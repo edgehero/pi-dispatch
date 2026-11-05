@@ -38,7 +38,7 @@ const OUT = "Out of the loop";
  * `media`: a generated picture on screen from beat `from` until beat `to`, a clip played at `rate` times its speed and from `start` seconds if given.
  * Everything else is drawn.
  * `screens`: a real console page, dark and moving, from beat `from` until beat `to` (`screens.mjs` renders it). `real` says
- * so, and "Sample data." must then be on screen too (the bolt is in the test).
+ * so. The frames carry no "Sample data." line, at the owner's request: the README's caption says it instead.
  * `cinema`: full bleed, letterboxed, with no console shell: the film's own world rather than the product's.
  * `punch`: the whole frame takes each kick. `glitches`: `[beat, beats long, amount]`, one flash of datamosh each.
  * `{name}` and `{version}` are the release's, filled in at render from `release.json` in the build folder, so
@@ -88,33 +88,33 @@ export const SHOTS = Object.freeze([
 	{
 		// The turn from the spectacle to the product: what this is, in the fewest words.
 		id: "turn",
-		beats: 8,
+		beats: 7,
 		stage: IN,
 		phrases: [
-			{ words: "You can't watch them all.", at: 0, until: 4 },
-			{ words: "pi-dispatch manages it all.", at: 4, until: 8 },
+			{ words: "You can't watch them all.", at: 0, until: 3.5 },
+			{ words: "pi-dispatch manages it all.", at: 3.5, until: 7 },
 		],
 	},
 	{
 		id: "machines",
-		beats: 5,
+		beats: 4,
 		real: true,
-		screens: [{ name: "machines", from: 0, to: 5 }],
-		phrases: [{ words: "All your machines.", at: 0, until: 5 }],
+		screens: [{ name: "machines", from: 0, to: 4 }],
+		phrases: [{ words: "All your machines.", at: 0, until: 4 }],
 	},
 	{
 		id: "models",
-		beats: 5,
+		beats: 4,
 		real: true,
-		screens: [{ name: "models", from: 0, to: 5 }],
-		phrases: [{ words: "All your models.", at: 0, until: 5 }],
+		screens: [{ name: "models", from: 0, to: 4 }],
+		phrases: [{ words: "All your models.", at: 0, until: 4 }],
 	},
 	{
 		id: "rules",
-		beats: 6,
+		beats: 4,
 		real: true,
-		screens: [{ name: "rules", from: 0, to: 6 }],
-		phrases: [{ words: "All set by you.", at: 0, until: 6 }],
+		screens: [{ name: "rules", from: 0, to: 4 }],
+		phrases: [{ words: "All set by you.", at: 0, until: 4 }],
 	},
 	{
 		id: "box",
@@ -126,12 +126,12 @@ export const SHOTS = Object.freeze([
 	{
 		id: "limits",
 		punch: true,
-		beats: 6,
+		beats: 5,
 		stage: NEAR,
 		phrases: [
-			{ words: "Over a spending limit?", at: 0, until: 6 },
-			{ words: "It does not start.", at: 1.5, until: 6 },
-			{ words: "No AI cost.", at: 3.5, until: 6 },
+			{ words: "Over a spending limit?", at: 0, until: 5 },
+			{ words: "It does not start.", at: 1.5, until: 5 },
+			{ words: "No AI cost.", at: 2.8, until: 5 },
 		],
 	},
 	{
@@ -145,25 +145,26 @@ export const SHOTS = Object.freeze([
 		],
 	},
 	{
-		id: "page",
-		beats: 8,
-		real: true,
-		screens: [
-			{ name: "overview", from: 0, to: 5 },
-			{ name: "steer", from: 5, to: 8 },
-		],
-		phrases: [{ words: "Watch and steer from one page.", at: 0, until: 8 }],
-	},
-	{
 		id: "number",
-		beats: 8,
+		beats: 7,
 		real: true,
-		screens: [{ name: "zero", from: 0, to: 8 }],
+		screens: [{ name: "zero", from: 0, to: 7 }],
 		phrases: [
 			// Zero touch's rate is a guide and not a trigger, so nothing here says the number moves you.
-			{ words: "How often it needs you.", at: 0, until: 8 },
-			{ words: "You choose when to step back.", at: 3, until: 8 },
+			{ words: "How often it needs you.", at: 0, until: 7 },
+			{ words: "You choose when to step back.", at: 2.8, until: 7 },
 		],
+	},
+	{
+		// The whole overview page, the one screen the film does not trim, so what it looks after is clear before the morning.
+		id: "page",
+		beats: 15,
+		real: true,
+		screens: [
+			{ name: "overview", from: 0, to: 10 },
+			{ name: "steer", from: 10, to: 15 },
+		],
+		phrases: [{ words: "Watch and steer from one page.", at: 0, until: 15 }],
 	},
 	{
 		id: "morning",

@@ -112,8 +112,9 @@ export function soundDesign({ beats, shots = SHOTS, rate = SOUND_RATE, tail = TA
 	const turn = startOf.get("turn");
 	tick(at(turn), 0.2, 0, 880);
 	thump(at(turn), 0.3, 110);
-	tick(at(turn + 4), 0.26, 0, 1320);
-	thump(at(turn + 4), 0.4, 130);
+	const turnAt = shots.find((shot) => shot.id === "turn").phrases[1].at;
+	tick(at(turn + turnAt), 0.26, 0, 1320);
+	thump(at(turn + turnAt), 0.4, 130);
 
 	// A click as each row of the real cards lands, at the beats `screen-motion.js` brings it in.
 	for (let i = 0; i < 3; i++) tick(at(startOf.get("machines") + 0.3 + i * 0.7), 0.14);
@@ -136,12 +137,16 @@ export function soundDesign({ beats, shots = SHOTS, rate = SOUND_RATE, tail = TA
 	for (let i = 0; i < 39; i++) key(at(asks + 3 + i / 15), 0.1);
 	const page = startOf.get("page");
 	const steerFrom = shots.find((shot) => shot.id === "page").screens.find((screen) => screen.name === "steer").from;
-	for (let i = 0; i < 51; i++) key(at(page + steerFrom + 0.2 + i / 23), 0.1);
-	tick(at(page + steerFrom + 2.5), 0.18);
+	for (let i = 0; i < 34; i++) key(at(page + steerFrom + 0.3 + i / 12), 0.1);
+	tick(at(page + steerFrom + 3.4), 0.18);
 
-	// The overview: a click per card, and the day's spend lighting up.
-	for (let i = 0; i < 3; i++) tick(at(page + i * 0.35), 0.13);
-	for (let i = 0; i < 18; i++) tick(at(page + 0.7 + i * 0.18), 0.035, i / 9 - 1, 2200 + i * 70);
+	// The overview: a click per card, the day's spend lighting up, air as the camera glides down the page, a rising tick per cap,
+	// and a last breath as it pulls back to show the whole page.
+	for (let i = 0; i < 4; i++) tick(at(page + i * 0.2), 0.13);
+	for (let i = 0; i < 18; i++) tick(at(page + 0.4 + i * 0.085), 0.035, i / 9 - 1, 2200 + i * 70);
+	wash(at(page + 1.5), at(page + 5.5) - at(page + 1.5), 0.1, (p) => Math.sin(Math.PI * p), () => 0.08);
+	for (let i = 0; i < 8; i++) tick(at(page + 4 + i * 0.1), 0.05, i / 4 - 1, 900 + i * 110);
+	wash(at(page + 5.5), at(page + 7.5) - at(page + 5.5), 0.16, (p) => Math.sin(Math.PI * p), (p) => 0.1 + 0.2 * p);
 
 	// The one row under the marker, ringing once.
 	const number = startOf.get("number");

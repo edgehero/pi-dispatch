@@ -2,7 +2,7 @@
  * What the film shows of a real console page: one card at a time, large, on an empty canvas. This runs inside the page, with the
  * console's own markup, stylesheet and dark theme and nothing redrawn. Everything else on the page is hidden rather than removed,
  * so what remains stays where the console's layout put it, and the card's own small print is taken out, because a viewer gets a
- * few seconds and one idea. A count that moves ends on the number the page already held.
+ * few seconds and one idea. The overview is the one exception, shown whole. A count that moves ends on the number the page already held.
  *
  * `filmScreen.seek(b)` puts the page in its state at beat `b`, as a pure function of `b`, so a frame can be rendered in any order.
  * Styles are set through the CSSOM, which the console's CSP allows, because `style=` attributes are what it refuses.
@@ -85,6 +85,29 @@
 		}
 	}
 
+	/**
+	 * A polyline's first `share` of its length, as points. Not a moving dash: the chart's stroke is `non-scaling-stroke`, so a dash
+	 * is measured on screen while `getTotalLength` answers in the drawing's units, and the line stopped partway with its dot alone
+	 * at the far end.
+	 */
+	function lineUpTo(points, share) {
+		if (share >= 1) return points;
+		const lengths = points.slice(1).map((point, i) => Math.hypot(point[0] - points[i][0], point[1] - points[i][1]));
+		let left = share * lengths.reduce((sum, length) => sum + length, 0);
+		const kept = [points[0]];
+		for (let i = 0; i < lengths.length; i++) {
+			if (left >= lengths[i]) {
+				kept.push(points[i + 1]);
+				left -= lengths[i];
+				continue;
+			}
+			const part = left / lengths[i];
+			kept.push([points[i][0] + (points[i + 1][0] - points[i][0]) * part, points[i][1] + (points[i + 1][1] - points[i][1]) * part]);
+			break;
+		}
+		return kept;
+	}
+
 	const hide = (...els) => {
 		for (const el of els) if (el) el.style.display = "none";
 	};
@@ -125,42 +148,79 @@
 	}
 
 	const PROGRAMS = {
-		/** Three cards that keep moving: the question waiting, the slots filling, the day's spend lighting up as its number rises. */
+		/**
+		 * The whole page in its real layout, and the one screen nothing is hidden on. It is taller than the frame, so the camera starts
+		 * on the top of the page, glides down it while each part comes alive as it arrives, and pulls back until all of it is in view.
+		 */
 		overview: {
 			setup() {
-				const cards = ["#p-needs", "#p-active", "#p-spend"].map((id) => one(id));
-				hide(one("#p-waiting"));
-				const row = cards[0].parentElement;
-				row.style.gridTemplateColumns = "repeat(3, 1fr)";
-				row.style.width = "880px";
-				for (const section of cards) trim(one(".card", section), ".card__head, .bigpair, .kpi, .sd, .rows");
-				// One row under "Needs you", the question: the others are the console's to explain.
-				hide(...all(".rowpill", one("#p-needs")).slice(1));
-				only(...cards);
-				this.cards = cards;
-				this.columns = all(".sd__c", one("#p-spend"));
+				this.page = one(".page");
+				this.height = this.page.getBoundingClientRect().height;
+				this.cards = ["#p-needs", "#p-waiting", "#p-active", "#p-spend"].map((id) => one(id));
+				this.needs = all(".rowpill", one("#p-needs"));
+				this.waiting = all(".rowpill", one("#p-waiting"));
 				this.hosts = all(".rowpill", one("#p-active"));
-				this.question = one(".rowpill", one("#p-needs"));
-				this.view = aim(cards, 1340);
+				this.columns = all(".sd__c", one("#p-spend"));
+				this.rows = all(".tl__r", one("#p-timeline"));
+				this.groups = all(".wl__g", one("#p-waitlists"));
+				this.caps = all(".cap", one("#p-caps")).map((cap) => {
+					const pill = one(".cap__pill", cap);
+					return { pill, value: one(".cap__v", cap), top: Number(pill.getAttribute("y")), tall: Number(pill.getAttribute("height")) };
+				});
+				this.fleet = all(".hostrow", one("#p-hosts"));
 			},
 			seek(b) {
-				camera(this.view, 1 + 0.01 * b);
-				this.cards.forEach((card, i) => enter(card, b, i * 0.35));
-				all(".big__n").forEach((n) => count(n, b, 0.1, { length: 0.9 }));
-				enter(this.question, b, 1.1, { rise: 14 });
-				// The question waiting for its answer pulses with the music, the one thing on the page asking for you.
-				if (this.question) this.question.style.outline = b >= 2 && Math.floor(b * 2) % 2 === 0 ? "2px solid var(--parked)" : "";
-				all(".kpi b", one("#p-active")).forEach((n) => count(n, b, 0.4, { length: 1 }));
+				const middle = (FRAME.height - FRAME.band) / 2;
+				const smooth = (x) => clamp(x) * clamp(x) * (3 - 2 * clamp(x));
+				const glide = smooth((b - 1.5) / 4);
+				// Back by beat 7.5 of 10, so the whole page holds for over a second, long enough to register.
+				const pull = smooth((b - 5.5) / 2);
+				// Far enough back for the page and a little air, zooming at an even rate rather than an even number of pixels.
+				const scale = ((FRAME.height - FRAME.band) / this.height) * 0.96;
+				const s = scale ** pull * (1 + 0.012 * Math.max(0, b - 7.5));
+				const lowest = this.height - middle;
+				const cy = (middle + (lowest - middle) * glide) * (1 - pull) + (this.height / 2) * pull;
+				camera({ scale: s, x: FRAME.width / 2 - FRAME.width / 2 / s, y: cy - middle / s });
+				this.page.style.outline = pull > 0 ? "4px solid var(--line)" : "";
+				this.page.style.outlineOffset = "0";
+
+				// The top row, in the first two beats.
+				this.cards.forEach((card, i) => enter(card, b, i * 0.15, { length: 0.5, rise: 16 }));
+				all(".big__n").forEach((n) => count(n, b, 0.1, { length: 0.8 }));
+				for (const id of ["#p-waiting", "#p-active"]) all(".kpi b", one(id)).forEach((n) => count(n, b, 0.2, { length: 0.8 }));
+				[...this.needs, ...this.waiting].forEach((row, i) => enter(row, b, 0.5 + (i % this.needs.length) * 0.2, { rise: 10, length: 0.4 }));
 				this.hosts.forEach((host, i) => {
-					enter(host, b, 0.9 + i * 0.45, { rise: 14 });
+					enter(host, b, 0.5 + i * 0.25, { rise: 10, length: 0.4 });
 					all(".sl--run, .sl--hold", host).forEach((slot, n) => {
-						slot.style.opacity = b >= 1.2 + i * 0.45 + n * 0.3 ? "1" : "0";
+						slot.style.opacity = b >= 0.7 + i * 0.25 + n * 0.2 ? "1" : "0";
 					});
 				});
-				all(".kpi b", one("#p-spend")).forEach((n) => count(n, b, 0.7, { length: 3.2 }));
+				all(".kpi b", one("#p-spend")).forEach((n) => count(n, b, 0.4, { length: 1.5 }));
 				this.columns.forEach((column, i) => {
-					const on = b >= 0.7 + (i / this.columns.length) * 3.2;
+					const on = b >= 0.4 + (i / this.columns.length) * 1.5;
 					for (const dot of all("i.on", column)) dot.style.opacity = on ? "1" : "0";
+				});
+				// The question waiting for its answer pulses with the music, the one thing on the page asking for you.
+				if (this.needs[0]) this.needs[0].style.outline = b >= 1.5 && Math.floor(b * 2) % 2 === 0 ? "2px solid var(--parked)" : "";
+
+				// Runs sweep in from the left to now and then what is in line, as the timeline arrives.
+				const sweep = ease((b - 2.4) / 2);
+				for (const row of this.rows) row.style.clipPath = `inset(-40px ${(1 - sweep) * 100}% -40px -40px)`;
+				this.groups.forEach((group, i) => enter(group, b, 2.8 + i * 0.35, { rise: 14, length: 0.5 }));
+
+				// The caps rise, and the hosts fill their slots, as the bottom of the page arrives.
+				this.caps.forEach((cap, i) => {
+					const q = ease((b - 4 - i * 0.1) / 0.7);
+					cap.pill.setAttribute("height", (cap.tall * q).toFixed(2));
+					cap.pill.setAttribute("y", (cap.top + cap.tall * (1 - q)).toFixed(2));
+					if (cap.value) cap.value.style.opacity = String(clamp(q * 2 - 1));
+					count(cap.value, b, 4 + i * 0.1, { length: 0.7 });
+				});
+				this.fleet.forEach((host, i) => {
+					enter(host, b, 4.1 + i * 0.3, { rise: 14, length: 0.5 });
+					all(".sl--run, .sl--hold", host).forEach((slot, n) => {
+						slot.style.opacity = b >= 4.4 + i * 0.3 + n * 0.2 ? "1" : "0";
+					});
 				});
 			},
 		},
@@ -264,9 +324,10 @@
 			seek(b) {
 				camera(this.view, 1 + 0.01 * b);
 				enter(this.card, b, 0, { length: 0.4 });
-				type(this.field, "Leave the payments reader for a later pull request.", b, 0.2, 23);
-				this.field.style.outline = b >= 0.2 ? "2px solid var(--focus)" : "";
-				const sent = b >= 2.5;
+				// Slow enough to read as it types, then a moment on the finished sentence. sound.mjs types its keys at this rate.
+				type(this.field, "Leave the payments code for later.", b, 0.3, 12);
+				this.field.style.outline = b >= 0.3 ? "2px solid var(--focus)" : "";
+				const sent = b >= 3.4;
 				this.button.style.background = sent ? "var(--primary)" : "";
 				this.button.style.color = sent ? "var(--on-primary)" : "";
 			},
@@ -320,6 +381,16 @@
 				}
 				this.rate = rate;
 				this.projects = projects;
+				this.spark = one(".zt-spark__l", rate);
+				this.sparkDot = one(".zt-spark__d", rate);
+				this.sparkPoints = this.spark.getAttribute("points").trim().split(/\s+/).map((pair) => pair.split(",").map(Number));
+				// The chart stretches its drawing to the card, which would make the dot an oval.
+				const chart = this.spark.ownerSVGElement;
+				const drawn = chart.viewBox.baseVal;
+				const box = chart.getBoundingClientRect();
+				this.sparkDot.style.transformBox = "fill-box";
+				this.sparkDot.style.transformOrigin = "center";
+				this.sparkDot.style.transform = `scaleX(${(box.height / drawn.height) / (box.width / drawn.width)})`;
 				this.rateView = aim([rateCard], 840, 177);
 				this.listView = aim([card], 1160, 177);
 				this.shown = null;
@@ -335,14 +406,11 @@
 					enter(this.rate, b, 0);
 					// Down from where it started: the page's own series begins at 31%.
 					count(one(".kpi b", this.rate), b, 0.2, { length: 2.4, from: 31 });
-					const spark = one(".zt-spark__l");
-					if (spark) {
-						const length = spark.getTotalLength();
-						spark.style.strokeDasharray = String(length);
-						spark.style.strokeDashoffset = String(length * (1 - ease((b - 0.2) / 2.4)));
-						// The dot marks now, so it arrives with the line.
-						for (const dot of all("circle", spark.ownerSVGElement)) dot.style.opacity = b >= 2.4 ? "1" : "0";
-					}
+					// The dot marks now, so it travels at the head of the line and they reach the end together.
+					const line = lineUpTo(this.sparkPoints, ease((b - 0.2) / 2.4));
+					this.spark.setAttribute("points", line.map((point) => point.join(",")).join(" "));
+					this.sparkDot.setAttribute("cx", String(line.at(-1)[0]));
+					this.sparkDot.setAttribute("cy", String(line.at(-1)[1]));
 					return;
 				}
 				camera(this.listView, 1 + 0.004 * (b - 3));

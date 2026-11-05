@@ -111,13 +111,15 @@ test("type that carries meaning stays legible on a phone", () => {
   assert.match(FILM_JS, /if \(size < F\.minType\) throw/);
 });
 
-test("a shot that shows a real screen says it is sample data, and only those shots show one", () => {
+test("only the shots marked real show a real screen, and no frame carries a sample data line", () => {
   for (const shot of SHOTS) {
     const drawing = drawingOf(shot.id);
     assert.equal(/\bscreen\(c\)/.test(drawing), Boolean(shot.real), `${shot.id}: its table entry and its drawing disagree about showing a real screen`);
     assert.equal(Boolean(shot.screens?.length), Boolean(shot.real), `${shot.id}: "real" and "screens" disagree`);
-    if (shot.real) assert.match(drawing, /say\("Sample data\."/, `${shot.id} shows a real screen with no "Sample data."`);
   }
+  // The owner asked for it off the frames, where it pulled the eye on every screen. The README's caption says it instead.
+  assert.doesNotMatch(FILM_JS, /sample data/i);
+  assert.match(read("README.md"), /<sub>[^<]*The screens show sample data\.<\/sub>/);
 });
 
 test("every real screen is a committed golden with its own motion", () => {
@@ -135,9 +137,26 @@ test("every real screen is a committed golden with its own motion", () => {
   for (const shot of SHOTS) for (const screen of shot.screens ?? []) assert.ok(screen.from >= 0 && screen.to <= shot.beats, `${screen.name} outlasts ${shot.id}`);
 });
 
+test("the chart's line is drawn to its end, not by a dash that its stroke measures differently", () => {
+  // A non-scaling stroke measures a dash on screen, and getTotalLength answers in the drawing's units: the line stopped partway.
+  assert.doesNotMatch(MOTION_JS, /strokeDash/);
+  assert.match(MOTION_JS, /lineUpTo\(this\.sparkPoints/);
+});
+
+test("the overview is the one screen shown whole, near the end, and it ends with all of it in view", () => {
+  const start = MOTION_JS.indexOf("\t\toverview: {");
+  const body = MOTION_JS.slice(start, MOTION_JS.indexOf("\n\t\t},", start));
+  assert.doesNotMatch(body, /\bonly\(|\bhide\(|\btrim\(/, "nothing on the page is hidden");
+  const ids = SHOTS.map((shot) => shot.id);
+  const page = SHOTS.find((shot) => shot.id === "page");
+  assert.ok(page.screens.some((screen) => screen.name === "overview"));
+  assert.deepEqual(ids.slice(-3), ["page", "morning", "end"], "the last screen before the morning and the end card");
+});
+
 test("a real screen shows one thing: the page is hidden around it, and its small print taken out", () => {
-  // Whole console pages were too much to take in during a few seconds, so each screen's motion chooses what stays.
-  for (const name of Object.keys(SCREENS)) {
+  // Whole console pages were too much to take in during a few seconds, so each screen's motion chooses what stays. The owner asked
+  // for one look at the whole overview, so that one is exempt and pinned by its own test above.
+  for (const name of Object.keys(SCREENS).filter((screen) => screen !== "overview")) {
     const start = MOTION_JS.indexOf(`\t\t${name}: {`);
     assert.ok(start > 0, `${name} has no motion`);
     const body = MOTION_JS.slice(start, MOTION_JS.indexOf("\n\t\t},", start));
