@@ -107,6 +107,17 @@ test("the README says the web page is not on npm for exactly as long as that is 
   else assert.ok(!ROOT.includes(note), "the release that moved the version carries the web page");
 });
 
+test("the root README plays the film, and calls it a first look for exactly as long as that is true", () => {
+  // The form GitHub itself writes for an uploaded video, and renders as a player: its bare address, alone on its line.
+  const film = ROOT.match(/^https:\/\/github\.com\/user-attachments\/assets\/[0-9a-f-]+$/m);
+  assert.ok(film, "the film's address, alone on its line");
+  assert.ok(ROOT.indexOf("</p>") < film.index && film.index < ROOT.indexOf("# pi-dispatch\n"), "right under the banner, above the title");
+  // The film announces a version npm does not have yet. A release moves this version: reword the caption in that pull request.
+  const caption = "A first look at the next release";
+  if (JSON.parse(read("admin/package.json")).version === "4.3.1") assert.ok(ROOT.includes(caption), "say so");
+  else assert.ok(!ROOT.includes(caption), "the film is no longer a first look once its release is out");
+});
+
 test("Open the web page says what the console's commands do", () => {
   const section = ROOT.slice(ROOT.indexOf("## Open the web page"), ROOT.indexOf("## How to use it"));
   const consoleCli = read("admin/src/console/cli.mjs");
