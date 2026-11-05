@@ -68,6 +68,9 @@ function text(x, y, words, { size = EXPLAIN_MIN_TEXT, weight = 400, fill, anchor
 const lines = (x, y, rows, { leading = 30, ...options }) => rows.map((row, at) => text(x, y + at * leading, row, options)).join("");
 
 /** An icon from the design system's sprite, by its name there. */
+/** One of the design system's icons as SVG markup, for a picture that is not drawn here (the film). */
+export const iconBody = (name) => ICONS.get(name);
+
 function icon(name, x, y, size, colour) {
 	const body = ICONS.get(name);
 	if (!body) throw new Error(`explainers: no icon ${name} in the design system's sprite`);

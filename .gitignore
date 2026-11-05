@@ -135,3 +135,7 @@ plan-artifacts/
 
 # render-images.mjs --console --all: every golden at both widths and themes, about a gigabyte. Rendered on demand.
 docs/images/console/all/
+
+# The film's clips, frames and masters. Tens of megabytes that would weigh down every clone for good; launch/video/ holds the recipe.
+launch/video/build/
+launch/video/ledger.json.lock

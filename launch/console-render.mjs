@@ -36,12 +36,12 @@ export function picksPlan(picks = CONSOLE_PICKS) {
 }
 
 /** The canned transcript as the stream's frames, each drawn by the console's own `transcriptEntryHtml`. */
-function transcriptFrames(transcriptEntryHtml, runId) {
+export function transcriptFrames(transcriptEntryHtml, runId) {
 	return CONSOLE_TRANSCRIPT[runId].map((entry) => `id: ${entry.id}\nevent: entry\ndata: ${JSON.stringify({ html: String(transcriptEntryHtml(entry)) })}\n\n`).join("");
 }
 
 /** The golden pages over http, with the console's headers; the stream holds open, and for `frames` first sends them. */
-function servePages({ docs, css, script, applyHeaders, frames }) {
+export function servePages({ docs, css, script, applyHeaders, frames }) {
 	const byPath = new Map(docs.map((doc) => [doc.path, doc]));
 	const held = new Set();
 	const server = createServer((req, res) => {

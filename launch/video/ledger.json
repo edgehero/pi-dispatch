@@ -1,0 +1,263 @@
+{
+	"cap": 40,
+	"entries": [
+		{
+			"at": "2026-11-05T05:52:29.754Z",
+			"hash": "dad2beee99affee683e11b32914c4a475d4454669afb94264356f2eefbce0a57",
+			"kind": "track",
+			"name": "track-1",
+			"model": "google/lyria-3-pro-preview",
+			"estimate": 0.08,
+			"cost": 0.08,
+			"file": "generated/track-1-dad2beee99.mp3"
+		},
+		{
+			"at": "2026-11-05T05:53:05.733Z",
+			"hash": "d9a3882fecd4a2fb79d391ecf90f0902a64354df3086d8a2edcb2cc281b4a38d",
+			"kind": "track",
+			"name": "track-2",
+			"model": "google/lyria-3-pro-preview",
+			"estimate": 0.08,
+			"cost": 0.08,
+			"file": "generated/track-2-d9a3882fec.mp3"
+		},
+		{
+			"at": "2026-11-05T05:53:24.738Z",
+			"hash": "76a182100414096e00033cece88a04f5d86b745a49ed010a9788cb7af9584b84",
+			"kind": "track",
+			"name": "track-3",
+			"model": "google/lyria-3-pro-preview",
+			"estimate": 0.08,
+			"cost": 0.08,
+			"file": "generated/track-3-76a1821004.mp3"
+		},
+		{
+			"at": "2026-11-05T05:53:53.889Z",
+			"hash": "68fc2728cfb65003837279fc9dbb9527d38cc60f4c7ce0759e9721890277ed5e",
+			"kind": "track",
+			"name": "track-4",
+			"model": "google/lyria-3-pro-preview",
+			"estimate": 0.08,
+			"cost": 0.08,
+			"file": "generated/track-4-68fc2728cf.mp3"
+		},
+		{
+			"at": "2026-11-05T05:54:24.108Z",
+			"hash": "e0d40b4c5f521f4379e432d61a1e999ea3156cf7b54ca399b79ca080da89bccc",
+			"kind": "track",
+			"name": "track-5",
+			"model": "google/lyria-3-pro-preview",
+			"estimate": 0.08,
+			"cost": 0.08,
+			"file": "generated/track-5-e0d40b4c5f.mp3"
+		},
+		{
+			"at": "2026-11-05T06:11:04.177Z",
+			"hash": "1568a6a5492d3443eb3dc4d5554a65ae0d6765c561be56e3f74f7c720cf45d1a",
+			"kind": "still",
+			"name": "meadow-night--google_gemini-3-pro-image",
+			"model": "google/gemini-3-pro-image",
+			"seed": 31,
+			"estimate": 0.25,
+			"cost": 0.13463,
+			"file": "generated/meadow-night--google_gemini-3-pro-image-1568a6a549.png"
+		},
+		{
+			"hash": "reconciled-412b7e2418fb30fe",
+			"kind": "still",
+			"name": "meadow-night--openai_gpt-image-2",
+			"model": "openai/gpt-image-2",
+			"estimate": 0.25,
+			"cost": 0.0521,
+			"costIs": "reconciled: an equal share of the gap between the ledger and the key usage, from a parallel run that lost its entries",
+			"file": "generated/meadow-night--openai_gpt-image-2-a3b9230189.png",
+			"at": "2026-11-05T06:11:04.177Z"
+		},
+		{
+			"hash": "reconciled-2432bf14bc1cfa2f",
+			"kind": "still",
+			"name": "meadow-night--black-forest-labs_flux-3-image",
+			"model": "black-forest-labs/flux-3-image",
+			"estimate": 0.25,
+			"cost": 0.0521,
+			"costIs": "reconciled: an equal share of the gap between the ledger and the key usage, from a parallel run that lost its entries",
+			"file": "generated/meadow-night--black-forest-labs_flux-3-image-d256e5e7d7.png",
+			"at": "2026-11-05T06:11:04.177Z"
+		},
+		{
+			"at": "2026-11-05T06:14:12.381Z",
+			"hash": "7d599154af7dcc2249654938b21134bc077a5c55b17b29e1bb0fda14488dbbe5",
+			"kind": "still",
+			"name": "meadow-day--black-forest-labs_flux-3-image",
+			"model": "black-forest-labs/flux-3-image",
+			"seed": 32,
+			"estimate": 0.25,
+			"cost": 0.1,
+			"file": "generated/meadow-day--black-forest-labs_flux-3-image-7d599154af.png"
+		},
+		{
+			"at": "2026-11-05T06:14:44.687Z",
+			"hash": "8063ccfcf0c3169436f1dc6b10a638ed7794af05e69c907e620828de57939512",
+			"kind": "still",
+			"name": "wax-macro--black-forest-labs_flux-3-image",
+			"model": "black-forest-labs/flux-3-image",
+			"seed": 33,
+			"estimate": 0.25,
+			"cost": 0.1,
+			"file": "generated/wax-macro--black-forest-labs_flux-3-image-8063ccfcf0.png"
+		},
+		{
+			"at": "2026-11-05T06:15:07.978Z",
+			"hash": "909fc1a85fd304f7a295417348d029f7216209b37a6a876f832cff866238e5e4",
+			"kind": "still",
+			"name": "dark-comb-infrared--black-forest-labs_flux-3-image",
+			"model": "black-forest-labs/flux-3-image",
+			"seed": 34,
+			"estimate": 0.25,
+			"cost": 0.1,
+			"file": "generated/dark-comb-infrared--black-forest-labs_flux-3-image-909fc1a85f.png"
+		},
+		{
+			"at": "2026-11-05T06:15:37.622Z",
+			"hash": "b0c50c72f3be77e6699148a14bff37fc5cf57fe82ff263287a49341ae82fc27c",
+			"kind": "still",
+			"name": "keeper-dawn--black-forest-labs_flux-3-image",
+			"model": "black-forest-labs/flux-3-image",
+			"seed": 35,
+			"estimate": 0.25,
+			"cost": 0.1,
+			"file": "generated/keeper-dawn--black-forest-labs_flux-3-image-b0c50c72f3.png"
+		},
+		{
+			"at": "2026-11-05T06:40:05.939Z",
+			"hash": "3da22d77030e2bae978241bdd11dcca76b8b2afa6b0e7a72aee8dfaae8e51ff6",
+			"kind": "clip",
+			"name": "timelapse--google_veo-3.1-fast",
+			"model": "google/veo-3.1-fast",
+			"seed": 42,
+			"seconds": 6,
+			"estimate": 0.6000000000000001,
+			"cost": 0.6,
+			"file": "generated/timelapse--google_veo-3.1-fast-3da22d7703.mp4"
+		},
+		{
+			"at": "2026-11-05T06:42:12.245Z",
+			"hash": "3b4894a0117f4d02c1e49466199db2ff7c5799a289082e37f48879ebf52028a4",
+			"kind": "clip",
+			"name": "timelapse--kwaivgi_kling-v3.0-pro",
+			"model": "kwaivgi/kling-v3.0-pro",
+			"seed": 42,
+			"seconds": 6,
+			"estimate": 0.672,
+			"cost": 0.672,
+			"file": "generated/timelapse--kwaivgi_kling-v3.0-pro-3b4894a011.mp4"
+		},
+		{
+			"at": "2026-11-05T06:45:18.224Z",
+			"hash": "b05cbeba3d953b89ec80b66b93250ca4150d78e04e77136065073268774372f4",
+			"kind": "clip",
+			"name": "timelapse--google_veo-3.1",
+			"model": "google/veo-3.1",
+			"seed": 42,
+			"seconds": 6,
+			"estimate": 1.2000000000000002,
+			"cost": 1.2,
+			"file": "generated/timelapse--google_veo-3.1-b05cbeba3d.mp4"
+		},
+		{
+			"at": "2026-11-05T06:47:25.929Z",
+			"hash": "33f65ab472d08576f45f17a8c6bdc8fdc2ce50e6418c16e46d6aa218a66edd5e",
+			"kind": "clip",
+			"name": "timelapse--black-forest-labs_flux-3-video",
+			"model": "black-forest-labs/flux-3-video",
+			"seed": 42,
+			"seconds": 6,
+			"estimate": 1.7399999999999998,
+			"cost": 1.74,
+			"file": "generated/timelapse--black-forest-labs_flux-3-video-33f65ab472.mp4"
+		},
+		{
+			"at": "2026-11-05T06:50:02.641Z",
+			"hash": "6cd778194ac1a60dd40b2ef8807f27da94c3165e6e6e158483816024775159bc",
+			"kind": "clip",
+			"name": "keeper-frame--google_veo-3.1-fast",
+			"model": "google/veo-3.1-fast",
+			"seed": 45,
+			"seconds": 6,
+			"estimate": 0.6000000000000001,
+			"cost": 0.6,
+			"file": "generated/keeper-frame--google_veo-3.1-fast-6cd778194a.mp4"
+		},
+		{
+			"at": "2026-11-05T06:52:08.948Z",
+			"hash": "c28a82d30ea09f20174c7311c851ce07489464d9d7e04e5c56cfebb0b34ce882",
+			"kind": "clip",
+			"name": "keeper-frame--kwaivgi_kling-v3.0-pro",
+			"model": "kwaivgi/kling-v3.0-pro",
+			"seed": 45,
+			"seconds": 6,
+			"estimate": 0.672,
+			"cost": 0.672,
+			"file": "generated/keeper-frame--kwaivgi_kling-v3.0-pro-c28a82d30e.mp4"
+		},
+		{
+			"at": "2026-11-05T06:55:16.391Z",
+			"hash": "83ce7c1ae27778cca6c0930330abf9f8c971fbfcc9833333bc3d37f66e4cab90",
+			"kind": "clip",
+			"name": "keeper-frame--google_veo-3.1",
+			"model": "google/veo-3.1",
+			"seed": 45,
+			"seconds": 6,
+			"estimate": 1.2000000000000002,
+			"cost": 1.2,
+			"file": "generated/keeper-frame--google_veo-3.1-83ce7c1ae2.mp4"
+		},
+		{
+			"at": "2026-11-05T07:04:08.433Z",
+			"hash": "2947a45403c895ffc42f697306cbc07e1aee125a98b28f136c024f41c48f6325",
+			"kind": "still",
+			"name": "keeper-dawn--black-forest-labs_flux-3-image",
+			"model": "black-forest-labs/flux-3-image",
+			"seed": 36,
+			"estimate": 0.25,
+			"cost": 0.1,
+			"file": "generated/keeper-dawn--black-forest-labs_flux-3-image-2947a45403.png"
+		},
+		{
+			"at": "2026-11-05T07:04:46.568Z",
+			"hash": "2e874ac765025c7ac5bc1094e8a547042885bf6f568cb6e42acb18eeca5dcb59",
+			"kind": "clip",
+			"name": "night-sky--google_veo-3.1-fast",
+			"model": "google/veo-3.1-fast",
+			"seed": 41,
+			"seconds": 8,
+			"estimate": 0.8,
+			"cost": 0.8,
+			"file": "generated/night-sky--google_veo-3.1-fast-2e874ac765.mp4"
+		},
+		{
+			"at": "2026-11-05T07:06:57.344Z",
+			"hash": "8678ab961b7df0201d3148d8df4f72d1196640145da25bc7f479e9ec094d463c",
+			"kind": "clip",
+			"name": "wax-cap--google_veo-3.1-fast",
+			"model": "google/veo-3.1-fast",
+			"seed": 43,
+			"seconds": 6,
+			"estimate": 0.6000000000000001,
+			"cost": 0.6,
+			"file": "generated/wax-cap--google_veo-3.1-fast-8678ab961b.mp4"
+		},
+		{
+			"at": "2026-11-05T07:09:04.312Z",
+			"hash": "a12825a8b76726704751a6bb6ad27a4f782573c4018a61f50215b8a23df63489",
+			"kind": "clip",
+			"name": "keeper-frame--google_veo-3.1-fast",
+			"model": "google/veo-3.1-fast",
+			"seed": 46,
+			"seconds": 6,
+			"estimate": 0.6000000000000001,
+			"cost": 0.6,
+			"file": "generated/keeper-frame--google_veo-3.1-fast-a12825a8b7.mp4"
+		}
+	]
+}
