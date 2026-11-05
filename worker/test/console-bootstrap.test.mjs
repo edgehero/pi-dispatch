@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { runConsoleUp, verifyConsolePeer } from "../src/console-bootstrap.mjs";
+import { boundedCommand, MANAGER_PROBE_MAX_BUFFER, runConsoleUp, verifyConsolePeer } from "../src/console-bootstrap.mjs";
 import { runUp } from "../src/up.mjs";
 import { readTokensFile, addToken } from "../src/console-tokens.mjs";
 
@@ -52,6 +52,23 @@ test("console bootstrap composes the host commands, discards plaintext and prese
 	assert.equal(await runConsoleUp(["--console", "--yes"], deps), 0);
 	assert.deepEqual(readTokensFile({ path: file }).file.tokens, first.tokens);
 	assert.equal(rows.filter((row) => row.action === "token-added").length, 1);
+});
+
+test("a service manager that prints more than the small bound still answered: launchctl print gui/<uid> was 141 KiB on a real Mac", async () => {
+	const loud = ["-e", "process.stdout.write('x'.repeat(200 * 1024))"];
+	assert.equal((await boundedCommand(process.execPath, loud)).code, null, "every other command keeps the small bound");
+	assert.equal((await boundedCommand(process.execPath, loud, { maxBuffer: MANAGER_PROBE_MAX_BUFFER })).code, 0, "and this much output is an answer");
+	for (const [platform, bin] of [["linux", "systemctl"], ["darwin", "launchctl"]]) {
+		const { deps } = harness();
+		const seen = [];
+		const answer = deps.consoleCommand;
+		deps.platform = platform;
+		deps.consoleCommand = async (name, args, options) => { seen.push({ name, options }); return answer(name, args, options); };
+		await runConsoleUp(["--console", "--yes"], deps);
+		const probe = seen.find((call) => call.name === bin);
+		assert.ok(probe, `${platform} asks ${bin}`);
+		assert.equal(probe.options.maxBuffer, MANAGER_PROBE_MAX_BUFFER, `${platform}: the probe takes the larger bound`);
+	}
 });
 
 test("cache/version/platform/manager/token refusals happen before an up mutation", async () => {
