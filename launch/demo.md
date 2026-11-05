@@ -215,3 +215,17 @@ version alone.
 
 Nothing generated holds words, screens or logos. Every word is drawn, and every screen is the real console, marked as sample
 data. The build folder is ignored by git: a finished master is uploaded, never committed.
+
+The root README plays a copy of the film. GitHub's player shows a video's first frame until someone presses play, and this film
+opens nearly black, so the copy's first frame is swapped for a later one, which changes neither its length nor its timing:
+
+```sh
+ffmpeg -ss 20.6 -i film.mp4 -frames:v 1 -update 1 preview.png
+ffmpeg -i film.mp4 -i preview.png -filter_complex "[1:v]scale=out_color_matrix=bt709:out_range=tv,format=yuv420p[p];[0:v][p]overlay=enable='eq(n,0)':format=yuv420[v]" \
+  -map '[v]' -map 0:a -c:v libx264 -preset slow -crf 24 -pix_fmt yuv420p -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv \
+  -c:a aac -b:a 192k -ar 48000 -movflags +faststart readme.mp4
+gh pr comment <number> --attach readme.mp4     # writes the uploaded address into the comment
+```
+
+That address goes in the README, alone on its line. A new render means a new upload and a new address. GitHub takes a video of up
+to 100 MB on a paid plan and 10 MB on a free one.

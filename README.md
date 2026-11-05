@@ -5,6 +5,10 @@
   </picture>
 </p>
 
+https://github.com/user-attachments/assets/9c415fda-62c9-4175-ae60-cbb0def80f77
+
+<sub>One minute, with sound. A first look at the next release, 5.0.</sub>
+
 # pi-dispatch
 
 **Go from sitting next to one AI coding agent to running many in the background.**
