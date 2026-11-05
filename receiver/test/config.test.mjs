@@ -47,7 +47,7 @@ test("a valid secret + triggers file yields conservative defaults and grouped we
 
 	// the single comment trigger. `packages` is asserted present-and-undefined: the grouper builds the key
 	// by construction and this whole-object deepEqual (assert/strict) counts an own undefined-valued key.
-	assert.deepEqual(c.triggers.github.comment, { index: 1, phrase: "@pi", defaultFlow: "triage", command: undefined, packages: undefined, image: undefined, backend: undefined, excludeTools: undefined, mcp: undefined, provider: undefined, model: undefined, maxTurns: undefined, models: undefined, fallbackModels: undefined, maxCostUsd: undefined, skillsDir: undefined, instructions: undefined, resume: undefined, awaitInput: undefined, progress: undefined, statusComment: undefined, recover: undefined, steer: undefined, secrets: undefined, secretsProfile: undefined, waitFor: undefined, replicas: undefined, repository: undefined });
+	assert.deepEqual(c.triggers.github.comment, { index: 1, phrase: "@pi", defaultFlow: "triage", command: undefined, packages: undefined, image: undefined, backend: undefined, excludeTools: undefined, excludeExtensions: undefined, excludeExtensionTools: undefined, mcp: undefined, provider: undefined, model: undefined, maxTurns: undefined, models: undefined, fallbackModels: undefined, maxCostUsd: undefined, skillsDir: undefined, instructions: undefined, resume: undefined, awaitInput: undefined, progress: undefined, statusComment: undefined, recover: undefined, steer: undefined, secrets: undefined, secretsProfile: undefined, waitFor: undefined, replicas: undefined, repository: undefined });
 
 	// pull_request rules: actions is a Set, predicate carries the label selectors.
 	assert.equal(c.triggers.github.pullRequest.length, 1);
@@ -454,6 +454,17 @@ test("reloadTriggers swaps cfg.triggers in place from the new file (live, no res
 	assert.deepEqual(res, { ok: true });
 	assert.equal(cfg.triggers.github.label[0].flow, "new-flow");
 	assert.deepEqual(cfg.triggers.github.label[0].predicate.any, ["new"]);
+});
+
+test("over a file a newer release stamped, a live receiver keeps the rules it had, so a delivery still matches and queues without what the file added", () => {
+	const cfg = loadReceiverConfig({ WEBHOOK_SECRET: "shh" }, { fileExists: () => true, readFile: () => JSON.stringify({ triggers: [{ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix" } }] }) });
+	const before = JSON.stringify(cfg.triggers);
+	assert.equal(cfg.triggers.github.comment.phrase, "@pi", "the premise: the rule a delivery matches");
+	const newer = JSON.stringify({ version: 99, triggers: [{ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix", somethingNewer: ["x"] } }] });
+	const res = reloadTriggers({ WEBHOOK_SECRET: "shh" }, cfg, { fileExists: () => true, readFile: () => newer });
+	assert.match(res.invalid, /written by a newer pi-dispatch \(version 99;/);
+	assert.equal(JSON.stringify(cfg.triggers), before, "not an empty table: docs/upgrading.md says deliveries still match");
+	assert.throws(() => loadReceiverConfig({ WEBHOOK_SECRET: "shh" }, { fileExists: () => true, readFile: () => newer }), /written by a newer pi-dispatch/, "and a fresh start does not start on it");
 });
 
 test("reloadTriggers keeps the running triggers when the new file is invalid (never crash a live receiver)", () => {

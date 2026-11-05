@@ -29,9 +29,9 @@ The add editor and its JSON fallback write the add tool's entry, including `run.
 
 A trigger's page has two editors, and no key has both:
 
-- **What its jobs get** changes `flow`, `provider`, `model`, `maxCostUsd`, `models`, `fallbackModels`, `mcp`, `packages` and
-  `excludeTools`, with one preview that says each change in words and one Confirm. Only a person can use this form, and no `dispatch_*` tool
-  reaches it. Of those fields, `dispatch_trigger_edit` can still set the first three, and no `dispatch_*` tool can set the other six
+- **What its jobs get** changes `flow`, `provider`, `model`, `maxCostUsd`, `models`, `fallbackModels`, `mcp`, `packages`,
+  `excludeTools`, `excludeExtensions` and `excludeExtensionTools`, with one preview that says each change in words and one Confirm. Only a person can use this form, and no `dispatch_*` tool
+  reaches it. Of those fields, `dispatch_trigger_edit` can still set the first three, and no `dispatch_*` tool can set the other eight
   ([what a trigger's jobs get](console.md#what-a-triggers-jobs-get)).
 - **Edit** changes the venue (`backend`), `maxTurns`, `progress`, `statusComment`, `steer` and `recover`. Cron cannot enable
   statusComment or recover.
@@ -199,11 +199,12 @@ Four deployment notes:
 writer (the panel, the console and the trigger tools) writes it, first in the file, only when an entry uses a `run`
 field, a top-level block or a value (a new `on.type`, a new `waitFor` condition, a new `run.kind`) that an older
 release would misread (a field whose absence would let a job run wider than the file says, or a value it would refuse
-as broken). Nothing needs one yet, so today's files have none and every write leaves them byte for byte as before. A
+as broken). Today that is a trigger with `run.excludeExtensions` or `run.excludeExtensionTools`, which needs version 2. Any other file has
+no `version`, and every write leaves it byte for byte as before. A
 file that uses such a field or value with a lower `version`, or with none, is refused like any malformed file.
 
 **A file written by a newer pi-dispatch** names the versions in its refusal ("triggers file written by a newer
-pi-dispatch (version 2; this build understands 1)"):
+pi-dispatch (version 3; this build understands 2)"):
 
 - A worker or receiver refuses to start on it, as on any file that does not load.
 - A running worker keeps its schedules and logs `triggers_reload_newer`, and from then on defers EVERY job, cron runs
@@ -234,17 +235,17 @@ broken when its last value reads newer and otherwise shows the file as it did be
 **Upgrading.** Earlier releases ignored a top-level `version` in this file; since issue #761 it is read. If you put one
 there yourself, remove it before you upgrade: one that is not a whole number of 1 or more makes the file broken, so the
 worker and the receiver refuse to start on it (a running worker keeps its schedules, and the next panel write drops
-it), and one above 1 reads as a file a newer release wrote, so every job waits.
+it), and one above what this release reads (2) is taken for a file a newer release wrote, so every job waits.
 
 Every top-level key beside `triggers`, and every `run` key of an entry, including ones this release does not know, is
-kept by every write of a release with issue #704 or later. A `/dispatch` panel or worker from before it (4.3.1
+kept by every write of 5.0.0 or later. A `/dispatch` panel or worker from before it (4.3.1
 included, which had no web console) or an earlier console build writes `triggers` alone, dropping `version` and every
 other top-level block, `secretBundles` among them, so upgrade them first.
 
 ## Optional `run` fields
 
 Most of these change what code runs or what it costs, so each is a deliberate edit to the file that neither the panel nor any
-`dispatch_*` tool can set. `packages`, `excludeTools` and `mcp` can also be changed by a person on the
+`dispatch_*` tool can set. `packages`, `excludeTools`, `excludeExtensions`, `excludeExtensionTools` and `mcp` can also be changed by a person on the
 [trigger's page](console.md#what-a-triggers-jobs-get), which no tool reaches. `progress`, `statusComment`, `steer` and `recover` change
 how a run is followed or picked up, and that page's Edit form and `dispatch_trigger_edit` take them too.
 
@@ -271,6 +272,14 @@ how a run is followed or picked up, and that page's Edit form and `dispatch_trig
   must declare the `excludeTools` capability. The shipped image does. A job carrying exclusions on an
   older image is refused before it costs anything. That image's runner would run the job with every tool
   you removed ([`docs/exclude-tools.md`](exclude-tools.md)).
+
+- `"excludeExtensions": ["@acme/deploy-tools", "git-guard"]` leaves named extensions out of that trigger's jobs: a staged package by
+  its manifest name, with its skills, prompts and themes, or an overlay extension by its file stem or folder name, before any of
+  its code runs. `"excludeExtensionTools": ["deploy_preview"]` removes named tools an extension brings. Neither takes a watch rule.
+  Either makes the file `"version": 2`, which a writer that reads that version stamps, and needs every host on a release that reads it
+  ([what a fleet needs](upgrading.md#what-a-fleet-needs-before-a-trigger-leaves-something-out)). A name not on a host is no refusal there, and a tool name
+  no staged package or overlay extension brought can stop a job before its prompt. Removing a tool does not stop its extension's code from running, and
+  neither key stops what an agent that can write or edit files, or run commands, can reach ([what exclusion does not stop](exclude-tools.md#what-exclusion-does-not-stop)).
 
 - `"mcp": ["docs", "files"]` names MCP servers from the overlay's `mcp.json` for that trigger's jobs to
   connect ([`docs/mcp.md`](mcp.md)). Names only: the servers themselves, and the credentials they take, are the

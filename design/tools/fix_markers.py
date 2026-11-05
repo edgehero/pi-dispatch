@@ -45,7 +45,7 @@ STATUS = {
     "ConnectionsScreen": (BUILT, "Built by #751; provider API key management added by PR #784 (#774); hook run display added by #775."),
     **{n: (BUILT, "Built by #800, part 1.") for n in ["RunLoaded", "ProjectLoads"]},
     "LoadedStates": (BUILT, "Built by #800: a run, a sandbox, the Runs list and, under each row of What its jobs get, a trigger."),
-    **{n: (BUILT, "Built by #800, part 2: what a trigger's jobs get on each host, changed in place by a person, with one preview; no tool reaches this action. Per-extension switches, extension tool chips and their two fields wait on a later pull request.") for n in ["TriggerEnvironment", "TriggerEnvironmentChange"]},
+    **{n: (BUILT, "Built by #800, parts 2 and 3: what a trigger's jobs get on each host, each extension and its tools among it, changed in place by a person, with one preview; no tool reaches this action.") for n in ["TriggerEnvironment", "TriggerEnvironmentChange"]},
     "UpdatesScreen": (BUILT, "Built by #796 (PR #790). Prepared by pi-dispatch, adopted by a person: nothing a job runs updates by itself."),
     **{n: (BUILT, "In main since #742.") for n in ["SignIn", "AccessStates", "AuditScreen", "ErrorPage"]},
     "ApprovalRequest": (BUILT, "Built by #649: budget raises are worker-enforced; external gates are advisory. Model text stays in the transcript."), "ForkRun": (BUILT, "Built by #648, managed fork controls on the run page."),

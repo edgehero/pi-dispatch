@@ -101,21 +101,21 @@ test("the console's whole-list pause action refuses a file a newer pi-dispatch w
 test("readTriggers reads a triggers file a newer pi-dispatch wrote as invalid, naming the versions and never the path (#761)", () => {
   const dir = tempDir("pd-761-tr-");
   const triggersPath = join(dir, "triggers.json");
-  writeFileSync(triggersPath, text({ version: 2, triggers: [{ on: { type: "label", any: ["pi"] }, run: { kind: "github", flow: "fix" } }] }));
-  assert.deepEqual(readTriggers({ triggersPath }), { invalid: "triggers file written by a newer pi-dispatch (version 2; this build understands 1)", newer: true });
-  // A version this build reads, written by hand, is read as before; the display stays lenient on a broken one.
+  writeFileSync(triggersPath, text({ version: 3, triggers: [{ on: { type: "label", any: ["pi"] }, run: { kind: "github", flow: "fix" } }] }));
+  assert.deepEqual(readTriggers({ triggersPath }), { invalid: "triggers file written by a newer pi-dispatch (version 3; this build understands 2)", newer: true });
+  // A version this build reads, written by hand, is read as before; the display stays lenient on a broken one, and says the loaders refuse it.
   writeFileSync(triggersPath, text({ version: 1, triggers: [] }));
   assert.deepEqual(readTriggers({ triggersPath }), { triggers: [], count: 0 });
   writeFileSync(triggersPath, text({ version: "x", triggers: [] }));
-  assert.deepEqual(readTriggers({ triggersPath }), { triggers: [], count: 0 });
+  assert.deepEqual(readTriggers({ triggersPath }), { triggers: [], count: 0, doesNotLoad: true });
 });
 
 test("readTriggers reads a file whose version is written twice as broken, never newer, as the loaders and triggersFileNewer do (#761)", () => {
   const dir = tempDir("pd-761-tr-dup-");
   const triggersPath = join(dir, "triggers.json");
   const broken = "triggers file has a duplicate key, so it is broken, not newer: JSON keeps the last value, so the file that was reviewed and the file that runs are not the same file";
-  // `JSON.parse` keeps the last value, so each of these reads as version 2 once parsed; the text says the file is broken.
-  for (const dup of ['{"triggers":[],"version":1,"version":2}', '{"version":2,"triggers":[],"version":2}', '{"version":2,"triggers":[],"triggers":[]}']) {
+  // `JSON.parse` keeps the last value, so each of these reads as version 3 once parsed; the text says the file is broken.
+  for (const dup of ['{"triggers":[],"version":1,"version":3}', '{"version":3,"triggers":[],"version":3}', '{"version":3,"triggers":[],"triggers":[]}']) {
     writeFileSync(triggersPath, dup);
     const view = readTriggers({ triggersPath });
     assert.deepEqual(view, { invalid: broken }, dup);
@@ -125,9 +125,9 @@ test("readTriggers reads a file whose version is written twice as broken, never 
     assert.throws(() => parseTriggersDocument(dup, triggersPath), (e) => /duplicate key/.test(e.message) && e.newer === undefined, `${dup}: the loader calls it broken`);
   }
   // The same file written once is newer, in all three readers' words.
-  const once = '{"triggers":[],"version":2}';
+  const once = '{"triggers":[],"version":3}';
   writeFileSync(triggersPath, once);
-  assert.deepEqual(readTriggers({ triggersPath }), { invalid: "triggers file written by a newer pi-dispatch (version 2; this build understands 1)", newer: true });
+  assert.deepEqual(readTriggers({ triggersPath }), { invalid: "triggers file written by a newer pi-dispatch (version 3; this build understands 2)", newer: true });
   assert.equal(triggersFileNewer(once), true);
   assert.throws(() => parseTriggersDocument(once, triggersPath), (e) => e.newer === true);
 });
@@ -205,7 +205,7 @@ test("a re-run of a local or a forge job a newer pi-dispatch queued is refused b
   for (const [jobId, kind, base] of [["local-9f8e7d", "local", LOCAL_DATA], ["gh-acme-web-7", "github", FORGE_DATA]]) {
     const record = { jobId, kind, outcome: "failed", startedAt: "2026-10-14T11:50:00.000Z", endedAt: ENDED };
     // Above this build's version, and a `dataVersion` no release writes (a string, 0): neither is read as this build's.
-    for (const dataVersion of [3, "3", 0]) {
+    for (const dataVersion of [4, "4", 0]) {
       const data = { ...base, dataVersion };
       assert.equal(rerunRefusalOf(record, AFTER, data), rerunNewer(jobId), `${kind} ${JSON.stringify(dataVersion)}`);
       assert.deepEqual(await planRerun({ ...heldJobs([record], data), jobId, now: () => AFTER }), { refusal: rerunNewer(jobId) }, `${kind} ${JSON.stringify(dataVersion)}: the planner asks the same check first`);
@@ -218,13 +218,13 @@ test("a re-run of a local or a forge job a newer pi-dispatch queued is refused b
   }
   // A cron run is rebuilt from its trigger and copies nothing of its data, so a stamp on that data refuses nothing here.
   const cron = { jobId: "repeat:nightly:1760443200000", kind: "local", outcome: "failed", startedAt: "2026-10-14T11:50:00.000Z", endedAt: ENDED };
-  assert.equal(rerunRefusalOf(cron, AFTER, { ...LOCAL_DATA, dataVersion: 3 }), null);
+  assert.equal(rerunRefusalOf(cron, AFTER, { ...LOCAL_DATA, dataVersion: 4 }), null);
 });
 
 test("a parked run whose job a newer pi-dispatch queued is not answered from the console, before the triggers file is read (#761)", async () => {
   const jobId = "gh-acme-web-park";
   const record = { jobId, kind: "github", target: "acme/web#7", outcome: "completed", reason: "awaiting-input", startedAt: "2026-10-14T11:50:00.000Z", endedAt: ENDED };
-  for (const dataVersion of [3, "3"]) {
+  for (const dataVersion of [4, "4"]) {
     const data = { ...FORGE_DATA, dataVersion };
     // Ahead of every check the triggers file decides: a path that names no file is never read.
     assert.deepEqual(parkedAnswerRefusalOf({ jobId, data, triggersPath: "/nonexistent/triggers.json" }), { refusal: answerNewer(jobId) });
@@ -235,11 +235,11 @@ test("a parked run whose job a newer pi-dispatch queued is not answered from the
   // The newer check comes before every check on the job's own fields, which only this build's meaning can judge: a kind
   // this console does not know (a newer release may add a forge, stamped for that reason) is refused as newer, not as
   // "is a <kind> run", and an approval's answer as newer, not for a missing gate declaration.
-  for (const [data, approval] of [[{ ...FORGE_DATA, kind: "bitbucket", dataVersion: 3 }, false], [{ ...FORGE_DATA, kind: "bitbucket", dataVersion: 3 }, true], [{ ...FORGE_DATA, dataVersion: 3 }, true]]) {
+  for (const [data, approval] of [[{ ...FORGE_DATA, kind: "bitbucket", dataVersion: 4 }, false], [{ ...FORGE_DATA, kind: "bitbucket", dataVersion: 4 }, true], [{ ...FORGE_DATA, dataVersion: 4 }, true]]) {
     const said = parkedAnswerRefusalOf({ jobId, data, triggersPath: "/nonexistent/triggers.json", approval });
     assert.deepEqual(said, { refusal: answerNewer(jobId) }, `${data.kind}${approval ? ", an approval" : ""}`);
   }
-  const unknown = { ...FORGE_DATA, kind: "bitbucket", dataVersion: 3 };
+  const unknown = { ...FORGE_DATA, kind: "bitbucket", dataVersion: 4 };
   assert.deepEqual(await planParkedAnswer({ ...heldJobs([{ ...record, kind: "bitbucket" }], unknown), jobId, text: "use the staging db", by: "alice", runsFn: async () => [], now: () => AFTER }), { refusal: answerNewer(jobId) }, "the planner asks the same check in the same order");
   // Unstamped, the same job is refused for what it is, so only the order tells the two apart.
   assert.deepEqual(parkedAnswerRefusalOf({ jobId, data: { ...FORGE_DATA, kind: "bitbucket" }, triggersPath: "/nonexistent/triggers.json" }), { refusal: `${jobId} is a bitbucket run; only a forge issue's parked run is answered this way` });

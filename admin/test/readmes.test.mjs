@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { CONSOLE_PICKS } from "../../launch/console-picks.mjs";
 import { relightTranscript, renderTranscript } from "../../launch/transcript-svg.mjs";
+import { TRIGGER_RUN_FIELD_VERSIONS } from "../../worker/src/triggers.mjs";
 import { loadedRows, outcomeNote } from "../src/loaded-words.mjs";
 import { CARD_FIELDS } from "../src/trigger-edit-core.mjs";
 import { TRIGGER_GETS_WORDS } from "../src/trigger-gets-view.mjs";
@@ -162,23 +163,11 @@ test("the install prompt leaves a person's step to the person, and says what Cla
   assert.ok(ROOT.replace(/\s+/g, " ").includes("Claude Code only does the installing: your jobs run on pi"));
 });
 
-test("the README says the web page is not on npm for exactly as long as that is true", () => {
-  // 4.3.1 went out before the console existed (its tag does not hold `admin/src/console/cli.mjs`), and the README describes what
-  // `main` holds. A release moves this version, which makes the note false: take it out in that pull request, and this test with it.
-  const note = "The web page is not on npm yet";
-  if (JSON.parse(read("admin/package.json")).version === "4.3.1") assert.ok(ROOT.includes(note), "say so");
-  else assert.ok(!ROOT.includes(note), "the release that moved the version carries the web page");
-});
-
-test("the root README plays the film, and calls it a first look for exactly as long as that is true", () => {
+test("the root README plays the film", () => {
   // The form GitHub itself writes for an uploaded video, and renders as a player: its bare address, alone on its line.
   const film = ROOT.match(/^https:\/\/github\.com\/user-attachments\/assets\/[0-9a-f-]+$/m);
   assert.ok(film, "the film's address, alone on its line");
   assert.ok(ROOT.indexOf("</p>") < film.index && film.index < ROOT.indexOf("# pi-dispatch\n"), "right under the banner, above the title");
-  // The film announces a version npm does not have yet. A release moves this version: reword the caption in that pull request.
-  const caption = "A first look at the next release";
-  if (JSON.parse(read("admin/package.json")).version === "4.3.1") assert.ok(ROOT.includes(caption), "say so");
-  else assert.ok(!ROOT.includes(caption), "the film is no longer a first look once its release is out");
 });
 
 test("Open the web page says what the console's commands do", () => {
@@ -275,18 +264,57 @@ test("What a job gets says what the trigger's page does: the card by its name, t
   // A plain name for each row a person changes on the image. A row added to the card fails here until the section says it.
   const plain = { Model: "the model", "Job cap": "its job cap", "Flow and skills": "the flow", Extensions: "your packages", "MCP servers": "the outside systems", Tools: "the tools" };
   for (const [row, name] of Object.entries(plain)) assert.ok(words.includes(name), `${row} is said as ${name}`);
+  // Turning one thing off, and what that is not: a reader must not take it for a lock against the agent, or a tool's switch for its extension's.
+  for (const said of ["one of your packages or extensions for that trigger's jobs alone", "those jobs no longer load it", "the tool is gone, and the rest of that extension still runs", "An agent that can run commands, write files or edit files can bring back what you turned off", "also turn off the tools that do those things: `bash` and `powershell` run commands, `write` writes files and `edit` edits them"]) assert.ok(words.includes(said), said);
+  // A chip comes from the newest run that says what it loaded (`triggerLastRun`) or from the file, so no sentence says any run's will do.
+  assert.ok(words.includes("A tool has a switch while the newest run that says what it loaded lists it, or while your triggers file names it"));
+  for (const stumble of ["one tool they add", "by itself", "lock it away", "one that tries", "They can still", "which of an extension's tools"]) assert.ok(!words.includes(stumble), stumble);
+  for (const stumble of ["a switch for each tool your extensions add", "keep one trigger's jobs out of", "reads a file's version", "a name nothing registered"]) assert.ok(!ROOT.includes(stumble), stumble);
+  assert.ok(section.includes("(docs/exclude-tools.md#what-exclusion-does-not-stop)"), "the section sends a reader to what this does not stop");
+  // No release number here: a rename moves one page, and `docs/upgrading.md` holds it. Nor the page's refusal, which reads running workers and no other machine.
+  assert.ok(words.includes("Every running machine must run a release that can read these settings. The [upgrade notes](docs/upgrading.md#what-a-fleet-needs-before-a-trigger-leaves-something-out) say which release, and what to do until then."));
+  const offSwitch = section.slice(section.indexOf("**You can turn off one thing and keep the rest.**"), section.indexOf("**You see it in words first"));
+  assert.doesNotMatch(offSwitch, /\b\d+\.\d+\.\d+\b|next release|the page refuses|turn those tools off|reads less/);
+  assert.ok(!words.includes("before you are asked"), "asked what");
+  assert.ok(!words.includes("your extensions',"), "a possessive with nothing after it");
+  assert.ok(words.includes("which tools its jobs lose (pi's own or those your extensions add)") && words.includes("A command that tries is refused, and you are never asked to confirm it."));
+  assert.ok(section.includes("(docs/upgrading.md#what-a-fleet-needs-before-a-trigger-leaves-something-out)"));
+  // The picture says each switch by the words a reader sees it under, and the golden it is drawn from holds that switch.
+  const golden = read(`admin/test/fixtures/console/${CONSOLE_PICKS.find((pick) => pick.name === "console-trigger").golden}.html`);
+  const alt = /<img src="docs\/images\/console\/console-trigger\.png[^"]*" alt="([^"]*)"/.exec(ROOT)?.[1];
+  for (const [list, said] of [["excludeExtensions", "one for each of your extensions"], ["excludeExtensionTools", "a switch for each tool the newest run that says what it loaded lists"]]) {
+    assert.ok(golden.includes(`data-gets-list="${list}"`), list);
+    assert.ok(alt.includes(said), said);
+  }
 });
 
-test("nothing promises what is not built: no switch per extension, however it is put, and no field still to come", () => {
-  // The words a switch or a chip for one extension could be put in. "One switch for all the staged packages" is what is built, and matches none.
-  const perExtension = /\b(?:switch|toggle|chip)(?:es)?\b[^.|]{0,40}\b(?:per|for each|for every|each|every|one)[\s-]+(?:staged\s+)?(?:package|extension|overlay)\b|\b(?:each|every|one|per)[\s-]+(?:staged\s+)?(?:package|extension)\b[^.|]{0,40}\b(?:switch|toggle|chip)(?:es)?\b/i;
-  for (const said of ["with a switch per extension", "each extension has its own switch", "a per-extension toggle", "one chip per staged package"]) assert.match(said, perExtension, said);
-  assert.doesNotMatch("One switch for all the staged packages. Each staged package and overlay extension is shown, with where it is, and is not switched.", perExtension);
-  for (const path of ["README.md", "admin/README.md", "docs/console.md"]) {
-    const text = read(path).replace(/\s+/g, " ");
-    assert.doesNotMatch(text, perExtension, path);
-    for (const later of ["excludeExtensions", "excludeExtensionTools", "exclude-tool-not-loaded"]) assert.ok(!text.includes(later), `${path} promises ${later}`);
+test("both READMEs say what an exclusion is not, and every heading of the exclusions doc they link is one", () => {
+  // `worker/test/exclude-extensions.test.mjs` holds the docs' own sentences of this boundary, and `image/runner/test/role-child-exclusions.integration.test.mjs` what a real job does. `write` is here beside commands because pi's write tool takes any path, and the settings file is writable in the image.
+  const engineers = ROOT.slice(ROOT.indexOf("## For engineers\n"));
+  const admin = read("admin/README.md");
+  for (const [path, text, link] of [["README.md", engineers, "docs/"], ["admin/README.md", admin, "../docs/"]]) {
+    assert.ok(text.replace(/\s+/g, " ").includes("Neither stops what an agent that can run commands, write files or edit files can reach"), path);
+    assert.ok(text.includes(`(${link}exclude-tools.md#what-exclusion-does-not-stop)`), path);
   }
+  // Each of the two keys by what it does: only one of them keeps code from running.
+  const engineerWords = engineers.replace(/\s+/g, " ");
+  assert.ok(engineerWords.includes("`excludeExtensions` keeps an extension's code from loading in a job, though its files stay readable. `excludeExtensionTools` removes only the tool, so the rest of that extension still runs."));
+  assert.ok(read("admin/README.md").replace(/\s+/g, " ").includes("An extension left out does not load, and a tool removed leaves the rest of its extension running."));
+  for (const [text, path] of [[ROOT, "README.md"], [admin, "admin/README.md"]]) assert.doesNotMatch(text, /stops? what a job loads on its own|stops a job from loading/, path);
+  // The version a file needs, as the loader's table has it. Which release reads it is `docs/upgrading.md`'s to say, so neither paragraph holds a release's number.
+  for (const field of ["excludeExtensions", "excludeExtensionTools"]) assert.ok(engineerWords.includes(`A file that uses either needs \`"version": ${TRIGGER_RUN_FIELD_VERSIONS[field]}\`, so every worker, receiver and console must run a release that can read both.`), field);
+  assert.ok(engineerWords.includes("A release that cannot ignores them and runs the job with what the file turned off. The [upgrade notes](docs/upgrading.md#what-a-fleet-needs-before-a-trigger-leaves-something-out) say which release, and what to do until then. While a running worker cannot read them, the page refuses the change and names it."));
+  const engineerParagraph = engineers.slice(engineers.indexOf("`excludeExtensions` keeps an extension's code"), engineers.indexOf("A whole project can get one environment"));
+  const adminParagraphs = admin.slice(admin.indexOf("**What its jobs get**"), admin.indexOf("`dispatch_trigger_edit` also takes"));
+  assert.ok(adminParagraphs.replace(/\s+/g, " ").includes("Every running machine must run a release that can read these two settings: the [upgrade notes](../docs/upgrading.md#what-a-fleet-needs-before-a-trigger-leaves-something-out) say which release, and what to do until then. While a running worker cannot read them, the page refuses the change and names it."));
+  for (const [path, paragraph] of [["README.md", engineerParagraph], ["admin/README.md", adminParagraphs]]) assert.doesNotMatch(paragraph, /\b\d+\.\d+\.\d+\b|reads less|job data version|comes after/, path);
+  assert.equal(adminParagraphs.trim().split("\n\n").length, 4, "what it says, what a person changes, what that does not stop, and who reads it: one paragraph held all four");
+  assert.ok(ROOT.includes("[excluded tools and extensions](docs/exclude-tools.md)"), "the docs index says what that file covers");
+  const anchors = anchorsIn(read("docs/exclude-tools.md"));
+  for (const text of [ROOT, admin]) for (const [, anchor] of text.matchAll(/exclude-tools\.md#([\w-]+)/g)) assert.ok(anchors.has(anchor), anchor);
+  // A person brought here by the import's list learns the narrower switch beside the wider one.
+  const reading = ROOT.slice(ROOT.indexOf("**Read the list it prints.**"), ROOT.indexOf("Your projects still win."));
+  for (const said of ["all your packages, or one package or extension, out of one trigger's jobs", '"packages": false', '"excludeExtensions"']) assert.ok(reading.replace(/\s+/g, " ").includes(said), said);
 });
 
 test("the root README's optional fields name every field a trigger's page changes, and its sentence names exactly those, in order", () => {
@@ -296,6 +324,8 @@ test("the root README's optional fields name every field a trigger's page change
   const list = ROOT.slice(start, sentenceAt);
   // `flow` is no option: a run names one or a command, in the line the list opens with. Every other member is a line of the list.
   for (const field of CARD_FIELDS) assert.ok(list.includes(`\`${field}\``), `the list names ${field}`);
+  // Which tools go on which key, since the loader refuses a name on the wrong one, and that a name can stop a job, since only a run can know it.
+  for (const said of ["`excludeTools`: removes named tools of pi's own or an MCP server's", "`excludeExtensions`: leaves named staged packages and overlay extensions out of its jobs", "`excludeExtensionTools`: removes named tools an extension adds. If no staged package or overlay extension brought a name, the job can stop before its agent starts"]) assert.ok(list.includes(said), said);
   const said = /a person changes ((?:`[A-Za-z]+`(?:, | and\s+)?)+) with one preview and one Confirm/.exec(ROOT.slice(sentenceAt));
   assert.ok(said, "the sentence");
   assert.deepEqual([...said[1].matchAll(/`([A-Za-z]+)`/g)].map((m) => m[1]), [...CARD_FIELDS]);
@@ -307,30 +337,30 @@ test("the admin README's list of what a person changes on a trigger's page is CA
   const admin = read("admin/README.md").replace(/\s+/g, " ");
   const sentence = /There a person changes (.*?), with one preview that says each change in words, one Confirm, and Undo\./.exec(admin)?.[1];
   assert.ok(sentence, "the sentence");
-  const plain = { flow: "the flow", provider: "the provider", model: "and model", maxCostUsd: "the job cap", models: "the allowed models", fallbackModels: "and fallbacks", mcp: "the MCP servers", packages: "switch for staged packages", excludeTools: "the tools" };
+  const plain = { flow: "the flow", provider: "the provider", model: "and model", maxCostUsd: "the job cap", models: "the allowed models", fallbackModels: "and fallbacks", mcp: "the MCP servers", packages: "switch for staged packages", excludeTools: "the tools", excludeExtensions: "each extension the trigger leaves out", excludeExtensionTools: "each extension's tool it removes" };
   assert.deepEqual(Object.keys(plain), [...CARD_FIELDS], "one plain name per field");
   for (const [field, name] of Object.entries(plain)) assert.ok(sentence.includes(name), `${field} is said as ${name}`);
   assert.ok(admin.includes(TRIGGER_GETS_WORDS.title), "the card by its name");
   assert.ok(!admin.includes("which neither the console nor a model callable tool makes for you"), "the staged packages switch exists now");
 });
 
-test("both READMEs say what no tool can set as the six fields it cannot, and neither overreaches to what a job may spend or reach", () => {
+test("both READMEs say what no tool can set as exactly the fields it cannot, and neither overreaches to what a job may spend or reach", () => {
   const proof = /const TOOL_PROOF_FIELDS = new Set\(\[([^]*?)\]\)/.exec(read("admin/src/write-plans.mjs"))[1];
-  const fields = [...proof.matchAll(/"run\.([^"]+)"/g)].map((m) => m[1]).sort();
+  const fields = [...proof.matchAll(/"run\.([^"]+)"/g)].map((m) => m[1]).filter((key) => CARD_FIELDS.includes(key)).sort();
   const section = ROOT.slice(ROOT.indexOf("## What a job gets\n"), ROOT.indexOf("## Words used here\n")).replace(/\s+/g, " ");
   // Whose: pi-dispatch's own commands, and not everything an AI can run. pi's own `bash` is outside this, as SECURITY.md says, so "No AI tool" overclaims.
   assert.match(read("SECURITY.md").replace(/\s+/g, " "), /A pi process’s own bash, write and edit tools are outside this policy/);
-  const said = /The commands pi-dispatch gives an AI cannot set a trigger's (.*?): one that tries is refused before you are asked/.exec(section)?.[1];
+  const said = /The commands pi-dispatch gives an AI cannot set a trigger's (.*?)\. A command that tries is refused, and you are never asked to confirm it/.exec(section)?.[1];
   assert.ok(said, "the root README's sentence");
   assert.doesNotMatch(section, /No AI tool/);
   // What those commands can still do, as `docs/triggers.md` says: without it the list reads as ruling out a one-confirm change of the model.
-  assert.match(section, /They can still move a trigger's flow, provider and model, and only after you confirm/);
+  assert.match(section, /Those commands can still move a trigger's flow, provider and model, and only after you confirm/);
   assert.match(read("docs/triggers.md").replace(/\s+/g, " "), /`dispatch_trigger_edit` can still set the first three/);
-  const plain = { maxCostUsd: "job cap", models: "the list of models its jobs may use", fallbackModels: "fallback models", mcp: "outside systems", excludeTools: "which tools its jobs lose", packages: "load your packages" };
+  const plain = { maxCostUsd: "job cap", models: "the list of models its jobs may use", fallbackModels: "fallback models", mcp: "outside systems", excludeTools: "which tools its jobs lose (pi's own", packages: "load your packages", excludeExtensions: "which of your packages and extensions they leave out", excludeExtensionTools: "or those your extensions add)" };
   assert.deepEqual(Object.keys(plain).sort(), fields, "one plain name per field");
   for (const [field, name] of Object.entries(plain)) assert.ok(said.includes(name), `${field} is said as ${name}`);
   const admin = read("admin/README.md").replace(/\s+/g, " ");
-  const adminPlain = { maxCostUsd: "job cap", models: "allowed models", fallbackModels: "fallbacks", mcp: "MCP servers", excludeTools: "tool exclusions", packages: "staged packages" };
+  const adminPlain = { maxCostUsd: "job cap", models: "allowed models", fallbackModels: "fallbacks", mcp: "MCP servers", excludeTools: "tool exclusions", packages: "staged packages", excludeExtensions: "extension exclusions", excludeExtensionTools: "extension tool exclusions" };
   assert.deepEqual(Object.keys(adminPlain).sort(), fields);
   const list = /no `dispatch_\*` tool can set a trigger's (job cap[^.]*?)\. A pi process's own `bash`, `write` and `edit` tools are outside this policy/.exec(admin)?.[1];
   assert.ok(list, "the admin README's sentence, and what it does not cover");

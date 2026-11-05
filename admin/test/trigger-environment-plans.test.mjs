@@ -103,8 +103,8 @@ function undoBody(inverse) {
 
 // ---- the file ---------------------------------------------------------------------------------------------------------
 
-test("CARD_FIELDS are the nine the card edits, named once; image, secrets and skillsDir are not among them", () => {
-  assert.deepEqual([...CARD_FIELDS], ["flow", "provider", "model", "maxCostUsd", "models", "fallbackModels", "mcp", "packages", "excludeTools"]);
+test("CARD_FIELDS are the eleven the card edits, named once; image, secrets and skillsDir are not among them", () => {
+  assert.deepEqual([...CARD_FIELDS], ["flow", "provider", "model", "maxCostUsd", "models", "fallbackModels", "mcp", "packages", "excludeTools", "excludeExtensions", "excludeExtensionTools"]);
   assert.ok(Object.isFrozen(CARD_FIELDS));
   for (const key of ["image", "secrets", "secretsProfile", "skillsDir", "backend", "maxTurns"]) assert.ok(!CARD_FIELDS.includes(key), key);
 });
@@ -2094,7 +2094,7 @@ test("a hand-written file: the first write rewrites all of it, the Confirm says 
   const out = await hand.service.preview(ask(hand, { packages: false }), operator);
   const sentence = "This file is not in the writer's layout, so this write also rewrites all of it: spacing and line breaks move in lines this change does not touch, and what each key says does not. Undo puts the values back, not that layout.";
   assert.ok(out.summary.includes(sentence), out.summary.join("\n"));
-  assert.equal(out.plan.undo, "Put trigger row 2's values back; the file keeps the layout this write gave it");
+  assert.equal(out.plan.undo, "Put trigger row 2's values back; the file stays in the form the writer gives it");
   assert.deepEqual(await hand.service.apply(out, operator), { ok: true });
   const undone = await hand.service.preview(undoBody(out.plan.inverse), operator);
   assert.ok(undone.plan, JSON.stringify(undone));
@@ -2141,6 +2141,7 @@ function skewFixture(jobs, options = {}) {
   const f = fixture({
     ...options,
     deps: {
+      ...options.deps,
       readSkew: (index, dry) => {
         seen.push(dry);
         return readTriggerSkew({ index, waiting, triggersPath: f.paths.triggersPath, fs: dry, lookupJob: async (_q, id) => ({ data: jobs.find((job) => job.id === id).data }) });
@@ -2188,6 +2189,8 @@ const IN_LINE = [
   [{ mcp: ["docs"] }, "mcp"],
   [{ packages: false }, null],
   [{ excludeTools: ["bash"] }, null],
+  [{ excludeExtensions: ["pi-lint"] }, "excludeExtensions"],
+  [{ excludeExtensionTools: ["lint_run"] }, "excludeExtensionTools"],
 ];
 test("the rows below hold every field the card writes", () => {
   assert.deepEqual(new Set(IN_LINE.flatMap(([change]) => Object.keys(change))), new Set(CARD_FIELDS));
@@ -2196,7 +2199,8 @@ for (const [change, field] of IN_LINE) {
   test(`a job in line under ${JSON.stringify(change)}: ${field === null ? "runs, and no sentence names it" : `refused, as run.${field}`}, as the worker's own check says of the written file`, async () => {
     // A job that carries the list, so the one thing it lacks is what this row adds.
     const carried = "fallbackModels" in change ? { models: [HAIKU, SONNET] } : {};
-    const { f } = skewFixture([queued("gh-1", carried)], { run: { provider: "anthropic", model: "claude-haiku-4-5", ...carried, ...(change.fallbackModels ? { models: [HAIKU, SONNET] } : {}) } });
+    // A narrowing that needs version 2 asks each live host, and this one reads it.
+    const { f } = skewFixture([queued("gh-1", carried)], { run: { provider: "anthropic", model: "claude-haiku-4-5", ...carried, ...(change.fallbackModels ? { models: [HAIKU, SONNET] } : {}) }, deps: { readHosts: async () => ({ hosts: [{ name: "mini1", triggersVersion: "2", jobDataVersion: "3" }] }), readHostLoads: async () => ({ hosts: [{ name: "mini1", state: "current", packages: [{ name: "pi-lint", version: "1.4.2" }], extensions: [], unread: [], more: {} }] }) } });
     const out = await f.service.preview(ask(f, change), operator);
     assert.ok(out.plan, JSON.stringify(out));
     assert.deepEqual(out.plan.skew.rows, field === null ? [] : [{ jobId: "gh-1", queue: "pi-jobs", field }], JSON.stringify(change));
@@ -2273,6 +2277,48 @@ test("the worker's check reads through the dry run: it sees the proposed bytes, 
 
 // ---- each host's release ----------------------------------------------------------------------------------------------
 
+// ---- the version gate, on this build's own tables (#800): run.excludeExtensions and run.excludeExtensionTools make a file need version 2
+
+const narrowed = comment({ excludeExtensions: ["pi-lint"], excludeExtensionTools: ["lint_run"] });
+const needingTwo = { version: 2, triggers: [cron, narrowed] };
+const reads = (name, version = "2") => ({ name, triggersVersion: version, jobDataVersion: "3" });
+
+test("this build's own tables: an edit beside a real version 2 field reads the live hosts, and goes through when each reads it", async () => {
+  const f = fixture({ doc: needingTwo, deps: { readHosts: async () => ({ hosts: [reads("mini1")] }) } });
+  const out = await f.service.preview(ask(f, { flow: "review" }), operator);
+  assert.ok(out.plan, JSON.stringify(out));
+  assert.deepEqual(out.plan.need, { triggersVersion: 2, jobDataVersion: 3 }, "the file's own fields need it, whichever field this edit touches");
+  assert.ok(out.summary.includes("mini1 reads what this change needs."), JSON.stringify(out.summary));
+  // The edit's own part goes through planTriggerEditCore, which reads with this build's constant: at 2 a version 2 file is one it reads, and it keeps both keys.
+  assert.deepEqual(await f.service.apply(out, operator), { ok: true });
+  const after = JSON.parse(f.read());
+  assert.equal(after.version, 2);
+  assert.deepEqual([after.triggers[1].run.flow, after.triggers[1].run.excludeExtensions, after.triggers[1].run.excludeExtensionTools], ["review", ["pi-lint"], ["lint_run"]]);
+});
+
+test("this build's own tables: a live host that reads less, or says nothing, refuses a file that needs version 2, with nothing written", async () => {
+  const f = fixture({ doc: needingTwo, deps: { readHosts: async () => ({ hosts: [reads("mini1"), reads("mini2", "1"), { name: "old" }] }) } });
+  const before = f.read();
+  const refused = await f.service.preview(ask(f, { flow: "review" }), operator);
+  assert.equal(refused.status, 409);
+  assert.match(refused.refusal, /This change needs the triggers file at version 2/);
+  assert.match(refused.refusal, /mini2 reads less/);
+  assert.match(refused.refusal, /old/);
+  assert.equal(f.read(), before);
+  const unread = fixture({ doc: needingTwo, deps: { readHosts: async () => { throw new Error("valkey down"); } } });
+  assert.match((await unread.service.preview(ask(unread, { flow: "review" }), operator)).refusal, /could not be read/);
+});
+
+test("this build's own tables: a file above what it reads is refused, and an edit that needs nothing reads no host", async () => {
+  const f = fixture({ doc: { version: 3, triggers: [cron, comment()] }, deps: { readHosts: async () => assert.fail("no host is read") } });
+  const out = await f.service.preview(ask(f, { flow: "review" }), operator);
+  assert.equal(out.status, 409);
+  assert.match(out.refusal, /written by a newer pi-dispatch \(version 3; this build understands 2\)/);
+  const plain = fixture({ deps: { readHosts: async () => assert.fail("no host is read while the need is 1") } });
+  const fine = await plain.service.preview(ask(plain, { flow: "review" }), operator);
+  assert.deepEqual(fine.plan.need, { triggersVersion: 1, jobDataVersion: 1 });
+});
+
 const tables = { triggers: { supported: 2, runTable: { packages: 2 } }, jobData: { table: {} } };
 const jobTables = { triggers: {}, jobData: { table: { mcp: 2 } } };
 
@@ -2281,7 +2327,7 @@ test("while the need is 1 nothing reads a host, and a registry that cannot answe
   const f = fixture({ deps: { readHosts: async () => { reads++; throw new Error("down"); } } });
   const out = await f.service.preview(ask(f, { packages: false, mcp: ["docs"], excludeTools: ["bash"], flow: "review", maxCostUsd: "1", provider: "anthropic", model: "claude-haiku-4-5", models: [HAIKU], fallbackModels: [HAIKU] }), operator);
   assert.ok(out.plan, JSON.stringify(out));
-  assert.deepEqual(out.plan.need, { triggersVersion: 1, jobDataVersion: 1 }, "every field the card writes is version 1 at this release");
+  assert.deepEqual(out.plan.need, { triggersVersion: 1, jobDataVersion: 1 }, "every field but the two exclusions is version 1");
   assert.equal(reads, 0);
   assert.deepEqual(await f.service.apply(out, operator), { ok: true });
   assert.equal(reads, 0);
@@ -2328,7 +2374,7 @@ test("every host at or above the need passes, with the stamp said out loud and w
   const out = await f.service.preview(ask(f, { packages: false }), operator);
   assert.ok(out.plan, JSON.stringify(out));
   assert.deepEqual(out.plan.need, { triggersVersion: 2, jobDataVersion: 1 });
-  assert.ok(out.summary.includes("Stamps the file version 2: a host reading less waits on every trigger's jobs, not only this one's."));
+  assert.ok(out.summary.includes("Stamps the file version 2: a host from before 5.0.0 ignores that and runs this trigger's jobs wider, and a later host that reads less waits on every trigger's jobs."));
   assert.ok(out.summary.includes("build3, mini1 and mini2 each read what this change needs."));
   assert.deepEqual(await f.service.apply(out, operator), { ok: true });
   assert.equal(JSON.parse(f.read()).version, 2);

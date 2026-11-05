@@ -257,7 +257,7 @@ export function swallowedRunSentence(jobId, existing) {
 	return `an identical run was queued${hhmm} as ${jobId} (${existing?.state ?? "already queued or done"}); nothing new was queued.`;
 }
 
-async function addLocalJob(queue, { folder, flow, task, command, provider, model, maxTurns, models, fallbackModels, maxCostUsd, image, backend, excludeTools, mcp, skillsDir, secrets, secretsProfile, recover, steer, chainDepth, parentJobId, jobId, enqueueNonce, dataVersion, now = new Date() }, { dataVersions } = {}) {
+async function addLocalJob(queue, { folder, flow, task, command, provider, model, maxTurns, models, fallbackModels, maxCostUsd, packages, image, backend, excludeTools, excludeExtensions, excludeExtensionTools, mcp, skillsDir, secrets, secretsProfile, recover, steer, chainDepth, parentJobId, jobId, enqueueNonce, dataVersion, now = new Date() }, { dataVersions } = {}) {
 	const minute = now.toISOString().slice(0, 16); // YYYY-MM-DDTHH:MM -- the dedup window
 	// A caller-supplied jobId (the outbox collector's retry-idempotent chainedJobId) wins; otherwise the
 	// minute-windowed localJobId is the dedup key. A command job (issue #189) fills the flow slot with
@@ -290,6 +290,9 @@ async function addLocalJob(queue, { folder, flow, task, command, provider, model
 		...(fallbackModels !== undefined && { fallbackModels }),
 		// Issue #501: the per-job dollar cap, passed through for the outbox child that inherits its parent's.
 		...(maxCostUsd !== undefined && { maxCostUsd }),
+		// Issue #800: the outbox child's `"packages": false`, off its parent's data. Not in this function's list before, so the collector could not have
+		// passed it. A key every worker already reads, so it asks for no `dataVersion`. Conditional like `image`, so no other job's data moves.
+		...(packages !== undefined && { packages }),
 		...(image !== undefined && { image }),
 		// #227. WHERE this job's container is built. Conditional like `image`, so a trigger that named no
 		// venue produces byte-identical job data -- and at JOB level, never inside `trigger`, for the reason
@@ -301,6 +304,10 @@ async function addLocalJob(queue, { folder, flow, task, command, provider, model
 		// same reason: `trigger` is copied verbatim into /job/event.json, and a permission boundary is the
 		// worker's business, never agent-visible input to reason about.
 		...(excludeTools !== undefined && { excludeTools }),
+		// Issue #800. Each its own conditional, and at JOB level, excludeTools' two reasons: a dropped list runs the job with what the
+		// file takes away, and what the session may not load is the worker's business, never agent-visible input.
+		...(excludeExtensions !== undefined && { excludeExtensions }),
+		...(excludeExtensionTools !== undefined && { excludeExtensionTools }),
 		...(mcp !== undefined && { mcp }),
 		// The host directory of operator-authored skills this trigger injects (REQ-PER-TRIGGER-SKILLS).
 		// Conditional like `image`, so an unflagged job's data stays byte-identical, and at JOB level rather
@@ -511,7 +518,7 @@ export async function enqueueLateForgeJob(queue, kind, fields, { dataVersions } 
  * semantic dedup id. Throws on a bad delivery id or console name, and on input a newer release stored with a
  * `dataVersion` above this build's (issue #761; every caller that rebuilds stored input answers with a reply then).
  */
-function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, models, fallbackModels, maxCostUsd, packages, image, backend, excludeTools, mcp, skillsDir, instructions, resume, awaitInput, gates, approvalRequestId, gateTimeout, gateBudgetRaiseUsd, progress, statusComment, recover, steer, fork, forkPolicy, forkReserveMicros, thinkingLevel, parkedReply, replyReceivedAt, console: consoleMeta, secrets, secretsProfile, waitFor, replica, replicas, dataVersion }, { dataVersions } = {}) {
+function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, models, fallbackModels, maxCostUsd, packages, image, backend, excludeTools, excludeExtensions, excludeExtensionTools, mcp, skillsDir, instructions, resume, awaitInput, gates, approvalRequestId, gateTimeout, gateBudgetRaiseUsd, progress, statusComment, recover, steer, fork, forkPolicy, forkReserveMicros, thinkingLevel, parkedReply, replyReceivedAt, console: consoleMeta, secrets, secretsProfile, waitFor, replica, replicas, dataVersion }, { dataVersions } = {}) {
 	const jobId = forgeDeliveryJobId(kind, trigger?.deliveryId, replica);
 	if (approvalRequestId !== undefined && (typeof approvalRequestId !== "string" || !/^[A-Za-z0-9._:-]{1,200}$/.test(approvalRequestId))) throw new TypeError("approval-request-invalid");
 	if (replyReceivedAt !== undefined && (!Number.isSafeInteger(replyReceivedAt) || replyReceivedAt < 0 || resume !== true || typeof trigger?.comment?.body !== "string")) throw new TypeError("reply-receipt-invalid");
@@ -563,6 +570,10 @@ function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigg
 		// same reason: `trigger` is copied verbatim into /job/event.json, and a permission boundary is the
 		// worker's business, never agent-visible input to reason about.
 		...(excludeTools !== undefined && { excludeTools }),
+		// Issue #800. Each its own conditional, and at JOB level, excludeTools' two reasons: a dropped list runs the job with what the
+		// file takes away, and what the session may not load is the worker's business, never agent-visible input.
+		...(excludeExtensions !== undefined && { excludeExtensions }),
+		...(excludeExtensionTools !== undefined && { excludeExtensionTools }),
 		...(mcp !== undefined && { mcp }),
 		// #501. The trigger's per-job dollar cap, as written. Conditional like `excludeTools`, at JOB level for its
 		// reason, and a narrowing like it: the worker runs the job under the smaller of this and the deployment cap.

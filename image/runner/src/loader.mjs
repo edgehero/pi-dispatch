@@ -3,6 +3,7 @@ import { createRequire } from "node:module";
 import { join, relative, resolve, sep } from "node:path";
 import { DefaultResourceLoader, SettingsManager, getAgentDir, loadSkillsFromDir } from "@earendil-works/pi-coding-agent";
 import { LAYOUT } from "./layout.mjs";
+import { overlayEntryNamed } from "./loaded.mjs";
 import { extensionEntryName, isUnderAnyRoot, owningRoot, partitionAdminExtensions } from "./packages.mjs";
 
 /** Where the image bakes the guardrails. Outside agentDir, on purpose -- see buildResourceLoader. */
@@ -286,6 +287,21 @@ export function discoverExtensionEntries(dir, { fs = nodeFs, makeIgnore = piIgno
 const MANIFEST_PATTERN_RE = /[*?]|^[!+-]/;
 
 /**
+ * The overlay's list without what `run.excludeExtensions` names, by the first path segment under `dir`, which is how the record and a
+ * host's publication name an entry. Here, on the paths, because pi imports a module and runs its factory while it loads: its
+ * `extensionsOverride` hands over what already ran. A `skipped` entry goes too: it did not load, and a name the trigger took away is no
+ * failure to report.
+ */
+export function withoutExcludedEntries({ entries, skipped }, dir, excluded) {
+	if (excluded.length === 0) return { entries, skipped };
+	const named = (path) => {
+		const segment = relative(dir, path).split(sep)[0];
+		return excluded.some((name) => overlayEntryNamed(name, segment));
+	};
+	return { entries: entries.filter((path) => !named(path)), skipped: skipped.filter(({ path }) => !named(path)) };
+}
+
+/**
  * What an extensions folder holds that loaded before issue #544 and does not now, or loads differently: pi
  * read the folder as a package root, so a root `pi` manifest's skills, prompts and themes loaded, its
  * `pi.extensions` globs and `!` excludes were expanded, and without a manifest the `extensions/ skills/
@@ -535,6 +551,8 @@ export function buildResourceLoader({
 	// which is exactly why it must not say the opposite of what a job does.
 	allowGlobalExtensions = true,
 	packagePaths = [],
+	// Issue #800: the trigger's run.excludeExtensions. Only the overlay's are read here: the worker left the packages out of PI_PACKAGES.
+	excludeExtensions = [],
 	// Map<name, PromptTemplate> of the PROTECTED prompt templates (repo, then overlay), pre-loaded by
 	// buildLoadedResourceLoader because the promptsOverride seam below is synchronous and a loader
 	// cannot reload() inside its own override. `null` -- every job without staged packages -- makes
@@ -591,7 +609,7 @@ export function buildResourceLoader({
 	// The workspace is last because it is the catch-all -- a discovered repo extension is anywhere in it.
 	const extensionRoots = [...packagePaths, `${jobPiDir}/extensions`, globalExtensions, cwd];
 	// Read ONCE, here, so the layout and withheld lines are written once per job (issue #544).
-	const overlay = allowGlobalExtensions ? overlayExtensionEntries(globalExtensions, { log }) : { entries: [], skipped: [] };
+	const overlay = allowGlobalExtensions ? withoutExcludedEntries(overlayExtensionEntries(globalExtensions, { log }), globalExtensions, excludeExtensions) : { entries: [], skipped: [] };
 
 	return new DefaultResourceLoader({
 		cwd,

@@ -8,6 +8,7 @@ import * as runnerLoaded from "../../image/runner/src/loaded.mjs";
 import { createExitWriter } from "../../image/runner/src/exit-line.mjs";
 import { maximalLoaded } from "../../image/runner/test/helpers/maximal-loaded.mjs";
 import * as record from "../src/loaded-record.mjs";
+import { makeCollectChain } from "../src/outbox.mjs";
 import { makeRedactor, secretValuesOf } from "../src/redact-secrets.mjs";
 import { buildRecord, makeLogSink } from "../src/run-history.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -614,6 +615,7 @@ test("a tool of a package past the row cap has no row to hold it, so it is count
 function maximal() {
 	const line = maximalLoaded();
 	const longName = (i) => `@${"s".repeat(100)}/${String(i).padStart(2, "0")}${"n".repeat(110)}`;
+	const excludeExtensionTools = Array.from({ length: record.LEFT_OUT_NAMES_MAX }, (_, i) => `x${String(i).padStart(2, "0")}`.padEnd(48, "z"));
 	const longVersion = `1.2.3-${"r".repeat(122)}`;
 	const overlayNames = line.overlay.loaded;
 	const tierRow = record.LOADED_ROW.map((name) => (name === "failed" || name === "dropped" ? Math.floor(LOADED_COUNT_MAX / 5) : LOADED_COUNT_MAX));
@@ -626,6 +628,7 @@ function maximal() {
 		pi: piLongest,
 		tiers: Object.fromEntries(Object.keys(line.tiers).map((tier) => [tier, [...tierRow]])),
 		extTools: { p: [], o: onOverlay },
+		tools: { ...line.tools, unmatched: excludeExtensionTools.map((_, i) => i) },
 		cut: { form: "full", packages: LOADED_COUNT_MAX, servers: LOADED_COUNT_MAX, names: LOADED_COUNT_MAX, counts: LOADED_COUNT_MAX },
 	};
 	const filler = { name: longName(99), version: longVersion };
@@ -634,16 +637,18 @@ function maximal() {
 		overlayExtensions: overlayNames,
 		servers: Array.from({ length: record.LOADED_MAX_SERVERS + LOADED_COUNT_MAX }, (_, i) => `${String(i % 100).padStart(2, "0")}${"x".repeat(30)}`),
 		ownTools: OWN,
-		leftOut: { tools: Array.from({ length: 32 }, (_, i) => `mcp__${String(i).padStart(2, "0")}${"y".repeat(41)}*`), packages: false, overlayExtensions: false, restricted: false },
+		// `extensions` beside `extensionsNotHere`: one list split in two, so together at most the cap, and a package's name is the longest either holds.
+		leftOut: { tools: Array.from({ length: 32 }, (_, i) => `mcp__${String(i).padStart(2, "0")}${"y".repeat(41)}*`), packages: false, overlayExtensions: false, restricted: false, extensions: Array.from({ length: 8 }, (_, i) => longName(i)), extensionsNotHere: Array.from({ length: 8 }, (_, i) => longName(i + 8)), extensionTools: excludeExtensionTools },
+		excludeExtensionTools,
 	};
 	const img = { image: `ghcr.io/${"i".repeat(504)}`, imageDigest: `sha256:${"f".repeat(64)}`, piVersion: piLongest, fromJob: true };
 	return { forged, known, img, baseSha: "e".repeat(64) };
 }
 
 /** Measured off `maximal` below, and said in INT-RUN-HISTORY-FILE-CONTRACT. A new cap moves this and the spec together. */
-const WORST_RECORD_BYTES = 15_971;
+const WORST_RECORD_BYTES = 21_145;
 
-test("the record stays under 16 KiB at every cap, and the worst case is measured and pinned", () => {
+test("the record stays under 24 KiB at every cap, and the worst case is measured and pinned", () => {
 	const { forged, known, img, baseSha } = maximal();
 	const built = rebuildLoaded(forged, known);
 	assert.equal(built.runner, "reported", "the premise: this worst line passes every check");
@@ -656,6 +661,9 @@ test("the record stays under 16 KiB at every cap, and the worst case is measured
 	assert.equal(kept.imageFromJob, true, "the key that is there only sometimes");
 	assert.equal(kept.mcp.length, 8);
 	assert.equal(kept.leftOut.tools.length, 32);
+	assert.equal(kept.leftOut.extensions.length + kept.leftOut.extensionsNotHere.length, record.LEFT_OUT_NAMES_MAX);
+	assert.equal(kept.leftOut.extensionTools.length, record.LEFT_OUT_NAMES_MAX);
+	assert.equal(kept.tools.unmatched.length, record.LEFT_OUT_NAMES_MAX);
 	assert.equal(kept.tools.job.length, record.LOADED_JOB_TOOLS.length);
 	assert.equal(kept.tools.own.length, 8, "every name of pi's own: a worst line with none understated this by 60 bytes");
 	assert.equal(source(kept, "overlay").namedTools.length, 16, "the costliest place for a tool's name");
@@ -708,22 +716,26 @@ test("past the bound it reads as `cut` and keeps the worker's facts: a key that 
 	assert.equal(built.loaded.imageFromJob, true, "and that the image was the job's own");
 	const bytes = Buffer.byteLength(JSON.stringify(built.loaded), "utf8");
 	assert.ok(bytes <= LOADED_RECORD_MAX_BYTES, "what is left fits, and it is the most the worker alone can say");
-	assert.equal(bytes, 2_619);
+	assert.equal(bytes, 6_963);
 	assert.deepEqual(recordedLoaded(built.loaded), built.loaded, "and it reads back as itself");
 	assert.deepEqual(Object.keys(built).slice(-2), ["loaded", "v"]);
-	// The bound itself, to the byte. A name costs its length, two quotes and a comma, less the one comma the first has none of.
+	// The bound itself, to the byte. A name costs its length, two quotes and a comma, less the one comma a row's first has none of.
 	const filled = (target) => {
-		let left = target - Buffer.byteLength(JSON.stringify(kept), "utf8") + 1;
-		const names = [];
+		let left = target - Buffer.byteLength(JSON.stringify(kept), "utf8");
+		// A row holds so many, so a bound far past the worst record takes several. Each package row of the worst record names none.
+		const rows = kept.sources.filter((row) => row.tier === "package").map(() => []);
+		let at = 0;
 		while (left > 0) {
-			// A name costs its length, two quotes and a comma, so at least four bytes: what would leave less than that is shared
-			// with this name. REJECTED: `Math.min(51, left)`, which threw whenever the room left a remainder under four, so a
-			// new worst case could turn this test red for no reason to do with the bound.
-			const take = left <= 51 ? left : Math.min(51, left - 4);
-			names.push("t".repeat(take - 3));
+			if (rows[at].length === record.LOADED_MAX_EXT_TOOLS) at += 1;
+			const overhead = rows[at].length === 0 ? 2 : 3;
+			// At least four bytes each: what would leave less than that is shared with this name. REJECTED: `Math.min(51, left)`, which
+			// threw whenever the room left a remainder under four, so a new worst case could turn this test red for no reason to do with the bound.
+			const most = 48 + overhead;
+			const take = left <= most ? left : Math.min(most, left - 4);
+			rows[at].push("t".repeat(take - overhead));
 			left -= take;
 		}
-		const out = { ...kept, sources: kept.sources.map((row, i) => (i === 0 ? { ...row, toolNames: names } : row)) };
+		const out = { ...kept, sources: kept.sources.map((row, i) => (row.tier === "package" ? { ...row, toolNames: rows[i] } : row)) };
 		assert.equal(Buffer.byteLength(JSON.stringify(out), "utf8"), target);
 		return out;
 	};
@@ -1026,6 +1038,29 @@ test('run-container: `"packages": false` is said as such, with no rows and no re
 	assert.deepEqual(result.loaded.sources.filter((row) => row.tier === "package"), []);
 });
 
+test("a chained child of a job that withheld its packages gets none: the real collector, the real builder, the real command line", { skip }, async () => {
+	const childOf = async (parentData) => {
+		const jobDir = tempDir("loaded-chain-");
+		mkdirSync(join(jobDir, "outbox"), { recursive: true });
+		writeFileSync(join(jobDir, "outbox", "request-1.json"), JSON.stringify({ flow: "next", task: "go on", packages: true }));
+		const adds = [];
+		const queue = { add: async (_name, data, opts) => (adds.push(data), { id: opts.jobId }) };
+		const collect = makeCollectChain({ queue, readFlowGate: async () => ({ gate: "allow" }), config: { chainMaxPerJob: 2, chainDepthMax: 1 } });
+		const parent = { kind: "local", folder: "/host/w", flow: "first", task: "start", provider: "anthropic", model: "m", ...parentData };
+		assert.deepEqual(await collect({ job: { id: "parent-1", data: parent }, prepared: { jobDir, workspace: "/host/w", sha: "a".repeat(40) } }), { enqueued: 1, refused: 0 });
+		return adds[0];
+	};
+	const packagePaths = resolver({ [LINT]: KNOWN.packages[0] });
+	const onCommandLine = async (job) => (await runWith({ known: { packagePaths }, job: { ...job, maxTurns: 5 }, spawnOptions: {} })).recorder.args.filter((a) => String(a).startsWith("PI_PACKAGES"));
+	const withheld = await childOf({ packages: false });
+	assert.equal(withheld.packages, false);
+	assert.equal(Object.hasOwn(withheld, "dataVersion"), false, "a key every worker reads asks for no version");
+	assert.deepEqual(await onCommandLine(withheld), [], "and it gets no staged package, whatever the request file said");
+	const plain = await childOf({});
+	assert.equal(Object.hasOwn(plain, "packages"), false, "a parent that said nothing chains a child that says nothing");
+	assert.deepEqual(await onCommandLine(plain), [`PI_PACKAGES=${LINT}`], "the premise: this child does get them");
+});
+
 test("run-container: left out reads the host's switch and the job's own fields, and a restricted job's forced overlay stays `restricted`", { skip }, async () => {
 	const off = await runWith({ makeOptions: { allowGlobalExtensions: false }, spawnOptions: {} });
 	assert.equal(off.result.loaded.runner, "absent");
@@ -1035,6 +1070,144 @@ test("run-container: left out reads the host's switch and the job's own fields, 
 	const restricted = await runWith({ job: { ...BASE_JOB, questionGrouping: { runId: "r" }, questionGroupModel: { provider: "anthropic", id: "m" } }, spawnOptions: {} });
 	assert.deepEqual(restricted.result.loaded.leftOut, { tools: [], packages: false, overlayExtensions: false, restricted: true }, "the host's switch is on");
 	assert.ok(restricted.recorder.args.includes("PI_GLOBAL_ALLOW_EXTENSIONS=0"), "and this job's overlay is off all the same");
+});
+
+test("run-container: an excluded package is left out by its manifest name, with its row, and what the job got is what the record names", { skip }, async () => {
+	const { result, recorder } = await runWith({
+		known: { packagePaths: resolver({ [LINT]: KNOWN.packages[0], [FMT]: KNOWN.packages[1] }) },
+		job: { ...BASE_JOB, mcp: ["linear"], excludeExtensions: ["pi-lint"] },
+		spawnOptions: { noted: line({ roots: { ...ROOTS, packages: [FMT] }, flow: null, extensions: [`${OVERLAY_EXT}/git-guard.ts`], skills: [], failures: [], drops: [], tools: [tool("read", "builtin:read")], active: ["read"] }) },
+	});
+	assert.ok(recorder.args.includes(`PI_PACKAGES=${FMT}`), JSON.stringify(recorder.args.filter((a) => String(a).startsWith("PI_PACKAGES"))));
+	assert.ok(recorder.args.includes("PI_EXCLUDE_EXTENSIONS=pi-lint"));
+	assert.equal(result.loaded.runner, "reported");
+	assert.deepEqual(result.loaded.sources.filter((row) => row.tier === "package").map((row) => row.name), ["@acme/fmt"], "the row names the package that is at that position now");
+	assert.deepEqual(result.loaded.leftOut.extensions, ["pi-lint"]);
+	assert.equal(Object.hasOwn(result.loaded.leftOut, "extensionsNotHere"), false);
+});
+
+test("run-container: an excluded name on the overlay is the runner's to leave out, and the worker leaves every package path where it was", { skip }, async () => {
+	const { recorder, result } = await runWith({
+		known: { packagePaths: resolver({ [LINT]: KNOWN.packages[0] }) },
+		job: { ...BASE_JOB, excludeExtensions: ["git-guard"] },
+		spawnOptions: {},
+	});
+	assert.ok(recorder.args.includes(`PI_PACKAGES=${LINT}`));
+	assert.ok(recorder.args.includes("PI_EXCLUDE_EXTENSIONS=git-guard"));
+	assert.deepEqual(result.loaded.leftOut.extensions, ["git-guard"], "this host's folder holds git-guard.ts, whichever way a person spells it");
+});
+
+test("run-container: a name this host holds neither way is said, only where both sides were read", { skip }, async () => {
+	const job = { ...BASE_JOB, excludeExtensions: ["pi-lint", "git-guard.ts", "typo"] };
+	const known = { packagePaths: resolver({ [LINT]: KNOWN.packages[0] }) };
+	const read = await runWith({ known, job, spawnOptions: {} });
+	assert.deepEqual([read.result.loaded.leftOut.extensions, read.result.loaded.leftOut.extensionsNotHere], [["pi-lint", "git-guard.ts"], ["typo"]]);
+	// A stage this job never read, and a folder that could not be listed, hold nothing that says a name is absent.
+	const withheld = await runWith({ known, job: { ...job, packages: false }, spawnOptions: {} });
+	assert.deepEqual([withheld.result.loaded.leftOut.extensions, withheld.result.loaded.leftOut.extensionsNotHere], [["pi-lint", "git-guard.ts", "typo"], undefined]);
+	const unlisted = await runWith({ known, job, makeOptions: { readOverlayExtensions: () => { throw new Error("EACCES"); } }, spawnOptions: {} });
+	assert.deepEqual([unlisted.result.loaded.leftOut.extensions, unlisted.result.loaded.leftOut.extensionsNotHere], [["pi-lint", "git-guard.ts", "typo"], undefined]);
+	// No overlay on this host at all is an answer: nothing there holds a name.
+	const noOverlay = await runWith({ known, job, makeOptions: { globalPiDir: null }, spawnOptions: {} });
+	assert.deepEqual([noOverlay.result.loaded.leftOut.extensions, noOverlay.result.loaded.leftOut.extensionsNotHere], [["pi-lint"], ["git-guard.ts", "typo"]]);
+});
+
+test("run-container: an overlay of packages alone has no extensions folder, which is an answer: a typo is not here, and a read that failed otherwise still says nothing", { skip }, async () => {
+	const job = { ...BASE_JOB, excludeExtensions: ["pi-lint", "typo"] };
+	const known = { packagePaths: resolver({ [LINT]: KNOWN.packages[0] }) };
+	const noFolder = tempDir("pi-global-");
+	mkdirSync(join(noFolder, "packages"), { recursive: true });
+	const none = await runWith({ known, job, makeOptions: { globalPiDir: noFolder, readOverlayExtensions: undefined }, spawnOptions: {} });
+	assert.deepEqual([none.result.loaded.leftOut.extensions, none.result.loaded.leftOut.extensionsNotHere], [["pi-lint"], ["typo"]], "the real readdirSync, on a folder that is not there");
+	const empty = tempDir("pi-global-");
+	mkdirSync(join(empty, "extensions"), { recursive: true });
+	const same = await runWith({ known, job, makeOptions: { globalPiDir: empty, readOverlayExtensions: undefined }, spawnOptions: {} });
+	assert.deepEqual(same.result.loaded.leftOut, none.result.loaded.leftOut, "and it reads as an empty folder does");
+	const notAFolder = tempDir("pi-global-");
+	writeFileSync(join(notAFolder, "extensions"), "a file\n");
+	const failed = await runWith({ known, job, makeOptions: { globalPiDir: notAFolder, readOverlayExtensions: undefined }, spawnOptions: {} });
+	assert.deepEqual([failed.result.loaded.leftOut.extensions, failed.result.loaded.leftOut.extensionsNotHere], [["pi-lint", "typo"], undefined], "ENOTDIR holds nothing to vouch for");
+	for (const code of ["EACCES", "EIO", undefined]) {
+		const denied = await runWith({ known, job, makeOptions: { readOverlayExtensions: () => { throw Object.assign(new Error("no"), { code }); } }, spawnOptions: {} });
+		assert.deepEqual([denied.result.loaded.leftOut.extensions, denied.result.loaded.leftOut.extensionsNotHere], [["pi-lint", "typo"], undefined], String(code));
+	}
+});
+
+test("run-container: a manifest that did not read names nothing as not here, a package's real name among them, and the record leaves each as could-not-say", { skip }, async () => {
+	const job = { ...BASE_JOB, excludeExtensions: ["pi-lint", "typo"] };
+	const unread = () => [];
+	unread.rowOf = () => null;
+	unread.stageRead = () => false;
+	const { result, recorder } = await runWith({ known: { packagePaths: unread }, job, spawnOptions: {} });
+	assert.deepEqual([result.loaded.leftOut.extensions, result.loaded.leftOut.extensionsNotHere], [["pi-lint", "typo"], undefined]);
+	assert.equal(recorder.args.some((a) => String(a).startsWith("PI_PACKAGES")), false, "the premise: such a job gets no package");
+	// The same resolver over a stage that read and holds nothing does know: that is what a host with no manifest answers.
+	const read = () => [];
+	read.rowOf = () => null;
+	read.stageRead = () => true;
+	const nothing = await runWith({ known: { packagePaths: read }, job, spawnOptions: {} });
+	assert.deepEqual([nothing.result.loaded.leftOut.extensions, nothing.result.loaded.leftOut.extensionsNotHere], [undefined, ["pi-lint", "typo"]]);
+	const silent = await runWith({ known: { packagePaths: resolver({}) }, job, spawnOptions: {} });
+	assert.deepEqual(silent.result.loaded.leftOut, nothing.result.loaded.leftOut, "a resolver that says nothing either way stands as read");
+});
+
+test("run-container: a path no name can be told for is refused before the container, never loaded against the file", { skip }, async () => {
+	for (const packagePaths of [[LINT], () => [LINT]]) {
+		await assert.rejects(runWith({ known: { packagePaths }, job: { ...BASE_JOB, excludeExtensions: ["pi-lint"] }, spawnOptions: {} }), (error) => error.piDispatchConfig === true && /cannot tell which staged package/.test(error.message));
+	}
+	const { recorder } = await runWith({ known: { packagePaths: [LINT] }, spawnOptions: {} });
+	assert.ok(recorder.args.includes(`PI_PACKAGES=${LINT}`), "a job with no list needs no name");
+});
+
+test("run-container: PI_EXCLUDE_TOOLS_STRICT is set for a job that should hold every extension it could, and for no other", { skip }, async () => {
+	const job = { ...BASE_JOB, excludeExtensionTools: ["lint_run"] };
+	const strictOf = async (over = {}, makeOptions = {}) => {
+		const { recorder } = await runWith({ known: { packagePaths: resolver({ [LINT]: KNOWN.packages[0] }) }, job: { ...job, ...over }, makeOptions, spawnOptions: {} });
+		assert.ok(recorder.args.includes(`PI_EXCLUDE_EXTENSION_TOOLS=${(over.excludeExtensionTools ?? job.excludeExtensionTools).join(",")}`), "the names go whatever the flag says: an unmatched one widens nothing");
+		return recorder.args.includes("PI_EXCLUDE_TOOLS_STRICT=1");
+	};
+	assert.equal(await strictOf(), true);
+	assert.equal(await strictOf({ packages: true }), true, "run.packages: true is no opt-out");
+	assert.equal(await strictOf({ packages: false }), false, "a typo on a trigger withholding packages is only reported");
+	assert.equal(await strictOf({ excludeExtensions: ["pi-lint"] }), false, "the tool may have gone with the extension");
+	assert.equal(await strictOf({}, { allowGlobalExtensions: false }), false, "an overlay shut on this host may hold it");
+	assert.equal(await strictOf({ parentJobId: "gh-1" }), false, "a chained child inherits a list for a job that may load less");
+	const { recorder } = await runWith({ known: { packagePaths: resolver({}) }, job: BASE_JOB, spawnOptions: {} });
+	for (const name of ["PI_EXCLUDE_TOOLS_STRICT", "PI_EXCLUDE_EXTENSIONS", "PI_EXCLUDE_EXTENSION_TOOLS"]) assert.ok(!recorder.args.some((arg) => String(arg).startsWith(name)), `an unflagged job has no ${name}`);
+});
+
+test("run-container: a restricted job is never strict", { skip }, async () => {
+	for (const restricted of [{ questionGrouping: { runId: "r" }, questionGroupModel: { provider: "anthropic", id: "m" } }, { watch: { id: "w" } }, { answerDraft: { id: "a" }, answerDecisionModel: { provider: "anthropic", id: "m" } }]) {
+		const { recorder } = await runWith({ job: { ...BASE_JOB, excludeExtensionTools: ["lint_run"], ...restricted }, spawnOptions: {} });
+		assert.ok(!recorder.args.includes("PI_EXCLUDE_TOOLS_STRICT=1"), JSON.stringify(restricted));
+	}
+});
+
+test("what matched nothing survives the compact form, and the minimal form says nothing of it", () => {
+	const known = { ...KNOWN, excludeExtensionTools: ["lint_run", "typo_tool"] };
+	const [full, compact, minimal] = fitLoaded(line({ unmatched: [1] }));
+	assert.deepEqual(rebuildLoaded(full, known).tools.unmatched, ["typo_tool"]);
+	assert.deepEqual(rebuildLoaded(compact, known).tools.unmatched, ["typo_tool"]);
+	assert.equal(compact.cut.form, "compact");
+	assert.equal(rebuildLoaded(minimal, known).tools, null);
+});
+
+test("run-container: which name matched nothing is read by position off the worker's own list, and a position past it is no line to believe", { skip }, async () => {
+	const job = { ...BASE_JOB, mcp: ["linear"], excludeExtensionTools: ["lint_run", "typo_tool"] };
+	const known = { packagePaths: resolver({ [LINT]: KNOWN.packages[0], [FMT]: KNOWN.packages[1] }) };
+	const ok = await runWith({ known, job, spawnOptions: { noted: line({ unmatched: [1] }) } });
+	assert.equal(ok.result.loaded.runner, "reported");
+	assert.deepEqual(ok.result.loaded.tools.unmatched, ["typo_tool"]);
+	for (const positions of [[2], [0, 0], [-1], ["typo_tool"], "1"]) {
+		const forged = await runWith({ known, job, spawnOptions: { noted: { ...line(), tools: { ...line().tools, unmatched: positions } } } });
+		assert.equal(forged.result.loaded.runner, "invalid", JSON.stringify(positions));
+		assert.ok(forged.logs.some((entry) => entry.event === "loaded_invalid" && entry.why === "tools-unmatched"));
+		assert.deepEqual(forged.result.loaded.leftOut.extensionTools, job.excludeExtensionTools, "the worker's own facts stay");
+	}
+	const none = await runWith({ known, job: { ...BASE_JOB, mcp: ["linear"] }, spawnOptions: { noted: line({ unmatched: [0] }) } });
+	assert.equal(none.result.loaded.runner, "invalid", "a job with no list has nothing to point at");
+	const plain = await runWith({ known, job, spawnOptions: { noted: line() } });
+	assert.equal(Object.hasOwn(plain.result.loaded.tools, "unmatched"), false, "no key on a job where everything matched");
 });
 
 test("run-container: a forged line is `invalid`, says so on the log by a fixed word, and an unsigned one is not read at all", { skip }, async () => {

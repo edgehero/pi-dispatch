@@ -836,6 +836,44 @@ BEPROBE
 				[ -n "$pc_plain" ] && ! echo "$pc_plain" | grep -q canaryLoad \
 					|| fail "the image reports a canary on a job that is not one: $pc_plain"
 				;;
+			loadExclusions)
+				# Issue #800. The claim is that an overlay extension the trigger names never runs, and that a strict job stops on a tool name that matched
+				# nothing, before its prompt. Proved through the real runner at a cap of 0 and no network, so nothing can spend: the marker is written by the
+				# module's own first line, and a job that keeps the name is the control.
+				le_dir=$(mktemp -d)
+				mkdir -p "$le_dir/job" "$le_dir/global/extensions"
+				echo "Reply with the single word ok." >"$le_dir/job/prompt.md"
+				cat >"$le_dir/global/extensions/kept.js" <<'LEKEPT'
+export default function (pi) { pi.registerTool({ name: "kept_tool", label: "t", description: "t", parameters: { type: "object", properties: {} }, execute: async () => ({ content: [] }) }); }
+LEKEPT
+				cat >"$le_dir/global/extensions/gone.js" <<'LEGONE'
+console.log("LOAD-EXCLUSION-MODULE-RAN");
+export default function () {}
+LEGONE
+				chmod -R a+rX "$le_dir"
+				le_run() {
+					docker run --rm --network none --cap-drop=ALL --security-opt no-new-privileges -v "$le_dir/job:/job:ro" -v "$le_dir/global:/opt/pi-global:ro" \
+						-e PI_PROVIDER=anthropic -e PI_MODEL=claude-sonnet-4-5-20250929 -e PI_MAX_TURNS=1 \
+						-e ANTHROPIC_API_KEY=sk-ant-not-a-real-key -e PI_MAX_COST_MICROS=0 "$@" "$IMAGE_REF" 2>&1
+				}
+				le_control=$(le_run) || true
+				le_excluded=$(le_run -e PI_EXCLUDE_EXTENSIONS=gone) || true
+				le_typo=$(le_run -e PI_EXCLUDE_EXTENSION_TOOLS=no_such_tool -e PI_EXCLUDE_TOOLS_STRICT=1) && le_typo_code=0 || le_typo_code=$?
+				le_kept=$(le_run -e PI_EXCLUDE_EXTENSION_TOOLS=kept_tool -e PI_EXCLUDE_TOOLS_STRICT=1) || true
+				rm -rf "$le_dir"
+				echo "$le_control" | grep -q 'LOAD-EXCLUSION-MODULE-RAN' \
+					|| fail "the image declares loadExclusions but the control job never ran the overlay extension, so the next check proves nothing: $le_control"
+				! echo "$le_excluded" | grep -q 'LOAD-EXCLUSION-MODULE-RAN' \
+					|| fail "the image declares loadExclusions but an overlay extension PI_EXCLUDE_EXTENSIONS names still ran: $le_excluded"
+				[ "$le_typo_code" = 2 ] && echo "$le_typo" | grep -q '"reason":"exclude-tool-not-loaded"' \
+					|| fail "the image declares loadExclusions but a strict job with a tool name that matched nothing did not stop as exclude-tool-not-loaded (exit $le_typo_code): $le_typo"
+				! echo "$le_kept" | grep -q '"reason":"exclude-tool-not-loaded"' \
+					|| fail "the image declares loadExclusions but a strict job naming a tool an extension registered was stopped: $le_kept"
+				# The token's other half, in 'excludeTools' evidence style: a role child reads no job setting, so the runner has to put the list on its command line.
+				# The worker refuses a tool exclusion beside a role map on an image without this token, so this claim is what lets such a job run.
+				docker run --rm --entrypoint grep "$IMAGE_REF" -q -- "--exclude-tools" /app/image/runner/src/model-roles.mjs 2>/dev/null \
+					|| fail "the image declares loadExclusions but its baked runner never hands a role child the trigger's exclusions"
+				;;
 			questionGrouping)
 				# The dedicated classifier mode must reach the cost guard before any executable discovery.
 				# A zero cap and no network make this a real runner proof that cannot spend provider tokens.

@@ -11,9 +11,18 @@ import { logsDirPath } from "./config.mjs";
 import { probeConsole, consoleProbeTarget } from "./console-probe.mjs";
 import { resolveSetupWorkerEntry, setupCachePath, trustedSetupFile } from "./setup-host-entry.mjs";
 
-function command(bin, args, options = {}) {
+/**
+ * What the service manager's probe may print. `launchctl print gui/<uid>` describes the whole login session: 141 KiB on one real Mac,
+ * and more on a busier one. execFile kills a child that passes its bound and reports a string code, so the small bound below read a
+ * manager that answered as one that did not, and `up --console` refused the README's install on that Mac. Only this probe's exit code
+ * is read, so it gets a bound for what it may print, and every other command keeps the small one. REJECTED: reading the overflow as an
+ * answer, since the kill means no exit status was ever seen.
+ */
+export const MANAGER_PROBE_MAX_BUFFER = 16 * 1024 * 1024;
+
+export function boundedCommand(bin, args, { maxBuffer = 65536, ...options } = {}) {
 	return new Promise((done) => {
-		try { execFile(bin, args, { ...options, timeout: 15_000, maxBuffer: 65536, killSignal: "SIGKILL" }, (error, stdout) => done({ code: error ? typeof error.code === "number" ? error.code : null : 0, stdout: String(stdout ?? "") })); }
+		try { execFile(bin, args, { ...options, timeout: 15_000, maxBuffer, killSignal: "SIGKILL" }, (error, stdout) => done({ code: error ? typeof error.code === "number" ? error.code : null : 0, stdout: String(stdout ?? "") })); }
 		catch { done({ code: null, stdout: "" }); }
 	});
 }
@@ -47,7 +56,7 @@ export async function runConsoleUp(argv, deps = {}) {
 	const home = deps.home ?? homedir();
 	const out = deps.out ?? ((text) => process.stdout.write(text));
 	const prompt = deps.prompt ?? (await import("./up.mjs")).defaultPrompt;
-	const run = deps.consoleCommand ?? command;
+	const run = deps.consoleCommand ?? boundedCommand;
 	const refuse = (text) => { out(`up --console: ${text}\n`); return 2; };
 	const worker = (deps.resolveSetupEntry ?? resolveSetupWorkerEntry)();
 	// env-internal PATH: find the installed admin binary; never a browser-supplied program search path.
@@ -93,7 +102,7 @@ export async function runConsoleUp(argv, deps = {}) {
 			if (!consolePlan || consolePlan.refusal || typeof consolePlan !== "object") return refuse("the existing console unit or loaded manager command differs from this exact setup grant. Review it and reinstall explicitly with service install --console --host-setup --force.");
 		} catch { return refuse("the existing console service could not be validated."); }
 	}
-	const manager = await run(platform === "linux" ? "systemctl" : "launchctl", platform === "linux" ? ["--user", "show-environment"] : ["print", `gui/${uid}`], { cwd: dir, env });
+	const manager = await run(platform === "linux" ? "systemctl" : "launchctl", platform === "linux" ? ["--user", "show-environment"] : ["print", `gui/${uid}`], { cwd: dir, env, maxBuffer: MANAGER_PROBE_MAX_BUFFER });
 	if (manager.code !== 0) return refuse("the account's user service manager did not answer. Start it before console bootstrap.");
 	const operators = existing?.tokens.filter((entry) => entry.role === "operator") ?? [];
 	let name = operators.length === 1 ? operators[0].name : null;

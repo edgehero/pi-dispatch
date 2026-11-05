@@ -60,6 +60,29 @@ test("unsupported role image refuses before token mint and clone", async () => {
 	assert.deepEqual(f.events, []);
 });
 
+test("a tool exclusion on an image whose role child would keep the tool refuses free, and only where a child can start, through the real pickup", async () => {
+	const image = (capabilities) => makeImagePreflight({ image: "pi-job:test", spawnFn: () => {
+		const child = new EventEmitter(); child.stdout = new EventEmitter();
+		queueMicrotask(() => { child.stdout.emit("data", `sha256:abc|1.5.0|github|${capabilities}`); child.emit("close", 0); });
+		return child;
+	} });
+	const older = "exitAuth,modelPolicy,modelRoles,excludeTools";
+	const removes = { data: { excludeTools: ["bash"] } };
+	const refused = fixture({ ...removes, imagePreflight: image(older) });
+	const record = await refused.run();
+	assert.equal(record.reason, "job-image-load-exclusions-unsupported");
+	assert.deepEqual(refused.events, [], "before the mint, the clone, the snapshot and the reservation");
+	const noMap = fixture({ data: { ...removes.data, provider: "openai", model: "small" }, roles: {}, imagePreflight: image("exitAuth,modelPolicy,excludeTools") });
+	assert.equal((await noMap.run()).outcome, "completed", "no map, so no child: this image still runs it");
+	assert.equal(noMap.events.find((event) => event.run).run.modelRoles, undefined, "the premise: the field the row reads");
+	const noExclusion = fixture({ imagePreflight: image(older) });
+	assert.equal((await noExclusion.run()).outcome, "completed", "a child with nothing to lose is not asked about");
+	const noMachinery = fixture({ ...removes, imagePreflight: image("exitAuth,modelPolicy,excludeTools") });
+	assert.equal((await noMachinery.run()).reason, "job-image-model-roles-unsupported", "an image with no role machinery is refused for that, in its own words");
+	const fresh = fixture({ ...removes, imagePreflight: image(`${older},loadExclusions`) });
+	assert.equal((await fresh.run()).outcome, "completed");
+});
+
 test("invalid base agent snapshot refuses before the count reservation and container", async () => {
 	const f = fixture({ stage: async () => { throw Object.assign(new Error("invalid agent"), { piDispatchConfig: true }); } });
 	assert.equal((await f.run()).reason, "model-agents-invalid");

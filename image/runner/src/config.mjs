@@ -68,6 +68,13 @@ export function parseRunnerEnv(env, { steerFrames = false } = {}) {
 		// withhold from createAgentSession. `[]` (the overwhelmingly common state) means the full pinned
 		// default set, byte-identical to every job before the feature.
 		excludeTools: parseExcludeTools(env, "PI_EXCLUDE_TOOLS"),
+		// INT-CONTAINER-JOB-INPUTS (issue #800): the trigger's run.excludeExtensions, whose overlay names the loader leaves out
+		// before any factory runs (the worker already left out the packages), its run.excludeExtensionTools, which join the list
+		// above in the session and are not held to pi's own names, and whether a name of the second that no staged package or overlay extension brought stops the
+		// job. `[]`, `[]` and `false` (the overwhelmingly common state) are byte-identical to every job before the feature.
+		excludeExtensions: parseExcludeTools(env, "PI_EXCLUDE_EXTENSIONS"),
+		excludeExtensionTools: parseExcludeTools(env, "PI_EXCLUDE_EXTENSION_TOOLS"),
+		excludeToolsStrict: parseExcludeToolsStrict(env, "PI_EXCLUDE_TOOLS_STRICT"),
 		// INT-CONTAINER-JOB-INPUTS (issue #625): the trigger's run.awaitInput -- whether the job is offered the
 		// await_human_input tool and may end as `awaiting-input`. `false` (the overwhelmingly common state) is
 		// byte-identical to every job before the feature.
@@ -405,12 +412,22 @@ function parseCommand(env, name) {
  * would be a second place to disagree with the first (PI_COMMAND's own rule, one parser up).
  * Empty segments are skipped for parsePackagePaths' reason: they are the shape a shell leaves behind.
  */
-// env-internal PI_EXCLUDE_TOOLS: the worker's own per-job input (INT-CONTAINER-JOB-INPUTS). The container
-// env is BUILT, never inherited, and a trigger naming it in `run.secrets` is refused at load.
+// env-internal PI_EXCLUDE_TOOLS, PI_EXCLUDE_EXTENSIONS, PI_EXCLUDE_EXTENSION_TOOLS: the worker's own per-job inputs
+// (INT-CONTAINER-JOB-INPUTS). The container env is BUILT, never inherited, and a trigger naming one in `run.secrets` is
+// refused at load.
 function parseExcludeTools(env, name) {
 	const raw = env[name];
 	if (raw === undefined || raw === "") return [];
 	return raw.split(",").filter((entry) => entry !== "");
+}
+
+// env-internal PI_EXCLUDE_TOOLS_STRICT: the worker's own per-job input (INT-CONTAINER-JOB-INPUTS), set only where it knows a name
+// that matches nothing can only be wrong. Refused beyond its one value, PI_REPORT_PROGRESS' rule: a typo here must not read as off.
+function parseExcludeToolsStrict(env, name) {
+	const raw = env[name];
+	if (raw === undefined || raw === "") return false;
+	if (raw === "1") return true;
+	throw configError(`invalid ${name}: ${JSON.stringify(raw)} (want "1" to stop a job on a tool name no staged package or overlay extension brought, or leave it unset)`);
 }
 
 /**

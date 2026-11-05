@@ -1475,7 +1475,7 @@ test("no builtin: extension (MCP, codemode, tool-search, llama.cpp) is loaded in
 	assert.match(runJob, /\.\.\.\(extensionFactories\.length > 0 && \{ extensionFactories \}\)/);
 	assert.match(runJob, /const awaitInput = cfg\.awaitInput \? createAwaitInput\(\{ sessionFile: cfg\.sessionFile \}\) : null;/);
 	assert.match(runJob, /const reportProgress = cfg\.reportProgress \? createReportProgress\(\) : null;/);
-	assert.match(runJob, /const roleSubagents = roleInputs \? createRoleSubagents\(roleInputs\) : null;/);
+	assert.match(runJob, /const roleSubagents = roleInputs \? createRoleSubagents\(roleInputs, \{ excludeTools: sessionExclusions \}\) : null;/);
 	assert.match(runJob, /const inbox = cfg\.steer \? createInbox\(\{ [^\n]*\}\) : null;/);
 	assert.match(runJob, /const jobMcp = mcpDocument \? createJobMcp\(/);
 	assert.match(loaderSrc, /\.\.\.\(extensionFactories\.length > 0 && \{ extensionFactories \}\)/);

@@ -279,6 +279,17 @@ test("commandName reads the string exactly as pi's dispatch will: text to the fi
 	assert.equal(commandName("wf run nightly"), "wf");
 });
 
+test("the load exclusions parse shape-only, absent is empty, and the strict flag takes its one value (issue #800)", () => {
+	const base = { PI_PROVIDER: "anthropic", PI_MODEL: "m", PI_MAX_TURNS: "1" };
+	const absent = parseRunnerEnv(base);
+	assert.deepEqual([absent.excludeExtensions, absent.excludeExtensionTools, absent.excludeToolsStrict], [[], [], false]);
+	const given = parseRunnerEnv({ ...base, PI_EXCLUDE_EXTENSIONS: "@acme/lint,guard", PI_EXCLUDE_EXTENSION_TOOLS: "lint_run,,", PI_EXCLUDE_TOOLS_STRICT: "1" });
+	assert.deepEqual([given.excludeExtensions, given.excludeExtensionTools, given.excludeToolsStrict], [["@acme/lint", "guard"], ["lint_run"], true]);
+	assert.equal(parseRunnerEnv({ ...base, PI_EXCLUDE_TOOLS_STRICT: "" }).excludeToolsStrict, false);
+	for (const typo of ["0", "true", "yes"]) assert.throws(() => parseRunnerEnv({ ...base, PI_EXCLUDE_TOOLS_STRICT: typo }), /invalid PI_EXCLUDE_TOOLS_STRICT/, typo);
+	assert.deepEqual(parseRunnerEnv({ ...base, PI_EXCLUDE_TOOLS: "bash" }).excludeExtensionTools, [], "a tool in the closed list is not one here");
+});
+
 test("PI_EXCLUDE_TOOLS parses shape-only: unset is [], entries ride verbatim, empty segments drop", () => {
 	// Issue #291. Membership deliberately does NOT live here: parseRunnerEnv promises purity and
 	// pi-freedom, and the one check that needs the pinned artifact runs in run-job's pre-spend assert

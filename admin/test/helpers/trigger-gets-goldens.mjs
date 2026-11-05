@@ -27,6 +27,11 @@ export function getsFile(entry = GETS_ENTRY) {
   return `${JSON.stringify(doc, null, 2)}\n`;
 }
 
+/** A real watch rule as row 3 of a file the worker loads, with the source it needs. */
+export const watchRuleFile = (run) => `${JSON.stringify({ watchSources: { prod: { verify: "hmac-sha256", secretEnv: "WATCH_SECRET" } }, triggers: [{ on: { type: "label", any: ["pi"] }, run: { kind: "github", flow: "triage" } }, { on: { type: "label", any: ["frontend"] }, run: { kind: "github", flow: "frontend-fix" } }, { on: { type: "watch", id: "errors", source: "prod", fingerprint: ["service", "error.type"], window: "10m", cooldown: "6h", maxPerDay: 4 }, run }] }, null, 2)}\n`;
+/** A real investigating rule, and what a host publishes that no job of it loads. */
+export const WATCH_INVESTIGATE = Object.freeze({ kind: "local", folder: "/srv/web", flow: "triage", task: "Look at it.", maxCostUsd: "1", image: "pi-job:4.3.1" });
+
 /** A file system holding one file, with what a read of it and the dry run need. */
 export function fileOnlyFs(text, { path = TRIGGER_GETS_PATH } = {}) {
   return { readFileSync: (asked) => { if (asked !== path) throw Object.assign(new Error("no such file"), { code: "ENOENT" }); return text; }, existsSync: (asked) => asked === path };
@@ -61,8 +66,8 @@ const PRICED = Object.freeze(["anthropic/claude-sonnet-5-5", "anthropic/claude-o
  * The page. `records` are the trigger's runs in any order, each its own. Everything else the page reads is what `cli.mjs` wires, over
  * a file of one trigger and a snapshot that holds the same file's display: the card reads the file, and the rest of the page the snapshot.
  */
-export async function triggerGetsPage({ role = "operator", readOnly = false, entry = GETS_ENTRY, records = RUNS(), loads = getsHostLoads(), live = HOSTS_BEATING, deps = {} } = {}) {
-  const file = getsFile(entry);
+export async function triggerGetsPage({ role = "operator", readOnly = false, entry = GETS_ENTRY, records = RUNS(), loads = getsHostLoads(), live = HOSTS_BEATING, deps = {}, text = null } = {}) {
+  const file = text ?? getsFile(entry);
   const fs = fileOnlyFs(file);
   const { readTriggers } = await import("../../src/read-model.mjs");
   const triggers = readTriggers({ triggersPath: TRIGGER_GETS_PATH, fs });
@@ -111,16 +116,20 @@ export function asChanged(page, changes) {
   return out;
 }
 
-/** The changes the card's bar draws: linear on, and bash off. Git-guard's switch waits on `run.excludeExtensions`. */
+/** The changes the card's bar draws: linear on, and bash off. */
 export const GETS_CHANGES = Object.freeze([{ list: "mcp", value: "linear", on: true }, { list: "excludeTools", value: "bash", on: false }]);
+/** One extension left out, and one of an extension's tools removed, each alone. */
+export const GETS_EXTENSION_OFF = Object.freeze([{ list: "excludeExtensions", value: "pi-lint", on: false }]);
+export const GETS_TOOL_OFF = Object.freeze([{ list: "excludeExtensionTools", value: "lint_file", on: false }]);
 
 /** The longest names the card draws, for the width check, which can only see a name a golden holds. */
 function longNames() {
   const { host, overlay, package: pkg, image } = LONG_LOADED;
   const row = { state: "current", at: NOW - HOUR, ageMs: HOUR, every: 24, by: { uid: 1000, worker: true }, overlayExtensionsAllowed: true, skills: [overlay], flows: [{ trigger: 2, flow: "fix", tier: "package", package: pkg, repo: "unknown" }], unread: [], more: {}, image, piVersion: "1.5.0" };
-  const server = { name: `${"linear-".repeat(6)}x`, transport: "http", where: `${"mcp.".repeat(12)}example.com`, exposure: "codemode", enabled: true, keys: [`${"LINEAR_".repeat(7)}KEY`] };
+  // Each name the longest the loader takes, so what the card draws of it is also what the worker reads.
+  const server = { name: `${"linear-".repeat(4)}abcd`, transport: "http", where: `${"mcp.".repeat(12)}example.com`, exposure: "codemode", enabled: true, keys: [`${"LINEAR_".repeat(7)}KEY`] };
   const loads = { more: 0, hosts: [{ ...row, name: host, extensions: [{ name: overlay, kind: "file" }], packages: [{ name: pkg, version: "1.4.2" }], mcp: [server] }, { ...row, name: "mini1", extensions: [], packages: [], mcp: [], flows: [] }] };
-  const entry = { on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix", provider: "anthropic", model: `${"claude-sonnet-".repeat(4)}5`, models: [`anthropic/${"claude-sonnet-".repeat(4)}5`, `kimi-coding/${"kimi-for-coding-".repeat(4)}x`], fallbackModels: [`kimi-coding/${"kimi-for-coding-".repeat(4)}x`], maxCostUsd: "1.5", mcp: [server.name], image } };
+  const entry = { on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix", provider: "anthropic", model: `${"claude-sonnet-".repeat(4)}5`, models: [`anthropic/${"claude-sonnet-".repeat(4)}5`, `kimi-coding/${"kimi-for-coding-".repeat(3)}kimi-for-coding1`], fallbackModels: [`kimi-coding/${"kimi-for-coding-".repeat(3)}kimi-for-coding1`], maxCostUsd: "1.5", mcp: [server.name], image } };
   const records = [longNamesRecord()];
   return { loads, entry, records, live: [{ name: host }, { name: "mini1" }] };
 }
@@ -129,7 +138,7 @@ const UNKNOWN_ALL = Object.freeze({ more: 0, hosts: [{ name: "build3", state: "u
 
 /** A schedule whose folder is on each host and holds no such flow: what doctor publishes when no tier does, before any run has paid to show it. */
 const FLOW_ABSENT = Object.freeze({
-  entry: { on: { type: "cron", pattern: "0 9 * * *" }, run: { kind: "local", folder: "/srv/web", flow: "fix", task: "Run it." } },
+  entry: { on: { type: "cron", id: "web-fix", pattern: "0 9 * * *" }, run: { kind: "local", folder: "/srv/web", flow: "fix", task: "Run it." } },
   records: [],
   loads: hostLoads({ mini1: { flows: [{ trigger: 2, flow: "fix", tier: "none", package: null, repo: "absent" }] }, build3: { flows: [{ trigger: 2, flow: "fix", tier: "none", package: null, repo: "absent" }] } }),
 });
@@ -138,12 +147,18 @@ export const TRIGGER_GETS_DRAW = Object.freeze({
   "trigger-gets.operator": () => triggerGetsPage(),
   "trigger-gets.viewer": () => triggerGetsPage({ role: "viewer" }),
   "trigger-gets-changed.operator": async () => asChanged(await triggerGetsPage(), GETS_CHANGES),
+  "trigger-gets-one-extension-off.operator": async () => asChanged(await triggerGetsPage(), GETS_EXTENSION_OFF),
+  "trigger-gets-extension-tool-off.operator": async () => asChanged(await triggerGetsPage(), GETS_TOOL_OFF),
   "trigger-gets-host-lacks.operator": () => triggerGetsPage({ entry: { ...GETS_ENTRY, run: { ...GETS_ENTRY.run, mcp: ["docs"] } } }),
   "trigger-gets-no-flow.operator": () => triggerGetsPage({ records: [S.noFlow()], loads: hostLoads({ mini1: { ...FLOW_ROW("unknown") }, build3: { ...FLOW_ROW("unknown") } }) }),
   "trigger-gets-no-run.operator": () => triggerGetsPage({ records: [] }),
   "trigger-gets-flow-absent.operator": () => triggerGetsPage(FLOW_ABSENT),
   "trigger-gets-unknown-host.operator": () => triggerGetsPage({ loads: UNKNOWN_ALL }),
+  // A version 2 file written by hand, on hosts as `readHostLoadsView` hands them: mini1's worker publishes that it reads 1, and mini2's nothing.
+  "trigger-gets-host-holds.operator": () => { const loads = getsHostLoads(); return triggerGetsPage({ text: `${JSON.stringify({ version: 2, ...JSON.parse(getsFile()) }, null, 2)}\n`, loads: { ...loads, hosts: loads.hosts.map((row) => ({ ...row, triggersVersion: { build3: "2", mini1: "1" }[row.name] ?? null })) } }); },
   "trigger-gets-read-only.operator": () => triggerGetsPage({ readOnly: true }),
   "trigger-gets-long-names.operator": () => triggerGetsPage(longNames()),
+  "trigger-gets-watch.operator": () => triggerGetsPage({ text: watchRuleFile(WATCH_INVESTIGATE), records: [] }),
+  "trigger-gets-file-refused.operator": () => triggerGetsPage({ text: getsFile({ ...GETS_ENTRY, run: { ...GETS_ENTRY.run, excludeExtensions: ["pi-lint"] } }), records: [] }),
 });
 export const TRIGGER_GETS_PANEL_STATES = Object.freeze(Object.keys(TRIGGER_GETS_DRAW));

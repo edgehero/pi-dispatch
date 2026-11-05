@@ -44,7 +44,7 @@ export function resolveJobImage(job, defaultImage) {
  *   { forgeUnsupported }  -- present, but declares it cannot serve this job's forge => POLICY, refuse
  *   { <gate.result>, declared } -- present, but does not declare a capability this job needs, one key per
  *                            CAPABILITY_GATES row (replicaUnsupported, commandUnsupported,
- *                            excludeToolsUnsupported, modelPolicyUnsupported, costCapUnsupported, mcpUnsupported,
+ *                            excludeToolsUnsupported, loadExclusionsUnsupported, modelPolicyUnsupported, costCapUnsupported, mcpUnsupported,
  *                            forgeMcpUnsupported, awaitInputUnsupported, progressUnsupported, recoverUnsupported,
  *                            steerUnsupported)
  *                            => POLICY
@@ -326,6 +326,16 @@ export const CAPABILITY_GATES = Object.freeze([	// REQ-REPLICA-RUNS: an image bu
 	Object.freeze({ token: "answerDraft", needed: (job) => Boolean(job?.answerDraft), result: "answerDraftUnsupported", reason: "job-image-answer-draft-unsupported", event: "refused_image_answer_draft_unsupported", comment: (image, declared) => `Refused: the job image "${image}" does not declare restricted answer drafts (\`dev.pi-dispatch.capabilities\` ${declared}), so it cannot enforce source-only drafting without posting tools. Rebuild the image from a version that has this feature. Not run.` }),
 	// Only trusted host connection policy arms this gate. Queued input cannot claim or suppress authentication.
 	Object.freeze({ token: "subscriptionAuth", needed: (_job, { subscriptionAuthRequired = false } = {}) => subscriptionAuthRequired === true, result: "subscriptionAuthUnsupported", reason: "job-image-subscription-auth-unsupported", event: "refused_image_subscription_auth_unsupported", comment: (image, declared) => `Refused: the job image "${image}" does not declare subscription authentication (\`dev.pi-dispatch.capabilities\` ${declared}), so it cannot verify the admitted access snapshot, community adapter or final request cost. Rebuild the image from a version that has this feature. Not run.` }),
+	// Issue #800: a runner that predates them reads no PI_EXCLUDE_EXTENSIONS and no PI_EXCLUDE_EXTENSION_TOOLS, so the overlay extension loads, the tool
+	// stays, and the job records a clean exit. A permission quietly not enforced, as the `excludeTools` row says. A package the worker left out of
+	// PI_PACKAGES stays out on any image, but the worker cannot know a name is only that, so either field arms this.
+	// `run.excludeTools` beside a role map arms it too. That runner reads PI_EXCLUDE_TOOLS for its own session, so the `excludeTools` row above passes, and then
+	// starts a role child on pi's CLI with no `--exclude-tools`, so the child keeps what the trigger removed and the job reads clean. `job.modelRoles` is what says
+	// a child can start: `resolveModelRoles` set it at this pickup, a queued one never survives that, and with no map there is no `subagent` tool. An image with no
+	// role machinery at all never reaches this for that reason: the `modelRoles` row stands above and answers first, in its own words. A list of only a server's
+	// names arms it as well, though a child connects no server: the row's words hold of it, the fix is the same rebuild, and this module holds no table of those names.
+	// One sentence for all of these. REJECTED: naming the keys and the role child, which said "would start a role child" of a job with no role map on an image with no role machinery.
+	Object.freeze({ token: "loadExclusions", needed: (job) => job?.excludeExtensions !== undefined || job?.excludeExtensionTools !== undefined || (job?.excludeTools !== undefined && job?.modelRoles !== undefined), result: "loadExclusionsUnsupported", reason: "job-image-load-exclusions-unsupported", event: "refused_image_load_exclusions_unsupported", comment: (image, declared) => `Refused: the job image "${image}" does not declare support for this job's exclusions (\`dev.pi-dispatch.capabilities\` ${declared}), so its runner would not honour them. Rebuild the image from a version that has this feature. Not run.` }),
 	// Issue #796: an image too old to report whether a canary's candidate loaded could only ever read "not reported", on a paid run.
 	Object.freeze({ token: "packageCanary", needed: (job) => job?.packageCanary !== undefined, result: "packageCanaryUnsupported", reason: "job-image-package-canary-unsupported", event: "refused_image_package_canary_unsupported", comment: (image, declared) => `Refused: the job image "${image}" does not declare package canaries (\`dev.pi-dispatch.capabilities\` ${declared}), so it could not report whether the candidate loaded. Rebuild the image from a version that has this feature. Not run.` }),
 ]);

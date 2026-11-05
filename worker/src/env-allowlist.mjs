@@ -376,7 +376,7 @@ function layoutEnv(layout) {
  * `allowGlobalExtensions` defaults to TRUE here, matching loadConfig's default (REQ-GLOBAL-PI-OVERLAY): a
  * caller that says nothing gets the operator's staged setup, and only an explicit `false` withholds it.
  */
-export function buildContainerEnv({ size = DEFAULT_JOB_SIZE, provider, secondaryProvider = null, model, maxTurns, maxTokens, maxCostMicros = null, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], packageCanaryPath = undefined, forwardEnv = [], secrets = {}, sessionFile = null, flow = null, command = null, excludeTools = [], mcpServers = [], awaitInput = false, approvalGates = null, approvalDecision = null, reportProgress = false, recover = false, recovering = false, steer = false, layout = "mounts", allowedModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null, exitAuth = false, transcriptStderr = false, steerStdin = false, bundleEnvFile = false, observableRunner = false, fork = null, thinkingLevel = null, subscriptionAuth = [] }) {
+export function buildContainerEnv({ size = DEFAULT_JOB_SIZE, provider, secondaryProvider = null, model, maxTurns, maxTokens, maxCostMicros = null, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], packageCanaryPath = undefined, forwardEnv = [], secrets = {}, sessionFile = null, flow = null, command = null, excludeTools = [], excludeExtensions = [], excludeExtensionTools = [], excludeToolsStrict = false, mcpServers = [], awaitInput = false, approvalGates = null, approvalDecision = null, reportProgress = false, recover = false, recovering = false, steer = false, layout = "mounts", allowedModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null, exitAuth = false, transcriptStderr = false, steerStdin = false, bundleEnvFile = false, observableRunner = false, fork = null, thinkingLevel = null, subscriptionAuth = [] }) {
 	// The provider credential(s), by pi's expected variable name(s) -- from the worker env, or (when
 	// PI_AUTH_FROM_PI is set and the env has none) host-side from pi's auth.json. Throws (config) if
 	// neither source yields one, which the processor turns into a policy refusal that refunds any reserve
@@ -450,6 +450,13 @@ export function buildContainerEnv({ size = DEFAULT_JOB_SIZE, provider, secondary
 		// second-validator rule directly above). Absent means the full pinned default set, never an empty
 		// string, for PI_PACKAGES' reason.
 		PI_EXCLUDE_TOOLS: excludeTools.length > 0 ? excludeTools.join(",") : undefined,
+		// The trigger's run.excludeExtensions and run.excludeExtensionTools (issue #800): the overlay names the runner leaves out
+		// before any factory runs, and the tools it adds to the list above. Comma-safe for that list's reason (the loader's grammar
+		// holds no comma). Absent means none, never an empty string, for PI_PACKAGES' reason. PI_EXCLUDE_TOOLS_STRICT is "1" only
+		// where a name of the second list that no staged package or overlay extension brought can only be wrong (run-container.mjs says when).
+		PI_EXCLUDE_EXTENSIONS: excludeExtensions.length > 0 ? excludeExtensions.join(",") : undefined,
+		PI_EXCLUDE_EXTENSION_TOOLS: excludeExtensionTools.length > 0 ? excludeExtensionTools.join(",") : undefined,
+		PI_EXCLUDE_TOOLS_STRICT: excludeToolsStrict === true ? "1" : undefined,
 		// The trigger's run.mcp (REQ-MCP-OPERATOR-SERVERS): the overlay servers the job's session connects, so the
 		// runner can hold `/job/mcp.json` to the names the worker meant. Comma-safe for excludeTools' reason (the loader
 		// admits only lowercase letters, digits and `-`). Absent means none, never an empty string.

@@ -339,13 +339,13 @@ test("Podman's bare-hex image id is published in docker's sha256: spelling, and 
 // --- the capability gates are ONE table (issues #501, #502) ---
 
 test("CAPABILITY_GATES: the old three in their old order, then modelPolicy (#502), costCap (#501), mcp, forgeMcp, awaitInput (#625), reportProgress (#644), recover (#645), steer (#646), sandboxLayout (#683) and observableRunner (#730), each keyed once, each free for a job without its feature", async () => {
-	assert.deepEqual(CAPABILITY_GATES.map((gate) => gate.token), ["replicas", "commands", "excludeTools", "modelPolicy", "costCap", "mcp", "forgeMcp", "awaitInput", "reportProgress", "recover", "steer", "sandboxLayout", "observableRunner", "fork", "approvalGates", "modelFailover", "modelRoles", "watch", "questionGrouping", "answerDraft", "subscriptionAuth", "packageCanary"], "the order the branches had, so a job carrying several is refused for the same one; a new row appends, in the order the features landed");
+	assert.deepEqual(CAPABILITY_GATES.map((gate) => gate.token), ["replicas", "commands", "excludeTools", "modelPolicy", "costCap", "mcp", "forgeMcp", "awaitInput", "reportProgress", "recover", "steer", "sandboxLayout", "observableRunner", "fork", "approvalGates", "modelFailover", "modelRoles", "watch", "questionGrouping", "answerDraft", "subscriptionAuth", "loadExclusions", "packageCanary"], "the order the branches had, so a job carrying several is refused for the same one; a new row appends, in the order the features landed");
 	for (const key of ["token", "result", "reason", "event"]) {
 		assert.equal(new Set(CAPABILITY_GATES.map((gate) => gate[key])).size, CAPABILITY_GATES.length, `${key} is unique per row`);
 	}
 	const label = (caps) => `sha256:abc${FIELD_SEP}0.99.1${FIELD_SEP}github${FIELD_SEP}${caps}\n`;
 	// A job carrying EVERY gated feature, on an image that declares none: the first row refuses.
-	const all = { packageCanary: { name: "a", version: "1.0.0" }, answerDraft: {}, questionGrouping: {}, watch: {}, modelRoles: { editor: "anthropic/claude-x" }, kind: "local", replica: 2, replicas: 2, command: "wf run", excludeTools: ["bash"], models: ["anthropic/claude-x"], maxCostMicros: 2_500_000, mcp: ["docs", "forge"], awaitInput: true, progress: true, recover: true, steer: true, fork: {}, gates: ["deploy:staging"], fallbackModels: ["anthropic/claude-x"] };
+	const all = { packageCanary: { name: "a", version: "1.0.0" }, excludeExtensions: ["pi-lint"], answerDraft: {}, questionGrouping: {}, watch: {}, modelRoles: { editor: "anthropic/claude-x" }, kind: "local", replica: 2, replicas: 2, command: "wf run", excludeTools: ["bash"], models: ["anthropic/claude-x"], maxCostMicros: 2_500_000, mcp: ["docs", "forge"], awaitInput: true, progress: true, recover: true, steer: true, fork: {}, gates: ["deploy:staging"], fallbackModels: ["anthropic/claude-x"] };
 	const none = makeImagePreflight({ image: "i", spawnFn: fakeSpawn([], { image: 0, info: 0 }, label("")) });
 	assert.deepEqual(await none(all), { replicaUnsupported: "i", declared: [] });
 	// Declare tokens one at a time: each declaration moves the refusal to the next row, then passes.
@@ -361,6 +361,34 @@ test("CAPABILITY_GATES: the old three in their old order, then modelPolicy (#502
 		assert.equal(gate.needed({ kind: "github", models: null }), false, `${gate.token}: a null list is unrestricted, not a feature`);
 		assert.match(gate.comment("img", "is absent"), /^Refused: the job image "img" does not declare .* \(`dev\.pi-dispatch\.capabilities` is absent\).* Rebuild the image from a version that has this feature\. Not run\.$/);
 	}
+});
+
+test("loadExclusions (#800): either field needs it, and so does a tool exclusion a role child could keep, on no other job", async () => {
+	const label = (caps) => `sha256:abc${FIELD_SEP}1.5.0${FIELD_SEP}github${FIELD_SEP}${caps}\n`;
+	const row = CAPABILITY_GATES.find((gate) => gate.token === "loadExclusions");
+	const roles = { modelRoles: { editor: "anthropic/m" } };
+	const declared = ["excludeTools", "modelPolicy", "modelRoles"];
+	const older = makeImagePreflight({ image: "i", spawnFn: fakeSpawn([], { image: 0, info: 0 }, label(declared.join(","))) });
+	for (const job of [{ excludeExtensions: ["a"] }, { excludeExtensionTools: ["t"] }, { excludeTools: ["bash"], ...roles }, { excludeTools: ["mcp__linear__*"], ...roles }]) {
+		assert.equal(row.needed(job), true, JSON.stringify(job));
+		assert.deepEqual(await older({ kind: "local", ...job }), { loadExclusionsUnsupported: "i", declared }, JSON.stringify(job));
+	}
+	for (const job of [{ excludeTools: ["bash"] }, roles, {}]) {
+		assert.equal(row.needed(job), false, JSON.stringify(job));
+		assert.equal((await older({ kind: "local", ...job })).ok, true, `${JSON.stringify(job)}: no child can start, or none has a tool to keep, so this image runs it as it did`);
+	}
+	// An image with no role machinery answers the row that names what it lacks, which stands above this one, and not this row's words.
+	const noRoles = makeImagePreflight({ image: "i", spawnFn: fakeSpawn([], { image: 0, info: 0 }, label("excludeTools,modelPolicy")) });
+	assert.deepEqual(await noRoles({ kind: "local", excludeTools: ["bash"], ...roles }), { modelRolesUnsupported: "i", declared: ["excludeTools", "modelPolicy"] });
+	assert.equal((await noRoles({ kind: "local", excludeTools: ["bash"] })).ok, true, "and with no map it runs");
+	const tokens = CAPABILITY_GATES.map((gate) => gate.token);
+	assert.ok(tokens.indexOf("excludeTools") < tokens.indexOf("modelRoles") && tokens.indexOf("modelRoles") < tokens.indexOf("loadExclusions"), "what the two reasons above rest on");
+	const fresh = makeImagePreflight({ image: "i", spawnFn: fakeSpawn([], { image: 0, info: 0 }, label([...declared, "loadExclusions"].join(","))) });
+	assert.equal((await fresh({ kind: "local", excludeTools: ["bash"], ...roles })).ok, true);
+	// One sentence of each job that reaches this row, whichever of its fields it carries: it names no key and no child, since not every such job has either.
+	const said = row.comment("img", "is absent");
+	assert.ok(said.includes("does not declare support for this job's exclusions") && said.includes("so its runner would not honour them"), said);
+	assert.doesNotMatch(said, /role child|run\.exclude/);
 });
 
 test("reportProgress (#644): a job armed with run.progress needs it; an unarmed one never does", async () => {

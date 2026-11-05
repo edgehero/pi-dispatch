@@ -8,7 +8,7 @@ import { CANNOT_ADOPT_WORDS, HOST_STATES_DRAWN, PI_STATES_DRAWN, updatesProblems
 import { scanFleetRunRecords } from "../src/read-model.mjs";
 import { HOST_ADOPT_STATES, PI_ROW_STATES, UPDATE_ROW_STATES, canaryResultOf, hostStandings, packageRow, piRow, readDeploymentUpdates, readStaged, readTriggersDocument, readUpdates } from "../src/updates-view.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { UPDATES_CANARY_RECORD, UPDATES_CONFIRM_STATES, UPDATES_DRAW, updatesFacts } from "./helpers/updates-goldens.mjs";
+import { UPDATES_CANARY_RECORD, UPDATES_CONFIRM_STATES, UPDATES_DRAW, updatesFacts, updatesPage } from "./helpers/updates-goldens.mjs";
 import { USED_API } from "../src/index.ts";
 
 const NOW = 1_800_000_000_000;
@@ -142,6 +142,47 @@ test("a paid button says what it costs where it is pressed, and Undo says what i
 	const undoing = await UPDATES_DRAW["updates-undoing.operator"]();
 	assert.match(undoing, /1\.4\.3<svg[^]*?<\/svg>1\.4\.2/, "going from where it is to where it is going, not the end state as if it were done");
 	assert.doesNotMatch(await UPDATES_DRAW["updates-stale.operator"](), /1\.5\.0<svg[^]*?<\/svg>1\.5\.0/, "no arrow between a version and itself");
+});
+
+test("what a canary runs as is true of the package each row is about, and of the page", async () => {
+	const words = (page) => page.replace(/<svg[\s\S]*?<\/svg>/g, "").replace(/<[^>]+>/g, " ").replace(/&#39;/g, "'").replace(/\s+/g, " ");
+	const rowOf = (text, name) => text.slice(text.indexOf(`${name} extension, staged`), text.indexOf("extension, staged", text.indexOf(`${name} extension, staged`) + name.length + 20));
+	const page = async (triggers, role = "operator") => words(await updatesPage({ role, facts: { triggersDocument: { triggers } } }));
+	const NONE = "No cron trigger that loads this package can run a canary here.";
+	const leaves = { on: { type: "cron", id: "leaves" }, run: { maxCostUsd: 2, excludeExtensions: ["pi-lint"] } };
+	const keeps = { on: { type: "cron", id: "keeps" }, run: { maxCostUsd: 3 } };
+	// No cron trigger at all: no row offers one, and no sentence prices one.
+	const none = await page([{ on: { type: "comment" }, run: {} }]);
+	assert.ok(rowOf(none, "pi-lint").includes(NONE), rowOf(none, "pi-lint"));
+	assert.doesNotMatch(rowOf(none, "pi-lint"), /A canary runs|the trigger you choose/);
+	assert.match(none, /A canary runs as no cron trigger can/);
+	// The one cron trigger leaves this package out: nothing for it, the row beside it priced, and the page's own line does not stand for both.
+	const one = await page([leaves]);
+	assert.ok(rowOf(one, "pi-lint").includes(NONE));
+	assert.doesNotMatch(rowOf(one, "pi-lint"), /A canary runs|the trigger you choose|trigger 1/);
+	assert.match(rowOf(one, "pi-test-runner"), /A canary runs one job of trigger 1, up to \$2\.00/);
+	assert.match(one, /A canary runs as trigger 1, leaves, up to its \$2\.00 cap, unless it leaves that package out/);
+	// Beside one that keeps it: the row names that one, and the page's line still holds of the first.
+	const both = await page([leaves, keeps]);
+	assert.match(rowOf(both, "pi-lint"), /A canary runs one job of trigger 2, up to \$3\.00/);
+	assert.match(rowOf(both, "pi-test-runner"), /A canary runs one paid job of the trigger you choose/);
+	assert.match(both, /A canary runs as trigger 1, leaves, up to its \$2\.00 cap, or 1 more, unless it leaves that package out/);
+	// With none leaving anything out, the page's line has nothing to except.
+	const plain = await page([keeps]);
+	assert.match(plain, /A canary runs as trigger 1, keeps, up to its \$3\.00 cap/);
+	assert.doesNotMatch(plain, /unless it leaves/);
+	// An agent's copy keeps that a trigger leaves something out and none of what, by the projection's rule, so its row says what holds without knowing.
+	const agent = await page([leaves], "agent");
+	for (const name of ["pi-lint", "pi-test-runner"]) {
+		assert.match(rowOf(agent, name), /A canary runs one job of a cron trigger that loads this package, with this version for that job only\./, name);
+		assert.doesNotMatch(rowOf(agent, name), /one job of trigger 1/, name);
+	}
+	assert.match(agent, /A canary runs as trigger 1, leaves, up to its \$2\.00 cap, unless it leaves that package out/);
+	assert.match(rowOf(await page([keeps], "agent"), "pi-lint"), /A canary runs one job of trigger 1, up to \$3\.00/, "and with nothing left out, it does know");
+	// A viewer reads the same, with no button to say why there is none.
+	const viewer = await page([leaves], "viewer");
+	assert.doesNotMatch(rowOf(viewer, "pi-lint"), /A canary runs|the trigger you choose/);
+	assert.ok(rowOf(viewer, "pi-lint").includes("Not tried yet."));
 });
 
 test("the banner about a host says which, why, and what to do, because the host table does not", async () => {

@@ -9,7 +9,7 @@
 
 https://github.com/user-attachments/assets/129a774b-1dea-4dee-bb4f-3478eff409bc
 
-<sub>One minute, with sound. A first look at the next release, 5.0. The screens show sample data.</sub>
+<sub>One minute, with sound, on what is new in 5.0. The screens show sample data.</sub>
 
 # pi-dispatch
 
@@ -42,9 +42,6 @@ It is free and open source. You pay your AI provider for what the agent uses, or
 
 ## Install in four steps
 
-> **The web page is not on npm yet.** The console and the browser setup on this page are built, and come with the next
-> release. The version on npm today, 4.3.1, does not have them. Step 2 says what to do until then.
-
 **1. Have these ready.** A computer or server that stays on (on a Mac or Windows machine, jobs run only while you are logged in),
 [Docker](https://www.docker.com/products/docker-desktop/) and [Node.js](https://nodejs.org) 22.19 or newer, and a key from an AI
 provider or a [subscription](docs/subscription-auth.md).
@@ -76,19 +73,14 @@ pi install npm:@edgehero/pi-dispatch-admin
 **By hand**, install into a folder that will stay there:
 
 ```bash
-mkdir my-dispatch && cd my-dispatch
-npm install --save-exact @edgehero/pi-dispatch@4.3.1 @edgehero/pi-dispatch-admin@4.3.1 @earendil-works/pi-coding-agent@1.5.0 --omit=dev --omit=optional --ignore-scripts --no-audit --no-fund
+mkdir my-dispatch && cd my-dispatch && npm init -y
+npm install --save-exact @edgehero/pi-dispatch@5.0.0 @edgehero/pi-dispatch-admin@5.0.0 @earendil-works/pi-coding-agent@1.5.0 --omit=dev --omit=optional --ignore-scripts --no-audit --no-fund
 ./node_modules/.bin/pi-dispatch up --console
 ```
 
 It asks before it starts anything, then prints a sign in link that works for 60 seconds. Setup in the browser needs a Mac or
 Linux. On Windows, run `pi-dispatch up` without `--console`, or choose **Guided setup** in pi, and sign in to the console with a
 token.
-
-**Until the next release,** `--console` does nothing and no sign in link appears, and in pi `/dispatch` offers **Guided setup**
-only, so skip step 3 for now. Put your provider key in the `.env` file in the folder you installed into (a failed key check before
-that is normal), run `./node_modules/.bin/pi-dispatch service install` to keep the worker running, and follow it in the
-[pi panel](#the-pi-panel).
 
 **3. Finish the checklist in your browser.** The link opens a live list of what is ready and what is not: the queue, a worker, the
 network rules, your provider key and a first trigger. Your key goes in here, never in a chat. It offers recipes: fix an issue when
@@ -404,8 +396,8 @@ updates by itself ([updates](docs/console.md#updates)).
 A schedule also gets a button that fires it now ([triggers](docs/triggers.md)).
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/console/console-trigger-dark.png?v=2026-11-05">
-  <img src="docs/images/console/console-trigger.png?v=2026-11-04-800c" alt="What its jobs get, on one trigger's page, with two changes not written yet: a pill per machine saying what differs or that it is unknown, then the model and its job cap, the flow, the staged packages, the outside systems with linear switched on, pi's own tools with bash off, the image and secrets, what the last run had under each, and a bar with Preview the change and Discard">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/console/console-trigger-dark.png?v=2026-11-05-800e">
+  <img src="docs/images/console/console-trigger.png?v=2026-11-04-800e" alt="What its jobs get, on one trigger's page, with two changes not written yet: a pill per machine saying what differs or that it is unknown, then the model and its job cap, the flow, a switch for the staged packages and one for each of your extensions, the outside systems with linear switched on, pi's own tools with bash off and a switch for each tool the newest run that says what it loaded lists, the image and secrets, what the last run had under each, and a bar with Preview the change and Discard">
 </picture>
 
 **Your phone:** every page fits, for answering a question from wherever you are. The console listens only on its own machine
@@ -438,7 +430,8 @@ PI_GLOBAL_PI_DIR=/absolute/path/to/my-dispatch/pi-global
 | Your MCP servers, with credentials as references only | Secrets of any kind: the copy is read by jobs, so it holds none |
 
 **Read the list it prints.** An extension is code, and it runs in every job, beside work that may come from a stranger's issue text. Skip
-extensions with `--no-extensions`, or keep one trigger's jobs out of your packages with the switch on its page (`"packages": false` in the triggers file).
+extensions with `--no-extensions`. To keep all your packages, or one package or extension, out of one trigger's jobs, use the switches on that trigger's page
+(`"packages": false` and `"excludeExtensions"` in the triggers file).
 
 Your projects still win. A job layers your setup under the project's own `.pi/` folder, so a project's skill replaces yours of the same
 name, and a small safety floor sits under both, which neither can remove. To add a language or a system tool rather than a pi setting, build
@@ -475,6 +468,17 @@ start with the same things as on your other machines, and one that has not told 
 match. Under each line is what a recent run really had, so a setting and what it did sit together. Nothing is saved while you click: your changes collect
 at the foot of the card, and you can discard them.
 
+**You can turn off one thing and keep the rest.** On a trigger's page you can turn off one of your packages or extensions for that trigger's jobs alone, and those
+jobs no longer load it. You can also turn off a tool one of them adds: the tool is gone, and the rest of that extension still runs. A tool has a switch while the newest run that says what it
+loaded lists it, or while your triggers file names it.
+
+This limits what a job starts with, not what its agent can do next. An agent that can run commands, write files or edit files can bring back what you turned off. If code must not run
+in a trigger's jobs, also turn off the tools that do those things: `bash` and `powershell` run commands, `write` writes files and `edit` edits them
+([what this does not stop](docs/exclude-tools.md#what-exclusion-does-not-stop)).
+
+Every running machine must run a release that can read these settings. The [upgrade notes](docs/upgrading.md#what-a-fleet-needs-before-a-trigger-leaves-something-out)
+say which release, and what to do until then.
+
 **You see it in words first, and confirm once.** **Preview the change** says each change in a sentence, and says so when it gives
 jobs more than they had. It says when the change takes effect and which jobs already in line would be refused, warns about what would stop these jobs on the
 machine the console runs on, and says how to undo it. One
@@ -485,14 +489,15 @@ machine the console runs on, and says how to undo it. One
   <img src="docs/images/console/console-trigger-change.png?v=2026-11-04-800d" alt="The preview of that change, in words: linear on and where its jobs would now connect, bash off, when the change takes effect, a waiting job that would now be refused, that a job on a machine without linear is refused and which machines have it, who it is recorded under, the lines of the file as they would change, the way to undo it, and one Confirm button">
 </picture>
 
-**It stops what would only fail later, before it costs you anything.** A job cap can only lower the limit you set for all jobs. If a trigger's model is too
+**Some changes that would only fail later are refused before they cost you anything.** A job cap can only lower the limit you set for all jobs. If a trigger's model is too
 expensive for even one request under its cap, the page refuses the change and names the amount a short task needs, rather than letting a job start and fail.
 If the page is out of date, it asks you to reload rather than write over someone else's change.
 
 **Some of this only a person sets.** The commands pi-dispatch gives an AI cannot set a trigger's job cap, the list of models its jobs may use, its fallback models,
-its outside systems, which tools its jobs lose or whether they load your packages: one that tries is refused before you are asked. You set those on the page,
+its outside systems, which tools its jobs lose (pi's own or those your extensions add), whether they load your packages, or which of your packages and extensions
+they leave out. A command that tries is refused, and you are never asked to confirm it. You set those on the page,
 or your technical person sets them in the triggers file ([what the card can say, and what it refuses](docs/console.md#what-a-triggers-jobs-get)).
-They can still move a trigger's flow, provider and model, and only after you confirm.
+Those commands can still move a trigger's flow, provider and model, and only after you confirm.
 
 ## Words used here
 
@@ -592,7 +597,7 @@ the host ([more](docs/console.md#from-another-machine)):
 
 ```bash
 ssh -L 4790:127.0.0.1:4790 yourhost              # on your own machine; then, on the host:
-./node_modules/.bin/pi-dispatch-console link --name you --port 4790
+./node_modules/.bin/pi-dispatch-console link --name operator --port 4790
 ```
 
 **Connect a forge.** `pi-dispatch setup github --webhook-url '<receiver URL>'` creates a GitHub App in one browser click, or `--no-webhook`
@@ -710,17 +715,24 @@ live, and which the console and the panel can edit, or you by hand. Each entry i
 - `image`: this trigger's own job image ([job image](docs/job-image.md)).
 - `secrets`, `secretsProfile`, `secretBundle`: vault references, and a project's one shared environment ([secrets](docs/secrets.md#recipe-d-one-environment-for-a-whole-project)).
 - `mcp`, `forge`: MCP servers for its jobs ([MCP](docs/mcp.md)).
-- `excludeTools`: removes named built in tools ([excluded tools](docs/exclude-tools.md)).
 - `packages`: opts out of the staged pi packages ([workflows](docs/workflows.md)).
+- `excludeTools`: removes named tools of pi's own or an MCP server's ([excluded tools](docs/exclude-tools.md)).
+- `excludeExtensions`: leaves named staged packages and overlay extensions out of its jobs ([leaving one out](docs/exclude-tools.md#leaving-an-extension-out-runexcludeextensions)).
+- `excludeExtensionTools`: removes named tools an extension adds. If no staged package or overlay extension brought a name, the job can stop before its agent starts ([an extension's tools](docs/exclude-tools.md#an-extensions-tools-runexcludeextensiontools)).
 - `provider`, `model`: the model its jobs run on ([choosing the model](docs/triggers.md#choosing-the-model-and-the-turn-limit)).
 - `models`, `fallbackModels`, `maxCostUsd`: the models a job may call, the ones to try when one is rate limited, and its own dollar cap ([limiting models](docs/triggers.md#limiting-which-models-a-job-may-call), [fallback models](docs/model-failover.md), [a dollar cap](docs/triggers.md#a-dollar-cap-per-job)).
 - `replicas`: races independent sandboxes on one event ([replicas](docs/replicas.md)).
 - `waitFor`: holds a job, unstarted and unbilled, until a time or your own check ([waiting](docs/wait-for.md)).
 - `instructions`, `skillsDir`, `github`, `portfolio`: the rest are in [`docs/triggers.md`](docs/triggers.md#optional-run-fields).
 
-On a trigger's page in the console, a person changes `flow`, `provider`, `model`, `maxCostUsd`, `models`, `fallbackModels`, `mcp`, `packages` and
-`excludeTools` with one preview and one Confirm ([what a trigger's jobs get](docs/console.md#what-a-triggers-jobs-get)). The page writes this host's file,
+On a trigger's page in the console, a person changes `flow`, `provider`, `model`, `maxCostUsd`, `models`, `fallbackModels`, `mcp`, `packages`, `excludeTools`, `excludeExtensions` and
+`excludeExtensionTools` with one preview and one Confirm ([what a trigger's jobs get](docs/console.md#what-a-triggers-jobs-get)). The page writes this host's file,
 so on a fleet where each host keeps its own, a host keeps what it has until its copy changes. A few others have the page's Edit form. The rest change in the file, and editing the file works as it always has.
+
+`excludeExtensions` keeps an extension's code from loading in a job, though its files stay readable. `excludeExtensionTools` removes only the tool, so the rest of that extension still runs. Neither stops what an
+agent that can run commands, write files or edit files can reach ([what exclusion does not stop](docs/exclude-tools.md#what-exclusion-does-not-stop)). A file that uses either needs
+`"version": 2`, so every worker, receiver and console must run a release that can read both. A release that cannot ignores them and runs the job with what the file turned off. The [upgrade notes](docs/upgrading.md#what-a-fleet-needs-before-a-trigger-leaves-something-out) say which release, and what to do until then. While a running
+worker cannot read them, the page refuses the change and names it.
 
 A whole project can get one environment from your secrets manager, granted once and read fresh at each job start. Quiet
 hours pause a repo or folder by weekday and timezone ([`docs/pause-windows.md`](docs/pause-windows.md)). The
@@ -935,7 +947,7 @@ These forges have one auth source each, a token you create, so setting theirs to
 
 **Triggers and flows:** [triggers](docs/triggers.md), [workflows](docs/workflows.md), [wait for](docs/wait-for.md),
 [pause windows](docs/pause-windows.md), [replicas](docs/replicas.md), [canary](docs/canary.md),
-[excluded tools](docs/exclude-tools.md), [MCP](docs/mcp.md), [global pi overlay](docs/global-pi-overlay.md).
+[excluded tools and extensions](docs/exclude-tools.md), [MCP](docs/mcp.md), [global pi overlay](docs/global-pi-overlay.md).
 
 **Money and machines:** [costs](docs/costs.md), [insights](docs/insights.md), [graph](docs/graph.md),
 [scoped limits](docs/scoped-limits.md), [projects](docs/projects.md), [allocation](docs/allocation.md),
@@ -1015,5 +1027,6 @@ MIT. See [LICENSE](LICENSE). Built on [pi](https://github.com/earendil-works/pi)
 > **Not affiliated with** the unrelated npm package `pi-dispatch`, a pi extension for rotating ChatGPT Codex OAuth accounts. Same name,
 > different thing. This project publishes scoped packages only:
 > [`@edgehero/pi-dispatch`](https://www.npmjs.com/package/@edgehero/pi-dispatch) (worker and CLI),
-> [`@edgehero/pi-dispatch-receiver`](https://www.npmjs.com/package/@edgehero/pi-dispatch-receiver), and
-> [`@edgehero/pi-dispatch-admin`](https://www.npmjs.com/package/@edgehero/pi-dispatch-admin) (the console and the panel). The bare name is theirs.
+> [`@edgehero/pi-dispatch-receiver`](https://www.npmjs.com/package/@edgehero/pi-dispatch-receiver),
+> [`@edgehero/pi-dispatch-admin`](https://www.npmjs.com/package/@edgehero/pi-dispatch-admin) (the console and the panel), and the optional
+> [`@edgehero/pi-dispatch-sandbox-gateway`](https://www.npmjs.com/package/@edgehero/pi-dispatch-sandbox-gateway). The bare name is theirs.

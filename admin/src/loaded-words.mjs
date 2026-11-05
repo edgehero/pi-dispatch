@@ -47,7 +47,7 @@ import { QUEUED_STATES } from "@edgehero/pi-dispatch/chat-mode";
 import { isForgeKind } from "@edgehero/pi-dispatch/forges";
 import { SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
 import { hostsAgree } from "@edgehero/pi-dispatch/host-loads";
-import { recordedLoaded } from "@edgehero/pi-dispatch/loaded-record";
+import { overlayEntryNamed, recordedLoaded } from "@edgehero/pi-dispatch/loaded-record";
 import { modelIdProblem, providerIdProblem } from "@edgehero/pi-dispatch/model-ref";
 import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
 import { refusedBeforeSpend, repoOfTarget } from "./costs.mjs";
@@ -397,6 +397,14 @@ function cutWords(loaded) {
 }
 
 /**
+ * The names in `run.excludeExtensionTools` this run's record says took a tool out. `leftOut` holds what the job asked, so a name no staged package or overlay
+ * extension brought is on it, and a misspelled one keeps the real tool active: `tools.unmatched` says which. Such a name is not "matched nothing" either: a repository's
+ * tool of that name did leave the session, and the record cannot say so, so it says only what it knows. The runner asks only at `ready`, so a record from before that
+ * cannot tell a tool removed from such a name, and says neither. REJECTED: reading the asked list as what came off, which said "deploy_previw removed", in green.
+ */
+const extensionToolsRemoved = (loaded) => (loaded.at === "ready" ? (loaded.leftOut?.extensionTools ?? []).filter((name) => !(loaded.tools?.unmatched ?? []).includes(name)) : []);
+
+/**
  * What the trigger and the host left out on purpose, each its own sentence. Green: what a trigger turns off is not a
  * problem, so it is said as chosen and never as missing.
  */
@@ -404,8 +412,13 @@ function leftOutLines(loaded) {
   const left = loaded.leftOut;
   if (left === null || left === undefined) return [];
   const lines = [];
-  const asked = [...(left.tools.length > 0 ? [listed(left.tools.map(toolWord))] : []), ...(left.packages ? ["the staged packages"] : [])];
+  const names = [...left.tools.map(toolWord), ...extensionToolsRemoved(loaded), ...(left.extensions ?? [])];
+  const asked = [...(names.length > 0 ? [listed(names)] : []), ...(left.packages ? ["the staged packages"] : [])];
   if (asked.length > 0) lines.push({ bold: "Left out, as it asks:", rest: `${commaAnd(asked)}.` });
+  // Neither is a thing that went wrong in the run: a name on no host's list loads nothing, and a tool no package or overlay extension brought is theirs to bring. Each is the
+  // operator's to read, since a misspelled name keeps nothing out where the real one exists.
+  if (left.extensionsNotHere?.length > 0) lines.push({ bold: "Named to leave out, and not on this host:", rest: `${listed(left.extensionsNotHere)}.` });
+  if (loaded.tools?.unmatched?.length > 0) lines.push({ bold: "Named to remove, and no staged package or overlay extension brought it:", rest: `${listed(loaded.tools.unmatched)}.` });
   // One line for the one thing: a restricted run's switch is closed too, and its own reason is the more exact.
   if (left.restricted) lines.push({ bold: "Left out, as this kind of run asks:", rest: "the overlay’s extensions." });
   else if (left.overlayExtensions) lines.push({ bold: "Left out for this job:", rest: "the overlay’s extensions." });
@@ -696,8 +709,12 @@ function toolsRow(loaded, ran) {
     fromExtensions > 0 ? `${fromExtensions} from the extensions` : null,
     Array.isArray(loaded.tools.job) && loaded.tools.job.length > 0 ? `${listed(loaded.tools.job)}, the job’s own` : null,
   ].filter(Boolean);
-  const removed = loaded.leftOut?.tools?.length > 0 ? `${listed(loaded.leftOut.tools.map(toolWord))} removed` : "none removed";
-  return row(`${loaded.tools.active} active`, said.length > 0 ? `${commaAnd(said)}; ${removed}` : removed);
+  const removing = [...(loaded.leftOut?.tools ?? []).map(toolWord), ...extensionToolsRemoved(loaded)];
+  const unbrought = loaded.tools.unmatched ?? [];
+  // "None removed" is a claim too. A record from before `ready` cannot make it of a name it holds, and a name no package or overlay extension brought may have taken a repository's tool of that name out, which no record holds.
+  const cannotTell = unbrought.length > 0 || (loaded.at !== "ready" && (loaded.leftOut?.extensionTools?.length ?? 0) > 0);
+  const more = [said.length > 0 ? commaAnd(said) : null, removing.length > 0 ? `${listed(removing)} removed` : cannotTell ? null : "none removed", unbrought.length > 0 ? `${listed(unbrought)}: no package or overlay extension brought ${unbrought.length === 1 ? "it" : "them"}` : null].filter(Boolean);
+  return row(`${loaded.tools.active} active`, more.join("; "));
 }
 
 /**
@@ -773,6 +790,10 @@ export function loadedFold(record) {
   if (repositoryTools > 0) add("Tools", String(repositoryTools), "", `the repository’s extensions; ${LOADED_WORDS.noRepositoryNames}`);
   for (const name of loaded.tools?.job ?? []) add("Tools", code(name), "", name === "report_progress" ? `the job’s own, because ${facts.subject} sets run.progress` : "the job’s own");
   for (const name of loaded.leftOut?.tools ?? []) add("Left out", code(name), "", `${facts.subject}’s run.excludeTools`);
+  for (const name of extensionToolsRemoved(loaded)) add("Left out", code(name), "", `${facts.subject}’s run.excludeExtensionTools`);
+  for (const name of loaded.leftOut?.extensions ?? []) add("Left out", code(name), "", `${facts.subject}’s run.excludeExtensions`);
+  for (const name of loaded.leftOut?.extensionsNotHere ?? []) add("Not on this host", code(name), "", `${facts.subject}’s run.excludeExtensions names it`);
+  for (const name of loaded.tools?.unmatched ?? []) add("Not brought", code(name), "", `${facts.subject}’s run.excludeExtensionTools names it, and no staged package or overlay extension brought it`);
   if (loaded.leftOut?.packages) add("Left out", "the staged packages", "", `${facts.subject}’s run.packages false`);
   if (loaded.leftOut?.restricted) add("Left out", "the overlay’s extensions", "", "this kind of run");
   else if (loaded.leftOut?.overlayExtensions) add("Left out", "the overlay’s extensions", "", "this job’s overlay switch: off on its host (PI_GLOBAL_ALLOW_EXTENSIONS=0), or for a model canary’s replay");
@@ -825,6 +846,19 @@ export function triggerLastRun(records, hostLoads = null) {
     newest,
     quoted: { id: runIdOf(record), host: facts.host, record, rows: Object.fromEntries(loadedRows(record, { past: true }).map((row) => [row.label, row])), problems, sources, tools, notes: [...cutWords(loaded), ...(wentOn(record) && loaded.at !== "ready" ? [LOADED_WORDS.notedEarly] : [])] },
   };
+}
+
+/**
+ * The tools a trigger's runs say an extension brought, by name: what the card can draw a chip from, and what its preview can confirm. A staged
+ * package's or the overlay's, never a repository's, which stay a count. Null with no list to read, which is not a trigger with no such tool.
+ */
+export function toolNamesOfRuns(records) {
+  if (!Array.isArray(records)) return null;
+  return [...new Set(records.flatMap((record) => {
+    const loaded = loadedOf(record);
+    if (loaded === null) return [];
+    return [...sourcesOf(loaded, "package").flatMap((row) => row.toolNames ?? []), ...(sourcesOf(loaded, "overlay")[0]?.namedTools ?? []).flatMap((row) => row.tools ?? [])];
+  }))];
 }
 
 // ---- a sandbox -------------------------------------------------------------------------------------------------------
@@ -887,7 +921,7 @@ export function hostLoadsRow(hostLoads, name) {
  * Approximate in the safe direction, as the publication is: the repository's part is decided at its base commit, which the
  * foot says.
  */
-export function sandboxFreshLine({ hostLoads, host, triggerIndex, withholdsPackages = false, image = null }) {
+export function sandboxFreshLine({ hostLoads, host, triggerIndex, withholdsPackages = false, excludes = [], image = null }) {
   const row = hostLoadsRow(hostLoads, host);
   const first = noOverlay(hostPiFor(row, image));
   const unknown = (why) => [`${first} What a job of trigger ${triggerIndex + 1} would load on this host is unknown: ${why}.`];
@@ -896,10 +930,11 @@ export function sandboxFreshLine({ hostLoads, host, triggerIndex, withholdsPacka
   // not none. A part this job would not load from anyway (packages it withholds, an overlay that is off) changes nothing.
   const unread = (row.unread ?? []).filter((part) => (part !== "packages" || !withholdsPackages) && (part !== "extensions" || row.overlayExtensionsAllowed));
   if (unread.length > 0) return unknown(`its last doctor run could not read ${listed(unread.map((part) => UNREAD_PART_WORDS[part] ?? "part of what it publishes"))}`);
-  const packages = withholdsPackages ? [] : (row.packages ?? []).map((entry) => `${entry.name} ${entry.version}`);
-  const extensions = row.overlayExtensionsAllowed ? (row.extensions ?? []).map((entry) => entry.name) : [];
+  const packages = withholdsPackages ? [] : (row.packages ?? []).filter((entry) => !excludes.includes(entry.name)).map((entry) => `${entry.name} ${entry.version}`);
+  const extensions = row.overlayExtensionsAllowed ? (row.extensions ?? []).map((entry) => entry.name).filter((name) => !excludes.some((excluded) => overlayEntryNamed(excluded, name))) : [];
   const past = (withholdsPackages ? 0 : row.more?.packages ?? 0) + (row.overlayExtensionsAllowed ? row.more?.extensions ?? 0 : 0);
-  const named = [...packages, ...extensions, ...(past > 0 ? [`${past} more`] : [])];
+  // What the list did not name may be what the trigger leaves out, so that count is a bound there and no more.
+  const named = [...packages, ...extensions, ...(past > 0 ? [`${excludes.length > 0 ? "up to " : ""}${past} more`] : [])];
   const said = named.length > 0 ? listed(named) : "no staged package or overlay extension";
   return [`${first} A job of trigger ${triggerIndex + 1} on this host would load ${said}, from its last doctor run at `, time(row.at), row.state === "old" ? ", which is old." : "."];
 }
@@ -954,6 +989,14 @@ const hasNoAgent = (record) => {
  */
 const overlayShutByKind = (record, loaded) => Boolean(record?.canary) || loaded?.leftOut?.restricted === true;
 
+/**
+ * Whether a run left an extension out by name (`run.excludeExtensions`). Its lists are short of what its host holds, on purpose, and a name
+ * may be a package's, an overlay entry's or both, so it speaks for neither. A name this host does not hold (`extensionsNotHere`) left nothing
+ * out. REJECTED: comparing two hosts less the names either run left out, a second reading of each list for a card that says the same thing
+ * from a run that shows the whole of them.
+ */
+const leftOutByName = (loaded) => (loaded?.leftOut?.extensions?.length ?? 0) > 0;
+
 /** Whether a run speaks for its host's staged packages: a withholding trigger and either canary each differ on purpose. */
 const showsHostPackages = (record, loaded) => loaded?.leftOut?.packages !== true && !record?.packageCanary && !record?.canary;
 
@@ -975,13 +1018,13 @@ function endOf(record) {
  * its newest run on its own image; its staged packages from its newest run that did not withhold them, was no canary and kept their whole
  * list; its overlay from its newest run with the overlay open and its whole list kept. A host can have run 1.4.2 and then 1.4.3 inside the window, and a rare trigger may not
  * have run since, so REJECTED: the union of a host's runs, and its newest run per trigger, each of which calls a routine Adopt a difference
- * until the old run leaves the window. Packages and the overlay are the host's: a trigger chooses only all or nothing, which is
- * `leftOut`. A fact no run could show stays null, which is unknown, never empty: a record cut past its names is no evidence of none.
+ * until the old run leaves the window. Packages and the overlay are the host's, except what a run's trigger left out, all of them or
+ * one by name, which is `leftOut`, and such a run shows neither (`leftOutByName`). A fact no run could show stays null, which is unknown, never empty: a record cut past its names is no evidence of none.
  * What a flow or a server did belongs to a trigger, and the card counts those by run, so it compares neither. A list past its cap is cut
  * short of what the run had, so it cannot show that kind either: its first 16 names beside another host's are neither the same nor different.
  */
 function hostFacts(records) {
-  const facts = { pi: null, image: null, packages: null, overlay: null, cut: false, shut: false, withheld: false, jobImage: false, stopped: 0 };
+  const facts = { pi: null, image: null, packages: null, overlay: null, cut: false, shut: false, named: false, withheld: false, jobImage: false, stopped: 0 };
   const newest = { image: Number.NEGATIVE_INFINITY, packages: Number.NEGATIVE_INFINITY, overlay: Number.NEGATIVE_INFINITY };
   const take = (slot, at, value) => {
     if (facts[slot] !== null && at <= newest[slot]) return;
@@ -1011,10 +1054,12 @@ function hostFacts(records) {
     const kept = loaded.sources.length > 0;
     const overlayRow = sourcesOf(loaded, "overlay")[0];
     if (overlayShutByKind(record, loaded)) facts.shut = true;
+    else if (leftOutByName(loaded)) facts.named = true;
     else if (!kept || overlayRow?.names === null || overlayNamesCut(loaded, overlayRow)) facts.cut = true;
     else take("overlay", at, overlayRow?.names ?? []);
     const rows = sourcesOf(loaded, "package");
-    if (!showsHostPackages(record, loaded)) facts.withheld = true;
+    if (leftOutByName(loaded)) facts.named = true;
+    else if (!showsHostPackages(record, loaded)) facts.withheld = true;
     else if (!kept || rows.some((row) => row.name === null) || (loaded.cut?.packages ?? 0) > 0) facts.cut = true;
     else take("packages", at, rows.map((row) => `${row.name} ${row.version}`));
   }
@@ -1219,6 +1264,7 @@ export function projectLoadsOf(records, { historyIncomplete = false } = {}) {
     const cutHosts = hostsWhere((facts) => facts.cut && (facts.packages === null || facts.overlay === null));
     const shutHosts = hostsWhere((facts) => facts.shut && facts.overlay === null);
     const withheldHosts = hostsWhere((facts) => facts.withheld && facts.packages === null);
+    const namedHosts = hostsWhere((facts) => facts.named && (facts.packages === null || facts.overlay === null));
     const jobImageHosts = hostsWhere((facts) => facts.jobImage && facts.image === null && facts.pi === null);
     const noVersionHosts = hostsWhere((facts) => facts.image !== null && facts.pi === null);
     const noImageHosts = hostsWhere((facts) => facts.pi !== null && facts.image === null);
@@ -1231,6 +1277,7 @@ export function projectLoadsOf(records, { historyIncomplete = false } = {}) {
       stopped.length > 0 ? `${listed(stopped)} stopped before anything loaded.` : null,
       shutHosts.length > 0 ? `The runs on ${listed(shutHosts)} had the overlay shut, as a model canary and a restricted run do, so they say nothing of its extensions.` : null,
       withheldHosts.length > 0 ? `The runs on ${listed(withheldHosts)} withheld the staged packages or were canaries, so they say nothing of them.` : null,
+      namedHosts.length > 0 ? `The runs on ${listed(namedHosts)} left an extension out by name, so they say nothing of what their host holds.` : null,
       jobImageHosts.length > 0 ? `No recorded run on ${listed(jobImageHosts)} used the host’s own image, so none says what pi or image the host runs otherwise.` : null,
       noVersionHosts.length > 0 ? `No run on ${listed(noVersionHosts)} on the host’s own image says which pi it ran.` : null,
       noImageHosts.length > 0 ? `No run on ${listed(noImageHosts)} says which image it ran in.` : null,
@@ -1238,7 +1285,7 @@ export function projectLoadsOf(records, { historyIncomplete = false } = {}) {
     ].filter(Boolean);
     // Attention is for what someone could look into. A trigger that names its image, or jobs that withhold the packages, leave this open for
     // good with nothing wrong, and a card that always warns gets skipped on the day it has something to say. It still will not say the same.
-    const chosenOnly = read.length === total && missingParts.length === 0 && !historyIncomplete && hostless === 0 && cutHosts.length === 0 && stopped.length === 0 && noVersionHosts.length === 0 && noImageHosts.length === 0 && (shutHosts.length > 0 || withheldHosts.length > 0 || jobImageHosts.length > 0);
+    const chosenOnly = read.length === total && missingParts.length === 0 && !historyIncomplete && hostless === 0 && cutHosts.length === 0 && stopped.length === 0 && noVersionHosts.length === 0 && noImageHosts.length === 0 && (shutHosts.length > 0 || withheldHosts.length > 0 || namedHosts.length > 0 || jobImageHosts.length > 0);
     return { state, tone: chosenOnly ? "idle" : "attention", icon: chosenOnly ? "minus" : "attention", total, read: read.length, sub, top: `${readFrom}, so runs may differ in ways this does not show.`, small, rows: [piRowOf(), extensionsRowOf, missingRow], hosts: [], links: [], foot: null };
   }
   if (state === "same") {

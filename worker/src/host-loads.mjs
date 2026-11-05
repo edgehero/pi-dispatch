@@ -347,7 +347,7 @@ export function hostsAgree(rows) {
  *
  * `repoFlowAtHead(folder, flow)` answers `present`, `absent` or anything else for not known. `staged` is `readStagedSkills`.
  */
-export async function flowTierOf({ flow, folder = null, skillsDir = null, packages = true }, { repoFlowAtHead, fileExists, overlay = null, staged = { skills: [], unenumerable: [] } }) {
+export async function flowTierOf({ flow, folder = null, skillsDir = null, packages = true, excludeExtensions = [] }, { repoFlowAtHead, fileExists, overlay = null, staged = { skills: [], unenumerable: [] } }) {
 	let tier = null;
 	let pkg = null;
 	let resolved = null;
@@ -389,13 +389,16 @@ export async function flowTierOf({ flow, folder = null, skillsDir = null, packag
 		if (!packages) {
 			checked.push("staged packages (withheld: run.packages false)");
 		} else {
-			const hit = staged.skills.find((skill) => skill.name === flow);
+			// A package this trigger leaves out by name (issue #800) brings it no skill, so such a package is no answer here.
+			const hit = staged.skills.find((skill) => skill.name === flow && !excludeExtensions.includes(skill.package));
+			// And no such package is a doubt either: what its globs might hold, the job does not load.
+			const unenumerable = staged.unenumerable.filter((name) => !excludeExtensions.includes(name));
 			if (hit) {
 				tier = "package";
 				pkg = hit.package;
 				resolved = `staged package ${hit.package}`;
-			} else if (staged.unenumerable.length > 0) {
-				unknown.push(`staged package(s) ${staged.unenumerable.join(", ")} (manifest patterns, not enumerable here)`);
+			} else if (unenumerable.length > 0) {
+				unknown.push(`staged package(s) ${unenumerable.join(", ")} (manifest patterns, not enumerable here)`);
 			} else {
 				checked.push("staged packages");
 			}

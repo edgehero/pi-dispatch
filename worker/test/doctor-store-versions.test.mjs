@@ -134,7 +134,7 @@ test("the overlay keys this build does not know are named, sorted and capped, as
 	assert.equal(line.length, 1);
 	assert.equal(line[0].warn, true);
 	assert.equal(line[0].label, `settings overlay ${settingsFile} holds 2 keys this build does not know (futureCap, zetaCap): the worker ignores them`);
-	assert.equal(line[0].fix, "a key from a newer release is ignored here and kept by every panel and console from issue #761's release on, but an earlier one (4.3.1 included) drops every key it does not know when it writes this file, secretBundles included, so upgrade every panel and console first; a misspelt key is kept too, so remove it if it is a typo");
+	assert.equal(line[0].fix, "a key from a newer release is ignored here and kept by every panel and console from 5.0.0 on, but an earlier one (4.3.1 included) drops every key it does not know when it writes this file, secretBundles included, so upgrade every panel and console first; a misspelt key is kept too, so remove it if it is a typo");
 	assert.equal(JSON.stringify(checks).includes("SECRET-VALUE-1"), false, "names only");
 	const many = Object.fromEntries(Array.from({ length: UNKNOWN_KEYS_SHOWN + 2 }, (_, i) => [`k${String(i).padStart(2, "0")}`, i]));
 	const capped = (await doctorWith(JSON.stringify({ ...many, "tab\there": 1 }))).checks.find((c) => c.id === "settings.unknown-keys");
@@ -297,9 +297,9 @@ test("a pause windows file a newer pi-dispatch wrote gets the upgrade as its fix
 });
 
 test("a triggers file a newer pi-dispatch wrote gets the upgrade as its fix; a broken one keeps its own fix", async () => {
-	const newer = await doctorWith("{}", { triggers: { version: 2, triggers: [] } });
+	const newer = await doctorWith("{}", { triggers: { version: 3, triggers: [] } });
 	const line = newer.checks.find((c) => c.id === "triggers.file");
-	assert.match(line.label, /triggers file written by a newer pi-dispatch \(version 2; this build understands 1\)/);
+	assert.match(line.label, /triggers file written by a newer pi-dispatch \(version 3; this build understands 2\)/);
 	assert.equal(line.fix, "upgrade this host's worker and receiver, and every panel and console that writes this file, to the release that wrote it; do not edit or delete the file, which would lose what that release wrote, unless you added `version` to it yourself: then remove that key -- every trigger-derived check below is skipped until this host reads it");
 	for (const broken of [{ version: "2", triggers: [] }, { triggers: "reshaped" }, "{ nope"]) {
 		const bad = await doctorWith("{}", { triggers: broken });

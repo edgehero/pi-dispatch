@@ -20,7 +20,7 @@ import { readTriggers, triggerVenue, writeInputs } from "./read-model.mjs";
  * card's form all read this list. It lives here rather than beside the planner so the action table, which tools reach, can
  * name them without importing the planner. Image, secrets and `skillsDir` are not here: they change where they do today.
  */
-export const CARD_FIELDS = Object.freeze(["flow", "provider", "model", "maxCostUsd", "models", "fallbackModels", "mcp", "packages", "excludeTools"]);
+export const CARD_FIELDS = Object.freeze(["flow", "provider", "model", "maxCostUsd", "models", "fallbackModels", "mcp", "packages", "excludeTools", "excludeExtensions", "excludeExtensionTools"]);
 
 /**
  * Every key `trigger-environment-edit` takes: which row, what the page saw (`pageDigest`), the fields, and the key order an

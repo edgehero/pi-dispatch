@@ -25,6 +25,9 @@ const BASE = {
 	secretsProfile: "ci",
 	backend: "local",
 	excludeTools: ["bash"],
+	// Issue #800. Each narrows a job, so a schedule that drops one runs it with what the file takes away.
+	excludeExtensions: ["pi-lint", "git-guard"],
+	excludeExtensionTools: ["lint_run"],
 	// REQ-MCP-OPERATOR-SERVERS: the overlay MCP servers the job connects.
 	mcp: ["docs"],
 	provider: "openai",
@@ -40,7 +43,8 @@ const BASE = {
 const VARIANTS = { flow: { flow: "tidy", task: "run the tidy pass" }, command: { command: "wf run" } };
 
 function load(variant) {
-	const json = JSON.stringify({ triggers: [{ on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run: { kind: "local", ...BASE, ...variant } }] });
+	// Version 2: the fixture is maximal, and the file must say what it needs (issue #800).
+	const json = JSON.stringify({ version: 2, triggers: [{ on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run: { kind: "local", ...BASE, ...variant } }] });
 	const [normalized] = parseTriggers(json, "/t.json");
 	const [schedule] = loadSchedules({ triggersFile: "/t.json" }, { readFileSync: () => json, existsSync: () => true });
 	return { normalized, data: schedule.data };
@@ -75,7 +79,7 @@ test("cron: each field ALONE reaches the schedule's job data (one folded into a 
 	for (const [field, value] of Object.entries(BASE)) {
 		if (field === "folder") continue;
 		const run = { kind: "local", folder: "/proj", flow: "tidy", task: "t", ...(needs[field] ?? {}), [field]: value };
-		const json = JSON.stringify({ triggers: [{ on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run }] });
+		const json = JSON.stringify({ version: 2, triggers: [{ on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run }] });
 		const [normalized] = parseTriggers(json, "/t.json");
 		const [schedule] = loadSchedules({ triggersFile: "/t.json" }, { readFileSync: () => json, existsSync: () => true });
 		assert.deepEqual(JSON.parse(JSON.stringify(schedule.data))[field], JSON.parse(JSON.stringify(normalized.run))[field], `run.${field} alone was dropped`);

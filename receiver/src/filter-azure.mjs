@@ -126,6 +126,9 @@ export function filterAzure(subset, triggers, knownFlows, selfId, authorized, de
 			...(resolved.backend !== undefined ? { backend: resolved.backend } : {}),
 			// #291. A separate spread, filter.mjs's backend rule: a dropped exclusion runs the job WITH the tool.
 			...(resolved.excludeTools !== undefined ? { excludeTools: resolved.excludeTools } : {}),
+			// Issue #800, each its own spread by the same rule: a dropped list runs the job with what the file takes away.
+			...(resolved.excludeExtensions !== undefined ? { excludeExtensions: resolved.excludeExtensions } : {}),
+			...(resolved.excludeExtensionTools !== undefined ? { excludeExtensionTools: resolved.excludeExtensionTools } : {}),
 			// REQ-MCP-OPERATOR-SERVERS. Its own spread, the excludeTools rule above: a dropped list runs
 			// the job without its servers.
 			...(resolved.mcp !== undefined ? { mcp: resolved.mcp } : {}),
@@ -234,7 +237,7 @@ function matchLabelRules(subset, triggers, labels, action) {
 		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 		repository: rule.repository,
 		packages: rule.packages,
-		image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools, mcp: rule.mcp,
+		image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools, excludeExtensions: rule.excludeExtensions, excludeExtensionTools: rule.excludeExtensionTools, mcp: rule.mcp,
 		provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models, fallbackModels: rule.fallbackModels, maxCostUsd: rule.maxCostUsd,
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,
@@ -300,7 +303,7 @@ function routeComment(subset, triggers, knownFlows, targetType, assumeParked = f
 		...(command !== undefined ? { command } : { flow }),
 		repository: triggers.comment.repository,
 		packages: triggers.comment.packages,
-		image: triggers.comment.image, backend: triggers.comment.backend, excludeTools: triggers.comment.excludeTools, mcp: triggers.comment.mcp,
+		image: triggers.comment.image, backend: triggers.comment.backend, excludeTools: triggers.comment.excludeTools, excludeExtensions: triggers.comment.excludeExtensions, excludeExtensionTools: triggers.comment.excludeExtensionTools, mcp: triggers.comment.mcp,
 		provider: triggers.comment.provider, model: triggers.comment.model, maxTurns: triggers.comment.maxTurns, models: triggers.comment.models, fallbackModels: triggers.comment.fallbackModels, maxCostUsd: triggers.comment.maxCostUsd,
 		skillsDir: triggers.comment.skillsDir,
 		secrets: triggers.comment.secrets,
@@ -345,7 +348,7 @@ function routePullRequest(subset, triggers, action) {
 			...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 			repository: rule.repository,
 			packages: rule.packages,
-			image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools, mcp: rule.mcp,
+			image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools, excludeExtensions: rule.excludeExtensions, excludeExtensionTools: rule.excludeExtensionTools, mcp: rule.mcp,
 			provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models, fallbackModels: rule.fallbackModels, maxCostUsd: rule.maxCostUsd,
 			skillsDir: rule.skillsDir,
 			secrets: rule.secrets,

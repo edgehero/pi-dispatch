@@ -29,6 +29,7 @@ import { BACKEND_NAMES, backendFor, servesOf } from "./backends.mjs";
 import { SCHEDULER_JOB_ID_OVERHEAD, SLOT_DIGITS_MAX } from "./bullmq-internals.mjs";
 import { EGRESS_ENV_VARS, WORKER_ONLY_SECRET_VARS, configError } from "./config.mjs";
 import { imageRefProblem } from "./image-ref.mjs";
+import { LEFT_OUT_NAMES_MAX, LOADED_JOB_TOOLS, LOADED_OVERLAY_NAME_RE, LOADED_TOOL_NAME_RE } from "./loaded-record.mjs";
 // SKILL_NAME_RE is the single-sourced skill charset (flow-gate exports it for exactly this reason:
 // materialize.mjs and the admin already import it, and a keep-in-sync copy would drift where a
 // traversal guard cannot). flow-gate's module body is import-inert, so this keeps parseTriggers pure.
@@ -38,6 +39,7 @@ import { findDuplicateKey } from "./json-duplicates.mjs";
 // The server-name rule, from the one module that parses the overlay's list (its body is import-inert).
 import { FORGE_MCP_KINDS, FORGE_MCP_SERVER_NAME, MCP_SERVER_NAME_RE } from "./mcp-config.mjs";
 import { isModelRolesField, validateModelRoles } from "./model-roles.mjs";
+import { isPackageName } from "./package-names.mjs";
 import { validateModelRef } from "./model-ref.mjs";
 import { parseUsdMicros } from "./money.mjs";
 import { validateApprovalConfig } from "./approval-policy.mjs";
@@ -318,15 +320,18 @@ function isNonEmptyString(value) {
  * `version`, absent meaning 1, which `writeTriggers` owns and writes only when the content needs more than 1, so every
  * file of today's fields stays byte-identical.
  */
-export const TRIGGERS_FILE_VERSION = 1;
+export const TRIGGERS_FILE_VERSION = 2;
 
 /**
  * Each `run` key whose ABSENCE an older build would misread, with the version that introduced it. The raw `run` keys
  * of an entry are carried by every writer, and an older loader DROPS a key it does not know: harmless for most, a
  * widened job for a key that narrows one. Every row of `AUTHORED_NARROWING_FIELDS` added after issue #761 must appear
- * here (and in `JOB_DATA_FIELD_VERSIONS`) at 2 or above; a test holds that. Empty until a key needs one.
+ * here (and in `JOB_DATA_FIELD_VERSIONS`) at 2 or above; a test holds that.
+ *
+ * `excludeExtensions` and `excludeExtensionTools` (issue #800): an older loader drops either and runs the job with the
+ * extension or the tool the file takes away, on a clean record.
  */
-export const TRIGGER_RUN_FIELD_VERSIONS = Object.freeze({});
+export const TRIGGER_RUN_FIELD_VERSIONS = Object.freeze({ excludeExtensions: 2, excludeExtensionTools: 2 });
 
 /** Each top-level block (beside `triggers`) whose absence an older build would misread, as above. Empty until one does. */
 export const TRIGGERS_BLOCK_VERSIONS = Object.freeze({});
@@ -723,6 +728,8 @@ function normalizeCron(on, run, index, path, state) {
 	// A cron job's session narrows like any other: the field selects what the container's agent can do,
 	// which is orthogonal to what triggered it (issue #291).
 	const excludeTools = validateExcludeTools(on, run, `cron trigger "${id}"`, path);
+	const excludeExtensions = validateExcludeExtensions(on, run, `cron trigger "${id}"`, path);
+	const excludeExtensionTools = validateExcludeExtensionTools(on, run, `cron trigger "${id}"`, path);
 	const mcp = validateMcp(on, run, `cron trigger "${id}"`, path, { kind: "local" });
 	// Validated since #502; before it these three were copied untouched, so `run.provider: 7` loaded.
 	const ref = validateRunModel(on, run, `cron trigger "${id}"`, path);
@@ -738,7 +745,7 @@ function normalizeCron(on, run, index, path, state) {
 	// freeze today's default into every stored repeatable.
 	return {
 		on: { type: "cron", id, pattern },
-		run: { kind: "local", folder: run.folder, flow: run.flow, task: run.task, provider: ref.provider, model: ref.model, maxTurns: ref.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...(ref.models !== undefined && { models: ref.models }), ...(ref.fallbackModels !== undefined && { fallbackModels: ref.fallbackModels }), ...(ref.maxCostUsd !== undefined && { maxCostUsd: ref.maxCostUsd }), ...(portfolio !== undefined && { portfolio }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }) },
+		run: { kind: "local", folder: run.folder, flow: run.flow, task: run.task, provider: ref.provider, model: ref.model, maxTurns: ref.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(excludeExtensions !== undefined && { excludeExtensions }), ...(excludeExtensionTools !== undefined && { excludeExtensionTools }), ...(mcp !== undefined && { mcp }), ...(ref.models !== undefined && { models: ref.models }), ...(ref.fallbackModels !== undefined && { fallbackModels: ref.fallbackModels }), ...(ref.maxCostUsd !== undefined && { maxCostUsd: ref.maxCostUsd }), ...(portfolio !== undefined && { portfolio }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }) },
 	};
 }
 
@@ -1945,14 +1952,136 @@ function validateMaxCostUsd(run, at, path) {
  * toolsOff): that is the general unknown-key sweep this file's forward-compatibility posture rejects.
  */
 export function excludeToolsNearMiss(key) {
+	return nearMissOf(["excludetools", "excludetool", "excludedtools"], key);
+}
+
+/** Whether `a` becomes `b` in at most `limit` single edits. */
+function withinEdits(a, b, limit) {
+	let previous = Array.from({ length: b.length + 1 }, (_, j) => j);
+	for (let i = 1; i <= a.length; i++) {
+		const row = [i];
+		for (let j = 1; j <= b.length; j++) row[j] = Math.min(previous[j] + 1, row[j - 1] + 1, previous[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+		previous = row;
+	}
+	return previous[b.length] <= limit;
+}
+
+/**
+ * The one body of every exclusion key's sweep: a case or separator variant of a target, or a key outside plain ASCII whose letters
+ * are a target's in order, which can be drawn exactly like it. `slips` adds a key that many edits from a target. Only on a key new enough
+ * that no file holds one: `excludeToolz` stays a key the loader ignores, as it was, since refusing it now would stop a service on a
+ * file it read yesterday.
+ */
+function nearMissOf(targets, key, { slips = 0 } = {}) {
 	const normalized = key.replace(/[^a-z0-9]/gi, "").toLowerCase();
-	const targets = ["excludetools", "excludetool", "excludedtools"];
 	const isSubsequence = (needle, hay) => {
 		let i = 0;
 		for (const ch of hay) if (i < needle.length && needle[i] === ch) i++;
 		return i === needle.length;
 	};
-	return /^[\x20-\x7E]*$/.test(key) ? targets.includes(normalized) : normalized.length >= 4 && targets.some((t) => isSubsequence(normalized, t));
+	if (!/^[\x20-\x7E]*$/.test(key)) return normalized.length >= 4 && targets.some((t) => isSubsequence(normalized, t));
+	return targets.some((t) => t === normalized || (slips > 0 && withinEdits(normalized, t, slips)));
+}
+
+/**
+ * How far a spelling of these two keys may be from the name and still mean it. Two: a key this long holds a slip in each of its words
+ * (`exludeExtentions`), and a participle comes with a plural (`excludedExtension`, `excludeExtensionsTools`), where a list of each word's forms
+ * would be a list of misspellings. Nothing else the loader reads comes within two; a test holds every key against that.
+ */
+const EXTENSION_KEY_SLIPS = 2;
+
+/** Whether `key` spells `run.excludeExtensions` or nearly does, the exact name and the word cut short (`excludeExt`) included: the caller decides where an exact name is legal, `excludeToolsNearMiss`'s rule. */
+export function excludeExtensionsNearMiss(key) {
+	return nearMissOf(["excludeextensions", "excludeext"], key, { slips: EXTENSION_KEY_SLIPS });
+}
+
+/** Whether `key` spells `run.excludeExtensionTools` or nearly does, the exact name and the word cut short (`excludeExtTools`) included: the caller decides where an exact name is legal, `excludeToolsNearMiss`'s rule. */
+export function excludeExtensionToolsNearMiss(key) {
+	return nearMissOf(["excludeextensiontools", "excludeexttools"], key, { slips: EXTENSION_KEY_SLIPS });
+}
+
+/**
+ * Refuses a near miss of a list key under `run` or `on` (an exact spelling is the field under `run` and wrong under `on`), and
+ * the list's own shape: a non-empty array of distinct strings, each passing `check`, which names what is wrong with one or says
+ * nothing. A dropped or empty exclusion runs the job WITH what the file reads as gone, so none of this is left to drop silently.
+ */
+function validateNameList({ field, nearMiss, check, what }, on, run, at, path) {
+	for (const [label, source, exactIsLegal] of [
+		["run", run, true],
+		["on", on, false],
+	]) {
+		for (const key of Object.keys(source ?? {})) {
+			if (exactIsLegal && key === field) continue;
+			if (!nearMiss(key)) continue;
+			throw configError(`${at}: ${label}.${key} is not a field -- did you mean run.${field}? An exclusion the loader drops runs the job WITH what the file reads as gone, so a near miss is refused rather than dropped: ${path}`);
+		}
+	}
+	const list = run?.[field];
+	if (list === undefined) return undefined;
+	if (!Array.isArray(list) || list.length === 0) throw configError(`${at}: run.${field} must be a non-empty array of ${what} when present (got ${JSON.stringify(list)}): ${path}`);
+	if (list.length > LEFT_OUT_NAMES_MAX) throw configError(`${at}: run.${field} names ${list.length}, and it takes at most ${LEFT_OUT_NAMES_MAX}, what a run's record holds: ${path}`);
+	const seen = new Set();
+	for (let i = 0; i < list.length; i++) {
+		const name = list[i];
+		if (typeof name !== "string") throw configError(`${at}: run.${field}[${i}] must be a string naming ${what} (got ${JSON.stringify(name)}): ${path}`);
+		const wrong = check(name);
+		if (wrong) throw configError(`${at}: run.${field}[${i}] ${JSON.stringify(name)} ${wrong}: ${path}`);
+		if (seen.has(name)) throw configError(`${at}: run.${field} names ${JSON.stringify(name)} twice -- the entries are a removal set, so the second can never change the answer: ${path}`);
+		seen.add(name);
+	}
+	return list;
+}
+
+/**
+ * `run.excludeExtensions` (issue #800): extensions this trigger's jobs do not load, each named by what a person reads on a host:
+ * a staged package's manifest name, or an overlay entry's file stem or folder name. A name means every extension of that name,
+ * so one that is both takes out both. The worker omits a package's path and the runner filters the overlay's entries before any
+ * factory runs (`DES-PER-TRIGGER-LOAD-EXCLUSIONS`). Excluding a package also removes its skills, prompts and themes.
+ *
+ * NOT MEMBERSHIP-CHECKED, the one thing `run.excludeTools` is for: what a host holds is that host's, and the file is shared, so a
+ * name no host here holds is not knowable at load. A name not on a host is no refusal there: its record says so and doctor warns.
+ * A shape, so the list stays comma-safe in the container's environment and a record can hold it.
+ */
+export function validateExcludeExtensions(on, run, at, path) {
+	return validateNameList({
+		field: "excludeExtensions",
+		nearMiss: excludeExtensionsNearMiss,
+		what: "extension names",
+		check: (name) => (isPackageName(name) || LOADED_OVERLAY_NAME_RE.test(name) ? null : "is neither a package's manifest name nor an overlay extension's file stem or folder name"),
+	}, on, run, at, path);
+}
+
+/**
+ * `run.excludeExtensionTools` (issue #800): tools an extension brings, which this trigger's sessions must not have. Its own key, and
+ * `run.excludeTools` stays closed: that list is checked against the pinned pi, which is what makes a typo in it a refusal at load,
+ * and this one cannot be, since an extension's tools are known only once it runs. The runner stops a job on a name no staged package
+ * or overlay extension registered, where it can tell (`exclude-tool-not-loaded`). Refused here is a name this key would mistake: pi's own
+ * tools and a server's are `run.excludeTools`', and a tool pi-dispatch gives some jobs (`LOADED_JOB_TOOLS`) is theirs: a run field arms some, a role map or a label trigger's draft
+ * others, and taking one away could leave `run.progress` or `run.awaitInput` armed with nothing to call. Each compared with the name's case folded:
+ * `run.excludeTools` refuses `Bash` by membership, and here it would load, match nothing and read as though the shell were gone. A staged
+ * package's or an overlay extension's real tool that differs from one of those only in case is reached by excluding it; a repository extension's is not. REJECTED: a `*` pattern,
+ * which pi takes and which would match tools no person named.
+ */
+const EXTENSION_TOOL_WAY_OUT = "to remove a staged package's or an overlay extension's tool of that name, put that package's or extension's name in run.excludeExtensions";
+export function validateExcludeExtensionTools(on, run, at, path) {
+	return validateNameList({
+		field: "excludeExtensionTools",
+		nearMiss: excludeExtensionToolsNearMiss,
+		what: "tool names",
+		check: (name) => {
+			if (!LOADED_TOOL_NAME_RE.test(name)) return "is not a tool's name (a letter, then letters, digits, _ or -, at most 48, and no pattern)";
+			const folded = name.toLowerCase();
+			// The spelling that list takes: it holds names by exact membership, so sending `BASH` there as written is a second refusal. That list removes pi's `bash` and leaves an overlay's `BASH`, so each refusal also names the way out for an extension's.
+			if (EXCLUDABLE_TOOL_NAMES.has(folded)) return `matches, ignoring case, one of pi's own tools, which this key does not take: run.excludeTools removes pi's, spelled ${JSON.stringify(folded)}; ${EXTENSION_TOOL_WAY_OUT}`;
+			// REJECTED: "is not an extension's tool", since an overlay extension can register any of these names, and a bare "it belongs on run.excludeTools", which refuses these on a trigger with no run.mcp.
+			if (MCP_EXCLUDABLE_TOOL_NAMES.has(folded)) return `matches, ignoring case, one of the MCP tools, which this key does not take: on a trigger with run.mcp, run.excludeTools removes those, spelled ${JSON.stringify(folded)}; ${EXTENSION_TOOL_WAY_OUT}`;
+			// REJECTED: "is a server's tool", false of `MCP__X__Y`, which no server can bring, since a server's name is lower case.
+			if (folded.startsWith("mcp__")) return `starts, ignoring case, like a server's tool, which this key does not take: on a trigger whose run.mcp names that server, run.excludeTools removes its tools all at once, as mcp__<server>__*; ${EXTENSION_TOOL_WAY_OUT}`;
+			// REJECTED: "another run field arms it; turn that field off", which is false of `subagent` (a role map arms it) and of `decide` and `read_repository` on a label trigger. REJECTED: "a tool the job itself offers", false of a plain job, which offers none of these and does offer an overlay extension's tool of such a name.
+			if (LOADED_JOB_TOOLS.includes(folded)) return `matches, ignoring case, the name of a tool pi-dispatch gives some jobs, which this key does not take; ${EXTENSION_TOOL_WAY_OUT}`;
+			return null;
+		},
+	}, on, run, at, path);
 }
 
 /**
@@ -2275,11 +2404,13 @@ function normalizeLabel(on, run, index, path) {
 	const backend = validateBackend(on, run, at, path, { localWorkspace: false });
 	const waitFor = validateWaitFor(on, run, at, path, { onType: on.type });
 	const excludeTools = validateExcludeTools(on, run, at, path);
+	const excludeExtensions = validateExcludeExtensions(on, run, at, path);
+	const excludeExtensionTools = validateExcludeExtensionTools(on, run, at, path);
 	const mcp = validateMcp(on, run, at, path, { kind: run.kind });
 	const ref = validateRunModel(on, run, at, path);
 	return {
 		on: { type: "label", any: predicate.any, all: predicate.all, none: predicate.none },
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...validateApprovalConfig(run), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...validateApprovalConfig(run), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(excludeExtensions !== undefined && { excludeExtensions }), ...(excludeExtensionTools !== undefined && { excludeExtensionTools }), ...(mcp !== undefined && { mcp }), ...ref },
 	};
 }
 
@@ -2323,11 +2454,13 @@ function normalizeComment(on, run, index, path, state) {
 	const backend = validateBackend(on, run, at, path, { localWorkspace: false });
 	const waitFor = validateWaitFor(on, run, at, path, { onType: on.type });
 	const excludeTools = validateExcludeTools(on, run, at, path);
+	const excludeExtensions = validateExcludeExtensions(on, run, at, path);
+	const excludeExtensionTools = validateExcludeExtensionTools(on, run, at, path);
 	const mcp = validateMcp(on, run, at, path, { kind: run.kind });
 	const ref = validateRunModel(on, run, at, path);
 	return {
 		on: { type: "comment", phrase: on.phrase },
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...validateApprovalConfig(run), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...validateApprovalConfig(run), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(excludeExtensions !== undefined && { excludeExtensions }), ...(excludeExtensionTools !== undefined && { excludeExtensionTools }), ...(mcp !== undefined && { mcp }), ...ref },
 	};
 }
 
@@ -2398,6 +2531,8 @@ function normalizeIssue(on, run, index, path) {
 	const backend = validateBackend(on, run, at, path, { localWorkspace: false });
 	const waitFor = validateWaitFor(on, run, at, path, { onType: on.type });
 	const excludeTools = validateExcludeTools(on, run, at, path);
+	const excludeExtensions = validateExcludeExtensions(on, run, at, path);
+	const excludeExtensionTools = validateExcludeExtensionTools(on, run, at, path);
 	const mcp = validateMcp(on, run, at, path, { kind: run.kind });
 	const ref = validateRunModel(on, run, at, path);
 	return {
@@ -2409,7 +2544,7 @@ function normalizeIssue(on, run, index, path) {
 			...(number !== undefined && { number }),
 			...(once !== undefined && { once }),
 		},
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...validateApprovalConfig(run), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...validateApprovalConfig(run), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(excludeExtensions !== undefined && { excludeExtensions }), ...(excludeExtensionTools !== undefined && { excludeExtensionTools }), ...(mcp !== undefined && { mcp }), ...ref },
 	};
 }
 
@@ -2491,6 +2626,8 @@ function normalizePullRequest(on, run, index, path) {
 	const backend = validateBackend(on, run, at, path, { localWorkspace: false });
 	const waitFor = validateWaitFor(on, run, at, path, { onType: on.type });
 	const excludeTools = validateExcludeTools(on, run, at, path);
+	const excludeExtensions = validateExcludeExtensions(on, run, at, path);
+	const excludeExtensionTools = validateExcludeExtensionTools(on, run, at, path);
 	const mcp = validateMcp(on, run, at, path, { kind: run.kind });
 	const ref = validateRunModel(on, run, at, path);
 	return {
@@ -2507,7 +2644,7 @@ function normalizePullRequest(on, run, index, path) {
 			...(number !== undefined && { number }),
 			...(once !== undefined && { once }),
 		},
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...validateApprovalConfig(run), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(mcp !== undefined && { mcp }), ...ref },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...validateApprovalConfig(run), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(excludeExtensions !== undefined && { excludeExtensions }), ...(excludeExtensionTools !== undefined && { excludeExtensionTools }), ...(mcp !== undefined && { mcp }), ...ref },
 	};
 }
 

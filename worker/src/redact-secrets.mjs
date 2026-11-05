@@ -153,6 +153,9 @@ export const NON_SECRET_ENV_KEYS = new Set([
 	"PI_FLOW",
 	"PI_COMMAND",
 	"PI_EXCLUDE_TOOLS",
+	"PI_EXCLUDE_EXTENSIONS",
+	"PI_EXCLUDE_EXTENSION_TOOLS",
+	"PI_EXCLUDE_TOOLS_STRICT",
 	"PI_MCP_SERVERS",
 	"PI_AWAIT_INPUT",
 	// Approval env holds declared actions and decision identifiers only; human text stays in event.json.

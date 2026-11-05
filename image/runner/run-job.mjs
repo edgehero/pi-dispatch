@@ -50,7 +50,7 @@ import {
 import { restoreEnvProxyDispatcher } from "./src/env-proxy.mjs";
 import { readCgroupUsage } from "./src/cgroup-usage.mjs";
 import { createExitWriter, readExitKey, writeAllSync } from "./src/exit-line.mjs";
-import { createLoadedRecorder, createLoadTee } from "./src/loaded.mjs";
+import { createLoadedRecorder, createLoadTee, toolsBroughtByHost } from "./src/loaded.mjs";
 import { createJobModelRuntime, loadPiAuthStorage } from "./src/model-runtime.mjs";
 import { countPackageResources, findShadowedSkills, isFlowLoaded, owningRoot } from "./src/packages.mjs";
 import { isNestedRunner, runAsPiCli } from "./src/child-route.mjs";
@@ -423,7 +423,10 @@ async function main() {
 	const requestApproval = cfg.approvalGates.length ? createRequestApproval(cfg.approvalGates) : null;
 	// The tool a job armed with run.progress reports its phases with (issue #644), on the same terms.
 	const reportProgress = cfg.reportProgress ? createReportProgress() : null;
-	const roleSubagents = roleInputs ? createRoleSubagents(roleInputs) : null;
+	// What the session and each role child leave out: pi's own and the servers' (`run.excludeTools`) and an extension's. One list, since pi
+	// reads one, and the second half is not held to pi's names: an unmatched name widens nothing, and which matched is asked below.
+	const sessionExclusions = [...cfg.excludeTools, ...cfg.excludeExtensionTools];
+	const roleSubagents = roleInputs ? createRoleSubagents(roleInputs, { excludeTools: sessionExclusions }) : null;
 	if (roleSubagents) roleExitFields = () => ({ modelRoles: roleSubagents.snapshot() });
 	// The run's inbox (issue #646, src/inbox.mjs), on the same terms. The acks are signed with the exit key and name the
 	// run by PI_JOB_ID, the exact string the worker verifies them against (its container name for this job: the worker's
@@ -456,6 +459,7 @@ async function main() {
 		settingsManager,
 		allowGlobalExtensions: cfg.allowGlobalExtensions,
 		packagePaths: cfg.packages,
+		excludeExtensions: cfg.excludeExtensions,
 		log: loadTee.log,
 		...(extensionFactories.length > 0 && { extensionFactories }),
 	});
@@ -474,8 +478,9 @@ async function main() {
 	// the worker materialises .pi/ cannot leave these checks guarding paths that no longer exist.
 	const protectedRoots = [`${JOB_PI_DIR}/skills`, TRIGGER_SKILLS_DIR, `${GLOBAL_PI_DIR}/skills`];
 	const shadowed = findShadowedSkills(diagnostics, { packageRoots: cfg.packages, protectedRoots });
+	const loadRoots = { packages: cfg.packages, jobPi: JOB_PI_DIR, triggerSkills: TRIGGER_SKILLS_DIR, overlay: GLOBAL_PI_DIR, workspace: WORKSPACE };
 	loaded.record("loader", () => ({
-		roots: { packages: cfg.packages, jobPi: JOB_PI_DIR, triggerSkills: TRIGGER_SKILLS_DIR, overlay: GLOBAL_PI_DIR, workspace: WORKSPACE },
+		roots: loadRoots,
 		flow: cfg.flow,
 		extensions: resourceLoader.getExtensions().extensions.map((extension) => extension.path),
 		skills,
@@ -571,7 +576,7 @@ async function main() {
 		// setActiveTools nor a later refresh can re-enable one. Spread conditionally so an unflagged
 		// job's options object is byte-identical to today's -- at the pin `excludeTools: []` happens to
 		// behave the same, but it stores an empty Set on the session, and a future pi may distinguish.
-		...(cfg.excludeTools.length > 0 && { excludeTools: cfg.excludeTools }),
+		...(sessionExclusions.length > 0 && { excludeTools: sessionExclusions }),
 		...(watchReadOnly && watchToolOptions(cfg.excludeTools, excludableToolNames(), watchTools?.names)),
 		...(answerTools && { tools: answerTools.names, excludeTools: [...excludableToolNames(), "codemode", "tool_search"] }),
 	}));
@@ -592,8 +597,8 @@ async function main() {
 	// The in-container read-back (issue #291): what was asked for and what the session actually holds,
 	// on every flagged job's log. Names only, from a set the loader validated -- no payload text, no
 	// values -- so the line is PII-free by construction.
-	if (cfg.excludeTools.length > 0) {
-		log("tools_excluded", { excludeTools: cfg.excludeTools, active: session.getActiveToolNames() });
+	if (sessionExclusions.length > 0) {
+		log("tools_excluded", { excludeTools: cfg.excludeTools, ...(cfg.excludeExtensionTools.length > 0 && { excludeExtensionTools: cfg.excludeExtensionTools }), active: session.getActiveToolNames() });
 	}
 
 	// What the session holds, read again after the servers connect, since a server's direct tools register then. Before
@@ -645,6 +650,25 @@ async function main() {
 		}
 	} else {
 		loaded.record("ready", liveTools);
+	}
+
+	// A name in run.excludeExtensionTools that no staged package or overlay extension brought (issue #800). Pi takes it whatever it matches, so a repository's
+	// tool of that name is gone from the session all the same, and a name that matches nothing widens nothing, while the file reads as though a tool were gone.
+	// What they registered is the runner's alone to read, and an extension's own `tools` still hold a name the exclusion took out: `getAllTools` no longer lists
+	// one. A repository's own tool is no answer here: the file is shared, so a trigger serving two repositories would stop only the one without it, with no name
+	// to fix and nothing to exclude, and the two now answer alike. After the servers and before the prompt. A stop needs the worker's word,
+	// PI_EXCLUDE_TOOLS_STRICT, that this job should have held every extension it could, and a clean load: with a package withheld or a load that failed the
+	// name may be right, so it only says so. Positions on the record and names on the log, each from the list the worker handed over, never a string a repository chose.
+	if (cfg.excludeExtensionTools.length > 0) {
+		const brought = toolsBroughtByHost(resourceLoader.getExtensions().extensions, loadRoots);
+		const unmatched = cfg.excludeExtensionTools.flatMap((name, position) => (brought.has(name) ? [] : [{ name, position }]));
+		if (unmatched.length > 0) {
+			loaded.record("ready", () => ({ unmatched: unmatched.map(({ position }) => position) }));
+			log("exclude_tools_unmatched", { tools: unmatched.map(({ name }) => name), strict: cfg.excludeToolsStrict });
+			if (cfg.excludeToolsStrict && loadTee.failures().length === 0 && loadTee.drops().length === 0) {
+				throw configError(`run.excludeExtensionTools names ${unmatched.map(({ name }) => JSON.stringify(name)).join(", ")}, and no staged package or overlay extension in this job registered that when it loaded -- fix the name, stage what brings the tool on this host, exclude the extension, or take off a tool only a repository registers`, "exclude-tool-not-loaded");
+			}
+		}
 	}
 
 	// The one packages count that cannot ride packages_loaded: a COMMAND exists only once the

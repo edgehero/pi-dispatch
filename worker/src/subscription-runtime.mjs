@@ -1,5 +1,6 @@
 import { REASONS } from "./reason-catalog.mjs";
 /** Host-only orchestration. Private snapshots never become job data, run records or telemetry. */
+import { COMMUNITY_AUTH_ADAPTERS } from "./community-auth-metadata.mjs";
 import { builtinModel } from "./model-catalog.mjs";
 import { splitModelEntry } from "./model-ref.mjs";
 import { normalizeClaudeQuota, normalizeOpenAIQuota, normalizeSubscriptionQuotaError } from "./subscription-quota.mjs";
@@ -43,7 +44,10 @@ export function makeSubscriptionRuntime({ auth, quota, now = Date.now, lookup = 
 			if (ref.provider === "openai" && (job.watchDecisionModel?.provider === "openai" || job.questionGroupModel?.provider === "openai" || job.answerDecisionModel?.provider === "openai")) return { ok: false, managed: true, reason: "auth-capability-unsupported" };
 			if (["openshell", "openshell-bind"].includes(job.backend ?? defaultBackend) || job.canary === true) return { ok: false, managed: true, reason: "auth-venue-unsupported" };
 			if (ref.provider === "anthropic") {
-				if (job.packages === false) return { ok: false, managed: true, reason: "auth-adapter-disabled" };
+				// Excluded by name too (issue #800): the adapter is a staged package, and left out of PI_PACKAGES it would stop the job at its load, inside a started
+				// container with its budget held. `row.adapter` is the policy's key, `pi-anthropic-oauth@0.3.6`, which the loader refuses as an extension's name; a trigger
+				// names the package, as the worker omits it (run-container.mjs) and `isSubscriptionAdapter` reads it, so the key's `package` is what compares.
+				if (job.packages === false || (Array.isArray(job.excludeExtensions) && job.excludeExtensions.includes(COMMUNITY_AUTH_ADAPTERS[row.adapter]?.package))) return { ok: false, managed: true, reason: "auth-adapter-disabled" };
 				const staged = packageRootFor(row.adapter);
 				if (!staged) return { ok: false, managed: true, reason: "auth-adapter-unavailable" };
 				if (staged.refused) return { ok: false, managed: true, reason: staged.refused };

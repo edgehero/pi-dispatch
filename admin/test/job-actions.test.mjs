@@ -346,9 +346,10 @@ test("the expect a retry or remove carries is checked before anything is read: a
 // ---- re-run ----
 
 /** The label trigger a forge run in these tests matched (index 0), with the run fields a re-run must take from the file. */
-const LABEL_RUN = { kind: "github", flow: "fix", secretsProfile: "prod", secrets: { TOKEN: "op://x" }, maxCostUsd: "1.5", model: "claude-sonnet-5-5", provider: "anthropic", image: "pi-job:v1" };
+const LABEL_RUN = { kind: "github", flow: "fix", secretsProfile: "prod", secrets: { TOKEN: "op://x" }, maxCostUsd: "1.5", model: "claude-sonnet-5-5", provider: "anthropic", image: "pi-job:v1", excludeExtensions: ["pi-lint"], excludeExtensionTools: ["lint_run"] };
 function forgeTriggers(path, entries = [{ on: { type: "label", any: ["pi"] }, run: LABEL_RUN }]) {
-  writeFileSync(path, JSON.stringify({ triggers: entries }));
+  // Version 2 for the two exclusions, which a re-run takes from the file too (issue #800).
+  writeFileSync(path, JSON.stringify({ version: 2, triggers: entries }));
 }
 
 test("planRerun of a forge run: the where from retained data, the run fields from the trigger now, a fresh console delivery id, routed like the receiver; the window and expiry refuse by name", live, async () => {
@@ -665,9 +666,10 @@ function parkedTriggers(path, kind) {
   writeFileSync(
     path,
     JSON.stringify({
+      version: 2,
       triggers: [
         { on: { type: "label", any: ["pi"] }, run: { kind, flow: "fix", resume: true, awaitInput: true } },
-        { on: { type: "comment", phrase: "@pi" }, run: { kind, flow: "fix", resume: true, awaitInput: true, progress: true, statusComment: true, recover: true, steer: true, model: "claude-sonnet-5-5", provider: "anthropic", maxCostUsd: "1.25", instructions: "be brief" } },
+        { on: { type: "comment", phrase: "@pi" }, run: { kind, flow: "fix", resume: true, awaitInput: true, progress: true, statusComment: true, recover: true, steer: true, model: "claude-sonnet-5-5", provider: "anthropic", maxCostUsd: "1.25", instructions: "be brief", excludeExtensions: ["pi-lint"], excludeExtensionTools: ["lint_run"] } },
       ],
     }),
   );

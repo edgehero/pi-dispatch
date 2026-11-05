@@ -1306,8 +1306,51 @@ test("staged packages: a manifest that goes unreadable after boot keeps the last
 		const torn = whileCapturingLogs(() => resolve());
 		assert.deepEqual(torn.value, ["/opt/pi-global/packages/a__b"], "a torn read keeps the last set rather than silently running toolless");
 		assert.ok(torn.logs.some((l) => l.event === "packages_manifest_unreadable"), "and it is never silent");
+		assert.equal(resolve.stageRead(), true, "and that set is what the record names against: a read chose those paths");
 	} finally {
 		rmSync(overlay, { recursive: true, force: true });
+	}
+});
+
+// Issue #800: `[]` from a manifest that is not there and `[]` from one that does not read are different statements, and a run's record must not call a real package's name absent over the second.
+test("staged packages: the resolver says whether it read a stage: no manifest is a stage with nothing in it, and one that does not read with nothing kept says nothing", { skip }, async () => {
+	const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
+	const overlay = tempDir("pi-global-");
+	try {
+		mkdirSync(join(overlay, "packages"), { recursive: true });
+		writeFileSync(join(overlay, "packages", "packages.json"), "{ this is not json");
+		const { runContainerCalls } = await runStart({ env: { PI_GLOBAL_PI_DIR: overlay }, makeAuth, makeHost: () => fakeHost() });
+		const resolve = runContainerCalls[0].packagePaths;
+		assert.deepEqual(resolve(), [], "unreadable at boot, with nothing to keep");
+		assert.equal(resolve.stageRead(), false);
+		rmSync(join(overlay, "packages", "packages.json"));
+		assert.deepEqual(resolve(), []);
+		assert.equal(resolve.stageRead(), true, "no manifest: nothing is staged here, and that is an answer");
+		writeFileSync(join(overlay, "packages", "packages.json"), "{ this is not json");
+		resolve();
+		assert.equal(resolve.stageRead(), false, "and it goes back with the file");
+		writeFileSync(join(overlay, "packages", "packages.json"), JSON.stringify({ stagedAt: null, packages: [] }));
+		assert.deepEqual(resolve(), []);
+		assert.equal(resolve.stageRead(), true, "a manifest that reads and holds nothing");
+		writeFileSync(join(overlay, "packages", "packages.json"), "{ this is not json");
+		resolve();
+		assert.equal(resolve.stageRead(), false, "an empty last read keeps nothing, so a torn one says nothing either");
+		writeFileSync(join(overlay, "packages", "packages.json"), JSON.stringify({ stagedAt: null, packages: [{ name: "@a/b", version: "1.0.0", dir: "a__b" }] }));
+		assert.deepEqual(resolve(), ["/opt/pi-global/packages/a__b"]);
+		assert.equal(resolve.stageRead(), true);
+	} finally {
+		rmSync(overlay, { recursive: true, force: true });
+	}
+	// A manifest this host cannot even stat is no absent one: `packages` is a file here, so the path fails ENOTDIR.
+	const blocked = tempDir("pi-global-");
+	try {
+		writeFileSync(join(blocked, "packages"), "not a folder");
+		const { runContainerCalls } = await runStart({ env: { PI_GLOBAL_PI_DIR: blocked }, makeAuth, makeHost: () => fakeHost() });
+		const resolve = runContainerCalls[0].packagePaths;
+		assert.deepEqual(resolve(), []);
+		assert.equal(resolve.stageRead(), false);
+	} finally {
+		rmSync(blocked, { recursive: true, force: true });
 	}
 });
 
@@ -5402,7 +5445,7 @@ test("issue #761: a triggers reload that meets a newer file keeps the running sc
 	const log = (event, fields) => lines.push([event, fields]);
 	const state = { newer: false };
 	const ref = { current: [{ schedulerId: "kept" }] };
-	const newerError = Object.assign(new Error("triggers file written by a newer pi-dispatch (version 2; this build understands 1): /t.json"), { piDispatchConfig: true, newer: true });
+	const newerError = Object.assign(new Error("triggers file written by a newer pi-dispatch (version 3; this build understands 2): /t.json"), { piDispatchConfig: true, newer: true });
 	// The real cron reload, with the loader and the reconcile replaced: what it keeps on a refused load is its own rule.
 	const reconciled = [];
 	const reconcileFn = async (_queue, served) => (reconciled.push(served), { installed: served.length, removed: 0 });
@@ -5434,8 +5477,8 @@ test("issue #761: a pause windows or triggers file a newer pi-dispatch wrote ref
 	writeFileSync(pausePath, `${JSON.stringify({ version: 2, windows: [] }, null, 2)}\n`);
 	await assert.rejects(() => runStart({ env: { VALKEY_URL, PI_PAUSE_WINDOWS_FILE: pausePath } }), (e) => e.piDispatchConfig === true && e.newer === true && e.message === `pause-windows file written by a newer pi-dispatch (version 2; this build understands 1): ${pausePath}`);
 	const triggersPath = join(dir, "triggers.json");
-	writeFileSync(triggersPath, `${JSON.stringify({ version: 2, triggers: [] }, null, 2)}\n`);
-	await assert.rejects(() => runStart({ env: { VALKEY_URL, PI_TRIGGERS_FILE: triggersPath } }), (e) => e.piDispatchConfig === true && e.newer === true && e.message === `triggers file written by a newer pi-dispatch (version 2; this build understands 1): ${triggersPath}`);
+	writeFileSync(triggersPath, `${JSON.stringify({ version: 3, triggers: [] }, null, 2)}\n`);
+	await assert.rejects(() => runStart({ env: { VALKEY_URL, PI_TRIGGERS_FILE: triggersPath } }), (e) => e.piDispatchConfig === true && e.newer === true && e.message === `triggers file written by a newer pi-dispatch (version 3; this build understands 2): ${triggersPath}`);
 });
 
 test("issue #761: a pause windows reload that meets a newer file keeps the last good windows and sets the newer state, which only a good reload clears", { skip }, () => {
@@ -5496,7 +5539,7 @@ test("issue #761: a running worker's watchers carry a newer pause windows or tri
 			assert.equal(captured.triggersNewer(), false);
 			await until("the pause windows reload", () => captured.pauseWindowsNewer() === true, [[pausePath, today({ version: 2, windows: [] })]]);
 			// The triggers watcher was handed the state the processor reads; with its own default the gate never moves.
-			await until("the triggers reload", () => captured.triggersNewer() === true, [[triggersPath, today({ version: 2, triggers: [] })]]);
+			await until("the triggers reload", () => captured.triggersNewer() === true, [[triggersPath, today({ version: 3, triggers: [] })]]);
 			await until("both good reloads", () => captured.pauseWindowsNewer() === false && captured.triggersNewer() === false, [[pausePath, today({ windows: [] })], [triggersPath, today({ triggers: [] })]]);
 			seen = "cleared";
 		},

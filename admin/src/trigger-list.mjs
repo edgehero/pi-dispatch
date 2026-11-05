@@ -35,11 +35,11 @@ function ruleOf(t) {
     out.command = words[0];
     out.commandArgs = words.length > 1;
   }
-  out.displayCut = ["any", "all", "none", "action", "reviewState", "models", "fallbackModels", "mcp", "excludeTools", "gates", "waitFor"].some((k) => Array.isArray(t[k]) && t[k].length > 64);
+  out.displayCut = ["any", "all", "none", "action", "reviewState", "models", "fallbackModels", "mcp", "excludeTools", "excludeExtensions", "excludeExtensionTools", "gates", "waitFor"].some((k) => Array.isArray(t[k]) && t[k].length > 64);
   out.task = t.task === true;
   out.instructions = t.instructions === true;
   out.secrets = Number.isSafeInteger(t.secrets) && t.secrets >= 0 ? t.secrets : 0;
-  for (const key of ["any", "all", "none", "action", "reviewState", "models", "fallbackModels", "mcp", "excludeTools", "gates"]) if (Array.isArray(t[key])) out[key] = copyStrings(t[key]);
+  for (const key of ["any", "all", "none", "action", "reviewState", "models", "fallbackModels", "mcp", "excludeTools", "excludeExtensions", "excludeExtensionTools", "gates"]) if (Array.isArray(t[key])) out[key] = copyStrings(t[key]);
   if (t.disarmed && typeof t.disarmed === "object") out.disarmed = Object.fromEntries(["at", "jobId"].filter((k) => typeof t.disarmed[k] === "string").map((k) => [k, t.disarmed[k]]));
   if (Array.isArray(t.waitFor)) out.waitFor = t.waitFor.slice(0, 64).flatMap((w) => typeof w?.profile === "string" ? [{ profile: w.profile }] : typeof w?.after === "string" ? [{ after: w.after }] : []);
   return out;

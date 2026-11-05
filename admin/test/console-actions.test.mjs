@@ -378,7 +378,7 @@ test("every action has frozen fields, a danger flag never beside paid, and its u
   const FIELDS = {
     "run-enqueue": ["folder", "flow", "task"], "standing-answer-add": ["title", "text", "projects", "repo", "runId"], "answer-draft-drop": ["runId", "draftRunId", "digest"],
     "model-role-edit": [...MODEL_ROLE_EDIT_FIELDS],
-    "trigger-environment-edit": ["index", "pageDigest", "flow", "provider", "model", "maxCostUsd", "models", "fallbackModels", "mcp", "packages", "excludeTools", "keyOrder"],
+    "trigger-environment-edit": ["index", "pageDigest", "flow", "provider", "model", "maxCostUsd", "models", "fallbackModels", "mcp", "packages", "excludeTools", "excludeExtensions", "excludeExtensionTools", "keyOrder"],
     "sandbox-prepare": ["repo", "index", "ref", "host", "pin"], "sandbox-pin": ["host", "id"], "sandbox-end": ["host", "id", "nonce", "containerId"], "sandbox-host-set": ["host", "target", "deployment", "nodePath", "cliPath", "shell"],
     "cancel-active": ["jobId"], "cancel-held": ["jobId"], "cancel-all-held": [], "cancel-queued": ["jobId", "queue"],
     "retry-failed": ["jobId", "queue"], "remove-failed": ["jobId", "queue"], "retry-all-failed": ["queue", "repo"], "remove-all-failed": ["queue", "repo"],
@@ -3097,6 +3097,9 @@ test("a canary's preview refuses what could prove nothing, for free", async () =
   assert.match((await preview(updatesRow())).text, /run\.packages to false/);
   const resuming = await (await start({ paths, a: { rm: { ...RM, planTriggerFire: async () => ({ plan: { ...planned.plan, schedule: { data: { resume: true } } } }) }, updates: updatesDeps(updatesRow()).updates } })).act("package-canary", { index: 0, name: "pi-lint", version: "1.4.3" });
   assert.match(resuming.text, /resumes its transcript/, "its effects would outlive the one job");
+  const excluding = (names) => async () => (await start({ paths, a: { rm: { ...RM, planTriggerFire: async () => ({ plan: { ...planned.plan, schedule: { data: { excludeExtensions: names } } } }) }, updates: updatesDeps(updatesRow()).updates } })).act("package-canary", { index: 0, name: "pi-lint", version: "1.4.3" });
+  assert.match((await excluding(["pi-lint"])()).text, /leaves pi-lint out in run\.excludeExtensions/, "a candidate in a job its trigger keeps the package out of says nothing");
+  assert.doesNotMatch((await excluding(["other"])()).text, /run\.excludeExtensions/, "another name is not this package");
   for (const version of ["^1.4.3", "latest", "1.x"]) assert.equal((await preview(updatesRow(), { index: 0, name: "pi-lint", version })).status, 400, version);
   assert.equal((await preview(updatesRow(), { index: 0, name: "../x", version: "1.4.3" })).status, 400);
 });

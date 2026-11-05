@@ -36,8 +36,9 @@ Each guide keeps the notes about its own feature. [The last sections](#notes-kep
    whole fleet and across restarts. Deliveries still queue up and wait.
 2. **Wait for the running jobs**, until `pi-dispatch status` shows no active job. Parked, held and recovering runs may
    stay where they are: none of them holds a container.
-3. **Upgrade the job image.** Pull the release's image and point `PI_JOB_IMAGE` at it. The image goes before the
-   worker ([why](#why-this-order)).
+3. **Upgrade the job image.** Pull the release's image and point `PI_JOB_IMAGE` at it. An image a trigger names in
+   `run.image` moves too, on every host that runs it: point the trigger at the release's image, or rebuild yours from it
+   ([job-image.md](job-image.md)). The image goes before the worker ([why](#why-this-order)).
 4. **Upgrade and restart every worker.** In each deployment folder, `npm install --save-exact` the release's packages,
    then `pi-dispatch service restart`. On rootless Podman, run `pi-dispatch service install --force` before that
    restart: it rewrites the units this release changed and restarts Valkey when its unit changed
@@ -144,9 +145,9 @@ for what an older receiver queued, and run those jobs again.
 | An older worker, a newer job image | The worker drops what the image added to its exit line | Ship them in one window |
 | An older worker, a newer receiver or console | An older worker does not offer a secret profile declared through the panel, so the receiver can route a job that binds it to a host that refuses it | Workers first ([secrets.md](secrets.md)) |
 | A newer worker, an older receiver | The receiver drops a `run` field it does not know; the worker refuses such a job before it spends (`trigger-skew`, `wait-skew`) when it can read the triggers file | Receivers right after the workers, in the same `npm install`; run refused jobs again |
-| A receiver older than the triggers file | From 5.0.0 on, a receiver refuses a triggers file whose `version` is above what it reads: it does not start on one, and on a live edit it keeps the triggers it had. Deliveries in between match nothing, and a forge does not send them again on its own | Upgrade every receiver before any trigger uses a field that needs version 2. No field needs one yet |
-| A worker older than the settings file, `pause-windows.json` or `triggers.json` | From 5.0.0 on, the worker defers jobs as `newer-release` ("Queued or configured by a newer pi-dispatch: waits for this host's upgrade") and looks again every ten minutes. A 4.x worker ignores `version` and drops what it does not know | No file needs more than version 1 yet. Doctor's `fleet.store-versions` names the hosts ([multi-host.md](multi-host.md#what-the-panel-and-doctor-show-you)) |
-| A job queued by a newer release, on an older worker | From 5.0.0 on, the job waits (`newer-release`). A 4.x worker has no such gate and runs a job by the fields it knows. A canary from the console's Updates page queues job data version 2, which a 4.x worker would run as the trigger's ordinary job, without the candidate package | Every worker on 5.0.0 before anyone runs a canary from the Updates page ([console.md](console.md#updates)) |
+| A receiver older than the triggers file | From 5.0.0 on, a receiver refuses a triggers file whose `version` is above what it reads. It does not start on one, and a forge does not send again what it misses while it is down. On a live edit it keeps the triggers it had, so a delivery still matches those and queues its job without what the file now adds. A worker that reads the added field refuses that job (`trigger-skew`) where it can read the file | Upgrade every receiver before any trigger uses a field that needs version 2 ([what a fleet needs](#what-a-fleet-needs-before-a-trigger-leaves-something-out)) |
+| A worker older than the settings file, `pause-windows.json` or `triggers.json` | From 5.0.0 on, the worker defers jobs as `newer-release` ("Queued or configured by a newer pi-dispatch: waits for this host's upgrade") and looks again every ten minutes. A 4.x worker ignores `version` and drops what it does not know | Of these, only `triggers.json` needs more than version 1, for a trigger that leaves something out ([what a fleet needs](#what-a-fleet-needs-before-a-trigger-leaves-something-out)). Doctor's `fleet.store-versions` names the hosts ([multi-host.md](multi-host.md#what-the-panel-and-doctor-show-you)) |
+| A job queued by a newer release, on an older worker | From 5.0.0 on, the job waits (`newer-release`). A 4.x worker has no such gate and runs a job by the fields it knows. A canary from the console's Updates page queues job data version 2, which a 4.x worker would run as the trigger's ordinary job, without the candidate package. A job of a trigger that leaves something out queues version 3, which a 4.x worker runs by the fields it knows, so wider than the file says | Every worker on 5.0.0 before anyone runs a canary from the Updates page ([console.md](console.md#updates)) or a trigger leaves something out ([below](#what-a-fleet-needs-before-a-trigger-leaves-something-out)) |
 | An older `/dispatch` or console writing the settings file | A `/dispatch` from 4.3.1 or earlier drops every key it does not know (`secretBundles` included). From 5.0.0 on, an unknown key is kept | Write no setting a newer release added until every panel and console is upgraded |
 | An older console, a newer tokens file or audit log | 5.0.0 is the first release with the web console. From it on, a console keeps a token of a role it does not know (it signs in nowhere) and reads an audit row with an action it does not know as unknown, not as a broken chain | Upgrade every console before you mint a token of a new role ([console.md](console.md#managing-tokens)) |
 | Run records from different releases | From 5.0.0 on, a record carries `"v": 1`, and a reader shows a record a newer release wrote by its core facts only and leaves it out of totals. A 4.x reader reads a newer record in full and ignores fields it does not know | Nothing to do |
@@ -158,6 +159,33 @@ for what an older receiver queued, and run those jobs again.
 
 Doctor reads only workers. A receiver publishes its version for the console's Connections page instead (from 5.0.0
 on; an older receiver publishes nothing), so check the receivers there ([multi-host.md](multi-host.md#receiver-observations)).
+
+### What a fleet needs before a trigger leaves something out
+
+`run.excludeExtensions` and `run.excludeExtensionTools` need `triggers.json` at version 2 and job data at version 3
+([exclusions](exclude-tools.md#versions-and-older-hosts)). 5.0.0 is the first release that reads both. Move everything to it
+before any trigger uses either. Until then leave both out of the file: `"packages": false` and `run.excludeTools` need neither version.
+**Once either is used, no 4.3.1 writer may touch the file**: no `/dispatch` or panel of that release, and no worker of it that can disarm a one-shot.
+
+| Program | On a release from before 5.0.0, 4.3.1 among them | So |
+|---|---|---|
+| Worker | Reads the file, drops both keys and runs the job wider than the file says, on a clean record | Every worker. Doctor's `fleet.versions` names each version the workers report, and `fleet.store-versions` names one that publishes no version once a 5.0.0 host's file needs version 2 |
+| Receiver | Drops both keys from the jobs it queues. A worker that reads them refuses such a job (`trigger-skew`) where it can read the file, and runs it without them where it cannot | Every receiver. Check them on the console's Connections page: doctor cannot see them |
+| Panel, console, `/dispatch` | `/dispatch` and its panel write `triggers` alone, so both keys stay and the stamp goes (below). No release this old has a console | Every one that writes this file |
+
+**A file that lost its stamp.** A 4.3.1 `/dispatch` or panel writes `triggers` alone, and so does a 4.3.1 worker's one-shot disarm, and a hand edit can leave
+the same shape: either key, with no `"version": 2`. 5.0.0 refuses that file (`run.excludeExtensions needs triggers file version 2`, or the other key's name): a receiver, and a worker with `PI_TRIGGERS_FILE` set, do not start
+on it, and a running one keeps what it had. A write from the 5.0.0 console or `/dispatch` puts the stamp back. A 4.3.1 host loads it and drops both keys, and the job runs wider than the file says, on a clean record.
+
+The console's trigger page refuses the change while a live worker reads less or publishes no version, and names it, and while it cannot read which workers are live. It reads live
+workers alone: a receiver has no row in the worker registry and a stopped worker's row expires, so neither stops a change, whatever it reads. A hand edit is
+not stopped: doctor warns once a host's own file needs the version.
+
+**The job image.** A job with either key on an image whose `dev.pi-dispatch.capabilities` label does not list
+`loadExclusions` is refused before it spends (`job-image-load-exclusions-unsupported`). A fleet from 4.3.1 has no role map ([model roles](model-roles.md)). Once a scope has one, an image from before 5.0.0 refuses
+its jobs (`job-image-model-roles-unsupported`), and an image built with role maps but without this capability refuses a job there with `run.excludeTools`, even if its trigger never starts a child and no file uses either key: the map is the scope's, and that image would
+start a child with every tool the trigger removes. Point `PI_JOB_IMAGE`, or the trigger's `run.image`, at an image from 5.0.0 or later. Pull the published image on each host. Nothing rebuilds an image you built, by `FROM` or from a copy of
+`image/Dockerfile`: whoever maintains it rebuilds it from 5.0.0 or later and puts it on each host that runs it ([job-image.md](job-image.md)). A job with neither key, in a scope with no role map, runs on an older image as it did.
 
 ## Valkey and BullMQ
 
@@ -252,7 +280,7 @@ queued: an older BullMQ need not read what a newer one wrote. The release notes 
 
 ## What each release changed in stored state
 
-Release numbers come from the git tags. The next release is 5.0.0.
+Release numbers come from the git tags.
 
 ### 5.0.0
 
@@ -260,8 +288,10 @@ Release numbers come from the git tags. The next release is 5.0.0.
 |---|---|---|
 | Settings file (`PI_SETTINGS_FILE`) | Every writer keeps a key it does not know. An optional top-level `version`, written only when a key needs it (none does yet). A `version` you added by hand is now read. A 4.x `/dispatch` drops every key it does not know when it writes, and a 4.x worker ignores `version` | [backup.md](backup.md#a-key-or-a-file-from-a-newer-release) |
 | `pause-windows.json` | An optional `version`, as above. The writer keeps top-level keys it does not own. A 4.x writer drops them and `version`; a 4.x worker reads a newer file and drops what it does not know | [pause-windows.md](pause-windows.md#the-files-version) |
-| `triggers.json` | An optional `version`, as above. A cron `on.id` longer than 176 characters is refused. A 4.x writer (the panel, and the worker's one-shot disarm) writes `triggers` alone, dropping `version` and every other top-level block, `secretBundles` among them; a 4.x worker or receiver reads a newer file and drops what it does not know | [triggers.md](triggers.md#the-files-version) |
-| Queued jobs and the sandbox manifest | An optional version. A canary from the Updates page queues job data version 2 (issue #796), which a 4.x worker would run as the trigger's ordinary job, without the candidate package: every worker on 5.0.0 before anyone runs one. A worker defers a job or a file a newer release wrote as `newer-release`; a 4.x worker runs a job by the fields it knows | [console.md](console.md#updates), [sandbox.md](sandbox.md) |
+| `triggers.json` | An optional `version`, as above. A trigger with `run.excludeExtensions` or `run.excludeExtensionTools` makes the file version 2, which a writer stamps. A cron `on.id` longer than 176 characters is refused. A 4.x writer (the panel, and the worker's one-shot disarm) writes `triggers` alone, dropping `version` and every other top-level block, `secretBundles` among them; 5.0.0 refuses a file that holds either key after that. A 4.x worker or receiver reads a newer file and drops what it does not know, so it runs those triggers' jobs wider than the file says | [triggers.md](triggers.md#the-files-version), [what a fleet needs](#what-a-fleet-needs-before-a-trigger-leaves-something-out) |
+| Queued jobs and the sandbox manifest | An optional version. A canary from the Updates page queues job data version 2 (issue #796), which a 4.x worker would run as the trigger's ordinary job, without the candidate package: every worker on 5.0.0 before anyone runs one. A job of a trigger with either key above is job data version 3. A worker defers a job or a file a newer release wrote as `newer-release`; a 4.x worker runs a job by the fields it knows | [console.md](console.md#updates), [sandbox.md](sandbox.md), [what a fleet needs](#what-a-fleet-needs-before-a-trigger-leaves-something-out) |
+| Follow-up jobs (`/outbox`) | A follow-up job now inherits its parent's `"packages": false`, so a follow-up job of such a trigger loses the staged packages it used to load: their extensions, tools, skills and prompts. Its flow is its repository's, as every follow-up job's is, so it still starts. A 4.x worker builds the follow-up without the key, as it always did | [exclude-tools.md](exclude-tools.md) |
+| The job image's capabilities | The `loadExclusions` capability. A job with `run.excludeTools` whose scope has a role map needs it too | [what a fleet needs](#what-a-fleet-needs-before-a-trigger-leaves-something-out) |
 | Run records (`PI_LOGS_DIR`) | Written to a temporary file and renamed into place, with `"v": 1`. A record that reserved in the deployment's dollar windows says which ones (`dollars.reservedIn`: dates and a hash of the Valkey's address, never the address). Doctor's `dollars.window-reset` counts only such records, so it sees nothing of the runs before 5.0.0. Each queue job's record says when its job was queued (`jobCreatedAt`), and the Zero touch view counts a touch against a run only from then on; a record without it sets no such start. A 4.x reader ignores fields it does not know, and its sweep leaves a crash leftover `<job id>.json.<pid>.<12 hex>.tmp`, which is harmless | [backup.md](backup.md#stop-copy-start), [costs.md](costs.md#when-a-counter-resets) |
 | The web console | New: `console-tokens.json`, `console-login-codes/` and `<PI_LOGS_DIR>/console-audit/`. A token of a role a console does not know is kept and signs in nowhere. An audit row with an action or outcome a console does not know reads as unknown, not as damage. `PI_CONSOLE_AUDIT_RETENTION_DAYS` keeps the audit for its own number of days. 4.x has no console and leaves these files alone | [console.md](console.md#managing-tokens), [console.md](console.md#the-audit-log) |
 | Durable runs, steering, approvals, live transcripts, watch, zero-touch, Updates, the sandbox gateway, model failover | New Valkey keys and new files, listed in [backup.md](backup.md#what-the-valkey-volume-holds). A 4.x worker knows none of them, so a run held for an approval or waiting for its recovery is not continued | [durable-runs.md](durable-runs.md#across-versions) |
@@ -270,7 +300,7 @@ Release numbers come from the git tags. The next release is 5.0.0.
 | Valkey image | Pinned to `valkey/valkey:8.1`. Doctor's `state.older` names each of these still on `valkey/valkey:8`: a compose file's `valkey` service, a Quadlet, and a container this deployment's `up` started and still runs. `up`'s summary names that container too | [Valkey and BullMQ](#valkey-and-bullmq) |
 | Cron run ids | One reader for `repeat:<id>:<time>` and `manual:<id>:<time>` everywhere. A run record's cron id is read whatever its length, and the console and `/dispatch` name a schedule whose id is 177 to 200 characters long, which an earlier release made and showed with no id, so you can find and remove it. An id no release makes (a time with a leading 0, a `:` in the id) no longer counts as a cron run | [triggers.md](triggers.md#trigger-types-what-fires-each-one-and-what-it-runs) |
 | Model ids | A model id defined in the overlay can be the deployment's default only in the shape a trigger's `run.model` takes (issue #673). Outside it `PI_MODEL` stops the worker at boot, and a settings file holding one refuses every job | [global-pi-overlay.md](global-pi-overlay.md#custom-providers) |
-| The job image's pi | pi 1.4.0 (issue #693) and then 1.5.0 (issue #796). 59 catalog models are gone, and a trigger whose `watch.decide` names one refuses the triggers file. Each session key starts cold once, as after every pi change | [job-image.md](job-image.md#pi-150-upgrade-issue-796), [sessions.md](sessions.md#when-it-silently-doesnt-resume) |
+| The job image's pi | From 4.3.1's pi 1.2.0 to 1.5.0 (issues #693 and #796). 129 catalog models are gone and 192 are new, and a trigger whose `watch.decide` names a removed one refuses the triggers file. Each session key starts cold once, as after every pi change | [job-image.md](job-image.md#pi-150-upgrade-issue-796), [sessions.md](sessions.md#when-it-silently-doesnt-resume) |
 | Console tokens | A token may carry the `agent` role (issue #766) | [console.md](console.md#managing-tokens) |
 | The `@edgehero/pi-dispatch/defer-reasons` subpath | `dueOfScore`, `isSchedulerNext` and `DELAYED_SCORE_SHIFT` now live in `@edgehero/pi-dispatch/bullmq-internals` and are exported from both, so an import keeps working | |
 
@@ -301,8 +331,11 @@ Release numbers come from the git tags. The next release is 5.0.0.
      (version 2) before 3.0.0;
    - a triggers file with `replicas` on a trigger that is not GitHub is refused before 1.1.0, and only a hand edit
      removes the field ([replicas.md](replicas.md#upgrading-and-rolling-back));
-   - a `version` above 1 in the settings file, `pause-windows.json` or `triggers.json` makes a 5.0.0 or later worker
-     wait; a 4.x worker ignores it and drops what it does not know. No release writes one yet;
+   - a `version` above what the older release reads, in the settings file, `pause-windows.json` or `triggers.json`, makes
+     a 5.0.0 or later worker refuse `triggers.json` or `pause-windows.json` at its start, and defer jobs after a live edit or on a newer settings file; a 4.x worker ignores it and drops what it does not know. A release writes one into
+     `triggers.json` only for a trigger with `run.excludeExtensions` or `run.excludeExtensionTools`, and no release writes one
+     into the other two yet. So take both keys off every trigger before you go back to 4.x, which runs those triggers' jobs with what the keys
+     took away;
    - a console token of a role the older console does not know is kept and signs in nowhere (5.0.0 and later).
    Fix those by hand, or restore the copy you took before the upgrade. Restoring `triggers.json` re-arms the one-shots
    that fired since: keep the newer `on.disarmed` marks ([backup.md](backup.md#restoring)).

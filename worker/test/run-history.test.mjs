@@ -4,7 +4,7 @@ import { constants as fsConstants, lstatSync, readdirSync, readFileSync, symlink
 import { basename, join } from "node:path";
 import { test } from "node:test";
 import { createHmac, randomBytes } from "node:crypto";
-import { authenticExitLines, parseExitLoaded, AWAIT_INPUT_RUNNER_REASONS, PROGRESS_RUNNER_REASONS, STEER_RUNNER_REASONS, buildRecord, COST_CAP_WHYS, makeFindPreviousRun, makeLogReaper, makeLogSink, makeReadRecord, makeRecordWriter, makeSettledRecord, RECORD_CLOCK_SKEW_MS, RECORD_CORE_FIELDS, RECORD_TMP_MAX_AGE_MS, RECORD_TMP_RE, RUN_RECORD_VERSION, earlierFrom, recordOfThisJob, recordReadable, recordVerdict, recordVersionOf, UNREADABLE_RECORD, parseExitCode, parseExitContext, parseExitReason, parseExitSession, parseExitTokens, parseExitTurns, parseExitUsage, parseExitWhy, parseExitResources, parseExitOomKilled, EXIT_OOM_KILLED, MCP_RUNNER_REASONS, RESOURCE_KEYS, PLAN_RECORD_REASONS, recordSettlesAttempt, RUNNER_COMPLETED_REASONS, RUNNER_POLICY_REASONS, sanitizeJobId, TOKEN_KEYS } from "../src/run-history.mjs";
+import { authenticExitLines, parseExitLoaded, AWAIT_INPUT_RUNNER_REASONS, EXCLUDE_RUNNER_REASONS, PROGRESS_RUNNER_REASONS, STEER_RUNNER_REASONS, buildRecord, COST_CAP_WHYS, makeFindPreviousRun, makeLogReaper, makeLogSink, makeReadRecord, makeRecordWriter, makeSettledRecord, RECORD_CLOCK_SKEW_MS, RECORD_CORE_FIELDS, RECORD_TMP_MAX_AGE_MS, RECORD_TMP_RE, RUN_RECORD_VERSION, earlierFrom, recordOfThisJob, recordReadable, recordVerdict, recordVersionOf, UNREADABLE_RECORD, parseExitCode, parseExitContext, parseExitReason, parseExitSession, parseExitTokens, parseExitTurns, parseExitUsage, parseExitWhy, parseExitResources, parseExitOomKilled, EXIT_OOM_KILLED, MCP_RUNNER_REASONS, RESOURCE_KEYS, PLAN_RECORD_REASONS, recordSettlesAttempt, RUNNER_COMPLETED_REASONS, RUNNER_POLICY_REASONS, sanitizeJobId, TOKEN_KEYS } from "../src/run-history.mjs";
 import { MODEL_REF_PATTERN } from "../src/model-ref.mjs";
 import { FORGE_KINDS } from "../src/forges.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -1763,7 +1763,7 @@ test("every RUNNER_POLICY_REASONS member is a literal the runner itself writes (
 			assert.ok(new RegExp(`configError\\(.*, "${reason}"\\)`).test(steerSrc), `image/runner no longer throws a configError tagged "${reason}"`);
 			continue;
 		}
-		if (AWAIT_INPUT_RUNNER_REASONS.includes(reason) || PROGRESS_RUNNER_REASONS.includes(reason) || reason.startsWith("approval-")) {
+		if (AWAIT_INPUT_RUNNER_REASONS.includes(reason) || PROGRESS_RUNNER_REASONS.includes(reason) || EXCLUDE_RUNNER_REASONS.includes(reason) || reason.startsWith("approval-")) {
 			assert.ok(new RegExp(`configError\\(.*, "${reason}"\\)`).test(awaitSrc), `image/runner no longer throws a configError tagged "${reason}"`);
 			continue;
 		}

@@ -20,7 +20,7 @@ import { changelogExcerpt } from "./updates.mjs";
 
 export { CANARY_LOADS, CANARY_RECORD_LOADS, parsePackageCanary, recordedPackageCanary } from "./package-canary-record.mjs";
 export const PACKAGE_CANARY_SUBDIR = "canary";
-export const PACKAGE_CANARY_REASONS = Object.freeze(["package-canary-invalid", "package-canary-packages-off", "package-canary-resume", "package-canary-not-staged", "package-canary-adapter", "package-canary-version-missing", "package-canary-refused"]);
+export const PACKAGE_CANARY_REASONS = Object.freeze(["package-canary-invalid", "package-canary-packages-off", "package-canary-excluded", "package-canary-resume", "package-canary-not-staged", "package-canary-adapter", "package-canary-version-missing", "package-canary-refused"]);
 
 /** The most of a changelog read, so a huge one costs nothing. What is kept of it is `changelogExcerpt`'s. */
 const CHANGELOG_READ_MAX = 64 * 1024;
@@ -87,6 +87,9 @@ export function makePackageCanaryRuntime({ globalPiDir, env = process.env, exec 
 			if (!canary) return { refused: "package-canary-invalid" };
 			// A trigger that withholds staged packages has no staged copy to replace, and a run of it would prove nothing about the job this package goes into.
 			if (job.packages === false) return { refused: "package-canary-packages-off" };
+			// Nor one that leaves this package out (issue #800): `withCanaryPath` would put the candidate back in a job its trigger keeps it out of, for a run
+			// that says nothing about the jobs this package goes into. Free, here, before the mint, the clone and the reservation.
+			if (Array.isArray(job.excludeExtensions) && job.excludeExtensions.includes(canary.name)) return { refused: "package-canary-excluded" };
 			// A resuming trigger's next tick continues the transcript this job writes, with the candidate's work in it, so its effects would outlive the one job a person agreed to.
 			if (job.resume === true) return { refused: "package-canary-resume" };
 			if (isSubscriptionAdapter(canary.name)) return { refused: "package-canary-adapter" };

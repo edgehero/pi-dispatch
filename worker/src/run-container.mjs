@@ -7,10 +7,11 @@ import { CONTAINER_GLOBAL_PI_DIR, CONTAINER_HOME, memoryBytesOfArgs } from "./co
 import { layoutFor } from "./job-layout.mjs";
 import { cpuCeilingCenti, cpuRangeRefusal, DEFAULT_JOB_SIZE } from "./job-size.mjs";
 import { buildDockerRunArgs, CONTAINER_SESSION_FILE, insideDir } from "./docker-run.mjs";
+import { configError } from "./config.mjs";
 import { createJobNetwork, egressEnv, networkNameFor, removeJobNetwork } from "./egress.mjs";
 import { buildContainerEnv } from "./env-allowlist.mjs";
 import { authenticExitLines } from "./run-history.mjs";
-import { leavesOut, leftOutOf, rebuildLoaded } from "./loaded-record.mjs";
+import { extensionsNotHere, leavesOut, leftOutOf, rebuildLoaded } from "./loaded-record.mjs";
 import { withCanaryPath } from "./package-canary.mjs";
 import { parsePackageCanary } from "./package-canary-record.mjs";
 import { EXCLUDABLE_TOOL_NAMES } from "./triggers.mjs";
@@ -56,8 +57,9 @@ export function makeRunContainer({
 	// once per job (issue #102): the wired worker passes a resolver so a re-stage lands on the next job with
 	// no restart, while the array form stays valid for every caller that has a fixed set.
 	// Issue #800: a resolver may carry `rowOf(path)`, the `{ name, version }` its last read holds for a path, which names
-	// the runner's positional rows. On the resolver, not a second option, because every venue passes this one function
-	// through untouched, and a second option could reach a venue without it and record a job's packages with no names.
+	// the runner's positional rows, and `stageRead()`, false when this read could not say what is staged. On the resolver,
+	// not a second option, because every venue passes this one function through untouched, and a second option could reach a
+	// venue without it and record a job's packages with no names.
 	packagePaths = [],
 	// Issue #800: the names in `<overlay>/extensions`, which an overlay name on the exit line has to be one of. A seam for
 	// the tests. A folder that cannot be read holds nothing the worker can vouch for, so a name then reads as invalid.
@@ -332,19 +334,43 @@ export function makeRunContainer({
 		// parseTriggers refuses any non-boolean run.packages fail-loud at load, so a hand-edited string "false" never becomes
 		// job data this comparison could misread as an opt-out. The opt-out short-circuits BEFORE the resolver runs: a trigger
 		// that withheld the staged set has no reason to make the worker read the manifest on its behalf.
-		const stagedPaths = beforeSpawn(() => (job.packages === false ? [] : typeof packagePaths === "function" ? packagePaths() : packagePaths));
+		const everyStaged = beforeSpawn(() => (job.packages === false ? [] : typeof packagePaths === "function" ? packagePaths() : packagePaths));
+		// Issue #800: run.excludeExtensions, by the manifest name of the read that chose these paths. Here and not in the resolver, which has
+		// no job. A path this cannot name is refused rather than loaded: a resolver with no `rowOf` is no wired worker, and loading what the
+		// file takes away is the one answer this must never give. The processor reads the tag as a free refusal.
+		const excludedNames = Array.isArray(job.excludeExtensions) ? job.excludeExtensions : [];
+		const stagedRowOf = (p) => (typeof packagePaths === "function" ? (packagePaths.rowOf?.(p) ?? null) : null);
+		const stagedPaths = excludedNames.length === 0 ? everyStaged : beforeSpawn(() => everyStaged.filter((p) => {
+			const row = stagedRowOf(p);
+			if (row === null) throw configError("run.excludeExtensions names extensions, and this worker cannot tell which staged package a path is");
+			return !excludedNames.includes(row.name);
+		}));
 		// Issue #683: the staged packages' container paths are the overlay's, so on the sandbox layout their prefix moves with
 		// it (`/opt/pi-global` to `/sandbox/pi-global`). A path not under the overlay is passed as it was.
 		const movedPath = (p) => (layout !== "mounts" && typeof p === "string" && p.startsWith(`${CONTAINER_GLOBAL_PI_DIR}/`) ? `${paths.global}${p.slice(CONTAINER_GLOBAL_PI_DIR.length)}` : p);
 		const jobPackagePaths = withCanary(stagedPaths.map(movedPath));
 		// Issue #800: what the runner's `loaded` is checked against (loaded-record.mjs), from what this attempt hands the job.
-		const stagedRows = new Map(stagedPaths.map((p) => [movedPath(p), typeof packagePaths === "function" ? (packagePaths.rowOf?.(p) ?? null) : null]));
+		const stagedRows = new Map(stagedPaths.map((p) => [movedPath(p), stagedRowOf(p)]));
 		let overlayExtensions = [];
+		let overlayListed = true;
 		try {
 			overlayExtensions = globalPiDir ? readOverlayExtensions(join(globalPiDir, "extensions")) : [];
-		} catch {
+		} catch (error) {
 			overlayExtensions = [];
+			// No folder is no extensions, as `readOverlayExtensionRows` reads it: an overlay of packages alone holds none, so a typo there is a name this host does
+			// not hold, and reading it as could-not-say would record it as left out. Only a read that failed some other way holds nothing to vouch for.
+			overlayListed = error?.code === "ENOENT";
 		}
+		// Issue #800: which of those names this host holds neither way, for the record. Only where both sides were read: a job with its packages
+		// withheld never reads the stage, a manifest that did not read says nothing is staged only by accident, and a folder that could not be listed
+		// holds nothing this can vouch for, so none of them says a name is absent. `=== false`, so an array of paths or a resolver with no such word stands as read.
+		const stageRead = typeof packagePaths !== "function" || packagePaths.stageRead?.() !== false;
+		const excludedNotHere = job.packages !== false && overlayListed && stageRead ? extensionsNotHere(excludedNames, { packages: everyStaged.map(stagedRowOf), overlay: overlayExtensions }) : [];
+		const excludedTools = Array.isArray(job.excludeExtensionTools) ? job.excludeExtensionTools : [];
+		// Whether a name in run.excludeExtensionTools that no staged package or overlay extension brought stops this job (`exclude-tool-not-loaded`): only one that should have
+		// held every extension it could. A trigger withholding packages or leaving one out, a host with the overlay shut, a chained child (its
+		// parent's list, for a job that may load less) and a restricted run may each lack the tool with the name right, so there it is only said.
+		const excludeToolsStrict = excludedTools.length > 0 && job.packages !== false && excludedNames.length === 0 && allowGlobalExtensions !== false && job.parentJobId === undefined && !(job.watch || job.answerDraft || job.questionGrouping);
 		const loadedKnown = {
 			packages: jobPackagePaths.map((p) => (p === canaryPathOf() ? parsePackageCanary(job.packageCanary) : (stagedRows.get(p) ?? null))),
 			overlayExtensions,
@@ -352,7 +378,9 @@ export function makeRunContainer({
 			ownTools: EXCLUDABLE_TOOL_NAMES,
 			// The closure's value, not the job's below: this worker's switch (the host's, or a canary replay's) and a restricted
 			// job's forced one are different statements.
-			leftOut: leftOutOf(job, { allowGlobalExtensions }),
+			leftOut: leftOutOf(job, { allowGlobalExtensions, excludedNotHere }),
+			// What the line's `unmatched` positions index: PI_EXCLUDE_EXTENSION_TOOLS, as this attempt hands it over.
+			excludeExtensionTools: excludedTools,
 			// A word from a closed list, never line text: the line is what is not trusted here.
 			onViolation: (why) => log("loaded_invalid", { container: name, why }),
 			// How many and no name: the record says only that a name was left out, and this says why.
@@ -401,6 +429,9 @@ export function makeRunContainer({
 			// non-empty validated array; the guard is the same defensive shape `flow` above wears, so a
 			// hand-built job with junk in the field emits no variable rather than an empty one.
 			excludeTools: Array.isArray(job.excludeTools) && job.excludeTools.length > 0 ? job.excludeTools : undefined,
+			excludeExtensions: excludedNames.length > 0 ? excludedNames : undefined,
+			excludeExtensionTools: excludedTools.length > 0 ? excludedTools : undefined,
+			excludeToolsStrict,
 			// REQ-MCP-OPERATOR-SERVERS: the trigger's MCP server names, off `job` like excludeTools.
 			mcpServers: Array.isArray(job.mcp) && job.mcp.length > 0 ? job.mcp : undefined,
 			// Issue #625: whether the runner offers the tool a parked run ends on. Only beside a staged transcript: the

@@ -5,7 +5,8 @@ import { SANDBOX_DRAW } from "./sandbox-goldens.mjs";
 import { UPDATES_CANARY_RECORD, UPDATES_DRAW, updatesFacts } from "./updates-goldens.mjs";
 import { WORKSPACE_DRAW } from "./workspace-goldens.mjs";
 import { LOADED_DRAW } from "./loaded-goldens.mjs";
-import { GETS_CHANGES, GETS_ENTRY, GETS_HOST_ENV, GETS_MCP_JSON, TRIGGER_GETS_DRAW, asChanged, getsFile, getsHostLoads, triggerGetsPage } from "./trigger-gets-goldens.mjs";
+import { GETS_CHANGES, GETS_ENTRY, GETS_EXTENSION_OFF, GETS_HOST_ENV, GETS_MCP_JSON, GETS_TOOL_OFF, TRIGGER_GETS_DRAW, asChanged, getsFile, getsHostLoads, triggerGetsPage } from "./trigger-gets-goldens.mjs";
+import { LOADED_SAMPLES } from "./loaded-samples.mjs";
 import { ZERO_TOUCH_DRAW } from "./zero-touch-goldens.mjs";
 import { CONFIGURATION_DRAW } from "./configuration-goldens.mjs";
 import { TRIGGER_LIST_DRAW } from "./trigger-list-goldens.mjs";
@@ -237,14 +238,14 @@ function actionWorld({ fleet: fleetOver = {}, rm: rmOver = {}, updates = null, t
  * the page's own file: its Confirm, its refusals and its words are the ones a person gets. Which jobs in line it refuses is the one
  * thing a file cannot hold, so that read answers gh-c9e1, the card's job in line.
  */
-function getsWorld({ env = { PI_PROVIDER: "anthropic", PI_MODEL: "claude-sonnet-5-5", PI_MAX_COST_USD: "2", ...GETS_HOST_ENV } } = {}) {
+function getsWorld({ env = { PI_PROVIDER: "anthropic", PI_MODEL: "claude-sonnet-5-5", PI_MAX_COST_USD: "2", ...GETS_HOST_ENV }, inLineLacks = "mcp" } = {}) {
   const dir = tempDir("panel-goldens-gets-");
   const paths = { triggersPath: join(dir, "triggers.json"), settingsFile: join(dir, "settings.json"), projectsFile: null, globalPiDir: join(dir, "overlay") };
   nodeFs.writeFileSync(paths.triggersPath, getsFile());
   nodeFs.writeFileSync(paths.settingsFile, "{}");
   nodeFs.mkdirSync(paths.globalPiDir);
   nodeFs.writeFileSync(join(paths.globalPiDir, "mcp.json"), JSON.stringify(GETS_MCP_JSON));
-  const triggerEnvironment = createTriggerEnvironmentActions({ paths, env, now: () => NOW, deploymentDir: dir, readHostLoads: async () => getsHostLoads(), readSkew: async () => ({ rows: [{ jobId: "gh-c9e1", queue: "pi-jobs", field: "mcp" }], incomplete: false }) });
+  const triggerEnvironment = createTriggerEnvironmentActions({ paths, env, now: () => NOW, deploymentDir: dir, readHosts: async () => ({ hosts: ["build3", "mini1", "mini2"].map((name) => ({ name, triggersVersion: "2", jobDataVersion: "3" })) }), readHostLoads: async () => getsHostLoads(), readRunRecords: async () => [LOADED_SAMPLES.everything()], readSkew: async () => ({ rows: [{ jobId: "gh-c9e1", queue: "pi-jobs", field: inLineLacks }], incomplete: false }) });
   return { world: actionWorld({ triggerEnvironment }), body: (change) => ({ index: 2, pageDigest: triggerEntryDigest(GETS_ENTRY), ...change }) };
 }
 
@@ -753,6 +754,16 @@ const TRIGGER_GETS_CONFIRM = Object.freeze({
     const { world, body } = getsWorld();
     const answer = await world.preview("trigger-environment-edit", body({ mcp: ["linear"], excludeTools: ["bash"] }));
     return openSlotAfter(asChanged(await triggerGetsPage(), GETS_CHANGES), "p-trigger-gets", { inner: answerHtml(answer, 200, "the card's change") });
+  },
+  "trigger-gets-one-extension-off-preview.operator": async () => {
+    const { world, body } = getsWorld({ inLineLacks: "excludeExtensions" });
+    const answer = await world.preview("trigger-environment-edit", body({ excludeExtensions: ["pi-lint"] }));
+    return openSlotAfter(asChanged(await triggerGetsPage(), GETS_EXTENSION_OFF), "p-trigger-gets", { inner: answerHtml(answer, 200, "one extension left out") });
+  },
+  "trigger-gets-extension-tool-off-preview.operator": async () => {
+    const { world, body } = getsWorld({ inLineLacks: "excludeExtensionTools" });
+    const answer = await world.preview("trigger-environment-edit", body({ excludeExtensionTools: ["lint_file"] }));
+    return openSlotAfter(asChanged(await triggerGetsPage(), GETS_TOOL_OFF), "p-trigger-gets", { inner: answerHtml(answer, 200, "one of an extension's tools removed") });
   },
   "trigger-gets-refused-cost.operator": async () => {
     const { world, body } = getsWorld();

@@ -2,6 +2,7 @@
 import { CANNOT_ADOPT_REASONS } from "@edgehero/pi-dispatch/updates";
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
+import { canaryTriggersFor } from "../../updates-view.mjs";
 import { actForm } from "./config-ui.mjs";
 import { ageText, timeHtml } from "./common.mjs";
 
@@ -40,17 +41,20 @@ const notKnownLine = (state, view) => {
 	return line("attention", "attention", "Not known: the registry could not be read on the last look. It tries again on the next.");
 };
 
-/** What a canary would cost, in the row that offers it: a paid button says so where it is pressed. */
-function canaryCost(view) {
-	const triggers = data(view).triggers;
-	if (triggers.length !== 1) return "one paid job of the trigger you choose";
+/** What a canary would cost, in the row that offers it: a paid button says so where it is pressed. Null where no trigger can run this package's, since then nothing is on offer to cost anything. */
+function canaryCost(row, view) {
+	const triggers = canaryTriggersFor(data(view).triggers, row.name);
+	if (triggers.length === 0) return null;
+	// An agent's copy says that a trigger leaves something out and never what (`agentReadProjection` keeps the key and none of its names), so it cannot tell this package's trigger from another's. REJECTED: widening that copy.
+	if (view.role === "agent" && triggers.some((trigger) => trigger.excludes)) return "one job of a cron trigger that loads this package";
+	if (triggers.length > 1) return "one paid job of the trigger you choose";
 	const [only] = triggers;
 	return `one job of trigger ${only.index + 1}${only.capUsd !== null ? `, up to $${only.capUsd.toFixed(2)}` : ", up to its cap"}`;
 }
 
 function canaryForm(row, view, label = "Run a canary") {
-	const triggers = data(view).triggers;
-	if (triggers.length === 0) return html`<p class="muted">No cron trigger that loads staged packages can run a canary here.</p>`;
+	const triggers = canaryTriggersFor(data(view).triggers, row.name);
+	if (triggers.length === 0) return html`<p class="muted">No cron trigger that loads this package can run a canary here.</p>`;
 	const hidden = [["name", row.name], ["version", row.newest]];
 	const choose = triggers.length === 1
 		? null
@@ -77,9 +81,10 @@ function packageCells(row, view) {
 	const undoToo = (action) => (may && row.desired?.op === "adopt" ? html`${action}${undoForm(row)}` : action);
 	const canaryRun = (label) => (may && !row.adapter && row.newest ? canaryForm(row, view, label) : null);
 	const spent = canary && money(canary.costUsd) ? `, ${money(canary.costUsd)}` : "";
+	const cost = canaryCost(row, view);
 	switch (row.state) {
 		case "current": return [versions(row.version), line("ok", "done", "The newest version."), null];
-		case "newer": return [versions(row.version, row.newest), row.adapter ? html`<span class="muted">A reviewed subscription adapter. It moves with a pi-dispatch release.</span>` : html`${adoptedBefore}<span class="muted">Not tried yet. A canary runs ${canaryCost(view)}, with this version for that job only. ${npmLink(row)}</span>`, undoToo(canaryRun("Run a canary"))];
+		case "newer": return [versions(row.version, row.newest), row.adapter ? html`<span class="muted">A reviewed subscription adapter. It moves with a pi-dispatch release.</span>` : html`${adoptedBefore}<span class="muted">Not tried yet. ${cost === null ? null : `A canary runs ${cost}, with this version for that job only. `}${npmLink(row)}</span>`, undoToo(canaryRun("Run a canary"))];
 		case "canary-completed": return [versions(row.version, row.newest), html`${adoptedBefore}<p>${line("ok", "done", html`Canary completed, read the run: ${runLink(canary.jobId)}${spent}.`)}</p>${facts}`, undoToo(adopt)];
 		case "canary-failed": return [versions(row.version, row.newest), html`${adoptedBefore}<p>${line("failed", "failed", html`${canary.why === "did-not-load" ? "Canary failed: this version did not load." : "Canary failed: the run did not complete."} Read the run: ${runLink(canary.jobId)}${spent}.`)}</p>${npmLink(row)}`, undoToo(canaryRun("Run another canary"))];
 		case "adopting": return [versions(row.desired.from ?? row.version, row.desired.version), html`<p>${line("idle", "rerun", `Adopting ${row.desired.version}: ${done} of ${row.standings.length} hosts so far.`)}</p>${standingsList(row)}`, may ? undoForm(row) : null];
@@ -182,7 +187,8 @@ export function updatesHow(view) {
 	if (!v) return ui.card({ title: "How it keeps up", body: unreadable() });
 	const looks = v.state === "not-looking" ? "off, until PI_UPDATES_LOOK=1 is set" : v.state === "unknown" ? "unknown" : v.state === "stale" ? `late: the last was ${ageText(nowOf(view) - v.at)} ago` : "daily";
 	const first = v.triggers[0];
-	const runs = first ? `trigger ${first.index + 1}${first.id ? `, ${first.id}` : ""}${first.capUsd !== null ? `, up to its $${first.capUsd.toFixed(2)} cap` : ", up to its cap"}${v.triggers.length > 1 ? `, or ${v.triggers.length - 1} more` : ""}` : "no cron trigger can";
+	// This row is of the page and not of a package, and a trigger that leaves a package out is no choice for that one (`canaryTriggersFor`), so it says that, and each package's row says which.
+	const runs = first ? `trigger ${first.index + 1}${first.id ? `, ${first.id}` : ""}${first.capUsd !== null ? `, up to its $${first.capUsd.toFixed(2)} cap` : ", up to its cap"}${v.triggers.length > 1 ? `, or ${v.triggers.length - 1} more` : ""}${v.triggers.some((trigger) => trigger.excludes) ? ", unless it leaves that package out" : ""}` : "no cron trigger can";
 	return ui.card({ title: "How it keeps up", body: ui.facts([["Looks for updates", looks], ["Last look", Number.isFinite(v.at) ? timeHtml(v.at) : v.state === "unknown" ? "unknown" : "never"], ["A canary runs as", runs], ["Adopting", "always a person, with a preview and Undo"]], { cols: 1 }) });
 }
 

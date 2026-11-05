@@ -159,7 +159,7 @@ appear:
   added `version` to it yourself: then remove that key".
 - **Other keys in the file are kept.** Every writer of this release writes back each top-level key beside `windows`
   as it found it, in its place, so a block a later release adds survives an edit from this one. A panel or console
-  from before issue #761 writes `windows` alone, so upgrade them first.
+  from before 5.0.0 writes `windows` alone, so upgrade them first.
 
 A file that is broken (bad JSON, a bad window) is refused by the worker at boot, which keeps the last good windows on a
 live edit. Editing or deleting one window through the console, the panel or the tools refuses while the file does not load,

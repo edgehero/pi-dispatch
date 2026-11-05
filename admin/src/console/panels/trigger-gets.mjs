@@ -20,6 +20,7 @@ import * as ui from "../kit.mjs";
 import { forgeBaseLinkOf } from "../../read-model.mjs";
 import { TRIGGER_GETS_WORDS as W, triggerGetsOf } from "../../trigger-gets-view.mjs";
 import { triggerSandboxHosts } from "../trigger-sandbox.mjs";
+import { listed } from "../../words.mjs";
 import { canAct, shownPath } from "./common.mjs";
 import { fixButton, stateLine, wordsHtml } from "./loaded-parts.mjs";
 
@@ -32,6 +33,12 @@ const fileTrigger = (v) => v.data?.triggerGets?.trigger ?? detail(v).trigger ?? 
  */
 export function triggerGetsDrawn(v) {
   return v.role !== "agent" && fileTrigger(v) !== null && !v.data?.snapshot?.triggers?.invalid;
+}
+
+/** What the rest of the page says this card holds. A watch rule's has fewer rows, and one that only files an issue has none. */
+export function triggerGetsHolds(v) {
+  const trigger = fileTrigger(v);
+  return trigger.type !== "watch" ? W.holdsRows : trigger.mode === "issue" ? W.holdsIssue : W.holdsWatch;
 }
 
 /** The card's words for this view, from what the page read. */
@@ -51,6 +58,8 @@ function getsOf(v) {
     editor: v.data?.triggerEditor ?? null,
     modelChoices: v.data?.modelChoices ?? [],
     overlayServers: snapshot.overlayMcp?.servers ?? [],
+    fileRefused: (v.data?.triggerGets?.fileRefused ?? snapshot.triggers?.doesNotLoad) === true,
+    ...(Number.isSafeInteger(v.data?.triggerGets?.fileVersion) ? { fileVersion: v.data.triggerGets.fileVersion } : {}),
   }) };
 }
 
@@ -113,14 +122,19 @@ function flowBody(gets, form) {
 
 function extensionsBody(gets, form) {
   const e = gets.extensions;
-  const packagesLine = !e.packagesOn ? W.packagesOff : form ? W.packagesOn : W.packagesLoad;
+  const packagesLine = !e.packagesOn ? W.packagesOff : form ? W.packagesOn : e.anyLeftOut ? W.packagesLoadLess : W.packagesLoad;
   const toggle = form ? html`<input type="checkbox"${e.packagesOn ? html` checked` : null} data-gets-flag="packages" data-gets-on="staged packages on" data-gets-off="staged packages off">` : null;
   return html`<div class="te-items">
 ${item({ name: form ? "Staged packages" : e.packagesOn ? "Staged packages: on" : "Staged packages: off", subText: packagesLine, control: toggle, mark: form })}
-${e.items.map((entry) => item({ name: entry.name, subText: entry.sub }))}
+${e.items.map((entry) => {
+    // A moot row the file names keeps its box, disabled: what it says stays in the list an edit of the rest sends (`getsLists`).
+    const box = !form || (entry.moot && entry.on) ? null : html`<input type="checkbox"${entry.on ? html` checked` : null}${entry.moot ? html` disabled` : null} data-gets-list="excludeExtensions" data-gets-value="${entry.value}" data-gets-inverse data-gets-on="${entry.backOn}" data-gets-off="${entry.value} left out">`;
+    return item({ name: form ? entry.name : `${entry.name}: ${entry.on && !entry.moot ? "on" : "off"}`, subText: entry.sub, control: box, mark: form && !entry.moot });
+  })}
 ${item({ name: "The repository’s own", subText: W.repositoryExtensions })}
 </div>${e.none ? html`<p class="te-note">${e.noneWord}</p>` : null}${e.more > 0 ? html`<p class="te-note">And ${e.more} more past what the hosts publish.</p>` : null}
-<p class="te-note">${ui.icon("info", { size: "sm" })}<span>${W.oneExtension} ${W.newExtension} <a class="link" href="/config/updates">Open Updates</a></span></p>`;
+${form && !e.packagesOn && e.items.some((entry) => entry.moot) ? html`<p class="te-note">${ui.icon("info", { size: "sm" })}<span>${W.extensionsMoot}</span></p>` : null}
+<p class="te-note">${ui.icon("info", { size: "sm" })}<span>${form ? html`${W.extensionSwitch} ` : null}${W.newExtension} <a class="link" href="/config/updates">Open Updates</a></span></p>`;
 }
 
 function mcpBody(gets, form) {
@@ -134,24 +148,38 @@ function mcpBody(gets, form) {
 function toolsBody(gets, form) {
   const t = gets.tools;
   const tool = (entry) => (form ? chip("excludeTools", { ...entry, onWord: `${entry.label} on`, offWord: `${entry.label} off` }, { inverse: true }) : roChip(entry.label, entry.on));
-  const fromExtensions = t.fromExtensions.map((group) => html`<div>${sub(`From ${group.heading}`)}${chips(group.names.map((name) => roChip(name)))}</div>`);
+  const extensionTool = (entry) => (form && entry.switched !== false ? chip("excludeExtensionTools", { ...entry, onWord: `${entry.label} on`, offWord: `${entry.label} off` }, { inverse: true }) : roChip(entry.label, entry.on));
+  const fromExtensions = t.fromExtensions.map((group) => html`<div>${sub(`From ${group.heading}`)}${chips(group.chips.map(extensionTool))}</div>`);
   return html`<div>${sub("pi’s own")}${chips(t.own.map(tool))}</div>
 <p class="te-note">${ui.icon("info", { size: "sm" })}<span>${W.toolsOn}</span></p>
-${fromExtensions}${fromExtensions.length > 0 ? html`<p class="te-note">${ui.icon("info", { size: "sm" })}<span>${W.extensionTools}</span></p>` : null}
+${fromExtensions}${fromExtensions.length > 0 || t.otherTools.length > 0 ? html`<p class="te-note">${ui.icon("info", { size: "sm" })}<span>${W.extensionToolChip}</span></p>` : null}
 ${t.serverChips.length > 0 ? html`<div>${sub(`From ${t.servers.join(", ")}`)}${chips(t.serverChips.map(tool))}</div><p class="te-note tone-attention">${ui.icon("attention", { size: "sm" })}<span>${W.lastWay}</span></p>` : form ? html`<p class="te-note">${ui.icon("info", { size: "sm" })}<span>${W.serverToolsLater}</span></p>` : null}
-${t.other.length > 0 ? html`<div>${sub("Also in the file")}${chips(t.other.map(tool))}</div>` : null}
+${t.other.length > 0 || t.otherTools.length > 0 ? html`<div>${sub("Also in the file")}${chips([...t.other.map(tool), ...t.otherTools.map(extensionTool)])}</div>` : null}
 ${t.jobTool ? html`<div>${sub("The job’s own")}${chips(roChip("report_progress"))}</div><p class="te-note">${ui.icon("info", { size: "sm" })}<span>${W.jobTool}</span></p>` : null}`;
 }
 
-function imageBody(gets) {
+function imageBody(gets, watch = false) {
   const s = gets.secrets;
   const secrets = `${s.count > 0 ? `${s.count} named on this trigger` : "none named on this trigger"}${s.profile !== null ? `; profile ${s.profile}` : ""}`;
-  return html`<p class="te-read">${wordsHtml(gets.image.words)}</p><p class="te-read">Secrets: ${secrets}${s.optedOut ? "; it opts out of its project’s bundle" : "; a job also gets its project’s bundle, if it has one"}. <a class="link" href="/config/secrets">Open Secrets</a></p><p class="te-note">${ui.icon("info", { size: "sm" })}<span>${W.elsewhere}</span></p>`;
+  // A watch job carries no `trigger`, so the worker passes over its project's bundle as it does a manual job's (`processor.mjs`, `bundleManual`), whatever the rule says of one.
+  const bundle = watch ? "" : s.optedOut ? "; it opts out of its project’s bundle" : "; a job also gets its project’s bundle, if it has one";
+  return html`<p class="te-read">${wordsHtml(gets.image.words)}</p><p class="te-read">Secrets: ${secrets}${bundle}. <a class="link" href="/config/secrets">Open Secrets</a></p><p class="te-note">${ui.icon("info", { size: "sm" })}<span>${W.elsewhere}</span></p>`;
+}
+
+/**
+ * A watch rule's job loads nothing a host's publication lists and reaches no server, so the card reads less: its model, its flow, one sentence for the rest, its image. REJECTED: the usual rows with a
+ * branch in each, which said a switch's words of a rule with no switch ("Staged packages: on", a package "on"), and a row per host-published name no such job can load. One that only files an issue starts no agent and no container.
+ */
+function watchRows(gets, trigger, fix) {
+  if (trigger.mode === "issue") return note([W.watchIssue]);
+  const removes = trigger.excludeTools ?? [];
+  const can = html`<p class="te-read">${W.watchLoads}</p>${removes.length > 0 ? html`<p class="te-read">The file removes ${listed(removes)}.</p>` : null}`;
+  return html`${sec("bolt", "Model", "what its jobs call", modelBody(gets, false), gets.last.Model)}${sec("skill", "Flow and skills", "what it is told to do", flowBody(gets, false), gets.last.Skills, gets.problems.Skills ?? null, fix(gets.problems.Skills))}${sec("flows", "What it can use", "whichever host runs it", can, gets.last.Tools)}${sec("box", "Image and secrets", "set elsewhere", imageBody(gets, true), gets.last.pi)}`;
 }
 
 /**
  * The card. `form` is drawn for an operator on a console that takes changes, on a row the page read whole. A watch rule's `run` takes
- * only some of these fields, so it gets the same rows with no form; a row the file did not give back gets no digest, so no form either.
+ * only some of these fields, so it gets `watchRows` with no form; a row the file did not give back gets no digest, so no form either.
  */
 export function triggerGets(v) {
   const got = getsOf(v);
@@ -161,15 +189,16 @@ export function triggerGets(v) {
   const form = canAct(v) && typeof digest === "string" && trigger.type !== "watch";
   const repositoryHref = gets.record === null ? null : forgeBaseLinkOf(gets.record, v.env);
   const fix = (problem) => (problem && v.role === "operator" ? problem.fixes.filter((one) => one.kind !== "trigger").map((one) => fixButton(one, { repositoryHref })) : null);
-  const hosts = html`<div class="te-hosts" role="list" aria-label="Where its jobs run">${gets.pills.map((pill) => html`<span role="listitem" class="${pill.tone === "ok" ? "te-host te-host--ok" : pill.tone === "attention" ? "te-host te-host--att" : "te-host"}">${ui.icon(pill.icon, { size: "sm" })}<b>${pill.name}</b> ${pill.word}</span>`)}</div>${note(gets.hostsNote, { icon: "doctor" })}${note(gets.quote, { icon: "chain" })}`;
-  const rows = html`${sec("bolt", "Model", "what its jobs call", modelBody(gets, form), gets.last.Model)}${sec("skill", "Flow and skills", "what it is told to do", flowBody(gets, form), gets.last.Skills, gets.problems.Skills ?? null, fix(gets.problems.Skills))}${sec("layers", "Extensions", "code its jobs load", extensionsBody(gets, form), gets.last.Extensions, gets.problems.Extensions ?? null, fix(gets.problems.Extensions))}${sec("plug", "MCP servers", "outside systems it reaches", mcpBody(gets, form), gets.last.MCP, gets.problems.MCP ?? null, fix(gets.problems.MCP))}${sec("flows", "Tools", "what the agent may use", toolsBody(gets, form), gets.last.Tools)}${sec("box", "Image and secrets", "set elsewhere", imageBody(gets), gets.last.pi)}`;
-  const say = !canAct(v) && v.role === "operator" ? note([W.readOnly]) : trigger.type === "watch" ? note([W.watch]) : canAct(v) && !form ? note([W.unreadRow], { icon: "attention", tone: "attention" }) : null;
+  const watch = trigger.type === "watch";
+  const hosts = watch ? (trigger.mode === "issue" ? null : note(gets.quote, { icon: "chain" })) : html`<div class="te-hosts" role="list" aria-label="Where its jobs run">${gets.pills.map((pill) => html`<span role="listitem" class="${pill.tone === "ok" ? "te-host te-host--ok" : pill.tone === "attention" ? "te-host te-host--att" : "te-host"}">${ui.icon(pill.icon, { size: "sm" })}<b>${pill.name}</b> ${pill.word}</span>`)}</div>${note(gets.hostsNote, { icon: "doctor" })}${note(gets.quote, { icon: "chain" })}`;
+  const rows = watch ? watchRows(gets, trigger, fix) : html`${sec("bolt", "Model", "what its jobs call", modelBody(gets, form), gets.last.Model)}${sec("skill", "Flow and skills", "what it is told to do", flowBody(gets, form), gets.last.Skills, gets.problems.Skills ?? null, fix(gets.problems.Skills))}${sec("layers", "Extensions", "code its jobs load", extensionsBody(gets, form), gets.last.Extensions, gets.problems.Extensions ?? null, fix(gets.problems.Extensions))}${sec("plug", "MCP servers", "outside systems it reaches", mcpBody(gets, form), gets.last.MCP, gets.problems.MCP ?? null, fix(gets.problems.MCP))}${sec("flows", "Tools", "what the agent may use", toolsBody(gets, form), gets.last.Tools)}${sec("box", "Image and secrets", "set elsewhere", imageBody(gets), gets.last.pi)}`;
+  const say = !canAct(v) && v.role === "operator" ? note([W.readOnly]) : watch ? note([W.watch]) : canAct(v) && !form ? note([W.unreadRow], { icon: "attention", tone: "attention" }) : null;
   // The page's banner promises a link to the refusal that sent a person here, for the actions that keep one. This one does not.
   const unlinked = form && v.query?.becauseRun ? note([W.notLinked], { icon: "attention", tone: "attention" }) : null;
   const body = form
     ? html`<form class="act te-form" data-action="trigger-environment-edit" data-structured="trigger-gets" autocomplete="off"><fieldset data-config-controls disabled><input type="hidden" name="index" value="${String(trigger.index)}" data-type="int"><input type="hidden" name="pageDigest" value="${digest}">${rows}<div class="te-bar" role="status" data-gets-bar hidden><span class="te-bar__t"><b data-gets-count data-one="${W.barOne}" data-many="${W.barMany}"></b> <span data-gets-words></span><small>${W.reloadDrops}</small></span><span class="te-bar__a">${ui.btn({ type: "submit", label: "Preview the change", kind: "primary" })}<button class="btn" type="reset">Discard</button></span></div></fieldset><noscript><p class="muted">${W.noScript}</p></noscript></form>`
     : rows;
-  return ui.card({ title: W.title, sub: `as a job of trigger ${trigger.index + 1} would start, from each host’s last doctor run`, body: html`${hosts}${say}${unlinked}${body}` });
+  return ui.card({ title: W.title, ...(watch || gets.fileRefused ? {} : { sub: `as a job of trigger ${trigger.index + 1} would start, from each host’s last doctor run` }), body: html`${hosts}${say}${unlinked}${body}` });
 }
 
 /** How a change applies, for whoever reads the card. */
@@ -177,6 +206,8 @@ export function triggerGetsHow(v) {
   if (getsOf(v) === null) return null;
   const line = (icon, bold, rest) => html`<li>${ui.icon(icon)}<span><b>${bold}</b> ${rest}</span></li>`;
   const noTool = line("shield", "A person, at the console.", W.noTool);
-  if (!canAct(v)) return ui.card({ title: W.how, body: html`<ul class="te-list">${line("eye", "Read only here.", v.role === "operator" ? W.readOnly : W.viewer)}${noTool}</ul>` });
-  return ui.card({ title: W.how, body: html`<ul class="te-list">${line("edit", "Change it in place.", "A switch for the staged packages and each MCP server, a chip for each tool, a picker for the model and the flow.")}${line("skill", "The flow picker is not the whole list.", W.flowPicker)}${line("eye", "Nothing is written", "until you preview the change and confirm it.")}${noTool}${line("rerun", "Undo", "puts back the keys the change touched, as they were. Where this page could not write them, the preview says so.")}</ul>` });
+  const watch = fileTrigger(v).type === "watch";
+  // Of a watch rule this card only reads, and the page does not: its Edit form still writes what a rule takes, such as `maxTurns`.
+  if (!canAct(v) || watch) return ui.card({ title: W.how, body: html`<ul class="te-list">${line("eye", watch ? "This card only reads." : "Read only here.", watch ? W.watch : v.role === "operator" ? W.readOnly : W.viewer)}${noTool}</ul>` });
+  return ui.card({ title: W.how, body: html`<ul class="te-list">${line("edit", "Change it in place.", "A switch for the staged packages, each extension and each MCP server, a chip for each tool, a picker for the model and the flow.")}${line("skill", "The flow picker is not the whole list.", W.flowPicker)}${line("eye", "Nothing is written", "until you preview the change and confirm it.")}${noTool}${line("rerun", "Undo", "puts back the keys the change touched, as they were. Where this page could not write them, the preview says so.")}</ul>` });
 }

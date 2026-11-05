@@ -26,7 +26,8 @@ export async function readHostLoadsView(redis, { now = () => Date.now(), readLoa
   }
   const beats = new Map(live.map((host) => [host?.name, host]));
   const text = (value) => (typeof value === "string" && value !== "" ? value : null);
-  const withBeat = (row) => ({ ...row, image: text(beats.get(row.name)?.image), piVersion: text(beats.get(row.name)?.piVersion) });
+  // `triggersVersion` is what that host's worker reads of the triggers file, for a page that says whether it would hold a file's jobs.
+  const withBeat = (row) => ({ ...row, image: text(beats.get(row.name)?.image), piVersion: text(beats.get(row.name)?.piVersion), triggersVersion: text(beats.get(row.name)?.triggersVersion) });
   if (got?.unreachable || !Array.isArray(got?.hosts)) return { unreachable: true, hosts: live.filter((host) => typeof host?.name === "string").map((host) => withBeat({ name: host.name, state: "unknown", why: "unreachable" })), more: 0 };
   return { hosts: got.hosts.map(withBeat), more: Number.isSafeInteger(got.more) ? got.more : 0 };
 }

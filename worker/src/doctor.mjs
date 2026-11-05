@@ -141,6 +141,7 @@ import { ALLOC_PLAN_KEY, NO_ENVELOPE_FINGERPRINT } from "./allocation.mjs";
 import { assignCheckIds, buildDoctorRecord, doctorIntervalHours, publishRedactor, secretValuesIn } from "./doctor-results.mjs";
 import { olderStateFindings as olderStateFindingsReal, VALKEY_CONTAINER } from "./older-state.mjs";
 import { DOCTOR_PUBLISH_SKIPPED_PREFIX } from "./doctor-spawner.mjs";
+import { extensionsNotHere } from "./loaded-record.mjs";
 import { buildHostLoads, flowProbes, flowTierOf, mcpRowsOf, pathIsThere, readOverlayExtensionRows, readOverlaySkillNames } from "./host-loads.mjs";
 
 const NODE_FLOOR = [22, 19]; // pi's engine floor (22.19.0)
@@ -1890,10 +1891,10 @@ export async function collectChecks(shellVars, seams) {
 	// run.packages: true, which arms nothing any more but is still an operator statement of intent.
 	// Issue #761: the version tables, and the versions this build reads, that the store-version needs are judged by,
 	// per store: `{ settings: { supported, table, valueTable }, pauseWindows: { supported, table }, triggers: { supported,
-	// runTable, blockTable }, jobData: { table } }`, each part the store module's own when absent. Every table is empty in
-	// this release, so this seam is how a test drives a need above 1 through the real collection before a table has a row.
+	// runTable, blockTable }, jobData: { table } }`, each part the store module's own when absent. This seam is how a test
+	// drives a need above 1 through the real collection, for a store whose table has no row of its own and at a version no row holds yet.
 	const versionTables = seams.versionTables ?? {};
-	const { watchSources: triggerWatchSources, watchRules: triggerWatchRules, modelRoles: triggerModelRoles, secretBundles: triggerBundles, requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, recovering, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, costCaps, modelRuns, triggersVersionNeed, jobDataVersionNeed, parseError, parseNewer: triggersFileIsNewer, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTables);
+	const { watchSources: triggerWatchSources, watchRules: triggerWatchRules, modelRoles: triggerModelRoles, secretBundles: triggerBundles, requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, recovering, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, excludedNames, costCaps, modelRuns, triggersVersionNeed, jobDataVersionNeed, parseError, parseNewer: triggersFileIsNewer, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTables);
 	const modelRoleProjects = readProjectFacts(env, fileExists).projects;
 	const scopedLimitFacts = readScopedLimitFacts(env, fileExists);
 	const pauseWindowFacts = readPauseWindowFacts(env, fileExists, versionTables.pauseWindows);
@@ -2053,7 +2054,7 @@ export async function collectChecks(shellVars, seams) {
 		const staged = readStagedSkills({ globalPiDir: env.PI_GLOBAL_PI_DIR, readFile: stagedProbes.readFile, fileExists: stagedProbes.fileExists, readDir: stagedProbes.readDir });
 		const groups = new Map();
 		for (const f of flows) {
-			const key = JSON.stringify([f.flow, f.folder, f.skillsDir, f.packages]);
+			const key = JSON.stringify([f.flow, f.folder, f.skillsDir, f.packages, f.excludeExtensions]);
 			if (!groups.has(key)) groups.set(key, { ...f, labels: [], triggers: [] });
 			groups.get(key).labels.push(f.label);
 			groups.get(key).triggers.push(f.index);
@@ -2089,7 +2090,38 @@ export async function collectChecks(shellVars, seams) {
 					ok: false,
 					warn: true,
 					label: `Trigger flow "${g.flow}" resolves in NO tier visible here (${at})`,
-					fix: `checked: ${checked.join(", ") || "nothing checkable"}${unknown.length > 0 ? `; not checkable here: ${unknown.join(", ")}` : ""} -- commit .pi/skills/${g.flow}/SKILL.md, add the skill to run.skillsDir or the overlay skills/, or stage a package shipping it; a job of this trigger runs without the flow it names (the runner logs flow_not_loaded) and still exits 0`,
+					fix: `checked: ${checked.join(", ") || "nothing checkable"}${unknown.length > 0 ? `; not checkable here: ${unknown.join(", ")}` : ""} -- commit .pi/skills/${g.flow}/SKILL.md, add the skill to run.skillsDir or the overlay skills/, or stage a package shipping it (one already staged must be off this trigger's run.excludeExtensions, and run.packages must not be false); a job of this trigger runs without the flow it names (the runner logs flow_not_loaded) and still exits 0`,
+				});
+			}
+		}
+	}
+
+	// Issue #800: a name in run.excludeExtensions that this host holds neither way. No job refuses over it and nothing loads for it, since a host's overlay
+	// and stage are its own and the file is shared, but a typo in a list that keeps code out of a job reads as kept out. ⚠ and never ✗. Only against what
+	// was read: an overlay or manifest that cannot be read says nothing of a name, and has its own line. A trigger that withholds the packages is passed
+	// over: its name may be a package's, which that trigger never looks for.
+	{
+		const overlayDir = env.PI_GLOBAL_PI_DIR;
+		let held = null;
+		try {
+			const entries = readOverlayExtensionRows(overlayDir, { fs: seams.flowFs ?? { readFileSync, readdirSync, statSync } });
+			const manifest = overlayDir && fileExists(join(overlayDir, PACKAGES_SUBDIR, STAGE_MANIFEST)) ? readStageManifest({ globalPiDir: overlayDir, readFile: (p) => readFileSync(p, "utf8"), fileExists }) : { packages: [] };
+			if (entries !== null && manifest !== null) held = { overlay: entries.map((row) => row.name), packages: manifest.packages };
+		} catch {
+			held = null;
+		}
+		if (held !== null) {
+			const lines = new Map();
+			for (const { label, names, packages } of excludedNames) {
+				if (!packages) continue;
+				for (const name of extensionsNotHere(names, held)) lines.set(name, [...(lines.get(name) ?? []), label]);
+			}
+			for (const [name, labels] of lines) {
+				checks.push({
+					ok: false,
+					warn: true,
+					label: `run.excludeExtensions names ${JSON.stringify(name)}, and this host has no staged package or overlay extension of that name (${labels.join(", ")})`,
+					fix: "nothing loads for it here, so a job is not refused: fix the name if it is a typo, since a misspelled name keeps nothing out on a host that has the real one",
 				});
 			}
 		}
@@ -3476,7 +3508,7 @@ export async function collectChecks(shellVars, seams) {
 			}
 
 			// Staged pi packages (REQ-GLOBAL-PI-OVERLAY): pinned third-party code the operator staged with
-			// `import-pi --with-packages`, loaded by every job whose trigger did not set `run.packages: false`.
+			// `import-pi --with-packages`, loaded by every job whose trigger did not set `run.packages: false` or name it in `run.excludeExtensions`.
 			// Keyed on the dir the same way the extensions pair above is, so a deployment that stages none
 			// prints nothing here.
 			const packagesDir = join(overlay, PACKAGES_SUBDIR);
@@ -3532,7 +3564,7 @@ export async function collectChecks(shellVars, seams) {
 						});
 					}
 					// There is no dormant state left to report: a staged, manifested package loads into every
-					// job whose trigger did not opt out -- INCLUDING jobs no trigger file describes at all
+					// job whose trigger did not opt out or leave it out by name -- INCLUDING jobs no trigger file describes at all
 					// (a matched webhook, `dispatch_run`, the CLI). So "staged" IS "loading", and the honest
 					// line says so and names how much of the trigger file withholds it. Warn, never fail: this
 					// is the intended posture, and it is stated so a forgotten stage cannot read as inert.
@@ -3541,8 +3573,9 @@ export async function collectChecks(shellVars, seams) {
 					checks.push({
 						ok: false,
 						warn: true,
-						label: `Staged packages LOAD in every job (${optingOut} trigger(s) opt out with run.packages: false)`,
-						fix: "they run third-party code against adversarial input with open egress -- vet each, keep every version exactly pinned, and set run.packages: false on any trigger that must not load them",
+						// Counted against this host's manifest: a name in the list may be an overlay extension, which withholds no package, and a trigger with packages off is counted above.
+						label: `Staged packages LOAD in every job (${optingOut} trigger(s) opt out with run.packages: false, ${(excludedNames ?? []).filter((listed) => listed.packages && listed.names.some((name) => manifest.packages.some((staged) => staged.name === name))).length} leave one or more out with run.excludeExtensions)`,
+						fix: "they run third-party code against adversarial input with open egress -- vet each, keep every version exactly pinned, and on a trigger that must not load them set run.packages: false, or name one in run.excludeExtensions",
 					});
 
 					// A staged package whose --ignore-scripts build never ran (issue #102, comment 1). The
@@ -4676,7 +4709,7 @@ export async function collectChecks(shellVars, seams) {
 						ok: false,
 						warn: true,
 						label: `settings overlay ${settingsFile} holds ${unknown.length === 1 ? "a key" : `${unknown.length} keys`} this build does not know (${shown.join(", ")}${more > 0 ? `, and ${more} more` : ""}): the worker ignores ${unknown.length === 1 ? "it" : "them"}`,
-						fix: "a key from a newer release is ignored here and kept by every panel and console from issue #761's release on, but an earlier one (4.3.1 included) drops every key it does not know when it writes this file, secretBundles included, so upgrade every panel and console first; a misspelt key is kept too, so remove it if it is a typo",
+						fix: "a key from a newer release is ignored here and kept by every panel and console from 5.0.0 on, but an earlier one (4.3.1 included) drops every key it does not know when it writes this file, secretBundles included, so upgrade every panel and console first; a misspelt key is kept too, so remove it if it is a typo",
 					});
 				}
 				// Issue #501 (PR #542's review): a VALID overlay can still break the dollar invariant once merged over env
@@ -5213,7 +5246,8 @@ function nodeCheck(version) {
  * that every image a trigger names is actually on this host -- with `--pull=never` nothing will fetch one at
  * job time, so this is the only warning that arrives BEFORE the trigger fires at 03:00.
  *
- * `optingOut` counts `run.packages: false` -- the only thing that now withholds the staged set from a job.
+ * `optingOut` counts `run.packages: false` -- the only thing that withholds the whole staged set from a job. `run.excludeExtensions`
+ * withholds one package at a time, and `excludedNames` holds those names.
  * `requiring` counts explicit `run.packages: true`, which arms nothing any more but is still an operator
  * asserting "this flow needs those packages"; that assertion is what makes an empty stage a hard failure.
  *
@@ -6090,7 +6124,7 @@ export function storeVersionNeeds({ settingsFile, fileExists, pauseWindowFacts, 
  * own file needs) is above 1, a WARNING naming the peers that publish that field below the need (they defer what the
  * file touches until they are upgraded) and one naming the peers that publish no such field at all (workers from before
  * the field: they read the file without its version and drop what they do not know, which can widen a job). Nothing
- * at all while every need is 1, which is every deployment today, since no store's table has a row yet. Hosts are named,
+ * at all while every need is 1, which is a deployment whose files use nothing a table has a row for. Hosts are named,
  * never a file's content. `fleetSizeChecks` keeps its own line: a peer without `limitsVersion` still reads version 2.
  */
 export function fleetStoreVersionChecks(needs, peers) {
@@ -6528,7 +6562,7 @@ function triggerLabel(t, index) {
 }
 
 function readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTables = {}) {
-	const none = { watchSources: {}, watchRules: 0, modelRoles: {}, secretBundles: {}, requiring: 0, waiting: 0, listing: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, recovering: 0, replicating: 0, instructing: 0, commands: 0, secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], folders: [], images: [], imageRoutes: [], namedBackends: [], skillsDirs: [], forges: [], repositories: [], flows: [], costCaps: [], modelRuns: [], triggersVersionNeed: 1, jobDataVersionNeed: 1, parseError: null, parseNewer: false, path: null };
+	const none = { watchSources: {}, watchRules: 0, modelRoles: {}, secretBundles: {}, requiring: 0, waiting: 0, listing: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, recovering: 0, replicating: 0, instructing: 0, commands: 0, secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], folders: [], images: [], imageRoutes: [], namedBackends: [], skillsDirs: [], forges: [], repositories: [], flows: [], excludedNames: [], costCaps: [], modelRuns: [], triggersVersionNeed: 1, jobDataVersionNeed: 1, parseError: null, parseNewer: false, path: null };
 	try {
 		// Unset falls back to ./triggers.json in cwd, MIRRORING the receiver's own default
 		// (receiver/src/config.mjs) -- the two must read the same file, or doctor preflights a deployment
@@ -6665,8 +6699,11 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTable
 					folder: typeof t.run.folder === "string" ? t.run.folder : null,
 					skillsDir: typeof t.run.skillsDir === "string" ? t.run.skillsDir : null,
 					packages: t.run.packages !== false,
+					excludeExtensions: Array.isArray(t.run.excludeExtensions) ? t.run.excludeExtensions : [],
 				}))
 				.filter((f) => typeof f.flow === "string"),
+			// Issue #800: each trigger's run.excludeExtensions, for the line that says a name is on neither side of this host.
+			excludedNames: triggers.flatMap((t, index) => (Array.isArray(t.run.excludeExtensions) ? [{ label: triggerLabel(t, index), names: t.run.excludeExtensions, packages: t.run.packages !== false }] : [])),
 			// Issue #501: every trigger that sets run.maxCostUsd, with the label the cap check names it by. The value
 			// already parsed (the loader validated it), so the check below only compares.
 			costCaps: triggers.map((t, index) => ({ label: triggerLabel(t, index), maxCostUsd: t.run.maxCostUsd })).filter((r) => r.maxCostUsd !== undefined && r.maxCostUsd !== null),

@@ -166,6 +166,9 @@ export function filter(eventName, subset, cfg, selfId, deliveryId, closerAuthori
 			// dropped exclusion runs the job WITH the tool, the destructive absence the loader's own sweep
 			// refuses a misspelling for, arriving through the plumbing instead of the spelling.
 			...(resolved.excludeTools !== undefined ? { excludeTools: resolved.excludeTools } : {}),
+			// Issue #800, each its own spread by the same rule: a dropped list runs the job with what the file takes away.
+			...(resolved.excludeExtensions !== undefined ? { excludeExtensions: resolved.excludeExtensions } : {}),
+			...(resolved.excludeExtensionTools !== undefined ? { excludeExtensionTools: resolved.excludeExtensionTools } : {}),
 			// REQ-MCP-OPERATOR-SERVERS. Its own spread, the excludeTools rule above: a dropped list runs
 			// the job without its servers.
 			...(resolved.mcp !== undefined ? { mcp: resolved.mcp } : {}),
@@ -252,7 +255,7 @@ function routeIssueLabel(subset, triggers) {
 		// A command rule (issue #189) skips flow resolution entirely: the label match IS the dispatch.
 		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 		packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
-		image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools, mcp: rule.mcp,
+		image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools, excludeExtensions: rule.excludeExtensions, excludeExtensionTools: rule.excludeExtensionTools, mcp: rule.mcp,
 		provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models, fallbackModels: rule.fallbackModels, maxCostUsd: rule.maxCostUsd,
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,
@@ -334,7 +337,7 @@ function routeComment(subset, triggers, knownFlows, assumeParked = false) {
 		// The single comment trigger IS the matched rule here, so its opt-in is the job's. A `<phrase>
 		// <flow>` override changes WHICH flow runs, never which triggers.json entry authorized it.
 		packages: triggers.comment.packages,
-		image: triggers.comment.image, backend: triggers.comment.backend, excludeTools: triggers.comment.excludeTools, mcp: triggers.comment.mcp,
+		image: triggers.comment.image, backend: triggers.comment.backend, excludeTools: triggers.comment.excludeTools, excludeExtensions: triggers.comment.excludeExtensions, excludeExtensionTools: triggers.comment.excludeExtensionTools, mcp: triggers.comment.mcp,
 		provider: triggers.comment.provider, model: triggers.comment.model, maxTurns: triggers.comment.maxTurns, models: triggers.comment.models, fallbackModels: triggers.comment.fallbackModels, maxCostUsd: triggers.comment.maxCostUsd,
 		skillsDir: triggers.comment.skillsDir,
 		secrets: triggers.comment.secrets,
@@ -444,7 +447,7 @@ function routePullRequest(subset, triggers, action) {
 			// A command rule (issue #189) skips flow resolution entirely: the rule match IS the dispatch.
 			...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 			packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
-			image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools, mcp: rule.mcp,
+			image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools, excludeExtensions: rule.excludeExtensions, excludeExtensionTools: rule.excludeExtensionTools, mcp: rule.mcp,
 			provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models, fallbackModels: rule.fallbackModels, maxCostUsd: rule.maxCostUsd,
 			skillsDir: rule.skillsDir,
 			secrets: rule.secrets,
@@ -566,7 +569,7 @@ function routeClose(rules, number, closerAuthorized, matchedFor, targetFor) {
 		// A command rule (issue #189) skips flow resolution entirely: the rule match IS the dispatch.
 		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 		packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
-		image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools, mcp: rule.mcp,
+		image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools, excludeExtensions: rule.excludeExtensions, excludeExtensionTools: rule.excludeExtensionTools, mcp: rule.mcp,
 		provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models, fallbackModels: rule.fallbackModels, maxCostUsd: rule.maxCostUsd,
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,

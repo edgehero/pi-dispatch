@@ -20,7 +20,8 @@ import { isPackageName } from "./package-names.mjs";
  * WHAT SURVIVES IT, said plainly. Three things the line alone says, which the worker holds to a shape because it has nothing
  * to compare them with, so a repository extension in the same process can forge each:
  *   - an extension tool's name, `LOADED_TOOL_NAME_RE`: no space, no markup, no path, though `ignore-all-previous` passes. Nothing
- *     acts on one here. A later switch that excludes a tool by name could only narrow what a job has, and a wrong one would refuse the job.
+ *     acts on one here. A trigger's page offers one to switch off, and a person who does writes it to `run.excludeExtensionTools`, which can only narrow what a
+ *     job has; at worst a forged name, which no package or overlay extension brought, stops that trigger's strict jobs.
  *   - `pi`, `PI_VERSION_RE`: three dotted numbers, at most 32 characters. Digits, then, and no word.
  *   - every count, an integer up to `LOADED_COUNT_MAX`. It can be wrong, and a forger can spell digits in a run of them.
  * A `pi` holding one of the job's secrets or a known token's shape is refused anyway, and such a tool name is withheld (`known.redact`); a secret
@@ -48,7 +49,7 @@ export const LOADED_LINE_VERSION = 1;
  */
 export const LOADED_RUNNER_WORDS = Object.freeze(["reported", "absent", "invalid", "cut"]);
 /** The most the field may take on a record, serialized. Measured against every cap in the tests. */
-export const LOADED_RECORD_MAX_BYTES = 16 * 1024;
+export const LOADED_RECORD_MAX_BYTES = 24 * 1024;
 /**
  * The largest count the field may hold, anywhere: past it the whole field is a violation. A package row, a server and `active`
  * have tighter clamps below; this bounds what has none (`tiers`, which keep true totals, `cut`'s counts and the `problems`
@@ -103,6 +104,8 @@ const PI_VERSION_MAX = 32;
 const LEFT_OUT_TOOL_RE = /^[A-Za-z][A-Za-z0-9_-]{0,47}\*?$/;
 /** Pi's own, the MCP tools and a pattern per server of a trigger's at most eight (triggers.mjs): far under this. */
 const LEFT_OUT_TOOLS_MAX = 32;
+/** The most names `run.excludeExtensions` or `run.excludeExtensionTools` takes: the loader refuses more, by this number, so a record holds all of them. */
+export const LEFT_OUT_NAMES_MAX = 16;
 /** How many own tools a line may name, a bound on a list `known.ownTools` then judges by name. */
 const OWN_TOOLS_MAX = 16;
 
@@ -117,6 +120,22 @@ const isOverlayName = (value) => typeof value === "string" && LOADED_OVERLAY_NAM
 const slotMax = (slot) => (slot < FIRST_PROBLEM_SLOT ? LOADED_MAX_COUNT : LOADED_MAX_PROBLEM_COUNT);
 const rowFields = (row) => Object.fromEntries(LOADED_ROW.map((name, slot) => [name, row[slot]]));
 
+/** A name in `run.excludeExtensions`: a package's manifest name, or an overlay entry's. */
+const isExcludedName = (value) => isPackageName(value) || isOverlayName(value);
+
+/**
+ * Whether `name` in `run.excludeExtensions` means this first path segment of the overlay's `extensions/`: the runner's rule, restated
+ * because the worker cannot import what ships in the job image, and held to it by a test.
+ */
+export function overlayEntryNamed(name, segment) {
+	return name === segment || name === segment.replace(/\.(?:ts|js)$/, "");
+}
+
+/** Which names neither a staged package nor an overlay entry on this host holds, from what the worker read: `{ name }` rows and a folder listing. */
+export function extensionsNotHere(names, { packages = [], overlay = [] } = {}) {
+	return names.filter((name) => !packages.some((row) => row?.name === name) && !overlay.some((segment) => overlayEntryNamed(name, segment)));
+}
+
 /**
  * What the worker itself left out of this job, in its own words, because the runner cannot tell: it reads no `run.packages`
  * and sees only what reached it, so `"packages": false` and nothing staged read the same from inside (env-allowlist.mjs).
@@ -124,15 +143,32 @@ const rowFields = (row) => Object.fromEntries(LOADED_ROW.map((name, slot) => [na
  * or a canary replay, which runs every job with the overlay shut (canary-runtime.mjs). Not the value handed to a restricted
  * job, which is forced off for it alone: that is `restricted`, a different statement with a different fix.
  * `tools` keeps what passes the shape. The loader validated the field, so a name failing here is a hand-built job's.
+ * `run.excludeExtensions` splits in two: `extensionsNotHere` the names this host holds neither way, so this run left out nothing for
+ * them, and `extensions` the rest, what it left out or could not say of. The caller works out the first, and names none of them where
+ * it read no stage or no folder. `extensionTools` is `run.excludeExtensionTools`. Each only when it names something, so every record
+ * from before them, and every run with none, keeps its bytes.
  */
-export function leftOutOf(job, { allowGlobalExtensions = true } = {}) {
+export function leftOutOf(job, { allowGlobalExtensions = true, excludedNotHere = [] } = {}) {
 	const tools = Array.isArray(job?.excludeTools) ? [...new Set(job.excludeTools.filter((name) => typeof name === "string" && LEFT_OUT_TOOL_RE.test(name)))].slice(0, LEFT_OUT_TOOLS_MAX) : [];
-	return { tools, packages: job?.packages === false, overlayExtensions: allowGlobalExtensions === false, restricted: Boolean(job?.watch || job?.answerDraft || job?.questionGrouping) };
+	const named = (list, ok) => (Array.isArray(list) ? [...new Set(list.filter(ok))].slice(0, LEFT_OUT_NAMES_MAX) : []);
+	const asked = named(job?.excludeExtensions, isExcludedName);
+	const notHere = asked.filter((name) => excludedNotHere.includes(name));
+	const extensions = asked.filter((name) => !notHere.includes(name));
+	const extensionTools = named(job?.excludeExtensionTools, isToolName);
+	return {
+		tools,
+		packages: job?.packages === false,
+		overlayExtensions: allowGlobalExtensions === false,
+		restricted: Boolean(job?.watch || job?.answerDraft || job?.questionGrouping),
+		...(extensions.length > 0 ? { extensions } : {}),
+		...(notHere.length > 0 ? { extensionsNotHere: notHere } : {}),
+		...(extensionTools.length > 0 ? { extensionTools } : {}),
+	};
 }
 
 /** Whether `leftOut` says anything: a run with no line and nothing left out has no worker fact worth a key of its own. */
 export function leavesOut(leftOut) {
-	return isObject(leftOut) && (leftOut.packages === true || leftOut.overlayExtensions === true || leftOut.restricted === true || (Array.isArray(leftOut.tools) && leftOut.tools.length > 0));
+	return isObject(leftOut) && (leftOut.packages === true || leftOut.overlayExtensions === true || leftOut.restricted === true || (Array.isArray(leftOut.tools) && leftOut.tools.length > 0) || Array.isArray(leftOut.extensions) || Array.isArray(leftOut.extensionsNotHere) || Array.isArray(leftOut.extensionTools));
 }
 
 /** The field with no runner part: what the worker knows when the runner said nothing, or nothing that held up. */
@@ -255,12 +291,24 @@ function readMcp(raw, servers) {
 	});
 }
 
-function readTools(raw, form, ownTools) {
+/**
+ * Which of the job's `run.excludeExtensionTools` no staged package or overlay extension registered: positions on the line, as a package's row is, and the worker's own list
+ * names them, so a forged line can only pick from what the operator wrote. Conditional, so no other job's record changes by a byte.
+ */
+function readUnmatched(raw, excludeExtensionTools) {
+	if (raw === undefined) return {};
+	const list = Array.isArray(excludeExtensionTools) ? excludeExtensionTools : [];
+	if (!Array.isArray(raw) || raw.length === 0 || new Set(raw).size !== raw.length || !raw.every((position) => isCount(position) && position < list.length && isToolName(list[position]))) refuse("tools-unmatched");
+	return { unmatched: raw.map((position) => list[position]) };
+}
+
+function readTools(raw, form, ownTools, excludeExtensionTools) {
 	if (!isObject(raw) || !isCount(raw.active, LOADED_MAX_TOOL_COUNT)) refuse("tools");
-	if (form === "compact") return { active: raw.active, own: null, job: null };
+	const unmatched = readUnmatched(raw.unmatched, excludeExtensionTools);
+	if (form === "compact") return { active: raw.active, own: null, job: null, ...unmatched };
 	if (!Array.isArray(raw.own) || raw.own.length > OWN_TOOLS_MAX || new Set(raw.own).size !== raw.own.length || !raw.own.every((name) => ownTools.has(name))) refuse("tools-own");
 	if (!Array.isArray(raw.job) || new Set(raw.job).size !== raw.job.length || !raw.job.every((name) => LOADED_JOB_TOOLS.includes(name))) refuse("tools-job");
-	return { active: raw.active, own: raw.own, job: raw.job };
+	return { active: raw.active, own: raw.own, job: raw.job, ...unmatched };
 }
 
 const totalOf = (tiers, slot) => Object.values(tiers).reduce((sum, row) => sum + row[slot], 0);
@@ -310,7 +358,7 @@ function readLine(raw, known) {
 	const tiers = readTiers(raw.tiers);
 	if (live) {
 		runner.mcp = readMcp(raw.mcp, servers);
-		runner.tools = readTools(raw.tools, cut.form, known?.ownTools instanceof Set ? known.ownTools : new Set(known?.ownTools ?? []));
+		runner.tools = readTools(raw.tools, cut.form, known?.ownTools instanceof Set ? known.ownTools : new Set(known?.ownTools ?? []), known?.excludeExtensionTools);
 	} else if (raw.mcp !== undefined || raw.tools !== undefined) {
 		refuse("stage-facts");
 	}
@@ -355,6 +403,7 @@ function readLine(raw, known) {
  *   known.servers            the trigger's server names, in PI_MCP_SERVERS order
  *   known.ownTools           pi's own tool names (`EXCLUDABLE_TOOL_NAMES`)
  *   known.leftOut            `leftOutOf`, which the worker alone can say
+ *   known.excludeExtensionTools  the list in PI_EXCLUDE_EXTENSION_TOOLS, in that order, which names what the line says no package or overlay extension registered
  *   known.redact             this job's own redactor (`makeRedactor`): a tool's name kept comes through it unchanged
  *   known.onViolation        hears the fixed word of a check that failed, for the worker's log. Never line text
  *   known.onWithheld         hears how many tool names `redact` kept off the record, for the worker's log. Never a name
@@ -475,7 +524,13 @@ function recordedLeftOut(leftOut) {
 	if (leftOut === null) return null;
 	if (!isObject(leftOut) || !namesWithin(leftOut.tools, LEFT_OUT_TOOLS_MAX, (name) => typeof name === "string" && LEFT_OUT_TOOL_RE.test(name))) return undefined;
 	for (const key of ["packages", "overlayExtensions", "restricted"]) if (typeof leftOut[key] !== "boolean") return undefined;
-	return { tools: copied(leftOut.tools), packages: leftOut.packages, overlayExtensions: leftOut.overlayExtensions, restricted: leftOut.restricted };
+	const lists = {};
+	for (const [key, ok] of [["extensions", isExcludedName], ["extensionsNotHere", isExcludedName], ["extensionTools", isToolName]]) {
+		if (leftOut[key] === undefined) continue;
+		if (!namesWithin(leftOut[key], LEFT_OUT_NAMES_MAX, ok) || leftOut[key].length === 0) return undefined;
+		lists[key] = [...leftOut[key]];
+	}
+	return { tools: copied(leftOut.tools), packages: leftOut.packages, overlayExtensions: leftOut.overlayExtensions, restricted: leftOut.restricted, ...lists };
 }
 
 /** The runner's half of the record, REBUILT, or undefined on any violation. */
@@ -508,7 +563,8 @@ function recordedRunnerPart(value) {
 		if (!isObject(value.tools) || !isCount(value.tools.active, LOADED_MAX_TOOL_COUNT)) return undefined;
 		if (value.tools.own !== null && !namesWithin(value.tools.own, OWN_TOOLS_MAX, isToolName)) return undefined;
 		if (value.tools.job !== null && !namesWithin(value.tools.job, LOADED_JOB_TOOLS.length, (name) => LOADED_JOB_TOOLS.includes(name))) return undefined;
-		tools = { active: value.tools.active, own: copied(value.tools.own), job: copied(value.tools.job) };
+		if (value.tools.unmatched !== undefined && (!namesWithin(value.tools.unmatched, LEFT_OUT_NAMES_MAX, isToolName) || value.tools.unmatched.length === 0)) return undefined;
+		tools = { active: value.tools.active, own: copied(value.tools.own), job: copied(value.tools.job), ...(value.tools.unmatched !== undefined ? { unmatched: [...value.tools.unmatched] } : {}) };
 	}
 	let problems = null;
 	if (value.problems !== null) {
@@ -547,7 +603,7 @@ export function recordedLoaded(value) {
 	if (Buffer.byteLength(JSON.stringify(out), "utf8") <= LOADED_RECORD_MAX_BYTES) return out;
 	// No job's line gets here today (the tests measure the worst one); a cap that grows would. REJECTED: null, as this read before.
 	// The bound falls after the image's facts are added, so a line that had passed every check then
-	// left no key at all, and the run read like an older worker's. What is left always fits: the image's three facts and at
-	// most 32 left-out tools and the base commit, a few KiB between them.
+	// left no key at all, and the run read like an older worker's. What is left always fits: the image's three facts, at
+	// most 32 left-out tools, at most 16 names of each exclusion and the base commit, under 8 KiB between them.
 	return { ...out, runner: "cut", at: null, cut: null, pi: null, flow: null, sources: [], mcp: null, tools: null, problems: null };
 }

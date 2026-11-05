@@ -61,8 +61,15 @@ export function resolveAgentModel(value, document, parent = document.parent) {
 	return { model };
 }
 
-/** The same nested-runner route the pinned pi example uses, with bounded output and guaranteed prompt cleanup. */
-export async function runRoleChild({ agent, task, model, signal, cwd, thinkingLevel }, { spawnChild = spawn } = {}) {
+/**
+ * The same nested-runner route the pinned pi example uses, with bounded output and guaranteed prompt cleanup.
+ *
+ * `excludeTools` is the parent's, on the child's own command line, because the child reads none of the runner's environment:
+ * it is pi's CLI (`runAsPiCli`), so PI_EXCLUDE_TOOLS stays unread there and a trigger that took `bash` away got a child with it.
+ * pi's exclusion beats `--tools`, so an agent's `tools: [read, bash]` loses `bash` too. Here and not in `injectChildMeter`: that
+ * reaches every pi child and knows no job's list, and pi's flag is last-wins (`cli/args.js`), so a second one would replace a list.
+ */
+export async function runRoleChild({ agent, task, model, signal, cwd, thinkingLevel, excludeTools = [] }, { spawnChild = spawn } = {}) {
 	const dir = mkdtempSync(join(tmpdir(), "pi-role-agent-"));
 	try {
 		const prompt = join(dir, "system.md");
@@ -70,6 +77,7 @@ export async function runRoleChild({ agent, task, model, signal, cwd, thinkingLe
 		const args = [RUN_JOB_PATH, "--mode", "json", "-p", "--no-session", "--model", model, "--append-system-prompt", prompt];
 		if (thinkingLevel) args.push("--thinking", thinkingLevel);
 		if (agent.tools?.length) args.push("--tools", agent.tools.join(","));
+		if (excludeTools.length > 0) args.push("--exclude-tools", excludeTools.join(","));
 		// pi still expands @file positionals after --. The example's Task prefix keeps all task text data.
 		args.push("--", `Task: ${task}`);
 		return await new Promise((resolve) => {
@@ -115,7 +123,7 @@ export function roleSubagentShadow(tools) {
 	return tools.some((tool) => tool.name === ROLE_SUBAGENT_TOOL && tool.sourceInfo?.path !== OURS) ? ROLE_SUBAGENT_TOOL : null;
 }
 
-export function createRoleSubagents(inputs, { runChild = runRoleChild } = {}) {
+export function createRoleSubagents(inputs, { runChild = runRoleChild, excludeTools = [] } = {}) {
 	const { document, agents } = validateRoleInputs(inputs.document, { version: 1, agents: inputs.agents });
 	const refusals = [];
 	const refuse = (name, reason) => {
@@ -150,7 +158,7 @@ export function createRoleSubagents(inputs, { runChild = runRoleChild } = {}) {
 					const result = resolveAgentModel(agent.model, document, parent);
 					if (result.reason) return refuse(agent.name, result.reason);
 					if (signal?.aborted) return refuse(agent.name, "aborted");
-					const child = await runChild({ agent, task: args.task, model: result.model, cwd: ctx.cwd, signal, ...((agent.model === undefined || agent.model === "inherit") && { thinkingLevel: ctx.thinkingLevel }) });
+					const child = await runChild({ agent, task: args.task, model: result.model, cwd: ctx.cwd, signal, excludeTools, ...((agent.model === undefined || agent.model === "inherit") && { thinkingLevel: ctx.thinkingLevel }) });
 					return { content: [{ type: "text", text: child.text }], details: { agent: agent.name, model: result.model, exitCode: child.exitCode }, ...(child.exitCode !== 0 && { isError: true }) };
 					};
 					if (args.tasks) {

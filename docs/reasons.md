@@ -344,6 +344,12 @@ The image does not declare replica support, so its guardrails would name the wro
 
 The image does not declare command support, so its runner would not dispatch `run.command`.
 
+### job-image-load-exclusions-unsupported
+
+The job image does not declare support for this job's exclusions, so its runner would not honour them. No container started and nothing was spent.
+
+What to do: rebuild the job image from this release. See [exclude-tools.md](exclude-tools.md#versions-and-older-hosts).
+
 ### job-image-exclude-tools-unsupported
 
 The image does not declare exclude tools support, so its runner would ignore `run.excludeTools` and keep every tool.
@@ -782,6 +788,12 @@ Refused: this trigger sets `run.packages: false`, so it has no staged copy for a
 
 What to do: run the canary as a trigger that loads staged packages.
 
+### package-canary-excluded
+
+Refused: this trigger leaves this package out in `run.excludeExtensions`, so the run would say nothing about the jobs this package goes into. Nothing was spent.
+
+What to do: run the canary as a trigger that loads this package.
+
 ### package-canary-resume
 
 Refused: this trigger resumes its transcript, so its next run would continue the candidate's work, and a canary is for one job. Nothing was spent.
@@ -1037,6 +1049,14 @@ What to do: run a worker and a job image of the same release.
 Another extension in the job registers the tool a run uses to report its progress.
 
 What to do: remove that extension, or the trigger's `run.progress`. See [triggers.md](triggers.md).
+
+### exclude-tool-not-loaded
+
+Stopped: run.excludeExtensionTools names a tool no staged package or overlay extension in this job registered when it loaded, so the run ended before the agent started. That key names what those bring: a repository's own tool of that name does not count, though the key still removes it from the session. The name may be misspelled, the package that brings the tool may be missing on this host, or the extension may register it later. The operator needs to fix the name, stage the package, exclude that extension, or take off a tool only a repository registers. Not retried.
+
+The run's record names the tool, and the job log's `exclude_tools_unmatched` line says it too. An extension that called a model while it loaded is metered, so this stop may have cost that much: [what a stop costs](exclude-tools.md#an-extensions-tools-runexcludeextensiontools).
+
+What to do: fix the name in `run.excludeExtensionTools`, stage the package that brings the tool on this host, or if the extension registers the tool after it loads, exclude that extension in `run.excludeExtensions`. If only a repository registers the tool, take the name off the key, since a job on every repository stops the same way. See [exclude-tools.md](exclude-tools.md).
 
 ### steer-inbox-missing
 
@@ -1754,7 +1774,7 @@ What to do: Run `pi-dispatch auth status` on the connection owner host, check it
 
 Stopped before starting: the configured subscription connection cannot authorize this job (auth-adapter-disabled). No container was started and nothing was spent.
 
-What to do: Run `pi-dispatch auth status` on the connection owner host, check its adapter, quota and finite model policy, then reconnect or authorize one ordinary trial when appropriate.
+What to do: This job goes without the connection's adapter, so reconnecting cannot help. Take the adapter's package off the trigger's `run.excludeExtensions`, or take its `"packages": false` off. `pi-dispatch auth status` on the connection owner host names the adapter.
 
 ### auth-credit-cap-required
 

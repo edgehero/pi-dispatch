@@ -3,7 +3,7 @@ import { TRIGGER_RECIPES } from "../../trigger-recipes.mjs";
 import { triggerWhoMayFire } from "../../trigger-policy.mjs";
 import { TRIGGER_GETS_WORDS } from "../../trigger-gets-view.mjs";
 import { CARD_FIELDS } from "../../trigger-edit-core.mjs";
-import { triggerGetsDrawn } from "./trigger-gets.mjs";
+import { triggerGetsDrawn, triggerGetsHolds } from "./trigger-gets.mjs";
 import { outcomeWord, reasonWords, recordReason, refusalLine } from "../../words.mjs";
 import { planTriggerAdd } from "../../write-plans.mjs";
 import { triggerBundleOf } from "../../read-model.mjs";
@@ -11,7 +11,7 @@ import { BACKENDS } from "@edgehero/pi-dispatch/backends";
 import { triggerSandboxHosts } from "../trigger-sandbox.mjs";
 import { reserveText } from "../actions.mjs";
 import { PR_ACTIONS } from "@edgehero/pi-dispatch/triggers";
-import { fileTrouble } from "./config.mjs";
+import { fileRefused, fileTrouble } from "./config.mjs";
 import { html as escapedHtml } from "../html.mjs";
 // Keep indented source readable without emitting whitespace-only lines when an optional fragment is absent.
 const html = (strings, ...values) => escapedHtml(strings.map(s => s.replace(/[ \t]*\n[ \t]*/g, "\n")), ...values);
@@ -183,7 +183,7 @@ export function triggerRun(v) {
   return card(
     "What it runs",
     // Each key has one editor, and a view with no card has none of these in a form: so their rows go where the card's would have been, read-only.
-    html`${triggerGetsDrawn(v) ? html`<p>The flow, the model and its cap, the staged packages, the MCP servers and the tools are in What its jobs get.</p>` : html`<h3>What its jobs get</h3>${facts(CARD_FIELDS.map((k) => fieldRow(v, t, k)))}`}<h3>Edit here</h3>
+    html`${triggerGetsDrawn(v) ? html`<p>${triggerGetsHolds(v)}</p>` : html`<h3>What its jobs get</h3>${facts(CARD_FIELDS.map((k) => fieldRow(v, t, k)))}`}<h3>Edit here</h3>
       ${facts(
         EDIT_FIELDS.filter(
           (k) => t.type !== "cron" || !["statusComment", "recover"].includes(k),
@@ -371,7 +371,7 @@ export function triggerChange(v) {
             "Jobs that would be refused cannot be checked here.")
           : `${detail(v).skewIncomplete ? "At least " : ""}${detail(v).skewed?.length ?? 0} jobs in view would be refused now.${detail(v).skewIncomplete ? " The queue check was incomplete." : ""}`}
       </p>
-      <p>${othersUnread(v) ? TRIGGER_GETS_WORDS.othersUnread : fileTrouble(v.data?.snapshot?.triggers, "triggers file", v.data?.snapshot) ?? (t ? "The triggers file loads." : null)}</p>
+      <p>${othersUnread(v) ? TRIGGER_GETS_WORDS.othersUnread : fileTrouble(v.data?.snapshot?.triggers, "triggers file", v.data?.snapshot) ?? fileRefused(v.data?.snapshot?.triggers, "triggers file", v.data?.snapshot) ?? (t ? "This console loads the triggers file." : null)}</p>
       ${(detail(v).skewed ?? []).map(job => html`<p>${runLink(job.jobId)}: ${job.field ?? job.conditions ?? "trigger changed"}</p>`)}
       ${t && canAct(v)
         ? actForm("trigger-delete", {

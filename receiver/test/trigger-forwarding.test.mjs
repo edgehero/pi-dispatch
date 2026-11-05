@@ -49,6 +49,9 @@ const MAX_RUN = {
 	secretsProfile: "ci",
 	backend: "local",
 	excludeTools: ["bash"],
+	// Issue #800. Each narrows a job, so a route that drops one runs the job with what the file takes away.
+	excludeExtensions: ["pi-lint", "git-guard"],
+	excludeExtensionTools: ["lint_run"],
 	// REQ-MCP-OPERATOR-SERVERS: the overlay MCP servers the job connects.
 	mcp: ["docs"],
 	provider: "openai",
@@ -155,7 +158,8 @@ function drive(forge, route, triggers) {
 // One triggers file holding ONE entry, so the only rule a delivery can match is the maximal one.
 function load(forge, entry, variant) {
 	const raw = { on: entry.on, run: { kind: forge, ...MAX_RUN, ...variant, ...(entry.extra ?? {}) } };
-	const json = JSON.stringify({ triggers: [raw] });
+	// Version 2: the fixture is maximal, and the file must say what it needs (issue #800).
+	const json = JSON.stringify({ version: 2, triggers: [raw] });
 	const [normalized] = parseTriggers(json, "/t.json");
 	const cfg = {};
 	const res = reloadTriggers({ PI_TRIGGERS_FILE: "/t.json" }, cfg, { fileExists: () => true, readFile: () => json });
@@ -252,7 +256,7 @@ test("each field ALONE reaches the job: one folded into a neighbour's conditiona
 		for (const [forge, entries] of Object.entries(ENTRIES)) {
 			for (const entry of entries) {
 				const raw = { on: entry.on, run: { kind: forge, flow: "work", ...(needs[field] ?? {}), [field]: value, ...(entry.extra ?? {}) } };
-				const json = JSON.stringify({ triggers: [raw] });
+				const json = JSON.stringify({ version: 2, triggers: [raw] });
 				const [normalized] = parseTriggers(json, "/t.json");
 				const cfg = {};
 				assert.deepEqual(reloadTriggers({ PI_TRIGGERS_FILE: "/t.json" }, cfg, { fileExists: () => true, readFile: () => json }), { ok: true }, `${forge} ${entry.route}: ${field} alone must load`);

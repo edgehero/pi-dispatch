@@ -34,8 +34,8 @@ function valkey({ looks = [look("mini1"), look("mini2"), look("build3", { hostPi
 	};
 }
 
-export async function updatesFacts({ redis = {}, records = [], recordsPartial = false, audit = [], staged = STAGED, now = NOW } = {}) {
-	return await readUpdates({ redis: valkey(redis), staged, records, recordsPartial, audit, pinned: PINNED, triggersDocument: TRIGGERS, now });
+export async function updatesFacts({ redis = {}, records = [], recordsPartial = false, audit = [], staged = STAGED, now = NOW, triggersDocument = TRIGGERS } = {}) {
+	return await readUpdates({ redis: valkey(redis), staged, records, recordsPartial, audit, pinned: PINNED, triggersDocument, now });
 }
 
 async function draw({ role = "operator", readOnly = false, facts = {}, unavailable = false } = {}) {
@@ -45,6 +45,9 @@ async function draw({ role = "operator", readOnly = false, facts = {}, unavailab
 	const data = await loadPageData("updates", parsed.query, deps, { role, readOnly });
 	return String((await renderPage("updates", { data, query: parsed.query, session: { role, name: role === "operator" ? "ops" : "watcher" }, readOnly })).html);
 }
+
+/** The page over other facts than a golden's, such as another triggers file. */
+export const updatesPage = draw;
 
 const ALL_APPLIED = { mini1: { "pi-lint": applied() }, mini2: { "pi-lint": applied() }, build3: { "pi-lint": applied() } };
 const NEWER = { looks: [look("mini1", { pi: piRead({ newest: "1.6.0", checks: "failing" }), hostPi: hostPi({ version: "1.6.0", state: "newer" }) }), look("mini2", { pi: piRead({ newest: "1.6.0", checks: "failing" }) }), look("build3", { hostPi: hostPi({ version: null, state: "absent" }), pi: piRead({ newest: "1.6.0", checks: "failing" }) })] };

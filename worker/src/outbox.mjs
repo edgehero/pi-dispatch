@@ -214,6 +214,17 @@ export function makeCollectChain({ queue, enqueue = enqueueLocalJob, readFlowGat
 					// Less the names of the parent's MCP tools: the child connects no server (`mcp` below), its runner knows
 					// none of them, and they would refuse it at start while removing nothing.
 					excludeTools: withoutMcpExclusions(job.data?.excludeTools),
+					// Issue #800, both by #291's inverted direction: dropped, a child loads what its parent's trigger took away and
+					// keeps the tool. Whole, unlike the line above. A child connects no server, but it does load extensions, so a
+					// name here still removes something, and an unmatched one widens nothing: the runner stops only a job with no
+					// parent (`PI_EXCLUDE_TOOLS_STRICT`, run-container.mjs).
+					excludeExtensions: job.data?.excludeExtensions,
+					excludeExtensionTools: job.data?.excludeExtensionTools,
+					// `"packages": false`, by the same inverted direction, and the line those two left a hole beside: with only them, a trigger
+					// that withheld every staged package chained a child holding all of them, while one that named a package kept it out. `image`'s
+					// toolchain argument does not stand against it: a child's flow is its repository's, which is what the gate above reads, so a child
+					// without the packages is a child with what its parent had. Off `job.data`, so the request file cannot set it.
+					packages: job.data?.packages,
 					// `secrets`/`secretsProfile` are deliberately ABSENT, and the two lines above are exactly why
 					// this comment exists: their reasoning reads as though it should apply here too, and it must
 					// not. An image and a skills directory are toolchain; a resolved credential is a capability.

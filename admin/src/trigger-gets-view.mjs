@@ -16,11 +16,12 @@
  */
 import * as nodeFs from "node:fs";
 import { FORGE_MCP_KINDS, FORGE_MCP_SERVER_NAME } from "@edgehero/pi-dispatch/mcp-config";
-import { EXCLUDABLE_TOOL_NAMES, MCP_EXCLUDABLE_TOOL_NAMES, mcpServerToolPattern, triggersFileVersionProblem } from "@edgehero/pi-dispatch/triggers";
+import { EXCLUDABLE_TOOL_NAMES, MCP_EXCLUDABLE_TOOL_NAMES, mcpServerToolPattern, triggersFileVersionProblem, validateExcludeExtensionTools } from "@edgehero/pi-dispatch/triggers";
 import { hostsAgree } from "@edgehero/pi-dispatch/host-loads";
+import { overlayEntryNamed } from "@edgehero/pi-dispatch/loaded-record";
 import { optionalUsdMicros } from "@edgehero/pi-dispatch/money";
 import { hostLoadsRow, hostPiFor, triggerLastRun } from "./loaded-words.mjs";
-import { normalizeTriggerForDisplay } from "./read-model.mjs";
+import { loaderRefuses, normalizeTriggerForDisplay } from "./read-model.mjs";
 import { triggerEntryDigest } from "./trigger-edit-core.mjs";
 import { listed } from "./words.mjs";
 
@@ -29,6 +30,7 @@ export const TRIGGER_GETS_WORDS = Object.freeze({
   title: "What its jobs get",
   how: "How a change applies",
   fileSays: "The rows say what the next job gets, from the triggers file.",
+  fileRefused: "The worker refuses this file as it stands, so the rows say what it holds, not what a job gets.",
   noRun: "No run in the available history.",
   noRecord: "No run in the available history says what it loaded.",
   historyUnread: "The run history could not be read just now, so this says nothing of what its runs had.",
@@ -37,11 +39,14 @@ export const TRIGGER_GETS_WORDS = Object.freeze({
   noLiveList: "No live host is listed just now, so these are the hosts that last published, running or not.",
   hostsUnread: "The hosts’ doctor runs could not be read, so each reads unknown, never the same.",
   repositoryExtensions: ".pi/extensions at the base commit, merge-gated. Changed in the repository, not here.",
-  oneExtension: "A trigger cannot turn off one extension: it takes all the staged packages, or none.",
+  extensionSwitch: "Off leaves it out of these jobs by name: a staged package with its tools, skills, prompt templates and themes, an overlay extension before its code runs. A host without that name loads nothing for it.",
+  extensionsMoot: "Each staged package is off with them, so it has no switch of its own: turn them on and confirm first.",
+  extensionInFile: "named in the file",
   newExtension: "A new extension, or another version, is staged first, for every trigger.",
   packagesOff: "The file says \"packages\": false, so these jobs load none of them, nor their tools, skills, prompt templates or themes.",
   packagesOn: "Off writes \"packages\": false, and none load, nor their tools, skills, prompt templates or themes.",
   packagesLoad: "Its jobs load what is staged on the host that runs them.",
+  packagesLoadLess: "Its jobs load what is staged on the host that runs them, less what the file leaves out by name.",
   noExtensions: "The hosts that can say name no staged package or overlay extension.",
   noExtensionsKnown: "No host’s doctor run can say which extensions it has.",
   forgeServer: "the job’s own forge, with its own token; in no overlay",
@@ -49,7 +54,7 @@ export const TRIGGER_GETS_WORDS = Object.freeze({
   noServersKnown: "No host’s doctor run can say which MCP servers it has, and this trigger names none.",
   serverRefused: "A job on a host without a server it names, or with it off, is refused as mcp-server-unknown, before it spends; a host with no overlay or no mcp.json refuses it as mcp-config-invalid. A key a server uses must reach the job, through run.secrets in the file or a host’s PI_FORWARD_ENV, or the job is refused as mcp-secret-unmapped.",
   toolsOn: "On means not removed. powershell, grep, find and ls stay off unless an extension turns them on, so a trigger can remove them too.",
-  extensionTools: "A trigger cannot remove a tool an extension adds. A repository’s tools stay a count, so they have no chip here.",
+  extensionToolChip: "Off removes that tool from these jobs by name, on whichever host brings it. A chip comes from what a run recorded or what the file names, since no host publishes a tool’s name. A repository’s tools stay a count, so they have no chip here.",
   serverToolsLater: "A server’s tools are offered once this trigger names it: turn it on and confirm first.",
   lastWay: "Removing every tool that reaches a server refuses its jobs at pickup as mcp-excluded, before they spend. The preview refuses that where the file alone decides it, and warns where this host’s overlay routes it so; another host’s may route it another way.",
   jobTool: "report_progress comes with run.progress, in the Edit form: no list removes it.",
@@ -62,9 +67,15 @@ export const TRIGGER_GETS_WORDS = Object.freeze({
   reloadDrops: "A Confirm elsewhere on this page reloads it, and drops any change not yet written in What its jobs get.",
   othersUnread: "This page read the triggers file, and its other reads failed: the run history, the hosts and the jobs in line are unknown.",
   pillOrder: "differs in the order or kind of what it loads",
+  pillHolds: "holds this file’s jobs",
+  holdsRows: "The flow, the model and its cap, the staged packages and each extension, the MCP servers and the tools are in What its jobs get.",
+  holdsWatch: "The flow, the model and its cap, and what its jobs can use are in What its jobs get.",
+  holdsIssue: "What its jobs get says this rule starts no agent and no container.",
   notLinked: "A change made on this card is not linked to that run’s refusal.",
   unreadRow: "This page could not read this trigger’s row from the file, so it shows the last read and offers no change. Reload to try again.",
-  watch: "A watch rule’s run is set in the file: it allows only some of these fields, so this page offers no change here.",
+  watch: "What this card shows of a watch rule is set in the file, so it offers no change.",
+  watchLoads: "A watch rule’s job loads no staged package, no extension of the overlay’s or the repository’s and no skill of the overlay’s, and reaches no MCP server, on any host. Its tools are read, grep, find and ls, less what the file removes, and the watch’s own.",
+  watchIssue: "This rule files an issue with no agent and no container, so there is nothing here to read.",
   command: "not a flow, set in the file",
   barOne: "1 change, not written yet:",
   barMany: "{n} changes, not written yet:",
@@ -80,16 +91,18 @@ const unique = (items) => [...new Set(items)];
  * This row of the file, as a person's page draws it, with the digest of those same bytes when the page draws a form. One read, so a
  * file changed between two reads cannot put a digest beside values the person never saw. The digest covers the entry's prompt and
  * secret references, so it is asked for only for an operator's form. Null where there is no row, the file cannot be read, or a newer
- * release wrote it: its entries may use fields this build cannot read, and the planner would refuse any change to it.
+ * release wrote it: its entries may use fields this build cannot read, and the planner would refuse any change to it. `fileRefused`: the
+ * loaders' own parser refuses those bytes, and the row still draws, since a person can come here to fix it. Of the one read, so it holds with Valkey down too.
  */
 export function readTriggerGetsEntry({ triggersPath, index, withDigest = false, fs = nodeFs }) {
   try {
-    const doc = JSON.parse(fs.readFileSync(triggersPath, "utf8"));
+    const text = fs.readFileSync(triggersPath, "utf8");
+    const doc = JSON.parse(text);
     if (triggersFileVersionProblem(doc)?.newer === true) return null;
     const entry = doc?.triggers?.[index];
     const trigger = entry === undefined ? null : normalizeTriggerForDisplay(entry);
     if (trigger === null) return null;
-    return { trigger: { ...trigger, index }, ...(withDigest ? { pageDigest: triggerEntryDigest(entry) } : {}) };
+    return { trigger: { ...trigger, index }, fileVersion: Number.isSafeInteger(doc?.version) ? doc.version : 1, ...(withDigest ? { pageDigest: triggerEntryDigest(entry) } : {}), ...(loaderRefuses(text, triggersPath) ? { fileRefused: true } : {}) };
   } catch {
     return null;
   }
@@ -97,8 +110,16 @@ export function readTriggerGetsEntry({ triggersPath, index, withDigest = false, 
 
 // ---- the hosts -------------------------------------------------------------------------------------------------------
 
-/** Why this host's row can say nothing of this trigger's jobs, or null. Only a part this trigger would load from counts. */
-function cannotSay(row, trigger) {
+/**
+ * Why this host's row can say nothing of this trigger's jobs, or null. Only a part this trigger would load from counts. First, whether it reads the file at all, by the version its worker
+ * publishes: the planner stops a change that needs more than a live worker reads, and a hand edit is not stopped, so a host can sit behind a file with every other fact agreeing. `holds`:
+ * it reads less, and holds this file's jobs (`newer-release`). `noVersion`: nothing says, a worker from before the field or one not on the live list. Nothing to ask of a file at 1, which every release reads.
+ */
+function cannotSay(row, trigger, fileVersion) {
+  if (fileVersion > 1) {
+    if (row.triggersVersion === undefined || row.triggersVersion === null || row.triggersVersion === "") return "noVersion";
+    if (!(Number(row.triggersVersion) >= fileVersion)) return "holds";
+  }
   if (row.state === "old") return "old";
   if (row.state !== "current") return row.why ?? "absent";
   const blind = (part) => (row.unread ?? []).includes(part) || (row.more?.[part] ?? 0) > 0;
@@ -113,11 +134,16 @@ function cannotSay(row, trigger) {
 /** The servers this trigger names that an overlay must define: `forge` is the job's own, on no host's list. */
 const overlayServersOf = (trigger) => (trigger.mcp ?? []).filter((name) => name !== FORGE_MCP_SERVER_NAME);
 
+/** Which of this host's packages a job of this trigger loads: none where it withholds them, and never one it leaves out by name. */
+const packagesLoaded = (row, trigger) => (trigger.packages === false ? [] : (row.packages ?? []).filter((pkg) => !(trigger.excludeExtensions ?? []).includes(pkg.name)));
+/** Which of this host's overlay entries a job of this trigger loads, by the runner's own reading of a name (`overlayEntryNamed`). */
+const overlayLoaded = (row, trigger) => (row.overlayExtensionsAllowed === true ? (row.extensions ?? []).filter((entry) => !(trigger.excludeExtensions ?? []).some((name) => overlayEntryNamed(name, entry.name))) : []);
+
 /** What a job of this trigger gets on this host, each fact keyed so two hosts can be compared and worded so a pill can say it. */
 function hostFacts(row, trigger) {
   const facts = new Map();
-  if (trigger.packages !== false) for (const pkg of row.packages ?? []) facts.set(`p:${pkg.name} ${pkg.version}`, `${pkg.name} ${pkg.version}`);
-  if (row.overlayExtensionsAllowed === true) for (const entry of row.extensions ?? []) facts.set(`o:${entry.name}`, `${entry.name}, from its overlay`);
+  for (const pkg of packagesLoaded(row, trigger)) facts.set(`p:${pkg.name} ${pkg.version}`, `${pkg.name} ${pkg.version}`);
+  for (const entry of overlayLoaded(row, trigger)) facts.set(`o:${entry.name}`, `${entry.name}, from its overlay`);
   for (const name of row.skills ?? []) facts.set(`s:${name}`, `skill ${name}`);
   for (const name of overlayServersOf(trigger)) if ((row.mcp ?? []).some((server) => server.name === name && server.enabled === true)) facts.set(`m:${name}`, name);
   return facts;
@@ -137,10 +163,10 @@ function agreeRow(row, trigger) {
     unread: [],
     more: {},
     overlayExtensionsAllowed: true,
-    extensions: row.overlayExtensionsAllowed === true ? row.extensions ?? [] : [],
+    extensions: overlayLoaded(row, trigger),
     skills: row.skills ?? [],
     mcp: (row.mcp ?? []).filter((server) => named.includes(server.name) && server.enabled === true),
-    packages: trigger.packages === false ? [] : row.packages ?? [],
+    packages: packagesLoaded(row, trigger),
     flows: (row.flows ?? []).filter((entry) => entry.trigger === trigger.index && entry.flow === trigger.flow),
   };
 }
@@ -154,6 +180,8 @@ const FLOW_TIER_WORDS = Object.freeze({ repository: "from the repository", trigg
 function flowAnswer(row, trigger) {
   const found = (row.flows ?? []).find((entry) => entry.trigger === trigger.index && entry.flow === trigger.flow);
   if (!found) return null;
+  // Doctor never answers this of a package the file leaves out (`flowTierOf`), so such a row is from before that was written: no answer for the file as it is.
+  if (found.tier === "package" && (trigger.excludeExtensions ?? []).includes(found.package)) return null;
   return found.tier === "package" ? `from ${found.package ?? "a staged package"}` : FLOW_TIER_WORDS[found.tier] ?? null;
 }
 
@@ -179,9 +207,9 @@ function lacksFlow(row, trigger) {
  * live hosts'. Where they are only who last published (every worker stopped, or the fleet not read yet), a stopped host's record is still in date, so
  * one row proves nothing about how many hosts there are, and "the only host" is a claim only the live list can back.
  */
-function hostPills(rows, trigger, liveList) {
+function hostPills(rows, trigger, liveList, fileVersion) {
   const named = overlayServersOf(trigger);
-  const known = rows.filter((row) => cannotSay(row, trigger) === null).map((row) => ({ row, facts: hostFacts(row, trigger), flow: trigger.flow === null ? null : flowAnswer(row, trigger), lacksFlow: lacksFlow(row, trigger) }));
+  const known = rows.filter((row) => cannotSay(row, trigger, fileVersion) === null).map((row) => ({ row, facts: hostFacts(row, trigger), flow: trigger.flow === null ? null : flowAnswer(row, trigger), lacksFlow: lacksFlow(row, trigger) }));
   // A server it names is what its jobs ask for, so going without one is said even where every host does.
   const everything = new Map([...named.map((name) => [`m:${name}`, name]), ...known.flatMap(({ facts }) => [...facts])]);
   const flows = unique(known.map(({ flow }) => flow).filter((flow) => flow !== null));
@@ -191,7 +219,7 @@ function hostPills(rows, trigger, liveList) {
   const agree = hostsAgree(known.map(({ row }) => agreeRow(row, trigger)));
   return rows.map((row) => {
     const mine = known.find((entry) => entry.row === row);
-    if (!mine) return { name: row.name, tone: "unknown", icon: "minus", word: "unknown" };
+    if (!mine) return cannotSay(row, trigger, fileVersion) === "holds" ? { name: row.name, tone: "attention", icon: "attention", word: TRIGGER_GETS_WORDS.pillHolds } : { name: row.name, tone: "unknown", icon: "minus", word: "unknown" };
     if (known.length === 1 && !mine.lacksFlow) return { name: row.name, tone: "plain", icon: "info", word: rows.length === 1 && liveList ? "the only host" : "the only one known" };
     const also = [...mine.facts.entries()].filter(([key]) => known.some(({ facts }) => !facts.has(key))).map(([, word]) => word);
     const without = [...everything.entries()].filter(([key]) => !mine.facts.has(key)).map(([, word]) => word.replace(", from its overlay", ""));
@@ -215,13 +243,15 @@ function hostPills(rows, trigger, liveList) {
 }
 
 /** How old each host's answer is, and why the rest have none. A sentence per kind, so a fleet's worth of hosts stays one line. */
-function hostsNote(rows, trigger, hostLoads, liveList) {
+function hostsNote(rows, trigger, hostLoads, liveList, fileVersion) {
   if (hostLoads?.unreachable) return [TRIGGER_GETS_WORDS.hostsUnread];
-  const by = (why) => rows.filter((row) => cannotSay(row, trigger) === why).map((row) => row.name);
-  const known = rows.filter((row) => cannotSay(row, trigger) === null);
+  const by = (why) => rows.filter((row) => cannotSay(row, trigger, fileVersion) === why).map((row) => row.name);
+  const known = rows.filter((row) => cannotSay(row, trigger, fileVersion) === null);
   const parts = known.length > 0 ? ["What each host’s last doctor run published: ", ...known.flatMap((row, at) => [...(at > 0 ? [", "] : []), `${row.name} at `, time(row.at)]), ". "] : [];
   const sentences = [
     liveList ? null : TRIGGER_GETS_WORDS.noLiveList,
+    by("holds").length > 0 ? `${listed(by("holds"))} ${by("holds").length === 1 ? "reads this file only below version" : "read this file only below version"} ${fileVersion}, so ${by("holds").length === 1 ? "it holds this file’s jobs until it is upgraded" : "they hold this file’s jobs until they are upgraded"}.` : null,
+    by("noVersion").length > 0 ? `Unknown, because nothing says which version of this file ${by("noVersion").length === 1 ? "it reads" : "they read"}: ${listed(by("noVersion"))}.` : null,
     by("absent").length > 0 ? `${listed(by("absent"))} ${by("absent").length === 1 ? "has" : "have"} published none, so ${by("absent").length === 1 ? "it reads" : "they read"} unknown, never the same.` : null,
     by("unreachable").length > 0 ? `${listed(by("unreachable"))} could not be read, so ${by("unreachable").length === 1 ? "it reads" : "they read"} unknown.` : null,
     by("unreadable").length > 0 ? `Unknown, because the doctor record could not be read, or a newer release wrote it: ${listed(by("unreadable"))}.` : null,
@@ -321,12 +351,19 @@ function flowRow({ trigger, rows, editor }) {
 /** Whether this host's row lists this part whole, so a name not on it is one the host does not have. */
 const listsWhole = (row, part) => row.state === "current" && !(row.unread ?? []).includes(part) && !((row.more?.[part] ?? 0) > 0);
 
-/** Which hosts have this, as a person reads it: `staged on a and b, unknown on c`. A list cut short still proves what is on it. */
-function whereWords(rows, part, holds, word) {
+/** Which hosts have this, as a person reads it: `staged on a and b, unknown on c`, or `said` in place of the first part. A list cut short still proves what is on it. */
+function whereWords(rows, part, holds, word, said = null) {
   const has = rows.filter((row) => row.state === "current" && holds(row)).map((row) => row.name);
   const lacks = rows.filter((row) => listsWhole(row, part) && !holds(row)).map((row) => row.name);
   const unknown = rows.filter((row) => !has.includes(row.name) && !lacks.includes(row.name)).map((row) => row.name);
-  return [has.length > 0 ? `${word} on ${listed(has)}` : null, lacks.length > 0 ? `not on ${listed(lacks)}` : null, unknown.length > 0 ? `unknown on ${listed(unknown)}` : null].filter(Boolean).join(", ");
+  return [said ?? (has.length > 0 ? `${word} on ${listed(has)}` : null), lacks.length > 0 ? `not on ${listed(lacks)}` : null, unknown.length > 0 ? `unknown on ${listed(unknown)}` : null].filter(Boolean).join(", ");
+}
+
+/** Where a name the file holds and no host shows is not: only a host that lists both kinds whole can say that of a name that could be either. */
+function nowhereWords(rows) {
+  const lacks = rows.filter((row) => listsWhole(row, "packages") && listsWhole(row, "extensions")).map((row) => row.name);
+  const unknown = rows.filter((row) => !lacks.includes(row.name)).map((row) => row.name);
+  return [lacks.length > 0 ? `not on ${listed(lacks)}` : null, unknown.length > 0 ? `unknown on ${listed(unknown)}` : null].filter(Boolean).join(", ");
 }
 
 const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
@@ -337,28 +374,81 @@ function broughtWords(source) {
   return parts.length > 0 ? parts.join(", ") : null;
 }
 
+/**
+ * A name as `run.excludeExtensions` takes it for this overlay entry, when the file does not already spell it: the shortest the runner's own rule (`overlayEntryNamed`) reads as this entry, which means
+ * every entry of that name, on each host. REJECTED: a second regex here, which drifts from what a job leaves out.
+ */
+export function overlayStem(segment) {
+  for (let end = 1; end < segment.length; end += 1) if (overlayEntryNamed(segment.slice(0, end), segment)) return segment.slice(0, end);
+  return segment;
+}
+
+/**
+ * The other names on this list that can mean an entry `name` means, by the same rule: `git-guard` and `git-guard.ts` both take `git-guard.ts`. The loader takes both, and each is its own switch, so
+ * taking one off the list leaves out what the other still means. This is of the names and needs no host's list, so a sentence built on it is true of every host.
+ */
+export const alsoNaming = (list, name) => list.filter((other) => other !== name && (overlayEntryNamed(other, name) || overlayEntryNamed(name, other)));
+
+/**
+ * One row per NAME, since a name is what a switch sends and it means every extension of that name: a package and an overlay entry that share one are one row, and two hosts on two
+ * versions of a package are one row saying so. Two names in the file that mean one entry are two rows, since each is on the list until it is taken off, and each says the other is there. REJECTED: a row per version, each with a switch, which would send one name twice, and the loader refuses that. A name the file holds
+ * keeps the file's spelling and its row whether or not any host shows it, so nothing in the list falls off on an edit of the rest. Under the file's `"packages": false` a package's
+ * switch is moot, so it has none (`moot`), and one the file names keeps its box, disabled and unticked, so an edit of the rest sends that name back as it was.
+ */
 function extensionsRow({ trigger, rows, last }) {
   const known = rows.filter((row) => row.state === "current");
-  const packages = [...new Map(known.flatMap((row) => row.packages ?? []).map((pkg) => [`${pkg.name} ${pkg.version}`, pkg])).values()].sort((a, b) => a.name.localeCompare(b.name) || a.version.localeCompare(b.version));
+  const inFile = trigger.excludeExtensions ?? [];
+  const withheld = trigger.packages === false;
+  const groups = new Map();
+  const groupOf = (value) => {
+    if (!groups.has(value)) groups.set(value, { value, versions: new Set(), segments: new Set() });
+    return groups.get(value);
+  };
+  for (const pkg of [...known.flatMap((row) => row.packages ?? [])].sort((a, b) => a.name.localeCompare(b.name) || a.version.localeCompare(b.version))) groupOf(pkg.name).versions.add(pkg.version);
   const overlay = unique(known.flatMap((row) => (row.extensions ?? []).map((entry) => entry.name))).sort();
+  for (const segment of overlay) {
+    // Every name in the file that means this entry says where it is: the second spelling of one entry is held by the same hosts, as `extensionsNotHere` reads it.
+    const naming = inFile.filter((name) => overlayEntryNamed(name, segment));
+    for (const value of naming.length > 0 ? naming : [overlayStem(segment)]) groupOf(value).segments.add(segment);
+  }
+  for (const name of inFile) groupOf(name);
   const brought = (name, version = null) => {
     const row = (last?.sources ?? []).find((source) => source.name === name && (version === null || source.version === version));
     const words = broughtWords(row);
     return words === null ? null : `${words}, as ${last.id} loaded it`;
   };
-  const items = [
-    ...packages.map((pkg) => {
-      const holds = (row) => (row.packages ?? []).some((entry) => entry.name === pkg.name && entry.version === pkg.version);
-      return { name: `${pkg.name} ${pkg.version}`, sub: [whereWords(rows, "packages", holds, "staged"), ...(trigger.packages === false ? [] : [brought(pkg.name, pkg.version)])].filter(Boolean).join(" · ") };
-    }),
-    ...overlay.map((name) => {
-      const holds = (row) => (row.extensions ?? []).some((entry) => entry.name === name);
-      const off = known.filter((row) => holds(row) && row.overlayExtensionsAllowed !== true).map((row) => row.name);
-      return { name, sub: [whereWords(rows, "extensions", holds, "in the overlay"), off.length > 0 ? `its overlay extensions off on ${listed(off)}` : null, brought(name)].filter(Boolean).join(" · ") };
-    }),
-  ];
+  const items = [...groups.values()].map(({ value, versions, segments }) => {
+    const on = !inFile.includes(value);
+    const staged = [...versions];
+    const entries = [...segments];
+    const holdsPackage = (row) => (row.packages ?? []).some((entry) => entry.name === value);
+    const holdsEntry = (row) => (row.extensions ?? []).some((entry) => segments.has(entry.name));
+    const moot = withheld && staged.length > 0 && entries.length === 0;
+    const off = known.filter((row) => holdsEntry(row) && row.overlayExtensionsAllowed !== true).map((row) => row.name);
+    const hostsOn = (version) => known.filter((row) => (row.packages ?? []).some((entry) => entry.name === value && entry.version === version)).map((row) => row.name);
+    const stagedWhere = staged.length === 0 ? null : whereWords(rows, "packages", holdsPackage, "staged", staged.length === 1 ? null : staged.map((version) => `${version} on ${listed(hostsOn(version))}`).join(", "));
+    const quoted = (() => {
+      if (!on || withheld && entries.length === 0) return null;
+      if (staged.length === 0) return brought(entries[0]);
+      const running = staged.find((version) => brought(value, version) !== null);
+      if (running === undefined) return entries.length > 0 ? brought(entries[0]) : null;
+      return `${staged.length > 1 ? `${running}: ` : ""}${brought(value, running)}`;
+    })();
+    const also = inFile.includes(value) ? alsoNaming(inFile, value) : [];
+    // Two rows of one file name would read alike, and the words on each switch are its own name.
+    const named = staged.length > 0 ? `${value} ${listed(staged)}` : entries.length > 0 && also.length === 0 ? entries.join(", ") : value;
+    const sub = [
+      staged.length === 0 && entries.length === 0 ? [TRIGGER_GETS_WORDS.extensionInFile, nowhereWords(rows)].filter(Boolean).join("; ") : null,
+      stagedWhere,
+      entries.length > 0 ? whereWords(rows, "extensions", holdsEntry, "in the overlay") : null,
+      off.length > 0 ? `its overlay extensions off on ${listed(off)}` : null,
+      also.length > 0 ? `the file also names ${listed(also)}` : null,
+      quoted,
+    ].filter(Boolean).join(" · ");
+    return { value, name: named, on, moot, sub, backOn: also.length > 0 ? `${value} off the list` : `${value} back on` };
+  });
   const morePackages = known.reduce((total, row) => total + (row.more?.packages ?? 0) + (row.more?.extensions ?? 0), 0);
-  return { packagesOn: trigger.packages !== false, items, more: morePackages, none: items.length === 0, noneWord: known.length > 0 ? TRIGGER_GETS_WORDS.noExtensions : TRIGGER_GETS_WORDS.noExtensionsKnown };
+  return { packagesOn: !withheld, anyLeftOut: inFile.length > 0, items, more: morePackages, none: items.length === 0, noneWord: known.length > 0 ? TRIGGER_GETS_WORDS.noExtensions : TRIGGER_GETS_WORDS.noExtensionsKnown };
 }
 
 /**
@@ -393,6 +483,16 @@ function mcpRow({ trigger, rows, overlayServers }) {
   return { items, none: items.length === 0, noneWord: rows.some((row) => row.state === "current") ? TRIGGER_GETS_WORDS.noServers : TRIGGER_GETS_WORDS.noServersKnown };
 }
 
+/** Whether the file takes this name: a chip for one it refuses (pi's own, a server's, one pi-dispatch gives some jobs) could only end in a refusal, so that one is shown and not switched. */
+function takesToolName(name) {
+  try {
+    validateExcludeExtensionTools({}, { excludeExtensionTools: [name] }, "", "");
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 function toolsRow({ trigger, last }) {
   const removed = trigger.excludeTools ?? [];
   const chip = (name, label = name) => ({ name, label, on: !removed.includes(name) });
@@ -404,9 +504,24 @@ function toolsRow({ trigger, last }) {
   // An entry nothing above offers would vanish from the list on any edit of it, so it stays a chip. The loader refuses such a file, so this is a display's belt.
   const other = removed.filter((name) => !offered.has(name)).map((name) => chip(name));
   // No host publishes a tool's name: only a run knows them, so each is said as that run's. What came with the staged packages does not reach a
-  // job of a trigger that withholds them now, whatever that run had. `report_progress` is the file's: `run.progress`, and no record's.
-  const fromExtensions = (last?.tools ?? []).filter((group) => group.kind !== "package" || trigger.packages !== false).map((group) => ({ heading: `${group.from}${group.kind === "overlay" ? " in its overlay" : ""}, as ${last.id} loaded it${last.host ? ` on ${last.host}` : ""}`, names: group.names }));
-  return { own, servers, serverChips, other, fromExtensions, jobTool: trigger.progress === true };
+  // job of a trigger that withholds them now, or leaves that extension out by name, whatever that run had. `report_progress` is the file's: `run.progress`, and no record's.
+  const leftOut = trigger.excludeExtensions ?? [];
+  const removedByName = trigger.excludeExtensionTools ?? [];
+  const reachable = (last?.tools ?? []).filter((group) => (group.kind === "package" ? trigger.packages !== false && !leftOut.includes(group.from) : !leftOut.some((name) => overlayEntryNamed(name, group.from))));
+  // One box per name: two extensions can register one tool, the name means both, and a list holding it twice is refused. The second shows it, and the first's box says for both.
+  const drawn = new Set();
+  const fromExtensions = reachable.map((group) => ({
+    heading: `${group.from}${group.kind === "overlay" ? " in its overlay" : ""}, as ${last.id} loaded it${last.host ? ` on ${last.host}` : ""}`,
+    chips: group.names.map((name) => {
+      const switched = takesToolName(name) && !drawn.has(name);
+      if (switched) drawn.add(name);
+      // A name in either list takes the tool whoever registered it: pi matches exclusions by name, and only the second is this chip's to switch.
+      return { name, label: name, on: !removedByName.includes(name) && !removed.includes(name), switched };
+    }),
+  }));
+  // A name the file holds and no chip above offers stays a chip, or it would fall off the list on an edit of the rest: a tool the file removes is on no later run's record.
+  const otherTools = removedByName.filter((name) => !drawn.has(name)).map((name) => ({ name, label: name, on: false }));
+  return { own, servers, serverChips, other, fromExtensions, otherTools, jobTool: trigger.progress === true };
 }
 
 /** Each host's image and pi, as it beats them out, or what the file names instead. */
@@ -429,32 +544,37 @@ function imageRow({ trigger, rows }) {
 /**
  * Everything the card says, for one trigger. `liveHosts`: the names of the live hosts able to run it, or null where no live host is
  * known, and then what the hosts last published says who they are. `records`: this trigger's runs, newest first; `historyUnread` says the
- * read failed, which is not a trigger with no runs.
+ * read failed, which is not a trigger with no runs. `fileRefused`: the worker's own parser refuses the file these rows are read from. `fileVersion`: the version that file says it is.
  */
-export function triggerGetsOf({ trigger, records = [], historyUnread = false, hostLoads = null, liveHosts = null, defaults = {}, editor = null, modelChoices = [], overlayServers = [] }) {
+export function triggerGetsOf({ trigger, records = [], historyUnread = false, hostLoads = null, liveHosts = null, defaults = {}, editor = null, modelChoices = [], overlayServers = [], fileRefused = false, fileVersion = 1 }) {
+  // A watch rule's job loads nothing a host publishes (`watch-runtime.mjs`'s `packages: false`, `run-container.mjs`'s closed overlay, the runner's `watchReadOnly` loader): no pill and no doctor's answer can say what it gets.
+  const watch = trigger.type === "watch";
   const liveList = liveHosts !== null;
   const names = liveHosts ?? (Array.isArray(hostLoads?.hosts) ? hostLoads.hosts.map((row) => row?.name).filter((name) => typeof name === "string") : []);
   const rows = names.map((name) => hostLoadsRow(hostLoads, name));
   const last = triggerLastRun(records, hostLoads);
   const quoted = last.quoted;
   const noRun = historyUnread ? TRIGGER_GETS_WORDS.historyUnread : TRIGGER_GETS_WORDS.noRun;
+  const fileWord = fileRefused ? TRIGGER_GETS_WORDS.fileRefused : TRIGGER_GETS_WORDS.fileSays;
   const under = (label) => {
     if (quoted === null) return [last.newest === null ? noRun : TRIGGER_GETS_WORDS.noRecord];
     const row = quoted.rows[label];
     return [`Last run${quoted.host ? ` on ${quoted.host}` : ""}, `, run(quoted.id), ": ", ...(Array.isArray(row?.value) ? row.value : [row?.value ?? "not kept"]), ...(row?.more ? ["; ", ...(Array.isArray(row.more) ? row.more : [row.more])] : []), "."];
   };
   const quote = quoted === null
-    ? [TRIGGER_GETS_WORDS.fileSays, " ", last.newest === null ? noRun : "Its last run, ", ...(last.newest === null ? [] : [run(last.newest.id), `: ${last.newest.said}`])]
-    : [TRIGGER_GETS_WORDS.fileSays, " Under each is what ", run(quoted.id), `, its ${last.newest.id === quoted.id ? "last run" : "newest run that says what it loaded"}, had${quoted.host ? ` on ${quoted.host}` : ""}.`, ...quoted.notes.map((note) => ` ${note}`), ...(last.newest.id === quoted.id ? [] : [" The last it started, ", run(last.newest.id), `: ${last.newest.said}`])];
+    ? [fileWord, " ", last.newest === null ? noRun : "Its last run, ", ...(last.newest === null ? [] : [run(last.newest.id), `: ${last.newest.said}`])]
+    : [fileWord, " Under each is what ", run(quoted.id), `, its ${last.newest.id === quoted.id ? "last run" : "newest run that says what it loaded"}, had${quoted.host ? ` on ${quoted.host}` : ""}.`, ...quoted.notes.map((note) => ` ${note}`), ...(last.newest.id === quoted.id ? [] : [" The last it started, ", run(last.newest.id), `: ${last.newest.said}`])];
   return {
-    pills: hostPills(rows, trigger, liveList),
-    hostsNote: rows.length === 0 ? (hostLoads?.unreachable ? [TRIGGER_GETS_WORDS.hostsUnread] : [TRIGGER_GETS_WORDS.noHost]) : hostsNote(rows, trigger, hostLoads, liveList),
+    fileRefused,
+    // Of a file the worker refuses, a comparison of what its jobs get compares nothing a job gets: the file may be fixed any way, and a service may be running its last good one.
+    pills: fileRefused ? rows.map((row) => ({ name: row.name, tone: "unknown", icon: "minus", word: "unknown" })) : hostPills(rows, trigger, liveList, fileVersion),
+    hostsNote: rows.length === 0 ? (hostLoads?.unreachable ? [TRIGGER_GETS_WORDS.hostsUnread] : [TRIGGER_GETS_WORDS.noHost]) : hostsNote(rows, trigger, hostLoads, liveList, fileVersion),
     quote,
     problems: quoted?.problems ?? {},
     record: quoted?.record ?? null,
     last: { Model: under("Model"), Skills: under("Skills"), Extensions: under("Extensions"), MCP: under("MCP"), Tools: under("Tools"), pi: under("pi") },
     model: modelRow({ trigger, defaults, modelChoices }),
-    flow: flowRow({ trigger, rows, editor }),
+    flow: { ...flowRow({ trigger, rows, editor }), ...(watch ? { doctor: null, lacking: null } : {}) },
     extensions: extensionsRow({ trigger, rows, last: quoted }),
     mcp: mcpRow({ trigger, rows, overlayServers }),
     tools: toolsRow({ trigger, last: quoted }),

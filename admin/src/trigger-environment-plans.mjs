@@ -1,7 +1,7 @@
 /**
  * A person's change to what a trigger's jobs get (issue #800, `trigger-environment-edit`, `CARD_FIELDS`), with one preview
- * and one Confirm: which flow and model they run on, what each may spend, which servers and tools they reach, and whether
- * they load the staged packages.
+ * and one Confirm: which flow and model they run on, what each may spend, which servers and tools they reach, whether they
+ * load the staged packages, and which extensions and extension tools they go without.
  *
  * DELIBERATELY OUTSIDE `write-plans.mjs`, and that is the boundary, not a tidiness. `tool-actions.mjs` hands a tool
  * `{ ...writePlans }`, every export, so a planner there is a planner a model's call can reach. `TOOL_PROOF_FIELDS` are
@@ -20,7 +20,8 @@
  * like any other, previewed the same way, and puts back the keys it touched: the old value as JSON reads it from the file,
  * `null` for a key the edit added, and `keyOrder` where putting a deleted key back would otherwise leave it at the end. In a
  * file the writer wrote those are the same bytes. In one it did not, the first write puts the whole file in its form, as every
- * writer of this file does: its layout, a `"version": 1` written as nothing, a number as JSON reads it. No Undo restores those.
+ * writer of this file does: its layout, a `"version": 1` written as nothing, a number as JSON reads it, a stamp nothing needs gone
+ * and a stamp added back first. No Undo restores those, and it says "as it was" only where it writes the bytes it found.
  */
 import { createHash } from "node:crypto";
 import * as nodeFs from "node:fs";
@@ -29,6 +30,7 @@ import { DEFAULT_MODEL, DEFAULT_PROVIDER, allowedModelsFrom, forwardEnvList } fr
 import { egressArmed } from "@edgehero/pi-dispatch/egress";
 import { parseAllowlist } from "@edgehero/pi-dispatch/egress-allowlist";
 import { jobDataVersionFor } from "@edgehero/pi-dispatch/job-data-version";
+import { overlayEntryNamed } from "@edgehero/pi-dispatch/loaded-record";
 import { FIRST_CALL_SHORT_TASK_BYTES, boundModelOf, builtinChatModels as catalogChatModels, builtinModel as catalogModel, checkModelsKnown as catalogCheck, firstCallBoundMicros, firstCallFloorMicros } from "@edgehero/pi-dispatch/model-catalog";
 import { FORGE_MCP_KINDS, FORGE_MCP_SERVER_NAME, forgeMcpServer, readOverlayMcp } from "@edgehero/pi-dispatch/mcp-config";
 import { makeMcpCheck, mcpRouteCuts, reservedJobNames } from "@edgehero/pi-dispatch/mcp-preflight";
@@ -42,12 +44,15 @@ import { parseProjects } from "@edgehero/pi-dispatch/projects";
 import { explainReason } from "@edgehero/pi-dispatch/reason-catalog";
 import { readOverlay } from "@edgehero/pi-dispatch/runtime-settings";
 import { DEFAULT_ON_TOOL_NAMES, EXCLUDABLE_TOOL_NAMES, parseTriggers, parseTriggersDocument, triggersFileVersionProblem } from "@edgehero/pi-dispatch/triggers";
-import { writeTriggers } from "@edgehero/pi-dispatch/triggers-file";
+import { triggersFileText, writeTriggers } from "@edgehero/pi-dispatch/triggers-file";
+import { isSubscriptionAdapter } from "@edgehero/pi-dispatch/updates-subscription-adapters";
 import { dryRunFs } from "./console/actions.mjs";
+import { toolNamesOfRuns } from "./loaded-words.mjs";
 import { collectModelPolicies } from "./models-view.mjs";
 import { PROVIDER_KEY_NAMES, providerKeyNames } from "./provider-key-names.mjs";
 import { writeInputs } from "./read-model.mjs";
 import { CARD_FIELDS, TRIGGER_ENVIRONMENT_EDIT_FIELDS, planTriggerEditCore, rowName, triggerEntryDigest } from "./trigger-edit-core.mjs";
+import { alsoNaming } from "./trigger-gets-view.mjs";
 import { fieldNamed, listed } from "./words.mjs";
 
 const plain = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -59,7 +64,7 @@ const authority = (ctx) => ctx?.surface === "console" && ctx?.role === "operator
 const money = (micros) => `$${formatMicros(micros)}`;
 const sha = (text) => createHash("sha256").update(text).digest("hex");
 const STRING_FIELDS = Object.freeze(["provider", "model"]);
-const LIST_FIELDS = Object.freeze(["models", "fallbackModels", "mcp", "excludeTools"]);
+const LIST_FIELDS = Object.freeze(["models", "fallbackModels", "mcp", "excludeTools", "excludeExtensions", "excludeExtensionTools"]);
 /** The fields whose change is judged against what a job may call and spend (`judgeModels`), and only then. */
 const MODEL_OR_CAP = Object.freeze(["provider", "model", "models", "fallbackModels", "maxCostUsd"]);
 /** The fields whose change the pickup's MCP check speaks of. A model edit reaches the same check and is not asked: it would speak of a server nobody touched. */
@@ -186,7 +191,7 @@ function changeWords(key, before, after, facts, effective = null) {
     }
     case "packages": {
       if (after === false) return { line: "Staged packages: off." };
-      if (before === false) return { line: "Staged packages: on.", widening: "This widens what its jobs load: every package staged on the host that runs them." };
+      if (before === false) return { line: "Staged packages: on.", widening: `This widens what its jobs load: every package staged on the host that runs them${effective?.excludeExtensions?.length > 0 ? ", less what run.excludeExtensions leaves out" : ""}.` };
       // Of this row alone: doctor counts every row (`requiring`), so clearing one says nothing of what it does while another says `true`.
       return { line: after === true ? "Staged packages: stay on, and the file now says this flow needs them, so doctor fails a host with none staged." : "Staged packages: stay on, and the file no longer says this flow needs them." };
     }
@@ -204,6 +209,30 @@ function changeWords(key, before, after, facts, effective = null) {
       }
       const named = [raw.added.length > 0 ? `now names ${listed(raw.added)}` : "", raw.removed.length > 0 ? `no longer names ${listed(raw.removed)}` : ""].filter(Boolean).join(" and ");
       return { line: named !== "" ? `Tools: the file's list ${named}, and what its jobs lack does not change.` : "Tools: the empty list the file held removed." };
+    }
+    case "excludeExtensions": {
+      const d = delta(before, after);
+      if (d.reordered) return { line: "Extensions: the same names left out, in a new order." };
+      const left = Array.isArray(after) ? after : [];
+      // A name taken off beside another that means an entry it means: that entry stays out, so "back on" is said only less what the other still takes.
+      const stays = [...new Set(d.removed.flatMap((name) => alsoNaming(left, name)))];
+      const moved = [...d.added.map((name) => `${name} left out`), ...d.removed.map((name) => `${name} ${alsoNaming(left, name).length > 0 ? "off the list" : "back on"}`)];
+      if (moved.length === 0) return { line: "Extensions: the empty list the file held removed." };
+      const word = d.removed.length === 1 ? "it" : "them";
+      return {
+        line: `Extensions: ${moved.join(", ")}.`,
+        // Of a name and not of a package: a file names the same thing for every host, and on each it may be a package, an overlay entry or nothing.
+        ...(d.added.length > 0 ? { takes: "Where a name is a staged package, its tools, skills, prompt templates and themes go with it. Where it is an overlay extension, its code does not run." } : {}),
+        // A staged package stays out under the file's false, so of such a row the name comes back only as an overlay entry. The planner cannot tell which it is on a host.
+        ...(d.removed.length > 0 ? { widening: `This widens what its jobs load: ${listed(d.removed)} back on each host that holds ${word}${effective?.packages === false ? `, as an overlay extension, since the file's "packages": false keeps staged packages out` : ""}${stays.length > 0 ? `, less what ${listed(stays)} still ${stays.length === 1 ? "leaves" : "leave"} out` : ""}.` } : {}),
+      };
+    }
+    case "excludeExtensionTools": {
+      const d = delta(before, after);
+      if (d.reordered) return { line: "Extension tools: the same removals in a new order." };
+      const moved = [...d.added.map((name) => `${name} off`), ...d.removed.map((name) => `${name} on`)];
+      if (moved.length === 0) return { line: "Extension tools: the empty list the file held removed." };
+      return { line: `Extension tools: ${moved.join(", ")}.`, ...(d.removed.length > 0 ? { widening: `This widens what its jobs can do: ${listed(d.removed)} back on, wherever something a job loads brings ${d.removed.length === 1 ? "it" : "them"}.` } : {}) };
     }
     default:
       throw new RangeError(`no words for ${key}`);
@@ -247,10 +276,75 @@ function serverReach(name, hosts) {
  * overlay skills and a staged package only where a trigger already resolved one, so this is no claim about a repository, a
  * trigger's skills folder or a package's other skills: the warning names those, and a repository can gain the flow at any commit.
  */
-function hostsWithoutFlow(flow, hosts, loadsPackages) {
+function hostsWithoutFlow(flow, hosts, loadsPackages, excluded = []) {
   const answers = (host) => host?.state === "current" && Array.isArray(host.skills) && !(host.unread ?? []).includes("skills") && !(host.more?.skills > 0);
-  const holds = (host) => host.skills.includes(flow) || (host.flows ?? []).some((row) => row?.flow === flow && (row.tier === "overlay" || (row.tier === "package" && loadsPackages)));
+  // A package this trigger leaves out by name brings it no skill, as doctor's own reading has it (`flowTierOf`).
+  const holds = (host) => host.skills.includes(flow) || (host.flows ?? []).some((row) => row?.flow === flow && (row.tier === "overlay" || (row.tier === "package" && loadsPackages && !excluded.includes(row.package))));
   return hosts.filter((host) => answers(host) && !holds(host)).map((host) => host.name);
+}
+
+/**
+ * Whether this host's publication says it holds an extension of this name, as a job reads a name: a staged package by its manifest name, or an
+ * overlay entry by its file stem, file name or folder name (`overlayEntryNamed`). The overlay's own switch does not come into it: the worker's
+ * `extensionsNotHere` asks what is on the host, on or off, and a name held and shut is no typo.
+ */
+const hostHolds = (host, name) => (host?.state === "current" && ((host.packages ?? []).some((row) => row?.name === name) || (host.extensions ?? []).some((row) => overlayEntryNamed(name, row?.name ?? ""))));
+
+/** Whether this host's lists are whole and in date, so a name not on them is one it does not hold. */
+const answersForExtensions = (host) => host?.state === "current" && Array.isArray(host.packages) && Array.isArray(host.extensions) && !(host.unread ?? []).some((part) => part === "packages" || part === "extensions") && !(host.more?.packages > 0) && !(host.more?.extensions > 0);
+
+/**
+ * Which names no host holds: `refused` where every host listed answered, since then the file reads as keeping out what nothing here has, and
+ * `unknown` where one could not say. REJECTED: refusing on the hosts that did answer. Each host has its own overlay and stage, and the one that
+ * cannot say may be the one that holds it.
+ */
+function namesOnNoHost(names, rows) {
+  const free = names.filter((name) => !rows.some((host) => hostHolds(host, name)));
+  return rows.length > 0 && rows.every(answersForExtensions) ? { refused: free, unknown: [] } : { refused: [], unknown: free };
+}
+
+/** Why a name no host holds stands refused, in one sentence, for the preview and for the Undo that would write it back. */
+const onNoHostRefusal = (names) => `No live host holds ${listed(names)}, as each one's last doctor run published it, so leaving ${names.length === 1 ? "it" : "them"} out would keep nothing out. Check the name, or run pi-dispatch doctor on the host that has it.`;
+
+/**
+ * Whether a job of this run needs its image to declare `loadExclusions`: the half of the worker's gate that a trigger's file decides, restated because the gate is not exported, and held to it by a test. The other half is a `run.excludeTools` beside a role map, set at the job's pickup, which this sentence does not speak of. A host publishes no image's
+ * capabilities to this page, and `run.image` can name any image, so a sentence says what such an image does and where to look. REJECTED: reading the hosts' images to predict one, from a label nothing here reads.
+ */
+const needsLoadExclusions = (run) => run?.excludeExtensions !== undefined || run?.excludeExtensionTools !== undefined;
+
+/** Whether the file leaves a job able to stop over a name no staged package or overlay extension brought: the file's half of `excludeToolsStrict` (run-container.mjs). The host's and the job's halves are in the sentence. */
+const holdsNothingBack = (run) => run?.packages !== false && !(Array.isArray(run?.excludeExtensions) && run.excludeExtensions.length > 0);
+
+/** What `run.excludeExtensionTools` does to a job, as far as the file decides it, each line true of every host a job can land on. */
+function extensionToolLines({ was, now, seen }) {
+  const before = Array.isArray(was?.excludeExtensionTools) ? was.excludeExtensionTools : [];
+  const after = Array.isArray(now?.excludeExtensionTools) ? now.excludeExtensionTools : [];
+  const added = after.filter((name) => !before.includes(name));
+  const toolWords = [];
+  const unconfirmed = added.filter((name) => !(seen ?? []).includes(name));
+  if (unconfirmed.length > 0) toolWords.push(`No run of this trigger this page can read names ${listed(unconfirmed)}, so it cannot confirm ${unconfirmed.length === 1 ? "that name" : "those names"}.`);
+  if (holdsNothingBack(now)) {
+    // Every name when the change itself is what turns the stop on: a name that has only ever been reported may be a typo.
+    const asked = holdsNothingBack(was) ? added : after;
+    if (asked.length > 0) toolWords.push(`A job that reaches its container with nothing held back from it, no parent job and every extension loaded stops before its prompt as exclude-tool-not-loaded if no staged package or overlay extension registered ${asked.length === 1 ? asked[0] : `one of ${listed(asked)}`} when it loaded.`);
+  } else if (after.length > 0 && (holdsNothingBack(was) || unconfirmed.length > 0)) {
+    toolWords.push("A name in run.excludeExtensionTools that no staged package or overlay extension brought stops no job of this trigger while it holds extensions back: the job runs, and its log and record name it, so a misspelled name removes nothing.");
+  }
+  return toolWords;
+}
+
+/**
+ * The hosts whose doctor found this trigger's flow in a package this change leaves out (`flows`, `flowTierOf`, first hit wins), so no tier above it
+ * held it there. Another package may also hold it, and a forge's repository is not on a host, so the sentence says "unless", as the flow's own warning does.
+ */
+function hostsLosingFlow({ index, flow, names, hosts }) {
+  const groups = new Map();
+  for (const host of hosts) {
+    if (host?.state !== "current") continue;
+    const row = (host.flows ?? []).find((entry) => entry?.trigger === index && entry?.flow === flow && entry?.tier === "package" && names.includes(entry?.package));
+    if (row) groups.set(row.package, [...(groups.get(row.package) ?? []), host.name]);
+  }
+  return [...groups];
 }
 
 /**
@@ -336,7 +430,7 @@ function modelFacts({ paths, readHostEnv, fs }) {
   return { deployment, deploymentCap, ceiling, envList, note, capOf: (value) => effectiveCostCapMicros(value, deployment.maxCostUsd) };
 }
 
-export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, now = Date.now, checkModelsKnown = catalogCheck, builtinModel = catalogModel, builtinChatModels = catalogChatModels, readHosts = async () => ({ unreachable: "the live hosts are not wired" }), readHostLoads = async () => ({ hosts: [] }), readSkew = async () => ({ rows: [], incomplete: true }), versionTables = {}, jobsReadMs = JOBS_READ_MS, deploymentDir = ".", readHostEnv = () => ({ env, unread: [] }), readEndpoints = () => [] } = {}) {
+export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, now = Date.now, checkModelsKnown = catalogCheck, builtinModel = catalogModel, builtinChatModels = catalogChatModels, readHosts = async () => ({ unreachable: "the live hosts are not wired" }), readHostLoads = async () => ({ hosts: [] }), readSkew = async () => ({ rows: [], incomplete: true }), readRunRecords = async () => null, versionTables = {}, jobsReadMs = JOBS_READ_MS, deploymentDir = ".", readHostEnv = () => ({ env, unread: [] }), readEndpoints = () => [] } = {}) {
   const triggersTables = versionTables.triggers ?? {};
   const jobDataTables = versionTables.jobData ?? {};
 
@@ -846,23 +940,18 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
       }
       inverse = { action: "trigger-environment-edit", body: { index: body.index, pageDigest: afterDigest, ...fields, ...(same(Object.keys(replayed), Object.keys(entry.run)) ? {} : { keyOrder: Object.keys(entry.run) }) } };
     }
-    // Whether the writer, changing nothing, would write these bytes back. On a hand-written file it does not: the first write
-    // puts all of it in the writer's layout, every line of the diff moves for that, and an Undo restores values, not bytes, so
-    // neither the Confirm nor the Undo may read as though only this key moved.
-    const keepsLayout = (() => {
-      const probe = dryRunFs(fs);
-      try {
-        const same = writeTriggers({ triggersPath: paths.triggersPath, mutate: (raw) => raw, fs: probe, now, ...triggersTables });
-        if (same?.ok === true) return probe.files.get(paths.triggersPath) === beforeText;
-      } catch {
-        // The bytes are what is asked about, and they were read above.
-      }
-      return `${JSON.stringify(doc, null, 2)}\n` === beforeText;
-    })();
-    const undo = !beforeLoads ? `Edit ${row} back by hand: the file did not load as it was, and this page will not write that back` : inverse !== null ? (keepsLayout ? `Put ${row} back as it was` : `Put ${row}'s values back; the file keeps the layout this write gave it`) : heldNull !== undefined ? `Edit ${row} back by hand: the file held run.${heldNull} as null, which this page cannot write` : `Edit ${row} back by hand: this page would refuse what it said before. ${backRefused}`;
+    // Whether these bytes are the writer's spacing and line breaks, its stamp wherever this file holds it. On a hand-written file they are not: the first write
+    // puts all of it in the writer's layout, every line of the diff moves for that, so the Confirm may not read as though only this key moved. REJECTED: asking
+    // the writer what it writes changing nothing. It owns the stamp, so over a file in its layout whose stamp says more or less than the file needs it moves that
+    // one line, and "rewrites all of it" stood beside the sentence that says what happens to the stamp.
+    const keepsLayout = `${JSON.stringify(doc, null, 2)}\n` === beforeText;
+    // Whether the Undo writes these very bytes, by the writer's own text for the entry as it was over the file as this write leaves it. It owns the stamp there too:
+    // one the file held below "triggers" comes back first, and one nothing needs does not come back, so the words are asked of the bytes and not of the layout.
+    const comesBack = inverse !== null && triggersFileText(afterDoc.triggers.map((tr, i) => (i === body.index ? entry : tr)), afterDoc, triggersTables) === beforeText;
+    const undo = !beforeLoads ? `Edit ${row} back by hand: the file did not load as it was, and this page will not write that back` : inverse !== null ? (comesBack ? `Put ${row} back as it was` : `Put ${row}'s values back; the file stays in the form the writer gives it`) : heldNull !== undefined ? `Edit ${row} back by hand: the file held run.${heldNull} as null, which this page cannot write` : `Edit ${row} back by hand: this page would refuse what it said before. ${backRefused}`;
 
     const effectiveTools = wasLoaded ? { before: wasRun.excludeTools ?? [], after: nowRun.excludeTools ?? [] } : null;
-    const changes = touched.map((key) => ({ key, ...changeWords(key, entry.run[key] ?? undefined, nextEntry.run[key] ?? undefined, facts, key === "excludeTools" ? effectiveTools : null) }));
+    const changes = touched.map((key) => ({ key, ...changeWords(key, entry.run[key] ?? undefined, nextEntry.run[key] ?? undefined, facts, key === "excludeTools" ? effectiveTools : ["packages", "excludeExtensions"].includes(key) ? nowRun : null) }));
     if (sent.some((key) => MODEL_OR_CAP.includes(key))) {
       const before = policyOf({ entry, text: afterText, facts });
       const after = policyOf({ entry: nextEntry, text: afterText, facts });
@@ -875,8 +964,8 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
       // Over what the loader keeps of each trigger, doctor's count: a `run` key it drops reaches no job, so it needs nothing.
       jobDataVersion: parseTriggers(afterText, paths.triggersPath, triggersTables).reduce((most, trigger) => Math.max(most, jobDataVersionFor(trigger?.run, jobDataTables)), 1),
     };
-    const stamped = need.triggersVersion > (Number.isSafeInteger(doc.version) ? doc.version : 1);
-    return { body, expect, row, type: entry.on?.type, beforeText, afterText, mutate, dry, changes, unjudged, thin, warnings, keepsLayout, undo, inverse, need, stamped, nextRun: nowRun };
+    const fileVersion = Number.isSafeInteger(doc.version) ? doc.version : 1;
+    return { body, expect, row, type: entry.on?.type, beforeText, afterText, mutate, dry, changes, unjudged, thin, warnings, keepsLayout, undo, inverse, need, fileVersion, stamped: Object.hasOwn(doc, "version"), wasRun, nextRun: nowRun };
   }
 
   /**
@@ -921,6 +1010,21 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
     }
   }
 
+  /** The tool names this trigger's runs show, or null where that cannot be said. A slow read costs the confirmation, never the preview. */
+  async function runTools(index) {
+    let timer;
+    try {
+      const late = new Promise((resolve) => {
+        timer = setTimeout(resolve, jobsReadMs, null);
+      });
+      return toolNamesOfRuns(await Promise.race([Promise.resolve().then(() => readRunRecords(index)), late]));
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
   function skewLines({ rows = [], incomplete = false }) {
     const lines = [];
     if (rows.length > 0) {
@@ -939,14 +1043,18 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
     if (judged.refusal || judged.unchanged) return judged;
     const gate = await versionGate(judged.need);
     if (gate.refusal) return gate;
-    const { row, changes, undo, inverse, unjudged, thin } = judged;
+    const { row, changes, unjudged, thin } = judged;
+    let { undo, inverse } = judged;
     const added = changes.flatMap((change) => change.addedServers ?? []);
     // `forge` is the job's own forge and its own token (DES-FORGE-MCP), in no overlay, so no host lacks it and no host publishes it.
     const servers = added.filter((name) => name !== "forge");
     const flowChange = changes.some((change) => change.key === "flow");
+    const excludedChange = changes.some((change) => change.key === "excludeExtensions");
+    const excludedNow = judged.nextRun?.excludeExtensions ?? [];
+    const leaving = excludedChange ? delta(judged.wasRun?.excludeExtensions, excludedNow) : { added: [], removed: [] };
     let hosts = [];
     let hostsUnread = false;
-    if (servers.length > 0 || flowChange) {
+    if (servers.length > 0 || flowChange || excludedChange) {
       try {
         const read = await readHostLoads();
         hosts = read?.hosts ?? [];
@@ -961,9 +1069,41 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
     // at pickup, and one that gets past them all connects. REJECTED: leaving "connect" out where a warning stands, which one source
     // of warnings could not know about another's.
     const said = changes.map((change) => (change.addedServers?.length > 0 ? { ...change, widening: `This widens what its jobs reach: a job that reaches its container connects to ${listed(reach)}.` } : change));
-    const lacking = flowChange ? hostsWithoutFlow(judged.body.flow, hosts, judged.nextRun?.packages !== false) : [];
+    const lacking = flowChange ? hostsWithoutFlow(judged.body.flow, hosts, judged.nextRun?.packages !== false, excludedNow) : [];
+    // A name read against the live hosts where this change read them, and it reads them whenever it adds a name: it then needs version 2. A live host with no record of its own cannot say.
+    const hostRows = gate.hosts === null ? hosts : gate.hosts.map((name) => hosts.find((host) => host?.name === name) ?? { name, state: "unknown" });
+    const noHost = namesOnNoHost(leaving.added, hostRows);
+    if (noHost.refused.length > 0) return refuse(onNoHostRefusal(noHost.refused));
+    // Undo is a change like any other, so one that would be refused is no button: `judge`'s rule for the rest.
+    const backOnNoHost = namesOnNoHost(leaving.removed, hostRows).refused;
+    if (inverse !== null && backOnNoHost.length > 0) {
+      inverse = null;
+      undo = `Edit ${row} back by hand: this page would refuse what it said before. ${onNoHostRefusal(backOnNoHost)}`;
+    }
+    const unknownHosts = hostRows.filter((host) => !answersForExtensions(host)).map((host) => host.name);
+    const leavingStaged = leaving.added.filter((name) => hosts.some((host) => host?.state === "current" && (host.packages ?? []).some((pkg) => pkg?.name === name)));
+    const exclusionWords = [];
+    if (noHost.unknown.length > 0) {
+      if (hostsUnread) exclusionWords.push(`What the hosts published could not be read, so which of them hold ${listed(noHost.unknown)} is unknown.`);
+      // The publications are not nothing: the card's rows read them, and a stopped host's can be in date. They are only not a running host's word for today.
+      else if (hostRows.length === 0) exclusionWords.push(`No host is live right now, so no running host says whether it holds ${listed(noHost.unknown)}; the card's rows read what each one last published.`);
+      else exclusionWords.push(`No host that can say holds ${listed(noHost.unknown)}, and ${hostsNamed(unknownHosts)} ${unknownHosts.length === 1 ? "reads" : "read"} unknown. A name no host holds leaves nothing out, so check it.`);
+    }
+    if (judged.nextRun?.packages !== false && typeof judged.nextRun?.flow === "string") {
+      for (const [pkg, names] of hostsLosingFlow({ index: judged.body.index, flow: judged.nextRun.flow, names: leaving.added, hosts })) exclusionWords.push(`${hostsNamed(names)} ${names.length === 1 ? "finds" : "find"} ${judged.nextRun.flow} in ${pkg}, which this change leaves out. A job there runs without its flow unless something else it loads holds it, such as its repository.`);
+    }
+    // Only where this change is what starts asking it of the image: a job that already carried either list met this already.
+    if (needsLoadExclusions(judged.nextRun) && !needsLoadExclusions(judged.wasRun)) exclusionWords.push("A job of this trigger on an image whose dev.pi-dispatch.capabilities label does not list loadExclusions is refused as job-image-load-exclusions-unsupported, before it spends. The Image row says which image each host runs.");
+    for (const name of leaving.added.filter(isSubscriptionAdapter)) exclusionWords.push(`${name} is a subscription connection's adapter, so a job on that connection is refused as auth-adapter-disabled, before it spends.`);
+    // Only a schedule runs a canary (`canaryTriggers`), and only a name some host stages is a canary's package. One in line already carries no such key, and is not refused for it.
+    if (judged.type === "cron") for (const name of leavingStaged) exclusionWords.push(`A package canary of ${name} run as this trigger from now on is refused as package-canary-excluded, before it spends.`);
+    const toolsMoved = changes.some((change) => ["excludeExtensionTools", "excludeExtensions", "packages"].includes(change.key));
+    const addsTools = delta(judged.wasRun?.excludeExtensionTools, judged.nextRun?.excludeExtensionTools).added.length > 0;
+    const toolLines = toolsMoved ? extensionToolLines({ was: judged.wasRun, now: judged.nextRun, seen: addsTools ? await runTools(judged.body.index) : null }) : [];
     const warnings = [
       ...judged.warnings,
+      ...exclusionWords,
+      ...toolLines,
       // No list of where else a job looks: a row can withhold the staged packages, and a sentence naming them would offer what it does not load.
       ...(lacking.length > 0 ? [`${hostsNamed(lacking)} ${lacking.length === 1 ? "has" : "have"} no skill named ${judged.body.flow} in ${lacking.length === 1 ? "its" : "their"} overlay. A job there runs without its flow unless something else it loads holds it, such as its repository.`] : []),
       ...(flowChange && hostsUnread ? [`What the hosts published could not be read, so which of them have ${judged.body.flow} is unknown.`] : []),
@@ -973,7 +1113,7 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
     const noSkew = judged.type === "cron" || judged.type === "watch";
     const skew = noSkew ? { rows: [], incomplete: false } : await jobsRefused(judged.body.index, judged.dry);
     const lines = [
-      ...said.flatMap((change) => [change.line, ...(change.widening ? [change.widening] : [])]),
+      ...said.flatMap((change) => [change.line, ...(change.takes ? [change.takes] : []), ...(change.widening ? [change.widening] : [])]),
       ...(judged.keepsLayout ? [] : ["This file is not in the writer's layout, so this write also rewrites all of it: spacing and line breaks move in lines this change does not touch, and what each key says does not. Undo puts the values back, not that layout."]),
       ...warnings,
       ...thin,
@@ -985,7 +1125,11 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
       "A host with its own copy of this file keeps what it has until that copy changes.",
       ...(judged.type === "cron" ? ["While hosts' copies differ on a schedule, no host installs a change to one, so this one moves when they agree."] : []),
       ...skewLines(skew),
-      ...(judged.stamped ? [`Stamps the file version ${judged.need.triggersVersion}: a host reading less waits on every trigger's jobs, not only this one's.`] : []),
+      ...(judged.need.triggersVersion > judged.fileVersion ? [`Stamps the file version ${judged.need.triggersVersion}: a host from before 5.0.0 ignores that and runs this trigger's jobs wider, and a later host that reads less waits on every trigger's jobs.`] : []),
+      ...(judged.need.triggersVersion < judged.fileVersion ? [`The file no longer needs version ${judged.fileVersion}, so this write takes the stamp off.`] : []),
+      // The one stamp no line above speaks of: a `"version": 1`, or one the loader cannot read, which a file needing no more than version 1 is written without.
+      ...(judged.need.triggersVersion === 1 && judged.fileVersion === 1 && judged.stamped ? ["This write also takes the file's \"version\" line off: a file that needs no more than version 1 is written without one."] : []),
+      ...(judged.need.triggersVersion > 1 && judged.need.triggersVersion === judged.fileVersion ? [`The file stays at version ${judged.fileVersion}.`] : []),
       ...(gate.hosts === null ? [] : [gate.hosts.length > 0 ? `${hostsNamed(gate.hosts)} ${gate.hosts.length === 1 ? "reads" : "each read"} what this change needs.` : "No host is live right now, so no host's release could be checked."]),
       ...servers.map((name) => `A job on a host without ${name}, or with it off, is refused as mcp-server-unknown, before it spends; a host with no overlay or no mcp.json refuses it as mcp-config-invalid.${hosts.length > 0 ? ` ${serverHosts(name, hosts)}.` : hostsUnread ? " What the hosts published could not be read, so which of them have it is unknown." : " No host has published which servers it has."}`),
       ...(unjudged.length > 0 ? [`The first call on ${listed(unjudged)} could not be bounded here.`] : []),

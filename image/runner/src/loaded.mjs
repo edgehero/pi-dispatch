@@ -21,7 +21,7 @@ import { owningRoot } from "./packages.mjs";
  * no more, and the signature vouches for the runner's channel and not for what is on it. The worker's rebuild is the
  * boundary (worker/src/loaded-record.mjs `rebuildLoaded`): it checks every string it keeps against the same closed patterns,
  * in its own process. What survives that is a token of a closed shape (a tool's name, for which the worker has no list to
- * check against, so it could only narrow what a later switch excludes; pi's version, three dotted numbers) and the counts.
+ * check against, so it could only narrow what `run.excludeExtensionTools` takes out once a person writes it; pi's version, three dotted numbers) and the counts.
  *
  * Everything here is pure and handed its inputs, so it tests without pi or a container. packages.mjs is the one import,
  * for its segment-safe containment, and it reads no pi.
@@ -110,6 +110,17 @@ export function tierOf(path, { packages = [], jobPi, triggerSkills, overlay, wor
 	return owner === null ? "other" : ordered.find(([root]) => root === owner)[1];
 }
 
+/**
+ * Whether `name` in `run.excludeExtensions` means this first path segment of the overlay's `extensions/`: a folder's name, a file's
+ * stem, or a file's whole name, which is how a record and a host's publication spell it, so a name copied from either is no silent
+ * no-op. Blind to whether the segment is a file, so the worker, which holds a folder listing, answers as this does
+ * (worker/src/loaded-record.mjs holds the same rule, and a test holds the two equal). REJECTED: the stem alone, since a folder named
+ * `tool.js` would answer to `tool` and not to its own name.
+ */
+export function overlayEntryNamed(name, segment) {
+	return name === segment || name === segment.replace(/\.(?:ts|js)$/, "");
+}
+
 /** The folder under the overlay its extensions load from, as the loader's own constant builds it. */
 const overlayExtensionsOf = (roots) => `${roots.overlay}/extensions`;
 
@@ -157,6 +168,23 @@ export function createLoadTee(log, { overlayExtensions } = {}) {
 	};
 }
 
+/**
+ * The names of the tools a staged package or an overlay extension registered, which is what `run.excludeExtensionTools` names: a tool only a repository
+ * registers is no answer to it, or a trigger serving two repositories would stop one of them over a name that repository can neither fix nor exclude.
+ * Off each extension's own `tools`, and not pi's `getAllRegisteredTools()`, which keeps the first of a name, so its answer for a name two extensions hold would
+ * rest on pi's load order, host paths first at the pin and held by nothing here. Read by the path pi loaded it from, as `extensionTools` below reads it, and of
+ * the overlay only its `extensions/`.
+ */
+export function toolsBroughtByHost(extensions, roots) {
+	const names = new Set();
+	for (const extension of extensions ?? []) {
+		const tier = tierOf(extension?.path, roots);
+		if (tier !== "package" && !(tier === "overlay" && firstSegmentUnder(extension.path, overlayExtensionsOf(roots)) !== null)) continue;
+		for (const name of extension.tools?.keys?.() ?? []) names.add(name);
+	}
+	return names;
+}
+
 const emptyRow = () => LOADED_ROW.map(() => 0);
 
 /**
@@ -167,7 +195,7 @@ const emptyRow = () => LOADED_ROW.map(() => 0);
  * `flow` is absent when the job names none, and `none` when it names one that loaded in no tier. Those two read
  * differently because the second is the failure this field exists to surface.
  */
-export function buildLoaded({ at, pi, roots, flow = null, extensions = [], skills = [], prompts = [], themes = [], failures = [], drops = [], shadowed = [], tools = null, active = [], ownNames = [], mcp = null }) {
+export function buildLoaded({ at, pi, roots, flow = null, extensions = [], skills = [], prompts = [], themes = [], failures = [], drops = [], shadowed = [], tools = null, active = [], ownNames = [], mcp = null, unmatched = [] }) {
 	const cut = { form: "full", packages: 0, servers: 0, names: 0, counts: 0 };
 	const out = { v: LOADED_VERSION, at, pi: typeof pi === "string" && pi !== PI_VERSION_UNKNOWN && pi.length <= PI_VERSION_MAX && PI_VERSION_RE.test(pi) ? pi : null };
 	if (roots === undefined) return { ...out, cut };
@@ -235,7 +263,8 @@ export function buildLoaded({ at, pi, roots, flow = null, extensions = [], skill
 		const own = new Set(ownNames);
 		// By name AND by source, as `own` is: another extension's tool of a job tool's name is not the job's.
 		const job = new Set(toolRows.filter((tool) => tool.path.startsWith(INLINE_PATH_PREFIX) && LOADED_JOB_TOOLS.includes(tool.name)).map((tool) => tool.name));
-		out.tools = { active: clamp(active.length, LOADED_MAX_TOOL_COUNT), own: active.filter((name) => own.has(name) && builtin.has(name)), job: active.filter((name) => job.has(name)) };
+		// `unmatched`: which of PI_EXCLUDE_EXTENSION_TOOLS' names no staged package or overlay extension registered, by position, as rows are, so no name goes on the line.
+		out.tools = { active: clamp(active.length, LOADED_MAX_TOOL_COUNT), own: active.filter((name) => own.has(name) && builtin.has(name)), job: active.filter((name) => job.has(name)), ...(unmatched.length > 0 ? { unmatched } : {}) };
 		out.extTools = extensionTools({ tools: toolRows, roots, overlayNames: keptLoaded, cut });
 	}
 	out.cut = cut;
@@ -243,7 +272,7 @@ export function buildLoaded({ at, pi, roots, flow = null, extensions = [], skill
 }
 
 /**
- * The names of the tools a staged package or an overlay extension brought, for a later switch that excludes one:
+ * The names of the tools a staged package or an overlay extension brought, which a trigger's page offers to switch off in `run.excludeExtensionTools`:
  * `{ p: [[row, ...names]], o: [[overlayIndex, ...names]] }`, by source and sorted, so the same job writes the same bytes.
  * `row` is the position in PI_PACKAGES and `overlayIndex` in `overlay.loaded`. A repository's tools are counts only, by
  * the rule at the top of this file, and never reach here. A name that fails the shape, belongs to an overlay name the
@@ -292,13 +321,13 @@ function extensionTools({ tools, roots, overlayNames, cut }) {
  * The field's three forms, largest first, for the writer to pick from by measuring the line (exit-line.mjs). Tool names
  * go first: compact keeps what a person needs to know whether the run was fine and loses what names things.
  *   - full: everything;
- *   - compact: no package rows, no overlay names, no own or job tools, no extension tools;
+ *   - compact: no package rows, no overlay names, no own or job tools, no extension tools (which exclusions no package or overlay extension brought stays: positions, and few);
  *   - minimal: v, at, pi, flow, the failed and dropped totals, and how many servers failed or timed out.
  * Each says which it is in `cut.form`.
  */
 export function fitLoaded(loaded) {
 	const { packages: _packages, overlay: _overlay, extTools: _extTools, tools, cut, ...kept } = loaded;
-	const compact = { ...kept, ...(tools ? { tools: { active: tools.active } } : {}), cut: { ...cut, form: "compact" } };
+	const compact = { ...kept, ...(tools ? { tools: { active: tools.active, ...(tools.unmatched ? { unmatched: tools.unmatched } : {}) } } : {}), cut: { ...cut, form: "compact" } };
 	const total = (slot) => Object.values(loaded.tiers).reduce((sum, row) => sum + row[slot], 0);
 	const minimal = {
 		v: loaded.v,
