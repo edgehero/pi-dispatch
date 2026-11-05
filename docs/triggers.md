@@ -223,9 +223,11 @@ pi-dispatch (version 2; this build understands 1)"):
 
 Upgrade the hosts that refuse it; do not edit the `version` away, which would hide fields this release drops. The one
 exception is a `version` you wrote yourself (below): no release wrote that file, so remove the key. `pi-dispatch
-doctor` says so in its fix ("unless you added `version` to it yourself: then remove that key"). A file that is merely
-broken (bad JSON, a bad entry, `version` written twice) is handled as it always was: the services refuse it, and an
-unparseable one is rebuilt from empty by the next panel write. No reader, the console's triggers view included,
+doctor` says so in its fix ("unless you added `version` to it yourself: then remove that key"). The services refuse a
+file that is merely broken (bad JSON, a bad entry, `version` written twice). A panel or console write refuses one that
+is not valid JSON, is not a JSON object, or has a `triggers` that is not a list, with nothing written, because it could
+not keep what the file holds: fix the file, or move it aside to start from an empty one. Earlier releases rebuilt an
+unparseable file from empty at the next panel write, which dropped every trigger in it. No reader, the console's triggers view included,
 reads a `version` written twice as newer: the services refuse the file as broken, and the console's view calls it
 broken when its last value reads newer and otherwise shows the file as it did before.
 

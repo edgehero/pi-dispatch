@@ -3,7 +3,7 @@ import { makeSandboxService } from "../src/sandbox-data.mjs";
 import { sandboxFixture } from "./helpers/sandbox-goldens.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import * as nodeFs from "node:fs";
 import { request } from "node:http";
 import { join } from "node:path";
@@ -859,6 +859,33 @@ for (const [name, body] of [["trigger-edit", { index: 2, flow: "review" }], ["tr
     assert.equal(read(paths.triggersPath), before);
   });
 }
+
+for (const [what, text, says] of [
+  ["a stray comma", `{\n  "triggers": [,\n    { "on": { "type": "label", "any": ["bug"] }, "run": { "kind": "github", "flow": "fix" } }\n  ]\n}\n`, "is not valid JSON"],
+  ["a bare list", `[{ "on": { "type": "label", "any": ["bug"] }, "run": { "kind": "github", "flow": "fix" } }]\n`, "is not a JSON object"],
+]) {
+  test(`trigger-add on a triggers file with ${what} is refused at the preview, in words, with every byte kept`, async () => {
+    const { paths } = deployment();
+    writeFileSync(paths.triggersPath, text);
+    const c = await start({ paths });
+    const got = await c.act("trigger-add", { trigger: { kind: "label", labels: ["x"], flow: "f" } });
+    assert.equal(got.status, 400, got.text);
+    assert.equal(got.json().error, `rejected: the triggers file ${paths.triggersPath} ${says}, so its triggers cannot be kept; nothing was written. Fix the file, or move it aside to start from an empty one`);
+    assert.equal(read(paths.triggersPath), text);
+  });
+}
+
+test("trigger-add on a missing or empty triggers file still starts one", async () => {
+  for (const before of [null, "", "\n"]) {
+    const { paths } = deployment();
+    if (before === null) rmSync(paths.triggersPath, { force: true });
+    else writeFileSync(paths.triggersPath, before);
+    const c = await start({ paths });
+    const result = await c.both("trigger-add", { trigger: { kind: "label", labels: ["x"], flow: "f" } });
+    assert.equal(result.confirm.status, 200, result.confirm.text);
+    assert.equal(JSON.parse(read(paths.triggersPath)).triggers.length, 1);
+  }
+});
 
 test("project-edit on a project a secret bundle names is refused at the preview with the planner's sentence, nothing written (#704)", async () => {
   const { paths } = deployment();
