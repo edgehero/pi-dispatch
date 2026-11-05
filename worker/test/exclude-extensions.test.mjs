@@ -501,12 +501,15 @@ test("the docs' numbers and lists are the code's", () => {
 	assert.equal(JOB_DATA_FIELD_VERSIONS.excludeExtensions, JOB_DATA_FIELD_VERSIONS.excludeExtensionTools);
 	const fleetRows = section.split("\n").filter((line) => line.startsWith("| ")).slice(1).map((line) => line.split(" | ")[0].slice(2));
 	assert.deepEqual(fleetRows, ["Worker", "Receiver", "Panel, console, `/dispatch`"], "who a fleet upgrades, each with what an older one does");
-	for (const said of ["`newer-release`", "`trigger-skew`", "`fleet.store-versions`", "`job-image-load-exclusions-unsupported`", "`loadExclusions`", "role map"]) assert.ok(section.includes(said), said);
-	// A host that reads `version` does not refuse a file that lost its stamp: it runs wider, and only a release that reads version 2 refuses it. Each shape off the real parsers, in the test above and below.
+	for (const said of ["`trigger-skew`", "`fleet.store-versions`", "`job-image-load-exclusions-unsupported`", "`loadExclusions`", "role map"]) assert.ok(section.includes(said), said);
+	// Which release reads both is this section's to say, and it has to be true of the packages. No release reads `version` and less than these, since both arrive in 5.0.0;
+	// a build from `main` between #761 and #800 does, and what it does is held off the real parsers in the test above and below.
+	assert.ok(section.includes("5.0.0 is the first release that reads both"), "the section names the release");
+	assert.ok(Number(JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version.split(".")[0]) >= 5, "and the worker is at least that release");
 	const flatSection = section.replace(/\s+/g, " ");
 	for (const key of ["excludeTools", "packages"]) assert.equal(triggersFileVersionFor({ triggers: [KINDS[1][1]({ [key]: key === "packages" ? false : ["bash"] })] }), 1, `${key}: what the section offers until then needs no version`);
-	for (const said of ["Until then leave both out of the file: `\"packages\": false` and `run.excludeTools` need neither version.", "**Once either is used, no 4.3.1 writer may touch the file**", "**A file that lost its stamp.**", "one-shot disarm", "A release that reads `version` and less loads it and drops both keys", "Only a release that reads version 2 refuses that file (`run.excludeExtensions needs triggers file version 2`)", "No release this old has a console", "It reads live workers alone: a receiver publishes no version and a stopped worker's row expires", "so a delivery still matches and queues its job without the keys", "where it can read the file", "whoever maintains it rebuilds it from this release"]) assert.ok(flatSection.includes(said), said);
-	for (const wrong of ["so deliveries in between match nothing", "a release that reads `version` then refuses the file"]) assert.ok(!flatSection.includes(wrong), wrong);
+	for (const said of ["Until then leave both out of the file: `\"packages\": false` and `run.excludeTools` need neither version.", "**Once either is used, no 4.3.1 writer may touch the file**", "**A file that lost its stamp.**", "one-shot disarm", "A 4.3.1 host loads it and drops both keys", "5.0.0 refuses that file (`run.excludeExtensions needs triggers file version 2`)", "No release this old has a console", "It reads live workers alone: a receiver publishes no version and a stopped worker's row expires", "where it can read the file", "whoever maintains it rebuilds it from 5.0.0 or later"]) assert.ok(flatSection.includes(said), said);
+	for (const wrong of ["so deliveries in between match nothing", "a release that reads `version` then refuses the file", "reads `version` and less", "The release after 5.0.0", "comes after 5.0.0"]) assert.ok(!flatSection.includes(wrong), wrong);
 	assert.doesNotMatch(upgrading, /Deliveries in between match nothing/);
 	assert.ok(flat("docs/multi-host.md").includes("job data at version 3, and a live peer reads less or publishes nothing"));
 	assert.doesNotMatch(flat("docs/triggers.md"), /which a writer stamps/);
@@ -516,19 +519,19 @@ test("the docs' numbers and lists are the code's", () => {
 	assert.ok(flat("docs/reasons.md").includes("What to do: This job goes without the connection's adapter, so reconnecting cannot help."));
 	// What the design says of the same, and where its variables are: a job's inputs hold neither.
 	const designText = flat("specs/design.md");
-	assert.ok(designText.includes("land only after a tag holding #761 is out, and are used only once every host reads them"));
-	assert.ok(designText.includes("On a file that lost its stamp it loads the file and drops both, and only a release that reads version 2 refuses that shape."));
+	assert.ok(designText.includes("ship in 5.0.0 with #761 and are used only once every host reads them"));
+	assert.ok(designText.includes("must not be used until every host, and every panel and console that writes the store, runs issue #761's release or later"));
+	assert.ok(designText.includes("On a file that lost its stamp it loads the file and drops both, and 5.0.0 refuses that shape."));
 	assert.doesNotMatch(designText, /a 4\.3\.1 panel, console or disarm|every file today/);
 	assert.match(designText, /Traces to\*\*: `REQ-PER-TRIGGER-TOOL-EXCLUSIONS`, `INT-TRIGGERS-FILE-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT`/);
 	const interfacesText = flat("specs/interfaces.md");
 	assert.doesNotMatch(interfacesText, /before a table has a row|a worker at the tag|`INT-CONTAINER-JOB-INPUTS` AMENDED\*\*: `PI_EXCLUDE_EXTENSIONS`/);
 	assert.ok(interfacesText.slice(interfacesText.indexOf("## INT-CONTAINER-RUNTIME-CONTRACT"), interfacesText.indexOf("## INT-CONTAINER-RUNTIME-CONTRACT") + 60000).includes("`PI_EXCLUDE_EXTENSIONS`"), "the variables are in the contract the spec names");
 	assert.match(upgrading, /3\. \*\*Upgrade the job image\.\*\* Pull the release's image and point `PI_JOB_IMAGE` at it\. An image a trigger names in `run\.image` moves too/, "the order's own step, which said PI_JOB_IMAGE alone");
-	assert.match(doc, /\| A release that reads `version` and reads less than these \| It waits on every job \(`newer-release`\), and it refuses the file at its next start \| It loads the file, drops both keys and runs the job wider than the file says, on a clean record \|/);
-	assert.match(doc, /\| A release that reads file version 2 and job data version 3 \| It runs the job as the file says \| It refuses the file: `run\.excludeExtensions needs triggers file version 2` \|/);
+		assert.match(doc, /\| 5\.0\.0 or later \| It runs the job as the file says \| It refuses the file: `run\.excludeExtensions needs triggers file version 2` \|/);
 	assert.doesNotMatch(doc, /every writer stamps|the file refuses to load/);
 	const requirement = flat("specs/requirements.md");
-	assert.ok(requirement.includes("a file that lost its stamp (a 4.3.1 writer's or disarm's, or a hand edit) it loads, dropping both keys, and only a worker that reads these refuses that shape"));
+	assert.ok(requirement.includes("5.0.0 refuses a file that lost its stamp (a 4.3.1 writer's or disarm's, or a hand edit)"));
 	assert.ok(requirement.includes("no 4.3.1 writer may touch the file once either is used"));
 	assert.ok(fleet.indexOf("### What a fleet needs before a trigger leaves something out") > fleet.indexOf("## Mixed versions: what is safe"));
 	// The label and the row name the capability the same.
