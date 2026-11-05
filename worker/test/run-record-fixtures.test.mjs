@@ -127,8 +127,9 @@ test("every shape reads back whole by its job id, says what its case was, and is
 			else assert.equal(Object.hasOwn(record, "dollars"), false, at);
 			assert.equal(recordVersionOf(record), 1, at);
 			assert.equal(recordReadable(record), true, at);
-			if (shape.id === NEXT_ID) assert.equal(Object.keys(record).at(-1), "v", at);
-			else assert.equal(Object.hasOwn(record, "v"), false, `${at}: no release wrote one`);
+			// `v` is written from issue #761's release, 5.0.0, on, as the record's last key; every release before it wrote none.
+			if (since(shape, "v5.0.0")) assert.equal(Object.keys(record).at(-1), "v", at);
+			else assert.equal(Object.hasOwn(record, "v"), false, `${at}: no release before 5.0.0 wrote one`);
 		}
 		const synthetic = readRecord(SYNTHETIC.jobId);
 		assert.deepEqual(synthetic, SYNTHETIC, "a newer record is read back as it is, not refused");
