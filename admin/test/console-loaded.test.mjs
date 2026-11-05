@@ -101,7 +101,10 @@ test("no model read carries the list of what a run loaded, and each carries the 
   // Beside each key the projection already rebuilds, and on a record of every shape the fixtures hold.
   assert.equal(Object.hasOwn(modelRunRecord({ ...record, bundle: { id: "b", variables: [], shadowed: [] } }), "loaded"), false);
   assert.equal(Object.hasOwn(modelRunRecord({ ...record, modelWhy: "primary" }), "loaded"), false);
-  const maximal = JSON.parse(readFileSync(new URL("../../worker/test/fixtures/run-records/next.maximal.json", import.meta.url), "utf8"));
+  // The newest shape the fixtures hold: `next` until a release takes its name (`run-record-fixtures.mjs --write`), so no file name is fixed here.
+  const fixtures = new URL("../../worker/test/fixtures/run-records/", import.meta.url);
+  const newest = JSON.parse(readFileSync(new URL("manifest.json", fixtures), "utf8")).shapes.at(-1).id;
+  const maximal = JSON.parse(readFileSync(new URL(`${newest}.maximal.json`, fixtures), "utf8"));
   assert.ok(maximal.loaded, "the fixture holds the field, or this proves nothing");
   assert.equal(JSON.stringify(modelRunRecord(maximal)).includes("pi-lint"), false, "no name of it survives anywhere in what a model reads");
   assert.equal(Object.hasOwn(modelRunRecord({ ...record, v: 2 }), "loaded"), false, "a newer release's record is its core");
