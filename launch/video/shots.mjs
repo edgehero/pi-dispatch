@@ -41,7 +41,7 @@ const OUT = "Out of the loop";
  * so, and "Sample data." must then be on screen too (the bolt is in the test).
  * `cinema`: full bleed, letterboxed, with no console shell: the film's own world rather than the product's.
  * `punch`: the whole frame takes each kick. `glitches`: `[beat, beats long, amount]`, one flash of datamosh each.
- * `{name}`, `{version}` and `{definition}` are the release's, filled in at render from `release.json` in the build folder, so
+ * `{name}` and `{version}` are the release's, filled in at render from `release.json` in the build folder, so
  * the release's name is in the film and not in this repository.
  */
 export const SHOTS = Object.freeze([
@@ -56,8 +56,8 @@ export const SHOTS = Object.freeze([
 		media: [{ asset: "night-sky", from: 16, to: 32 }],
 	},
 	{
-		// One lit point becoming all of them is what the release's name means. Then what makes that safe to run, and the rest of
-		// the film proves those three lines in order.
+		// The drop lands on the release's name, and the next line says what it is: an update to this product, in plain words. Then
+		// what makes a swarm safe to run, and the rest of the film proves those three lines in order.
 		id: "burst",
 		cinema: true,
 		punch: true,
@@ -65,7 +65,7 @@ export const SHOTS = Object.freeze([
 		stage: NEAR,
 		phrases: [
 			{ words: "{name}", at: 0, until: 12 },
-			{ words: "{definition}", at: 2, until: 12 },
+			{ words: "The new pi-dispatch {version} update.", at: 2, until: 12 },
 			{ words: "In a box.", at: 6, until: 12 },
 			{ words: "On a budget.", at: 8, until: 12 },
 			{ words: "You decide.", at: 10, until: 12 },
@@ -196,7 +196,7 @@ export const SHOTS = Object.freeze([
 export const DOUBLINGS = Object.freeze([8, 10, 12, 14, 16, 17, 18, 19, 20, 20.5, 21, 21.5, 22, 22.5, 23]);
 
 /** What fills the table's placeholders when the build folder has no `release.json`: the version, and no name. */
-export const RELEASE_FALLBACK = Object.freeze({ version: "5.0", name: "5.0", definition: "A major release." });
+export const RELEASE_FALLBACK = Object.freeze({ version: "5.0", name: "5.0" });
 
 /** The table with its placeholders filled. A placeholder nobody knows stops here, rather than reaching the screen. */
 export function withRelease(shots = SHOTS, release = RELEASE_FALLBACK) {
