@@ -75,10 +75,13 @@ test("no file constructs a Valkey client except through connection.mjs' judged c
 	}
 	// The two allowed BullMQ constructions assert the connection is judged right before they build on it.
 	const at = (path) => files.find((f) => f.path === path).code;
-	assert.match(at("worker/src/queue.mjs"), /assertJudgedConnection\(connection\);\s*const queue = new Queue\(/);
+	// `makeQueue` builds a subclass, whose getters reject to their caller where BullMQ's own cannot, and nothing else builds one.
+	assert.match(at("worker/src/queue.mjs"), /assertJudgedConnection\(connection\);\s*const queue = new SettledQueue\(/);
+	assert.match(at("worker/src/queue.mjs"), /class SettledQueue extends Queue \{/);
+	assert.equal((at("worker/src/queue.mjs").match(/new (?:Queue|SettledQueue)\(/g) ?? []).length, 1);
 	assert.match(at("worker/src/index.mjs"), /assertJudgedConnection\(connection\);\s*worker = new Worker\(/);
 	// Issue #468: and each carries the one-line `error` listener, so BullMQ never prints the whole error object.
-	assert.match(at("worker/src/queue.mjs"), /const queue = new Queue\([^;]*\);\s*onValkeyError\(queue, /);
+	assert.match(at("worker/src/queue.mjs"), /const queue = new SettledQueue\([^;]*\);\s*onValkeyError\(queue, /);
 	assert.match(at("worker/src/index.mjs"), /worker = new Worker\([\s\S]*?\}\);\s*onValkeyError\(worker, /);
 	// #771's host-bound control worker is a third construction, outside paid processors. Its injected constructor
 	// seam must not become a way around the same endpoint judgment or one-line error handling.

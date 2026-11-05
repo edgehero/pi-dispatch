@@ -503,6 +503,37 @@ test("non-close jobs keep their pre-#231 semantic keys byte-identical (label and
 	assert.deepEqual(seen.map((s) => s.opts.deduplication.id), ["owner/repo#7:frontend-fix", "owner/repo#12:review"]);
 });
 
+// Real BullMQ and real ioredis, and no network: the judge refuses before anything dials. BullMQ's own `jobScheduler` and
+// `repeat` getters await the connection inside an async executor, where a rejection has no caller, so on a plain Queue each
+// of these never settles and the process ends on an unhandled rejection. node:test fails a test on one of those too.
+for (const [what, call] of [
+	["getJobSchedulers", (q) => q.getJobSchedulers(0, -1, true)],
+	["getJobScheduler", (q) => q.getJobScheduler("nightly")],
+	["upsertJobScheduler", (q) => q.upsertJobScheduler("nightly", { pattern: "0 3 * * *" }, { name: "n", data: {} })],
+	["removeJobScheduler", (q) => q.removeJobScheduler("nightly")],
+	["getRepeatableJobs", (q) => q.getRepeatableJobs(0, -1, true)],
+]) {
+	test(`a queue whose connection gave up rejects ${what} to its caller, and nothing goes unhandled`, { timeout: 8000 }, async () => {
+		const { parseConnection } = await import("../src/connection.mjs");
+		const { makeQueue } = await import("../src/queue.mjs");
+		const refused = Object.assign(new Error("the judge refused this Valkey"), { valkeyRefused: true });
+		const q = makeQueue(parseConnection("redis://127.0.0.1:1", { failFast: true, context: {}, judge: async () => { throw refused; } }), { name: "qtest-gave-up" });
+		q.removeAllListeners("error");
+		q.on("error", () => {});
+		const unhandled = [];
+		const note = (err) => unhandled.push(err);
+		process.on("unhandledRejection", note);
+		try {
+			await assert.rejects(call(q), /the judge refused this Valkey/);
+			await new Promise((resolve) => setTimeout(resolve, 20));
+			assert.deepEqual(unhandled, []);
+		} finally {
+			process.off("unhandledRejection", note);
+			await q.close().catch(() => {});
+		}
+	});
+}
+
 // Integration against a real Valkey. Runs when VALKEY_TEST_URL is set (CI provides a service).
 const url = process.env.VALKEY_TEST_URL;
 const skip = url ? false : "VALKEY_TEST_URL not set; the queue integration test needs a Valkey";

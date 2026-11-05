@@ -114,13 +114,34 @@ const WORKER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 export { chainedJobId, localJobId, deliveryJobId, gitlabDeliveryJobId, forgeDeliveryJobId, manualCanaryJobId, manualTriggerJobId };
 
 /**
+ * BullMQ's `jobScheduler` and `repeat` getters are `new Promise(async (resolve) => { ... await this.client ... })` (read
+ * at 5.80.4). A connection that gave up rejects `this.client` inside that async executor, where no caller can reach it:
+ * the outer promise never settles and the rejection is unhandled, which ends the process. One `getJobSchedulers` on a
+ * refused or absent Valkey took the whole console down, from behind every `.catch` and timeout its readers carry.
+ *
+ * So the connection is awaited FIRST, out here, where a rejection is the caller's. Past that `this.client` is settled and
+ * resolved, so the getter's own await cannot reject. Guarding each call site instead was the other way, and one of them
+ * already did (`await q.client` in trigger-schedule-zones): the next caller would have to know, and `makeQueue` is the one
+ * place every queue of this project is built.
+ */
+class SettledQueue extends Queue {
+	get jobScheduler() {
+		return this.client.then(() => super.jobScheduler);
+	}
+
+	get repeat() {
+		return this.client.then(() => super.repeat);
+	}
+}
+
+/**
  * A queue handle. `name` defaults to the shared queue, so every existing caller is unchanged and a
  * single-host deployment never names anything else.
  */
 export function makeQueue(connection, { name = QUEUE } = {}) {
 	// Issue #464: only a connection `parseConnection` built, which judges and pins the Valkey it dials.
 	assertJudgedConnection(connection);
-	const queue = new Queue(name, { connection });
+	const queue = new SettledQueue(name, { connection });
 	// Issue #468: an error of this queue is one line, its message, never BullMQ's console.error of the whole object.
 	onValkeyError(queue, `queue ${name}`);
 	return queue;
