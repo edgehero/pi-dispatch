@@ -209,12 +209,12 @@ The sound is the track plus `sound.mjs`, sound design drawn in code against the 
 film, as a `.srt`.
 
 Real screens are the console's goldens in its dark theme, one card at a time with the rest of the page hidden, moved a frame at a
-time by `screen-motion.js`. The release's name comes
+time by `screen-motion.js`. The overview is the exception: it is shown whole, once, in its real layout. The release's name comes
 from `release.json` in the build folder, `{ "version", "name" }`, which git ignores; without it the film says the
 version alone.
 
-Nothing generated holds words, screens or logos. Every word is drawn, and every screen is the real console, marked as sample
-data. The build folder is ignored by git: a finished master is uploaded, never committed.
+Nothing generated holds words, screens or logos. Every word is drawn, and every screen is the real console. The frames carry no
+sample data line; the README's caption says it instead, and so should the description wherever else the film is posted. The build folder is ignored by git: a finished master is uploaded, never committed.
 
 The root README plays a copy of the film. GitHub's player shows a video's first frame until someone presses play, and this film
 opens nearly black, so the copy's first frame is swapped for a later one, which changes neither its length nor its timing:

@@ -290,12 +290,14 @@
 	}
 
 	/** The band a real screen's words sit in. */
-	function band(height = 188) {
-		const fade = g.createLinearGradient(0, H - height - 70, 0, H - height);
-		fade.addColorStop(0, "rgba(0,0,0,0)");
-		fade.addColorStop(1, "rgba(0,0,0,1)");
-		g.fillStyle = fade;
-		g.fillRect(0, H - height - 70, W, 70);
+	function band(height = 188, soft = 70) {
+		if (soft > 0) {
+			const fade = g.createLinearGradient(0, H - height - soft, 0, H - height);
+			fade.addColorStop(0, "rgba(0,0,0,0)");
+			fade.addColorStop(1, "rgba(0,0,0,1)");
+			g.fillStyle = fade;
+			g.fillRect(0, H - height - soft, W, soft);
+		}
 		g.fillStyle = "#000";
 		g.fillRect(0, H - height, W, height);
 	}
@@ -615,10 +617,11 @@
 			pool.addColorStop(1, "rgba(0,0,0,0)");
 			g.fillStyle = pool;
 			g.fillRect(0, 0, W, H);
-			const manages = c.b >= 4;
+			const turnAt = c.shot.phrases[1].at;
+			const manages = c.b >= turnAt;
 			const who = manages ? "pi-dispatch" : "You";
 			const width = wordsWidth(who, T.chip, 700, F.sans) + 70;
-			const pop = hit(c.b, manages ? 4 : 0, 0.5) * 0.06;
+			const pop = hit(c.b, manages ? turnAt : 0, 0.5) * 0.06;
 			g.save();
 			g.translate(W / 2, 458);
 			g.scale(1 + pop, 1 + pop);
@@ -637,21 +640,18 @@
 			screen(c);
 			band();
 			phrase(c, 0, LEFT, H - 60, { size: T.big, stagger: 0.2 });
-			say("Sample data.", W - LEFT, H - 60, { size: T.tick, weight: 500, family: F.mono, fill: MUTED, align: "right" });
 		},
 
 		models(c) {
 			screen(c);
 			band();
 			phrase(c, 0, LEFT, H - 60, { size: T.big, stagger: 0.2 });
-			say("Sample data.", W - LEFT, H - 60, { size: T.tick, weight: 500, family: F.mono, fill: MUTED, align: "right" });
 		},
 
 		rules(c) {
 			screen(c);
 			band();
 			phrase(c, 0, LEFT, H - 60, { size: T.big, stagger: 0.2 });
-			say("Sample data.", W - LEFT, H - 60, { size: T.tick, weight: 500, family: F.mono, fill: MUTED, align: "right" });
 		},
 
 		box(c) {
@@ -692,7 +692,6 @@
 				say("Refused", x + 206, y + 480, { size: T.chip + 18, fill: dark("refused-ink") });
 				g.restore();
 			}
-			say("Sample data.", LEFT + 24, H - 72, { size: T.tick, weight: 500, family: F.mono, fill: MUTED });
 		},
 
 		asks(c) {
@@ -700,14 +699,6 @@
 			band();
 			phrase(c, 0, LEFT, H - 60, { size: T.line });
 			phrase(c, 1, LEFT + 320, H - 60, { size: T.line });
-			say("Sample data.", W - LEFT, H - 60, { size: T.tick, weight: 500, family: F.mono, fill: MUTED, align: "right" });
-		},
-
-		page(c) {
-			screen(c);
-			band();
-			phrase(c, 0, LEFT, H - 60, { size: T.line, stagger: 0.14 });
-			say("Sample data.", W - LEFT, H - 60, { size: T.tick, weight: 500, family: F.mono, fill: MUTED, align: "right" });
 		},
 
 		number(c) {
@@ -715,7 +706,13 @@
 			band(236);
 			phrase(c, 0, LEFT, H - 136, { size: T.line });
 			phrase(c, 1, LEFT, H - 44, { size: T.line, max: 1400 });
-			say("Sample data.", W - LEFT, H - 44, { size: T.tick, weight: 500, family: F.mono, fill: MUTED, align: "right" });
+		},
+
+		page(c) {
+			screen(c);
+			// The fade under the words lifts as the overview pulls back (beats 5.5 to 7.5), or it would dim the bottom of the whole page.
+			band(188, c.b < 10 ? 70 * (1 - inOut((c.b - 5.5) / 2)) : 70);
+			phrase(c, 0, LEFT, H - 60, { size: T.line, stagger: 0.14 });
 		},
 
 		morning(c) {

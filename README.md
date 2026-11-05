@@ -5,9 +5,9 @@
   </picture>
 </p>
 
-https://github.com/user-attachments/assets/9c415fda-62c9-4175-ae60-cbb0def80f77
+https://github.com/user-attachments/assets/129a774b-1dea-4dee-bb4f-3478eff409bc
 
-<sub>One minute, with sound. A first look at the next release, 5.0.</sub>
+<sub>One minute, with sound. A first look at the next release, 5.0. The screens show sample data.</sub>
 
 # pi-dispatch
 
