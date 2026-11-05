@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { crc32, deflateSync, inflateSync } from "node:zlib";
 import { decodePng, encodeApng } from "../../launch/apng.mjs";
 import { BANNER_ALT, bannerShot, bannerSvg, EXPLAIN_FPS, EXPLAIN_MIN_TEXT, EXPLAIN_THEMES, EXPLAIN_WIDTH, EXPLAINERS, explainerFile, explainerSvg, explainerWords, explainShots, explainSources } from "../../launch/explainers.mjs";
-import { TOP_HALF_BANNED } from "./helpers/plain-words.mjs";
+import { CLAIMS_REFUTED, TOP_HALF_BANNED } from "./helpers/plain-words.mjs";
 
 // Issue #820: the READMEs' explaining pictures. A picture is a hand-written restatement like any table (AGENTS.md), and
 // an easy one to get wrong, because simple words pull towards a stronger claim than the product makes. So the words are
@@ -102,7 +102,7 @@ test("no picture says the simpler thing the docs refute", () => {
   // The worker has dozens of refusals, so any count of checks is stale the day one is added.
   // An AI reviews and never approves: a self-approval is a merge by another name (`CONST-MERGE-NEVER-AUTOMATIC`).
   // pi-dispatch looks after a swarm and does not direct it, so "orchestrates" would be another agent it does not have.
-  const REFUTED = [/\b(can ?not|can't|unable to) (merge|accept)/i, /\bcan ?not (pass|exceed|overspend)/i, /\bnever (passes|exceeds|overspends)/i, /nothing (gets|leaves|comes) out/i, /\bfree\b/i, /\b\d+ (checks|gates|limits)\b/i, /never accepted/i, /\b(AI|agent|it) (also )?approves?\b/i, /approved by AI/i, /\borchestrat/i];
+  const REFUTED = CLAIMS_REFUTED;
   for (const explainer of EXPLAINERS) {
     for (const words of [...wordsOf(explainer), explainer.alt]) for (const refuted of REFUTED) assert.doesNotMatch(words, refuted, `${explainer.name}: ${words}`);
   }

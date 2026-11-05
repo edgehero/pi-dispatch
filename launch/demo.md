@@ -183,3 +183,35 @@ full page.
 
 After a render, bump the `?v=` on each changed image in both READMEs (the admin README links the PNGs by their
 absolute raw.githubusercontent.com URLs, because the npm page cannot show an SVG from there).
+
+## The one minute film
+
+`launch/video/` is a one minute motion graphics film, made from one table (`shots.mjs`). Its graphics, its words and its real
+console screens are drawn in code, and a few generated clips sit between them. The edit is cut to the measured beats of a
+track, and every word is held to the README's rules by `admin/test/video.test.mjs`.
+
+```sh
+node launch/video/temp-track.mjs build/temp.wav                            # a placeholder, no key and no cost
+node launch/video/beats.mjs build/temp.wav --out build/beats.json          # measure it, and refuse a beat that wanders
+node launch/video/compose.mjs --beats build/beats.json --track build/temp.wav --out build/film.mp4 --draft
+node launch/video/checks.mjs build/film.mp4                                # length, format, flashes
+```
+
+`beats.json` and `picks.json` beside the recipe record the chosen take and pictures, and `ledger.json` every paid call. The files
+themselves live in the build folder, so a clone without them still renders, with labelled panels and the placeholder track.
+
+A picture nobody has paid for yet draws as a labelled panel, so the whole film can be judged for nothing. To pay, run
+`generate.mjs` through `op run` with a dedicated key that has a credit limit. It reserves each call against `ledger.json`
+before sending it and stops at the cap, so a run cannot quietly overspend or pay twice, and `node launch/video/generate.mjs spend`
+says where the total stands. Name the chosen pictures in `picks.json` in the build folder, `{ name: file }`.
+
+The sound is the track plus `sound.mjs`, sound design drawn in code against the same beats. A render also writes captions beside the
+film, as a `.srt`.
+
+Real screens are the console's goldens in its dark theme, one card at a time with the rest of the page hidden, moved a frame at a
+time by `screen-motion.js`. The release's name comes
+from `release.json` in the build folder, `{ "version", "name", "definition" }`, which git ignores; without it the film says the
+version alone.
+
+Nothing generated holds words, screens or logos. Every word is drawn, and every screen is the real console, marked as sample
+data. The build folder is ignored by git: a finished master is uploaded, never committed.

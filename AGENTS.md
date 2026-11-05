@@ -34,7 +34,7 @@ Two consequences worth internalising before you design anything:
 | `specs/` | constitution, requirements, design, interfaces, open questions. The source of truth |
 | `docs/` | operator-facing reference, one file per feature or forge |
 | `design/` | the console's design system (#737): `system/` is the published cards, tokens and stylesheet; `tools/` the Python generators that build them (`design/README.md`) |
-| `launch/` | launch copy and the demo recording recipe. Maintainer material, deliberately not in `docs/` |
+| `launch/` | launch copy, the demo recording recipe and the film's recipe (`launch/video/`). Maintainer material, deliberately not in `docs/` |
 
 ## Read these before changing behaviour
 
@@ -272,6 +272,7 @@ Two consequences worth internalising before you design anything:
     inside one, whatever its name) is named in `docs/backup.md` or excluded with its reason. Two things it cannot see
     are caught only by reading the change: a store with a fixed name `FIXED_STORES` does not list, and a key family
     built inline with no exported constant.
+  And the film's words against the README's rules and its real screens against "Sample data." (`admin/test/video.test.mjs`).
   Add a table, add its bolt. Where the relation is NOT real, say so in the test
   rather than manufacturing one: `PR_ACTION_VOCAB.dflt` is deliberately unpinned, with a line explaining
   that gitlab's default is not its set's first member.
