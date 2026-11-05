@@ -125,24 +125,43 @@
 	}
 
 	const PROGRAMS = {
-		/** Three cards, and the big number on each. */
+		/** Three cards that keep moving: the question waiting, the slots filling, the day's spend lighting up as its number rises. */
 		overview: {
 			setup() {
 				const cards = ["#p-needs", "#p-active", "#p-spend"].map((id) => one(id));
 				hide(one("#p-waiting"));
 				const row = cards[0].parentElement;
 				row.style.gridTemplateColumns = "repeat(3, 1fr)";
-				row.style.width = "760px";
-				for (const section of cards) trim(one(".card", section), ".card__head, .bigpair, .kpi");
+				row.style.width = "880px";
+				for (const section of cards) trim(one(".card", section), ".card__head, .bigpair, .kpi, .sd, .rows");
+				// One row under "Needs you", the question: the others are the console's to explain.
+				hide(...all(".rowpill", one("#p-needs")).slice(1));
 				only(...cards);
 				this.cards = cards;
-				this.view = aim(cards, 1320);
+				this.columns = all(".sd__c", one("#p-spend"));
+				this.hosts = all(".rowpill", one("#p-active"));
+				this.question = one(".rowpill", one("#p-needs"));
+				this.view = aim(cards, 1340);
 			},
 			seek(b) {
-				camera(this.view, 1 + 0.012 * b);
-				this.cards.forEach((card, i) => enter(card, b, i * 0.5));
-				all(".big__n").forEach((n) => count(n, b, 0.1, { length: 1 }));
-				all(".kpi b").forEach((n, i) => count(n, b, 0.5 + i * 0.5, { length: 1.2 }));
+				camera(this.view, 1 + 0.01 * b);
+				this.cards.forEach((card, i) => enter(card, b, i * 0.35));
+				all(".big__n").forEach((n) => count(n, b, 0.1, { length: 0.9 }));
+				enter(this.question, b, 1.1, { rise: 14 });
+				// The question waiting for its answer pulses with the music, the one thing on the page asking for you.
+				if (this.question) this.question.style.outline = b >= 2 && Math.floor(b * 2) % 2 === 0 ? "2px solid var(--parked)" : "";
+				all(".kpi b", one("#p-active")).forEach((n) => count(n, b, 0.4, { length: 1 }));
+				this.hosts.forEach((host, i) => {
+					enter(host, b, 0.9 + i * 0.45, { rise: 14 });
+					all(".sl--run, .sl--hold", host).forEach((slot, n) => {
+						slot.style.opacity = b >= 1.2 + i * 0.45 + n * 0.3 ? "1" : "0";
+					});
+				});
+				all(".kpi b", one("#p-spend")).forEach((n) => count(n, b, 0.7, { length: 3.2 }));
+				this.columns.forEach((column, i) => {
+					const on = b >= 0.7 + (i / this.columns.length) * 3.2;
+					for (const dot of all("i.on", column)) dot.style.opacity = on ? "1" : "0";
+				});
 			},
 		},
 

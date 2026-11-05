@@ -50,10 +50,10 @@ export const SHOTS = Object.freeze([
 		// the world appears around it. It falls in on itself in the track's near-silent bar, so the drop is the explosion.
 		id: "open",
 		cinema: true,
-		beats: 32,
+		beats: 24,
 		stage: IN,
-		phrases: [{ words: "One AI coding agent.", at: 0, until: 8 }],
-		media: [{ asset: "night-sky", from: 16, to: 32 }],
+		phrases: [{ words: "One AI coding agent.", at: 0, until: 4 }],
+		media: [{ asset: "night-sky", from: 10, to: 24 }],
 	},
 	{
 		// The drop lands on the release's name, and the next line says what it is: an update to this product, in plain words. Then
@@ -97,17 +97,17 @@ export const SHOTS = Object.freeze([
 	},
 	{
 		id: "machines",
-		beats: 6,
+		beats: 5,
 		real: true,
-		screens: [{ name: "machines", from: 0, to: 6 }],
-		phrases: [{ words: "All your machines.", at: 0, until: 6 }],
+		screens: [{ name: "machines", from: 0, to: 5 }],
+		phrases: [{ words: "All your machines.", at: 0, until: 5 }],
 	},
 	{
 		id: "models",
-		beats: 6,
+		beats: 5,
 		real: true,
-		screens: [{ name: "models", from: 0, to: 6 }],
-		phrases: [{ words: "All your models.", at: 0, until: 6 }],
+		screens: [{ name: "models", from: 0, to: 5 }],
+		phrases: [{ words: "All your models.", at: 0, until: 5 }],
 	},
 	{
 		id: "rules",
@@ -146,13 +146,13 @@ export const SHOTS = Object.freeze([
 	},
 	{
 		id: "page",
-		beats: 6,
+		beats: 8,
 		real: true,
 		screens: [
-			{ name: "overview", from: 0, to: 3 },
-			{ name: "steer", from: 3, to: 6 },
+			{ name: "overview", from: 0, to: 5 },
+			{ name: "steer", from: 5, to: 8 },
 		],
-		phrases: [{ words: "Watch and steer from one page.", at: 0, until: 6 }],
+		phrases: [{ words: "Watch and steer from one page.", at: 0, until: 8 }],
 	},
 	{
 		id: "number",
@@ -181,9 +181,9 @@ export const SHOTS = Object.freeze([
 		beats: 8,
 		stage: OUT,
 		phrases: [
-			{ words: "pi-dispatch", at: 0, until: 12 },
-			{ words: "Manage your swarm of pi coding agents.", at: 1, until: 12 },
-			{ words: "Open source. Your machines, your models.", at: 3, until: 12 },
+			{ words: "pi-dispatch", at: 1.2, until: 12 },
+			{ words: "Manage your swarm of pi coding agents.", at: 2, until: 12 },
+			{ words: "Open source. Your machines, your models.", at: 3.5, until: 12 },
 			{ words: "github.com/edgehero/pi-dispatch", at: 5, until: 12 },
 		],
 	},
@@ -193,7 +193,7 @@ export const SHOTS = Object.freeze([
  * The film's beats each doubling of the swarm lands on: on the bar, then the beat, then the half beat, because an explosion
  * accelerates. The picture and the sound both read this.
  */
-export const DOUBLINGS = Object.freeze([8, 10, 12, 14, 16, 17, 18, 19, 20, 20.5, 21, 21.5, 22, 22.5, 23]);
+export const DOUBLINGS = Object.freeze([4, 6, 8, 10, 11, 12, 13, 14, 15, 15.5, 16, 16.5, 17, 17.5, 18]);
 
 /** What fills the table's placeholders when the build folder has no `release.json`: the version, and no name. */
 export const RELEASE_FALLBACK = Object.freeze({ version: "5.0", name: "5.0" });

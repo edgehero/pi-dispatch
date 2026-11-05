@@ -135,8 +135,13 @@ export function soundDesign({ beats, shots = SHOTS, rate = SOUND_RATE, tail = TA
 	const asks = startOf.get("asks");
 	for (let i = 0; i < 39; i++) key(at(asks + 3 + i / 15), 0.1);
 	const page = startOf.get("page");
-	for (let i = 0; i < 51; i++) key(at(page + 3.2 + i / 23), 0.1);
-	tick(at(page + 3 + 2.5), 0.18);
+	const steerFrom = shots.find((shot) => shot.id === "page").screens.find((screen) => screen.name === "steer").from;
+	for (let i = 0; i < 51; i++) key(at(page + steerFrom + 0.2 + i / 23), 0.1);
+	tick(at(page + steerFrom + 2.5), 0.18);
+
+	// The overview: a click per card, and the day's spend lighting up.
+	for (let i = 0; i < 3; i++) tick(at(page + i * 0.35), 0.13);
+	for (let i = 0; i < 18; i++) tick(at(page + 0.7 + i * 0.18), 0.035, i / 9 - 1, 2200 + i * 70);
 
 	// The one row under the marker, ringing once.
 	const number = startOf.get("number");
@@ -151,8 +156,11 @@ export function soundDesign({ beats, shots = SHOTS, rate = SOUND_RATE, tail = TA
 	}
 	for (const freq of [110, 164.81, 220, 329.63]) add(at(morning + 4), 3.4, 0.09, (t) => Math.min(1, t / 0.08) * Math.exp(-t * 1.1) * tone(freq)(t));
 
-	// The name on the last card.
-	for (const freq of [220, 329.63, 440, 659.25]) add(at(startOf.get("end")), 2.6, 0.05, (t) => env(t, 1.6, 0.01) * tone(freq)(t));
+	// The swarm flying into the logo, and the note as it lands.
+	const end = startOf.get("end");
+	wash(at(end), at(end + 1.2) - at(end), 0.5, (p) => p ** 2, (p) => 0.05 + 0.6 * p ** 2);
+	thump(at(end + 1.2), 0.6, 60);
+	for (const freq of [220, 329.63, 440, 659.25]) add(at(end + 1.2), 2.6, 0.07, (t) => env(t, 1.4, 0.008) * tone(freq)(t));
 
 	return { left, right, rate, seconds };
 }
