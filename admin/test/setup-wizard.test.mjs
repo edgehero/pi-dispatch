@@ -838,7 +838,7 @@ test("wizard: the edge's service answer installs the PINNED receiver, then the -
   assert.equal(attached[1].cwd, dir);
 
   const c = seen.confirm.find((x) => /receiver/i.test(x.title));
-  assert.match(c.message, new RegExp(`${RECEIVER_PKG.replace("/", "\\/")}@4\\.3\\.1`), "the confirm shows the exact pin");
+  assert.match(c.message, new RegExp(`${RECEIVER_PKG.replace("/", "\\/")}@5\\.0\\.0`), "the confirm shows the exact pin");
   assert.match(c.message, /service install --receiver/, "and the unit command it will run after");
   assert.ok(c.message.includes(dir), "and names the cwd");
   assert.ok(reachedFirstTrigger(seen), "the wizard continued to step 11");
