@@ -1117,6 +1117,7 @@ once jobs run. A temporary outage never turns an established deployment into a n
 Bootstrap from the deployment folder with the durable installed CLI:
 
 ```bash
+npm init -y
 npm install --save-exact @edgehero/pi-dispatch@5.0.0 @edgehero/pi-dispatch-admin@5.0.0 @earendil-works/pi-coding-agent@1.5.0 --omit=dev --omit=optional --ignore-scripts --no-audit --no-fund
 ./node_modules/.bin/pi-dispatch up --console
 ```
@@ -2147,7 +2148,7 @@ read, so this run's chat cannot be judged; try again". For a run whose record a 
 only its ids, kind, outcome, times, host, project and attempt (every other field null), plus `newer: true` and a
 `note` with the run page's sentence. The `dispatch_runs` tool answers such a record the same way, with a note of its
 own that names the fields it gives and says the others are left out. Every role, the agent included, gets both times,
-`startedAt` and `finishedAt`, for every run (before issue #761's release an agent's copy had no `finishedAt`).
+`startedAt` and `finishedAt`, for every run.
 
 Without a session, `/api/state` answers 401 with a JSON error, never a redirect to the sign-in page:
 `{"error": "sign in first", "ended": "idle"}`, where `ended` says why the session behind your cookie ended (one of the
@@ -2403,7 +2404,7 @@ Either exclusion makes the proposed file need version 2 and job data version 3, 
 live worker's release, and so does the Confirm, and each refuses on a lower one, none, or a registry it cannot read. It reads live workers alone, not receivers or stopped workers. A host that reads less would hold every job this file touches. A host
 that publishes no version is from before issue #761: it drops what it does not know and can run a job wider on a clean record. The refusal names each, and what to do is to upgrade it
 ([what a fleet needs](upgrading.md#what-a-fleet-needs-before-a-trigger-leaves-something-out)). Where they all read it, it says "mini1 and mini2 each read what this change needs.", and with no live host, "No host is live right now, so no host's release could be checked." Neither says anything of an image, which has its own line above. It says what the write does to the file's stamp: "Stamps the file version 2:
-a host reading less waits on every trigger's jobs, not only this one's.", "The file stays at version 2.", or "The file no longer needs version 2, so
+a host from before 5.0.0 ignores that and runs this trigger's jobs wider, and a later host that reads less waits on every trigger's jobs.", "The file stays at version 2.", or "The file no longer needs version 2, so
 this write takes the stamp off." A `"version": 1`, or one the loader cannot read, on a file that needs no more: "This write also takes the file's "version" line off: a file that needs no more than version 1 is written without one." A file that needs no more than version 1 asks no host, and any change to it keeps every other key's bytes.
 
 **Who reads what:**
@@ -2628,7 +2629,7 @@ link their confirmed changes to that refusal. Ordinary record-field filters rema
 
 Upgrade the console and the host’s `pi-dispatch` before adding an agent token. Older versions reject the whole
 access file when it contains an unknown role, which also blocks sign-in, doctor and console service installation.
-From issue #761's release on, a role a console does not know is kept and signs in nowhere instead
+From 5.0.0 on, a role a console does not know is kept and signs in nowhere instead
 ([Managing tokens](#managing-tokens)), so the order matters only for hosts and consoles older than that.
 Create the token on the host, print it once and keep it outside job-visible folders:
 

@@ -170,7 +170,7 @@ Managed forks require the `fork` image capability. The worker refuses an older i
 ## pi 1.5.0 upgrade (issue #796)
 
 This image pins pi 1.5.0. Deploy a job image built with pi 1.5.0 together with the updated worker, the image first
-([the order](upgrading.md#the-order)); updating host pi alone does not change queued jobs' image. The release notes must name pi 1.5.0 and say these three things:
+([the order](upgrading.md#the-order)); updating host pi alone does not change queued jobs' image. Three things change with pi 1.5.0:
 
 - **Tool arguments are converted.** pi 1.5.0 validates a plain JSON Schema tool with TypeBox's full conversion, so a wrong
   type is quietly changed: `2.7` to `2`, `null` to `"null"`, one object to a one-item array. Every tool the runner defines

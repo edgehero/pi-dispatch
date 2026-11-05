@@ -298,7 +298,7 @@ test("both READMEs say what an exclusion is not, and every heading of the exclus
   }
   // Each of the two keys by what it does: only one of them keeps code from running.
   const engineerWords = engineers.replace(/\s+/g, " ");
-  assert.ok(engineerWords.includes("`excludeExtensions` keeps an extension's code out of a job. `excludeExtensionTools` removes only the tool, so the rest of that extension still runs."));
+  assert.ok(engineerWords.includes("`excludeExtensions` keeps an extension's code from loading in a job, though its files stay readable. `excludeExtensionTools` removes only the tool, so the rest of that extension still runs."));
   assert.ok(read("admin/README.md").replace(/\s+/g, " ").includes("An extension left out does not load, and a tool removed leaves the rest of its extension running."));
   for (const [text, path] of [[ROOT, "README.md"], [admin, "admin/README.md"]]) assert.doesNotMatch(text, /stops? what a job loads on its own|stops a job from loading/, path);
   // The version a file needs, as the loader's table has it. Which release reads it is `docs/upgrading.md`'s to say, so neither paragraph holds a release's number.

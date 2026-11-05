@@ -123,7 +123,7 @@ Since issue #761 none of them deletes what it cannot read:
 
 - **A key this release does not know is kept.** The worker ignores it, as before, but every write (`/dispatch set`,
   `dispatch_set`, the console, `/dispatch secrets`) now writes it back as it was, in its place. A key that a later
-  release added survives an edit from a console of issue #761's release or later. An earlier `/dispatch` panel (4.3.1
+  release added survives an edit from a console of 5.0.0 or later. An earlier `/dispatch` panel (4.3.1
   included; 4.3.1 had no web console) or an earlier console build still drops every key it does not know when it
   writes the file, `secretBundles` included, so **upgrade
   every panel and console before anyone sets a key only the new release knows** (the whole order is in

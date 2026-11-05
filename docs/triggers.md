@@ -238,7 +238,7 @@ worker and the receiver refuse to start on it (a running worker keeps its schedu
 it), and one above what this release reads (2) is taken for a file a newer release wrote, so every job waits.
 
 Every top-level key beside `triggers`, and every `run` key of an entry, including ones this release does not know, is
-kept by every write of a release with issue #704 or later. A `/dispatch` panel or worker from before it (4.3.1
+kept by every write of 5.0.0 or later. A `/dispatch` panel or worker from before it (4.3.1
 included, which had no web console) or an earlier console build writes `triggers` alone, dropping `version` and every
 other top-level block, `secretBundles` among them, so upgrade them first.
 

@@ -73,7 +73,7 @@ pi install npm:@edgehero/pi-dispatch-admin
 **By hand**, install into a folder that will stay there:
 
 ```bash
-mkdir my-dispatch && cd my-dispatch
+mkdir my-dispatch && cd my-dispatch && npm init -y
 npm install --save-exact @edgehero/pi-dispatch@5.0.0 @edgehero/pi-dispatch-admin@5.0.0 @earendil-works/pi-coding-agent@1.5.0 --omit=dev --omit=optional --ignore-scripts --no-audit --no-fund
 ./node_modules/.bin/pi-dispatch up --console
 ```
@@ -472,8 +472,8 @@ at the foot of the card, and you can discard them.
 jobs no longer load it. You can also turn off a tool one of them adds: the tool is gone, and the rest of that extension still runs. A tool has a switch while the newest run that says what it
 loaded lists it, or while your triggers file names it.
 
-This limits what a job starts with, not what its agent can do next. An agent that can run commands, write files or edit files can bring back what you turned off. If code must stay
-out of reach of a trigger's agent, also turn off the tools that do those things: `bash` and `powershell` run commands, `write` writes files and `edit` edits them
+This limits what a job starts with, not what its agent can do next. An agent that can run commands, write files or edit files can bring back what you turned off. If code must not run
+in a trigger's jobs, also turn off the tools that do those things: `bash` and `powershell` run commands, `write` writes files and `edit` edits them
 ([what this does not stop](docs/exclude-tools.md#what-exclusion-does-not-stop)).
 
 Every running machine must run a release that can read these settings. The [upgrade notes](docs/upgrading.md#what-a-fleet-needs-before-a-trigger-leaves-something-out)
@@ -489,7 +489,7 @@ machine the console runs on, and says how to undo it. One
   <img src="docs/images/console/console-trigger-change.png?v=2026-11-04-800d" alt="The preview of that change, in words: linear on and where its jobs would now connect, bash off, when the change takes effect, a waiting job that would now be refused, that a job on a machine without linear is refused and which machines have it, who it is recorded under, the lines of the file as they would change, the way to undo it, and one Confirm button">
 </picture>
 
-**It stops what would only fail later, before it costs you anything.** A job cap can only lower the limit you set for all jobs. If a trigger's model is too
+**Some changes that would only fail later are refused before they cost you anything.** A job cap can only lower the limit you set for all jobs. If a trigger's model is too
 expensive for even one request under its cap, the page refuses the change and names the amount a short task needs, rather than letting a job start and fail.
 If the page is out of date, it asks you to reload rather than write over someone else's change.
 
@@ -597,7 +597,7 @@ the host ([more](docs/console.md#from-another-machine)):
 
 ```bash
 ssh -L 4790:127.0.0.1:4790 yourhost              # on your own machine; then, on the host:
-./node_modules/.bin/pi-dispatch-console link --name you --port 4790
+./node_modules/.bin/pi-dispatch-console link --name operator --port 4790
 ```
 
 **Connect a forge.** `pi-dispatch setup github --webhook-url '<receiver URL>'` creates a GitHub App in one browser click, or `--no-webhook`
@@ -729,7 +729,7 @@ On a trigger's page in the console, a person changes `flow`, `provider`, `model`
 `excludeExtensionTools` with one preview and one Confirm ([what a trigger's jobs get](docs/console.md#what-a-triggers-jobs-get)). The page writes this host's file,
 so on a fleet where each host keeps its own, a host keeps what it has until its copy changes. A few others have the page's Edit form. The rest change in the file, and editing the file works as it always has.
 
-`excludeExtensions` keeps an extension's code out of a job. `excludeExtensionTools` removes only the tool, so the rest of that extension still runs. Neither stops what an
+`excludeExtensions` keeps an extension's code from loading in a job, though its files stay readable. `excludeExtensionTools` removes only the tool, so the rest of that extension still runs. Neither stops what an
 agent that can run commands, write files or edit files can reach ([what exclusion does not stop](docs/exclude-tools.md#what-exclusion-does-not-stop)). A file that uses either needs
 `"version": 2`, so every worker, receiver and console must run a release that can read both. A release that cannot ignores them and runs the job with what the file turned off. The [upgrade notes](docs/upgrading.md#what-a-fleet-needs-before-a-trigger-leaves-something-out) say which release, and what to do until then. While a running
 worker cannot read them, the page refuses the change and names it.
@@ -1027,5 +1027,6 @@ MIT. See [LICENSE](LICENSE). Built on [pi](https://github.com/earendil-works/pi)
 > **Not affiliated with** the unrelated npm package `pi-dispatch`, a pi extension for rotating ChatGPT Codex OAuth accounts. Same name,
 > different thing. This project publishes scoped packages only:
 > [`@edgehero/pi-dispatch`](https://www.npmjs.com/package/@edgehero/pi-dispatch) (worker and CLI),
-> [`@edgehero/pi-dispatch-receiver`](https://www.npmjs.com/package/@edgehero/pi-dispatch-receiver), and
-> [`@edgehero/pi-dispatch-admin`](https://www.npmjs.com/package/@edgehero/pi-dispatch-admin) (the console and the panel). The bare name is theirs.
+> [`@edgehero/pi-dispatch-receiver`](https://www.npmjs.com/package/@edgehero/pi-dispatch-receiver),
+> [`@edgehero/pi-dispatch-admin`](https://www.npmjs.com/package/@edgehero/pi-dispatch-admin) (the console and the panel), and the optional
+> [`@edgehero/pi-dispatch-sandbox-gateway`](https://www.npmjs.com/package/@edgehero/pi-dispatch-sandbox-gateway). The bare name is theirs.

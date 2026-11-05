@@ -171,7 +171,7 @@ runs. None of the four keeps code away from an agent that can write or edit file
 ## Versions and older hosts
 
 A file that uses either key needs `"version": 2`. A writer that reads that version stamps it, and takes it away again when nothing needs it. A
-job that carries either is stamped job data version 3 (a canary's stays at 2). Every host needs 5.0.0 or later before a file uses either, and once one does,
+job that carries either is stamped job data version 3 (a canary with neither stays at 2). Every host needs 5.0.0 or later before a file uses either, and once one does,
 no 4.3.1 writer may touch the file ([what a fleet needs](upgrading.md#what-a-fleet-needs-before-a-trigger-leaves-something-out)): it keeps the keys and drops the stamp, as a hand edit can.
 
 | A worker on | A file with either key and `"version": 2`, or a job with either | The same file with no stamp |
@@ -180,11 +180,11 @@ no 4.3.1 writer may touch the file ([what a fleet needs](upgrading.md#what-a-fle
 | 5.0.0 or later | It runs the job as the file says | It refuses the file: `run.excludeExtensions needs triggers file version 2` |
 
 The trigger's page refuses the change while a live worker reads less or publishes no version, and names it. It reads live workers alone, not receivers or stopped workers. A hand edit is not
-stopped, and `pi-dispatch doctor` names such a host (`fleet.store-versions`).
+stopped: once the file is stamped, `pi-dispatch doctor` names such a host (`fleet.store-versions`), and a file with no stamp fails its `triggers.file` check instead.
 
 An image without the `loadExclusions` capability is refused before any spend (`job-image-load-exclusions-unsupported`). Its runner would
 not honour either key, and where it starts a role child that child gets no `--exclude-tools`, so a job with `run.excludeTools` is refused the same way where its
-scope has a role map, even on a trigger that never starts a child. A job with none of that runs on such an image as it did.
+scope has a role map, even on a trigger that never starts a child. An image from before role maps, 4.3.1's among them, refuses any job in such a scope first (`job-image-model-roles-unsupported`). A job with none of that runs on such an image as it did.
 
 ## The file, or a person on the trigger's page
 

@@ -1125,7 +1125,7 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
       "A host with its own copy of this file keeps what it has until that copy changes.",
       ...(judged.type === "cron" ? ["While hosts' copies differ on a schedule, no host installs a change to one, so this one moves when they agree."] : []),
       ...skewLines(skew),
-      ...(judged.need.triggersVersion > judged.fileVersion ? [`Stamps the file version ${judged.need.triggersVersion}: a host reading less waits on every trigger's jobs, not only this one's.`] : []),
+      ...(judged.need.triggersVersion > judged.fileVersion ? [`Stamps the file version ${judged.need.triggersVersion}: a host from before 5.0.0 ignores that and runs this trigger's jobs wider, and a later host that reads less waits on every trigger's jobs.`] : []),
       ...(judged.need.triggersVersion < judged.fileVersion ? [`The file no longer needs version ${judged.fileVersion}, so this write takes the stamp off.`] : []),
       // The one stamp no line above speaks of: a `"version": 1`, or one the loader cannot read, which a file needing no more than version 1 is written without.
       ...(judged.need.triggersVersion === 1 && judged.fileVersion === 1 && judged.stamped ? ["This write also takes the file's \"version\" line off: a file that needs no more than version 1 is written without one."] : []),

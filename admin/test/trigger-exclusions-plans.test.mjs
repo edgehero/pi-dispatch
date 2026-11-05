@@ -397,7 +397,7 @@ for (const [key, value] of [["excludeExtensions", ["pi-lint"]], ["excludeExtensi
     assert.equal(JSON.parse(before).version, undefined);
     const out = await w.write({ [key]: value });
     assert.deepEqual(out.plan.need, { triggersVersion: 2, jobDataVersion: 3 });
-    assert.ok(out.summary.includes("Stamps the file version 2: a host reading less waits on every trigger's jobs, not only this one's."), out.summary.join("\n"));
+    assert.ok(out.summary.includes("Stamps the file version 2: a host from before 5.0.0 ignores that and runs this trigger's jobs wider, and a later host that reads less waits on every trigger's jobs."), out.summary.join("\n"));
     assert.ok(out.summary.includes("mini1 reads what this change needs."));
     const stamped = w.read();
     assert.deepEqual(Object.keys(JSON.parse(stamped)), ["version", "triggers"], "first in the file");
@@ -420,7 +420,7 @@ for (const [key, value] of [["excludeExtensions", ["pi-lint"]], ["excludeExtensi
     assert.deepEqual(out.plan.need, { triggersVersion: 1, jobDataVersion: 1 });
     assert.deepEqual(out.plan.inverse.body.keyOrder, ["kind", "flow", key, "resume"], "the key goes back in its place");
     const back = await w.undo(out);
-    assert.ok(back.summary.includes("Stamps the file version 2: a host reading less waits on every trigger's jobs, not only this one's."));
+    assert.ok(back.summary.includes("Stamps the file version 2: a host from before 5.0.0 ignores that and runs this trigger's jobs wider, and a later host that reads less waits on every trigger's jobs."));
     assert.equal(w.read(), before, "byte for byte");
   });
 
@@ -509,7 +509,7 @@ test("the version refusal reads live workers alone: a stopped worker and a recei
   rows.running = { name: "running", beatAt: String(NOW), triggersVersion: "1", jobDataVersion: "2" };
   assert.match((await preview()).refusal, /running reads less/);
   const said = (path) => nodeFs.readFileSync(new URL(`../../${path}`, import.meta.url), "utf8").replace(/\s+/g, " ");
-  for (const [path, sentence] of [["docs/upgrading.md", "It reads live workers alone: a receiver publishes no version and a stopped worker's row expires"], ["docs/exclude-tools.md", "It reads live workers alone, not receivers or stopped workers"], ["docs/console.md", "It reads live workers alone, not receivers or stopped workers"], ["specs/requirements.md", "it asks no receiver and no stopped worker"]]) assert.ok(said(path).includes(sentence), path);
+  for (const [path, sentence] of [["docs/upgrading.md", "It reads live workers alone: a receiver has no row in the worker registry and a stopped worker's row expires"], ["docs/exclude-tools.md", "It reads live workers alone, not receivers or stopped workers"], ["docs/console.md", "It reads live workers alone, not receivers or stopped workers"], ["specs/requirements.md", "it asks no receiver and no stopped worker"]]) assert.ok(said(path).includes(sentence), path);
 });
 
 test("a file in the writer's layout whose stamp says more or less than it needs: no line says the whole file moves, and one says what the stamp does", async () => {
@@ -535,7 +535,7 @@ test("a file in the writer's layout whose stamp says more or less than it needs:
   assert.throws(() => parseTriggers(under, "t"), /needs triggers file version 2/);
   const stamps = await world({ text: under }).preview({ flow: "review" }, 0);
   assert.equal(lineOf(stamps, LAYOUT_LINE), undefined, stamps.summary.join("\n"));
-  assert.deepEqual(stampSaid(stamps), ["Stamps the file version 2: a host reading less waits on every trigger's jobs, not only this one's."]);
+  assert.deepEqual(stampSaid(stamps), ["Stamps the file version 2: a host from before 5.0.0 ignores that and runs this trigger's jobs wider, and a later host that reads less waits on every trigger's jobs."]);
   const clears = await world({ text: under }).preview({ excludeExtensions: null }, 0);
   assert.equal(lineOf(clears, LAYOUT_LINE), undefined, clears.summary.join("\n"));
   assert.deepEqual(stampSaid(clears), []);
@@ -563,7 +563,7 @@ test("a stamp placed by hand: the Undo says as it was only where it writes the b
   assert.equal(lineOf(off, LAYOUT_LINE), undefined, off.summary.join("\n"));
   assert.equal(off.plan.undo, VALUES_BACK);
   const back = await moved.undo(off);
-  assert.deepEqual(stampSaid(back), ["Stamps the file version 2: a host reading less waits on every trigger's jobs, not only this one's."]);
+  assert.deepEqual(stampSaid(back), ["Stamps the file version 2: a host from before 5.0.0 ignores that and runs this trigger's jobs wider, and a later host that reads less waits on every trigger's jobs."]);
   assert.deepEqual(JSON.parse(moved.read()), JSON.parse(atEnd), "every value back");
   assert.notEqual(moved.read(), atEnd, "and not the bytes, as the page said");
   assert.deepEqual(Object.keys(JSON.parse(moved.read())), ["version", "triggers"]);
@@ -589,7 +589,7 @@ test("a hand-written file: the stamp and the layout move together, and each sent
   const out = await w.preview({ excludeExtensions: ["pi-lint"] }, 0);
   assert.equal(out.plan.undo, "Put trigger row 1's values back; the file stays in the form the writer gives it");
   assert.ok(lineOf(out, "This file is not in the writer's layout"), out.summary.join("\n"));
-  assert.deepEqual(stampSaid(out), ["Stamps the file version 2: a host reading less waits on every trigger's jobs, not only this one's."], "one sentence for the one thing it does");
+  assert.deepEqual(stampSaid(out), ["Stamps the file version 2: a host from before 5.0.0 ignores that and runs this trigger's jobs wider, and a later host that reads less waits on every trigger's jobs."], "one sentence for the one thing it does");
   assert.deepEqual(await w.service.apply(out, operator), { ok: true });
   assert.deepEqual(Object.keys(JSON.parse(w.read())), ["version", "triggers"], "in place");
   assert.equal(JSON.parse(w.read()).version, 2);

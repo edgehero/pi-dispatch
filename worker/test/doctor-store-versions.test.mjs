@@ -134,7 +134,7 @@ test("the overlay keys this build does not know are named, sorted and capped, as
 	assert.equal(line.length, 1);
 	assert.equal(line[0].warn, true);
 	assert.equal(line[0].label, `settings overlay ${settingsFile} holds 2 keys this build does not know (futureCap, zetaCap): the worker ignores them`);
-	assert.equal(line[0].fix, "a key from a newer release is ignored here and kept by every panel and console from issue #761's release on, but an earlier one (4.3.1 included) drops every key it does not know when it writes this file, secretBundles included, so upgrade every panel and console first; a misspelt key is kept too, so remove it if it is a typo");
+	assert.equal(line[0].fix, "a key from a newer release is ignored here and kept by every panel and console from 5.0.0 on, but an earlier one (4.3.1 included) drops every key it does not know when it writes this file, secretBundles included, so upgrade every panel and console first; a misspelt key is kept too, so remove it if it is a typo");
 	assert.equal(JSON.stringify(checks).includes("SECRET-VALUE-1"), false, "names only");
 	const many = Object.fromEntries(Array.from({ length: UNKNOWN_KEYS_SHOWN + 2 }, (_, i) => [`k${String(i).padStart(2, "0")}`, i]));
 	const capped = (await doctorWith(JSON.stringify({ ...many, "tab\there": 1 }))).checks.find((c) => c.id === "settings.unknown-keys");

@@ -2374,7 +2374,7 @@ test("every host at or above the need passes, with the stamp said out loud and w
   const out = await f.service.preview(ask(f, { packages: false }), operator);
   assert.ok(out.plan, JSON.stringify(out));
   assert.deepEqual(out.plan.need, { triggersVersion: 2, jobDataVersion: 1 });
-  assert.ok(out.summary.includes("Stamps the file version 2: a host reading less waits on every trigger's jobs, not only this one's."));
+  assert.ok(out.summary.includes("Stamps the file version 2: a host from before 5.0.0 ignores that and runs this trigger's jobs wider, and a later host that reads less waits on every trigger's jobs."));
   assert.ok(out.summary.includes("build3, mini1 and mini2 each read what this change needs."));
   assert.deepEqual(await f.service.apply(out, operator), { ok: true });
   assert.equal(JSON.parse(f.read()).version, 2);

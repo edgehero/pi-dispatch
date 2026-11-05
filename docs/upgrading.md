@@ -169,24 +169,23 @@ before any trigger uses either. Until then leave both out of the file: `"package
 
 | Program | On a release from before 5.0.0, 4.3.1 among them | So |
 |---|---|---|
-| Worker | Reads the file, drops both keys and runs the job wider than the file says, on a clean record | Every worker. Doctor's `fleet.store-versions` names one that publishes no version |
+| Worker | Reads the file, drops both keys and runs the job wider than the file says, on a clean record | Every worker. Doctor's `fleet.versions` names each version the workers report, and `fleet.store-versions` names one that publishes no version once a 5.0.0 host's file needs version 2 |
 | Receiver | Drops both keys from the jobs it queues. A worker that reads them refuses such a job (`trigger-skew`) where it can read the file, and runs it without them where it cannot | Every receiver. Check them on the console's Connections page: doctor cannot see them |
 | Panel, console, `/dispatch` | `/dispatch` and its panel write `triggers` alone, so both keys stay and the stamp goes (below). No release this old has a console | Every one that writes this file |
 
 **A file that lost its stamp.** A 4.3.1 `/dispatch` or panel writes `triggers` alone, and so does a 4.3.1 worker's one-shot disarm, and a hand edit can leave
-the same shape: either key, with no `"version": 2`. 5.0.0 refuses that file (`run.excludeExtensions needs triggers file version 2`), and does not start
-on it. A 4.3.1 host loads it and drops both keys, and the job runs wider than the file says, on a clean record.
+the same shape: either key, with no `"version": 2`. 5.0.0 refuses that file (`run.excludeExtensions needs triggers file version 2`, or the other key's name): a receiver, and a worker with `PI_TRIGGERS_FILE` set, do not start
+on it, and a running one keeps what it had. A write from the 5.0.0 console or `/dispatch` puts the stamp back. A 4.3.1 host loads it and drops both keys, and the job runs wider than the file says, on a clean record.
 
 The console's trigger page refuses the change while a live worker reads less or publishes no version, and names it, and while it cannot read which workers are live. It reads live
-workers alone: a receiver publishes no version and a stopped worker's row expires, so neither stops a change, whatever it reads. A hand edit is
+workers alone: a receiver has no row in the worker registry and a stopped worker's row expires, so neither stops a change, whatever it reads. A hand edit is
 not stopped: doctor warns once a host's own file needs the version.
 
-**The job image, and when a rebuild comes first.** A job with either key on an image whose `dev.pi-dispatch.capabilities` label does not list
-`loadExclusions` is refused before it spends (`job-image-load-exclusions-unsupported`). So is a job with `run.excludeTools` whose scope has a
-role map ([model roles](model-roles.md)), even if its trigger never starts a child and no file uses either key: the map is the scope's, and that image would
-start a child with every tool the trigger removes. So those jobs are refused as soon as a 5.0.0 worker runs, with no change to the file, until the image they
-run on, `PI_JOB_IMAGE` or the trigger's `run.image`, is from 5.0.0 or later, or is rebuilt from such a tree. Pull the published image on each host. Nothing rebuilds an image you built, by `FROM` or from a copy of
-`image/Dockerfile`: whoever maintains it rebuilds it from 5.0.0 or later and puts it on each host that runs it ([job-image.md](job-image.md)). A job with neither key, and no `run.excludeTools` beside a role map, runs on an older image as it did.
+**The job image.** A job with either key on an image whose `dev.pi-dispatch.capabilities` label does not list
+`loadExclusions` is refused before it spends (`job-image-load-exclusions-unsupported`). A fleet from 4.3.1 has no role map ([model roles](model-roles.md)). Once a scope has one, an image from before 5.0.0 refuses
+its jobs (`job-image-model-roles-unsupported`), and an image built with role maps but without this capability refuses a job there with `run.excludeTools`, even if its trigger never starts a child and no file uses either key: the map is the scope's, and that image would
+start a child with every tool the trigger removes. Point `PI_JOB_IMAGE`, or the trigger's `run.image`, at an image from 5.0.0 or later. Pull the published image on each host. Nothing rebuilds an image you built, by `FROM` or from a copy of
+`image/Dockerfile`: whoever maintains it rebuilds it from 5.0.0 or later and puts it on each host that runs it ([job-image.md](job-image.md)). A job with neither key, in a scope with no role map, runs on an older image as it did.
 
 ## Valkey and BullMQ
 
@@ -301,7 +300,7 @@ Release numbers come from the git tags.
 | Valkey image | Pinned to `valkey/valkey:8.1`. Doctor's `state.older` names each of these still on `valkey/valkey:8`: a compose file's `valkey` service, a Quadlet, and a container this deployment's `up` started and still runs. `up`'s summary names that container too | [Valkey and BullMQ](#valkey-and-bullmq) |
 | Cron run ids | One reader for `repeat:<id>:<time>` and `manual:<id>:<time>` everywhere. A run record's cron id is read whatever its length, and the console and `/dispatch` name a schedule whose id is 177 to 200 characters long, which an earlier release made and showed with no id, so you can find and remove it. An id no release makes (a time with a leading 0, a `:` in the id) no longer counts as a cron run | [triggers.md](triggers.md#trigger-types-what-fires-each-one-and-what-it-runs) |
 | Model ids | A model id defined in the overlay can be the deployment's default only in the shape a trigger's `run.model` takes (issue #673). Outside it `PI_MODEL` stops the worker at boot, and a settings file holding one refuses every job | [global-pi-overlay.md](global-pi-overlay.md#custom-providers) |
-| The job image's pi | pi 1.4.0 (issue #693) and then 1.5.0 (issue #796). 59 catalog models are gone, and a trigger whose `watch.decide` names one refuses the triggers file. Each session key starts cold once, as after every pi change | [job-image.md](job-image.md#pi-150-upgrade-issue-796), [sessions.md](sessions.md#when-it-silently-doesnt-resume) |
+| The job image's pi | From 4.3.1's pi 1.2.0 to 1.5.0 (issues #693 and #796). 129 catalog models are gone and 192 are new, and a trigger whose `watch.decide` names a removed one refuses the triggers file. Each session key starts cold once, as after every pi change | [job-image.md](job-image.md#pi-150-upgrade-issue-796), [sessions.md](sessions.md#when-it-silently-doesnt-resume) |
 | Console tokens | A token may carry the `agent` role (issue #766) | [console.md](console.md#managing-tokens) |
 | The `@edgehero/pi-dispatch/defer-reasons` subpath | `dueOfScore`, `isSchedulerNext` and `DELAYED_SCORE_SHIFT` now live in `@edgehero/pi-dispatch/bullmq-internals` and are exported from both, so an import keeps working | |
 
@@ -333,7 +332,7 @@ Release numbers come from the git tags.
    - a triggers file with `replicas` on a trigger that is not GitHub is refused before 1.1.0, and only a hand edit
      removes the field ([replicas.md](replicas.md#upgrading-and-rolling-back));
    - a `version` above what the older release reads, in the settings file, `pause-windows.json` or `triggers.json`, makes
-     a 5.0.0 or later worker wait; a 4.x worker ignores it and drops what it does not know. A release writes one into
+     a 5.0.0 or later worker refuse `triggers.json` or `pause-windows.json` at its start, and defer jobs after a live edit or on a newer settings file; a 4.x worker ignores it and drops what it does not know. A release writes one into
      `triggers.json` only for a trigger with `run.excludeExtensions` or `run.excludeExtensionTools`, and no release writes one
      into the other two yet. So take both keys off every trigger before you go back to 4.x, which runs those triggers' jobs with what the keys
      took away;

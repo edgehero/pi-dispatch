@@ -4709,7 +4709,7 @@ export async function collectChecks(shellVars, seams) {
 						ok: false,
 						warn: true,
 						label: `settings overlay ${settingsFile} holds ${unknown.length === 1 ? "a key" : `${unknown.length} keys`} this build does not know (${shown.join(", ")}${more > 0 ? `, and ${more} more` : ""}): the worker ignores ${unknown.length === 1 ? "it" : "them"}`,
-						fix: "a key from a newer release is ignored here and kept by every panel and console from issue #761's release on, but an earlier one (4.3.1 included) drops every key it does not know when it writes this file, secretBundles included, so upgrade every panel and console first; a misspelt key is kept too, so remove it if it is a typo",
+						fix: "a key from a newer release is ignored here and kept by every panel and console from 5.0.0 on, but an earlier one (4.3.1 included) drops every key it does not know when it writes this file, secretBundles included, so upgrade every panel and console first; a misspelt key is kept too, so remove it if it is a typo",
 					});
 				}
 				// Issue #501 (PR #542's review): a VALID overlay can still break the dollar invariant once merged over env
