@@ -1,7 +1,7 @@
 {
   "card": "TriggerEnvironment",
   "pr": 800,
-  "words": "02462b62e09266fda1a096ca8c5cff0436417b45674ef9a3b310feafb6d53d40",
+  "words": "cf32a30fc496c0741f739732ff8c55ed3a1bf848482ab160d9431b07a45efa25",
   "elements": [
     {
       "el": "p-trigger-gets",
@@ -430,12 +430,12 @@
       "shows": "loads no staged package, no extension of the overlay"
     },
     {
-      "el": "A rule that only files an issue starts no job, and says that",
+      "el": "A rule that only files an issue starts no agent and no container, and says that",
       "kind": "readme",
       "status": "new",
       "panel": "p-trigger-gets",
       "source": "admin/src/trigger-gets-view.mjs#TRIGGER_GETS_WORDS",
-      "holds": "files an issue without an agent"
+      "holds": "files an issue with no agent and no container"
     },
     {
       "el": "A file the worker's own parser refuses keeps the form, so the row can be fixed, and every pill reads unknown",

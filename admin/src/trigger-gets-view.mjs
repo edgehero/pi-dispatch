@@ -70,12 +70,12 @@ export const TRIGGER_GETS_WORDS = Object.freeze({
   pillHolds: "holds this file’s jobs",
   holdsRows: "The flow, the model and its cap, the staged packages and each extension, the MCP servers and the tools are in What its jobs get.",
   holdsWatch: "The flow, the model and its cap, and what its jobs can use are in What its jobs get.",
-  holdsIssue: "What its jobs get says this rule starts no job.",
+  holdsIssue: "What its jobs get says this rule starts no agent and no container.",
   notLinked: "A change made on this card is not linked to that run’s refusal.",
   unreadRow: "This page could not read this trigger’s row from the file, so it shows the last read and offers no change. Reload to try again.",
   watch: "What this card shows of a watch rule is set in the file, so it offers no change.",
   watchLoads: "A watch rule’s job loads no staged package, no extension of the overlay’s or the repository’s and no skill of the overlay’s, and reaches no MCP server, on any host. Its tools are read, grep, find and ls, less what the file removes, and the watch’s own.",
-  watchIssue: "This rule files an issue without an agent: no job starts, so there is nothing here to read.",
+  watchIssue: "This rule files an issue with no agent and no container, so there is nothing here to read.",
   command: "not a flow, set in the file",
   barOne: "1 change, not written yet:",
   barMany: "{n} changes, not written yet:",
@@ -483,7 +483,7 @@ function mcpRow({ trigger, rows, overlayServers }) {
   return { items, none: items.length === 0, noneWord: rows.some((row) => row.state === "current") ? TRIGGER_GETS_WORDS.noServers : TRIGGER_GETS_WORDS.noServersKnown };
 }
 
-/** Whether the file takes this name: a chip for one it refuses (pi's own, a server's, one the job offers itself) could only end in a refusal, so that one is shown and not switched. */
+/** Whether the file takes this name: a chip for one it refuses (pi's own, a server's, one pi-dispatch gives some jobs) could only end in a refusal, so that one is shown and not switched. */
 function takesToolName(name) {
   try {
     validateExcludeExtensionTools({}, { excludeExtensionTools: [name] }, "", "");

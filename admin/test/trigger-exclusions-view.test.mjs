@@ -309,15 +309,17 @@ test("a watch rule's job loads nothing a host publishes, so its card names none 
   assert.equal(normalizeTriggerForDisplay(JSON.parse(text).triggers[2]).packages, false);
 });
 
-test("a watch rule that only files an issue starts no job, so it has none of the rows", async () => {
+test("a watch rule that only files an issue starts no agent and no container, so it has none of the rows", async () => {
   const text = watchFile(ISSUE);
   assert.equal(parseTriggers(text, TRIGGER_GETS_PATH)[2].run.mode, "issue");
   const page = await triggerGetsPage({ text, loads: SAME_HOSTS(), live: SAME_LIVE, records: [] });
   const words = textOf(panelOf(page, "p-trigger-gets"));
   assert.ok(words.includes(W.watchIssue), words);
+  assert.ok(words.includes("files an issue with no agent and no container"), words);
   for (const never of [...GOT, "Model", "Image and secrets", "What it can use", W.fileSays]) assert.ok(!words.includes(never), `${never}: ${words}`);
   const runs = textOf(panelOf(page, "p-trigger-run"));
   assert.ok(runs.includes(W.holdsIssue), runs.slice(0, 300));
+  assert.ok(runs.includes("this rule starts no agent and no container"), runs.slice(0, 300));
   assert.ok(!runs.includes(W.holdsWatch) && !runs.includes(W.holdsRows), "the card has none of those rows");
   assert.ok(textOf(panelOf(page, "p-trigger-gets-how")).includes("This card only reads."));
 });

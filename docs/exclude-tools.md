@@ -85,9 +85,9 @@ Be precise about the boundary before relying on it:
 ```
 
 Each entry is a tool's exact name: a letter, then letters, digits, `_` or `-`, at most 48 characters, and at most 16 names. No
-pattern. The file refuses pi's own tools and a server's, which belong on `run.excludeTools`. It also refuses a tool the job itself
-offers (`report_progress`, `await_human_input`, `request_approval`, `subagent` and the rest), which is no extension's:
-to remove another extension's tool of such a name, leave that extension out below.
+pattern. The file refuses, ignoring case, the names of pi's own tools and a server's, which `run.excludeTools` removes (a server's beside `run.mcp`), and of tools
+pi-dispatch gives some jobs (`report_progress`, `await_human_input`, `request_approval`, `subagent` and the rest). To remove a staged package's or an overlay
+extension's tool of such a name, put that package's or extension's name in `run.excludeExtensions`, below.
 
 pi removes these names from the session's tool registry, as it does for `run.excludeTools`. No extension can turn one back on, a
 tool registered later stays out, and a name that matched nothing widens nothing. A role child and a chained child get the same
@@ -162,6 +162,7 @@ runs. None of the four keeps code away from an agent that can write or edit file
 - **A role child can end up with no tools.** An agent with `tools: [bash]`, on a trigger that removes `bash`, still starts, and has none.
 - **An overlay manifest's entry outside its folder cannot be named.** A root `package.json` in `extensions/` may list `../outside.js`, and
   no name in `run.excludeExtensions` means it: it stays in the job while that manifest lists it.
+- **A file directly in `extensions/` with a space in its name cannot be named.** `extensions/my ext.js` loads, and no name in `run.excludeExtensions` reaches it until it is renamed.
 - **An extension baked into an image cannot be named.** pi finds one in `~/.pi/agent/extensions` by itself, which is where a derived image would put it. It is on neither
   list, so no name in `run.excludeExtensions` reaches it, and it stays loaded.
 - **A kept extension can import an excluded file.** The name takes an entry off the list of what pi loads. It does not stop an `import`, so
@@ -221,7 +222,7 @@ from a current tree and the refusal disappears.
 | Chaining | inherited from the parent's job data, less MCP tool names; the request file cannot set or drop it; `run.excludeExtensions`, `run.excludeExtensionTools` and `run.packages` are inherited whole |
 | Role children | `run.excludeTools` and `run.excludeExtensionTools` on each child's command line (`--exclude-tools`), which beats an agent's own `tools` |
 | Version floor | worker 2.0.0, receiver 2.0.0, admin 2.0.0, plus the 2.0.0 job image (`ghcr.io/edgehero/pi-job:2.0.0`) or one rebuilt from the same tree |
-| `run.excludeExtensionTools` | up to 16 exact tool names, any trigger kind but a watch rule; pi's, a server's and the job's own are refused at load; a name no staged package or overlay extension registered stops a job that held nothing back (`exclude-tool-not-loaded`), and is logged and recorded on any other; its extension's code still runs |
+| `run.excludeExtensionTools` | up to 16 exact tool names, any trigger kind but a watch rule; pi's, a server's and those of tools pi-dispatch gives some jobs are refused at load; a name no staged package or overlay extension registered stops a job that held nothing back (`exclude-tool-not-loaded`), and is logged and recorded on any other; its extension's code still runs |
 | `run.excludeExtensions` | up to 16 names of staged packages (manifest name) or overlay extensions (file stem, whole file name or folder), any trigger kind but a watch rule; a name not on this host is recorded and doctor warns |
 | Both, on an older host or image | the file at version 2 and job data at version 3: a worker that reads `version` and less waits (`newer-release`) on a stamped file and runs wider on one that lost the stamp, and one from before issue #761 drops both and runs wider on either, so every host reads both first; an older image is refused (`job-image-load-exclusions-unsupported`), and so is a job with `run.excludeTools` and a role map |
 | Related | [job image](job-image.md), [global pi overlay](global-pi-overlay.md), [workflows](workflows.md) |

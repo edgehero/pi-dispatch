@@ -168,7 +168,7 @@ function imageBody(gets, watch = false) {
 
 /**
  * A watch rule's job loads nothing a host's publication lists and reaches no server, so the card reads less: its model, its flow, one sentence for the rest, its image. REJECTED: the usual rows with a
- * branch in each, which said a switch's words of a rule with no switch ("Staged packages: on", a package "on"), and a row per host-published name no such job can load. One that only files an issue has no job at all.
+ * branch in each, which said a switch's words of a rule with no switch ("Staged packages: on", a package "on"), and a row per host-published name no such job can load. One that only files an issue starts no agent and no container.
  */
 function watchRows(gets, trigger, fix) {
   if (trigger.mode === "issue") return note([W.watchIssue]);

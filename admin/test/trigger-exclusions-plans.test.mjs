@@ -132,8 +132,8 @@ test("a tool off and a tool back on, the second a widening; a reorder and the sa
 
 test("a value the loader refuses is the funnel's to name, in the loader's words, with nothing written", async () => {
   for (const [change, words] of [
-    [{ excludeExtensionTools: ["bash"] }, /is not an extension's tool: it belongs on run\.excludeTools/],
-    [{ excludeExtensionTools: ["report_progress"] }, /is a tool the job itself offers/],
+    [{ excludeExtensionTools: ["bash"] }, /one of pi's own tools, which this key does not take: run\.excludeTools removes pi's/],
+    [{ excludeExtensionTools: ["report_progress"] }, /the name of a tool pi-dispatch gives some jobs/],
     [{ excludeExtensionTools: ["mcp__x__*"] }, /is not a tool's name/],
     [{ excludeExtensions: ["has space"] }, /is neither a package's manifest name nor an overlay extension's/],
     [{ excludeExtensions: [] }, /must be a non-empty array/],

@@ -70,27 +70,46 @@ test("a shape that is no list of names refuses, by the field's name, on all five
 	}
 });
 
-test("a tool with another key or no extension behind it refuses, saying where it belongs", () => {
+test("a file directly in extensions/ with a space in its name has no name in the key, as the docs say", () => {
+	for (const name of ["my ext", "my ext.js"]) assert.throws(() => parse([KINDS[1][1]({ excludeExtensions: [name] })]), /is neither a package's manifest name nor an overlay extension's file stem or folder name/, name);
+	assert.ok(readFileSync(new URL("../../docs/exclude-tools.md", import.meta.url), "utf8").replace(/\s+/g, " ").includes("**A file directly in `extensions/` with a space in its name cannot be named.** `extensions/my ext.js` loads, and no name in `run.excludeExtensions` reaches it until it is renamed."));
+});
+
+test("a name this key would mistake refuses, saying which way out does what", () => {
 	const load = (name) => () => parse([KINDS[1][1]({ excludeExtensionTools: [name] })]);
-	for (const name of ["bash", "read", "powershell", "codemode", "tool_search", "list_mcp_resources", "mcp__linear__search", "mcp__x"]) assert.throws(load(name), /belongs on run\.excludeTools/, name);
-	for (const name of ["report_progress", "await_human_input", "request_approval", "subagent", "query_logs"]) assert.throws(load(name), /tool the job itself offers/, name);
+	for (const name of ["bash", "read", "powershell", "codemode", "tool_search", "list_mcp_resources", "mcp__linear__search", "mcp__x"]) assert.throws(load(name), /run\.excludeTools removes/, name);
+	for (const name of ["report_progress", "await_human_input", "request_approval", "subagent", "query_logs"]) assert.throws(load(name), /a tool pi-dispatch gives some jobs/, name);
 	// A name that differs only in case: pi compares exactly, so it would match nothing and read as though the tool were gone. run.excludeTools refuses `Bash` by membership, and this list has none to refuse it by.
 	assert.throws(() => parse([KINDS[1][1]({ excludeTools: ["Bash"] })]), /is not a tool the pinned pi knows/, "the premise");
-	for (const name of ["Bash", "BASH", "Write", "bAsH", "Read", "Powershell", "Codemode", "Tool_Search", "LIST_MCP_RESOURCES", "MCP__linear__search", "Mcp__x"]) assert.throws(load(name), /belongs on run\.excludeTools/, name);
-	for (const name of ["Report_Progress", "REPORT_PROGRESS", "Await_Human_Input", "Subagent", "Query_Logs", "SUBMIT_ANSWER_DRAFT"]) assert.throws(load(name), /tool the job itself offers/, name);
-	for (const tool of [...EXCLUDABLE_TOOL_NAMES, ...MCP_EXCLUDABLE_TOOL_NAMES]) assert.throws(load(tool.toUpperCase()), /belongs on run\.excludeTools/, `${tool}, in any case`);
+	for (const name of ["Bash", "BASH", "Write", "bAsH", "Read", "Powershell", "Codemode", "Tool_Search", "LIST_MCP_RESOURCES", "MCP__linear__search", "Mcp__x"]) assert.throws(load(name), /run\.excludeTools removes/, name);
+	for (const name of ["Report_Progress", "REPORT_PROGRESS", "Await_Human_Input", "Subagent", "Query_Logs", "SUBMIT_ANSWER_DRAFT"]) assert.throws(load(name), /a tool pi-dispatch gives some jobs/, name);
+	for (const tool of [...EXCLUDABLE_TOOL_NAMES, ...MCP_EXCLUDABLE_TOOL_NAMES]) assert.throws(load(tool.toUpperCase()), /run\.excludeTools removes/, `${tool}, in any case`);
 	// The refusal names the spelling the other list takes: as written, `BASH` is a second refusal there, and the spelling it names is not.
 	const excludeTools = (name) => () => parseTriggers(JSON.stringify({ triggers: [{ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "f", mcp: ["linear"], excludeTools: [name] } }] }), "/t");
 	for (const tool of [...EXCLUDABLE_TOOL_NAMES, ...MCP_EXCLUDABLE_TOOL_NAMES]) {
-		assert.throws(load(tool.toUpperCase()), (e) => e.message.includes(`it belongs on run.excludeTools, spelled "${tool}"`), tool);
+		assert.throws(load(tool.toUpperCase()), (e) => e.message.includes(`run.excludeTools removes ${EXCLUDABLE_TOOL_NAMES.has(tool) ? "pi's" : "those"}, spelled "${tool}"`), tool);
 		assert.throws(excludeTools(tool.toUpperCase()), /is not a tool the pinned pi knows/, `${tool}: the premise`);
 		assert.doesNotThrow(excludeTools(tool), tool);
 	}
-	assert.throws(load("MCP__linear__search"), /run\.excludeTools, where a server's tools go all at once, as mcp__<server>__\*/);
+	assert.throws(load("MCP__linear__search"), /run\.excludeTools removes its tools all at once, as mcp__<server>__\*/);
 	assert.doesNotThrow(excludeTools("mcp__linear__*"));
+	// A server's tools are taken only beside run.mcp, so the refusal says so: bare, the place it names refuses them too.
+	for (const name of MCP_EXCLUDABLE_TOOL_NAMES) {
+		assert.throws(load(name), (e) => e.message.includes("on a trigger with run.mcp, run.excludeTools removes those"), name);
+		assert.throws(() => parse([KINDS[1][1]({ excludeTools: [name] })]), /is not a tool the pinned pi knows/, `${name}: the premise`);
+	}
+	assert.throws(load("mcp__linear__search"), /on a trigger whose run\.mcp names that server/);
+	// Whole sentences, since a pattern over the tail passes whatever stands in front of it.
+	const wayOut = "to remove a staged package's or an overlay extension's tool of that name, put that package's or extension's name in run.excludeExtensions";
+	for (const [name, words] of [
+		["BASH", `"BASH" matches, ignoring case, one of pi's own tools, which this key does not take: run.excludeTools removes pi's, spelled "bash"; ${wayOut}`],
+		["Codemode", `"Codemode" matches, ignoring case, one of the MCP tools, which this key does not take: on a trigger with run.mcp, run.excludeTools removes those, spelled "codemode"; ${wayOut}`],
+		["MCP__X__Y", `"MCP__X__Y" starts, ignoring case, like a server's tool, which this key does not take: on a trigger whose run.mcp names that server, run.excludeTools removes its tools all at once, as mcp__<server>__*; ${wayOut}`],
+		["Report_Progress", `"Report_Progress" matches, ignoring case, the name of a tool pi-dispatch gives some jobs, which this key does not take; ${wayOut}`],
+	]) assert.throws(load(name), (e) => e.message.includes(words), name);
 	// A job's own tool: none of these says a run field arms it, since a role map arms `subagent` and a label trigger's draft arms `decide` and `read_repository`.
-	for (const name of ["subagent", "decide", "read_repository", "report_progress"]) assert.throws(load(name), (e) => e.message.includes("is a tool the job itself offers, not an extension's; to remove another extension's tool of that name, exclude its extension in run.excludeExtensions") && !/run field|turn that field off/.test(e.message), name);
-	for (const tool of LOADED_JOB_TOOLS.filter((name) => !MCP_EXCLUDABLE_TOOL_NAMES.has(name))) assert.throws(load(tool.toUpperCase()), /tool the job itself offers/, `${tool}, in any case`);
+	for (const name of ["subagent", "decide", "read_repository", "report_progress"]) assert.throws(load(name), (e) => e.message.includes("matches, ignoring case, the name of a tool pi-dispatch gives some jobs, which this key does not take; to remove a staged package's or an overlay extension's tool of that name, put that package's or extension's name in run.excludeExtensions") && !/run field|turn that field off/.test(e.message), name);
+	for (const tool of LOADED_JOB_TOOLS.filter((name) => !MCP_EXCLUDABLE_TOOL_NAMES.has(name))) assert.throws(load(tool.toUpperCase()), /a tool pi-dispatch gives some jobs/, `${tool}, in any case`);
 	assert.deepEqual(parse([KINDS[1][1]({ excludeExtensionTools: ["lint_run", "Search-Web", "Bashful", "read_all"] })])[0].run.excludeExtensionTools, ["lint_run", "Search-Web", "Bashful", "read_all"], "a name of its own, in any case, is an extension's");
 });
 
@@ -492,7 +511,7 @@ test("the docs' numbers and lists are the code's", () => {
 	assert.ok(flat("docs/multi-host.md").includes("job data at version 3, and a live peer reads less or publishes nothing"));
 	assert.doesNotMatch(flat("docs/triggers.md"), /which a writer stamps/);
 	assert.doesNotMatch(flat("docs/exclude-tools.md"), /another run field arms/);
-	assert.ok(flat("docs/exclude-tools.md").includes("`subagent` and the rest), which is no extension's"));
+	assert.ok(flat("docs/exclude-tools.md").includes("`subagent` and the rest). To remove a staged package's or an overlay extension's tool of such a name, put that package's or extension's name in `run.excludeExtensions`"));
 	assert.doesNotMatch(flat("specs/interfaces.md"), /which another run field arms/);
 	assert.ok(flat("docs/reasons.md").includes("What to do: This job goes without the connection's adapter, so reconnecting cannot help."));
 	// What the design says of the same, and where its variables are: a job's inputs hold neither.

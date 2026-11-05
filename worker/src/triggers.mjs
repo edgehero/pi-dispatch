@@ -2055,13 +2055,14 @@ export function validateExcludeExtensions(on, run, at, path) {
  * `run.excludeExtensionTools` (issue #800): tools an extension brings, which this trigger's sessions must not have. Its own key, and
  * `run.excludeTools` stays closed: that list is checked against the pinned pi, which is what makes a typo in it a refusal at load,
  * and this one cannot be, since an extension's tools are known only once it runs. The runner stops a job on a name no staged package
- * or overlay extension registered, where it can tell (`exclude-tool-not-loaded`). Refused here is what has a better key or no extension behind it: pi's own
- * tools and a server's are `run.excludeTools`', and a job's own tool (`LOADED_JOB_TOOLS`) is the job's: a run field arms some, a role map or a label trigger's draft
+ * or overlay extension registered, where it can tell (`exclude-tool-not-loaded`). Refused here is a name this key would mistake: pi's own
+ * tools and a server's are `run.excludeTools`', and a tool pi-dispatch gives some jobs (`LOADED_JOB_TOOLS`) is theirs: a run field arms some, a role map or a label trigger's draft
  * others, and taking one away could leave `run.progress` or `run.awaitInput` armed with nothing to call. Each compared with the name's case folded:
- * `run.excludeTools` refuses `Bash` by membership, and here it would load, match nothing and read as though the shell were gone. An
- * extension's real tool that differs from one of those only in case is reached by excluding its extension. REJECTED: a `*` pattern,
+ * `run.excludeTools` refuses `Bash` by membership, and here it would load, match nothing and read as though the shell were gone. A staged
+ * package's or an overlay extension's real tool that differs from one of those only in case is reached by excluding it; a repository extension's is not. REJECTED: a `*` pattern,
  * which pi takes and which would match tools no person named.
  */
+const EXTENSION_TOOL_WAY_OUT = "to remove a staged package's or an overlay extension's tool of that name, put that package's or extension's name in run.excludeExtensions";
 export function validateExcludeExtensionTools(on, run, at, path) {
 	return validateNameList({
 		field: "excludeExtensionTools",
@@ -2070,11 +2071,14 @@ export function validateExcludeExtensionTools(on, run, at, path) {
 		check: (name) => {
 			if (!LOADED_TOOL_NAME_RE.test(name)) return "is not a tool's name (a letter, then letters, digits, _ or -, at most 48, and no pattern)";
 			const folded = name.toLowerCase();
-			// The spelling that list takes: it holds names by exact membership, so sending `BASH` there as written is a second refusal.
-			if (EXCLUDABLE_TOOL_NAMES.has(folded) || MCP_EXCLUDABLE_TOOL_NAMES.has(folded)) return `is not an extension's tool: it belongs on run.excludeTools, spelled ${JSON.stringify(folded)}`;
-			if (folded.startsWith("mcp__")) return "is not an extension's tool: it belongs on run.excludeTools, where a server's tools go all at once, as mcp__<server>__*";
-			// REJECTED: "another run field arms it; turn that field off", which is false of `subagent` (a role map arms it) and of `decide` and `read_repository` on a label trigger.
-			if (LOADED_JOB_TOOLS.includes(folded)) return "is a tool the job itself offers, not an extension's; to remove another extension's tool of that name, exclude its extension in run.excludeExtensions";
+			// The spelling that list takes: it holds names by exact membership, so sending `BASH` there as written is a second refusal. That list removes pi's `bash` and leaves an overlay's `BASH`, so each refusal also names the way out for an extension's.
+			if (EXCLUDABLE_TOOL_NAMES.has(folded)) return `matches, ignoring case, one of pi's own tools, which this key does not take: run.excludeTools removes pi's, spelled ${JSON.stringify(folded)}; ${EXTENSION_TOOL_WAY_OUT}`;
+			// REJECTED: "is not an extension's tool", since an overlay extension can register any of these names, and a bare "it belongs on run.excludeTools", which refuses these on a trigger with no run.mcp.
+			if (MCP_EXCLUDABLE_TOOL_NAMES.has(folded)) return `matches, ignoring case, one of the MCP tools, which this key does not take: on a trigger with run.mcp, run.excludeTools removes those, spelled ${JSON.stringify(folded)}; ${EXTENSION_TOOL_WAY_OUT}`;
+			// REJECTED: "is a server's tool", false of `MCP__X__Y`, which no server can bring, since a server's name is lower case.
+			if (folded.startsWith("mcp__")) return `starts, ignoring case, like a server's tool, which this key does not take: on a trigger whose run.mcp names that server, run.excludeTools removes its tools all at once, as mcp__<server>__*; ${EXTENSION_TOOL_WAY_OUT}`;
+			// REJECTED: "another run field arms it; turn that field off", which is false of `subagent` (a role map arms it) and of `decide` and `read_repository` on a label trigger. REJECTED: "a tool the job itself offers", false of a plain job, which offers none of these and does offer an overlay extension's tool of such a name.
+			if (LOADED_JOB_TOOLS.includes(folded)) return `matches, ignoring case, the name of a tool pi-dispatch gives some jobs, which this key does not take; ${EXTENSION_TOOL_WAY_OUT}`;
 			return null;
 		},
 	}, on, run, at, path);
