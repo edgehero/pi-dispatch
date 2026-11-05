@@ -1,5 +1,10 @@
 <p align="center">
-  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/banner.png?v=2026-11-04b" alt="An animation of the pi-dispatch banner: go from sitting next to one AI coding agent to running many in the background. In the loop, near the loop, out of the loop, dark engineering. On a lit floor you stand beside one agent. As the lights go off, more agents start, and you walk away to the one page that stays lit, whose counts follow the floor. Spending limits that hold, a sealed box for every job, and you decide what ships." width="880">
+  <picture>
+    <source media="(prefers-reduced-motion: reduce) and (prefers-color-scheme:light)" srcset="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/banner-light-still.png?v=2026-11-05">
+    <source media="(prefers-reduced-motion: reduce)" srcset="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/banner-still.png?v=2026-11-04b">
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/banner-light.png?v=2026-11-05">
+    <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/banner.png?v=2026-11-04b" alt="An animation of the pi-dispatch banner: go from sitting next to one AI coding agent to running many in the background. In the loop, near the loop, out of the loop, dark engineering. On a lit floor you stand beside one agent. As the lights go off, more agents start, and you walk away to the one page that stays lit, whose counts follow the floor. Spending limits that hold, a sealed box for every job, and you decide what ships." width="880">
+  </picture>
 </p>
 
 # pi-dispatch: go from sitting next to one AI coding agent to running many in the background
@@ -13,11 +18,19 @@ list, and brings your own pi setup and extensions along with `pi-dispatch import
 explains all of it.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/explain/how-close-you-stay.png?v=2026-11-04" alt="An animation of one loop of work drawn three times, one above the other, under the headline: decide how closely you watch. In the loop, you are on the track: you watch it work and step in, and a message from you crosses to the agent. Near the loop, you stand just beside it: it works alone and stops to ask when it needs you, and it waits until you answer. Out of the loop, you are far away: it starts without you, a second agent reviews it, and only the change, reviewed by AI, travels to you, and then you decide. At every stage: a spending limit, a sealed box, and the final say stays yours." width="820">
+  <picture>
+    <source media="(prefers-reduced-motion: reduce) and (prefers-color-scheme:dark)" srcset="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/explain/how-close-you-stay-dark-still.png?v=2026-11-04">
+    <source media="(prefers-reduced-motion: reduce)" srcset="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/explain/how-close-you-stay-still.png?v=2026-11-04">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/explain/how-close-you-stay-dark.png?v=2026-11-04">
+    <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/explain/how-close-you-stay.png?v=2026-11-04" alt="An animation of one loop of work drawn three times, one above the other, under the headline: decide how closely you watch. In the loop, you are on the track: you watch it work and step in, and a message from you crosses to the agent. Near the loop, you stand just beside it: it works alone and stops to ask when it needs you, and it waits until you answer. Out of the loop, you are far away: it starts without you, a second agent reviews it, and only the change, reviewed by AI, travels to you, and then you decide. At every stage: a spending limit, a sealed box, and the final say stays yours." width="820">
+  </picture>
 </p>
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/console/console-overview.png?v=2026-11-03" alt="The web console's overview page: what needs you, what is waiting and why, what is running, what today has cost, and a timeline of every project's runs" width="820">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/console/console-overview-dark.png?v=2026-11-03">
+    <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/console/console-overview.png?v=2026-11-03" alt="The web console's overview page: what needs you, what is waiting and why, what is running, what today has cost, and a timeline of every project's runs" width="820">
+  </picture>
 </p>
 
 > This npm package, **`@edgehero/pi-dispatch-admin`**, holds the two ways to work with a deployment: the **web console**
@@ -29,7 +42,12 @@ explains all of it.
 ## How it works
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/explain/one-job.png?v=2026-11-04" alt="An animation of one job in five steps, under the headline: you pay for AI only while the agent works. Something starts it: a schedule, an issue, or you. It waits in line, and nothing runs yet. It is checked: over a limit, it is refused. The agent works in a sealed box, and if it needs you it stops to ask. You decide on a proposed change: you accept it, not pi-dispatch. A strip under the steps shows no AI cost in the first three and the last, and AI cost only where the agent works. A job crosses the strip and it fills only there. A second job is refused at the check." width="820">
+  <picture>
+    <source media="(prefers-reduced-motion: reduce) and (prefers-color-scheme:dark)" srcset="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/explain/one-job-dark-still.png?v=2026-11-04">
+    <source media="(prefers-reduced-motion: reduce)" srcset="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/explain/one-job-still.png?v=2026-11-04">
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/explain/one-job-dark.png?v=2026-11-04">
+    <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/explain/one-job.png?v=2026-11-05" alt="An animation of one job in five steps, under the headline: you pay for AI only while the agent works. Something starts it: a schedule, an issue, or you. It waits in line, and nothing runs yet. It is checked: over a limit, it is refused. The agent works in a sealed box, and if it needs you it stops to ask. You decide on a proposed change: you accept it, not pi-dispatch. A strip under the steps shows no AI cost in the first three and the last, and AI cost only where the agent works. A job crosses the strip and it fills only there. A second job is refused at the check." width="820">
+  </picture>
 </p>
 
 Every trigger produces the same job, through the same path: one queue, one container, one budget.
@@ -132,7 +150,10 @@ Four things to know before you build on it:
 One command puts a live terminal view over the whole deployment:
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/dispatch-dashboard.png?v=2026-10-22-710" alt="The /dispatch panel: status, spend meters, dollar windows, triggers with a portfolio trigger, pause windows, scoped limits with their dollar caps, held and failed jobs, runs with their projects and the u hosts key, and settings" width="820">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/dispatch-dashboard-light.png?v=2026-11-05">
+    <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/dispatch-dashboard.png?v=2026-10-22-710" alt="The /dispatch panel: status, spend meters, dollar windows, triggers with a portfolio trigger, pause windows, scoped limits with their dollar caps, held and failed jobs, runs with their projects and the u hosts key, and settings" width="820">
+  </picture>
 </p>
 
 - **MCP servers, read-only.** A trigger that names MCP servers says so on its row (`[mcp ...]`), and its
@@ -158,7 +179,10 @@ One command puts a live terminal view over the whole deployment:
   always marked as one ([`docs/insights.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/insights.md)).
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/console/console-spend.png?v=2026-11-03" alt="The Spend page: KPI tiles, budget dials, the budget split, a plan verdict, spend charts, the five breakdowns, how busy each host was, and the topology with spend badges" width="820">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/console/console-spend-dark.png?v=2026-11-05">
+    <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/console/console-spend.png?v=2026-11-03" alt="The Spend page: KPI tiles, budget dials, the budget split, a plan verdict, spend charts, the five breakdowns, how busy each host was, and the topology with spend badges" width="820">
+  </picture>
 </p>
 
 - **Triggers, editable live.** Add, edit and delete triggers without a restart. Drill-ins show what
@@ -200,7 +224,10 @@ One command puts a live terminal view over the whole deployment:
   It counts jobs only: a machine busy with other work reads as idle.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/dispatch-hosts.png?v=2026-10-26" alt="The panel's hosts view: three machines, each with its slots in use, the memory and CPU its budget has promised, its running jobs with project, size and age, a host with an orphaned container, and the last 7 days as busy share, jobs at once, time full, the wait and the top projects, then each host's last doctor run with its failing and warning checks" width="820">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/dispatch-hosts-light.png?v=2026-11-05">
+    <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/dispatch-hosts.png?v=2026-10-26" alt="The panel's hosts view: three machines, each with its slots in use, the memory and CPU its budget has promised, its running jobs with project, size and age, a host with an orphaned container, and the last 7 days as busy share, jobs at once, time full, the wait and the top projects, then each host's last doctor run with its failing and warning checks" width="820">
+  </picture>
 </p>
 
 - **The budget split.** With an allocation envelope (a dollar total per window and a floor per project), `b`
@@ -214,7 +241,10 @@ One command puts a live terminal view over the whole deployment:
   plan. A run's detail names the plan a portfolio run wrote and the dollars it settled.
 
 <p align="center">
-  <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/dispatch-allocation.png?v=2026-10-14" alt="The panel's budget split view: the weekly envelope, each project's floor, weight, share and spend, the headroom, the applied plan with its reasons, and the history across two hosts with a revert and a refused plan" width="820">
+  <picture>
+    <source media="(prefers-color-scheme: light)" srcset="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/dispatch-allocation-light.png?v=2026-11-05">
+    <img src="https://raw.githubusercontent.com/edgehero/pi-dispatch/main/docs/images/dispatch-allocation.png?v=2026-10-14" alt="The panel's budget split view: the weekly envelope, each project's floor, weight, share and spend, the headroom, the applied plan with its reasons, and the history across two hosts with a revert and a refused plan" width="820">
+  </picture>
 </p>
 
 - **The portfolio manager.** A weekly flow you own reads the budget and writes a plan of weights. The

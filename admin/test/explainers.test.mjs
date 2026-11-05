@@ -151,7 +151,8 @@ test("the folder holds exactly the planned files, and no PNG is older than the p
   assert.deepEqual(readdirSync(`${REPO}${DIR}`).sort(), planned, `${DIR} holds exactly the pictures: run node launch/render-images.mjs --explain`);
   // PNGs are Chrome's rendering and are not held to bytes, so this is what stands between a changed word and a picture
   // still showing the old one with every test green.
-  assert.deepEqual(JSON.parse(read(`${DIR}/sources.json`)), explainSources([...shots, bannerShot()]), "a picture changed: run node launch/render-images.mjs --explain");
+  assert.deepEqual(JSON.parse(read(`${DIR}/sources.json`)), explainSources(), "a picture changed: run node launch/render-images.mjs --explain");
+  assert.deepEqual(Object.keys(explainSources()).sort(), [...shots.map((shot) => shot.file), "banner.png", "banner-light.png"].sort(), "and it covers the banner on both grounds");
 });
 
 test("what is committed plays: every loop is an animated PNG that repeats for ever and is light enough to keep, and every still is not animated", () => {
@@ -169,27 +170,37 @@ test("what is committed plays: every loop is an animated PNG that repeats for ev
   }
 });
 
-test("the banner plays, starts on the dark floor, and each README shows it with the words it was drawn with", () => {
-  const shot = bannerShot();
-  // The first frame is what a place that does not animate a PNG shows, and the dark floor is the point.
-  assert.match(shot.svg, /@keyframes bn-lights\{0%\{opacity:0\}/);
-  assert.equal(read("docs/images/banner.svg"), bannerSvg(), "the banner changed: run node launch/render-images.mjs --explain");
+test("the banner plays, starts on the dark floor on either ground, and each README shows it with the words it was drawn with", () => {
   const allowed = new Set(tokens.color.tokens.flatMap((token) => EXPLAIN_THEMES.map((theme) => token.value[theme].toLowerCase())));
-  for (const [, colour] of shot.svg.matchAll(/(?:fill|stroke)="(#[0-9a-fA-F]{3,8})"/g)) assert.ok(allowed.has(colour.toLowerCase()), `${colour} is not a design token`);
-  for (const [, name, body] of shot.svg.matchAll(/@keyframes ([a-z0-9-]+)\{(.*?\})\}/g)) assert.match(body, /100%\{/, `${name} does not reach the end of the loop`);
-  // A job's progress has its own speed, which has to divide the loop or a bar jumps where the loop starts over.
-  for (const [, seconds] of shot.svg.matchAll(/animation:bn-work ([\d.]+)s/g)) {
-    const laps = shot.seconds / Number(seconds);
-    assert.ok(Math.abs(laps - Math.round(laps)) < 0.001, `a bar of ${seconds}s does not close a loop of ${shot.seconds}s`);
+  for (const theme of ["dark", "light"]) {
+    const shot = bannerShot(theme);
+    // The first frame is what a place that does not animate a PNG shows, and the dark floor is the point.
+    assert.match(shot.svg, /@keyframes bn-lights\{0%\{opacity:0\}/);
+    assert.equal(read(`docs/images/${shot.svgFile}`), bannerSvg(theme), "the banner changed: run node launch/render-images.mjs --explain");
+    for (const [, colour] of shot.svg.matchAll(/(?:fill|stroke)="(#[0-9a-fA-F]{3,8})"/g)) assert.ok(allowed.has(colour.toLowerCase()), `${colour} is not a design token`);
+    for (const [, name, body] of shot.svg.matchAll(/@keyframes ([a-z0-9-]+)\{(.*?\})\}/g)) assert.match(body, /100%\{/, `${name} does not reach the end of the loop`);
+    // A job's progress has its own speed, which has to divide the loop or a bar jumps where the loop starts over.
+    for (const [, seconds] of shot.svg.matchAll(/animation:bn-work ([\d.]+)s/g)) {
+      const laps = shot.seconds / Number(seconds);
+      assert.ok(Math.abs(laps - Math.round(laps)) < 0.001, `a bar of ${seconds}s does not close a loop of ${shot.seconds}s`);
+    }
+    const loop = readFileSync(`${REPO}docs/images/${shot.file}`);
+    assert.ok(loop.length < 1024 * 1024, `${shot.file} is ${Math.round(loop.length / 1024)} KB`);
+    assert.equal(chunksOf(loop).find((c) => c.type === "acTL")?.data.readUInt32BE(4), 0, "it loops for ever");
+    assert.equal(chunksOf(readFileSync(`${REPO}docs/images/${shot.still}`)).some((c) => c.type === "acTL"), false, "the still holds still");
   }
+  // Each ground draws its words in its own ink: only the floor and the small console stay as they are.
+  const light = bannerShot("light");
+  assert.deepEqual([light.file, light.still, light.svgFile], ["banner-light.png", "banner-light-still.png", "banner-light.svg"]);
+  assert.deepEqual([bannerShot().file, bannerShot().still], ["banner.png", "banner-still.png"], "the names published READMEs and pi's gallery load");
+  assert.notEqual(light.svg, bannerShot("dark").svg);
   for (const banned of TOP_HALF_BANNED) assert.doesNotMatch(BANNER_ALT, new RegExp(`\\b${banned}(?![a-z])`, "i"), banned);
-  const loop = readFileSync(`${REPO}docs/images/${shot.file}`);
-  assert.ok(loop.length < 1024 * 1024, `${shot.file} is ${Math.round(loop.length / 1024)} KB`);
-  assert.equal(chunksOf(loop).find((c) => c.type === "acTL")?.data.readUInt32BE(4), 0, "it loops for ever");
-  assert.equal(chunksOf(readFileSync(`${REPO}docs/images/${shot.still}`)).some((c) => c.type === "acTL"), false, "the still holds still");
   const root = read("README.md");
   const block = root.slice(root.indexOf("<picture>"), root.indexOf("</picture>"));
   assert.ok(block.indexOf('media="(prefers-reduced-motion: reduce)" srcset="docs/images/banner-still.png') > 0, "a reader who asked for less motion gets the still");
+  assert.ok(block.indexOf('media="(prefers-reduced-motion: reduce) and (prefers-color-scheme:light)" srcset="docs/images/banner-light-still.png') > 0, "in their own theme");
+  assert.ok(block.indexOf('media="(prefers-color-scheme: light)" srcset="docs/images/banner-light.png') > 0, "a reader on a light page gets the light ground");
+  assert.ok(block.indexOf("banner-light-still.png") < block.indexOf("banner-still.png"), "the first source that matches wins");
   assert.ok(block.indexOf("banner-still.png") < block.indexOf('<img src="docs/images/banner.png'), "the first source that matches wins");
   assert.ok(block.includes(`alt="${BANNER_ALT}"`), "the root README's alt text");
   assert.ok(read("admin/README.md").includes(`alt="${BANNER_ALT}"`), "the npm page's alt text");
@@ -251,7 +262,7 @@ test("the root README shows every picture in both themes, a still to who asked f
     const block = readme.slice(readme.lastIndexOf("<picture>", start), readme.indexOf("</picture>", start));
     // The first source that matches wins, so the stills have to come first and the dark still before the light one.
     const order = [
-      `media="(prefers-reduced-motion: reduce) and (prefers-color-scheme: dark)" srcset="docs/images/explain/${explainerFile(name, "dark", true)}?v=`,
+      `media="(prefers-reduced-motion: reduce) and (prefers-color-scheme:dark)" srcset="docs/images/explain/${explainerFile(name, "dark", true)}?v=`,
       `media="(prefers-reduced-motion: reduce)" srcset="docs/images/explain/${explainerFile(name, "light", true)}?v=`,
       `media="(prefers-color-scheme: dark)" srcset="docs/images/explain/${explainerFile(name, "dark")}?v=`,
       `<img src="docs/images/explain/${explainerFile(name, "light")}?v=`,
@@ -277,14 +288,14 @@ test("the paragraph that says what the loop is comes before the picture of it", 
   assert.ok(readme.indexOf("You type, it works, you check") < readme.indexOf("explain/how-close-you-stay"));
 });
 
-test("the npm page shows its two pictures by absolute URL, light and moving, since it has neither SVG nor themes", () => {
+test("the npm page shows its two pictures by absolute URL: light and moving wherever only the fallback is drawn, and either theme where a reader's setting can choose", () => {
   const readme = read("admin/README.md");
   for (const { name, alt } of EXPLAINERS) {
     const shown = readme.includes(`/docs/images/explain/${name}.png`);
     assert.equal(shown, ON_NPM.includes(name), name);
     if (shown) assert.ok(readme.includes(`alt="${alt}"`), `${name}: the npm page's alt text is the one in launch/explainers.mjs`);
   }
-  assert.doesNotMatch(readme, /explain\/[a-z-]+-(dark|still)[a-z-]*\.png/);
+  assert.doesNotMatch(readme, /<img src="[^"]*explain\/[a-z-]+-(dark|still)[a-z-]*\.png/);
 });
 
 test("--explain refuses what cannot go with it, and says what it needs, before it starts anything", () => {

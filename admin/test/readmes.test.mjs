@@ -3,6 +3,7 @@ import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { CONSOLE_PICKS } from "../../launch/console-picks.mjs";
+import { relightTranscript, renderTranscript } from "../../launch/transcript-svg.mjs";
 import { loadedRows, outcomeNote } from "../src/loaded-words.mjs";
 import { CARD_FIELDS } from "../src/trigger-edit-core.mjs";
 import { TRIGGER_GETS_WORDS } from "../src/trigger-gets-view.mjs";
@@ -48,9 +49,71 @@ test("every image a README or a doc shows exists, and carries a cache tag so Git
 });
 
 test("an npm page shows PNGs on absolute URLs, since it cannot show an SVG from raw.githubusercontent.com", () => {
-  for (const [, target] of read("admin/README.md").matchAll(/<img src="([^"]+)"/g)) {
-    assert.match(target, /^https:\/\/raw\.githubusercontent\.com\/.+\.png\?v=/, target);
+  const targets = [...read("admin/README.md").matchAll(/(?:<img src|srcset)="([^"]+)"/g)];
+  assert.ok(targets.length > 8);
+  for (const [, target] of targets) assert.match(target, /^https:\/\/raw\.githubusercontent\.com\/.+\.png\?v=/, target);
+});
+
+test("every picture a README shows follows the reader's light or dark setting, and falls back to one that exists", () => {
+  for (const path of READMES) {
+    const text = read(path);
+    const pictures = [...text.matchAll(/<picture>[\s\S]*?<\/picture>/g)].map((m) => m[0]);
+    const outside = text.replace(/<picture>[\s\S]*?<\/picture>/g, "");
+    assert.doesNotMatch(outside, /!\[[^\]]*\]\([^)]*images\//, `${path}: a plain image has one look in both themes`);
+    assert.doesNotMatch(outside, /<img /, `${path}: an image outside a picture has one look in both themes`);
+    for (const picture of pictures) {
+      const fallback = /<img src="([^"?]+)/.exec(picture)?.[1];
+      assert.ok(fallback, `${path}: a picture needs an img for whatever does not read its sources: ${picture.slice(0, 120)}`);
+      assert.doesNotMatch(fallback, /-(?:dark|light|still)\./, `${path}: the fallback is the plain file, which a page without themes shows and a published README loads`);
+      const themed = [...picture.matchAll(/media="(?:\(prefers-reduced-motion: reduce\) and )?\(prefers-color-scheme: ?(dark|light)\)" srcset="([^"?]+)/g)];
+      assert.ok(themed.length > 0, `${path}: ${fallback} has no source for the other theme`);
+      // GitHub's themed-picture, for a signed-in reader whose theme is not "sync with system", replaces the whole media of a
+      // source that reads `prefers-color-scheme: dark`, with the space. A still's source written that way wins for that
+      // reader and they lose the animation, so it is written without the space, which a browser reads the same and that
+      // script leaves alone. Measured on the real page across theme, system setting and motion.
+      assert.doesNotMatch(picture, /prefers-reduced-motion: reduce\) and \(prefers-color-scheme: /, `${path}: ${fallback}: a still GitHub's script would turn on for every reader of that theme`);
+      for (const [, theme, target] of themed) {
+        assert.notEqual(target, fallback, `${path}: ${target} is the same picture as the fallback`);
+        assert.ok(target.includes(`-${theme}`), `${path}: ${target} is not the ${theme} picture its source says`);
+      }
+      // A picture that moves has a still for a reader who asked for less motion, in each theme.
+      const reduced = [...picture.matchAll(/media="[^"]*prefers-reduced-motion: reduce[^"]*" srcset="([^"?]+)/g)].map((m) => m[1]);
+      if (/images\/(?:banner|explain\/)/.test(fallback)) assert.ok(reduced.length > 0, `${path}: ${fallback} moves, so it has a still`);
+      if (reduced.length > 0) {
+        assert.equal(reduced.length, 2, `${path}: ${fallback} has a still in one theme only`);
+        for (const target of reduced) assert.match(target, /-still\.png$/, target);
+        assert.ok(picture.indexOf("prefers-reduced-motion") < picture.indexOf('media="(prefers-color-scheme'), `${path}: ${fallback}: the first source that matches wins, so the stills come first`);
+      }
+    }
   }
+});
+
+test("every console pick is drawn in the theme its name says, and each picture and its other theme are the same size", () => {
+  const sizeOf = (file) => { const png = readFileSync(`${REPO}docs/images/${file}`); return [png.readUInt32BE(16), png.readUInt32BE(20)].join("x"); };
+  for (const pick of CONSOLE_PICKS) {
+    assert.equal(pick.theme ?? "light", pick.name.endsWith("-dark") ? "dark" : "light", pick.name);
+    if (pick.name.endsWith("-dark")) assert.equal(sizeOf(`console/${pick.name}.png`), sizeOf(`console/${pick.name.replace(/-dark$/, "")}.png`), pick.name);
+  }
+  assert.equal(CONSOLE_PICKS.length % 2, 0);
+  for (const name of ["dispatch-dashboard", "dispatch-hosts", "dispatch-allocation"]) assert.equal(sizeOf(`${name}-light.png`), sizeOf(`${name}.png`), name);
+  assert.equal(sizeOf("banner-light.png"), sizeOf("banner.png"));
+  assert.equal(sizeOf("banner-light-still.png"), sizeOf("banner-still.png"));
+  const explained = readdirSync(`${REPO}docs/images/explain`).filter((f) => f.endsWith(".png") && !f.includes("-dark"));
+  assert.ok(explained.length > 0);
+  for (const file of explained) assert.equal(sizeOf(`explain/${file.replace(/(-still)?\.png$/, "-dark$1.png")}`), sizeOf(`explain/${file}`), file);
+});
+
+test("a captured terminal picture's light version is the dark one relit, colour for colour, with every line where it was", () => {
+  for (const name of ["cli-doctor", "dispatch-dashboard", "dispatch-hosts", "dispatch-allocation"]) {
+    const dark = read(`docs/images/${name}.svg`);
+    assert.equal(read(`docs/images/${name}-light.svg`), relightTranscript(dark), `${name}: run node launch/transcript-svg.mjs --relight`);
+    const words = (svg) => svg.replace(/\b(?:fill|stroke)="[^"]+"/g, "");
+    assert.equal(words(relightTranscript(dark)), words(dark));
+    assert.doesNotMatch(relightTranscript(dark), /#0d1117|#161b22/, `${name}: a dark window on a light page`);
+  }
+  assert.throws(() => relightTranscript('<rect fill="#123456"/>'), /no light partner for #123456/);
+  const coloured = renderTranscript(`${[...Array(8).keys()].flatMap((i) => [`\u001b[${30 + i}mx\u001b[0m`, `\u001b[${90 + i}my\u001b[0m`]).join("\n")}\n`, { prompt: "$ x", title: "t" });
+  assert.doesNotThrow(() => relightTranscript(coloured), "every colour a transcript can hold has a partner");
 });
 
 test("the docs index in the root README links every file in docs/, and nothing that is not one", () => {
