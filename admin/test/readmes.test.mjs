@@ -163,23 +163,11 @@ test("the install prompt leaves a person's step to the person, and says what Cla
   assert.ok(ROOT.replace(/\s+/g, " ").includes("Claude Code only does the installing: your jobs run on pi"));
 });
 
-test("the README says the web page is not on npm for exactly as long as that is true", () => {
-  // 4.3.1 went out before the console existed (its tag does not hold `admin/src/console/cli.mjs`), and the README describes what
-  // `main` holds. A release moves this version, which makes the note false: take it out in that pull request, and this test with it.
-  const note = "The web page is not on npm yet";
-  if (JSON.parse(read("admin/package.json")).version === "4.3.1") assert.ok(ROOT.includes(note), "say so");
-  else assert.ok(!ROOT.includes(note), "the release that moved the version carries the web page");
-});
-
-test("the root README plays the film, and calls it a first look for exactly as long as that is true", () => {
+test("the root README plays the film", () => {
   // The form GitHub itself writes for an uploaded video, and renders as a player: its bare address, alone on its line.
   const film = ROOT.match(/^https:\/\/github\.com\/user-attachments\/assets\/[0-9a-f-]+$/m);
   assert.ok(film, "the film's address, alone on its line");
   assert.ok(ROOT.indexOf("</p>") < film.index && film.index < ROOT.indexOf("# pi-dispatch\n"), "right under the banner, above the title");
-  // The film announces a version npm does not have yet. A release moves this version: reword the caption in that pull request.
-  const caption = "A first look at the next release";
-  if (JSON.parse(read("admin/package.json")).version === "4.3.1") assert.ok(ROOT.includes(caption), "say so");
-  else assert.ok(!ROOT.includes(caption), "the film is no longer a first look once its release is out");
 });
 
 test("Open the web page says what the console's commands do", () => {
@@ -293,7 +281,7 @@ test("What a job gets says what the trigger's page does: the card by its name, t
   assert.ok(section.includes("(docs/upgrading.md#what-a-fleet-needs-before-a-trigger-leaves-something-out)"));
   // The picture says each switch by the words a reader sees it under, and the golden it is drawn from holds that switch.
   const golden = read(`admin/test/fixtures/console/${CONSOLE_PICKS.find((pick) => pick.name === "console-trigger").golden}.html`);
-  const alt = /!\[([^\]]*)\]\(docs\/images\/console\/console-trigger\.png/.exec(ROOT)?.[1];
+  const alt = /<img src="docs\/images\/console\/console-trigger\.png[^"]*" alt="([^"]*)"/.exec(ROOT)?.[1];
   for (const [list, said] of [["excludeExtensions", "one for each of your extensions"], ["excludeExtensionTools", "a switch for each tool the newest run that says what it loaded lists"]]) {
     assert.ok(golden.includes(`data-gets-list="${list}"`), list);
     assert.ok(alt.includes(said), said);
@@ -315,7 +303,7 @@ test("both READMEs say what an exclusion is not, and every heading of the exclus
   for (const [text, path] of [[ROOT, "README.md"], [admin, "admin/README.md"]]) assert.doesNotMatch(text, /stops? what a job loads on its own|stops a job from loading/, path);
   // The version a file needs, as the loader's table has it. Which release reads it is `docs/upgrading.md`'s to say, so neither paragraph holds a release's number.
   for (const field of ["excludeExtensions", "excludeExtensionTools"]) assert.ok(engineerWords.includes(`A file that uses either needs \`"version": ${TRIGGER_RUN_FIELD_VERSIONS[field]}\`, so every worker, receiver and console must run a release that can read both.`), field);
-  assert.ok(engineerWords.includes("A release that cannot may ignore them and run the job with what the file turned off, or hold every job. The [upgrade notes](docs/upgrading.md#what-a-fleet-needs-before-a-trigger-leaves-something-out) say which release, and what to do until then. While a running worker cannot read them, the page refuses the change and names it."));
+  assert.ok(engineerWords.includes("A release that cannot ignores them and runs the job with what the file turned off. The [upgrade notes](docs/upgrading.md#what-a-fleet-needs-before-a-trigger-leaves-something-out) say which release, and what to do until then. While a running worker cannot read them, the page refuses the change and names it."));
   const engineerParagraph = engineers.slice(engineers.indexOf("`excludeExtensions` keeps an extension's code"), engineers.indexOf("A whole project can get one environment"));
   const adminParagraphs = admin.slice(admin.indexOf("**What its jobs get**"), admin.indexOf("`dispatch_trigger_edit` also takes"));
   assert.ok(adminParagraphs.replace(/\s+/g, " ").includes("Every running machine must run a release that can read these two settings: the [upgrade notes](../docs/upgrading.md#what-a-fleet-needs-before-a-trigger-leaves-something-out) say which release, and what to do until then. While a running worker cannot read them, the page refuses the change and names it."));

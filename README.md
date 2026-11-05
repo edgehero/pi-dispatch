@@ -9,7 +9,7 @@
 
 https://github.com/user-attachments/assets/129a774b-1dea-4dee-bb4f-3478eff409bc
 
-<sub>One minute, with sound. A first look at the next release, 5.0. The screens show sample data.</sub>
+<sub>One minute, with sound, on what is new in 5.0. The screens show sample data.</sub>
 
 # pi-dispatch
 
@@ -41,9 +41,6 @@ It is free and open source. You pay your AI provider for what the agent uses, or
 <sub>You choose this per kind of work, not once for everything.</sub>
 
 ## Install in four steps
-
-> **The web page is not on npm yet.** The console and the browser setup on this page are built, and come with the next
-> release. The version on npm today, 4.3.1, does not have them. Step 2 says what to do until then.
 
 **1. Have these ready.** A computer or server that stays on (on a Mac or Windows machine, jobs run only while you are logged in),
 [Docker](https://www.docker.com/products/docker-desktop/) and [Node.js](https://nodejs.org) 22.19 or newer, and a key from an AI
@@ -77,18 +74,13 @@ pi install npm:@edgehero/pi-dispatch-admin
 
 ```bash
 mkdir my-dispatch && cd my-dispatch
-npm install --save-exact @edgehero/pi-dispatch@4.3.1 @edgehero/pi-dispatch-admin@4.3.1 @earendil-works/pi-coding-agent@1.5.0 --omit=dev --omit=optional --ignore-scripts --no-audit --no-fund
+npm install --save-exact @edgehero/pi-dispatch@5.0.0 @edgehero/pi-dispatch-admin@5.0.0 @earendil-works/pi-coding-agent@1.5.0 --omit=dev --omit=optional --ignore-scripts --no-audit --no-fund
 ./node_modules/.bin/pi-dispatch up --console
 ```
 
 It asks before it starts anything, then prints a sign in link that works for 60 seconds. Setup in the browser needs a Mac or
 Linux. On Windows, run `pi-dispatch up` without `--console`, or choose **Guided setup** in pi, and sign in to the console with a
 token.
-
-**Until the next release,** `--console` does nothing and no sign in link appears, and in pi `/dispatch` offers **Guided setup**
-only, so skip step 3 for now. Put your provider key in the `.env` file in the folder you installed into (a failed key check before
-that is normal), run `./node_modules/.bin/pi-dispatch service install` to keep the worker running, and follow it in the
-[pi panel](#the-pi-panel).
 
 **3. Finish the checklist in your browser.** The link opens a live list of what is ready and what is not: the queue, a worker, the
 network rules, your provider key and a first trigger. Your key goes in here, never in a chat. It offers recipes: fix an issue when
@@ -404,7 +396,7 @@ updates by itself ([updates](docs/console.md#updates)).
 A schedule also gets a button that fires it now ([triggers](docs/triggers.md)).
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/console/console-trigger-dark.png?v=2026-11-05">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/console/console-trigger-dark.png?v=2026-11-05-800e">
   <img src="docs/images/console/console-trigger.png?v=2026-11-04-800e" alt="What its jobs get, on one trigger's page, with two changes not written yet: a pill per machine saying what differs or that it is unknown, then the model and its job cap, the flow, a switch for the staged packages and one for each of your extensions, the outside systems with linear switched on, pi's own tools with bash off and a switch for each tool the newest run that says what it loaded lists, the image and secrets, what the last run had under each, and a bar with Preview the change and Discard">
 </picture>
 
@@ -739,8 +731,7 @@ so on a fleet where each host keeps its own, a host keeps what it has until its 
 
 `excludeExtensions` keeps an extension's code out of a job. `excludeExtensionTools` removes only the tool, so the rest of that extension still runs. Neither stops what an
 agent that can run commands, write files or edit files can reach ([what exclusion does not stop](docs/exclude-tools.md#what-exclusion-does-not-stop)). A file that uses either needs
-`"version": 2`, so every worker, receiver and console must run a release that can read both. A release that cannot may ignore them and run the job with what the file turned off,
-or hold every job. The [upgrade notes](docs/upgrading.md#what-a-fleet-needs-before-a-trigger-leaves-something-out) say which release, and what to do until then. While a running
+`"version": 2`, so every worker, receiver and console must run a release that can read both. A release that cannot ignores them and runs the job with what the file turned off. The [upgrade notes](docs/upgrading.md#what-a-fleet-needs-before-a-trigger-leaves-something-out) say which release, and what to do until then. While a running
 worker cannot read them, the page refuses the change and names it.
 
 A whole project can get one environment from your secrets manager, granted once and read fresh at each job start. Quiet
