@@ -119,10 +119,38 @@ if (!Redis.prototype[SELECT_HOOK]) {
  * The `error` listener every BullMQ Queue and Worker of the project carries (issue #468): without one, BullMQ prints
  * the whole error object with `console.error`. This writes one line, the message only (scrubbed of any command), and
  * `what` naming whose error it is.
+ *
+ * `quietly`: the same line for the same `what` is said once per `VALKEY_ERROR_QUIET_MS`, across every emitter of the
+ * process, for the reader's raw client and for a queue that gives up (`makeQueue`): a reader that replaces its queues
+ * (`createFleetReader`) repeats the line on a new emitter per read, and a one-shot queue of a CLI verb or a worker's boot says
+ * it once instead of a few times. A message not said in that minute is said at once, so a new fault is not held back; two
+ * faults taking turns are each said once a minute. The raw client going ready ends the quiet for every line (a BullMQ queue
+ * does not pass that event on), since a fault after that is a new outage in the same words. Off for a client that rides a
+ * restart out: a running worker's and a receiver's retry lines are how a second outage shows in their logs.
  */
-export function onValkeyError(emitter, what, write = (line) => process.stderr.write(line)) {
-	emitter.on?.("error", (err) => write(`[pi-dispatch] Valkey error (${what}): ${String(scrubValkeyError(err)?.message ?? err)}\n`));
+export const VALKEY_ERROR_QUIET_MS = 60_000;
+const VALKEY_ERRORS_HELD = 256;
+const saidAt = new Map();
+export function onValkeyError(emitter, what, write = (line) => process.stderr.write(line), { quietly = false, now = () => Date.now() } = {}) {
+	if (quietly) emitter.on?.("ready", () => saidAt.clear());
+	emitter.on?.("error", (err) => {
+		const message = String(scrubValkeyError(err)?.message ?? err);
+		if (quietly) {
+			const key = `${what}\u0000${message}`;
+			const at = now();
+			const last = saidAt.get(key);
+			if (last !== undefined && at >= last && at - last < VALKEY_ERROR_QUIET_MS) return;
+			if (saidAt.size >= VALKEY_ERRORS_HELD) saidAt.clear();
+			saidAt.set(key, at);
+		}
+		write(`[pi-dispatch] Valkey error (${what}): ${message}\n`);
+	});
 	return emitter;
+}
+
+/** Whether `parseConnection` built this connection to give up after a couple of tries (`failFast`). */
+export function givesUp(connection) {
+	return connection?.[JUDGE]?.failFast === true;
 }
 
 /**
@@ -139,8 +167,15 @@ export function onValkeyError(emitter, what, write = (line) => process.stderr.wr
  * `failFast` is for the CLI producer (a one-shot enqueue): if Valkey is unreachable it should
  * error in a couple of seconds with a clear message, not hang forever. The long-running WORKER
  * uses the default (persistent) options -- it should ride out a Valkey restart, not give up.
+ * A failFast client whose retries ran out has ended for good, so anything that holds one for longer than a question must
+ * replace it (`createFleetReader`), or hold a persistent one instead (`noOfflineQueue` on `makeRedisClient`).
+ *
+ * `freshContext` is for a persistent client of a long-running surface that names no context: each connect judges by the
+ * context as it is then, not as it was at construction, so an operator's fix of the deployment's `.env` reaches a client
+ * that has been refused since it started. Off by default, so a worker's judgement stays the one it booted on. The password
+ * is still the one read at construction, since ioredis has settled it before the connector runs.
  */
-export function parseConnection(url, { failFast = false, servername = null, context = null, judge = null, withoutPassword = false } = {}) {
+export function parseConnection(url, { failFast = false, servername = null, context = null, judge = null, withoutPassword = false, freshContext = false } = {}) {
 	const u = new URL(url);
 	// PR #478's gate: a path that is not a database number was `db: NaN`, and the SELECT ioredis then sent failed outside
 	// every caller's await (an unhandled rejection). Refused here, where every client of the project is made, as the
@@ -159,7 +194,7 @@ export function parseConnection(url, { failFast = false, servername = null, cont
 		// reports. `context` is where the client stands (`valkeyClientContext`), the process's own when not given.
 		Connector: JudgedConnector,
 		// `judge` is a test seam only: the function asked for the address (judgedEndpoint when not given).
-		[JUDGE]: { url, context: where, ...(judge ? { judge } : {}) },
+		[JUDGE]: { url, context: where, ...(judge ? { judge } : {}), ...(freshContext && !context ? { freshContext: true } : {}), ...(failFast ? { failFast: true } : {}) },
 		// WHATWG URL keeps an IPv6 literal's brackets in `hostname` (`[::1]`), and net.connect then looks up the name
 		// "[::1]", which never resolves, so a `redis://[::1]:6379` VALKEY_URL never connected (issue #464, measured on
 		// Fedora 44: ETIMEDOUT). The address is the part inside them.
@@ -185,16 +220,53 @@ export function parseConnection(url, { failFast = false, servername = null, cont
 }
 
 /**
+ * A client whose commands have a bound. Its caller has been told a command that timed out failed, so that command must
+ * not go out later, and ioredis would send it: the timer rejects it and leaves it in the offline queue for when Valkey
+ * returns. A cancel the page said was not made then stopped the run hours later. One already on the socket of a Valkey
+ * that stopped answering cannot be taken back, so its error says so (`valkeyMayStillRun`), and the caller can too.
+ *
+ * ioredis' timer is also ref'd, so a client told to stop with commands still waiting held its process for up to one more
+ * bound. Reaches into two internals of the pinned ioredis, both held by
+ * `worker/test/connection.test.mjs`. REJECTED: `enableOfflineQueue: false`, which refuses a client's first command too,
+ * before it has had a chance to connect.
+ */
+class BoundedRedis extends Redis {
+	sendCommand(command, stream) {
+		const answer = super.sendCommand(command, stream);
+		command._commandTimeoutTimer?.unref?.();
+		answer?.catch?.((err) => {
+			if (err?.message !== "Command timed out") return;
+			err.code ??= "ETIMEDOUT";
+			const queue = this.offlineQueue;
+			for (let i = 0; i < queue.length; i += 1) {
+				if (queue.peekAt(i)?.command === command) {
+					queue.removeOne(i);
+					return;
+				}
+			}
+			err.valkeyMayStillRun = true;
+		});
+		return answer;
+	}
+}
+
+/**
  * A raw ioredis client (the budget's INCR/EXPIRE, the registry and fleet reads, doctor's PING). Built from
  * `parseConnection`'s options, so it connects through `JudgedConnector` like every other client. `lazyConnect` and
  * `failFast` as ioredis and `parseConnection` read them.
  */
-export function makeRedisClient(url, { servername = null, context = null, failFast = false, lazyConnect = false, judge = null, withoutPassword = false, disconnectTimeoutMs = null, noOfflineQueue = false } = {}) {
+export function makeRedisClient(url, { servername = null, context = null, failFast = false, lazyConnect = false, judge = null, withoutPassword = false, disconnectTimeoutMs = null, noOfflineQueue = false, commandTimeoutMs = null, freshContext = false } = {}) {
 	// `disconnectTimeoutMs` (issue #599): how long ioredis's `disconnect()` waits for a socket to close before it destroys
 	// it (its default is 2 s, on a ref'd timer). A one-shot read that must not hold its process passes 0.
 	// A shell monitor must reconnect across an outage without accumulating stale control commands (#771).
 	// Keep the persistent retry strategy, but reject each command while disconnected and bound in-flight retries.
-	return new Redis({ ...parseConnection(url, { failFast, servername, context, judge, withoutPassword }), ...(noOfflineQueue ? { enableOfflineQueue: false, maxRetriesPerRequest: 1 } : {}), ...(lazyConnect ? { lazyConnect: true } : {}), ...(Number.isSafeInteger(disconnectTimeoutMs) && disconnectTimeoutMs >= 0 ? { disconnectTimeout: disconnectTimeoutMs } : {}) });
+	// `commandTimeoutMs`: how long one command may wait for its answer, in the offline queue or on a Valkey that stopped
+	// answering. Without it a persistent client's command waits for as long as the outage lasts. With it, what timed out is
+	// never sent again: `BoundedRedis` takes it out of the offline queue, and no resend covers what was on a connection that
+	// died.
+	const bounded = Number.isSafeInteger(commandTimeoutMs) && commandTimeoutMs > 0;
+	const options = { ...parseConnection(url, { failFast, servername, context, judge, withoutPassword, freshContext }), ...(noOfflineQueue ? { enableOfflineQueue: false, maxRetriesPerRequest: 1 } : {}), ...(lazyConnect ? { lazyConnect: true } : {}), ...(Number.isSafeInteger(disconnectTimeoutMs) && disconnectTimeoutMs >= 0 ? { disconnectTimeout: disconnectTimeoutMs } : {}), ...(bounded ? { commandTimeout: commandTimeoutMs, autoResendUnfulfilledCommands: false } : {}) };
+	return bounded ? new BoundedRedis(options) : new Redis(options);
 }
 
 /**
@@ -336,7 +408,9 @@ export class JudgedConnector extends AbstractConnector {
 		this.connecting = true;
 		const judge = options[JUDGE];
 		if (!judge) return Promise.reject(new Error("a Valkey client was built without parseConnection's judged options"));
-		return (judge.judge ?? judgedEndpoint)(judge.url, judge.context).then(
+		// A promise chain, so a context read that throws takes the same path as a judgement that does: a client's connect
+		// must not reject (below), or ioredis ends it for good.
+		return new Promise((resolve) => resolve((judge.judge ?? judgedEndpoint)(judge.url, judge.freshContext ? defaultValkeyContext() : judge.context))).then(
 			(endpoint) => {
 				if (!this.connecting) throw new Error("Connection is closed.");
 				const target = { host: endpoint.host, port: options.port, ...(options.family != null ? { family: options.family } : {}) };

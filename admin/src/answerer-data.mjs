@@ -28,6 +28,8 @@ export function answererStats(rows, now) {
 export function makeAnswererService({ paths, env = {}, fs = nodeFs, now = Date.now, redisFn = makeRedisClient, storeFn = makeAnswerDraftStore } = {}) {
   const using = async fn => {
     const redis = redisFn(paths.valkeyUrl);
+    // Without a listener ioredis prints a stack trace per reconnect attempt, for as long as an outage outlasts this call.
+    redis.on?.("error", () => {});
     try { return await fn(storeFn({ redis, now, retentionDays: Number(env.PI_LOG_RETENTION_DAYS ?? 30) })); }
     finally { redis.disconnect?.(); }
   };

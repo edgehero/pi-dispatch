@@ -2833,6 +2833,30 @@ test("a cancel that THROWS puts a scrubbed note in the footer, not the thrown me
   assert.doesNotMatch(out, /[\u0000-\u0009\u000b-\u001f\u007f-\u009f]/, "but not in the thrown message's own bytes");
 });
 
+test("a cancel Valkey did not answer says it may or may not have been made, never that it failed", async () => {
+  const comp = makeDashboard({
+    paths: {},
+    done() {},
+    tui: fakeTui(),
+    intervalMs: 100000,
+    deps: cannedDeps({
+      fetchSnapshot: async () => ({ ...SNAPSHOT, activeJobId: "gh-1", active: [{ jobId: "gh-1" }] }),
+      cancelActive: async () => {
+        throw Object.assign(new Error("Command timed out"), { valkeyMayStillRun: true });
+      },
+    }),
+  });
+  await flush();
+  comp.handleInput("x");
+  await flush();
+  comp.handleInput("y");
+  await flush();
+  const out = stripAnsi(comp.render(200).join("\n"));
+  await comp.dispose();
+  assert.match(out, /cancel not confirmed: it may or may not have been made/);
+  assert.doesNotMatch(out, /cancel failed/);
+});
+
 test("an unreadable held view degrades that section alone", async () => {
   const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, held: { unreachable: "timed out reaching the queue" } }) }) });
   await flush();

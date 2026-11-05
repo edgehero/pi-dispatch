@@ -65,6 +65,18 @@ export const cancelAckKey = (jobId) => `cancel:ack:${jobId}`;
 export const agentCancelReqKey = (jobId) => `cancel:agent:req:${jobId}`;
 export const agentCancelAckKey = (jobId) => `cancel:agent:ack:${jobId}`;
 
+const cancelRequestKeyOf = (jobId, interventionOrigin) => (interventionOrigin === "agent" ? agentCancelReqKey(jobId) : cancelReqKey(jobId));
+
+/**
+ * Takes back a request whose answer was lost, for a caller that goes on to report a failure (the console's fleet reader; the
+ * CLI's catch does the same under its own bound). A SET with no answer can still land: a Valkey that stopped answering holds
+ * it on its socket and runs it when it wakes, so the DEL goes right behind it, in order. Not awaited: on the same outage it
+ * has its own bound to wait out, and the caller already has its answer.
+ */
+export function withdrawCancel({ redis, jobId, interventionOrigin = "human" }) {
+	Promise.resolve().then(() => redis.del(cancelRequestKeyOf(jobId, interventionOrigin))).catch(() => {});
+}
+
 /**
  * Ask whichever worker holds `jobId` to cancel it, and wait briefly for the answer.
  *
@@ -77,18 +89,31 @@ export const agentCancelAckKey = (jobId) => `cancel:agent:ack:${jobId}`;
  * `pollMs`/`sleep` are injectable so tests never wait on a wall clock.
  */
 export async function requestCancel({ redis, jobId, interventionOrigin = "human", ackTimeoutMs = 10_000, pollMs = 250, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
-	const requestKey = interventionOrigin === "agent" ? agentCancelReqKey(jobId) : cancelReqKey(jobId);
+	const requestKey = cancelRequestKeyOf(jobId, interventionOrigin);
 	const ackKey = interventionOrigin === "agent" ? agentCancelAckKey(jobId) : cancelAckKey(jobId);
 	await redis.set(requestKey, interventionOrigin === "agent" ? "agent-cancel" : "operator-cancel", "PX", CANCEL_REQ_TTL_MS);
 	for (let waited = 0; ; waited += pollMs) {
-		const host = await redis.get(ackKey);
+		let host;
+		try {
+			host = await redis.get(ackKey);
+		} catch (err) {
+			// The request went out and its answer is what was lost, so no caller may say nothing was changed.
+			if (err && typeof err === "object") err.valkeyMayStillRun = true;
+			throw err;
+		}
 		if (host !== null && host !== undefined) return { ack: host };
 		if (waited + pollMs > ackTimeoutMs) break;
 		await sleep(pollMs);
 	}
-	// Best-effort: losing this DEL to a blip leaves the 60s TTL as the backstop, and the worker-side GET
-	// racing it by one tick is a named residual (the operator is told to re-check `status`).
-	await redis.del(requestKey).catch(() => {});
+	// Losing this DEL leaves the request standing for its 60s TTL, where a worker can still read it, so that is no "nothing was
+	// changed" and it rejects, marked, as a lost answer does. The worker-side GET racing the DEL by one tick is a named residual
+	// (the operator is told to re-check `status`).
+	try {
+		await redis.del(requestKey);
+	} catch (err) {
+		if (err && typeof err === "object") err.valkeyMayStillRun = true;
+		throw err;
+	}
 	return { timeout: true };
 }
 

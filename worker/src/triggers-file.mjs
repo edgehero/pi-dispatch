@@ -283,7 +283,7 @@ export function writeTriggers({ triggersPath, mutate, mutateDocument = null, exp
 		// would hand it a truncated file and get back a confident answer about a key, when what happened is
 		// that the file was cut in half.
 		let parsedText = null;
-		// Only a MISSING file may start from nothing. A file that is there and could not be read is not an empty one: folded
+		// Only a file that holds nothing may start from nothing. A file that is there and could not be read is not an empty one: folded
 		// into "missing", one failed read made `current` empty, the `expect` re-read below then saw the file as it was and
 		// passed, and the rename replaced every trigger with what `mutate` made of nothing, on an `{ ok: true }`. Returned, not
 		// thrown, so every caller says it in the words it says any refusal in, and before `mutate`, which is owed a real list.

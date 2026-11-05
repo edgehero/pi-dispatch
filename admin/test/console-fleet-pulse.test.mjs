@@ -445,6 +445,20 @@ test("each venue shows all properties, a highlighted comparison, serving and gat
   }
 });
 
+test("a venue page with no snapshot says the hosts could not be read, which is not the same as there being none", () => {
+  const unread = view(null, "viewer", { query: { name: "local" } });
+  const summary = draw(venue.venueSummary, unread);
+  assert.match(summary, /not known: the hosts could not be read/);
+  assert.doesNotMatch(summary, /no live host/i);
+  const openshell = view(null, "viewer", { query: { name: "openshell" } });
+  assert.match(draw(venue.venueHosts, openshell), /Not known: the hosts could not be read\./);
+  const read = base();
+  read.hostBudgets = [];
+  const none = view(read, "viewer", { query: { name: "local" } });
+  assert.match(draw(venue.venueSummary, none), /no live host/);
+  assert.match(draw(venue.venueHosts, view(read, "viewer", { query: { name: "openshell" } })), /No live host blesses this venue\./);
+});
+
 test("renderers escape peer-published text and never emit inline style/script or event handlers", () => {
   const s = base();
   s.hostBudgets = [
@@ -666,4 +680,14 @@ test("host state shares the overview clock-skew threshold and names unread regis
   assert.match(draw(fleet.fleetBar, view(s)), /host registry could not be read/);
   assert.match(draw(fleet.fleetHosts, view(s)), /total occupancy is not known/);
   assert.doesNotMatch(draw(fleet.fleetHosts, view(s)), /class="slot slot--free"/);
+});
+
+test("a fleet card with no snapshot says Valkey could not be read, and never prints its header function's source", () => {
+  const cards = Object.entries(fleet).filter(([name, value]) => typeof value === "function" && /^fleet(?!Bar)/.test(name));
+  assert.ok(cards.length >= 8, "the census reaches the cards");
+  for (const [name, card] of cards) {
+    const text = String(card({ data: {} }) ?? "");
+    assert.doesNotMatch(text, /=&gt;|=>/, `${name} prints a function`);
+  }
+  assert.match(String(fleet.fleetHeld({ data: {} })), /Valkey could not be read/);
 });

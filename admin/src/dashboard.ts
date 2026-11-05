@@ -777,7 +777,7 @@ export function makeDashboard({
               // is the same "one field with a belt beside two without one" shape the issue is about. The
               // message is a thrown Error's, and `requestCancel` is not wrapped, so an ioredis rejection
               // reaches here verbatim.
-              actionNote = `cancel failed: ${cellOf(err?.message ?? String(err))}`;
+              actionNote = err?.valkeyMayStillRun ? "cancel not confirmed: it may or may not have been made" : `cancel failed: ${cellOf(err?.message ?? String(err))}`;
             }
           });
           tui?.requestRender?.();

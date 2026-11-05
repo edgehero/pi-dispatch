@@ -6,6 +6,7 @@ import { createHash } from "node:crypto";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { planZeroTouchName, planZeroTouchGroup, planZeroTouchInstruction, planZeroTouchInstructionUndo, applyZeroTouchFilePlan } from "../src/zero-touch-actions.mjs";
 import { checkTriggerFixSource } from "../src/job-actions.mjs";
+import { makeZeroTouchService } from "../src/zero-touch-data.mjs";
 const config = { capture: true, model: "test/classifier", maxCostUsd: "0.05", names: {} };
 const groupId = "a".repeat(32), scopeId = "b".repeat(64);
 function fixture() {
@@ -150,4 +151,14 @@ test("source identity checks retained trigger type, label and flow before accept
     assert.match(planZeroTouchInstruction({ params, paths, sourceRecord, group, binding: good }).refusal, /identity is unavailable or changed/);
   }
   assert.match((await checkTriggerFixSource({ ...args, readRetainedJob: async () => null })).refusal, /no longer holds/);
+});
+
+test("the service's client carries an error listener, so an outage outlasting a call is not a stack trace per reconnect attempt", async () => {
+  const dir = tempDir("zero-touch-listener-");
+  const heard = [];
+  const service = makeZeroTouchService({ paths: { valkeyUrl: "redis://example.invalid", logsDir: dir, triggersPath: join(dir, "triggers.json") }, redisFn: () => ({ on(event) { heard.push(event); }, disconnect() {} }) });
+  await service.withWriters(async () => null);
+  assert.deepEqual(heard, ["error"]);
+  const seam = makeZeroTouchService({ paths: { valkeyUrl: "redis://example.invalid", logsDir: dir, triggersPath: join(dir, "triggers.json") }, redisFn: () => ({ disconnect() {} }) });
+  assert.equal(await seam.withWriters(async () => "ran"), "ran");
 });

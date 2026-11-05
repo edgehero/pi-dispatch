@@ -786,7 +786,19 @@ open. It is one of four lines:
 With no worker online the line is never All clear, and starts with "No worker online: jobs queue but nothing runs
 them." (which then stands in for "Nothing needs you."). On a deployment that has never run a job the line says how
 many steps stand before the first one ([First run](#first-run)), and when Valkey cannot be read, that it could not be
-and the next refresh tries again.
+and the next refresh tries again. The console keeps running while Valkey is down, restarts, stops answering or is refused,
+started that way or not, and within about 30 seconds of Valkey answering its pages read it again, with no restart of the
+console. While Valkey stays down, some pages draw what they could not read as empty or missing: a live host as gone, no triggers
+or no triggers file, nothing to answer. Trust them again once it answers.
+
+A change that timed out before it left the console is not made when Valkey returns. One that reached a Valkey which then
+stopped answering may or may not have been made, and the confirm says so (`package-adopt`, `package-undo` and `sandbox-end` still
+say nothing was changed). On a Valkey that stopped answering, the kill switch and the previews of a failed job's and a steer's actions wait
+until it answers, and the console cannot stop until it does, so its service manager's limit ends it. While Valkey stays down,
+its log says each queue's error once a minute, and an outage after Valkey came back says it again at once.
+
+A restart of the console is still what picks up a changed `VALKEY_URL`, a Valkey password changed since it started, a database
+number Valkey refused, and everything in a `.env` that a bad line kept from being read at start, a Valkey password among them.
 
 One rule holds on every card: a whole count, an empty sentence ("The settings overlay sets no cap.", "nothing is
 waiting", "No run has settled any spend today.") or All clear is shown only over what the console read in full. When a

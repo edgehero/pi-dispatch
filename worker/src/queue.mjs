@@ -3,7 +3,7 @@ import { validateFork } from "./fork-job.mjs";
 import { randomUUID } from "node:crypto";
 import { Queue } from "bullmq";
 import { metaKeyPattern, queueNameOfMetaKey } from "./bullmq-internals.mjs";
-import { assertJudgedConnection, onValkeyError } from "./connection.mjs";
+import { assertJudgedConnection, givesUp, onValkeyError } from "./connection.mjs";
 import { chainedJobId, localJobId, deliveryJobId, gitlabDeliveryJobId, forgeDeliveryJobId, manualCanaryJobId, manualTriggerJobId } from "./job-id.mjs";
 import { targetSeparator } from "./forges.mjs";
 import { PR_CLOSE_ACTIONS } from "./triggers.mjs";
@@ -123,8 +123,20 @@ export { chainedJobId, localJobId, deliveryJobId, gitlabDeliveryJobId, forgeDeli
  * resolved, so the getter's own await cannot reject. Guarding each call site instead was the other way, and one of them
  * already did (`await q.client` in trigger-schedule-zones): the next caller would have to know, and `makeQueue` is the one
  * place every queue of this project is built.
+ *
+ * The constructor is the same class of fault at another address. `RedisConnection.close` removes every listener, and a
+ * connect still in flight then fails into `emit("error")`, which with no listener throws out of a promise chain nothing can
+ * reach, so a read that closed its queue at its own bound ended the process a moment after it answered. A queue that was
+ * closed has nobody left to tell, so that one emit says nothing.
  */
 class SettledQueue extends Queue {
+	constructor(name, options) {
+		super(name, options);
+		const { connection } = this;
+		const emit = connection.emit.bind(connection);
+		connection.emit = (event, ...args) => (event === "error" && connection.listenerCount("error") === 0 ? false : emit(event, ...args));
+	}
+
 	get jobScheduler() {
 		return this.client.then(() => super.jobScheduler);
 	}
@@ -143,7 +155,8 @@ export function makeQueue(connection, { name = QUEUE } = {}) {
 	assertJudgedConnection(connection);
 	const queue = new SettledQueue(name, { connection });
 	// Issue #468: an error of this queue is one line, its message, never BullMQ's console.error of the whole object.
-	onValkeyError(queue, `queue ${name}`);
+	// A queue that gives up is the kind a long-lived reader replaces, so it is the kind that repeats the line per read.
+	onValkeyError(queue, `queue ${name}`, undefined, { quietly: givesUp(connection) });
 	return queue;
 }
 

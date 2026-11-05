@@ -1202,3 +1202,80 @@ test("reviewed fallback lists ride local and forge jobs and distinguish local id
 	assert.equal(captured.opts.deduplication.id, dedup);
 	assert.equal("fallbackModels" in captured.data, false);
 });
+
+test("a queue closed with a connect in flight does not end the process when that connect then fails", { timeout: 8000 }, async () => {
+	const { parseConnection } = await import("../src/connection.mjs");
+	const { makeQueue } = await import("../src/queue.mjs");
+	let attempts = 0;
+	let inSecond;
+	const second = new Promise((resolve) => (inSecond = resolve));
+	let failSecond;
+	const judge = () => {
+		attempts += 1;
+		if (attempts === 1) return Promise.reject(new Error("the first attempt failed"));
+		inSecond();
+		return new Promise((_resolve, reject) => (failSecond = reject));
+	};
+	const q = makeQueue(parseConnection("redis://127.0.0.1:1", { failFast: true, context: {}, judge }), { name: "qtest-closed-mid-connect" });
+	q.removeAllListeners("error");
+	q.on("error", () => {});
+	const unhandled = [];
+	const note = (err) => unhandled.push(err);
+	process.on("unhandledRejection", note);
+	try {
+		await second;
+		await q.close();
+		failSecond(new Error("the connect in flight failed"));
+		await new Promise((resolve) => setTimeout(resolve, 50));
+		assert.deepEqual(unhandled, []);
+	} finally {
+		process.off("unhandledRejection", note);
+	}
+});
+
+test("the silence is for a closed queue's error alone: a live queue hears its connection's errors, and other events pass", { timeout: 8000 }, async () => {
+	const { parseConnection } = await import("../src/connection.mjs");
+	const { makeQueue } = await import("../src/queue.mjs");
+	const q = makeQueue(parseConnection("redis://127.0.0.1:1", { failFast: true, context: {}, judge: async () => { throw new Error("refused"); } }), { name: "qtest-live-hears" });
+	q.removeAllListeners("error");
+	const heard = [];
+	q.on("error", (err) => heard.push(err.message));
+	try {
+		q.connection.emit("error", new Error("a live queue's fault"));
+		assert.ok(heard.includes("a live queue's fault"));
+		q.connection.removeAllListeners("error");
+		let passed = false;
+		q.connection.on("an-event", () => { passed = true; });
+		q.connection.emit("an-event");
+		assert.equal(passed, true);
+		assert.equal(q.connection.emit("error", new Error("nobody listens")), false, "and with nobody listening it does not throw");
+	} finally {
+		await q.close().catch(() => {});
+	}
+});
+
+test("a queue that gives up says a repeated error once a minute, and one that rides a restart out says each", { timeout: 8000 }, async () => {
+	const { parseConnection } = await import("../src/connection.mjs");
+	const { makeQueue } = await import("../src/queue.mjs");
+	const written = [];
+	const write = process.stderr.write;
+	process.stderr.write = (line, ...rest) => {
+		if (String(line).includes("the quiet test's fault")) {
+			written.push(String(line));
+			return true;
+		}
+		return write.call(process.stderr, line, ...rest);
+	};
+	const judge = async () => { throw new Error("refused"); };
+	const quiet = makeQueue(parseConnection("redis://127.0.0.1:1", { failFast: true, context: {}, judge }), { name: "qtest-gives-up" });
+	const loud = makeQueue(parseConnection("redis://127.0.0.1:1", { context: {}, judge }), { name: "qtest-rides-out" });
+	try {
+		for (const queue of [quiet, loud, quiet, loud]) queue.emit("error", new Error("the quiet test's fault"));
+		assert.equal(written.filter((line) => line.includes("qtest-gives-up")).length, 1);
+		assert.equal(written.filter((line) => line.includes("qtest-rides-out")).length, 2);
+	} finally {
+		process.stderr.write = write;
+		await quiet.close().catch(() => {});
+		await loud.close().catch(() => {});
+	}
+});

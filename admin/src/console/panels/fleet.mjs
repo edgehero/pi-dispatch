@@ -50,7 +50,7 @@ const wrap =
       title,
       flush,
       sub: typeof sub === "function" ? sub(snapshot, view) : sub,
-      end: snapshot && typeof end === "function" ? end(snapshot, view) : end,
+      end: typeof end === "function" ? (snapshot ? end(snapshot, view) : null) : end,
       body: snapshot
         ? fn(snapshot, view)
         : html`<p class="note">The deployment's Valkey could not be read. The next refresh tries again.</p>`,

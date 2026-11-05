@@ -1163,6 +1163,18 @@ test("an audit append failure refuses the confirm 500 and the file is untouched"
   assert.equal(c.sessions.flashes.length, 0);
 });
 
+test("a write that may still run when Valkey wakes does not say nothing was changed, and offers Look again", async () => {
+  const { paths } = deployment();
+  const fleet = { snapshot: async () => ({}), cancelActive: async () => { throw Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT", valkeyMayStillRun: true }); } };
+  const c = await start({ paths, a: { fleet } });
+  const threw = await c.both("cancel-active", { jobId: "gh-1" });
+  assert.equal(threw.confirm.status, 500);
+  assert.equal(threw.confirm.json().error, "Valkey did not confirm the cancel-active change, so it may or may not have been made. Look again once Valkey answers; the console's log has the reason");
+  const bar = threw.confirm.json().html;
+  assert.doesNotMatch(bar, /nothing was changed/i);
+  assert.match(bar, /data-reload>Look again</);
+});
+
 test("a write that throws at the confirm refuses 500 with Close, the slot's one way out, as every refusal bar has", async () => {
   const { paths } = deployment();
   const fleet = { snapshot: async () => ({}), cancelActive: async () => { throw Object.assign(new Error("boom"), { code: "EBOOM" }); } };

@@ -2681,6 +2681,9 @@ export async function confirmAction(ctx, action) {
   } catch (e) {
     deps.log(`console: the ${action.name} write threw (${codeOf(e)})`);
     if (action.name.startsWith("setup-")) { deps.actionDeps?.setup?.discard?.(entry.payload?.setupRef); return refuse(ctx, "confirm", 500, "Host setup did not return a complete result. Some effects may have landed; inspect the host before retrying.", "partial"); }
+    // It reached a Valkey that then stopped answering. Whether it ran is not known here, and may not be decided yet, so
+    // neither "nothing was changed" nor "it will be made" is true.
+    if (e?.valkeyMayStillRun) return refuse(ctx, "confirm", 500, `Valkey did not confirm the ${action.name} change, so it may or may not have been made. Look again once Valkey answers; the console's log has the reason`, "partial");
     return refuse(ctx, "confirm", 500, `the ${action.name} change could not be made; nothing was changed, and the console's log has the reason`, "failed");
   }
   if (entry.payload?.setupRef) deps.actionDeps?.setup?.discard?.(entry.payload.setupRef);

@@ -15,7 +15,10 @@ const selected = (view) =>
   model(view).venues.find((v) => v.name === view.query?.name);
 const holderOf = (venue) =>
   venue.custody === "layer" ? "the venue's egress layer" : "the container";
-const names = (rows) => (rows.length ? rows.join(", ") : "no live host");
+// With no snapshot nothing was read about the hosts, which is not the same as there being none.
+const HOSTS_UNREAD = "not known: the hosts could not be read";
+const read = (view) => Boolean(view.data?.snapshot);
+const names = (rows, view) => (rows.length ? rows.join(", ") : read(view) ? "no live host" : HOSTS_UNREAD);
 const word = (p) =>
   html`<span class="chip vw vw--${p.word}${p.word === "enforced" ? " tone-ok" : ""}">${ui.icon(p.word === "enforced" ? "shield" : p.word === "asserted" ? "done" : "minus")}${p.word}</span>`;
 const missing = () =>
@@ -47,8 +50,8 @@ export const venueSummary = panel(
   (v, m, view) =>
     html`${ui.facts(
       [
-        ["Blessed on", names(v.blessedOn)],
-        ["Default on", names(v.defaultOn)],
+        ["Blessed on", names(v.blessedOn, view)],
+        ["Default on", names(v.defaultOn, view)],
         [
           "Published by",
           names(
@@ -57,6 +60,7 @@ export const venueSummary = panel(
                 (host) => host.backends !== null && host.backends !== undefined,
               )
               .map((host) => host.name),
+            view,
           ),
         ],
         [
@@ -74,7 +78,7 @@ export const venueSummary = panel(
                       .join(", ")}`,
                 )
                 .join("; ")
-            : "No live host published a floor",
+            : read(view) ? "No live host published a floor" : HOSTS_UNREAD,
         ],
       ],
       { cols: 1 },
@@ -117,7 +121,7 @@ export const venueProperties = panel(
     })}</div>`,
 );
 
-export const venueHosts = panel("OpenShell on each host", (v) =>
+export const venueHosts = panel("OpenShell on each host", (v, _m, view) =>
   v.openshell === null
     ? html`<p>This venue runs no gateway.</p>`
     : ui.tbl({
@@ -134,7 +138,7 @@ export const venueHosts = panel("OpenShell on each host", (v) =>
             ? OPENSHELL_UNPUBLISHED_TEXT
             : (GATEWAY_TEXT[o.gateway] ?? GATEWAY_TEXT.unknown),
         ]),
-        empty: "No live host blesses this venue.",
+        empty: read(view) ? "No live host blesses this venue." : "Not known: the hosts could not be read.",
       }),
 );
 

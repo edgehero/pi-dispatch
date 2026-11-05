@@ -104,6 +104,9 @@ export async function loadModules() {
 /** How long one insights assembly is reused per window: it walks every run record, far too much for each request. */
 export const INSIGHTS_CACHE_MS = 30_000;
 
+/** How long one command of the console's own Valkey client may wait for its answer, as the fleet reader's raw client does. */
+const READS_COMMAND_TIMEOUT_MS = 5_000;
+
 /**
  * How long one audit-chain verification is reused (issue #737). `verifyConsoleAudit` re-hashes every row of every
  * month the log keeps, which is far too much for each load of the audit page; the page says when it was checked.
@@ -492,9 +495,14 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
     m.connection?.useValkeyContext?.(() => m.readModel.panelValkeyContext({ env: shellEnv, pointerDir: config.dir, owned: [], fs, uid }));
     // The Valkey copy of the audit log (`console:audit`, INT-CONSOLE-AUDIT-LOG) is a view for a console elsewhere, never
     // the record: each row serve writes is pushed after the file holds it, a down or refusing Valkey costs nothing but
-    // the copy, and no Valkey error reaches the log or refuses a request.
+    // the copy, and no Valkey error reaches the log or refuses a request. This client lives as long as the console, so it
+    // keeps reconnecting: a `failFast` one ended for good at the first Valkey restart, and the copy silently stopped there.
+    // `noOfflineQueue` keeps the other half of that bound: a row is refused while nothing is connected, not held for later.
+    // `commandTimeoutMs` is for the pages that read through this client too (`hostLoads`, the updates page): on a Valkey
+    // that is connected and stopped answering, a read would otherwise wait for as long as it does not. A row already on
+    // that socket arrives when Valkey wakes, which costs nothing: it is a copy of what the file holds.
     try {
-      redis = m.connection?.makeRedisClient(config.valkeyUrl, { failFast: true, disconnectTimeoutMs: 0 }) ?? null;
+      redis = m.connection?.makeRedisClient(config.valkeyUrl, { noOfflineQueue: true, disconnectTimeoutMs: 0, freshContext: true, commandTimeoutMs: READS_COMMAND_TIMEOUT_MS }) ?? null;
       redis?.on?.("error", () => {});
     } catch {
       redis = null;

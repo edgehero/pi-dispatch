@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { createServer } from "node:net";
 import { test } from "node:test";
-import { parseConnection } from "../src/connection.mjs";
+import { Command } from "ioredis";
+import { JudgedConnector, VALKEY_ERROR_QUIET_MS, givesUp, makeRedisClient, onValkeyError, parseConnection, useValkeyContext } from "../src/connection.mjs";
 
 // Issue #464, gate round 1 (measured on Fedora 44): WHATWG URL keeps an IPv6 literal's brackets in `hostname`, and the
 // queue client then looked up the name "[::1]", which never resolves, so a `redis://[::1]:port` VALKEY_URL never
@@ -149,4 +151,302 @@ test("against a real Valkey, a valkey:// URL connects and uses its database, as 
 	await viaAlias.set(key, "via-valkey-scheme");
 	assert.equal(await viaRedis.get(key), "via-valkey-scheme", "the same Valkey and the same database 2");
 	await viaRedis.del(key);
+});
+
+test("onValkeyError says every line unless it is asked to be quiet, so a worker's second outage shows in its log", () => {
+	const lines = [];
+	const handlers = {};
+	onValkeyError({ on: (event, fn) => (handlers[event] = fn) }, "worker q", (line) => lines.push(line));
+	handlers.error(new Error("nothing answers"));
+	handlers.error(new Error("nothing answers"));
+	assert.deepEqual(lines, ["[pi-dispatch] Valkey error (worker q): nothing answers\n", "[pi-dispatch] Valkey error (worker q): nothing answers\n"]);
+	assert.equal(handlers.ready, undefined, "a worker going ready ends no reader's quiet");
+});
+
+test("givesUp is true of a failFast connection only", () => {
+	assert.equal(givesUp(parseConnection("redis://127.0.0.1:6379", { failFast: true })), true);
+	assert.equal(givesUp(parseConnection("redis://127.0.0.1:6379")), false);
+	assert.equal(givesUp(null), false);
+});
+
+test("the quiet is a minute, on the real clock by default", (t) => {
+	assert.equal(VALKEY_ERROR_QUIET_MS, 60_000);
+	t.mock.timers.enable({ apis: ["Date"], now: 3_000_000 });
+	const lines = [];
+	const handlers = {};
+	onValkeyError({ on: (event, fn) => (handlers[event] = fn) }, "queue quiet-clock", (line) => lines.push(line), { quietly: true });
+	handlers.error(new Error("nothing answers"));
+	handlers.error(new Error("nothing answers"));
+	assert.equal(lines.length, 1);
+	t.mock.timers.tick(VALKEY_ERROR_QUIET_MS);
+	handlers.error(new Error("nothing answers"));
+	assert.equal(lines.length, 2);
+});
+
+test("the quiet holds a bounded number of lines: past that it forgets, and says a held line again", () => {
+	const lines = [];
+	const handlers = {};
+	onValkeyError({ on: (event, fn) => (handlers[event] = fn) }, "queue quiet-held", (line) => lines.push(line), { quietly: true, now: () => 4_000_000 });
+	handlers.error(new Error("the first fault"));
+	for (let i = 0; i < 256; i += 1) handlers.error(new Error(`fault ${i}`));
+	assert.equal(lines.length, 257);
+	handlers.error(new Error("the first fault"));
+	assert.equal(lines.length, 258);
+});
+
+test("a client going ready ends the quiet, so a second outage inside the minute is said at once", () => {
+	const lines = [];
+	const handlers = {};
+	onValkeyError({ on: (event, fn) => (handlers[event] = fn) }, "queue quiet-ready", (line) => lines.push(line), { quietly: true, now: () => 2_000_000 });
+	handlers.error(new Error("nothing answers"));
+	handlers.error(new Error("nothing answers"));
+	assert.equal(lines.length, 1);
+	handlers.ready();
+	handlers.error(new Error("nothing answers"));
+	assert.equal(lines.length, 2);
+});
+
+test("onValkeyError quietly says a repeated line once per quiet window, across emitters, and a line not said in it at once", () => {
+	const lines = [];
+	let t = 1_000_000;
+	const listen = (what) => {
+		const handlers = {};
+		onValkeyError({ on: (event, fn) => (handlers[event] = fn) }, what, (line) => lines.push(line), { quietly: true, now: () => t });
+		return handlers.error;
+	};
+	const first = listen("queue quiet-a");
+	const second = listen("queue quiet-a");
+	first(new Error("nothing answers"));
+	second(new Error("nothing answers"));
+	assert.equal(lines.length, 1, "a replacement queue repeats its predecessor's line");
+	first(new Error("refused"));
+	assert.equal(lines.length, 2, "a change of what is wrong is said at once");
+	listen("queue quiet-b")(new Error("nothing answers"));
+	assert.equal(lines.length, 3, "another queue's line is its own");
+	t += VALKEY_ERROR_QUIET_MS - 1;
+	second(new Error("nothing answers"));
+	assert.equal(lines.length, 3);
+	t += 1;
+	second(new Error("nothing answers"));
+	assert.equal(lines.length, 4, "said again once the window has passed");
+	t -= 5 * VALKEY_ERROR_QUIET_MS;
+	second(new Error("nothing answers"));
+	assert.equal(lines.length, 5, "a clock gone backwards says it rather than holding it back");
+	assert.equal(lines[0], "[pi-dispatch] Valkey error (queue quiet-a): nothing answers\n");
+});
+
+test("freshContext judges each connect by the process's context as it is then; without it, by the one at construction", async () => {
+	const seen = [];
+	const judge = async (_url, context) => {
+		seen.push(context.mark);
+		throw new Error("no dial in this test");
+	};
+	let mark = "before the fix";
+	useValkeyContext(() => ({ mark }));
+	try {
+		const fresh = new JudgedConnector(parseConnection("redis://127.0.0.1:1", { judge, freshContext: true }));
+		const frozen = new JudgedConnector(parseConnection("redis://127.0.0.1:1", { judge }));
+		const named = new JudgedConnector(parseConnection("redis://127.0.0.1:1", { judge, freshContext: true, context: { mark: "named" } }));
+		await fresh.connect();
+		await frozen.connect();
+		await named.connect();
+		mark = "after the fix";
+		await fresh.connect();
+		await frozen.connect();
+		await named.connect();
+		assert.deepEqual(seen, ["before the fix", "before the fix", "named", "after the fix", "before the fix", "named"]);
+	} finally {
+		useValkeyContext(null);
+	}
+});
+
+test("freshContext: a context read that throws fails that connect the way a refused judgement does, and never rejects it", async () => {
+	useValkeyContext(() => {
+		if (armed) throw new Error("the context could not be read");
+		return {};
+	});
+	let armed = false;
+	try {
+		const connector = new JudgedConnector(parseConnection("redis://127.0.0.1:1", { judge: async () => ({ host: "127.0.0.1", servername: null, pinned: null }), freshContext: true }));
+		armed = true;
+		const stream = await connector.connect();
+		assert.equal(stream.destroyed, true);
+		assert.match(connector.firstError.message, /the context could not be read/);
+	} finally {
+		useValkeyContext(null);
+	}
+});
+
+/** `promise`, or a failure of its own after `ms`: with the bound gone these reads never end, and a test's `finally` must still run. */
+function within(promise, ms = 3000) {
+	let timer;
+	return Promise.race([promise, new Promise((_resolve, reject) => { timer = setTimeout(reject, ms, new Error("no answer within the test's own limit")); })]).finally(() => clearTimeout(timer));
+}
+
+test("commandTimeoutMs bounds a persistent client's command while it cannot connect, on real ioredis and no network", { timeout: 8000 }, async () => {
+	const client = makeRedisClient("redis://127.0.0.1:1", { context: {}, commandTimeoutMs: 40, judge: async () => { throw new Error("refused"); } });
+	client.on("error", () => {});
+	try {
+		await assert.rejects(within(client.get("x")), /Command timed out/);
+	} finally {
+		client.disconnect();
+	}
+});
+
+/** A loopback listener that answers +OK to every command and keeps what it heard, and a judge standing in for the outage. */
+async function listeningValkey(onCommand = () => {}) {
+	const heard = [];
+	const sockets = new Set();
+	const server = createServer((socket) => {
+		sockets.add(socket);
+		socket.on("error", () => {});
+		socket.on("data", (data) => {
+			const text = String(data);
+			heard.push(text);
+			const said = onCommand(text, socket);
+			if (said === "silent") return;
+			if (said === "refuse") return void socket.write("-ERR refused here\r\n");
+			socket.write("+OK\r\n".repeat(text.match(/(?:^|\r\n)\*\d+\r\n/g)?.length ?? 0));
+		});
+	});
+	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+	return {
+		heard: () => heard.join(""),
+		port: server.address().port,
+		close: () => {
+			for (const socket of sockets) socket.destroy();
+			server.close();
+		},
+	};
+}
+
+test("a command past commandTimeoutMs never goes out when Valkey returns, and one asked later does", { timeout: 15000 }, async () => {
+	const valkey = await listeningValkey();
+	let down = true;
+	const client = makeRedisClient(`redis://127.0.0.1:${valkey.port}`, { context: {}, commandTimeoutMs: 40, judge: async () => { if (down) throw new Error("down"); return { host: "127.0.0.1", servername: null, pinned: null }; } });
+	client.on("error", () => {});
+	try {
+		await assert.rejects(within(client.set("told-it-failed", "1")), /Command timed out/);
+		const ready = new Promise((resolve) => client.once("ready", resolve));
+		down = false;
+		await within(ready);
+		assert.equal(await within(client.set("asked-later", "2")), "OK");
+		assert.match(valkey.heard(), /asked-later/);
+		assert.doesNotMatch(valkey.heard(), /told-it-failed/);
+	} finally {
+		client.disconnect();
+		valkey.close();
+	}
+});
+
+test("only the command that timed out leaves the offline queue; one still inside its bound stays for Valkey's return", { timeout: 8000 }, async () => {
+	const client = makeRedisClient("redis://127.0.0.1:1", { context: {}, commandTimeoutMs: 200, judge: async () => { throw new Error("refused"); } });
+	client.on("error", () => {});
+	try {
+		const first = client.get("first");
+		await new Promise((resolve) => setTimeout(resolve, 150));
+		const second = client.get("second");
+		assert.equal(client.offlineQueue.length, 2);
+		await assert.rejects(within(first), /Command timed out/);
+		assert.equal(client.offlineQueue.length, 1, "the second is still inside its bound");
+		await assert.rejects(within(second), /Command timed out/);
+		assert.equal(client.offlineQueue.length, 0, "and nothing that timed out stays behind, however long the outage lasts");
+	} finally {
+		client.disconnect();
+	}
+});
+
+test("a command on a connection that died is not sent again on the next one, once commands have a bound", { timeout: 15000 }, async () => {
+	const valkey = await listeningValkey((text, socket) => {
+		if (!/on-the-wire/.test(text)) return "answer";
+		socket.destroy();
+		return "silent";
+	});
+	const judge = async () => ({ host: "127.0.0.1", servername: null, pinned: null });
+	const client = makeRedisClient(`redis://127.0.0.1:${valkey.port}`, { context: {}, commandTimeoutMs: 100, judge });
+	client.on("error", () => {});
+	try {
+		await within(new Promise((resolve) => client.once("ready", resolve)));
+		const again = new Promise((resolve) => client.once("close", () => client.once("ready", resolve)));
+		await assert.rejects(within(client.set("on-the-wire", "1")), /Command timed out/);
+		await within(again);
+		assert.equal(await within(client.set("after", "2")), "OK");
+		assert.equal(valkey.heard().match(/on-the-wire/g).length, 1);
+	} finally {
+		client.disconnect();
+		valkey.close();
+	}
+});
+
+test("a timed-out command says whether it could still run: not from the offline queue, yes from a socket", { timeout: 8000 }, async () => {
+	const offline = makeRedisClient("redis://127.0.0.1:1", { context: {}, commandTimeoutMs: 40, judge: async () => { throw new Error("refused"); } });
+	offline.on("error", () => {});
+	const valkey = await listeningValkey((text) => (/frozen-write/.test(text) ? "silent" : "answer"));
+	const connected = makeRedisClient(`redis://127.0.0.1:${valkey.port}`, { context: {}, commandTimeoutMs: 40, judge: async () => ({ host: "127.0.0.1", servername: null, pinned: null }) });
+	connected.on("error", () => {});
+	const ready = new Promise((resolve) => connected.once("ready", resolve));
+	try {
+		const unsent = await within(offline.set("k", "1")).catch((err) => err);
+		assert.equal(unsent.code, "ETIMEDOUT");
+		assert.equal(unsent.valkeyMayStillRun, undefined);
+		await within(ready);
+		const sent = await within(connected.set("frozen-write", "1")).catch((err) => err);
+		assert.equal(sent.code, "ETIMEDOUT");
+		assert.equal(sent.valkeyMayStillRun, true);
+	} finally {
+		offline.disconnect();
+		connected.disconnect();
+		valkey.close();
+	}
+});
+
+test("an error Valkey answered with is no timeout: it stays as it was, with no word about what may still run", { timeout: 8000 }, async () => {
+	const valkey = await listeningValkey((text) => (/refused-write/.test(text) ? "refuse" : "answer"));
+	const client = makeRedisClient(`redis://127.0.0.1:${valkey.port}`, { context: {}, commandTimeoutMs: 2000, judge: async () => ({ host: "127.0.0.1", servername: null, pinned: null }) });
+	client.on("error", () => {});
+	try {
+		const refused = await within(client.set("refused-write", "1")).catch((err) => err);
+		assert.match(refused.message, /refused here/);
+		assert.equal(refused.code, undefined);
+		assert.equal(refused.valkeyMayStillRun, undefined);
+	} finally {
+		client.disconnect();
+		valkey.close();
+	}
+});
+
+test("a bound that is not a positive whole number is no bound, and freshContext reaches the client", () => {
+	for (const commandTimeoutMs of [0, -1, 1.5, "40", null, Number.NaN]) {
+		const client = makeRedisClient("redis://127.0.0.1:1", { context: {}, lazyConnect: true, commandTimeoutMs });
+		assert.equal(client.options.commandTimeout, undefined, String(commandTimeoutMs));
+		assert.equal(client.options.autoResendUnfulfilledCommands, true, String(commandTimeoutMs));
+	}
+	const judged = (options) => makeRedisClient("redis://127.0.0.1:1", { lazyConnect: true, ...options }).options.piDispatchValkeyJudge;
+	assert.equal(judged({ freshContext: true }).freshContext, true);
+	assert.equal(judged({}).freshContext, undefined);
+});
+
+test("a command's timer holds no process, so a client told to stop with reads in flight does not wait out their bound", { timeout: 8000 }, async () => {
+	const client = makeRedisClient("redis://127.0.0.1:1", { context: {}, commandTimeoutMs: 60_000, judge: async () => { throw new Error("refused"); } });
+	client.on("error", () => {});
+	const command = new Command("get", ["x"]);
+	const answer = client.sendCommand(command).catch((err) => err);
+	try {
+		assert.equal(command._commandTimeoutTimer.hasRef(), false);
+	} finally {
+		client.disconnect();
+		clearTimeout(command._commandTimeoutTimer);
+		command.reject(new Error("the test is done"));
+		await answer;
+	}
+});
+
+test("a client with no command bound stays plain ioredis, so a worker's commands still wait out a restart and are sent again", () => {
+	const plain = makeRedisClient("redis://127.0.0.1:1", { context: {}, lazyConnect: true });
+	const bounded = makeRedisClient("redis://127.0.0.1:1", { context: {}, lazyConnect: true, commandTimeoutMs: 40 });
+	assert.equal(plain.options.commandTimeout, undefined);
+	assert.equal(plain.options.autoResendUnfulfilledCommands, true);
+	assert.notEqual(Object.getPrototypeOf(plain), Object.getPrototypeOf(bounded));
+	assert.equal(bounded.options.commandTimeout, 40);
+	assert.equal(bounded.options.autoResendUnfulfilledCommands, false);
 });

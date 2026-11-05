@@ -22,6 +22,18 @@ const setup = ({ env = {}, source = {} } = {}) => {
   return { paths, service, store, privateReads: () => privateReads };
 };
 
+test("the service's client carries an error listener, so an outage outlasting a call is not a stack trace per reconnect attempt", async () => {
+  const dir = tempDir("answerer-data-");
+  const paths = { triggersPath: join(dir, "triggers.json"), valkeyUrl: "redis://example.invalid" };
+  writeFileSync(paths.triggersPath, JSON.stringify({ triggers: [] }));
+  const heard = [];
+  const service = makeAnswererService({ paths, now: () => AT, redisFn: () => ({ on(event) { heard.push(event); }, disconnect() {} }), storeFn: () => ({ publicSnapshot: async () => ({ partial: false, rows: [] }) }) });
+  await service.read({ role: "viewer" }).catch(() => {});
+  assert.deepEqual(heard, ["error"]);
+  const seam = makeAnswererService({ paths, now: () => AT, redisFn: () => ({ disconnect() {} }), storeFn: () => ({ publicSnapshot: async () => ({ partial: false, rows: [] }) }) });
+  await seam.read({ role: "viewer" });
+});
+
 test("viewer and agent answerer projections never read or contain private question, draft, sources, decisions or configuration", async () => {
   const { service, privateReads } = setup();
   for (const role of ["viewer", "agent", "unknown"]) {
