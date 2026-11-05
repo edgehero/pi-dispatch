@@ -210,7 +210,7 @@ film, as a `.srt`.
 
 Real screens are the console's goldens in its dark theme, one card at a time with the rest of the page hidden, moved a frame at a
 time by `screen-motion.js`. The release's name comes
-from `release.json` in the build folder, `{ "version", "name", "definition" }`, which git ignores; without it the film says the
+from `release.json` in the build folder, `{ "version", "name" }`, which git ignores; without it the film says the
 version alone.
 
 Nothing generated holds words, screens or logos. Every word is drawn, and every screen is the real console, marked as sample

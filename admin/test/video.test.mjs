@@ -18,7 +18,7 @@ const read = (path) => readFileSync(fileURLToPath(new URL(`../../${path}`, impor
 const FILM_JS = read("launch/video/film.js");
 const MOTION_JS = read("launch/video/screen-motion.js");
 /** A stand-in the length of a real release's words, so the reading test measures what a viewer will read. */
-const RELEASE = { version: "9.9", name: "Name", definition: "name: a thing it means" };
+const RELEASE = { version: "9.9", name: "Name" };
 const secondsPerBeat = 60 / TEMPO_TARGET;
 const NOW = Date.UTC(2026, 10, 5, 12);
 
@@ -159,7 +159,7 @@ test("the film is drawn from the design system: tokens for colour, sentence case
 test("the release's name reaches the film only through its placeholder", () => {
   assert.ok(SHOTS.some((shot) => shot.phrases.some((phrase) => phrase.words === "{name}")));
   const filled = withRelease(SHOTS, RELEASE).flatMap((shot) => shot.phrases.map((phrase) => phrase.words));
-  assert.ok(filled.includes("Name") && filled.includes("name: a thing it means"));
+  assert.ok(filled.includes("Name") && filled.includes("The new pi-dispatch 9.9 update."), "the name, then what it is");
   assert.ok(filled.every((words) => !words.includes("{")), "a placeholder reached the screen");
   assert.throws(() => withRelease([{ phrases: [{ words: "{nope}" }] }], RELEASE), /does not have/);
   assert.doesNotThrow(() => withRelease(SHOTS, RELEASE_FALLBACK), "the film still renders with no release.json");

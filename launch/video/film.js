@@ -559,13 +559,7 @@
 			g.scale(1 + slam * 0.22, 1 + slam * 0.22);
 			say(c.shot.phrases[0].words, 0, 0, { size: T.title, align: "center" });
 			g.restore();
-			const lockup = `pi-dispatch ${c.release.version}`;
-			const width = wordsWidth(lockup, T.chip, 700, F.sans) + 80;
-			if (c.b >= 0.5) {
-				round(W / 2 - width / 2, 138, width, 92, 46, PRIMARY);
-				say(lockup, W / 2, 202, { size: T.chip, weight: 700, fill: ON_PRIMARY, align: "center" });
-			}
-			title(c, 1, 640, { size: T.line - 12, fade: 0.5 });
+			title(c, 1, 650, { size: T.line, fade: 0.5 });
 			const rows = [[2, "icon-box", dark("running-tint")], [3, "icon-spend", dark("ok-tint")], [4, "icon-done", dark("parked-tint")]];
 			const w = 520;
 			const gap = 22;
@@ -581,7 +575,7 @@
 				g.translate(0, (1 - q) * 40);
 				card(x, y, w, 196);
 				tile(x + 30, y + 46, 104, iconName, tint);
-				say(p.words, x + 158, y + 122, { size: T.chip + 8 });
+				say(p.words, x + 158, y + 120, { size: T.chip + 2 });
 				g.restore();
 			});
 		},
