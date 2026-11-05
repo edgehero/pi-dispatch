@@ -16,7 +16,7 @@ import { RECORD_CORE_FIELDS, recordReadable } from "@edgehero/pi-dispatch/run-hi
  * The refusal for a write over the parsed pause-windows document `doc` when a newer pi-dispatch wrote it, else null:
  * this build cannot know what that release's windows or blocks mean, and rewriting them under its own version would
  * lose them. Judged on the raw `version` only (`pauseWindowsVersionRefusal`); a broken `version` is not newer, and the
- * write repairs it like any broken file. The words are the triggers writer's for the same case.
+ * write replaces it. The words are the triggers writer's for the same case.
  */
 export function pauseWindowsNewerRefusal(doc, path) {
   const problem = pauseWindowsVersionRefusal(doc);

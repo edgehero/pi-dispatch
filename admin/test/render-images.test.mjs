@@ -27,7 +27,7 @@ const BASE = process.env.VALKEY_TEST_URL;
 const URL_ARGS = BIN ? [] : BASE ? ["--url", `${BASE.replace(/\/\d*$/, "")}/7`] : null;
 const skip = URL_ARGS === null ? "needs valkey-server or redis-server on PATH, or VALKEY_TEST_URL" : false;
 const run = promisify(execFile);
-const FILES = ["dispatch-dashboard.svg", "dispatch-hosts.svg", "dispatch-allocation.svg", "dispatch-run-detail.svg", "dispatch-commands.svg"];
+const FILES = ["dispatch-dashboard.svg", "dispatch-hosts.svg", "dispatch-allocation.svg", "dispatch-run-detail.svg", "dispatch-commands.svg", "dispatch-dashboard-light.svg", "dispatch-hosts-light.svg", "dispatch-allocation-light.svg"];
 
 async function render() {
   const out = tempDir("render-images-");

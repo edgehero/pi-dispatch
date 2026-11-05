@@ -99,7 +99,8 @@ Keep the file small (< ~3 MB): trim to ~25s, cap width at ~1200px, and prefer th
 `docs/images/cli-doctor.svg` and `cli-service-windows.svg` are real command
 output drawn as a terminal window by `launch/transcript-svg.mjs`. Regenerate them when the output changes:
 
-1. On a Linux host with Docker, as a throwaway account `you` (uid 1000) that is in the `docker` group and has
+1. On a Linux host with Docker (a privileged `docker:dind` container of your own serves, and keeps its inner daemon's
+   containers off your own), as a throwaway account `you` (uid 1000) that is in the `docker` group and has
    nothing listening on 127.0.0.1:6379, and with `pi-job:latest`, `valkey/valkey:8.1` (`VALKEY_IMAGE` in
    `worker/src/valkey-auth.mjs`) and the egress proxy image already pulled (so no pull progress lands in the
    transcript):
@@ -124,6 +125,12 @@ output drawn as a terminal window by `launch/transcript-svg.mjs`. Regenerate the
    node launch/transcript-svg.mjs --title "~/pi-work · pi-dispatch doctor" --prompt '$ pi-dispatch doctor' doctor.txt > docs/images/cli-doctor.svg
    ```
 
+   The README's `cli-doctor` follows the reader's theme, so draw its light version from the dark one, with no second capture:
+
+   ```sh
+   node launch/transcript-svg.mjs --relight docs/images/cli-doctor.svg > docs/images/cli-doctor-light.svg
+   ```
+
 4. Bump the `?v=` on each changed image in the README, so GitHub's image cache fetches the new one.
 
 `cli-service-windows.svg` is `service render` with `platform: "win32"` and Windows paths passed through
@@ -135,10 +142,17 @@ The web console is the main image now. Every console image in `docs/images/conso
 (`admin/test/fixtures/console/`) in headless Chrome, listed in `launch/console-picks.mjs`:
 
 ```sh
-node launch/render-images.mjs --console              # the READMEs' picks, into docs/images/console/
+node launch/render-images.mjs --console              # the READMEs' picks, each light and `-dark`, into docs/images/console/
 node launch/render-images.mjs --console --all        # every golden at 1440 and 375, light and dark, into docs/images/console/all/
 node launch/render-images.mjs --console --only panels/confirm-done.operator   # any one state
 ```
+
+A README shows each pick in a `<picture>`, its dark version on `(prefers-color-scheme: dark)`. A picture that moves also has a
+still in each theme, and those two sources go first, with `(prefers-color-scheme:dark)` written without the space: GitHub's script
+for a reader with a fixed theme replaces the whole media of a source that has the space, so such a still would stop the animation.
+
+Look at what you commit. Chrome sometimes repeats one tile of a picture across a screenshot and reports nothing, and no test
+reads a picture's content, so a fresh render can be garbage or carry a garbled frame in a loop. Render again if it is.
 
 It needs Google Chrome and no server. `--all` is about a gigabyte and four minutes, and its folder is gitignored. After a change to the look,
 re-render the picks and bump the `?v=` on each changed image, since no test catches a stale PNG.
@@ -147,11 +161,12 @@ re-render the picks and bump the `?v=` on each changed image, since no test catc
 
 Every panel and command image in `docs/images` is drawn by the shipped code over one canned deployment, by a
 committed script: `dispatch-dashboard.svg`, `dispatch-hosts.svg`, `dispatch-allocation.svg`,
-`dispatch-run-detail.svg`, `dispatch-commands.svg`, the `.png` copies of the first three and `insights-view.png`.
+`dispatch-run-detail.svg`, `dispatch-commands.svg`, the `.png` copies of the first three and `insights-view.png`. The
+first three are drawn for a light page too (`-light`), since the READMEs follow the reader's theme.
 
 ```sh
-node launch/render-images.mjs          # the five SVGs
-node launch/render-images.mjs --png    # also the three PNGs (for the npm page) and insights-view.png
+node launch/render-images.mjs          # the five SVGs, and the three -light SVGs
+node launch/render-images.mjs --png    # also the PNGs of those three in both (for the npm page) and insights-view.png
 ```
 
 What it needs:

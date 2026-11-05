@@ -75,10 +75,13 @@ test("no file constructs a Valkey client except through connection.mjs' judged c
 	}
 	// The two allowed BullMQ constructions assert the connection is judged right before they build on it.
 	const at = (path) => files.find((f) => f.path === path).code;
-	assert.match(at("worker/src/queue.mjs"), /assertJudgedConnection\(connection\);\s*const queue = new Queue\(/);
+	// `makeQueue` builds a subclass, whose getters reject to their caller where BullMQ's own cannot, and nothing else builds one.
+	assert.match(at("worker/src/queue.mjs"), /assertJudgedConnection\(connection\);\s*const queue = new SettledQueue\(/);
+	assert.match(at("worker/src/queue.mjs"), /class SettledQueue extends Queue \{/);
+	assert.equal((at("worker/src/queue.mjs").match(/new (?:Queue|SettledQueue)\(/g) ?? []).length, 1);
 	assert.match(at("worker/src/index.mjs"), /assertJudgedConnection\(connection\);\s*worker = new Worker\(/);
 	// Issue #468: and each carries the one-line `error` listener, so BullMQ never prints the whole error object.
-	assert.match(at("worker/src/queue.mjs"), /const queue = new Queue\([^;]*\);\s*onValkeyError\(queue, /);
+	assert.match(at("worker/src/queue.mjs"), /const queue = new SettledQueue\([^;]*\);[\s\S]{0,200}?\n\tonValkeyError\(queue, `queue \$\{name\}`, undefined, \{ quietly: givesUp\(connection\) \}\);/);
 	assert.match(at("worker/src/index.mjs"), /worker = new Worker\([\s\S]*?\}\);\s*onValkeyError\(worker, /);
 	// #771's host-bound control worker is a third construction, outside paid processors. Its injected constructor
 	// seam must not become a way around the same endpoint judgment or one-line error handling.
@@ -87,8 +90,11 @@ test("no file constructs a Valkey client except through connection.mjs' judged c
 	assert.match(control, /const worker = new WorkerClass\([\s\S]*?\}\);\s*onValkeyError\(worker, /);
 	assert.equal((control.match(/new WorkerClass\(/g) ?? []).length, 1);
 	// And connection.mjs' own client is built from parseConnection's options, never from a bare URL.
-	assert.match(at("worker/src/connection.mjs"), /return new Redis\(\{ \.\.\.parseConnection\(url,/);
-	assert.equal((at("worker/src/connection.mjs").match(/new Redis\(/g) ?? []).length, 1);
+	// A client with a command bound is the same client with one method more, on the same options.
+	assert.match(at("worker/src/connection.mjs"), /const options = \{ \.\.\.parseConnection\(url,/);
+	assert.match(at("worker/src/connection.mjs"), /return bounded \? new BoundedRedis\(options\) : new Redis\(options\);/);
+	assert.match(at("worker/src/connection.mjs"), /class BoundedRedis extends Redis \{/);
+	assert.equal((at("worker/src/connection.mjs").match(/new (?:Redis|BoundedRedis)\(/g) ?? []).length, 2);
 	// Non-vacuity: the sites that DO connect are there to be found, including the optional gateway.
 	// (admin/src/dashboard.ts was on this list until issue #641 moved the panel's reader, and its clients, into
 	// read-model.mjs's `createFleetReader`.)

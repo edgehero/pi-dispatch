@@ -36,7 +36,7 @@ import { LOADED_BASE_SHA_RE } from "@edgehero/pi-dispatch/loaded-record";
 import { pendingFactsOf, QUEUED_STATES } from "@edgehero/pi-dispatch/chat-mode";
 import { FORGE_MCP_SERVER_NAME, MCP_SERVER_NAME_RE, mcpServerWhere, readOverlayMcp } from "@edgehero/pi-dispatch/mcp-config";
 import { dayKey, weekKey, monthKey, tokenDayKey } from "@edgehero/pi-dispatch/budget";
-import { parsePauseWindows, pauseWindowsText } from "@edgehero/pi-dispatch/pause-windows";
+import { heldPauseWindows, parsePauseWindows, pauseWindowsText } from "@edgehero/pi-dispatch/pause-windows";
 // What this console says and skips for state a newer pi-dispatch wrote (issue #761): one leaf, shared with the console.
 import { coreRecordOf, fromNewerRelease, NEWER_RECORD_MODEL_NOTE, NEWER_RECORD_SENTENCE, newerSkippedSentence, pauseWindowsNewerRefusal, readableRecords, shownRecord } from "./newer-release.mjs";
 export { coreRecordOf, fromNewerRelease, NEWER_RECORD_MODEL_NOTE, NEWER_RECORD_SENTENCE, newerSkippedSentence, pauseWindowsNewerRefusal, readableRecords, shownRecord };
@@ -56,7 +56,7 @@ import { ENVELOPE_VERSION, envelopeDigest, parseEnvelope } from "@edgehero/pi-di
 import { OTHER, PLAN_VERSION, envelopeEntries, scopeRef } from "@edgehero/pi-dispatch/priorities";
 import { ALLOC_EXPECTED_KEY, ALLOC_LOG_KEY, ALLOC_PLAN_KEY, makeAllocationAudit, makeAllocationState, parseState } from "@edgehero/pi-dispatch/allocation";
 import { DOLLAR_KEY_PREFIX } from "@edgehero/pi-dispatch/dollar-budget";
-import { removeHeldJob, requestCancel } from "@edgehero/pi-dispatch/cancel-state";
+import { removeHeldJob, requestCancel, withdrawCancel } from "@edgehero/pi-dispatch/cancel-state";
 import { makeRunBudgetLedger } from "@edgehero/pi-dispatch/run-budget-ledger";
 import { RECOVERY_CAP, recoveryJobId, runIdOf } from "@edgehero/pi-dispatch/recovery-queue";
 import { STEER_ID_RE, STEER_MODES, STEER_SOURCES, STEER_STATES, isOpen as steerIsOpen, listInboxPublic } from "@edgehero/pi-dispatch/steer-inbox";
@@ -68,7 +68,7 @@ import { JOB_FIELD, META_FIELD, QUEUE_KEY, SCHEDULER_ID_MAX, SCHEDULER_ID_RE, SC
 // The subscriptions validator is shared for the same anti-drift reason: the admin prices finished runs
 // against the exact schema the file declares, and re-deriving it here is how the two would disagree.
 import { parseSubscriptions, SUBSCRIPTIONS_VERSION } from "@edgehero/pi-dispatch/subscriptions";
-import { parseConnection, makeRedisClient, killSwitchValkeyUrls, urlShown, useValkeyContext, valkeyContextFromKeys, VALKEY_CONTEXT_KEYS } from "@edgehero/pi-dispatch/connection";
+import { parseConnection, makeRedisClient, onValkeyError, killSwitchValkeyUrls, urlShown, useValkeyContext, valkeyContextFromKeys, VALKEY_CONTEXT_KEYS } from "@edgehero/pi-dispatch/connection";
 import { pointerState } from "./deployment-pointer.mjs";
 import { readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
 import { readDoctorResults } from "@edgehero/pi-dispatch/doctor-results";
@@ -955,6 +955,24 @@ export function readPauseWindows({ pauseWindowsPath, fs = nodeFs }) {
   }
 }
 
+/** What a person is told who changes one window of a file that does not load. No detail, since the parser's quotes the file. */
+export const PAUSE_FILE_DOES_NOT_LOAD = "the pause-windows file does not load, so one window of it cannot be changed; nothing was changed. Fix the file, or move it aside to start from an empty one";
+
+/**
+ * Why one window of the file cannot be changed, or null when it can: the file cannot be read, does not load, or holds what a
+ * write could not keep. Each of those read as "no windows" to whoever asked for row 1, over a file that may hold them all. A
+ * file a newer release wrote is told to upgrade first, since moving it aside would lose what that release wrote.
+ */
+export function pauseWindowChangeRefusal({ pauseWindowsPath, fs = nodeFs }) {
+  const read = fileSnapshot(fs, pauseWindowsPath);
+  if (isUnreadable(read)) return PAUSE_FILE_DOES_NOT_LOAD;
+  const held = heldPauseWindows(read, pauseWindowsPath);
+  const newer = pauseWindowsNewerRefusal(held.doc, pauseWindowsPath);
+  if (newer) return newer;
+  if (held.problem) return PAUSE_FILE_DOES_NOT_LOAD;
+  return read !== null && readPauseWindows({ pauseWindowsPath, fs }).invalid ? PAUSE_FILE_DOES_NOT_LOAD : null;
+}
+
 /**
  * Read-modify-write the pause-windows file (mirrors `writeTriggers`): `mutate(windows)` receives a copy of the
  * current raw `windows` array and returns the new array; the result is re-serialized, VALIDATED through the
@@ -973,29 +991,24 @@ export function readPauseWindows({ pauseWindowsPath, fs = nodeFs }) {
  * Every other top-level key of the file is carried in its place (issue #761, `pauseWindowsText`, the one serializer the
  * console's whole-list action shares), so a block a later release added survives a write from this one; a file holding
  * only `windows` is written byte for byte as it always was. A file written by a NEWER pi-dispatch is refused with
- * `{ invalid, newer: true }` and nothing written, judged on its raw `version` alone: a file with one bad window is still
- * fixed here, and an unparseable one is still rebuilt from empty, the recorded posture. A file that is there and cannot
- * be read is neither: it refuses with nothing written. A failed write or rename throws, after dropping this write's own
- * tmp file, and both happen beside the file, so the old file is whole after either.
+ * `{ invalid, newer: true }` and nothing written, judged on its raw `version` alone: a list with a bad window in it can still
+ * be replaced here, which the console's whole-list action does. A file that is there and cannot be read refuses with nothing written, as does one holding what this writer
+ * could not keep (`heldPauseWindows`): not JSON, not an object, a `windows` that is not a list, or a key written twice.
+ * Rebuilt from empty, as it once was, a stray comma lost every window behind a preview and a Confirm whose words said nothing
+ * of it, and the Undo only took the new row back out. A failed write or rename throws, after dropping this write's own tmp file, and both happen beside the
+ * file, so the old file is whole after either.
  */
 export function writePauseWindows({ pauseWindowsPath, mutate, expect = null, fs = nodeFs }) {
-  let current = [];
-  let doc = null;
   // The text as read, which is also the snapshot the re-check compares against when there is no `expect`.
   const read = fileSnapshot(fs, pauseWindowsPath);
-  // Only a missing file may start from nothing (`writeTriggers`' rule, and for its reason): the marker a failed read
-  // leaves does not parse, so it fell into the repair below, and with an `expect` or a read that kept failing the re-check
-  // passed and the rename replaced every window with none.
+  // A failed read is not a missing file (as in `writeTriggers`, and for its reason): with an `expect` or a read that kept
+  // failing, the re-check passed and the rename replaced every window with none.
   if (isUnreadable(read)) return { invalid: `the pause-windows file ${pauseWindowsPath} could not be read (${unreadableCode(read)}), so its windows cannot be kept; nothing was written` };
-  try {
-    doc = JSON.parse(read);
-    if (Array.isArray(doc?.windows)) current = doc.windows;
-  } catch {
-    // An unparseable file: start from empty, the recorded repair; the validated atomic write below replaces it. (A missing
-    // file reads as `null`, which parses to no document at all.)
-  }
+  const held = heldPauseWindows(read, pauseWindowsPath);
+  const { doc, windows: current } = held;
   const newer = pauseWindowsNewerRefusal(doc, pauseWindowsPath);
   if (newer) return { invalid: newer, newer: true };
+  if (held.problem) return { invalid: `${held.problem}; nothing was written. Fix the file, or move it aside to start from an empty one`, malformed: true };
   const next = mutate(current.map((w) => ({ ...w })));
   const text = pauseWindowsText(doc, next);
   try {
@@ -4145,6 +4158,8 @@ function doctorSelfName(env) {
 
 /** How long the reader waits on the registry before drawing the fleet it last knew. */
 const FLEET_READ_TIMEOUT_MS = 2_000;
+// Longer than every read this file bounds for itself, so this decides only the reads that have no bound of their own.
+const FLEET_COMMAND_TIMEOUT_MS = 5_000;
 
 /**
  * The most queues a switch preview reads (issue #737): `snapshot({ switchQueues: true })` reads a queue's paused flag,
@@ -4241,12 +4256,45 @@ export function createFleetReader(
 ) {
   const prune = readOnly !== true;
   const activePerQueue = Number.isSafeInteger(activeLimit) ? Math.min(Math.max(activeLimit, 1), ACTIVE_PER_QUEUE_MAX) : 1;
-  const queue = makeQueueFn(parseConnectionFn(paths.valkeyUrl, { failFast: true }));
-  const redis = redisFn(paths.valkeyUrl);
+  // Every queue this reader holds is built `failFast`, so a read during an outage is refused rather than waiting in an
+  // offline queue. The price of that bound: a client whose retries ran out has ended, an ended client never reconnects,
+  // and BullMQ's connection promise stays as it settled. Held for the reader's whole life, that left every page that reads a
+  // queue saying the Valkey could not be read, answering in 5 ms with the Valkey long back, until the process was restarted. A persistent
+  // client is not the way out: BullMQ's `client` stays pending for as long as nothing answers, so a queue built during an
+  // outage would make its reads wait rather than refuse. So a queue whose client ended is replaced the next time it is
+  // asked for, which costs what its first read cost and judges the Valkey again.
+  //
+  // Never once the reader is disposed. Closing a queue ends its client too, so a read in flight across `dispose` would
+  // build a new queue nobody closes, whose live client then holds the process past its stop.
+  let disposed = false;
+  const endedQueues = new WeakSet();
+  const watched = (q) => {
+    const ended = () => endedQueues.add(q);
+    Promise.resolve(q?.client).then((client) => {
+      if (client?.status === "end") ended();
+      else client?.once?.("end", ended);
+    }, ended);
+    return q;
+  };
+  const stillOpen = (held, open) => {
+    if (held && (disposed || !endedQueues.has(held))) return held;
+    if (disposed) throw new Error("this fleet reader has been disposed");
+    if (held) Promise.resolve().then(() => held.close()).catch(() => {});
+    return watched(open());
+  };
+  const queue = watched(makeQueueFn(parseConnectionFn(paths.valkeyUrl, { failFast: true })));
+  // Persistent, so it rides a restart out, which the queues above cannot. Bounded, or a read on it waits for as long as the
+  // Valkey does not answer: one such read in a snapshot's `Promise.all` hung the page whole, and the watch pages read
+  // nothing else. A command past the bound is gone unless it had reached the socket (`makeRedisClient`).
+  // `freshContext`: refused at its start by a `.env` line, it would stay refused after the line is fixed.
+  const redis = redisFn(paths.valkeyUrl, { commandTimeoutMs: FLEET_COMMAND_TIMEOUT_MS, freshContext: true });
+  // Without a listener ioredis prints a stack trace per reconnect attempt for as long as an outage lasts. Not a silent one:
+  // a password that changed under this client refuses it alone, and this line is then the only place that says why.
+  if (redis) onValkeyError(redis, "fleet reads", undefined, { quietly: true });
   const sandboxQueues = new Map();
   const sandboxQueue = (host) => {
     if (typeof host !== "string" || !WORKER_NAME_RE.test(host)) throw new Error("a sandbox request needs a worker name");
-    if (!sandboxQueues.has(host)) sandboxQueues.set(host, makeSandboxPrepareQueueFn(parseConnectionFn(paths.valkeyUrl, { failFast: true }), { host }));
+    sandboxQueues.set(host, stillOpen(sandboxQueues.get(host), () => makeSandboxPrepareQueueFn(parseConnectionFn(paths.valkeyUrl, { failFast: true }), { host })));
     return sandboxQueues.get(host);
   };
   const watchStore = makeWatchStore(redis, { now: nowFn });
@@ -4272,6 +4320,11 @@ export function createFleetReader(
   // because this reader is connection-first: it holds its clients for its whole life and a per-tick open/close of N
   // queues is the quiet load a dashboard must not add.
   const pool = new Map([[queue.name, queue]]);
+  // The pool's queue for `name`: the one held, or a new one where it has none or the held one's client ended.
+  const queueNamed = (name) => {
+    pool.set(name, stillOpen(pool.get(name), () => makeQueueFn(parseConnectionFn(paths.valkeyUrl, { failFast: true }), { name })));
+    return pool.get(name);
+  };
   // The last set we successfully resolved. On an unreachable registry the fleet does NOT shrink to the shared queue:
   // that would silently pause half a deployment and print success, which is the failure this whole surface exists to
   // prevent. We keep what we last saw and mark the snapshot degraded instead.
@@ -4298,12 +4351,9 @@ export function createFleetReader(
       lastHosts = fleet.hosts;
       lastHostsAt = nowFn();
     }
-    for (const name of lastNames) {
-      if (!pool.has(name)) pool.set(name, makeQueueFn(parseConnectionFn(paths.valkeyUrl, { failFast: true }), { name }));
-    }
     // A host that left keeps its queue open until dispose. Closing it here would race a pause already in flight
     // against it, and an idle BullMQ Queue costs one connection -- cheaper than that race.
-    return lastNames.map((n) => pool.get(n));
+    return lastNames.map(queueNamed);
   };
 
   // One job by id across the fleet's queues (the first that knows it): the Job, null when no queue holds it, or undefined
@@ -4342,12 +4392,7 @@ export function createFleetReader(
     return { names: unionQueueNames(lastNames, existing), incomplete: whole ? null : SWITCH_SCAN_INCOMPLETE };
   };
 
-  // The pool's queue for each name, built where it has none.
-  const queuesNamed = (names) =>
-    names.map((name) => {
-      if (!pool.has(name)) pool.set(name, makeQueueFn(parseConnectionFn(paths.valkeyUrl, { failFast: true }), { name }));
-      return pool.get(name);
-    });
+  const queuesNamed = (names) => names.map(queueNamed);
 
   // The queues a fleet pause or resume flips, read now: the registry afresh (so `lastNames` is this read's), then the
   // keyspace unioned onto it. ONE function for the switch (`poolSet`) and for the snapshot that previews a fleet or a
@@ -4679,7 +4724,7 @@ export function createFleetReader(
     async triggerSkew(index, waiting, { fs: viaFs = fs } = {}) {
       return readTriggerSkew({ index, waiting, triggersPath: paths.triggersPath, fs: viaFs, lookupJob: async (name, id) => {
         const queues = await fleetQueues();
-        const q = queues.find((q) => q.name === name) ?? pool.get(name);
+        const q = queues.find((q) => q.name === name) ?? (pool.has(name) ? queueNamed(name) : null);
         return q ? q.getJob(id) : null;
       }, timeoutMs: FLEET_READ_TIMEOUT_MS });
     },
@@ -4710,7 +4755,8 @@ export function createFleetReader(
       const [pausedStates, countsPer, workerList, dayRaw, weekRaw, monthRaw, tokenRaw, schedulerLists, activeLists, stallCounts] = await Promise.all([
         Promise.all(queues.map((q) => q.isPaused())),
         Promise.all(queues.map((q) => q.getJobCounts("waiting", "active", "paused", "delayed", "failed"))),
-        queue.getWorkers().catch(() => []),
+        // Inside the promise: a throw while building a replacement, right here in this list, would orphan the reads above it.
+        Promise.resolve().then(() => queueNamed(queue.name).getWorkers()).catch(() => []),
         redis.get(dayKey()),
         redis.get(weekKey()),
         redis.get(monthKey()),
@@ -5230,8 +5276,13 @@ export function createFleetReader(
     async cancelActive({ jobId, interventionOrigin = "human" }) {
       // The CLI's channel, byte for byte (issue #287, worker/src/cancel-state.mjs): a request key the owning worker
       // answers, carried on the reader's own held client -- `cancelJob` lives in the worker process and nothing here
-      // can raise it directly.
-      return requestCancel({ redis, jobId, interventionOrigin });
+      // can raise it directly. A failure goes on to be reported, so what it may have placed is taken back first.
+      try {
+        return await requestCancel({ redis, jobId, interventionOrigin });
+      } catch (err) {
+        withdrawCancel({ redis, jobId, interventionOrigin });
+        throw err;
+      }
     },
     // Only dedicated operator page/action reads ask for these. snapshot()/api/state never carry them.
     async sandboxInventory() {
@@ -5246,6 +5297,7 @@ export function createFleetReader(
     async sandboxPreparationStatus(host, id) { return readSandboxPreparationFn ? readSandboxPreparationFn(sandboxQueue(host), id) : { id, host, state: "unknown" }; },
     async sandboxEnd(request) { return requestSandboxEndFn({ redis, ...request, now: nowFn }); },
     async dispose() {
+      disposed = true;
       for (const q of sandboxQueues.values()) { try { await q.close(); } catch { /* best effort teardown */ } }
       for (const q of pool.values()) {
         try {

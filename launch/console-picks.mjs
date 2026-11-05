@@ -7,15 +7,17 @@
  * A pick is `{ name, golden, width, theme, height, selector, scale, transcript }`. The theme defaults to light, the width
  * to 1440 and the scale to 1.5. `height` keeps the top of the page, `selector` keeps one element, and neither keeps the
  * whole page. `transcript` names the run whose stream gets the canned entries below (the page's `/api/events` asks by run id).
+ *
+ * Each pick is drawn twice, light under its own name and dark with `-dark`, since a README shows a reader the one their own
+ * setting asks for. Derived, so no picture can have only one.
  */
 import { NOW } from "./fixture-deployment.mjs";
 
 const SEC = 1000;
 const MIN = 60 * SEC;
 
-export const CONSOLE_PICKS = Object.freeze([
+const LIGHT_PICKS = Object.freeze([
 	{ name: "console-overview", golden: "overview.operator", height: 1180 },
-	{ name: "console-overview-dark", golden: "overview.operator", height: 1180, theme: "dark" },
 	{ name: "console-overview-phone", golden: "overview.operator", width: 375, height: 1500, scale: 2 },
 	{ name: "console-run-live", golden: "panels/run-live-armed.operator", height: 1500, transcript: "gh-b3d7" },
 	{ name: "console-run-loaded", golden: "panels/run-loaded-no-flow.operator", selector: "#p-loaded" },
@@ -42,6 +44,8 @@ export const CONSOLE_PICKS = Object.freeze([
 	{ name: "console-updates", golden: "panels/updates-newer-available.operator", height: 920 },
 	{ name: "console-project", golden: "panels/project-populated.operator", height: 1470 },
 ]);
+
+export const CONSOLE_PICKS = Object.freeze(LIGHT_PICKS.flatMap((pick) => [pick, Object.freeze({ ...pick, name: `${pick.name}-dark`, theme: "dark" })]));
 
 /**
  * What each pick's run has said, by run id, as `readTranscriptSince` hands it to the page. A question is the agent's own

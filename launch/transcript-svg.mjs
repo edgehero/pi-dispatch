@@ -11,6 +11,10 @@
  * doctor prints inside `up` with one dim line that counts them, so the up image stays readable; the full
  * report is cli-doctor.svg. Nothing here reads the clock or the host, so the same input gives the same bytes.
  *
+ *   node launch/transcript-svg.mjs --relight docs/images/cli-doctor.svg > docs/images/cli-doctor-light.svg
+ *
+ * draws an image this module drew for a light page, so a captured transcript needs no second capture.
+ *
  * Capturing the input is the part that cannot live in a script: run the real command in a throwaway folder,
  * then replace every machine-specific value (paths, uids, container ids) before rendering. launch/demo.md
  * lists the scenario each image shows.
@@ -26,6 +30,18 @@ const PALETTE = [
 	"rgb(72,79,88)", "rgb(255,123,114)", "rgb(63,185,80)", "rgb(210,153,34)", "rgb(88,166,255)", "rgb(188,140,255)", "rgb(57,197,207)", "rgb(177,186,196)",
 	"rgb(110,118,129)", "rgb(255,161,152)", "rgb(86,211,100)", "rgb(227,179,65)", "rgb(121,192,255)", "rgb(210,168,255)", "rgb(86,212,221)", "rgb(255,255,255)",
 ];
+// The same window on a light page, colour for colour: GitHub's light terminal palette for its dark one, plus the panel's
+// truecolor names (`PALETTE` in render-images.mjs) and the window's own frame.
+const LIGHT = new Map([
+	[FG, "#24292f"], ["#0d1117", "#ffffff"], ["#161b22", "#f6f8fa"], ["#30363d", "#d0d7de"], ["#8b949e", "#57606a"],
+	["#ff5f57", "#ff5f57"], ["#febc2e", "#febc2e"], ["#28c840", "#28c840"],
+	["rgb(72,79,88)", "rgb(36,41,47)"], ["rgb(255,123,114)", "rgb(207,34,46)"], ["rgb(63,185,80)", "rgb(26,127,55)"], ["rgb(210,153,34)", "rgb(154,103,0)"],
+	["rgb(88,166,255)", "rgb(9,105,218)"], ["rgb(188,140,255)", "rgb(130,80,223)"], ["rgb(57,197,207)", "rgb(27,124,131)"], ["rgb(177,186,196)", "rgb(87,96,106)"],
+	["rgb(110,118,129)", "rgb(101,109,118)"], ["rgb(255,161,152)", "rgb(164,14,38)"], ["rgb(86,211,100)", "rgb(17,99,41)"], ["rgb(227,179,65)", "rgb(125,78,0)"],
+	["rgb(121,192,255)", "rgb(3,102,214)"], ["rgb(210,168,255)", "rgb(130,80,223)"], ["rgb(86,212,221)", "rgb(27,124,131)"], ["rgb(255,255,255)", "rgb(36,41,47)"],
+	["rgb(48,54,61)", "rgb(208,215,222)"], ["rgb(139,148,158)", "rgb(87,96,106)"], ["rgb(201,209,217)", "rgb(36,41,47)"], ["rgb(214,165,49)", "rgb(154,103,0)"],
+	["rgb(248,81,73)", "rgb(207,34,46)"], ["rgb(165,214,255)", "rgb(10,48,105)"],
+]);
 const CHAR_W = 8;
 const LINE_H = 19;
 
@@ -139,6 +155,18 @@ export function svgRows(svg) {
 	return [...svg.matchAll(/<text x="16" y="\d+"[^>]*>(.*?)<\/text>/g)].map((m) => unescape(m[1].replace(/<[^>]+>/g, "")));
 }
 
+/**
+ * An image this module drew, for a light page: only its colours change, so it holds the same lines in the same places. A
+ * colour with no light partner is refused rather than left, since a dark colour on a white window can vanish without a trace.
+ */
+export function relightTranscript(svg) {
+	return svg.replace(/\b(fill|stroke)="([^"]+)"/g, (_, attribute, colour) => {
+		const light = LIGHT.get(colour);
+		if (light === undefined) throw new Error(`no light partner for ${colour}: add it to LIGHT in launch/transcript-svg.mjs`);
+		return `${attribute}="${light}"`;
+	});
+}
+
 export function renderTranscript(text, { cols = 118, fit = false, foldDoctor: fold = false, title = "", prompt = "", dashRefs = false } = {}) {
 	const esc = dashRefs ? (s) => escapeDashes(escapeXml(s)) : escapeXml;
 	let lines = text.replace(/\r\n/g, "\n").replace(/\n$/, "").split("\n");
@@ -168,7 +196,9 @@ export function renderTranscript(text, { cols = 118, fit = false, foldDoctor: fo
 	return `${out.join("\n")}\n`;
 }
 
-if (import.meta.url === `file://${process.argv[1]}`) {
+if (import.meta.url === `file://${process.argv[1]}` && process.argv[2] === "--relight") {
+	process.stdout.write(relightTranscript(readFileSync(process.argv[3], "utf8")));
+} else if (import.meta.url === `file://${process.argv[1]}`) {
 	const opts = parseArgs(process.argv.slice(2));
 	const text = readFileSync(opts.input ?? 0, "utf8");
 	process.stdout.write(renderTranscript(text, opts));

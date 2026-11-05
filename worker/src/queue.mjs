@@ -3,7 +3,7 @@ import { validateFork } from "./fork-job.mjs";
 import { randomUUID } from "node:crypto";
 import { Queue } from "bullmq";
 import { metaKeyPattern, queueNameOfMetaKey } from "./bullmq-internals.mjs";
-import { assertJudgedConnection, onValkeyError } from "./connection.mjs";
+import { assertJudgedConnection, givesUp, onValkeyError } from "./connection.mjs";
 import { chainedJobId, localJobId, deliveryJobId, gitlabDeliveryJobId, forgeDeliveryJobId, manualCanaryJobId, manualTriggerJobId } from "./job-id.mjs";
 import { targetSeparator } from "./forges.mjs";
 import { PR_CLOSE_ACTIONS } from "./triggers.mjs";
@@ -114,15 +114,49 @@ const WORKER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
 export { chainedJobId, localJobId, deliveryJobId, gitlabDeliveryJobId, forgeDeliveryJobId, manualCanaryJobId, manualTriggerJobId };
 
 /**
+ * BullMQ's `jobScheduler` and `repeat` getters are `new Promise(async (resolve) => { ... await this.client ... })` (read
+ * at 5.80.4). A connection that gave up rejects `this.client` inside that async executor, where no caller can reach it:
+ * the outer promise never settles and the rejection is unhandled, which ends the process. One `getJobSchedulers` on a
+ * refused or absent Valkey took the whole console down, from behind every `.catch` and timeout its readers carry.
+ *
+ * So the connection is awaited FIRST, out here, where a rejection is the caller's. Past that `this.client` is settled and
+ * resolved, so the getter's own await cannot reject. Guarding each call site instead was the other way, and one of them
+ * already did (`await q.client` in trigger-schedule-zones): the next caller would have to know, and `makeQueue` is the one
+ * place every queue of this project is built.
+ *
+ * The constructor is the same class of fault at another address. `RedisConnection.close` removes every listener, and a
+ * connect still in flight then fails into `emit("error")`, which with no listener throws out of a promise chain nothing can
+ * reach, so a read that closed its queue at its own bound ended the process a moment after it answered. A queue that was
+ * closed has nobody left to tell, so that one emit says nothing.
+ */
+class SettledQueue extends Queue {
+	constructor(name, options) {
+		super(name, options);
+		const { connection } = this;
+		const emit = connection.emit.bind(connection);
+		connection.emit = (event, ...args) => (event === "error" && connection.listenerCount("error") === 0 ? false : emit(event, ...args));
+	}
+
+	get jobScheduler() {
+		return this.client.then(() => super.jobScheduler);
+	}
+
+	get repeat() {
+		return this.client.then(() => super.repeat);
+	}
+}
+
+/**
  * A queue handle. `name` defaults to the shared queue, so every existing caller is unchanged and a
  * single-host deployment never names anything else.
  */
 export function makeQueue(connection, { name = QUEUE } = {}) {
 	// Issue #464: only a connection `parseConnection` built, which judges and pins the Valkey it dials.
 	assertJudgedConnection(connection);
-	const queue = new Queue(name, { connection });
+	const queue = new SettledQueue(name, { connection });
 	// Issue #468: an error of this queue is one line, its message, never BullMQ's console.error of the whole object.
-	onValkeyError(queue, `queue ${name}`);
+	// A queue that gives up is the kind a long-lived reader replaces, so it is the kind that repeats the line per read.
+	onValkeyError(queue, `queue ${name}`, undefined, { quietly: givesUp(connection) });
 	return queue;
 }
 

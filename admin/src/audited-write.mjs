@@ -107,7 +107,7 @@ export function auditedWrite({ audit, actor, kind, target, beforeDigest = null, 
     return result;
   };
   const threw = (e) => {
-    compensate(`the write threw (${typeof e?.code === "string" ? e.code : "error"})`);
+    compensate(`the write threw (${typeof e?.code === "string" ? e.code : "error"})${e?.valkeyMayStillRun ? "; Valkey did not confirm it, so it may or may not have been made" : ""}`);
     throw e;
   };
   let result;

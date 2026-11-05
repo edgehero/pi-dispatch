@@ -385,7 +385,10 @@ test("serve copies each audit row it writes to the Valkey list after the file ho
   const mirrorCalls = [];
   modules.connection = {
     makeRedisClient: (url, opts) => {
-      assert.equal(opts.failFast, true, "a down Valkey must fail fast, never queue rows in memory");
+      assert.equal(opts.noOfflineQueue, true, "a down Valkey must refuse a row at once, never queue rows in memory");
+      assert.equal(opts.freshContext, true, "refused at its start by a .env line, the copy must resume once that line is fixed");
+      assert.notEqual(opts.failFast, true, "this client lives as long as the console, and a failFast one ends for good at the first Valkey restart");
+      assert.equal(opts.commandTimeoutMs, 5_000, "pages read through this client, so a Valkey that stopped answering must not hang them");
       return { on() {}, disconnect: () => (disconnected = true) };
     },
   };

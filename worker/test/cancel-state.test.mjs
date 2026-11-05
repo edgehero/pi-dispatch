@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ReplyError } from "ioredis";
-import { CANCEL_ACK_TTL_MS, CANCEL_REQ_TTL_MS, QUEUED_STATES, agentCancelAckKey, agentCancelReqKey, cancelAckKey, cancelReqKey, removeHeldJob, removeQueuedJob, requestCancel } from "../src/cancel-state.mjs";
+import { CANCEL_ACK_TTL_MS, CANCEL_REQ_TTL_MS, QUEUED_STATES, agentCancelAckKey, agentCancelReqKey, cancelAckKey, cancelReqKey, removeHeldJob, removeQueuedJob, requestCancel, withdrawCancel } from "../src/cancel-state.mjs";
 import { modelAttemptKey } from "../src/model-attempts.mjs";
 
 test("the cancel keyspace is exactly cancel:req:/cancel:ack: -- the CLI, the panel and the worker meet on these strings", () => {
@@ -54,6 +54,60 @@ test("requestCancel times out by deleting its own request -- a cancel the operat
 	assert.deepEqual(res, { timeout: true });
 	const dels = redis.ops.filter((op) => op[0] === "del");
 	assert.deepEqual(dels, [["del", "cancel:req:j2"]], "the timeout's DEL is the whole honesty of 'nothing was changed'");
+});
+
+test("requestCancel: a SET with no answer rejects as it is, with the client's own mark, and polls for nothing", async () => {
+	const sent = [];
+	const redis = {
+		async set(key) { sent.push(["set", key]); throw Object.assign(new Error("Command timed out"), { valkeyMayStillRun: true }); },
+		async get() { sent.push(["get"]); return null; },
+		async del(key) { sent.push(["del", key]); },
+	};
+	const refused = await requestCancel({ redis, jobId: "j3" }).catch((err) => err);
+	assert.equal(refused.message, "Command timed out");
+	assert.equal(refused.valkeyMayStillRun, true, "it may have run with its answer lost, and its DEL may be lost too");
+	assert.deepEqual(sent, [["set", cancelReqKey("j3")]], "taking it back is the caller's, as the CLI's catch has always done");
+});
+
+test("requestCancel: an answer that cannot be read rejects, marked, since the request did go out", async () => {
+	const sleeps = [];
+	const redis = {
+		async set() {},
+		async get() { throw new Error("Command timed out"); },
+		async del() { throw new Error("the caller's to send"); },
+	};
+	const lost = await requestCancel({ redis, jobId: "j4", sleep: async (ms) => sleeps.push(ms) }).catch((err) => err);
+	assert.equal(lost.message, "Command timed out");
+	assert.equal(lost.valkeyMayStillRun, true);
+	assert.deepEqual(sleeps, [], "at once, and not poll by poll");
+});
+
+test("requestCancel: a timeout whose DEL was lost rejects, marked, since the request stands for its TTL", async () => {
+	const redis = { async set() {}, async get() { return null; }, async del() { throw new Error("Command timed out"); } };
+	const lost = await requestCancel({ redis, jobId: "j7", ackTimeoutMs: 0, sleep: async () => {} }).catch((err) => err);
+	assert.equal(lost.message, "Command timed out");
+	assert.equal(lost.valkeyMayStillRun, true);
+});
+
+test("requestCancel: a failure that is not an object rejects as it is, from the poll and from the DEL", async () => {
+	for (const thrown of ["a bare string", null]) {
+		const polled = { async set() {}, async get() { throw thrown; } };
+		await assert.rejects(requestCancel({ redis: polled, jobId: "j8" }), (seen) => seen === thrown);
+		const deleted = { async set() {}, async get() { return null; }, async del() { throw thrown; } };
+		await assert.rejects(requestCancel({ redis: deleted, jobId: "j8", ackTimeoutMs: 0, sleep: async () => {} }), (seen) => seen === thrown);
+	}
+});
+
+test("withdrawCancel sends the DEL for the right key, holds nobody for its answer, and swallows its failure", async () => {
+	for (const [interventionOrigin, key] of [["human", cancelReqKey("j5")], ["agent", agentCancelReqKey("j5")]]) {
+		const sent = [];
+		withdrawCancel({ redis: { del: (k) => { sent.push(k); return new Promise(() => {}); } }, jobId: "j5", interventionOrigin });
+		await new Promise((resolve) => setImmediate(resolve));
+		assert.deepEqual(sent, [key]);
+	}
+	withdrawCancel({ redis: { del: async () => { throw new Error("Command timed out"); } }, jobId: "j5" });
+	withdrawCancel({ redis: { del: () => { throw new Error("not even a promise"); } }, jobId: "j5" });
+	await new Promise((resolve) => setImmediate(resolve));
 });
 
 test("an agent cancellation uses a distinct request and acknowledgement, so older workers cannot record a person's touch", async () => {

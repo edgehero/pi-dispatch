@@ -35,11 +35,10 @@
  *     hook with nobody at the keyboard, and the thing it races (an operator edit, a sibling job's
  *     disarm) clears in milliseconds.
  *
- * `disarmTrigger` is also deliberately NARROWER than `writeTriggers`: it refuses a missing or unparseable file
- * outright rather than repairing from empty. The repair posture is right for the operator CRUD path
- * (a missing file plus "add trigger" should scaffold) and catastrophic here -- overwriting a file the
- * worker could not parse, to record one disarm, would destroy the operator's trigger set. A file neither can READ,
- * both refuse: not being able to see a file is no reason to think it empty.
+ * `disarmTrigger` is also deliberately NARROWER than `writeTriggers`: it refuses a MISSING file too, where the operator
+ * CRUD path scaffolds one (a missing file plus "add trigger" is a first trigger), since a disarm has nothing to add to
+ * nothing. A file neither can READ or PARSE, both refuse: not being able to see or understand a file is no reason to
+ * think it empty, and overwriting it would destroy the operator's trigger set.
  *
  * Custom: exclusive-create lockfile per session-store.mjs precedent; no proper-lockfile dependency
  * (repo keeps runtime deps minimal, and the two-writer case needs no lease/renewal machinery)
@@ -47,6 +46,7 @@
 
 import nodeFs from "node:fs";
 import { parseTriggers, parseTriggersDocument, triggersFileNewer, triggersFileVersionFor, triggersFileVersionProblem } from "./triggers.mjs";
+import { heldDocument } from "./held-document.mjs";
 import { findDuplicateKey } from "./json-duplicates.mjs";
 import { expectRefusal } from "./file-expect.mjs";
 
@@ -144,8 +144,8 @@ function releaseLock(fd, triggersPath, fs, log) {
  * `triggers` is written back unchanged, in its original order (issue #704). The file is a shared
  * document, not a triggers-only one: the project secret bundles live beside the array, and a writer
  * that rebuilt the file as `{ triggers }` deleted them on every console edit and every one-shot disarm,
- * silently. `triggers` keeps its position when the document had it, and leads when it did not (the
- * repair-from-empty shape, which is the historical file). A file whose only key is `triggers` comes
+ * silently. `triggers` keeps its position when the document had it, and leads when it did not (a file
+ * started from nothing, which is the historical file). A file whose only key is `triggers` comes
  * out byte-identical to what this function always wrote.
  *
  * `version` (issue #761): when given, the writer OWNS the file's `version` and sets it to this value, in place when
@@ -224,9 +224,10 @@ function discardTmp(fs, tmp) {
  * human keypress is the approval and CONST-TRIGGER-AUTHOR-GATE's principle holds. The worker's disarm
  * does NOT come through here -- `disarmTrigger` below is its own, narrower entry.
  *
- * A missing or unparseable existing file starts from an empty set; the validated write repairs it. A file that is
- * there and cannot be read (EIO, EACCES, EISDIR) does not: it refuses with `{ invalid, unreadable: true }`, before
- * `mutate` runs and with the file untouched.
+ * Only a file that holds nothing starts from an empty set: a missing one, or one of nothing but whitespace or a
+ * byte-order mark. A file that is there and cannot be read (EIO, EACCES, EISDIR) refuses with
+ * `{ invalid, unreadable: true }`, and one that holds something this writer cannot keep (`heldDocument`) with
+ * `{ invalid, malformed: true }`, both before `mutate` runs and with the file untouched.
  * Returns `{ ok: true }`, or `{ invalid }` for a validation failure, a held lock or that read. A failure of the lock,
  * the tmp file or the rename throws, the contract this function has always had: all three happen beside the file, so
  * the old file is whole after any of them.
@@ -241,7 +242,7 @@ function discardTmp(fs, tmp) {
  * `{ invalid, newer: true }` and the file untouched: this build cannot know what the newer one's fields mean, and the
  * writer's own stamp (the lowest version the content needs) would otherwise LOWER the version under content it does
  * not understand, after which the final validation would pass. Judged on the RAW `version` only, never the full
- * parser, so a file with one bad entry can still be fixed; a broken `version` is repaired like any broken file. Then
+ * parser, so a file with one bad entry can still be fixed; a broken `version` is overwritten by the writer's own. Then
  * the writer owns `version`: it writes `triggersFileVersionFor` of the result (`triggersFileText`). `supported`,
  * `runTable`, `blockTable`, `entryValueTable`, `runValueTable` and `blockValueTable` are the version rules, injectable
  * for tests.
@@ -263,7 +264,7 @@ export function writeTriggers({ triggersPath, mutate, mutateDocument = null, exp
 		// would hand it a truncated file and get back a confident answer about a key, when what happened is
 		// that the file was cut in half.
 		let parsedText = null;
-		// Only a MISSING file may start from nothing. A file that is there and could not be read is not an empty one: folded
+		// Only a file that holds nothing may start from nothing. A file that is there and could not be read is not an empty one: folded
 		// into "missing", one failed read made `current` empty, the `expect` re-read below then saw the file as it was and
 		// passed, and the rename replaced every trigger with what `mutate` made of nothing, on an `{ ok: true }`. Returned, not
 		// thrown, so every caller says it in the words it says any refusal in, and before `mutate`, which is owed a real list.
@@ -273,21 +274,20 @@ export function writeTriggers({ triggersPath, mutate, mutateDocument = null, exp
 		} catch (err) {
 			if (err?.code !== "ENOENT") return { invalid: `the triggers file ${triggersPath} could not be read (${typeof err?.code === "string" ? err.code : "read-error"}), so its triggers cannot be kept; nothing was written`, unreadable: true };
 		}
-		if (raw !== null) {
-			try {
-				const value = JSON.parse(raw);
-				parsedText = raw;
-				doc = value;
-				if (Array.isArray(value?.triggers)) current = value.triggers;
-			} catch {
-				// An unparseable file: start from empty, the recorded repair; the validated atomic write below replaces it.
-			}
+		if (raw !== null && raw.trim() !== "") {
+			// This used to start from empty for anything that did not parse, so one stray comma and the next add replaced every
+			// trigger with one, on an `{ ok: true }`, under a preview whose sentences never said so, only its diff. What the file holds is the
+			// operator's to fix; a refusal costs them the add and nothing else.
+			const { value, problem } = heldDocument(raw, "triggers");
+			// A newer release may mean something by that shape, and the answer to that is upgrading, below.
+			const newerFirst = value !== undefined && triggersFileVersionProblem(value, { supported: versions.supported })?.newer;
+			if (problem && !newerFirst) return { invalid: `the triggers file ${triggersPath} ${problem}, so its triggers cannot be kept; nothing was written. Fix the file, or move it aside to start from an empty one`, malformed: true };
+			parsedText = raw;
+			doc = value;
+			if (Array.isArray(value.triggers)) current = value.triggers;
 		}
-		// The repair posture above cannot extend to a duplicate key (issue #313), and the two are exactly
-		// separated by the parse. A file that does not parse is repairable and stays repairable. A file that
-		// PARSES is not missing, so "start from empty" would not repair it, it would delete the operator's
-		// trigger set; and rebuilding from `current` writes back the winning value with the shadowed one
-		// silently gone, which turns a divergence a reviewer could still find into one nobody ever can.
+		// A duplicate key (issue #313) gets its own refusal: rebuilding from `current` writes back the winning value with the
+		// shadowed one silently gone, which turns a divergence a reviewer could still find into one nobody ever can.
 		if (parsedText !== null) {
 			const duplicate = findDuplicateKey(parsedText);
 			if (duplicate) {
@@ -367,9 +367,9 @@ export async function disarmTrigger({ triggersPath, index, number, flow, command
 				currentText = fs.readFileSync(triggersPath, "utf8");
 				raw = JSON.parse(currentText);
 			} catch (err) {
-				// NEVER repair-from-empty here: overwriting a file we could not read, to record one
-				// disarm, would destroy the operator's trigger set. writeTriggers' repair posture is for
-				// the operator CRUD path, where "missing" means "first trigger".
+				// NEVER start from empty here: overwriting a file we could not read, to record one disarm,
+				// would destroy the operator's trigger set. writeTriggers starts from empty only for a file
+				// that holds nothing, on the operator CRUD path, where "missing" means "first trigger".
 				return { invalid: `triggers file unreadable (${err?.code ?? "parse-error"}), disarm not written: ${triggersPath}` };
 			}
 			// And a duplicate key is the destruction that comment thought it had closed (issue #313). This

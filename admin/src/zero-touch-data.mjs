@@ -26,6 +26,8 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
   const repairFiles = new Set(Object.entries(paths).filter(([key, value]) => /(?:File|Path)$/.test(key) && typeof value === "string").map(([, value]) => value));
   const using = async (fn) => {
     const redis = redisFn(paths.valkeyUrl);
+    // Without a listener ioredis prints a stack trace per reconnect attempt, for as long as an outage outlasts this call.
+    redis.on?.("error", () => {});
     const groups = makeQuestionGroupStore({ redis, now, retentionDays });
     const fixes = makeZeroTouchFixStore({ redis, now, retentionDays });
     const touches = makeTouchStore({ redis, now, retentionDays });

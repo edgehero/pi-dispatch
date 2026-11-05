@@ -47,7 +47,7 @@ test("writePauseWindows carries every other top-level key in its place, and a fi
   assert.equal(readFileSync(proto.path, "utf8"), `{\n  "__proto__": {\n    "x": 1\n  },\n  "windows": [\n${JSON.stringify(W1, null, 2).replace(/^/gm, "    ")}\n  ]\n}\n`);
 });
 
-test("writePauseWindows refuses a file a newer pi-dispatch wrote before mutate runs, and still repairs a broken one (#761)", () => {
+test("writePauseWindows refuses a file a newer pi-dispatch wrote before mutate runs, replaces a broken version, and refuses a file it could not keep (#761)", () => {
   const newer = text({ version: 2, windows: [W1], future: true });
   const { dir, path } = pauseFile(newer);
   let mutated = 0;
@@ -56,14 +56,14 @@ test("writePauseWindows refuses a file a newer pi-dispatch wrote before mutate r
   assert.equal(mutated, 0);
   assert.equal(readFileSync(path, "utf8"), newer);
   assert.deepEqual(readdirSync(dir), ["pause-windows.json"], "no tmp file");
-  // A broken `version` is not newer: the write repairs it (the writer owns the version and 1 is written as nothing),
-  // and an unparseable file is still rebuilt from empty, the recorded posture.
+  // A broken `version` is not newer: the write replaces it (the writer owns the version and 1 is written as nothing).
   writeFileSync(path, text({ version: "2", windows: [W1] }));
   assert.deepEqual(writePauseWindows({ pauseWindowsPath: path, mutate: (list) => list, fs: nodeFs }), { ok: true });
   assert.equal(readFileSync(path, "utf8"), text({ windows: [W1] }));
+  // An unparseable file is not rebuilt from empty, which lost every window it held: it refuses, with its bytes kept.
   writeFileSync(path, "not json");
-  assert.deepEqual(writePauseWindows({ pauseWindowsPath: path, mutate: (list) => [...list, W2], fs: nodeFs }), { ok: true });
-  assert.equal(readFileSync(path, "utf8"), text({ windows: [W2] }));
+  assert.equal(writePauseWindows({ pauseWindowsPath: path, mutate: (list) => [...list, W2], fs: nodeFs }).malformed, true);
+  assert.equal(readFileSync(path, "utf8"), "not json");
 });
 
 /** The console's whole-list action, previewed and applied as its confirm applies it. */

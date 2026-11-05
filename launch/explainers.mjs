@@ -944,15 +944,17 @@ export function explainShots(explainers = EXPLAINERS) {
  * `sources.json`: each picture's file against the hash of the SVG it was shot from. PNGs are Chrome's rendering and are not
  * held to bytes, so without this a changed word would leave a picture saying the old one with every test green.
  */
-export function explainSources(shots = [...explainShots(), bannerShot()]) {
+export function explainSources(shots = everyExplainShot()) {
 	return Object.fromEntries(shots.map((shot) => [shot.file, createHash("sha256").update(shot.svg).digest("hex")]));
 }
 
 /**
  * The banner: from one agent on a lit floor to many in the dark, while you walk from the floor to the one page that stays lit.
  * It carries "dark engineering", which is a metaphor the words can only explain, in the first seconds a reader spends here.
- * It is not an explainer: it holds no claim of its own past the README's first lines, it has one look in both themes (dark
- * ground, light console, as it always had), and no README's rule for pictures of how things work applies to its small console.
+ * It is not an explainer: it holds no claim of its own past the README's first lines, and no README's rule for pictures of how
+ * things work applies to its small console. Its ground follows the reader's theme. The floor does not: the floor going dark is
+ * the point, so it is the same floor on either ground, and the small console stays the one lit page. Dark keeps the plain name,
+ * which published READMEs and pi's gallery load.
  *
  * IT STARTS DARK. The first frame is what a place that does not animate a PNG shows, and the dark floor is the point, so the
  * loop begins and ends there and only passes through the lit floor. The floor's lights go off in steps rather than a long fade,
@@ -964,9 +966,10 @@ export const BANNER_ALT = "An animation of the pi-dispatch banner: go from sitti
 export const BANNER_WIDTH = 1200;
 export const BANNER_HEIGHT = 420;
 
-function bannerParts() {
+function bannerParts(theme = "dark") {
 	const dark = paletteOf("dark");
 	const light = paletteOf("light");
+	const ground = paletteOf(theme);
 	const seconds = 14;
 	// The stages, in percent of the loop. The dark floor holds across the end and the start.
 	const STAGE = { in: [18, 36], near: [36, 54], out: [54, 72], dark: [72, 100] };
@@ -988,7 +991,7 @@ function bannerParts() {
 		box(x - 3, 219, width + 6, 40, 20, `class="${klass}" fill="none" stroke="${ink}" stroke-width="2"`),
 		text(x + width / 2, 244, words, { size: 16, weight: 650, fill: ink, anchor: "middle" }),
 	].join("");
-	const arrow = (x) => `<path d="M${x} 239h14m-5-5 5 5-5 5" fill="none" stroke="${dark("ink-faint")}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`;
+	const arrow = (x) => `<path d="M${x} 239h14m-5-5 5 5-5 5" fill="none" stroke="${ground("ink-faint")}" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>`;
 	// Beside an agent, on open floor. There are no empty boxes: a first draft had them, and "you" standing in one read as a job in line.
 	const youFloor = (i) => [stationX(i + 1) + 26, floorY + floorH / 2];
 	const at = ([x, y]) => `transform:translate(${x}px,${y}px)`;
@@ -1034,7 +1037,7 @@ function bannerParts() {
 	const miniTile = (x, title, big, bigFill, small, smallFill = light("ink-muted"), bigSize = 24) => `${box(x, 120, 94, 72, 12, `fill="${light("surface")}"`)}<text x="${x + 10}" y="138" font-size="10" font-weight="700" fill="${light("ink")}">${esc(title)}</text><text x="${x + 10}" y="166" font-size="${bigSize}" font-weight="800" fill="${bigFill}">${esc(big)}</text><text x="${x + 10}" y="182" font-size="10" fill="${smallFill}">${esc(small)}</text>`;
 	const miniConsole = [
 		`<g transform="translate(${consoleX} ${consoleY}) scale(${scale})">`,
-		box(0, 0, 424, 276, 16, `fill="${light("canvas")}"`),
+		box(0, 0, 424, 276, 16, `fill="${light("canvas")}"${theme === "light" ? ` stroke="${light("line-strong")}"` : ""}`),
 		box(14, 14, 86, 22, 11, `fill="${light("surface")}"`),
 		`<circle cx="26" cy="25" r="7" fill="${light("ink")}"/><text x="38" y="30" font-size="11" font-weight="700" fill="${light("ink")}">pi-dispatch</text>`,
 		box(350, 14, 60, 22, 11, `fill="${light("surface")}"`),
@@ -1060,22 +1063,23 @@ function bannerParts() {
 		`</g>`,
 	].join("");
 	const body = [
-		box(1, 1, BANNER_WIDTH - 2, BANNER_HEIGHT - 2, 18, `fill="${dark("canvas")}" stroke="${dark("line-strong")}" stroke-width="2"`),
-		text(64, 104, "pi-dispatch", { size: 62, weight: 800, fill: dark("ink"), track: "-1.5" }),
-		text(66, 152, "Go from sitting next to one AI coding agent", { size: 24, fill: dark("ink-muted") }),
-		text(66, 184, "to running many in the background.", { size: 24, fill: dark("ink-muted") }),
-		pill(66, 118, "in the loop", dark("running-tint"), dark("running-ink"), "bn-pill-in"),
+		box(1, 1, BANNER_WIDTH - 2, BANNER_HEIGHT - 2, 18, `fill="${ground("canvas")}" stroke="${ground("line-strong")}" stroke-width="2"`),
+		text(64, 104, "pi-dispatch", { size: 62, weight: 800, fill: ground("ink"), track: "-1.5" }),
+		text(66, 152, "Go from sitting next to one AI coding agent", { size: 24, fill: ground("ink-muted") }),
+		text(66, 184, "to running many in the background.", { size: 24, fill: ground("ink-muted") }),
+		pill(66, 118, "in the loop", ground("running-tint"), ground("running-ink"), "bn-pill-in"),
 		arrow(194),
-		pill(218, 134, "near the loop", dark("parked-tint"), dark("parked-ink"), "bn-pill-near"),
+		pill(218, 134, "near the loop", ground("parked-tint"), ground("parked-ink"), "bn-pill-near"),
 		arrow(362),
-		pill(386, 142, "out of the loop", dark("ok-tint"), dark("ok-ink"), "bn-pill-out"),
+		pill(386, 142, "out of the loop", ground("ok-tint"), ground("ok-ink"), "bn-pill-out"),
 		arrow(538),
-		pill(562, 152, "dark engineering", dark("surface-3"), dark("ink"), "bn-pill-dark"),
-		text(66, 288, "Spending limits that hold, a sealed box for every job, and you decide what ships.", { size: 18, fill: dark("ink-muted") }),
+		pill(562, 152, "dark engineering", ground("surface-3"), ground("ink"), "bn-pill-dark"),
+		text(66, 288, "Spending limits that hold, a sealed box for every job, and you decide what ships.", { size: 18, fill: ground("ink-muted") }),
 		miniConsole,
 		// The floor: dark underneath, and its lights over it.
 		box(24, floorY, BANNER_WIDTH - 48, floorH, 14, `fill="${dark("surface")}"`),
-		box(24, floorY, BANNER_WIDTH - 48, floorH, 14, `class="bn-lights" fill="${light("canvas")}"`),
+		// On a light ground the lit floor is the ground's colour, so the dark one beneath would show as a hairline at its corners.
+		box(24, floorY, BANNER_WIDTH - 48, floorH, 14, `class="bn-lights" fill="${light("canvas")}"${theme === "light" ? ` stroke="${light("canvas")}" stroke-width="2"` : ""}`),
 		...Array.from({ length: stations }, (_, i) => station(i)),
 		// A pale ring, because this mark crosses a lit floor and a dark one.
 		`<g class="bn-you"><circle r="20" fill="${dark("ink")}"/>${mark(0, 0, 18, "you", light("primary"), light("on-primary"), 16)}</g>`,
@@ -1083,14 +1087,20 @@ function bannerParts() {
 	return { css, body, seconds };
 }
 
-/** The banner as a whole SVG document, with its motion in its own style. It is written to `docs/images/banner.svg` by `--explain`. */
-export function bannerSvg() {
-	const { css, body } = bannerParts();
+/** The banner as a whole SVG document, with its motion in its own style. `--explain` writes it to `docs/images/banner.svg`, and light beside it. */
+export function bannerSvg(theme = "dark") {
+	const { css, body } = bannerParts(theme);
 	return `<svg xmlns="http://www.w3.org/2000/svg" width="${BANNER_WIDTH}" height="${BANNER_HEIGHT}" viewBox="0 0 ${BANNER_WIDTH} ${BANNER_HEIGHT}" role="img" aria-label="${esc(BANNER_ALT)}" font-family="${esc(SANS)}"><style>${css}</style>${body}</svg>\n`;
 }
 
 /** The banner's shot for `render-images.mjs --explain`. It lives beside the folder, not in it: the READMEs and pi's gallery load it from there. */
-export function bannerShot() {
-	const { seconds } = bannerParts();
-	return { name: "banner", theme: "dark", file: "banner.png", still: "banner-still.png", svg: bannerSvg(), width: BANNER_WIDTH, height: BANNER_HEIGHT, seconds, stillAt: 0.05, frames: Math.round(seconds * EXPLAIN_FPS) };
+export function bannerShot(theme = "dark") {
+	const { seconds } = bannerParts(theme);
+	const stem = theme === "dark" ? "banner" : `banner-${theme}`;
+	return { name: "banner", theme, file: `${stem}.png`, still: `${stem}-still.png`, svgFile: `${stem}.svg`, svg: bannerSvg(theme), width: BANNER_WIDTH, height: BANNER_HEIGHT, seconds, stillAt: 0.05, frames: Math.round(seconds * EXPLAIN_FPS) };
+}
+
+/** Every shot `--explain` renders and `sources.json` holds: the explainers in both themes, and the banner on both grounds. */
+export function everyExplainShot() {
+	return [...explainShots(), bannerShot(), bannerShot("light")];
 }

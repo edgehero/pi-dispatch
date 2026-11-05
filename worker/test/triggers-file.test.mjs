@@ -184,10 +184,48 @@ test("writeTriggers refuses a read that keeps failing too, on a real directory w
 	assert.equal(realStatSync(path).isDirectory(), true);
 });
 
-test("a file that does not parse is still rebuilt from empty: the recorded repair, a different thing from a failed read", () => {
-	const fs = triggerFs({ [T_PATH]: "{ this is not json" });
+const KEEPS = /so its triggers cannot be kept; nothing was written\. Fix the file, or move it aside to start from an empty one$/;
+
+for (const [what, text, says] of [
+	["a stray comma in a real file", `{\n  "triggers": [,\n    {"on":{"type":"cron"}}\n  ]\n}\n`, "is not valid JSON"],
+	["half a file", '{ "triggers": [ {"on":', "is not valid JSON"],
+	["a byte-order mark before a valid file", '\uFEFF{ "triggers": [] }\n', "is not valid JSON (it starts with a byte-order mark)"],
+	["a bare list of entries", '[{"on":{"type":"cron","id":"a","pattern":"0 3 * * *"}}]\n', "is not a JSON object"],
+	["a null", "null\n", "is not a JSON object"],
+	["a number", "5\n", "is not a JSON object"],
+	["a triggers key that is not a list", '{ "triggers": { "a": 1 } }\n', 'has a "triggers" that is not a list'],
+]) {
+	test(`writeTriggers refuses ${what} and leaves every byte, before mutate runs`, () => {
+		const fs = triggerFs({ [T_PATH]: text });
+		const res = writeTriggers({ triggersPath: T_PATH, fs, mutate: () => assert.fail("mutate was asked to build on nothing") });
+		assert.equal(res.malformed, true);
+		assert.ok(res.invalid.startsWith(`the triggers file ${T_PATH} ${says}, `), res.invalid);
+		assert.match(res.invalid, KEEPS);
+		assert.equal(fs.files[T_PATH], text);
+		assert.deepEqual(Object.keys(fs.files), [T_PATH], "neither a tmp file nor the lock is left");
+	});
+}
+
+test("the malformed refusal never quotes the file, whose text the parser's own message would", () => {
+	const res = writeTriggers({ triggersPath: T_PATH, fs: triggerFs({ [T_PATH]: '{ "task": "hunter2", ,' }), mutate: (list) => list });
+	assert.equal(res.malformed, true);
+	assert.doesNotMatch(res.invalid, /hunter2/);
+});
+
+for (const [what, text] of [["empty", ""], ["only whitespace", "  \n\t\n"], ["only a byte-order mark", "\uFEFF"]]) {
+	test(`writeTriggers starts from nothing on a file that is ${what}: it holds nothing to lose`, () => {
+		const fs = triggerFs({ [T_PATH]: text });
+		assert.deepEqual(writeTriggers({ triggersPath: T_PATH, fs, mutate: (list) => [...list, labelTrigger()] }), { ok: true });
+		assert.equal(JSON.parse(fs.files[T_PATH]).triggers.length, 1);
+	});
+}
+
+test("writeTriggers keeps a file's other keys when it has no triggers key yet: nothing there is a trigger to lose", () => {
+	const fs = triggerFs({ [T_PATH]: '{ "note": "kept" }\n' });
 	assert.deepEqual(writeTriggers({ triggersPath: T_PATH, fs, mutate: (list) => [...list, labelTrigger()] }), { ok: true });
-	assert.equal(JSON.parse(fs.files[T_PATH]).triggers.length, 1);
+	const doc = JSON.parse(fs.files[T_PATH]);
+	assert.equal(doc.note, "kept");
+	assert.equal(doc.triggers.length, 1);
 });
 
 for (const [what, method, code] of [["the tmp file's write", "writeFileSync", "ENOSPC"], ["the rename", "renameSync", "EIO"], ["the rename, twice with EPERM", "renameSync", "EPERM"]]) {
@@ -900,4 +938,15 @@ test("disarmTrigger keeps every other top-level key, byte-identical in content (
 	const expected = sharedDoc([cronTrigger(), onceTrigger(40)]);
 	expected.triggers[1].on.disarmed = { at: AT, jobId: "job-abc" };
 	assert.equal(fs.files[T_PATH], docFile(expected), "the disarm adds one key inside the array and touches nothing beside it");
+});
+
+test("a file a newer release wrote is told to upgrade, whatever shape its triggers have, and keeps every byte", () => {
+	const dir = tempDir("pd-triggers-newer-");
+	const path = join(dir, "triggers.json");
+	const text = '{ "version": 99, "triggers": { "future": true } }\n';
+	realWriteFileSync(path, text);
+	const res = writeTriggers({ triggersPath: path, mutate: (list) => list });
+	assert.equal(res.newer, true);
+	assert.match(res.invalid, /written by a newer pi-dispatch/);
+	assert.equal(realReadFileSync(path, "utf8"), text);
 });

@@ -17,6 +17,8 @@ import { existsSync as fsExistsSync, readFileSync as fsReadFileSync } from "node
 import { isAbsolute } from "node:path";
 import { configError } from "./config.mjs";
 import { FORGE_KINDS, isForgeKind } from "./forges.mjs";
+import { heldDocument } from "./held-document.mjs";
+import { findDuplicateKey } from "./json-duplicates.mjs";
 import { neededVersion, underDeclared, valueNeededVersion, valueUnderDeclared, versionProblem } from "./store-version.mjs";
 
 /**
@@ -63,8 +65,7 @@ export function pauseWindowsVersionFor(windows, { table = PAUSE_WINDOW_FIELD_VER
 /**
  * Whether a writer must refuse the parsed document `doc`: `{ newer, message }` when its raw `version` is newer than
  * this build reads (`newer: true`) or is not an integer of 1 or more (`newer: false`), else null. The RAW version
- * only, never the full parser, so a file with one bad window can still be fixed by deleting that window; a writer
- * refuses the newer case (it would lose what a newer release wrote) and repairs the rest, the recorded posture.
+ * only, never the full parser, so a list with a bad window in it can still be replaced whole; a writer refuses the newer case (it would lose what a newer release wrote) and replaces a broken `version`.
  */
 export function pauseWindowsVersionRefusal(doc, { supported = PAUSE_WINDOWS_VERSION } = {}) {
 	if (doc === null || typeof doc !== "object" || Array.isArray(doc) || !Object.hasOwn(doc, "version")) return null;
@@ -72,10 +73,26 @@ export function pauseWindowsVersionRefusal(doc, { supported = PAUSE_WINDOWS_VERS
 }
 
 /**
+ * What a write of this file starts from, `{ doc, windows }`, or `{ problem }` with the sentence saying why it could not keep
+ * what the file holds, and `doc` when it parsed, for the caller's newer-release answer, which comes first. One function for
+ * `writePauseWindows` and the console's whole-list action, so a preview and its write cannot read a file two ways. Only a file
+ * that holds nothing starts from no windows: missing (`null`), whitespace, or a byte-order mark alone. A file with one bad
+ * window is not such a file, since its raw list is still there to replace. A key written twice is refused too: `JSON.parse`
+ * keeps the last, so a write would drop the windows a person reading the file can see.
+ */
+export function heldPauseWindows(text, path) {
+	if ((text ?? "").trim() === "") return { doc: null, windows: [] };
+	const { value, problem } = heldDocument(text, "windows");
+	const refused = problem ?? (findDuplicateKey(text) ? "has a key written twice" : null);
+	if (refused) return { doc: value ?? null, problem: `the pause-windows file ${path} ${refused}, so its windows cannot be kept` };
+	return { doc: value, windows: Array.isArray(value.windows) ? value.windows : [] };
+}
+
+/**
  * The pause windows file text for `windows`, written over the parsed document `doc` the write started from (issue
  * #761): 2-space JSON and a trailing newline. Every top-level key of `doc` other than `windows` and `version` is
  * carried in its original place (the file is shared, and a writer from an older release must not delete a block a
- * newer one added), `windows` keeps its position (first when `doc` had none, the repair-from-empty shape), and
+ * newer one added), `windows` keeps its position (first when `doc` had none), and
  * `version` leads only when the windows need more than 1. A `doc` whose only key is `windows`, or no `doc`, gives
  * exactly the bytes this file was always written with, `JSON.stringify({ windows }, null, 2)` plus the newline.
  * Built with `Object.defineProperty`, so a carried key named `__proto__` stays data.

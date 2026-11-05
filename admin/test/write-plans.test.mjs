@@ -916,3 +916,11 @@ test("a tool-proof refusal carries its own stop, so a tool reads a whole sentenc
     assert.match(said, /[^.]\.$/, `${what}: ${said}`);
   }
 });
+
+test("a pause-windows file that cannot be read is not a file with no windows, for changing one of them", () => {
+  const paths = { pauseWindowsPath: "/nowhere/pause-windows.json" };
+  const fs = { readFileSync: () => { throw Object.assign(new Error("no"), { code: "EACCES" }); } };
+  for (const planned of [plans.planPauseWindowDelete({ index: 0, paths, fs }), plans.planPauseWindowEdit({ index: 0, fields: {}, paths, fs })]) {
+    assert.match(planned.refusal, /^the pause-windows file does not load, so one window of it cannot be changed/);
+  }
+});

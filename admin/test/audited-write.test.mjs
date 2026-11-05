@@ -87,6 +87,16 @@ test("a refused write appends ok then failed under the same ticket; a throwing o
   assert.equal(verifyConsoleAudit({ logsDir }).ok, true);
 });
 
+test("a write that may still have run says so in its failed row's reason, since a reader takes that row as the outcome", async () => {
+  const logsDir = tempDir("pd-audited-write-");
+  const audit = makeConsoleAudit({ logsDir });
+  await assert.rejects(auditedWrite({ audit, actor: ACTOR, kind: "board-freeze", target: "r1" }, async () => { throw Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT", valkeyMayStillRun: true }); }));
+  const rows = rowsOf(logsDir);
+  assert.equal(rows[1].outcome, "failed");
+  assert.equal(rows[1].reason, "the write threw (ETIMEDOUT); Valkey did not confirm it, so it may or may not have been made");
+  assert.equal(verifyConsoleAudit({ logsDir }).ok, true);
+});
+
 test("an append failure refuses the write: fn never runs, nothing is written, and the refusal is the caller's shape", () => {
   const audit = brokenAudit();
   let ran = false;

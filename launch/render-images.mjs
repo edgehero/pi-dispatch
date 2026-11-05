@@ -2,9 +2,10 @@
 /**
  * Render the README's panel images from the shipped code over one canned deployment (`launch/fixture-deployment.mjs`).
  *
- *   node launch/render-images.mjs           docs/images/dispatch-{dashboard,hosts,allocation,run-detail,commands}.svg
+ *   node launch/render-images.mjs           docs/images/dispatch-{dashboard,hosts,allocation,run-detail,commands}.svg, and
+ *                                           the READMEs' three of them for a light page as dispatch-*-light.svg
  *   node launch/render-images.mjs --png     the same, plus the .png copies the npm page shows (dashboard, hosts,
- *                                           allocation) and docs/images/insights-view.png
+ *                                           allocation, each in both) and docs/images/insights-view.png
  *
  *   node launch/render-images.mjs --console          docs/images/console/: the operator console images the READMEs show
  *                                                    (`launch/console-picks.mjs`)
@@ -543,9 +544,9 @@ async function mainConsole() {
  * so a loop comes out the same however busy the machine is, and closes on itself. A wall clock could do neither.
  */
 async function mainExplain() {
-	const { EXPLAIN_FPS, EXPLAIN_SCALE, bannerShot, explainShots, explainSources } = await import("./explainers.mjs");
+	const { EXPLAIN_FPS, EXPLAIN_SCALE, everyExplainShot, explainSources } = await import("./explainers.mjs");
 	const { encodeApng } = await import("./apng.mjs");
-	const shots = [...explainShots(), bannerShot()];
+	const shots = everyExplainShot();
 	// The banner lives beside the folder, because the READMEs and pi's gallery load it from there. A review's own --out keeps it inside.
 	const homeOf = (shot) => (shot.name === "banner" && opts.out === join(REPO, "docs", "images", "explain") ? join(REPO, "docs", "images") : opts.out);
 	const pipe = await openChromePipe({ chrome, work, children, Refusal, stepMs: CDP_STEP_MS, env: { HOME: process.env.HOME } });
@@ -570,7 +571,7 @@ async function mainExplain() {
 			for (let frame = 0; frame < shot.frames; frame++) loop.push(await at(frame / EXPLAIN_FPS));
 			writeFileSync(join(homeOf(shot), shot.file), encodeApng(loop, { fps: EXPLAIN_FPS }));
 			writeFileSync(join(homeOf(shot), shot.still), await at(shot.stillAt * shot.seconds));
-			if (shot.name === "banner") writeFileSync(join(homeOf(shot), "banner.svg"), shot.svg);
+			if (shot.name === "banner") writeFileSync(join(homeOf(shot), shot.svgFile), shot.svg);
 			await close();
 			console.log(join(homeOf(shot), shot.file));
 			console.log(join(homeOf(shot), shot.still));
@@ -603,7 +604,7 @@ async function main() {
 	const RM = await import("../admin/src/read-model.mjs");
 	const DW = await import("../admin/src/dollar-windows.mjs");
 	const { columnsOf } = await import("../admin/src/panel.mjs");
-	const { renderTranscript, svgRows } = await import("./transcript-svg.mjs");
+	const { relightTranscript, renderTranscript, svgRows } = await import("./transcript-svg.mjs");
 	const version = JSON.parse(readFileSync(join(REPO, "worker", "package.json"), "utf8")).version;
 
 	const server = opts.url ? null : await startServer(serverBin);
@@ -658,6 +659,8 @@ async function main() {
 		];
 		mkdirSync(opts.out, { recursive: true });
 		for (const [name, svg] of images) writeFileSync(join(opts.out, `${name}.svg`), svg);
+		const lightName = (name) => `${name}-light`;
+		for (const [name, svg] of images.filter(([n]) => PNG_IMAGES.includes(n))) writeFileSync(join(opts.out, `${lightName(name)}.svg`), relightTranscript(svg));
 
 		if (opts.png) {
 			const html = await insightsPage({ env, RM });
@@ -668,14 +671,15 @@ async function main() {
 				await browser.shoot({ url: pathToFileURL(page).href, out: join(opts.out, "insights-view.png"), width: 1240, scale: 2, fullPage: true, clockMs: NOW + 60_000 });
 				for (const [name, svg] of images.filter(([n]) => PNG_IMAGES.includes(n))) {
 					const [, w, h] = /width="(\d+)" height="(\d+)"/.exec(svg);
-					await browser.shoot({ url: pathToFileURL(join(opts.out, `${name}.svg`)).href, out: join(opts.out, `${name}.png`), width: Number(w), height: Number(h), scale: SVG_PNG_SCALE });
+					for (const file of [name, lightName(name)]) await browser.shoot({ url: pathToFileURL(join(opts.out, `${file}.svg`)).href, out: join(opts.out, `${file}.png`), width: Number(w), height: Number(h), scale: SVG_PNG_SCALE });
 				}
 			} finally {
 				await browser.close();
 			}
 		}
 		for (const [name] of images) console.log(join(opts.out, `${name}.svg`));
-		if (opts.png) for (const name of [...PNG_IMAGES, "insights-view"]) console.log(join(opts.out, `${name}.png`));
+		for (const name of PNG_IMAGES) console.log(join(opts.out, `${lightName(name)}.svg`));
+		if (opts.png) for (const name of [...PNG_IMAGES, ...PNG_IMAGES.map(lightName), "insights-view"]) console.log(join(opts.out, `${name}.png`));
 	} finally {
 		if (opts.url && seeded) await admin.flushdb().catch(() => {});
 		admin.disconnect();

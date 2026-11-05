@@ -2029,3 +2029,369 @@ test("live watch facts report a validated watch rule and discard private finding
     assert.equal(invalid.target, null);
   } finally { await reader.dispose(); }
 });
+
+// ---- A queue whose client ended is replaced (a Valkey restart under a running console) ---------------------------------
+
+/** A `makeQueueFn` whose queues answer the snapshot's reads, each with a client this test can end. */
+function endingQueues() {
+  const built = [];
+  const mk = (_conn, opts = {}) => {
+    const name = opts.name ?? "pi-jobs";
+    const listeners = {};
+    const client = { status: "ready", once(event, fn) { listeners[event] = fn; } };
+    const q = {
+      name,
+      client: Promise.resolve(client),
+      closed: 0,
+      workersAsked: 0,
+      jobsAsked: 0,
+      end() { client.status = "end"; listeners.end?.(); },
+      async isPaused() { return false; },
+      async getJobCounts() { return { waiting: 0, active: 0, paused: 0, delayed: 0, failed: 0 }; },
+      async getWorkers() { q.workersAsked += 1; return []; },
+      async getJobSchedulers() { return []; },
+      async getActive() { return []; },
+      async getFailed() { return []; },
+      async getJob() { q.jobsAsked += 1; return null; },
+      async close() { q.closed += 1; },
+    };
+    built.push(q);
+    return q;
+  };
+  return { built, mk };
+}
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+const readyRedis = () => ({ status: "ready", on() {}, get: async () => null, mget: async () => [], hgetall: async () => ({}), smembers: async () => [], scan: async () => ["0", []], disconnect() {} });
+
+function endingReader(mk, hosts = [], seams = {}) {
+  const logsDir = tempDir("pd-ended-queue-");
+  const triggersPath = join(logsDir, "triggers.json");
+  writeFileSync(triggersPath, '{ "triggers": [] }\n');
+  return createFleetReader(
+    { valkeyUrl: "redis://unused", logsDir, triggersPath },
+    { makeQueueFn: mk, parseConnectionFn: () => ({}), redisFn: readyRedis, readLiveHostsFn: async () => ({ hosts: typeof hosts === "function" ? hosts() : hosts }), discoverHostQueuesFn: async () => [], nowFn: () => 1_800_000_000_000, readOnly: true, activeLimit: 2, ...seams },
+  );
+}
+
+test("createFleetReader replaces a queue whose client ended, once, closes the old one, and keeps a live one", async () => {
+  const { built, mk } = endingQueues();
+  const reader = endingReader(mk, [{ name: "hostb", routes: true }]);
+  await reader.snapshot();
+  await settle();
+  assert.deepEqual(built.map((q) => q.name), ["pi-jobs", "pi-jobs@hostb"]);
+  await reader.snapshot();
+  assert.equal(built.length, 2, "two reads on live clients build nothing");
+  built[0].end();
+  await reader.snapshot();
+  await settle();
+  assert.deepEqual(built.map((q) => q.name), ["pi-jobs", "pi-jobs@hostb", "pi-jobs"], "the ended one alone is replaced");
+  assert.equal(built[0].closed, 1, "what it replaced is closed, not left open");
+  assert.equal(built[1].closed, 0);
+  await reader.snapshot();
+  assert.equal(built.length, 3, "and the replacement is held, not rebuilt per read");
+});
+
+test("createFleetReader asks the replacement for the workers, not the shared queue it held from the start", async () => {
+  const { built, mk } = endingQueues();
+  const reader = endingReader(mk);
+  await reader.snapshot();
+  await settle();
+  assert.equal(built[0].workersAsked, 1);
+  built[0].end();
+  await reader.snapshot();
+  assert.equal(built[0].workersAsked, 1, "the ended queue is not asked again");
+  assert.equal(built[1].workersAsked, 1);
+});
+
+test("createFleetReader: a job's lookup on a host that left the registry goes to a replacement too", async () => {
+  const { built, mk } = endingQueues();
+  let hosts = [{ name: "hostb", routes: true }];
+  const reader = endingReader(mk, () => hosts);
+  await reader.snapshot();
+  await settle();
+  const left = built.find((q) => q.name === "pi-jobs@hostb");
+  hosts = [];
+  await reader.snapshot();
+  left.end();
+  await reader.triggerSkew(0, { rows: [{ queue: "pi-jobs@hostb", jobId: "gh-1" }] });
+  await settle();
+  assert.equal(left.jobsAsked, 0, "the ended queue answers for nothing");
+  assert.equal(left.closed, 1);
+  const again = built.filter((q) => q.name === "pi-jobs@hostb");
+  assert.equal(again.length, 2);
+  assert.equal(again[1].jobsAsked, 1);
+  await reader.triggerSkew(0, { rows: [{ queue: "pi-jobs@never-held", jobId: "gh-2" }] });
+  assert.equal(built.some((q) => q.name === "pi-jobs@never-held"), false, "a lookup replaces what the pool holds, and builds nothing for a name a row carries");
+});
+
+test("createFleetReader replaces a sandbox request queue whose client ended, and closes the replacement at dispose", async () => {
+  const { built, mk } = endingQueues();
+  const reader = endingReader(() => ({ name: "pi-jobs" }), [], {
+    makeSandboxPrepareQueueFn: (conn, { host }) => mk(conn, { name: `sandbox@${host}` }),
+    readSandboxPreparationFn: async (q, id) => ({ id, queue: q }),
+  });
+  const first = await reader.sandboxPreparationStatus("mini1", "a");
+  await settle();
+  assert.equal((await reader.sandboxPreparationStatus("mini1", "b")).queue, first.queue, "a live one is held");
+  built[0].end();
+  const second = await reader.sandboxPreparationStatus("mini1", "c");
+  await settle();
+  assert.notEqual(second.queue, first.queue);
+  assert.equal(built[0].closed, 1);
+  await reader.dispose();
+  assert.equal(built[1].closed, 1);
+});
+
+test("createFleetReader builds nothing once disposed: a read that follows finds the held queue, and a new name is refused", async () => {
+  const { built, mk } = endingQueues();
+  let hosts = [];
+  const reader = endingReader(mk, () => hosts);
+  await reader.snapshot();
+  await settle();
+  await reader.dispose();
+  built[0].end();
+  await reader.snapshot();
+  assert.equal(built.length, 1, "an ended queue past dispose is not replaced: its live client would outlive the stop");
+  hosts = [{ name: "hostb", routes: true }];
+  await assert.rejects(reader.snapshot(), /this fleet reader has been disposed/);
+  assert.equal(built.length, 1);
+});
+
+test("createFleetReader: a read in flight across dispose builds nothing when it comes back", async () => {
+  const { built, mk } = endingQueues();
+  let release;
+  const held = new Promise((resolve) => (release = resolve));
+  const logsDir = tempDir("pd-ended-queue-");
+  const reader = createFleetReader(
+    { valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json") },
+    { makeQueueFn: mk, parseConnectionFn: () => ({}), redisFn: readyRedis, readLiveHostsFn: async () => { await held; return { hosts: [] }; }, discoverHostQueuesFn: async () => [], nowFn: () => 1_800_000_000_000, readOnly: true },
+  );
+  await settle();
+  const reading = reader.snapshot().catch(() => {});
+  await settle();
+  built[0].end();
+  await settle();
+  await reader.dispose();
+  release();
+  await reading;
+  assert.equal(built.length, 1);
+});
+
+test("createFleetReader replaces a queue whose connection never came up: its client promise rejected", async () => {
+  const { built, mk } = endingQueues();
+  const refusing = (conn, opts) => {
+    const q = mk(conn, opts);
+    if (built.length === 1) {
+      q.client = Promise.reject(new Error("nothing answers VALKEY_URL"));
+      q.isPaused = async () => { throw new Error("nothing answers VALKEY_URL"); };
+    }
+    return q;
+  };
+  const reader = endingReader(refusing);
+  await settle();
+  const healed = await reader.snapshot();
+  assert.equal(built.length, 2, "the next read builds a queue again, so a Valkey that came up is seen");
+  assert.equal(healed.queue.counts.waiting, 0);
+});
+
+test("createFleetReader: a client that had already ended when it was first looked at counts as ended", async () => {
+  const { built, mk } = endingQueues();
+  const ended = (conn, opts) => {
+    const q = mk(conn, opts);
+    if (built.length === 1) q.client = Promise.resolve({ status: "end", once() { assert.fail("an ended client emits nothing more"); } });
+    return q;
+  };
+  const reader = endingReader(ended);
+  await settle();
+  await reader.snapshot();
+  assert.equal(built.length, 2);
+});
+
+test("createFleetReader: a queue built with no client at all (a surface's own seam) is simply held", async () => {
+  const q = { name: "pi-jobs", async isPaused() { return false; }, async getJobCounts() { return {}; }, async getWorkers() { return []; }, async getJobSchedulers() { return []; }, async getActive() { return []; }, async getFailed() { return []; }, async close() {} };
+  let built = 0;
+  const reader = endingReader(() => { built += 1; return q; });
+  await settle();
+  await reader.snapshot();
+  await reader.snapshot();
+  assert.equal(built, 1);
+});
+
+test("createFleetReader: the raw client is bounded and judged afresh, so a stale verdict cannot hang a page", () => {
+  let options = null;
+  const logsDir = tempDir("pd-ended-queue-");
+  createFleetReader(
+    { valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json") },
+    { makeQueueFn: () => ({ name: "pi-jobs" }), parseConnectionFn: () => ({}), redisFn: (_url, opts) => { options = opts; return { on() {} }; }, readOnly: true },
+  );
+  assert.equal(options.freshContext, true);
+  assert.equal(options.commandTimeoutMs, 5_000, "longer than the reads this reader bounds itself, and short enough to be read as a page's wait");
+});
+
+test("createFleetReader on a real raw client that cannot connect: a healthy queue's snapshot still ends, where a raw read used to hang it", { timeout: 15000 }, async () => {
+  const { makeRedisClient } = await import("@edgehero/pi-dispatch/connection");
+  const { mk } = endingQueues();
+  const logsDir = tempDir("pd-ended-queue-");
+  const reader = createFleetReader(
+    { valkeyUrl: "redis://127.0.0.1:1", logsDir, triggersPath: join(logsDir, "none.json") },
+    {
+      makeQueueFn: mk,
+      parseConnectionFn: () => ({}),
+      redisFn: (url, opts) => makeRedisClient(url, { ...opts, commandTimeoutMs: 40, context: {}, judge: async () => { throw new Error("refused by a stale .env verdict"); } }),
+      readLiveHostsFn: async () => ({ hosts: [] }),
+      discoverHostQueuesFn: async () => [],
+      nowFn: () => 1_800_000_000_000,
+      readOnly: true,
+    },
+  );
+  let wait;
+  try {
+    // A race and not a bare await: without the bound the read never ends, and neither would this file, on a client the
+    // `finally` below never got to let go.
+    const answer = await Promise.race([reader.snapshot().then(() => "answered", (err) => err.message), new Promise((resolve) => { wait = setTimeout(resolve, 5000, "no answer"); })]);
+    assert.match(answer, /Command timed out/);
+  } finally {
+    clearTimeout(wait);
+    await reader.dispose();
+  }
+});
+
+test("createFleetReader's cancelActive takes back a request whose answer was lost, in order, and leaves an answered one alone", async () => {
+  const cancelling = (set, get) => {
+    const sent = [];
+    const logsDir = tempDir("pd-ended-queue-");
+    const redis = { on() {}, disconnect() {}, async set(key) { sent.push(["set", key]); return set(); }, async get(key) { sent.push(["get", key]); return get(); }, async del(key) { sent.push(["del", key]); throw new Error("Command timed out"); } };
+    const reader = createFleetReader({ valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json") }, { makeQueueFn: () => ({ name: "pi-jobs", close: async () => {} }), parseConnectionFn: () => ({}), redisFn: () => redis, readOnly: true });
+    return { sent, reader };
+  };
+  const timedOut = () => { throw new Error("Command timed out"); };
+  const refused = cancelling(timedOut, () => null);
+  await assert.rejects(refused.reader.cancelActive({ jobId: "gh-1" }), /Command timed out/);
+  await settle();
+  assert.deepEqual(refused.sent, [["set", "cancel:req:gh-1"], ["del", "cancel:req:gh-1"]]);
+  const lost = cancelling(() => "OK", timedOut);
+  await assert.rejects(lost.reader.cancelActive({ jobId: "gh-1", interventionOrigin: "agent" }), (err) => err.valkeyMayStillRun === true);
+  await settle();
+  assert.deepEqual(lost.sent, [["set", "cancel:agent:req:gh-1"], ["get", "cancel:agent:ack:gh-1"], ["del", "cancel:agent:req:gh-1"]]);
+  const answered = cancelling(() => "OK", () => "mini1");
+  assert.deepEqual(await answered.reader.cancelActive({ jobId: "gh-1" }), { ack: "mini1" });
+  await settle();
+  assert.deepEqual(answered.sent.map(([op]) => op), ["set", "get"], "an answered request is the worker's to consume");
+});
+
+test("createFleetReader: a replacement that cannot be built while the snapshot's reads start costs the worker list, and orphans none of them", async () => {
+  const { built, mk } = endingQueues();
+  let refuse = false;
+  const reader = endingReader(mk, [], { parseConnectionFn: () => { if (refuse) throw new Error("the context could not be read"); return {}; } });
+  await reader.snapshot();
+  await settle();
+  // The first read of the list ends the client, so the worker read, next in the list, finds it ended and has to replace it.
+  built[0].isPaused = async () => false;
+  const isPaused = built[0].isPaused;
+  built[0].isPaused = () => { built[0].end(); refuse = true; return isPaused(); };
+  const got = await reader.snapshot();
+  assert.deepEqual(got.workers ?? [], []);
+  assert.equal(built.length, 1, "nothing could be built, and the snapshot still ended");
+});
+
+test("createFleetReader: closing a replaced queue that refuses to close goes nowhere", async () => {
+  const { built, mk } = endingQueues();
+  const unhandled = [];
+  const note = (err) => unhandled.push(err);
+  process.on("unhandledRejection", note);
+  try {
+    const reader = endingReader(mk);
+    await reader.snapshot();
+    await settle();
+    built[0].close = async () => { throw new Error("close refused"); };
+    built[0].end();
+    await reader.snapshot();
+    await settle();
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(built.length, 2);
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off("unhandledRejection", note);
+  }
+});
+
+test("createFleetReader: a queue only the keyspace names, as the kill switch reads it, is replaced too once its client ended", async () => {
+  const { built, mk } = endingQueues();
+  const reader = endingReader(mk, [], { discoverHostQueuesFn: async () => ["pi-jobs@stopped"] });
+  await reader.snapshot({ switchQueues: true });
+  await settle();
+  const first = built.find((q) => q.name === "pi-jobs@stopped");
+  assert.ok(first);
+  first.end();
+  await settle();
+  await reader.snapshot({ switchQueues: true });
+  await settle();
+  assert.equal(built.filter((q) => q.name === "pi-jobs@stopped").length, 2);
+  assert.equal(first.closed, 1);
+});
+
+test("createFleetReader: the raw client's error is one line a minute under its own name, and a client seam may be absent", () => {
+  const handlers = {};
+  const logsDir = tempDir("pd-ended-queue-");
+  const written = [];
+  const write = process.stderr.write;
+  process.stderr.write = (line, ...rest) => {
+    if (String(line).includes("the raw client's fault")) {
+      written.push(String(line));
+      return true;
+    }
+    return write.call(process.stderr, line, ...rest);
+  };
+  try {
+    createFleetReader(
+      { valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json") },
+      { makeQueueFn: () => ({ name: "pi-jobs" }), parseConnectionFn: () => ({}), redisFn: () => ({ on(event, fn) { handlers[event] = fn; } }), readOnly: true },
+    );
+    handlers.error(new Error("the raw client's fault"));
+    handlers.error(new Error("the raw client's fault"));
+    assert.deepEqual(written, ["[pi-dispatch] Valkey error (fleet reads): the raw client's fault\n"]);
+  } finally {
+    process.stderr.write = write;
+  }
+  assert.doesNotThrow(() => createFleetReader({ valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json") }, { makeQueueFn: () => ({ name: "pi-jobs" }), parseConnectionFn: () => ({}), redisFn: () => null, readOnly: true }));
+});
+
+test("createFleetReader: the raw client says its error in one line, so an outage is not a stack trace per reconnect attempt", () => {
+  const events = [];
+  const logsDir = tempDir("pd-ended-queue-");
+  createFleetReader(
+    { valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json") },
+    { makeQueueFn: () => ({ name: "pi-jobs" }), parseConnectionFn: () => ({}), redisFn: () => ({ on(event) { events.push(event); } }), readOnly: true },
+  );
+  assert.deepEqual(events, ["ready", "error"], "and its going ready lets a second outage be said");
+});
+
+test("createFleetReader on real BullMQ and ioredis: a refused judge fails the read, and the next read builds a new queue on a new judgement", { timeout: 15000 }, async () => {
+  const { makeQueue } = await import("@edgehero/pi-dispatch/queue");
+  const { parseConnection } = await import("@edgehero/pi-dispatch/connection");
+  let opened = 0;
+  const logsDir = tempDir("pd-ended-queue-");
+  const reader = createFleetReader(
+    { valkeyUrl: "redis://127.0.0.1:1", logsDir, triggersPath: join(logsDir, "none.json") },
+    {
+      makeQueueFn: (conn, opts) => { opened += 1; const q = makeQueue(conn, opts); q.removeAllListeners("error"); q.on("error", () => {}); return q; },
+      parseConnectionFn: (url, opts) => parseConnection(url, { ...opts, context: {}, judge: async () => { throw new Error("nothing answers VALKEY_URL"); } }),
+      redisFn: readyRedis,
+      readLiveHostsFn: async () => ({ hosts: [] }),
+      discoverHostQueuesFn: async () => [],
+      nowFn: () => 1_800_000_000_000,
+      readOnly: true,
+    },
+  );
+  try {
+    await assert.rejects(reader.snapshot(), /nothing answers VALKEY_URL/);
+    await settle();
+    assert.equal(opened, 1);
+    await assert.rejects(reader.snapshot(), /nothing answers VALKEY_URL/);
+    await settle();
+    assert.equal(opened, 2, "the ended queue was replaced, not asked again");
+  } finally {
+    await reader.dispose();
+  }
+});
