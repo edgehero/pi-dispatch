@@ -43,6 +43,7 @@ with at least one commit, and `run` refuses any other folder before it queues an
 |---|---|
 | `init` | write `.env` and the config files into this folder (never overwrites) |
 | `up` | one pass that asks before each container action: image, Valkey, egress proxy, `init`, `doctor` |
+| `console` | get into the web console: starts its service if it stopped, then opens your browser signed in |
 | `doctor [--fix] [--live] [--openshell] [--secrets] [--no-publish]` | check the whole setup; `--live` reads the isolation guarantees back from real containers; each run publishes its checks (paths, URLs and secret values cut out) for the console and the panel, unless `--no-publish` |
 | `worker` | run jobs from the queue |
 | `run <folder> --task "..."` | queue one job against a local folder |

@@ -623,6 +623,7 @@ test("wizard: declined confirms spawn NOTHING, and every step is still offered",
   assert.equal(seen.select.length, 3, "intent + worker choice + trigger edge");
   assert.ok(notes.some((n) => /provider key/.test(n.m)), "the never-tier provider-key notice still fires");
   assert.ok(notes.some((n) => /setup finished/.test(n.m)));
+  assert.ok(notes.some((n) => /To use the web console as well, run \/dispatch setup/.test(n.m)), "the Guided route does not leave the console unmentioned");
   assert.equal(dashboards.length, 1, "the wizard still ends at the panel");
   assert.deepEqual(dashboards[0], { canned: "resolved" }, "opened against freshly resolved paths");
 });
@@ -1986,7 +1987,7 @@ test("browser wizard installs exact durable worker/admin/pi artifacts, checks th
   assert.deepEqual(attached[0].args, ["install", `@edgehero/pi-dispatch@${mod.RUNTIME_VERSION}`, `@edgehero/pi-dispatch-admin@${mod.RUNTIME_VERSION}`, `@earendil-works/pi-coding-agent@${PINNED_PI}`, "--save-exact", "--omit=dev", "--omit=optional", "--ignore-scripts", "--no-audit", "--no-fund", "--loglevel=error"]);
   assert.equal(attached[0].cwd, dir);
   assert.equal(attached[0].shell, undefined);
-  assert.deepEqual(attached[1].args, [cliPathOf(dir), "up", "--console"]);
+  assert.deepEqual(attached[1].args, [cliPathOf(dir), "up", "--console", "--ask-each", "--no-open"]);
   assert.ok(attached.every(call => !call.args.includes("--yes")));
   assert.equal(pointerWrites[0].pointer.deploymentDir, dir);
   assert.deepEqual(opened, [dir]);
@@ -2016,7 +2017,7 @@ test("browser setup converges exact artifacts and preserves independent bootstra
     const opened = [];
     const { deps, attached } = wizardDeps({ openSetupConsoleFn: async selected => opened.push(selected) });
     await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
-    assert.deepEqual(attached.map(call => call.args), [[cliPathOf(dir), "up", "--console"]], "no redundant install and no service command outside up");
+    assert.deepEqual(attached.map(call => call.args), [[cliPathOf(dir), "up", "--console", "--ask-each", "--no-open"], ...(pointerAccepted ? [] : [[cliPathOf(dir), "console", "--next", "/setup"]])], "no redundant install and no service command outside up, and a declined pointer is not left without a way in");
     assert.equal(opened.length, pointerAccepted ? 1 : 0, "a declined pointer cannot mint into an unguarded deployment");
   }
   const dir = emptyDir();
@@ -2025,6 +2026,15 @@ test("browser setup converges exact artifacts and preserves independent bootstra
   await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
   assert.deepEqual(attached, []);
   assert.deepEqual(pointerWrites, []);
+});
+
+test("with no pointer written, a sign-in that could not be opened says what to run", async () => {
+  const dir = emptyDir();
+  plantBrowserArtifacts(dir);
+  const { ui, notes } = wizardUi({ select: ["Finish setup in browser"], input: [dir], confirm: [true, false] });
+  const { deps } = wizardDeps({ runAttachedFn: async (_ctx, opts) => ({ code: opts.args.includes("console") && !opts.args.includes("up") ? 2 : 0 }), openSetupConsoleFn: async () => {} });
+  await mod.runSetupWizard({}, tuiCtx(ui), ui.notify, deps);
+  assert.ok(notes.some(row => /No sign-in was opened/.test(row.m) && row.m.includes("./pi-dispatch console")), JSON.stringify(notes));
 });
 
 test("browser route failure keeps the operator in terminal recovery and never mints a fresh private link", async () => {

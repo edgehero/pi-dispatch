@@ -162,9 +162,8 @@ pi-dispatch-console link --name rob --port 4790
 
 It prints `http://localhost:4790/login/code#<code>`, ready to open on your own machine. The console cannot know that
 port (a unix socket has none, and a tunnel can forward any free one), so you name it: `--port` takes a number from 1
-to 65535, a bad one is refused before any link is made, and it is refused on every command but `link`. Without
-`--port`, a console on a unix socket prints its link with `<the local port of your ssh -L tunnel>` where the port
-goes.
+to 65535, a bad one is refused before any link is made, and it is refused on every command but `link` and `open`. Without
+`--port`, `link` on a unix socket prints `<the local port of your ssh -L tunnel>` where the port goes, and `open` uses 4790.
 
 A page opened by a name the console does not answer to (a hostname of your own that is not in
 `PI_CONSOLE_ALLOWED_HOSTS`, say) says so and gives the `ssh -L` command for the address and port you came in on
@@ -1114,7 +1113,22 @@ shows, which it counts as not read), or both in one sentence. Under the groups, 
 no run is recorded and either no host is registered or no trigger exists. The direct setup page remains available
 once jobs run. A temporary outage never turns an established deployment into a new one.
 
-Bootstrap from the deployment folder with the durable installed CLI:
+From an empty folder, one command does all of it (Mac and Linux, from the first release after 5.0.0; on 5.0.0 use the lines by hand below):
+
+```bash
+mkdir my-dispatch && cd my-dispatch
+npx --yes --ignore-scripts @edgehero/pi-dispatch@5.0.0 up --console
+```
+
+Run from npm's cache, `up --console` checks the platform, the folder, the deployment's settings, the tokens file and the
+service manager first, so a refusal leaves nothing behind. It then lists what it will do and asks once: **y** for yes to
+all, **a** to be asked before each step, anything else to stop. Yes means exactly `--yes`: every command is still printed, and
+anything `--yes` does not cover still asks. It installs the exact worker, admin and pi versions into the folder, with
+install scripts off, and hands over to the folder's own binary. It refuses your home folder, a folder inside a cache, and
+one that holds other files and is not a deployment. If a later step fails, Docker not running being the likely one, it says
+what to run next. On a folder that is already a deployment it asks before each step instead.
+
+The same thing by hand, for a folder you want to control yourself:
 
 ```bash
 npm init -y
@@ -1122,14 +1136,23 @@ npm install --save-exact @edgehero/pi-dispatch@5.0.0 @edgehero/pi-dispatch-admin
 ./node_modules/.bin/pi-dispatch up --console
 ```
 
-`up --console` checks the installed console, exact pi peer, supported user manager, deployment, token file and
-service paths before changing anything. A worker-only `npx` cache cannot become a service. The ordinary `up` pass
-still asks about its infrastructure actions. The extra consent names the console service's `--host-setup` grant.
-Bootstrap preserves existing tokens, or creates an operator hash and discards its durable plaintext. It starts
-only the console service and prints a one-use `/setup` sign-in link after that console answers. The link is good
-for 60 seconds. Its recovery instructions name `pi-dispatch-console link --name '<operator>' --next /setup` and
-`token rotate`. Multiple operators require an explicit choice. On a remote machine, open your own tunnel before
-using its loopback link. `/dispatch setup` offers the same browser route and retains its terminal guided route.
+A worker-only `npx` cache cannot become a service. A durable worker with no admin package refuses rather than installs.
+Bootstrap preserves existing tokens, or creates an operator hash and discards its durable plaintext. The name defaults to
+`operator`, and `--name` chooses another. It starts only the console service and adds a `./pi-dispatch` shortcut to the
+folder's own binary, then opens your browser on `/setup`, signed in.
+
+To get back in at any time, from the deployment folder:
+
+```bash
+./pi-dispatch console
+```
+
+It starts this deployment's console service if it has stopped, then signs you in. On your own machine it opens the browser and
+prints no link; press Enter if no browser appeared and it prints a fresh one. Over SSH, or for a console on a unix socket, it
+first shows the tunnel to open, then waits for Enter and only then makes a link, so the 60 seconds start when you can use them. A link works once.
+`pi-dispatch-console link` still prints a link to pass along, and its `--name` can be left out when there is one operator.
+Multiple operators require an explicit choice. On Windows the command opens the page and you paste a token.
+`/dispatch setup` offers the same browser route and retains its terminal guided route.
 
 The steps keep this order:
 

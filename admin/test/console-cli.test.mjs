@@ -218,14 +218,85 @@ test("link --port prints the link for the tunnel's local port on localhost, over
   assert.equal((await cli(["link", "--name", "alice", "--port"])).code, 2);
 });
 
-test("--port on any command but link is refused before anything runs: it would be ignored, so it is said", async () => {
+test("--port on any command but link and open is refused before anything runs: it would be ignored, so it is said", async () => {
   for (const argv of [["serve"], ["token", "add", "--name", "a", "--role", "viewer"], ["token", "list"], ["token", "revoke", "--name", "alice"], ["token", "rotate", "--name", "alice"], ["sessions", "end-all"], ["audit", "verify"]]) {
     const r = await cli([...argv, "--port", "8080"], { until: Promise.resolve() });
     assert.equal(r.code, 2, argv.join(" "));
-    assert.deepEqual(r.err, ["pi-dispatch-console: --port is for link only"], argv.join(" "));
+    assert.deepEqual(r.err, ["pi-dispatch-console: --port is for link and open only"], argv.join(" "));
     assert.deepEqual([r.out, r.modules.calls, r.modules.rows], [[], [], []], `${argv.join(" ")}: nothing ran`);
   }
-  assert.match(USAGE, /^  link --name <name> \[--port <n>\] \[--next \/setup\] {2}a one-time sign-in link, valid 60 seconds$/m);
+  assert.match(USAGE, /^  link \[--name <name>\] \[--port <n>\] \[--next \/setup\] {2}a one-time sign-in link to pass along, valid 60 seconds$/m);
+});
+
+test("link needs no --name with exactly one operator, says why with none or several, and still refuses an empty one", async () => {
+  const tokenOf = (name) => ({ name, role: "operator", sha256: "a".repeat(64), createdAt: "2026-10-01T00:00:00.000Z" });
+  const sole = await cli(["link"], { env: deployment({ PI_CONSOLE_LISTEN: "127.0.0.1:4790" }).env });
+  assert.equal(sole.code, 0);
+  assert.deepEqual(sole.out, [`http://127.0.0.1:4790/login/code#${CODE}`]);
+  const none = await cli(["link"], { modules: fakeModules({ tokens: [] }) });
+  assert.equal(none.code, 2);
+  assert.match(none.err.join(" "), /no operator token yet/);
+  const two = await cli(["link"], { modules: fakeModules({ tokens: [tokenOf("a"), tokenOf("b")] }) });
+  assert.equal(two.code, 2);
+  assert.match(two.err.join(" "), /2 operator tokens, so name one/);
+  assert.equal((await cli(["link", "--name", ""])).code, 2, "a script's empty $NAME is no request for the sole operator");
+});
+
+test("open: audit, then mint, hand the link to the browser, print no code, and pass --next", async () => {
+  const opened = [];
+  const r = await cli(["open", "--next", "/setup"], { env: deployment({ PI_CONSOLE_LISTEN: "127.0.0.1:4790" }).env, isTTY: false, isLocal: () => true, openLink: (url) => { opened.push(url); return {}; } });
+  assert.equal(r.code, 0);
+  assert.deepEqual(r.out, [], "no code on stdout");
+  assert.deepEqual(opened, [`http://127.0.0.1:4790/login/code#${CODE}&next=/setup`]);
+  assert.equal(r.modules.rows.filter((row) => row.action === "login-code").length, 1);
+});
+
+test("open: a unix socket is the tunnel path even at the machine's own keyboard, with the tunnel's port in the link", async () => {
+  const opened = [];
+  const r = await cli(["open"], { env: deployment({ PI_CONSOLE_LISTEN: "unix:/tmp/pd.sock" }).env, isTTY: false, isLocal: () => true, openLink: (url) => { opened.push(url); return {}; } });
+  assert.equal(r.code, 2, "no terminal to wait on, so it stops");
+  assert.deepEqual(opened, [], "a browser could not have reached it");
+  assert.match(r.err.join(" "), /link for a link to pass along/);
+});
+
+test("open: over SSH the tunnel line is right for IPv4 and for IPv6", async () => {
+  for (const [listen, line] of [["127.0.0.1:4790", "ssh -L 4790:127.0.0.1:4790 <this host>"], ["[::1]:4790", "ssh -L 4790:[::1]:4790 <this host>"]]) {
+    const r = await cli(["open"], { env: deployment({ PI_CONSOLE_LISTEN: listen }).env, isTTY: true, isLocal: () => false, enter: { next: async () => false, close() {} } });
+    assert.ok(r.err.join(" ").includes(line), `${listen}: ${r.err.join(" ")}`);
+  }
+});
+
+test("open: over SSH on a socket the printed link carries the tunnel's port, and --port is honoured", async () => {
+  let presses = 1;
+  const enter = { next: async () => presses-- > 0, close() {} };
+  const modules = fakeModules();
+  // The link is taken at once, so the watch ends after its first look.
+  modules.loginCodes.codePending = () => false;
+  const r = await cli(["open"], { modules, env: deployment({ PI_CONSOLE_LISTEN: "unix:/tmp/pd.sock" }).env, isTTY: true, isLocal: () => false, enter, sleep: async () => {} });
+  assert.equal(r.code, 0);
+  assert.deepEqual(r.out, [`http://localhost:4790/login/code#${CODE}`]);
+  const opened = [];
+  const ported = await cli(["open", "--port", "8080"], { env: deployment({ PI_CONSOLE_LISTEN: "127.0.0.1:4790" }).env, isTTY: false, isLocal: () => true, openLink: (url) => { opened.push(url); return {}; } });
+  assert.equal(ported.code, 0);
+  assert.deepEqual(opened, [`http://localhost:8080/login/code#${CODE}`]);
+});
+
+test("open and link name this deployment's own binary when it has one", async () => {
+  const d = deployment({ PI_CONSOLE_LISTEN: "127.0.0.1:4790" });
+  mkdirSync(join(d.dir, "node_modules", ".bin"), { recursive: true });
+  writeFileSync(join(d.dir, "node_modules", ".bin", "pi-dispatch-console"), "");
+  const r = await cli(["open"], { dir: d.dir, env: d.env, cwd: d.dir, isTTY: false, isLocal: () => false });
+  assert.match(r.err.join(" "), /\.\/node_modules\/\.bin\/pi-dispatch-console link for a link to pass along/);
+});
+
+test("open: a token gone by the time of a fresh link gets no code", async () => {
+  const modules = fakeModules();
+  let reads = 0;
+  const readTokensFile = modules.tokens.readTokensFile;
+  modules.tokens.readTokensFile = (...args) => { reads += 1; return reads > 1 ? { file: { version: 1, generation: 0, tokens: [] } } : readTokensFile(...args); };
+  const r = await cli(["open"], { modules, env: deployment({ PI_CONSOLE_LISTEN: "127.0.0.1:4790" }).env, isTTY: false, isLocal: () => true, openLink: () => ({}) });
+  assert.equal(r.code, 2);
+  assert.equal(modules.rows.filter((row) => row.action === "login-code").length, 0);
 });
 
 test("audit verify: intact is 0, a broken chain is 2 naming where", async () => {

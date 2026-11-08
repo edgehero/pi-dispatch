@@ -4,7 +4,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 export function setupCachePath(path) {
-	return /(?:^|[/\\])(?:_npx|_cacache|npm-cache|\.cache)(?:[/\\]|$)/.test(String(path));
+	// pnpm's, yarn's and bun's temporary stores are as disposable as npm's own. Matched by their whole shape, because a folder someone named
+	// `dlx` is an ordinary folder.
+	const text = String(path);
+	return /(?:^|[/\\])(?:_npx|_cacache|npm-cache|\.cache)(?:[/\\]|$)/.test(text) || /(?:^|[/\\])pnpm[/\\]dlx(?:[/\\]|$)/.test(text) || /(?:^|[/\\])xfs-[^/\\]+[/\\]dlx-\d+(?:[/\\]|$)/.test(text) || /(?:^|[/\\])bunx-\d+-[^/\\]+(?:[/\\]|$)/.test(text) || /(?:^|[/\\])\.yarn[/\\]berry[/\\]cache(?:[/\\]|$)/.test(text);
 }
 export function trustedSetupFile(entry, { uid = process.geteuid?.(), realpath = realpathSync, stat = statSync } = {}) {
 	try {

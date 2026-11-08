@@ -1155,7 +1155,9 @@ export async function runUp(argv = [], deps = {}) {
 	for (const [name, note] of summary) {
 		out(`  ${name.padEnd(21)} ${note}\n`);
 	}
-	out(`
+	// `up --console` goes on to /setup, whose checklist is the next step, and these bare commands are not on a local install's PATH.
+	const nextOut = deps.skipNextSteps ? () => {} : out;
+	nextOut(`
 Next:
   edit ${envPath}
       set ANTHROPIC_API_KEY (or your provider's key) — already logged into pi? leave it blank
@@ -1167,7 +1169,7 @@ Next:
 	// A worker run BY HAND reads only its shell, so on the podman venue it needs the list exported; the service reads
 	// `.env` itself. Printed only there, so every other deployment's closing text is unchanged.
 	if (venues.podmanUsed) {
-		out("  (podman venue: a worker started by hand reads only its shell, so export the same PI_BACKENDS there first, or run it as a service with `pi-dispatch service install`, which reads .env)\n");
+		nextOut("  (podman venue: a worker started by hand reads only its shell, so export the same PI_BACKENDS there first, or run it as a service with `pi-dispatch service install`, which reads .env)\n");
 	}
 	// Issue #708: the console as a service, offered only where it could start (an operator token exists): without one,
 	// `service install --console` refuses, and a "Next:" line that leads to a refusal is not a next step.
@@ -1175,10 +1177,10 @@ Next:
 	try {
 		consoleReady = consoleOperators(cwd) > 0 && !consoleUnitInstalled(cwd);
 	} catch {}
-	if (consoleReady) out("  pi-dispatch service install --console\n      keep the operator console running as a service (open it with /dispatch console)\n");
+	if (consoleReady) nextOut("  pi-dispatch service install --console\n      keep the operator console running as a service (open it with /dispatch console)\n");
 	// Issue #707: the openshell venues' own next step, said only where one is blessed.
 	if (openshell.used) {
-		out(`  pi-dispatch service install\n      the worker as a ${platform === "darwin" ? "LaunchAgent (the gateway runs in this login session: `brew services start openshell`, the service of OpenShell's release formula, keeps it there)" : `user service that pulls in the gateway's own unit (${OPENSHELL_GATEWAY_UNIT})`}; then \`pi-dispatch doctor\` reads the gateway, its engine and the image back. A worker started by hand reads only its shell, so export the same PI_BACKENDS (and PI_OPENSHELL_ENGINE) there first\n`);
+		nextOut(`  pi-dispatch service install\n      the worker as a ${platform === "darwin" ? "LaunchAgent (the gateway runs in this login session: `brew services start openshell`, the service of OpenShell's release formula, keeps it there)" : `user service that pulls in the gateway's own unit (${OPENSHELL_GATEWAY_UNIT})`}; then \`pi-dispatch doctor\` reads the gateway, its engine and the image back. A worker started by hand reads only its shell, so export the same PI_BACKENDS (and PI_OPENSHELL_ENGINE) there first\n`);
 	}
 	// Issue #464: a Valkey this pass refused (another account's, or one no one could name) is a failed `up` whatever doctor
 	// says: a worker started now would take that queue's jobs, and an exit 0 read by a script or the wizard says ready.

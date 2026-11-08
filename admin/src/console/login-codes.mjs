@@ -174,6 +174,26 @@ export function mintLoginCode({ dir, name, fs = nodeFs, now = () => Date.now(), 
   return { code };
 }
 
+/** The operator names in a tokens file, in file order. */
+export function operatorNames(file) {
+  return (file?.tokens ?? []).filter((t) => t.role === "operator").map((t) => t.name);
+}
+
+/** The one operator a command can pick without being told, or null when there is none or more than one. */
+export function soleOperatorName(file) {
+  const names = operatorNames(file);
+  return names.length === 1 ? names[0] : null;
+}
+
+/**
+ * Is this code still waiting to be spent? Looks and takes nothing, so a watcher cannot spend the code it watches. A drop that has gone
+ * counts as still waiting: the file went with the folder, so its absence says nothing about a browser having taken it.
+ */
+export function codePending({ dir, code, fs = nodeFs }) {
+  if (typeof code !== "string" || !CODE_RE.test(code)) return false;
+  return !fs.existsSync(dir) || fs.existsSync(join(dir, `${codeHash(code)}.json`));
+}
+
 /**
  * Spend a code: `{name}` for the one caller that removes its file before it expires, `{refusal}` for everyone else
  * (unknown, already used, expired, malformed). The refusal never quotes the code.

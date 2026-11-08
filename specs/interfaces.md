@@ -11463,7 +11463,7 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
     `^[a-z][a-z0-9-]{0,39}$` (`CONSOLE_AUDIT_ACTION_RE`, "Across versions" below). CORRECTED 2026-11-03 (#761): the
     list lacked `write-applied`, written since #766; a test now holds it to the code. A `login-code` row
     comes from three writers: the console's sign-in with a code (the session's actor, or `anonymous` for a refused
-    code, target `/login/code`), `pi-dispatch-console link` (actor role `shell`, target the token's name), and since
+    code, target `/login/code`), `pi-dispatch-console link` and, since issue #849, `pi-dispatch-console open` (actor role `shell`, target the token's name), and since
     issue #708 `/dispatch console --link`: actor role `panel`, target the token's name, outcome `ok`, appended BEFORE
     the code is made (no code without the row), and a second row with outcome `failed` and the mint's refusal as
     `reason` when the mint is then refused; both rows carry the same `ticket` (12 hex, `writeTicket`), so a reader
@@ -11721,8 +11721,10 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
   grants a session, not a retained token. If minting fails, explicitly report the retained viewer entry and host
   recovery. Revoke is separately confirmed against that exact entry, never an independent same-name replacement.
 - **Bootstrap link**: host `up --console` preserves or creates an operator entry without printing/retaining its
-  durable plaintext, asks explicitly among multiple operators and prints the existing one-use 60-second link
-  only after bounded console health succeeds. Failure after token/service mutation reports what remains and
+  durable plaintext, takes the operator from `--name` (which must name an existing operator once one exists) or asks explicitly among multiple operators, and only after
+  bounded console health succeeds hands the existing one-use 60-second link to `pi-dispatch-console open` (issue #849),
+  which opens it in a local browser unprinted, or, over SSH or for a unix socket, mints it once Enter says the tunnel is up. `--no-open` makes
+  no link, for a caller that signs the person in itself. Failure after token/service mutation reports what remains and
   exact recovery. `token add`/`token rotate` retain their existing one-line durable-token output; no browser
   operator mint or new token-print exception is admitted.
 - **Projection**: `/api/state`'s public shape is UNCHANGED, checked by this prerequisite. `/setup` reuses existing
@@ -13598,6 +13600,7 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 
 | Date | Change |
 |---|---|
+| 2026-11-08 (#849, part 1) | **`INT-CONSOLE-SETUP-HOST` AMENDED**, "Bootstrap link": the link goes to `pi-dispatch-console open` rather than being printed, `--no-open`, and `--name`. **`INT-CONSOLE-AUDIT-LOG` AMENDED**: `open` is a `login-code` writer, as `link` is. No browser operator mint or new token-print exception is admitted: UNCHANGED, checked. |
 | 2026-11-05 (no issue, the file a write cannot keep, pause windows) | **`INT-PAUSE-WINDOWS-FILE-CONTRACT` AMENDED**, reversing a recorded posture as `INT-TRIGGERS-FILE-CONTRACT` just did for the same reason: a file holding what the writer could not keep refuses with every byte kept. Five windows and a stray comma, then an add, used to preview, Confirm and leave one window, with an Undo that only took the new row back out, and the whole-list action previewed "0 windows now" over the full file. Editing or deleting one window of a file that does not load now says so, where it said "have 0". The worker's reading of the file is UNCHANGED, checked: it refuses a file that does not parse or has no list at boot and keeps the last good windows on a live edit, and it reads a key written twice as `JSON.parse` does. |
 | 2026-11-05 (no issue, the file a write cannot keep) | **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**, reversing a recorded posture: `writeTriggers` starts from an empty set only for a file that holds nothing (missing, whitespace, a byte-order mark). A file that is not valid JSON, is not a JSON object, or has a `triggers` that is not a list now refuses with `{ invalid, malformed: true }`, before `mutate` runs and with every byte kept, and the console refuses it at the preview. It used to be rebuilt from empty as "the recorded repair": a typo in a thirteen-row file and one add left one row, with `{ ok: true }`, a preview whose sentences never said so, only its diff, and an Undo that brought nothing back. Two sentences that leaned on the repair are reworded. `disarmTrigger` (`DES-ONE-SHOT-DISARM-IN-THE-FILE`) already refused these files; UNCHANGED, checked. `INT-PAUSE-WINDOWS-FILE-CONTRACT` UNCHANGED, checked: that writer keeps its own repair. |
 | 2026-11-05 (no issue, a Valkey outage under the console) | **`INT-CANCEL-CHANNEL-CONTRACT` AMENDED**: the console's `cancelActive` sends its DEL right behind a request whose answer was lost, as the CLI's catch already did, now that its client gives up on a command instead of waiting out the outage. An ack that cannot be read, or a timeout's DEL that was lost, rejects marked `valkeyMayStillRun`, since the request did go out and can stand for its TTL. The key names, values and TTLs are UNCHANGED, checked, as is what the CLI says, apart from a DEL Valkey refuses, which now goes through its catch rather than saying nothing changed. |

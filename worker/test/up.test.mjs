@@ -3115,6 +3115,16 @@ test("up on openshell: the gateway list's shapes, the poll's wall-clock deadline
 	assert.doesNotMatch(nobus.text(), /has no openshell-gateway\.service/);
 });
 
+test("under up --console the closing Next: is left to /setup, and a plain up keeps it (#849)", async () => {
+	const plain = harness({ plan: green, argv: ["--yes"] });
+	await plain.run();
+	assert.ok(plain.text().includes("Next:"), plain.text());
+	const quiet = harness({ plan: green, argv: ["--yes"], extra: { skipNextSteps: true } });
+	await quiet.run();
+	assert.ok(!quiet.text().includes("Next:"), quiet.text());
+	assert.ok(quiet.text().includes("up: summary"), "the summary of what ran is still said");
+});
+
 test("up's closing Next: offers the console as a service only where an operator token exists (#708)", async () => {
 	const line = "  pi-dispatch service install --console\n      keep the operator console running as a service (open it with /dispatch console)\n";
 	const without = harness({ plan: green, argv: ["--yes"] });

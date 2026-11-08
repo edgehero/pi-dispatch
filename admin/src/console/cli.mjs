@@ -5,8 +5,11 @@
  *   token add --name N --role operator|viewer
  *   token list | token revoke --name N | token rotate --name N
  *   sessions end-all                        sign every browser out (bumps the tokens file's generation)
- *   link --name N [--port P]                a one-time sign-in link for token N, valid 60 seconds (P: an ssh -L
- *                                           tunnel's local port, which the console cannot know)
+ *   link [--name N] [--port P]              a one-time sign-in link for token N, valid 60 seconds (P: an ssh -L
+ *                                           tunnel's local port, which the console cannot know); N may be left
+ *                                           out when there is exactly one operator
+ *   open [--name N] [--port P]              sign in the person at this terminal: opens the browser here, or waits for
+ *                                           their tunnel over SSH (`open-command.mjs`)
  *   audit verify                            walk the audit log's hash chain
  *
  * Every subcommand takes `--deployment <dir>`. Exit codes: 0 done, 2 refused (a configuration or input problem, with a
@@ -14,7 +17,8 @@
  *
  * ONLY `token add` AND `token rotate` PRINT A TOKEN, on one line of its own, so a terminal log or a pasted transcript
  * holds a token only where the operator asked for one. `link` prints a one-time code inside a URL, which is its
- * purpose; the code is not the token and dies in 60 seconds or at first use.
+ * purpose; the code is not the token and dies in 60 seconds or at first use. `open` prints one only where there is no
+ * local browser to hand it to, or when the person presses Enter for one.
  *
  * The real collaborators (tokens, sessions, codes, tickets, audit, the pause-windows writer, for #641 the server
  * with its pages, the fleet reader, the insights assembler and its pricing, and the live hub, and for #642 the write
@@ -29,9 +33,13 @@ import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { consoleConfig, consoleEnv, deploymentDirOf } from "./config.mjs";
 import { makeLoginLimiter } from "./guards.mjs";
-import { listenOn, listenUrl } from "./listen.mjs";
+import { isLoopbackAddress, listenOn, listenUrl } from "./listen.mjs";
 import { acquireConsoleLock } from "./lock.mjs";
-import { keptTokenLinkRefusal } from "./login-codes.mjs";
+import { codePending, keptTokenLinkRefusal, operatorNames, soleOperatorName } from "./login-codes.mjs";
+import { enterReader, runOpenCommand } from "./open-command.mjs";
+import { openLinkViaFile } from "./open-link.mjs";
+import { isLocalBrowserSession, openBrowser } from "@edgehero/pi-dispatch/open-browser";
+import { shellWord } from "./link.mjs";
 import { makeAnswererService } from "../answerer-data.mjs";
 import { readAgentWritesToday } from "../agent-write-count.mjs";
 import { readSandboxGateways } from "../sandbox-gateways.mjs";
@@ -45,7 +53,8 @@ export const USAGE = `usage: pi-dispatch-console <command> [--deployment <dir>]
   token revoke --name <name>               remove a token; its sessions end at their next request
   token rotate --name <name>               a new secret for a name; prints it once
   sessions end-all                         sign every browser out
-  link --name <name> [--port <n>] [--next /setup]  a one-time sign-in link, valid 60 seconds
+  open [--name <name>] [--port <n>] [--next /setup]  sign in here: opens your browser, or waits for your ssh tunnel
+  link [--name <name>] [--port <n>] [--next /setup]  a one-time sign-in link to pass along, valid 60 seconds
   serve --host-setup                       explicitly allow local person-only setup actions
   audit verify                             check the audit log's hash chain
 
@@ -337,11 +346,11 @@ async function run(argv, io) {
   const uid = "uid" in io ? io.uid : process.geteuid?.();
   const platform = io.platform ?? process.platform;
   const command = positionals.join(" ");
-  const known = ["serve", "token add", "token list", "token revoke", "token rotate", "sessions end-all", "link", "audit verify"];
+  const known = ["serve", "token add", "token list", "token revoke", "token rotate", "sessions end-all", "link", "open", "audit verify"];
   if (!known.includes(command)) throw new Refusal(`unknown command "${command.slice(0, 40)}"; run pi-dispatch-console --help`);
   // Refused before anything is read or written, so a `--port` that would be silently ignored never runs its command.
-  if (values.port !== undefined && command !== "link") throw new Refusal("--port is for link only");
-  if (values.next !== undefined && (command !== "link" || values.next !== "/setup")) throw new Refusal("--next is for link only and must be /setup");
+  if (values.port !== undefined && command !== "link" && command !== "open") throw new Refusal("--port is for link and open only");
+  if (values.next !== undefined && ((command !== "link" && command !== "open") || values.next !== "/setup")) throw new Refusal("--next is for link and open only and must be /setup");
   if (values["host-setup"] && command !== "serve") throw new Refusal("--host-setup is an explicit serve grant only");
 
   const m = io.modules ?? (await loadModules());
@@ -367,6 +376,54 @@ async function run(argv, io) {
   };
   const invalid = (res) => {
     if (res?.invalid) throw new Refusal(res.invalid);
+  };
+
+  /** What to type for a command of this deployment: its own binary when one is installed here, because a local install puts nothing on PATH. */
+  const localCommand = (name) => {
+    const local = `node_modules/.bin/${name}`;
+    try {
+      if (!fs.existsSync(resolvePath(config.dir, local))) return name;
+      return resolvePath(cwd) === resolvePath(config.dir) ? `./${local}` : shellWord(resolvePath(config.dir, local));
+    } catch { return name; }
+  };
+
+  /**
+   * The token a sign-in link is for: `--name`, or the only operator. Refuses a name this console cannot sign in, before
+   * any code exists, because a kept entry's code would be refused at sign-in (issue #761).
+   */
+  const signInName = () => {
+    const read = m.tokens.readTokensFile({ path: config.tokensPath, fs, uid });
+    if (read.refusal) throw new Refusal(read.refusal);
+    if (values.name === "") throw new Refusal("--name needs a name");
+    if (values.name === undefined) {
+      const sole = soleOperatorName(read.file);
+      if (sole !== null) return sole;
+      const operators = operatorNames(read.file);
+      throw new Refusal(operators.length === 0 ? `there is no operator token yet; run ${localCommand("pi-dispatch")} up --console, or ${localCommand("pi-dispatch-console")} token add --name <name> --role operator` : `there are ${operators.length} operator tokens, so name one with --name <name>; see ${localCommand("pi-dispatch-console")} token list`);
+    }
+    const name = values.name;
+    if (read.file.tokens.some((t) => t.name === name)) return name;
+    const kept = m.tokens.keptTokens(read.file).find((t) => t.name === name);
+    if (kept) throw new Refusal(keptTokenLinkRefusal(kept));
+    throw new Refusal(`there is no token named "${name}"; see ${localCommand("pi-dispatch-console")} token list`);
+  };
+
+  /** Audit, then mint, then build the URL: `{url, code}`, or `{exit}` once the failure has been said. Refusals throw. */
+  const mintSignIn = (name, port) => {
+    // Bootstrap composes this command, so its audit intent must exist before a code file can be created.
+    const row = { actor: SHELL, action: "login-code", target: name, ticket: (random ?? randomBytes)(6).toString("hex") };
+    try { audit.append({ ...row, outcome: "ok" }); }
+    catch (e) { io.err(`pi-dispatch-console: no sign-in code was minted because its audit row could not be written (${e?.code ?? "error"}); check PI_LOGS_DIR and run audit verify`); return { exit: 1 }; }
+    const failed = () => {
+      try { audit.append({ ...row, outcome: "failed", reason: "login-code-mint-failed" }); }
+      catch (e) { io.err(`pi-dispatch-console: the sign-in code was not minted, but its failed audit row could not be written (${e?.code ?? "error"}); run audit verify`); }
+    };
+    let minted;
+    try { minted = m.loginCodes.mintLoginCode(withRandom({ dir: m.loginCodes.loginCodesDir(config.tokensPath), name, fs, now })); }
+    catch (e) { failed(); throw e; }
+    if (minted.refusal) { failed(); throw new Refusal(minted.refusal); }
+    const base = port !== null ? `http://localhost:${port}/` : (listenUrl(config.listen) ?? "http://localhost:<the local port of your ssh -L tunnel>/");
+    return { url: `${base}login/code#${minted.code}${values.next === "/setup" ? "&next=/setup" : ""}`, code: minted.code };
   };
 
   switch (command) {
@@ -412,33 +469,46 @@ async function run(argv, io) {
       return record({ action: "sessions-ended" }) ? 0 : 1;
     }
     case "link": {
-      const name = needName(values);
       // Judged before the code is minted, so a mistyped port costs no code and no audit row.
       const port = values.port === undefined ? null : linkPortOf(values.port);
-      const read = m.tokens.readTokensFile({ path: config.tokensPath, fs, uid });
-      if (read.refusal) throw new Refusal(read.refusal);
-      if (!read.file.tokens.some((t) => t.name === name)) {
-        // A code only for an entry this console signs in (issue #761): a kept entry's code would be refused at sign-in.
-        const kept = m.tokens.keptTokens(read.file).find((t) => t.name === name);
-        if (kept) throw new Refusal(keptTokenLinkRefusal(kept));
-        throw new Refusal(`there is no token named "${name}"; see pi-dispatch-console token list`);
-      }
-      // Bootstrap composes this command, so its audit intent must exist before a code file can be created.
-      const row = { actor: SHELL, action: "login-code", target: name, ticket: (random ?? randomBytes)(6).toString("hex") };
-      try { audit.append({ ...row, outcome: "ok" }); }
-      catch (e) { io.err(`pi-dispatch-console: no sign-in code was minted because its audit row could not be written (${e?.code ?? "error"}); check PI_LOGS_DIR and run audit verify`); return 1; }
-      const failed = () => {
-        try { audit.append({ ...row, outcome: "failed", reason: "login-code-mint-failed" }); }
-        catch (e) { io.err(`pi-dispatch-console: the sign-in code was not minted, but its failed audit row could not be written (${e?.code ?? "error"}); run audit verify`); }
-      };
-      let minted;
-      try { minted = m.loginCodes.mintLoginCode(withRandom({ dir: m.loginCodes.loginCodesDir(config.tokensPath), name, fs, now })); }
-      catch (e) { failed(); throw e; }
-      if (minted.refusal) { failed(); throw new Refusal(minted.refusal); }
-      const base = port !== null ? `http://localhost:${port}/` : (listenUrl(config.listen) ?? "http://localhost:<the local port of your ssh -L tunnel>/");
-      io.out(`${base}login/code#${minted.code}${values.next === "/setup" ? "&next=/setup" : ""}`);
+      const made = mintSignIn(signInName(), port);
+      if (made.exit !== undefined) return made.exit;
+      io.out(made.url);
       io.err("open it within 60 seconds; it works once");
       return 0;
+    }
+    case "open": {
+      const listen = config.listen;
+      // A unix socket has no port of its own: 4790 is the local end of the tunnel the line below sets up.
+      const port = values.port !== undefined ? linkPortOf(values.port) : listen.kind === "unix" ? 4790 : null;
+      const say = (text) => io.err(`pi-dispatch-console: ${text}`);
+      const windows = platform === "win32";
+      // Windows opens the page and mints nothing, so it needs no name. Judged first here for the refusal, and again at each mint below.
+      if (!windows) signInName();
+      const isTTY = io.isTTY ?? (Boolean(process.stdin.isTTY) && Boolean(process.stdout.isTTY));
+      const enter = isTTY && !windows ? (io.enter ?? (await enterReader(process.stdin))) : null;
+      const bracketed = listen.host?.includes(":") ? `[${listen.host}]` : listen.host;
+      const tunnelLine = listen.kind === "unix" ? `ssh -L ${port}:${shellWord(listen.path)} <this host>` : isLoopbackAddress(listen.host) ? `ssh -L ${port ?? listen.port}:${bracketed}:${listen.port} <this host>` : null;
+      try {
+        return await runOpenCommand({
+          windows, isTTY, enter, say, tunnelLine,
+          // A socket console answers nothing a browser here could open without a tunnel, so it is the tunnel path, whoever is at the keyboard.
+          local: listen.kind !== "unix" && (io.isLocal ?? isLocalBrowserSession)({ env, platform }),
+          consoleCommand: localCommand("pi-dispatch-console"),
+          plainUrl: listenUrl(listen),
+          snapHint: platform !== "darwin",
+          print: (text) => io.out(text),
+          // The name again at each mint: a token revoked during a long wait must not get a code.
+          mint: () => mintSignIn(signInName(), port),
+          pending: (code) => (m.loginCodes.codePending ?? codePending)({ dir: m.loginCodes.loginCodesDir(config.tokensPath), code, fs }),
+          openLink: (url) => (io.openLink ?? ((u) => openLinkViaFile(u, { open: openBrowser })))(url),
+          openPlain: (url) => (io.openPlain ?? openBrowser)(url),
+          ...(io.sleep ? { sleep: io.sleep } : {}),
+          now,
+        });
+      } finally {
+        enter?.close?.();
+      }
     }
     case "audit verify": {
       // `withLast` (opt-in, so the result doctor reads is untouched) names the last row the chain vouches for and, when
