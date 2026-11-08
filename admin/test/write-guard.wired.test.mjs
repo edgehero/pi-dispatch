@@ -42,6 +42,8 @@ test("the deployment's .env and the pointer are guarded, beside the five files t
   // Issue #640: the console tokens file at its default place in the deployment folder (a write could add a token).
   assert.match((await guard(join(dep, "console-tokens.json")))?.reason ?? "", /the console tokens file \(PI_CONSOLE_TOKENS_FILE\)/);
   assert.equal(await guard(join(dep, "notes.md")), undefined, "an unrelated file beside them passes");
+  // Issue #849: the remembered-device folder, the same way: a record planted there is a standing sign-in.
+  assert.match((await guard(join(dep, "console-devices", `${"f".repeat(64)}.json`)))?.reason ?? "", /the console's remembered devices/);
   // Issue #708: the login-codes directory beside the tokens file, as a directory: a code planted there is a sign-in.
   for (const tool of ["write", "edit"]) {
     const r = await guard(join(dep, "console-login-codes", `${"f".repeat(64)}.json`), tool);

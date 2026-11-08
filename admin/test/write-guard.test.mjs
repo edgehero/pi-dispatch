@@ -1,3 +1,4 @@
+import * as nodeFsForGuard from "node:fs";
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import * as fs from "node:fs";
@@ -7,7 +8,7 @@ import { join } from "node:path";
 import { createRequire } from "node:module";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { JUDGED_COMMAND_TOOLS, LOGIN_CODES_GUARD, PATH_WRITE_TOOLS, PI_UNICODE_SPACES, UNJUDGED_TOOLS, envNamedFiles, insideDirectory, makeWriteGuard, piResolveToCwd, readSmallRegularFile, targetIdentity } from "../src/write-guard.mjs";
+import { DEVICE_STORE_GUARD, JUDGED_COMMAND_TOOLS, LOGIN_CODES_GUARD, PATH_WRITE_TOOLS, PI_UNICODE_SPACES, UNJUDGED_TOOLS, envNamedFiles, insideDirectory, makeWriteGuard, piResolveToCwd, readSmallRegularFile, targetIdentity } from "../src/write-guard.mjs";
 import { execFileSync, spawnSync } from "node:child_process";
 
 // The operator session's write guard (issue #504 part C, admin/src/write-guard.mjs). The guarded files are real files
@@ -243,7 +244,7 @@ test("envNamedFiles reads every way a loader might take a value: comment, quotes
   assert.deepEqual(at("# PI_PROJECTS_FILE=/dep/projects.json\nPI_OTHER_FILE=/x"), [], "a comment and an unguarded key name nothing");
   // Issue #640: a console tokens file moved by the deployment's .env is guarded where it really is, not only at its default.
   // Issue #708: and the login-codes directory beside it, wherever the key puts the file.
-  assert.deepEqual(at("PI_CONSOLE_TOKENS_FILE=/dep/secret/console-tokens.json"), ["/dep/secret/console-tokens.json", "/dep/secret/console-login-codes"], "the console tokens file and its login codes");
+  assert.deepEqual(at("PI_CONSOLE_TOKENS_FILE=/dep/secret/console-tokens.json"), ["/dep/secret/console-tokens.json", "/dep/secret/console-login-codes", "/dep/secret/console-devices"], "the console tokens file and its login codes");
 });
 
 test("powershell: trailing dots and spaces (stripped by Windows) still name the file; .env.example still does not", () => {
@@ -251,6 +252,35 @@ test("powershell: trailing dots and spaces (stripped by Windows) still name the 
   const ps = (command) => guard({ type: "tool_call", toolName: "powershell", toolCallId: "p", input: { command } }, { cwd: "/" });
   for (const c of ["Set-Content projects.json. x", "Set-Content 'projects.json.' x", "Set-Content projects.json... x", "Set-Content 'projects.json . ' x"]) assert.equal(ps(c)?.block, true, c);
   for (const c of ["Copy-Item .env.example x", "Get-Content projects.json.bak"]) assert.equal(ps(c), undefined, c);
+});
+
+test("a directory guard (issue #849): a remembered-device record cannot be planted by a write or an edit", () => {
+  const dep = tempDir("pd-guard-devices-");
+  const devices = join(dep, "console-devices");
+  const guard = makeWriteGuard({ guardedFiles: () => [{ path: devices, ...DEVICE_STORE_GUARD }] });
+  const call = (path, toolName = "write") => guard({ type: "tool_call", toolName, toolCallId: "c", input: toolName === "edit" ? { path, edits: [{ oldText: "a", newText: "b" }] } : { path, content: "{}" } }, { cwd: dep });
+  const planted = `${"a".repeat(64)}.json`;
+  assert.equal(call(join(devices, planted))?.block, true, "before the folder exists, which is the attack");
+  assert.match(call(join(devices, planted)).reason, /remembered devices/);
+  assert.equal(call("console-devices/x.json")?.block, true, "relative to the session folder");
+  assert.equal(call(join(devices, planted), "edit")?.block, true);
+  assert.equal(call(join(dep, "console-devices-old", "z.json")), undefined, "a sibling whose name only starts the same passes");
+});
+
+test("macOS's root entries that re-resolve a path are refused while a folder is guarded, since the identity walk cannot see through it (#849)", () => {
+  const dep = tempDir("pd-guard-vol-");
+  const guarded = { path: join(dep, "console-devices"), ...DEVICE_STORE_GUARD };
+  const write = (platform) => makeWriteGuard({ guardedFiles: () => [guarded], platform })({ type: "tool_call", toolName: "write", toolCallId: "c", input: { path: "/.vol/16777234/12345/x.json", content: "{}" } }, { cwd: dep });
+  assert.equal(write("darwin")?.block, true);
+  assert.equal(write("linux"), undefined, "the path means nothing there");
+  const resolve = makeWriteGuard({ guardedFiles: () => [guarded], platform: "darwin" })({ type: "tool_call", toolName: "write", toolCallId: "c", input: { path: join("/.resolve/1", dep, "console-devices", "x.json"), content: "{}" } }, { cwd: dep });
+  assert.equal(resolve?.block, true, "/.resolve/ too");
+  for (const prefix of ["/.nofollow/.vol/16777234/12345/x.json", "/.nofollow/x.json", "/.file/id=1.2/x.json"]) {
+    assert.equal(makeWriteGuard({ guardedFiles: () => [guarded], platform: "darwin" })({ type: "tool_call", toolName: "write", toolCallId: "c", input: { path: prefix, content: "{}" } }, { cwd: dep })?.block, true, prefix);
+  }
+  const unwalkable = { ...nodeFsForGuard, lstatSync: (p, ...a) => { if (String(p).startsWith("/odd")) throw Object.assign(new Error("no"), { code: "EINVAL" }); return nodeFsForGuard.lstatSync(p, ...a); } };
+  const odd = makeWriteGuard({ guardedFiles: () => [guarded], platform: "linux", fs: unwalkable })({ type: "tool_call", toolName: "write", toolCallId: "c", input: { path: "/odd/x.json", content: "{}" } }, { cwd: dep });
+  assert.equal(odd?.block, true, "a target whose path cannot be walked may be a spelling of the folder");
 });
 
 test("a directory guard (issue #708): every write or edit under console-login-codes is refused, links and case variants too", () => {

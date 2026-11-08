@@ -159,6 +159,7 @@ const FIXED_STORES = new Map([
 	["pi-dispatch-valkey-data", [["worker/src/valkey-auth.mjs", 'VALKEY_VOLUME = "pi-dispatch-valkey-data"']]],
 	[".pi-dispatch-valkey-volume.json", [["worker/src/valkey-auth.mjs", 'VALKEY_VOLUME_RECORD = ".pi-dispatch-valkey-volume.json"'], ["worker/src/up.mjs", "join(cwd, VALKEY_VOLUME_RECORD)"], ["admin/src/setup-wizard.ts", "join(dir, VALKEY_VOLUME_RECORD)"]]],
 	["console-login-codes/", [["admin/src/console/login-codes.mjs", 'join(dirname(tokensPath), "console-login-codes")']]],
+	["console-devices/", [["worker/src/console-devices.mjs", 'CONSOLE_DEVICES_DIRNAME = "console-devices"']]],
 ]);
 
 test("every store with a fixed name is pinned to its source and named on the backup page", () => {

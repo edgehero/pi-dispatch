@@ -11373,6 +11373,23 @@ in.
     key when it writes the file.
 - **Acceptance**: `REQ-CONSOLE-SECURITY` (a) and (i).
 
+## INT-CONSOLE-DEVICES-STORE
+
+- **Status**: the store only, issue #849, in `worker/src/console-devices.mjs` with its tests in `worker/test/console-devices.test.mjs`. Nothing writes it, and nothing calls `reapDevices`, until the console's remembered sessions land in a later part of that issue.
+- **Where**: `console-devices/` beside the tokens file (`INT-CONSOLE-TOKENS-FILE-CONTRACT`), mode 0700, owned by the deployment's account. One file per device,
+  `<sha256(secret)>.json`, mode 0600. Temporary files are `.<hash>.<16 hex>.tmp` in the same folder and are removed after an hour.
+- **Record**: `{version: 1, name, role, tokenHash, generation, createdAt, label, ended?: {reason, at}}`. `role` is `operator` or `viewer` (`REMEMBER_ROLES`), `tokenHash` and `generation` are the
+  token entry's at the moment of remembering, `createdAt` and `ended.at` are ISO instants, `label` is built from closed word lists (`deviceLabelOf`), never User-Agent bytes, and
+  `ended.reason` is one of `DEVICE_END_REASONS`. A record names no secret. A record with any other `version` is unreadable to this build and is left alone.
+- **Secret and cookie**: 32 random bytes, base64url. Only its sha256 is on disk. The cookie is `pdc_device_<first 10 hex of sha256(tokensPath)>`, per deployment because cookies ignore ports.
+- **Last use** is the file's mtime, written at most daily, and changes no content, so it cannot lose an end.
+- **Ending a device** rewrites its record with `ended` through a temporary, fsync, rename and fsync of the folder. It is kept for 90 days (`ENDED_RETENTION_MS`) so a browser presenting the cookie can be told why, and at most the newest 31 are kept per name. Sequential ends keep the first reason; ends that truly race both succeed and one reason stays.
+- **Three answers on a read**: a record, absent, or unjudged. A missing folder, an unsafe folder and a corrupt or unsafe record are unjudged, never absent: nothing about them says a device was revoked. One bad record
+  leaves the others readable. The fix for an unsafe folder is to remove it, never `chmod`, since tightening a folder another account could write would make whatever it planted good.
+- **Limits**: at most 32 live devices per token name (`MAX_DEVICES_PER_NAME`), which writers racing can overshoot by at most one each. A device bound to an older generation, a changed role or a token entry newer than it is ended at the next remember for that name, with the true reason, and holds no place. A record over 64 KiB or with a second name (`nlink`) is unjudged.
+- **Boundary**: whoever can write this folder can plant or revive a record, so the folder being owner-only is the boundary and a record's shape is no defence. It joins the write guard as a directory, as the login codes do, and doctor judges its safety, whether a job can reach it, and any unreadable record. Named residuals: `bash` is not judged by the write guard (`DES-OPERATOR-CONSOLE`); ACLs are not judged by the mode check; a fsync is only as good as the drive; an immutable folder or a read-only mount passes the mode check and fails at the first write, loudly. On a Windows host nothing is made and remembering is refused.
+- **Writers**: the console process and the `pi-dispatch-console device` commands, each through this module. The per-device file is what makes the two safe together.
+
 ## INT-CONSOLE-AUDIT-LOG
 
 - **AMENDED AND IMPLEMENTED 2026-11-02 (#792)**: Fixed sandbox-watch-opening/start/end kinds use
@@ -11458,7 +11475,7 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
     2026-11-03 (#761): this list named neither `agent` nor `none`. `role` is an escaped string like `name`, not a closed
     set, so the verifier does not judge it.
   - `action`: the writer writes exactly one of `login`, `login-failed`, `login-code`, `logout`, `refused`, `write`,
-    `write-applied`, `token-added`, `token-revoked`, `token-rotated`, `sessions-ended`, `serve-started`
+    `write-applied`, `token-added`, `token-revoked`, `token-rotated`, `sessions-ended`, `serve-started`, `login-device`, `device-remembered`, `device-ended`
     (`CONSOLE_AUDIT_ACTIONS`), and the verifier links any action of the shape every one of them has,
     `^[a-z][a-z0-9-]{0,39}$` (`CONSOLE_AUDIT_ACTION_RE`, "Across versions" below). CORRECTED 2026-11-03 (#761): the
     list lacked `write-applied`, written since #766; a test now holds it to the code. A `login-code` row
@@ -13601,6 +13618,7 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 
 | Date | Change |
 |---|---|
+| 2026-11-08 (#849, part 3) | **NEW `INT-CONSOLE-DEVICES-STORE`**: the remembered-device store, its record, the three answers on a read, and its limits. **`INT-CONSOLE-AUDIT-LOG` AMENDED**: three new actions, `login-device`, `device-remembered`, `device-ended`, not yet written by anything. `INT-CONSOLE-TOKENS-FILE-CONTRACT` shape and version, `CONSOLE_ENV_KEYS`, and `INT-ENVELOPE-FILE-CONTRACT` (the containment helper gains a `directory` option no envelope caller passes): UNCHANGED, checked. |
 | 2026-11-08 (#849, part 2) | **`INT-CONSOLE-STATE-API` AMENDED**: the refusal of `POST /login/code` carries `link` as well as `error`, and `POST /login` answers `next` when it was sent. **`INT-CONSOLE-EVENT-STREAM`**: a page leaving for sign-in carries its own address as `next`. |
 | 2026-11-08 (#849, part 1) | **`INT-CONSOLE-SETUP-HOST` AMENDED**, "Bootstrap link": the link goes to `pi-dispatch-console open` rather than being printed, `--no-open`, and `--name`. **`INT-CONSOLE-AUDIT-LOG` AMENDED**: `open` is a `login-code` writer, as `link` is. No browser operator mint or new token-print exception is admitted: UNCHANGED, checked. |
 | 2026-11-05 (no issue, the file a write cannot keep, pause windows) | **`INT-PAUSE-WINDOWS-FILE-CONTRACT` AMENDED**, reversing a recorded posture as `INT-TRIGGERS-FILE-CONTRACT` just did for the same reason: a file holding what the writer could not keep refuses with every byte kept. Five windows and a stray comma, then an add, used to preview, Confirm and leave one window, with an Undo that only took the new row back out, and the whole-list action previewed "0 windows now" over the full file. Editing or deleting one window of a file that does not load now says so, where it said "have 0". The worker's reading of the file is UNCHANGED, checked: it refuses a file that does not parse or has no list at boot and keeps the last good windows on a live edit, and it reads a key written twice as `JSON.parse` does. |

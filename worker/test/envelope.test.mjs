@@ -366,3 +366,14 @@ test("containment is judged by identity (device and inode): a firmlink or bind a
 	assert.deepEqual(envelopeInsideJobPaths("/Users/rob/logical/y/env.json", { cronFolders: ["./../y"] }, { ...fs, cwd: "/Users/rob/P/inner", env }), { kind: "cron-folder", path: "./../y" });
 	assert.equal(envelopeInsideJobPaths("/Users/rob/logical/y/env.json", { cronFolders: ["./../y"] }, { ...fs, cwd: "/Users/rob/P/inner", env: { PWD: "/System/Volumes/Data/Users/rob/ops" } }), null, "a $PWD with another identity adds nothing");
 });
+
+test("the directory option judges a folder by identity, and only when asked (#849)", () => {
+	const root = realpathSync.native(tempDir("pd-envelope-dir-"));
+	const folder = join(root, "store");
+	mkdirSync(folder, { mode: 0o700 });
+	const paths = { cronFolders: [folder], runRoots: [], skillsDirs: [], globalPiDir: null };
+	assert.equal(envelopeInsideJobPaths(folder, paths, { cwd: root, directory: true })?.kind, "cron-folder", "a job folder that is the folder itself");
+	assert.equal(envelopeInsideJobPaths(folder, { ...paths, cronFolders: [root] }, { cwd: root, directory: true })?.kind, "cron-folder", "or one above it");
+	assert.equal(envelopeInsideJobPaths(folder, { ...paths, cronFolders: [] }, { cwd: root, directory: true }), null);
+	assert.throws(() => envelopeInsideJobPaths(folder, paths, { cwd: root }), /not a regular file/, "without the option a folder is still refused");
+});

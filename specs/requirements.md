@@ -1100,7 +1100,7 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   without a display or for a socket it only prints; nothing the command does reaches
   `pi.sendMessage` or a tool (`admin/test/console-command.test.mjs`, `worker/test/console-probe.test.mjs`,
   `admin/test/wiring.test.mjs`, `worker/test/open-browser.test.mjs`); given pi's `write` or `edit` into the console's
-  `console-login-codes/` directory (a code that does not exist yet, an existing one, a symlink into it, a firmlink
+  `console-devices/` folder (issue #849) or `console-login-codes/` directory (a code that does not exist yet, an existing one, a symlink into it, a firmlink
   alias before the directory exists), then it is blocked, and a code file with loose permission bits, another owner
   or a life longer than a code's is refused by the consumer and removed (`admin/test/write-guard.test.mjs`, `admin/test/write-guard.wired.test.mjs`). The tool enumeration is
   UNCHANGED, checked: `/dispatch console` registers no tool, and the extension still binds no port. AMENDED
@@ -1220,7 +1220,7 @@ writes retain their existing interactive confirmation. This adds no unattended p
     socket path longer than the platform allows, `serve` refuses with a sentence naming the value and binds
     nothing; given `PI_CONSOLE_BIND_PUBLIC=1`, doctor warns. Given a tokens file that is group or world accessible,
     a symlink, not a regular file, owned by another account, or holding no operator token, `serve` refuses to start
-    and doctor names the problem; given a tokens file inside any path a job container can see (a local trigger's `run.folder` or `run.skillsDir`, a `PI_DISPATCH_RUN_ROOTS` root, `PI_GLOBAL_PI_DIR`), doctor fails; given a second
+    and doctor names the problem; given a remembered-device folder that is unsafe, reachable by a job, or holding an unreadable record, doctor fails it (issue #849); given a tokens file inside any path a job container can see (a local trigger's `run.folder` or `run.skillsDir`, a `PI_DISPATCH_RUN_ROOTS` root, `PI_GLOBAL_PI_DIR`), doctor fails; given a second
     `serve` on the same deployment while the first runs, it refuses on the lock. AMENDED 2026-11-03 (#761): given a
     tokens file that also holds an entry whose role this release does not know but has a role's shape (a role a later
     release added), `serve` still starts, and that entry signs in nowhere (its secret and a one-time code for it are
@@ -8600,6 +8600,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-08 (#849, part 3) | **`REQ-CONSOLE-SECURITY` AMENDED**, (a): doctor judges the new remembered-device folder. **`REQ-ADMIN-VIA-PI-EXTENSION`**: that folder joins `guardedFiles()` as a directory. Nothing writes the store yet, so every other clause is UNCHANGED, checked. |
 | 2026-11-08 (#849, part 2) | Sign-in pages that recover on their own. **`REQ-CONSOLE-SECURITY` AMENDED**, (i): the redirect to `/login` carries the page asked for as `next`, once the page parser accepts it. A session ending in an open tab sends its page along too, never for `switched`. **`REQ-OPERATOR-CONSOLE-SCREENS`**: the link page gains `expired` and `signed-in`. The 60 seconds and single use are UNCHANGED, checked. |
 | 2026-11-08 (#849, part 1) | One command to a signed-in browser. **`REQ-BROWSER-FIRST-RUN-SETUP` AMENDED**, the Bootstrap acceptance: the self-install from npm's cache and its order, `open` in place of a printed link, `pi-dispatch console`. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**: the one first-run question, which is exactly `--yes`, and `--ask-each`; plain `up` UNCHANGED, checked. `REQ-CONSOLE-SECURITY` (i), the 60 seconds and single use: UNCHANGED, checked: `open` mints later, never for longer. |
 | 2026-11-05 (no issue, a Valkey outage under the console) | **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: the console keeps running when Valkey is down, restarts, stops answering or is refused, hangs no page over it, and reads again within about 30 seconds of Valkey answering, with no restart, and a change that timed out before it left the console is not made when Valkey returns. What is not so yet is named in the entry. On a console started with Valkey down, or with a `.env` line that made a Valkey on macOS refused, the first signed-in page ended the process; and after a restart lasting past a client's retries every page that reads a queue kept saying Valkey could not be read until the console itself was restarted. `REQ-CONSOLE-SECURITY` UNCHANGED, checked. |

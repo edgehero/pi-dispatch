@@ -282,6 +282,12 @@ queued: an older BullMQ need not read what a newer one wrote. The release notes 
 
 Release numbers come from the git tags.
 
+### Next release
+
+| Store | What changed, and what an older release does with it | Guide |
+|---|---|---|
+| `console-devices/`, beside the console tokens file | New: one owner-only file for each remembered browser (#849). Nothing is written until someone chooses to remember a device. An older console ignores the folder, so a browser remembered on the new release signs in again after going back. | [console.md](console.md) |
+
 ### 5.0.0
 
 | Store | What changed, and what an older release does with it | Guide |
