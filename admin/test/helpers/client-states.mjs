@@ -37,6 +37,8 @@ export const T = Object.freeze({
   bothClosed: "one question at a time answers every caller: a run page's shared stream says what the answer means, and a write's 401 while a stream's question is out says so in the slot and leaves with that answer",
   stale: "stale: the page dims under the time it was last seen, says whether the tokens file or the data failed, keeps its time through a reconnect, and fresh alone takes it back",
   signIn: "sign-in: what needs the script is revealed, a refusal shows its one notice, the ended notice gives way, an older attempt's answer does nothing, and a post that reaches nothing keeps the page and retries every 2 s",
+  linkEnds: "the link page: an expired code says so, and a browser already in is told that rather than sent for a new link (#849)",
+  arrival: "sign-in: a browser that arrives from elsewhere and is signed in goes on, one that is not keeps the form, and the page asked for is where a token returns to (#849)",
   signInStops: "a sign-in or a link that reaches nothing stops after 30 posts or 60 s, judged before each post goes out: nothing more is sent, the token or code is dropped, and the stop notice says so",
   getsBar: "what a trigger's jobs get: each change moves the bar's count and its words, a row is marked, and a change set back as it was drawn leaves the bar hidden",
   getsBody: "what a trigger's jobs get sends the digest the page drew and only what differs from what it drew, with null for a key a blank box, an emptied list or the packages switch turned back on removes",
@@ -77,6 +79,7 @@ export const CLIENT_STATES = Object.freeze([
   // SignIn
   row("SignIn", "\"Console not reachable, retrying\" keeps the page", T.signIn),
   row("SignIn", "One notice at a time above the field", T.signIn),
+  row("SignIn", "A person signed in who arrives from another site goes straight to the page, and one who is not returns to it after signing in with a token", T.arrival),
   // The retry's stop: the script's own notice, a copy of the server's unreachable one.
   row("SignIn", "The retry stops after 30 tries or 60 s, and asks for Sign in again", T.signInStops),
   // TriggerEnvironment
@@ -85,7 +88,9 @@ export const CLIENT_STATES = Object.freeze([
   row("TriggerEnvironment", "Each change is sent, and nothing else", T.getsBody),
   row("TriggerEnvironment", "Any move of a control closes a preview it no longer matches", T.getsMoveCloses),
   row("TriggerEnvironment", "Nothing to preview, and a refusal under no field", T.getsNothing),
-  // AccessStates: the link page's states are panels in its ledger (p-link-wait, -used, -nocode).
+  // AccessStates: the link page's states are panels in its ledger (p-link-wait, -used, -expired, -signed-in, -nocode).
+  row("AccessStates", "p-link-expired", T.linkEnds),
+  row("AccessStates", "p-link-signed-in", T.linkEnds),
   row("AccessStates", "p-link-used", T.link),
   row("AccessStates", "p-link-nocode", T.link),
   row("AccessStates", "p-link-wait", T.link),

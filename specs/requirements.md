@@ -1351,17 +1351,18 @@ writes retain their existing interactive confirmation. This adds no unattended p
     (`destroy(id, null)`, an entry with no reason); `peek` and the hub's `verdict` write nothing. The tombstones are a
     FIFO of `TOMBSTONE_MAX` (1024): past it the oldest goes and the eviction is counted. Given a page request whose
     well-formed cookie names an ended session, it is a 303 to `/login?ended=<reason>` (`/login` when there is no reason
-    to give) with the cookie cleared; given an API route or a write that needs a session, a 401 `{"error": "sign in
+    to give), with `next=<page>` added when the page parser accepts the page asked for and it is not `/`, with the cookie cleared; given an API route or a write that needs a session, a 401 `{"error": "sign in
     first", "ended": <reason>}`, `ended` null when there is none (`INT-CONSOLE-STATE-API`), with NO Set-Cookie: the
     probe a page makes after a stream closed must still carry the cookie to read why, and a 401 for an old cookie must
     never clear a newer one another tab's sign-in set meanwhile (before PR 2 it cleared the cookie); given no cookie,
-    `location: /login` exactly, as before, with no Set-Cookie. Given a well-formed id the store does not
+    `location: /login`, with no Set-Cookie, and `?next=<page>` when the page asked for is one the page parser accepts other than `/` (issue #849: signing in with a token on that page returns there). Given a well-formed id the store does not
     hold and no tombstone, the reason is `restart` only while the process has been up for less than
     `PI_CONSOLE_MAX_HOURS` and has evicted no tombstone, and its sentence is a possibility, never a claim ("This
     console no longer knows this sign-in; it may have restarted"), since a planted cookie looks the same; otherwise
     none. `GET /login` draws an ended notice only for exactly one `ended` that is a member of the list, compared byte
-    for byte, ignores every other parameter and echoes nothing of the query, so a crafted link can only pick one of
-    the console's own sentences. Each reason is kept under the session's own id and describes that session's own
+    for byte, and reads one other parameter, `next`, drawn only once the page parser accepts it as one of this console's own pages (issue #849). It
+    ignores every other parameter and echoes nothing else of the query, so a crafted link can only pick one of
+    the console's own sentences or pages. Each reason is kept under the session's own id and describes that session's own
     token, so a tombstone tells a browser nothing about any other token or session. Given a request that carries a
     session cookie while the tokens file cannot be used (the reader gives no file), it is answered 503 with
     `TOKENS_UNUSABLE` ("the console's tokens file cannot be used right now; the operator should run pi-dispatch
@@ -2921,7 +2922,7 @@ writes retain their existing interactive confirmation. This adds no unattended p
     Signed out), a page shown as
     last seen and a panel kept still; the read-only banner for each role; the audit page's damaged and not-verified
     rows; each ended reason and each refusal the sign-in page draws, and its unreachable notice; and the link page's
-    used and no-code states and each of its notices; and since #737 PR 3b the overview all clear and its first run
+    used, expired, already-signed-in and no-code states and each of its notices; and since #737 PR 3b the overview all clear and its first run
     with two steps not yet ready, for each role, and for an operator its first run with no doctor result yet, each
     waiting bucket alone, a host whose clock is out of step or whose registry row has no expiry, and the longest names
     the overview draws in running text (`overview-host-long-names.operator`, `LONG_NAMES`, which the width check
@@ -3005,7 +3006,7 @@ writes retain their existing interactive confirmation. This adds no unattended p
     pill): a 200 that names another person than the page's is this browser
     signed in as someone else (below), a 200 that names the page's own is the stream limit (Not live, the note naming
     the token's `PI_CONSOLE_MAX_STREAMS` and the console's 32, with Reload), a 401 is a session that ended (Signed out,
-    then `/login?ended=<the answer's reason>`), and a 503 or no answer keeps the page under "Console not reachable,
+    then `/login?ended=<the answer's reason>` (with `next=<page>` when this page is one of the console's own other than `/`, never for `switched`, issue #849)), and a 503 or no answer keeps the page under "Console not reachable,
     retrying", asking again every 2 seconds and reloading once the console answers. AMENDED 2026-10-25 (#737, PR 3a):
     one question is out at a time, and its answer settles every caller that asked meanwhile (the page's stream, the
     transcript's, a write's 401): given a run page whose two streams the browser closed together (a 429 past the
@@ -3245,7 +3246,7 @@ writes retain their existing interactive confirmation. This adds no unattended p
     whichever comes first, and then the page drops the token or the code and says so in a notice of its own; a link's
     post the sign-in limiter refuses (429) leaves the link page in its first state under the rate notice, since the
     limiter answers before the code is read and the link is not spent, where a 401, a 503 or a 500 shows the used
-    state; a new link pasted into the same tab (only its fragment changes, so no page loads) loads the page again for
+    state (a 401 for a code the server can still tell has expired shows the expired state, and a browser already signed in is told that instead, issue #849); a new link pasted into the same tab (only its fragment changes, so no page loads) loads the page again for
     its code;
     an error page's title bar carries a line under its title (`ERROR_SENTENCES`' `sub`, as the ErrorPage card draws
     it, `REQ-CONSOLE-SECURITY` (n)); a read-only console
@@ -8599,6 +8600,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-08 (#849, part 2) | Sign-in pages that recover on their own. **`REQ-CONSOLE-SECURITY` AMENDED**, (i): the redirect to `/login` carries the page asked for as `next`, once the page parser accepts it. A session ending in an open tab sends its page along too, never for `switched`. **`REQ-OPERATOR-CONSOLE-SCREENS`**: the link page gains `expired` and `signed-in`. The 60 seconds and single use are UNCHANGED, checked. |
 | 2026-11-08 (#849, part 1) | One command to a signed-in browser. **`REQ-BROWSER-FIRST-RUN-SETUP` AMENDED**, the Bootstrap acceptance: the self-install from npm's cache and its order, `open` in place of a printed link, `pi-dispatch console`. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**: the one first-run question, which is exactly `--yes`, and `--ask-each`; plain `up` UNCHANGED, checked. `REQ-CONSOLE-SECURITY` (i), the 60 seconds and single use: UNCHANGED, checked: `open` mints later, never for longer. |
 | 2026-11-05 (no issue, a Valkey outage under the console) | **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: the console keeps running when Valkey is down, restarts, stops answering or is refused, hangs no page over it, and reads again within about 30 seconds of Valkey answering, with no restart, and a change that timed out before it left the console is not made when Valkey returns. What is not so yet is named in the entry. On a console started with Valkey down, or with a `.env` line that made a Valkey on macOS refused, the first signed-in page ended the process; and after a restart lasting past a client's retries every page that reads a queue kept saying Valkey could not be read until the console itself was restarted. `REQ-CONSOLE-SECURITY` UNCHANGED, checked. |
 | 2026-11-04 (#811) | **`REQ-RUN-RECOVERY` AMENDED**: a recovery is superseded only by its own run's settled record; one from before the run was created, less 5 minutes, which an older job left under a reused id, settles nothing, while a record with no readable time still settles. **`REQ-ZERO-TOUCH-RATE` UNCHANGED, checked**: a touch still counts against the run it touched; an older job's touch under a reused id was never that run's, and the view now tells them apart by the record's job creation time (`DES-TOUCH-RATE-FROM-RECORDS-AND-AUDIT`). **`REQ-MODEL-POLICY` UNCHANGED, checked**: its Reviewed failover bullet ("Missing evidence never authorizes switching") holds as written; a retry now reads only the job's own previous record, so an older job's never-started record under a reused id is missing evidence (`DES-STORE-VERSION-WHEN-NEEDED`). **`REQ-CAPACITY-INSIGHTS` UNCHANGED, checked**: `earlier` keeps its meaning and now comes from the job's own previous record only (`DES-CAPACITY-FROM-RECORDS`). **Code evidence**: worker/src/processor.mjs -> runAttempt (`settlesRun`); worker/src/recovery-queue.mjs -> recoveryDataOf; worker/src/zero-touch.mjs -> computeZeroTouch. |

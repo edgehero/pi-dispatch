@@ -347,7 +347,8 @@ async function postLogin(ctx) {
     ctx.record({ actor: ANONYMOUS, action: "login-failed", target: "/login", outcome: "refused", reason: "no token matched" });
     return sendError(ctx.res, 401, "that token is not valid for this console");
   }
-  return startSession(ctx, entry, file, "login");
+  // Only when the page asked, so the answer to a plain sign-in is what it always was. The page parser judges it, as for a link.
+  return startSession(ctx, entry, file, "login", ctx.body.next === undefined ? {} : { next: realPages.returnPathOf(ctx.body.next) ?? "/" });
 }
 
 async function postLoginCode(ctx) {
@@ -356,7 +357,8 @@ async function postLoginCode(ctx) {
   const consumed = CODE_RE.test(code) ? ctx.deps.consumeLoginCode(code) : { refusal: "malformed" };
   const refuse = (reason) => {
     ctx.record({ actor: ANONYMOUS, action: "login-code", target: "/login/code", outcome: "refused", reason });
-    return sendError(ctx.res, 401, "this sign-in link is used, expired or unknown; ask for a new one with pi-dispatch-console link");
+    // `link` picks the page's state. Only what the code alone shows is told apart: a used code and one never made look the same to the server.
+    return sendJson(ctx.res, 401, { error: "this sign-in link is used, expired or unknown; ask for a new one with ./pi-dispatch console", link: consumed?.kind === "expired" ? "expired" : "used" });
   };
   if (!consumed || consumed.refusal) return refuse("code refused");
   const file = tokensOr503(ctx);
@@ -458,17 +460,37 @@ function pageHandler(name) {
 }
 
 /**
+ * The sign-in page's address for a person who asked for a page and is not signed in (issue #849): why they are here, and where they were
+ * going, so signing in with a token on that page returns them there. Only what the page parser accepts is ever a `next`, and `/` is left out because it is where
+ * a sign-in lands anyway.
+ */
+export function loginHref(ended, next) {
+  const query = new URLSearchParams();
+  if (ended) query.set("ended", ended);
+  if (next && next !== "/") query.set("next", next);
+  const text = query.toString();
+  return text === "" ? "/login" : `/login?${text}`;
+}
+
+/**
  * The sign-in page (issue #737). `?ended=` selects the notice for why the last session ended, only when it is given once
  * and is exactly a member of `ENDED_REASONS`; anything else (two of them, another word, another parameter) is no
- * notice, and no byte of the query reaches the page. The limits are this console's own, so the idle and longest-life
+ * notice. `?next=` is the one other parameter read, and it reaches the page only once the page parser accepts it. The limits are this console's own, so the idle and longest-life
  * sentences state what it runs with; the footer follows how it listens (see `listenWord`).
  */
 function getLogin(ctx) {
   const { config } = ctx.deps;
   const notice = loginNoticeOf(ctx.searchParams);
+  const next = realPages.returnPathOf(ctx.searchParams.get("next")) ?? undefined;
+  // `SameSite=Strict` withholds the cookie on a navigation that starts on another site (a link in GitHub or a mail), so a signed-in browser
+  // arrives here looking signed out. The page's own same-origin fetch does carry the cookie, so the script asks. Exactly `cross-site`, the one
+  // arrival that lost its cookie: a person who came here on purpose (to use a token, or as someone else) must see the form, a bookmark (`none`) sent
+  // the cookie anyway, browsers send no header at all to a plain-HTTP name, and an `ended` notice must stay on screen. REJECTED: `SameSite=Lax`,
+  // which would give up what `Strict` protects for every other request.
+  const arrival = notice === null && ctx.req.headers["sec-fetch-site"] === "cross-site";
   const idleMinutes = Number.isSafeInteger(config.idleMs) ? Math.floor(config.idleMs / 60000) : undefined;
   const maxHours = Number.isSafeInteger(config.maxMs) ? Math.floor(config.maxMs / 3600000) : undefined;
-  return sendHtml(ctx.res, 200, loginPage({ theme: themeOf(ctx.req.headers.cookie), notice, limits: { idleMinutes, maxHours }, listen: listenWord(config) }));
+  return sendHtml(ctx.res, 200, loginPage({ theme: themeOf(ctx.req.headers.cookie), notice, limits: { idleMinutes, maxHours }, listen: listenWord(config), next, arrival }));
 }
 
 /** The sign-in page's `ended` notice from its query: exactly one `ended`, a member of `ENDED_REASONS`, else null. */
@@ -857,10 +879,9 @@ async function dispatch(req, res, deps) {
       // No Set-Cookie (see the header): the probe that follows a closed stream must still carry this cookie to read why,
       // and must never clear a newer one another tab's sign-in set meanwhile.
       if (route.write || route.path.startsWith("/api/")) return sendJson(res, 401, { error: SIGN_IN_FIRST, ended });
-      // `ended` is a member of `ENDED_REASONS` or null (resolveSession held it to the list), so the location is one of
-      // eight fixed strings (and never `?ended=switched`, which no tombstone holds). A request with no cookie has
-      // nothing to clear, so its answer is exactly what it was.
-      return redirect(res, ended ? `/login?ended=${ended}` : "/login", presented ? { "set-cookie": deps.cookies.clearSessionCookie() } : {});
+      // `ended` is a member of `ENDED_REASONS` or null (resolveSession held it to the list), and never `switched`, which no tombstone
+      // holds. A request with no cookie has nothing to clear. The page asked for goes along as `next` once the page parser accepts it.
+      return redirect(res, loginHref(ended, realPages.returnPathOf(req.url)), presented ? { "set-cookie": deps.cookies.clearSessionCookie() } : {});
     }
     // The person (see the header), before the role: a page drawn for someone else learns that, not what the other one
     // may not do.
@@ -910,7 +931,7 @@ async function dispatch(req, res, deps) {
  *     the CLI; `streamAcquire(id)` and `streamRelease(id)` the streams'.
  *   - `cookies`: `sessionCookie(id, {maxAgeSec, secure})`, `clearSessionCookie()`, `readSessionCookie(header)` (the one session a
  *     request runs as), `readSessionCookies(header)` (every one a sign-out ends), `sessionDigest(id)`.
- *   - `consumeLoginCode(code)` -> `{name}` | `{refusal}` (the CLI binds the codes directory, fs and clock).
+ *   - `consumeLoginCode(code)` -> `{name}` | `{refusal, kind?}`, `kind` being `expired` when the code alone shows that (the CLI binds the codes directory, fs and clock).
  *   - `tickets`: `issue({...})` -> `{ticket}`, `redeem({sessionId, ticket, action})` -> `{entry}` | `{refusal}`.
  *   - `audit.append(row)`: synchronous, throws on failure.
  *   - `writePauseWindows({pauseWindowsPath, mutate, fs, expect})` -> `{ok}` | `{invalid}`.

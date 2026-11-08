@@ -208,7 +208,7 @@ export function consumeLoginCode({ dir, code, fs = nodeFs, now = () => Date.now(
   reap(dir, fs, t);
   if (!taken) return { refusal: used };
   if (!Number.isFinite(taken.expiresAt) || taken.expiresAt <= t) {
-    return { refusal: "this login link has expired. Run `pi-dispatch-console link --name <name>` for a new one" };
+    return { kind: "expired", refusal: "this login link has expired. Run `pi-dispatch-console link --name <name>` for a new one" };
   }
   // A code the minter made expires at most `ttlMs` after it was made; one that claims longer (allowing a few seconds of
   // clock step) was written by something else.

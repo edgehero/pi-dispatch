@@ -363,8 +363,8 @@ ${inner}
  * `endedReasonOf`'s, never the query's own bytes); `limits` the console's `{ idleMinutes, maxHours }`; `listen` the
  * config's listen address, for the footer.
  */
-export function loginPage({ theme = null, notice = null, limits = {}, listen = null } = {}) {
-  return frameHtml({ name: "login", title: "Sign in", theme, skip: "Skip to sign-in", titleShown: false }, signInContent({ notice, limits, listen }));
+export function loginPage({ theme = null, notice = null, limits = {}, listen = null, next = undefined, arrival = false } = {}) {
+  return frameHtml({ name: "login", title: "Sign in", theme, skip: "Skip to sign-in", titleShown: false }, signInContent({ notice, limits, listen, next, arrival }));
 }
 
 /**

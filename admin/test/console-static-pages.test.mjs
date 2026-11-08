@@ -74,7 +74,7 @@ test("the static pages say what their card says: who is signed in only where a s
   assert.ok(!login.includes('class="pillnav"') && !login.includes('id="logout"'), "nobody is signed in");
   // The link page starts signing in, for the script to reveal; the other two states drawn hidden for it to switch to.
   const link = pages["login-code.anonymous"].html;
-  assert.deepEqual([...link.matchAll(/<div class="signin__state" data-link-state="([a-z]+)"( hidden data-reveal| hidden)>/g)].map((m) => [m[1], m[2] === " hidden data-reveal"]), [["wait", true], ["used", false], ["nocode", false]]);
+  assert.deepEqual([...link.matchAll(/<div class="signin__state" data-link-state="([a-z-]+)"( hidden data-reveal| hidden)>/g)].map((m) => [m[1], m[2] === " hidden data-reveal"]), [["wait", true], ["used", false], ["expired", false], ["signed-in", false], ["nocode", false]]);
   // 404, 400 and 403 keep the console's navigation for the session they were asked by (a viewer's has no audit link);
   // none marks a screen current, since the page is none of them.
   for (const shot of ["error-404.operator", "error-404.viewer", "error-400.operator", "error-403.viewer"]) {
@@ -139,7 +139,7 @@ test("without a script the sign-in pages show only what works, the sentence that
   // With the script: the noscript is not drawn, and the reveal shows the form and its lead-in.
   const on = drawn(login, { script: true });
   assert.ok(shown(on.getElementById("login-form")) && !on.querySelector("[data-noscript]"));
-  assert.ok(seen(on.querySelector(".signin")).startsWith("pi Sign in to the console Paste a console token, or open a one-time link from pi."), seen(on.querySelector(".signin")));
+  assert.ok(seen(on.querySelector(".signin")).startsWith("pi Sign in to the console Paste a console token, or open a one-time link."), seen(on.querySelector(".signin")));
   // The reveal is the only thing that shows them: drawn hidden, and nothing else on the page is marked for it.
   assert.ok(!shown(drawn(login, { script: true, reveal: false }).getElementById("login-form")));
   assert.deepEqual([...on.querySelectorAll("[data-reveal]")].map((el) => el.localName), ["p", "form"]);

@@ -329,7 +329,7 @@ test("the sign-in pages: the skip link to sign-in, the sprite, a top bar of the 
   assert.equal(count(String(loginCodePage()), 'id="notice"'), 1);
 });
 
-test("the sign-in card: one notice region holding every notice, hidden but the server's choice; the help with --link; the footer by the bind", () => {
+test("the sign-in card: one notice region holding every notice, hidden but the server's choice; the help with the one command first; the footer by the bind", () => {
   // The two lists share no name, so a value can only select one of them.
   assert.deepEqual(ENDED_REASONS.filter((r) => Object.hasOwn(SIGN_IN_NOTICES, r)), []);
   const keys = [...ENDED_REASONS.map((r) => `ended-${r}`), ...Object.keys(SIGN_IN_NOTICES)];
@@ -358,9 +358,11 @@ test("the sign-in card: one notice region holding every notice, hidden but the s
   // The refusal the server words itself: its text is set by the script, into an empty element.
   assert.ok(text.includes('<div data-notice="other" hidden><div class="banner banner--sm tone-failed" role="status"><span class="tile"><svg class="ic" aria-hidden="true"><use href="#i-failed"></use></svg></span><div><p class="banner__t">The console refused the sign-in</p><p class="banner__s"><span data-notice-text></span></p></div></div></div>'));
   // The help (the command that prints a link is --link; the name placeholder is quoted, as a shell reads it).
-  assert.ok(text.includes(`<p class="muted">Make a link from pi. It works once, for 60 seconds:</p><div class="cmd"><code><span>/dispatch</span> <span>console</span> <span>--link</span></code><button class="btn btn--sm" type="button" data-copy hidden>Copy</button></div><p class="muted">Or make a token on the host:</p><div class="cmd"><code><span>pi-dispatch-console</span> <span>token</span> <span>add</span> <span>--name</span> <span>&#39;&lt;you&gt;&#39;</span> <span>--role</span> <span>operator</span></code>`));
+  assert.ok(text.includes('<p class="muted">Run this in your deployment folder to sign in:</p><div class="cmd"><code><span>./pi-dispatch</span> <span>console</span></code>'), "the one command first, with nothing to fill in");
+  assert.ok(text.includes("<code><span>./node_modules/.bin/pi-dispatch</span> <span>console</span></code>") && text.includes("<code><span>/dispatch</span> <span>console</span> <span>--link</span></code>"));
+  assert.ok(text.indexOf("<details><summary>Make a token instead</summary>") < text.indexOf("<code><span>pi-dispatch-console</span> <span>token</span>"), "the token is behind its disclosure");
   // Without a script the form and its lead-in are not drawn (signin.mjs); the script reveals the two of them.
-  assert.ok(text.includes('<p class="muted" hidden data-reveal>Paste a console token, or open a one-time link from pi.</p>'));
+  assert.ok(text.includes('<p class="muted" hidden data-reveal>Paste a console token, or open a one-time link.</p>'));
   assert.equal(count(text, "data-reveal"), 2);
   // A command in a notice is in the code face; the other notice's text stays the script's, set as text.
   assert.ok(text.includes('<p class="banner__s">An operator should run <span class="code">pi-dispatch doctor</span> on the host.</p>'));
@@ -384,16 +386,17 @@ test("the sign-in card: one notice region holding every notice, hidden but the s
 });
 
 test("the one-time link's card: each state drawn, only the chosen one for the script to reveal, its own notices, the commands for a new link", () => {
-  assert.deepEqual(LINK_STATES, ["wait", "used", "nocode"]);
+  assert.deepEqual(LINK_STATES, ["wait", "used", "expired", "signed-in", "nocode"]);
   // `*` the state the page opens in: drawn `hidden data-reveal`, so a page without a script shows no state.
-  const states = (text) => [...text.matchAll(/<div class="signin__state" data-link-state="([a-z]+)"( hidden data-reveal| hidden)>/g)].map((m) => `${m[1]}${m[2] === " hidden" ? "" : "*"}`);
+  const states = (text) => [...text.matchAll(/<div class="signin__state" data-link-state="([a-z-]+)"( hidden data-reveal| hidden)>/g)].map((m) => `${m[1]}${m[2] === " hidden" ? "" : "*"}`);
   for (const state of LINK_STATES) assert.deepEqual(states(String(linkContent({ state }))), LINK_STATES.map((s) => (s === state ? `${s}*` : s)), state);
-  for (const odd of [HOSTILE, "USED", null, "__proto__"]) assert.deepEqual(states(String(linkContent({ state: odd }))), ["wait*", "used", "nocode"], String(odd));
+  for (const odd of [HOSTILE, "USED", null, "__proto__"]) assert.deepEqual(states(String(linkContent({ state: odd }))), ["wait*", "used", "expired", "signed-in", "nocode"], String(odd));
   const text = String(linkContent());
-  assert.equal(count(text, '<a class="link signin__alt" href="/login">Sign in with a token instead</a>'), 3, "every state offers the token form");
+  assert.equal(count(text, '<a class="link signin__alt" href="/login">Sign in with a token instead</a>'), 5, "every state offers the token form");
   assert.ok(text.includes("<h2>Signing in with a one-time link</h2><p class=\"muted\">This takes a moment. The link is taken out of your browser history first, so it cannot be used again from there.</p>"));
   // The used state's two ways to a new link, each led in by where it runs.
-  assert.ok(text.includes('<p class="muted">A link works once, for 60 seconds. Ask for a new one on the host:</p><div class="cmd"><code><span>pi-dispatch-console</span> <span>link</span> <span>--name</span> <span>&#39;&lt;you&gt;&#39;</span></code><button class="btn btn--sm" type="button" data-copy hidden>Copy</button></div><p class="muted">Or in pi:</p><div class="cmd"><code><span>/dispatch</span> <span>console</span> <span>--link</span></code>'));
+  assert.ok(text.includes('<p class="muted">A link works once, for 60 seconds.</p><p class="muted">Run this in your deployment folder to sign in:</p><div class="cmd"><code><span>./pi-dispatch</span> <span>console</span></code>'), "a used link names the one command, with nothing to fill in");
+  assert.ok(text.includes("<h2>This sign-in link has expired</h2>") && text.includes("<h2>You are already signed in</h2>") && text.includes('<a class="link" href="/">Go to the console</a>'));
   assert.deepEqual([...text.matchAll(/<div data-notice="([a-z-]+)" hidden>/g)].map((m) => m[1]), [...LINK_NOTICES]);
   for (const k of LINK_NOTICES) assert.ok(Object.hasOwn(SIGN_IN_NOTICES, k), k);
   assert.ok(text.startsWith(`<section id="p-link" data-panel><div class="card signin">\n${NO_SCRIPT}\n`), "what a page without a script says, first");
@@ -404,7 +407,7 @@ test("the one-time link's card: each state drawn, only the chosen one for the sc
   assert.deepEqual(shownNotices(String(loginCodePage({ notice: "rate" }))), ["rate"]);
   assert.ok(!/pdc_/.test(text));
   assertClean("login-code", String(loginCodePage()));
-  assert.deepEqual(states(String(loginCodePage({ state: "used" }))), ["wait", "used*", "nocode"]);
+  assert.deepEqual(states(String(loginCodePage({ state: "used" }))), ["wait", "used*", "expired", "signed-in", "nocode"]);
 });
 
 test("frameHtml: a page that is not a screen, with the sign-in bar, or the signed-in bar with no current pill and no live pill", () => {

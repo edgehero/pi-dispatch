@@ -88,7 +88,9 @@ test("an expired code is refused and removed; other expired codes are reaped, li
   now.advance(30000);
   const live = mintLoginCode({ dir, name: "view", now, random }).code;
   now.advance(30000);
-  assert.match(consumeLoginCode({ dir, code: old, now }).refusal, /has expired/);
+  const refused = consumeLoginCode({ dir, code: old, now });
+  assert.match(refused.refusal, /has expired/);
+  assert.equal(refused.kind, "expired", "the only thing that lets the link page say expired");
   assert.deepEqual(fs.readdirSync(dir), [`${sha(live)}.json`], "the expired code and its expired sibling are gone");
   assert.match(consumeLoginCode({ dir, code: stale, now }).refusal, /already used/);
   assert.deepEqual(consumeLoginCode({ dir, code: live, now }), { name: "view" });

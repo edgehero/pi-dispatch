@@ -11784,7 +11784,8 @@ script reads the console without scraping a page (issue #641, `DES-OPERATOR-CONS
   (no cookie, or one with no reason to give). The list's eighth word, `switched`, is never this 401's: no session
   ends for it (below). The sign-in posts need no session and their own refusals are not this
   401: `POST /login`'s wrong token (`{"error": "that token is not valid for this console"}`) and `POST /login/code`'s
-  refused link carry `error` alone. The 401 sends NO Set-Cookie, where before PR 2 it cleared the cookie: a script's
+  refused link carry `error`, and the link's also `link` (`expired` or `used`, issue #849), which picks the page's state. A successful `POST /login` that sent `next`
+  answers the page the parser accepted, as `POST /login/code` does. The 401 sends NO Set-Cookie, where before PR 2 it cleared the cookie: a script's
   next request still carries the cookie, so it can still read why, and a 401 never clears a newer cookie another
   tab's sign-in set meanwhile (a page's 303 to `/login` still clears it, and so does sign-out). `error` is the
   sentence it always was, so a script that read it reads the same. And while the console cannot use its tokens file,
@@ -12072,7 +12073,7 @@ script is its only intended client; it is documented so that what a stream may c
     and connects again once the console answers. `restart` is never sent (this process opened every stream it ends),
     and null means ended for no reason the console can give. A client treats a word it does not know as an end with no
     reason. The
-    browser page goes to `/login?ended=<word>` only for a member of `ENDED_REASONS`; on `shutdown` and on `elsewhere`
+    browser page goes to `/login?ended=<word>` (with `next=<page>` when it is one of the console's own pages other than `/`, never for `switched`, issue #849) only for a member of `ENDED_REASONS`; on `shutdown` and on `elsewhere`
     it waits 2 seconds (the browser may be storing a newer cookie) and asks `/api/whoami`, a 401 then meaning the
     console no longer knows the session, and a 200 reloading the page only when it names the person the page was
     drawn for (the top bar's name and role), else going to `/login?ended=switched` (the page's own word: no stream
@@ -13600,6 +13601,7 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 
 | Date | Change |
 |---|---|
+| 2026-11-08 (#849, part 2) | **`INT-CONSOLE-STATE-API` AMENDED**: the refusal of `POST /login/code` carries `link` as well as `error`, and `POST /login` answers `next` when it was sent. **`INT-CONSOLE-EVENT-STREAM`**: a page leaving for sign-in carries its own address as `next`. |
 | 2026-11-08 (#849, part 1) | **`INT-CONSOLE-SETUP-HOST` AMENDED**, "Bootstrap link": the link goes to `pi-dispatch-console open` rather than being printed, `--no-open`, and `--name`. **`INT-CONSOLE-AUDIT-LOG` AMENDED**: `open` is a `login-code` writer, as `link` is. No browser operator mint or new token-print exception is admitted: UNCHANGED, checked. |
 | 2026-11-05 (no issue, the file a write cannot keep, pause windows) | **`INT-PAUSE-WINDOWS-FILE-CONTRACT` AMENDED**, reversing a recorded posture as `INT-TRIGGERS-FILE-CONTRACT` just did for the same reason: a file holding what the writer could not keep refuses with every byte kept. Five windows and a stray comma, then an add, used to preview, Confirm and leave one window, with an Undo that only took the new row back out, and the whole-list action previewed "0 windows now" over the full file. Editing or deleting one window of a file that does not load now says so, where it said "have 0". The worker's reading of the file is UNCHANGED, checked: it refuses a file that does not parse or has no list at boot and keeps the last good windows on a live edit, and it reads a key written twice as `JSON.parse` does. |
 | 2026-11-05 (no issue, the file a write cannot keep) | **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**, reversing a recorded posture: `writeTriggers` starts from an empty set only for a file that holds nothing (missing, whitespace, a byte-order mark). A file that is not valid JSON, is not a JSON object, or has a `triggers` that is not a list now refuses with `{ invalid, malformed: true }`, before `mutate` runs and with every byte kept, and the console refuses it at the preview. It used to be rebuilt from empty as "the recorded repair": a typo in a thirteen-row file and one add left one row, with `{ ok: true }`, a preview whose sentences never said so, only its diff, and an Undo that brought nothing back. Two sentences that leaned on the repair are reworded. `disarmTrigger` (`DES-ONE-SHOT-DISARM-IN-THE-FILE`) already refused these files; UNCHANGED, checked. `INT-PAUSE-WINDOWS-FILE-CONTRACT` UNCHANGED, checked: that writer keeps its own repair. |

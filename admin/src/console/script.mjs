@@ -56,8 +56,9 @@
  *     the script navigates there only if the answer is also one of `PAGES`' paths (`ownPage`), never anywhere else.
  *     The card's states (`[data-link-state]`): the state the server drew (`wait`; a panel golden draws the others) is
  *     the one `data-reveal` shows, and the script moves off it only for a reason: `nocode` for a fragment with no code,
- *     `used` for a refusal that spent or refused the code (a 401 is the link's own; a 503 or 500 comes after the
- *     server took it, so a new link is the way on, and the notice above says why). A 429 is the sign-in limiter's,
+ *     `used` for a refusal that spent or refused the code, or `expired` when a 401 says so (a 401 is the link's own; a 503 or 500 comes after the
+ *     server took it, so a new link is the way on, and the notice above says why). After `nocode` or a 401 it asks /api/whoami, and a 200 moves it to
+ *     `signed-in`, since a browser already in has no use for a new link. A 429 is the sign-in limiter's,
  *     answered before the code is read: the link was not tried, so the state stays and the `rate` notice says to wait.
  *     A post that reaches nothing keeps the state as it is, shows `unreachable` and posts the same code again every
  *     `RETRY_MS`, under the token's cap; past it the page shows `used` (the link has expired by then) and the `gaveup`
@@ -287,10 +288,15 @@ export const CONSOLE_SCRIPT = `"use strict";
     return typeof r === "string" && ENDED_REASONS.indexOf(r) >= 0;
   }
   // Sign-in, saying why only with one of the console's own reasons: whatever an answer or an event carried, nothing
-  // else reaches the query string.
+  // else of it reaches the query string. The page this tab is on goes along as next, as the server's redirect does for
+  // a closed tab, except for switched: that page was drawn for someone else.
   function toLogin(r) {
     endSetupPrivate();
-    location.assign(isReason(r) ? "/login?ended=" + r : "/login");
+    var query = [];
+    if (isReason(r)) query.push("ended=" + r);
+    var here = location.pathname + (location.search || "");
+    if (r !== "switched" && here !== "/" && ownPage(here) === here) query.push("next=" + encodeURIComponent(here));
+    location.assign(query.length ? "/login?" + query.join("&") : "/login");
   }
   function later(fn, ms) {
     return typeof setTimeout === "function" ? setTimeout(fn, ms) : null;
@@ -391,6 +397,8 @@ export const CONSOLE_SCRIPT = `"use strict";
     // an older attempt's answer, arriving late, does nothing.
     var attempt = 0;
     var retrying = null;
+    var signInPanel = document.getElementById("p-signin");
+    var loginNext = signInPanel && typeof signInPanel.getAttribute === "function" ? signInPanel.getAttribute("data-next") : null;
     // The current attempt's token, for its retries alone: dropped once the attempt is answered or has stopped.
     var held = null;
     var stopLogin = function () {
@@ -401,10 +409,10 @@ export const CONSOLE_SCRIPT = `"use strict";
     var signIn = function (mine, tries, from) {
       if (mine !== attempt) return;
       if (!mayPost(tries, from, nowMs())) return stopLogin();
-      post("/login", { token: held }).then(function (r) {
+      post("/login", loginNext === null ? { token: held } : { token: held, next: loginNext }).then(function (r) {
         if (mine !== attempt) return;
         held = null;
-        if (r.ok) location.assign("/");
+        if (r.ok) location.assign(ownPage(r.body && r.body.next));
         else refusedSignIn("/login", r);
       }, function () {
         if (mine !== attempt) return;
@@ -413,6 +421,13 @@ export const CONSOLE_SCRIPT = `"use strict";
         retrying = later(function () { retrying = null; signIn(mine, tries + 1, from); }, RETRY_MS);
       });
     };
+    // SameSite=Strict kept the cookie off the navigation that brought this browser here from another site, but this fetch carries it
+    // (server.mjs getLogin). Anything but a 200 leaves the form exactly as it is.
+    if (signInPanel && typeof signInPanel.getAttribute === "function" && signInPanel.getAttribute("data-arrival") !== null && typeof fetch === "function") {
+      fetch("/api/whoami", { credentials: "same-origin", cache: "no-store" }).then(function (res) {
+        if (res.status === 200) location.replace(ownPage(loginNext));
+      }, function () {});
+    }
     if (form && input) form.addEventListener("submit", function (ev) {
       ev.preventDefault();
       // Out of the field at once, whatever the answer: the token stays in this closure for the retries alone.
@@ -450,8 +465,16 @@ export const CONSOLE_SCRIPT = `"use strict";
       linkState("used");
       gaveUp("link");
     };
+    // A browser that is already in has no use for a new link, whatever became of this one. Only ever moves off a state that says the link failed.
+    var showSignedInIfSo = function () {
+      if (typeof fetch !== "function") return;
+      fetch("/api/whoami", { credentials: "same-origin", cache: "no-store" }).then(function (res) {
+        if (res.status === 200) linkState("signed-in");
+      }, function () {});
+    };
     if (code === "") {
       linkState("nocode");
+      showSignedInIfSo();
     } else {
       var sendCode = function (tries, from) {
         if (!mayPost(tries, from, nowMs())) return stopLink();
@@ -463,7 +486,8 @@ export const CONSOLE_SCRIPT = `"use strict";
           // Refused. A 429 is the sign-in limiter's, which answers before the code is read: the link was not tried,
           // so the state stays (not used) and the notice says to wait. A 401 is the link's own refusal; a 503 or a
           // 500 comes after the server took the code, so it is spent, and a new link is the way on.
-          if (r.status !== 429) linkState("used");
+          if (r.status !== 429) linkState(r.status === 401 && r.body && r.body.link === "expired" ? "expired" : "used");
+          if (r.status === 401) showSignedInIfSo();
           refusedSignIn("/login/code", r);
         }, function () {
           // The same cap as the token's: by then the link has expired, so the page says that and holds the code no more.

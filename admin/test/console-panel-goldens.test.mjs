@@ -48,7 +48,7 @@ test("the panel goldens are the states the cards name, by name: the ledgers and 
   const live = ["reconnecting", "not-live", "signed-out", "stale", "kept-still"].map((s) => `live-${s}.operator`);
   const signIn = [...ENDED_REASONS.map((r) => `login-ended-${r}.anonymous`), ...["wrong", "rate", "tokens", "audit", "other"].map((k) => `login-refused-${k}.anonymous`), "login-unreachable.anonymous"];
   // The link page: its two states the script switches to, then each notice it can show (signin.mjs LINK_NOTICES).
-  const link = ["login-code-used.anonymous", "login-code-nocode.anonymous", ...["rate", "tokens", "audit", "other"].map((k) => `login-code-refused-${k}.anonymous`), "login-code-unreachable.anonymous"];
+  const link = ["login-code-used.anonymous", "login-code-expired.anonymous", "login-code-signed-in.anonymous", "login-code-nocode.anonymous", ...["rate", "tokens", "audit", "other"].map((k) => `login-code-refused-${k}.anonymous`), "login-code-unreachable.anonymous"];
   // The overview's states (issue #737): all clear and the first run for both roles where the role changes the page, the
   // waitlists with each kind of wait alone (`DEFER_BUCKETS`), and the two hosts the registry has something to say of.
   const overview = ["overview-all-clear.operator", "overview-all-clear.viewer", "setup-nothing-ready.operator", "setup-partial.operator", "setup-partial.viewer", ...DEFER_BUCKETS.map((b) => `waitlist-${b}.operator`), "overview-host-skew.operator", "overview-host-no-expiry.operator", "overview-host-long-names.operator"];
@@ -300,9 +300,9 @@ test("the sign-in states: exactly one notice each, the reason's or the refusal's
   assert.ok(pages["login-ended-restart.anonymous"].includes("it may have restarted"), "restart worded as a possibility");
   // The state a page opens in is drawn for the script to reveal (signin.mjs: without a script none shows), the others
   // hidden for it to switch to.
-  const states = (page) => [...page.matchAll(/<div class="signin__state" data-link-state="([a-z]+)"( hidden data-reveal| hidden)>/g)].map((m) => [m[1], m[2] === " hidden data-reveal"]);
-  for (const state of ["used", "nocode"]) {
-    assert.deepEqual(states(pages[`login-code-${state}.anonymous`]), ["wait", "used", "nocode"].map((s) => [s, s === state]), state);
+  const states = (page) => [...page.matchAll(/<div class="signin__state" data-link-state="([a-z-]+)"( hidden data-reveal| hidden)>/g)].map((m) => [m[1], m[2] === " hidden data-reveal"]);
+  for (const state of ["used", "expired", "signed-in", "nocode"]) {
+    assert.deepEqual(states(pages[`login-code-${state}.anonymous`]), ["wait", "used", "expired", "signed-in", "nocode"].map((s) => [s, s === state]), state);
   }
   // The link page's notices: a refusal is the used state with the notice that says why, except too many attempts, which
   // leaves the link untried (the limiter answers before the code is read), so the page keeps waiting; out of reach, it
@@ -313,5 +313,6 @@ test("the sign-in states: exactly one notice each, the reason's or the refusal's
   }
   const far = pages["login-code-unreachable.anonymous"];
   assert.deepEqual([shownNotices(far), states(far).filter(([, opens]) => opens).map(([s]) => s)], [["unreachable"], ["wait"]]);
-  assert.ok(pages["login-code-used.anonymous"].includes("<code><span>pi-dispatch-console</span> <span>link</span> <span>--name</span> <span>&#39;&lt;you&gt;&#39;</span></code>"), "a used link names the command for a new one");
+  assert.ok(pages["login-code-used.anonymous"].includes("<code><span>./pi-dispatch</span> <span>console</span></code>"), "a used link names the command for a new one");
+  assert.ok(!pages["login-code-used.anonymous"].includes("&lt;you&gt;"), "with nothing for the person to fill in");
 });

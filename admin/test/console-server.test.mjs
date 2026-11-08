@@ -750,6 +750,37 @@ test("a signed-in page escapes and shows the name, and serves its script and sty
 
 // ---- issue #641: the screens, /api/state and the stream's refusals ----
 
+test("the page asked for survives sign-in: only the page parser's own pages, and only for a page that was asked for (#849)", async () => {
+  const c = await start();
+  assert.equal((await c.send({ path: "/" })).headers.location, "/login", "/ is where a sign-in lands anyway");
+  assert.equal((await c.send({ path: "/runs?filter=x" })).headers.location, (realPages.returnPathOf("/runs?filter=x") === null ? "/login" : `/login?next=${encodeURIComponent(realPages.returnPathOf("/runs?filter=x"))}`));
+  const page = async (query, headers = {}) => (await c.send({ path: `/login${query}`, headers })).text;
+  assert.ok((await page("?next=%2Fruns")).includes('data-next="/runs"'));
+  for (const bad of ["https%3A%2F%2Fevil.example", "%2F%2Fevil.example", "%2Fnowhere", "%2Flogin", "%5Cevil"]) assert.ok(!(await page(`?next=${bad}`)).includes("data-next"), bad);
+  const res = await c.post("/login", { token: OP_TOKEN, next: "/runs" });
+  assert.equal(JSON.parse(res.text).next, "/runs");
+  for (const bad of ["https://evil.example", "//evil.example", "/nowhere"]) assert.equal(JSON.parse((await c.post("/login", { token: OP_TOKEN, next: bad })).text).next, "/", bad);
+  assert.equal(JSON.parse((await c.post("/login", { token: OP_TOKEN })).text).next, undefined, "a plain sign-in answers as it always did");
+});
+
+test("the signed-in check is drawn only for a browser that arrived from elsewhere, and never over a reason (#849)", async () => {
+  const c = await start();
+  const page = async (query, site) => (await c.send({ path: `/login${query}`, headers: site ? { "sec-fetch-site": site } : {} })).text;
+  assert.ok((await page("", "cross-site")).includes("data-arrival"));
+  assert.ok(!(await page("", "none")).includes("data-arrival"), "a bookmark carried its cookie: anyone here without one is really signed out");
+  assert.ok(!(await page("")).includes("data-arrival"), "no header at all is a plain-HTTP name, where this cannot tell an arrival from a choice");
+  assert.ok(!(await page("", "same-origin")).includes("data-arrival"), "chose this page, from the console's own pages");
+  assert.ok(!(await page("?ended=switched", "cross-site")).includes("data-arrival"), "why a session ended stays on screen");
+});
+
+test("an expired code is told apart from a used one, and the answer names which (#849)", async () => {
+  const c = await start({ consumeLoginCode: () => ({ kind: "expired", refusal: "expired" }) });
+  const expired = await c.post("/login/code", { code: "k".repeat(43) });
+  assert.deepEqual([expired.status, JSON.parse(expired.text).link], [401, "expired"]);
+  const u = await start({ consumeLoginCode: () => ({ refusal: "used" }) });
+  assert.equal(JSON.parse((await u.post("/login/code", { code: "k".repeat(43) })).text).link, "used");
+});
+
 test("every page: signed out it redirects to /login; signed in it loads its data with the console's deps and renders; HEAD sends no body", async () => {
   const pageDeps = { fleet: { snapshot: async () => ({}) }, marker: "the-deps" };
   const c = await start({ pageDeps });
@@ -757,7 +788,8 @@ test("every page: signed out it redirects to /login; signed in it loads its data
   for (const [name, spec] of Object.entries(realPages.PAGES)) {
     const anon = await c.send({ path: spec.path });
     assert.equal(anon.status, 303, spec.path);
-    assert.equal(anon.headers.location, "/login");
+    const returnsTo = realPages.returnPathOf(spec.path);
+    assert.equal(anon.headers.location, returnsTo === null || returnsTo === "/" ? "/login" : `/login?next=${encodeURIComponent(returnsTo)}`, spec.path);
     // `run` needs an id; every other page renders bare.
     const path = name === "project" ? `${spec.path}?id=billing` : name === "run" ? `${spec.path}?id=job-1` : name === "watch-board" ? `${spec.path}?rule=shop` : name === "host" ? `${spec.path}?name=build3` : name === "venue" ? `${spec.path}?name=local` : name === "trigger" ? `${spec.path}?index=0` : spec.path;
     const res = await c.send({ path, headers: { cookie } });
@@ -1356,7 +1388,7 @@ test("a cookie whose session ended: a page goes to /login?ended=<reason> with th
   const expectEnded = async (cookie, reason, label) => {
     const page = await c.send({ path: "/runs", headers: { cookie } });
     assert.equal(page.status, 303, label);
-    assert.equal(page.headers.location, reason === null ? "/login" : `/login?ended=${reason}`, label);
+    assert.equal(page.headers.location, reason === null ? "/login?next=%2Fruns" : `/login?ended=${reason}&next=%2Fruns`, label);
     assert.match(page.headers["set-cookie"]?.[0] ?? "", clear, `${label}: the dead cookie is cleared`);
     const api = await c.send({ path: "/api/whoami", headers: { cookie } });
     assert.equal(api.status, 401, label);
