@@ -296,7 +296,8 @@ export async function checkSetupBrowser({ chrome, shots = null, sandbox = proces
     await until("document.querySelector('#confirm-slot').hidden || !document.querySelector('#confirm-slot [data-confirm]')");
     assert.ok(!JSON.parse(readFileSync(fixture.paths.tokensPath, "utf8")).tokens.some(token => token.name === "new-viewer"), "fresh confirmed Undo revokes the created viewer");
     await tab.send("Page.navigate", { url: href });
-    await until("document.body.innerText.includes('used, expired or unknown')");
+    // This browser is still signed in as the operator, so a spent link says that rather than asking for a new one (#849).
+    await until("document.body.innerText.includes('You are already signed in')");
     await navigate("/setup");
     await click('#p-setup-ready .card > details > summary');
     await type('[data-action="setup-viewer-add"] input[name=name]', "next-viewer");
