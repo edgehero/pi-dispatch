@@ -27,7 +27,10 @@ const USAGE = `pi-dispatch — run pi coding-agent flows on your own folders
                            --secrets resolves each project secret bundle here and prints its variable names, never values;
                            every run publishes its checks to Valkey for the console and the panel (labels with paths
                            and secret values redacted, kept 7 days), and --no-publish skips that
+  pi-dispatch console [--name NAME] [--next /setup] [--port N] [--deployment DIR]
+      get into the web console: starts its service if it stopped, then opens your browser signed in
   pi-dispatch up [--console] [--yes] [--adopt-volume] [--restart-proxy] [--refresh-proxy-rules]
+      with --console also: [--ask-each] [--no-open] [--name NAME]
                            one consented pass: pull+tag the job image, start Valkey, init, doctor
   pi-dispatch setup github mint GitHub App credentials in one browser click (App Manifest flow);
                            every write shown first and individually consented — no --yes here
@@ -159,6 +162,11 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 	if (cmd === "up") {
 		const { runUp } = await import("./up.mjs");
 		return runUp(argv.slice(1), { env });
+	}
+
+	if (cmd === "console") {
+		const { runConsoleOpen } = await import("./console-open.mjs");
+		return runConsoleOpen(argv.slice(1), { env });
 	}
 
 	if (cmd === "setup") {

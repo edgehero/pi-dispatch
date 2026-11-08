@@ -178,8 +178,8 @@ test("Open the web page says what the console's commands do", () => {
   assert.match(consoleCli, /default 127\.0\.0\.1:4790/);
   // The name setup gives the first operator when nobody chooses one, so the command works as it is printed here.
   assert.ok(section.includes("pi-dispatch-console link --name operator"));
-  assert.match(bootstrap, /"--yes"\) \? "operator" : .*\|\| "operator"/);
-  assert.match(consoleCli, /link --name <name>/);
+  assert.match(bootstrap, /named \?\? "operator"/);
+  assert.match(consoleCli, /link \[--name <name>\]/);
   assert.match(consoleCli, /token list/);
   // Setup keeps only the token's hash, which is why this section offers a token to keep at all.
   assert.ok(section.includes("Setup keeps no password you could paste"));

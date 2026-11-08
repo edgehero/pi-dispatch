@@ -2561,6 +2561,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 - **Traces to**: `INT-DEPLOYMENT-POINTER-CONTRACT`, `REQ-DEPLOYMENT-BOOTSTRAP`, `DES-CLI-SURFACE`,
   `DES-GH-APP-MANIFEST-SETUP`, `DES-TRIGGER-OUTSIDE-PI` (the wizard bootstraps host processes; it
   never hosts them)
+- **The browser route (issue #849)** runs its `up` child with `--ask-each --no-open`: the wizard's text promises a question before each host
+  mutation, and it signs the person in itself, so the child must neither ask once nor make a second link. With no pointer written it runs
+  `pi-dispatch console --next /setup` in the same attached way.
 
 ## DES-BROWSER-FIRST-RUN-SETUP
 
@@ -2643,8 +2646,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   Code's own `setup-token` is distinguished from pi-dispatch's login and current provider restrictions are linked.
   The host credential store, refresh ownership and selected-provider-only job forwarding are UNCHANGED, checked.
 - **Tokens and invitations**: host bootstrap may create an operator hash through the existing hardened writer,
-  discard the durable plaintext and print only a 60-second setup link after the console answers. It names the
-  created/reused operator and exact host `link`/`rotate` recovery, so losing a link is actionable. Existing tokens
+  discard the durable plaintext and, after the console answers, hand a 60-second setup link to
+  `pi-dispatch-console open` (issue #849). A failure names the created/reused operator and exact host `link` recovery,
+  so losing a link is actionable; `./pi-dispatch console` is the way back in on success. Existing tokens
   are preserved on retry, and multiple operator choices are explicit. Only `token add` and `token rotate` print
   durable tokens. The granted browser can create **viewer** entries only and return a one-use 60-second fragment
   link in the initiating operator's confirmation response. It never appears in server HTML, shared flash,
@@ -2656,14 +2660,32 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   code minting fails, report the retained viewer and recovery rather than hiding the mutation. A separately
   confirmed revoke is Undo only for the exact entry created, never a rotated/replaced entry with the same name.
 - **Durable bootstrap**: `up --console` resolves and validates the admin package before **any** host/config/token
-  mutation. The runtime does not silently install that optional package. A worker-only `npx` invocation therefore
-  refuses when it is missing. The documented terminal line installs exact worker/admin versions durably in the
+  mutation. The runtime does not silently install that optional package. A durable worker with no admin package
+  refuses. A run from npm's execution cache (issue #849) instead asks, and on yes installs exact worker/admin/pi
+  versions durably into the deployment (built in a staging folder and moved into place once npm succeeds, because npx looks here first
+  and a half-installed worker package would leave a command that can never recover) and hands over to the installed command (`worker/src/console-install.mjs`);
+  every refusal that needs nothing installed comes first, so a refusal leaves no `node_modules`. The cache run itself
+  never becomes a service. The environment it hands on drops npx's own exports and what npx put on PATH (its cache, every ancestor's `node_modules/.bin`, `node-gyp-bin`). **The folder is judged before the question**: empty, or holding only what a deployment holds and showing it is one (`triggers.json`, or a `.env` with a key `init` writes). A `.env` alone proves nothing, and `.npmrc`, `node_modules` or a foreign `package.json` beside one are refused, since each changes what npm installs. An empty folder with a group-writable mode is what `mkdir` makes under Ubuntu's default umask: it is accepted, tightened after the answer and read again, and the umask is tightened too, or the durable checks refuse what npm then writes after all the work. **REJECTED**: telling the person to `chmod` (two more commands, on the most common Linux); accepting any `.env` (it is in every web project). The documented
+  terminal line installs exact worker/admin versions durably in the
   deployment and then invokes the installed command; any automatically installed pi peer must resolve to the
   repository's exact pin too. Cache-backed entries cannot become service targets. Packed-artifact verification
   must prove package discovery, dependency resolution and executable service paths without workspace symlinks.
   Existing `up` consent/adoption/proxy flags retain their meanings. Bootstrap starts the console, not the worker;
   it checks supported platform, manager, address, token file and deployment identity before changes, preserves
   existing usable state and gives bounded health/failure output without printing secrets.
+- **One command, one question (issue #849)**: three install lines and five prompts stood between a person and the page.
+  A fresh `up --console` lists what it will do by kind and asks once. Yes is exactly `--yes`, so it adds no authority.
+  It lists kinds because `up` chooses its commands from live state, so a promise of exact commands up front could not
+  be kept. `--ask-each` carries the other answer across the self-install's handover and is what the wizard always
+  passes, since its text promises a question per step. The operator's name is no longer asked (default `operator`,
+  `--name`). `pi-dispatch console` is the one command to remember: the worker side owns the service (start one that is
+  installed and stopped, never install one) and the admin's `pi-dispatch-console open` owns the credential, so a code
+  is minted only by the package that always minted one. `open` hands a local code to the browser through
+  `openLinkViaFile`, unprinted, and over SSH, or for a unix socket whoever is at the keyboard, mints only when Enter says the
+  tunnel is up, which removes the 60-second race without any code living longer. A token named in `--name` is judged again at each mint. A `./pi-dispatch` symlink puts the folder's own pinned binary in reach.
+  **REJECTED**: a link in `~/.local/bin` (account-wide, wrong with two deployments); `npx pi-dispatch` (outside the
+  folder it fetches whatever unrelated package holds that name); a longer-lived link (it would sit in scrollback);
+  `up` printing every command before asking (it cannot know them yet).
 - **Recipes and GitHub**: the closed `recipe` query on `/config/trigger-add` offers label fix, nightly local tidy
   and comment answer. It prefills editable ordinary fields and grants nothing: the existing trigger planner,
   narrowing, diff, confirmation and audit perform the save. No GET writes or arms a trigger. Missing folder/skill,
@@ -12680,6 +12702,7 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
      it is neither a 404 in its console nor a sign-in redirect; issue #737) and the login routes,
      a request needs a session, and a session comes only from a token in the tokens file
      (`INT-CONSOLE-TOKENS-FILE-CONTRACT`) or from a one-time login code that `pi-dispatch-console link --name <n>`
+     or, since issue #849, `pi-dispatch-console open`
      mints as the deployment's own account (since issue #708 the panel's `/dispatch console --link` mints one too, as
      the same account: "The panel as a second minter" below). Two roles: `operator` (reads and writes) and `viewer` (reads). Sessions
      live in the process (a restart signs everyone out), the id is 32 random bytes, a new one at every login (no
@@ -17499,6 +17522,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-11-08 (#849, part 1) | **`DES-BROWSER-FIRST-RUN-SETUP` AMENDED**: "Tokens and invitations" (`open`, not a printed link; recovery on failure), "Durable bootstrap" gains the self-install from npm's cache, and a new bullet "One command, one question" records `up --console`'s single question, `--ask-each`, `pi-dispatch console`, `open`, the `./pi-dispatch` shortcut and what was rejected. **`DES-FIRST-RUN-SETUP-WIZARD` AMENDED**, one bullet: the browser route passes `--ask-each --no-open`. **`DES-OPERATOR-CONSOLE`**: `open` named as a minter. `DES-ADMIN-VIA-PI-EXTENSION`: UNCHANGED, checked (`/dispatch console` is part 6). The folder rules of the self-install and the loose empty folder are recorded under "Durable bootstrap", with what was rejected; `setupCachePath` also names pnpm's, yarn's and bun's temporary stores. |
 | 2026-11-05 (no issue, the file a write cannot keep, pause windows) | **`DES-STORE-VERSION-WHEN-NEEDED` CORRECTED**, one sentence: the pause windows writer no longer repairs a file it could not keep, and refuses it as the triggers writer does (`INT-PAUSE-WINDOWS-FILE-CONTRACT`). |
 | 2026-11-05 (no issue, a Valkey outage under the console) | **`DES-OPERATOR-CONSOLE` AMENDED**, a new bullet: why a queue's connection failure is awaited in a subclass rather than at each call site or by a process-wide handler, why a closed queue's late connect failure is silenced there too, why the fleet reader replaces a queue whose client ended rather than holding a persistent one, why its raw client is bounded and judged at each connect, why a command past that bound is not sent later, how long a cache can still hold a failed read, and why a queue that gives up says a repeated Valkey error line once a minute. **`DES-STORE-VERSION-WHEN-NEEDED` CORRECTED**, one sentence: the triggers writer no longer repairs a file it could not keep (`INT-TRIGGERS-FILE-CONTRACT`), and the pause windows writer still does. `DES-ONE-SHOT-DISARM-IN-THE-FILE` UNCHANGED, checked: "the CRUD writer's repair-from-empty posture (missing file + add trigger = scaffold)" still describes the missing file, the only case that sentence names. |
 | 2026-11-04 (#811) | A record an older job left under a reused id answers for no newer job. **`DES-STORE-VERSION-WHEN-NEEDED` AMENDED**: the pickup's one read of the previous record is held to `recordOfThisJob`, each side before the higher attempt is kept, with `attemptsMade` and `attemptsMade + 1` both asked, so `earlier`, the touches a retry carries (with `touchLineageSkipped`), the failover wait and `retryNeverStarted` take this job's previous attempt's record or none; one attempt chosen by `stalledCounter` rejected (BullMQ never lowers it, so a job that stalled and later failed would miss its own record and be refused `model-failover-no-candidate`); the second read the failover wait made is gone. Its Residuals drop the prior-record uses without the rule and the superseded check's missing age, and gain the stall that wrote no record (the attempt before answers for it) and the superseded check's two conditions. **`DES-RECOVERY-ROUTED-TO-CHECKPOINT-HOST` AMENDED**: the data gains `recoveryOfCreatedAt`, the base run's creation time (the first recovery from the crashed queue job's `timestamp`, a later one keeping its data's, none from a `.r1` without it), with no job data version because its absence is that build's own behaviour and recoveries ship in this release; Superseded: a record whose time parses and is older than that time less `RECORD_CLOCK_SKEW_MS` settles nothing, a time that does not parse still settles (re-running a settled run pays twice), a recovery without the field keeps the check without an age, and the reader holds each side to the rule for every recovery, so a record on this host that does not settle the run hides no settled one in the mirror, and a recovery without the field can now be ended by the mirror's settled record (an older job's among them) where this host's record used to answer first. **`DES-TOUCH-RATE-FROM-RECORDS-AND-AUDIT` AMENDED**, Identity: an event counts against a run only from its record's `jobCreatedAt` less the skew (its count, first cause, wait answer, approval wait end, draft answer and fix match, and the index event that stands in for the record's own cancel or delivered steer), a lower bound, so late answers, approvals, re-runs and a stalled attempt's touches still count; no bound without the field; the scope and project streaks unbounded; a bound from `queuedAt`, `earlier` or `startedAt` rejected. **`DES-CAPACITY-FROM-RECORDS` AMENDED**, Retries and stalls: `earlier` comes from this job's own previous record only. UNCHANGED, checked: `DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` (the lost-lock checks already took `recordOfThisJob` and are as they were) and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` (one more conditional key, no new store). **Code evidence**: worker/src/index.mjs -> makeProcessor (`ownPrior`, the pickup's read, `retryNeverStarted`); worker/src/processor.mjs -> runAttempt (`settlesRun`); worker/src/recovery-queue.mjs -> recoveryDataOf, makeRecoveryEnqueuer; worker/src/start.mjs -> readRunRecord; worker/src/run-history.mjs -> buildRecord, jobCreatedAtOf; worker/src/zero-touch.mjs -> computeZeroTouch. |

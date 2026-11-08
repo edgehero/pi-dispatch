@@ -7529,6 +7529,13 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
     viewer and recovery. Other operator sessions, viewers, agents, role caches and reconnects receive no code.
     Undo revalidates the exact created entry and refuses a same-name replacement. Tunnel reachability and session
     limits are stated. Neither invitation nor bootstrap exposes a durable plaintext token.
+    **Issue #849**: from an empty folder, `npx --yes --ignore-scripts @edgehero/pi-dispatch@<version> up --console` is one
+    command and one question: every refusal that needs nothing installed runs before anything touches the folder (so a
+    refusal leaves no `node_modules`), then it installs the exact worker, admin and pi versions and hands over to the
+    folder's own binary, carrying the answer so nothing is asked twice. A durable worker with no admin package still
+    refuses. Bootstrap opens the browser through `pi-dispatch-console open` instead of printing a link, unless the
+    caller passes `--no-open`; a failure keeps its exact host recovery. `pi-dispatch console` starts this deployment's own
+    installed but stopped console service and signs the person in; it never installs one and never starts another deployment's.
   - **Recipes**: a closed `recipe` enum selects label fix, nightly tidy or comment answer; unknown, repeated and
     oversized values refuse before reads. Verify exact editable prefills, submitted fields and saved narrowing
     through the existing trigger planner, diff, Confirm and audit. GET, Cancel and stale-file refusal write
@@ -7563,6 +7570,10 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
   and a one-time `/setup` link. Existing create-only scaffolds, per-action consent, empty/unset treatment,
   adoption/proxy flags and zero-provider-token bootstrap behavior below are UNCHANGED, checked. The operator
   finishes supported host steps only after separate browser previews; bootstrap does not start the worker.
+  **Issue #849**: on a fresh deployment `up --console` asks one question, yes to all or ask each. Yes is exactly `--yes`
+  (commands still print, and what `--yes` does not cover still asks), so per-action consent is still what a person
+  chooses, and `--ask-each` keeps the per-action questions for a caller that promised them, as the wizard does. The
+  plain `up` below is UNCHANGED, checked.
 
 - **Statement**: The CLI shall take a fresh machine to a preflighted deployment through **create-only
   scaffolds and per-action consented host mutations** — `pi-dispatch init` (scaffold), `pi-dispatch
@@ -8588,6 +8599,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-08 (#849, part 1) | One command to a signed-in browser. **`REQ-BROWSER-FIRST-RUN-SETUP` AMENDED**, the Bootstrap acceptance: the self-install from npm's cache and its order, `open` in place of a printed link, `pi-dispatch console`. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**: the one first-run question, which is exactly `--yes`, and `--ask-each`; plain `up` UNCHANGED, checked. `REQ-CONSOLE-SECURITY` (i), the 60 seconds and single use: UNCHANGED, checked: `open` mints later, never for longer. |
 | 2026-11-05 (no issue, a Valkey outage under the console) | **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: the console keeps running when Valkey is down, restarts, stops answering or is refused, hangs no page over it, and reads again within about 30 seconds of Valkey answering, with no restart, and a change that timed out before it left the console is not made when Valkey returns. What is not so yet is named in the entry. On a console started with Valkey down, or with a `.env` line that made a Valkey on macOS refused, the first signed-in page ended the process; and after a restart lasting past a client's retries every page that reads a queue kept saying Valkey could not be read until the console itself was restarted. `REQ-CONSOLE-SECURITY` UNCHANGED, checked. |
 | 2026-11-04 (#811) | **`REQ-RUN-RECOVERY` AMENDED**: a recovery is superseded only by its own run's settled record; one from before the run was created, less 5 minutes, which an older job left under a reused id, settles nothing, while a record with no readable time still settles. **`REQ-ZERO-TOUCH-RATE` UNCHANGED, checked**: a touch still counts against the run it touched; an older job's touch under a reused id was never that run's, and the view now tells them apart by the record's job creation time (`DES-TOUCH-RATE-FROM-RECORDS-AND-AUDIT`). **`REQ-MODEL-POLICY` UNCHANGED, checked**: its Reviewed failover bullet ("Missing evidence never authorizes switching") holds as written; a retry now reads only the job's own previous record, so an older job's never-started record under a reused id is missing evidence (`DES-STORE-VERSION-WHEN-NEEDED`). **`REQ-CAPACITY-INSIGHTS` UNCHANGED, checked**: `earlier` keeps its meaning and now comes from the job's own previous record only (`DES-CAPACITY-FROM-RECORDS`). **Code evidence**: worker/src/processor.mjs -> runAttempt (`settlesRun`); worker/src/recovery-queue.mjs -> recoveryDataOf; worker/src/zero-touch.mjs -> computeZeroTouch. |
 | 2026-11-04 (#824) | The receiver status record is read across a forge one release does not know. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**, the receiver observations bullet: it said unreadable or newer telemetry remains unknown, and a record of a later release that names a forge this build does not know is no longer unreadable. Now a record of another `v` stays unknown, as does an unknown forge's counts, and the forges this build knows are shown from it; a known forge an older record leaves out reads as zero counts (`INT-RECEIVER-STATUS-KEY`). `dispatch_connections` rebuilds the same parsed record, so it gains no field. **`REQ-OPERATOR-CONSOLE-SCREENS` UNCHANGED, checked**: (g6) shows a receiver's forges from that parse, and for the four forges nothing it shows changes. **Code evidence**: worker/src/receiver-status.mjs -> parseReceiverStatus; admin/src/connections-view.mjs -> modelReceivers. |

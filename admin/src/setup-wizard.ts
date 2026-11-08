@@ -926,7 +926,9 @@ export async function runSetupWizard(paths: any, rawCtx: any, notify: Notify, de
   const upEnv =
     !podmanVenue ? env : fileAssigns ? (typeof env?.PI_BACKENDS === "string" ? withoutBackends(env) : env) : upAddsBackends ? { ...env, PI_BACKENDS: "podman" } : env;
   const podmanUpText = `Run in ${dir}:\n  ${upAddsBackends ? "PI_BACKENDS=podman " : ""}${execPath} ${cliPath} up\n\nup shows each podman and systemctl action (the job image, then Valkey, the egress proxy and its rootless network keeper as Quadlet units) and asks y/N before it: nothing is auto-accepted.`;
-  const upArgs = [cliPath, "up", ...(browser ? ["--console"] : [])];
+  // `--ask-each`: the text below promises this child asks before each mutation, so its one-question shortcut must not run here.
+  // `--no-open`: the wizard signs the person in itself, below, and a second code would be one more live credential for nothing.
+  const upArgs = [cliPath, "up", ...(browser ? ["--console", "--ask-each", "--no-open"] : [])];
   const okUp = await ui.confirm(
     browser ? "Bring up the console with local setup authority" : "Bring the deployment up",
     browser ? `Run in ${dir}:\n  ${execPath} ${upArgs.join(" ")}\n\nThe child asks before each host mutation and before granting bounded local host setup. It creates or preserves an operator entry and starts the console user service; it does not start the worker. No --yes is forwarded.` :
@@ -1013,7 +1015,11 @@ export async function runSetupWizard(paths: any, rawCtx: any, notify: Notify, de
 
   if (browser) {
     if (pointerWritten && typeof openSetupConsoleFn === "function") await openSetupConsoleFn(dir, ctx, notify);
-    else notify?.("Continue with the one-time setup link printed in the terminal. To open private links from /dispatch, record this deployment pointer first.", "info");
+    else {
+      // No pointer means `/dispatch` cannot find this deployment to mint for it, so the deployment's own command does.
+      const res = await runAttachedFn(ctx, { title: `pi-dispatch console — in ${dir}`, argv0: execPath, args: [cliPath, "console", "--next", "/setup"], cwd: dir, env: upEnv });
+      if (res.error || res.code !== 0) notify?.(`No sign-in was opened. Run this in ${dir}: ./pi-dispatch console (with --name <operator> if there are several)`, "warning");
+    }
     return;
   }
 
@@ -1082,6 +1088,7 @@ export async function runSetupWizard(paths: any, rawCtx: any, notify: Notify, de
   // ── (12) re-detect + open the panel ────────────────────────────────────────────────────────────
   const finalDet = await detectFn({ env, cwd: ctx?.cwd, fs });
   notify?.(`setup finished — ${finalDet.detail}`, "info");
+  notify?.("To use the web console as well, run /dispatch setup and choose Finish setup in browser.", "info");
   if (typeof openDashboardFn === "function") {
     // Fresh resolvePaths on purpose: the pointer re-apply above layered the new deployment's paths
     // into the env, so the panel must resolve NOW, not reuse the pre-wizard `paths`.

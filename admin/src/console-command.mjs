@@ -37,7 +37,7 @@ import { keptTokens, readTokensFile } from "@edgehero/pi-dispatch/console-tokens
 import { isLocalBrowserSession, openBrowser } from "@edgehero/pi-dispatch/open-browser";
 import { panelActor, panelAudit, writeTicket } from "./audited-write.mjs";
 import { consolePageLines, consolePageUrl } from "./console/link.mjs";
-import { keptTokenLinkRefusal, loginCodesDir, mintLoginCode } from "./console/login-codes.mjs";
+import { keptTokenLinkRefusal, loginCodesDir, mintLoginCode, operatorNames } from "./console/login-codes.mjs";
 import { openLinkViaFile } from "./console/open-link.mjs";
 import { probeConsole } from "@edgehero/pi-dispatch/console-probe";
 import { CONSOLE_START_ADVICE } from "./console/link.mjs";
@@ -160,7 +160,7 @@ export async function consoleCommand(words, deps) {
     }
     const read = (deps.readTokens ?? (() => readTokensFile({ path: deps.tokensPath })))();
     if (read.refusal) return refuse(`${read.refusal}; ${TOKEN_ADD_HINT}`);
-    const operators = read.file.tokens.filter((t) => t.role === "operator").map((t) => t.name);
+    const operators = operatorNames(read.file);
     let name = args.name;
     if (name !== null) {
       const entry = read.file.tokens.find((t) => t.name === name);
