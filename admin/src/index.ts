@@ -113,7 +113,8 @@ import { readConfigTool } from "./config-tools.mjs";
 export { setConfigToolReadsForTest } from "./config-tools.mjs";
 // The operator session's write guard (issue #504 part C): pi's own `write`, `edit` and `powershell` blocked on the
 // deployment's money files, which only the confirm-gated tools and the operator's own hand may change.
-import { envNamedFiles, makeWriteGuard } from "./write-guard.mjs";
+import { DEVICE_STORE_GUARD, envNamedFiles, makeWriteGuard } from "./write-guard.mjs";
+import { consoleDevicesDir } from "@edgehero/pi-dispatch/console-devices";
 import { consolePageLines } from "./console/link.mjs";
 import { CONSOLE_PAGE_WORDS, consoleCommand } from "./console-command.mjs";
 import { loginCodesDir } from "./console/login-codes.mjs";
@@ -432,6 +433,7 @@ function consoleTokenGuards(tokensPath: string | null): Guarded[] {
   return [
     { path: tokensPath, ...CONSOLE_TOKENS_GUARD },
     { path: loginCodesDir(tokensPath), label: "the console's one-time login codes (console-login-codes, beside the tokens file)", tool: "`/dispatch console --link` or `pi-dispatch-console link`, typed by the operator", dir: true },
+    { path: consoleDevicesDir(tokensPath), ...DEVICE_STORE_GUARD },
   ];
 }
 

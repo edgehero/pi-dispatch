@@ -49,6 +49,7 @@ import { dirname, isAbsolute, join, parse as parsePath, resolve as nodeResolve, 
 import { fileURLToPath } from "node:url";
 
 import { loginCodesDir } from "./console/login-codes.mjs";
+import { consoleDevicesDir } from "@edgehero/pi-dispatch/console-devices";
 
 /** pi's Unicode-space class (`dist/utils/paths.js` `UNICODE_SPACES`), copied; a test pins the literal. */
 export const PI_UNICODE_SPACES = /[\u00A0\u2000-\u200A\u202F\u205F\u3000]/g;
@@ -185,6 +186,12 @@ export const GUARDED_ENV_KEYS = Object.freeze({
 /** The login-codes directory's guard entry (issue #708), minus its path: guarded as a directory. */
 export const LOGIN_CODES_GUARD = Object.freeze({ label: "the console's one-time login codes (console-login-codes, beside the tokens file)", tool: "`/dispatch console --link` or `pi-dispatch-console link`, typed by the operator", dir: true });
 
+/**
+ * The remembered-device folder's guard entry (issue #849), minus its path: guarded as a directory. A record there is a standing sign-in as the
+ * token it names, so a model that could `write` one could make itself a permanent operator, the same reach as adding a token.
+ */
+export const DEVICE_STORE_GUARD = Object.freeze({ label: "the console's remembered devices (console-devices, beside the tokens file)", tool: "the console's own sign-in", dir: true });
+
 /** The most of a `.env` the guard reads: far above any real one, far below what a device or a huge file could cost. */
 export const ENV_READ_MAX = 1024 * 1024;
 
@@ -258,7 +265,7 @@ export function envNamedFiles(dir, { fs = nodeFs, home = homedir() } = {}) {
     for (const r of readings) {
       if (r.trim() === "") continue;
       out.push({ path: nodeResolve(dir, r), ...GUARDED_ENV_KEYS[key] });
-      if (key === "PI_CONSOLE_TOKENS_FILE") out.push({ path: loginCodesDir(nodeResolve(dir, r)), ...LOGIN_CODES_GUARD });
+      if (key === "PI_CONSOLE_TOKENS_FILE") out.push({ path: loginCodesDir(nodeResolve(dir, r)), ...LOGIN_CODES_GUARD }, { path: consoleDevicesDir(nodeResolve(dir, r)), ...DEVICE_STORE_GUARD });
     }
   }
   if (out.length > 0) out.push({ path: join(dir, ".env"), label: "the deployment's .env, which names these files (PI_*_FILE)", tool: "the operator's own editor" });
@@ -303,7 +310,7 @@ export function realLocation(absPath, { fs = nodeFs } = {}) {
 /**
  * Is `absPath` the directory `dirPath` or anything under it (issue #708, a `dir: true` guard)? Decided by identity,
  * never by a path string, since a volume can be reached by more than one path that is not a symlink (a macOS firmlink
- * such as `/System/Volumes/Data/...`, a bind mount, `/.vol/<dev>/<ino>`):
+ * such as `/System/Volumes/Data/...`, a bind mount):
  *   - where the directory exists: some existing ancestor of the target's real location (`realLocation`, links
  *     followed) is the directory's `(dev, ino)`, so a symlink into it, a case variant of its name and `..` all land
  *     on it;
@@ -312,6 +319,7 @@ export function realLocation(absPath, { fs = nodeFs } = {}) {
  *     inside when one of its existing ancestors IS that ancestor (by identity) and the folded path from there down to
  *     the target begins with those segments. A string comparison here was bypassed through a firmlink alias (review
  *     round 1): pi's `write` then made the directory and the code file under the alias.
+ * macOS's `/.vol/`, `/.resolve/`, `/.nofollow/` and `/.file/` are the exceptions this walk cannot see through, and `makeWriteGuard` refuses them outright.
  * THROWS like `targetIdentity`.
  */
 export function insideDirectory(absPath, dirPath, { fs = nodeFs } = {}) {
@@ -378,15 +386,22 @@ export function makeWriteGuard({ guardedFiles, fs = nodeFs, home = homedir(), pl
       const target = targetIdentity(abs, { fs });
       for (const g of guarded) {
         if (g.dir === true) {
+          // macOS's own root entries: `/.vol/<dev>/<ino>` names any file by number, and `/.resolve/`, `/.nofollow/` and `/.file/` re-resolve what follows them,
+          // in combination too. `lstat` answers ENOENT or EINVAL on the way through them, or stops short without an error, so the identity walk below
+          // never reaches the folder. These four are every such entry a macOS root holds, and nothing legitimate writes a guarded folder through one.
+          if (platform === "darwin" && /^\/\.(?:vol|resolve|nofollow|file)\//.test(fold(abs))) return blocked(tool, g);
           const dirAbs = nodeResolve(processCwd(), g.path);
           let inside;
           try {
             inside = insideDirectory(abs, dirAbs, { fs });
           } catch {
-            // As for a file below: judged by name, folded, when the identity cannot be read.
+            // As for a file below: judged by name, folded, when the identity cannot be read. But only the guarded folder's own identity may go missing:
+            // a target whose own path cannot be walked may be a spelling of the folder that the string compare cannot see.
             const f = fold(abs);
             const d = fold(dirAbs);
-            inside = f === d || f.startsWith(`${d}${sep}`);
+            let walkable = true;
+            try { realLocation(abs, { fs }); } catch { walkable = false; }
+            inside = !walkable || f === d || f.startsWith(`${d}${sep}`);
           }
           if (inside) return blocked(tool, g);
           continue;

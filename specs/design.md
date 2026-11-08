@@ -3736,8 +3736,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     worker/src/console-probe.mjs -> consoleProbeTarget, probeConsole; worker/src/open-browser.mjs -> openerArgv,
     isLocalBrowserSession; admin/src/index.ts (the `console` case); admin/test/console-command.test.mjs,
     worker/test/console-probe.test.mjs, worker/test/open-browser.test.mjs, admin/test/wiring.test.mjs.
-  - **The guard**: the login-codes directory joins `guardedFiles()` as a directory, as the tokens file is
-    (`DES-OPERATOR-CONSOLE` threat 4); `write-guard.mjs` judges a `dir: true` entry by containment. The residuals named
+  - **The guard**: the login-codes directory and, since issue #849, the remembered-device folder join `guardedFiles()` as directories, as the tokens file is
+    (`DES-OPERATOR-CONSOLE` threat 4); `write-guard.mjs` judges a `dir: true` entry by containment, and since issue #849 guards the remembered-device folder the same way and refuses any write through macOS's `/.vol/`, `/.resolve/`, `/.nofollow/` and `/.file/`, which that containment walk cannot see through. The residuals named
     above (`bash`, a later extension) are unchanged.
 - **Traces to**: `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`,
   `CONST-ISSUE-TEXT-IS-DATA`, `DES-RUNTIME-SETTINGS-FILE-OVERLAY`, `DES-AI-TRIGGER-FLOW-GATE`,
@@ -12830,7 +12830,7 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
      for every guarded file, and the audit records each token the CLI adds. **The login codes are the same reach
      (AMENDED 2026-10-21, #708).** A file `<sha256(code)>.json` holding `{name, expiresAt}` in `console-login-codes/`
      beside the tokens file is a sign-in as the token it names, for whoever holds the code, and the session that wrote
-     the file chose the code. So the login-codes directory joins the guarded files, as the tokens file is, as a
+     the file chose the code. So the login-codes directory, and since issue #849 the remembered-device folder, whose records are standing sign-ins, join the guarded files, as the tokens file is, as a
      DIRECTORY guard: a `write` or `edit` of the directory or of any path under it is refused, always judged by
      identity: where the directory exists, an existing ancestor of the target is its `(dev, ino)` (a symlink into it, a
      case variant, a `..` on the way); before the first code makes it, as `targetIdentity` judges a missing file, its
@@ -17534,6 +17534,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-11-08 (#849, part 3) | **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**, the write guard: the remembered-device folder is guarded as a directory, and a write through any of macOS's four root entries that re-resolve a path is refused, because the identity walk cannot see through them. `DES-OPERATOR-CONSOLE` threat 4 names the folder. |
 | 2026-11-08 (#849, part 2) | **`DES-OPERATOR-CONSOLE` AMENDED**, a new bullet "Coming back to the page you asked for, and arriving from elsewhere": `next`, the `Strict` recovery through `/api/whoami`, drawn only for a `cross-site` arrival, `expired` and `signed-in`, the rejection of `Lax`, and three browsers' cookie behaviour as measured. The #708 rejection of `next` in a query string is narrowed to the one-time link. |
 | 2026-11-08 (#849, part 1) | **`DES-BROWSER-FIRST-RUN-SETUP` AMENDED**: "Tokens and invitations" (`open`, not a printed link; recovery on failure), "Durable bootstrap" gains the self-install from npm's cache, and a new bullet "One command, one question" records `up --console`'s single question, `--ask-each`, `pi-dispatch console`, `open`, the `./pi-dispatch` shortcut and what was rejected. **`DES-FIRST-RUN-SETUP-WIZARD` AMENDED**, one bullet: the browser route passes `--ask-each --no-open`. **`DES-OPERATOR-CONSOLE`**: `open` named as a minter. `DES-ADMIN-VIA-PI-EXTENSION`: UNCHANGED, checked (`/dispatch console` is part 6). The folder rules of the self-install and the loose empty folder are recorded under "Durable bootstrap", with what was rejected; `setupCachePath` also names pnpm's, yarn's and bun's temporary stores. |
 | 2026-11-05 (no issue, the file a write cannot keep, pause windows) | **`DES-STORE-VERSION-WHEN-NEEDED` CORRECTED**, one sentence: the pause windows writer no longer repairs a file it could not keep, and refuses it as the triggers writer does (`INT-PAUSE-WINDOWS-FILE-CONTRACT`). |

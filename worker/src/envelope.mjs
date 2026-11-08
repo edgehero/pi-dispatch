@@ -290,7 +290,7 @@ function jobPathCandidates(path, cwd, env, statSync) {
  * to write instead, when there is one. The FILE must exist (the check runs with a successful load) and must have one
  * link: a hard link elsewhere is the same file under a name this check cannot see, and it could sit in a job path.
  */
-function canonicalEnvelopePath(path, realpath, statSync) {
+function canonicalEnvelopePath(path, realpath, statSync, directory = false) {
 	const text = String(path);
 	if (!isAbsolute(text)) throw configError(`the envelope path ${JSON.stringify(text)} must be absolute: write its canonical path, with no symlink, "." or ".." in it`);
 	let real;
@@ -304,6 +304,8 @@ function canonicalEnvelopePath(path, realpath, statSync) {
 	}
 	const stat = statSync(text, { bigint: true });
 	// Before the link count: a directory's nlink counts its subdirectories, so "has 3 hard links" would misname it.
+	// `directory`: the console's device store is a folder, judged by the same identity rules. A folder has no link count to speak of.
+	if (directory && stat.isDirectory()) return text;
 	if (!stat.isFile()) {
 		throw configError(`the envelope path ${JSON.stringify(text)} is not a regular file; point it at the envelope file itself`);
 	}
@@ -366,8 +368,8 @@ export function fileIdentity(stat) {
  * relative, and when a path cannot be read for a reason other than its absence. `realpathSync`, `statSync`, `cwd` and
  * `env` are injectable for tests.
  */
-export function envelopeInsideJobPaths(envelopePath, { cronFolders = [], runRoots = [], skillsDirs = [], globalPiDir = null } = {}, { realpathSync = fsRealpathSync.native, statSync = fsStatSync, cwd = process.cwd(), env = process.env } = {}) {
-	const real = canonicalEnvelopePath(envelopePath, realpathSync, statSync);
+export function envelopeInsideJobPaths(envelopePath, { cronFolders = [], runRoots = [], skillsDirs = [], globalPiDir = null } = {}, { realpathSync = fsRealpathSync.native, statSync = fsStatSync, cwd = process.cwd(), env = process.env, directory = false } = {}) {
+	const real = canonicalEnvelopePath(envelopePath, realpathSync, statSync, directory);
 	// A relative run root is refused under an envelope, as `PI_GLOBAL_PI_DIR` and `run.skillsDir` already must be
 	// absolute: the worker would judge it against its own working directory, while the admin's `dispatch_run` resolves
 	// it in the operator's pi process, so the two could mean different folders.

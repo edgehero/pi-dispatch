@@ -8,6 +8,7 @@ import { loadConfig } from "../src/config.mjs";
 import { runService } from "../src/service.mjs";
 import { collectChecks } from "./helpers/doctor.mjs";
 import { addToken } from "../src/console-tokens.mjs";
+import { endDevice, rememberDevice } from "../src/console-devices.mjs";
 import { makeConsoleAudit } from "../src/console-audit.mjs";
 import { serviceEnvFileOf, serviceEnvLoader } from "../src/service-env.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -476,4 +477,77 @@ test("collectChecks: a bad PI_CONSOLE_AUDIT_RETENTION_DAYS or PI_RUN_MIRROR_MAX_
 	]);
 	// Values the worker boots on: no line at all.
 	assert.deepEqual(await run("PI_CONSOLE_AUDIT_RETENTION_DAYS=0\n", { PI_RUN_MIRROR_MAX_RUNS: "20000" }), []);
+});
+
+// Issue #849: the remembered devices. Nothing until a device has been remembered.
+const remember = (d) => rememberDevice({ dir: join(d.cwd, "console-devices"), name: "alice", role: "operator", tokenHash: "a".repeat(64), generation: 0, label: "Chrome on macOS", now: () => T0 });
+
+test("no remembered devices: doctor says nothing about them", () => {
+	const d = deployment();
+	withToken(d);
+	assert.ok(!labels(consoleChecks(d.env, { cwd: d.cwd })).some((l) => /remembered/.test(l)));
+});
+
+test("a sound store is silent, and an unsafe one fails and says to remove it, never to tighten it", { skip: !posix }, () => {
+	const d = deployment();
+	withToken(d);
+	assert.ok(remember(d).hash);
+	assert.ok(!labels(consoleChecks(d.env, { cwd: d.cwd })).some((l) => /remembered/.test(l)));
+	chmodSync(join(d.cwd, "console-devices"), 0o755);
+	const failing = consoleChecks(d.env, { cwd: d.cwd }).find((c) => /remembered-device folder/.test(c.label));
+	assert.equal(failing.ok, false);
+	assert.match(failing.fix, /remove the folder/);
+	assert.doesNotMatch(failing.fix, /chmod/);
+});
+
+test("an unreadable record fails and counts", { skip: !posix }, () => {
+	const d = deployment();
+	withToken(d);
+	remember(d);
+	writeFileSync(join(d.cwd, "console-devices", `${"e".repeat(64)}.json`), "{", { mode: 0o600 });
+	const line = consoleChecks(d.env, { cwd: d.cwd }).find((c) => /record/.test(c.label));
+	assert.equal(line.ok, false);
+	assert.match(line.label, /1 remembered-device record /);
+	assert.match(line.fix, /whose name starts with eeeeeeeeeeee/);
+	assert.doesNotMatch(line.fix, /rm -r/, "one bad file is no reason to sign everyone out");
+});
+
+test("a store a job could reach fails; a folder's own link count is no fault", { skip: !posix }, () => {
+	const d = deployment();
+	withToken(d);
+	remember(d);
+	const clean = labels(consoleChecks(d.env, { cwd: d.cwd }));
+	assert.ok(!clean.some((l) => /hard links/.test(l)), clean.join(" | "));
+	const inside = consoleChecks({ ...d.env, PI_DISPATCH_RUN_ROOTS: d.cwd }, { cwd: d.cwd }).filter((c) => !c.ok && /remembered-device folder/.test(c.label));
+	assert.equal(inside.length, 1);
+	assert.match(inside[0].label, /a job container can see/);
+	assert.match(inside[0].label, /plant a remembered device/);
+});
+
+test("a Windows console with no store has no line about one", () => {
+	const d = deployment();
+	withToken(d);
+	assert.ok(!labels(consoleChecks(d.env, { cwd: d.cwd, platform: "win32" })).some((l) => /remembered/.test(l)));
+});
+
+test("only live devices are warned of on a public bind", { skip: !posix }, () => {
+	const d = deployment();
+	withToken(d);
+	const { hash } = remember(d);
+	endDevice({ dir: join(d.cwd, "console-devices"), hash, reason: "removed", now: () => T0 });
+	assert.ok(!labels(consoleChecks({ ...d.env, PI_CONSOLE_BIND_PUBLIC: "1", PI_CONSOLE_LISTEN: "0.0.0.0:4790" }, { cwd: d.cwd })).some((l) => /remembered device/.test(l)));
+});
+
+test("remembered devices are warned of only on a console that really listens off loopback", { skip: !posix }, () => {
+	const d = deployment();
+	withToken(d);
+	remember(d);
+	const line = (env) => consoleChecks({ ...d.env, ...env }, { cwd: d.cwd }).find((c) => /remembered device/.test(c.label) && c.warn);
+	assert.equal(line({ PI_CONSOLE_BIND_PUBLIC: "1" }), undefined, "a loopback console, whatever the flag says");
+	const warn = line({ PI_CONSOLE_BIND_PUBLIC: "1", PI_CONSOLE_LISTEN: "0.0.0.0:4790" });
+	assert.equal(warn.warn, true);
+	assert.match(warn.fix, /loopback address/);
+	const none = deployment();
+	withToken(none);
+	assert.equal(consoleChecks({ ...none.env, PI_CONSOLE_BIND_PUBLIC: "1", PI_CONSOLE_LISTEN: "0.0.0.0:4790" }, { cwd: none.cwd }).find((c) => /remembered device/.test(c.label)), undefined, "nothing to warn of");
 });

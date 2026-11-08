@@ -134,6 +134,7 @@ import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant, effectiveC
 import { cronPlacement, envelopeJobPaths } from "./schedules.mjs";
 import { envelopeDigest, envelopeInsideJobPaths, loadEnvelopeChecked } from "./envelope.mjs";
 import { keptTokens, operatorCount, readTokensFile, tokensFilePath } from "./console-tokens.mjs";
+import { consoleDevicesDir, devicesState } from "./console-devices.mjs";
 import { RUN_MIRROR_MAX_RUNS_DEFAULT, RUN_MIRROR_MAX_RUNS_MAX, RUN_MIRROR_MAX_RUNS_MIN, runMirrorMaxRunsOf } from "./retention.mjs";
 import { verifyConsoleAudit } from "./console-audit.mjs";
 import { OTHER } from "./priorities.mjs";
@@ -5552,6 +5553,16 @@ export function consoleChecks(env, { cwd = process.cwd(), fs = nodeFs, uid = pro
 		} else if (operators > 0) {
 			checks.push({ ok: true, label: `console: tokens file ${shownPath} is owner-only and outside every job folder (${operators} operator${operators === 1 ? "" : "s"}, ${viewers} viewer${viewers === 1 ? "" : "s"})` });
 		}
+		// Issue #849: the remembered devices, which sit beside the tokens file and are as sensitive as it is about who may sign in.
+		const devicesDir = consoleDevicesDir(path);
+		const devices = devicesState({ dir: devicesDir, fs, uid, platform });
+		if (devices.problem) {
+			checks.push({ ok: false, label: "console: the remembered-device folder cannot be used, so a remembered browser must sign in again", fix: escapeControls(devices.problem) });
+		} else if (!devices.absent) {
+			const devicesInside = consoleTokensInsideJobPaths(devicesDir, env, { cwd, fs, folders, skillsDirs, realpath, directory: true });
+			if (devicesInside.problem) checks.push({ ok: false, label: `console: the remembered-device folder ${quotedShown(devicesDir)} ${devicesInside.problem}`, fix: devicesInside.fix });
+			if (devices.unreadable > 0) checks.push({ ok: false, label: `console: ${devices.unreadable} remembered-device record${devices.unreadable === 1 ? "" : "s"} in ${quotedShown(devicesDir)} cannot be read, and those browsers must sign in again`, fix: `if a newer pi-dispatch wrote ${devices.unreadable === 1 ? "it" : "them"}, upgrade this host; otherwise remove the file${devices.unreadable === 1 ? "" : "s"} whose name${devices.unreadable === 1 ? " starts" : "s start"} with ${devices.unreadableIds.slice(0, 5).join(", ")} from that folder` });
+		}
 		const kept = keptTokens(read.file).length;
 		if (kept > 0) {
 			const said = kept === 1 ? "1 token carries a role this pi-dispatch does not know, so a console of this release signs it in nowhere" : `${kept} tokens carry a role this pi-dispatch does not know, so a console of this release signs them in nowhere`;
@@ -5566,6 +5577,11 @@ export function consoleChecks(env, { cwd = process.cwd(), fs = nodeFs, uid = pro
 		checks.push({ ok: false, label: `console: PI_CONSOLE_LISTEN ${quotedShown(env.PI_CONSOLE_LISTEN)} is not a loopback address, so \`pi-dispatch-console serve\` refuses to start`, fix: "listen on 127.0.0.1, [::1] or a unix: socket and reach it with ssh -L; or, to accept plain HTTP on a network, set PI_CONSOLE_BIND_PUBLIC=1" });
 	} else {
 		checks.push({ ok: true, label: `console: listens on ${escapeControls(listen.shown)}` });
+	}
+	// Only on an address that really is not loopback: PI_CONSOLE_BIND_PUBLIC=1 alone changes nothing about where a loopback console's cookies travel.
+	if (bindPublic && !listen.refusal && !listen.loopback) {
+		const devices = devicesState({ dir: consoleDevicesDir(path), fs, uid, platform });
+		if (devices.live > 0) checks.push({ ok: false, warn: true, label: `console: ${devices.live} remembered device${devices.live === 1 ? "" : "s"} on a console that listens on a non-loopback address, where cookies cross the network in plain HTTP`, fix: "listen on a loopback address and reach the console through a tunnel, or put it behind a proxy that terminates TLS" });
 	}
 	if (bindPublic) {
 		checks.push({ ok: false, warn: true, label: "console: PI_CONSOLE_BIND_PUBLIC=1 lets the console listen on a non-loopback address, where tokens and session cookies cross the network in plain HTTP", fix: "keep it only behind a TLS proxy on a network you trust; otherwise unset PI_CONSOLE_BIND_PUBLIC, listen on 127.0.0.1, [::1] or a unix: socket, and reach it with ssh -L" });
@@ -5653,17 +5669,19 @@ export async function consoleServiceChecks(env, seams = {}) {
  * relative run root is skipped here (the envelope refuses one; the console has no such rule to borrow), and a path
  * that cannot be judged is said, not passed.
  */
-function consoleTokensInsideJobPaths(path, env, { cwd, fs, folders, skillsDirs, realpath }) {
+function consoleTokensInsideJobPaths(path, env, { cwd, fs, folders, skillsDirs, realpath, directory = false }) {
 	const fix = "move the tokens file out of every local trigger's run.folder and run.skillsDir, every PI_DISPATCH_RUN_ROOTS root and PI_GLOBAL_PI_DIR, and point PI_CONSOLE_TOKENS_FILE at its new path";
 	try {
 		const st = fs.statSync(path);
-		if (st.nlink > 1) return { problem: `has ${st.nlink} hard links: another name of the file could sit inside a folder a job can see, so keep exactly one`, fix: `remove the other names (\`find / -samefile ${path}\` lists them)` };
+		// A folder always has more than one link (its own name, `.`, and each child's `..`), so the count says nothing about one.
+		if (!directory && st.nlink > 1) return { problem: `has ${st.nlink} hard links: another name of the file could sit inside a folder a job can see, so keep exactly one`, fix: `remove the other names (\`find / -samefile ${path}\` lists them)` };
 		const real = realpath(path);
 		const runRoots = delimitedList(env.PI_DISPATCH_RUN_ROOTS).filter((r) => isAbsolute(r));
 		const globalPiDir = typeof env.PI_GLOBAL_PI_DIR === "string" && env.PI_GLOBAL_PI_DIR !== "" ? env.PI_GLOBAL_PI_DIR : null;
 		// PWD comes from the process environment inside the check, as on doctor's envelope load (`loadEnvelopeChecked`).
-		const inside = envelopeInsideJobPaths(real, { cronFolders: folders, runRoots, skillsDirs, globalPiDir }, { cwd });
+		const inside = envelopeInsideJobPaths(real, { cronFolders: folders, runRoots, skillsDirs, globalPiDir }, { cwd, directory });
 		if (inside === null) return {};
+		if (directory) return { problem: `lies inside a folder a job container can see (${quotedShown(inside.path)}): a job there could plant a remembered device`, fix: "move the tokens file and this folder out of every folder a job can see, point PI_CONSOLE_TOKENS_FILE at the new path, and remove the old folder" };
 		const what = { "cron-folder": "a local trigger's run.folder", "run-root": "a PI_DISPATCH_RUN_ROOTS root", "skills-dir": "a trigger's run.skillsDir", "global-pi-dir": "PI_GLOBAL_PI_DIR" }[inside.kind] ?? inside.kind;
 		return { problem: `lies inside ${what} (${quotedShown(inside.path)}), which a job container can see: a job there could read the token hashes or add a token of its own`, fix };
 	} catch (err) {
