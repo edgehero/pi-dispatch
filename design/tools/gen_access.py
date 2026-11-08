@@ -199,10 +199,13 @@ def link_card(tone, glyph, title, body, cid):
 </section>"""
 
 TOKEN_LINK = '<a class="link ac-tok" href="#">Sign in with a token instead</a>'
+NEW_LINK = '<p class="muted">Run this in your deployment folder to sign in:</p>' + cmd('./pi-dispatch console') + '<p class="muted">If that file is not there:</p>' + cmd('./node_modules/.bin/pi-dispatch console') + '<p class="muted">On a global install: <span class="code">pi-dispatch console</span></p><p class="muted">Or in pi:</p>' + cmd('/dispatch console --link')
 LINKS = f"""<div class="cards-3 ac-links">
 {link_card('running', 'hourglass', 'Signing in with a one-time link', '<p class="muted">This takes a moment. The link is taken out of your browser history first, so it cannot be used again from there.</p>' + TOKEN_LINK, 'p-link-wait')}
-{link_card('failed', 'failed', 'This sign-in link is used, expired or unknown', '<p class="muted">A link works once, for 60 seconds. Ask for a new one:</p>' + cmd('pi-dispatch-console link --name <you>') + TOKEN_LINK, 'p-link-used')}
-{link_card('attention', 'attention', 'This link carries no code', '<p class="muted">Copy the whole link, or ask for a new one with <span class="code">pi-dispatch-console link</span>. In pi, <span class="code">/dispatch console --link</span> opens one for you.</p>' + TOKEN_LINK, 'p-link-nocode')}
+{link_card('failed', 'failed', 'This sign-in link is used, expired or unknown', '<p class="muted">A link works once, for 60 seconds.</p>' + NEW_LINK + TOKEN_LINK, 'p-link-used')}
+{link_card('attention', 'attention', 'This sign-in link has expired', '<p class="muted">A link works for 60 seconds after it is made.</p>' + NEW_LINK + TOKEN_LINK, 'p-link-expired')}
+{link_card('ok', 'done', 'You are already signed in', '<p class="muted">This browser is signed in already. To sign in as someone else, sign out and make a new link.</p><a class="link" href="#">Go to the console</a>' + TOKEN_LINK, 'p-link-signed-in')}
+{link_card('attention', 'attention', 'This link carries no code', '<p class="muted">Copy the whole link, or make a new one.</p>' + NEW_LINK + TOKEN_LINK, 'p-link-nocode')}
 </div>
 <p class="ac-noscript">{ic('info', 'ic ic--sm')}Without JavaScript the sign-in page says only: <b>The console needs JavaScript to sign in.</b></p>"""
 
@@ -294,20 +297,20 @@ ACCESS_CSS = """
 @media (max-width: 760px) { .ac-link { padding: var(--space-5); } .ac-link .tile { top: var(--space-5); right: var(--space-5); } }
 """
 
-write("AccessStates", card_marker("Access", 1280, 1440, "The one-time link page in its three states, and operator, viewer and read-only side by side"),
+write("AccessStates", card_marker("Access", 1280, 1440, "The one-time link page in its five states, and operator, viewer and read-only side by side"),
       "Access states", ACCESS, ACCESS_CSS)
 readme("AccessStates", """
 The access states that are not the sign-in form itself: the one-time link page, and what an operator, a viewer and a read-only console each see on the same page.
 
 **How a person uses it.**
-- **One-time link.** `/login/code#<code>` shows "Signing in with a one-time link" while it posts the code, after taking the code out of the browser history. If the link was used, has expired or is unknown, it says so, gives the command for a new link, and offers "Sign in with a token instead". A link with no code says so too. Without JavaScript the page says only "The console needs JavaScript to sign in."
+- **One-time link.** `/login/code#<code>` shows "Signing in with a one-time link" while it posts the code, after taking the code out of the browser history. If the link was used, has expired or is unknown, it says so, gives the command for a new link, and offers "Sign in with a token instead". A browser that is already signed in is told that instead, with a link to go on. A link with no code says so too. Without JavaScript the page says only "The console needs JavaScript to sign in."
 - **Operator.** Sees reasons, transcripts, phase names, chat, Audit and every action, each as preview then Confirm.
 - **Viewer.** Sees the same rows and numbers. In place of a hidden detail, the viewer gets the repo's sentence, such as "Failure reasons are shown to operators only.", "Phase names and the run's note are shown to operators only.", "Transcripts are shown to operators only." or "Chat is for operators; a viewer sees the run's status only." There are no action buttons, and no Audit in the nav.
 - **Read-only console.** A console started with `PI_CONSOLE_READ_ONLY=1` shows a "Read-only console" chip in the top bar and a banner. Operators keep every detail, but no page has a form, and talking to a run points to the terminal command.
 
-**Panels.** `p-link-wait`, `p-link-used`, `p-link-nocode`, `p-role-operator`, `p-role-viewer`, `p-role-read-only`.
+**Panels.** `p-link-wait`, `p-link-used`, `p-link-expired`, `p-link-signed-in`, `p-link-nocode`, `p-role-operator`, `p-role-viewer`, `p-role-read-only`.
 
-**The server provides.** The signed-in token's name and role, the read-only flag, and for the link page a closed answer: signing in, used/expired/unknown, or no code. A role decides on the server which panels and fields are sent at all. A viewer's page never carries the hidden text.
+**The server provides.** The signed-in token's name and role, the read-only flag, and for the link page a closed answer: signing in, used/expired/unknown, expired, already signed in, or no code. A role decides on the server which panels and fields are sent at all. A viewer's page never carries the hidden text.
 
 **Fixture note.** gh-f0c2 (failed on mini1) and gh-b3d7 (running, phase 2 of 4) are fixture runs. The failure text and the phase name are sample copy.
 """)

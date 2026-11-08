@@ -155,7 +155,7 @@ test("the script drives the pill through the stream: open, a drop, a refusal, a 
   es.emit("end", { data: JSON.stringify({ ended: "idle" }) });
   assert.equal(es.closed, true);
   assert.deepEqual(pill(d), { cls: "live live--off live--out", word: "Signed out", title: null });
-  assert.deepEqual(d.assigned, ["/login?ended=idle"]);
+  assert.deepEqual(d.assigned, ["/login?ended=idle&next=%2Ffleet"]);
 });
 
 test("a closed stream the console cannot be asked about keeps the page Reconnecting and asks again every 2 s; a 401 is Signed out", async () => {
@@ -172,13 +172,13 @@ test("a closed stream the console cannot be asked about keeps the page Reconnect
   d.timers.shift()();
   await d.fetch.open("/api/whoami").answer(401, { error: "sign in first", ended: "revoked" });
   assert.deepEqual(pill(d), { cls: "live live--off live--out", word: "Signed out", title: null });
-  assert.deepEqual(d.assigned, ["/login?ended=revoked"], "sign-in, with the answer's reason");
+  assert.deepEqual(d.assigned, ["/login?ended=revoked&next=%2Ffleet"], "sign-in, with the answer's reason");
   // A reason the console does not have is never put in the address.
   const odd = liveDom();
   odd.streams[0].readyState = 2;
   odd.streams[0].emit("error");
   await odd.fetch.open("/api/whoami").answer(401, { ended: "<script>" });
-  assert.deepEqual(odd.assigned, ["/login"]);
+  assert.deepEqual(odd.assigned, ["/login?next=%2Ffleet"]);
   // After a failed ask, a 200 is the console back: the page reloads to reopen its stream.
   const back = liveDom();
   back.streams[0].readyState = 2;

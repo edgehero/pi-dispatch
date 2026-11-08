@@ -1245,17 +1245,17 @@ stateTest(T.ended, async () => {
   assert.equal(page.url, "/api/events?page=run&id=gh-1&as=ops.operator", "the stream says the page's person");
   transcript.emit("end", { ended: "max" });
   page.emit("end", { ended: "max" });
-  assert.deepEqual([page.closed, transcript.closed, run.location.assigned], [true, true, ["/login?ended=max"]]);
+  assert.deepEqual([page.closed, transcript.closed, run.location.assigned], [true, true, ["/login?ended=max&next=%2Frun%3Fid%3Dgh-1"]]);
   assert.equal(text(run.document.querySelector("[data-transcript-status]")), "signed out");
   assert.ok(ENDED_REASONS.includes("max"));
   // The end on the transcript stream alone: it is the page's end too, closing both.
   const alone = boot(runPage(), { url: "/run?id=gh-1" });
   alone.streams[0].emit("end", { ended: "revoked" });
-  assert.deepEqual([alone.streams[0].closed, alone.streams[0].closed, alone.location.assigned, pill(alone).word], [true, true, ["/login?ended=revoked"], "Signed out"]);
+  assert.deepEqual([alone.streams[0].closed, alone.streams[0].closed, alone.location.assigned, pill(alone).word], [true, true, ["/login?ended=revoked&next=%2Frun%3Fid%3Dgh-1"], "Signed out"]);
   // A transcript stream the browser closed (a 401, a 429 or a 503: it cannot tell) is asked about as the page's own is,
   // saying "reconnecting" on its line meanwhile and leaving the page's pill alone: a session that ended goes to sign-in
   // with its reason, another person to sign-in as switched, and only a 200 for the page's person is the stream limit.
-  for (const [answer, to] of [[[401, { error: "sign in first", ended: "idle" }], "/login?ended=idle"], [[200, { name: "mallory", role: "operator" }], "/login?ended=switched"]]) {
+  for (const [answer, to] of [[[401, { error: "sign in first", ended: "idle" }], "/login?ended=idle&next=%2Frun%3Fid%3Dgh-1"], [[200, { name: "mallory", role: "operator" }], "/login?ended=switched"]]) {
     const w = boot(runPage(), { url: "/run?id=gh-1" });
     w.streams[0].emit("open");
     w.streams[0].emit("open");
@@ -1411,7 +1411,7 @@ stateTest(T.bothClosed, async () => {
   assert.deepEqual([pill(apart), notes(apart), apart.location.reloads], [{ cls: LIVE_STATES.off.cls, word: "Not live" }, ["limit"], 0], "and is said the stream limit");
   // Every other answer settles both at once, once: a sign-in that ended, another person, and the console back after a
   // failed question (a reload, one).
-  for (const [answers, reloads, assigned] of [[[[401, { error: "sign in first", ended: "idle" }]], 0, ["/login?ended=idle"]], [[[200, { name: "mallory", role: "operator" }]], 0, ["/login?ended=switched"]], [[null, [200, { name: "ops", role: "operator" }]], 1, []]]) {
+  for (const [answers, reloads, assigned] of [[[[401, { error: "sign in first", ended: "idle" }]], 0, ["/login?ended=idle&next=%2Frun%3Fid%3Dgh-1"]], [[[200, { name: "mallory", role: "operator" }]], 0, ["/login?ended=switched"]], [[null, [200, { name: "ops", role: "operator" }]], 1, []]]) {
     const w = run();
     closeBoth(w, ["transcript", "page"]);
     for (const a of answers) {
@@ -1610,7 +1610,7 @@ stateTest(T.signInStops, async () => {
 
 stateTest(T.link, async () => {
   const none = boot(String(loginCodePage()), { url: "/login/code" });
-  assert.deepEqual([linkStates(none), notices(none), none.fetch.calls.length], [["nocode"], [], 0], "a link with no code: said, nothing sent");
+  assert.deepEqual([linkStates(none), notices(none), calls(none, "/login/code").length, calls(none, "/api/whoami").length], [["nocode"], [], 0, 1], "a link with no code: said, no code sent, and it asks whether this browser is already in");
   const code = "k".repeat(43);
   const open = (hash = `#${code}`) => boot(String(loginCodePage()), { url: `/login/code${hash}` });
   const w = open();
@@ -1832,6 +1832,63 @@ stateTest("a filter bar's GET carries only the fields in use: its empty fields a
 
 // ---- what the script is made of ------------------------------------------------------------------------------------
 
+stateTest(T.arrival, async () => {
+  const arrived = boot(String(loginPage({ arrival: true, next: "/runs" })), { url: "/login?next=%2Fruns" });
+  assert.equal(calls(arrived, "/api/whoami")[0].init?.credentials, "same-origin", "without the cookie this recovery does nothing");
+  await arrived.fetch.open("/api/whoami").answer(200, { name: "ops", role: "operator", readOnly: false });
+  assert.deepEqual(arrived.location.replaced, ["/runs"]);
+  const out = boot(String(loginPage({ arrival: true, next: "/runs" })), { url: "/login?next=%2Fruns" });
+  await out.fetch.open("/api/whoami").answer(401, { error: "sign in first" });
+  assert.deepEqual(out.location.replaced ?? [], [], "not signed in: the form stays");
+  const unavailable = boot(String(loginPage({ arrival: true, next: "/runs" })), { url: "/login?next=%2Fruns" });
+  await unavailable.fetch.open("/api/whoami").answer(503, { error: "x" });
+  assert.deepEqual(unavailable.location.replaced ?? [], [], "only a 200 means signed in");
+  const plain = boot(String(loginPage({ arrival: true })), { url: "/login" });
+  await plain.fetch.open("/api/whoami").answer(200, { name: "ops", role: "operator", readOnly: false });
+  assert.deepEqual(plain.location.replaced, ["/"], "with no page asked for, the overview");
+  const chosen = boot(String(loginPage({ next: "/runs" })), { url: "/login" });
+  assert.equal(calls(chosen, "/api/whoami").length, 0, "came here on purpose: nothing is asked and nothing moves");
+  chosen.document.getElementById("token").value = "tok-1";
+  chosen.submit(chosen.document.getElementById("login-form"));
+  assert.deepEqual(calls(chosen, "/login").map((c) => c.body), [{ token: "tok-1", next: "/runs" }], "the page asked for goes with the token");
+  await chosen.fetch.open("/login").answer(200, { next: "/runs" });
+  assert.deepEqual(chosen.location.assigned, ["/runs"]);
+});
+
+test("a session that ends in an open tab keeps its page for the sign-in (#849)", async () => {
+  const ended = boot(fleetPage(), { url: "/runs?outcome=failed" });
+  ended.streams[0].emit("end", { ended: "idle" });
+  assert.deepEqual(ended.location.assigned, [`/login?ended=idle&next=${encodeURIComponent("/runs?outcome=failed")}`]);
+  const unknown = boot(fleetPage(), { url: "/nowhere" });
+  unknown.streams[0].emit("end", { ended: "idle" });
+  assert.deepEqual(unknown.location.assigned, ["/login?ended=idle"], "only one of the console's own pages goes along");
+});
+
+stateTest(T.linkEnds, async () => {
+  const code = "k".repeat(43);
+  const open = () => boot(String(loginCodePage()), { url: `/login/code#${code}` });
+  const expired = open();
+  await expired.fetch.open("/login/code").answer(401, { error: "x", link: "expired" });
+  assert.deepEqual(linkStates(expired), ["expired"]);
+  await expired.fetch.open("/api/whoami").answer(401, { error: "sign in first" });
+  assert.deepEqual(linkStates(expired), ["expired"], "not signed in: it stays");
+  const inAlready = open();
+  await inAlready.fetch.open("/login/code").answer(401, { error: "x", link: "used" });
+  assert.equal(calls(inAlready, "/api/whoami")[0].init?.credentials ?? "same-origin", "same-origin", "the question has to carry the cookie");
+  await inAlready.fetch.open("/api/whoami").answer(200, { name: "ops", role: "operator", readOnly: false });
+  assert.deepEqual(linkStates(inAlready), ["signed-in"]);
+  for (const status of [500, 503]) {
+    const spent = open();
+    await spent.fetch.open("/login/code").answer(status, { error: "x", link: "expired" });
+    assert.equal(calls(spent, "/api/whoami").length, 0, `${status}: the server took the code, and says why itself`);
+    assert.deepEqual(linkStates(spent), ["used"], String(status));
+  }
+  const unsure = open();
+  await unsure.fetch.open("/login/code").answer(401, { error: "x", link: "used" });
+  await unsure.fetch.open("/api/whoami").answer(503, { error: "x" });
+  assert.deepEqual(linkStates(unsure), ["used"], "only a 200 means signed in");
+});
+
 test("the script's closed lists are written in from their one source each, never copied", () => {
   for (const [name, value] of Object.entries({ ENDED_REASONS, STREAM_ENDS, STREAM_SHUTDOWN, PERSON_PARAM, PERSON_HEADER, NOTICE_OF_STATUS, CONFIRM_SLOT_ID, CONFIRM_NO_ANSWER, CONFIRM_SIGNED_OUT, RETRY_MS, SIGN_IN_TRIES_MAX, SIGN_IN_RETRY_FOR_MS, SIGN_IN_GAVE_UP, SIGN_OUT_TIMEOUT_MS, SIGN_OUT_UNCONFIRMED, STALE_TOKENS_BODY })) {
     assert.ok(CONSOLE_SCRIPT.includes(`var ${name} = ${JSON.stringify(value)};`), name);
@@ -1844,7 +1901,7 @@ test("the script's closed lists are written in from their one source each, never
   assert.deepEqual(named("mark"), Object.keys(LIVE_STATES).filter((k) => k !== "start").sort());
   // The sign-in page goes where a reason is the console's own, and nowhere else.
   // Sign-out's only one is its 200's (issue #737): an unconfirmed sign-out stays on the page.
-  assert.deepEqual(CONSOLE_SCRIPT.match(/location\.assign\(.*?\);/g), ['location.assign(isReason(r) ? "/login?ended=" + r : "/login");', 'location.assign("/");', 'location.assign("/login");', 'location.assign("/runs/sandboxes?request=" + encodeURIComponent(b.requestId) + "&host=" + encodeURIComponent(b.host));']);
+  assert.deepEqual(CONSOLE_SCRIPT.match(/location\.assign\(.*?\);/g), ['location.assign(query.length ? "/login?" + query.join("&") : "/login");', 'location.assign(ownPage(r.body && r.body.next));', 'location.assign("/login");', 'location.assign("/runs/sandboxes?request=" + encodeURIComponent(b.requestId) + "&host=" + encodeURIComponent(b.host));']);
   assert.match(CONSOLE_SCRIPT, /if \(r\.status === 200\) location\.assign\("\/login"\);\n\s+else unconfirmed\(\);\n\s+\}, unconfirmed\);/);
   // The signed-out sentence is said as text, in the slot's message line (slotSays), never as markup.
   assert.match(CONSOLE_SCRIPT, /function signedOut\(r\) \{[^]*?slotSays\(CONFIRM_SIGNED_OUT\);/);

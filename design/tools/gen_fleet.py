@@ -747,17 +747,21 @@ SIGNIN = f"""<a class="skip" href="#si-token">Skip to sign-in</a>
     <section class="si-card" id="p-signin" data-panel aria-labelledby="si-h">
       <span class="brandpill__m si-mark">pi</span>
       <h1 id="si-h">Sign in to the console</h1>
-      <p class="muted">Paste a console token, or open a one-time link from pi.</p>
+      <p class="muted">Paste a console token, or open a one-time link.</p>
       <form class="si-form" aria-label="Sign in">
         <div class="field"><label for="si-token">Console token</label><input id="si-token" class="input si-input" type="password" autocomplete="off" placeholder="pdc_…"></div>
         <button class="btn btn--primary btn--lg si-go" type="button">Sign in</button>
       </form>
       <div class="si-help">
         <p class="si-help__h">No token yet?</p>
-        <p class="muted">Make a link from pi. It works once, for 60 seconds:</p>
-        {cmd('/dispatch console')}
-        <p class="muted">Or make a token on the host:</p>
-        {cmd('pi-dispatch-console token add --name <you> --role operator')}
+        <p class="muted">Run this in your deployment folder to sign in:</p>
+        {cmd('./pi-dispatch console')}
+        <p class="muted">If that file is not there:</p>
+        {cmd('./node_modules/.bin/pi-dispatch console')}
+        <p class="muted">On a global install: <span class="code">pi-dispatch console</span></p>
+        <p class="muted">Or in pi:</p>
+        {cmd('/dispatch console --link')}
+        <details><summary>Make a token instead</summary><p class="muted">On the host, with your own name in place of &lt;you&gt;. In a local install it is under <span class="code">./node_modules/.bin/</span>:</p>{cmd('pi-dispatch-console token add --name <you> --role operator')}</details>
       </div>
       <p class="si-foot faint">This console answers on 127.0.0.1 only. Reach it locally or through an SSH tunnel.</p>
     </section>
@@ -794,11 +798,12 @@ SIGNIN_CSS = """
 write("SignIn", card_marker("Screens", 1120, 1440, "Sign in: a token field, help on where tokens and links come from, and every notice this page can show"),
       "Sign in", SIGNIN, SIGNIN_CSS)
 readme("SignIn", """
-Sign-in is a single centered card: paste a console token or open a one-time link from pi, with help that says exactly where both come from.
+Sign-in is a single centered card: paste a console token or open a one-time link, with help that says exactly where both come from.
 
 **How a person uses it.**
 - **The token.** A person pastes the token and presses *Sign in*.
-- **No token yet.** The help block gives the two commands with a copy button each: `/dispatch console` in pi, which prints the address and a link that works once for 60 seconds, and `pi-dispatch-console token add --name <you> --role operator` on the host.
+- **No token yet.** The help block leads with the one command to remember, `./pi-dispatch console` in the deployment folder, which signs you in. It gives the spelling for a folder without that shortcut and `/dispatch console --link` in pi, each with a copy button. Making a token, `pi-dispatch-console token add --name <you> --role operator` on the host, sits in a disclosure below them.
+- **Arriving from elsewhere.** A person who opens a console page from another site and is signed in goes straight to that page. A person who is not signed in returns to that page after signing in with a token.
 - **Notices.** One notice at a time sits above the token field, each saying what happened and what to do.
   - Why a session ended: 60 minutes idle (an open live tab does not count), the 12-hour maximum, a revoked or rotated token, a changed role, an operator ending every session, signing out in another tab, or a console restart.
   - Why a sign-in was refused: a wrong token, a used or expired link, too many attempts (5 a minute), a tokens file the console cannot use, or an audit log it cannot write.

@@ -1118,6 +1118,8 @@ const DRAW = {
   // before it reads the code, so the link is not spent and the page keeps waiting; the console out of reach keeps
   // signing in.
   "login-code-used.anonymous": () => loginCodePage({ theme: null, state: "used" }),
+  "login-code-expired.anonymous": () => loginCodePage({ theme: null, state: "expired" }),
+  "login-code-signed-in.anonymous": () => loginCodePage({ theme: null, state: "signed-in" }),
   "login-code-nocode.anonymous": () => loginCodePage({ theme: null, state: "nocode" }),
   ...Object.fromEntries(["rate", "tokens", "audit"].map((k) => [`login-code-refused-${k}.anonymous`, () => loginCodePage({ theme: null, state: k === "rate" ? "wait" : "used", notice: k })])),
   "login-code-refused-other.anonymous": () => noticeText(String(loginCodePage({ theme: null, state: "used", notice: "other" })), OTHER_REFUSAL),

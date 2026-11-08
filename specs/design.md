@@ -13741,6 +13741,17 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
   profileUse; admin/src/console/panels/run.mjs -> openshellRows; admin/src/dashboard.ts -> profilesSection,
   renderRunDetail; admin/src/secrets-command.ts;
   admin/test/secret-profiles-view.test.mjs.
+- **Coming back to the page you asked for, and arriving from elsewhere (ADDED 2026-11-08, #849).** The redirect to `/login` carries the page asked for
+  as `next`, judged by the page parser (`returnPathOf`) on the way out and again when it is used, so only this console's own pages can be a destination.
+  `SameSite=Strict` withholds the cookie on a navigation that starts on another site, so a signed-in browser opening a link from a forge or a mail arrives at
+  `/login` looking signed out. The page's own same-origin fetch of `/api/whoami` does carry the cookie and continues to `next` on a 200. It is drawn only when
+  `Sec-Fetch-Site` is exactly `cross-site` and no `ended` is shown, or it would bounce a person who came here on purpose to use a token or sign in as someone else,
+  and would wipe the reason a session ended. Exactly `cross-site`: a missing header (browsers send none to a plain-HTTP name) or `none` (a bookmark, which carries
+  the cookie anyway) is not one. `next` returns a person to the page when they sign in with a token on that page; a one-time link opens its own page. A session ending in an open tab sends its page along too, except for `switched`, whose page was drawn for someone else.
+  **Measured 2026-11-08** in Chromium 158, Firefox 159 and WebKit 27.2 (Playwright's Linux build, not Safari): `Strict` is withheld on both hops of a cross-site 303 and carried by the landed page's same-origin
+  fetch; a cookie set with `Max-Age=34560000` is kept 400 days in Chromium and Firefox and 365 in WebKit, so anything meant to outlast that must be re-set; WebKit drops a `Secure` cookie over http on `127.0.0.1` and `localhost` where the others keep it. The link page tells `expired` from `used` on a best-effort basis, since `reap` removes old files, and says
+  `signed-in` when this browser is in already. **REJECTED**: `SameSite=Lax`, which would give up what `Strict` protects for every request to repair one.
+
 - **The panel as a second minter, and the return path (ADDED 2026-10-21, #708).** `/dispatch console --link` (the
   operator-typed subcommand of `DES-ADMIN-VIA-PI-EXTENSION`) mints a one-time login code in the panel's own process,
   for an operator token of the tokens file, through the same `mintLoginCode` and drop as `pi-dispatch-console link`.
@@ -14256,11 +14267,11 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
     a stream opens, the earlier shape, under which a tab that reconnected while its data still failed showed Live,
     undimmed, over panels from before the failure, then the degraded panels, and never stale.
   - **The server draws every state; the script only switches.** Each sign-in notice (an `ended-<reason>` per
-    reason and each refusal of `SIGN_IN_NOTICES`, chosen by `NOTICE_OF_STATUS`), the link page's three states and its
+    reason and each refusal of `SIGN_IN_NOTICES`, chosen by `NOTICE_OF_STATUS`), the link page's five states and its
     notices (`LINK_NOTICES`), the four live notes (`LIVE_NOTES`, in `#live-note`), the slot's previewing skeleton and
     the kept-still note (`<template id="held-note">`) are server markup, hidden but the one the server chose, and the
     preview, no-change, refusal and bulk-result bars arrive as `html` in the JSON answer. A notice no answer can select
-    is not drawn: the link page's own refusal (the 401 of `/login/code`) is said whole by its used state, so
+    is not drawn: the link page's own refusal (the 401 of `/login/code`) is said whole by its used or expired state, so
     `NOTICE_OF_STATUS` maps it to no notice, and `/login`, whose 401 is a wrong token, draws no notice for a used link.
     The sign-in pages draw what works only with the script (the token form, its lead-in, the link page's first state)
     `hidden data-reveal`, and the script's first act there is to reveal every `[data-reveal]` (`revealScripted`), so a
@@ -15286,10 +15297,11 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
     proof the byte-identical panels give: that the shell, the stylesheet and the theme changed nothing inside a
     panel. Each page converts in its own pull request, against its own card, and the legacy layer carries the old
     markup until then.
-  - **`next` in a query string, or a redirect from the server** (2026-10-21, #708). A query string reaches the request
+  - **`next` in the one-time link's query string, or a redirect from the server to it** (2026-10-21, #708). A query string reaches the request
     log and the history (the reason the code is in the fragment), and a server-side redirect to a path the request
     named is the open-redirect shape itself. The page path rides in the fragment and comes back as a JSON answer the
-    script checks again.
+    script checks again. Still rejected for the link. The `/login?next=` of issue #849 is a different case: it holds no credential, it is a path the browser
+    has already asked for, the server only ever names `/login` in the redirect, and the page parser judges it again before anything uses it.
   - **Keeping a second, offline insights renderer beside the console** (2026-10-18). From #641 the console served
     the insights sections while the extension still wrote the static insights export, with its own page chrome, its
     own inline script, its own reload loop and its own window default (30d against the console's 7d); the two
@@ -17522,6 +17534,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-11-08 (#849, part 2) | **`DES-OPERATOR-CONSOLE` AMENDED**, a new bullet "Coming back to the page you asked for, and arriving from elsewhere": `next`, the `Strict` recovery through `/api/whoami`, drawn only for a `cross-site` arrival, `expired` and `signed-in`, the rejection of `Lax`, and three browsers' cookie behaviour as measured. The #708 rejection of `next` in a query string is narrowed to the one-time link. |
 | 2026-11-08 (#849, part 1) | **`DES-BROWSER-FIRST-RUN-SETUP` AMENDED**: "Tokens and invitations" (`open`, not a printed link; recovery on failure), "Durable bootstrap" gains the self-install from npm's cache, and a new bullet "One command, one question" records `up --console`'s single question, `--ask-each`, `pi-dispatch console`, `open`, the `./pi-dispatch` shortcut and what was rejected. **`DES-FIRST-RUN-SETUP-WIZARD` AMENDED**, one bullet: the browser route passes `--ask-each --no-open`. **`DES-OPERATOR-CONSOLE`**: `open` named as a minter. `DES-ADMIN-VIA-PI-EXTENSION`: UNCHANGED, checked (`/dispatch console` is part 6). The folder rules of the self-install and the loose empty folder are recorded under "Durable bootstrap", with what was rejected; `setupCachePath` also names pnpm's, yarn's and bun's temporary stores. |
 | 2026-11-05 (no issue, the file a write cannot keep, pause windows) | **`DES-STORE-VERSION-WHEN-NEEDED` CORRECTED**, one sentence: the pause windows writer no longer repairs a file it could not keep, and refuses it as the triggers writer does (`INT-PAUSE-WINDOWS-FILE-CONTRACT`). |
 | 2026-11-05 (no issue, a Valkey outage under the console) | **`DES-OPERATOR-CONSOLE` AMENDED**, a new bullet: why a queue's connection failure is awaited in a subclass rather than at each call site or by a process-wide handler, why a closed queue's late connect failure is silenced there too, why the fleet reader replaces a queue whose client ended rather than holding a persistent one, why its raw client is bounded and judged at each connect, why a command past that bound is not sent later, how long a cache can still hold a failed read, and why a queue that gives up says a repeated Valkey error line once a minute. **`DES-STORE-VERSION-WHEN-NEEDED` CORRECTED**, one sentence: the triggers writer no longer repairs a file it could not keep (`INT-TRIGGERS-FILE-CONTRACT`), and the pause windows writer still does. `DES-ONE-SHOT-DISARM-IN-THE-FILE` UNCHANGED, checked: "the CRUD writer's repair-from-empty posture (missing file + add trigger = scaffold)" still describes the missing file, the only case that sentence names. |

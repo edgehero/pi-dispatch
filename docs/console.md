@@ -71,8 +71,7 @@ sign in: paste a token (pi-dispatch-console token add --name <you> --role operat
 ```
 
 On a unix socket the last line ends with `--port <your tunnel's local port>`: a link through a tunnel needs the port
-you forward, which only you know ([From another machine](#from-another-machine)). The sign-in page gives the same
-help, with the commands in boxes to copy.
+you forward, which only you know ([From another machine](#from-another-machine)). The sign-in page gives the commands for a link, with each in a box to copy.
 
 To listen somewhere else, set `PI_CONSOLE_LISTEN`:
 
@@ -186,8 +185,9 @@ ever open to other accounts, the console refuses it: remove the folder (what it 
 new link, which creates it again.
 
 The link's page says "Signing in with a one-time link" while it works. A link that was used, has expired or is
-unknown says so and gives both commands for a new one (`pi-dispatch-console link --name <you>` on the host, and
-`/dispatch console --link` in pi); a link that lost the part after `#` says it carries no code. Each state offers the
+unknown says so and gives the command for a new one (`./pi-dispatch console` in the deployment folder, and
+`/dispatch console --link` in pi), and an old enough link may read as unknown rather than expired. A browser that is already signed in is told so and
+offered the way on. A link that lost the part after `#` says it carries no code. Each state offers the
 token form instead. If the console does not answer, the page stays, says "Console not reachable, retrying" and posts
 the same code again every 2 seconds, for at most 30 tries or 60 seconds, whichever comes first. Then it stops, says the
 link has expired (a link lasts 60 seconds), and asks you for a new one once the console is back. Too many sign-in
@@ -201,8 +201,8 @@ operator should run `pi-dispatch doctor` on the host), or an audit log it could 
 (A used or expired link is said on the link's own page, above.) A sign-in that reaches nothing keeps the page and is
 sent again every 2 seconds until the console answers, for at most 30 tries or 60 seconds: then nothing more is sent,
 the page no longer holds the token, and it asks you to paste it and press Sign in again once the console is back.
-The field is cleared as soon as you press Sign in. Under it, "No token yet?" gives the pi command
-for a link (`/dispatch console --link`) and the host command for a token, each in a box to copy, and a line says where
+The field is cleared as soon as you press Sign in. Under it, "No token yet?" gives the command that signs you in (`./pi-dispatch console` in the deployment folder), its longer spelling, and
+the pi command for a link (`/dispatch console --link`), with the host command for a token behind "Make a token instead", each in a box to copy, and a line says where
 the console answers: on this host's loopback address only, on its unix socket only, or nothing about it on a public
 bind. Signing in needs JavaScript. A page without it says so first, and shows only what still holds: the token form,
 its lead-in and the link page's "Signing in" state are drawn hidden, and the page's script shows them as it loads.
@@ -300,8 +300,8 @@ about any other token or session. It remembers the last 1024. The `restart` line
 in memory, so after a restart the console cannot tell your old cookie from one it never issued. It says it only while
 the console has been running for less than `PI_CONSOLE_MAX_HOURS` (after that, a session from before would have ended
 anyway) and has not yet forgotten an ended session; otherwise the sign-in page says nothing. The page takes the reason
-only from its own list: a link to `/login?ended=` with anything else shows no notice, and nothing from the address is
-ever repeated on the page. A script gets the same reason as `ended` in a 401's JSON
+only from its own list: a link to `/login?ended=` with anything else shows no notice, and nothing else from the address is
+repeated on the page but a `next` the console accepts as one of its own pages. A script gets the same reason as `ended` in a 401's JSON
 ([The state API](#the-state-api)).
 
 **A tokens file the console cannot read signs nobody out.** If the file stops being readable while the console runs
@@ -693,7 +693,8 @@ the sign-in page included, in your theme from its first byte, so a page never sh
 so that this holds also when you arrive from another site, where the pages you can land on are the sign-in page and a
 one-time sign-in link (`pi-dispatch-console link`) opened from a chat or a mail: `Strict` would withhold the cookie on
 exactly that first request. Any other console page you reach from another site is first a redirect to the sign-in
-page, because the session cookie is `Strict`. The console itself never sets it.
+page, because the session cookie is `Strict`. The page then checks with a request of its own, which does carry the cookie, and if you are signed in it
+goes on to the page you asked for. If you are not, signing in with a token on that page returns you there. The console itself never sets it.
 
 The cookie is a preference, not a credential: it signs nobody in and opens nothing. The console takes only an exact
 `light` or `dark` from it, and anything else, or two copies of it (set for two paths), draws the system's theme. What

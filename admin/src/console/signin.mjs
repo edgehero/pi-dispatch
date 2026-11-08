@@ -37,8 +37,8 @@ import { ENDED_REASONS, SIGN_IN_NOTICES, endedNotices } from "./session-ends.mjs
 /** The notices a link page can show: it has no ended session and no token to be wrong, so a subset of the sign-in's. */
 export const LINK_NOTICES = Object.freeze(["unreachable", "rate", "tokens", "audit", "other"]);
 
-/** The link page's states (the AccessStates card): signing in, a used or unknown link, a link with no code. */
-export const LINK_STATES = Object.freeze(["wait", "used", "nocode"]);
+/** The link page's states (the AccessStates card): signing in, used or unknown, expired, a browser already signed in, a link with no code. */
+export const LINK_STATES = Object.freeze(["wait", "used", "expired", "signed-in", "nocode"]);
 
 /** The sentence a page without JavaScript shows; the sign-in posts JSON from the script, so it cannot work without it. */
 export const NO_SCRIPT_TEXT = "The console needs JavaScript to sign in.";
@@ -46,10 +46,14 @@ export const NO_SCRIPT_TEXT = "The console needs JavaScript to sign in.";
 /** The attributes of a part only the script can make true: drawn hidden, revealed by the script as the page loads. */
 const REVEAL = html` hidden data-reveal`;
 
-/** The help's two commands: a one-time link from pi (`console-command.mjs`: `--link` prints it), and a token on the host. */
+/** The help's commands: the one to remember, its spelling for a folder without the shortcut, pi's, and the token a host can make. */
+const CONSOLE_HERE = Object.freeze(["./pi-dispatch", "console"]);
+const CONSOLE_INSTALLED = Object.freeze(["./node_modules/.bin/pi-dispatch", "console"]);
 const PI_LINK = Object.freeze(["/dispatch", "console", "--link"]);
 const TOKEN_ADD = Object.freeze(["pi-dispatch-console", "token", "add", "--name", "<you>", "--role", "operator"]);
-const CLI_LINK = Object.freeze(["pi-dispatch-console", "link", "--name", "<you>"]);
+
+/** How to get a fresh link, said the same way wherever one is needed. */
+const NEW_LINK = html`<p class="muted">Run this in your deployment folder to sign in:</p>${ui.cmd([...CONSOLE_HERE])}<p class="muted">If that file is not there:</p>${ui.cmd([...CONSOLE_INSTALLED])}<p class="muted">On a global install: <span class="code">pi-dispatch console</span></p><p class="muted">Or in pi:</p>${ui.cmd([...PI_LINK])}`;
 
 /** The footer's sentence by where the console listens (see the header); null says nothing. */
 export const LISTEN_FOOTERS = Object.freeze({
@@ -114,18 +118,20 @@ const NO_SCRIPT = html`<noscript>${ui.banner({ status: "attention", icon: "info"
  * ended notices state the limits it runs with) and where it `listen`s (`listenKey`). The form and its lead-in are the
  * script's to reveal (see the header).
  */
-export function signInContent({ notice = null, limits = {}, listen = null } = {}) {
+export function signInContent({ notice = null, limits = {}, listen = null, next = undefined, arrival = false } = {}) {
   const ended = endedNotices({ idleMinutes: limitOf(limits?.idleMinutes), maxHours: limitOf(limits?.maxHours) });
   const entries = [...ENDED_REASONS.map((r) => [`ended-${r}`, ended[r]]), ...Object.entries(SIGN_IN_NOTICES)];
   const footer = LISTEN_FOOTERS[listenKey(listen)];
-  return html`<section id="p-signin" data-panel><div class="card signin">
+  // `data-next` and `data-arrival` are the script's: where a sign-in returns to (a value the page parser accepted), and to check first whether this
+  // browser is already signed in (`server.mjs` `getLogin`).
+  return html`<section id="p-signin" data-panel${next === undefined ? null : html` data-next="${next}"`}${arrival ? html` data-arrival` : null}><div class="card signin">
 ${NO_SCRIPT}
 ${MARK}
 <h2>Sign in to the console</h2>
-<p class="muted"${REVEAL}>Paste a console token, or open a one-time link from pi.</p>
+<p class="muted"${REVEAL}>Paste a console token, or open a one-time link.</p>
 ${noticeRegion(entries, noticeKey(notice))}
 <form id="login-form" class="signin__form" autocomplete="off"${REVEAL}><div class="field"><label for="token">Console token</label><input id="token" class="input input--code" name="token" type="password" autocomplete="off" spellcheck="false" required aria-describedby="notice"></div><button class="btn btn--primary btn--lg" type="submit">Sign in</button></form>
-<div class="signin__help"><p class="signin__help-h">No token yet?</p><p class="muted">Make a link from pi. It works once, for 60 seconds:</p>${ui.cmd([...PI_LINK])}<p class="muted">Or make a token on the host:</p>${ui.cmd([...TOKEN_ADD])}</div>
+<div class="signin__help"><p class="signin__help-h">No token yet?</p>${NEW_LINK}<details><summary>Make a token instead</summary><p class="muted">On the host, with your own name in place of &lt;you&gt;. In a local install it is under <span class="code">./node_modules/.bin/</span>:</p>${ui.cmd([...TOKEN_ADD])}</details></div>
 ${footer === null ? null : html`<p class="signin__foot faint">${footer}</p>`}
 </div></section>`;
 }
@@ -151,9 +157,11 @@ export function linkContent({ state = "wait", notice = null } = {}) {
   const shown = LINK_STATES.includes(state) ? state : "wait";
   const states = [
     linkState("wait", shown, { status: "running", icon: "hourglass", title: "Signing in with a one-time link", body: html`<p class="muted">This takes a moment. The link is taken out of your browser history first, so it cannot be used again from there.</p>` }),
-    // Two commands for a new link, each led in by where it runs: the host's own CLI, then pi's.
-    linkState("used", shown, { status: "failed", icon: "failed", title: "This sign-in link is used, expired or unknown", body: html`<p class="muted">A link works once, for 60 seconds. Ask for a new one on the host:</p>${ui.cmd([...CLI_LINK])}<p class="muted">Or in pi:</p>${ui.cmd([...PI_LINK])}` }),
-    linkState("nocode", shown, { status: "attention", icon: "attention", title: "This link carries no code", body: html`<p class="muted">Copy the whole link, or ask for a new one with <span class="code">pi-dispatch-console link</span>. In pi, <span class="code">/dispatch console --link</span> makes one for you.</p>` }),
+    linkState("used", shown, { status: "failed", icon: "failed", title: "This sign-in link is used, expired or unknown", body: html`<p class="muted">A link works once, for 60 seconds.</p>${NEW_LINK}` }),
+    // Best effort: an expired code is told apart only while its file is still there, and sweeps remove it, so an old link often reads as `used`.
+    linkState("expired", shown, { status: "attention", icon: "attention", title: "This sign-in link has expired", body: html`<p class="muted">A link works for 60 seconds after it is made.</p>${NEW_LINK}` }),
+    linkState("signed-in", shown, { status: "ok", icon: "done", title: "You are already signed in", body: html`<p class="muted">This browser is signed in already. To sign in as someone else, sign out and make a new link.</p><a class="link" href="/">Go to the console</a>` }),
+    linkState("nocode", shown, { status: "attention", icon: "attention", title: "This link carries no code", body: html`<p class="muted">Copy the whole link, or make a new one.</p>${NEW_LINK}` }),
   ];
   const entries = LINK_NOTICES.map((k) => [k, SIGN_IN_NOTICES[k]]);
   return html`<section id="p-link" data-panel><div class="card signin">

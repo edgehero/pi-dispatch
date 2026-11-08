@@ -46,17 +46,21 @@
     <section class="si-card" id="p-signin" data-panel aria-labelledby="si-h">
       <span class="brandpill__m si-mark">pi</span>
       <h1 id="si-h">Sign in to the console</h1>
-      <p class="muted">Paste a console token, or open a one-time link from pi.</p>
+      <p class="muted">Paste a console token, or open a one-time link.</p>
       <form class="si-form" aria-label="Sign in">
         <div class="field"><label for="si-token">Console token</label><input id="si-token" class="input si-input" type="password" autocomplete="off" placeholder="pdc_…"></div>
         <button class="btn btn--primary btn--lg si-go" type="button">Sign in</button>
       </form>
       <div class="si-help">
         <p class="si-help__h">No token yet?</p>
-        <p class="muted">Make a link from pi. It works once, for 60 seconds:</p>
-        <div class="cmd"><code>/dispatch console</code><button class="btn btn--sm" type="button">Copy</button></div>
-        <p class="muted">Or make a token on the host:</p>
-        <div class="cmd"><code>pi-dispatch-console token add --name &lt;you&gt; --role operator</code><button class="btn btn--sm" type="button">Copy</button></div>
+        <p class="muted">Run this in your deployment folder to sign in:</p>
+        <div class="cmd"><code>./pi-dispatch console</code><button class="btn btn--sm" type="button">Copy</button></div>
+        <p class="muted">If that file is not there:</p>
+        <div class="cmd"><code>./node_modules/.bin/pi-dispatch console</code><button class="btn btn--sm" type="button">Copy</button></div>
+        <p class="muted">On a global install: <span class="code">pi-dispatch console</span></p>
+        <p class="muted">Or in pi:</p>
+        <div class="cmd"><code>/dispatch console --link</code><button class="btn btn--sm" type="button">Copy</button></div>
+        <details><summary>Make a token instead</summary><p class="muted">On the host, with your own name in place of &lt;you&gt;. In a local install it is under <span class="code">./node_modules/.bin/</span>:</p><div class="cmd"><code>pi-dispatch-console token add --name &lt;you&gt; --role operator</code><button class="btn btn--sm" type="button">Copy</button></div></details>
       </div>
       <p class="si-foot faint">This console answers on 127.0.0.1 only. Reach it locally or through an SSH tunnel.</p>
     </section>
