@@ -76,6 +76,7 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
 | The operator console process (`pi-dispatch-console serve`) | **Operator, the same trust as the admin extension** | It runs as the deployment's account and writes through the same read-model funnels as the panel. It renders untrusted text (issue titles, and from #641 on run text) but only escaped, after the control-byte scrub, under a strict CSP and behind the operator role; it executes none of it and feeds none of it to a model. It listens on loopback or a 0600 unix socket, never on the receiver ([The operator console](#the-operator-console)) |
 | The operator's browser | **Operator, while it holds a session** | A signed-in browser acts as the token's person. Every other page that browser opens, including one on another `localhost` port, is **None**: the console refuses its writes by origin, not by trust in the browser |
 | The console tokens file (`PI_CONSOLE_TOKENS_FILE`) | **Operator, the same trust as the deployment's `.env`** | It says who may sign in. It holds sha256 hashes only, so a copy signs no one in, but whoever can WRITE it can add a person. The console refuses to start on one that is group or world accessible, a symlink or another account's; the pi extension guards it from its own session's `write` and `edit`; doctor fails it inside any path a job container can see (a local trigger's `run.folder` or `run.skillsDir`, a `PI_DISPATCH_RUN_ROOTS` root, `PI_GLOBAL_PI_DIR`) |
+| The remembered devices (`console-devices/` beside the tokens file) | **Operator, the same trust as the tokens file** | Each record is a standing sign-in as its token, so whoever can write the folder can sign in. It holds hashes only, so a copy signs no one in, and it is owner-only, guarded from the agent's `write` and `edit`, and judged by doctor. Residual: cookies ignore ports, so a remembered browser sends its device cookie to every port on the console's host name for up to 400 days, where an ordinary session cookie lasted at most 12 hours. Any local service the browser opens on that name receives it. Use the console's own name for nothing else, and remove a device you no longer use. |
 | The login-code drop directory (`console-login-codes/` beside the tokens file) | **Operator, the same trust as the tokens file** | `pi-dispatch-console link`, `pi-dispatch-console open` (issue #849) and, since issue #708, `/dispatch console --link` write a one-time code's hash there (directory 0700, file 0600, 60 seconds, consumed by the first `unlink` that wins; the panel appends its audit row first). Whoever can write it can mint a login, which is why it must be the deployment account's alone, and why the pi extension guards the directory, every path under it, from its own session's `write` and `edit`, as it guards the tokens file |
 | Receiver, worker, queue, admin extension, operator console, sandbox gateway | Trusted | They never execute agent-authored content: the admin extension feeds only PII-free, fixed-enum run records to the model; raw container output stays in the overlay viewer. The operator console renders untrusted text as data only: escaped, behind the operator role, and never in a list view |
 
@@ -325,7 +326,8 @@ The threat model, and what answers each part:
 - **A local user on the host.** Any account on the machine can connect to a loopback port. Every request but
   `/healthz`, an empty `/favicon.ico`, the sign-in pages, sign-out (which ends only the sessions its own cookies name)
   and the console's script and stylesheet needs a session, and a session needs a named token (256 random bits) or a
-  one-time login code that only the deployment's account can mint. Login attempts are rate limited and every failure is
+  one-time login code that only the deployment's account can mint, or a remembered device that one of those made
+  (issue #849, below). Login attempts are rate limited and every failure is
   audited. In unix-socket mode the socket is 0600 in a directory only the deployment's account can enter, so another
   account cannot connect at all.
 - **The job container reaching loopback through the host gateway.** On Docker Desktop `host.docker.internal`
@@ -381,7 +383,7 @@ The threat model, and what answers each part:
   there.
 - **Why a session ended is told, and tells nothing else** (issue #737). A session that ends leaves a tombstone in
   the console's memory: its 256-bit session id and one word from a closed list (idle, max, revoked, role, all,
-  elsewhere), so the next page request that presents that cookie is sent to `/login?ended=<word>` and the sign-in page
+  elsewhere, and since issue #849 device), so the next page request that presents that cookie is sent to `/login?ended=<word>` and the sign-in page
   says why in the console's own sentence (an API request gets the word in its 401). The tombstone is kept under the session's own id, and its word describes that
   session's own token, so it tells a browser nothing about any other token or session; a browser learns only why its
   own sign-in stopped working, which signing in again would show it anyway. Only an id that was a live session gets
@@ -413,6 +415,23 @@ The threat model, and what answers each part:
   page with no notice, and the console never says "it may have restarted" again until it restarts. Nobody can plant
   a reason for another person's session: one is written only under the id of a session the console held, in its own
   word.
+- **A remembered browser** (issue #849). A person may ask the console to remember a browser, which then stays signed in
+  across idle periods and restarts: its cookie holds a 256-bit secret, HttpOnly and SameSite=Strict, and the console
+  keeps only its hash, in an owner-only folder beside the tokens file. A device is made only by a sign-in that has just
+  proved itself (a token, or a one-time link, within 10 minutes), only for an operator or a viewer (never an `agent`
+  token, never a viewer invitation), and only where its cookie does not cross a network in plain text: a loopback
+  bind, a unix socket reached as `localhost` through its tunnel, or an enrolled HTTPS origin, judged by the bind and
+  the origin: under a public bind the Host header decides nothing, since any client can set it, and under a loopback
+  bind a name that is not loopback (a plain-HTTP proxy) is refused. Every use judges the record against the tokens file, so revoking
+  or rotating the token, changing its role and `sessions end-all` end the device too, across restarts; signing out
+  erases it, and `pi-dispatch-console device revoke` removes one. Restoring a device is a sign-in with its audit row.
+  A record the console cannot read signs nobody in and signs nobody out: the page says so and doctor names it.
+  Residuals, each named: the secret is not rotated while in use (rotation races a browser's several tabs, and lost
+  races would sign a person out), so a copy of the cookie works until the device is ended; a sign-out the folder
+  cannot record (a full disk) is refused in the console's memory only, so after a restart a copy works again until
+  the device is revoked, which the page, the audit row and the log line say; a record unused for 400 days is ended
+  at its next use, since no browser keeps the cookie that long; and a backup restored over the folder can bring an
+  ended device back (`docs/backup.md`).
 - **A tokens file the console cannot read signs nobody out** (issue #737). While the file cannot be read (a permission
   mistake, say), a request that carries a session cookie is answered 503 with no Set-Cookie and
   nothing ended, so the browser keeps its session for when the file reads again, and every open live page is kept

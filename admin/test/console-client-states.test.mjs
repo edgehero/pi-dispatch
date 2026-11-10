@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { CONFIRM_NO_ANSWER, CONFIRM_SIGNED_OUT, CONFIRM_SLOT_ID, HELD_NOTE_CHIP, HELD_NOTE_TEXT, bulkResultsHtml, heldNoteHtml, previewBarHtml, refusalHtml, unchangedBarHtml } from "../src/console/confirm-view.mjs";
 import { html, page } from "../src/console/html.mjs";
 import { actForm, area, editor, field } from "../src/console/panels/common.mjs";
-import { CONSOLE_SCRIPT, RETRY_MS, SIGN_IN_GAVE_UP, SIGN_IN_RETRY_FOR_MS, SIGN_IN_TRIES_MAX, SIGN_OUT_TIMEOUT_MS, SIGN_OUT_UNCONFIRMED, STALE_TOKENS_BODY } from "../src/console/script.mjs";
+import { CONSOLE_SCRIPT, RETRY_MS, SIGN_IN_GAVE_UP, SIGN_IN_RETRY_FOR_MS, SIGN_IN_TRIES_MAX, SIGN_OUT_TIMEOUT_MS, SIGN_OUT_UNCONFIRMED, STALE_DEVICE_BODY, STALE_TOKENS_BODY } from "../src/console/script.mjs";
 import { PERSON_CHANGED } from "../src/console/server.mjs";
 import { ENDED_REASONS, NOTICE_OF_STATUS, PERSON_HEADER, PERSON_PARAM, SIGN_IN_NOTICES, STREAM_ENDS, STREAM_SHUTDOWN } from "../src/console/session-ends.mjs";
 import { LIVE_NOTES, LIVE_STATES, SEARCH_HREF, loginCodePage, loginPage, shellHtml } from "../src/console/shell.mjs";
@@ -1315,6 +1315,26 @@ stateTest(T.ended, async () => {
   assert.deepEqual(twice.location.assigned, ["/login"]);
 });
 
+test("a console back from a restart that cannot read this browser's remembered sign-in holds the page under the device note, never 'not reachable', and reloads once it reads (#849)", async () => {
+  const w = boot(fleetPage());
+  w.streams[0].emit("open");
+  w.streams[0].emit("end", { ended: STREAM_SHUTDOWN });
+  w.tick(RETRY_MS);
+  await w.fetch.open("/api/whoami").answer(503, { error: "this browser's remembered sign-in could not be checked; sign in with a link or a token", ended: "device-store" });
+  assert.deepEqual([notes(w), w.location.assigned], [["stale"], []]);
+  assert.equal(w.document.getElementById("main").classList.contains("stale"), true);
+  assert.equal(text(w.document.querySelector('[data-live-note="stale"] .banner__s')), STALE_DEVICE_BODY.replaceAll("`", ""));
+  w.tick(RETRY_MS);
+  await w.fetch.open("/api/whoami").answer(200, { name: "ops", role: "operator" });
+  assert.equal(w.location.reloads, 1, "back once the record reads");
+  // Any other 503 is still a console that cannot answer this, as before.
+  const other = boot(fleetPage());
+  other.streams[0].emit("end", { ended: STREAM_SHUTDOWN });
+  other.tick(RETRY_MS);
+  await other.fetch.open("/api/whoami").answer(503, { error: "the console's tokens file cannot be used right now" });
+  assert.deepEqual(notes(other), ["retry"]);
+});
+
 stateTest(T.stale, async () => {
   const w = boot(fleetPage());
   const es = w.streams[0];
@@ -1355,6 +1375,10 @@ stateTest(T.stale, async () => {
   assert.equal(text(body), STALE_TOKENS_BODY.replaceAll("`", ""));
   assert.deepEqual(body.querySelectorAll("span.code").map(text), ["pi-dispatch doctor"]);
   assert.equal(STALE_TOKENS_BODY, "The console could not read its tokens file, so it shows nothing newer; this is the page as it was last seen. An operator should run `pi-dispatch doctor`.");
+  // A stream held because its remembered device's record cannot be read (issue #849) names that store, not the tokens file.
+  es.emit("stale", { since: NOW - 1000, what: "device" });
+  assert.equal(text(body), STALE_DEVICE_BODY.replaceAll("`", ""));
+  assert.deepEqual([main.classList.contains("stale"), body.querySelectorAll("span.code").map(text)], [true, ["pi-dispatch doctor"]]);
   es.emit("stale", { since: NOW - 1000, what: "data" });
   assert.equal(text(body), LIVE_NOTES.stale.body);
   assert.equal(body.querySelectorAll("span.code").length, 0);
@@ -1901,13 +1925,13 @@ test("the script's closed lists are written in from their one source each, never
   assert.deepEqual(named("mark"), Object.keys(LIVE_STATES).filter((k) => k !== "start").sort());
   // The sign-in page goes where a reason is the console's own, and nowhere else.
   // Sign-out's only one is its 200's (issue #737): an unconfirmed sign-out stays on the page.
-  assert.deepEqual(CONSOLE_SCRIPT.match(/location\.assign\(.*?\);/g), ['location.assign(query.length ? "/login?" + query.join("&") : "/login");', 'location.assign(ownPage(r.body && r.body.next));', 'location.assign("/login");', 'location.assign("/runs/sandboxes?request=" + encodeURIComponent(b.requestId) + "&host=" + encodeURIComponent(b.host));']);
-  assert.match(CONSOLE_SCRIPT, /if \(r\.status === 200\) location\.assign\("\/login"\);\n\s+else unconfirmed\(\);\n\s+\}, unconfirmed\);/);
+  assert.deepEqual(CONSOLE_SCRIPT.match(/location\.assign\(.*?\);/g), ['location.assign(query.length ? "/login?" + query.join("&") : "/login");', 'location.assign(ownPage(r.body && r.body.next));', 'location.assign(r.body && r.body.device === "unerased" ? "/login?ended=device-kept" : "/login");', 'location.assign("/runs/sandboxes?request=" + encodeURIComponent(b.requestId) + "&host=" + encodeURIComponent(b.host));']);
+  assert.match(CONSOLE_SCRIPT, /if \(r\.status === 200\) location\.assign\(r\.body && r\.body\.device === "unerased" \? "\/login\?ended=device-kept" : "\/login"\);\n\s+else unconfirmed\(\);\n\s+\}, unconfirmed\);/);
   // The signed-out sentence is said as text, in the slot's message line (slotSays), never as markup.
   assert.match(CONSOLE_SCRIPT, /function signedOut\(r\) \{[^]*?slotSays\(CONFIRM_SIGNED_OUT\);/);
   // The three sentences the script owns are set as text, in their elements, never as markup.
   for (const name of ["SIGN_IN_GAVE_UP.title", "SIGN_IN_GAVE_UP[kind]", "SIGN_OUT_UNCONFIRMED.title", "SIGN_OUT_UNCONFIRMED.body"]) assert.ok(CONSOLE_SCRIPT.includes(`.textContent = ${name};`), name);
-  assert.ok(CONSOLE_SCRIPT.includes("sayWithCode(staleBody, tokens ? STALE_TOKENS_BODY : staleData);"));
+  assert.ok(CONSOLE_SCRIPT.includes('sayWithCode(staleBody, tokens === "device" ? STALE_DEVICE_BODY : tokens ? STALE_TOKENS_BODY : staleData);'));
   assert.match(CONSOLE_SCRIPT, /function sayWithCode\(el, sentence\) \{[^]*?code\.textContent = parts\[i\];[^]*?\n {2}\}/, "the code run set as text, never markup");
 });
 

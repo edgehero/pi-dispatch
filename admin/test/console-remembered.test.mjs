@@ -1,0 +1,984 @@
+import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
+import * as fs from "node:fs";
+import { request } from "node:http";
+import { join } from "node:path";
+import { after, test } from "node:test";
+import { tempDir } from "./helpers/temp-dir.mjs";
+import { DEVICE_END_REASONS } from "@edgehero/pi-dispatch/console-devices";
+import { ENDED_OF_DEVICE_REASON, REMEMBER_FRESH_MS, makeDeviceTrust } from "../src/console/device-trust.mjs";
+import { ENDED_REASONS, STREAM_ENDS } from "../src/console/session-ends.mjs";
+import * as realPages from "../src/console/pages.mjs";
+import { DEVICE_STORE_UNUSABLE, createConsoleServer } from "../src/console/server.mjs";
+import * as cookies from "../src/console/sessions.mjs";
+import { makeSessionStore } from "../src/console/sessions.mjs";
+import { makeLoginLimiter } from "../src/console/guards.mjs";
+
+// Remembered devices through the real server, the real session store, the real cookies and the real device store (issue #849). A "restart" is a new server and a
+// new session store over the same folder, which is exactly what a console restart leaves behind.
+
+const T0 = Date.UTC(2026, 10, 8, 12, 0, 0);
+const HOUR = 3600 * 1000;
+const sha = (t) => createHash("sha256").update(t).digest("hex");
+const OPERATOR = `pdc_${"o".repeat(43)}`;
+const VIEWER = `pdc_${"v".repeat(43)}`;
+const AGENT = `pdc_${"a".repeat(43)}`;
+const SECOND = `pdc_${"s".repeat(43)}`;
+const baseFile = () => ({ version: 1, generation: 0, tokens: [
+  { name: "rob", role: "operator", sha256: sha(OPERATOR), createdAt: "2026-10-01T00:00:00.000Z" },
+  { name: "ann", role: "viewer", sha256: sha(VIEWER), createdAt: "2026-10-01T00:00:00.000Z" },
+  { name: "bot", role: "agent", sha256: sha(AGENT), createdAt: "2026-10-01T00:00:00.000Z" },
+  { name: "sam", role: "operator", sha256: sha(SECOND), createdAt: "2026-10-01T00:00:00.000Z" },
+] });
+
+const servers = [];
+after(() => { for (const s of servers) s.close(); });
+
+function world({ config = {}, consoleOrigin = null, hub = false, denyMax = undefined } = {}) {
+  const root = fs.realpathSync(tempDir("console-remembered-"));
+  const shared = { root, tokensPath: join(root, "console-tokens.json"), file: baseFile(), t: T0, consoleOrigin, rows: [], logs: [], bodies: [], ticketEnds: [], hubEnds: [], answer: null, fsOverride: fs };
+  const now = () => shared.t;
+  async function boot() {
+    const trust = makeDeviceTrust({ tokensPath: shared.tokensPath, fs: shared.fsOverride === fs ? fs : shared.fsOverride, now, log: (l) => shared.logs.push(l), platform: "linux", ...(denyMax === undefined ? {} : { denyMax }) });
+    const sessions = makeSessionStore({ now, idleMs: HOUR, maxMs: 12 * HOUR, deviceVerdict: (hash) => trust.verdictOf(hash) });
+    const server = createConsoleServer({
+      config: { allowedHosts: [], readOnly: false, maxMs: 12 * HOUR, idleMs: HOUR, listen: { kind: "tcp", host: "127.0.0.1", port: 0 }, pauseWindowsPath: join(root, "pw.json"), ...config },
+      now, sessions, devices: trust, cookies,
+      audit: { append: (row) => { if (shared.auditFails) throw new Error("disk full"); shared.rows.push(row); return { seq: shared.rows.length }; } },
+      tickets: { endSession(id) { shared.ticketEnds.push(id); }, issue: () => ({ ticket: "t" }), redeem: () => ({ refusal: "no" }) },
+      limiter: makeLoginLimiter({ now, burst: 1000, perMinute: 1000 }),
+      log: (l) => shared.logs.push(l),
+      readTokens: () => ({ file: shared.file }),
+      findToken: (file, presented) => file.tokens.find((e) => e.sha256 === sha(presented)) ?? null,
+      consumeLoginCode: (code) => shared.codes?.get(code) ?? { refusal: "unknown" },
+      writePauseWindows: () => ({ ok: true }),
+      pages: { ...realPages, loadPageData: async () => ({}), pagePanels: async (name) => [{ id: "p-main", html: `<p>${name}</p>` }], renderPage: async (name, ctx) => ({ status: 200, html: `<!doctype html><title>${name}</title><p>${ctx?.session?.name ?? ""}</p>` }) },
+      pageDeps: { fleet: { snapshot: async () => ({}) } },
+      // A hub that says, for each end, whether the request it came from had answered yet (`answer`, a sign-in's response, seen beside the handler).
+      hub: hub ? { endSession: (id, reason) => shared.hubEnds.push([id, reason, shared.answer?.writableFinished === true]), subscribe: () => () => {} } : null,
+      consoleOrigin: () => (shared.originUnreadable ? false : shared.consoleOrigin),
+    });
+    servers.push(server);
+    server.on("request", (req, res) => {
+      if (req.url === "/login") shared.answer = res;
+    });
+    await new Promise((r) => server.listen(0, "127.0.0.1", r));
+    const port = server.address().port;
+    const host = `127.0.0.1:${port}`;
+    const send = ({ method = "GET", path = "/", headers = {}, body = null }) => new Promise((resolve, reject) => {
+      const length = body !== null ? { "content-length": String(Buffer.byteLength(body)) } : {};
+      const req = request({ host: "127.0.0.1", port, method, path, headers: { host, ...length, ...headers }, setHost: false }, (res) => {
+        const chunks = [];
+        res.on("data", (c) => chunks.push(c));
+        res.on("end", () => { const text = Buffer.concat(chunks).toString("utf8"); shared.bodies.push(text); resolve({ status: res.statusCode, headers: res.headers, text, json: () => JSON.parse(text) }); });
+      });
+      req.on("error", reject);
+      if (body !== null) req.write(body);
+      req.end();
+    });
+    const writeHeaders = (extra = {}) => ({ origin: `${consoleOrigin ?? `http://${host}`}`, "sec-fetch-site": "same-origin", "content-type": "application/json", ...extra });
+    const post = (path, obj, extra = {}) => send({ method: "POST", path, headers: writeHeaders(extra), body: JSON.stringify(obj) });
+    /** A write whose body is held back until `release` is called: the race a slow client can run. */
+    const slowPost = (path, obj, extra = {}) => {
+      let release;
+      const done = new Promise((resolve, reject) => {
+        const body = JSON.stringify(obj);
+        const req = request({ host: "127.0.0.1", port, method: "POST", path, headers: { host, ...writeHeaders(extra), "content-length": String(Buffer.byteLength(body)) }, setHost: false }, (res) => {
+          const chunks = [];
+          res.on("data", (c) => chunks.push(c));
+          res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, text: Buffer.concat(chunks).toString("utf8") }));
+        });
+        req.on("error", reject);
+        req.flushHeaders();
+        release = () => { req.write(body); req.end(); };
+      });
+      return { release: () => release(), done };
+    };
+    return { send, post, slowPost, host, trust, sessions, server };
+  }
+  return { shared, boot, advance: (ms) => { shared.t += ms; } };
+}
+
+const pairsOf = (res) => (res.headers["set-cookie"] ?? []).map((c) => c.split(";")[0]);
+const deviceCookieOf = (res) => pairsOf(res).find((c) => c.startsWith("pdc_device_") && !c.endsWith("=")) ?? null;
+const sessionCookieOf = (res) => pairsOf(res).find((c) => c.startsWith("pdc_session=") && c !== "pdc_session=") ?? null;
+const whoami = (c, cookie) => c.send({ path: "/api/whoami", headers: { cookie } });
+async function remember(c, token = OPERATOR) {
+  const res = await c.post("/login", { token, remember: true });
+  assert.equal(res.status, 200, res.text);
+  return { res, cookie: deviceCookieOf(res) };
+}
+
+test("remembering at sign-in sets the device cookie and no session cookie, with the right attributes, and records it", async () => {
+  const w = world();
+  const c = await w.boot();
+  const { res, cookie } = await remember(c);
+  assert.ok(cookie, JSON.stringify(res.headers["set-cookie"]));
+  assert.equal(sessionCookieOf(res), null, "a remembered browser holds one credential");
+  assert.match(res.headers["set-cookie"][0], /^pdc_device_[0-9a-f]{10}=[A-Za-z0-9_-]{43}; HttpOnly; SameSite=Strict; Path=\/; Max-Age=34560000$/);
+  assert.equal(res.json().remembered, true);
+  assert.deepEqual(c.trust.list().devices.map((d) => [d.name, d.role]), [["rob", "operator"]]);
+  assert.deepEqual(w.shared.rows.map((r) => r.action), ["login", "device-remembered"]);
+  assert.equal((await whoami(c, cookie)).status, 200);
+});
+
+test("acceptance 1: past the idle and absolute limits a remembered browser is still in, and an ordinary one is not", async () => {
+  const w = world();
+  const c = await w.boot();
+  const { cookie } = await remember(c);
+  const ordinary = sessionCookieOf(await c.post("/login", { token: VIEWER }));
+  w.advance(13 * HOUR);
+  assert.equal((await whoami(c, cookie)).json().name, "rob");
+  const out = await whoami(c, ordinary);
+  assert.deepEqual([out.status, out.json().ended], [401, "idle"]);
+  w.advance(30 * 24 * HOUR);
+  assert.equal((await whoami(c, cookie)).status, 200);
+});
+
+test("acceptance 2: a restart keeps a remembered browser in, with one sign-in row, and an ordinary session does not survive", async () => {
+  const w = world();
+  const first = await w.boot();
+  const { cookie } = await remember(first);
+  const ordinary = sessionCookieOf(await first.post("/login", { token: VIEWER }));
+  const c = await w.boot();
+  const before = w.shared.rows.length;
+  assert.equal((await whoami(c, cookie)).json().name, "rob");
+  await whoami(c, cookie);
+  assert.deepEqual(w.shared.rows.slice(before).map((r) => r.action), ["login-device"], "one row per device per process");
+  assert.equal((await whoami(c, ordinary)).status, 401);
+});
+
+test("several requests arriving together after a restart share one session", async () => {
+  const w = world();
+  const { cookie } = await remember(await w.boot());
+  const c = await w.boot();
+  const before = w.shared.rows.length;
+  const all = await Promise.all(Array.from({ length: 12 }, () => whoami(c, cookie)));
+  assert.ok(all.every((r) => r.status === 200));
+  assert.equal(c.sessions.size(), 1);
+  assert.equal(w.shared.rows.slice(before).filter((r) => r.action === "login-device").length, 1);
+});
+
+test("an audit log that cannot be written refuses a restored sign-in", async () => {
+  const w = world();
+  const { cookie } = await remember(await w.boot());
+  const c = await w.boot();
+  w.shared.auditFails = true;
+  assert.equal((await whoami(c, cookie)).status, 500);
+  assert.equal(c.sessions.size(), 0);
+  w.shared.auditFails = false;
+  assert.equal((await whoami(c, cookie)).status, 200, "and it works again once the log does");
+});
+
+test("acceptance 4: sign-out ends the device for good, across a restart, and clears its cookie", async () => {
+  const w = world();
+  const c = await w.boot();
+  const { cookie } = await remember(c);
+  const out = await c.post("/logout", {}, { cookie });
+  assert.equal(out.status, 200);
+  const cleared = [].concat(out.headers["set-cookie"]);
+  assert.ok(cleared.some((h) => /^pdc_device_[0-9a-f]{10}=;/.test(h)));
+  assert.ok(w.shared.rows.some((r) => r.action === "device-ended" && r.outcome === "ok"));
+  const again = await whoami(await w.boot(), cookie);
+  assert.deepEqual([again.status, again.json().ended], [401, "elsewhere"]);
+});
+
+test("acceptance 4: end-all, revoke, rotate and a role change each end a remembered browser, with the true reason, after a restart too", async () => {
+  const cases = {
+    all: (f) => { f.generation += 1; },
+    revoked: (f) => { f.tokens = f.tokens.filter((e) => e.name !== "rob"); },
+    "rotated, so revoked": (f) => { f.tokens.find((e) => e.name === "rob").sha256 = "f".repeat(64); },
+    role: (f) => { f.tokens.find((e) => e.name === "rob").role = "viewer"; },
+  };
+  const expected = { all: "all", revoked: "revoked", "rotated, so revoked": "revoked", role: "role" };
+  for (const [name, change] of Object.entries(cases)) {
+    for (const restart of [false, true]) {
+      const w = world();
+      const first = await w.boot();
+      const { cookie } = await remember(first);
+      assert.equal((await whoami(first, cookie)).status, 200);
+      change(w.shared.file);
+      const c = restart ? await w.boot() : first;
+      const res = await whoami(c, cookie);
+      assert.deepEqual([res.status, res.json().ended], [401, expected[name]], `${name}, restart ${restart}`);
+      const later = await whoami(await w.boot(), cookie);
+      assert.deepEqual([later.status, later.json().ended], [401, expected[name]], `${name}: still ended, with its reason, after a further restart`);
+    }
+  }
+});
+
+test("removing a device ends a live session, and the page is told why, with the dead cookie cleared", async () => {
+  const w = world();
+  const c = await w.boot();
+  const { cookie } = await remember(c);
+  assert.equal((await whoami(c, cookie)).status, 200);
+  const [{ hash }] = c.trust.list().devices;
+  c.trust.end(hash, "removed");
+  const api = await whoami(c, cookie);
+  assert.deepEqual([api.status, api.json().ended, api.headers["set-cookie"]], [401, "device", undefined], "no Set-Cookie on an API refusal");
+  const page = await c.send({ path: "/runs", headers: { cookie } });
+  assert.equal(page.status, 303);
+  assert.equal(page.headers.location, "/login?ended=device&next=%2Fruns");
+  assert.ok(page.headers["set-cookie"].some((h) => /^pdc_device_[0-9a-f]{10}=;/.test(h)));
+});
+
+test("a store that cannot be read signs nobody out: the cookie stays, the page says so, a program gets a 503, and token sign-in still works", async () => {
+  const w = world();
+  const c = await w.boot();
+  const { cookie } = await remember(c);
+  const [{ hash }] = c.trust.list().devices;
+  const path = join(w.shared.root, "console-devices", `${hash}.json`);
+  const bytes = fs.readFileSync(path, "utf8");
+  fs.writeFileSync(path, "{corrupt");
+  const fresh = await w.boot();
+  const api = await whoami(fresh, cookie);
+  assert.deepEqual([api.status, api.json().ended, api.json().error], [503, "device-store", DEVICE_STORE_UNUSABLE]);
+  const page = await fresh.send({ path: "/runs", headers: { cookie } });
+  assert.deepEqual([page.status, page.headers.location, page.headers["set-cookie"]], [303, "/login?ended=device-store&next=%2Fruns", undefined], "nothing cleared");
+  assert.equal((await fresh.post("/login", { token: VIEWER })).status, 200);
+  fs.writeFileSync(path, bytes, { mode: 0o600 });
+  assert.equal((await whoami(fresh, cookie)).status, 200, "and it comes back whole when the store does");
+});
+
+test("a dead device cookie does not outrank a live session: signing in again really does sign you in", async () => {
+  const w = world();
+  const c = await w.boot();
+  const { cookie } = await remember(c);
+  w.shared.file.generation += 1;
+  await whoami(c, cookie);
+  const signedIn = await c.post("/login", { token: OPERATOR }, { cookie });
+  const session = sessionCookieOf(signedIn);
+  assert.ok(session);
+  assert.ok(signedIn.headers["set-cookie"].some((h) => /^pdc_device_[0-9a-f]{10}=;/.test(h)), "and the sign-in clears the dead one");
+  assert.equal((await whoami(c, `${cookie}; ${session}`)).json().name, "rob", "even for a request that still carries it");
+});
+
+test("signing in again as the same person on a remembered browser keeps the device", async () => {
+  const w = world();
+  const c = await w.boot();
+  const { cookie } = await remember(c);
+  const again = await c.post("/login", { token: OPERATOR }, { cookie });
+  assert.deepEqual([again.status, again.json().remembered, again.headers["set-cookie"]], [200, true, undefined]);
+  assert.equal(c.trust.list().devices.filter((d) => d.ended === undefined).length, 1);
+  assert.equal((await whoami(c, cookie)).status, 200);
+  assert.equal(c.sessions.size(), 1);
+});
+
+test("someone else signing in on a remembered browser ends that device, so a later sign-out cannot land on the wrong console", async () => {
+  const w = world();
+  const c = await w.boot();
+  const { cookie } = await remember(c);
+  const other = await c.post("/login", { token: SECOND }, { cookie });
+  assert.equal(other.json().deviceEnded, true);
+  assert.ok(other.headers["set-cookie"].some((h) => /^pdc_device_[0-9a-f]{10}=;/.test(h)));
+  assert.equal(c.trust.list().devices[0].ended.reason, "replaced");
+  assert.equal((await whoami(c, sessionCookieOf(other))).json().name, "sam");
+  assert.equal((await whoami(c, cookie)).status, 401);
+});
+
+/** A store that reads but cannot be written: a full disk, as the deny-list exists for. */
+const unwritable = () => ({ ...fs, renameSync: () => { throw Object.assign(new Error("no space"), { code: "ENOSPC" }); } });
+
+test("a sign-out the store cannot write still signs out, says so, and refuses the device in this process", async () => {
+  const w = world();
+  const { cookie } = await remember(await w.boot());
+  w.shared.fsOverride = unwritable();
+  const c = await w.boot();
+  const [{ hash }] = c.trust.list().devices;
+  const out = await c.post("/logout", {}, { cookie });
+  assert.deepEqual([out.status, out.json().device], [200, "unerased"]);
+  assert.ok(w.shared.rows.some((r) => r.action === "device-ended" && r.outcome === "failed"));
+  assert.equal((await whoami(c, cookie)).status, 401, "refused here, though the record is intact");
+  assert.equal(c.trust.read(hash).denied, true);
+});
+
+test("an agent cannot be remembered, by sign-in or afterwards", async () => {
+  const w = world();
+  const c = await w.boot();
+  const res = await c.post("/login", { token: AGENT, remember: true });
+  assert.equal(res.status, 403);
+  assert.ok(w.shared.rows.some((r) => r.action === "login-failed"));
+  assert.equal(c.trust.list().devices.length, 0);
+  const session = sessionCookieOf(await c.post("/login", { token: AGENT }));
+  const up = await c.post("/api/device/remember", {}, { cookie: session });
+  assert.equal(up.status, 403);
+  assert.equal(c.trust.list().devices.length, 0);
+});
+
+test("plain HTTP across a network is refused; an enrolled HTTPS origin is allowed and gets Secure", async () => {
+  const plain = world({ config: { listen: { kind: "tcp", host: "0.0.0.0", port: 0 }, allowedHosts: ["127.0.0.1"] } });
+  const p = await plain.boot();
+  assert.equal((await p.post("/login", { token: OPERATOR, remember: true })).status, 403);
+  assert.equal(p.trust.list().devices.length, 0);
+  const https = world({ config: { listen: { kind: "tcp", host: "0.0.0.0", port: 0 }, allowedHosts: ["127.0.0.1", "console.example"] }, consoleOrigin: "https://console.example" });
+  const h = await https.boot();
+  const res = await h.post("/login", { token: OPERATOR, remember: true }, { host: "console.example" });
+  assert.equal(res.status, 200, res.text);
+  assert.match(res.headers["set-cookie"][0], /; Secure$/);
+});
+
+test("the store's real path never decides a Secure cookie by a Host header a client could forge", async () => {
+  const w = world({ config: { listen: { kind: "tcp", host: "0.0.0.0", port: 0 }, allowedHosts: ["127.0.0.1"] } });
+  const c = await w.boot();
+  assert.equal((await c.post("/login", { token: OPERATOR, remember: true }, { host: "localhost" })).status, 403, "a public bind, whatever Host says");
+});
+
+test("remembering after signing in: in place, soon after, once, and never for a stale or invited sign-in", async () => {
+  const w = world();
+  const c = await w.boot();
+  const first = sessionCookieOf(await c.post("/login", { token: OPERATOR }));
+  const [, id] = first.split("=");
+  const up = await c.post("/api/device/remember", {}, { cookie: first });
+  assert.equal(up.status, 200, up.text);
+  const device = deviceCookieOf(up);
+  assert.ok(device);
+  assert.ok(up.headers["set-cookie"].some((h) => h.startsWith("pdc_session=;")), "the ordinary cookie goes in the same answer");
+  assert.equal(c.sessions.sessionOfDevice(c.trust.list().devices[0].hash), id, "the same session, so its tickets and streams carry on");
+  assert.equal((await whoami(c, device)).status, 200);
+  assert.deepEqual([(await c.post("/api/device/remember", {}, { cookie: device })).status, c.trust.list().devices.length], [200, 1], "asked twice is one device");
+  const stale = sessionCookieOf(await c.post("/login", { token: VIEWER }));
+  w.advance(REMEMBER_FRESH_MS + 1);
+  const late = await c.post("/api/device/remember", {}, { cookie: stale });
+  assert.equal(late.status, 403);
+  assert.match(late.text, /too old/);
+  w.shared.codes = new Map([["i".repeat(43), { name: "ann", binding: { createdAt: "2026-10-01T00:00:00.000Z", generation: 0, role: "viewer", sha256: sha(VIEWER) } }]]);
+  const invited = sessionCookieOf(await c.post("/login/code", { code: "i".repeat(43) }));
+  assert.ok(invited);
+  const refused = await c.post("/api/device/remember", {}, { cookie: invited });
+  assert.equal(refused.status, 403);
+  assert.match(refused.text, /invitation/);
+});
+
+test("the remember route keeps the write guards: another origin and a cross-site request are refused", async () => {
+  const w = world();
+  const c = await w.boot();
+  const cookie = sessionCookieOf(await c.post("/login", { token: OPERATOR }));
+  for (const extra of [{ origin: "http://evil.example" }, { "sec-fetch-site": "cross-site" }]) {
+    assert.equal((await c.post("/api/device/remember", {}, { cookie, ...extra })).status, 403, JSON.stringify(extra));
+  }
+  assert.equal(c.trust.list().devices.length, 0);
+  assert.equal((await c.send({ method: "POST", path: "/api/device/remember", headers: { ...{ origin: `http://${c.host}`, "sec-fetch-site": "same-origin", "content-type": "text/plain" }, cookie }, body: "{}" })).status, 403);
+});
+
+/** Make the device's last use two days old, so its next use moves it and re-sets the cookie. */
+function ageDevice(w, c) {
+  const [{ hash }] = c.trust.list().devices;
+  const old = (w.shared.t - 2 * 24 * HOUR) / 1000;
+  fs.utimesSync(join(w.shared.root, "console-devices", `${hash}.json`), old, old);
+}
+
+test("the cookie is re-set at most daily, with the attributes it was set with", async () => {
+  const w = world();
+  const c = await w.boot();
+  const { cookie } = await remember(c);
+  assert.equal((await whoami(c, cookie)).headers["set-cookie"], undefined, "not yet");
+  ageDevice(w, c);
+  const renewed = await whoami(c, cookie);
+  assert.match(renewed.headers["set-cookie"][0], /^pdc_device_[0-9a-f]{10}=[A-Za-z0-9_-]{43}; HttpOnly; SameSite=Strict; Path=\/; Max-Age=34560000$/);
+  assert.equal((await whoami(c, cookie)).headers["set-cookie"], undefined, "and then not again until tomorrow");
+});
+
+test("under an enrolled HTTPS origin the re-set cookie keeps Secure", async () => {
+  const w = world({ config: { listen: { kind: "tcp", host: "0.0.0.0", port: 0 }, allowedHosts: ["127.0.0.1", "console.example"] }, consoleOrigin: "https://console.example" });
+  const c = await w.boot();
+  const res = await c.post("/login", { token: OPERATOR, remember: true }, { host: "console.example" });
+  const cookie = deviceCookieOf(res);
+  ageDevice(w, c);
+  const renewed = await c.send({ path: "/api/whoami", headers: { cookie, host: "console.example" } });
+  assert.equal(renewed.status, 200, renewed.text);
+  assert.match(renewed.headers["set-cookie"][0], /; Max-Age=34560000; Secure$/);
+});
+
+test("the cookie is not re-set when the console's origin cannot be read, nor on a write, nor on a stream", async () => {
+  const unreadable = world();
+  const u = await unreadable.boot();
+  const { cookie } = await remember(u);
+  ageDevice(unreadable, u);
+  unreadable.shared.originUnreadable = true;
+  const res = await whoami(u, cookie);
+  assert.deepEqual([res.status, res.headers["set-cookie"]], [200, undefined], "a cookie whose Secure cannot be told is not sent at all");
+
+  const writes = world();
+  const w = await writes.boot();
+  const device = (await remember(w)).cookie;
+  ageDevice(writes, w);
+  const posted = await w.post("/api/device/remember", {}, { cookie: device });
+  assert.deepEqual([posted.status, posted.headers["set-cookie"]], [200, undefined], "a write");
+
+  const streams = world();
+  const s = await streams.boot();
+  const held = (await remember(s)).cookie;
+  ageDevice(streams, s);
+  const head = await new Promise((resolve, reject) => {
+    const req = request({ host: "127.0.0.1", port: Number(s.host.split(":")[1]), path: "/api/events?page=overview", headers: { host: s.host, cookie: held }, setHost: false }, (r) => {
+      resolve({ status: r.statusCode, headers: r.headers });
+      req.destroy();
+    });
+    req.on("error", reject);
+    req.end();
+  });
+  assert.equal(head.headers["set-cookie"], undefined, `a stream (status ${head.status})`);
+});
+
+test("the signed-in bar of a 404 reads a remembered device without signing it in", async () => {
+  const w = world();
+  const { cookie } = await remember(await w.boot());
+  const c = await w.boot();
+  const before = w.shared.rows.length;
+  const page = await c.send({ path: "/nowhere", headers: { cookie, accept: "text/html" } });
+  assert.equal(page.status, 404);
+  assert.match(page.text, /rob/, "the bar names the remembered person");
+  assert.deepEqual(w.shared.rows.slice(before), [], "no row");
+  assert.equal(c.sessions.size(), 0, "no session");
+});
+
+test("the device secret reaches no page and no log", async () => {
+  const w = world();
+  const c = await w.boot();
+  const { cookie } = await remember(c);
+  const secret = cookie.split("=")[1];
+  await whoami(c, cookie);
+  await c.send({ path: "/runs", headers: { cookie } });
+  await c.post("/logout", {}, { cookie });
+  for (const text of [...w.shared.bodies, ...w.shared.logs, JSON.stringify(w.shared.rows)]) assert.ok(!text.includes(secret));
+});
+
+// Round 2 of the review (issue #849).
+
+const tick = () => new Promise((r) => setTimeout(r, 30));
+
+test("a remember whose body arrives after end-all or a sign-out is refused, and leaves no device", async () => {
+  for (const ending of ["end-all", "sign-out"]) {
+    const w = world();
+    const c = await w.boot();
+    const session = sessionCookieOf(await c.post("/login", { token: OPERATOR }));
+    const slow = c.slowPost("/api/device/remember", {}, { cookie: session });
+    await tick();
+    if (ending === "end-all") w.shared.file.generation += 1;
+    else assert.equal((await c.post("/logout", {}, { cookie: session })).status, 200);
+    slow.release();
+    const res = await slow.done;
+    assert.equal(res.status, 401, `${ending}: ${res.text}`);
+    assert.equal(c.trust.list().devices.length, 0, ending);
+  }
+});
+
+test("two tabs pressing Remember together leave one device, not an orphan that outlives sign-out", async () => {
+  const w = world();
+  const c = await w.boot();
+  const session = sessionCookieOf(await c.post("/login", { token: OPERATOR }));
+  const a = c.slowPost("/api/device/remember", {}, { cookie: session });
+  const b = c.slowPost("/api/device/remember", {}, { cookie: session });
+  await tick();
+  a.release();
+  b.release();
+  const [ra, rb] = await Promise.all([a.done, b.done]);
+  assert.deepEqual([ra.status, rb.status], [200, 200]);
+  assert.equal(c.trust.list().devices.filter((d) => d.ended === undefined).length, 1);
+});
+
+test("the pdc_session a browser held before it was remembered no longer signs in, and signing out with it ends the device", async () => {
+  const w = world();
+  const c = await w.boot();
+  const session = sessionCookieOf(await c.post("/login", { token: OPERATOR }));
+  const device = deviceCookieOf(await c.post("/api/device/remember", {}, { cookie: session }));
+  assert.equal((await whoami(c, session)).status, 401, "a copy of the old cookie");
+  w.advance(30 * 24 * HOUR);
+  assert.equal((await whoami(c, session)).status, 401, "and not later either");
+  assert.equal((await whoami(c, device)).status, 200, "while the device itself is fine");
+  assert.equal((await c.post("/logout", {}, { cookie: session })).status, 200);
+  assert.equal((await whoami(c, device)).status, 401, "signing out with the old cookie ended the device");
+  const row = w.shared.rows.find((r) => r.action === "device-ended");
+  assert.deepEqual([row?.outcome, row?.reason], ["ok", "signed out"]);
+});
+
+test("a refused sign-in by someone else leaves the browser's remembered person as they were", async () => {
+  const w = world();
+  const c = await w.boot();
+  const { cookie } = await remember(c);
+  w.shared.auditFails = true;
+  assert.equal((await c.post("/login", { token: SECOND }, { cookie })).status, 500);
+  w.shared.auditFails = false;
+  assert.equal((await whoami(c, cookie)).json().name, "rob");
+  assert.equal(c.trust.list().devices[0].ended, undefined);
+});
+
+test("the same person signing in again after their token changed ends the old device with the true reason", async () => {
+  const w = world();
+  const c = await w.boot();
+  const { cookie } = await remember(c);
+  w.shared.file.generation += 1;
+  const again = await c.post("/login", { token: OPERATOR }, { cookie });
+  assert.equal(again.status, 200);
+  assert.equal(c.trust.list().devices[0].ended.reason, "all");
+});
+
+test("a same-person sign-in that cannot be audited leaves no session to be restored later without a row", async () => {
+  const w = world();
+  const { cookie } = await remember(await w.boot());
+  const c = await w.boot();
+  w.shared.auditFails = true;
+  assert.equal((await c.post("/login", { token: OPERATOR }, { cookie })).status, 500);
+  assert.equal(c.sessions.size(), 0);
+  w.shared.auditFails = false;
+  const before = w.shared.rows.length;
+  assert.equal((await whoami(c, cookie)).status, 200);
+  assert.deepEqual(w.shared.rows.slice(before).map((r) => r.action), ["login-device"], "the restore that follows has its row");
+});
+
+test("a loopback console reached under another name over plain HTTP is not remembered", async () => {
+  const w = world({ config: { allowedHosts: ["console.lan"] } });
+  const c = await w.boot();
+  const res = await c.send({ method: "POST", path: "/login", headers: { host: "console.lan", origin: "http://console.lan", "sec-fetch-site": "same-origin", "content-type": "application/json" }, body: JSON.stringify({ token: OPERATOR, remember: true }) });
+  assert.equal(res.status, 403, res.text);
+  assert.equal(c.trust.list().devices.length, 0);
+});
+
+test("a record unused for longer than any browser keeps the cookie is a copy, and is ended", async () => {
+  const w = world();
+  const c = await w.boot();
+  const { cookie } = await remember(c);
+  const [{ hash }] = c.trust.list().devices;
+  w.advance(401 * 24 * HOUR);
+  const old = (w.shared.t - 401 * 24 * HOUR) / 1000;
+  fs.utimesSync(join(w.shared.root, "console-devices", `${hash}.json`), old, old);
+  const res = await whoami(c, cookie);
+  assert.deepEqual([res.status, res.json().ended], [401, "device"]);
+  assert.equal(c.trust.list().devices[0].ended.reason, "removed");
+});
+
+test("with no device folder a presented cookie is simply no device: signed out and cleared, never the store alarm", async () => {
+  const w = world();
+  const c = await w.boot();
+  const planted = `${c.trust.cookieName}=${"p".repeat(43)}`;
+  const api = await whoami(c, planted);
+  assert.deepEqual([api.status, api.json().ended], [401, "device"]);
+  const page = await c.send({ path: "/runs", headers: { cookie: planted } });
+  assert.equal(page.headers.location, "/login?ended=device&next=%2Fruns");
+  assert.ok(page.headers["set-cookie"].some((h) => h.startsWith(`${c.trust.cookieName}=;`)));
+});
+
+test("a sign-out the store cannot write names the device and the command to finish it in the log", async () => {
+  const w = world();
+  const { cookie } = await remember(await w.boot());
+  w.shared.fsOverride = unwritable();
+  const c = await w.boot();
+  const [{ id }] = c.trust.list().devices;
+  await c.post("/logout", {}, { cookie });
+  assert.ok(w.shared.logs.some((l) => l.includes(id) && l.includes(`device revoke --id ${id}`)), w.shared.logs.join(" | "));
+});
+
+// Round 3 of the review (issue #849).
+
+test("a junk device cookie beside the old pdc_session does not reach the device's session", async () => {
+  const w = world();
+  const c = await w.boot();
+  const session = sessionCookieOf(await c.post("/login", { token: OPERATOR }));
+  await c.post("/api/device/remember", {}, { cookie: session });
+  const junk = `${c.trust.cookieName}=${"j".repeat(43)}`;
+  assert.equal((await whoami(c, `${session}; ${junk}`)).status, 401);
+});
+
+test("a unix-socket console is remembered only through a loopback name, as a tunnel arrives", async () => {
+  const w = world({ config: { listen: { kind: "unix", path: "/tmp/x.sock" }, allowedHosts: ["console.lan"] } });
+  const c = await w.boot();
+  const proxied = await c.send({ method: "POST", path: "/login", headers: { host: "console.lan", origin: "http://console.lan", "sec-fetch-site": "same-origin", "content-type": "application/json" }, body: JSON.stringify({ token: OPERATOR, remember: true }) });
+  assert.equal(proxied.status, 403, proxied.text);
+  const tunnel = await c.send({ method: "POST", path: "/login", headers: { host: "localhost:4790", origin: "http://localhost:4790", "sec-fetch-site": "same-origin", "content-type": "application/json" }, body: JSON.stringify({ token: OPERATOR, remember: true }) });
+  assert.equal(tunnel.status, 200, tunnel.text);
+});
+
+test("one sign-out writes one row per device", async () => {
+  const w = world();
+  const c = await w.boot();
+  const { cookie } = await remember(c);
+  await whoami(c, cookie);
+  const before = w.shared.rows.length;
+  await c.post("/logout", {}, { cookie });
+  assert.equal(w.shared.rows.slice(before).filter((r) => r.action === "device-ended").length, 1);
+});
+
+test("signing in again on a browser whose record is past 400 days replaces it rather than keeping a dead one", async () => {
+  const w = world();
+  const c = await w.boot();
+  const { cookie } = await remember(c);
+  const [{ hash }] = c.trust.list().devices;
+  w.advance(401 * 24 * HOUR);
+  const old = (w.shared.t - 401 * 24 * HOUR) / 1000;
+  fs.utimesSync(join(w.shared.root, "console-devices", `${hash}.json`), old, old);
+  const before = w.shared.rows.length;
+  const again = await c.post("/login", { token: OPERATOR }, { cookie });
+  assert.equal(again.json().remembered, undefined, "not answered as remembered");
+  assert.equal((await whoami(c, sessionCookieOf(again))).status, 200, "and the new sign-in works on the next request");
+  assert.equal(c.trust.list().devices[0].ended.reason, "removed", "the same person's own record, ended as unused, not as replaced");
+  assert.equal(w.shared.rows.slice(before).find((r) => r.action === "device-ended")?.reason, "unused for longer than any browser keeps the cookie");
+});
+
+test("an end met at a device's next use is in the audit log, with why", async () => {
+  const w = world();
+  const c = await w.boot();
+  const { cookie } = await remember(c);
+  w.shared.file.generation += 1;
+  await whoami(c, cookie);
+  const row = w.shared.rows.find((r) => r.action === "device-ended");
+  assert.deepEqual([row?.outcome, row?.reason], ["ok", "its token entry no longer matches"]);
+});
+
+// Round 4 of the review (issue #849): guarantees the earlier tests did not hold.
+
+test("sign-out with both the tokens file and the device store unreadable still signs out, and says the device was not erased", async (t) => {
+  // Twice: with the device's session held in this process, which proves the record real here, and after a restart, when nothing does.
+  for (const restarted of [false, true]) {
+    const w = world();
+    const first = await w.boot();
+    const { cookie } = await remember(first);
+    const [{ hash }] = first.trust.list().devices;
+    const c = restarted ? await w.boot() : first;
+    const file = w.shared.file;
+    const dir = join(w.shared.root, "console-devices");
+    w.shared.file = null;
+    fs.chmodSync(dir, 0o500);
+    t.after(() => fs.chmodSync(dir, 0o700));
+    const out = await c.post("/logout", {}, { cookie });
+    assert.deepEqual([out.status, out.json().device], [200, "unerased"]);
+    const cleared = [].concat(out.headers["set-cookie"]);
+    assert.ok(cleared.some((h) => /^pdc_device_[0-9a-f]{10}=;/.test(h)), "the device cookie cleared");
+    assert.ok(w.shared.rows.some((r) => r.action === "device-ended" && r.outcome === "failed"));
+    w.shared.file = file;
+    const after = await whoami(c, cookie);
+    if (restarted) {
+      assert.deepEqual([after.status, after.json().ended], [503, "device-store"], "a copy signs nobody in while the store cannot be read");
+      assert.notEqual(c.trust.read(hash).denied, true, "and a cookie alone, with no session behind it here, adds nothing to the deny-list");
+    } else {
+      assert.deepEqual([after.status, after.json().ended], [401, "device"], "refused in this process, whatever the record says later");
+    }
+    fs.chmodSync(dir, 0o700);
+  }
+});
+
+test("a record that cannot be read does not hide a revocation the tokens file already proves", async () => {
+  const w = world();
+  const c = await w.boot();
+  const { cookie } = await remember(c);
+  assert.equal((await whoami(c, cookie)).status, 200);
+  const [{ hash }] = c.trust.list().devices;
+  w.shared.file.tokens = w.shared.file.tokens.filter((e) => e.name !== "rob");
+  fs.writeFileSync(join(w.shared.root, "console-devices", `${hash}.json`), "{corrupt");
+  const res = await whoami(c, cookie);
+  assert.deepEqual([res.status, res.json().ended], [401, "revoked"]);
+  assert.equal(c.sessions.size(), 0);
+});
+
+test("an unjudged device gives way to a live ordinary session in the same browser", async () => {
+  const w = world();
+  const c = await w.boot();
+  const { cookie } = await remember(c);
+  const [{ hash }] = c.trust.list().devices;
+  fs.writeFileSync(join(w.shared.root, "console-devices", `${hash}.json`), "{corrupt");
+  const fresh = await w.boot();
+  const session = sessionCookieOf(await fresh.post("/login", { token: SECOND }));
+  const res = await whoami(fresh, `${cookie}; ${session}`);
+  assert.deepEqual([res.status, res.json().name], [200, "sam"]);
+});
+
+test("a device found dead loses its session here, with its tickets", async () => {
+  const w = world();
+  const c = await w.boot();
+  const { cookie } = await remember(c);
+  assert.equal((await whoami(c, cookie)).status, 200);
+  const [{ hash }] = c.trust.list().devices;
+  const id = c.sessions.sessionOfDevice(hash);
+  c.trust.end(hash, "removed");
+  assert.equal((await whoami(c, cookie)).status, 401);
+  assert.equal(c.sessions.size(), 0);
+  assert.ok(w.shared.ticketEnds.includes(id));
+});
+
+test("sign-out by device cookie and a sign-in by someone else each end the device's session in this process", async () => {
+  for (const ending of ["sign-out", "someone else"]) {
+    const w = world();
+    const c = await w.boot();
+    const { cookie } = await remember(c);
+    assert.equal((await whoami(c, cookie)).status, 200);
+    const [{ hash }] = c.trust.list().devices;
+    const id = c.sessions.sessionOfDevice(hash);
+    if (ending === "sign-out") await c.post("/logout", {}, { cookie });
+    else await c.post("/login", { token: SECOND }, { cookie });
+    assert.equal(c.sessions.sessionOfDevice(hash) ?? null, null, ending);
+    assert.ok(w.shared.ticketEnds.includes(id), ending);
+  }
+});
+
+test("a sign-out after a restart is that person's, on the record, not an anonymous one", async () => {
+  const w = world();
+  const { cookie } = await remember(await w.boot());
+  const c = await w.boot();
+  const before = w.shared.rows.length;
+  await c.post("/logout", {}, { cookie });
+  const rows = w.shared.rows.slice(before);
+  assert.deepEqual(rows.map((r) => [r.action, r.actor.name]), [["device-ended", "rob"], ["logout", "rob"]]);
+});
+
+test("the remember route refuses plain HTTP across a network, and sets Secure under an enrolled HTTPS origin", async () => {
+  const plain = world({ config: { listen: { kind: "tcp", host: "0.0.0.0", port: 0 }, allowedHosts: ["127.0.0.1"] } });
+  const p = await plain.boot();
+  const ordinary = sessionCookieOf(await p.post("/login", { token: OPERATOR }));
+  const refused = await p.post("/api/device/remember", {}, { cookie: ordinary });
+  assert.equal(refused.status, 403);
+  assert.match(refused.text, /plain HTTP/);
+  assert.equal(p.trust.list().devices.length, 0);
+  const https = world({ config: { listen: { kind: "tcp", host: "0.0.0.0", port: 0 }, allowedHosts: ["127.0.0.1", "console.example"] }, consoleOrigin: "https://console.example" });
+  const h = await https.boot();
+  const session = sessionCookieOf(await h.post("/login", { token: OPERATOR }, { host: "console.example" }));
+  const up = await h.post("/api/device/remember", {}, { cookie: session, host: "console.example" });
+  assert.equal(up.status, 200, up.text);
+  assert.match(up.headers["set-cookie"][0], /; Secure$/);
+});
+
+test("the remember route stops when its audit row cannot be written, and leaves no device", async () => {
+  const w = world();
+  const c = await w.boot();
+  const session = sessionCookieOf(await c.post("/login", { token: OPERATOR }));
+  w.shared.auditFails = true;
+  const res = await c.post("/api/device/remember", {}, { cookie: session });
+  assert.equal(res.status, 503);
+  assert.equal(c.trust.list().devices.length, 0);
+  w.shared.auditFails = false;
+  assert.equal((await whoami(c, session)).status, 200, "and the ordinary session carries on");
+});
+
+test("a device someone else replaced, whose end the store could not write, is on the record as failed", async () => {
+  const w = world();
+  const { cookie } = await remember(await w.boot());
+  w.shared.fsOverride = unwritable();
+  const c = await w.boot();
+  await c.post("/login", { token: SECOND }, { cookie });
+  const row = w.shared.rows.find((r) => r.action === "device-ended");
+  assert.deepEqual([row?.outcome, row?.actor.name], ["failed", "rob"]);
+});
+
+test("remembering with a new token ends the devices of the token it replaced, as revoked", async () => {
+  const w = world();
+  const c = await w.boot();
+  await remember(c);
+  w.advance(24 * HOUR);
+  const NEW = `pdc_${"n".repeat(43)}`;
+  const rob = w.shared.file.tokens.find((e) => e.name === "rob");
+  rob.sha256 = sha(NEW);
+  rob.createdAt = new Date(w.shared.t - HOUR).toISOString();
+  await remember(c, NEW);
+  const devices = c.trust.list().devices;
+  assert.equal(devices.length, 2);
+  assert.deepEqual(devices.map((d) => d.ended?.reason ?? "live").sort(), ["live", "revoked"]);
+});
+
+test("ENDED_OF_DEVICE_REASON has a sign-in page word for every reason the store writes, and only those", () => {
+  // A hand-written table over the worker's list: a reason added there without a word here would reach the page as the bare `device`.
+  assert.deepEqual(Object.keys(ENDED_OF_DEVICE_REASON).sort(), [...DEVICE_END_REASONS].sort());
+  // Each word ends a page and a stream alike, so it must be in both lists: `restart` or `device-store` would pass the first alone.
+  for (const word of Object.values(ENDED_OF_DEVICE_REASON)) assert.ok(ENDED_REASONS.includes(word) && STREAM_ENDS.includes(word), word);
+});
+
+// Round 4 of the adversarial review (issue #849).
+
+test("a sign-out over a record that cannot be read keeps a copy out once the record reads again, in this process", async () => {
+  const w = world();
+  const c = await w.boot();
+  const { cookie } = await remember(c);
+  const [{ hash, id }] = c.trust.list().devices;
+  const path = join(w.shared.root, "console-devices", `${hash}.json`);
+  const bytes = fs.readFileSync(path, "utf8");
+  fs.writeFileSync(path, "{corrupt");
+  const out = await c.post("/logout", {}, { cookie });
+  assert.deepEqual([out.status, out.json().device], [200, "unerased"]);
+  fs.writeFileSync(path, bytes, { mode: 0o600 });
+  const copy = await whoami(c, cookie);
+  assert.deepEqual([copy.status, copy.json().ended], [401, "device"]);
+  assert.ok(w.shared.logs.some((l) => l.includes(`device revoke --id ${id}`)), w.shared.logs.join(" | "));
+});
+
+test("a renewal never drops Secure: once the HTTPS enrollment is gone, a cookie made under it is left to age", async () => {
+  const w = world({ config: { listen: { kind: "tcp", host: "0.0.0.0", port: 0 }, allowedHosts: ["127.0.0.1", "console.example"] }, consoleOrigin: "https://console.example" });
+  const c = await w.boot();
+  const cookie = deviceCookieOf(await c.post("/login", { token: OPERATOR, remember: true }, { host: "console.example" }));
+  ageDevice(w, c);
+  w.shared.consoleOrigin = null;
+  const res = await c.send({ path: "/api/whoami", headers: { cookie, host: "console.example" } });
+  assert.deepEqual([res.status, res.headers["set-cookie"]], [200, undefined]);
+});
+
+test("a remembered session whose record cannot be read keeps its tickets when its old pdc_session comes back", async () => {
+  const w = world();
+  const c = await w.boot();
+  const session = sessionCookieOf(await c.post("/login", { token: OPERATOR }));
+  const [, id] = session.split("=");
+  const device = deviceCookieOf(await c.post("/api/device/remember", {}, { cookie: session }));
+  const [{ hash }] = c.trust.list().devices;
+  const path = join(w.shared.root, "console-devices", `${hash}.json`);
+  const bytes = fs.readFileSync(path, "utf8");
+  fs.writeFileSync(path, "{corrupt");
+  assert.equal((await whoami(c, session)).status, 401);
+  assert.ok(!w.shared.ticketEnds.includes(id), "its pending confirms are not cancelled by an old cookie");
+  assert.equal(c.sessions.size(), 1);
+  fs.writeFileSync(path, bytes, { mode: 0o600 });
+  assert.equal((await whoami(c, device)).status, 200);
+});
+
+test("a stream or a write on the day's first use leaves the cookie's re-set for the next read", async () => {
+  for (const first of ["stream", "write"]) {
+    const w = world();
+    const c = await w.boot();
+    const { cookie } = await remember(c);
+    ageDevice(w, c);
+    if (first === "write") {
+      assert.equal((await c.post("/api/device/remember", {}, { cookie })).status, 200);
+    } else {
+      await new Promise((resolve, reject) => {
+        const req = request({ host: "127.0.0.1", port: Number(c.host.split(":")[1]), path: "/api/events?page=overview", headers: { host: c.host, cookie }, setHost: false }, (r) => {
+          resolve();
+          req.destroy();
+        });
+        req.on("error", reject);
+        req.end();
+      });
+    }
+    const page = await whoami(c, cookie);
+    assert.match(page.headers["set-cookie"]?.[0] ?? "", /^pdc_device_[0-9a-f]{10}=/, `${first} first, then a read: renewed`);
+  }
+});
+
+test("a failed end over an unreadable record names the person signing out, so no anonymous flood can keep it out of the log", async () => {
+  const w = world();
+  const c = await w.boot();
+  const { cookie } = await remember(c);
+  const [{ hash }] = c.trust.list().devices;
+  fs.writeFileSync(join(w.shared.root, "console-devices", `${hash}.json`), "{corrupt");
+  const before = w.shared.rows.length;
+  await c.post("/logout", {}, { cookie });
+  const rows = w.shared.rows.slice(before);
+  const ended = rows.filter((r) => r.action === "device-ended");
+  assert.deepEqual(ended.map((r) => [r.actor.name, r.outcome]), [["rob", "failed"]]);
+  assert.deepEqual(rows.filter((r) => r.action === "logout").map((r) => r.actor.name), ["rob"]);
+});
+
+// The walkthrough's findings (issue #849).
+
+test("signing out of a remembered console leaves another loopback console's ordinary session alone", async () => {
+  const a = world();
+  const ca = await a.boot();
+  const { cookie } = await remember(ca);
+  const b = world();
+  const cb = await b.boot();
+  const other = sessionCookieOf(await cb.post("/login", { token: VIEWER }));
+  const out = await ca.post("/logout", {}, { cookie: `${cookie}; ${other}` });
+  const cleared = [].concat(out.headers["set-cookie"]);
+  assert.ok(cleared.some((h) => /^pdc_device_[0-9a-f]{10}=;/.test(h)), "its own device cookie goes");
+  assert.ok(!cleared.some((h) => h.startsWith("pdc_session=;")), "a pdc_session this console never held stays");
+  assert.equal((await whoami(cb, other)).status, 200);
+  // A pdc_session this console did hold, beside the device cookie, still goes.
+  const w = world();
+  const c = await w.boot();
+  const session = sessionCookieOf(await c.post("/login", { token: OPERATOR }));
+  const device = deviceCookieOf(await c.post("/api/device/remember", {}, { cookie: session }));
+  const both = await c.post("/logout", {}, { cookie: `${device}; ${session}` });
+  assert.ok([].concat(both.headers["set-cookie"]).some((h) => h.startsWith("pdc_session=;")));
+});
+
+test("signing in again while this browser's record cannot be read clears its cookie, leaves a row with its id, and keeps a copy out here", async () => {
+  for (const restarted of [false, true]) {
+    const w = world();
+    const first = await w.boot();
+    const { cookie } = await remember(first);
+    const [{ hash, id }] = first.trust.list().devices;
+    const path = join(w.shared.root, "console-devices", `${hash}.json`);
+    const bytes = fs.readFileSync(path, "utf8");
+    fs.writeFileSync(path, "{corrupt");
+    const c = restarted ? await w.boot() : first;
+    const before = w.shared.rows.length;
+    const again = await c.post("/login", { token: OPERATOR }, { cookie });
+    assert.equal(again.status, 200, again.text);
+    assert.ok([].concat(again.headers["set-cookie"]).some((h) => /^pdc_device_[0-9a-f]{10}=;/.test(h)), "the cookie goes: the record could be anyone's");
+    const row = w.shared.rows.slice(before).find((r) => r.action === "device-ended");
+    assert.deepEqual([row?.target, row?.outcome, row?.actor.name], [id, "failed", "rob"]);
+    fs.writeFileSync(path, bytes, { mode: 0o600 });
+    const copy = await whoami(c, cookie);
+    if (restarted) assert.equal(copy.status, 200, "after a restart nothing held it: the residual, which the row's id is for");
+    else assert.deepEqual([copy.status, copy.json().ended], [401, "device"], "refused in memory while its session was held here");
+  }
+});
+
+// Round 5 of the spec audit (issue #849).
+
+test("someone else signing in ends the replaced device's open streams only once the answer has gone out, its record readable or not", async () => {
+  for (const unreadable of [false, true]) {
+    const w = world({ hub: true });
+    const c = await w.boot();
+    const { cookie } = await remember(c);
+    assert.equal((await whoami(c, cookie)).status, 200);
+    const [{ hash }] = c.trust.list().devices;
+    const id = c.sessions.sessionOfDevice(hash);
+    if (unreadable) fs.writeFileSync(join(w.shared.root, "console-devices", `${hash}.json`), "{corrupt");
+    assert.equal((await c.post("/login", { token: SECOND }, { cookie })).status, 200);
+    assert.deepEqual(w.shared.hubEnds.filter(([sid]) => sid === id), [[id, "elsewhere", true]], `unreadable ${unreadable}: never before the new cookie was sent`);
+  }
+});
+
+test("a sign-out's device row says it was a sign-out", async () => {
+  const w = world();
+  const c = await w.boot();
+  const { cookie } = await remember(c);
+  await c.post("/logout", {}, { cookie });
+  assert.equal(w.shared.rows.find((r) => r.action === "device-ended")?.reason, "signed out");
+});
+
+test("remembering at sign-in over a live ordinary session clears its pdc_session in the same answer", async () => {
+  const w = world();
+  const c = await w.boot();
+  const session = sessionCookieOf(await c.post("/login", { token: OPERATOR }));
+  const res = await c.post("/login", { token: OPERATOR, remember: true }, { cookie: session });
+  const set = [].concat(res.headers["set-cookie"]);
+  assert.ok(set.some((h) => /^pdc_device_[0-9a-f]{10}=[A-Za-z0-9_-]{43};/.test(h)) && set.some((h) => h.startsWith("pdc_session=;")), JSON.stringify(set));
+});
+
+test("a record or a whole folder removed ends that device's session at its next judgement", async () => {
+  for (const removed of ["record", "folder"]) {
+    const w = world();
+    const c = await w.boot();
+    const { cookie } = await remember(c);
+    const [{ hash }] = c.trust.list().devices;
+    const id = c.sessions.sessionOfDevice(hash);
+    const dir = join(w.shared.root, "console-devices");
+    if (removed === "record") fs.unlinkSync(join(dir, `${hash}.json`));
+    else fs.rmSync(dir, { recursive: true });
+    assert.deepEqual(c.sessions.verdict(id, w.shared.file), { ended: "device" }, `${removed}: what the hub asks each tick`);
+    assert.deepEqual([(await whoami(c, cookie)).status], [401], removed);
+  }
+});
+
+test("past the in-memory limit an end that cannot be written is not claimed as refused", async () => {
+  const root = fs.realpathSync(tempDir("console-remembered-cap-"));
+  const tokensPath = join(root, "console-tokens.json");
+  const writable = makeDeviceTrust({ tokensPath, fs, platform: "linux", now: () => T0 });
+  const a = writable.remember({ name: "rob", role: "operator", tokenHash: sha(OPERATOR), generation: 0 });
+  const b = writable.remember({ name: "rob", role: "operator", tokenHash: sha(OPERATOR), generation: 0 });
+  const logs = [];
+  const full = makeDeviceTrust({ tokensPath, fs: unwritable(), platform: "linux", now: () => T0, log: (l) => logs.push(l), denyMax: 1 });
+  assert.deepEqual([full.end(a.hash, "signed-out").held, full.read(a.hash).denied], [true, true]);
+  const second = full.end(b.hash, "signed-out");
+  assert.deepEqual([second.unerased, second.held, full.read(b.hash).denied], [true, false, undefined]);
+  assert.match(logs.at(-1), /holds too many such refusals/);
+  assert.doesNotMatch(logs.at(-1), /it is refused until/);
+  assert.equal(full.end(a.hash, "signed-out").held, true, "one already held stays held, however full the list");
+});
+
+test("past the in-memory limit a sign-out's audit row does not claim the device is refused either", async () => {
+  const w = world({ denyMax: 0 });
+  const { cookie } = await remember(await w.boot());
+  w.shared.fsOverride = unwritable();
+  const c = await w.boot();
+  await c.post("/logout", {}, { cookie });
+  const row = w.shared.rows.find((r) => r.action === "device-ended");
+  assert.equal(row?.outcome, "failed");
+  assert.match(row.reason, /could not hold it either, so revoke it/);
+  assert.doesNotMatch(row.reason, /refused in memory/);
+});

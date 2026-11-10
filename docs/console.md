@@ -246,7 +246,8 @@ install --console` ([above](#keep-it-running-as-a-service)).
 
 ## Sessions
 
-Signing in sets one host-only cookie, `pdc_session` (`HttpOnly`, `SameSite=Strict`, `Path=/`). A protected HTTPS console
+Signing in sets one host-only cookie, `pdc_session` (`HttpOnly`, `SameSite=Strict`, `Path=/`), or for a remembered
+browser the device cookie in its place ([Remembered browsers](#remembered-browsers)). A protected HTTPS console
 origin in [gateway enrollment](sandbox-gateway.md) adds `Secure`; HTTP-loopback keeps its existing browser
 compatibility. Proxy headers alone cannot change this setting. Sign-out expires the same cookie in either case.
 The theme button sets a second one,
@@ -260,10 +261,46 @@ session ends:
 - for everyone, when you run `pi-dispatch-console sessions end-all`;
 - for everyone, when `serve` restarts, because sessions live in the process.
 
+A remembered browser's session is the exception to the first two and the last ([Remembered browsers](#remembered-browsers)).
+
 Signing in again in the same browser ends the session it held before. Its other open live tabs wait a moment, ask
 the console who this browser is now, and reload on the new session only if it is the same person (the same name and
 role); otherwise they go to the sign-in page, which says this browser is now signed in as someone else, so a
 one-time link someone else sent you, opened in another tab, never puts their console into a tab you were using.
+
+### Remembered browsers
+
+A browser can be remembered, so that it stays signed in across idle periods, its own restarts and the console's,
+without a token or a link each time. It stays signed in until you sign out in it, an operator removes it, or its
+token is revoked or rotated, changes role or `sessions end-all` runs; each of those ends it at its next request, with
+the reason on the sign-in page, also after a restart. Every other rule on this page holds for it.
+
+- **How.** A sign-in asks for it: `remember: true` with the token on `POST /login`, or `POST /api/device/remember`
+  within 10 minutes of signing in, which is how a one-time link's sign-in is remembered.
+- **Who and where.** Operator and viewer tokens only, never an `agent` token or a viewer invitation's sign-in. Only on
+  a loopback console reached as `localhost` or `127.0.0.1`, a unix socket reached through its `ssh -L` tunnel as
+  `localhost`, or a console behind an enrolled HTTPS origin ([gateway enrollment](sandbox-gateway.md)): plain HTTP
+  across a network would carry the cookie in the clear, so it is refused there. Not on a Windows host.
+- **The cookie.** `pdc_device_` and 10 hex characters named after this deployment's tokens file (cookies ignore ports,
+  so two deployments on one machine need two names), `HttpOnly`, `SameSite=Strict`, `Path=/`, 400 days, `Secure`
+  under an enrolled HTTPS origin. It replaces `pdc_session`, so a remembered browser holds one credential, and the
+  console renews it at most once a day. Like every cookie it is sent to every port on the console's host name, so
+  use that name for nothing else.
+- **Where it is kept.** The console keeps a hash of it in `console-devices/` beside the tokens file, one file per
+  browser, owner-only ([Backup](backup.md)). A browser unused for 400 days is ended at its next use, since no browser
+  keeps the cookie that long.
+- **Restarts.** The first request after a restart signs the browser in again, with a `login-device` row in the audit
+  log. If the console cannot read the browser's record, it signs nobody out: the page says the console could not
+  check this browser's remembered sign-in, a program gets a 503, and `pi-dispatch doctor` names what is wrong.
+  Signing in with a link or a token works meanwhile, but the browser is then no longer remembered, and the record is
+  left for an operator to remove with `device revoke` once doctor passes (the audit log names its id).
+- **Signing out** erases the browser's record. If the console cannot write that down (a full disk, say, or a record it
+  cannot read), you are still signed out and the sign-in page says the record could not be erased. The console refuses
+  the record until it stops when it can (a record it could read before, while it holds fewer than about a thousand such
+  refusals; the log says when it cannot), and an operator should fix what doctor names and remove it with
+  `pi-dispatch-console device revoke`.
+- **Someone else signing in** on a remembered browser ends that browser's record, so a later sign-out cannot leave
+  the first person remembered.
 
 **A page acts only as the person it was drawn for.** Every page says who it was drawn for when it opens its live
 updates and when it previews or confirms a change, and the console refuses the request when this browser is now
@@ -294,6 +331,9 @@ in one line what happened:
 | `elsewhere` | you signed out in another tab | This browser signed out in another tab |
 | `restart` | the console restarted, perhaps | This console no longer knows this sign-in; it may have restarted |
 | `switched` | nothing ended: another tab signed this browser in as someone else, and this page stopped rather than act for them | This browser is now signed in as someone else |
+| `device` | this browser was removed from the remembered devices | This browser is no longer remembered |
+| `device-store` | nothing ended: the console could not read its remembered devices | The console could not check this browser's remembered sign-in |
+| `device-kept` | you signed out, but the console could not write that down | You are signed out, but this browser's remembered sign-in could not be erased |
 
 The console remembers why each session ended for that session alone, under its own random id, so the line says nothing
 about any other token or session. It remembers the last 1024. The `restart` line is a guess, and says so: sessions live
@@ -319,9 +359,11 @@ and a session that ended in the meantime (its idle limit, say) ends then, with i
 | `token list` | Names, roles and creation dates. Never a token or a hash. |
 | `token rotate --name <n>` | A new secret for that name, printed once. Its sessions end. |
 | `token revoke --name <n>` | Removes the name. Its sessions end. |
-| `sessions end-all` | Ends every session; every token stays valid. |
+| `sessions end-all` | Ends every session, remembered browsers included; every token stays valid. |
+| `device list` | Every remembered browser: a 12-character id, name, role, browser, when it was remembered and last used, and why it ended. Never a secret or a whole hash. "Last used" is its last page load, to the day: a tab left open whose live updates carry on does not move it. |
+| `device revoke --id <id>` or `--name <n>` | Stops remembering one browser, or every browser of that token name. It signs out at its next request. |
 
-Each of these except `token list` appends a row to the audit log, with the actor `shell`.
+Each of these except `token list` and `device list` appends a row to the audit log, with the actor `shell`.
 
 From this release on, a token with a role a later pi-dispatch added (one a newer console wrote into a file this
 console shares) is kept in the file and signs in nowhere here: its token, and a one-time link for it, are refused at
@@ -2002,7 +2044,8 @@ says:
   one token may hold, with Reload.
 - **Signed out** when your session ends: a note says so and the page goes to the sign-in page, which says why
   ([Sessions](#sessions)). A console that was restarted, whether stopped or killed, no longer knows your session, so
-  once it answers again an open page goes to the sign-in page too, which says the console may have restarted.
+  once it answers again an open page goes to the sign-in page too, which says the console may have restarted (a
+  remembered browser's page signs in again instead, [Remembered browsers](#remembered-browsers)).
 
 When you sign out in one tab, that tab goes to the sign-in page once the console confirms it ([Sessions](#sessions)).
 Every other open live tab of the same session waits 2 seconds and asks the console whether this browser is signed in
@@ -2049,15 +2092,17 @@ another tab; its pill then says Not live, and its note says how many live tabs o
 run page with its transcript open counts as one, so two run tabs leave two slots spare at the default limit. The terminal chat's separate `/api/transcript` connection also counts as one.
 
 **An open page does not keep you signed in.** Only a page load or a request counts as activity. A page left open
-signs out after `PI_CONSOLE_IDLE_MINUTES`, and its updates stop and send you to the sign-in page when:
+(in a browser that is not remembered) signs out after `PI_CONSOLE_IDLE_MINUTES`, and its updates stop and send you to the sign-in page when:
 
 - you sign out, in this tab or another (its updates stop at once; another tab first asks the console whether this
   browser signed in again, above);
 - your token is revoked or rotated, or its role changes;
 - someone runs `pi-dispatch-console sessions end-all`;
-- the session passes the idle limit or `PI_CONSOLE_MAX_HOURS`.
+- the session passes the idle limit or `PI_CONSOLE_MAX_HOURS`;
+- this browser stops being remembered (`device revoke`, or someone else signed in on it).
 
-All but sign-out take effect within a second, with no request needed. A browser that falls far behind (2 MiB of
+A remembered browser's page whose record the console cannot read is held, not signed out: it says its data could not
+be checked and carries on once the record reads again. All but sign-out take effect within a second, with no request needed. A browser that falls far behind (2 MiB of
 updates it has not read) is cut off and reconnects to a fresh copy of the page.
 
 ## Error pages

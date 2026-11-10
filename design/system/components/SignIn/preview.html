@@ -1,4 +1,4 @@
-<!-- @dsCard group="Access and audit" height=1170 width=1440 subtitle="Sign in: a token field, help on where tokens and links come from, and every notice this page can show" -->
+<!-- @dsCard group="Access and audit" height=1520 width=1440 subtitle="Sign in: a token field, help on where tokens and links come from, and every notice this page can show" -->
 <!doctype html>
 <html lang="en">
 <head>
@@ -114,6 +114,18 @@
 </div><div class="banner banner--sm tone-idle" role="status">
   <span class="tile"><svg class="ic" aria-hidden="true"><use href="#i-rerun"/></svg></span>
   <div><p class="banner__t">The console restarted, so every session ended</p><p class="banner__s">Sign in again. Nothing else changed.</p></div>
+  
+</div><div class="banner banner--sm tone-attention" role="status">
+  <span class="tile"><svg class="ic" aria-hidden="true"><use href="#i-slot-held"/></svg></span>
+  <div><p class="banner__t">This browser is no longer remembered</p><p class="banner__s">It was removed from the remembered devices. Sign in again.</p></div>
+  
+</div><div class="banner banner--sm tone-failed" role="status">
+  <span class="tile"><svg class="ic" aria-hidden="true"><use href="#i-config"/></svg></span>
+  <div><p class="banner__t">The console could not check this browser's remembered sign-in</p><p class="banner__s">Nothing was signed out. An operator should run <span class='code'>pi-dispatch doctor</span> on the host. Signing in with a link or a token works meanwhile, but this browser is then no longer remembered.</p></div>
+  
+</div><div class="banner banner--sm tone-attention" role="status">
+  <span class="tile"><svg class="ic" aria-hidden="true"><use href="#i-slot-held"/></svg></span>
+  <div><p class="banner__t">You are signed out, but this browser's remembered sign-in could not be erased</p><p class="banner__s">An operator should run <span class='code'>pi-dispatch doctor</span> on the host, fix what it names, then remove this browser with <span class='code'>pi-dispatch-console device revoke</span>.</p></div>
   
 </div><div class="banner banner--sm tone-attention" role="status">
   <span class="tile"><svg class="ic" aria-hidden="true"><use href="#i-beat"/></svg></span>

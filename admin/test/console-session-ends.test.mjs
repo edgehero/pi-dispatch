@@ -11,10 +11,12 @@ import { STATUS_KINDS } from "../src/words.mjs";
 
 const CONTROL_RE = /[\u0000-\u001f\u007f-\u009f]/;
 
-test("the reason lists: a stream ends for every reason but restart and switched, and shutdown takes their place", () => {
-  assert.deepEqual([...ENDED_REASONS], ["idle", "max", "revoked", "role", "all", "elsewhere", "restart", "switched"]);
+test("the reason lists: a stream ends for every reason but restart, switched and the two a request alone can meet, and shutdown takes their place", () => {
+  assert.deepEqual([...ENDED_REASONS], ["idle", "max", "revoked", "role", "all", "elsewhere", "restart", "switched", "device", "device-store", "device-kept"]);
   assert.equal(STREAM_SHUTDOWN, "shutdown");
-  assert.deepEqual([...STREAM_ENDS], [...ENDED_REASONS.filter((r) => r !== "restart" && r !== "switched"), STREAM_SHUTDOWN], "derived, in the same order");
+  // device-store ends nothing (a stream is held instead), and device-kept is said by the page that signed out.
+  const pageOnly = ["restart", "switched", "device-store", "device-kept"];
+  assert.deepEqual([...STREAM_ENDS], [...ENDED_REASONS.filter((r) => !pageOnly.includes(r)), STREAM_SHUTDOWN], "derived, in the same order");
   assert.ok(Object.isFrozen(ENDED_REASONS) && Object.isFrozen(STREAM_ENDS));
   assert.ok(!STREAM_ENDS.includes("restart"), "this process opened every stream it ends");
   assert.ok(!STREAM_ENDS.includes("switched"), "no session ends for it: only the page says it (issue #737)");

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
-import { COOKIE_NAME, FLASH_MAX_BYTES, TOMBSTONE_MAX, clearSessionCookie, makeSessionStore, readSessionCookie, readSessionCookies, sessionCookie, sessionDigest } from "../src/console/sessions.mjs";
+import { COOKIE_NAME, FLASH_MAX_BYTES, TOMBSTONE_MAX, clearDeviceCookie, clearSessionCookie, deviceCookie, makeSessionStore, readDeviceCookie, readDeviceCookies, readSessionCookie, readSessionCookies, sessionCookie, sessionDigest } from "../src/console/sessions.mjs";
 
 // The console's in-memory sessions (issue #640). Every expiry is judged on an injected clock.
 const T0 = Date.UTC(2026, 9, 14, 12, 0, 0);
@@ -551,4 +551,76 @@ test("a flash goes with its session: on destroy, on a failing get, and on a swee
   now.advance(61 * MIN);
   assert.equal(s.size(), 0);
   assert.equal(s.takeFlash(c), null);
+});
+
+// Issue #849: a device-backed session.
+const file849 = { generation: 1, tokens: [{ sha256: "h".repeat(64), role: "operator", name: "rob" }] };
+function deviceStore(verdict = () => null, t = { now: 1000 }) {
+  return { t, store: makeSessionStore({ now: () => t.now, idleMs: 1000, maxMs: 5000, random: (n) => Buffer.alloc(n, ++seed849), deviceVerdict: verdict }) };
+}
+let seed849 = 0;
+const dev849 = { deviceHash: "d".repeat(64), name: "rob", role: "operator", tokenHash: "h".repeat(64), generation: 1 };
+
+test("a device-backed session has no time limit, and every other judgement still applies", () => {
+  const { t, store } = deviceStore();
+  const { id } = store.ensureDevice(dev849);
+  t.now += 100000;
+  assert.equal(store.get(id, file849).name, "rob");
+  assert.equal(store.size(), 1, "and a sweep does not take it");
+  assert.equal(store.get(id, { ...file849, generation: 2 }), null);
+  assert.equal(store.endedOf(id), "all");
+});
+
+test("one session per device: asked twice it is the same one, and a new one once it has gone", () => {
+  const { store } = deviceStore();
+  const a = store.ensureDevice(dev849);
+  const b = store.ensureDevice(dev849);
+  assert.deepEqual([a.created, b.created, a.id === b.id], [true, false, true]);
+  store.destroy(a.id, "elsewhere");
+  assert.equal(store.sessionOfDevice(dev849.deviceHash), null);
+  assert.equal(store.ensureDevice(dev849).created, true);
+});
+
+test("a device's own verdict ends a session with its reason, and comes after the tokens file's", () => {
+  let verdict = "device";
+  const { store } = deviceStore(() => verdict);
+  const { id } = store.ensureDevice(dev849);
+  assert.deepEqual(store.verdict(id, file849), { ended: "device" });
+  assert.equal(store.verdict(id, { ...file849, generation: 2 }).ended, "all", "what the tokens file proves is said first");
+  verdict = null;
+  assert.equal(store.verdict(id, file849).session.name, "rob");
+});
+
+test("an unjudged device ends nothing and passes nothing", () => {
+  const { store } = deviceStore(() => ({ unjudged: true }));
+  const { id } = store.ensureDevice(dev849);
+  assert.deepEqual(store.verdict(id, file849), { unjudged: true });
+  assert.equal(store.get(id, file849), null);
+  assert.equal(store.peek(id, file849), null);
+  assert.equal(store.size(), 1, "it is still there");
+  assert.equal(store.endedOf(id), null);
+});
+
+test("adopting makes a live session device-backed in place, and only once", () => {
+  const { t, store } = deviceStore();
+  const { id } = store.create({ name: "rob", role: "operator", tokenHash: "h".repeat(64), generation: 1 });
+  assert.equal(store.adoptDevice(id, dev849.deviceHash), true);
+  assert.equal(store.adoptDevice(id, "e".repeat(64)), false);
+  assert.equal(store.sessionOfDevice(dev849.deviceHash), id);
+  t.now += 100000;
+  assert.equal(store.get(id, file849).id, id, "and the time limits no longer apply");
+  assert.equal(store.adoptDevice("nobody", dev849.deviceHash), false);
+});
+
+test("the device cookie: exact attributes, Secure only when asked, and two of them count as none", () => {
+  const name = "pdc_device_0123456789";
+  const secret = "s".repeat(43);
+  assert.equal(deviceCookie(name, secret), `${name}=${secret}; HttpOnly; SameSite=Strict; Path=/; Max-Age=34560000`);
+  assert.match(deviceCookie(name, secret, { secure: true }), /; Secure$/);
+  assert.throws(() => deviceCookie(name, "bad\r\nx"));
+  assert.equal(readDeviceCookie(name, `${name}=${secret}`), secret);
+  assert.equal(readDeviceCookie(name, `${name}=${secret}; ${name}=${"t".repeat(43)}`), null);
+  assert.equal(readDeviceCookie(name, `other=${secret}`), null);
+  assert.deepEqual(readDeviceCookies(name, `${name}=${secret}; ${name}=${"t".repeat(43)}; ${name}=${secret}`), [secret, "t".repeat(43)]);
+  assert.equal(clearDeviceCookie(name), `${name}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`);
 });

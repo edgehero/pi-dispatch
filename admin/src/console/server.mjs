@@ -88,7 +88,7 @@ import { refusalHtml } from "./confirm-view.mjs";
 import { invitationMatches } from "./login-codes.mjs";
 import { renderTriggerCheckResult } from "./panels/triggers.mjs";
 import { errorPage as realErrorPage } from "./error-pages.mjs";
-import { contentTypeRefusal, hostnameOf, hostRefusal, makeLoginLimiter, originRefusal, readOnlyRefusal, roleRefusal } from "./guards.mjs";
+import { LOOPBACK_HOSTS, contentTypeRefusal, hostnameOf, hostRefusal, makeLoginLimiter, originRefusal, readOnlyRefusal, roleRefusal } from "./guards.mjs";
 import { applySecurityHeaders } from "./headers.mjs";
 import * as ui from "./kit.mjs";
 import { isLoopbackAddress } from "./listen.mjs";
@@ -105,6 +105,10 @@ import { CONSOLE_CSS } from "./style.mjs";
 import { themeOf } from "./theme.mjs";
 import { TRANSCRIPT_FORMATS } from "./transcript.mjs";
 import { gatewayApi, gatewayLanding } from "./gateway.mjs";
+import { ENDED_OF_DEVICE_REASON, REMEMBER_FRESH_MS, bindingFailure } from "./device-trust.mjs";
+import { streamEndOf } from "./session-ends.mjs";
+import { REMEMBER_ROLES, deviceIdOf, deviceLabelOf } from "@edgehero/pi-dispatch/console-devices";
+import { DEVICE_COOKIE_MAX_AGE_SEC } from "./sessions.mjs";
 
 /** The largest request body a write may send. A pause-windows file is a few hundred bytes; 64 KiB is generous. */
 export const BODY_LIMIT = 64 * 1024;
@@ -227,9 +231,15 @@ export function wantsHtml(req, pathname = pathnameOf(req)) {
 function peekForNav(deps, req) {
   try {
     const id = deps.cookies.readSessionCookie(req.headers.cookie);
-    if (!id) return null;
     const read = deps.readTokens();
     if (!read?.file) return null;
+    // A read-only look at a remembered device: this draws a bar, so it signs nobody in and writes no row.
+    const secret = deps.devices ? deps.cookies.readDeviceCookie(deps.devices.cookieName, req.headers.cookie) : null;
+    if (secret) {
+      const device = deps.devices.read(deps.devices.hashOf(secret));
+      if (device.record && !device.record.ended && bindingFailure(device.record, read.file) === null) return { name: device.record.name, role: device.record.role };
+    }
+    if (!id) return null;
     const s = deps.sessions.peek(id, read.file);
     return s ? { name: s.name, role: s.role } : null;
   } catch {
@@ -278,9 +288,53 @@ function actorOf(ctx) {
 }
 
 /**
+ * Whether a browser on this request may be remembered: a console reached over loopback, a unix socket's tunnel or an enrolled HTTPS origin, never plain HTTP
+ * across a network. Judged by the bind and by the origin the write guard already read for this request (`ctx.consoleOrigin`), never a second read. Under a
+ * public bind the Host header decides nothing, since a non-browser client can set it to anything; under a loopback bind or a unix socket a name that is not
+ * loopback is refused, which is the plain-HTTP proxy case. A proxy that instead sends a loopback Host upstream (nginx's default) still passes
+ * the browser's own Origin, which the write guard refuses against that Host, so remembering, a write, fails there too. Only a proxy that rewrites
+ * both headers to loopback names looks like a local browser, and it makes every write look local; this rule does not claim to catch that.
+ */
+function rememberTransportOk(ctx) {
+  const https = typeof ctx.consoleOrigin === "string" && ctx.consoleOrigin.startsWith("https://");
+  if (https) return true;
+  if (listenWord(ctx.deps.config) === "public") return false;
+  // A loopback bind can still be reached across a network through a plain-HTTP proxy under a `PI_CONSOLE_ALLOWED_HOSTS` name. The write guard has
+  // already tied a browser's Origin to this Host, so a loopback name here means the browser itself is on this host or through a tunnel to it.
+  // A unix socket too: the documented `ssh -L` to it arrives as `localhost`, and a proxy to the socket under another name is the case refused here.
+  return LOOPBACK_HOSTS.includes(hostnameOf(ctx.req.headers.host));
+}
+
+/** Whether this origin is an enrolled HTTPS one, for a cookie's `Secure` on a GET, which has no `ctx.consoleOrigin`. Null when it cannot be told. A write uses the one its guard read. */
+function secureOrigin(deps) {
+  try {
+    const origin = deps.consoleOrigin?.() ?? null;
+    return origin === false ? null : typeof origin === "string" && origin.startsWith("https://");
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * The `Secure` for re-setting a device cookie on this read, or null to leave the cookie as it is. With no enrolled HTTPS origin now, only where remembering
+ * would be allowed without one (a loopback Host on a bind that is not public): a cookie made under an enrollment that has since been removed must never be
+ * re-set without `Secure` on a name a network carries, which would send it in the clear from then on. It simply ages, and the browser signs in again.
+ */
+function renewSecureOf(ctx) {
+  const secure = secureOrigin(ctx.deps);
+  if (secure !== false) return secure;
+  return listenWord(ctx.deps.config) !== "public" && LOOPBACK_HOSTS.includes(hostnameOf(ctx.req.headers.host)) ? false : null;
+}
+
+/**
  * Create a session for `entry` (a tokens-file entry), with a NEW id whatever cookie came in (no fixation: a cookie
  * planted before sign-in is never promoted, and is destroyed once the sign-in succeeds), and audit it. An audit
  * failure refuses the sign-in.
+ *
+ * The one exception is a browser that already remembers this same person under a record that still holds (issue #849):
+ * it keeps its device and that device's one session, since a second session for the same device would be a second
+ * credential, and the sign-in is still on the record. A record of someone else, or one whose binding has stopped
+ * holding, is ended once this sign-in's own row is written, with the true reason, and its cookie cleared.
  *
  * The session this request made and then refused for its audit row ends with no reason: it never reached a browser.
  * Its audit row is the sign-in, so it is written first, and only a sign-in that succeeded ends what the browser held: a
@@ -296,10 +350,47 @@ function actorOf(ctx) {
  * probe, for the browser to store the cookie; and should this answer never finish, the hub's next tick ends them, the
  * old session being gone already.)
  */
-function startSession(ctx, entry, file, action, extra = {}) {
+function startSession(ctx, entry, file, action, extra = {}, { remember = false, invited = false } = {}) {
   const { deps, res } = ctx;
   const presented = deps.cookies.readSessionCookie(ctx.req.headers.cookie);
-  const { id } = deps.sessions.create({ name: entry.name, role: entry.role, tokenHash: entry.sha256, generation: file.generation });
+  // The write guard already judged this request against the protected canonical origin. Reuse that exact
+  // declaration, never a forwarding header or a second file read that could change while the body arrived.
+  const secure = typeof ctx.consoleOrigin === "string" && ctx.consoleOrigin.startsWith("https://");
+  const cookies = [];
+  let deviceEnded = false;
+  const secret = deps.devices ? deps.cookies.readDeviceCookie(deps.devices.cookieName, ctx.req.headers.cookie) : null;
+  let replacing = null;
+  let unreadable = null;
+  if (secret) {
+    const hash = deps.devices.hashOf(secret);
+    const read = deps.devices.read(hash);
+    if (read.record && !read.record.ended && read.record.name === entry.name && read.record.tokenHash === entry.sha256 && bindingFailure(read.record, file) === null && deps.now() - read.mtimeMs <= DEVICE_COOKIE_MAX_AGE_SEC * 1000) {
+      // The same person signing in on a browser that already remembers them: nothing about the browser changes, and the sign-in is still on the record.
+      const made = deps.sessions.ensureDevice({ deviceHash: hash, name: entry.name, role: entry.role, tokenHash: entry.sha256, generation: file.generation });
+      try {
+        deps.audit.append({ actor: { name: entry.name, role: entry.role, session: deps.cookies.sessionDigest(made.id) }, action, outcome: "ok" });
+      } catch (e) {
+        // A session made just now with no row would be restored later with none.
+        if (made.created) deps.sessions.destroy(made.id, null);
+        deps.log(`console: audit append failed (${e?.code ?? "error"}), so the sign-in was refused`);
+        return sendError(res, 500, "the audit log could not be written, so the sign-in was refused; check the console's log directory");
+      }
+      return sendJson(res, 200, { ok: true, name: entry.name, role: entry.role, remembered: true, ...extra });
+    }
+    // Someone else, or the same person under a binding that no longer holds. Ended only once this sign-in is on the record, below: a refused sign-in must
+    // not sign the browser's previous person out. Left in place it would outrank the new sign-in, and a later sign-out would land on the wrong console.
+    if (read.record && !read.record.ended) {
+      const sameName = read.record.name === entry.name;
+      const reason = !sameName ? "replaced" : bindingFailure(read.record, file) ?? (read.record.tokenHash === entry.sha256 ? "removed" : "replaced");
+      replacing = { hash, record: read.record, reason };
+    } else if (read.unjudged) {
+      // A record that cannot be read could be anyone's, so its cookie is cleared all the same (kept, it could switch this browser back to another person once
+      // the record reads again). The record itself is left, so it gets a row with its id, below, for an operator to revoke once doctor passes.
+      unreadable = hash;
+    }
+    cookies.push(deps.cookies.clearDeviceCookie(deps.devices.cookieName));
+  }
+  const { id } = deps.sessions.create({ name: entry.name, role: entry.role, tokenHash: entry.sha256, generation: file.generation, invited });
   try {
     deps.audit.append({ actor: { name: entry.name, role: entry.role, session: deps.cookies.sessionDigest(id) }, action, outcome: "ok" });
   } catch (e) {
@@ -307,17 +398,66 @@ function startSession(ctx, entry, file, action, extra = {}) {
     deps.log(`console: audit append failed (${e?.code ?? "error"}), so the sign-in was refused`);
     return sendError(res, 500, "the audit log could not be written, so the sign-in was refused; check the console's log directory");
   }
+  if (replacing) {
+    const done = deps.devices.end(replacing.hash, replacing.reason);
+    ctx.record({ actor: { name: replacing.record.name, role: replacing.record.role, session: null }, action: "device-ended", target: deviceIdOf(replacing.hash), outcome: done.unerased ? "failed" : "ok", reason: replacing.record.name !== entry.name ? "another person signed in on this browser" : replacing.reason === "removed" ? "unused for longer than any browser keeps the cookie" : "the same person signed in again after the device's token changed" });
+    deviceEnded = true;
+    dropDeviceSession(deps, replacing.hash, "elsewhere", res);
+  }
+  if (unreadable) {
+    // A session of it held here proves the record real in this process: refused in memory, as a sign-out over one is.
+    if (deps.sessions.sessionOfDevice?.(unreadable)) {
+      deps.devices.end(unreadable, "replaced");
+      dropDeviceSession(deps, unreadable, "elsewhere", res);
+    }
+    ctx.record({ actor: { name: entry.name, role: entry.role, session: deps.cookies.sessionDigest(id) }, action: "device-ended", target: deviceIdOf(unreadable), outcome: "failed", reason: "signed in again while the record could not be read: its cookie was cleared and the record left; revoke it once doctor passes" });
+  }
   if (presented) {
     deps.sessions.destroy(presented, "elsewhere");
     deps.actionDeps?.setup?.endSession?.(presented);
     deps.tickets?.endSession?.(presented);
     res.once("finish", () => deps.hub?.endSession(presented, "elsewhere"));
   }
-  // The write guard already judged this request against the protected canonical origin. Reuse that exact
-  // declaration, never a forwarding header or a second file read that could change while the body arrived.
-  const secure = typeof ctx.consoleOrigin === "string" && ctx.consoleOrigin.startsWith("https://");
-  const cookie = deps.cookies.sessionCookie(id, { maxAgeSec: Math.floor(deps.config.maxMs / 1000), secure });
-  return sendJson(res, 200, { ok: true, name: entry.name, role: entry.role, ...extra }, { "set-cookie": cookie });
+  let remembered = false;
+  if (remember) {
+    const secretCookie = rememberOnto(ctx, id, entry, file, secure);
+    if (secretCookie) {
+      cookies.push(secretCookie);
+      // One credential: an ordinary cookie that came in goes, since its session has just ended above.
+      if (presented) cookies.push(deps.cookies.clearSessionCookie());
+      remembered = true;
+    }
+  }
+  if (!remembered) cookies.push(deps.cookies.sessionCookie(id, { maxAgeSec: Math.floor(deps.config.maxMs / 1000), secure }));
+  return sendJson(res, 200, { ok: true, name: entry.name, role: entry.role, ...extra, ...(remember ? { remembered } : {}), ...(deviceEnded ? { deviceEnded: true } : {}) }, { "set-cookie": cookies.length === 1 ? cookies[0] : cookies });
+}
+
+/**
+ * Make session `id` a remembered device: the cookie to set, or null having said why in the log. The audit row comes first, as for every mint; a store that refuses leaves
+ * an ordinary session, which the person is told in the answer.
+ */
+function rememberOnto(ctx, id, entry, file, secure) {
+  const { deps } = ctx;
+  const actor = { name: entry.name, role: entry.role, session: deps.cookies.sessionDigest(id) };
+  try {
+    deps.audit.append({ actor, action: "device-remembered", outcome: "ok" });
+  } catch (e) {
+    deps.log(`console: audit append failed (${e?.code ?? "error"}), so this device was not remembered`);
+    return null;
+  }
+  const made = deps.devices.remember({ name: entry.name, role: entry.role, tokenHash: entry.sha256, generation: file.generation, tokenCreatedAt: entry.createdAt, label: deviceLabelOf(ctx.req.headers["user-agent"]) });
+  if (!made.hash) {
+    ctx.record({ actor, action: "device-remembered", outcome: "failed", reason: "the store refused" });
+    deps.log(`console: this device could not be remembered: ${made.refusal}`);
+    return null;
+  }
+  // Two tabs pressing Remember together: the second finds the session already adopted, and its record must not stay behind, live and unclaimed.
+  if (!deps.sessions.adoptDevice(id, made.hash)) {
+    deps.devices.end(made.hash, "replaced");
+    return null;
+  }
+  deps.devices.reap();
+  return deps.cookies.deviceCookie(deps.devices.cookieName, made.secret, { secure });
 }
 
 /** The tokens file, or null after answering 503 (a file that went bad while the console ran: nobody signs in). */
@@ -348,7 +488,16 @@ async function postLogin(ctx) {
     return sendError(ctx.res, 401, "that token is not valid for this console");
   }
   // Only when the page asked, so the answer to a plain sign-in is what it always was. The page parser judges it, as for a link.
-  return startSession(ctx, entry, file, "login", ctx.body.next === undefined ? {} : { next: realPages.returnPathOf(ctx.body.next) ?? "/" });
+  const remember = ctx.body.remember === true;
+  if (remember) {
+    // Refused rather than ignored: someone who asked to be remembered must not walk away believing they are.
+    const why = !REMEMBER_ROLES.includes(entry.role) ? "this token cannot be remembered on a device" : !ctx.deps.devices ? "remembering a device is not available on this console" : !rememberTransportOk(ctx) ? "this console is reached over plain HTTP, where a remembered sign-in would cross the network" : null;
+    if (why) {
+      ctx.record({ actor: { name: entry.name, role: entry.role, session: null }, action: "login-failed", target: "/login", outcome: "refused", reason: why });
+      return sendError(ctx.res, 403, why);
+    }
+  }
+  return startSession(ctx, entry, file, "login", ctx.body.next === undefined ? {} : { next: realPages.returnPathOf(ctx.body.next) ?? "/" }, { remember });
 }
 
 async function postLoginCode(ctx) {
@@ -374,14 +523,15 @@ async function postLoginCode(ctx) {
   // Issue #708: the page the link returns to, judged HERE by the page parser (`returnPathOf`), so the browser is only
   // ever sent to one of this console's own pages; anything else, or nothing, lands on the overview. The script checks
   // the answer's shape again before it navigates.
-  return startSession(ctx, entry, file, "login-code", { next: realPages.returnPathOf(ctx.body.next) ?? "/" });
+  return startSession(ctx, entry, file, "login-code", { next: realPages.returnPathOf(ctx.body.next) ?? "/" }, { invited: consumed.binding !== undefined });
 }
 
 /**
  * Sign out (issue #737): EVERY session the browser presents ends, each the store holds (`readSessionCookies`: a cookie
  * planted beside the real one, `Path=/logout` from another loopback port's page, must not turn the sign-out into a no-op
  * answered 200), and the answer is 200 with the clearing Set-Cookie ALWAYS, also when no session was held (the
- * browser is signed out either way). It judges nothing, so it needs no tokens file: the route is `auth: "none"`, and
+ * browser is signed out either way). Since issue #849 that holds for `pdc_session` unless the browser signs out by this
+ * console's device cookie and presented no `pdc_session` this console held (see the clearing at the end). It judges nothing, so it needs no tokens file: the route is `auth: "none"`, and
  * the store names who it ended (`destroy`). Behind the session auth it had before, an unreadable tokens file answered
  * sign-out 503 and kept the session, while the page went to sign-in as though it had signed out. The write guards
  * (Origin, JSON) still run first, so no other site can sign a browser out.
@@ -389,10 +539,61 @@ async function postLoginCode(ctx) {
 async function postLogout(ctx) {
   const { deps, res } = ctx;
   let held = 0;
-  for (const id of deps.cookies.readSessionCookies(ctx.req.headers.cookie)) {
+  const ids = new Set(deps.cookies.readSessionCookies(ctx.req.headers.cookie));
+  const cookieIds = new Set(ids);
+  // Whether a `pdc_session` this console held came in: see the clearing below.
+  let heldCookie = false;
+  // Devices this sign-out has already ended through their cookie, so destroying their sessions below does not end them, and write their row, a second time.
+  const handled = new Set();
+  // Unreadable records whose session this process holds: their failed row is written below, as the person `destroy` names. An anonymous row is rate limited,
+  // so a flood of anonymous sign-outs could otherwise keep this one out of the log.
+  const unreadableHeld = new Set();
+  const deniedHeld = new Map();
+  const secrets = deps.devices ? deps.cookies.readDeviceCookies(deps.devices.cookieName, ctx.req.headers.cookie) : [];
+  let unerased = false;
+  for (const secret of secrets) {
+    const hash = deps.devices.hashOf(secret);
+    handled.add(hash);
+    const read = deps.devices.read(hash);
+    // Only a record that exists, and only its true owner's row. A secret nothing holds is treated as no device at all.
+    const session = deps.sessions.sessionOfDevice?.(hash);
+    if (read.record && !read.record.ended) {
+      const done = deps.devices.end(hash, "signed-out");
+      if (done.unerased) unerased = true;
+      ctx.record({ actor: { name: read.record.name, role: read.record.role, session: null }, action: "device-ended", target: deviceIdOf(hash), outcome: done.unerased ? "failed" : "ok", reason: done.unerased ? unerasedReason(done, "the store could not be written") : "signed out" });
+      // After a restart the device has no session here yet, and this is still that person signing out.
+      if (!session) {
+        held += 1;
+        ctx.record({ actor: { name: read.record.name, role: read.record.role, session: null }, action: "logout", outcome: "ok" });
+      }
+    } else if (read.unjudged) {
+      // A record that cannot be read signs nobody in while it stays so, but would let a copy back in once it reads again. A session of this device held here
+      // proves the record was real in this process, so that one is refused in memory until it can be ended (`end` denies what it cannot write). A planted
+      // secret never has one, so cookies alone cannot grow the deny-list. Said, as a failure, since this sign-out could not be written down.
+      unerased = true;
+      if (session) {
+        deniedHeld.set(hash, deps.devices.end(hash, "signed-out"));
+        unreadableHeld.add(hash);
+      } else {
+        ctx.record({ actor: ANONYMOUS, action: "device-ended", target: deviceIdOf(hash), outcome: "failed", reason: "the record could not be read" });
+      }
+    }
+    if (session) ids.add(session);
+  }
+  for (const id of ids) {
     // `elsewhere`: the tab that signed out ignores its own stream's end (the script knows it is signing out), and every
     // other tab of this session is told the browser signed out elsewhere.
     const ended = deps.sessions.destroy(id, "elsewhere");
+    // A session that was remembered after it signed in: whoever signs out with its old cookie ends the device too, since a browser that remembered it
+    // was answered without that cookie.
+    if (ended?.deviceHash && unreadableHeld.has(ended.deviceHash)) {
+      ctx.record({ actor: { name: ended.name, role: ended.role, session: deps.cookies.sessionDigest(id) }, action: "device-ended", target: deviceIdOf(ended.deviceHash), outcome: "failed", reason: unerasedReason(deniedHeld.get(ended.deviceHash) ?? {}, "the record could not be read") });
+    } else if (ended?.deviceHash && deps.devices && !handled.has(ended.deviceHash)) {
+      const done = deps.devices.end(ended.deviceHash, "signed-out");
+      if (done.unerased) unerased = true;
+      // Its record may be unreadable or unwritable: this sign-out came with no device cookie to read it by, so the reason names neither.
+      ctx.record({ actor: { name: ended.name, role: ended.role, session: deps.cookies.sessionDigest(id) }, action: "device-ended", target: deviceIdOf(ended.deviceHash), outcome: done.unerased ? "failed" : "ok", reason: done.unerased ? unerasedReason(done, "the record could not be ended") : "signed out" });
+    }
     deps.actionDeps?.setup?.endSession?.(id);
     deps.tickets?.endSession?.(id);
     // The session's open streams end now, not at the hub's next tick.
@@ -401,12 +602,46 @@ async function postLogout(ctx) {
     // a session the store held.
     if (ended) {
       held += 1;
+      if (cookieIds.has(id)) heldCookie = true;
       ctx.record({ actor: { name: ended.name, role: ended.role, session: deps.cookies.sessionDigest(id) }, action: "logout", outcome: "ok" });
     }
   }
   // Nothing held: the anonymous kind of row, rate limited like the others.
   if (held === 0) ctx.record({ actor: ANONYMOUS, action: "logout", target: "/logout", outcome: "ok", reason: "no session was held, so only the cookie was cleared" });
-  return sendJson(res, 200, { ok: true }, { "set-cookie": deps.cookies.clearSessionCookie() });
+  // `pdc_session` is one name for every console on this host, since cookies ignore ports. A browser signing out of this console by its own device cookie,
+  // with no `pdc_session` this console held, may carry another loopback console's ordinary session under that name, which this sign-out must not end
+  // (issue #849). Without a device cookie it is cleared as it always was.
+  const clearSession = secrets.length === 0 || heldCookie;
+  const clears = [...(clearSession ? [deps.cookies.clearSessionCookie()] : []), ...(deps.devices ? [deps.cookies.clearDeviceCookie(deps.devices.cookieName)] : [])];
+  return sendJson(res, 200, { ok: true, ...(unerased ? { device: "unerased" } : {}) }, { "set-cookie": clears.length === 1 ? clears[0] : clears });
+}
+
+/**
+ * Remember this browser, after signing in (issue #849). A one-time link posts itself with no moment to tick a box, so this is how such a sign-in is remembered. Only soon
+ * after a credential was presented: a stolen ordinary cookie must not be able to make itself permanent later. Converts the live session in place, so its tickets and streams carry on.
+ */
+async function postRememberDevice(ctx) {
+  const { deps, session } = ctx;
+  const refuse = (status, why) => {
+    ctx.record({ actor: ctx.actor(), action: "refused", target: ctx.route.path, outcome: "refused", reason: why });
+    return sendError(ctx.res, status, why);
+  };
+  if (!deps.devices) return refuse(403, "remembering a device is not available on this console");
+  if (!rememberTransportOk(ctx)) return refuse(403, "this console is reached over plain HTTP, where a remembered sign-in would cross the network");
+  const read = deps.readTokens();
+  if (!read?.file) return sendJson(ctx.res, 503, { error: TOKENS_UNUSABLE });
+  // Judged again now the body has arrived: the session was judged before it was read, and a slow body must not outlast a sign-out or `sessions end-all`.
+  const live = deps.sessions.get(session.id, read.file);
+  if (!live) return refuse(401, "this sign-in has ended; sign in again");
+  if (!REMEMBER_ROLES.includes(live.role)) return refuse(403, "this token cannot be remembered on a device");
+  if (live.deviceHash) return sendJson(ctx.res, 200, { ok: true, remembered: true });
+  if (live.invited) return refuse(403, "a sign-in from an invitation cannot be remembered; ask for a token of your own");
+  if (deps.now() - live.createdAt > REMEMBER_FRESH_MS) return refuse(403, "this sign-in is too old to be remembered; sign in again and remember it then");
+  const entry = read.file.tokens.find((t) => t.sha256 === live.tokenHash && t.role === live.role);
+  if (!entry) return refuse(403, "this sign-in's token has changed; sign in again");
+  const cookie = rememberOnto(ctx, session.id, entry, read.file, typeof ctx.consoleOrigin === "string" && ctx.consoleOrigin.startsWith("https://"));
+  if (!cookie) return sendError(ctx.res, 503, "this device could not be remembered; you stay signed in as before");
+  return sendJson(ctx.res, 200, { ok: true, remembered: true }, { "set-cookie": [cookie, deps.cookies.clearSessionCookie()] });
 }
 
 // ---- pages, state and the live stream (issue #641) ----
@@ -511,6 +746,9 @@ function listenWord(config) {
   if (listen?.kind === "tcp" && typeof listen.host === "string" && !isLoopbackAddress(listen.host)) return "public";
   return "tcp";
 }
+
+/** What a request gets when its remembered device cannot be judged. Nothing was signed out. */
+export const DEVICE_STORE_UNUSABLE = "this browser's remembered sign-in could not be checked; sign in with a link or a token";
 
 /** What `/api/state` answers, 503, when the snapshot cannot be read at all: a fixed sentence, never the error's text. */
 export const STATE_UNREADABLE = "the fleet could not be read (is Valkey reachable?); try again";
@@ -671,6 +909,8 @@ export const ROUTES = Object.freeze([
   // `auth: "none"` (issue #737): a sign-out judges no session, it ends the one the cookie names (`postLogout`), so an
   // unreadable tokens file cannot keep a browser signed in that asked to sign out.
   { method: "POST", path: "/logout", auth: "none", write: true, readOnlyExempt: true, handler: postLogout },
+  // Issue #849: for the same reason a sign-in is exempt. It changes only this browser's credential, and a read-only console must still let someone stay signed in.
+  { method: "POST", path: "/api/device/remember", auth: "viewer", write: true, readOnlyExempt: true, handler: postRememberDevice },
   // Public generic shells recover the Strict cookie with a same-origin request, without replacing the sign-in.
   ...["launch", "authorize", "return", "select"].map((mode) => ({ method: "GET", path: `/sandbox/gateway/${mode}`, auth: "none", write: false, handler: (ctx) => sendHtml(ctx.res, 200, gatewayLanding({ mode, theme: themeOf(ctx.req.headers.cookie), gesture: ctx.req.headers["sec-fetch-site"] !== "same-origin" })) })),
   ...["launch", "context", "authorize"].map((method) => ({ method: "POST", path: `/api/sandbox-gateway/${method}`, auth: "operator", write: true, handler: (ctx) => { ctx.gatewayTheme = themeOf(ctx.req.headers.cookie); return gatewayApi(ctx, method); } })),
@@ -727,7 +967,95 @@ export function lookupRoute(method, pathname) {
 }
 
 /**
- * The session behind the request's cookie. Reads the tokens file each time, so a rotate or revoke bites at once.
+ * A request's remembered device (issue #849), judged. SYNCHRONOUS, all of it: the read, the judgement, the one-session-per-device lookup and the audit row, so tabs
+ * arriving together after a restart share one session without a lock (`device-trust.mjs`).
+ *
+ * `{session}` for a live one, `{unjudged}` when the store cannot say, `{auditRefused}` when the row could not be written, `{dead, ended}` otherwise. A record that has
+ * stopped matching the tokens file is ended durably here, with the true reason.
+ */
+function resolveDevice(deps, secret, file, { read: readRoute = true } = {}) {
+  const trust = deps.devices;
+  const hash = trust.hashOf(secret);
+  const read = trust.read(hash);
+  if (read.unjudged) {
+    // An unreadable record must not hide what the tokens file already proves: a session of this device still in memory is judged by it first.
+    const held = deps.sessions.sessionOfDevice?.(hash);
+    const verdict = held ? deps.sessions.verdict(held, file) : null;
+    if (verdict?.ended && ["all", "role", "revoked"].includes(verdict.ended)) {
+      dropDeviceSession(deps, hash, verdict.ended);
+      return { dead: true, ended: verdict.ended, hash };
+    }
+    return { unjudged: true };
+  }
+  const dead = (ended) => {
+    dropDeviceSession(deps, hash, ended);
+    return { dead: true, ended, hash };
+  };
+  if (read.denied || read.absent) return dead("device");
+  const { record, mtimeMs } = read;
+  if (record.ended) return dead(ENDED_OF_DEVICE_REASON[record.ended.reason] ?? "device");
+  // No browser keeps the cookie this long, and an active one moves last-use daily, so what is presented now is a copy.
+  if (deps.now() - mtimeMs > DEVICE_COOKIE_MAX_AGE_SEC * 1000) {
+    endAtUse(deps, hash, record, "removed", "unused for longer than any browser keeps the cookie");
+    return dead("device");
+  }
+  const failure = bindingFailure(record, file);
+  if (failure) {
+    endAtUse(deps, hash, record, failure, "its token entry no longer matches");
+    return dead(ENDED_OF_DEVICE_REASON[failure]);
+  }
+  const made = deps.sessions.ensureDevice({ deviceHash: hash, name: record.name, role: record.role, tokenHash: record.tokenHash, generation: record.generation });
+  if (made.created) {
+    try {
+      deps.audit.append({ actor: { name: record.name, role: record.role, session: deps.cookies.sessionDigest(made.id) }, action: "login-device", outcome: "ok" });
+    } catch (e) {
+      deps.sessions.destroy(made.id, null);
+      deps.log(`console: audit append failed (${e?.code ?? "error"}), so the remembered sign-in was refused`);
+      return { auditRefused: true };
+    }
+  }
+  const session = deps.sessions.get(made.id, file);
+  if (!session) return { unjudged: true };
+  // Last use moves at most daily, and only on a request whose answer can carry the re-set cookie: a stream or a write that moved it would spend the day's
+  // re-set, and a dashboard whose stream reconnects first every morning would never have its cookie renewed.
+  return { session, ...(readRoute && trust.touch(hash, mtimeMs) ? { renew: secret } : {}) };
+}
+
+/**
+ * A device found dead loses the session it had in this process, with the same clean-up a session that ends gets: setup, tickets and its open streams. Given
+ * `res`, a sign-in's answer, the streams end once it has gone out, as `startSession` ends the browser's ordinary session's: ended first, the other tabs
+ * would probe before the new cookie arrived.
+ */
+function dropDeviceSession(deps, hash, ended, res = null) {
+  const id = deps.sessions.sessionOfDevice?.(hash);
+  if (!id) return;
+  deps.sessions.destroy(id, null);
+  deps.actionDeps?.setup?.endSession?.(id);
+  deps.tickets?.endSession?.(id);
+  const word = streamEndOf(ended) ?? "device";
+  if (res) res.once("finish", () => deps.hub?.endSession(id, word));
+  else deps.hub?.endSession(id, word);
+}
+
+/** An unerased end's audit reason: what failed, and whether this process holds the refusal (`end` says `held`: the in-memory list is bounded). */
+function unerasedReason(done, failed) {
+  return `${failed}; ${done.held === false ? "this console could not hold it either, so revoke it" : "refused in memory until this console stops"}`;
+}
+
+/** End a device met at its next use, with a row saying why, so the audit log explains every end. A row that cannot be written is logged, never a refusal: the end is what protects. */
+function endAtUse(deps, hash, record, reason, why) {
+  const done = deps.devices.end(hash, reason);
+  try {
+    deps.audit.append({ actor: { name: record.name, role: record.role, session: null }, action: "device-ended", target: deviceIdOf(hash), outcome: done.unerased ? "failed" : "ok", reason: why });
+  } catch (e) {
+    deps.log(`console: a device ended at its next use, but its audit row could not be written (${e?.code ?? "error"})`);
+  }
+}
+
+/**
+ * The session behind the request's cookie. Reads the tokens file each time, so a rotate or revoke bites at once. A
+ * remembered device's cookie is judged first (`resolveDevice`), and a dead or unjudged device yields to a live ordinary
+ * session, so a browser that signed in again is not bounced back to sign-in.
  *
  *   - `{session}`: a live one (its `lastSeen` moved, by `get`).
  *   - `{session: null, presented, ended}`: none. `presented` says a well-formed cookie came in (so there is one to
@@ -736,16 +1064,34 @@ export function lookupRoute(method, pathname) {
  *     to judge, and the sign-in page it is sent to answers for the file itself.
  *   - `{unavailable: true}`: a cookie came in and the tokens file cannot be used, so nothing can be judged and nothing
  *     is ended (no `get`, no tombstone, the session kept for when the file reads again).
+ *   - `{deviceStore: true}`: only a device cookie, whose record cannot be read: nothing is ended, the cookie is kept.
+ *   - `{auditRefused: true}`: a device restore whose sign-in row could not be written.
  */
-function resolveSession(deps, req) {
+function resolveSession(deps, req, { read: readRoute = true } = {}) {
   const id = deps.cookies.readSessionCookie(req.headers.cookie);
-  if (!id) return { session: null, presented: false, ended: null };
+  const secret = deps.devices ? deps.cookies.readDeviceCookie(deps.devices.cookieName, req.headers.cookie) : null;
+  if (!id && !secret) return { session: null, presented: false, ended: null };
   const read = deps.readTokens();
   if (!read?.file) return { unavailable: true };
+  if (secret) {
+    const device = resolveDevice(deps, secret, read.file, { read: readRoute });
+    if (device.session || device.auditRefused) return device;
+    // A live ordinary session outranks a device that is dead or cannot be judged: that browser signed in again and must not be bounced back to sign-in.
+    const session = id ? deps.sessions.get(id, read.file) ?? null : null;
+    // Never a device's own session by its old `pdc_session`, whatever device cookie came with it.
+    if (session && !session.deviceHash) return { session };
+    if (device.unjudged) return { deviceStore: true };
+    return { session: null, presented: true, clearDevice: true, ended: endedReasonOf(device.ended) };
+  }
   const session = deps.sessions.get(id, read.file) ?? null;
+  // A remembered device's session is reached by its device cookie and never by a `pdc_session`: the id it had before it was remembered would otherwise
+  // be a copy that no longer times out (issue #849).
+  if (session?.deviceHash) return { session: null, presented: true, ended: null };
   if (session) return { session };
+  // A device's session whose record cannot be read is still held (`get` ended nothing), so its tickets and setup state stay with it: refused here, as above.
+  if (deps.sessions.verdict?.(id, read.file)?.unjudged === true) return { session: null, presented: true, ended: null };
   deps.actionDeps?.setup?.endSession?.(id);
-    deps.tickets?.endSession?.(id);
+  deps.tickets?.endSession?.(id);
   return { session: null, presented: true, ended: endedReasonOf(deps.sessions.endedOf?.(id) ?? null) };
 }
 
@@ -861,7 +1207,7 @@ async function dispatch(req, res, deps) {
   }
 
   if (route.auth !== "none") {
-    const resolved = resolveSession(deps, req);
+    const resolved = resolveSession(deps, req, { read: !route.write && !route.stream });
     if (resolved.unavailable) {
       // Nothing was judged, so nothing ends: no Set-Cookie (the browser keeps its cookie for when the file reads
       // again), no tombstone, the session untouched. The script reads this 503 on a stream or a probe as "not reachable,
@@ -872,16 +1218,29 @@ async function dispatch(req, res, deps) {
       if (route.write) return sendJson(res, 503, { error: TOKENS_UNUSABLE, html: tokensUnusableBar(route) });
       return sendFailure(ctx, 503, TOKENS_UNUSABLE, { page: { kind: "unavailable" } });
     }
+    if (resolved.auditRefused) return sendError(res, 500, "the audit log could not be written, so the sign-in was refused; check the console's log directory");
+    if (resolved.deviceStore) {
+      // Nothing was judged, so nothing ends, and the cookie stays for when the store reads again.
+      if (route.write) record({ actor: ANONYMOUS, action: "refused", target: route.path, outcome: "refused", reason: "auth: the remembered-device store cannot be used" });
+      if (route.write || route.path.startsWith("/api/")) return sendJson(res, 503, { error: DEVICE_STORE_UNUSABLE, ended: "device-store" });
+      return redirect(res, loginHref("device-store", realPages.returnPathOf(req.url)));
+    }
     ctx.session = resolved.session;
+    if (resolved.renew && !route.write && !route.stream) {
+      // At most daily, and never in a way that could drop `Secure` from a cookie that has it (`renewSecureOf`).
+      const secure = renewSecureOf(ctx);
+      if (secure !== null) res.setHeader("set-cookie", deps.cookies.deviceCookie(deps.devices.cookieName, resolved.renew, { secure }));
+    }
     if (!ctx.session) {
-      const { presented, ended } = resolved;
+      const { presented, ended, clearDevice } = resolved;
       if (route.write) record({ actor: ANONYMOUS, action: "refused", target: route.path, outcome: "refused", reason: "auth: not signed in" });
       // No Set-Cookie (see the header): the probe that follows a closed stream must still carry this cookie to read why,
       // and must never clear a newer one another tab's sign-in set meanwhile.
       if (route.write || route.path.startsWith("/api/")) return sendJson(res, 401, { error: SIGN_IN_FIRST, ended });
       // `ended` is a member of `ENDED_REASONS` or null (resolveSession held it to the list), and never `switched`, which no tombstone
       // holds. A request with no cookie has nothing to clear. The page asked for goes along as `next` once the page parser accepts it.
-      return redirect(res, loginHref(ended, realPages.returnPathOf(req.url)), presented ? { "set-cookie": deps.cookies.clearSessionCookie() } : {});
+      const clears = [...(presented && deps.cookies.readSessionCookie(req.headers.cookie) ? [deps.cookies.clearSessionCookie()] : []), ...(clearDevice ? [deps.cookies.clearDeviceCookie(deps.devices.cookieName)] : [])];
+      return redirect(res, loginHref(ended, realPages.returnPathOf(req.url)), clears.length === 0 ? {} : { "set-cookie": clears.length === 1 ? clears[0] : clears });
     }
     // The person (see the header), before the role: a page drawn for someone else learns that, not what the other one
     // may not do.
@@ -971,10 +1330,11 @@ export function createConsoleServer({
   limits: limitsOverride = {},
   gateway = null,
   consoleOrigin = null,
+  devices = null,
 }) {
   const limits = { ...SERVER_LIMITS, streamsTotal: STREAMS_TOTAL_MAX, streamsOperatorReserve: STREAMS_OPERATOR_RESERVE, ...limitsOverride };
   const refusalRows = makeLoginLimiter({ now, perMinute: REFUSAL_ROWS_PER_MINUTE, burst: 2 * REFUSAL_ROWS_PER_MINUTE });
-  const deps = { config, fs, now, random, audit, sessions, cookies, tickets, limiter, log, readTokens, findToken, keptTokens, consumeLoginCode, writePauseWindows, actionDeps, refusalRows, quieted: { count: 0 }, pages, pageDeps, hub, stateOf, errorPage, limits, streams: { open: 0 }, gateway, consoleOrigin };
+  const deps = { devices, config, fs, now, random, audit, sessions, cookies, tickets, limiter, log, readTokens, findToken, keptTokens, consumeLoginCode, writePauseWindows, actionDeps, refusalRows, quieted: { count: 0 }, pages, pageDeps, hub, stateOf, errorPage, limits, streams: { open: 0 }, gateway, consoleOrigin };
   // `connectionsCheckingInterval` makes the two timeouts bite within a second of expiring rather than within node's
   // default 30: a client holding connections open without sending holds a slot of `maxConnections` only that long.
   const server = createServer({ headersTimeout: limits.headersTimeout, requestTimeout: limits.requestTimeout, connectionsCheckingInterval: limits.connectionsCheckingInterval }, (req, res) => {

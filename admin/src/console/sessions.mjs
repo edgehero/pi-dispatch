@@ -57,6 +57,9 @@ export const TOMBSTONE_MAX = 1024;
  */
 export const FLASH_MAX_BYTES = 16384;
 
+/** What `reasonOf` answers when a device-backed session's record cannot be judged. A symbol, so it can never be mistaken for a reason. */
+const UNJUDGED = Symbol("unjudged");
+
 /** The reasons `destroy` takes: a sign-out or a sign-in over the cookie (`elsewhere`), or null for none (an audit failure). */
 const DESTROY_REASONS = Object.freeze(["elsewhere", null]);
 
@@ -66,8 +69,10 @@ const DESTROY_REASONS = Object.freeze(["elsewhere", null]);
  * shares the one budget, so signing in eight times does not buy eight times the streams), `tombstoneMax` (tests only:
  * how many ended ids are remembered). `now` and `random` are the seams.
  */
-export function makeSessionStore({ now = () => Date.now(), random = randomBytes, idleMs = 60 * 60000, maxMs = 12 * 3600000, maxStreams = 4, tombstoneMax = TOMBSTONE_MAX } = {}) {
+export function makeSessionStore({ now = () => Date.now(), random = randomBytes, idleMs = 60 * 60000, maxMs = 12 * 3600000, maxStreams = 4, tombstoneMax = TOMBSTONE_MAX, deviceVerdict = null } = {}) {
   const sessions = new Map();
+  // Issue #849: the one session each remembered device has, so tabs arriving together share it. Device hash to session id.
+  const byDevice = new Map();
   // Open stream slots: per session id `{name, count}`, and per token name the sum. A session that ends keeps its entry
   // until its streams close and give their slots back (the hub ends them within a tick), so the token's count is never
   // forgotten while those streams still run.
@@ -80,8 +85,9 @@ export function makeSessionStore({ now = () => Date.now(), random = randomBytes,
   const bornAt = now();
   let evicted = 0;
 
-  /** The time limit a session is past at `t`, idle first, or null. */
+  /** The time limit a session is past at `t`, idle first, or null. A device-backed session has none: being remembered is what the person asked for. */
   function timeReason(session, t) {
+    if (session.deviceHash) return null;
     if (t - session.lastSeen > idleMs) return "idle";
     if (t - session.createdAt > maxMs) return "max";
     return null;
@@ -98,8 +104,14 @@ export function makeSessionStore({ now = () => Date.now(), random = randomBytes,
     if (timed !== null) return timed;
     if (file.generation !== session.generation) return "all";
     const withHash = file.tokens.filter((entry) => entry?.sha256 === session.tokenHash);
-    if (withHash.some((entry) => entry?.role === session.role)) return null;
-    return withHash.length > 0 ? "role" : "revoked";
+    if (!withHash.some((entry) => entry?.role === session.role)) return withHash.length > 0 ? "role" : "revoked";
+    // Last: a bad store must not hide a revocation the tokens file already proves.
+    if (session.deviceHash && typeof deviceVerdict === "function") {
+      const device = deviceVerdict(session.deviceHash);
+      if (device?.unjudged) return UNJUDGED;
+      if (device) return device;
+    }
+    return null;
   }
 
   /** Remember that `id` ended for `reason` (null: no reason to give). Newest last; past the cap the oldest goes. */
@@ -115,6 +127,8 @@ export function makeSessionStore({ now = () => Date.now(), random = randomBytes,
   /** End a session that was live: its tombstone first, then it and its flash are gone. */
   function end(id, reason) {
     tombstone(id, reason);
+    const held = sessions.get(id);
+    if (held?.deviceHash && byDevice.get(held.deviceHash) === id) byDevice.delete(held.deviceHash);
     sessions.delete(id);
     flashes.delete(id);
   }
@@ -125,6 +139,16 @@ export function makeSessionStore({ now = () => Date.now(), random = randomBytes,
     const session = sessions.get(id);
     if (!session) return null;
     return reasonOf(session, file, now()) === null ? session : null;
+  }
+
+  /** Make a session: `{id}`. */
+  function make({ name, role, tokenHash, generation, invited = false, deviceHash = null }) {
+    sweep();
+    const id = random(32).toString("base64url");
+    const t = now();
+    sessions.set(id, { id, name, role, tokenHash, generation, createdAt: t, lastSeen: t, ...(invited ? { invited: true } : {}), ...(deviceHash ? { deviceHash } : {}) });
+    if (deviceHash) byDevice.set(deviceHash, id);
+    return { id };
   }
 
   /** Forget every session past its idle or absolute limit, so an abandoned browser does not hold memory forever. */
@@ -145,12 +169,33 @@ export function makeSessionStore({ now = () => Date.now(), random = randomBytes,
 
   return {
     /** A new session for a token that just signed in: `{id}`. */
-    create({ name, role, tokenHash, generation }) {
-      sweep();
-      const id = random(32).toString("base64url");
-      const t = now();
-      sessions.set(id, { id, name, role, tokenHash, generation, createdAt: t, lastSeen: t });
-      return { id };
+    create({ name, role, tokenHash, generation, invited = false }) {
+      return make({ name, role, tokenHash, generation, invited });
+    },
+
+    /**
+     * The one session of a remembered device: `{id, created}`, made when it has none. Synchronous on purpose: several tabs arriving at once after a restart
+     * must share one session, and an `await` anywhere on this path would let each make its own.
+     */
+    ensureDevice({ deviceHash, name, role, tokenHash, generation }) {
+      const held = byDevice.get(deviceHash);
+      if (held && sessions.has(held)) return { id: held, created: false };
+      return { ...make({ name, role, tokenHash, generation, deviceHash }), created: true };
+    },
+
+    /** Make an ordinary live session a remembered one, in place: its tickets and streams carry on. True when it did. */
+    adoptDevice(id, deviceHash) {
+      const session = sessions.get(id);
+      if (!session || session.deviceHash) return false;
+      session.deviceHash = deviceHash;
+      byDevice.set(deviceHash, id);
+      return true;
+    },
+
+    /** The session of a device, or null. */
+    sessionOfDevice(deviceHash) {
+      const id = byDevice.get(deviceHash);
+      return id && sessions.has(id) ? id : null;
     },
 
     /**
@@ -166,6 +211,8 @@ export function makeSessionStore({ now = () => Date.now(), random = randomBytes,
       if (!session) return null;
       const t = now();
       const reason = reasonOf(session, file, t);
+      // Unjudged: nothing is known, so nothing ends, exactly as for an unusable tokens file.
+      if (reason === UNJUDGED) return null;
       if (reason !== null) {
         end(id, reason);
         return null;
@@ -195,6 +242,7 @@ export function makeSessionStore({ now = () => Date.now(), random = randomBytes,
       const session = typeof id === "string" ? sessions.get(id) : undefined;
       if (!session) return { ended: endedOf(id) };
       const reason = reasonOf(session, file, now());
+      if (reason === UNJUDGED) return { unjudged: true };
       return reason === null ? { session: { ...session } } : { ended: reason };
     },
 
@@ -221,7 +269,7 @@ export function makeSessionStore({ now = () => Date.now(), random = randomBytes,
       const session = typeof id === "string" ? sessions.get(id) : undefined;
       if (!session) return null;
       end(id, timeReason(session, now()) ?? reason);
-      return { name: session.name, role: session.role };
+      return { name: session.name, role: session.role, ...(session.deviceHash ? { deviceHash: session.deviceHash } : {}) };
     },
 
     /**
@@ -338,6 +386,44 @@ export function readSessionCookie(cookieHeader) {
  */
 export function readSessionCookies(cookieHeader) {
   return [...new Set(sessionCookieValues(cookieHeader).filter((v) => SESSION_ID_RE.test(v)))];
+}
+
+/** Every value of cookie `name` in a Cookie header, in its order. */
+function namedCookieValues(name, cookieHeader) {
+  const header = Array.isArray(cookieHeader) ? cookieHeader.join("; ") : cookieHeader;
+  if (typeof header !== "string" || header === "") return [];
+  const found = [];
+  for (const part of header.split(";")) {
+    const eq = part.indexOf("=");
+    if (eq !== -1 && part.slice(0, eq).trim() === name) found.push(part.slice(eq + 1).trim());
+  }
+  return found;
+}
+
+const DEVICE_SECRET_SHAPE = /^[A-Za-z0-9_-]{43}$/;
+
+/** The remembered device's secret in a request, or null. Two of them count as none, for the reason two session cookies do. */
+export function readDeviceCookie(name, cookieHeader) {
+  const found = namedCookieValues(name, cookieHeader);
+  return found.length === 1 && DEVICE_SECRET_SHAPE.test(found[0]) ? found[0] : null;
+}
+
+/** Every well-formed device secret a request carries: what a sign-out ends, for the reason `readSessionCookies` gives. */
+export function readDeviceCookies(name, cookieHeader) {
+  return [...new Set(namedCookieValues(name, cookieHeader).filter((v) => DEVICE_SECRET_SHAPE.test(v)))];
+}
+
+/** The longest a browser keeps a cookie, as measured: 400 days in Chromium and Firefox, 365 in WebKit. It is re-set at most daily, so it never reaches that. */
+export const DEVICE_COOKIE_MAX_AGE_SEC = 400 * 24 * 3600;
+
+/** The remembered device's cookie. `Secure` only under an enrolled HTTPS origin: WebKit drops a `Secure` cookie over http on loopback. */
+export function deviceCookie(name, secret, { secure = false } = {}) {
+  if (typeof secret !== "string" || !DEVICE_SECRET_SHAPE.test(secret)) throw new Error("a device secret is 43 base64url characters");
+  return `${name}=${secret}; HttpOnly; SameSite=Strict; Path=/; Max-Age=${DEVICE_COOKIE_MAX_AGE_SEC}${secure ? "; Secure" : ""}`;
+}
+
+export function clearDeviceCookie(name) {
+  return `${name}=; HttpOnly; SameSite=Strict; Path=/; Max-Age=0`;
 }
 
 /** A session's name in an audit row: the first 12 hex of its id's SHA-256, so the row never carries the id itself. */

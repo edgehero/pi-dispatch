@@ -11375,16 +11375,16 @@ in.
 
 ## INT-CONSOLE-DEVICES-STORE
 
-- **Status**: the store only, issue #849, in `worker/src/console-devices.mjs` with its tests in `worker/test/console-devices.test.mjs`. Nothing writes it, and nothing calls `reapDevices`, until the console's remembered sessions land in a later part of that issue.
+- **Status**: issue #849, in `worker/src/console-devices.mjs` with its tests in `worker/test/console-devices.test.mjs`; the console reads and writes it through `admin/src/console/device-trust.mjs`, sweeps it (`reapDevices`) at start and at each remember, and `pi-dispatch-console device list` and `device revoke` act on it.
 - **Where**: `console-devices/` beside the tokens file (`INT-CONSOLE-TOKENS-FILE-CONTRACT`), mode 0700, owned by the deployment's account. One file per device,
   `<sha256(secret)>.json`, mode 0600. Temporary files are `.<hash>.<16 hex>.tmp` in the same folder and are removed after an hour.
 - **Record**: `{version: 1, name, role, tokenHash, generation, createdAt, label, ended?: {reason, at}}`. `role` is `operator` or `viewer` (`REMEMBER_ROLES`), `tokenHash` and `generation` are the
   token entry's at the moment of remembering, `createdAt` and `ended.at` are ISO instants, `label` is built from closed word lists (`deviceLabelOf`), never User-Agent bytes, and
   `ended.reason` is one of `DEVICE_END_REASONS`. A record names no secret. A record with any other `version` is unreadable to this build and is left alone.
 - **Secret and cookie**: 32 random bytes, base64url. Only its sha256 is on disk. The cookie is `pdc_device_<first 10 hex of sha256(tokensPath)>`, per deployment because cookies ignore ports.
-- **Last use** is the file's mtime, written at most daily, and changes no content, so it cannot lose an end.
+- **Last use** is the file's mtime, written at most daily, and changes no content, so it cannot lose an end. The console moves it only on a page or API read, never on a write or a stream, whether or not that read then re-sets the cookie (it does not while the origin cannot be read or a removed HTTPS enrollment leaves its `Secure` unknown).
 - **Ending a device** rewrites its record with `ended` through a temporary, fsync, rename and fsync of the folder. It is kept for 90 days (`ENDED_RETENTION_MS`) so a browser presenting the cookie can be told why, and at most the newest 31 are kept per name. Sequential ends keep the first reason; ends that truly race both succeed and one reason stays.
-- **Three answers on a read**: a record, absent, or unjudged. A missing folder, an unsafe folder and a corrupt or unsafe record are unjudged, never absent: nothing about them says a device was revoked. One bad record
+- **Three answers on a read**: a record, absent, or unjudged. An unsafe folder and a corrupt or unsafe record are unjudged, never absent: nothing about them says a device was revoked. The store's own `readDevice` calls a missing folder unjudged too; the console (`device-trust.mjs`) reads it as no devices, since the cookie's name comes from the tokens file's path, so a repointed tokens file presents another cookie, and removing the folder is doctor's way to sign every browser out. One bad record
   leaves the others readable. The fix for an unsafe folder is to remove it, never `chmod`, since tightening a folder another account could write would make whatever it planted good.
 - **Limits**: at most 32 live devices per token name (`MAX_DEVICES_PER_NAME`), which writers racing can overshoot by at most one each. A device bound to an older generation, a changed role or a token entry newer than it is ended at the next remember for that name, with the true reason, and holds no place. A record over 64 KiB or with a second name (`nlink`) is unjudged.
 - **Boundary**: whoever can write this folder can plant or revive a record, so the folder being owner-only is the boundary and a record's shape is no defence. It joins the write guard as a directory, as the login codes do, and doctor judges its safety, whether a job can reach it, and any unreadable record. Named residuals: `bash` is not judged by the write guard (`DES-OPERATOR-CONSOLE`); ACLs are not judged by the mode check; a fsync is only as good as the drive; an immutable folder or a read-only mount passes the mode check and fails at the first write, loudly. On a Windows host nothing is made and remembering is refused.
@@ -11464,8 +11464,10 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
   - `prev`: the sha256 hex of the previous row's raw line, without its newline; `null` only on the very first row
     ever written. The chain continues across month files.
   - `actor`: `{name, role, session}`. `session` is the first 12 hex characters of the sha256 of the session id,
-    never the id; `null` for a CLI row, whose actor is `{name: "shell", role: "shell", session: null}`; a failed login
-    names no token holder. Since issue #642 a write made from the `/dispatch` TUI, its commands and dialogs or the
+    never the id; `null` for a CLI row, whose actor is `{name: "shell", role: "shell", session: null}`, and since issue
+    #849 for a console `device-ended` row, which ends a device rather than a session; a failed login names no token
+    holder, except one refused only because its valid token cannot be remembered on a device (issue #849), which names
+    that token's holder. Since issue #642 a write made from the `/dispatch` TUI, its commands and dialogs or the
     extension's tools is `{name: <the OS login, reduced to [A-Za-z0-9._@-] and 64 characters, "unknown" when there is
     none>, role: "panel", session: null}` (`panelActor`, `admin/src/audited-write.mjs`), appended to the deployment's
     `PI_LOGS_DIR`. The roles written are `operator`, `viewer`, `agent`, `shell`, `panel` and `none`: a session's role is
@@ -11488,7 +11490,19 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
     `logout` row names a session the console ended; since #737 (PR 2) a sign-out ends every session its cookies name
     that the console holds, one `logout` row for each, and a sign-out with no session held (an unknown cookie, or
     none) is still answered and still a row, one, `anonymous`, target `/logout`, outcome `ok`, reason "no session was
-    held, so only the cookie was cleared", rate limited like every other row without a session.
+    held, so only the cookie was cleared", rate limited like every other row without a session. Since issue #849 a
+    sign-out with a remembered device's cookie after a restart, when the console holds no session for it yet, writes its
+    `logout` row as that device's person with `session` null. The device rows (issue #849), each targeting the device's
+    12-hex id where one is named: `login-device` is a remembered device restored to a session, written by the console
+    once per device per process with that session's actor, before the session is used (a row that cannot be written
+    refuses the restore); `device-remembered` is written by the console with the session's actor before the record is
+    made, and again with outcome `failed` when the store then refused; `device-ended` is written by the console with
+    the device's person as actor (`session` null, or the session's digest when a sign-out with the session's old
+    `pdc_session` ended it), or, for a record a sign-out could not read, the person of that device's session when this process holds one (never rate limited) and `anonymous` otherwise, with a `reason` saying why (signed
+    out, another person signed in on this browser, unused for longer than any browser keeps the cookie, its token entry
+    no longer matches), outcome `failed` when the end could not be written; by a sign-in over a record the console
+    could not read, as the person signing in, outcome `failed`, since the record is left; and by
+    `pi-dispatch-console device revoke` as `shell`.
   - `outcome`: the writer writes exactly one of `ok`, `refused`, `failed` (`CONSOLE_AUDIT_OUTCOMES`), and the verifier
     links any outcome of the same shape (`CONSOLE_AUDIT_OUTCOME_RE`).
   - `target`, `reason` (optional, absent when unset): short strings, control characters written out as `\u{XXXX}`,
@@ -11795,14 +11809,14 @@ script reads the console without scraping a page (issue #641, `DES-OPERATOR-CONS
   route is. The viewer role is enough. It is a GET and has no side effect beyond the request moving its session's
   `lastSeen`, as every request does. **Since #737 (PR 2) the 401 body says why**, on every `/api/*` route and every
   write that needs a session: `{ "error": "sign in first", "ended": "<reason>" }`, `ended` one of `ENDED_REASONS`
-  (`idle`, `max`, `revoked`, `role`, `all`, `elsewhere`, `restart`, `admin/src/console/session-ends.mjs`) when the
+  (`idle`, `max`, `revoked`, `role`, `all`, `elsewhere`, `restart`, and since issue #849 `device`, `admin/src/console/session-ends.mjs`) when the
   cookie names a session that ended (`restart` only as a possibility: a well-formed id this process does not know,
   while it has been up for less than `PI_CONSOLE_MAX_HOURS` and has forgotten no ended session), and null otherwise
-  (no cookie, or one with no reason to give). The list's eighth word, `switched`, is never this 401's: no session
-  ends for it (below). The sign-in posts need no session and their own refusals are not this
+  (no cookie, or one with no reason to give). The list's page-only words, `switched` and since issue #849 `device-store` and
+  `device-kept`, are never this 401's: no session ends for them (below; a device that cannot be judged is a 503). The sign-in posts need no session and their own refusals are not this
   401: `POST /login`'s wrong token (`{"error": "that token is not valid for this console"}`) and `POST /login/code`'s
   refused link carry `error`, and the link's also `link` (`expired` or `used`, issue #849), which picks the page's state. A successful `POST /login` that sent `next`
-  answers the page the parser accepted, as `POST /login/code` does. The 401 sends NO Set-Cookie, where before PR 2 it cleared the cookie: a script's
+  answers the page the parser accepted, as `POST /login/code` does. Since issue #849, `POST /login` with `remember: true` answers `remembered: true` and sets the device cookie instead of `pdc_session` (clearing a `pdc_session` that came in), `remembered: false` with an ordinary `pdc_session` when the store refused, or 403 with a `login-failed` row for a role (`agent`) or a transport that cannot be remembered; a sign-in on a browser that remembered someone else also answers `deviceEnded: true`, that device having ended. `POST /api/device/remember` (a write, allowed in read-only mode) remembers a session after the fact: 200 `{ok, remembered: true}` with the device cookie set and `pdc_session` cleared in one answer (and with no cookie for a session already remembered), 401 for a session that ended while its body arrived, 403 for an agent, an invitation, a sign-in older than 10 minutes, a changed token or plain HTTP across a network, and 503 when its audit row or the store refused (the session carries on as before). `POST /logout` answers `device: "unerased"` when a device it ended could not be written down, or when a device cookie's record could not be read (nothing could be ended then); the browser is signed out either way. A request whose device cannot be judged gets a 503 with `ended: "device-store"`, and a page a 303 to `/login?ended=device-store`, with the cookie kept. The 401 sends NO Set-Cookie, where before PR 2 it cleared the cookie: a script's
   next request still carries the cookie, so it can still read why, and a 401 never clears a newer cookie another
   tab's sign-in set meanwhile (a page's 303 to `/login` still clears it, and so does sign-out). `error` is the
   sentence it always was, so a script that read it reads the same. And while the console cannot use its tokens file,
@@ -11810,7 +11824,9 @@ script reads the console without scraping a page (issue #641, `DES-OPERATOR-CONS
   right now; the operator should run pi-dispatch doctor" }` (`TOKENS_UNUSABLE`), with no Set-Cookie and the session
   kept, on every route that needs a session (`REQ-CONSOLE-SECURITY` (i)): a script waits and asks again rather than
   signing in. `POST /logout` needs none: it ends every session its cookies name that the console holds, and answers
-  `200` with the clearing Set-Cookie whatever the tokens file's state. **Since #737 (PR 2) a request may say whose page
+  `200` with the clearing Set-Cookie whatever the tokens file's state (since issue #849 the device cookie's too, and
+  `pdc_session`'s only when this console held the one presented or no device cookie of its own came in: that name is
+  shared by every console on the host, and a remembered browser holds none of this one's). **Since #737 (PR 2) a request may say whose page
   it comes from**, `<name>.<role>`, in the header `x-console-as` (`PERSON_HEADER`; the console's own page sends it
   on every preview and confirm, and an event stream says it in its query instead, `INT-CONSOLE-EVENT-STREAM`). When
   it names another person than the session the cookie names, the request is refused after auth and before the role,
@@ -12080,13 +12096,14 @@ script is its only intended client; it is documented so that what a stream may c
     before a restart never matches.
   - `: ping`, a comment line, every 15 seconds, so an idle stream is not closed by a tunnel or a proxy. Clients ignore
     it.
-  - `end`: the session is over (logout, revoke, rotate, a role change, `sessions end-all`, the idle or the absolute
+  - `end`: the session is over (a remembered device removed gives `device`, issue #849; logout, revoke, rotate, a role change, `sessions end-all`, the idle or the absolute
     limit). The server closes the stream after it; the page goes to `/login` instead of reconnecting.
     Its data is `{}`, because a browser fires no event that carries none. **AMENDED 2026-10-24 (#737 PR 2): the data
     says why.** It is `{"ended": <word>}`, never empty, the word one of `STREAM_ENDS` (`admin/src/console/session-ends.mjs`)
     or null: `idle`, `max`, `revoked`, `role`, `all` (`sessions end-all`) and `elsewhere` (this session signed out,
     which ends its streams at once, or the browser signed in again over its cookie, which ends them once the sign-in's
-    answer, with the new cookie, has gone out) are the session's own end, and `shutdown` is the console stopping, which is NOT a sign-out: a client keeps what it shows
+    answer, with the new cookie, has gone out) and, since issue #849, `device` (its remembered device was removed or
+    replaced) are the session's own end, and `shutdown` is the console stopping, which is NOT a sign-out: a client keeps what it shows
     and connects again once the console answers. `restart` is never sent (this process opened every stream it ends),
     and null means ended for no reason the console can give. A client treats a word it does not know as an end with no
     reason. The
@@ -12106,9 +12123,12 @@ script is its only intended client; it is documented so that what a stream may c
     for, whatever it holds), each sent once and again only when it changes. `stale` says the console could not read this page's data (the load or
     the render threw, or the load's primary read failed) or could not read its tokens file this tick, so it keeps the
     panels it last sent rather than draw unreadable ones over them. Its data is `{"since": <ms or null>, "what":
-    "tokens" or "data"}`: `since` the hub's clock at that view's last good render, null when the hub holds none (a
+    "tokens", "device" or "data"}`: `since` the hub's clock at that view's last good render, null when the hub holds none (a
     view goes with its last stream, so a lone tab that reconnects is told null), and `what` which failed, the
-    console's tokens file or the page's data, so a client never blames the deployment's data for a tokens file. A
+    console's tokens file or the page's data, so a client never blames the deployment's data for a tokens file. Since
+    issue #849 `device` is a stream held because its remembered device's record cannot be read: that stream alone is
+    told, it takes no panel and no transcript entry until the record reads (then `fresh` once its page renders again),
+    and it is never ended for it; the page names the device store, not the tokens file or the data. A
     browser holds panels once a good render was sent to its stream, when its stream came with a `Last-Event-ID` (a
     reconnect holds the panels it was drawn with), and once its stream was told `stale`: a read-failed load sends such
     a stream `stale` and no panel, while a first stream that holds none is sent the degraded panels the load makes,
@@ -13618,6 +13638,7 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 
 | Date | Change |
 |---|---|
+| 2026-11-08 (#849, part 4) | **`INT-CONSOLE-STATE-API` AMENDED**: `remember` on `POST /login` and its answers (`remembered`, `deviceEnded`), `POST /api/device/remember` and its 401, 403 and 503, `device: "unerased"` on sign-out and which cookies it clears, the 503 and the page's 303 for a device that cannot be judged, and the 401's word list (`device`; `device-store` and `device-kept` are page-only). **`INT-CONSOLE-EVENT-STREAM` AMENDED**: the `device` end, and `stale`'s `what` gains `device`, a stream held because its record cannot be read. **`INT-CONSOLE-DEVICES-STORE` AMENDED**: its status, now written and swept by the console, "Last use" (moved on reads only), and "Three answers on a read": the console reads a missing folder as no devices. **`INT-CONSOLE-AUDIT-LOG` AMENDED**: who writes `login-device`, `device-remembered` and `device-ended` and with which actor, `session` null on a console `device-ended` row, a refused remember naming its token's holder, and a sign-out after a restart naming the device's person. The row shape and the verifier: UNCHANGED, checked. |
 | 2026-11-08 (#849, part 3) | **NEW `INT-CONSOLE-DEVICES-STORE`**: the remembered-device store, its record, the three answers on a read, and its limits. **`INT-CONSOLE-AUDIT-LOG` AMENDED**: three new actions, `login-device`, `device-remembered`, `device-ended`, not yet written by anything. `INT-CONSOLE-TOKENS-FILE-CONTRACT` shape and version, `CONSOLE_ENV_KEYS`, and `INT-ENVELOPE-FILE-CONTRACT` (the containment helper gains a `directory` option no envelope caller passes): UNCHANGED, checked. |
 | 2026-11-08 (#849, part 2) | **`INT-CONSOLE-STATE-API` AMENDED**: the refusal of `POST /login/code` carries `link` as well as `error`, and `POST /login` answers `next` when it was sent. **`INT-CONSOLE-EVENT-STREAM`**: a page leaving for sign-in carries its own address as `next`. |
 | 2026-11-08 (#849, part 1) | **`INT-CONSOLE-SETUP-HOST` AMENDED**, "Bootstrap link": the link goes to `pi-dispatch-console open` rather than being printed, `--no-open`, and `--name`. **`INT-CONSOLE-AUDIT-LOG` AMENDED**: `open` is a `login-code` writer, as `link` is. No browser operator mint or new token-print exception is admitted: UNCHANGED, checked. |

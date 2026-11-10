@@ -52,7 +52,9 @@ export const USAGE = `usage: pi-dispatch-console <command> [--deployment <dir>]
   token list                               names and roles, never a token
   token revoke --name <name>               remove a token; its sessions end at their next request
   token rotate --name <name>               a new secret for a name; prints it once
-  sessions end-all                         sign every browser out
+  sessions end-all                         sign every browser out, remembered devices included
+  device list                              the browsers that stay signed in, by id, never a secret
+  device revoke --id <id> | --name <name>  stop remembering one browser, or every browser of a token
   open [--name <name>] [--port <n>] [--next /setup]  sign in here: opens your browser, or waits for your ssh tunnel
   link [--name <name>] [--port <n>] [--next /setup]  a one-time sign-in link to pass along, valid 60 seconds
   serve --host-setup                       explicitly allow local person-only setup actions
@@ -107,7 +109,8 @@ export async function loadModules() {
     import("../setup-host-client.mjs"),
     import("./actions.mjs"),
   ]);
-  return { updatesView, updates, tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView, zeroTouchData, sandboxData, hostLoadsView, modelsView, modelRolePlans, triggerEnvironmentPlans, setupActions, setupHostClient, consoleActions };
+  const deviceTrust = await import("./device-trust.mjs");
+  return { deviceTrust, updatesView, updates, tokens, audit, sessions, loginCodes, confirm, readModel, connection, server, live, pages, insights, pricing, serviceEnv, forges, writePlans, jobData, workerConfig, modelEndpoints, modelCatalog, whatif, sandboxVerdict, triggerList, triggerCheck, scheduleZones, secretsView, connectionsView, projectView, zeroTouchData, sandboxData, hostLoadsView, modelsView, modelRolePlans, triggerEnvironmentPlans, setupActions, setupHostClient, consoleActions };
 }
 
 /** How long one insights assembly is reused per window: it walks every run record, far too much for each request. */
@@ -281,7 +284,7 @@ function parse(argv) {
     return parseArgs({
       args: argv,
       allowPositionals: true,
-      options: { deployment: { type: "string" }, name: { type: "string" }, role: { type: "string" }, port: { type: "string" }, next: { type: "string" }, "host-setup": { type: "boolean" }, help: { type: "boolean", short: "h" } },
+      options: { deployment: { type: "string" }, id: { type: "string" }, name: { type: "string" }, role: { type: "string" }, port: { type: "string" }, next: { type: "string" }, "host-setup": { type: "boolean" }, help: { type: "boolean", short: "h" } },
     });
   } catch (e) {
     throw new Refusal(`${e?.message ?? "the arguments could not be read"}; run pi-dispatch-console --help`);
@@ -346,7 +349,7 @@ async function run(argv, io) {
   const uid = "uid" in io ? io.uid : process.geteuid?.();
   const platform = io.platform ?? process.platform;
   const command = positionals.join(" ");
-  const known = ["serve", "token add", "token list", "token revoke", "token rotate", "sessions end-all", "link", "open", "audit verify"];
+  const known = ["serve", "token add", "token list", "token revoke", "token rotate", "sessions end-all", "device list", "device revoke", "link", "open", "audit verify"];
   if (!known.includes(command)) throw new Refusal(`unknown command "${command.slice(0, 40)}"; run pi-dispatch-console --help`);
   // Refused before anything is read or written, so a `--port` that would be silently ignored never runs its command.
   if (values.port !== undefined && command !== "link" && command !== "open") throw new Refusal("--port is for link and open only");
@@ -426,6 +429,12 @@ async function run(argv, io) {
     return { url: `${base}login/code#${minted.code}${values.next === "/setup" ? "&next=/setup" : ""}`, code: minted.code };
   };
 
+  /** The device store, for the commands that act on it. Real path, as `serve` uses it, so both name one cookie. */
+  const deviceTrustOf = () => {
+    const tokensReal = (() => { try { return realpathSync(config.tokensPath); } catch { return config.tokensPath; } })();
+    return m.deviceTrust.makeDeviceTrust(withRandom({ tokensPath: tokensReal, fs, uid, now, log: (line) => io.err(line), platform }));
+  };
+
   switch (command) {
     case "token add": {
       const name = needName(values);
@@ -467,6 +476,31 @@ async function run(argv, io) {
       invalid(res);
       io.out("every console session ends at its next request");
       return record({ action: "sessions-ended" }) ? 0 : 1;
+    }
+    case "device list": {
+      const listed = deviceTrustOf().list();
+      if (listed.problem) throw new Refusal(listed.problem);
+      for (const d of listed.devices) io.out(`${d.id}  ${d.name}  ${d.role}  ${d.label}  remembered ${d.createdAt}  last used ${d.lastUsedAt}${d.ended ? `  ended (${d.ended.reason})` : ""}`);
+      if (listed.devices.length === 0) io.err("no device is remembered");
+      if (listed.unreadable > 0) io.err(`${listed.unreadable} record${listed.unreadable === 1 ? "" : "s"} could not be read: run pi-dispatch doctor`);
+      return 0;
+    }
+    case "device revoke": {
+      const trust = deviceTrustOf();
+      if ((values.id === undefined) === (values.name === undefined)) throw new Refusal("device revoke needs exactly one of --id <id> or --name <name>");
+      const listed = trust.list();
+      if (listed.problem) throw new Refusal(listed.problem);
+      const live = listed.devices.filter((d) => d.ended === undefined && (values.id !== undefined ? d.id === values.id : d.name === values.name));
+      if (live.length === 0) throw new Refusal(values.id !== undefined ? `no remembered device has the id "${values.id}"; see pi-dispatch-console device list` : `no device is remembered for "${values.name}"; see pi-dispatch-console device list`);
+      let failed = 0;
+      for (const d of live) {
+        const done = trust.end(d.hash, "removed");
+        if (done.unerased) failed += 1;
+        if (!record({ action: "device-ended", target: d.id, ...(done.unerased ? { outcome: "failed", reason: "the store could not be written" } : {}) })) return 1;
+      }
+      if (failed > 0) throw new Refusal(`${failed} device${failed === 1 ? "" : "s"} could not be ended: the remembered-device store could not be written; run pi-dispatch doctor`);
+      io.out(`stopped remembering ${live.length} device${live.length === 1 ? "" : "s"}; ${live.length === 1 ? "it signs" : "they sign"} out at the next request`);
+      return 0;
     }
     case "link": {
       // Judged before the code is minted, so a mistyped port costs no code and no audit row.
@@ -591,7 +625,11 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
     const withRandom = (args) => (random ? { ...args, random } : args);
     const codesDir = m.loginCodes.loginCodesDir(config.tokensPath);
     const log = io.log ?? ((line) => io.err(line));
-    const sessions = m.sessions.makeSessionStore(withRandom({ now, idleMs: config.idleMs, maxMs: config.maxMs, maxStreams: config.maxStreams }));
+    // Issue #849. `realpath` so one deployment has one cookie name however its path was spelled; a folder that is not there yet is taken as written.
+    const tokensReal = (() => { try { return realpathSync(config.tokensPath); } catch { return config.tokensPath; } })();
+    const devices = m.deviceTrust?.makeDeviceTrust(withRandom({ tokensPath: tokensReal, fs, uid, now, log: (line) => io.err(line), platform: io.platform ?? process.platform }));
+    devices?.reap();
+    const sessions = m.sessions.makeSessionStore(withRandom({ now, idleMs: config.idleMs, maxMs: config.maxMs, maxStreams: config.maxStreams, ...(devices ? { deviceVerdict: (hash) => devices.verdictOf(hash) } : {}) }));
 
     // The read side (issue #641): one fleet reader for every page, stream and /api/state, held for serve's life.
     const side = readSideOf({ m, env: shellEnv, dir: config.dir, fs, platform: io.platform ?? process.platform, uid });
@@ -751,6 +789,7 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       // module without it loads once per distinct query, as before.
       ...(typeof m.pages.dataQueryOf === "function" ? { dataQueryOf: (page, query) => m.pages.dataQueryOf(page, query) } : {}),
       peekSession: (id, file) => sessions.peek(id, file),
+      sessionHeld: (id, file) => sessions.verdict(id, file).unjudged === true,
       // Issue #737: why a stream's session ended, from the store's pure verdict (never `get`, which would delete it).
       endedReason: (id, file) => sessions.verdict(id, file).ended ?? null,
       // Issue #643: the operator's live transcript streams read through the same reader (non-blocking XRANGE).
@@ -813,7 +852,8 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       random,
       audit,
       sessions,
-      cookies: m.sessions,
+      devices,
+      cookies: m.sessions.readDeviceCookie ? { ...m.sessions, readDeviceCookie: (name, header) => m.sessions.readDeviceCookie(name, header), readDeviceCookies: (name, header) => m.sessions.readDeviceCookies(name, header) } : m.sessions,
       tickets: m.confirm.makeConfirmTickets(withRandom({ now })),
       limiter: makeLoginLimiter({ now }),
       log,

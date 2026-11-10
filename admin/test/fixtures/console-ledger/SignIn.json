@@ -1,7 +1,7 @@
 {
   "card": "SignIn",
   "pr": 2,
-  "words": "a04ccf53fa6c598c66c2cba37e03d7cc9b56810d133e80a355282a3bfd71ead3",
+  "words": "d38a80486f1293c6ee0e0785a92f348dc014716848109a5f04e956ec143c53b0",
   "elements": [
     {"el":"p-signin","kind":"panel","status":"new","source":"admin/src/console/signin.mjs#signInContent","golden":["login.anonymous"]},
     {"el":"A single centered card","kind":"readme","status":"new","panel":"p-signin","source":"admin/src/console/signin.mjs#signInContent","holds":"class=\"card signin\"","golden":["login.anonymous"],"shows":"class=\"card signin\""},
@@ -24,6 +24,9 @@
     {"el":"ended=all: an operator ended every session","kind":"provides","status":"new","panel":"p-signin","source":"admin/src/console/session-ends.mjs#endedNotices","golden":["panels/login-ended-all.anonymous"],"shows":"<div data-notice=\"ended-all\">"},
     {"el":"ended=elsewhere: signing out in another tab","kind":"provides","status":"new","panel":"p-signin","source":"admin/src/console/session-ends.mjs#endedNotices","golden":["panels/login-ended-elsewhere.anonymous"],"shows":"<div data-notice=\"ended-elsewhere\">"},
     {"el":"ended=restart: a console restart","kind":"provides","status":"new","panel":"p-signin","source":"admin/src/console/session-ends.mjs#endedNotices","golden":["panels/login-ended-restart.anonymous"],"shows":"<div data-notice=\"ended-restart\">","reason":"worded as a possibility: the server reaches it only for an id it does not know while it has been up less than a session's longest life, never as a claim"},
+    {"el":"ended=device: this browser was removed from the remembered devices","kind":"provides","status":"new","panel":"p-signin","source":"admin/src/console/session-ends.mjs#endedNotices","golden":["panels/login-ended-device.anonymous"],"shows":"<div data-notice=\"ended-device\">"},
+    {"el":"ended=device-store: the remembered sign-in could not be checked","kind":"provides","status":"new","panel":"p-signin","source":"admin/src/console/session-ends.mjs#endedNotices","golden":["panels/login-ended-device-store.anonymous"],"shows":"<div data-notice=\"ended-device-store\">"},
+    {"el":"ended=device-kept: signed out, but the remembered sign-in could not be erased","kind":"provides","status":"new","panel":"p-signin","source":"admin/src/console/session-ends.mjs#endedNotices","golden":["panels/login-ended-device-kept.anonymous"],"shows":"<div data-notice=\"ended-device-kept\">"},
     {"el":"401: a wrong token","kind":"provides","status":"new","panel":"p-signin","source":"admin/src/console/session-ends.mjs#SIGN_IN_NOTICES","sentence":"admin/src/console/session-ends.mjs#SIGN_IN_NOTICES.wrong.title","golden":["panels/login-refused-wrong.anonymous"],"shows":"<div data-notice=\"wrong\">"},
     {"el":"401: a used or expired link","kind":"provides","status":"new","panel":"p-link","source":"admin/src/console/session-ends.mjs#NOTICE_OF_STATUS","holds":"\"/login/code\":{\"401\":null","golden":["panels/login-code-used.anonymous"],"shows":"data-link-state=\"used\" hidden data-reveal>","reason":"said by the link page's used state (the AccessStates card's p-link-used), whole, with the commands for a new link; /login never answers a link (its 401 is the wrong token), so no notice repeats it (the sign-in page's link notice was drawn and never shown, and is gone)"},
     {"el":"429: too many attempts (5 a minute)","kind":"provides","status":"new","panel":"p-signin","source":"admin/src/console/session-ends.mjs#SIGN_IN_NOTICES","sentence":"admin/src/console/session-ends.mjs#SIGN_IN_NOTICES.rate.title","golden":["panels/login-refused-rate.anonymous"],"shows":"<div data-notice=\"rate\">"},
