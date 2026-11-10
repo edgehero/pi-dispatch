@@ -703,6 +703,50 @@ test("a tokens file that cannot be read ends no stream and writes no panel or en
   }
 });
 
+test("a stream whose remembered device cannot be judged is held and sent nothing, not ended (#849)", async () => {
+  let held = true;
+  const alive = new Set();
+  const h = hubOn({ alive, sessionHeld: () => held, reasons: new Map([["s1", "device"]]) });
+  const live = fakeRes();
+  h.hub.subscribe({ res: live, sessionId: "s1", session: OP, page: "overview", query: {} });
+  live.take();
+  await h.hub.tick();
+  const during = live.take();
+  assert.deepEqual(eventsIn(during, "end"), [], "held, not ended");
+  assert.deepEqual(panelsIn(during), [], "and nothing drawn");
+  alive.add("s1");
+  await h.hub.tick();
+  assert.ok(panelsIn(live.take()).length > 0, "it carries on when the record reads again");
+  alive.delete("s1");
+  held = false;
+  await h.hub.tick();
+  assert.deepEqual(eventsIn(live.take(), "end"), [{ ended: "device" }], "and a real end is one");
+});
+
+test("a transcript stream of a session whose device cannot be judged is sent no entry while it is held (#849)", async () => {
+  let held = true;
+  const entries = [{ id: "1-1", kind: "assistant", ts: T0, text: "one", tool: null, error: false, truncated: false, outcome: null }];
+  const h = hubOn({
+    alive: new Set(["s1"]),
+    sessionHeld: () => held,
+    transcriptSince: async (jobId, after) => {
+      const rows = entries.filter((e) => after === null || e.id > after);
+      return { entries: rows, next: rows.at(-1)?.id ?? after, ended: false, outcome: null };
+    },
+  });
+  const live = fakeRes();
+  h.hub.subscribeTranscript({ res: live, sessionId: "s1", session: OP, jobId: "j1" });
+  await h.hub.tick();
+  live.take();
+  h.alive.delete("s1");
+  entries.push({ ...entries[0], id: "1-2", text: "secret job output" });
+  await h.hub.tick();
+  assert.ok(!live.take().includes("secret job output"), "held: nothing new reaches it");
+  h.alive.add("s1");
+  await h.hub.tick();
+  assert.ok(live.take().includes("secret job output"), "and it catches up once the device reads again");
+});
+
 test("a page stream told stale by the tokens file carries its view's last good render time; one that never drew says null", async () => {
   const now = clock();
   let read = () => ({ file: FILE });

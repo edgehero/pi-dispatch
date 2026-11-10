@@ -251,6 +251,9 @@ export const SIGN_OUT_UNCONFIRMED = Object.freeze({
  * The backticked command is drawn in the code face, as `kit.mjs` `withCode` draws the server's (a plain one broke as
  * "pi-/dispatch" at 375 px).
  */
+/** The same note when what could not be read is this browser's remembered sign-in (issue #849): the device store, not the tokens file. */
+export const STALE_DEVICE_BODY = "The console could not check this browser's remembered sign-in, so it shows nothing newer; this is the page as it was last seen. An operator should run `pi-dispatch doctor`.";
+
 export const STALE_TOKENS_BODY = "The console could not read its tokens file, so it shows nothing newer; this is the page as it was last seen. An operator should run `pi-dispatch doctor`.";
 
 export const CONSOLE_SCRIPT = `"use strict";
@@ -281,6 +284,7 @@ export const CONSOLE_SCRIPT = `"use strict";
   var SIGN_OUT_TIMEOUT_MS = ${JSON.stringify(SIGN_OUT_TIMEOUT_MS)};
   var SIGN_OUT_UNCONFIRMED = ${JSON.stringify(SIGN_OUT_UNCONFIRMED)};
   var STALE_TOKENS_BODY = ${JSON.stringify(STALE_TOKENS_BODY)};
+  var STALE_DEVICE_BODY = ${JSON.stringify(STALE_DEVICE_BODY)};
   function own(obj, key) {
     return obj !== null && typeof obj === "object" && Object.prototype.hasOwnProperty.call(obj, key);
   }
@@ -597,7 +601,7 @@ export const CONSOLE_SCRIPT = `"use strict";
     outTimer = later(unconfirmed, SIGN_OUT_TIMEOUT_MS);
     post("/logout", {}).then(function (r) {
       // Any press's 200 is the sign-out, whichever press it answers.
-      if (r.status === 200) location.assign("/login");
+      if (r.status === 200) location.assign(r.body && r.body.device === "unerased" ? "/login?ended=device-kept" : "/login");
       else unconfirmed();
     }, unconfirmed);
   });
@@ -2351,6 +2355,20 @@ ${FIT_JS}
         mark("out");
         note("out");
         toLogin(own(r.body, "ended") && isReason(r.body.ended) ? r.body.ended : why);
+      } else if (r.status === 503 && own(r.body, "ended") && r.body.ended === "device-store") {
+        // The console answers, but cannot read this browser's remembered sign-in (issue #849): nothing was signed out, so
+        // this is neither "not reachable" nor a sign-in. The page keeps what it shows under the note that says so, as a
+        // held stream's does, and asks again; the 200 once the record reads reloads it.
+        mark("retry");
+        unnote("retry");
+        outside(function () {
+          if (!staleShown) since(null);
+          staleShown = true;
+          if (mainEl && mainEl.classList) mainEl.classList.add("stale");
+          if (staleBody) sayWithCode(staleBody, STALE_DEVICE_BODY);
+          note("stale");
+        });
+        later(function () { ask(true); }, RETRY_MS);
       } else {
         again();
       }
@@ -2448,7 +2466,7 @@ ${FIT_JS}
       try {
         var d = JSON.parse(ev.data);
         at = own(d, "since") && typeof d.since === "number" ? d.since : null;
-        tokens = own(d, "what") && d.what === "tokens";
+        tokens = own(d, "what") && (d.what === "tokens" || d.what === "device") ? d.what : false;
       } catch (e) { at = null; }
       // A stale with no time while this page is already dimmed (a lone tab's reconnect: the hub let the view go with its
       // last stream) keeps the time it was told: the panels it holds are still the ones last seen then.
@@ -2456,7 +2474,7 @@ ${FIT_JS}
         if (at !== null || !staleShown) since(at);
         staleShown = true;
         if (mainEl && mainEl.classList) mainEl.classList.add("stale");
-        if (staleBody) sayWithCode(staleBody, tokens ? STALE_TOKENS_BODY : staleData);
+        if (staleBody) sayWithCode(staleBody, tokens === "device" ? STALE_DEVICE_BODY : tokens ? STALE_TOKENS_BODY : staleData);
         note("stale");
       });
     });

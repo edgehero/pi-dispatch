@@ -1168,11 +1168,13 @@ writes retain their existing interactive confirmation. This adds no unattended p
   session and session-person guards as an action; it remains available in read-only mode and creates neither
   a ticket nor an audit row. This explicit read exception grants no write capability or delivery authority.
 
+- **AMENDED 2026-11-08 (#849 part 4), remembered devices**: on top of the sessions below, a person may ask the console to remember a browser. A remembered browser holds one credential, the device cookie, and survives idle periods, browser restarts and console restarts until it is signed out, removed, or its token is revoked, rotated, changes role or `sessions end-all` runs, or until its record goes unused for 400 days (longer than any browser keeps the cookie, so what is presented then is a copy and is ended as removed). A device is created only by a sign-in with a token or link that has just proved itself (within 10 minutes), for an `operator` or a `viewer` (an allowlist), over loopback, a unix socket reached as `localhost` or an enrolled HTTPS origin, and never for a viewer invitation. Restoring one is a sign-in: it has its audit row first. Non-remembered sessions keep every limit below (UNCHANGED, checked). `INT-CONSOLE-DEVICES-STORE`.
+
 - **Statement**: The operator console (`pi-dispatch-console serve`, `DES-OPERATOR-CONSOLE`) shall be a separate
   process that listens only on loopback or on a 0600 unix socket unless the operator opts into a public bind; shall
   answer every request but `/healthz`, `/favicon.ico` (an empty 204, issue #737), the console's script and stylesheet
   (`/static/console.js`, `/static/console.css`), sign-in and sign-out only within a session obtained from a named token
-  or a one-time login code; shall accept a write only when it is same-origin, JSON, by the operator role or an explicitly permitted agent transition, on a console
+  or a one-time login code, or restored from a remembered device one of those made (issue #849); shall accept a write only when it is same-origin, JSON, by the operator role or an explicitly permitted agent transition, on a console
   that is not read-only, and confirmed by a single-use ticket bound to the diff the operator saw; shall make every write
   through shared validated funnels (existing read-model writes or the explicitly granted setup funnels);
   shall send the same security headers on every response and escape every
@@ -1244,7 +1246,7 @@ writes retain their existing interactive confirmation. This adds no unattended p
     one that exists or not, the API and sign-in included, and every write to those paths is still 421 first. Tests:
     `admin/test/console-guards.test.mjs`, `admin/test/console-server.test.mjs` ("the 421 page's own files answer on
     any Host ..."), `admin/test/console-config.test.mjs`.
-  - (c) **A cross-site or same-site write is refused.** Given a write with `Sec-Fetch-Site` `same-site`,
+  - (c) **A cross-site or same-site write is refused**, `POST /api/device/remember` included. Given a write with `Sec-Fetch-Site` `same-site`,
     `cross-site` or `none`, with no `Sec-Fetch-Site` and an `Origin` other than `http://<Host>`, with no `Origin`,
     or with a body that is not `application/json` (a form post), it is answered 403 and nothing is written; protected
     gateway enrollment replaces `http://<Host>` with its exact canonical console origin, never a proxy header.
@@ -1259,7 +1261,7 @@ writes retain their existing interactive confirmation. This adds no unattended p
     end, its sign-in, its `/api/run` read, its transcript stream and a steer's preview and confirm pass with an audit
     row; given the same sign-in with a foreign `Origin`, it is 403. Tests: `admin/test/console-chat.test.mjs` ("end to
     end"), `worker/test/console-client.test.mjs` (the headers sent).
-  - (d) **The read-only switch and the viewer role.** Given `PI_CONSOLE_READ_ONLY=1`, every write route in the route
+  - (d) **The read-only switch and the viewer role.** Given `PI_CONSOLE_READ_ONLY=1`, every write route but signing in and out and remembering this browser (`readOnlyExempt`: each changes only this browser's credential) in the route
     table answers 403 and writes nothing, and login still works; given a viewer's session, every write route answers
     403; each such refusal appends an audit row with `action: "refused"`. Test: `admin/test/console-server.test.mjs`.
   - (e) **The headers on every response.** Given any route in the route table (the test iterates the table, not a
@@ -1272,11 +1274,13 @@ writes retain their existing interactive confirmation. This adds no unattended p
     one stylesheet and one script, both from the console's own files, an inline SVG sprite whose references stay in
     the page ((m)), and a theme stamped by the server. A real browser now holds every page to the CSP as well:
     `REQ-OPERATOR-CONSOLE-SCREENS` (o) fails on any violation it reports.
-  - (f) **No token or code anywhere it could leak.** Given a full test session (token login, one-time code login,
+  - (f) **No token, code or device secret anywhere it could leak.** Given a full test session (token login, one-time code login, a remembered device,
     a write, a refusal, logout, the CLI's token commands), no captured log line, audit row or response body
     contains the test token, the test code, the session cookie's value, or the `pdc_` prefix outside the one line
-    `token add` and `token rotate` print; `token list` prints names and roles only. Tests:
-    `admin/test/console-server.test.mjs`, `admin/test/console-cli.test.mjs`, `worker/test/console-audit.test.mjs`.
+    `token add` and `token rotate` print; `token list` prints names and roles only. A device secret reaches no page, log
+    line or audit row either, and `device list` prints a 12-character id, never the secret or its whole hash (issue #849). Tests:
+    `admin/test/console-server.test.mjs`, `admin/test/console-cli.test.mjs`, `worker/test/console-audit.test.mjs`,
+    `admin/test/console-remembered.test.mjs`.
     **AMENDED 2026-10-23 (#737 PR 1): the theme preference cookie.** `pd_theme` holds a person's theme choice
     (`light` or `dark`; none means follow the system), is written only by the served script's theme button, and is
     not a credential: it signs nobody in and opens nothing. Given a request to any page or sign-in page whose Cookie
@@ -1290,7 +1294,7 @@ writes retain their existing interactive confirmation. This adds no unattended p
     Tests: `admin/test/console-server.test.mjs` ("pd_theme: only an exact light or dark reaches a page"),
     `admin/test/console-html.test.mjs` (a page's theme from a closed table), `admin/test/console-shell.test.mjs` (the
     script never parses `document.cookie` and holds no `pdc_` name).
-  - (g) **Writes go through the funnel, behind a single-use ticket, for every entry of the action table** (issue
+  - (g) **Writes go through the funnel, behind a single-use ticket, for every entry of the action table** (remembering this browser is the one exception beside signing in and out, for the same reason: it previews no change to anything but this browser's own credential) (issue
     #642 generalised it from the one pause-windows write). Given any action's preview, the confirm applies exactly the
     previewed change through that action's read-model funnel, whatever else the confirm's body carries: the ticket,
     not the body, holds the payload, the snapshots (`expect`), the targets and the reserve. Given a ticket that is
@@ -1302,7 +1306,7 @@ writes retain their existing interactive confirmation. This adds no unattended p
     (`REQ-OPERATOR-CONSOLE-ACTIONS` (a)). Tests:
     `admin/test/console-confirm.test.mjs`, `admin/test/console-pause-windows-expect.test.mjs`,
     `admin/test/console-server.test.mjs`, and `admin/test/console-actions.test.mjs`.
-  - (h) **The audit chain, refusals included.** Given rows appended across a month boundary, each row's `prev` is
+  - (h) **The audit chain, refusals included.** A restored remembered sign-in is a sign-in (`login-device`, one row per device per process, and refused if the row cannot be written), and remembering and ending a device are rows too (`device-remembered`, `device-ended`). Given rows appended across a month boundary, each row's `prev` is
     the sha256 of the previous raw line and `seq` rises by one; given a row edited, removed or reordered,
     `audit verify` names the first broken file and line and doctor warns; given the oldest month reaped, verify
     reports where the chain starts and does not call it broken; given an append that fails, the write it would
@@ -1342,7 +1346,9 @@ writes retain their existing interactive confirmation. This adds no unattended p
     `admin/test/console-server.test.mjs`, `worker/test/console-tokens.test.mjs`. **AMENDED 2026-10-24 (#737 PR 2):
     why a session ended, and a tokens file that cannot be read.** A session that ends leaves a TOMBSTONE, its 256-bit
     id and one word of `ENDED_REASONS` (`admin/src/console/session-ends.mjs`: `idle`, `max`, `revoked`, `role`, `all`,
-    `elsewhere`, `restart`, and `switched`, the page's own word, which no tombstone holds: below), judged in one order
+    `elsewhere`, `restart`, `device` (issue #849: its remembered device was removed or replaced), and the words no tombstone
+    holds: `switched`, the page's own word (below), and since issue #849 `device-store` (the device's record could not be read,
+    nothing ended) and `device-kept` (signed out, but the device could not be erased), which only the sign-in page shows), judged in one order
     (idle before max, then `all` for a `generation` that moved, `role` for an entry with the session's hash and another
     role, `revoked` for no entry with its hash), and written only where a session that WAS live ends: a `get` that fails
     it, the sweep of expired sessions (`idle` or `max`), a sign-out, and a sign-in over a live cookie once that sign-in
@@ -1354,7 +1360,7 @@ writes retain their existing interactive confirmation. This adds no unattended p
     to give), with `next=<page>` added when the page parser accepts the page asked for and it is not `/`, with the cookie cleared; given an API route or a write that needs a session, a 401 `{"error": "sign in
     first", "ended": <reason>}`, `ended` null when there is none (`INT-CONSOLE-STATE-API`), with NO Set-Cookie: the
     probe a page makes after a stream closed must still carry the cookie to read why, and a 401 for an old cookie must
-    never clear a newer one another tab's sign-in set meanwhile (before PR 2 it cleared the cookie); given no cookie,
+    never clear a newer one another tab's sign-in set meanwhile (before PR 2 it cleared the cookie); a session backed by a remembered device skips the idle and absolute limits and keeps every other check; its record is judged at each use, and one that cannot be read answers a page with a 303 to `/login?ended=device-store`, cookie kept, a program with a 503, and signs nobody out (issue #849); given no cookie,
     `location: /login`, with no Set-Cookie, and `?next=<page>` when the page asked for is one the page parser accepts other than `/` (issue #849: signing in with a token on that page returns there). Given a well-formed id the store does not
     hold and no tombstone, the reason is `restart` only while the process has been up for less than
     `PI_CONSOLE_MAX_HOURS` and has evicted no tombstone, and its sentence is a possibility, never a claim ("This
@@ -1376,7 +1382,9 @@ writes retain their existing interactive confirmation. This adds no unattended p
     browser then sends first) cannot make the sign-out a no-op answered 200; every other route still reads two
     `pdc_session` values as no cookie at all. It ends each such session's streams, writes one row per session it ended
     (the person signed out), or, when it ended none, one `anonymous` row with outcome `ok` and "no session was held, so
-    only the cookie was cleared", and always answers 200 with the clearing Set-Cookie. The page goes to sign-in only
+    only the cookie was cleared", and always answers 200 with the clearing Set-Cookie (since issue #849 the device
+    cookie's too; a browser signing out by this console's device cookie with no `pdc_session` this console held keeps
+    its `pdc_session`, which can only be another loopback console's, since cookies ignore ports). The page goes to sign-in only
     on that 200; any other answer, none, or none within `SIGN_OUT_TIMEOUT_MS` (10 s) keeps it, under one banner saying
     the sign-out was not confirmed (pressing Sign out again draws no second one), and a 200 that comes after that
     still goes to sign-in. A PAGE ACTS ONLY AS THE PERSON IT WAS DRAWN FOR. The browser's cookie is whoever signed in
@@ -1411,7 +1419,7 @@ writes retain their existing interactive confirmation. This adds no unattended p
     directory that gives nothing to group or other and belongs to the console's account, and `serve` refuses a
     parent directory that does not; a stale socket nobody answers on is replaced, and a live one is not. Test:
     `admin/test/console-listen.test.mjs`.
-  - (k) **An event stream ends with its session and never extends it** (issue #641). Given an open stream, when its
+  - (k) **An event stream ends with its session and never extends it** (issue #641). A device-backed session has no idle or absolute limit of its own, so being open is not what keeps it, and a stream whose device cannot be judged is held, not ended (issue #849). Given an open stream, when its
     session is logged out, its stream ends at once with `event: end`; when its token is revoked or rotated, its role
     changes, `sessions end-all` runs, or the session passes its idle or absolute limit, its stream ends with
     `event: end` within one tick (about a second) without any request arriving; given a session whose only activity
@@ -1427,7 +1435,7 @@ writes retain their existing interactive confirmation. This adds no unattended p
     `console-live.test.mjs`). **AMENDED 2026-10-24 (#737 PR 2): an end says why, a stopped console is not a
     sign-out, and a tokens file that cannot be read holds every stream.** Every `event: end` carries `{"ended":
     <word>}`, never empty data (a browser drops an event without any): one of `STREAM_ENDS` (`idle`, `max`,
-    `revoked`, `role`, `all`, `elsewhere`, `shutdown`) or null, held to that list by the one writer of the event
+    `revoked`, `role`, `all`, `elsewhere`, `device` since issue #849, `shutdown`) or null, held to that list by the one writer of the event
     (`finish`, through `streamEndOf`), so no stream ever ends with `restart` (this process opened it) or with a word
     the page does not know; the reason is the store's pure `verdict`, never `get`, which would end the session under
     the request that should. A sign-out ends that session's streams at once with `elsewhere` (`hub.endSession`), and a
@@ -8600,6 +8608,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-08 (#849, part 4) | Remembered sessions. **`REQ-CONSOLE-SECURITY` AMENDED**: a new amendment on remembered devices (the 400-day end included), the Statement (a session may be restored from a remembered device), and (c), (d), (f), (g), (h), (i) and (k); `ENDED_REASONS` gains `device`, `device-store` and `device-kept`, `STREAM_ENDS` gains `device`; sign-out (i) clears the device cookie, and keeps a `pdc_session` this console never held when the browser signs out by its device cookie. (a) was part 3's. Non-remembered sessions keep every limit: UNCHANGED, checked. (b), (e), (j), (l), (m), (n), memory-only tickets, `REQ-TERMINAL-CHAT`: UNCHANGED, checked. |
 | 2026-11-08 (#849, part 3) | **`REQ-CONSOLE-SECURITY` AMENDED**, (a): doctor judges the new remembered-device folder. **`REQ-ADMIN-VIA-PI-EXTENSION`**: that folder joins `guardedFiles()` as a directory. Nothing writes the store yet, so every other clause is UNCHANGED, checked. |
 | 2026-11-08 (#849, part 2) | Sign-in pages that recover on their own. **`REQ-CONSOLE-SECURITY` AMENDED**, (i): the redirect to `/login` carries the page asked for as `next`, once the page parser accepts it. A session ending in an open tab sends its page along too, never for `switched`. **`REQ-OPERATOR-CONSOLE-SCREENS`**: the link page gains `expired` and `signed-in`. The 60 seconds and single use are UNCHANGED, checked. |
 | 2026-11-08 (#849, part 1) | One command to a signed-in browser. **`REQ-BROWSER-FIRST-RUN-SETUP` AMENDED**, the Bootstrap acceptance: the self-install from npm's cache and its order, `open` in place of a printed link, `pi-dispatch console`. **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**: the one first-run question, which is exactly `--yes`, and `--ask-each`; plain `up` UNCHANGED, checked. `REQ-CONSOLE-SECURITY` (i), the 60 seconds and single use: UNCHANGED, checked: `open` mints later, never for longer. |

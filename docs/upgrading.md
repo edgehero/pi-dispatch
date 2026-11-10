@@ -286,7 +286,7 @@ Release numbers come from the git tags.
 
 | Store | What changed, and what an older release does with it | Guide |
 |---|---|---|
-| `console-devices/`, beside the console tokens file | New: one owner-only file for each remembered browser (#849). Nothing is written until someone chooses to remember a device. An older console ignores the folder, so a browser remembered on the new release signs in again after going back. | [console.md](console.md) |
+| `console-devices/`, beside the console tokens file | New: one owner-only file for each remembered browser (#849). Nothing is written until someone chooses to remember a device. An older console ignores the folder, so a browser remembered on the new release signs in again after going back. | [console.md](console.md#remembered-browsers) |
 
 ### 5.0.0
 

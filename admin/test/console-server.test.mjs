@@ -471,8 +471,9 @@ test("the route table: every route declares auth and write, writes are POST, and
     assert.equal(Boolean(r.write || r.readJson), r.method === "POST", `${r.path}: every POST meets the JSON request guards`);
     assert.equal(typeof r.handler, "function");
   }
-  // Only signing in and out exempt a write from read-only mode; reads need no exemption.
-  assert.deepEqual(ROUTES.filter((r) => r.readOnlyExempt).map((r) => r.path).sort(), ["/login", "/login/code", "/logout"]);
+  // Only signing in and out, and remembering this browser (issue #849), exempt a write from read-only mode: each changes this browser's own credential and
+  // nothing else. Reads need no exemption.
+  assert.deepEqual(ROUTES.filter((r) => r.readOnlyExempt).map((r) => r.path).sort(), ["/api/device/remember", "/login", "/login/code", "/logout"]);
   assert.deepEqual(ROUTES.filter((r) => r.readJson).map((r) => [r.path, r.auth, r.write]), [["/api/trigger-check", "viewer", false]], "the event checker is the sole read-only JSON POST, never an operator action");
   assert.deepEqual(lookupRoute("PUT", "/login"), { allow: ["GET", "HEAD", "POST"] });
   assert.equal(lookupRoute("HEAD", "/healthz").route.path, "/healthz");

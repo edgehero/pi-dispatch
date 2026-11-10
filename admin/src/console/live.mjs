@@ -160,6 +160,7 @@ export function makeLiveHub({
   loadPageData,
   pagePanels,
   peekSession,
+  sessionHeld = null,
   readTokens,
   endedReason = null,
   readOnly = false,
@@ -217,7 +218,8 @@ export function makeLiveHub({
   /** The stream's data key: its page and the canonical text of the part of its query the load reads (`dataKeyOf`). */
   const dataKeyOfSub = (sub) => `${sub.page}\n${sub.dkey}${sub.session.role === "agent" ? "\nagent" : ""}`;
   const isPage = (sub) => sub.kind === "page";
-  const pageSubs = () => [...subs].filter(isPage);
+  // A stream whose remembered device cannot be judged right now is held: told it is stale and sent nothing, as for an unreadable tokens file.
+  const pageSubs = () => [...subs].filter((sub) => isPage(sub) && !sub.deviceHeld);
   const nextSeq = () => `${epoch}-${(counter += 1)}`;
 
   function startTimer() {
@@ -321,7 +323,7 @@ export function makeLiveHub({
    * degraded draw may go over it.
    */
   function markStale(sub, since, what) {
-    const kind = what === "tokens" ? "tokens" : "data";
+    const kind = what === "tokens" || what === "device" ? what : "data";
     if (!isPage(sub) || !subs.has(sub)) return;
     sub.holds = true;
     if (sub.said === kind) return;
@@ -383,7 +385,22 @@ export function makeLiveHub({
         } catch {
           alive = null;
         }
-        if (!alive) finish(sub, reasonFor(sub.sessionId, file));
+        if (alive) {
+          sub.deviceHeld = false;
+          continue;
+        }
+        let held = false;
+        try {
+          held = sessionHeld?.(sub.sessionId, file) === true;
+        } catch {
+          held = false;
+        }
+        if (held) {
+          sub.deviceHeld = true;
+          markStale(sub, views.get(viewKeyOf(sub))?.at ?? null, "device");
+          continue;
+        }
+        finish(sub, reasonFor(sub.sessionId, file));
       }
     }
     // 2. stalled readers.
@@ -544,6 +561,8 @@ export function makeLiveHub({
     const byJob = new Map();
     for (const sub of subs) {
       if (sub.kind !== "transcript" && !(isPage(sub) && sub.jobId && !sub.transcriptDone)) continue;
+      // Held while its remembered device cannot be judged: sent nothing, transcripts included.
+      if (sub.deviceHeld) continue;
       if (!byJob.has(sub.jobId)) byJob.set(sub.jobId, []);
       byJob.get(sub.jobId).push(sub);
     }

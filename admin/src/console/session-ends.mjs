@@ -24,13 +24,13 @@
  */
 
 /** Why a session ended, as the server and the sign-in page know it, and `switched`, which only the page says (see the header). */
-export const ENDED_REASONS = Object.freeze(["idle", "max", "revoked", "role", "all", "elsewhere", "restart", "switched"]);
+export const ENDED_REASONS = Object.freeze(["idle", "max", "revoked", "role", "all", "elsewhere", "restart", "switched", "device", "device-store", "device-kept"]);
 
 /** The stream's word for the console stopping: the page keeps itself and waits, it is not signed out. */
 export const STREAM_SHUTDOWN = "shutdown";
 
 /** What a stream's `end` event may carry: the reasons a live session can end for, and the console stopping. */
-export const STREAM_ENDS = Object.freeze(["idle", "max", "revoked", "role", "all", "elsewhere", "shutdown"]);
+export const STREAM_ENDS = Object.freeze(["idle", "max", "revoked", "role", "all", "elsewhere", "device", "shutdown"]);
 
 /**
  * How a page's requests say the person it was drawn for (`<name>.<role>`, see `switched` above and `server.mjs`): its
@@ -68,6 +68,9 @@ export function endedNotices({ idleMinutes = 60, maxHours = 12 } = {}) {
     elsewhere: notice("idle", "logout", "This browser signed out in another tab", "Sign in again to carry on here."),
     restart: notice("idle", "rerun", "This console no longer knows this sign-in; it may have restarted", "Sign in again."),
     switched: notice("attention", "key", "This browser is now signed in as someone else", "Another tab signed this browser in with a different token, so this page stopped rather than act for that sign-in. Sign in again to carry on as yourself."),
+    device: notice("attention", "slot-held", "This browser is no longer remembered", "It was removed from the remembered devices. Sign in again."),
+    "device-store": notice("failed", "config", "The console could not check this browser's remembered sign-in", "Nothing was signed out. An operator should run `pi-dispatch doctor` on the host. Signing in with a link or a token works meanwhile, but this browser is then no longer remembered."),
+    "device-kept": notice("attention", "slot-held", "You are signed out, but this browser's remembered sign-in could not be erased", "An operator should run `pi-dispatch doctor` on the host, fix what it names, then remove this browser with `pi-dispatch-console device revoke`."),
   });
 }
 

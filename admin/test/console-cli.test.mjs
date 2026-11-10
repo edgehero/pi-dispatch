@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
 import { request } from "node:http";
 import { basename, join } from "node:path";
 import { test } from "node:test";
@@ -297,6 +297,29 @@ test("open: a token gone by the time of a fresh link gets no code", async () => 
   const r = await cli(["open"], { modules, env: deployment({ PI_CONSOLE_LISTEN: "127.0.0.1:4790" }).env, isTTY: false, isLocal: () => true, openLink: () => ({}) });
   assert.equal(r.code, 2);
   assert.equal(modules.rows.filter((row) => row.action === "login-code").length, 0);
+});
+
+test("device list and revoke (#849): ids and names only, audited, and refused where there is nothing to act on", async () => {
+  const d = deployment({ PI_CONSOLE_LISTEN: "127.0.0.1:4790" });
+  const modules = fakeModules();
+  const { makeDeviceTrust } = await import("../src/console/device-trust.mjs");
+  modules.deviceTrust = { makeDeviceTrust };
+  const trust = makeDeviceTrust({ tokensPath: join(d.dir, "console-tokens.json") });
+  const made = trust.remember({ name: "alice", role: "operator", tokenHash: "a".repeat(64), generation: 0, label: "Chrome on macOS" });
+  const list = await cli(["device", "list"], { dir: d.dir, env: d.env, modules });
+  assert.equal(list.code, 0);
+  assert.match(list.out[0], /^[0-9a-f]{12} {2}alice {2}operator {2}Chrome on macOS {2}remembered /);
+  assert.ok(!list.out.join(" ").includes(made.secret) && !list.out.join(" ").includes(made.hash), "never a secret, never the whole hash");
+  assert.equal((await cli(["device", "revoke"], { dir: d.dir, env: d.env, modules })).code, 2, "needs one of --id or --name");
+  assert.equal((await cli(["device", "revoke", "--id", "nope", "--name", "alice"], { dir: d.dir, env: d.env, modules })).code, 2, "not both");
+  assert.equal((await cli(["device", "revoke", "--id", "nope"], { dir: d.dir, env: d.env, modules })).code, 2);
+  const revoked = await cli(["device", "revoke", "--name", "alice"], { dir: d.dir, env: d.env, modules });
+  assert.equal(revoked.code, 0);
+  assert.match(revoked.out[0], /stopped remembering 1 device/);
+  assert.equal(trust.list().devices[0].ended.reason, "removed");
+  assert.equal(modules.rows.filter((r) => r.action === "device-ended").length, 1);
+  assert.equal((await cli(["device", "revoke", "--name", "alice"], { dir: d.dir, env: d.env, modules })).code, 2, "an ended device is nothing to revoke");
+  assert.match(USAGE, /device revoke --id <id> \| --name <name>/);
 });
 
 test("audit verify: intact is 0, a broken chain is 2 naming where", async () => {
@@ -661,6 +684,75 @@ test("serve wires the hub's endedReason to the store's pure verdict, and a unix 
   assert.deepEqual(verdicts.map(([id, f]) => [id, f === file]), [["a", true], ["b", true], ["c", true], ["d", true]]);
   assert.equal(out[2], "sign in: paste a token (pi-dispatch-console token add --name <you> --role operator makes one), or open a one-time link: pi-dispatch-console link --name <you> --port <your tunnel's local port>");
   assert.equal(out.length, 3);
+  stop();
+  assert.equal(await running, 0);
+});
+
+test("serve wires remembered devices end to end (#849): a removed device's live stream ends within a tick, and one whose record cannot be read is held, not ended", { skip: process.platform === "win32" ? "no device store on Windows" : false }, async (t) => {
+  // The real session store, device store, cookies and hub, through serve's own wiring: each of its three device seams (the server's `devices`, the
+  // store's `deviceVerdict`, the hub's `sessionHeld`) is what one of these assertions needs, so none can be dropped unseen.
+  const dep = deployment();
+  let stop;
+  const until = new Promise((resolve) => (stop = resolve));
+  t.after(() => stop());
+  let listening;
+  const up = new Promise((resolve) => (listening = resolve));
+  const modules = fakeModules();
+  modules.sessions = await import("../src/console/sessions.mjs");
+  modules.deviceTrust = await import("../src/console/device-trust.mjs");
+  modules.tokens.findToken = (f, presented) => (presented === TOKEN ? f.tokens[0] : null);
+  const err = [];
+  const running = runCli(["serve", "--deployment", dep.dir], { env: dep.env, modules, now: () => T0, uid: process.geteuid?.(), out: () => {}, err: (l) => err.push(l), until, onListening: listening });
+  const srv = await Promise.race([up, running.then((code) => assert.fail(`serve exited ${code} before listening: ${err.join(" ")}`))]);
+  const port = srv.address().port;
+  const writes = { origin: `http://127.0.0.1:${port}`, "sec-fetch-site": "same-origin", "content-type": "application/json" };
+  const rememberAlice = async () => {
+    const login = await http(port, { method: "POST", path: "/login", headers: writes, body: JSON.stringify({ token: TOKEN, remember: true }) });
+    assert.equal(login.status, 200, login.text);
+    const cookie = login.headers["set-cookie"].map((c) => c.split(";")[0]).find((c) => c.startsWith("pdc_device_"));
+    assert.ok(cookie, "serve passed the device store to the server");
+    return cookie;
+  };
+  /** An overview stream: resolves its text once `until(text)` holds, or after `ms` with what it has. */
+  const stream = (cookie) => {
+    let text = "";
+    const waiters = [];
+    const req = request({ host: "127.0.0.1", port, path: "/api/events?page=overview", headers: { host: `127.0.0.1:${port}`, cookie }, setHost: false }, (res) => {
+      res.on("data", (c) => {
+        text += c;
+        for (const w of [...waiters]) if (w.until(text)) w.resolve(text);
+      });
+    });
+    req.end();
+    t.after(() => req.destroy());
+    return {
+      when: (until, ms) => new Promise((resolve) => {
+        if (until(text)) return resolve(text);
+        waiters.push({ until, resolve });
+        setTimeout(() => resolve(text), ms);
+      }),
+    };
+  };
+
+  const first = await rememberAlice();
+  const s1 = stream(first);
+  assert.match(await s1.when((x) => x.includes("event: panel"), 5000), /event: panel/);
+  // `pi-dispatch-console device revoke`, as an operator runs it while serve holds the stream open.
+  const revoked = await cli(["device", "revoke", "--name", "alice"], { dir: dep.dir, env: dep.env, modules });
+  assert.equal(revoked.code, 0, revoked.err.join(" "));
+  assert.match(await s1.when((x) => x.includes("event: end"), 5000), /event: end\ndata: \{"ended":"device"\}/, "the hub's next tick ends it: a device session has no idle limit to do it later");
+
+  const second = await rememberAlice();
+  const s2 = stream(second);
+  assert.match(await s2.when((x) => x.includes("event: panel"), 5000), /event: panel/);
+  const dir = join(dep.dir, "console-devices");
+  const listed = (await cli(["device", "list"], { dir: dep.dir, env: dep.env, modules })).out.find((l) => !/ended/.test(l));
+  assert.ok(listed, "the second device is listed");
+  // Every live record made unreadable: the one this browser holds is among them.
+  for (const name of readdirSync(dir)) if (!JSON.parse(readFileSync(join(dir, name), "utf8")).ended) writeFileSync(join(dir, name), "{corrupt");
+  const held = await s2.when((x) => x.includes("event: end") || x.includes('"what":"device"'), 5000);
+  assert.match(held, /event: stale\ndata: \{"since":[0-9]+,"what":"device"\}/, "held, and told why");
+  assert.doesNotMatch(await s2.when((x) => x.includes("event: end"), 2500), /event: end/, "never ended while the record cannot be read");
   stop();
   assert.equal(await running, 0);
 });
