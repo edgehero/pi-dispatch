@@ -2301,3 +2301,98 @@ stateTest("viewer invitation stays in the initiating slot, disappears on expiry 
   assert.equal(w.document.querySelector("[data-setup-invitation]"), null);
   assert.equal(w.document.body.textContent.includes("foreign.invalid"), false);
 });
+
+// Issue #849, part 5: the Remember choice on the sign-in form, and the offer a fresh sign-in sees once.
+
+test("the Remember choice is posted only when ticked, and never ticked for you", async () => {
+  const page = String(loginPage({ remember: true }));
+  assert.match(page, /<input type="checkbox" name="remember">/, "drawn unticked");
+  assert.doesNotMatch(String(loginPage()), /name="remember"/, "drawn only where the console would remember");
+  const w = boot(page, { url: "/login" });
+  const input = w.document.getElementById("token");
+  input.value = "tok-1";
+  w.submit(w.document.getElementById("login-form"));
+  assert.deepEqual(calls(w, "/login").at(-1).body, { token: "tok-1" });
+  await w.fetch.open("/login").answer(401, { error: "that token is not valid for this console" });
+  w.document.querySelector('input[name="remember"]').checked = true;
+  input.value = "tok-2";
+  w.submit(w.document.getElementById("login-form"));
+  assert.deepEqual(calls(w, "/login").at(-1).body, { token: "tok-2", remember: true });
+});
+
+function offerPage() {
+  const ctx = { session: OPERATOR, readOnly: false, data: { parkedCount: 0, now: NOW }, query: {}, theme: null, flash: null, maxStreams: 4, offer: true };
+  const body = shellHtml("fleet", ctx, html`<section id="p-fleet-state" data-panel><h2>Fleet</h2></section>`);
+  return String(page({ title: "pi-dispatch console: Fleet", name: "fleet", body, live: null, query: "" }));
+}
+
+test("the offer: hidden until the script shows it, Not now hides it, and Remember asks as this page's person and reloads on 200", async () => {
+  const markup = offerPage();
+  assert.match(markup, /<div data-remember-offer hidden>/, "drawn hidden: only the script can act on it");
+  assert.doesNotMatch(markup.slice(markup.indexOf("data-remember-offer") - 200, markup.indexOf("data-remember-offer")), /data-panel/, "never inside a panel");
+  const dismissed = boot(markup, { url: "/fleet" });
+  const offer = dismissed.document.querySelector("[data-remember-offer]");
+  assert.equal(offer.hasAttribute("hidden"), false, "shown");
+  offer.querySelector("[data-remember-no]").click();
+  assert.equal(offer.hasAttribute("hidden"), true, "Not now hides it");
+  assert.equal(calls(dismissed, "/api/device/remember").length, 0);
+  const yes = boot(markup, { url: "/fleet" });
+  yes.document.querySelector("[data-remember-yes]").click();
+  const sent = calls(yes, "/api/device/remember");
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].init.headers[PERSON_HEADER], "ops.operator", "as the page's person");
+  await yes.fetch.open("/api/device/remember").answer(200, { ok: true, remembered: true });
+  assert.equal(yes.location.reloads, 1);
+  const refused = boot(markup, { url: "/fleet" });
+  const box = refused.document.querySelector("[data-remember-offer]");
+  box.querySelector("[data-remember-yes]").click();
+  await refused.fetch.open("/api/device/remember").answer(403, { error: "this sign-in is too old to be remembered; sign in again and remember it then" });
+  assert.equal(text(box.querySelector(".banner__s")), "This sign-in is too old to be remembered; sign in again and remember it then.", "the console's reason, as a sentence");
+  assert.equal(text(box.querySelector(".banner__t")), "This browser was not remembered");
+  assert.equal(box.querySelector("[data-remember-yes]").hasAttribute("hidden"), true, "nothing left to press");
+  assert.equal(refused.location.reloads ?? 0, 0);
+});
+
+test("a notice flash is drawn as its own banner, never a done banner's Changed by", () => {
+  const ctx = { session: OPERATOR, readOnly: false, data: { parkedCount: 0, now: NOW }, query: {}, theme: null, maxStreams: 4, flash: { notice: true, status: "attention", summary: "This browser was not remembered", body: "You are signed in for this session only." } };
+  const drawn = String(shellHtml("fleet", ctx, html`<section id="p-fleet-state" data-panel></section>`));
+  assert.match(drawn, /class="banner tone-attention"[^]*This browser was not remembered[^]*You are signed in for this session only\./);
+  assert.doesNotMatch(drawn, /Changed by/);
+  const quiet = String(shellHtml("fleet", { ...ctx, flash: { ...ctx.flash, status: "idle", summary: "This browser no longer remembers rob" } }, html``));
+  assert.match(quiet, /class="banner tone-idle"/);
+});
+
+test("the offer: one press sends one request, and an answer that never comes says so", async () => {
+  const markup = offerPage();
+  const w = boot(markup, { url: "/fleet" });
+  const yes = w.document.querySelector("[data-remember-yes]");
+  yes.click();
+  yes.click();
+  assert.equal(calls(w, "/api/device/remember").length, 1, "a second press while the first is out sends nothing");
+  await w.fetch.open("/api/device/remember").fail();
+  assert.equal(text(w.document.querySelector("[data-remember-offer] .banner__s")), "The console did not answer, so this browser is not remembered. Try again.");
+});
+
+test("a sign-in retried after the network failed keeps the Remember choice it was sent with", async () => {
+  const w = boot(String(loginPage({ remember: true })), { url: "/login" });
+  w.document.querySelector('input[name="remember"]').checked = true;
+  w.document.getElementById("token").value = "tok-1";
+  w.submit(w.document.getElementById("login-form"));
+  await w.fetch.open("/login").fail();
+  w.document.querySelector('input[name="remember"]').checked = false;
+  w.tick(RETRY_MS);
+  assert.deepEqual(calls(w, "/login").map((c) => c.body), [{ token: "tok-1", remember: true }, { token: "tok-1", remember: true }]);
+});
+
+test("unticking the box before trying again sends the next attempt without remember", async () => {
+  const w = boot(String(loginPage({ remember: true })), { url: "/login" });
+  const box = w.document.querySelector('input[name="remember"]');
+  box.checked = true;
+  w.document.getElementById("token").value = "tok-1";
+  w.submit(w.document.getElementById("login-form"));
+  await w.fetch.open("/login").answer(401, { error: "that token is not valid for this console" });
+  box.checked = false;
+  w.document.getElementById("token").value = "tok-2";
+  w.submit(w.document.getElementById("login-form"));
+  assert.deepEqual(calls(w, "/login").map((c) => c.body), [{ token: "tok-1", remember: true }, { token: "tok-2" }]);
+});

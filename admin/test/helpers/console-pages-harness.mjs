@@ -1,6 +1,7 @@
 import { readStaged, readTriggersDocument, readUpdates } from "../../src/updates-view.mjs";
 import { parseSandboxOpenUrl } from "@edgehero/pi-dispatch/opener-protocol";
 import { zeroTouchFixture } from "./zero-touch-goldens.mjs";
+import { DEVICES_FIXTURE } from "./devices-fixture.mjs";
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
 import { appendFileSync, mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
@@ -95,6 +96,7 @@ export const SHOTS = Object.freeze([
   ["secrets", "secrets", ""],
   ["connections", "connections", ""],
   ["updates", "updates", ""],
+  ["devices", "devices", ""],
   ["project", "project", "id=billing"],
   ["watch", "watch", "rule=shop-5xx"],
   ["watch-board", "watch-board", "rule=shop-5xx&finding=finding-1"],
@@ -136,7 +138,8 @@ export async function renderStatic() {
   assert.equal(typeof refusal, "string", "the runs page refuses a cursor that is not a number");
   const err = (opts) => errorPage({ theme: null, readOnly: false, ...opts });
   const draws = {
-    "login.anonymous": () => ({ status: 200, html: loginPage({ theme: null, notice: null, limits, listen: "tcp" }) }),
+    // A default console listens on loopback, where a browser may be remembered (issue #849), so its sign-in page offers it.
+    "login.anonymous": () => ({ status: 200, html: loginPage({ theme: null, notice: null, limits, listen: "tcp", remember: true }) }),
     "login-code.anonymous": () => ({ status: 200, html: loginCodePage({ theme: null }) }),
     "error-404.operator": () => err({ kind: "no-page", status: 404, session: STATIC_SESSIONS.operator }),
     "error-404.viewer": () => err({ kind: "no-page", status: 404, session: STATIC_SESSIONS.viewer }),
@@ -431,6 +434,8 @@ async function renderInChild() {
     // As serve builds it (`cli.mjs`); the overview's load asks it for the waiting jobs (issue #737, `PAGE_READS`).
     reader = RM.createFleetReader(fleetPaths, { makeQueueFn: queueFn, dollarEnvFn: () => ({}), nowFn: () => NOW, readLiveHostsFn: (redis, opts) => W.hostRegistry.readLiveHosts(atBeat(redis), opts) });
     const deps = {
+      // Issue #849: the remembered browsers as `serve` lists them for the page (no hashes), from the DevicesScreen card's fixture.
+      devices: () => ({ devices: DEVICES_FIXTURE, unreadable: 0, unreadableIds: [] }),
       secretsView: (snapshot) => secretsView({ snapshot, env }),
       connections: (snapshot) => readConnections({ snapshot, env, deploymentDir: deployment, paths: fleetPaths, now: NOW, redis: admin }),
       updates: async () => readUpdates({ redis: admin, staged: readStaged({ globalPiDir: fleetPaths.globalPiDir }), triggersDocument: readTriggersDocument({ triggersPath: fleetPaths.triggersPath }), records: [], audit: [], pinned: pricing.piAiVersion(), now: NOW }),

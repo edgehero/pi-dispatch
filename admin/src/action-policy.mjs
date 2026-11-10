@@ -58,6 +58,8 @@ export const ACTION_AGENT_POLICIES = Object.freeze({
   "sandbox-pin": rule("person", "Workspace retention belongs to the operator."),
   "sandbox-end": rule("person", "A sandbox shell belongs to its operator."),
   "sandbox-host-set": rule("person", "Terminal enrollment grants access on the operator's computer."),
+  "device-remove": rule("person", "Which browsers stay signed in is a person's decision."),
+  "sessions-end-all": rule("person", "Signing everyone out is a person's decision."),
   "zero-touch-group": rule("person", "Private question analysis is requested by an operator."),
   "zero-touch-name": rule("person", "A person supplies the group's name."),
   "zero-touch-instruction": rule("person", "Standing instructions are an operator's reviewed text."),

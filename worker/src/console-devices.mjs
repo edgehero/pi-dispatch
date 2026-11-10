@@ -270,7 +270,8 @@ export function rememberDevice({ dir, name, role, tokenHash, generation, tokenCr
 			if (endDevice({ dir, hash: row.hash, reason, fs, uid, now, random }).ok) row.record.ended = { reason, at: new Date(now()).toISOString() };
 		}
 		const live = mine.filter((row) => row.record.ended === undefined).length;
-		if (live >= MAX_DEVICES_PER_NAME) return { refusal: `"${name}" already has ${live} remembered devices, the most one sign-in may have; remove one first` };
+		// `full` lets a page say what a person can do about it (remove one), where every other refusal is the operator's to fix.
+		if (live >= MAX_DEVICES_PER_NAME) return { refusal: `"${name}" already has ${live} remembered devices, the most one sign-in may have; remove one first`, full: true };
 		const dead = mine.filter((row) => row.record.ended !== undefined).sort((a, b) => Date.parse(b.record.ended.at) - Date.parse(a.record.ended.at));
 		for (const row of dead.slice(MAX_DEVICES_PER_NAME - 1)) {
 			try { fs.unlinkSync(join(dir, `${row.hash}.json`)); } catch { /* the next remember */ }

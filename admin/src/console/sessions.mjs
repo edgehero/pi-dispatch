@@ -22,7 +22,8 @@
  * idle, then max (a session idle past its limit at its twelfth hour was ended by the idle limit first), then all (the
  * file's `generation` moved: `sessions end-all`), then role (an entry with its hash, none with its role), then revoked
  * (no entry with its hash). A tombstone is written only where a session that WAS live ends: a failing `get`, `sweep`,
- * and `destroy`. `peek` and `verdict` write nothing, so the hub can ask every tick without ending anything itself.
+ * `destroy`, and `endAll` (an operator's Sign everyone out, issue #849, whose `all` moves no generation). `peek` and
+ * `verdict` write nothing, so the hub can ask every tick without ending anything itself.
  *
  *   - Keyed by the 256-bit id alone, and each reason describes that session's own token, so a tombstone tells a
  *     browser nothing about any other token or session.
@@ -36,6 +37,10 @@
  * THE FLASH is the one change a session's next page reports in its banner (`setFlash` after a write, `takeFlash` when
  * the page is drawn). It is kept apart from the session, so `get`'s copies stay the shape every caller relies on, and
  * dropped with the session.
+ *
+ * THE OFFER (issue #849) is the same kind of thing: a fresh sign-in that could be remembered is offered that once, on its
+ * next page (`setOffer` at sign-in, `takeOffer` when the page is drawn), and only while the sign-in is fresh enough to be
+ * remembered. A page drawn later does not offer again, so ignoring it leaves an ordinary session and nothing to dismiss.
  */
 import { createHash, randomBytes } from "node:crypto";
 
@@ -60,7 +65,7 @@ export const FLASH_MAX_BYTES = 16384;
 /** What `reasonOf` answers when a device-backed session's record cannot be judged. A symbol, so it can never be mistaken for a reason. */
 const UNJUDGED = Symbol("unjudged");
 
-/** The reasons `destroy` takes: a sign-out or a sign-in over the cookie (`elsewhere`), or null for none (an audit failure). */
+/** The reasons `destroy` takes: a sign-out or a sign-in over the cookie (`elsewhere`), or null for none (an audit failure). `all` is `endAll`'s alone. */
 const DESTROY_REASONS = Object.freeze(["elsewhere", null]);
 
 /**
@@ -81,6 +86,8 @@ export function makeSessionStore({ now = () => Date.now(), random = randomBytes,
   // Ended ids and their reason, in insertion order (a Map iterates oldest first, which makes it the FIFO).
   const tombstones = new Map();
   const flashes = new Map();
+  // Sessions offered "remember this browser" on their next page (issue #849): ids, dropped with the session.
+  const offers = new Set();
   // When this store, so this process, began: `restart` is possible only while a session from before could still live.
   const bornAt = now();
   let evicted = 0;
@@ -99,12 +106,19 @@ export function makeSessionStore({ now = () => Date.now(), random = randomBytes,
   }
 
   /** Why `session` fails against the usable `file` at `t`, in the header's order, or null when it passes. */
-  function reasonOf(session, file, t) {
-    const timed = timeReason(session, t);
-    if (timed !== null) return timed;
+  /** Why the tokens file no longer signs `session` in, in the store's order, or null: a moved generation, another role for its hash, its hash gone. */
+  function tokenReason(session, file) {
     if (file.generation !== session.generation) return "all";
     const withHash = file.tokens.filter((entry) => entry?.sha256 === session.tokenHash);
     if (!withHash.some((entry) => entry?.role === session.role)) return withHash.length > 0 ? "role" : "revoked";
+    return null;
+  }
+
+  function reasonOf(session, file, t) {
+    const timed = timeReason(session, t);
+    if (timed !== null) return timed;
+    const token = tokenReason(session, file);
+    if (token !== null) return token;
     // Last: a bad store must not hide a revocation the tokens file already proves.
     if (session.deviceHash && typeof deviceVerdict === "function") {
       const device = deviceVerdict(session.deviceHash);
@@ -131,6 +145,7 @@ export function makeSessionStore({ now = () => Date.now(), random = randomBytes,
     if (held?.deviceHash && byDevice.get(held.deviceHash) === id) byDevice.delete(held.deviceHash);
     sessions.delete(id);
     flashes.delete(id);
+    offers.delete(id);
   }
 
   /** The stored session `id` names when every check passes against `file` now, else null. Changes nothing. */
@@ -288,6 +303,43 @@ export function makeSessionStore({ now = () => Date.now(), random = randomBytes,
       if (typeof text !== "string" || Buffer.byteLength(text, "utf8") > FLASH_MAX_BYTES) return false;
       flashes.set(id, JSON.parse(text));
       return true;
+    },
+
+    /** Offer "remember this browser" on live session `id`'s next page (see the header). False for an id the store does not hold. */
+    setOffer(id) {
+      if (typeof id !== "string" || !sessions.has(id)) return false;
+      offers.add(id);
+      return true;
+    },
+
+    /** Whether `id`'s page should offer it now, which then ends the offer: only once, and only while the sign-in is younger than `freshMs`. */
+    takeOffer(id, freshMs) {
+      if (typeof id !== "string" || !offers.has(id)) return false;
+      offers.delete(id);
+      const session = sessions.get(id);
+      return Boolean(session && !session.deviceHash && now() - session.createdAt <= freshMs);
+    },
+
+    /**
+     * End every session this store holds, each with the tombstone `all` (an operator signed everyone out from the console, issue #849), and return
+     * `[{id, reason}]` so the caller can end what each held elsewhere (setup state, tickets, open streams) and tell its open tabs the same word. A
+     * session already past a time limit keeps that limit's word, as `destroy` does, and one the tokens file already ends keeps that file's word.
+     */
+    endAll(file = null) {
+      const ids = [...sessions.keys()];
+      const t = now();
+      // A truer word first, as `get` would have given at the next request: a token already revoked is told so, never "your token still works".
+      return ids.map((id) => {
+        const session = sessions.get(id);
+        const reason = timeReason(session, t) ?? (usable(file) ? tokenReason(session, file) : null) ?? "all";
+        end(id, reason);
+        return { id, reason };
+      });
+    },
+
+    /** The device hashes this store holds a session for (issue #849): what "sign everyone out" refuses in memory when their records cannot be read. */
+    heldDevices() {
+      return [...byDevice.keys()];
     },
 
     /** The flash held for `id`, which is then gone (a page shows a change once), or null. */

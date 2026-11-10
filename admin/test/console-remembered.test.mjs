@@ -13,6 +13,8 @@ import { DEVICE_STORE_UNUSABLE, createConsoleServer } from "../src/console/serve
 import * as cookies from "../src/console/sessions.mjs";
 import { makeSessionStore } from "../src/console/sessions.mjs";
 import { makeLoginLimiter } from "../src/console/guards.mjs";
+import { makeConfirmTickets } from "../src/console/confirm.mjs";
+import { clearLoginCodes, mintLoginCode } from "../src/console/login-codes.mjs";
 
 // Remembered devices through the real server, the real session store, the real cookies and the real device store (issue #849). A "restart" is a new server and a
 // new session store over the same folder, which is exactly what a console restart leaves behind.
@@ -34,25 +36,26 @@ const baseFile = () => ({ version: 1, generation: 0, tokens: [
 const servers = [];
 after(() => { for (const s of servers) s.close(); });
 
-function world({ config = {}, consoleOrigin = null, hub = false, denyMax = undefined } = {}) {
+function world({ config = {}, consoleOrigin = null, hub = false, denyMax = undefined, realTickets = false, platform = "linux", loginCodes = undefined } = {}) {
   const root = fs.realpathSync(tempDir("console-remembered-"));
-  const shared = { root, tokensPath: join(root, "console-tokens.json"), file: baseFile(), t: T0, consoleOrigin, rows: [], logs: [], bodies: [], ticketEnds: [], hubEnds: [], answer: null, fsOverride: fs };
+  const shared = { root, tokensPath: join(root, "console-tokens.json"), file: baseFile(), t: T0, consoleOrigin, rows: [], logs: [], bodies: [], ticketEnds: [], setupEnds: [], hubEnds: [], answer: null, fsOverride: fs };
   const now = () => shared.t;
   async function boot() {
-    const trust = makeDeviceTrust({ tokensPath: shared.tokensPath, fs: shared.fsOverride === fs ? fs : shared.fsOverride, now, log: (l) => shared.logs.push(l), platform: "linux", ...(denyMax === undefined ? {} : { denyMax }) });
+    const trust = makeDeviceTrust({ tokensPath: shared.tokensPath, fs: shared.fsOverride === fs ? fs : shared.fsOverride, now, log: (l) => shared.logs.push(l), platform, ...(denyMax === undefined ? {} : { denyMax }) });
     const sessions = makeSessionStore({ now, idleMs: HOUR, maxMs: 12 * HOUR, deviceVerdict: (hash) => trust.verdictOf(hash) });
     const server = createConsoleServer({
       config: { allowedHosts: [], readOnly: false, maxMs: 12 * HOUR, idleMs: HOUR, listen: { kind: "tcp", host: "127.0.0.1", port: 0 }, pauseWindowsPath: join(root, "pw.json"), ...config },
       now, sessions, devices: trust, cookies,
       audit: { append: (row) => { if (shared.auditFails) throw new Error("disk full"); shared.rows.push(row); return { seq: shared.rows.length }; } },
-      tickets: { endSession(id) { shared.ticketEnds.push(id); }, issue: () => ({ ticket: "t" }), redeem: () => ({ refusal: "no" }) },
+      tickets: realTickets ? (() => { const t = makeConfirmTickets({ now }); return { ...t, endSession(id) { shared.ticketEnds.push(id); return t.endSession(id); } }; })() : { endSession(id) { shared.ticketEnds.push(id); }, issue: () => ({ ticket: "t" }), redeem: () => ({ refusal: "no" }) },
+      actionDeps: { setup: { endSession(id) { shared.setupEnds.push(id); } }, ...(loginCodes === null ? {} : { loginCodes: loginCodes ?? { clear: () => clearLoginCodes({ dir: join(root, "console-login-codes"), fs }) } }) },
       limiter: makeLoginLimiter({ now, burst: 1000, perMinute: 1000 }),
       log: (l) => shared.logs.push(l),
       readTokens: () => ({ file: shared.file }),
       findToken: (file, presented) => file.tokens.find((e) => e.sha256 === sha(presented)) ?? null,
       consumeLoginCode: (code) => shared.codes?.get(code) ?? { refusal: "unknown" },
       writePauseWindows: () => ({ ok: true }),
-      pages: { ...realPages, loadPageData: async () => ({}), pagePanels: async (name) => [{ id: "p-main", html: `<p>${name}</p>` }], renderPage: async (name, ctx) => ({ status: 200, html: `<!doctype html><title>${name}</title><p>${ctx?.session?.name ?? ""}</p>` }) },
+      pages: { ...realPages, loadPageData: async () => ({}), pagePanels: async (name) => [{ id: "p-main", html: `<p>${name}</p>` }], renderPage: async (name, ctx) => { shared.pageCtx = ctx; return { status: 200, html: `<!doctype html><title>${name}</title><p>${ctx?.session?.name ?? ""}</p>` }; } },
       pageDeps: { fleet: { snapshot: async () => ({}) } },
       // A hub that says, for each end, whether the request it came from had answered yet (`answer`, a sign-in's response, seen beside the handler).
       hub: hub ? { endSession: (id, reason) => shared.hubEnds.push([id, reason, shared.answer?.writableFinished === true]), subscribe: () => () => {} } : null,
@@ -981,4 +984,567 @@ test("past the in-memory limit a sign-out's audit row does not claim the device 
   assert.equal(row?.outcome, "failed");
   assert.match(row.reason, /could not hold it either, so revoke it/);
   assert.doesNotMatch(row.reason, /refused in memory/);
+});
+
+// Part 5 of issue #849: the Remember choice, the offer, the remembered mark, and the two operator actions.
+
+test("the session store offers a fresh sign-in once, never a remembered one, and forgets the offer with the session", () => {
+  let t = T0;
+  const store = makeSessionStore({ now: () => t, idleMs: HOUR, maxMs: 12 * HOUR });
+  const { id } = store.create({ name: "rob", role: "operator", tokenHash: "a".repeat(64), generation: 0 });
+  assert.equal(store.takeOffer(id, REMEMBER_FRESH_MS), false, "nothing offered yet");
+  assert.equal(store.setOffer(id), true);
+  assert.equal(store.takeOffer(id, REMEMBER_FRESH_MS), true);
+  assert.equal(store.takeOffer(id, REMEMBER_FRESH_MS), false, "once");
+  store.setOffer(id);
+  t += REMEMBER_FRESH_MS + 1;
+  assert.equal(store.takeOffer(id, REMEMBER_FRESH_MS), false, "too old to be remembered: not offered");
+  const other = store.create({ name: "ann", role: "viewer", tokenHash: "b".repeat(64), generation: 0 }).id;
+  store.setOffer(other);
+  store.destroy(other, "elsewhere");
+  assert.equal(store.takeOffer(other, REMEMBER_FRESH_MS), false);
+  assert.equal(store.setOffer("x".repeat(43)), false, "an id the store does not hold");
+  const device = store.ensureDevice({ deviceHash: "d".repeat(64), name: "rob", role: "operator", tokenHash: "a".repeat(64), generation: 0 }).id;
+  store.setOffer(device);
+  assert.equal(store.takeOffer(device, REMEMBER_FRESH_MS), false, "a remembered session is never offered");
+});
+
+test("endAll ends every session with the tombstone all, keeps a time limit's word, and returns the ids", () => {
+  let t = T0;
+  const store = makeSessionStore({ now: () => t, idleMs: HOUR, maxMs: 12 * HOUR });
+  const file = { version: 1, generation: 0, tokens: [] };
+  const a = store.create({ name: "rob", role: "operator", tokenHash: "a".repeat(64), generation: 0 }).id;
+  const b = store.create({ name: "ann", role: "viewer", tokenHash: "b".repeat(64), generation: 0 }).id;
+  const d = store.ensureDevice({ deviceHash: "d".repeat(64), name: "rob", role: "operator", tokenHash: "a".repeat(64), generation: 0 }).id;
+  // The two ordinary sessions go idle; the device-backed one has no idle limit.
+  t += 70 * 60000;
+  assert.deepEqual(store.endAll().map(({ id, reason }) => [id, reason]).sort(), [[a, "idle"], [b, "idle"], [d, "all"]].sort());
+  assert.equal(store.size(), 0);
+  assert.deepEqual([store.endedOf(a), store.endedOf(b), store.endedOf(d)], ["idle", "idle", "all"], "a time limit keeps its word");
+  assert.equal(store.sessionOfDevice("d".repeat(64)), null);
+  const live = store.create({ name: "ann", role: "viewer", tokenHash: "b".repeat(64), generation: 0 }).id;
+  store.endAll();
+  assert.deepEqual([store.endedOf(live), store.get(live, file)], ["all", null]);
+});
+
+test("clearLoginCodes removes every pending link, expired or not, and a missing folder holds none", () => {
+  const root = fs.realpathSync(tempDir("console-remembered-codes-"));
+  const dir = join(root, "console-login-codes");
+  assert.deepEqual(clearLoginCodes({ dir, fs }), { removed: 0, left: 0 });
+  const one = mintLoginCode({ dir, name: "rob", fs, now: () => T0 });
+  const two = mintLoginCode({ dir, name: "ann", fs, now: () => T0, binding: { sha256: "b".repeat(64), createdAt: "2026-10-01T00:00:00.000Z", role: "viewer", generation: 0 } });
+  assert.ok(one.code && two.code);
+  fs.writeFileSync(join(dir, "README"), "not a code");
+  assert.deepEqual(clearLoginCodes({ dir, fs }), { removed: 2, left: 0 });
+  assert.deepEqual(fs.readdirSync(dir), ["README"], "only code files go");
+});
+
+test("a fresh sign-in that did not ask is offered once on its next page; a remembered, invited, agent or plain-HTTP sign-in is not", async () => {
+  const w = world();
+  const c = await w.boot();
+  const session = sessionCookieOf(await c.post("/login", { token: OPERATOR }));
+  await c.send({ path: "/runs", headers: { cookie: session, accept: "text/html" } });
+  assert.equal(w.shared.pageCtx.offer, true);
+  assert.equal(w.shared.pageCtx.session.remembered, null);
+  await c.send({ path: "/runs", headers: { cookie: session, accept: "text/html" } });
+  assert.equal(w.shared.pageCtx.offer, false, "once");
+  const remembered = (await remember(c)).cookie;
+  await c.send({ path: "/runs", headers: { cookie: remembered, accept: "text/html" } });
+  assert.equal(w.shared.pageCtx.offer, false, "asked already");
+  assert.match(w.shared.pageCtx.session.remembered, /^[0-9a-f]{12}$/, "the page knows this browser is remembered, by its short id");
+  const agent = sessionCookieOf(await c.post("/login", { token: AGENT }));
+  await c.send({ path: "/runs", headers: { cookie: agent, accept: "text/html" } });
+  assert.equal(w.shared.pageCtx.offer, false, "an agent token is never offered");
+  w.shared.codes = new Map([["i".repeat(43), { name: "ann", binding: { createdAt: "2026-10-01T00:00:00.000Z", generation: 0, role: "viewer", sha256: sha(VIEWER) } }]]);
+  const invited = sessionCookieOf(await c.post("/login/code", { code: "i".repeat(43) }));
+  await c.send({ path: "/runs", headers: { cookie: invited, accept: "text/html" } });
+  assert.equal(w.shared.pageCtx.offer, false, "nor an invitation");
+  const late = sessionCookieOf(await c.post("/login", { token: SECOND }));
+  w.advance(REMEMBER_FRESH_MS + 1);
+  await c.send({ path: "/runs", headers: { cookie: late, accept: "text/html" } });
+  assert.equal(w.shared.pageCtx.offer, false, "nor once it is too old to be remembered");
+  const plain = world({ config: { listen: { kind: "tcp", host: "0.0.0.0", port: 0 }, allowedHosts: ["127.0.0.1"] } });
+  const p = await plain.boot();
+  const across = sessionCookieOf(await p.post("/login", { token: OPERATOR }));
+  await p.send({ path: "/runs", headers: { cookie: across, accept: "text/html" } });
+  assert.equal(plain.shared.pageCtx.offer, false, "nor over plain HTTP across a network");
+});
+
+test("the sign-in page draws the Remember choice only where the console would remember this browser", async () => {
+  const w = world();
+  const c = await w.boot();
+  assert.match((await c.send({ path: "/login" })).text, /name="remember"/);
+  const plain = world({ config: { listen: { kind: "tcp", host: "0.0.0.0", port: 0 }, allowedHosts: ["127.0.0.1"] } });
+  assert.doesNotMatch((await (await plain.boot()).send({ path: "/login" })).text, /name="remember"/, "a public bind over plain HTTP");
+  const lan = world({ config: { allowedHosts: ["console.lan"] } });
+  assert.doesNotMatch((await (await lan.boot()).send({ path: "/login", headers: { host: "console.lan" } })).text, /name="remember"/, "a proxy name over plain HTTP");
+  const https = world({ config: { listen: { kind: "tcp", host: "0.0.0.0", port: 0 }, allowedHosts: ["127.0.0.1", "console.example"] }, consoleOrigin: "https://console.example" });
+  assert.match((await (await https.boot()).send({ path: "/login", headers: { host: "console.example" } })).text, /name="remember"/, "an enrolled HTTPS origin");
+});
+
+test("someone else signing in on a remembered browser is told, on their first page, that it no longer remembers the other person", async () => {
+  const w = world();
+  const c = await w.boot();
+  const { cookie } = await remember(c);
+  const sam = sessionCookieOf(await c.post("/login", { token: SECOND }, { cookie }));
+  await c.send({ path: "/runs", headers: { cookie: sam, accept: "text/html" } });
+  assert.deepEqual([w.shared.pageCtx.flash?.notice, w.shared.pageCtx.flash?.status, w.shared.pageCtx.flash?.summary], [true, "idle", "This browser no longer remembers rob"]);
+  const rob = (await remember(c)).cookie;
+  const own = await c.post("/login", { token: OPERATOR }, { cookie: rob });
+  assert.equal(own.json().remembered, true, "the same person on their own remembered browser");
+  await c.send({ path: "/runs", headers: { cookie: rob, accept: "text/html" } });
+  assert.equal(w.shared.pageCtx.flash, null, "a person's own sign-in says nothing of the kind");
+});
+
+/** Preview then confirm an action as `cookie`, with the page's person, as the console's own page does. */
+async function act(c, cookie, name, body, person) {
+  const headers = { cookie, ...(person ? { "x-console-as": person } : {}) };
+  const preview = await c.post(`/api/act/${name}/preview`, body, headers);
+  if (preview.status !== 200) return { preview };
+  const confirm = await c.post(`/api/act/${name}/confirm`, { ticket: preview.json().ticket }, headers);
+  return { preview, confirm };
+}
+
+test("an operator removes one remembered browser, behind a preview, and it signs out at its next request", async () => {
+  const w = world({ realTickets: true });
+  const c = await w.boot();
+  const ann = (await remember(c, VIEWER)).cookie;
+  const ops = sessionCookieOf(await c.post("/login", { token: OPERATOR }));
+  const [{ id }] = c.trust.list().devices;
+  const { preview, confirm } = await act(c, ops, "device-remove", { id }, "rob.operator");
+  assert.equal(preview.status, 200, preview.text);
+  assert.match(preview.json().summary[0], /^Stop remembering .+ for ann$/);
+  assert.equal(preview.json().danger, true);
+  assert.equal(confirm.status, 200, confirm.text);
+  assert.equal(c.trust.list().devices[0].ended.reason, "removed");
+  assert.deepEqual([(await whoami(c, ann)).status, (await whoami(c, ann)).json().ended], [401, "device"]);
+  assert.ok(w.shared.rows.some((r) => r.action === "write" && r.kind === "device-remove" && r.target === id && r.outcome === "ok"));
+  assert.equal((await act(c, ops, "device-remove", { id }, "rob.operator")).preview.status, 409, "nothing left to remove");
+  assert.equal((await act(c, ops, "device-remove", { id: "../../etc" }, "rob.operator")).preview.status, 400);
+});
+
+test("a viewer and an agent can remove no browser and sign nobody out", async () => {
+  const w = world({ realTickets: true });
+  const c = await w.boot();
+  await remember(c);
+  const [{ id }] = c.trust.list().devices;
+  const viewer = sessionCookieOf(await c.post("/login", { token: VIEWER }));
+  const agent = sessionCookieOf(await c.post("/login", { token: AGENT }));
+  for (const [cookie, person] of [[viewer, "ann.viewer"], [agent, "bot.agent"]]) {
+    assert.equal((await act(c, cookie, "device-remove", { id }, person)).preview.status, 403, person);
+    assert.equal((await act(c, cookie, "sessions-end-all", {}, person)).preview.status, 403, person);
+  }
+  assert.equal(c.trust.list().devices[0].ended, undefined);
+});
+
+test("signing everyone out ends every session and remembered browser and every pending link, and needs no tokens file change", async () => {
+  const w = world({ realTickets: true, hub: true });
+  const c = await w.boot();
+  const remembered = (await remember(c, VIEWER)).cookie;
+  const other = sessionCookieOf(await c.post("/login", { token: SECOND }));
+  const ops = sessionCookieOf(await c.post("/login", { token: OPERATOR }));
+  const codes = join(w.shared.root, "console-login-codes");
+  mintLoginCode({ dir: codes, name: "ann", fs, now: () => w.shared.t, binding: { sha256: sha(VIEWER), createdAt: "2026-10-01T00:00:00.000Z", role: "viewer", generation: 0 } });
+  const generation = w.shared.file.generation;
+  const { preview, confirm } = await act(c, ops, "sessions-end-all", {}, "rob.operator");
+  assert.equal(preview.status, 200, preview.text);
+  assert.match(preview.json().summary[1], /^3 sessions end now, 1 remembered browser is forgotten/);
+  assert.equal(confirm.status, 200, confirm.text);
+  for (const cookie of [remembered, other, ops]) {
+    const res = await whoami(c, cookie);
+    assert.equal(res.status, 401);
+  }
+  assert.equal((await whoami(c, other)).json().ended, "all");
+  assert.equal(c.trust.list().devices[0].ended.reason, "all");
+  assert.deepEqual(fs.readdirSync(codes).filter((n) => n.endsWith(".json")), [], "the invitation link is gone");
+  assert.equal(w.shared.file.generation, generation, "the tokens file was not touched");
+  assert.ok(w.shared.hubEnds.some(([, why]) => why === "all"), "open streams end, said why");
+  assert.ok(w.shared.rows.some((r) => r.action === "write" && r.kind === "sessions-end-all" && r.outcome === "ok"));
+});
+
+test("signing everyone out is refused before anything is touched when the remembered browsers cannot be read", async () => {
+  const w = world({ realTickets: true });
+  const c = await w.boot();
+  await remember(c);
+  const ops = sessionCookieOf(await c.post("/login", { token: OPERATOR }));
+  const dir = join(w.shared.root, "console-devices");
+  fs.chmodSync(dir, 0o755);
+  try {
+    const { preview } = await act(c, ops, "sessions-end-all", {}, "rob.operator");
+    assert.equal(preview.status, 503, preview.text);
+    assert.equal((await whoami(c, ops)).status, 200, "nobody was signed out");
+  } finally {
+    fs.chmodSync(dir, 0o700);
+  }
+});
+
+test("signing everyone out names a browser it could not forget, and still signs everyone else out", async () => {
+  const w = world({ realTickets: true });
+  const { cookie } = await remember(await w.boot(), VIEWER);
+  w.shared.fsOverride = unwritable();
+  const c = await w.boot();
+  const ops = sessionCookieOf(await c.post("/login", { token: OPERATOR }));
+  const [{ id }] = c.trust.list().devices;
+  const { confirm } = await act(c, ops, "sessions-end-all", {}, "rob.operator");
+  assert.equal(confirm.status, 409, confirm.text);
+  assert.match(confirm.json().error, new RegExp(`Everyone else was signed out, but 1 remembered browser could not be forgotten \\(${id}\\)`));
+  assert.equal((await whoami(c, ops)).status, 401);
+  assert.equal((await whoami(c, cookie)).status, 401, "refused in memory all the same");
+});
+
+// Part 5, the adversary's round 1 (issue #849).
+
+test("signing everyone out refuses a held browser whose record cannot be read, names it, and points to the host's command", async () => {
+  const w = world({ realTickets: true });
+  const c = await w.boot();
+  const { cookie } = await remember(c, VIEWER);
+  assert.equal((await whoami(c, cookie)).status, 200);
+  const [{ hash, id }] = c.trust.list().devices;
+  const path = join(w.shared.root, "console-devices", `${hash}.json`);
+  const bytes = fs.readFileSync(path, "utf8");
+  fs.writeFileSync(path, "{corrupt");
+  const ops = sessionCookieOf(await c.post("/login", { token: OPERATOR }));
+  const { preview, confirm } = await act(c, ops, "sessions-end-all", {}, "rob.operator");
+  assert.match(preview.json().summary.join(" "), new RegExp(`1 remembered browser cannot be read now \\(${id}\\)`));
+  assert.equal(confirm.status, 409, confirm.text);
+  assert.match(confirm.json().error, new RegExp(`1 remembered browser could not be read \\(${id}\\).*pi-dispatch-console sessions end-all on the host`));
+  fs.writeFileSync(path, bytes, { mode: 0o600 });
+  assert.equal((await whoami(c, cookie)).status, 401, "refused in this process once the record reads again");
+});
+
+test("signing everyone out keeps the truer word where the tokens file proves one", async () => {
+  const w = world({ realTickets: true });
+  const c = await w.boot();
+  const ann = sessionCookieOf(await c.post("/login", { token: VIEWER }));
+  const annDevice = (await remember(c, VIEWER)).cookie;
+  const ops = sessionCookieOf(await c.post("/login", { token: OPERATOR }));
+  w.shared.file.tokens = w.shared.file.tokens.filter((e) => e.name !== "ann");
+  const { confirm } = await act(c, ops, "sessions-end-all", {}, "rob.operator");
+  assert.equal(confirm.status, 200, confirm.text);
+  assert.equal((await whoami(c, ann)).json().ended, "revoked");
+  assert.equal(c.trust.list().devices[0].ended.reason, "revoked");
+  assert.equal((await whoami(c, annDevice)).json().ended, "revoked");
+});
+
+test("a ticked box the console could not honour says so on the next page, and a full sign-in says what to do", async () => {
+  const w = world();
+  const { cookie } = await remember(await w.boot());
+  w.shared.fsOverride = unwritable();
+  const c = await w.boot();
+  const res = await c.post("/login", { token: SECOND, remember: true });
+  assert.deepEqual([res.status, res.json().remembered], [200, false]);
+  await c.send({ path: "/runs", headers: { cookie: sessionCookieOf(res), accept: "text/html" } });
+  assert.deepEqual([w.shared.pageCtx.flash?.notice, w.shared.pageCtx.flash?.status, w.shared.pageCtx.flash?.summary], [true, "attention", "This browser was not remembered"]);
+  assert.match(w.shared.pageCtx.flash.body, /signed in for this session only/);
+  assert.ok(cookie);
+  // The most remembered browsers one sign-in may have: the person can do something about that, and is told what.
+  const full = world();
+  const f = await full.boot();
+  for (let i = 0; i < 32; i++) assert.equal((await f.post("/login", { token: OPERATOR, remember: true })).json().remembered, true, `browser ${i + 1}`);
+  const over = await f.post("/login", { token: OPERATOR, remember: true });
+  assert.equal(over.json().remembered, false);
+  await f.send({ path: "/runs", headers: { cookie: sessionCookieOf(over), accept: "text/html" } });
+  assert.match(full.shared.pageCtx.flash.body, /already has 32 remembered browsers.*Remove one on Remembered browsers/);
+  const later = sessionCookieOf(await f.post("/login", { token: OPERATOR }));
+  const refused = await f.post("/api/device/remember", {}, { cookie: later });
+  assert.deepEqual([refused.status, /already has 32 remembered browsers/.test(refused.text)], [409, true]);
+});
+
+test("the replaced browser's banner warns when its end could not be written", async () => {
+  const w = world();
+  const { cookie } = await remember(await w.boot());
+  w.shared.fsOverride = unwritable();
+  const c = await w.boot();
+  const sam = sessionCookieOf(await c.post("/login", { token: SECOND }, { cookie }));
+  await c.send({ path: "/runs", headers: { cookie: sam, accept: "text/html" } });
+  assert.deepEqual([w.shared.pageCtx.flash?.status, w.shared.pageCtx.flash?.summary], ["attention", "This browser may still remember rob"]);
+});
+
+test("the devices page tells a person to tick the box only where the sign-in page draws it", async () => {
+  const draw = async (rememberable, session = {}) => String((await realPages.renderPage("devices", { data: { devices: { devices: [], unreadable: 0, unreadableIds: [] } }, query: {}, session: { name: "rob", role: "operator", remembered: null, ...session }, rememberable })).html);
+  assert.match(await draw(true), /sign in again with Remember this trusted device ticked/);
+  const here = await draw("transport");
+  assert.doesNotMatch(here, /ticked/);
+  assert.match(here, /cannot be from here/);
+  assert.match(await draw("store"), /cannot use its store of remembered browsers/, "a store problem is doctor's, not the transport's");
+  assert.match(await draw("windows"), /Windows host/);
+  assert.match(await draw(true, { role: "viewer", invited: true }), /a sign-in from an invitation cannot be/);
+});
+
+test("a codes folder that cannot be listed is said to be unreadable, never counted", () => {
+  const root = fs.realpathSync(tempDir("console-remembered-codes-"));
+  const dir = join(root, "console-login-codes");
+  mintLoginCode({ dir, name: "rob", fs, now: () => T0 });
+  const unlistable = { ...fs, readdirSync: () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); } };
+  assert.deepEqual(clearLoginCodes({ dir, fs: unlistable }), { removed: 0, left: 0, unreadable: true });
+});
+
+// Part 5, the adversary's round 2 (issue #849).
+
+test("signing everyone out tells each open tab the same word its next request reads", async () => {
+  const w = world({ realTickets: true, hub: true });
+  const c = await w.boot();
+  const ann = sessionCookieOf(await c.post("/login", { token: VIEWER }));
+  const [, annId] = ann.split("=");
+  const ops = sessionCookieOf(await c.post("/login", { token: OPERATOR }));
+  const [, opsId] = ops.split("=");
+  w.shared.file.tokens = w.shared.file.tokens.filter((e) => e.name !== "ann");
+  assert.equal((await act(c, ops, "sessions-end-all", {}, "rob.operator")).confirm.status, 200);
+  assert.deepEqual(w.shared.hubEnds.filter(([id]) => id === annId).map(([, why]) => why), ["revoked"]);
+  assert.deepEqual(w.shared.hubEnds.filter(([id]) => id === opsId).map(([, why]) => why), ["all"]);
+});
+
+test("past the in-memory limit, signing everyone out does not claim to refuse an unreadable browser", async () => {
+  const w = world({ realTickets: true, denyMax: 0 });
+  const c = await w.boot();
+  const { cookie } = await remember(c, VIEWER);
+  assert.equal((await whoami(c, cookie)).status, 200);
+  const [{ hash }] = c.trust.list().devices;
+  fs.writeFileSync(join(w.shared.root, "console-devices", `${hash}.json`), "{corrupt");
+  const ops = sessionCookieOf(await c.post("/login", { token: OPERATOR }));
+  const { preview, confirm } = await act(c, ops, "sessions-end-all", {}, "rob.operator");
+  assert.match(preview.json().summary.join(" "), /can refuse only those it holds a session for/);
+  assert.match(confirm.json().error, /could not refuse them all in memory either/);
+  assert.doesNotMatch(confirm.json().error, /refuses those it held/);
+});
+
+test("a sign-in that both replaces a browser it could not end and could not remember says both on one banner", async () => {
+  const w = world();
+  const { cookie } = await remember(await w.boot());
+  w.shared.fsOverride = unwritable();
+  const c = await w.boot();
+  const sam = sessionCookieOf(await c.post("/login", { token: SECOND, remember: true }, { cookie }));
+  await c.send({ path: "/runs", headers: { cookie: sam, accept: "text/html" } });
+  const flash = w.shared.pageCtx.flash;
+  assert.equal(flash.status, "attention");
+  assert.equal(flash.summary, "This browser may still remember rob, and this browser was not remembered");
+  assert.match(flash.body, /could not be ended.*signed in for this session only/);
+});
+
+test("a viewer at the most remembered browsers is told what she can do, not to press a Remove she does not have", async () => {
+  const w = world();
+  const c = await w.boot();
+  for (let i = 0; i < 32; i++) assert.equal((await c.post("/login", { token: VIEWER, remember: true })).json().remembered, true);
+  const over = await c.post("/login", { token: VIEWER, remember: true });
+  await c.send({ path: "/runs", headers: { cookie: sessionCookieOf(over), accept: "text/html" } });
+  assert.match(w.shared.pageCtx.flash.body, /Sign out on one you no longer use, or ask an operator to remove one/);
+  assert.doesNotMatch(w.shared.pageCtx.flash.body, /Remove one on Remembered browsers/);
+  const later = sessionCookieOf(await c.post("/login", { token: VIEWER }));
+  assert.match((await c.post("/api/device/remember", {}, { cookie: later })).text, /ask an operator to remove one/);
+});
+
+// Part 5, the adversary's round 3 (issue #849).
+
+test("on a read-only console the cap tells an operator to use the host's command, since the page draws no Remove there", async () => {
+  const w = world({ config: { readOnly: true } });
+  const c = await w.boot();
+  for (let i = 0; i < 32; i++) assert.equal((await c.post("/login", { token: OPERATOR, remember: true })).json().remembered, true);
+  const over = await c.post("/login", { token: OPERATOR, remember: true });
+  await c.send({ path: "/runs", headers: { cookie: sessionCookieOf(over), accept: "text/html" } });
+  assert.match(w.shared.pageCtx.flash.body, /read-only.*pi-dispatch-console device revoke on the host/);
+  assert.doesNotMatch(w.shared.pageCtx.flash.body, /Remove one on Remembered browsers/);
+  const later = sessionCookieOf(await c.post("/login", { token: OPERATOR }));
+  assert.match((await c.post("/api/device/remember", {}, { cookie: later })).text, /read-only.*device revoke on the host/);
+});
+
+test("signing in over a record that cannot be read says the browser may still remember someone else", async () => {
+  const w = world();
+  const { cookie } = await remember(await w.boot());
+  const c = await w.boot();
+  const [{ hash, id }] = c.trust.list().devices;
+  fs.writeFileSync(join(w.shared.root, "console-devices", `${hash}.json`), "{corrupt");
+  const sam = sessionCookieOf(await c.post("/login", { token: SECOND }, { cookie }));
+  await c.send({ path: "/runs", headers: { cookie: sam, accept: "text/html" } });
+  assert.deepEqual([w.shared.pageCtx.flash?.status, w.shared.pageCtx.flash?.summary], ["attention", "This browser may still remember someone else"]);
+  assert.match(w.shared.pageCtx.flash.body, new RegExp(`device revoke --id ${id}`));
+});
+
+test("an agent on Remembered browsers is told the page is people's, not operators'; the top bar marks a remembered browser for a phone too", async () => {
+  const agent = String((await realPages.renderPage("devices", { data: {}, query: {}, session: { name: "bot", role: "agent", remembered: null } })).html);
+  assert.match(agent, /This page is for people/);
+  assert.doesNotMatch(agent, /for operators only/);
+  const remembered = String((await realPages.renderPage("devices", { data: { devices: { devices: [], unreadable: 0, unreadableIds: [] } }, query: {}, session: { name: "rob", role: "operator", remembered: "3f9a1c0b7d2e" } })).html);
+  assert.match(remembered, /class="who who--remembered"/, "the avatar's ring, which a phone shows where it hides the words");
+});
+
+test("signing in while the whole remembered-browser folder is unusable says the store could not be checked, never someone else", async (t) => {
+  const w = world();
+  const { cookie } = await remember(await w.boot());
+  const dir = join(w.shared.root, "console-devices");
+  fs.chmodSync(dir, 0o755);
+  t.after(() => fs.chmodSync(dir, 0o700));
+  const c = await w.boot();
+  const again = sessionCookieOf(await c.post("/login", { token: OPERATOR }, { cookie }));
+  await c.send({ path: "/runs", headers: { cookie: again, accept: "text/html" } });
+  assert.equal(w.shared.pageCtx.flash?.summary, "This browser's remembered sign-in could not be checked");
+  assert.doesNotMatch(w.shared.pageCtx.flash.body, /someone else|--id/);
+});
+
+// Part 5, the spec audit's round 1 (issue #849): guarantees that had no test failing without them.
+
+test("on a Windows host the sign-in page draws no Remember box, nothing is offered, and the devices page says why", async () => {
+  const w = world({ platform: "win32" });
+  const c = await w.boot();
+  assert.doesNotMatch((await c.send({ path: "/login" })).text, /name="remember"/);
+  const session = sessionCookieOf(await c.post("/login", { token: OPERATOR }));
+  await c.send({ path: "/runs", headers: { cookie: session, accept: "text/html" } });
+  assert.deepEqual([w.shared.pageCtx.offer, w.shared.pageCtx.rememberable], [false, "windows"]);
+});
+
+test("a store problem draws no Remember box either, and pages are told it is the store's", async (t) => {
+  const w = world();
+  const c = await w.boot();
+  await remember(c);
+  const dir = join(w.shared.root, "console-devices");
+  fs.chmodSync(dir, 0o755);
+  t.after(() => fs.chmodSync(dir, 0o700));
+  assert.doesNotMatch((await c.send({ path: "/login" })).text, /name="remember"/);
+  const session = sessionCookieOf(await c.post("/login", { token: VIEWER }));
+  await c.send({ path: "/runs", headers: { cookie: session, accept: "text/html" } });
+  assert.equal(w.shared.pageCtx.rememberable, "store");
+});
+
+test("pages are told the transport's refusal and an invitation's sign-in, and a HEAD never takes the offer", async () => {
+  const plain = world({ config: { listen: { kind: "tcp", host: "0.0.0.0", port: 0 }, allowedHosts: ["127.0.0.1"] } });
+  const p = await plain.boot();
+  const across = sessionCookieOf(await p.post("/login", { token: OPERATOR }));
+  await p.send({ path: "/runs", headers: { cookie: across, accept: "text/html" } });
+  assert.equal(plain.shared.pageCtx.rememberable, "transport");
+  const w = world();
+  const c = await w.boot();
+  w.shared.codes = new Map([["i".repeat(43), { name: "ann", binding: { createdAt: "2026-10-01T00:00:00.000Z", generation: 0, role: "viewer", sha256: sha(VIEWER) } }]]);
+  const invited = sessionCookieOf(await c.post("/login/code", { code: "i".repeat(43) }));
+  await c.send({ path: "/runs", headers: { cookie: invited, accept: "text/html" } });
+  assert.equal(w.shared.pageCtx.session.invited, true);
+  const fresh = sessionCookieOf(await c.post("/login", { token: OPERATOR }));
+  await c.send({ method: "HEAD", path: "/runs", headers: { cookie: fresh, accept: "text/html" } });
+  await c.send({ path: "/runs", headers: { cookie: fresh, accept: "text/html" } });
+  assert.equal(w.shared.pageCtx.offer, true, "the HEAD left the offer for the page a person sees");
+});
+
+test("a remembered browser's refusal pages say remembered in the bar too", async () => {
+  const w = world();
+  const { cookie } = await remember(await w.boot());
+  const c = await w.boot();
+  const missing = await c.send({ path: "/nowhere", headers: { cookie, accept: "text/html" } });
+  assert.equal(missing.status, 404);
+  assert.match(missing.text, /Operator, remembered/);
+  await whoami(c, cookie);
+  const signedIn = await c.send({ path: "/nowhere", headers: { cookie, accept: "text/html" } });
+  assert.match(signedIn.text, /Operator, remembered/);
+});
+
+test("the devices page lists live browsers only; an ended one the store keeps to say why is not drawn", async () => {
+  const listed = { devices: [{ id: "3f9a1c0b7d2e", name: "rob", role: "operator", label: "Chrome on macOS", createdAt: "2026-10-01T09:00:00.000Z", lastUsedAt: "2026-10-20T09:00:00.000Z" }, { id: "0d4c2b1a9e8f", name: "rob", role: "operator", label: "Firefox on Linux", createdAt: "2026-10-01T09:00:00.000Z", lastUsedAt: "2026-10-02T09:00:00.000Z", ended: { reason: "signed-out", at: "2026-10-02T09:00:00.000Z" } }], unreadable: 0, unreadableIds: [] };
+  const page = String((await realPages.renderPage("devices", { data: { devices: listed }, query: {}, session: { name: "rob", role: "operator", remembered: null } })).html);
+  assert.match(page, /3f9a1c0b7d2e/);
+  assert.doesNotMatch(page, /0d4c2b1a9e8f/);
+});
+
+test("signing everyone out names an unreadable browser no session holds, and refuses to report success", async () => {
+  const w = world({ realTickets: true });
+  const first = await w.boot();
+  await remember(first, VIEWER);
+  const [{ hash, id }] = first.trust.list().devices;
+  fs.writeFileSync(join(w.shared.root, "console-devices", `${hash}.json`), "{corrupt");
+  const c = await w.boot();
+  const ops = sessionCookieOf(await c.post("/login", { token: OPERATOR }));
+  const { confirm } = await act(c, ops, "sessions-end-all", {}, "rob.operator");
+  assert.equal(confirm.status, 409, confirm.text);
+  assert.match(confirm.json().error, new RegExp(`could not be read \\(${id}\\)`));
+});
+
+test("signing everyone out says so when sign-in links remain, the links folder cannot be read, or this console has none wired", async () => {
+  const cases = [[{ clear: () => ({ removed: 1, left: 2 }) }, /2 sign-in links could not be removed/], [{ clear: () => ({ removed: 0, left: 0, unreadable: true }) }, /sign-in links folder could not be read/], [null, /sign-in links folder could not be read/]];
+  for (const [loginCodes, said] of cases) {
+    const w = world({ realTickets: true, loginCodes });
+    const c = await w.boot();
+    const ops = sessionCookieOf(await c.post("/login", { token: OPERATOR }));
+    const { confirm } = await act(c, ops, "sessions-end-all", {}, "rob.operator");
+    assert.equal(confirm.status, 409, confirm.text);
+    assert.match(confirm.json().error, said);
+  }
+});
+
+test("signing everyone out ends each session's tickets and setup state, and re-reads the store at the confirm", async () => {
+  const w = world({ realTickets: true });
+  const c = await w.boot();
+  const ann = sessionCookieOf(await c.post("/login", { token: VIEWER }));
+  const [, annId] = ann.split("=");
+  await remember(c, VIEWER);
+  const ops = sessionCookieOf(await c.post("/login", { token: OPERATOR }));
+  const [, opsId] = ops.split("=");
+  assert.equal((await act(c, ops, "sessions-end-all", {}, "rob.operator")).confirm.status, 200);
+  for (const id of [annId, opsId]) {
+    assert.ok(w.shared.ticketEnds.includes(id), "tickets");
+    assert.ok(w.shared.setupEnds.includes(id), "setup state");
+  }
+  const late = world({ realTickets: true });
+  const l = await late.boot();
+  await remember(l, VIEWER);
+  const op2 = sessionCookieOf(await l.post("/login", { token: OPERATOR }));
+  const preview = await l.post("/api/act/sessions-end-all/preview", {}, { cookie: op2, "x-console-as": "rob.operator" });
+  assert.equal(preview.status, 200);
+  const dir = join(late.shared.root, "console-devices");
+  fs.chmodSync(dir, 0o755);
+  try {
+    const confirm = await l.post("/api/act/sessions-end-all/confirm", { ticket: preview.json().ticket }, { cookie: op2, "x-console-as": "rob.operator" });
+    assert.equal(confirm.status, 409, confirm.text);
+    assert.match(confirm.json().error, /nobody was signed out/);
+    assert.equal((await whoami(l, op2)).status, 200);
+  } finally {
+    fs.chmodSync(dir, 0o700);
+  }
+});
+
+test("removing a browser whose end cannot be written says so instead of reporting success", async () => {
+  const w = world({ realTickets: true });
+  await remember(await w.boot(), VIEWER);
+  w.shared.fsOverride = unwritable();
+  const c = await w.boot();
+  const [{ id }] = c.trust.list().devices;
+  const ops = sessionCookieOf(await c.post("/login", { token: OPERATOR }));
+  const { confirm } = await act(c, ops, "device-remove", { id }, "rob.operator");
+  assert.equal(confirm.status, 409, confirm.text);
+  assert.match(confirm.json().error, /could not be forgotten/);
+});
+
+// Part 5, the spec audit's round 2 (issue #849).
+
+test("the same person signing in again after their token changed hears nothing about someone else", async () => {
+  const w = world();
+  const c = await w.boot();
+  const { cookie } = await remember(c);
+  w.shared.file.generation += 1;
+  const again = sessionCookieOf(await c.post("/login", { token: OPERATOR }, { cookie }));
+  await c.send({ path: "/runs", headers: { cookie: again, accept: "text/html" } });
+  assert.equal(w.shared.pageCtx.flash, null);
+  assert.equal(c.trust.list().devices[0].ended.reason, "all", "the old record still ended, with its own word");
+});
+
+test("a refusal page reached by a signed-in remembered browser says remembered in the bar", async () => {
+  const w = world();
+  const c = await w.boot();
+  const { cookie } = await remember(c, VIEWER);
+  const refused = await c.send({ path: "/audit", headers: { cookie, accept: "text/html" } });
+  assert.equal(refused.status, 403);
+  assert.match(refused.text, /Viewer, remembered/);
+});
+
+test("the combined banner is a warning whenever either notice is, the warning second included", async () => {
+  const w = world();
+  const c = await w.boot();
+  for (let i = 0; i < 32; i++) assert.equal((await c.post("/login", { token: SECOND, remember: true })).json().remembered, true);
+  const { cookie } = await remember(c);
+  const sam = sessionCookieOf(await c.post("/login", { token: SECOND, remember: true }, { cookie }));
+  await c.send({ path: "/runs", headers: { cookie: sam, accept: "text/html" } });
+  assert.deepEqual([w.shared.pageCtx.flash.status, w.shared.pageCtx.flash.summary], ["attention", "This browser no longer remembers rob, and this browser was not remembered"]);
+});
+
+test("clearLoginCodes counts a link file it could not remove", () => {
+  const root = fs.realpathSync(tempDir("console-remembered-codes-"));
+  const dir = join(root, "console-login-codes");
+  mintLoginCode({ dir, name: "rob", fs, now: () => T0 });
+  const stuck = { ...fs, unlinkSync: () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); } };
+  assert.deepEqual(clearLoginCodes({ dir, fs: stuck }), { removed: 0, left: 1 });
 });

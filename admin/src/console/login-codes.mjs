@@ -143,6 +143,33 @@ function reap(dir, fs, t) {
 }
 
 /**
+ * Remove every pending code in the drop, expired or not: what "sign everyone out" does to links not yet opened (issue #849), host-minted ones and
+ * viewer invitations alike. `{removed, left}`: `left` counts the files that could not be removed, which the caller reports, since a link it
+ * leaves still signs in; `unreadable` says the folder itself could not be listed, so how many links remain is not known. A folder that does not
+ * exist holds no link. Never throws.
+ */
+export function clearLoginCodes({ dir, fs = nodeFs }) {
+  let names;
+  try {
+    names = fs.readdirSync(dir);
+  } catch (e) {
+    return e?.code === "ENOENT" ? { removed: 0, left: 0 } : { removed: 0, left: 0, unreadable: true };
+  }
+  let removed = 0;
+  let left = 0;
+  for (const name of names) {
+    if (!CODE_FILE_RE.test(name)) continue;
+    try {
+      fs.unlinkSync(join(dir, name));
+      removed += 1;
+    } catch (e) {
+      if (e?.code !== "ENOENT") left += 1;
+    }
+  }
+  return { removed, left };
+}
+
+/**
  * Make a code for token `name`, valid for `ttlMs`: `{code}` (to put in the link's fragment, printed once) or
  * `{refusal}`. The caller has already checked that `name` is in the tokens file.
  */

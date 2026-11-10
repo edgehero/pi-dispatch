@@ -113,12 +113,23 @@ const MARK = html`<span class="brandpill__m signin__mark" aria-hidden="true">pi<
  */
 const NO_SCRIPT = html`<noscript>${ui.banner({ status: "attention", icon: "info", sm: true, title: NO_SCRIPT_TEXT })}</noscript>`;
 
+/** The sign-in form's Remember choice (issue #849): its words, and the sentence under them that says what it means and where not to use it. */
+export const REMEMBER_LABEL = "Remember this trusted device";
+export const REMEMBER_HINT = "Stay signed in on this browser across idle time and restarts, until you sign out. Only on a browser that is yours alone.";
+
+/**
+ * The Remember choice, never ticked: remembering is a decision about this browser, so the page never makes it. Its input is found by name inside the
+ * form (`#login-form`'s `remember`), so it adds no id the kit would have to reserve.
+ */
+const REMEMBER_CHOICE = html`<label class="signin__remember"><input type="checkbox" name="remember"><span><b>${REMEMBER_LABEL}</b><small>${REMEMBER_HINT}</small></span></label>`;
+
 /**
  * The sign-in panel: `notice` (see `noticeKey`), the console's session `limits` (`{ idleMinutes, maxHours }`, so the
  * ended notices state the limits it runs with) and where it `listen`s (`listenKey`). The form and its lead-in are the
- * script's to reveal (see the header).
+ * script's to reveal (see the header). `remember` draws the Remember choice (issue #849), only where the console would
+ * remember this browser (`server.mjs` `rememberableHere`): never on a Windows host or over plain HTTP across a network.
  */
-export function signInContent({ notice = null, limits = {}, listen = null, next = undefined, arrival = false } = {}) {
+export function signInContent({ notice = null, limits = {}, listen = null, next = undefined, arrival = false, remember = false } = {}) {
   const ended = endedNotices({ idleMinutes: limitOf(limits?.idleMinutes), maxHours: limitOf(limits?.maxHours) });
   const entries = [...ENDED_REASONS.map((r) => [`ended-${r}`, ended[r]]), ...Object.entries(SIGN_IN_NOTICES)];
   const footer = LISTEN_FOOTERS[listenKey(listen)];
@@ -130,7 +141,7 @@ ${MARK}
 <h2>Sign in to the console</h2>
 <p class="muted"${REVEAL}>Paste a console token, or open a one-time link.</p>
 ${noticeRegion(entries, noticeKey(notice))}
-<form id="login-form" class="signin__form" autocomplete="off"${REVEAL}><div class="field"><label for="token">Console token</label><input id="token" class="input input--code" name="token" type="password" autocomplete="off" spellcheck="false" required aria-describedby="notice"></div><button class="btn btn--primary btn--lg" type="submit">Sign in</button></form>
+<form id="login-form" class="signin__form" autocomplete="off"${REVEAL}><div class="field"><label for="token">Console token</label><input id="token" class="input input--code" name="token" type="password" autocomplete="off" spellcheck="false" required aria-describedby="notice"></div>${remember ? REMEMBER_CHOICE : null}<button class="btn btn--primary btn--lg" type="submit">Sign in</button></form>
 <div class="signin__help"><p class="signin__help-h">No token yet?</p>${NEW_LINK}<details><summary>Make a token instead</summary><p class="muted">On the host, with your own name in place of &lt;you&gt;. In a local install it is under <span class="code">./node_modules/.bin/</span>:</p>${ui.cmd([...TOKEN_ADD])}</details></div>
 ${footer === null ? null : html`<p class="signin__foot faint">${footer}</p>`}
 </div></section>`;

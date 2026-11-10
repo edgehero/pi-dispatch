@@ -48,6 +48,7 @@ const CARDS = Object.freeze({
   SecretsScreen: { page: "secrets", path: "/config/secrets" },
   ConnectionsScreen: { page: "connections", path: "/config/connections" },
   UpdatesScreen: { page: "updates", path: "/config/updates" },
+  DevicesScreen: { page: "devices", path: "/config/devices" },
   ProjectDetail: { page: "project", path: "/config/project" },
 });
 

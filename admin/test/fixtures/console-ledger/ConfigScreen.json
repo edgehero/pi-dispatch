@@ -1,7 +1,7 @@
 {
   "card": "ConfigScreen",
   "pr": 750,
-  "words": "53cd02373f95a4cf9da64f5b78c47c6e14cc9c28c425abb026f904790a879848",
+  "words": "233ed1bb7f5b31cb66dffee8e68eead6e282b610be5ccb80d9c8786465701693",
   "elements": [
     {"el":"cf-navigation","kind":"panel","status":"new","source":"admin/src/console/panels/config.mjs#configNavigation","golden":["config.operator"],"reason":"Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."},
     {"el":"cf-settings","kind":"panel","status":"new","source":"admin/src/console/panels/config.mjs#configSettings","golden":["config.operator"],"reason":"Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."},

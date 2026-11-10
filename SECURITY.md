@@ -424,7 +424,11 @@ The threat model, and what answers each part:
   the origin: under a public bind the Host header decides nothing, since any client can set it, and under a loopback
   bind a name that is not loopback (a plain-HTTP proxy) is refused. Every use judges the record against the tokens file, so revoking
   or rotating the token, changing its role and `sessions end-all` end the device too, across restarts; signing out
-  erases it, and `pi-dispatch-console device revoke` removes one. Restoring a device is a sign-in with its audit row.
+  erases it, and `pi-dispatch-console device revoke` removes one, as does an operator's Remove on the console's
+  Remembered browsers page; its Sign everyone out forgets them and stops every pending sign-in link, writing no tokens file.
+  A record it cannot read at that moment is named rather than forgotten, and refused in memory only where this process holds
+  its session, so once it reads again that browser signs in; `pi-dispatch-console sessions end-all` on the host ends it by
+  the tokens file's generation, and the answer says so. Restoring a device is a sign-in with its audit row.
   A record the console cannot read signs nobody in and signs nobody out: the page says so and doctor names it.
   Residuals, each named: the secret is not rotated while in use (rotation races a browser's several tabs, and lost
   races would sign a person out), so a copy of the cookie works until the device is ended; a sign-out the folder

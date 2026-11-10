@@ -1,0 +1,14 @@
+{
+  "card": "DevicesScreen",
+  "pr": 849,
+  "words": "0b33b0b3792e50b2935d6c8fdc74d2d7d96d3e7695bf623c5fe593084a20c69d",
+  "elements": [
+    {"el":"p-dev-this","kind":"panel","status":"new","source":"admin/src/console/panels/devices.mjs#devicesThis","golden":["panels/devices-remembered.operator","panels/devices-not-remembered.operator"]},
+    {"el":"p-dev-list","kind":"panel","status":"new","source":"admin/src/console/panels/devices.mjs#devicesList","golden":["panels/devices-remembered.operator","panels/devices-remembered.viewer","panels/devices-none.operator","panels/devices-unreadable-record.operator","panels/devices-store-unusable.operator"]},
+    {"el":"p-dev-all","kind":"panel","status":"new","source":"admin/src/console/panels/devices.mjs#devicesEndAll","golden":["panels/devices-remembered.operator"]},
+    {"el":"The offer: Remember this browser or Not now, once, after a fresh sign-in","kind":"readme","status":"new","source":"admin/src/console/shell.mjs#OFFER_TITLE","golden":["panels/devices-offer.operator"],"shows":["Remember this browser?","data-remember-yes","data-remember-no"]},
+    {"el":"The top bar says remembered beside the role","kind":"readme","status":"new","source":"admin/src/console/shell.mjs#REMEMBERED_WORD","golden":["panels/devices-remembered.operator"],"shows":"Operator, remembered"},
+    {"el":"Remove is an operator's, with a preview; a viewer sees their own browsers","kind":"readme","status":"new","panel":"p-dev-list","source":"admin/src/console/panels/devices.mjs#devicesList","holds":"device-remove","golden":["panels/devices-remembered.operator","panels/devices-remembered.viewer"],"shows":"Firefox on Linux"},
+    {"el":"Sign everyone out, an operator's, with a preview","kind":"readme","status":"new","panel":"p-dev-all","source":"admin/src/console/panels/devices.mjs#devicesEndAll","holds":"sessions-end-all","golden":["panels/devices-remembered.operator"],"shows":"Sign everyone out"}
+  ]
+}

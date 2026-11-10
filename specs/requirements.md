@@ -1354,7 +1354,9 @@ writes retain their existing interactive confirmation. This adds no unattended p
     it, the sweep of expired sessions (`idle` or `max`), a sign-out, and a sign-in over a live cookie once that sign-in
     succeeded (`destroy(id, "elsewhere")`, which keeps the time limit's word for a session already past one; a sign-in
     refused for its audit row ends nothing the browser held), and the session such a refused sign-in had made
-    (`destroy(id, null)`, an entry with no reason); `peek` and the hub's `verdict` write nothing. The tombstones are a
+    (`destroy(id, null)`, an entry with no reason), and since issue #849 an operator's Sign everyone out from the console
+    (`endAll`), which writes `all` for every session with no `generation` moving (a time limit's word, or the word the
+    tokens file already proves, where one holds); `peek` and the hub's `verdict` write nothing. The tombstones are a
     FIFO of `TOMBSTONE_MAX` (1024): past it the oldest goes and the eviction is counted. Given a page request whose
     well-formed cookie names an ended session, it is a 303 to `/login?ended=<reason>` (`/login` when there is no reason
     to give), with `next=<page>` added when the page parser accepts the page asked for and it is not `/`, with the cookie cleared; given an API route or a write that needs a session, a 401 `{"error": "sign in
@@ -2762,6 +2764,20 @@ writes retain their existing interactive confirmation. This adds no unattended p
     operator only. A row never reads "passed": a canary that ended well reads "completed, read the run". A failed read reads "unknown", a look
     that is off reads "not looking", a record past two intervals reads as stale, and none of them is ever drawn as healthy. A row prices a canary only where a
     trigger can run that package's (`canaryTriggersFor`), and the page's own "A canary runs as" says a trigger is no choice for a package it leaves out. An agent's copy says that a trigger leaves something out and never what, so there a row says what holds without knowing: one job of a cron trigger that loads this package.
+  - (g9) **Remembered browsers** (`/config/devices`, page `devices`, viewer, not live; #849). DevicesScreen draws `p-dev-this` (whether this browser is
+    remembered, and how to change that), `p-dev-list` (every live remembered browser by a 12-character id, its browser label from a closed list, whose it
+    is, when it was remembered and last used; a viewer sees their own) and `p-dev-all` (sign everyone out). Removing a browser (`device-remove`) and
+    signing everyone out (`sessions-end-all`) are operator actions with a preview and a ticket, both `danger`, both `person` in the agent policy; an
+    `agent` token is refused the page. Signing everyone out ends every session in this process with the word `all` (or the truer word the tokens file already
+    proves, such as `revoked`, which its open tabs are told too), ends every live remembered browser the same way, and removes every pending sign-in
+    link, viewer invitations included, without writing the tokens file; it is refused before anything is touched when the remembered-browser folder
+    cannot be used, and a browser it could not forget or whose record it could not read is named while everyone else is signed out, with the host's
+    `pi-dispatch-console sessions end-all` as the way to end it for good (such a browser is refused in memory only where this process holds its session).
+    A person who ticked the box and was not remembered is told so on the next page, with what to do. The
+    Configuration page links it, and the top bar says "remembered" beside the role on a remembered browser. The sign-in form's Remember this trusted
+    device box, never ticked, is drawn only where the console would remember the browser (never on a Windows host, never over plain HTTP across a
+    network), and a fresh sign-in that did not ask is offered it once, on its next page, while it can still be remembered (10 minutes): never in a
+    panel, never to an `agent` token or a viewer invitation.
   - (g7) **One project** (`/config/project?id=`, page `project`, viewer, not live; #751). ProjectDetail validates
     PROJECT_ID_RE. An unknown id in a successfully read file yields the dedicated no-project 404; an unread file
     yields an unavailable state. Configuration stays current, with its back link and Runs filtered to the id.
@@ -3646,7 +3662,7 @@ writes retain their existing interactive confirmation. This adds no unattended p
     answer and every refusal carry `html` too, a refusal beside its `error`. `danger` is true for the destructive
     actions (`cancel-active`, `cancel-held`, `cancel-all-held`, `cancel-queued`, `remove-failed`, `remove-all-failed`,
     `fleet-pause`, `queue-pause`, `trigger-delete`, `pause-window-delete`, `limit-delete`, `project-delete`,
-    `secret-profile-remove`, `secret-bundle-remove`, `board-freeze`, `board-clear`, `board-revert`, `sandbox-end`, `setup-worker-stop`, `setup-worker-restart`, `setup-receiver-stop`,
+    `secret-profile-remove`, `secret-bundle-remove`, `board-freeze`, `board-clear`, `board-revert`, `sandbox-end`, `device-remove`, `sessions-end-all`, `setup-worker-stop`, `setup-worker-restart`, `setup-receiver-stop`,
     `setup-receiver-restart`, `setup-viewer-revoke`, `setup-provider-key-replace`) and never beside `paid`, and the bar's ring and its Confirm's
     fill follow (paid, danger or plain). `confirmLabel` says what the button does: a paid act's most ("Retry for up to
     $2.00", "Re-run (reserve
@@ -8608,6 +8624,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-08 (#849, part 5) | The Remember experience. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: new (g9), the Remembered browsers screen, the sign-in form's Remember box, the offer after a fresh sign-in and the remembered mark in the top bar. **`REQ-OPERATOR-CONSOLE-ACTIONS` AMENDED**, (p): `device-remove` and `sessions-end-all` are destructive. **`REQ-CONSOLE-SECURITY` AMENDED**, (i): a tombstone is also written by Sign everyone out (`endAll`), whose `all` moves no `generation`; both actions ride the existing write guards, and signing everyone out writes no tokens file. |
 | 2026-11-08 (#849, part 4) | Remembered sessions. **`REQ-CONSOLE-SECURITY` AMENDED**: a new amendment on remembered devices (the 400-day end included), the Statement (a session may be restored from a remembered device), and (c), (d), (f), (g), (h), (i) and (k); `ENDED_REASONS` gains `device`, `device-store` and `device-kept`, `STREAM_ENDS` gains `device`; sign-out (i) clears the device cookie, and keeps a `pdc_session` this console never held when the browser signs out by its device cookie. (a) was part 3's. Non-remembered sessions keep every limit: UNCHANGED, checked. (b), (e), (j), (l), (m), (n), memory-only tickets, `REQ-TERMINAL-CHAT`: UNCHANGED, checked. |
 | 2026-11-08 (#849, part 3) | **`REQ-CONSOLE-SECURITY` AMENDED**, (a): doctor judges the new remembered-device folder. **`REQ-ADMIN-VIA-PI-EXTENSION`**: that folder joins `guardedFiles()` as a directory. Nothing writes the store yet, so every other clause is UNCHANGED, checked. |
 | 2026-11-08 (#849, part 2) | Sign-in pages that recover on their own. **`REQ-CONSOLE-SECURITY` AMENDED**, (i): the redirect to `/login` carries the page asked for as `next`, once the page parser accepts it. A session ending in an open tab sends its page along too, never for `switched`. **`REQ-OPERATOR-CONSOLE-SCREENS`**: the link page gains `expired` and `signed-in`. The 60 seconds and single use are UNCHANGED, checked. |

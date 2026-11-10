@@ -474,7 +474,7 @@ Fleet on a phone. The question on a phone is "is it running, and is anything stu
 # =====================================================================================
 SECTIONS = [("Settings", "13"), ("Pause windows", "1"), ("Scoped limits", "6"), ("Projects", "4"),
             ("MCP servers", "1"), ("pi packages", "0")]
-PAGES = [("Triggers", "what starts a job"), ("Secrets", "profiles and bundles"), ("Connections", "forges, egress, endpoints")]
+PAGES = [("Triggers", "what starts a job"), ("Secrets", "profiles and bundles"), ("Connections", "forges, egress, endpoints"), ("Remembered browsers", "who stays signed in")]
 TABS = '<nav class="tabs cf-tabs" aria-label="Sections on this page, and the other Configuration pages">' + "".join(
     f'<a href="#cf-{n.lower().replace(" ", "-")}"{" aria-current=" + chr(34) + "page" + chr(34) if n == "Settings" else ""}>{n}<span class="count">{c}</span></a>' for n, c in SECTIONS) + \
     '<span class="cf-tabs__sep" aria-hidden="true"></span>' + "".join(
@@ -753,6 +753,7 @@ SIGNIN = f"""<a class="skip" href="#si-token">Skip to sign-in</a>
       <p class="muted">Paste a console token, or open a one-time link.</p>
       <form class="si-form" aria-label="Sign in">
         <div class="field"><label for="si-token">Console token</label><input id="si-token" class="input si-input" type="password" autocomplete="off" placeholder="pdc_…"></div>
+        <label class="si-remember"><input type="checkbox"><span><b>Remember this trusted device</b><small>Stay signed in on this browser across idle time and restarts, until you sign out. Only on a browser that is yours alone.</small></span></label>
         <button class="btn btn--primary btn--lg si-go" type="button">Sign in</button>
       </form>
       <div class="si-help">
@@ -786,6 +787,11 @@ SIGNIN_CSS = """
 .si-form { display: grid; gap: var(--space-3); }
 .si-input { height: var(--control-h); border-radius: var(--radius-pill); padding: 0 20px; font-family: var(--font-mono); }
 .si-go { width: 100%; }
+.si-remember { display: flex; gap: 10px; align-items: flex-start; font-size: 13px; line-height: 18px; cursor: pointer; }
+.si-remember input { flex: none; width: 16px; height: 16px; margin-top: 1px; accent-color: var(--ink); }
+.si-remember span { display: grid; gap: 2px; min-width: 0; }
+.si-remember b { font-weight: 650; }
+.si-remember small { color: var(--ink-muted); }
 .si-help { display: grid; grid-template-columns: minmax(0, 1fr); gap: 8px; padding: var(--space-4); border-radius: var(--radius-md); background: var(--surface-2); font-size: 13px; }
 .si-help .cmd { background: var(--surface); }
 .si-help__h { font-weight: 650; }
@@ -805,6 +811,7 @@ Sign-in is a single centered card: paste a console token or open a one-time link
 
 **How a person uses it.**
 - **The token.** A person pastes the token and presses *Sign in*.
+- **Remember this trusted device.** A box under the token field, never ticked for you, keeps this browser signed in across idle time and restarts until it signs out. It is drawn only where the console would remember the browser: never on a Windows host, and never over plain HTTP across a network.
 - **No token yet.** The help block leads with the one command to remember, `./pi-dispatch console` in the deployment folder, which signs you in. It gives the spelling for a folder without that shortcut and `/dispatch console --link` in pi, each with a copy button. Making a token, `pi-dispatch-console token add --name <you> --role operator` on the host, sits in a disclosure below them.
 - **Arriving from elsewhere.** A person who opens a console page from another site and is signed in goes straight to that page. A person who is not signed in returns to that page after signing in with a token.
 - **Notices.** One notice at a time sits above the token field, each saying what happened and what to do.

@@ -269,8 +269,33 @@ function signedInBar({ here, role, parked, live, theme, readOnly, session }) {
   // `data-name` and `data-role` are the session's own, for the script (issue #737): a probe's 200 reloads the page only
   // into this same person, never into whoever this browser's cookie names by then. Absent when there is none to name.
   const whoData = typeof s.name === "string" && role !== null ? html` data-name="${s.name}" data-role="${role}"` : null;
-  const who = html`<span class="who"${whoData} title="${role === null ? whoName : `${whoName}, ${roleWord}`}"><span><b>${whoName}</b><small>${roleWord}</small></span><span class="avatar">${initialsOf(s.name)}</span></span>`;
+  // Issue #849: a remembered browser says so beside the role, so a person can always tell a browser that stays signed in from one that does not.
+  const roleShown = typeof s.remembered === "string" && role !== null ? `${roleWord}, ${REMEMBERED_WORD}` : roleWord;
+  const who = html`<span class="${typeof s.remembered === "string" && role !== null ? "who who--remembered" : "who"}"${whoData} title="${role === null ? whoName : `${whoName}, ${roleShown}`}"><span><b>${whoName}</b><small>${roleShown}</small></span><span class="avatar">${initialsOf(s.name)}</span></span>`;
   return html`<header class="${readOnly ? "top top--ro" : "top"}">${brandPill()}${navHtml(here, role, parked)}<div class="top__end">${searchButton()}${live}${themeButton(theme)}${readOnly ? ui.chip("Read-only console", { status: "attention", icon: "shield" }) : null}${who}<button id="logout" class="roundbtn" type="button" aria-label="Sign out" title="Sign out">${ui.icon("logout")}</button></div></header>`;
+}
+
+/** The bar's word for a remembered browser, after the role (issue #849). */
+export const REMEMBERED_WORD = "remembered";
+
+/** The offer a fresh sign-in sees once (issue #849, `sessions.mjs` "THE OFFER"): its title, its sentence, and its two buttons. */
+export const OFFER_TITLE = "Remember this browser?";
+export const OFFER_BODY = "Stay signed in here across idle time and restarts, until you sign out. Only on a browser that is yours alone.";
+export const OFFER_YES = "Remember this browser";
+export const OFFER_NO = "Not now";
+
+/**
+ * The offer's banner: drawn by the shell, never in a panel, so no live update ever carries it to another tab or person, and hidden until the script
+ * shows it, since only the script can act on it (`POST /api/device/remember`). No id: the script finds it by `data-remember-offer`.
+ */
+function rememberOfferHtml() {
+  const actions = html`<button class="btn btn--sm btn--primary" type="button" data-remember-yes>${OFFER_YES}</button><button class="btn btn--sm btn--ghost" type="button" data-remember-no>${OFFER_NO}</button>`;
+  return html`<div data-remember-offer hidden>${ui.banner({ status: "idle", icon: "shield", title: OFFER_TITLE, body: OFFER_BODY, actions })}</div>`;
+}
+
+/** A notice flash (issue #849): its own title and sentence, in the attention tone or a quiet one, never a done banner's "Changed by". */
+function noticeFlashHtml(flash) {
+  return ui.banner({ status: flash.status === "attention" ? "attention" : "idle", icon: "shield", title: String(flash.summary ?? ""), body: String(flash.body ?? "") });
 }
 
 /** A session's role as the bar knows it, or null for one it does not (which opens no operator page). */
@@ -294,20 +319,22 @@ export function shellHtml(name, ctx, inner, { headline = null, description = nul
   if (typeof name !== "string" || !Object.hasOwn(PAGES, name)) throw new RangeError(`no such page: ${String(name)}`);
   const role = roleOf(ctx?.session);
   const meta = mayOpen(name, role) ? PAGES[name] : { ...PAGES[name], live: false };
-  const here = !mayOpen(name, role) ? null : name === "setup" ? "overview" : ["secrets", "connections", "updates", "project"].includes(name) ? "config" : name === "answer-rules" ? "parked" : name.startsWith("insights") ? "insights" : ["run", "zero-touch", "sandboxes"].includes(name) ? "runs" : ["host", "venue"].includes(name) ? "fleet" : ["watch", "watch-board", "trigger", "trigger-add", "trigger-check"].includes(name) ? "triggers" : name;
+  const here = !mayOpen(name, role) ? null : name === "setup" ? "overview" : ["secrets", "connections", "updates", "devices", "project"].includes(name) ? "config" : name === "answer-rules" ? "parked" : name.startsWith("insights") ? "insights" : ["run", "zero-touch", "sandboxes"].includes(name) ? "runs" : ["host", "venue"].includes(name) ? "fleet" : ["watch", "watch-board", "trigger", "trigger-add", "trigger-check"].includes(name) ? "triggers" : name;
   // Drawn on a live page always, so the stream has a panel to fill; elsewhere only when there is a count to show.
   const count = navParkedHtml(ctx?.data);
   const parked = meta.live || String(count) !== "" ? html`<span id="${NAV_PARKED_ID}" data-panel>${count}</span>` : null;
   const start = LIVE_STATES.start;
   const glyphs = Object.entries(LIVE_GLYPHS).map(([state, glyph]) => liveGlyph(state, glyph));
   const liveHtml = meta.live ? html`<span id="live-status" class="${start.cls}" role="status" aria-live="polite" title="${start.title}"><span class="dot"></span>${glyphs}<span data-live-word>${start.word}</span></span>` : null;
-  const back = ["secrets", "connections", "updates", "project"].includes(name) ? html`<a class="back" href="${PAGES.config.path}">${ui.icon("chev-l", { size: "sm" })}Configuration</a>` : name === "run" ? html`<a class="back" href="${PAGES.runs.path}">${ui.icon("chev-l", { size: "sm" })}${PAGES.runs.nav}</a>` : ["host", "venue"].includes(name) ? html`<a class="back" href="${PAGES.fleet.path}">${ui.icon("chev-l", { size: "sm" })}Fleet</a>` : null;
+  const back = ["secrets", "connections", "updates", "devices", "project"].includes(name) ? html`<a class="back" href="${PAGES.config.path}">${ui.icon("chev-l", { size: "sm" })}Configuration</a>` : name === "run" ? html`<a class="back" href="${PAGES.runs.path}">${ui.icon("chev-l", { size: "sm" })}${PAGES.runs.nav}</a>` : ["host", "venue"].includes(name) ? html`<a class="back" href="${PAGES.fleet.path}">${ui.icon("chev-l", { size: "sm" })}Fleet</a>` : null;
   const heading = title ?? (name === "run" && typeof ctx?.query?.id === "string" && ctx.query.id !== "" ? html`${ctx.query.id}` : ["host", "venue"].includes(name) && typeof ctx?.query?.name === "string" ? html`${ctx.query.name}` : meta.title);
   const reload = mayOpen(name, role) ? selfHref(name, ctx?.query) : null;
   const drawn = !meta.live && reload !== null ? drawnHtml(ctx?.data?.now, reload, end) : end;
   const readOnly = Boolean(ctx?.readOnly);
   const ro = readOnly ? ui.banner({ status: "attention", icon: "shield", sm: true, title: READ_ONLY_TITLE, body: READ_ONLY_BODY }) : null;
-  const flash = ctx?.flash !== null && typeof ctx?.flash === "object" ? doneBannerHtml(ctx.flash) : null;
+  // A flash is a write's done banner, or since issue #849 a notice about this browser's sign-in (`notice`), which changed nothing to undo.
+  const flash = ctx?.flash !== null && typeof ctx?.flash === "object" ? (ctx.flash.notice === true ? noticeFlashHtml(ctx.flash) : doneBannerHtml(ctx.flash)) : null;
+  const offer = ctx?.offer === true && role !== null && role !== "agent" ? rememberOfferHtml() : null;
   const notes = meta.live ? liveNoteHtml({ maxStreams: ctx?.maxStreams, reload }) : null;
   const writes = role === "operator" && !readOnly && ctx?.slot !== false ? confirmSlotHtml() : null;
   const held = meta.live ? html`<template id="held-note">${heldNoteHtml()}</template>` : null;
@@ -318,7 +345,7 @@ ${SPRITE}
 ${signedInBar({ here, role, parked, live: liveHtml, theme: ctx?.theme, readOnly, session: ctx?.session })}
 <main id="main" tabindex="-1">
 <div class="titlebar"><div class="titlebar__lead">${back}<h1>${heading}</h1>${sub}</div>${drawn}</div>
-${ro}${flash}${notes}${inner}${writes}${held}
+${ro}${flash}${offer}${notes}${inner}${writes}${held}
 </main>
 </div>`;
 }
@@ -363,8 +390,8 @@ ${inner}
  * `endedReasonOf`'s, never the query's own bytes); `limits` the console's `{ idleMinutes, maxHours }`; `listen` the
  * config's listen address, for the footer.
  */
-export function loginPage({ theme = null, notice = null, limits = {}, listen = null, next = undefined, arrival = false } = {}) {
-  return frameHtml({ name: "login", title: "Sign in", theme, skip: "Skip to sign-in", titleShown: false }, signInContent({ notice, limits, listen, next, arrival }));
+export function loginPage({ theme = null, notice = null, limits = {}, listen = null, next = undefined, arrival = false, remember = false } = {}) {
+  return frameHtml({ name: "login", title: "Sign in", theme, skip: "Skip to sign-in", titleShown: false }, signInContent({ notice, limits, listen, next, arrival, remember }));
 }
 
 /**
