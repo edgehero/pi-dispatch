@@ -2,6 +2,7 @@ Sign-in is a single centered card: paste a console token or open a one-time link
 
 **How a person uses it.**
 - **The token.** A person pastes the token and presses *Sign in*.
+- **Remember this trusted device.** A box under the token field, never ticked for you, keeps this browser signed in across idle time and restarts until it signs out. It is drawn only where the console would remember the browser: never on a Windows host, and never over plain HTTP across a network.
 - **No token yet.** The help block leads with the one command to remember, `./pi-dispatch console` in the deployment folder, which signs you in. It gives the spelling for a folder without that shortcut and `/dispatch console --link` in pi, each with a copy button. Making a token, `pi-dispatch-console token add --name <you> --role operator` on the host, sits in a disclosure below them.
 - **Arriving from elsewhere.** A person who opens a console page from another site and is signed in goes straight to that page. A person who is not signed in returns to that page after signing in with a token.
 - **Notices.** One notice at a time sits above the token field, each saying what happened and what to do.

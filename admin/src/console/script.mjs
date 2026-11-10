@@ -253,6 +253,8 @@ export const SIGN_OUT_UNCONFIRMED = Object.freeze({
  */
 /** The same note when what could not be read is this browser's remembered sign-in (issue #849): the device store, not the tokens file. */
 export const STALE_DEVICE_BODY = "The console could not check this browser's remembered sign-in, so it shows nothing newer; this is the page as it was last seen. An operator should run `pi-dispatch doctor`.";
+/** The offer's title once the console refused to remember this browser (issue #849): what happened, over the console's own reason. */
+export const OFFER_REFUSED = "This browser was not remembered";
 
 export const STALE_TOKENS_BODY = "The console could not read its tokens file, so it shows nothing newer; this is the page as it was last seen. An operator should run `pi-dispatch doctor`.";
 
@@ -285,6 +287,7 @@ export const CONSOLE_SCRIPT = `"use strict";
   var SIGN_OUT_UNCONFIRMED = ${JSON.stringify(SIGN_OUT_UNCONFIRMED)};
   var STALE_TOKENS_BODY = ${JSON.stringify(STALE_TOKENS_BODY)};
   var STALE_DEVICE_BODY = ${JSON.stringify(STALE_DEVICE_BODY)};
+  var OFFER_REFUSED = ${JSON.stringify(OFFER_REFUSED)};
   function own(obj, key) {
     return obj !== null && typeof obj === "object" && Object.prototype.hasOwnProperty.call(obj, key);
   }
@@ -403,8 +406,11 @@ export const CONSOLE_SCRIPT = `"use strict";
     var retrying = null;
     var signInPanel = document.getElementById("p-signin");
     var loginNext = signInPanel && typeof signInPanel.getAttribute === "function" ? signInPanel.getAttribute("data-next") : null;
-    // The current attempt's token, for its retries alone: dropped once the attempt is answered or has stopped.
+    // The Remember choice (issue #849), drawn only where the console would remember this browser; found by name, so it needs no id.
+    var rememberBox = form && typeof form.querySelector === "function" ? form.querySelector('input[name="remember"]') : null;
+    // The current attempt's token, for its retries alone: dropped once the attempt is answered or has stopped. With it, whether it asked to be remembered.
     var held = null;
+    var heldRemember = false;
     var stopLogin = function () {
       held = null;
       if (input) input.value = "";
@@ -413,7 +419,10 @@ export const CONSOLE_SCRIPT = `"use strict";
     var signIn = function (mine, tries, from) {
       if (mine !== attempt) return;
       if (!mayPost(tries, from, nowMs())) return stopLogin();
-      post("/login", loginNext === null ? { token: held } : { token: held, next: loginNext }).then(function (r) {
+      var asked = { token: held };
+      if (loginNext !== null) asked.next = loginNext;
+      if (heldRemember) asked.remember = true;
+      post("/login", asked).then(function (r) {
         if (mine !== attempt) return;
         held = null;
         if (r.ok) location.assign(ownPage(r.body && r.body.next));
@@ -436,6 +445,7 @@ export const CONSOLE_SCRIPT = `"use strict";
       ev.preventDefault();
       // Out of the field at once, whatever the answer: the token stays in this closure for the retries alone.
       held = input.value;
+      heldRemember = Boolean(rememberBox && rememberBox.checked);
       input.value = "";
       attempt += 1;
       if (retrying !== null && typeof clearTimeout === "function") clearTimeout(retrying);
@@ -605,6 +615,37 @@ export const CONSOLE_SCRIPT = `"use strict";
       else unconfirmed();
     }, unconfirmed);
   });
+  // ---- the offer to remember this browser (issue #849): drawn once by the shell after a fresh sign-in, hidden until here ----
+  var offerEl = typeof document.querySelector === "function" ? document.querySelector("[data-remember-offer]") : null;
+  if (offerEl && typeof offerEl.querySelector === "function") {
+    var offerYes = offerEl.querySelector("[data-remember-yes]");
+    var offerNo = offerEl.querySelector("[data-remember-no]");
+    var offerBusy = false;
+    offerEl.removeAttribute("hidden");
+    if (offerNo) offerNo.addEventListener("click", function () { offerEl.setAttribute("hidden", ""); });
+    if (offerYes) offerYes.addEventListener("click", function () {
+      if (offerBusy) return;
+      offerBusy = true;
+      // As this page's person: a page drawn for someone else must not remember whoever this browser is signed in as now.
+      post("/api/device/remember", {}, true).then(function (r) {
+        offerBusy = false;
+        if (r.status === 200) return location.reload();
+        // The console's own sentence (too old, not on plain HTTP, ...) as a sentence, under a title that says what happened, and nothing left to press.
+        var said = typeof offerEl.querySelector === "function" ? offerEl.querySelector(".banner__s") : null;
+        var titled = typeof offerEl.querySelector === "function" ? offerEl.querySelector(".banner__t") : null;
+        var why = errorOf(r);
+        why = why.charAt(0).toUpperCase() + why.slice(1);
+        if (!/[.!?]$/.test(why)) why += ".";
+        if (titled) titled.textContent = OFFER_REFUSED;
+        if (said) said.textContent = why;
+        offerYes.setAttribute("hidden", "");
+      }, function () {
+        offerBusy = false;
+        var said = typeof offerEl.querySelector === "function" ? offerEl.querySelector(".banner__s") : null;
+        if (said) said.textContent = "The console did not answer, so this browser is not remembered. Try again.";
+      });
+    });
+  }
   // ---- the shell (issue #737): the theme button, the More menu, the current pill, the Copy buttons ----
   // Every DOM API below is checked before it is used: the sign-in pages hold none of these elements, and the test stubs
   // this script also runs on have no documentElement, no cookie and no clipboard. The listeners are added only where

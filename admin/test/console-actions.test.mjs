@@ -157,6 +157,9 @@ const fakeCookies = {
   clearSessionCookie: () => "pdc_session=; Max-Age=0",
   readSessionCookie: (header) => /(?:^|;\s*)pdc_session=([A-Za-z0-9_-]{43})/.exec(header ?? "")?.[1] ?? null,
   sessionDigest: (id) => sha256(id).slice(0, 12),
+  // Issue #849: no device cookie in these tests; the remembered-device paths have their own (`console-remembered.test.mjs`).
+  readDeviceCookie: () => null,
+  readDeviceCookies: () => [],
 };
 
 /** A deployment's config files in a temp dir, and its paths as `resolvePaths` names them. */
@@ -188,7 +191,7 @@ after(async () => {
 });
 
 /** A running console over `paths` with the real tickets and audit log; `actionDeps` overrides go in `a`. */
-async function start({ paths, a = {}, readOnly = false, hub = null, realSessions = false, fs = nodeFs } = {}) {
+async function start({ paths, a = {}, readOnly = false, hub = null, realSessions = false, fs = nodeFs, devices = null } = {}) {
   const tokenFile = structuredClone(FILE);
   let t = T0;
   const now = () => t;
@@ -236,6 +239,7 @@ async function start({ paths, a = {}, readOnly = false, hub = null, realSessions
     actionDeps: { rm: RM, plans: WP, paths, env: {}, urlShown: (u) => u.replace(/\/\/[^@]*@/, "//"), readJobsData, host: "console-test", ...a },
     pageDeps: { fleet: a.fleet ?? { snapshot: async () => ({}) } },
     hub,
+    devices,
   });
   servers.push(server);
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -318,6 +322,7 @@ test("the action table: unique names, the audit kind charset, two generated rout
   assert.deepEqual(Object.fromEntries(ACTIONS.map((a) => [a.name, a.kind])), {
     ...Object.fromEntries(SETUP_ACTION_NAMES.map(name => [name, name])),
     "sandbox-prepare": "sandbox-prepare", "sandbox-pin": "sandbox-pin", "sandbox-end": "sandbox-end", "sandbox-host-set": "sandbox-host-set",
+    "device-remove": "device-remove", "sessions-end-all": "sessions-end-all",
     "cancel-active": "cancel-active",
     "run-enqueue": "run-enqueue",
     "standing-answer-add": "standing-answer-add", "answer-draft-drop": "answer-draft-drop",
@@ -379,7 +384,7 @@ test("every action has frozen fields, a danger flag never beside paid, and its u
     "run-enqueue": ["folder", "flow", "task"], "standing-answer-add": ["title", "text", "projects", "repo", "runId"], "answer-draft-drop": ["runId", "draftRunId", "digest"],
     "model-role-edit": [...MODEL_ROLE_EDIT_FIELDS],
     "trigger-environment-edit": ["index", "pageDigest", "flow", "provider", "model", "maxCostUsd", "models", "fallbackModels", "mcp", "packages", "excludeTools", "excludeExtensions", "excludeExtensionTools", "keyOrder"],
-    "sandbox-prepare": ["repo", "index", "ref", "host", "pin"], "sandbox-pin": ["host", "id"], "sandbox-end": ["host", "id", "nonce", "containerId"], "sandbox-host-set": ["host", "target", "deployment", "nodePath", "cliPath", "shell"],
+    "sandbox-prepare": ["repo", "index", "ref", "host", "pin"], "sandbox-pin": ["host", "id"], "sandbox-end": ["host", "id", "nonce", "containerId"], "device-remove": ["id"], "sessions-end-all": [], "sandbox-host-set": ["host", "target", "deployment", "nodePath", "cliPath", "shell"],
     "cancel-active": ["jobId"], "cancel-held": ["jobId"], "cancel-all-held": [], "cancel-queued": ["jobId", "queue"],
     "retry-failed": ["jobId", "queue"], "remove-failed": ["jobId", "queue"], "retry-all-failed": ["queue", "repo"], "remove-all-failed": ["queue", "repo"],
     "run-fork": ["jobId", "entry", "position", "point", "provider", "model", "thinking", "message"],
@@ -398,7 +403,7 @@ test("every action has frozen fields, a danger flag never beside paid, and its u
     "board-freeze": ["rule", "expectedVersion"], "board-unfreeze": ["rule", "expectedVersion"], "board-clear": ["rule", "expectedVersion"], "board-revert": ["rule", "expectedVersion", "version"], "board-adopt": ["rule", "expectedVersion", "proposalId"],
   };
   Object.assign(FIELDS, Object.fromEntries(SETUP_ACTION_NAMES.map(name => [name, name.startsWith("setup-provider-key") ? ["provider", "value"] : name === "setup-viewer-add" ? ["name"] : name === "setup-viewer-revoke" ? ["name", "identity"] : []])));
-  assert.equal(ACTIONS.length, 61 + SETUP_ACTION_NAMES.length);
+  assert.equal(ACTIONS.length, 63 + SETUP_ACTION_NAMES.length);
   for (const name of CONFIG_FIX_ACTIONS) FIELDS[name].push("becauseRun");
   assert.deepEqual(Object.keys(FIELDS).sort(), ACTIONS.map((a) => a.name).sort());
   for (const a of ACTIONS) {
@@ -410,7 +415,7 @@ test("every action has frozen fields, a danger flag never beside paid, and its u
     // Issue #737: every one of the 38 says what it did, for the banner after the write.
     for (const fn of ["undo", "inverse", "confirmLabel", "done"]) assert.equal(typeof a[fn], "function", `${a.name}: ${fn}`);
   }
-  assert.deepEqual(ACTIONS.filter((a) => a.danger).map((a) => a.name).sort(), ["board-clear", "board-freeze", "board-revert", "cancel-active", "cancel-all-held", "cancel-held", "cancel-queued", "fleet-pause", "limit-delete", "pause-window-delete", "project-delete", "queue-pause", "remove-all-failed", "remove-failed", "sandbox-end", "secret-bundle-remove", "secret-profile-remove", "setup-provider-key-replace", "setup-receiver-restart", "setup-receiver-stop", "setup-viewer-revoke", "setup-worker-restart", "setup-worker-stop", "trigger-delete"]);
+  assert.deepEqual(ACTIONS.filter((a) => a.danger).map((a) => a.name).sort(), ["board-clear", "board-freeze", "board-revert", "cancel-active", "cancel-all-held", "cancel-held", "cancel-queued", "device-remove", "fleet-pause", "limit-delete", "pause-window-delete", "project-delete", "queue-pause", "remove-all-failed", "remove-failed", "sandbox-end", "secret-bundle-remove", "secret-profile-remove", "sessions-end-all", "setup-provider-key-replace", "setup-receiver-restart", "setup-receiver-stop", "setup-viewer-revoke", "setup-worker-restart", "setup-worker-stop", "trigger-delete"]);
   assert.ok(Object.isFrozen(UNDO_SENTENCES));
   for (const [k, v] of Object.entries(UNDO_SENTENCES)) assert.match(v, /^[A-Z][^]*\.$/, `${k}: a sentence`);
 });
@@ -471,6 +476,8 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
     ["sandbox-prepare", { payload: { params: { host: "mini1" } } }, twice("The host sweeps the prepared clone when its retention window ends. No shell starts until you open it."), null, "Prepare sandbox", "Requested sandbox preparation on mini1"],
     ["sandbox-pin", { payload: { params: { id: "gh-1" } } }, twice("The workspace is swept after its host's pin window. Restore an earlier deadline only from that host."), null, "Pin workspace", "Requested a pin for gh-1"],
     ["sandbox-end", { payload: { params: { id: "gh-1" } } }, twice("Open a new shell from the kept workspace; the ended shell's processes cannot be restored."), null, "End this shell", "Ended the shell for gh-1"],
+    ["device-remove", { payload: { id: "0123456789ab", name: "rob", label: "Chrome on macOS" } }, twice("That browser signs in again with a token or a link, and can ask to be remembered again."), null, "Stop remembering it", "Stopped remembering Chrome on macOS for rob"],
+    ["sessions-end-all", { payload: {} }, twice("Everyone signs in again with a token or a link; every token still works."), null, "Sign everyone out", "Signed everyone out"],
     ["sandbox-host-set", { payload: { params: { host: "mini1" } } }, twice("Edit this host's terminal target again. Import the changed file into the opener on your own computer."), null, "Save terminal target", "Saved terminal target for mini1"],
     ["zero-touch-group", {}, twice("A completed classification cannot be withdrawn; it never answers the question."), null, "Start grouping job", "Queued the capped question grouping job"],
     ["zero-touch-name", {}, twice("Rename the group again from Zero touch."), null, "Save group name", "Saved the group name"],
@@ -3274,6 +3281,23 @@ test("Zero touch real actions bind private-source references, exact instructions
     assert.equal((await c.confirm("zero-touch-instruction", stale.json().ticket)).status, 409);
     assert.equal(JSON.parse(read(paths.triggersPath)).triggers[0].run.instructions, "A later operator edit.");
   } finally { await f.done(); }
+});
+
+test("remembered browsers (issue #849): Remove and Sign everyone out go through the preview, ticket and audit pipeline, held to the copy rules", async () => {
+  const { paths } = deployment();
+  const listed = [{ id: "3f9a1c0b7d2e", hash: "e".repeat(64), name: "alice", role: "operator", label: "Chrome on macOS", createdAt: "2026-10-01T09:00:00.000Z", lastUsedAt: "2026-10-20T09:00:00.000Z" }];
+  const ended = [];
+  const devices = { cookieName: "pdc_device_0000000000", unavailable: () => null, hashOf: () => "f".repeat(64), read: () => ({ absent: true }), list: () => ({ devices: listed.filter((d) => !ended.some(([h]) => h === d.hash)), unreadable: 0, unreadableIds: [] }), end: (hash, reason) => (ended.push([hash, reason]), { ok: true }) };
+  const c = await start({ paths, realSessions: true, devices, a: { loginCodes: { clear: () => ({ removed: 0, left: 0 }) } } });
+  const remove = await c.both("device-remove", { id: "3f9a1c0b7d2e" });
+  assert.deepEqual(remove.preview.summary.slice(0, 1), ["Stop remembering Chrome on macOS for alice"]);
+  assert.equal(remove.confirm.status, 200, remove.confirm.text);
+  assert.deepEqual(ended, [["e".repeat(64), "removed"]]);
+  assert.deepEqual([lastWrite(c).kind, lastWrite(c).target, lastWrite(c).outcome], ["device-remove", "3f9a1c0b7d2e", "ok"]);
+  const all = await c.both("sessions-end-all", {});
+  assert.equal(all.confirm.status, 200, all.confirm.text);
+  assert.deepEqual([lastWrite(c).kind, lastWrite(c).target], ["sessions-end-all", "everyone"]);
+  assert.equal((await c.act("sessions-end-all", {})).status, 401, "the operator who did it is signed out too");
 });
 
 test("sandbox controls use the HTTP preview/ticket/audit pipeline; audit failure and viewer/read-only cannot dispatch", async () => {

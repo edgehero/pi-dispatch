@@ -73,6 +73,9 @@ import { pauseWindowsNewerRefusal } from "../newer-release.mjs";
 import { fieldNamed, NO_EXPLANATION, UNNAMED_FIELD } from "../words.mjs";
 import { PREVIEW_AGAIN } from "./confirm.mjs";
 import { bulkResultsHtml, diffHtmlOf, plural, previewBarHtml, REFUSAL_STATES, refusalHtml, textHtml, unchangedBarHtml } from "./confirm-view.mjs";
+import { bindingFailure } from "./device-trust.mjs";
+import { streamEndOf } from "./session-ends.mjs";
+import { deviceIdOf } from "@edgehero/pi-dispatch/console-devices";
 import { resolverTextShown } from "./secrets-privacy.mjs";
 import { delimitedList } from "@edgehero/pi-dispatch/config";
 import { html } from "./html.mjs";
@@ -2015,6 +2018,8 @@ const WRITE_RULES = {
   "sandbox-prepare": { fields: ["repo", "index", "ref", "host", "pin"], danger: false, undo: () => "The host sweeps the prepared clone when its retention window ends. No shell starts until you open it.", inverse: () => null, confirmLabel: () => "Prepare sandbox", done: (out) => `Requested sandbox preparation on ${out.payload.params.host}` },
   "sandbox-pin": { fields: ["host", "id"], danger: false, undo: () => "The workspace is swept after its host's pin window. Restore an earlier deadline only from that host.", inverse: () => null, confirmLabel: () => "Pin workspace", done: (out) => `Requested a pin for ${out.payload.params.id}` },
   "sandbox-end": { fields: ["host", "id", "nonce", "containerId"], danger: true, undo: () => "Open a new shell from the kept workspace; the ended shell's processes cannot be restored.", inverse: () => null, confirmLabel: () => "End this shell", done: (out) => `Ended the shell for ${out.payload.params.id}` },
+  "device-remove": { fields: ["id"], danger: true, undo: () => "That browser signs in again with a token or a link, and can ask to be remembered again.", inverse: () => null, confirmLabel: () => "Stop remembering it", done: (out) => `Stopped remembering ${out.payload.label} for ${out.payload.name}` },
+  "sessions-end-all": { fields: [], danger: true, undo: () => "Everyone signs in again with a token or a link; every token still works.", inverse: () => null, confirmLabel: () => "Sign everyone out", done: () => "Signed everyone out" },
   "sandbox-host-set": { fields: ["host", "target", "deployment", "nodePath", "cliPath", "shell"], danger: false, undo: () => "Edit this host's terminal target again. Import the changed file into the opener on your own computer.", inverse: () => null, confirmLabel: () => "Save terminal target", done: (out) => `Saved terminal target for ${out.payload.params.host}` },
   "zero-touch-group": { fields: ["runId"], danger: false, undo: () => "A completed classification cannot be withdrawn; it never answers the question.", inverse: none, confirmLabel: () => "Start grouping job", done: () => "Queued the capped question grouping job" },
   "zero-touch-name": { fields: ["groupId", "name"], danger: false, undo: () => "Rename the group again from Zero touch.", inverse: none, confirmLabel: () => "Save group name", done: () => "Saved the group name" },
@@ -2230,6 +2235,89 @@ const sandboxActions = ["prepare", "pin", "end", "host-set"].map((operation) => 
   apply(entry, ctx) { return ctx.a.sandboxes.apply(this.name, entry, ctx.session.name); },
 }));
 
+/**
+ * Remembered browsers (issue #849): removing one, and signing everyone out. Both read the server's own device store, session store, hub and tickets
+ * (`ctx.deps`), since what they end lives in this console process; neither writes the tokens file, so signing everyone out needs no setup grant. The
+ * preview reads the store again at the confirm (`apply`), which acts on what is there then: a browser removed meanwhile is simply gone.
+ */
+const deviceActions = [{
+  name: "device-remove", kind: "device-remove", paid: false, bulk: false, needs: [],
+  preview(body, ctx) {
+    const id = str(body, "id", { required: true, max: 12 });
+    if (!/^[0-9a-f]{12}$/.test(id)) throw new BadRequest("id must be a remembered browser's 12-character id");
+    const devices = ctx.deps.devices;
+    if (!devices) return { refusal: "this console holds no remembered-device store", status: 503 };
+    const listed = devices.list();
+    if (listed.problem) return { refusal: `the remembered browsers cannot be read (${listed.problem}); an operator should run pi-dispatch doctor`, status: 503 };
+    const d = listed.devices.find((x) => x.id === id && x.ended === undefined);
+    if (!d) return { refusal: "no browser with that id is remembered now; look again", status: 409 };
+    return { summary: [`Stop remembering ${d.label} for ${d.name}`, `${d.name} (${d.role}) remembered it on ${d.createdAt.slice(0, 10)}, and it was last used on ${d.lastUsedAt.slice(0, 10)}.`, "It signs out at its next request, and signs in again with a token or a link."], payload: { id, name: d.name, label: d.label }, target: id };
+  },
+  apply(entry, ctx) {
+    const devices = ctx.deps.devices;
+    const listed = devices?.list();
+    if (!listed || listed.problem) return { invalid: "the remembered browsers cannot be read now, so nothing was removed; an operator should run pi-dispatch doctor" };
+    const d = listed.devices.find((x) => x.id === entry.payload.id && x.ended === undefined);
+    if (!d) return { invalid: "that browser is no longer remembered, so there was nothing to remove" };
+    const done = devices.end(d.hash, "removed");
+    if (done.unerased) return { invalid: `that browser could not be forgotten (${done.problem}); ${done.held === false ? "this console could not hold the refusal either, so remove it with pi-dispatch-console device revoke" : "this console refuses it until it stops"}; an operator should run pi-dispatch doctor`, partial: true };
+    return { ok: true };
+  },
+}, {
+  name: "sessions-end-all", kind: "sessions-end-all", paid: false, bulk: false, needs: [],
+  preview(body, ctx) {
+    const devices = ctx.deps.devices;
+    const listed = devices ? devices.list() : { devices: [], unreadable: 0 };
+    // Refused before anything is touched: an end-all that could not reach the remembered browsers would sign out everyone but them.
+    if (listed.problem) return { refusal: `the remembered browsers cannot be read (${listed.problem}), so nobody was signed out; an operator should run pi-dispatch doctor`, status: 503 };
+    const live = listed.devices.filter((d) => d.ended === undefined).length;
+    const open = typeof ctx.deps.sessions?.size === "function" ? ctx.deps.sessions.size() : 0;
+    // Said before the confirm: a record that cannot be read cannot be ended here, only refused in memory, so the host's command is the way to end it for good.
+    const unread = listed.unreadable > 0 ? [`${plural(listed.unreadable, "remembered browser")} cannot be read now (${listed.unreadableIds.join(", ")}): this console can refuse only those it holds a session for, and only while it runs; pi-dispatch-console sessions end-all on the host ends ${listed.unreadable === 1 ? "it" : "them"} for good.`] : [];
+    return { summary: ["Sign everyone out", `${plural(open, "session")} ${open === 1 ? "ends" : "end"} now, ${plural(live, "remembered browser")} ${live === 1 ? "is" : "are"} forgotten, and every sign-in link not opened yet stops working, viewer invitations included.`, ...unread, "Every token still works. You are signed out too: sign in again with your token, or run ./pi-dispatch console on the host."], payload: {}, target: "everyone" };
+  },
+  apply(entry, ctx) {
+    const { deps } = ctx;
+    // The remembered browsers first, so a browser whose record cannot be ended is named before anything else changes; the rest still ends.
+    const listed = deps.devices ? deps.devices.list() : { devices: [] };
+    if (listed.problem) return { invalid: `the remembered browsers cannot be read (${listed.problem}), so nobody was signed out; an operator should run pi-dispatch doctor` };
+    // The truer word where the tokens file already proves one (a revoked token is never told "your token still works").
+    const file = deps.readTokens?.()?.file ?? null;
+    const left = [];
+    for (const d of listed.devices) {
+      if (d.ended !== undefined) continue;
+      const read = deps.devices.read(d.hash);
+      const reason = (read.record && file ? bindingFailure(read.record, file) : null) ?? "all";
+      if (deps.devices.end(d.hash, reason).unerased) left.push(d.id);
+    }
+    // A record that cannot be read is not in the listing. A session this process holds for one is refused in memory (`end` denies what it cannot write),
+    // as a sign-out over one is; one with no session here is the host command's to end.
+    const unreadable = new Set(listed.unreadableIds ?? []);
+    let unheld = false;
+    for (const hash of deps.sessions.heldDevices?.() ?? []) {
+      if (deps.devices.read(hash).unjudged) {
+        if (deps.devices.end(hash, "all").held === false) unheld = true;
+        unreadable.add(deviceIdOf(hash));
+      }
+    }
+    // A console wired without the links folder must not report links stopped that it never reached.
+    const links = typeof ctx.a.loginCodes?.clear === "function" ? ctx.a.loginCodes.clear() : { removed: 0, left: 0, unreadable: true };
+    // Each open tab is told the word its session ended with, the same one its next request would read (a revoked token's tab says revoked).
+    for (const { id, reason } of deps.sessions.endAll(file)) {
+      ctx.a.setup?.endSession?.(id);
+      deps.tickets?.endSession?.(id);
+      deps.hub?.endSession(id, streamEndOf(reason) ?? "all");
+    }
+    const problems = [
+      ...(left.length > 0 ? [`${plural(left.length, "remembered browser")} could not be forgotten (${left.join(", ")}); remove ${left.length === 1 ? "it" : "them"} with pi-dispatch-console device revoke once doctor passes`] : []),
+      ...(unreadable.size > 0 ? [`${plural(unreadable.size, "remembered browser")} could not be read (${[...unreadable].join(", ")}); ${unheld ? "this console could not refuse them all in memory either" : "this console refuses those it held a session for while it runs"}, and pi-dispatch-console sessions end-all on the host ends them for good`] : []),
+      ...(links.unreadable ? ["the sign-in links folder could not be read, so a link not opened yet may still work; an operator should run pi-dispatch doctor"] : links.left > 0 ? [`${plural(links.left, "sign-in link")} could not be removed from the codes folder; an operator should run pi-dispatch doctor`] : []),
+    ];
+    if (problems.length > 0) return { invalid: `Everyone else was signed out, but ${problems.join(", and ")}`, partial: true };
+    return { ok: true };
+  },
+}];
+
 /** Board writes use the same ticket and audit-before-write path as every other console change. */
 const boardActions = ["freeze", "unfreeze", "clear", "revert", "adopt"].map((operation) => ({
   name: `board-${operation}`, kind: `board-${operation}`, paid: false, bulk: false, needs: ["watch"],
@@ -2354,7 +2442,7 @@ function adoptable(facts, { name, version }) {
 
 /** Every action the console can take, by name. The routes, the pages' forms and the tests all read this table. */
 export const CONFIG_FIX_ACTIONS = Object.freeze(configActions.map((action) => action.name));
-export const ACTIONS = Object.freeze([...jobActions, ...fleetActions, ...configActions, ...boardActions, ...zeroTouchActions, ...sandboxActions, ...packageActions, ...modelRoleActions, ...triggerEnvironmentActions, ...ANSWERER_ACTIONS, ...SETUP_HTTP_ACTIONS].map(withRules));
+export const ACTIONS = Object.freeze([...jobActions, ...fleetActions, ...configActions, ...boardActions, ...zeroTouchActions, ...sandboxActions, ...deviceActions, ...packageActions, ...modelRoleActions, ...triggerEnvironmentActions, ...ANSWERER_ACTIONS, ...SETUP_HTTP_ACTIONS].map(withRules));
 
 /** The action named `name`, or null. */
 export function actionNamed(name) {

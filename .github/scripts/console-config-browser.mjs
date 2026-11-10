@@ -73,7 +73,7 @@ export async function checkConfigBrowser({
         async ({ evaluate }) => {
           ensure(
             await evaluate(
-              `(()=>{const card=document.querySelector('.card'),select=document.querySelector('.config-form select');const outlineLinks=[...document.querySelectorAll('.config-sections>.btn')];const outlined=${JSON.stringify(pageName)}!=='config'||(outlineLinks.length===2&&outlineLinks.every(e=>{const s=getComputedStyle(e);return s.borderTopStyle==='solid'&&parseFloat(s.borderTopWidth)>=1;}));return outlined&&card&&(${width}>1100||card.getBoundingClientRect().width>=${width}*.8)&&[...document.querySelectorAll('.facts dd')].every(e=>e.getBoundingClientRect().width>=60)&&parseFloat(getComputedStyle(card).borderRadius)>=10&&select&&getComputedStyle(select).fontFamily!=='Times New Roman'&&document.scrollingElement.scrollWidth<=${width};})()`,
+              `(()=>{const card=document.querySelector('.card'),select=document.querySelector('.config-form select');const outlineLinks=[...document.querySelectorAll('.config-sections>.btn')];const outlined=${JSON.stringify(pageName)}!=='config'||(outlineLinks.length===3&&outlineLinks.every(e=>{const s=getComputedStyle(e);return s.borderTopStyle==='solid'&&parseFloat(s.borderTopWidth)>=1;}));return outlined&&card&&(${width}>1100||card.getBoundingClientRect().width>=${width}*.8)&&[...document.querySelectorAll('.facts dd')].every(e=>e.getBoundingClientRect().width>=60)&&parseFloat(getComputedStyle(card).borderRadius)>=10&&select&&getComputedStyle(select).fontFamily!=='Times New Roman'&&document.scrollingElement.scrollWidth<=${width};})()`,
             ),
             "Pulse configuration styling or responsive layout is absent",
           );

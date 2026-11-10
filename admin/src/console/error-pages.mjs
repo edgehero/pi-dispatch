@@ -191,6 +191,14 @@ export function forbiddenContent() {
   return errorCard({ status: KIND_STATUS["operators-only"], said: ERROR_SENTENCES["operators-only"], actions: goTo("overview", true) });
 }
 
+/** What an agent token is told on a page that is people's (issue #849, Remembered browsers): the same 403 card, in words true for that refusal. */
+export const PEOPLE_ONLY = Object.freeze({ heading: "This page is for people", sentence: "Remembered browsers belong to people who sign in; an agent token has none, and cannot change anyone's." });
+
+/** The 403 card for an agent on a people's page. */
+export function peopleOnlyContent() {
+  return errorCard({ status: KIND_STATUS["operators-only"], said: { ...ERROR_SENTENCES["operators-only"], ...PEOPLE_ONLY }, actions: goTo("overview", true) });
+}
+
 /**
  * The run id a no-run page puts in its search field: the asked id when the runs page's `q` rule takes it as it is
  * (`parseRunFilter`, the rule the search it fills is read by), else null, an empty field. Never cut or cleaned into

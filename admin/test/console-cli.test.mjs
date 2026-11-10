@@ -701,6 +701,11 @@ test("serve wires remembered devices end to end (#849): a removed device's live 
   modules.sessions = await import("../src/console/sessions.mjs");
   modules.deviceTrust = await import("../src/console/device-trust.mjs");
   modules.tokens.findToken = (f, presented) => (presented === TOKEN ? f.tokens[0] : null);
+  // The real links module's clear, and the server's arguments as serve builds them (part 5: the page's listing and the links folder).
+  const realCodes = await import("../src/console/login-codes.mjs");
+  modules.loginCodes = { ...modules.loginCodes, clearLoginCodes: realCodes.clearLoginCodes };
+  let built = null;
+  modules.server = { ...server, createConsoleServer: (args) => ((built = args), server.createConsoleServer(args)) };
   const err = [];
   const running = runCli(["serve", "--deployment", dep.dir], { env: dep.env, modules, now: () => T0, uid: process.geteuid?.(), out: () => {}, err: (l) => err.push(l), until, onListening: listening });
   const srv = await Promise.race([up, running.then((code) => assert.fail(`serve exited ${code} before listening: ${err.join(" ")}`))]);
@@ -735,6 +740,14 @@ test("serve wires remembered devices end to end (#849): a removed device's live 
   };
 
   const first = await rememberAlice();
+  // The remembered browsers as pages get them: a short id each, never a hash.
+  const forPage = built.pageDeps.devices();
+  assert.ok(forPage.devices.length === 1 && forPage.devices.every((d) => !Object.hasOwn(d, "hash") && /^[0-9a-f]{12}$/.test(d.id)), JSON.stringify(forPage));
+  // Sign everyone out reaches this deployment's links folder.
+  const codes = join(dep.dir, "console-login-codes");
+  mkdirSync(codes, { recursive: true, mode: 0o700 });
+  writeFileSync(join(codes, `${"c".repeat(64)}.json`), "{}");
+  assert.deepEqual(built.actionDeps.loginCodes.clear(), { removed: 1, left: 0 });
   const s1 = stream(first);
   assert.match(await s1.when((x) => x.includes("event: panel"), 5000), /event: panel/);
   // `pi-dispatch-console device revoke`, as an operator runs it while serve holds the stream open.

@@ -564,6 +564,10 @@ export function configNavigation(v) {
       label: "Connections",
       href: ui.pageHref(v.pages, "connections") ?? "/config",
       kind: "sm",
+    })}${ui.btn({
+      label: "Remembered browsers",
+      href: ui.pageHref(v.pages, "devices") ?? "/config",
+      kind: "sm",
     })}
   </nav>`;
 }

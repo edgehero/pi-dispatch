@@ -107,7 +107,7 @@ import { TRANSCRIPT_FORMATS } from "./transcript.mjs";
 import { gatewayApi, gatewayLanding } from "./gateway.mjs";
 import { ENDED_OF_DEVICE_REASON, REMEMBER_FRESH_MS, bindingFailure } from "./device-trust.mjs";
 import { streamEndOf } from "./session-ends.mjs";
-import { REMEMBER_ROLES, deviceIdOf, deviceLabelOf } from "@edgehero/pi-dispatch/console-devices";
+import { MAX_DEVICES_PER_NAME, REMEMBER_ROLES, deviceIdOf, deviceLabelOf } from "@edgehero/pi-dispatch/console-devices";
 import { DEVICE_COOKIE_MAX_AGE_SEC } from "./sessions.mjs";
 
 /** The largest request body a write may send. A pause-windows file is a few hundred bytes; 64 KiB is generous. */
@@ -236,8 +236,9 @@ function peekForNav(deps, req) {
     // A read-only look at a remembered device: this draws a bar, so it signs nobody in and writes no row.
     const secret = deps.devices ? deps.cookies.readDeviceCookie(deps.devices.cookieName, req.headers.cookie) : null;
     if (secret) {
-      const device = deps.devices.read(deps.devices.hashOf(secret));
-      if (device.record && !device.record.ended && bindingFailure(device.record, read.file) === null) return { name: device.record.name, role: device.record.role };
+      const hash = deps.devices.hashOf(secret);
+      const device = deps.devices.read(hash);
+      if (device.record && !device.record.ended && bindingFailure(device.record, read.file) === null) return { name: device.record.name, role: device.record.role, remembered: deviceIdOf(hash) };
     }
     if (!id) return null;
     const s = deps.sessions.peek(id, read.file);
@@ -262,7 +263,8 @@ function sendFailure(ctx, status, sentence, { headers = {}, page = null } = {}) 
   if (res.headersSent) return;
   if (!wantsHtml(req, ctx.pathname ?? pathnameOf(req))) return sendError(res, status, sentence, headers);
   const kind = page?.kind ?? "failed";
-  const session = ctx.session ? { name: ctx.session.name, role: ctx.session.role } : ctx.peek ? peekForNav(deps, req) : null;
+  // `remembered` too (issue #849): the bar says so on every page a remembered browser is shown, a refusal's included.
+  const session = ctx.session ? { name: ctx.session.name, role: ctx.session.role, ...(ctx.session.deviceHash ? { remembered: deviceIdOf(ctx.session.deviceHash) } : {}) } : ctx.peek ? peekForNav(deps, req) : null;
   let out;
   try {
     out = deps.errorPage({ ...page, kind, status, sentence, theme: themeOf(req.headers.cookie), session, readOnly: Boolean(deps.config?.readOnly) });
@@ -316,6 +318,24 @@ function secureOrigin(deps) {
 }
 
 /**
+ * Whether this browser could be remembered here, for a page that offers it (issue #849): a device store that works on this host (never on Windows) and
+ * the transport `rememberTransportOk` asks for, judged on a GET by `secureOrigin` in place of the write guard's origin. A page that offers it may still
+ * be refused by the route, which judges again; one that does not offer it never shows a choice the console would then refuse.
+ */
+function rememberableHere(deps, req) {
+  return rememberRefusalHere(deps, req) === null;
+}
+
+/** Why `rememberableHere` is false, for a page that says so in its own words: `store`, `windows`, `transport`, or null when it is not. */
+function rememberRefusalHere(deps, req) {
+  if (!deps.devices) return "store";
+  const kind = typeof deps.devices.unavailableKind === "function" ? deps.devices.unavailableKind() : deps.devices.unavailable() !== null ? "store" : null;
+  if (kind !== null) return kind;
+  if (secureOrigin(deps) === true) return null;
+  return listenWord(deps.config) !== "public" && LOOPBACK_HOSTS.includes(hostnameOf(req.headers.host)) ? null : "transport";
+}
+
+/**
  * The `Secure` for re-setting a device cookie on this read, or null to leave the cookie as it is. With no enrolled HTTPS origin now, only where remembering
  * would be allowed without one (a loopback Host on a bind that is not public): a cookie made under an enrollment that has since been removed must never be
  * re-set without `Secure` on a name a network carries, which would send it in the clear from then on. It simply ages, and the browser signs in again.
@@ -361,6 +381,8 @@ function startSession(ctx, entry, file, action, extra = {}, { remember = false, 
   const secret = deps.devices ? deps.cookies.readDeviceCookie(deps.devices.cookieName, ctx.req.headers.cookie) : null;
   let replacing = null;
   let unreadable = null;
+  // What this sign-in's first page should say about the browser (issue #849), gathered into one flash below.
+  const notices = [];
   if (secret) {
     const hash = deps.devices.hashOf(secret);
     const read = deps.devices.read(hash);
@@ -403,6 +425,13 @@ function startSession(ctx, entry, file, action, extra = {}, { remember = false, 
     ctx.record({ actor: { name: replacing.record.name, role: replacing.record.role, session: null }, action: "device-ended", target: deviceIdOf(replacing.hash), outcome: done.unerased ? "failed" : "ok", reason: replacing.record.name !== entry.name ? "another person signed in on this browser" : replacing.reason === "removed" ? "unused for longer than any browser keeps the cookie" : "the same person signed in again after the device's token changed" });
     deviceEnded = true;
     dropDeviceSession(deps, replacing.hash, "elsewhere", res);
+    // Said on the new session's first page, so the person signing in sees that the browser stopped remembering someone else, or may not have.
+    if (replacing.record.name !== entry.name) {
+      const who = replacing.record.name;
+      notices.push(done.unerased
+        ? { status: "attention", summary: `This browser may still remember ${who}`, body: `Its record could not be ended. An operator should run pi-dispatch doctor on the host, then remove it on Remembered browsers or with pi-dispatch-console device revoke.` }
+        : { status: "idle", summary: `This browser no longer remembers ${who}`, body: `${who} can sign in here again and ask to be remembered.` });
+    }
   }
   if (unreadable) {
     // A session of it held here proves the record real in this process: refused in memory, as a sign-out over one is.
@@ -411,6 +440,11 @@ function startSession(ctx, entry, file, action, extra = {}, { remember = false, 
       dropDeviceSession(deps, unreadable, "elsewhere", res);
     }
     ctx.record({ actor: { name: entry.name, role: entry.role, session: deps.cookies.sessionDigest(id) }, action: "device-ended", target: deviceIdOf(unreadable), outcome: "failed", reason: "signed in again while the record could not be read: its cookie was cleared and the record left; revoke it once doctor passes" });
+    // The record names nobody the console can read, so the notice cannot say whose: only that a copy of the cookie may still work. A store that is
+    // unusable as a whole makes every cookie read so, its owner's own included, and names no record: that is the folder's problem, said as such.
+    notices.push(deps.devices.unavailableKind?.() === "store"
+      ? { status: "attention", summary: "This browser's remembered sign-in could not be checked", body: "The console cannot use its store of remembered browsers, so this browser may still be remembered. An operator should run pi-dispatch doctor on the host." }
+      : { status: "attention", summary: "This browser may still remember someone else", body: `Its remembered sign-in could not be read, so it was left. An operator should run pi-dispatch doctor on the host, then remove it with pi-dispatch-console device revoke --id ${deviceIdOf(unreadable)}.` });
   }
   if (presented) {
     deps.sessions.destroy(presented, "elsewhere");
@@ -420,21 +454,30 @@ function startSession(ctx, entry, file, action, extra = {}, { remember = false, 
   }
   let remembered = false;
   if (remember) {
-    const secretCookie = rememberOnto(ctx, id, entry, file, secure);
-    if (secretCookie) {
-      cookies.push(secretCookie);
+    const made = rememberOnto(ctx, id, entry, file, secure);
+    if (made.cookie) {
+      cookies.push(made.cookie);
       // One credential: an ordinary cookie that came in goes, since its session has just ended above.
       if (presented) cookies.push(deps.cookies.clearSessionCookie());
       remembered = true;
+    } else {
+      // Asked and not done: said on the first page, so nobody walks away believing this browser stays signed in.
+      notices.push({ status: "attention", summary: "This browser was not remembered", body: notRemembered(made.refusal, entry.role, Boolean(deps.config.readOnly)) });
     }
   }
+  // One flash holds what this sign-in has to say, so a second notice never replaces a warning the first one gave (both come with a full disk).
+  if (notices.length > 0) deps.sessions.setFlash?.(id, { notice: true, status: notices.some((n) => n.status === "attention") ? "attention" : "idle", summary: notices.map((n, i) => (i === 0 ? n.summary : n.summary.charAt(0).toLowerCase() + n.summary.slice(1))).join(", and "), body: notices.map((n) => n.body).join(" ") });
   if (!remembered) cookies.push(deps.cookies.sessionCookie(id, { maxAgeSec: Math.floor(deps.config.maxMs / 1000), secure }));
+  // Offered once, on the next page, to a sign-in that could be remembered and did not ask (issue #849): a one-time link has no moment to ask, and a
+  // person who left the box unticked is asked once more there, where Not now is the answer and nothing follows from ignoring it.
+  if (!remember && !invited && REMEMBER_ROLES.includes(entry.role) && deps.devices && deps.devices.unavailable() === null && rememberTransportOk(ctx)) deps.sessions.setOffer?.(id);
   return sendJson(res, 200, { ok: true, name: entry.name, role: entry.role, ...extra, ...(remember ? { remembered } : {}), ...(deviceEnded ? { deviceEnded: true } : {}) }, { "set-cookie": cookies.length === 1 ? cookies[0] : cookies });
 }
 
 /**
- * Make session `id` a remembered device: the cookie to set, or null having said why in the log. The audit row comes first, as for every mint; a store that refuses leaves
- * an ordinary session, which the person is told in the answer.
+ * Make session `id` a remembered device: `{cookie}`, or `{refusal}` having said why in the log, `full` when this sign-in already has the most remembered browsers one may
+ * have (a person can remove one), `failed` for anything else (the operator's to fix). The audit row comes first, as for every mint; a store that refuses leaves an
+ * ordinary session, which the person is told.
  */
 function rememberOnto(ctx, id, entry, file, secure) {
   const { deps } = ctx;
@@ -443,22 +486,32 @@ function rememberOnto(ctx, id, entry, file, secure) {
     deps.audit.append({ actor, action: "device-remembered", outcome: "ok" });
   } catch (e) {
     deps.log(`console: audit append failed (${e?.code ?? "error"}), so this device was not remembered`);
-    return null;
+    return { refusal: "failed" };
   }
   const made = deps.devices.remember({ name: entry.name, role: entry.role, tokenHash: entry.sha256, generation: file.generation, tokenCreatedAt: entry.createdAt, label: deviceLabelOf(ctx.req.headers["user-agent"]) });
   if (!made.hash) {
     ctx.record({ actor, action: "device-remembered", outcome: "failed", reason: "the store refused" });
     deps.log(`console: this device could not be remembered: ${made.refusal}`);
-    return null;
+    return { refusal: made.full ? "full" : "failed" };
   }
   // Two tabs pressing Remember together: the second finds the session already adopted, and its record must not stay behind, live and unclaimed.
   if (!deps.sessions.adoptDevice(id, made.hash)) {
     deps.devices.end(made.hash, "replaced");
-    return null;
+    return { refusal: "failed" };
   }
   deps.devices.reap();
-  return deps.cookies.deviceCookie(deps.devices.cookieName, made.secret, { secure });
+  return { cookie: deps.cookies.deviceCookie(deps.devices.cookieName, made.secret, { secure }) };
 }
+
+/** What a person is told when a browser they asked to remember was not (issue #849): never left believing it is. A viewer has no Remove, so is told what she can do. */
+export const NOT_REMEMBERED = Object.freeze({
+  full: `This sign-in already has ${MAX_DEVICES_PER_NAME} remembered browsers, the most it may have. Remove one on Remembered browsers, then sign in again with the box ticked. You are signed in for this session only.`,
+  fullViewer: `This sign-in already has ${MAX_DEVICES_PER_NAME} remembered browsers, the most it may have. Sign out on one you no longer use, or ask an operator to remove one, then sign in again with the box ticked. You are signed in for this session only.`,
+  fullReadOnly: `This sign-in already has ${MAX_DEVICES_PER_NAME} remembered browsers, the most it may have. This console is read-only, so sign out on one you no longer use, or remove one with pi-dispatch-console device revoke on the host, then sign in again with the box ticked. You are signed in for this session only.`,
+  failed: "You are signed in for this session only. The console's log says why, and an operator should run pi-dispatch doctor on the host.",
+});
+/** Which of `NOT_REMEMBERED` a person gets: Remove is offered only to an operator on a console that takes changes. */
+const notRemembered = (refusal, role, readOnly) => (refusal !== "full" ? NOT_REMEMBERED.failed : readOnly ? NOT_REMEMBERED.fullReadOnly : role === "operator" ? NOT_REMEMBERED.full : NOT_REMEMBERED.fullViewer);
 
 /** The tokens file, or null after answering 503 (a file that went bad while the console ran: nobody signs in). */
 function tokensOr503(ctx) {
@@ -639,9 +692,10 @@ async function postRememberDevice(ctx) {
   if (deps.now() - live.createdAt > REMEMBER_FRESH_MS) return refuse(403, "this sign-in is too old to be remembered; sign in again and remember it then");
   const entry = read.file.tokens.find((t) => t.sha256 === live.tokenHash && t.role === live.role);
   if (!entry) return refuse(403, "this sign-in's token has changed; sign in again");
-  const cookie = rememberOnto(ctx, session.id, entry, read.file, typeof ctx.consoleOrigin === "string" && ctx.consoleOrigin.startsWith("https://"));
-  if (!cookie) return sendError(ctx.res, 503, "this device could not be remembered; you stay signed in as before");
-  return sendJson(ctx.res, 200, { ok: true, remembered: true }, { "set-cookie": [cookie, deps.cookies.clearSessionCookie()] });
+  const made = rememberOnto(ctx, session.id, entry, read.file, typeof ctx.consoleOrigin === "string" && ctx.consoleOrigin.startsWith("https://"));
+  if (made.refusal === "full") return sendError(ctx.res, 409, deps.config.readOnly ? `this sign-in already has ${MAX_DEVICES_PER_NAME} remembered browsers, the most it may have; this console is read-only, so sign out on one you no longer use, or remove one with pi-dispatch-console device revoke on the host` : live.role === "operator" ? `this sign-in already has ${MAX_DEVICES_PER_NAME} remembered browsers, the most it may have; remove one on Remembered browsers first` : `this sign-in already has ${MAX_DEVICES_PER_NAME} remembered browsers, the most it may have; sign out on one you no longer use, or ask an operator to remove one`);
+  if (!made.cookie) return sendError(ctx.res, 503, "this device could not be remembered; you stay signed in as before");
+  return sendJson(ctx.res, 200, { ok: true, remembered: true }, { "set-cookie": [made.cookie, deps.cookies.clearSessionCookie()] });
 }
 
 // ---- pages, state and the live stream (issue #641) ----
@@ -681,9 +735,16 @@ function pageHandler(name) {
     const { pages, pageDeps, config } = ctx.deps;
     const data = await pages.loadPageData(name, parsed.query, pageDeps, { role: ctx.session.role, readOnly: Boolean(config.readOnly) });
     ctx.flash = ctx.req.method === "GET" && data?.readFailed !== true ? ctx.deps.sessions.takeFlash?.(ctx.session.id) ?? null : null;
+    // Issue #849: the offer is taken by a page drawn for a person (never a HEAD) on a transport where remembering would be allowed.
+    const offer = ctx.req.method === "GET" && ctx.deps.sessions.takeOffer?.(ctx.session.id, REMEMBER_FRESH_MS) === true && rememberableHere(ctx.deps, ctx.req);
     const out = await pages.renderPage(name, {
       query: parsed.query,
-      session: { name: ctx.session.name, role: ctx.session.role },
+      // `remembered` is the device's short id, never its hash: the bar says the browser is remembered and the devices page marks it. `invited`: an
+      // invitation's sign-in, which can never be remembered, so the devices page says that rather than how.
+      session: { name: ctx.session.name, role: ctx.session.role, remembered: ctx.session.deviceHash ? deviceIdOf(ctx.session.deviceHash) : null, ...(ctx.session.invited ? { invited: true } : {}) },
+      offer,
+      // Whether this browser could be remembered from here, so a page never tells a person to tick a box the sign-in page does not draw.
+      rememberable: rememberRefusalHere(ctx.deps, ctx.req) ?? true,
       data,
       readOnly: Boolean(config.readOnly),
       theme: themeOf(ctx.req.headers.cookie),
@@ -725,7 +786,7 @@ function getLogin(ctx) {
   const arrival = notice === null && ctx.req.headers["sec-fetch-site"] === "cross-site";
   const idleMinutes = Number.isSafeInteger(config.idleMs) ? Math.floor(config.idleMs / 60000) : undefined;
   const maxHours = Number.isSafeInteger(config.maxMs) ? Math.floor(config.maxMs / 3600000) : undefined;
-  return sendHtml(ctx.res, 200, loginPage({ theme: themeOf(ctx.req.headers.cookie), notice, limits: { idleMinutes, maxHours }, listen: listenWord(config), next, arrival }));
+  return sendHtml(ctx.res, 200, loginPage({ theme: themeOf(ctx.req.headers.cookie), notice, limits: { idleMinutes, maxHours }, listen: listenWord(config), next, arrival, remember: rememberableHere(ctx.deps, ctx.req) }));
 }
 
 /** The sign-in page's `ended` notice from its query: exactly one `ended`, a member of `ENDED_REASONS`, else null. */

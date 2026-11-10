@@ -275,8 +275,21 @@ without a token or a link each time. It stays signed in until you sign out in it
 token is revoked or rotated, changes role or `sessions end-all` runs; each of those ends it at its next request, with
 the reason on the sign-in page, also after a restart. Every other rule on this page holds for it.
 
-- **How.** A sign-in asks for it: `remember: true` with the token on `POST /login`, or `POST /api/device/remember`
-  within 10 minutes of signing in, which is how a one-time link's sign-in is remembered.
+- **How.** Tick **Remember this trusted device** under the token field when you sign in. It is never ticked for you,
+  and it is drawn only where the console would remember the browser (below). A one-time link has no moment to ask, so
+  the first page after a fresh sign-in that did not ask offers it once: **Remember this browser** or **Not now**.
+  Ignoring it leaves an ordinary sign-in, and once 10 minutes have passed it is not offered again: sign out and sign in
+  with the box ticked. (For a script: `remember: true` with the token on `POST /login`, or `POST /api/device/remember`
+  within 10 minutes of signing in.)
+- **Seeing and undoing it.** The top bar says **remembered** beside your role, and puts a ring round your avatar,
+  which is what a phone shows. **Remembered browsers**
+  (`/config/devices`, linked from Configuration) shows this browser, every remembered browser (a viewer sees their own)
+  and, for an operator, **Remove** on each and **Sign everyone out**, each with a preview. Sign everyone out ends every
+  session, forgets every remembered browser and stops every sign-in link not opened yet, viewer invitations included;
+  every token still works, so you sign in again with yours or with `./pi-dispatch console` on the host. A remembered
+  browser whose record the console cannot read at that moment is named in its answer instead of forgotten: run
+  `pi-dispatch-console sessions end-all` on the host, which ends it for good. An `agent`
+  token can do none of this, and is refused the page.
 - **Who and where.** Operator and viewer tokens only, never an `agent` token or a viewer invitation's sign-in. Only on
   a loopback console reached as `localhost` or `127.0.0.1`, a unix socket reached through its `ssh -L` tunnel as
   `localhost`, or a console behind an enrolled HTTPS origin ([gateway enrollment](sandbox-gateway.md)): plain HTTP
@@ -327,7 +340,7 @@ in one line what happened:
 | `max` | `PI_CONSOLE_MAX_HOURS` since sign-in | You were signed out after 12 hours (the longest a session lasts) |
 | `revoked` | the token was revoked or rotated | Your token was revoked or rotated |
 | `role` | the token's role changed | Your role changed, so you were signed out |
-| `all` | `sessions end-all` | An operator ended every session (your token still works) |
+| `all` | `sessions end-all`, or Sign everyone out on Remembered browsers | An operator ended every session (your token still works) |
 | `elsewhere` | you signed out in another tab | This browser signed out in another tab |
 | `restart` | the console restarted, perhaps | This console no longer knows this sign-in; it may have restarted |
 | `switched` | nothing ended: another tab signed this browser in as someone else, and this page stopped rather than act for them | This browser is now signed in as someone else |
@@ -359,7 +372,7 @@ and a session that ended in the meantime (its idle limit, say) ends then, with i
 | `token list` | Names, roles and creation dates. Never a token or a hash. |
 | `token rotate --name <n>` | A new secret for that name, printed once. Its sessions end. |
 | `token revoke --name <n>` | Removes the name. Its sessions end. |
-| `sessions end-all` | Ends every session, remembered browsers included; every token stays valid. |
+| `sessions end-all` | Ends every session, remembered browsers included; every token stays valid. The console's own **Sign everyone out** ([Remembered browsers](#remembered-browsers)) does the same from the browser, and also stops sign-in links not opened yet. |
 | `device list` | Every remembered browser: a 12-character id, name, role, browser, when it was remembered and last used, and why it ended. Never a secret or a whole hash. "Last used" is its last page load, to the day: a tab left open whose live updates carry on does not move it. |
 | `device revoke --id <id>` or `--name <n>` | Stops remembering one browser, or every browser of that token name. It signs out at its next request. |
 
@@ -698,6 +711,7 @@ readers ([Live updates](#live-updates)).
 | `/config/connections` | Forges, the receiver, model endpoints, provider keys, MCP servers and the egress rules. |
 | `/config/project?id=<project>` | One project: its members, limits, spend and share of a budget split ([Projects](projects.md)). |
 | `/config/updates` | Which pi and which extensions jobs run, what is newer, a canary and Adopt ([Updates](#updates)). |
+| `/config/devices` | This browser, every remembered browser with Remove, and Sign everyone out ([Remembered browsers](#remembered-browsers)). |
 | `/models` | Scoped model roles and ordered fallbacks, actionable policy banners, observed cooldowns and model windows, published proposals and retained canary comparisons. Not live; Reload reads again. Operators review role-map changes through preview, diff and confirm. No page action starts a run. |
 | `/audit` | The console's audit log, newest first. Operator only, under More in the navigation. How far its hash chain is verified, which rows it does not vouch for, filters and a search ([The audit log](#the-audit-log)). A line that is not a valid row is shown as damaged in its place, never skipped. |
 

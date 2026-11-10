@@ -40,6 +40,7 @@ import { configNavigation, configFiles, configUnset, configDescription } from ".
 import { secretsView } from "../secrets-view.mjs";
 import { secretsHeadline, secretsProblems, secretsProfiles, secretsBundles, secretsAdd, secretsHelp } from "./panels/secrets.mjs";
 import { updatesDescription, updatesHosts, updatesHow, updatesJobs, updatesProblems, updatesRecent } from "./panels/updates.mjs";
+import { DEVICES_WORDS, devicesEndAll, devicesList, devicesThis } from "./panels/devices.mjs";
 import { connectionsDescription, connectionsProblems, connectionsForges, connectionsEgress, connectionsEndpoints, connectionsNotify, connectionsMcp, connectionsEnvironment, connectionsPackages } from "./panels/connections.mjs";
 import { projectTitle, projectDescription, projectSpend, projectRuns, projectSize, projectLoads, projectMembers, projectSizing, projectRecent, projectAllocation, projectLimits, projectBundle, projectTriggers, projectDelete } from "./panels/project.mjs";
 import { triggersNavigation, triggersViewer, triggersCount, triggersNext, triggersSpend, triggersFilters, triggersWeek, triggersSchedules, triggersGithub, triggersGitlab, triggersForgejo, triggersAzure, triggersUnknown, triggersCheck, triggerCheckPage, triggersDescription } from "./panels/triggers.mjs";
@@ -62,7 +63,7 @@ import { TIMELINE_ROWS, TIMELINE_ZOOMS } from "./timeline.mjs";
 import { auditAbout, auditChain, auditFilter } from "./panels/audit.mjs";
 import { AUDIT_PARAMS, auditQueryString, parseAuditQuery, readAuditView } from "./audit-view.mjs";
 import { SPEND_PANELS, SPEND_LAYOUTS, spendControls, spendTabs, spendDescription } from "./panels/spend.mjs";
-import { errorPage, forbiddenContent } from "./error-pages.mjs";
+import { errorPage, forbiddenContent, peopleOnlyContent } from "./error-pages.mjs";
 import {
   auditLog,
   configMcp,
@@ -170,6 +171,7 @@ export const PAGES = Object.freeze({
   secrets: Object.freeze({ path: "/config/secrets", auth: "viewer", live: false, title: "Secrets", nav: null, icon: "config" }),
   connections: Object.freeze({ path: "/config/connections", auth: "viewer", live: false, title: "Connections", nav: null, icon: "config" }),
   updates: Object.freeze({ path: "/config/updates", auth: "viewer", live: false, title: "Updates", nav: null, icon: "config" }),
+  devices: Object.freeze({ path: "/config/devices", auth: "viewer", live: false, title: "Remembered browsers", nav: null, icon: "config" }),
   project: Object.freeze({ path: "/config/project", auth: "viewer", live: false, title: "Project", nav: null, icon: "config" }),
   watch: Object.freeze({ path: "/watch", auth: "viewer", live: false, title: "Watch", nav: null, icon: "bolt" }),
   "watch-board": Object.freeze({ path: "/watch/board", auth: "viewer", live: false, title: "Watch board", nav: null, icon: "bolt" }),
@@ -184,6 +186,7 @@ const PAGE_PANELS = Object.freeze({
   "zero-touch": ZERO_TOUCH_PANELS,
   secrets: [["p-secret-problems", secretsProblems], ["p-secret-profiles", secretsProfiles], ["p-secret-bundles", secretsBundles], ["p-secret-add", secretsAdd], ["p-secret-help", secretsHelp]],
   updates: [["p-up-problems", updatesProblems], ["p-up-jobs", updatesJobs], ["p-up-hosts", updatesHosts], ["p-up-how", updatesHow], ["p-up-recent", updatesRecent]],
+  devices: [["p-dev-this", devicesThis], ["p-dev-list", devicesList], ["p-dev-all", devicesEndAll]],
   connections: [["p-connection-problems", connectionsProblems], ["p-provider-keys", connectionsProviderKeys], ["p-forges", connectionsForges], ["p-egress", connectionsEgress], ["p-endpoints", connectionsEndpoints], ["p-subscription-auth", connectionsSubscriptionAuth], ["p-notify", connectionsNotify], ["p-mcp", connectionsMcp], ["p-env", connectionsEnvironment], ["p-packages", connectionsPackages]],
   project: [["p-proj-spend", projectSpend], ["p-proj-runs", projectRuns], ["p-proj-size", projectSize], ["p-proj-loads", projectLoads], ["p-proj-members", projectMembers], ["p-proj-sizing", projectSizing], ["p-proj-recent", projectRecent], ["p-proj-alloc", projectAllocation], ["p-proj-limits", projectLimits], ["p-proj-bundle", projectBundle], ["p-proj-triggers", projectTriggers], ["p-proj-delete", projectDelete]],
   triggers: [["p-tr-tabs", triggersNavigation], ["p-tr-viewer", triggersViewer], ["p-tr-count", triggersCount], ["p-tr-next", triggersNext], ["p-tr-spend", triggersSpend], ["p-tr-filters", triggersFilters], ["p-tr-week", triggersWeek], ["p-tr-schedule", triggersSchedules], ["p-tr-github", triggersGithub], ["p-tr-gitlab", triggersGitlab], ["p-tr-forgejo", triggersForgejo], ["p-tr-azure", triggersAzure], ["p-tr-unknown", triggersUnknown], ["p-tr-check", triggersCheck]],
@@ -313,6 +316,7 @@ const PAGE_PARAMS = Object.freeze({
   secrets: [],
   connections: [],
   updates: [],
+  devices: [],
   project: ["id"],
   trigger: ["index"],
   triggers: ["kind"],
@@ -635,6 +639,7 @@ const PAGE_READS = Object.freeze({
   secrets: ["snapshot", "secrets"],
   connections: ["snapshot", "connections", "setup"],
   updates: ["snapshot", "updates"],
+  devices: ["devices", "parkedCount"],
   project: ["snapshot", "waiting", "project"],
   trigger: ["snapshot", "waiting", "hostLoads"],
   triggers: ["snapshot", "waiting"],
@@ -831,6 +836,11 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   if (reads.includes("connections")) {
     try { data.connections = typeof deps.connections === "function" ? await deps.connections(data.snapshot) : null; }
     catch { data.connections = null; }
+  }
+  if (reads.includes("devices")) {
+    // Issue #849: the device store's listing, read on demand; never a secret, never a whole hash beyond the server.
+    try { data.devices = typeof deps.devices === "function" ? deps.devices() : null; }
+    catch { data.devices = null; }
   }
   if (reads.includes("updates")) {
     try { data.updates = typeof deps.updates === "function" ? await deps.updates() : null; }
@@ -1073,7 +1083,7 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
  */
 function viewOf(name, ctx) {
   const data = ctx?.data ?? {};
-  return { page: name, data, role: ctx?.session?.role ?? null, name: ctx?.session?.name ?? null, readOnly: Boolean(ctx?.readOnly), query: ctx?.query ?? {}, env: data.env ?? {}, now: data.now, pages: PAGES };
+  return { page: name, data, role: ctx?.session?.role ?? null, name: ctx?.session?.name ?? null, remembered: typeof ctx?.session?.remembered === "string" ? ctx.session.remembered : null, rememberable: typeof ctx?.rememberable === "string" ? ctx.rememberable : true, invited: ctx?.session?.invited === true, readOnly: Boolean(ctx?.readOnly), query: ctx?.query ?? {}, env: data.env ?? {}, now: data.now, pages: PAGES };
 }
 
 /** The viewer card's fixed visible panels. The other ids remain empty for live state swaps. */
@@ -1154,8 +1164,9 @@ export async function renderPage(name, ctx) {
   const live = meta.live ? name : null;
   const query = pageQueryString(name, ctx?.query);
   const theme = ctx?.theme ?? null;
-  if (meta.auth === "operator" && role !== "operator") {
-    const body = shellHtml(name, ctx, forbiddenContent());
+  // Remembered browsers are people's (issue #849): an agent token has none, may remove none, and is refused the page as a viewer is refused an operator's.
+  if (meta.auth === "operator" && role !== "operator" || name === "devices" && role === "agent") {
+    const body = shellHtml(name, ctx, meta.auth === "operator" ? forbiddenContent() : peopleOnlyContent());
     return { status: 403, html: page({ title: `pi-dispatch console: ${meta.title}`, name, body, theme }) };
   }
   const places = name === "run" ? runPlacesOf(ctx?.data) : null;
@@ -1177,7 +1188,7 @@ export async function renderPage(name, ctx) {
   const inner = Object.hasOwn(PAGE_LAYOUT, name) ? layoutHtml(name === "run" ? runLayoutOf(ctx?.data) : name === "zero-touch" ? zeroTouchLayout(role) : PAGE_LAYOUT[name], sections) : html`${[...sections.values()]}`;
   const headline = headlineOf(name, ctx);
   const triggerListOptions = name === "triggers" ? { description: triggersDescription(viewOf(name, ctx)), end: role === "operator" && !ctx?.readOnly ? html`<a class="btn btn--primary" href="${PAGES["trigger-add"].path}">Add a trigger</a>` : null } : name === "trigger-check" ? { description: "Describe a hypothetical event. Nothing is sent or spent.", end: html`<a class="btn" href="${PAGES.triggers.path}">Back to Triggers</a>` } : null;
-  const configOptions = name === "connections" ? { description: connectionsDescription() } : name === "updates" ? { description: updatesDescription() } : name === "project" ? { title: projectTitle(ctx?.data?.projectView), description: projectDescription(ctx?.data?.projectView), end: html`<a class="btn" href="${`/runs?project=${encodeURIComponent(ctx?.query?.id ?? "")}`}">Open in Runs</a>` } : null;
+  const configOptions = name === "connections" ? { description: connectionsDescription() } : name === "updates" ? { description: updatesDescription() } : name === "devices" ? { description: DEVICES_WORDS.description } : name === "project" ? { title: projectTitle(ctx?.data?.projectView), description: projectDescription(ctx?.data?.projectView), end: html`<a class="btn" href="${`/runs?project=${encodeURIComponent(ctx?.query?.id ?? "")}`}">Open in Runs</a>` } : null;
   const titleOptions = configOptions ?? triggerListOptions ?? (name === "setup" ? { description: SETUP_DESCRIPTION } : name === "models" ? { description: "Which model each role runs, its fallbacks and cooldowns. Every role change is reviewed; this page starts no run." } : name === "sandboxes" ? { description: ctx?.query?.gatewaySelect ? "Choose an already-open shell on the workspace host. No sandbox starts here." : "A kept workspace or a fresh clone, in your own terminal. A job’s isolation, no credentials and no agent.", end: ctx?.query?.gatewaySelect ? null : html`<a class="btn" href="/runs/sandboxes#p-sb-new">New sandbox</a>` } : name === "config" ? { description: configDescription(viewOf(name, ctx)) } : name === "trigger" ? { title: triggerTitle(viewOf(name, ctx)), end: html`<a class="btn" href="${`/runs?trigger=${encodeURIComponent(String(ctx?.data?.triggerDetail?.trigger?.type === "cron" ? ctx.data.triggerDetail.trigger.id : ctx?.query?.index))}`}">Open in Runs</a>` } : name === "venue" ? { description: BACKENDS[ctx?.query?.name]?.describe ?? null, end: seg(BACKEND_NAMES.map((venue) => ({ label: venue, href: `/fleet/venue?${new URLSearchParams({ name: venue })}`, on: venue === ctx?.query?.name })), { label: "Venues" }) } : name === "fleet" ? { description: "Queues, hosts and their health. Every pause, cancel and removal previews first." } : {});
   const body = shellHtml(name, ctx, html`${["runs", "zero-touch", "sandboxes"].includes(name) ? zeroTouchTabs(viewOf(name, ctx)) : name.startsWith("insights") ? spendTabs(viewOf(name, ctx)) : null}${ctx?.query?.becauseRun ? html`<p class="note">Configuration fix started from <a href="${`/run?id=${encodeURIComponent(ctx.query.becauseRun)}`}">${ctx.query.becauseRun}</a>. Confirmed changes on this page will be linked to that refusal.</p>` : null}${inner}`, { ...titleOptions, ...(name === "zero-touch" ? { description: "How often a run needed a person, per project and repository. The goal is zero.", end: zeroTouchControls(viewOf(name, ctx)) } : {}), ...(name.startsWith("insights") ? { description: spendDescription(name), end: spendControls(viewOf(name, ctx)) } : {}), ...(headline === null ? {} : { headline }) });
   // A run no place shows while one could not be read is a run page that cannot say whether the run exists: 503.

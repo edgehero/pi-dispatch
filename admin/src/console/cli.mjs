@@ -731,6 +731,8 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       configLocations: () => m.readModel.configLocationsOf({ paths: side.paths, deploymentDir: config.dir }),
       secretsView: (snapshot) => m.secretsView.secretsView({ snapshot, env: side.env, fs }),
       updates: () => readUpdatesFacts(),
+      // Issue #849: the remembered browsers, for their page. The listing carries each record's hash for the actions; the page needs none of them.
+      devices: devices ? () => { const listed = devices.list(); return listed.problem ? listed : { ...listed, devices: listed.devices.map(({ hash, ...rest }) => rest) }; } : null,
       connections: (snapshot) => m.connectionsView.readConnections({ snapshot, env: shellEnv, deploymentDir: config.dir, paths: side.paths, fs, now: now(), redis, platform: io.platform ?? process.platform, uid }),
       projectView: (id, snapshot) => m.projectView.readProjectView({ id, snapshot, paths: side.paths, env: side.env, deploymentDir: config.dir, pricing, fleet, fs, now: now(), platform: io.platform ?? process.platform, uid }),
       triggerCheck: (input) => m.triggerCheck.checkTriggerEvent({ input, triggersPath: side.paths.triggersPath, fs }),
@@ -822,6 +824,8 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
     });
     actionDeps = {
       updates: { read: readUpdatesFacts, setDesired: (row) => m.updates.setDesired(redis, row) },
+      // Issue #849: "sign everyone out" stops every link not opened yet, host-minted and invitations alike.
+      loginCodes: { clear: () => m.loginCodes.clearLoginCodes({ dir: codesDir, fs }) },
     modelRoles,
     triggerEnvironment,
     watch: fleet.watch,

@@ -49,6 +49,12 @@ export function makeDeviceTrust({ tokensPath, fs, uid = process.geteuid?.(), now
       return problem && !problem.absent ? problem.problem : platform === "win32" ? "remembering a device does not work on a Windows host" : null;
     },
 
+    /** Which of `unavailable`'s two cases holds, for a page that words them differently: `store` (doctor's to fix), `windows`, or null. */
+    unavailableKind() {
+      const problem = devicesDirProblem(dir, { fs, uid, platform, create: false });
+      return problem && !problem.absent ? "store" : platform === "win32" ? "windows" : null;
+    },
+
     hashOf: (secret) => hashDeviceSecret(secret),
 
     /**

@@ -3,6 +3,7 @@ import { MODELS_DRAW } from "./models-goldens.mjs";
 import { ANSWERER_DRAW, AGENT_OVERVIEW_DRAW } from "./answerer-goldens.mjs";
 import { SANDBOX_DRAW } from "./sandbox-goldens.mjs";
 import { UPDATES_CANARY_RECORD, UPDATES_DRAW, updatesFacts } from "./updates-goldens.mjs";
+import { DEVICES_DRAW } from "./devices-goldens.mjs";
 import { WORKSPACE_DRAW } from "./workspace-goldens.mjs";
 import { LOADED_DRAW } from "./loaded-goldens.mjs";
 import { GETS_CHANGES, GETS_ENTRY, GETS_EXTENSION_OFF, GETS_HOST_ENV, GETS_MCP_JSON, GETS_TOOL_OFF, TRIGGER_GETS_DRAW, asChanged, getsFile, getsHostLoads, triggerGetsPage } from "./trigger-gets-goldens.mjs";
@@ -911,6 +912,7 @@ const DRAW = {
     const answer = await actionWorld({ updates: { read: async () => updatesFacts(facts), setDesired: async () => 1 } }).preview("package-adopt", { name: "pi-lint", version: "1.4.3" });
     return openSlotAfter(await UPDATES_DRAW["updates-canary-completed.operator"](), "p-up-jobs", { inner: answerHtml(answer, 200, "package-adopt") });
   },
+  ...DEVICES_DRAW,
   ...WORKSPACE_DRAW,
   ...LOADED_DRAW,
   ...TRIGGER_GETS_DRAW,
