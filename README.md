@@ -60,8 +60,8 @@ or password. When you are done, tell me how to run that last command in my own t
 what to expect.
 ```
 
-That last command is yours to run because it asks before it starts anything on your machine, and it prints your sign in link,
-which should stay out of the chat. Claude Code only does the installing: your jobs run on pi, with your own AI provider key or
+That last command is yours to run because it asks before it starts anything on your machine, and it signs you in to the web
+page, which should stay out of the chat. Claude Code only does the installing: your jobs run on pi, with your own AI provider key or
 subscription.
 
 **With pi**, run this, type `/dispatch` inside pi, and choose **Finish setup in browser**:
@@ -70,17 +70,27 @@ subscription.
 pi install npm:@edgehero/pi-dispatch-admin
 ```
 
+**In one command**, from a new empty folder, on a Mac or Linux:
+
+```bash
+mkdir my-dispatch && cd my-dispatch
+npx --yes --ignore-scripts @edgehero/pi-dispatch@5.1.0 up --console
+```
+
+It checks the folder first, then lists what it will do and asks before it starts anything. It installs into that folder and
+opens your browser on the checklist, already signed in.
+
 **By hand**, install into a folder that will stay there:
 
 ```bash
 mkdir my-dispatch && cd my-dispatch && npm init -y
-npm install --save-exact @edgehero/pi-dispatch@5.0.0 @edgehero/pi-dispatch-admin@5.0.0 @earendil-works/pi-coding-agent@1.5.2 --omit=dev --omit=optional --ignore-scripts --no-audit --no-fund
+npm install --save-exact @edgehero/pi-dispatch@5.1.0 @edgehero/pi-dispatch-admin@5.1.0 @earendil-works/pi-coding-agent@1.5.2 --omit=dev --omit=optional --ignore-scripts --no-audit --no-fund
 ./node_modules/.bin/pi-dispatch up --console
 ```
 
-It asks before it starts anything, then prints a sign in link that works for 60 seconds. Setup in the browser needs a Mac or
-Linux. On Windows, run `pi-dispatch up` without `--console`, or choose **Guided setup** in pi, and sign in to the console with a
-token.
+It asks before it starts anything, then opens your browser on the checklist, signed in. Where no browser can open (on a server
+you reach from another computer, say) it prints a sign in link that works for 60 seconds instead. Setup in the browser needs a Mac or Linux. On Windows, run
+`pi-dispatch up` without `--console`, or choose **Guided setup** in pi, and sign in to the console with a token.
 
 **3. Finish the checklist in your browser.** The link opens a live list of what is ready and what is not: the queue, a worker, the
 network rules, your provider key and a first trigger. Your key goes in here, never in a chat. It offers recipes: fix an issue when
@@ -107,21 +117,22 @@ server for good has [its own steps](#set-up-a-host).
 ## Open the web page
 
 The web page, which the rest of this README calls the console, runs on your own machine at `http://127.0.0.1:4790`. Bookmark it.
-A sign in lasts up to 12 hours, and an hour with nothing happening ends it sooner. To sign in again:
+Right after you sign in, the page asks whether to remember this browser. Choose **Remember this browser**, and it stays signed
+in: closing it, a restart of the console or days away do not sign you out. (Signing in with a token instead, tick **Remember this
+trusted device** under it.) Without it, a sign in lasts up to 12 hours, and an hour with nothing happening ends it sooner. Missed
+the question? Sign out, sign in again, and it is asked again.
+
+To sign in, or to add another browser:
 
 | Where you are | What to do |
 |---|---|
-| In pi | `/dispatch console` opens the page, and `/dispatch console --link` signs you in as well |
-| In a terminal, in the folder you installed into | `./node_modules/.bin/pi-dispatch-console link --name operator`, then open the link it prints within 60 seconds. If you gave another name during setup, `./node_modules/.bin/pi-dispatch-console token list` shows it |
+| In a terminal, in the folder you installed into | `./pi-dispatch console` starts the page if it stopped, opens it and signs you in. Where it cannot open a browser it prints a link instead, which works once within 60 seconds |
+| In pi, started in that folder | `/dispatch console` opens the page and signs you in, while the page runs |
 | On a server | Forward a port, and make the link on the server ([how](#set-up-a-host)) |
 | On Windows | One time links do not work there, so paste a token ([how](docs/console.md#create-the-first-token)) |
 
-**Rather not use a terminal each time?** Setup keeps no password you could paste. Run this once, keep what it prints in your
-password manager, and paste it into the sign in page from then on. It ends the sign in you have now.
-
-```bash
-./node_modules/.bin/pi-dispatch-console token rotate --name operator
-```
+**A browser you no longer use?** **Remembered browsers**, linked from Configuration in the console, lists every browser that stays
+signed in, and removes one. Signing out in a browser also forgets it.
 
 **The page does not load?** The console may have stopped. `./node_modules/.bin/pi-dispatch service status --console` says whether
 it runs, and `./node_modules/.bin/pi-dispatch service start --console` starts it ([everything about the console](docs/console.md)).
@@ -586,7 +597,7 @@ A machine that runs jobs for good, rather than while you watch. As an ordinary a
 22.19 or newer installed, install into a folder that stays ([step 2 of Install](#install-in-four-steps)), then:
 
 ```bash
-./node_modules/.bin/pi-dispatch up --console     # asks before each action: job image, Valkey, egress proxy, config, the console's service
+./node_modules/.bin/pi-dispatch up --console     # lists each action and asks first: job image, Valkey, egress proxy, config, the console's service
 ./node_modules/.bin/pi-dispatch doctor --live    # checks the setup and reads its isolation back from real containers
 ./node_modules/.bin/pi-dispatch service install  # keeps the worker running, restarted at boot
 sudo loginctl enable-linger "$USER"              # on Linux: user services start with no one logged in
