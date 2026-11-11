@@ -206,7 +206,9 @@ a worker, counted against their timeout. Trigger secrets and forwarded host sett
 the count.
 
 The overlay validator also accepts pi 1.4.0's `compat.imageInput` (`assets`, `images`, or
-`state-image-urls`) and boolean `compat.sendImageOptInHeader`. Summary cost-cap behavior and Radius's
+`state-image-urls`) and boolean `compat.sendImageOptInHeader`, and pi 1.5.2's booleans
+`compat.requiresNonNullAssistantContent`, `compat.requiresToolsWithToolHistory` and `compat.supportsMessageThreads`
+and `compat.promptCacheKeyMode` (`auto`, `enabled`, or `disabled`), with the types pi checks. Summary cost-cap behavior and Radius's
 named refusal are documented in [costs](costs.md#pi-140-summaries-and-radius); resumed tool loadouts are
 in [sessions](sessions.md#tools-on-resume).
 

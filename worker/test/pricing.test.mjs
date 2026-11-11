@@ -253,8 +253,10 @@ test("piAiVersion default path resolves the real pin, and the pricing surface is
 	// OpenRouter's per-key lists); calculateCost is byte-identical to 1.1.0's.
 	// Re-verified at 1.4.0: request identity headers and telemetry observers changed;
 	// At 1.5.0 calculateCost only adds usage.cost.totalFromProvider = false; reprice reads usage.cost.total alone, and tiers,
-	// cache writes and total are unchanged.
+	// cache writes and total are unchanged. Re-verified at 1.5.2: models.js changed only in the auth refresh (a provider
+	// whose refreshModelsAuth is "configured" refreshes without a credential) and in passing the call's signal on to
+	// dispatch; calculateCost is byte-identical to 1.5.0's.
 	const models = readFileSync(join(dirname(entry), "models.js"));
-	assert.equal(createHash("sha256").update(models).digest("hex"), "b2730ffa727d4a19a212172d031344fd6e0992082df233952233a15116824ac4", `pi-ai ${realPackage.version}'s dist/models.js changed: re-verify calculateCost and the pricing surface, then update this hash`);
+	assert.equal(createHash("sha256").update(models).digest("hex"), "f23dda9e5a472f9556c9b834d924504b771af8275d17a49496100a4f4b91e2dc", `pi-ai ${realPackage.version}'s dist/models.js changed: re-verify calculateCost and the pricing surface, then update this hash`);
 	assert.equal(piAiVersion(), piAiVersion(), "cached: repeated calls agree");
 });

@@ -4969,7 +4969,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     0.99.1 pin, not only subagents) and adds "subprocesses" from `childTotal`, naming any unmetered children.
   - **No cache-warming pin.** A child builds its own pi settings (a pi CLI child, a pi-subagents foreground or
     background child), and pi reads `cacheWarming` from its global settings only, default `"streaming"`
-    (`settings-manager.js` `getCacheWarmingMode`), so warming is on there; a project's `.pi/settings.json` does not
+    (`"idle"` since pi 1.5.2, which also warms between a child's runs while its session stays open;
+    `settings-manager.js` `getCacheWarmingMode`), so warming is on there; a project's `.pi/settings.json` does not
     change it. pi-dispatch does not pin it off for children it did not create: the meter counts those calls and a
     cost cap bounds them (`docs/costs.md`, #500's recommendation). In a job a child's agent folder is the image's
     (`/home/pi/.pi/agent`), not the read-only overlay, so an operator turns it off only with a custom image or
@@ -6530,8 +6531,10 @@ free local model, or using a few successful live probes as proof of every routin
   resolver is never reached, so a value that starts with `!` is text and a value holding `${OTHER}` is not resolved
   again. HTTP: pi-mcp's `StreamableHttpTransport` with the resolved url and headers, no auth provider (a 401 refuses,
   never signs in), and a fetch that admits only the server's own origin and refuses a redirect rather than following
-  it, and bounds every body but an event stream at 16 MiB (pi-mcp reads a JSON answer and an error body whole, and
-  bounds only a stream's events); that fetch calls `globalThis.fetch`, which the restored env-proxy dispatcher sends
+  it, and bounds every body but an event stream at 16 MiB (pi-mcp before 1.5.2 read a JSON answer and an error body
+  whole; since 1.5.2 it bounds a JSON answer at its own 16 MiB and keeps an error body's first 8 KiB, but past its
+  bound it throws an unnamed error, so this bound, equal and upstream of pi's reader, is the one that fires and names
+  the refusal; pi bounds a stream's events itself); that fetch calls `globalThis.fetch`, which the restored env-proxy dispatcher sends
   through the egress proxy. A control character in a document value or a resolved header is refused before spawn or
   fetch would refuse it with a TypeError pi reads as the network. stdio: pi-mcp's `StdioTransport` with `inheritEnv:
   false`, the cwd `/workspace`, and an environment of the server's own resolved `env` over a fixed base (PATH, HOME,
@@ -17570,6 +17573,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-11-11 (#853, pi 1.5.2) | **`DES-MCP-TRANSPORTS-OWNED` AMENDED**: pi-mcp 1.5.2 bounds a JSON answer at the same 16 MiB and an error body at 8 KiB, so the runner's bound now fires first by being upstream at an equal size, which keeps the refusal named; the bound and its residual are unchanged. **`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY` AMENDED** in "No cache-warming pin": a child's default is `"idle"` since 1.5.2. Every other entry UNCHANGED, checked against the 1.5.2 tarballs. |
 | 2026-11-11 (#849, part 6) | **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**, "The console command": it signs in by default where nothing is left to choose, takes `--no-link`, and names `setup` among its page words, which the code already took; REJECTED: linking only where no browser is remembered, which the panel cannot know. **`DES-OPERATOR-CONSOLE` AMENDED**: a new id at every login but for a same-person link, which keeps the live session while it has time left; the sign-in page's help no longer says a bare `/dispatch console` prints no link. |
 | 2026-11-08 (#849, part 5) | **`DES-OPERATOR-CONSOLE` AMENDED**, "Remembered devices": the person's side, the Remember box, the one-time offer, the remembered mark, the Remembered browsers page and its two actions, with what was rejected (a dismiss route, a forget route, a generation bump from the browser). |
 | 2026-11-08 (#849, part 4) | **`DES-OPERATOR-CONSOLE` AMENDED**, part 2 and a new bullet "Remembered devices": why two credentials, restore, precedence (an unreadable record never hides a revocation the tokens file proves), the clean-up of a device found dead, re-setting the cookie (reads only, never dropping `Secure`), the failed sign-out and its residual, a sign-out over an unreadable record (refused in memory only with a session held here), signing in over a device, remembering after the fact, and what was rejected. |

@@ -668,7 +668,8 @@ fails before any child runs. Its children do not see the overlay `models.json` (
 only there is not available to them.
 
 **Cache warming.** The runner turns pi's cache warming off for its own session. A child builds its own pi
-settings, and pi's default there is on (`streaming`), so a child's warm re-sends are paid. pi-dispatch does not
+settings, and pi's default there is on (`idle` since pi 1.5.2, which also warms between a child's runs while its
+session stays open), so a child's warm re-sends are paid. pi-dispatch does not
 turn it off for children it did not start: the meter counts those calls, and a cost cap bounds them. pi reads this
 setting only from the global `settings.json` in the agent folder the child uses. A project's `.pi/settings.json`
 does not change it, and neither does the pi-dispatch overlay, which a job mounts somewhere else. In a job that agent

@@ -65,8 +65,10 @@ const SITES_FILE = new URL("./fixtures/provider-steering-sites.json", import.met
 
 // 1.4.0 adds sessionId as an ordinary request option: the scanner conservatively sees
 // `options && "sessionId" in options`; it is not an environment variable. WINDIR is no longer read.
+// 1.5.2 adds ALACRITTY_WINDOW_ID: pi-tui's terminal-image.js reads it only to tell Alacritty's image and colour support
+// apart, so it steers what pi draws in a terminal and nothing a provider or a job's spend depends on.
 const OUTSIDE_PI_NAMESPACE = [
-	"CI", "COLORFGBG", "COLORTERM", "COLUMNS", "DISPLAY", "EDITOR", "GHOSTTY_RESOURCES_DIR", "HF_HOME",
+	"ALACRITTY_WINDOW_ID", "CI", "COLORFGBG", "COLORTERM", "COLUMNS", "DISPLAY", "EDITOR", "GHOSTTY_RESOURCES_DIR", "HF_HOME",
 	"HF_TOKEN", "HF_TOKEN_PATH", "HTTPS_PROXY", "HTTP_PROXY", "ITERM_SESSION_ID", "KITTY_WINDOW_ID", "LINES",
 	"LLAMA_API_KEY", "LLAMA_BASE_URL", "MOSH_CONNECTION", "ORCA_IMAGE_PROTOCOL", "PNPM_HOME", "ProgramFiles", "SHELL", "SSH_CLIENT",
 	"SSH_CONNECTION", "SSH_TTY", "STY", "SystemRoot", "TERM", "TERMINAL_EMULATOR", "TERMUX_VERSION",
