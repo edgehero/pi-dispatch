@@ -714,6 +714,10 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       },
       answerer,
       modelsView,
+      // Issue #849: the grant alone, for the overview, fleet and host pages (`data.setupGranted`), without the provider and allowlist reads `setup` makes.
+      setupGranted: () => setup?.granted?.() === true,
+      // This console's own host, by the worker's name rule over the deployment's env, as the fleet reader names it (`doctorSelf`): a run page's fix button only for a run refused here.
+      selfHost: () => m.readModel.doctorSelfName?.(side.env) ?? null,
       setup: async ({ role, snapshot } = {}) => {
         const state = setup?.state(role ?? "operator", snapshot) ?? { enabled: false, reason: "host-setup-disabled", actions: [], providerKey: null, progress: [], allowlistCount: null };
         // Connections owns the allowlist reader; setup copies only its count, never a sample or secret.

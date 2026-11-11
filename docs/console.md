@@ -202,7 +202,9 @@ operator should run `pi-dispatch doctor` on the host), or an audit log it could 
 sent again every 2 seconds until the console answers, for at most 30 tries or 60 seconds: then nothing more is sent,
 the page no longer holds the token, and it asks you to paste it and press Sign in again once the console is back.
 The field is cleared as soon as you press Sign in. Under it, "No token yet?" gives the command that signs you in (`./pi-dispatch console` in the deployment folder), its longer spelling, and
-the pi command for a link (`/dispatch console --link`), with the host command for a token behind "Make a token instead", each in a box to copy, and a line says where
+the pi command for a link (`/dispatch console --link`), then, behind "In a browser that is not your default one",
+`./node_modules/.bin/pi-dispatch-console link`, which prints a link to paste rather than opening the default browser
+(which would use it at once), and the host command for a token behind "Make a token instead", each in a box to copy, and a line says where
 the console answers: on this host's loopback address only, on its unix socket only, or nothing about it on a public
 bind. Signing in needs JavaScript. A page without it says so first, and shows only what still holds: the token form,
 its lead-in and the link page's "Signing in" state are drawn hidden, and the page's script shows them as it loads.
@@ -212,7 +214,7 @@ its lead-in and the link page's "Signing in" state are drawn hidden, and the pag
 In pi, `/dispatch console` does the same in one step, without a second terminal:
 
 ```text
-/dispatch console [runs|fleet|insights|config|parked|audit|<run id>] [--link [token name]] [--no-open]
+/dispatch console [setup|runs|fleet|insights|config|parked|audit|<run id>] [--link [token name]] [--no-link] [--no-open]
 ```
 
 - **The address.** It prints the page's URL by the same rules as `/dispatch insights`: the loopback URL, the `ssh -L`
@@ -222,6 +224,13 @@ In pi, `/dispatch console` does the same in one step, without a second terminal:
   address or the socket and nowhere else (the same check doctor makes), and says `running`, `not running` (with why,
   and how to start it or keep it running as a service), or that it cannot tell and why (port 0, a non loopback
   address).
+- **Signing in.** With one operator token, the console running and a browser on this machine to hand it to,
+  `/dispatch console` makes a one-time sign-in link by itself, so the browser opens signed in; a browser already
+  signed in as that person keeps its session, if it has an hour or more of its longest life left (a quarter of it on a
+  console set shorter); in that last stretch the link signs in afresh, which ends what the old session was doing. Otherwise (several operator tokens, `--no-open`, an SSH session, a
+  tunnel) it opens or prints the address as it always did, and one line says why no link was made. `--no-link`
+  turns the link off. "Local" is judged from the environment pi started in, so a pi started at your desk inside tmux
+  and reattached over SSH still hands the link to the desk's browser; use `--no-link` there.
 - **`--link`** makes a one-time sign-in link, like `pi-dispatch-console link`, for an operator token: the one there
   is, the one you name (`--link rob`; the page goes before `--link`), or the one you pick when there are several. It
   is shown only to you, in pi's notice: never in the conversation, never a tool. Its row is written to the audit log
@@ -263,7 +272,10 @@ session ends:
 
 A remembered browser's session is the exception to the first two and the last ([Remembered browsers](#remembered-browsers)).
 
-Signing in again in the same browser ends the session it held before. Its other open live tabs wait a moment, ask
+Signing in again in the same browser ends the session it held before, except that a one-time link for the person
+this browser is already signed in as keeps that session while it has an hour or more of its longest life left (so
+`/dispatch console`, which makes one by default, does not interrupt what the browser is doing; in a session's last
+stretch the link signs in afresh). Its other open live tabs wait a moment, ask
 the console who this browser is now, and reload on the new session only if it is the same person (the same name and
 role); otherwise they go to the sign-in page, which says this browser is now signed in as someone else, so a
 one-time link someone else sent you, opened in another tab, never puts their console into a tab you were using.
@@ -1168,7 +1180,11 @@ shows, which it counts as not read), or both in one sentence. Under the groups, 
 
 `/setup` is the live checklist for finishing a deployment. The overview links to it while Valkey answers,
 no run is recorded and either no host is registered or no trigger exists. The direct setup page remains available
-once jobs run. A temporary outage never turns an established deployment into a new one.
+once jobs run. A temporary outage never turns an established deployment into a new one. When this console has host
+setup granted (`--host-setup`), the overview's checklist sends an operator to `/setup` for the steps it can do there
+(the worker service, egress and doctor, a provider key) when the step is about this console's own host, and keeps
+each command behind "In a terminal instead". The Fleet and host pages' Doctor cards add "Run doctor from Set up" for this console's own host;
+the command stays beside it, since the browser's doctor publishes the same checks without its container probes.
 
 From an empty folder, one command does all of it (Mac and Linux, from the first release after 5.0.0; on 5.0.0 use the lines by hand below):
 
@@ -1389,7 +1405,9 @@ refused, failed, awaiting input or cancelled, in its colour), the reason's whole
 console serves no docs of its own, and the link goes to `main`, which holds every reason a released worker can write).
 Where the record's detail (`why`) says which of a reason's messages the worker posted, the panel says that one. A
 reason this console does not know (from a newer worker) is shown as its word with "no explanation yet", and an
-outcome word it does not know is shown as it is, cut at 64 characters.
+outcome word it does not know is shown as it is, cut at 64 characters. For a run refused on this console's own host,
+where a console page has the form that fixes the reason, an operator also gets a button to it beside What to do,
+which stays word for word: an unknown secret profile or bundle profile opens Secrets.
 
 When the page has no record to show, the Outcome panel says why, once: the id is not a run id, the run is still going
 (a record is written when a run ends), the job is queued, the job ended but its record is on another host with no run

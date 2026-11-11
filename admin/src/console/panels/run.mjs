@@ -180,6 +180,20 @@ function absentOutcome(view) {
 }
 
 /**
+ * The console page that fixes what a refusal names (issue #849), beside the catalog's own "What to do", which stays word for word (`INT-REASON-CATALOG`).
+ * Only pages with a form that fixes it, and only for a run refused on this console's own host (`data.selfHost`), since the secret profiles a page writes
+ * are this host's. REJECTED: links to pages that only show the problem (subscription authentication, egress, MCP servers); a provider key, which the page
+ * writes only under the host-setup grant; and an invalid settings overlay, which the settings form refuses to change until the file is fixed by hand: a
+ * button there would send a person somewhere that cannot do it. A test holds each
+ * key to a catalog token and each link to a page's own panel.
+ */
+export const REASON_FIXES = Object.freeze({
+  "secret-profile-unknown": Object.freeze({ label: "Declare it on Secrets", href: "/config/secrets#p-secret-add", icon: "key" }),
+  "secret-bundle-profile-unknown": Object.freeze({ label: "Declare it on Secrets", href: "/config/secrets#p-secret-add", icon: "key" }),
+  "secret-bundle-profile-ambiguous": Object.freeze({ label: "Open Secrets", href: "/config/secrets#p-secret-bundles", icon: "key" }),
+});
+
+/**
  * The run page's first panel (issue #710, REQ-OPERATOR-CONSOLE-SCREENS (c)): what happened, why and what now. The
  * outcome in the console's words (words.mjs, the panel's too) in its tone, the reason's catalog sentence (the record's
  * `why` picks its variant where the catalog has one), its next step and a link to its heading in `docs/reasons.md`.
@@ -213,7 +227,9 @@ export function runOutcome(view) {
   const recoveryId = view.data?.chat?.activeJobId ?? view.data?.chat?.queuedJobId;
   const recoveryActions = recovering ? html`${typeof recoveryId === "string" && RUN_ID_RE.test(recoveryId) ? ui.btn({ href: `/run?id=${encodeURIComponent(recoveryId)}`, label: "Open recovery run", kind: "primary", icon: "running" }) : null}${view.data?.siblings?.map((s) => ui.btn({ href: `/run?id=${encodeURIComponent(s.jobId)}`, label: "Open sibling replica", kind: "sm", icon: "runs" }))}` : null;
   const fixLink = r.outcome === "policy" && !["awaiting-input", "awaiting-approval"].includes(token) && /^[a-f0-9]{64}$/.test(r.touchScopeId ?? "") ? ui.btn({ href: `/config?becauseRun=${encodeURIComponent(r.jobId)}`, label: "Fix configuration", kind: "sm", icon: "config" }) : null;
-  const actions = view.role !== "operator" ? null : recovering ? recoveryActions : html`${lacked ? lacked.fixes.map((fix) => fixButton(fix, { repositoryHref: forgeBaseLinkOf(r, view.env) })) : null}${refusedBeforeStart(r) ? ui.btn({ href: "/fleet", label: "Open Fleet", kind: "primary", icon: "fleet" }) : href ? ui.outLink({ href, label: "Open target on the forge", btn: "primary" }) : null}${r.outcome === "completed" && !["awaiting-input", "awaiting-approval"].includes(token) ? ui.btn({ href: "#p-workspace", label: "Try it in its workspace", kind: "sm", icon: "terminal" }) : null}${rerunLine(r, view)}${fixLink}`;
+  const here = typeof view.data?.selfHost === "string" && view.data.selfHost !== "" && r.host === view.data.selfHost;
+  const reasonFix = token && here && canAct(view) && Object.hasOwn(REASON_FIXES, token) ? REASON_FIXES[token] : null;
+  const actions = view.role !== "operator" ? null : recovering ? recoveryActions : html`${lacked ? lacked.fixes.map((fix) => fixButton(fix, { repositoryHref: forgeBaseLinkOf(r, view.env) })) : null}${reasonFix ? ui.btn({ href: reasonFix.href, label: reasonFix.label, kind: "sm", icon: reasonFix.icon }) : null}${refusedBeforeStart(r) ? ui.btn({ href: "/fleet", label: "Open Fleet", kind: "primary", icon: "fleet" }) : href ? ui.outLink({ href, label: "Open target on the forge", btn: "primary" }) : null}${r.outcome === "completed" && !["awaiting-input", "awaiting-approval"].includes(token) ? ui.btn({ href: "#p-workspace", label: "Try it in its workspace", kind: "sm", icon: "terminal" }) : null}${rerunLine(r, view)}${fixLink}`;
   return ui.banner({ block: true, status: recovering ? "running" : note !== null ? "attention" : w.status, title: `${word}${refusedBeforeStart(r) ? "" : duration}`, body: html`${lacked === null || token ? html`<p>${reason}</p>` : null}${lacked === null ? null : lacked.sentences.map((sentence) => html`<p>${sentence}</p>`)}${next}${(view.data?.children?.length ?? 0) > 0 || r.chainRefused > 0 ? html`<p>It queued ${view.data?.children?.length ?? 0} runs from /outbox${r.chainRefused > 0 ? `, and ${r.chainRefused} more requests were refused: a job may queue at most ${view.data?.chainMaxPerJob ?? CHAIN_MAX_PER_JOB_DEFAULT}` : ""}. ${view.data?.children?.map((child) => runLink(child.jobId))}</p>` : null}${refusedBeforeStart(r) ? html`<p>Nothing was spent.</p>` : href ? html`<p>Merges are never automatic: a person merges the pull request on the forge.</p>` : null}`, actions });
 }
 

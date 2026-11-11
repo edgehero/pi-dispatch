@@ -1548,3 +1548,63 @@ test("clearLoginCodes counts a link file it could not remove", () => {
   const stuck = { ...fs, unlinkSync: () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); } };
   assert.deepEqual(clearLoginCodes({ dir, fs: stuck }), { removed: 0, left: 1 });
 });
+
+// Part 6 (issue #849): a link for the person this browser is already signed in as keeps its session.
+
+test("a one-time link for the person already signed in keeps that session; another person's or an invitation's replaces it", async () => {
+  const w = world();
+  const c = await w.boot();
+  const rob = sessionCookieOf(await c.post("/login", { token: OPERATOR }));
+  const [, robId] = rob.split("=");
+  w.shared.codes = new Map([["r".repeat(43), { name: "rob" }], ["s".repeat(43), { name: "sam" }]]);
+  const kept = await c.post("/login/code", { code: "r".repeat(43), next: "/runs" }, { cookie: rob });
+  assert.deepEqual([kept.status, kept.json().kept, kept.json().next, kept.headers["set-cookie"]], [200, true, "/runs", undefined]);
+  assert.equal((await whoami(c, rob)).status, 200, "the same session carries on");
+  assert.equal(c.sessions.endedOf(robId), null, "nothing ended");
+  assert.ok(w.shared.rows.some((r) => r.action === "login-code" && r.outcome === "ok" && /already signed in as this person/.test(r.reason ?? "")));
+  const other = await c.post("/login/code", { code: "s".repeat(43) }, { cookie: rob });
+  assert.equal(other.json().kept, undefined);
+  assert.ok(sessionCookieOf(other), "someone else's link is a new sign-in");
+  assert.equal(c.sessions.endedOf(robId), "elsewhere");
+});
+
+test("a session near the end of its longest life is replaced by a same-person link rather than kept", async () => {
+  const w = world();
+  const c = await w.boot();
+  const rob = sessionCookieOf(await c.post("/login", { token: OPERATOR }));
+  // Kept busy every half hour, so it is the longest life that runs out, never the idle limit.
+  for (let i = 0; i < 23; i++) {
+    w.advance(30 * 60000);
+    assert.equal((await whoami(c, rob)).status, 200, `still signed in after ${(i + 1) / 2} hours`);
+  }
+  w.shared.codes = new Map([["r".repeat(43), { name: "rob" }]]);
+  const fresh = await c.post("/login/code", { code: "r".repeat(43) }, { cookie: rob });
+  assert.equal(fresh.json().kept, undefined, "half an hour left: a new session");
+  assert.ok(sessionCookieOf(fresh));
+});
+
+test("an invited or a remembered session is never kept by a link, and an invitation's link is a sign-in of its own", async () => {
+  const w = world();
+  const c = await w.boot();
+  w.shared.codes = new Map([["i".repeat(43), { name: "ann", binding: { createdAt: "2026-10-01T00:00:00.000Z", generation: 0, role: "viewer", sha256: sha(VIEWER) } }], ["a".repeat(43), { name: "ann" }], ["j".repeat(43), { name: "ann", binding: { createdAt: "2026-10-01T00:00:00.000Z", generation: 0, role: "viewer", sha256: sha(VIEWER) } }]]);
+  const invited = sessionCookieOf(await c.post("/login/code", { code: "i".repeat(43) }));
+  const over = await c.post("/login/code", { code: "a".repeat(43) }, { cookie: invited });
+  assert.equal(over.json().kept, undefined, "an invited session is never kept");
+  const plain = sessionCookieOf(over);
+  const invitation = await c.post("/login/code", { code: "j".repeat(43) }, { cookie: plain });
+  assert.equal(invitation.json().kept, undefined, "an invitation's link binds a session of its own kind");
+  const remembered = (await remember(c)).cookie;
+  w.shared.codes = new Map([["r".repeat(43), { name: "rob" }]]);
+  const linked = await c.post("/login/code", { code: "r".repeat(43) }, { cookie: remembered });
+  assert.equal(linked.json().kept, undefined, "a remembered browser's own path keeps its device, not this one");
+});
+
+test("on a console set to a one-hour session life, a fresh session is still kept by a same-person link", async () => {
+  const w = world({ config: { maxMs: HOUR } });
+  const c = await w.boot();
+  const rob = sessionCookieOf(await c.post("/login", { token: OPERATOR }));
+  w.advance(60000);
+  w.shared.codes = new Map([["r".repeat(43), { name: "rob" }]]);
+  const kept = await c.post("/login/code", { code: "r".repeat(43) }, { cookie: rob });
+  assert.equal(kept.json().kept, true, "a quarter of an hour's life is the threshold here");
+});

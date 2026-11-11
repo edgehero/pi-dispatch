@@ -687,7 +687,7 @@ const CALM = Object.freeze({
  * A deployment before its first job (the SetupScreen card): read, with no run on record and no trigger. `doctor` is the
  * hosts' published doctor runs (none: nothing has run doctor yet).
  */
-const firstRun = (doctor = []) => overviewSnapshot({
+export const firstRun = (doctor = []) => overviewSnapshot({
   queue: { pausedState: false, pausedPartial: false, counts: {}, workers: 0, queues: 1, fleetDegraded: null },
   queueCounts: [{ queue: "pi-jobs", paused: false, counts: { waiting: 0, active: 0, delayed: 0, paused: 0, failed: 0 } }],
   hostBudgets: [],

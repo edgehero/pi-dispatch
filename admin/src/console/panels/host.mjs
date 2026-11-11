@@ -23,6 +23,7 @@ import {
   ageText,
   beatAgeOf,
   canAct,
+  doctorFromSetup,
   runLink as recordLink,
   timeHtml,
 } from "./common.mjs";
@@ -646,6 +647,6 @@ export const hostDoctor = (v) => {
   return ui.card({
     title: "Doctor",
     sub: "visible to viewers; paths and secrets redacted at the source",
-    body: html`${state}${sections}${problemsHtml}${v.role === "operator" ? ui.cmd(["pi-dispatch", "doctor"], { host: label(v) }) : html`<p>Run doctor on this host to inspect its checks.</p>`}`,
+    body: html`${state}${sections}${problemsHtml}${v.role === "operator" ? html`${doctorFromSetup(v, v.query?.name)}${ui.cmd(["pi-dispatch", "doctor"], { host: label(v) })}` : html`<p>Run doctor on this host to inspect its checks.</p>`}`,
   });
 };

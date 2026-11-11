@@ -134,6 +134,20 @@ const titled = (title, body) => html`<h2>${title}</h2>${body}`;
 /** Whether this view draws write controls: an operator, on a console that is not read-only. */
 export const canAct = (view) => view?.role === "operator" && !view?.readOnly;
 
+/** The sentence that sends an operator to /setup's doctor on this console's own host (issue #849). */
+export const DOCTOR_FROM_SETUP = "here in the browser, without its container probes; the command below also runs those.";
+
+/**
+ * A link to /setup's doctor, for an operator where the host-setup grant is on (`data.setupGranted`) and only for this console's own host (`doctorSelf`):
+ * the browser's doctor runs where the console runs, and publishes the same checks without the probe containers, so the command stays beside it. Null elsewhere.
+ */
+export function doctorFromSetup(view, hostName) {
+  if (!canAct(view) || view.data?.setupGranted !== true) return null;
+  const self = view.data?.snapshot?.doctorSelf;
+  if (typeof self !== "string" || self === "" || hostName !== self) return null;
+  return html`<p class="fl-doc__p"><a class="link" href="/setup">Run doctor from Set up</a>, ${DOCTOR_FROM_SETUP}</p>`;
+}
+
 /**
  * One action's form: hidden fields (`[name, value, type?]`), the visible controls, the submit button, and the
  * `[data-preview]` element the script fills with the server's preview. `type` is how the script reads a value

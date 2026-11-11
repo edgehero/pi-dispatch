@@ -704,6 +704,8 @@ const OVERVIEW_CSS = `
 .su-step .cmd{background:var(--surface)}
 .su-step--done .cmd{background:var(--surface-2)}
 .su-alt{font-size:12px;color:var(--ink-muted)}
+.su-step .su-term summary{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:650;color:var(--ink-muted);cursor:pointer}
+.su-step .su-term .cmd{margin-top:8px}
 .su-act{display:flex;gap:8px;flex-wrap:wrap}
 .su-p{font-size:13px;margin-bottom:var(--space-3)}
 .su-empties{gap:8px}

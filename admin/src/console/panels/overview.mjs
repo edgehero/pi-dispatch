@@ -1175,6 +1175,16 @@ function progressBar(steps) {
   })}</svg>`;
 }
 
+/**
+ * The first-run steps /setup does in the browser when the host-setup grant is on (issue #849): the worker service, the egress stack and doctor, and a
+ * provider key, each on this console's own host only, so a step another host's doctor judged keeps its command. The forge's GitHub App is not one
+ * (`OQ-054`), `/dispatch setup` is pi's, and the viewer token step is never left to do for an operator (`firstRunState`), so those keep their commands.
+ */
+export const SETUP_DOES_STEPS = Object.freeze(["worker", "egress", "provider"]);
+
+/** The line a granted step shows in place of its commands, which move into a disclosure beside it. */
+export const SETUP_DOES_TEXT = "Do this on Set up, here in the browser.";
+
 /** One step of the checklist, the card's: its tile, number, title, word, sentence, and an operator's commands or action. */
 function stepHtml(st, i, view) {
   const word = FIRST_RUN_STATES[st.state];
@@ -1184,7 +1194,12 @@ function stepHtml(st, i, view) {
     const hint = firstRunCommandHint(argv);
     return hint === null ? null : html`<p class="su-alt">${partsHtml(hint)}</p>`;
   };
-  const cmds = operator ? st.commands.map((argv, k) => html`${k === 1 && st.id === "worker" ? html`<p class="su-alt">Or run it yourself in a terminal:</p>` : null}${ui.cmd([...argv])}${hintOf(argv)}`) : null;
+  const terminal = operator ? st.commands.map((argv, k) => html`${k === 1 && st.id === "worker" ? html`<p class="su-alt">Or run it yourself in a terminal:</p>` : null}${ui.cmd([...argv])}${hintOf(argv)}`) : null;
+  // Where the browser can do the step, the browser is offered first and the terminal is kept, folded, for whoever prefers it.
+  const self = view.data?.snapshot?.doctorSelf;
+  const ownHost = st.host === undefined || (typeof self === "string" && self !== "" && st.host === self);
+  const viaSetup = operator && canAct(view) && view.data?.setupGranted === true && SETUP_DOES_STEPS.includes(st.id) && st.state !== "ready" && st.commands.length > 0 && ownHost;
+  const cmds = viaSetup ? html`<p class="su-alt"><a class="link" href="/setup">${SETUP_DOES_TEXT}</a></p><details class="su-term"><summary>In a terminal instead</summary>${terminal}</details>` : terminal;
   const href = docsHref("docs/triggers.md");
   const add = st.id === "trigger" && st.state !== "ready" && canAct(view) ? html`<div class="su-act">${ui.btn({ kind: "primary", label: "Add a trigger", icon: "plus", href: hrefTo(view, "trigger-add", null, "config") })}${href === null ? null : ui.outLink({ href, label: "What triggers can do", btn: "ghost" })}</div>` : null;
   return html`<li class="${st.state === "ready" ? "su-step su-step--done" : "su-step"}">${ui.tile(word.status, { icon: stepIcon(st) })}<div class="su-step__b"><p class="su-step__t"><span class="su-n">${count(i + 1)}</span>${st.title}${ui.chip(word.word, { status: word.status })}</p><p class="su-step__s">${partsHtml(st.sentence)}</p>${cmds}${add}</div></li>`;

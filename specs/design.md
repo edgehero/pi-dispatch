@@ -3709,12 +3709,25 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     resolver), and `add` refuses an env-declared name and a resolver outside a visible `PI_SECRET_RESOLVER_ROOTS`
     before the confirm. The operator-typed doors for declaring a resolver are this command and the console's audited
     forms; no tool declares one (the "and nowhere else" this entry's code comments said was corrected).
-- **The console command (ADDED 2026-10-21, #708)**: `/dispatch console [runs|fleet|insights|config|parked|audit|<run
-  id>] [--link [name]] [--no-open]`, an operator-typed subcommand, never a tool, for the reason `secrets` and `chat`
+- **The console command (ADDED 2026-10-21, #708)**: `/dispatch console [setup|runs|fleet|insights|config|parked|audit|<run
+  id>] [--link [name]] [--no-link] [--no-open]`, an operator-typed subcommand, never a tool, for the reason `secrets` and `chat`
   are commands: a sign-in link is a login as an operator. Its output goes to `notify` alone, never through `send`, and
   without `ctx.hasUI` it refuses before anything else. It prints the page's address by `consolePageLines`' rules (the
   ones `insights` uses), says whether the console runs, and with `--link` mints a one-time code
   (`DES-OPERATOR-CONSOLE`, "The panel as a second minter"). The model-callable tool list is UNCHANGED, checked.
+  **Since issue #849 it signs in by default** where nothing is left to choose: with neither flag, in pi's terminal UI,
+  with the console running, exactly one operator token, the drop guarded, and a browser on this machine to hand the link
+  to (a local session, a TCP address, no `--no-open`), it does what `--link` does (the audit row first); otherwise it
+  opens or prints the address as before, with one line saying why no link was made and no refusal or prompt, so a typed
+  `/dispatch console` never asks a question it did not need to and never leaves a code in the scrollback for nobody. A
+  failure after it has decided to mint (the audit row, the mint) is said in that line and the page still opens.
+  `--no-link` turns the default off. A link for the person a browser is already signed in as keeps that session
+  (`postLoginCode`) while it has an hour or more of its longest life left (a quarter of it on a console set shorter),
+  so the default does not end a session mid-operation; in its last stretch the link signs in afresh, since that session
+  would end within it anyway. It does not read the remembered-device
+  store: whether a browser is remembered lives in that browser's HttpOnly cookie, and a link on a remembered browser
+  reuses its session (the same person keeps the device). REJECTED: linking only where no browser is remembered, which
+  this process cannot know.
   - **Running or not**: ONE probe, the worker's `@edgehero/pi-dispatch/console-probe` (`worker/src/console-probe.mjs`),
     which doctor's console lines use too, so the command and doctor cannot disagree about whether a console runs (the
     admin's own copy this PR first carried was replaced by the import once #728 merged). It sends one `GET /healthz`
@@ -12706,7 +12719,8 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
      mints as the deployment's own account (since issue #708 the panel's `/dispatch console --link` mints one too, as
      the same account: "The panel as a second minter" below). Two roles: `operator` (reads and writes) and `viewer` (reads). Since issue #849 a remembered device is the third way to a session, restored from `INT-CONSOLE-DEVICES-STORE`. Sessions
      live in the process (a restart signs out everyone who is not remembered), the id is 32 random bytes, a new one at every login (no
-     fixation), in the cookie `pdc_session` with `HttpOnly; SameSite=Strict; Path=/`. An idle limit
+     fixation; since issue #849 a one-time link for the person the browser's live session already belongs to keeps that
+     session, which issues no id at all, so it promotes nothing either), in the cookie `pdc_session` with `HttpOnly; SameSite=Strict; Path=/`. An idle limit
      (`PI_CONSOLE_IDLE_MINUTES`, default 60, 5 to 1440) and an absolute one (`PI_CONSOLE_MAX_HOURS`, default 12, 1
      to 168) bound it, and every request re-reads the tokens file: a session whose token was revoked or rotated, whose
      role changed, or whose `generation` is older than the file's (`sessions end-all`) ends on that request. Each
@@ -14436,8 +14450,8 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
     address.
   - **The sign-in pages.** The SignIn and AccessStates cards' markup through the kit (`signin.mjs`), out of the legacy
     layer, with the three ids the script finds (`#login-form`, `#token`, `#notice`) drawn by hand in the kit's classes.
-    The help names the commands that make a link (`/dispatch console --link`; the card's `/dispatch console`
-    prints no link) and a token, its `<you>` quoted by the copy box, and never a token's prefix (the leak
+    The help names the commands that make a link (`/dispatch console --link`, which always makes one; since issue #849
+    a bare `/dispatch console` makes one too where the choice is plain) and a token, its `<you>` quoted by the copy box, and never a token's prefix (the leak
     canary fails on any body holding it). A notice's command or name is in the code face, from the catalog's own
     backticks (`withCode`; the `other` notice's body is the server's sentence, which the script sets as text and which
     never passes through it); the used link's state leads each command for a new link in by where it runs, the host
@@ -17556,6 +17570,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-11-11 (#849, part 6) | **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**, "The console command": it signs in by default where nothing is left to choose, takes `--no-link`, and names `setup` among its page words, which the code already took; REJECTED: linking only where no browser is remembered, which the panel cannot know. **`DES-OPERATOR-CONSOLE` AMENDED**: a new id at every login but for a same-person link, which keeps the live session while it has time left; the sign-in page's help no longer says a bare `/dispatch console` prints no link. |
 | 2026-11-08 (#849, part 5) | **`DES-OPERATOR-CONSOLE` AMENDED**, "Remembered devices": the person's side, the Remember box, the one-time offer, the remembered mark, the Remembered browsers page and its two actions, with what was rejected (a dismiss route, a forget route, a generation bump from the browser). |
 | 2026-11-08 (#849, part 4) | **`DES-OPERATOR-CONSOLE` AMENDED**, part 2 and a new bullet "Remembered devices": why two credentials, restore, precedence (an unreadable record never hides a revocation the tokens file proves), the clean-up of a device found dead, re-setting the cookie (reads only, never dropping `Secure`), the failed sign-out and its residual, a sign-out over an unreadable record (refused in memory only with a session held here), signing in over a device, remembering after the fact, and what was rejected. |
 | 2026-11-08 (#849, part 3) | **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**, the write guard: the remembered-device folder is guarded as a directory, and a write through any of macOS's four root entries that re-resolve a path is refused, because the identity walk cannot see through them. `DES-OPERATOR-CONSOLE` threat 4 names the folder. |

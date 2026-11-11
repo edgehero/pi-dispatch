@@ -56,10 +56,11 @@ function harness({ hasUI = true, mode = "tui", env = {}, state = "running", toke
 const text = (h) => h.notes.map(([t]) => t).join("\n");
 
 test("parseConsoleArgs and consolePagePath: the page words, a run id, --link [name], --no-open; anything else is usage", () => {
-  assert.deepEqual(parseConsoleArgs([]), { page: null, link: false, name: null, noOpen: false });
-  assert.deepEqual(parseConsoleArgs(["runs", "--link", "alice", "--no-open"]), { page: "runs", link: true, name: "alice", noOpen: true });
-  assert.deepEqual(parseConsoleArgs(["--link", "--no-open"]), { page: null, link: true, name: null, noOpen: true });
-  for (const bad of [["runs", "fleet"], ["--open"], ["--link", "a", "--link"], ["--no-open", "--no-open"], ["-x"]]) assert.equal(parseConsoleArgs(bad).usage, true, bad.join(" "));
+  assert.deepEqual(parseConsoleArgs([]), { page: null, link: false, noLink: false, name: null, noOpen: false });
+  assert.deepEqual(parseConsoleArgs(["runs", "--link", "alice", "--no-open"]), { page: "runs", link: true, noLink: false, name: "alice", noOpen: true });
+  assert.deepEqual(parseConsoleArgs(["--link", "--no-open"]), { page: null, link: true, noLink: false, name: null, noOpen: true });
+  assert.deepEqual(parseConsoleArgs(["runs", "--no-link"]), { page: "runs", link: false, noLink: true, name: null, noOpen: false });
+  for (const bad of [["runs", "fleet"], ["--open"], ["--link", "a", "--link"], ["--no-open", "--no-open"], ["-x"], ["--link", "--no-link"], ["--no-link", "--no-link"]]) assert.equal(parseConsoleArgs(bad).usage, true, bad.join(" "));
   const pages = { runs: "runs", fleet: "fleet", insights: "insights", config: "config", parked: "parked", audit: "audit", "gh-acme-widgets-42.1": "run?id=gh-acme-widgets-42.1", "repeat:t1:1760000000000": "run?id=repeat:t1:1760000000000" };
   for (const [word, path] of Object.entries(pages)) assert.equal(consolePagePath(word), path, word);
   assert.equal(consolePagePath(null), "");
@@ -239,18 +240,18 @@ test("--link mints only into a drop the write guard holds, and only in pi's term
 
 test("the browser: opened on a local session for a TCP listener, never with --no-open or off a local session", async () => {
   const local = harness();
-  assert.equal((await consoleCommand(["config"], local.deps)).opened, true);
+  assert.equal((await consoleCommand(["config", "--no-link"], local.deps)).opened, true);
   assert.deepEqual(local.opened, ["http://127.0.0.1:4790/config"]);
   assert.match(text(local), /handed to your browser$/m);
 
   const noOpen = harness();
-  const r = await consoleCommand(["config", "--no-open"], noOpen.deps);
+  const r = await consoleCommand(["config", "--no-open", "--no-link"], noOpen.deps);
   assert.equal(r.opened, false);
   assert.deepEqual(noOpen.opened, []);
   assert.ok(text(noOpen).includes("http://127.0.0.1:4790/config"), "the URL is printed all the same");
 
   const remote = harness({ local: false });
-  await consoleCommand(["config"], remote.deps);
+  await consoleCommand(["config", "--no-link"], remote.deps);
   assert.deepEqual(remote.opened, []);
   assert.match(text(remote), /not opened: this is not a local session/);
 
@@ -264,10 +265,10 @@ test("the default local-session check reads the session's env: SSH prints only",
   const h = harness();
   delete h.deps.isLocal;
   h.deps.sessionEnv = { SSH_CONNECTION: "10.0.0.2 5000 10.0.0.1 22" };
-  await consoleCommand([], h.deps);
+  await consoleCommand(["--no-link"], h.deps);
   assert.deepEqual(h.opened, []);
   h.deps.sessionEnv = {};
-  await consoleCommand([], h.deps);
+  await consoleCommand(["--no-link"], h.deps);
   assert.deepEqual(h.opened, ["http://127.0.0.1:4790/"], "darwin with no SSH variable is local");
 });
 
@@ -331,4 +332,56 @@ test("setup link uses the private guarded opener and validated /setup destinatio
   const rpc = harness({ mode: "rpc" });
   await consoleCommand(["setup", "--link"], rpc.deps);
   assert.ok(!rpc.order.includes("mint"), "an RPC client never receives the setup credential");
+});
+
+// Issue #849, part 6: with neither flag the link is made where the choice is plain, and the command is otherwise what it was.
+
+test("with no flag, one operator and a running console in pi's terminal UI, /dispatch console signs in as --link does", async () => {
+  const h = harness();
+  const r = await consoleCommand(["runs"], h.deps);
+  assert.equal(r.minted, true);
+  assert.deepEqual(h.order, ["probe", "guarded", "read", "audit:ok", "mint", "openLink"], "the audit row before the code, as --link");
+  assert.match(text(h), /sign-in link for "alice" \(it works once, within 60 seconds\)/);
+});
+
+test("with no flag, anything less plain is the old plain address with one line saying why, never a refusal and never a prompt", async () => {
+  const cases = {
+    "several operators": [harness({ tokens: [{ name: "alice", role: "operator" }, { name: "bob", role: "operator" }], select: (options) => options[0] }), /holds 2 operator tokens; \/dispatch console --link picks one/],
+    "not running": [harness({ state: "not-running" }), /the console is not running/],
+    "not the terminal UI": [harness({ mode: "rpc" }), /pi runs in rpc mode here/],
+    "no guarded drop": [harness({ guarded: false }), /guards no login-code directory/],
+    "--no-open": [harness(), /--no-open asks for the address alone; \/dispatch console --link prints one/, ["runs", "--no-open"]],
+    "over SSH": [harness({ local: false }), /no sign-in link was made: nothing here would open it; \/dispatch console --link prints one\nnot opened: this is not a local session/],
+    "a public bind": [harness({ env: { PI_CONSOLE_LISTEN: "0.0.0.0:4790", PI_CONSOLE_BIND_PUBLIC: "1" } }), /through a tunnel or another host/],
+    "a unix socket": [harness({ env: { PI_CONSOLE_LISTEN: "unix:/run/pd/console.sock" } }), /through a tunnel or another host/],
+    "no operator token": [harness({ tokens: [{ name: "ann", role: "viewer" }] }), /holds no operator token/],
+    "an unreadable tokens file": [harness({ tokensRefusal: "the tokens file is open to other accounts" }), /the tokens file is open to other accounts/],
+    "a console not confirmed running": [harness({ state: "unknown" }), /could not be confirmed running/],
+    "a Windows host": [(() => { const h = harness(); h.deps.platform = "win32"; return h; })(), /one-time links do not work on a Windows host/],
+  };
+  for (const [what, [h, said, words]] of Object.entries(cases)) {
+    const r = await consoleCommand(words ?? ["runs"], h.deps);
+    assert.equal(r.refused, undefined, what);
+    assert.equal(r.minted, false, what);
+    assert.match(text(h), said, what);
+    assert.ok(!h.order.includes("audit:ok") && !h.order.includes("mint") && h.selects.length === 0, `${what}: no row, no code, no prompt`);
+  }
+  // A failure after it decided to mint is said, and the page still opens: nobody asked for a link.
+  const audit = harness({ auditFails: true });
+  const failed = await consoleCommand(["runs"], audit.deps);
+  assert.deepEqual([failed.refused, failed.minted, failed.opened], [undefined, false, true]);
+  assert.match(text(audit), /no sign-in link was made: the audit log could not be written/);
+  assert.deepEqual(audit.opened, ["http://127.0.0.1:4790/runs"]);
+  assert.equal(audit.notes.at(-1)[1], "warning", "a fault after deciding is a warning, never the dim status line");
+  const mintFails = harness({ mintRefusal: "the code drop could not be written" });
+  const refusedMint = await consoleCommand(["runs"], mintFails.deps);
+  assert.deepEqual([refusedMint.refused, refusedMint.minted, refusedMint.opened], [undefined, false, true]);
+  assert.match(text(mintFails), /no sign-in link was made: the code drop could not be written/);
+  assert.equal(mintFails.notes.at(-1)[1], "warning");
+  const plain = harness({ tokens: [{ name: "alice", role: "operator" }, { name: "bob", role: "operator" }] });
+  await consoleCommand(["runs"], plain.deps);
+  assert.equal(plain.notes.at(-1)[1], "info", "a reason not to link is no fault");
+  const off = harness();
+  assert.equal((await consoleCommand(["runs", "--no-link"], off.deps)).minted, false, "--no-link turns it off");
+  assert.ok(!off.order.includes("mint"));
 });

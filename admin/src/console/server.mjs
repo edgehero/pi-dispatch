@@ -513,6 +513,13 @@ export const NOT_REMEMBERED = Object.freeze({
 /** Which of `NOT_REMEMBERED` a person gets: Remove is offered only to an operator on a console that takes changes. */
 const notRemembered = (refusal, role, readOnly) => (refusal !== "full" ? NOT_REMEMBERED.failed : readOnly ? NOT_REMEMBERED.fullReadOnly : role === "operator" ? NOT_REMEMBERED.full : NOT_REMEMBERED.fullViewer);
 
+/**
+ * How long a live session must have left for a same-person link to keep it rather than make a new one (issue #849): an hour, or a quarter of the
+ * console's longest session life when that is shorter, so a console set to `PI_CONSOLE_MAX_HOURS=1` keeps a fresh session too.
+ */
+export const KEEP_SESSION_MIN_LEFT_MS = 3600000;
+export const keepSessionMinLeftMs = (maxMs) => Math.min(KEEP_SESSION_MIN_LEFT_MS, Math.floor(maxMs / 4));
+
 /** The tokens file, or null after answering 503 (a file that went bad while the console ran: nobody signs in). */
 function tokensOr503(ctx) {
   const read = ctx.deps.readTokens();
@@ -573,6 +580,21 @@ async function postLoginCode(ctx) {
     return refuse(kept ? "the link named a token whose role this console does not know" : "the link named a token that no longer exists");
   }
   if (consumed.binding !== undefined && !invitationMatches(consumed.binding, entry, file)) return refuse("the viewer invitation entry or generation changed");
+  // Issue #849: a link for the person this browser is already signed in as keeps that session, rather than replacing it. `/dispatch console`
+  // makes a link by default, and a replaced session would end what it was doing: a /setup operation, a preview, other tabs' streams. The code
+  // is spent and the sign-in is on the record all the same; an invitation's sign-in is never this (it binds a session of its own kind).
+  const held = consumed.binding === undefined ? ctx.deps.sessions.get(ctx.deps.cookies.readSessionCookie(ctx.req.headers.cookie), file) : null;
+  // Only with an hour or more left of its longest life: a link is a fresh sign-in, and one kept near its end would sign the person out minutes later.
+  const timeLeft = held ? held.createdAt + ctx.deps.config.maxMs - ctx.deps.now() : 0;
+  if (held && timeLeft >= keepSessionMinLeftMs(ctx.deps.config.maxMs) && !held.deviceHash && !held.invited && held.name === entry.name && held.role === entry.role && held.tokenHash === entry.sha256 && held.generation === file.generation) {
+    try {
+      ctx.deps.audit.append({ actor: { name: entry.name, role: entry.role, session: ctx.deps.cookies.sessionDigest(held.id) }, action: "login-code", outcome: "ok", reason: "the browser was already signed in as this person, so its session was kept" });
+    } catch (e) {
+      ctx.deps.log(`console: audit append failed (${e?.code ?? "error"}), so the sign-in was refused`);
+      return sendError(ctx.res, 500, "the audit log could not be written, so the sign-in was refused; check the console's log directory");
+    }
+    return sendJson(ctx.res, 200, { ok: true, name: entry.name, role: entry.role, next: realPages.returnPathOf(ctx.body.next) ?? "/", kept: true });
+  }
   // Issue #708: the page the link returns to, judged HERE by the page parser (`returnPathOf`), so the browser is only
   // ever sent to one of this console's own pages; anything else, or nothing, lands on the overview. The script checks
   // the answer's shape again before it navigates.
