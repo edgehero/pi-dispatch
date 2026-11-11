@@ -523,6 +523,27 @@ test("guardedFetch bounds a JSON answer, and leaves an event stream to pi-mcp's 
 	assert.equal((await (await mcp.guardedFetch("https://h", big("application/json"), 64)("https://h/mcp")).text()).length, 64);
 });
 
+test("at pi-mcp's own JSON bound the guarded fetch answers first, so the failure keeps its name (pi 1.5.2)", { skip }, async () => {
+	// pi-mcp 1.5.2 reads a JSON answer through readBodyText(maxMessageBytes) and throws a plain Error past it, which
+	// failurePhrase would report as an unfinished handshake. The runner sets no maxMessageBytes, so both bounds are
+	// 16 MiB (pinned-api.test.mjs holds that), and the guarded fetch's stream sits upstream of pi's reader: the chunk that
+	// crosses the bound errors there before pi reads it. Here both bounds are 16 bytes, and the answer's second chunk crosses.
+	const { StreamableHttpTransport } = await import("@earendil-works/pi-mcp");
+	const chunks = () => async () => new Response(new ReadableStream({ start(c) { c.enqueue(new TextEncoder().encode('{"jsonrpc":')); c.enqueue(new TextEncoder().encode('"2.0","id":1,"result":{}}')); c.close(); } }), { status: 200, headers: { "content-type": "application/json" } });
+	const send = async (runnerBound) => {
+		const transport = new StreamableHttpTransport({ url: "https://h/mcp", fetch: mcp.guardedFetch("https://h", chunks(), runnerBound), maxMessageBytes: 16 });
+		await transport.start();
+		try {
+			await transport.send({ jsonrpc: "2.0", id: 1, method: "ping" });
+		} finally {
+			await transport.close();
+		}
+	};
+	await assert.rejects(send(16), mcp.McpBodyTooLargeError, "equal bounds: the runner's named refusal");
+	// The control: a looser runner bound leaves pi's own refusal, unnamed, so the test above is not vacuous.
+	await assert.rejects(send(1024), (error) => !(error instanceof mcp.McpBodyTooLargeError) && /exceeds 16 bytes/.test(error.message));
+});
+
 test("a pi MCP extension that throws while it loads leaves no session handler behind: the job refuses rather than runs without servers", { skip }, async () => {
 	const f = sessionFixture();
 	const document = doc({ files: stdio() }, { files: ["FILES_TOKEN"] });

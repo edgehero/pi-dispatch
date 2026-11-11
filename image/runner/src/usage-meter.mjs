@@ -28,7 +28,7 @@ import { configError, COST_CAP, COST_CAP_UNENFORCEABLE, MODEL_NOT_ALLOWED, MODEL
  * in-process session makes goes through a ModelRuntime instance: createAgentSession's streamFn returns
  * `modelRuntime.streamSimple(...)` (sdk.js:260), compaction and branch summaries reuse that streamFn
  * (agent-session.js, `streamFn: this.agent.streamFunction`), the cache warmer calls
- * `modelRuntime.streamSimple` (cache-warmer.js:239), and the ModelRegistry facade an extension sees as
+ * `modelRuntime.streamSimple` (cache-warmer.js:239; at 1.5.2 line 183, with pi-ai's getCacheWarmingRequestOptions), and the ModelRegistry facade an extension sees as
  * `ctx.modelRegistry` forwards stream/streamSimple/complete/classify to its runtime (model-registry.js).
  * complete/completeSimple/fetchDeferred call the instance's own stream/streamSimple/streamDeferred, so they
  * are counted through those. Wrapping the PROTOTYPE covers every instance, the runner's and any a subagent

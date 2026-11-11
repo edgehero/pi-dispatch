@@ -695,7 +695,8 @@ export function enforceTelemetryOff(env = process.env) {
  *   the spread so a future PI_RETRY_* knob for it would win.
  * - `cacheWarming: "off"`: pi 0.86.0 made "streaming" the default, which re-sends the cached prefix with
  *   maxTokens 1 during long tool runs, for up to an hour, as extra PAID requests the turn budget never
- *   sees. A job pays for its turns, not for keeping a cache warm between them.
+ *   sees, and pi 1.5.2's default, "idle", also warms between agent runs. A job pays for its turns, not for
+ *   keeping a cache warm between them.
  * - `enableInstallTelemetry: false`: see enforceTelemetryOff, which closes the env override of it.
  *
  * inMemory() writes to the GLOBAL scope of a storage with no project file, so a serviced project's

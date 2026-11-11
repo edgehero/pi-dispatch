@@ -150,6 +150,73 @@ test("replay safety refuses tools, child/loose/non-root calls, missing coverage 
 	for (const change of [{ metered: false }, { calls: 2 }, { sessions: 2 }, { unresolved: 1 }, { childProcesses: 1 }, { unmeteredChildren: 1 }]) assert.equal(providerReplaySafe({ ...clean, tokens: { ...clean.tokens, ...change } }), false);
 });
 
+test("an egress proxy's refused tunnel is no evidence about the model, though pi 1.5.2 now names its status (#853)", { skip: !pi }, async () => {
+	// The real chain: pi's own undici through a loopback proxy that refuses CONNECT with each status, wrapped as the
+	// provider SDKs wrap a failed fetch ("Connection error."), then pi-ai's own withCauseDetail, which appends the
+	// deepest cause. pi 1.5.0 left the bare "Connection error.", which no pattern here matched.
+	const { createServer } = await import("node:http");
+	const { loadPiUndici } = await import("../src/env-proxy.mjs");
+	const { withCauseDetail } = await import(new URL("./utils/error-body.js", import.meta.resolve("@earendil-works/pi-ai")).href);
+	const undici = loadPiUndici();
+	let status = 0;
+	const proxy = createServer();
+	proxy.on("connect", (_request, socket) => socket.end(`HTTP/1.1 ${status} Refused\r\nContent-Length: 0\r\n\r\n`));
+	await new Promise((resolve) => proxy.listen(0, "127.0.0.1", resolve));
+	const dispatcher = new undici.ProxyAgent({ uri: `http://127.0.0.1:${proxy.address().port}`, proxyTunnel: true });
+	try {
+		for (status of [403, 429, 500, 502, 503, 504]) {
+			const failed = await undici.fetch("https://provider.invalid/v1/messages", { dispatcher, method: "POST" }).then(() => null, (e) => e);
+			assert.ok(failed, `a ${status} tunnel refusal must fail the fetch`);
+			const message = withCauseDetail(new Error("Connection error.", { cause: failed }));
+			assert.match(message, new RegExp(`^Connection error\\.: .*\\b${status}\\b`), "the premise: pi 1.5.2 carries the proxy's status into the message");
+			assert.equal(classifyProviderFailure(error(message)), null, `${message}: an api the observer cannot see`);
+			assert.equal(classifyProviderFailure(error(message), { connection: true }), null, `${message}: an api the observer sees`);
+		}
+	} finally {
+		await dispatcher.close();
+		await new Promise((resolve) => proxy.close(resolve));
+	}
+	// Cutting the proxy's text leaves the provider's own words to the patterns.
+	assert.deepEqual(classifyProviderFailure(error("Service unavailable: try again")), { kind: "overloaded" });
+});
+
+test("a fetch that got no answer records that, and the next call's answer is its own (#853)", async () => {
+	class Runtime {
+		streamSimple(model, context, options) {
+			const done = options.fetch("https://unused.invalid").catch(() => {}).then(() => context.message);
+			return { result: () => done };
+		}
+	}
+	const observer = installProviderFailureObserver({ ModelRuntime: Runtime, now: () => NOW });
+	try {
+		const runtime = new Runtime();
+		const unreachable = error("Connection error.: 503 Service Unavailable");
+		await runtime.streamSimple({ api: "anthropic-messages" }, { message: unreachable }, { fetch: async () => { throw new TypeError("fetch failed"); } }).result();
+		assert.equal(observer.failure(unreachable), null, "no HTTP answer: whatever the message says, the model is not judged");
+		const answered = error("Service Unavailable");
+		await runtime.streamSimple({ api: "anthropic-messages" }, { message: answered }, { fetch: async () => ({ status: 503, headers: new Headers() }) }).result();
+		assert.deepEqual(observer.failure(answered), { kind: "overloaded" }, "a measured 503 still switches");
+		// pi's own retries inside one call: the last attempt's evidence is the call's.
+		const attempts = (...outcomes) => async () => { const next = outcomes.shift(); if (next === "throw") throw new TypeError("fetch failed"); return { status: next, headers: new Headers() }; };
+		class Retrying {
+			streamSimple(model, context, options) {
+				const done = (async () => { for (let i = 0; i < 2; i += 1) await options.fetch("https://unused.invalid").catch(() => {}); return context.message; })();
+				return { result: () => done };
+			}
+		}
+		observer.uninstall();
+		const retrying = installProviderFailureObserver({ ModelRuntime: Retrying, now: () => NOW });
+		try {
+			const thenAnswered = error("Service Unavailable");
+			await new Retrying().streamSimple({ api: "openai-responses" }, { message: thenAnswered }, { fetch: attempts("throw", 503) }).result();
+			assert.deepEqual(retrying.failure(thenAnswered), { kind: "overloaded" }, "no answer, then a 503: the 503 is the evidence");
+			const thenLost = error("Connection error.: 429 rate limit");
+			await new Retrying().streamSimple({ api: "openai-responses" }, { message: thenLost }, { fetch: attempts(429, "throw") }).result();
+			assert.equal(retrying.failure(thenLost), null, "a 429, then no answer: the call ended on the network, as before this release");
+		} finally { retrying.uninstall(); }
+	} finally { observer.uninstall(); }
+});
+
 test("pinned SDK prompt resolves on 429 yet terminal events retain reset evidence and root-only replay proof", { skip: !pi }, async () => {
 	const bedrock = readFileSync(new URL("./api/bedrock-converse-stream.js", import.meta.resolve("@earendil-works/pi-ai")), "utf8");
 	assert.match(bedrock, /type: "bedrock_response_failure"/);

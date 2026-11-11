@@ -454,7 +454,7 @@ Evidence convention as in `constitution.md`.
   `-> dist/core/provider-composer.js` (`streamWith`: a composed provider with no base resolves the api in the
   compat registry) · `-> dist/core/extensions/virtual-modules.js` and `loader.js getAliases` (extensions get pi's
   own pi-ai compat and pi-coding-agent) · `-> dist/core/settings-manager.js:664,679-682` (maxAgentDelayMs,
-  cacheWarming default "streaming") · `-> dist/core/telemetry.js:6-7` (PI_TELEMETRY overrides the setting) ·
+  cacheWarming default "streaming"; `"idle"` since 1.5.2) · `-> dist/core/telemetry.js:6-7` (PI_TELEMETRY overrides the setting) ·
   `-> dist/index.js` (`ModelRuntime` a value export; `AuthStorage` absent). The 0.80.7 evidence below is kept
   as the record of the previous pin. Re-verified at 1.0.3 (issue #587): the same, plus
   `-> dist/core/model-runtime.js` (`create` takes `options.credentials` and falls back to
@@ -565,7 +565,7 @@ Evidence convention as in `constitution.md`.
 - **(m) Three settings and one env var are spend or egress controls at 0.99.1, and each is pinned against
   pi's own default.** `cacheWarming: "off"`: pi 0.86.0 made `"streaming"` the default, which re-sends the
   cached prefix with maxTokens 1 during long tool runs, for up to an hour, as paid requests the turn budget
-  never sees. `retry.maxAgentDelayMs: 60000`: new since 0.80.7, it caps the backoff between agent retries at
+  never sees, and pi 1.5.2 made `"idle"` the default, which also warms between agent runs. `retry.maxAgentDelayMs: 60000`: new since 0.80.7, it caps the backoff between agent retries at
   pi's own default; pinned so an upstream default change cannot move unattended retry timing. Compaction and
   branch-summary retries (`summarization_retry_*`) now use the same `retry` budget, and each is a paid call.
   `enableInstallTelemetry: false` and `PI_TELEMETRY=0`: the env var, when set at all, OVERRIDES the setting
@@ -9458,6 +9458,8 @@ LM Studio) a job may reach through the egress proxy, each by one host and one po
   above zero; and a top-level `$schema` string is accepted. At pi 1.4.0 the merged compat object also
   accepts `imageInput` (`"assets"`, `"images"`, `"state-image-urls"`) and boolean `sendImageOptInHeader`.
   The differential corpus covers both and all four source-file hashes are reverified (issue #693).
+  At pi 1.5.2 it also type-checks the booleans `requiresNonNullAssistantContent`, `requiresToolsWithToolHistory` and
+  `supportsMessageThreads` and `promptCacheKeyMode` (`"auto"`, `"enabled"`, `"disabled"`), each in the corpus (PR #853).
   The mirror is pinned to the exact
   pi files it was transcribed from by their content hash (model-config.js, provider-composer.js, and since 1.2.0 the
   two pi-ai modules model-config.js builds its schema from, `providers/compat-schema.js` and
@@ -13644,6 +13646,7 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 
 | Date | Change |
 |---|---|
+| 2026-11-11 (#853, pi 1.5.2) | **`INT-SDK-SESSION-OPTIONS` AMENDED** in its evidence line and in (m): pi's default `cacheWarming` is `"idle"` since 1.5.2, which also warms between agent runs; the runner's `"off"` still holds and now saves more. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**: the merged compat object type-checks 1.5.2's four new keys, as pi does. Every other entry UNCHANGED, checked against the 1.5.2 tarballs. |
 | 2026-11-11 (#849, part 6) | **`INT-CONSOLE-STATE-API` AMENDED**: `POST /login/code` answers `kept: true` and keeps the browser's live session when it already belongs to the link's person and has time left. **`INT-CONSOLE-AUDIT-LOG` AMENDED**: the panel's `login-code` rows come from a bare `/dispatch console` too, where it links by default; a kept session's row carries a reason. |
 | 2026-11-08 (#849, part 5) | **`INT-CONSOLE-AUDIT-LOG` AMENDED**: two write kinds, `device-remove` and `sessions-end-all`, written through the existing action routes; the CLI's `sessions-ended` and its `shell` actor are UNCHANGED, checked. **`INT-CONSOLE-STATE-API` AMENDED**: `POST /api/device/remember` answers 409 at the per-name cap. `INT-CONSOLE-DEVICES-STORE`: UNCHANGED, checked, but for `rememberDevice` marking the cap refusal `full`: the page reads the store's listing, and the actions use `/api/act/<name>/preview` and `/confirm` as every action does. |
 | 2026-11-08 (#849, part 4) | **`INT-CONSOLE-STATE-API` AMENDED**: `remember` on `POST /login` and its answers (`remembered`, `deviceEnded`), `POST /api/device/remember` and its 401, 403 and 503, `device: "unerased"` on sign-out and which cookies it clears, the 503 and the page's 303 for a device that cannot be judged, and the 401's word list (`device`; `device-store` and `device-kept` are page-only). **`INT-CONSOLE-EVENT-STREAM` AMENDED**: the `device` end, and `stale`'s `what` gains `device`, a stream held because its record cannot be read. **`INT-CONSOLE-DEVICES-STORE` AMENDED**: its status, now written and swept by the console, "Last use" (moved on reads only), and "Three answers on a read": the console reads a missing folder as no devices. **`INT-CONSOLE-AUDIT-LOG` AMENDED**: who writes `login-device`, `device-remembered` and `device-ended` and with which actor, `session` null on a console `device-ended` row, a refused remember naming its token's holder, and a sign-out after a restart naming the device's person. The row shape and the verifier: UNCHANGED, checked. |

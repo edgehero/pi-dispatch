@@ -208,8 +208,9 @@ test("the job's settings mean what jobSettings says at the pin, each against pi'
 	// reading, or a default that moved to where the pin is a no-op, fails here instead of silently costing money.
 	const job = mod.SettingsManager.inMemory(jobSettings({ maxRetries: 2, baseDelayMs: 2000 }));
 	const stock = mod.SettingsManager.inMemory({});
-	// Cache warming: pi 0.86.0's default re-sends the prefix during long tool runs, as extra paid requests.
-	assert.equal(stock.getCacheWarmingMode(), "streaming", "pi's default cache warming moved -- re-check whether the pin still changes anything");
+	// Cache warming: pi 0.86.0's default re-sends the prefix during long tool runs, as extra paid requests. pi 1.5.2's
+	// default, "idle", also warms between agent runs (cache-warmer.js warms an idle run only when the mode is "idle").
+	assert.equal(stock.getCacheWarmingMode(), "idle", "pi's default cache warming moved -- re-check whether the pin still changes anything");
 	assert.equal(job.getCacheWarmingMode(), "off", "cacheWarming: \"off\" is no longer honoured -- a job pays to keep a cache warm");
 	// The retry settings pi's _prepareRetry reads, including the new backoff cap.
 	assert.deepEqual(job.getRetrySettings(), { enabled: true, maxRetries: 2, baseDelayMs: 2000, maxAgentDelayMs: 60_000 });
@@ -368,8 +369,12 @@ test("every model call a session or an extension makes reaches a ModelRuntime me
 	assert.match(sdk, /\n {4}const agent = new Agent\(\{/, "createAgentSession no longer builds the Agent itself");
 	// Compaction and branch summaries reuse the session's streamFn (so they are counted, under their own id).
 	assert.match(agentDistFile("core", "agent-session.js"), /streamFn: this\.agent\.streamFunction,/, "summaries no longer reuse the session's streamFn");
-	// The cache warmer (off in a job, jobSettings) goes through the runtime too.
-	assert.match(agentDistFile("core", "cache-warmer.js"), /\.streamSimple\(run\.model, run\.context, \{/, "the cache warmer's call moved");
+	// The cache warmer (off in a job, jobSettings) goes through the runtime too. Since 1.5.2 its options come from pi-ai's
+	// getCacheWarmingRequestOptions: the run's own, with maxTokens 1, no retries and its signal, and no fetch of its own.
+	const warmer = agentDistFile("core", "cache-warmer.js");
+	assert.match(warmer, /\.streamSimple\(run\.model, run\.context, getCacheWarmingRequestOptions\(run\.options, run\.controller\.signal\)\)/, "the cache warmer's call moved");
+	assert.match(sdk, /new CacheWarmer\(modelRuntime, /, "the cache warmer no longer calls through the session's ModelRuntime");
+	assert.match(readFileSync(join(piAiDist(), "cache-warming.js"), "utf8"), /return \{ \.\.\.options, maxTokens: 1, disableContinuation: true, maxRetries: 0, signal \};/, "a warm request's options moved: re-check it adds no fetch of its own");
 	// ctx.modelRegistry is a facade over the runtime: every one of its model calls lands on a wrapped method.
 	const registry = agentDistFile("core", "model-registry.js");
 	for (const call of ["stream", "streamSimple", "complete", "classify"]) {
@@ -1772,6 +1777,27 @@ test("what else picks the model that answers, as the model guard reads it (issue
 	assert.match(azureProvider, /id: "azure",/, "the azure provider id moved: the model guard's AZURE_PROVIDER must follow it");
 	assert.match(azureProvider, /const deploymentName = resolveDeploymentName\(model, options\);[\s\S]*?const params = \{ \.\.\.payload, model: deploymentName \};/, "the provider's deployment rewrite moved");
 	assert.match(azureProvider, /"openai-completions": azureStreams\(openAICompletionsApi\(\)\),/, "the azure provider no longer rewrites the deployment on openai-completions");
+	// Since 1.5.2, on Anthropic's own endpoint, pi builds the body it sends from the checked one, after the hook
+	// (anthropic-messages.js): a new thread adds only `thread` (createThreadRequest), and a continued one also drops
+	// `system`, `tools` and the earlier messages (prepareThreadRequest), only when the prefix hash of this request equals
+	// the one recorded from the reply it continues, a request this guard checked. The hash (hashThreadPrefix) covers the
+	// model, base url, system, tools, thinking, output config, tool choice, betas, fallbacks and the earlier messages,
+	// ignoring only cache markers and a string content's form. A rejected thread is resent as a new thread or as the
+	// checked body itself (sendThreadRequest), and every body goes to `client.beta.messages.create` as it is. Each of the
+	// four is pinned by its whole text: any change is re-read, since a body that differs from the checked one in any
+	// other way breaks "the object checked is the object sent" (DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER).
+	const anthropicApi = nestedPiAi("api", "anthropic-messages.js");
+	assert.match(anthropicApi, /const nextParams = await options\?\.onPayload\?\.\(params, model\);\s*if \(nextParams !== undefined\) \{\s*params = \{ \.\.\.nextParams, stream: true \};\s*\}\s*const prepared = threadSessionId !== undefined && options\?\.disableContinuation !== true\s*\? prepareThreadRequest\(model, threadSessionId, params\)\s*: undefined;\s*try \{\s*const sent = prepared\s*\? await sendThreadRequest\(prepared, params, send, output, options\?\.signal\)\s*: \{ response: await send\(params\), thread: undefined \};/, "the thread body is no longer built from the hook's result, or sent another way");
+	assert.match(anthropicApi, /const send = \(body\) => retryProviderRequest\(\(\) => client\.beta\.messages\.create\(body, requestOptions\)\.asResponse\(\), \{/, "a body no longer goes to the client as it is");
+	for (const [name, hash] of [
+		["createThreadRequest", "3f6a8f6ac639f929f7723028d5a384d6fd29ba0228433171963df7ff903f143d"],
+		["prepareThreadRequest", "3953fc91e9388dfc0c370e445e6b21e35f3e8914003bcf959fe42ac97e3208de"],
+		["hashThreadPrefix", "63d9ca41b7f51c3338b9cfbd6db3281f8db4e9213b8e271c5909af4ad72c5fd2"],
+		["sendThreadRequest", "a919325b37f8d01b55680548ad320a452a25ac30b748537389b1f24c7a7d51e6"],
+	]) assert.equal(sha256(piFunction(anthropicApi, name)), hash, `pi's ${name} changed: re-read what a thread sends against the checked body`);
+	// And no other api builds a thread, which the guard would meet unread.
+	const apiFiles = join(dirname(fileURLToPath(resolvePiAiCompat()[0].url)), "api");
+	assert.deepEqual(readdirSync(apiFiles).filter((name) => name.endsWith(".js") && /\bthread: \{ type:/.test(readFileSync(join(apiFiles, name), "utf8"))).sort(), ["anthropic-messages.js"], "another api now sends a thread");
 	// A caller's own fetch sends the request after every hook: the guard refuses it, and pi passes none itself.
 	assert.doesNotMatch(agentDistFile("core", "sdk.js"), /\bfetch: /, "pi's session now passes a fetch of its own: the guard's fetch refusal would stop every listed job");
 	// ...nor does the agent loop's per-request config, nor the cache warmer's call (the other two places that build the
@@ -1780,8 +1806,11 @@ test("what else picks the model that answers, as the model guard reads it (issue
 	const loopConfig = agentCore.match(/\n {4}createLoopConfig\(options = \{\}\) \{([\s\S]*?)\n {4}\}\n/)?.[1];
 	assert.ok(loopConfig, "createLoopConfig moved: re-check what options the agent loop passes");
 	assert.doesNotMatch(loopConfig, /\bfetch\b/, "the agent loop now passes a fetch");
-	const warm = agentDistFile("core", "cache-warmer.js").match(/\.streamSimple\(run\.model, run\.context, \{([\s\S]*?)\}\)/)?.[1];
-	assert.ok(warm, "the cache warmer's call moved");
+	// Since 1.5.2 the warmer's options are built by pi-ai's getCacheWarmingRequestOptions from the run's own (which the
+	// session built, checked above), so the body read is that function's.
+	assert.match(agentDistFile("core", "cache-warmer.js"), /\.streamSimple\(run\.model, run\.context, getCacheWarmingRequestOptions\(run\.options, run\.controller\.signal\)\)/, "the cache warmer's call moved");
+	const warm = readFileSync(join(piAiDist(), "cache-warming.js"), "utf8").match(/\nexport function getCacheWarmingRequestOptions\(options, signal\) \{([\s\S]*?)\n\}/)?.[1];
+	assert.ok(warm, "getCacheWarmingRequestOptions moved: re-check what options a warm request carries");
 	assert.doesNotMatch(warm, /\bfetch\b/, "the cache warmer now passes a fetch");
 });
 
@@ -1802,7 +1831,9 @@ test("the service-tier multipliers the bound assumes, and azure applying none (i
 
 test("the output-bound rules: who sends maxTokens, the 16 floor, the reasoning ceiling, the context clamp (issue #501)", { skip }, () => {
 	const simple = nestedPiAi("api", "simple-options.js");
-	assert.match(simple, /return Math\.min\(maxTokens, Math\.max\(MIN_MAX_TOKENS, available\)\);/, "the context clamp only ever LOWERS the output cap");
+	// 1.5.2 widens the margin (15% of the input, or the fixed 4096 where that leaves under 32768 of output) and calls the
+	// result `room`; the outer min with the caller's maxTokens is unchanged, so the clamp still never raises it.
+	assert.match(simple, /return Math\.min\(maxTokens, Math\.max\(MIN_MAX_TOKENS, room\)\);/, "the context clamp only ever LOWERS the output cap");
 	assert.match(simple, /const maxTokens = baseMaxTokens === undefined \? modelMaxTokens : Math\.min\(baseMaxTokens \+ thinkingBudget, modelMaxTokens\);/, "a thinking budget lifts the cap no higher than model.maxTokens");
 	for (const file of ["openai-responses.js", "azure-openai-responses.js"]) {
 		const src = nestedPiAi("api", file);
@@ -2156,7 +2187,7 @@ test("McpExtensionOptions is the set the runner fills, and codemode takes its mo
 	assert.match(agentDistFile("extensions", "codemode", "index.js"), /models: options\.models \?\? true,/, "codemode's models.* switch moved: the job's codemodeModels would not reach it");
 });
 
-test("the transports the runner builds: stdio takes inheritEnv and kills its process group at exit; HTTP takes a fetch", { skip }, () => {
+test("the transports the runner builds: stdio takes inheritEnv and kills its process group at exit; HTTP takes a fetch", { skip }, async () => {
 	const stdio = mcpDistFile("transports", "stdio.js");
 	assert.match(stdio, /const env = this\.options\.inheritEnv === false \? \{ \.\.\.this\.options\.env \} : \{ \.\.\.process\.env, \.\.\.this\.options\.env \};/, "inheritEnv:false no longer keeps the runner's environment from a stdio server");
 	assert.match(stdio, /process\.once\("exit", \(\) => \{/, "pi-mcp no longer kills live servers at exit: a SIGTERM'd runner would leave them");
@@ -2165,7 +2196,16 @@ test("the transports the runner builds: stdio takes inheritEnv and kills its pro
 	assert.match(stdio, /this\.child = child;/, "the stdio transport no longer keeps its child where the runner's stop reaches it");
 	const http = mcpDistFile("transports", "streamable-http.js");
 	assert.match(http, /const fetch = options\.fetch \?\? globalThis\.fetch;/, "the HTTP transport no longer takes the guarded fetch");
-	assert.match(http, /const body = await response\.json\(\);/, "a JSON answer is no longer read whole: re-read the guarded fetch's bound");
+	// Since 1.5.2 pi bounds a JSON answer itself, at the transport's maxMessageBytes, and an error body at 8 KiB. The
+	// guarded fetch keeps its own bound so the refusal is named: equal to pi's default and upstream of it, it fires first
+	// (mcp.test.mjs proves the order), which holds only while the runner sets no maxMessageBytes and the two stay equal.
+	assert.match(http, /const maxBytes = this\.options\.maxMessageBytes \?\? DEFAULT_MAX_MESSAGE_BYTES;\s*const \{ text, truncated \} = await readBodyText\(response, maxBytes\);/, "a JSON answer's bound moved: re-read the guarded fetch's bound");
+	assert.match(http, /const body = \(await readBodyText\(response, MAX_ERROR_BODY_BYTES\)\.catch\(\(\) => \(\{ text: "" \}\)\)\)\.text;/, "an error body's bound moved: re-read the guarded fetch's bound");
+	assert.match(mcpDistFile("transports", "transport.js"), new RegExp(`export const DEFAULT_MAX_MESSAGE_BYTES = 16 \\* 1024 \\* 1024;`), "pi's default message bound moved");
+	const { MCP_HTTP_MAX_BYTES } = await import("../src/mcp.mjs");
+	assert.equal(MCP_HTTP_MAX_BYTES, 16 * 1024 * 1024, "the guarded fetch's bound is no longer pi's default: the one that fires first may be pi's, unnamed");
+	const runner = readFileSync(new URL("../src/mcp.mjs", import.meta.url), "utf8");
+	assert.match(runner, /return new http\[entry\.name\]\(\{ url, headers, fetch: guardedFetch\(new URL\(url\)\.origin\) \}\);/, "the runner now builds its HTTP transport differently: re-check it sets no maxMessageBytes");
 });
 
 test("isTransientMcpError is pi's own isTransientError, which decides what pi retries and so what the runner waits for", { skip }, async () => {

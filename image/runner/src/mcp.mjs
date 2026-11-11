@@ -263,11 +263,16 @@ export function guardedFetch(origin, base = (...args) => globalThis.fetch(...arg
 		if (url.origin !== origin) throw new McpRedirectRefusedError(`a request to another origin was refused`);
 		const response = await base(input, { ...init, redirect: "manual" });
 		if (response.status >= 300 && response.status < 400) throw new McpRedirectRefusedError(`the server answered with a redirect (HTTP ${response.status}), which is not followed`);
-		// pi-mcp reads a JSON answer and an error body whole (`response.json()`, `response.text()`), with no bound; an event
-		// stream it bounds per event itself. So every body but an event stream is bounded, the type read as pi reads it
-		// (streamable-http.js `contentType`: up to `;`, trimmed, lowercased).
+		// pi-mcp before 1.5.2 read a JSON answer and an error body whole (`response.json()`, `response.text()`), with no
+		// bound. Since 1.5.2 it reads a JSON answer up to `maxMessageBytes` (16 MiB unless set, and the runner sets none)
+		// and an error body's first 8 KiB, but past its bound it throws a plain Error, which failurePhrase could only call an
+		// unfinished handshake. This bound is the same 16 MiB and sits upstream of pi's reader, so the chunk that crosses
+		// it errors here first, named (mcp.test.mjs). An event stream pi bounds per event itself. So every body but an
+		// event stream is bounded, the type read as pi reads it (streamable-http.js `contentType`: up to `;`, trimmed,
+		// lowercased).
 		const type = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
-		// An ERROR answer pi reads whole whatever its type (`checkResponse`, `response.text()`), so only an ok stream passes.
+		// An ERROR answer is bounded whatever its type, so only an ok stream passes. Since 1.5.2 pi reads only its first 8 KiB
+		// (`checkResponse`) and drops a read error, so there the failure is named by its HTTP status, not by this bound.
 		if (response.body === null || (response.ok && type === "text/event-stream")) return response;
 		let seen = 0;
 		const bounded = response.body.pipeThrough(

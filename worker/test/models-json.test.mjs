@@ -65,6 +65,10 @@ const MAXIMAL = {
 				supportsThinkingTokenBudget: false,
 				supportsMidConvoSystemMessages: false,
 				supportsMidConvoToolAdditions: false,
+				// pi 1.5.2's: two completions switches and the three-way prompt_cache_key mode.
+				requiresNonNullAssistantContent: false,
+				requiresToolsWithToolHistory: true,
+				promptCacheKeyMode: "enabled",
 			},
 			models: [
 				{
@@ -83,7 +87,7 @@ const MAXIMAL = {
 					samplingParams: { temperature: 0.2, anything: [1, { x: 2 }] },
 					samplingParamsByThinkingLevel: { off: { temperature: 0 }, high: { max_tokens: 100, anything: [1] }, max: {} },
 					headers: { "x-m": "n" },
-					compat: { supportsEagerToolInputStreaming: true, supportsMidConvoToolChanges: false, allowedFallbackModels: [{ provider: "anthropic", model: "claude-x", cost: COST }] },
+					compat: { supportsEagerToolInputStreaming: true, supportsMidConvoToolChanges: false, supportsMessageThreads: false, allowedFallbackModels: [{ provider: "anthropic", model: "claude-x", cost: COST }] },
 				},
 			],
 			modelOverrides: { "qwen2.5:0.5b": { name: "Q", cost: { input: 1 }, contextWindow: 1, samplingParamsByThinkingLevel: { low: { top_p: 0.5 } }, compat: { supportsMaxOutputTokens: true, supportsAdditionalTools: false, supportsToolSearch: false, supportsExplicitPromptCacheMode: false } } },
@@ -180,10 +184,14 @@ const MIRRORED_PI_FILES = Object.freeze({
 	"dist/core/model-config.js": "f03200776dbefa9171da850724e2e2eb20d865768feb0cb3f5b9e5f3260d13fe",
 	// Since 1.5.0 model-config.js reads its schemas through this file, so it is part of what the mirror transcribes.
 	"dist/core/pi-ai-schemas.js": "1bb7c31c57b5af6282b406679c5bc2b10f1d5009b62491fb72f3c069cec98874",
-	"dist/core/provider-composer.js": "7ec4af06726158fa34377bed34fbb378d2d39c5c9d51ae5640ac459a4c78bec4",
+	// 1.5.2: the composer passes the call's signal on and sets refreshModelsAuth; neither composes api, baseUrl or
+	// maxTokensField, so overlayProviderProblem and outputCapView are unchanged.
+	"dist/core/provider-composer.js": "98facdd61bdb741804f8f303c5b2661db7f40b64a8ec0ef4767df0d71ec03608",
 	// Since 1.2.0 model-config.js imports its compat, cost, prompt-cache, input-limit and thinking-map schemas from
 	// pi-ai, so the two files they live in are part of what the mirror transcribes. Relative to PI: the hoisted pi-ai.
-	"../pi-ai/dist/providers/compat-schema.js": "2e9a7bd4652d319bc524b81e2babbeabf6b8b5aa334f4b2d51dd98fceb5be341",
+	// Re-transcribed at 1.5.2: requiresNonNullAssistantContent, requiresToolsWithToolHistory, promptCacheKeyMode and
+	// supportsMessageThreads are new typed compat keys.
+	"../pi-ai/dist/providers/compat-schema.js": "962a8e5cb874fb8ecbf713665c2bfd2ce937456e47dbec115a97f3e709a68df9",
 	"../pi-ai/dist/providers/model-schema.js": "a8013ceaedd0105cbd2af886779d62f2691fbe202b16588ef2a977f35fa5270e",
 });
 
