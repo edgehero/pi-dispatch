@@ -11,7 +11,7 @@
  */
 
 /** The sha256 of `PULSE_CSS` as UTF-8, which is the sha256 of `components/bundle.css` itself. */
-export const PULSE_CSS_SHA256 = "acd9426272c7960005ae17e7fdcbf636b8d7dd758f300b92841997ab9db10134";
+export const PULSE_CSS_SHA256 = "90ab98a7ca39ce040bf54b9d09da5ed87e17adefabed5e766d9f116b6b6ae0eb";
 
 /** `components/bundle.css`, every byte. */
 export const PULSE_CSS = `/* pi-dispatch console, Pulse. One stylesheet for every page.
@@ -113,6 +113,10 @@ ul, ol { margin: 0; padding: 0; list-style: none; }
 .card__sub { color: var(--ink-muted); font-size: 12px; line-height: 16px; font-weight: 500; }
 .card--flush { padding: 0; overflow: hidden; }
 .card--flush > .card__head { padding: var(--space-5) var(--space-5) 0; }
+/* A flush card's own sentence (a bare paragraph or a .note right in the card): the head's side padding, and room under
+   the last one, so the rounded corner never clips it. No specificity, so a page's own class for it wins. */
+:where(.card--flush > p:not([class]), .card--flush > p.note) { padding: 0 var(--space-5); }
+:where(.card--flush > p:not([class]):last-child, .card--flush > p.note:last-child) { padding-bottom: var(--space-5); }
 .card--tint { background: var(--tone-tint); }
 .card--ring { box-shadow: inset 0 0 0 2px var(--tone); }
 .cards-4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-4); }
@@ -456,6 +460,8 @@ kbd { padding: 1px 7px; border-radius: 6px; background: var(--surface-2); font: 
   .card { padding: var(--space-4); border-radius: 22px; }
   .card--flush { padding: 0; }
   .card--flush > .card__head { padding: var(--space-4) var(--space-4) 0; }
+  :where(.card--flush > p:not([class]), .card--flush > p.note) { padding-left: var(--space-4); padding-right: var(--space-4); }
+  :where(.card--flush > p:not([class]):last-child, .card--flush > p.note:last-child) { padding-bottom: var(--space-4); }
   .filterbar__toggle { display: inline-flex; }
   .projseg { max-width: 100%; overflow-x: auto; scrollbar-width: none; flex: none; }
   .titlebar__end > * { max-width: 100%; }

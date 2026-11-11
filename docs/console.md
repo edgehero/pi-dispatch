@@ -224,11 +224,11 @@ In pi, `/dispatch console` does the same in one step, without a second terminal:
   address or the socket and nowhere else (the same check doctor makes), and says `running`, `not running` (with why,
   and how to start it or keep it running as a service), or that it cannot tell and why (port 0, a non loopback
   address).
-- **Signing in.** With one operator token, the console running and a browser on this machine to hand it to,
-  `/dispatch console` makes a one-time sign-in link by itself, so the browser opens signed in; a browser already
+- **Signing in.** With one operator token, the console running, its address the one your deployment folder's `.env`
+  names, and a browser on this machine to hand it to, `/dispatch console` makes a one-time sign-in link by itself, so the browser opens signed in; a browser already
   signed in as that person keeps its session, if it has an hour or more of its longest life left (a quarter of it on a
   console set shorter); in that last stretch the link signs in afresh, which ends what the old session was doing. Otherwise (several operator tokens, `--no-open`, an SSH session, a
-  tunnel) it opens or prints the address as it always did, and one line says why no link was made. `--no-link`
+  tunnel, or a `PI_CONSOLE_LISTEN` that points at another deployment's console) it opens or prints the address as it always did, and one line says why no link was made. `--no-link`
   turns the link off. "Local" is judged from the environment pi started in, so a pi started at your desk inside tmux
   and reattached over SSH still hands the link to the desk's browser; use `--no-link` there.
 - **`--link`** makes a one-time sign-in link, like `pi-dispatch-console link`, for an operator token: the one there

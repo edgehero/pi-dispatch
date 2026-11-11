@@ -87,7 +87,7 @@ SETUP_MAIN = card("Getting ready",
 
 SETUP_SIDE = f"""<div class="stack">
 {card('Ready', done_rows(), sub='3 of 8', id_="p-setup-ready")}
-{card('The one command', '<p class="muted su-p">After the exact durable installation in the Quickstart.</p>' + cmd('pi-dispatch up --console') + '<p class="muted su-p su-p2">Or from pi, which opens this page for you:</p>' + cmd('/dispatch setup') + '<p class="su-small"><a class="link" href="#p-provider-keys">Manage provider API keys</a>, also after setup is ready.</p>', id_="p-setup-start")}
+{card('The one command', '<p class="muted su-p">After the exact durable installation in the Quickstart.</p>' + cmd('./pi-dispatch up --console') + '<p class="muted su-p su-p2">If that file is not there:</p>' + cmd('./node_modules/.bin/pi-dispatch up --console') + '<p class="muted su-p su-p2">Or from pi, which opens this page for you:</p>' + cmd('/dispatch setup') + '<p class="su-small"><a class="link" href="#p-provider-keys">Manage provider API keys</a>, also after setup is ready.</p>', id_="p-setup-start")}
 </div>"""
 
 SETUP_CSS = """
@@ -155,10 +155,10 @@ write("SetupScreen", card_marker("Overview", 1600, 1440, "First run in the brows
       shell("Overview", f'<div class="cols">{SETUP_MAIN}{SETUP_SIDE}</div>', "Set up pi-dispatch",
             sub="Finish supported steps here. The terminal way remains available for every step.", parked=0), SETUP_CSS)
 readme("SetupScreen", """
-First-run setup in the browser. A durable host bootstrap starts the console and prints a one-time link. Supported remaining steps each have a preview and Confirm. Terminal alternatives remain available.
+First-run setup in the browser. A durable host bootstrap starts the console and opens the browser here signed in, or prints a one-time link where it cannot. Supported remaining steps each have a preview and Confirm. Terminal alternatives remain available.
 
 **How a person uses it.**
-- **The one command.** After the exact durable installation in the Quickstart, `pi-dispatch up --console` starts the console, creates or preserves an operator entry and prints a one-use 60-second setup link. It never starts a worker. `/dispatch setup` offers the same handoff.
+- **The one command.** After the exact durable installation in the Quickstart, `./pi-dispatch up --console` (or, if that file is not there, `./node_modules/.bin/pi-dispatch up --console`) starts the console, creates or preserves an operator entry and opens this page signed in, or prints a one-use 60-second setup link where nothing can open a browser. It never starts a worker. `/dispatch setup` offers the same handoff.
 - **Progress.** A big "3 of 8 ready", a segment for each step and real Starting progress. Published heartbeat and doctor facts decide readiness; a completed process alone does not. Missing, stale, partial and timed-out observations stay explicit.
 - **Ready** (side). Ready steps fold to a row each. The deployment is shown by its last folder, Valkey without its address and sign-in by role alone. Add a viewer previews a name and returns a private viewer-only link after Confirm, usable once within 60 seconds.
 - **Start the worker.** The preview names the service manager, local account, exact units and dependencies, queued manual jobs, armed schedules and reserve estimates. A start permits future consumption too. Stop and restart have a new preview; they can interrupt jobs and cannot undo spending.

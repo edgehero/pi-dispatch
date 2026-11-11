@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { test } from "node:test";
-import { CONSOLE_USAGE, consoleCommand, consolePagePath, parseConsoleArgs, probeLine } from "../src/console-command.mjs";
+import { CONSOLE_USAGE, consoleCommand, consoleDeploymentCheck, consolePagePath, parseConsoleArgs, probeLine } from "../src/console-command.mjs";
 import { keptTokenLinkRefusal, loginCodesDir } from "../src/console/login-codes.mjs";
 import { parseTokensFile } from "@edgehero/pi-dispatch/console-tokens";
 
@@ -358,6 +358,7 @@ test("with no flag, anything less plain is the old plain address with one line s
     "an unreadable tokens file": [harness({ tokensRefusal: "the tokens file is open to other accounts" }), /the tokens file is open to other accounts/],
     "a console not confirmed running": [harness({ state: "unknown" }), /could not be confirmed running/],
     "a Windows host": [(() => { const h = harness(); h.deps.platform = "win32"; return h; })(), /one-time links do not work on a Windows host/],
+    "another deployment's console": [(() => { const h = harness(); h.deps.deployment = { same: false, why: "WHY", hint: "HINT" }; return h; })(), /no sign-in link was made: WHY; HINT/],
   };
   for (const [what, [h, said, words]] of Object.entries(cases)) {
     const r = await consoleCommand(words ?? ["runs"], h.deps);
@@ -384,4 +385,62 @@ test("with no flag, anything less plain is the old plain address with one line s
   const off = harness();
   assert.equal((await consoleCommand(["runs", "--no-link"], off.deps)).minted, false, "--no-link turns it off");
   assert.ok(!off.order.includes("mint"));
+});
+
+test("the default links only for the console whose tokens file it mints into; --link still mints, warned (issue #849's follow-up)", async () => {
+  const other = { same: false, why: "WHY", hint: "HINT" };
+  const skipped = harness();
+  skipped.deps.deployment = other;
+  const r = await consoleCommand(["runs"], skipped.deps);
+  assert.deepEqual([r.minted, r.opened], [false, true], "the page still opens");
+  assert.equal(skipped.notes.at(-1)[1], "warning", "another deployment's console is a warning, not the dim status line");
+  const asked = harness();
+  asked.deps.deployment = other;
+  assert.equal((await consoleCommand(["runs", "--link"], asked.deps)).minted, true, "an asked-for link still mints, as before");
+  const said = text(asked);
+  assert.match(said, /warning: WHY; the link below may be refused \(HINT\)\nsign-in link for "alice"/, "said above the link it may not take");
+  assert.equal(asked.notes.at(-1)[1], "warning");
+  for (const deployment of [{ same: true }, undefined]) {
+    const h = harness();
+    h.deps.deployment = deployment;
+    assert.equal((await consoleCommand(["runs"], h.deps)).minted, true, JSON.stringify(deployment));
+  }
+});
+
+test("consoleDeploymentCheck: the address against the folder's PI_CONSOLE_LISTEN, as the console parses both", () => {
+  const folder = (fileEnv, extra = {}) => () => ({ path: "/dep/.env", env: fileEnv, unread: [], hazardSkipped: [], unreadable: null, untrusted: null, ...extra });
+  const check = (env, read) => consoleDeploymentCheck({ env, folder: "/dep", platform: "darwin", readFolder: read });
+  assert.equal(consoleDeploymentCheck({ env: {}, folder: null, readFolder: () => assert.fail("no folder, no read") }), undefined, "no folder: the drop guard decides");
+  assert.deepEqual(check({}, folder({})), { same: true }, "neither names one: both the default");
+  assert.deepEqual(check({ PI_CONSOLE_LISTEN: "127.0.0.1:4790" }, folder({})), { same: true }, "the default spelled out is the default");
+  assert.deepEqual(check({ PI_CONSOLE_LISTEN: "127.0.0.1:4791" }, folder({ PI_CONSOLE_LISTEN: " 127.0.0.1:4791 " })), { same: true });
+  const exported = consoleDeploymentCheck({ env: { PI_CONSOLE_LISTEN: "127.0.0.1:4791" }, folder: "/dep", exported: true, platform: "darwin", readFolder: folder({}) });
+  assert.equal(exported.same, false, "an export in pi's environment that the folder does not name");
+  assert.equal(exported.why, "/dep/.env puts this deployment's console at the default 127.0.0.1:4790, but this pi opens 127.0.0.1:4791 (PI_CONSOLE_LISTEN in pi's environment), and that console would refuse a code made for this folder");
+  assert.equal(exported.hint, "unset PI_CONSOLE_LISTEN in pi's environment or set it to the default 127.0.0.1:4790, or run ./pi-dispatch console in /dep", "an export outranks a pointer, so the advice is the export");
+  const elsewhere = check({}, folder({ PI_CONSOLE_LISTEN: "127.0.0.1:4791" }));
+  assert.equal(elsewhere.why, "/dep/.env puts this deployment's console at 127.0.0.1:4791, but this pi opens the default 127.0.0.1:4790, and that console would refuse a code made for this folder", "no pointer and a folder whose console is elsewhere");
+  assert.equal(elsewhere.hint, "run /dispatch setup so this pi reads that folder's settings, or run ./pi-dispatch console in /dep");
+  assert.equal(check({ PI_CONSOLE_LISTEN: "unix:/run/a.sock" }, folder({ PI_CONSOLE_LISTEN: "unix:/run/b.sock" })).same, false);
+  // As the console parses them: a port written with a leading zero is the same port, so two spellings of one address agree.
+  assert.deepEqual(check({ PI_CONSOLE_LISTEN: "127.0.0.1:04790" }, folder({})), { same: true }, "the default's port, spelled another way");
+  assert.deepEqual(check({ PI_CONSOLE_LISTEN: "[::1]:4811" }, folder({ PI_CONSOLE_LISTEN: "[::1]:04811" })), { same: true });
+  assert.deepEqual(check({ PI_CONSOLE_LISTEN: "[0:0:0:0:0:0:0:1]:4811" }, folder({ PI_CONSOLE_LISTEN: "[::1]:4811" })), { same: true }, "one IPv6 address, two spellings");
+  // A zone id is no URL host: it compares as written, and never throws, which would fail every /dispatch console.
+  assert.deepEqual(check({ PI_CONSOLE_LISTEN: "[::1%lo0]:4790" }, folder({ PI_CONSOLE_LISTEN: "[::1%lo0]:4790" })), { same: true });
+  assert.equal(check({}, folder({ PI_CONSOLE_LISTEN: "[fe80::1%en0]:4790" })).same, false);
+  // A folder's name reaches the operator's terminal: an escape sequence in it is shown, never run.
+  const odd = consoleDeploymentCheck({ env: {}, folder: "/d\u001b[2Jep", platform: "darwin", readFolder: () => ({ path: "/d\u001b[2Jep/.env", env: { PI_CONSOLE_LISTEN: "127.0.0.1:4791" }, unread: [], hazardSkipped: [] }) });
+  assert.ok(!/[\u0000-\u001f]/.test(odd.why + odd.hint), JSON.stringify(odd));
+  assert.match(odd.why, /^\/d\?\[2Jep\/\.env puts/);
+  // Also where the trust reader's own reason names a path.
+  const distrusted = consoleDeploymentCheck({ env: {}, folder: "/d", platform: "darwin", readFolder: () => ({ path: "/d/.env", untrusted: "is in a folder another account can change: /d\u001b]0;x\u0007", env: {}, unread: [], hazardSkipped: [] }) });
+  assert.ok(!/[\u0000-\u001f]/.test(distrusted.why + distrusted.hint), JSON.stringify(distrusted));
+  for (const [extra, said] of [[{ unreadable: "EACCES" }, /could not be read \(EACCES\)/], [{ untrusted: "is in a folder another account can change: /dep" }, /another account can change/], [{ unread: [{ key: "PI_CONSOLE_LISTEN", line: 3 }] }, /has a line its service may read differently, and it could set PI_CONSOLE_LISTEN/], [{ hazardSkipped: ["PI_CONSOLE_LISTEN"] }, /may read differently/], [{ shellRunsLine: 1 }, /line 1 is run by the shell rather than read, and could set PI_CONSOLE_LISTEN/]]) {
+    const r = check({}, folder({}, extra));
+    assert.equal(r.same, false, JSON.stringify(extra));
+    assert.match(r.why, said);
+    assert.match(r.why, /cannot be told$/);
+    assert.equal(r.hint, "fix that line, or run ./pi-dispatch console in /dep");
+  }
 });

@@ -59,6 +59,8 @@ test("endedNotices: one notice per reason, in the list's order, each frozen, dra
   const mine = endedNotices({ idleMinutes: 15, maxHours: 3 });
   assert.equal(mine.idle.title, "You were signed out after 15 minutes without a request");
   assert.equal(mine.max.title, "You were signed out after 3 hours");
+  assert.equal(endedNotices({ maxHours: 1 }).max.title, "You were signed out after 1 hour", "PI_CONSOLE_MAX_HOURS=1 reads as one hour");
+  assert.equal(endedNotices({ maxHours: 168 }).max.title, "You were signed out after 168 hours");
   assert.deepEqual(endedNotices({}), notices);
   // restart is a possibility, never a claim.
   assert.match(notices.restart.title, /\bmay\b/);

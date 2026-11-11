@@ -1,7 +1,7 @@
 {
   "card": "SetupScreen",
   "pr": 784,
-  "words": "46a59931f1c36e09e4ae2299651bacb506bbc8fbe55a42a8d3d415dcaf72416c",
+  "words": "405096e9a6b4ad8c925a4f83adf06f7e1b279ee556de2ea5f20ebe782c31c4e0",
   "elements": [
     {"el":"p-setup","kind":"panel","status":"new","source":"admin/src/console/panels/setup.mjs#setupMain","golden":["panels/setup-starting.operator","panels/setup-starting.viewer"]},
     {"el":"p-setup-pi","kind":"panel","status":"new","source":"admin/src/console/panels/overview.mjs#overviewSetupPi","golden":["panels/setup-partial.operator"],"reason":"the host's pi setup step, a panel the console adds to the checklist"},
@@ -24,6 +24,7 @@
     {"el":"The trigger count","kind":"provides","status":"real","source":"admin/src/read-model.mjs#createFleetReader","holds":"triggers"},
     {"el":"p-setup-ready","kind":"panel","status":"new","source":"admin/src/console/panels/setup.mjs#setupReady","golden":["panels/setup-starting.operator","panels/setup-starting.viewer"]},
     {"el":"p-setup-start","kind":"panel","status":"new","source":"admin/src/console/panels/setup.mjs#setupStart","golden":["panels/setup-starting.operator","panels/setup-starting.viewer"]},
+    {"el":"The one command: the folder's wrapper, then the installed binary","kind":"readme","status":"new","panel":"p-setup-start","source":"admin/src/console/panels/setup.mjs#SETUP_BOOTSTRAP_COMMAND","golden":["panels/setup-starting.operator"],"shows":["<span>./pi-dispatch</span> <span>up</span> <span>--console</span>","If that file is not there","<span>./node_modules/.bin/pi-dispatch</span> <span>up</span> <span>--console</span>"]},
     {"el":"Real host progress and published readiness","kind":"readme","status":"new","panel":"p-setup","source":"admin/src/setup-view.mjs#setupState","golden":["panels/setup-starting.operator"],"shows":["Starting","Waiting for a fresh heartbeat"]},
     {"el":"Worker starts disclose manual jobs and future spend","kind":"readme","status":"new","panel":"p-setup","source":"admin/src/console/panels/setup.mjs#SETUP_START_NOTICE","golden":["panels/setup-starting.operator"],"shows":"Starting a worker admits queued jobs"},
     {"el":"Viewer invitation is private after Confirm","kind":"readme","status":"new","panel":"p-setup-ready","source":"admin/src/console/panels/setup.mjs#setupReady","golden":["panels/setup-starting.operator"],"shows":["Add a viewer","one-use link"]},
