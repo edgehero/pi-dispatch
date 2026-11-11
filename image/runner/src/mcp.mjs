@@ -271,7 +271,8 @@ export function guardedFetch(origin, base = (...args) => globalThis.fetch(...arg
 		// event stream is bounded, the type read as pi reads it (streamable-http.js `contentType`: up to `;`, trimmed,
 		// lowercased).
 		const type = response.headers.get("content-type")?.split(";", 1)[0]?.trim().toLowerCase();
-		// An ERROR answer pi reads whole whatever its type (`checkResponse`, `response.text()`), so only an ok stream passes.
+		// An ERROR answer is bounded whatever its type, so only an ok stream passes. Since 1.5.2 pi reads only its first 8 KiB
+		// (`checkResponse`) and drops a read error, so there the failure is named by its HTTP status, not by this bound.
 		if (response.body === null || (response.ok && type === "text/event-stream")) return response;
 		let seen = 0;
 		const bounded = response.body.pipeThrough(

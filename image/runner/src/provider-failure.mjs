@@ -4,6 +4,14 @@ export const MAX_RESET_MS = 6 * 60 * 60 * 1000;
 // These pinned HTTP adapters accept a per-call fetch. Google and Bedrock explicitly do not.
 const FETCH_APIS = new Set(["anthropic-messages", "openai-completions", "openai-responses", "azure-openai-responses"]);
 const SUBSCRIPTION_CODES = new Set(["usage_limit_reached", "usage_not_included", "rate_limit_exceeded", "quota_exhausted"]);
+/**
+ * The egress proxy's refusal of a CONNECT (undici's ProxyAgent, `lib/dispatcher/proxy-agent.js`). The status in it is the
+ * proxy's, never the provider's: the request did not reach the provider. Since pi 1.5.2 (pi-ai `utils/error-body.js`
+ * `withCauseDetail`) a connection failure's message carries its deepest cause, so this text now reaches the patterns
+ * below, where a 502 or 429 in it read as the model being overloaded or out of quota, a cooldown and a failover that
+ * pi 1.5.0's bare "Connection error." never caused. It is cut from the text first, on every api.
+ */
+const PROXY_TUNNEL_REFUSAL = /Proxy response \(\d{3}\) !== 200 when HTTP Tunneling/g;
 
 /** Inspect only bounded structured error fields. Provider prose cannot create a persistent subscription pause. */
 export async function subscriptionFailureFromResponse(response, { now = Date.now } = {}) {
@@ -53,7 +61,10 @@ export function resetFromHeaders(headers, now, maxResetMs = MAX_RESET_MS) {
 
 export function classifyProviderFailure(terminal, measured = null) {
 	if (terminal?.stopReason !== "error" || (terminal.role !== undefined && terminal.role !== "assistant")) return null;
-	const text = typeof terminal.errorMessage === "string" ? terminal.errorMessage : "";
+	// A request on an api whose fetch the observer wraps that got no HTTP answer at all (the connection, the egress
+	// proxy's tunnel or a timeout failed) is no evidence about the model, whatever pi's message says of the cause.
+	if (measured?.connection === true) return null;
+	const text = typeof terminal.errorMessage === "string" ? terminal.errorMessage.replace(PROXY_TUNNEL_REFUSAL, "") : "";
 	// Bedrock cannot take our fetch seam. Its pinned adapter supplies HTTP status in this diagnostic;
 	// use only that number, never the request id or other provider text it carries.
 	const diagnostic = Array.isArray(terminal.diagnostics) ? terminal.diagnostics.findLast((d) => d?.type === "bedrock_response_failure" && Number.isInteger(d.details?.status) && d.details.status >= 100 && d.details.status <= 599) : null;
@@ -92,7 +103,13 @@ export function installProviderFailureObserver({ ModelRuntime, now = Date.now, f
 				const theirs = options?.fetch ?? fetch;
 				passed = { ...options, fetch: async (...args) => {
 					measured = null;
-					const response = await theirs(...args);
+					let response;
+					try {
+						response = await theirs(...args);
+					} catch (error) {
+						measured = { connection: true };
+						throw error;
+					}
 					const resetAt = resetFromHeaders(response.headers, now());
 					const subscription = model.provider === "openai" || model.provider === "anthropic" ? await subscriptionFailureFromResponse(response, { now }) : null;
 					measured = { status: response.status, ...(resetAt === null ? {} : { resetAt }), ...(model.provider === "anthropic" && response.status === 429 ? { subscriptionProvider: "anthropic" } : {}), ...(subscription ? { ...subscription, subscriptionProvider: model.provider } : {}), ...(subscription && !subscription.resetAt && resetFromHeaders(response.headers, now(), 32 * 86_400_000) ? { resetAt: resetFromHeaders(response.headers, now(), 32 * 86_400_000) } : {}) };
