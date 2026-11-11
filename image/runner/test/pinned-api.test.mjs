@@ -1778,15 +1778,26 @@ test("what else picks the model that answers, as the model guard reads it (issue
 	assert.match(azureProvider, /const deploymentName = resolveDeploymentName\(model, options\);[\s\S]*?const params = \{ \.\.\.payload, model: deploymentName \};/, "the provider's deployment rewrite moved");
 	assert.match(azureProvider, /"openai-completions": azureStreams\(openAICompletionsApi\(\)\),/, "the azure provider no longer rewrites the deployment on openai-completions");
 	// Since 1.5.2, on Anthropic's own endpoint, pi builds the body it sends from the checked one, after the hook
-	// (anthropic-messages.js prepareThreadRequest): a new thread adds only `thread`, and a continued one also drops
-	// `system`, `tools` and the earlier messages, which the thread's prefix hash binds to an earlier request this guard
-	// checked (the model, system, tools, thinking, output config, tool choice, betas and fallbacks, and those messages).
-	// A body that differs from the checked one in any other way breaks "the object checked is the object sent".
+	// (anthropic-messages.js): a new thread adds only `thread` (createThreadRequest), and a continued one also drops
+	// `system`, `tools` and the earlier messages (prepareThreadRequest), only when the prefix hash of this request equals
+	// the one recorded from the reply it continues, a request this guard checked. The hash (hashThreadPrefix) covers the
+	// model, base url, system, tools, thinking, output config, tool choice, betas, fallbacks and the earlier messages,
+	// ignoring only cache markers and a string content's form. A rejected thread is resent as a new thread or as the
+	// checked body itself (sendThreadRequest), and every body goes to `client.beta.messages.create` as it is. Each of the
+	// four is pinned by its whole text: any change is re-read, since a body that differs from the checked one in any
+	// other way breaks "the object checked is the object sent" (DES-MODEL-POLICY-AT-THE-PROVIDER-WRAPPER).
 	const anthropicApi = nestedPiAi("api", "anthropic-messages.js");
-	assert.match(anthropicApi, /const nextParams = await options\?\.onPayload\?\.\(params, model\);\s*if \(nextParams !== undefined\) \{\s*params = \{ \.\.\.nextParams, stream: true \};\s*\}\s*const prepared = threadSessionId !== undefined && options\?\.disableContinuation !== true\s*\? prepareThreadRequest\(model, threadSessionId, params\)/, "the thread body is no longer built from the hook's result");
-	assert.match(anthropicApi, /return \{ sessionId, body: \{ \.\.\.params, thread: \{ type: "create" \} \} \};/, "a new thread's body is no longer the checked one plus `thread`");
-	assert.match(anthropicApi, /const \{ system: _system, tools: _tools, \.\.\.rest \} = params;\s*return \{\s*body: \{\s*\.\.\.rest,\s*messages: params\.messages\.slice\(state\.prefixCount\),\s*thread: \{ type: "continue", previous_message_id: state\.replyId \},\s*\},/, "a continued thread's body is no longer the checked one less system, tools and the earlier messages");
-	assert.match(anthropicApi, /const \{ system, tools, thinking, output_config, tool_choice, betas, fallbacks \} = params;\s*const settings = JSON\.stringify\(\[\s*model\.provider,\s*model\.baseUrl,\s*params\.model,\s*system,\s*tools,\s*thinking,\s*output_config,\s*tool_choice,\s*betas,\s*fallbacks,\s*\]\);/, "the thread's prefix hash no longer binds what a continue drops to the request that sent it");
+	assert.match(anthropicApi, /const nextParams = await options\?\.onPayload\?\.\(params, model\);\s*if \(nextParams !== undefined\) \{\s*params = \{ \.\.\.nextParams, stream: true \};\s*\}\s*const prepared = threadSessionId !== undefined && options\?\.disableContinuation !== true\s*\? prepareThreadRequest\(model, threadSessionId, params\)\s*: undefined;\s*try \{\s*const sent = prepared\s*\? await sendThreadRequest\(prepared, params, send, output, options\?\.signal\)\s*: \{ response: await send\(params\), thread: undefined \};/, "the thread body is no longer built from the hook's result, or sent another way");
+	assert.match(anthropicApi, /const send = \(body\) => retryProviderRequest\(\(\) => client\.beta\.messages\.create\(body, requestOptions\)\.asResponse\(\), \{/, "a body no longer goes to the client as it is");
+	for (const [name, hash] of [
+		["createThreadRequest", "3f6a8f6ac639f929f7723028d5a384d6fd29ba0228433171963df7ff903f143d"],
+		["prepareThreadRequest", "3953fc91e9388dfc0c370e445e6b21e35f3e8914003bcf959fe42ac97e3208de"],
+		["hashThreadPrefix", "63d9ca41b7f51c3338b9cfbd6db3281f8db4e9213b8e271c5909af4ad72c5fd2"],
+		["sendThreadRequest", "a919325b37f8d01b55680548ad320a452a25ac30b748537389b1f24c7a7d51e6"],
+	]) assert.equal(sha256(piFunction(anthropicApi, name)), hash, `pi's ${name} changed: re-read what a thread sends against the checked body`);
+	// And no other api builds a thread, which the guard would meet unread.
+	const apiFiles = join(dirname(fileURLToPath(resolvePiAiCompat()[0].url)), "api");
+	assert.deepEqual(readdirSync(apiFiles).filter((name) => name.endsWith(".js") && /\bthread: \{ type:/.test(readFileSync(join(apiFiles, name), "utf8"))).sort(), ["anthropic-messages.js"], "another api now sends a thread");
 	// A caller's own fetch sends the request after every hook: the guard refuses it, and pi passes none itself.
 	assert.doesNotMatch(agentDistFile("core", "sdk.js"), /\bfetch: /, "pi's session now passes a fetch of its own: the guard's fetch refusal would stop every listed job");
 	// ...nor does the agent loop's per-request config, nor the cache warmer's call (the other two places that build the

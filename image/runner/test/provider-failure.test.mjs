@@ -183,7 +183,8 @@ test("an egress proxy's refused tunnel is no evidence about the model, though pi
 test("a fetch that got no answer records that, and the next call's answer is its own (#853)", async () => {
 	class Runtime {
 		streamSimple(model, context, options) {
-			return { result: async () => { await options.fetch("https://unused.invalid").catch(() => {}); return context.message; } };
+			const done = options.fetch("https://unused.invalid").catch(() => {}).then(() => context.message);
+			return { result: () => done };
 		}
 	}
 	const observer = installProviderFailureObserver({ ModelRuntime: Runtime, now: () => NOW });
@@ -195,6 +196,24 @@ test("a fetch that got no answer records that, and the next call's answer is its
 		const answered = error("Service Unavailable");
 		await runtime.streamSimple({ api: "anthropic-messages" }, { message: answered }, { fetch: async () => ({ status: 503, headers: new Headers() }) }).result();
 		assert.deepEqual(observer.failure(answered), { kind: "overloaded" }, "a measured 503 still switches");
+		// pi's own retries inside one call: the last attempt's evidence is the call's.
+		const attempts = (...outcomes) => async () => { const next = outcomes.shift(); if (next === "throw") throw new TypeError("fetch failed"); return { status: next, headers: new Headers() }; };
+		class Retrying {
+			streamSimple(model, context, options) {
+				const done = (async () => { for (let i = 0; i < 2; i += 1) await options.fetch("https://unused.invalid").catch(() => {}); return context.message; })();
+				return { result: () => done };
+			}
+		}
+		observer.uninstall();
+		const retrying = installProviderFailureObserver({ ModelRuntime: Retrying, now: () => NOW });
+		try {
+			const thenAnswered = error("Service Unavailable");
+			await new Retrying().streamSimple({ api: "openai-responses" }, { message: thenAnswered }, { fetch: attempts("throw", 503) }).result();
+			assert.deepEqual(retrying.failure(thenAnswered), { kind: "overloaded" }, "no answer, then a 503: the 503 is the evidence");
+			const thenLost = error("Connection error.: 429 rate limit");
+			await new Retrying().streamSimple({ api: "openai-responses" }, { message: thenLost }, { fetch: attempts(429, "throw") }).result();
+			assert.equal(retrying.failure(thenLost), null, "a 429, then no answer: the call ended on the network, as before this release");
+		} finally { retrying.uninstall(); }
 	} finally { observer.uninstall(); }
 });
 
