@@ -684,6 +684,18 @@ test("completions offer console, its page words and its flags", async () => {
   assert.deepEqual(def.getArgumentCompletions("console runs --no-link --").map((i) => i.value), ["console runs --no-link --no-open"]);
 });
 
+test("/dispatch console hands its default link the check of one deployment: the tokens file's folder against the address (issue #849)", () => {
+  // Source-read: driving the real handler would probe a console, and the default address is a real one. The check
+  // itself is console-command.test.mjs's; this holds that index.ts asks it of the folder the tokens file comes from.
+  const src = readFileSync(fileURLToPath(new URL("../src/index.ts", import.meta.url)), "utf8");
+  const block = /case "console": \{([\s\S]*?)\n {6}return;\n {4}\}/.exec(src)?.[1];
+  assert.ok(block, "the console case must stay one block");
+  assert.match(block, /const tokensPath = consoleTokensPathFor\(env, dir\);/);
+  assert.match(block, /const folder = typeof dir === "string" && dir !== "" \? dir : tokensPath !== null \? process\.cwd\(\) : null;/, "the pointer's folder, else the one pi started in, as consoleTokensPathFor reads");
+  assert.match(block, /tokensPath,\n/, "the same tokens path the check's folder was taken from");
+  assert.match(block, /deployment: consoleDeploymentCheck\(\{ env, folder \}\),/);
+});
+
 test("USAGE and KNOWN_SUBCOMMANDS agree, member for member, in order", () => {
   // Two copies of one list (the string is what an operator reads, the array is what completion
   // offers), and until now nothing pinned them together -- the exact drift class this suite exists

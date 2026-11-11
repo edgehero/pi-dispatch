@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { test } from "node:test";
-import { CONSOLE_USAGE, consoleCommand, consolePagePath, parseConsoleArgs, probeLine } from "../src/console-command.mjs";
+import { CONSOLE_USAGE, consoleCommand, consoleDeploymentCheck, consolePagePath, parseConsoleArgs, probeLine } from "../src/console-command.mjs";
 import { keptTokenLinkRefusal, loginCodesDir } from "../src/console/login-codes.mjs";
 import { parseTokensFile } from "@edgehero/pi-dispatch/console-tokens";
 
@@ -358,6 +358,7 @@ test("with no flag, anything less plain is the old plain address with one line s
     "an unreadable tokens file": [harness({ tokensRefusal: "the tokens file is open to other accounts" }), /the tokens file is open to other accounts/],
     "a console not confirmed running": [harness({ state: "unknown" }), /could not be confirmed running/],
     "a Windows host": [(() => { const h = harness(); h.deps.platform = "win32"; return h; })(), /one-time links do not work on a Windows host/],
+    "another deployment's console": [(() => { const h = harness(); h.deps.deployment = { same: false, why: "the console here is 127.0.0.1:4791, but /dep/.env names the default 127.0.0.1:4790" }; return h; })(), /no sign-in link was made: the console here is 127\.0\.0\.1:4791, but \/dep\/\.env names the default 127\.0\.0\.1:4790; start pi in the deployment folder of the console you mean, or make PI_CONSOLE_LISTEN agree/],
   };
   for (const [what, [h, said, words]] of Object.entries(cases)) {
     const r = await consoleCommand(words ?? ["runs"], h.deps);
@@ -384,4 +385,36 @@ test("with no flag, anything less plain is the old plain address with one line s
   const off = harness();
   assert.equal((await consoleCommand(["runs", "--no-link"], off.deps)).minted, false, "--no-link turns it off");
   assert.ok(!off.order.includes("mint"));
+});
+
+test("the default links only for the console whose tokens file it mints into; --link is unchanged (issue #849's follow-up)", async () => {
+  const other = { same: false, why: "the console here is 127.0.0.1:4791, but /dep/.env names the default 127.0.0.1:4790" };
+  const asked = harness();
+  asked.deps.deployment = other;
+  assert.equal((await consoleCommand(["runs", "--link"], asked.deps)).minted, true, "an asked-for link still mints, as before");
+  for (const deployment of [{ same: true }, undefined]) {
+    const h = harness();
+    h.deps.deployment = deployment;
+    assert.equal((await consoleCommand(["runs"], h.deps)).minted, true, JSON.stringify(deployment));
+  }
+});
+
+test("consoleDeploymentCheck: the address against the folder's PI_CONSOLE_LISTEN, as the console parses both", () => {
+  const folder = (fileEnv, extra = {}) => () => ({ path: "/dep/.env", env: fileEnv, unread: [], hazardSkipped: [], unreadable: null, untrusted: null, ...extra });
+  const check = (env, read) => consoleDeploymentCheck({ env, folder: "/dep", platform: "darwin", readFolder: read });
+  assert.equal(consoleDeploymentCheck({ env: {}, folder: null, readFolder: () => assert.fail("no folder, no read") }), undefined, "no folder: the drop guard decides");
+  assert.deepEqual(check({}, folder({})), { same: true }, "neither names one: both the default");
+  assert.deepEqual(check({ PI_CONSOLE_LISTEN: "127.0.0.1:4790" }, folder({})), { same: true }, "the default spelled out is the default");
+  assert.deepEqual(check({ PI_CONSOLE_LISTEN: "127.0.0.1:4791" }, folder({ PI_CONSOLE_LISTEN: " 127.0.0.1:4791 " })), { same: true });
+  const exported = check({ PI_CONSOLE_LISTEN: "127.0.0.1:4791" }, folder({}));
+  assert.equal(exported.same, false, "an export in pi's environment that the folder does not name");
+  assert.match(exported.why, /the console here is 127\.0\.0\.1:4791, but \/dep\/\.env names the default 127\.0\.0\.1:4790/);
+  assert.match(check({}, folder({ PI_CONSOLE_LISTEN: "127.0.0.1:4791" })).why, /the console here is the default 127\.0\.0\.1:4790, but \/dep\/\.env names 127\.0\.0\.1:4791/, "no pointer and a folder whose console is elsewhere");
+  assert.equal(check({ PI_CONSOLE_LISTEN: "unix:/run/a.sock" }, folder({ PI_CONSOLE_LISTEN: "unix:/run/b.sock" })).same, false);
+  for (const [extra, said] of [[{ unreadable: "EACCES" }, /could not be read \(EACCES\)/], [{ untrusted: "is in a folder another account can change: /dep" }, /another account can change/], [{ unread: [{ key: "PI_CONSOLE_LISTEN", line: 3 }] }, /may read differently/], [{ hazardSkipped: ["PI_CONSOLE_LISTEN"] }, /may read differently/]]) {
+    const r = check({}, folder({}, extra));
+    assert.equal(r.same, false, JSON.stringify(extra));
+    assert.match(r.why, said);
+    assert.match(r.why, /cannot be told$/);
+  }
 });

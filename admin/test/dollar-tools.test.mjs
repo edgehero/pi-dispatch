@@ -234,10 +234,15 @@ test("dispatch_set refuses a malformed dollar value BEFORE the confirm, naming t
 
 // --- dispatch_costs ----------------------------------------------------------------------------------------------
 
+// One instant for the records and the tool's clock: the dollar windows are the current UTC day, week and month, so records
+// a minute before the real clock fell into yesterday in the first minute of a UTC day.
+const NOW = Date.parse("2026-06-15T12:00:00.000Z");
+
 test("dispatch_costs carries the dollar windows and the per-run dollars beside the fold", async () => {
   const logsDir = tempDir("pd-501-p7-logs-");
   process.env.PI_LOGS_DIR = logsDir;
-  const now = Date.now();
+  const now = NOW;
+  indexMod._setCostsClockForTests(() => NOW);
   const at = (ms) => new Date(ms).toISOString();
   const rec = (jobId, over) => ({ jobId, kind: "github", target: "acme/web#1", flow: "fix", startedAt: at(now - 60_000), endedAt: at(now - 30_000), outcome: "completed", tokens: { total: 1, cost: 0.4, boundExceeded: 0 }, usage: null, ...over });
   writeFileSync(join(logsDir, "a.json"), JSON.stringify(rec("a", { dollars: { reservedMicros: 2_000_000, settledMicros: 400_000, basis: "metered", modelBasis: null } })));
@@ -259,13 +264,15 @@ test("dispatch_costs carries the dollar windows and the per-run dollars beside t
     assert.equal(out.dollars.more, 0);
   } finally {
     delete process.env.VALKEY_URL;
+    indexMod._setCostsClockForTests();
   }
 });
 
 test("dispatch_costs says beside the per-run dollars how many records a newer pi-dispatch wrote, which the list leaves out (#761)", async () => {
   const logsDir = tempDir("pd-761-costs-logs-");
   process.env.PI_LOGS_DIR = logsDir;
-  const now = Date.now();
+  const now = NOW;
+  indexMod._setCostsClockForTests(() => NOW);
   const at = (ms) => new Date(ms).toISOString();
   const rec = (jobId, over) => ({ jobId, kind: "github", target: "acme/web#1", flow: "fix", startedAt: at(now - 60_000), endedAt: at(now - 30_000), outcome: "completed", tokens: { total: 1, cost: 0.4, boundExceeded: 0 }, usage: null, dollars: { reservedMicros: 2_000_000, settledMicros: 400_000, basis: "metered", modelBasis: null }, ...over });
   writeFileSync(join(logsDir, "a.json"), JSON.stringify(rec("a")));
@@ -303,6 +310,7 @@ test("dispatch_costs says beside the per-run dollars how many records a newer pi
     assert.equal(Object.hasOwn(textOf(await toolByName("dispatch_costs").execute("id", {}, undefined, undefined, undefined)).dollars, "newerSkipped"), false);
   } finally {
     delete process.env.VALKEY_URL;
+    indexMod._setCostsClockForTests();
   }
 });
 

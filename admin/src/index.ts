@@ -116,7 +116,7 @@ export { setConfigToolReadsForTest } from "./config-tools.mjs";
 import { DEVICE_STORE_GUARD, envNamedFiles, makeWriteGuard } from "./write-guard.mjs";
 import { consoleDevicesDir } from "@edgehero/pi-dispatch/console-devices";
 import { consolePageLines } from "./console/link.mjs";
-import { CONSOLE_PAGE_WORDS, consoleCommand } from "./console-command.mjs";
+import { CONSOLE_PAGE_WORDS, consoleCommand, consoleDeploymentCheck } from "./console-command.mjs";
 import { loginCodesDir } from "./console/login-codes.mjs";
 import { whatIfAnswer, WHATIF_MODEL_RE } from "./console/whatif.mjs";
 import { SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
@@ -295,6 +295,18 @@ function thisWorkerName(): string {
  */
 export function panelTailLog(paths: any) {
   return ({ jobId, lines, host }: { jobId: string; lines: number; host?: string | null }) => readLogTail({ logsDir: paths.logsDir, jobId, lines, host: host ?? null, self: thisWorkerName() });
+}
+
+/**
+ * The clock `dispatch_costs` reads ONCE per call, for the fold's window, the dollar windows, the held jobs and the
+ * what-if alike, so one answer is about one instant. A seam because the dollar windows are the current UTC day, week and
+ * month: a test on the real clock with records a minute old fails in the first minute of a UTC day (AGENTS.md, the
+ * injected clock rule).
+ */
+let costsClock: () => number = () => Date.now();
+/** TEST-ONLY: the clock `dispatch_costs` reads; nothing, or undefined, restores the real one. */
+export function _setCostsClockForTests(clock?: () => number): void {
+  costsClock = clock ?? (() => Date.now());
 }
 
 /** TEST-ONLY: arm the advisory directly (under the pinned devDep pi the natural computation is a no-op). */
@@ -651,23 +663,23 @@ function registerTools(pi: ExtensionAPI): void {
       }
       if (params.whatif !== undefined && (!WHATIF_MODEL_RE.test(params.whatif) || params.runs !== undefined && !["24h", "week"].includes(params.runs)) || params.whatif === undefined && params.runs !== undefined) throw publicToolRefusal("whatif needs a provider/model and runs must be 24h or week");
       const paths = resolvePaths(deploymentEnv());
-      const res = assembleCosts(paths, window, params.flow, params.repo, params.project);
+      const nowMs = costsClock();
+      const res = assembleCosts(paths, window, params.flow, params.repo, params.project, nowMs);
       if (res.unreachable) throw new Error(`could not read the run history: ${res.unreachable}`);
       // Issue #501, part 7: the dollar caps beside the fold. The windows are the CURRENT day, week and month whatever
       // `window` asked for (that is what a cap counts), each counter read under the worker's own keys; the runs are
       // this window's records, filtered like the fold. Integers and fixed tokens, so nothing a job chose rides along.
-      const windows = await readDollarWindows({ paths, env: deploymentEnv() });
+      const windows = await readDollarWindows({ paths, env: deploymentEnv(), now: new Date(nowMs) });
       // Issue #761: `res.records` are the records the fold read, so a newer pi-dispatch's record never reaches
       // `runDollars` here and its own count stays empty; the scan's count rides beside the list instead, so a list that
       // leaves such a run out says so.
       const runs = runDollars(res.records);
       const newerSkipped = res.fold?.newerSkipped;
       const dollars = { ...windows, ...runs, ...(Number.isSafeInteger(newerSkipped) && newerSkipped > 0 ? { newerSkipped } : {}) };
-      const nowMs = Date.now();
       const held = await readHeldForAgent({ paths, env: deploymentEnv(), nowMs, project: params.project ?? null });
       let whatif;
       if (params.whatif !== undefined) {
-        const sample = assembleCosts(paths, "7d", params.flow, params.repo, params.project);
+        const sample = assembleCosts(paths, "7d", params.flow, params.repo, params.project, nowMs);
         whatif = whatIfAnswer({ model: params.whatif, pricing: { getPricedModel, listPricedModels, isZeroRated, reprice, piAiVersion }, records: sample.records, project: params.project ?? null, runs: params.runs ?? "24h", nowMs });
       }
       // The fold's dollars are TYPED `{ usd, class, floor, ... }` on purpose: the class rides beside every
@@ -1630,6 +1642,9 @@ async function dispatch(pi: ExtensionAPI, args: string, rawCtx: any): Promise<vo
       // operator, so it goes to `notify` (the operator's alone) and never through `send` (console-command.mjs).
       const env = deploymentEnv();
       const dir = pointerState().deploymentDir;
+      const tokensPath = consoleTokensPathFor(env, dir);
+      // The folder the tokens file is read from: the pointer's, else the folder pi was started in (consoleTokensPathFor).
+      const folder = typeof dir === "string" && dir !== "" ? dir : tokensPath !== null ? process.cwd() : null;
       await consoleCommand(tokens.slice(1), {
         hasUI: Boolean(ctx?.hasUI),
         mode: ctx?.mode,
@@ -1638,8 +1653,9 @@ async function dispatch(pi: ExtensionAPI, args: string, rawCtx: any): Promise<vo
         env,
         sessionEnv: process.env,
         logsDir: paths.logsDir,
-        tokensPath: consoleTokensPathFor(env, dir),
+        tokensPath,
         guarded: (codesDir: string) => guardedFiles().some((g) => g.dir === true && g.path === codesDir),
+        deployment: consoleDeploymentCheck({ env, folder }),
       });
       return;
     }
@@ -1777,8 +1793,8 @@ async function dispatch(pi: ExtensionAPI, args: string, rawCtx: any): Promise<vo
 const PRICING = { listPricedModels, getPricedModel, isZeroRated, reprice, piAiVersion };
 
 /** The costs fold for the dispatch_costs tool and the PROJECTS view, priced by the real façade (`assembleCostsOf`). */
-function assembleCosts(paths: any, window: string, flow?: string, repo?: string, project?: string): any {
-  return assembleCostsOf(paths, window, { flow, repo, project, pricing: PRICING });
+function assembleCosts(paths: any, window: string, flow?: string, repo?: string, project?: string, nowMs?: number): any {
+  return assembleCostsOf(paths, window, { flow, repo, project, pricing: PRICING, ...(nowMs === undefined ? {} : { nowMs }) });
 }
 
 // The insights slices the tests reach through this module, bound to the deployment's environment (`deploymentEnv`);

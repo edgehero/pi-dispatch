@@ -41,7 +41,7 @@ const read = (css) => new Set([...css.matchAll(/var\(\s*(--[\w-]+)/g)].map((m) =
 const declarationsOf = (css) => cssBlocks(css).flatMap(({ prelude, body }) => (prelude.startsWith("@") ? declarationsOf(body) : [body]));
 
 test("bundle.css and tokens.json are pasted verbatim: each module's text hashes to the design file's", () => {
-  assert.equal(PULSE_CSS_SHA256, "acd9426272c7960005ae17e7fdcbf636b8d7dd758f300b92841997ab9db10134", "the pin is the file's, measured when it was pasted");
+  assert.equal(PULSE_CSS_SHA256, "90ab98a7ca39ce040bf54b9d09da5ed87e17adefabed5e766d9f116b6b6ae0eb", "the pin is the file's, measured when it was pasted");
   assert.equal(sha256(PULSE_CSS), PULSE_CSS_SHA256, "PULSE_CSS is bundle.css, every byte");
   assert.equal(PULSE_TOKENS_SHA256, "23a272327010840ed86e4138c3d2c904831b7a33a24d7a9dcb67a58cb1c1c868");
   assert.equal(sha256(JSON.stringify(PULSE_TOKENS, null, 1)), PULSE_TOKENS_SHA256, "PULSE_TOKENS is tokens.json, every value");

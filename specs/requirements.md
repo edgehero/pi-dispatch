@@ -820,8 +820,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   says whether the console is running from one probe of this host's loopback or the console's socket, with `--link`
   shows a one-time sign-in link for an operator token, audited before it is minted, and opens the browser on a local
   session only; since issue #849 it makes that link by default, with neither flag, where the choice is plain (pi's
-  terminal UI, a running console, exactly one operator token, a guarded drop, and a browser here to hand it to: a local
-  session, a TCP address, no `--no-open`) and otherwise opens or prints the address as it did, with one line saying why
+  terminal UI, a running console, exactly one operator token, a guarded drop, an address the tokens file's deployment
+  folder names, and a browser here to hand it to: a local session, a TCP address, no `--no-open`) and otherwise opens or prints the address as it did, with one line saying why
   no link was made and no refusal or prompt, `--no-link` turning the default off; an operator-typed command and never a tool, its output a notice and never model context, and the one
   subcommand that spawns a browser), queue on/off
   (`pause`/`resume`, backed by the same durable `queue.pause()`), and
@@ -1098,8 +1098,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   then a select chooses; given none, a viewer name or an unknown name, then it refuses with the hint; given an audit
   log that cannot be appended, then no code is made; given a console not found running, pi in RPC or another non-TUI
   mode, or a tokens file the write guard does not hold, then no code is made; since issue #849, given neither `--link`
-  nor `--no-link`, one operator token, a running console, pi's terminal UI, a guarded drop, a local session, a TCP
-  address and no `--no-open`, then it does what `--link` does, and given any of those not so (several operators
+  nor `--no-link`, one operator token, a running console, pi's terminal UI, a guarded drop, the address the tokens
+  file's folder names in its `.env` (or the default where it names none), a local session, a TCP address and no
+  `--no-open`, then it does what `--link` does, and given any of those not so (several operators
   included), then it opens or prints the address with one line saying why, no refusal, no prompt and no audit row (a
   failure after it decided to mint is said as a warning, and the page still opens), and given `--no-link`, then no code
   is made (test:
@@ -8650,6 +8651,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-11 (#849, follow-ups) | **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**, the console subcommand and its acceptance: the default link is made only where the address in use is the one the tokens file's deployment folder names (its `.env`'s `PI_CONSOLE_LISTEN`, or the default), so a code is never minted into one deployment's drop for another's console; `--link` is unchanged. Every other entry UNCHANGED, checked. |
 | 2026-11-11 (#849, part 6) | Fewer commands. **`REQ-CONSOLE-SECURITY` AMENDED**, the Statement's "a new session id each time" and (i): a one-time link for the person a browser's live session already belongs to keeps that session (audited, the code spent), while it has time left. **`REQ-OPERATOR-CONSOLE-SCREENS` (a10) AMENDED**: a first-run step may carry `host`. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: `/dispatch console` makes its sign-in link by default where the choice is plain (pi's terminal UI, a running console, one operator token, a guarded drop), says the address as before otherwise, and takes `--no-link`; its acceptance gains that clause. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: new (g10), a button where the console can do a step (the overview's granted steps, doctor from Set up on the console's own host, the run page's reason fixes). `REQ-BROWSER-FIRST-RUN-SETUP`'s commands where no button is offered and `INT-REASON-CATALOG`'s words: UNCHANGED, checked. |
 | 2026-11-08 (#849, part 5) | The Remember experience. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: new (g9), the Remembered browsers screen, the sign-in form's Remember box, the offer after a fresh sign-in and the remembered mark in the top bar. **`REQ-OPERATOR-CONSOLE-ACTIONS` AMENDED**, (p): `device-remove` and `sessions-end-all` are destructive. **`REQ-CONSOLE-SECURITY` AMENDED**, (i): a tombstone is also written by Sign everyone out (`endAll`), whose `all` moves no `generation`; both actions ride the existing write guards, and signing everyone out writes no tokens file. |
 | 2026-11-08 (#849, part 4) | Remembered sessions. **`REQ-CONSOLE-SECURITY` AMENDED**: a new amendment on remembered devices (the 400-day end included), the Statement (a session may be restored from a remembered device), and (c), (d), (f), (g), (h), (i) and (k); `ENDED_REASONS` gains `device`, `device-store` and `device-kept`, `STREAM_ENDS` gains `device`; sign-out (i) clears the device cookie, and keeps a `pdc_session` this console never held when the browser signs out by its device cookie. (a) was part 3's. Non-remembered sessions keep every limit: UNCHANGED, checked. (b), (e), (j), (l), (m), (n), memory-only tickets, `REQ-TERMINAL-CHAT`: UNCHANGED, checked. |

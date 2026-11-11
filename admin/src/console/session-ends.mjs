@@ -61,7 +61,8 @@ const notice = (status, icon, title, body) => Object.freeze({ status, icon, titl
 export function endedNotices({ idleMinutes = 60, maxHours = 12 } = {}) {
   return Object.freeze({
     idle: notice("idle", "clock", `You were signed out after ${idleMinutes} minutes without a request`, "An open live tab does not count. Sign in again to carry on."),
-    max: notice("idle", "hourglass", `You were signed out after ${maxHours} hours`, "That is the longest a session lasts. Sign in again."),
+    // PI_CONSOLE_MAX_HOURS may be 1; the idle limit's floor is 5 minutes, so only this one needs the singular.
+    max: notice("idle", "hourglass", `You were signed out after ${maxHours} ${maxHours === 1 ? "hour" : "hours"}`, "That is the longest a session lasts. Sign in again."),
     revoked: notice("attention", "slot-held", "Your token was revoked or rotated", "Ask an operator for a new token, or make a link from pi."),
     role: notice("idle", "shield", "Your role changed, so you were signed out", "Sign in again to carry on with your new role."),
     all: notice("idle", "logout", "An operator ended every session", "Sign in again. Your token still works."),

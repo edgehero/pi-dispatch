@@ -3716,8 +3716,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   ones `insights` uses), says whether the console runs, and with `--link` mints a one-time code
   (`DES-OPERATOR-CONSOLE`, "The panel as a second minter"). The model-callable tool list is UNCHANGED, checked.
   **Since issue #849 it signs in by default** where nothing is left to choose: with neither flag, in pi's terminal UI,
-  with the console running, exactly one operator token, the drop guarded, and a browser on this machine to hand the link
-  to (a local session, a TCP address, no `--no-open`), it does what `--link` does (the audit row first); otherwise it
+  with the console running, exactly one operator token, the drop guarded, the address in use the one the tokens file's
+  folder names, and a browser on this machine to hand the link to (a local session, a TCP address, no `--no-open`), it
+  does what `--link` does (the audit row first); otherwise it
   opens or prints the address as before, with one line saying why no link was made and no refusal or prompt, so a typed
   `/dispatch console` never asks a question it did not need to and never leaves a code in the scrollback for nobody. A
   failure after it has decided to mint (the audit row, the mint) is said in that line and the page still opens.
@@ -3727,7 +3728,15 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   would end within it anyway. It does not read the remembered-device
   store: whether a browser is remembered lives in that browser's HttpOnly cookie, and a link on a remembered browser
   reuses its session (the same person keeps the device). REJECTED: linking only where no browser is remembered, which
-  this process cannot know.
+  this process cannot know. **One deployment** (a follow-up of #849): the address is the deployment env's
+  `PI_CONSOLE_LISTEN`, where an export in pi's environment outranks the pointer's `.env`, and the tokens file is the
+  pointer's folder's or, with no pointer, the folder pi was started in, so on a machine with two deployments the two can
+  name different ones, and a code minted into one drop is refused by the other console. `consoleDeploymentCheck` reads
+  that folder's `.env` for `PI_CONSOLE_LISTEN` alone, to compare and never to use, through the same reader and trust rule
+  as the panel's env (`deploymentServiceEnv`), and compares the two as the console parses them; a mismatch, or a `.env`
+  that cannot be read, trusted or read as its service reads it, skips the default link with that reason. `--link` is
+  unchanged: it is asked for, and the operator may know better. REJECTED: taking the address from the folder's `.env`
+  over pi's export (the panel and every other surface use the export; one surface disagreeing would be a second rule).
   - **Running or not**: ONE probe, the worker's `@edgehero/pi-dispatch/console-probe` (`worker/src/console-probe.mjs`),
     which doctor's console lines use too, so the command and doctor cannot disagree about whether a console runs (the
     admin's own copy this PR first carried was replaced by the import once #728 merged). It sends one `GET /healthz`
@@ -17570,6 +17579,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-11-11 (#849, follow-ups) | **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**, "The console command": the default link checks that the address and the tokens file are one deployment's (`consoleDeploymentCheck`), with a rejected alternative. `DES-OPERATOR-CONSOLE`'s "The visual system" UNCHANGED, checked: the flush-card sentence padding lands in `design/` first and is pasted with its hash, as it requires. |
 | 2026-11-11 (#849, part 6) | **`DES-ADMIN-VIA-PI-EXTENSION` AMENDED**, "The console command": it signs in by default where nothing is left to choose, takes `--no-link`, and names `setup` among its page words, which the code already took; REJECTED: linking only where no browser is remembered, which the panel cannot know. **`DES-OPERATOR-CONSOLE` AMENDED**: a new id at every login but for a same-person link, which keeps the live session while it has time left; the sign-in page's help no longer says a bare `/dispatch console` prints no link. |
 | 2026-11-08 (#849, part 5) | **`DES-OPERATOR-CONSOLE` AMENDED**, "Remembered devices": the person's side, the Remember box, the one-time offer, the remembered mark, the Remembered browsers page and its two actions, with what was rejected (a dismiss route, a forget route, a generation bump from the browser). |
 | 2026-11-08 (#849, part 4) | **`DES-OPERATOR-CONSOLE` AMENDED**, part 2 and a new bullet "Remembered devices": why two credentials, restore, precedence (an unreadable record never hides a revocation the tokens file proves), the clean-up of a device found dead, re-setting the cookie (reads only, never dropping `Secure`), the failed sign-out and its residual, a sign-out over an unreadable record (refused in memory only with a session held here), signing in over a device, remembering after the fact, and what was rejected. |

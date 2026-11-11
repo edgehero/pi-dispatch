@@ -87,7 +87,7 @@ SETUP_MAIN = card("Getting ready",
 
 SETUP_SIDE = f"""<div class="stack">
 {card('Ready', done_rows(), sub='3 of 8', id_="p-setup-ready")}
-{card('The one command', '<p class="muted su-p">After the exact durable installation in the Quickstart.</p>' + cmd('pi-dispatch up --console') + '<p class="muted su-p su-p2">Or from pi, which opens this page for you:</p>' + cmd('/dispatch setup') + '<p class="su-small"><a class="link" href="#p-provider-keys">Manage provider API keys</a>, also after setup is ready.</p>', id_="p-setup-start")}
+{card('The one command', '<p class="muted su-p">After the exact durable installation in the Quickstart.</p>' + cmd('./pi-dispatch up --console') + '<p class="muted su-p su-p2">If that file is not there:</p>' + cmd('./node_modules/.bin/pi-dispatch up --console') + '<p class="muted su-p su-p2">Or from pi, which opens this page for you:</p>' + cmd('/dispatch setup') + '<p class="su-small"><a class="link" href="#p-provider-keys">Manage provider API keys</a>, also after setup is ready.</p>', id_="p-setup-start")}
 </div>"""
 
 SETUP_CSS = """

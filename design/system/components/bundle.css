@@ -97,6 +97,10 @@ ul, ol { margin: 0; padding: 0; list-style: none; }
 .card__sub { color: var(--ink-muted); font-size: 12px; line-height: 16px; font-weight: 500; }
 .card--flush { padding: 0; overflow: hidden; }
 .card--flush > .card__head { padding: var(--space-5) var(--space-5) 0; }
+/* A flush card's own sentence (a bare paragraph or a .note right in the card): the head's side padding, and room under
+   the last one, so the rounded corner never clips it. No specificity, so a page's own class for it wins. */
+:where(.card--flush > p:not([class]), .card--flush > p.note) { padding: 0 var(--space-5); }
+:where(.card--flush > p:not([class]):last-child, .card--flush > p.note:last-child) { padding-bottom: var(--space-5); }
 .card--tint { background: var(--tone-tint); }
 .card--ring { box-shadow: inset 0 0 0 2px var(--tone); }
 .cards-4 { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-4); }
@@ -440,6 +444,8 @@ kbd { padding: 1px 7px; border-radius: 6px; background: var(--surface-2); font: 
   .card { padding: var(--space-4); border-radius: 22px; }
   .card--flush { padding: 0; }
   .card--flush > .card__head { padding: var(--space-4) var(--space-4) 0; }
+  :where(.card--flush > p:not([class]), .card--flush > p.note) { padding-left: var(--space-4); padding-right: var(--space-4); }
+  :where(.card--flush > p:not([class]):last-child, .card--flush > p.note:last-child) { padding-bottom: var(--space-4); }
   .filterbar__toggle { display: inline-flex; }
   .projseg { max-width: 100%; overflow-x: auto; scrollbar-width: none; flex: none; }
   .titlebar__end > * { max-width: 100%; }
