@@ -154,6 +154,8 @@ const SamplingParams = T.rec(T.unknown());
 const SamplingParamsByThinkingLevel = T.obj({ off: opt(SamplingParams), minimal: opt(SamplingParams), low: opt(SamplingParams), medium: opt(SamplingParams), high: opt(SamplingParams), xhigh: opt(SamplingParams), max: opt(SamplingParams) });
 const KwargValue = T.union(T.str(), T.num(), T.bool(), T.nul(), T.obj({ $var: req(T.union(T.lit("thinking.enabled"), T.lit("thinking.effort"), T.lit("thinking.budget"))), omitWhenOff: opt(T.bool()) }));
 const affinity = T.union(T.lit("openai"), T.lit("openai-nosession"), T.lit("openrouter"));
+// pi 1.5.2: the prompt_cache_key switch, the same three values in the completions, responses and generic schemas.
+const cacheKeyMode = T.union(T.lit("auto"), T.lit("enabled"), T.lit("disabled"));
 const costRates = { input: req(T.num()), output: req(T.num()), cacheRead: req(T.num()), cacheWrite: req(T.num()) };
 const ModelCostTier = T.obj({ inputTokensAbove: req(T.num()), ...costRates });
 const ModelCost = T.obj({ ...costRates, tiers: opt(T.arr(ModelCostTier)) });
@@ -164,7 +166,8 @@ const ImageResize = T.obj({ maxWidth: opt(posInt), maxHeight: opt(posInt), maxBy
 const ModelInputLimits = T.obj({ maxRequestBytes: opt(posInt), images: opt(T.obj({ resize: opt(ImageResize), maxPerMessage: opt(posInt), maxPerRequest: opt(posInt) })) });
 // compat-schema.js's ProviderCompatSchema: the merged properties of the OpenAI completions, OpenAI responses, Anthropic
 // messages, Bedrock, Mistral and System One schemas. A key two of them share takes pi's generic override, which for every shared
-// key here is the same type as each api's own (a boolean, or the three-way affinity format), so the superset is exact.
+// key here is the same type as each api's own (a boolean, the three-way affinity format, or 1.5.2's three-way
+// promptCacheKeyMode), so the superset is exact.
 const bool = opt(T.bool());
 const ProviderCompat = T.obj({
 	// OpenAI completions
@@ -176,6 +179,8 @@ const ProviderCompat = T.obj({
 	maxTokensField: opt(T.union(T.lit("max_completion_tokens"), T.lit("max_tokens"))),
 	requiresToolResultName: bool,
 	requiresAssistantAfterToolResult: bool,
+	requiresNonNullAssistantContent: bool,
+	requiresToolsWithToolHistory: bool,
 	requiresThinkingAsText: bool,
 	requiresReasoningContentOnAssistantMessages: bool,
 	thinkingFormat: opt(T.union(...["openai", "openrouter", "deepseek", "together", "baseten", "zai", "qwen", "chat-template", "qwen-chat-template", "string-thinking", "ant-ling"].map((x) => T.lit(x)))),
@@ -193,6 +198,7 @@ const ProviderCompat = T.obj({
 	cacheControlFormat: opt(T.lit("anthropic")),
 	sendSessionAffinityHeaders: bool,
 	sessionAffinityFormat: opt(affinity),
+	promptCacheKeyMode: opt(cacheKeyMode),
 	supportsLongCacheRetention: bool,
 	vllmPriority: opt(T.num()),
 	// OpenAI responses
@@ -209,6 +215,7 @@ const ProviderCompat = T.obj({
 	supportsStrictTools: bool,
 	supportsMidConvoEffort: bool,
 	supportsMidConvoToolChanges: bool,
+	supportsMessageThreads: bool,
 	// System One classifier image transport, checked before pi reads the overlay.
 	imageInput: opt(T.union(T.lit("assets"), T.lit("images"), T.lit("state-image-urls"))),
 	sendImageOptInHeader: bool,

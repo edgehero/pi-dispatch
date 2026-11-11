@@ -17,7 +17,7 @@ export const GPT_6_1_CODEX = Object.freeze({"id":"gpt-6.1-sol","api":"openai-cod
 /** openai-codex.json openai-codex-responses chat:gpt-6-luna */
 export const CODEX_LUNA = Object.freeze({"id":"gpt-6-luna","api":"openai-codex-responses","provider":"openai-codex","baseUrl":"https://chatgpt.com/backend-api","cost":{"input":0.1,"output":0.5,"cacheRead":0.01,"cacheWrite":0.125,"tiers":[{"inputTokensAbove":272000,"input":0.2,"output":0.75,"cacheRead":0.02,"cacheWrite":0.25}]},"contextWindow":272000,"maxTokens":128000});
 /** azure.json azure-openai-responses chat:gpt-5.4 */
-export const AZURE_GPT_5_4 = Object.freeze({"id":"gpt-5.4","api":"azure-openai-responses","provider":"azure","baseUrl":"","cost":{"input":2.5,"output":15,"cacheRead":0.25,"cacheWrite":0},"contextWindow":1050000,"maxTokens":128000});
+export const AZURE_GPT_5_4 = Object.freeze({"id":"gpt-5.4","api":"azure-openai-responses","provider":"azure","baseUrl":"","cost":{"input":2.5,"output":15,"cacheRead":0.25,"cacheWrite":0,"tiers":[{"inputTokensAbove":272000,"input":5,"output":22.5,"cacheRead":0.5,"cacheWrite":0}]},"contextWindow":1050000,"maxTokens":128000});
 /** anthropic.json anthropic-messages chat:claude-sonnet-4-5-20250929 */
 export const SONNET_4_5 = Object.freeze({"id":"claude-sonnet-4-5-20250929","api":"anthropic-messages","provider":"anthropic","baseUrl":"https://api.anthropic.com","cost":{"input":3,"output":15,"cacheRead":0.3,"cacheWrite":3.75},"contextWindow":200000,"maxTokens":64000});
 /** anthropic.json anthropic-messages chat:claude-fable-5 */

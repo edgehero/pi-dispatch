@@ -102,8 +102,8 @@
 		"el, cacheRetention, env) { const retention": 1,
 		"ion(cacheRetention, env); if (retention ===": 1,
 		"l, apiKey, headers, env) { if (model.provid": 1,
+		"ns?.cacheRetention, options?.env); const cac": 1,
 		", options?.headers, options?.env); if (!": 1,
-		"ns?.cacheRetention, options?.env); const": 1,
 		", options?.headers, options?.env)) { assertReque": 1,
 		"ns?.cacheRetention, options?.env); const compat = ge": 1
 	},
@@ -147,7 +147,7 @@
 	"@earendil-works/pi-ai/dist/api/openai-responses.js": {
 		"ion(cacheRetention, env) { if (cacheRetenti": 1,
 		"ns?.cacheRetention, options?.env); const cac": 1,
-		"ns?.cacheRetention, options?.env);": 1
+		"ns?.cacheRetention, options?.env); const sendPromptC": 1
 	},
 	"@earendil-works/pi-ai/dist/api/pi-messages.js": {
 		"ion(cacheRetention, env) { if (cacheRetenti": 1,
@@ -306,10 +306,6 @@
 	"@earendil-works/pi-coding-agent/dist/core/keybindings.js": {
 		"= process.platform, env = process.env) { re": 1,
 		"ess.platform, env = process.env) { return platform": 1
-	},
-	"@earendil-works/pi-coding-agent/dist/core/mcp-servers.js": {
-		"} if (value.env !== undefined && !isStr": 1,
-		"&& !isStringRecord(value.env)) return `s": 1
 	},
 	"@earendil-works/pi-coding-agent/dist/core/model-registry.js": {
 		"}), env: resolution.env,": 1,
@@ -482,6 +478,11 @@
 	"@earendil-works/pi-coding-agent/dist/utils/wsl.js": {
 		"port function isWSL(env = process.env) { if": 1,
 		"unction isWSL(env = process.env) { if (env.WSL_DIST": 1
+	},
+	"@earendil-works/pi-mcp/dist/config.js": {
+		"{ const { args, env, cwd } = entry; if": 1,
+		"ngs\"; } if (env !== undefined && !isStr": 1,
+		"&& !isStringRecord(env)) return \"env m": 1
 	},
 	"@earendil-works/pi-mcp/dist/transports/stdio.js": {
 		"true; const env = this.options.inheritE": 1,

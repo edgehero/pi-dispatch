@@ -65,5 +65,8 @@ export async function loadRenderer() {
  * Re-verified at 1.2.0: the one change is in `extractSegments` (overlay compositing), which keeps a zero-width APC
  * marker such as CURSOR_MARKER at the "after" boundary; the width functions are byte-identical, and the panel draws
  * no APC sequence.
+ * Re-verified at 1.5.2: the one change is in `sliceWithWidth` (behind `sliceByColumn`), which no longer carries an
+ * APC sequence from before the cut range into it; the width functions are byte-identical, and the panel still draws
+ * no APC sequence.
  */
-export const PI_TUI_UTILS_SHA256 = "7f6db62ad0964d157ed4b26d54e86d0fb6ca168d4fa3bb43b76d09422983b37d";
+export const PI_TUI_UTILS_SHA256 = "8a116df57e08b670742aef85fec547314b90bd25ddb564ed1ccd4687f7969055";

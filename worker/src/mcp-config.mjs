@@ -17,7 +17,9 @@
  * name or password. pi's own resolver would run a value starting with `!` and expand bare `$NAME`; the job resolves
  * the references itself, never pi.
  *
- * Accepted is a subset of pi 1.1.0's schema (core/mcp-servers.js `validateMcpServerConfig`), strict on keys: a key
+ * Accepted is a subset of pi 1.1.0's schema (core/mcp-servers.js `validateMcpServerConfig`; since 1.5.2 pi-mcp's
+ * dist/config.js checks the fields MCP clients share and core/mcp-servers.js adds exposure and `auth`, accepting the
+ * same entries as before), strict on keys: a key
  * pi-dispatch does not know is refused, so a key a later pi adds is read before a job relies on it. Refused outright:
  * `auth` and `oauth` (a credential flow the container cannot finish, and a token file it must not hold), `cwd` (a job
  * runs its servers in the checkout), and the legacy `sse` type, which pi refuses too. `allowPackageRunner` is
