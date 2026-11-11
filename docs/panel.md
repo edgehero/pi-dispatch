@@ -41,7 +41,8 @@ behind the panel's, a notice points you back at `/dispatch setup`.
 The same data is there as plain commands, all local, with no model involved: `/dispatch status | pause | resume | run | runs | logs |
 chat | budget | insights | console | triggers | settings | set | unset | priorities | setup | secrets`.
 
-`/dispatch console` opens the web console or prints how to reach it ([console](console.md#from-pi-dispatch-console)), and
+`/dispatch console` opens the web console or prints how to reach it, signed in when you have one operator token, the
+console runs and a browser on this machine will open it ([console](console.md#from-pi-dispatch-console)), and
 `/dispatch chat` opens a run's conversation ([chat](chat.md#in-pi-dispatch-chat)).
 
 ![Transcript of /dispatch status, budget, runs, triggers and priorities: queue counts and budget, the scoped limits with their dollar rows, the run history table with tokens, cost, chain and replica per job and a run awaiting input, the triggers list with a portfolio trigger and a trigger with an MCP server, and the budget split with its history](images/dispatch-commands.svg?v=2026-10-22-710)

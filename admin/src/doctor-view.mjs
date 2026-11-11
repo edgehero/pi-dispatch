@@ -281,7 +281,8 @@ export function firstRunState(snapshot, { session = null, deployment = null, fre
   const doctorRead = s !== null && s.doctor && !s.doctor.unreachable;
   const role = session?.role === "operator" ? "operator" : session?.role === "viewer" ? "viewer" : session?.role === "agent" ? "agent" : null;
 
-  const step = (id, state, sentence, { commands = [] } = {}) => ({ id, state, title: state === "ready" ? STEP_TITLES[id].done : STEP_TITLES[id].todo, sentence, commands });
+  // `host` (issue #849): the host whose doctor result judged the step, where one did, so a page sends a person to /setup only for its own host's problem.
+  const step = (id, state, sentence, { commands = [], host = null } = {}) => ({ id, state, title: state === "ready" ? STEP_TITLES[id].done : STEP_TITLES[id].todo, sentence, commands, ...(host === null ? {} : { host }) });
 
   const steps = [];
   // 1. Where the console reads its files: the deployment folder, by its last folder.
@@ -302,24 +303,24 @@ export function firstRunState(snapshot, { session = null, deployment = null, fre
   else if (fresh.length > 0) steps.push(step("worker", "ready", fresh.length === 1 ? [{ b: fresh[0].name }, " beats."] : [`${fresh.length} hosts beat, `, { b: fresh[0].name }, " among them."]));
   else if (hosts.length > 0) {
     const newest = hosts.reduce((a, h) => (beatAgeOf(h) !== null && (a === null || beatAgeOf(h) < beatAgeOf(a)) ? h : a), null);
-    steps.push(step("worker", "check", newest === null ? ["A host is registered, but no beat from it can be read."] : [{ b: newest.name }, " is registered, but its last beat is ", { age: beatAgeOf(newest) }, " old."], { commands: workerCommands }));
+    steps.push(step("worker", "check", newest === null ? ["A host is registered, but no beat from it can be read."] : [{ b: newest.name }, " is registered, but its last beat is ", { age: beatAgeOf(newest) }, " old."], { commands: workerCommands, ...(newest === null ? {} : { host: newest.name }) }));
   } else if (connected > 0) steps.push(step("worker", "ready", ["The queue sees a worker connected."]));
   else steps.push(step("worker", "not-yet", ["No host is registered. A worker registers when it starts, and until one does nothing in the queue starts."], { commands: workerCommands }));
   // 5. The egress proxy, on every venue that runs one: the worst any host's doctor published.
   const egress = doctorRead ? worstCheck(doctorRows, (id) => EGRESS_ID_RE.test(id)) : null;
   const newest = newestDoctor(doctorRows);
   if (egress !== null) {
-    steps.push(step("egress", stateOfLevel(egress.level), doctorSaid(egress, { ok: "found the egress proxy running", notOk: ["Every job is refused before it starts until the egress proxy runs."] }), { commands: egress.level === "ok" ? [] : [FIRST_RUN_COMMANDS.up] }));
+    steps.push(step("egress", stateOfLevel(egress.level), doctorSaid(egress, { ok: "found the egress proxy running", notOk: ["Every job is refused before it starts until the egress proxy runs."] }), { commands: egress.level === "ok" ? [] : [FIRST_RUN_COMMANDS.up] , host: egress.host }));
   } else if (newest !== null) {
-    steps.push(step("egress", "check", ["Doctor on ", { b: newest.host }, " names no egress proxy: egress may be off there, or its doctor predates the check."], { commands: [FIRST_RUN_COMMANDS.doctor] }));
+    steps.push(step("egress", "check", ["Doctor on ", { b: newest.host }, " names no egress proxy: egress may be off there, or its doctor predates the check."], { commands: [FIRST_RUN_COMMANDS.doctor] , host: newest.host }));
   } else steps.push(step("egress", "to-do", NO_DOCTOR_YET("whether the egress proxy runs"), { commands: [FIRST_RUN_COMMANDS.doctor] }));
   // 6. The provider key: present or not, never its value.
   const provider = doctorRead ? worstCheck(doctorRows, (id) => PROVIDER_ID_RE.test(id)) : null;
   if (provider !== null) {
-    steps.push(step("provider", stateOfLevel(provider.level), doctorSaid(provider, { ok: "found the provider key", notOk: ["Use a configured API key or a bound, host-owned managed subscription. For API-key setup, set the key in the deployment's ", { code: ".env" }, ", then run doctor again."] }), { commands: provider.level === "ok" ? [] : [FIRST_RUN_COMMANDS.doctor] }));
+    steps.push(step("provider", stateOfLevel(provider.level), doctorSaid(provider, { ok: "found the provider key", notOk: ["Use a configured API key or a bound, host-owned managed subscription. For API-key setup, set the key in the deployment's ", { code: ".env" }, ", then run doctor again."] }), { commands: provider.level === "ok" ? [] : [FIRST_RUN_COMMANDS.doctor] , host: provider.host }));
   } else if (newest !== null) {
     const predates = doctorRows.some((r) => (Array.isArray(r.checks) ? r.checks : []).some((c) => typeof c?.id === "string" && PROVIDER_DERIVED_RE.test(c.id)));
-    steps.push(step("provider", "check", predates ? ["Doctor on ", { b: newest.host }, " checked the provider but not the key by name: its doctor predates the check."] : ["Doctor on ", { b: newest.host }, " did not judge the provider key."], { commands: [FIRST_RUN_COMMANDS.doctor] }));
+    steps.push(step("provider", "check", predates ? ["Doctor on ", { b: newest.host }, " checked the provider but not the key by name: its doctor predates the check."] : ["Doctor on ", { b: newest.host }, " did not judge the provider key."], { commands: [FIRST_RUN_COMMANDS.doctor] , host: newest.host }));
   } else steps.push(step("provider", "to-do", NO_DOCTOR_YET("whether the provider key is found"), { commands: [FIRST_RUN_COMMANDS.doctor] }));
   // 7. A first trigger arms matching deliveries; a manual run can already be queued without one.
   if (triggerList.length > 0) steps.push(step("trigger", "ready", [`The triggers file holds ${triggerList.length} ${triggerList.length === 1 ? "trigger" : "triggers"}.`]));

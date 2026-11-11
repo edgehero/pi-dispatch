@@ -765,6 +765,7 @@ SIGNIN = f"""<a class="skip" href="#si-token">Skip to sign-in</a>
         <p class="muted">On a global install: <span class="code">pi-dispatch console</span></p>
         <p class="muted">Or in pi:</p>
         {cmd('/dispatch console --link')}
+        <details><summary>In a browser that is not your default one</summary><p class="muted">The commands above open your default browser, which uses the link at once. This one prints a link to paste where you want it:</p>{cmd('./node_modules/.bin/pi-dispatch-console link')}</details>
         <details><summary>Make a token instead</summary><p class="muted">On the host, with your own name in place of &lt;you&gt;. In a local install it is under <span class="code">./node_modules/.bin/</span>:</p>{cmd('pi-dispatch-console token add --name <you> --role operator')}</details>
       </div>
       <p class="si-foot faint">This console answers on 127.0.0.1 only. Reach it locally or through an SSH tunnel.</p>
@@ -812,6 +813,7 @@ Sign-in is a single centered card: paste a console token or open a one-time link
 **How a person uses it.**
 - **The token.** A person pastes the token and presses *Sign in*.
 - **Remember this trusted device.** A box under the token field, never ticked for you, keeps this browser signed in across idle time and restarts until it signs out. It is drawn only where the console would remember the browser: never on a Windows host, and never over plain HTTP across a network.
+- **Another browser.** A disclosure under the help gives `./node_modules/.bin/pi-dispatch-console link`, which prints a link rather than opening the default browser, for signing in a browser that is not the default one.
 - **No token yet.** The help block leads with the one command to remember, `./pi-dispatch console` in the deployment folder, which signs you in. It gives the spelling for a folder without that shortcut and `/dispatch console --link` in pi, each with a copy button. Making a token, `pi-dispatch-console token add --name <you> --role operator` on the host, sits in a disclosure below them.
 - **Arriving from elsewhere.** A person who opens a console page from another site and is signed in goes straight to that page. A person who is not signed in returns to that page after signing in with a token.
 - **Notices.** One notice at a time sits above the token field, each saying what happened and what to do.

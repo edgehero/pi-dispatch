@@ -4163,8 +4163,8 @@ function hostRowOf(h) {
   };
 }
 
-/** The host a reader runs on, as the worker names itself (`workerName`), or null for a name the worker refuses. */
-function doctorSelfName(env) {
+/** The host a reader runs on, as the worker names itself (`workerName`), or null for a name the worker refuses. Exported for the console's run page (issue #849). */
+export function doctorSelfName(env) {
   try {
     return workerName({ PI_WORKER_NAME: typeof env?.PI_WORKER_NAME === "string" ? env.PI_WORKER_NAME : undefined });
   } catch {

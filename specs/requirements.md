@@ -816,10 +816,13 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   panel's `i` key shows the same URL as a notice), a run's chat (`chat`, since issue #647 part 2:
   `/dispatch chat <run-id | issue-or-PR-url | session-key>` per `REQ-TERMINAL-CHAT`, an operator-typed command and
   never a tool; it reads the deployment's `PI_SESSIONS_DIR`, which joins the panel's path keys), the console
-  (`console`, since issue #708: `/dispatch console [page] [--link [name]] [--no-open]` prints a console page's address,
+  (`console`, since issue #708: `/dispatch console [page] [--link [name]] [--no-link] [--no-open]` prints a console page's address,
   says whether the console is running from one probe of this host's loopback or the console's socket, with `--link`
   shows a one-time sign-in link for an operator token, audited before it is minted, and opens the browser on a local
-  session only; an operator-typed command and never a tool, its output a notice and never model context, and the one
+  session only; since issue #849 it makes that link by default, with neither flag, where the choice is plain (pi's
+  terminal UI, a running console, exactly one operator token, a guarded drop, and a browser here to hand it to: a local
+  session, a TCP address, no `--no-open`) and otherwise opens or prints the address as it did, with one line saying why
+  no link was made and no refusal or prompt, `--no-link` turning the default off; an operator-typed command and never a tool, its output a notice and never model context, and the one
   subcommand that spawns a browser), queue on/off
   (`pause`/`resume`, backed by the same durable `queue.pause()`), and
   settings editing (`set`/`unset`, writing the `settings.json` overlay), plus **operator-typed trigger CRUD**
@@ -1094,7 +1097,13 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   `<url>login/code#<code>[&next=/<page>]`, the code never in a query string and the token never shown; given several,
   then a select chooses; given none, a viewer name or an unknown name, then it refuses with the hint; given an audit
   log that cannot be appended, then no code is made; given a console not found running, pi in RPC or another non-TUI
-  mode, or a tokens file the write guard does not hold, then no code is made; given a local session (no SSH variable;
+  mode, or a tokens file the write guard does not hold, then no code is made; since issue #849, given neither `--link`
+  nor `--no-link`, one operator token, a running console, pi's terminal UI, a guarded drop, a local session, a TCP
+  address and no `--no-open`, then it does what `--link` does, and given any of those not so (several operators
+  included), then it opens or prints the address with one line saying why, no refusal, no prompt and no audit row (a
+  failure after it decided to mint is said as a warning, and the page still opens), and given `--no-link`, then no code
+  is made (test:
+  `admin/test/console-command.test.mjs`); given a local session (no SSH variable;
   macOS, Windows or a display), a running console and a TCP listener, then the browser opens on the printed URL unless
   `--no-open` (a link with a code through a private 0600 redirect page, never as the opener's argument), and over SSH,
   without a display or for a socket it only prints; nothing the command does reaches
@@ -1338,7 +1347,8 @@ writes retain their existing interactive confirmation. This adds no unattended p
   - (i) **Session limits and revocation.** Given a session idle past `PI_CONSOLE_IDLE_MINUTES` or older than
     `PI_CONSOLE_MAX_HOURS`, its next request is unauthenticated; given its token revoked or rotated, its role
     changed, or `sessions end-all` run, its next request is unauthenticated; login issues a new session id each
-    time; the login rate limit answers 429 past its burst and every failed login is audited; a one-time login code
+    time (since issue #849, but for a one-time link for the person the browser's live session already belongs to,
+    which keeps that session: no new id is issued, so nothing a planted cookie names is promoted either); the login rate limit answers 429 past its burst and every failed login is audited; a one-time login code
     works once, also under two concurrent consumers, and not after 60 seconds; the tokens file is in the pi
     extension's `guardedFiles()`. Tests: `admin/test/console-sessions.test.mjs`,
     `admin/test/write-guard.test.mjs`, `admin/test/write-guard.wired.test.mjs`, `admin/test/write-guard.cwd.test.mjs`,
@@ -1353,7 +1363,10 @@ writes retain their existing interactive confirmation. This adds no unattended p
     role, `revoked` for no entry with its hash), and written only where a session that WAS live ends: a `get` that fails
     it, the sweep of expired sessions (`idle` or `max`), a sign-out, and a sign-in over a live cookie once that sign-in
     succeeded (`destroy(id, "elsewhere")`, which keeps the time limit's word for a session already past one; a sign-in
-    refused for its audit row ends nothing the browser held), and the session such a refused sign-in had made
+    refused for its audit row ends nothing the browser held; since issue #849 a one-time link for the person the
+    browser's live session already belongs to, same token entry and generation, with an hour or more of its longest life
+    left (or a quarter of it on a console set shorter, `keepSessionMinLeftMs`), keeps that session and ends nothing; in
+    the last stretch a new session is made, as before, since the old one would end within it anyway), and the session such a refused sign-in had made
     (`destroy(id, null)`, an entry with no reason), and since issue #849 an operator's Sign everyone out from the console
     (`endAll`), which writes `all` for every session with no `generation` moving (a time limit's word, or the word the
     tokens file already proves, where one holds); `peek` and the hub's `verdict` write nothing. The tombstones are a
@@ -1944,7 +1957,8 @@ writes retain their existing interactive confirmation. This adds no unattended p
       run is on record (the newest runs and the last 24 hours') and there is no host row (in a registry that was read)
       or no trigger, so a Valkey that did not answer, or every worker down on a deployment that has run, never turns the
       overview into the checklist. Its eight steps (`FIRST_RUN_STEPS`, in doctor's order, each a state of
-      `FIRST_RUN_STATES`, each `{ id, state, title, sentence, commands }` and no more: who reads a command is each
+      `FIRST_RUN_STATES`, each `{ id, state, title, sentence, commands }` and no more, but for the worker, egress and
+      provider steps' `host` since issue #849, the host whose result judged the step where one did: who reads a command is each
       surface's rule) are judged from the snapshot, the session's role alone and the deployment folder's last part
       (`deploymentOf`): a worker by a beat within the console's fresh bound (its age by `beatAgeOf`, as Hosts judges
       it), the egress proxy and the provider key by the worst level any host's doctor published for `egress.proxy` (with
@@ -2764,6 +2778,18 @@ writes retain their existing interactive confirmation. This adds no unattended p
     operator only. A row never reads "passed": a canary that ended well reads "completed, read the run". A failed read reads "unknown", a look
     that is off reads "not looking", a record past two intervals reads as stale, and none of them is ever drawn as healthy. A row prices a canary only where a
     trigger can run that package's (`canaryTriggersFor`), and the page's own "A canary runs as" says a trigger is no choice for a package it leaves out. An agent's copy says that a trigger leaves something out and never what, so there a row says what holds without knowing: one job of a cron trigger that loads this package.
+  - (g10) **A button where the console can do it** (#849). A page shows a person where the console does a step only where
+    it really can, and keeps the command where it cannot, as `REQ-BROWSER-FIRST-RUN-SETUP` requires. With the host-setup
+    grant on (`data.setupGranted`, the grant alone, none of `setup`'s reads), the overview's first-run steps that `/setup`
+    does (the worker service, egress and doctor, a provider key; `SETUP_DOES_STEPS`) send an operator there and keep their
+    commands in an "In a terminal instead" disclosure, but only for a step this console's own host judged (`step.host`,
+    `doctorSelf`), since `/setup` works on that host; the GitHub App step and pi's own `/dispatch setup` keep theirs in
+    view. The Fleet and host Doctor cards add "Run doctor from Set up" for this console's own host only, the command kept
+    beside it, since the browser's doctor runs no container probes. The run page adds, for an operator on a console that
+    takes changes, a button to the page whose form fixes a reason (`REASON_FIXES`: an unknown secret profile or bundle
+    profile, each held to a catalog token and a page's own panel), only for a run refused on
+    this console's own host (`data.selfHost`), beside the catalog's What to do, which stays word for word
+    (`INT-REASON-CATALOG`). Tests: `admin/test/console-fewer-commands.test.mjs`.
   - (g9) **Remembered browsers** (`/config/devices`, page `devices`, viewer, not live; #849). DevicesScreen draws `p-dev-this` (whether this browser is
     remembered, and how to change that), `p-dev-list` (every live remembered browser by a 12-character id, its browser label from a closed list, whose it
     is, when it was remembered and last used; a viewer sees their own) and `p-dev-all` (sign everyone out). Removing a browser (`device-remove`) and
@@ -8624,6 +8650,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-11 (#849, part 6) | Fewer commands. **`REQ-CONSOLE-SECURITY` AMENDED**, the Statement's "a new session id each time" and (i): a one-time link for the person a browser's live session already belongs to keeps that session (audited, the code spent), while it has time left. **`REQ-OPERATOR-CONSOLE-SCREENS` (a10) AMENDED**: a first-run step may carry `host`. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: `/dispatch console` makes its sign-in link by default where the choice is plain (pi's terminal UI, a running console, one operator token, a guarded drop), says the address as before otherwise, and takes `--no-link`; its acceptance gains that clause. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: new (g10), a button where the console can do a step (the overview's granted steps, doctor from Set up on the console's own host, the run page's reason fixes). `REQ-BROWSER-FIRST-RUN-SETUP`'s commands where no button is offered and `INT-REASON-CATALOG`'s words: UNCHANGED, checked. |
 | 2026-11-08 (#849, part 5) | The Remember experience. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: new (g9), the Remembered browsers screen, the sign-in form's Remember box, the offer after a fresh sign-in and the remembered mark in the top bar. **`REQ-OPERATOR-CONSOLE-ACTIONS` AMENDED**, (p): `device-remove` and `sessions-end-all` are destructive. **`REQ-CONSOLE-SECURITY` AMENDED**, (i): a tombstone is also written by Sign everyone out (`endAll`), whose `all` moves no `generation`; both actions ride the existing write guards, and signing everyone out writes no tokens file. |
 | 2026-11-08 (#849, part 4) | Remembered sessions. **`REQ-CONSOLE-SECURITY` AMENDED**: a new amendment on remembered devices (the 400-day end included), the Statement (a session may be restored from a remembered device), and (c), (d), (f), (g), (h), (i) and (k); `ENDED_REASONS` gains `device`, `device-store` and `device-kept`, `STREAM_ENDS` gains `device`; sign-out (i) clears the device cookie, and keeps a `pdc_session` this console never held when the browser signs out by its device cookie. (a) was part 3's. Non-remembered sessions keep every limit: UNCHANGED, checked. (b), (e), (j), (l), (m), (n), memory-only tickets, `REQ-TERMINAL-CHAT`: UNCHANGED, checked. |
 | 2026-11-08 (#849, part 3) | **`REQ-CONSOLE-SECURITY` AMENDED**, (a): doctor judges the new remembered-device folder. **`REQ-ADMIN-VIA-PI-EXTENSION`**: that folder joins `guardedFiles()` as a directory. Nothing writes the store yet, so every other clause is UNCHANGED, checked. |

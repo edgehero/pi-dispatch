@@ -700,3 +700,12 @@ test("a viewer name an entry of a role this console does not know holds is taken
   assert.equal(fs.readFileSync(f.path, "utf8"), before, "nothing was written");
   assert.deepEqual(f.readTokens().file.carry.kept, [kept]);
 });
+
+test("granted alone answers whether host setup is on here, for the pages that send a person to /setup (issue #849)", (t) => {
+  const on = fixture(t);
+  assert.equal(on.service.granted(), true);
+  const off = fixture(t, { enabled: false });
+  assert.equal(off.service.granted(), false);
+  on.service.close();
+  assert.equal(on.service.granted(), false, "a closed service is no grant");
+});

@@ -679,8 +679,9 @@ test("completions offer console, its page words and its flags", async () => {
   const { def } = await loadRegistered();
   assert.ok(def.getArgumentCompletions("con").some((i) => i.value === "console"));
   assert.deepEqual(def.getArgumentCompletions("console r").map((i) => i.value), ["console runs"]);
-  assert.deepEqual(def.getArgumentCompletions("console runs --").map((i) => i.value), ["console runs --link", "console runs --no-open"]);
-  assert.deepEqual(def.getArgumentCompletions("console runs --link --").map((i) => i.value), ["console runs --link --no-open"]);
+  assert.deepEqual(def.getArgumentCompletions("console runs --").map((i) => i.value), ["console runs --link", "console runs --no-link", "console runs --no-open"]);
+  assert.deepEqual(def.getArgumentCompletions("console runs --link --").map((i) => i.value), ["console runs --link --no-open"], "--no-link contradicts --link");
+  assert.deepEqual(def.getArgumentCompletions("console runs --no-link --").map((i) => i.value), ["console runs --no-link --no-open"]);
 });
 
 test("USAGE and KNOWN_SUBCOMMANDS agree, member for member, in order", () => {

@@ -1,9 +1,9 @@
 /**
- * `/dispatch console [page] [--link [name]] [--no-open]` (issue #708): from pi to the operator console in one step.
+ * `/dispatch console [page] [--link [name]] [--no-link] [--no-open]` (issue #708): from pi to the operator console in one step.
  * It prints the page's address (`consolePageLines`, the rules `/dispatch insights` uses), says whether the console is
  * running (the worker's `console-probe.mjs`, the one rule doctor uses too: one `GET /healthz` to this host's loopback or
- * the socket and nowhere else), with `--link` mints
- * a one-time sign-in code for an operator token, and on a local session opens the browser.
+ * the socket and nowhere else), with `--link` mints a one-time sign-in code for an operator token (and since issue #849
+ * does so by default, with neither flag, where the choice is plain), and on a local session opens the browser.
  *
  * AN OPERATOR-TYPED COMMAND, NEVER A TOOL (DES-ADMIN-VIA-PI-EXTENSION). A sign-in link is a login to the console as an
  * operator, so nothing here reaches model context: every word goes to `notify`, which is the operator's alone, and
@@ -43,7 +43,7 @@ import { probeConsole } from "@edgehero/pi-dispatch/console-probe";
 import { CONSOLE_START_ADVICE } from "./console/link.mjs";
 import { RUN_ID_RE } from "./read-model.mjs";
 
-export const CONSOLE_USAGE = "usage: /dispatch console [setup|runs|fleet|insights|config|parked|audit|<run id>] [--link [token name]] [--no-open]";
+export const CONSOLE_USAGE = "usage: /dispatch console [setup|runs|fleet|insights|config|parked|audit|<run id>] [--link [token name]] [--no-link] [--no-open]";
 
 /** The page words the command takes, each the console page of that name. Anything else that is a run id is `run?id=`. */
 export const CONSOLE_PAGE_WORDS = Object.freeze(["setup", "runs", "fleet", "insights", "config", "parked", "audit"]);
@@ -52,12 +52,14 @@ export const CONSOLE_PAGE_WORDS = Object.freeze(["setup", "runs", "fleet", "insi
 const TOKEN_ADD_HINT = "add one in the operator's own shell with pi-dispatch-console token add --name <name> --role operator";
 
 /**
- * The words after `console`: `{ page, link, name, noOpen }` or `{ usage: true }`. The word right after `--link` is the
- * token's name unless it is a flag, so a page goes before `--link` (`/dispatch console runs --link alice`).
+ * The words after `console`: `{ page, link, noLink, name, noOpen }` or `{ usage: true }`. The word right after `--link` is
+ * the token's name unless it is a flag, so a page goes before `--link` (`/dispatch console runs --link alice`). `--no-link`
+ * (issue #849) turns off the link the command makes by default where the choice is plain; with `--link` it is a usage error.
  */
 export function parseConsoleArgs(words) {
   let page = null;
   let link = false;
+  let noLink = false;
   let name = null;
   let noOpen = false;
   for (let i = 0; i < words.length; i += 1) {
@@ -70,6 +72,9 @@ export function parseConsoleArgs(words) {
         name = next;
         i += 1;
       }
+    } else if (w === "--no-link") {
+      if (noLink) return { usage: true };
+      noLink = true;
     } else if (w === "--no-open") {
       if (noOpen) return { usage: true };
       noOpen = true;
@@ -79,7 +84,8 @@ export function parseConsoleArgs(words) {
       page = w;
     }
   }
-  return { page, link, name, noOpen };
+  if (link && noLink) return { usage: true };
+  return { page, link, noLink, name, noOpen };
 }
 
 /**
@@ -144,83 +150,115 @@ export async function consoleCommand(words, deps) {
 
   let url = at.url && !at.anyHost ? at.url : null;
   let minted = false;
-  if (args.link) {
-    const refuse = (why) => {
+  // Issue #849: with neither flag, the link is made by default where the choice is plain (pi's terminal UI, a running console, one operator token,
+  // a guarded drop), and otherwise the command says what it always said, with no refusal: `--link` is for choosing among operators or naming one.
+  // Once it has decided to mint, a failure (the audit row, the mint) is said either way: a person is waiting for a sign-in.
+  const auto = !args.link && !args.noLink;
+  let skippedLevelOut = "info";
+  const isLocal = deps.isLocal ?? isLocalBrowserSession;
+  const local = isLocal({ env: deps.sessionEnv ?? process.env, platform });
+  if (args.link || auto) {
+    const SKIP = Symbol("no link");
+    // In the default, every reason not to link is said in one line and the page is still opened; only an asked-for `--link` refuses.
+    let skipped = null;
+    // Set once it has decided to mint: a failure then is a fault (the audit log, the drop), said as a warning, never the dim status line.
+    let decided = false;
+    let skippedLevel = "info";
+    const refuse = (why, hint = null) => {
+      if (auto) {
+        skipped = `no sign-in link was made: ${why}${hint ? `; ${hint}` : ""}`;
+        if (decided) skippedLevel = "warning";
+        return SKIP;
+      }
       notify([...lines, `no sign-in link was made: ${why}`].join("\n"), "warning");
       return { refused: "link", state: answer.state };
     };
-    // `"tui"` exactly: a pi too old to say its mode is not known to be the operator's terminal either.
-    if (deps.mode !== "tui") return refuse(`pi runs in ${deps.mode ?? "an unknown"} mode here, where a notice goes to another program, not the operator's terminal; run /dispatch console --link in pi's terminal UI, or pi-dispatch-console link in a shell`);
-    if (at.refusal || at.ephemeral) return refuse("the console's address is not known here, so a link could not name it; run pi-dispatch-console link --name <name> where the console runs");
-    if (answer.state !== "running") return refuse(answer.state === "not-running" ? "the console is not running, and a code expires 60 seconds after it is made" : "the console could not be confirmed running, and a code expires 60 seconds after it is made; start it, or run pi-dispatch-console link where it runs");
-    // Mint only into a drop the write guard holds, so this session's own `write` could not have planted a code there.
-    const codesDir = typeof deps.tokensPath === "string" && deps.tokensPath !== "" ? loginCodesDir(deps.tokensPath) : null;
-    if (codesDir === null || typeof deps.guarded !== "function" || !deps.guarded(codesDir)) {
-      return refuse("the panel does not see this deployment's tokens file, so it guards no login-code directory to mint into; run /dispatch setup (a deployment pointer), or start pi in the deployment folder, or use pi-dispatch-console link in a shell");
-    }
-    const read = (deps.readTokens ?? (() => readTokensFile({ path: deps.tokensPath })))();
-    if (read.refusal) return refuse(`${read.refusal}; ${TOKEN_ADD_HINT}`);
-    const operators = operatorNames(read.file);
-    let name = args.name;
-    if (name !== null) {
-      const entry = read.file.tokens.find((t) => t.name === name);
-      // Issue #761: a name the file keeps for a role this console does not know is no missing token; it is refused as
-      // `pi-dispatch-console link` refuses it.
-      const kept = entry ? undefined : keptTokens(read.file).find((t) => t.name === name);
-      if (kept) return refuse(keptTokenLinkRefusal(kept));
-      if (!entry) return refuse(`there is no token named "${name}"; see pi-dispatch-console token list`);
-      if (entry.role !== "operator") return refuse(`"${name}" is a ${entry.role} token, and the panel signs in operators only; use pi-dispatch-console link --name ${name} in a shell for it`);
-    } else if (operators.length === 0) {
-      return refuse(`the tokens file holds no operator token; ${TOKEN_ADD_HINT}`);
-    } else if (operators.length === 1) {
-      name = operators[0];
-    } else {
-      if (typeof deps.select !== "function") return refuse(`the tokens file holds ${operators.length} operator tokens; name one: /dispatch console --link <name>`);
-      const picked = await deps.select("Sign in to the console as which operator token?", operators);
-      if (typeof picked !== "string" || !operators.includes(picked)) {
-        notify([...lines, "no sign-in link was made: no token was chosen"].join("\n"), "info");
-        return { refused: "cancelled", state: answer.state };
+    const linked = await (async () => {
+      // The default makes a link only for a browser it will hand it to: a code printed for nobody would sit in the scrollback for 60 seconds.
+      // Windows refuses the login-code drop (its ACLs cannot be judged), so the default never decides to mint there; `--link` says so as a refusal.
+      if (auto && platform === "win32") return refuse("one-time links do not work on a Windows host; paste a token");
+      if (auto && (args.noOpen || !local || at.socket || at.anyHost)) return refuse(args.noOpen ? "--no-open asks for the address alone" : !local ? "nothing here would open it" : "this console is reached through a tunnel or another host, so nothing here would open it", "/dispatch console --link prints one");
+      // `"tui"` exactly: a pi too old to say its mode is not known to be the operator's terminal either.
+      if (deps.mode !== "tui") return refuse(`pi runs in ${deps.mode ?? "an unknown"} mode here, where a notice goes to another program, not the operator's terminal; run /dispatch console --link in pi's terminal UI, or pi-dispatch-console link in a shell`);
+      if (at.refusal || at.ephemeral) return refuse("the console's address is not known here, so a link could not name it; run pi-dispatch-console link --name <name> where the console runs");
+      if (answer.state !== "running") return refuse(answer.state === "not-running" ? "the console is not running, and a code expires 60 seconds after it is made" : "the console could not be confirmed running, and a code expires 60 seconds after it is made; start it, or run pi-dispatch-console link where it runs");
+      // Mint only into a drop the write guard holds, so this session's own `write` could not have planted a code there.
+      const codesDir = typeof deps.tokensPath === "string" && deps.tokensPath !== "" ? loginCodesDir(deps.tokensPath) : null;
+      if (codesDir === null || typeof deps.guarded !== "function" || !deps.guarded(codesDir)) {
+        return refuse("the panel does not see this deployment's tokens file, so it guards no login-code directory to mint into; run /dispatch setup (a deployment pointer), or start pi in the deployment folder, or use pi-dispatch-console link in a shell");
       }
-      name = picked;
-    }
-    // Audit, then mint (the panel's rule): a code with no row in the log is never made.
-    // One ticket on both rows, as `auditedWrite` does, so a reader ties a `failed` row to its `ok` row.
-    const audit = deps.audit ?? panelAudit(deps.logsDir);
-    const ticket = deps.ticket ?? writeTicket();
-    try {
-      audit.append({ actor: deps.actor ?? panelActor(), action: "login-code", target: name, outcome: "ok", ticket });
-    } catch (e) {
-      return refuse(`the audit log could not be written (${typeof e?.code === "string" ? e.code : "error"}), so no code was made; check PI_LOGS_DIR`);
-    }
-    const mint = deps.mint ?? ((o) => mintLoginCode(o));
-    const made = mint({ dir: codesDir, name });
-    if (made.refusal) {
-      // The row says ok and no code exists: the safe direction to be wrong in, and said here.
+      const read = (deps.readTokens ?? (() => readTokensFile({ path: deps.tokensPath })))();
+      if (read.refusal) return refuse(`${read.refusal}; ${TOKEN_ADD_HINT}`);
+      const operators = operatorNames(read.file);
+      let name = args.name;
+      if (name !== null) {
+        const entry = read.file.tokens.find((t) => t.name === name);
+        // Issue #761: a name the file keeps for a role this console does not know is no missing token; it is refused as
+        // `pi-dispatch-console link` refuses it.
+        const kept = entry ? undefined : keptTokens(read.file).find((t) => t.name === name);
+        if (kept) return refuse(keptTokenLinkRefusal(kept));
+        if (!entry) return refuse(`there is no token named "${name}"; see pi-dispatch-console token list`);
+        if (entry.role !== "operator") return refuse(`"${name}" is a ${entry.role} token, and the panel signs in operators only; use pi-dispatch-console link --name ${name} in a shell for it`);
+      } else if (operators.length === 0) {
+        return refuse(`the tokens file holds no operator token; ${TOKEN_ADD_HINT}`);
+      } else if (operators.length === 1) {
+        name = operators[0];
+      } else if (auto) {
+        return refuse(`the tokens file holds ${operators.length} operator tokens`, "/dispatch console --link picks one");
+      } else {
+        if (typeof deps.select !== "function") return refuse(`the tokens file holds ${operators.length} operator tokens; name one: /dispatch console --link <name>`);
+        const picked = await deps.select("Sign in to the console as which operator token?", operators);
+        if (typeof picked !== "string" || !operators.includes(picked)) {
+          notify([...lines, "no sign-in link was made: no token was chosen"].join("\n"), "info");
+          return { refused: "cancelled", state: answer.state };
+        }
+        name = picked;
+      }
+      decided = true;
+      // Audit, then mint (the panel's rule): a code with no row in the log is never made.
+      // One ticket on both rows, as `auditedWrite` does, so a reader ties a `failed` row to its `ok` row.
+      const audit = deps.audit ?? panelAudit(deps.logsDir);
+      const ticket = deps.ticket ?? writeTicket();
       try {
-        audit.append({ actor: deps.actor ?? panelActor(), action: "login-code", target: name, outcome: "failed", reason: made.refusal, ticket });
-      } catch {
-        // the refusal below is what the operator must see
+        audit.append({ actor: deps.actor ?? panelActor(), action: "login-code", target: name, outcome: "ok", ticket });
+      } catch (e) {
+        return refuse(`the audit log could not be written (${typeof e?.code === "string" ? e.code : "error"}), so no code was made; check PI_LOGS_DIR`);
       }
-      return refuse(made.refusal);
+      const mint = deps.mint ?? ((o) => mintLoginCode(o));
+      const made = mint({ dir: codesDir, name });
+      if (made.refusal) {
+        // The row says ok and no code exists: the safe direction to be wrong in, and said here.
+        try {
+          audit.append({ actor: deps.actor ?? panelActor(), action: "login-code", target: name, outcome: "failed", reason: made.refusal, ticket });
+        } catch {
+          // the refusal below is what the operator must see
+        }
+        return refuse(made.refusal);
+      }
+      minted = true;
+      const next = path === "" ? "" : `&next=${fragmentValue(`/${path}`)}`;
+      if (at.socket) {
+        lines.push(`sign-in link for "${name}" (through that tunnel; it works once, within 60 seconds): http://localhost:4790/login/code#${made.code}${next}`);
+      } else {
+        const base = at.url.slice(0, at.url.length - path.length);
+        const link = `${base}login/code#${made.code}${next}`;
+        lines.push(`sign-in link for "${name}" (it works once, within 60 seconds): ${link}`);
+        url = at.anyHost ? null : link;
+      }
+      return null;
+    })();
+    if (linked === SKIP) {
+      lines.push(skipped);
+      skippedLevelOut = skippedLevel;
     }
-    minted = true;
-    const next = path === "" ? "" : `&next=${fragmentValue(`/${path}`)}`;
-    if (at.socket) {
-      lines.push(`sign-in link for "${name}" (through that tunnel; it works once, within 60 seconds): http://localhost:4790/login/code#${made.code}${next}`);
-    } else {
-      const base = at.url.slice(0, at.url.length - path.length);
-      const link = `${base}login/code#${made.code}${next}`;
-      lines.push(`sign-in link for "${name}" (it works once, within 60 seconds): ${link}`);
-      url = at.anyHost ? null : link;
-    }
+    else if (linked !== null) return linked;
   }
 
   let opened = false;
-  const isLocal = deps.isLocal ?? isLocalBrowserSession;
   if (url !== null && answer.state === "running") {
     if (args.noOpen) {
       // Said nothing: the operator asked for the URL alone.
-    } else if (isLocal({ env: deps.sessionEnv ?? process.env, platform })) {
+    } else if (local) {
       if (minted) {
         const o = (deps.openLink ?? ((u) => openLinkViaFile(u, { open: deps.open ?? openBrowser })))(url);
         if (o?.refusal) lines.push(o.refusal);
@@ -236,6 +274,6 @@ export async function consoleCommand(words, deps) {
       lines.push("not opened: this is not a local session (SSH, or no display), so open the URL yourself");
     }
   }
-  notify(lines.join("\n"), answer.state === "not-running" ? "warning" : "info");
+  notify(lines.join("\n"), answer.state === "not-running" || skippedLevelOut === "warning" ? "warning" : "info");
   return { state: answer.state, url, opened, minted };
 }

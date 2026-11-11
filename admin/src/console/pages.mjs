@@ -837,6 +837,16 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     try { data.connections = typeof deps.connections === "function" ? await deps.connections(data.snapshot) : null; }
     catch { data.connections = null; }
   }
+  // Issue #849: whether the host-setup grant is on, for the pages that send an operator to /setup rather than a terminal. One boolean, none of `setup`'s reads.
+  if (["overview", "fleet", "host"].includes(name) && typeof deps.setupGranted === "function") {
+    try { data.setupGranted = deps.setupGranted() === true; }
+    catch { data.setupGranted = false; }
+  }
+  // The run page's fix button is for a run refused on this console's own host (issue #849): what the console fixes, it fixes here.
+  if (name === "run" && typeof deps.selfHost === "function") {
+    try { data.selfHost = deps.selfHost(); }
+    catch { data.selfHost = null; }
+  }
   if (reads.includes("devices")) {
     // Issue #849: the device store's listing, read on demand; never a secret, never a whole hash beyond the server.
     try { data.devices = typeof deps.devices === "function" ? deps.devices() : null; }

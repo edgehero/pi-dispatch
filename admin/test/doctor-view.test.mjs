@@ -396,7 +396,9 @@ test("first run: every command with a placeholder has the sentence that fills it
 
 test("first run: a step is its id, state, title, sentence and commands; who reads a command is each surface's rule", () => {
   const st = firstRunState(firstRun({ doctor: { hosts: [{ name: "a", ageMs: M, counts: {}, checks: [{ id: "provider.1", level: "ok" }], more: 0 }], more: 0 } }), { session: { role: "operator" } });
-  for (const step of st.steps) assert.deepEqual(Object.keys(step), ["id", "state", "title", "sentence", "commands"], step.id);
+  // Issue #849: `host`, the host whose doctor result judged it, only on the egress and provider steps, where a page needs it to send a person to /setup.
+  for (const step of st.steps) assert.deepEqual(Object.keys(step), ["id", "state", "title", "sentence", "commands", ...(["egress", "provider"].includes(step.id) || step.host !== undefined && step.id === "worker" ? ["host"] : [])], step.id);
+  assert.equal(st.steps.find((step) => step.id === "provider").host, "a");
 });
 
 test("first run: the forge step is optional without a forge trigger, else the worst of the github and forges sections", () => {

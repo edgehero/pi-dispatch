@@ -2739,8 +2739,10 @@ function completeArguments(prefix: string) {
     // The page words and the flags; a run id is typed whole (or completed under `logs`).
     const partial = parts[parts.length - 1];
     const head = parts.slice(0, -1).join(" ");
-    const items = [...CONSOLE_PAGE_WORDS, "--link", "--no-open"]
-      .filter((w) => w.startsWith(partial) && !parts.slice(1, -1).includes(w))
+    // `--link` and `--no-link` contradict each other, so once one is typed the other is not offered.
+    const typed = parts.slice(1, -1);
+    const items = [...CONSOLE_PAGE_WORDS, "--link", "--no-link", "--no-open"]
+      .filter((w) => w.startsWith(partial) && !typed.includes(w) && !(w === "--no-link" && typed.includes("--link")) && !(w === "--link" && typed.includes("--no-link")))
       .map((w) => ({ value: `${head} ${w}`, label: w }));
     return items.length > 0 ? items : null;
   }

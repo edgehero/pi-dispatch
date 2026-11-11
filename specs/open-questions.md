@@ -2674,10 +2674,29 @@ adversarial passes did.
 - **Traces**: `REQ-DISPATCHERS`, `DES-DISPATCHER-TRIGGER-PROPOSALS`, `CONST-TRIGGER-AUTHOR-GATE`,
   `CONST-MERGE-NEVER-AUTOMATIC`, `REQ-AI-TRIGGERED-RUNS`, `OQ-051`, `OQ-052`.
 
+## OQ-058: Adding another browser from a signed-in browser
+
+- **Status**: **OPEN** (issue #849). Not admitted.
+- **Question**: may a person signed in on one browser sign in, or remember, a second browser from the console itself
+  (a link or a code the first browser shows), without the host?
+- **Current decision**: no. A browser is remembered only within 10 minutes of a credential the host gave (a token, or a
+  link a host command minted), and a second browser needs the host again: `./pi-dispatch console`, `pi-dispatch-console
+  link`, or a token. A session near its twelfth hour that could mint another session would never end, and with
+  remembered browsers that becomes a foothold that renews itself. A default-bound console's browsers are already on the
+  host or hold an SSH login, so the cost today is one command. Viewer invitations (`setup-viewer-add`) are the one
+  browser-made link, and they make a viewer session that cannot be remembered.
+- **What closes it**: a design in which a browser-made sign-in is bounded by the session that made it (it ends no later,
+  and Sign everyone out and the maker's sign-out end it), is always audited as the maker's, cannot be remembered or can be
+  only with a fresh credential, and has a threat model for a copied session cookie making one; or a decision that the
+  host step stays.
+- **Traces**: `REQ-CONSOLE-SECURITY`, `DES-OPERATOR-CONSOLE` ("Remembered devices"), `INT-CONSOLE-SETUP-HOST`,
+  `INT-CONSOLE-DEVICES-STORE`.
+
 ## Revision History
 
 | Date | Change |
 |---|---|
+| 2026-11-11 (#849, part 6) | **NEW `OQ-058`**: adding another browser from a signed-in browser stays a host step; what would close it. Every other entry: UNCHANGED, checked. |
 | 2026-11-04 (#809) | What a 503 means for each forge. **`OQ-013` CORRECTED**, two sentences: an indeterminate GitLab lookup fails loudly with a 503 that GitLab does not resend on its own, so the delivery waits for a hand resend, where it said redelivered; and the failure mode of a broken or revoked token is that nothing runs, every delivery shows failed in the hook's Recent events, and after 4 failures in a row GitLab disables the hook (for a while, growing to a day; for good after 40 from GitLab 17.11; on gitlab.com and for a group hook anywhere, and for a project hook on a self-managed instance only where the `auto_disabling_web_hooks` feature flag is on), where it said GitLab keeps retrying. The Connections page now warns on each forge's 503 answers. The risk itself, a gate with a moving part, is UNCHANGED, checked. **Code evidence**: receiver/src/receiver.mjs -> makeGitLabHandler, answerEnqueueFailed; admin/src/console/panels/connections.mjs -> receiverWarnings. |
 | 2026-11-02 (#754, #792, #793; approved extension) | OQ-050 amended before implementation for the approved maintained-library tabs/splits workbench, run Workspace/context and opt-in read-only observer threat model. Container isolation, credentials, money/run slots, retries, exit protocol, native opener/monitor/End, preparation admission, retention policy, run-record schema, fork/answer authority, console CSP/origin/cookie and OQ-051 UNCHANGED, checked. Ordinary state/event framing is unchanged; narrowly scoped private operator projections/queries are documented by the amended gateway contract. |
 | 2026-11-03 (#761, tolerant readers) | **`OQ-039` AMENDED**: the residual of a writer from before the fleet horizon gains its count trim: such a writer cuts the shared run index at a fixed 5,000 runs without recording it, which the reader catches by starting the mirror at the oldest run of an index at its cap, and since that cap became `PI_RUN_MIRROR_MAX_RUNS` a reader told one above 5,000 misses that cut, so its time reads as idle. Its status and its other residuals UNCHANGED, checked. **Code evidence**: worker/src/capacity-records.mjs -> readMirrorWindow (`indexMax`); worker/src/retention.mjs -> runMirrorMaxRunsOf. |

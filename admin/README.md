@@ -302,8 +302,9 @@ and on its run page, and its transcript, redacted, streams live
 on its run page for operators, and the panel's live tail
 (`l`) reads the same transcript for a run on any host. Nothing listens unless you start it. In pi,
 `/dispatch console [page] [--link]` prints a page's address, says whether the console is running, makes a one time
-sign-in link for an operator token (shown only to you, and recorded in the audit log first), and opens your browser
-when the session is local (not over SSH; `--no-open` keeps it closed). See
+sign-in link for an operator token (shown only to you, and recorded in the audit log first; with one operator token
+and the console running it does this by itself when a browser on this machine will open it, and `--no-link` turns it off), and opens your browser when the
+session is local (not over SSH; `--no-open` keeps it closed). See
 [`docs/console.md`](https://github.com/edgehero/pi-dispatch/blob/main/docs/console.md).
 
 ## More than one machine

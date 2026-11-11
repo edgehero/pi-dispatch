@@ -51,6 +51,9 @@ const CONSOLE_HERE = Object.freeze(["./pi-dispatch", "console"]);
 const CONSOLE_INSTALLED = Object.freeze(["./node_modules/.bin/pi-dispatch", "console"]);
 const PI_LINK = Object.freeze(["/dispatch", "console", "--link"]);
 const TOKEN_ADD = Object.freeze(["pi-dispatch-console", "token", "add", "--name", "<you>", "--role", "operator"]);
+/** A link printed rather than opened (issue #849): the commands above hand theirs to the default browser, which uses it at once. */
+const LINK_PRINTED = Object.freeze(["./node_modules/.bin/pi-dispatch-console", "link"]);
+export const OTHER_BROWSER = Object.freeze({ summary: "In a browser that is not your default one", lead: "The commands above open your default browser, which uses the link at once. This one prints a link to paste where you want it:" });
 
 /** How to get a fresh link, said the same way wherever one is needed. */
 const NEW_LINK = html`<p class="muted">Run this in your deployment folder to sign in:</p>${ui.cmd([...CONSOLE_HERE])}<p class="muted">If that file is not there:</p>${ui.cmd([...CONSOLE_INSTALLED])}<p class="muted">On a global install: <span class="code">pi-dispatch console</span></p><p class="muted">Or in pi:</p>${ui.cmd([...PI_LINK])}`;
@@ -142,7 +145,7 @@ ${MARK}
 <p class="muted"${REVEAL}>Paste a console token, or open a one-time link.</p>
 ${noticeRegion(entries, noticeKey(notice))}
 <form id="login-form" class="signin__form" autocomplete="off"${REVEAL}><div class="field"><label for="token">Console token</label><input id="token" class="input input--code" name="token" type="password" autocomplete="off" spellcheck="false" required aria-describedby="notice"></div>${remember ? REMEMBER_CHOICE : null}<button class="btn btn--primary btn--lg" type="submit">Sign in</button></form>
-<div class="signin__help"><p class="signin__help-h">No token yet?</p>${NEW_LINK}<details><summary>Make a token instead</summary><p class="muted">On the host, with your own name in place of &lt;you&gt;. In a local install it is under <span class="code">./node_modules/.bin/</span>:</p>${ui.cmd([...TOKEN_ADD])}</details></div>
+<div class="signin__help"><p class="signin__help-h">No token yet?</p>${NEW_LINK}<details><summary>${OTHER_BROWSER.summary}</summary><p class="muted">${OTHER_BROWSER.lead}</p>${ui.cmd([...LINK_PRINTED])}</details><details><summary>Make a token instead</summary><p class="muted">On the host, with your own name in place of &lt;you&gt;. In a local install it is under <span class="code">./node_modules/.bin/</span>:</p>${ui.cmd([...TOKEN_ADD])}</details></div>
 ${footer === null ? null : html`<p class="signin__foot faint">${footer}</p>`}
 </div></section>`;
 }

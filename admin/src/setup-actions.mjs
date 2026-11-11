@@ -273,7 +273,8 @@ export function makeSetupActions({ broker, enabled = false, reason = null, opera
     const providerKey = currentProviderKey();
     return { enabled: granted(), reason: granted() ? null : reason ?? "Host setup is not enabled on this console; use the terminal commands.", actions: granted() && role === "operator" ? SETUP_ACTION_NAMES.filter(name => operations.includes(name)) : [], providerKey: role === "operator" ? providerKey : null, progress: [...progress.values()].map(({ host, ...safe }) => safe), allowlistCount: null };
   }
-  return { preview, apply, state, discard, endSession,
+  // `granted` alone, for a page that only needs to know whether to send a person to /setup (issue #849): the deployment check, without the provider read `state` makes.
+  return { preview, apply, state, discard, endSession, granted,
     cancel({ sessionId, ref }) { const entry = held.get(ref); if (entry?.session.id === sessionId) discard(ref); },
     close() { closed = true; clearIntervalFn(timer); for (const ref of held.keys()) discard(ref); for (const entry of active.values()) entry.controller.abort(); receipts.clear(); },
     privateSize: () => held.size,

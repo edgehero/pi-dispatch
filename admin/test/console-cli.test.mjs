@@ -706,6 +706,9 @@ test("serve wires remembered devices end to end (#849): a removed device's live 
   modules.loginCodes = { ...modules.loginCodes, clearLoginCodes: realCodes.clearLoginCodes };
   let built = null;
   modules.server = { ...server, createConsoleServer: (args) => ((built = args), server.createConsoleServer(args)) };
+  // Part 6: the run page's host and the pages' grant, as serve wires them.
+  const named = [];
+  modules.readModel = { ...modules.readModel, doctorSelfName: (env) => (named.push(env), "mini-self") };
   const err = [];
   const running = runCli(["serve", "--deployment", dep.dir], { env: dep.env, modules, now: () => T0, uid: process.geteuid?.(), out: () => {}, err: (l) => err.push(l), until, onListening: listening });
   const srv = await Promise.race([up, running.then((code) => assert.fail(`serve exited ${code} before listening: ${err.join(" ")}`))]);
@@ -748,6 +751,9 @@ test("serve wires remembered devices end to end (#849): a removed device's live 
   mkdirSync(codes, { recursive: true, mode: 0o700 });
   writeFileSync(join(codes, `${"c".repeat(64)}.json`), "{}");
   assert.deepEqual(built.actionDeps.loginCodes.clear(), { removed: 1, left: 0 });
+  assert.equal(built.pageDeps.selfHost(), "mini-self", "this console's own host, by the read model's rule");
+  assert.equal(named.at(-1)?.PI_LOGS_DIR, dep.env.PI_LOGS_DIR, "over the deployment's env, where PI_WORKER_NAME is");
+  assert.equal(built.pageDeps.setupGranted(), false, "a console started without --host-setup has no grant");
   const s1 = stream(first);
   assert.match(await s1.when((x) => x.includes("event: panel"), 5000), /event: panel/);
   // `pi-dispatch-console device revoke`, as an operator runs it while serve holds the stream open.
