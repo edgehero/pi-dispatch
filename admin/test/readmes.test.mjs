@@ -172,25 +172,52 @@ test("the root README plays the film", () => {
 
 test("Open the web page says what the console's commands do", () => {
   const section = ROOT.slice(ROOT.indexOf("## Open the web page"), ROOT.indexOf("## How to use it"));
+  const words = section.replace(/\s+/g, " ");
   const consoleCli = read("admin/src/console/cli.mjs");
-  const bootstrap = read("worker/src/console-bootstrap.mjs");
   assert.ok(section.includes("http://127.0.0.1:4790"));
   assert.match(consoleCli, /default 127\.0\.0\.1:4790/);
-  // The name setup gives the first operator when nobody chooses one, so the command works as it is printed here.
-  assert.ok(section.includes("pi-dispatch-console link --name operator"));
-  assert.match(bootstrap, /named \?\? "operator"/);
-  assert.match(consoleCli, /link \[--name <name>\]/);
-  assert.match(consoleCli, /token list/);
-  // Setup keeps only the token's hash, which is why this section offers a token to keep at all.
-  assert.ok(section.includes("Setup keeps no password you could paste"));
-  assert.match(bootstrap, /delete made\.token/);
-  assert.ok(section.includes("pi-dispatch-console token rotate --name operator"));
-  assert.match(consoleCli, /token rotate --name <name>/);
-  assert.ok(section.includes("/dispatch console --link"));
-  assert.match(read("admin/src/console-command.mjs"), /\[--link \[token name\]\]/);
+  // A link sign-in, which every way in here is, asks once on the first page; a token's form has the box instead.
+  const shell = read("admin/src/console/shell.mjs");
+  assert.ok(words.includes("the page asks whether to remember this browser. Choose **Remember this browser**"));
+  assert.match(shell, /OFFER_TITLE = "Remember this browser\?"/);
+  assert.match(shell, /OFFER_YES = "Remember this browser"/);
+  assert.ok(words.includes("tick **Remember this trusted device** under it"));
+  assert.match(read("admin/src/console/signin.mjs"), /REMEMBER_LABEL = "Remember this trusted device"/);
+  // Signing out first: a link for the person a browser is signed in as keeps that session, which is not asked again.
+  assert.ok(words.includes("Sign out, sign in again, and it is asked again"));
+  assert.match(read("docs/console.md"), /once 10 minutes have passed it is not offered again: sign out and sign in/);
+  assert.match(read("admin/src/console/device-trust.mjs"), /REMEMBER_FRESH_MS = 10 \* 60000/);
+  // The folder's shortcut: bootstrap makes it, and it starts a stopped console before signing in.
+  assert.ok(words.includes("`./pi-dispatch console` starts the page if it stopped, opens it and signs you in"));
+  assert.match(read("worker/src/console-install.mjs"), /const shortcut = ensureConsoleShortcut\(dir, fs\);/);
+  assert.match(read("worker/src/cli.mjs"), /pi-dispatch console \[--name NAME\]/);
+  // /dispatch console signs in by default (neither flag), only where pi finds the folder's tokens file and the console runs.
+  const command = read("admin/src/console-command.mjs");
+  assert.ok(words.includes("In pi, started in that folder | `/dispatch console` opens the page and signs you in, while the page runs"));
+  assert.match(command, /const auto = !args\.link && !args\.noLink;/);
+  assert.match(command, /if \(answer\.state !== "running"\) return refuse\(/);
+  assert.match(read("admin/src/index.ts"), /if \(DEPLOYMENT_SCAFFOLD_FILES\.every\(\(f\) => nodeFs\.existsSync\(join\(cwd, f\)\)\)\) return tokensFilePath\(env, cwd\);/);
+  // Where a remembered browser is seen and removed, by the page's own title, and that signing out forgets it.
+  assert.ok(words.includes("**Remembered browsers**, linked from Configuration"));
+  assert.match(read("admin/src/console/pages.mjs"), /path: "\/config\/devices", [^}]*title: "Remembered browsers"/);
+  assert.match(read("admin/src/console/panels/config.mjs"), /label: "Remembered browsers"/);
+  assert.ok(words.includes("Signing out in a browser also forgets it"));
+  assert.match(read("admin/src/console/server.mjs"), /const done = deps\.devices\.end\(hash, "signed-out"\);/);
   assert.ok(section.includes("service start --console") && section.includes("service status --console"));
   assert.match(read("worker/src/cli.mjs"), /service <render\|install\|uninstall\|status\|start\|stop\|restart> \[--receiver\|--console\]/);
   assert.match(read("docs/console.md"), /One-time links do not work on a Windows host/);
+});
+
+test("the README's one command and its lines by hand name the release in each package.json", () => {
+  const version = (pkg) => JSON.parse(read(`${pkg}/package.json`)).version;
+  const install = ROOT.slice(ROOT.indexOf("## Install in four steps"), ROOT.indexOf("## Open the web page"));
+  const byHand = `@edgehero/pi-dispatch@${version("worker")} @edgehero/pi-dispatch-admin@${version("admin")} `;
+  assert.ok(install.includes(`npx --yes --ignore-scripts @edgehero/pi-dispatch@${version("worker")} up --console`), "the one command, at the worker's release");
+  assert.ok(install.includes(byHand), "the lines by hand, at the same release");
+  assert.ok(read("docs/console.md").includes(byHand), "and docs/console.md's lines by hand");
+  // A new empty folder: up --console refuses one that holds other files; Mac and Linux: the setup host refuses Windows.
+  assert.match(install, /\*\*In one command\*\*, from a new empty folder, on a Mac or Linux/);
+  assert.match(read("docs/console.md"), /one that holds other files and is not a deployment/);
 });
 
 test("Manage a swarm says what pi-dispatch does for many agents, and that it does not direct them", () => {

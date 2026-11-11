@@ -282,7 +282,7 @@ queued: an older BullMQ need not read what a newer one wrote. The release notes 
 
 Release numbers come from the git tags.
 
-### Next release
+### 5.1.0
 
 | Store | What changed, and what an older release does with it | Guide |
 |---|---|---|
