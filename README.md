@@ -87,8 +87,8 @@ network rules, your provider key and a first trigger. Your key goes in here, nev
 it gets a label, tidy every night, or answer a comment.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/console/console-setup-dark.png?v=2026-11-05">
-  <img src="docs/images/console/console-setup.png?v=2026-11-03" alt="The setup page: each step of a new deployment marked ready, starting, not yet or to do, with a button for the next action and recipes for a first trigger">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/console/console-setup-dark.png?v=2026-11-11">
+  <img src="docs/images/console/console-setup.png?v=2026-11-11" alt="The setup page: each step of a new deployment marked ready, starting, not yet or to do, with a button for the next action and recipes for a first trigger">
 </picture>
 
 <details>
@@ -844,13 +844,13 @@ of every write, and Configuration. Each write is a preview and a confirm, and pa
 </picture>
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/console/console-audit-dark.png?v=2026-11-05">
-  <img src="docs/images/console/console-audit.png?v=2026-11-05" alt="The audit log: every write, who made it and how far its hash chain is verified">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/console/console-audit-dark.png?v=2026-11-11">
+  <img src="docs/images/console/console-audit.png?v=2026-11-11" alt="The audit log: every write, who made it and how far its hash chain is verified">
 </picture>
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/console/console-config-dark.png?v=2026-11-05">
-  <img src="docs/images/console/console-config.png?v=2026-11-03" alt="The Configuration page: triggers, settings, pause windows, scoped limits and projects, each edited through a preview">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/console/console-config-dark.png?v=2026-11-11">
+  <img src="docs/images/console/console-config.png?v=2026-11-11" alt="The Configuration page: triggers, settings, pause windows, scoped limits and projects, each edited through a preview">
 </picture>
 
 ## Reuse your existing pi setup
