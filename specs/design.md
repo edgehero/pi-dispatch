@@ -3734,8 +3734,11 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   name different ones, and a code minted into one drop is refused by the other console. `consoleDeploymentCheck` reads
   that folder's `.env` for `PI_CONSOLE_LISTEN` alone, to compare and never to use, through the same reader and trust rule
   as the panel's env (`deploymentServiceEnv`), and compares the two as the console parses them; a mismatch, or a `.env`
-  that cannot be read, trusted or read as its service reads it, skips the default link with that reason. `--link` is
-  unchanged: it is asked for, and the operator may know better. REJECTED: taking the address from the folder's `.env`
+  that cannot be read, trusted or read as its service reads it, skips the default link with that reason, as a warning,
+  with the advice the address's source calls for (`/dispatch setup`, or the export to change) and `./pi-dispatch
+  console` in that folder, which always reaches its own console. A tokens file pi's own environment names is no
+  folder's, so there is no check then. `--link` still mints: it is asked for, and the operator may know better; the same
+  warning stands above its link. REJECTED: taking the address from the folder's `.env`
   over pi's export (the panel and every other surface use the export; one surface disagreeing would be a second rule).
   - **Running or not**: ONE probe, the worker's `@edgehero/pi-dispatch/console-probe` (`worker/src/console-probe.mjs`),
     which doctor's console lines use too, so the command and doctor cannot disagree about whether a console runs (the

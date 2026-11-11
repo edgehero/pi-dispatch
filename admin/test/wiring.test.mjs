@@ -691,9 +691,11 @@ test("/dispatch console hands its default link the check of one deployment: the 
   const block = /case "console": \{([\s\S]*?)\n {6}return;\n {4}\}/.exec(src)?.[1];
   assert.ok(block, "the console case must stay one block");
   assert.match(block, /const tokensPath = consoleTokensPathFor\(env, dir\);/);
-  assert.match(block, /const folder = typeof dir === "string" && dir !== "" \? dir : tokensPath !== null \? process\.cwd\(\) : null;/, "the pointer's folder, else the one pi started in, as consoleTokensPathFor reads");
+  assert.match(block, /const exported = \(key: string\) => typeof process\.env\[key\] === "string" && !pointerState\(\)\.owned\.includes\(key\);/, "pi's own export, an empty one too, never a value the pointer layered in");
+  assert.match(block, /const base = typeof dir === "string" && dir !== "" \? dir : tokensPath !== null \? process\.cwd\(\) : null;/, "the pointer's folder, else the one pi started in, as consoleTokensPathFor reads");
+  assert.match(block, /const folder = base !== null && tokensPath !== null && inside\(base, tokensPath\) \? base : null;/, "a folder only for a tokens file inside it");
   assert.match(block, /tokensPath,\n/, "the same tokens path the check's folder was taken from");
-  assert.match(block, /deployment: consoleDeploymentCheck\(\{ env, folder \}\),/);
+  assert.match(block, /deployment: consoleDeploymentCheck\(\{ env, folder, exported: exported\("PI_CONSOLE_LISTEN"\) \}\),/);
 });
 
 test("USAGE and KNOWN_SUBCOMMANDS agree, member for member, in order", () => {

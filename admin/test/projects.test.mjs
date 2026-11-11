@@ -304,7 +304,9 @@ test("dispatch_projects lists each project with safe member identities, limits a
 test("dispatch_costs: byProject in the fold, and the project filter scopes every arm to the runs recorded under it", async () => {
   const logsDir = tempDir("pd-499c-logs-");
   process.env.PI_LOGS_DIR = logsDir;
-  const now = Date.now();
+  // One instant for the records and the tool's clock: on the real clock, records a minute old fell out of the
+  // month-to-date window in a month's first minute.
+  const now = Date.parse("2026-06-15T12:00:00.000Z");
   const at = (ms) => new Date(ms).toISOString();
   const rec = (jobId, project, cost) => ({ jobId, kind: "github", target: "acme/web#1", flow: "fix", startedAt: at(now - 60_000), endedAt: at(now - 30_000), outcome: "completed", tokens: { input: 1, output: 1, total: 2, cost, metered: true }, usage: null, dollars: null, ...(project === undefined ? {} : { project }) });
   writeFileSync(join(logsDir, "a.json"), JSON.stringify(rec("a", "shop", 0.5)));
@@ -317,6 +319,7 @@ test("dispatch_costs: byProject in the fold, and the project filter scopes every
   process.env.PI_TRIGGERS_FILE = join(dir, "triggers.json");
   process.env.VALKEY_URL = "not-a-url";
   try {
+    indexMod._setCostsClockForTests(() => now);
     const all = textOf(await toolByName("dispatch_costs").execute("id", {}, undefined, undefined, undefined));
     assert.deepEqual(all.fold.byProject.map((r) => [r.key, r.runs, r.cost.usd]), [["shop", 1, 0.5], [null, 2, 0.375]]);
     const shop = textOf(await toolByName("dispatch_costs").execute("id", { project: "shop" }, undefined, undefined, undefined));
@@ -326,6 +329,7 @@ test("dispatch_costs: byProject in the fold, and the project filter scopes every
     await assert.rejects(() => toolByName("dispatch_costs").execute("id", { project: "(no project)" }, undefined, undefined, undefined), /project must be a project id/);
   } finally {
     delete process.env.VALKEY_URL;
+    indexMod._setCostsClockForTests();
   }
 });
 

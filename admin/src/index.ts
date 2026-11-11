@@ -163,7 +163,7 @@ import { applyDeploymentPointer, pointerPath, pointerState, readPointer, takePoi
 import * as nodeFs from "node:fs";
 // The audit rows' host name for a plan this session applies (issue #504 part C): PI_WORKER_NAME, else this machine's.
 import { homedir, hostname } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative, resolve as resolvePath } from "node:path";
 import { COSTS_WINDOWS, PROJECT_KEY_RE } from "./costs.mjs";
 // The REAL pricing façade. costs.mjs may not hold a module-scope worker/pricing import by contract (the
 // fold is pure; tests inject a canned fake) -- index.ts is where the fs-adjacent assembly lives, so the
@@ -1643,8 +1643,18 @@ async function dispatch(pi: ExtensionAPI, args: string, rawCtx: any): Promise<vo
       const env = deploymentEnv();
       const dir = pointerState().deploymentDir;
       const tokensPath = consoleTokensPathFor(env, dir);
-      // The folder the tokens file is read from: the pointer's, else the folder pi was started in (consoleTokensPathFor).
-      const folder = typeof dir === "string" && dir !== "" ? dir : tokensPath !== null ? process.cwd() : null;
+      // pi's own export of a key, never a value the pointer layered into this process (an export outranks the pointer,
+      // an empty one too: `PI_CONSOLE_LISTEN=""` makes the address the default whatever the pointer's .env says).
+      const exported = (key: string) => typeof process.env[key] === "string" && !pointerState().owned.includes(key);
+      // The folder the tokens file is resolved in: the pointer's, else the folder pi was started in (consoleTokensPathFor).
+      // Its .env says which console the tokens file belongs to only when the file is inside it: one pi's environment names
+      // elsewhere (PI_CONSOLE_TOKENS_FILE) is the operator's choice, no folder's, and gets no check.
+      const base = typeof dir === "string" && dir !== "" ? dir : tokensPath !== null ? process.cwd() : null;
+      const inside = (folder: string, file: string) => {
+        const rel = relative(resolvePath(folder), resolvePath(file));
+        return rel !== "" && !rel.startsWith("..") && !isAbsolute(rel);
+      };
+      const folder = base !== null && tokensPath !== null && inside(base, tokensPath) ? base : null;
       await consoleCommand(tokens.slice(1), {
         hasUI: Boolean(ctx?.hasUI),
         mode: ctx?.mode,
@@ -1655,7 +1665,8 @@ async function dispatch(pi: ExtensionAPI, args: string, rawCtx: any): Promise<vo
         logsDir: paths.logsDir,
         tokensPath,
         guarded: (codesDir: string) => guardedFiles().some((g) => g.dir === true && g.path === codesDir),
-        deployment: consoleDeploymentCheck({ env, folder }),
+        // Whether the address is pi's own export, which a pointer's .env does not outrank: it decides the advice.
+        deployment: consoleDeploymentCheck({ env, folder, exported: exported("PI_CONSOLE_LISTEN") }),
       });
       return;
     }

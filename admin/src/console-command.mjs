@@ -116,8 +116,25 @@ function fragmentValue(text) {
 function addressKey(value, platform) {
   const text = String(value ?? "").trim() || DEFAULT_LISTEN;
   const parsed = parseListen(text, { bindPublic: true, platform });
-  return parsed.refusal ? `refused ${text}` : JSON.stringify([parsed.kind, parsed.host ?? null, parsed.port ?? null, parsed.path ?? null]);
+  if (parsed.refusal) return `refused ${text}`;
+  // An IPv6 host in its one canonical form, so `[0:0:0:0:0:0:0:1]` is `[::1]`, as the socket it binds is. A zone id
+  // (`[fe80::1%en0]`, which the console accepts) is no URL host, so such an address compares as written.
+  let host = parsed.host ?? null;
+  if (typeof host === "string" && host.includes(":")) {
+    try {
+      host = new URL(`http://[${host}]/`).hostname;
+    } catch {
+      // as written
+    }
+  }
+  return JSON.stringify([parsed.kind, host, parsed.port ?? null, parsed.path ?? null]);
 }
+
+/**
+ * A line as a terminal may show it: a control character (an escape sequence in a folder's name, which a path, the
+ * trust reader's reason or an error message can carry) as `?`. Applied to the whole answer, not to each path in it.
+ */
+const shown = (text) => String(text).replace(/[\u0000-\u001f\u007f-\u009f]/g, "?");
 
 /**
  * Whether the console this address names is the one whose tokens file the panel would mint into (issue #849's
@@ -126,19 +143,33 @@ function addressKey(value, platform) {
  * no pointer, or with that export, the two can name two deployments on one machine, and a code minted into one drop is
  * refused by the other console: safe, but a sign-in that fails. So the default link is made only when the folder's
  * `.env` names this same address (read for that one key, to compare, never to use). A `.env` that cannot be read or
- * trusted, or names the key in a form the service's loader may read differently, cannot tell, and skips it too.
- * Returns undefined with no folder (the drop guard decides then), else `{ same: true }` or `{ same: false, why }`.
+ * trusted, names the key in a form the service's loader may read differently, or holds a line the shell runs rather
+ * than reads (which can set it unseen), cannot tell, and skips it too. A tokens file outside the folder (one pi's
+ * environment names elsewhere with `PI_CONSOLE_TOKENS_FILE`) is no folder's, and the panel passes no folder: the check
+ * is not made.
+ * `exported` says the address came from pi's own environment, which decides the advice: a pointer (`/dispatch setup`)
+ * makes the panel read the folder's `.env`, but an export outranks it. Returns undefined with no folder (the drop guard
+ * decides then), else `{ same: true }` or `{ same: false, why, hint }`; in every case `./pi-dispatch console`, run in
+ * that folder, signs in to that folder's own console.
  */
-export function consoleDeploymentCheck({ env, folder, platform = process.platform, readFolder = (dir) => deploymentServiceEnv({ env: {}, dir, keys: ["PI_CONSOLE_LISTEN"], platform, fs: nodeFs }) } = {}) {
+export function consoleDeploymentCheck({ env, folder, exported = false, platform = process.platform, readFolder = (dir) => deploymentServiceEnv({ env: {}, dir, keys: ["PI_CONSOLE_LISTEN"], platform, fs: nodeFs }) } = {}) {
   if (typeof folder !== "string" || folder === "") return undefined;
   const res = readFolder(folder);
-  const unknown = res.unreadable ? `could not be read (${res.unreadable})` : res.untrusted ? res.untrusted : (res.unread ?? []).length > 0 || (res.hazardSkipped ?? []).length > 0 ? "has a PI_CONSOLE_LISTEN line its service may read differently" : null;
-  if (unknown) return { same: false, why: `${res.path} ${unknown}, so whether this console is the one its tokens file signs in to cannot be told` };
+  // A line the shell loader runs rather than reads (`. ./more.env`, macOS's loader) can set the key without spelling it,
+  // which the console's own reader treats as a hazard too (console/cli.mjs), so it cannot tell either.
+  const unknown = res.unreadable ? `could not be read (${res.unreadable})` : res.untrusted ? res.untrusted : (res.unread ?? []).length > 0 || (res.hazardSkipped ?? []).length > 0 ? "has a line its service may read differently, and it could set PI_CONSOLE_LISTEN" : res.shellRunsLine != null ? `line ${res.shellRunsLine} is run by the shell rather than read, and could set PI_CONSOLE_LISTEN` : null;
+  const fallback = `or run ./pi-dispatch console in ${folder}`;
+  if (unknown) return { same: false, why: shown(`${res.path} ${unknown}, so whether this console is the one its tokens file signs in to cannot be told`), hint: shown(`fix that line, ${fallback}`) };
   const declared = res.env?.PI_CONSOLE_LISTEN;
   const here = env?.PI_CONSOLE_LISTEN;
   if (addressKey(here, platform) === addressKey(declared, platform)) return { same: true };
   const say = (value) => (String(value ?? "").trim() ? String(value).trim() : `the default ${DEFAULT_LISTEN}`);
-  return { same: false, why: `the console here is ${say(here)}, but ${res.path} names ${say(declared)}, so the tokens file and this console belong to different deployments and the console would refuse a code made here` };
+  const theirs = say(declared);
+  return {
+    same: false,
+    why: shown(`${res.path} puts this deployment's console at ${theirs}, but this pi opens ${say(here)}${exported ? " (PI_CONSOLE_LISTEN in pi's environment)" : ""}, and that console would refuse a code made for this folder`),
+    hint: shown(exported ? `unset PI_CONSOLE_LISTEN in pi's environment or set it to ${theirs}, ${fallback}` : `run /dispatch setup so this pi reads that folder's settings, ${fallback}`),
+  };
 }
 
 /** The one line a probe answer reads as. */
@@ -198,10 +229,10 @@ export async function consoleCommand(words, deps) {
     // Set once it has decided to mint: a failure then is a fault (the audit log, the drop), said as a warning, never the dim status line.
     let decided = false;
     let skippedLevel = "info";
-    const refuse = (why, hint = null) => {
+    const refuse = (why, hint = null, { fault = false } = {}) => {
       if (auto) {
         skipped = `no sign-in link was made: ${why}${hint ? `; ${hint}` : ""}`;
-        if (decided) skippedLevel = "warning";
+        if (decided || fault) skippedLevel = "warning";
         return SKIP;
       }
       notify([...lines, `no sign-in link was made: ${why}`].join("\n"), "warning");
@@ -221,8 +252,13 @@ export async function consoleCommand(words, deps) {
       if (codesDir === null || typeof deps.guarded !== "function" || !deps.guarded(codesDir)) {
         return refuse("the panel does not see this deployment's tokens file, so it guards no login-code directory to mint into; run /dispatch setup (a deployment pointer), or start pi in the deployment folder, or use pi-dispatch-console link in a shell");
       }
-      // The default never mints for a console that is not the tokens file's; an asked-for `--link` still does, as before.
-      if (auto && deps.deployment?.same === false) return refuse(deps.deployment.why, "start pi in the deployment folder of the console you mean, or make PI_CONSOLE_LISTEN agree");
+      // The default never mints for a console that is not the tokens file's, and says so as a warning: the page it opens
+      // is another deployment's. An asked-for `--link` still mints, as before, with the same warning above its link.
+      if (deps.deployment?.same === false) {
+        if (auto) return refuse(deps.deployment.why, deps.deployment.hint, { fault: true });
+        lines.push(`warning: ${deps.deployment.why}; the link below may be refused (${deps.deployment.hint})`);
+        skippedLevelOut = "warning";
+      }
       const read = (deps.readTokens ?? (() => readTokensFile({ path: deps.tokensPath })))();
       if (read.refusal) return refuse(`${read.refusal}; ${TOKEN_ADD_HINT}`);
       const operators = operatorNames(read.file);

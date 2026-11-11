@@ -242,7 +242,6 @@ test("dispatch_costs carries the dollar windows and the per-run dollars beside t
   const logsDir = tempDir("pd-501-p7-logs-");
   process.env.PI_LOGS_DIR = logsDir;
   const now = NOW;
-  indexMod._setCostsClockForTests(() => NOW);
   const at = (ms) => new Date(ms).toISOString();
   const rec = (jobId, over) => ({ jobId, kind: "github", target: "acme/web#1", flow: "fix", startedAt: at(now - 60_000), endedAt: at(now - 30_000), outcome: "completed", tokens: { total: 1, cost: 0.4, boundExceeded: 0 }, usage: null, ...over });
   writeFileSync(join(logsDir, "a.json"), JSON.stringify(rec("a", { dollars: { reservedMicros: 2_000_000, settledMicros: 400_000, basis: "metered", modelBasis: null } })));
@@ -253,6 +252,7 @@ test("dispatch_costs carries the dollar windows and the per-run dollars beside t
   tmpFile("triggers.json", { triggers: [] }, "PI_TRIGGERS_FILE");
   process.env.VALKEY_URL = "not-a-url";
   try {
+    indexMod._setCostsClockForTests(() => NOW);
     const out = textOf(await toolByName("dispatch_costs").execute("id", {}, undefined, undefined, undefined));
     assert.ok(out.fold, "the fold is still there");
     assert.deepEqual(out.dollars.windows.map((w) => [w.ledger, w.name, w.window, w.capMicros, w.counterMicros, w.records?.settledMicros]), [
@@ -272,7 +272,6 @@ test("dispatch_costs says beside the per-run dollars how many records a newer pi
   const logsDir = tempDir("pd-761-costs-logs-");
   process.env.PI_LOGS_DIR = logsDir;
   const now = NOW;
-  indexMod._setCostsClockForTests(() => NOW);
   const at = (ms) => new Date(ms).toISOString();
   const rec = (jobId, over) => ({ jobId, kind: "github", target: "acme/web#1", flow: "fix", startedAt: at(now - 60_000), endedAt: at(now - 30_000), outcome: "completed", tokens: { total: 1, cost: 0.4, boundExceeded: 0 }, usage: null, dollars: { reservedMicros: 2_000_000, settledMicros: 400_000, basis: "metered", modelBasis: null }, ...over });
   writeFileSync(join(logsDir, "a.json"), JSON.stringify(rec("a")));
@@ -283,6 +282,7 @@ test("dispatch_costs says beside the per-run dollars how many records a newer pi
   tmpFile("triggers.json", { triggers: [] }, "PI_TRIGGERS_FILE");
   process.env.VALKEY_URL = "not-a-url";
   try {
+    indexMod._setCostsClockForTests(() => NOW);
     const out = textOf(await toolByName("dispatch_costs").execute("id", {}, undefined, undefined, undefined));
     assert.deepEqual(out.dollars.runs.map((r) => [r.jobId, r.dollars.settledMicros]), [["a", 400_000]], "the newer run's dollars are not listed");
     assert.equal(out.dollars.newerSkipped, 1, "and the list says one was left out");
@@ -308,6 +308,30 @@ test("dispatch_costs says beside the per-run dollars how many records a newer pi
     // None left out: no count at all, so every other answer is as it was.
     writeFileSync(join(logsDir, "n.json"), JSON.stringify(rec("n")));
     assert.equal(Object.hasOwn(textOf(await toolByName("dispatch_costs").execute("id", {}, undefined, undefined, undefined)).dollars, "newerSkipped"), false);
+  } finally {
+    delete process.env.VALKEY_URL;
+    indexMod._setCostsClockForTests();
+  }
+});
+
+test("dispatch_costs' what-if prices the runs of the tool's one clock, its sample and its window alike (#849)", async () => {
+  // The sample is the 7d fold's records and the window the last 24 hours, both from the clock the call read: a record a
+  // minute before NOW is a run of that window, and the real clock, months later, would leave it out of both.
+  const logsDir = tempDir("pd-849-whatif-logs-");
+  process.env.PI_LOGS_DIR = logsDir;
+  const at = (ms) => new Date(ms).toISOString();
+  writeFileSync(join(logsDir, "w.json"), JSON.stringify({ jobId: "w", kind: "github", target: "acme/web#1", flow: "fix", model: "anthropic/claude-sonnet-4-5", startedAt: at(NOW - 120_000), endedAt: at(NOW - 60_000), outcome: "completed", tokens: { total: 1, cost: 0.4, boundExceeded: 0 }, usage: null }));
+  tmpFile("settings.json", { maxCostUsd: "2" }, "PI_SETTINGS_FILE");
+  tmpFile("scoped-limits.json", undefined, "PI_SCOPED_LIMITS_FILE");
+  tmpFile("subscriptions.json", undefined, "PI_SUBSCRIPTIONS_FILE");
+  tmpFile("triggers.json", { triggers: [] }, "PI_TRIGGERS_FILE");
+  process.env.VALKEY_URL = "not-a-url";
+  try {
+    indexMod._setCostsClockForTests(() => NOW);
+    const out = textOf(await toolByName("dispatch_costs").execute("id", { whatif: "anthropic/claude-sonnet-4-5", runs: "24h" }, undefined, undefined, undefined));
+    const set = out.whatif?.runSet;
+    assert.ok(set, JSON.stringify(out.whatif));
+    assert.equal(set.runs + set.excluded, 1, "the one record is in the sample and in the window");
   } finally {
     delete process.env.VALKEY_URL;
     indexMod._setCostsClockForTests();

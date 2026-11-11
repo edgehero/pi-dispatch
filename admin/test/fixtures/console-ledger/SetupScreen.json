@@ -1,7 +1,7 @@
 {
   "card": "SetupScreen",
   "pr": 784,
-  "words": "a496f232bbf31fa55c49397b92da39fe83b1734963939be09f7e5c912c606cf1",
+  "words": "405096e9a6b4ad8c925a4f83adf06f7e1b279ee556de2ea5f20ebe782c31c4e0",
   "elements": [
     {"el":"p-setup","kind":"panel","status":"new","source":"admin/src/console/panels/setup.mjs#setupMain","golden":["panels/setup-starting.operator","panels/setup-starting.viewer"]},
     {"el":"p-setup-pi","kind":"panel","status":"new","source":"admin/src/console/panels/overview.mjs#overviewSetupPi","golden":["panels/setup-partial.operator"],"reason":"the host's pi setup step, a panel the console adds to the checklist"},
