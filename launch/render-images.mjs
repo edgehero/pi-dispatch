@@ -5,7 +5,7 @@
  *   node launch/render-images.mjs           docs/images/dispatch-{dashboard,hosts,allocation,run-detail,commands}.svg, and
  *                                           the READMEs' three of them for a light page as dispatch-*-light.svg
  *   node launch/render-images.mjs --png     the same, plus the .png copies the npm page shows (dashboard, hosts,
- *                                           allocation, each in both) and docs/images/insights-view.png
+ *                                           allocation, each in both)
  *
  *   node launch/render-images.mjs --console          docs/images/console/: the operator console images the READMEs show
  *                                                    (`launch/console-picks.mjs`)
@@ -33,9 +33,10 @@
  * parked run and Enter, its RUN_DETAIL), and drawn as framed SVGs by `launch/transcript-svg.mjs`. The commands
  * transcript is what `/dispatch status`, `budget`, `runs 5`, `triggers` and `priorities` send, assembled from the same
  * reads and `render.mjs` functions index.ts uses, at `COMMANDS_WIDTH` columns, with the deployment's temporary folder
- * shown as `~/pi-work`. With `--png`, the operator console's insights page is rendered by the console's own page code
- * (`insightsPage`) and shot in headless Chrome at 1240 px and device scale 2, full page, and the two SVGs are rasterised for the
- * npm page, which cannot show an SVG from raw.githubusercontent.com. Chrome is never needed without `--png`.
+ * shown as `~/pi-work`. With `--png`, the three SVGs are rasterised in headless Chrome for the npm page, which cannot show
+ * an SVG from raw.githubusercontent.com. Chrome is never needed without `--png`. The console's spend screen is no longer
+ * drawn here (issue #846): `docs/images/insights-view.png` went with the last published README that loaded it, and the
+ * console's own pictures (`--console`) show that screen from its goldens.
  *
  * Only live state is canned: the queue's (its counts, its workers, the active job and the failed one), which a running
  * fleet is the only thing that produces, and the run detail's sandbox (`SANDBOX`: a retained directory on the worker's
@@ -59,7 +60,7 @@ import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { frozenDateSource, openChrome as openChromePipe } from "./chrome-pipe.mjs";
+import { openChrome as openChromePipe } from "./chrome-pipe.mjs";
 import { findOnPath } from "./server-binary.mjs";
 import { NOW, QUEUE_STATE, WORKERS, FAILED, RUNNING, LOCAL_HOST, PARKED, seedDeployment, writeDeployment } from "./fixture-deployment.mjs";
 
@@ -149,7 +150,6 @@ try {
 	process.exit(2);
 }
 const chrome = process.env.CHROME || MAC_CHROME;
-const gitPath = process.env.PATH ?? "";
 if (opts.png || opts.console || opts.explain) {
 	try {
 		accessSync(chrome, constants.X_OK);
@@ -470,61 +470,23 @@ async function openChrome() {
 	browserPipe = pipe;
 	return {
 		/**
-		 * Load `url` in a `width` px viewport at `scale`, with the page's clock fixed at `clockMs` when given, and write a
-		 * PNG of `height` px, or of the whole page.
+		 * Load `url` in a `width` px viewport at `scale`, and write a PNG of `height` px.
 		 */
-		async shoot({ url, out, width, height = 900, scale, fullPage = false, clockMs = null }) {
+		async shoot({ url, out, width, height = 900, scale }) {
 			const { sessionId, send: s, close } = await pipe.openTarget();
 			await s("Page.enable");
 			const metrics = (h) => s("Emulation.setDeviceMetricsOverride", { width, height: h, deviceScaleFactor: scale, mobile: false });
 			await metrics(height);
-			if (clockMs !== null) {
-				// The page's "generated N ago" reads the BROWSER's clock: fixed one minute after the page was generated.
-				await s("Page.addScriptToEvaluateOnNewDocument", { source: frozenDateSource(clockMs) });
-			}
 			const loaded = pipe.event((m) => m.method === "Page.loadEventFired" && m.sessionId === sessionId, "load event");
 			await s("Page.navigate", { url });
 			await loaded;
 			await sleep(500); // fonts and the charts' first layout
-			let h = height;
-			if (fullPage) {
-				const m = await s("Page.getLayoutMetrics");
-				h = Math.ceil(m.cssContentSize.height);
-				await metrics(h);
-				await sleep(200);
-			}
-			const { data } = await s("Page.captureScreenshot", { format: "png", captureBeyondViewport: true, clip: { x: 0, y: 0, width, height: h, scale: 1 } });
+			const { data } = await s("Page.captureScreenshot", { format: "png", captureBeyondViewport: true, clip: { x: 0, y: 0, width, height, scale: 1 } });
 			writeFileSync(out, Buffer.from(data, "base64"));
 			await close();
 		},
 		close: () => pipe.close(),
 	};
-}
-
-/**
- * The operator console's spend screen (`/insights?range=30d`), as `pi-dispatch-console serve` renders it for an
- * operator: the console's own page code (`loadPageData`, `renderPage`) over the real `assembleInsights` and pricing.
- * The page links its stylesheet and script by URL (the console serves them; its CSP refuses inline ones); for a file
- * Chrome opens they are written in, the stylesheet in the head and the script at the end of the body, unchanged.
- */
-async function insightsPage({ env, RM }) {
-	const pages = await import("../admin/src/console/pages.mjs");
-	const { assembleInsights } = await import("../admin/src/insights-assembly.mjs");
-	const { CONSOLE_CSS } = await import("../admin/src/console/style.mjs");
-	const { CONSOLE_SCRIPT } = await import("../admin/src/console/script.mjs");
-	const { pricedModelIds } = await import("../admin/src/console/whatif.mjs");
-	const pricing = await import("../worker/src/pricing.mjs");
-	const paths = RM.resolvePaths(env);
-	const parsed = pages.parsePageQuery("insights", "range=30d");
-	const deps = { insights: (window, o) => assembleInsights(paths, window, { pricing, nowMs: NOW, envFn: () => env, ...(o?.fullPaths ? { fullPaths: true } : {}) }), pricedModels: () => pricedModelIds(pricing), env, now: () => NOW };
-	const session = { name: "ops", role: "operator" };
-	const data = await pages.loadPageData("insights", parsed.query, deps, session);
-	const { html } = await pages.renderPage("insights", { query: parsed.query, session, data, readOnly: false });
-	const link = '<link rel="stylesheet" href="/static/console.css">';
-	const script = '<script src="/static/console.js" defer></script>';
-	const page = String(html);
-	if (!page.includes(link) || !page.includes(script) || !page.includes("</body>")) throw new Error("the console page no longer links its stylesheet and script as expected");
-	return page.replace(link, `<style>${CONSOLE_CSS}</style>`).replace(script, "").replace("</body>", `<script>${CONSOLE_SCRIPT}</script>\n</body>`);
 }
 
 // ---- main ---------------------------------------------------------------------------------------------------------
@@ -626,10 +588,8 @@ async function main() {
 		const size = await Promise.race([admin.dbsize(), new Promise((_, reject) => (timer = setTimeout(() => reject(new Refusal(`no answer from ${opts.url ? "--url" : "the server"} within ${URL_CONNECT_MS / 1000} s`)), URL_CONNECT_MS)))]).finally(() => clearTimeout(timer));
 		if (size !== 0) throw new Refusal(`the database at --url holds ${size} keys: the fixture needs an empty one`);
 		seeded = true;
-		process.env.PATH = gitPath; // only git reads it (the --png topology's two repositories), and only while they are made
 		const deployment = join(work, "deployment");
-		const paths = writeDeployment(deployment, { git: opts.png });
-		delete process.env.PATH;
+		const paths = writeDeployment(deployment);
 		const env = {
 			VALKEY_URL: url,
 			PI_WORKER_NAME: LOCAL_HOST,
@@ -663,12 +623,8 @@ async function main() {
 		for (const [name, svg] of images.filter(([n]) => PNG_IMAGES.includes(n))) writeFileSync(join(opts.out, `${lightName(name)}.svg`), relightTranscript(svg));
 
 		if (opts.png) {
-			const html = await insightsPage({ env, RM });
-			const page = join(work, "insights-page.html");
-			writeFileSync(page, html);
 			const browser = await openChrome();
 			try {
-				await browser.shoot({ url: pathToFileURL(page).href, out: join(opts.out, "insights-view.png"), width: 1240, scale: 2, fullPage: true, clockMs: NOW + 60_000 });
 				for (const [name, svg] of images.filter(([n]) => PNG_IMAGES.includes(n))) {
 					const [, w, h] = /width="(\d+)" height="(\d+)"/.exec(svg);
 					for (const file of [name, lightName(name)]) await browser.shoot({ url: pathToFileURL(join(opts.out, `${file}.svg`)).href, out: join(opts.out, `${file}.png`), width: Number(w), height: Number(h), scale: SVG_PNG_SCALE });
@@ -679,7 +635,7 @@ async function main() {
 		}
 		for (const [name] of images) console.log(join(opts.out, `${name}.svg`));
 		for (const name of PNG_IMAGES) console.log(join(opts.out, `${lightName(name)}.svg`));
-		if (opts.png) for (const name of [...PNG_IMAGES, ...PNG_IMAGES.map(lightName), "insights-view"]) console.log(join(opts.out, `${name}.png`));
+		if (opts.png) for (const name of [...PNG_IMAGES, ...PNG_IMAGES.map(lightName)]) console.log(join(opts.out, `${name}.png`));
 	} finally {
 		if (opts.url && seeded) await admin.flushdb().catch(() => {});
 		admin.disconnect();

@@ -86,12 +86,18 @@ export function withdrawCancel({ redis, jobId, interventionOrigin = "human" }) {
  * already own a could-not-reach-Valkey message, and swallowing here would turn an unreachable Valkey into
  * a lying "no worker acknowledged".
  *
- * `pollMs`/`sleep` are injectable so tests never wait on a wall clock.
+ * `pollMs`/`sleep` are injectable so tests never wait on a wall clock. The wait ends at `ackTimeoutMs` by whichever runs
+ * out first: the sleeps it took, or the time `now` says has passed (issue #846). Counting sleeps alone, a GET that waited
+ * out a Valkey restart in the client's queue was not counted at all, so a 10 s wait could last as long as the outage did.
  */
-export async function requestCancel({ redis, jobId, interventionOrigin = "human", ackTimeoutMs = 10_000, pollMs = 250, sleep = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
+export async function requestCancel({ redis, jobId, interventionOrigin = "human", ackTimeoutMs = 10_000, pollMs = 250, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = Date.now, onWritten = null }) {
 	const requestKey = cancelRequestKeyOf(jobId, interventionOrigin);
 	const ackKey = interventionOrigin === "agent" ? agentCancelAckKey(jobId) : cancelAckKey(jobId);
 	await redis.set(requestKey, interventionOrigin === "agent" ? "agent-cancel" : "operator-cancel", "PX", CANCEL_REQ_TTL_MS);
+	// When the request's TTL started, for a caller that names until when it may stand (the CLI, issue #846), and the start
+	// of the wait for its acknowledgment, so a slow SET is not counted against it.
+	onWritten?.();
+	const deadline = now() + ackTimeoutMs;
 	for (let waited = 0; ; waited += pollMs) {
 		let host;
 		try {
@@ -102,7 +108,7 @@ export async function requestCancel({ redis, jobId, interventionOrigin = "human"
 			throw err;
 		}
 		if (host !== null && host !== undefined) return { ack: host };
-		if (waited + pollMs > ackTimeoutMs) break;
+		if (waited + pollMs > ackTimeoutMs || now() >= deadline) break;
 		await sleep(pollMs);
 	}
 	// Losing this DEL leaves the request standing for its 60s TTL, where a worker can still read it, so that is no "nothing was

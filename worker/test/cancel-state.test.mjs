@@ -567,3 +567,18 @@ test("a cancel deletes the removed job's model attempt key, named by its queue a
 	}
 });
 
+
+test("requestCancel's wait ends by the clock too: a poll that waited out an outage in the client's queue counts its time (#846)", async () => {
+	const redis = fakeRedis({ acks: [] });
+	let at = 1_000_000;
+	// Each GET takes 3 s of wall time (it sat in the client's queue while Valkey restarted); the sleeps are instant.
+	const get = redis.get.bind(redis);
+	redis.get = async (key) => {
+		at += 3_000;
+		return get(key);
+	};
+	const res = await requestCancel({ redis, jobId: "j3", ackTimeoutMs: 10_000, pollMs: 250, sleep: async () => {}, now: () => at });
+	assert.deepEqual(res, { timeout: true });
+	assert.equal(redis.ops.filter((op) => op[0] === "get").length, 4, "four polls of 3 s pass the 10 s; by the sleeps alone it would have been forty");
+	assert.deepEqual(redis.ops.at(-1), ["del", "cancel:req:j3"]);
+});

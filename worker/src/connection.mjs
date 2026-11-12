@@ -251,6 +251,13 @@ class BoundedRedis extends Redis {
 }
 
 /**
+ * How long one command of a short-lived client may wait for its answer (`commandTimeoutMs`), in the offline queue or on a
+ * Valkey that stopped answering: the console's own clients wait as long, and `pi-dispatch cancel` (issue #846) takes it
+ * from here, so a cancel against a Valkey that went away ends with a sentence rather than waiting as long as it is gone.
+ */
+export const VALKEY_COMMAND_TIMEOUT_MS = 5_000;
+
+/**
  * A raw ioredis client (the budget's INCR/EXPIRE, the registry and fleet reads, doctor's PING). Built from
  * `parseConnection`'s options, so it connects through `JudgedConnector` like every other client. `lazyConnect` and
  * `failFast` as ioredis and `parseConnection` read them.
