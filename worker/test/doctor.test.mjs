@@ -2950,6 +2950,16 @@ test("doctor: an EMPTY PI_PAUSE_WINDOWS_FILE is a REFUSED BOOT, not an unset one
 	assert.ok(text().includes(`⚠ ${join(cwd, "pause-windows.json")} exists but PI_PAUSE_WINDOWS_FILE is unset`));
 });
 
+test("doctor: a pause-windows file with a key written twice FAILS, as the boot it predicts refuses it (#846)", async () => {
+	const cwd = scaffoldedCwd();
+	const path = join(cwd, "doubled.json");
+	writeFileSync(path, '{"windows":[{"scope":"*","from":"01:00","to":"02:00"}],"windows":[]}');
+	const { out, text } = capture();
+	const code = await runDoctor(imgEnv({ PI_PAUSE_WINDOWS_FILE: path }), scaffoldDeps(out, cwd));
+	assert.match(text(), /✗ PI_PAUSE_WINDOWS_FILE is set in this shell to a file the worker cannot load, so it REFUSES TO START: pause-windows file has a duplicate key "windows" at windows: JSON keeps the LAST value/);
+	assert.notEqual(code, 0);
+});
+
 test("doctor: the pause-windows mismatch is NEVER tier -- doctor cannot guess which path was meant", async () => {
 	// This cwd is doctor's, not necessarily the worker's, and writing an env line would be guessing a
 	// semantic value. The doctrine pin below enforces the allowed set generally; this asserts it at the

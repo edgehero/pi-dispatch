@@ -83,8 +83,13 @@ export function pauseWindowsVersionRefusal(doc, { supported = PAUSE_WINDOWS_VERS
 export function heldPauseWindows(text, path) {
 	if ((text ?? "").trim() === "") return { doc: null, windows: [] };
 	const { value, problem } = heldDocument(text, "windows");
-	const refused = problem ?? (findDuplicateKey(text) ? "has a key written twice" : null);
-	if (refused) return { doc: value ?? null, problem: `the pause-windows file ${path} ${refused}, so its windows cannot be kept` };
+	// Whenever the text parsed, a problem with its shape included (`"windows": {}`), as the loader judges the duplicate first.
+	const doubled = value !== undefined && findDuplicateKey(text) !== null;
+	const refused = doubled ? "has a key written twice" : problem ?? null;
+	// A key written twice hands back no document (issue #846): the callers ask the document whether a newer release wrote
+	// it before they read `problem`, and `{"version":1,"version":2}` would send the operator to upgrade to a release that
+	// refuses the file too. Broken, never newer, as the loader reads it and as the triggers writer does.
+	if (refused) return { doc: doubled ? null : value ?? null, problem: `the pause-windows file ${path} ${refused}, so its windows cannot be kept` };
 	return { doc: value, windows: Array.isArray(value.windows) ? value.windows : [] };
 }
 
@@ -158,7 +163,7 @@ function validateTz(tz, at, path) {
  * (unknown fields dropped; `fromMin`/`toMin` precomputed). Throws `configError` (fail-loud) on any malformed
  * entry. `path` is for messages only.
  *
- * The file's `version` is judged FIRST, before the windows (issue #761): a newer file's windows may use a shape this
+ * The file's `version` is judged right after the duplicate-key check (issue #846) and before the windows (issue #761): a newer file's windows may use a shape this
  * build would call malformed, and the true message is "upgrade". A newer file throws a configError with
  * `.newer === true` (the worker defers jobs rather than misread a pause); a broken `version`, or a window using a field
  * or a value that needs a higher version than the file declares, throws the ordinary configError. `supported`, `table`
@@ -170,6 +175,17 @@ export function parsePauseWindows(text, path, { supported = PAUSE_WINDOWS_VERSIO
 		parsed = JSON.parse(text);
 	} catch (error) {
 		throw configError(`pause-windows file is not valid JSON: ${path} (${error.message})`);
+	}
+	// Issue #846: a key written twice is REFUSED, after the parse and before anything else, as the triggers loader refuses
+	// one (`triggers.mjs`, issue #313). `JSON.parse` keeps the LAST value, so `{"windows":[...],"windows":[]}` loaded no
+	// window while a person reading the file sees two, and a reload swapped a live list down to none with nothing said:
+	// quiet hours stopped applying, which costs money in exactly the hours someone believes are paused. Refused, the boot
+	// does not start and a reload keeps the last good windows and logs why (`reloadPauseWindows`). The writers have
+	// refused such a file since #841 (`heldPauseWindows`), so only a hand edit makes one. BEFORE the version, the triggers
+	// loader's order: a doubled `version` is broken, never newer, and a newer release refuses the duplicate as well.
+	const duplicate = findDuplicateKey(text);
+	if (duplicate) {
+		throw configError(`pause-windows file has a duplicate key ${JSON.stringify(duplicate.key)} at ${duplicate.at}: JSON keeps the LAST value, so the file a person reads and the file that applies are not the same: ${path}`);
 	}
 	const problem = pauseWindowsVersionRefusal(parsed, { supported });
 	if (problem) {

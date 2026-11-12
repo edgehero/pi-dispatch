@@ -169,8 +169,10 @@ live edit. Editing or deleting one window through the console, the panel or the 
 and an add refuses unless what it leaves loads. Every write refuses a file that is not valid JSON, is not a JSON object, has
 a `windows` that is not a list, or has a key written twice, with every byte left as it was: fix the file by hand, or move it
 aside to start from an empty one. The console's whole-list action (`POST /api/pause-windows/preview`, then `/confirm`) can
-replace a list with a bad window in it. A key written twice is the one the worker does not refuse: it reads the file as
-`JSON.parse` does, so the last list wins, whichever one a person reads. A window that uses a field or a value above the `version` the file
+replace a list with a bad window in it. Its Undo then says to put the old list back by hand, since the console would refuse
+that list. A key written twice anywhere in the file (such as two `windows` keys, or one
+field twice in a window) is refused by the worker too, at boot and on a live edit: `JSON.parse` would keep the last one, so the windows that applied
+would not be the ones a person reads ([upgrading.md](upgrading.md#before-you-start) says from which release). A window that uses a field or a value above the `version` the file
 declares is broken too ("pause window at index 1: days holds a value that needs pause-windows file version 2, and the
 file declares 1").
 
