@@ -49,7 +49,7 @@ export function parseSecretBundleProfilesSafe(raw) {
  *   - `realExecutablePath`: the resolver's own probe (secrets.mjs `realExecutable`), or null when pi did not load;
  *   - `resolveBundle`: `(binding) => resolve result`, only with `--secrets`.
  */
-export async function secretBundleChecks({ bundles = {}, triggersPresent = true, projects = [], projectsError = null, envRaw, overlayBundles = {}, roots = [], realExecutablePath = null, resolveBundle = null } = {}) {
+export async function secretBundleChecks({ bundles = {}, triggersPresent = true, projects = [], projectsError = null, projectsUnread = false, envRaw, overlayBundles = {}, roots = [], realExecutablePath = null, resolveBundle = null } = {}) {
 	const checks = [];
 	const { bundles: envBundles, error } = parseSecretBundleProfilesSafe(envRaw);
 	if (error) {
@@ -91,7 +91,11 @@ export async function secretBundleChecks({ bundles = {}, triggersPresent = true,
 		} else if (!fromEnv && !Object.hasOwn(usableOverlay, b.profile)) {
 			checks.push({ ok: false, label: `secret bundle ${id} names profile ${b.profile}, declared in the settings overlay but not usable`, fix: roots.length === 0 ? "PI_SECRET_RESOLVER_ROOTS is unset, so the worker uses no overlay-declared resolver: set it, or declare the profile in PI_SECRET_BUNDLES" : "the resolver must be an executable file whose real path sits inside PI_SECRET_RESOLVER_ROOTS" });
 		}
-		if (projectsError !== null) {
+		if (projectsUnread) {
+			// Issue #859: the `.env` line naming the projects file could not be read (its own line says why), so whether the
+			// service's file holds the project is not known: a warning, never the ✗ a file with no such project earns.
+			checks.push({ ok: false, warn: true, label: `secret bundle ${id} names project ${b.project}, and whether the projects file the service reads holds it is not known: doctor could not read what the deployment .env sets for PI_PROJECTS_FILE`, fix: "fix what the boot-file line above names, then re-run doctor" });
+		} else if (projectsError !== null) {
 			checks.push({ ok: false, label: `secret bundle ${id} names project ${b.project}, and projects.json does not load`, fix: "fix projects.json (its own line above says why) -- a bundle applies to a project's jobs only once the worker knows the project" });
 		} else if (!projectIds.has(b.project)) {
 			checks.push({ ok: false, label: `secret bundle ${id} names project ${b.project}, which projects.json does not hold`, fix: "add the project to PI_PROJECTS_FILE, or correct the bundle's project -- until then the bundle reaches no job, while the file reads as granting it" });
