@@ -1915,7 +1915,9 @@ function pauseListBack(out) {
 /** Whether the list `out` replaced would pass the whole-list preview as its own Undo (`pauseListBack`). */
 function pauseListGoesBack(out) {
   const before = out.extra?.before;
-  if (!Array.isArray(before) || pauseListShapeRefusal(before) !== null) return false;
+  // `plainBody` first, as every preview's body is judged before the action's own (`previewAction`): a list of more than
+  // 256 windows, or a `days` of more than 256 names, loads in the worker and is refused there.
+  if (!Array.isArray(before) || !plainBody({ windows: before }) || pauseListShapeRefusal(before) !== null) return false;
   if (typeof out.beforeText !== "string") return true;
   const held = heldPauseWindows(out.beforeText, out.target ?? "pause-windows.json");
   if (held.problem) return false;

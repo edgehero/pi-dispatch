@@ -204,14 +204,14 @@ test("parseScopeString refuses a qualified scope whose repo is not a forge repo'
 
 test("parsePauseWindows refuses a key written twice anywhere in the file, which JSON.parse would settle by keeping the last (#846)", () => {
 	const two = '{"windows":[{"scope":"*","from":"01:00","to":"02:00"},{"scope":"*","from":"03:00","to":"04:00"}],"windows":[]}';
-	assert.throws(() => parsePauseWindows(two, "pw.json"), (e) => e.piDispatchConfig === true && e.message === 'pause-windows file has a duplicate key "windows" at windows: JSON keeps the LAST value, so the windows a person reads in the file and the windows that apply are not the same: pw.json');
+	assert.throws(() => parsePauseWindows(two, "pw.json"), (e) => e.piDispatchConfig === true && e.message === 'pause-windows file has a duplicate key "windows" at windows: JSON keeps the LAST value, so the file a person reads and the file that applies are not the same: pw.json');
 	// Inside one window: the second `to` would quietly move the window's end.
 	assert.throws(() => parsePauseWindows('{"windows":[{"scope":"*","from":"01:00","to":"02:00","to":"23:00"}]}', "pw.json"), /duplicate key "to" at windows\.0\.to/);
 	// A key the file does not own is the file's too: the whole file is refused, as the triggers loader refuses its own.
 	assert.throws(() => parsePauseWindows('{"windows":[],"note":1,"note":2}', "pw.json"), /duplicate key "note"/);
 	// "Not valid JSON" stays the first thing said, and a doubled version is a broken file, never a newer one.
 	assert.throws(() => parsePauseWindows('{"windows":[],"windows":', "pw.json"), /not valid JSON/);
-	assert.throws(() => parsePauseWindows('{"version":2,"version":1,"windows":[]}', "pw.json"), (e) => /duplicate key "version"/.test(e.message) && e.newer !== true);
+	assert.throws(() => parsePauseWindows('{"version":1,"version":2,"windows":[]}', "pw.json"), (e) => /duplicate key "version"/.test(e.message) && e.newer !== true, "the duplicate is judged before the version JSON.parse keeps, which reads as newer");
 	// The same key in two windows is two keys, not one written twice.
 	assert.equal(parse([{ scope: "*", from: "01:00", to: "02:00" }, { scope: "*", from: "03:00", to: "04:00" }]).length, 2);
 });
