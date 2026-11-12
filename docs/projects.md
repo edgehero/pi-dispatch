@@ -206,7 +206,7 @@ Which projects keep each host busy shows in the capacity report: its projects by
 
 | Piece | Value |
 |---|---|
-| Env var | `PI_PROJECTS_FILE` (absolute path; unset = no projects. An EMPTY value is NOT unset: the worker keeps it and refuses to start, so fill the line in or delete it, and doctor fails on it) |
+| Env var | `PI_PROJECTS_FILE` (absolute path; unset = no projects. An EMPTY value is NOT unset: the worker keeps it and refuses to start, so fill the line in or delete it, and doctor fails on it. Doctor's checks read it from your shell, else from the deployment's `.env`) |
 | File | `{ "version": 1, "projects": [ { id, name?, members } ] }` |
 | Record field | `project`: the id, or `null` |
 | Caps | a `project:<id>` row in `scoped-limits.json`; refusal reason `project-cap` |

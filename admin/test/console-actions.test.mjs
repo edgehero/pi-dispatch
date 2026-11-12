@@ -444,6 +444,8 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
     envelopeAfter: "Set it back with the envelope form: the console kept no copy of the old values.",
     tooBig: "Put the previous list back by hand: this preview showed it; the console keeps no copy.",
     tooBigAfter: "Put the previous list back by hand: the console kept no copy of it.",
+    refusedList: "Put the previous list back by hand: the console would refuse it as an Undo (a window it does not take, or more than 256 windows or days); this preview showed it, and the console keeps no copy.",
+    refusedListAfter: "Put the previous list back by hand: the console would refuse it as an Undo (a window it does not take, or more than 256 windows or days), and kept no copy of it.",
     resumeUnread: "Pause the queues that were paused again by hand: the fleet was not read before the resume, so which they were is not known.",
     resumeShort: "Pause the queues that were paused again by hand: not every queue was read before the resume, so which they were is not fully known.",
   });
@@ -534,6 +536,8 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
     ["queue-resume", { payload: { queue: "pi-jobs" } }, twice("Pause queue pi-jobs again"), { action: "queue-pause", body: { queue: "pi-jobs" } }, "Resume", "Resumed queue pi-jobs"],
     ["pause-windows", { beforeText: json({ windows: [windows] }), extra: { before: [windows] } }, twice("Put the previous pause windows back"), { action: "pause-windows", body: { windows: [windows] } }, "Confirm", "Replaced the pause windows"],
     ["pause-windows", { beforeText: '{ "later": true }', extra: { before: [] } }, [U.tooBig, U.tooBigAfter], null, "Confirm", "Replaced the pause windows"],
+    ["pause-windows", { beforeText: json({ windows: [{ scope: "*", from: "25:00", to: "02:00" }] }), target: "pw.json", extra: { before: [{ scope: "*", from: "25:00", to: "02:00" }] } }, [U.refusedList, U.refusedListAfter], null, "Confirm", "Replaced the pause windows"],
+    ["pause-windows", { beforeText: json({ windows: Array.from({ length: 257 }, () => windows) }), target: "pw.json", extra: { before: Array.from({ length: 257 }, () => windows) } }, [U.refusedList, U.refusedListAfter], null, "Confirm", "Replaced the pause windows"],
     ["trigger-add", { beforeText: json({ triggers: [{}, {}] }), plan: { entry: { on: { type: "label" } } } }, twice("Delete trigger row 3"), { action: "trigger-delete", body: { index: 2 } }, "Confirm", "Added trigger row 3 (label)"],
     ["trigger-edit", { beforeText: json({ triggers: [{ run: { flow: "triage" } }] }), plan: { index: 0, ref: {}, changes: [["flow", "triage", "review"]] } }, twice("Edit trigger row 1 back to what it said"), { action: "trigger-edit", body: { index: 0, flow: "triage" } }, "Confirm", "Changed trigger row 1: flow from triage to review"],
     ["trigger-edit", { beforeText: json({ triggers: [{ run: { flow: "triage" } }] }), plan: { index: 0, ref: { model: "m1" }, changes: [["flow", "triage", "triage"], ["model", "-", "m1"]] } }, twice("Edit trigger row 1 back by hand: model had no value before, and an edit cannot remove one."), null, "Confirm", "Changed trigger row 1: flow from triage to triage, model from - to m1"],
@@ -887,6 +891,10 @@ for (const [what, text, says] of [
   ["a bare list", `[{ "scope": "*", "from": "01:00", "to": "02:00" }]\n`, "is not a JSON object"],
   ["an object for windows", `{ "windows": {} }\n`, 'has a "windows" that is not a list'],
   ["a key written twice over an empty list", `{ "windows": [{ "scope": "*", "from": "01:00", "to": "02:00" }], "windows": [] }\n`, "has a key written twice"],
+  // Issue #846: a doubled `version` whose last value reads as newer is broken, as the worker reads it, never "upgrade".
+  ["a version written twice", `{ "version": 1, "version": 2, "windows": [] }\n`, "has a key written twice"],
+  ["a version written twice beside a windows that is no list", `{ "version": 1, "version": 2, "windows": {} }\n`, "has a key written twice"],
+  ["a windows written twice, the last no list", `{ "windows": [], "windows": {} }\n`, "has a key written twice"],
 ]) {
   test(`every pause window action on a pause-windows file with ${what} is refused at the preview, in words, with every byte kept`, async () => {
     const { paths } = deployment();
@@ -1474,10 +1482,31 @@ test("the whole-list pause-windows refusals name a window by the index the Confi
   assert.deepEqual([unread.confirm.json().change.inverse, unread.confirm.json().change.undo], [null, UNDO_SENTENCES.tooBigAfter]);
 });
 
+test("replacing a list that held a window the console refuses offers no Undo that its own preview would refuse, and says so (#846)", async () => {
+  const { paths } = deployment();
+  const c = await start({ paths });
+  // A window the loader refuses (an hour past 23), and one with a field the whole-list action does not take: each is a list
+  // a person replaces to get rid of, and neither can come back through the preview.
+  for (const bad of [{ scope: "*", from: "25:00", to: "02:00" }, { scope: "*", from: "01:00", to: "02:00", colour: "red" }]) {
+    writeFileSync(paths.pauseWindowsPath, `${JSON.stringify({ windows: [{ scope: "*", from: "01:00", to: "02:00" }, bad] }, null, 2)}\n`);
+    const replaced = await c.both("pause-windows", { windows: [{ scope: "*", from: "05:00", to: "06:00" }] });
+    assert.equal(replaced.preview.undo, UNDO_SENTENCES.refusedList);
+    assert.deepEqual([replaced.confirm.json().change.inverse, replaced.confirm.json().change.undo], [null, UNDO_SENTENCES.refusedListAfter]);
+    // What the old Undo did: its preview refused the list it was offered to put back.
+    const back = await c.act("pause-windows", { windows: [{ scope: "*", from: "01:00", to: "02:00" }, bad] });
+    assert.equal(back.status, 400);
+  }
+  // A good list still goes back.
+  writeFileSync(paths.pauseWindowsPath, `${JSON.stringify({ windows: [{ scope: "*", from: "01:00", to: "02:00" }] }, null, 2)}\n`);
+  const good = await c.both("pause-windows", { windows: [] });
+  assert.deepEqual(good.confirm.json().change.inverse, { action: "pause-windows", body: { windows: [{ scope: "*", from: "01:00", to: "02:00" }] } });
+});
+
 test("a change too big for the session's flash keeps its banner and drops its inverse, saying to put the list back by hand", async () => {
   const { paths } = deployment();
   // A list of windows whose JSON is past FLASH_MAX_BYTES: its inverse (the whole old list) cannot ride the flash.
-  const big = Array.from({ length: 400 }, (_, i) => ({ scope: `github:acme/repo-with-a-long-name-${i}`, from: "01:00", to: "02:00", tz: "Europe/Amsterdam", days: ["mon", "tue", "wed"] }));
+  // 250 windows: past the flash, and under the 256 a preview's body may hold (`plainBody`), so the Undo is one to begin with.
+  const big = Array.from({ length: 250 }, (_, i) => ({ scope: `github:acme/repo-with-a-long-name-${i}`, from: "01:00", to: "02:00", tz: "Europe/Amsterdam", days: ["mon", "tue", "wed"] }));
   writeFileSync(paths.pauseWindowsPath, `${JSON.stringify({ windows: big }, null, 2)}\n`);
   assert.ok(Buffer.byteLength(JSON.stringify(big)) > FLASH_MAX_BYTES);
   const c = await start({ paths });

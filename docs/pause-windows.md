@@ -64,13 +64,16 @@ path and **refuses to start**. Doctor judges the two separately, since a valid p
 nothing about the service, which reads only the file. `pi-dispatch up` leaves such a line alone (it never
 clobbers a value you wrote) and names it in its summary. Fill it in, or delete the line.
 
-Doctor reads the `.env` **in its own working directory** for this one key, and judges two things separately:
+Doctor reads the `.env` **in its own working directory** for this key (and the other four boot-file keys), and judges
+two things separately:
 the SERVICE, which reads that file and never your shell, and this shell, which is what a foreground
 `pi-dispatch worker` would get. A file that points the key at a pause-windows file which loads is a ✓ saying
 the service reads it and this command does not. A file that assigns the key nothing, or points it at
 something the worker cannot load, is a failure whatever your shell says, because the unit will not start.
+The checks that read the windows themselves, such as the warning about a bare repo scope, read that same file
+when your shell sets no value (issue #859), so they judge the windows the service applies.
 
-Two limits on that read, both deliberate. It covers only the keys these checks name. And it repeats a value
+Two limits on that read, both deliberate. It covers only the five boot-file keys. And it repeats a value
 back to you only when the line is written in the form every loader of a `.env` reads the same way; otherwise
 it names the **line number** and tells you what to write, because systemd, a sourcing shell and the Windows
 wrapper do not agree about quoting, inline comments or spacing, and printing one of their readings as
@@ -166,8 +169,10 @@ live edit. Editing or deleting one window through the console, the panel or the 
 and an add refuses unless what it leaves loads. Every write refuses a file that is not valid JSON, is not a JSON object, has
 a `windows` that is not a list, or has a key written twice, with every byte left as it was: fix the file by hand, or move it
 aside to start from an empty one. The console's whole-list action (`POST /api/pause-windows/preview`, then `/confirm`) can
-replace a list with a bad window in it. A key written twice is the one the worker does not refuse: it reads the file as
-`JSON.parse` does, so the last list wins, whichever one a person reads. A window that uses a field or a value above the `version` the file
+replace a list with a bad window in it. Its Undo then says to put the old list back by hand, since the console would refuse
+that list. A key written twice anywhere in the file (such as two `windows` keys, or one
+field twice in a window) is refused by the worker too, at boot and on a live edit: `JSON.parse` would keep the last one, so the windows that applied
+would not be the ones a person reads ([upgrading.md](upgrading.md#before-you-start) says from which release). A window that uses a field or a value above the `version` the file
 declares is broken too ("pause window at index 1: days holds a value that needs pause-windows file version 2, and the
 file declares 1").
 
