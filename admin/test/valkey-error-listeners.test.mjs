@@ -11,7 +11,7 @@ import { assembleInsightsView } from "../src/insights-assembly.mjs";
 // Issue #846: during a Valkey outage every read of an /insights page printed ioredis' "Unhandled error event" with a
 // stack trace (17 lines of that kind per read of /insights, 7 per read of each of the other three). A client with no
 // `error` listener does that once per reconnect attempt, for as long as the outage outlasts the call, and the reads
-// that built one per call had none (`readBudget`, `readHosts` and five more). The listener is a line beside each
+// that built one per call had none (`readBudget`, `readHosts` and six more). The listener is a line beside each
 // construction, so two tests hold it: a scan of every construction in `admin/src` (the fast hint, which sees a call
 // shape), and the pages themselves against a port nothing answers (the oracle, which sees what ioredis prints).
 

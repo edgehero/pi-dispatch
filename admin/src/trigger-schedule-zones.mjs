@@ -63,7 +63,7 @@ export async function readScheduleHosts({ url, now = () => Date.now(), timeoutMs
   let redis;
   try {
     redis = redisFn(url, { failFast: true, disconnectTimeoutMs: 0 });
-    redis.on?.("error", () => {}); // Issue #846: a down Valkey is this read's answer; without a listener ioredis also prints a stack trace per reconnect attempt.
+    redis.on?.("error", () => {}); // Issue #846: a down Valkey is this call's answer; without a listener ioredis also prints a stack trace per reconnect attempt.
     const names = await bounded(() => redis.smembers(HOST_SET), timeoutMs, null);
     if (!Array.isArray(names)) return { hosts: [], complete: false };
     const valid = [...new Set(names.filter((n) => typeof n === "string" && NAME_RE.test(n)))];

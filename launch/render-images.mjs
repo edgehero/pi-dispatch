@@ -60,7 +60,7 @@ import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { frozenDateSource, openChrome as openChromePipe } from "./chrome-pipe.mjs";
+import { openChrome as openChromePipe } from "./chrome-pipe.mjs";
 import { findOnPath } from "./server-binary.mjs";
 import { NOW, QUEUE_STATE, WORKERS, FAILED, RUNNING, LOCAL_HOST, PARKED, seedDeployment, writeDeployment } from "./fixture-deployment.mjs";
 
@@ -150,7 +150,6 @@ try {
 	process.exit(2);
 }
 const chrome = process.env.CHROME || MAC_CHROME;
-const gitPath = process.env.PATH ?? "";
 if (opts.png || opts.console || opts.explain) {
 	try {
 		accessSync(chrome, constants.X_OK);
@@ -471,30 +470,18 @@ async function openChrome() {
 	browserPipe = pipe;
 	return {
 		/**
-		 * Load `url` in a `width` px viewport at `scale`, with the page's clock fixed at `clockMs` when given, and write a
-		 * PNG of `height` px, or of the whole page.
+		 * Load `url` in a `width` px viewport at `scale`, and write a PNG of `height` px.
 		 */
-		async shoot({ url, out, width, height = 900, scale, fullPage = false, clockMs = null }) {
+		async shoot({ url, out, width, height = 900, scale }) {
 			const { sessionId, send: s, close } = await pipe.openTarget();
 			await s("Page.enable");
 			const metrics = (h) => s("Emulation.setDeviceMetricsOverride", { width, height: h, deviceScaleFactor: scale, mobile: false });
 			await metrics(height);
-			if (clockMs !== null) {
-				// The page's "generated N ago" reads the BROWSER's clock: fixed one minute after the page was generated.
-				await s("Page.addScriptToEvaluateOnNewDocument", { source: frozenDateSource(clockMs) });
-			}
 			const loaded = pipe.event((m) => m.method === "Page.loadEventFired" && m.sessionId === sessionId, "load event");
 			await s("Page.navigate", { url });
 			await loaded;
 			await sleep(500); // fonts and the charts' first layout
-			let h = height;
-			if (fullPage) {
-				const m = await s("Page.getLayoutMetrics");
-				h = Math.ceil(m.cssContentSize.height);
-				await metrics(h);
-				await sleep(200);
-			}
-			const { data } = await s("Page.captureScreenshot", { format: "png", captureBeyondViewport: true, clip: { x: 0, y: 0, width, height: h, scale: 1 } });
+			const { data } = await s("Page.captureScreenshot", { format: "png", captureBeyondViewport: true, clip: { x: 0, y: 0, width, height, scale: 1 } });
 			writeFileSync(out, Buffer.from(data, "base64"));
 			await close();
 		},
@@ -601,10 +588,8 @@ async function main() {
 		const size = await Promise.race([admin.dbsize(), new Promise((_, reject) => (timer = setTimeout(() => reject(new Refusal(`no answer from ${opts.url ? "--url" : "the server"} within ${URL_CONNECT_MS / 1000} s`)), URL_CONNECT_MS)))]).finally(() => clearTimeout(timer));
 		if (size !== 0) throw new Refusal(`the database at --url holds ${size} keys: the fixture needs an empty one`);
 		seeded = true;
-		process.env.PATH = gitPath; // only git reads it (the --png topology's two repositories), and only while they are made
 		const deployment = join(work, "deployment");
-		const paths = writeDeployment(deployment, { git: opts.png });
-		delete process.env.PATH;
+		const paths = writeDeployment(deployment);
 		const env = {
 			VALKEY_URL: url,
 			PI_WORKER_NAME: LOCAL_HOST,

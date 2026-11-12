@@ -434,7 +434,7 @@ test("a withdraw Valkey refuses leaves the request standing, and the line names 
 	};
 	const at = Date.parse("2026-11-12T10:00:00.000Z");
 	assert.equal(await runCancel("j8", "redis://x", { ...seams, ackTimeoutMs: 1000, now: () => at }), 1);
-	assert.match(err.join(""), /^error: Valkey at \S+ refused DEL: NOPERM User default has no permissions to run the 'del' command after the cancel request for j8 was written, and the request could not be withdrawn\. It stands until 2026-11-12T10:01:00\.000Z, 60s after it was written, and a worker that reads it before then stops the job: run `pi-dispatch status` once Valkey answers to see whether it did\n$/);
+	assert.match(err.join(""), /^error: Valkey at \S+ refused DEL: NOPERM User default has no permissions to run the 'del' command after the cancel request for j8 was written, and its withdrawal was not answered, so it may stand until 2026-11-12T10:01:00\.000Z, 60s after it was written: a worker that reads it before then stops the job\. Run `pi-dispatch status` to see whether it did\n$/);
 	assert.doesNotMatch(err.join(""), /could not reach|is it running|is the Valkey/, "Valkey answered: it refused");
 });
 
@@ -450,7 +450,7 @@ test("a request that went out and could not be taken back on a silent Valkey say
 	};
 	const at = Date.parse("2026-11-12T10:00:00.000Z");
 	assert.equal(await runCancel("j8", "redis://x", { ...seams, now: () => at }), 1);
-	assert.match(err.join(""), /^error: Valkey at \S+ stopped answering \(Command timed out\) after the cancel request for j8 was written, and the request could not be withdrawn\. It stands until 2026-11-12T10:01:00\.000Z/);
+	assert.match(err.join(""), /^error: Valkey at \S+ stopped answering \(Command timed out\) after the cancel request for j8 was written, and its withdrawal was not answered, so it may stand until 2026-11-12T10:01:00\.000Z, 60s after it was written: a worker that reads it before then stops the job\. Run `pi-dispatch status` once Valkey answers to see whether it did\n$/);
 });
 
 test("a state that could not be read after the wait is said as that, never as a job that left the queue (#846)", { skip: needsDeps }, async () => {
@@ -477,4 +477,51 @@ test("Valkey refusing a command before any request went out says it refused, and
 	assert.equal(await runCancel("j8", "redis://x", { ...seams, queueFn: refusing }), 1);
 	assert.match(err.join(""), /^error: Valkey at \S+ refused HGETALL: NOPERM User default has no permissions to run the 'hgetall' command; nothing was changed\n$/);
 	assert.ok(!ops.some((op) => op[0] === "set"), "no request went out");
+});
+
+test("a lost poll whose withdrawal finds the request gone reads the acknowledgment, and a cancel its worker took is said as taken (#846)", { skip: needsDeps }, async () => {
+	for (const [ack, code, words] of [["host-x", 0, /^cancel accepted by host-x — stopping the container/], [null, 1, /the request was gone when the CLI went to withdraw it: its worker may have read it, or it expired, and no acknowledgment was found/]]) {
+		const { out, err, ops, seams } = world({ hash: {}, state: "active" });
+		const probe = seams.redisFn();
+		let gets = 0;
+		probe.get = async (key) => {
+			ops.push(["get", key]);
+			gets += 1;
+			if (gets === 1) throw Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT" });
+			return ack;
+		};
+		probe.del = async (key) => (ops.push(["del", key]), 0);
+		assert.equal(await runCancel("j8", "redis://x", seams), code, String(ack));
+		assert.match((code === 0 ? out : err).join(""), words);
+		assert.ok(ops.some((op) => op[0] === "get" && op[1] === "cancel:ack:j8"), "the acknowledgment is read once the DEL finds nothing");
+		assert.doesNotMatch(err.join(""), /nothing was changed/, "never said of a request its worker may have taken");
+	}
+});
+
+test("a state read that does not answer ends at the bound, and a queue close that does not answer is dropped (#846)", { skip: needsDeps }, async () => {
+	const { err, seams } = world({ hash: {}, state: "active" });
+	const job = await seams.queueFn(null, { name: "pi-jobs" }).getJob("j8");
+	let reads = 0;
+	const getState = job.getState.bind(job);
+	job.getState = () => (++reads === 1 ? getState() : new Promise(() => {}));
+	let dropped = 0;
+	const queueFn = (conn, opts) => ({ ...seams.queueFn(conn, opts), close: () => new Promise(() => {}), disconnect: async () => { dropped += 1; } });
+	const started = Date.now();
+	assert.equal(await runCancel("j8", "redis://x", { ...seams, queueFn, ackTimeoutMs: 1000, commandTimeoutMs: 50, closeTimeoutMs: 50 }), 1);
+	assert.match(err.join(""), /the job's state could not be read \(no answer within 0s\)/);
+	assert.equal(dropped, 1, "the queue whose close was not answered is dropped");
+	assert.ok(Date.now() - started < 2000, "both bounds held the verb only as long as they are");
+});
+
+test("a first state read that failed is said as that, never as a job that is unknown with nothing to cancel (#846)", { skip: needsDeps }, async () => {
+	const { err, seams } = world({ hash: {}, state: "unknown" });
+	const job = await seams.queueFn(null, { name: "pi-jobs" }).getJob("j8");
+	let reads = 0;
+	job.getState = async () => {
+		reads += 1;
+		if (reads === 1) return "unknown";
+		throw new Error("Connection is closed.");
+	};
+	assert.equal(await runCancel("j8", "redis://x", seams), 1);
+	assert.equal(err.join(""), "error: could not read the state of j8 (Connection is closed.), so whether it is running is not known; nothing was changed. Run `pi-dispatch cancel j8` again once Valkey answers\n");
 });

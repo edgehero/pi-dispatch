@@ -90,11 +90,14 @@ export function withdrawCancel({ redis, jobId, interventionOrigin = "human" }) {
  * out first: the sleeps it took, or the time `now` says has passed (issue #846). Counting sleeps alone, a GET that waited
  * out a Valkey restart in the client's queue was not counted at all, so a 10 s wait could last as long as the outage did.
  */
-export async function requestCancel({ redis, jobId, interventionOrigin = "human", ackTimeoutMs = 10_000, pollMs = 250, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = Date.now }) {
-	const deadline = now() + ackTimeoutMs;
+export async function requestCancel({ redis, jobId, interventionOrigin = "human", ackTimeoutMs = 10_000, pollMs = 250, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), now = Date.now, onWritten = null }) {
 	const requestKey = cancelRequestKeyOf(jobId, interventionOrigin);
 	const ackKey = interventionOrigin === "agent" ? agentCancelAckKey(jobId) : cancelAckKey(jobId);
 	await redis.set(requestKey, interventionOrigin === "agent" ? "agent-cancel" : "operator-cancel", "PX", CANCEL_REQ_TTL_MS);
+	// When the request's TTL started, for a caller that names until when it may stand (the CLI, issue #846), and the start
+	// of the wait for its acknowledgment, so a slow SET is not counted against it.
+	onWritten?.();
+	const deadline = now() + ackTimeoutMs;
 	for (let waited = 0; ; waited += pollMs) {
 		let host;
 		try {

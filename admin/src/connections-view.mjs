@@ -184,7 +184,7 @@ export async function readConnections({ deploymentDir, env = {}, paths = {}, sna
     // An injected reader needs no connection when its fixture supplies no URL. Real readers share one owner.
     if (injectedRead && typeof paths.valkeyUrl !== "string") return null;
     owned = redisFn(paths.valkeyUrl);
-    owned.on?.("error", () => {}); // Issue #846: a down Valkey is this read's answer; without a listener ioredis also prints a stack trace per reconnect attempt.
+    owned.on?.("error", () => {}); // Issue #846: a down Valkey is this call's answer; without a listener ioredis also prints a stack trace per reconnect attempt.
     return owned;
   };
   const endpointFleetDeclared = endpointFleetDeclaration(file, environmentUnknown);
