@@ -272,6 +272,20 @@ test("a fresh sandbox knows whether its trigger withholds the staged packages, s
   assert.equal((await s.service.read({})).withholdsPackages, true);
 });
 
+test("a fresh sandbox hands on its trigger's flow and the MCP servers it names, from the file as the worker reads it (#847)", async () => {
+  const s = setup();
+  s.triggers.triggers[0].run.flow = "fix";
+  s.triggers.triggers[0].run.mcp = ["docs"];
+  writeFileSync(s.paths.triggersPath, JSON.stringify(s.triggers));
+  const read = await s.service.read({});
+  assert.deepEqual([read.flow, read.mcp], ["fix", ["docs"]]);
+  // A github trigger always names a flow; with no servers named, the list is empty, never absent.
+  delete s.triggers.triggers[0].run.mcp;
+  writeFileSync(s.paths.triggersPath, JSON.stringify(s.triggers));
+  const none = await s.service.read({});
+  assert.deepEqual([none.flow, none.mcp], ["fix", []]);
+});
+
 // Issue #824: a forge is the forge table's (`isForgeKind`), so a forge added to FORGES has its triggers offered, its run's
 // repository filled in and its workspace read as a clone, with no edit in these files.
 test("every forge's trigger is a preparation option, a run of each fills its repository and opens as its retained clone, and neither file writes the forges out", async () => {

@@ -407,8 +407,8 @@ updates by itself ([updates](docs/console.md#updates)).
 A schedule also gets a button that fires it now ([triggers](docs/triggers.md)).
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/console/console-trigger-dark.png?v=2026-11-05-800e">
-  <img src="docs/images/console/console-trigger.png?v=2026-11-04-800e" alt="What its jobs get, on one trigger's page, with two changes not written yet: a pill per machine saying what differs or that it is unknown, then the model and its job cap, the flow, a switch for the staged packages and one for each of your extensions, the outside systems with linear switched on, pi's own tools with bash off and a switch for each tool the newest run that says what it loaded lists, the image and secrets, what the last run had under each, and a bar with Preview the change and Discard">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/console/console-trigger-dark.png?v=2026-11-12-847">
+  <img src="docs/images/console/console-trigger.png?v=2026-11-12-847" alt="What its jobs get, on one trigger's page, with two changes not written yet: a pill per machine saying what differs or that it is unknown, then the model and its job cap, the flow, a switch for the staged packages and one for each of your extensions, the outside systems with linear switched on, pi's own tools with bash off and a switch for each tool the newest run that says what it loaded lists, the image and secrets, what the last run had under each, and a bar with Preview the change and Discard">
 </picture>
 
 **Your phone:** every page fits, for answering a question from wherever you are. The console listens only on its own machine
@@ -496,8 +496,8 @@ machine the console runs on, and says how to undo it. One
 **Confirm** saves it, the console records who did, and **Undo** puts it back, or says what to edit by hand where it cannot.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/console/console-trigger-change-dark.png?v=2026-11-05">
-  <img src="docs/images/console/console-trigger-change.png?v=2026-11-04-800d" alt="The preview of that change, in words: linear on and where its jobs would now connect, bash off, when the change takes effect, a waiting job that would now be refused, that a job on a machine without linear is refused and which machines have it, who it is recorded under, the lines of the file as they would change, the way to undo it, and one Confirm button">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/console/console-trigger-change-dark.png?v=2026-11-12-847">
+  <img src="docs/images/console/console-trigger-change.png?v=2026-11-12-847" alt="The preview of that change, in words: linear on and where its jobs would now connect, bash off, when the change takes effect, a waiting job that would now be refused, that a job on a machine without linear is refused and which machines have it, who it is recorded under, the lines of the file as they would change, the way to undo it, and one Confirm button">
 </picture>
 
 **Some changes that would only fail later are refused before they cost you anything.** A job cap can only lower the limit you set for all jobs. If a trigger's model is too

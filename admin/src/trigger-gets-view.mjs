@@ -184,6 +184,8 @@ export function flowAnswer(row, trigger) {
   if (!found) return null;
   // Doctor never answers this of a package the file leaves out (`flowTierOf`), so such a row is from before that was written: no answer for the file as it is.
   if (found.tier === "package" && (trigger.excludeExtensions ?? []).includes(found.package)) return null;
+  // Nor of a package tier under `"packages": false` (issue #847): no package loads, so that answer is for the file as it was.
+  if (found.tier === "package" && trigger.packages === false) return null;
   return found.tier === "package" ? `from ${found.package ?? "a staged package"}` : FLOW_TIER_WORDS[found.tier] ?? null;
 }
 
@@ -397,7 +399,7 @@ export const alsoNaming = (list, name) => list.filter((other) => other !== name 
  * keeps the file's spelling and its row whether or not any host shows it, so nothing in the list falls off on an edit of the rest. Under the file's `"packages": false` a package's
  * switch is moot, so it has none (`moot`), and one the file names keeps its box, disabled and unticked, so an edit of the rest sends that name back as it was.
  */
-function extensionsRow({ trigger, rows, last }) {
+function extensionsRow({ trigger, rows, last, records = [], historyUnread = false, hostLoads = null }) {
   const known = rows.filter((row) => row.state === "current");
   const inFile = trigger.excludeExtensions ?? [];
   const withheld = trigger.packages === false;
@@ -414,10 +416,17 @@ function extensionsRow({ trigger, rows, last }) {
     for (const value of naming.length > 0 ? naming : [overlayStem(segment)]) groupOf(value).segments.add(segment);
   }
   for (const name of inFile) groupOf(name);
-  const brought = (name, version = null) => {
-    const row = (last?.sources ?? []).find((source) => source.name === name && (version === null || source.version === version));
-    const words = broughtWords(row);
-    return words === null ? null : `${words}, as ${last.id} loaded it`;
+  // Issue #847: the NEWEST RUN THAT LOADED this extension, of the kind asked (a package at a version, or an overlay entry),
+  // not the newest run alone: a row switched off is left out of every run after, and quoting only the newest said "known
+  // once a run has loaded it" one run later of an extension a run had loaded. One that brought nothing countable (a hook
+  // alone) says so rather than reading as unloaded.
+  const said = (Array.isArray(records) ? records : []).map((record) => triggerLastRun([record], hostLoads).quoted).filter(Boolean);
+  const brought = (name, { kind, version = null }) => {
+    for (const run of [last, ...said].filter(Boolean)) {
+      const row = (run.sources ?? []).find((source) => source.kind === kind && source.name === name && (version === null || source.version === version));
+      if (row) return `${broughtWords(row) ?? "no tool, skill or prompt template"}, as ${run.id} loaded it`;
+    }
+    return null;
   };
   const items = [...groups.values()].map(({ value, versions, segments }) => {
     const on = !inFile.includes(value);
@@ -430,13 +439,15 @@ function extensionsRow({ trigger, rows, last }) {
     const hostsOn = (version) => known.filter((row) => (row.packages ?? []).some((entry) => entry.name === value && entry.version === version)).map((row) => row.name);
     const stagedWhere = staged.length === 0 ? null : whereWords(rows, "packages", holdsPackage, "staged", staged.length === 1 ? null : staged.map((version) => `${version} on ${listed(hostsOn(version))}`).join(", "));
     // Issue #847: what a recorded run brought is quoted switched off too, since that is when a person decides to turn it on,
-    // and where no run has loaded it the row says that is not known yet, never only where it is staged.
+    // and where no run has loaded it the row says that is not known yet, never only where it is staged. Under
+    // `"packages": false` only the overlay entries of the name would load, so only theirs is quoted.
+    const fromEntries = () => entries.map((segment) => brought(segment, { kind: "overlay" })).find((words) => words !== null) ?? null;
     const quoted = (() => {
       if (withheld && entries.length === 0) return null;
-      if (staged.length === 0) return brought(entries[0]);
-      const running = staged.find((version) => brought(value, version) !== null);
-      if (running === undefined) return entries.length > 0 ? brought(entries[0]) : null;
-      return `${staged.length > 1 ? `${running}: ` : ""}${brought(value, running)}`;
+      if (staged.length === 0 || withheld) return fromEntries();
+      const running = staged.find((version) => brought(value, { kind: "package", version }) !== null);
+      if (running === undefined) return fromEntries();
+      return `${staged.length > 1 ? `${running}: ` : ""}${brought(value, { kind: "package", version: running })}`;
     })();
     const also = inFile.includes(value) ? alsoNaming(inFile, value) : [];
     // Two rows of one file name would read alike, and the words on each switch are its own name.
@@ -448,7 +459,8 @@ function extensionsRow({ trigger, rows, last }) {
       off.length > 0 ? `its overlay extensions off on ${listed(off)}` : null,
       also.length > 0 ? `the file also names ${listed(also)}` : null,
       quoted,
-      quoted === null && !(withheld && entries.length === 0) && (staged.length > 0 || entries.length > 0) ? (staged.length > 0 ? TRIGGER_GETS_WORDS.bringsUnknown : TRIGGER_GETS_WORDS.overlayBringsUnknown) : null,
+      // Not said where the history could not be read: the card says so once, and a failed read is not "no run".
+      quoted === null && !historyUnread && !(withheld && entries.length === 0) && (staged.length > 0 || entries.length > 0) ? (staged.length > 0 && !withheld ? TRIGGER_GETS_WORDS.bringsUnknown : TRIGGER_GETS_WORDS.overlayBringsUnknown) : null,
     ].filter(Boolean).join(" · ");
     return { value, name: named, on, moot, sub, backOn: also.length > 0 ? `${value} off the list` : `${value} back on` };
   });
@@ -580,7 +592,7 @@ export function triggerGetsOf({ trigger, records = [], historyUnread = false, ho
     last: { Model: under("Model"), Skills: under("Skills"), Extensions: under("Extensions"), MCP: under("MCP"), Tools: under("Tools"), pi: under("pi") },
     model: modelRow({ trigger, defaults, modelChoices }),
     flow: { ...flowRow({ trigger, rows, editor }), ...(watch ? { doctor: null, lacking: null } : {}) },
-    extensions: extensionsRow({ trigger, rows, last: quoted }),
+    extensions: extensionsRow({ trigger, rows, last: quoted, records, historyUnread, hostLoads }),
     mcp: mcpRow({ trigger, rows, overlayServers }),
     tools: toolsRow({ trigger, last: quoted }),
     image: imageRow({ trigger, rows }),
@@ -600,17 +612,20 @@ const freshListsWhole = (row, part) => !(row.unread ?? []).includes(part) && !((
 
 /**
  * Where a job of this trigger would find its flow on this host, from its last doctor run, in the trigger page's own words
- * (`flowAnswer`, `lacksFlow`, `FLOW_TIER_WORDS`), so the two pages cannot say it two ways. Unknown where doctor has no
- * answer for this flow (it ran before an edit, or the row was cut to fit) or found it in no tier a host can see.
+ * (`flowAnswer`, `FLOW_TIER_WORDS`), so the two pages cannot say it two ways. A sandbox is prepared for a forge trigger
+ * only, whose repository is on no host, so doctor never answered its repository tier: a tier it found is named with the
+ * trigger page's caveat that the repository comes first, and one it found nowhere a host can see is unknown, never
+ * absent. Unknown too where doctor has no answer for this flow (it ran before an edit, or the row was cut to fit).
  */
 function freshFlowWords(row, trigger) {
   if (trigger.flow === null) return SANDBOX_FRESH_WORDS.noFlow;
-  if (lacksFlow(row, trigger)) return `A job here would not find ${trigger.flow}: it is not at the repository’s HEAD, nor in any other tier this trigger loads from.`;
+  const who = `a job of trigger ${trigger.index + 1} on this host`;
   const word = flowAnswer(row, trigger);
-  if (word === null) return `Whether a job here would find ${trigger.flow} is unknown: its last doctor run has no answer for it.`;
+  if (word === null) return `Whether ${who} would find ${trigger.flow} is unknown: its last doctor run has no answer for it.`;
   const tier = (row.flows ?? []).find((entry) => entry.trigger === trigger.index && entry.flow === trigger.flow)?.tier;
-  if (tier === "none" || tier === "unknown") return `Whether a job here would find ${trigger.flow} is unknown: doctor found it ${word}.`;
-  return `A job here would find ${trigger.flow} ${word}.`;
+  if (tier === "none" || tier === "unknown") return `Whether ${who} would find ${trigger.flow} is unknown: doctor found it ${word}, and the repository, which is on no host, may hold it.`;
+  if (tier === "repository") return `${who.charAt(0).toUpperCase()}${who.slice(1)} would find ${trigger.flow} ${word}.`;
+  return `${who.charAt(0).toUpperCase()}${who.slice(1)} would find ${trigger.flow} ${word}, unless the repository holds it at its base commit, which comes first.`;
 }
 
 /**
@@ -638,7 +653,9 @@ function freshMcpWords(row, named) {
   const refused = [off.length > 0 ? `${listed(off)} switched off here` : null, lacking.length > 0 ? `${listed(lacking)} not on this host` : null].filter(Boolean);
   const said = [
     on.length > 0 ? `${listed(on)} on this host` : null,
-    refused.length > 0 ? `${refused.join(" and ")}, so a job here is refused as mcp-server-unknown` : null,
+    // The reason is not named: a host with no mcp.json publishes the same empty list, and its jobs are refused as
+    // mcp-config-invalid rather than mcp-server-unknown (`serverRefused`). Either way, before it spends.
+    refused.length > 0 ? `${refused.join(" and ")}, so a job there is refused before it spends` : null,
     unknown.length > 0 ? `${listed(unknown)} unknown here` : null,
     forge ? `${FORGE_MCP_SERVER_NAME}: ${TRIGGER_GETS_WORDS.forgeServer}` : null,
   ].filter(Boolean);
@@ -654,7 +671,16 @@ export function sandboxFreshRows({ hostLoads, host, triggerIndex, flow = null, m
   const rows = [[`On ${host}`, sandboxFreshLine({ hostLoads, host, triggerIndex, withholdsPackages, excludes, image, mcp })]];
   const row = hostLoadsRow(hostLoads, host);
   if (row.state === "unknown") return rows;
-  rows.push([SANDBOX_FRESH_WORDS.flowLabel, [freshFlowWords(row, { index: triggerIndex, flow: typeof flow === "string" && flow !== "" ? flow : null, excludeExtensions: excludes })]]);
+  const named = typeof flow === "string" && flow !== "" ? flow : null;
+  // An old publication is no answer for these two, as the trigger page reads it ("has no answer to read"): the first row
+  // still says what that run published, and that it is old.
+  if (row.state !== "current") {
+    rows.push([SANDBOX_FRESH_WORDS.flowLabel, [named === null ? SANDBOX_FRESH_WORDS.noFlow : `Whether a job of trigger ${triggerIndex + 1} on this host would find ${named} is unknown: its last doctor run is old.`]]);
+    const listedNames = (mcp ?? []).filter((name) => typeof name === "string");
+    if (listedNames.length > 0) rows.push([SANDBOX_FRESH_WORDS.mcpLabel, [`${listed(listedNames)} unknown here: its last doctor run is old.`]]);
+    return rows;
+  }
+  rows.push([SANDBOX_FRESH_WORDS.flowLabel, [freshFlowWords(row, { index: triggerIndex, flow: named, excludeExtensions: excludes, packages: withholdsPackages ? false : undefined })]]);
   const mcpWords = freshMcpWords(row, mcp);
   if (mcpWords !== null) rows.push([SANDBOX_FRESH_WORDS.mcpLabel, [mcpWords]]);
   return rows;

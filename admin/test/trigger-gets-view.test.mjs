@@ -430,10 +430,10 @@ test("a fresh sandbox's rows say where the flow would be found and which named M
   const rowsOf = (host, opts = {}) => sandboxFreshRows({ hostLoads: { more: 0, hosts: [host] }, host: "mini1", triggerIndex: 2, image: "pi-job:1", ...opts });
   const text = (rows, label) => rows.find(([l]) => l === label)?.[1].join("");
   const found = rowsOf({ ...base, flows: [{ trigger: 2, flow: "fix", tier: "package", package: "pi-lint", repo: "absent" }], mcp: [] }, { flow: "fix" });
-  assert.equal(text(found, "Flow"), "A job here would find fix from pi-lint.");
+  assert.equal(text(found, "Flow"), "A job of trigger 3 on this host would find fix from pi-lint, unless the repository holds it at its base commit, which comes first.");
   assert.equal(text(found, "MCP servers"), undefined, "no row for a trigger that names no server");
   // A package the trigger leaves out never answers its flow: no answer for the file as it is.
-  assert.equal(text(rowsOf({ ...base, flows: [{ trigger: 2, flow: "fix", tier: "package", package: "pi-lint", repo: "absent" }], mcp: [] }, { flow: "fix", excludes: ["pi-lint"] }), "Flow"), "Whether a job here would find fix is unknown: its last doctor run has no answer for it.");
+  assert.equal(text(rowsOf({ ...base, flows: [{ trigger: 2, flow: "fix", tier: "package", package: "pi-lint", repo: "absent" }], mcp: [] }, { flow: "fix", excludes: ["pi-lint"] }), "Flow"), "Whether a job of trigger 3 on this host would find fix is unknown: its last doctor run has no answer for it.");
   assert.equal(text(rowsOf({ ...base, flows: [], mcp: [] }, { flow: null }), "Flow"), "This trigger names no flow.");
   // A list that was cut, or one that could not be read, proves no lack.
   const mcp = rowsOf({ ...base, flows: [], mcp: [{ name: "linear", enabled: true }], more: { mcp: 3 } }, { flow: "fix", mcp: ["linear", "docs", "forge"] });

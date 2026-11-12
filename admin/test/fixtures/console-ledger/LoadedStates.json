@@ -1,7 +1,7 @@
 {
   "card": "LoadedStates",
   "pr": 800,
-  "words": "0c8ad1763feccfde4afd0dfb7eecb42d7b65fd59c9525b7c0611c3bbdd1df54d",
+  "words": "53758b2e31febc83e0a0b7e9ebe0547846184a365ae2aff9237303d4648691fa",
   "elements": [
     {
       "el": "p-loaded",
@@ -94,7 +94,6 @@
       "golden": [
         "panels/sandbox-loaded-fresh.operator",
         "panels/sandbox-loaded-flow-found.operator",
-        "panels/sandbox-loaded-flow-absent.operator",
         "panels/sandbox-loaded-flow-unknown.operator",
         "panels/sandbox-loaded-mcp-lacks.operator"
       ],

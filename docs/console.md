@@ -1959,7 +1959,7 @@ would load on that host, from the host's last doctor run and with its time. A ho
 last doctor run could not read a part that job loads from, reads as unknown, never as nothing. Where the host published a
 doctor run, a Flow row says whether a job there would find the trigger's flow and from where, or that this is unknown, in
 the words the trigger page uses, and an MCP servers row says which servers the trigger names that host has on, has
-switched off or lacks (a job is refused for either), or cannot say. It names no tool, since no host publishes one. The repository's part is
+switched off or lacks (a job is refused for either, before it spends), or cannot say. An old publication reads as unknown for both rows. It names no tool, since no host publishes one. The repository's part is
 decided at its base commit ([What a run loaded](#what-a-run-loaded), and
 [what the host's publication says](global-pi-overlay.md#what-a-run-loaded-and-where-to-read-it)).
 

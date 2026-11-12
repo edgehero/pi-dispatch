@@ -104,10 +104,10 @@ export const LOADED_DRAW = Object.freeze({
   "run-loaded-both.operator": () => runPage(SAMPLES.bothLacked()),
   "sandbox-loaded-run.operator": () => sandboxPage({ query: "id=gh-9575&host=mini1", record: SAMPLES.everything() }),
   "sandbox-loaded-fresh.operator": () => sandboxPage({ query: FRESH_QUERY }),
-  "sandbox-loaded-flow-found.operator": () => sandboxPage({ query: FRESH_QUERY, hostLoads: freshHostLoads({ mcp: [server("linear", true)] }), change: (report) => { report.mcp = ["linear"]; } }),
-  "sandbox-loaded-flow-absent.operator": () => sandboxPage({ query: FRESH_QUERY, hostLoads: freshHostLoads({ tier: "none", repo: "absent" }) }),
+  // A sandbox's trigger is a forge's, whose repository is on no host: doctor answers its flow from another tier or not at all.
+  "sandbox-loaded-flow-found.operator": () => sandboxPage({ query: FRESH_QUERY, hostLoads: freshHostLoads({ tier: "overlay", repo: "unknown", mcp: [server("linear", true)] }), change: (report) => { report.mcp = ["linear"]; } }),
   "sandbox-loaded-flow-unknown.operator": () => sandboxPage({ query: FRESH_QUERY, hostLoads: freshHostLoads({ tier: "unknown", repo: "unknown" }) }),
-  "sandbox-loaded-mcp-lacks.operator": () => sandboxPage({ query: FRESH_QUERY, hostLoads: freshHostLoads({ mcp: [server("linear", false)] }), change: (report) => { report.mcp = ["linear", "docs"]; } }),
+  "sandbox-loaded-mcp-lacks.operator": () => sandboxPage({ query: FRESH_QUERY, hostLoads: freshHostLoads({ tier: "overlay", repo: "unknown", mcp: [server("linear", false)] }), change: (report) => { report.mcp = ["linear", "docs"]; } }),
   "sandbox-loaded-unknown.operator": () => sandboxPage({ query: FRESH_QUERY, change: (report) => { report.hosts.push({ ...report.hosts[0], name: "mini2", rows: [] }); report.plan.host = "mini2"; report.selected.host = "mini2"; } }),
   "sandbox-loaded-long-names.operator": () => sandboxPage({ query: "id=gh-9575&host=mini1", record: longNamesRecord(), hostLoads: longNamesHostLoads(), change: (report) => { report.hosts.push({ ...report.hosts[0], name: LONG_LOADED.host, rows: [] }); report.plan.host = LONG_LOADED.host; report.plan.image = LONG_LOADED.image; report.selected.host = LONG_LOADED.host; } }),
   "project-loads.operator": () => projectPage(billingRecords()),

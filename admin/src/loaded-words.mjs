@@ -841,7 +841,8 @@ export function triggerLastRun(records, hostLoads = null) {
     ...sourcesOf(loaded, "package").filter((row) => row.toolNames?.length > 0).map((row) => ({ kind: "package", from: row.name ?? "a staged package", names: [...row.toolNames] })),
     ...(overlay?.namedTools ?? []).map((row) => ({ kind: "overlay", from: row.name, names: [...row.tools] })),
   ];
-  const sources = [...sourcesOf(loaded, "package"), ...(overlay?.names ?? []).map((name) => ({ name, version: null, tools: overlay.namedTools?.find((row) => row.name === name)?.tools.length ?? 0, skills: 0, prompts: 0 }))];
+  // `kind` says which a source is (issue #847), so an overlay entry and a package of one name are never each other's counts.
+  const sources = [...sourcesOf(loaded, "package").map((row) => ({ ...row, kind: "package" })), ...(overlay?.names ?? []).map((name) => ({ name, version: null, kind: "overlay", tools: overlay.namedTools?.find((row) => row.name === name)?.tools.length ?? 0, skills: 0, prompts: 0 }))];
   return {
     newest,
     quoted: { id: runIdOf(record), host: facts.host, record, rows: Object.fromEntries(loadedRows(record, { past: true }).map((row) => [row.label, row])), problems, sources, tools, notes: [...cutWords(loaded), ...(wentOn(record) && loaded.at !== "ready" ? [LOADED_WORDS.notedEarly] : [])] },

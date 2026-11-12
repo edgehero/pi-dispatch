@@ -557,3 +557,43 @@ test("the editor's defaults say none for both, so a page that lists them says a 
   assert.equal(editor.defaults.excludeExtensionTools, "none");
   assert.ok(normalizeTriggerForDisplay(withRun({ excludeExtensions: ["x"] })).excludeExtensions);
 });
+
+// ---- issue #847, the adversary's cases ----------------------------------------------------------------------------------------
+
+test("a switched-off row quotes the newest run that loaded it, whatever ran after; nothing countable is said as such (#847)", async () => {
+  const hostLoads = await published({ a: { packages: [PI_LINT] } });
+  const withLint = (jobId, over = {}) => loadedRecord({ jobId, loaded: loadedField({ sources: [source("package", { name: "pi-lint", version: "1.4.2", extensions: 1, tools: 1, toolNames: ["lint"], ...over }), source("overlay"), source("repository"), source("trigger"), source("other")] }) });
+  const without = loadedRecord({ jobId: "gh-new1", loaded: loadedField({ sources: [source("overlay"), source("repository"), source("trigger"), source("other")] }) });
+  const off = { ...COMMENT, excludeExtensions: ["pi-lint"] };
+  const row = (records, trigger = off) => triggerGetsOf({ trigger, records, hostLoads, liveHosts: ["a"] }).extensions.items[0].sub;
+  assert.equal(row([without, withLint("gh-old1")]), "staged on a · 1 tool, as gh-old1 loaded it", "the newer run left it out; the older one still says what it brought");
+  assert.equal(row([withLint("gh-hook", { tools: 0, toolNames: [] })], COMMENT), "staged on a · no tool, skill or prompt template, as gh-hook loaded it", "a hook alone is loaded, never unknown");
+  // A history that could not be read is no run: the card says so once, and no row claims none loaded it.
+  assert.equal(triggerGetsOf({ trigger: off, records: [], historyUnread: true, hostLoads, liveHosts: ["a"] }).extensions.items[0].sub, "staged on a");
+});
+
+test("an overlay entry and a package of one name are each other's counts never; a stem's second entry is looked for too (#847)", async () => {
+  const hostLoads = await published({ a: { packages: [{ name: "guard", version: "2.0.0" }], extensions: [{ name: "guard.ts", kind: "file" }] } });
+  const record = loadedRecord({ jobId: "gh-g1", loaded: loadedField({ sources: [source("package", { name: "guard", version: "1.0.0", extensions: 1, tools: 2, toolNames: ["a", "b"] }), source("overlay"), source("repository"), source("trigger"), source("other")] }) });
+  const sub = triggerGetsOf({ trigger: COMMENT, records: [record], hostLoads, liveHosts: ["a"] }).extensions.items.find((item) => item.value === "guard").sub;
+  assert.doesNotMatch(sub, /2 tools/, "guard 1.0.0's counts are not guard 2.0.0's, nor the overlay entry's");
+  // Two entries of one stem on two hosts: the run loaded the second.
+  const twoHosts = await published({ m1: { extensions: [{ name: "git-guard.ts", kind: "file" }] }, m2: { extensions: [{ name: "git-guard", kind: "dir" }] } });
+  const loadedTs = loadedRecord({ jobId: "gh-gg1", loaded: loadedField({ sources: [source("overlay", { names: ["git-guard.ts"], namedTools: [{ name: "git-guard.ts", tools: ["guard"] }], extensions: 1, tools: 1 }), source("repository"), source("trigger"), source("other")] }) });
+  const stem = triggerGetsOf({ trigger: COMMENT, records: [loadedTs], hostLoads: twoHosts, liveHosts: ["m1", "m2"] }).extensions.items[0].sub;
+  assert.match(stem, /1 tool, as gh-gg1 loaded it$/);
+});
+
+test("a fresh sandbox's rows: an old publication reads unknown, a package-tier answer under packages false is no answer, and the refusal names no reason (#847)", async () => {
+  const { sandboxFreshRows } = await import("../src/trigger-gets-view.mjs");
+  const base = { name: "mini1", at: 1, ageMs: 0, every: 24, overlayExtensionsAllowed: true, extensions: [], skills: [], packages: [{ name: "pi-lint", version: "1.4.2" }], unread: [], more: {}, piVersion: "1.5.0", image: "pi-job:1" };
+  const text = (rows, label) => rows.find(([l]) => l === label)?.[1].join("");
+  const of = (host, opts) => sandboxFreshRows({ hostLoads: { more: 0, hosts: [host] }, host: "mini1", triggerIndex: 2, image: "pi-job:1", ...opts });
+  const old = of({ ...base, state: "old", flows: [{ trigger: 2, flow: "fix", tier: "none", package: null, repo: "absent" }], mcp: [{ name: "docs", enabled: false }] }, { flow: "fix", mcp: ["docs"] });
+  assert.equal(text(old, "Flow"), "Whether a job of trigger 3 on this host would find fix is unknown: its last doctor run is old.");
+  assert.equal(text(old, "MCP servers"), "docs unknown here: its last doctor run is old.");
+  const withheld = of({ ...base, state: "current", flows: [{ trigger: 2, flow: "fix", tier: "package", package: "pi-lint", repo: "absent" }], mcp: [] }, { flow: "fix", withholdsPackages: true });
+  assert.equal(text(withheld, "Flow"), "Whether a job of trigger 3 on this host would find fix is unknown: its last doctor run has no answer for it.");
+  const refused = of({ ...base, state: "current", flows: [], mcp: [{ name: "docs", enabled: false }] }, { flow: "fix", mcp: ["docs", "linear"] });
+  assert.equal(text(refused, "MCP servers"), "docs switched off here and linear not on this host, so a job there is refused before it spends.");
+});
