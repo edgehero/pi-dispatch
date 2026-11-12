@@ -94,7 +94,7 @@ export async function secretBundleChecks({ bundles = {}, triggersPresent = true,
 		if (projectsUnread) {
 			// Issue #859: the `.env` line naming the projects file could not be read (its own line says why), so whether the
 			// service's file holds the project is not known: a warning, never the ✗ a file with no such project earns.
-			checks.push({ ok: false, warn: true, label: `secret bundle ${id} names project ${b.project}, and whether the projects file the service reads holds it is not known: doctor could not read the PI_PROJECTS_FILE line of the deployment .env`, fix: "fix that line (its own line above says why), then re-run doctor" });
+			checks.push({ ok: false, warn: true, label: `secret bundle ${id} names project ${b.project}, and whether the projects file the service reads holds it is not known: doctor could not read what the deployment .env sets for PI_PROJECTS_FILE`, fix: "fix what the boot-file line above names, then re-run doctor" });
 		} else if (projectsError !== null) {
 			checks.push({ ok: false, label: `secret bundle ${id} names project ${b.project}, and projects.json does not load`, fix: "fix projects.json (its own line above says why) -- a bundle applies to a project's jobs only once the worker knows the project" });
 		} else if (!projectIds.has(b.project)) {

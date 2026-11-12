@@ -1312,17 +1312,39 @@ function bootKeyUnread(env, key) {
 export function bootFileEnv(shell, envFile, cwd, platform = process.platform, { untrusted = false } = {}) {
 	const win = platform === "win32";
 	const at = (path) => (win ? win32.resolve(cwd, path) : posix.resolve(cwd, path));
-	const same = (a, b) => (win ? at(a).toLowerCase() === at(b).toLowerCase() : at(a) === at(b));
-	const file = untrusted ? {} : (envFile ?? {});
-	const out = { env: { ...shell }, service: { ...shell }, differs: [], shellOnly: [] };
+	// ONE FILE NAMED TWO WAYS IS NO DIFFERENCE: where both are there, by what they are (a symlinked folder, `/tmp` and
+	// `/private/tmp` on a Mac, a case-insensitive disk), else by the resolved text, case-folded on Windows.
+	const identity = (path) => {
+		try {
+			const st = statSync(at(path));
+			return `${st.dev}:${st.ino}`;
+		} catch {
+			return null;
+		}
+	};
+	const same = (a, b) => {
+		const ia = identity(a);
+		const ib = ia === null ? null : identity(b);
+		if (ia !== null && ib !== null) return ia === ib;
+		return win ? at(a).toLowerCase() === at(b).toLowerCase() : at(a) === at(b);
+	};
+	// The SERVICE's subject reads the file whoever can write it, as the BOOT_FILES lines do (they only decide what doctor
+	// says); the checks take nothing from an untrusted one.
+	const whole = envFile ?? {};
+	const file = untrusted ? {} : whole;
+	const out = { env: { ...shell }, service: { ...shell }, differs: [], shellOnly: [], serviceUnread: new Set() };
 	const unread = new Set();
 	for (const key of BOOT_FACT_KEYS) {
 		const own = typeof shell[key] === "string" && shell[key].trim() !== "" ? shell[key] : undefined;
-		const raw = file.hazard == null && typeof file[key] === "string" && file[key] !== "" ? file[key] : undefined;
-		const cannotRead = file.unreadable === true || file.hazard != null || file.notPlain?.[key] !== undefined || file.insideValue?.[key] !== undefined;
+		const lineOf = (f) => (f.hazard == null && typeof f[key] === "string" && f[key] !== "" ? f[key] : undefined);
+		const unreadIn = (f) => f.unreadable === true || f.hazard != null || f.notPlain?.[key] !== undefined || f.insideValue?.[key] !== undefined;
+		const raw = lineOf(file);
+		const cannotRead = unreadIn(file);
 		const sets = raw !== undefined || cannotRead || file.exported?.[key] !== undefined || file.blankInFile?.[key] === true;
-		if (raw !== undefined) out.service[key] = at(raw);
-		else if (!cannotRead) delete out.service[key];
+		const serviceRaw = lineOf(whole);
+		if (serviceRaw !== undefined) out.service[key] = at(serviceRaw);
+		else if (unreadIn(whole)) out.serviceUnread.add(key);
+		else delete out.service[key];
 		if (own !== undefined) {
 			out.env[key] = at(own);
 			if (raw !== undefined && !same(own, raw)) out.differs.push({ key, shell: own, file: raw });
@@ -2007,6 +2029,13 @@ export async function collectChecks(shellVars, seams) {
 	const scopedLimitFacts = readScopedLimitFacts(bootEnv, fileExists);
 	const pauseWindowFacts = readPauseWindowFacts(bootEnv, fileExists, versionTables.pauseWindows);
 	section("triggers");
+	// Issue #859: a boot file the `.env` names on a line doctor could not read is not known, and the checks that read it are
+	// left out rather than judged against nothing; this line says which, once, so none of them goes quiet without a word. A
+	// `.env` that could not be read at all has a line per key already ("cannot be answered here"), so this adds nothing there.
+	const unreadBoot = [...bootEnv[UNREAD_BOOT_KEYS]];
+	if (unreadBoot.length > 0 && envFile.unreadable !== true) {
+		checks.push({ ok: false, warn: true, label: `not judged here, since doctor could not read what the deployment .env sets for ${unreadBoot.join(", ")}: the checks that read ${unreadBoot.length === 1 ? "that file" : "those files"} (a project's model roles, size and bundles, the scoped limits and budgets, the pause windows, the envelope)`, fix: "fix what the boot-file line above names, then re-run doctor" });
+	}
 	checks.push(...watchDoctorChecks({ sources: triggerWatchSources, rules: triggerWatchRules, env }));
 	// FIRST, and fail rather than warn: every check below this line reads counts that a parse failure
 	// zeroed, so a green run here would be reporting on a file nobody could read. The receiver loads this
@@ -2455,7 +2484,7 @@ export async function collectChecks(shellVars, seams) {
 		if (scopedLimitFacts.parseError === "unread") {
 			// Issue #859: the `.env` line naming the file could not be read (its own line says why), so which rows the service
 			// has is not known, and a suggestion would tell a project that has one to add it.
-			checks.push({ ok: true, label: "size suggestions: off, because the scoped-limits file the service reads is not known (doctor could not read its line in the deployment .env)" });
+			checks.push({ ok: true, label: "size suggestions: off, because the scoped-limits file the service reads is not known (doctor could not read what the deployment .env sets for it)" });
 		} else if (scopedLimitFacts.parseError !== null) {
 			checks.push({ ok: true, label: "size suggestions: off until the scoped-limits file loads (a size read without it would be the default, not the project's)" });
 		} else {
@@ -3251,7 +3280,7 @@ export async function collectChecks(shellVars, seams) {
 			// A malformed list is its own line below; the worker refuses to boot on it.
 		}
 		const usdHere = usdFingerprint(dollarsHere, scopedLimitFacts.parseError === null ? scopedLimitFacts.limits : [], envListHere);
-		checks.push(...(await fleetDollarChecks(usdHere, peers, { dollarKeysExist: () => (seams.dollarKeysExist ?? defaultDollarKeysExist)(valkeyTalkUrl) })));
+		if (scopedLimitFacts.parseError !== "unread") checks.push(...(await fleetDollarChecks(usdHere, peers, { dollarKeysExist: () => (seams.dollarKeysExist ?? defaultDollarKeysExist)(valkeyTalkUrl) })));
 		// Issue #499 part C: each host resolves its jobs' project from its OWN projects.json, while the project rows' counters
 		// are shared. This host's `fpProjects` from the file the service names, against every peer's published one. SKIPPED
 		// when this host's file does not load (PR #569's review): the BOOT_FILES line already fails on it, and comparing
@@ -3972,7 +4001,7 @@ export async function collectChecks(shellVars, seams) {
 		}
 	}
 
-	checks.push(...await doctorModelProposalChecks(env, { cwd, credentials: service.extra(["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]).env, declaredEndpoints: () => (seams.declaredEndpoints ?? ((a) => declaredEndpointsIn({ ...a, fs: { readFileSync, existsSync } })))({ env, cwd: seams.cwd, platform: seams.platform ?? process.platform }), now: seams.wallClock ?? Date.now, ...(seams.modelProposals ?? {}) }));
+	checks.push(...await doctorModelProposalChecks(env, { cwd, credentials: service.extra(["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]).env, declaredEndpoints: () => (seams.declaredEndpoints ?? ((a) => declaredEndpointsIn({ ...a, fs: keylessIo })))({ env, cwd: seams.cwd, platform: seams.platform ?? process.platform }), now: seams.wallClock ?? Date.now, ...(seams.modelProposals ?? {}) }));
 	section("secrets");
 	// REQ-TRIGGER-SECRETS. Only reported when a trigger actually binds one, on the run.resume block's
 	// reasoning below: a deployment that uses no secrets should not be told about a variable it has no
@@ -4502,7 +4531,12 @@ export async function collectChecks(shellVars, seams) {
 		// boot key was never opened. `fileRaw` is set only for a line this reader vouches for the TEXT of, so
 		// there is always a real path here; whether it loads is a fact about the filesystem, not about the
 		// rest of the file.
-		if (envFile.hazard == null && fileRaw !== undefined && !blankInFile) {
+		// Issue #859: the envelope is judged against the projects and limits the service names; where the `.env` line of one
+		// of those cannot be read, neither can this verdict, and a "no projects" verdict would fail a service that starts.
+		const contextUnread = spec.key === "PI_ENVELOPE_FILE" ? ["PI_PROJECTS_FILE", "PI_SCOPED_LIMITS_FILE"].filter((key) => boot.serviceUnread.has(key)) : [];
+		if (envFile.hazard == null && fileRaw !== undefined && !blankInFile && contextUnread.length > 0) {
+			checks.push({ id: bootFileId(spec), ok: false, warn: true, label: `${spec.key} is set in ${join(cwd, ".env")} (${envValueShown(fileRaw)}), and whether the service loads it cannot be judged: doctor could not read what that file sets for ${contextUnread.join(" and ")}, which it is judged against`, fix: "fix that line (its own line here says why), then re-run doctor" });
+		} else if (envFile.hazard == null && fileRaw !== undefined && !blankInFile) {
 			const verdict = loadVerdict(spec, fileRaw, cwd, serviceSeamsForLoad, platform);
 			checks.push(
 				verdict.ok

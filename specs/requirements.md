@@ -7957,8 +7957,11 @@ only one, its own ladder, OpenShell's pinned release first, then `.env`, `up`, `
   is; a key set in this shell alone beside a `.env` that does not set it joins the shell-only line where a service is
   installed for the folder. From a `.env` another account can write the checks take nothing, as the line refusing it
   says. Where the file's line for a key cannot be read (a hazard, a line not in the plain form, a file doctor could not
-  open) and this shell sets none, the file is not known, never empty: a bundle's project is then a warning, and the
-  comparisons that would read "none" are skipped. `PI_MODEL_ENDPOINTS_FILE` keeps its own rule (`endpointsFileSetting`,
+  open) and this shell sets none, the file is not known, never empty: a bundle's project is then a warning, the
+  comparisons that would read "none" are skipped, one warning names what is not judged, and an envelope in the file is
+  not judged against projects or limits the file names on such a line. One file named two ways (a symlinked folder,
+  `/tmp` and `/private/tmp`, a case-insensitive disk) is no difference: where both exist they are compared by what they
+  are. The service's own subject reads an untrusted file as the BOOT_FILES lines do, to say what that file would do. `PI_MODEL_ENDPOINTS_FILE` keeps its own rule (`endpointsFileSetting`,
   which refuses a disagreement), now for the cheaper-route proposals as well. Every file read this way is opened behind
   a regular-file guard. It is one read of the file, and still configures nothing. **An env-setup script THE SERVICE RUNS
   downgrades a service refusal to a WARNING naming it**, because on all three platforms that script runs

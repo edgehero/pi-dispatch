@@ -13381,9 +13381,10 @@ test("doctor: a .env line naming the projects file that doctor cannot read leave
 	const d = serviceDeployment(["PI_PROJECTS_FILE=$PWD/projects.json"], { files: { "triggers.json": triggers, "projects.json": JSON.stringify({ version: 1, projects: [{ id: "myproject", members: ["github:acme/web"] }] }) } });
 	const checks = await collectChecks(imgEnv({ PI_TRIGGERS_FILE: join(d.dir, "triggers.json"), PI_SECRET_BUNDLES: "demo-profile:/bin/true:dotenv" }), d.seams());
 	assert.ok(!checks.some((c) => /which projects\.json does not hold/.test(c.label)), "no false ✗ from a file doctor never read");
-	const line = checks.find((c) => /^secret bundle demo names project myproject, and whether the projects file the service reads holds it is not known/.test(c.label));
+	const line = checks.find((c) => /^secret bundle demo names project myproject, and whether the projects file the service reads holds it is not known: doctor could not read what the deployment \.env sets for PI_PROJECTS_FILE$/.test(c.label));
 	assert.deepEqual([line?.ok, line?.warn], [false, true]);
 	assert.ok(checks.some((c) => /PI_PROJECTS_FILE on line 1 of .* is not in the form every loader reads the same way/.test(c.label)), "the line that says why");
+	assert.ok(checks.some((c) => c.warn === true && /^not judged here, since doctor could not read what the deployment \.env sets for PI_PROJECTS_FILE/.test(c.label)), "and what that leaves out, once");
 });
 
 test("with a worker unit installed for this folder, a boot-file key only this shell sets joins the shell-only line (#859)", async () => {
@@ -13420,4 +13421,32 @@ test("doctor: a project's model roles are judged with the .env's projects file (
 	const d = serviceDeployment(["PI_PROJECTS_FILE=projects.json"], { files });
 	const checks = await collectChecks(imgEnv({ PI_TRIGGERS_FILE: join(d.dir, "triggers.json") }), d.seams());
 	assert.ok(checks.some((c) => /project shop.*model-role-provider-conflict/.test(c.label)), checks.filter((c) => /model-role/.test(c.label)).map((c) => c.label).join(" | ") || "no model-role line at all");
+});
+
+test("doctor: one file reached by two paths is no difference, a symlinked folder included (#859)", async () => {
+	const d = serviceDeployment(["PI_PROJECTS_FILE=projects.json"], { files: { "projects.json": JSON.stringify({ version: 1, projects: [] }) } });
+	const link = `${d.dir}-link`;
+	symlinkSync(d.dir, link);
+	try {
+		const checks = await collectChecks(imgEnv({ PI_PROJECTS_FILE: join(link, "projects.json") }), d.seams());
+		assert.ok(!checks.some((c) => /names different files/.test(c.label)), "the same file through a symlinked folder");
+	} finally {
+		rmSync(link, { force: true });
+	}
+});
+
+test("doctor: an envelope in .env whose projects line doctor cannot read is not judged, never REFUSES TO START (#859)", async () => {
+	const files = { "projects.json": JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/web"] }] }), "envelope.json": JSON.stringify({ version: 1, window: "week", totalUsd: "100", floorsUsd: { shop: "10" } }) };
+	const d = serviceDeployment(["PI_PROJECTS_FILE=$PWD/projects.json", "PI_ENVELOPE_FILE=envelope.json"], { files });
+	const checks = await collectChecks(imgEnv({ PI_MAX_COST_USD: "2", PI_SETTINGS_FILE: noOverlay() }), d.seams());
+	assert.ok(!checks.some((c) => /PI_ENVELOPE_FILE .*REFUSES TO START/.test(c.label)));
+	const line = checks.find((c) => /^PI_ENVELOPE_FILE is set in .*, and whether the service loads it cannot be judged: doctor could not read what that file sets for PI_PROJECTS_FILE/.test(c.label));
+	assert.deepEqual([line?.ok, line?.warn], [false, true]);
+});
+
+test("doctor: an untrusted .env's envelope is still judged against that file's projects, as its BOOT_FILES line reads it (#859)", async () => {
+	const files = { "projects.json": JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/web"] }] }), "envelope.json": JSON.stringify({ version: 1, window: "week", totalUsd: "100", floorsUsd: { shop: "10" } }) };
+	const d = serviceDeployment(["PI_PROJECTS_FILE=projects.json", "PI_ENVELOPE_FILE=envelope.json"], { files });
+	const checks = await collectChecks(imgEnv({ PI_MAX_COST_USD: "2", PI_SETTINGS_FILE: noOverlay() }), d.seams({ envUntrusted: true }));
+	assert.ok(checks.some((c) => c.ok && /^PI_ENVELOPE_FILE is set in .*\.env .* and loads/.test(c.label)), "no false refusal beside the untrusted ✗");
 });
