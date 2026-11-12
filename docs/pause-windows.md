@@ -69,6 +69,8 @@ the SERVICE, which reads that file and never your shell, and this shell, which i
 `pi-dispatch worker` would get. A file that points the key at a pause-windows file which loads is a ✓ saying
 the service reads it and this command does not. A file that assigns the key nothing, or points it at
 something the worker cannot load, is a failure whatever your shell says, because the unit will not start.
+The checks that read the windows themselves, such as the warning about a bare repo scope, read that same file
+when your shell sets no value (issue #859), so they judge the windows the service applies.
 
 Two limits on that read, both deliberate. It covers only the keys these checks name. And it repeats a value
 back to you only when the line is written in the form every loader of a `.env` reads the same way; otherwise

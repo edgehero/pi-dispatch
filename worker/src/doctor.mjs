@@ -1256,6 +1256,49 @@ export function envFileKeys(path, keys, { fileExists, readEnvFile, statFile = st
 }
 
 /**
+ * Issue #859: the five boot-file keys as doctor's other checks judge them, from this shell and from the one reading of
+ * the deployment `.env` that `envFileKeys` made. Until this, the checks that read the projects, the scoped limits, the
+ * pause windows and the envelope took these keys from this shell alone, and the shell a service deployment's operator
+ * runs doctor from sets none of them: doctor judged a deployment with no projects, FAILED every secret bundle bound to
+ * one as naming a project projects.json does not hold, left the size suggestions out without a word, and compared "no
+ * projects" with healthy peers. Only the BOOT_FILES lines read the file, and they kept what they read to themselves.
+ *
+ * These keys stay outside `resolveDoctorEnv` (the BOOT_FILES lines judge two subjects, the service's file and this
+ * shell, and a test pins `SERVICE_ENV_KEYS`), but the precedence is that resolver's, so one rule decides every value
+ * doctor's checks judge: this shell's value where it sets one, else the file's. One difference, on purpose: a BLANK
+ * value in this shell has its own ✗ in the BOOT_FILES block (a worker started from here cannot start), and the checks
+ * then judge the service's file rather than nothing. A file value is taken only where `envFileKeys` vouches for its text
+ * (a plain line, no hazard in the file), and a relative one is resolved against the deployment folder, where the
+ * service runs and where `loadVerdict` resolves it; this shell's value is handed on as it was.
+ *
+ * Read to decide what doctor SAYS, the licence `ENV_FILE_READABLE_KEYS` gives: what this returns goes to the fact
+ * readers and the load verdicts and nowhere else. Returns `{ env, service, from, differs }`: `env` is `shell` with the
+ * five keys as the checks judge them; `service` the same with the five as the SERVICE reads them, from the file alone
+ * (the load verdict of the service's own subject, whose envelope is judged against the service's projects and limits);
+ * `from[key]` "shell" or ".env"; `differs` the keys this shell and the file set to different files, `{ key, shell, file }`.
+ */
+export function bootFileEnv(shell, envFile, cwd, platform = process.platform) {
+	const isAbsoluteOn = platform === "win32" ? win32.isAbsolute : posix.isAbsolute;
+	const at = (path) => (isAbsoluteOn(path) ? path : join(cwd, path));
+	const out = { env: { ...shell }, service: { ...shell }, from: {}, differs: [] };
+	for (const key of ENV_FILE_READABLE_KEYS) {
+		const own = typeof shell[key] === "string" && shell[key].trim() !== "" ? shell[key] : undefined;
+		const raw = envFile?.hazard == null && typeof envFile?.[key] === "string" && envFile[key] !== "" ? envFile[key] : undefined;
+		const file = raw === undefined ? undefined : at(raw);
+		if (file === undefined) delete out.service[key];
+		else out.service[key] = file;
+		if (own !== undefined) {
+			out.from[key] = "shell";
+			if (file !== undefined && at(own) !== file) out.differs.push({ key, shell: own, file: raw });
+		} else if (file !== undefined) {
+			out.env[key] = file;
+			out.from[key] = ".env";
+		}
+	}
+	return out;
+}
+
+/**
  * The files a worker LOADS at boot, and the one place that knows what each is and how to ask. The model endpoints file
  * (issue #503) defaults to the deployment folder's copy where the other three are off when unset.
  *
@@ -1661,6 +1704,13 @@ export async function collectChecks(shellVars, seams) {
 	// is this shell's, never the file's. The one thing the worker does read there, auth.json, follows the resolution
 	// (`keyAgentDir`).
 	const { cwd, spawn, probeValkey, readHosts = defaultReadHosts, fileExists, nodeVersion, platform, agentDir = agentDirFrom(spawnEnv), readHostPiFn = readHostPi, home = safeHomeDir(), underTemp = underOsTempDir, providerOracle = defaultProviderOracle, facts = null, readEnvFile = null, stat: statSeam = statSync, runTimeouts = RUN_TIMEOUTS } = seams;
+	// Issue #859: the deployment `.env`'s reading of the five boot-file keys, made ONCE and here, before the first check that
+	// reads a projects, scoped-limits, pause-windows or envelope file (a test fails a second read). The BOOT_FILES lines
+	// further down judge its two subjects from it, as they did when it was read there; `bootEnv` is what every other
+	// check judges those keys by (`bootFileEnv`), never this shell's value alone.
+	const envFile = envFileKeys(join(cwd, ".env"), BOOT_FILES.map((spec) => spec.key), { fileExists, readEnvFile, platform });
+	const boot = bootFileEnv(env, envFile, cwd, platform);
+	const bootEnv = boot.env;
 
 	// The job image as the worker takes it (`config.mjs` `jobImageFrom`: `||`, so an empty value is the default, where
 	// doctor's `??` inspected an image named ""), and judged BEFORE doctor inspects or runs it (issue #471) by the one
@@ -1896,9 +1946,9 @@ export async function collectChecks(shellVars, seams) {
 	// drives a need above 1 through the real collection, for a store whose table has no row of its own and at a version no row holds yet.
 	const versionTables = seams.versionTables ?? {};
 	const { watchSources: triggerWatchSources, watchRules: triggerWatchRules, modelRoles: triggerModelRoles, secretBundles: triggerBundles, requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, recovering, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, excludedNames, costCaps, modelRuns, triggersVersionNeed, jobDataVersionNeed, parseError, parseNewer: triggersFileIsNewer, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTables);
-	const modelRoleProjects = readProjectFacts(env, fileExists).projects;
-	const scopedLimitFacts = readScopedLimitFacts(env, fileExists);
-	const pauseWindowFacts = readPauseWindowFacts(env, fileExists, versionTables.pauseWindows);
+	const modelRoleProjects = readProjectFacts(bootEnv, fileExists).projects;
+	const scopedLimitFacts = readScopedLimitFacts(bootEnv, fileExists);
+	const pauseWindowFacts = readPauseWindowFacts(bootEnv, fileExists, versionTables.pauseWindows);
 	section("triggers");
 	checks.push(...watchDoctorChecks({ sources: triggerWatchSources, rules: triggerWatchRules, env }));
 	// FIRST, and fail rather than warn: every check below this line reads counts that a parse failure
@@ -2343,7 +2393,7 @@ export async function collectChecks(shellVars, seams) {
 	// offers. The records are read only when there is a project to suggest for, and not at all when the scoped-limits
 	// file does not load: every size read without it would be the default, not the project's, and a project that has a
 	// row would be told to `dispatch_limit_add` one.
-	const sizingProjects = readProjectFacts(env, fileExists).projects;
+	const sizingProjects = readProjectFacts(bootEnv, fileExists).projects;
 	if (sizingProjects.length > 0 && !budgetView.error) {
 		if (scopedLimitFacts.parseError !== null) {
 			checks.push({ ok: true, label: "size suggestions: off until the scoped-limits file loads (a size read without it would be the default, not the project's)" });
@@ -3145,7 +3195,7 @@ export async function collectChecks(shellVars, seams) {
 		// are shared. This host's `fpProjects` from the file the service names, against every peer's published one. SKIPPED
 		// when this host's file does not load (PR #569's review): the BOOT_FILES line already fails on it, and comparing
 		// "no projects" against healthy peers would send the operator to the wrong host.
-		const projectFactsHere = readProjectFacts(env, fileExists);
+		const projectFactsHere = readProjectFacts(bootEnv, fileExists);
 		if (projectFactsHere.parseError === null) checks.push(...fleetProjectsChecks(projectsFingerprint(projectFactsHere.projects), peers));
 		// Issue #596: a peer that predates version 3 keeps its last good scoped-limits file once this one is version 3, so
 		// no edit to the file applies on it. Judged on the DECLARED version, or the derived one if that is higher (gate
@@ -3161,7 +3211,7 @@ export async function collectChecks(shellVars, seams) {
 		// Issue #504 part B: one applied split, judged on every host against its own envelope. A host whose envelope digest
 		// differs refuses every governed job as `envelope-mismatch`. SKIPPED when this host's file does not load, for the
 		// projects check's reason above.
-		const envelopeHere = readEnvelopeFacts(env);
+		const envelopeHere = readEnvelopeFacts(bootEnv);
 		if (envelopeHere.parseError === null && appliedSplit === null) checks.push(...fleetEnvelopeChecks(envelopeHere.envelope ? envelopeDigest(envelopeHere.envelope) : NO_ENVELOPE_FINGERPRINT, peers));
 	} else if (fleet.unreachable) {
 		// Said, rather than silently absent: "no peers" and "could not ask" are different facts.
@@ -3186,7 +3236,7 @@ export async function collectChecks(shellVars, seams) {
 	// whose envelope differs refuses its governed jobs. Read whenever this command may talk to the Valkey (above), from
 	// the same Valkey the fleet was read from; with no split there, or no answer, nothing is said.
 	if (appliedSplit !== null) {
-		const envelopeHere = readEnvelopeFacts(env);
+		const envelopeHere = readEnvelopeFacts(bootEnv);
 		if (envelopeHere.parseError === null) checks.push(...appliedSplitChecks(appliedSplit, envelopeHere.envelope ? envelopeDigest(envelopeHere.envelope) : NO_ENVELOPE_FINGERPRINT, workerNameOf(declaredWorkerName), peers));
 	}
 
@@ -3861,7 +3911,7 @@ export async function collectChecks(shellVars, seams) {
 		}
 	}
 
-	checks.push(...await doctorModelProposalChecks(env, { cwd, credentials: service.extra(["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]).env, now: seams.wallClock ?? Date.now, ...(seams.modelProposals ?? {}) }));
+	checks.push(...await doctorModelProposalChecks(env, { cwd, credentials: service.extra(["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]).env, modelEndpointsFile: bootEnv.PI_MODEL_ENDPOINTS_FILE, now: seams.wallClock ?? Date.now, ...(seams.modelProposals ?? {}) }));
 	section("secrets");
 	// REQ-TRIGGER-SECRETS. Only reported when a trigger actually binds one, on the run.resume block's
 	// reasoning below: a deployment that uses no secrets should not be told about a variable it has no
@@ -3997,7 +4047,7 @@ export async function collectChecks(shellVars, seams) {
 		// skip reason. Doctor cannot see another host's file, so it warns where the shape allows it: a multi-host worker
 		// (PI_WORKER_NAME) with projects and no triggers file of its own.
 		if (!anyBundle && typeof env.PI_WORKER_NAME === "string" && env.PI_WORKER_NAME.trim() !== "" && !fileExists(triggersPath(env, cwd))) {
-			const fleetProjects = readProjectFacts(env, fileExists);
+			const fleetProjects = readProjectFacts(bootEnv, fileExists);
 			if (fleetProjects.parseError === null && fleetProjects.projects.length > 0) {
 				checks.push({ ok: true, warn: true, label: "this fleet worker has projects but no triggers file, so it applies no project secret bundle: a project another host's triggers.json binds would run here without its environment", fix: "keep the same triggers.json on every host (PI_TRIGGERS_FILE), or declare the bundle profiles here, which makes a missing file a retry instead" });
 			}
@@ -4009,7 +4059,7 @@ export async function collectChecks(shellVars, seams) {
 			} catch {
 				realExecutablePath = null;
 			}
-			const projectFacts = readProjectFacts(env, fileExists);
+			const projectFacts = readProjectFacts(bootEnv, fileExists);
 			let resolveBundle = null;
 			if (seams.secrets === true) {
 				try {
@@ -4243,7 +4293,8 @@ export async function collectChecks(shellVars, seams) {
 	// a deployment whose unit exits 1 in a restart loop is not a deployment that is merely unconfigured in
 	// this shell. Where the file merely configures what this shell does not, the line still says which
 	// process would honour it, and is still a warning.
-	const envFile = envFileKeys(join(cwd, ".env"), BOOT_FILES.map((spec) => spec.key), { fileExists, readEnvFile, platform });
+	// The read itself (`envFile`) is made once at the top of `collectChecks` since issue #859, so the checks before this
+	// block judge the same reading of these keys.
 	// ONE RULE FOR BOTH BOOT FILES, and it asks the worker's own loader rather than a second opinion
 	// (issue #384). Before this there were two hand-written copies of a shell-shaped check for
 	// `PI_PAUSE_WINDOWS_FILE`, a THIRD rule for a scoped-limits file that does not parse, and no rule at all
@@ -4264,6 +4315,9 @@ export async function collectChecks(shellVars, seams) {
 	// regular-file guard and the loaders' own two reads. A test drives a whole deployment through these
 	// without a real file, which is how the fixtures below stay honest about content.
 	const seamsForLoad = { env, statFile: statSeam, loaderIo: { existsSync: (p) => fileExists(p), readFileSync: readEnvFile ? (p, enc) => asText(readEnvFile(p), enc) : readFileSync } };
+	// Issue #859: the SERVICE's subject is loaded with the boot keys as the service reads them, from the file alone, so an
+	// envelope in `.env` is judged against the projects and limits the service names, never against this shell's.
+	const serviceSeamsForLoad = { ...seamsForLoad, env: boot.service };
 	// ONCE PER FILE, not once per key (issue #396). This is a fact about the FILE -- one line the reader
 	// cannot model -- and it was announced inside the per-key loop, so a `.env` with one such line produced
 	// two near-identical warnings differing only in which key they named. The keys it prevents a verdict
@@ -4387,7 +4441,7 @@ export async function collectChecks(shellVars, seams) {
 		// there is always a real path here; whether it loads is a fact about the filesystem, not about the
 		// rest of the file.
 		if (envFile.hazard == null && fileRaw !== undefined && !blankInFile) {
-			const verdict = loadVerdict(spec, fileRaw, cwd, seamsForLoad, platform);
+			const verdict = loadVerdict(spec, fileRaw, cwd, serviceSeamsForLoad, platform);
 			checks.push(
 				verdict.ok
 					? { id: bootFileId(spec), ok: true, label: `${spec.key} is set in ${join(cwd, ".env")} (${envValueShown(fileRaw)})${alsoExported === undefined ? "" : ", for this platform's loader,"} and loads: the service reads that file, this shell does not` }
@@ -4463,6 +4517,20 @@ export async function collectChecks(shellVars, seams) {
 				fix: `set ${fixLineFor(spec.key, scaffolded)} in .env and restart the worker -- unset means ${spec.unsetMeans}${spec.panelWrites === false ? "" : `, while the admin panel defaults to this same file and reports each ${spec.unit} it writes as applied live`}; delete the file if this deployment has no ${spec.nothing}`,
 			});
 		}
+
+		// Issue #859: WHICH FILE THE OTHER CHECKS JUDGED, where the two subjects name different ones. Each subject's own line
+		// above already fails where its file does not load, so the difference is a warning, worded as the service-key
+		// disagreement line words it (`serviceEnvLines`); without it a reader could take a project or limit line for the
+		// service's while it was judged on this shell's file.
+		const differs = boot.differs.find((d) => d.key === spec.key);
+		if (differs !== undefined) {
+			checks.push({
+				ok: false,
+				warn: true,
+				label: `${spec.key} names different files in this shell (${envValueShown(differs.shell)}) and in ${join(cwd, ".env")} (${envValueShown(differs.file)}): doctor's other checks judged this shell's, which a worker started by hand from this shell runs, while the service runs the file's`,
+				fix: `make them agree: change ${join(cwd, ".env")} (what the service reads), or unset ${spec.key} in this shell, then re-run doctor`,
+			});
+		}
 	}
 
 	// A scope that can only ever be a folder (issue #242's dead-scope rule): a forge repo always contains "/" and never
@@ -4502,14 +4570,14 @@ export async function collectChecks(shellVars, seams) {
 	// (start.mjs, `checkProjectRows`), so this is a FAILURE naming the row and the id. Skipped when either file does not
 	// load: that is the BOOT_FILES line's, and a zeroed list here would name every project row as dangling.
 	if (scopedLimitFacts.parseError === null && scopedLimitFacts.limits.length > 0) {
-		const projectFacts = readProjectFacts(env, fileExists);
+		const projectFacts = readProjectFacts(bootEnv, fileExists);
 		if (projectFacts.parseError === null) checks.push(...projectRowChecks(scopedLimitFacts.limits, projectFacts.projects, scopedLimitFacts.path));
 	}
 
 	section("envelope");
 	// Issue #504 part B: the envelope's advisories, on the file the service names, when it loads (a file that does not is
 	// the BOOT_FILES line's). Warnings only: the worker boots on both.
-	const envelopeFactsHere = readEnvelopeFacts(env);
+	const envelopeFactsHere = readEnvelopeFacts(bootEnv);
 	if (envelopeFactsHere.envelope) checks.push(...envelopeChecks(envelopeFactsHere.envelope, envelopeFactsHere.projects, envelopeFactsHere.maxCostMicros));
 
 	section("console");
@@ -5438,15 +5506,17 @@ function readScopedLimitFacts(env, fileExists) {
 /**
  * The projects facts (issue #499 part B): the parsed projects when PI_PROJECTS_FILE is set, `[]` when it is unset (no
  * projects, so every project row dangles), or a parse error when it is set and does not load (the BOOT_FILES line's).
+ * `path` is the file read, null when the key is unset (issue #859: unset and a file with no projects are both `[]`, and
+ * this is how a line tells them apart). Handed `bootEnv`, so the key is the service's where this shell sets none.
  */
 function readProjectFacts(env, fileExists) {
 	const path = env.PI_PROJECTS_FILE;
-	if (typeof path !== "string" || path.trim() === "") return { projects: [], parseError: null };
+	if (typeof path !== "string" || path.trim() === "") return { projects: [], parseError: null, path: null };
 	try {
-		if (!fileExists(path) || !statSync(path).isFile()) return { projects: [], parseError: "unreadable" };
-		return { projects: loadProjects({ projectsFile: path }, { readFileSync, existsSync: fileExists }), parseError: null };
+		if (!fileExists(path) || !statSync(path).isFile()) return { projects: [], parseError: "unreadable", path };
+		return { projects: loadProjects({ projectsFile: path }, { readFileSync, existsSync: fileExists }), parseError: null, path };
 	} catch (e) {
-		return { projects: [], parseError: e?.message ?? String(e) };
+		return { projects: [], parseError: e?.message ?? String(e), path };
 	}
 }
 

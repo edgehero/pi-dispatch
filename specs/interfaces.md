@@ -8636,7 +8636,8 @@ two Valkey keys that keep it to one per recovery number and bound its wait (issu
   in this project to read a `.env` file's contents. Since issue #384 that read also decides a VERDICT rather
   than only the wording of one: doctor runs the worker's own loader on the path the file names, behind a
   regular-file guard, and a deployment whose service cannot start fails the command
-  (`REQ-DEPLOYMENT-BOOTSTRAP`). **An EMPTY value is not an unset one** (issue #384). `config.mjs` reads this
+  (`REQ-DEPLOYMENT-BOOTSTRAP`). Since issue #859 doctor's checks that read the windows (the bare-repo advisory, the
+  version a peer must read) take the file from the same reading where this shell sets no value. **An EMPTY value is not an unset one** (issue #384). `config.mjs` reads this
   key with `??`, so `PI_PAUSE_WINDOWS_FILE=` survives as an empty string, the loader runs on it
   unconditionally, and the worker REFUSES TO START: the feature is not off, the deployment is down. Doctor
   therefore FAILS on a blank value rather than softening it, judging the service and this shell as separate
@@ -8746,7 +8747,8 @@ two Valkey keys that keep it to one per recovery number and bound its wait (issu
   `[]`). Since issue #357 `pi-dispatch up` sets it to the `scoped-limits.json` in the folder it runs in
   when that key has no value, and `doctor` reads the deployment's `.env` for this key alone -- to reword a
   line where the deployment is merely unconfigured in this shell, and to FAIL where the service itself
-  cannot start (issue #384): the same change, the same bounds and the same
+  cannot start (issue #384), and since issue #859 for every check that reads the rows where this shell sets no
+  value (the project rows, the size suggestions, the fleet lines): the same change, the same bounds and the same
   reasoning as `INT-PAUSE-WINDOWS-FILE-CONTRACT` records for its own key, including that the worker's own
   fail-closed default does not move and that an EMPTY value is NOT an unset one: this key is read with `??`
   too, `loadScopedLimits` runs on the empty path, and the worker refuses to start (issue #384). The one-job-per-folder mutex for local jobs is CODE, not configuration: it holds with no file, an
@@ -9081,7 +9083,9 @@ folders. A job whose scope is a member belongs to that project, and its run reco
   the worker refuses to start, the rule `INT-SCOPED-LIMITS-FILE-CONTRACT` records for its own key. `pi-dispatch init`
   scaffolds an empty `projects.json`, `pi-dispatch up` sets the key to it when the key has no value, and doctor
   judges it as one of the boot files: it fails on an empty value and on a file the worker cannot load, and warns on a
-  scaffolded file the key does not name. The deployment pointer carries the key (`INT-DEPLOYMENT-POINTER-CONTRACT`).
+  scaffolded file the key does not name. Since issue #859 every doctor check that reads the projects (the secret
+  bundles' projects, the size suggestions, the project rows, the fleet digest) reads the file the deployment's `.env`
+  names where this shell sets no value, so a service deployment checked from a plain shell is judged with its projects. The deployment pointer carries the key (`INT-DEPLOYMENT-POINTER-CONTRACT`).
 - **Shape**: `{ "version": 1, "projects": [ { "id", "name"?, "members" } ] }`. Validated by the shared parser
   (`parseProjects`, `./projects`), fail loud. Unknown fields are dropped (the operator-file policy).
   - `version` (required): integer >= 1, and a newer one is refused (`projects file written by a newer pi-dispatch`).
@@ -9173,7 +9177,9 @@ A priorities plan moves headroom between projects inside it, and nothing an agen
   judged against their live lists, and a projects or scoped-limits reload that commits re-judges the envelope from
   disk (`pair.afterCommit`), so an edit that needs both files applies in either save order. A changed digest asks the
   applied split to follow it (`DES-DELEGATED-ALLOCATION-INSIDE-ENVELOPE`). Doctor loads it through the same function
-  (`BOOT_FILES`, `loadEnvelopeAsTheWorker`), and `PI_ENVELOPE_FILE` is one of the keys doctor reads from `.env`.
+  (`BOOT_FILES`, `loadEnvelopeAsTheWorker`), and `PI_ENVELOPE_FILE` is one of the keys doctor reads from `.env`. Since
+  issue #859 the service's own verdict judges it against the projects and scoped limits that `.env` names, and the
+  envelope's advisories and the applied-split line read it from there too where this shell sets no value.
   `pi-dispatch up` never writes the key (it says so when the operator's line is blank, since that refuses the boot),
   and `init` scaffolds no file: an envelope has no neutral empty form. The receiver does not read it.
 - **Location**: `PI_ENVELOPE_FILE`. Unset means no envelope and no delegation anywhere: `loadEnvelope` returns null
@@ -13646,6 +13652,7 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 
 | Date | Change |
 |---|---|
+| 2026-11-12 (#859) | **`INT-PROJECTS-FILE-CONTRACT`, `INT-SCOPED-LIMITS-FILE-CONTRACT`, `INT-PAUSE-WINDOWS-FILE-CONTRACT` and `INT-ENVELOPE-FILE-CONTRACT` AMENDED**, each in its doctor sentence: doctor's checks that read the file (the secret bundles' projects, the size suggestions, the project rows, the fleet digests, the bare-repo advisory, the envelope's advisories and the applied-split line) read the file the deployment `.env` names where this shell sets no value (`bootFileEnv`, `REQ-DEPLOYMENT-BOOTSTRAP`), and the service's envelope verdict is judged against the `.env`'s projects and limits. Before it they read this shell alone, which a service deployment's shell never sets. UNCHANGED, checked: each file's shape, its loader, the worker's reading, and `INT-DOCTOR-RESULTS-KEY` (the published record carries the same lines, now judged on the service's files). |
 | 2026-11-11 (#853, pi 1.5.2) | **`INT-SDK-SESSION-OPTIONS` AMENDED** in its evidence line and in (m): pi's default `cacheWarming` is `"idle"` since 1.5.2, which also warms between agent runs; the runner's `"off"` still holds and now saves more. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**: the merged compat object type-checks 1.5.2's four new keys, as pi does. Every other entry UNCHANGED, checked against the 1.5.2 tarballs. |
 | 2026-11-11 (#849, part 6) | **`INT-CONSOLE-STATE-API` AMENDED**: `POST /login/code` answers `kept: true` and keeps the browser's live session when it already belongs to the link's person and has time left. **`INT-CONSOLE-AUDIT-LOG` AMENDED**: the panel's `login-code` rows come from a bare `/dispatch console` too, where it links by default; a kept session's row carries a reason. |
 | 2026-11-08 (#849, part 5) | **`INT-CONSOLE-AUDIT-LOG` AMENDED**: two write kinds, `device-remove` and `sessions-end-all`, written through the existing action routes; the CLI's `sessions-ended` and its `shell` actor are UNCHANGED, checked. **`INT-CONSOLE-STATE-API` AMENDED**: `POST /api/device/remember` answers 409 at the per-name cap. `INT-CONSOLE-DEVICES-STORE`: UNCHANGED, checked, but for `rememberDevice` marking the cap refusal `full`: the page reads the store's listing, and the actions use `/api/act/<name>/preview` and `/confirm` as every action does. |

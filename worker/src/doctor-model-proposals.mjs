@@ -77,7 +77,7 @@ export function cheaperRouteChecks(roles, routes, models, endpoints, builtin = g
 	return checks;
 }
 
-export async function doctorModelProposalChecks(env, { cwd, credentials = {}, now = Date.now, read = safeRead, fetch = fetchLifecycle, endpoints: suppliedEndpoints } = {}) {
+export async function doctorModelProposalChecks(env, { cwd, credentials = {}, now = Date.now, read = safeRead, fetch = fetchLifecycle, endpoints: suppliedEndpoints, modelEndpointsFile = env.PI_MODEL_ENDPOINTS_FILE } = {}) {
 	let config;
 	try { config = parseProposalConfig(read(join(cwd, "model-proposals.json"))); }
 	catch (error) {
@@ -102,7 +102,9 @@ export async function doctorModelProposalChecks(env, { cwd, credentials = {}, no
 	if (config.routes?.length) try {
 		const parsed = parseModelsJson(read(join(env.PI_GLOBAL_PI_DIR, "models.json")));
 		if (parsed.error) throw new Error("overlay unavailable");
-		const endpoints = suppliedEndpoints ?? loadModelEndpoints({ modelEndpointsFile: env.PI_MODEL_ENDPOINTS_FILE }, { cwd });
+		// Issue #859: the endpoints file doctor's other checks judge (`bootFileEnv`: this shell's, else the `.env`'s), handed in;
+		// this shell's alone when a caller hands none.
+		const endpoints = suppliedEndpoints ?? loadModelEndpoints({ modelEndpointsFile }, { cwd });
 		checks.push(...cheaperRouteChecks(roles, config.routes, parsed.value, endpoints));
 	} catch { checks.push({ proposal: { kind: "unavailable" }, ok: false, warn: true, label: "Model proposals: declared route prices or endpoints unavailable", fix: "check the overlay models.json and declared endpoints; no route was changed" }); }
 	return checks;

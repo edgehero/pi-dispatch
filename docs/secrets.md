@@ -85,7 +85,9 @@ The narrowing is the whole of the licence, and each half is load-bearing:
 - it reads to decide **what doctor says, and whether doctor fails**, never to configure anything. No value
   read this way reaches a config, an argv, a container environment, or any fix that writes. Since issue #384
   a value does reach one read-only thing: the worker's own loader, opened behind a regular-file guard, to
-  answer whether a service started from this folder would start at all;
+  answer whether a service started from this folder would start at all. Since issue #859 the checks that read
+  those files (a secret bundle's project, the size suggestions, the project rows, the envelope) read the file
+  the `.env` names when your shell sets no value, so they judge the deployment the service runs;
 - it reads only the keys the message itself names, so it cannot grow into "load `.env`";
 - a file nobody could open is reported as exactly that, rather than as a key that is unset, because a
   deployment told it is fine when nobody could check is the worse failure. The same holds for a file this

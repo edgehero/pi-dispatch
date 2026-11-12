@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { DOCTOR_PUBLISH_SKIPPED_PREFIX } from "../src/doctor-spawner.mjs";
-import { defaultPublishDoctor, doctorHostLoads, dollarChecks, overlayDollarProblem, scopedDollarRowChecks, startAdvice, CANARY_LINES, CANARY_PROBE_SLUGS, DOCTOR_SHELL_KEYS, EGRESS_CANARY_RUNNER_MODULE, EGRESS_CANARY_STALE_RUNNER, ENV_FILE_READABLE_KEYS, RECEIVER_SERVICE_KEYS, RUN_TIMEOUTS, SERVICE_ENV_KEYS, STEERING_SERVICE_KEYS, WORKER_SERVICE_KEYS, backendChecks, countRetained, defaultPromptFn, dockerRunVia, egressCanaryPlainScript, egressCanaryProbeArgs, forgeUrlEgressChecks, egressCanaryScript, envFileKeys, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, podmanLiveChecks, render, sandboxTombstoneChecks, serviceEnvKeys, serviceEnvLoader, sweepStaleCanaryNetworks, urlShown, resolveDoctorEnv, jobImageOf, CLI_SERVICE_KEYS, cliNotHandedLines, fileConfigures, triggersPath, valkeyPasswordUpgradeStep, undeclaredPortNear, ENDPOINT_PROBE_SLUGS, allowlistHostAliases, egressEndpointScript, lanIPv4Addresses, overlayLoopbackModels } from "../src/doctor.mjs";
+import { defaultPublishDoctor, doctorHostLoads, dollarChecks, overlayDollarProblem, scopedDollarRowChecks, startAdvice, CANARY_LINES, CANARY_PROBE_SLUGS, DOCTOR_SHELL_KEYS, EGRESS_CANARY_RUNNER_MODULE, EGRESS_CANARY_STALE_RUNNER, ENV_FILE_READABLE_KEYS, RECEIVER_SERVICE_KEYS, RUN_TIMEOUTS, SERVICE_ENV_KEYS, STEERING_SERVICE_KEYS, WORKER_SERVICE_KEYS, backendChecks, countRetained, defaultPromptFn, dockerRunVia, egressCanaryPlainScript, egressCanaryProbeArgs, forgeUrlEgressChecks, egressCanaryScript, envFileKeys, bootFileEnv, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, podmanLiveChecks, render, sandboxTombstoneChecks, serviceEnvKeys, serviceEnvLoader, sweepStaleCanaryNetworks, urlShown, resolveDoctorEnv, jobImageOf, CLI_SERVICE_KEYS, cliNotHandedLines, fileConfigures, triggersPath, valkeyPasswordUpgradeStep, undeclaredPortNear, ENDPOINT_PROBE_SLUGS, allowlistHostAliases, egressEndpointScript, lanIPv4Addresses, overlayLoopbackModels } from "../src/doctor.mjs";
 import { collectChecks, runDoctor } from "./helpers/doctor.mjs";
 import { valkeyPasswordFor } from "../src/valkey-endpoint.mjs";
 import { serviceEnvFileOf } from "../src/service-env.mjs";
@@ -13211,4 +13211,126 @@ test("doctor --json needs neither publication nor reachable Valkey, and retains 
 	assert.equal(record.at, at);
 	assert.ok(record.checks.some((c) => c.level === "fail"));
 	assert.match(stderr.join(""), /doctor: some checks failed/);
+});
+
+// ── Issue #859: the checks judge the boot files the SERVICE reads, from the deployment `.env` ──────────────────
+
+/** A deployment folder whose `.env` names its boot files, and seams that read that `.env` as runDoctor does. */
+function serviceDeployment(envLines, { files = {} } = {}) {
+	const dir = realpathSync.native(tempDir("pi-boot-env-"));
+	for (const [name, text] of Object.entries(files)) writeFileSync(join(dir, name), text);
+	writeFileSync(join(dir, ".env"), envLines.map((l) => `${l}\n`).join(""));
+	return { dir, seams: (extra = {}) => collectSeams(green, { cwd: dir, nodeVersion: "22.19.0", probeValkey: async () => true, readEnvFile: (p) => readFileSync(p), ...extra }) };
+}
+
+test("bootFileEnv: this shell's value where it sets one, else the .env's, resolved against the deployment folder (#859)", () => {
+	const envFile = { PI_PROJECTS_FILE: "projects.json", PI_SCOPED_LIMITS_FILE: "/d/limits.json", PI_PAUSE_WINDOWS_FILE: "/d/pause.json" };
+	const boot = bootFileEnv({ PI_SCOPED_LIMITS_FILE: "/shell/limits.json", PI_PAUSE_WINDOWS_FILE: "  ", OTHER: "x" }, envFile, "/d", "linux");
+	assert.equal(boot.env.PI_PROJECTS_FILE, "/d/projects.json", "the file's, made absolute against the folder the service runs in");
+	assert.equal(boot.env.PI_SCOPED_LIMITS_FILE, "/shell/limits.json", "this shell's wins, as for every other service key");
+	assert.equal(boot.env.PI_PAUSE_WINDOWS_FILE, "/d/pause.json", "a blank shell value has its own ✗; the checks judge the service's file");
+	assert.equal(boot.env.OTHER, "x", "the rest of the environment is handed on");
+	assert.deepEqual(boot.from, { PI_PROJECTS_FILE: ".env", PI_SCOPED_LIMITS_FILE: "shell", PI_PAUSE_WINDOWS_FILE: ".env" });
+	assert.deepEqual(boot.differs, [{ key: "PI_SCOPED_LIMITS_FILE", shell: "/shell/limits.json", file: "/d/limits.json" }]);
+	assert.equal(boot.service.PI_SCOPED_LIMITS_FILE, "/d/limits.json", "the service reads the file's, whatever this shell says");
+	assert.equal(bootFileEnv({ PI_PROJECTS_FILE: "/x.json" }, {}, "/d", "linux").service.PI_PROJECTS_FILE, undefined, "and nothing the file does not set");
+	// The same file named two ways is no difference.
+	assert.deepEqual(bootFileEnv({ PI_PROJECTS_FILE: "/d/projects.json" }, envFile, "/d", "linux").differs, []);
+	// A file with a hazard vouches for no value, and an unread one has none.
+	assert.equal(bootFileEnv({}, { ...envFile, hazard: { line: 3 } }, "/d", "linux").env.PI_PROJECTS_FILE, undefined);
+	assert.equal(bootFileEnv({}, { unreadable: true }, "/d", "linux").env.PI_PROJECTS_FILE, undefined);
+	// Absolute on the TARGET platform, as loadVerdict judges it.
+	assert.equal(bootFileEnv({}, { PI_PROJECTS_FILE: "C:\\pi\\projects.json" }, "C:\\pi", "win32").env.PI_PROJECTS_FILE, "C:\\pi\\projects.json");
+});
+
+test("doctor: a bundle bound to a project the .env's projects.json holds fails nothing from a shell without the key (#859)", async () => {
+	const resolver = "/bin/true";
+	const triggers = JSON.stringify({ triggers: [], secretBundles: { demo: { profile: "demo-profile", ref: "x", project: "myproject" } } });
+	const projects = JSON.stringify({ version: 1, projects: [{ id: "myproject", members: ["github:acme/web"] }] });
+	for (const value of ["projects.json", null]) {
+		const d = serviceDeployment([`PI_PROJECTS_FILE=${value ?? "<abs>"}`], { files: { "triggers.json": triggers, "projects.json": projects } });
+		if (value === null) writeFileSync(join(d.dir, ".env"), `PI_PROJECTS_FILE=${join(d.dir, "projects.json")}\n`);
+		const env = imgEnv({ PI_TRIGGERS_FILE: join(d.dir, "triggers.json"), PI_SECRET_BUNDLES: `demo-profile:${resolver}:dotenv` });
+		const checks = await collectChecks(env, d.seams());
+		assert.ok(checks.some((c) => c.ok && c.label === "secret bundle demo: profile demo-profile (dotenv), project myproject"), value ?? "absolute");
+		assert.ok(!checks.some((c) => /which projects\.json does not hold/.test(c.label)), `no false ✗ (${value ?? "absolute"}): ${checks.filter((c) => /projects\.json/.test(c.label)).map((c) => c.label).join(" | ")}`);
+		assert.ok(checks.some((c) => c.ok && /^PI_PROJECTS_FILE is set in .*\.env .* and loads: the service reads that file, this shell does not$/.test(c.label)));
+	}
+	// A project the file does not hold still fails: the check judges the service's file, it did not go quiet.
+	const d = serviceDeployment(["PI_PROJECTS_FILE=projects.json"], { files: { "triggers.json": triggers, "projects.json": JSON.stringify({ version: 1, projects: [{ id: "other", members: ["github:acme/x"] }] }) } });
+	const checks = await collectChecks(imgEnv({ PI_TRIGGERS_FILE: join(d.dir, "triggers.json"), PI_SECRET_BUNDLES: `demo-profile:${resolver}:dotenv` }), d.seams());
+	assert.ok(checks.some((c) => c.ok === false && !c.warn && c.label === "secret bundle demo names project myproject, which projects.json does not hold"));
+});
+
+test("doctor run from a shell without PI_PROJECTS_FILE says what a shell with it says: the size lines and exit code (#859)", async () => {
+	const d = serviceDeployment([], { files: { "projects.json": JSON.stringify({ version: 1, projects: [{ id: "web", members: ["github:acme/web"] }] }) } });
+	writeFileSync(join(d.dir, ".env"), `PI_PROJECTS_FILE=${join(d.dir, "projects.json")}\n`);
+	const at = Date.parse("2026-10-01T12:00:00.000Z");
+	const run = async (shell) => {
+		const { out, text } = capture();
+		const code = await runDoctor(imgEnv({ PI_TRIGGERS_FILE: triggersFile(), PI_HOST_MEMORY_BUDGET: "8g", ...shell }), { ...imgDeps(out, green), cwd: d.dir, fileExists: existsSync, wallClock: () => at, readRunRecords: () => [] });
+		return { code, text: text() };
+	};
+	const without = await run({});
+	const withKey = await run({ PI_PROJECTS_FILE: join(d.dir, "projects.json") });
+	assert.match(without.text, /project web: size 4g, 2 CPUs: not enough runs to suggest a size yet/, "the size line is there without the key in this shell");
+	assert.equal(without.code, withKey.code);
+	assert.equal(without.text, withKey.text, "the same report either way");
+});
+
+test("doctor: the .env's scoped limits and projects are judged together, never a dangling row from this shell's absence (#859)", async () => {
+	const files = {
+		"triggers.json": JSON.stringify({ triggers: [{ on: { type: "cron", id: "t1", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/srv/shop-a", flow: "tidy", task: "t" } }] }),
+		"scoped-limits.json": JSON.stringify({ version: 2, limits: [{ scope: "project:shop", day: 2 }] }),
+		"projects.json": JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["/srv/shop-a"] }] }),
+	};
+	const dangling = (checks) => checks.find((x) => /name a project that is not in the projects file/.test(x.label));
+	const both = serviceDeployment(["PI_SCOPED_LIMITS_FILE=scoped-limits.json", "PI_PROJECTS_FILE=projects.json"], { files });
+	assert.equal(dangling(await collectChecks(imgEnv({ PI_TRIGGERS_FILE: join(both.dir, "triggers.json") }), both.seams())), undefined);
+	// The worker really refuses to start with the row and no projects file, and the line still says so.
+	const limitsOnly = serviceDeployment(["PI_SCOPED_LIMITS_FILE=scoped-limits.json"], { files });
+	const c = dangling(await collectChecks(imgEnv({ PI_TRIGGERS_FILE: join(limitsOnly.dir, "triggers.json") }), limitsOnly.seams()));
+	assert.ok(c && c.ok === false && c.warn !== true, "read from the .env, the row is judged, and it dangles");
+});
+
+test("doctor: the .env's pause windows reach the bare-repo advisory (#859)", async () => {
+	const files = {
+		"triggers.json": JSON.stringify({ triggers: [{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix" } }, { on: { type: "label", any: ["pi:fix"] }, run: { kind: "forgejo", flow: "fix" } }] }),
+		"pause-windows.json": JSON.stringify({ windows: [{ scope: "acme/docs", from: "22:00", to: "06:00" }] }),
+	};
+	const d = serviceDeployment(["PI_PAUSE_WINDOWS_FILE=pause-windows.json"], { files });
+	const checks = await collectChecks(imgEnv({ PI_TRIGGERS_FILE: join(d.dir, "triggers.json") }), d.seams());
+	assert.ok(checks.some((x) => /^1 pause window\(s\) name a bare repo \(acme\/docs\)/.test(x.label)), checks.filter((x) => /bare/.test(x.label)).map((x) => x.label).join(" | "));
+});
+
+test("doctor: an envelope in .env is judged against the .env's projects, and an applied split finds it (#859)", async () => {
+	const files = {
+		"projects.json": JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/web"] }] }),
+		"envelope.json": JSON.stringify({ version: 1, window: "week", totalUsd: "100", floorsUsd: { shop: "10" } }),
+	};
+	const d = serviceDeployment(["PI_ENVELOPE_FILE=envelope.json", "PI_PROJECTS_FILE=projects.json"], { files });
+	const env = imgEnv({ PI_MAX_COST_USD: "2", PI_SETTINGS_FILE: noOverlay() });
+	const checks = await collectChecks(env, d.seams({ readAppliedSplit: async () => ({ digest: "0123456789abcdef" }) }));
+	assert.ok(checks.some((c) => c.ok && /^PI_ENVELOPE_FILE is set in .*\.env .* and loads/.test(c.label)), "the service's envelope loads against the service's projects");
+	assert.ok(!checks.some((c) => /floorsUsd\.shop names a project/.test(c.label)));
+	assert.ok(checks.some((c) => /^Allocation envelope [0-9a-f]{16}: 100\.00 a week/.test(c.label)), "the envelope's advisories read it");
+	assert.ok(!checks.some((c) => /has no envelope while the fleet has an applied budget split/.test(c.label)), "no false ✗: this host has one");
+	assert.ok(checks.some((c) => /carries envelope [0-9a-f]{16}, not the one the applied budget split was made for/.test(c.label)), "it is compared instead");
+	// The service's subject does not borrow this shell's projects: with the projects only here, the service's envelope fails.
+	const shellOnly = serviceDeployment(["PI_ENVELOPE_FILE=envelope.json"], { files });
+	const judged = await collectChecks({ ...env, PI_PROJECTS_FILE: join(shellOnly.dir, "projects.json") }, shellOnly.seams());
+	assert.ok(judged.some((c) => c.ok === false && /^PI_ENVELOPE_FILE is set in .*\.env .* to a file the worker cannot load.*floorsUsd\.shop names a project that is not in the projects file/.test(c.label)));
+});
+
+test("doctor: this shell and the .env naming different boot files is said once, naming which the checks judged (#859)", async () => {
+	const files = { "projects.json": JSON.stringify({ version: 1, projects: [{ id: "web", members: ["github:acme/web"] }] }), "other.json": JSON.stringify({ version: 1, projects: [] }) };
+	const d = serviceDeployment(["PI_PROJECTS_FILE=projects.json"], { files });
+	const checks = await collectChecks(imgEnv({ PI_PROJECTS_FILE: join(d.dir, "other.json") }), d.seams());
+	const lines = checks.filter((c) => /^PI_PROJECTS_FILE names different files/.test(c.label));
+	assert.equal(lines.length, 1);
+	assert.deepEqual([lines[0].ok, lines[0].warn], [false, true]);
+	assert.equal(lines[0].label, `PI_PROJECTS_FILE names different files in this shell (${join(d.dir, "other.json")}) and in ${join(d.dir, ".env")} (projects.json): doctor's other checks judged this shell's, which a worker started by hand from this shell runs, while the service runs the file's`);
+	// The same file named relatively in one and absolutely in the other is no difference.
+	const same = await collectChecks(imgEnv({ PI_PROJECTS_FILE: join(d.dir, "projects.json") }), d.seams());
+	assert.ok(!same.some((c) => /names different files/.test(c.label)));
 });
