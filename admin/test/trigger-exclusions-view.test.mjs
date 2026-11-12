@@ -74,7 +74,7 @@ test("doctor's answer naming a package the file now leaves out is no answer for 
 test("one row per name: a package and an overlay entry of one name share it, two entries of a stem share it, and a name the file holds keeps its row and its spelling", async () => {
   const items = async (hosts, trigger = COMMENT) => (await view(hosts, trigger)).extensions.items;
   const both = await items({ a: { packages: [{ name: "shared", version: "1.0.0" }], extensions: [{ name: "shared.ts", kind: "file" }] } });
-  assert.deepEqual(both.map((row) => [row.value, row.name, row.sub]), [["shared", "shared 1.0.0", "staged on a · in the overlay on a"]]);
+  assert.deepEqual(both.map((row) => [row.value, row.name, row.sub]), [["shared", "shared 1.0.0", "staged on a · in the overlay on a · what it brings is known once a run has loaded it"]]);
   const stems = await items({ a: { extensions: [{ name: "guard.ts", kind: "file" }] }, b: { extensions: [{ name: "guard.js", kind: "file" }] }, c: { extensions: [{ name: "guard", kind: "dir" }] } });
   assert.deepEqual(stems.map((row) => row.value), ["guard"], "every entry that name means, on each host");
   for (const segment of ["guard.ts", "guard.js", "guard"]) assert.equal(overlayEntryNamed("guard", segment), true, segment);
@@ -85,9 +85,12 @@ test("one row per name: a package and an overlay entry of one name share it, two
   assert.equal(row.on, false);
   assert.equal(row.sub, "named in the file; not on a, unknown on blind, shut and silent");
   assert.equal((await items({}, { ...COMMENT, excludeExtensions: ["ghost"] }))[0].sub, "named in the file");
-  // What a run had of an extension is no part of a row the file now leaves out.
+  // Issue #847: what a run had of an extension is quoted on a row the file now leaves out too, since that row is where a
+  // person decides to turn it back on; and one no run has loaded says that is not known yet.
   const off = triggerGetsOf({ trigger: { ...COMMENT, excludeExtensions: ["pi-lint"] }, records: [S.everything()], hostLoads: await published({ a: { packages: [PI_LINT] } }), liveHosts: ["a"] }).extensions.items[0];
-  assert.equal(off.sub, "staged on a");
+  assert.equal(off.sub, "staged on a · 2 tools, 1 prompt template, as gh-9575 loaded it");
+  const never = triggerGetsOf({ trigger: { ...COMMENT, excludeExtensions: ["pi-lint"] }, records: [], hostLoads: await published({ a: { packages: [PI_LINT] } }), liveHosts: ["a"] }).extensions.items[0];
+  assert.equal(never.sub, "staged on a · what it brings is known once a run has loaded it");
   assert.match(triggerGetsOf({ trigger: COMMENT, records: [S.everything()], hostLoads: await published({ a: { packages: [PI_LINT] } }), liveHosts: ["a"] }).extensions.items[0].sub, /as gh-9575 loaded it/);
 });
 
@@ -96,17 +99,17 @@ test("two names in the file that mean one entry: a row each, each says where it 
   assert.deepEqual(extensionsNotHere(names, { packages: [], overlay: [GUARD.name] }), [], "the worker: both are on this host");
   const out = await view({ mini1: { extensions: [GUARD] }, mini2: { extensions: [GUARD] } }, { ...COMMENT, excludeExtensions: names });
   assert.deepEqual(out.extensions.items.map((row) => [row.value, row.name, row.on, row.sub, row.backOn]), [
-    ["git-guard", "git-guard", false, "in the overlay on mini1 and mini2 · the file also names git-guard.ts", "git-guard off the list"],
-    ["git-guard.ts", "git-guard.ts", false, "in the overlay on mini1 and mini2 · the file also names git-guard", "git-guard.ts off the list"],
+    ["git-guard", "git-guard", false, "in the overlay on mini1 and mini2 · the file also names git-guard.ts · an overlay entry has no manifest, so what it brings is known once a run has loaded it", "git-guard off the list"],
+    ["git-guard.ts", "git-guard.ts", false, "in the overlay on mini1 and mini2 · the file also names git-guard · an overlay entry has no manifest, so what it brings is known once a run has loaded it", "git-guard.ts off the list"],
   ]);
   // Beside a host that lists whole and holds neither, and one that cannot say, the same words any other row reads.
   const beside = await view({ mini1: { extensions: [GUARD] }, bare: {}, blind: { unread: ["extensions"] } }, { ...COMMENT, excludeExtensions: names });
-  assert.equal(beside.extensions.items[1].sub, "in the overlay on mini1, not on bare, unknown on blind · the file also names git-guard");
+  assert.equal(beside.extensions.items[1].sub, "in the overlay on mini1, not on bare, unknown on blind · the file also names git-guard · an overlay entry has no manifest, so what it brings is known once a run has loaded it");
   // One name stays one row, in its own words, and an entry of another stem is its own row whatever the file spells.
   const one = await view({ mini1: { extensions: [GUARD, { name: "git-guard.js", kind: "file" }] } }, { ...COMMENT, excludeExtensions: ["git-guard.ts"] });
   assert.deepEqual(one.extensions.items.map((row) => [row.value, row.name, row.on, row.sub, row.backOn]), [
-    ["git-guard", "git-guard.js", true, "in the overlay on mini1", "git-guard back on"],
-    ["git-guard.ts", "git-guard.ts", false, "in the overlay on mini1", "git-guard.ts back on"],
+    ["git-guard", "git-guard.js", true, "in the overlay on mini1 · an overlay entry has no manifest, so what it brings is known once a run has loaded it", "git-guard back on"],
+    ["git-guard.ts", "git-guard.ts", false, "in the overlay on mini1 · an overlay entry has no manifest, so what it brings is known once a run has loaded it", "git-guard.ts back on"],
   ]);
   // On the page: the word the bar repeats is the row's.
   const panel = await card({ excludeExtensions: names });
@@ -553,4 +556,44 @@ test("the editor's defaults say none for both, so a page that lists them says a 
   assert.equal(editor.defaults.excludeExtensions, "none");
   assert.equal(editor.defaults.excludeExtensionTools, "none");
   assert.ok(normalizeTriggerForDisplay(withRun({ excludeExtensions: ["x"] })).excludeExtensions);
+});
+
+// ---- issue #847, the adversary's cases ----------------------------------------------------------------------------------------
+
+test("a switched-off row quotes the newest run that loaded it, whatever ran after; nothing countable is said as such (#847)", async () => {
+  const hostLoads = await published({ a: { packages: [PI_LINT] } });
+  const withLint = (jobId, over = {}) => loadedRecord({ jobId, loaded: loadedField({ sources: [source("package", { name: "pi-lint", version: "1.4.2", extensions: 1, tools: 1, toolNames: ["lint"], ...over }), source("overlay"), source("repository"), source("trigger"), source("other")] }) });
+  const without = loadedRecord({ jobId: "gh-new1", loaded: loadedField({ sources: [source("overlay"), source("repository"), source("trigger"), source("other")] }) });
+  const off = { ...COMMENT, excludeExtensions: ["pi-lint"] };
+  const row = (records, trigger = off) => triggerGetsOf({ trigger, records, hostLoads, liveHosts: ["a"] }).extensions.items[0].sub;
+  assert.equal(row([without, withLint("gh-old1")]), "staged on a · 1 tool, as gh-old1 loaded it", "the newer run left it out; the older one still says what it brought");
+  assert.equal(row([withLint("gh-hook", { tools: 0, toolNames: [] })], COMMENT), "staged on a · no tool, skill or prompt template, as gh-hook loaded it", "a hook alone is loaded, never unknown");
+  // A history that could not be read is no run: the card says so once, and no row claims none loaded it.
+  assert.equal(triggerGetsOf({ trigger: off, records: [], historyUnread: true, hostLoads, liveHosts: ["a"] }).extensions.items[0].sub, "staged on a");
+});
+
+test("an overlay entry and a package of one name are each other's counts never; a stem's second entry is looked for too (#847)", async () => {
+  const hostLoads = await published({ a: { packages: [{ name: "guard", version: "2.0.0" }], extensions: [{ name: "guard.ts", kind: "file" }] } });
+  const record = loadedRecord({ jobId: "gh-g1", loaded: loadedField({ sources: [source("package", { name: "guard", version: "1.0.0", extensions: 1, tools: 2, toolNames: ["a", "b"] }), source("overlay"), source("repository"), source("trigger"), source("other")] }) });
+  const sub = triggerGetsOf({ trigger: COMMENT, records: [record], hostLoads, liveHosts: ["a"] }).extensions.items.find((item) => item.value === "guard").sub;
+  assert.doesNotMatch(sub, /2 tools/, "guard 1.0.0's counts are not guard 2.0.0's, nor the overlay entry's");
+  // Two entries of one stem on two hosts: the run loaded the second.
+  const twoHosts = await published({ m1: { extensions: [{ name: "git-guard.ts", kind: "file" }] }, m2: { extensions: [{ name: "git-guard", kind: "dir" }] } });
+  const loadedTs = loadedRecord({ jobId: "gh-gg1", loaded: loadedField({ sources: [source("overlay", { names: ["git-guard.ts"], namedTools: [{ name: "git-guard.ts", tools: ["guard"] }], extensions: 1, tools: 1 }), source("repository"), source("trigger"), source("other")] }) });
+  const stem = triggerGetsOf({ trigger: COMMENT, records: [loadedTs], hostLoads: twoHosts, liveHosts: ["m1", "m2"] }).extensions.items[0].sub;
+  assert.match(stem, /1 tool, as gh-gg1 loaded it$/);
+});
+
+test("a fresh sandbox's rows: an old publication reads unknown, a package-tier answer under packages false is no answer, and the refusal names no reason (#847)", async () => {
+  const { sandboxFreshRows } = await import("../src/trigger-gets-view.mjs");
+  const base = { name: "mini1", at: 1, ageMs: 0, every: 24, overlayExtensionsAllowed: true, extensions: [], skills: [], packages: [{ name: "pi-lint", version: "1.4.2" }], unread: [], more: {}, piVersion: "1.5.0", image: "pi-job:1" };
+  const text = (rows, label) => rows.find(([l]) => l === label)?.[1].join("");
+  const of = (host, opts) => sandboxFreshRows({ hostLoads: { more: 0, hosts: [host] }, host: "mini1", triggerIndex: 2, image: "pi-job:1", ...opts });
+  const old = of({ ...base, state: "old", flows: [{ trigger: 2, flow: "fix", tier: "none", package: null, repo: "absent" }], mcp: [{ name: "docs", enabled: false }] }, { flow: "fix", mcp: ["docs"] });
+  assert.equal(text(old, "Flow"), "Whether a job of trigger 3 on this host would find fix is unknown: its last doctor run is old.");
+  assert.equal(text(old, "MCP servers"), "docs unknown here: its last doctor run is old.");
+  const withheld = of({ ...base, state: "current", flows: [{ trigger: 2, flow: "fix", tier: "package", package: "pi-lint", repo: "absent" }], mcp: [] }, { flow: "fix", withholdsPackages: true });
+  assert.equal(text(withheld, "Flow"), "Whether a job of trigger 3 on this host would find fix is unknown: its last doctor run has no answer for it.");
+  const refused = of({ ...base, state: "current", flows: [], mcp: [{ name: "docs", enabled: false }] }, { flow: "fix", mcp: ["docs", "linear"] });
+  assert.equal(text(refused, "MCP servers"), "docs switched off here and linear not on this host, so a job there is refused before it spends.");
 });

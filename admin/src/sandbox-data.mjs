@@ -89,14 +89,16 @@ export function makeSandboxService({ paths, env = {}, deploymentDir, fleet, fs =
       }
       const selected = { repo: query.repo ?? sourceRun?.repo ?? null, index: query.index, ref: query.ref ?? "HEAD", host: query.host ?? (query.fromRun ? sourceRun?.host ?? null : inv.hosts.find((h) => !h.stale && !h.unreadable && h.settings)?.name ?? null), pin: query.pin === true };
       if (selected.index === null || selected.index === undefined) selected.index = query.fromRun ? null : options[0]?.index ?? null;
-      const rawTrigger = cfg.triggers[selected.index]?.run;
+      // A disarmed one-shot's run is the file's entry, as the worker prepares it (`sandbox-prepare.mjs`): the parser hands
+      // back no run for it, so its flow, MCP servers and packages read from the raw entry (issue #847).
+      const rawTrigger = cfg.triggers[selected.index]?.on?.type === "disarmed" ? (() => { try { return JSON.parse(cfg.triggersText).triggers?.[selected.index]?.run; } catch { return undefined; } })() : cfg.triggers[selected.index]?.run;
       const eligibleHosts = inv.hosts.filter((h) => {
         const backend = rawTrigger?.backend ?? h.settings?.defaultBackend;
         return !h.stale && !h.unreadable && h.settings && ["local", "podman"].includes(backend) && h.settings.backends.includes(backend);
       }).map((h) => h.name);
       const judged = selected.repo && selected.host && selected.index !== null ? preparation(selected, inv, cfg) : {};
       const request = query.request && query.host ? await fleet.sandboxPreparationStatus(query.host, query.request) : null;
-      return { ...inv, options, eligibleHosts, selected, withholdsPackages: rawTrigger?.packages === false, excludes: Array.isArray(rawTrigger?.excludeExtensions) ? rawTrigger.excludeExtensions : [], ...judged, request, ...(query.fromRun ? { fromRun: query.fromRun, sourceRun } : {}) };
+      return { ...inv, options, eligibleHosts, selected, withholdsPackages: rawTrigger?.packages === false, flow: typeof rawTrigger?.flow === "string" ? rawTrigger.flow : null, mcp: Array.isArray(rawTrigger?.mcp) ? rawTrigger.mcp.filter((name) => typeof name === "string") : [], excludes: Array.isArray(rawTrigger?.excludeExtensions) ? rawTrigger.excludeExtensions : [], ...judged, request, ...(query.fromRun ? { fromRun: query.fromRun, sourceRun } : {}) };
     },
     async preview(name, params) {
       if (name === "sandbox-host-set") {

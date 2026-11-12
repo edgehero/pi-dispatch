@@ -196,12 +196,12 @@ test("where each extension is: a list cut short proves what is on it and no lack
   const loads = await published({ a: { packages: [pkg("pi-lint")] }, b: { packages: [pkg("pi-lint", "1.4.3")] }, wide: { packages: wide }, none: {}, silent: null });
   const item = (name, records = []) => triggerGetsOf({ trigger: COMMENT, hostLoads: loads, liveHosts: ["a", "b", "wide", "none", "silent"], records }).extensions.items.find((row) => row.name === name);
   // One row for one name, since a name is what its switch sends, and the two versions each say where they are.
-  assert.equal(item("pi-lint 1.4.2 and 1.4.3").sub, "1.4.2 on a, 1.4.3 on b, not on none, unknown on wide and silent");
+  assert.equal(item("pi-lint 1.4.2 and 1.4.3").sub, "1.4.2 on a, 1.4.3 on b, not on none, unknown on wide and silent · what it brings is known once a run has loaded it");
   assert.equal(item("pi-lint 1.4.2 and 1.4.3").value, "pi-lint");
   const record = loadedRecord({ jobId: "gh-r1", loaded: loadedField({ sources: [source("package", { name: "pi-lint", version: "1.4.3", extensions: 1, tools: 2, toolNames: ["lint_file", "lint_fix"] }), source("overlay"), source("repository"), source("trigger"), source("other")] }) });
   assert.ok(item("pi-lint 1.4.2 and 1.4.3", [record]).sub.endsWith("1.4.3: 2 tools, as gh-r1 loaded it"), "what 1.4.3 brought says which it was");
   const off = await published({ a: { extensions: [{ name: "git-guard", kind: "dir" }], overlayExtensionsAllowed: false } });
-  assert.equal(triggerGetsOf({ trigger: COMMENT, hostLoads: off, liveHosts: ["a"] }).extensions.items[0].sub, "in the overlay on a · its overlay extensions off on a");
+  assert.equal(triggerGetsOf({ trigger: COMMENT, hostLoads: off, liveHosts: ["a"] }).extensions.items[0].sub, "in the overlay on a · its overlay extensions off on a · an overlay entry has no manifest, so what it brings is known once a run has loaded it");
 });
 
 // ---- a pill must not say what the rows beneath it contradict ------------------------------------------------------------
@@ -420,4 +420,31 @@ test("the note reads right for one silent host and for several", async () => {
   assert.doesNotMatch(several, /’s (?:is|could)|so it reads/, "no singular for two hosts");
   const one = noted(await published({ mini1: known, old1: old }), ["mini1", "old1"]);
   assert.ok(one.includes("Unknown, because the doctor record is old: old1."), one);
+});
+
+// ── issue #847: a fresh sandbox's Flow and MCP servers rows ────────────────────────────────────────────────────────
+
+test("a fresh sandbox's rows say where the flow would be found and which named MCP servers the host has, and nothing of tools (#847)", async () => {
+  const { sandboxFreshRows } = await import("../src/trigger-gets-view.mjs");
+  const base = { name: "mini1", state: "current", at: 1, ageMs: 0, every: 24, overlayExtensionsAllowed: true, extensions: [], skills: [], packages: [], unread: [], more: {}, piVersion: "1.5.0", image: "pi-job:1" };
+  const rowsOf = (host, opts = {}) => sandboxFreshRows({ hostLoads: { more: 0, hosts: [host] }, host: "mini1", triggerIndex: 2, image: "pi-job:1", ...opts });
+  const text = (rows, label) => rows.find(([l]) => l === label)?.[1].join("");
+  const found = rowsOf({ ...base, flows: [{ trigger: 2, flow: "fix", tier: "package", package: "pi-lint", repo: "absent" }], mcp: [] }, { flow: "fix" });
+  assert.equal(text(found, "Flow"), "A job of trigger 3 on this host would find fix from pi-lint, unless the repository holds it at its base commit, which comes first.");
+  assert.equal(text(found, "MCP servers"), undefined, "no row for a trigger that names no server");
+  // A package the trigger leaves out never answers its flow: no answer for the file as it is.
+  assert.equal(text(rowsOf({ ...base, flows: [{ trigger: 2, flow: "fix", tier: "package", package: "pi-lint", repo: "absent" }], mcp: [] }, { flow: "fix", excludes: ["pi-lint"] }), "Flow"), "Whether a job of trigger 3 on this host would find fix is unknown: its last doctor run has no answer for it.");
+  assert.equal(text(rowsOf({ ...base, flows: [], mcp: [] }, { flow: null }), "Flow"), "This trigger names no flow.");
+  // A list that was cut, or one that could not be read, proves no lack.
+  const mcp = rowsOf({ ...base, flows: [], mcp: [{ name: "linear", enabled: true }], more: { mcp: 3 } }, { flow: "fix", mcp: ["linear", "docs", "forge"] });
+  assert.equal(text(mcp, "MCP servers"), "linear on this host; docs unknown here; forge: the job’s own forge, with its own token; in no overlay.");
+  const unread = rowsOf({ ...base, flows: [], mcp: [], unread: ["mcp"] }, { flow: "fix", mcp: ["docs"] });
+  assert.match(text(unread, `On mini1`), /is unknown: its last doctor run could not read its MCP servers/, "a part this job loads from, unread, still makes the first row unknown");
+  assert.equal(text(unread, "MCP servers"), "docs unknown here.");
+  // A trigger that names no server: an unread MCP part changes nothing.
+  assert.match(text(rowsOf({ ...base, flows: [], mcp: [], unread: ["mcp"] }, { flow: "fix", mcp: [] }), "On mini1"), /would load no staged package or overlay extension/);
+  // A host that published nothing: the first row alone, as before.
+  assert.deepEqual(rowsOf({ name: "mini1", state: "unknown", why: "absent" }, { flow: "fix", mcp: ["docs"] }).map(([label]) => label), ["On mini1"]);
+  // No row names a tool.
+  assert.doesNotMatch(JSON.stringify(mcp), /tool/i);
 });

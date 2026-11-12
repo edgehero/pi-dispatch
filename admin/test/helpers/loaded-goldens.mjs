@@ -59,6 +59,12 @@ function longNamesHostLoads() {
 /** A fresh sandbox's page: the form's own query, with no kept workspace named, so no run is quoted. */
 const FRESH_QUERY = "repo=acme%2Fweb&index=2&ref=HEAD&host=mini1";
 
+/** Issue #847: what mini1 published, with an answer for trigger 3's flow and the overlay's MCP servers. */
+function freshHostLoads({ tier = "repository", repo = "present", mcp = [] } = {}) {
+  return { ...HOST_LOADS, hosts: HOST_LOADS.hosts.map((row) => (row.name === "mini1" ? { ...row, flows: [{ trigger: 2, flow: "fix", tier, package: null, repo }], mcp } : row)) };
+}
+const server = (name, enabled) => ({ name, transport: "stdio", where: "overlay", exposure: "local", enabled, keys: [] });
+
 const SAMPLES = LOADED_SAMPLES;
 const LIVE = Object.freeze({
   id: "gh-b3d7",
@@ -98,6 +104,10 @@ export const LOADED_DRAW = Object.freeze({
   "run-loaded-both.operator": () => runPage(SAMPLES.bothLacked()),
   "sandbox-loaded-run.operator": () => sandboxPage({ query: "id=gh-9575&host=mini1", record: SAMPLES.everything() }),
   "sandbox-loaded-fresh.operator": () => sandboxPage({ query: FRESH_QUERY }),
+  // A sandbox's trigger is a forge's, whose repository is on no host: doctor answers its flow from another tier or not at all.
+  "sandbox-loaded-flow-found.operator": () => sandboxPage({ query: FRESH_QUERY, hostLoads: freshHostLoads({ tier: "overlay", repo: "unknown", mcp: [server("linear", true)] }), change: (report) => { report.mcp = ["linear"]; } }),
+  "sandbox-loaded-flow-unknown.operator": () => sandboxPage({ query: FRESH_QUERY, hostLoads: freshHostLoads({ tier: "unknown", repo: "unknown" }) }),
+  "sandbox-loaded-mcp-lacks.operator": () => sandboxPage({ query: FRESH_QUERY, hostLoads: freshHostLoads({ tier: "overlay", repo: "unknown", mcp: [server("linear", false)] }), change: (report) => { report.mcp = ["linear", "docs"]; } }),
   "sandbox-loaded-unknown.operator": () => sandboxPage({ query: FRESH_QUERY, change: (report) => { report.hosts.push({ ...report.hosts[0], name: "mini2", rows: [] }); report.plan.host = "mini2"; report.selected.host = "mini2"; } }),
   "sandbox-loaded-long-names.operator": () => sandboxPage({ query: "id=gh-9575&host=mini1", record: longNamesRecord(), hostLoads: longNamesHostLoads(), change: (report) => { report.hosts.push({ ...report.hosts[0], name: LONG_LOADED.host, rows: [] }); report.plan.host = LONG_LOADED.host; report.plan.image = LONG_LOADED.image; report.selected.host = LONG_LOADED.host; } }),
   "project-loads.operator": () => projectPage(billingRecords()),

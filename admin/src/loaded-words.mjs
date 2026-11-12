@@ -841,7 +841,8 @@ export function triggerLastRun(records, hostLoads = null) {
     ...sourcesOf(loaded, "package").filter((row) => row.toolNames?.length > 0).map((row) => ({ kind: "package", from: row.name ?? "a staged package", names: [...row.toolNames] })),
     ...(overlay?.namedTools ?? []).map((row) => ({ kind: "overlay", from: row.name, names: [...row.tools] })),
   ];
-  const sources = [...sourcesOf(loaded, "package"), ...(overlay?.names ?? []).map((name) => ({ name, version: null, tools: overlay.namedTools?.find((row) => row.name === name)?.tools.length ?? 0, skills: 0, prompts: 0 }))];
+  // `kind` says which a source is (issue #847), so an overlay entry and a package of one name are never each other's counts.
+  const sources = [...sourcesOf(loaded, "package").map((row) => ({ ...row, kind: "package" })), ...(overlay?.names ?? []).map((name) => ({ name, version: null, kind: "overlay", tools: overlay.namedTools?.find((row) => row.name === name)?.tools.length ?? 0, skills: 0, prompts: 0 }))];
   return {
     newest,
     quoted: { id: runIdOf(record), host: facts.host, record, rows: Object.fromEntries(loadedRows(record, { past: true }).map((row) => [row.label, row])), problems, sources, tools, notes: [...cutWords(loaded), ...(wentOn(record) && loaded.at !== "ready" ? [LOADED_WORDS.notedEarly] : [])] },
@@ -921,14 +922,15 @@ export function hostLoadsRow(hostLoads, name) {
  * Approximate in the safe direction, as the publication is: the repository's part is decided at its base commit, which the
  * foot says.
  */
-export function sandboxFreshLine({ hostLoads, host, triggerIndex, withholdsPackages = false, excludes = [], image = null }) {
+export function sandboxFreshLine({ hostLoads, host, triggerIndex, withholdsPackages = false, excludes = [], image = null, mcp = null }) {
   const row = hostLoadsRow(hostLoads, host);
   const first = noOverlay(hostPiFor(row, image));
   const unknown = (why) => [`${first} What a job of trigger ${triggerIndex + 1} would load on this host is unknown: ${why}.`];
   if (row.state === "unknown") return unknown(row.why === "unreachable" ? "the hosts’ doctor runs could not be read" : row.why === "unreadable" ? "its last doctor run could not be read" : "it has published no doctor run");
   // Any part this job could load from that the host could not read makes the whole answer unknown: an empty list there is
-  // not none. A part this job would not load from anyway (packages it withholds, an overlay that is off) changes nothing.
-  const unread = (row.unread ?? []).filter((part) => (part !== "packages" || !withholdsPackages) && (part !== "extensions" || row.overlayExtensionsAllowed));
+  // not none. A part this job would not load from anyway (packages it withholds, an overlay that is off, and since issue
+  // #847 the MCP servers of a trigger that names none, `mcp` being its list) changes nothing.
+  const unread = (row.unread ?? []).filter((part) => (part !== "packages" || !withholdsPackages) && (part !== "extensions" || row.overlayExtensionsAllowed) && (part !== "mcp" || !Array.isArray(mcp) || mcp.length > 0));
   if (unread.length > 0) return unknown(`its last doctor run could not read ${listed(unread.map((part) => UNREAD_PART_WORDS[part] ?? "part of what it publishes"))}`);
   const packages = withholdsPackages ? [] : (row.packages ?? []).filter((entry) => !excludes.includes(entry.name)).map((entry) => `${entry.name} ${entry.version}`);
   const extensions = row.overlayExtensionsAllowed ? (row.extensions ?? []).map((entry) => entry.name).filter((name) => !excludes.some((excluded) => overlayEntryNamed(excluded, name))) : [];

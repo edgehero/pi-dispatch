@@ -1660,7 +1660,20 @@ writes retain their existing interactive confirmation. This adds no unattended p
   sandbox says what a job of that trigger would load on that host, from the host's last doctor run, with its time
   (`doctor:loads:<name>`, `INT-DOCTOR-RESULTS-KEY`; `sandboxFreshLine`), leaving out packages the trigger withholds and
   an overlay that is off. It reads unknown for a host that published nothing, a publication that could not be read and
-  a last doctor run that could not read a part this job loads from, and it never reads as the same or as none. pi's
+  a last doctor run that could not read a part this job loads from, and it never reads as the same or as none. Since
+  issue #847, where the host published a doctor run, two rows follow it (`sandboxFreshRows`): **Flow**, where a job of
+  the trigger would find its flow on that host, in the trigger page's own words (`flowAnswer`, `lacksFlow`,
+  `FLOW_TIER_WORDS`): a sandbox's trigger is a forge's, whose repository is on no host, so a tier doctor found is named
+  with the trigger page's caveat that the repository comes first at its base commit, and one found in no tier a host
+  can see is unknown, never absent, as is a flow doctor has no answer for (it ran before an edit, or the row was cut to
+  fit); and, when the trigger names any, **MCP servers**: each server `run.mcp`
+  names against the host's overlay servers, on, switched off or not there (a job is then refused before it spends, the
+  reason not named, since a host with no `mcp.json` publishes the same empty list), or unknown where the list could not
+  be read or was cut, and `forge` as the job's own. Tools stay out, since no host publishes a tool's name. An unread MCP
+  part no longer makes the first row unknown for a trigger that names no server. A package-tier answer under
+  `"packages": false` is no answer, as is one for a package the trigger leaves out, and an old publication reads unknown
+  for both rows, as the trigger page reads it. A host that published nothing keeps the first row alone. A disarmed
+  one-shot's flow and servers are read from its entry in the file, as the worker prepares it. pi's
   version is the record's, or the host's beat's (`host:h:<name>`) where the sandbox's image is the one that host booted on, so
   a host that published nothing still has one. A kept older image and a trigger's own `run.image` hold their own pi, so otherwise
   the line says it cannot name the version (`hostPiFor`). A read of the record that failed says it could not be read. **Who sees what**: an operator and a viewer read the same words on the run page, the Runs list and a project's
@@ -1669,7 +1682,7 @@ writes retain their existing interactive confirmation. This adds no unattended p
   operators only (`REQ-SANDBOX-FROM-THE-CONSOLE`, UNCHANGED, checked: it adds no control, command or shell list).
   `/api/run` carries the field for both roles (`INT-CONSOLE-STATE-API`). No model or agent reads the list, and each reads
   `outcomeNote`'s closed sentence as `note`, and an agent's page draws no Loaded card or project card over a copy with no field.
-  Goldens: `sandbox-loaded-run.operator`, `sandbox-loaded-fresh.operator`, `sandbox-loaded-unknown.operator`, `sandbox-loaded-long-names.operator`. Tests:
+  Goldens: `sandbox-loaded-run.operator`, `sandbox-loaded-fresh.operator`, `sandbox-loaded-flow-found.operator`, `sandbox-loaded-flow-unknown.operator`, `sandbox-loaded-mcp-lacks.operator`, `sandbox-loaded-unknown.operator`, `sandbox-loaded-long-names.operator`. Tests:
   `admin/test/loaded-words.test.mjs`, `admin/test/console-sandboxes.test.mjs`, `admin/test/sandbox-data.test.mjs`.
 
 - **AMENDED 2026-11-02 (#792, #793)**: Run Workspace and the separate gateway workbench/observer surface follow
@@ -2653,7 +2666,12 @@ writes retain their existing interactive confirmation. This adds no unattended p
       The browser judges no money or policy. With no script the page reads the same, every control disabled and the bar
       hidden. The digest covers the entry's prompt and secret references, so it reaches an operator's form alone.
     - **What is switched and what is shown (AMENDED 2026-11-04).** Staged packages have one switch, all or nothing, and each staged package and
-      overlay extension a host publishes has its own, by name (`run.excludeExtensions`), with where it is. A name the file holds that no host shows keeps
+      overlay extension a host publishes has its own, by name (`run.excludeExtensions`), with where it is, and what the newest run that loaded it
+      brought (its tools, skills and prompt templates, "as gh-9575 loaded it", or "no tool, skill or prompt template" for one that brought nothing
+      countable), switched off too since issue #847, since that row is where a person decides to turn it back on: the newest run that loaded that
+      package at that version, or that overlay entry, never a package's counts for an overlay entry of its name; one no recorded run has loaded
+      says "what it brings is known once a run has loaded it", an overlay entry that it has no manifest, and neither is said while the run
+      history could not be read. Hosts publish no counts per package (`DES-OPERATOR-CONSOLE`). A name the file holds that no host shows keeps
       its row, so it can be turned back on, and under `"packages": false` a package's switch is moot and the row says so. Two names in the file that mean one entry (`git-guard` and `git-guard.ts`, which the loader takes) are a row each: each says where the entry is, as the worker's `extensionsNotHere` reads it, and that the file also names the other. A tool an extension adds is a chip,
       named from a run's record by its id and host (`run.excludeExtensionTools`), since no host publishes a tool's name, and a name the file holds that no
       chip offers stays listed. A repository's extensions and tools stay counts, with no control. pi's own tools and a named server's are chips, on meaning not
@@ -8670,6 +8688,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-12 (#847) | **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: a fresh sandbox's What opens gains, where the host published a doctor run, a Flow row (where a job would find the trigger's flow, in the trigger page's words, or unknown) and, for a trigger that names any, an MCP servers row (on, switched off, not there, unknown; `forge` the job's own); an unread MCP part no longer makes the first row unknown for a trigger that names none; three goldens added (`sandbox-loaded-flow-found`, `-flow-unknown`, `-mcp-lacks`). (g1)'s extension row quotes what the newest run that loaded it brought also when it is switched off, and one no run has loaded says that is not known yet; an overlay entry says it has no manifest. UNCHANGED, checked: `INT-DOCTOR-RESULTS-KEY` (nothing new is published), `REQ-SANDBOX-FROM-THE-CONSOLE` (no control is added), the README's What a job gets (no sentence it holds moved). |
 | 2026-11-12 (#846, part 4) | **`REQ-OPERATOR-CONSOLE-ACTIONS` AMENDED**, (p): the cases whose Undo is by hand gain a whole pause-windows list its own preview would refuse (`refusedList`), which the whole-list action may replace and whose Undo was offered and then refused with a 400. |
 | 2026-11-12 (#859) | **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, doctor's `.env` reading: the boot-file keys (`ENV_FILE_READABLE_KEYS`, "two" corrected to five in the lead and the body) now reach the checks that read their files, not only the BOOT_FILES lines. `bootFileEnv` takes this shell's non-blank value, else the file's plain one, both resolved against the deployment folder, from the one reading of the file those lines already made (moved to the top of `collectChecks`); the service's own load verdict judges an envelope against the projects and limits the file names. A shell and a file naming different files is a ✗, as for every service key; a key only this shell sets joins the #471 shell-only line; an untrusted `.env` gives nothing; a line doctor cannot read leaves its file not known (a bundle's project is then a warning), never empty; `PI_MODEL_ENDPOINTS_FILE` keeps `endpointsFileSetting`, now for the cheaper-route proposals too; the envelope's and its context's reads gained the regular-file guard the others have, since a FIFO the `.env` named would now hang doctor. Before it, a service deployment checked from a plain shell was judged with no projects, scoped limits, pause windows or envelope: every secret bundle bound to a project FAILED as naming one projects.json does not hold, the per-project size lines went missing, and the fleet and applied-split lines compared nothing with healthy peers. UNCHANGED, checked: `SERVICE_ENV_KEYS` and `resolveDoctorEnv` (the five keys stay outside them), the BOOT_FILES lines' wording and two subjects (but for the envelope's service verdict, judged against the `.env`'s projects and limits, and the new ✗ where the subjects name different files). |
 | 2026-11-11 (#849, follow-ups) | **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**, the console subcommand and its acceptance: the default link is made only where the address in use is the one the tokens file's deployment folder names (its `.env`'s `PI_CONSOLE_LISTEN`, or the default), so a code is never minted into one deployment's drop for another's console (said as a warning, with the advice its source calls for); `--link` still mints, under the same warning; a tokens file pi's own environment names is checked against no folder. Every other entry UNCHANGED, checked. |

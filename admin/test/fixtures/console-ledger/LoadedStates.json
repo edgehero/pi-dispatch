@@ -1,7 +1,7 @@
 {
   "card": "LoadedStates",
   "pr": 800,
-  "words": "ec07fdea6638797dd7c5d181caa3e56dcd4c1f844ae5104a2ca8193f262ad247",
+  "words": "53758b2e31febc83e0a0b7e9ebe0547846184a365ae2aff9237303d4648691fa",
   "elements": [
     {
       "el": "p-loaded",
@@ -92,11 +92,15 @@
       "as": "p-sb-new",
       "source": "admin/src/console/panels/sandboxes.mjs#sandboxNew",
       "golden": [
-        "panels/sandbox-loaded-fresh.operator"
+        "panels/sandbox-loaded-fresh.operator",
+        "panels/sandbox-loaded-flow-found.operator",
+        "panels/sandbox-loaded-flow-unknown.operator",
+        "panels/sandbox-loaded-mcp-lacks.operator"
       ],
       "shows": [
         "On mini1",
-        "A job of trigger 3 on this host would load pi-lint 1.4.2 and pi-test-runner 0.9.0, from its last doctor run at"
+        "A job of trigger 3 on this host would load pi-lint 1.4.2 and pi-test-runner 0.9.0, from its last doctor run at",
+        "Flow"
       ]
     },
     {

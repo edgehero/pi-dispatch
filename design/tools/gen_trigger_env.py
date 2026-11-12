@@ -173,7 +173,8 @@ def gets_card():
   {item(True, "Staged packages", 'Off writes "packages": false, and none load, nor their tools, skills, prompt templates or themes.')}
   {item(True, "pi-lint 1.4.2", "staged on build3 and mini1, unknown on mini2 · 2 tools, 1 prompt template, as gh-9575 loaded it")}
   {item(True, "pi-test-runner 0.9.0", "staged on build3 and mini1, unknown on mini2 · 3 tools, 1 skill, as gh-9575 loaded it")}
-  {item(True, "git-guard", "in the overlay on build3, not on mini1, unknown on mini2")}
+  {item(True, "git-guard", "in the overlay on build3, not on mini1, unknown on mini2 · an overlay entry has no manifest, so what it brings is known once a run has loaded it")}
+  {item(False, "pi-format 0.3.0", "staged on build3, not on mini1, unknown on mini2 · what it brings is known once a run has loaded it")}
   {item(True, "The repository’s own", ".pi/extensions at the base commit, merge-gated. Changed in the repository, not here.", locked=True)}
 </div>
 <p class="te-note">{ic("info", "ic ic--sm")}<span>Off leaves it out of these jobs by name: a staged package with its tools, skills, prompt templates and themes, an overlay extension before its code runs. A host without that name loads nothing for it. A new extension, or another version, is staged first, for every trigger. <a class="link" href="#">Open Updates</a></span></p>""",

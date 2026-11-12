@@ -269,6 +269,9 @@ def states_page():
         sub="Sandboxes, from gh-9575", id_="p-loaded-sandbox")
     fresh = card("What opens", facts([
         (f'<span class="ld-new">On mini1</span>', f'<span class="ld-new">{NO_OVERLAY} A job of trigger 3 on this host would load pi-lint 1.4.2 and pi-test-runner 0.9.0, from its last doctor run at 2026-10-08 14:39 UTC.</span>'),
+        # Issue #847: where the host published a doctor run, the flow and the MCP servers the trigger names, in the trigger page's words.
+        (f'<span class="ld-new">Flow</span>', f'<span class="ld-new">A job of trigger 3 on this host would find fix from the overlay, unless the repository holds it at its base commit, which comes first.</span>'),
+        (f'<span class="ld-new">MCP servers</span>', f'<span class="ld-new">linear on this host; docs not on this host, so a job there is refused before it spends.</span>'),
         (f'<span class="ld-new">On mini2</span>', f'<span class="ld-new">{NO_OVERLAY} What a job of trigger 3 would load on this host is unknown: it has published no doctor run.</span>'),
     ], 1) + f'<p class="ld-foot">{ic("info", "ic ic--sm")}<span>A fresh sandbox has no run to quote, so it says what a job would load there, from the host’s last doctor run, or unknown. The repository’s part is decided at its base commit.</span></p>',
         sub="Sandboxes, a fresh one", id_="p-loaded-sandbox-fresh")
