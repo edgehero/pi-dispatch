@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { DOCTOR_PUBLISH_SKIPPED_PREFIX } from "../src/doctor-spawner.mjs";
-import { defaultPublishDoctor, doctorHostLoads, dollarChecks, overlayDollarProblem, scopedDollarRowChecks, startAdvice, CANARY_LINES, CANARY_PROBE_SLUGS, DOCTOR_SHELL_KEYS, EGRESS_CANARY_RUNNER_MODULE, EGRESS_CANARY_STALE_RUNNER, ENV_FILE_READABLE_KEYS, RECEIVER_SERVICE_KEYS, RUN_TIMEOUTS, SERVICE_ENV_KEYS, STEERING_SERVICE_KEYS, WORKER_SERVICE_KEYS, backendChecks, countRetained, defaultPromptFn, dockerRunVia, egressCanaryPlainScript, egressCanaryProbeArgs, forgeUrlEgressChecks, egressCanaryScript, envFileKeys, bootFileEnv, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, podmanLiveChecks, render, sandboxTombstoneChecks, serviceEnvKeys, serviceEnvLoader, sweepStaleCanaryNetworks, urlShown, resolveDoctorEnv, jobImageOf, CLI_SERVICE_KEYS, cliNotHandedLines, fileConfigures, triggersPath, valkeyPasswordUpgradeStep, undeclaredPortNear, ENDPOINT_PROBE_SLUGS, allowlistHostAliases, egressEndpointScript, lanIPv4Addresses, overlayLoopbackModels } from "../src/doctor.mjs";
+import { defaultPublishDoctor, doctorHostLoads, dollarChecks, overlayDollarProblem, scopedDollarRowChecks, startAdvice, CANARY_LINES, CANARY_PROBE_SLUGS, DOCTOR_SHELL_KEYS, EGRESS_CANARY_RUNNER_MODULE, EGRESS_CANARY_STALE_RUNNER, ENV_FILE_READABLE_KEYS, RECEIVER_SERVICE_KEYS, RUN_TIMEOUTS, SERVICE_ENV_KEYS, STEERING_SERVICE_KEYS, WORKER_SERVICE_KEYS, backendChecks, countRetained, defaultPromptFn, dockerRunVia, egressCanaryPlainScript, egressCanaryProbeArgs, forgeUrlEgressChecks, egressCanaryScript, envFileKeys, bootFileEnv, UNREAD_BOOT_KEYS, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, podmanLiveChecks, render, sandboxTombstoneChecks, serviceEnvKeys, serviceEnvLoader, sweepStaleCanaryNetworks, urlShown, resolveDoctorEnv, jobImageOf, CLI_SERVICE_KEYS, cliNotHandedLines, fileConfigures, triggersPath, valkeyPasswordUpgradeStep, undeclaredPortNear, ENDPOINT_PROBE_SLUGS, allowlistHostAliases, egressEndpointScript, lanIPv4Addresses, overlayLoopbackModels } from "../src/doctor.mjs";
 import { collectChecks, runDoctor } from "./helpers/doctor.mjs";
 import { valkeyPasswordFor } from "../src/valkey-endpoint.mjs";
 import { serviceEnvFileOf } from "../src/service-env.mjs";
@@ -2479,7 +2479,7 @@ test("doctor: a .env that does NOT name the key gets the full warning, unchanged
 	assert.match(text(), /scoped pauses are OFF/);
 });
 
-test("doctor: the .env read is narrowed to the two keys these checks name, and never configures (#357)", async () => {
+test("doctor: the .env read is narrowed to the boot-file keys, and never configures (#357)", async () => {
 	// The new precedent, pinned as a boundary rather than described in a comment. `service.test.mjs` pins
 	// that a PI_ENV_SETUP line in ./.env is deliberately NOT honoured, and that has to stay true: this read
 	// decides what doctor SAYS about two named keys, and nothing else in the file may reach anything.
@@ -12694,8 +12694,12 @@ test("issue #596, phase 3: runDoctor hands its readRunRecords seam on, and print
 	writeFileSync(projectsFile, JSON.stringify({ version: 1, projects: [{ id: "web", members: ["github:acme/web"] }] }));
 	const at = Date.parse("2026-10-01T12:00:00.000Z");
 	const oom = { project: "web", reason: "oom-killed", startedAt: "2026-10-01T11:00:00.000Z", endedAt: "2026-10-01T11:10:00.000Z", resources: { memPeak: 4096 * 1024 * 1024 }, size: { memMiB: 4096, cpuCenti: 200, source: "default" } };
+	// Issue #859: a scoped-limits file of its own, since `imgDeps`' `fileExists` answers yes for a `.env` it cannot read, and
+	// a key that file might set is then not known: the suggestions would be off.
+	const limitsFile = join(dir, "scoped-limits.json");
+	writeFileSync(limitsFile, JSON.stringify({ version: 3, limits: [] }));
 	const { out, text } = capture();
-	await runDoctor(imgEnv({ PI_TRIGGERS_FILE: triggersFile(), PI_PROJECTS_FILE: projectsFile, PI_HOST_MEMORY_BUDGET: "8g" }), { ...imgDeps(out, green), wallClock: () => at, readRunRecords: () => [oom] });
+	await runDoctor(imgEnv({ PI_TRIGGERS_FILE: triggersFile(), PI_PROJECTS_FILE: projectsFile, PI_SCOPED_LIMITS_FILE: limitsFile, PI_HOST_MEMORY_BUDGET: "8g" }), { ...imgDeps(out, green), wallClock: () => at, readRunRecords: () => [oom] });
 	assert.match(text(), /⚠ project web: size 4g, 2 CPUs; its runs in the last 30 days suggest memory 6g \(oom-killed: 1 run ended oom-killed \(the largest size killed 4g\)\)\n {4}→ apply it in the admin panel with dispatch_limit_add \{"scope":"project:web","memory":"6g"\}/);
 });
 
@@ -13224,21 +13228,35 @@ function serviceDeployment(envLines, { files = {} } = {}) {
 }
 
 test("bootFileEnv: this shell's value where it sets one, else the .env's, resolved against the deployment folder (#859)", () => {
-	const envFile = { PI_PROJECTS_FILE: "projects.json", PI_SCOPED_LIMITS_FILE: "/d/limits.json", PI_PAUSE_WINDOWS_FILE: "/d/pause.json" };
-	const boot = bootFileEnv({ PI_SCOPED_LIMITS_FILE: "/shell/limits.json", PI_PAUSE_WINDOWS_FILE: "  ", OTHER: "x" }, envFile, "/d", "linux");
+	const envFile = { PI_PROJECTS_FILE: "projects.json", PI_SCOPED_LIMITS_FILE: "/d/limits.json", PI_PAUSE_WINDOWS_FILE: "/d/pause.json", notPlain: {} };
+	const boot = bootFileEnv({ PI_SCOPED_LIMITS_FILE: "/shell/limits.json", PI_PAUSE_WINDOWS_FILE: "  ", PI_ENVELOPE_FILE: "env.json", OTHER: "x" }, envFile, "/d", "linux");
 	assert.equal(boot.env.PI_PROJECTS_FILE, "/d/projects.json", "the file's, made absolute against the folder the service runs in");
 	assert.equal(boot.env.PI_SCOPED_LIMITS_FILE, "/shell/limits.json", "this shell's wins, as for every other service key");
 	assert.equal(boot.env.PI_PAUSE_WINDOWS_FILE, "/d/pause.json", "a blank shell value has its own ✗; the checks judge the service's file");
+	assert.equal(boot.env.PI_ENVELOPE_FILE, "/d/env.json", "a relative shell value is resolved against the same folder");
 	assert.equal(boot.env.OTHER, "x", "the rest of the environment is handed on");
-	assert.deepEqual(boot.from, { PI_PROJECTS_FILE: ".env", PI_SCOPED_LIMITS_FILE: "shell", PI_PAUSE_WINDOWS_FILE: ".env" });
 	assert.deepEqual(boot.differs, [{ key: "PI_SCOPED_LIMITS_FILE", shell: "/shell/limits.json", file: "/d/limits.json" }]);
+	assert.deepEqual(boot.shellOnly, ["PI_ENVELOPE_FILE"], "set here, and a .env that was read does not set it");
 	assert.equal(boot.service.PI_SCOPED_LIMITS_FILE, "/d/limits.json", "the service reads the file's, whatever this shell says");
-	assert.equal(bootFileEnv({ PI_PROJECTS_FILE: "/x.json" }, {}, "/d", "linux").service.PI_PROJECTS_FILE, undefined, "and nothing the file does not set");
-	// The same file named two ways is no difference.
-	assert.deepEqual(bootFileEnv({ PI_PROJECTS_FILE: "/d/projects.json" }, envFile, "/d", "linux").differs, []);
-	// A file with a hazard vouches for no value, and an unread one has none.
-	assert.equal(bootFileEnv({}, { ...envFile, hazard: { line: 3 } }, "/d", "linux").env.PI_PROJECTS_FILE, undefined);
-	assert.equal(bootFileEnv({}, { unreadable: true }, "/d", "linux").env.PI_PROJECTS_FILE, undefined);
+	assert.equal(boot.service.PI_ENVELOPE_FILE, undefined, "and nothing the file does not set");
+	assert.equal(boot.env.PI_MODEL_ENDPOINTS_FILE, undefined, "the endpoints key keeps its own rule (`endpointsFileSetting`)");
+	// The same file named another way is no difference: a `./`, a doubled slash, a relative spelling.
+	for (const spelled of ["/d/projects.json", "/d/./projects.json", "/d//projects.json", "./projects.json"]) assert.deepEqual(bootFileEnv({ PI_PROJECTS_FILE: spelled }, envFile, "/d", "linux").differs, [], spelled);
+	assert.deepEqual(bootFileEnv({ PI_PROJECTS_FILE: "c:\\pi\\projects.json" }, { PI_PROJECTS_FILE: "C:\\pi\\projects.json" }, "C:\\pi", "win32").differs, [], "case does not tell two paths apart on Windows");
+	// A file with a hazard, a line doctor cannot read, or a file it could not open: the key is not known, never unset.
+	for (const file of [{ ...envFile, hazard: { line: 3 } }, { notPlain: { PI_PROJECTS_FILE: 2 } }, { unreadable: true }]) {
+		const unread = bootFileEnv({}, file, "/d", "linux");
+		assert.equal(unread.env.PI_PROJECTS_FILE, undefined);
+		assert.ok(unread.env[UNREAD_BOOT_KEYS].has("PI_PROJECTS_FILE"), JSON.stringify(file));
+		assert.deepEqual(unread.shellOnly, [], "a file that could not be read says nothing about what it lacks");
+	}
+	// A .env another account can write gives nothing, and nothing is called unknown: the checks judge this shell's values.
+	const untrusted = bootFileEnv({ PI_SCOPED_LIMITS_FILE: "/shell/limits.json" }, envFile, "/d", "linux", { untrusted: true });
+	assert.equal(untrusted.env.PI_PROJECTS_FILE, undefined);
+	assert.equal(untrusted.env.PI_SCOPED_LIMITS_FILE, "/shell/limits.json");
+	assert.deepEqual([untrusted.differs, untrusted.shellOnly, [...untrusted.env[UNREAD_BOOT_KEYS]]], [[], [], []]);
+	// No .env at all: nothing from it, nothing unknown, nothing to call shell-only.
+	assert.deepEqual(bootFileEnv({ PI_PROJECTS_FILE: "/x.json" }, {}, "/d", "linux").shellOnly, []);
 	// Absolute on the TARGET platform, as loadVerdict judges it.
 	assert.equal(bootFileEnv({}, { PI_PROJECTS_FILE: "C:\\pi\\projects.json" }, "C:\\pi", "win32").env.PI_PROJECTS_FILE, "C:\\pi\\projects.json");
 });
@@ -13328,9 +13346,78 @@ test("doctor: this shell and the .env naming different boot files is said once, 
 	const checks = await collectChecks(imgEnv({ PI_PROJECTS_FILE: join(d.dir, "other.json") }), d.seams());
 	const lines = checks.filter((c) => /^PI_PROJECTS_FILE names different files/.test(c.label));
 	assert.equal(lines.length, 1);
-	assert.deepEqual([lines[0].ok, lines[0].warn], [false, true]);
+	assert.deepEqual([lines[0].ok, lines[0].warn], [false, undefined], "a ✗, as a disagreement about any other service key is");
 	assert.equal(lines[0].label, `PI_PROJECTS_FILE names different files in this shell (${join(d.dir, "other.json")}) and in ${join(d.dir, ".env")} (projects.json): doctor's other checks judged this shell's, which a worker started by hand from this shell runs, while the service runs the file's`);
 	// The same file named relatively in one and absolutely in the other is no difference.
 	const same = await collectChecks(imgEnv({ PI_PROJECTS_FILE: join(d.dir, "projects.json") }), d.seams());
 	assert.ok(!same.some((c) => /names different files/.test(c.label)));
+});
+
+test("doctor: a FIFO the .env names for the envelope, or for the projects it is judged against, does not hang it (#859)", () => {
+	const dir = realpathSync.native(tempDir("pi-boot-fifo-"));
+	const fifo = join(dir, "named.pipe");
+	execFileSync("mkfifo", [fifo]);
+	writeFileSync(join(dir, "envelope.json"), JSON.stringify({ version: 1, window: "week", totalUsd: "100", floorsUsd: { shop: "10" } }));
+	const env = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_MAX_COST_USD: "2" };
+	for (const lines of [[`PI_ENVELOPE_FILE=${fifo}`], ["PI_ENVELOPE_FILE=envelope.json", `PI_PROJECTS_FILE=${fifo}`], ["PI_ENVELOPE_FILE=envelope.json", `PI_SCOPED_LIMITS_FILE=${fifo}`]]) {
+		writeFileSync(join(dir, ".env"), `${lines.join("\n")}\n`);
+		const { out } = doctorInChild(env, dir);
+		assert.match(out, /not a regular file/, lines.join(" "));
+	}
+});
+
+test("doctor: from a .env another account can write, the checks take no boot file either, as its ✗ says (#859)", async () => {
+	const d = serviceDeployment(["PI_PROJECTS_FILE=projects.json"], { files: { "triggers.json": JSON.stringify({ triggers: [], secretBundles: { demo: { profile: "demo-profile", ref: "x", project: "myproject" } } }), "projects.json": JSON.stringify({ version: 1, projects: [{ id: "myproject", members: ["github:acme/web"] }] }) } });
+	chmodSync(join(d.dir, ".env"), 0o666);
+	const { out, text } = capture();
+	await runDoctor(imgEnv({ PI_TRIGGERS_FILE: join(d.dir, "triggers.json"), PI_SECRET_BUNDLES: "demo-profile:/bin/true:dotenv" }), { ...imgDeps(out, green), cwd: d.dir, fileExists: existsSync, readEnvFile: (p) => readFileSync(p) });
+	assert.match(text(), /\.env is [^\n]*writable by every account, so doctor took no value from it and judged this shell's values/);
+	assert.match(text(), /✗ secret bundle demo names project myproject, which projects\.json does not hold/, "judged on this shell's values, which name no projects file");
+	assert.doesNotMatch(text(), /holds 1 folder|project myproject holds/);
+});
+
+test("doctor: a .env line naming the projects file that doctor cannot read leaves the bundle's project not known, never absent (#859)", async () => {
+	const triggers = JSON.stringify({ triggers: [], secretBundles: { demo: { profile: "demo-profile", ref: "x", project: "myproject" } } });
+	const d = serviceDeployment(["PI_PROJECTS_FILE=$PWD/projects.json"], { files: { "triggers.json": triggers, "projects.json": JSON.stringify({ version: 1, projects: [{ id: "myproject", members: ["github:acme/web"] }] }) } });
+	const checks = await collectChecks(imgEnv({ PI_TRIGGERS_FILE: join(d.dir, "triggers.json"), PI_SECRET_BUNDLES: "demo-profile:/bin/true:dotenv" }), d.seams());
+	assert.ok(!checks.some((c) => /which projects\.json does not hold/.test(c.label)), "no false ✗ from a file doctor never read");
+	const line = checks.find((c) => /^secret bundle demo names project myproject, and whether the projects file the service reads holds it is not known/.test(c.label));
+	assert.deepEqual([line?.ok, line?.warn], [false, true]);
+	assert.ok(checks.some((c) => /PI_PROJECTS_FILE on line 1 of .* is not in the form every loader reads the same way/.test(c.label)), "the line that says why");
+});
+
+test("with a worker unit installed for this folder, a boot-file key only this shell sets joins the shell-only line (#859)", async () => {
+	const cwd = scaffoldedCwd();
+	writeFileSync(join(cwd, ".env"), "PI_LOGS_DIR=/srv/logs\n");
+	writeFileSync(join(cwd, "projects.json"), JSON.stringify({ version: 1, projects: [] }));
+	const { home } = installUnit({ platform: "linux", deployDir: cwd });
+	const { out, text } = capture();
+	await runDoctor(ghEnv({ PI_PROJECTS_FILE: join(cwd, "projects.json") }), { ...ghDeps(out, green, []), cwd, home, platform: "linux", agentDir: NO_AGENT_DIR, readEnvFile: (path) => readFileSync(path) });
+	assert.match(text(), /⚠ [^\n]*PI_PROJECTS_FILE[^\n]* set in this shell only: the service installed for this folder/);
+});
+
+test("doctor: the fleet's project and envelope digests and the triggerless fleet worker read the .env's files (#859)", async () => {
+	const files = {
+		"projects.json": JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/web"] }] }),
+		"envelope.json": JSON.stringify({ version: 1, window: "week", totalUsd: "100", floorsUsd: { shop: "10" } }),
+	};
+	const d = serviceDeployment(["PI_PROJECTS_FILE=projects.json", "PI_ENVELOPE_FILE=envelope.json"], { files });
+	const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+	const env = { VALKEY_URL: "redis://x", PI_WORKER_NAME: "mini1", PI_MAX_COST_USD: "2", PI_SETTINGS_FILE: noOverlay(), PI_TRIGGERS_FILE: join(d.dir, "absent.json"), PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x" };
+	const same = projectsFingerprint([{ id: "shop", name: null, members: ["github:acme/web"] }]);
+	const digest = envelopeDigest(loadEnvelopeAsTheWorker(join(d.dir, "envelope.json"), {}, { ...env, PI_PROJECTS_FILE: join(d.dir, "projects.json") }));
+	const checks = await collectChecks(env, fleetSeams([{ name: "mini2", tz, fpProjects: same, fpEnvelope: digest }], { cwd: d.dir, readEnvFile: (p) => readFileSync(p) }));
+	assert.ok(!checks.some((c) => /^Hosts disagree about the projects/.test(c.label)), "the same projects as the peer: the .env's file was read");
+	assert.ok(!checks.some((c) => /^Hosts disagree about the allocation envelope/.test(c.label)), "and the same envelope");
+	assert.ok(checks.some((c) => /this fleet worker has projects but no triggers file/.test(c.label)), "a fleet worker with the .env's projects and no triggers file is warned");
+});
+
+test("doctor: a project's model roles are judged with the .env's projects file (#859)", async () => {
+	const files = {
+		"triggers.json": JSON.stringify({ modelRoles: { default: { editor: "base/editor" }, shop: { editor: "fast/project" } }, triggers: [{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix", provider: "base", model: "role:editor" } }] }),
+		"projects.json": JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:org/repo"] }] }),
+	};
+	const d = serviceDeployment(["PI_PROJECTS_FILE=projects.json"], { files });
+	const checks = await collectChecks(imgEnv({ PI_TRIGGERS_FILE: join(d.dir, "triggers.json") }), d.seams());
+	assert.ok(checks.some((c) => /project shop.*model-role-provider-conflict/.test(c.label)), checks.filter((c) => /model-role/.test(c.label)).map((c) => c.label).join(" | ") || "no model-role line at all");
 });

@@ -315,7 +315,7 @@ planted by `bash` in the same message as the write. An envelope edit made that w
 
 | Piece | Value |
 |---|---|
-| Env var | `PI_ENVELOPE_FILE` (absolute, canonical path; unset = no envelope. An EMPTY value is NOT unset: the worker keeps it and refuses to start, so fill the line in or delete it, and doctor fails on it) |
+| Env var | `PI_ENVELOPE_FILE` (absolute, canonical path; unset = no envelope. An EMPTY value is NOT unset: the worker keeps it and refuses to start, so fill the line in or delete it, and doctor fails on it. Doctor's checks read it from your shell, else from the deployment's `.env`) |
 | Needs | `PI_MAX_COST_USD` |
 | Refusal reasons | `allocation-cap`, `envelope-mismatch`, `portfolio-no-envelope`, `portfolio-snapshot-oversize`, `local-folder-escaped`, `local-folder-holds-envelope`, `local-folder-project-changed` |
 | Plan reasons (run record `plan`) | `plan-absent`, `plan-not-portfolio`, `plan-oversize`, `plan-not-regular-file`, `plan-unreadable`, `plan-parse-error`, `plan-collect-error`, `plan-invalid`, and the apply ladder |

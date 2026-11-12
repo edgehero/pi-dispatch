@@ -86,9 +86,11 @@ The narrowing is the whole of the licence, and each half is load-bearing:
   read this way reaches a config, an argv, a container environment, or any fix that writes. Since issue #384
   a value does reach one read-only thing: the worker's own loader, opened behind a regular-file guard, to
   answer whether a service started from this folder would start at all. Since issue #859 the checks that read
-  those files (a secret bundle's project, the size suggestions, the project rows, the envelope) read the file
-  the `.env` names when your shell sets no value, so they judge the deployment the service runs;
-- it reads only the keys the message itself names, so it cannot grow into "load `.env`";
+  those files (such as a secret bundle's project, the size suggestions, the project rows and the envelope) read
+  the file the `.env` names when your shell sets no value, so they judge the deployment the service runs, and from
+  a `.env` another account can write they take nothing;
+- it reads only the five keys named above, a list fixed in the code that no check can add to, so it cannot grow into
+  "load `.env`";
 - a file nobody could open is reported as exactly that, rather than as a key that is unset, because a
   deployment told it is fine when nobody could check is the worse failure. The same holds for a file this
   reader cannot finish: a line your service manager's loader would RUN, or that reaches into the line below

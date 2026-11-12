@@ -56,7 +56,9 @@ about exactly this state, and the wizard's deployment pointer carries the path s
 worker agree. `pi-dispatch up` sets the variable for you in a deployment folder, and doctor reads
 the `.env` in its own cwd for this key: where that file configures the service, the line says so rather than
 reporting the shell's view of it, and where that file would stop the service starting, doctor fails. The same
-rule `docs/pause-windows.md` describes, for the same reason.
+rule `docs/pause-windows.md` describes, for the same reason. The checks that read the rows themselves (the project
+rows, the size suggestions, the dead-scope and bare-repo advisories) read that same file when your shell sets no
+value (issue #859).
 
 ## The limit schema
 
