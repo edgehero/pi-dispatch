@@ -29,6 +29,9 @@ Each guide keeps the notes about its own feature. [The last sections](#notes-kep
      new schedule.
    - Remove a top-level `version` you added by hand to the settings file, `pause-windows.json` or `triggers.json`:
      5.0.0 reads it ([backup.md](backup.md#a-key-or-a-file-from-a-newer-release)).
+6. **Before the next release**, if you edit `pause-windows.json` by hand: check that no key is written twice in it (two
+   `windows` keys, or one field twice in a window). The next release refuses such a file and the worker does not start
+   on it. Earlier releases kept the last value and quietly dropped the windows before it.
 
 ## The order
 
@@ -281,6 +284,12 @@ queued: an older BullMQ need not read what a newer one wrote. The release notes 
 ## What each release changed in stored state
 
 Release numbers come from the git tags.
+
+### Next release
+
+| Store | What changed, and what an older release does with it | Guide |
+|---|---|---|
+| `pause-windows.json` | A key written twice is refused (#846): the worker does not start on such a file, a live reload keeps the last good windows, and doctor fails on it. The console and the panel have refused to write one since 5.0.0, so only a hand edit makes one. An older worker reads such a file as `JSON.parse` does and keeps the last value | [pause-windows.md](pause-windows.md#the-files-version) |
 
 ### 5.1.0
 

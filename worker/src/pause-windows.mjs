@@ -171,6 +171,16 @@ export function parsePauseWindows(text, path, { supported = PAUSE_WINDOWS_VERSIO
 	} catch (error) {
 		throw configError(`pause-windows file is not valid JSON: ${path} (${error.message})`);
 	}
+	// Issue #846: a key written twice is REFUSED, after the parse and before anything else, as the triggers loader refuses
+	// one (`triggers.mjs`, issue #313). `JSON.parse` keeps the LAST value, so `{"windows":[...],"windows":[]}` loaded no
+	// window while a person reading the file sees two, and a reload swapped a live list down to none with nothing said:
+	// quiet hours stopped applying, which costs money in exactly the hours someone believes are paused. Refused, the boot
+	// does not start and a reload keeps the last good windows and logs why (`reloadPauseWindows`). The writers have
+	// refused such a file since #841 (`heldPauseWindows`), so only a hand edit makes one.
+	const duplicate = findDuplicateKey(text);
+	if (duplicate) {
+		throw configError(`pause-windows file has a duplicate key ${JSON.stringify(duplicate.key)} at ${duplicate.at}: JSON keeps the LAST value, so the windows a person reads in the file and the windows that apply are not the same: ${path}`);
+	}
 	const problem = pauseWindowsVersionRefusal(parsed, { supported });
 	if (problem) {
 		const error = configError(`${problem.message}: ${path}`);

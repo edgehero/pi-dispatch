@@ -649,17 +649,8 @@ const pauseWindowsWhole = {
   needs: [],
   async preview(body, ctx) {
     if (!Array.isArray(body.windows)) return { refusal: "send {\"windows\": [...]} with the whole new list of pause windows" };
-    for (const [i, w] of body.windows.entries()) {
-      // Issue #737: the window by the index the Configuration page's table and forms show, until that page
-      // converts (PR 7a); the pi panel counts from 1.
-      const at = atIndex("pause window", i);
-      if (w === null || typeof w !== "object" || Array.isArray(w)) return { refusal: `${at} is not an object; nothing was changed` };
-      for (const [k, value] of Object.entries(w)) {
-        if (!PAUSE_WINDOW_FIELDS.includes(k)) return { refusal: `${at} has a field this file does not take (${PAUSE_WINDOW_FIELDS.join(", ")} only); nothing was changed` };
-        const plain = typeof value === "string" || (k === "days" && Array.isArray(value) && value.every((d) => typeof d === "string"));
-        if (!plain) return { refusal: `${at}: ${k} must be ${k === "days" ? "a list of weekday names" : "a string"}; nothing was changed` };
-      }
-    }
+    const shape = pauseListShapeRefusal(body.windows);
+    if (shape) return { refusal: `${shape}; nothing was changed` };
     const path = ctx.config.pauseWindowsPath;
     const snap = readNow(ctx.fs, path);
     if (snap.refusal) return snap;
@@ -1765,6 +1756,8 @@ export const UNDO_SENTENCES = Object.freeze({
   envelopeAfter: "Set it back with the envelope form: the console kept no copy of the old values.",
   tooBig: "Put the previous list back by hand: this preview showed it; the console keeps no copy.",
   tooBigAfter: "Put the previous list back by hand: the console kept no copy of it.",
+  refusedList: "Put the previous list back by hand: it held a window the console refuses, so it cannot be its own Undo; this preview showed it, and the console keeps no copy.",
+  refusedListAfter: "Put the previous list back by hand: it held a window the console refuses, and the console kept no copy of it.",
   resumeUnread: "Pause the queues that were paused again by hand: the fleet was not read before the resume, so which they were is not known.",
   resumeShort: "Pause the queues that were paused again by hand: not every queue was read before the resume, so which they were is not fully known.",
 });
@@ -1886,13 +1879,52 @@ function settingDone(out) {
 }
 
 /**
+ * What the whole-list action refuses in a list before it reads the file, or null: each window an object with only the
+ * parser's own fields (`PAUSE_WINDOW_FIELDS`), each a string or, for `days`, a list of them. Shared by the preview and by
+ * the Undo it offers (`pauseListBack`), so the console never offers a way back its own preview would refuse.
+ */
+function pauseListShapeRefusal(windows) {
+  for (const [i, w] of windows.entries()) {
+    // Issue #737: the window by the index the Configuration page's table and forms show, until that page
+    // converts (PR 7a); the pi panel counts from 1.
+    const at = atIndex("pause window", i);
+    if (w === null || typeof w !== "object" || Array.isArray(w)) return `${at} is not an object`;
+    for (const [k, value] of Object.entries(w)) {
+      if (!PAUSE_WINDOW_FIELDS.includes(k)) return `${at} has a field this file does not take (${PAUSE_WINDOW_FIELDS.join(", ")} only)`;
+      const plain = typeof value === "string" || (k === "days" && Array.isArray(value) && value.every((d) => typeof d === "string"));
+      if (!plain) return `${at}: ${k} must be ${k === "days" ? "a list of weekday names" : "a string"}`;
+    }
+  }
+  return null;
+}
+
+/**
  * The whole pause-windows list's way back: the list as it was. A file with no `windows` array read as empty, and an empty
- * list is not what it said, so that one is put back by hand.
+ * list is not what it said, so that one is put back by hand. Issue #846: so is a list the preview would refuse, which the
+ * whole-list action may replace (a bad window in the file is how a person comes to replace it): its Undo was offered, and
+ * its own preview answered 400. Judged as the preview judges a list, the shape first and then the loader's own parse of
+ * the file it would write, so the offer and the refusal cannot disagree.
  */
 function pauseListBack(out) {
   const unread = typeof out.beforeText === "string" && !Array.isArray(jsonOf(out.beforeText)?.windows);
   if (unread) return { undo: twice(UNDO_SENTENCES.tooBig, UNDO_SENTENCES.tooBigAfter), inverse: null };
+  if (!pauseListGoesBack(out)) return { undo: twice(UNDO_SENTENCES.refusedList, UNDO_SENTENCES.refusedListAfter), inverse: null };
   return { undo: "Put the previous pause windows back", inverse: { action: "pause-windows", body: { windows: out.extra.before } } };
+}
+
+/** Whether the list `out` replaced would pass the whole-list preview as its own Undo (`pauseListBack`). */
+function pauseListGoesBack(out) {
+  const before = out.extra?.before;
+  if (!Array.isArray(before) || pauseListShapeRefusal(before) !== null) return false;
+  if (typeof out.beforeText !== "string") return true;
+  const held = heldPauseWindows(out.beforeText, out.target ?? "pause-windows.json");
+  if (held.problem) return false;
+  try {
+    parsePauseWindows(pauseWindowsText(held.doc, before), out.target ?? "pause-windows.json");
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /** A trigger edit's way back: the old flow, and the old value of each of backend, provider and model it set. */

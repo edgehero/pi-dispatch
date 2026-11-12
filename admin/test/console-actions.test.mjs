@@ -444,6 +444,8 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
     envelopeAfter: "Set it back with the envelope form: the console kept no copy of the old values.",
     tooBig: "Put the previous list back by hand: this preview showed it; the console keeps no copy.",
     tooBigAfter: "Put the previous list back by hand: the console kept no copy of it.",
+    refusedList: "Put the previous list back by hand: it held a window the console refuses, so it cannot be its own Undo; this preview showed it, and the console keeps no copy.",
+    refusedListAfter: "Put the previous list back by hand: it held a window the console refuses, and the console kept no copy of it.",
     resumeUnread: "Pause the queues that were paused again by hand: the fleet was not read before the resume, so which they were is not known.",
     resumeShort: "Pause the queues that were paused again by hand: not every queue was read before the resume, so which they were is not fully known.",
   });
@@ -1472,6 +1474,26 @@ test("the whole-list pause-windows refusals name a window by the index the Confi
   const unread = await c.both("pause-windows", { windows: [{ scope: "*", from: "05:00", to: "06:00" }] });
   assert.equal(unread.preview.undo, UNDO_SENTENCES.tooBig);
   assert.deepEqual([unread.confirm.json().change.inverse, unread.confirm.json().change.undo], [null, UNDO_SENTENCES.tooBigAfter]);
+});
+
+test("replacing a list that held a window the console refuses offers no Undo that its own preview would refuse, and says so (#846)", async () => {
+  const { paths } = deployment();
+  const c = await start({ paths });
+  // A window the loader refuses (an hour past 23), and one with a field the whole-list action does not take: each is a list
+  // a person replaces to get rid of, and neither can come back through the preview.
+  for (const bad of [{ scope: "*", from: "25:00", to: "02:00" }, { scope: "*", from: "01:00", to: "02:00", colour: "red" }]) {
+    writeFileSync(paths.pauseWindowsPath, `${JSON.stringify({ windows: [{ scope: "*", from: "01:00", to: "02:00" }, bad] }, null, 2)}\n`);
+    const replaced = await c.both("pause-windows", { windows: [{ scope: "*", from: "05:00", to: "06:00" }] });
+    assert.equal(replaced.preview.undo, UNDO_SENTENCES.refusedList);
+    assert.deepEqual([replaced.confirm.json().change.inverse, replaced.confirm.json().change.undo], [null, UNDO_SENTENCES.refusedListAfter]);
+    // What the old Undo did: its preview refused the list it was offered to put back.
+    const back = await c.act("pause-windows", { windows: [{ scope: "*", from: "01:00", to: "02:00" }, bad] });
+    assert.equal(back.status, 400);
+  }
+  // A good list still goes back.
+  writeFileSync(paths.pauseWindowsPath, `${JSON.stringify({ windows: [{ scope: "*", from: "01:00", to: "02:00" }] }, null, 2)}\n`);
+  const good = await c.both("pause-windows", { windows: [] });
+  assert.deepEqual(good.confirm.json().change.inverse, { action: "pause-windows", body: { windows: [{ scope: "*", from: "01:00", to: "02:00" }] } });
 });
 
 test("a change too big for the session's flash keeps its banner and drops its inverse, saying to put the list back by hand", async () => {

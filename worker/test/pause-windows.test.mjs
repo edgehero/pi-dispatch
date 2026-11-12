@@ -199,3 +199,24 @@ test("parseScopeString refuses a qualified scope whose repo is not a forge repo'
 	assert.equal(pauseUntilMs([w], { kind: "azure", repo: "Fabrikam Fiber/Web App" }, now), UTC(2026, 7, 23, 17));
 	assert.equal(pauseUntilMs([w], { kind: "github", repo: "Fabrikam Fiber/Web App" }, now), null);
 });
+
+// ── issue #846: a key written twice ─────────────────────────────────────────────────────────────────────
+
+test("parsePauseWindows refuses a key written twice anywhere in the file, which JSON.parse would settle by keeping the last (#846)", () => {
+	const two = '{"windows":[{"scope":"*","from":"01:00","to":"02:00"},{"scope":"*","from":"03:00","to":"04:00"}],"windows":[]}';
+	assert.throws(() => parsePauseWindows(two, "pw.json"), (e) => e.piDispatchConfig === true && e.message === 'pause-windows file has a duplicate key "windows" at windows: JSON keeps the LAST value, so the windows a person reads in the file and the windows that apply are not the same: pw.json');
+	// Inside one window: the second `to` would quietly move the window's end.
+	assert.throws(() => parsePauseWindows('{"windows":[{"scope":"*","from":"01:00","to":"02:00","to":"23:00"}]}', "pw.json"), /duplicate key "to" at windows\.0\.to/);
+	// A key the file does not own is the file's too: the whole file is refused, as the triggers loader refuses its own.
+	assert.throws(() => parsePauseWindows('{"windows":[],"note":1,"note":2}', "pw.json"), /duplicate key "note"/);
+	// "Not valid JSON" stays the first thing said, and a doubled version is a broken file, never a newer one.
+	assert.throws(() => parsePauseWindows('{"windows":[],"windows":', "pw.json"), /not valid JSON/);
+	assert.throws(() => parsePauseWindows('{"version":2,"version":1,"windows":[]}', "pw.json"), (e) => /duplicate key "version"/.test(e.message) && e.newer !== true);
+	// The same key in two windows is two keys, not one written twice.
+	assert.equal(parse([{ scope: "*", from: "01:00", to: "02:00" }, { scope: "*", from: "03:00", to: "04:00" }]).length, 2);
+});
+
+test("loadPauseWindows refuses a file with a key written twice, so the worker does not start on it (#846)", () => {
+	const text = '{"windows":[{"scope":"*","from":"01:00","to":"02:00"}],"windows":[]}';
+	assert.throws(() => loadPauseWindows({ pauseWindowsFile: "/d/pw.json" }, { existsSync: () => true, readFileSync: () => text }), (e) => e.piDispatchConfig === true && /duplicate key "windows"/.test(e.message));
+});

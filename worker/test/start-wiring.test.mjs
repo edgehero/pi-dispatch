@@ -5501,6 +5501,26 @@ test("issue #761: a pause windows reload that meets a newer file keeps the last 
 	assert.deepEqual(lines.at(-1), ["pause_windows_reloaded", { count: 0 }]);
 });
 
+test("issue #846: a live edit that writes a key twice keeps the last good windows and says why, through the real loader", { skip }, () => {
+	const dir = tempDir("pi-846-reload-");
+	const path = join(dir, "pause-windows.json");
+	const config = { pauseWindowsFile: path };
+	const lines = [];
+	const log = (event, fields) => lines.push([event, fields]);
+	writeFileSync(path, JSON.stringify({ windows: [{ scope: "*", from: "01:00", to: "02:00" }, { scope: "*", from: "03:00", to: "04:00" }] }));
+	const ref = { current: [], newer: false };
+	mod.reloadPauseWindows(config, ref, log);
+	assert.equal(ref.current.length, 2);
+	const kept = ref.current;
+	// What JSON.parse alone made of this edit: no window at all, while a person reading the file sees two.
+	writeFileSync(path, '{"windows":[{"scope":"*","from":"01:00","to":"02:00"},{"scope":"*","from":"03:00","to":"04:00"}],"windows":[]}');
+	mod.reloadPauseWindows(config, ref, log);
+	assert.equal(ref.current, kept, "the two windows stay in force");
+	assert.equal(ref.newer, false, "a broken file, never a newer one");
+	assert.equal(lines.at(-1)[0], "pause_windows_reload_invalid");
+	assert.match(lines.at(-1)[1].reason, /^pause-windows file has a duplicate key "windows" at windows: /);
+});
+
 test("issue #761: a running worker's watchers carry a newer pause windows or triggers file to the processor's head gates, and a good file clears them", { skip }, async () => {
 	const dir = tempDir("pi-761-live-");
 	const pausePath = join(dir, "pause-windows.json");
