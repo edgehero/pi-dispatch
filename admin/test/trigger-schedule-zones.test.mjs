@@ -90,6 +90,8 @@ test("registry clock evidence is GET-only, complete and fresh; failed members ca
     async hgetall(key) { commands.push(["hgetall", key]); return key.endsWith(":gone") ? {} : { ...host, routes: "true", beatAt: String(now() - 1000) }; },
     async pttl(key) { commands.push(["pttl", key]); return key.endsWith(":gone") ? -2 : 89000; },
     disconnect() { disconnected++; },
+    // Issue #846: the error listener every per-call client carries; a listener is not a command, so the read stays GET-only.
+    on(event) { assert.equal(event, "error"); },
     ...overrides,
   }, { get(target, key) { assert.ok(key in target, `unexpected registry method ${String(key)}`); return target[key]; } }) });
   const good = await read();

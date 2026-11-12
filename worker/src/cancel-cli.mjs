@@ -24,7 +24,7 @@
  * job's attempt count.
  */
 
-import { cancelReqKey, ranBefore, removeQueuedJob, requestCancel } from "./cancel-state.mjs";
+import { CANCEL_REQ_TTL_MS, cancelReqKey, ranBefore, removeQueuedJob, requestCancel } from "./cancel-state.mjs";
 
 /** Same budget the kill switch gives the host registry before acting on what the keyspace alone says. */
 const FLEET_READ_TIMEOUT_MS = 2_000;
@@ -42,6 +42,39 @@ export function boundedText(text) {
 	return String(text ?? "no reason given").replace(/[\u0000-\u001f\u007f-\u009f]/g, " ").slice(0, 200);
 }
 
+/** Whether `error` is Valkey's own refusal (a reply), as against no answer at all: the two are different sentences. */
+function refusedByValkey(error) {
+	return error?.name === "ReplyError";
+}
+
+/** What went wrong, as the start of a line: Valkey refused a command (it answered), or it did not answer. */
+function valkeyFault(error, shown) {
+	const command = typeof error?.command?.name === "string" ? error.command.name.toUpperCase() : "a command";
+	return refusedByValkey(error) ? `Valkey at ${shown} refused ${boundedText(command)}: ${boundedText(error?.message)}` : `Valkey at ${shown} stopped answering (${boundedText(error?.message)})`;
+}
+
+/**
+ * The job's state, read under the same bound as every other command here: `{ state }`, or `{ unread }` with why it could
+ * not be read. Issue #846: a read that failed was `"unknown"`, which is also what BullMQ says of a job that left its
+ * queue, so a job still running was reported as gone "and nothing was changed".
+ */
+async function boundedState(job, timeoutMs) {
+	let timer;
+	try {
+		return await Promise.race([
+			Promise.resolve(job.getState()).then((state) => ({ state })),
+			new Promise((resolve) => {
+				timer = setTimeout(() => resolve({ unread: `no answer within ${Math.round(timeoutMs / 1000)}s` }), timeoutMs);
+				timer.unref?.();
+			}),
+		]);
+	} catch (error) {
+		return { unread: error?.message ?? String(error) };
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
 /**
  * Run the cancel. Returns the process exit code. Every collaborator is a seam with the production default,
  * so tests drive states and races without a queue; `write` is the stdout seam cli.mjs already injects.
@@ -55,7 +88,7 @@ export async function runCancel(jobId, url, { write = (chunk) => process.stdout.
 		return fail("a job id is required: pi-dispatch cancel <jobId>  (ids are in `pi-dispatch status`, the panel, and the run log)");
 	}
 	// Lazy imports, the pause verb's shape: a mistyped id must not load bullmq before it can be refused.
-	const { parseConnection, makeRedisClient } = await import("./connection.mjs");
+	const { parseConnection, makeRedisClient, VALKEY_COMMAND_TIMEOUT_MS } = await import("./connection.mjs");
 	const { fleetQueueNames, discoverHostQueues, unionQueueNames, makeQueue } = await import("./queue.mjs");
 	const { readLiveHosts } = await import("./host-registry.mjs");
 	const parseConn = parseConnectionFn ?? parseConnection;
@@ -83,10 +116,14 @@ export async function runCancel(jobId, url, { write = (chunk) => process.stdout.
 				});
 	const refused = await refusalOf(url);
 	if (refused) return fail(refused);
-	const probe = mkRedis(url);
+	// BOUNDED (issue #846): each command waits at most VALKEY_COMMAND_TIMEOUT_MS for its answer, and one that timed out is
+	// never sent again. The unbounded client this was waited for as long as Valkey was gone: killed during the ack poll it
+	// printed nothing until the operator gave up, and on a partition its DEL never reached the catch below.
+	const probe = mkRedis(url, { commandTimeoutMs: VALKEY_COMMAND_TIMEOUT_MS, disconnectTimeoutMs: 0 });
 	probe.on?.("error", () => {});
 	const queues = [];
 	let requested = false;
+	let requestedAt = null;
 	try {
 		// The job could sit on the shared queue or on any host's own (issue #57): find it the way pause
 		// spans them, and fail OPEN but LOUDLY on a degraded registry read, exactly as the kill switch does.
@@ -147,7 +184,8 @@ export async function runCancel(jobId, url, { write = (chunk) => process.stdout.
 
 		if (state === "active") {
 			requested = true;
-			const res = await requestCancel({ redis: probe, jobId, ackTimeoutMs, pollMs, ...(sleep ? { sleep } : {}) });
+			requestedAt = now();
+			const res = await requestCancel({ redis: probe, jobId, ackTimeoutMs, pollMs, now, ...(sleep ? { sleep } : {}) });
 			if (res.ack !== undefined) {
 				write(`cancel accepted by ${res.ack === "" ? "the worker" : boundedText(res.ack)} — stopping the container (allow ~30s); the run record will say operator-cancel\n`);
 				return 0;
@@ -155,8 +193,11 @@ export async function runCancel(jobId, url, { write = (chunk) => process.stdout.
 			// Gate round 2 of PR #479: the worker stops its cancel poll before it holds or retries a job, so a request that
 			// lands in that moment is never acknowledged and the job is back in the queue. Re-read, so the words are true.
 			// Gate round 3: by the state, since a job that finished or left the queue cannot be removed by a second cancel.
-			const after = await job.getState().catch(() => "unknown");
+			const read = await boundedState(job, VALKEY_COMMAND_TIMEOUT_MS);
 			const waited = `no worker acknowledged within ${Math.round(ackTimeoutMs / 1000)}s`;
+			// Issue #846: a state that could not be read is said as that, never as BullMQ's "unknown" (a job that left).
+			if (read.unread !== undefined) return fail(`${waited}, and the job's state could not be read (${boundedText(read.unread)}), so whether it still runs is not known. The cancel request was withdrawn, so nothing was changed: run \`pi-dispatch status\`, and \`pi-dispatch cancel ${jobId}\` again if it still runs`);
+			const after = read.state;
 			if (after === "waiting" || after === "delayed" || after === "prioritized" || after === "paused") return fail(`${waited}: the job went back to the queue before its worker read the cancel (it is now ${after}), and nothing was changed. Run \`pi-dispatch cancel ${jobId}\` again to remove it`);
 			if (after === "completed" || after === "failed") return fail(`${waited}: the job finished (${after}) before its worker read the cancel, and nothing was changed`);
 			if (after !== "active") return fail(`${waited}: the job is no longer in the queue (its state reads ${after}), and nothing was changed`);
@@ -170,18 +211,43 @@ export async function runCancel(jobId, url, { write = (chunk) => process.stdout.
 		// del would sit in ioredis's retry queue and hold this process open long past the error message.
 		// The bound timer is CLEARED when the del wins the race (discoverHostQueues' own rule): cli.mjs
 		// sets exitCode rather than exiting, so a stray pending timer is a second of pure hang.
+		let withdrawn = false;
 		if (requested) {
 			let bound;
-			await Promise.race([
-				Promise.resolve(probe.del?.(cancelReqKey(jobId))).catch(() => {}),
-				new Promise((r) => (bound = setTimeout(r, 1000))),
+			withdrawn = await Promise.race([
+				Promise.resolve(probe.del?.(cancelReqKey(jobId))).then(() => true, () => false),
+				new Promise((r) => (bound = setTimeout(() => r(false), 1000))),
 			]);
 			clearTimeout(bound);
 		}
-		return fail(error?.valkeyRefused ? error.message : `could not reach Valkey at ${(await import("./connection.mjs")).urlShown(url)}: ${(await import("./valkey-auth.mjs")).valkeyDownHint(url)}\n  ${boundedText(error?.message)}`);
+		if (error?.valkeyRefused) return fail(error.message);
+		const shown = (await import("./connection.mjs")).urlShown(url);
+		// Issue #846: after the request went out, what is said is what became of it. The old line said only "could not reach
+		// Valkey ... is it running?", also when Valkey answered with a refusal, and never that a request may still stand.
+		if (requested && error?.valkeyMayStillRun) {
+			if (withdrawn) return fail(`${valkeyFault(error, shown)} after the cancel request for ${jobId} was written. The request was withdrawn again, so nothing was changed, unless its worker read it in that moment: run \`pi-dispatch status\` to see whether ${jobId} still runs`);
+			const until = new Date((requestedAt ?? now()) + CANCEL_REQ_TTL_MS).toISOString();
+			return fail(`${valkeyFault(error, shown)} after the cancel request for ${jobId} was written, and the request could not be withdrawn. It stands until ${until}, ${Math.round(CANCEL_REQ_TTL_MS / 1000)}s after it was written, and a worker that reads it before then stops the job: run \`pi-dispatch status\` once Valkey answers to see whether it did`);
+		}
+		if (refusedByValkey(error)) return fail(`${valkeyFault(error, shown)}; nothing was changed`);
+		return fail(`could not reach Valkey at ${shown}: ${(await import("./valkey-auth.mjs")).valkeyDownHint(url)}\n  ${boundedText(error?.message)}`);
 	} finally {
 		probe.disconnect?.();
-		for (const q of queues) await q.close().catch(() => {});
+		// BOUNDED (issue #846): `close()` waits for the answer to QUIT, so on a Valkey that stopped answering the verb printed
+		// its line and then never exited. Past the bound the queue is dropped (`disconnect`, no QUIT), which nothing here
+		// needs an answer to: every command this verb sent has been answered or given up on by then.
+		await Promise.all(queues.map((q) => closeWithin(q, 1000)));
 	}
+}
+
+/** Close `queue`, or drop its connection when the close is not answered within `ms`. Never throws. */
+async function closeWithin(queue, ms) {
+	let timer;
+	const closed = await Promise.race([
+		Promise.resolve(queue.close()).then(() => true, () => true),
+		new Promise((resolve) => (timer = setTimeout(() => resolve(false), ms))),
+	]);
+	clearTimeout(timer);
+	if (!closed) await Promise.resolve(queue.disconnect?.()).catch(() => {});
 }
 

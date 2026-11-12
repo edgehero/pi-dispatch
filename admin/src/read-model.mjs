@@ -668,6 +668,7 @@ export async function checkDispatchRun({
     let redis;
     try {
       redis = redisFn(valkeyUrl);
+      redis.on?.("error", () => {}); // Issue #846: a down Valkey is this read's answer; without a listener ioredis also prints a stack trace per reconnect attempt.
       const key = hourKey(now());
       const count = Number(consumeRate ? await redis.incr(key) : (await redis.get(key) ?? 0));
       if (consumeRate && count === 1) await redis.expire(key, DISPATCH_RUN_TTL_SECONDS);
@@ -2127,6 +2128,7 @@ export async function readHosts({ url, redisFn = makeRedisClient, timeoutMs = 25
   try {
     parseConnection(url, { failFast: true }); // throws on junk before any client exists
     redis = redisFn(url);
+    redis.on?.("error", () => {}); // Issue #846: a down Valkey is this read's answer; without a listener ioredis also prints a stack trace per reconnect attempt.
     // `timeoutMs` goes INWARD as well as around. Without it the inner per-operation bound stayed at its
     // 2000ms default while the outer 2500ms had to cover a sequential `1 + N` round-trip walk, so past a
     // handful of hosts on a slow Valkey the outer timer always won -- and the caller degraded to the
@@ -2174,6 +2176,7 @@ export async function readHeldJobs({ url, limit = 20, redisFn = makeRedisClient,
   try {
     parseConnection(url, { failFast: true }); // throws on junk before any client exists
     redis = redisFn(url);
+    redis.on?.("error", () => {}); // Issue #846: a down Valkey is this read's answer; without a listener ioredis also prints a stack trace per reconnect attempt.
     const settled = (async () => {
       // SMEMBERS of the worker's index, not a SCAN. A scan of `wait:job:*` walks the whole keyspace, and
       // walks ALL of it precisely when nothing is held, which is the deployment least willing to pay for it.
@@ -2284,6 +2287,7 @@ export async function cancelHeldJob({ url, jobId, redisFn = makeRedisClient, que
   try {
     parseConnection(url, { failFast: true });
     redis = redisFn(url);
+    redis.on?.("error", () => {}); // Issue #846: a down Valkey is this read's answer; without a listener ioredis also prints a stack trace per reconnect attempt.
     // EVERY fleet queue (issue #642), as `pi-dispatch cancel` searches them (cancel-cli.mjs): a held job lives on the queue
     // it was enqueued onto, and a named host's cron, chained children and routed forge jobs live on `pi-jobs@<name>`.
     // Looking only in the shared queue refused every held job on a host queue as "no longer in the queue", for a job
@@ -2532,6 +2536,7 @@ export async function readBudget({ url, redisFn = makeRedisClient, timeoutMs = 2
   try {
     parseConnection(url, { failFast: true }); // throws on junk before any client exists
     redis = redisFn(url);
+    redis.on?.("error", () => {}); // Issue #846: a down Valkey is this read's answer; without a listener ioredis also prints a stack trace per reconnect attempt.
     const settled = Promise.all([redis.get(dayKey(now)), redis.get(weekKey(now)), redis.get(monthKey(now)), redis.get(tokenDayKey(now))]).then(
       ([day, week, month, tokens]) => ({ day: Number(day ?? 0), week: Number(week ?? 0), month: Number(month ?? 0), tokensToday: Number(tokens ?? 0) }),
       (err) => ({ unreachable: err?.message ?? String(err) }),

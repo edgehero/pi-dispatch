@@ -88,6 +88,7 @@ export async function enqueueTriggerFire(plan, options = {}) {
     const canary = options.packageCanary ?? null;
     const id = (canary ? manualCanaryJobId : manualTriggerJobId)({ triggerId: current.schedulerId, now: instant });
     redis = redisFn(url);
+    redis.on?.("error", () => {}); // Issue #846: a down Valkey is this read's answer; without a listener ioredis also prints a stack trace per reconnect attempt.
     if (await redis.set(`trigger-fire:${current.queue}:${id}`, "1", "EX", 120, "NX") !== "OK") return { refusal: "This cron trigger was already fired this minute. Nothing was queued.", deduplicated: true };
     queue = queueFn(parseConnectionFn(url, { failFast: true }), { name: current.queue });
     // Stamped by the same rule as every builder (`DES-STORE-VERSION-WHEN-NEEDED`), so a worker from before canaries waits for an upgrade instead of paying for a plain run.

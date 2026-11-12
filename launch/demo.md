@@ -157,16 +157,16 @@ reads a picture's content, so a fresh render can be garbage or carry a garbled f
 It needs Google Chrome and no server. `--all` is about a gigabyte and four minutes, and its folder is gitignored. After a change to the look,
 re-render the picks and bump the `?v=` on each changed image, since no test catches a stale PNG.
 
-## The panel and insights images
+## The panel images
 
 Every panel and command image in `docs/images` is drawn by the shipped code over one canned deployment, by a
 committed script: `dispatch-dashboard.svg`, `dispatch-hosts.svg`, `dispatch-allocation.svg`,
-`dispatch-run-detail.svg`, `dispatch-commands.svg`, the `.png` copies of the first three and `insights-view.png`. The
-first three are drawn for a light page too (`-light`), since the READMEs follow the reader's theme.
+`dispatch-run-detail.svg`, `dispatch-commands.svg` and the `.png` copies of the first three. The first three are drawn
+for a light page too (`-light`), since the READMEs follow the reader's theme.
 
 ```sh
 node launch/render-images.mjs          # the five SVGs, and the three -light SVGs
-node launch/render-images.mjs --png    # also the PNGs of those three in both (for the npm page) and insights-view.png
+node launch/render-images.mjs --png    # also the PNGs of those three in both (for the npm page)
 ```
 
 What it needs:

@@ -10561,7 +10561,15 @@ job can only be stopped by asking whichever worker owns it to raise its own abor
   with "nothing was changed": waiting, delayed, prioritized or paused, it went back to the queue before its
   worker read the cancel, so cancel it again to remove it; completed or failed, it finished before its worker
   read the cancel; any other state, it is no longer in the queue. The panel's timeout sentence names these
-  cases in one line. A shutdown's abort is not a cancel: that job is held or retried as before, so it
+  cases in one line. Since issue #846 the requester's wait ends at `ackTimeoutMs` by the time `now` says has passed
+  as well as by its sleeps, so a poll that waited out an outage in its client's queue is counted; the CLI reads the
+  state after it under its command bound, and a state it could not read is said as that ("so whether it still runs
+  is not known"), never as a job that left the queue; and every command of the CLI's client is bounded
+  (`VALKEY_COMMAND_TIMEOUT_MS`, 5 s, the console's bound), its queues closed under a bound too, so a Valkey that goes
+  away or stops answering during the cancel ends the verb with what became of its request: withdrawn again, so
+  nothing was changed but for a worker that read it in that moment; or standing until the time it expires (60 s
+  after it was written), when a worker that reads it before then still stops the job; and where Valkey answered with
+  a refusal (an ACL that withholds `DEL`), that refusal quoted, never "could not reach Valkey". A shutdown's abort is not a cancel: that job is held or retried as before, so it
   survives the restart.
   Queued and held cancels write NO run record -- the `dispatch_wait_cancel` rule -- and the CLI says so in its
   output, with the job's past read off BullMQ's `attemptsMade` (issue #477): a job with none never ran; a job with one
@@ -13646,6 +13654,7 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 
 | Date | Change |
 |---|---|
+| 2026-11-12 (#846, parts 2) | **`INT-CANCEL-CHANNEL-CONTRACT` AMENDED**, the requester's timeout: `requestCancel` ends its wait at `ackTimeoutMs` by the wall clock (an injected `now`) as well as by its sleeps, so a GET that waited out a Valkey restart in the client's queue counts its time. `pi-dispatch cancel` builds its client with a bound on every command (`VALKEY_COMMAND_TIMEOUT_MS`, exported from `connection.mjs`, 5 s as the console's), reads the state after the wait under the same bound, and closes its queues under a bound, dropping one whose QUIT goes unanswered. Its sentences say what can be known: a state it could not read is not BullMQ's `unknown`; after the request was written, a lost answer says whether the request was withdrawn or stands until its expiry, named as a time; a `ReplyError` is Valkey refusing a command, quoted, never "could not reach Valkey". Measured on macOS with a real Valkey stopped by SIGSTOP during the ack poll: the verb printed its line and never exited (its queue close waited on QUIT), and now ends in about 11 s; with Valkey back after 3 s it says the job is active and unowned, where it said the job had left the queue. UNCHANGED, checked: the keys, their TTLs, the worker's poll and acknowledgment, the console's `cancelActive` (it shares `requestCancel` and keeps its behaviour). |
 | 2026-11-11 (#853, pi 1.5.2) | **`INT-SDK-SESSION-OPTIONS` AMENDED** in its evidence line and in (m): pi's default `cacheWarming` is `"idle"` since 1.5.2, which also warms between agent runs; the runner's `"off"` still holds and now saves more. **`INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED**: the merged compat object type-checks 1.5.2's four new keys, as pi does. Every other entry UNCHANGED, checked against the 1.5.2 tarballs. |
 | 2026-11-11 (#849, part 6) | **`INT-CONSOLE-STATE-API` AMENDED**: `POST /login/code` answers `kept: true` and keeps the browser's live session when it already belongs to the link's person and has time left. **`INT-CONSOLE-AUDIT-LOG` AMENDED**: the panel's `login-code` rows come from a bare `/dispatch console` too, where it links by default; a kept session's row carries a reason. |
 | 2026-11-08 (#849, part 5) | **`INT-CONSOLE-AUDIT-LOG` AMENDED**: two write kinds, `device-remove` and `sessions-end-all`, written through the existing action routes; the CLI's `sessions-ended` and its `shell` actor are UNCHANGED, checked. **`INT-CONSOLE-STATE-API` AMENDED**: `POST /api/device/remember` answers 409 at the per-name cap. `INT-CONSOLE-DEVICES-STORE`: UNCHANGED, checked, but for `rememberDevice` marking the cap refusal `full`: the page reads the store's listing, and the actions use `/api/act/<name>/preview` and `/confirm` as every action does. |
