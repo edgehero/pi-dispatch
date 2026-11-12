@@ -1660,7 +1660,16 @@ writes retain their existing interactive confirmation. This adds no unattended p
   sandbox says what a job of that trigger would load on that host, from the host's last doctor run, with its time
   (`doctor:loads:<name>`, `INT-DOCTOR-RESULTS-KEY`; `sandboxFreshLine`), leaving out packages the trigger withholds and
   an overlay that is off. It reads unknown for a host that published nothing, a publication that could not be read and
-  a last doctor run that could not read a part this job loads from, and it never reads as the same or as none. pi's
+  a last doctor run that could not read a part this job loads from, and it never reads as the same or as none. Since
+  issue #847, where the host published a doctor run, two rows follow it (`sandboxFreshRows`): **Flow**, where a job of
+  the trigger would find its flow on that host, in the trigger page's own words (`flowAnswer`, `lacksFlow`,
+  `FLOW_TIER_WORDS`): found with its tier, not found ("it is not at the repository's HEAD, nor in any other tier this
+  trigger loads from"), or unknown where doctor has no answer for that flow (it ran before an edit, or the row was cut
+  to fit) or found it in no tier a host can see; and, when the trigger names any, **MCP servers**: each server `run.mcp`
+  names against the host's overlay servers, on, switched off or not there (both refused as `mcp-server-unknown`), or
+  unknown where the list could not be read or was cut, and `forge` as the job's own. Tools stay out, since no host
+  publishes a tool's name. An unread MCP part no longer makes the first row unknown for a trigger that names no server.
+  A host that published nothing keeps the first row alone. pi's
   version is the record's, or the host's beat's (`host:h:<name>`) where the sandbox's image is the one that host booted on, so
   a host that published nothing still has one. A kept older image and a trigger's own `run.image` hold their own pi, so otherwise
   the line says it cannot name the version (`hostPiFor`). A read of the record that failed says it could not be read. **Who sees what**: an operator and a viewer read the same words on the run page, the Runs list and a project's
@@ -1669,7 +1678,7 @@ writes retain their existing interactive confirmation. This adds no unattended p
   operators only (`REQ-SANDBOX-FROM-THE-CONSOLE`, UNCHANGED, checked: it adds no control, command or shell list).
   `/api/run` carries the field for both roles (`INT-CONSOLE-STATE-API`). No model or agent reads the list, and each reads
   `outcomeNote`'s closed sentence as `note`, and an agent's page draws no Loaded card or project card over a copy with no field.
-  Goldens: `sandbox-loaded-run.operator`, `sandbox-loaded-fresh.operator`, `sandbox-loaded-unknown.operator`, `sandbox-loaded-long-names.operator`. Tests:
+  Goldens: `sandbox-loaded-run.operator`, `sandbox-loaded-fresh.operator`, `sandbox-loaded-flow-found.operator`, `sandbox-loaded-flow-absent.operator`, `sandbox-loaded-flow-unknown.operator`, `sandbox-loaded-mcp-lacks.operator`, `sandbox-loaded-unknown.operator`, `sandbox-loaded-long-names.operator`. Tests:
   `admin/test/loaded-words.test.mjs`, `admin/test/console-sandboxes.test.mjs`, `admin/test/sandbox-data.test.mjs`.
 
 - **AMENDED 2026-11-02 (#792, #793)**: Run Workspace and the separate gateway workbench/observer surface follow
@@ -2653,7 +2662,10 @@ writes retain their existing interactive confirmation. This adds no unattended p
       The browser judges no money or policy. With no script the page reads the same, every control disabled and the bar
       hidden. The digest covers the entry's prompt and secret references, so it reaches an operator's form alone.
     - **What is switched and what is shown (AMENDED 2026-11-04).** Staged packages have one switch, all or nothing, and each staged package and
-      overlay extension a host publishes has its own, by name (`run.excludeExtensions`), with where it is. A name the file holds that no host shows keeps
+      overlay extension a host publishes has its own, by name (`run.excludeExtensions`), with where it is, and what the newest run that loaded it
+      brought (its tools, skills and prompt templates, "as gh-9575 loaded it"), switched off too since issue #847, since that row is where a person
+      decides to turn it back on; one no recorded run has loaded says "what it brings is known once a run has loaded it", and an overlay entry says it
+      has no manifest, so only a run can say. Hosts publish no counts per package (`DES-OPERATOR-CONSOLE`). A name the file holds that no host shows keeps
       its row, so it can be turned back on, and under `"packages": false` a package's switch is moot and the row says so. Two names in the file that mean one entry (`git-guard` and `git-guard.ts`, which the loader takes) are a row each: each says where the entry is, as the worker's `extensionsNotHere` reads it, and that the file also names the other. A tool an extension adds is a chip,
       named from a run's record by its id and host (`run.excludeExtensionTools`), since no host publishes a tool's name, and a name the file holds that no
       chip offers stays listed. A repository's extensions and tools stay counts, with no control. pi's own tools and a named server's are chips, on meaning not
@@ -8651,6 +8663,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-12 (#847) | **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: a fresh sandbox's What opens gains, where the host published a doctor run, a Flow row (where a job would find the trigger's flow, in the trigger page's words, or unknown) and, for a trigger that names any, an MCP servers row (on, switched off, not there, unknown; `forge` the job's own); an unread MCP part no longer makes the first row unknown for a trigger that names none; four goldens added (`sandbox-loaded-flow-found`, `-flow-absent`, `-flow-unknown`, `-mcp-lacks`). (g1)'s extension row quotes what the newest run that loaded it brought also when it is switched off, and one no run has loaded says that is not known yet; an overlay entry says it has no manifest. UNCHANGED, checked: `INT-DOCTOR-RESULTS-KEY` (nothing new is published), `REQ-SANDBOX-FROM-THE-CONSOLE` (no control is added), the README's What a job gets (no sentence it holds moved). |
 | 2026-11-11 (#849, follow-ups) | **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**, the console subcommand and its acceptance: the default link is made only where the address in use is the one the tokens file's deployment folder names (its `.env`'s `PI_CONSOLE_LISTEN`, or the default), so a code is never minted into one deployment's drop for another's console (said as a warning, with the advice its source calls for); `--link` still mints, under the same warning; a tokens file pi's own environment names is checked against no folder. Every other entry UNCHANGED, checked. |
 | 2026-11-11 (#849, part 6) | Fewer commands. **`REQ-CONSOLE-SECURITY` AMENDED**, the Statement's "a new session id each time" and (i): a one-time link for the person a browser's live session already belongs to keeps that session (audited, the code spent), while it has time left. **`REQ-OPERATOR-CONSOLE-SCREENS` (a10) AMENDED**: a first-run step may carry `host`. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: `/dispatch console` makes its sign-in link by default where the choice is plain (pi's terminal UI, a running console, one operator token, a guarded drop), says the address as before otherwise, and takes `--no-link`; its acceptance gains that clause. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: new (g10), a button where the console can do a step (the overview's granted steps, doctor from Set up on the console's own host, the run page's reason fixes). `REQ-BROWSER-FIRST-RUN-SETUP`'s commands where no button is offered and `INT-REASON-CATALOG`'s words: UNCHANGED, checked. |
 | 2026-11-08 (#849, part 5) | The Remember experience. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: new (g9), the Remembered browsers screen, the sign-in form's Remember box, the offer after a fresh sign-in and the remembered mark in the top bar. **`REQ-OPERATOR-CONSOLE-ACTIONS` AMENDED**, (p): `device-remove` and `sessions-end-all` are destructive. **`REQ-CONSOLE-SECURITY` AMENDED**, (i): a tombstone is also written by Sign everyone out (`endAll`), whose `all` moves no `generation`; both actions ride the existing write guards, and signing everyone out writes no tokens file. |

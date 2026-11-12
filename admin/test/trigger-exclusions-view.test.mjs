@@ -74,7 +74,7 @@ test("doctor's answer naming a package the file now leaves out is no answer for 
 test("one row per name: a package and an overlay entry of one name share it, two entries of a stem share it, and a name the file holds keeps its row and its spelling", async () => {
   const items = async (hosts, trigger = COMMENT) => (await view(hosts, trigger)).extensions.items;
   const both = await items({ a: { packages: [{ name: "shared", version: "1.0.0" }], extensions: [{ name: "shared.ts", kind: "file" }] } });
-  assert.deepEqual(both.map((row) => [row.value, row.name, row.sub]), [["shared", "shared 1.0.0", "staged on a · in the overlay on a"]]);
+  assert.deepEqual(both.map((row) => [row.value, row.name, row.sub]), [["shared", "shared 1.0.0", "staged on a · in the overlay on a · what it brings is known once a run has loaded it"]]);
   const stems = await items({ a: { extensions: [{ name: "guard.ts", kind: "file" }] }, b: { extensions: [{ name: "guard.js", kind: "file" }] }, c: { extensions: [{ name: "guard", kind: "dir" }] } });
   assert.deepEqual(stems.map((row) => row.value), ["guard"], "every entry that name means, on each host");
   for (const segment of ["guard.ts", "guard.js", "guard"]) assert.equal(overlayEntryNamed("guard", segment), true, segment);
@@ -85,9 +85,12 @@ test("one row per name: a package and an overlay entry of one name share it, two
   assert.equal(row.on, false);
   assert.equal(row.sub, "named in the file; not on a, unknown on blind, shut and silent");
   assert.equal((await items({}, { ...COMMENT, excludeExtensions: ["ghost"] }))[0].sub, "named in the file");
-  // What a run had of an extension is no part of a row the file now leaves out.
+  // Issue #847: what a run had of an extension is quoted on a row the file now leaves out too, since that row is where a
+  // person decides to turn it back on; and one no run has loaded says that is not known yet.
   const off = triggerGetsOf({ trigger: { ...COMMENT, excludeExtensions: ["pi-lint"] }, records: [S.everything()], hostLoads: await published({ a: { packages: [PI_LINT] } }), liveHosts: ["a"] }).extensions.items[0];
-  assert.equal(off.sub, "staged on a");
+  assert.equal(off.sub, "staged on a · 2 tools, 1 prompt template, as gh-9575 loaded it");
+  const never = triggerGetsOf({ trigger: { ...COMMENT, excludeExtensions: ["pi-lint"] }, records: [], hostLoads: await published({ a: { packages: [PI_LINT] } }), liveHosts: ["a"] }).extensions.items[0];
+  assert.equal(never.sub, "staged on a · what it brings is known once a run has loaded it");
   assert.match(triggerGetsOf({ trigger: COMMENT, records: [S.everything()], hostLoads: await published({ a: { packages: [PI_LINT] } }), liveHosts: ["a"] }).extensions.items[0].sub, /as gh-9575 loaded it/);
 });
 
@@ -96,17 +99,17 @@ test("two names in the file that mean one entry: a row each, each says where it 
   assert.deepEqual(extensionsNotHere(names, { packages: [], overlay: [GUARD.name] }), [], "the worker: both are on this host");
   const out = await view({ mini1: { extensions: [GUARD] }, mini2: { extensions: [GUARD] } }, { ...COMMENT, excludeExtensions: names });
   assert.deepEqual(out.extensions.items.map((row) => [row.value, row.name, row.on, row.sub, row.backOn]), [
-    ["git-guard", "git-guard", false, "in the overlay on mini1 and mini2 · the file also names git-guard.ts", "git-guard off the list"],
-    ["git-guard.ts", "git-guard.ts", false, "in the overlay on mini1 and mini2 · the file also names git-guard", "git-guard.ts off the list"],
+    ["git-guard", "git-guard", false, "in the overlay on mini1 and mini2 · the file also names git-guard.ts · an overlay entry has no manifest, so what it brings is known once a run has loaded it", "git-guard off the list"],
+    ["git-guard.ts", "git-guard.ts", false, "in the overlay on mini1 and mini2 · the file also names git-guard · an overlay entry has no manifest, so what it brings is known once a run has loaded it", "git-guard.ts off the list"],
   ]);
   // Beside a host that lists whole and holds neither, and one that cannot say, the same words any other row reads.
   const beside = await view({ mini1: { extensions: [GUARD] }, bare: {}, blind: { unread: ["extensions"] } }, { ...COMMENT, excludeExtensions: names });
-  assert.equal(beside.extensions.items[1].sub, "in the overlay on mini1, not on bare, unknown on blind · the file also names git-guard");
+  assert.equal(beside.extensions.items[1].sub, "in the overlay on mini1, not on bare, unknown on blind · the file also names git-guard · an overlay entry has no manifest, so what it brings is known once a run has loaded it");
   // One name stays one row, in its own words, and an entry of another stem is its own row whatever the file spells.
   const one = await view({ mini1: { extensions: [GUARD, { name: "git-guard.js", kind: "file" }] } }, { ...COMMENT, excludeExtensions: ["git-guard.ts"] });
   assert.deepEqual(one.extensions.items.map((row) => [row.value, row.name, row.on, row.sub, row.backOn]), [
-    ["git-guard", "git-guard.js", true, "in the overlay on mini1", "git-guard back on"],
-    ["git-guard.ts", "git-guard.ts", false, "in the overlay on mini1", "git-guard.ts back on"],
+    ["git-guard", "git-guard.js", true, "in the overlay on mini1 · an overlay entry has no manifest, so what it brings is known once a run has loaded it", "git-guard back on"],
+    ["git-guard.ts", "git-guard.ts", false, "in the overlay on mini1 · an overlay entry has no manifest, so what it brings is known once a run has loaded it", "git-guard.ts back on"],
   ]);
   // On the page: the word the bar repeats is the row's.
   const panel = await card({ excludeExtensions: names });

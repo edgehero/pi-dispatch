@@ -1,7 +1,7 @@
 {
   "card": "TriggerEnvironment",
   "pr": 800,
-  "words": "cf32a30fc496c0741f739732ff8c55ed3a1bf848482ab160d9431b07a45efa25",
+  "words": "4e21e092901fd18cb27707b20713c3cba976a8ffe391625e40c413317ef73074",
   "elements": [
     {
       "el": "p-trigger-gets",
@@ -38,7 +38,10 @@
         "panels/trigger-gets-no-run.operator",
         "panels/trigger-gets-no-flow.operator"
       ],
-      "reason": "The card draws the other states in one panel. On the page each is the same panel, with its own file and record."
+      "reason": "The card draws the other states in one panel. On the page each is the same panel, with its own file and record.",
+      "shows": [
+        "what it brings is known once a run has loaded it"
+      ]
     },
     {
       "el": "The hosts: one pill per host, whether its jobs get the same there",
