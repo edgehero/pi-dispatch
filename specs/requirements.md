@@ -7789,8 +7789,8 @@ only one, its own ladder, OpenShell's pinned release first, then `.env`, `up`, `
   networks it makes when the egress policy is armed, and its fixture directory are named before any exists; and
   all are removed when the read ends, or by the next `--live` when that run was interrupted, which names what it
   removed (`INT-LIVE-PROBE-CONTRACT`). Nothing else reaches it: not `up`, not `--fix`, not the panel.
-- **`doctor` reads the deployment's `.env` for two named keys, to decide what to say AND whether to fail**
-  (issues #357 and #384), **and, since issue #453, for the three venue keys `up` and `service install` already read**
+- **`doctor` reads the deployment's `.env` for the five boot-file keys (`ENV_FILE_READABLE_KEYS`), to decide what to say AND whether to fail**
+  (issues #357, #384, #499, #503 and #504; since issue #859 for every check that reads those files), **and, since issue #453, for the three venue keys `up` and `service install` already read**
   (`PI_BACKENDS`, `PI_EGRESS`, `PI_EGRESS_PROXY`, through the same `readStackKeys` and the same shell-wins,
   disagreement-is-a-✗ rule as `up`), **and for the service's own `VALKEY_URL`, `PI_PROVIDER` and the provider's key**
   (its presence, and whether it is whitespace or an OAuth token; never its value), **and, since PR #466's gate round
@@ -7878,7 +7878,7 @@ only one, its own ladder, OpenShell's pinned release first, then `.env`, `up`, `
   deployment folder is trusted exactly as far as the service trusts it, so the job image this account's own `.env`
   names is run by doctor's canary and probes, in containers pinned as a job's are, as the service runs it. Every such key passes
   ONE structural allowlist (`SERVICE_ENV_KEYS` plus pi's own key names for the provider) and one platform-to-loader
-  mapping, beside the two-key `ENV_FILE_READABLE_KEYS`; unlike those two, these values STEER doctor: which venue it
+  mapping, beside the five-key `ENV_FILE_READABLE_KEYS`; unlike those five, these values STEER doctor: which venue it
   judges and so which runtime it spawns, which Valkey it connects to, and which fixes it offers. A URL doctor prints
   is printed as scheme, host, port and database only (`<no host>` without one, `<unparseable URL>` when it does not
   parse), and the fleet host names a chosen Valkey returns are printed with C0 and C1 controls blanked. That widening is the review this paragraph asks for: without it the plain `doctor` a podman-only
@@ -7891,7 +7891,7 @@ only one, its own ladder, OpenShell's pinned release first, then `.env`, `up`, `
   configures the SERVICE through `EnvironmentFile=` and the wrappers and configures nothing about a shell
   an operator later runs `doctor` in; unqualified, the two warnings would then fire hardest at the
   deployments that had just been converged, and this module's own rule is that a check nobody can silence
-  must never cry wolf. So doctor reads that file for exactly the keys those two checks name, and judges TWO
+  must never cry wolf. So doctor reads that file for exactly the boot-file keys (two then, five now), and judges TWO
   SUBJECTS from it (issue #384). **The SERVICE** is judged whenever `<cwd>/.env` assigns the key, WHATEVER
   this shell says, because the shell never reaches it: `deploy/worker.service` is `EnvironmentFile=` plus
   `ExecStart` with no `Environment=`, the launchd plist carries only `PATH` and `PI_ENV_SETUP`, and the
@@ -7946,7 +7946,25 @@ only one, its own ladder, OpenShell's pinned release first, then `.env`, `up`, `
   does. **A `.env` VALUE now reaches read-only file I/O**, which is the one widening of "reads to decide
   what to SAY": doctor runs the worker's own loader on the path the file names, behind a `statSync().isFile()`
   guard so a FIFO or a device cannot hang the command, and resolves a relative value against doctor's own
-  working directory. It still configures nothing, writes nothing and runs nothing. **An env-setup script THE SERVICE RUNS
+  working directory. It still configures nothing, writes nothing and runs nothing. **Since issue #859 the same reading
+  reaches the checks that read those files** (the projects, the scoped limits, the pause windows and the envelope:
+  the secret bundles' projects, the per-project size suggestions and model roles, the project rows, the fleet
+  comparisons and the envelope's advisories), through `bootFileEnv`: each key is this shell's value where it sets a
+  non-blank one, else the file's plain one, both resolved against the deployment folder, and the service's own load
+  verdict judges an envelope against the projects and limits the file names. Before it those checks read this shell
+  alone, and the shell a service deployment is checked from sets none of these keys, so doctor FAILED every secret
+  bundle bound to a project as naming one projects.json does not hold and left the per-project lines out without a
+  word. Where this shell and the file name different files that is a ✗, as a disagreement about any other service key
+  is; a key set in this shell alone beside a `.env` that does not set it joins the shell-only line where a service is
+  installed for the folder. From a `.env` another account can write the checks take nothing, as the line refusing it
+  says. Where the file's line for a key cannot be read (a hazard, a line not in the plain form, a file doctor could not
+  open) and this shell sets none, the file is not known, never empty: a bundle's project is then a warning, the
+  comparisons that would read "none" are skipped, one warning names what is not judged, and an envelope in the file is
+  not judged against projects or limits the file names on such a line. One file named two ways (a symlinked folder,
+  `/tmp` and `/private/tmp`, a case-insensitive disk) is no difference: where both exist they are compared by what they
+  are. The service's own subject reads an untrusted file as the BOOT_FILES lines do, to say what that file would do. `PI_MODEL_ENDPOINTS_FILE` keeps its own rule (`endpointsFileSetting`,
+  which refuses a disagreement), now for the cheaper-route proposals as well. Every file read this way is opened behind
+  a regular-file guard. It is one read of the file, and still configures nothing. **An env-setup script THE SERVICE RUNS
   downgrades a service refusal to a WARNING naming it**, because on all three platforms that script runs
   after `.env` and can override the key; without the downgrade doctor and `up` would fail a working
   `--env-setup` deployment, and without the usable condition doctor softens a refusal on the strength of
@@ -8653,6 +8671,7 @@ instead of drifting.
 | Date | Change |
 |---|---|
 | 2026-11-12 (#846, part 4) | **`REQ-OPERATOR-CONSOLE-ACTIONS` AMENDED**, (p): the cases whose Undo is by hand gain a whole pause-windows list its own preview would refuse (`refusedList`), which the whole-list action may replace and whose Undo was offered and then refused with a 400. |
+| 2026-11-12 (#859) | **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, doctor's `.env` reading: the boot-file keys (`ENV_FILE_READABLE_KEYS`, "two" corrected to five in the lead and the body) now reach the checks that read their files, not only the BOOT_FILES lines. `bootFileEnv` takes this shell's non-blank value, else the file's plain one, both resolved against the deployment folder, from the one reading of the file those lines already made (moved to the top of `collectChecks`); the service's own load verdict judges an envelope against the projects and limits the file names. A shell and a file naming different files is a ✗, as for every service key; a key only this shell sets joins the #471 shell-only line; an untrusted `.env` gives nothing; a line doctor cannot read leaves its file not known (a bundle's project is then a warning), never empty; `PI_MODEL_ENDPOINTS_FILE` keeps `endpointsFileSetting`, now for the cheaper-route proposals too; the envelope's and its context's reads gained the regular-file guard the others have, since a FIFO the `.env` named would now hang doctor. Before it, a service deployment checked from a plain shell was judged with no projects, scoped limits, pause windows or envelope: every secret bundle bound to a project FAILED as naming one projects.json does not hold, the per-project size lines went missing, and the fleet and applied-split lines compared nothing with healthy peers. UNCHANGED, checked: `SERVICE_ENV_KEYS` and `resolveDoctorEnv` (the five keys stay outside them), the BOOT_FILES lines' wording and two subjects (but for the envelope's service verdict, judged against the `.env`'s projects and limits, and the new ✗ where the subjects name different files). |
 | 2026-11-11 (#849, follow-ups) | **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**, the console subcommand and its acceptance: the default link is made only where the address in use is the one the tokens file's deployment folder names (its `.env`'s `PI_CONSOLE_LISTEN`, or the default), so a code is never minted into one deployment's drop for another's console (said as a warning, with the advice its source calls for); `--link` still mints, under the same warning; a tokens file pi's own environment names is checked against no folder. Every other entry UNCHANGED, checked. |
 | 2026-11-11 (#849, part 6) | Fewer commands. **`REQ-CONSOLE-SECURITY` AMENDED**, the Statement's "a new session id each time" and (i): a one-time link for the person a browser's live session already belongs to keeps that session (audited, the code spent), while it has time left. **`REQ-OPERATOR-CONSOLE-SCREENS` (a10) AMENDED**: a first-run step may carry `host`. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**: `/dispatch console` makes its sign-in link by default where the choice is plain (pi's terminal UI, a running console, one operator token, a guarded drop), says the address as before otherwise, and takes `--no-link`; its acceptance gains that clause. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: new (g10), a button where the console can do a step (the overview's granted steps, doctor from Set up on the console's own host, the run page's reason fixes). `REQ-BROWSER-FIRST-RUN-SETUP`'s commands where no button is offered and `INT-REASON-CATALOG`'s words: UNCHANGED, checked. |
 | 2026-11-08 (#849, part 5) | The Remember experience. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: new (g9), the Remembered browsers screen, the sign-in form's Remember box, the offer after a fresh sign-in and the remembered mark in the top bar. **`REQ-OPERATOR-CONSOLE-ACTIONS` AMENDED**, (p): `device-remove` and `sessions-end-all` are destructive. **`REQ-CONSOLE-SECURITY` AMENDED**, (i): a tombstone is also written by Sign everyone out (`endAll`), whose `all` moves no `generation`; both actions ride the existing write guards, and signing everyone out writes no tokens file. |

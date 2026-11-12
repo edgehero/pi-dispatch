@@ -390,7 +390,8 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 	// Measured: a CONTAINERS_CONF in it naming a containers.conf with a `conmon_path` made doctor's own `podman info` run
 	// that program. So from such a file no value is taken at all (the venue keys included), and that is a ✗: the service's
 	// loader has no such rule, so the deployment runs on a file someone else chose. The read above still happens, for the
-	// two-subject pause and limits reading (`envFileKeys`), which only decides what doctor SAYS.
+	// BOOT_FILES lines' two-subject reading (`envFileKeys`), which only decides what doctor SAYS; from such a file
+	// `bootFileEnv` takes nothing (issue #859, `envUntrusted`), so the other checks judge this shell's values as the ✗ says.
 	const envUntrusted = envText !== null ? envRead.untrusted : null;
 	const envValues = envUntrusted ? null : envText;
 	let envTextUnused = envText !== null;
@@ -454,7 +455,7 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 						return { ...(await valkeyAuthState(url, { context, withoutPassword })), passwordSet: Boolean(sent.password), from: sent.from };
 					}
 				: null;
-	const seams = { setupReadOnly: setupReadOnly === true, ...(subscriptionFactory ? { subscriptionFactory } : {}), ...(modelProposals ? { modelProposals } : {}), secrets: secrets === true, ...(bundleSpawn ? { bundleSpawn } : {}), openshell: openshell === true, ...(openshellRun ? { openshellRun } : {}), cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, ...(modelCatalog ? { modelCatalog } : {}), ...(piModelLoader ? { piModelLoader } : {}), ...(dollarKeysExist ? { dollarKeysExist } : {}), ...(readAppliedSplit ? { readAppliedSplit } : {}), ...(readCapacity ? { readCapacity } : {}), ...(readDollarRecords ? { readDollarRecords } : {}), ...(readDollarCounters ? { readDollarCounters } : {}), ...(olderStateFindings ? { olderStateFindings } : {}), ...(consoleProbe ? { consoleProbe } : {}), fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, flowFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, ...(readRunRecords ? { readRunRecords } : {}), venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(lstatOverlayFile ? { lstatOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
+	const seams = { setupReadOnly: setupReadOnly === true, ...(subscriptionFactory ? { subscriptionFactory } : {}), ...(modelProposals ? { modelProposals } : {}), secrets: secrets === true, ...(bundleSpawn ? { bundleSpawn } : {}), openshell: openshell === true, ...(openshellRun ? { openshellRun } : {}), cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, ...(modelCatalog ? { modelCatalog } : {}), ...(piModelLoader ? { piModelLoader } : {}), ...(dollarKeysExist ? { dollarKeysExist } : {}), ...(readAppliedSplit ? { readAppliedSplit } : {}), ...(readCapacity ? { readCapacity } : {}), ...(readDollarRecords ? { readDollarRecords } : {}), ...(readDollarCounters ? { readDollarCounters } : {}), ...(olderStateFindings ? { olderStateFindings } : {}), ...(consoleProbe ? { consoleProbe } : {}), fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, flowFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, ...(readRunRecords ? { readRunRecords } : {}), venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(lstatOverlayFile ? { lstatOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), ...(envUntrusted ? { envUntrusted: true } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
 	// Issue #471: every other service key, resolved ONCE for the whole run (the fix pass's re-collect and `--live` judge the
 	// same resolution). THE RULE (PR #474's round cap, after three rounds of trust patches): no program doctor starts is
 	// handed anything from `.env`. Every child gets this shell's own environment, the one it had before #471; a `.env`
@@ -758,11 +759,13 @@ function asText(content, enc) {
  * The values `<cwd>/.env` sets for NAMED keys, or `{}`. Doctor's first read of a `.env` (issue #357), and the
  * narrowing is what makes it an addition rather than a reversal. It is NOT the only reader: `up` and `service
  * install` read the venue keys since #430 (`readStackKeys`), and since #453 doctor reads `SERVICE_ENV_KEYS` below,
- * whose values DO steer what doctor spawns, connects to and offers as fixes. For these two keys:
+ * whose values DO steer what doctor spawns, connects to and offers as fixes. For these five keys:
  *
  *   - it reads to decide WHAT DOCTOR SAYS, never to configure anything. No value from here reaches a
  *     config, an argv, a container env, or a fix that writes;
- *   - the caller passes the exact keys its own message names, so this cannot grow into "load .env";
+ *   - the keys are the five frozen here and a caller's list can only narrow them (`envFileKeys`), so this cannot grow
+ *     into "load .env". Since issue #859 what is read for them also reaches the checks that read those files
+ *     (`bootFileEnv`), still only to decide what doctor says and whether it fails;
  *   - it is best effort, and it says WHICH kind of nothing it has. A file that is not there is `{}` and
  *     changes no message. Something that is there and cannot be read -- a directory, a pipe, a mode this
  *     account cannot open -- is `{ unreadable: true }`, which gets a line of its own, because "the key is
@@ -1154,7 +1157,7 @@ export function envFileKeys(path, keys, { fileExists, readEnvFile, statFile = st
 	}
 	// The narrowing is STRUCTURAL rather than a convention the caller keeps. A caller's key list can only
 	// narrow this further, never widen it: the licence for reading a `.env` at all is that it decides what
-	// two named checks SAY, and "the caller passes the right keys" is the kind of rule that holds until the
+	// doctor SAYS about five named files, and "the caller passes the right keys" is the kind of rule that holds until the
 	// third check wants the same softening and adds its own key to an array. A `.env` also holds
 	// `WEBHOOK_SECRET` and provider keys, and `up.mjs` states the standard for those: a webhook secret in a
 	// scrollback is a webhook secret in a pastebin. Add a key here and the addition is the review.
@@ -1253,6 +1256,107 @@ export function envFileKeys(path, keys, { fileExists, readEnvFile, statFile = st
 		// claim about a file nobody could open.
 		return { unreadable: true };
 	}
+}
+
+/**
+ * The boot-file keys `bootFileEnv` resolves for doctor's other checks: every `ENV_FILE_READABLE_KEYS` key but
+ * `PI_MODEL_ENDPOINTS_FILE`, whose checks keep their own rule (`endpointsFileSetting`: this shell's, else the `.env`'s,
+ * and a disagreement is no endpoints), read where they are used.
+ */
+export const BOOT_FACT_KEYS = Object.freeze(ENV_FILE_READABLE_KEYS.filter((key) => key !== "PI_MODEL_ENDPOINTS_FILE"));
+
+/**
+ * On the environment `bootFileEnv` returns, the keys whose `.env` value doctor could not read while this shell sets none
+ * (a hazard in the file, a line not in the plain form, a file it could not open). A fact reader says such a file is not
+ * known (`bootKeyUnread`), never that it holds nothing: "no projects" there FAILED a bundle bound to a project, issue
+ * #859's own false ✗ reached another way. A symbol, so no scan of `env.NAME` reads mistakes it for a key.
+ */
+export const UNREAD_BOOT_KEYS = Symbol("boot-file keys whose .env value could not be read");
+
+/** Whether `key` is one whose `.env` value doctor could not read (`UNREAD_BOOT_KEYS`). */
+function bootKeyUnread(env, key) {
+	return env?.[UNREAD_BOOT_KEYS]?.has(key) === true;
+}
+
+/**
+ * Issue #859: the boot-file keys (`BOOT_FACT_KEYS`) as doctor's other checks judge them, from this shell and from the one
+ * reading of the deployment `.env` that `envFileKeys` made. Until this, the checks that read the projects, the scoped
+ * limits, the pause windows and the envelope took these keys from this shell alone, and the shell a service deployment's
+ * operator runs doctor from sets none of them: doctor judged a deployment with no projects, FAILED every secret bundle
+ * bound to one as naming a project projects.json does not hold, left the size suggestions out without a word, and
+ * compared "no projects" with healthy peers. Only the BOOT_FILES lines read the file, and they kept what they read.
+ *
+ * These keys stay outside `resolveDoctorEnv` (the BOOT_FILES lines judge two subjects, the service's file and this
+ * shell, and a test pins `SERVICE_ENV_KEYS`), but the precedence is that resolver's: this shell's value where it sets
+ * one, else the file's, and where both are set and name different files that is a ✗ (`differs`), as a disagreement
+ * about any other service key is (`serviceEnvLines`), since the checks then judge files the service does not read. A
+ * key set in this shell alone, beside a `.env` that could be read and does not set it, joins the #471 shell-only line
+ * (`shellOnly`). A BLANK value in this shell has its own ✗ in the BOOT_FILES block and the checks then judge the
+ * service's file. Paths are resolved against the deployment folder, where the service runs and where `loadVerdict`
+ * resolves them, and compared resolved (case-folded on win32).
+ *
+ * What the file gives, and when it gives nothing:
+ *   - a value only where `envFileKeys` vouches for its line (plain, no hazard in the file);
+ *   - nothing from a `.env` another account can write (`untrusted`): doctor says it took no value from it, and it takes
+ *     none here either, so the checks judge this shell's values as that line says;
+ *   - "not known" (`UNREAD_BOOT_KEYS`) for a key this shell does not set when the file has a hazard, the key's line is
+ *     not in the plain form, or the file could not be read: the BOOT_FILES lines name why, and the checks say the file
+ *     is not known rather than empty.
+ *
+ * Read to decide what doctor SAYS, the licence `ENV_FILE_READABLE_KEYS` gives: what this returns goes to the fact readers
+ * and the load verdicts and nowhere else. Returns `{ env, service, differs, shellOnly }`: `env` is `shell` with these keys
+ * as the checks judge them (and `UNREAD_BOOT_KEYS`); `service` the same with the keys as the SERVICE reads them, from the
+ * file alone, or this shell's where the file's line cannot be read (the load verdict of the service's own subject, whose
+ * envelope is judged against the service's projects and limits); `differs` `[{ key, shell, file }]`; `shellOnly` keys.
+ */
+export function bootFileEnv(shell, envFile, cwd, platform = process.platform, { untrusted = false } = {}) {
+	const win = platform === "win32";
+	const at = (path) => (win ? win32.resolve(cwd, path) : posix.resolve(cwd, path));
+	// ONE FILE NAMED TWO WAYS IS NO DIFFERENCE: where both are there, by what they are (a symlinked folder, `/tmp` and
+	// `/private/tmp` on a Mac, a case-insensitive disk), else by the resolved text, case-folded on Windows.
+	const identity = (path) => {
+		try {
+			const st = statSync(at(path));
+			return `${st.dev}:${st.ino}`;
+		} catch {
+			return null;
+		}
+	};
+	const same = (a, b) => {
+		const ia = identity(a);
+		const ib = ia === null ? null : identity(b);
+		if (ia !== null && ib !== null) return ia === ib;
+		return win ? at(a).toLowerCase() === at(b).toLowerCase() : at(a) === at(b);
+	};
+	// The SERVICE's subject reads the file whoever can write it, as the BOOT_FILES lines do (they only decide what doctor
+	// says); the checks take nothing from an untrusted one.
+	const whole = envFile ?? {};
+	const file = untrusted ? {} : whole;
+	const out = { env: { ...shell }, service: { ...shell }, differs: [], shellOnly: [], serviceUnread: new Set() };
+	const unread = new Set();
+	for (const key of BOOT_FACT_KEYS) {
+		const own = typeof shell[key] === "string" && shell[key].trim() !== "" ? shell[key] : undefined;
+		const lineOf = (f) => (f.hazard == null && typeof f[key] === "string" && f[key] !== "" ? f[key] : undefined);
+		const unreadIn = (f) => f.unreadable === true || f.hazard != null || f.notPlain?.[key] !== undefined || f.insideValue?.[key] !== undefined;
+		const raw = lineOf(file);
+		const cannotRead = unreadIn(file);
+		const sets = raw !== undefined || cannotRead || file.exported?.[key] !== undefined || file.blankInFile?.[key] === true;
+		const serviceRaw = lineOf(whole);
+		if (serviceRaw !== undefined) out.service[key] = at(serviceRaw);
+		else if (unreadIn(whole)) out.serviceUnread.add(key);
+		else delete out.service[key];
+		if (own !== undefined) {
+			out.env[key] = at(own);
+			if (raw !== undefined && !same(own, raw)) out.differs.push({ key, shell: own, file: raw });
+			else if (!sets && !untrusted && Object.keys(file).length > 0) out.shellOnly.push(key);
+		} else if (raw !== undefined) {
+			out.env[key] = at(raw);
+		} else if (cannotRead) {
+			unread.add(key);
+		}
+	}
+	out.env[UNREAD_BOOT_KEYS] = unread;
+	return out;
 }
 
 /**
@@ -1372,6 +1476,19 @@ export function bootFileId(spec, subject = "service") {
 	return `${spec.scaffold.replace(/\.json$/, "")}.file${subject === "shell" ? "-shell" : ""}`;
 }
 
+/**
+ * Whether `path` is a regular file or nothing at all, by the real `statSync`: a FIFO or a device is neither, and a
+ * synchronous read of a FIFO never returns. A stat that fails (absent, or a path only a seam knows) is left to the
+ * loader, which says so in its own words.
+ */
+function regularOrAbsent(path) {
+	try {
+		return statSync(path).isFile();
+	} catch {
+		return true;
+	}
+}
+
 /** A key's value when it is a non-empty string, else null: the boot reads an unset key as off. */
 function nonEmpty(value) {
 	return typeof value === "string" && value.trim() !== "" ? value : null;
@@ -1396,8 +1513,13 @@ function envelopeContextOf(env, io = {}) {
 			return [];
 		}
 	};
-	const projects = quiet(() => loadProjects({ projectsFile: nonEmpty(env.PI_PROJECTS_FILE) }, io));
-	const limits = quiet(() => loadScopedLimits({ scopedLimitsFile: nonEmpty(env.PI_SCOPED_LIMITS_FILE) }, io));
+	// A FIFO or a device named here is none, never a read (issue #859): `loadVerdict` guards the envelope's own path, and
+	// these two are read inside the envelope's load, from the `.env` since #859 as well as from this shell.
+	const guarded = (path) => (path !== null && !regularOrAbsent(path) ? () => [] : null);
+	const projectsFile = nonEmpty(env.PI_PROJECTS_FILE);
+	const limitsFile = nonEmpty(env.PI_SCOPED_LIMITS_FILE);
+	const projects = quiet(guarded(projectsFile) ?? (() => loadProjects({ projectsFile }, io)));
+	const limits = quiet(guarded(limitsFile) ?? (() => loadScopedLimits({ scopedLimitsFile: limitsFile }, io)));
 	let maxCostMicros = null;
 	try {
 		const settings = deploymentSettingsOf(env, settingsFilePath(env), (p) => (io.existsSync ?? existsSync)(p));
@@ -1661,6 +1783,13 @@ export async function collectChecks(shellVars, seams) {
 	// is this shell's, never the file's. The one thing the worker does read there, auth.json, follows the resolution
 	// (`keyAgentDir`).
 	const { cwd, spawn, probeValkey, readHosts = defaultReadHosts, fileExists, nodeVersion, platform, agentDir = agentDirFrom(spawnEnv), readHostPiFn = readHostPi, home = safeHomeDir(), underTemp = underOsTempDir, providerOracle = defaultProviderOracle, facts = null, readEnvFile = null, stat: statSeam = statSync, runTimeouts = RUN_TIMEOUTS } = seams;
+	// Issue #859: the deployment `.env`'s reading of the five boot-file keys, made ONCE and here, before the first check that
+	// reads a projects, scoped-limits, pause-windows or envelope file (a test fails a second read). The BOOT_FILES lines
+	// further down judge its two subjects from it, as they did when it was read there; `bootEnv` is what every other
+	// check judges those keys by (`bootFileEnv`), never this shell's value alone.
+	const envFile = envFileKeys(join(cwd, ".env"), BOOT_FILES.map((spec) => spec.key), { fileExists, readEnvFile, platform });
+	const boot = bootFileEnv(env, envFile, cwd, platform, { untrusted: seams.envUntrusted === true });
+	const bootEnv = boot.env;
 
 	// The job image as the worker takes it (`config.mjs` `jobImageFrom`: `||`, so an empty value is the default, where
 	// doctor's `??` inspected an image named ""), and judged BEFORE doctor inspects or runs it (issue #471) by the one
@@ -1896,10 +2025,17 @@ export async function collectChecks(shellVars, seams) {
 	// drives a need above 1 through the real collection, for a store whose table has no row of its own and at a version no row holds yet.
 	const versionTables = seams.versionTables ?? {};
 	const { watchSources: triggerWatchSources, watchRules: triggerWatchRules, modelRoles: triggerModelRoles, secretBundles: triggerBundles, requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, recovering, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, excludedNames, costCaps, modelRuns, triggersVersionNeed, jobDataVersionNeed, parseError, parseNewer: triggersFileIsNewer, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTables);
-	const modelRoleProjects = readProjectFacts(env, fileExists).projects;
-	const scopedLimitFacts = readScopedLimitFacts(env, fileExists);
-	const pauseWindowFacts = readPauseWindowFacts(env, fileExists, versionTables.pauseWindows);
+	const modelRoleProjects = readProjectFacts(bootEnv, fileExists).projects;
+	const scopedLimitFacts = readScopedLimitFacts(bootEnv, fileExists);
+	const pauseWindowFacts = readPauseWindowFacts(bootEnv, fileExists, versionTables.pauseWindows);
 	section("triggers");
+	// Issue #859: a boot file the `.env` names on a line doctor could not read is not known, and the checks that read it are
+	// left out rather than judged against nothing; this line says which, once, so none of them goes quiet without a word. A
+	// `.env` that could not be read at all has a line per key already ("cannot be answered here"), so this adds nothing there.
+	const unreadBoot = [...bootEnv[UNREAD_BOOT_KEYS]];
+	if (unreadBoot.length > 0 && envFile.unreadable !== true) {
+		checks.push({ ok: false, warn: true, label: `not judged here, since doctor could not read what the deployment .env sets for ${unreadBoot.join(", ")}: the checks that read ${unreadBoot.length === 1 ? "that file" : "those files"} (a project's model roles, size and bundles, the scoped limits and budgets, the pause windows, the envelope)`, fix: "fix what the boot-file line above names, then re-run doctor" });
+	}
 	checks.push(...watchDoctorChecks({ sources: triggerWatchSources, rules: triggerWatchRules, env }));
 	// FIRST, and fail rather than warn: every check below this line reads counts that a parse failure
 	// zeroed, so a green run here would be reporting on a file nobody could read. The receiver loads this
@@ -2343,9 +2479,13 @@ export async function collectChecks(shellVars, seams) {
 	// offers. The records are read only when there is a project to suggest for, and not at all when the scoped-limits
 	// file does not load: every size read without it would be the default, not the project's, and a project that has a
 	// row would be told to `dispatch_limit_add` one.
-	const sizingProjects = readProjectFacts(env, fileExists).projects;
+	const sizingProjects = readProjectFacts(bootEnv, fileExists).projects;
 	if (sizingProjects.length > 0 && !budgetView.error) {
-		if (scopedLimitFacts.parseError !== null) {
+		if (scopedLimitFacts.parseError === "unread") {
+			// Issue #859: the `.env` line naming the file could not be read (its own line says why), so which rows the service
+			// has is not known, and a suggestion would tell a project that has one to add it.
+			checks.push({ ok: true, label: "size suggestions: off, because the scoped-limits file the service reads is not known (doctor could not read what the deployment .env sets for it)" });
+		} else if (scopedLimitFacts.parseError !== null) {
 			checks.push({ ok: true, label: "size suggestions: off until the scoped-limits file loads (a size read without it would be the default, not the project's)" });
 		} else {
 			const nowMs = (typeof seams.wallClock === "function" ? seams.wallClock : Date.now)();
@@ -3140,12 +3280,12 @@ export async function collectChecks(shellVars, seams) {
 			// A malformed list is its own line below; the worker refuses to boot on it.
 		}
 		const usdHere = usdFingerprint(dollarsHere, scopedLimitFacts.parseError === null ? scopedLimitFacts.limits : [], envListHere);
-		checks.push(...(await fleetDollarChecks(usdHere, peers, { dollarKeysExist: () => (seams.dollarKeysExist ?? defaultDollarKeysExist)(valkeyTalkUrl) })));
+		if (scopedLimitFacts.parseError !== "unread") checks.push(...(await fleetDollarChecks(usdHere, peers, { dollarKeysExist: () => (seams.dollarKeysExist ?? defaultDollarKeysExist)(valkeyTalkUrl) })));
 		// Issue #499 part C: each host resolves its jobs' project from its OWN projects.json, while the project rows' counters
 		// are shared. This host's `fpProjects` from the file the service names, against every peer's published one. SKIPPED
 		// when this host's file does not load (PR #569's review): the BOOT_FILES line already fails on it, and comparing
 		// "no projects" against healthy peers would send the operator to the wrong host.
-		const projectFactsHere = readProjectFacts(env, fileExists);
+		const projectFactsHere = readProjectFacts(bootEnv, fileExists);
 		if (projectFactsHere.parseError === null) checks.push(...fleetProjectsChecks(projectsFingerprint(projectFactsHere.projects), peers));
 		// Issue #596: a peer that predates version 3 keeps its last good scoped-limits file once this one is version 3, so
 		// no edit to the file applies on it. Judged on the DECLARED version, or the derived one if that is higher (gate
@@ -3161,7 +3301,7 @@ export async function collectChecks(shellVars, seams) {
 		// Issue #504 part B: one applied split, judged on every host against its own envelope. A host whose envelope digest
 		// differs refuses every governed job as `envelope-mismatch`. SKIPPED when this host's file does not load, for the
 		// projects check's reason above.
-		const envelopeHere = readEnvelopeFacts(env);
+		const envelopeHere = readEnvelopeFacts(bootEnv);
 		if (envelopeHere.parseError === null && appliedSplit === null) checks.push(...fleetEnvelopeChecks(envelopeHere.envelope ? envelopeDigest(envelopeHere.envelope) : NO_ENVELOPE_FINGERPRINT, peers));
 	} else if (fleet.unreachable) {
 		// Said, rather than silently absent: "no peers" and "could not ask" are different facts.
@@ -3186,7 +3326,7 @@ export async function collectChecks(shellVars, seams) {
 	// whose envelope differs refuses its governed jobs. Read whenever this command may talk to the Valkey (above), from
 	// the same Valkey the fleet was read from; with no split there, or no answer, nothing is said.
 	if (appliedSplit !== null) {
-		const envelopeHere = readEnvelopeFacts(env);
+		const envelopeHere = readEnvelopeFacts(bootEnv);
 		if (envelopeHere.parseError === null) checks.push(...appliedSplitChecks(appliedSplit, envelopeHere.envelope ? envelopeDigest(envelopeHere.envelope) : NO_ENVELOPE_FINGERPRINT, workerNameOf(declaredWorkerName), peers));
 	}
 
@@ -3861,7 +4001,7 @@ export async function collectChecks(shellVars, seams) {
 		}
 	}
 
-	checks.push(...await doctorModelProposalChecks(env, { cwd, credentials: service.extra(["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]).env, now: seams.wallClock ?? Date.now, ...(seams.modelProposals ?? {}) }));
+	checks.push(...await doctorModelProposalChecks(env, { cwd, credentials: service.extra(["ANTHROPIC_API_KEY", "OPENAI_API_KEY"]).env, declaredEndpoints: () => (seams.declaredEndpoints ?? ((a) => declaredEndpointsIn({ ...a, fs: keylessIo })))({ env, cwd: seams.cwd, platform: seams.platform ?? process.platform }), now: seams.wallClock ?? Date.now, ...(seams.modelProposals ?? {}) }));
 	section("secrets");
 	// REQ-TRIGGER-SECRETS. Only reported when a trigger actually binds one, on the run.resume block's
 	// reasoning below: a deployment that uses no secrets should not be told about a variable it has no
@@ -3997,7 +4137,7 @@ export async function collectChecks(shellVars, seams) {
 		// skip reason. Doctor cannot see another host's file, so it warns where the shape allows it: a multi-host worker
 		// (PI_WORKER_NAME) with projects and no triggers file of its own.
 		if (!anyBundle && typeof env.PI_WORKER_NAME === "string" && env.PI_WORKER_NAME.trim() !== "" && !fileExists(triggersPath(env, cwd))) {
-			const fleetProjects = readProjectFacts(env, fileExists);
+			const fleetProjects = readProjectFacts(bootEnv, fileExists);
 			if (fleetProjects.parseError === null && fleetProjects.projects.length > 0) {
 				checks.push({ ok: true, warn: true, label: "this fleet worker has projects but no triggers file, so it applies no project secret bundle: a project another host's triggers.json binds would run here without its environment", fix: "keep the same triggers.json on every host (PI_TRIGGERS_FILE), or declare the bundle profiles here, which makes a missing file a retry instead" });
 			}
@@ -4009,7 +4149,7 @@ export async function collectChecks(shellVars, seams) {
 			} catch {
 				realExecutablePath = null;
 			}
-			const projectFacts = readProjectFacts(env, fileExists);
+			const projectFacts = readProjectFacts(bootEnv, fileExists);
 			let resolveBundle = null;
 			if (seams.secrets === true) {
 				try {
@@ -4027,6 +4167,7 @@ export async function collectChecks(shellVars, seams) {
 					triggersPresent: fileExists(triggersPath(env, cwd)),
 					projects: projectFacts.projects,
 					projectsError: projectFacts.parseError,
+					projectsUnread: projectFacts.unread === true,
 					envRaw: env.PI_SECRET_BUNDLES,
 					overlayBundles,
 					roots: delimitedList(env.PI_SECRET_RESOLVER_ROOTS),
@@ -4233,7 +4374,7 @@ export async function collectChecks(shellVars, seams) {
 	// warning then cries wolf at a correctly configured deployment, and this module's own rule is that a
 	// check nobody can silence must never do that.
 	//
-	// So doctor reads `<cwd>/.env` for EXACTLY the key each check names, and never to configure anything.
+	// So doctor reads `<cwd>/.env` for EXACTLY the boot-file keys (`ENV_FILE_READABLE_KEYS`), and never to configure anything.
 	// That narrowing is the whole licence: the project's stance is that nothing parses `.env`
 	// (`docs/secrets.md`), and `worker/test/service.test.mjs` pins that a `PI_ENV_SETUP` line in `./.env` is
 	// deliberately NOT honoured. Both stay true.
@@ -4243,7 +4384,8 @@ export async function collectChecks(shellVars, seams) {
 	// a deployment whose unit exits 1 in a restart loop is not a deployment that is merely unconfigured in
 	// this shell. Where the file merely configures what this shell does not, the line still says which
 	// process would honour it, and is still a warning.
-	const envFile = envFileKeys(join(cwd, ".env"), BOOT_FILES.map((spec) => spec.key), { fileExists, readEnvFile, platform });
+	// The read itself (`envFile`) is made once at the top of `collectChecks` since issue #859, so every check that reads
+	// these files, before this block and after it, judges the same reading (`bootFileEnv`).
 	// ONE RULE FOR BOTH BOOT FILES, and it asks the worker's own loader rather than a second opinion
 	// (issue #384). Before this there were two hand-written copies of a shell-shaped check for
 	// `PI_PAUSE_WINDOWS_FILE`, a THIRD rule for a scoped-limits file that does not parse, and no rule at all
@@ -4264,12 +4406,15 @@ export async function collectChecks(shellVars, seams) {
 	// regular-file guard and the loaders' own two reads. A test drives a whole deployment through these
 	// without a real file, which is how the fixtures below stay honest about content.
 	const seamsForLoad = { env, statFile: statSeam, loaderIo: { existsSync: (p) => fileExists(p), readFileSync: readEnvFile ? (p, enc) => asText(readEnvFile(p), enc) : readFileSync } };
+	// Issue #859: the SERVICE's subject is loaded with the boot keys as the service reads them, from the file alone, so an
+	// envelope in `.env` is judged against the projects and limits the service names, never against this shell's.
+	const serviceSeamsForLoad = { ...seamsForLoad, env: boot.service };
 	// ONCE PER FILE, not once per key (issue #396). This is a fact about the FILE -- one line the reader
 	// cannot model -- and it was announced inside the per-key loop, so a `.env` with one such line produced
 	// two near-identical warnings differing only in which key they named. The keys it prevents a verdict
 	// about are listed IN the line instead, which is what the reader actually knows.
 	//
-	// ITS LIMIT, stated because the wording would otherwise imply more: this command reads two keys, so the
+	// ITS LIMIT, stated because the wording would otherwise imply more: this command reads five keys, so the
 	// line says what it cannot answer about THOSE. The same hazard may also stop a sourcing shell reaching
 	// `WEBHOOK_SECRET`, which the receiver refuses to start without, and nothing here says so -- widening
 	// the read is how a narrow reader grows into "load the .env", which `envFileKeys`' own docblock and
@@ -4386,8 +4531,13 @@ export async function collectChecks(shellVars, seams) {
 		// boot key was never opened. `fileRaw` is set only for a line this reader vouches for the TEXT of, so
 		// there is always a real path here; whether it loads is a fact about the filesystem, not about the
 		// rest of the file.
-		if (envFile.hazard == null && fileRaw !== undefined && !blankInFile) {
-			const verdict = loadVerdict(spec, fileRaw, cwd, seamsForLoad, platform);
+		// Issue #859: the envelope is judged against the projects and limits the service names; where the `.env` line of one
+		// of those cannot be read, neither can this verdict, and a "no projects" verdict would fail a service that starts.
+		const contextUnread = spec.key === "PI_ENVELOPE_FILE" ? ["PI_PROJECTS_FILE", "PI_SCOPED_LIMITS_FILE"].filter((key) => boot.serviceUnread.has(key)) : [];
+		if (envFile.hazard == null && fileRaw !== undefined && !blankInFile && contextUnread.length > 0) {
+			checks.push({ id: bootFileId(spec), ok: false, warn: true, label: `${spec.key} is set in ${join(cwd, ".env")} (${envValueShown(fileRaw)}), and whether the service loads it cannot be judged: doctor could not read what that file sets for ${contextUnread.join(" and ")}, which it is judged against`, fix: "fix that line (its own line here says why), then re-run doctor" });
+		} else if (envFile.hazard == null && fileRaw !== undefined && !blankInFile) {
+			const verdict = loadVerdict(spec, fileRaw, cwd, serviceSeamsForLoad, platform);
 			checks.push(
 				verdict.ok
 					? { id: bootFileId(spec), ok: true, label: `${spec.key} is set in ${join(cwd, ".env")} (${envValueShown(fileRaw)})${alsoExported === undefined ? "" : ", for this platform's loader,"} and loads: the service reads that file, this shell does not` }
@@ -4463,6 +4613,19 @@ export async function collectChecks(shellVars, seams) {
 				fix: `set ${fixLineFor(spec.key, scaffolded)} in .env and restart the worker -- unset means ${spec.unsetMeans}${spec.panelWrites === false ? "" : `, while the admin panel defaults to this same file and reports each ${spec.unit} it writes as applied live`}; delete the file if this deployment has no ${spec.nothing}`,
 			});
 		}
+
+		// Issue #859: WHICH FILE THE OTHER CHECKS JUDGED, where the two subjects name different ones. A ✗, as a disagreement
+		// about any other service key is (`serviceEnvLines`): the checks then judge files the service does not read, and a
+		// warning let doctor exit 0 on a service its own `.env` stops (a project row the shell's projects hold and the
+		// file's do not passed, while `checkProjectRows` refuses the boot).
+		const differs = boot.differs.find((d) => d.key === spec.key);
+		if (differs !== undefined) {
+			checks.push({
+				ok: false,
+				label: `${spec.key} names different files in this shell (${envValueShown(differs.shell)}) and in ${join(cwd, ".env")} (${envValueShown(differs.file)}): doctor's other checks judged this shell's, which a worker started by hand from this shell runs, while the service runs the file's`,
+				fix: `make them agree: change ${join(cwd, ".env")} (what the service reads), or unset ${spec.key} in this shell, then re-run doctor`,
+			});
+		}
 	}
 
 	// A scope that can only ever be a folder (issue #242's dead-scope rule): a forge repo always contains "/" and never
@@ -4502,14 +4665,14 @@ export async function collectChecks(shellVars, seams) {
 	// (start.mjs, `checkProjectRows`), so this is a FAILURE naming the row and the id. Skipped when either file does not
 	// load: that is the BOOT_FILES line's, and a zeroed list here would name every project row as dangling.
 	if (scopedLimitFacts.parseError === null && scopedLimitFacts.limits.length > 0) {
-		const projectFacts = readProjectFacts(env, fileExists);
+		const projectFacts = readProjectFacts(bootEnv, fileExists);
 		if (projectFacts.parseError === null) checks.push(...projectRowChecks(scopedLimitFacts.limits, projectFacts.projects, scopedLimitFacts.path));
 	}
 
 	section("envelope");
 	// Issue #504 part B: the envelope's advisories, on the file the service names, when it loads (a file that does not is
 	// the BOOT_FILES line's). Warnings only: the worker boots on both.
-	const envelopeFactsHere = readEnvelopeFacts(env);
+	const envelopeFactsHere = readEnvelopeFacts(bootEnv);
 	if (envelopeFactsHere.envelope) checks.push(...envelopeChecks(envelopeFactsHere.envelope, envelopeFactsHere.projects, envelopeFactsHere.maxCostMicros));
 
 	section("console");
@@ -4813,7 +4976,9 @@ export async function collectChecks(shellVars, seams) {
 	// Nor XDG_CONFIG_HOME at its own default (`~/.config`, which a login shell often exports): unset, every CLI that
 	// reads it falls back to that same directory, so the service runs with the same value (measured on pd-fedora: the
 	// named line otherwise flagged the default).
-	const shellOnly = service.shellOnly.filter((k) => !AMBIENT_SERVICE_KEYS.includes(k) && !(k === "XDG_CONFIG_HOME" && typeof home === "string" && env.XDG_CONFIG_HOME === join(home, ".config")));
+	// Issue #859: a boot-file key set in this shell alone (`bootFileEnv`) is the same fact about the same file, so it joins
+	// this line: the checks judged this shell's file, and the service runs without one.
+	const shellOnly = [...service.shellOnly.filter((k) => !AMBIENT_SERVICE_KEYS.includes(k) && !(k === "XDG_CONFIG_HOME" && typeof home === "string" && env.XDG_CONFIG_HOME === join(home, ".config"))), ...boot.shellOnly];
 	const unit = shellOnly.length > 0 ? serviceUnitFor(seams, cwd) : null;
 	if (unit) {
 		checks.push({
@@ -5415,6 +5580,7 @@ function parseSecretProfilesSafe(raw) {
  */
 function readScopedLimitFacts(env, fileExists) {
 	const none = { limits: [], parseError: null, path: null };
+	if (bootKeyUnread(env, "PI_SCOPED_LIMITS_FILE")) return { ...none, parseError: "unread" };
 	const path = env.PI_SCOPED_LIMITS_FILE;
 	if (typeof path !== "string" || path.trim() === "") return none;
 	if (!fileExists(path)) return { limits: [], parseError: `scoped-limits file does not exist: ${path}`, path };
@@ -5438,8 +5604,12 @@ function readScopedLimitFacts(env, fileExists) {
 /**
  * The projects facts (issue #499 part B): the parsed projects when PI_PROJECTS_FILE is set, `[]` when it is unset (no
  * projects, so every project row dangles), or a parse error when it is set and does not load (the BOOT_FILES line's).
+ * Handed `bootEnv` (issue #859), so the key is the service's where this shell sets none, and `unread` where the `.env`
+ * line that sets it could not be read.
  */
 function readProjectFacts(env, fileExists) {
+	// Issue #859: a `.env` line doctor could not read is a file not known, said by its own line, never "no projects".
+	if (bootKeyUnread(env, "PI_PROJECTS_FILE")) return { projects: [], parseError: "unread", unread: true };
 	const path = env.PI_PROJECTS_FILE;
 	if (typeof path !== "string" || path.trim() === "") return { projects: [], parseError: null };
 	try {
@@ -5695,9 +5865,13 @@ function consoleTokensInsideJobPaths(path, env, { cwd, fs, folders, skillsDirs, 
  * `envelope` is null when the key is unset.
  */
 function readEnvelopeFacts(env) {
+	if (bootKeyUnread(env, "PI_ENVELOPE_FILE")) return { envelope: null, projects: [], maxCostMicros: null, parseError: "unread" };
 	const path = nonEmpty(env.PI_ENVELOPE_FILE);
 	if (path === null) return { envelope: null, projects: [], maxCostMicros: null, parseError: null };
 	const io = { readFileSync, existsSync };
+	// A REGULAR FILE or nothing, as every other reader of these files here (issue #859): since the `.env` names this path
+	// too, a FIFO there hung doctor in a synchronous read no timeout interrupts.
+	if (!regularOrAbsent(path)) return { envelope: null, projects: [], maxCostMicros: null, parseError: `envelope file is not a regular file: ${path}` };
 	try {
 		const context = envelopeContextOf(env, io);
 		return { envelope: loadEnvelopeAsTheWorker(path, io, env), projects: context.projects, maxCostMicros: context.maxCostMicros, parseError: null };
@@ -5888,6 +6062,7 @@ export function projectRowChecks(limits, projects, path) {
  * module's own by default.
  */
 function readPauseWindowFacts(env, fileExists, versions = {}) {
+	if (bootKeyUnread(env, "PI_PAUSE_WINDOWS_FILE")) return { windows: [], versionNeed: 1, parseError: "unread" };
 	const path = env.PI_PAUSE_WINDOWS_FILE;
 	if (typeof path !== "string" || path.trim() === "") return { windows: [], versionNeed: 1, parseError: null };
 	try {
