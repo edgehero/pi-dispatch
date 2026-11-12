@@ -444,8 +444,8 @@ test("each action's Undo, inverse, confirm label and banner title, as literals o
     envelopeAfter: "Set it back with the envelope form: the console kept no copy of the old values.",
     tooBig: "Put the previous list back by hand: this preview showed it; the console keeps no copy.",
     tooBigAfter: "Put the previous list back by hand: the console kept no copy of it.",
-    refusedList: "Put the previous list back by hand: it held a window the console refuses, so it cannot be its own Undo; this preview showed it, and the console keeps no copy.",
-    refusedListAfter: "Put the previous list back by hand: it held a window the console refuses, and the console kept no copy of it.",
+    refusedList: "Put the previous list back by hand: the console would refuse it as an Undo (a window it does not take, or more than 256 windows or days); this preview showed it, and the console keeps no copy.",
+    refusedListAfter: "Put the previous list back by hand: the console would refuse it as an Undo (a window it does not take, or more than 256 windows or days), and kept no copy of it.",
     resumeUnread: "Pause the queues that were paused again by hand: the fleet was not read before the resume, so which they were is not known.",
     resumeShort: "Pause the queues that were paused again by hand: not every queue was read before the resume, so which they were is not fully known.",
   });
@@ -893,6 +893,8 @@ for (const [what, text, says] of [
   ["a key written twice over an empty list", `{ "windows": [{ "scope": "*", "from": "01:00", "to": "02:00" }], "windows": [] }\n`, "has a key written twice"],
   // Issue #846: a doubled `version` whose last value reads as newer is broken, as the worker reads it, never "upgrade".
   ["a version written twice", `{ "version": 1, "version": 2, "windows": [] }\n`, "has a key written twice"],
+  ["a version written twice beside a windows that is no list", `{ "version": 1, "version": 2, "windows": {} }\n`, "has a key written twice"],
+  ["a windows written twice, the last no list", `{ "windows": [], "windows": {} }\n`, "has a key written twice"],
 ]) {
   test(`every pause window action on a pause-windows file with ${what} is refused at the preview, in words, with every byte kept`, async () => {
     const { paths } = deployment();

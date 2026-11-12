@@ -83,8 +83,9 @@ export function pauseWindowsVersionRefusal(doc, { supported = PAUSE_WINDOWS_VERS
 export function heldPauseWindows(text, path) {
 	if ((text ?? "").trim() === "") return { doc: null, windows: [] };
 	const { value, problem } = heldDocument(text, "windows");
-	const doubled = !problem && findDuplicateKey(text) !== null;
-	const refused = problem ?? (doubled ? "has a key written twice" : null);
+	// Whenever the text parsed, a problem with its shape included (`"windows": {}`), as the loader judges the duplicate first.
+	const doubled = value !== undefined && findDuplicateKey(text) !== null;
+	const refused = doubled ? "has a key written twice" : problem ?? null;
 	// A key written twice hands back no document (issue #846): the callers ask the document whether a newer release wrote
 	// it before they read `problem`, and `{"version":1,"version":2}` would send the operator to upgrade to a release that
 	// refuses the file too. Broken, never newer, as the loader reads it and as the triggers writer does.
