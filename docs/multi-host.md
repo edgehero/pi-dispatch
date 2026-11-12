@@ -69,7 +69,13 @@ when you ran it.
 worker owns it (a `cancel:req:` key that worker polls and acknowledges by name), since a running job's
 abort can only be raised inside the process that holds its lock. No acknowledgment within the window is
 reported as exactly that: the job may be on a host that is down, or on a worker predating the verb, and
-nothing was changed.
+nothing was changed. If Valkey goes away or stops answering once the request is written, the verb ends within
+seconds and says what became of the request: taken back, so nothing was changed unless its worker read it in
+that moment; already gone, when it reads the acknowledgment and says the cancel was taken if a worker took it; or
+not answered, so it may stand until the time it expires on its own (60 seconds after it was written), in which
+case a worker that reads it before then still stops the job. A job state it could not read is said as that. A
+command Valkey refused, such as a `DEL` its access rules withhold, is named with Valkey's own answer. Before the
+request is written, a Valkey that is connected and stops answering can still hold the lookup.
 
 ### Not shared, on purpose
 

@@ -157,16 +157,16 @@ reads a picture's content, so a fresh render can be garbage or carry a garbled f
 It needs Google Chrome and no server. `--all` is about a gigabyte and four minutes, and its folder is gitignored. After a change to the look,
 re-render the picks and bump the `?v=` on each changed image, since no test catches a stale PNG.
 
-## The panel and insights images
+## The panel images
 
 Every panel and command image in `docs/images` is drawn by the shipped code over one canned deployment, by a
 committed script: `dispatch-dashboard.svg`, `dispatch-hosts.svg`, `dispatch-allocation.svg`,
-`dispatch-run-detail.svg`, `dispatch-commands.svg`, the `.png` copies of the first three and `insights-view.png`. The
-first three are drawn for a light page too (`-light`), since the READMEs follow the reader's theme.
+`dispatch-run-detail.svg`, `dispatch-commands.svg` and the `.png` copies of the first three. The first three are drawn
+for a light page too (`-light`), since the READMEs follow the reader's theme.
 
 ```sh
 node launch/render-images.mjs          # the five SVGs, and the three -light SVGs
-node launch/render-images.mjs --png    # also the PNGs of those three in both (for the npm page) and insights-view.png
+node launch/render-images.mjs --png    # also the PNGs of those three in both (for the npm page)
 ```
 
 What it needs:
@@ -176,14 +176,13 @@ What it needs:
   an existing database instead; it must be empty, and is emptied again when the script ends.
 - Google Chrome, for `--png` only: `/Applications/Google Chrome.app/...` on macOS, or set `CHROME` to its executable.
   It is driven headless over its DevTools pipe, with every host name mapped to nothing.
-- git, for `--png` only (the insights topology reads the two job folders' flow gate from git).
 
 The deployment is `launch/fixture-deployment.mjs`: three hosts (`mini1`, `mini2`, `build3`), four projects (`web`,
 `api`, `billing`, `ops`), repos under `acme`, a month of run records, all dated around one frozen instant and written
 through the worker's own record, mirror, registry, budget, wait and allocation code. Its config and its records agree:
 no run breaks a cap, a scoped limit, a host's slots or budget, or a project's share. build3 keeps its own logs for 7
 days and trims the shared run mirror by them, so its history here starts at the age cutoff of its last trim that
-removed a run (that write's time less 7 days), and the insights page hatches the time before as no data. The script empties its
+removed a run (that write's time less 7 days). The script empties its
 environment before anything loads, so no key or deployment of the machine running it is read, and nothing is fetched.
 Only live state is canned: the queue's live counts, its workers, the active job and the failed job, and the parked
 run's retained sandbox (a directory on a worker's disk, with this shell's egress setting). The panel images are one
@@ -192,9 +191,8 @@ the cursor moved to the parked run (a triage run that asked a question and ended
 run detail. The commands image is what `/dispatch status`, `budget`, `runs 5`, `triggers` and `priorities` send,
 assembled from the same reads and renderers the extension uses, with the deployment's folder shown as `~/pi-work`.
 Each SVG is checked against the renderer's lines before it is written, and two runs write the same bytes
-(`admin/test/render-images.test.mjs`). The
-insights page is the console's `/insights?range=30d` page over the same fixture, shot at 1240 px and device scale 2,
-full page.
+(`admin/test/render-images.test.mjs`). The console's own screens, the insights page among them, are drawn from its
+goldens with `render-images.mjs --console`, not here.
 
 After a render, bump the `?v=` on each changed image in both READMEs (the admin README links the PNGs by their
 absolute raw.githubusercontent.com URLs, because the npm page cannot show an SVG from there).
