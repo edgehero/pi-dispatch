@@ -304,7 +304,7 @@ test("dispatch_limit_edit's confirm shows the project's peaks when a size field 
   assert.equal(indexMod.sizingNote({ logsDir: logs, scopedLimitsPath: join(dir, "nope.json"), projectsFile: join(dir, "projects.json") }, "acme/web", now), "");
 });
 
-test("issue #865: an OOM read off disk names the CPU count its tools saw, after the verdict, in the reader, the edit preview, the panel and the console's project card", async () => {
+test("issue #865: an OOM read off disk names the CPU count its tools counted at least, after the verdict, in the reader, the edit preview, the panel and the console's project card", async () => {
   // A killed run recorded on `local` with what its host offered at admission: 18 CPUs and a CPU budget of 17.
   const killed = { ...rec({ reason: "oom-killed", peakMiB: 4096 }), backend: "local", capacity: { slots: 4, memMiB: 15360, cpuCenti: 1700, cpus: 18 } };
   const pointer = "size per-CPU worker pools from PI_JOB_SIZE_CPUS: the killed run's tools counted at least 17 CPUs at a size of 2 CPUs";

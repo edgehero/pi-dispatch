@@ -2948,7 +2948,7 @@ function sizingLines(sizing: any, id: string, iw: number, styler: any): string[]
   if (verdicts.length > 0) push(wrapColumns(verdicts.join("; "), sub, styler), tone);
   if (typeof s.call === "string") out.push(...callLines(cellOf(s.call), iw, styler, indent.length));
   if (over) push(wrapColumns(`no live host admits it (${cellOf(s.words?.refusal ?? "")}): a job of it would wait for a host that never comes`, sub, styler), "error");
-  // issue #865: `memoryCeiling` (the CPU count an OOM-killed run's tools saw) rides with the facts: information, no call
+  // issue #865: `memoryCeiling` (the CPU count an OOM-killed run's tools counted at least) rides with the facts: information, no call
   for (const fact of [s.words?.memoryFact, s.words?.cpuFact, s.words?.memoryCeiling]) if (typeof fact === "string" && fact !== "") push(wrapColumns(cellOf(fact), sub, styler), "dim");
   return out;
 }

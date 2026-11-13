@@ -9799,10 +9799,10 @@ export function sizeSuggestionChecks({ projects = [], limits = [], env = {}, rec
 		const words = suggestionEvidence(s);
 		const size = `${formatMemory(current.memMiB)}, ${cpusText(current.cpuCenti)}`;
 		const call = suggestionCall(s, limits);
-		// Issue #865: `memoryCeiling` rides after the suggestion and BEFORE the two facts: the label is published cut at
-		// DOCTOR_LABEL_MAX, so what a cut takes first is the facts (information with no call) and then this pointer's tail,
-		// never a held raise, a refusal or a budget note, which come before it, nor the call: a raise carries its call in
-		// its fix, and a lowering's label puts its call ahead of the facts (`head`, below).
+		// Issue #865: `memoryCeiling` rides after the suggestion and BEFORE the two facts: it comes only with an OOM, whose
+		// line is a warning, and a warning's label is published cut at DOCTOR_LABEL_MAX, so what a cut takes first is the facts (information with no call) and then this pointer's tail,
+		// never a held raise, a refusal or a budget note, which come before it, nor the call: a raise (a warn line, whose
+		// label is published) carries its call in its fix, and a lowering is an ok line, published without its label.
 		const facts = [words.memoryCeiling, words.memoryFact, words.cpuFact].filter(Boolean);
 		const factTail = facts.length > 0 ? `; ${facts.join("; ")}` : "";
 		const held = s.memory.suggested === null && s.memory.held !== null;
@@ -9827,8 +9827,10 @@ export function sizeSuggestionChecks({ projects = [], limits = [], env = {}, rec
 		const note = totals.length > 0 ? ` (note: ${totals.join(" and ")}; its budget is off or unknown, so the worker admits it)` : "";
 		const raise = (s.memory.suggested ?? 0) > current.memMiB || (s.cpu.suggested ?? 0) > current.cpuCenti;
 		const suggests = parts.length > 0 ? `its runs in the last ${SUGGEST_WINDOW_DAYS} days suggest ${parts.join(" and ")}` : "";
-		// The label without its facts, so a line that carries its call in the label (a lowering, below) can put the call
-		// BEFORE them: the facts are what a publish cut at DOCTOR_LABEL_MAX may take, and the call never is (#865, review).
+		// The label without its facts, so a line that carries its call in the label (a lowering, below) reads the call right
+		// after the suggestion it applies, and the no-call facts after that (#865, review). Reading order in the terminal
+		// only: a lowering is an `ok` check, and `buildDoctorRecord` (doctor-results.mjs) publishes an ok check as its id
+		// and level, with no label, so no publish cut ever reaches it.
 		const head = `project ${id}: size ${size}; ${[heldText ? `in the last ${SUGGEST_WINDOW_DAYS} days ${heldText}` : "", suggests].filter(Boolean).join("; ")}${over.length > 0 ? `, but ${over.join(" and ")}, so a job of it would never fit this host` : ""}${note}`;
 		const label = `${head}${factTail}`;
 		// a size that would never fit is never offered as a call: applying it would turn a refusal into the same refusal.

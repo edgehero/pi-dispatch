@@ -234,8 +234,8 @@ function heldToCap(wanted, current, cap) {
 
 /**
  * Issue #865: what CPU count the killed runs' tools counted at least, against their size, or null: over the
- * `oom-killed` runs that decide a raise (the same ones `ooms` counts), those whose tools counted at least more whole CPUs
- * (`seenOf`) than their size rounded up, which is what `PI_JOB_SIZE_CPUS` tells them. At or below it nothing can be said:
+ * `oom-killed` runs that decide a raise (the same ones `ooms` counts), those where the fewest CPUs their tools could
+ * count (`seenOf`) is more than their size rounded up, which is what `PI_JOB_SIZE_CPUS` tells them. At or below it nothing can be said:
  * a pool sized from the variable may be the pool the ceiling gave. `{ runs, seenCpus, seenMaxCpus, sizeCenti,
  * sizeVaries }`: how many such runs, the fewest and the most CPUs their tools counted at least (equal when every run
  * gives the same bound), and the smallest CPU size among them and whether their sizes differ. Either can vary alone

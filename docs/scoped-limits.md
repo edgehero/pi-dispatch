@@ -294,10 +294,11 @@ call it names.
   it.
 - **Memory is raised only after an OOM kill.** A run that ended `oom-killed` at the current size or larger suggests
   1.5x the larger of the size and the largest size in the window that was killed. One step per kill: the run that
-  caused a raise does not count once the raise is applied. Where the killed runs' tools counted at least more whole
-  CPUs than `PI_JOB_SIZE_CPUS` (their CPU ceiling rounded down, or the whole machine under one CPU, against their size
-  rounded up), the line points to the variable with both numbers after the suggestion, since a per-CPU worker pool may be what
-  used the memory; not on OpenShell, whose CPU limit is the size, nor for a run whose record has no `capacity`.
+  caused a raise does not count once the raise is applied. Where the fewest CPUs the killed runs' tools could count
+  (their CPU ceiling rounded down, or the whole machine under one CPU) is more than `PI_JOB_SIZE_CPUS` (their size
+  rounded up), the line points to the variable with both numbers after the suggestion, since a per-CPU worker pool may
+  be what used the memory; not on OpenShell, whose CPU limit is the size, nor for a run whose record has no
+  `capacity`.
 - **A peak at the limit raises nothing.** `memory.peak` counts the page cache, and a job that only reads files fills
   it up to its limit with no harm (measured: a 512m container reading 1.2 GB of files peaked at exactly 512m, with no
   OOM kill). When runs at the limit were also stalled for memory (the kernel's memory pressure, above 1% of their

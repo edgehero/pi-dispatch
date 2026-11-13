@@ -55,8 +55,8 @@ weight. A tool that asks how many CPUs it has gets a number that is not the job'
   sized under one CPU: its tools see the gateway's whole machine while `PI_JOB_SIZE_CPUS` says 1.
 - `nproc` reads every CPU of the container runtime, the reserve included, on every venue.
 
-So a tool counts at least the limit rounded down, and often more. A Node of another version in your own image may
-count differently: the image job checks that the job image's Node bundles the libuv this was read at.
+So a tool counts at least the limit rounded down, and sometimes more. A Node of another version in your own image may
+count differently: this repository's CI checks that the job image's Node bundles the libuv this was read at.
 
 A tool that starts one worker per CPU it sees therefore starts far more workers than the size was planned for, and all
 of them share the job's memory. jest 30 and vitest 2 both start one worker per CPU less one by default, so on that

@@ -559,7 +559,7 @@ const killed = ({ i = 0, backend = "local", capacity = { slots: 4, memMiB: 15360
 const POINTER = "size per-CPU worker pools from PI_JOB_SIZE_CPUS: ";
 const one = (seenCpus, sizeCenti = 200) => ({ runs: 1, seenCpus, seenMaxCpus: seenCpus, sizeCenti, sizeVaries: false });
 
-test("issue #865: an OOM on a ceiling venue says what CPU count the killed run's tools saw, in a word of its own", () => {
+test("issue #865: an OOM on a ceiling venue says what CPU count the killed run's tools counted at least, in a word of its own", () => {
 	const s = suggest([killed()]);
 	assert.deepEqual(s.memory.evidence.oomCeiling, one(17));
 	const words = suggestionEvidence(s);

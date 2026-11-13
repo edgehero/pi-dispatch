@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { operatorQuotaCommand, reservePlan } from "../src/cpu-reserve.mjs";
 import { ISOLATION_FLAGS } from "../src/docker-run.mjs";
 import { cpuReserveChecks, doctorHostBudget, hostBudgetChecks, jobSizeChecks, render, sizeSuggestionChecks } from "../src/doctor.mjs";
-import { DOCTOR_LABEL_MAX, redactText } from "../src/doctor-results.mjs";
+import { DOCTOR_LABEL_MAX, assignCheckIds, buildDoctorRecord } from "../src/doctor-results.mjs";
 import { BUDGET_RECHECK_MS, NEVER_FITS_RECHECK_MS, RESERVE_CPUS_FROM, RESERVE_MEMORY_MAX_MIB, RESERVE_MEMORY_MIN_MIB, computeHostBudget, hostBudgetSettings, makeHostBudget } from "../src/host-budget.mjs";
 import { DEFAULT_JOB_SIZE, JOB_CPUS_FLOOR_CENTI, SHM_CEILING_MIB, cpuCeilingCenti, formatCpus, formatMemory, jobSizeEnv, parseCpus, parseMemory, shmMiBOf, wholeCpusOf } from "../src/job-size.mjs";
 import { parseProjects } from "../src/projects.mjs";
@@ -75,6 +75,8 @@ const show = (checks) => {
 };
 const SYSTEMD = reservePlan({ venue: "local", facts: { cgroupDriver: "systemd", cgroupVersion: "v2" }, endpointLocal: true, platform: "linux" });
 const NOW = Date.parse("2026-10-14T12:00:00Z");
+/** Doctor's checks as `buildDoctorRecord` publishes them for the console's Fleet page: `[{ id, level, label?, fix? }]`. */
+const published = (checks) => buildDoctorRecord({ checks, ids: assignCheckIds(checks), at: NOW, version: "1.0.0" }).checks;
 
 test("docs/sizing.md's example files load with the worker's own loaders, and the env sets no budget", () => {
 	assert.deepEqual(
@@ -133,7 +135,7 @@ test("docs/sizing.md's out of memory suggestion is the line doctor prints for on
 	const medium = limits.find((l) => l.scope === "project:medium");
 	const size = { memMiB: parseMemory(medium.memory), cpuCenti: parseCpus(medium.cpus), source: "project" };
 	// Issue #865: each run records the venue and what the example's host offered at admission (`capacity`: its budget and
-	// its 16 CPUs), so the line also says what CPU count the killed run's tools saw, the budget's 15 against a size of 2.
+	// its 16 CPUs), so the line also says what CPU count the killed run's tools counted at least, the budget's 15 against a size of 2.
 	const capacity = { slots: Number(env.PI_CONCURRENCY), memMiB: view.memMiB, cpuCenti: view.cpuCenti, cpus: HOST_CPUS };
 	const run = (day, oom) => ({
 		project: "medium",
@@ -149,12 +151,14 @@ test("docs/sizing.md's out of memory suggestion is the line doctor prints for on
 	const lines = show(sizeSuggestionChecks({ projects: [{ id: "medium" }], limits, env, records, budget: { memMiB: view.memMiB, cpuCenti: view.cpuCenti }, total: { memMiB: MEM_TOTAL_MIB, cpuCenti: HOST_CPUS * 100 }, nowMs: NOW }));
 	assert.ok(doc.includes(`\`\`\`text\n${lines.join("\n")}\n\`\`\``), `docs/sizing.md must show:\n${lines.join("\n")}`);
 	assert.ok(lines[0].endsWith(`; size per-CPU worker pools from PI_JOB_SIZE_CPUS: the killed run's tools counted at least ${Math.floor(view.cpuCenti / 100)} CPUs at a size of ${medium.cpus} CPUs`), "the clause names the example's own numbers, last");
-	// Issue #865, review: doctor PUBLISHES each label and fix through `redactText`, cut at DOCTOR_LABEL_MAX, and the
-	// console's Fleet page shows what was published. The page's own example must arrive whole, the pointer included.
+	// Issue #865, review: doctor PUBLISHES a warning's label and fix (`buildDoctorRecord`), each cut at DOCTOR_LABEL_MAX,
+	// and the console's Fleet page shows what was published. The page's own example must arrive whole, pointer included.
 	const checks = sizeSuggestionChecks({ projects: [{ id: "medium" }], limits, env, records, budget: { memMiB: view.memMiB, cpuCenti: view.cpuCenti }, total: { memMiB: MEM_TOTAL_MIB, cpuCenti: HOST_CPUS * 100 }, nowMs: NOW });
-	for (const text of [checks[0].label, checks[0].fix]) {
-		assert.ok(text.length <= DOCTOR_LABEL_MAX, `${text.length} characters, above ${DOCTOR_LABEL_MAX}: ${text}`);
-		assert.equal(redactText(text), text, "published as doctor printed it");
+	const [entry] = published(checks);
+	assert.equal(entry.level, "warn");
+	for (const key of ["label", "fix"]) {
+		assert.ok(checks[0][key].length <= DOCTOR_LABEL_MAX, `${checks[0][key].length} characters, above ${DOCTOR_LABEL_MAX}: ${checks[0][key]}`);
+		assert.equal(entry[key], checks[0][key], `the ${key} is published as doctor printed it`);
 	}
 });
 
@@ -192,19 +196,21 @@ test("issue #865, review: published through doctor's cut, the pointer comes befo
 				if (said) assert.ok(at(pointer) < at(fact), `${label}: the pointer comes before ${fact}`);
 			}
 			if (budgetMiB === 10240) assert.ok(at(held) >= 0 && at(held) < at(pointer), `${label}: the held words come before the pointer`);
-			const published = redactText(check.label);
-			assert.ok(published.includes("PI_JOB_SIZE_CPUS"), `${label}: the pointer survives the publish: ${published}`);
-			if (budgetMiB === 10240) assert.ok(published.includes(held), `${label}: and so do the held words: ${published}`);
+			const [entry] = published([check]);
+			assert.equal(entry.level, "warn", `${label}: an OOM raise is a warning, so its label is published`);
+			assert.ok(entry.label.includes("PI_JOB_SIZE_CPUS"), `${label}: the pointer survives the publish: ${entry.label}`);
+			if (budgetMiB === 10240) assert.ok(entry.label.includes(held), `${label}: and so do the held words: ${entry.label}`);
 			// without the hold, the pointer arrives whole: what the cut takes is the facts after it
-			if (budgetMiB !== 10240) assert.ok(published.includes(pointer), `${label}: the whole pointer: ${published}`);
+			if (budgetMiB !== 10240) assert.ok(entry.label.includes(pointer), `${label}: the whole pointer: ${entry.label}`);
 		}
 	}
 });
 
-test("issue #865, review: a lowering's call is in its label ahead of the facts, so doctor's publish cut never takes it", () => {
+test("issue #865, review: a lowering's line reads its call before the facts, and is published as its id and level only", () => {
 	// The example's heavy project (20g, 4 CPUs) with twelve runs that used half a core and peaked at their limit while
 	// stalled for memory: the CPUs lower to 0.75 and the memory fact rides along. A lowering is an ok line whose call is
-	// in the label itself, so it must come before the facts, which a publish cut at DOCTOR_LABEL_MAX may take.
+	// in the label, so in the terminal the call comes right after the suggestion and the no-call fact after it. Doctor
+	// publishes an ok line without its label (`buildDoctorRecord`), so no publish cut ever reaches it.
 	const heavy = limits.find((l) => l.scope === "project:heavy");
 	const size = { memMiB: parseMemory(heavy.memory), cpuCenti: parseCpus(heavy.cpus), source: "project" };
 	const WALL_US = 600e6;
@@ -217,14 +223,17 @@ test("issue #865, review: a lowering's call is in its label ahead of the facts, 
 		endedAt: new Date(NOW - (i + 1) * 86400000).toISOString(),
 		reason: "completed",
 	}));
-	const [check] = sizeSuggestionChecks({ projects: [{ id: "heavy" }], limits, env, records, budget: { memMiB: view.memMiB, cpuCenti: view.cpuCenti }, total: { memMiB: MEM_TOTAL_MIB, cpuCenti: HOST_CPUS * 100 }, nowMs: NOW });
+	const checks = sizeSuggestionChecks({ projects: [{ id: "heavy" }], limits, env, records, budget: { memMiB: view.memMiB, cpuCenti: view.cpuCenti }, total: { memMiB: MEM_TOTAL_MIB, cpuCenti: HOST_CPUS * 100 }, nowMs: NOW });
+	const [check] = checks;
 	const call = 'dispatch_limit_edit {"index":0,"cpus":0.75}';
 	const fact = "12 of 12 runs reached the memory limit while stalled for memory more than 1% of their time";
 	assert.equal(check.ok, true, "a lowering is an ok line");
-	assert.ok(check.label.includes(call) && check.label.includes(fact) && check.label.indexOf(call) < check.label.indexOf(fact), check.label);
-	assert.ok(check.label.length > DOCTOR_LABEL_MAX, `long enough to be cut (${check.label.length}), or the case proves nothing`);
-	const published = redactText(check.label);
-	assert.ok(published.includes(call), `the call survives the publish whole: ${published}`);
+	// the terminal prints the whole label (`render`), so the order is a reading order
+	const [line] = show(checks);
+	assert.ok(line.includes(call) && line.includes(fact) && line.indexOf(call) < line.indexOf(fact), line);
+	const [entry] = published(checks);
+	assert.deepEqual(Object.keys(entry).sort(), ["id", "level"], "published as its id and level only");
+	assert.equal(entry.level, "ok");
 });
 
 test("docs/sizing.md's CPU reserve table names who sets the quota, and where doctor reads it back, as reservePlan decides", () => {

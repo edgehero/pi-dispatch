@@ -41,3 +41,29 @@ test("the image job runs the check against the image it built", () => {
 	assert.ok(job.includes('run: node .github/scripts/libuv-pin-check.mjs "$IMAGE_REF"'), "the step is in that job");
 	assert.ok(job.includes("IMAGE_REF: pi-job:ci") && job.indexOf("docker build -f image/Dockerfile -t pi-job:ci .") < job.indexOf("libuv-pin-check.mjs"), "after the build of that image");
 });
+
+test("the specs that name the libuv or the Node the rule was read at name the pinned ones", () => {
+	// The entries that explain the rule restate both versions in prose; a hand-written copy is held to its source
+	// (AGENTS.md). libuv to SEEN_CPUS_LIBUV, which the image job holds the built image to; Node to the Dockerfile's own
+	// note of what its pinned base resolves to. A later release named on purpose (1.52.0, where the rule moved) is
+	// written without the "libuv" before it, so it is not read as a claim about the image.
+	const read = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), "utf8");
+	const section = (text, id) => {
+		const at = text.indexOf(`\n## ${id}\n`);
+		assert.ok(at >= 0, id);
+		const end = text.indexOf("\n## ", at + 4);
+		return text.slice(at, end < 0 ? undefined : end);
+	};
+	const node = /it resolves to node (\d+\.\d+\.\d+)/.exec(read("image/Dockerfile"))?.[1];
+	assert.ok(node, "image/Dockerfile notes the Node its base resolves to");
+	const design = read("specs/design.md");
+	const entries = { "DES-JOB-SIZE-IN-THE-ENV": section(design, "DES-JOB-SIZE-IN-THE-ENV"), "DES-SIZE-SUGGESTIONS": section(design, "DES-SIZE-SUGGESTIONS"), "INT-CONTAINER-RUNTIME-CONTRACT": section(read("specs/interfaces.md"), "INT-CONTAINER-RUNTIME-CONTRACT") };
+	for (const [id, text] of Object.entries(entries)) {
+		const libuvs = [...text.matchAll(/\blibuv\s+(\d+\.\d+\.\d+)/g)].map((m) => m[1]);
+		const nodes = [...text.matchAll(/\bNode\s+(\d+\.\d+\.\d+)/g)].map((m) => m[1]);
+		assert.ok(libuvs.length > 0, `${id} names the libuv it read`);
+		for (const v of libuvs) assert.equal(v, SEEN_CPUS_LIBUV, `${id} names libuv ${v}`);
+		for (const v of nodes) assert.equal(v, node, `${id} names Node ${v}`);
+	}
+	assert.ok(Object.values(entries).some((text) => /\bNode\s+\d/.test(text)), "and at least one names the Node");
+});
