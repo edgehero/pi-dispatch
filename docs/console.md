@@ -868,9 +868,13 @@ its log says each queue's error once a minute, and an outage after Valkey came b
 A Valkey password changed in the deployment's `.env` needs no restart: the console's clients read it again each time they
 connect, so after a rotation they read Valkey again at their next try, and so does a password a bad line kept from being
 read at start, once the line is fixed. A password written into `VALKEY_URL` itself is part of that address. While the
-`.env` is missing or cannot be read, the clients keep the password they have. They take a password from the `.env` only
-while it names the Valkey they talk to (the default one when it names none), also when your shell exports `VALKEY_URL`: a
-password that comes with another `VALKEY_URL` belongs to that Valkey, and the clients stay on the one they started with.
+`.env` is missing or cannot be read, the clients keep the password they have. After start they take a changed password
+from the `.env` only while it names the Valkey they dial (the default one when it names none), also when your shell
+exports `VALKEY_URL`, so a password that comes with another `VALKEY_URL` never reaches the Valkey they stay on. One Valkey
+written two ways counts as one where only the scheme (`valkey://`), a database path or a trailing `/` differs; `localhost`
+and `127.0.0.1` count as two. When a changed password is held back that way, the banner names `VALKEY_PASSWORD`, and a
+restart picks it up. At start, as before, a client takes the `.env`'s password for any Valkey on this machine, also one
+your shell names and the file does not.
 
 A restart of the console is still what picks up a changed `VALKEY_URL`, a database number Valkey refused, and every other
 value it read from the `.env` at start, those a bad line kept from being read included. The console says so. Every page,
