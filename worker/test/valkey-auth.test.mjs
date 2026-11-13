@@ -528,6 +528,68 @@ setTimeout(() => { console.log("NOT-REACHED"); process.exit(0); }, 6000);
 	}
 });
 
+// Issue #845 (measured on macOS against a real console): after a rotation in the deployment's `.env` and on the server,
+// the console's clients said WRONGPASS once a minute for as long as it ran, and a password a bad `.env` line kept from
+// being read at start said NOAUTH after the line was fixed. A `freshContext` client now reads the password again before
+// each connect. Real ioredis, against the RESP stand-in above, with the console's own client options.
+test("a freshContext client heals a rotated password and a password missing at start at its next connect, with no rebuild; one without freshContext keeps its first (#845)", { timeout: 30_000 }, async () => {
+	const OLD = "oldPasswordHealedWithoutRestart1";
+	const NEW = "newPasswordHealedWithoutRestart2";
+	const valkey = await fakeValkey(OLD);
+	const judge = async () => ({ host: "127.0.0.1", servername: null, pinned: "127.0.0.1" });
+	let file = OLD;
+	useValkeyContext(() => ctx({ file }));
+	const url = `redis://127.0.0.1:${valkey.port}`;
+	const clients = [];
+	const made = (opts) => {
+		const c = makeRedisClient(url, { judge, noOfflineQueue: true, disconnectTimeoutMs: 0, ...opts });
+		const errors = [];
+		c.on("error", (e) => errors.push(e.message));
+		clients.push(c);
+		return { c, errors };
+	};
+	/** Until `ok()` holds, or a failure of the test's own after `ms`. */
+	const until = async (ok, what, ms = 8000) => {
+		const end = Date.now() + ms;
+		while (!ok()) {
+			if (Date.now() > end) assert.fail(`not within ${ms} ms: ${what}`);
+			await new Promise((r) => setTimeout(r, 20));
+		}
+	};
+	try {
+		const fresh = made({ freshContext: true });
+		const frozen = made({});
+		await until(() => fresh.c.status === "ready" && frozen.c.status === "ready", "both ready on the old password");
+		assert.equal(await fresh.c.ping(), "PONG");
+
+		// The rotation on the server first: both are refused, and each keeps retrying by its strategy.
+		valkey.rotate(NEW);
+		await until(() => fresh.errors.some((m) => /WRONGPASS/.test(m)) && frozen.errors.some((m) => /WRONGPASS/.test(m)), "both refused after the rotation");
+		// Then in the .env: the same client goes ready at its next try, with no rebuild and no restart.
+		file = NEW;
+		await until(() => fresh.c.status === "ready", "the freshContext client ready on the new password");
+		assert.equal(await fresh.c.ping(), "PONG");
+		const refusedSince = frozen.errors.length;
+		await until(() => frozen.errors.length >= refusedSince + 2, "the other client refused twice more");
+		assert.notEqual(frozen.c.status, "ready", "without freshContext the password read at construction stays");
+		assert.ok(frozen.errors.slice(refusedSince).every((m) => /WRONGPASS/.test(m)), frozen.errors.join("\n"));
+
+		// A password a bad .env line kept from being read at start: NOAUTH, then ready once the line gives it.
+		file = null;
+		valkey.rotate(NEW);
+		const late = made({ freshContext: true });
+		await until(() => late.errors.some((m) => /NOAUTH/.test(m)), "refused with no password");
+		file = NEW;
+		await until(() => late.c.status === "ready", "ready once the .env gives the password");
+		assert.equal(await late.c.ping(), "PONG");
+		for (const { errors } of [fresh, frozen, late]) for (const pw of [OLD, NEW]) assert.ok(!errors.join("\n").includes(pw), "no error carries a password");
+	} finally {
+		for (const c of clients) c.disconnect();
+		useValkeyContext(null);
+		valkey.server.close();
+	}
+});
+
 // PR #475's review, round 2: a stale VALKEY_URL in the shell made `pause` "succeed" on the wrong Valkey while the
 // service's kept taking jobs. On a shell/.env disagreement `pause` pauses BOTH and says so, `status` shows both, and
 // `resume` and `cancel` refuse until `--valkey-url` names which. Two databases of the test Valkey stand in for two.

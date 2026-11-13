@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { readdirSync, readFileSync, statSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, extname, join, relative, resolve } from "node:path";
 import { test } from "node:test";
 import { Socket } from "node:net";
@@ -288,6 +289,32 @@ test("a client whose judgement fails while the Valkey restarts reconnects when i
 	} finally {
 		client.disconnect();
 	}
+});
+
+// Issue #845: a `freshContext` client's password is read again before each connect (connection.mjs, the hook on
+// `Redis.prototype.connect`), which holds only while the pinned ioredis does the four things below. Read from the installed
+// package's own files, so a bump that moves one fails here, naming it, rather than leaving a rotated password unread.
+test("the pinned ioredis builds each connect's AUTH from the client's options, and a refused AUTH or ready check reconnects through connect() (#845)", () => {
+	const root = dirname(createRequire(import.meta.url).resolve("ioredis/package.json"));
+	const redis = readFileSync(join(root, "built", "Redis.js"), "utf8");
+	const events = readFileSync(join(root, "built", "redis", "event_handler.js"), "utf8");
+	const pins = [
+		// The connector is built over the client's own options object, which the hook writes the password into.
+		[redis, /this\.connector = new this\.options\.Connector\(this\.options\);/, "the Connector gets the client's options object"],
+		// `connect()` runs `_connect()`, which builds the AUTH from `options.password` before it asks the connector for a stream.
+		[redis, /connect\(callback\) \{\s+const promise = \(0, tracing_1\.traceConnect\)\(\(\) => this\._connect\(\)/, "connect() runs _connect()"],
+		[redis, /const \{ options \} = this;\s+this\.condition = \{\s+select: options\.db,\s+auth: options\.username\s+\? \[options\.username, options\.password\]\s+: options\.password,[\s\S]*?this\.connector\.connect\(/, "_connect builds condition.auth from options.password, then asks the connector"],
+		// A refused AUTH and a refused ready check go to recoverFromFatalError, which disconnects to reconnect.
+		[events, /if \(self\.condition\.auth\) \{\s+self\.auth\(self\.condition\.auth, function \(err\) \{[\s\S]*?flushed = true;\s+self\.recoverFromFatalError\(err, err\);/, "a refused AUTH (WRONGPASS) recovers"],
+		[events, /if \(!flushed\) \{\s+self\.recoverFromFatalError\(new Error\("Ready check failed: " \+ err\.message\), err\);/, "a refused ready check (NOAUTH) recovers"],
+		[redis, /recoverFromFatalError\(_commandError, err, options\) \{\s+this\.flushQueue\(err, options\);\s+this\.silentEmit\("error", err\);\s+this\.disconnect\(true\);\s+\}/, "recoverFromFatalError disconnects to reconnect"],
+		// The reconnect timer calls the public connect(), the method the hook wraps.
+		[events, /self\.reconnectTimeout = setTimeout\(function \(\) \{\s+self\.reconnectTimeout = null;\s+self\.connect\(\)\.catch\(utils_1\.noop\);\s+\}, retryDelay\);/, "the reconnect timer calls self.connect()"],
+	];
+	for (const [text, re, what] of pins) assert.match(text, re, what);
+	// And the hook is where it says: on the prototype's connect, delegated to the connector.
+	const own = readFileSync(join(REPO_ROOT, "worker", "src", "connection.mjs"), "utf8");
+	assert.match(own, /Redis\.prototype\.connect = function connectWithFreshPassword\(\.\.\.args\) \{\s+try \{\s+this\.connector\?\.\[FRESH_PASSWORD\]\?\.\(\);/);
 });
 
 // Gate round 3, M2: the TLS servername is kept on a pinned connect, so a certificate for the name still verifies.

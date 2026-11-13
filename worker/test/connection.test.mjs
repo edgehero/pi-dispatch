@@ -277,6 +277,65 @@ test("freshContext: a context read that throws fails that connect the way a refu
 	}
 });
 
+// Issue #845: a `freshContext` client's password is the context's as it is at each connect, so a password rotated in the
+// deployment's `.env` reaches a running console. What ioredis sends is `condition.auth`, which `_connect` builds from the
+// options, so that is what is read here. No dial: the judge refuses each connect, and the client retries by its strategy.
+test("freshContext: each connect sends the password the context gives then; the URL's own, a throwing or broken context, and withoutPassword keep theirs (#845)", async () => {
+	const refuse = async () => {
+		throw new Error("no dial in this test");
+	};
+	const ctx = (password, over = {}) => ({ envPath: "/d/.env", shared: false, rootRefused: false, error: null, password: { environment: null, file: password }, ...over });
+	let now = ctx("first-password");
+	useValkeyContext(() => {
+		if (now instanceof Error) throw now;
+		return now;
+	});
+	const clients = [];
+	// No retry, so the client's every connect is one the test makes: the judge's refusal ends it, and the next starts
+	// from "end", which ioredis' `connect()` accepts.
+	const made = (url, opts = {}) => {
+		const c = makeRedisClient(url, { lazyConnect: true, judge: refuse, ...opts });
+		c.options.retryStrategy = () => null;
+		c.on("error", () => {});
+		clients.push(c);
+		return c;
+	};
+	/** The AUTH a connect of `c` was built with: its password, or null for none. */
+	const connectOnce = async (c) => {
+		await c.connect().catch(() => {});
+		assert.equal(c.status, "end");
+		return c.condition?.auth ?? null;
+	};
+	try {
+		const fresh = made("redis://127.0.0.1:1", { freshContext: true });
+		const frozen = made("redis://127.0.0.1:1");
+		const fromUrl = made("redis://:fromTheUrl@127.0.0.1:1", { freshContext: true });
+		const probe = made("redis://127.0.0.1:1", { freshContext: true, withoutPassword: true });
+		assert.deepEqual([await connectOnce(fresh), await connectOnce(frozen), await connectOnce(fromUrl), await connectOnce(probe)], ["first-password", "first-password", "fromTheUrl", null]);
+		now = ctx("rotated-password");
+		assert.equal(await connectOnce(fresh), "rotated-password", "the rotation, at the next connect, on the same client");
+		assert.equal(await connectOnce(frozen), "first-password", "without freshContext: the password read at construction");
+		assert.equal(await connectOnce(fromUrl), "fromTheUrl", "a password in VALKEY_URL is the URL's, whatever the .env says");
+		assert.equal(await connectOnce(probe), null, "a probe that sends none never gets one");
+		const twin = fresh.duplicate();
+		twin.on("error", () => {});
+		clients.push(twin);
+		now = ctx("third-password");
+		assert.equal(await connectOnce(twin), "third-password", "a duplicate (BullMQ's blocking connections) reads it too");
+		assert.equal(await connectOnce(fresh), "third-password");
+		now = new Error("the context could not be read");
+		assert.equal(await connectOnce(fresh), "third-password", "a context that throws keeps the last password, and the connect still runs");
+		now = ctx(null, { error: "/d/.env line 3 has an open quote" });
+		assert.equal(await connectOnce(fresh), "third-password", "a .env that cannot be told keeps the last password rather than dropping one that works");
+		now = ctx(null);
+		assert.equal(await connectOnce(fresh), null, "a context that gives none sends none, as a restart would");
+		assert.equal(Object.hasOwn(fresh.options, "password"), false);
+	} finally {
+		for (const c of clients) c.disconnect();
+		useValkeyContext(null);
+	}
+});
+
 /** `promise`, or a failure of its own after `ms`: with the bound gone these reads never end, and a test's `finally` must still run. */
 function within(promise, ms = 3000) {
 	let timer;
