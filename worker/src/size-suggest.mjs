@@ -39,11 +39,12 @@
  *   4. otherwise it fits.
  *   A FACT (no call) rides along when runs at the limit were also under real memory pressure (`memFullUsec` above 1%
  *   of the wall time): information, never an instruction.
- *   An `oom-killed` raise also says what CPU count the killed runs' tools saw (issue #865, `oomCeiling`): on a venue
- *   whose `--cpus` is the host ceiling (`CEILING_VENUES`), a run's ceiling as its record's `capacity` gives it, when that
- *   is above the run's size in whole CPUs (`PI_JOB_SIZE_CPUS`). A tool that starts a worker per CPU it sees starts one
- *   per CEILING CPU inside the size's memory, so a smaller pool may be a cheaper fix than a larger size. Information
- *   too: the raise is the same either way.
+ *   An `oom-killed` raise also says what CPU count the killed runs' tools saw (issue #865, `oomCeiling`, worded as
+ *   `memoryCeiling`): on a venue whose `--cpus` is the host ceiling (`CEILING_VENUES`), the whole CPUs a run's ceiling
+ *   gives `os.availableParallelism()`, from its record's `capacity`, when that is more than its size in whole CPUs
+ *   (`PI_JOB_SIZE_CPUS`). A tool that starts a worker per CPU it sees starts one per such CPU inside the size's memory,
+ *   so a smaller pool may be a cheaper fix than a larger size. Information beside the raise, which is the same either
+ *   way.
  *   A size is rounded UP to a step: 256m up to 2g, 512m up to 8g, then 1g.
  * CPUs: fewer than `SUGGEST_MIN_SAMPLES` runs is not enough runs; the p95 cores used (CPU time over wall time) below
  * 0.4x the current cpus lowers to 1.25x that p95, never below 1.25x the window's largest cores used, nor 0.25;
@@ -199,18 +200,30 @@ function heldToCap(wanted, current, cap) {
 }
 
 /**
+ * Issue #865: the whole CPUs a ceiling in hundredths gives a tool inside the container. libuv (`uv_available_parallelism`,
+ * which Node's `os.availableParallelism()` returns) divides the cgroup's `cpu.max` quota by its period and truncates, and
+ * answers at least 1, so a `--cpus=2.5` reads as 2: the ceiling ROUNDED DOWN, where `PI_JOB_SIZE_CPUS` rounds the size
+ * up. Comparing the raw ceiling would say a tool saw 2.5 CPUs when it saw the 2 the variable already gives it.
+ */
+const seenCpusOf = (ceilingCenti) => Math.max(1, Math.floor(ceilingCenti / 100));
+
+/**
  * Issue #865: what CPU count the killed runs' tools saw, against their size, or null: over the `oom-killed` runs that
- * decide a raise (the same ones `ooms` counts), those whose ceiling (`ceilingOf`) is above their size rounded up to whole
- * CPUs, which is what `PI_JOB_SIZE_CPUS` tells them. At or below it a pool sized from the variable is the pool the
- * ceiling gave, so there is nothing to say. `{ runs, ceilingCenti, sizeCenti, uniform }`: how many such runs, the
- * largest ceiling and the smallest CPU size among them, and whether every one had exactly that ceiling and size.
+ * decide a raise (the same ones `ooms` counts), those whose ceiling (`ceilingOf`) gives a tool more whole CPUs
+ * (`seenCpusOf`) than their size rounded up, which is what `PI_JOB_SIZE_CPUS` tells them. At or below it a pool sized
+ * from the variable is the pool the ceiling gave, so there is nothing to say. `{ runs, seenCpus, seenVaries, sizeCenti,
+ * sizeVaries }`: how many such runs, the most CPUs a tool among them saw and whether the runs saw different counts, the
+ * smallest CPU size among them and whether their sizes differ. Two flags, since either can vary alone (one host's
+ * ceiling under projects of several sizes, or one size across hosts), and the words say a range for that one only.
  */
 function oomCeilingOf(relevant) {
-	const over = relevant.filter((e) => e.oom && e.ceilingCenti !== null && e.ceilingCenti > wholeCpusOf(e.size.cpuCenti) * 100);
+	const over = relevant.filter((e) => e.oom && e.ceilingCenti !== null && seenCpusOf(e.ceilingCenti) > wholeCpusOf(e.size.cpuCenti));
 	if (over.length === 0) return null;
-	const ceilingCenti = Math.max(...over.map((e) => e.ceilingCenti));
-	const sizeCenti = Math.min(...over.map((e) => e.size.cpuCenti));
-	return { runs: over.length, ceilingCenti, sizeCenti, uniform: over.every((e) => e.ceilingCenti === ceilingCenti && e.size.cpuCenti === sizeCenti) };
+	const seen = over.map((e) => seenCpusOf(e.ceilingCenti));
+	const sizes = over.map((e) => e.size.cpuCenti);
+	const seenCpus = Math.max(...seen);
+	const sizeCenti = Math.min(...sizes);
+	return { runs: over.length, seenCpus, seenVaries: seen.some((n) => n !== seenCpus), sizeCenti, sizeVaries: sizes.some((n) => n !== sizeCenti) };
 }
 
 function suggestMemory(runs, current, cap) {
@@ -469,25 +482,29 @@ export function notEnoughRunsText(dim, sizeText) {
 }
 
 /**
- * Issue #865: the CPU count the killed runs' tools saw, as a clause after the OOM words (`; its tools saw ...`), or "" when
- * the evidence carries none (`oomCeilingOf`). It names the ceiling and the size, says what a per-CPU pool does with
- * them and names the variable that carries the size. Information, never a call: the raise is the same either way.
+ * Issue #865: the CPU count the killed runs' tools saw, in words, or "" when the evidence carries none (`oomCeilingOf`):
+ * `size per-CPU worker pools from PI_JOB_SIZE_CPUS: the killed run's tools saw 15 CPUs at a size of 2 CPUs`.
+ * A word of its own (`memoryCeiling`), not part of the OOM words: every surface prints it AFTER what the suggestion is
+ * (doctor at its label's tail with the facts), so where a surface cuts a line (doctor publishes a label at most
+ * `DOCTOR_LABEL_MAX` long) it is this that goes, never the call, a held raise or a refusal. Short for the same cap, and
+ * the variable first, so a cut keeps the pointer. A pointer, never a call: the raise is the same either way.
  */
 function oomCeilingWords(me) {
 	const o = me?.oomCeiling;
-	if (o === null || typeof o !== "object" || !Number.isSafeInteger(o.runs) || o.runs < 1) return "";
-	const ooms = Number.isSafeInteger(me.ooms) ? me.ooms : o.runs;
-	const whose = ooms === 1 ? "its tools" : o.runs === ooms ? "their tools" : `the tools of ${o.runs} of them`;
-	const saw = o.uniform === true ? `a CPU ceiling of ${cpusText(o.ceilingCenti)} at a size of ${cpusText(o.sizeCenti)}` : `CPU ceilings of up to ${cpusText(o.ceilingCenti)} at sizes from ${cpusText(o.sizeCenti)}`;
-	return `; ${whose} saw ${saw}: a tool that starts a worker per CPU it sees (jest and vitest do by default) starts one per ceiling CPU, all inside the job's memory, and PI_JOB_SIZE_CPUS gives it the size instead`;
+	if (o === null || typeof o !== "object" || !Number.isSafeInteger(o.runs) || o.runs < 1 || !Number.isSafeInteger(o.seenCpus)) return "";
+	const ooms = Number.isSafeInteger(me.ooms) && me.ooms >= o.runs ? me.ooms : o.runs;
+	const whose = ooms === 1 ? "the killed run's tools" : o.runs === ooms ? "the killed runs' tools" : `the tools of ${o.runs} of the ${ooms} killed runs`;
+	const seen = `${o.seenVaries === true ? "up to " : ""}${o.seenCpus} CPUs`;
+	const size = o.sizeVaries === true ? `sizes from ${cpusText(o.sizeCenti)}` : `a size of ${cpusText(o.sizeCenti)}`;
+	return `size per-CPU worker pools from PI_JOB_SIZE_CPUS: ${whose} saw ${seen} at ${size}`;
 }
 
 /**
  * The evidence of a suggestion in words, for doctor, the panel and the insights page alike: `{ memory, cpu, memoryHeld,
- * memoryFact, cpuFact }`, each a short clause (empty when it does not apply), such as `2 runs ended oom-killed (the
- * largest size killed 4g)` or `p95 peak 2560m, largest 3g, over 24 runs`. Ids and numbers only. A fact is worded as
- * information and a held raise as what the host offers: none of them is an instruction, and none advises growing a
- * host's budget.
+ * memoryFact, cpuFact, memoryCeiling }`, each a short clause (empty when it does not apply), such as `2 runs ended
+ * oom-killed (the largest size killed 4g)` or `p95 peak 2560m, largest 3g, over 24 runs`. Ids and numbers only. A fact
+ * is worded as information and a held raise as what the host offers, and `memoryCeiling` (issue #865) points to a
+ * variable: none of them is a call, and none advises growing a host's budget.
  */
 export function suggestionEvidence(suggestion) {
 	const m = suggestion?.memory ?? {};
@@ -497,7 +514,7 @@ export function suggestionEvidence(suggestion) {
 	const peaks = `p95 peak ${formatMemory(me.p95MiB ?? 0)}, largest ${formatMemory(me.maxPeakMiB ?? 0)}, over ${plural(me.samples, "run")}`;
 	const cores = `p95 ${coresText(ce.p95CoresCenti ?? 0)} used, largest ${coresText(ce.maxCoresCenti ?? 0)}, over ${plural(ce.samples, "run")}`;
 	const memWords = {
-		"oom-killed": `${plural(me.ooms, "run")} ended oom-killed (the largest size killed ${formatMemory(me.largestOomMiB ?? 0)})${oomCeilingWords(me)}`,
+		"oom-killed": `${plural(me.ooms, "run")} ended oom-killed (the largest size killed ${formatMemory(me.largestOomMiB ?? 0)})`,
 		"not-enough-runs": `${me.samples} of the ${SUGGEST_MIN_SAMPLES} runs with measurements at ${formatMemory(m.current ?? 0)} or larger it needs${me.smaller > 0 ? `, ${me.smaller} more at smaller sizes` : ""}`,
 		oversized: peaks,
 		fits: peaks,
@@ -520,5 +537,6 @@ export function suggestionEvidence(suggestion) {
 		memoryHeld: heldWords[m.held] ?? "",
 		memoryFact: m.fact === "pressure" ? `${me.pressured} of ${plural(me.samples, "run")} reached the memory limit while stalled for memory more than 1% of their time` : "",
 		cpuFact: c.fact === "ceiling" ? `the median run was held back ${ce.throttledPct}% of its time by this host's CPU ceiling (its CPU budget, shared by every job), which a job's cpus do not change` : "",
+		memoryCeiling: m.reason === "oom-killed" ? oomCeilingWords(me) : "",
 	};
 }

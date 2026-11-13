@@ -4529,7 +4529,7 @@ writes retain their existing interactive confirmation. This adds no unattended p
   Given a `project:` row with `memory: "1g"` and `cpus: 0.5` (issue #596), then each member job's container gets
   `--memory=1g --memory-swap=1g --cpu-shares=512 --shm-size=512m` and the record's `size` says `project`, and its env
   `PI_JOB_SIZE_CPUS=1` and `PI_JOB_SIZE_MEMORY_MIB=1024` (issue #865), whatever a trigger secret or a forwarded host
-  value of either name says, and a sandbox of such a run the same two; given no
+  value of either name says, and a sandbox of such a run the two for its recorded size; given no
   row and `PI_JOB_MEMORY=2g`, then `2g` and `env`; given neither, `4g`, 2 CPUs and `default`; given a size in a job's
   payload, then it changes nothing. Given a size field in a version 2 file, or on a repo row, then the file is
   refused; given `minJobs` with no size, or above the row's `concurrent`, then the file is refused; given `hostShare`
@@ -4609,9 +4609,11 @@ writes retain their existing interactive confirmation. This adds no unattended p
   insights page withhold it when at least one live host published a numeric budget and every such host refuses it.
   A withheld call names the dimension that does not fit. An OOM raise also says, as information with no call, what
   CPU count the killed runs' tools saw (issue #865): where a run's CPU ceiling, as its record's `capacity` gives it on
-  a venue whose `--cpus` is the host ceiling, is above its size in whole CPUs, the words name the ceiling and the size
-  and point to `PI_JOB_SIZE_CPUS`, since a pool that starts a worker per CPU may be what used the memory. Doctor, the
-  console's project page and the `dispatch_limit_edit` confirm say it; it is left out for an OpenShell run and for a
+  a venue whose `--cpus` is the host ceiling, gives a tool more whole CPUs (rounded down, as Node reads it) than its
+  size rounded up, a line points to `PI_JOB_SIZE_CPUS` and names that count and the size, since a pool that starts a
+  worker per CPU may be what used the memory. Doctor, the console's project page, the panel's PROJECTS view and the
+  `dispatch_limit_edit` confirm say it after everything else the suggestion says, so doctor's published label, cut at
+  300 characters, never loses a call, a held raise or a refusal to it; it is left out for an OpenShell run and for a
   record without `capacity`.
 - **Why**: Decision 1 of the issue was to measure first; sizes per project are only as good as the operator's guess
   without the measurement read back. The measurements come from inside the jobs' containers, so they may inform a
@@ -4640,10 +4642,11 @@ writes retain their existing interactive confirmation. This adds no unattended p
   load, then doctor prints no size line and says suggestions are off until it loads. Given a `dispatch_limit_edit`
   of a project row's memory, then its confirm names the project's p95 peak and cores and what they suggest, and says
   the budget was not checked there; given an edit of a count, then it does not. Given one `oom-killed` run of a 2 CPU
-  project on `local` whose `capacity` names 18 CPUs and a CPU budget of 17, then the OOM words add "its tools saw a CPU
-  ceiling of 17 CPUs at a size of 2 CPUs" and `PI_JOB_SIZE_CPUS`, and the suggested memory is what it was without
-  them; given the same run on `openshell`, or without `capacity`, or with a ceiling of 3 at a size of 2.5, then they
-  add nothing.
+  project on `local` whose `capacity` names 18 CPUs and a CPU budget of 17, then the suggestion adds "size per-CPU
+  worker pools from PI_JOB_SIZE_CPUS: the killed run's tools saw 17 CPUs at a size of 2 CPUs" after its other words,
+  and the suggested memory is what it was without it; given the same run on `openshell`, or without `capacity`, or
+  with a budget of 2.5 at a size of 2 (read as 2), or of 3.5 at a size of 2.5 (both read as 3), then it adds nothing.
+  Given `docs/sizing.md`'s worked example, then doctor's published label for its OOM is the line it printed, whole.
 - **Traces to**: `DES-SIZE-SUGGESTIONS`, `REQ-HOST-BUDGET`, `REQ-SCOPED-LIMITS`, `REQ-OPERATOR-CONSOLE-SCREENS`,
   `INT-RUN-HISTORY-FILE-CONTRACT`
 
@@ -7055,8 +7058,8 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
   to serve a case image+workspace already serves.
 - **No credential, and it is not a knob.** No minted forge token, no provider key, no forwarded host
   variable; the container env is `TERM` and `TMOUT` (plus the proxy variables when egress is armed,
-  `HOME=/home/pi` beside `--user` when the run had a job user, issue #341, and the run's size as its job read it,
-  `PI_JOB_SIZE_CPUS` and `PI_JOB_SIZE_MEMORY_MIB`, issue #865). `buildContainerEnv` is deliberately
+  `HOME=/home/pi` beside `--user` when the run had a job user, issue #341, and `PI_JOB_SIZE_CPUS` and
+  `PI_JOB_SIZE_MEMORY_MIB` for the run's recorded size, issue #865). `buildContainerEnv` is deliberately
   not reused: it writes the mint into that forge's variable names and throws when no provider credential resolves,
   so a credential-free container cannot be produced from it. An operator who needs to push authenticates
   themselves inside the shell.
@@ -8731,7 +8734,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
-| 2026-11-13 (#865) | **`REQ-SCOPED-LIMITS` AMENDED**, the job sizes bullet and its acceptance: a job can read its own size, `PI_JOB_SIZE_CPUS` and `PI_JOB_SIZE_MEMORY_MIB`, in its env and in a sandbox of its run, and no trigger secret or forwarded value can set either. **`REQ-SIZE-SUGGESTIONS` AMENDED**, its statement and acceptance: an OOM raise also says what CPU count the killed runs' tools saw against their size and points to `PI_JOB_SIZE_CPUS`, with no call and the same raise; not for an OpenShell run nor a record without `capacity`. UNCHANGED, checked: `REQ-HOST-BUDGET` (admission and the ceiling), `REQ-OPERATOR-CONSOLE-SCREENS` (the project page shows the suggestion's memory words as before, which now carry the clause), `REQ-SANDBOX-FROM-THE-CONSOLE`. **`REQ-RESURRECTABLE-SANDBOX` and `REQ-TRIGGER-SECRETS` AMENDED**, one clause each, as the #341 row did: the sandbox env they list also carries the run's two size variables. Neither is a credential, and the no-credential clause of both is UNCHANGED, checked. |
+| 2026-11-13 (#865) | **`REQ-SCOPED-LIMITS` AMENDED**, the job sizes bullet and its acceptance: a job can read its own size, `PI_JOB_SIZE_CPUS` and `PI_JOB_SIZE_MEMORY_MIB`, in its env and in a sandbox of its run, and no trigger secret or forwarded value can set either. **`REQ-SIZE-SUGGESTIONS` AMENDED**, its statement and acceptance: an OOM raise also says what CPU count the killed runs' tools saw against their size and points to `PI_JOB_SIZE_CPUS`, with no call and the same raise; not for an OpenShell run nor a record without `capacity`. UNCHANGED, checked: `REQ-HOST-BUDGET` (admission and the ceiling), `REQ-OPERATOR-CONSOLE-SCREENS` (the project page shows the suggestion's memory words as before, which now carry the clause), `REQ-SANDBOX-FROM-THE-CONSOLE`. **`REQ-RESURRECTABLE-SANDBOX` and `REQ-TRIGGER-SECRETS` AMENDED**, one clause each, as the #341 row did: the sandbox env they list also carries the run's two size variables. Neither is a credential, and the no-credential clause of both is UNCHANGED, checked. Review round: **`REQ-SIZE-SUGGESTIONS` CORRECTED**, statement and acceptance: the CPU count is said after everything else the suggestion says, on doctor, the console, the panel and the confirm, so doctor's label cut at 300 characters never loses a call, a held raise or a refusal to it, and the page's worked example is published whole; the count is the ceiling rounded down as Node reads it, so a budget of 2.5 at a size of 2 says nothing. **`REQ-RESURRECTABLE-SANDBOX` and `REQ-SCOPED-LIMITS` CORRECTED**: a sandbox carries the two values for the run's recorded size, which a run from before #865 never had in its job. |
 | 2026-11-13 (#867, the review) | **`REQ-OPERATOR-JOB-CANCEL` AMENDED**, its statement: reading whether the job is held is a point that changes nothing too, and a hold that cannot be read is never taken as no hold; a Valkey never reached is said as that, with the hint. Acceptance UNCHANGED, checked: its #867 clause names the test file, which holds both. |
 | 2026-11-13 (#867) | **`REQ-OPERATOR-JOB-CANCEL` AMENDED**, its statement and acceptance: the CLI's cancel ends within its bounds wherever Valkey stops answering, its lookup included, which #846 left as a named residual, and says what it changed at that point (nothing during the lookup; may or may not, after a removal or a hold's delete that was sent and not answered). **`REQ-SUBSCRIPTION-AUTHENTICATION` UNCHANGED, checked**: it names no CLI output; `pi-dispatch auth` now bounds each Valkey command and ends a Valkey failure with one line, where it printed ioredis' stack trace (`INT-SUBSCRIPTION-QUOTA-KEY`, docs/subscription-auth.md). **`REQ-OPERATOR-CONSOLE-SCREENS` UNCHANGED, checked**: the console's stop on a Valkey that stopped answering stays #842's. |
 | 2026-11-13 (#869) | **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: in (g1)'s hosts and in a fresh sandbox's Flow row, a host's answer for the flow counts only where its doctor judged the trigger as the file has it now, by the digest each published flow row carries (`INT-DOCTOR-RESULTS-KEY`'s `basis`). Elsewhere, a renamed flow included, the trigger page says the host "answered for another version of the triggers file, so it is unknown there", with no warning that a job would not find it, and the sandbox says it is unknown because its last doctor run answered for another version of the triggers file. "Has no answer for it" loses its "yet" for the same reason. Neither promises a later answer, which doctor never gives for a spent one-shot or a file the worker refuses. A row from an older doctor is read as before. Two goldens added, `trigger-gets-flow-stale` and `sandbox-loaded-flow-stale`; the sandbox paragraph no longer gives "it ran before an edit" as a reason for no answer, since such a row is now this case. `REQ-SANDBOX-FROM-THE-CONSOLE` UNCHANGED, checked: no control is added. |

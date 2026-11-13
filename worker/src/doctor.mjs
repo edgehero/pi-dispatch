@@ -9799,7 +9799,9 @@ export function sizeSuggestionChecks({ projects = [], limits = [], env = {}, rec
 		const words = suggestionEvidence(s);
 		const size = `${formatMemory(current.memMiB)}, ${cpusText(current.cpuCenti)}`;
 		const call = suggestionCall(s, limits);
-		const facts = [words.memoryFact, words.cpuFact].filter(Boolean);
+		// Issue #865: `memoryCeiling` rides LAST, after the facts: the label is published cut at DOCTOR_LABEL_MAX, and what a
+		// cut may take is this pointer, never the call, a held raise, a refusal or a budget note before it.
+		const facts = [words.memoryFact, words.cpuFact, words.memoryCeiling].filter(Boolean);
 		const factTail = facts.length > 0 ? `; ${facts.join("; ")}` : "";
 		const held = s.memory.suggested === null && s.memory.held !== null;
 		if (call === null && !held) {

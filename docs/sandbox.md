@@ -114,9 +114,10 @@ pull request on your own machine — and the container still applies every isola
 
 A sandbox carries no `GITHUB_TOKEN`, no `GH_TOKEN`, no GitLab/Forgejo/Azure token, and no provider API
 key. The env is `TERM` and `TMOUT`, plus four proxy variables when egress is on, plus `HOME=/home/pi` when the
-sandbox runs with `--user` (see *Known limitations*), plus the run's size as its job read it, `PI_JOB_SIZE_CPUS` and
-`PI_JOB_SIZE_MEMORY_MIB` ([sizing](sizing.md#how-many-cpus-a-jobs-tools-see)), so a command copied from the run, such
-as `jest --maxWorkers="$PI_JOB_SIZE_CPUS"`, runs here as it ran there. `TERM` and `TMOUT` are
+sandbox runs with `--user` (see *Known limitations*), plus `PI_JOB_SIZE_CPUS` and `PI_JOB_SIZE_MEMORY_MIB` for the
+size the sandbox records ([sizing](sizing.md#how-many-cpus-a-jobs-tools-see)): the run's, or for a sandbox prepared
+from a trigger the size its jobs get. So a command copied from a run, such as `jest --maxWorkers="$PI_JOB_SIZE_CPUS"`,
+sizes its pool here as it would in a job of that size. `TERM` and `TMOUT` are
 dropped when they have nothing to say, so an unset host `TERM` or `PI_SANDBOX_IDLE_MINUTES=0` emits nothing
 rather than an empty string.
 

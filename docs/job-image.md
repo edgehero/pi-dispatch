@@ -206,11 +206,13 @@ a worker, counted against their timeout. Trigger secrets and forwarded host sett
 the count.
 
 Beside it, every job carries its own size: `PI_JOB_SIZE_CPUS` (its CPUs rounded up to a whole number) and
-`PI_JOB_SIZE_MEMORY_MIB` (issue #865). A CPU count read inside the container is the host's CPU ceiling
-(`os.availableParallelism()`) or the whole runtime (`nproc`), never the job's size, so an image or a
-flow that sizes a worker pool (jest's `--maxWorkers`, vitest's `VITEST_MAX_FORKS`, `make -j`) should read
-`PI_JOB_SIZE_CPUS` instead ([sizing](sizing.md#how-many-cpus-a-jobs-tools-see)). Both are information:
-the container's limits are the bound, and trigger secrets and forwarded host settings cannot set either.
+`PI_JOB_SIZE_MEMORY_MIB` (issue #865). A CPU count read inside the container is not the job's size:
+`nproc` reads the whole runtime on every venue, and `os.availableParallelism()` reads the container's
+CPU limit rounded down, which on Docker and Podman is the host's CPU ceiling (the same for every job) and
+on OpenShell is the size itself. So an image or a flow that sizes a worker pool (jest's `--maxWorkers`,
+vitest's `VITEST_MAX_FORKS`, `make -j`) should read `PI_JOB_SIZE_CPUS` instead
+([sizing](sizing.md#how-many-cpus-a-jobs-tools-see)). Both are information: the container's limits are
+the bound, and trigger secrets and forwarded host settings cannot set either.
 
 The overlay validator also accepts pi 1.4.0's `compat.imageInput` (`assets`, `images`, or
 `state-image-urls`) and boolean `compat.sendImageOptInHeader`, and pi 1.5.2's booleans

@@ -43,8 +43,8 @@ export { SANDBOX_LAUNCHERS, SANDBOX_OPEN_GRACE_MS, sandboxLauncher, sandboxSyncR
  *     (env-allowlist.mjs) and throws outright when no provider credential resolves, so a credential-free
  *     container cannot be produced from it. The env here is two variables about the terminal, plus the four
  *     proxy variables when an egress policy is armed, plus `HOME=/home/pi` beside `--user` when the run had a job
- *     user (issue #341), plus the run's size as its job read it (`PI_JOB_SIZE_CPUS`, `PI_JOB_SIZE_MEMORY_MIB`, issue
- *     #865).
+ *     user (issue #341), plus the size the manifest records (`PI_JOB_SIZE_CPUS`, `PI_JOB_SIZE_MEMORY_MIB`, issue #865):
+ *     the run's, or for a prepared sandbox the size its trigger's jobs get.
  *   - No `/outbox`, no `/session`, no `/opt/pi-global`. The agent is not running; there is nothing to
  *     chain, no transcript to continue and no overlay to layer.
  *
@@ -178,9 +178,11 @@ export function buildSandboxRunArgs({ venue = DEFAULT_BACKEND, image, name, work
 			TMOUT: idleSeconds > 0 ? String(idleSeconds) : undefined,
 			// Beside `--user` only (issue #341). Not a credential either.
 			HOME: user !== null ? home : undefined,
-			// Issue #865: the RUN's size as its job read it, by the job env's own function (`jobSizeEnv`), so a flow
-			// command copied in here (`jest --maxWorkers=$PI_JOB_SIZE_CPUS`) means what it meant in the job instead of
-			// expanding to nothing. Two integers, not a credential.
+			// Issue #865: the size this shell is built at (`size`: the manifest's, the run's own or, for a prepared
+			// sandbox, its trigger's), by the job env's own function (`jobSizeEnv`), so a flow command copied in here
+			// (`jest --maxWorkers=$PI_JOB_SIZE_CPUS`) sizes its pool as a job of that size would instead of expanding to
+			// nothing. A run retained before this release never had the variables; its shell gets them for its recorded
+			// size all the same. Two integers, not a credential.
 			...jobSizeEnv(size),
 			// Still NO CREDENTIALS, and that clause is untouched: a proxy URL is not a credential, and
 			// buildContainerEnv is still not reused here. The env is two variables about the terminal, HOME

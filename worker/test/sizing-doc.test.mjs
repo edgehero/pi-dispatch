@@ -4,6 +4,7 @@ import { test } from "node:test";
 import { operatorQuotaCommand, reservePlan } from "../src/cpu-reserve.mjs";
 import { ISOLATION_FLAGS } from "../src/docker-run.mjs";
 import { cpuReserveChecks, doctorHostBudget, hostBudgetChecks, jobSizeChecks, render, sizeSuggestionChecks } from "../src/doctor.mjs";
+import { DOCTOR_LABEL_MAX, redactText } from "../src/doctor-results.mjs";
 import { BUDGET_RECHECK_MS, NEVER_FITS_RECHECK_MS, RESERVE_CPUS_FROM, RESERVE_MEMORY_MAX_MIB, RESERVE_MEMORY_MIN_MIB, computeHostBudget, hostBudgetSettings, makeHostBudget } from "../src/host-budget.mjs";
 import { DEFAULT_JOB_SIZE, SHM_CEILING_MIB, cpuCeilingCenti, formatCpus, formatMemory, jobSizeEnv, parseCpus, parseMemory, shmMiBOf, wholeCpusOf } from "../src/job-size.mjs";
 import { parseProjects } from "../src/projects.mjs";
@@ -147,7 +148,28 @@ test("docs/sizing.md's out of memory suggestion is the line doctor prints for on
 	const records = [run(1, true), ...Array.from({ length: 13 }, (_, i) => run(i + 2, false))];
 	const lines = show(sizeSuggestionChecks({ projects: [{ id: "medium" }], limits, env, records, budget: { memMiB: view.memMiB, cpuCenti: view.cpuCenti }, total: { memMiB: MEM_TOTAL_MIB, cpuCenti: HOST_CPUS * 100 }, nowMs: NOW }));
 	assert.ok(doc.includes(`\`\`\`text\n${lines.join("\n")}\n\`\`\``), `docs/sizing.md must show:\n${lines.join("\n")}`);
-	assert.match(lines[0], new RegExp(`a CPU ceiling of ${formatCpus(view.cpuCenti)} CPUs at a size of ${medium.cpus} CPUs`), "the clause names the example's own numbers");
+	assert.ok(lines[0].endsWith(`; size per-CPU worker pools from PI_JOB_SIZE_CPUS: the killed run's tools saw ${Math.floor(view.cpuCenti / 100)} CPUs at a size of ${medium.cpus} CPUs`), "the clause names the example's own numbers, last");
+	// Issue #865, review: doctor PUBLISHES each label and fix through `redactText`, cut at DOCTOR_LABEL_MAX, and the
+	// console's Fleet page shows what was published. The page's own example must arrive whole, the pointer included.
+	const checks = sizeSuggestionChecks({ projects: [{ id: "medium" }], limits, env, records, budget: { memMiB: view.memMiB, cpuCenti: view.cpuCenti }, total: { memMiB: MEM_TOTAL_MIB, cpuCenti: HOST_CPUS * 100 }, nowMs: NOW });
+	for (const text of [checks[0].label, checks[0].fix]) {
+		assert.ok(text.length <= DOCTOR_LABEL_MAX, `${text.length} characters, above ${DOCTOR_LABEL_MAX}: ${text}`);
+		assert.equal(redactText(text), text, "published as doctor printed it");
+	}
+});
+
+test("issue #865, review: a held OOM raise with the ceiling clause keeps the held words whole when published, and a cut takes only the clause's tail", () => {
+	// The longest label a raise of the example writes: the cap binds (a 10g budget), so the held words ride in it too.
+	const medium = limits.find((l) => l.scope === "project:medium");
+	const size = { memMiB: parseMemory(medium.memory), cpuCenti: parseCpus(medium.cpus), source: "project" };
+	const capacity = { slots: 4, memMiB: 10240, cpuCenti: view.cpuCenti, cpus: HOST_CPUS };
+	const killedRun = { project: "medium", backend: "local", size, capacity, resources: { memPeak: size.memMiB * 1048576, cpuUsec: 600e6, throttledUsec: 0, memFullUsec: 0 }, startedAt: new Date(NOW - 86400000 - 600000).toISOString(), endedAt: new Date(NOW - 86400000).toISOString(), reason: "oom-killed" };
+	const [check] = sizeSuggestionChecks({ projects: [{ id: "medium" }], limits, env, records: [killedRun], budget: { memMiB: 10240, cpuCenti: view.cpuCenti }, total: { memMiB: MEM_TOTAL_MIB, cpuCenti: HOST_CPUS * 100 }, nowMs: NOW });
+	const held = "this project's runs need more than this host offers: they ask for 12g, the largest here is 10g";
+	assert.ok(check.label.includes(held) && check.label.indexOf(held) < check.label.indexOf("PI_JOB_SIZE_CPUS"), check.label);
+	const published = redactText(check.label);
+	assert.ok(published.includes(held), `the held words survive the publish: ${published}`);
+	assert.ok(published.includes("PI_JOB_SIZE_CPUS"), `and so does the pointer, which comes before the numbers: ${published}`);
 });
 
 test("docs/sizing.md's CPU reserve table names who sets the quota, and where doctor reads it back, as reservePlan decides", () => {

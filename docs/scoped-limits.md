@@ -239,8 +239,9 @@ measuring, setting sizes and the host budget, with a worked example.
   has four or more; see [the host budget](multi-host.md#the-host-budget)). That bound is per job; what keeps the
   reserve free across all jobs together is the parent cgroup they share
   ([the CPU reserve across all jobs](multi-host.md#the-cpu-reserve-across-all-jobs)), inside which the weights still
-  order the jobs. Inside the job a CPU count reads as that ceiling whatever its `cpus`, so a tool that starts a worker per
-  CPU should be sized from `PI_JOB_SIZE_CPUS`, which every job carries ([sizing](sizing.md#how-many-cpus-a-jobs-tools-see)).
+  order the jobs. Inside a Docker or Podman job, `os.availableParallelism()` reads that ceiling rounded down whatever
+  its `cpus`, and `nproc` reads the whole runtime on every venue, so a tool that starts a worker per CPU should be sized
+  from `PI_JOB_SIZE_CPUS`, which every job carries ([sizing](sizing.md#how-many-cpus-a-jobs-tools-see)).
 - A row may set only a size, only one of the two, or a size beside its caps. A field the row does not set comes
   from `PI_JOB_MEMORY` and `PI_JOB_CPUS` in `.env`, which default to `4g` and `2`. A bad value there stops the
   worker at boot with the reason.
@@ -292,9 +293,10 @@ call it names.
   it.
 - **Memory is raised only after an OOM kill.** A run that ended `oom-killed` at the current size or larger suggests
   1.5x the larger of the size and the largest size in the window that was killed. One step per kill: the run that
-  caused a raise does not count once the raise is applied. Where the killed runs' CPU ceiling was above their size in
-  whole CPUs, the line also names both and `PI_JOB_SIZE_CPUS`, since a per-CPU worker pool may be what used the memory;
-  not on OpenShell, whose CPU limit is the size, nor for a run whose record has no `capacity`.
+  caused a raise does not count once the raise is applied. Where the killed runs' tools saw more whole CPUs than
+  `PI_JOB_SIZE_CPUS` (their CPU ceiling rounded down, against their size rounded up), the line ends by pointing to the
+  variable with both numbers, since a per-CPU worker pool may be what used the memory; not on OpenShell, whose CPU
+  limit is the size, nor for a run whose record has no `capacity`.
 - **A peak at the limit raises nothing.** `memory.peak` counts the page cache, and a job that only reads files fills
   it up to its limit with no harm (measured: a 512m container reading 1.2 GB of files peaked at exactly 512m, with no
   OOM kill). When runs at the limit were also stalled for memory (the kernel's memory pressure, above 1% of their
