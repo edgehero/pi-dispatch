@@ -135,6 +135,10 @@ export function makeRedactor({ values = [], extraPatterns = [] } = {}) {
 export const NON_SECRET_ENV_KEYS = new Set([
 	// Issue #693: a memory-derived concurrency count, never a credential; keep it in the structural venue env.
 	"PI_CODEMODE_MAX_WORKERS",
+	// Issue #865: the job's size, two integers, never a secret. Listed, or OpenShell would put each in the job's credential
+	// provider and the agent would read a placeholder where a tool's worker count needs the number.
+	"PI_JOB_SIZE_CPUS",
+	"PI_JOB_SIZE_MEMORY_MIB",
 	"PI_PROVIDER",
 	"PI_MODEL",
 	"PI_FORK_ENTRY",

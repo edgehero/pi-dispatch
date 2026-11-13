@@ -423,6 +423,38 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   functions and pins its heap, FIFO ceiling, environment parsing and timeout accounting.
 - **Traces to**: `DES-HOST-BUDGET`, `INT-CONTAINER-RUNTIME-CONTRACT`, `CONST-ISOLATION-CONTAINER-PER-JOB`.
 
+## DES-JOB-SIZE-IN-THE-ENV
+
+- **Decision** (issue #865): every job carries its resolved size in its closed env map, `PI_JOB_SIZE_CPUS` (the size's
+  CPUs rounded UP to a whole number, `Math.ceil(cpuCenti / 100)`) and `PI_JOB_SIZE_MEMORY_MIB` (its memory in MiB), both
+  from one function, `jobSizeEnv` in `worker/src/job-size.mjs`. `buildContainerEnv` sets them beside
+  `PI_CODEMODE_MAX_WORKERS`, after the forwarding and secrets loops; both names are in `CONTAINER_ENV_NAMES` (refused in
+  `run.secrets` and `PI_FORWARD_ENV`) and in `NON_SECRET_ENV_KEYS` (so the OpenShell venues carry the numbers on the exec
+  rather than a credential placeholder). The `pi-dispatch sandbox` shell carries the same two values for the run's
+  recorded size, through the same function. They are information: the size is resolved at pickup from the operator's
+  files, nothing reads them back, and the container's flags remain the bound. They reach the agent's commands because
+  the runner keeps its environment and pi 1.5.2's bash tool spawns with `process.env` (`getShellEnv`,
+  `dist/utils/shell.js`); an MCP stdio server gets only its own base env, which is unchanged.
+- **Why**: a job's memory is a hard bound at its size, but its CPUs are a weight under one host ceiling
+  (`DES-HOST-BUDGET`), and a weight is invisible inside the container: `os.availableParallelism()` reads the cgroup's
+  `cpu.max`, the ceiling, and `nproc` the affinity mask, the whole runtime. jest 30 and vitest 2 default to
+  `availableParallelism() - 1` workers, so a default `4g` job on an 18 CPU runtime started 16 of them and was killed for
+  its memory (the issue's measurement). The job had no way to learn the size it was planned for. With the size in its
+  env, a flow, an image or a repository's own script can size a per-CPU pool from it (`jest
+  --maxWorkers=$PI_JOB_SIZE_CPUS`), and the docs have one name to point at. Rounded up because a worker count takes no
+  fraction, no size may read as 0, and a size between two counts is a weight that may already use idle cores beyond it.
+- **Rejected**:
+  - *A hard `--cpus` at the size*: #596 decided the ceiling on purpose, since a hard cap leaves idle cores unused, and it
+    would not reach `nproc` either, which read 18 at `--cpus=2` in the issue's measurement.
+  - *Setting each tool's knob by default* (`VITEST_MAX_FORKS`, `MAKEFLAGS`): it would override what an image or a flow
+    chose for itself, jest has no such variable at all (its count is a flag or its config), the list of tools is never
+    complete, and vitest 2 refuses a maximum below its minimum, so a maximum set alone can stop a suite that ran.
+  - *Reusing `PI_JOB_CPUS` and `PI_JOB_MEMORY`*: those name the deployment's DEFAULT size in `.env`, and a project row
+    gives a job another one, so the same name would mean two things.
+  - *The size's CPUs as a fraction* (`1.5`): every tool that takes a count refuses or truncates one.
+- **Traces to**: `DES-HOST-BUDGET`, `DES-CODEMODE-WORKERS`, `DES-SIZE-SUGGESTIONS`, `INT-CONTAINER-RUNTIME-CONTRACT`,
+  `INT-SANDBOX-CONTRACT`, `REQ-SCOPED-LIMITS`.
+
 ## DES-HOST-BUDGET
 
 - **Decision** (issue #596, phase 2): each worker keeps ONE ledger of the sizes its running jobs were started at, and
@@ -660,6 +692,20 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     median of the runs that DO report throttled time was throttled more than 25% of its wall time, and at least 10
     runs report it (the same minimum as a suggestion: one throttled run is not "the median run"), a FACT line says it
     ran into the host's CPU ceiling (the host's CPU budget, not the job's size), with no call.
+  - **An OOM says what CPU count the killed runs' tools saw** (issue #865). On a venue whose `--cpus` is the host
+    ceiling (`CEILING_VENUES`: `local` and `podman`), each `oom-killed` run that decides the raise is read for its
+    ceiling, the worker's own `cpuCeilingCenti` over the record's `capacity` (`cpus` and `cpuCenti`, judged again as
+    untrusted). Where that ceiling is above the run's size in whole CPUs (what `PI_JOB_SIZE_CPUS` told it), the OOM
+    words gain one clause: the ceiling and the size, that a tool starting a worker per CPU starts one per ceiling CPU
+    inside the job's memory, and that `PI_JOB_SIZE_CPUS` gives it the size (`DES-JOB-SIZE-IN-THE-ENV`). Several
+    such runs are counted, and ceilings or sizes that differ are said as a range. It is information: the raise is
+    the same, since nothing on the record says the memory went to a pool. Left out for the OpenShell venues (their
+    `--cpu` is the size, so the tools read it), for a record without `capacity` (before issue #599, or a refusal
+    before a slot), and at a ceiling no higher than the size in whole CPUs, where a pool sized from the variable is
+    the pool the ceiling gave. `CEILING_VENUES` and `OPENSHELL_BACKENDS` together are held to every venue by a test,
+    so a new venue is placed before the clause is said or left out for it. Doctor, the console's project page and
+    the `dispatch_limit_edit` preview print it through `suggestionEvidence`; the panel's PROJECTS view shows no
+    evidence words, and the killed run's own forge comment is unchanged (`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK`).
   - **"Not enough runs" says what it counted**: the runs at the current size or larger, and how many smaller ones it
     did not (`not enough runs at 4g (0; 20 at smaller sizes)`); for memory the chart beside it draws those smaller runs
     too. One helper (`notEnoughRunsText`) words it for the panel's PROJECTS view and the tool, and the insights page
@@ -17661,6 +17707,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-11-13 (#865) | **NEW `DES-JOB-SIZE-IN-THE-ENV`**: every job, and a sandbox of its run, carries `PI_JOB_SIZE_CPUS` (CPUs rounded up) and `PI_JOB_SIZE_MEMORY_MIB` from one function, reserved and non-secret, because inside the container a CPU count reads as the host ceiling (`availableParallelism()`) or the whole runtime (`nproc`) and never as the size, so per-CPU pools (jest 30, vitest 2) overran the size's memory. Rejected: a hard `--cpus` at the size (#596's decision, and `nproc` would still read the runtime), setting each tool's knob by default, reusing `PI_JOB_CPUS` and `PI_JOB_MEMORY` (the deployment's default), and a fractional count. **`DES-SIZE-SUGGESTIONS` AMENDED**: an OOM raise also names the CPU ceiling the killed runs' tools saw against their size, read from the record's `capacity` on a venue whose `--cpus` is the ceiling (`CEILING_VENUES`, held with `OPENSHELL_BACKENDS` to every venue by a test), where it is above the size in whole CPUs; information only, the raise unchanged. UNCHANGED, checked: `DES-HOST-BUDGET` (the ceiling and its weight are as decided), `DES-CODEMODE-WORKERS` (its variable and its count), `DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` (the OOM comment). |
 | 2026-11-13 (#867, the review) | **`DES-CANCEL-VIA-REDIS-REQUEST-KEY` AMENDED**: the lookup's bound is each queue's; a lookup with no answer is "stopped answering" only where the probe saw a connection, and "could not reach" with the hint where none was made; an unreadable hold refuses rather than reading as no hold. Two more rejected alternatives recorded (telling a never-reached Valkey by the queue's own errors, reading an unreadable hold as no hold). UNCHANGED, checked: `DES-OPERATOR-CONSOLE` (its doors say the hold refusal and the state-unread refusal through `heldRefused`, as nothing changed). |
 | 2026-11-13 (#867) | **`DES-CANCEL-VIA-REDIS-REQUEST-KEY` AMENDED**: the CLI's queues get its command bound (`parseConnection`'s `commandTimeoutMs`, `failFast` only) and the lookup a bound of its own as one step, with a `sendCommand` hook in connection.mjs that does for those BullMQ-built clients what `BoundedRedis` does for its own (timer unref'd, a written command's lost answer marked `valkeyMayStillRun`), inert for every client without the bound; `removeHeldJob` says which write went unanswered. Four rejected alternatives recorded (the per-command bound alone for the lookup, the removal bounded as one step, a `BoundedRedis` handed to BullMQ, the bound on every BullMQ connection). **`DES-OPERATOR-CONSOLE` UNCHANGED, checked**: the console's queue clients keep no bound (#842), and its doors ignore `unanswered`. **`DES-CLI-SURFACE` UNCHANGED, checked**: no command, flag or exit code of `cancel` changes; `auth` now exits 1 on a Valkey failure, the code its transient failures already had. |
 | 2026-11-13 (#869) | **`DES-OPERATOR-CONSOLE` AMENDED**, "What a trigger's jobs get" gains "Doctor's answer is for the trigger it read", and the #847 sentence in "What a run loaded" points to it: a flow row answers on the trigger page and a fresh sandbox only where its basis, a digest of the fields `flowTierOf` reads (`INT-DOCTOR-RESULTS-KEY`), equals the one the card computes from its own parse of the file, through the same function (`flowRowFor`). Otherwise the page says that host answered for another version of the triggers file, a renamed flow included, and promises no later answer. Rejected: matching on position and flow name, which kept a stale answer for up to a week, and the console running `flowTierOf`, which reads the host's folders. The preview's `hostsLosingFlow` keeps reading the row without its basis, since there a stale row can only add a hedged warning. **`DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS`** UNCHANGED, checked: doctor's check line and its published tier keep their words, and the basis rides beside them. **Code evidence**: worker/src/host-loads.mjs -> flowInputOf, flowBasisOf; worker/src/doctor.mjs -> readTriggerFacts; admin/src/trigger-gets-view.mjs -> flowRowFor, readTriggerGetsEntry; admin/src/sandbox-data.mjs. |

@@ -5,7 +5,7 @@ import { operatorQuotaCommand, reservePlan } from "../src/cpu-reserve.mjs";
 import { ISOLATION_FLAGS } from "../src/docker-run.mjs";
 import { cpuReserveChecks, doctorHostBudget, hostBudgetChecks, jobSizeChecks, render, sizeSuggestionChecks } from "../src/doctor.mjs";
 import { BUDGET_RECHECK_MS, NEVER_FITS_RECHECK_MS, RESERVE_CPUS_FROM, RESERVE_MEMORY_MAX_MIB, RESERVE_MEMORY_MIN_MIB, computeHostBudget, hostBudgetSettings, makeHostBudget } from "../src/host-budget.mjs";
-import { DEFAULT_JOB_SIZE, SHM_CEILING_MIB, formatCpus, formatMemory, parseCpus, parseMemory, shmMiBOf } from "../src/job-size.mjs";
+import { DEFAULT_JOB_SIZE, SHM_CEILING_MIB, cpuCeilingCenti, formatCpus, formatMemory, jobSizeEnv, parseCpus, parseMemory, shmMiBOf, wholeCpusOf } from "../src/job-size.mjs";
 import { parseProjects } from "../src/projects.mjs";
 import { parseScopedLimits } from "../src/scoped-limits.mjs";
 import { SUGGEST_MIN_SAMPLES, SUGGEST_WINDOW_DAYS, SUGGEST_WINDOW_RUNS, suggestSize } from "../src/size-suggest.mjs";
@@ -131,9 +131,14 @@ test("docs/sizing.md's standalone root commands are the ones doctor prints, for 
 test("docs/sizing.md's out of memory suggestion is the line doctor prints for one oom-killed medium run", () => {
 	const medium = limits.find((l) => l.scope === "project:medium");
 	const size = { memMiB: parseMemory(medium.memory), cpuCenti: parseCpus(medium.cpus), source: "project" };
+	// Issue #865: each run records the venue and what the example's host offered at admission (`capacity`: its budget and
+	// its 16 CPUs), so the line also says what CPU count the killed run's tools saw, the budget's 15 against a size of 2.
+	const capacity = { slots: Number(env.PI_CONCURRENCY), memMiB: view.memMiB, cpuCenti: view.cpuCenti, cpus: HOST_CPUS };
 	const run = (day, oom) => ({
 		project: "medium",
+		backend: "local",
 		size,
+		capacity,
 		resources: { memPeak: (oom ? size.memMiB : 5000) * 1048576, cpuUsec: 600e6, throttledUsec: 0, memFullUsec: 0 },
 		startedAt: new Date(NOW - day * 86400000 - 600000).toISOString(),
 		endedAt: new Date(NOW - day * 86400000).toISOString(),
@@ -142,6 +147,7 @@ test("docs/sizing.md's out of memory suggestion is the line doctor prints for on
 	const records = [run(1, true), ...Array.from({ length: 13 }, (_, i) => run(i + 2, false))];
 	const lines = show(sizeSuggestionChecks({ projects: [{ id: "medium" }], limits, env, records, budget: { memMiB: view.memMiB, cpuCenti: view.cpuCenti }, total: { memMiB: MEM_TOTAL_MIB, cpuCenti: HOST_CPUS * 100 }, nowMs: NOW }));
 	assert.ok(doc.includes(`\`\`\`text\n${lines.join("\n")}\n\`\`\``), `docs/sizing.md must show:\n${lines.join("\n")}`);
+	assert.match(lines[0], new RegExp(`a CPU ceiling of ${formatCpus(view.cpuCenti)} CPUs at a size of ${medium.cpus} CPUs`), "the clause names the example's own numbers");
 });
 
 test("docs/sizing.md's CPU reserve table names who sets the quota, and where doctor reads it back, as reservePlan decides", () => {
@@ -322,4 +328,37 @@ test("docs/sizing.md's run counts and suggestion factors are the ones suggestSiz
 	const at = Math.round(Number(cpu[1]) * size.cpuCenti);
 	assert.equal(suggest(runs(SUGGEST_MIN_SAMPLES, size, { cores: at }), size).cpu.suggested, null, "not lowered at the factor");
 	assert.notEqual(suggest(runs(SUGGEST_MIN_SAMPLES, size, { cores: at - 1 }), size).cpu.suggested, null, "lowered just below it");
+});
+
+test("issue #865: docs/sizing.md says what a job's tools read of its size, in the example's own numbers, and names what it carries", () => {
+	// The ceiling a job of the example sees, as the worker computes --cpus: the budget, capped at the runtime's count.
+	const ceiling = cpuCeilingCenti(HOST_CPUS, view.cpuCenti);
+	says(`every job: ${formatCpus(ceiling)} on the machine of [the worked example](#a-worked-example), whatever the job's size.`);
+	// jest 30 and vitest 2 start one worker per CPU they see, less one.
+	says(`a default job (\`${formatMemory(DEFAULT_JOB_SIZE.memMiB)}\`, ${formatCpus(DEFAULT_JOB_SIZE.cpuCenti)} CPUs) runs ${ceiling / 100 - 1} of them in its \`${formatMemory(DEFAULT_JOB_SIZE.memMiB)}\``);
+	// The table's rows are the variables jobSizeEnv writes, and its examples are what it writes for them.
+	const names = Object.keys(jobSizeEnv(DEFAULT_JOB_SIZE));
+	assert.deepEqual(names, ["PI_JOB_SIZE_CPUS", "PI_JOB_SIZE_MEMORY_MIB"]);
+	for (const name of names) assert.match(doc, new RegExp(`^\\| \`${name}\` \\|`, "m"), `docs/sizing.md's table names ${name}`);
+	for (const [text, want] of [["1.5", 2], ["0.25", 1]]) {
+		assert.equal(wholeCpusOf(parseCpus(text)), want);
+		says(`\`${text}\` is \`${want}\``);
+	}
+	says(`(\`${formatMemory(DEFAULT_JOB_SIZE.memMiB)}\` is \`${jobSizeEnv(DEFAULT_JOB_SIZE).PI_JOB_SIZE_MEMORY_MIB}\`)`);
+	// The fallback in the examples is the built-in size, what a job on an older worker most likely had.
+	const examples = doc.split("\n").filter((l) => l.includes("${PI_JOB_SIZE_CPUS:-"));
+	assert.equal(examples.length, 3, "jest, make and vitest");
+	for (const line of examples) assert.ok(line.includes(`\${PI_JOB_SIZE_CPUS:-${jobSizeEnv(DEFAULT_JOB_SIZE).PI_JOB_SIZE_CPUS}}`), line);
+	// Where else the two names must be: the contracts that list a job's and a sandbox's env, and the guides beside them.
+	const read = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), "utf8");
+	const section = (text, id) => {
+		const at = text.indexOf(`\n## ${id}\n`);
+		assert.ok(at >= 0, id);
+		const end = text.indexOf("\n## ", at + 4);
+		return text.slice(at, end < 0 ? undefined : end);
+	};
+	const interfaces = read("specs/interfaces.md");
+	for (const [where, text] of [["INT-CONTAINER-RUNTIME-CONTRACT", section(interfaces, "INT-CONTAINER-RUNTIME-CONTRACT")], ["INT-SANDBOX-CONTRACT", section(interfaces, "INT-SANDBOX-CONTRACT")], ["DES-JOB-SIZE-IN-THE-ENV", section(read("specs/design.md"), "DES-JOB-SIZE-IN-THE-ENV")], ["docs/sandbox.md", read("docs/sandbox.md")], ["docs/job-image.md", read("docs/job-image.md")]]) {
+		for (const name of names) assert.ok(text.includes(`\`${name}\``), `${where} names ${name}`);
+	}
 });

@@ -1995,7 +1995,13 @@ a sandbox not confirmed gone marks the run's result `lingering`, its exit code u
       It bounds any SINGLE job; on its own it does not keep a core free across jobs, because each container's quota
       is its own and they do not sum (measured: two busy jobs on a 4-core cpuset with `--cpus=3` used 4.06 cores). The
       reserve across all jobs is the parent cgroup's quota below. It is not the job's size either, which
-      would be the hard cap the issue decided against. When the runtime gave no count and no budget value is set the flag is ABSENT (fail open,
+      would be the hard cap the issue decided against. **It is the CPU count a job's tools read** (issue #865):
+      Node's `os.availableParallelism()` reads the cgroup's `cpu.max`, so it returns the ceiling, and `nproc` reads
+      the affinity mask, so it returns the whole runtime; neither ever returns the size, which is only a weight. A
+      tool that starts a worker per CPU it sees (jest 30 and vitest 2 take `availableParallelism() - 1`) therefore
+      starts one per ceiling CPU inside the size's memory (the issue's measurement: 16 workers of 384 MiB each were
+      OOM-killed in a default `4g` job under `--cpus=17`, and 1 ran clean under `--cpus=2`). The size reaches the job as `PI_JOB_SIZE_CPUS` and `PI_JOB_SIZE_MEMORY_MIB` (the env list
+      below), and doctor's and the console's OOM suggestion names the ceiling (`DES-SIZE-SUGGESTIONS`). When the runtime gave no count and no budget value is set the flag is ABSENT (fail open,
       logged `cpu_ceiling_unknown`, and doctor warns per venue): Docker refuses a `--cpus` above its own count, and
       the worker's count is not the daemon's on Docker Desktop. The count is a cached read on both venues (`local`:
       the job-user resolver's `docker info`; `podman`: `cachedPodmanInfo`'s `podman info`), re-read by the first
@@ -2344,7 +2350,12 @@ a sandbox not confirmed gone marks the run's result `lingering`, its exit code u
     would be sent by `gh` to github.com on the agent's first invocation — a working credential handed to
     the wrong host, which is precisely how a scoped token stops being scoped. Absent otherwise; `PI_JOB_ID`; `PI_PROVIDER`;
     `PI_MODEL`; `PI_CODEMODE_MAX_WORKERS` (always worker-owned, derived from the resolved job memory
-    by `DES-CODEMODE-WORKERS`, reserved against secrets and forwarding); `PI_MAX_TURNS`; `PI_MAX_TOKENS` (the per-job token budget — forwarded ONLY when set, omitted
+    by `DES-CODEMODE-WORKERS`, reserved against secrets and forwarding); `PI_JOB_SIZE_CPUS` and
+    `PI_JOB_SIZE_MEMORY_MIB` (issue #865, `DES-JOB-SIZE-IN-THE-ENV`: always worker-owned, the resolved job size's
+    CPUs rounded UP to a whole number and its memory in MiB, decimal strings from `jobSizeEnv` in
+    `worker/src/job-size.mjs`, set after the forwarding and secrets loops, reserved against both, and in
+    `NON_SECRET_ENV_KEYS` so the OpenShell venues carry the numbers on the exec rather than a placeholder;
+    information for the job's own tools, never read back and never a bound); `PI_MAX_TURNS`; `PI_MAX_TOKENS` (the per-job token budget — forwarded ONLY when set, omitted
     otherwise so the runner meters usage without a cap; `REQ-TOKEN-ACCOUNTING-AND-CAPS`); no
     `PI_CODING_AGENT_DIR` (pi's `getAgentDir` falls back to `$HOME/.pi/agent`, and from issue #511 a trigger
     cannot bind it either, `INT-TRIGGERS-FILE-CONTRACT`); `PI_GLOBAL_ALLOW_EXTENSIONS=0` (forwarded ONLY to carry the operator's explicit
@@ -3308,8 +3319,11 @@ sibling rather than an extension of the GitHub one for the same reason.
     session's network is created, refused in words and before any container starts, in front of an operator
     at a terminal, which is the one place a late failure is cheap.
   - **Env is exactly `TERM` and `TMOUT`**, plus the four proxy variables when a policy is armed, plus
-    `HOME=/home/pi` beside `--user` when the run had a job user (issue #341). No minted forge token under any
-    forge's variable names, no provider key, no `PI_FORWARD_ENV` pass-through, none of the `PI_*` job variables.
+    `HOME=/home/pi` beside `--user` when the run had a job user (issue #341), plus `PI_JOB_SIZE_CPUS` and
+    `PI_JOB_SIZE_MEMORY_MIB` (issue #865), the RUN's size as its job read it, from the same `jobSizeEnv` and the same
+    size the argv is built at, so a flow command copied into the shell sizes its pool as it did in the job. No minted
+    forge token under any forge's variable names, no provider key, no `PI_FORWARD_ENV` pass-through, and no other
+    `PI_*` job variable: the two size values are integers about the run, not credentials or job inputs.
     `buildContainerEnv`
     is NOT reused and cannot be: it writes the mint (`env-allowlist.mjs`) and throws when no provider
     credential resolves, so it has no credential-free output to produce.
@@ -6104,7 +6118,12 @@ validator rather than a second copy of it.
   (`worker/src/size-records.mjs`, shared by doctor and the admin) opens only files whose mtime is within the window
   plus a day, skips and counts a file over 256 KiB, drops a record without an object `resources` and a `size` (a
   refusal before any container started), and only THEN keeps the newest 50 records per project, so refusals never
-  crowd measured runs out of the window. It writes nothing to any record.
+  crowd measured runs out of the window. It writes nothing to any record. Since issue #865 it also reads `capacity`
+  (`cpus` and `cpuCenti`) and `backend` of an `oom-killed` run, for one clause with no call: the CPU ceiling that run's
+  tools saw (`cpuCeilingCenti` over those two, as the worker computes `--cpus`) against its `size`. Only on a venue whose
+  `--cpus` is that ceiling (`local`, `podman`; the OpenShell venues pass the size itself), only when `cpus` is an
+  integer from 1 to 4096 or `cpuCenti` one from 1 to 409600, judged again here, and never for a record without
+  `capacity`. No record field was added for it.
   **`hostBudget` (issue #596, phase 2) is additive, nullable, an explicit literal rebuilt by the worker, and TAIL
   position** after `size`: on the two never-fits refusals (`job-size-exceeds-host`, `job-size-exceeds-share`) the
   host budget the size was judged against, in MiB and hundredths of a CPU, and the project's `hostShare` (null without
@@ -13747,6 +13766,7 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 
 | Date | Change |
 |---|---|
+| 2026-11-13 (#865) | **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**, two places. The env list gains `PI_JOB_SIZE_CPUS` (the resolved size's CPUs rounded up to a whole number) and `PI_JOB_SIZE_MEMORY_MIB`, always worker-owned, from `jobSizeEnv`, set after the forwarding and secrets loops, reserved against both and carried as numbers on the OpenShell exec (`NON_SECRET_ENV_KEYS`). The `--cpus` bullet says what a tool inside reads: `os.availableParallelism()` the ceiling, `nproc` the whole runtime, never the size, which is why the job carries its size. **`INT-SANDBOX-CONTRACT` AMENDED**: "Env is exactly" adds the same two variables for the run's recorded size, by the same function; NO CREDENTIALS still holds, checked, since they are two integers about the run and `buildContainerEnv` is still not reused. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED** in its readers only: the size suggestion now also reads `capacity` and `backend` of an `oom-killed` run, judged again, for a clause with no call. The record's shape is UNCHANGED, checked: no field, key or value was added, and nothing stored changes. UNCHANGED, checked: `INT-RUNNER-EXIT-CODE-PROTOCOL` (the runner neither reads nor removes the two names), `INT-CONTAINER-JOB-INPUTS` (no mount or file), `INT-TRIGGERS-FILE-CONTRACT` (its reserved names are `CONTAINER_ENV_NAMES`, imported, so it refuses both names in `run.secrets` with no text of its own), `INT-CAPACITY-REPORT` (its reading of `capacity` is unchanged). |
 | 2026-11-13 (#867, the review) | **`INT-CANCEL-CHANNEL-CONTRACT` AMENDED** in its #867 sentences: a lookup where no connection to Valkey was ever made (the probe saw no `connect`) says "could not reach" with the hint, as before #867, where the lookup's bound made it "stopped answering"; a hold that cannot be read refuses before anything is sent, where `removeQueuedJob` read it as no hold and a Valkey that woke then had a held job removed by the plain path with its hold left behind; a held job's answer that changed nothing for want of an answer carries `noAnswer` and says to run `cancel` again; only the failure's words are bounded, after the outcome; "the lookup only reads" corrected (each queue writes its meta row on connect, as every BullMQ queue does), and the lookup's bound is each queue's; the measured times restated with how they were measured. **`INT-TOUCH-INDEX` AMENDED**, a residual named: a cancel's removal that lands after its answer was lost is a stop not counted, since its intent is aborted as for any throw; keeping it pending was rejected, since nothing resolves it and the Zero touch page would read unavailable for as long as the fleet acts. **`INT-SUBSCRIPTION-QUOTA-KEY` AMENDED**: the trial's "may or may not" only when its CAS was sent and lost; a logout's status failure gets the line and no QUIT; the quoted error is forgotten when the client goes ready. UNCHANGED, checked: the keys and TTLs of all three, the console's doors but for the two answers named (they read neither `noAnswer` nor `holdUnread`, and say each refusal through `heldRefused`). |
 | 2026-11-13 (#867) | **`INT-CANCEL-CHANNEL-CONTRACT` AMENDED**, closing the residual #846 named: `pi-dispatch cancel`'s BullMQ queues carry the same command bound as its own client (`parseConnection`'s new `commandTimeoutMs`, for a `failFast` client only, with ioredis' resend of an unanswered command off), and the lookup is bounded as one step, so a Valkey that is connected and stops answering ends the verb there too. A command such a queue wrote and got no answer for is marked `valkeyMayStillRun` (a hook in connection.mjs, inert for every client without the bound), and each point the verb stops at says what it changed: the lookup, nothing; a removal or a hold's delete sent and not answered, that it may or may not have been made, and to run `cancel` again once Valkey answers. `removeHeldJob` gains `unanswered` on its cleared answer, refuses a job whose state cannot be read as that rather than as one that left its hold, and keeps no cleared mark for a delete that was never sent. Verified at the pinned BullMQ 5.80.4 and ioredis 5.11.1: a `Queue` builds its connection non-blocking and sends no blocking command (BZPOPMIN is the Worker's blocking connection's, XREAD BLOCK the QueueEvents'); `commandTimeout` rejects with a plain "Command timed out" and leaves a written command on the socket, where a `kill -STOP`ed Valkey ran it on `kill -CONT`. **`INT-SUBSCRIPTION-QUOTA-KEY` AMENDED**: the terminal CLI's client is bounded and listened to, and a Valkey failure is one line. UNCHANGED, checked: the keys, their TTLs, the worker's poll and acknowledgment, the active path's sentences (#846), the console's `cancelQueuedJob`, `cancelHeldJob` and `cancelActive` (they ignore `unanswered`; the state-unread refusal reaches them as a sentence through `heldRefused`), `INT-STEER-INBOX-CONTRACT` (`steer` builds its queues as before), and the quota key's shape and CAS. |
 | 2026-11-13 (#869) | **`INT-DOCTOR-RESULTS-KEY` AMENDED**, what a host's jobs can load: each `flows` row carries `basis`, 8 hex digits of a SHA-256 over the fields `flowTierOf` reads of its trigger as the loader parsed it (`flowBasisOf`, `FLOW_INPUT_FIELDS`), held to that shape at both ends, so the console can tell an answer judged for the file as it was. The record's example shows it, and the worst case is now 65,493 bytes with 39 flow rows kept, two fewer than before, 19 bytes a row: a longer digest was rejected for that reason, and a collision costs one stale answer, which every edit cost before. No new `v`: a row with no `basis` is an older doctor's and reads as before, and an older console's allowlist drops the field. Still PII-free: a digest of operator-written fields, from which nothing reads back. The reading bullet says the allowlist keeps only the keys it names. Every other entry UNCHANGED, checked: `INT-RUN-HISTORY-FILE-CONTRACT` (a run's `loaded.flow` is the run's own, judged in its container), `INT-TRIGGERS-FILE-CONTRACT` (no field is added to the file). |

@@ -41,6 +41,41 @@ A size isolates **memory and CPU**, and nothing else.
   cache back before it kills anything (measured: a `512m` container reading 1.2 GB of files peaked at exactly `512m`,
   with no kill). That is why a peak at the limit raises no suggestion, and only a confirmed out of memory kill does.
 
+## How many CPUs a job's tools see
+
+A job's memory is a hard limit at its size, but its CPUs are only a weight, and nothing inside the container can see a
+weight. A tool that asks how many CPUs it has gets a larger number than the job's `cpus`:
+
+- Node's `os.availableParallelism()` reads the container's CPU ceiling, which is the host's CPU budget and the same for
+  every job: 15 on the machine of [the worked example](#a-worked-example), whatever the job's size.
+- `nproc` reads every CPU of the container runtime, the reserve included.
+
+A tool that starts one worker per CPU it sees therefore starts far more workers than the size was planned for, and all
+of them share the job's memory. jest 30 and vitest 2 both start one worker per CPU less one by default, so on that
+machine a default job (`4g`, 2 CPUs) runs 14 of them in its `4g`, and can end `oom-killed`.
+
+So every job carries its size in two variables, which the job's commands, a flow or a repository's own scripts can read:
+
+| Variable | What it holds |
+|---|---|
+| `PI_JOB_SIZE_CPUS` | the job's `cpus`, rounded up to a whole number (`1.5` is `2`, `0.25` is `1`) |
+| `PI_JOB_SIZE_MEMORY_MIB` | the job's `memory` in MiB (`4g` is `4096`) |
+
+They describe the size and limit nothing: the container's own limits do that. Neither a trigger's `run.secrets` nor
+`PI_FORWARD_ENV` can set them, and a [sandbox](sandbox.md) of a run has the same two values its job had. Size a per-CPU
+pool from them, with a fallback for a job on a worker from before them:
+
+```sh
+npx jest --maxWorkers="${PI_JOB_SIZE_CPUS:-2}"
+make -j"${PI_JOB_SIZE_CPUS:-2}"
+VITEST_MAX_FORKS="${PI_JOB_SIZE_CPUS:-2}" VITEST_MIN_FORKS=1 npx vitest run
+```
+
+Use the variable where a script would write `$(nproc)`. vitest 2 needs `VITEST_MIN_FORKS` beside `VITEST_MAX_FORKS`,
+because it refuses a minimum above the maximum. A job that was killed for its memory while a pool like this ran may
+need a smaller pool rather than a larger size, so the size suggestion for such a run names the ceiling its tools saw
+(see [Reading the suggestions](#6-reading-the-suggestions)).
+
 ## 1. Measure first
 
 Change nothing yet. Every run already records what it was given and what it used:
@@ -269,6 +304,11 @@ How to read one:
   size, from before an earlier raise, does not raise it again). A run that ended `oom-killed` suggests 1.5 times
   the larger of the size and the largest size killed in the window. A peak at the limit raises nothing (the page
   cache, above); when such runs were also stalled for memory, the line says so as a fact, with no call.
+- **A kill also says how many CPUs the killed runs' tools saw**, when that was more than their size: the CPU ceiling
+  their record names, against their `cpus`, and that `PI_JOB_SIZE_CPUS` gives a per-CPU pool the size
+  ([How many CPUs a job's tools see](#how-many-cpus-a-jobs-tools-see)). The raise is the same either way. It is left
+  out for a run on OpenShell, whose CPU limit is the size itself, and for a run recorded before pi-dispatch kept what
+  the host offered (`capacity` in the record).
 - **Memory is lowered** when 1.25 times the p95 peak is at most 0.75 times the size, never below 1.25 times the
   largest peak in the window, nor 1.5 times the largest size killed, nor `512m`.
 - **CPUs are only ever lowered**, when the p95 of the cores used is below 0.4 times the size. Raising `cpus` cannot
@@ -401,9 +441,10 @@ it on the shared queue would wait for that machine instead.
 peaked well below. Doctor's line for it:
 
 ```text
-⚠ project medium: size 8g, 2 CPUs; its runs in the last 30 days suggest memory 12g (oom-killed: 1 run ended oom-killed (the largest size killed 8g))
+⚠ project medium: size 8g, 2 CPUs; its runs in the last 30 days suggest memory 12g (oom-killed: 1 run ended oom-killed (the largest size killed 8g); its tools saw a CPU ceiling of 15 CPUs at a size of 2 CPUs: a tool that starts a worker per CPU it sees (jest and vitest do by default) starts one per ceiling CPU, all inside the job's memory, and PI_JOB_SIZE_CPUS gives it the size instead)
     → apply it in the admin panel with dispatch_limit_edit {"index":1,"memory":"12g"} (an operator confirms it; nothing applies a size by itself)
 ```
 
 The index is the row's place in the file, counted from 0. Nothing changes until you run that call and confirm it,
-and the next `medium` job picked up after that gets `12g`.
+and the next `medium` job picked up after that gets `12g`. If that run's tests start a worker per CPU, sizing them
+from `PI_JOB_SIZE_CPUS` may keep it inside `8g` instead.

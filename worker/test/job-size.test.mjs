@@ -24,11 +24,13 @@ import {
 	formatMemory,
 	hostCpuCeiling,
 	jobSizeDefaults,
+	jobSizeEnv,
 	parseCpus,
 	parseMemory,
 	recordedJobSize,
 	resolveJobSize,
 	shmMiBOf,
+	wholeCpusOf,
 } from "../src/job-size.mjs";
 import { projectScope } from "../src/scoped-limits.mjs";
 
@@ -234,5 +236,17 @@ test("codemode concurrency leaves half the job memory for pi, tools and worker o
 	}
 	for (const memory of [null, "512", 511, 512.5, NaN, Infinity, JOB_MEMORY_CEILING_MIB + 1]) {
 		assert.throws(() => codemodeWorkersOf(memory), /valid job memory/);
+	}
+});
+
+test("issue #865: a size as the job reads it, its CPUs rounded UP to a whole count and its memory in MiB", () => {
+	for (const [cpuCenti, whole] of [[JOB_CPUS_FLOOR_CENTI, 1], [99, 1], [100, 1], [101, 2], [150, 2], [200, 2], [201, 3], [JOB_CPUS_CEILING_CENTI, 256]]) {
+		assert.equal(wholeCpusOf(cpuCenti), whole, `${cpuCenti} hundredths`);
+	}
+	assert.deepEqual(jobSizeEnv(DEFAULT_JOB_SIZE), { PI_JOB_SIZE_CPUS: "2", PI_JOB_SIZE_MEMORY_MIB: "4096" });
+	assert.deepEqual(jobSizeEnv({ memMiB: JOB_MEMORY_FLOOR_MIB, cpuCenti: JOB_CPUS_FLOOR_CENTI, source: "project" }), { PI_JOB_SIZE_CPUS: "1", PI_JOB_SIZE_MEMORY_MIB: "512" });
+	// The container's own refusal, so a size the flags would refuse is never written as a number the job trusts.
+	for (const size of [null, {}, { memMiB: 4096, cpuCenti: 0 }, { memMiB: 511, cpuCenti: 200 }, { memMiB: 4096, cpuCenti: 1.5 }]) {
+		assert.throws(() => jobSizeEnv(size), /refusing a job size/, JSON.stringify(size));
 	}
 });

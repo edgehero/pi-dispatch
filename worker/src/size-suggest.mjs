@@ -39,6 +39,11 @@
  *   4. otherwise it fits.
  *   A FACT (no call) rides along when runs at the limit were also under real memory pressure (`memFullUsec` above 1%
  *   of the wall time): information, never an instruction.
+ *   An `oom-killed` raise also says what CPU count the killed runs' tools saw (issue #865, `oomCeiling`): on a venue
+ *   whose `--cpus` is the host ceiling (`CEILING_VENUES`), a run's ceiling as its record's `capacity` gives it, when that
+ *   is above the run's size in whole CPUs (`PI_JOB_SIZE_CPUS`). A tool that starts a worker per CPU it sees starts one
+ *   per CEILING CPU inside the size's memory, so a smaller pool may be a cheaper fix than a larger size. Information
+ *   too: the raise is the same either way.
  *   A size is rounded UP to a step: 256m up to 2g, 512m up to 8g, then 1g.
  * CPUs: fewer than `SUGGEST_MIN_SAMPLES` runs is not enough runs; the p95 cores used (CPU time over wall time) below
  * 0.4x the current cpus lowers to 1.25x that p95, never below 1.25x the window's largest cores used, nor 0.25;
@@ -59,7 +64,7 @@
  * land on the side the rule says, on every host.
  */
 
-import { JOB_CPUS_CEILING_CENTI, JOB_CPUS_FLOOR_CENTI, JOB_MEMORY_CEILING_MIB, JOB_MEMORY_FLOOR_MIB, formatCpus, formatMemory, recordedJobSize } from "./job-size.mjs";
+import { HOST_CPUS_MAX, JOB_CPUS_CEILING_CENTI, JOB_CPUS_FLOOR_CENTI, JOB_MEMORY_CEILING_MIB, JOB_MEMORY_FLOOR_MIB, cpuCeilingCenti, formatCpus, formatMemory, recordedJobSize, wholeCpusOf } from "./job-size.mjs";
 
 /** How far back a suggestion reads: 30 days. */
 export const SUGGEST_WINDOW_DAYS = 30;
@@ -93,6 +98,15 @@ export const MEMORY_HELD = Object.freeze(["cap", "largest", "no-cap"]);
 export const MEMORY_CAP_MISSING = Object.freeze(["unread", "none-holds", "off"]);
 /** The facts a suggestion may carry with no call: memory `pressure`, CPU `ceiling`. */
 export const SIZE_FACTS = Object.freeze(["pressure", "ceiling"]);
+/**
+ * Issue #865: the venues whose job containers get the host's CPU ceiling as `--cpus`, the same for every job
+ * (job-size.mjs `containerSizing`, on the docker and podman builders alike), so a job's tools read the ceiling and
+ * never its size. OpenShell's venues are not here: their `--cpu` is the job's size itself (backend-openshell.mjs
+ * `sizeArgs`), so the count a tool reads there is the size. Restated, since this module imports nothing heavy, and held
+ * to backends.mjs by a test: every venue is in this list or in `OPENSHELL_BACKENDS`, so a new venue fails it until
+ * someone says which it is.
+ */
+export const CEILING_VENUES = Object.freeze(["local", "podman"]);
 
 const MIB = 1024 * 1024;
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -118,8 +132,28 @@ function rank(sorted, pct) {
 const isCount = (v) => Number.isSafeInteger(v) && v >= 0;
 
 /**
+ * Issue #865: the `--cpus` ceiling a run's container had, in hundredths, as its record gives it: the record's `capacity`
+ * (`cpus`, the runtime's CPU count, and `cpuCenti`, the host's CPU budget, each judged again here) through the worker's
+ * own `cpuCeilingCenti`, on a venue in `CEILING_VENUES` only. Null for any other venue, a record with no readable
+ * `capacity` (every record before issue #599, and every refusal before a slot), and a capacity that names neither.
+ * The record holds what the host offered at admission, not the argv itself, so this is the ceiling the worker computes
+ * from those facts. Where the budget's read of the runtime gave no CPU count, the record holds the worker's own count
+ * instead (index.mjs `capacityNow`), which on Docker Desktop is the Mac's and not the VM's, so the value is then an
+ * estimate of what the tools read. Accepted, rather than a record field for the argv's own `--cpus`: the clause is
+ * information beside a raise that does not depend on it, and that read failing while a job still ran is rare.
+ */
+function ceilingOf(record) {
+	if (!CEILING_VENUES.includes(record.backend)) return null;
+	const c = record.capacity;
+	if (c === null || typeof c !== "object" || Array.isArray(c)) return null;
+	const cpus = Number.isSafeInteger(c.cpus) && c.cpus >= 1 && c.cpus <= HOST_CPUS_MAX ? c.cpus : null;
+	const budget = Number.isSafeInteger(c.cpuCenti) && c.cpuCenti >= 1 && c.cpuCenti <= HOST_CPUS_MAX * 100 ? c.cpuCenti : null;
+	return cpuCeilingCenti(cpus, budget);
+}
+
+/**
  * One record as a suggestion reads it, or null when it is not evidence: `{ at, size, memPeak, oom, wallUsec, cpuUsec,
- * throttledUsec, memFullUsec }`. `memPeak` (bytes, clamped to the record's own limit) is null when absent or not a
+ * throttledUsec, memFullUsec, ceilingCenti }`. `memPeak` (bytes, clamped to the record's own limit) is null when absent or not a
  * count; `wallUsec` is null unless the span is readable; `cpuUsec` is null unless it can be read with a wall time (CPU
  * time clamped to the CPU ceiling over the wall), and `throttledUsec` likewise on its own (clamped to the wall): cgroup v2
  * writes `throttled_usec` in `cpu.stat` only where the cpu controller is enabled, so a run without it is still a CPU
@@ -145,7 +179,7 @@ function evidenceOf(record, project, nowMs) {
 	// unclamped: it is only ever compared (exactly, in BigInt) with 1% of the wall, and a stall past the wall is above it
 	const memFullUsec = wallUsec !== null && isCount(r.memFullUsec) ? r.memFullUsec : null;
 	if (memPeak === null && cpu.cpuUsec === null) return null;
-	return { at, size, memPeak, oom: record.reason === "oom-killed", wallUsec, ...cpu, memFullUsec };
+	return { at, size, memPeak, oom: record.reason === "oom-killed", wallUsec, ...cpu, memFullUsec, ceilingCenti: ceilingOf(record) };
 }
 
 /** a x b > c x d, exactly. */
@@ -164,6 +198,21 @@ function heldToCap(wanted, current, cap) {
 	return { suggested: wanted, held: null };
 }
 
+/**
+ * Issue #865: what CPU count the killed runs' tools saw, against their size, or null: over the `oom-killed` runs that
+ * decide a raise (the same ones `ooms` counts), those whose ceiling (`ceilingOf`) is above their size rounded up to whole
+ * CPUs, which is what `PI_JOB_SIZE_CPUS` tells them. At or below it a pool sized from the variable is the pool the
+ * ceiling gave, so there is nothing to say. `{ runs, ceilingCenti, sizeCenti, uniform }`: how many such runs, the
+ * largest ceiling and the smallest CPU size among them, and whether every one had exactly that ceiling and size.
+ */
+function oomCeilingOf(relevant) {
+	const over = relevant.filter((e) => e.oom && e.ceilingCenti !== null && e.ceilingCenti > wholeCpusOf(e.size.cpuCenti) * 100);
+	if (over.length === 0) return null;
+	const ceilingCenti = Math.max(...over.map((e) => e.ceilingCenti));
+	const sizeCenti = Math.min(...over.map((e) => e.size.cpuCenti));
+	return { runs: over.length, ceilingCenti, sizeCenti, uniform: over.every((e) => e.ceilingCenti === ceilingCenti && e.size.cpuCenti === sizeCenti) };
+}
+
 function suggestMemory(runs, current, cap) {
 	const measured = runs.filter((e) => e.memPeak !== null);
 	const relevant = measured.filter((e) => e.size.memMiB >= current);
@@ -176,7 +225,7 @@ function suggestMemory(runs, current, cap) {
 	// at the limit (90% of it or more: peak x 10 >= limit x 9) AND stalled for memory more than 1% of the wall.
 	const pressured = relevant.filter((e) => !productAbove(e.size.memMiB * MIB, 9, e.memPeak, 10) && e.memFullUsec !== null && productAbove(e.memFullUsec, 100, e.wallUsec, 1)).length;
 	// `smaller`: the measured runs below the current size, which a chart draws and this verdict does not count.
-	const evidence = { samples, smaller: measured.length - samples, p95MiB: p95 === null ? null : Math.ceil(p95 / MIB), maxPeakMiB: maxPeak === null ? null : Math.ceil(maxPeak / MIB), ooms, largestOomMiB: largestOom, pressured };
+	const evidence = { samples, smaller: measured.length - samples, p95MiB: p95 === null ? null : Math.ceil(p95 / MIB), maxPeakMiB: maxPeak === null ? null : Math.ceil(maxPeak / MIB), ooms, largestOomMiB: largestOom, pressured, oomCeiling: oomCeilingOf(relevant) };
 	const fact = pressured > 0 ? "pressure" : null;
 	const out = (reason, suggested, more = {}) => ({ current, suggested: suggested === null || suggested === current ? null : suggested, reason, evidence, fact, held: null, wanted: null, ...more });
 	if (ooms > 0) {
@@ -420,6 +469,20 @@ export function notEnoughRunsText(dim, sizeText) {
 }
 
 /**
+ * Issue #865: the CPU count the killed runs' tools saw, as a clause after the OOM words (`; its tools saw ...`), or "" when
+ * the evidence carries none (`oomCeilingOf`). It names the ceiling and the size, says what a per-CPU pool does with
+ * them and names the variable that carries the size. Information, never a call: the raise is the same either way.
+ */
+function oomCeilingWords(me) {
+	const o = me?.oomCeiling;
+	if (o === null || typeof o !== "object" || !Number.isSafeInteger(o.runs) || o.runs < 1) return "";
+	const ooms = Number.isSafeInteger(me.ooms) ? me.ooms : o.runs;
+	const whose = ooms === 1 ? "its tools" : o.runs === ooms ? "their tools" : `the tools of ${o.runs} of them`;
+	const saw = o.uniform === true ? `a CPU ceiling of ${cpusText(o.ceilingCenti)} at a size of ${cpusText(o.sizeCenti)}` : `CPU ceilings of up to ${cpusText(o.ceilingCenti)} at sizes from ${cpusText(o.sizeCenti)}`;
+	return `; ${whose} saw ${saw}: a tool that starts a worker per CPU it sees (jest and vitest do by default) starts one per ceiling CPU, all inside the job's memory, and PI_JOB_SIZE_CPUS gives it the size instead`;
+}
+
+/**
  * The evidence of a suggestion in words, for doctor, the panel and the insights page alike: `{ memory, cpu, memoryHeld,
  * memoryFact, cpuFact }`, each a short clause (empty when it does not apply), such as `2 runs ended oom-killed (the
  * largest size killed 4g)` or `p95 peak 2560m, largest 3g, over 24 runs`. Ids and numbers only. A fact is worded as
@@ -434,7 +497,7 @@ export function suggestionEvidence(suggestion) {
 	const peaks = `p95 peak ${formatMemory(me.p95MiB ?? 0)}, largest ${formatMemory(me.maxPeakMiB ?? 0)}, over ${plural(me.samples, "run")}`;
 	const cores = `p95 ${coresText(ce.p95CoresCenti ?? 0)} used, largest ${coresText(ce.maxCoresCenti ?? 0)}, over ${plural(ce.samples, "run")}`;
 	const memWords = {
-		"oom-killed": `${plural(me.ooms, "run")} ended oom-killed (the largest size killed ${formatMemory(me.largestOomMiB ?? 0)})`,
+		"oom-killed": `${plural(me.ooms, "run")} ended oom-killed (the largest size killed ${formatMemory(me.largestOomMiB ?? 0)})${oomCeilingWords(me)}`,
 		"not-enough-runs": `${me.samples} of the ${SUGGEST_MIN_SAMPLES} runs with measurements at ${formatMemory(m.current ?? 0)} or larger it needs${me.smaller > 0 ? `, ${me.smaller} more at smaller sizes` : ""}`,
 		oversized: peaks,
 		fits: peaks,

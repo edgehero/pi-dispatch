@@ -202,6 +202,8 @@ test("the container env is a CLOSED set: only the provider key, never the whole 
 			"GITHUB_TOKEN",
 			"PI_CODEMODE_MAX_WORKERS",
 			"PI_JOB_ID",
+			"PI_JOB_SIZE_CPUS",
+			"PI_JOB_SIZE_MEMORY_MIB",
 			"PI_MAX_TURNS",
 			"PI_MODEL",
 			"PI_OFFLINE",
@@ -1513,6 +1515,33 @@ test("codemode workers follow the resolved job size and cannot be replaced throu
 		});
 		assert.equal(env.PI_CODEMODE_MAX_WORKERS, String(Math.floor(memMiB / 512)));
 	}
+});
+
+test("issue #865: the job carries its size, CPUs rounded up and memory in MiB, from the resolved size alone", { skip }, () => {
+	// The built-in size when none is passed: the 4g and 2 CPUs every job gets by default.
+	const plain = buildContainerEnv(secretsBase);
+	assert.deepEqual([plain.PI_JOB_SIZE_CPUS, plain.PI_JOB_SIZE_MEMORY_MIB], ["2", "4096"]);
+	// Rounded UP to a whole count, so a -j flag never reads 0 and a size between two counts gets the larger.
+	for (const [cpuCenti, cpus] of [[25, "1"], [100, "1"], [101, "2"], [150, "2"], [200, "2"], [250, "3"], [25600, "256"]]) {
+		const env = buildContainerEnv({ ...secretsBase, size: { memMiB: 1536, cpuCenti, source: "project" } });
+		assert.equal(env.PI_JOB_SIZE_CPUS, cpus, `${cpuCenti} hundredths`);
+		assert.equal(env.PI_JOB_SIZE_MEMORY_MIB, "1536");
+	}
+});
+
+test("issue #865: neither size variable can be set by a forwarded host value or a trigger secret", { skip }, () => {
+	for (const name of ["PI_JOB_SIZE_CPUS", "PI_JOB_SIZE_MEMORY_MIB"]) assert.ok(CONTAINER_ENV_NAMES.has(name), `${name} is reserved, so run.secrets and PI_FORWARD_ENV refuse it upstream`);
+	// The backstop if a refusal upstream is ever bypassed: settled after both loops, as PI_CODEMODE_MAX_WORKERS is.
+	const env = buildContainerEnv({
+		...secretsBase,
+		size: { memMiB: 2048, cpuCenti: 150, source: "project" },
+		hostEnv: { ...secretsBase.hostEnv, PI_JOB_SIZE_CPUS: "64", PI_JOB_SIZE_MEMORY_MIB: "999999" },
+		forwardEnv: ["PI_JOB_SIZE_CPUS", "PI_JOB_SIZE_MEMORY_MIB"],
+		secrets: { PI_JOB_SIZE_CPUS: "32", PI_JOB_SIZE_MEMORY_MIB: "65536" },
+	});
+	assert.deepEqual([env.PI_JOB_SIZE_CPUS, env.PI_JOB_SIZE_MEMORY_MIB], ["2", "2048"]);
+	// A size that is not one is refused, never written as NaN: the same assertion the container's flags make.
+	assert.throws(() => buildContainerEnv({ ...secretsBase, size: { memMiB: 4096, cpuCenti: 0, source: "project" } }), /refusing a job size/);
 });
 
 test("secondary reviewed watch provider resolves only its own credential and refuses an absent key", { skip }, () => {
