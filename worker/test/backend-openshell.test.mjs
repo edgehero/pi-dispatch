@@ -184,6 +184,8 @@ test("one run: create sized and labelled under the generated policy, read it bac
 	const env = Object.fromEntries(execCall.flatMap((a, i) => (a === "--env" ? [execCall[i + 1].split(/=(.*)/s).slice(0, 2)] : [])));
 	assert.equal(env.PI_JOB_LAYOUT, "sandbox");
 	assert.equal(env.PI_CODEMODE_MAX_WORKERS, "4", "the 2g job carries its derived codemode concurrency as structural exec env (#693)");
+	// Issue #865: the job's size as numbers on the exec's env, never a provider placeholder: 1.5 CPUs read as 2.
+	assert.deepEqual([env.PI_JOB_SIZE_CPUS, env.PI_JOB_SIZE_MEMORY_MIB], ["2", "2048"]);
 	assert.equal(env.PI_SESSION_FILE, "/sandbox/session/current.jsonl");
 	assert.equal(env.HOME, "/home/pi");
 	assert.equal(env.PI_EXIT_AUTH, "stdin");

@@ -2324,7 +2324,8 @@ export function sizingNote(paths: any, scope: any, nowMs: number): string {
     if (dim.held === "largest") return `no larger size (${dim.reason}: ${words})`;
     return dim.reason === "not-enough-runs" ? notEnoughRunsText(dim, shown === formatCpus ? cpusText : shown) : "fits";
   };
-  const facts = [s.words.memoryFact, s.words.cpuFact].filter(Boolean);
+  // issue #865: `memoryCeiling` (the CPU count an OOM-killed run's tools counted at least) is said after the verdict, with the facts
+  const facts = [s.words.memoryFact, s.words.cpuFact, s.words.memoryCeiling].filter(Boolean);
   return `\nProject ${id}'s runs (the last ${SUGGEST_WINDOW_DAYS} days, measured inside the jobs, so advisory): size now ${formatMemory(m.current)}, ${cpusText(c.current)}; ${peaks}. They suggest memory ${said(m, s.words.memory, formatMemory)}, CPUs ${said(c, s.words.cpu, formatCpus)}.${facts.length > 0 ? ` ${facts.map((f: string) => `${f[0].toUpperCase()}${f.slice(1)}.`).join(" ")}` : ""}`;
 }
 

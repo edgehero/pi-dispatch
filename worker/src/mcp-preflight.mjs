@@ -158,7 +158,7 @@ export function makeMcpCheck({ globalPiDir, forwardEnv = [], hostEnv = {}, egres
 		// writes under exactly that name, which is the reason every other server is refused it.
 		for (const name of overlayNames) {
 			for (const ref of servers[name].refs) {
-				if (own.has(ref)) return { refused: "mcp-secret-reserved", name, why: `it references ${ref}, which this deployment uses for the job's own credentials` };
+				if (own.has(ref)) return { refused: "mcp-secret-reserved", name, why: `it references ${ref}, which this deployment uses for the job's own credentials or settings` };
 			}
 		}
 		for (const name of overlayNames) {
@@ -276,7 +276,7 @@ export const MCP_REFUSAL_COMMENT = Object.freeze({
 	"mcp-list-invalid": "the list this job carries is not one the triggers file's loader writes (a service in this deployment may be at another version)",
 	"mcp-config-invalid": "this deployment's list of MCP servers (mcp.json in the overlay) cannot be used",
 	"mcp-server-unknown": "this deployment does not offer that server",
-	"mcp-secret-reserved": "that server would be handed a credential this deployment keeps for the job itself",
+	"mcp-secret-reserved": "that server would be handed a variable this deployment keeps for the job itself",
 	"mcp-secret-unmapped": "a credential that server needs is not passed by this trigger",
 	"mcp-excluded": "this trigger's run.excludeTools removes every way the job could reach that server",
 	"mcp-egress-unreachable": "the egress policy does not let a job reach that server",

@@ -30,7 +30,7 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { findEnvKeys } from "@earendil-works/pi-ai/compat";
 import { getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
-import { codemodeWorkersOf, DEFAULT_JOB_SIZE } from "./job-size.mjs";
+import { codemodeWorkersOf, DEFAULT_JOB_SIZE, jobSizeEnv } from "./job-size.mjs";
 import { egressEnv } from "./egress.mjs";
 import { RECEIVER_ONLY_VARS, forgeSpec } from "./forges.mjs";
 import { apiKeyVariable } from "./provider-key.mjs";
@@ -636,6 +636,14 @@ export function buildContainerEnv({ size = DEFAULT_JOB_SIZE, provider, secondary
 	// so even a caller bypassing their reservation cannot replace it with a host or trigger value.
 	// env-internal PI_CODEMODE_MAX_WORKERS: written into the job's closed env map here, never read from the worker's environment.
 	env.PI_CODEMODE_MAX_WORKERS = String(codemodeWorkersOf(size.memMiB));
+
+	// Issue #865: the job's size, `PI_JOB_SIZE_CPUS` (its CPUs rounded up) and `PI_JOB_SIZE_MEMORY_MIB`, from the same
+	// resolved size as the container's flags (`jobSizeEnv`, which the sandbox shell shares). Inside the container a CPU
+	// count reads as the host ceiling (`availableParallelism()`) or the whole runtime (`nproc`), never the size, so these
+	// are the one place a flow or an image can size a per-CPU worker pool from. Information, not a bound, and read from
+	// no payload. Set after forwarding and secrets, for PI_CODEMODE_MAX_WORKERS' reason: both names are reserved in
+	// CONTAINER_ENV_NAMES, and this is the backstop if a refusal upstream is ever bypassed.
+	Object.assign(env, jobSizeEnv(size));
 
 	// Issue #500: the runner sets these in its own environment, for its child processes, and no value from outside
 	// may arrive first. Both lists refuse them upstream (config.mjs for PI_FORWARD_ENV, the triggers loader for
