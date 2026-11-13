@@ -1,7 +1,7 @@
 {
   "card": "AccessStates",
   "pr": 2,
-  "words": "4503e297c00137d8dbd5fbaad3880a9d3692def9b8d0bd9c6f389fc9fd1fbe75",
+  "words": "7ebb1964dab5749589d394eb39325d1e22a1c8001a6c193fd5f9bced9c38253c",
   "elements": [
     {"el":"p-link-wait","kind":"panel","status":"new","as":"p-link","source":"admin/src/console/signin.mjs#linkContent","golden":["login-code.anonymous","panels/login-code-refused-rate.anonymous"],"shows":"data-link-state=\"wait\" hidden data-reveal>","reason":"the state the page opens in, drawn for the script to reveal: without a script it never signs in, and the page says only that it needs one"},
     {"el":"p-link-used","kind":"panel","status":"new","as":"p-link","source":"admin/src/console/signin.mjs#linkContent","golden":["panels/login-code-used.anonymous","panels/login-code-refused-tokens.anonymous","panels/login-code-refused-audit.anonymous","panels/login-code-refused-other.anonymous"],"shows":"data-link-state=\"used\" hidden data-reveal>","reason":"a golden draws the state the script switches to as the state the page opens in; after a 503, 500 or another status the used state carries the notice that says why; a 429 is the limiter's, answered before the code is read, so the page stays in the wait state with the rate notice"},
@@ -25,7 +25,7 @@
     {"el":"Restart needed: a banner, \"This console needs a restart\", on every page for every role","kind":"readme","status":"new","source":"admin/src/console/shell.mjs#restartBannerHtml","sentence":"admin/src/console/restart-notice.mjs#RESTART_TITLE","golden":["panels/restart-needed.operator","panels/restart-needed.viewer"],"shows":"<use href=\"#i-rerun\"></use>"},
     {"el":"Restart needed: the settings by name, never their values, and the refused database by number","kind":"readme","status":"new","source":"admin/src/console/restart-notice.mjs#restartReasons","holds":"keyList(changed)","golden":["panels/restart-needed.operator","panels/restart-needed.viewer"],"shows":["<span class=\"code\">VALKEY_URL</span> has changed in the deployment","Valkey refused database 16, the one <span class=\"code\">VALKEY_URL</span> named when this console started"]},
     {"el":"Restart needed: its log says the same once","kind":"readme","status":"new","source":"admin/src/console/restart-notice.mjs#makeRestartWatch","holds":"log(restartLogLine(notice))"},
-    {"el":"Restart needed: a .env that is missing or cannot be read now asks for a fix before the restart instead","kind":"readme","status":"new","source":"admin/src/console/restart-notice.mjs#RESTART_FIX_FIRST_TITLE"},
+    {"el":"Restart needed: a .env gone since the console started, or one that cannot be read now, asks for a fix before the restart instead","kind":"readme","status":"new","source":"admin/src/console/restart-notice.mjs#RESTART_FIX_FIRST_TITLE"},
     {"el":"Restart needed: a password changed in that file needs no restart","kind":"readme","status":"new","source":"worker/src/connection.mjs#JudgedConnector","holds":"freshPassword"},
     {"el":"Read-only console: operators keep every detail, but no page has a form","kind":"readme","status":"real","source":"admin/src/console/panels/common.mjs#canAct","holds":"readOnly"},
     {"el":"The read-only Fleet's own line, \"Every change is refused here, so there is no Retry or Remove.\"","kind":"readme","status":"absent","sentence":"admin/src/console/shell.mjs#READ_ONLY_TITLE","roles":["operator"],"golden":["panels/read-only.operator"],"reason":"said once for the whole page, by the read-only banner (no page shows a form), not on each panel"},
