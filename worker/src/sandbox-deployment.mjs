@@ -1,4 +1,7 @@
-/** An explicit deployment handoff is stronger than a generic deployment pointer: it loads sandbox authority only. */
+/**
+ * An explicit deployment handoff is stronger than a generic deployment pointer: it loads sandbox authority and what a
+ * sandbox's preparation reads, and never a forge credential.
+ */
 import * as nodeFs from "node:fs";
 import { isAbsolute, join, win32 } from "node:path";
 import { homedir } from "node:os";
@@ -9,6 +12,15 @@ export const SANDBOX_DEPLOYMENT_KEYS = Object.freeze([
 	"PI_WORKER_NAME", "PI_SANDBOX_DIR", "PI_JOBS_DIR", "PI_SANDBOX_RETENTION_HOURS", "PI_SANDBOX_PIN_DAYS", "PI_SANDBOX_IDLE_MINUTES",
 	"PI_BACKENDS", "PI_BACKEND_FLOOR", "PI_EGRESS", "PI_EGRESS_PROXY", "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "DOCKER_TLS_VERIFY", "DOCKER_CERT_PATH",
 	"VALKEY_URL", "VALKEY_PASSWORD", "PI_VALKEY_SHARED", "PATH", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "XDG_CONFIG_HOME", "CONTAINERS_STORAGE_CONF", "CONTAINERS_CONF", "CONTAINERS_CONF_OVERRIDE", "CONTAINERS_REGISTRIES_CONF", "CONTAINER_HOST", "CONTAINER_CONNECTION",
+	// Issue #863: what `--new` reads to plan a preparation (`planSandboxPreparation`). Without them a sandbox prepared
+	// here got no project, the default size and the default image, so its plan was not the one the deployment's own
+	// worker and the console's preview make. A relative file path names a file in the deployment folder, because the
+	// re-exec runs there as the service does (`runDeploymentSandbox`). The forge's credential and address are left out
+	// on purpose (#771): with none, a GitHub trigger clones with this account's own `gh` login, and a trigger on another
+	// forge cannot be prepared this way (the console's preparation runs in the worker, with its credential).
+	// sandbox-deployment-plan.test.mjs records the plan's inputs from the real preparer, and fails on a new one until it
+	// is carried here or named there with its reason.
+	"PI_TRIGGERS_FILE", "PI_PROJECTS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_JOB_IMAGE", "PI_JOB_MEMORY", "PI_JOB_CPUS",
 ]);
 const OS_KEYS = Object.freeze(["HOME", "USERPROFILE", "SystemRoot", "WINDIR", "TEMP", "TMP", "TMPDIR", "TERM", "LANG", "LC_ALL", "PATH"]);
 export function sandboxDeploymentEnv({ dir, env = process.env, expectedHost = null, fs = nodeFs, platform = process.platform, uid = process.geteuid?.(), home = homedir(), read = deploymentServiceEnv } = {}) {

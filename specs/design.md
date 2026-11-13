@@ -16721,6 +16721,12 @@ is introduced. The design generator owns the published card before the console u
       environment for ordinary invocations, with the explicit trusted deployment-aware path added in #771 (`OQ-038`), and a non-interactive SSH command usually has
       neither the settings nor the CLI on its `PATH`.
     - The opener uses absolute Node/CLI paths and the explicit trusted `--deployment` loader implemented and measured by #771, on local and Podman runs.
+    - **CORRECTED (#863)**: the loader's list also carries what a preparation reads (the triggers, projects and
+      scoped-limits files, the job image and the default job size), so `--new --deployment` plans as the worker
+      does. The list had been written as the settings opening a shell needs, and a preparation reads more. A test
+      now records what the real preparer reads from its config and environment, finds which keys decide those
+      reads by setting each in turn, and fails on one the list neither carries nor names with a reason. The
+      re-exec runs in the deployment folder, so a relative path names the service's file.
   - **A prepared sandbox is a kept workspace with no run.**
     - The worker clones on the host, with its git hardening, as it clones for a job. It then drops the credential and
       keeps the directory beside retained runs under an `sb-` id, with a manifest naming the image of the trigger it
@@ -16757,6 +16763,14 @@ is introduced. The design generator owns the published card before the console u
     path for something that spends nothing.
   - *Carrying the clone's credential into the sandbox, for a `git push`.* `REQ-RESURRECTABLE-SANDBOX` keeps
     credentials out on purpose. `gh auth login` is in the image for the operator who wants to push as themself.
+  - *Loading the deployment's whole `.env` into the `--deployment` re-exec (#863).* It would hand a process started
+    from an SSH login the deployment's provider keys and forge secrets, and let any setting in the file change what
+    a sandbox gets, which is what the clean environment exists to stop.
+  - *Carrying the forge's credential so `--new --deployment` clones as the worker does (#863).* The console's
+    preparation already does that, inside the worker. The hand-run route clones with the person's own `gh` login
+    on GitHub and is not offered on the other forges.
+  - *A hand-written list of the preparation's inputs, kept by review (#863).* The first list was one, and it
+    missed six of them.
 - **Traces to**: `REQ-SANDBOX-FROM-THE-CONSOLE`, `REQ-RESURRECTABLE-SANDBOX`, `DES-SANDBOX-IS-A-FRESH-CONTAINER`,
   `DES-OPERATOR-CONSOLE`, `DES-DOCTOR-RESULTS-PUBLISHED`, `CONST-TOKEN-SCOPED-PER-JOB`, `OQ-038`, `OQ-050`
 
@@ -17591,6 +17605,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-11-13 (#863) | **`DES-SANDBOX-OPENS-IN-THE-OPERATORS-TERMINAL` CORRECTED**: the `--deployment` loader's list also carries what a preparation reads, so `--new --deployment` plans as the worker does, and a test holds the list to the real preparer's reads instead of review. Rejected: loading the whole `.env`, carrying the forge's credential, and a hand list kept by review. UNCHANGED, checked: `DES-SANDBOX-IS-A-FRESH-CONTAINER` (the container and its credential-free environment), `DES-OPERATOR-CONSOLE` (nothing in the console moves), and `OQ-038`'s own-environment limitation of the panel. |
 | 2026-11-12 (#847) | **`DES-OPERATOR-CONSOLE` AMENDED**: a fresh sandbox says where its flow would be found and which named MCP servers the host has (`sandboxFreshRows`, reusing the trigger page's `flowAnswer` and `lacksFlow` so the two pages cannot word it two ways), and the trigger card's extension row quotes what a run brought also when switched off, reversing the #800 posture that "what a run had of an extension is no part of a row the file now leaves out": that row is where a person decides to turn it back on, and the quote is past and attributed. Rejected: publishing counts per staged package in `doctor:loads:<name>` so a row could say what a package brings before any run loads it. The record is about 76 bytes under its 64 KiB cap at its worst (`WORST_BYTES`), so counts would push each trigger's flow answer out first (`FIT_ORDER`); tools cannot be counted without running code; and a count of skills alone would read as the whole. The row says it is not known until a run has loaded it instead. |
 | 2026-11-12 (#846, parts 1, 2 and 5) | **`DES-OPERATOR-CONSOLE` UNCHANGED, checked**: the console's per-call Valkey clients (`readBudget`, `readHosts`, `readHeldJobs`, `cancelHeldJob`, the `dispatch_run` rate check, the trigger fire, the schedule zones and the connections page's own: eight sites) gain the `error` listener #841 gave the zero-touch and answerer clients, so an outage no longer prints ioredis' stack trace per reconnect attempt (17 lines a read of `/insights`, 7 for each other `/insights` page); `admin/test/valkey-error-listeners.test.mjs` holds every construction to a listener beside it and the four pages to printing none against a dead port. **`DES-CANCEL-VIA-REDIS-REQUEST-KEY` UNCHANGED, checked**: the channel is the same; only the CLI's bound and its sentences moved (`INT-CANCEL-CHANNEL-CONTRACT`). **The render script's spend screen removed**: `docs/images/insights-view.png` stayed, by the #752 row below, until the next publish, because the published admin README loaded it from `main`; npm's page shows only the latest README (5.1.0's), which does not load it, and no release note does; the READMEs inside the 4.x tarballs (and `admin/README.md` at v4.0.0 to v4.3.1) do load it from `main` and now show no picture, which the owner accepted for a picture drawn by an older code path whose cost cards read "unknown". The picture and `render-images.mjs`'s `insightsPage` go, with the fixture's git repositories and the shot's full-page and clock options only it used, and the console's own pictures (`--console`, from its goldens) show that screen. **`DES-OPERATOR-CONSOLE` AMENDED** in its code list, which named `render-images.mjs` as rendering the picture. |
 | 2026-11-12 (#846, part 4) | **`DES-OPERATOR-CONSOLE` AMENDED**, "Undo": the claim that an inverse checked by `checkInverse` "can never preview a refusal of its own" did not hold for the whole pause-windows list, whose Undo replayed an old list holding a window the console refuses and whose preview then answered 400. That Undo is now judged as its own preview judges a list (`pauseListGoesBack`: `plainBody`, `pauseListShapeRefusal`, the loader's parse of the file it would write), and where that refuses the bar and the banner say to put the list back by hand (`refusedList`, `refusedListAfter`). |
