@@ -4,7 +4,8 @@ import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { deploymentServiceEnv } from "@edgehero/pi-dispatch/service-env";
-import { restartKeysOf, restartReadingOf, restartValuesOf } from "../src/console/cli.mjs";
+import { VALKEY_CONTEXT_KEYS } from "@edgehero/pi-dispatch/connection";
+import { restartKeysOf, restartProblemKeysOf, restartReadingOf, restartValuesOf } from "../src/console/cli.mjs";
 import { CONSOLE_ENV_KEYS } from "../src/console/config.mjs";
 import { RESTART_CHECK_EVERY_MS, RESTART_CLEARED, RESTART_FIX_FIRST_TITLE, RESTART_RECHECK_MS, RESTART_TITLE, envProblemOf, makeRestartWatch, restartBody, restartLogLine, restartNoticeOf, restartReasons } from "../src/console/restart-notice.mjs";
 import { PANEL_SERVICE_KEYS } from "../src/read-model.mjs";
@@ -25,7 +26,8 @@ test("restartReasons: a changed setting by name, never its value; one only the s
   const now = reading({ VALKEY_URL: JSON.stringify([SECRET]), PI_LOGS_DIR: '["/srv/logs"]', PI_SESSIONS_DIR: '["/srv/sessions"]' });
   const reasons = restartReasons({ start, now });
   assert.deepEqual(reasons.map((r) => [r.kind, r.keys]), [["settings", ["PI_SESSIONS_DIR", "VALKEY_URL"]]]);
-  assert.equal(reasons[0].sentence, "`PI_SESSIONS_DIR` and `VALKEY_URL` have changed in the deployment's .env since this console started, and the console keeps the values it started with until it is restarted.");
+  // The kill switch reads VALKEY_URL from the .env at each use, so the sentence says so for that key (and for no other).
+  assert.equal(reasons[0].sentence, "`PI_SESSIONS_DIR` and `VALKEY_URL` have changed in the deployment's .env since this console started, and the console keeps the values it started with until it is restarted. Pause the fleet and Resume the fleet already use the `VALKEY_URL` the .env names now; the pages read the one the console started with.");
   assert.equal(restartReasons({ start, now: reading({ ...start.values, PI_LOGS_DIR: '["/srv/other"]' }) })[0].sentence, "`PI_LOGS_DIR` has changed in the deployment's .env since this console started, and the console keeps the value it started with until it is restarted.");
   // A key the reading no longer has at all is a change too (a line removed), and so is one it gained.
   assert.deepEqual(restartReasons({ start, now: reading({ VALKEY_URL: start.values.VALKEY_URL }) })[0].keys, ["PI_LOGS_DIR", "PI_SESSIONS_DIR"]);
@@ -53,12 +55,22 @@ test("restartReasons: a .env that cannot be read now asks for a fix first, and w
   assert.deepEqual(both.map((r) => [r.kind, r.keys ?? null]), [["settings", ["PI_LOGS_DIR"]], ["env", null]]);
   assert.equal(restartNoticeOf(both).title, RESTART_TITLE);
   // A file it cannot read at all, or one another account can change, covers every key.
-  for (const [problem, words] of [[{ kind: "unreadable", code: "EACCES", keys: null }, "it could not be read (EACCES)"], [{ kind: "untrusted", keys: null }, "another account can change it, so the console takes nothing from it"], [{ kind: "unread", line: 7, keys: ["PI_LOGS_DIR"] }, "line 7 assigns `PI_LOGS_DIR` in a form the service's loader may read differently"]]) {
+  for (const [problem, words] of [[{ kind: "unreadable", code: "EACCES", keys: null }, "it could not be read (EACCES)"], [{ kind: "unreadable", code: null, keys: null }, "it could not be read"], [{ kind: "absent", keys: null }, "there is no file there any more"], [{ kind: "untrusted", keys: null }, "another account can change it, so the console takes nothing from it"], [{ kind: "unread", line: 7, keys: ["PI_LOGS_DIR"] }, "line 7 assigns `PI_LOGS_DIR` in a form the service's loader may read differently"]]) {
     const got = restartReasons({ start, now: reading({}, problem) });
     const want = problem.keys === null ? ["env"] : ["settings", "env"];
     assert.deepEqual(got.map((r) => r.kind), want, problem.kind);
     assert.ok(got.at(-1).sentence.startsWith(`The deployment's .env cannot be read now: ${words}. Fix it before restarting`), problem.kind);
   }
+  // Told apart by kind and keys, never by line: the bad line the console started with, moved by an edit above it, is
+  // no reason; one that now hides another key is.
+  assert.deepEqual(restartReasons({ start: reading(now.values, hazard), now: reading(now.values, { ...hazard, line: 9 }) }), []);
+  assert.deepEqual(restartReasons({ start: reading(now.values, hazard), now: reading(now.values, { ...hazard, keys: ["PI_LOGS_DIR", "VALKEY_URL"] }) }).map((r) => r.kind), ["env"]);
+  // A .env that was there at start and is gone now: put it back first, since a console started now would run on the
+  // defaults; none at start and none now is the console's own setup, and no reason.
+  const gone = restartReasons({ start, now: reading({}, { kind: "absent", keys: null }) });
+  assert.deepEqual(gone.map((r) => r.kind), ["env"], "no setting is called changed: they are all gone with the file");
+  assert.equal(restartNoticeOf(gone).title, RESTART_FIX_FIRST_TITLE);
+  assert.deepEqual(restartReasons({ start: reading({}, { kind: "absent", keys: null }), now: reading({}, { kind: "absent", keys: null }) }), []);
 });
 
 test("restartReasons: a database a held client was refused, once per number, without an address; the title is the restart's (#845)", () => {
@@ -74,7 +86,7 @@ test("restartReasons: a database a held client was refused, once per number, wit
   assert.equal(String(restartBody(restartNoticeOf(reasons))), "Valkey refused database 16, the one <span class=\"code\">VALKEY_URL</span> named when this console started, and the console does not try a refused database again. Name one that Valkey has, or raise <span class=\"code\">databases</span> in its configuration, then restart the console.");
 });
 
-test("envProblemOf over the service's own reader: a new bad line, an unreadable file and a line only this shell's value covers (#845)", () => {
+test("envProblemOf over the service's own reader: a new bad line, a file gone, an unreadable file by its code alone, and a line only this shell's value covers (#845)", () => {
   const dir = tempDir("restart-env-");
   const read = (text, env = {}) => {
     writeFileSync(join(dir, ".env"), text);
@@ -84,7 +96,14 @@ test("envProblemOf over the service's own reader: a new bad line, an unreadable 
   assert.deepEqual(read("VALKEY_URL=redis://127.0.0.1:6379\rPI_LOGS_DIR=/srv/logs\n"), { kind: "hazard", line: 1, keys: ["PI_LOGS_DIR", "VALKEY_URL"] }, "a lone CR, which systemd splits differently");
   assert.deepEqual(read("VALKEY_URL=redis://127.0.0.1:6379\nPI_LOGS_DIR=/srv/$USER\n"), { kind: "unread", line: 2, keys: ["PI_LOGS_DIR"] });
   assert.equal(read("VALKEY_URL=redis://127.0.0.1:6379\nPI_LOGS_DIR=/srv/$USER\n", { PI_LOGS_DIR: "/shell" }), null, "the shell's value is used either way");
-  assert.deepEqual(envProblemOf({ unreadable: "EACCES: permission denied, open '/srv/.env'" }), { kind: "unreadable", code: "EACCES permission denied open srvenv", keys: null }, "no path survives as one");
+  nodeFs.rmSync(join(dir, ".env"));
+  assert.deepEqual(envProblemOf(deploymentServiceEnv({ env: {}, dir, keys: ["VALKEY_URL"], platform: "linux", fs: nodeFs, uid: process.geteuid?.() })), { kind: "absent", keys: null }, "a file that is not there");
+  // Only a system error's code reaches the banner: a message (which the reader hands back where there is no code) can
+  // carry a path, and none of it is shown.
+  assert.deepEqual(envProblemOf({ unreadable: "EACCES" }), { kind: "unreadable", code: "EACCES", keys: null });
+  assert.deepEqual(envProblemOf({ unreadable: "EACCES: permission denied, open '/srv/.env'" }), { kind: "unreadable", code: null, keys: null }, "no part of a message, so no part of a path");
+  assert.deepEqual(envProblemOf({ unreadable: "not a regular file" }), { kind: "unreadable", code: null, keys: null });
+  assert.deepEqual(envProblemOf({ unreadable: "ENOENT" }), { kind: "absent", keys: null }, "gone between the reader's two looks");
   assert.deepEqual(envProblemOf({ untrusted: "is in a folder another account can change: /srv" }), { kind: "untrusted", keys: null });
   assert.equal(envProblemOf(null), null);
 });
@@ -154,10 +173,14 @@ test("makeRestartWatch: a reading that throws is said as a .env that cannot be r
 
 test("the console's reading: the keys it read at start, a .env edit named, a key this shell sets left alone, a new bad line asked to be fixed first (#845)", () => {
   const dir = tempDir("restart-reading-");
-  const m = { readModel: { PANEL_SERVICE_KEYS, panelEnv: ({ env }) => ({ env: { ...env } }), resolvePaths: () => ({}) } };
+  const m = { readModel: { PANEL_SERVICE_KEYS, panelEnv: ({ env }) => ({ env: { ...env } }), resolvePaths: () => ({}) }, connection: { VALKEY_CONTEXT_KEYS } };
   const keys = restartKeysOf(m);
   for (const key of [...CONSOLE_ENV_KEYS, ...PANEL_SERVICE_KEYS, "PI_SESSIONS_DIR", "PI_ALLOWED_MODELS"]) assert.ok(keys.includes(key), key);
   assert.ok(!keys.includes("VALKEY_PASSWORD"), "the password is read again at each connect, so it needs no restart");
+  // Its line is judged all the same, with the rest of the Valkey context's.
+  const problemKeys = restartProblemKeysOf(m);
+  for (const key of [...keys, ...VALKEY_CONTEXT_KEYS]) assert.ok(problemKeys.includes(key), key);
+  assert.ok(problemKeys.includes("VALKEY_PASSWORD"));
   const env = { PI_CONSOLE_LISTEN: "127.0.0.1:0" };
   const at = (text) => {
     writeFileSync(join(dir, ".env"), text);
@@ -175,5 +198,30 @@ test("the console's reading: the keys it read at start, a .env edit named, a key
   const brokenStart = at("VALKEY_URL=redis://127.0.0.1:6379/1\rPI_CONSOLE_LISTEN=1\n");
   assert.deepEqual(restartReasons({ start: brokenStart, now: at("VALKEY_URL=redis://127.0.0.1:6379/1\n") }).map((r) => r.keys), [["VALKEY_URL"]]);
   // What the start compared is what serve ran on: the same function over the start's two environments.
-  assert.deepEqual(restartValuesOf(m, { VALKEY_URL: "x" }, { VALKEY_URL: "x" }).VALKEY_URL, '["x","x"]');
+  assert.deepEqual(restartValuesOf(m, { VALKEY_URL: "x" }, { VALKEY_URL: "x" }, dir).VALKEY_URL, '["x","x"]');
+  // A VALKEY_PASSWORD line the service's loader reads differently, written after start: the clients keep the password
+  // they had, a restart would start with none, so it is said (measured live with `pw$abc` before this was judged).
+  const fine = at("VALKEY_URL=redis://127.0.0.1:6379/1\nVALKEY_PASSWORD=pw-abc\n");
+  const badPassword = restartReasons({ start: fine, now: at("VALKEY_URL=redis://127.0.0.1:6379/1\nVALKEY_PASSWORD=pw$abc\n") });
+  assert.deepEqual(badPassword.map((r) => [r.kind, r.problem?.keys]), [["env", ["VALKEY_PASSWORD"]]]);
+  assert.match(badPassword[0].sentence, /line 2 assigns `VALKEY_PASSWORD` in a form the service's loader may read differently/);
+  assert.deepEqual(restartReasons({ start: fine, now: at("VALKEY_URL=redis://127.0.0.1:6379/1\nVALKEY_PASSWORD=pw-rotated\n") }), [], "a password changed on a good line needs no restart");
+  // A path named two ways that name one file is no change; another file is.
+  const hosts = at("PI_SANDBOX_HOSTS_FILE=hosts.json\nPI_LOGS_DIR=logs\n");
+  assert.deepEqual(restartReasons({ start: hosts, now: at("PI_SANDBOX_HOSTS_FILE=./hosts.json\nPI_LOGS_DIR=./logs/\n") }), []);
+  assert.deepEqual(restartReasons({ start: hosts, now: at("PI_SANDBOX_HOSTS_FILE=other.json\nPI_LOGS_DIR=logs\n") }).map((r) => r.keys), [["PI_SANDBOX_HOSTS_FILE"]]);
+  // The bad line the console started with, moved down by a comment added above it: the same problem, no reason.
+  const moved = at("VALKEY_URL=redis://127.0.0.1:6379/1\nPI_LOGS_DIR=/srv/$USER\n");
+  assert.equal(moved.problem.line, 2);
+  const after = at("# a comment\nVALKEY_URL=redis://127.0.0.1:6379/1\nPI_LOGS_DIR=/srv/$USER\n");
+  assert.equal(after.problem.line, 3);
+  assert.deepEqual(restartReasons({ start: moved, now: after }), []);
+  // The file moved away: put it back first, not restart, and no setting is called changed.
+  const there = at("VALKEY_URL=redis://127.0.0.1:6379/1\n");
+  nodeFs.rmSync(join(dir, ".env"));
+  const away = restartReadingOf({ m, env, dir, fs: nodeFs, platform: "linux", uid: process.geteuid?.() });
+  assert.deepEqual(away.problem, { kind: "absent", keys: null });
+  const told = restartReasons({ start: there, now: away });
+  assert.deepEqual(told.map((r) => r.kind), ["env"]);
+  assert.equal(restartNoticeOf(told).title, RESTART_FIX_FIRST_TITLE);
 });

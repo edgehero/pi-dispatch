@@ -13,6 +13,7 @@ import * as sandboxData from "../src/sandbox-data.mjs";
 import { readTriggerEditor, configLocationsOf, panelEnv, PANEL_SERVICE_KEYS } from "../src/read-model.mjs";
 import * as realWhatif from "../src/console/whatif.mjs";
 import { RESTART_CLEARED, RESTART_RECHECK_MS, RESTART_TITLE } from "../src/console/restart-notice.mjs";
+import { VALKEY_CONTEXT_KEYS } from "@edgehero/pi-dispatch/connection";
 import { restartBannerHtml } from "../src/console/shell.mjs";
 
 // `pi-dispatch-console` (issue #640) on injected modules: the token, session, code, ticket and audit modules are fakes
@@ -574,6 +575,52 @@ test("serve: a VALKEY_URL changed in the deployment's .env under a running conso
   stop();
   assert.equal(await running, 0);
   assert.equal(cleared, 1, "the watch's timer is stopped with serve");
+});
+
+// Issue #845, the review: the wiring each reason rests on. The start's own problem is read at start (a bad line the
+// console started with is no reason), and each held client's refused database reaches the banner, the console's own and
+// the fleet reader's.
+test("serve: a bad line the console started with is no reason, and a database either held client was refused is, each on its own (#845)", async (t) => {
+  const dep = deployment();
+  // This shell sets no PI_SANDBOX_GATEWAYS_FILE, so a line for it the service's loader reads differently is a problem
+  // the console starts with, and still the same one at every page.
+  writeFileSync(join(dep.dir, ".env"), "VALKEY_URL=redis://127.0.0.1:6379/1\nPI_SANDBOX_GATEWAYS_FILE=/srv/$USER/gateways.json\n");
+  let stop;
+  const until = new Promise((resolve) => (stop = resolve));
+  t.after(() => stop());
+  let listening;
+  const up = new Promise((resolve) => (listening = resolve));
+  const modules = fakeModules();
+  modules.sessions = await import("../src/console/sessions.mjs");
+  modules.tokens.findToken = (f, presented) => (presented === TOKEN ? f.tokens[0] : null);
+  const own = { refused: null, on() {}, disconnect() {} };
+  modules.connection = { ...modules.connection, VALKEY_CONTEXT_KEYS, makeRedisClient: () => own, refusedDatabaseOf: (client) => client?.refused ?? null };
+  modules.audit.mirrorRow = async () => false;
+  let fleetRefused = null;
+  modules.fleet.refusedDatabase = () => fleetRefused;
+  const drawn = [];
+  modules.pages = { ...modules.pages, renderPage: async (name, ctx) => (drawn.push(ctx.restart ?? null), { status: 200, html: `<!doctype html><title>${name}</title>` }) };
+  const timers = { setInterval: () => ({ unref() {} }), clearInterval() {} };
+  let clock = T0;
+  const err = [];
+  const running = runCli(["serve", "--deployment", dep.dir], { env: dep.env, modules, now: () => clock, uid: process.geteuid?.(), out: () => {}, err: (l) => err.push(l), log: () => {}, timers, until, onListening: listening });
+  const srv = await Promise.race([up, running.then((code) => assert.fail(`serve exited ${code} before listening: ${err.join(" ")}`))]);
+  const port = srv.address().port;
+  const login = await http(port, { method: "POST", path: "/login", headers: { origin: `http://127.0.0.1:${port}`, "sec-fetch-site": "same-origin", "content-type": "application/json" }, body: JSON.stringify({ token: TOKEN }) });
+  const cookie = login.headers["set-cookie"][0].split(";")[0];
+  const page = async () => {
+    clock += RESTART_RECHECK_MS;
+    await http(port, { path: "/fleet", headers: { cookie } });
+    return drawn.at(-1)?.reasons.map((r) => [r.kind, r.db ?? null]) ?? [];
+  };
+  assert.deepEqual(await page(), [], "the bad line it started with is the start's own, not a reason");
+  own.refused = { db: 16 };
+  assert.deepEqual(await page(), [["database", 16]], "the console's own client");
+  own.refused = null;
+  fleetRefused = { db: 15 };
+  assert.deepEqual(await page(), [["database", 15]], "the fleet reader's client");
+  stop();
+  assert.equal(await running, 0);
 });
 
 test("serve refuses to start, exit 2, when its start cannot be audited, and releases the lock it took", async () => {

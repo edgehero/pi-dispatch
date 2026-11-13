@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { PAGES, panelIds, pagePanels, parsePageQuery, renderPage } from "../src/console/pages.mjs";
+import { PAGES, loadPageData, panelIds, pagePanels, parsePageQuery, renderPage } from "../src/console/pages.mjs";
 import { ICON_NAMES, SPRITE } from "../src/console/pulse-icons.mjs";
 import { CONSOLE_SCRIPT } from "../src/console/script.mjs";
 import { confirmSlotHtml, doneBannerHtml, heldNoteHtml } from "../src/console/confirm-view.mjs";
@@ -491,7 +491,7 @@ test("the live notes: four, each hidden in its box, the limit's from the console
 // never on one an anonymous visitor is.
 test("the restart banner on every page for every role, under the read-only banner, and on a signed-in error page alone (#845)", async () => {
   const notice = restartNoticeOf(restartReasons({ start: { values: { VALKEY_URL: "a" }, problem: null }, now: { values: { VALKEY_URL: "b" }, problem: null } }));
-  const banner = `<div class="banner banner--sm tone-attention" role="status"><span class="tile"><svg class="ic" aria-hidden="true"><use href="#i-rerun"></use></svg></span><div><p class="banner__t">${RESTART_TITLE}</p><p class="banner__s"><span class="code">VALKEY_URL</span> has changed in the deployment&#39;s .env since this console started, and the console keeps the value it started with until it is restarted.</p></div></div>`;
+  const banner = `<div class="banner banner--sm tone-attention" role="status"><span class="tile"><svg class="ic" aria-hidden="true"><use href="#i-rerun"></use></svg></span><div><p class="banner__t">${RESTART_TITLE}</p><p class="banner__s"><span class="code">VALKEY_URL</span> has changed in the deployment&#39;s .env since this console started, and the console keeps the value it started with until it is restarted. Pause the fleet and Resume the fleet already use the <span class="code">VALKEY_URL</span> the .env names now; the pages read the one the console started with.</p></div></div>`;
   assert.equal(String(restartBannerHtml(notice)), banner);
   for (const none of [null, undefined, {}, { title: RESTART_TITLE, reasons: [] }, "restart"]) assert.equal(restartBannerHtml(none), null, String(none));
   for (const name of Object.keys(PAGES)) {
@@ -511,6 +511,15 @@ test("the restart banner on every page for every role, under the read-only banne
   assert.ok(signedIn.indexOf("<h1>Not found</h1>") < signedIn.indexOf(banner) && signedIn.indexOf(banner) < signedIn.indexOf("gone"), "under the title, above the page's own card");
   assert.equal(count(String(frameHtml({ name: "error", title: "Not found", nav: true, restart: notice }, "<p>gone</p>")), RESTART_TITLE), 0, "no session, no banner");
   assert.equal(count(String(loginPage({})), RESTART_TITLE), 0);
+  // The two 404s `renderPage` draws itself, a run and a project no place has, carry it too.
+  const parsed = parsePageQuery("run", "id=gh-7777");
+  const fleet = { runById: async () => ({ missing: true }), jobStatus: async () => ({ found: false }), transcriptMeta: async () => ({ exists: false }), progress: async () => ({ absent: true }), progressOfRun: async () => ({ progress: { absent: true }, continues: false, continuesAs: null }), parkedCount: async () => 0 };
+  const noRun = await renderPage("run", { query: parsed.query, session: { name: "watcher", role: "viewer" }, data: await loadPageData("run", parsed.query, { fleet, now: () => 0 }), restart: notice });
+  assert.equal(noRun.status, 404);
+  assert.equal(count(String(noRun.html), banner), 1, "the run-not-found page");
+  const noProject = await renderPage("project", { query: { id: "gone" }, session: { name: "ops", role: "operator" }, data: { now: 0, env: {}, projectView: { state: "missing" } }, restart: notice });
+  assert.equal(noProject.status, 404);
+  assert.equal(count(String(noProject.html), banner), 1, "the project-not-found page");
 });
 
 test("the read-only banner on every page of a read-only console; the done banner once from the session's flash", async () => {

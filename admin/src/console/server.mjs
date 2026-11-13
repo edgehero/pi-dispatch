@@ -1399,7 +1399,7 @@ async function dispatch(req, res, deps) {
  *     `stateOf` (default: `live.mjs`'s).
  *   - issue #737: `errorPage` (default: `error-pages.mjs`'s), what a refusal is drawn with for a browser's navigation.
  *   - issue #845: `restartNotice()` (default: none), whether this console needs a restart (`restart-notice.mjs`'s watch's
- *     `current`), drawn as a banner on every page and error page a signed-in person is shown.
+ *     `current`), drawn as a banner on every page and every error page drawn with the navigation bar.
  *   - `limits`: TESTS ONLY, overrides `SERVER_LIMITS`, `streamsTotal` (default `STREAMS_TOTAL_MAX`) and
  *     `streamsOperatorReserve` (default `STREAMS_OPERATOR_RESERVE`).
  */

@@ -258,25 +258,44 @@ export function restartKeysOf(m) {
 }
 
 /**
+ * The keys whose `.env` lines the restart watch judges for a problem (issue #845): every key it compares, and the keys a
+ * Valkey client's context reads (`VALKEY_CONTEXT_KEYS`, from the connection module, VALKEY_PASSWORD among them). Those
+ * are never compared, since the clients read them again at each connect, but a line for one that cannot be read now keeps
+ * the clients on what they had while a restart would start without it, so it is said.
+ */
+export function restartProblemKeysOf(m) {
+  return [...new Set([...restartKeysOf(m), ...(m.connection?.VALKEY_CONTEXT_KEYS ?? [])])].sort();
+}
+
+/** A key that names a file or a folder, by the deployment's own naming (`PI_LOGS_DIR`, `PI_SANDBOX_HOSTS_FILE`). */
+const PATH_KEY_RE = /_(?:FILE|DIR)$/;
+
+/**
  * What the restart watch compares (issue #845, `restart-notice.mjs`): each key of `restartKeysOf` as the console's own
  * read (`consoleEnv`'s `env`) and the read side's (`readSideOf`'s `env`) have it, as one comparable string per key. A
- * value is only ever compared, never said.
+ * value is only ever compared, never said. A path-named key is compared by what it names in `dir`, and a blank one as
+ * unset: some reach this raw (PI_SANDBOX_HOSTS_FILE, which `sandboxHostsPath` resolves later, and the read side's extra
+ * keys), and `hosts.json` becoming `./hosts.json` changes no file the console reads.
  */
-export function restartValuesOf(m, consoleValues, sideValues) {
+export function restartValuesOf(m, consoleValues, sideValues, dir) {
+  const effective = (key, value) => {
+    if (typeof value !== "string" || !PATH_KEY_RE.test(key) || typeof dir !== "string") return value ?? null;
+    return value.trim() === "" ? null : resolvePath(dir, value);
+  };
   const values = {};
-  for (const key of restartKeysOf(m)) values[key] = JSON.stringify([consoleValues?.[key] ?? null, sideValues?.[key] ?? null]);
+  for (const key of restartKeysOf(m)) values[key] = JSON.stringify([effective(key, consoleValues?.[key]), effective(key, sideValues?.[key])]);
   return values;
 }
 
 /**
  * The console's reading of its deployment as it would be now, for the restart watch: the same reads serve made at start
- * (`consoleEnv`, `readSideOf`) from the same shell environment, and what keeps the `.env` from being read
- * (`envProblemOf` over the service's own reader, for every key in `restartKeysOf`). Synchronous file reads only.
+ * (`consoleEnv`, `readSideOf`) with the same shell environment, and what keeps the `.env` from being read
+ * (`envProblemOf` over the service's own reader, for every key in `restartProblemKeysOf`). Synchronous file reads only.
  */
 export function restartReadingOf({ m, env, dir, fs, platform, uid }) {
   const layered = consoleEnv({ env, dir, fs, platform, uid });
   const side = readSideOf({ m, env, dir, fs, platform, uid });
-  return { values: restartValuesOf(m, layered.env, side.env), problem: envProblemOf(deploymentServiceEnv({ env, dir, keys: restartKeysOf(m), platform, fs, uid })) };
+  return { values: restartValuesOf(m, layered.env, side.env, dir), problem: envProblemOf(deploymentServiceEnv({ env, dir, keys: restartProblemKeysOf(m), platform, fs, uid })) };
 }
 
 /**
@@ -696,7 +715,7 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
     // A start reading that throws is the problem every later one meets too, so it is the start's, not a change.
     const startProblem = (() => { try { return restartReading().problem; } catch (e) { return thrownProblem(e); } })();
     restart = makeRestartWatch({
-      start: { values: restartValuesOf(m, layered?.env, side.env), problem: startProblem },
+      start: { values: restartValuesOf(m, layered?.env, side.env, config.dir), problem: startProblem },
       readNow: restartReading,
       refused: () => [m.connection?.refusedDatabaseOf?.(redis) ?? null, fleet.refusedDatabase?.() ?? null],
       now,

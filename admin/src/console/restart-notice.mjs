@@ -8,15 +8,19 @@
  * fault. A password rotated in the `.env` is not here: the console's long-lived clients read it again before each
  * connect (`worker/src/connection.mjs`, `freshPassword`), so it needs no restart.
  *
- * HOW IT KNOWS. What the console read at start is compared with what the same reads give now, from the same shell
- * environment (`makeSetupExposureReader`'s method): the console's own keys (`consoleEnv`, `CONSOLE_ENV_KEYS`) and the
- * read side's (`readSideOf`, `PANEL_SERVICE_KEYS` and the keys it reads beside them). A key whose value differs is named,
- * never its value: a VALKEY_URL may carry a password, and the banner is shown to viewers as well as operators. Three
- * reasons, in this order:
+ * HOW IT KNOWS. What the console read at start is compared with what the same reads give now, with this shell's
+ * environment as at start, so a key the shell sets is never called changed by an edit to the file. Modelled on
+ * `makeSetupExposureReader`, which differs there: it re-reads the file alone, since it asks whether the service's settings
+ * moved. Compared: the console's own keys (`consoleEnv`, `CONSOLE_ENV_KEYS`) and the read side's (`readSideOf`,
+ * `PANEL_SERVICE_KEYS` and the keys it reads beside them), a path by the file or folder it names (`cli.mjs`
+ * `restartValuesOf`). A key whose value differs is named, never its value: a VALKEY_URL may carry a password, and the
+ * banner is shown to viewers as well as operators. Three reasons, in this order:
  *   - `settings`: keys the `.env` now sets differently (a bad line fixed since start shows here, as keys that now read);
- *   - `env`: the `.env` cannot be read now in a way it could at start (unreadable, another account can change it, or a
- *     line the service's loader reads differently, `envProblemOf`), so a restart now would run without what it holds:
- *     fix it first. Keys that only this problem keeps from being read are not also named as changed;
+ *   - `env`: the `.env` cannot be read now in a way it could at start (gone, unreadable, another account can change it,
+ *     or a line the service's loader reads differently, `envProblemOf`, judged over the Valkey context's keys as well,
+ *     VALKEY_PASSWORD among them), so a restart now would run without what it holds: fix it first. Told apart by kind and
+ *     keys, never by line, so a bad line the console started with that only moved is no reason. Keys that only this
+ *     problem keeps from being read are not also named as changed;
  *   - `database`: a long-lived client holds a refused database (`DB_REFUSED`), which it never tries again, so only a
  *     restart picks up a `databases` raised since. The sentence is this module's own and names the number, never an
  *     address (`valkeyDbRangeSentence`, which names the URL, is for the log and the CLI, and stays as it is).
@@ -67,8 +71,10 @@ function keyList(keys) {
  */
 export function envProblemOf(read) {
   if (!read || typeof read !== "object") return null;
+  // A file gone between the reader's two looks at it is gone too.
+  if (read.absent === true || read.unreadable === "ENOENT") return { kind: "absent", keys: null };
   if (read.untrusted) return { kind: "untrusted", keys: null };
-  if (read.unreadable) return { kind: "unreadable", code: String(read.unreadable).replace(/[^A-Za-z0-9_ -]/g, "").slice(0, 40), keys: null };
+  if (read.unreadable) return { kind: "unreadable", code: errorCodeOf(read.unreadable), keys: null };
   const skipped = Array.isArray(read.hazardSkipped) ? [...read.hazardSkipped].sort() : [];
   if (skipped.length > 0) return { kind: "hazard", line: Number.isSafeInteger(read.hazard?.line) ? read.hazard.line : null, keys: skipped };
   const unread = Array.isArray(read.unread) ? read.unread.filter((row) => row && row.shellSet !== true && typeof row.key === "string") : [];
@@ -76,14 +82,27 @@ export function envProblemOf(read) {
   return null;
 }
 
-/** The problem a reading that threw stands for: the `.env` could not be read, by the error's code, never its message. */
-export function thrownProblem(e) {
-  return { kind: "unreadable", code: String(e?.code ?? "error").replace(/[^A-Za-z0-9_ -]/g, "").slice(0, 40), keys: null };
+/**
+ * A system error's code (`EACCES`, `EISDIR`), or null for anything else: the reader hands back an error's message where
+ * it has no code, and a message can carry a path, which a viewer's banner must not.
+ */
+function errorCodeOf(text) {
+  return typeof text === "string" && /^E[A-Z0-9_]{1,30}$/.test(text) ? text : null;
 }
+
+/** The problem a reading that threw stands for: the `.env` could not be read, by the error's code alone. */
+export function thrownProblem(e) {
+  return { kind: "unreadable", code: errorCodeOf(e?.code), keys: null };
+}
+
+/** What tells one problem from another: its kind and the keys it hides, never the line (an edit above it moves that). */
+const problemIdentity = (problem) => (problem === null ? null : JSON.stringify([problem.kind, problem.keys]));
 
 /** The sentence for an `envProblemOf` problem: what keeps the `.env` from being read, in a few words. */
 function problemWords(problem) {
   switch (problem.kind) {
+    case "absent":
+      return "there is no file there any more";
     case "untrusted":
       return "another account can change it, so the console takes nothing from it";
     case "unreadable":
@@ -105,14 +124,17 @@ function problemWords(problem) {
 export function restartReasons({ start, now, refused = [] }) {
   const reasons = [];
   const problem = now?.problem ?? null;
-  const fresh = problem !== null && JSON.stringify(problem) !== JSON.stringify(start?.problem ?? null) ? problem : null;
+  const fresh = problem !== null && problemIdentity(problem) !== problemIdentity(start?.problem ?? null) ? problem : null;
   const covered = fresh === null ? new Set() : fresh.keys === null ? null : new Set(fresh.keys);
   const before = start?.values ?? {};
   const after = now?.values ?? {};
   const changed = covered === null ? [] : [...new Set([...Object.keys(before), ...Object.keys(after)])].filter((key) => (before[key] ?? null) !== (after[key] ?? null) && !covered.has(key)).sort();
   if (changed.length > 0) {
     const one = changed.length === 1;
-    reasons.push({ kind: "settings", keys: changed, sentence: `${keyList(changed)} ${one ? "has" : "have"} changed in the deployment's .env since this console started, and the console keeps the ${one ? "value" : "values"} it started with until it is restarted.` });
+    // Except the kill switch, which reads VALKEY_URL from the `.env` at each use (`killSwitchPlan`), so the service's own
+    // Valkey is paused whatever this console was started with; the sentence says so rather than claiming every use waits.
+    const killSwitch = changed.includes("VALKEY_URL") ? " Pause the fleet and Resume the fleet already use the `VALKEY_URL` the .env names now; the pages read the one the console started with." : "";
+    reasons.push({ kind: "settings", keys: changed, sentence: `${keyList(changed)} ${one ? "has" : "have"} changed in the deployment's .env since this console started, and the console keeps the ${one ? "value" : "values"} it started with until it is restarted.${killSwitch}` });
   }
   if (fresh !== null) {
     reasons.push({ kind: "env", problem: fresh, sentence: `The deployment's .env cannot be read now: ${problemWords(fresh)}. Fix it before restarting the console, since one started now would run without what it cannot read.` });
