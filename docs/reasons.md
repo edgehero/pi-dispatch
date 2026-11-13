@@ -977,7 +977,7 @@ What to do: pass it in the trigger's `run.secrets`.
 The server would be handed a variable the deployment keeps for the job itself: one of its credentials, or a setting
 the worker writes for it (such as `PI_JOB_SIZE_CPUS`).
 
-What to do: give the server's credential a variable of its own.
+What to do: give the server a variable of its own, not one the job keeps.
 
 ### mcp-excluded
 

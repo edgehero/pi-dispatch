@@ -274,7 +274,7 @@ const ROWS = [
 	["mcp-config-invalid", "Refused: the list of MCP servers could not be used: the overlay `mcp.json` before the job started, or the list the worker wrote for the job inside its container. Not run.", "Fix the overlay `mcp.json` (`pi-dispatch doctor` checks it), and run a worker and a job image of the same release."],
 	["mcp-server-unknown", mcpRefusalComment("mcp-server-unknown", null), "Declare the server in the overlay `mcp.json`, or fix the name in `run.mcp`."],
 	["mcp-secret-unmapped", mcpRefusalComment("mcp-secret-unmapped", null), "Pass the credential the server needs in the trigger's `run.secrets`."],
-	["mcp-secret-reserved", mcpRefusalComment("mcp-secret-reserved", null), "Give the server's credential a variable of its own."],
+	["mcp-secret-reserved", mcpRefusalComment("mcp-secret-reserved", null), "Give the server a variable of its own, not one the job keeps."],
 	["mcp-excluded", mcpRefusalComment("mcp-excluded", null), "Remove the server from `run.mcp`, or keep a tool that reaches it out of `run.excludeTools`."],
 	["mcp-egress-unreachable", mcpRefusalComment("mcp-egress-unreachable", null), "Add the server's host to the egress allowlist, or drop the server from `run.mcp`."],
 	["mcp-package-runner", mcpRefusalComment("mcp-package-runner", null), "Allow the package registry in the egress allowlist, or install the server in the job image."],

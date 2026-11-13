@@ -1501,7 +1501,7 @@ test("each of the check's other answers is said, by the reason it would refuse w
   assert.match(await warned(broken, { mcp: ["docs"] }), /refused as mcp-config-invalid.*cannot be read whole/);
   await quiet(none, { mcp: ["forge"] });
   const reserved = fixture({ mcpJson: { mcpServers: { k: { url: "https://k.example.com/mcp", description: "K", headers: { Authorization: "Bearer ${ANTHROPIC_API_KEY}" } } } }, run: { secrets: { ANTHROPIC_API_KEY: "op://v/r" } } });
-  assert.match(await warned(reserved, { mcp: ["k"] }), /refused as mcp-secret-reserved.*k: it references ANTHROPIC_API_KEY, which this deployment uses for the job's own credentials or settings\. Give the server's credential a variable of its own\./);
+  assert.match(await warned(reserved, { mcp: ["k"] }), /refused as mcp-secret-reserved.*k: it references ANTHROPIC_API_KEY, which this deployment uses for the job's own credentials or settings\. Give the server a variable of its own, not one the job keeps\./);
   // A server already on the trigger that this host refuses neither speaks nor hides the one being added.
   const both = fixture({ run: { mcp: ["linear"] }, env: { PI_FORWARD_ENV: "" } });
   const said = await quiet(both, { mcp: ["linear", "docs"] });
