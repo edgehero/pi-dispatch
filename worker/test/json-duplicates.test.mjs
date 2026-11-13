@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { findDuplicateKey } from "../src/json-duplicates.mjs";
@@ -40,6 +41,45 @@ test("the same key spelled two ways is ONE key to JSON.parse, and must be to thi
 	assert.equal(Object.keys(JSON.parse(text)).length, 1, "the premise: JSON.parse sees one key");
 	assert.equal(JSON.parse(text).flow, "evil");
 	assert.deepEqual(findDuplicateKey(text), { key: "flow", at: "flow" });
+});
+
+test("a key is decoded exactly as JSON.parse decodes it, escape by escape (issue #868)", () => {
+	// Since #868 a key with a backslash is decoded by JSON.parse of its literal and a key without one is a slice
+	// of the text, so what can go wrong is the choice between the two and where the literal ends. Every code
+	// unit is written twice: escaped as `\uXXXX`, and in the plainest spelling JSON allows, which is raw (the
+	// slice) for everything but a quote, a backslash and a control character. The key reported has to be the
+	// one JSON.parse made, which is the reading the check defends. The hand-written decoder before #868 passes
+	// this too, so the change could not move a verdict.
+	const hex4 = (c) => c.toString(16).padStart(4, "0");
+	for (let c = 0; c <= 0xffff; c++) {
+		const unit = String.fromCharCode(c);
+		const plain = c < 0x20 || c === 0x22 || c === 0x5c ? JSON.stringify(unit) : `"${unit}"`;
+		for (const hex of [hex4(c), hex4(c).toUpperCase()]) {
+			const text = `{${plain}:1,"${B}u${hex}":2}`;
+			const found = findDuplicateKey(text);
+			if (found?.key !== unit || found.at !== unit) assert.fail(`U+${hex}: found ${JSON.stringify(found)} in ${JSON.stringify(text)}`);
+		}
+		// Spot-check the premise rather than paying a second parse for every unit.
+		if (c % 4099 === 0) assert.deepEqual(Object.keys(JSON.parse(`{${plain}:1,"${B}u${hex4(c)}":2}`)), [unit]);
+	}
+
+	// The simple escapes, each against a spelling of the same character that is not itself.
+	const SIMPLE = [["/", "/"], ["b", `${B}u0008`], ["f", `${B}u000C`], ["n", `${B}u000a`], ["r", `${B}u000D`], ["t", `${B}u0009`], ['"', `${B}u0022`], [B, `${B}u005c`]];
+	for (const [esc, other] of SIMPLE) {
+		const text = `{"a${B}${esc}b":1,"a${other}b":2}`;
+		const [key] = Object.keys(JSON.parse(text));
+		assert.deepEqual(findDuplicateKey(text), { key, at: key }, `${B}${esc} is ${other}`);
+	}
+
+	// Surrogates: JSON.parse keeps a lone one as itself, so a pair written as two escapes, as one escape beside
+	// a raw half, and raw are all one key, and two different lone halves are two keys.
+	const smile = "\u{1f600}";
+	for (const spelling of [`${B}ud83d${B}ude00`, `${B}ud83d${smile[1]}`, `${smile[0]}${B}ude00`, `${B}uD83D${B}uDE00`]) {
+		assert.deepEqual(findDuplicateKey(`{"${smile}x":1,"${spelling}x":2}`), { key: `${smile}x`, at: `${smile}x` }, spelling);
+		assert.deepEqual(findDuplicateKey(`{"${spelling}x":1,"${smile}x":2}`), { key: `${smile}x`, at: `${smile}x` }, `${spelling}, second`);
+	}
+	assert.equal(findDuplicateKey(`{"${B}ud800":1,"${B}udc00":2,"${B}udc00${B}ud800":3,"${B}ud800${B}udc00":4}`), null);
+	assert.equal(Object.keys(JSON.parse(`{"${B}ud800":1,"${B}udc00":2,"${B}udc00${B}ud800":3,"${B}ud800${B}udc00":4}`)).length, 4);
 });
 
 test("a duplicate inside a STRING is not a duplicate", () => {
@@ -102,12 +142,17 @@ function mulberry(seed) {
 	};
 }
 
-// Deliberately including every character that means something to the scanner.
-const KEY_CHARS = ["a", "b", "Z", "_", "-", ".", " ", '"', "\\", "\n", "\t", "é", "漢", "$", "{", "}", ":", ",", "[", "]"];
+// Deliberately including every character that means something to the scanner. Since issue #868 that also
+// means the surrogates: a pair, which JSON.stringify writes raw, and each lone half, which it writes as a
+// `\u` escape, so a key can reach JSON.parse with one half escaped and the other raw.
+const KEY_CHARS = ["a", "b", "Z", "_", "-", ".", " ", '"', "\\", "\n", "\t", "é", "漢", "$", "{", "}", ":", ",", "[", "]", "\u{1f600}", "\ud800", "\udc00"];
 
 function randomKey(rnd) {
 	let k = "";
-	for (let i = 0, len = 1 + Math.floor(rnd() * 4); i < len; i++) k += KEY_CHARS[Math.floor(rnd() * KEY_CHARS.length)];
+	// Now and then a key of 13 characters or more, the length from which V8 makes a slice a view of the text
+	// rather than a copy, so the keys the Set compares are real slices as well as short copies.
+	const len = rnd() < 0.1 ? 13 + Math.floor(rnd() * 20) : 1 + Math.floor(rnd() * 4);
+	for (let i = 0; i < len; i++) k += KEY_CHARS[Math.floor(rnd() * KEY_CHARS.length)];
 	return k;
 }
 
@@ -143,6 +188,10 @@ function generate(rnd, depth, wantDuplicate, path, out) {
 		// Half the time the second occurrence is spelled with an escape, which is the case that separates a
 		// decoded comparison from a byte one.
 		const spelled = rnd() < 0.5 || k.length === 0 ? JSON.stringify(k) : escapedFirst(k);
+		// Which of the scanner's two ways of reading a key this pair takes (issue #868): both spellings free of
+		// a backslash are two slices, anything else reaches JSON.parse at least once.
+		if (`${JSON.stringify(k)}${spelled}`.includes(B)) out.parsedPairs++;
+		else out.slicedPairs++;
 		parts.push(`${spelled}:${generate(rnd, depth + 1, false, path, out)}`);
 	}
 	return `{${parts.join(",")}}`;
@@ -206,6 +255,39 @@ test("a value string is walked, not built, and its escapes still cannot end it e
 	assert.ok(grew < 8, `scanning a 4MB value must not allocate it again (grew ${grew.toFixed(1)}MB)`);
 });
 
+test("a long key costs about its own length, so 2MB keys fit a 32MB heap (issue #868)", () => {
+	// Keys were decoded one character at a time until #868, about 30 bytes of heap per character: a 4MB key took
+	// 123MB and a 16MB key ended a process with a 256MB heap, which for these files is a worker that dies at boot
+	// reading its own configuration. A heapUsed delta in this process would depend on when the collector ran, so
+	// the bound is a child whose heap is too small for the old cost. Measured on node 22, this child needs 137MB
+	// with the old decoder and dies here in about 90ms, and 14MB with a slice. It also reads the escaped spelling
+	// (JSON.parse, so that key costs its own decoded length) and a long value, then reports what it found.
+	const script = `
+		import { findDuplicateKey } from ${JSON.stringify(new URL("../src/json-duplicates.mjs", import.meta.url).href)};
+		const L = 2 * 1024 * 1024;
+		const B = String.fromCharCode(92);
+		const texts = {
+			plain: () => { const k = "k".repeat(L); return ['{"', k, '":1,"', k, '":2}'].join(""); },
+			escaped: () => { const k = "k".repeat(L) + B + "n"; return ['{"', k, '":1,"', k, '":2}'].join(""); },
+			value: () => ['{"t":[{"task":"', "v".repeat(L), '","flow":"a","flow":"b"}]}'].join(""),
+		};
+		const seen = {};
+		for (const [name, make] of Object.entries(texts)) {
+			const found = findDuplicateKey(make());
+			seen[name] = found && { keyLength: found.key.length, tail: found.key.slice(-2), at: found.at === found.key ? "the key" : found.at };
+		}
+		process.stdout.write(JSON.stringify(seen));
+	`;
+	const child = spawnSync(process.execPath, ["--max-old-space-size=32", "--input-type=module", "-e", script], { encoding: "utf8", timeout: 60_000 });
+	assert.equal(child.status, 0, `the scan must fit a 32MB heap (status ${child.status}, signal ${child.signal}): ${child.stderr.slice(-600)}`);
+	const L = 2 * 1024 * 1024;
+	assert.deepEqual(JSON.parse(child.stdout), {
+		plain: { keyLength: L, tail: "kk", at: "the key" },
+		escaped: { keyLength: L + 1, tail: "k\n", at: "the key" },
+		value: { keyLength: 4, tail: "ow", at: "t.0.flow" },
+	});
+});
+
 test("a CRLF file is read, not hung on", () => {
 	// `\r` is in STRUCTURAL, so a scanner that stopped treating it as whitespace could not advance past one
 	// and would spin forever: the worker and the receiver would HANG at boot rather than refuse, which is
@@ -217,10 +299,11 @@ test("a CRLF file is read, not hung on", () => {
 test("the scanner agrees with a generator that knows the answer, over thousands of documents", () => {
 	let checked = 0;
 	let withDuplicate = 0;
+	const out = { injected: null, slicedPairs: 0, parsedPairs: 0 };
 	for (let seed = 1; seed <= 3000; seed++) {
 		const rnd = mulberry(seed);
 		const wantDuplicate = seed % 2 === 0;
-		const out = { injected: null };
+		out.injected = null;
 		let text = generate(rnd, 0, wantDuplicate, [], out);
 		if (!text.startsWith("{") && !text.startsWith("[")) text = `{"root":${text}}`;
 		// The scanner's contract is text that already parsed, so a generated document that does not is out
@@ -249,6 +332,9 @@ test("the scanner agrees with a generator that knows the answer, over thousands 
 	// The generator has to actually be generating both, or this passes by producing nothing interesting.
 	assert.ok(checked > 2500, `too few documents survived the precondition: ${checked}`);
 	assert.ok(withDuplicate > 300, `too few documents carried an injected duplicate: ${withDuplicate}`);
+	// And a duplicate has to be found both ways a key is read, or one of them is checked by nothing here.
+	assert.ok(out.slicedPairs > 50, `too few duplicates spelled without an escape on either side: ${out.slicedPairs}`);
+	assert.ok(out.parsedPairs > 50, `too few duplicates spelled with an escape on a side: ${out.parsedPairs}`);
 });
 
 test("this module imports nothing", () => {
