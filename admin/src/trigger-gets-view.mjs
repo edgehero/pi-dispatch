@@ -66,7 +66,7 @@ export const TRIGGER_GETS_WORDS = Object.freeze({
   viewer: "An operator changes these on this page, with one preview and one Confirm.",
   noTool: "No tool reaches this action; dispatch_trigger_edit keeps today’s scope.",
   flowPicker: "It leaves out what is in a skills folder, or in a repository not on this host, and any other name can be typed.",
-  flowStale: "answered for the triggers file as it was, so it is unknown there",
+  flowStale: "answered for another version of the triggers file, so it is unknown there",
   reloadDrops: "A Confirm elsewhere on this page reloads it, and drops any change not yet written in What its jobs get.",
   othersUnread: "This page read the triggers file, and its other reads failed: the run history, the hosts and the jobs in line are unknown.",
   pillOrder: "differs in the order or kind of what it loads",
@@ -186,7 +186,7 @@ export const FLOW_TIER_WORDS = Object.freeze({ repository: "from the repository"
 
 /**
  * Doctor's row for this trigger's flow on this host, read against the file as this page read it (issue #869): `{ row }` where it answers
- * for the trigger as the file has it now, `{ stale: true }` where doctor judged it for the trigger as it was, or null where it has no row
+ * for the trigger as the file has it now, `{ stale: true }` where doctor judged another version of the trigger, or null where it has no row
  * for this flow. A row carries the basis of the fields it was judged from (`flowBasisOf`, `FLOW_INPUT_FIELDS`), and it answers only where
  * that is `trigger.flowBasis`, the basis of this page's own parse of the file, so an edit to any of those fields leaves that host with no
  * answer. A row at this trigger's position for another flow is stale too where it carries a basis other than this one: the flow was
@@ -374,7 +374,8 @@ function flowRow({ trigger, rows, editor }) {
     // Issue #869: an answer judged before a change to what the flow is found by. One sentence for one host or many, so it reads alike,
     // and none promises a later answer: a spent one-shot, a file the loaders refuse or a host whose own triggers file differs gets none.
     stale.length > 0 ? `${listed(stale)} ${TRIGGER_GETS_WORDS.flowStale}` : null,
-    silent.length > 0 ? `${listed(silent)} ${silent.length === 1 ? "has" : "have"} no answer for it yet` : null,
+    // No "yet": a flow that fails the skill charset, or a spent one-shot, never gets one.
+    silent.length > 0 ? `${listed(silent)} ${silent.length === 1 ? "has" : "have"} no answer for it` : null,
     unknown.length > 0 ? `${listed(unknown)} ${unknown.length === 1 ? "has" : "have"} no answer to read` : null,
   ].filter(Boolean);
   return {
@@ -639,7 +640,7 @@ export function triggerGetsOf({ trigger, records = [], historyUnread = false, ho
 /** What a fresh sandbox's Flow and MCP servers rows say (issue #847), in their own words. */
 export const SANDBOX_FRESH_WORDS = Object.freeze({
   noFlow: "This trigger names no flow.",
-  flowStale: "its last doctor run answered for the triggers file as it was",
+  flowStale: "its last doctor run answered for another version of the triggers file",
   flowLabel: "Flow",
   mcpLabel: "MCP servers",
 });
@@ -653,7 +654,7 @@ const freshListsWhole = (row, part) => !(row.unread ?? []).includes(part) && !((
  * only, whose repository is on no host, so doctor never answered its repository tier: a tier it found is named with the
  * trigger page's caveat that the repository comes first, and one it found nowhere a host can see is unknown, never
  * absent. Unknown too where doctor has no answer for this flow (the row was cut to fit, or the flow was named after that run), or answered
- * for the file as it was (`flowRowFor`).
+ * for another version of the file (`flowRowFor`).
  */
 function freshFlowWords(row, trigger) {
   if (trigger.flow === null) return SANDBOX_FRESH_WORDS.noFlow;

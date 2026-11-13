@@ -366,7 +366,7 @@ test("the flow row says each host's answer, reads no answer from a doctor run ab
   const flow = (tier, name = "fix", pkg = null) => ({ flows: [{ trigger: 2, flow: name, tier, package: pkg, repo: "unknown" }] });
   const view = (hosts, trigger = COMMENT) => published(hosts).then((loads) => triggerGetsOf({ trigger, hostLoads: loads, liveHosts: Object.keys(hosts) }).flow);
   assert.equal((await view({ a: flow("overlay"), b: flow("package", "fix", "pi-test-runner"), c: flow("none"), d: flow("repository"), e: flow("trigger"), f: flow("unknown") })).doctor, "a finds fix from the overlay; b finds fix from pi-test-runner; c finds fix in no tier; d finds fix from the repository; e finds fix from its skills folder; f finds fix in no tier a host can see.");
-  assert.equal((await view({ a: flow("overlay", "other"), b: null })).doctor, "a has no answer for it yet; b has no answer to read.");
+  assert.equal((await view({ a: flow("overlay", "other"), b: null })).doctor, "a has no answer for it; b has no answer to read.");
   assert.equal((await view({ a: flow("overlay") }, { ...COMMENT, flow: null })).doctor, null, "no flow, so nothing to answer");
   const command = await triggerGetsPage({ entry: { on: { type: "comment", phrase: "@pi" }, run: { kind: "github", command: "ship" } } });
   const panel = panelOf(command, "p-trigger-gets");

@@ -110,7 +110,7 @@ export function flowInputOf(trigger) {
 /**
  * The basis of a flow row (issue #869): a digest of what `flowTierOf` was asked of this trigger, from the trigger as the loader
  * parsed it. Doctor writes it beside each answer, and the console computes it from its own parse of the file it reads, through
- * this one function, so the two cannot compute it two ways. Where they differ, the answer was judged for the file as it was.
+ * this one function, so the two cannot compute it two ways. Where they differ, the answer was judged for another version of the file.
  * `flowTierOf` only asks whether a name is in `excludeExtensions`, so the list's order and a repeat change nothing here either.
  * REJECTED: leaving the list out under `"packages": false`, where `flowTierOf` does not look at it. An edit there would then keep
  * the answer, at the price of a copy of `flowTierOf`'s branches here that would have to move with them, and the cost of not doing

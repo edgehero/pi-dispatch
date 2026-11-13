@@ -1,7 +1,7 @@
 {
   "card": "TriggerEnvironment",
   "pr": 800,
-  "words": "8c75bff2c53f792e2c0db912cea864de1768587ec117696067b11bccafce5bfd",
+  "words": "857f5ecc83a4f20c21f49468134ee6072914687b1c5501e57d9945c483e4df6b",
   "elements": [
     {
       "el": "p-trigger-gets",
@@ -169,17 +169,17 @@
       ]
     },
     {
-      "el": "An answer doctor gave for the file as it was, a renamed flow included, reads unknown and promises no later answer, and no warning stands on it",
+      "el": "An answer doctor gave for another version of the triggers file, a renamed flow included, reads unknown and promises no later answer, and no warning stands on it",
       "kind": "readme",
       "status": "new",
       "panel": "p-trigger-gets",
       "source": "admin/src/trigger-gets-view.mjs#TRIGGER_GETS_WORDS",
-      "holds": "answered for the triggers file as it was, so it is unknown there",
+      "holds": "answered for another version of the triggers file, so it is unknown there",
       "golden": [
         "panels/trigger-gets-flow-stale.operator"
       ],
       "shows": [
-        "mini1 answered for the triggers file as it was, so it is unknown there;",
+        "mini1 answered for another version of the triggers file, so it is unknown there;",
         "no answer for its flow"
       ],
       "reason": "Issue #869. The card draws this state in the states panel; on the page it is the flow row's Doctor’s answer, beside build3's answer for the file as it is."

@@ -12713,15 +12713,15 @@ the worker's, exported from `@edgehero/pi-dispatch/doctor-results`, so the reade
     `flowTierOf` only asks whether a name is in it; a field that is not there reads as `flowTierOf`'s default. Held to that shape at the builder and at the parser: a row whose `basis`
     has any other shape is dropped and counted in `more`, never read as one with none. The console computes the same digest
     from its own parse of the file it reads, through the same exported function, and answers from a row only where the two
-    are equal, a row at the trigger's position for another flow being for the file as it was too; elsewhere the page says
-    that host answered for the triggers file as it was, so its answer is unknown (`DES-OPERATOR-CONSOLE`).
+    are equal, a row at the trigger's position for another flow being for another version of the file too; elsewhere the page
+    says that host answered for another version of the triggers file, so its answer is unknown (`DES-OPERATOR-CONSOLE`).
     A disarmed one-shot is the loader's sentinel, which names no flow, so it has no row, and a row from before it was spent
-    answers nothing for it. A collision costs one answer for the file as it was read as current, which is what every edit
+    answers nothing for it. A collision costs one answer for another version of the file read as current, which is what every edit
     cost before the basis: one in about four billion per edit, and only the operator writes the file. A longer digest was
     rejected, because the worst case already trims flow rows. **No new `v`**: a row with no `basis` is from a doctor before
     #869 and is read as before, and an older console reads a newer record through its allowlist, which drops `basis`, so it
     reads every row as before too. A release that changes what `flowTierOf` reads changes every basis, so a console and a
-    doctor on two sides of that release read each row as for the file as it was: unknown, never a wrong answer. **Still
+    doctor on two sides of that release read each row as for another version of the file: unknown, never a wrong answer. **Still
     free of PII and paths**: a digest of operator-written fields, cut to 32 bits, from which nothing reads back. Someone who
     holds the record can test a guess at all five fields at once, a full path included, and learns nothing else.
   - **Bounded**: 32 extensions, 64 skills, 32 servers with 4 keys each, 64 packages, 128 flows, each counted past its cap in

@@ -389,7 +389,9 @@ test("flowTierOf: the loader's order, first hit wins, and a forge trigger found 
 
 // Issue #869: a flow row says which version of the trigger it answered for, so a console reading the file after an edit can tell.
 test("a flow row's basis digests exactly the fields flowTierOf reads, read off its own signature, and each one moves it", () => {
-	// The names `flowTierOf` destructures from its first argument, from its source: a field it comes to read fails here first.
+	// The names `flowTierOf` destructures from its first argument, from its source: a field it comes to read fails here first. The pins' known
+	// limit: doctor changing a tier after `flowTierOf` returns, on a trigger field (as `blind` reads `g.packages`, which the basis holds), is not
+	// caught here, only by reading the change.
 	const signature = /^async function flowTierOf\(\{([^}]*)\}/.exec(Function.prototype.toString.call(flowTierOf));
 	assert.ok(signature, "flowTierOf still takes its trigger's fields as one destructured argument");
 	const read = signature[1].split(",").map((part) => part.split("=")[0].trim()).filter(Boolean);

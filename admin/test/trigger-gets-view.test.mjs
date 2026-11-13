@@ -509,7 +509,7 @@ test("a flow row judged for the file as it was answers nothing on the row, the w
   // A row an older doctor wrote has no basis to say so, and reads as before: no answer for this flow yet.
   const { basis: _old, ...currentOlderRow } = current.flows[0];
   assert.equal(flowRowFor({ flows: [currentOlderRow] }, renamed), null);
-  assert.equal((await gets({ mini1: { flows: [currentOlderRow] } }, renamed)).flow.doctor, "mini1 has no answer for it yet.");
+  assert.equal((await gets({ mini1: { flows: [currentOlderRow] } }, renamed)).flow.doctor, "mini1 has no answer for it.");
   // And this file's own row for a flow that failed the skill charset holds no name and this file's basis: no answer, never stale.
   assert.equal(flowRowFor({ flows: [{ ...current.flows[0], flow: null }] }, now), null);
 
@@ -538,7 +538,7 @@ test("a flow row judged for the file as it was answers nothing on the row, the w
   // A fresh sandbox says the same of the same row, in its own words.
   const host = { name: "mini1", state: "current", at: 1, ageMs: 0, every: 24, overlayExtensionsAllowed: true, extensions: [], skills: [], packages: [], mcp: [], unread: [], more: {}, piVersion: "1.5.0", image: "pi-job:1" };
   const fresh = (flows, flowBasis) => sandboxFreshRows({ hostLoads: { more: 0, hosts: [{ ...host, ...flows }] }, host: "mini1", triggerIndex: 2, image: "pi-job:1", flow: "fix", flowBasis }).find(([label]) => label === "Flow")[1].join("");
-  assert.equal(fresh(folder, now.flowBasis), "Whether a job of trigger 3 on this host would find fix is unknown: its last doctor run answered for the triggers file as it was.");
+  assert.equal(fresh(folder, now.flowBasis), "Whether a job of trigger 3 on this host would find fix is unknown: its last doctor run answered for another version of the triggers file.");
   assert.equal(fresh(folder, asRead({ skillsDir: "/srv/skills" }).flowBasis), "A job of trigger 3 on this host would find fix from its skills folder, unless the repository holds it at its base commit, which comes first.");
   assert.equal(fresh(folder, undefined), fresh(folder, now.flowBasis), "a caller that hands no basis gets no answer from a row that has one");
 });
