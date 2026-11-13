@@ -582,3 +582,77 @@ test("requestCancel's wait ends by the clock too: a poll that waited out an outa
 	assert.equal(redis.ops.filter((op) => op[0] === "get").length, 4, "four polls of 3 s pass the 10 s; by the sleeps alone it would have been forty");
 	assert.deepEqual(redis.ops.at(-1), ["del", "cancel:req:j3"]);
 });
+
+// ── issue #867: which write of the held sequence went unanswered, for a caller that words it ────────────────────────
+
+/** A command that reached a Valkey whose answer was lost, as the bounded clients reject it (connection.mjs). */
+const lostAnswer = () => Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT", valkeyMayStillRun: true });
+
+test("removeHeldJob names the write that went unanswered: the hold's first delete, or the job's removal (#867)", async () => {
+	// The hold's delete sent and lost, and the hold not read back either: the hold may or may not be gone, and the job was
+	// never asked to go.
+	const hold = heldWorld({ hash: { since: "1" } });
+	hold.redis.del = async (key) => {
+		hold.ops.push(["del", key]);
+		throw lostAnswer();
+	};
+	hold.redis.hexists = async () => {
+		throw lostAnswer();
+	};
+	assert.deepEqual(await removeHeldJob({ redis: hold.redis, queue: hold.queue, jobId: "j1" }), { invalid: "Command timed out", cleared: true, unanswered: "hold" });
+	assert.ok(!hold.ops.some((op) => op[0] === "remove"));
+	// The same delete with the hold read back gone: it ran, so the hold is known gone and nothing is unanswered.
+	const ran = heldWorld({ hash: { since: "1" } });
+	ran.redis.del = async () => {
+		throw lostAnswer();
+	};
+	ran.redis.hexists = async () => 0;
+	assert.deepEqual(await removeHeldJob({ redis: ran.redis, queue: ran.queue, jobId: "j1" }), { invalid: "Command timed out", cleared: true });
+	// Read back in place: nothing was changed.
+	const kept = heldWorld({ hash: { since: "1" } });
+	kept.redis.del = async () => {
+		throw lostAnswer();
+	};
+	kept.redis.hexists = async () => 1;
+	assert.deepEqual(await removeHeldJob({ redis: kept.redis, queue: kept.queue, jobId: "j1" }), { invalid: "Command timed out" });
+	// Timed out before it was written, by a bounded client that took it out of its queue: never sent, nothing changed.
+	const unsent = heldWorld({ hash: { since: "1" } });
+	unsent.redis.del = async () => {
+		throw Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT" });
+	};
+	unsent.redis.hexists = async () => {
+		throw Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT" });
+	};
+	assert.deepEqual(await removeHeldJob({ redis: unsent.redis, queue: unsent.queue, jobId: "j1" }), { invalid: "Command timed out" });
+	// The job's removal sent and lost, after the hold went: the job may or may not be gone.
+	const job = heldWorld({ hash: { since: "1" } });
+	const theJob = await job.queue.getJob("j1");
+	theJob.remove = async () => {
+		job.ops.push(["remove"]);
+		throw lostAnswer();
+	};
+	assert.deepEqual(await removeHeldJob({ redis: job.redis, queue: job.queue, jobId: "j1", touchStore: null }), { invalid: "Command timed out", cleared: true, unanswered: "job" });
+	// A read lost between the two (the lease's) leaves the hold known gone and the job not asked: no write is unanswered.
+	const lease = heldWorld({ hash: { since: "1", dedupId: "d1" } });
+	lease.redis.get = async () => {
+		throw lostAnswer();
+	};
+	assert.deepEqual(await removeHeldJob({ redis: lease.redis, queue: lease.queue, jobId: "j1" }), { invalid: "Command timed out", cleared: true });
+	// And an answer Valkey gave (BullMQ's refusal of a locked job) is no lost answer.
+	const locked = heldWorld({ hash: { since: "1" }, removeThrows: true });
+	assert.deepEqual(Object.keys(await removeHeldJob({ redis: locked.redis, queue: locked.queue, jobId: "j1" })), ["invalid", "cleared"]);
+});
+
+test("removeHeldJob refuses a job whose state cannot be read as that, and removeQueuedJob carries what went unanswered (#867)", async () => {
+	const unread = heldWorld({ hash: { since: "1" } });
+	(await unread.queue.getJob("j1")).getState = async () => {
+		throw lostAnswer();
+	};
+	assert.deepEqual(await removeHeldJob({ redis: unread.redis, queue: unread.queue, jobId: "j1" }), { invalid: "the state of job j1 could not be read (Command timed out), so nothing was changed" });
+	assert.ok(!unread.ops.some((op) => op[0] === "del"), "nothing was sent");
+	const { redis, queue, job } = queuedWorld({ hash: { since: "1" } });
+	job.remove = async () => {
+		throw lostAnswer();
+	};
+	assert.deepEqual(await removeQueuedJob({ redis, queue, job, jobId: "j1", touchStore: null }), { invalid: "Command timed out", cleared: true, unanswered: "job" });
+});

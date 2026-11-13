@@ -9806,7 +9806,15 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
   cancel <id>` again, where it said only the error, which read as nothing done. And every line that carries another
   module's words (the registry's, a removal's, the error under the could-not-reach line) carries them bounded, each
   C0, DEL and C1 character a space and at most 200 characters (`boundedText`), so a line whose words hold none of
-  those characters and are at most 200 characters long is byte for byte what it was.
+  those characters and are at most 200 characters long is byte for byte what it was. AMENDED 2026-11-13 (#867): the
+  CLI's BullMQ queues carry the bound its own client has had since #846, through `parseConnection`'s
+  `commandTimeoutMs`, and the lookup is bounded as one step. BullMQ builds a queue's ioredis client itself from the
+  options it is given, so the bound is an option (`commandTimeout`, with ioredis' resend of an unanswered command off)
+  and what `BoundedRedis` adds for its own clients is a hook on ioredis' `sendCommand` that acts only for a client
+  whose options carry the bound: the command's timer unref'd, and a command it wrote that got no answer marked
+  `valkeyMayStillRun`. The option is refused without `failFast`, whose client has no offline queue, so nothing it
+  gave up on can be sent later and no Worker's persistent connection can carry it. `removeHeldJob` says which write
+  went unanswered (`unanswered`), so the CLI's line names the hold or the job as maybe gone and not both.
 - **Why**: the abort machinery was complete with exactly two triggers, both automatic, and the only
   human-shaped door (`dispatch_wait_cancel`) reached held jobs only and was model-callable only -- an
   operator had to ask a model to stop a job the panel was showing them, or type `docker stop` by hand.
@@ -9825,6 +9833,16 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
   refused forever); **folding held rows into the LIST cursor** (perturbs the trigger-index/Tab
   arithmetic for no gain over a dedicated view); **a footer hint for `x`** (the footer's width
   arithmetic has no headroom; the hint rides the selected ACTIVE row and the held divider instead).
+  Rejected for #867: **the per-command bound alone for the lookup** (BullMQ connects inside the queue, and on a Valkey
+  that takes the connection and never answers ioredis' handshake waits a bound per command on each of the three
+  connections `failFast` tries: 6.4 s measured at a 1 s bound, so about 30 s at 5 s); **bounding the removal as one
+  step, as the console's `cancelQueuedJob` does** (it answers within its bound, but a single timer cannot tell a hold
+  delete that went unanswered from a job removal that did, so the line could only say "may or may not" of both, where
+  the CLI can say the job was never asked to go); **handing BullMQ a `BoundedRedis` client** (BullMQ treats a client it
+  is handed as shared, so `close()` leaves it open and every queue would need a disconnect of its own beside
+  `closeWithin`); **the bound on every BullMQ connection** (a Worker's BZPOPMIN blocks up to 10 s by design, and a
+  long-lived reader rides an outage out rather than giving up; the console's fleet reader may take the option for
+  #842, which is that issue's to decide).
 - **Residuals**: the one-tick ack race, the unreachable-owner timeout and the record latency are named
   in `INT-CANCEL-CHANNEL-CONTRACT`; a worker predating the contract acks nothing (release-ordering skew,
   `design.md`'s widening class, honest at the requester); the held partial failure keeps
@@ -9836,7 +9854,11 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
   ioredis's resend, after a reconnect, of a delete that already ran; the CLI's line says the hold was cleared (its error
   with each C0, DEL and C1 character a space, at most 200 characters of it), and `cancelHeldJob` (the panel's, the
   tool's and the console's `cancel-held`) and the console's `cancel-queued` say so in fixed words (`heldClearedAnswer`,
-  `partial`, the console's bar the partial one), never the error's and never "nothing was changed".
+  `partial`, the console's bar the partial one), never the error's and never "nothing was changed". Since #867 a
+  cleared answer whose failing write was sent and not answered also carries `unanswered`, which only the CLI words;
+  the start's own refusal check (`judgeValkeyAtStart`, up to 5 s of `valkeyAuthState` on a Valkey that stopped
+  answering) and the fleet reads (2 s) come before the lookup's bound, and a queue's socket can take ioredis' own 2 s
+  disconnect timeout to let go after the last line, both named in `INT-CANCEL-CHANNEL-CONTRACT`'s measurement.
 - **Traces to**: `REQ-OPERATOR-JOB-CANCEL`, `REQ-JOB-TIMEOUT-30M` (the abort machinery it rides),
   `CONST-RETRY-INFRA-ONLY` (policy, returned, never retried), `DES-CLI-SURFACE` (operator-typed tier),
   `INT-CANCEL-CHANNEL-CONTRACT`, `INT-WAIT-PROFILES-CONTRACT`
@@ -17591,6 +17613,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-11-13 (#867) | **`DES-CANCEL-VIA-REDIS-REQUEST-KEY` AMENDED**: the CLI's queues get its command bound (`parseConnection`'s `commandTimeoutMs`, `failFast` only) and the lookup a bound of its own as one step, with a `sendCommand` hook in connection.mjs that does for those BullMQ-built clients what `BoundedRedis` does for its own (timer unref'd, a written command's lost answer marked `valkeyMayStillRun`), inert for every client without the bound; `removeHeldJob` says which write went unanswered. Four rejected alternatives recorded (the per-command bound alone for the lookup, the removal bounded as one step, a `BoundedRedis` handed to BullMQ, the bound on every BullMQ connection). **`DES-OPERATOR-CONSOLE` UNCHANGED, checked**: the console's queue clients keep no bound (#842), and its doors ignore `unanswered`. **`DES-CLI-SURFACE` UNCHANGED, checked**: no command, flag or exit code of `cancel` changes; `auth` now exits 1 on a Valkey failure, the code its transient failures already had. |
 | 2026-11-12 (#847) | **`DES-OPERATOR-CONSOLE` AMENDED**: a fresh sandbox says where its flow would be found and which named MCP servers the host has (`sandboxFreshRows`, reusing the trigger page's `flowAnswer` and `lacksFlow` so the two pages cannot word it two ways), and the trigger card's extension row quotes what a run brought also when switched off, reversing the #800 posture that "what a run had of an extension is no part of a row the file now leaves out": that row is where a person decides to turn it back on, and the quote is past and attributed. Rejected: publishing counts per staged package in `doctor:loads:<name>` so a row could say what a package brings before any run loads it. The record is about 76 bytes under its 64 KiB cap at its worst (`WORST_BYTES`), so counts would push each trigger's flow answer out first (`FIT_ORDER`); tools cannot be counted without running code; and a count of skills alone would read as the whole. The row says it is not known until a run has loaded it instead. |
 | 2026-11-12 (#846, parts 1, 2 and 5) | **`DES-OPERATOR-CONSOLE` UNCHANGED, checked**: the console's per-call Valkey clients (`readBudget`, `readHosts`, `readHeldJobs`, `cancelHeldJob`, the `dispatch_run` rate check, the trigger fire, the schedule zones and the connections page's own: eight sites) gain the `error` listener #841 gave the zero-touch and answerer clients, so an outage no longer prints ioredis' stack trace per reconnect attempt (17 lines a read of `/insights`, 7 for each other `/insights` page); `admin/test/valkey-error-listeners.test.mjs` holds every construction to a listener beside it and the four pages to printing none against a dead port. **`DES-CANCEL-VIA-REDIS-REQUEST-KEY` UNCHANGED, checked**: the channel is the same; only the CLI's bound and its sentences moved (`INT-CANCEL-CHANNEL-CONTRACT`). **The render script's spend screen removed**: `docs/images/insights-view.png` stayed, by the #752 row below, until the next publish, because the published admin README loaded it from `main`; npm's page shows only the latest README (5.1.0's), which does not load it, and no release note does; the READMEs inside the 4.x tarballs (and `admin/README.md` at v4.0.0 to v4.3.1) do load it from `main` and now show no picture, which the owner accepted for a picture drawn by an older code path whose cost cards read "unknown". The picture and `render-images.mjs`'s `insightsPage` go, with the fixture's git repositories and the shot's full-page and clock options only it used, and the console's own pictures (`--console`, from its goldens) show that screen. **`DES-OPERATOR-CONSOLE` AMENDED** in its code list, which named `render-images.mjs` as rendering the picture. |
 | 2026-11-12 (#846, part 4) | **`DES-OPERATOR-CONSOLE` AMENDED**, "Undo": the claim that an inverse checked by `checkInverse` "can never preview a refusal of its own" did not hold for the whole pause-windows list, whose Undo replayed an old list holding a window the console refuses and whose preview then answered 400. That Undo is now judged as its own preview judges a list (`pauseListGoesBack`: `plainBody`, `pauseListShapeRefusal`, the loader's parse of the file it would write), and where that refuses the bar and the banner say to put the list back by hand (`refusedList`, `refusedListAfter`). |

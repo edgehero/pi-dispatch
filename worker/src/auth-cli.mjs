@@ -2,7 +2,9 @@ import { createInterface } from "node:readline/promises";
 import { loadConfig } from "./config.mjs";
 import { configuredSubscriptions } from "./subscription-config.mjs";
 import { subscriptionIdentity } from "./subscription-runtime.mjs";
-import { makeRedisClient } from "./connection.mjs";
+import { makeRedisClient, urlShown, VALKEY_COMMAND_TIMEOUT_MS } from "./connection.mjs";
+import { valkeyDownHint } from "./valkey-auth.mjs";
+import { boundedText } from "./cancel-cli.mjs";
 import { openBrowser } from "./open-browser.mjs";
 import { authError } from "./auth-store.mjs";
 import { OPENAI_LOGIN_INSTRUCTIONS } from "./oauth-openai.mjs";
@@ -22,6 +24,25 @@ export function authSelectAnswer(question, answer) {
 	return input;
 }
 
+/**
+ * The line for a Valkey failure (issue #867), or null when `error` is no Valkey failure: Valkey's own refusal (a reply),
+ * a configuration refusal this project raised (`valkeyRefused`), or a command that got no answer (a bound that fired, or
+ * one that reached a Valkey and lost its answer). `seen` is the client's last `error` event, which says why a client
+ * that never connected got none ("nothing answers VALKEY_URL ...") where the timeout says only that it got none. After a
+ * login the failure is the status read's, since a login sends nothing to Valkey. A trial's compare-and-set may have
+ * landed with its answer lost, so it is not said to have failed.
+ */
+export function authValkeyLine(error, { command, url, seen = null }) {
+	if (error?.valkeyRefused === true) return `Subscription authentication: ${boundedText(error.message)}`;
+	const refused = error?.name === "ReplyError";
+	// ioredis' own timeout by its words, not by `ETIMEDOUT` alone, which a provider's request can carry too.
+	if (!refused && error?.message !== "Command timed out" && error?.valkeyMayStillRun !== true) return null;
+	const lead = `Subscription authentication: ${command === "login" ? "the login finished, but " : ""}Valkey at ${urlShown(url)}`;
+	if (refused) return `${lead} refused ${boundedText(typeof error?.command?.name === "string" ? error.command.name.toUpperCase() : "a command")} (${boundedText(error.message)}).`;
+	const trial = command === "trial" && error?.valkeyMayStillRun === true ? " The trial grant may or may not have been made." : "";
+	return `${lead} did not answer (${boundedText(seen ?? error?.message)}).${trial} Run \`pi-dispatch auth status\` once it answers: ${valkeyDownHint(url)}`;
+}
+
 export async function runAuth(args, { env = process.env, write = (value) => process.stdout.write(value), writeErr = (value) => process.stderr.write(value), configure = configuredSubscriptions, configFn = loadConfig, redisFn = makeRedisClient, interaction = null, now = Date.now, terminalInput = process.stdin, terminalOutput = process.stdout, createPrompt = createInterface, openBrowserFn = openBrowser } = {}) {
 	const [command = "status", id, ...rest] = args;
 	if (!["status", "login", "logout", "usage", "trial"].includes(command) || rest.length > 0 || (command === "status" ? id !== undefined : !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(id ?? ""))) {
@@ -30,10 +51,26 @@ export async function runAuth(args, { env = process.env, write = (value) => proc
 	}
 	let redis;
 	let prompt;
+	let config;
+	// The client's last error event, for the line a Valkey failure ends with.
+	let seen = null;
+	let valkeyFailed = false;
 	try {
-		const config = configFn(env);
+		config = configFn(env);
 		if (!config.authConnectionsFile) { writeErr("Set PI_AUTH_CONNECTIONS_FILE to an operator-reviewed subscription connection policy.\n"); return 2; }
-		redis = redisFn(config.valkeyUrl);
+		// BOUNDED (issue #867): every command this client sends is a short read or one compare-and-set of a quota row, so one
+		// that waits past VALKEY_COMMAND_TIMEOUT_MS is a Valkey that is gone or stopped answering. Without the bound `auth
+		// status` and `auth usage` waited for as long as it stayed so (measured: `auth usage` on a closed port printed 18 stack
+		// traces in 8 s, one per reconnect attempt, while its read sat in ioredis' offline queue for as long as Valkey stayed
+		// gone). The bound is on each command, never on the client's life, so a login
+		// that waits minutes on a browser is not cut short: the login itself sends nothing to Valkey, only the status read
+		// after it. `disconnectTimeoutMs: 0`, as `cancel`'s probe, so the socket of a Valkey that stopped answering does not
+		// hold the process past its last line.
+		redis = redisFn(config.valkeyUrl, { commandTimeoutMs: VALKEY_COMMAND_TIMEOUT_MS, disconnectTimeoutMs: 0 });
+		// Without a listener ioredis prints a stack trace per reconnect attempt, for as long as an outage outlasts this call.
+		redis?.on?.("error", (err) => {
+			seen = err?.message ?? String(err);
+		});
 		const service = configure({ config, redis, now });
 		if (!interaction) interaction = {
 			async notify(event) {
@@ -76,11 +113,21 @@ export async function runAuth(args, { env = process.env, write = (value) => proc
 		write(`${JSON.stringify(result, (key, value) => ["accountGroup", "generation", "accountDigest", "credential", "registration"].includes(key) ? undefined : value, 2)}\n`);
 		return result?.ok === false || result?.kind === "unavailable" ? 2 : 0;
 	} catch (error) {
+		// A Valkey failure is one plain line naming Valkey, exit 1 as the transient failure it is: "auth-unavailable" and
+		// "Run auth status" said nothing of Valkey, and `auth status` needs the same Valkey.
+		const line = config?.valkeyUrl ? authValkeyLine(error, { command, url: config.valkeyUrl, seen }) : null;
+		if (line !== null) {
+			valkeyFailed = true;
+			writeErr(`${line}\n`);
+			return 1;
+		}
 		const code = typeof error?.code === "string" && /^(?:auth|subscription)-[a-z-]+$/.test(error.code) ? error.code : "auth-unavailable";
 		writeErr(`Subscription authentication: ${code}. Run auth status on the connection owner host.\n`);
 		return error?.transient === true ? 1 : 2;
 	} finally {
 		prompt?.close();
-		try { await redis?.quit(); } catch { redis?.disconnect?.(); }
+		// After a Valkey failure QUIT would wait out one more bound on a Valkey that stopped answering, for nothing.
+		if (valkeyFailed) redis?.disconnect?.();
+		else try { await redis?.quit(); } catch { redis?.disconnect?.(); }
 	}
 }

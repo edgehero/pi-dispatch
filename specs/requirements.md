@@ -492,6 +492,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   ran and has no record; with one or more (a job waiting to retry after a failed attempt) it made that many attempts,
   and whatever they recorded stays (most write a run record; a gate that fails above the processor's `try` writes
   none, so no record is promised). A cancel that no reachable worker acknowledges is a named refusal, never a silent no-op.
+  Since issue #867 the CLI's cancel ends within its bounds wherever Valkey stops answering, its lookup included, and its
+  line says what it changed at the point it stopped: nothing, while it looked for the job; that the job or a held job's
+  hold may or may not be gone, after their removal or delete was sent and not answered, with the cancel to run again
+  once Valkey answers.
 - **Why**: the abort machinery (`REQ-JOB-TIMEOUT-30M`) shipped complete with exactly two triggers, both
   automatic -- the kill timer and shutdown -- while the only human-shaped stop, `dispatch_wait_cancel`,
   reached held jobs only and was model-callable only. An operator watching a paid job misbehave had
@@ -505,7 +509,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   it (`admin/test/job-actions.test.mjs`, `cancelHeldJob finds a held job on a HOST queue ...`); given a console
   cancel of an active job that no worker acknowledges, the console answers the same named refusal as the CLI and the
   panel (`admin/test/console-actions.test.mjs`); each console cancel is audited with kind `cancel-active`,
-  `cancel-held` or, in bulk, `held-cancel-all`, and each panel cancel with actor role `panel`.
+  `cancel-held` or, in bulk, `held-cancel-all`, and each panel cancel with actor role `panel`. Given a Valkey that
+  takes the connection and never answers, the CLI's cancel ends at its bound during the lookup saying nothing was
+  changed, and given a removal or a hold's delete that was sent and not answered, it says the job or the hold may or
+  may not be gone (`worker/test/cancel-cli.test.mjs`, the #867 cases, on fakes and on real clients against a silent
+  loopback server and a closed port).
 
 ## REQ-FRONTEND-VISUAL-VERIFY
 
@@ -8688,6 +8696,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-13 (#867) | **`REQ-OPERATOR-JOB-CANCEL` AMENDED**, its statement and acceptance: the CLI's cancel ends within its bounds wherever Valkey stops answering, its lookup included, which #846 left as a named residual, and says what it changed at that point (nothing during the lookup; may or may not, after a removal or a hold's delete that was sent and not answered). **`REQ-SUBSCRIPTION-AUTHENTICATION` UNCHANGED, checked**: it names no CLI output; `pi-dispatch auth` now bounds each Valkey command and ends a Valkey failure with one line, where it printed ioredis' stack trace (`INT-SUBSCRIPTION-QUOTA-KEY`, docs/subscription-auth.md). **`REQ-OPERATOR-CONSOLE-SCREENS` UNCHANGED, checked**: the console's stop on a Valkey that stopped answering stays #842's. |
 | 2026-11-12 (#847) | **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: a fresh sandbox's What opens gains, where the host published a doctor run, a Flow row (where a job would find the trigger's flow, in the trigger page's words, or unknown) and, for a trigger that names any, an MCP servers row (on, switched off, not there, unknown; `forge` the job's own); an unread MCP part no longer makes the first row unknown for a trigger that names none; three goldens added (`sandbox-loaded-flow-found`, `-flow-unknown`, `-mcp-lacks`). (g1)'s extension row quotes what the newest run that loaded it brought also when it is switched off, and one no run has loaded says that is not known yet; an overlay entry says it has no manifest. UNCHANGED, checked: `INT-DOCTOR-RESULTS-KEY` (nothing new is published), `REQ-SANDBOX-FROM-THE-CONSOLE` (no control is added), the README's What a job gets (no sentence it holds moved). |
 | 2026-11-12 (#846, part 4) | **`REQ-OPERATOR-CONSOLE-ACTIONS` AMENDED**, (p): the cases whose Undo is by hand gain a whole pause-windows list its own preview would refuse (`refusedList`), which the whole-list action may replace and whose Undo was offered and then refused with a 400. |
 | 2026-11-12 (#859) | **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, doctor's `.env` reading: the boot-file keys (`ENV_FILE_READABLE_KEYS`, "two" corrected to five in the lead and the body) now reach the checks that read their files, not only the BOOT_FILES lines. `bootFileEnv` takes this shell's non-blank value, else the file's plain one, both resolved against the deployment folder, from the one reading of the file those lines already made (moved to the top of `collectChecks`); the service's own load verdict judges an envelope against the projects and limits the file names. A shell and a file naming different files is a ✗, as for every service key; a key only this shell sets joins the #471 shell-only line; an untrusted `.env` gives nothing; a line doctor cannot read leaves its file not known (a bundle's project is then a warning), never empty; `PI_MODEL_ENDPOINTS_FILE` keeps `endpointsFileSetting`, now for the cheaper-route proposals too; the envelope's and its context's reads gained the regular-file guard the others have, since a FIFO the `.env` named would now hang doctor. Before it, a service deployment checked from a plain shell was judged with no projects, scoped limits, pause windows or envelope: every secret bundle bound to a project FAILED as naming one projects.json does not hold, the per-project size lines went missing, and the fleet and applied-split lines compared nothing with healthy peers. UNCHANGED, checked: `SERVICE_ENV_KEYS` and `resolveDoctorEnv` (the five keys stay outside them), the BOOT_FILES lines' wording and two subjects (but for the envelope's service verdict, judged against the `.env`'s projects and limits, and the new ✗ where the subjects name different files). |

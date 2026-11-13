@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
-import { createServer } from "node:net";
+import { connect as netConnect, createServer } from "node:net";
 import { test } from "node:test";
-import { Command } from "ioredis";
+import { Command, Redis } from "ioredis";
 import { JudgedConnector, VALKEY_ERROR_QUIET_MS, givesUp, makeRedisClient, onValkeyError, parseConnection, useValkeyContext } from "../src/connection.mjs";
 
 // Issue #464, gate round 1 (measured on Fedora 44): WHATWG URL keeps an IPv6 literal's brackets in `hostname`, and the
@@ -449,4 +449,134 @@ test("a client with no command bound stays plain ioredis, so a worker's commands
 	assert.notEqual(Object.getPrototypeOf(plain), Object.getPrototypeOf(bounded));
 	assert.equal(bounded.options.commandTimeout, 40);
 	assert.equal(bounded.options.autoResendUnfulfilledCommands, false);
+});
+
+// ── issue #867: parseConnection's command bound, for the one-shot BullMQ queues of `pi-dispatch cancel` ─────────────
+
+const judgeHere = async () => ({ host: "127.0.0.1", servername: null, pinned: null });
+
+test("parseConnection's command bound is for a failFast client only, so a worker's persistent connection cannot carry one (#867)", () => {
+	// A Worker's blocking read waits longer than any bound by design, and a persistent client keeps an offline queue, from
+	// which ioredis would send a command that timed out once Valkey returns.
+	assert.throws(() => parseConnection("redis://127.0.0.1:1", { context: {}, commandTimeoutMs: 5000 }), (err) => err instanceof TypeError && /failFast/.test(err.message));
+	const bounded = parseConnection("redis://127.0.0.1:1", { context: {}, failFast: true, commandTimeoutMs: 5000 });
+	assert.equal(bounded.commandTimeout, 5000);
+	assert.equal(bounded.autoResendUnfulfilledCommands, false, "what the caller was told failed is never sent again on a later connection");
+	assert.equal(bounded.enableOfflineQueue, false);
+	assert.equal(bounded.piDispatchValkeyJudge.commandBound, true);
+	for (const options of [{}, { failFast: true }, ...[0, -1, 1.5, "40", null, Number.NaN].map((commandTimeoutMs) => ({ failFast: true, commandTimeoutMs }))]) {
+		const plain = parseConnection("redis://127.0.0.1:1", { context: {}, ...options });
+		assert.equal(plain.commandTimeout, undefined, JSON.stringify(options));
+		assert.equal(plain.autoResendUnfulfilledCommands, undefined, JSON.stringify(options));
+		assert.equal(plain.piDispatchValkeyJudge.commandBound, undefined, JSON.stringify(options));
+	}
+});
+
+test("a bounded failFast client says a command that reached a silent Valkey may still run, not one Valkey refused, and its timer holds no process (#867)", { timeout: 8000 }, async () => {
+	const valkey = await listeningValkey((text) => (/frozen-write/.test(text) ? "silent" : /refused-write/.test(text) ? "refuse" : "answer"));
+	const client = new Redis(parseConnection(`redis://127.0.0.1:${valkey.port}`, { context: {}, judge: judgeHere, failFast: true, commandTimeoutMs: 100 }));
+	client.on("error", () => {});
+	try {
+		await within(new Promise((resolve) => client.once("ready", resolve)));
+		// The refusal first: replies are matched in order, so after a command that is never answered nothing is.
+		const refused = await within(client.set("refused-write", "1")).catch((err) => err);
+		assert.match(refused.message, /refused here/);
+		assert.equal(refused.valkeyMayStillRun, undefined, "Valkey answered");
+		assert.equal(refused.code, undefined);
+		const command = new Command("set", ["frozen-write", "1"]);
+		const sent = client.sendCommand(command).catch((err) => err);
+		assert.equal(command._commandTimeoutTimer.hasRef(), false, "a one-shot that said its last line does not wait out a bound nobody awaits");
+		const lost = await within(sent);
+		assert.equal(lost.message, "Command timed out");
+		assert.equal(lost.code, "ETIMEDOUT");
+		assert.equal(lost.valkeyMayStillRun, true, "it reached the socket, so Valkey may run it when it wakes");
+	} finally {
+		client.disconnect();
+		valkey.close();
+	}
+	// Refused at once, never written (no connection, and no offline queue to wait in): no word about what may still run.
+	const unsent = await within(client.get("after-the-end")).catch((err) => err);
+	assert.match(unsent.message, /Connection is closed|Stream isn't writeable/);
+	assert.equal(unsent.valkeyMayStillRun, undefined);
+	// A client without the bound is left as ioredis made it: a worker's, a receiver's, every other failFast queue's.
+	const plain = new Redis(parseConnection("redis://127.0.0.1:1", { context: {}, failFast: true, lazyConnect: true }));
+	const planned = new Command("get", ["x"]);
+	const answer = plain.sendCommand(planned).catch((err) => err);
+	assert.equal(planned._commandTimeoutTimer, undefined);
+	plain.disconnect();
+	await answer;
+});
+
+/**
+ * A loopback proxy to the real Valkey that can stop passing bytes either way and later pass what it held, in order: a
+ * `kill -STOP` and a `kill -CONT` of that Valkey as one client sees them, without a Valkey process of the test's own.
+ */
+async function freezingProxy(target) {
+	const to = new URL(target);
+	let frozen = false;
+	const held = [];
+	const sockets = new Set();
+	const server = createServer((client) => {
+		const upstream = netConnect({ host: to.hostname.replace(/^\[(.*)\]$/, "$1"), port: Number(to.port || 6379) });
+		for (const s of [client, upstream]) {
+			sockets.add(s);
+			s.on("error", () => {});
+		}
+		client.on("data", (data) => (frozen ? held.push([upstream, data]) : upstream.write(data)));
+		upstream.on("data", (data) => (frozen ? held.push([client, data]) : client.write(data)));
+		client.on("close", () => upstream.destroy());
+		upstream.on("close", () => client.destroy());
+	});
+	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+	const via = new URL(target);
+	via.hostname = "127.0.0.1";
+	via.port = String(server.address().port);
+	return {
+		url: via.toString(),
+		freeze: () => (frozen = true),
+		thaw: () => {
+			frozen = false;
+			for (const [socket, data] of held.splice(0)) socket.write(data);
+		},
+		close: () => {
+			for (const s of sockets) s.destroy();
+			server.close();
+		},
+	};
+}
+
+test("a BullMQ queue with the bound reads as before, and its remove on a Valkey that stops answering ends at the bound, marked, and lands when Valkey wakes (#867, VALKEY_TEST_URL)", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL", timeout: 20_000 }, async () => {
+	const { makeQueue } = await import("../src/queue.mjs");
+	const target = process.env.VALKEY_TEST_URL;
+	const proxy = await freezingProxy(target);
+	const name = `pi-jobs-test-867-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+	const direct = makeQueue(parseConnection(target, { failFast: true }), { name });
+	const bounded = makeQueue(parseConnection(proxy.url, { failFast: true, commandTimeoutMs: 300, context: {}, judge: judgeHere }), { name });
+	try {
+		// The remove script in Valkey's cache first: a remove that waited out a NOSCRIPT would never be sent as EVAL.
+		const scratch = await direct.add("t", {}, { delay: 600_000 });
+		await direct.remove(scratch.id);
+		const added = await direct.add("t", { n: 1 }, { delay: 600_000 });
+		const job = await within(bounded.getJob(added.id));
+		assert.equal(job?.id, added.id, "a Valkey that answers is read through the bound as before");
+		assert.equal(await within(job.getState()), "delayed");
+		proxy.freeze();
+		const started = performance.now();
+		const lost = await within(job.remove()).catch((err) => err);
+		assert.equal(lost.message, "Command timed out");
+		assert.equal(lost.code, "ETIMEDOUT");
+		assert.equal(lost.valkeyMayStillRun, true);
+		assert.ok(performance.now() - started < 2000, "ended at the bound");
+		assert.equal((await direct.getJob(added.id))?.id, added.id, "nothing has reached Valkey yet");
+		proxy.thaw();
+		const until = Date.now() + 5000;
+		while ((await direct.getJob(added.id)) !== undefined && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 50));
+		assert.equal(await direct.getJob(added.id), undefined, "the remove the client gave up on ran once Valkey read it: may or may not, never 'nothing was changed'");
+	} finally {
+		proxy.thaw();
+		await bounded.close().catch(() => {});
+		await direct.obliterate({ force: true }).catch(() => {});
+		await direct.close().catch(() => {});
+		proxy.close();
+	}
 });

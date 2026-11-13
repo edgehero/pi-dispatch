@@ -100,6 +100,12 @@ shell/file declarations. Keep `PI_AUTH_CONNECTIONS_FILE`, `PI_AUTH_STORE_DIR`, `
 and the deployment's actual `VALKEY_URL`/Valkey credential context consistent with the worker. An unavailable
 Valkey or another host's policy is not evidence of a successful login.
 
+`auth` reads and writes the quota rows in Valkey, and each of those commands waits at most 5 seconds. When one meets
+a Valkey that is down or stops answering, `auth` ends with one line naming Valkey and what it said (exit 1), never a
+stack trace, and asks you to run `pi-dispatch auth status` once Valkey answers. A login sends nothing to Valkey, so after one the
+line starts with "the login finished, but": only the status read after it failed. After `auth trial`, it adds that the
+grant may or may not have been made, since Valkey may have run the write whose answer it never sent.
+
 The worker adapter requests `http://127.0.0.1:1455/auth/callback` and listens on
 `127.0.0.1:1455`. When the browser runs on another machine, establish a separate callback tunnel first:
 

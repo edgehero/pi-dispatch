@@ -116,6 +116,21 @@ test("no file constructs a Valkey client except through connection.mjs' judged c
 	assert.equal(matches("a BullMQ Queue, QueueEvents or FlowProducer", "new Queue(name, { connection })"), true);
 });
 
+// Issue #867: a command bound on a BullMQ connection (`parseConnection`'s `commandTimeoutMs`) is for `cancel`'s one-shot
+// queues. A Worker's blocking reads wait longer than any bound by design and a long-lived reader rides an outage out, so
+// neither may get it by accident: `parseConnection` refuses it without `failFast` (connection.test.mjs), and no other file
+// passes it. A caller that should (the console's fleet reader, #842) adds itself here, with its reason.
+test("the command bound on a BullMQ connection is passed in one file, cancel's, so no Worker or long-lived client gets it by accident (#867)", () => {
+	const passes = /\bparseConn(?:ection)?(?:Fn)?\([^;]*\bcommandTimeoutMs\b/;
+	const files = sources();
+	const allowed = ["worker/src/connection.mjs", "worker/src/cancel-cli.mjs"];
+	assert.deepEqual(files.filter((f) => passes.test(f.code) && !allowed.includes(f.path)).map((f) => f.path), []);
+	// Non-vacuity: cancel's lookup is found in the shape the pattern looks for, and a planted second caller is caught.
+	assert.match(files.find((f) => f.path === "worker/src/cancel-cli.mjs").code, /mkQueue\(parseConn\(url, \{ failFast: true, commandTimeoutMs: bound \}\), \{ name \}\)/);
+	for (const code of ["makeQueue(parseConnection(url, { failFast: true, commandTimeoutMs: 5000 }))", "parseConnectionFn(u, { commandTimeoutMs })"]) assert.ok(passes.test(code), code);
+	assert.ok(!passes.test("makeRedisClient(url, { commandTimeoutMs: 5000 })"), "a raw client's bound is makeRedisClient's own");
+});
+
 // Issue #468: the credential is part of the ONE connection function too. Every client of the project (the worker, the
 // CLI, the receiver, the admin panel, doctor) is built by parseConnection, so the password is attached there and nowhere
 // else, and VALKEY_PASSWORD is read from a process environment in one place (`valkeyClientContext`). A client that
