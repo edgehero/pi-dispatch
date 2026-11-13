@@ -479,10 +479,17 @@ export class JudgedConnector extends AbstractConnector {
 	 * where ioredis reads it for the connect about to start (the hook below). Here and not in `connect()`: by the time
 	 * ioredis asks the connector for a stream it has already built that connect's AUTH from `options.password`. The options
 	 * are the client's own object (ioredis hands its `options` to the Connector it constructs), so this is what the client
-	 * sends. A password from VALKEY_URL's userinfo comes back as it is, so it stays fixed. A context that throws, or names
-	 * an `error` (a `.env` that cannot be read, or a line in it the service's loader reads differently), keeps the last
-	 * password: it cannot say which one the file holds, and dropping the one that worked would refuse a client that is fine.
-	 * A context that gives none drops it, as a restart would.
+	 * sends. A password from VALKEY_URL's userinfo comes back as it is, so it stays fixed. The last password is kept by a
+	 * context that:
+	 *   - throws, or names an `error` (a `.env` that cannot be read, or a line in it the service's loader reads
+	 *     differently): it cannot say which password the file holds, and dropping the one that worked would refuse a client
+	 *     that is fine;
+	 *   - finds no file (`absent`): a `.env` gone, for good or for the moment an editor replaces it, is not a file that
+	 *     sets no password, so it does not drop one either (the console says to put the file back before a restart);
+	 *   - stands for another deployment than the one the client was built in (its `envPath` differs): the pi extension's
+	 *     context follows the deployment pointer, and a client built for one deployment's Valkey must never send the next
+	 *     deployment's password to it.
+	 * A context of the same deployment whose file gives none drops it, as a restart would.
 	 */
 	[FRESH_PASSWORD]() {
 		const judge = this.options?.[JUDGE];
@@ -493,7 +500,8 @@ export class JudgedConnector extends AbstractConnector {
 		} catch {
 			return;
 		}
-		if (!context || context.error) return;
+		if (!context || context.error || context.absent === true) return;
+		if ((context.envPath ?? null) !== (judge.context?.envPath ?? null)) return;
 		const { password } = valkeyPasswordFor(judge.url, context);
 		if (password) this.options.password = password;
 		else delete this.options.password;

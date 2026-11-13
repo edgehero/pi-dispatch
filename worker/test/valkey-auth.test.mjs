@@ -181,6 +181,10 @@ test("valkeyClientContext reads VALKEY_PASSWORD from the environment and the dep
 	assert.deepEqual(valkeyClientContext({ env: {}, cwd: dir }).password, { environment: null, file: PW });
 	assert.deepEqual(valkeyClientContext({ env: { VALKEY_PASSWORD: "E".repeat(20) }, cwd: dir }).password, { environment: "E".repeat(20), file: PW });
 	assert.deepEqual(valkeyClientContext({ env: { VALKEY_PASSWORD: "" }, cwd: tempDir("valkey-ctx-none-") }).password, { environment: null, file: null }, "empty is unset");
+	// Issue #845: a folder with no .env says so (`absent`), which a client reading its password at each connect tells
+	// from a file that sets none.
+	assert.equal(valkeyClientContext({ env: {}, cwd: tempDir("valkey-ctx-none-") }).absent, true);
+	assert.equal(valkeyClientContext({ env: {}, cwd: dir }).absent, false);
 	// The admin panel runs wherever pi was started, and installs the context its own one `.env` reader built (issue #471's
 	// `readDeploymentEnv`, the pointer's folder); a client with no context of its own gets it, and no file is read here.
 	const built = valkeyContextFromKeys({ env: {}, envPath: "/pointed/.env", fileKeys: { [VALKEY_PASSWORD_KEY]: PW, VALKEY_URL: "redis://127.0.0.1:6379" } });

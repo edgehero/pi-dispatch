@@ -443,7 +443,8 @@ export function panelValkeyContext({ env = process.env, pointerDir = null, owned
         : res.unread.length > 0
           ? `${res.path} assigns ${res.unread.map((u) => `${u.key} (line ${u.line})`).join(", ")} in a form the service's loader may read differently`
           : null;
-  return valkeyContextFromKeys({ env: own, envPath: res.path, fileKeys: res.fromFile, error, platform });
+  // Issue #845: and whether nothing is there, so a client that reads its password at each connect keeps it while a file is gone.
+  return valkeyContextFromKeys({ env: own, envPath: res.path, fileKeys: res.fromFile, error, absent: res.absent === true, platform });
 }
 
 /**

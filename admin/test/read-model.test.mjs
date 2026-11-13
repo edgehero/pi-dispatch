@@ -2972,6 +2972,10 @@ test("panelValkeyContext: the pointer's folder only, through #471's reader: noth
   assert.equal(ok.shared, true);
   assert.equal(ok.error, null);
   assert.equal(ok.envPath, join(dir, ".env"));
+  assert.equal(ok.absent, false);
+  // Issue #845: the pointer's folder with no .env says so, for the clients that read their password at each connect.
+  const empty = realpathSync(tempDir("admin-ctx-none-"));
+  assert.deepEqual([panelValkeyContext({ env: {}, pointerDir: empty }).absent, panelValkeyContext({ env: {}, pointerDir: empty }).envPath], [true, join(empty, ".env")]);
   // No pointer: pi's environment alone, even with a .env in the cwd.
   const none = panelValkeyContext({ env: { VALKEY_PASSWORD: "exported-by-the-operator" }, pointerDir: null });
   assert.equal(none.password.file, null);

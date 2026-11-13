@@ -58,7 +58,7 @@ export function defaultValkeyContext() {
 }
 
 /**
- * Where a client stands (issue #464, gate round 3): `{ envPath, shared, rootRefused, error, password }`.
+ * Where a client stands (issue #464, gate round 3): `{ envPath, shared, rootRefused, error, absent, password, url }`.
  *
  * The owner decision itself does not depend on this (gate round 3's simpler rule): on Linux EVERY client refuses a
  * listener held by a uid that is neither this account's euid, nor one of its subordinate uids, nor root, from any cwd.
@@ -86,10 +86,12 @@ export function valkeyClientContext({ env = process.env, cwd = process.cwd(), pl
 	const envPath = join(cwd, ".env");
 	let content = null;
 	let error = null;
+	let absent = false;
 	try {
 		content = readEnv(envPath);
 	} catch (err) {
-		if (err?.code !== "ENOENT") error = `${envPath} could not be read (${err?.code ?? err?.message})`;
+		if (err?.code === "ENOENT") absent = true;
+		else error = `${envPath} could not be read (${err?.code ?? err?.message})`;
 	}
 	const fileKeys = {};
 	if (content !== null) {
@@ -104,7 +106,7 @@ export function valkeyClientContext({ env = process.env, cwd = process.cwd(), pl
 		if (keys.error) error ??= keys.error;
 		else for (const k of [VALKEY_SHARED_KEY, VALKEY_PASSWORD_KEY, "VALKEY_URL"]) if (typeof keys.keys[k] === "string") fileKeys[k] = keys.keys[k];
 	}
-	return valkeyContextFromKeys({ env, envPath, fileKeys, error, platform, rootRefused });
+	return valkeyContextFromKeys({ env, envPath, fileKeys, error, absent, platform, rootRefused });
 }
 
 /**
@@ -138,9 +140,10 @@ export const VALKEY_CONTEXT_KEYS = Object.freeze(["VALKEY_URL", VALKEY_PASSWORD_
  * A context from keys a caller has already read out of the deployment's `.env` (`fileKeys`, the `VALKEY_CONTEXT_KEYS`
  * it supplied) and this process's environment. `valkeyClientContext` reads the file itself; the admin panel passes what
  * issue #471's resolver read, so the panel has one `.env` reader. `error` is a reason the file could not be read, as
- * `valkeyClientContext`'s.
+ * `valkeyClientContext`'s. `absent` (issue #845) is true when nothing is at `envPath`: no file, which is not a file that
+ * sets nothing, so a client that reads its password again at each connect keeps the one it has (`freshPassword`).
  */
-export function valkeyContextFromKeys({ env = process.env, envPath = null, fileKeys = {}, error = null, platform = process.platform, rootRefused } = {}) {
+export function valkeyContextFromKeys({ env = process.env, envPath = null, fileKeys = {}, error = null, absent = false, platform = process.platform, rootRefused } = {}) {
 	const fileVenue = typeof fileKeys.PI_BACKENDS === "string" ? { PI_BACKENDS: fileKeys.PI_BACKENDS } : {};
 	const shared = valkeySharedOn(fileKeys[VALKEY_SHARED_KEY]);
 	const filePassword = fileKeys[VALKEY_PASSWORD_KEY] || null;
@@ -156,7 +159,7 @@ export function valkeyContextFromKeys({ env = process.env, envPath = null, fileK
 	const engine = typeof env.PI_OPENSHELL_ENGINE === "string" ? env.PI_OPENSHELL_ENGINE : fileKeys.PI_OPENSHELL_ENGINE;
 	const derived = platform === "linux" && ((venues.podmanUsed && !venues.localUsed) || openshellSetupOf(venues, { PI_OPENSHELL_ENGINE: engine }).valkeyEngine === "podman");
 	const envUrl = typeof env.VALKEY_URL === "string" ? env.VALKEY_URL : null;
-	return { envPath, shared, rootRefused: typeof rootRefused === "boolean" ? rootRefused : derived, error, password: { environment: envPassword, file: filePassword }, url: { environment: envUrl, file: fileUrl } };
+	return { envPath, shared, rootRefused: typeof rootRefused === "boolean" ? rootRefused : derived, error, absent: absent === true, password: { environment: envPassword, file: filePassword }, url: { environment: envUrl, file: fileUrl } };
 }
 
 /**

@@ -284,7 +284,7 @@ test("freshContext: a context read that throws fails that connect the way a refu
 // Issue #845: a `freshContext` client's password is the context's as it is at each connect, so a password rotated in the
 // deployment's `.env` reaches a running console. What ioredis sends is `condition.auth`, which `_connect` builds from the
 // options, so that is what is read here. No dial: the judge refuses each connect, and the client retries by its strategy.
-test("freshContext: each connect sends the password the context gives then; the URL's own, a throwing or broken context, and withoutPassword keep theirs (#845)", async () => {
+test("freshContext: each connect sends the password the context gives then; the URL's own, a throwing, broken or missing context, another deployment's, and withoutPassword keep theirs (#845)", async () => {
 	const refuse = async () => {
 		throw new Error("no dial in this test");
 	};
@@ -331,6 +331,16 @@ test("freshContext: each connect sends the password the context gives then; the 
 		assert.equal(await connectOnce(fresh), "third-password", "a context that throws keeps the last password, and the connect still runs");
 		now = ctx(null, { error: "/d/.env line 3 has an open quote" });
 		assert.equal(await connectOnce(fresh), "third-password", "a .env that cannot be told keeps the last password rather than dropping one that works");
+		now = ctx(null, { absent: true });
+		assert.equal(await connectOnce(fresh), "third-password", "a .env gone (for good, or while an editor replaces it) is not one that sets none");
+		// The pi extension's context follows the deployment pointer: a client built for one deployment's Valkey never sends
+		// another deployment's password to it, and takes its own again once the context is its deployment's.
+		now = ctx("the-next-deployments-password", { envPath: "/other/.env" });
+		assert.equal(await connectOnce(fresh), "third-password", "another deployment's context: the last password stays");
+		now = ctx("the-next-deployments-password", { envPath: null });
+		assert.equal(await connectOnce(fresh), "third-password", "no deployment at all: the same");
+		now = ctx("fourth-password");
+		assert.equal(await connectOnce(fresh), "fourth-password", "its own deployment again");
 		now = ctx(null);
 		assert.equal(await connectOnce(fresh), null, "a context that gives none sends none, as a restart would");
 		assert.equal(Object.hasOwn(fresh.options, "password"), false);
