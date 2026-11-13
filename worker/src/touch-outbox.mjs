@@ -54,6 +54,11 @@ export async function trackTouchAction({ store, outbox = null, event, act, succe
 	const writer = outbox ?? { begin: (e) => store.begin(e), applied: (intent) => store.write(intent.event), abort: (intent) => store.abort(intent.event) };
 	const intent = await writer.begin(event);
 	let result;
+	// Aborted on any throw, also one whose answer was lost (`valkeyMayStillRun`, issue #867): a cancel's removal that then
+	// lands is a stop not counted, so the stops count can be one short (the rate is unaffected, since stops never enter
+	// its denominator). REJECTED: keeping the intent pending as unknown. Nothing resolves it (a rerun finds no job, the CLI
+	// has no outbox, `repair()` only begins it again), so the store reads `touch-actions-unresolved` with its coverage reset
+	// to now, the Zero touch page reads unavailable, and every later tracked action renews its 30-day TTL.
 	try { result = await act(); } catch (error) { await writer.abort(intent); throw error; }
 	if (!succeeded(result)) { await writer.abort(intent); return result; }
 	const tracked = await writer.applied(intent);

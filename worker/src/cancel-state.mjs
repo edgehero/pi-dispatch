@@ -143,16 +143,37 @@ export function ranBefore(job) {
 
 /**
  * Whether the hold is still there, read back after its delete failed: its CLOCK (`since`), the field that makes the hash
- * a hold, since the worker's own counters can re-create the key without it. False when it cannot be read.
+ * a hold, since the worker's own counters can re-create the key without it. True or false as read, null when it cannot
+ * be read (issue #867: a hold read back gone is known gone, one not read back is not known either way).
  */
 async function holdInPlace(redis, jobId) {
-	if (typeof redis?.hexists !== "function") return false;
+	if (typeof redis?.hexists !== "function") return null;
 	try {
 		return (await redis.hexists(jobKey(jobId), "since")) === 1;
 	} catch {
-		return false;
+		return null;
 	}
 }
+
+/**
+ * Whether a command's failure means it was never sent: a bounded client's timeout that came while the command still
+ * waited for a connection (`makeRedisClient`'s `BoundedRedis` takes such a command out of its queue, so it is never sent
+ * later either), told apart from one that reached a socket by the missing `valkeyMayStillRun`.
+ */
+function neverSent(err) {
+	return err?.code === "ETIMEDOUT" && err?.message === "Command timed out" && err?.valkeyMayStillRun !== true;
+}
+
+/**
+ * Whether a failure is Valkey giving no answer (issue #867): a bounded client's timeout, or a command it sent whose answer
+ * was lost (`valkeyMayStillRun`). An answer that changed nothing carries the failure's words as `noAnswer`, so a caller can
+ * say Valkey did not answer, and when to ask again, rather than quote it as a refusal; a caller that does not read it
+ * says what it said before.
+ */
+function noAnswer(err) {
+	return err?.code === "ETIMEDOUT" || err?.valkeyMayStillRun === true;
+}
+const noAnswerOf = (err) => (noAnswer(err) ? { noAnswer: err?.message ?? String(err) } : {});
 
 /**
  * Remove a job that is held on a `run.waitFor` condition: hold keys first, then the job (issue #230's
@@ -165,8 +186,14 @@ async function holdInPlace(redis, jobId) {
  * been sent for deletion (most often `remove` refusing a job a worker locked in between): the hold is gone, or partly
  * gone, while the job's own removal failed, which a caller must never word as "nothing was changed". A first delete
  * that failed answers `{ invalid }` only when the hold is read back in place afterwards (Valkey refused the command:
- * NOPERM, READONLY, MISCONF); a hold not read back, or a read that fails, keeps the mark, since a refusal can answer a
- * resend of a delete that already ran. Never throws.
+ * NOPERM, READONLY, MISCONF), or when it was never sent (`neverSent`); a hold not read back, or a read that fails, keeps
+ * the mark, since a refusal can answer a resend of a delete that already ran. Never throws.
+ * Issue #867: a cleared answer whose failure was a lost answer (`valkeyMayStillRun`: the command reached a Valkey that
+ * then did not answer, so it may still run) says which write that was, `unanswered`: "hold" for the hold's first delete,
+ * when the hold could not be read back either (the hold may or may not be gone, and the job was not asked to go), "job"
+ * for the job's own removal (the hold is gone, and the job may or may not be). A job whose state cannot be read is
+ * refused as that, never as one that left the hold. An answer that changed nothing because Valkey gave none (a read past
+ * its bound, a delete never sent) carries the failure's words as `noAnswer`.
  * Writes no run record of its own (INT-RUN-HISTORY-FILE-CONTRACT records terminal states of runs, and a removed hold
  * is none); `attemptsMade` is what the job had done before, for the caller's sentence (`ranBefore`, issue #477): a job
  * held again on a retry has made attempts, and whatever they recorded stays. Once the job is removed, its model attempt
@@ -177,6 +204,9 @@ async function holdInPlace(redis, jobId) {
 export async function removeHeldJob({ redis, queue, jobId, timeoutMs = 2_000, dropDefer = false, touchStore = undefined, touchOutbox = null, now = Date.now, interventionOrigin = "human" }) {
 	// Set as the first hold key's delete is sent, before it is answered: a delete lost in transit may still have landed.
 	let cleared = false;
+	// The write in flight, for `unanswered`: the hold's first delete, then the job's removal; null between them, where a
+	// failure leaves the hold known gone and the job not asked.
+	let step = null;
 	try {
 		const hash = await redis.hgetall(jobKey(jobId));
 		// A hold is a hash with a CLOCK, not merely a non-empty hash: the worker's own counters create this
@@ -188,7 +218,12 @@ export async function removeHeldJob({ redis, queue, jobId, timeoutMs = 2_000, dr
 		// while the job wakes, runs and completes -- and bullmq will happily `remove()` a completed job. That
 		// would answer `applied: true` to an operator who approved a dialog reading "It will never run", for
 		// a job whose run record is already on disk.
-		const state = await job.getState().catch(() => null);
+		let unread = null;
+		const state = await job.getState().catch((err) => ((unread = err), null));
+		// Issue #867: a read that failed (on a bounded queue, one Valkey did not answer) says nothing of where the job is,
+		// so it is no job that "has already left the hold": nothing was sent, and that is what is said, before the
+		// failure's own words, which a caller may cut.
+		if (unread !== null) return { invalid: `the state of job ${jobId} could not be read, so nothing was changed: ${unread?.message ?? String(unread)}`, ...noAnswerOf(unread) };
 		if (state !== "delayed" && state !== "waiting" && state !== "prioritized") {
 			return { invalid: `job ${jobId} is ${state ?? "in an unknown state"}, not waiting -- it has already left the hold` };
 		}
@@ -196,28 +231,40 @@ export async function removeHeldJob({ redis, queue, jobId, timeoutMs = 2_000, dr
 		// mid-sequence, an orphaned hash would keep a row on the panel for a job that no longer exists; an
 		// orphaned JOB is merely a job that still runs, which is the state the operator was already in.
 		cleared = true;
+		step = "hold";
 		try {
 			await redis.del(jobKey(jobId));
 		} catch (err) {
 			// A failed DEL may still have run: ioredis resends an unanswered command after a reconnect, and the refusal
 			// (an ACL without DEL, a read-only replica, a failed save) can be the answer to that resend. So the hold is
 			// read back, and only a hold still in place makes "nothing was changed" true; a read that fails keeps the mark.
-			if (await holdInPlace(redis, jobId)) cleared = false;
+			// A DEL never sent changed nothing either, whatever the read says. One read back gone ran.
+			const inPlace = await holdInPlace(redis, jobId);
+			if (inPlace === true || neverSent(err)) cleared = false;
+			else if (inPlace === false) step = null;
 			throw err;
 		}
+		step = null;
 		await redis.srem(HELD_SET, jobId).catch(() => {});
 		if (hash.dedupId) {
 			const holder = await redis.get(leaseKey(hash.dedupId));
 			if (holder === jobId) await redis.del(leaseKey(hash.dedupId));
 		}
 		const store = touchStore === undefined ? (typeof redis?.eval === "function" ? makeTouchStore({ redis, now }) : null) : touchStore;
-		const removal = interventionOrigin === "agent" ? (await job.remove(), { ok: true }) : await trackTouchAction({ store, outbox: touchOutbox, event: stopTouch(job, queue, jobId, now), act: async () => { await job.remove(); return { ok: true }; }, succeeded: () => !(job.attemptsMade > 0) && isWorkload(job) });
+		const remove = async () => {
+			step = "job";
+			await job.remove();
+			return { ok: true };
+		};
+		const removal = interventionOrigin === "agent" ? await remove() : await trackTouchAction({ store, outbox: touchOutbox, event: stopTouch(job, queue, jobId, now), act: remove, succeeded: () => !(job.attemptsMade > 0) && isWorkload(job) });
+		step = null;
 		await Promise.all([dropDefer ? dropDeferRecord(redis, jobId, timeoutMs) : null, dropAttemptOf(redis, queue, jobId, timeoutMs)]);
 		// Issue #477: what the job had done, for the caller's sentence (`ranBefore`); read off the job just removed.
 		return { ok: true, jobId, attemptsMade: Number.isInteger(job.attemptsMade) && job.attemptsMade > 0 ? job.attemptsMade : 0, ...(removal.touchWarning ? { touchWarning: removal.touchWarning } : {}) };
 	} catch (err) {
 		const invalid = err?.message ?? String(err);
-		return cleared ? { invalid, cleared: true } : { invalid };
+		if (!cleared) return { invalid, ...noAnswerOf(err) };
+		return { invalid, cleared: true, ...(err?.valkeyMayStillRun === true && step !== null ? { unanswered: step } : {}) };
 	}
 }
 
@@ -238,8 +285,10 @@ export const QUEUED_STATES = Object.freeze(["delayed", "waiting", "prioritized",
  *   any other state                                      -> nothing is changed.
  *
  * A HOLD IS JUDGED FIRST: a held job IS delayed, and the plain path would strand its `wait:*` keys as a panel row for a
- * job that no longer exists. A hash that cannot be read is not a hold, as the CLI has always read it. `state` is the
- * state the caller already read, or null to read it here.
+ * job that no longer exists. So a hash that cannot be read refuses, nothing changed (issue #867): it was read as no hold,
+ * and a read that timed out on a Valkey that then woke removed a held job by the plain path, leaving its hash and its
+ * `wait:held` member as a panel row for a job that was gone. A client with no `hgetall` (a bare test wiring) has no hold
+ * to read. `state` is the state the caller already read, or null to read it here.
  *
  * `guard` (optional; the CLI passes none) is a caller's last check, asked with `job` right before the removal is sent:
  * before `removeHeldJob` for a held job, and after the state check, before `remove()`, otherwise. It answers null to go
@@ -253,10 +302,13 @@ export const QUEUED_STATES = Object.freeze(["delayed", "waiting", "prioritized",
  * (issue #812), beside the record, so the two deletes share one bound: here for a waiting job, inside `removeHeldJob`
  * (`dropDefer`) for a held one. Returns, and never throws:
  *   `{ ok: true, held: true, jobId, attemptsMade }`         a held job, removed;
- *   `{ invalid }`                                            `removeHeldJob`'s own refusal of a held job, nothing changed;
- *   `{ invalid, cleared: true }`                             `removeHeldJob` failed after its hold's keys were deleted: the
+ *   `{ invalid, holdUnread, noAnswer? }`                     the hold's hash could not be read (`holdUnread`, the failure's
+ *                                                            words; `noAnswer` when Valkey gave none): nothing was sent;
+ *   `{ invalid, noAnswer? }`                                 `removeHeldJob`'s own refusal of a held job, nothing changed;
+ *   `{ invalid, cleared: true, unanswered? }`                `removeHeldJob` failed after its hold's keys were deleted: the
  *                                                            hold is gone and the job's own removal failed (never "nothing
- *                                                            was changed");
+ *                                                            was changed"), or a write of it was not answered
+ *                                                            (`unanswered`, removeHeldJob's);
  *   `{ refused, error? }`                                    the guard's answer (`refused`), or its throw (`refused` null,
  *                                                            `error` the throw); nothing was sent;
  *   `{ notQueued: true, state }`                             not waiting to start (`active`, `completed`, `unknown`...);
@@ -264,17 +316,24 @@ export const QUEUED_STATES = Object.freeze(["delayed", "waiting", "prioritized",
  *   `{ raced: true, state, error }`                          `remove()` threw (most often: a worker took the job between
  *                                                            the read and the remove, or it is a job scheduler's next
  *                                                            run, which BullMQ refuses to remove); `state` is read again.
+ *                                                            An `error` with `valkeyMayStillRun` was sent and not answered,
+ *                                                            so the remove may yet run (issue #867).
  * `attemptsMade` is the job's own count for the caller's sentence (`ranBefore`), 0 when it is not a positive whole number.
  */
 export async function removeQueuedJob({ redis, queue, job, jobId, state = null, timeoutMs = 2_000, guard = null, touchStore = undefined, touchOutbox = null, now = Date.now, interventionOrigin = "human" }) {
-	const hash = await Promise.resolve()
+	let holdUnread = null;
+	const hash = typeof redis?.hgetall !== "function" ? null : await Promise.resolve()
 		.then(() => redis.hgetall(jobKey(jobId)))
-		.catch(() => null);
+		.catch((err) => ((holdUnread = err), null));
+	if (holdUnread !== null) {
+		const words = holdUnread?.message ?? String(holdUnread);
+		return { invalid: `could not read whether job ${jobId} is held on a wait condition, so nothing was changed: ${words}`, holdUnread: words, ...noAnswerOf(holdUnread) };
+	}
 	if (hash?.since) {
 		const stop = await guarded(guard, job);
 		if (stop !== null) return stop;
 		const res = await removeHeldJob({ redis, queue, jobId, timeoutMs, dropDefer: true, touchStore, touchOutbox, now, interventionOrigin });
-		if (!res.ok) return res.cleared === true ? { invalid: res.invalid, cleared: true } : { invalid: res.invalid };
+		if (!res.ok) return res.cleared === true ? { invalid: res.invalid, cleared: true, ...(res.unanswered ? { unanswered: res.unanswered } : {}) } : { invalid: res.invalid, ...(res.noAnswer !== undefined ? { noAnswer: res.noAnswer } : {}) };
 		return { ok: true, held: true, jobId: res.jobId, attemptsMade: res.attemptsMade, ...(res.touchWarning ? { touchWarning: res.touchWarning } : {}) };
 	}
 	if (!job) return { notQueued: true, state: "unknown" };

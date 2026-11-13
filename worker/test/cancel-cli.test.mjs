@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { existsSync } from "node:fs";
+import { createServer } from "node:net";
 import { test } from "node:test";
 import { boundedText, runCancel } from "../src/cancel-cli.mjs";
 import { ranBefore } from "../src/cancel-state.mjs";
@@ -508,7 +509,7 @@ test("a state read that does not answer ends at the bound, and a queue close tha
 	const queueFn = (conn, opts) => ({ ...seams.queueFn(conn, opts), close: () => new Promise(() => {}), disconnect: async () => { dropped += 1; } });
 	const started = Date.now();
 	assert.equal(await runCancel("j8", "redis://x", { ...seams, queueFn, ackTimeoutMs: 1000, commandTimeoutMs: 50, closeTimeoutMs: 50 }), 1);
-	assert.match(err.join(""), /the job's state could not be read \(no answer within 0s\)/);
+	assert.match(err.join(""), /the job's state could not be read \(no answer within 50 ms\)/);
 	assert.equal(dropped, 1, "the queue whose close was not answered is dropped");
 	assert.ok(Date.now() - started < 2000, "both bounds held the verb only as long as they are");
 });
@@ -524,4 +525,231 @@ test("a first state read that failed is said as that, never as a job that is unk
 	};
 	assert.equal(await runCancel("j8", "redis://x", seams), 1);
 	assert.equal(err.join(""), "error: could not read the state of j8 (Connection is closed.), so whether it is running is not known; nothing was changed. Run `pi-dispatch cancel j8` again once Valkey answers\n");
+});
+
+// ── issue #867: every queue command has the probe's bound, and each point it can stop at says what it changed ──────────
+
+/** What the bounded clients reject a command with that reached a Valkey and got no answer (connection.mjs marks it). */
+const lostAnswer = () => Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT", valkeyMayStillRun: true });
+
+test("the queues are built with the probe's bound on every command (#867)", { skip: needsDeps }, async () => {
+	const { seams } = world({ jobKnown: false, queueNames: ["pi-jobs", "pi-jobs@a"] });
+	const asked = [];
+	const { VALKEY_COMMAND_TIMEOUT_MS } = await import("../src/connection.mjs");
+	await runCancel("j1", "redis://x", { ...seams, parseConnectionFn: (url, opts) => (asked.push(opts), { url }) });
+	assert.deepEqual(asked, [{ failFast: true, commandTimeoutMs: VALKEY_COMMAND_TIMEOUT_MS }, { failFast: true, commandTimeoutMs: VALKEY_COMMAND_TIMEOUT_MS }]);
+});
+
+/** A probe that reports it connected, as ioredis' `connect` event does once a socket to Valkey is open. */
+const connectedProbe = (probe) => Object.assign(probe, { on: (event, fn) => (event === "connect" ? fn() : undefined) });
+
+test("a lookup Valkey does not answer ends at its bound, says nothing was changed, and drops its queue (#867)", { skip: needsDeps, timeout: 10_000 }, async () => {
+	// The lookup never answering (the queue still connecting to a Valkey that took the connection), and the lookup's
+	// own command rejected at its bound by the queue's client: the same point, the same words.
+	for (const [getJob, said, connects] of [[() => new Promise(() => {}), "no answer within 50 ms", true], [async () => { throw lostAnswer(); }, "Command timed out", false]]) {
+		const { err, ops, seams } = world({ hash: {}, state: "delayed" });
+		if (connects) connectedProbe(seams.redisFn());
+		let dropped = 0;
+		const queueFn = (conn, opts) => ({ ...seams.queueFn(conn, opts), getJob, close: () => new Promise(() => {}), disconnect: async () => { dropped += 1; } });
+		const started = Date.now();
+		assert.equal(await runCancel("j1", "redis://x", { ...seams, queueFn, commandTimeoutMs: 50, closeTimeoutMs: 50 }), 1);
+		assert.equal(err.join(""), `error: Valkey at redis://x stopped answering (${said}) while cancel looked for j1, so nothing was changed. Run \`pi-dispatch cancel j1\` again once Valkey answers\n`);
+		assert.ok(Date.now() - started < 2000, "the lookup and the close each held the verb only as long as their bound");
+		assert.equal(dropped, 1, "the queue whose close was not answered is dropped");
+		assert.deepEqual(ops, [["disconnect"]], "nothing but the lookup was asked");
+	}
+});
+
+test("a lookup that never got a connection is a Valkey that could not be reached, with the hint, not one that stopped answering (#867)", { skip: needsDeps, timeout: 10_000 }, async () => {
+	// An address that drops the connect (a firewall, a host that is off): `failFast` takes about 6.4 s to give up, so the
+	// lookup's 5 s bound fires first, and before the review that read as "stopped answering" with no hint.
+	const { err, seams } = world({ hash: {}, state: "delayed" });
+	const queueFn = (conn, opts) => ({ ...seams.queueFn(conn, opts), getJob: () => new Promise(() => {}) });
+	assert.equal(await runCancel("j1", "redis://x", { ...seams, queueFn, commandTimeoutMs: 50, closeTimeoutMs: 50 }), 1);
+	assert.equal(err.join(""), "error: could not reach Valkey at redis://x while cancel looked for j1, so nothing was changed: is the Valkey at x running?\n  no connection within 50 ms\n");
+	// The queue giving up on its own with a connect timeout says the same, in the client's words.
+	const gaveUp = world({ hash: {}, state: "delayed" });
+	const timedOut = (conn, opts) => ({ ...gaveUp.seams.queueFn(conn, opts), getJob: async () => { throw Object.assign(new Error("connect ETIMEDOUT"), { code: "ETIMEDOUT" }); } });
+	assert.equal(await runCancel("j1", "redis://x", { ...gaveUp.seams, queueFn: timedOut }), 1);
+	assert.equal(gaveUp.err.join(""), "error: could not reach Valkey at redis://x while cancel looked for j1, so nothing was changed: is the Valkey at x running?\n  connect ETIMEDOUT\n");
+});
+
+test("a lookup that cannot reach Valkey says nothing was changed, and why (#867)", { skip: needsDeps }, async () => {
+	const { err, seams } = world({ hash: {}, state: "delayed" });
+	const queueFn = (conn, opts) => ({ ...seams.queueFn(conn, opts), getJob: async () => { throw new Error("connect ECONNREFUSED 127.0.0.1:1"); } });
+	assert.equal(await runCancel("j1", "redis://x", { ...seams, queueFn }), 1);
+	assert.equal(err.join(""), "error: could not reach Valkey at redis://x while cancel looked for j1, so nothing was changed: is the Valkey at x running?\n  connect ECONNREFUSED 127.0.0.1:1\n");
+});
+
+test("a remove sent and not answered may or may not have been removed, and is never said to have changed nothing (#867)", { skip: needsDeps }, async () => {
+	const lost = "error: Valkey at redis://x stopped answering (Command timed out) after the removal of j8 was sent, so it may or may not have been removed. Once Valkey answers, run `pi-dispatch cancel j8` again: it removes the job if it is still queued, and says so if it is gone\n";
+	// What the state reads after the remove: not read at all, or read in no list (BullMQ's "unknown"). Either way the remove
+	// may have run, and the #846 re-read would have said "nothing was changed" of the first.
+	for (const after of [() => { throw lostAnswer(); }, () => "unknown"]) {
+		const { err, ops, seams } = world({ hash: {}, state: "delayed" });
+		const job = await seams.queueFn(null, { name: "pi-jobs" }).getJob("j8");
+		let reads = 0;
+		job.getState = async () => (++reads === 1 ? "delayed" : after());
+		job.remove = async () => {
+			ops.push(["remove"]);
+			throw lostAnswer();
+		};
+		assert.equal(await runCancel("j8", "redis://x", seams), 1);
+		assert.equal(err.join(""), lost);
+		assert.ok(ops.some((op) => op[0] === "remove"), "the remove was really sent (this test would be vacuous otherwise)");
+	}
+	// Read back in a list after it: its remove is one script, so the job is still there, and the line says so.
+	const back = world({ hash: {}, state: "delayed" });
+	const kept = await back.seams.queueFn(null, { name: "pi-jobs" }).getJob("j8");
+	kept.remove = async () => {
+		throw lostAnswer();
+	};
+	assert.equal(await runCancel("j8", "redis://x", back.seams), 1);
+	assert.equal(back.err.join(""), "error: could not remove j8 — it is now delayed; the remove failed with: Command timed out\n");
+	// Refused before it was sent (no connection, and no offline queue to wait in): nothing went out, so with the state
+	// unread the #846 line is the true one.
+	const unsent = world({ hash: {}, state: "delayed" });
+	const never = await unsent.seams.queueFn(null, { name: "pi-jobs" }).getJob("j8");
+	let reads = 0;
+	never.getState = async () => {
+		if (++reads === 1) return "delayed";
+		throw new Error("Stream isn't writeable and enableOfflineQueue options is false");
+	};
+	never.remove = async () => {
+		throw new Error("Stream isn't writeable and enableOfflineQueue options is false");
+	};
+	assert.equal(await runCancel("j8", "redis://x", unsent.seams), 1);
+	assert.equal(unsent.err.join(""), "error: could not read the state of j8 (Stream isn't writeable and enableOfflineQueue options is false), so whether it is running is not known; nothing was changed. Run `pi-dispatch cancel j8` again once Valkey answers\n");
+});
+
+test("a held job's hold delete sent and not answered: the hold may or may not be gone, and the job was not removed (#867)", { skip: needsDeps }, async () => {
+	const { err, ops, seams } = world({ hash: { since: "123" }, state: "delayed" });
+	const probe = seams.redisFn();
+	probe.del = async (key) => {
+		ops.push(["del", key]);
+		throw lostAnswer();
+	};
+	probe.hexists = async () => {
+		throw lostAnswer();
+	};
+	assert.equal(await runCancel("j1", "redis://x", seams), 1);
+	assert.equal(err.join(""), "error: Valkey at redis://x stopped answering (Command timed out) after the delete of held job j1's hold was sent, so the hold may or may not be gone, and the job itself was not removed. Once Valkey answers, run `pi-dispatch cancel j1` again to remove it\n");
+	assert.ok(ops.some((op) => op[0] === "del" && op[1] === "wait:job:j1"), "the delete was really sent");
+	assert.ok(!ops.some((op) => op[0] === "remove"), "and the job was never asked to go");
+	// A delete that timed out before it was ever written (the probe took it out of its queue) changed nothing.
+	const unsent = world({ hash: { since: "123" }, state: "delayed" });
+	const quiet = unsent.seams.redisFn();
+	quiet.del = async () => {
+		throw Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT" });
+	};
+	quiet.hexists = async () => {
+		throw Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT" });
+	};
+	assert.equal(await runCancel("j1", "redis://x", unsent.seams), 1);
+	assert.equal(unsent.err.join(""), "error: could not cancel held job j1: Valkey at redis://x did not answer (Command timed out), so nothing was changed. Run `pi-dispatch cancel j1` again once Valkey answers\n");
+});
+
+test("a held job's removal sent and not answered: its hold was cleared, and the job may or may not have been removed (#867)", { skip: needsDeps }, async () => {
+	const { err, ops, seams } = world({ hash: { since: "123" }, state: "delayed" });
+	const job = await seams.queueFn(null, { name: "pi-jobs" }).getJob("j1");
+	job.remove = async () => {
+		ops.push(["remove"]);
+		throw lostAnswer();
+	};
+	assert.equal(await runCancel("j1", "redis://x", seams), 1);
+	assert.equal(err.join(""), "error: Valkey at redis://x stopped answering (Command timed out) after the removal of held job j1 was sent: its hold was cleared, and the job may or may not have been removed. Once Valkey answers, run `pi-dispatch cancel j1` again: it removes the job if it is still queued, and says so if it is gone\n");
+	assert.ok(ops.some((op) => op[0] === "del" && op[1] === "wait:job:j1") && ops.some((op) => op[0] === "remove"), "the hold went, then the removal was sent");
+});
+
+test("a held job whose state cannot be read is refused as that, never as one that left its hold (#867)", { skip: needsDeps }, async () => {
+	const { err, ops, seams } = world({ hash: { since: "123" }, state: "delayed" });
+	const job = await seams.queueFn(null, { name: "pi-jobs" }).getJob("j1");
+	job.getState = async () => {
+		throw lostAnswer();
+	};
+	assert.equal(await runCancel("j1", "redis://x", seams), 1);
+	assert.equal(err.join(""), "error: could not cancel held job j1: Valkey at redis://x did not answer (Command timed out), so nothing was changed. Run `pi-dispatch cancel j1` again once Valkey answers\n");
+	assert.ok(!ops.some((op) => op[0] === "del" || op[0] === "remove"), "nothing was sent");
+	// A failure that is no timeout keeps the sequence's own sentence, the outcome before the failure's words, so the
+	// 200-character cut takes those words and never the outcome, whatever the id's length.
+	const long = `local-${"a".repeat(120)}`;
+	const reset = world({ hash: { since: "123" }, state: "delayed" });
+	(await reset.seams.queueFn(null, { name: "pi-jobs" }).getJob(long)).getState = async () => {
+		throw new Error(`ECONNRESET ${"x".repeat(300)}`);
+	};
+	assert.equal(await runCancel(long, "redis://x", reset.seams), 1);
+	assert.match(reset.err.join(""), new RegExp(`^error: could not cancel held job ${long}: the state of job ${long} could not be read, so nothing was changed: ECONNRESET x+\\n$`));
+});
+
+test("a hold that could not be read refuses before anything is sent, so a held job is never removed as a plain one (#867)", { skip: needsDeps }, async () => {
+	// The review's repro: the hold's read timed out, Valkey woke, and the job, read as unheld, was removed by the plain
+	// path, its hold's hash and `wait:held` member left as a panel row for a job that was gone.
+	const { err, ops, seams } = world({ hash: { since: "123" }, state: "delayed" });
+	connectedProbe(seams.redisFn()).hgetall = async (key) => {
+		ops.push(["hgetall", key]);
+		throw lostAnswer();
+	};
+	assert.equal(await runCancel("j1", "redis://x", seams), 1);
+	assert.equal(err.join(""), "error: Valkey at redis://x stopped answering (Command timed out) while cancel read whether j1 is held, so nothing was changed. Run `pi-dispatch cancel j1` again once Valkey answers\n");
+	assert.ok(!ops.some((op) => ["getState", "remove", "del", "srem"].includes(op[0])), `nothing after the read: ${JSON.stringify(ops)}`);
+	// Valkey refusing the read is no timeout: its words, and still nothing changed.
+	const refused = world({ hash: { since: "123" }, state: "delayed" });
+	refused.seams.redisFn().hgetall = async () => {
+		throw replyError("hgetall", "NOPERM User default has no permissions to run the 'hgetall' command");
+	};
+	assert.equal(await runCancel("j1", "redis://x", refused.seams), 1);
+	assert.equal(refused.err.join(""), "error: could not read whether j1 is held on its wait condition, so nothing was changed: NOPERM User default has no permissions to run the 'hgetall' command\n");
+});
+
+/** A loopback server that takes every connection and never answers, as a `kill -STOP`ed Valkey does. */
+async function silentServer() {
+	const sockets = new Set();
+	const server = createServer((s) => (sockets.add(s), s.on("error", () => {}), s.on("data", () => {})));
+	await new Promise((r) => server.listen(0, "127.0.0.1", r));
+	return {
+		url: `redis://127.0.0.1:${server.address().port}`,
+		close: () => {
+			for (const s of sockets) s.destroy();
+			server.close();
+		},
+	};
+}
+
+/** A loopback port nothing listens on. */
+async function closedPort() {
+	const server = createServer();
+	await new Promise((r) => server.listen(0, "127.0.0.1", r));
+	const { port } = server.address();
+	await new Promise((r) => server.close(r));
+	return `redis://127.0.0.1:${port}`;
+}
+
+/** The fleet's own reads stand in (they have bounds of their own, issue #846); the probe, the queues and their connections are real. */
+const realClients = (err) => ({ write: () => {}, errWrite: (c) => err.push(c), refusalFn: async () => null, readLiveHostsFn: async () => ({ hosts: {} }), discoverHostQueuesFn: async () => [], fleetQueueNamesFn: () => [], unionQueueNamesFn: () => ["pi-jobs"] });
+
+test("on real clients, a Valkey that takes the connection and never answers ends the lookup at its bound (#867)", { skip: needsDeps, timeout: 15_000 }, async () => {
+	const srv = await silentServer();
+	try {
+		const err = [];
+		const started = performance.now();
+		assert.equal(await runCancel("j1", srv.url, { ...realClients(err), commandTimeoutMs: 300 }), 1);
+		const took = performance.now() - started;
+		assert.equal(err.join(""), `error: Valkey at ${srv.url} stopped answering (no answer within 300 ms) while cancel looked for j1, so nothing was changed. Run \`pi-dispatch cancel j1\` again once Valkey answers\n`);
+		assert.ok(took < 2000, `it ended at its bound, not after the queue's handshake gave up (${Math.round(took)} ms)`);
+	} finally {
+		srv.close();
+	}
+});
+
+test("on real clients, a closed port ends the lookup when the queue gives up, saying nothing was changed (#867)", { skip: needsDeps, timeout: 15_000 }, async () => {
+	const url = await closedPort();
+	const err = [];
+	const started = performance.now();
+	assert.equal(await runCancel("j1", url, { ...realClients(err), commandTimeoutMs: 4000 }), 1);
+	const took = performance.now() - started;
+	const [first, second, rest] = err.join("").split("\n");
+	assert.equal(first, `error: could not reach Valkey at ${url} while cancel looked for j1, so nothing was changed: is it running? (\`pi-dispatch up\` in the deployment folder starts it)`);
+	assert.match(second, /^ {2}\S/, "the client's own words, on a line of their own");
+	assert.equal(rest, "");
+	assert.ok(took < 4000, `the failFast queue gave up before the bound (${Math.round(took)} ms)`);
 });

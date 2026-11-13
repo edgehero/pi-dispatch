@@ -9806,7 +9806,19 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
   cancel <id>` again, where it said only the error, which read as nothing done. And every line that carries another
   module's words (the registry's, a removal's, the error under the could-not-reach line) carries them bounded, each
   C0, DEL and C1 character a space and at most 200 characters (`boundedText`), so a line whose words hold none of
-  those characters and are at most 200 characters long is byte for byte what it was.
+  those characters and are at most 200 characters long is byte for byte what it was. AMENDED 2026-11-13 (#867): the
+  CLI's BullMQ queues carry the bound its own client has had since #846, through `parseConnection`'s
+  `commandTimeoutMs`, and each queue's lookup is bounded as one step. BullMQ builds a queue's ioredis client itself from the
+  options it is given, so the bound is an option (`commandTimeout`, with ioredis' resend of an unanswered command off)
+  and what `BoundedRedis` adds for its own clients is a hook on ioredis' `sendCommand` that acts only for a client
+  whose options carry the bound: the command's timer unref'd, and a command it wrote that got no answer marked
+  `valkeyMayStillRun`. The option is refused without `failFast`, whose client has no offline queue, so nothing it
+  gave up on can be sent later and no Worker's persistent connection can carry it. `removeHeldJob` says which write
+  went unanswered (`unanswered`), so the CLI's line names the hold or the job as maybe gone and not both. Since the
+  review of #867: a lookup that got no answer says "stopped answering" only where a connection was made (the probe's
+  `connect` event), and "could not reach", with the hint, where none ever was; and `removeQueuedJob` refuses when the
+  hold's hash cannot be read, nothing sent, since reading it as no hold removed a held job by the plain path when the
+  read timed out and Valkey then woke, leaving the hold as a panel row for a job that was gone.
 - **Why**: the abort machinery was complete with exactly two triggers, both automatic, and the only
   human-shaped door (`dispatch_wait_cancel`) reached held jobs only and was model-callable only -- an
   operator had to ask a model to stop a job the panel was showing them, or type `docker stop` by hand.
@@ -9825,6 +9837,20 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
   refused forever); **folding held rows into the LIST cursor** (perturbs the trigger-index/Tab
   arithmetic for no gain over a dedicated view); **a footer hint for `x`** (the footer's width
   arithmetic has no headroom; the hint rides the selected ACTIVE row and the held divider instead).
+  Rejected for #867: **the per-command bound alone for the lookup** (BullMQ connects inside the queue, and on a Valkey
+  that takes the connection and never answers ioredis' handshake waits a bound per command on each of the three
+  connections `failFast` tries: 6.4 s measured at a 1 s bound, so about 30 s at 5 s); **bounding the removal as one
+  step, as the console's `cancelQueuedJob` does** (it answers within its bound, but a single timer cannot tell a hold
+  delete that went unanswered from a job removal that did, so the line could only say "may or may not" of both, where
+  the CLI can say the job was never asked to go); **handing BullMQ a `BoundedRedis` client** (BullMQ treats a client it
+  is handed as shared, so `close()` leaves it open and every queue would need a disconnect of its own beside
+  `closeWithin`); **the bound on every BullMQ connection** (a Worker's BZPOPMIN blocks up to 10 s by design, and a
+  long-lived reader rides an outage out rather than giving up; the console's fleet reader may take the option for
+  #842, which is that issue's to decide); **telling a Valkey never reached by the queue's own errors** (the queue
+  reports a dropped connect only after its 2 s connect timeout, and a Valkey that took the connection and stopped
+  answering reports nothing before the lookup's bound, so the two read alike there; the probe, built first, has had its
+  `connect` or not by then); **reading an unreadable hold as no hold** (what the CLI had always done: the removal that
+  follows is the plain one, which strands a real hold).
 - **Residuals**: the one-tick ack race, the unreachable-owner timeout and the record latency are named
   in `INT-CANCEL-CHANNEL-CONTRACT`; a worker predating the contract acks nothing (release-ordering skew,
   `design.md`'s widening class, honest at the requester); the held partial failure keeps
@@ -9836,7 +9862,11 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
   ioredis's resend, after a reconnect, of a delete that already ran; the CLI's line says the hold was cleared (its error
   with each C0, DEL and C1 character a space, at most 200 characters of it), and `cancelHeldJob` (the panel's, the
   tool's and the console's `cancel-held`) and the console's `cancel-queued` say so in fixed words (`heldClearedAnswer`,
-  `partial`, the console's bar the partial one), never the error's and never "nothing was changed".
+  `partial`, the console's bar the partial one), never the error's and never "nothing was changed". Since #867 a
+  cleared answer whose failing write was sent and not answered also carries `unanswered`, which only the CLI words;
+  the start's own refusal check (`judgeValkeyAtStart`, up to 5 s of `valkeyAuthState` on a Valkey that stopped
+  answering) and the fleet reads (2 s) come before the lookup's bound, and a queue's socket can take ioredis' own 2 s
+  disconnect timeout to let go after the last line, both named in `INT-CANCEL-CHANNEL-CONTRACT`'s measurement.
 - **Traces to**: `REQ-OPERATOR-JOB-CANCEL`, `REQ-JOB-TIMEOUT-30M` (the abort machinery it rides),
   `CONST-RETRY-INFRA-ONLY` (policy, returned, never retried), `DES-CLI-SURFACE` (operator-typed tier),
   `INT-CANCEL-CHANNEL-CONTRACT`, `INT-WAIT-PROFILES-CONTRACT`
@@ -17631,6 +17661,8 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-11-13 (#867, the review) | **`DES-CANCEL-VIA-REDIS-REQUEST-KEY` AMENDED**: the lookup's bound is each queue's; a lookup with no answer is "stopped answering" only where the probe saw a connection, and "could not reach" with the hint where none was made; an unreadable hold refuses rather than reading as no hold. Two more rejected alternatives recorded (telling a never-reached Valkey by the queue's own errors, reading an unreadable hold as no hold). UNCHANGED, checked: `DES-OPERATOR-CONSOLE` (its doors say the hold refusal and the state-unread refusal through `heldRefused`, as nothing changed). |
+| 2026-11-13 (#867) | **`DES-CANCEL-VIA-REDIS-REQUEST-KEY` AMENDED**: the CLI's queues get its command bound (`parseConnection`'s `commandTimeoutMs`, `failFast` only) and the lookup a bound of its own as one step, with a `sendCommand` hook in connection.mjs that does for those BullMQ-built clients what `BoundedRedis` does for its own (timer unref'd, a written command's lost answer marked `valkeyMayStillRun`), inert for every client without the bound; `removeHeldJob` says which write went unanswered. Four rejected alternatives recorded (the per-command bound alone for the lookup, the removal bounded as one step, a `BoundedRedis` handed to BullMQ, the bound on every BullMQ connection). **`DES-OPERATOR-CONSOLE` UNCHANGED, checked**: the console's queue clients keep no bound (#842), and its doors ignore `unanswered`. **`DES-CLI-SURFACE` UNCHANGED, checked**: no command, flag or exit code of `cancel` changes; `auth` now exits 1 on a Valkey failure, the code its transient failures already had. |
 | 2026-11-13 (#869) | **`DES-OPERATOR-CONSOLE` AMENDED**, "What a trigger's jobs get" gains "Doctor's answer is for the trigger it read", and the #847 sentence in "What a run loaded" points to it: a flow row answers on the trigger page and a fresh sandbox only where its basis, a digest of the fields `flowTierOf` reads (`INT-DOCTOR-RESULTS-KEY`), equals the one the card computes from its own parse of the file, through the same function (`flowRowFor`). Otherwise the page says that host answered for another version of the triggers file, a renamed flow included, and promises no later answer. Rejected: matching on position and flow name, which kept a stale answer for up to a week, and the console running `flowTierOf`, which reads the host's folders. The preview's `hostsLosingFlow` keeps reading the row without its basis, since there a stale row can only add a hedged warning. **`DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS`** UNCHANGED, checked: doctor's check line and its published tier keep their words, and the basis rides beside them. **Code evidence**: worker/src/host-loads.mjs -> flowInputOf, flowBasisOf; worker/src/doctor.mjs -> readTriggerFacts; admin/src/trigger-gets-view.mjs -> flowRowFor, readTriggerGetsEntry; admin/src/sandbox-data.mjs. |
 | 2026-11-13 (#863) | **`DES-SANDBOX-OPENS-IN-THE-OPERATORS-TERMINAL` CORRECTED**: for `--new` alone, the `--deployment` loader also carries what a preparation reads, from a list of its own held to the deployment by name, so `--new --deployment` plans as the worker does; a test holds the lists to the real preparer's reads instead of review. Opening and attaching load and compare what they did. A trigger whose forge has no usable settings refuses by name, naming what to set, instead of failing as infrastructure. Rejected: loading the whole `.env`, carrying the forge's credential, a hand list kept by review, and one list for every `--deployment` call. UNCHANGED, checked: `DES-SANDBOX-IS-A-FRESH-CONTAINER` (the container and its credential-free environment), `DES-OPERATOR-CONSOLE` (nothing in the console moves), and `OQ-038`'s own-environment limitation of the panel. |
 | 2026-11-12 (#847) | **`DES-OPERATOR-CONSOLE` AMENDED**: a fresh sandbox says where its flow would be found and which named MCP servers the host has (`sandboxFreshRows`, reusing the trigger page's `flowAnswer` and `lacksFlow` so the two pages cannot word it two ways), and the trigger card's extension row quotes what a run brought also when switched off, reversing the #800 posture that "what a run had of an extension is no part of a row the file now leaves out": that row is where a person decides to turn it back on, and the quote is past and attributed. Rejected: publishing counts per staged package in `doctor:loads:<name>` so a row could say what a package brings before any run loads it. The record is about 76 bytes under its 64 KiB cap at its worst (`WORST_BYTES`), so counts would push each trigger's flow answer out first (`FIT_ORDER`); tools cannot be counted without running code; and a count of skills alone would read as the whole. The row says it is not known until a run has loaded it instead. |

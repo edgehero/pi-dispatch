@@ -492,6 +492,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   ran and has no record; with one or more (a job waiting to retry after a failed attempt) it made that many attempts,
   and whatever they recorded stays (most write a run record; a gate that fails above the processor's `try` writes
   none, so no record is promised). A cancel that no reachable worker acknowledges is a named refusal, never a silent no-op.
+  Since issue #867 the CLI's cancel ends within its bounds wherever Valkey stops answering, its lookup included, and its
+  line says what it changed at the point it stopped: nothing, while it looked for the job or read whether it is held
+  (a hold it cannot read is never taken as no hold); that the job or a held job's hold may or may not be gone, after
+  their removal or delete was sent and not answered, with the cancel to run again once Valkey answers. A Valkey it never
+  reached is said as that, with the hint, never as one that stopped answering.
 - **Why**: the abort machinery (`REQ-JOB-TIMEOUT-30M`) shipped complete with exactly two triggers, both
   automatic -- the kill timer and shutdown -- while the only human-shaped stop, `dispatch_wait_cancel`,
   reached held jobs only and was model-callable only. An operator watching a paid job misbehave had
@@ -505,7 +510,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   it (`admin/test/job-actions.test.mjs`, `cancelHeldJob finds a held job on a HOST queue ...`); given a console
   cancel of an active job that no worker acknowledges, the console answers the same named refusal as the CLI and the
   panel (`admin/test/console-actions.test.mjs`); each console cancel is audited with kind `cancel-active`,
-  `cancel-held` or, in bulk, `held-cancel-all`, and each panel cancel with actor role `panel`.
+  `cancel-held` or, in bulk, `held-cancel-all`, and each panel cancel with actor role `panel`. Given a Valkey that
+  takes the connection and never answers, the CLI's cancel ends at its bound during the lookup saying nothing was
+  changed, and given a removal or a hold's delete that was sent and not answered, it says the job or the hold may or
+  may not be gone (`worker/test/cancel-cli.test.mjs`, the #867 cases, on fakes and on real clients against a silent
+  loopback server and a closed port).
 
 ## REQ-FRONTEND-VISUAL-VERIFY
 
@@ -8707,6 +8716,8 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-13 (#867, the review) | **`REQ-OPERATOR-JOB-CANCEL` AMENDED**, its statement: reading whether the job is held is a point that changes nothing too, and a hold that cannot be read is never taken as no hold; a Valkey never reached is said as that, with the hint. Acceptance UNCHANGED, checked: its #867 clause names the test file, which holds both. |
+| 2026-11-13 (#867) | **`REQ-OPERATOR-JOB-CANCEL` AMENDED**, its statement and acceptance: the CLI's cancel ends within its bounds wherever Valkey stops answering, its lookup included, which #846 left as a named residual, and says what it changed at that point (nothing during the lookup; may or may not, after a removal or a hold's delete that was sent and not answered). **`REQ-SUBSCRIPTION-AUTHENTICATION` UNCHANGED, checked**: it names no CLI output; `pi-dispatch auth` now bounds each Valkey command and ends a Valkey failure with one line, where it printed ioredis' stack trace (`INT-SUBSCRIPTION-QUOTA-KEY`, docs/subscription-auth.md). **`REQ-OPERATOR-CONSOLE-SCREENS` UNCHANGED, checked**: the console's stop on a Valkey that stopped answering stays #842's. |
 | 2026-11-13 (#869) | **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: in (g1)'s hosts and in a fresh sandbox's Flow row, a host's answer for the flow counts only where its doctor judged the trigger as the file has it now, by the digest each published flow row carries (`INT-DOCTOR-RESULTS-KEY`'s `basis`). Elsewhere, a renamed flow included, the trigger page says the host "answered for another version of the triggers file, so it is unknown there", with no warning that a job would not find it, and the sandbox says it is unknown because its last doctor run answered for another version of the triggers file. "Has no answer for it" loses its "yet" for the same reason. Neither promises a later answer, which doctor never gives for a spent one-shot or a file the worker refuses. A row from an older doctor is read as before. Two goldens added, `trigger-gets-flow-stale` and `sandbox-loaded-flow-stale`; the sandbox paragraph no longer gives "it ran before an edit" as a reason for no answer, since such a row is now this case. `REQ-SANDBOX-FROM-THE-CONSOLE` UNCHANGED, checked: no control is added. |
 | 2026-11-13 (#863) | **`REQ-SANDBOX-FROM-THE-CONSOLE` CORRECTED**, a prepared sandbox and its acceptance: `pi-dispatch sandbox --new --deployment <dir>` reads the deployment's triggers, projects and scoped-limits files, job image and default job size, so it is prepared as the trigger's jobs would see it, as the requirement already said. It got no project, the default size and the default image. A shell value or an unreadable line for one of them refuses by name before preparing. It reads no forge credential, as #771 built it: a GitHub trigger clones with the launching account's `gh` login, and another forge's trigger refuses as `sandbox-forge-unconfigured` and is prepared from the console. UNCHANGED, checked: `REQ-RESURRECTABLE-SANDBOX` (opening and attaching through `--deployment` load and compare only what they did before, so a preparation setting in the shell, or a `.env` line for one that the loader reads differently such as `$HOME/...`, cannot stop them; a `.env` the loader cannot read at all still refuses, as before), `REQ-CONSOLE-SECURITY` and `REQ-OPERATOR-CONSOLE-ACTIONS` (nothing in the console moves). |
 | 2026-11-12 (#847) | **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: a fresh sandbox's What opens gains, where the host published a doctor run, a Flow row (where a job would find the trigger's flow, in the trigger page's words, or unknown) and, for a trigger that names any, an MCP servers row (on, switched off, not there, unknown; `forge` the job's own); an unread MCP part no longer makes the first row unknown for a trigger that names none; three goldens added (`sandbox-loaded-flow-found`, `-flow-unknown`, `-mcp-lacks`). (g1)'s extension row quotes what the newest run that loaded it brought also when it is switched off, and one no run has loaded says that is not known yet; an overlay entry says it has no manifest. UNCHANGED, checked: `INT-DOCTOR-RESULTS-KEY` (nothing new is published), `REQ-SANDBOX-FROM-THE-CONSOLE` (no control is added), the README's What a job gets (no sentence it holds moved). |

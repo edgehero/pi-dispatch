@@ -174,14 +174,26 @@ export function givesUp(connection) {
  * context as it is then, not as it was at construction, so an operator's fix of the deployment's `.env` reaches a client
  * that has been refused since it started. Off by default, so a worker's judgement stays the one it booted on. The password
  * is still the one read at construction, since ioredis has settled it before the connector runs.
+ *
+ * `commandTimeoutMs` (issue #867) is a bound on each command of a `failFast` client, for a one-shot BullMQ queue that
+ * must not wait for as long as a Valkey that is connected and stopped answering (`kill -STOP`, a partition) stays so:
+ * `failFast` refuses while nothing is connected, and a command already sent had no bound. A command past it rejects with
+ * ioredis' "Command timed out"; one that was sent may still run when Valkey wakes, so its error says so
+ * (`valkeyMayStillRun`, the hook below), and it is never sent again on a later connection. It needs `failFast`: that
+ * client has no offline queue, and on one that has, ioredis sends a command that timed out there once Valkey returns.
+ * `makeRedisClient` takes such a command out of its own queue (`BoundedRedis`), but BullMQ builds this client itself, so
+ * nothing could. Never for a Worker: its blocking reads wait longer than any bound by design, and its connection is a
+ * persistent one, which this refuses.
  */
-export function parseConnection(url, { failFast = false, servername = null, context = null, judge = null, withoutPassword = false, freshContext = false } = {}) {
+export function parseConnection(url, { failFast = false, servername = null, context = null, judge = null, withoutPassword = false, freshContext = false, commandTimeoutMs = null } = {}) {
 	const u = new URL(url);
 	// PR #478's gate: a path that is not a database number was `db: NaN`, and the SELECT ioredis then sent failed outside
 	// every caller's await (an unhandled rejection). Refused here, where every client of the project is made, as the
 	// configuration refusal it is; `judgeValkeyAtStart` says it first at each start.
 	const dbProblem = valkeyUrlProblem(url);
 	if (dbProblem) throw valkeyRefusal(dbProblem);
+	const bounded = Number.isSafeInteger(commandTimeoutMs) && commandTimeoutMs > 0;
+	if (bounded && !failFast) throw new TypeError("parseConnection: a command bound (commandTimeoutMs) is for a failFast client only, which has no offline queue to send a command that timed out from later");
 	const where = context ?? defaultValkeyContext();
 	// Issue #468: the password this client sends, by `valkeyPasswordFor`'s rule (the URL's own, else VALKEY_PASSWORD from
 	// the environment, else from the deployment `.env` for a loopback host). Here and nowhere else, so every client of the
@@ -194,7 +206,7 @@ export function parseConnection(url, { failFast = false, servername = null, cont
 		// reports. `context` is where the client stands (`valkeyClientContext`), the process's own when not given.
 		Connector: JudgedConnector,
 		// `judge` is a test seam only: the function asked for the address (judgedEndpoint when not given).
-		[JUDGE]: { url, context: where, ...(judge ? { judge } : {}), ...(freshContext && !context ? { freshContext: true } : {}), ...(failFast ? { failFast: true } : {}) },
+		[JUDGE]: { url, context: where, ...(judge ? { judge } : {}), ...(freshContext && !context ? { freshContext: true } : {}), ...(failFast ? { failFast: true } : {}), ...(bounded ? { commandBound: true } : {}) },
 		// WHATWG URL keeps an IPv6 literal's brackets in `hostname` (`[::1]`), and net.connect then looks up the name
 		// "[::1]", which never resolves, so a `redis://[::1]:6379` VALKEY_URL never connected (issue #464, measured on
 		// Fedora 44: ETIMEDOUT). The address is the part inside them.
@@ -216,7 +228,42 @@ export function parseConnection(url, { failFast = false, servername = null, cont
 					retryStrategy: (attempts) => (attempts > 2 ? null : 200), // give up after ~2 tries
 				}
 			: {}),
+		// ioredis' resend of what was on a connection that died is off with the bound: the caller was told such a command
+		// failed, and a resend on the next connection would make it run after that.
+		...(bounded ? { commandTimeout: commandTimeoutMs, autoResendUnfulfilledCommands: false } : {}),
 	};
+}
+
+/**
+ * What `BoundedRedis` does for its own clients, done for a client `parseConnection` built with a command bound (issue
+ * #867), which BullMQ constructs itself as a plain ioredis client, so it cannot be a subclass. On the prototype, like the
+ * scrub above, and inert for every client without the bound (a worker's, a receiver's, every `makeRedisClient` client).
+ *
+ * Two things. The command's timer is unref'd, since ioredis' is ref'd and a one-shot that has said its last line must not
+ * wait out a bound on a command nobody awaits. And a command that was WRITTEN (it is the newest entry of the client's
+ * command queue right after the send; without an offline queue, one that was not is refused at once and never sent) and
+ * then rejected with anything but Valkey's own reply carries `valkeyMayStillRun`: it reached a socket, so Valkey may run
+ * it when it wakes, or ran it before its answer was lost. Measured against the pinned ioredis: a SET past the bound on a
+ * `kill -STOP`ed Valkey rejects with "Command timed out" and is applied once the process is continued. Besides the
+ * timeout that is "Connection is closed.", for a command on a connection whose retries ran out. A refusal this project
+ * raised itself (`valkeyRefused`, a database the server does not have) is no lost answer.
+ */
+const COMMAND_BOUND_HOOK = Symbol.for("pi-dispatch.valkey-command-bound");
+if (!Redis.prototype[COMMAND_BOUND_HOOK]) {
+	const sendCommand = Redis.prototype.sendCommand;
+	Redis.prototype.sendCommand = function sendCommandWithBound(command, stream) {
+		const answer = sendCommand.call(this, command, stream);
+		if (this.options?.[JUDGE]?.commandBound !== true) return answer;
+		command._commandTimeoutTimer?.unref?.();
+		if (this.commandQueue?.peekBack?.()?.command !== command) return answer;
+		answer?.catch?.((err) => {
+			if (!err || typeof err !== "object" || err.name === "ReplyError" || err.valkeyRefused) return;
+			if (err.message === "Command timed out") err.code ??= "ETIMEDOUT";
+			err.valkeyMayStillRun = true;
+		});
+		return answer;
+	};
+	Redis.prototype[COMMAND_BOUND_HOOK] = true;
 }
 
 /**

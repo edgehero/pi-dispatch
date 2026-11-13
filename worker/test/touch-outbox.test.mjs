@@ -48,3 +48,15 @@ test("refused or throwing actions abort their intent and never publish a success
 	assert.equal(aborts, 2);
 	assert.equal(writes, 0);
 });
+
+test("an action whose answer was lost aborts its intent too, so nothing is left that no reader can resolve (issue #867)", async () => {
+	// The stop may have landed, so the stops count can be one short. Keeping the intent pending instead was tried and
+	// REJECTED: nothing resolves it, and the Zero touch page would read unavailable for as long as anything is tracked.
+	let aborts = 0;
+	let writes = 0;
+	const store = { begin: async (e) => ({ ok: true, event: e }), abort: async () => { aborts++; }, write: async () => { writes++; return { ok: true }; } };
+	const lost = Object.assign(new Error("Command timed out"), { valkeyMayStillRun: true });
+	await assert.rejects(trackTouchAction({ store, event, act: async () => { throw lost; } }), (error) => error === lost);
+	assert.equal(aborts, 1);
+	assert.equal(writes, 0);
+});
