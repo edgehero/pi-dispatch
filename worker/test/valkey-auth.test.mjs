@@ -542,8 +542,9 @@ test("a freshContext client heals a rotated password and a password missing at s
 	const valkey = await fakeValkey(OLD);
 	const judge = async () => ({ host: "127.0.0.1", servername: null, pinned: "127.0.0.1" });
 	let file = OLD;
-	useValkeyContext(() => ctx({ file }));
 	const url = `redis://127.0.0.1:${valkey.port}`;
+	// The deployment's .env names this Valkey, as `up` writes it: its password is this Valkey's.
+	useValkeyContext(() => ctx({ file }, { url: { environment: null, file: url } }));
 	const clients = [];
 	const made = (opts) => {
 		const c = makeRedisClient(url, { judge, noOfflineQueue: true, disconnectTimeoutMs: 0, ...opts });
@@ -597,18 +598,9 @@ test("a freshContext client heals a rotated password and a password missing at s
 // Review of PR #878, measured with two Valkeys: a deployment moving to another Valkey changes VALKEY_URL and
 // VALKEY_PASSWORD together. A held client stays on the Valkey it was built for, so it must keep that Valkey's password:
 // sending the new one there was refused, and the pages lost the old Valkey too.
-test("a freshContext client whose deployment now names another Valkey keeps the password of the one it talks to (#845)", { timeout: 30_000 }, async () => {
+test("a freshContext client whose deployment now names another Valkey keeps the password of the one it talks to, with or without a shell's VALKEY_URL (#845)", { timeout: 30_000 }, async () => {
 	const PW_A = "passwordOfValkeyA000000000001";
 	const PW_B = "passwordOfValkeyB000000000002";
-	const a = await fakeValkey(PW_A);
-	const b = await fakeValkey(PW_B);
-	const judge = async () => ({ host: "127.0.0.1", servername: null, pinned: "127.0.0.1" });
-	const urlA = `redis://127.0.0.1:${a.port}`;
-	let now = ctx({ file: PW_A }, { url: { environment: null, file: urlA } });
-	useValkeyContext(() => now);
-	const client = makeRedisClient(urlA, { judge, freshContext: true, noOfflineQueue: true, disconnectTimeoutMs: 0 });
-	const errors = [];
-	client.on("error", (e) => errors.push(e.message));
 	const until = async (ok, what, ms = 8000) => {
 		const end = Date.now() + ms;
 		while (!ok()) {
@@ -616,22 +608,36 @@ test("a freshContext client whose deployment now names another Valkey keeps the 
 			await new Promise((r) => setTimeout(r, 20));
 		}
 	};
-	try {
-		await until(() => client.status === "ready", "ready on A");
-		// The .env now names B, with B's password; A drops every connection, so the client reconnects to A.
-		now = ctx({ file: PW_B }, { url: { environment: null, file: `redis://127.0.0.1:${b.port}` } });
-		const dropped = new Promise((resolve) => client.once("close", resolve));
-		a.rotate(PW_A);
-		await dropped;
-		await until(() => client.status === "ready", "ready on A again, with A's password");
-		assert.equal(await client.ping(), "PONG");
-		assert.deepEqual(errors.filter((m) => /WRONGPASS|NOAUTH/.test(m)), [], "never refused by A");
-		assert.equal(client.options.password, PW_A);
-	} finally {
-		client.disconnect();
-		useValkeyContext(null);
-		a.server.close();
-		b.server.close();
+	// Third review of PR #878: with this shell exporting A's URL, the context's own choice of URL never moves, so the
+	// file's move to B must still keep B's password from A.
+	for (const shell of [false, true]) {
+		const a = await fakeValkey(PW_A);
+		const b = await fakeValkey(PW_B);
+		const judge = async () => ({ host: "127.0.0.1", servername: null, pinned: "127.0.0.1" });
+		const urlA = `redis://127.0.0.1:${a.port}`;
+		const environment = shell ? urlA : null;
+		let now = ctx({ file: PW_A }, { url: { environment, file: urlA } });
+		useValkeyContext(() => now);
+		const client = makeRedisClient(urlA, { judge, freshContext: true, noOfflineQueue: true, disconnectTimeoutMs: 0 });
+		const errors = [];
+		client.on("error", (e) => errors.push(e.message));
+		try {
+			await until(() => client.status === "ready", `ready on A (shell ${shell})`);
+			// The .env now names B, with B's password; A drops every connection, so the client reconnects to A.
+			now = ctx({ file: PW_B }, { url: { environment, file: `redis://127.0.0.1:${b.port}` } });
+			const dropped = new Promise((resolve) => client.once("close", resolve));
+			a.rotate(PW_A);
+			await dropped;
+			await until(() => client.status === "ready", `ready on A again, with A's password (shell ${shell})`);
+			assert.equal(await client.ping(), "PONG");
+			assert.deepEqual(errors.filter((m) => /WRONGPASS|NOAUTH/.test(m)), [], `never refused by A (shell ${shell})`);
+			assert.equal(client.options.password, PW_A);
+		} finally {
+			client.disconnect();
+			useValkeyContext(null);
+			a.server.close();
+			b.server.close();
+		}
 	}
 });
 

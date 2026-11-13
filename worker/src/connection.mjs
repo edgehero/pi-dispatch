@@ -3,7 +3,7 @@ import { Socket, connect as netConnect } from "node:net";
 import { connect as tlsConnect } from "node:tls";
 import { valkeyAuthRefusal } from "./valkey-auth.mjs";
 import { valkeySchemeOf } from "./podman-stack.mjs";
-import { decodedUserinfo, judgeValkeyAtStart as judgeEndpointAtStart, judgedEndpoint, killSwitchValkeyUrls, defaultValkeyContext, urlShown, useValkeyContext, valkeyClientContext, valkeyContextFromKeys, VALKEY_CONTEXT_KEYS, valkeyPasswordFor, valkeyDbRangeSentence, valkeyRefusal, valkeyUrlFor, valkeyUrlProblem } from "./valkey-endpoint.mjs";
+import { DEFAULT_VALKEY_URL, decodedUserinfo, judgeValkeyAtStart as judgeEndpointAtStart, judgedEndpoint, killSwitchValkeyUrls, defaultValkeyContext, urlShown, useValkeyContext, valkeyClientContext, valkeyContextFromKeys, VALKEY_CONTEXT_KEYS, valkeyPasswordFor, valkeyDbRangeSentence, valkeyRefusal, valkeyUrlFor, valkeyUrlProblem } from "./valkey-endpoint.mjs";
 
 // Re-exported for the receiver and the admin, which import this module from the package (issues #464 and #468).
 export { killSwitchValkeyUrls, defaultValkeyContext, urlShown, useValkeyContext, valkeyClientContext, valkeyContextFromKeys, VALKEY_CONTEXT_KEYS, valkeyPasswordFor, valkeyUrlFor, valkeyUrlProblem };
@@ -486,15 +486,19 @@ export class JudgedConnector extends AbstractConnector {
 	 *     that is fine;
 	 *   - finds no file (`absent`): a `.env` gone, for good or for the moment an editor replaces it, is not a file that
 	 *     sets no password, so it does not drop one either (the console says to put the file back before a restart);
-	 *   - no longer names the Valkey the client talks to: its VALKEY_URL (`valkeyUrlFor`, this shell's else the file's, as
-	 *     every client of the process is given) differs from the one the context named when the client was built. A held
-	 *     client never moves to another Valkey, so a password that came with a new VALKEY_URL is the new Valkey's, and sent
-	 *     to the old one it is refused and the pages lose the old Valkey too (review of PR #878, measured with two Valkeys:
-	 *     one deployment moving to another Valkey, and a symlinked deployment folder repointed, whose `.env` path is
-	 *     spelled the same). A rotation keeps the URL, so it is taken;
+	 *   - would answer from the `.env` while that file does not name the Valkey this client dials: a password the file
+	 *     gives (or the lack of one) belongs to the Valkey the file's VALKEY_URL names, the default one when it names
+	 *     none, and a held client never moves to another Valkey. Review of PR #878, measured with two Valkeys: one
+	 *     deployment moving to another Valkey changes both lines together, a symlinked deployment folder repointed reads
+	 *     another deployment's file through the same path, and a shell that exports VALKEY_URL keeps the client on its URL
+	 *     whatever the file says; in each the new Valkey's password went to the old one, which refused it, and the pages
+	 *     lost the old Valkey too. The check is against the URL the client dials, not the context's own choice of URL
+	 *     (`valkeyUrlFor`, which prefers this shell's and so never moved). A rotation keeps the file's URL, so it is taken,
+	 *     and so is a password a bad line hid at start once the line is fixed, when the file names the client's Valkey;
 	 *   - is read from another `.env` path than the one the client was built with: the pi extension's context follows the
 	 *     deployment pointer, and that alone says the file is another deployment's.
-	 * A context that passes all of these and gives no password drops it, as a restart would.
+	 * A password from this process's environment, or from VALKEY_URL's own userinfo, is not the file's, and is taken as it
+	 * comes. A context that passes all of these and gives no password drops it, as a restart would.
 	 */
 	[FRESH_PASSWORD]() {
 		const judge = this.options?.[JUDGE];
@@ -507,8 +511,9 @@ export class JudgedConnector extends AbstractConnector {
 		}
 		if (!context || context.error || context.absent === true) return;
 		if ((context.envPath ?? null) !== (judge.context?.envPath ?? null)) return;
-		if (valkeyUrlFor(context).url !== valkeyUrlFor(judge.context).url) return;
-		const { password } = valkeyPasswordFor(judge.url, context);
+		const { password, from } = valkeyPasswordFor(judge.url, context);
+		const fromFile = from !== "VALKEY_URL" && from !== "the environment";
+		if (fromFile && (context.url?.file ?? DEFAULT_VALKEY_URL) !== judge.url) return;
 		if (password) this.options.password = password;
 		else delete this.options.password;
 	}

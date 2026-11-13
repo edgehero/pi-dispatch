@@ -351,6 +351,31 @@ test("freshContext: each connect sends the password the context gives then; the 
 		assert.equal(await connectOnce(fresh), "fourth-password", "the same .env path naming another Valkey: the same");
 		now = ctx("fifth-password", { url: { environment: null, file: "redis://127.0.0.1:1" } });
 		assert.equal(await connectOnce(fresh), "fifth-password", "the URL it was built on, rotated: taken");
+		now = ctx(null, { url: { environment: null, file: "redis://127.0.0.1:2" } });
+		assert.equal(await connectOnce(fresh), "fifth-password", "another Valkey's file that sets none drops nothing either");
+		// Third review of PR #878, measured with two Valkeys: a shell that exports VALKEY_URL keeps the client on that URL,
+		// so the context's own choice of URL never moved; the file's password belongs to the file's Valkey all the same.
+		now = ctx("shell-first", { url: { environment: "redis://127.0.0.1:1", file: "redis://127.0.0.1:1" } });
+		const shelled = made("redis://127.0.0.1:1", { freshContext: true });
+		assert.equal(await connectOnce(shelled), "shell-first");
+		now = ctx("valkey-2-password", { url: { environment: "redis://127.0.0.1:1", file: "redis://127.0.0.1:2" } });
+		assert.equal(await connectOnce(shelled), "shell-first", "the file moved to another Valkey under the shell's URL: its password is not this client's");
+		now = ctx("shell-rotated", { url: { environment: "redis://127.0.0.1:1", file: "redis://127.0.0.1:1" } });
+		assert.equal(await connectOnce(shelled), "shell-rotated", "the file names the client's Valkey again, rotated: taken");
+		now = ctx("valkey-2-password", { url: { environment: "redis://127.0.0.1:1", file: null } });
+		assert.equal(await connectOnce(shelled), "shell-rotated", "a file naming no VALKEY_URL speaks for the default Valkey, which is not this client's");
+		// A password a bad line hid at start: the client was built on the default URL (the line hid VALKEY_URL too) with no
+		// password; once the line is fixed it is taken where the file names that same Valkey, and not where it names another.
+		now = ctx(null, { error: "/d/.env line 1 has a carriage return", url: { environment: null, file: null } });
+		const hidden = made("redis://127.0.0.1:6379", { freshContext: true });
+		assert.equal(await connectOnce(hidden), null);
+		now = ctx("found-after-the-fix", { url: { environment: null, file: "redis://127.0.0.1:9" } });
+		assert.equal(await connectOnce(hidden), null, "the fixed file names another Valkey: the banner says VALKEY_URL changed, and nothing is sent here");
+		now = ctx("found-after-the-fix", { url: { environment: null, file: "redis://127.0.0.1:6379" } });
+		assert.equal(await connectOnce(hidden), "found-after-the-fix", "the fixed file names this client's Valkey: taken, no restart");
+		// A password from this process's environment is not the file's, and is taken whatever the file names.
+		now = ctx(null, { password: { environment: "exported-password", file: null }, url: { environment: null, file: "redis://127.0.0.1:9" } });
+		assert.equal(await connectOnce(hidden), "exported-password");
 		now = ctx(null);
 		assert.equal(await connectOnce(fresh), null, "a context that gives none sends none, as a restart would");
 		assert.equal(Object.hasOwn(fresh.options, "password"), false);
