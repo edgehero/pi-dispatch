@@ -159,11 +159,12 @@ function seenOf(record) {
 }
 
 /**
- * Issue #865: the libuv the rule in `seenCpusOf` was read at, the one Node 22.23.1 (the job image's) bundles. libuv
- * 1.52.0 changed it (`uv__get_cgroupv2_constrained_cpu` answers 1 for a quota under one CPU, where 1.51.0 answers 0 and
- * the caller skips it), so the image job compares the built image's `process.versions.uv` with this
- * (.github/scripts/libuv-pin-check.mjs, in "the job image holds its contract") and fails on any other, saying to read the
- * rule again at the new libuv before moving this.
+ * Issue #865: the libuv the rule in `seenCpusOf` was read at, the one the job image's Node bundles (the Node
+ * image/Dockerfile notes its base resolves to). The next minor release, 1.52.0, changed it
+ * (`uv__get_cgroupv2_constrained_cpu` answers 1 for a quota under one CPU, where this release answers 0 and the caller
+ * skips it), so the image job compares the built image's `process.versions.uv` and `process.versions.node` with this
+ * and with that note (.github/scripts/libuv-pin-check.mjs, in "the job image holds its contract") and fails on any
+ * other, saying to read the rule again at the new libuv before moving this.
  */
 export const SEEN_CPUS_LIBUV = "1.51.0";
 

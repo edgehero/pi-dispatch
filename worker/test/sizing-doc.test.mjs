@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { operatorQuotaCommand, reservePlan } from "../src/cpu-reserve.mjs";
 import { ISOLATION_FLAGS } from "../src/docker-run.mjs";
 import { cpuReserveChecks, doctorHostBudget, hostBudgetChecks, jobSizeChecks, render, sizeSuggestionChecks } from "../src/doctor.mjs";
-import { DOCTOR_LABEL_MAX, assignCheckIds, buildDoctorRecord } from "../src/doctor-results.mjs";
+import { DOCTOR_LABEL_MAX, assignCheckIds, buildDoctorRecord, parseDoctorRecord } from "../src/doctor-results.mjs";
 import { BUDGET_RECHECK_MS, NEVER_FITS_RECHECK_MS, RESERVE_CPUS_FROM, RESERVE_MEMORY_MAX_MIB, RESERVE_MEMORY_MIN_MIB, computeHostBudget, hostBudgetSettings, makeHostBudget } from "../src/host-budget.mjs";
 import { DEFAULT_JOB_SIZE, JOB_CPUS_FLOOR_CENTI, SHM_CEILING_MIB, cpuCeilingCenti, formatCpus, formatMemory, jobSizeEnv, parseCpus, parseMemory, shmMiBOf, wholeCpusOf } from "../src/job-size.mjs";
 import { parseProjects } from "../src/projects.mjs";
@@ -75,8 +75,11 @@ const show = (checks) => {
 };
 const SYSTEMD = reservePlan({ venue: "local", facts: { cgroupDriver: "systemd", cgroupVersion: "v2" }, endpointLocal: true, platform: "linux" });
 const NOW = Date.parse("2026-10-14T12:00:00Z");
-/** Doctor's checks as `buildDoctorRecord` publishes them for the console's Fleet page: `[{ id, level, label?, fix? }]`. */
-const published = (checks) => buildDoctorRecord({ checks, ids: assignCheckIds(checks), at: NOW, version: "1.0.0" }).checks;
+/**
+ * Doctor's checks as the console's Fleet page reads them: published by `buildDoctorRecord`, stored as JSON and read back
+ * through `parseDoctorRecord`'s allowlist, `[{ id, level, label?, fix? }]`.
+ */
+const published = (checks) => parseDoctorRecord(JSON.stringify(buildDoctorRecord({ checks, ids: assignCheckIds(checks), at: NOW, version: "1.0.0" }))).checks;
 
 test("docs/sizing.md's example files load with the worker's own loaders, and the env sets no budget", () => {
 	assert.deepEqual(
@@ -206,11 +209,12 @@ test("issue #865, review: published through doctor's cut, the pointer comes befo
 	}
 });
 
-test("issue #865, review: a lowering's line reads its call before the facts, and is published as its id and level only", () => {
+test("issue #865, review: doctor prints a lowering's call before the facts, and publishes it as its id and level only", () => {
 	// The example's heavy project (20g, 4 CPUs) with twelve runs that used half a core and peaked at their limit while
 	// stalled for memory: the CPUs lower to 0.75 and the memory fact rides along. A lowering is an ok line whose call is
 	// in the label, so in the terminal the call comes right after the suggestion and the no-call fact after it. Doctor
-	// publishes an ok line without its label (`buildDoctorRecord`), so no publish cut ever reaches it.
+	// publishes an ok line with no model proposal as its id and level only (`buildDoctorRecord`, INT-DOCTOR-RESULTS-KEY),
+	// so no publish cut ever reaches it.
 	const heavy = limits.find((l) => l.scope === "project:heavy");
 	const size = { memMiB: parseMemory(heavy.memory), cpuCenti: parseCpus(heavy.cpus), source: "project" };
 	const WALL_US = 600e6;
