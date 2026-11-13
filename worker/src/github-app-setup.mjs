@@ -372,7 +372,7 @@ function printSummary(say, summary, { noWebhook }) {
 		say("  watches the repositories of the installation GITHUB_APP_INSTALLATION_ID names; POLL_REPOS names a list of\n");
 		say("  your own instead. See docs/polling.md.\n");
 		say(`  the App's webhook URL is a placeholder, ${NO_WEBHOOK_URL}, which nothing can receive. Moving to webhooks\n`);
-		say("  later takes a new webhook secret and an order of steps: docs/polling.md, \"Moving to webhooks later\".\n");
+		say("  later takes a webhook secret and an order of steps: docs/polling.md, \"Moving to webhooks later\".\n");
 	} else {
 		say("  start the receiver so deliveries have somewhere to land: `pi-dispatch-receiver`\n");
 		say("  (or, where the folder holds deploy/docker-compose.yml, its receiver profile), reachable at the --webhook-url you gave GitHub.\n");

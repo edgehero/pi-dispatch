@@ -330,7 +330,7 @@ test("setup github: --no-webhook never touches WEBHOOK_SECRET and says the App i
 	assert.ok(h.text().includes("webhook URL is a placeholder, https://no-webhook.invalid/"), "the placeholder URL is printed, so ticking Active later is not a surprise");
 	// The move to webhooks has an order and a secret the wizard never wrote; it lives in one place, the guide's section
 	// (held below), and the closing lines point there rather than restating it.
-	assert.match(h.text(), /new webhook secret and an order of steps: docs\/polling\.md, "Moving to webhooks later"/);
+	assert.match(h.text(), /a webhook secret and an order of steps: docs\/polling\.md, "Moving to webhooks later"/);
 	// The App path polls ONE installation, the one GITHUB_APP_INSTALLATION_ID names (receiver/src/poller.mjs
 	// discoverRepos), never every place the App is installed: an operator with two installations must not be told so.
 	assert.match(h.text(), /the installation GITHUB_APP_INSTALLATION_ID names/);
@@ -350,7 +350,7 @@ test("docs/polling.md's move to webhooks keeps its order: the secret, the receiv
 	const at = doc.indexOf("\n## Moving to webhooks later\n");
 	assert.ok(at >= 0, "the section the wizard names exists, under that exact heading");
 	const section = doc.slice(at, doc.indexOf("\n## ", at + 1));
-	const steps = ["`WEBHOOK_SECRET`", "Start `pi-dispatch-receiver`", "restart it", "Tick **Active**", "Then stop the poller"].map((needle) => {
+	const steps = ["`WEBHOOK_SECRET`", "Start `pi-dispatch-receiver`", "restart it", "Tick **Active**", "green tick, a 2xx answer", "Then stop the poller"].map((needle) => {
 		const i = section.indexOf(needle);
 		assert.ok(i >= 0, `the section says ${needle}`);
 		return i;

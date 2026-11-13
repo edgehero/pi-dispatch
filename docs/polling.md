@@ -159,14 +159,20 @@ Comments self heal, because their cursor advances and the next cycle collects th
 
 An App made with `--no-webhook` can take webhooks once you have a public URL for the receiver. In this order:
 
-1. In the App's settings on GitHub, under Webhook, set your receiver's URL and a new webhook secret. Leave **Active**
-   unticked for now. Put the same secret in `WEBHOOK_SECRET` in `.env`: the wizard wrote none for this App.
-2. Start `pi-dispatch-receiver` where that URL reaches it. If one already runs, for another forge, restart it: it
-   reads `WEBHOOK_SECRET` only when it starts, and with the old value every delivery fails its signature check.
-3. Tick **Active**, and wait until the App's **Recent Deliveries** (under **Advanced**) shows a delivery the receiver
-   answered.
-4. Then stop the poller. Stopping it first leaves a gap in which no event is seen, by either. While both run, one
-   comment can reach a run twice ([steering.md](steering.md#per-forge)), so keep the overlap short.
+1. In the App's settings on GitHub, under Webhook, set your receiver's URL and a webhook secret, and leave **Active**
+   unticked for now. If `.env` already has a `WEBHOOK_SECRET` that another GitHub webhook uses, give the App that
+   value: the receiver checks every GitHub delivery against that one secret. Otherwise make a new one and put it in
+   `WEBHOOK_SECRET`. The wizard wrote none for this App.
+2. Start `pi-dispatch-receiver` where that URL reaches it. If one already runs, restart it: it decides whether to
+   serve GitHub, and reads `WEBHOOK_SECRET`, only when it starts. Until then a GitHub delivery gets a 404, or a 401
+   against an older secret.
+3. Tick **Active**, then make one delivery happen, for example by adding a label no trigger names to an issue (the
+   receiver answers it 204 and nothing runs). Wait until the App's **Recent Deliveries** (under **Advanced**) shows it
+   with a green tick, a 2xx answer. A 401 there means the two secrets differ, and a 404 that the receiver is not
+   serving GitHub yet.
+4. Then stop the poller. Stopping it first leaves a gap in which no event is seen, by either. While both run, a
+   comment that steers a running job can be handled twice: steered twice, or steered and then started as a job of its
+   own ([steering.md](steering.md#per-forge)). Keep the overlap short.
 
 ## Reference
 
