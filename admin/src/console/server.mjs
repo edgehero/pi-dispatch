@@ -267,12 +267,24 @@ function sendFailure(ctx, status, sentence, { headers = {}, page = null } = {}) 
   const session = ctx.session ? { name: ctx.session.name, role: ctx.session.role, ...(ctx.session.deviceHash ? { remembered: deviceIdOf(ctx.session.deviceHash) } : {}) } : ctx.peek ? peekForNav(deps, req) : null;
   let out;
   try {
-    out = deps.errorPage({ ...page, kind, status, sentence, theme: themeOf(req.headers.cookie), session, readOnly: Boolean(deps.config?.readOnly) });
+    out = deps.errorPage({ ...page, kind, status, sentence, theme: themeOf(req.headers.cookie), session, readOnly: Boolean(deps.config?.readOnly), restart: session ? restartNoticeOf(deps) : null });
   } catch (e) {
     deps.log?.(`console: the ${kind} error page could not be drawn (${e?.name ?? "error"}), so the refusal went as JSON`);
     return sendError(res, status, sentence, headers);
   }
   return sendHtml(res, status, out.html, headers);
+}
+
+/**
+ * Whether this console needs a restart, and why (issue #845, `restart-notice.mjs`), for the banner a signed-in page draws:
+ * the notice, or null. A watch that fails costs the banner, never the page.
+ */
+function restartNoticeOf(deps) {
+  try {
+    return deps.restartNotice?.() ?? null;
+  } catch {
+    return null;
+  }
 }
 
 function redirect(res, location, headers = {}) {
@@ -769,6 +781,7 @@ function pageHandler(name) {
       rememberable: rememberRefusalHere(ctx.deps, ctx.req) ?? true,
       data,
       readOnly: Boolean(config.readOnly),
+      restart: restartNoticeOf(ctx.deps),
       theme: themeOf(ctx.req.headers.cookie),
       flash: ctx.flash,
       maxStreams: config.maxStreams,
@@ -1385,6 +1398,8 @@ async function dispatch(req, res, deps) {
  *     `loadPageData` reads with: `{fleet, insights, audit, env, now}`), `hub` (`live.mjs`'s `makeLiveHub`), and
  *     `stateOf` (default: `live.mjs`'s).
  *   - issue #737: `errorPage` (default: `error-pages.mjs`'s), what a refusal is drawn with for a browser's navigation.
+ *   - issue #845: `restartNotice()` (default: none), whether this console needs a restart (`restart-notice.mjs`'s watch's
+ *     `current`), drawn as a banner on every page and error page a signed-in person is shown.
  *   - `limits`: TESTS ONLY, overrides `SERVER_LIMITS`, `streamsTotal` (default `STREAMS_TOTAL_MAX`) and
  *     `streamsOperatorReserve` (default `STREAMS_OPERATOR_RESERVE`).
  */
@@ -1414,10 +1429,11 @@ export function createConsoleServer({
   gateway = null,
   consoleOrigin = null,
   devices = null,
+  restartNotice = null,
 }) {
   const limits = { ...SERVER_LIMITS, streamsTotal: STREAMS_TOTAL_MAX, streamsOperatorReserve: STREAMS_OPERATOR_RESERVE, ...limitsOverride };
   const refusalRows = makeLoginLimiter({ now, perMinute: REFUSAL_ROWS_PER_MINUTE, burst: 2 * REFUSAL_ROWS_PER_MINUTE });
-  const deps = { devices, config, fs, now, random, audit, sessions, cookies, tickets, limiter, log, readTokens, findToken, keptTokens, consumeLoginCode, writePauseWindows, actionDeps, refusalRows, quieted: { count: 0 }, pages, pageDeps, hub, stateOf, errorPage, limits, streams: { open: 0 }, gateway, consoleOrigin };
+  const deps = { devices, config, fs, now, random, audit, sessions, cookies, tickets, limiter, log, readTokens, findToken, keptTokens, consumeLoginCode, writePauseWindows, actionDeps, refusalRows, quieted: { count: 0 }, pages, pageDeps, hub, stateOf, errorPage, limits, streams: { open: 0 }, gateway, consoleOrigin, restartNotice };
   // `connectionsCheckingInterval` makes the two timeouts bite within a second of expiring rather than within node's
   // default 30: a client holding connections open without sending holds a slot of `maxConnections` only that long.
   const server = createServer({ headersTimeout: limits.headersTimeout, requestTimeout: limits.requestTimeout, connectionsCheckingInterval: limits.connectionsCheckingInterval }, (req, res) => {

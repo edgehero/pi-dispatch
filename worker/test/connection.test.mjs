@@ -60,7 +60,7 @@ test("a scheme no client here speaks is named as such, never as a database or a 
 
 const valkeyTest = process.env.VALKEY_TEST_URL;
 test("against a real Valkey, a database it does not have is refused by every client, never database 0 (gate round 2 of PR #478, VALKEY_TEST_URL)", { skip: valkeyTest ? false : "needs VALKEY_TEST_URL", timeout: 30_000 }, async (t) => {
-	const { DB_REFUSED, defaultValkeyContext, judgeValkeyAtStart, makeRedisClient, valkeyAuthState } = await import("../src/connection.mjs");
+	const { DB_REFUSED, defaultValkeyContext, judgeValkeyAtStart, makeRedisClient, refusedDatabaseOf, valkeyAuthState } = await import("../src/connection.mjs");
 	const base = new URL(valkeyTest);
 	base.pathname = "";
 	const plain = makeRedisClient(base.toString(), {});
@@ -87,6 +87,10 @@ test("against a real Valkey, a database it does not have is refused by every cli
 	for (let i = 0; i < 50 && client.status !== "end"; i++) await new Promise((r) => setTimeout(r, 20));
 	assert.equal(client.status, "end", "the client closed and does not reconnect");
 	assert.ok(client[DB_REFUSED] && seen.length === 1 && seen[0] === client[DB_REFUSED], "one error event, the refusal");
+	// Issue #845: the number the console's restart banner names, from the client that holds the refusal; none for one that does not.
+	assert.deepEqual(refusedDatabaseOf(client), { db: databases });
+	assert.equal(refusedDatabaseOf(plain), null);
+	assert.equal(refusedDatabaseOf(null), null);
 	await assert.rejects(client.get(key));
 	assert.equal(await plain.get(key), null, "nothing was written to database 0");
 	assert.equal(await plain.exists(key), 0);

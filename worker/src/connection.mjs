@@ -89,6 +89,18 @@ if (!Redis.prototype[SCRUBS]) {
  */
 export const DB_REFUSED = Symbol.for("pi-dispatch.valkey-db-refused");
 const SELECT_HOOK = Symbol.for("pi-dispatch.valkey-select-refusal");
+
+/**
+ * The database a client holds a refusal of (`DB_REFUSED`), as `{ db }` (null where the client no longer says which), or
+ * null when it holds none. Issue #845: the refusal is held for the client's life, so only a restart of a long-lived
+ * process tries the database again, and the console says so on every page from this.
+ */
+export function refusedDatabaseOf(client) {
+	if (!client?.[DB_REFUSED]) return null;
+	const db = client.condition?.select ?? client.options?.db;
+	return { db: Number.isSafeInteger(db) ? db : null };
+}
+
 /** Whether `err` is a server's refusal of a SELECT for a database it does not have. */
 function isSelectRangeError(err) {
 	return Boolean(err) && typeof err === "object" && String(err.command?.name ?? "").toLowerCase() === "select" && /DB index is out of range|invalid DB index/i.test(String(err.message ?? ""));

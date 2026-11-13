@@ -51,6 +51,7 @@ import * as ui from "./kit.mjs";
 // A cycle by design: `pages.mjs` draws through `shellHtml`, and this module reads the page table. Neither touches the
 // other's exports while it loads, only when a page is drawn, which ES modules allow.
 import { PAGES, pageQueryString } from "./pages.mjs";
+import { restartBody } from "./restart-notice.mjs";
 import { ICON_NAMES, SPRITE } from "./pulse-icons.mjs";
 import { linkContent, signInContent } from "./signin.mjs";
 import { themeLabel } from "./theme.mjs";
@@ -145,6 +146,16 @@ export const READ_ONLY_TITLE = "This console is read-only";
 
 /** The read-only banner's sentence: why, what it means, and what operators keep. */
 const READ_ONLY_BODY = html`It was started with <span class="code">PI_CONSOLE_READ_ONLY=1</span>, so every change is refused and no page shows a form. Operators still see reasons, transcripts and the audit log.`;
+
+/**
+ * The restart banner (the AccessStates card, issue #845): what this console cannot pick up without a restart, from the
+ * restart watch's notice (`restart-notice.mjs`), or nothing for none. Beside the read-only banner and drawn the same way,
+ * for every signed-in role: it names settings and a database number, never a value or an address.
+ */
+export function restartBannerHtml(notice) {
+  if (notice === null || typeof notice !== "object" || typeof notice.title !== "string" || !Array.isArray(notice.reasons) || notice.reasons.length === 0) return null;
+  return ui.banner({ status: "attention", icon: "rerun", sm: true, title: notice.title, body: restartBody(notice) });
+}
 
 /**
  * The most live streams the whole console holds, every token together (`server.mjs` `STREAMS_TOTAL_MAX`). Written here
@@ -308,8 +319,8 @@ const roleOf = (session) => (typeof session?.role === "string" && Object.hasOwn(
  * detail counts as Runs in the navigation and links back to it; its heading names the run.
  *
  * In order inside `<main>`: the title bar (on a page drawn once, when it was drawn and Reload, where the role may open
- * it: a viewer refused the audit log is not offered its address), the read-only banner on a read-only console, the done
- * banner, the live notes on a live page, `inner`, for an operator on a console that takes changes the confirm slot, and
+ * it: a viewer refused the audit log is not offered its address), the read-only banner on a read-only console, the restart
+ * banner when `ctx.restart` holds a notice (issue #845, `restartBannerHtml`), the done banner, the live notes on a live page, `inner`, for an operator on a console that takes changes the confirm slot, and
  * on a live page the held note's template.
  *
  * `headline` is the page's headline panel's first content (text or a fragment, an empty one included, which the stream
@@ -332,6 +343,7 @@ export function shellHtml(name, ctx, inner, { headline = null, description = nul
   const drawn = !meta.live && reload !== null ? drawnHtml(ctx?.data?.now, reload, end) : end;
   const readOnly = Boolean(ctx?.readOnly);
   const ro = readOnly ? ui.banner({ status: "attention", icon: "shield", sm: true, title: READ_ONLY_TITLE, body: READ_ONLY_BODY }) : null;
+  const restart = restartBannerHtml(ctx?.restart ?? null);
   // A flash is a write's done banner, or since issue #849 a notice about this browser's sign-in (`notice`), which changed nothing to undo.
   const flash = ctx?.flash !== null && typeof ctx?.flash === "object" ? (ctx.flash.notice === true ? noticeFlashHtml(ctx.flash) : doneBannerHtml(ctx.flash)) : null;
   const offer = ctx?.offer === true && role !== null && role !== "agent" ? rememberOfferHtml() : null;
@@ -345,7 +357,7 @@ ${SPRITE}
 ${signedInBar({ here, role, parked, live: liveHtml, theme: ctx?.theme, readOnly, session: ctx?.session })}
 <main id="main" tabindex="-1">
 <div class="titlebar"><div class="titlebar__lead">${back}<h1>${heading}</h1>${sub}</div>${drawn}</div>
-${ro}${flash}${offer}${notes}${inner}${writes}${held}
+${ro}${restart}${flash}${offer}${notes}${inner}${writes}${held}
 </main>
 </div>`;
 }
@@ -362,7 +374,7 @@ ${ro}${flash}${offer}${notes}${inner}${writes}${held}
  * the page's stylesheet read. `here` marks a screen's pill current where the page stands for one (the run-id 404 is a
  * run's page, which counts as Runs as the run detail does); by default none is.
  */
-export function frameHtml({ name, title, sub = null, theme = null, session = null, readOnly = false, nav = false, skip = "Skip to content", titleShown = true, here = null }, inner) {
+export function frameHtml({ name, title, sub = null, theme = null, session = null, readOnly = false, nav = false, skip = "Skip to content", titleShown = true, here = null, restart = null }, inner) {
   const signedIn = nav && session !== null && typeof session === "object";
   const role = roleOf(session);
   const current = typeof here === "string" && NAV.includes(here) && mayOpen(here, role) ? here : null;
@@ -371,13 +383,15 @@ export function frameHtml({ name, title, sub = null, theme = null, session = nul
     : html`<header class="top">${brandPill()}<div class="top__end">${themeButton(theme)}</div></header>`;
   const subLine = typeof sub === "string" && sub !== "" ? html`<p class="titlebar__sub">${sub}</p>` : null;
   const head = titleShown ? html`<div class="titlebar"><div class="titlebar__lead"><h1>${title}</h1>${subLine}</div></div>` : html`<h1 class="sr">${title}</h1>`;
+  // Issue #845: the restart banner on a page with the signed-in bar only, never one an anonymous visitor is shown.
+  const notice = signedIn ? restartBannerHtml(restart) : null;
   const body = html`<a class="skip" href="#main">${skip}</a>
 ${SPRITE}
 <div class="page">
 ${bar}
 <main id="main" tabindex="-1">
 ${head}
-${inner}
+${notice}${inner}
 </main>
 </div>`;
   return page({ title: `pi-dispatch console: ${title}`, name, body, theme });

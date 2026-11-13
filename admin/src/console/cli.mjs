@@ -31,13 +31,15 @@ import { hostname } from "node:os";
 import { basename, isAbsolute, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
-import { consoleConfig, consoleEnv, deploymentDirOf } from "./config.mjs";
+import { deploymentServiceEnv } from "@edgehero/pi-dispatch/service-env";
+import { CONSOLE_ENV_KEYS, consoleConfig, consoleEnv, deploymentDirOf } from "./config.mjs";
 import { makeLoginLimiter } from "./guards.mjs";
 import { isLoopbackAddress, listenOn, listenUrl } from "./listen.mjs";
 import { acquireConsoleLock } from "./lock.mjs";
 import { codePending, keptTokenLinkRefusal, operatorNames, soleOperatorName } from "./login-codes.mjs";
 import { enterReader, runOpenCommand } from "./open-command.mjs";
 import { openLinkViaFile } from "./open-link.mjs";
+import { envProblemOf, makeRestartWatch, thrownProblem } from "./restart-notice.mjs";
 import { isLocalBrowserSession, openBrowser } from "@edgehero/pi-dispatch/open-browser";
 import { shellWord } from "./link.mjs";
 import { makeAnswererService } from "../answerer-data.mjs";
@@ -235,6 +237,49 @@ export function endpointSnapshotFn({ m, env, paths, dir, fs }) {
 }
 
 /**
+ * The keys `readSideOf` takes from the deployment's `.env` beside the panel's own (`PANEL_SERVICE_KEYS`, through
+ * `panelEnv`). The deployment's own forge URL variables (GITLAB_URL, FORGEJO_URL, AZURE_ORG_URL) are what a `.env` sets;
+ * the job-container names after them only exist where the worker derived them. Issue #642: the keys a reserve estimate
+ * reads as the worker does (the allowed-model list, the default provider and model, and where the model-endpoint
+ * declaration lives), so a console preview judges a job by the service's settings. One list, so the restart watch
+ * (issue #845) compares exactly the keys the read side read.
+ */
+function readSideExtraKeys(m) {
+  return [...Object.values(m.readModel.FORGE_HOST_ENV ?? {}).flat(), ...(m.forges?.FORGE_HOST_VARS ?? []), "PI_SESSIONS_DIR", ...RESERVE_ENV_KEYS];
+}
+
+/**
+ * Every key the console takes from the deployment's `.env` at start and keeps for its life (issue #845): its own
+ * (`CONSOLE_ENV_KEYS`, `consoleEnv`) and the read side's (`PANEL_SERVICE_KEYS` and `readSideExtraKeys`, `readSideOf`).
+ * VALKEY_PASSWORD is in none of them: the console's clients read it again at each connect.
+ */
+export function restartKeysOf(m) {
+  return [...new Set([...CONSOLE_ENV_KEYS, ...(m.readModel.PANEL_SERVICE_KEYS ?? []), ...readSideExtraKeys(m)])].sort();
+}
+
+/**
+ * What the restart watch compares (issue #845, `restart-notice.mjs`): each key of `restartKeysOf` as the console's own
+ * read (`consoleEnv`'s `env`) and the read side's (`readSideOf`'s `env`) have it, as one comparable string per key. A
+ * value is only ever compared, never said.
+ */
+export function restartValuesOf(m, consoleValues, sideValues) {
+  const values = {};
+  for (const key of restartKeysOf(m)) values[key] = JSON.stringify([consoleValues?.[key] ?? null, sideValues?.[key] ?? null]);
+  return values;
+}
+
+/**
+ * The console's reading of its deployment as it would be now, for the restart watch: the same reads serve made at start
+ * (`consoleEnv`, `readSideOf`) from the same shell environment, and what keeps the `.env` from being read
+ * (`envProblemOf` over the service's own reader, for every key in `restartKeysOf`). Synchronous file reads only.
+ */
+export function restartReadingOf({ m, env, dir, fs, platform, uid }) {
+  const layered = consoleEnv({ env, dir, fs, platform, uid });
+  const side = readSideOf({ m, env, dir, fs, platform, uid });
+  return { values: restartValuesOf(m, layered.env, side.env), problem: envProblemOf(deploymentServiceEnv({ env, dir, keys: restartKeysOf(m), platform, fs, uid })) };
+}
+
+/**
  * The environment and paths the read side runs on (issue #641): this shell's environment with the deployment `.env`
  * filling the panel's keys (`panelEnv`, the TUI's own resolver, so the console reads the queue, logs and files the
  * service does), plus the forge host variables `forgeLinkOf` builds links from and `PI_SESSIONS_DIR`, which turns on
@@ -248,11 +293,7 @@ export function endpointSnapshotFn({ m, env, paths, dir, fs }) {
  */
 export function readSideOf({ m, env, dir, fs, platform, uid }) {
   const panel = m.readModel.panelEnv({ env, pointerDir: dir, owned: [], fs, platform, uid });
-  // The deployment's own forge URL variables (GITLAB_URL, FORGEJO_URL, AZURE_ORG_URL) are what a `.env` sets; the
-  // job-container names after them only exist where the worker derived them.
-  // Issue #642: the keys a reserve estimate reads as the worker does (the allowed-model list, the default provider and
-  // model, and where the model-endpoint declaration lives), so a console preview judges a job by the service's settings.
-  const extraKeys = [...Object.values(m.readModel.FORGE_HOST_ENV ?? {}).flat(), ...(m.forges?.FORGE_HOST_VARS ?? []), "PI_SESSIONS_DIR", ...RESERVE_ENV_KEYS];
+  const extraKeys = readSideExtraKeys(m);
   const extra = m.serviceEnv ? m.serviceEnv.deploymentServiceEnv({ env, dir, keys: extraKeys, platform, fs, uid }).env : {};
   const merged = { ...panel.env };
   for (const key of extraKeys) if (extra?.[key] !== undefined && merged[key] === undefined) merged[key] = extra[key];
@@ -568,14 +609,14 @@ async function run(argv, io) {
       throw new Refusal(`the console audit log's chain breaks at ${broken.file} line ${broken.line}: ${broken.reason}.${either} ${intact}; keep the file for inspection`);
     }
     case "serve":
-      return serve({ io, m, config, audit, fs, now, uid, random });
+      return serve({ io, m, config, layered, audit, fs, now, uid, random });
     default:
       throw new Refusal(`unknown command "${command}"`);
   }
 }
 
 /** Startup refusals in order (tokens file, an operator, the lock, the bind), then serve until stopped. */
-async function serve({ io, m, config, audit, fs, now, uid, random }) {
+async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
   const readTokens = () => m.tokens.readTokensFile({ path: config.tokensPath, fs, uid });
   const first = readTokens();
   if (first.refusal) throw new Refusal(first.refusal);
@@ -591,6 +632,7 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
   let setup = null;
   let setupBroker = null;
   let gateway = null;
+  let restart = null;
   try {
     // Every Valkey client of this process (the audit copy's, the fleet reader's) takes its password and its facts
     // about the deployment's Valkey from THIS deployment's `.env`, through the panel's one reader, as the pi extension
@@ -646,6 +688,21 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
     // waiting job pays no read for one.
     const killSwitchPlanFn = ({ paused }) => m.readModel.killSwitchPlan({ paused, env: shellEnv, stateFn: () => ({ deploymentDir: config.dir, owned: [] }), fs, uid });
     fleet = m.readModel.createFleetReader(side.paths, { dollarEnvFn: () => side.env, nowFn: now, fs, readOnly: true, activeLimit: CONSOLE_ACTIVE_LIMIT, killSwitchPlanFn, ...(m.sandboxData?.SANDBOX_READ_DEPS ?? {}), sandboxRetentionFn: m.sandboxVerdict?.sandboxRetentionOf ?? null });
+    // Issue #845: what this console read at start and keeps for its life (its settings and the read side's, `layered` and
+    // `side` above) against what the same reads give now, and the databases its two held clients were refused. Every page
+    // draws the answer as a banner and the log says each change of it once (`restart-notice.mjs`). The reading's shell
+    // environment is this one's, as at start, so a key this shell sets is never called changed by an edit to the file.
+    const restartReading = () => restartReadingOf({ m, env: shellEnv, dir: config.dir, fs, platform: io.platform ?? process.platform, uid });
+    // A start reading that throws is the problem every later one meets too, so it is the start's, not a change.
+    const startProblem = (() => { try { return restartReading().problem; } catch (e) { return thrownProblem(e); } })();
+    restart = makeRestartWatch({
+      start: { values: restartValuesOf(m, layered?.env, side.env), problem: startProblem },
+      readNow: restartReading,
+      refused: () => [m.connection?.refusedDatabaseOf?.(redis) ?? null, fleet.refusedDatabase?.() ?? null],
+      now,
+      timers: io.timers,
+      log,
+    });
     const zeroTouch = m.zeroTouchData?.makeZeroTouchService({ paths: side.paths, env: side.env, fs, now, log: () => log("console: Zero touch accounting needs repair") });
     // The console's hosts file, always a path: the read side's environment takes PI_SANDBOX_HOSTS_FILE from this shell
     // only, so a value set only in the deployment .env reaches the service through the console's configuration.
@@ -880,6 +937,8 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
       stateOf: m.live.stateOf,
       gateway,
       consoleOrigin: () => { const read = gatewayRegistry(); return read.refusal ? false : read.config?.consoleOrigin ?? null; },
+      // Issue #845: the banner every page draws when this console needs a restart, for every role.
+      restartNotice: () => restart.current(),
     });
     const bound = await listenOn(server, config.listen, { fs, uid });
     if (bound.refusal) throw new Refusal(bound.refusal);
@@ -907,6 +966,7 @@ async function serve({ io, m, config, audit, fs, now, uid, random }) {
     return 0;
   } finally {
     // The streams first, so closing the server is not held open by them; then the listener, the reader, the copy.
+    restart?.close();
     setup?.close();
     setupBroker?.close();
     await gateway?.close();

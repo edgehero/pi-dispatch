@@ -68,7 +68,7 @@ import { JOB_FIELD, META_FIELD, QUEUE_KEY, SCHEDULER_ID_MAX, SCHEDULER_ID_RE, SC
 // The subscriptions validator is shared for the same anti-drift reason: the admin prices finished runs
 // against the exact schema the file declares, and re-deriving it here is how the two would disagree.
 import { parseSubscriptions, SUBSCRIPTIONS_VERSION } from "@edgehero/pi-dispatch/subscriptions";
-import { parseConnection, makeRedisClient, onValkeyError, killSwitchValkeyUrls, urlShown, useValkeyContext, valkeyContextFromKeys, VALKEY_CONTEXT_KEYS } from "@edgehero/pi-dispatch/connection";
+import { parseConnection, makeRedisClient, onValkeyError, killSwitchValkeyUrls, refusedDatabaseOf, urlShown, useValkeyContext, valkeyContextFromKeys, VALKEY_CONTEXT_KEYS } from "@edgehero/pi-dispatch/connection";
 import { pointerState } from "./deployment-pointer.mjs";
 import { readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
 import { readDoctorResults } from "@edgehero/pi-dispatch/doctor-results";
@@ -4314,7 +4314,9 @@ export function createFleetReader(
   // Persistent, so it rides a restart out, which the queues above cannot. Bounded, or a read on it waits for as long as the
   // Valkey does not answer: one such read in a snapshot's `Promise.all` hung the page whole, and the watch pages read
   // nothing else. A command past the bound is gone unless it had reached the socket (`makeRedisClient`).
-  // `freshContext`: refused at its start by a `.env` line, it would stay refused after the line is fixed.
+  // `freshContext`: refused at its start by a `.env` line, it would stay refused after the line is fixed. It also sends the
+  // password that `.env` gives at each connect (issue #845), so a rotation reaches it at its next try. Not its URL, nor a
+  // database Valkey refused, which it holds on to (`refusedDatabase` below says which, for the console's restart banner).
   const redis = redisFn(paths.valkeyUrl, { commandTimeoutMs: FLEET_COMMAND_TIMEOUT_MS, freshContext: true });
   // Without a listener ioredis prints a stack trace per reconnect attempt for as long as an outage lasts. Not a silent one:
   // a password that changed under this client refuses it alone, and this line is then the only place that says why.
@@ -5324,6 +5326,14 @@ export function createFleetReader(
     async sandboxPrepare(request) { if (!enqueueSandboxPreparationFn) return { refused: "sandbox-not-wired", message: "Sandbox requests are not wired in this console." }; return enqueueSandboxPreparationFn(sandboxQueue(request.host), request, { now: nowFn }); },
     async sandboxPreparationStatus(host, id) { return readSandboxPreparationFn ? readSandboxPreparationFn(sandboxQueue(host), id) : { id, host, state: "unknown" }; },
     async sandboxEnd(request) { return requestSandboxEndFn({ redis, ...request, now: nowFn }); },
+    /**
+     * Issue #845: the database this reader's held client was refused (`refusedDatabaseOf`: `{ db }`, or null when it holds
+     * no refusal). The queues are rebuilt and try again; the held client never does, so its reads stay refused until the
+     * process is restarted, and the console says that rather than only that Valkey could not be read. Reads no Valkey.
+     */
+    refusedDatabase() {
+      return refusedDatabaseOf(redis);
+    },
     async dispose() {
       disposed = true;
       for (const q of sandboxQueues.values()) { try { await q.close(); } catch { /* best effort teardown */ } }

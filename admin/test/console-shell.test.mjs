@@ -9,7 +9,8 @@ import { html } from "../src/console/html.mjs";
 import { STREAMS_TOTAL_MAX } from "../src/console/server.mjs";
 import { ENDED_REASONS, SIGN_IN_NOTICES, endedNotices } from "../src/console/session-ends.mjs";
 import { LINK_NOTICES, LINK_STATES, LISTEN_FOOTERS, NO_SCRIPT_TEXT, linkContent, signInContent } from "../src/console/signin.mjs";
-import { HEADLINE_ID, LINK_PAGE_TITLE, LIVE_GLYPHS, LIVE_NOTES, LIVE_STATES, LIVE_STREAMS_TOTAL, NAV, NAV_MORE, NAV_PARKED_ID, READ_ONLY_TITLE, SEARCH_HREF, SHELL_PANEL_IDS, frameHtml, liveNoteHtml, loginCodePage, loginPage, navParkedCount, navParkedHtml, shellHtml } from "../src/console/shell.mjs";
+import { HEADLINE_ID, LINK_PAGE_TITLE, LIVE_GLYPHS, LIVE_NOTES, LIVE_STATES, LIVE_STREAMS_TOTAL, NAV, NAV_MORE, NAV_PARKED_ID, READ_ONLY_TITLE, SEARCH_HREF, SHELL_PANEL_IDS, frameHtml, liveNoteHtml, loginCodePage, loginPage, navParkedCount, navParkedHtml, restartBannerHtml, shellHtml } from "../src/console/shell.mjs";
+import { RESTART_TITLE, restartNoticeOf, restartReasons } from "../src/console/restart-notice.mjs";
 import { RESERVED_IDS, SEARCH_ID } from "../src/console/kit.mjs";
 import { SYSTEM_SCHEME, THEME_COOKIE, THEME_COOKIE_MAX_AGE_SEC, THEME_COOKIE_SAME_SITE, THEME_LABELS, THEMES } from "../src/console/theme.mjs";
 import { assertClean } from "./helpers/console-pages-harness.mjs";
@@ -27,9 +28,9 @@ const HOSTILE = `<img src=x onerror=alert(1)>"'${ESC}`;
 const ROLES = ["viewer", "operator"];
 
 /** Page `name` drawn for `role` over `data` (empty by default: every panel says what it could not read). */
-async function draw(name, { role = "operator", data = {}, readOnly = false, theme = null, sessionName = role === "operator" ? "ops" : "watcher", flash = null, maxStreams = 4, slot = undefined, query = null } = {}) {
+async function draw(name, { role = "operator", data = {}, readOnly = false, theme = null, sessionName = role === "operator" ? "ops" : "watcher", flash = null, maxStreams = 4, slot = undefined, query = null, restart = undefined } = {}) {
   const q = query ?? parsePageQuery(name, name === "run" ? "id=gh-1" : "").query;
-  const out = await renderPage(name, { query: q, session: { name: sessionName, role }, data: { now: 0, env: {}, ...data }, readOnly, theme, flash, maxStreams, slot });
+  const out = await renderPage(name, { query: q, session: { name: sessionName, role }, data: { now: 0, env: {}, ...data }, readOnly, theme, flash, maxStreams, slot, ...(restart === undefined ? {} : { restart }) });
   return { status: out.status, html: String(out.html) };
 }
 
@@ -483,6 +484,33 @@ test("the live notes: four, each hidden in its box, the limit's from the console
     assert.ok(t.includes("One token may hold only a few live tabs, and the console 32 in all.") && !t.includes("{maxStreams}"), `${String(bad)}: no wrong number`);
     assert.ok(!t.includes(">Reload<"), "no Reload without an address");
   }
+});
+
+// Issue #845: what a running console cannot pick up without a restart, on every page for every role (names, never
+// values), under the read-only banner and above the done banner; on an error page a signed-in person is shown too, and
+// never on one an anonymous visitor is.
+test("the restart banner on every page for every role, under the read-only banner, and on a signed-in error page alone (#845)", async () => {
+  const notice = restartNoticeOf(restartReasons({ start: { values: { VALKEY_URL: "a" }, problem: null }, now: { values: { VALKEY_URL: "b" }, problem: null } }));
+  const banner = `<div class="banner banner--sm tone-attention" role="status"><span class="tile"><svg class="ic" aria-hidden="true"><use href="#i-rerun"></use></svg></span><div><p class="banner__t">${RESTART_TITLE}</p><p class="banner__s"><span class="code">VALKEY_URL</span> has changed in the deployment&#39;s .env since this console started, and the console keeps the value it started with until it is restarted.</p></div></div>`;
+  assert.equal(String(restartBannerHtml(notice)), banner);
+  for (const none of [null, undefined, {}, { title: RESTART_TITLE, reasons: [] }, "restart"]) assert.equal(restartBannerHtml(none), null, String(none));
+  for (const name of Object.keys(PAGES)) {
+    for (const role of ROLES) {
+      const { html } = await draw(name, { role, restart: notice });
+      assert.equal(count(html, banner), 1, `${name}.${role}`);
+      assert.ok(html.indexOf(banner) > html.indexOf("<h1") && (html.search(/<section id="(?:p-|cf-)/) === -1 || html.indexOf(banner) < html.search(/<section id="(?:p-|cf-)/)), `${name}.${role}: under the title bar, above the panels`);
+      assert.equal(count((await draw(name, { role, restart: null })).html, RESTART_TITLE), 0, `${name}.${role}: none without a notice`);
+    }
+  }
+  const flash = { summary: "Paused the fleet", by: "ops", auditSeq: 41, count: 1, undo: "Resume it.", inverse: { action: "fleet-resume", body: {} }, kind: "fleet-pause", at: 0 };
+  const all = (await draw("fleet", { readOnly: true, flash, restart: notice })).html;
+  assert.ok(all.indexOf(READ_ONLY_TITLE) < all.indexOf(banner) && all.indexOf(banner) < all.indexOf(String(doneBannerHtml(flash))), "read-only, then restart, then done");
+  // The error pages: drawn with the signed-in bar, the banner under the title; without a session (the sign-in bar), none.
+  const signedIn = String(frameHtml({ name: "error", title: "Not found", session: { name: "watcher", role: "viewer" }, nav: true, restart: notice }, "<p>gone</p>"));
+  assert.equal(count(signedIn, banner), 1);
+  assert.ok(signedIn.indexOf("<h1>Not found</h1>") < signedIn.indexOf(banner) && signedIn.indexOf(banner) < signedIn.indexOf("gone"), "under the title, above the page's own card");
+  assert.equal(count(String(frameHtml({ name: "error", title: "Not found", nav: true, restart: notice }, "<p>gone</p>")), RESTART_TITLE), 0, "no session, no banner");
+  assert.equal(count(String(loginPage({})), RESTART_TITLE), 0);
 });
 
 test("the read-only banner on every page of a read-only console; the done banner once from the session's flash", async () => {
