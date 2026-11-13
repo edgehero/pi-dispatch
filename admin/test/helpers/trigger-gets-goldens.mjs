@@ -6,6 +6,8 @@
  * that done, each step asserted to apply once (`panel-goldens.mjs`' rule), which `console-client-states.test.mjs` holds to the script.
  */
 import assert from "node:assert/strict";
+import { flowBasisOf } from "@edgehero/pi-dispatch/host-loads";
+import { parseTriggers } from "@edgehero/pi-dispatch/triggers";
 import { NOW } from "../../../launch/fixture-deployment.mjs";
 import { loadPageData, parsePageQuery, renderPage } from "../../src/console/pages.mjs";
 import { HOST_LOADS, LOADED_SAMPLES as S, LONG_LOADED, longNamesRecord } from "./loaded-samples.mjs";
@@ -143,6 +145,18 @@ const FLOW_ABSENT = Object.freeze({
   loads: hostLoads({ mini1: { flows: [{ trigger: 2, flow: "fix", tier: "none", package: null, repo: "absent" }] }, build3: { flows: [{ trigger: 2, flow: "fix", tier: "none", package: null, repo: "absent" }] } }),
 });
 
+/**
+ * Issue #869: the same schedule, its packages loaded again since mini1's doctor ran with them withheld and found the flow nowhere. build3's
+ * doctor has run since and found it in a staged package. Each row carries the basis of the file its doctor read, as the loader parses it.
+ */
+const flowStale = () => {
+  const entry = FLOW_ABSENT.entry;
+  const basisOf = (run) => flowBasisOf(parseTriggers(getsFile({ ...entry, run }), TRIGGER_GETS_PATH)[2]);
+  const withheld = { trigger: 2, flow: "fix", tier: "none", package: null, repo: "absent", basis: basisOf({ ...entry.run, packages: false }) };
+  const loaded = { trigger: 2, flow: "fix", tier: "package", package: "pi-test-runner", repo: "absent", basis: basisOf(entry.run) };
+  return { entry, records: [], loads: hostLoads({ mini1: { flows: [withheld] }, build3: { flows: [loaded] } }) };
+};
+
 export const TRIGGER_GETS_DRAW = Object.freeze({
   "trigger-gets.operator": () => triggerGetsPage(),
   "trigger-gets.viewer": () => triggerGetsPage({ role: "viewer" }),
@@ -153,6 +167,7 @@ export const TRIGGER_GETS_DRAW = Object.freeze({
   "trigger-gets-no-flow.operator": () => triggerGetsPage({ records: [S.noFlow()], loads: hostLoads({ mini1: { ...FLOW_ROW("unknown") }, build3: { ...FLOW_ROW("unknown") } }) }),
   "trigger-gets-no-run.operator": () => triggerGetsPage({ records: [] }),
   "trigger-gets-flow-absent.operator": () => triggerGetsPage(FLOW_ABSENT),
+  "trigger-gets-flow-stale.operator": () => triggerGetsPage(flowStale()),
   "trigger-gets-unknown-host.operator": () => triggerGetsPage({ loads: UNKNOWN_ALL }),
   // A version 2 file written by hand, on hosts as `readHostLoadsView` hands them: mini1's worker publishes that it reads 1, and mini2's nothing.
   "trigger-gets-host-holds.operator": () => { const loads = getsHostLoads(); return triggerGetsPage({ text: `${JSON.stringify({ version: 2, ...JSON.parse(getsFile()) }, null, 2)}\n`, loads: { ...loads, hosts: loads.hosts.map((row) => ({ ...row, triggersVersion: { build3: "2", mini1: "1" }[row.name] ?? null })) } }); },

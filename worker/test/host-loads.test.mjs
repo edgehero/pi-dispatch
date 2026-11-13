@@ -3,22 +3,22 @@ import { mkdirSync, readdirSync, readFileSync, statSync, symlinkSync, writeFileS
 import { join } from "node:path";
 import { test } from "node:test";
 import { DOCTOR_RESULTS_TTL_MS } from "../src/doctor-results.mjs";
-import { buildHostLoads, flowProbes, flowTierOf, HOST_LOADS_CAPS, HOST_LOADS_MAX_BYTES, HOST_LOADS_OLD_INTERVALS, HOST_LOADS_PARTS, HOST_LOADS_VERSION, hostLoadsKey, hostsAgree, LOADS_EXTENSION_KINDS, LOADS_FLOW_TIERS, LOADS_IGNORE_FILES, LOADS_REPO_STATES, loadsFreshness, mcpRowsOf, parseHostLoads, pathIsThere, publishHostLoads, readHostLoads, readOverlayExtensionRows, readOverlaySkillNames } from "../src/host-loads.mjs";
+import { buildHostLoads, FLOW_BASIS_HEX, FLOW_INPUT_FIELDS, flowBasisOf, flowInputOf, flowProbes, flowTierOf, HOST_LOADS_CAPS, HOST_LOADS_MAX_BYTES, HOST_LOADS_OLD_INTERVALS, HOST_LOADS_PARTS, HOST_LOADS_VERSION, hostLoadsKey, hostsAgree, LOADS_EXTENSION_KINDS, LOADS_FLOW_TIERS, LOADS_IGNORE_FILES, LOADS_REPO_STATES, loadsFreshness, mcpRowsOf, parseHostLoads, pathIsThere, publishHostLoads, readHostLoads, readOverlayExtensionRows, readOverlaySkillNames } from "../src/host-loads.mjs";
 import { ABSENT_CODES, parseOverlayMcp } from "../src/mcp-config.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 // Issue #800, INT-DOCTOR-RESULTS-KEY's `doctor:loads:<name>`. Every clock here is injected: a record's age is the point.
 const NOW = Date.UTC(2026, 10, 3, 12, 0, 0);
 /** Every name at its longest at every cap, fitted to the bound: measured, and said in the contract. */
-const WORST_BYTES = 65_460;
-const FLOWS_KEPT = 41;
+const WORST_BYTES = 65_493;
+const FLOWS_KEPT = 39;
 const HOUR = 3_600_000;
 const PARTS = {
 	extensions: [{ name: "git-guard.ts", kind: "file" }],
 	skills: ["deploy"],
 	mcp: [{ name: "linear", transport: "http", where: "mcp.linear.app", exposure: "codemode", enabled: true, keys: ["LINEAR_KEY"] }],
 	packages: [{ name: "pi-lint", version: "1.4.2" }],
-	flows: [{ trigger: 3, flow: "fix", tier: "overlay", package: null, repo: "unknown" }],
+	flows: [{ trigger: 3, flow: "fix", tier: "overlay", package: null, repo: "unknown", basis: flowBasisOf({ on: { type: "label", any: ["pi"] }, run: { kind: "github", flow: "fix" } }) }],
 };
 const record = (over = {}) => buildHostLoads({ at: NOW, every: 24, by: { uid: 501, worker: true }, overlayExtensionsAllowed: true, ...PARTS, ...over });
 const rowOf = (over = {}, { name = "mini1", at = NOW } = {}) => ({ name, state: "current", ...parseHostLoads(JSON.stringify(record({ at, ...over }))) });
@@ -57,7 +57,7 @@ test("the record: the shape the contract names, and an empty `more`", () => {
 		skills: ["deploy"],
 		mcp: [{ name: "linear", transport: "http", where: "mcp.linear.app", exposure: "codemode", enabled: true, keys: ["LINEAR_KEY"] }],
 		packages: [{ name: "pi-lint", version: "1.4.2" }],
-		flows: [{ trigger: 3, flow: "fix", tier: "overlay", package: null, repo: "unknown" }],
+		flows: [{ trigger: 3, flow: "fix", tier: "overlay", package: null, repo: "unknown", basis: "889e51f3" }],
 		more: {},
 	});
 });
@@ -129,7 +129,8 @@ test("each list has its cap, the rest counted in `more`, and the whole record it
 		skills: Array.from({ length: 64 }, (_, i) => big("s", i).padEnd(64, "x")),
 		mcp: Array.from({ length: 32 }, (_, i) => ({ name: big("m", i).padEnd(32, "x"), transport: "stdio", where: "w".repeat(255), exposure: "codemode", enabled: true, keys: Array.from({ length: 4 }, (_, k) => `K${k}`.padEnd(64, "Y")) })),
 		packages: Array.from({ length: 64 }, (_, i) => ({ name: big("p", i).padEnd(214, "x"), version: `1.0.0-${"r".repeat(122)}` })),
-		flows: Array.from({ length: 128 }, (_, i) => ({ trigger: 999_999 - i, flow: "f".repeat(64), tier: "package", package: "p".repeat(214), repo: "unknown" })),
+		// Each row with its basis (issue #869), which every doctor since writes: 19 bytes a row, two rows fewer kept than without.
+		flows: Array.from({ length: 128 }, (_, i) => ({ trigger: 999_999 - i, flow: "f".repeat(64), tier: "package", package: "p".repeat(214), repo: "unknown", basis: "f".repeat(FLOW_BASIS_HEX) })),
 	});
 	const bytes = Buffer.byteLength(JSON.stringify(worst), "utf8");
 	assert.ok(bytes <= HOST_LOADS_MAX_BYTES, `the worst record is ${bytes} bytes`);
@@ -384,6 +385,55 @@ test("flowTierOf: the loader's order, first hit wins, and a forge trigger found 
 	assert.deepEqual(await of({ folder: "/srv" }, "absent", { ...nowhere, staged: { skills: [], unenumerable: ["pi-glob"] } }), ["unknown", null, "absent"], "a package whose manifest cannot be enumerated");
 	const words = await flowTierOf({ flow: "fix", folder: "/srv" }, { repoFlowAtHead: answer("absent"), ...nowhere });
 	assert.deepEqual([words.resolved, words.checked, words.unknown], [null, ["repo .pi/skills at HEAD", "overlay skills/", "staged packages"], []], "the words of doctor's own line");
+});
+
+// Issue #869: a flow row says which version of the trigger it answered for, so a console reading the file after an edit can tell.
+test("a flow row's basis digests exactly the fields flowTierOf reads, read off its own signature, and each one moves it", () => {
+	// The names `flowTierOf` destructures from its first argument, from its source: a field it comes to read fails here first.
+	const signature = /^async function flowTierOf\(\{([^}]*)\}/.exec(Function.prototype.toString.call(flowTierOf));
+	assert.ok(signature, "flowTierOf still takes its trigger's fields as one destructured argument");
+	const read = signature[1].split(",").map((part) => part.split("=")[0].trim()).filter(Boolean);
+	assert.deepEqual(read, [...FLOW_INPUT_FIELDS], "FLOW_INPUT_FIELDS names what flowTierOf reads, in its order");
+	assert.deepEqual(Object.keys(flowInputOf({ run: {} })), [...FLOW_INPUT_FIELDS], "and flowInputOf hands it each of them");
+
+	const base = { on: { type: "cron", id: "web", pattern: "0 9 * * *" }, run: { kind: "local", folder: "/srv/web", flow: "fix", task: "t", skillsDir: "/srv/skills", excludeExtensions: ["pi-a", "pi-b"] } };
+	const basis = flowBasisOf(base);
+	assert.match(basis, new RegExp(`^[0-9a-f]{${FLOW_BASIS_HEX}}$`));
+	assert.equal(FLOW_BASIS_HEX, 8);
+	// One change per field, keyed by the list: a field added to it fails until it has one here, and then until the digest moves with it.
+	const changes = {
+		flow: [{ flow: "review" }],
+		folder: [{ folder: "/srv/api" }, { folder: undefined }],
+		skillsDir: [{ skillsDir: "/srv/other-skills" }, { skillsDir: "skills" }, { skillsDir: undefined }],
+		packages: [{ packages: false }],
+		excludeExtensions: [{ excludeExtensions: ["pi-a"] }, { excludeExtensions: ["pi-a", "pi-b", "pi-c"] }, { excludeExtensions: undefined }],
+	};
+	assert.deepEqual(Object.keys(changes), [...FLOW_INPUT_FIELDS]);
+	for (const [field, overs] of Object.entries(changes)) {
+		for (const over of overs) {
+			const changed = { ...base, run: { ...base.run, ...over } };
+			assert.notDeepEqual(flowInputOf(changed)[field], flowInputOf(base)[field], `${field}: flowInputOf reads ${JSON.stringify(over)}`);
+			assert.notEqual(flowBasisOf(changed), basis, `${field}: ${JSON.stringify(over)} moves the basis`);
+		}
+	}
+	// What flowTierOf does not read, or reads the same way, does not move it.
+	const same = (run) => flowBasisOf({ ...base, run: { ...base.run, ...run } });
+	assert.equal(same({ excludeExtensions: ["pi-b", "pi-a"] }), basis, "flowTierOf asks only whether a name is in the list");
+	assert.equal(same({ packages: true }), basis, "absent and true are one answer");
+	for (const run of [{ task: "another" }, { model: "m", provider: "p" }, { image: "pi-job:4.3.1" }, { mcp: ["linear"] }, { excludeTools: ["bash"] }, { kind: "github" }]) assert.equal(same(run), basis, JSON.stringify(run));
+	assert.equal(flowBasisOf({ ...base, on: { type: "label", any: ["pi"] } }), basis, "nor does what starts it");
+	// The loader's sentinel for a disarmed one-shot names no flow, so doctor publishes no row for it.
+	assert.equal(flowInputOf({ on: { type: "disarmed" }, run: {} }).flow, null);
+	assert.notEqual(flowBasisOf({ on: { type: "disarmed" }, run: {} }), basis);
+});
+
+test("a flow row's basis is read by its shape: one of another shape drops the row and counts it, and none is a row from before #869", () => {
+	const row = PARTS.flows[0];
+	const { basis, ...older } = row;
+	const parsed = parseHostLoads(JSON.stringify({ ...record(), flows: [row, older, { ...row, trigger: 4, basis: "XYZ12345" }, { ...row, trigger: 5, basis: 7 }, { ...row, trigger: 6, basis: `${basis}0` }, { ...row, trigger: 7, basis: null }] }));
+	assert.deepEqual(parsed.flows, [row, older], "its basis kept as written, and a row with none read as an older doctor wrote it");
+	assert.deepEqual(parsed.more, { flows: 4 });
+	assert.deepEqual(buildHostLoads({ at: NOW, flows: [{ ...row, basis: "/srv/web" }] }).flows, [], "the builder holds it to the same shape");
 });
 
 test("flowProbes answers as each reader did, and notes only a failure that is not absence", () => {

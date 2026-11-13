@@ -143,7 +143,7 @@ import { assignCheckIds, buildDoctorRecord, doctorIntervalHours, publishRedactor
 import { olderStateFindings as olderStateFindingsReal, VALKEY_CONTAINER } from "./older-state.mjs";
 import { DOCTOR_PUBLISH_SKIPPED_PREFIX } from "./doctor-spawner.mjs";
 import { extensionsNotHere } from "./loaded-record.mjs";
-import { buildHostLoads, flowProbes, flowTierOf, mcpRowsOf, pathIsThere, readOverlayExtensionRows, readOverlaySkillNames } from "./host-loads.mjs";
+import { buildHostLoads, FLOW_INPUT_FIELDS, flowBasisOf, flowInputOf, flowProbes, flowTierOf, mcpRowsOf, pathIsThere, readOverlayExtensionRows, readOverlaySkillNames } from "./host-loads.mjs";
 
 const NODE_FLOOR = [22, 19]; // pi's engine floor (22.19.0)
 
@@ -2191,7 +2191,8 @@ export async function collectChecks(shellVars, seams) {
 		const staged = readStagedSkills({ globalPiDir: env.PI_GLOBAL_PI_DIR, readFile: stagedProbes.readFile, fileExists: stagedProbes.fileExists, readDir: stagedProbes.readDir });
 		const groups = new Map();
 		for (const f of flows) {
-			const key = JSON.stringify([f.flow, f.folder, f.skillsDir, f.packages, f.excludeExtensions]);
+			// Keyed by every field `flowTierOf` reads, so a group shares one answer and one basis.
+			const key = JSON.stringify(FLOW_INPUT_FIELDS.map((field) => f[field]));
 			if (!groups.has(key)) groups.set(key, { ...f, labels: [], triggers: [] });
 			groups.get(key).labels.push(f.label);
 			groups.get(key).triggers.push(f.index);
@@ -2209,7 +2210,7 @@ export async function collectChecks(shellVars, seams) {
 					fix: "a flow name must match the skill charset (lowercase alphanumerics, - and _, 64 max), or no tier can ever hold it -- fix run.flow",
 				});
 				// No tier can hold it, and a name that fails the charset is not published.
-				for (const trigger of g.triggers) seams.flowRows.push({ trigger, flow: null, tier: "none", package: null, repo: "unknown" });
+				for (const trigger of g.triggers) seams.flowRows.push({ trigger, flow: null, tier: "none", package: null, repo: "unknown", basis: g.basis });
 				continue;
 			}
 			const probes = flowProbes({ fileExists, fs: flowFs });
@@ -2219,7 +2220,7 @@ export async function collectChecks(shellVars, seams) {
 			// trigger that withholds the packages did not, and another trigger's unreadable folder says nothing of this one's.
 			const blind = probes.blind() || (g.packages !== false && stagedProbes.blind());
 			const tier = found.tier === "none" && blind ? "unknown" : found.tier;
-			for (const trigger of g.triggers) seams.flowRows.push({ trigger, flow: g.flow, tier, package: found.package, repo: found.repo });
+			for (const trigger of g.triggers) seams.flowRows.push({ trigger, flow: g.flow, tier, package: found.package, repo: found.repo, basis: g.basis });
 			if (resolved) {
 				checks.push({ ok: true, label: `Trigger flow "${g.flow}" resolves (${at}: ${resolved})` });
 			} else {
@@ -6883,18 +6884,12 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTable
 			// two triggers naming the same flow with different skillsDirs are two different questions.
 			// The label is how a line names its trigger: cron entries by their id, id-less webhook
 			// entries by raw file position (the admin's trigger:<index> identity).
+			// Issue #869: what `flowTierOf` is asked and the basis each published row carries come from the one module the console
+			// computes its basis with (`flowInputOf`, `flowBasisOf`), from the trigger as the loader parsed it, so the two cannot
+			// read a field two ways. A command trigger and a disarmed one-shot name no flow and drop out here.
 			flows: triggers
-				.map((t, index) => ({
-					index,
-					label: triggerLabel(t, index),
-					flow: t.run.flow,
-					kind: t.run.kind,
-					folder: typeof t.run.folder === "string" ? t.run.folder : null,
-					skillsDir: typeof t.run.skillsDir === "string" ? t.run.skillsDir : null,
-					packages: t.run.packages !== false,
-					excludeExtensions: Array.isArray(t.run.excludeExtensions) ? t.run.excludeExtensions : [],
-				}))
-				.filter((f) => typeof f.flow === "string"),
+				.map((t, index) => ({ index, label: triggerLabel(t, index), kind: t.run.kind, ...flowInputOf(t), basis: flowBasisOf(t) }))
+				.filter((f) => f.flow !== null),
 			// Issue #800: each trigger's run.excludeExtensions, for the line that says a name is on neither side of this host.
 			excludedNames: triggers.flatMap((t, index) => (Array.isArray(t.run.excludeExtensions) ? [{ label: triggerLabel(t, index), names: t.run.excludeExtensions, packages: t.run.packages !== false }] : [])),
 			// Issue #501: every trigger that sets run.maxCostUsd, with the label the cap check names it by. The value

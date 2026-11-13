@@ -4,6 +4,7 @@ import * as nodeFs from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
 import { parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
 import { isForgeKind } from "@edgehero/pi-dispatch/forges";
+import { flowBasisOf } from "@edgehero/pi-dispatch/host-loads";
 import { planSandboxPreparation } from "@edgehero/pi-dispatch/sandbox-prepare";
 import { readSandboxHosts, planSandboxHost, sandboxHostsPath, writeSandboxHost } from "@edgehero/pi-dispatch/sandbox-hosts";
 import { parseProjects } from "@edgehero/pi-dispatch/projects";
@@ -92,13 +93,16 @@ export function makeSandboxService({ paths, env = {}, deploymentDir, fleet, fs =
       // A disarmed one-shot's run is the file's entry, as the worker prepares it (`sandbox-prepare.mjs`): the parser hands
       // back no run for it, so its flow, MCP servers and packages read from the raw entry (issue #847).
       const rawTrigger = cfg.triggers[selected.index]?.on?.type === "disarmed" ? (() => { try { return JSON.parse(cfg.triggersText).triggers?.[selected.index]?.run; } catch { return undefined; } })() : cfg.triggers[selected.index]?.run;
+      // Issue #869: the basis a doctor's flow row must carry to answer for this trigger, from the loader's own entry as doctor reads it, so
+      // a disarmed one-shot's is its sentinel's, for which doctor publishes no row: a row from before it was spent is for the file as it was.
+      const flowBasis = cfg.triggers[selected.index] === undefined ? null : flowBasisOf(cfg.triggers[selected.index]);
       const eligibleHosts = inv.hosts.filter((h) => {
         const backend = rawTrigger?.backend ?? h.settings?.defaultBackend;
         return !h.stale && !h.unreadable && h.settings && ["local", "podman"].includes(backend) && h.settings.backends.includes(backend);
       }).map((h) => h.name);
       const judged = selected.repo && selected.host && selected.index !== null ? preparation(selected, inv, cfg) : {};
       const request = query.request && query.host ? await fleet.sandboxPreparationStatus(query.host, query.request) : null;
-      return { ...inv, options, eligibleHosts, selected, withholdsPackages: rawTrigger?.packages === false, flow: typeof rawTrigger?.flow === "string" ? rawTrigger.flow : null, mcp: Array.isArray(rawTrigger?.mcp) ? rawTrigger.mcp.filter((name) => typeof name === "string") : [], excludes: Array.isArray(rawTrigger?.excludeExtensions) ? rawTrigger.excludeExtensions : [], ...judged, request, ...(query.fromRun ? { fromRun: query.fromRun, sourceRun } : {}) };
+      return { ...inv, options, eligibleHosts, selected, withholdsPackages: rawTrigger?.packages === false, flow: typeof rawTrigger?.flow === "string" ? rawTrigger.flow : null, flowBasis, mcp: Array.isArray(rawTrigger?.mcp) ? rawTrigger.mcp.filter((name) => typeof name === "string") : [], excludes: Array.isArray(rawTrigger?.excludeExtensions) ? rawTrigger.excludeExtensions : [], ...judged, request, ...(query.fromRun ? { fromRun: query.fromRun, sourceRun } : {}) };
     },
     async preview(name, params) {
       if (name === "sandbox-host-set") {

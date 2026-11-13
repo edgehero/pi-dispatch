@@ -17,11 +17,11 @@
 import * as nodeFs from "node:fs";
 import { FORGE_MCP_KINDS, FORGE_MCP_SERVER_NAME } from "@edgehero/pi-dispatch/mcp-config";
 import { EXCLUDABLE_TOOL_NAMES, MCP_EXCLUDABLE_TOOL_NAMES, mcpServerToolPattern, triggersFileVersionProblem, validateExcludeExtensionTools } from "@edgehero/pi-dispatch/triggers";
-import { hostsAgree } from "@edgehero/pi-dispatch/host-loads";
+import { flowBasisOf, hostsAgree } from "@edgehero/pi-dispatch/host-loads";
 import { overlayEntryNamed } from "@edgehero/pi-dispatch/loaded-record";
 import { optionalUsdMicros } from "@edgehero/pi-dispatch/money";
 import { hostLoadsRow, hostPiFor, sandboxFreshLine, triggerLastRun } from "./loaded-words.mjs";
-import { loaderRefuses, normalizeTriggerForDisplay } from "./read-model.mjs";
+import { loaderTriggers, normalizeTriggerForDisplay } from "./read-model.mjs";
 import { triggerEntryDigest } from "./trigger-edit-core.mjs";
 import { listed } from "./words.mjs";
 
@@ -66,6 +66,7 @@ export const TRIGGER_GETS_WORDS = Object.freeze({
   viewer: "An operator changes these on this page, with one preview and one Confirm.",
   noTool: "No tool reaches this action; dispatch_trigger_edit keeps today’s scope.",
   flowPicker: "It leaves out what is in a skills folder, or in a repository not on this host, and any other name can be typed.",
+  flowStale: "answered for the triggers file as it was, so it is unknown there until doctor runs again",
   reloadDrops: "A Confirm elsewhere on this page reloads it, and drops any change not yet written in What its jobs get.",
   othersUnread: "This page read the triggers file, and its other reads failed: the run history, the hosts and the jobs in line are unknown.",
   pillOrder: "differs in the order or kind of what it loads",
@@ -95,6 +96,8 @@ const unique = (items) => [...new Set(items)];
  * secret references, so it is asked for only for an operator's form. Null where there is no row, the file cannot be read, or a newer
  * release wrote it: its entries may use fields this build cannot read, and the planner would refuse any change to it. `fileRefused`: the
  * loaders' own parser refuses those bytes, and the row still draws, since a person can come here to fix it. Of the one read, so it holds with Valkey down too.
+ * `trigger.flowBasis`: the basis of this entry as the loaders parse it (`flowBasisOf`, issue #869), which a doctor's flow row must carry to
+ * answer for it, or null where they refuse the file, since then no doctor has judged this file as it stands.
  */
 export function readTriggerGetsEntry({ triggersPath, index, withDigest = false, fs = nodeFs }) {
   try {
@@ -104,7 +107,8 @@ export function readTriggerGetsEntry({ triggersPath, index, withDigest = false, 
     const entry = doc?.triggers?.[index];
     const trigger = entry === undefined ? null : normalizeTriggerForDisplay(entry);
     if (trigger === null) return null;
-    return { trigger: { ...trigger, index }, fileVersion: Number.isSafeInteger(doc?.version) ? doc.version : 1, ...(withDigest ? { pageDigest: triggerEntryDigest(entry) } : {}), ...(loaderRefuses(text, triggersPath) ? { fileRefused: true } : {}) };
+    const loaded = loaderTriggers(text, triggersPath);
+    return { trigger: { ...trigger, index, flowBasis: loaded === null ? null : flowBasisOf(loaded[index]) }, fileVersion: Number.isSafeInteger(doc?.version) ? doc.version : 1, ...(withDigest ? { pageDigest: triggerEntryDigest(entry) } : {}), ...(loaded === null ? { fileRefused: true } : {}) };
   } catch {
     return null;
   }
@@ -169,7 +173,9 @@ function agreeRow(row, trigger) {
     skills: row.skills ?? [],
     mcp: (row.mcp ?? []).filter((server) => named.includes(server.name) && server.enabled === true),
     packages: packagesLoaded(row, trigger),
-    flows: (row.flows ?? []).filter((entry) => entry.trigger === trigger.index && entry.flow === trigger.flow),
+    // Its answer for the file as it is, without the basis: two hosts that answer for it hold the same one, and a host on a release before
+    // #869 holds none, which would otherwise be a difference no job meets.
+    flows: [flowRowFor(row, trigger)?.row].filter(Boolean).map((found) => ({ trigger: found.trigger, flow: found.flow, tier: found.tier, package: found.package, repo: found.repo })),
   };
 }
 
@@ -178,14 +184,32 @@ const serverDefinition = (server) => JSON.stringify([server.transport, server.wh
 
 export const FLOW_TIER_WORDS = Object.freeze({ repository: "from the repository", trigger: "from its skills folder", overlay: "from the overlay", none: "in no tier", unknown: "in no tier a host can see" });
 
-/** Where doctor found this trigger's flow on this host, or null when it has no answer for this flow: it may have run before an edit. */
-export function flowAnswer(row, trigger) {
+/**
+ * Doctor's row for this trigger's flow on this host, read against the file as this page read it (issue #869): `{ row }` where it answers
+ * for the trigger as the file has it now, `{ stale: true }` where doctor judged it for the trigger as it was, or null where it has no row
+ * for this flow. A row carries the basis of the fields it was judged from (`flowBasisOf`), and it answers only where that is
+ * `trigger.flowBasis`, the basis of this page's own parse of the file, so an edit to the flow, its folder, `run.skillsDir`, `run.packages`
+ * or `run.excludeExtensions` leaves no answer until doctor runs again on that host. REJECTED: matching on the trigger's position and flow
+ * name alone, as before, which kept the answer for the file as it was: a flow found in a skills folder the file no longer names, or found
+ * nowhere while packages were withheld, after the file loaded them again. A row from a doctor before #869 has no basis, and is read the
+ * older way, with the two cases a row shows of itself (#847).
+ */
+export function flowRowFor(row, trigger) {
+  if (typeof trigger.flow !== "string") return null;
   const found = (row.flows ?? []).find((entry) => entry.trigger === trigger.index && entry.flow === trigger.flow);
   if (!found) return null;
+  if (typeof found.basis === "string") return found.basis === trigger.flowBasis ? { row: found } : { stale: true };
   // Doctor never answers this of a package the file leaves out (`flowTierOf`), so such a row is from before that was written: no answer for the file as it is.
   if (found.tier === "package" && (trigger.excludeExtensions ?? []).includes(found.package)) return null;
   // Nor of a package tier under `"packages": false` (issue #847): no package loads, so that answer is for the file as it was.
   if (found.tier === "package" && trigger.packages === false) return null;
+  return { row: found };
+}
+
+/** Where doctor found this trigger's flow on this host, or null when it has no answer for the file as it is (`flowRowFor`). */
+export function flowAnswer(row, trigger) {
+  const found = flowRowFor(row, trigger)?.row;
+  if (!found) return null;
   return found.tier === "package" ? `from ${found.package ?? "a staged package"}` : FLOW_TIER_WORDS[found.tier] ?? null;
 }
 
@@ -196,7 +220,8 @@ export function flowAnswer(row, trigger) {
  * REJECTED: `none` alone, which trusts the one word to imply the other when the reader's parse takes any pair of them.
  */
 export function lacksFlow(row, trigger) {
-  const found = trigger.flow === null ? null : (row.flows ?? []).find((entry) => entry.trigger === trigger.index && entry.flow === trigger.flow);
+  // Of a row that answers for the file as it is (`flowRowFor`): a `none` judged before an edit is no reason to say a job would go without it.
+  const found = flowRowFor(row, trigger)?.row;
   return found?.tier === "none" && found.repo === "absent";
 }
 
@@ -328,8 +353,13 @@ function flowRow({ trigger, rows, editor }) {
   const choices = offered.filter((entry) => !seen.has(entry.name) && seen.add(entry.name)).slice(0, FLOW_CHOICES_MAX);
   const groups = new Map();
   const silent = [];
+  const stale = [];
   for (const row of rows) {
     if (trigger.flow === null || row.state !== "current") continue;
+    if (flowRowFor(row, trigger)?.stale === true) {
+      stale.push(row.name);
+      continue;
+    }
     const word = flowAnswer(row, trigger);
     if (word === null) silent.push(row.name);
     else groups.set(word, [...(groups.get(word) ?? []), row.name]);
@@ -338,6 +368,8 @@ function flowRow({ trigger, rows, editor }) {
   const lacking = rows.filter((row) => row.state === "current" && lacksFlow(row, trigger)).map((row) => row.name);
   const said = [
     ...[...groups].map(([word, names]) => `${listed(names)} ${names.length === 1 ? "finds" : "find"} ${trigger.flow} ${word}`),
+    // Issue #869: an answer judged before a change to what the flow is found by. One sentence for one host or many, so it reads alike.
+    stale.length > 0 ? `${listed(stale)} ${TRIGGER_GETS_WORDS.flowStale}` : null,
     silent.length > 0 ? `${listed(silent)} ${silent.length === 1 ? "has" : "have"} no answer for it yet` : null,
     unknown.length > 0 ? `${listed(unknown)} ${unknown.length === 1 ? "has" : "have"} no answer to read` : null,
   ].filter(Boolean);
@@ -603,6 +635,7 @@ export function triggerGetsOf({ trigger, records = [], historyUnread = false, ho
 /** What a fresh sandbox's Flow and MCP servers rows say (issue #847), in their own words. */
 export const SANDBOX_FRESH_WORDS = Object.freeze({
   noFlow: "This trigger names no flow.",
+  flowStale: "its last doctor run answered for the triggers file as it was",
   flowLabel: "Flow",
   mcpLabel: "MCP servers",
 });
@@ -615,14 +648,18 @@ const freshListsWhole = (row, part) => !(row.unread ?? []).includes(part) && !((
  * (`flowAnswer`, `FLOW_TIER_WORDS`), so the two pages cannot say it two ways. A sandbox is prepared for a forge trigger
  * only, whose repository is on no host, so doctor never answered its repository tier: a tier it found is named with the
  * trigger page's caveat that the repository comes first, and one it found nowhere a host can see is unknown, never
- * absent. Unknown too where doctor has no answer for this flow (it ran before an edit, or the row was cut to fit).
+ * absent. Unknown too where doctor has no answer for this flow (the row was cut to fit, or the flow was named after that run), or answered
+ * for the file as it was (`flowRowFor`).
  */
 function freshFlowWords(row, trigger) {
   if (trigger.flow === null) return SANDBOX_FRESH_WORDS.noFlow;
   const who = `a job of trigger ${trigger.index + 1} on this host`;
+  const at = flowRowFor(row, trigger);
+  // Issue #869: judged before a change to what the flow is found by, so the answer is the next doctor run's, here.
+  if (at?.stale === true) return `Whether ${who} would find ${trigger.flow} is unknown until doctor runs here again: ${SANDBOX_FRESH_WORDS.flowStale}.`;
   const word = flowAnswer(row, trigger);
   if (word === null) return `Whether ${who} would find ${trigger.flow} is unknown: its last doctor run has no answer for it.`;
-  const tier = (row.flows ?? []).find((entry) => entry.trigger === trigger.index && entry.flow === trigger.flow)?.tier;
+  const tier = at.row.tier;
   if (tier === "none" || tier === "unknown") return `Whether ${who} would find ${trigger.flow} is unknown: doctor found it ${word}, and the repository, which is on no host, may hold it.`;
   if (tier === "repository") return `${who.charAt(0).toUpperCase()}${who.slice(1)} would find ${trigger.flow} ${word}.`;
   return `${who.charAt(0).toUpperCase()}${who.slice(1)} would find ${trigger.flow} ${word}, unless the repository holds it at its base commit, which comes first.`;
@@ -667,7 +704,7 @@ function freshMcpWords(row, named) {
  * `sandboxFreshLine`'s. Where the host published a doctor run, a Flow row and, when the trigger names any, an MCP servers
  * row follow; where it did not, the first row alone, as before, since the rest would only repeat that it is unknown.
  */
-export function sandboxFreshRows({ hostLoads, host, triggerIndex, flow = null, mcp = [], withholdsPackages = false, excludes = [], image = null }) {
+export function sandboxFreshRows({ hostLoads, host, triggerIndex, flow = null, flowBasis = null, mcp = [], withholdsPackages = false, excludes = [], image = null }) {
   const rows = [[`On ${host}`, sandboxFreshLine({ hostLoads, host, triggerIndex, withholdsPackages, excludes, image, mcp })]];
   const row = hostLoadsRow(hostLoads, host);
   if (row.state === "unknown") return rows;
@@ -680,7 +717,7 @@ export function sandboxFreshRows({ hostLoads, host, triggerIndex, flow = null, m
     if (listedNames.length > 0) rows.push([SANDBOX_FRESH_WORDS.mcpLabel, [`${listed(listedNames)} unknown here: its last doctor run is old.`]]);
     return rows;
   }
-  rows.push([SANDBOX_FRESH_WORDS.flowLabel, [freshFlowWords(row, { index: triggerIndex, flow: named, excludeExtensions: excludes, packages: withholdsPackages ? false : undefined })]]);
+  rows.push([SANDBOX_FRESH_WORDS.flowLabel, [freshFlowWords(row, { index: triggerIndex, flow: named, excludeExtensions: excludes, packages: withholdsPackages ? false : undefined, flowBasis })]]);
   const mcpWords = freshMcpWords(row, mcp);
   if (mcpWords !== null) rows.push([SANDBOX_FRESH_WORDS.mcpLabel, [mcpWords]]);
   return rows;

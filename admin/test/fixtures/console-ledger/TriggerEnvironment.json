@@ -1,7 +1,7 @@
 {
   "card": "TriggerEnvironment",
   "pr": 800,
-  "words": "83f974adff6e920494977e747201e241428b82cd900441581d36fa9cd3a85115",
+  "words": "9179a19fa9c36ff434a18eef3893800c8003d858aa8c859b9ff0c66a53f9670a",
   "elements": [
     {
       "el": "p-trigger-gets",
@@ -36,7 +36,8 @@
       "source": "admin/src/console/panels/trigger-gets.mjs#triggerGets",
       "golden": [
         "panels/trigger-gets-no-run.operator",
-        "panels/trigger-gets-no-flow.operator"
+        "panels/trigger-gets-no-flow.operator",
+        "panels/trigger-gets-flow-stale.operator"
       ],
       "reason": "The card draws the other states in one panel. On the page each is the same panel, with its own file and record.",
       "shows": [
@@ -166,6 +167,22 @@
         "its flow in no tier",
         "would not find fix: it is not at the repository’s HEAD, nor in any other tier this trigger loads from."
       ]
+    },
+    {
+      "el": "An answer doctor gave for the file as it was reads unknown until doctor runs there again, and no warning stands on it",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-trigger-gets",
+      "source": "admin/src/trigger-gets-view.mjs#TRIGGER_GETS_WORDS",
+      "holds": "answered for the triggers file as it was, so it is unknown there until doctor runs again",
+      "golden": [
+        "panels/trigger-gets-flow-stale.operator"
+      ],
+      "shows": [
+        "mini1 answered for the triggers file as it was, so it is unknown there until doctor runs again",
+        "no answer for its flow"
+      ],
+      "reason": "Issue #869. The card draws this state in the states panel; on the page it is the flow row's Doctor’s answer, beside build3's answer for the file as it is."
     },
     {
       "el": "Extensions: the all-off switch for staged packages, a switch per extension, the repository's own shown",

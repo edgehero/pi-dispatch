@@ -336,6 +336,8 @@ function extensionToolLines({ was, now, seen }) {
 /**
  * The hosts whose doctor found this trigger's flow in a package this change leaves out (`flows`, `flowTierOf`, first hit wins), so no tier above it
  * held it there. Another package may also hold it, and a forge's repository is not on a host, so the sentence says "unless", as the flow's own warning does.
+ * A row's `basis` (issue #869) is not read here: a row judged for the file as it was can only add a warning, which that "unless" covers, and the
+ * card's rule (`flowRowFor`) would only take one away.
  */
 function hostsLosingFlow({ index, flow, names, hosts }) {
   const groups = new Map();
