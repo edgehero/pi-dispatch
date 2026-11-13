@@ -260,6 +260,7 @@ ROLEBOARD = f'<div class="cards-3 ac-roles">{"".join(role_col(*r) for r in ROLES
 # read-only banner. It names settings and a database number, never a value or an address.
 RESTART = banner('attention', 'rerun', 'This console needs a restart',
     '<span class="code">VALKEY_URL</span> has changed in the deployment\'s .env since this console started, and the console keeps the value it started with until it is restarted. '
+    'Pause the fleet and Resume the fleet already use the <span class="code">VALKEY_URL</span> the .env names now; the pages read the one the console started with. '
     'Valkey refused database 16, the one <span class="code">VALKEY_URL</span> named when this console started, and the console does not try a refused database again. '
     'Name one that Valkey has, or raise <span class="code">databases</span> in its configuration, then restart the console.', small=True)
 
@@ -315,7 +316,7 @@ The access states that are not the sign-in form itself: the one-time link page, 
 - **Operator.** Sees reasons, transcripts, phase names, chat, Audit and every action, each as preview then Confirm.
 - **Viewer.** Sees the same rows and numbers. In place of a hidden detail, the viewer gets the repo's sentence, such as "Failure reasons are shown to operators only.", "Phase names and the run's note are shown to operators only.", "Transcripts are shown to operators only." or "Chat is for operators; a viewer sees the run's status only." There are no action buttons, and no Audit in the nav.
 - **Read-only console.** A console started with `PI_CONSOLE_READ_ONLY=1` shows a "Read-only console" chip in the top bar and a banner. Operators keep every detail, but no page has a form, and talking to a run points to the terminal command.
-- **Restart needed.** A console keeps what it read from the deployment's `.env` at start. When that file has changed since, or Valkey refused the database `VALKEY_URL` names, every page shows a banner for every role, "This console needs a restart", naming the settings but never their values. Its log says the same once. A `.env` that cannot be read now asks for a fix before the restart instead. A password changed in that file needs no restart.
+- **Restart needed.** A console keeps what it read from the deployment's `.env` at start. When that file has changed since, or Valkey refused the database `VALKEY_URL` names, every page shows a banner for every role, "This console needs a restart", naming the settings but never their values. Its log says the same once. A `.env` that is missing or cannot be read now asks for a fix before the restart instead. A password changed in that file needs no restart.
 
 **Panels.** `p-link-wait`, `p-link-used`, `p-link-expired`, `p-link-signed-in`, `p-link-nocode`, `p-role-operator`, `p-role-viewer`, `p-role-read-only`.
 
