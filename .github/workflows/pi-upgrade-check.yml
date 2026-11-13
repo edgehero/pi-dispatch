@@ -680,6 +680,15 @@ jobs:
         # PROVED here, never skipped as it is on a host without Landlock (Docker Desktop's LinuxKit kernel).
         run: VERIFY_REQUIRE_LANDLOCK=1 ./image/verify-image.sh "$IMAGE_REF"
 
+      # --- DES-JOB-SIZE-IN-THE-ENV (issue #865) ---
+      # The size suggestion says how many CPUs an OOM-killed run's tools counted at least, by libuv's own arithmetic
+      # (worker/src/size-suggest.mjs `seenCpusOf`), read at one libuv release: 1.52.0 changed it under one CPU. A Node
+      # bump in image/Dockerfile moves libuv with nothing else noticing, so the built image's libuv must be the one the
+      # rule was read at, and a difference says to read the rule again first. RUNNER, not CORE: an operator's own image
+      # may carry any Node, and the suggestion is this repo's.
+      - name: "RUNNER: the job image's Node bundles the libuv the CPU-count rule was read at"
+        run: node .github/scripts/libuv-pin-check.mjs "$IMAGE_REF"
+
       # --- INT-CONTAINER-RUNTIME-CONTRACT (costCap, issue #501) ---
       # The checklist above proves a CLAIMED capability; it cannot notice one this image stopped claiming. Dropping
       # `costCap` from the Dockerfile label would otherwise pass every check here, and the worker reads the label to

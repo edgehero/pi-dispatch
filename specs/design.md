@@ -423,6 +423,65 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   functions and pins its heap, FIFO ceiling, environment parsing and timeout accounting.
 - **Traces to**: `DES-HOST-BUDGET`, `INT-CONTAINER-RUNTIME-CONTRACT`, `CONST-ISOLATION-CONTAINER-PER-JOB`.
 
+## DES-JOB-SIZE-IN-THE-ENV
+
+- **Decision** (issue #865): every job carries its resolved size in its closed env map, `PI_JOB_SIZE_CPUS` (the size's
+  CPUs rounded UP to a whole number, `Math.ceil(cpuCenti / 100)`) and `PI_JOB_SIZE_MEMORY_MIB` (its memory in MiB), both
+  from one function, `jobSizeEnv` in `worker/src/job-size.mjs`. `buildContainerEnv` sets them beside
+  `PI_CODEMODE_MAX_WORKERS`, after the forwarding and secrets loops; both names are in `CONTAINER_ENV_NAMES` (refused in
+  `run.secrets` and `PI_FORWARD_ENV`) and in `NON_SECRET_ENV_KEYS` (so the OpenShell venues carry the numbers on the exec
+  rather than a credential placeholder). The `pi-dispatch sandbox` shell carries the same two values for the size its
+  manifest records (the run's, or for a prepared sandbox its trigger's), through the same function; a run retained
+  before this change gets them for its recorded size although its job never had them. They are information: the size is resolved at pickup from the operator's
+  files, nothing reads them back, and the container's flags remain the bound. They reach the agent's commands because
+  the runner keeps its environment and pi 1.5.2's bash tool spawns with `process.env` (`resolveSpawnContext` copies
+  `getShellEnv()` and deletes five `PI_*` names of pi's own, `dist/core/tools/bash.js`), which
+  `worker/test/job-size-env.pinned.test.mjs` holds by running the pinned tool definition; an MCP stdio server gets only
+  its own base env, which is unchanged, and an overlay `mcp.json` server that references either name is refused as
+  `mcp-secret-reserved`, as for every name the job holds for itself.
+- **Why**: a job's memory is a hard bound at its size, but its CPUs are a weight under one host ceiling
+  (`DES-HOST-BUDGET`), and a weight is invisible inside the container: `os.availableParallelism()` reads the cgroup's
+  `cpu.max`, the ceiling, and `nproc` the affinity mask, the whole runtime. jest 30 and vitest 2 default to
+  `availableParallelism() - 1` workers, so a default `4g` job on an 18 CPU runtime started 16 of them and was killed for
+  its memory (the issue's measurement). The job had no way to learn the size it was planned for. With the size in its
+  env, a flow, an image or a repository's own script can size a per-CPU pool from it (`jest
+  --maxWorkers=$PI_JOB_SIZE_CPUS`), and the docs have one name to point at. Rounded up because a worker count takes no
+  fraction, no size may read as 0, and on Docker and Podman a size between two counts is a weight that may already use
+  idle cores beyond it. That reason does not hold on OpenShell, where `--cpu` is the size as a hard limit: there a
+  1.5 CPU job's pool of 2 shares 1.5 CPUs, a little time slicing and one worker more than `availableParallelism()`
+  gives (read at libuv 1.51.0, Node 22.23.1's: it divides the quota by its period in integer division, so 1), which is
+  harmless beside the ceiling's many. `nproc` reads the whole runtime on every venue. **Under one CPU,
+  `availableParallelism()` reads the whole runtime too**: the quota divides to 0, and libuv takes a quota only when it is
+  above 0 (`uv_available_parallelism`, src/unix/core.c), so it answers the affinity count. On Docker and Podman that
+  takes a CPU ceiling under one CPU, which only a budget below one CPU gives. On OpenShell it is every job sized under
+  one CPU, 0.25 to 0.99 (`parseCpus` takes any two-decimal size from 0.25; `REQ-SCOPED-LIMITS`' own example is 0.5),
+  whose tools read the gateway's whole machine while `PI_JOB_SIZE_CPUS` says 1: #865's own case, on the venue whose
+  limit is otherwise the size. **On cgroup v1 it reads the whole runtime at any limit**: libuv 1.51.0's
+  `uv__cgroup1_find_cpu_controller` turns `N:cpu,cpuacct:/path` into `/sys/fs/cgroup/cpuacct:/path/cpu.cfs_quota_us`,
+  which does not exist, so the read fails and the affinity count stands (jobs do run on cgroup v1 hosts, where
+  `cpu-reserve.mjs` keeps no quota). So in every case a tool counts AT LEAST the limit rounded down, or the whole
+  runtime under one CPU, which is how the size suggestion words it. None of this was measured inside an OpenShell
+  sandbox or on a cgroup v1 host here; it follows from the libuv source and the limit each venue is handed. The rule
+  holds at one libuv release, `SEEN_CPUS_LIBUV` in `size-suggest.mjs` (the next minor release, 1.52.0, answers 1
+  under one CPU instead), and the image job's `.github/scripts/libuv-pin-check.mjs` fails when the built image's
+  `process.versions.uv` is another, saying to read the rule again first, or when its `process.versions.node` is not
+  the Node image/Dockerfile notes its base resolves to, the note this entry's own "Node" is held to by a test. **Residuals**: for an OpenShell run under one
+  CPU the size suggestion's OOM clause is left out, since the record's `capacity.cpus` is this host's runtime's count,
+  not the gateway's (which may be another machine), so it cannot say what the tools counted; and the record does not
+  hold the host's cgroup version, so on cgroup v1 the clause's "at least" is the most it can say. The variable itself
+  is right in both, and the docs say to use it.
+- **Rejected**:
+  - *A hard `--cpus` at the size*: #596 decided the ceiling on purpose, since a hard cap leaves idle cores unused, and it
+    would not reach `nproc` either, which read 18 at `--cpus=2` in the issue's measurement.
+  - *Setting each tool's knob by default* (`VITEST_MAX_FORKS`, `MAKEFLAGS`): it would override what an image or a flow
+    chose for itself, jest has no such variable at all (its count is a flag or its config), the list of tools is never
+    complete, and vitest 2 refuses a maximum below its minimum, so a maximum set alone can stop a suite that ran.
+  - *Reusing `PI_JOB_CPUS` and `PI_JOB_MEMORY`*: those name the deployment's DEFAULT size in `.env`, and a project row
+    gives a job another one, so the same name would mean two things.
+  - *The size's CPUs as a fraction* (`1.5`): every tool that takes a count refuses or truncates one.
+- **Traces to**: `DES-HOST-BUDGET`, `DES-CODEMODE-WORKERS`, `DES-SIZE-SUGGESTIONS`, `INT-CONTAINER-RUNTIME-CONTRACT`,
+  `INT-SANDBOX-CONTRACT`, `REQ-SCOPED-LIMITS`.
+
 ## DES-HOST-BUDGET
 
 - **Decision** (issue #596, phase 2): each worker keeps ONE ledger of the sizes its running jobs were started at, and
@@ -660,6 +719,46 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     median of the runs that DO report throttled time was throttled more than 25% of its wall time, and at least 10
     runs report it (the same minimum as a suggestion: one throttled run is not "the median run"), a FACT line says it
     ran into the host's CPU ceiling (the host's CPU budget, not the job's size), with no call.
+  - **An OOM says what CPU count the killed runs' tools counted at least** (issue #865). On a venue whose `--cpus` is
+    the host ceiling (`CEILING_VENUES`: `local` and `podman`), each `oom-killed` run that decides the raise is read for
+    its ceiling, the worker's own `cpuCeilingCenti` over the record's `capacity` (`cpus` and `cpuCenti`, judged again as
+    untrusted), and for the fewest whole CPUs a tool counts there (`seenCpusOf`): the ceiling ROUNDED DOWN, since
+    libuv's `uv_available_parallelism` (Node's `os.availableParallelism()`, libuv 1.51.0 in the job image's Node
+    22.23.1) divides the cgroup v2 quota by its period in integer division, so `--cpus=2.5` reads as 2; and under one
+    CPU the record's runtime count (`capacity.cpus`), since that quota divides to 0 and libuv then answers the affinity
+    count (none known, nothing said). A LOWER BOUND, worded "counted at least": on cgroup v1 libuv cannot find the limit
+    and reads the whole runtime at any ceiling, and the record does not hold the host's cgroup version
+    (`DES-JOB-SIZE-IN-THE-ENV`). Where that count is above the run's size rounded up (what `PI_JOB_SIZE_CPUS` told it),
+    the suggestion carries a word of its own, `memoryCeiling`: `size per-CPU worker pools from PI_JOB_SIZE_CPUS: the
+    killed run's tools counted at least 15 CPUs at a size of 2 CPUs` (`DES-JOB-SIZE-IN-THE-ENV`). Several such runs are
+    counted, and a range is said for the count or the size only where that one differs among them. It is information:
+    the raise is the same, since nothing on the record says the memory went to a pool. Left out for the OpenShell
+    venues (their `--cpu` is the size, so from one CPU up the tools read it rounded down; a job there under one CPU
+    reads the gateway's whole machine, a residual of `DES-JOB-SIZE-IN-THE-ENV`, since the record does not hold that
+    machine's count), for a record without `capacity` (before issue #599, or a refusal before a slot), and where the
+    count is no more than the variable says, where nothing can be said. `CEILING_VENUES` and `OPENSHELL_BACKENDS`
+    together are held to every venue by a test, so a new venue is placed before the clause is said or left out for it.
+    **Residual, the runtime count**: where the budget's read of the runtime gave no CPU count, `capacity.cpus` is the
+    worker's own `os.availableParallelism()` (index.mjs `capacityNow`), the Mac's on Docker Desktop and not the VM's,
+    and where Docker and Podman both answer it is the smaller of the two (start.mjs), so the count is then an estimate
+    of the venue the job ran on; the clause is information beside a raise that does not depend on it, and a record
+    field for the argv's own `--cpus` was not added for it.
+    **Its own word, after what the suggestion is**: every surface says it after the verdict, a held raise and a
+    refusal. Doctor puts it right after those and BEFORE its two facts (memory pressure, the CPU ceiling), which are
+    information with no call, and doctor prints a lowering's call, which rides in its label, before the facts too (a
+    reading order in the terminal: a lowering, an ok line with no model proposal, is published as its id and level
+    only, `INT-DOCTOR-RESULTS-KEY`); the console's project card puts it as the last of the suggestion's notes, before
+    the card's advisory note ("Measured inside the jobs, so advisory."), with the exact call's block below the notes as
+    for every suggestion; the panel's PROJECTS view and the `dispatch_limit_edit` preview put it after their facts, the
+    panel below the call. Doctor publishes a warn or fail label (the first `DOCTOR_DETAILED_MAX`, 80, of a run) cut at
+    `DOCTOR_LABEL_MAX` (300 characters, `doctor-results.mjs`), and the word rides only on an OOM's warning, so what a
+    long label loses
+    first is the facts, then this word's tail, never the call, a held raise, a refusal or a budget note; the variable
+    comes first in it for the same reason. A label whose held words and project id alone run near the cap can still
+    lose the variable's name, which the other surfaces, which cut nothing, still show. Rejected: the clause inside the
+    OOM words (the first version), which put about 200 characters in the middle of the label and pushed a held raise's
+    or a refusal's words past the cut; "saw N CPUs" (the second), a claim exact only on cgroup v2. The killed run's own
+    forge comment is unchanged (`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK`).
   - **"Not enough runs" says what it counted**: the runs at the current size or larger, and how many smaller ones it
     did not (`not enough runs at 4g (0; 20 at smaller sizes)`); for memory the chart beside it draws those smaller runs
     too. One helper (`notEnoughRunsText`) words it for the panel's PROJECTS view and the tool, and the insights page
@@ -17668,6 +17767,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | Date | Change |
 |---|---|
 | 2026-11-13 (#874) | **`DES-GH-APP-MANIFEST-SETUP` CORRECTED**: `--no-webhook` sent `hook_attributes` as `{ active: false }`, and GitHub refuses that manifest ("url" wasn't supplied), so the polling shape could not create an App at all; the tests pinned the refused shape and nothing sent a manifest to GitHub. The inactive hook now names `https://no-webhook.invalid/`. What GitHub accepts here was measured against github.com on 2026-11-09 by another project's throwaway Apps: a `.invalid` hook URL with `active: false` was accepted, `localhost` and `127.0.0.1` were refused as not reachable over the public Internet, leaving `hook_attributes` out was refused ("Hook url cannot be blank") on an App that subscribes events, as this one does, and the App with the inactive hook recorded one delivery, its creation's ping, and no event after it. Rejected: the project homepage, which GitHub would post the creation ping to (and every event, should someone tick Active without changing the URL), and which reads as the maintainer receiving an operator's events; and any real host, which would receive the same ping and events, and because a domain can change owner. The wizard's closing lines now name `pi-dispatch-receiver poll` instead of calling polling a follow-up, say the poller watches the installation `GITHUB_APP_INSTALLATION_ID` names, print the placeholder, and point to `docs/polling.md`'s new "Moving to webhooks later", which gives the order a test holds: a webhook secret in the App and in `WEBHOOK_SECRET` (the wizard writes none under `--no-webhook`; an existing one another GitHub webhook uses is kept), the receiver started or restarted after it, Active ticked and one delivery seen answered 2xx, and only then the poller stopped. The entry's Rejected list gains the real-host placeholder. A test holds GitHub's rule, a `url` in every shape. UNCHANGED, checked: `DES-GH-POLLING-TRANSPORT` and every other entry (the App's permissions, events and the credential flow are as they were), `CONST-TOKEN-SCOPED-PER-JOB`. No `REQ-` or `INT-` entry states the manifest's shape, so neither file moves. |
+| 2026-11-13 (#865) | **NEW `DES-JOB-SIZE-IN-THE-ENV`**: every job, and a sandbox of its run, carries `PI_JOB_SIZE_CPUS` (CPUs rounded up) and `PI_JOB_SIZE_MEMORY_MIB` from one function, reserved and non-secret, because inside the container a CPU count reads as the host ceiling (`availableParallelism()`) or the whole runtime (`nproc`) and never as the size, so per-CPU pools (jest 30, vitest 2) overran the size's memory. Rejected: a hard `--cpus` at the size (#596's decision, and `nproc` would still read the runtime), setting each tool's knob by default, reusing `PI_JOB_CPUS` and `PI_JOB_MEMORY` (the deployment's default), and a fractional count. **`DES-SIZE-SUGGESTIONS` AMENDED**: an OOM raise also names the CPU ceiling the killed runs' tools saw against their size, read from the record's `capacity` on a venue whose `--cpus` is the ceiling (`CEILING_VENUES`, held with `OPENSHELL_BACKENDS` to every venue by a test), where it is above the size in whole CPUs; information only, the raise unchanged. UNCHANGED, checked: `DES-HOST-BUDGET` (the ceiling and its weight are as decided), `DES-CODEMODE-WORKERS` (its variable and its count), `DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` (the OOM comment). Review round, **`DES-SIZE-SUGGESTIONS` CORRECTED**: the clause was inside the OOM words, about 200 characters in the middle of doctor's label, which is published cut at 300 (`DOCTOR_LABEL_MAX`), so the page's own example lost its pointer on the Fleet page and a held raise's or a refusal's words could go with it. It is now a word of its own, `memoryCeiling`, short and said last on every surface (doctor after the facts, the console, the preview and the panel with them), the variable first; a test holds the example's published label whole and a held raise's words ahead of any cut. It compared the raw ceiling, so `--cpus=2.5` at size 2 read as 2.5 CPUs where Node reads 2: the count is now the ceiling rounded down. One `uniform` flag became two (`seenVaries`, `sizeVaries`), each tested, and a range is said only for the one that varies. **`DES-JOB-SIZE-IN-THE-ENV` AMENDED**: its reason for rounding up holds on Docker and Podman only, and says why it is harmless on OpenShell; the pass-through by pi's bash tool is pinned by a test that runs the pinned tool definition; an overlay MCP server referencing either name is refused as `mcp-secret-reserved`, whose reason now says credentials or settings; the sandbox clause says the size its manifest records. Review round 2, **both CORRECTED** again. Round 1 said "said last on every surface", true of none exactly: doctor put it after its facts, where in the publish cut a label with the memory pressure fact (343 characters) lost the pointer's numbers and a held raise with that fact (439) or both facts (488) lost the variable's name, and the console's card put it before a refusal. Doctor now puts it BEFORE its two facts, so a cut takes the facts first; the card puts it last among its notes, the call's block below the notes; tests cover the pressure fact, the throttle fact and a held raise through the cut, and the card's order. Round 1's count "rounded down, at least 1" was wrong under one CPU: at libuv 1.51.0 (the job image's Node 22.23.1; `uv__get_constrained_cpu` in src/unix/linux.c divides in integer division, `uv_available_parallelism` in src/unix/core.c takes the quota only when it is above 0) a ceiling under one CPU reads as the whole runtime, which the suggestion now says from the record's `capacity.cpus`. On OpenShell a job sized 0.25 to 0.75 reads the gateway's whole machine, which the record cannot name: a residual of `DES-JOB-SIZE-IN-THE-ENV`, said in the docs, not a clause said on a guess. Review round 3, **both CORRECTED** again. "Saw N CPUs" was exact only on cgroup v2 at libuv 1.51.0: on cgroup v1, libuv 1.51.0's `uv__cgroup1_find_cpu_controller` builds a path that does not exist and reads the whole runtime at any limit, so the word now says "counted at least", the evidence carries the fewest and the most (`seenCpus`, `seenMaxCpus`), and cgroup v1 is a named residual (the record does not hold the cgroup version). The rule is pinned to libuv 1.51.0 (`SEEN_CPUS_LIBUV`; 1.52.0 answers 1 under one CPU), and the image job's `.github/scripts/libuv-pin-check.mjs` fails on a built image whose Node bundles another. The OpenShell range was "0.25 to 0.75"; `parseCpus` takes any two-decimal size, so it is 0.25 to 0.99. A lowering's call, in its label, came after the facts and could be cut (311 characters measured); it now comes before them, tested through the cut. The card puts the pointer last among the suggestion's notes, before its advisory note, which the words now say. A residual is named for `capacity.cpus` when the runtime's facts were not read (the worker's own count) or two venues answered (the smaller). Review round 4, **`DES-SIZE-SUGGESTIONS` CORRECTED**: round 3's reason for a lowering's order was false. A lowering is an ok line with no model proposal, which doctor publishes as its id and level only (`INT-DOCTOR-RESULTS-KEY`), so no publish cut reaches its label and the 311-character case cut nothing; the order stays, as the order doctor prints in the terminal, the call right after the suggestion, and the test goes through `buildDoctorRecord`. "Doctor publishes each label" is "a warn or fail label (the first `DOCTOR_DETAILED_MAX`, 80, of a run)". The libuv and Node versions these entries name are held to `SEEN_CPUS_LIBUV` and to the Dockerfile's note by a test (`libuv-pin.test.mjs`), and the later release `DES-JOB-SIZE-IN-THE-ENV` names on purpose is written without "libuv" before it ("the next minor release, 1.52.0"). Review round 5, both CORRECTED in wording only: round 4 said doctor publishes "an ok line as its id and level only" and "each warn or fail label", where an ok line carrying a validated model proposal (#773) is published with its words and only the first 80 detailed entries of a run carry any; both now say so. "The terminal reads its call" is "doctor prints its call". The Node version the specs are held to is now itself held to the built image: `.github/scripts/libuv-pin-check.mjs` reads `process.versions.uv` and `process.versions.node` in one run and compares the Node to the Dockerfile's note through the reader the test shares (`dockerfileNode`); the test's patterns also catch "Node.js", "node", "v" prefixes, "libuv's" and "libuv release", and hold the two copies in `size-suggest.mjs` and its test, which now name the constant. |
 | 2026-11-13 (#867, the review) | **`DES-CANCEL-VIA-REDIS-REQUEST-KEY` AMENDED**: the lookup's bound is each queue's; a lookup with no answer is "stopped answering" only where the probe saw a connection, and "could not reach" with the hint where none was made; an unreadable hold refuses rather than reading as no hold. Two more rejected alternatives recorded (telling a never-reached Valkey by the queue's own errors, reading an unreadable hold as no hold). UNCHANGED, checked: `DES-OPERATOR-CONSOLE` (its doors say the hold refusal and the state-unread refusal through `heldRefused`, as nothing changed). |
 | 2026-11-13 (#867) | **`DES-CANCEL-VIA-REDIS-REQUEST-KEY` AMENDED**: the CLI's queues get its command bound (`parseConnection`'s `commandTimeoutMs`, `failFast` only) and the lookup a bound of its own as one step, with a `sendCommand` hook in connection.mjs that does for those BullMQ-built clients what `BoundedRedis` does for its own (timer unref'd, a written command's lost answer marked `valkeyMayStillRun`), inert for every client without the bound; `removeHeldJob` says which write went unanswered. Four rejected alternatives recorded (the per-command bound alone for the lookup, the removal bounded as one step, a `BoundedRedis` handed to BullMQ, the bound on every BullMQ connection). **`DES-OPERATOR-CONSOLE` UNCHANGED, checked**: the console's queue clients keep no bound (#842), and its doors ignore `unanswered`. **`DES-CLI-SURFACE` UNCHANGED, checked**: no command, flag or exit code of `cancel` changes; `auth` now exits 1 on a Valkey failure, the code its transient failures already had. |
 | 2026-11-13 (#869) | **`DES-OPERATOR-CONSOLE` AMENDED**, "What a trigger's jobs get" gains "Doctor's answer is for the trigger it read", and the #847 sentence in "What a run loaded" points to it: a flow row answers on the trigger page and a fresh sandbox only where its basis, a digest of the fields `flowTierOf` reads (`INT-DOCTOR-RESULTS-KEY`), equals the one the card computes from its own parse of the file, through the same function (`flowRowFor`). Otherwise the page says that host answered for another version of the triggers file, a renamed flow included, and promises no later answer. Rejected: matching on position and flow name, which kept a stale answer for up to a week, and the console running `flowTierOf`, which reads the host's folders. The preview's `hostsLosingFlow` keeps reading the row without its basis, since there a stale row can only add a hedged warning. **`DES-FLOW-RESOLUTION-TWO-ADVISORY-LAYERS`** UNCHANGED, checked: doctor's check line and its published tier keep their words, and the basis rides beside them. **Code evidence**: worker/src/host-loads.mjs -> flowInputOf, flowBasisOf; worker/src/doctor.mjs -> readTriggerFacts; admin/src/trigger-gets-view.mjs -> flowRowFor, readTriggerGetsEntry; admin/src/sandbox-data.mjs. |
