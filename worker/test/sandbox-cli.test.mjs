@@ -3,7 +3,7 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { test } from "node:test";
-import { runSandbox } from "../src/sandbox-cli.mjs";
+import { runDeploymentSandbox, runSandbox } from "../src/sandbox-cli.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 /**
@@ -76,8 +76,35 @@ test("new preparation passes the selected trigger/ref/pin and starts no runtime 
 });
 
 test("deployment invocation reexecutes in the clean loader result before any runtime call", async () => {
-	const c = capture({ deploymentEnv: async ({ dir, expectedHost }) => (assert.equal(dir, "/trusted/deploy"), assert.equal(expectedHost, "build1"), { env: { PI_EGRESS: "1", PI_WORKER_NAME: "build1" } }), runDeployment: async (args, childEnv) => { assert.deepEqual(args, ["gh-1", "--attach"]); assert.deepEqual(childEnv, { PI_EGRESS: "1", PI_WORKER_NAME: "build1" }); return 7; }, running: async () => assert.fail("must reexec first") });
+	const c = capture({ deploymentEnv: async ({ dir, expectedHost }) => (assert.equal(dir, "/trusted/deploy"), assert.equal(expectedHost, "build1"), { env: { PI_EGRESS: "1", PI_WORKER_NAME: "build1" } }), runDeployment: async (args, childEnv, dir) => { assert.deepEqual(args, ["gh-1", "--attach"]); assert.deepEqual(childEnv, { PI_EGRESS: "1", PI_WORKER_NAME: "build1" }); assert.equal(dir, "/trusted/deploy", "the re-exec runs in the deployment folder"); return 7; }, running: async () => assert.fail("must reexec first") });
 	assert.equal(await runSandbox(["gh-1", "--attach", "--deployment", "/trusted/deploy", "--expected-host=build1"], { env: { PI_EGRESS: "0", SECRET: "ambient" }, deps: c.deps }), 7);
+});
+
+test("only --new asks the deployment handoff for a preparation's settings; open, attach and --list do not (#863)", async () => {
+	for (const [args, preparing] of [[["--new", "acme/web", "--ref", "main", "--as", "0"], true], [["gh-1"], false], [["gh-1", "--attach"], false], [["--list"], false]]) {
+		let asked;
+		const c = capture({ deploymentEnv: async (opts) => ((asked = opts.preparing), { env: { PI_WORKER_NAME: "build1" } }), runDeployment: async () => 0 });
+		assert.equal(await runSandbox([...args, "--deployment", "/trusted/deploy"], { env: {}, deps: c.deps }), 0);
+		assert.equal(asked, preparing, args.join(" "));
+	}
+});
+
+test("the deployment re-exec runs in the deployment folder with only the loaded environment (#863)", async () => {
+	// The folder is what makes a relative PI_PROJECTS_FILE, PI_SCOPED_LIMITS_FILE or PI_TRIGGERS_FILE name the file the
+	// deployment's worker reads: its service runs there too. sandbox-deployment-plan.test.mjs prepares from that folder.
+	let seen;
+	const spawnFn = (bin, args, options) => {
+		seen = { bin, args, options };
+		const child = new EventEmitter();
+		queueMicrotask(() => child.emit("exit", 5));
+		return child;
+	};
+	assert.equal(await runDeploymentSandbox(["--new", "acme/web", "--ref", "main", "--as", "0"], { PI_WORKER_NAME: "build1" }, "/trusted/deploy", { spawnFn }), 5);
+	assert.equal(seen.bin, process.execPath);
+	assert.deepEqual(seen.args.slice(1), ["sandbox", "--new", "acme/web", "--ref", "main", "--as", "0"]);
+	assert.match(seen.args[0], /cli\.mjs$/);
+	assert.equal(seen.options.cwd, "/trusted/deploy");
+	assert.deepEqual(seen.options.env, { PI_WORKER_NAME: "build1" }, "nothing from this process's own environment is added");
 });
 
 test("attach uses the manifest runtime's immutable live container and repairs tracking without a new container", async () => {

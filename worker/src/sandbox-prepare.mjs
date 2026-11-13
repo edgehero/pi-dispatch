@@ -21,6 +21,13 @@ const PREPARATION_LOCK_MAX_BYTES = 16 * 1024;
 const hash = (value) => createHash("sha256").update(value).digest("hex");
 const refused = (reason, message) => ({ refused: reason, message });
 const configRefusal = () => refused("sandbox-config-invalid", "the host's sandbox configuration could not be read; run pi-dispatch doctor on that host");
+/**
+ * What a preparation needs set to clone from each forge whose address is configuration (#863), as `config.mjs` reads
+ * them (`loadGitLabAuth`, `loadForgejoAuth`, `loadAzureAuth`: no block at all without the token). GitHub's address is
+ * fixed. Named in the refusal so it says what to set, in words true both in a worker serving the console and in a
+ * terminal; sandbox-prepare.test.mjs holds each name to `loadConfig`.
+ */
+export const SANDBOX_FORGE_SETTINGS = Object.freeze({ gitlab: "GitLab (GITLAB_TOKEN, and GITLAB_URL when it is not gitlab.com)", forgejo: "Forgejo (FORGEJO_TOKEN and FORGEJO_URL)", azure: "Azure DevOps (AZURE_TOKEN and AZURE_ORG_URL)" });
 
 export function sandboxTriggerDigest(text, index) {
 	const rows = JSON.parse(text)?.triggers;
@@ -123,11 +130,18 @@ export function createSandboxPreparer({ env = process.env, config = loadConfig(e
 		catch (error) { if (error?.piDispatchConfig || error?.code === "ENOENT") return configRefusal(); throw new Error("sandbox preparation configuration read failed", { cause: error }); }
 		if (planned.refused) return planned;
 		const { plan } = planned;
+		// A forge's settings are configuration, so a preparation without usable ones is a determinate refusal, said here
+		// before any directory, lock, credential or clone. Inside the directories' catch below it read as infrastructure: the
+		// CLI said "try again" and the control queue retried a request that can never succeed (#863,
+		// CONST-RETRY-INFRA-ONLY). The plan has already refused a malformed repository (`sandbox-repo-invalid`, from the same
+		// `sandboxRepoProblem` this calls), so what is left to throw is the forge's settings: no block at all (its token is
+		// unset, whatever its URL says), or an address that is not a plain http(s) URL.
+		let remote;
+		try { remote = sandboxRemoteUrl(plan.kind, plan.repo, config); }
+		catch { return refused("sandbox-forge-unconfigured", `this preparation has no usable settings for ${SANDBOX_FORGE_SETTINGS[plan.kind] ?? "the trigger's forge"}, so it cannot clone the repository`); }
 		const id = request.id ?? newSandboxId();
 		const fingerprint = hash(JSON.stringify({ plan, by: request.by ?? null }));
-		let remote;
 		try {
-			remote = sandboxRemoteUrl(plan.kind, plan.repo, config);
 			ensureDir(config.sandboxDir, { env });
 			fs.mkdirSync(config.sandboxDir, { recursive: true, mode: 0o700 });
 			ensureDir(config.sandboxDir, { env });

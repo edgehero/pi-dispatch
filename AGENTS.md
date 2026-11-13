@@ -181,7 +181,10 @@ Two consequences worth internalising before you design anything:
   against the actions whose write rules set `danger`, and `docs/triggers.md`'s
   `pull_request` fields against the trigger add's `TRIGGER_ADD_FIELDS.pull_request`; and `INT-DEFER-REASON-KEY`'s
   reason table, fields block and bucket lists against `worker/src/defer-reasons.mjs`, both ways, in
-  `worker/test/defer-reasons.test.mjs`; and the design folder's `tokens.json` and `components/bundle.css` against
+  `worker/test/defer-reasons.test.mjs`; and the sandbox `--deployment` handoff's `SANDBOX_DEPLOYMENT_KEYS` and
+  `SANDBOX_PREPARATION_KEYS` against what the real preparer reads from its config and environment (each key's fields
+  found by probing `loadConfig`), with `docs/sandbox.md`'s list of what `--new` reads, both ways
+  (`worker/test/sandbox-deployment-plan.test.mjs`); and the design folder's `tokens.json` and `components/bundle.css` against
   the console's pasted copies (`admin/test/design-folder.test.mjs`: the tokens equal, the stylesheet equal or exactly
   the version recorded as waiting to be pasted); and `docs/console.md`'s screens table against `PAGES`
   (`console-doc-tables.test.mjs`); and `docs/console.md`'s Loaded states against `LOADED_STATES`, `outcomeNote`'s words in the docs
