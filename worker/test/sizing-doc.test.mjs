@@ -6,7 +6,7 @@ import { ISOLATION_FLAGS } from "../src/docker-run.mjs";
 import { cpuReserveChecks, doctorHostBudget, hostBudgetChecks, jobSizeChecks, render, sizeSuggestionChecks } from "../src/doctor.mjs";
 import { DOCTOR_LABEL_MAX, redactText } from "../src/doctor-results.mjs";
 import { BUDGET_RECHECK_MS, NEVER_FITS_RECHECK_MS, RESERVE_CPUS_FROM, RESERVE_MEMORY_MAX_MIB, RESERVE_MEMORY_MIN_MIB, computeHostBudget, hostBudgetSettings, makeHostBudget } from "../src/host-budget.mjs";
-import { DEFAULT_JOB_SIZE, SHM_CEILING_MIB, cpuCeilingCenti, formatCpus, formatMemory, jobSizeEnv, parseCpus, parseMemory, shmMiBOf, wholeCpusOf } from "../src/job-size.mjs";
+import { DEFAULT_JOB_SIZE, JOB_CPUS_FLOOR_CENTI, SHM_CEILING_MIB, cpuCeilingCenti, formatCpus, formatMemory, jobSizeEnv, parseCpus, parseMemory, shmMiBOf, wholeCpusOf } from "../src/job-size.mjs";
 import { parseProjects } from "../src/projects.mjs";
 import { parseScopedLimits } from "../src/scoped-limits.mjs";
 import { SUGGEST_MIN_SAMPLES, SUGGEST_WINDOW_DAYS, SUGGEST_WINDOW_RUNS, suggestSize } from "../src/size-suggest.mjs";
@@ -148,7 +148,7 @@ test("docs/sizing.md's out of memory suggestion is the line doctor prints for on
 	const records = [run(1, true), ...Array.from({ length: 13 }, (_, i) => run(i + 2, false))];
 	const lines = show(sizeSuggestionChecks({ projects: [{ id: "medium" }], limits, env, records, budget: { memMiB: view.memMiB, cpuCenti: view.cpuCenti }, total: { memMiB: MEM_TOTAL_MIB, cpuCenti: HOST_CPUS * 100 }, nowMs: NOW }));
 	assert.ok(doc.includes(`\`\`\`text\n${lines.join("\n")}\n\`\`\``), `docs/sizing.md must show:\n${lines.join("\n")}`);
-	assert.ok(lines[0].endsWith(`; size per-CPU worker pools from PI_JOB_SIZE_CPUS: the killed run's tools saw ${Math.floor(view.cpuCenti / 100)} CPUs at a size of ${medium.cpus} CPUs`), "the clause names the example's own numbers, last");
+	assert.ok(lines[0].endsWith(`; size per-CPU worker pools from PI_JOB_SIZE_CPUS: the killed run's tools counted at least ${Math.floor(view.cpuCenti / 100)} CPUs at a size of ${medium.cpus} CPUs`), "the clause names the example's own numbers, last");
 	// Issue #865, review: doctor PUBLISHES each label and fix through `redactText`, cut at DOCTOR_LABEL_MAX, and the
 	// console's Fleet page shows what was published. The page's own example must arrive whole, the pointer included.
 	const checks = sizeSuggestionChecks({ projects: [{ id: "medium" }], limits, env, records, budget: { memMiB: view.memMiB, cpuCenti: view.cpuCenti }, total: { memMiB: MEM_TOTAL_MIB, cpuCenti: HOST_CPUS * 100 }, nowMs: NOW });
@@ -175,7 +175,7 @@ test("issue #865, review: published through doctor's cut, the pointer comes befo
 		endedAt: new Date(NOW - (i + 1) * 86400000).toISOString(),
 		reason: oom ? "oom-killed" : "completed",
 	});
-	const pointer = `size per-CPU worker pools from PI_JOB_SIZE_CPUS: the killed run's tools saw ${Math.floor(view.cpuCenti / 100)} CPUs at a size of ${medium.cpus} CPUs`;
+	const pointer = `size per-CPU worker pools from PI_JOB_SIZE_CPUS: the killed run's tools counted at least ${Math.floor(view.cpuCenti / 100)} CPUs at a size of ${medium.cpus} CPUs`;
 	const held = "this project's runs need more than this host offers: they ask for 12g, the largest here is 10g";
 	const pressureFact = "reached the memory limit while stalled for memory";
 	const throttleFact = "the median run was held back 50% of its time";
@@ -199,6 +199,32 @@ test("issue #865, review: published through doctor's cut, the pointer comes befo
 			if (budgetMiB !== 10240) assert.ok(published.includes(pointer), `${label}: the whole pointer: ${published}`);
 		}
 	}
+});
+
+test("issue #865, review: a lowering's call is in its label ahead of the facts, so doctor's publish cut never takes it", () => {
+	// The example's heavy project (20g, 4 CPUs) with twelve runs that used half a core and peaked at their limit while
+	// stalled for memory: the CPUs lower to 0.75 and the memory fact rides along. A lowering is an ok line whose call is
+	// in the label itself, so it must come before the facts, which a publish cut at DOCTOR_LABEL_MAX may take.
+	const heavy = limits.find((l) => l.scope === "project:heavy");
+	const size = { memMiB: parseMemory(heavy.memory), cpuCenti: parseCpus(heavy.cpus), source: "project" };
+	const WALL_US = 600e6;
+	const records = Array.from({ length: 12 }, (_, i) => ({
+		project: "heavy",
+		backend: "local",
+		size,
+		resources: { memPeak: size.memMiB * 1048576, cpuUsec: WALL_US / 2, throttledUsec: 0, memFullUsec: WALL_US / 10 },
+		startedAt: new Date(NOW - (i + 1) * 86400000 - 600000).toISOString(),
+		endedAt: new Date(NOW - (i + 1) * 86400000).toISOString(),
+		reason: "completed",
+	}));
+	const [check] = sizeSuggestionChecks({ projects: [{ id: "heavy" }], limits, env, records, budget: { memMiB: view.memMiB, cpuCenti: view.cpuCenti }, total: { memMiB: MEM_TOTAL_MIB, cpuCenti: HOST_CPUS * 100 }, nowMs: NOW });
+	const call = 'dispatch_limit_edit {"index":0,"cpus":0.75}';
+	const fact = "12 of 12 runs reached the memory limit while stalled for memory more than 1% of their time";
+	assert.equal(check.ok, true, "a lowering is an ok line");
+	assert.ok(check.label.includes(call) && check.label.includes(fact) && check.label.indexOf(call) < check.label.indexOf(fact), check.label);
+	assert.ok(check.label.length > DOCTOR_LABEL_MAX, `long enough to be cut (${check.label.length}), or the case proves nothing`);
+	const published = redactText(check.label);
+	assert.ok(published.includes(call), `the call survives the publish whole: ${published}`);
 });
 
 test("docs/sizing.md's CPU reserve table names who sets the quota, and where doctor reads it back, as reservePlan decides", () => {
@@ -385,6 +411,9 @@ test("issue #865: docs/sizing.md says what a job's tools read of its size, in th
 	// The ceiling a job of the example sees, as the worker computes --cpus: the budget, capped at the runtime's count.
 	const ceiling = cpuCeilingCenti(HOST_CPUS, view.cpuCenti);
 	says(`every job: ${formatCpus(ceiling)} on the machine of [the worked example](#a-worked-example), whatever the job's size.`);
+	// Under one CPU is every size from the floor to the largest two-decimal size below 1, which parseCpus accepts.
+	assert.equal(parseCpus("0.99"), 99);
+	says(`Under one CPU (\`${formatCpus(JOB_CPUS_FLOOR_CENTI)}\` to \`${formatCpus(99)}\`) the limit rounds down to 0`);
 	// jest 30 and vitest 2 start one worker per CPU they see, less one.
 	says(`a default job (\`${formatMemory(DEFAULT_JOB_SIZE.memMiB)}\`, ${formatCpus(DEFAULT_JOB_SIZE.cpuCenti)} CPUs) runs ${ceiling / 100 - 1} of them in its \`${formatMemory(DEFAULT_JOB_SIZE.memMiB)}\``);
 	// The table's rows are the variables jobSizeEnv writes, and its examples are what it writes for them.

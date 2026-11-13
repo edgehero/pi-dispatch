@@ -307,7 +307,7 @@ test("dispatch_limit_edit's confirm shows the project's peaks when a size field 
 test("issue #865: an OOM read off disk names the CPU count its tools saw, after the verdict, in the reader, the edit preview, the panel and the console's project card", async () => {
   // A killed run recorded on `local` with what its host offered at admission: 18 CPUs and a CPU budget of 17.
   const killed = { ...rec({ reason: "oom-killed", peakMiB: 4096 }), backend: "local", capacity: { slots: 4, memMiB: 15360, cpuCenti: 1700, cpus: 18 } };
-  const pointer = "size per-CPU worker pools from PI_JOB_SIZE_CPUS: the killed run's tools saw 17 CPUs at a size of 2 CPUs";
+  const pointer = "size per-CPU worker pools from PI_JOB_SIZE_CPUS: the killed run's tools counted at least 17 CPUs at a size of 2 CPUs";
   const logsDir = logsWith([killed]);
   const limits = parseScopedLimits(JSON.stringify({ version: 3, limits: [{ scope: "project:shop", memory: "4g" }] }), "sl.json");
   const res = readSizeSuggestions({ logsDir, projectIds: ["shop"], limits, env: {}, hostBudgets: [{ memMiB: 8192, cpuCenti: 1700 }], nowMs: NOW });
@@ -318,7 +318,7 @@ test("issue #865: an OOM read off disk names the CPU count its tools saw, after 
   const dir = tempDir("pd-865-note-");
   writeFileSync(join(dir, "projects.json"), JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/web"] }] }));
   const paths = { logsDir, scopedLimitsPath: join(dir, "absent.json"), projectsFile: join(dir, "projects.json") };
-  assert.ok(indexMod.sizingNote(paths, "project:shop", NOW).endsWith(`(oom-killed: 1 run ended oom-killed (the largest size killed 4g); budget not checked here), CPUs not enough runs at 2 CPUs (1). Size per-CPU worker pools from PI_JOB_SIZE_CPUS: the killed run's tools saw 17 CPUs at a size of 2 CPUs.`));
+  assert.ok(indexMod.sizingNote(paths, "project:shop", NOW).endsWith(`(oom-killed: 1 run ended oom-killed (the largest size killed 4g); budget not checked here), CPUs not enough runs at 2 CPUs (1). Size per-CPU worker pools from PI_JOB_SIZE_CPUS: the killed run's tools counted at least 17 CPUs at a size of 2 CPUs.`));
   // the console's project card: its last note, after the verdicts, the facts and a refusal; the exact call's block sits
   // below the notes, as it does for every suggestion
   const card = (sizing, role = "viewer") => String(projectSizingCard({ role, readOnly: false, data: { projectView: { state: "ready", id: "shop", now: NOW, size: { memMiB: 4096, cpuCenti: 200 }, sizing } } }));
@@ -333,7 +333,7 @@ test("issue #865: an OOM read off disk names the CPU count its tools saw, after 
   assert.ok(where.every((n) => n >= 0) && where.every((n, i) => i === 0 || where[i - 1] < n), `verdict, fact, refusal, then the pointer: ${where}`);
   // the panel's PROJECTS view: a dim line with the facts, under the call
   const panel = (await projectsAt(140, { ...sizingInfo(), projects: { ...sizingInfo().projects, shop: res.projects.shop } })).lines.map(content).join("\n");
-  assert.match(panel, /^dispatch_limit_edit \{"index":0,"memory":"6g"\}\nsize per-CPU worker pools from PI_JOB_SIZE_CPUS: the killed\nrun's tools saw 17 CPUs at a size of 2 CPUs\ngithub:acme\/web$/m);
+  assert.match(panel, /^dispatch_limit_edit \{"index":0,"memory":"6g"\}\nsize per-CPU worker pools from PI_JOB_SIZE_CPUS: the killed\nrun's tools counted at least 17 CPUs at a size of 2 CPUs\ngithub:acme\/web$/m);
   // the same run on OpenShell, whose --cpu is the size, says nothing more anywhere
   const shell = readSizeSuggestions({ logsDir: logsWith([{ ...killed, backend: "openshell" }]), projectIds: ["shop"], limits, env: {}, nowMs: NOW });
   assert.deepEqual([shell.projects.shop.words.memory, shell.projects.shop.words.memoryCeiling], ["1 run ended oom-killed (the largest size killed 4g)", ""]);

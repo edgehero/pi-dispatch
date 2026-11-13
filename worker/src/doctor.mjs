@@ -9801,7 +9801,8 @@ export function sizeSuggestionChecks({ projects = [], limits = [], env = {}, rec
 		const call = suggestionCall(s, limits);
 		// Issue #865: `memoryCeiling` rides after the suggestion and BEFORE the two facts: the label is published cut at
 		// DOCTOR_LABEL_MAX, so what a cut takes first is the facts (information with no call) and then this pointer's tail,
-		// never the call, a held raise, a refusal or a budget note, which all come before it.
+		// never a held raise, a refusal or a budget note, which come before it, nor the call: a raise carries its call in
+		// its fix, and a lowering's label puts its call ahead of the facts (`head`, below).
 		const facts = [words.memoryCeiling, words.memoryFact, words.cpuFact].filter(Boolean);
 		const factTail = facts.length > 0 ? `; ${facts.join("; ")}` : "";
 		const held = s.memory.suggested === null && s.memory.held !== null;
@@ -9826,7 +9827,10 @@ export function sizeSuggestionChecks({ projects = [], limits = [], env = {}, rec
 		const note = totals.length > 0 ? ` (note: ${totals.join(" and ")}; its budget is off or unknown, so the worker admits it)` : "";
 		const raise = (s.memory.suggested ?? 0) > current.memMiB || (s.cpu.suggested ?? 0) > current.cpuCenti;
 		const suggests = parts.length > 0 ? `its runs in the last ${SUGGEST_WINDOW_DAYS} days suggest ${parts.join(" and ")}` : "";
-		const label = `project ${id}: size ${size}; ${[heldText ? `in the last ${SUGGEST_WINDOW_DAYS} days ${heldText}` : "", suggests].filter(Boolean).join("; ")}${over.length > 0 ? `, but ${over.join(" and ")}, so a job of it would never fit this host` : ""}${note}${factTail}`;
+		// The label without its facts, so a line that carries its call in the label (a lowering, below) can put the call
+		// BEFORE them: the facts are what a publish cut at DOCTOR_LABEL_MAX may take, and the call never is (#865, review).
+		const head = `project ${id}: size ${size}; ${[heldText ? `in the last ${SUGGEST_WINDOW_DAYS} days ${heldText}` : "", suggests].filter(Boolean).join("; ")}${over.length > 0 ? `, but ${over.join(" and ")}, so a job of it would never fit this host` : ""}${note}`;
+		const label = `${head}${factTail}`;
 		// a size that would never fit is never offered as a call: applying it would turn a refusal into the same refusal.
 		const apply = call === null ? "" : over.length > 0 ? "" : `apply it in the admin panel with ${call} (an operator confirms it; nothing applies a size by itself)`;
 		const never = over.length > 0 ? "no call is offered: a job of that size would never fit this host" : "";
@@ -9837,7 +9841,7 @@ export function sizeSuggestionChecks({ projects = [], limits = [], env = {}, rec
 		} else if (raise || over.length > 0 || totals.length > 0) {
 			checks.push({ ok: false, warn: true, label, fix: apply || never });
 		} else {
-			checks.push({ ok: true, label: `${label}; ${apply.replace(/ \(an operator confirms it; nothing applies a size by itself\)$/, "")}` });
+			checks.push({ ok: true, label: `${head}; ${apply.replace(/ \(an operator confirms it; nothing applies a size by itself\)$/, "")}${factTail}` });
 		}
 	}
 	return checks;

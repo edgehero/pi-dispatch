@@ -552,18 +552,18 @@ test("the words: singular one core and one CPU, held raises as what the host off
 	}
 });
 
-// --- issue #865: what CPU count the killed runs' tools saw ---------------------------------------------------------------
+// --- issue #865: what CPU count the killed runs' tools counted at least ---------------------------------------------------------------
 
 /** An oom-killed run of `web` on `backend`, whose record says what the host offered at admission (`capacity`). */
 const killed = ({ i = 0, backend = "local", capacity = { slots: 4, memMiB: 15360, cpuCenti: 1700, cpus: 18 }, cpuCenti = 200, memMiB = 4096, ago = i + 1 } = {}) => ({ ...rec({ i, ago, memMiB, cpuCenti, reason: "oom-killed", peakMiB: memMiB }), backend, capacity });
 const POINTER = "size per-CPU worker pools from PI_JOB_SIZE_CPUS: ";
-const one = (seenCpus, sizeCenti = 200) => ({ runs: 1, seenCpus, seenVaries: false, sizeCenti, sizeVaries: false });
+const one = (seenCpus, sizeCenti = 200) => ({ runs: 1, seenCpus, seenMaxCpus: seenCpus, sizeCenti, sizeVaries: false });
 
 test("issue #865: an OOM on a ceiling venue says what CPU count the killed run's tools saw, in a word of its own", () => {
 	const s = suggest([killed()]);
 	assert.deepEqual(s.memory.evidence.oomCeiling, one(17));
 	const words = suggestionEvidence(s);
-	assert.equal(words.memoryCeiling, `${POINTER}the killed run's tools saw 17 CPUs at a size of 2 CPUs`);
+	assert.equal(words.memoryCeiling, `${POINTER}the killed run's tools counted at least 17 CPUs at a size of 2 CPUs`);
 	// its own word, so the OOM words, and what a surface prints before the facts, are the ones they were
 	assert.equal(words.memory, "1 run ended oom-killed (the largest size killed 4g)");
 	// the raise itself is the same with or without it: a pointer, never a call
@@ -573,7 +573,7 @@ test("issue #865: an OOM on a ceiling venue says what CPU count the killed run's
 	assert.equal(suggestionEvidence(suggest(runs(10, { peakMiB: 3072 }))).memoryCeiling, "");
 });
 
-test("issue #865: the ceiling is the worker's own, from the record's capacity, and a tool reads it in whole CPUs ROUNDED DOWN", () => {
+test("issue #865: the ceiling is the worker's own, from the record's capacity, and a tool counts at least it in whole CPUs ROUNDED DOWN", () => {
 	const seen = (capacity) => suggest([killed({ capacity })]).memory.evidence.oomCeiling?.seenCpus ?? null;
 	assert.equal(seen({ slots: 4, memMiB: "off", cpuCenti: "off", cpus: 18 }), 17, "budget off: 18 CPUs less the reserve of one");
 	assert.equal(seen({ slots: 4, memMiB: null, cpuCenti: null, cpus: 18 }), 17, "budget unknown: the same");
@@ -624,25 +624,25 @@ test("issue #865: only more whole CPUs than PI_JOB_SIZE_CPUS says is worth sayin
 	assert.deepEqual(at(25, 100), null, "while 1.00 reads as 1, what the variable says at 0.25");
 	// with the runtime's count unknown there is nothing to say, rather than a guess
 	assert.equal(suggest([killed({ capacity: { cpuCenti: 50, cpus: null }, cpuCenti: 25 })], { current: { memMiB: 4096, cpuCenti: 25 } }).memory.evidence.oomCeiling, null);
-	assert.equal(suggestionEvidence(suggest([killed({ capacity: { cpus: 64, cpuCenti: 50 }, cpuCenti: 25 })], { current: { memMiB: 4096, cpuCenti: 25 } })).memoryCeiling, `${POINTER}the killed run's tools saw 64 CPUs at a size of 0.25 CPUs`);
+	assert.equal(suggestionEvidence(suggest([killed({ capacity: { cpus: 64, cpuCenti: 50 }, cpuCenti: 25 })], { current: { memMiB: 4096, cpuCenti: 25 } })).memoryCeiling, `${POINTER}the killed run's tools counted at least 64 CPUs at a size of 0.25 CPUs`);
 });
 
 test("issue #865: several killed runs are counted, and a range is said only for what varies, ceiling or size", () => {
 	const words = (records) => suggestionEvidence(suggest(records)).memoryCeiling;
-	assert.equal(words([killed({ i: 0 }), killed({ i: 1 })]), `${POINTER}the killed runs' tools saw 17 CPUs at a size of 2 CPUs`);
-	assert.equal(words([killed({ i: 0 }), killed({ i: 1, backend: "openshell" })]), `${POINTER}the tools of 1 of the 2 killed runs saw 17 CPUs at a size of 2 CPUs`);
+	assert.equal(words([killed({ i: 0 }), killed({ i: 1 })]), `${POINTER}the killed runs' tools counted at least 17 CPUs at a size of 2 CPUs`);
+	assert.equal(words([killed({ i: 0 }), killed({ i: 1, backend: "openshell" })]), `${POINTER}the tools of 1 of the 2 killed runs counted at least 17 CPUs at a size of 2 CPUs`);
 	// the ceilings differ, the sizes do not
 	const hosts = [killed({ i: 0 }), killed({ i: 1, capacity: { cpus: 8, cpuCenti: "off" } })];
-	assert.deepEqual(suggest(hosts).memory.evidence.oomCeiling, { runs: 2, seenCpus: 17, seenVaries: true, sizeCenti: 200, sizeVaries: false });
-	assert.equal(words(hosts), `${POINTER}the killed runs' tools saw up to 17 CPUs at a size of 2 CPUs`);
+	assert.deepEqual(suggest(hosts).memory.evidence.oomCeiling, { runs: 2, seenCpus: 7, seenMaxCpus: 17, sizeCenti: 200, sizeVaries: false });
+	assert.equal(words(hosts), `${POINTER}the killed runs' tools counted at least 7 to 17 CPUs at a size of 2 CPUs`);
 	// the sizes differ, the ceilings do not
 	const sizes = [killed({ i: 0 }), killed({ i: 1, cpuCenti: 300 })];
-	assert.deepEqual(suggest(sizes).memory.evidence.oomCeiling, { runs: 2, seenCpus: 17, seenVaries: false, sizeCenti: 200, sizeVaries: true });
-	assert.equal(words(sizes), `${POINTER}the killed runs' tools saw 17 CPUs at sizes from 2 CPUs`);
+	assert.deepEqual(suggest(sizes).memory.evidence.oomCeiling, { runs: 2, seenCpus: 17, seenMaxCpus: 17, sizeCenti: 200, sizeVaries: true });
+	assert.equal(words(sizes), `${POINTER}the killed runs' tools counted at least 17 CPUs at sizes from 2 CPUs`);
 	// both
 	const both = [...hosts, killed({ i: 2, cpuCenti: 300 })];
-	assert.deepEqual(suggest(both).memory.evidence.oomCeiling, { runs: 3, seenCpus: 17, seenVaries: true, sizeCenti: 200, sizeVaries: true });
-	assert.equal(words(both), `${POINTER}the killed runs' tools saw up to 17 CPUs at sizes from 2 CPUs`);
+	assert.deepEqual(suggest(both).memory.evidence.oomCeiling, { runs: 3, seenCpus: 7, seenMaxCpus: 17, sizeCenti: 200, sizeVaries: true });
+	assert.equal(words(both), `${POINTER}the killed runs' tools counted at least 7 to 17 CPUs at sizes from 2 CPUs`);
 	// a pointer, not a call: nothing in it advises a larger size or a larger budget
 	assert.doesNotMatch(words(both), /raise|increase|grow/i);
 });

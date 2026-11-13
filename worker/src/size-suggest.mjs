@@ -39,10 +39,10 @@
  *   4. otherwise it fits.
  *   A FACT (no call) rides along when runs at the limit were also under real memory pressure (`memFullUsec` above 1%
  *   of the wall time): information, never an instruction.
- *   An `oom-killed` raise also says what CPU count the killed runs' tools saw (issue #865, `oomCeiling`, worded as
- *   `memoryCeiling`): on a venue whose `--cpus` is the host ceiling (`CEILING_VENUES`), the whole CPUs a run's ceiling
- *   gives `os.availableParallelism()`, from its record's `capacity`, when that is more than its size in whole CPUs
- *   (`PI_JOB_SIZE_CPUS`). A tool that starts a worker per CPU it sees starts one per such CPU inside the size's memory,
+ *   An `oom-killed` raise also says what CPU count the killed runs' tools counted at least (issue #865, `oomCeiling`,
+ *   worded as `memoryCeiling`): on a venue whose `--cpus` is the host ceiling (`CEILING_VENUES`), the fewest whole CPUs
+ *   a run's ceiling gives `os.availableParallelism()` (`seenCpusOf`), from its record's `capacity`, when that is more
+ *   than its size in whole CPUs (`PI_JOB_SIZE_CPUS`). A tool that starts a worker per CPU it sees starts one per such CPU inside the size's memory,
  *   so a smaller pool may be a cheaper fix than a larger size. Information beside the raise, which is the same either
  *   way.
  *   A size is rounded UP to a step: 256m up to 2g, 512m up to 8g, then 1g.
@@ -101,12 +101,12 @@ export const MEMORY_CAP_MISSING = Object.freeze(["unread", "none-holds", "off"])
 export const SIZE_FACTS = Object.freeze(["pressure", "ceiling"]);
 /**
  * Issue #865: the venues whose job containers get the host's CPU ceiling as `--cpus`, the same for every job
- * (job-size.mjs `containerSizing`, on the docker and podman builders alike), so a job's tools read the ceiling (or, under
- * one CPU, the whole runtime: `seenCpusOf`) and never its size. OpenShell's venues are not here: their `--cpu` is the
- * job's size itself (backend-openshell.mjs `sizeArgs`), so a tool there reads the size rounded down from one CPU up, and
- * under one CPU the gateway's whole runtime, whose CPU count the record does not hold (its `capacity.cpus` is this
- * host's runtime's, and the gateway may be another machine). That last case is a residual, named in
- * `DES-JOB-SIZE-IN-THE-ENV`, not a clause said on a guess. Restated, since this module imports nothing heavy, and held
+ * (job-size.mjs `containerSizing`, on the docker and podman builders alike), so a job's tools count at least the ceiling
+ * (`seenCpusOf`) and never its size. OpenShell's venues are not here: their `--cpu` is the job's size itself
+ * (backend-openshell.mjs `sizeArgs`), so on cgroup v2 a tool there reads the size rounded down from one CPU up, and
+ * under one CPU (0.25 to 0.99) the gateway's whole runtime, whose CPU count the record does not hold (its
+ * `capacity.cpus` is this host's runtime's, and the gateway may be another machine). That last case is a residual,
+ * named in `DES-JOB-SIZE-IN-THE-ENV`, not a clause said on a guess. Restated, since this module imports nothing heavy, and held
  * to backends.mjs by a test: every venue is in this list or in `OPENSHELL_BACKENDS`, so a new venue fails it until
  * someone says which it is.
  */
@@ -159,13 +159,26 @@ function seenOf(record) {
 }
 
 /**
- * Issue #865: the whole CPUs a `--cpus` ceiling in hundredths gives a tool inside the container, or null, where
- * `runtimeCpus` is the runtime's own count (the container's affinity mask holds all of it, so `nproc` reads it). Read
- * at libuv 1.51.0, which Node 22.23.1 (the job image's) bundles: `uv__get_constrained_cpu` (src/unix/linux.c) sets the
- * quota to `cpu.max`'s limit over its period in INTEGER division, and `uv_available_parallelism` (src/unix/core.c)
- * takes it only `if (quota > 0 && quota < rc)`, where `rc` is the affinity count. So a ceiling of 2.5 reads as 2 (ROUNDED
- * DOWN, where `PI_JOB_SIZE_CPUS` rounds the size up), and a ceiling under one CPU gives a quota of 0, which libuv skips:
- * the tool reads the WHOLE runtime, null when the record does not say how many that is.
+ * Issue #865: the libuv the rule in `seenCpusOf` was read at, the one Node 22.23.1 (the job image's) bundles. libuv
+ * 1.52.0 changed it (`uv__get_cgroupv2_constrained_cpu` answers 1 for a quota under one CPU, where 1.51.0 answers 0 and
+ * the caller skips it), so the image job compares the built image's `process.versions.uv` with this
+ * (.github/scripts/libuv-pin-check.mjs, in "the job image holds its contract") and fails on any other, saying to read the
+ * rule again at the new libuv before moving this.
+ */
+export const SEEN_CPUS_LIBUV = "1.51.0";
+
+/**
+ * Issue #865: the fewest whole CPUs a tool counts through `os.availableParallelism()` in a container with a `--cpus`
+ * ceiling in hundredths, or null, where `runtimeCpus` is the runtime's own count (the container's affinity mask holds all
+ * of it, so `nproc` reads it). A LOWER BOUND, since what libuv reads depends on the host's cgroup version, which the
+ * record does not hold. Read at libuv `SEEN_CPUS_LIBUV`: on cgroup v2, `uv__get_constrained_cpu` (src/unix/linux.c)
+ * sets the quota to `cpu.max`'s limit over its period in INTEGER division, and `uv_available_parallelism`
+ * (src/unix/core.c) takes it only `if (quota > 0 && quota < rc)`, where `rc` is the affinity count: a ceiling of 2.5
+ * reads as 2 (ROUNDED DOWN, where `PI_JOB_SIZE_CPUS` rounds the size up), and one under one CPU gives a quota of 0,
+ * which is skipped, so the tool reads the WHOLE runtime. On cgroup v1, `uv__cgroup1_find_cpu_controller` turns
+ * `N:cpu,cpuacct:/path` into a `/sys/fs/cgroup/cpuacct:/path` that does not exist, so the read fails and the tool reads
+ * the whole runtime at any ceiling. So a tool counts at least the ceiling rounded down, and under one CPU the whole
+ * runtime: null when the record does not say how many that is.
  */
 function seenCpusOf(ceilingCenti, runtimeCpus) {
 	if (ceilingCenti >= 100) return Math.floor(ceilingCenti / 100);
@@ -220,22 +233,22 @@ function heldToCap(wanted, current, cap) {
 }
 
 /**
- * Issue #865: what CPU count the killed runs' tools saw, against their size, or null: over the `oom-killed` runs that
- * decide a raise (the same ones `ooms` counts), those whose tools read more whole CPUs (`seenOf`) than their size
- * rounded up, which is what `PI_JOB_SIZE_CPUS` tells them. At or below it a pool sized
- * from the variable is the pool the ceiling gave, so there is nothing to say. `{ runs, seenCpus, seenVaries, sizeCenti,
- * sizeVaries }`: how many such runs, the most CPUs a tool among them saw and whether the runs saw different counts, the
- * smallest CPU size among them and whether their sizes differ. Two flags, since either can vary alone (one host's
- * ceiling under projects of several sizes, or one size across hosts), and the words say a range for that one only.
+ * Issue #865: what CPU count the killed runs' tools counted at least, against their size, or null: over the
+ * `oom-killed` runs that decide a raise (the same ones `ooms` counts), those whose tools counted at least more whole CPUs
+ * (`seenOf`) than their size rounded up, which is what `PI_JOB_SIZE_CPUS` tells them. At or below it nothing can be said:
+ * a pool sized from the variable may be the pool the ceiling gave. `{ runs, seenCpus, seenMaxCpus, sizeCenti,
+ * sizeVaries }`: how many such runs, the fewest and the most CPUs their tools counted at least (equal when every run
+ * gives the same bound), and the smallest CPU size among them and whether their sizes differ. Either can vary alone
+ * (one host's ceiling under projects of several sizes, or one size across hosts), and the words say a range for that
+ * one only.
  */
 function oomCeilingOf(relevant) {
 	const over = relevant.filter((e) => e.oom && e.seenCpus !== null && e.seenCpus > wholeCpusOf(e.size.cpuCenti));
 	if (over.length === 0) return null;
 	const seen = over.map((e) => e.seenCpus);
 	const sizes = over.map((e) => e.size.cpuCenti);
-	const seenCpus = Math.max(...seen);
 	const sizeCenti = Math.min(...sizes);
-	return { runs: over.length, seenCpus, seenVaries: seen.some((n) => n !== seenCpus), sizeCenti, sizeVaries: sizes.some((n) => n !== sizeCenti) };
+	return { runs: over.length, seenCpus: Math.min(...seen), seenMaxCpus: Math.max(...seen), sizeCenti, sizeVaries: sizes.some((n) => n !== sizeCenti) };
 }
 
 function suggestMemory(runs, current, cap) {
@@ -494,23 +507,24 @@ export function notEnoughRunsText(dim, sizeText) {
 }
 
 /**
- * Issue #865: the CPU count the killed runs' tools saw, in words, or "" when the evidence carries none (`oomCeilingOf`):
- * `size per-CPU worker pools from PI_JOB_SIZE_CPUS: the killed run's tools saw 15 CPUs at a size of 2 CPUs`.
- * A word of its own (`memoryCeiling`), not part of the OOM words: every surface prints it AFTER the suggestion, a held
- * raise and a refusal (doctor ahead of its two facts, the console's card, the panel and the confirm as their last line
- * or note, the console's call block below its notes), so where a surface cuts a line (doctor publishes a label at most
- * `DOCTOR_LABEL_MAX` long) the facts go first, then this, never the call, a held raise or a refusal. Short for the same
- * cap, and the variable first, so a cut keeps the pointer as long as it can. A pointer, never a call: the raise is the
- * same either way.
+ * Issue #865: the CPU count the killed runs' tools counted at least, in words, or "" when the evidence carries none
+ * (`oomCeilingOf`): `size per-CPU worker pools from PI_JOB_SIZE_CPUS: the killed run's tools counted at least 15 CPUs
+ * at a size of 2 CPUs`. "At least", since the count is a lower bound (`seenCpusOf`). A word of its own
+ * (`memoryCeiling`), not part of the OOM words: every surface prints it AFTER the suggestion, a held raise and a refusal
+ * (doctor ahead of its two facts; the console's card as the last of the suggestion's notes, before the card's advisory
+ * note, with the call's block below the notes; the panel and the confirm after their facts), so where a surface cuts a
+ * line (doctor publishes a label at most `DOCTOR_LABEL_MAX` long) the facts go first, then this, never the call, a held
+ * raise or a refusal. Short for the same cap, and the variable first, so a cut keeps the pointer as long as it can. A
+ * pointer, never a call: the raise is the same either way.
  */
 function oomCeilingWords(me) {
 	const o = me?.oomCeiling;
 	if (o === null || typeof o !== "object" || !Number.isSafeInteger(o.runs) || o.runs < 1 || !Number.isSafeInteger(o.seenCpus)) return "";
 	const ooms = Number.isSafeInteger(me.ooms) && me.ooms >= o.runs ? me.ooms : o.runs;
 	const whose = ooms === 1 ? "the killed run's tools" : o.runs === ooms ? "the killed runs' tools" : `the tools of ${o.runs} of the ${ooms} killed runs`;
-	const seen = `${o.seenVaries === true ? "up to " : ""}${o.seenCpus} CPUs`;
+	const seen = `${o.seenCpus}${Number.isSafeInteger(o.seenMaxCpus) && o.seenMaxCpus > o.seenCpus ? ` to ${o.seenMaxCpus}` : ""} CPUs`;
 	const size = o.sizeVaries === true ? `sizes from ${cpusText(o.sizeCenti)}` : `a size of ${cpusText(o.sizeCenti)}`;
-	return `size per-CPU worker pools from PI_JOB_SIZE_CPUS: ${whose} saw ${seen} at ${size}`;
+	return `size per-CPU worker pools from PI_JOB_SIZE_CPUS: ${whose} counted at least ${seen} at ${size}`;
 }
 
 /**

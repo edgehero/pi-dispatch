@@ -207,11 +207,12 @@ the count.
 
 Beside it, every job carries its own size: `PI_JOB_SIZE_CPUS` (its CPUs rounded up to a whole number) and
 `PI_JOB_SIZE_MEMORY_MIB` (issue #865). A CPU count read inside the container is not the job's size:
-`nproc` reads the whole runtime on every venue, and `os.availableParallelism()` reads the container's
-CPU limit rounded down, which on Docker and Podman is the host's CPU ceiling (the same for every job) and
-on OpenShell is the size itself. A limit under one CPU rounds down to 0, which Node ignores: it then reads
-the whole runtime too, which on OpenShell is any job sized `0.25` to `0.75`. So an image or a flow that sizes a worker pool (jest's `--maxWorkers`,
-vitest's `VITEST_MAX_FORKS`, `make -j`) should read `PI_JOB_SIZE_CPUS` instead
+`nproc` reads the whole runtime on every venue, and with the job image's Node, on cgroup v2,
+`os.availableParallelism()` reads the container's CPU limit rounded down, which on Docker and Podman is
+the host's CPU ceiling (the same for every job) and on OpenShell is the size itself. Under one CPU (`0.25`
+to `0.99`, which on OpenShell is the size) or on cgroup v1 it reads the whole runtime too. So an image or
+a flow that sizes a worker pool (jest's `--maxWorkers`, vitest's `VITEST_MAX_FORKS`, `make -j`) should
+read `PI_JOB_SIZE_CPUS` instead
 ([sizing](sizing.md#how-many-cpus-a-jobs-tools-see)). Both are information: the container's limits are
 the bound, and trigger secrets and forwarded host settings cannot set either.
 

@@ -46,14 +46,17 @@ A size isolates **memory and CPU**, and nothing else.
 A job's memory is a hard limit at its size, but its CPUs are only a weight, and nothing inside the container can see a
 weight. A tool that asks how many CPUs it has gets a number that is not the job's `cpus`, and usually a much larger one:
 
-- Node's `os.availableParallelism()` reads the container's CPU limit, rounded down to a whole number. On Docker and
-  Podman that limit is the host's CPU budget and the same for every job: 15 on the machine of [the worked
-  example](#a-worked-example), whatever the job's size. On OpenShell the limit is the job's size itself, so there it
-  reads the size rounded down from one CPU up.
-- A limit under one CPU rounds down to 0, which Node ignores, so it reads every CPU of the runtime instead. On
-  OpenShell that is any job sized `0.25` to `0.75` CPUs: its tools see the gateway's whole machine while
-  `PI_JOB_SIZE_CPUS` says 1.
+- With the job image's Node, on a host with cgroup v2, `os.availableParallelism()` reads the container's CPU limit,
+  rounded down to a whole number. On Docker and Podman that limit is the host's CPU budget and the same for every job:
+  15 on the machine of [the worked example](#a-worked-example), whatever the job's size. On OpenShell the limit is the
+  job's size itself, so there it reads the size rounded down from one CPU up.
+- Under one CPU (`0.25` to `0.99`) the limit rounds down to 0, which Node ignores, and on a host with cgroup v1 it
+  cannot find the limit at all: in both cases it reads every CPU of the runtime instead. On OpenShell that is any job
+  sized under one CPU: its tools see the gateway's whole machine while `PI_JOB_SIZE_CPUS` says 1.
 - `nproc` reads every CPU of the container runtime, the reserve included, on every venue.
+
+So a tool counts at least the limit rounded down, and often more. A Node of another version in your own image may
+count differently: the image job checks that the job image's Node bundles the libuv this was read at.
 
 A tool that starts one worker per CPU it sees therefore starts far more workers than the size was planned for, and all
 of them share the job's memory. jest 30 and vitest 2 both start one worker per CPU less one by default, so on that
@@ -78,8 +81,8 @@ VITEST_MAX_FORKS="${PI_JOB_SIZE_CPUS:-2}" VITEST_MIN_FORKS=1 npx vitest run
 
 Use the variable where a script would write `$(nproc)`. vitest 2 needs `VITEST_MIN_FORKS` beside `VITEST_MAX_FORKS`,
 because it refuses a minimum above the maximum. A job that was killed for its memory while a pool like this ran may
-need a smaller pool rather than a larger size, so the size suggestion for such a run names the ceiling its tools saw
-(see [Reading the suggestions](#6-reading-the-suggestions)).
+need a smaller pool rather than a larger size, so the size suggestion for such a run names how many CPUs its tools
+counted at least (see [Reading the suggestions](#6-reading-the-suggestions)).
 
 ## 1. Measure first
 
@@ -309,13 +312,14 @@ How to read one:
   size, from before an earlier raise, does not raise it again). A run that ended `oom-killed` suggests 1.5 times
   the larger of the size and the largest size killed in the window. A peak at the limit raises nothing (the page
   cache, above); when such runs were also stalled for memory, the line says so as a fact, with no call.
-- **A kill also says how many CPUs the killed runs' tools saw**, when that was more than `PI_JOB_SIZE_CPUS` told
-  them: a line or clause after the suggestion pointing to the variable, with the count (the CPU ceiling their record
-  names, rounded down as Node reads it, or the whole machine under one CPU) and their `cpus`
-  ([How many CPUs a job's tools see](#how-many-cpus-a-jobs-tools-see)). The raise is the same either way. It is left out for a run on OpenShell, whose CPU limit is the size itself, and for a
-  run recorded before pi-dispatch kept what the host offered (`capacity` in the record). An OpenShell job sized under
-  one CPU is the one case it misses: its tools see the gateway's whole machine, and the record does not say how many
-  CPUs that has. Size such a job's pools from `PI_JOB_SIZE_CPUS` all the same.
+- **A kill also says how many CPUs the killed runs' tools counted at least**, when that was more than
+  `PI_JOB_SIZE_CPUS` told them: a line or clause after the suggestion pointing to the variable, with that count (the
+  CPU ceiling their record names, rounded down, or the whole machine under one CPU) and their `cpus`
+  ([How many CPUs a job's tools see](#how-many-cpus-a-jobs-tools-see)). The raise is the same either way. It is left
+  out for a run on OpenShell, whose CPU limit is the size itself, and for a run recorded before pi-dispatch kept what
+  the host offered (`capacity` in the record). An OpenShell job sized under one CPU is the one case it misses: its
+  tools see the gateway's whole machine, and the record does not say how many CPUs that has. Size such a job's pools
+  from `PI_JOB_SIZE_CPUS` all the same.
 - **Memory is lowered** when 1.25 times the p95 peak is at most 0.75 times the size, never below 1.25 times the
   largest peak in the window, nor 1.5 times the largest size killed, nor `512m`.
 - **CPUs are only ever lowered**, when the p95 of the cores used is below 0.4 times the size. Raising `cpus` cannot
@@ -448,7 +452,7 @@ it on the shared queue would wait for that machine instead.
 peaked well below. Doctor's line for it:
 
 ```text
-⚠ project medium: size 8g, 2 CPUs; its runs in the last 30 days suggest memory 12g (oom-killed: 1 run ended oom-killed (the largest size killed 8g)); size per-CPU worker pools from PI_JOB_SIZE_CPUS: the killed run's tools saw 15 CPUs at a size of 2 CPUs
+⚠ project medium: size 8g, 2 CPUs; its runs in the last 30 days suggest memory 12g (oom-killed: 1 run ended oom-killed (the largest size killed 8g)); size per-CPU worker pools from PI_JOB_SIZE_CPUS: the killed run's tools counted at least 15 CPUs at a size of 2 CPUs
     → apply it in the admin panel with dispatch_limit_edit {"index":1,"memory":"12g"} (an operator confirms it; nothing applies a size by itself)
 ```
 
