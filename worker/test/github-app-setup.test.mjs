@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createVerify, generateKeyPairSync } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { buildFormPage, buildManifest, defaultAppName, mintAppJwt, runGithubAppSetup, sanitizeAppName } from "../src/github-app-setup.mjs";
+import { buildFormPage, buildManifest, defaultAppName, mintAppJwt, NO_WEBHOOK_URL, runGithubAppSetup, sanitizeAppName } from "../src/github-app-setup.mjs";
 
 // A REAL RSA keypair, generated once: the conversion response carries the private half as its `pem`,
 // so the wizard's hand-rolled JWT is signed with a key the test can VERIFY against the public half —
@@ -194,9 +194,11 @@ test("buildManifest: --webhook-url shape is exactly the narrow permission/event 
 	});
 });
 
-test("buildManifest: no webhook URL yields an INACTIVE hook that still names a URL, the homepage — the polling-ready shape (issue #874)", () => {
+test("buildManifest: no webhook URL yields an INACTIVE hook that still names a URL, one that can never resolve — the polling-ready shape (issue #874)", () => {
 	const manifest = buildManifest({ name: "pi-dispatch-x", redirectUrl: "http://127.0.0.1:1/callback", webhookUrl: undefined });
-	assert.deepEqual(manifest.hook_attributes, { url: "https://github.com/edgehero/pi-dispatch", active: false });
+	assert.deepEqual(manifest.hook_attributes, { url: "https://no-webhook.invalid/", active: false });
+	assert.equal(manifest.hook_attributes.url, NO_WEBHOOK_URL);
+	assert.match(new URL(NO_WEBHOOK_URL).hostname, /\.invalid$/, "RFC 6761: a name that never resolves, so no host can receive what GitHub sends there");
 	assert.deepEqual(manifest.default_permissions, { contents: "write", pull_requests: "write", issues: "write", metadata: "read" });
 	assert.deepEqual(manifest.default_events, ["issues", "issue_comment", "pull_request", "pull_request_review"]);
 });
@@ -240,7 +242,7 @@ test("form page: --org switches the POST target to the organization endpoint", a
 	await h.run();
 	const page = h.getPageFor()("http://127.0.0.1:43210");
 	assert.match(page, /action="https:\/\/github\.com\/organizations\/acme\/settings\/apps\/new"/);
-	assert.deepEqual(embeddedManifest(page).hook_attributes, { url: "https://github.com/edgehero/pi-dispatch", active: false });
+	assert.deepEqual(embeddedManifest(page).hook_attributes, { url: "https://no-webhook.invalid/", active: false });
 });
 
 test("buildFormPage: the embedded JSON is HTML-escaped (quotes cannot break out of the input value)", () => {
@@ -323,9 +325,12 @@ test("setup github: --no-webhook never touches WEBHOOK_SECRET and says the App i
 	assert.match(h.store.get(ENV_PATH), /^WEBHOOK_SECRET=$/m, "the empty scaffold line stays empty — nothing will sign deliveries with it");
 	assert.doesNotMatch(h.text(), /WEBHOOK_SECRET=<value not shown>/, "no secret line is even offered");
 	assert.match(h.text(), /webhook INACTIVE \(--no-webhook\)/);
-	assert.match(h.text(), /`pi-dispatch-receiver poll`, with the repositories in POLL_REPOS/, "the poller is named, not called a follow-up: it shipped");
+	assert.match(h.text(), /`pi-dispatch-receiver poll`/, "the poller is named, not called a follow-up: it shipped");
 	assert.doesNotMatch(h.text(), /follow-up|until it lands/, "polling is no longer a promise");
-	assert.match(h.text(), /webhook URL is a placeholder \(this project's homepage\)/, "the placeholder URL is said, so ticking Active later is not a surprise");
+	assert.ok(h.text().includes("webhook URL is a placeholder, https://no-webhook.invalid/"), "the placeholder URL is printed, so ticking Active later is not a surprise");
+	// The wizard never writes WEBHOOK_SECRET under --no-webhook, so moving to webhooks without a secret would leave the
+	// receiver refusing to start, or refusing every delivery: the steps name it.
+	assert.match(h.text(), /new webhook secret in the App's settings, put the same secret in\s+WEBHOOK_SECRET/);
 	assertNoSecrets(h.text());
 });
 

@@ -41,8 +41,10 @@ commands.
 Everything else is shared with `serve`: the same `triggers.json` (`PI_TRIGGERS_FILE`), the same GitHub
 auth block, the same queue. Pair it with `pi-dispatch setup github --no-webhook`, which mints
 credentials without asking you for a public URL. The App it creates has its webhook switched off. GitHub requires a
-webhook URL all the same, so the App names this project's homepage there, which receives nothing while the webhook is
-off. To move to webhooks later, put your receiver's URL in the App's settings and tick **Active**.
+webhook URL all the same, so the App names `https://no-webhook.invalid/`, an address that never resolves. GitHub's
+one ping when it creates the App fails there, and nothing can ever be delivered to it. To move to webhooks later, set
+your receiver's URL and a new webhook secret in the App's settings, put the same secret in `WEBHOOK_SECRET`, and tick
+**Active**.
 
 ## Which repos, and the two ways to say
 
