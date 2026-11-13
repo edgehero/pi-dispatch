@@ -1,7 +1,7 @@
 {
   "card": "LoadedStates",
   "pr": 800,
-  "words": "53758b2e31febc83e0a0b7e9ebe0547846184a365ae2aff9237303d4648691fa",
+  "words": "32d51ab0beead07891b58273fe3cfc06b7e63263b42a605fded6cec33fc9afe6",
   "elements": [
     {
       "el": "p-loaded",
@@ -95,7 +95,8 @@
         "panels/sandbox-loaded-fresh.operator",
         "panels/sandbox-loaded-flow-found.operator",
         "panels/sandbox-loaded-flow-unknown.operator",
-        "panels/sandbox-loaded-mcp-lacks.operator"
+        "panels/sandbox-loaded-mcp-lacks.operator",
+        "panels/sandbox-loaded-flow-stale.operator"
       ],
       "shows": [
         "On mini1",
@@ -439,6 +440,18 @@
         "What a job of trigger 3 would load on this host is unknown: it has published no doctor run.",
         "A fresh sandbox has no run to quote"
       ]
+    },
+    {
+      "el": "Its Flow row says where a job there would find the trigger's flow, and reads unknown where that run answered for another version of the triggers file",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-sb-new",
+      "source": "admin/src/trigger-gets-view.mjs#SANDBOX_FRESH_WORDS",
+      "holds": "its last doctor run answered for another version of the triggers file",
+      "golden": [
+        "panels/sandbox-loaded-flow-stale.operator"
+      ],
+      "shows": "Whether a job of trigger 3 on this host would find fix is unknown: its last doctor run answered for another version of the triggers file."
     },
     {
       "el": "As a viewer sees it: the same words with no button",

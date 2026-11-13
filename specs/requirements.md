@@ -1674,13 +1674,16 @@ writes retain their existing interactive confirmation. This adds no unattended p
   the trigger would find its flow on that host, in the trigger page's own words (`flowAnswer`, `lacksFlow`,
   `FLOW_TIER_WORDS`): a sandbox's trigger is a forge's, whose repository is on no host, so a tier doctor found is named
   with the trigger page's caveat that the repository comes first at its base commit, and one found in no tier a host
-  can see is unknown, never absent, as is a flow doctor has no answer for (it ran before an edit, or the row was cut to
-  fit); and, when the trigger names any, **MCP servers**: each server `run.mcp`
+  can see is unknown, never absent, as is a flow doctor has no answer for (the row was cut to fit, or the flow was named
+  after that run). Since issue #869 it is unknown too where that host's doctor answered for another version of the trigger: "unknown:
+  its last doctor run answered for another version of the triggers file", by the digest each flow row carries
+  (`INT-DOCTOR-RESULTS-KEY`'s `basis`, which names the fields it covers) against the one the page computes from the loader's
+  entry for its trigger, so an edit to any of them, a renamed flow included, never keeps an answer for another version of it; and, when the trigger names any, **MCP servers**: each server `run.mcp`
   names against the host's overlay servers, on, switched off or not there (a job is then refused before it spends, the
   reason not named, since a host with no `mcp.json` publishes the same empty list), or unknown where the list could not
   be read or was cut, and `forge` as the job's own. Tools stay out, since no host publishes a tool's name. An unread MCP
   part no longer makes the first row unknown for a trigger that names no server. A package-tier answer under
-  `"packages": false` is no answer, as is one for a package the trigger leaves out, and an old publication reads unknown
+  `"packages": false` is no answer, as is one for a package the trigger leaves out, from a doctor before #869, and an old publication reads unknown
   for both rows, as the trigger page reads it. A host that published nothing keeps the first row alone. A disarmed
   one-shot's flow and servers are read from its entry in the file, as the worker prepares it. pi's
   version is the record's, or the host's beat's (`host:h:<name>`) where the sandbox's image is the one that host booted on, so
@@ -1691,7 +1694,7 @@ writes retain their existing interactive confirmation. This adds no unattended p
   operators only (`REQ-SANDBOX-FROM-THE-CONSOLE`, UNCHANGED, checked: it adds no control, command or shell list).
   `/api/run` carries the field for both roles (`INT-CONSOLE-STATE-API`). No model or agent reads the list, and each reads
   `outcomeNote`'s closed sentence as `note`, and an agent's page draws no Loaded card or project card over a copy with no field.
-  Goldens: `sandbox-loaded-run.operator`, `sandbox-loaded-fresh.operator`, `sandbox-loaded-flow-found.operator`, `sandbox-loaded-flow-unknown.operator`, `sandbox-loaded-mcp-lacks.operator`, `sandbox-loaded-unknown.operator`, `sandbox-loaded-long-names.operator`. Tests:
+  Goldens: `sandbox-loaded-run.operator`, `sandbox-loaded-fresh.operator`, `sandbox-loaded-flow-found.operator`, `sandbox-loaded-flow-unknown.operator`, `sandbox-loaded-flow-stale.operator`, `sandbox-loaded-mcp-lacks.operator`, `sandbox-loaded-unknown.operator`, `sandbox-loaded-long-names.operator`. Tests:
   `admin/test/loaded-words.test.mjs`, `admin/test/console-sandboxes.test.mjs`, `admin/test/sandbox-data.test.mjs`.
 
 - **AMENDED 2026-11-02 (#792, #793)**: Run Workspace and the separate gateway workbench/observer surface follow
@@ -2656,7 +2659,12 @@ writes retain their existing interactive confirmation. This adds no unattended p
       and its flow's answer) and on the image and its pi, unless it names its own image. A host alone on the live list says so. A difference says what a
       host has over another, what it goes without, a named server defined differently, and what it runs. A host with no answer for the
       flow, or no image to read, says that. A host whose doctor found the flow nowhere says "its flow in no tier", whoever agrees with it,
-      beside other hosts or alone. A host that published nothing, whose record is old or cannot be read (a newer release's reads
+      beside other hosts or alone. Since issue #869 a host's answer for the flow counts only where its doctor judged the trigger as the
+      file has it now: each published flow row carries a digest of the fields that answer depends on (`INT-DOCTOR-RESULTS-KEY`'s `basis`),
+      and the card computes the same digest from its own read of the file. Where they differ, a renamed flow included, Doctor's answer under the flow says the host
+      "answered for another version of the triggers file, so it is unknown there", beside other hosts its pill says it has no
+      answer for its flow, and neither the warning that a job would not find it nor "its flow in no tier" stands on that answer. A row from a doctor
+      before #869 carries no digest and is read as before. Golden: `trigger-gets-flow-stale.operator`. A host that published nothing, whose record is old or cannot be read (a newer release's reads
       so), or that left out part of what this trigger loads from, reads unknown. A host whose worker publishes that it reads less of the triggers file than the file says holds this
       file's jobs, and its pill and the note under the pills say so; over a file above version 1, one that publishes no version reads unknown.
     - **The rows.** Model, flow and skills, extensions, MCP servers, tools, and image and secrets. A row's control says what
@@ -7258,6 +7266,12 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
   prepare action (a safe write: previewed, confirmed, audited).
   - **It is prepared as one trigger's jobs would see it.** The image, size and egress come from that trigger, because
     one project's triggers can name different images (`run.image`).
+    - **CORRECTED (#863)**: from a host's terminal too. `--new --deployment <dir>` reads the deployment's triggers,
+      projects and scoped-limits files, job image and default job size; before, it got no project, the default size
+      and the default image. A shell value or an unreadable line for one of them refuses by name before preparing.
+      Opening and attaching do not read them, so they neither load nor compare them. It reads no forge credential
+      (#771): a GitHub trigger clones with the launching account's own `gh` login, and a GitLab, Forgejo or Azure
+      trigger refuses as `sandbox-forge-unconfigured` and is prepared from the console.
   - The worker clones on the host with a credential that never enters a container (`CONST-TOKEN-SCOPED-PER-JOB`).
     That credential is contents-read only where the forge can mint one so (a GitHub App installation token).
   - It then drops the credential and keeps the directory under `PI_SANDBOX_DIR` with a manifest naming that
@@ -7294,6 +7308,11 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
     nothing.
   - **Prepare.** Given `--new` or the console's prepare action, the kept directory and its manifest exist, no
     container runs, neither holds a credential, and no budget was reserved.
+    Given `--new --deployment` for a repository in a project with its own size, the manifest records the project's
+    size and the deployment's image, and the plan's digest is the one the deployment's worker computes (#863).
+    Given `--deployment` without `--new`, a shell's `PI_JOB_MEMORY`, or a `.env` line for a preparation setting
+    that the service's loader reads differently (such as `$HOME/...`), neither refuses nor reaches the re-executed
+    process. A `.env` the loader cannot read at all still refuses opening, as before.
   - **Roles.** Given a viewer's session, no page, panel, event or `/api/state` body carries the tab, a command, an
     opener link or the list of open shells.
   - **Open shells.** Given an open shell whose process died, its entry is gone within its expiry.
@@ -8699,6 +8718,8 @@ instead of drifting.
 |---|---|
 | 2026-11-13 (#867, the review) | **`REQ-OPERATOR-JOB-CANCEL` AMENDED**, its statement: reading whether the job is held is a point that changes nothing too, and a hold that cannot be read is never taken as no hold; a Valkey never reached is said as that, with the hint. Acceptance UNCHANGED, checked: its #867 clause names the test file, which holds both. |
 | 2026-11-13 (#867) | **`REQ-OPERATOR-JOB-CANCEL` AMENDED**, its statement and acceptance: the CLI's cancel ends within its bounds wherever Valkey stops answering, its lookup included, which #846 left as a named residual, and says what it changed at that point (nothing during the lookup; may or may not, after a removal or a hold's delete that was sent and not answered). **`REQ-SUBSCRIPTION-AUTHENTICATION` UNCHANGED, checked**: it names no CLI output; `pi-dispatch auth` now bounds each Valkey command and ends a Valkey failure with one line, where it printed ioredis' stack trace (`INT-SUBSCRIPTION-QUOTA-KEY`, docs/subscription-auth.md). **`REQ-OPERATOR-CONSOLE-SCREENS` UNCHANGED, checked**: the console's stop on a Valkey that stopped answering stays #842's. |
+| 2026-11-13 (#869) | **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: in (g1)'s hosts and in a fresh sandbox's Flow row, a host's answer for the flow counts only where its doctor judged the trigger as the file has it now, by the digest each published flow row carries (`INT-DOCTOR-RESULTS-KEY`'s `basis`). Elsewhere, a renamed flow included, the trigger page says the host "answered for another version of the triggers file, so it is unknown there", with no warning that a job would not find it, and the sandbox says it is unknown because its last doctor run answered for another version of the triggers file. "Has no answer for it" loses its "yet" for the same reason. Neither promises a later answer, which doctor never gives for a spent one-shot or a file the worker refuses. A row from an older doctor is read as before. Two goldens added, `trigger-gets-flow-stale` and `sandbox-loaded-flow-stale`; the sandbox paragraph no longer gives "it ran before an edit" as a reason for no answer, since such a row is now this case. `REQ-SANDBOX-FROM-THE-CONSOLE` UNCHANGED, checked: no control is added. |
+| 2026-11-13 (#863) | **`REQ-SANDBOX-FROM-THE-CONSOLE` CORRECTED**, a prepared sandbox and its acceptance: `pi-dispatch sandbox --new --deployment <dir>` reads the deployment's triggers, projects and scoped-limits files, job image and default job size, so it is prepared as the trigger's jobs would see it, as the requirement already said. It got no project, the default size and the default image. A shell value or an unreadable line for one of them refuses by name before preparing. It reads no forge credential, as #771 built it: a GitHub trigger clones with the launching account's `gh` login, and another forge's trigger refuses as `sandbox-forge-unconfigured` and is prepared from the console. UNCHANGED, checked: `REQ-RESURRECTABLE-SANDBOX` (opening and attaching through `--deployment` load and compare only what they did before, so a preparation setting in the shell, or a `.env` line for one that the loader reads differently such as `$HOME/...`, cannot stop them; a `.env` the loader cannot read at all still refuses, as before), `REQ-CONSOLE-SECURITY` and `REQ-OPERATOR-CONSOLE-ACTIONS` (nothing in the console moves). |
 | 2026-11-12 (#847) | **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: a fresh sandbox's What opens gains, where the host published a doctor run, a Flow row (where a job would find the trigger's flow, in the trigger page's words, or unknown) and, for a trigger that names any, an MCP servers row (on, switched off, not there, unknown; `forge` the job's own); an unread MCP part no longer makes the first row unknown for a trigger that names none; three goldens added (`sandbox-loaded-flow-found`, `-flow-unknown`, `-mcp-lacks`). (g1)'s extension row quotes what the newest run that loaded it brought also when it is switched off, and one no run has loaded says that is not known yet; an overlay entry says it has no manifest. UNCHANGED, checked: `INT-DOCTOR-RESULTS-KEY` (nothing new is published), `REQ-SANDBOX-FROM-THE-CONSOLE` (no control is added), the README's What a job gets (no sentence it holds moved). |
 | 2026-11-12 (#846, part 4) | **`REQ-OPERATOR-CONSOLE-ACTIONS` AMENDED**, (p): the cases whose Undo is by hand gain a whole pause-windows list its own preview would refuse (`refusedList`), which the whole-list action may replace and whose Undo was offered and then refused with a 400. |
 | 2026-11-12 (#859) | **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, doctor's `.env` reading: the boot-file keys (`ENV_FILE_READABLE_KEYS`, "two" corrected to five in the lead and the body) now reach the checks that read their files, not only the BOOT_FILES lines. `bootFileEnv` takes this shell's non-blank value, else the file's plain one, both resolved against the deployment folder, from the one reading of the file those lines already made (moved to the top of `collectChecks`); the service's own load verdict judges an envelope against the projects and limits the file names. A shell and a file naming different files is a ✗, as for every service key; a key only this shell sets joins the #471 shell-only line; an untrusted `.env` gives nothing; a line doctor cannot read leaves its file not known (a bundle's project is then a warning), never empty; `PI_MODEL_ENDPOINTS_FILE` keeps `endpointsFileSetting`, now for the cheaper-route proposals too; the envelope's and its context's reads gained the regular-file guard the others have, since a FIFO the `.env` named would now hang doctor. Before it, a service deployment checked from a plain shell was judged with no projects, scoped limits, pause windows or envelope: every secret bundle bound to a project FAILED as naming one projects.json does not hold, the per-project size lines went missing, and the fleet and applied-split lines compared nothing with healthy peers. UNCHANGED, checked: `SERVICE_ENV_KEYS` and `resolveDoctorEnv` (the five keys stay outside them), the BOOT_FILES lines' wording and two subjects (but for the envelope's service verdict, judged against the `.env`'s projects and limits, and the new ✗ where the subjects name different files). |

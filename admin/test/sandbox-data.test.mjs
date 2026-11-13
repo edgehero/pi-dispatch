@@ -11,6 +11,8 @@ import { NOW } from "../../launch/fixture-deployment.mjs";
 import { makeSandboxTelemetry } from "@edgehero/pi-dispatch/host-telemetry";
 import { makeSandboxInventory, readSandboxInventories } from "@edgehero/pi-dispatch/sandbox-inventory";
 import { FORGE_KINDS } from "@edgehero/pi-dispatch/forges";
+import { flowBasisOf } from "@edgehero/pi-dispatch/host-loads";
+import { parseTriggers } from "@edgehero/pi-dispatch/triggers";
 import { sandboxFromRun } from "../src/console/panels/sandboxes.mjs";
 
 function setup() {
@@ -284,6 +286,26 @@ test("a fresh sandbox hands on its trigger's flow and the MCP servers it names, 
   writeFileSync(s.paths.triggersPath, JSON.stringify(s.triggers));
   const none = await s.service.read({});
   assert.deepEqual([none.flow, none.mcp], ["fix", []]);
+});
+
+// Issue #869: the basis is the loader's entry's, as doctor reads the same file, so a row doctor published answers here only for the file as it is.
+test("a fresh sandbox hands on the basis a doctor's flow row must carry to answer for its trigger, and a spent one-shot's is its sentinel's (#869)", async () => {
+  const s = setup();
+  s.triggers.triggers[0].run.flow = "fix";
+  writeFileSync(s.paths.triggersPath, JSON.stringify(s.triggers));
+  const entryOf = (index) => parseTriggers(readFileSync(s.paths.triggersPath, "utf8"), s.paths.triggersPath)[index];
+  const read = await s.service.read({});
+  assert.equal(read.selected.index, 0);
+  assert.equal(read.flowBasis, flowBasisOf(entryOf(0)));
+  s.triggers.triggers[0].run.packages = false;
+  writeFileSync(s.paths.triggersPath, JSON.stringify(s.triggers));
+  assert.notEqual((await s.service.read({})).flowBasis, read.flowBasis, "a field flowTierOf reads moves it");
+  // A spent one-shot is prepared from its entry as written, and doctor publishes no row for the loader's sentinel it reads as.
+  s.triggers.triggers[0] = { on: { type: "issue", action: ["closed"], number: 40, once: true, disarmed: { at: "2026-11-01T00:00:00Z", jobId: "gh-1" } }, run: { kind: "github", flow: "fix" } };
+  writeFileSync(s.paths.triggersPath, JSON.stringify(s.triggers));
+  const spent = await s.service.read({ index: 0 });
+  assert.equal(spent.flow, "fix");
+  assert.equal(spent.flowBasis, flowBasisOf({ on: { type: "disarmed" }, run: {} }));
 });
 
 // Issue #824: a forge is the forge table's (`isForgeKind`), so a forge added to FORGES has its triggers offered, its run's

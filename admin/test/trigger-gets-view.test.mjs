@@ -3,7 +3,8 @@
 // and reader, because a shape written by hand can hide the defect it stands in for.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildHostLoads, flowTierOf, hostLoadsKey } from "@edgehero/pi-dispatch/host-loads";
+import { buildHostLoads, flowBasisOf, flowInputOf, flowTierOf, hostLoadsKey } from "@edgehero/pi-dispatch/host-loads";
+import { parseTriggers } from "@edgehero/pi-dispatch/triggers";
 import { readHostLoadsView } from "../src/host-loads-view.mjs";
 import { readTriggerEditor } from "../src/read-model.mjs";
 import { triggerLastRun, wordsText } from "../src/loaded-words.mjs";
@@ -447,4 +448,97 @@ test("a fresh sandbox's rows say where the flow would be found and which named M
   assert.deepEqual(rowsOf({ name: "mini1", state: "unknown", why: "absent" }, { flow: "fix", mcp: ["docs"] }).map(([label]) => label), ["On mini1"]);
   // No row names a tool.
   assert.doesNotMatch(JSON.stringify(mcp), /tool/i);
+});
+
+// Issue #869: a flow row answers for the trigger as the file has it only where its basis is the one this page computes from the file it
+// reads. Each case is the issue's: doctor judged the trigger, the file changed in a field `flowTierOf` reads, and doctor has not run since.
+test("a flow row judged for the file as it was answers nothing on the row, the warning, the pills or a fresh sandbox (#869)", async () => {
+  const { flowRowFor, readTriggerGetsEntry, sandboxFreshRows } = await import("../src/trigger-gets-view.mjs");
+  const PATH = "/deployment/triggers.json";
+  const fileOf = (run) => JSON.stringify({ version: 2, triggers: [{ on: { type: "label", any: ["pi"] }, run: { kind: "github", flow: "triage" } }, { on: { type: "label", any: ["fe"] }, run: { kind: "github", flow: "frontend-fix" } }, { on: { type: "cron", id: "web", pattern: "0 9 * * *" }, run: { kind: "local", folder: "/srv/web", flow: "fix", task: "t", ...run } }] });
+  // The trigger as the page reads it, through its one read of the file.
+  const asRead = (run) => readTriggerGetsEntry({ triggersPath: PATH, index: 2, fs: { readFileSync: () => fileOf(run) } }).trigger;
+  // What doctor publishes for row 3 of that file on a host: the loader's entry, the real flowTierOf, and the basis beside its answer.
+  const STAGED = { skills: [{ name: "fix", package: "pi-lint" }], unenumerable: [] };
+  const doctorOn = async (run, world = {}) => {
+    const entry = parseTriggers(fileOf(run), PATH)[2];
+    const found = await flowTierOf(flowInputOf(entry), { repoFlowAtHead: async () => "absent", fileExists: () => false, overlay: "/overlay", staged: STAGED, ...world });
+    return { flows: [{ trigger: 2, flow: "fix", tier: found.tier, package: found.package, repo: found.repo, basis: flowBasisOf(entry) }] };
+  };
+  const gets = async (hosts, trigger) => triggerGetsOf({ trigger, hostLoads: await published(hosts), liveHosts: Object.keys(hosts) });
+  const STALE = `mini1 ${W.flowStale}`;
+  const now = asRead({});
+  assert.equal(now.flowBasis, flowBasisOf(parseTriggers(fileOf({}), PATH)[2]), "the page's basis is the loader's entry's");
+
+  // Doctor found it nowhere while the packages were withheld, and the file has loaded them since: no warning that a job goes without it.
+  const withheld = await doctorOn({ packages: false });
+  assert.deepEqual([withheld.flows[0].tier, withheld.flows[0].repo], ["none", "absent"]);
+  const before = await gets({ mini1: withheld }, asRead({ packages: false }));
+  assert.match(before.flow.lacking, /a job on mini1 would not find fix/, "for the file it judged, the warning stands");
+  const after = await gets({ mini1: withheld }, now);
+  assert.equal(after.flow.lacking, null);
+  assert.equal(after.flow.doctor, `${STALE}.`);
+  assert.deepEqual(before.pills.map((pill) => pill.word), ["its flow in no tier"]);
+  assert.deepEqual(after.pills.map((pill) => pill.word), ["the only host"], "a host alone says nothing of its flow but what it lacks");
+  // And once doctor runs again on the file as it is, the answer is its own.
+  assert.equal((await gets({ mini1: await doctorOn({}) }, now)).flow.doctor, "mini1 finds fix from pi-lint.");
+
+  // Doctor found it in the trigger's skills folder, and the file has dropped or moved the folder since.
+  const folder = await doctorOn({ skillsDir: "/srv/skills" }, { fileExists: (path) => path === "/srv/skills/fix/SKILL.md" });
+  assert.equal(folder.flows[0].tier, "trigger");
+  for (const run of [{}, { skillsDir: "/srv/other-skills" }]) {
+    const read = asRead(run);
+    assert.deepEqual(flowRowFor(folder, read), { stale: true }, JSON.stringify(run));
+    assert.equal((await gets({ mini1: folder }, read)).flow.doctor, `${STALE}.`);
+  }
+  assert.equal((await gets({ mini1: folder }, asRead({ skillsDir: "/srv/skills" }))).flow.doctor, "mini1 finds fix from its skills folder.");
+
+  // Doctor found it nowhere while the trigger left its package out, and the file loads that package since.
+  const left = await doctorOn({ excludeExtensions: ["pi-lint"] });
+  assert.equal(left.flows[0].tier, "none");
+  assert.equal((await gets({ mini1: left }, now)).flow.lacking, null);
+  assert.equal((await gets({ mini1: left }, asRead({ excludeExtensions: ["pi-lint"] }))).flow.lacking !== null, true);
+
+  // The flow renamed since: the row at this position names the old one, and its basis says it was judged for the file as it was.
+  const renamed = asRead({ flow: "review" });
+  const current = await doctorOn({});
+  assert.deepEqual(flowRowFor(current, renamed), { stale: true });
+  const afterRename = await gets({ mini1: current }, renamed);
+  assert.equal(afterRename.flow.doctor, `${STALE}.`);
+  assert.equal(afterRename.flow.lacking, null);
+  // A row an older doctor wrote has no basis to say so, and reads as before: no answer for this flow yet.
+  const { basis: _old, ...currentOlderRow } = current.flows[0];
+  assert.equal(flowRowFor({ flows: [currentOlderRow] }, renamed), null);
+  assert.equal((await gets({ mini1: { flows: [currentOlderRow] } }, renamed)).flow.doctor, "mini1 has no answer for it.");
+  // And this file's own row for a flow that failed the skill charset holds no name and this file's basis: no answer, never stale.
+  assert.equal(flowRowFor({ flows: [{ ...current.flows[0], flow: null }] }, now), null);
+
+  // Beside a host that answers for the file as it is, each says its own, and the pills claim nothing for the stale one.
+  const both = await gets({ mini1: withheld, mini2: await doctorOn({}) }, now);
+  assert.equal(both.flow.doctor, `mini2 finds fix from pi-lint; ${STALE}.`);
+  assert.deepEqual(Object.fromEntries(both.pills.map((pill) => [pill.name, pill.word])), { mini1: "no answer for its flow", mini2: "its flow from pi-lint" });
+
+  // A row from a doctor before #869 has no basis, and keeps the older reading: the warning, and #847's own two cases.
+  const { basis, ...older } = withheld.flows[0];
+  assert.equal(typeof basis, "string");
+  assert.match((await gets({ mini1: { flows: [older] } }, now)).flow.lacking, /would not find fix/, "an older doctor's row cannot say which file it judged");
+  const olderPackage = { flows: [{ ...older, tier: "package", package: "pi-lint" }] };
+  assert.equal(flowRowFor(olderPackage, asRead({ packages: false })), null);
+  assert.equal(flowRowFor(olderPackage, asRead({ excludeExtensions: ["pi-lint"] })), null);
+  // And a fleet of both releases, answering alike for the file as it is, is the same: the basis is no fact of what a host loads.
+  const { basis: _, ...currentOlder } = current.flows[0];
+  const mixed = await gets({ mini1: current, mini2: { flows: [currentOlder] } }, now);
+  assert.deepEqual(mixed.pills.map((pill) => pill.word), ["the same", "the same"]);
+
+  // A page that could not parse the file has no basis for it, so a row that carries one answers nothing.
+  assert.deepEqual(flowRowFor(current, { ...now, flowBasis: null }), { stale: true });
+  const refused = readTriggerGetsEntry({ triggersPath: PATH, index: 2, fs: { readFileSync: () => JSON.stringify({ triggers: JSON.parse(fileOf({ excludeExtensions: ["pi-lint"] })).triggers }) } });
+  assert.deepEqual([refused.fileRefused, refused.trigger.flowBasis], [true, null], "a version 1 file naming run.excludeExtensions is one the loaders refuse");
+
+  // A fresh sandbox says the same of the same row, in its own words.
+  const host = { name: "mini1", state: "current", at: 1, ageMs: 0, every: 24, overlayExtensionsAllowed: true, extensions: [], skills: [], packages: [], mcp: [], unread: [], more: {}, piVersion: "1.5.0", image: "pi-job:1" };
+  const fresh = (flows, flowBasis) => sandboxFreshRows({ hostLoads: { more: 0, hosts: [{ ...host, ...flows }] }, host: "mini1", triggerIndex: 2, image: "pi-job:1", flow: "fix", flowBasis }).find(([label]) => label === "Flow")[1].join("");
+  assert.equal(fresh(folder, now.flowBasis), "Whether a job of trigger 3 on this host would find fix is unknown: its last doctor run answered for another version of the triggers file.");
+  assert.equal(fresh(folder, asRead({ skillsDir: "/srv/skills" }).flowBasis), "A job of trigger 3 on this host would find fix from its skills folder, unless the repository holds it at its base commit, which comes first.");
+  assert.equal(fresh(folder, undefined), fresh(folder, now.flowBasis), "a caller that hands no basis gets no answer from a row that has one");
 });

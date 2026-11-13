@@ -1,3 +1,4 @@
+import { flowBasisOf } from "@edgehero/pi-dispatch/host-loads";
 import { NOW } from "../../../launch/fixture-deployment.mjs";
 import { loadPageData, parsePageQuery, renderPage } from "../../src/console/pages.mjs";
 const HOUR = 3600000;
@@ -16,8 +17,10 @@ export function sandboxFixture(now = NOW) {
   ], sessions: [{ host: "mini1", id: "gh-9575", nonce: "1".repeat(32), containerId: "2".repeat(64), venue: "local", by: "ops", since: now - 19 * 60000, at: now }], sessionsUnavailable: false,
     options: [{ index: 2, repository: null, label: "trigger 3, comment, github, flow fix" }, { index: 1, repository: null, label: "trigger 2, label, github, flow triage" }],
     selected: { repo: "acme/web", index: 2, ref: "HEAD", host: "mini1", pin: false },
-    // Issue #847: the selected trigger's flow and the MCP servers it names, as `sandbox-data.mjs` hands them on.
+    // Issue #847: the selected trigger's flow and the MCP servers it names, as `sandbox-data.mjs` hands them on, and (issue #869) the basis
+    // of its entry as the loader parses it, which a doctor's flow row must carry to answer for it.
     flow: "fix",
+    flowBasis: flowBasisOf({ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix" } }),
     mcp: [],
     plan: { host: "mini1", repo: "acme/web", ref: "HEAD", triggerIndex: 2, image: "pi-job:4.3.1", backend: "local", size: { memMiB: 2048, cpuCenti: 100, source: "default" }, egress: { armed: true, proxy: "pi-dispatch-egress-proxy" }, retentionHours: 24, pin: false, pinDays: 7, project: "web" },
   };

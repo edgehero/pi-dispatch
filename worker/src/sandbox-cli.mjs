@@ -61,7 +61,9 @@ export async function runSandbox(argv = [], { env = process.env, deps = {} } = {
 
 	if (values.deployment) {
 		const { sandboxDeploymentEnv } = await import("./sandbox-deployment.mjs");
-		const loaded = await (deps.deploymentEnv ?? sandboxDeploymentEnv)({ dir: values.deployment, env, expectedHost: values["expected-host"] });
+		// Only `--new` reads the preparation's settings (#863), so only `--new` loads and compares them: an opener's open or
+		// attach must not refuse over a shell's PI_JOB_MEMORY it would never read.
+		const loaded = await (deps.deploymentEnv ?? sandboxDeploymentEnv)({ dir: values.deployment, env, expectedHost: values["expected-host"], preparing: values.new !== undefined });
 		if (loaded.refused) return fail(err, loaded.message);
 		// Readers and runtime helpers use their process's environment. Re-exec in the clean environment so none
 		// can accidentally consult the SSH shell's DOCKER_HOST, egress or rootless store (#771).
@@ -209,9 +211,13 @@ export async function runSandbox(argv = [], { env = process.env, deps = {} } = {
 	return result.code ?? 0;
 }
 
-function runDeploymentSandbox(argv, env, dir) {
+// The child runs IN the deployment folder, as the service does (its unit's WorkingDirectory), and that is load-bearing
+// (#863): a relative PI_PROJECTS_FILE, PI_SCOPED_LIMITS_FILE or PI_TRIGGERS_FILE, and an unset PI_TRIGGERS_FILE's
+// `triggers.json`, then name the files the deployment's worker reads. Resolving them here instead would be a second
+// rule for the same paths, which drifts.
+export function runDeploymentSandbox(argv, env, dir, { spawnFn = spawn } = {}) {
 	return new Promise((resolve) => {
-		const child = spawn(process.execPath, [fileURLToPath(new URL("./cli.mjs", import.meta.url)), "sandbox", ...argv], { env, ...(dir ? { cwd: dir } : {}), stdio: "inherit" });
+		const child = spawnFn(process.execPath, [fileURLToPath(new URL("./cli.mjs", import.meta.url)), "sandbox", ...argv], { env, ...(dir ? { cwd: dir } : {}), stdio: "inherit" });
 		child.once("error", () => resolve(1));
 		child.once("exit", (code) => resolve(code ?? 1));
 	});

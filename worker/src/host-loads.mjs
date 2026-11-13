@@ -14,9 +14,11 @@
  * charset, on the way in AND on the way out, since another host wrote what a reader parses. An overlay extension's first
  * path segment and whether it is a file or a folder; a skill's folder name; a server's name, transport, where it is
  * (`mcpServerWhere`: a url's host and port, or a command's base name, never a header, an argument or a value), exposure,
- * whether it is on, and the variable NAMES it references; a package's name and version; a trigger's position, flow name and
- * the tier it resolved in. No path, no value and no tool name: what a server or an extension offers is known only once it
- * runs, and the run's own record says that. These are the same facts the viewer's Connections page shows; a model's
+ * whether it is on, and the variable NAMES it references; a package's name and version; a trigger's position, flow name,
+ * the tier it resolved in and a short hex digest of the trigger fields that answer was judged from (`flowBasisOf`). No path,
+ * no value and no tool name: what a server or an extension offers is known only once it runs, and the run's own record says
+ * that. The digest holds a path (`run.folder`, `run.skillsDir`) only as a hash cut to 8 hex digits, which names nothing a
+ * reader can read back. These are the same facts the viewer's Connections page shows; a model's
  * projection (`modelConnections`) carries counts in place of `where` and the key names, and one of these rows gets the
  * same treatment when a tool reads it.
  *
@@ -27,6 +29,7 @@
  * folders on the host and runs nothing: a frontmatter `name:` rename is invisible, and what a run really loaded is its
  * own record's `loaded`. Where a read cannot say, it says so (`unread`), never an empty list that reads as none.
  */
+import { createHash } from "node:crypto";
 import * as nodeFs from "node:fs";
 import { join, resolve, sep } from "node:path";
 import { DOCTOR_HOSTS, DOCTOR_HOSTS_MAX, DOCTOR_RESULTS_TTL_MS } from "./doctor-results.mjs";
@@ -73,6 +76,52 @@ const KEY_NAME_RE = /^[A-Z_][A-Z0-9_]{0,63}$/;
 const WHERE_RE = /^[A-Za-z0-9._:[\]-]{1,255}$/;
 const INDEX_MAX = 1_000_000;
 
+/**
+ * The trigger fields `flowTierOf` reads, by the names its first argument gives them (issue #869). A flow row's `basis` is a
+ * digest of exactly these, so a test holds this list to that argument's own names: a field `flowTierOf` came to read that
+ * this list left out would let an edit to it keep the console answering for the file as it was.
+ */
+export const FLOW_INPUT_FIELDS = Object.freeze(["flow", "folder", "skillsDir", "packages", "excludeExtensions"]);
+/**
+ * How long a basis is, in hex digits: 32 bits. A collision costs one stale answer read as current, which is what every edit
+ * cost before the basis, and the triggers file has no author but the operator, so nobody gains by aiming for one. Per edit the
+ * odds are one in about four billion. REJECTED: a longer digest, which a flow row carries 128 times over in a record that already
+ * trims its flow rows at its worst (`FIT_ORDER`), so each digit would put a trigger's answer out of the record on such a host.
+ */
+export const FLOW_BASIS_HEX = 8;
+const FLOW_BASIS_RE = new RegExp(`^[0-9a-f]{${FLOW_BASIS_HEX}}$`);
+
+/**
+ * What `flowTierOf` is asked of a trigger as the loader parsed it (`parseTriggers`' entry): doctor's flow lines and its published
+ * rows ask it this, and nothing else does. A field that is not there reads as `flowTierOf`'s own default. A disarmed one-shot is
+ * the loader's sentinel, whose `run` is empty, so it names no flow and doctor publishes no row for it.
+ */
+export function flowInputOf(trigger) {
+	const run = isObject(trigger?.run) ? trigger.run : {};
+	return {
+		flow: typeof run.flow === "string" ? run.flow : null,
+		folder: typeof run.folder === "string" ? run.folder : null,
+		skillsDir: typeof run.skillsDir === "string" ? run.skillsDir : null,
+		packages: run.packages !== false,
+		excludeExtensions: Array.isArray(run.excludeExtensions) ? run.excludeExtensions.filter((name) => typeof name === "string") : [],
+	};
+}
+
+/**
+ * The basis of a flow row (issue #869): a digest of what `flowTierOf` was asked of this trigger, from the trigger as the loader
+ * parsed it. Doctor writes it beside each answer, and the console computes it from its own parse of the file it reads, through
+ * this one function, so the two cannot compute it two ways. Where they differ, the answer was judged for another version of the file.
+ * `flowTierOf` only asks whether a name is in `excludeExtensions`, so the list's order and a repeat change nothing here either.
+ * REJECTED: leaving the list out under `"packages": false`, where `flowTierOf` does not look at it. An edit there would then keep
+ * the answer, at the price of a copy of `flowTierOf`'s branches here that would have to move with them, and the cost of not doing
+ * it is an answer read as unknown until doctor runs on the file as it is, the safe direction.
+ */
+export function flowBasisOf(trigger) {
+	const input = flowInputOf(trigger);
+	const canonical = FLOW_INPUT_FIELDS.map((field) => (field === "excludeExtensions" ? [...new Set(input[field])].sort() : input[field]));
+	return createHash("sha256").update(JSON.stringify(canonical)).digest("hex").slice(0, FLOW_BASIS_HEX);
+}
+
 /** A first path segment: the shape a run's record holds, less the two a folder listing never returns and a path could. */
 const extensionOf = (row) => (isObject(row) && typeof row.name === "string" && EXTENSION_NAME_RE.test(row.name) && row.name !== "." && row.name !== ".." && LOADS_EXTENSION_KINDS.includes(row.kind) ? { name: row.name, kind: row.kind } : null);
 const skillOf = (name) => (typeof name === "string" && SKILL_NAME_RE.test(name) ? name : null);
@@ -83,7 +132,10 @@ const flowOf = (row) => {
 	if (flow === null && row.flow !== null) return null;
 	const pkg = row.package === null ? null : isPackageName(row.package) ? row.package : undefined;
 	if (pkg === undefined || (pkg !== null && row.tier !== "package")) return null;
-	return { trigger: row.trigger, flow, tier: row.tier, package: pkg, repo: row.repo };
+	// Absent is a row from a release before issue #869, which a reader answers from as it did. Any other shape is refused, never
+	// read as absent: that would put a row of unknown basis back on the older rule, which answers whatever the file now says.
+	if (row.basis !== undefined && (typeof row.basis !== "string" || !FLOW_BASIS_RE.test(row.basis))) return null;
+	return { trigger: row.trigger, flow, tier: row.tier, package: pkg, repo: row.repo, ...(row.basis === undefined ? {} : { basis: row.basis }) };
 };
 /** One server's row, or null, with how many of its keys its cap left out. */
 const serverOf = (row) => {
@@ -346,6 +398,8 @@ export function hostsAgree(rows) {
  *   resolved, checked, unknown   the words of doctor's own line, which name folders and so are never published
  *
  * `repoFlowAtHead(folder, flow)` answers `present`, `absent` or anything else for not known. `staged` is `readStagedSkills`.
+ * The first argument is `flowInputOf`'s, and its names are `FLOW_INPUT_FIELDS`: a new one goes in both, or a flow row's basis
+ * would not change when it does (`worker/test/host-loads.test.mjs` reads them off this signature).
  */
 export async function flowTierOf({ flow, folder = null, skillsDir = null, packages = true, excludeExtensions = [] }, { repoFlowAtHead, fileExists, overlay = null, staged = { skills: [], unenumerable: [] } }) {
 	let tier = null;

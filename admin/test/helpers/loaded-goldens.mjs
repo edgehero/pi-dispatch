@@ -7,6 +7,7 @@
  * `run.progress` on trigger 3, so it cannot produce gh-9575's record. Each record is handed to its page here, rather than
  * teaching that fixture a story the other goldens would then have to tell.
  */
+import { flowBasisOf } from "@edgehero/pi-dispatch/host-loads";
 import { NOW } from "../../../launch/fixture-deployment.mjs";
 import { projectLoadsOf } from "../../src/loaded-words.mjs";
 import { loadPageData, parsePageQuery, renderPage } from "../../src/console/pages.mjs";
@@ -59,10 +60,18 @@ function longNamesHostLoads() {
 /** A fresh sandbox's page: the form's own query, with no kept workspace named, so no run is quoted. */
 const FRESH_QUERY = "repo=acme%2Fweb&index=2&ref=HEAD&host=mini1";
 
-/** Issue #847: what mini1 published, with an answer for trigger 3's flow and the overlay's MCP servers. */
-function freshHostLoads({ tier = "repository", repo = "present", mcp = [] } = {}) {
-  return { ...HOST_LOADS, hosts: HOST_LOADS.hosts.map((row) => (row.name === "mini1" ? { ...row, flows: [{ trigger: 2, flow: "fix", tier, package: null, repo }], mcp } : row)) };
+/** Issue #847: what mini1 published, with an answer for trigger 3's flow and the overlay's MCP servers. `basis` (issue #869) is the file its doctor read. */
+function freshHostLoads({ tier = "repository", repo = "present", mcp = [], basis = undefined } = {}) {
+  return { ...HOST_LOADS, hosts: HOST_LOADS.hosts.map((row) => (row.name === "mini1" ? { ...row, flows: [{ trigger: 2, flow: "fix", tier, package: null, repo, ...(basis === undefined ? {} : { basis }) }], mcp } : row)) };
 }
+/**
+ * Trigger 3 as the page reads it, which a doctor since issue #869 writes beside its answer: the found and the unknown goldens carry it, so
+ * an answer for the file as it is goes through the panel's own hand-off of the basis (`sandboxNew`), and a panel that dropped it would read
+ * every such answer as for the file as it was. The fresh and the MCP goldens keep a row with none, an older doctor's.
+ */
+const FILE_BASIS = sandboxFixture().flowBasis;
+/** Trigger 3 as mini1's doctor read it before the file dropped its skills folder: found there, for the file as it was. */
+const SKILLS_DIR_BASIS = flowBasisOf({ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix", skillsDir: "/srv/skills" } });
 const server = (name, enabled) => ({ name, transport: "stdio", where: "overlay", exposure: "local", enabled, keys: [] });
 
 const SAMPLES = LOADED_SAMPLES;
@@ -105,8 +114,9 @@ export const LOADED_DRAW = Object.freeze({
   "sandbox-loaded-run.operator": () => sandboxPage({ query: "id=gh-9575&host=mini1", record: SAMPLES.everything() }),
   "sandbox-loaded-fresh.operator": () => sandboxPage({ query: FRESH_QUERY }),
   // A sandbox's trigger is a forge's, whose repository is on no host: doctor answers its flow from another tier or not at all.
-  "sandbox-loaded-flow-found.operator": () => sandboxPage({ query: FRESH_QUERY, hostLoads: freshHostLoads({ tier: "overlay", repo: "unknown", mcp: [server("linear", true)] }), change: (report) => { report.mcp = ["linear"]; } }),
-  "sandbox-loaded-flow-unknown.operator": () => sandboxPage({ query: FRESH_QUERY, hostLoads: freshHostLoads({ tier: "unknown", repo: "unknown" }) }),
+  "sandbox-loaded-flow-found.operator": () => sandboxPage({ query: FRESH_QUERY, hostLoads: freshHostLoads({ tier: "overlay", repo: "unknown", mcp: [server("linear", true)], basis: FILE_BASIS }), change: (report) => { report.mcp = ["linear"]; } }),
+  "sandbox-loaded-flow-unknown.operator": () => sandboxPage({ query: FRESH_QUERY, hostLoads: freshHostLoads({ tier: "unknown", repo: "unknown", basis: FILE_BASIS }) }),
+  "sandbox-loaded-flow-stale.operator": () => sandboxPage({ query: FRESH_QUERY, hostLoads: freshHostLoads({ tier: "trigger", repo: "unknown", basis: SKILLS_DIR_BASIS }) }),
   "sandbox-loaded-mcp-lacks.operator": () => sandboxPage({ query: FRESH_QUERY, hostLoads: freshHostLoads({ tier: "overlay", repo: "unknown", mcp: [server("linear", false)] }), change: (report) => { report.mcp = ["linear", "docs"]; } }),
   "sandbox-loaded-unknown.operator": () => sandboxPage({ query: FRESH_QUERY, change: (report) => { report.hosts.push({ ...report.hosts[0], name: "mini2", rows: [] }); report.plan.host = "mini2"; report.selected.host = "mini2"; } }),
   "sandbox-loaded-long-names.operator": () => sandboxPage({ query: "id=gh-9575&host=mini1", record: longNamesRecord(), hostLoads: longNamesHostLoads(), change: (report) => { report.hosts.push({ ...report.hosts[0], name: LONG_LOADED.host, rows: [] }); report.plan.host = LONG_LOADED.host; report.plan.image = LONG_LOADED.image; report.selected.host = LONG_LOADED.host; } }),
