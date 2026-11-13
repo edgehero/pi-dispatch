@@ -272,20 +272,34 @@ export function restartProblemKeysOf(m) {
 const PATH_KEY_RE = /_(?:FILE|DIR)$/;
 
 /**
+ * The path keys every console reader of which takes a blank line as no line (review of PR #878), so a blank one is
+ * compared as unset: `resolvePaths` reads PI_LOGS_DIR, PI_SETTINGS_FILE, PI_GLOBAL_PI_DIR and PI_SANDBOX_DIR with `||`;
+ * `consoleConfig` reads PI_SANDBOX_GATEWAYS_FILE with `||`; `tokensFilePath` trims PI_CONSOLE_TOKENS_FILE and
+ * `readSideOf` PI_SESSIONS_DIR; PI_AUTH_CONNECTIONS_FILE and PI_AUTH_STORE_DIR are read for whether they are set. Every
+ * other path key keeps a blank as its own value, since some reader of it does: `resolvePaths` reads PI_TRIGGERS_FILE,
+ * PI_PAUSE_WINDOWS_FILE, PI_SCOPED_LIMITS_FILE, PI_PROJECTS_FILE and PI_ENVELOPE_FILE with `??`, so `PI_TRIGGERS_FILE=`
+ * names no triggers file where no line names `triggers.json`, and `loadModelEndpoints` refuses an empty
+ * PI_MODEL_ENDPOINTS_FILE. Held to those readers, key by key, by `admin/test/console-restart-notice.test.mjs`, which
+ * fails for a path key it has no reader for, so a new one is judged before it is compared. `.env.example` ships several
+ * of these as blank lines, which an operator uncommenting one must not see as a change.
+ */
+export const RESTART_BLANK_IS_UNSET = Object.freeze(["PI_AUTH_CONNECTIONS_FILE", "PI_AUTH_STORE_DIR", "PI_CONSOLE_TOKENS_FILE", "PI_GLOBAL_PI_DIR", "PI_LOGS_DIR", "PI_SANDBOX_DIR", "PI_SANDBOX_GATEWAYS_FILE", "PI_SESSIONS_DIR", "PI_SETTINGS_FILE"]);
+
+/**
  * What the restart watch compares (issue #845, `restart-notice.mjs`): each key of `restartKeysOf` as the console's own
  * read (`consoleEnv`'s `env`) and the read side's (`readSideOf`'s `env`) have it, as one comparable string per key. A
  * value is only ever compared, never said. A path-named key is compared by what it names in `dir`: some reach this raw
  * (the read side's extra keys), and `models.json` becoming `./models.json` changes no file the console reads. A blank
- * one stays blank, never unset: `resolvePaths` reads these keys with `??`, so `PI_TRIGGERS_FILE=` names no triggers file
- * where no line names `triggers.json`, and `loadModelEndpoints` refuses an empty PI_MODEL_ENDPOINTS_FILE (review of PR
- * #878). PI_SANDBOX_HOSTS_FILE alone reaches the console raw to be read by `sandboxHostsPath`, which trims it and takes a
- * blank as unset, so it is compared by that function's answer.
+ * one is unset for `RESTART_BLANK_IS_UNSET` and its own value for every other. PI_SANDBOX_HOSTS_FILE reaches the console
+ * raw to be read by `sandboxHostsPath`, which trims it, takes a blank as unset and names a default, so it is compared by
+ * that function's answer.
  */
 export function restartValuesOf(m, consoleValues, sideValues, dir) {
   const effective = (key, value) => {
     if (typeof dir !== "string" || !PATH_KEY_RE.test(key)) return value ?? null;
     if (key === "PI_SANDBOX_HOSTS_FILE") return sandboxHostsPath({ PI_SANDBOX_HOSTS_FILE: value }, dir);
     if (typeof value !== "string") return value ?? null;
+    if (RESTART_BLANK_IS_UNSET.includes(key)) return value.trim() === "" ? null : resolvePath(dir, value);
     return value === "" ? "" : resolvePath(dir, value);
   };
   const values = {};

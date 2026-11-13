@@ -5,8 +5,14 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { deploymentServiceEnv } from "@edgehero/pi-dispatch/service-env";
 import { VALKEY_CONTEXT_KEYS } from "@edgehero/pi-dispatch/connection";
-import { restartKeysOf, restartProblemKeysOf, restartReadingOf, restartValuesOf } from "../src/console/cli.mjs";
-import { CONSOLE_ENV_KEYS } from "../src/console/config.mjs";
+import { RESTART_BLANK_IS_UNSET, endpointSnapshotFn, readSideOf, restartKeysOf, restartProblemKeysOf, restartReadingOf, restartValuesOf } from "../src/console/cli.mjs";
+import { CONSOLE_ENV_KEYS, consoleConfig } from "../src/console/config.mjs";
+import { connectionEnvValue } from "../src/connections-view.mjs";
+import * as RM from "../src/read-model.mjs";
+import * as FORGES from "@edgehero/pi-dispatch/forges";
+import * as MODEL_ENDPOINTS from "@edgehero/pi-dispatch/model-endpoints";
+import * as WORKER_CONFIG from "@edgehero/pi-dispatch/config";
+import { tokensFilePath } from "@edgehero/pi-dispatch/console-tokens";
 import { RESTART_CHECK_EVERY_MS, RESTART_CLEARED, RESTART_FIX_FIRST_TITLE, RESTART_RECHECK_MS, RESTART_TITLE, envProblemOf, makeRestartWatch, restartBody, restartLogLine, restartNoticeOf, restartReasons, thrownProblem } from "../src/console/restart-notice.mjs";
 import { PANEL_SERVICE_KEYS, panelEnv, resolvePaths } from "../src/read-model.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -235,4 +241,52 @@ test("the console's reading: the keys it read at start, a .env edit named, a key
   const told = restartReasons({ start: there, now: away });
   assert.deepEqual(told.map((r) => r.kind), ["env"]);
   assert.equal(restartNoticeOf(told).title, RESTART_FIX_FIRST_TITLE);
+});
+
+// Review of PR #878: a blank path line is no line for some keys and a value of its own for others, by what the console's
+// readers of each key do with it. Every path-named key the watch compares has its readers here (the read side's paths,
+// the console's own configuration, or the key's own reader), and is judged by them: a blank line is compared as unset
+// exactly when no reader tells it from no line. A path key with no reader here fails, so a new one is judged before the
+// watch compares it, and each reader must see its key, so a reader that reads nothing cannot pass for one.
+test("a blank path line is compared as no line exactly where every console reader of that key does so, for every path key compared (#845)", () => {
+  const dir = tempDir("restart-blank-");
+  const m = { readModel: { PANEL_SERVICE_KEYS, FORGE_HOST_ENV: RM.FORGE_HOST_ENV, panelEnv: ({ env }) => ({ env: { ...env } }), resolvePaths }, forges: FORGES, connection: { VALKEY_CONTEXT_KEYS } };
+  const side = (env) => JSON.stringify(readSideOf({ m, env, dir, fs: nodeFs, platform: "linux", uid: process.geteuid?.() }).paths);
+  const config = (env) => JSON.stringify(consoleConfig({ env, dir, platform: "linux", tokensFilePath }));
+  const endpoints = (env) => {
+    try {
+      return JSON.stringify(endpointSnapshotFn({ m: { modelEndpoints: MODEL_ENDPOINTS, workerConfig: WORKER_CONFIG }, env, paths: { valkeyUrl: "redis://127.0.0.1:6379", globalPiDir: null }, dir, fs: nodeFs })());
+    } catch (e) {
+      return `refused: ${e?.message}`;
+    }
+  };
+  const presence = (key) => (env) => connectionEnvValue(key, env[key]);
+  const READERS = {
+    PI_AUTH_CONNECTIONS_FILE: [presence("PI_AUTH_CONNECTIONS_FILE")],
+    PI_AUTH_STORE_DIR: [presence("PI_AUTH_STORE_DIR")],
+    PI_CONSOLE_TOKENS_FILE: [config],
+    PI_ENVELOPE_FILE: [side],
+    PI_GLOBAL_PI_DIR: [side],
+    PI_LOGS_DIR: [side, config],
+    PI_MODEL_ENDPOINTS_FILE: [endpoints],
+    PI_PAUSE_WINDOWS_FILE: [side, config],
+    PI_PROJECTS_FILE: [side],
+    PI_SANDBOX_DIR: [side],
+    PI_SANDBOX_GATEWAYS_FILE: [config],
+    PI_SANDBOX_HOSTS_FILE: [config],
+    PI_SCOPED_LIMITS_FILE: [side],
+    PI_SESSIONS_DIR: [side],
+    PI_SETTINGS_FILE: [side],
+    PI_TRIGGERS_FILE: [side],
+  };
+  const pathKeys = restartKeysOf(m).filter((key) => /_(?:FILE|DIR)$/.test(key));
+  assert.deepEqual(pathKeys, Object.keys(READERS).sort(), "every path key the watch compares has its readers here, and no other");
+  const compared = (key, value) => restartValuesOf(m, value === undefined ? {} : { [key]: value }, value === undefined ? {} : { [key]: value }, dir)[key];
+  for (const key of pathKeys) {
+    for (const read of READERS[key]) assert.notEqual(read({ [key]: "elsewhere/file" }), read({}), `${key}: a reader that sees it`);
+    const blankDiffers = READERS[key].some((read) => read({ [key]: "" }) !== read({}));
+    // PI_SANDBOX_HOSTS_FILE is compared by its reader's own answer (`sandboxHostsPath`), so it needs no place in the list.
+    if (key !== "PI_SANDBOX_HOSTS_FILE") assert.equal(RESTART_BLANK_IS_UNSET.includes(key), !blankDiffers, `${key}: in RESTART_BLANK_IS_UNSET exactly when no reader tells a blank line from none`);
+    assert.equal(compared(key, "") !== compared(key, undefined), blankDiffers, `${key}: the watch tells a blank line from none exactly when a reader does`);
+  }
 });
