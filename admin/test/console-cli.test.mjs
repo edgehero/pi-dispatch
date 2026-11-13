@@ -583,8 +583,10 @@ test("serve: a VALKEY_URL changed in the deployment's .env under a running conso
 test("serve: a bad line the console started with is no reason, and a database either held client was refused is, each on its own (#845)", async (t) => {
   const dep = deployment();
   // This shell sets no PI_SANDBOX_GATEWAYS_FILE, so a line for it the service's loader reads differently is a problem
-  // the console starts with, and still the same one at every page.
-  writeFileSync(join(dep.dir, ".env"), "VALKEY_URL=redis://127.0.0.1:6379/1\nPI_SANDBOX_GATEWAYS_FILE=/srv/$USER/gateways.json\n");
+  // the console starts with, and still the same one at every page. PI_SANDBOX_HOSTS_FILE reaches the console raw and is
+  // compared by the file it names in the deployment folder, which the start's reading must be given too (review of PR
+  // #878: without it, the first page called it changed).
+  writeFileSync(join(dep.dir, ".env"), "VALKEY_URL=redis://127.0.0.1:6379/1\nPI_SANDBOX_GATEWAYS_FILE=/srv/$USER/gateways.json\nPI_SANDBOX_HOSTS_FILE=hosts.json\n");
   let stop;
   const until = new Promise((resolve) => (stop = resolve));
   t.after(() => stop());

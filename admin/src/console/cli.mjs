@@ -32,6 +32,7 @@ import { basename, isAbsolute, resolve as resolvePath } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { deploymentServiceEnv } from "@edgehero/pi-dispatch/service-env";
+import { sandboxHostsPath } from "@edgehero/pi-dispatch/sandbox-hosts";
 import { CONSOLE_ENV_KEYS, consoleConfig, consoleEnv, deploymentDirOf } from "./config.mjs";
 import { makeLoginLimiter } from "./guards.mjs";
 import { isLoopbackAddress, listenOn, listenUrl } from "./listen.mjs";
@@ -273,14 +274,19 @@ const PATH_KEY_RE = /_(?:FILE|DIR)$/;
 /**
  * What the restart watch compares (issue #845, `restart-notice.mjs`): each key of `restartKeysOf` as the console's own
  * read (`consoleEnv`'s `env`) and the read side's (`readSideOf`'s `env`) have it, as one comparable string per key. A
- * value is only ever compared, never said. A path-named key is compared by what it names in `dir`, and a blank one as
- * unset: some reach this raw (PI_SANDBOX_HOSTS_FILE, which `sandboxHostsPath` resolves later, and the read side's extra
- * keys), and `hosts.json` becoming `./hosts.json` changes no file the console reads.
+ * value is only ever compared, never said. A path-named key is compared by what it names in `dir`: some reach this raw
+ * (the read side's extra keys), and `models.json` becoming `./models.json` changes no file the console reads. A blank
+ * one stays blank, never unset: `resolvePaths` reads these keys with `??`, so `PI_TRIGGERS_FILE=` names no triggers file
+ * where no line names `triggers.json`, and `loadModelEndpoints` refuses an empty PI_MODEL_ENDPOINTS_FILE (review of PR
+ * #878). PI_SANDBOX_HOSTS_FILE alone reaches the console raw to be read by `sandboxHostsPath`, which trims it and takes a
+ * blank as unset, so it is compared by that function's answer.
  */
 export function restartValuesOf(m, consoleValues, sideValues, dir) {
   const effective = (key, value) => {
-    if (typeof value !== "string" || !PATH_KEY_RE.test(key) || typeof dir !== "string") return value ?? null;
-    return value.trim() === "" ? null : resolvePath(dir, value);
+    if (typeof dir !== "string" || !PATH_KEY_RE.test(key)) return value ?? null;
+    if (key === "PI_SANDBOX_HOSTS_FILE") return sandboxHostsPath({ PI_SANDBOX_HOSTS_FILE: value }, dir);
+    if (typeof value !== "string") return value ?? null;
+    return value === "" ? "" : resolvePath(dir, value);
   };
   const values = {};
   for (const key of restartKeysOf(m)) values[key] = JSON.stringify([effective(key, consoleValues?.[key]), effective(key, sideValues?.[key])]);

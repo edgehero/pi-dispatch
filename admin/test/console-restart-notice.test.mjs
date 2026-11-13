@@ -7,8 +7,8 @@ import { deploymentServiceEnv } from "@edgehero/pi-dispatch/service-env";
 import { VALKEY_CONTEXT_KEYS } from "@edgehero/pi-dispatch/connection";
 import { restartKeysOf, restartProblemKeysOf, restartReadingOf, restartValuesOf } from "../src/console/cli.mjs";
 import { CONSOLE_ENV_KEYS } from "../src/console/config.mjs";
-import { RESTART_CHECK_EVERY_MS, RESTART_CLEARED, RESTART_FIX_FIRST_TITLE, RESTART_RECHECK_MS, RESTART_TITLE, envProblemOf, makeRestartWatch, restartBody, restartLogLine, restartNoticeOf, restartReasons } from "../src/console/restart-notice.mjs";
-import { PANEL_SERVICE_KEYS } from "../src/read-model.mjs";
+import { RESTART_CHECK_EVERY_MS, RESTART_CLEARED, RESTART_FIX_FIRST_TITLE, RESTART_RECHECK_MS, RESTART_TITLE, envProblemOf, makeRestartWatch, restartBody, restartLogLine, restartNoticeOf, restartReasons, thrownProblem } from "../src/console/restart-notice.mjs";
+import { PANEL_SERVICE_KEYS, panelEnv, resolvePaths } from "../src/read-model.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 // Issue #845: a running console could not pick up a changed VALKEY_URL, other `.env` values, or a database Valkey refused,
@@ -104,6 +104,9 @@ test("envProblemOf over the service's own reader: a new bad line, a file gone, a
   assert.deepEqual(envProblemOf({ unreadable: "EACCES: permission denied, open '/srv/.env'" }), { kind: "unreadable", code: null, keys: null }, "no part of a message, so no part of a path");
   assert.deepEqual(envProblemOf({ unreadable: "not a regular file" }), { kind: "unreadable", code: null, keys: null });
   assert.deepEqual(envProblemOf({ unreadable: "ENOENT" }), { kind: "absent", keys: null }, "gone between the reader's two looks");
+  // A reading that threw: its code when it is a system error's code, else none, so nothing with a path in it is shown.
+  assert.deepEqual(thrownProblem(Object.assign(new Error("boom"), { code: "EACCES" })), { kind: "unreadable", code: "EACCES", keys: null });
+  for (const code of ["/srv/deploy/.env", "EACCES /srv/deploy/.env", "ENOENT: no such file, open '/srv/.env'", 7, undefined]) assert.equal(thrownProblem({ code }).code, null, String(code));
   assert.deepEqual(envProblemOf({ untrusted: "is in a folder another account can change: /srv" }), { kind: "untrusted", keys: null });
   assert.equal(envProblemOf(null), null);
 });
@@ -173,7 +176,8 @@ test("makeRestartWatch: a reading that throws is said as a .env that cannot be r
 
 test("the console's reading: the keys it read at start, a .env edit named, a key this shell sets left alone, a new bad line asked to be fixed first (#845)", () => {
   const dir = tempDir("restart-reading-");
-  const m = { readModel: { PANEL_SERVICE_KEYS, panelEnv: ({ env }) => ({ env: { ...env } }), resolvePaths: () => ({}) }, connection: { VALKEY_CONTEXT_KEYS } };
+  // The read side's own `.env` reader (`panelEnv`) and path rule, so a key it takes from the file is compared as it reads it.
+  const m = { readModel: { PANEL_SERVICE_KEYS, panelEnv, resolvePaths }, connection: { VALKEY_CONTEXT_KEYS } };
   const keys = restartKeysOf(m);
   for (const key of [...CONSOLE_ENV_KEYS, ...PANEL_SERVICE_KEYS, "PI_SESSIONS_DIR", "PI_ALLOWED_MODELS"]) assert.ok(keys.includes(key), key);
   assert.ok(!keys.includes("VALKEY_PASSWORD"), "the password is read again at each connect, so it needs no restart");
@@ -210,6 +214,13 @@ test("the console's reading: the keys it read at start, a .env edit named, a key
   const hosts = at("PI_SANDBOX_HOSTS_FILE=hosts.json\nPI_LOGS_DIR=logs\n");
   assert.deepEqual(restartReasons({ start: hosts, now: at("PI_SANDBOX_HOSTS_FILE=./hosts.json\nPI_LOGS_DIR=./logs/\n") }), []);
   assert.deepEqual(restartReasons({ start: hosts, now: at("PI_SANDBOX_HOSTS_FILE=other.json\nPI_LOGS_DIR=logs\n") }).map((r) => r.keys), [["PI_SANDBOX_HOSTS_FILE"]]);
+  // A blank line is not no line (review of PR #878): `PI_TRIGGERS_FILE=` reads no triggers file, no line reads
+  // triggers.json, so the line removed is a change. PI_SANDBOX_HOSTS_FILE is the one key whose reader takes a blank as
+  // unset, so for it the two are the same, and naming its default file is the same again.
+  const blank = at("PI_TRIGGERS_FILE=\nPI_SANDBOX_HOSTS_FILE=\n");
+  assert.deepEqual(restartReasons({ start: blank, now: at("PI_SANDBOX_HOSTS_FILE=\n") }).map((r) => r.keys), [["PI_TRIGGERS_FILE"]]);
+  assert.deepEqual(restartReasons({ start: blank, now: at("PI_TRIGGERS_FILE=\nPI_SANDBOX_HOSTS_FILE=sandbox-hosts.json\n") }), []);
+  assert.deepEqual(restartReasons({ start: blank, now: at("PI_TRIGGERS_FILE=\n") }), []);
   // The bad line the console started with, moved down by a comment added above it: the same problem, no reason.
   const moved = at("VALKEY_URL=redis://127.0.0.1:6379/1\nPI_LOGS_DIR=/srv/$USER\n");
   assert.equal(moved.problem.line, 2);
