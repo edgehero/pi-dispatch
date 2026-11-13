@@ -42,10 +42,8 @@ Everything else is shared with `serve`: the same `triggers.json` (`PI_TRIGGERS_F
 auth block, the same queue. Pair it with `pi-dispatch setup github --no-webhook`, which mints
 credentials without asking you for a public URL. The App it creates has its webhook switched off. GitHub requires a
 webhook URL all the same, so the App names `https://no-webhook.invalid/`, an address that never resolves. The ping
-GitHub sends when it creates the App fails there, and nothing can ever be delivered to it. To move to webhooks later,
-set your receiver's URL and a new webhook secret in the App's settings, put the same secret in `WEBHOOK_SECRET`, start
-`pi-dispatch-receiver` where that URL reaches it, stop the poller (running both takes each comment twice), then tick
-**Active**.
+GitHub sends when it creates the App fails there, and nothing can ever be delivered to it. To switch to webhooks
+later, see [Moving to webhooks later](#moving-to-webhooks-later).
 
 ## Which repos, and the two ways to say
 
@@ -156,6 +154,19 @@ they are the price of diffing a list rather than receiving events.
 The events endpoint has no `since`, so the poller reads at most five pages of it per repository per
 cycle. A backlog deeper than that is skipped with an explicit log line rather than stalling the cycle.
 Comments self heal, because their cursor advances and the next cycle collects the rest.
+
+## Moving to webhooks later
+
+An App made with `--no-webhook` can take webhooks once you have a public URL for the receiver. In this order:
+
+1. In the App's settings on GitHub, under Webhook, set your receiver's URL and a new webhook secret. Leave **Active**
+   unticked for now. Put the same secret in `WEBHOOK_SECRET` in `.env`: the wizard wrote none for this App.
+2. Start `pi-dispatch-receiver` where that URL reaches it. If one already runs, for another forge, restart it: it
+   reads `WEBHOOK_SECRET` only when it starts, and with the old value every delivery fails its signature check.
+3. Tick **Active**, and wait until the App's **Recent Deliveries** (under **Advanced**) shows a delivery the receiver
+   answered.
+4. Then stop the poller. Stopping it first leaves a gap in which no event is seen, by either. While both run, one
+   comment can reach a run twice ([steering.md](steering.md#per-forge)), so keep the overlap short.
 
 ## Reference
 

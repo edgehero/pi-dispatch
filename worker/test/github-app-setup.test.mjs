@@ -328,13 +328,9 @@ test("setup github: --no-webhook never touches WEBHOOK_SECRET and says the App i
 	assert.match(h.text(), /`pi-dispatch-receiver poll`/, "the poller is named, not called a follow-up: it shipped");
 	assert.doesNotMatch(h.text(), /follow-up|until it lands/, "polling is no longer a promise");
 	assert.ok(h.text().includes("webhook URL is a placeholder, https://no-webhook.invalid/"), "the placeholder URL is printed, so ticking Active later is not a surprise");
-	// The wizard never writes WEBHOOK_SECRET under --no-webhook, so moving to webhooks without a secret would leave the
-	// receiver refusing to start, or refusing every delivery: the steps name it.
-	assert.match(h.text(), /new webhook secret in the App's settings, put the same secret in\s+WEBHOOK_SECRET/);
-	// The rest of the move: the receiver must start after the secret is written (it reads .env at boot), the poller must
-	// stop (both at once take each comment twice), and nothing is delivered until the hook is Active.
-	assert.match(h.text(), /start `pi-dispatch-receiver` where that URL reaches it, stop the poller/);
-	assert.match(h.text(), /then tick Active/);
+	// The move to webhooks has an order and a secret the wizard never wrote; it lives in one place, the guide's section
+	// (held below), and the closing lines point there rather than restating it.
+	assert.match(h.text(), /new webhook secret and an order of steps: docs\/polling\.md, "Moving to webhooks later"/);
 	// The App path polls ONE installation, the one GITHUB_APP_INSTALLATION_ID names (receiver/src/poller.mjs
 	// discoverRepos), never every place the App is installed: an operator with two installations must not be told so.
 	assert.match(h.text(), /the installation GITHUB_APP_INSTALLATION_ID names/);
@@ -345,6 +341,21 @@ test("setup github: --no-webhook never touches WEBHOOK_SECRET and says the App i
 test("docs/polling.md names the --no-webhook placeholder the wizard sends, so the guide cannot drift from it (issue #874)", () => {
 	const doc = readFileSync(new URL("../../docs/polling.md", import.meta.url), "utf8");
 	assert.ok(doc.includes(`\`${NO_WEBHOOK_URL}\``), `docs/polling.md quotes ${NO_WEBHOOK_URL}`);
+});
+
+test("docs/polling.md's move to webhooks keeps its order: the secret, the receiver (re)started, Active, then the poller stopped (issue #874)", () => {
+	// The order is the content. A receiver started before WEBHOOK_SECRET is written verifies with the old value (it reads
+	// it once, at start), so every delivery fails; a poller stopped before the hook is Active leaves a gap no one reads.
+	const doc = readFileSync(new URL("../../docs/polling.md", import.meta.url), "utf8");
+	const at = doc.indexOf("\n## Moving to webhooks later\n");
+	assert.ok(at >= 0, "the section the wizard names exists, under that exact heading");
+	const section = doc.slice(at, doc.indexOf("\n## ", at + 1));
+	const steps = ["`WEBHOOK_SECRET`", "Start `pi-dispatch-receiver`", "restart it", "Tick **Active**", "Then stop the poller"].map((needle) => {
+		const i = section.indexOf(needle);
+		assert.ok(i >= 0, `the section says ${needle}`);
+		return i;
+	});
+	assert.deepEqual([...steps].sort((a, b) => a - b), steps, "in this order");
 });
 
 test("setup github: an existing file at the PEM path is a refusal — key files are never clobbered", async () => {
