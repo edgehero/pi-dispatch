@@ -5,8 +5,9 @@
  * and a database Valkey refused all took a restart to pick up, and the console never said so. It kept reading the old
  * Valkey with nothing said, or repeated "nothing answers VALKEY_URL" or a refused database once a minute, and raising
  * `databases` recovered nothing. Needing the restart is the design (`DES-OPERATOR-CONSOLE`); not being told was the
- * fault. A password rotated in the `.env` is not here: the console's long-lived clients read it again before each
- * connect (`worker/src/connection.mjs`, `freshPassword`), so it needs no restart.
+ * fault. A password rotated in the `.env` needs no restart: the console's long-lived clients read it again before each
+ * connect (`worker/src/connection.mjs`, `freshPassword`). Only one they hold back, because the file does not name the
+ * Valkey they dial as they dial it, is a reason here (`password`, below).
  *
  * HOW IT KNOWS. What the console read at start is compared with what the same reads give now, with this shell's
  * environment as at start, so a key the shell sets is never called changed by an edit to the file. Modelled on
@@ -33,7 +34,8 @@
  * WHEN. A page asks `current()`, which reads again when its answer is older than `RESTART_RECHECK_MS`, and a timer reads
  * again every `RESTART_CHECK_EVERY_MS`, unref'd, so the log line comes with no page open and never holds the process.
  * The log says the reasons once per change of them, the change back to none included. Every read is a few small file
- * reads and two property reads on held clients; none touches Valkey. Clock and timers are injected.
+ * reads and four reads of the two held clients (a database each holds refused, and a password each holds back, which
+ * reads that client's context, the `.env` once more); none touches Valkey. Clock and timers are injected.
  *
  * REJECTED: re-reading the whole `.env` live and applying it, which every page's closure over the paths read at start
  * rules out (each would have to learn to swap them mid-request); and dropping a held database refusal once a connect
@@ -146,7 +148,7 @@ export function restartReasons({ start, now, refused = [], declined = [] }) {
     reasons.push({ kind: "env", problem: fresh, sentence: `The deployment's .env cannot be read now: ${problemWords(fresh)}. Fix it before restarting the console, since one started now would run without what it cannot read.` });
   }
   if (declined.some((d) => d === true)) {
-    reasons.push({ kind: "password", sentence: "`VALKEY_PASSWORD` has changed in the deployment's .env, but the `VALKEY_URL` there does not name the Valkey this console's clients dial as they write it, so they keep the password they started with until the console is restarted." });
+    reasons.push({ kind: "password", sentence: "`VALKEY_PASSWORD` has changed in the deployment's .env, but the `VALKEY_URL` there does not name the Valkey this console's clients dial as they write it, so they keep the password they have until the console is restarted." });
   }
   // The two held clients read VALKEY_URL by the same rule, so one refusal is said once; one without its number only alone.
   const dbs = [...new Set(refused.filter((r) => r !== null && typeof r === "object").map((r) => (Number.isSafeInteger(r.db) ? r.db : null)))];

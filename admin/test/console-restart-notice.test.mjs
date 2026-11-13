@@ -102,7 +102,7 @@ test("restartReasons: a changed password a held client declined is a restart's r
     const reasons = restartReasons({ start: same, now: same, declined });
     assert.deepEqual(reasons.map((r) => r.kind), ["password"], JSON.stringify(declined));
     assert.equal(restartNoticeOf(reasons).title, RESTART_TITLE);
-    assert.equal(reasons[0].sentence, "`VALKEY_PASSWORD` has changed in the deployment's .env, but the `VALKEY_URL` there does not name the Valkey this console's clients dial as they write it, so they keep the password they started with until the console is restarted.");
+    assert.equal(reasons[0].sentence, "`VALKEY_PASSWORD` has changed in the deployment's .env, but the `VALKEY_URL` there does not name the Valkey this console's clients dial as they write it, so they keep the password they have until the console is restarted.");
   }
   const lines = [];
   let declined = [false, false];
