@@ -331,7 +331,20 @@ test("setup github: --no-webhook never touches WEBHOOK_SECRET and says the App i
 	// The wizard never writes WEBHOOK_SECRET under --no-webhook, so moving to webhooks without a secret would leave the
 	// receiver refusing to start, or refusing every delivery: the steps name it.
 	assert.match(h.text(), /new webhook secret in the App's settings, put the same secret in\s+WEBHOOK_SECRET/);
+	// The rest of the move: the receiver must start after the secret is written (it reads .env at boot), the poller must
+	// stop (both at once take each comment twice), and nothing is delivered until the hook is Active.
+	assert.match(h.text(), /start `pi-dispatch-receiver` where that URL reaches it, stop the poller/);
+	assert.match(h.text(), /then tick Active/);
+	// The App path polls ONE installation, the one GITHUB_APP_INSTALLATION_ID names (receiver/src/poller.mjs
+	// discoverRepos), never every place the App is installed: an operator with two installations must not be told so.
+	assert.match(h.text(), /the installation GITHUB_APP_INSTALLATION_ID names/);
+	assert.doesNotMatch(h.text(), /every repository the App is installed on/);
 	assertNoSecrets(h.text());
+});
+
+test("docs/polling.md names the --no-webhook placeholder the wizard sends, so the guide cannot drift from it (issue #874)", () => {
+	const doc = readFileSync(new URL("../../docs/polling.md", import.meta.url), "utf8");
+	assert.ok(doc.includes(`\`${NO_WEBHOOK_URL}\``), `docs/polling.md quotes ${NO_WEBHOOK_URL}`);
 });
 
 test("setup github: an existing file at the PEM path is a refusal — key files are never clobbered", async () => {

@@ -50,9 +50,9 @@ const USER_AGENT = "pi-dispatch-setup-github";
 // The repo homepage, shown on the App's about page — informational, not a trust anchor.
 const HOMEPAGE = "https://github.com/edgehero/pi-dispatch";
 // The webhook URL of an App made with --no-webhook (issue #874). GitHub requires one even for an inactive hook. A
-// `.invalid` name (RFC 6761) never resolves, so nothing GitHub sends there reaches any host: not the ping it sends when
-// the App is created, and not an event if someone ticks Active later without changing the URL. A real host would get
-// both, and a domain can change owner.
+// `.invalid` name (RFC 6761) never resolves, so nothing GitHub sends there reaches any host: not the ping an inactive
+// hook still got at creation in the measurement below `buildManifest`'s comment cites, and not an event if someone
+// ticks Active later without changing the URL. A real host would get both, and a domain can change owner.
 export const NO_WEBHOOK_URL = "https://no-webhook.invalid/";
 // GitHub app names are GLOBALLY unique and capped at 34 characters.
 const NAME_MAX = 34;
@@ -369,10 +369,12 @@ function printSummary(say, summary, { noWebhook }) {
 	if (noWebhook) {
 		say("  the App was created with its webhook INACTIVE (--no-webhook) — the polling-ready shape.\n");
 		say("  start the poller so events reach the queue: `pi-dispatch-receiver poll`. Under GITHUB_AUTH_SOURCE=app it\n");
-		say("  watches every repository the App is installed on; POLL_REPOS names a narrower list. See docs/polling.md.\n");
+		say("  watches the repositories of the installation GITHUB_APP_INSTALLATION_ID names, and lists them again about\n");
+		say("  every ten minutes; POLL_REPOS names a list of your own instead. See docs/polling.md.\n");
 		say(`  the App's webhook URL is a placeholder, ${NO_WEBHOOK_URL}, which nothing can receive. To move to webhooks\n`);
-		say("  later, set your receiver's URL and a new webhook secret in the App's settings, put the same secret in\n");
-		say("  WEBHOOK_SECRET in .env, and tick Active.\n");
+		say("  later: set your receiver's URL and a new webhook secret in the App's settings, put the same secret in\n");
+		say("  WEBHOOK_SECRET in .env, start `pi-dispatch-receiver` where that URL reaches it, stop the poller (both at\n");
+		say("  once would take each comment twice), then tick Active.\n");
 	} else {
 		say("  start the receiver so deliveries have somewhere to land: `pi-dispatch-receiver`\n");
 		say("  (or, where the folder holds deploy/docker-compose.yml, its receiver profile), reachable at the --webhook-url you gave GitHub.\n");
@@ -415,8 +417,8 @@ export function sanitizeAppName(raw) {
  * refuses a manifest whose `hook_attributes` has no `url`, inactive or not ("url" wasn't supplied, issue #874), and one
  * that leaves `hook_attributes` out while it subscribes events ("Hook url cannot be blank"). What it accepts was
  * measured against github.com on 2026-11-09 by another project's throwaway Apps: a `.invalid` URL with
- * `active: false` was accepted, and only `localhost` and `127.0.0.1` were refused as not reachable over the public
- * Internet.
+ * `active: false` was accepted, only `localhost` and `127.0.0.1` were refused as not reachable over the public
+ * Internet, and the App with the inactive hook recorded one delivery, its creation's ping, and no event after it.
  *
  * `pull_request_review` (issue #66) is subscribed for every new App, armed trigger or not. That is the
  * posture `pull_request` already has for a label-only deployment: an unsubscribed event cannot be turned
