@@ -194,11 +194,22 @@ test("buildManifest: --webhook-url shape is exactly the narrow permission/event 
 	});
 });
 
-test("buildManifest: no webhook URL yields hook_attributes {active:false} — the polling-ready shape", () => {
+test("buildManifest: no webhook URL yields an INACTIVE hook that still names a URL, the homepage — the polling-ready shape (issue #874)", () => {
 	const manifest = buildManifest({ name: "pi-dispatch-x", redirectUrl: "http://127.0.0.1:1/callback", webhookUrl: undefined });
-	assert.deepEqual(manifest.hook_attributes, { active: false });
+	assert.deepEqual(manifest.hook_attributes, { url: "https://github.com/edgehero/pi-dispatch", active: false });
 	assert.deepEqual(manifest.default_permissions, { contents: "write", pull_requests: "write", issues: "write", metadata: "read" });
 	assert.deepEqual(manifest.default_events, ["issues", "issue_comment", "pull_request", "pull_request_review"]);
+});
+
+test("buildManifest: every shape's hook_attributes carries a url, which GitHub requires whenever the object is sent, inactive or not (issue #874)", () => {
+	// GitHub answered the {active:false} shape with "Invalid GitHub App configuration ... "url" wasn't supplied", and no
+	// App was made. This is that rule written down: nothing here talks to GitHub, so the shape is the only thing to hold.
+	for (const webhookUrl of [undefined, "", "https://hooks.example/github"]) {
+		const { hook_attributes: hook } = buildManifest({ name: "pi-dispatch-x", redirectUrl: "http://127.0.0.1:1/callback", webhookUrl });
+		assert.equal(typeof hook.url, "string", `webhookUrl ${JSON.stringify(webhookUrl)}: a url is sent`);
+		assert.equal(new URL(hook.url).protocol, "https:", `webhookUrl ${JSON.stringify(webhookUrl)}: an https url`);
+		if (!webhookUrl) assert.equal(hook.active, false, "with no receiver URL the hook is inactive, so the placeholder receives nothing");
+	}
 });
 
 // -- the served form page: embeds the manifest, POSTs to the right target ------------------------------
@@ -229,7 +240,7 @@ test("form page: --org switches the POST target to the organization endpoint", a
 	await h.run();
 	const page = h.getPageFor()("http://127.0.0.1:43210");
 	assert.match(page, /action="https:\/\/github\.com\/organizations\/acme\/settings\/apps\/new"/);
-	assert.deepEqual(embeddedManifest(page).hook_attributes, { active: false });
+	assert.deepEqual(embeddedManifest(page).hook_attributes, { url: "https://github.com/edgehero/pi-dispatch", active: false });
 });
 
 test("buildFormPage: the embedded JSON is HTML-escaped (quotes cannot break out of the input value)", () => {
@@ -312,7 +323,9 @@ test("setup github: --no-webhook never touches WEBHOOK_SECRET and says the App i
 	assert.match(h.store.get(ENV_PATH), /^WEBHOOK_SECRET=$/m, "the empty scaffold line stays empty — nothing will sign deliveries with it");
 	assert.doesNotMatch(h.text(), /WEBHOOK_SECRET=<value not shown>/, "no secret line is even offered");
 	assert.match(h.text(), /webhook INACTIVE \(--no-webhook\)/);
-	assert.match(h.text(), /[Pp]olling/, "the follow-up transport is named so the shape is not a surprise");
+	assert.match(h.text(), /`pi-dispatch-receiver poll`, with the repositories in POLL_REPOS/, "the poller is named, not called a follow-up: it shipped");
+	assert.doesNotMatch(h.text(), /follow-up|until it lands/, "polling is no longer a promise");
+	assert.match(h.text(), /webhook URL is a placeholder \(this project's homepage\)/, "the placeholder URL is said, so ticking Active later is not a surprise");
 	assertNoSecrets(h.text());
 });
 

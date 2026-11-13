@@ -363,7 +363,10 @@ function printSummary(say, summary, { noWebhook }) {
 	say("\nNext:\n");
 	if (noWebhook) {
 		say("  the App was created with its webhook INACTIVE (--no-webhook) — the polling-ready shape.\n");
-		say("  Polling delivery is a follow-up; until it lands, forge triggers for this App will not fire on their own.\n");
+		say("  start the poller so events reach the queue: `pi-dispatch-receiver poll`, with the repositories in POLL_REPOS\n");
+		say("  (or GITHUB_AUTH_SOURCE=app, and the App installation names them); see docs/polling.md.\n");
+		say("  the App's webhook URL is a placeholder (this project's homepage): to move to webhooks later, set your\n");
+		say("  receiver's URL in the App's settings and tick Active.\n");
 	} else {
 		say("  start the receiver so deliveries have somewhere to land: `pi-dispatch-receiver`\n");
 		say("  (or, where the folder holds deploy/docker-compose.yml, its receiver profile), reachable at the --webhook-url you gave GitHub.\n");
@@ -402,8 +405,12 @@ export function sanitizeAppName(raw) {
  * The manifest GitHub converts into the App — the narrowest shape this system needs
  * (SECURITY.md's auth-source ladder): write on exactly the three surfaces jobs touch, metadata read
  * because the API requires it, private, and only the event families the triggers file can name.
- * `hook_attributes` carries the receiver URL, or `active: false` under --no-webhook — the
- * no-public-URL shape the polling transport will consume.
+ * `hook_attributes` carries the receiver URL, or under --no-webhook an INACTIVE hook whose URL is the project's
+ * homepage. GitHub refuses a manifest whose `hook_attributes` has no `url`, inactive or not ("url" wasn't supplied,
+ * issue #874), so the polling shape still names one. The homepage and not a name that can never resolve (`.invalid`):
+ * GitHub already accepts it in this same manifest, and it refuses a hook URL it judges unreachable from the public
+ * Internet, which an unresolvable name may well be. A hook ticked Active later without a new URL posts to GitHub's own
+ * page and nowhere else.
  *
  * `pull_request_review` (issue #66) is subscribed for every new App, armed trigger or not. That is the
  * posture `pull_request` already has for a label-only deployment: an unsubscribed event cannot be turned
@@ -415,7 +422,7 @@ export function buildManifest({ name, redirectUrl, webhookUrl }) {
 		name,
 		url: HOMEPAGE,
 		redirect_url: redirectUrl,
-		hook_attributes: webhookUrl ? { url: webhookUrl } : { active: false },
+		hook_attributes: webhookUrl ? { url: webhookUrl } : { url: HOMEPAGE, active: false },
 		public: false,
 		default_permissions: { contents: "write", pull_requests: "write", issues: "write", metadata: "read" },
 		default_events: ["issues", "issue_comment", "pull_request", "pull_request_review"],
