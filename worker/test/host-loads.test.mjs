@@ -395,6 +395,11 @@ test("a flow row's basis digests exactly the fields flowTierOf reads, read off i
 	const read = signature[1].split(",").map((part) => part.split("=")[0].trim()).filter(Boolean);
 	assert.deepEqual(read, [...FLOW_INPUT_FIELDS], "FLOW_INPUT_FIELDS names what flowTierOf reads, in its order");
 	assert.deepEqual(Object.keys(flowInputOf({ run: {} })), [...FLOW_INPUT_FIELDS], "and flowInputOf hands it each of them");
+	// Its second argument is the host's: what this host holds, never a field of the trigger. A trigger field handed in there would escape the
+	// basis, so a new name fails here until someone decides it is the host's, or moves it into the first argument and the list.
+	const head = Function.prototype.toString.call(flowTierOf);
+	const signature2 = head.slice(head.indexOf("}, {") + 4, head.indexOf(") {") - 1).replace(/\{[^{}]*\}/g, "");
+	assert.deepEqual(signature2.split(",").map((part) => part.split("=")[0].trim()).filter(Boolean), ["repoFlowAtHead", "fileExists", "overlay", "staged"]);
 
 	const base = { on: { type: "cron", id: "web", pattern: "0 9 * * *" }, run: { kind: "local", folder: "/srv/web", flow: "fix", task: "t", skillsDir: "/srv/skills", excludeExtensions: ["pi-a", "pi-b"] } };
 	const basis = flowBasisOf(base);
@@ -425,6 +430,20 @@ test("a flow row's basis digests exactly the fields flowTierOf reads, read off i
 	// The loader's sentinel for a disarmed one-shot names no flow, so doctor publishes no row for it.
 	assert.equal(flowInputOf({ on: { type: "disarmed" }, run: {} }).flow, null);
 	assert.notEqual(flowBasisOf({ on: { type: "disarmed" }, run: {} }), basis);
+});
+
+// AGENTS.md: a hand-written list that restates a derivable source is derived or pinned. The fields a basis covers are spelled out in one form,
+// derived here from FLOW_INPUT_FIELDS, in the places a person reads them, and every other page names them by reference.
+test("the fields a flow row's basis covers are spelled one way, from FLOW_INPUT_FIELDS, wherever a page lists them", () => {
+	const named = FLOW_INPUT_FIELDS.map((field) => `\`run.${field}\``);
+	const list = `${named.slice(0, -1).join(", ")} or ${named.at(-1)}`;
+	assert.equal(list, "`run.flow`, `run.folder`, `run.skillsDir`, `run.packages` or `run.excludeExtensions`");
+	const read = (path) => readFileSync(new URL(`../../${path}`, import.meta.url), "utf8").replace(/\s+/g, " ");
+	const spec = read("specs/interfaces.md");
+	const section = spec.slice(spec.indexOf("**What a host's jobs can load** (issue #800"), spec.indexOf("- **Acceptance**", spec.indexOf("**What a host's jobs can load** (issue #800")));
+	for (const [where, text, times] of [["INT-DOCTOR-RESULTS-KEY's basis", section, 1], ["docs/console.md", read("docs/console.md"), 2], ["the TriggerEnvironment card's README", read("design/system/components/TriggerEnvironment/README.md"), 1]]) {
+		assert.equal(text.split(list).length - 1, times, `${where} lists the fields ${times} time(s), as derived`);
+	}
 });
 
 test("a flow row's basis is read by its shape: one of another shape drops the row and counts it, and none is a row from before #869", () => {

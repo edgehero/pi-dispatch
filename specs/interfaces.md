@@ -12708,12 +12708,13 @@ the worker's, exported from `@edgehero/pi-dispatch/doctor-results`, so the reade
     looks in: a stage that cannot be read says nothing of a trigger that withholds the packages. Doctor's check line keeps its words either way.
   - **`basis`** (issue #869), on each `flows` row: which version of its trigger the row answered for. 8 lowercase hex
     digits, the first 32 bits of a SHA-256 of the fields `flowTierOf` reads, from the trigger as the loader parsed it
-    (`flowBasisOf`, over `FLOW_INPUT_FIELDS`: `run.flow`, `run.folder`, `run.skillsDir`, whether `run.packages` is false,
-    and `run.excludeExtensions` sorted without repeats, since `flowTierOf` only asks whether a name is in it; a field that
-    is not there reads as `flowTierOf`'s default). Held to that shape at the builder and at the parser: a row whose `basis`
+    (`flowBasisOf`, over `FLOW_INPUT_FIELDS`), so an edit to `run.flow`, `run.folder`, `run.skillsDir`, `run.packages` or `run.excludeExtensions`
+    changes it. `run.packages` counts by whether it is false, and `run.excludeExtensions` sorted without repeats, since
+    `flowTierOf` only asks whether a name is in it; a field that is not there reads as `flowTierOf`'s default. Held to that shape at the builder and at the parser: a row whose `basis`
     has any other shape is dropped and counted in `more`, never read as one with none. The console computes the same digest
     from its own parse of the file it reads, through the same exported function, and answers from a row only where the two
-    are equal; elsewhere the page says the answer is unknown until doctor runs again on that host (`DES-OPERATOR-CONSOLE`).
+    are equal, a row at the trigger's position for another flow being for the file as it was too; elsewhere the page says
+    that host answered for the triggers file as it was, so its answer is unknown (`DES-OPERATOR-CONSOLE`).
     A disarmed one-shot is the loader's sentinel, which names no flow, so it has no row, and a row from before it was spent
     answers nothing for it. A collision costs one answer for the file as it was read as current, which is what every edit
     cost before the basis: one in about four billion per edit, and only the operator writes the file. A longer digest was

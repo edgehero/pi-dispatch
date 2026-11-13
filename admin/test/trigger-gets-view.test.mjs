@@ -452,7 +452,7 @@ test("a fresh sandbox's rows say where the flow would be found and which named M
 
 // Issue #869: a flow row answers for the trigger as the file has it only where its basis is the one this page computes from the file it
 // reads. Each case is the issue's: doctor judged the trigger, the file changed in a field `flowTierOf` reads, and doctor has not run since.
-test("a flow row judged for the file as it was answers nothing on the row, the warning, the pills or a fresh sandbox, until doctor runs again (#869)", async () => {
+test("a flow row judged for the file as it was answers nothing on the row, the warning, the pills or a fresh sandbox (#869)", async () => {
   const { flowRowFor, readTriggerGetsEntry, sandboxFreshRows } = await import("../src/trigger-gets-view.mjs");
   const PATH = "/deployment/triggers.json";
   const fileOf = (run) => JSON.stringify({ version: 2, triggers: [{ on: { type: "label", any: ["pi"] }, run: { kind: "github", flow: "triage" } }, { on: { type: "label", any: ["fe"] }, run: { kind: "github", flow: "frontend-fix" } }, { on: { type: "cron", id: "web", pattern: "0 9 * * *" }, run: { kind: "local", folder: "/srv/web", flow: "fix", task: "t", ...run } }] });
@@ -499,6 +499,20 @@ test("a flow row judged for the file as it was answers nothing on the row, the w
   assert.equal((await gets({ mini1: left }, now)).flow.lacking, null);
   assert.equal((await gets({ mini1: left }, asRead({ excludeExtensions: ["pi-lint"] }))).flow.lacking !== null, true);
 
+  // The flow renamed since: the row at this position names the old one, and its basis says it was judged for the file as it was.
+  const renamed = asRead({ flow: "review" });
+  const current = await doctorOn({});
+  assert.deepEqual(flowRowFor(current, renamed), { stale: true });
+  const afterRename = await gets({ mini1: current }, renamed);
+  assert.equal(afterRename.flow.doctor, `${STALE}.`);
+  assert.equal(afterRename.flow.lacking, null);
+  // A row an older doctor wrote has no basis to say so, and reads as before: no answer for this flow yet.
+  const { basis: _old, ...currentOlderRow } = current.flows[0];
+  assert.equal(flowRowFor({ flows: [currentOlderRow] }, renamed), null);
+  assert.equal((await gets({ mini1: { flows: [currentOlderRow] } }, renamed)).flow.doctor, "mini1 has no answer for it yet.");
+  // And this file's own row for a flow that failed the skill charset holds no name and this file's basis: no answer, never stale.
+  assert.equal(flowRowFor({ flows: [{ ...current.flows[0], flow: null }] }, now), null);
+
   // Beside a host that answers for the file as it is, each says its own, and the pills claim nothing for the stale one.
   const both = await gets({ mini1: withheld, mini2: await doctorOn({}) }, now);
   assert.equal(both.flow.doctor, `mini2 finds fix from pi-lint; ${STALE}.`);
@@ -512,7 +526,6 @@ test("a flow row judged for the file as it was answers nothing on the row, the w
   assert.equal(flowRowFor(olderPackage, asRead({ packages: false })), null);
   assert.equal(flowRowFor(olderPackage, asRead({ excludeExtensions: ["pi-lint"] })), null);
   // And a fleet of both releases, answering alike for the file as it is, is the same: the basis is no fact of what a host loads.
-  const current = await doctorOn({});
   const { basis: _, ...currentOlder } = current.flows[0];
   const mixed = await gets({ mini1: current, mini2: { flows: [currentOlder] } }, now);
   assert.deepEqual(mixed.pills.map((pill) => pill.word), ["the same", "the same"]);
@@ -525,7 +538,7 @@ test("a flow row judged for the file as it was answers nothing on the row, the w
   // A fresh sandbox says the same of the same row, in its own words.
   const host = { name: "mini1", state: "current", at: 1, ageMs: 0, every: 24, overlayExtensionsAllowed: true, extensions: [], skills: [], packages: [], mcp: [], unread: [], more: {}, piVersion: "1.5.0", image: "pi-job:1" };
   const fresh = (flows, flowBasis) => sandboxFreshRows({ hostLoads: { more: 0, hosts: [{ ...host, ...flows }] }, host: "mini1", triggerIndex: 2, image: "pi-job:1", flow: "fix", flowBasis }).find(([label]) => label === "Flow")[1].join("");
-  assert.equal(fresh(folder, now.flowBasis), "Whether a job of trigger 3 on this host would find fix is unknown until doctor runs here again: its last doctor run answered for the triggers file as it was.");
+  assert.equal(fresh(folder, now.flowBasis), "Whether a job of trigger 3 on this host would find fix is unknown: its last doctor run answered for the triggers file as it was.");
   assert.equal(fresh(folder, asRead({ skillsDir: "/srv/skills" }).flowBasis), "A job of trigger 3 on this host would find fix from its skills folder, unless the repository holds it at its base commit, which comes first.");
   assert.equal(fresh(folder, undefined), fresh(folder, now.flowBasis), "a caller that hands no basis gets no answer from a row that has one");
 });

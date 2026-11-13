@@ -66,7 +66,7 @@ export const TRIGGER_GETS_WORDS = Object.freeze({
   viewer: "An operator changes these on this page, with one preview and one Confirm.",
   noTool: "No tool reaches this action; dispatch_trigger_edit keeps today’s scope.",
   flowPicker: "It leaves out what is in a skills folder, or in a repository not on this host, and any other name can be typed.",
-  flowStale: "answered for the triggers file as it was, so it is unknown there until doctor runs again",
+  flowStale: "answered for the triggers file as it was, so it is unknown there",
   reloadDrops: "A Confirm elsewhere on this page reloads it, and drops any change not yet written in What its jobs get.",
   othersUnread: "This page read the triggers file, and its other reads failed: the run history, the hosts and the jobs in line are unknown.",
   pillOrder: "differs in the order or kind of what it loads",
@@ -187,17 +187,20 @@ export const FLOW_TIER_WORDS = Object.freeze({ repository: "from the repository"
 /**
  * Doctor's row for this trigger's flow on this host, read against the file as this page read it (issue #869): `{ row }` where it answers
  * for the trigger as the file has it now, `{ stale: true }` where doctor judged it for the trigger as it was, or null where it has no row
- * for this flow. A row carries the basis of the fields it was judged from (`flowBasisOf`), and it answers only where that is
- * `trigger.flowBasis`, the basis of this page's own parse of the file, so an edit to the flow, its folder, `run.skillsDir`, `run.packages`
- * or `run.excludeExtensions` leaves no answer until doctor runs again on that host. REJECTED: matching on the trigger's position and flow
- * name alone, as before, which kept the answer for the file as it was: a flow found in a skills folder the file no longer names, or found
- * nowhere while packages were withheld, after the file loaded them again. A row from a doctor before #869 has no basis, and is read the
- * older way, with the two cases a row shows of itself (#847).
+ * for this flow. A row carries the basis of the fields it was judged from (`flowBasisOf`, `FLOW_INPUT_FIELDS`), and it answers only where
+ * that is `trigger.flowBasis`, the basis of this page's own parse of the file, so an edit to any of those fields leaves that host with no
+ * answer. A row at this trigger's position for another flow is stale too where it carries a basis other than this one: the flow was
+ * renamed after that run, and the basis says so, where the name alone read as a flow that run never saw. REJECTED: matching on the
+ * trigger's position and flow name alone, as before, which kept the answer for the file as it was: a flow found in a skills folder the
+ * file no longer names, or found nowhere while packages were withheld, after the file loaded them again. A row from a doctor before #869
+ * has no basis, and is read the older way, with the two cases a row shows of itself (#847).
  */
 export function flowRowFor(row, trigger) {
   if (typeof trigger.flow !== "string") return null;
-  const found = (row.flows ?? []).find((entry) => entry.trigger === trigger.index && entry.flow === trigger.flow);
-  if (!found) return null;
+  const here = (row.flows ?? []).filter((entry) => entry.trigger === trigger.index);
+  const found = here.find((entry) => entry.flow === trigger.flow);
+  // An equal basis on another name is this file's own row for a flow that failed the skill charset (`flow: null`): no answer, and not stale.
+  if (!found) return here.some((entry) => typeof entry.basis === "string" && entry.basis !== trigger.flowBasis) ? { stale: true } : null;
   if (typeof found.basis === "string") return found.basis === trigger.flowBasis ? { row: found } : { stale: true };
   // Doctor never answers this of a package the file leaves out (`flowTierOf`), so such a row is from before that was written: no answer for the file as it is.
   if (found.tier === "package" && (trigger.excludeExtensions ?? []).includes(found.package)) return null;
@@ -368,7 +371,8 @@ function flowRow({ trigger, rows, editor }) {
   const lacking = rows.filter((row) => row.state === "current" && lacksFlow(row, trigger)).map((row) => row.name);
   const said = [
     ...[...groups].map(([word, names]) => `${listed(names)} ${names.length === 1 ? "finds" : "find"} ${trigger.flow} ${word}`),
-    // Issue #869: an answer judged before a change to what the flow is found by. One sentence for one host or many, so it reads alike.
+    // Issue #869: an answer judged before a change to what the flow is found by. One sentence for one host or many, so it reads alike,
+    // and none promises a later answer: a spent one-shot, a file the loaders refuse or a host whose own triggers file differs gets none.
     stale.length > 0 ? `${listed(stale)} ${TRIGGER_GETS_WORDS.flowStale}` : null,
     silent.length > 0 ? `${listed(silent)} ${silent.length === 1 ? "has" : "have"} no answer for it yet` : null,
     unknown.length > 0 ? `${listed(unknown)} ${unknown.length === 1 ? "has" : "have"} no answer to read` : null,
@@ -655,8 +659,9 @@ function freshFlowWords(row, trigger) {
   if (trigger.flow === null) return SANDBOX_FRESH_WORDS.noFlow;
   const who = `a job of trigger ${trigger.index + 1} on this host`;
   const at = flowRowFor(row, trigger);
-  // Issue #869: judged before a change to what the flow is found by, so the answer is the next doctor run's, here.
-  if (at?.stale === true) return `Whether ${who} would find ${trigger.flow} is unknown until doctor runs here again: ${SANDBOX_FRESH_WORDS.flowStale}.`;
+  // Issue #869: judged before a change to what the flow is found by. It says no more: a later run need not answer either, as for a
+  // spent one-shot, a file the loaders refuse or a host whose own triggers file differs.
+  if (at?.stale === true) return `Whether ${who} would find ${trigger.flow} is unknown: ${SANDBOX_FRESH_WORDS.flowStale}.`;
   const word = flowAnswer(row, trigger);
   if (word === null) return `Whether ${who} would find ${trigger.flow} is unknown: its last doctor run has no answer for it.`;
   const tier = at.row.tier;

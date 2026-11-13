@@ -337,7 +337,8 @@ function extensionToolLines({ was, now, seen }) {
  * The hosts whose doctor found this trigger's flow in a package this change leaves out (`flows`, `flowTierOf`, first hit wins), so no tier above it
  * held it there. Another package may also hold it, and a forge's repository is not on a host, so the sentence says "unless", as the flow's own warning does.
  * A row's `basis` (issue #869) is not read here: a row judged for the file as it was can only add a warning, which that "unless" covers, and the
- * card's rule (`flowRowFor`) would only take one away.
+ * card's rule (`flowRowFor`) would only take one away. "As doctor last read it" says whose answer it is, the card's flow row's own words, so
+ * beside a host the card calls unknown it reads as that run's.
  */
 function hostsLosingFlow({ index, flow, names, hosts }) {
   const groups = new Map();
@@ -1092,7 +1093,7 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
       else exclusionWords.push(`No host that can say holds ${listed(noHost.unknown)}, and ${hostsNamed(unknownHosts)} ${unknownHosts.length === 1 ? "reads" : "read"} unknown. A name no host holds leaves nothing out, so check it.`);
     }
     if (judged.nextRun?.packages !== false && typeof judged.nextRun?.flow === "string") {
-      for (const [pkg, names] of hostsLosingFlow({ index: judged.body.index, flow: judged.nextRun.flow, names: leaving.added, hosts })) exclusionWords.push(`${hostsNamed(names)} ${names.length === 1 ? "finds" : "find"} ${judged.nextRun.flow} in ${pkg}, which this change leaves out. A job there runs without its flow unless something else it loads holds it, such as its repository.`);
+      for (const [pkg, names] of hostsLosingFlow({ index: judged.body.index, flow: judged.nextRun.flow, names: leaving.added, hosts })) exclusionWords.push(`As doctor last read it, ${hostsNamed(names)} ${names.length === 1 ? "finds" : "find"} ${judged.nextRun.flow} in ${pkg}, which this change leaves out. A job there runs without its flow unless something else it loads holds it, such as its repository.`);
     }
     // Only where this change is what starts asking it of the image: a job that already carried either list met this already.
     if (needsLoadExclusions(judged.nextRun) && !needsLoadExclusions(judged.wasRun)) exclusionWords.push("A job of this trigger on an image whose dev.pi-dispatch.capabilities label does not list loadExclusions is refused as job-image-load-exclusions-unsupported, before it spends. The Image row says which image each host runs.");

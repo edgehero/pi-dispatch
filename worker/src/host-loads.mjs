@@ -114,7 +114,7 @@ export function flowInputOf(trigger) {
  * `flowTierOf` only asks whether a name is in `excludeExtensions`, so the list's order and a repeat change nothing here either.
  * REJECTED: leaving the list out under `"packages": false`, where `flowTierOf` does not look at it. An edit there would then keep
  * the answer, at the price of a copy of `flowTierOf`'s branches here that would have to move with them, and the cost of not doing
- * it is an answer read as unknown until doctor runs again, the safe direction.
+ * it is an answer read as unknown until doctor runs on the file as it is, the safe direction.
  */
 export function flowBasisOf(trigger) {
 	const input = flowInputOf(trigger);

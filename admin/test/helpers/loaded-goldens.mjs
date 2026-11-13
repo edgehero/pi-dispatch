@@ -64,6 +64,12 @@ const FRESH_QUERY = "repo=acme%2Fweb&index=2&ref=HEAD&host=mini1";
 function freshHostLoads({ tier = "repository", repo = "present", mcp = [], basis = undefined } = {}) {
   return { ...HOST_LOADS, hosts: HOST_LOADS.hosts.map((row) => (row.name === "mini1" ? { ...row, flows: [{ trigger: 2, flow: "fix", tier, package: null, repo, ...(basis === undefined ? {} : { basis }) }], mcp } : row)) };
 }
+/**
+ * Trigger 3 as the page reads it, which a doctor since issue #869 writes beside its answer: the found and the unknown goldens carry it, so
+ * an answer for the file as it is goes through the panel's own hand-off of the basis (`sandboxNew`), and a panel that dropped it would read
+ * every such answer as for the file as it was. The fresh and the MCP goldens keep a row with none, an older doctor's.
+ */
+const FILE_BASIS = sandboxFixture().flowBasis;
 /** Trigger 3 as mini1's doctor read it before the file dropped its skills folder: found there, for the file as it was. */
 const SKILLS_DIR_BASIS = flowBasisOf({ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix", skillsDir: "/srv/skills" } });
 const server = (name, enabled) => ({ name, transport: "stdio", where: "overlay", exposure: "local", enabled, keys: [] });
@@ -108,8 +114,8 @@ export const LOADED_DRAW = Object.freeze({
   "sandbox-loaded-run.operator": () => sandboxPage({ query: "id=gh-9575&host=mini1", record: SAMPLES.everything() }),
   "sandbox-loaded-fresh.operator": () => sandboxPage({ query: FRESH_QUERY }),
   // A sandbox's trigger is a forge's, whose repository is on no host: doctor answers its flow from another tier or not at all.
-  "sandbox-loaded-flow-found.operator": () => sandboxPage({ query: FRESH_QUERY, hostLoads: freshHostLoads({ tier: "overlay", repo: "unknown", mcp: [server("linear", true)] }), change: (report) => { report.mcp = ["linear"]; } }),
-  "sandbox-loaded-flow-unknown.operator": () => sandboxPage({ query: FRESH_QUERY, hostLoads: freshHostLoads({ tier: "unknown", repo: "unknown" }) }),
+  "sandbox-loaded-flow-found.operator": () => sandboxPage({ query: FRESH_QUERY, hostLoads: freshHostLoads({ tier: "overlay", repo: "unknown", mcp: [server("linear", true)], basis: FILE_BASIS }), change: (report) => { report.mcp = ["linear"]; } }),
+  "sandbox-loaded-flow-unknown.operator": () => sandboxPage({ query: FRESH_QUERY, hostLoads: freshHostLoads({ tier: "unknown", repo: "unknown", basis: FILE_BASIS }) }),
   "sandbox-loaded-flow-stale.operator": () => sandboxPage({ query: FRESH_QUERY, hostLoads: freshHostLoads({ tier: "trigger", repo: "unknown", basis: SKILLS_DIR_BASIS }) }),
   "sandbox-loaded-mcp-lacks.operator": () => sandboxPage({ query: FRESH_QUERY, hostLoads: freshHostLoads({ tier: "overlay", repo: "unknown", mcp: [server("linear", false)] }), change: (report) => { report.mcp = ["linear", "docs"]; } }),
   "sandbox-loaded-unknown.operator": () => sandboxPage({ query: FRESH_QUERY, change: (report) => { report.hosts.push({ ...report.hosts[0], name: "mini2", rows: [] }); report.plan.host = "mini2"; report.selected.host = "mini2"; } }),

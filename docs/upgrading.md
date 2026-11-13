@@ -289,7 +289,7 @@ Release numbers come from the git tags.
 
 | Store | What changed, and what an older release does with it | Guide |
 |---|---|---|
-| `doctor:loads:<name>` in Valkey | Each flow row carries `basis`, a short digest of the trigger fields doctor judged its answer from (#869), and the trigger page and a fresh sandbox answer from a row only where it matches the triggers file they read. The record stays `"v": 1`. An older console drops the field and reads every row as before. A row an older doctor wrote has none, and is read as before too, until that host's next doctor run, at most its seven-day expiry | [console.md](console.md#what-a-triggers-jobs-get) |
+| `doctor:loads:<name>` in Valkey | Each flow row carries `basis`, a short digest of the trigger fields doctor judged its answer from (#869), and the trigger page and a fresh sandbox answer from a row only where it matches the triggers file they read. The record stays `"v": 1`. An older console drops the field and reads every row as before. A row an older doctor wrote has none and is read as before too, and a host keeps writing such rows until it runs this release | [console.md](console.md#what-a-triggers-jobs-get) |
 
 ### 5.2.0
 
