@@ -158,7 +158,7 @@ export function makeMcpCheck({ globalPiDir, forwardEnv = [], hostEnv = {}, egres
 		// writes under exactly that name, which is the reason every other server is refused it.
 		for (const name of overlayNames) {
 			for (const ref of servers[name].refs) {
-				if (own.has(ref)) return { refused: "mcp-secret-reserved", name, why: `it references ${ref}, which this deployment uses for the job's own credentials` };
+				if (own.has(ref)) return { refused: "mcp-secret-reserved", name, why: `it references ${ref}, which this deployment uses for the job's own credentials or settings` };
 			}
 		}
 		for (const name of overlayNames) {
