@@ -343,7 +343,7 @@ test("docs/polling.md names the --no-webhook placeholder the wizard sends, so th
 	assert.ok(doc.includes(`\`${NO_WEBHOOK_URL}\``), `docs/polling.md quotes ${NO_WEBHOOK_URL}`);
 });
 
-test("docs/polling.md's move to webhooks keeps its order: the secret, the receiver (re)started, Active, then the poller stopped (issue #874)", () => {
+test("docs/polling.md's move to webhooks keeps its order: the secret, the receiver (re)started, Active and a 2xx seen, then the poller stopped (issue #874)", () => {
 	// The order is the content. A receiver started before WEBHOOK_SECRET is written verifies with the old value (it reads
 	// it once, at start), so every delivery fails; a poller stopped before the hook is Active leaves a gap no one reads.
 	const doc = readFileSync(new URL("../../docs/polling.md", import.meta.url), "utf8");
@@ -356,6 +356,9 @@ test("docs/polling.md's move to webhooks keeps its order: the secret, the receiv
 		return i;
 	});
 	assert.deepEqual([...steps].sort((a, b) => a - b), steps, "in this order");
+	// No step may tell the operator to MAKE an event to see a delivery: a label added to an issue that still carries a
+	// trigger's label matches that trigger again (filter.mjs matches the issue's whole label set) and starts a paid job.
+	assert.doesNotMatch(section, /adding a label/i);
 });
 
 test("setup github: an existing file at the PEM path is a refusal — key files are never clobbered", async () => {

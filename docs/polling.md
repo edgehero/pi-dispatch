@@ -166,13 +166,14 @@ An App made with `--no-webhook` can take webhooks once you have a public URL for
 2. Start `pi-dispatch-receiver` where that URL reaches it. If one already runs, restart it: it decides whether to
    serve GitHub, and reads `WEBHOOK_SECRET`, only when it starts. Until then a GitHub delivery gets a 404, or a 401
    against an older secret.
-3. Tick **Active**, then make one delivery happen, for example by adding a label no trigger names to an issue (the
-   receiver answers it 204 and nothing runs). Wait until the App's **Recent Deliveries** (under **Advanced**) shows it
-   with a green tick, a 2xx answer. A 401 there means the two secrets differ, and a 404 that the receiver is not
-   serving GitHub yet.
-4. Then stop the poller. Stopping it first leaves a gap in which no event is seen, by either. While both run, a
-   comment that steers a running job can be handled twice: steered twice, or steered and then started as a job of its
-   own ([steering.md](steering.md#per-forge)). Keep the overlap short.
+3. Tick **Active**, and wait until the App's **Recent Deliveries** (under **Advanced**) shows the next event with a
+   green tick, a 2xx answer. The poller keeps running meanwhile, so nothing is missed while you wait. A 401 there means
+   the two secrets differ, and a 404 that the receiver is not serving GitHub yet. If nothing shows at all, check the
+   App's **Permissions & events**, under Subscribe to events.
+4. Then stop the poller. Stopping it first leaves a gap in which no event is seen, by either. While both run, each
+   event arrives twice, under different ids. Repeats are normally merged into one job, but not around a run that takes
+   steering: a comment can reach such a run twice, and once it has ended, the other copy of an event can start it again
+   ([steering.md](steering.md#per-forge)). Keep the overlap short.
 
 ## Reference
 
