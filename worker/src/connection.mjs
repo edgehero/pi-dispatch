@@ -2,7 +2,7 @@ import { AbstractConnector, Command, Redis } from "ioredis";
 import { Socket, connect as netConnect } from "node:net";
 import { connect as tlsConnect } from "node:tls";
 import { valkeyAuthRefusal } from "./valkey-auth.mjs";
-import { valkeySchemeOf } from "./podman-stack.mjs";
+import { valkeySchemeOf, valkeyTarget } from "./podman-stack.mjs";
 import { DEFAULT_VALKEY_URL, decodedUserinfo, judgeValkeyAtStart as judgeEndpointAtStart, judgedEndpoint, killSwitchValkeyUrls, defaultValkeyContext, urlShown, useValkeyContext, valkeyClientContext, valkeyContextFromKeys, VALKEY_CONTEXT_KEYS, valkeyPasswordFor, valkeyDbRangeSentence, valkeyRefusal, valkeyUrlFor, valkeyUrlProblem } from "./valkey-endpoint.mjs";
 
 // Re-exported for the receiver and the admin, which import this module from the package (issues #464 and #468).
@@ -448,6 +448,29 @@ const JUDGE = "piDispatchValkeyJudge";
 /** The connector's method that reads a `freshPassword` client's password again (`JudgedConnector`, the hook below it). */
 const FRESH_PASSWORD = Symbol.for("pi-dispatch.valkey-fresh-password");
 
+/** Set on a connector whose last refresh declined a `.env` password other than the one its client holds (see there). */
+const PASSWORD_DECLINED = Symbol.for("pi-dispatch.valkey-password-declined");
+
+/**
+ * Whether two Valkey URLs name one Valkey server, by `valkeyTarget`'s host and port (the scheme alias, a database path
+ * and a trailing `/` aside): a password belongs to the server. False for one that does not parse. `localhost` and
+ * `127.0.0.1` are two names here, as for `valkeyEndpointTag`: which address a name reaches is the judge's to say.
+ */
+function sameValkeyServer(a, b) {
+	const x = valkeyTarget(a);
+	const y = valkeyTarget(b);
+	return !x.error && !y.error && x.host === y.host && x.port === y.port;
+}
+
+/**
+ * Issue #845, review of PR #878: whether a `freshPassword` client's last refresh declined a password the deployment's
+ * `.env` now gives, other than the one it holds, because the file does not name the Valkey the client dials as it dials
+ * it. Such a client keeps its password until the process restarts, and the console says so. Reads nothing.
+ */
+export function passwordDeclinedOf(client) {
+	return client?.connector?.[PASSWORD_DECLINED] === true;
+}
+
 /**
  * ioredis' connector for every client of this project (issue #464, gate round 2 follow-up): on each connect it asks
  * `judgedEndpoint` for the address, then dials that literal (with a `rediss:` URL's name kept as the TLS servername),
@@ -493,8 +516,13 @@ export class JudgedConnector extends AbstractConnector {
 	 *     another deployment's file through the same path, and a shell that exports VALKEY_URL keeps the client on its URL
 	 *     whatever the file says; in each the new Valkey's password went to the old one, which refused it, and the pages
 	 *     lost the old Valkey too. The check is against the URL the client dials, not the context's own choice of URL
-	 *     (`valkeyUrlFor`, which prefers this shell's and so never moved). A rotation keeps the file's URL, so it is taken,
-	 *     and so is a password a bad line hid at start once the line is fixed, when the file names the client's Valkey;
+	 *     (`valkeyUrlFor`, which prefers this shell's and so never moved), and by the server each names (`sameValkeyServer`:
+	 *     `valkeyTarget`'s host and port, so a scheme alias, a database path or a trailing `/` is the same Valkey, while
+	 *     `localhost` and `127.0.0.1` stay two names, as `valkeyEndpointTag` keeps them). A rotation keeps the file's URL,
+	 *     so it is taken, and so is a password a bad line hid at start once the line is fixed, when the file names the
+	 *     client's Valkey. A password declined here that is not the one the client holds is recorded (`PASSWORD_DECLINED`,
+	 *     `passwordDeclinedOf`), so the console names VALKEY_PASSWORD as needing a restart rather than going on refused in
+	 *     silence (a shell that exports `redis://localhost:6440` over a file's `redis://127.0.0.1:6440`, say);
 	 *   - is read from another `.env` path than the one the client was built with: the pi extension's context follows the
 	 *     deployment pointer, and that alone says the file is another deployment's.
 	 * A password from this process's environment, or from VALKEY_URL's own userinfo, is not the file's, and is taken as it
@@ -513,7 +541,11 @@ export class JudgedConnector extends AbstractConnector {
 		if ((context.envPath ?? null) !== (judge.context?.envPath ?? null)) return;
 		const { password, from } = valkeyPasswordFor(judge.url, context);
 		const fromFile = from !== "VALKEY_URL" && from !== "the environment";
-		if (fromFile && (context.url?.file ?? DEFAULT_VALKEY_URL) !== judge.url) return;
+		if (fromFile && !sameValkeyServer(context.url?.file ?? DEFAULT_VALKEY_URL, judge.url)) {
+			this[PASSWORD_DECLINED] = (password ?? null) !== (this.options.password ?? null);
+			return;
+		}
+		this[PASSWORD_DECLINED] = false;
 		if (password) this.options.password = password;
 		else delete this.options.password;
 	}

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { connect as netConnect, createServer } from "node:net";
 import { test } from "node:test";
 import { Command, Redis } from "ioredis";
-import { JudgedConnector, VALKEY_ERROR_QUIET_MS, givesUp, makeRedisClient, onValkeyError, parseConnection, useValkeyContext } from "../src/connection.mjs";
+import { JudgedConnector, VALKEY_ERROR_QUIET_MS, givesUp, makeRedisClient, onValkeyError, parseConnection, passwordDeclinedOf, useValkeyContext } from "../src/connection.mjs";
 
 // Issue #464, gate round 1 (measured on Fedora 44): WHATWG URL keeps an IPv6 literal's brackets in `hostname`, and the
 // queue client then looked up the name "[::1]", which never resolves, so a `redis://[::1]:port` VALKEY_URL never
@@ -376,6 +376,39 @@ test("freshContext: each connect sends the password the context gives then; the 
 		// A password from this process's environment is not the file's, and is taken whatever the file names.
 		now = ctx(null, { password: { environment: "exported-password", file: null }, url: { environment: null, file: "redis://127.0.0.1:9" } });
 		assert.equal(await connectOnce(hidden), "exported-password");
+		// Fourth review of PR #878: the default Valkey's file, a file that names another Valkey than a shell's, and a bad
+		// line that hid the URL under a shell's. Each of the first two fails a wrong version of the check: one without the
+		// default for a file that names none, and one against the URL the file named at construction.
+		now = ctx("default-rotated", { url: { environment: null, file: null } });
+		assert.equal(await connectOnce(hidden), "default-rotated", "a file naming no VALKEY_URL speaks for the default Valkey, which this client dials");
+		now = ctx("t-first", { url: { environment: "redis://127.0.0.1:1", file: "redis://127.0.0.1:2" } });
+		const split = made("redis://127.0.0.1:1", { freshContext: true });
+		assert.equal(await connectOnce(split), "t-first", "at start a client takes the file's password for any Valkey on this machine, as before");
+		assert.equal(passwordDeclinedOf(split), false, "the password it holds is the file's: nothing to say");
+		now = ctx("t-rotated", { url: { environment: "redis://127.0.0.1:1", file: "redis://127.0.0.1:2" } });
+		assert.equal(await connectOnce(split), "t-first", "the file never named this client's Valkey: its rotation is not taken");
+		assert.equal(passwordDeclinedOf(split), true, "and the decline is recorded, so the console says a restart is needed");
+		now = ctx(null, { error: "x", url: { environment: "redis://127.0.0.1:1", file: null } });
+		const hiddenShell = made("redis://127.0.0.1:1", { freshContext: true });
+		assert.equal(await connectOnce(hiddenShell), null);
+		now = ctx("s-found", { url: { environment: "redis://127.0.0.1:1", file: "redis://127.0.0.1:1" } });
+		assert.equal(await connectOnce(hiddenShell), "s-found", "the fixed file names the shell's Valkey: taken");
+		// The same Valkey spelled another way is the same server: a scheme alias, a database path, a trailing slash and the
+		// default port. `localhost` is another name than 127.0.0.1, so its rotation is declined, and said.
+		for (const [file, password] of [["valkey://127.0.0.1:1/0", "alias"], ["redis://127.0.0.1:1/", "slash"], ["redis://127.0.0.1:1/3", "database"]]) {
+			now = ctx(password, { url: { environment: "redis://127.0.0.1:1", file } });
+			assert.equal(await connectOnce(hiddenShell), password, file);
+			assert.equal(passwordDeclinedOf(hiddenShell), false, file);
+		}
+		const onDefault = made("redis://127.0.0.1", { freshContext: true });
+		now = ctx("default-port", { url: { environment: null, file: "redis://127.0.0.1:6379/0" } });
+		assert.equal(await connectOnce(onDefault), "default-port", "no port is 6379");
+		now = ctx("by-name", { url: { environment: "redis://127.0.0.1:1", file: "redis://localhost:1" } });
+		assert.equal(await connectOnce(hiddenShell), "database", "localhost is not 127.0.0.1 by name");
+		assert.equal(passwordDeclinedOf(hiddenShell), true);
+		now = ctx("database", { url: { environment: "redis://127.0.0.1:1", file: "redis://localhost:1" } });
+		assert.equal(await connectOnce(hiddenShell), "database");
+		assert.equal(passwordDeclinedOf(hiddenShell), false, "the same password as it holds is no news");
 		now = ctx(null);
 		assert.equal(await connectOnce(fresh), null, "a context that gives none sends none, as a restart would");
 		assert.equal(Object.hasOwn(fresh.options, "password"), false);
