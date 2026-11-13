@@ -463,12 +463,40 @@ function sameValkeyServer(a, b) {
 }
 
 /**
- * Issue #845, review of PR #878: whether a `freshPassword` client's last refresh declined a password the deployment's
- * `.env` now gives, other than the one it holds, because the file does not name the Valkey the client dials as it dials
- * it. Such a client keeps its password until the process restarts, and the console says so. Reads nothing.
+ * What a `freshPassword` client's refresh does with `context` as it is now (`JudgedConnector`'s method below has the
+ * rules): `{ take: true, password }` to send `password` (null: none) from the next connect on; `{ take: false, declined }`
+ * to keep the one it holds (`held`), where `declined` is true when the `.env` gives another password than `held` for a
+ * Valkey the client does not dial as it dials it, false when nothing is being held back, and null when the context
+ * cannot tell (it could not be read, finds no file, or is another deployment's). Pure: one rule for the refresh before
+ * each connect and for `passwordDeclinedOf`, so the two never disagree about what is held back.
+ */
+function freshPasswordVerdict(judge, context, held) {
+	if (!context || context.error || context.absent === true) return { take: false, declined: null };
+	if ((context.envPath ?? null) !== (judge?.context?.envPath ?? null)) return { take: false, declined: null };
+	const { password, from } = valkeyPasswordFor(judge.url, context);
+	const fromFile = from !== "VALKEY_URL" && from !== "the environment";
+	if (fromFile && !sameValkeyServer(context.url?.file ?? DEFAULT_VALKEY_URL, judge.url)) return { take: false, declined: (password ?? null) !== (held ?? null) };
+	return { take: true, password: password ?? null };
+}
+
+/**
+ * Issue #845, review of PR #878: whether a `freshPassword` client holds back a password the deployment's `.env` gives,
+ * other than the one it holds, because the file does not name the Valkey the client dials as it dials it. True only
+ * while a reconnect has declined one (recorded by the refresh, which runs on connect alone) AND the `.env` as it is now
+ * still gives such a password (`freshPasswordVerdict` over the context read now): a file put back to the held password,
+ * or changed to name the client's Valkey, clears it at once, with no reconnect, and so does a file that cannot be read
+ * now (the console says that instead). Reads the client's context once; touches no Valkey.
  */
 export function passwordDeclinedOf(client) {
-	return client?.connector?.[PASSWORD_DECLINED] === true;
+	const connector = client?.connector;
+	if (connector?.[PASSWORD_DECLINED] !== true) return false;
+	const judge = connector.options?.[JUDGE];
+	if (judge?.freshPassword !== true) return false;
+	try {
+		return freshPasswordVerdict(judge, defaultValkeyContext(), connector.options.password).declined === true;
+	} catch {
+		return false;
+	}
 }
 
 /**
@@ -537,16 +565,14 @@ export class JudgedConnector extends AbstractConnector {
 		} catch {
 			return;
 		}
-		if (!context || context.error || context.absent === true) return;
-		if ((context.envPath ?? null) !== (judge.context?.envPath ?? null)) return;
-		const { password, from } = valkeyPasswordFor(judge.url, context);
-		const fromFile = from !== "VALKEY_URL" && from !== "the environment";
-		if (fromFile && !sameValkeyServer(context.url?.file ?? DEFAULT_VALKEY_URL, judge.url)) {
-			this[PASSWORD_DECLINED] = (password ?? null) !== (this.options.password ?? null);
+		const verdict = freshPasswordVerdict(judge, context, this.options.password);
+		if (!verdict.take) {
+			// Recorded only where the context could tell; `passwordDeclinedOf` reads it against the file as it is then.
+			if (verdict.declined !== null) this[PASSWORD_DECLINED] = verdict.declined;
 			return;
 		}
 		this[PASSWORD_DECLINED] = false;
-		if (password) this.options.password = password;
+		if (verdict.password) this.options.password = verdict.password;
 		else delete this.options.password;
 	}
 

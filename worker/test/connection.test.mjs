@@ -409,6 +409,31 @@ test("freshContext: each connect sends the password the context gives then; the 
 		now = ctx("database", { url: { environment: "redis://127.0.0.1:1", file: "redis://localhost:1" } });
 		assert.equal(await connectOnce(hiddenShell), "database");
 		assert.equal(passwordDeclinedOf(hiddenShell), false, "the same password as it holds is no news");
+		// Fifth review of PR #878: a recorded decline stands only while the file as it is now still gives a password held
+		// back. The refresh runs on connect alone, so without this a decline outlived the file that caused it.
+		const byName = (password, file = "redis://localhost:1", over = {}) => ctx(password, { url: { environment: "redis://127.0.0.1:1", file }, ...over });
+		now = byName("by-name-again");
+		assert.equal(await connectOnce(hiddenShell), "database");
+		assert.equal(passwordDeclinedOf(hiddenShell), true);
+		now = byName("database");
+		assert.equal(passwordDeclinedOf(hiddenShell), false, "the file put back to the held password: cleared, with no reconnect");
+		now = byName("by-name-again");
+		assert.equal(passwordDeclinedOf(hiddenShell), true, "and the decline it recorded stands again while the file gives that password");
+		now = byName("by-name-again", "redis://127.0.0.1:1");
+		assert.equal(passwordDeclinedOf(hiddenShell), false, "the file names the client's Valkey: nothing is held back, with no reconnect");
+		now = byName("by-name-again", "redis://localhost:1", { error: "/d/.env line 2 is half written" });
+		assert.equal(passwordDeclinedOf(hiddenShell), false, "a file that cannot be read now says nothing of a password (the console names the file instead)");
+		now = byName("by-name-again", "redis://localhost:1", { absent: true });
+		assert.equal(passwordDeclinedOf(hiddenShell), false);
+		// The taken path clears the record: a new password for the client's own Valkey is sent, and a later declining file
+		// is no news until a reconnect declines it.
+		now = byName("named-again", "redis://127.0.0.1:1");
+		assert.equal(await connectOnce(hiddenShell), "named-again");
+		assert.equal(passwordDeclinedOf(hiddenShell), false);
+		now = byName("by-name-later");
+		assert.equal(passwordDeclinedOf(hiddenShell), false, "no reconnect has declined it yet");
+		assert.equal(await connectOnce(hiddenShell), "named-again");
+		assert.equal(passwordDeclinedOf(hiddenShell), true);
 		now = ctx(null);
 		assert.equal(await connectOnce(fresh), null, "a context that gives none sends none, as a restart would");
 		assert.equal(Object.hasOwn(fresh.options, "password"), false);
