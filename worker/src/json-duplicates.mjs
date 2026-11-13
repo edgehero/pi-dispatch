@@ -22,7 +22,8 @@
  * FIRST, IT RUNS ONLY ON TEXT `JSON.parse` HAS ALREADY ACCEPTED. Every caller parses first and scans
  * second. So the scanner never has to decide whether malformed input is malformed, never has to recover
  * from anything, and every branch it does not have is a branch that cannot be wrong. Feeding it text that
- * did not parse is a caller error, not an input case: the result is unspecified rather than a refusal.
+ * did not parse is a caller error, not an input case: the result is unspecified rather than a refusal, and
+ * since issue #868 it can be a `SyntaxError`, thrown when a key with an escape is decoded.
  *
  * SECOND, IT IS CHECKED AGAINST A GENERATOR THAT KNOWS THE ANSWER. `worker/test/json-duplicates.test.mjs`
  * builds thousands of documents with adversarial key characters -- quotes, backslashes, newlines, braces,
@@ -33,13 +34,18 @@
  * a key written plainly and the same key written with a `u00`-style escape are ONE key to `JSON.parse`,
  * and a byte comparison sees two.
  *
+ * SINCE ISSUE #868 NO KEY IS DECODED BY HAND. A key with no backslash is a slice of the text, and a key
+ * with one is handed to `JSON.parse` as its own string literal, so the decoder is the same code whose
+ * reading of the file the check defends. The hand-written decoder before it appended one character at a
+ * time, which took about 30 bytes of heap per character of a key: a 4MB key cost 123MB, and a 16MB key
+ * ended a process with a 256MB heap while it read its own configuration. That decoder agreed with
+ * `JSON.parse` on every escape, so no verdict moves. What is still written by hand about a string is
+ * where it ends, the one rule the value skip has always relied on, and the generator above checks it.
+ *
  * IMPORT-FREE, like `reserved-env.mjs` and `provider-key.mjs` beside it: `triggers.mjs` is the shared
  * validator, the receiver loads it and `admin/build.mjs` inlines it into the published console, so
  * anything it reaches has to be as cheap as a list of strings.
  */
-
-/** The escape characters JSON defines, other than `\u`. */
-const SIMPLE_ESCAPES = { '"': '"', "\\": "\\", "/": "/", b: "\b", f: "\f", n: "\n", r: "\r", t: "\t" };
 
 /**
  * The first duplicate key in `text`, as `{ key, at }`, or `null` when there is none.
@@ -73,54 +79,53 @@ export function findDuplicateKey(text) {
 	};
 
 	/**
-	 * Walk past the string starting at `s[i] === '"'` WITHOUT building it.
+	 * Walk past the string starting at `s[i] === '"'` WITHOUT building it, and say whether it held an escape.
 	 *
-	 * Value position only, and it is not a micro-optimisation: `readString` accumulates about 32 bytes of
-	 * heap per source character, so a single 64MB string value cost 2GB of garbage to decode a value this
-	 * function then discards. A trigger's `run.task` and `run.instructions` are free text, and a worker
-	 * that dies at boot reading its own configuration is a worse failure than anything this file refuses.
+	 * Building a string here one character at a time (`out += ch`) costs about 30 bytes of heap per source
+	 * character, because each append is a new rope node that lives until the string is flattened. A value's
+	 * text is discarded, so it is never built: a single 64MB value cost 2GB of garbage that way, and a
+	 * trigger's `run.task` and `run.instructions` are free text. A key is taken from the text by `readKey`
+	 * with the end this finds (issue #868). A worker that dies at boot reading its own configuration is a
+	 * worse failure than anything this file refuses.
+	 *
+	 * Character codes, as `skipWhitespace` reads them, because comparing numbers measured a little faster
+	 * than comparing one-character strings on an ordinary triggers file. Either is correct.
 	 */
 	const skipString = () => {
 		i++; // the opening quote
+		let escaped = false;
 		while (i < n) {
-			const ch = s[i];
-			if (ch === '"') {
+			const c = s.charCodeAt(i);
+			if (c === 0x22) {
 				i++;
-				return;
+				return escaped;
 			}
 			// An escape consumes its own next character, which is what stops `\"` ending the string. The
 			// `\uXXXX` digits need no special case here: none of them is a quote or a backslash.
-			i += ch === "\\" ? 2 : 1;
+			if (c === 0x5c) {
+				escaped = true;
+				i += 2;
+			} else {
+				i++;
+			}
 		}
+		return escaped; // unreachable on text that parsed
 	};
 
-	/** Read the string starting at `s[i] === '"'` and return its DECODED value. Keys only. */
-	const readString = () => {
-		i++; // the opening quote
-		let out = "";
-		while (i < n) {
-			const ch = s[i];
-			if (ch === '"') {
-				i++;
-				return out;
-			}
-			if (ch === "\\") {
-				const esc = s[i + 1];
-				i += 2;
-				if (esc === "u") {
-					// A lone surrogate is preserved as itself, which is what JSON.parse does too, so a pair
-					// written as two escapes still compares equal to the same pair written literally.
-					out += String.fromCharCode(Number.parseInt(s.slice(i, i + 4), 16));
-					i += 4;
-				} else {
-					out += SIMPLE_ESCAPES[esc] ?? esc;
-				}
-				continue;
-			}
-			out += ch;
-			i++;
-		}
-		return out; // unreachable on text that parsed
+	/**
+	 * Read the key starting at `s[i] === '"'` and return its DECODED value.
+	 *
+	 * A key with no backslash is its own text, so it is a slice, which V8 keeps as a view of `s` rather than
+	 * a copy from 13 characters up. A key with one is decoded by `JSON.parse` of its literal, quotes
+	 * included. That literal is valid on its own because the whole text already parsed and `skipString`
+	 * ends a string where the parse did. Decoding every key with `JSON.parse` would give the same answers;
+	 * the slice is there because nearly every key has no escape and a slice copies nothing.
+	 * `json-duplicates.test.mjs` holds every `\u` code unit, in both cases of hex, and every simple escape
+	 * against the key `JSON.parse` makes, and the hand-written decoder this replaced passed it too.
+	 */
+	const readKey = () => {
+		const start = i;
+		return skipString() ? JSON.parse(s.slice(start, i)) : s.slice(start + 1, i - 1);
 	};
 
 	// True when the next string is a KEY rather than a value: just after `{`, or after a `,` inside one.
@@ -177,8 +182,14 @@ export function findDuplicateKey(text) {
 		if (ch === '"') {
 			const top = stack[stack.length - 1];
 			if (expectKey && top && top.keys !== null) {
-				const key = readString();
-				if (top.keys.has(key)) return { key, at: [...path, key].join(".") };
+				const key = readKey();
+				// The key is copied on the way out, once: a slice is a view that keeps the whole text alive for as long
+				// as a caller holds the answer, and `secret-bundles.mjs` keeps `key` past the call while its text is a
+				// resolver's output, which holds secret values. JSON's own round trip keeps a lone surrogate as itself.
+				if (top.keys.has(key)) {
+					const own = JSON.parse(JSON.stringify(key));
+					return { key: own, at: [...path, own].join(".") };
+				}
 				top.keys.add(key);
 				path.push(key);
 				top.named = true;
