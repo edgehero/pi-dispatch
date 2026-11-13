@@ -622,3 +622,15 @@ test("a held job whose hold was cleared and whose state never answers again: the
     clearInterval(alive);
   }
 });
+
+test("a hold the confirm cannot read refuses through the worker's sequence, nothing removed, never a held job removed as a plain one (#867)", async () => {
+  // `removeQueuedJob` read an unreadable hold as no hold until #867's review: a read that timed out on a Valkey that then
+  // woke removed a held job by the plain path and left its hash as a panel row for a job that was gone.
+  let removed = 0;
+  const lost = () => Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT", valkeyMayStillRun: true });
+  const redisFn = () => quietRedis({ async hgetall(key) { if (String(key).startsWith("wait:job:")) throw lost(); return {}; } });
+  const queueFn = (_c, { name }) => ({ name, toKey: (type) => `bull:${name}:${type}`, getJob: async () => quietJob({ async remove() { removed += 1; } }), close: async () => {} });
+  const res = await cancelQueuedJob({ ...onFakes, expect: asPreviewed, redisFn, queueFn });
+  assert.deepEqual(res, { invalid: "could not read whether the job is held on a wait condition, so nothing was changed: Command timed out (job gh-1)" });
+  assert.equal(removed, 0);
+});

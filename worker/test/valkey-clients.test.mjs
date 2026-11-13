@@ -120,21 +120,56 @@ test("no file constructs a Valkey client except through connection.mjs' judged c
 // queues. A Worker's blocking reads wait longer than any bound by design and a long-lived reader rides an outage out, so
 // neither may get it by accident: `parseConnection` refuses it without `failFast` (connection.test.mjs), and no other file
 // passes it. A caller that should (the console's fleet reader, #842) adds its line here, with its reason.
-test("the command bound on a BullMQ connection is passed at one line, cancel's lookup, so no Worker or long-lived client gets it by accident (#867)", () => {
-	// Read a line at a time, comments stripped; each exemption must match exactly one line, so a second caller in either
-	// file is no exemption of its own.
-	const passes = /\bparseConn(?:ection)?(?:Fn)?\([^)]*\bcommandTimeoutMs\b/;
+/**
+ * Every `parseConnection(...)` call (or `parseConn`, `parseConnectionFn`) in `code` whose arguments name `commandTimeoutMs`,
+ * found in the whole text, so a call split across lines or one with a call inside its arguments is found too: from each
+ * call's opening parenthesis to its balanced closing one. Each is `{ line, text }`, the line its call starts on (1-based).
+ */
+function boundCalls(code) {
+	const out = [];
+	const opener = /\bparseConn(?:ection)?(?:Fn)?\(/g;
+	for (let m = opener.exec(code); m !== null; m = opener.exec(code)) {
+		let depth = 0;
+		let end = -1;
+		for (let i = m.index + m[0].length - 1; i < code.length; i++) {
+			if (code[i] === "(") depth += 1;
+			else if (code[i] === ")" && (depth -= 1) === 0) {
+				end = i;
+				break;
+			}
+		}
+		const args = code.slice(m.index + m[0].length, end === -1 ? code.length : end);
+		if (/\bcommandTimeoutMs\b/.test(args)) out.push({ line: code.slice(0, m.index).split("\n").length, text: code.slice(m.index, end + 1) });
+	}
+	return out;
+}
+
+test("the command bound on a BullMQ connection is passed at one place, cancel's lookup, so no Worker or long-lived client gets it by accident (#867)", () => {
+	// Found in the whole text (comments stripped), so a call split across lines or with a call inside its arguments is
+	// found too; each exemption names the one line its call starts on, and must match exactly one call.
 	const EXEMPT = [
 		{ path: "worker/src/connection.mjs", line: /^export function parseConnection\(url, \{[^)]*commandTimeoutMs = null \} = \{\}\) \{$/, why: "the option's own definition" },
 		{ path: "worker/src/cancel-cli.mjs", line: /^\t\t\tconst q = mkQueue\(parseConn\(url, \{ failFast: true, commandTimeoutMs: bound \}\), \{ name \}\);$/, why: "cancel's lookup, the one caller" },
 	];
-	const hits = sources().flatMap((f) => f.code.split("\n").filter((line) => passes.test(line)).map((line) => ({ path: f.path, line })));
-	for (const { path, line, why } of EXEMPT) assert.equal(hits.filter((h) => h.path === path && line.test(h.line)).length, 1, `${path}: ${why}, exactly one line`);
-	assert.deepEqual(hits.filter((h) => !EXEMPT.some((e) => e.path === h.path && e.line.test(h.line))).map((h) => `${h.path}: ${h.line.trim()}`), []);
-	// Non-vacuity: the pattern catches a second caller in the shapes a caller would write, and not a raw client's own bound.
-	for (const code of ["makeQueue(parseConnection(url, { failFast: true, commandTimeoutMs: 5000 }))", "parseConnectionFn(u, { commandTimeoutMs })"]) assert.ok(passes.test(code), code);
-	assert.ok(!passes.test("makeRedisClient(url, { commandTimeoutMs: 5000 })"), "a raw client's bound is makeRedisClient's own");
-	assert.ok(!passes.test("const options = { ...parseConnection(url, { failFast, servername }), ...(bounded ? { commandTimeout: commandTimeoutMs } : {}) };"), "a bound applied beside the options is not one passed in");
+	const hits = sources().flatMap((f) => {
+		const lines = f.code.split("\n");
+		return boundCalls(f.code).map((hit) => ({ path: f.path, at: hit.line, line: lines[hit.line - 1] }));
+	});
+	for (const { path, line, why } of EXEMPT) assert.equal(hits.filter((h) => h.path === path && line.test(h.line)).length, 1, `${path}: ${why}, exactly one call`);
+	assert.deepEqual(hits.filter((h) => !EXEMPT.some((e) => e.path === h.path && e.line.test(h.line))).map((h) => `${h.path}:${h.at}: ${h.line.trim()}`), []);
+	// Non-vacuity: the shapes a second caller would write, a call split across lines and calls inside the arguments
+	// among them, are found, each on the line its call starts; a raw client's own bound and a bound applied beside the
+	// options are not a bound passed in.
+	const planted = [
+		"makeQueue(parseConnection(url, { failFast: true, commandTimeoutMs: 5000 }))",
+		"parseConnectionFn(u, { commandTimeoutMs })",
+		"const q = makeQueue(\n\tparseConnection(\n\t\turl,\n\t\t{ failFast: true, commandTimeoutMs: 5000 },\n\t),\n);",
+		"makeQueue(parseConnection(valkeyUrlFor(ctx).url, { failFast: true, commandTimeoutMs: bound }), { name })",
+		"queueFn(parseConnectionFn(pick(urls, (u) => u.ok), {\n\tfailFast: true,\n\tcommandTimeoutMs: VALKEY_COMMAND_TIMEOUT_MS,\n}))",
+	];
+	for (const code of planted) assert.equal(boundCalls(code).length, 1, code);
+	assert.equal(boundCalls(planted[2])[0].line, 2, "a split call is placed on the line it starts");
+	for (const code of ["makeRedisClient(url, { commandTimeoutMs: 5000 })", "const options = { ...parseConnection(url, { failFast, servername }), ...(bounded ? { commandTimeout: commandTimeoutMs } : {}) };", "parseConnection(url, { failFast: true }); const commandTimeoutMs = 5;"]) assert.deepEqual(boundCalls(code), [], code);
 });
 
 // Issue #468: the credential is part of the ONE connection function too. Every client of the project (the worker, the

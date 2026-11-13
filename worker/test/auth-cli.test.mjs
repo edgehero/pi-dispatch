@@ -160,8 +160,6 @@ test("a Valkey failure in auth is one plain line naming Valkey, by what failed, 
 		[["status"], (client) => async () => { client.listeners.error(new Error("nothing answers VALKEY_URL (127.0.0.1:6379), so whose Valkey it is cannot be judged yet")); throw Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT" }); }, `Subscription authentication: Valkey at redis://127.0.0.1:6379 did not answer (nothing answers VALKEY_URL (127.0.0.1:6379), so whose Valkey it is cannot be judged yet). Run \`pi-dispatch auth status\` once it answers: ${down}\n`],
 		// After a login, which sends nothing to Valkey: the login finished, and the status read is what failed.
 		[["login", "claude"], () => async () => { throw lostAnswer(); }, `Subscription authentication: the login finished, but Valkey at redis://127.0.0.1:6379 did not answer (Command timed out). Run \`pi-dispatch auth status\` once it answers: ${down}\n`],
-		// A trial's compare-and-set may have landed with its answer lost.
-		[["trial", "claude"], () => async () => { throw lostAnswer(); }, `Subscription authentication: Valkey at redis://127.0.0.1:6379 did not answer (Command timed out). The trial grant may or may not have been made. Run \`pi-dispatch auth status\` once it answers: ${down}\n`],
 		// Valkey's own refusal, quoted.
 		[["status"], () => async () => { throw Object.assign(new Error("NOPERM User default has no permissions to run the 'get' command"), { name: "ReplyError", command: { name: "get" } }); }, "Subscription authentication: Valkey at redis://127.0.0.1:6379 refused GET (NOPERM User default has no permissions to run the 'get' command).\n"],
 	];
@@ -219,4 +217,54 @@ test("on real clients, auth against a closed port or a Valkey that never answers
 		for (const s of sockets) s.destroy();
 		silent.close();
 	}
+});
+
+test("auth trial says the grant may or may not have been made only when its compare-and-set was sent and lost its answer (#867)", async () => {
+	// The trial reads the quota row (a GET), then writes it with a compare-and-set (EVAL), each through runAuth's client.
+	// A GET lost before the write means the write was never sent, so nothing is said of a grant.
+	const run = async (lost) => {
+		const { output, options } = fixture();
+		const sent = [];
+		options.redisFn = () => ({
+			on() {},
+			quit: async () => {},
+			disconnect() {},
+			get: async () => { sent.push("GET"); if (lost === "GET") throw lostAnswer(); return null; },
+			eval: async () => { sent.push("EVAL"); if (lost === "EVAL") throw lostAnswer(); return 1; },
+		});
+		options.configFn = () => ({ authConnectionsFile: "/policy.json", valkeyUrl: "redis://127.0.0.1:6379", workerName: "host1" });
+		const configure = options.configure;
+		options.configure = ({ redis, ...rest }) => {
+			const service = configure({ redis, ...rest });
+			service.quota.read = async () => (await redis.get("quota"), { version: 3 });
+			service.quota.grantOneTrial = async () => ((await redis.eval("cas", 1, "quota")), { ok: true });
+			return service;
+		};
+		const code = await runAuth(["trial", "claude"], options);
+		return { code, said: output.join(""), sent };
+	};
+	assert.deepEqual(await run("GET"), { code: 1, said: `Subscription authentication: Valkey at redis://127.0.0.1:6379 did not answer (Command timed out). Run \`pi-dispatch auth status\` once it answers: ${down}\n`, sent: ["GET"] });
+	assert.deepEqual(await run("EVAL"), { code: 1, said: `Subscription authentication: Valkey at redis://127.0.0.1:6379 did not answer (Command timed out). The trial grant may or may not have been made. Run \`pi-dispatch auth status\` once it answers: ${down}\n`, sent: ["GET", "EVAL"] });
+	// Both answered: the trial is granted, and nothing is said of Valkey.
+	assert.deepEqual(await run(null), { code: 0, said: (await run(null)).said, sent: ["GET", "EVAL"] });
+	assert.doesNotMatch((await run(null)).said, /Valkey/);
+});
+
+test("auth logout keeps its evidence on a Valkey failure, says Valkey's line, and does not wait out a QUIT (#867)", async () => {
+	const { output, options, client } = valkeyFixture(() => async () => { throw lostAnswer(); });
+	assert.equal(await runAuth(["logout", "claude"], options), 0, "the logout itself is done");
+	const [line, ...json] = output;
+	assert.equal(line, `Subscription authentication: the logout finished, but Valkey at redis://127.0.0.1:6379 did not answer (Command timed out). Run \`pi-dispatch auth status\` once it answers: ${down}\n`);
+	assert.deepEqual(JSON.parse(json.join("")).logout, { id: "claude", state: "disconnected", remoteRevocationConfirmed: false });
+	assert.deepEqual([client.quit, client.disconnected], [0, 1]);
+});
+
+test("auth's line quotes no outage that ended before it: the client's error is forgotten when it goes ready (#867)", async () => {
+	const { output, options } = valkeyFixture((client) => async () => {
+		client.listeners.error(new Error("connect ECONNREFUSED 127.0.0.1:6379"));
+		client.listeners.ready();
+		throw lostAnswer();
+	});
+	assert.equal(await runAuth(["status"], options), 1);
+	assert.equal(output.join(""), `Subscription authentication: Valkey at redis://127.0.0.1:6379 did not answer (Command timed out). Run \`pi-dispatch auth status\` once it answers: ${down}\n`);
 });

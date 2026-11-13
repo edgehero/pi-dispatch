@@ -764,3 +764,18 @@ test("the fleet reader's held rows carry the checks, the after instant and each 
 	assert.deepEqual(Object.keys(tool.rows[0]).sort(), ["checks", "jobId", "label", "target", "waitedMs"], "the tool's listing is unchanged");
 	await reader.dispose();
 });
+
+test("cancelHeldJob says a held job whose state cannot be read was not touched, never that it left its hold (#867)", async () => {
+	// The worker's removeHeldJob, which this shares with `pi-dispatch cancel`, said "is in an unknown state, not waiting
+	// -- it has already left the hold" of a state read that failed; on a bounded queue that is a read Valkey did not answer.
+	const { cancelHeldJob } = await import("../src/read-model.mjs");
+	const sent = [];
+	const res = await cancelHeldJob({
+		url: "redis://x",
+		jobId: "gh-1",
+		redisFn: () => ({ hgetall: async () => ({ since: "1" }), get: async () => null, del: async (key) => (sent.push(key), 1), srem: async () => 1, disconnect() {} }),
+		queueFn: () => ({ getJob: async () => ({ getState: async () => { throw Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT", valkeyMayStillRun: true }); }, remove: async () => sent.push("remove") }), close: async () => {} }),
+	});
+	assert.deepEqual(res, { invalid: "the state of the job could not be read, so nothing was changed: Command timed out (job gh-1)" });
+	assert.deepEqual(sent, [], "nothing was sent");
+});

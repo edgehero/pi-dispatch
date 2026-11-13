@@ -29,17 +29,18 @@ export function authSelectAnswer(question, answer) {
  * a configuration refusal this project raised (`valkeyRefused`), or a command that got no answer (a bound that fired, or
  * one that reached a Valkey and lost its answer). `seen` is the client's last `error` event, which says why a client
  * that never connected got none ("nothing answers VALKEY_URL ...") where the timeout says only that it got none. After a
- * login the failure is the status read's, since a login sends nothing to Valkey. A trial's compare-and-set may have
- * landed with its answer lost, so it is not said to have failed.
+ * login or a logout the failure is the status read's, since neither sends anything to Valkey. `casLost` says the
+ * trial's compare-and-set itself was sent and its answer lost, so the grant may have landed and is not said to have
+ * failed; a read lost before it means the compare-and-set was never sent, and nothing is said of a grant.
  */
-export function authValkeyLine(error, { command, url, seen = null }) {
+export function authValkeyLine(error, { command, url, seen = null, casLost = false }) {
 	if (error?.valkeyRefused === true) return `Subscription authentication: ${boundedText(error.message)}`;
 	const refused = error?.name === "ReplyError";
 	// ioredis' own timeout by its words, not by `ETIMEDOUT` alone, which a provider's request can carry too.
 	if (!refused && error?.message !== "Command timed out" && error?.valkeyMayStillRun !== true) return null;
-	const lead = `Subscription authentication: ${command === "login" ? "the login finished, but " : ""}Valkey at ${urlShown(url)}`;
+	const lead = `Subscription authentication: ${command === "login" || command === "logout" ? `the ${command} finished, but ` : ""}Valkey at ${urlShown(url)}`;
 	if (refused) return `${lead} refused ${boundedText(typeof error?.command?.name === "string" ? error.command.name.toUpperCase() : "a command")} (${boundedText(error.message)}).`;
-	const trial = command === "trial" && error?.valkeyMayStillRun === true ? " The trial grant may or may not have been made." : "";
+	const trial = command === "trial" && casLost === true ? " The trial grant may or may not have been made." : "";
 	return `${lead} did not answer (${boundedText(seen ?? error?.message)}).${trial} Run \`pi-dispatch auth status\` once it answers: ${valkeyDownHint(url)}`;
 }
 
@@ -52,9 +53,13 @@ export async function runAuth(args, { env = process.env, write = (value) => proc
 	let redis;
 	let prompt;
 	let config;
-	// The client's last error event, for the line a Valkey failure ends with.
+	// The client's last error event since it was last ready, for the line a Valkey failure ends with: cleared when it goes
+	// ready, so a line after a long login does not quote an outage that ended during it.
 	let seen = null;
 	let valkeyFailed = false;
+	// Whether the one write `auth` sends, a quota compare-and-set (EVAL), was sent and lost its answer, so the line says a
+	// trial grant may or may not have been made only then, never of a read lost before the write was sent.
+	let casLost = false;
 	try {
 		config = configFn(env);
 		if (!config.authConnectionsFile) { writeErr("Set PI_AUTH_CONNECTIONS_FILE to an operator-reviewed subscription connection policy.\n"); return 2; }
@@ -71,6 +76,16 @@ export async function runAuth(args, { env = process.env, write = (value) => proc
 		redis?.on?.("error", (err) => {
 			seen = err?.message ?? String(err);
 		});
+		redis?.on?.("ready", () => {
+			seen = null;
+		});
+		if (typeof redis?.eval === "function") {
+			const evaluate = redis.eval.bind(redis);
+			redis.eval = (...args) => Promise.resolve(evaluate(...args)).catch((err) => {
+				if (err?.valkeyMayStillRun === true) casLost = true;
+				throw err;
+			});
+		}
 		const service = configure({ config, redis, now });
 		if (!interaction) interaction = {
 			async notify(event) {
@@ -107,7 +122,16 @@ export async function runAuth(args, { env = process.env, write = (value) => proc
 			const logout = { id, state: "disconnected", remoteRevocationConfirmed: result?.remoteRevocationConfirmed === true };
 			let status;
 			try { status = await service.runtime.status(); }
-			catch { status = { state: "unavailable", partial: true, connections: [] }; }
+			catch (error) {
+				status = { state: "unavailable", partial: true, connections: [] };
+				// The logout is done (it sends nothing to Valkey) and its evidence printed below; a Valkey failure of the status
+				// read is still said as the one line, and the client is dropped rather than asked to QUIT (issue #867).
+				const line = authValkeyLine(error, { command, url: config.valkeyUrl, seen });
+				if (line !== null) {
+					valkeyFailed = true;
+					writeErr(`${line}\n`);
+				}
+			}
 			result = { ...status, logout };
 		}
 		write(`${JSON.stringify(result, (key, value) => ["accountGroup", "generation", "accountDigest", "credential", "registration"].includes(key) ? undefined : value, 2)}\n`);
@@ -115,7 +139,7 @@ export async function runAuth(args, { env = process.env, write = (value) => proc
 	} catch (error) {
 		// A Valkey failure is one plain line naming Valkey, exit 1 as the transient failure it is: "auth-unavailable" and
 		// "Run auth status" said nothing of Valkey, and `auth status` needs the same Valkey.
-		const line = config?.valkeyUrl ? authValkeyLine(error, { command, url: config.valkeyUrl, seen }) : null;
+		const line = config?.valkeyUrl ? authValkeyLine(error, { command, url: config.valkeyUrl, seen, casLost }) : null;
 		if (line !== null) {
 			valkeyFailed = true;
 			writeErr(`${line}\n`);

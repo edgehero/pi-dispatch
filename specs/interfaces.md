@@ -10582,34 +10582,52 @@ job can only be stopped by asking whichever worker owns it to raise its own abor
   queues are bounded too. Each is built `failFast` with the same command bound, `parseConnection`'s `commandTimeoutMs`,
   which sets ioredis' `commandTimeout` and turns off its resend of a command that was on a connection that died, and
   which `parseConnection` refuses without `failFast` (that client has no offline queue to send a timed-out command from
-  later), so no Worker and no long-lived client carries it; and the lookup is bounded as one step at the same 5 s, since
-  BullMQ connects inside the queue and on a Valkey that takes the connection and never answers ioredis' handshake waits
-  one bound per command on each of the three connections `failFast` tries (measured: 6.4 s at a 1 s bound). A command
-  such a client wrote and got no answer for rejects marked `valkeyMayStillRun`, as the CLI's own client's does: Valkey
-  may run it when it wakes (measured with the pinned ioredis 5.11.1: a SET past the bound on a `kill -STOP`ed Valkey
-  rejected with "Command timed out" and was applied on `kill -CONT`). So each point the verb stops at says what it
-  changed. During the lookup, which only reads: "Valkey at <url> stopped answering (<its words>) while cancel looked
-  for <id>, so nothing was changed. Run `pi-dispatch cancel <id>` again once Valkey answers", or "could not reach
-  Valkey at <url> while cancel looked for <id>, so nothing was changed: <the hint>" over the client's words. A removal
-  sent and not answered, with the job not read back in any of BullMQ's lists (read as `unknown`, or not read):
-  "Valkey at <url> stopped answering (<its words>) after the removal of <id> was sent, so it may or may not have been
-  removed", where the #846 re-read said "nothing was changed" of a state it could not read; a job read back in a list
-  after it was not removed (its remove is one script) and keeps its line. For a held job `removeHeldJob` names the
-  write that went unanswered as `unanswered` on its cleared answer, which `removeQueuedJob` carries: "hold" for the
-  hold's first delete when the hold is not read back either ("... after the delete of held job <id>'s hold was sent,
-  so the hold may or may not be gone, and the job itself was not removed"), "job" for the job's removal ("... its hold
-  was cleared, and the job may or may not have been removed"); a hold read back gone after a lost delete is known gone
-  and keeps the cleared line. Each ends by naming `pi-dispatch cancel <id>` run again once Valkey answers, which
-  removes the job if it is still queued and says so if it is gone: not `pi-dispatch status`, whose counts name no job.
-  Two answers of `removeHeldJob` it shares with the console change: a job whose state cannot be read is refused as
-  that ("the state of job <id> could not be read (<its words>), so nothing was changed"), where it said the job "has
-  already left the hold"; and a hold delete that timed out before it was written (a bounded client takes such a command
-  out of its queue and never sends it, `ETIMEDOUT` without `valkeyMayStillRun`) changed nothing, where it kept the
-  cleared mark. Measured on a real Valkey, `kill -STOP`ed at each point (5 s bound): stopped before the verb started,
-  its line came 12 s in (5 s of the start's own refusal check, 2 s of fleet reads, 5 s of lookup) and the process
-  exited 2 s later, where the unbounded lookup, on a loopback server that never answers, was still waiting at 40 s; stopped at the plain removal, at the hold's delete and at the held job's
-  removal, it ended 15 s, 13 s and 10 s after the stop, and on `kill -CONT` the removal, the delete and the removal had
-  each landed. The console's fleet reader keeps its unbounded queue clients (#842). A shutdown's abort is not a
+  later), so no Worker and no long-lived client carries it; and each queue's lookup is bounded as one step at the same
+  5 s, since BullMQ connects inside the queue and on a Valkey that takes the connection and never answers ioredis'
+  handshake waits one bound per command on each of the three connections `failFast` tries (measured: 6.4 s at a 1 s
+  bound). A command such a client wrote and got no answer for rejects marked `valkeyMayStillRun`, as the CLI's own
+  client's does: Valkey may run it when it wakes (measured with the pinned ioredis 5.11.1: a SET past the bound on a
+  `kill -STOP`ed Valkey rejected with "Command timed out" and was applied on `kill -CONT`). So each point the verb
+  stops at says what it changed. The lookup changes nothing about the job (each queue writes its own meta row on
+  connect, `HSET bull:<queue>:meta opts.maxLenEvents ... version ...`, as every BullMQ queue does): where a connection
+  to Valkey was made (the probe's `connect` event, or a lost answer, which was on a socket), "Valkey at <url> stopped
+  answering (<its words>) while cancel looked for <id>, so nothing was changed. Run `pi-dispatch cancel <id>` again
+  once Valkey answers"; where none ever was (an address that drops the connect, a host that is off, where `failFast`
+  needs about 6.4 s to give up and the lookup's bound fires first), "could not reach Valkey at <url> while cancel looked
+  for <id>, so nothing was changed: <the hint>" over the client's words or "no connection within 5s", the hint as before
+  #867. A hold that cannot be read refuses before anything is sent ("Valkey at <url> stopped answering (<its words>)
+  while cancel read whether <id> is held, so nothing was changed. Run ... again once Valkey answers", or "could not read
+  whether <id> is held on its wait condition, so nothing was changed: <its words>" for a refusal): `removeQueuedJob`
+  read it as no hold, and a read that timed out on a Valkey that then woke removed a held job by the plain path, its
+  hash and `wait:held` member left as a panel row for a job that was gone. A removal sent and not answered, with the
+  job not read back in any of BullMQ's lists (read as `unknown`, or not read): "Valkey at <url> stopped answering (<its
+  words>) after the removal of <id> was sent, so it may or may not have been removed", where the #846 re-read said
+  "nothing was changed" of a state it could not read; a job read back in a list after it was not removed (its remove
+  is one script) and keeps its line. Its touch intent is aborted, as for any removal that threw, so a removal that lands
+  after its answer was lost is a stop not counted (a residual, `INT-TOUCH-INDEX`). For a held job `removeHeldJob` names the write that
+  went unanswered as `unanswered` on its cleared answer, which `removeQueuedJob` carries: "hold" for the hold's first
+  delete when the hold is not read back either ("... after the delete of held job <id>'s hold was sent, so the hold may
+  or may not be gone, and the job itself was not removed"), "job" for the job's removal ("... its hold was cleared, and
+  the job may or may not have been removed"); a hold read back gone after a lost delete is known gone and keeps the
+  cleared line. A held job's answer that changed nothing because Valkey gave none (a read past its bound, a delete never
+  sent) carries the failure's words as `noAnswer`, and the CLI says "could not cancel held job <id>: Valkey at <url> did
+  not answer (<its words>), so nothing was changed. Run ... again once Valkey answers". Each ends by naming `pi-dispatch
+  cancel <id>` run again once Valkey answers, which removes the job if it is still queued and says so if it is gone:
+  not `pi-dispatch status`, whose counts name no job. In every such line only the failure's words are bounded
+  (`boundedText`), after the outcome, so a long id never cuts "nothing was changed" off. Two answers of `removeHeldJob`
+  it shares with the console change: a job whose state cannot be read is refused as that ("the state of job <id> could
+  not be read, so nothing was changed: <its words>"), where it said the job "has already left the hold"; and a hold
+  delete that timed out before it was written (a bounded client takes such a command out of its queue and never sends
+  it, `ETIMEDOUT` without `valkeyMayStillRun`) changed nothing, where it kept the cleared mark. Measured with the real
+  CLI through a loopback proxy that sends SIGSTOP to a real Valkey right before it forwards the chosen command (5 s
+  bound, two runs each): stopped at the plain removal, the line came about 12 s after the stop (5 s for the removal, 2 s
+  for the touch store's abort of its intent, 5 s for the state read after it), at the hold's delete about 10 s (the
+  delete, then the hold's read back), and at the held job's removal about 7 s (the removal, then the abort), each
+  process exiting about 1 s after its line, and on `kill -CONT` the removal, the delete and the removal had each landed; stopped at the hold's read, the refusal came 5 s after it,
+  and the job and its hold were both still there; at an address that drops the connect (192.0.2.1), "could not reach"
+  with the hint came 9 s after the start. Stopped before the verb started, its line came 12 s in (5 s of the start's own
+  refusal check, 2 s of fleet reads, 5 s of lookup) and the process exited 2 s later, where the unbounded lookup, on a
+  loopback server that never answers, was still waiting at 40 s. The console's fleet reader keeps its unbounded queue clients (#842). A shutdown's abort is not a
   cancel: that job is held or retried as before, so it survives the restart.
   Queued and held cancels write NO run record -- the `dispatch_wait_cancel` rule -- and the CLI says so in its
   output, with the job's past read off BullMQ's `attemptsMade` (issue #477): a job with none never ran; a job with one
@@ -13169,7 +13187,13 @@ Proposals are retained separately from adopted blocks. Board updates compare exp
   approval closure uses `type:"wait-end"`, no cause, and the closed reason `approval-expired` or
   `approval-policy-changed` (`WAIT_END_REASONS`). It ends only an approval wait, never adds a touched run,
   cause count, stop or human-answer median. Expiry uses the trusted deadline; withdrawal uses its first accepted
-  terminal time. Publication uses durable intent/repair and cannot replay a transition. No body carries a
+  terminal time. Publication uses durable intent/repair and cannot replay a transition. A residual, named (#867): an
+  action that throws has its intent aborted, also when its answer was lost (`valkeyMayStillRun`) and it may still run,
+  so when a cancel's removal lands after its answer was lost, that stop is not counted and the stops count can be one
+  short. The rate is unaffected, since stops never enter its denominator. REJECTED: keeping such an intent pending as
+  unknown, since nothing resolves it (a rerun finds no job, the CLI has no outbox, the outbox's repair only begins it
+  again): the store would read `touch-actions-unresolved` with its coverage reset to now, the Zero touch page would read
+  unavailable, and every later tracked action would renew the pending set's 30-day TTL. No body carries a
   question, answer, instruction, identity credential or payload. Unsupported properties are dropped.
 - Events are idempotent by id, and one run contributes once to the numerator. Primary-cause charts use earliest
   successful event, breaking ties by vocabulary order; all causes remain available. Stops have their own distinct
@@ -13677,9 +13701,12 @@ separate connections is inferred. Physical model cooldown keys and their six-hou
   AMENDED 2026-11-13 (#867): the terminal CLI's client (`pi-dispatch auth`) bounds each command at
   `VALKEY_COMMAND_TIMEOUT_MS` (5 s) and carries an `error` listener, so a Valkey that is down or stops answering ends
   the verb with one line naming Valkey (exit 1) where it printed ioredis' stack trace per reconnect attempt (18 in 8 s
-  for `auth usage` on a closed port) while its read waited in the client's offline queue for as long as Valkey was gone. A trial whose CAS lost its answer is said to be one that may or may not
-  have been granted, since Valkey may have run it; after a login, which sends nothing to Valkey, the line says the
-  login finished.
+  for `auth usage` on a closed port) while its read waited in the client's offline queue for as long as Valkey was
+  gone. The line quotes the client's last error since it was last ready. A trial is said to be one that may or may not
+  have been granted only when its CAS itself was sent and lost its answer, since Valkey may have run it; a read lost
+  before it means the CAS was never sent, and nothing is said of a grant. After a login or a logout, neither of which
+  sends anything to Valkey, the line says it finished; a logout still prints its evidence (exit 0), with the line on
+  stderr, and drops the client rather than waiting out a QUIT.
 - Initial unknown quota permits ordinary admission only after the separate authentication and billing gates.
   Monitoring selections never disregard an observed exhausted applicable window. With several resets, all must
   clear. Enabled or unknown Claude paid extra usage requires explicit positive authorization and the compatible
@@ -13700,6 +13727,7 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 
 | Date | Change |
 |---|---|
+| 2026-11-13 (#867, the review) | **`INT-CANCEL-CHANNEL-CONTRACT` AMENDED** in its #867 sentences: a lookup where no connection to Valkey was ever made (the probe saw no `connect`) says "could not reach" with the hint, as before #867, where the lookup's bound made it "stopped answering"; a hold that cannot be read refuses before anything is sent, where `removeQueuedJob` read it as no hold and a Valkey that woke then had a held job removed by the plain path with its hold left behind; a held job's answer that changed nothing for want of an answer carries `noAnswer` and says to run `cancel` again; only the failure's words are bounded, after the outcome; "the lookup only reads" corrected (each queue writes its meta row on connect, as every BullMQ queue does), and the lookup's bound is each queue's; the measured times restated with how they were measured. **`INT-TOUCH-INDEX` AMENDED**, a residual named: a cancel's removal that lands after its answer was lost is a stop not counted, since its intent is aborted as for any throw; keeping it pending was rejected, since nothing resolves it and the Zero touch page would read unavailable for as long as the fleet acts. **`INT-SUBSCRIPTION-QUOTA-KEY` AMENDED**: the trial's "may or may not" only when its CAS was sent and lost; a logout's status failure gets the line and no QUIT; the quoted error is forgotten when the client goes ready. UNCHANGED, checked: the keys and TTLs of all three, the console's doors but for the two answers named (they read neither `noAnswer` nor `holdUnread`, and say each refusal through `heldRefused`). |
 | 2026-11-13 (#867) | **`INT-CANCEL-CHANNEL-CONTRACT` AMENDED**, closing the residual #846 named: `pi-dispatch cancel`'s BullMQ queues carry the same command bound as its own client (`parseConnection`'s new `commandTimeoutMs`, for a `failFast` client only, with ioredis' resend of an unanswered command off), and the lookup is bounded as one step, so a Valkey that is connected and stops answering ends the verb there too. A command such a queue wrote and got no answer for is marked `valkeyMayStillRun` (a hook in connection.mjs, inert for every client without the bound), and each point the verb stops at says what it changed: the lookup, nothing; a removal or a hold's delete sent and not answered, that it may or may not have been made, and to run `cancel` again once Valkey answers. `removeHeldJob` gains `unanswered` on its cleared answer, refuses a job whose state cannot be read as that rather than as one that left its hold, and keeps no cleared mark for a delete that was never sent. Verified at the pinned BullMQ 5.80.4 and ioredis 5.11.1: a `Queue` builds its connection non-blocking and sends no blocking command (BZPOPMIN is the Worker's blocking connection's, XREAD BLOCK the QueueEvents'); `commandTimeout` rejects with a plain "Command timed out" and leaves a written command on the socket, where a `kill -STOP`ed Valkey ran it on `kill -CONT`. **`INT-SUBSCRIPTION-QUOTA-KEY` AMENDED**: the terminal CLI's client is bounded and listened to, and a Valkey failure is one line. UNCHANGED, checked: the keys, their TTLs, the worker's poll and acknowledgment, the active path's sentences (#846), the console's `cancelQueuedJob`, `cancelHeldJob` and `cancelActive` (they ignore `unanswered`; the state-unread refusal reaches them as a sentence through `heldRefused`), `INT-STEER-INBOX-CONTRACT` (`steer` builds its queues as before), and the quota key's shape and CAS. |
 | 2026-11-12 (#846, part 2) | **`INT-CANCEL-CHANNEL-CONTRACT` AMENDED**, the requester's timeout: `requestCancel` ends its wait at `ackTimeoutMs` by the wall clock (an injected `now`, its deadline starting once the SET answered) as well as by its sleeps, so a GET that waited out a Valkey restart in the client's queue counts its time. `pi-dispatch cancel` builds its own client with a bound on every command (`VALKEY_COMMAND_TIMEOUT_MS`, exported from `connection.mjs`, 5 s as the console's), reads the job's state under the same bound (also the first read, where a failed one read as BullMQ's `unknown`, "nothing to cancel"), and closes its queues under a bound, dropping one whose QUIT goes unanswered. Its sentences say what can be known: a state it could not read is not BullMQ's `unknown`; after the request was written, what the withdrawing DEL answered decides the line (withdrawn; already gone, when the acknowledgment is read and a cancel its worker took is said as taken; unanswered, it may stand until a named time); a `ReplyError` is Valkey refusing a command, quoted. Measured with a real Valkey: killed at the ack poll and staying down, the verb ended in about 7 s saying the request may stand, which it did; killed and back after 3 s, it said the state could not be read and the request was withdrawn, both true, where it had said "no longer in the queue (its state reads unknown)"; a partition at the DEL ended at about 17 s where it had not ended in 90 s; an ACL without DEL quoted the refusal where it had said "could not reach Valkey ... is it running?"; SIGSTOP during the poll ended in about 10 s where nothing was printed and the verb did not end. The residual is named: a Valkey that stops answering before the request is written can still hold the lookup. UNCHANGED, checked: the keys, their TTLs, the worker's poll and acknowledgment, the console's `cancelActive` (it shares `requestCancel`, now ending its wait by the wall clock as well, which only shortens a wait an outage stretched). |
 | 2026-11-12 (#846, parts 3 and 4) | **`INT-PAUSE-WINDOWS-FILE-CONTRACT` AMENDED**, reversing the sentence that named the worker's reading as unchanged: the worker refuses a pause-windows file with a key written twice, after the JSON parse and before the version, in the triggers loader's words (`findDuplicateKey`, issue #313). The boot does not start, a live reload keeps the last good windows and logs `pause_windows_reload_invalid`, and doctor fails on it through the loader. `JSON.parse` kept the last value, so `{"windows":[...],"windows":[]}` applied no window while a person reading the file saw some, and a reload swapped a live list down to none with nothing said. The writers have refused such a file since 5.0.0, so only a hand edit makes one; the upgrade guide names it before the next release. The whole-list action's Undo is offered only where its own preview would take the old list; a list holding a window the console refuses goes back by hand (`refusedList`, `refusedListAfter`). Since the review (same PR): `heldPauseWindows` judges a key written twice whenever the text parses and hands back no document for it, so no writer calls such a file newer, and the whole-list Undo is also judged by the body limit. UNCHANGED, checked: the file's shape and versions, the older-state detectors (a malformed file is not an older shape), `REQ-OPERATOR-CONSOLE-SCREENS` (it names no Undo of this action). |

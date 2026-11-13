@@ -493,9 +493,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   and whatever they recorded stays (most write a run record; a gate that fails above the processor's `try` writes
   none, so no record is promised). A cancel that no reachable worker acknowledges is a named refusal, never a silent no-op.
   Since issue #867 the CLI's cancel ends within its bounds wherever Valkey stops answering, its lookup included, and its
-  line says what it changed at the point it stopped: nothing, while it looked for the job; that the job or a held job's
-  hold may or may not be gone, after their removal or delete was sent and not answered, with the cancel to run again
-  once Valkey answers.
+  line says what it changed at the point it stopped: nothing, while it looked for the job or read whether it is held
+  (a hold it cannot read is never taken as no hold); that the job or a held job's hold may or may not be gone, after
+  their removal or delete was sent and not answered, with the cancel to run again once Valkey answers. A Valkey it never
+  reached is said as that, with the hint, never as one that stopped answering.
 - **Why**: the abort machinery (`REQ-JOB-TIMEOUT-30M`) shipped complete with exactly two triggers, both
   automatic -- the kill timer and shutdown -- while the only human-shaped stop, `dispatch_wait_cancel`,
   reached held jobs only and was model-callable only. An operator watching a paid job misbehave had
@@ -8696,6 +8697,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-13 (#867, the review) | **`REQ-OPERATOR-JOB-CANCEL` AMENDED**, its statement: reading whether the job is held is a point that changes nothing too, and a hold that cannot be read is never taken as no hold; a Valkey never reached is said as that, with the hint. Acceptance UNCHANGED, checked: its #867 clause names the test file, which holds both. |
 | 2026-11-13 (#867) | **`REQ-OPERATOR-JOB-CANCEL` AMENDED**, its statement and acceptance: the CLI's cancel ends within its bounds wherever Valkey stops answering, its lookup included, which #846 left as a named residual, and says what it changed at that point (nothing during the lookup; may or may not, after a removal or a hold's delete that was sent and not answered). **`REQ-SUBSCRIPTION-AUTHENTICATION` UNCHANGED, checked**: it names no CLI output; `pi-dispatch auth` now bounds each Valkey command and ends a Valkey failure with one line, where it printed ioredis' stack trace (`INT-SUBSCRIPTION-QUOTA-KEY`, docs/subscription-auth.md). **`REQ-OPERATOR-CONSOLE-SCREENS` UNCHANGED, checked**: the console's stop on a Valkey that stopped answering stays #842's. |
 | 2026-11-12 (#847) | **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: a fresh sandbox's What opens gains, where the host published a doctor run, a Flow row (where a job would find the trigger's flow, in the trigger page's words, or unknown) and, for a trigger that names any, an MCP servers row (on, switched off, not there, unknown; `forge` the job's own); an unread MCP part no longer makes the first row unknown for a trigger that names none; three goldens added (`sandbox-loaded-flow-found`, `-flow-unknown`, `-mcp-lacks`). (g1)'s extension row quotes what the newest run that loaded it brought also when it is switched off, and one no run has loaded says that is not known yet; an overlay entry says it has no manifest. UNCHANGED, checked: `INT-DOCTOR-RESULTS-KEY` (nothing new is published), `REQ-SANDBOX-FROM-THE-CONSOLE` (no control is added), the README's What a job gets (no sentence it holds moved). |
 | 2026-11-12 (#846, part 4) | **`REQ-OPERATOR-CONSOLE-ACTIONS` AMENDED**, (p): the cases whose Undo is by hand gain a whole pause-windows list its own preview would refuse (`refusedList`), which the whole-list action may replace and whose Undo was offered and then refused with a 400. |

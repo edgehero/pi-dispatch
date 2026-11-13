@@ -76,14 +76,18 @@ not answered, so it may stand until the time it expires on its own (60 seconds a
 case a worker that reads it before then still stops the job. A job state it could not read is said as that. A
 command Valkey refused, such as a `DEL` its access rules withhold, is named with Valkey's own answer.
 
-Before any request is written, every command the verb sends has the same bound of 5 seconds, so a Valkey that is
-connected and stops answering (a `kill -STOP`, a network partition) ends it there too. While it looks for the job it
-only reads, so it says nothing was changed and to run it again once Valkey answers. Once it has sent the removal of
-a queued job, or the delete of a held job's hold, and got no answer, it cannot know whether Valkey made the change,
-since a Valkey that stopped answering runs what it already received when it wakes. So it says the job, or the hold,
-may or may not be gone, and that `pi-dispatch cancel <jobId>` run again once Valkey answers removes the job if it is
-still queued and says so if it is gone. A job's state it could not read before sending anything is said as that,
-with nothing changed.
+Before any request is written, every command the verb sends has the same bound of 5 seconds, and so does each queue's
+lookup as a whole, so a Valkey that is connected and stops answering (a `kill -STOP`, a network partition) ends it
+there too. Looking for the job changes nothing about it (each queue writes its own small meta row as it connects, as
+every BullMQ client does), so it says nothing was changed and to run it again once Valkey answers. A Valkey it never
+reached at all, such as an address a firewall drops, is said as one it could not reach, with the question whether it
+is running. Whether the job is held on a wait condition is read before anything is sent, and a read that fails stops
+the verb with nothing changed, because a held job removed as a plain one would leave its hold behind on the panel.
+Once it has sent the removal of a queued job, or the delete of a held job's hold, and got no answer, it cannot know
+whether Valkey made the change, since a Valkey that stopped answering runs what it already received when it wakes. So
+it says the job, or the hold, may or may not be gone, and that `pi-dispatch cancel <jobId>` run again once Valkey
+answers removes the job if it is still queued and says so if it is gone. A job's state it could not read before
+sending anything is said as that, with nothing changed.
 
 ### Not shared, on purpose
 

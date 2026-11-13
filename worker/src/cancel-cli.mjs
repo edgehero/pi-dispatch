@@ -25,8 +25,9 @@
  *
  * Every command it sends has a bound (issue #846 for its own client, issue #867 for its queues), so a Valkey that is
  * connected and stopped answering ends the verb with a line rather than holding it for as long as it stays so. The line
- * says what the point it stopped at allows: the lookup only reads, so nothing was changed; a removal or a hold's delete
- * that was sent and not answered may or may not have been made, and `cancel` again settles it once Valkey answers.
+ * says what the point it stopped at allows: the lookup changes nothing about the job (each queue writes its own meta row
+ * on connect, as every BullMQ queue does), so nothing was changed; a removal or a hold's delete that was sent and not
+ * answered may or may not have been made, and `cancel` again settles it once Valkey answers.
  */
 
 import { CANCEL_REQ_TTL_MS, cancelAckKey, cancelReqKey, ranBefore, removeQueuedJob, requestCancel } from "./cancel-state.mjs";
@@ -90,17 +91,17 @@ async function boundedState(job, timeoutMs) {
 }
 
 /**
- * `promise`'s answer, or a rejection once `ms` passed without one, marked as no answer (`ETIMEDOUT`). The lookup's own
- * bound (issue #867), as one step: BullMQ connects inside the queue, and on a Valkey that takes the connection and never
- * answers, ioredis' handshake (CLIENT SETINFO, then the ready check's INFO) waits one command bound each, on each of the
- * three connections `failFast` tries, so the per-command bound alone ended a lookup after about six of them (measured:
- * 6.4 s at a 1 s bound). A lookup only reads, so what it leaves running changes nothing, and its queue is dropped on the
- * way out (`closeWithin`).
+ * `promise`'s answer, or a rejection once `ms` passed without one, marked as no answer (`ETIMEDOUT`, `lookupBound`). Each
+ * queue's lookup has this bound of its own, as one step (issue #867): BullMQ connects inside the queue, and on a Valkey
+ * that takes the connection and never answers, ioredis' handshake (CLIENT SETINFO, then the ready check's INFO) waits
+ * one command bound each, on each of the three connections `failFast` tries, so the per-command bound alone ended a
+ * lookup after about six of them (measured: 6.4 s at a 1 s bound). A lookup changes nothing about the job, so what it
+ * leaves running changes nothing either, and its queue is dropped on the way out (`closeWithin`).
  */
 function answeredWithin(promise, ms) {
 	let timer;
 	return new Promise((resolve, reject) => {
-		timer = setTimeout(() => reject(Object.assign(new Error(`no answer within ${spoken(ms)}`), { code: "ETIMEDOUT" })), ms);
+		timer = setTimeout(() => reject(Object.assign(new Error(`no answer within ${spoken(ms)}`), { code: "ETIMEDOUT", lookupBound: true })), ms);
 		Promise.resolve(promise).then(resolve, reject);
 	}).finally(() => clearTimeout(timer));
 }
@@ -153,8 +154,15 @@ export async function runCancel(jobId, url, { write = (chunk) => process.stdout.
 	// printed nothing until the operator gave up, and on a partition its DEL never reached the catch below.
 	const probe = mkRedis(url, { commandTimeoutMs: bound, disconnectTimeoutMs: 0 });
 	probe.on?.("error", () => {});
+	// Whether a connection to Valkey was ever made (issue #867, the review): a lookup that got no answer from a Valkey that
+	// took the connection says it stopped answering; one where nothing ever took it (an address that drops the connect, a
+	// host that is off) says it could not be reached, with the hint, as before #867. The probe connects first, so it tells.
+	let connected = false;
+	probe.on?.("connect", () => {
+		connected = true;
+	});
 	const queues = [];
-	// Whether the job was found: until then only reads went out (issue #867), so a failure says nothing was changed.
+	// Whether the job was found: until then nothing about the job changed (issue #867), so a failure says nothing was changed.
 	let found = false;
 	let requested = false;
 	let requestedAt = null;
@@ -171,10 +179,10 @@ export async function runCancel(jobId, url, { write = (chunk) => process.stdout.
 		// Constructed INSIDE the try (the pause loop's leak posture); first queue that knows the id wins.
 		// Job ids are delivery GUIDs, `local-<hex>` or `repeat:<id>:<millis>`, so a cross-queue duplicate
 		// is not a state this project can produce.
-		// BOUNDED (issue #867), each command at the probe's bound (`parseConnection`'s `commandTimeoutMs`) and the lookup as
-		// one step (`answeredWithin`): `failFast` alone refuses while nothing is connected, and a command a Valkey took and
-		// never answered (`kill -STOP`, a partition) held the verb for as long as it stayed so, in the lookup and in the
-		// state read and the remove of `removeQueuedJob`, which go through this queue too.
+		// BOUNDED (issue #867), each command at the probe's bound (`parseConnection`'s `commandTimeoutMs`) and each queue's
+		// lookup as one step (`answeredWithin`): `failFast` alone refuses while nothing is connected, and a command a Valkey
+		// took and never answered (`kill -STOP`, a partition) held the verb for as long as it stayed so, in the lookup and in
+		// the state read and the remove of `removeQueuedJob`, which go through this queue too.
 		let job = null;
 		let owner = null;
 		for (const name of names) {
@@ -206,6 +214,16 @@ export async function runCancel(jobId, url, { write = (chunk) => process.stdout.
 		// names which write that was and says it may or may not have been made. The cleared line below would say the job
 		// "could not be removed" of a removal that may yet land, and its hold "was cleared" of a delete that may not.
 		const shown = urlShown(url);
+		// Issue #867 (the review): a hold that could not be read refuses, so a held job is never removed by the plain path,
+		// which strands its hold as a panel row. Nothing was sent. The outcome comes before the failure's words, which are
+		// the only part bounded, so a long id never cuts it off.
+		if (typeof queued.holdUnread === "string") {
+			if (queued.noAnswer !== undefined) return fail(`Valkey at ${shown} stopped answering (${boundedText(queued.noAnswer)}) while cancel read whether ${jobId} is held, so nothing was changed. Run \`pi-dispatch cancel ${jobId}\` again once Valkey answers`);
+			return fail(`could not read whether ${jobId} is held on its wait condition, so nothing was changed: ${boundedText(queued.holdUnread)}`);
+		}
+		if (queued.invalid !== undefined && queued.cleared !== true && queued.noAnswer !== undefined) {
+			return fail(`could not cancel held job ${jobId}: Valkey at ${shown} did not answer (${boundedText(queued.noAnswer)}), so nothing was changed. Run \`pi-dispatch cancel ${jobId}\` again once Valkey answers`);
+		}
 		if (queued.invalid !== undefined && queued.cleared === true && queued.unanswered === "hold") {
 			return fail(`Valkey at ${shown} stopped answering (${boundedText(queued.invalid)}) after the delete of held job ${jobId}'s hold was sent, so the hold may or may not be gone, and the job itself was not removed. Once Valkey answers, run \`pi-dispatch cancel ${jobId}\` again to remove it`);
 		}
@@ -306,11 +324,15 @@ export async function runCancel(jobId, url, { write = (chunk) => process.stdout.
 			return fail(`${valkeyFault(error, shown)} after the cancel request for ${jobId} was written, and its withdrawal was not answered, so it may stand until ${until}, ${Math.round(CANCEL_REQ_TTL_MS / 1000)}s after it was written: a worker that reads it before then stops the job. ${then.charAt(0).toUpperCase()}${then.slice(1)}`);
 		}
 		if (refusedByValkey(error)) return fail(`${valkeyFault(error, shown)}; nothing was changed`);
-		// Issue #867: the lookup only reads, so a failure there changed nothing, and the line says so: a Valkey that stopped
-		// answering as that, with when to ask again, and one that could not be reached as before.
-		if (!found && unanswered(error)) return fail(`${valkeyFault(error, shown)} while cancel looked for ${jobId}, so nothing was changed. Run \`pi-dispatch cancel ${jobId}\` again once Valkey answers`);
+		// Issue #867: the lookup changes nothing about the job, so a failure there changed nothing, and the line says so: a
+		// Valkey that took a connection and stopped answering as that, with when to ask again; one never reached (nothing took
+		// a connection, so the lookup's own bound fired, or the queue gave up) as before #867, with the hint. A lost answer
+		// (`valkeyMayStillRun`) was on a socket, so it was reached.
+		const reached = connected || error?.valkeyMayStillRun === true;
+		if (!found && unanswered(error) && reached) return fail(`${valkeyFault(error, shown)} while cancel looked for ${jobId}, so nothing was changed. Run \`pi-dispatch cancel ${jobId}\` again once Valkey answers`);
 		const hint = (await import("./valkey-auth.mjs")).valkeyDownHint(url);
-		if (!found) return fail(`could not reach Valkey at ${shown} while cancel looked for ${jobId}, so nothing was changed: ${hint}\n  ${boundedText(error?.message)}`);
+		const words = error?.lookupBound === true && !reached ? `no connection within ${spoken(bound)}` : error?.message;
+		if (!found) return fail(`could not reach Valkey at ${shown} while cancel looked for ${jobId}, so nothing was changed: ${hint}\n  ${boundedText(words)}`);
 		return fail(`could not reach Valkey at ${shown}: ${hint}\n  ${boundedText(error?.message)}`);
 	} finally {
 		probe.disconnect?.();
