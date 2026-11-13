@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { homedir } from "node:os";
 import { isDeepStrictEqual } from "node:util";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { SANDBOX_DEPLOYMENT_KEYS, sandboxDeploymentEnv } from "../src/sandbox-deployment.mjs";
+import { SANDBOX_DEPLOYMENT_KEYS, SANDBOX_PREPARATION_KEYS, sandboxDeploymentEnv } from "../src/sandbox-deployment.mjs";
 import { createSandboxPreparer, observeSandboxPreparation, planSandboxPreparation } from "../src/sandbox-prepare.mjs";
 import { loadConfig } from "../src/config.mjs";
 import { loadProjects } from "../src/projects.mjs";
@@ -97,7 +97,8 @@ function servicePlan(serviceEnv, request) {
 
 test("a deployment's triggers file, project size, image and default size reach a preparation made through --deployment", async () => {
 	const d = deployment();
-	const handoff = sandboxDeploymentEnv({ dir: d.dir, env: AMBIENT, expectedHost: "mini1" });
+	// `preparing`, as sandbox-cli.mjs asks for `--new` alone: an open or attach is handed none of these (sandbox-deployment.test.mjs).
+	const handoff = sandboxDeploymentEnv({ dir: d.dir, env: AMBIENT, expectedHost: "mini1", preparing: true });
 	assert.equal(handoff.refused, undefined, handoff.message);
 	for (const key of ["GITLAB_TOKEN", "GITLAB_URL", "FORGEJO_TOKEN", "AZURE_TOKEN", "PI_MAX_COST_USD"]) assert.equal(handoff.env[key], undefined, `${key} is not sandbox authority and stays out of the handoff`);
 	assert.equal(handoff.env.PI_PROJECTS_FILE, "projects.json", "carried as written: the folder the re-exec runs in resolves it");
@@ -129,18 +130,19 @@ test("a deployment's triggers file, project size, image and default size reach a
 });
 
 /**
- * HOW A SETTING IS JUDGED. The real preparer runs over the service's whole configuration, once per forge, with
- * `outside()` faked, and a Proxy notes every config field and every environment key it reads. `loadConfig` builds all
- * of its fields at once, so a read of its environment cannot say which field it was for. Instead each key it reads is
- * set to every value in PROBES in turn (and removed) over the same deployment, and the fields that change are the
- * fields that key sets. A key that sets a field the preparation read, or that the preparation read itself, is an input
- * of the plan, and must be carried by the handoff or named in NOT_CARRIED with its reason. So a field the preparation
- * starts to read, or a key that starts to decide a field it reads, fails here until someone decides.
+ * HOW A SETTING IS JUDGED. The real preparer runs over the service's whole configuration, once per forge, pinned and
+ * not, with `outside()` faked, and a Proxy notes every config field and every environment key it reads. `loadConfig`
+ * builds all of its fields at once, so a read of its environment cannot say which field it was for. Instead each key it
+ * reads is set to every value in PROBES in turn (and removed) over the same deployment, and the fields that change are
+ * the fields that key sets. A key that sets a field the preparation read, or that the preparation read itself, is an
+ * input of the plan, and must be carried by the handoff or named in NOT_CARRIED with its reason.
  *
- * THE LIMIT. A key whose every accepted probe leaves the config as it was (one value only, or values that need another
- * key beside them) cannot be judged by setting it. Those are named in UNPROBED with the field they set, and a
- * preparation that starts reading that field fails here the same way. A key whose probes move only unrelated fields,
- * while a value outside PROBES would move one the preparation reads, is not caught; a new probe value closes it.
+ * WHAT FAILS, AND WHAT DOES NOT. A key that sets no field the preparation reads is not this test's business, and
+ * neither is a key whose values PROBES does not hold (a `json|text` setting, a credential that needs another key beside
+ * it): setting it changes nothing here, so it passes. What fails is a field the preparation reads that no probe moves,
+ * since then a key behind it cannot be judged, and an input that is neither carried nor named. So a field the
+ * preparation starts to read fails until its key is decided, whatever values that key takes. Left open: a field already
+ * judged through one key that gains a second key no probe moves.
  *
  * WHAT IS OUT OF REACH. The container runtime's own environment (DOCKER_HOST, CONTAINER_HOST, the XDG folders) is read
  * by the docker and podman binaries, not by this code, so no Proxy sees it; sandbox-deployment.test.mjs holds those.
@@ -157,19 +159,13 @@ const NOT_CARRIED = {
  * A key that sets only a forge's own field (`config.github`, `.gitlab`, `.forgejo`, `.azure`: the forge's credential
  * and the address it is sent to) is never carried, and the test fails if one is. #771 made the handoff load sandbox
  * authority only. Without them a GitHub trigger clones with the launching account's own `gh` login, and a GitLab,
- * Forgejo or Azure trigger cannot be prepared through `--deployment`; the console's preparation runs in the worker,
- * with the worker's own credential.
+ * Forgejo or Azure trigger refuses as `sandbox-forge-unconfigured`; the console's preparation runs in the worker, with
+ * the worker's own credential.
  */
 const FORGE_FIELDS = new Set(FORGE_KINDS);
 
-/** Keys no probe moves, each with the config field it sets. */
-const UNPROBED = {
-	GITHUB_AUTH_SOURCE: "github", // "gh" is the default, and "pat" and "app" each refuse without the credential they name
-	GITHUB_APP_PRIVATE_KEY: "github", // kept only on the App source, which needs an App id and installation beside it
-	GITLAB_AUTH_SOURCE: "gitlab", // "pat" is its only value, and its default
-	FORGEJO_AUTH_SOURCE: "forgejo", // likewise
-	AZURE_AUTH_SOURCE: "azure", // likewise
-};
+/** What a `--new` through `--deployment` is handed from the deployment (`sandboxDeploymentEnv` with `preparing`). */
+const CARRIED = new Set([...SANDBOX_DEPLOYMENT_KEYS, ...SANDBOX_PREPARATION_KEYS]);
 
 const watched = (target, into, { own = false } = {}) => new Proxy(target, { get: (t, key) => ((typeof key === "string" && (!own || Object.hasOwn(t, key)) && into.add(key)), t[key]) });
 
@@ -179,9 +175,11 @@ test("every setting a sandbox's preparation reads is carried by the deployment h
 	const direct = new Set();
 	await inFolder(d.dir, async () => {
 		for (const [index, kind] of FORGE_KINDS.entries()) {
-			const prepare = createSandboxPreparer({ config: watched(loadConfig(d.serviceEnv), fields, { own: true }), env: watched(d.serviceEnv, direct), ...outside() });
-			const ready = await prepare({ ...REQUEST, triggerIndex: index });
-			assert.equal(ready.prepared, true, `${kind}: ${ready.message}`);
+			for (const pin of [true, false]) {
+				const prepare = createSandboxPreparer({ config: watched(loadConfig(d.serviceEnv), fields, { own: true }), env: watched(d.serviceEnv, direct), ...outside() });
+				const ready = await prepare({ ...REQUEST, triggerIndex: index, pin });
+				assert.equal(ready.prepared, true, `${kind}, pin ${pin}: ${ready.message}`);
+			}
 		}
 	});
 
@@ -202,33 +200,29 @@ test("every setting a sandbox's preparation reads is carried by the deployment h
 
 	const problems = [];
 	const inputs = new Map();
+	const judged = new Set();
 	for (const key of [...new Set([...read, ...direct])].sort()) {
-		const moved = movedBy(key);
-		if (Object.hasOwn(UNPROBED, key)) {
-			if (moved.size > 0) problems.push(`${key} is moved by a probe now (${[...moved].join(", ")}); take it out of UNPROBED`);
-			if (!Object.hasOwn(base, UNPROBED[key])) problems.push(`${key}'s UNPROBED field ${UNPROBED[key]} is not a config field`);
-			moved.add(UNPROBED[key]);
-		} else if (moved.size === 0 && !direct.has(key)) {
-			problems.push(`${key} is read by loadConfig, but no probe changes the config; add a probe value that does, or name it in UNPROBED with the field it sets`);
-		}
-		const decides = [...moved].filter((field) => fields.has(field));
+		const decides = [...movedBy(key)].filter((field) => fields.has(field));
+		for (const field of decides) judged.add(field);
 		if (direct.has(key) || decides.length > 0) inputs.set(key, decides);
 	}
-
+	for (const field of [...fields].sort()) {
+		if (!judged.has(field)) problems.push(`the preparation reads config.${field}, but no value in PROBES moves it, so the key behind it cannot be judged; add a value that key takes to PROBES`);
+	}
 	for (const [key, decides] of inputs) {
 		const forgeOnly = decides.length > 0 && decides.every((field) => FORGE_FIELDS.has(field));
-		const carried = SANDBOX_DEPLOYMENT_KEYS.includes(key);
-		if (forgeOnly && carried) problems.push(`${key} sets only the forge's credential or address (${decides.join(", ")}), which the handoff must never carry (#771)`);
-		if (!forgeOnly && !carried && !Object.hasOwn(NOT_CARRIED, key)) problems.push(`${key} decides ${decides.length ? `config.${decides.join(", config.")}` : "the preparation directly"}; carry it in SANDBOX_DEPLOYMENT_KEYS or name it in NOT_CARRIED with its reason`);
+		if (forgeOnly && CARRIED.has(key)) problems.push(`${key} sets only the forge's credential or address (${decides.join(", ")}), which the handoff must never carry (#771)`);
+		if (!forgeOnly && !CARRIED.has(key) && !Object.hasOwn(NOT_CARRIED, key)) problems.push(`${key} decides ${decides.length ? `config.${decides.join(", config.")}` : "the preparation directly"}; carry it in SANDBOX_PREPARATION_KEYS (SANDBOX_DEPLOYMENT_KEYS if opening a shell reads it too) or name it in NOT_CARRIED with its reason`);
 	}
+	// The preparation's own list exists for the plan alone, so a key in it the plan no longer reads is stale.
+	for (const key of SANDBOX_PREPARATION_KEYS) if (!inputs.has(key)) problems.push(`${key} is in SANDBOX_PREPARATION_KEYS but no preparation reads it; take it out`);
 	for (const key of Object.keys(NOT_CARRIED)) {
 		if (!inputs.has(key)) problems.push(`${key} is in NOT_CARRIED but the preparation no longer reads it; take it out`);
-		if (SANDBOX_DEPLOYMENT_KEYS.includes(key)) problems.push(`${key} is both carried and named as not carried`);
+		if (CARRIED.has(key)) problems.push(`${key} is both carried and named as not carried`);
 	}
 	assert.deepEqual(problems, []);
 
-	// Not vacuous: the recording saw the inputs #863 was about, and the forge rule had forge keys to judge.
-	for (const key of ["PI_TRIGGERS_FILE", "PI_PROJECTS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_JOB_IMAGE", "PI_JOB_MEMORY", "PI_JOB_CPUS"]) assert.ok(inputs.has(key), `${key} is an input of the plan`);
+	// Not vacuous: the forge rule had forge keys to judge.
 	assert.ok([...inputs].some(([, decides]) => decides.includes("gitlab")), "a forge's own settings were judged");
 
 	// docs/sandbox.md tells an operator which of the deployment's settings `--new --deployment` reads. That list is the
@@ -238,9 +232,9 @@ test("every setting a sandbox's preparation reads is carried by the deployment h
 	const at = docs.indexOf(marker);
 	assert.ok(at > 0, "docs/sandbox.md lists what --new reads through --deployment");
 	const named = [...docs.slice(at, docs.indexOf(".", at + marker.length)).matchAll(/`([A-Z][A-Z0-9_]*)`/g)].map((m) => m[1]).sort();
-	assert.deepEqual(named, [...inputs.keys()].filter((key) => SANDBOX_DEPLOYMENT_KEYS.includes(key)).sort());
+	assert.deepEqual(named, [...inputs.keys()].filter((key) => CARRIED.has(key)).sort());
 
 	// NOT_CARRIED's reason is a claim about the handoff, so check it: the account's temp root comes from its own shell.
-	const handoff = sandboxDeploymentEnv({ dir: d.dir, env: { ...AMBIENT, TMPDIR: "/account/tmp", TEMP: "/account/temp" }, expectedHost: "mini1" });
+	const handoff = sandboxDeploymentEnv({ dir: d.dir, env: { ...AMBIENT, TMPDIR: "/account/tmp", TEMP: "/account/temp" }, expectedHost: "mini1", preparing: true });
 	assert.deepEqual([handoff.env?.TMPDIR, handoff.env?.TEMP], ["/account/tmp", "/account/temp"], handoff.message);
 });

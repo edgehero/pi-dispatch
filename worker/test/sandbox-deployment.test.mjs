@@ -4,7 +4,7 @@ import * as fs from "node:fs";
 import { join } from "node:path";
 import { homedir } from "node:os";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { sandboxDeploymentEnv } from "../src/sandbox-deployment.mjs";
+import { SANDBOX_DEPLOYMENT_KEYS, SANDBOX_PREPARATION_KEYS, sandboxDeploymentEnv } from "../src/sandbox-deployment.mjs";
 
 function deployment(text = "PI_WORKER_NAME=mini1\nPI_BACKENDS=podman\nPI_SANDBOX_DIR=/var/lib/pi/sandboxes\nPI_EGRESS=1\nVALKEY_PASSWORD=private_value_not_forwarded_to_container\nPROVIDER_API_KEY=excluded\n") {
 	const dir = fs.realpathSync(tempDir("sandbox-deployment-"));
@@ -91,4 +91,27 @@ test("PATH controls refuse as values while file newlines follow the service's ac
 	assert.equal(linux.refused, undefined, linux.message);
 	assert.equal(linux.env.PATH, "/usr/bin");
 	assert.ok(sandboxDeploymentEnv({ dir: split, env: {}, platform: "darwin" }).refused);
+});
+
+test("opening, attaching and --list neither read nor compare a preparation's settings; --new holds them to the deployment by name (#863)", () => {
+	// Opening reads the kept workspace's manifest, never these. A shell's PI_JOB_MEMORY, an absolute spelling of a relative
+	// path, or a line only the service's shell can expand must not stop an opener's command, as it did not before #863.
+	const dir = deployment("PI_WORKER_NAME=mini1\nPI_JOB_IMAGE=pi-job:deployment\nPI_SCOPED_LIMITS_FILE=limits.json\nPI_PROJECTS_FILE=$HOME/p.json\n");
+	const ambient = { HOME: homedir(), PI_JOB_MEMORY: "8g", PI_SCOPED_LIMITS_FILE: join(dir, "limits.json"), PI_JOB_IMAGE: "pi-job:other" };
+	for (const platform of ["linux", "darwin"]) {
+		const opened = sandboxDeploymentEnv({ dir, env: ambient, expectedHost: "mini1", platform });
+		assert.equal(opened.refused, undefined, `${platform}: ${opened.message}`);
+		for (const key of SANDBOX_PREPARATION_KEYS) assert.equal(opened.env[key], undefined, `${platform}: ${key} is not handed to an open or attach`);
+		// Strict and named when preparing, whichever of the four it meets first.
+		const refusal = (env, file = dir) => sandboxDeploymentEnv({ dir: file, env: { HOME: homedir(), ...env }, expectedHost: "mini1", platform, preparing: true }).message ?? "";
+		assert.match(refusal({}), /PI_PROJECTS_FILE line cannot be read .*before preparing/, `${platform}: a line the service's shell expands`);
+		const readable = deployment("PI_WORKER_NAME=mini1\nPI_JOB_IMAGE=pi-job:deployment\nPI_SCOPED_LIMITS_FILE=limits.json\n");
+		assert.match(refusal({ PI_JOB_MEMORY: "8g" }, readable), /shell sets PI_JOB_MEMORY, which the deployment does not; .*before preparing/);
+		assert.match(refusal({ PI_SCOPED_LIMITS_FILE: join(readable, "limits.json") }, readable), /disagrees with the deployment for PI_SCOPED_LIMITS_FILE; .*before preparing/, "an absolute spelling is another value");
+		assert.match(refusal({ PI_JOB_IMAGE: "pi-job:other" }, readable), /disagrees with the deployment for PI_JOB_IMAGE/);
+		const agreed = sandboxDeploymentEnv({ dir: readable, env: { HOME: homedir(), PI_JOB_IMAGE: "pi-job:deployment" }, expectedHost: "mini1", platform, preparing: true });
+		assert.equal(agreed.refused, undefined, agreed.message);
+		assert.deepEqual([agreed.env.PI_JOB_IMAGE, agreed.env.PI_SCOPED_LIMITS_FILE], ["pi-job:deployment", "limits.json"], "the deployment's values, carried as written");
+	}
+	assert.deepEqual(SANDBOX_PREPARATION_KEYS.filter((key) => SANDBOX_DEPLOYMENT_KEYS.includes(key)), [], "the two lists do not overlap");
 });

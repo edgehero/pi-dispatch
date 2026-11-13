@@ -80,6 +80,15 @@ test("deployment invocation reexecutes in the clean loader result before any run
 	assert.equal(await runSandbox(["gh-1", "--attach", "--deployment", "/trusted/deploy", "--expected-host=build1"], { env: { PI_EGRESS: "0", SECRET: "ambient" }, deps: c.deps }), 7);
 });
 
+test("only --new asks the deployment handoff for a preparation's settings; open, attach and --list do not (#863)", async () => {
+	for (const [args, preparing] of [[["--new", "acme/web", "--ref", "main", "--as", "0"], true], [["gh-1"], false], [["gh-1", "--attach"], false], [["--list"], false]]) {
+		let asked;
+		const c = capture({ deploymentEnv: async (opts) => ((asked = opts.preparing), { env: { PI_WORKER_NAME: "build1" } }), runDeployment: async () => 0 });
+		assert.equal(await runSandbox([...args, "--deployment", "/trusted/deploy"], { env: {}, deps: c.deps }), 0);
+		assert.equal(asked, preparing, args.join(" "));
+	}
+});
+
 test("the deployment re-exec runs in the deployment folder with only the loaded environment (#863)", async () => {
 	// The folder is what makes a relative PI_PROJECTS_FILE, PI_SCOPED_LIMITS_FILE or PI_TRIGGERS_FILE name the file the
 	// deployment's worker reads: its service runs there too. sandbox-deployment-plan.test.mjs prepares from that folder.

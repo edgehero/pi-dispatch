@@ -66,6 +66,24 @@ test("every free determinate gate precedes identity observation, mint and clone"
 	assert.deepEqual(w.calls, []);
 });
 
+test("a trigger whose forge has no usable address refuses by name before any directory, credential or clone (#863)", async () => {
+	const textOf = (kind) => JSON.stringify({ triggers: [{ on: { type: "label", any: ["pi:human"] }, run: { kind, flow: "fix", ...(kind === "azure" ? { repository: "repo" } : {}) } }] });
+	for (const [kind, config] of [["gitlab", {}], ["forgejo", {}], ["azure", {}], ["gitlab", { gitlab: { apiUrl: "https://user:secret@gitlab.example" } }]]) {
+		const w = world({ text: textOf(kind), config });
+		const result = await w.prepare({ ...requestOf(), triggerDigest: undefined });
+		// Determinate, so returned rather than thrown: a throw is what the control queue retries.
+		assert.equal(result.refused, "sandbox-forge-unconfigured", kind);
+		assert.match(result.message, /from the console/);
+		assert.doesNotMatch(result.message, /secret/);
+		assert.deepEqual(w.calls, [], `${kind}: no identity, credential or clone`);
+		assert.equal(fs.existsSync(w.config.jobsDir), false, `${kind}: no directory or lock was made`);
+	}
+	// A malformed repository never reaches the address: the plan refuses it first, on a forge with no address too.
+	const w = world({ text: textOf("gitlab") });
+	assert.equal((await w.prepare({ ...requestOf(), repo: "owner/../escape", triggerDigest: undefined })).refused, "sandbox-repo-invalid");
+	assert.deepEqual(w.calls, []);
+});
+
 test("cross-filesystem publication refuses before credentials, while an unread device is infrastructure", async () => {
 	for (const unreadable of [false, true]) {
 		const w = world();

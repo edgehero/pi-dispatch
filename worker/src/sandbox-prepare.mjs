@@ -123,11 +123,17 @@ export function createSandboxPreparer({ env = process.env, config = loadConfig(e
 		catch (error) { if (error?.piDispatchConfig || error?.code === "ENOENT") return configRefusal(); throw new Error("sandbox preparation configuration read failed", { cause: error }); }
 		if (planned.refused) return planned;
 		const { plan } = planned;
+		// The forge's address is configuration, so a host without one is a determinate refusal, said here before any
+		// directory, lock, credential or clone. Inside the directories' catch below it read as infrastructure: the CLI said
+		// "try again" and the control queue retried a request that can never succeed (#863, CONST-RETRY-INFRA-ONLY). The
+		// plan has already refused a malformed repository (`sandbox-repo-invalid`, from the same `sandboxRepoProblem` this
+		// calls), so what is left to throw is the forge's address: none configured, or one that is not a plain http(s) URL.
+		let remote;
+		try { remote = sandboxRemoteUrl(plan.kind, plan.repo, config); }
+		catch { return refused("sandbox-forge-unconfigured", "the trigger's forge has no usable address where this preparation runs; prepare it from the console, on a host whose worker has that forge configured"); }
 		const id = request.id ?? newSandboxId();
 		const fingerprint = hash(JSON.stringify({ plan, by: request.by ?? null }));
-		let remote;
 		try {
-			remote = sandboxRemoteUrl(plan.kind, plan.repo, config);
 			ensureDir(config.sandboxDir, { env });
 			fs.mkdirSync(config.sandboxDir, { recursive: true, mode: 0o700 });
 			ensureDir(config.sandboxDir, { env });
