@@ -865,8 +865,18 @@ say nothing was changed). On a Valkey that stopped answering, the kill switch an
 until it answers, and the console cannot stop until it does, so its service manager's limit ends it. While Valkey stays down,
 its log says each queue's error once a minute, and an outage after Valkey came back says it again at once.
 
-A restart of the console is still what picks up a changed `VALKEY_URL`, a Valkey password changed since it started, a database
-number Valkey refused, and everything in a `.env` that a bad line kept from being read at start, a Valkey password among them.
+A Valkey password changed in the deployment's `.env` needs no restart: the console's clients read it again each time they
+connect, so after a rotation they read Valkey again at their next try, and so does a password a bad line kept from being
+read at start, once the line is fixed. A password written into `VALKEY_URL` itself is part of that address.
+
+A restart of the console is still what picks up a changed `VALKEY_URL`, a database number Valkey refused, and every other
+value it read from the `.env` at start, those a bad line kept from being read included. The console says so. Every page, and
+every error page you are shown signed in, carries a banner, "This console needs a restart", for operators and viewers
+alike. It names the settings that changed but never their values, and a refused database by its number. The console's log
+says the same once, and says again when it is over (a change put back). When the `.env` cannot be read now in a way it
+could at start, the banner asks you to fix it before restarting, since a console started then would run without what it
+cannot read. A page looks again when what it last saw is more than 5 seconds old, and the console looks once a minute
+with no page open.
 
 One rule holds on every card: a whole count, an empty sentence ("The settings overlay sets no cap.", "nothing is
 waiting", "No run has settled any spend today.") or All clear is shown only over what the console read in full. When a
