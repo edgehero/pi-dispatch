@@ -617,6 +617,14 @@ test("issue #865: only more whole CPUs than PI_JOB_SIZE_CPUS says is worth sayin
 	assert.deepEqual(at(250, 400), one(4, 250), "4 at size 2.5");
 	assert.deepEqual(at(25, 200), one(2, 25), "0.25 reads as 1");
 	assert.equal(at(25, 199), null, "a ceiling of 1.99 reads as 1");
+	// Under one CPU libuv's quota is 0, which it skips (libuv 1.51.0, the job image's Node 22.23.1): the tools read the
+	// WHOLE runtime, the record's 64 here, never 1.
+	assert.deepEqual(at(25, 50), one(64, 25), "a --cpus=0.5 reads as the runtime's 64");
+	assert.deepEqual(at(25, 99), one(64, 25), "and 0.99 too");
+	assert.deepEqual(at(25, 100), null, "while 1.00 reads as 1, what the variable says at 0.25");
+	// with the runtime's count unknown there is nothing to say, rather than a guess
+	assert.equal(suggest([killed({ capacity: { cpuCenti: 50, cpus: null }, cpuCenti: 25 })], { current: { memMiB: 4096, cpuCenti: 25 } }).memory.evidence.oomCeiling, null);
+	assert.equal(suggestionEvidence(suggest([killed({ capacity: { cpus: 64, cpuCenti: 50 }, cpuCenti: 25 })], { current: { memMiB: 4096, cpuCenti: 25 } })).memoryCeiling, `${POINTER}the killed run's tools saw 64 CPUs at a size of 0.25 CPUs`);
 });
 
 test("issue #865: several killed runs are counted, and a range is said only for what varies, ceiling or size", () => {

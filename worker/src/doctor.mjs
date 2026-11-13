@@ -9799,9 +9799,10 @@ export function sizeSuggestionChecks({ projects = [], limits = [], env = {}, rec
 		const words = suggestionEvidence(s);
 		const size = `${formatMemory(current.memMiB)}, ${cpusText(current.cpuCenti)}`;
 		const call = suggestionCall(s, limits);
-		// Issue #865: `memoryCeiling` rides LAST, after the facts: the label is published cut at DOCTOR_LABEL_MAX, and what a
-		// cut may take is this pointer, never the call, a held raise, a refusal or a budget note before it.
-		const facts = [words.memoryFact, words.cpuFact, words.memoryCeiling].filter(Boolean);
+		// Issue #865: `memoryCeiling` rides after the suggestion and BEFORE the two facts: the label is published cut at
+		// DOCTOR_LABEL_MAX, so what a cut takes first is the facts (information with no call) and then this pointer's tail,
+		// never the call, a held raise, a refusal or a budget note, which all come before it.
+		const facts = [words.memoryCeiling, words.memoryFact, words.cpuFact].filter(Boolean);
 		const factTail = facts.length > 0 ? `; ${facts.join("; ")}` : "";
 		const held = s.memory.suggested === null && s.memory.held !== null;
 		if (call === null && !held) {

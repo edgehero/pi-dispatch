@@ -44,12 +44,15 @@ A size isolates **memory and CPU**, and nothing else.
 ## How many CPUs a job's tools see
 
 A job's memory is a hard limit at its size, but its CPUs are only a weight, and nothing inside the container can see a
-weight. A tool that asks how many CPUs it has gets a larger number than the job's `cpus`:
+weight. A tool that asks how many CPUs it has gets a number that is not the job's `cpus`, and usually a much larger one:
 
-- Node's `os.availableParallelism()` reads the container's CPU ceiling, rounded down to a whole number. On Docker and
-  Podman that ceiling is the host's CPU budget and the same for every job: 15 on the machine of [the worked
+- Node's `os.availableParallelism()` reads the container's CPU limit, rounded down to a whole number. On Docker and
+  Podman that limit is the host's CPU budget and the same for every job: 15 on the machine of [the worked
   example](#a-worked-example), whatever the job's size. On OpenShell the limit is the job's size itself, so there it
-  reads the size rounded down.
+  reads the size rounded down from one CPU up.
+- A limit under one CPU rounds down to 0, which Node ignores, so it reads every CPU of the runtime instead. On
+  OpenShell that is any job sized `0.25` to `0.75` CPUs: its tools see the gateway's whole machine while
+  `PI_JOB_SIZE_CPUS` says 1.
 - `nproc` reads every CPU of the container runtime, the reserve included, on every venue.
 
 A tool that starts one worker per CPU it sees therefore starts far more workers than the size was planned for, and all
@@ -307,10 +310,12 @@ How to read one:
   the larger of the size and the largest size killed in the window. A peak at the limit raises nothing (the page
   cache, above); when such runs were also stalled for memory, the line says so as a fact, with no call.
 - **A kill also says how many CPUs the killed runs' tools saw**, when that was more than `PI_JOB_SIZE_CPUS` told
-  them: a last line or clause pointing to the variable, with the count (the CPU ceiling their record names, rounded
-  down as Node reads it) and their `cpus` ([How many CPUs a job's tools see](#how-many-cpus-a-jobs-tools-see)). The
-  raise is the same either way. It is left out for a run on OpenShell, whose CPU limit is the size itself, and for a
-  run recorded before pi-dispatch kept what the host offered (`capacity` in the record).
+  them: a line or clause after the suggestion pointing to the variable, with the count (the CPU ceiling their record
+  names, rounded down as Node reads it, or the whole machine under one CPU) and their `cpus`
+  ([How many CPUs a job's tools see](#how-many-cpus-a-jobs-tools-see)). The raise is the same either way. It is left out for a run on OpenShell, whose CPU limit is the size itself, and for a
+  run recorded before pi-dispatch kept what the host offered (`capacity` in the record). An OpenShell job sized under
+  one CPU is the one case it misses: its tools see the gateway's whole machine, and the record does not say how many
+  CPUs that has. Size such a job's pools from `PI_JOB_SIZE_CPUS` all the same.
 - **Memory is lowered** when 1.25 times the p95 peak is at most 0.75 times the size, never below 1.25 times the
   largest peak in the window, nor 1.5 times the largest size killed, nor `512m`.
 - **CPUs are only ever lowered**, when the p95 of the cores used is below 0.4 times the size. Raising `cpus` cannot

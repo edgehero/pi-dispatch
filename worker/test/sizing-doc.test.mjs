@@ -158,18 +158,47 @@ test("docs/sizing.md's out of memory suggestion is the line doctor prints for on
 	}
 });
 
-test("issue #865, review: a held OOM raise with the ceiling clause keeps the held words whole when published, and a cut takes only the clause's tail", () => {
-	// The longest label a raise of the example writes: the cap binds (a 10g budget), so the held words ride in it too.
+test("issue #865, review: published through doctor's cut, the pointer comes before the facts, and a held raise's words before it", () => {
+	// The example's medium project, killed once at 8g on its host, as the records of a busy week might hold it: with the
+	// memory pressure fact (a run killed at its limit was likely stalled for memory too), with the throttle fact, with a
+	// budget that holds the raise back, and every mix of them. Doctor's label is published cut at DOCTOR_LABEL_MAX.
 	const medium = limits.find((l) => l.scope === "project:medium");
 	const size = { memMiB: parseMemory(medium.memory), cpuCenti: parseCpus(medium.cpus), source: "project" };
-	const capacity = { slots: 4, memMiB: 10240, cpuCenti: view.cpuCenti, cpus: HOST_CPUS };
-	const killedRun = { project: "medium", backend: "local", size, capacity, resources: { memPeak: size.memMiB * 1048576, cpuUsec: 600e6, throttledUsec: 0, memFullUsec: 0 }, startedAt: new Date(NOW - 86400000 - 600000).toISOString(), endedAt: new Date(NOW - 86400000).toISOString(), reason: "oom-killed" };
-	const [check] = sizeSuggestionChecks({ projects: [{ id: "medium" }], limits, env, records: [killedRun], budget: { memMiB: 10240, cpuCenti: view.cpuCenti }, total: { memMiB: MEM_TOTAL_MIB, cpuCenti: HOST_CPUS * 100 }, nowMs: NOW });
+	const WALL_US = 600e6;
+	const run = (i, { budgetMiB, oom = false, pressure = false, throttle = false }) => ({
+		project: "medium",
+		backend: "local",
+		size,
+		capacity: { slots: 4, memMiB: budgetMiB, cpuCenti: view.cpuCenti, cpus: HOST_CPUS },
+		resources: { memPeak: size.memMiB * 1048576, cpuUsec: WALL_US, throttledUsec: throttle ? WALL_US / 2 : 0, memFullUsec: pressure ? WALL_US / 10 : 0 },
+		startedAt: new Date(NOW - (i + 1) * 86400000 - 600000).toISOString(),
+		endedAt: new Date(NOW - (i + 1) * 86400000).toISOString(),
+		reason: oom ? "oom-killed" : "completed",
+	});
+	const pointer = `size per-CPU worker pools from PI_JOB_SIZE_CPUS: the killed run's tools saw ${Math.floor(view.cpuCenti / 100)} CPUs at a size of ${medium.cpus} CPUs`;
 	const held = "this project's runs need more than this host offers: they ask for 12g, the largest here is 10g";
-	assert.ok(check.label.includes(held) && check.label.indexOf(held) < check.label.indexOf("PI_JOB_SIZE_CPUS"), check.label);
-	const published = redactText(check.label);
-	assert.ok(published.includes(held), `the held words survive the publish: ${published}`);
-	assert.ok(published.includes("PI_JOB_SIZE_CPUS"), `and so does the pointer, which comes before the numbers: ${published}`);
+	const pressureFact = "reached the memory limit while stalled for memory";
+	const throttleFact = "the median run was held back 50% of its time";
+	for (const budgetMiB of [view.memMiB, 10240]) {
+		for (const [pressure, throttle] of [[false, false], [true, false], [false, true], [true, true]]) {
+			const label = `budget ${budgetMiB}, pressure ${pressure}, throttle ${throttle}`;
+			// ten runs, so the throttle fact (which needs ten that report throttled time) can be said; the newest is killed
+			const records = Array.from({ length: 10 }, (_, i) => run(i, { budgetMiB, oom: i === 0, pressure, throttle }));
+			const [check] = sizeSuggestionChecks({ projects: [{ id: "medium" }], limits, env, records, budget: { memMiB: budgetMiB, cpuCenti: view.cpuCenti }, total: { memMiB: MEM_TOTAL_MIB, cpuCenti: HOST_CPUS * 100 }, nowMs: NOW });
+			const at = (text) => check.label.indexOf(text);
+			assert.ok(at(pointer) > 0, `${label}: the pointer is in the label: ${check.label}`);
+			for (const [fact, said] of [[pressureFact, pressure], [throttleFact, throttle]]) {
+				assert.equal(at(fact) >= 0, said, `${label}: ${fact}`);
+				if (said) assert.ok(at(pointer) < at(fact), `${label}: the pointer comes before ${fact}`);
+			}
+			if (budgetMiB === 10240) assert.ok(at(held) >= 0 && at(held) < at(pointer), `${label}: the held words come before the pointer`);
+			const published = redactText(check.label);
+			assert.ok(published.includes("PI_JOB_SIZE_CPUS"), `${label}: the pointer survives the publish: ${published}`);
+			if (budgetMiB === 10240) assert.ok(published.includes(held), `${label}: and so do the held words: ${published}`);
+			// without the hold, the pointer arrives whole: what the cut takes is the facts after it
+			if (budgetMiB !== 10240) assert.ok(published.includes(pointer), `${label}: the whole pointer: ${published}`);
+		}
+	}
 });
 
 test("docs/sizing.md's CPU reserve table names who sets the quota, and where doctor reads it back, as reservePlan decides", () => {

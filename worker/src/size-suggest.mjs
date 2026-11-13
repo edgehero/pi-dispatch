@@ -101,9 +101,12 @@ export const MEMORY_CAP_MISSING = Object.freeze(["unread", "none-holds", "off"])
 export const SIZE_FACTS = Object.freeze(["pressure", "ceiling"]);
 /**
  * Issue #865: the venues whose job containers get the host's CPU ceiling as `--cpus`, the same for every job
- * (job-size.mjs `containerSizing`, on the docker and podman builders alike), so a job's tools read the ceiling and
- * never its size. OpenShell's venues are not here: their `--cpu` is the job's size itself (backend-openshell.mjs
- * `sizeArgs`), so the count a tool reads there is the size. Restated, since this module imports nothing heavy, and held
+ * (job-size.mjs `containerSizing`, on the docker and podman builders alike), so a job's tools read the ceiling (or, under
+ * one CPU, the whole runtime: `seenCpusOf`) and never its size. OpenShell's venues are not here: their `--cpu` is the
+ * job's size itself (backend-openshell.mjs `sizeArgs`), so a tool there reads the size rounded down from one CPU up, and
+ * under one CPU the gateway's whole runtime, whose CPU count the record does not hold (its `capacity.cpus` is this
+ * host's runtime's, and the gateway may be another machine). That last case is a residual, named in
+ * `DES-JOB-SIZE-IN-THE-ENV`, not a clause said on a guess. Restated, since this module imports nothing heavy, and held
  * to backends.mjs by a test: every venue is in this list or in `OPENSHELL_BACKENDS`, so a new venue fails it until
  * someone says which it is.
  */
@@ -133,28 +136,45 @@ function rank(sorted, pct) {
 const isCount = (v) => Number.isSafeInteger(v) && v >= 0;
 
 /**
- * Issue #865: the `--cpus` ceiling a run's container had, in hundredths, as its record gives it: the record's `capacity`
- * (`cpus`, the runtime's CPU count, and `cpuCenti`, the host's CPU budget, each judged again here) through the worker's
- * own `cpuCeilingCenti`, on a venue in `CEILING_VENUES` only. Null for any other venue, a record with no readable
- * `capacity` (every record before issue #599, and every refusal before a slot), and a capacity that names neither.
+ * Issue #865: the whole CPUs a run's tools read through `os.availableParallelism()`, as its record gives it, or null. The
+ * `--cpus` ceiling comes from the record's `capacity` (`cpus`, the runtime's CPU count, and `cpuCenti`, the host's CPU
+ * budget, each judged again here) through the worker's own `cpuCeilingCenti`, on a venue in `CEILING_VENUES` only, and
+ * becomes a count by `seenCpusOf`. Null for any other venue, a record with no readable `capacity` (every record before
+ * issue #599, and every refusal before a slot), a capacity that names neither, and a ceiling under one CPU on a record
+ * whose runtime count is not known.
  * The record holds what the host offered at admission, not the argv itself, so this is the ceiling the worker computes
  * from those facts. Where the budget's read of the runtime gave no CPU count, the record holds the worker's own count
  * instead (index.mjs `capacityNow`), which on Docker Desktop is the Mac's and not the VM's, so the value is then an
  * estimate of what the tools read. Accepted, rather than a record field for the argv's own `--cpus`: the clause is
  * information beside a raise that does not depend on it, and that read failing while a job still ran is rare.
  */
-function ceilingOf(record) {
+function seenOf(record) {
 	if (!CEILING_VENUES.includes(record.backend)) return null;
 	const c = record.capacity;
 	if (c === null || typeof c !== "object" || Array.isArray(c)) return null;
 	const cpus = Number.isSafeInteger(c.cpus) && c.cpus >= 1 && c.cpus <= HOST_CPUS_MAX ? c.cpus : null;
 	const budget = Number.isSafeInteger(c.cpuCenti) && c.cpuCenti >= 1 && c.cpuCenti <= HOST_CPUS_MAX * 100 ? c.cpuCenti : null;
-	return cpuCeilingCenti(cpus, budget);
+	const ceilingCenti = cpuCeilingCenti(cpus, budget);
+	return ceilingCenti === null ? null : seenCpusOf(ceilingCenti, cpus);
+}
+
+/**
+ * Issue #865: the whole CPUs a `--cpus` ceiling in hundredths gives a tool inside the container, or null, where
+ * `runtimeCpus` is the runtime's own count (the container's affinity mask holds all of it, so `nproc` reads it). Read
+ * at libuv 1.51.0, which Node 22.23.1 (the job image's) bundles: `uv__get_constrained_cpu` (src/unix/linux.c) sets the
+ * quota to `cpu.max`'s limit over its period in INTEGER division, and `uv_available_parallelism` (src/unix/core.c)
+ * takes it only `if (quota > 0 && quota < rc)`, where `rc` is the affinity count. So a ceiling of 2.5 reads as 2 (ROUNDED
+ * DOWN, where `PI_JOB_SIZE_CPUS` rounds the size up), and a ceiling under one CPU gives a quota of 0, which libuv skips:
+ * the tool reads the WHOLE runtime, null when the record does not say how many that is.
+ */
+function seenCpusOf(ceilingCenti, runtimeCpus) {
+	if (ceilingCenti >= 100) return Math.floor(ceilingCenti / 100);
+	return Number.isSafeInteger(runtimeCpus) && runtimeCpus >= 1 ? runtimeCpus : null;
 }
 
 /**
  * One record as a suggestion reads it, or null when it is not evidence: `{ at, size, memPeak, oom, wallUsec, cpuUsec,
- * throttledUsec, memFullUsec, ceilingCenti }`. `memPeak` (bytes, clamped to the record's own limit) is null when absent or not a
+ * throttledUsec, memFullUsec, seenCpus }`. `memPeak` (bytes, clamped to the record's own limit) is null when absent or not a
  * count; `wallUsec` is null unless the span is readable; `cpuUsec` is null unless it can be read with a wall time (CPU
  * time clamped to the CPU ceiling over the wall), and `throttledUsec` likewise on its own (clamped to the wall): cgroup v2
  * writes `throttled_usec` in `cpu.stat` only where the cpu controller is enabled, so a run without it is still a CPU
@@ -180,7 +200,7 @@ function evidenceOf(record, project, nowMs) {
 	// unclamped: it is only ever compared (exactly, in BigInt) with 1% of the wall, and a stall past the wall is above it
 	const memFullUsec = wallUsec !== null && isCount(r.memFullUsec) ? r.memFullUsec : null;
 	if (memPeak === null && cpu.cpuUsec === null) return null;
-	return { at, size, memPeak, oom: record.reason === "oom-killed", wallUsec, ...cpu, memFullUsec, ceilingCenti: ceilingOf(record) };
+	return { at, size, memPeak, oom: record.reason === "oom-killed", wallUsec, ...cpu, memFullUsec, seenCpus: seenOf(record) };
 }
 
 /** a x b > c x d, exactly. */
@@ -200,26 +220,18 @@ function heldToCap(wanted, current, cap) {
 }
 
 /**
- * Issue #865: the whole CPUs a ceiling in hundredths gives a tool inside the container. libuv (`uv_available_parallelism`,
- * which Node's `os.availableParallelism()` returns) divides the cgroup's `cpu.max` quota by its period and truncates, and
- * answers at least 1, so a `--cpus=2.5` reads as 2: the ceiling ROUNDED DOWN, where `PI_JOB_SIZE_CPUS` rounds the size
- * up. Comparing the raw ceiling would say a tool saw 2.5 CPUs when it saw the 2 the variable already gives it.
- */
-const seenCpusOf = (ceilingCenti) => Math.max(1, Math.floor(ceilingCenti / 100));
-
-/**
  * Issue #865: what CPU count the killed runs' tools saw, against their size, or null: over the `oom-killed` runs that
- * decide a raise (the same ones `ooms` counts), those whose ceiling (`ceilingOf`) gives a tool more whole CPUs
- * (`seenCpusOf`) than their size rounded up, which is what `PI_JOB_SIZE_CPUS` tells them. At or below it a pool sized
+ * decide a raise (the same ones `ooms` counts), those whose tools read more whole CPUs (`seenOf`) than their size
+ * rounded up, which is what `PI_JOB_SIZE_CPUS` tells them. At or below it a pool sized
  * from the variable is the pool the ceiling gave, so there is nothing to say. `{ runs, seenCpus, seenVaries, sizeCenti,
  * sizeVaries }`: how many such runs, the most CPUs a tool among them saw and whether the runs saw different counts, the
  * smallest CPU size among them and whether their sizes differ. Two flags, since either can vary alone (one host's
  * ceiling under projects of several sizes, or one size across hosts), and the words say a range for that one only.
  */
 function oomCeilingOf(relevant) {
-	const over = relevant.filter((e) => e.oom && e.ceilingCenti !== null && seenCpusOf(e.ceilingCenti) > wholeCpusOf(e.size.cpuCenti));
+	const over = relevant.filter((e) => e.oom && e.seenCpus !== null && e.seenCpus > wholeCpusOf(e.size.cpuCenti));
 	if (over.length === 0) return null;
-	const seen = over.map((e) => seenCpusOf(e.ceilingCenti));
+	const seen = over.map((e) => e.seenCpus);
 	const sizes = over.map((e) => e.size.cpuCenti);
 	const seenCpus = Math.max(...seen);
 	const sizeCenti = Math.min(...sizes);
@@ -484,10 +496,12 @@ export function notEnoughRunsText(dim, sizeText) {
 /**
  * Issue #865: the CPU count the killed runs' tools saw, in words, or "" when the evidence carries none (`oomCeilingOf`):
  * `size per-CPU worker pools from PI_JOB_SIZE_CPUS: the killed run's tools saw 15 CPUs at a size of 2 CPUs`.
- * A word of its own (`memoryCeiling`), not part of the OOM words: every surface prints it AFTER what the suggestion is
- * (doctor at its label's tail with the facts), so where a surface cuts a line (doctor publishes a label at most
- * `DOCTOR_LABEL_MAX` long) it is this that goes, never the call, a held raise or a refusal. Short for the same cap, and
- * the variable first, so a cut keeps the pointer. A pointer, never a call: the raise is the same either way.
+ * A word of its own (`memoryCeiling`), not part of the OOM words: every surface prints it AFTER the suggestion, a held
+ * raise and a refusal (doctor ahead of its two facts, the console's card, the panel and the confirm as their last line
+ * or note, the console's call block below its notes), so where a surface cuts a line (doctor publishes a label at most
+ * `DOCTOR_LABEL_MAX` long) the facts go first, then this, never the call, a held raise or a refusal. Short for the same
+ * cap, and the variable first, so a cut keeps the pointer as long as it can. A pointer, never a call: the raise is the
+ * same either way.
  */
 function oomCeilingWords(me) {
 	const o = me?.oomCeiling;
