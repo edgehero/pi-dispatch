@@ -594,6 +594,47 @@ test("a freshContext client heals a rotated password and a password missing at s
 	}
 });
 
+// Review of PR #878, measured with two Valkeys: a deployment moving to another Valkey changes VALKEY_URL and
+// VALKEY_PASSWORD together. A held client stays on the Valkey it was built for, so it must keep that Valkey's password:
+// sending the new one there was refused, and the pages lost the old Valkey too.
+test("a freshContext client whose deployment now names another Valkey keeps the password of the one it talks to (#845)", { timeout: 30_000 }, async () => {
+	const PW_A = "passwordOfValkeyA000000000001";
+	const PW_B = "passwordOfValkeyB000000000002";
+	const a = await fakeValkey(PW_A);
+	const b = await fakeValkey(PW_B);
+	const judge = async () => ({ host: "127.0.0.1", servername: null, pinned: "127.0.0.1" });
+	const urlA = `redis://127.0.0.1:${a.port}`;
+	let now = ctx({ file: PW_A }, { url: { environment: null, file: urlA } });
+	useValkeyContext(() => now);
+	const client = makeRedisClient(urlA, { judge, freshContext: true, noOfflineQueue: true, disconnectTimeoutMs: 0 });
+	const errors = [];
+	client.on("error", (e) => errors.push(e.message));
+	const until = async (ok, what, ms = 8000) => {
+		const end = Date.now() + ms;
+		while (!ok()) {
+			if (Date.now() > end) assert.fail(`not within ${ms} ms: ${what}`);
+			await new Promise((r) => setTimeout(r, 20));
+		}
+	};
+	try {
+		await until(() => client.status === "ready", "ready on A");
+		// The .env now names B, with B's password; A drops every connection, so the client reconnects to A.
+		now = ctx({ file: PW_B }, { url: { environment: null, file: `redis://127.0.0.1:${b.port}` } });
+		const dropped = new Promise((resolve) => client.once("close", resolve));
+		a.rotate(PW_A);
+		await dropped;
+		await until(() => client.status === "ready", "ready on A again, with A's password");
+		assert.equal(await client.ping(), "PONG");
+		assert.deepEqual(errors.filter((m) => /WRONGPASS|NOAUTH/.test(m)), [], "never refused by A");
+		assert.equal(client.options.password, PW_A);
+	} finally {
+		client.disconnect();
+		useValkeyContext(null);
+		a.server.close();
+		b.server.close();
+	}
+});
+
 // PR #475's review, round 2: a stale VALKEY_URL in the shell made `pause` "succeed" on the wrong Valkey while the
 // service's kept taking jobs. On a shell/.env disagreement `pause` pauses BOTH and says so, `status` shows both, and
 // `resume` and `cancel` refuse until `--valkey-url` names which. Two databases of the test Valkey stand in for two.

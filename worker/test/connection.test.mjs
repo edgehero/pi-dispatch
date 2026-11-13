@@ -288,7 +288,8 @@ test("freshContext: each connect sends the password the context gives then; the 
 	const refuse = async () => {
 		throw new Error("no dial in this test");
 	};
-	const ctx = (password, over = {}) => ({ envPath: "/d/.env", shared: false, rootRefused: false, error: null, password: { environment: null, file: password }, ...over });
+	// The deployment's own VALKEY_URL is the one the clients below dial, as a console's is.
+	const ctx = (password, over = {}) => ({ envPath: "/d/.env", shared: false, rootRefused: false, error: null, password: { environment: null, file: password }, url: { environment: null, file: "redis://127.0.0.1:1" }, ...over });
 	let now = ctx("first-password");
 	useValkeyContext(() => {
 		if (now instanceof Error) throw now;
@@ -341,6 +342,15 @@ test("freshContext: each connect sends the password the context gives then; the 
 		assert.equal(await connectOnce(fresh), "third-password", "no deployment at all: the same");
 		now = ctx("fourth-password");
 		assert.equal(await connectOnce(fresh), "fourth-password", "its own deployment again");
+		// Review of PR #878, measured with two Valkeys: a password that came with another VALKEY_URL is that Valkey's, and a
+		// held client never moves there. One deployment moving to another Valkey changes both lines together; a symlinked
+		// deployment folder repointed reads another deployment's file through the same .env path.
+		now = ctx("the-new-valkeys-password", { url: { environment: null, file: "redis://127.0.0.1:2" } });
+		assert.equal(await connectOnce(fresh), "fourth-password", "the deployment moved to another Valkey: the old one's password stays");
+		now = ctx("deployment-b-password", { envPath: "/d/.env", url: { environment: null, file: "redis://127.0.0.1:3" } });
+		assert.equal(await connectOnce(fresh), "fourth-password", "the same .env path naming another Valkey: the same");
+		now = ctx("fifth-password", { url: { environment: null, file: "redis://127.0.0.1:1" } });
+		assert.equal(await connectOnce(fresh), "fifth-password", "the URL it was built on, rotated: taken");
 		now = ctx(null);
 		assert.equal(await connectOnce(fresh), null, "a context that gives none sends none, as a restart would");
 		assert.equal(Object.hasOwn(fresh.options, "password"), false);

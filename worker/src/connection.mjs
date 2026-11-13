@@ -486,10 +486,15 @@ export class JudgedConnector extends AbstractConnector {
 	 *     that is fine;
 	 *   - finds no file (`absent`): a `.env` gone, for good or for the moment an editor replaces it, is not a file that
 	 *     sets no password, so it does not drop one either (the console says to put the file back before a restart);
-	 *   - stands for another deployment than the one the client was built in (its `envPath` differs): the pi extension's
-	 *     context follows the deployment pointer, and a client built for one deployment's Valkey must never send the next
-	 *     deployment's password to it.
-	 * A context of the same deployment whose file gives none drops it, as a restart would.
+	 *   - no longer names the Valkey the client talks to: its VALKEY_URL (`valkeyUrlFor`, this shell's else the file's, as
+	 *     every client of the process is given) differs from the one the context named when the client was built. A held
+	 *     client never moves to another Valkey, so a password that came with a new VALKEY_URL is the new Valkey's, and sent
+	 *     to the old one it is refused and the pages lose the old Valkey too (review of PR #878, measured with two Valkeys:
+	 *     one deployment moving to another Valkey, and a symlinked deployment folder repointed, whose `.env` path is
+	 *     spelled the same). A rotation keeps the URL, so it is taken;
+	 *   - is read from another `.env` path than the one the client was built with: the pi extension's context follows the
+	 *     deployment pointer, and that alone says the file is another deployment's.
+	 * A context that passes all of these and gives no password drops it, as a restart would.
 	 */
 	[FRESH_PASSWORD]() {
 		const judge = this.options?.[JUDGE];
@@ -502,6 +507,7 @@ export class JudgedConnector extends AbstractConnector {
 		}
 		if (!context || context.error || context.absent === true) return;
 		if ((context.envPath ?? null) !== (judge.context?.envPath ?? null)) return;
+		if (valkeyUrlFor(context).url !== valkeyUrlFor(judge.context).url) return;
 		const { password } = valkeyPasswordFor(judge.url, context);
 		if (password) this.options.password = password;
 		else delete this.options.password;
