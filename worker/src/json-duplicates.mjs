@@ -183,7 +183,13 @@ export function findDuplicateKey(text) {
 			const top = stack[stack.length - 1];
 			if (expectKey && top && top.keys !== null) {
 				const key = readKey();
-				if (top.keys.has(key)) return { key, at: [...path, key].join(".") };
+				// The key is copied on the way out, once: a slice is a view that keeps the whole text alive for as long
+				// as a caller holds the answer, and `secret-bundles.mjs` keeps `key` past the call while its text is a
+				// resolver's output, which holds secret values. JSON's own round trip keeps a lone surrogate as itself.
+				if (top.keys.has(key)) {
+					const own = JSON.parse(JSON.stringify(key));
+					return { key: own, at: [...path, own].join(".") };
+				}
 				top.keys.add(key);
 				path.push(key);
 				top.named = true;

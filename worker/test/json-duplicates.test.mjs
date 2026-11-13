@@ -146,13 +146,19 @@ function mulberry(seed) {
 // means the surrogates: a pair, which JSON.stringify writes raw, and each lone half, which it writes as a
 // `\u` escape, so a key can reach JSON.parse with one half escaped and the other raw.
 const KEY_CHARS = ["a", "b", "Z", "_", "-", ".", " ", '"', "\\", "\n", "\t", "é", "漢", "$", "{", "}", ":", ",", "[", "]", "\u{1f600}", "\ud800", "\udc00"];
+/** What `JSON.stringify` writes as itself: a long key of these is read as a slice. */
+const PLAIN_KEY_CHARS = KEY_CHARS.filter((c) => JSON.stringify(c) === `"${c}"`);
 
 function randomKey(rnd) {
 	let k = "";
 	// Now and then a key of 13 characters or more, the length from which V8 makes a slice a view of the text
-	// rather than a copy, so the keys the Set compares are real slices as well as short copies.
-	const len = rnd() < 0.1 ? 13 + Math.floor(rnd() * 20) : 1 + Math.floor(rnd() * 4);
-	for (let i = 0; i < len; i++) k += KEY_CHARS[Math.floor(rnd() * KEY_CHARS.length)];
+	// rather than a copy, so the keys the Set compares are real slices as well as short copies. Half of those are
+	// drawn from the characters JSON writes without an escape: from the whole alphabet, nearly every long key
+	// holds one and goes to JSON.parse, and two long slices were then compared only by the heap test below.
+	const long = rnd() < 0.1;
+	const len = long ? 13 + Math.floor(rnd() * 20) : 1 + Math.floor(rnd() * 4);
+	const chars = long && rnd() < 0.5 ? PLAIN_KEY_CHARS : KEY_CHARS;
+	for (let i = 0; i < len; i++) k += chars[Math.floor(rnd() * chars.length)];
 	return k;
 }
 
@@ -191,7 +197,10 @@ function generate(rnd, depth, wantDuplicate, path, out) {
 		// Which of the scanner's two ways of reading a key this pair takes (issue #868): both spellings free of
 		// a backslash are two slices, anything else reaches JSON.parse at least once.
 		if (`${JSON.stringify(k)}${spelled}`.includes(B)) out.parsedPairs++;
-		else out.slicedPairs++;
+		else {
+			out.slicedPairs++;
+			if (k.length >= 13) out.longSlicedPairs++;
+		}
 		parts.push(`${spelled}:${generate(rnd, depth + 1, false, path, out)}`);
 	}
 	return `{${parts.join(",")}}`;
@@ -260,7 +269,7 @@ test("a long key costs about its own length, so 2MB keys fit a 32MB heap (issue 
 	// 123MB and a 16MB key ended a process with a 256MB heap, which for these files is a worker that dies at boot
 	// reading its own configuration. A heapUsed delta in this process would depend on when the collector ran, so
 	// the bound is a child whose heap is too small for the old cost. Measured on node 22, this child needs 137MB
-	// with the old decoder and dies here in about 90ms, and 14MB with a slice. It also reads the escaped spelling
+	// with the old decoder and dies here in about 90ms, and 14MB to 18MB with a slice (macOS and Linux, node 22 to 24). It also reads the escaped spelling
 	// (JSON.parse, so that key costs its own decoded length) and a long value, then reports what it found.
 	const script = `
 		import { findDuplicateKey } from ${JSON.stringify(new URL("../src/json-duplicates.mjs", import.meta.url).href)};
@@ -299,7 +308,7 @@ test("a CRLF file is read, not hung on", () => {
 test("the scanner agrees with a generator that knows the answer, over thousands of documents", () => {
 	let checked = 0;
 	let withDuplicate = 0;
-	const out = { injected: null, slicedPairs: 0, parsedPairs: 0 };
+	const out = { injected: null, slicedPairs: 0, longSlicedPairs: 0, parsedPairs: 0 };
 	for (let seed = 1; seed <= 3000; seed++) {
 		const rnd = mulberry(seed);
 		const wantDuplicate = seed % 2 === 0;
@@ -335,6 +344,8 @@ test("the scanner agrees with a generator that knows the answer, over thousands 
 	// And a duplicate has to be found both ways a key is read, or one of them is checked by nothing here.
 	assert.ok(out.slicedPairs > 50, `too few duplicates spelled without an escape on either side: ${out.slicedPairs}`);
 	assert.ok(out.parsedPairs > 50, `too few duplicates spelled with an escape on a side: ${out.parsedPairs}`);
+	// Two long slices, the views of the text a Set compares by content, not by where they start.
+	assert.ok(out.longSlicedPairs > 5, `too few long duplicates read as two slices: ${out.longSlicedPairs}`);
 });
 
 test("this module imports nothing", () => {
