@@ -106,6 +106,33 @@ export function codemodeWorkersOf(memMiB) {
 	return Math.max(1, Math.floor(memMiB / (2 * CODEMODE_WORKER_HEAP_MIB)));
 }
 
+/**
+ * Issue #865: a size's CPUs as a whole count, rounded UP (`1.5` is 2, `0.25` is 1), for a tool's `-j` or worker flag,
+ * which takes no fraction. Up, not down, so no size reads as 0 and a size between two counts gets the larger one: it is
+ * a pool size under a CPU WEIGHT, and the job may already use idle cores beyond its size (the `--cpus` ceiling above).
+ */
+export function wholeCpusOf(cpuCenti) {
+	return Math.ceil(cpuCenti / 100);
+}
+
+/**
+ * Issue #865: the job's size as its own processes can read it, `{ PI_JOB_SIZE_CPUS, PI_JOB_SIZE_MEMORY_MIB }`, both
+ * decimal strings. A job's CPU size is a weight that nothing inside the container can see: `os.availableParallelism()`
+ * reads the cgroup's `cpu.max`, which is the host ceiling (`--cpus`, the same for every job), and `nproc` reads the
+ * affinity mask, which is the whole runtime. So a tool that starts one worker per CPU it sees (jest and vitest by
+ * default) starts one per CEILING CPU, all inside the size's memory, which is the hard bound. These two values are what
+ * a flow, an image or the agent's commands size such a pool from instead.
+ *
+ * INFORMATION, NOT A BOUND: the size is resolved at pickup and enforced by the container's flags; nothing reads these
+ * back. One function, so the job's closed env map (`env-allowlist.mjs`) and the operator's sandbox shell
+ * (`sandbox.mjs`) cannot spell them two ways. Not `PI_JOB_CPUS` and `PI_JOB_MEMORY`: those name the DEPLOYMENT's default
+ * size in `.env`, and a project row can give a job another one.
+ */
+export function jobSizeEnv(size) {
+	assertJobSize(size);
+	return { PI_JOB_SIZE_CPUS: String(wholeCpusOf(size.cpuCenti)), PI_JOB_SIZE_MEMORY_MIB: String(size.memMiB) };
+}
+
 /** The scope prefix of a project row, as `scoped-limits.mjs` spells it (`PROJECT_SCOPE_PREFIX`; a test holds them equal). */
 const PROJECT_ROW_PREFIX = "project:";
 

@@ -11,6 +11,7 @@ import { hostBudgetsOf, readSizeSuggestions } from "../src/read-model.mjs";
 import { projectSizing } from "../src/insights-assembly.mjs";
 import { PAGE_THEME } from "../src/graph-html.mjs";
 import { insightsBody } from "../src/console/panels.mjs";
+import { projectSizing as projectSizingCard } from "../src/console/panels/project.mjs";
 import { INSIGHTS_CAP_MISSING, INSIGHTS_CPU_REASONS, INSIGHTS_MEMORY_HELD, SIZING_NO_CAP_WORDS, INSIGHTS_MEMORY_REASONS, INSIGHTS_SIZE_FACTS, layoutSizingChart, sizeCoresText, sizeCpuText, sizeMemText } from "../src/insights-html.mjs";
 import { CPU_REASONS, MEMORY_CAP_MISSING, MEMORY_HELD, MEMORY_REASONS, SIZE_FACTS, coresText, hostCap, suggestSize } from "@edgehero/pi-dispatch/size-suggest";
 import { formatCpus, formatMemory } from "@edgehero/pi-dispatch/job-size";
@@ -301,6 +302,41 @@ test("dispatch_limit_edit's confirm shows the project's peaks when a size field 
   assert.doesNotMatch(repo.shown[0].message, /runs \(the last/);
   // a row that is not a project's has no note
   assert.equal(indexMod.sizingNote({ logsDir: logs, scopedLimitsPath: join(dir, "nope.json"), projectsFile: join(dir, "projects.json") }, "acme/web", now), "");
+});
+
+test("issue #865: an OOM read off disk names the CPU count its tools counted at least, after the verdict, in the reader, the edit preview, the panel and the console's project card", async () => {
+  // A killed run recorded on `local` with what its host offered at admission: 18 CPUs and a CPU budget of 17.
+  const killed = { ...rec({ reason: "oom-killed", peakMiB: 4096 }), backend: "local", capacity: { slots: 4, memMiB: 15360, cpuCenti: 1700, cpus: 18 } };
+  const pointer = "size per-CPU worker pools from PI_JOB_SIZE_CPUS: the killed run's tools counted at least 17 CPUs at a size of 2 CPUs";
+  const logsDir = logsWith([killed]);
+  const limits = parseScopedLimits(JSON.stringify({ version: 3, limits: [{ scope: "project:shop", memory: "4g" }] }), "sl.json");
+  const res = readSizeSuggestions({ logsDir, projectIds: ["shop"], limits, env: {}, hostBudgets: [{ memMiB: 8192, cpuCenti: 1700 }], nowMs: NOW });
+  assert.equal(res.projects.shop.words.memoryCeiling, pointer);
+  assert.equal(res.projects.shop.words.memory, "1 run ended oom-killed (the largest size killed 4g)", "a word of its own, so the verdict reads as it did");
+  assert.equal(res.projects.shop.call, 'dispatch_limit_edit {"index":0,"memory":"6g"}', "the raise is the same with it");
+  // the dispatch_limit_edit confirm: a sentence after the verdict, as the facts are
+  const dir = tempDir("pd-865-note-");
+  writeFileSync(join(dir, "projects.json"), JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/web"] }] }));
+  const paths = { logsDir, scopedLimitsPath: join(dir, "absent.json"), projectsFile: join(dir, "projects.json") };
+  assert.ok(indexMod.sizingNote(paths, "project:shop", NOW).endsWith(`(oom-killed: 1 run ended oom-killed (the largest size killed 4g); budget not checked here), CPUs not enough runs at 2 CPUs (1). Size per-CPU worker pools from PI_JOB_SIZE_CPUS: the killed run's tools counted at least 17 CPUs at a size of 2 CPUs.`));
+  // the console's project card: its last note, after the verdicts, the facts and a refusal; the exact call's block sits
+  // below the notes, as it does for every suggestion
+  const card = (sizing, role = "viewer") => String(projectSizingCard({ role, readOnly: false, data: { projectView: { state: "ready", id: "shop", now: NOW, size: { memMiB: 4096, cpuCenti: 200 }, sizing } } }));
+  const markup = card(res.projects.shop, "operator");
+  const said = pointer.replace("run's", "run&#39;s");
+  assert.ok(markup.includes(said), markup);
+  assert.ok(markup.indexOf("Memory: suggest") < markup.indexOf(said), "after the memory verdict");
+  assert.ok(markup.indexOf(said) < markup.indexOf("The exact call"), "and above the call's block, which follows the notes");
+  const refused = { ...res.projects.shop, call: null, words: { ...res.projects.shop.words, memoryFact: "1 of 1 run reached the memory limit while stalled for memory more than 1% of their time", refusal: "memory 6g is above every live host's budget" } };
+  const ordered = card(refused);
+  const where = ["Memory: suggest", "reached the memory limit", "above every live host", said].map((t) => ordered.indexOf(t));
+  assert.ok(where.every((n) => n >= 0) && where.every((n, i) => i === 0 || where[i - 1] < n), `verdict, fact, refusal, then the pointer: ${where}`);
+  // the panel's PROJECTS view: a dim line with the facts, under the call
+  const panel = (await projectsAt(140, { ...sizingInfo(), projects: { ...sizingInfo().projects, shop: res.projects.shop } })).lines.map(content).join("\n");
+  assert.match(panel, /^dispatch_limit_edit \{"index":0,"memory":"6g"\}\nsize per-CPU worker pools from PI_JOB_SIZE_CPUS: the killed\nrun's tools counted at least 17 CPUs at a size of 2 CPUs\ngithub:acme\/web$/m);
+  // the same run on OpenShell, whose --cpu is the size, says nothing more anywhere
+  const shell = readSizeSuggestions({ logsDir: logsWith([{ ...killed, backend: "openshell" }]), projectIds: ["shop"], limits, env: {}, nowMs: NOW });
+  assert.deepEqual([shell.projects.shop.words.memory, shell.projects.shop.words.memoryCeiling], ["1 run ended oom-killed (the largest size killed 4g)", ""]);
 });
 
 test("sizingNote names a project with no measured runs, and a limits file that does not load", () => {

@@ -37,6 +37,10 @@ export const CONTAINER_ENV_NAMES = new Set([
 	"PI_RUNNER_OBSERVABLE",
 	// Issue #693: derived from the resolved job memory, never chosen by a trigger or forwarded host value.
 	"PI_CODEMODE_MAX_WORKERS",
+	// Issue #865: the job's size as the job reads it (job-size.mjs `jobSizeEnv`). A trigger binding one through
+	// run.secrets, or a forwarded host value, would tell the job's tools a size the container was not given.
+	"PI_JOB_SIZE_CPUS",
+	"PI_JOB_SIZE_MEMORY_MIB",
 	"PI_PROVIDER",
 	"PI_MODEL",
 	"PI_FORK_ENTRY",

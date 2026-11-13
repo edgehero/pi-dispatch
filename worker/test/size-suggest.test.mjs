@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { RECORD_CLOCK_SKEW_MS } from "../src/run-history.mjs";
 import { neverFits } from "../src/host-budget.mjs";
+import { BACKEND_NAMES, OPENSHELL_BACKENDS } from "../src/backends.mjs";
 import {
+	CEILING_VENUES,
 	CPU_REASONS,
 	MEMORY_CAP_MISSING,
 	MEMORY_HELD,
@@ -109,7 +111,7 @@ test("a CPU size rounds UP to a 0.25 step, never below 0.25 nor above the ceilin
 });
 
 test("memory: fewer than 10 runs is not enough, exactly 10 decides", () => {
-	const ev = (samples) => ({ samples, smaller: 0, p95MiB: 3072, maxPeakMiB: 3072, ooms: 0, largestOomMiB: null, pressured: 0 });
+	const ev = (samples) => ({ samples, smaller: 0, p95MiB: 3072, maxPeakMiB: 3072, ooms: 0, largestOomMiB: null, pressured: 0, oomCeiling: null });
 	assert.deepEqual(mem(runs(9, { peakMiB: 3072 })), { current: 4096, suggested: null, reason: "not-enough-runs", evidence: ev(9), ...NO, cap: ROOMY.memMiB, capMissing: null });
 	assert.deepEqual(mem(runs(10, { peakMiB: 3072 })), { current: 4096, suggested: null, reason: "fits", evidence: ev(10), ...NO, cap: ROOMY.memMiB, capMissing: null });
 	assert.equal(mem([]).reason, "not-enough-runs");
@@ -165,7 +167,7 @@ test("an OOM is the record's reason, never its outcome alone: another policy ref
 
 test("memory: an OOM raises ONE step, to 1.5x the larger of the size and the largest OOM-killed size in the window", () => {
 	const oom = rec({ i: 0, reason: "oom-killed", peakMiB: 4096 });
-	assert.deepEqual(mem([oom]), { current: 4096, suggested: 6144, reason: "oom-killed", evidence: { samples: 1, smaller: 0, p95MiB: 4096, maxPeakMiB: 4096, ooms: 1, largestOomMiB: 4096, pressured: 0 }, fact: null, held: null, wanted: 6144, cap: ROOMY.memMiB, capMissing: null, overBudget: false });
+	assert.deepEqual(mem([oom]), { current: 4096, suggested: 6144, reason: "oom-killed", evidence: { samples: 1, smaller: 0, p95MiB: 4096, maxPeakMiB: 4096, ooms: 1, largestOomMiB: 4096, pressured: 0, oomCeiling: null }, fact: null, held: null, wanted: 6144, cap: ROOMY.memMiB, capMissing: null, overBudget: false });
 	// an OOM at a LARGER size than now (a lowering that went too far): 1.5x of that size, 8g -> 12g
 	assert.equal(mem([rec({ i: 0, memMiB: 8192, reason: "oom-killed", peakMiB: 8192 })]).suggested, 12288);
 	// the p95 asks for nothing: heavy runs at 8g beside an OOM at 4g still raise to 6g, not 1.25x their 7g
@@ -548,6 +550,107 @@ test("the words: singular one core and one CPU, held raises as what the host off
 	for (const w of [fits, pressed, suggestionEvidence(suggest(oom, { cap: { memMiB: 5120 } })), suggestionEvidence(suggest(oom, { cap: null }))]) {
 		for (const text of Object.values(w)) assert.doesNotMatch(text, /raise|increase|grow/i, text);
 	}
+});
+
+// --- issue #865: what CPU count the killed runs' tools counted at least ---------------------------------------------------------------
+
+/** An oom-killed run of `web` on `backend`, whose record says what the host offered at admission (`capacity`). */
+const killed = ({ i = 0, backend = "local", capacity = { slots: 4, memMiB: 15360, cpuCenti: 1700, cpus: 18 }, cpuCenti = 200, memMiB = 4096, ago = i + 1 } = {}) => ({ ...rec({ i, ago, memMiB, cpuCenti, reason: "oom-killed", peakMiB: memMiB }), backend, capacity });
+const POINTER = "size per-CPU worker pools from PI_JOB_SIZE_CPUS: ";
+const one = (seenCpus, sizeCenti = 200) => ({ runs: 1, seenCpus, seenMaxCpus: seenCpus, sizeCenti, sizeVaries: false });
+
+test("issue #865: an OOM on a ceiling venue says what CPU count the killed run's tools counted at least, in a word of its own", () => {
+	const s = suggest([killed()]);
+	assert.deepEqual(s.memory.evidence.oomCeiling, one(17));
+	const words = suggestionEvidence(s);
+	assert.equal(words.memoryCeiling, `${POINTER}the killed run's tools counted at least 17 CPUs at a size of 2 CPUs`);
+	// its own word, so the OOM words, and what a surface prints before the facts, are the ones they were
+	assert.equal(words.memory, "1 run ended oom-killed (the largest size killed 4g)");
+	// the raise itself is the same with or without it: a pointer, never a call
+	assert.deepEqual([s.memory.reason, s.memory.suggested], ["oom-killed", 6144]);
+	assert.deepEqual(suggest([killed({ backend: "podman" })]).memory.evidence.oomCeiling, one(17), "podman jobs get the same ceiling");
+	// and only an OOM's words carry it
+	assert.equal(suggestionEvidence(suggest(runs(10, { peakMiB: 3072 }))).memoryCeiling, "");
+});
+
+test("issue #865: the ceiling is the worker's own, from the record's capacity, and a tool counts at least it in whole CPUs ROUNDED DOWN", () => {
+	const seen = (capacity) => suggest([killed({ capacity })]).memory.evidence.oomCeiling?.seenCpus ?? null;
+	assert.equal(seen({ slots: 4, memMiB: "off", cpuCenti: "off", cpus: 18 }), 17, "budget off: 18 CPUs less the reserve of one");
+	assert.equal(seen({ slots: 4, memMiB: null, cpuCenti: null, cpus: 18 }), 17, "budget unknown: the same");
+	assert.equal(seen({ slots: 4, memMiB: 1, cpuCenti: 350, cpus: 18 }), 3, "a budget of 3.5 is a --cpus=3.5, which availableParallelism() reads as 3");
+	assert.equal(seen({ slots: 4, memMiB: 1, cpuCenti: 399, cpus: 18 }), 3, "and 3.99 as 3");
+	assert.equal(seen({ slots: 4, memMiB: 1, cpuCenti: 2400, cpus: 18 }), 18, "a budget above the runtime is capped at it");
+	assert.equal(seen({ slots: 4, memMiB: 1, cpuCenti: 1200, cpus: null }), 12, "the budget alone");
+	assert.equal(seen({ slots: 4, memMiB: 1, cpuCenti: "off", cpus: 3 }), 3, "under four CPUs no reserve is taken");
+	// the record is judged again: a count or budget that is not one names nothing
+	for (const cpus of [0, -4, 1.5, "18", 4097, null]) assert.equal(seen({ cpuCenti: "off", cpus }), null, `cpus ${String(cpus)}`);
+	assert.equal(seen({ cpuCenti: 409601, cpus: 18 }), 17, "a budget past any host is unknown, so the count decides");
+});
+
+test("issue #865: the clause is left out where the tools read the size, or the record cannot say what they read", () => {
+	for (const backend of OPENSHELL_BACKENDS) assert.equal(suggest([killed({ backend })]).memory.evidence.oomCeiling, null, `${backend}: its --cpu is the size`);
+	for (const backend of [null, "far", "toString"]) assert.equal(suggest([killed({ backend })]).memory.evidence.oomCeiling, null, `backend ${String(backend)}`);
+	for (const capacity of [null, [], "18", { slots: 4 }]) assert.equal(suggest([killed({ capacity })]).memory.evidence.oomCeiling, null, `capacity ${JSON.stringify(capacity)}`);
+	// a record from before either key (a venue from #277, a capacity from #599) names no ceiling
+	const { backend: _venue, ...noVenue } = killed();
+	const { capacity: _capacity, ...noCapacity } = killed();
+	for (const record of [noVenue, noCapacity]) assert.equal(suggest([record]).memory.evidence.oomCeiling, null);
+	for (const s of [suggest([killed({ backend: "openshell" })]), suggest([killed({ capacity: null })])]) {
+		assert.deepEqual([suggestionEvidence(s).memory, suggestionEvidence(s).memoryCeiling], ["1 run ended oom-killed (the largest size killed 4g)", ""]);
+	}
+	// a run that was not killed says nothing about it, whatever its ceiling
+	assert.equal(suggest([{ ...rec({ peakMiB: 4096 }), backend: "local", capacity: { cpus: 18, cpuCenti: 1700 } }]).memory.evidence.oomCeiling, null);
+	// nor does a kill at a smaller size than now, which no longer decides the raise
+	assert.equal(suggest([killed({ memMiB: 2048 })]).memory.evidence.oomCeiling, null);
+});
+
+test("issue #865: only more whole CPUs than PI_JOB_SIZE_CPUS says is worth saying, the ceiling rounded down and the size up", () => {
+	const at = (cpus, cpuCenti) => suggest([killed({ capacity: { cpus: 64, cpuCenti }, cpuCenti: cpus })], { current: { memMiB: 4096, cpuCenti: cpus } }).memory.evidence.oomCeiling;
+	assert.equal(at(200, 200), null, "a ceiling equal to the size");
+	assert.equal(at(200, 150), null, "a ceiling below it");
+	assert.equal(at(200, 250), null, "--cpus=2.5 reads as 2, which is what the variable already says at size 2");
+	assert.equal(at(200, 299), null, "and 2.99 too");
+	assert.deepEqual(at(200, 300), one(3), "3 whole CPUs at size 2");
+	assert.equal(at(250, 301), null, "2.5 reads as 3, and a ceiling of 3.01 reads as 3");
+	assert.equal(at(250, 350), null, "nor --cpus=3.5, read as 3");
+	assert.equal(at(250, 399), null);
+	assert.deepEqual(at(250, 400), one(4, 250), "4 at size 2.5");
+	assert.deepEqual(at(25, 200), one(2, 25), "0.25 reads as 1");
+	assert.equal(at(25, 199), null, "a ceiling of 1.99 reads as 1");
+	// Under one CPU libuv's quota is 0, which it skips (at SEEN_CPUS_LIBUV, the libuv of the job image's Node): the tools
+	// read the WHOLE runtime, the record's 64 here, never 1.
+	assert.deepEqual(at(25, 50), one(64, 25), "a --cpus=0.5 reads as the runtime's 64");
+	assert.deepEqual(at(25, 99), one(64, 25), "and 0.99 too");
+	assert.deepEqual(at(25, 100), null, "while 1.00 reads as 1, what the variable says at 0.25");
+	// with the runtime's count unknown there is nothing to say, rather than a guess
+	assert.equal(suggest([killed({ capacity: { cpuCenti: 50, cpus: null }, cpuCenti: 25 })], { current: { memMiB: 4096, cpuCenti: 25 } }).memory.evidence.oomCeiling, null);
+	assert.equal(suggestionEvidence(suggest([killed({ capacity: { cpus: 64, cpuCenti: 50 }, cpuCenti: 25 })], { current: { memMiB: 4096, cpuCenti: 25 } })).memoryCeiling, `${POINTER}the killed run's tools counted at least 64 CPUs at a size of 0.25 CPUs`);
+});
+
+test("issue #865: several killed runs are counted, and a range is said only for what varies, ceiling or size", () => {
+	const words = (records) => suggestionEvidence(suggest(records)).memoryCeiling;
+	assert.equal(words([killed({ i: 0 }), killed({ i: 1 })]), `${POINTER}the killed runs' tools counted at least 17 CPUs at a size of 2 CPUs`);
+	assert.equal(words([killed({ i: 0 }), killed({ i: 1, backend: "openshell" })]), `${POINTER}the tools of 1 of the 2 killed runs counted at least 17 CPUs at a size of 2 CPUs`);
+	// the ceilings differ, the sizes do not
+	const hosts = [killed({ i: 0 }), killed({ i: 1, capacity: { cpus: 8, cpuCenti: "off" } })];
+	assert.deepEqual(suggest(hosts).memory.evidence.oomCeiling, { runs: 2, seenCpus: 7, seenMaxCpus: 17, sizeCenti: 200, sizeVaries: false });
+	assert.equal(words(hosts), `${POINTER}the killed runs' tools counted at least 7 to 17 CPUs at a size of 2 CPUs`);
+	// the sizes differ, the ceilings do not
+	const sizes = [killed({ i: 0 }), killed({ i: 1, cpuCenti: 300 })];
+	assert.deepEqual(suggest(sizes).memory.evidence.oomCeiling, { runs: 2, seenCpus: 17, seenMaxCpus: 17, sizeCenti: 200, sizeVaries: true });
+	assert.equal(words(sizes), `${POINTER}the killed runs' tools counted at least 17 CPUs at sizes from 2 CPUs`);
+	// both
+	const both = [...hosts, killed({ i: 2, cpuCenti: 300 })];
+	assert.deepEqual(suggest(both).memory.evidence.oomCeiling, { runs: 3, seenCpus: 7, seenMaxCpus: 17, sizeCenti: 200, sizeVaries: true });
+	assert.equal(words(both), `${POINTER}the killed runs' tools counted at least 7 to 17 CPUs at sizes from 2 CPUs`);
+	// a pointer, not a call: nothing in it advises a larger size or a larger budget
+	assert.doesNotMatch(words(both), /raise|increase|grow/i);
+});
+
+test("issue #865: every venue either sets the host ceiling as --cpus or is an OpenShell venue, whose --cpu is the size", () => {
+	// A new venue fails here until someone says which it is, so a clause is never said, or left out, on a guess.
+	assert.deepEqual([...CEILING_VENUES, ...OPENSHELL_BACKENDS].sort(), [...BACKEND_NAMES].sort());
+	assert.ok(CEILING_VENUES.every((v) => !OPENSHELL_BACKENDS.includes(v)));
 });
 
 test("with hosts, each dimension is capped per host against the size the OTHER dimension will have", () => {
