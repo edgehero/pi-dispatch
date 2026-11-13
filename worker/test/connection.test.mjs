@@ -507,6 +507,42 @@ test("a bounded failFast client says a command that reached a silent Valkey may 
 	await answer;
 });
 
+test("the hook marks nothing on a client without the bound: a written command's lost answer on any other client carries no mark (#867)", { timeout: 15000 }, async () => {
+	// The console branches on `valkeyMayStillRun` (a confirm's "may or may not", an audit row's reason, the panel's note),
+	// so a mark leaking onto its clients would change what it says. Each client below writes a command Valkey never
+	// answers and is then dropped, so the command fails with "Connection is closed.", a lost answer by the hook's rule.
+	const valkey = await listeningValkey((text) => (/frozen-write/.test(text) ? "silent" : "answer"));
+	const url = `redis://127.0.0.1:${valkey.port}`;
+	const clients = {
+		"a plain client (a worker's, a receiver's)": () => makeRedisClient(url, { context: {}, judge: judgeHere }),
+		"a BoundedRedis (cancel's probe, the console's own)": () => makeRedisClient(url, { context: {}, judge: judgeHere, commandTimeoutMs: 60_000 }),
+		"a failFast queue client without the bound (the console's fleet reader)": () => new Redis(parseConnection(url, { context: {}, judge: judgeHere, failFast: true })),
+		"a failFast client with the bound": () => new Redis(parseConnection(url, { context: {}, judge: judgeHere, failFast: true, commandTimeoutMs: 60_000 })),
+	};
+	const marks = {};
+	try {
+		for (const [name, make] of Object.entries(clients)) {
+			const client = make();
+			client.on("error", () => {});
+			await within(new Promise((resolve) => client.once("ready", resolve)));
+			const answer = client.set("frozen-write", "1").catch((err) => err);
+			await new Promise((resolve) => setImmediate(resolve));
+			client.disconnect();
+			const err = await within(answer);
+			assert.equal(err.message, "Connection is closed.", name);
+			marks[name] = err.valkeyMayStillRun;
+		}
+	} finally {
+		valkey.close();
+	}
+	assert.deepEqual(marks, {
+		"a plain client (a worker's, a receiver's)": undefined,
+		"a BoundedRedis (cancel's probe, the console's own)": undefined,
+		"a failFast queue client without the bound (the console's fleet reader)": undefined,
+		"a failFast client with the bound": true,
+	});
+});
+
 /**
  * A loopback proxy to the real Valkey that can stop passing bytes either way and later pass what it held, in order: a
  * `kill -STOP` and a `kill -CONT` of that Valkey as one client sees them, without a Valkey process of the test's own.

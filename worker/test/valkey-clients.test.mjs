@@ -119,16 +119,22 @@ test("no file constructs a Valkey client except through connection.mjs' judged c
 // Issue #867: a command bound on a BullMQ connection (`parseConnection`'s `commandTimeoutMs`) is for `cancel`'s one-shot
 // queues. A Worker's blocking reads wait longer than any bound by design and a long-lived reader rides an outage out, so
 // neither may get it by accident: `parseConnection` refuses it without `failFast` (connection.test.mjs), and no other file
-// passes it. A caller that should (the console's fleet reader, #842) adds itself here, with its reason.
-test("the command bound on a BullMQ connection is passed in one file, cancel's, so no Worker or long-lived client gets it by accident (#867)", () => {
-	const passes = /\bparseConn(?:ection)?(?:Fn)?\([^;]*\bcommandTimeoutMs\b/;
-	const files = sources();
-	const allowed = ["worker/src/connection.mjs", "worker/src/cancel-cli.mjs"];
-	assert.deepEqual(files.filter((f) => passes.test(f.code) && !allowed.includes(f.path)).map((f) => f.path), []);
-	// Non-vacuity: cancel's lookup is found in the shape the pattern looks for, and a planted second caller is caught.
-	assert.match(files.find((f) => f.path === "worker/src/cancel-cli.mjs").code, /mkQueue\(parseConn\(url, \{ failFast: true, commandTimeoutMs: bound \}\), \{ name \}\)/);
+// passes it. A caller that should (the console's fleet reader, #842) adds its line here, with its reason.
+test("the command bound on a BullMQ connection is passed at one line, cancel's lookup, so no Worker or long-lived client gets it by accident (#867)", () => {
+	// Read a line at a time, comments stripped; each exemption must match exactly one line, so a second caller in either
+	// file is no exemption of its own.
+	const passes = /\bparseConn(?:ection)?(?:Fn)?\([^)]*\bcommandTimeoutMs\b/;
+	const EXEMPT = [
+		{ path: "worker/src/connection.mjs", line: /^export function parseConnection\(url, \{[^)]*commandTimeoutMs = null \} = \{\}\) \{$/, why: "the option's own definition" },
+		{ path: "worker/src/cancel-cli.mjs", line: /^\t\t\tconst q = mkQueue\(parseConn\(url, \{ failFast: true, commandTimeoutMs: bound \}\), \{ name \}\);$/, why: "cancel's lookup, the one caller" },
+	];
+	const hits = sources().flatMap((f) => f.code.split("\n").filter((line) => passes.test(line)).map((line) => ({ path: f.path, line })));
+	for (const { path, line, why } of EXEMPT) assert.equal(hits.filter((h) => h.path === path && line.test(h.line)).length, 1, `${path}: ${why}, exactly one line`);
+	assert.deepEqual(hits.filter((h) => !EXEMPT.some((e) => e.path === h.path && e.line.test(h.line))).map((h) => `${h.path}: ${h.line.trim()}`), []);
+	// Non-vacuity: the pattern catches a second caller in the shapes a caller would write, and not a raw client's own bound.
 	for (const code of ["makeQueue(parseConnection(url, { failFast: true, commandTimeoutMs: 5000 }))", "parseConnectionFn(u, { commandTimeoutMs })"]) assert.ok(passes.test(code), code);
 	assert.ok(!passes.test("makeRedisClient(url, { commandTimeoutMs: 5000 })"), "a raw client's bound is makeRedisClient's own");
+	assert.ok(!passes.test("const options = { ...parseConnection(url, { failFast, servername }), ...(bounded ? { commandTimeout: commandTimeoutMs } : {}) };"), "a bound applied beside the options is not one passed in");
 });
 
 // Issue #468: the credential is part of the ONE connection function too. Every client of the project (the worker, the
