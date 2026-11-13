@@ -22,6 +22,7 @@ import { OBSERVATION_FIX } from "../src/backends.mjs";
 import { PODMAN_JOB_USER_FIX } from "../src/backend-podman.mjs";
 import { loadConfig, underOsTempDir } from "../src/config.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { flowBasisOf } from "../src/host-loads.mjs";
 import { usdFingerprint } from "../src/dollar-fingerprint.mjs";
 import { projectsFingerprint } from "../src/projects.mjs";
 import { appliedSplitChecks, envelopeChecks, fleetEnvelopeChecks, loadEnvelopeAsTheWorker } from "../src/doctor.mjs";
@@ -12874,11 +12875,13 @@ test("doctor publishes what this host's jobs can load beside its record, and eac
 		{ name: "local", transport: "stdio", where: "my-server", exposure: "codemode", enabled: false, keys: ["ARG_KEY"] },
 	]);
 	assert.deepEqual(loads.packages, [{ name: "wf-tools", version: "1.0.0" }]);
+	// Each with the basis of what it was judged from (issue #869): the fields `flowTierOf` read, and nothing else of its trigger.
+	const basis = (run) => flowBasisOf({ run });
 	assert.deepEqual(loads.flows, [
-		{ trigger: 0, flow: "review", tier: "overlay", package: null, repo: "absent" },
-		{ trigger: 1, flow: "packed", tier: "package", package: "wf-tools", repo: "unknown" },
-		{ trigger: 2, flow: "nowhere", tier: "unknown", package: null, repo: "unknown" },
-		{ trigger: 3, flow: "nowhere", tier: "none", package: null, repo: "absent" },
+		{ trigger: 0, flow: "review", tier: "overlay", package: null, repo: "absent", basis: basis({ folder: "/srv/repo", flow: "review" }) },
+		{ trigger: 1, flow: "packed", tier: "package", package: "wf-tools", repo: "unknown", basis: basis({ flow: "packed" }) },
+		{ trigger: 2, flow: "nowhere", tier: "unknown", package: null, repo: "unknown", basis: basis({ flow: "nowhere" }) },
+		{ trigger: 3, flow: "nowhere", tier: "none", package: null, repo: "absent", basis: basis({ folder: "/srv/repo", flow: "nowhere", packages: false }) },
 	], "a forge's repository is not on a host, so a forge trigger found nowhere reads unknown; a local one checked everywhere reads none");
 	assert.deepEqual(loads.more, {});
 	assert.equal(Object.hasOwn(loads, "unread"), false);
@@ -12888,6 +12891,48 @@ test("doctor publishes what this host's jobs can load beside its record, and eac
 	assert.match(text(), /⚠ Trigger flow "nowhere" resolves in NO tier visible here \(label trigger #2\)/);
 	const json = JSON.stringify(loads);
 	for (const leak of [dir, "/usr/local/bin", "/mcp/", "Bearer", "--secret-arg", SEEDED_KEY, SEEDED_PASSWORD]) assert.ok(!json.includes(leak), `${leak} reached the published loads`);
+});
+
+// Issue #869: the console answers from a flow row only where its basis is the one the console computes from the file it reads
+// (`flowAnswer`), so the two sides must compute it alike from one text, for every shape a trigger's flow fields can take. Doctor's
+// side is a real run's publication, and the console's is the trigger page's own read of the file.
+test("doctor's published basis and the console's read of the same triggers file agree for every trigger shape, and a disarmed one-shot has no row (#869)", { skip: skipNoPi }, async () => {
+	const dir = overlay({ skills: ["review"] });
+	const triggers = join(dir, "triggers.json");
+	const cron = (id, run) => ({ on: { type: "cron", id, pattern: "0 3 * * *" }, run: { kind: "local", folder: "/srv/repo", flow: "review", task: "t", ...run } });
+	const label = (run) => ({ on: { type: "label", any: ["pi"] }, run: { kind: "github", flow: "review", ...run } });
+	const entries = [
+		cron("plain", {}),
+		cron("withheld", { packages: false }),
+		cron("loading", { packages: true, skillsDir: join(dir, "trigger-skills") }),
+		cron("relative", { skillsDir: "trigger-skills" }),
+		label({}),
+		{ on: { type: "label", any: ["pi"] }, run: { kind: "gitlab", flow: "review", packages: false } },
+		label({ excludeExtensions: ["pi-b", "pi-a"] }),
+		label({ excludeExtensions: ["pi-a", "pi-b"] }),
+		{ on: { type: "issue", action: ["closed"], number: 40, once: true, disarmed: { at: "2026-11-01T00:00:00Z", jobId: "gh-1" } }, run: { kind: "github", flow: "review" } },
+	];
+	const text = JSON.stringify({ version: 2, triggers: entries });
+	writeFileSync(triggers, text);
+	const published = [];
+	const spawn = fakeSpawn({ ...green, [gitKey("/srv/repo", "rev-parse")]: { code: 0, output: `${"a".repeat(40)}\n` }, [gitKey("/srv/repo", "ls-tree")]: { code: 0, output: "" } });
+	await runDoctor({ ...publishEnv(triggers), PI_GLOBAL_PI_DIR: dir }, publishDeps(capture().out, { publish: true, fileExists: existsSync, cwd: tmpdir(), agentDir: NO_AGENT_DIR, spawn, publishDoctor: async (url, name, record, loads) => published.push(loads) }));
+	const rows = published[0].flows;
+	const { flowAnswer, readTriggerGetsEntry } = await import("../../admin/src/trigger-gets-view.mjs");
+	const read = (index) => readTriggerGetsEntry({ triggersPath: triggers, index });
+	assert.deepEqual(rows.map((row) => row.trigger), [0, 1, 2, 3, 4, 5, 6, 7], "the disarmed one-shot is the loader's sentinel, which names no flow");
+	for (const row of rows) {
+		const { trigger } = read(row.trigger);
+		assert.equal(trigger.flowBasis, row.basis, `trigger ${row.trigger}: the console's basis is doctor's`);
+		assert.notEqual(flowAnswer({ flows: [row] }, trigger), null, `trigger ${row.trigger}: so the console answers from it`);
+	}
+	assert.equal(rows[6].basis, rows[7].basis, "the order of run.excludeExtensions is no difference to flowTierOf, nor to its basis");
+	assert.equal(new Set(rows.slice(0, 7).map((row) => row.basis)).size, 7, "and every other shape here differs in a field flowTierOf reads");
+	// The one-shot's console basis is its sentinel's too, so a row doctor published while it was armed answers for the file as it was.
+	const spent = read(8).trigger;
+	assert.equal(spent.flowBasis, flowBasisOf({ on: { type: "disarmed" }, run: {} }));
+	const armed = { trigger: 8, flow: "review", tier: "overlay", package: null, repo: "unknown", basis: flowBasisOf({ run: { kind: "github", flow: "review" } }) };
+	assert.equal(flowAnswer({ flows: [armed] }, spent), null);
 });
 
 test("a part this run cannot read is named `unread`, a flow that fails the charset is not published, and the doctor record goes out whatever happens (#800)", { skip: skipNoPi }, async () => {
@@ -12907,7 +12952,7 @@ test("a part this run cannot read is named `unread`, a flow that fails the chars
 	assert.deepEqual(loads.unread, ["extensions", "mcp", "packages"], "an ignore file the host cannot read as a job does, a file that does not parse, a manifest that does not read");
 	assert.deepEqual([loads.extensions, loads.mcp, loads.packages], [[], [], []]);
 	assert.equal(loads.overlayExtensionsAllowed, false, "PI_GLOBAL_ALLOW_EXTENSIONS=0");
-	assert.deepEqual(loads.flows, [{ trigger: 0, flow: null, tier: "none", package: null, repo: "unknown" }]);
+	assert.deepEqual(loads.flows, [{ trigger: 0, flow: null, tier: "none", package: null, repo: "unknown", basis: flowBasisOf({ run: { folder: "/srv/repo", flow: "Not A Skill" } }) }]);
 	assert.ok(!JSON.stringify(loads).includes("Not A Skill") && !JSON.stringify(loads).includes("secret.ts"));
 
 	// A host with no overlay has nothing to hide and nothing it could not read.

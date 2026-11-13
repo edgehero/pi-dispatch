@@ -2892,11 +2892,18 @@ export function readTriggers({ triggersPath, fs = nodeFs }) {
 
 /** Whether the loaders' own parser refuses these bytes. Pure: `parseTriggers` reads no file and no network, so asking it of text already read is no new read. */
 export function loaderRefuses(text, path) {
+  return loaderTriggers(text, path) === null;
+}
+
+/**
+ * The entries as the loaders' own parser hands them on, by file position, or null where it refuses these bytes: what doctor reads
+ * of the same file (issue #869, `flowBasisOf`). Pure, `loaderRefuses`' read.
+ */
+export function loaderTriggers(text, path) {
   try {
-    parseTriggers(text, path);
-    return false;
+    return parseTriggers(text, path);
   } catch {
-    return true;
+    return null;
   }
 }
 

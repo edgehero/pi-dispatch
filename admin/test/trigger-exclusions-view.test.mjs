@@ -62,7 +62,7 @@ test("a package or an overlay entry the file leaves out is no difference between
 
 test("doctor's answer naming a package the file now leaves out is no answer for the file as it is", async () => {
   const out = await view({ a: { packages: [PI_LINT], ...answered("package", "pi-lint") } }, { ...COMMENT, excludeExtensions: ["pi-lint"] });
-  assert.equal(out.flow.doctor, "a has no answer for it yet.");
+  assert.equal(out.flow.doctor, "a has no answer for it.");
   const beside = await view({ a: { packages: [PI_LINT], ...answered("package", "pi-lint") }, b: { packages: [PI_LINT], ...answered("package", "pi-lint") } }, { ...COMMENT, excludeExtensions: ["pi-lint"] });
   assert.deepEqual(beside.pills.map((pill) => pill.word), ["no answer for its flow", "no answer for its flow"], "not known to differ, and not the same");
   const kept = await view({ a: { packages: [PI_LINT], ...answered("package", "pi-lint") } });

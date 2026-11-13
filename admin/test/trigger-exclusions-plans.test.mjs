@@ -253,8 +253,8 @@ test("a package that is doctor's only answer for the flow warns, of each real sh
   const row = (tier, pkg, repo = "unknown", flow = "fix", trigger = 1) => ({ flows: [{ trigger, flow, tier, package: pkg, repo }] });
   const say = (name) => `${name}, which this change leaves out. A job there runs without its flow unless something else it loads holds it, such as its repository.`;
   const lost = async (loads, change = { excludeExtensions: ["pi-lint"] }, entry = comment()) => (await world({ entry, loads, live: loads.map((h) => h.name) }).preview(change)).plan.warnings.filter((line) => line.includes("which this change leaves out"));
-  assert.deepEqual(await lost([host("a", { packages: [PI_LINT], ...row("package", "pi-lint") }), host("b", { packages: [PI_LINT], ...row("package", "pi-lint") })]), [`a and b find fix in ${say("pi-lint")}`]);
-  assert.deepEqual(await lost([host("a", { packages: [PI_LINT], ...row("package", "pi-lint") }), host("b", { packages: [PI_LINT], ...row("repository", null, "present") })]), [`a finds fix in ${say("pi-lint")}`], "a host that finds it higher up is not named");
+  assert.deepEqual(await lost([host("a", { packages: [PI_LINT], ...row("package", "pi-lint") }), host("b", { packages: [PI_LINT], ...row("package", "pi-lint") })]), [`As doctor last read it, a and b find fix in ${say("pi-lint")}`]);
+  assert.deepEqual(await lost([host("a", { packages: [PI_LINT], ...row("package", "pi-lint") }), host("b", { packages: [PI_LINT], ...row("repository", null, "present") })]), [`As doctor last read it, a finds fix in ${say("pi-lint")}`], "a host that finds it higher up is not named");
   assert.deepEqual(await lost([host("a", { packages: [PI_LINT], ...row("overlay", null) })]), [], "a tier above the packages holds it");
   assert.deepEqual(await lost([host("a", { packages: [PI_LINT], ...row("package", "other") })]), [], "another package holds it");
   assert.deepEqual(await lost([host("a", { packages: [PI_LINT], ...row("package", "pi-lint", "unknown", "other") })]), [], "another flow's answer");
