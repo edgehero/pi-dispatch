@@ -106,7 +106,7 @@ test("opening, attaching and --list neither read nor compare a preparation's set
 		const refusal = (env, file = dir) => sandboxDeploymentEnv({ dir: file, env: { HOME: homedir(), ...env }, expectedHost: "mini1", platform, preparing: true }).message ?? "";
 		assert.match(refusal({}), /PI_PROJECTS_FILE line cannot be read .*before preparing/, `${platform}: a line the service's shell expands`);
 		const readable = deployment("PI_WORKER_NAME=mini1\nPI_JOB_IMAGE=pi-job:deployment\nPI_SCOPED_LIMITS_FILE=limits.json\n");
-		assert.match(refusal({ PI_JOB_MEMORY: "8g" }, readable), /shell sets PI_JOB_MEMORY, which the deployment does not; .*before preparing/);
+		assert.match(refusal({ PI_JOB_MEMORY: "8g" }, readable), /shell sets PI_JOB_MEMORY, which the deployment's \.env does not set; .*before preparing/);
 		assert.match(refusal({ PI_SCOPED_LIMITS_FILE: join(readable, "limits.json") }, readable), /disagrees with the deployment for PI_SCOPED_LIMITS_FILE; .*before preparing/, "an absolute spelling is another value");
 		assert.match(refusal({ PI_JOB_IMAGE: "pi-job:other" }, readable), /disagrees with the deployment for PI_JOB_IMAGE/);
 		const agreed = sandboxDeploymentEnv({ dir: readable, env: { HOME: homedir(), PI_JOB_IMAGE: "pi-job:deployment" }, expectedHost: "mini1", platform, preparing: true });

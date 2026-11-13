@@ -67,7 +67,7 @@ export function sandboxDeploymentEnv({ dir, env = process.env, expectedHost = nu
 	if (preparing) {
 		for (const key of SANDBOX_PREPARATION_KEYS) {
 			if (typeof env[key] !== "string") continue;
-			if (typeof clean[key] !== "string") return refuse(`the shell sets ${key}, which the deployment does not; unset that variable before preparing`);
+			if (typeof clean[key] !== "string") return refuse(`the shell sets ${key}, which the deployment's .env does not set; unset that variable before preparing`);
 			if (clean[key] !== env[key]) return refuse(`the shell disagrees with the deployment for ${key}; unset that variable before preparing`);
 		}
 	}

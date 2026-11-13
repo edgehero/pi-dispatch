@@ -4,7 +4,9 @@ import * as fs from "node:fs";
 import { join } from "node:path";
 import { spawn } from "node:child_process";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { createSandboxPinHandler, createSandboxPreparer, observeSandboxPreparation, planSandboxPreparation, sandboxTriggerDigest } from "../src/sandbox-prepare.mjs";
+import { SANDBOX_FORGE_SETTINGS, createSandboxPinHandler, createSandboxPreparer, observeSandboxPreparation, planSandboxPreparation, sandboxTriggerDigest } from "../src/sandbox-prepare.mjs";
+import { loadConfig } from "../src/config.mjs";
+import { sandboxRemoteUrl } from "../src/sandbox-refs.mjs";
 import { listSandboxes, readManifest, sandboxDeadline, makeSandboxReaper } from "../src/sandbox-store.mjs";
 
 const instant = 1_800_000_000_000;
@@ -66,14 +68,14 @@ test("every free determinate gate precedes identity observation, mint and clone"
 	assert.deepEqual(w.calls, []);
 });
 
-test("a trigger whose forge has no usable address refuses by name before any directory, credential or clone (#863)", async () => {
+test("a trigger whose forge has no usable settings refuses by name before any directory, credential or clone (#863)", async () => {
 	const textOf = (kind) => JSON.stringify({ triggers: [{ on: { type: "label", any: ["pi:human"] }, run: { kind, flow: "fix", ...(kind === "azure" ? { repository: "repo" } : {}) } }] });
 	for (const [kind, config] of [["gitlab", {}], ["forgejo", {}], ["azure", {}], ["gitlab", { gitlab: { apiUrl: "https://user:secret@gitlab.example" } }]]) {
 		const w = world({ text: textOf(kind), config });
 		const result = await w.prepare({ ...requestOf(), triggerDigest: undefined });
 		// Determinate, so returned rather than thrown: a throw is what the control queue retries.
 		assert.equal(result.refused, "sandbox-forge-unconfigured", kind);
-		assert.match(result.message, /from the console/);
+		assert.equal(result.message, `this preparation has no usable settings for ${SANDBOX_FORGE_SETTINGS[kind]}, so it cannot clone the repository`);
 		assert.doesNotMatch(result.message, /secret/);
 		assert.deepEqual(w.calls, [], `${kind}: no identity, credential or clone`);
 		assert.equal(fs.existsSync(w.config.jobsDir), false, `${kind}: no directory or lock was made`);
@@ -82,6 +84,18 @@ test("a trigger whose forge has no usable address refuses by name before any dir
 	const w = world({ text: textOf("gitlab") });
 	assert.equal((await w.prepare({ ...requestOf(), repo: "owner/../escape", triggerDigest: undefined })).refused, "sandbox-repo-invalid");
 	assert.deepEqual(w.calls, []);
+});
+
+test("the forge settings that refusal names are the ones loadConfig reads for that forge's address (#863)", () => {
+	// A hand-written table beside config.mjs, so it is held to it: the named token gives the forge a block, the named
+	// URL becomes the address the clone uses, and without the token there is no block at all.
+	assert.deepEqual(Object.keys(SANDBOX_FORGE_SETTINGS).sort(), ["azure", "forgejo", "gitlab"]);
+	for (const [kind, words] of Object.entries(SANDBOX_FORGE_SETTINGS)) {
+		const [token, url] = words.match(/\b[A-Z][A-Z0-9_]*_(?:TOKEN|URL)\b/g);
+		const env = { [token]: "named-token", [url]: "https://forge.example/acme" };
+		assert.equal(sandboxRemoteUrl(kind, "acme/web", loadConfig(env)).startsWith("https://forge.example/acme/"), true, `${kind}: ${url} is the clone's address`);
+		assert.equal(loadConfig({ [url]: "https://forge.example/acme" })[kind], null, `${kind}: without ${token} there is no ${kind} block`);
+	}
 });
 
 test("cross-filesystem publication refuses before credentials, while an unread device is infrastructure", async () => {
