@@ -275,7 +275,7 @@ const PATH_KEY_RE = /_(?:FILE|DIR)$/;
  * The path keys every console reader of which takes a blank line as no line (review of PR #878), so a blank one is
  * compared as unset: `resolvePaths` reads PI_LOGS_DIR, PI_SETTINGS_FILE, PI_GLOBAL_PI_DIR and PI_SANDBOX_DIR with `||`;
  * `consoleConfig` reads PI_SANDBOX_GATEWAYS_FILE with `||`; `tokensFilePath` trims PI_CONSOLE_TOKENS_FILE and
- * `readSideOf` PI_SESSIONS_DIR; PI_AUTH_CONNECTIONS_FILE and PI_AUTH_STORE_DIR are read for whether they are set. Every
+ * `readSideOf` PI_SESSIONS_DIR, which a run page's `readForkPoints` reads for whether it is set; PI_AUTH_CONNECTIONS_FILE and PI_AUTH_STORE_DIR are read for whether they are set. Every
  * other path key keeps a blank as its own value, since some reader of it does: `resolvePaths` reads PI_TRIGGERS_FILE,
  * PI_PAUSE_WINDOWS_FILE, PI_SCOPED_LIMITS_FILE, PI_PROJECTS_FILE and PI_ENVELOPE_FILE with `??`, so `PI_TRIGGERS_FILE=`
  * names no triggers file where no line names `triggers.json`, and `loadModelEndpoints` refuses an empty
@@ -728,7 +728,8 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
     const killSwitchPlanFn = ({ paused }) => m.readModel.killSwitchPlan({ paused, env: shellEnv, stateFn: () => ({ deploymentDir: config.dir, owned: [] }), fs, uid });
     fleet = m.readModel.createFleetReader(side.paths, { dollarEnvFn: () => side.env, nowFn: now, fs, readOnly: true, activeLimit: CONSOLE_ACTIVE_LIMIT, killSwitchPlanFn, ...(m.sandboxData?.SANDBOX_READ_DEPS ?? {}), sandboxRetentionFn: m.sandboxVerdict?.sandboxRetentionOf ?? null });
     // Issue #845: what this console read at start and keeps for its life (its settings and the read side's, `layered` and
-    // `side` above) against what the same reads give now, and the databases its two held clients were refused. Every page
+    // `side` above) against what the same reads give now, the databases its two held clients were refused, and whether
+    // either declined a changed password. Every page
     // draws the answer as a banner and the log says each change of it once (`restart-notice.mjs`). The reading's shell
     // environment is this one's, as at start, so a key this shell sets is never called changed by an edit to the file.
     const restartReading = () => restartReadingOf({ m, env: shellEnv, dir: config.dir, fs, platform: io.platform ?? process.platform, uid });
@@ -738,6 +739,7 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
       start: { values: restartValuesOf(m, layered?.env, side.env, config.dir), problem: startProblem },
       readNow: restartReading,
       refused: () => [m.connection?.refusedDatabaseOf?.(redis) ?? null, fleet.refusedDatabase?.() ?? null],
+      declined: () => [m.connection?.passwordDeclinedOf?.(redis) === true, fleet.passwordDeclined?.() === true],
       now,
       timers: io.timers,
       log,

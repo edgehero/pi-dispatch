@@ -2234,6 +2234,10 @@ test("createFleetReader: the raw client is bounded and judged afresh, so a stale
   held[DB_REFUSED] = new Error("refused");
   held.condition = { select: 16 };
   assert.deepEqual(reader.refusedDatabase(), { db: 16 });
+  // And whether it last declined a changed password (`passwordDeclinedOf`, review of PR #878).
+  assert.equal(reader.passwordDeclined(), false);
+  held.connector = { [Symbol.for("pi-dispatch.valkey-password-declined")]: true };
+  assert.equal(reader.passwordDeclined(), true);
 });
 
 test("createFleetReader on a real raw client that cannot connect: a healthy queue's snapshot still ends, where a raw read used to hang it", { timeout: 15000 }, async () => {

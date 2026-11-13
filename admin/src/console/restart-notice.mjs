@@ -14,13 +14,18 @@
  * moved. Compared: the console's own keys (`consoleEnv`, `CONSOLE_ENV_KEYS`) and the read side's (`readSideOf`,
  * `PANEL_SERVICE_KEYS` and the keys it reads beside them), a path by the file or folder it names (`cli.mjs`
  * `restartValuesOf`). A key whose value differs is named, never its value: a VALKEY_URL may carry a password, and the
- * banner is shown to viewers as well as operators. Three reasons, in this order:
+ * banner is shown to viewers as well as operators. Four reasons, in this order:
  *   - `settings`: keys the `.env` now sets differently (a bad line fixed since start shows here, as keys that now read);
  *   - `env`: the `.env` cannot be read now in a way it could at start (gone, unreadable, another account can change it,
  *     or a line the service's loader reads differently, `envProblemOf`, judged over the Valkey context's keys as well,
  *     VALKEY_PASSWORD among them), so a restart now would run without what it holds: fix it first. Told apart by kind and
  *     keys, never by line, so a bad line the console started with that only moved is no reason. Keys that only this
  *     problem keeps from being read are not also named as changed;
+ *   - `password`: a long-lived client declined a VALKEY_PASSWORD the `.env` now gives, other than the one it holds,
+ *     because the file does not name the Valkey it dials as it dials it (`passwordDeclinedOf`: this shell's VALKEY_URL
+ *     spelled another way, `localhost` for `127.0.0.1` say, or the file moved to another Valkey), so only a restart
+ *     sends it (review of PR #878: a silent decline left the client refused with the docs saying a password change needs
+ *     no restart);
  *   - `database`: a long-lived client holds a refused database (`DB_REFUSED`), which it never tries again, so only a
  *     restart picks up a `databases` raised since. The sentence is this module's own and names the number, never an
  *     address (`valkeyDbRangeSentence`, which names the URL, is for the log and the CLI, and stays as it is).
@@ -117,11 +122,12 @@ function problemWords(problem) {
 /**
  * The reasons a console needs a restart, from what it read at `start`, what the same reads give `now` (each `{ values,
  * problem }`: `values` a key's reading as a comparable string, never shown; `problem` `envProblemOf`'s) and the
- * databases its held clients were refused (`refusedDatabaseOf`'s answers). Returns `[]`, or reasons `{ kind, sentence }`
- * (`settings` with `keys`, `env` with `problem`, `database` with `db`), each sentence a backticked catalog sentence
+ * databases its held clients were refused (`refusedDatabaseOf`'s answers) and whether each declined a changed password
+ * (`passwordDeclinedOf`'s). Returns `[]`, or reasons `{ kind, sentence }` (`settings` with `keys`, `env` with `problem`,
+ * `password`, `database` with `db`), each sentence a backticked catalog sentence
  * (`withCode`). Pure.
  */
-export function restartReasons({ start, now, refused = [] }) {
+export function restartReasons({ start, now, refused = [], declined = [] }) {
   const reasons = [];
   const problem = now?.problem ?? null;
   const fresh = problem !== null && problemIdentity(problem) !== problemIdentity(start?.problem ?? null) ? problem : null;
@@ -138,6 +144,9 @@ export function restartReasons({ start, now, refused = [] }) {
   }
   if (fresh !== null) {
     reasons.push({ kind: "env", problem: fresh, sentence: `The deployment's .env cannot be read now: ${problemWords(fresh)}. Fix it before restarting the console, since one started now would run without what it cannot read.` });
+  }
+  if (declined.some((d) => d === true)) {
+    reasons.push({ kind: "password", sentence: "`VALKEY_PASSWORD` has changed in the deployment's .env, but the `VALKEY_URL` there does not name the Valkey this console's clients dial as they write it, so they keep the password they started with until the console is restarted." });
   }
   // The two held clients read VALKEY_URL by the same rule, so one refusal is said once; one without its number only alone.
   const dbs = [...new Set(refused.filter((r) => r !== null && typeof r === "object").map((r) => (Number.isSafeInteger(r.db) ? r.db : null)))];
@@ -170,11 +179,12 @@ export function restartBody(notice) {
 
 /**
  * The watch serve keeps (see the header). `start` is `readNow()`'s answer at start; `readNow()` reads the same again
- * (`{ values, problem }`); `refused()` the databases the held clients were refused. `log` takes one line. Returns
+ * (`{ values, problem }`); `refused()` the databases the held clients were refused, `declined()` whether each declined a
+ * changed password. `log` takes one line. Returns
  * `{ current, check, close }`: `current()` the notice a page draws (null for none), `check()` a read now, `close()` the
  * timer stopped. A read that throws is a problem of its own (`unreadable`), said, never a silent "nothing changed".
  */
-export function makeRestartWatch({ start, readNow, refused = () => [], now = () => Date.now(), timers = { setInterval, clearInterval }, log = () => {}, recheckMs = RESTART_RECHECK_MS, everyMs = RESTART_CHECK_EVERY_MS }) {
+export function makeRestartWatch({ start, readNow, refused = () => [], declined = () => [], now = () => Date.now(), timers = { setInterval, clearInterval }, log = () => {}, recheckMs = RESTART_RECHECK_MS, everyMs = RESTART_CHECK_EVERY_MS }) {
   let held = null;
   let said = JSON.stringify(null);
   const check = () => {
@@ -190,7 +200,13 @@ export function makeRestartWatch({ start, readNow, refused = () => [], now = () 
     } catch {
       databases = [];
     }
-    const notice = restartNoticeOf(restartReasons({ start, now: read, refused: databases }));
+    let passwords = [];
+    try {
+      passwords = declined() ?? [];
+    } catch {
+      passwords = [];
+    }
+    const notice = restartNoticeOf(restartReasons({ start, now: read, refused: databases, declined: passwords }));
     const key = JSON.stringify(notice);
     if (key !== said) {
       said = key;

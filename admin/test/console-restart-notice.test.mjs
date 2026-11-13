@@ -8,6 +8,7 @@ import { VALKEY_CONTEXT_KEYS } from "@edgehero/pi-dispatch/connection";
 import { RESTART_BLANK_IS_UNSET, endpointSnapshotFn, readSideOf, restartKeysOf, restartProblemKeysOf, restartReadingOf, restartValuesOf } from "../src/console/cli.mjs";
 import { CONSOLE_ENV_KEYS, consoleConfig } from "../src/console/config.mjs";
 import { connectionEnvValue } from "../src/connections-view.mjs";
+import { readForkPoints } from "../src/run-fork.mjs";
 import * as RM from "../src/read-model.mjs";
 import * as FORGES from "@edgehero/pi-dispatch/forges";
 import * as MODEL_ENDPOINTS from "@edgehero/pi-dispatch/model-endpoints";
@@ -90,6 +91,26 @@ test("restartReasons: a database a held client was refused, once per number, wit
   assert.equal(restartLogLine(restartNoticeOf(reasons)), "pi-dispatch-console: restart needed: Valkey refused database 16, the one VALKEY_URL named when this console started, and the console does not try a refused database again. Name one that Valkey has, or raise databases in its configuration, then restart the console.");
   assert.equal(restartLogLine(null), `pi-dispatch-console: ${RESTART_CLEARED}`);
   assert.equal(String(restartBody(restartNoticeOf(reasons))), "Valkey refused database 16, the one <span class=\"code\">VALKEY_URL</span> named when this console started, and the console does not try a refused database again. Name one that Valkey has, or raise <span class=\"code\">databases</span> in its configuration, then restart the console.");
+});
+
+// Review of PR #878: a held client that declines a changed VALKEY_PASSWORD (the .env does not name the Valkey it dials as
+// it dials it) keeps the password it has until a restart, so that is said, by name, once whichever client declined it.
+test("restartReasons: a changed password a held client declined is a restart's reason, said once (#845)", () => {
+  const same = reading({ VALKEY_URL: '["x"]' });
+  assert.deepEqual(restartReasons({ start: same, now: same, declined: [false, false] }), []);
+  for (const declined of [[true, false], [false, true], [true, true]]) {
+    const reasons = restartReasons({ start: same, now: same, declined });
+    assert.deepEqual(reasons.map((r) => r.kind), ["password"], JSON.stringify(declined));
+    assert.equal(restartNoticeOf(reasons).title, RESTART_TITLE);
+    assert.equal(reasons[0].sentence, "`VALKEY_PASSWORD` has changed in the deployment's .env, but the `VALKEY_URL` there does not name the Valkey this console's clients dial as they write it, so they keep the password they started with until the console is restarted.");
+  }
+  const lines = [];
+  let declined = [false, false];
+  const watch = makeRestartWatch({ start: same, readNow: () => same, declined: () => declined, now: () => 0, timers: { setInterval: () => ({}), clearInterval() {} }, log: (l) => lines.push(l), recheckMs: 0 });
+  assert.equal(watch.current(), null);
+  declined = [false, true];
+  assert.deepEqual(watch.current().reasons.map((r) => r.kind), ["password"]);
+  assert.match(lines.at(-1), /^pi-dispatch-console: restart needed: VALKEY_PASSWORD has changed/);
 });
 
 test("envProblemOf over the service's own reader: a new bad line, a file gone, an unreadable file by its code alone, and a line only this shell's value covers (#845)", () => {
@@ -248,7 +269,7 @@ test("the console's reading: the keys it read at start, a .env edit named, a key
 // the console's own configuration, or the key's own reader), and is judged by them: a blank line is compared as unset
 // exactly when no reader tells it from no line. A path key with no reader here fails, so a new one is judged before the
 // watch compares it, and each reader must see its key, so a reader that reads nothing cannot pass for one.
-test("a blank path line is compared as no line exactly where every console reader of that key does so, for every path key compared (#845)", () => {
+test("a blank path line is compared as no line exactly where every console reader of that key does so, for every path key compared (#845)", async () => {
   const dir = tempDir("restart-blank-");
   const m = { readModel: { PANEL_SERVICE_KEYS, FORGE_HOST_ENV: RM.FORGE_HOST_ENV, panelEnv: ({ env }) => ({ env: { ...env } }), resolvePaths }, forges: FORGES, connection: { VALKEY_CONTEXT_KEYS } };
   const side = (env) => JSON.stringify(readSideOf({ m, env, dir, fs: nodeFs, platform: "linux", uid: process.geteuid?.() }).paths);
@@ -261,6 +282,8 @@ test("a blank path line is compared as no line exactly where every console reade
     }
   };
   const presence = (key) => (env) => connectionEnvValue(key, env[key]);
+  // A run page's fork points, read from the read side's environment as the console started with it (pages.mjs).
+  const forkPoints = async (env) => JSON.stringify(await readForkPoints({ jobId: "gh-1", env, now: () => 0 }));
   const READERS = {
     PI_AUTH_CONNECTIONS_FILE: [presence("PI_AUTH_CONNECTIONS_FILE")],
     PI_AUTH_STORE_DIR: [presence("PI_AUTH_STORE_DIR")],
@@ -275,16 +298,20 @@ test("a blank path line is compared as no line exactly where every console reade
     PI_SANDBOX_GATEWAYS_FILE: [config],
     PI_SANDBOX_HOSTS_FILE: [config],
     PI_SCOPED_LIMITS_FILE: [side],
-    PI_SESSIONS_DIR: [side],
+    PI_SESSIONS_DIR: [side, forkPoints],
     PI_SETTINGS_FILE: [side],
     PI_TRIGGERS_FILE: [side],
   };
   const pathKeys = restartKeysOf(m).filter((key) => /_(?:FILE|DIR)$/.test(key));
   assert.deepEqual(pathKeys, Object.keys(READERS).sort(), "every path key the watch compares has its readers here, and no other");
   const compared = (key, value) => restartValuesOf(m, value === undefined ? {} : { [key]: value }, value === undefined ? {} : { [key]: value }, dir)[key];
+  const elsewhere = join(dir, "elsewhere", "file");
   for (const key of pathKeys) {
-    for (const read of READERS[key]) assert.notEqual(read({ [key]: "elsewhere/file" }), read({}), `${key}: a reader that sees it`);
-    const blankDiffers = READERS[key].some((read) => read({ [key]: "" }) !== read({}));
+    let blankDiffers = false;
+    for (const read of READERS[key]) {
+      assert.notEqual(await read({ [key]: elsewhere }), await read({}), `${key}: a reader that sees it`);
+      if ((await read({ [key]: "" })) !== (await read({}))) blankDiffers = true;
+    }
     // PI_SANDBOX_HOSTS_FILE is compared by its reader's own answer (`sandboxHostsPath`), so it needs no place in the list.
     if (key !== "PI_SANDBOX_HOSTS_FILE") assert.equal(RESTART_BLANK_IS_UNSET.includes(key), !blankDiffers, `${key}: in RESTART_BLANK_IS_UNSET exactly when no reader tells a blank line from none`);
     assert.equal(compared(key, "") !== compared(key, undefined), blankDiffers, `${key}: the watch tells a blank line from none exactly when a reader does`);

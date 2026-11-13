@@ -580,7 +580,7 @@ test("serve: a VALKEY_URL changed in the deployment's .env under a running conso
 // Issue #845, the review: the wiring each reason rests on. The start's own problem is read at start (a bad line the
 // console started with is no reason), and each held client's refused database reaches the banner, the console's own and
 // the fleet reader's.
-test("serve: a bad line the console started with is no reason, and a database either held client was refused is, each on its own (#845)", async (t) => {
+test("serve: a bad line the console started with is no reason, and a database either held client was refused is, and so is a password either declined, each on its own (#845)", async (t) => {
   const dep = deployment();
   // This shell sets no PI_SANDBOX_GATEWAYS_FILE, so a line for it the service's loader reads differently is a problem
   // the console starts with, and still the same one at every page. PI_SANDBOX_HOSTS_FILE reaches the console raw and is
@@ -595,11 +595,13 @@ test("serve: a bad line the console started with is no reason, and a database ei
   const modules = fakeModules();
   modules.sessions = await import("../src/console/sessions.mjs");
   modules.tokens.findToken = (f, presented) => (presented === TOKEN ? f.tokens[0] : null);
-  const own = { refused: null, on() {}, disconnect() {} };
-  modules.connection = { ...modules.connection, VALKEY_CONTEXT_KEYS, makeRedisClient: () => own, refusedDatabaseOf: (client) => client?.refused ?? null };
+  const own = { refused: null, declined: false, on() {}, disconnect() {} };
+  modules.connection = { ...modules.connection, VALKEY_CONTEXT_KEYS, makeRedisClient: () => own, refusedDatabaseOf: (client) => client?.refused ?? null, passwordDeclinedOf: (client) => client?.declined === true };
   modules.audit.mirrorRow = async () => false;
   let fleetRefused = null;
+  let fleetDeclined = false;
   modules.fleet.refusedDatabase = () => fleetRefused;
+  modules.fleet.passwordDeclined = () => fleetDeclined;
   const drawn = [];
   modules.pages = { ...modules.pages, renderPage: async (name, ctx) => (drawn.push(ctx.restart ?? null), { status: 200, html: `<!doctype html><title>${name}</title>` }) };
   const timers = { setInterval: () => ({ unref() {} }), clearInterval() {} };
@@ -621,6 +623,13 @@ test("serve: a bad line the console started with is no reason, and a database ei
   own.refused = null;
   fleetRefused = { db: 15 };
   assert.deepEqual(await page(), [["database", 15]], "the fleet reader's client");
+  // A changed password either held client declined (review of PR #878), each on its own.
+  fleetRefused = null;
+  own.declined = true;
+  assert.deepEqual(await page(), [["password", null]], "the console's own client declined it");
+  own.declined = false;
+  fleetDeclined = true;
+  assert.deepEqual(await page(), [["password", null]], "the fleet reader's client declined it");
   stop();
   assert.equal(await running, 0);
 });
