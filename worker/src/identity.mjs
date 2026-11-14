@@ -13,7 +13,71 @@
  */
 
 import { configError } from "./config.mjs";
+import { githubFailureFields, stderrJson } from "./octokit-log.mjs";
 import { isDeterminateFetchFailure, isTransientStatus, octokitHeaderReader, transientError } from "./transient.mjs";
+
+/**
+ * The repository permissions a GitHub App needs for everything the worker does with its installation tokens (issue
+ * #876). `pi-dispatch setup github` asks for exactly these (`buildManifest`), and the worker's boot check below compares
+ * an installation's grant with them, so the App the wizard makes and the line that says what an older App lacks read
+ * one list.
+ *
+ * - `contents`, `pull_requests`: the agent pushes its branch and opens the pull request.
+ * - `issues`: the worker's status and refusal comments, and the agent's own replies.
+ * - `metadata`: GitHub grants it to every App and requires it.
+ * - `administration: read`: the worker's branch protection read (`REQ-BRANCH-PROTECTION-PRECONDITION`,
+ *   `github-host.mjs`). GitHub answers `GET .../branches/{branch}/protection` 403 to an installation token without
+ *   it, so an App that lacks it can run no forge job at all. The job's token carries the installation's whole grant,
+ *   so every job's token carries this read too; `CONST-TOKEN-SCOPED-PER-JOB` says why that is accepted.
+ */
+export const GITHUB_APP_PERMISSIONS = Object.freeze({ contents: "write", pull_requests: "write", issues: "write", metadata: "read", administration: "read" });
+
+/** GitHub's permission levels in order. A level this table does not know ranks as none, so it is named, never passed. */
+const PERMISSION_RANK = Object.freeze({ read: 1, write: 2, admin: 3 });
+const rankOf = (level) => (typeof level === "string" && Object.hasOwn(PERMISSION_RANK, level) ? PERMISSION_RANK[level] : 0);
+
+/**
+ * Read the App installation's granted permissions with the App JWT and log one line naming each one below `required`
+ * (issue #876). Answers `{ missing }` (`["administration:read"]`, empty when the grant covers every one), or `null` when
+ * the grant could not be read.
+ *
+ * NEVER THROWS, and that is the contract rather than a convenience. This is a diagnosis at boot, not a gate: the gate is
+ * the per-job protection read, which refuses a job whose token cannot read branch protection
+ * (`branch-protection-unreadable`). A failed read here (GitHub down, a rate limit, an App JWT GitHub refuses) therefore
+ * says only that the read failed (`github_app_permissions_unread`, with GitHub's status and request id, never the
+ * response) and stops nothing. Reading the grant at boot is what doctor cannot do: doctor never reads the private key
+ * whole, so it has no JWT to ask with.
+ *
+ * Why the INSTALLATION and not the App: the App's settings can ask for a permission that the installation has not yet
+ * accepted, and GitHub mints tokens from the installation's grant, so the installation is the one that decides.
+ *
+ * `octokit` is the App-JWT client `makeGitHubAuth` builds (its auth strategy sends the JWT on `/app/installations/*`);
+ * `log` is the caller's `(event, fields)` logger, a JSON line on stderr when none is given.
+ */
+export async function checkAppPermissions({ octokit, installationId, log = stderrJson, required = GITHUB_APP_PERMISSIONS }) {
+	let granted;
+	try {
+		const { data } = await octokit.request("GET /app/installations/{installation_id}", { installation_id: installationId });
+		granted = data?.permissions;
+	} catch (error) {
+		log("github_app_permissions_unread", { ...githubFailureFields(error) });
+		return null;
+	}
+	if (granted === null || typeof granted !== "object" || Array.isArray(granted)) {
+		log("github_app_permissions_unread", { why: "no-permissions-object" });
+		return null;
+	}
+	const missing = Object.entries(required)
+		.filter(([name, level]) => rankOf(Object.hasOwn(granted, name) ? granted[name] : undefined) < rankOf(level))
+		.map(([name, level]) => `${name}:${level}`);
+	if (missing.length > 0) {
+		log("github_app_permission_missing", {
+			missing,
+			fix: "in the GitHub App's settings, set each named repository permission to at least that level (administration:read is Administration: Read-only), then accept the change on the App's installation (docs/github.md#app-permissions)",
+		});
+	}
+	return { missing };
+}
 
 /**
  * Resolve the acting identity's numeric user id from `auth = { source, octokit }`.

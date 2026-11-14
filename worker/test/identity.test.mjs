@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { resolveSelfId } from "../src/identity.mjs";
+import { checkAppPermissions, GITHUB_APP_PERMISSIONS, resolveSelfId } from "../src/identity.mjs";
 
 /**
  * Hand-rolled fake @octokit/rest: `request(route, params)` returns a canned `{ data }` keyed on the
@@ -162,4 +162,85 @@ test("missing octokit is a config error", async () => {
 		() => resolveSelfId({ source: "pat" }),
 		(e) => e.piDispatchConfig === true && /missing octokit/.test(e.message),
 	);
+});
+
+// -- checkAppPermissions: the boot line for an App installation's grant (issue #876) ---------------------------------
+
+const INSTALLATION_ROUTE = "GET /app/installations/{installation_id}";
+/** A recording `(event, fields)` logger. */
+function recordingLog() {
+	const lines = [];
+	const log = (event, fields) => lines.push({ event, fields });
+	log.lines = lines;
+	return log;
+}
+/** The grant `pi-dispatch setup github` made before #876: everything but administration. */
+const PRE_876_GRANT = { contents: "write", pull_requests: "write", issues: "write", metadata: "read" };
+
+test("checkAppPermissions: an installation without Administration gets one line naming administration:read and the fix", async () => {
+	const octokit = fakeOctokit({ [INSTALLATION_ROUTE]: { id: 456, permissions: PRE_876_GRANT } });
+	const log = recordingLog();
+	assert.deepEqual(await checkAppPermissions({ octokit, installationId: "456", log }), { missing: ["administration:read"] });
+	assert.deepEqual(octokit.calls, [{ route: INSTALLATION_ROUTE, params: { installation_id: "456" } }], "the INSTALLATION's grant, which tokens are minted from, read once");
+	assert.equal(log.lines.length, 1, "one line");
+	const [{ event, fields }] = log.lines;
+	assert.equal(event, "github_app_permission_missing");
+	assert.deepEqual(fields.missing, ["administration:read"]);
+	assert.match(fields.fix, /Administration: Read-only/, "names the setting as GitHub's settings page writes it");
+	assert.match(fields.fix, /accept the change on the App's installation/, "an App's new permission reaches tokens only once the installation accepts it");
+	assert.match(fields.fix, /docs\/github\.md#app-permissions/);
+});
+
+test("checkAppPermissions: the full grant, or a wider level, says nothing", async () => {
+	for (const permissions of [{ ...GITHUB_APP_PERMISSIONS }, { ...GITHUB_APP_PERMISSIONS, administration: "write", metadata: "write", checks: "read" }]) {
+		const log = recordingLog();
+		assert.deepEqual(await checkAppPermissions({ octokit: fakeOctokit({ [INSTALLATION_ROUTE]: { permissions } }), installationId: "456", log }), { missing: [] });
+		assert.deepEqual(log.lines, [], JSON.stringify(permissions));
+	}
+});
+
+test("checkAppPermissions: a level below the one needed is named, and so is a level GitHub may add that this build does not know", async () => {
+	const log = recordingLog();
+	const permissions = { ...GITHUB_APP_PERMISSIONS, issues: "read", administration: "triage" };
+	assert.deepEqual(await checkAppPermissions({ octokit: fakeOctokit({ [INSTALLATION_ROUTE]: { permissions } }), installationId: "456", log }), { missing: ["issues:write", "administration:read"] });
+	assert.equal(log.lines[0].event, "github_app_permission_missing");
+});
+
+test("checkAppPermissions: a failed read says only that it failed, with GitHub's status and request id, and never throws", async () => {
+	const refused = Object.assign(new Error("Bad credentials - https://docs.github.com/rest"), { name: "HttpError", status: 401, response: { headers: { "x-github-request-id": "ABCD:1234:5678" }, data: { message: "Bad credentials" } } });
+	for (const [answer, expected] of [
+		[refused, { status: 401, requestId: "ABCD:1234:5678" }],
+		[httpError(500), {}],
+		[new TypeError("fetch failed"), {}],
+	]) {
+		const log = recordingLog();
+		assert.equal(await checkAppPermissions({ octokit: fakeOctokit({ [INSTALLATION_ROUTE]: answer }), installationId: "456", log }), null);
+		assert.deepEqual(log.lines, [{ event: "github_app_permissions_unread", fields: expected }], "no message, no response body: GitHub's words can carry a URL");
+	}
+});
+
+test("checkAppPermissions: an answer with no permissions object is unread, not a grant of nothing", async () => {
+	for (const data of [{ id: 456 }, { permissions: null }, { permissions: ["administration"] }, null]) {
+		const log = recordingLog();
+		assert.equal(await checkAppPermissions({ octokit: fakeOctokit({ [INSTALLATION_ROUTE]: data }), installationId: "456", log }), null, JSON.stringify(data));
+		assert.deepEqual(log.lines, [{ event: "github_app_permissions_unread", fields: { why: "no-permissions-object" } }]);
+	}
+});
+
+test("checkAppPermissions: a client that throws synchronously is a failed read too", async () => {
+	const log = recordingLog();
+	const octokit = {
+		request() {
+			throw new Error("not a promise");
+		},
+	};
+	assert.equal(await checkAppPermissions({ octokit, installationId: "456", log }), null);
+	assert.equal(log.lines[0].event, "github_app_permissions_unread");
+});
+
+test("GITHUB_APP_PERMISSIONS is frozen and every level is one GitHub uses, administration a read", () => {
+	assert.ok(Object.isFrozen(GITHUB_APP_PERMISSIONS));
+	assert.deepEqual(Object.keys(GITHUB_APP_PERMISSIONS).sort(), ["administration", "contents", "issues", "metadata", "pull_requests"]);
+	assert.equal(GITHUB_APP_PERMISSIONS.administration, "read");
+	for (const level of Object.values(GITHUB_APP_PERMISSIONS)) assert.ok(["read", "write"].includes(level), level);
 });

@@ -38,6 +38,7 @@ import { hostname } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
 import { ENV_WRITER_FS, updateEnvFile } from "./env-file.mjs";
+import { GITHUB_APP_PERMISSIONS } from "./identity.mjs";
 import { openBrowser as defaultOpenBrowser } from "./open-browser.mjs";
 import { defaultPrompt } from "./up.mjs";
 
@@ -410,7 +411,11 @@ export function sanitizeAppName(raw) {
 /**
  * The manifest GitHub converts into the App — the narrowest shape this system needs
  * (SECURITY.md's auth-source ladder): write on exactly the three surfaces jobs touch, metadata read
- * because the API requires it, private, and only the event families the triggers file can name.
+ * because the API requires it, administration read because the worker's branch protection check cannot
+ * be answered without it (issue #876: an App made without it had every forge job fail on a 403 before
+ * it started), private, and only the event families the triggers file can name. The permissions are
+ * `GITHUB_APP_PERMISSIONS` (identity.mjs), the same list the worker's boot check holds an installation
+ * to, so the two cannot drift apart.
  * `hook_attributes` carries the receiver URL, or under --no-webhook an INACTIVE hook at `NO_WEBHOOK_URL`. GitHub
  * refuses a manifest whose `hook_attributes` has no `url`, inactive or not ("url" wasn't supplied, issue #874), and one
  * that leaves `hook_attributes` out while it subscribes events ("Hook url cannot be blank"). What it accepts was
@@ -430,7 +435,7 @@ export function buildManifest({ name, redirectUrl, webhookUrl }) {
 		redirect_url: redirectUrl,
 		hook_attributes: webhookUrl ? { url: webhookUrl } : { url: NO_WEBHOOK_URL, active: false },
 		public: false,
-		default_permissions: { contents: "write", pull_requests: "write", issues: "write", metadata: "read" },
+		default_permissions: { ...GITHUB_APP_PERMISSIONS },
 		default_events: ["issues", "issue_comment", "pull_request", "pull_request_review"],
 	};
 }

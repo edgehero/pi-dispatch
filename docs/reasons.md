@@ -685,6 +685,22 @@ that stops a job from merging its own work. Nothing was spent.
 
 What to do: protect the default branch, then run the job again. See [SECURITY.md](../SECURITY.md).
 
+### branch-protection-unreadable
+
+GitHub refused to let the job's token read the default branch's protection settings (a 403 that was not a rate limit),
+so the worker could not tell whether the branch is protected. A job runs only on a branch it knows is protected, so
+this one was refused. Nothing was spent, and it is not retried: the same token gets the same answer every time.
+
+The usual cause is a GitHub App without the repository permission **Administration: Read-only**. An App that
+`pi-dispatch setup github` made before the wizard asked for it lacks it, unless someone added it by hand. When it is missing, the worker says
+so at start with a `github_app_permission_missing` line. GitHub gives the same answer to a fine-grained token without
+that permission, to a `gh` login or classic token whose account may not read the repository's protection settings, and
+on a private repository whose GitHub plan has no branch protection.
+
+What to do: in the App's settings, set Repository permissions, Administration, to Read-only, and accept the new
+permission on the App's installation. A fine-grained token needs the same permission. Then run the job again. See
+[github.md](github.md#app-permissions).
+
 ### sha-gone
 
 The default branch moved past the commit the job was resolved to, and the forge no longer serves that commit. Nothing

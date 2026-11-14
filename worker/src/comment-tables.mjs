@@ -141,9 +141,20 @@ export const BUNDLE_COMMENTS = Object.freeze({
 });
 
 /**
+ * The reason a forge job is refused with when its token cannot read the default branch's protection (issue #876): a
+ * determinate 403 on GitHub's protection read. The host's error carries it (github-host.mjs) and the processor's
+ * protection step returns it, so both read this one spelling.
+ */
+export const BRANCH_PROTECTION_UNREADABLE = "branch-protection-unreadable";
+
+/**
  * Issue #710: the processor's single-sentence pre-start refusals, keyed by the reason the record carries. These were
  * inline literals at their call sites; they moved into named tables so the reason catalog can read them, and each call
  * site posts the table's entry, so the comment is byte-identical to what it posted before.
+ *
+ * `branch-protection-unreadable` (issue #876) names its usual fix in plain words, the App permission, so that whoever
+ * reads it, the operator or an issue author who passes it on, knows what to change. It says "usual" because GitHub
+ * answers the same 403 for causes the worker does not tell apart (docs/reasons.md lists them).
  */
 export const REFUSAL_COMMENTS = Object.freeze({
 	"sessions-dir-unset": "Refused: this trigger set `run.resume` but PI_SESSIONS_DIR is unset, so there is nowhere to persist the transcript -- the job would run with no session and still report success. Set PI_SESSIONS_DIR to a private directory outside every repo, or drop `run.resume` from this trigger. Not run.",
@@ -151,6 +162,7 @@ export const REFUSAL_COMMENTS = Object.freeze({
 	"secret-profile-unknown": "Refused: this trigger set `run.secrets`, and the resolver profile it names is not usable on this worker host. No profile of that name is declared, or its resolver is absent or not executable. The job would have started with those variables unset, and an agent that gets a 401 writes a plausible report and exits 0. Run `pi-dispatch doctor` on the worker to see which profiles it has. Not run.",
 	"secret-profile-ambiguous": "Refused: this trigger set `run.secrets`, and the resolver profile it names is declared twice on this worker host, once in the environment and once in the settings overlay. Neither wins, on purpose: the job would otherwise run against whichever one happened to be picked. Remove one of the two. Not run.",
 	"unprotected-branch": "Refused: the default branch is not protected. See SECURITY.md.",
+	[BRANCH_PROTECTION_UNREADABLE]: "Refused: GitHub would not let this job's token read the default branch's protection settings, so the worker could not confirm that the branch is protected, which every job needs before it starts. Nothing was started or spent. The usual cause is a GitHub App without the repository permission Administration: Read-only; the operator adds it in the App's settings and accepts it on the App's installation. Not run.",
 	"local-folder-project-changed": "Refused: this job's folder now leads into another project's folder, so no container was started and nothing was spent. Not run.",
 	"config-refused": "Refused: this deployment is misconfigured, so the job could not be started. Ask the operator to run `pi-dispatch doctor`. Not run.",
 });

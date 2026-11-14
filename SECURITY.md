@@ -200,11 +200,15 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
   `workflow` among the broad scopes it warns about by name, so that warning is your signal, and it is the
   only one you get. See *Operator responsibilities* for the same fact stated from the credential side.
   **What the App grants is also wider than `contents` + `pull_requests`.** The manifest this project mints
-  asks for `contents: write`, `pull_requests: write`, `issues: write` and `metadata: read`. `issues: write`
-  exists for the comment-back path (a job replies on the issue that triggered it), and it is real authority:
-  with it an injected agent can close issues and edit or delete comments. The constitution's stated ideal
-  (`CONST-TOKEN-SCOPED-PER-JOB`, "contents + pull-requests only") is **narrower than what ships**; this
-  paragraph is that gap, written down.
+  asks for `contents: write`, `pull_requests: write`, `issues: write`, `metadata: read` and
+  `administration: read`, and a job's token carries the whole grant (an answer draft's is narrowed to reads).
+  `issues: write` exists for the comment-back path (a job replies on the issue that triggered it), and it is
+  real authority: with it an injected agent can close issues and edit or delete comments.
+  `administration: read` exists for the worker's branch protection check (issue #876): GitHub refuses that
+  read to a token without it, and the worker makes it with the job's own token. It is read only, so an
+  injected agent can read the repository's settings, such as its branch protection rules and who has access,
+  and can change none of them. `CONST-TOKEN-SCOPED-PER-JOB` names each of these grants and the reason it is
+  accepted.
   **It does NOT hold on GitLab.** A project access token needs `api` to post a note, and `api` grants full
   project API read/write; `write_repository` alone already permits pushing `.gitlab-ci.yml`. GitLab offers
   no contents-vs-CI split, so an injected agent on a GitLab job **can** rewrite your pipeline definition,
@@ -1205,7 +1209,10 @@ Stated openly rather than discovered later:
   code is single-use and expires in an hour, and the wizard shows every `.env` line before writing it,
   never prints a secret, writes the PEM `0600`, and refuses to overwrite an existing key file or an
   already-set `WEBHOOK_SECRET`. The credential minted is the narrowest this system supports
-  (`contents`/`pull_requests`/`issues` write + `metadata` read, per-repo 1h installation tokens).
+  (`contents`/`pull_requests`/`issues` write + `metadata` and `administration` read, per-repo 1h installation
+  tokens). An App the wizard made before issue #876 lacks `administration` read, and the worker refuses every
+  github job on it (`branch-protection-unreadable`) until that permission is added and accepted
+  ([docs/github.md](docs/github.md#app-permissions)).
 - **On GitLab there is no stronger option to prefer.** GitLab has no App equivalent and no short-expiry
   per-job token, so your project access token is what every GitLab job gets, for as long as you leave it
   valid. Use a **project** token rather than a group token (a group token reaches every project in the

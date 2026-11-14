@@ -30,7 +30,7 @@ flowchart LR
   token-carrying job. It has full scope and does not expire. This is what `pi-dispatch doctor` warns
   about. Under every source it *can* merge, because GitHub gates push and merge behind the same scope.
   **Branch protection on your default branch is the real control.** The worker refuses an unprotected
-  repo before any spend.
+  repo before any spend, and one whose protection its token may not read ([App permissions](#app-permissions)).
 - The checkout is always the base repo at its default-branch SHA. It is never a PR branch. Landing a
   commit on your default branch is enough to run code in a job container. Issue and comment text never
   runs code. It stays data.
@@ -42,6 +42,39 @@ loopback. One browser click creates the App id, private key and webhook secret. 
 before one consent. The key lands with mode 0600. No secret is ever printed. The App is the strongest
 auth source (per-repo one-hour tokens). A fine-grained PAT carries an expiry you set. `gh` carries
 neither (`GITHUB_AUTH_SOURCE`).
+
+## App permissions
+
+The App that `pi-dispatch setup github` makes asks for these repository permissions, named as GitHub's settings page
+names them:
+
+| Permission | Access | What needs it |
+|---|---|---|
+| Contents | Read and write | the agent pushes its branch |
+| Pull requests | Read and write | the agent opens its pull request |
+| Issues | Read and write | the worker's status comments and the agent's replies |
+| Metadata | Read-only | GitHub gives it to every App |
+| Administration | Read-only | before each job, the worker reads whether the default branch is protected |
+
+A job's token is minted from this grant, so every job can read the repository's settings, such as its branch protection
+rules, and none can change them ([SECURITY.md](../SECURITY.md)).
+
+**An App made before Administration was on this list** cannot run a github job. GitHub refuses its tokens the branch
+protection read, and the worker refuses each job as
+[`branch-protection-unreadable`](reasons.md#branch-protection-unreadable), before anything is spent. When the worker
+starts, it reads what the installation was granted and logs a `github_app_permission_missing` line naming what is
+missing. To add it:
+
+1. In the App's settings on GitHub (Developer settings, GitHub Apps, then the App), open Permissions & events, set
+   Repository permissions, Administration, to Read-only, and save.
+2. GitHub then asks the account the App is installed on to accept the new permission. Open the installation's
+   settings (Installed GitHub Apps, then the App) and accept the request. Until it is accepted, the tokens do not
+   carry the new permission.
+3. Start the job again. The next token carries the permission, so the worker needs no restart. After the next
+   restart, its start log no longer has the `github_app_permission_missing` line.
+
+A fine-grained PAT (`GITHUB_AUTH_SOURCE=pat`) needs the same Administration: Read-only permission on the repository. A
+`gh` login or a classic token works only when its account may read the repository's branch protection settings.
 
 ## Three ways to run the trigger edge
 

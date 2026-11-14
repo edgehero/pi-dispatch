@@ -78,6 +78,68 @@ test("isDefaultBranchProtected: non-404 (500) -> InfraRetry, never false", async
 	);
 });
 
+/** A 403 as octokit builds one: `HttpError`, a status, GitHub's message, and the response's headers. */
+function forbidden(message, headers = { "content-type": "application/json; charset=utf-8" }) {
+	return Object.assign(new Error(message), { name: "HttpError", status: 403, response: { headers } });
+}
+const protectionReturning = (answer) =>
+	makeGitHubHost({
+		octokitFor: fakeOctokitFor({
+			"GET /repos/{owner}/{repo}": { default_branch: "main" },
+			"GET /repos/{owner}/{repo}/branches/{branch}/protection": answer,
+		}),
+	});
+
+test("isDefaultBranchProtected: a 403 that is no rate limit refuses determinately as branch-protection-unreadable, never true or false (issue #876)", async () => {
+	// GitHub's answer to an installation token without Administration: read, a fine-grained token without it, and an
+	// account that may not read protection. Each is the same on every retry, so it is a config error carrying the token.
+	for (const answer of [
+		forbidden("Resource not accessible by integration - https://docs.github.com/rest/branches/branch-protection#get-branch-protection"),
+		forbidden("Resource not accessible by personal access token"),
+		forbidden("Must have admin rights to Repository."),
+		forbidden("Resource not accessible by integration", {}),
+		httpError(403),
+	]) {
+		await assert.rejects(
+			() => protectionReturning(answer).isDefaultBranchProtected(REPO, "tok"),
+			(e) => {
+				assert.equal(e.piDispatchConfig, true, "determinate: not retried");
+				assert.notEqual(e.name, "InfraRetry");
+				assert.equal(e.reason, "branch-protection-unreadable");
+				assert.equal(e.cause, answer, "GitHub's error rides as the cause, for a request id");
+				return true;
+			},
+			answer.message,
+		);
+	}
+});
+
+test("isDefaultBranchProtected: a rate-limited 403 is retried, by every signal transient.mjs reads (issue #876)", async () => {
+	for (const answer of [
+		forbidden("API rate limit exceeded for installation", { "content-type": "application/json", "x-ratelimit-remaining": "0", "x-ratelimit-reset": "1999999999" }),
+		forbidden("You have exceeded a secondary rate limit", { "content-type": "application/json", "retry-after": "60" }),
+		forbidden("You have exceeded a secondary rate limit. Please wait a few minutes before you try again."),
+		forbidden("<html>Access denied</html>", { "content-type": "text/html" }),
+	]) {
+		await assert.rejects(
+			() => protectionReturning(answer).isDefaultBranchProtected(REPO, "tok"),
+			(e) => e.piDispatchRetry === true && e.name === "InfraRetry" && e.piDispatchConfig !== true,
+			answer.message,
+		);
+	}
+});
+
+test("isDefaultBranchProtected: other refusals keep their answers, a 401 and a 429 retried (issue #876)", async () => {
+	for (const status of [401, 429, 500, 502]) {
+		await assert.rejects(
+			() => protectionReturning(httpError(status)).isDefaultBranchProtected(REPO, "tok"),
+			(e) => e.piDispatchRetry === true && e.piDispatchConfig !== true,
+			String(status),
+		);
+	}
+	assert.equal(await protectionReturning(httpError(404)).isDefaultBranchProtected(REPO, "tok"), false);
+});
+
 // -- resolveDefaultBranchSha ---------------------------------------------------------------------
 
 test("resolveDefaultBranchSha: reads default_branch then the branch tip, returns { branch, sha }", async () => {

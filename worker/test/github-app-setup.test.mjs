@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createVerify, generateKeyPairSync } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { buildFormPage, buildManifest, defaultAppName, mintAppJwt, NO_WEBHOOK_URL, runGithubAppSetup, sanitizeAppName } from "../src/github-app-setup.mjs";
+import { GITHUB_APP_PERMISSIONS } from "../src/identity.mjs";
 
 // A REAL RSA keypair, generated once: the conversion response carries the private half as its `pem`,
 // so the wizard's hand-rolled JWT is signed with a key the test can VERIFY against the public half —
@@ -189,7 +190,7 @@ test("buildManifest: --webhook-url shape is exactly the narrow permission/event 
 		redirect_url: "http://127.0.0.1:1/callback",
 		hook_attributes: { url: "https://hooks.example/github" },
 		public: false,
-		default_permissions: { contents: "write", pull_requests: "write", issues: "write", metadata: "read" },
+		default_permissions: { contents: "write", pull_requests: "write", issues: "write", metadata: "read", administration: "read" },
 		default_events: ["issues", "issue_comment", "pull_request", "pull_request_review"],
 	});
 });
@@ -199,8 +200,17 @@ test("buildManifest: no webhook URL yields an INACTIVE hook that still names a U
 	assert.deepEqual(manifest.hook_attributes, { url: "https://no-webhook.invalid/", active: false });
 	assert.equal(manifest.hook_attributes.url, NO_WEBHOOK_URL);
 	assert.match(new URL(NO_WEBHOOK_URL).hostname, /\.invalid$/, "RFC 6761: a name that never resolves, so no host can receive what GitHub sends there");
-	assert.deepEqual(manifest.default_permissions, { contents: "write", pull_requests: "write", issues: "write", metadata: "read" });
+	assert.deepEqual(manifest.default_permissions, { contents: "write", pull_requests: "write", issues: "write", metadata: "read", administration: "read" });
 	assert.deepEqual(manifest.default_events, ["issues", "issue_comment", "pull_request", "pull_request_review"]);
+});
+
+test("buildManifest: the App asks for Administration: read, which the worker's branch protection read needs, and nothing else beyond the four (issue #876)", () => {
+	// GitHub answers GET .../branches/{branch}/protection 403 to an installation token without it, so an App this wizard
+	// made before #876 could run no forge job. The manifest and the worker's boot check read one list.
+	const manifest = buildManifest({ name: "pi-dispatch-x", redirectUrl: "http://127.0.0.1:1/callback", webhookUrl: "https://hooks.example/github" });
+	assert.equal(manifest.default_permissions.administration, "read", "read only: the worker never changes a repository's settings");
+	assert.deepEqual(manifest.default_permissions, { ...GITHUB_APP_PERMISSIONS });
+	assert.notEqual(manifest.default_permissions, GITHUB_APP_PERMISSIONS, "a copy, so the frozen list is never the object sent");
 });
 
 test("buildManifest: every shape's hook_attributes carries a url, which GitHub requires whenever the object is sent, inactive or not (issue #874)", () => {

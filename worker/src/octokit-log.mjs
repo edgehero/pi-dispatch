@@ -60,6 +60,7 @@ export function githubFailureFields(error) {
 	return {};
 }
 
-function stderrJson(event, fields) {
+/** The `(event, fields)` logger for a caller that was given none: one JSON line on stderr. */
+export function stderrJson(event, fields) {
 	process.stderr.write(`${JSON.stringify({ event, ...fields })}\n`);
 }

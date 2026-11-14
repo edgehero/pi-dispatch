@@ -26,7 +26,7 @@ import { promisify } from "node:util";
 import { createAppAuth as realCreateAppAuth } from "@octokit/auth-app";
 import { Octokit as RealOctokit } from "@octokit/rest";
 import { configError } from "./config.mjs";
-import { resolveSelfId } from "./identity.mjs";
+import { checkAppPermissions, resolveSelfId } from "./identity.mjs";
 import { octokitLogOptions } from "./octokit-log.mjs";
 import { InfraRetry } from "./processor.mjs";
 import { isDeterminateFetchFailure, isDeterminateFsCode, isTransientStatus, octokitHeaderReader } from "./transient.mjs";
@@ -58,6 +58,10 @@ export async function makeGitHubAuth(cfg, deps = {}) {
 		// Issue #530: the caller's `(event, fields)` logger, which a GitHub client's own warnings go through. Every client
 		// here is built with `octokitLog`, so none prints Octokit's plain `GET /user - 401 ...` line into a JSON stream.
 		log,
+		// Issue #876: under the app source, also read the installation's grant and log what it lacks (`checkAppPermissions`).
+		// Opt-in, and only the worker opts in: the worker is what reads branch protection with these tokens, while the
+		// receiver, the poller and a sandbox preparation build this same auth for reads that need none of it.
+		checkPermissions = false,
 	} = deps;
 	const quiet = octokitLogOptions(log);
 
@@ -105,6 +109,11 @@ export async function makeGitHubAuth(cfg, deps = {}) {
 		// App-JWT client: resolveSelfId's app path reads GET /app then GET /users/{slug}[bot].
 		const octokit = new Octokit({ authStrategy: createAppAuth, auth, ...quiet });
 		const selfId = await resolveSelfId({ source: "app", octokit });
+		// NOT awaited. The read only says what the grant lacks, and it must not hold the boot up or decide it: a slow
+		// answer here would otherwise count against the worker's bound on re-resolving its auth (`ensureAuth`'s timeout)
+		// and turn a working credential into an unavailable one. It never rejects; the catch is for a logger that throws,
+		// which would otherwise be an unhandled rejection, and that stops a Node process.
+		if (checkPermissions === true) checkAppPermissions({ octokit, installationId: cfg.installationId, ...(typeof log === "function" ? { log } : {}) }).catch(() => {});
 
 		const mintToken = async (job) => {
 			const repo = job?.repo;
@@ -120,7 +129,9 @@ export async function makeGitHubAuth(cfg, deps = {}) {
 			// for `{ metadata: "read" }`, so the token it holds for that one question cannot write anything
 			// even if leaked. Job mints never pass this and keep the installation's full grant -- narrowing
 			// is the caller's statement of intent, not a default this mint could guess.
-			const permissions = job?.purpose === "answer-draft" ? { contents: "read", issues: "read", pull_requests: "read", metadata: "read" } : job?.permissions;
+			// The answer draft's read set includes `administration: read` (issue #876): its job passes the same branch
+			// protection read as every forge job, with this token, and GitHub answers that read 403 without it.
+			const permissions = job?.purpose === "answer-draft" ? { contents: "read", issues: "read", pull_requests: "read", metadata: "read", administration: "read" } : job?.permissions;
 			let minted;
 			try {
 				const appAuth = createAppAuth({ ...auth, request: mintRequest });

@@ -8,7 +8,8 @@
  * contents:write, which covers push AND merge, so branch protection is the only technical barrier
  * to a self-merge. A transient read failure must therefore NOT collapse to "unprotected" and let
  * the job run: only a real 404 (the repo has no protection object) is the determinate unprotected
- * state that drives the policy refusal; any other error is retryable and never a silent `false`.
+ * state that drives the policy refusal; a determinate 403 (the token may not read protection, issue
+ * #876) is a refusal of its own; any other error is retryable and never a silent `false`.
  *
  * REQ-JOB-STATUS-COMMENTS: `postStatusComment` reports outcome to the issue or PR. It is content-
  * agnostic -- the no-trigger-phrase guard belongs to the caller -- and never logs the comment body or
@@ -24,11 +25,13 @@
  */
 
 import { Octokit } from "@octokit/rest";
+import { BRANCH_PROTECTION_UNREADABLE } from "./comment-tables.mjs";
 import { configError } from "./config.mjs";
 import { octokitLogOptions } from "./octokit-log.mjs";
 import { PARKED_LABEL } from "./parked.mjs";
 import { InfraRetry } from "./processor.mjs";
 import { commentIdOf, isStatusCommentId } from "./status-comment.mjs";
+import { isTransientStatus, octokitHeaderReader } from "./transient.mjs";
 
 /**
  * Build the host surface. `octokitFor` is `(token) => new Octokit({ auth: token, ...octokitLogOptions(log) })`; inject a fake
@@ -59,8 +62,9 @@ export function makeGitHubHost({ log, octokitFor = (token) => new Octokit({ auth
 
 	/**
 	 * True when the default branch has a protection object, false when it provably does not (404).
-	 * A non-404 error is retryable, NOT `false`: a transient blip must not read as "unprotected" and
-	 * bypass the never-merge backstop.
+	 * A determinate 403 throws a config error tagged `reason: BRANCH_PROTECTION_UNREADABLE`, which the
+	 * processor returns as a refusal (issue #876). Any other error is retryable, NOT `false`: a transient
+	 * blip must not read as "unprotected" and bypass the never-merge backstop.
 	 */
 	async function isDefaultBranchProtected(repo, token) {
 		const [owner, name] = splitRepo(repo);
@@ -80,9 +84,20 @@ export function makeGitHubHost({ log, octokitFor = (token) => new Octokit({ auth
 		} catch (error) {
 			// A missing protection object is a real, determinate state -- the repo is unprotected.
 			if (error?.status === 404) return false;
-			// Any other status is retryable rather than resolved. A 403 (the token lacks the scope to
-			// read protection) is treated as InfraRetry here too: acceptable for v1, though it could be
-			// a permanent config error. Collapsing non-404 to false would silently bypass never-merge.
+			// A 403 that is not a rate limit (issue #876) is the token being refused this read: an App without
+			// Administration: read, which every App `setup github` made before #876 lacks, a fine-grained token without
+			// it, an account GitHub does not let read protection, a private repository on a plan without branch
+			// protection. Each answers the same on every retry, so it used to be retried into a `worker-error` failure
+			// that named no cause. It is neither `true` nor `false`: the backstop is unconfirmed, so the job must not
+			// run, and "unprotected" would send the operator to fix the wrong thing. `isTransientStatus` is the
+			// project's one rule for a 403 (transient.mjs): GitHub's primary limit (`x-ratelimit-remaining: 0`), its
+			// secondary limit by header or by body, and a proxy's non-JSON page in front of the API all stay retryable.
+			// The cause rides along so a log line can name GitHub's request id (`githubFailureFields`).
+			if (error?.status === 403 && !isTransientStatus(403, octokitHeaderReader(error), error?.message)) {
+				throw Object.assign(configError(`github-host: the token may not read branch protection for ${owner}/${name} (status 403)`), { reason: BRANCH_PROTECTION_UNREADABLE, cause: error });
+			}
+			// Any other status is retryable rather than resolved. Collapsing non-404 to false would
+			// silently bypass never-merge.
 			throw new InfraRetry(
 				`github-host: branch-protection read failed for ${owner}/${name} (status ${error?.status ?? "unknown"})`,
 			);
