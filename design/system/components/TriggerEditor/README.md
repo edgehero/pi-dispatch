@@ -19,7 +19,7 @@ A viewer never sees this page.
 
 **The server provides.**
 - The blessed venues and the deployment defaults.
-- The forges that have webhooks configured.
+- The forges whose events reach this deployment: a forge with its webhook secret set, and GitHub where a new GitHub trigger would fire, by its webhook or by the poller under `GITHUB_INGEST`.
 - The flows found in the repository skill tiers, for suggestions.
 - For a preview: the entry as JSON, the diff against the file, the plan summary, the undo plan and the ticket.
 - For a refusal: the field and the loader's sentence.
