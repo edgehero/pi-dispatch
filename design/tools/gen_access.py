@@ -256,6 +256,14 @@ def role_col(role, n, r, ro):
 
 ROLEBOARD = f'<div class="cards-3 ac-roles">{"".join(role_col(*r) for r in ROLES)}</div>'
 
+# Issue #845: what a running console cannot pick up without a restart, on every page for every role, beside the
+# read-only banner. It names settings and a database number, never a value or an address.
+RESTART = banner('attention', 'rerun', 'This console needs a restart',
+    '<span class="code">VALKEY_URL</span> has changed in the deployment\'s .env since this console started, and the console keeps the value it started with until it is restarted. '
+    'Pause the fleet and Resume the fleet already use the <span class="code">VALKEY_URL</span> the .env names now; the pages read the one the console started with. '
+    'Valkey refused database 16, the one <span class="code">VALKEY_URL</span> named when this console started, and the console does not try a refused database again. '
+    'Name one that Valkey has, or raise <span class="code">databases</span> in its configuration, then restart the console.', small=True)
+
 ACCESS = f"""<a class="skip" href="#main">Skip to content</a>
 <main id="main" class="page">
 {titlebar('Access states', 'The one-time sign-in link, and what each role sees on the same page')}
@@ -264,6 +272,7 @@ ACCESS = f"""<a class="skip" href="#main">Skip to content</a>
 <div class="sect"><h2>What each role sees</h2><span class="card__sub">the same failed job and the same live run</span></div>
 {ROLEBOARD}
 {banner('attention', 'shield', 'This console is read-only', 'It was started with <span class="code">PI_CONSOLE_READ_ONLY=1</span>, so every change is refused and no page shows a form. Operators still see reasons, transcripts and the audit log.', small=True)}
+{RESTART}
 </main>"""
 
 ACCESS_CSS = """
@@ -297,20 +306,21 @@ ACCESS_CSS = """
 @media (max-width: 760px) { .ac-link { padding: var(--space-5); } .ac-link .tile { top: var(--space-5); right: var(--space-5); } }
 """
 
-write("AccessStates", card_marker("Access", 1280, 1440, "The one-time link page in its five states, and operator, viewer and read-only side by side"),
+write("AccessStates", card_marker("Access", 1280, 1440, "The one-time link page in its five states, operator, viewer and read-only side by side, and the restart banner"),
       "Access states", ACCESS, ACCESS_CSS)
 readme("AccessStates", """
-The access states that are not the sign-in form itself: the one-time link page, and what an operator, a viewer and a read-only console each see on the same page.
+The access states that are not the sign-in form itself: the one-time link page, what an operator, a viewer and a read-only console each see on the same page, and the banner a console shows when it needs a restart.
 
 **How a person uses it.**
 - **One-time link.** `/login/code#<code>` shows "Signing in with a one-time link" while it posts the code, after taking the code out of the browser history. If the link was used, has expired or is unknown, it says so, gives the command for a new link, and offers "Sign in with a token instead". A browser that is already signed in is told that instead, with a link to go on. A link with no code says so too. Without JavaScript the page says only "The console needs JavaScript to sign in."
 - **Operator.** Sees reasons, transcripts, phase names, chat, Audit and every action, each as preview then Confirm.
 - **Viewer.** Sees the same rows and numbers. In place of a hidden detail, the viewer gets the repo's sentence, such as "Failure reasons are shown to operators only.", "Phase names and the run's note are shown to operators only.", "Transcripts are shown to operators only." or "Chat is for operators; a viewer sees the run's status only." There are no action buttons, and no Audit in the nav.
 - **Read-only console.** A console started with `PI_CONSOLE_READ_ONLY=1` shows a "Read-only console" chip in the top bar and a banner. Operators keep every detail, but no page has a form, and talking to a run points to the terminal command.
+- **Restart needed.** A console keeps what it read from the deployment's `.env` at start. When that file has changed since, or Valkey refused the database `VALKEY_URL` names, every page shows a banner for every role, "This console needs a restart", naming the settings but never their values. Its log says the same once. A `.env` gone since the console started, or one that cannot be read now, asks for a fix before the restart instead. A password changed in that file needs no restart, unless the file names the console's Valkey otherwise than the console dials it: then the banner names `VALKEY_PASSWORD` too.
 
 **Panels.** `p-link-wait`, `p-link-used`, `p-link-expired`, `p-link-signed-in`, `p-link-nocode`, `p-role-operator`, `p-role-viewer`, `p-role-read-only`.
 
-**The server provides.** The signed-in token's name and role, the read-only flag, and for the link page a closed answer: signing in, used/expired/unknown, expired, already signed in, or no code. A role decides on the server which panels and fields are sent at all. A viewer's page never carries the hidden text.
+**The server provides.** The signed-in token's name and role, the read-only flag, whether this console needs a restart and why (setting names and a database number), and for the link page a closed answer: signing in, used/expired/unknown, expired, already signed in, or no code. A role decides on the server which panels and fields are sent at all. A viewer's page never carries the hidden text.
 
 **Fixture note.** gh-f0c2 (failed on mini1) and gh-b3d7 (running, phase 2 of 4) are fixture runs. The failure text and the phase name are sample copy.
 """)

@@ -2,8 +2,8 @@ import { AbstractConnector, Command, Redis } from "ioredis";
 import { Socket, connect as netConnect } from "node:net";
 import { connect as tlsConnect } from "node:tls";
 import { valkeyAuthRefusal } from "./valkey-auth.mjs";
-import { valkeySchemeOf } from "./podman-stack.mjs";
-import { decodedUserinfo, judgeValkeyAtStart as judgeEndpointAtStart, judgedEndpoint, killSwitchValkeyUrls, defaultValkeyContext, urlShown, useValkeyContext, valkeyClientContext, valkeyContextFromKeys, VALKEY_CONTEXT_KEYS, valkeyPasswordFor, valkeyDbRangeSentence, valkeyRefusal, valkeyUrlFor, valkeyUrlProblem } from "./valkey-endpoint.mjs";
+import { valkeySchemeOf, valkeyTarget } from "./podman-stack.mjs";
+import { DEFAULT_VALKEY_URL, decodedUserinfo, judgeValkeyAtStart as judgeEndpointAtStart, judgedEndpoint, killSwitchValkeyUrls, defaultValkeyContext, urlShown, useValkeyContext, valkeyClientContext, valkeyContextFromKeys, VALKEY_CONTEXT_KEYS, valkeyPasswordFor, valkeyDbRangeSentence, valkeyRefusal, valkeyUrlFor, valkeyUrlProblem } from "./valkey-endpoint.mjs";
 
 // Re-exported for the receiver and the admin, which import this module from the package (issues #464 and #468).
 export { killSwitchValkeyUrls, defaultValkeyContext, urlShown, useValkeyContext, valkeyClientContext, valkeyContextFromKeys, VALKEY_CONTEXT_KEYS, valkeyPasswordFor, valkeyUrlFor, valkeyUrlProblem };
@@ -89,6 +89,18 @@ if (!Redis.prototype[SCRUBS]) {
  */
 export const DB_REFUSED = Symbol.for("pi-dispatch.valkey-db-refused");
 const SELECT_HOOK = Symbol.for("pi-dispatch.valkey-select-refusal");
+
+/**
+ * The database a client holds a refusal of (`DB_REFUSED`), as `{ db }` (null where the client no longer says which), or
+ * null when it holds none. Issue #845: the refusal is held for the client's life, so only a restart of a long-lived
+ * process tries the database again, and the console says so on every page from this.
+ */
+export function refusedDatabaseOf(client) {
+	if (!client?.[DB_REFUSED]) return null;
+	const db = client.condition?.select ?? client.options?.db;
+	return { db: Number.isSafeInteger(db) ? db : null };
+}
+
 /** Whether `err` is a server's refusal of a SELECT for a database it does not have. */
 function isSelectRangeError(err) {
 	return Boolean(err) && typeof err === "object" && String(err.command?.name ?? "").toLowerCase() === "select" && /DB index is out of range|invalid DB index/i.test(String(err.message ?? ""));
@@ -172,8 +184,10 @@ export function givesUp(connection) {
  *
  * `freshContext` is for a persistent client of a long-running surface that names no context: each connect judges by the
  * context as it is then, not as it was at construction, so an operator's fix of the deployment's `.env` reaches a client
- * that has been refused since it started. Off by default, so a worker's judgement stays the one it booted on. The password
- * is still the one read at construction, since ioredis has settled it before the connector runs.
+ * that has been refused since it started. Off by default, so a worker's judgement stays the one it booted on. Its password
+ * is read again before each connect too (issue #845, `freshPassword` below), so a password rotated in that `.env`, or one
+ * a bad line kept from being read at start, is what the next connect sends. Not its URL: a changed `VALKEY_URL` is
+ * another Valkey, which a running client is never moved to (the console says it needs a restart for that instead).
  *
  * `commandTimeoutMs` (issue #867) is a bound on each command of a `failFast` client, for a one-shot BullMQ queue that
  * must not wait for as long as a Valkey that is connected and stopped answering (`kill -STOP`, a partition) stays so:
@@ -206,7 +220,9 @@ export function parseConnection(url, { failFast = false, servername = null, cont
 		// reports. `context` is where the client stands (`valkeyClientContext`), the process's own when not given.
 		Connector: JudgedConnector,
 		// `judge` is a test seam only: the function asked for the address (judgedEndpoint when not given).
-		[JUDGE]: { url, context: where, ...(judge ? { judge } : {}), ...(freshContext && !context ? { freshContext: true } : {}), ...(failFast ? { failFast: true } : {}), ...(bounded ? { commandBound: true } : {}) },
+		// `freshPassword` (issue #845): a client that judges by the context as it is at each connect sends the password that
+		// context gives then, unless it was built to send none (`withoutPassword`, a probe of what another account sees).
+		[JUDGE]: { url, context: where, ...(judge ? { judge } : {}), ...(freshContext && !context ? { freshContext: true, ...(withoutPassword ? {} : { freshPassword: true }) } : {}), ...(failFast ? { failFast: true } : {}), ...(bounded ? { commandBound: true } : {}) },
 		// WHATWG URL keeps an IPv6 literal's brackets in `hostname` (`[::1]`), and net.connect then looks up the name
 		// "[::1]", which never resolves, so a `redis://[::1]:6379` VALKEY_URL never connected (issue #464, measured on
 		// Fedora 44: ETIMEDOUT). The address is the part inside them.
@@ -429,6 +445,60 @@ export function authRefusalFor(state, url, context) {
  */
 const JUDGE = "piDispatchValkeyJudge";
 
+/** The connector's method that reads a `freshPassword` client's password again (`JudgedConnector`, the hook below it). */
+const FRESH_PASSWORD = Symbol.for("pi-dispatch.valkey-fresh-password");
+
+/** Set on a connector whose last refresh declined a `.env` password other than the one its client holds (see there). */
+const PASSWORD_DECLINED = Symbol.for("pi-dispatch.valkey-password-declined");
+
+/**
+ * Whether two Valkey URLs name one Valkey server, by `valkeyTarget`'s host and port (the scheme alias, a database path
+ * and a trailing `/` aside): a password belongs to the server. False for one that does not parse. `localhost` and
+ * `127.0.0.1` are two names here, as for `valkeyEndpointTag`: which address a name reaches is the judge's to say.
+ */
+function sameValkeyServer(a, b) {
+	const x = valkeyTarget(a);
+	const y = valkeyTarget(b);
+	return !x.error && !y.error && x.host === y.host && x.port === y.port;
+}
+
+/**
+ * What a `freshPassword` client's refresh does with `context` as it is now (`JudgedConnector`'s method below has the
+ * rules): `{ take: true, password }` to send `password` (null: none) from the next connect on; `{ take: false, declined }`
+ * to keep the one it holds (`held`), where `declined` is true when the `.env` gives another password than `held` for a
+ * Valkey the client does not dial as it dials it, false when nothing is being held back, and null when the context
+ * cannot tell (it could not be read, finds no file, or is another deployment's). Pure: one rule for the refresh before
+ * each connect and for `passwordDeclinedOf`, so the two never disagree about what is held back.
+ */
+function freshPasswordVerdict(judge, context, held) {
+	if (!context || context.error || context.absent === true) return { take: false, declined: null };
+	if ((context.envPath ?? null) !== (judge?.context?.envPath ?? null)) return { take: false, declined: null };
+	const { password, from } = valkeyPasswordFor(judge.url, context);
+	const fromFile = from !== "VALKEY_URL" && from !== "the environment";
+	if (fromFile && !sameValkeyServer(context.url?.file ?? DEFAULT_VALKEY_URL, judge.url)) return { take: false, declined: (password ?? null) !== (held ?? null) };
+	return { take: true, password: password ?? null };
+}
+
+/**
+ * Issue #845, review of PR #878: whether a `freshPassword` client holds back a password the deployment's `.env` gives,
+ * other than the one it holds, because the file does not name the Valkey the client dials as it dials it. True only
+ * while a reconnect has declined one (recorded by the refresh, which runs on connect alone) AND the `.env` as it is now
+ * still gives such a password (`freshPasswordVerdict` over the context read now): a file put back to the held password,
+ * or changed to name the client's Valkey, clears it at once, with no reconnect, and so does a file that cannot be read
+ * now (the console says that instead). Reads the client's context once; touches no Valkey.
+ */
+export function passwordDeclinedOf(client) {
+	const connector = client?.connector;
+	if (connector?.[PASSWORD_DECLINED] !== true) return false;
+	const judge = connector.options?.[JUDGE];
+	if (judge?.freshPassword !== true) return false;
+	try {
+		return freshPasswordVerdict(judge, defaultValkeyContext(), connector.options.password).declined === true;
+	} catch {
+		return false;
+	}
+}
+
 /**
  * ioredis' connector for every client of this project (issue #464, gate round 2 follow-up): on each connect it asks
  * `judgedEndpoint` for the address, then dials that literal (with a `rediss:` URL's name kept as the TLS servername),
@@ -453,6 +523,57 @@ export class JudgedConnector extends AbstractConnector {
 	/** ioredis' ready check: failed for a client whose SELECT was refused (`DB_REFUSED`), so it never goes ready. */
 	check() {
 		return !this[DB_REFUSED];
+	}
+
+	/**
+	 * Issue #845: a `freshPassword` client's password, as `valkeyPasswordFor` reads it from the context as it is now, put
+	 * where ioredis reads it for the connect about to start (the hook below). Here and not in `connect()`: by the time
+	 * ioredis asks the connector for a stream it has already built that connect's AUTH from `options.password`. The options
+	 * are the client's own object (ioredis hands its `options` to the Connector it constructs), so this is what the client
+	 * sends. A password from VALKEY_URL's userinfo comes back as it is, so it stays fixed. The last password is kept by a
+	 * context that:
+	 *   - throws, or names an `error` (a `.env` that cannot be read, or a line in it the service's loader reads
+	 *     differently): it cannot say which password the file holds, and dropping the one that worked would refuse a client
+	 *     that is fine;
+	 *   - finds no file (`absent`): a `.env` gone, for good or for the moment an editor replaces it, is not a file that
+	 *     sets no password, so it does not drop one either (the console says to put the file back before a restart);
+	 *   - would answer from the `.env` while that file does not name the Valkey this client dials: a password the file
+	 *     gives (or the lack of one) belongs to the Valkey the file's VALKEY_URL names, the default one when it names
+	 *     none, and a held client never moves to another Valkey. Review of PR #878, measured with two Valkeys: one
+	 *     deployment moving to another Valkey changes both lines together, a symlinked deployment folder repointed reads
+	 *     another deployment's file through the same path, and a shell that exports VALKEY_URL keeps the client on its URL
+	 *     whatever the file says; in each the new Valkey's password went to the old one, which refused it, and the pages
+	 *     lost the old Valkey too. The check is against the URL the client dials, not the context's own choice of URL
+	 *     (`valkeyUrlFor`, which prefers this shell's and so never moved), and by the server each names (`sameValkeyServer`:
+	 *     `valkeyTarget`'s host and port, so a scheme alias, a database path or a trailing `/` is the same Valkey, while
+	 *     `localhost` and `127.0.0.1` stay two names, as `valkeyEndpointTag` keeps them). A rotation keeps the file's URL,
+	 *     so it is taken, and so is a password a bad line hid at start once the line is fixed, when the file names the
+	 *     client's Valkey. A password declined here that is not the one the client holds is recorded (`PASSWORD_DECLINED`,
+	 *     `passwordDeclinedOf`), so the console names VALKEY_PASSWORD as needing a restart rather than going on refused in
+	 *     silence (a shell that exports `redis://localhost:6440` over a file's `redis://127.0.0.1:6440`, say);
+	 *   - is read from another `.env` path than the one the client was built with: the pi extension's context follows the
+	 *     deployment pointer, and that alone says the file is another deployment's.
+	 * A password from this process's environment, or from VALKEY_URL's own userinfo, is not the file's, and is taken as it
+	 * comes. A context that passes all of these and gives no password drops it, as a restart would.
+	 */
+	[FRESH_PASSWORD]() {
+		const judge = this.options?.[JUDGE];
+		if (judge?.freshPassword !== true) return;
+		let context;
+		try {
+			context = defaultValkeyContext();
+		} catch {
+			return;
+		}
+		const verdict = freshPasswordVerdict(judge, context, this.options.password);
+		if (!verdict.take) {
+			// Recorded only where the context could tell; `passwordDeclinedOf` reads it against the file as it is then.
+			if (verdict.declined !== null) this[PASSWORD_DECLINED] = verdict.declined;
+			return;
+		}
+		this[PASSWORD_DECLINED] = false;
+		if (verdict.password) this.options.password = verdict.password;
+		else delete this.options.password;
 	}
 
 	connect() {
@@ -491,6 +612,39 @@ export class JudgedConnector extends AbstractConnector {
 
 /** How `JudgedConnector` dials, net and tls: a seam, so a test sees the options a pinned connect is made with. */
 JudgedConnector.dial = { net: netConnect, tls: tlsConnect };
+
+/**
+ * Where a `freshPassword` client's password is read again (issue #845): before EVERY connect, its first and each
+ * reconnect, on the prototype like the hooks above, so a client ioredis or BullMQ duplicates keeps it too. Measured
+ * against the pinned ioredis 5.11.1 (`worker/test/valkey-clients.test.mjs` holds each line): `connect()` runs
+ * `_connect()`, which builds the connect's AUTH (`this.condition.auth`) from `this.options.password` before it asks the
+ * connector for a stream; a refused AUTH (WRONGPASS) and a refused ready check (NOAUTH) go to `recoverFromFatalError`,
+ * which disconnects to reconnect, and the reconnect timer calls `self.connect()`. So a rotated password reaches a client
+ * that has been refused since the rotation at its next try, by its own retry strategy, with no rebuild.
+ *
+ * Delegated to the client's connector, so the context read is the one of the copy of this module that built the client
+ * (a bundle carries its own copy beside the shared ioredis, and the first copy loaded installs this hook). Inert for every
+ * other client. A throw here would escape ioredis' reconnect timer, which does not catch one, so it is caught: the last
+ * password is kept.
+ *
+ * REJECTED: rebuilding the client when its password changes, which every holder of one (the console's audit copy, the
+ * fleet reader, a page's reads) would have to learn to swap; wrapping `connect` on each client `makeRedisClient` makes,
+ * which misses a duplicate and a client BullMQ builds from `parseConnection`'s options; and reading the password in
+ * `JudgedConnector.connect`, which is too late for that connect's AUTH (above).
+ */
+const FRESH_PASSWORD_HOOK = Symbol.for("pi-dispatch.valkey-fresh-password-hook");
+if (!Redis.prototype[FRESH_PASSWORD_HOOK]) {
+	const connect = Redis.prototype.connect;
+	Redis.prototype.connect = function connectWithFreshPassword(...args) {
+		try {
+			this.connector?.[FRESH_PASSWORD]?.();
+		} catch {
+			// The last password stays.
+		}
+		return connect.apply(this, args);
+	};
+	Redis.prototype[FRESH_PASSWORD_HOOK] = true;
+}
 
 /**
  * Whether `connection` (options for BullMQ, or an ioredis client) connects through `JudgedConnector`. `makeQueue` and the

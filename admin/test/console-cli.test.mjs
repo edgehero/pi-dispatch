@@ -12,6 +12,9 @@ import * as server from "../src/console/server.mjs";
 import * as sandboxData from "../src/sandbox-data.mjs";
 import { readTriggerEditor, configLocationsOf, panelEnv, PANEL_SERVICE_KEYS } from "../src/read-model.mjs";
 import * as realWhatif from "../src/console/whatif.mjs";
+import { RESTART_CLEARED, RESTART_RECHECK_MS, RESTART_TITLE } from "../src/console/restart-notice.mjs";
+import { VALKEY_CONTEXT_KEYS } from "@edgehero/pi-dispatch/connection";
+import { restartBannerHtml } from "../src/console/shell.mjs";
 
 // `pi-dispatch-console` (issue #640) on injected modules: the token, session, code, ticket and audit modules are fakes
 // here, so these tests pin the command's own rules (exit codes, what it prints and where, the startup refusals, the
@@ -508,6 +511,127 @@ test("serve copies each audit row it writes to the Valkey list after the file ho
   stop();
   assert.equal(await running, 0);
   assert.equal(disconnected, true, "the Valkey client is closed on stop");
+});
+
+// Issue #845, measured on a real console: a VALKEY_URL changed in the deployment's .env under a running console was
+// never picked up, and nothing said so. The next page now carries the restart banner, an error page a signed-in person is
+// shown too, and the log says it once, by name; the timer says it with no page open, and says when it is over.
+test("serve: a VALKEY_URL changed in the deployment's .env under a running console puts the restart banner on the next page and one log line, by name only (#845)", async (t) => {
+  const dep = deployment();
+  const envPath = join(dep.dir, ".env");
+  writeFileSync(envPath, "VALKEY_URL=redis://127.0.0.1:6379/1\n");
+  let stop;
+  const until = new Promise((resolve) => (stop = resolve));
+  t.after(() => stop());
+  let listening;
+  const up = new Promise((resolve) => (listening = resolve));
+  const modules = fakeModules();
+  modules.sessions = await import("../src/console/sessions.mjs");
+  modules.tokens.findToken = (f, presented) => (presented === TOKEN ? f.tokens[0] : null);
+  const drawn = [];
+  modules.pages = { ...modules.pages, renderPage: async (name, ctx) => (drawn.push(ctx.restart ?? null), { status: 200, html: `<!doctype html><title>${name}</title>${restartBannerHtml(ctx.restart ?? null) ?? ""}` }) };
+  const lines = [];
+  let tick = null;
+  let cleared = 0;
+  const timers = { setInterval: (fn, ms) => ((tick = fn), { ms, unref() {} }), clearInterval: () => (cleared += 1) };
+  let clock = T0;
+  const err = [];
+  const running = runCli(["serve", "--deployment", dep.dir], { env: dep.env, modules, now: () => clock, uid: process.geteuid?.(), out: () => {}, err: (l) => err.push(l), log: (l) => lines.push(l), timers, until, onListening: listening });
+  const srv = await Promise.race([up, running.then((code) => assert.fail(`serve exited ${code} before listening: ${err.join(" ")}`))]);
+  const port = srv.address().port;
+  assert.equal(typeof tick, "function", "the watch's timer is set");
+  const login = await http(port, { method: "POST", path: "/login", headers: { origin: `http://127.0.0.1:${port}`, "sec-fetch-site": "same-origin", "content-type": "application/json" }, body: JSON.stringify({ token: TOKEN }) });
+  assert.equal(login.status, 200, login.text);
+  const cookie = login.headers["set-cookie"][0].split(";")[0];
+
+  const before = await http(port, { path: "/fleet", headers: { cookie } });
+  assert.equal(before.status, 200);
+  assert.equal(drawn.at(-1), null, "nothing changed: no banner");
+  assert.ok(!before.text.includes(RESTART_TITLE));
+
+  writeFileSync(envPath, "VALKEY_URL=redis://:hunter2@127.0.0.1:6379/2\n");
+  await http(port, { path: "/fleet", headers: { cookie } });
+  assert.equal(drawn.at(-1), null, "inside the recheck window the held answer stands");
+  clock += RESTART_RECHECK_MS;
+  const after = await http(port, { path: "/fleet", headers: { cookie } });
+  assert.ok(after.text.includes(`<p class="banner__t">${RESTART_TITLE}</p>`) && after.text.includes('<span class="code">VALKEY_URL</span> has changed in the deployment'), after.text);
+  assert.deepEqual(drawn.at(-1).reasons.map((r) => r.keys), [["VALKEY_URL"]]);
+  const said = lines.filter((l) => l.includes("restart needed"));
+  assert.equal(said.length, 1, lines.join("\n"));
+  assert.match(said[0], /^pi-dispatch-console: restart needed: VALKEY_URL has changed in the deployment's \.env since this console started/);
+  for (const text of [after.text, ...lines]) assert.ok(!text.includes("hunter2") && !text.includes("6379/2"), "a name, never a value");
+  // An error page a signed-in person is shown carries it too.
+  const missing = await http(port, { path: "/no-such-page", headers: { cookie, accept: "text/html" } });
+  assert.equal(missing.status, 404);
+  assert.ok(missing.text.includes(`<p class="banner__t">${RESTART_TITLE}</p>`), "the 404 page under the signed-in bar");
+  assert.ok(!(await http(port, { path: "/no-such-page", headers: { accept: "text/html" } })).text.includes(RESTART_TITLE), "never for an anonymous visitor");
+  // The timer, with no page open: the same reasons say nothing more; the file put back says it is over, once.
+  tick();
+  assert.equal(lines.filter((l) => l.includes("restart needed")).length, 1);
+  writeFileSync(envPath, "VALKEY_URL=redis://127.0.0.1:6379/1\n");
+  tick();
+  tick();
+  assert.deepEqual(lines.filter((l) => l.includes("no restart needed")), [`pi-dispatch-console: ${RESTART_CLEARED}`]);
+  stop();
+  assert.equal(await running, 0);
+  assert.equal(cleared, 1, "the watch's timer is stopped with serve");
+});
+
+// Issue #845, the review: the wiring each reason rests on. The start's own problem is read at start (a bad line the
+// console started with is no reason), and each held client's refused database reaches the banner, the console's own and
+// the fleet reader's.
+test("serve: a bad line the console started with is no reason, and a database either held client was refused is, and so is a password either declined, each on its own (#845)", async (t) => {
+  const dep = deployment();
+  // This shell sets no PI_SANDBOX_GATEWAYS_FILE, so a line for it the service's loader reads differently is a problem
+  // the console starts with, and still the same one at every page. PI_SANDBOX_HOSTS_FILE reaches the console raw and is
+  // compared by the file it names in the deployment folder, which the start's reading must be given too (review of PR
+  // #878: without it, the first page called it changed).
+  writeFileSync(join(dep.dir, ".env"), "VALKEY_URL=redis://127.0.0.1:6379/1\nPI_SANDBOX_GATEWAYS_FILE=/srv/$USER/gateways.json\nPI_SANDBOX_HOSTS_FILE=hosts.json\n");
+  let stop;
+  const until = new Promise((resolve) => (stop = resolve));
+  t.after(() => stop());
+  let listening;
+  const up = new Promise((resolve) => (listening = resolve));
+  const modules = fakeModules();
+  modules.sessions = await import("../src/console/sessions.mjs");
+  modules.tokens.findToken = (f, presented) => (presented === TOKEN ? f.tokens[0] : null);
+  const own = { refused: null, declined: false, on() {}, disconnect() {} };
+  modules.connection = { ...modules.connection, VALKEY_CONTEXT_KEYS, makeRedisClient: () => own, refusedDatabaseOf: (client) => client?.refused ?? null, passwordDeclinedOf: (client) => client?.declined === true };
+  modules.audit.mirrorRow = async () => false;
+  let fleetRefused = null;
+  let fleetDeclined = false;
+  modules.fleet.refusedDatabase = () => fleetRefused;
+  modules.fleet.passwordDeclined = () => fleetDeclined;
+  const drawn = [];
+  modules.pages = { ...modules.pages, renderPage: async (name, ctx) => (drawn.push(ctx.restart ?? null), { status: 200, html: `<!doctype html><title>${name}</title>` }) };
+  const timers = { setInterval: () => ({ unref() {} }), clearInterval() {} };
+  let clock = T0;
+  const err = [];
+  const running = runCli(["serve", "--deployment", dep.dir], { env: dep.env, modules, now: () => clock, uid: process.geteuid?.(), out: () => {}, err: (l) => err.push(l), log: () => {}, timers, until, onListening: listening });
+  const srv = await Promise.race([up, running.then((code) => assert.fail(`serve exited ${code} before listening: ${err.join(" ")}`))]);
+  const port = srv.address().port;
+  const login = await http(port, { method: "POST", path: "/login", headers: { origin: `http://127.0.0.1:${port}`, "sec-fetch-site": "same-origin", "content-type": "application/json" }, body: JSON.stringify({ token: TOKEN }) });
+  const cookie = login.headers["set-cookie"][0].split(";")[0];
+  const page = async () => {
+    clock += RESTART_RECHECK_MS;
+    await http(port, { path: "/fleet", headers: { cookie } });
+    return drawn.at(-1)?.reasons.map((r) => [r.kind, r.db ?? null]) ?? [];
+  };
+  assert.deepEqual(await page(), [], "the bad line it started with is the start's own, not a reason");
+  own.refused = { db: 16 };
+  assert.deepEqual(await page(), [["database", 16]], "the console's own client");
+  own.refused = null;
+  fleetRefused = { db: 15 };
+  assert.deepEqual(await page(), [["database", 15]], "the fleet reader's client");
+  // A changed password either held client declined (review of PR #878), each on its own.
+  fleetRefused = null;
+  own.declined = true;
+  assert.deepEqual(await page(), [["password", null]], "the console's own client declined it");
+  own.declined = false;
+  fleetDeclined = true;
+  assert.deepEqual(await page(), [["password", null]], "the fleet reader's client declined it");
+  stop();
+  assert.equal(await running, 0);
 });
 
 test("serve refuses to start, exit 2, when its start cannot be audited, and releases the lock it took", async () => {

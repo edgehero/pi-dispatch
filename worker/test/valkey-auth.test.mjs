@@ -181,6 +181,10 @@ test("valkeyClientContext reads VALKEY_PASSWORD from the environment and the dep
 	assert.deepEqual(valkeyClientContext({ env: {}, cwd: dir }).password, { environment: null, file: PW });
 	assert.deepEqual(valkeyClientContext({ env: { VALKEY_PASSWORD: "E".repeat(20) }, cwd: dir }).password, { environment: "E".repeat(20), file: PW });
 	assert.deepEqual(valkeyClientContext({ env: { VALKEY_PASSWORD: "" }, cwd: tempDir("valkey-ctx-none-") }).password, { environment: null, file: null }, "empty is unset");
+	// Issue #845: a folder with no .env says so (`absent`), which a client reading its password at each connect tells
+	// from a file that sets none.
+	assert.equal(valkeyClientContext({ env: {}, cwd: tempDir("valkey-ctx-none-") }).absent, true);
+	assert.equal(valkeyClientContext({ env: {}, cwd: dir }).absent, false);
 	// The admin panel runs wherever pi was started, and installs the context its own one `.env` reader built (issue #471's
 	// `readDeploymentEnv`, the pointer's folder); a client with no context of its own gets it, and no file is read here.
 	const built = valkeyContextFromKeys({ env: {}, envPath: "/pointed/.env", fileKeys: { [VALKEY_PASSWORD_KEY]: PW, VALKEY_URL: "redis://127.0.0.1:6379" } });
@@ -525,6 +529,115 @@ setTimeout(() => { console.log("NOT-REACHED"); process.exit(0); }, 6000);
 	for (const pw of [OLD, NEW]) {
 		assert.ok(!out.includes(pw), `not on stdout:\n${out}`);
 		assert.ok(!err.includes(pw), `not on stderr:\n${err}`);
+	}
+});
+
+// Issue #845 (measured on macOS against a real console): after a rotation in the deployment's `.env` and on the server,
+// the console's clients said WRONGPASS once a minute for as long as it ran, and a password a bad `.env` line kept from
+// being read at start said NOAUTH after the line was fixed. A `freshContext` client now reads the password again before
+// each connect. Real ioredis, against the RESP stand-in above, with the console's own client options.
+test("a freshContext client heals a rotated password and a password missing at start at its next connect, with no rebuild; one without freshContext keeps its first (#845)", { timeout: 30_000 }, async () => {
+	const OLD = "oldPasswordHealedWithoutRestart1";
+	const NEW = "newPasswordHealedWithoutRestart2";
+	const valkey = await fakeValkey(OLD);
+	const judge = async () => ({ host: "127.0.0.1", servername: null, pinned: "127.0.0.1" });
+	let file = OLD;
+	const url = `redis://127.0.0.1:${valkey.port}`;
+	// The deployment's .env names this Valkey, as `up` writes it: its password is this Valkey's.
+	useValkeyContext(() => ctx({ file }, { url: { environment: null, file: url } }));
+	const clients = [];
+	const made = (opts) => {
+		const c = makeRedisClient(url, { judge, noOfflineQueue: true, disconnectTimeoutMs: 0, ...opts });
+		const errors = [];
+		c.on("error", (e) => errors.push(e.message));
+		clients.push(c);
+		return { c, errors };
+	};
+	/** Until `ok()` holds, or a failure of the test's own after `ms`. */
+	const until = async (ok, what, ms = 8000) => {
+		const end = Date.now() + ms;
+		while (!ok()) {
+			if (Date.now() > end) assert.fail(`not within ${ms} ms: ${what}`);
+			await new Promise((r) => setTimeout(r, 20));
+		}
+	};
+	try {
+		const fresh = made({ freshContext: true });
+		const frozen = made({});
+		await until(() => fresh.c.status === "ready" && frozen.c.status === "ready", "both ready on the old password");
+		assert.equal(await fresh.c.ping(), "PONG");
+
+		// The rotation on the server first: both are refused, and each keeps retrying by its strategy.
+		valkey.rotate(NEW);
+		await until(() => fresh.errors.some((m) => /WRONGPASS/.test(m)) && frozen.errors.some((m) => /WRONGPASS/.test(m)), "both refused after the rotation");
+		// Then in the .env: the same client goes ready at its next try, with no rebuild and no restart.
+		file = NEW;
+		await until(() => fresh.c.status === "ready", "the freshContext client ready on the new password");
+		assert.equal(await fresh.c.ping(), "PONG");
+		const refusedSince = frozen.errors.length;
+		await until(() => frozen.errors.length >= refusedSince + 2, "the other client refused twice more");
+		assert.notEqual(frozen.c.status, "ready", "without freshContext the password read at construction stays");
+		assert.ok(frozen.errors.slice(refusedSince).every((m) => /WRONGPASS/.test(m)), frozen.errors.join("\n"));
+
+		// A password a bad .env line kept from being read at start: NOAUTH, then ready once the line gives it.
+		file = null;
+		valkey.rotate(NEW);
+		const late = made({ freshContext: true });
+		await until(() => late.errors.some((m) => /NOAUTH/.test(m)), "refused with no password");
+		file = NEW;
+		await until(() => late.c.status === "ready", "ready once the .env gives the password");
+		assert.equal(await late.c.ping(), "PONG");
+		for (const { errors } of [fresh, frozen, late]) for (const pw of [OLD, NEW]) assert.ok(!errors.join("\n").includes(pw), "no error carries a password");
+	} finally {
+		for (const c of clients) c.disconnect();
+		useValkeyContext(null);
+		valkey.server.close();
+	}
+});
+
+// Review of PR #878, measured with two Valkeys: a deployment moving to another Valkey changes VALKEY_URL and
+// VALKEY_PASSWORD together. A held client stays on the Valkey it was built for, so it must keep that Valkey's password:
+// sending the new one there was refused, and the pages lost the old Valkey too.
+test("a freshContext client whose deployment now names another Valkey keeps the password of the one it talks to, with or without a shell's VALKEY_URL (#845)", { timeout: 30_000 }, async () => {
+	const PW_A = "passwordOfValkeyA000000000001";
+	const PW_B = "passwordOfValkeyB000000000002";
+	const until = async (ok, what, ms = 8000) => {
+		const end = Date.now() + ms;
+		while (!ok()) {
+			if (Date.now() > end) assert.fail(`not within ${ms} ms: ${what}`);
+			await new Promise((r) => setTimeout(r, 20));
+		}
+	};
+	// Third review of PR #878: with this shell exporting A's URL, the context's own choice of URL never moves, so the
+	// file's move to B must still keep B's password from A.
+	for (const shell of [false, true]) {
+		const a = await fakeValkey(PW_A);
+		const b = await fakeValkey(PW_B);
+		const judge = async () => ({ host: "127.0.0.1", servername: null, pinned: "127.0.0.1" });
+		const urlA = `redis://127.0.0.1:${a.port}`;
+		const environment = shell ? urlA : null;
+		let now = ctx({ file: PW_A }, { url: { environment, file: urlA } });
+		useValkeyContext(() => now);
+		const client = makeRedisClient(urlA, { judge, freshContext: true, noOfflineQueue: true, disconnectTimeoutMs: 0 });
+		const errors = [];
+		client.on("error", (e) => errors.push(e.message));
+		try {
+			await until(() => client.status === "ready", `ready on A (shell ${shell})`);
+			// The .env now names B, with B's password; A drops every connection, so the client reconnects to A.
+			now = ctx({ file: PW_B }, { url: { environment, file: `redis://127.0.0.1:${b.port}` } });
+			const dropped = new Promise((resolve) => client.once("close", resolve));
+			a.rotate(PW_A);
+			await dropped;
+			await until(() => client.status === "ready", `ready on A again, with A's password (shell ${shell})`);
+			assert.equal(await client.ping(), "PONG");
+			assert.deepEqual(errors.filter((m) => /WRONGPASS|NOAUTH/.test(m)), [], `never refused by A (shell ${shell})`);
+			assert.equal(client.options.password, PW_A);
+		} finally {
+			client.disconnect();
+			useValkeyContext(null);
+			a.server.close();
+			b.server.close();
+		}
 	}
 });
 

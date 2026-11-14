@@ -11,7 +11,7 @@
  */
 import * as nodeFs from "node:fs";
 import { isAbsolute, resolve as resolvePath } from "node:path";
-import { logsDirPath } from "@edgehero/pi-dispatch/config";
+import { DEFAULT_VALKEY_URL, logsDirPath } from "@edgehero/pi-dispatch/config";
 import { sandboxHostsPath } from "@edgehero/pi-dispatch/sandbox-hosts";
 import { deploymentServiceEnv } from "@edgehero/pi-dispatch/service-env";
 import { pointerPath, readPointer } from "../deployment-pointer.mjs";
@@ -138,7 +138,9 @@ export function consoleConfig({ env, dir, platform = process.platform, tokensFil
     maxMs: maxHours.value * 3_600_000,
     maxStreams: streams.value,
     logsDir: inDir(logsDirPath(env)),
-    valkeyUrl: env.VALKEY_URL || "redis://127.0.0.1:6379",
+    // The worker's own default, by its one constant: a Valkey client compares the URL it dials with the one a `.env`
+    // names (issue #845), so a second spelling of the default would be a second Valkey there.
+    valkeyUrl: env.VALKEY_URL || DEFAULT_VALKEY_URL,
     // The panel's default (resolvePaths): the deployment folder's pause-windows.json, which `init` scaffolds.
     pauseWindowsPath: inDir(env.PI_PAUSE_WINDOWS_FILE || "pause-windows.json"),
     // The worker's one rule for this file (issue #806): the sandbox service reads and writes the same path.

@@ -2218,15 +2218,36 @@ test("createFleetReader: a queue built with no client at all (a surface's own se
   assert.equal(built, 1);
 });
 
-test("createFleetReader: the raw client is bounded and judged afresh, so a stale verdict cannot hang a page", () => {
+test("createFleetReader: the raw client is bounded and judged afresh, so a stale verdict cannot hang a page", async () => {
   let options = null;
   const logsDir = tempDir("pd-ended-queue-");
-  createFleetReader(
+  const held = { on() {} };
+  const reader = createFleetReader(
     { valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json") },
-    { makeQueueFn: () => ({ name: "pi-jobs" }), parseConnectionFn: () => ({}), redisFn: (_url, opts) => { options = opts; return { on() {} }; }, readOnly: true },
+    { makeQueueFn: () => ({ name: "pi-jobs" }), parseConnectionFn: () => ({}), redisFn: (_url, opts) => { options = opts; return held; }, readOnly: true },
   );
   assert.equal(options.freshContext, true);
   assert.equal(options.commandTimeoutMs, 5_000, "longer than the reads this reader bounds itself, and short enough to be read as a page's wait");
+  // Issue #845: the database the held client was refused, for the console's restart banner; it never tries it again.
+  const { DB_REFUSED } = await import("@edgehero/pi-dispatch/connection");
+  assert.equal(reader.refusedDatabase(), null);
+  held[DB_REFUSED] = new Error("refused");
+  held.condition = { select: 16 };
+  assert.deepEqual(reader.refusedDatabase(), { db: 16 });
+  // And whether it holds back a changed password (`passwordDeclinedOf`, review of PR #878): a decline recorded by a
+  // reconnect, while the .env as it is now still gives a password for a Valkey this client does not dial as it dials it.
+  const { useValkeyContext } = await import("@edgehero/pi-dispatch/connection");
+  assert.equal(reader.passwordDeclined(), false);
+  const context = { envPath: "/d/.env", error: null, absent: false, password: { environment: null, file: "the-files-new-password" }, url: { environment: "redis://localhost:6379", file: "redis://127.0.0.1:6379" } };
+  held.connector = { [Symbol.for("pi-dispatch.valkey-password-declined")]: true, options: { password: "the-held-password", piDispatchValkeyJudge: { url: "redis://localhost:6379", freshPassword: true, context } } };
+  useValkeyContext(() => context);
+  try {
+    assert.equal(reader.passwordDeclined(), true);
+    useValkeyContext(() => ({ ...context, password: { environment: null, file: "the-held-password" } }));
+    assert.equal(reader.passwordDeclined(), false, "the file back to the held password");
+  } finally {
+    useValkeyContext(null);
+  }
 });
 
 test("createFleetReader on a real raw client that cannot connect: a healthy queue's snapshot still ends, where a raw read used to hang it", { timeout: 15000 }, async () => {
