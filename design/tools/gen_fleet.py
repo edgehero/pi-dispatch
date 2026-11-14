@@ -742,6 +742,9 @@ VARIANTS = [
     ("failed", "config", "The console could not check this browser's remembered sign-in", "Nothing was signed out. An operator should run <span class='code'>pi-dispatch doctor</span> on the host. Signing in with a link or a token works meanwhile, but this browser is then no longer remembered."),
     ("attention", "slot-held", "You are signed out, but this browser's remembered sign-in could not be erased", "An operator should run <span class='code'>pi-dispatch doctor</span> on the host, fix what it names, then remove this browser with <span class='code'>pi-dispatch-console device revoke</span>."),
     ("attention", "beat", "Console not reachable, retrying", "Your page stays as it is. Retrying every 5 seconds."),
+    ("failed", "failed", "This computer did not let the browser in", "The request was denied, or no one answered it within a minute. Try again, or type a code from <span class='code'>pi-dispatch-console link</span>."),
+    ("attention", "clock", "A sign-in request is already waiting", "Answer or close the window this computer shows first, then try again."),
+    ("attention", "info", "This computer cannot show a sign-in window", "Type a code from <span class='code'>pi-dispatch-console link</span> instead, or run <span class='code'>./pi-dispatch console</span> on the host."),
 ]
 SIGNIN = f"""<a class="skip" href="#si-code">Skip to sign-in</a>
 <main id="main" class="page si-page">
@@ -751,10 +754,16 @@ SIGNIN = f"""<a class="skip" href="#si-code">Skip to sign-in</a>
     <section class="si-card" id="p-signin" data-panel aria-labelledby="si-h">
       <span class="brandpill__m si-mark">pi</span>
       <h1 id="si-h">Sign in to the console</h1>
-      <p class="muted">Type the sign-in code from your terminal, or paste a console token.</p>
+      <p class="muted">Sign in on this computer, type the sign-in code from your terminal, or paste a console token.</p>
+      <form class="si-form" aria-label="Sign in on this computer">
+        <button class="btn btn--primary btn--lg si-go" type="button">Sign in on this computer</button>
+        <p class="si-hint">This computer shows a window asking to let this browser in. No code or token is needed, and the browser then stays signed in until you sign out, so use it on a browser that is yours.</p>
+        <p class="si-hint si-wait">Allow it in the window this computer shows. The code there should be <b class="code">AB2C</b>.</p>
+      </form>
+      <p class="si-or">or</p>
       <form class="si-form" aria-label="Sign in with a code">
         <div class="field"><label for="si-code">Sign-in code</label><input id="si-code" class="input si-input si-code" type="text" autocomplete="one-time-code" placeholder="XXXX-XXXX" value="K7QX-9M2D"><p class="si-hint">The 8 characters <span class="code">pi-dispatch-console link</span> prints. It works once, within 5 minutes, and this browser then stays signed in until you sign out, so use it on a browser that is yours.</p></div>
-        <button class="btn btn--primary btn--lg si-go" type="button">Sign in</button>
+        <button class="btn btn--lg si-go" type="button">Sign in</button>
       </form>
       <p class="si-or">or</p>
       <form class="si-form" aria-label="Sign in with a token">
@@ -816,12 +825,13 @@ SIGNIN_CSS = """
 @media (max-width: 760px) { .si-grid { grid-template-columns: minmax(0, 1fr); gap: var(--space-5); margin-top: 0; } .si-card { padding: var(--space-5); } .si-card h1 { font-size: 26px; line-height: 32px; } }
 """
 
-write("SignIn", card_marker("Screens", 1280, 1440, "Sign in: a code to type or a token, help on where they come from, and every notice this page can show"),
+write("SignIn", card_marker("Screens", 1280, 1440, "Sign in: on this computer, with a code to type or with a token, help on where they come from, and every notice this page can show"),
       "Sign in", SIGNIN, SIGNIN_CSS)
 readme("SignIn", """
-Sign-in is a single centered card: type the sign-in code from your terminal, or paste a console token, with help that says exactly where both come from.
+Sign-in is a single centered card: sign in on this computer, type the sign-in code from your terminal, or paste a console token, with help that says exactly where they come from.
 
 **How a person uses it.**
+- **Sign in on this computer.** Where the console can show a window on the host's desktop (macOS, or Linux with a desktop and `zenity` or `kdialog`), the card leads with this button. Pressing it makes the host show a window asking to let this browser in, with a 4-character code; the page shows the same code, *AB2C* here, and waits. Allow signs this browser in and it stays signed in until it signs out; Deny, or no answer within a minute, says so. A job's container can send a request but cannot click a window on the person's screen, which is why the window is what lets a browser in. Where the console cannot show a window, the button is not drawn.
 - **The sign-in code.** A person types the 8 characters `pi-dispatch-console link` printed, such as `K7QX-9M2D`, and presses *Sign in*. Capitals or not, with the dash or without, and an O for a zero or an I or L for a one all work. A code works once, within 5 minutes, and the browser it signs in stays signed in until it signs out, which the hint under the field says, so a person uses it on a browser that is theirs.
 - **The token.** Below a rule marked *or*, a person can paste a console token instead and press *Sign in with the token*.
 - **Remember this trusted device.** A box under the token field, ticked to start with, keeps this browser signed in across idle time and restarts until it signs out. Untick it on a browser that is not yours alone. It is drawn only where the console would remember the browser: never on a Windows host, and never over plain HTTP across a network.
@@ -830,14 +840,15 @@ Sign-in is a single centered card: type the sign-in code from your terminal, or 
 - **Notices.** One notice at a time sits above the code field, each saying what happened and what to do.
   - Why a session ended: 60 minutes idle (an open live tab does not count), the 12-hour maximum, a revoked or rotated token, a changed role, an operator ending every session, signing out in another tab, a console restart, or a remembered device being removed. A remembered sign-in that could not be checked or erased says so.
   - Why a sign-in was refused: a wrong token, a code that did not work, a used or expired link, too many attempts (5 a minute), a tokens file the console cannot use, or an audit log it cannot write.
+  - Why signing in on this computer did not work: the window was denied or not answered, a request was already waiting, or this computer cannot show a window.
   - "Console not reachable, retrying" keeps the page instead of going to the browser's error page.
 - **Where it answers.** The footer says the console answers at `pi-dispatch.localhost`, on this host only: a name of the console's own, so its cookies are sent to no other local web server.
 
 **Panels.** `p-signin`.
 
-**The server provides.** The notice as a closed reason, never echoed input: `ended=idle|max|revoked|role|all|elsewhere|restart|device|device-store|device-kept`, or the refusal (401 wrong token, 401 code that did not work, 401 link used or expired, 429 too many attempts, 503 tokens file, 500 audit log). Today the repo's login page says nothing about why a session ended; the `ended` reason is the change this design asks for.
+**The server provides.** The notice as a closed reason, never echoed input: `ended=idle|max|revoked|role|all|elsewhere|restart|device|device-store|device-kept`, or the refusal (401 wrong token, 401 code that did not work, 401 link used or expired, 429 too many attempts, 503 tokens file, 500 audit log); whether this console can show a window (the button); and for a request to it, its match code and then 202 waiting, 401 denied or unanswered, 409 one already waiting, 404 no window here. Today the repo's login page says nothing about why a session ended; the `ended` reason is the change this design asks for.
 
-**Fixture note.** The code `K7QX-9M2D` in the field, the token placeholder `pdc_…` and the 5-second retry interval are sample values.
+**Fixture note.** The match code `AB2C`, the code `K7QX-9M2D` in the field, the token placeholder `pdc_…` and the 5-second retry interval are sample values.
 """)
 
 # =====================================================================================
