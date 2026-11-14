@@ -1,7 +1,7 @@
 The live run gh-b3d7 as a viewer sees it: status and numbers only, with a plain line where operator-only parts would be.
 
 **How a person uses it.**
-- A small banner says they are signed in as a viewer and what that hides.
+- A small banner says they are signed in as a viewer and what that hides. The short link beside the id is theirs as well.
 - *Progress* keeps:
   - the elapsed time, turn and steps;
   - the tool running now;

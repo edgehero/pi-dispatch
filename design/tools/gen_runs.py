@@ -287,17 +287,22 @@ RUN_PHONE_STYLE = """
 #p-progress .run-prog { gap: var(--space-4); }
 """
 
+# The short link (#882) sits on the id's line, after it, and wraps under it when the line is full. Its own block, so
+# every run card's style takes the same rules (gen_parked's cards add it to theirs).
+RUN_PATH_STYLE = """
+.titlebar__head { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: var(--space-4); row-gap: 2px; min-width: 0; }
+.titlebar__head h1 { min-width: 0; overflow-wrap: anywhere; }
+.run-path { font-family: var(--font-mono); font-size: 14px; font-weight: 500; color: var(--ink-muted); text-underline-offset: 3px; overflow-wrap: anywhere; }
+.run-path:hover { color: var(--ink); }
+"""
+
 RUN_STYLE = """
 /* Keep fact values readable inside a narrow desktop card as well as on a phone. */
 .facts, .facts--3 { grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); }
 .facts--1 { grid-template-columns: minmax(0, 1fr); }
 .fact { grid-template-columns: minmax(0, min(128px, 40%)) minmax(0, 1fr); }
 .run-id { font-family: var(--font-mono); font-weight: 700; letter-spacing: -0.03em; }
-/* The short link sits on the id's line, after it, and wraps under it when the line is full. */
-.titlebar__head { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: var(--space-4); row-gap: 2px; min-width: 0; }
-.titlebar__head h1 { min-width: 0; overflow-wrap: anywhere; }
-.run-path { font-family: var(--font-mono); font-size: 14px; font-weight: 500; color: var(--ink-muted); text-underline-offset: 3px; overflow-wrap: anywhere; }
-.run-path:hover { color: var(--ink); }
+""" + RUN_PATH_STYLE + """
 .titlebar__sub .link { margin-left: 4px; }
 .titlebar__sub .muted { margin-left: 4px; }
 .run-prog { display: flex; align-items: flex-end; gap: var(--space-6); flex-wrap: wrap; margin-bottom: var(--space-4); }

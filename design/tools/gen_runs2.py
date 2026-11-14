@@ -1,7 +1,7 @@
 """Run states on the Pulse kit: RunRecovered, RunSandboxed, RunChatStates, RunViewer (work package B)."""
 from pulse import *
 from common2 import ICONS, S
-from gen_runs import RUN_STYLE, run_title
+from gen_runs import RUN_STYLE, run_path, run_title
 
 def readme(name, text):
     open(f"{ROOT}/{name}/README.md", "w").write(text.strip() + "\n")
@@ -209,7 +209,7 @@ def run_recovered_page():
     side = f"""<div class="stack">{recovered_facts()}{recovered_cost()}
   <p class="collapsed" id="p-chain" data-panel>{ic('chain', 'ic ic--sm')}<b>Chain:</b> no parent and no child runs.</p></div>"""
     inner = oc + f'<div class="cols">{main}{side}</div>'
-    return shell("Runs", inner, run_title("gh-5d10-r2"), sub=sub, end=badge("running", "Recovering"), back="Runs")
+    return shell("Runs", inner, run_title("gh-5d10-r2"), sub=sub, end=badge("running", "Recovering"), back="Runs", beside=run_path("acme/api#140"))
 
 # =====================================================================================
 # 2. RunSandboxed: an openshell-bind cron run with a secret bundle, a cost floor and chained children
@@ -506,13 +506,14 @@ def run_viewer_page():
     main = f'<div class="stack">{v_progress()}{v_transcript()}</div>'
     side = f'<div class="stack">{v_chat()}{v_inbox()}{v_facts()}</div>'
     inner = note + f'<div class="cols">{main}{side}</div>' + v_states()
-    return shell("Runs", inner, run_title("gh-b3d7"), sub=sub, end=badge("running"), back="Runs", role="viewer")
+    return shell("Runs", inner, run_title("gh-b3d7"), sub=sub, end=badge("running"), back="Runs", role="viewer", beside=run_path("acme/web#415"))
 
 # =====================================================================================
 README = {
 "RunRecovered": """A durable run whose first attempt was lost: the outcome says it goes on, a track shows the attempt, its checkpoints and the recovery, and the side column keeps the facts and what each attempt spent.
 
 **How a person uses it.**
+- Beside the id, the short link `/run/acme/api/140` opens the newest run on the issue, so while the recovery runs it opens the recovery job.
 - The outcome reads "Failed, continuing" with the running glyph, because the run is not over. Its one action opens the recovery job.
 - *Recovery* draws the run on one track (15:00 to 15:45 UTC):
   - attempt 1 as a red pill;
@@ -562,6 +563,7 @@ README = {
 "RunSandboxed": """A completed run in an OpenShell sandbox, with a project secret bundle, a cost that is only a floor, per-model usage, and two chained children.
 
 **How a person uses it.**
+- A scheduled run names no issue, so its title has no short link.
 - The outcome says it finished and what it queued. Its actions open the children or preview a re-run (paid).
 - *Run* covers:
   - the cron job id, which wraps rather than overflows;
@@ -640,7 +642,7 @@ README = {
 "RunViewer": """The live run gh-b3d7 as a viewer sees it: status and numbers only, with a plain line where operator-only parts would be.
 
 **How a person uses it.**
-- A small banner says they are signed in as a viewer and what that hides.
+- A small banner says they are signed in as a viewer and what that hides. The short link beside the id is theirs as well.
 - *Progress* keeps:
   - the elapsed time, turn and steps;
   - the tool running now;
