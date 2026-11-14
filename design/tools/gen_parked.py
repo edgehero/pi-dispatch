@@ -1,6 +1,7 @@
 """Run refused, run parked, Parked on a phone, approval request (#649) and fork a run (#648), on the Pulse kit."""
 import os
 from pulse import *
+from gen_runs import RUN_PATH_STYLE, run_path
 
 def readme(name, text):
     open(f"{ROOT}/{name}/README.md", "w").write(text.strip() + "\n")
@@ -16,7 +17,7 @@ COMMON = """
 .rt-meta { display: inline-flex; align-items: center; gap: 8px; flex-wrap: wrap; }
 .rt-meta a { font-weight: 650; text-decoration: none; color: var(--ink); }
 .rt-small { font-size: 12px; color: var(--ink-muted); display: flex; align-items: center; gap: 6px; }
-"""
+""" + RUN_PATH_STYLE
 
 def meta(*parts):
     return '<span class="rt-meta">' + "".join(parts) + "</span>"
@@ -57,7 +58,7 @@ def run_refused():
     inner = oc + f'<div class="cols"><div class="stack">{main}</div><div class="stack">{why}{host}</div></div>'
     body = shell("Runs", inner, runtitle("gh-e9a0"),
                  sub=meta(tag("billing"), '<a href="#">acme/billing#260</a>', badge("refused"), '<span class="faint">15:30 UTC</span>'),
-                 back="Runs")
+                 back="Runs", beside=run_path("acme/billing#260"))
     style = COMMON + """
 .rf-why { font-size: 12px; line-height: 16px; color: var(--ink-muted); max-width: 210px; }
 .rf-note { margin-top: var(--space-3); }
@@ -75,6 +76,7 @@ The run page for a run refused before it started: the outcome banner leads with 
 - The one primary action is **Open Fleet**, where the proxy and doctor live. **Preview a re-run** is shown but disabled, with the reason beside it, so the person knows it exists and why it waits.
 - Progress, transcript, tokens and chain do not apply, so they collapse into one line instead of five empty panels.
 - The sandbox command is hidden because the run kept no workspace (#710), and a small line says there is none to open.
+- Beside the id, the short link `/run/acme/billing/260` opens the newest run on the issue, so once the run is re-run it opens the new one.
 - *Why it was refused* names the rule in one sentence, counts the same reason in 24 hours and links the reason's docs.
 
 ## Panels
@@ -138,7 +140,7 @@ def run_parked():
     inner = f'<div class="cols"><div class="stack">{hero}{expired}</div><div class="stack">{run_facts}{spend}{tail}</div></div>'
     body = shell("Runs", inner, runtitle("gh-2f6a"),
                  sub=meta(tag("api"), '<a href="#">acme/api#131</a>', badge("awaiting"), '<span class="faint">parked 15:13 UTC</span>'),
-                 back="Runs")
+                 back="Runs", beside=run_path("acme/api#131"))
     style = COMMON + """
 .pk-code { font-size: 17px; font-weight: 700; }
 .pk-hero { display: grid; gap: var(--space-4); }
@@ -160,6 +162,7 @@ The run page for a parked run: the agent's question is the hero, with the answer
 - The question card shows who asked (gh-2f6a, `api`, acme/api#131), how long it has waited and the question in large text.
 - The person writes an answer and previews it. The preview says it is posted to acme/api#131 as a reply and resumes the run, that the session continues, and what is reserved before the first token. **Post answer and resume** confirms; the undo line says how to take it back.
 - A terminal route stays available: `pi-dispatch chat gh-2f6a`.
+- Beside the id, the short link `/run/acme/api/131` opens the newest run on the issue, so once the answer resumes it, the link opens the resumed run.
 - When the queue no longer holds the run's data, the answer box is replaced by an attention banner that sends the person to the issue, where a reply still resumes the run. Both states are shown on this card.
 - The side column holds the run facts, tokens and dollars against the job cap, and the last three transcript entries.
 
@@ -288,7 +291,7 @@ def fork_run():
     from gen_runs import fork_controls
     inner = card("Actions", fork_controls(), id_="p-actions")
     body = shell("Runs", inner, runtitle("gh-9575"),
-                 sub=meta(tag("web"), '<a href="#">acme/web#490</a>', badge("completed"), '<span class="faint">ended 15:12 UTC on mini1</span>'), back="Runs")
+                 sub=meta(tag("web"), '<a href="#">acme/web#490</a>', badge("completed"), '<span class="faint">ended 15:12 UTC on mini1</span>'), back="Runs", beside=run_path("acme/web#490"))
     write("ForkRun", card_marker("Runs", 1000, 1440, "Managed fork controls on a finished run: a saved point, a permitted model, and a paid preview"), "Fork gh-9575", body, COMMON)
     readme("ForkRun", """
 # Fork a run

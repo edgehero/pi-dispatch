@@ -1,7 +1,7 @@
 {
   "card": "RunSandboxed",
   "pr": 5,
-  "words": "d4cac0dc9693c5ec9b4b0609014de1a2fc04dd4ba16590a5d14232eed74bb154",
+  "words": "9573243c0c2b4ad44f2d598a14dc25d5a6d3ac4a024263a2111ea090d4bcefcb",
   "elements": [
     {"el":"p-outcome","kind":"panel","status":"new","source":"admin/src/console/panels/run.mjs#runOutcome","golden":["panels/run-sandbox-openshell.operator"]},
     {"el":"p-run","kind":"panel","status":"new","source":"admin/src/console/panels/run.mjs#runSummary","golden":["panels/run-sandbox-openshell.operator"]},
@@ -49,6 +49,7 @@
     {"el":"Bundle skipped (`chained`): a chained /outbox child, so it got no bundle: the grant was to the trigger, not to what its job queues.","kind":"readme","status":"new","source":"admin/src/console/panels/run.mjs#runChain"},
     {"el":"Rule hosts, no rule host: the sandbox reaches nothing.","kind":"readme","status":"new","source":"admin/src/console/panels/run.mjs#runSandbox"},
     {"el":"**Fixture note.** All of it is sample: the billing-sweep cron trigger, the billing-jobs folder as a billing member, the variable names, the rule hosts, the token and cost figures, and the two chain children. The skip sentences and the chain cap (2 per job) are the repo's.","kind":"sample","status":"illustrative","reason":"Sample values: production uses real records and catalog words, and the card's sample values are not runtime contracts."},
-    {"el":"Sandbox as rows plus a host list","kind":"readme","status":"illustrative","reason":"the page draws one column of facts, the same rows"}
+    {"el":"Sandbox as rows plus a host list","kind":"readme","status":"illustrative","reason":"the page draws one column of facts, the same rows"},
+    {"el":"A scheduled run names no issue, so its title has no short link","kind":"readme","status":"new","source":"admin/src/console/run-path.mjs#runPathOf","reason":"runPathOf answers null for a local or scheduled run's target, so the title bar draws no link"}
   ]
 }

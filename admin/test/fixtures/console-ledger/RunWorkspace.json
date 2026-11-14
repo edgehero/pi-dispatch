@@ -1,7 +1,7 @@
 {
   "card": "RunWorkspace",
   "pr": 790,
-  "words": "f9afc132bab27788fdb1a9fe757c73a1954d235e26a5df159862cbeab675ab1a",
+  "words": "e04f9c339dc792d22433ca44a082a968e63972fcb4025f62ca5cc42d72443252",
   "elements": [
     {
       "el": "p-outcome",
@@ -233,6 +233,7 @@
       "kind": "sample",
       "status": "illustrative",
       "reason": "Fixture values identify the reference deployment; production renders validated source facts and explicit historical trigger chooser, never a fabricated trigger identity or fixed date."
-    }
+    },
+    {"el":"The title with its short link is RunEnded's","kind":"readme","status":"new","source":"admin/src/console/run-path.mjs#runPathLink"}
   ]
 }

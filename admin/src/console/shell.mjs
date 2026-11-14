@@ -325,8 +325,12 @@ const roleOf = (session) => (typeof session?.role === "string" && Object.hasOwn(
  *
  * `headline` is the page's headline panel's first content (text or a fragment, an empty one included, which the stream
  * fills later), drawn under the title as `#p-headline` (see the header); null, the default, draws no line.
+ *
+ * `beside` (issue #882) is a fragment on the title's own line, after the `<h1>` and outside it, so the heading stays the
+ * title alone: the run page's short link (`run-path.mjs`). Drawn once, with the page: a run's target never changes.
+ * Null, the default, draws the `<h1>` as every other page has it.
  */
-export function shellHtml(name, ctx, inner, { headline = null, description = null, end = null, title = null } = {}) {
+export function shellHtml(name, ctx, inner, { headline = null, description = null, end = null, title = null, beside = null } = {}) {
   if (typeof name !== "string" || !Object.hasOwn(PAGES, name)) throw new RangeError(`no such page: ${String(name)}`);
   const role = roleOf(ctx?.session);
   const meta = mayOpen(name, role) ? PAGES[name] : { ...PAGES[name], live: false };
@@ -356,7 +360,7 @@ ${SPRITE}
 <div class="page">
 ${signedInBar({ here, role, parked, live: liveHtml, theme: ctx?.theme, readOnly, session: ctx?.session })}
 <main id="main" tabindex="-1">
-<div class="titlebar"><div class="titlebar__lead">${back}<h1>${heading}</h1>${sub}</div>${drawn}</div>
+<div class="titlebar"><div class="titlebar__lead">${back}${beside === null ? html`<h1>${heading}</h1>` : html`<div class="titlebar__head"><h1>${heading}</h1>${beside}</div>`}${sub}</div>${drawn}</div>
 ${ro}${restart}${flash}${offer}${notes}${inner}${writes}${held}
 </main>
 </div>`;

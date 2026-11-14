@@ -5,6 +5,7 @@ The run page for a run refused before it started: the outcome banner leads with 
 - The one primary action is **Open Fleet**, where the proxy and doctor live. **Preview a re-run** is shown but disabled, with the reason beside it, so the person knows it exists and why it waits.
 - Progress, transcript, tokens and chain do not apply, so they collapse into one line instead of five empty panels.
 - The sandbox command is hidden because the run kept no workspace (#710), and a small line says there is none to open.
+- Beside the id, the short link `/run/acme/billing/260` opens the newest run on the issue, so once the run is re-run it opens the new one.
 - *Why it was refused* names the rule in one sentence, counts the same reason in 24 hours and links the reason's docs.
 
 ## Panels

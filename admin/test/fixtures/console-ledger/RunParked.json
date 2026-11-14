@@ -1,7 +1,7 @@
 {
   "card": "RunParked",
   "pr": 5,
-  "words": "9218971bd65dd5bdef2cee9c7aa99b58dd850b04424ff7d4c979dbf35a1b870d",
+  "words": "cd92ed74860bfc673f0d7d9ed2dddc76f9ba795e7414b87f53da0b70a46b4fab",
   "elements": [
     {"el":"p-chat","kind":"panel","status":"new","source":"admin/src/console/panels/run.mjs#runChat","golden":["panels/run-chat-reply.operator"]},
     {"el":"p-run","kind":"panel","status":"new","source":"admin/src/console/panels/run.mjs#runSummary","golden":["panels/run-chat-reply.operator"]},
@@ -22,6 +22,7 @@
     {"el":"From the fixture: gh-2f6a, acme/api#131, triage on mini1, local, trigger 7 (index 6 in the fixture file; label pi:triage, keeps a session, MCP linear), 11 turns, $0.21 (settled $0.209633), 74,953 in, 5,523 out, 125,448 total, 11 model calls, 14:52 to 15:13 UTC, and the \"cannot be answered here\" state. The question, the typed answer and the transcript tail are sample copy.","kind":"readme","status":"new","source":"admin/src/console/panels/run.mjs#runChat"},
     {"el":"The question slot is empty on the server; operator entry events fill it in the browser","kind":"state","status":"new","panel":"p-chat","source":"admin/src/console/panels/run.mjs#runChat","golden":["panels/run-chat-reply.operator"],"shows":"<div data-run-question></div>"},
     {"el":"The last-three entries slot is empty on the server","kind":"state","status":"new","panel":"p-tail","source":"admin/src/console/panels/run.mjs#runTail","golden":["panels/run-chat-reply.operator"],"shows":"<div data-run-tail></div>"},
-    {"el":"The terminal command inside the question card","kind":"readme","status":"illustrative","reason":"the page keeps it in the side column's Terminal chat, as on every run"}
+    {"el":"The terminal command inside the question card","kind":"readme","status":"illustrative","reason":"the page keeps it in the side column's Terminal chat, as on every run"},
+    {"el":"Beside the id, the short link opens the newest run on the issue, so once the answer resumes it, the link opens the resumed run","kind":"readme","status":"new","source":"admin/src/console/run-path.mjs#runPathLink"}
   ]
 }
