@@ -23,11 +23,14 @@ const USAGE = `pi-dispatch-receiver — the always-on trigger edge: turns GitHub
   pi-dispatch-receiver poll    start the polling producer — no public URL, no DNS, no tunnel: it
                                reads api.github.com with the operator's own credential instead
 
-Config comes from the environment (see .env.example): WEBHOOK_SECRET is required for serve
-only when your triggers name github (poll needs none either — there is no inbound delivery to
-verify, and a forge-only deployment has no github endpoint), PI_TRIGGERS_FILE overrides the
-./triggers.json default, VALKEY_URL names the queue, RECEIVER_PORT/RECEIVER_BIND choose where
-serve listens, and POLL_REPOS / POLL_INTERVAL_SECONDS shape what poll watches and how often.`;
+Config comes from the environment (see .env.example). serve needs WEBHOOK_SECRET only when it
+serves GitHub. GITHUB_INGEST says whether it does: webhook or both, it serves GitHub; poll, the
+poller brings GitHub events and serve mounts no GitHub route. Unset, serve serves GitHub when
+your triggers name github or GITHUB_AUTH_SOURCE is set. poll needs no secret, since there is no
+inbound delivery to verify, and refuses to start under GITHUB_INGEST=webhook. PI_TRIGGERS_FILE
+overrides the ./triggers.json default, VALKEY_URL names the queue, RECEIVER_PORT/RECEIVER_BIND
+choose where serve listens, and POLL_REPOS / POLL_INTERVAL_SECONDS shape what poll watches and
+how often.`;
 
 /**
  * `start`/`startPoll` are injection seams defaulting to the lazy imports of ./start.mjs and

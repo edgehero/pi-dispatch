@@ -37,7 +37,8 @@ import { existsSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import { parseArgs } from "node:util";
-import { ENV_WRITER_FS, updateEnvFile } from "./env-file.mjs";
+import { ENV_WRITER_FS, readEnvAssignments, updateEnvFile } from "./env-file.mjs";
+import { GITHUB_APP_PERMISSIONS } from "./identity.mjs";
 import { openBrowser as defaultOpenBrowser } from "./open-browser.mjs";
 import { defaultPrompt } from "./up.mjs";
 
@@ -209,6 +210,19 @@ export async function runGithubAppSetup(argv = [], deps = {}) {
 		// nothing will ever sign a delivery with it, and planting it would only shadow whatever the
 		// operator sets when they wire a real receiver later.
 		const offerSecret = !noWebhook && typeof app.webhook_secret === "string" && app.webhook_secret !== "";
+		// Issue #879: the transport this run leaves. `--no-webhook` writes `poll`. With a webhook, an earlier `poll` (from a
+		// `--no-webhook` run) would keep `serve` from mounting the route this App now delivers to, and its own next step,
+		// the receiver, would answer every delivery 404; so it becomes `both`, and the poller keeps running until the
+		// webhook is seen working. Never `webhook` here: that refuses the poller still running, which is a step for after
+		// it is stopped (docs/polling.md, "Moving to webhooks later"). Any other value, or none, is left as it is: unset
+		// already serves GitHub beside the GITHUB_AUTH_SOURCE=app written below.
+		let priorIngest = null;
+		try {
+			if (fs.existsSync(envPath)) priorIngest = readEnvAssignments(String(fs.readFileSync(envPath, "utf8")), ["GITHUB_INGEST"]).GITHUB_INGEST?.value ?? null;
+		} catch {
+			priorIngest = null;
+		}
+		const writeIngest = noWebhook ? "poll" : priorIngest === "poll" ? "both" : null;
 		say(`\nGitHub created the App "${app.slug}" (id ${app.id}). Nothing is written locally yet.\n\n`);
 		say("setup would write:\n");
 		say(`  ${pemPath}\n`);
@@ -217,6 +231,11 @@ export async function runGithubAppSetup(argv = [], deps = {}) {
 		say("      GITHUB_AUTH_SOURCE=app\n");
 		say(`      GITHUB_APP_ID=${app.id}\n`);
 		say(`      GITHUB_APP_PRIVATE_KEY_PATH=${pemPath}\n`);
+		if (writeIngest === "poll") {
+			say("      GITHUB_INGEST=poll — this App delivers no webhook, so `pi-dispatch-receiver serve` mounts no GitHub route and needs no WEBHOOK_SECRET\n");
+		} else if (writeIngest === "both") {
+			say("      GITHUB_INGEST=both (replaces poll) — `serve` takes this App's webhook while the poller keeps running; set GITHUB_INGEST=webhook once the poller is stopped (docs/polling.md, \"Moving to webhooks later\")\n");
+		}
 		if (offerSecret) {
 			say("      WEBHOOK_SECRET=<value not shown> — only if .env has none; an existing secret is KEPT, because your configured hooks verify deliveries against it\n");
 		}
@@ -254,6 +273,15 @@ export async function runGithubAppSetup(argv = [], deps = {}) {
 			updateEnvFile(envPath, "GITHUB_APP_ID", String(app.id), { fs, overwrite: true });
 			updateEnvFile(envPath, "GITHUB_APP_PRIVATE_KEY_PATH", pemPath, { fs, overwrite: true });
 			summary.push(["auth source", "GITHUB_AUTH_SOURCE=app (+ app id and key path) written to .env"]);
+			if (writeIngest !== null) {
+				// Issue #879. GITHUB_AUTH_SOURCE=app, written just above, is one of the two signals `serve` reads as "this
+				// deployment serves GitHub" while GITHUB_INGEST is unset, so without `poll` a receiver for another forge
+				// sharing this `.env` refused at its next restart for want of a WEBHOOK_SECRET this App will never sign with.
+				// OVERWRITE, like the three App lines: an older value describes the App this one replaces. Shown in the
+				// consent above, `poll` or `both` as `writeIngest` decided.
+				updateEnvFile(envPath, "GITHUB_INGEST", writeIngest, { fs, overwrite: true });
+				summary.push(["GitHub ingest", writeIngest === "poll" ? "GITHUB_INGEST=poll written to .env (no GitHub route on `serve`)" : "GITHUB_INGEST=both written to .env (it said poll); set webhook once the poller is stopped"]);
+			}
 			if (offerSecret) {
 				// setEnvKeyIfEmpty, NOT overwrite: an operator's existing webhook secret is what their
 				// already-configured hooks sign with — replacing it would invalidate working deliveries.
@@ -263,7 +291,7 @@ export async function runGithubAppSetup(argv = [], deps = {}) {
 			}
 		} catch (err) {
 			say(`error: could not write the App's lines into ${envPath}: ${err?.message}\n`);
-			say(`    → the App exists on GitHub and its key is at ${pemPath}. Add GITHUB_AUTH_SOURCE=app, GITHUB_APP_ID=${app.id} and GITHUB_APP_PRIVATE_KEY_PATH=${pemPath} to that file by hand\n`);
+			say(`    → the App exists on GitHub and its key is at ${pemPath}. Add GITHUB_AUTH_SOURCE=app, GITHUB_APP_ID=${app.id}${writeIngest !== null ? `, GITHUB_INGEST=${writeIngest}` : ""} and GITHUB_APP_PRIVATE_KEY_PATH=${pemPath} to that file by hand\n`);
 			summary.push(["auth source", `NOT written: ${err?.message}`]);
 		}
 		say(`✓ credentials written\n`);
@@ -410,7 +438,10 @@ export function sanitizeAppName(raw) {
 /**
  * The manifest GitHub converts into the App — the narrowest shape this system needs
  * (SECURITY.md's auth-source ladder): write on exactly the three surfaces jobs touch, metadata read
- * because the API requires it, private, and only the event families the triggers file can name.
+ * because the API requires it, private, and only the event families the triggers file can name. The
+ * permissions are `GITHUB_APP_PERMISSIONS` (identity.mjs), the same list the worker's boot check holds an
+ * installation to, so the two cannot drift apart. No `administration`: the worker's branch protection
+ * check reads the branch and its active rules, which Contents and Metadata cover (issue #876).
  * `hook_attributes` carries the receiver URL, or under --no-webhook an INACTIVE hook at `NO_WEBHOOK_URL`. GitHub
  * refuses a manifest whose `hook_attributes` has no `url`, inactive or not ("url" wasn't supplied, issue #874), and one
  * that leaves `hook_attributes` out while it subscribes events ("Hook url cannot be blank"). What it accepts was
@@ -430,7 +461,7 @@ export function buildManifest({ name, redirectUrl, webhookUrl }) {
 		redirect_url: redirectUrl,
 		hook_attributes: webhookUrl ? { url: webhookUrl } : { url: NO_WEBHOOK_URL, active: false },
 		public: false,
-		default_permissions: { contents: "write", pull_requests: "write", issues: "write", metadata: "read" },
+		default_permissions: { ...GITHUB_APP_PERMISSIONS },
 		default_events: ["issues", "issue_comment", "pull_request", "pull_request_review"],
 	};
 }

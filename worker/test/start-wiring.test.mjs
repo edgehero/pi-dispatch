@@ -614,6 +614,36 @@ test("github configured: real mintToken and the host's isDefaultBranchProtected 
 	);
 });
 
+test("the worker opts its GitHub auth into the installation check, and its line reaches the worker's log (issue #876)", { skip }, async () => {
+	// Two halves, so that removing `checkPermissions: true` from start.mjs fails here: the deps the worker hands its
+	// auth factory, and the line the REAL makeGitHubAuth then writes through the worker's own logger for an App
+	// installation short of a permission.
+	const { makeGitHubAuth } = await import("../src/get-token.mjs");
+	const routes = {
+		"GET /app": { slug: "pi-dispatch", id: 9001 },
+		"GET /users/{username}": { id: 555123, login: "pi-dispatch[bot]" },
+		"GET /app/installations/{installation_id}": { permissions: { contents: "write", pull_requests: "write", issues: "read", metadata: "read" } },
+	};
+	class FakeOctokit {
+		async request(route) {
+			if (!(route in routes)) throw new Error(`unexpected route: ${route}`);
+			return { data: routes[route] };
+		}
+	}
+	let handed = null;
+	const makeAuth = (_cfg, deps) => {
+		handed = deps;
+		return makeGitHubAuth({ source: "app", appId: "1", installationId: "2", privateKey: "-----BEGIN RSA PRIVATE KEY-----\nx\n-----END RSA PRIVATE KEY-----\n" }, { ...deps, Octokit: FakeOctokit, createAppAuth: () => async () => ({ token: "ghs_x" }) });
+	};
+	const { logsNow } = await runStart({ makeAuth, makeHost: () => fakeHost() });
+	assert.equal(handed?.checkPermissions, true, "start.mjs asks for the check");
+	assert.equal(typeof handed?.log, "function", "and hands the worker's logger, so the line lands in its stream");
+	await new Promise((resolve) => setImmediate(resolve));
+	const missing = logsNow().filter((l) => l.event === "github_app_permission_missing");
+	assert.equal(missing.length, 1, JSON.stringify(logsNow().map((l) => l.event)));
+	assert.deepEqual(missing[0].missing, ["issues:write"]);
+});
+
 test("comment is best-effort: a rejecting postStatusComment does not reject the adapter", { skip }, async () => {
 	const host = fakeHost({
 		postStatusComment: async () => {

@@ -1,7 +1,7 @@
 {
   "card": "ConnectionsScreen",
   "pr": 784,
-  "words": "8aab6bb1e6b23c053463786ce81c42847ca28e254a294c74df3bb6a911d1ca8d",
+  "words": "b591d74e05ec27db980af2262b891365aa409083140882b8bb7d6db9b97ef499",
   "elements": [
     {"el":"p-connection-problems","kind":"panel","status":"new","source":"admin/src/console/panels/connections.mjs#connectionsProblems","golden":["panels/connections-proxy.operator","panels/connections-populated.viewer"]},
     {"el":"p-forges","kind":"panel","status":"new","source":"admin/src/console/panels/connections.mjs#connectionsForges","golden":["panels/connections-proxy.operator","panels/connections-populated.viewer"],"shows":["X-GitHub-Delivery","HMAC-SHA256","Developer or above"]},
@@ -34,6 +34,11 @@
     {"el":"Receiver placement and per-forge delivery observations","kind":"readme","status":"new","panel":"p-forges","source":"admin/src/console/panels/connections.mjs#connectionsForges","golden":["panels/connections-populated.viewer"],"shows":["Receiver on","Port 3000","all interfaces","Last taken","Last refused","24 UTC hours"]},
     {"el":"No live receiver, unauthorized-only and unknown observation states","kind":"state","status":"new","panel":"p-forges","source":"admin/src/console/panels/connections.mjs#connectionsForges","golden":["panels/connections-receiver-none.operator","panels/connections-receiver-unauthorized.viewer","panels/connections-receiver-unknown.viewer"]},
     {"el":"Versioned, bounded, display-only receiver source","kind":"provides","status":"new","source":"worker/src/receiver-status.mjs#readReceiverStatus","holds":"RECEIVER_HOSTS_MAX"},
-    {"el":"build3's proxy banner in the sample","kind":"readme","status":"illustrative","reason":"the fixture's worst problem is WEBHOOK_SECRET, so the page leads with that"}
+    {"el":"build3's proxy banner in the sample","kind":"readme","status":"illustrative","reason":"the fixture's worst problem is WEBHOOK_SECRET, so the page leads with that"},
+    {"el":"GitHub is enabled as the receiver decides: GITHUB_INGEST when it is set, else a trigger or an explicit auth source","kind":"readme","status":"new","panel":"p-forges","source":"admin/src/connections-view.mjs#forgeConnections","holds":"githubIngestState(env)"},
+    {"el":"Under GITHUB_INGEST=poll GitHub's row reads polled: no webhook, its path answers 404, its auth, polling and who may fire stay","kind":"state","status":"new","panel":"p-forges","source":"admin/src/console/panels/connections.mjs#connectionsForges","golden":["panels/connections-github-polled.operator"],"shows":["polled","GITHUB_INGEST=poll","No webhook:","mounts no GitHub route","answers 404","App installation repositories","write access"]},
+    {"el":"A GITHUB_INGEST the receiver refuses leads the problems in the missing secret's place","kind":"state","status":"new","panel":"p-connection-problems","source":"admin/src/connections-view.mjs#connectionsProblems","holds":"GITHUB_INGEST is not webhook, poll or both","golden":["panels/connections-github-ingest-refused.operator"],"shows":"GITHUB_INGEST is not webhook, poll or both"},
+    {"el":"For GitHub, the GITHUB_INGEST word","kind":"provides","status":"new","source":"admin/src/connections-view.mjs#modelConnections","holds":"\"inferred\""},
+    {"el":"An armed forge whose live receivers report but none serves it is told a restart takes its webhooks","kind":"state","status":"new","panel":"p-forges","source":"admin/src/console/panels/connections.mjs#RESTART_TO_SERVE","golden":["panels/connections-receiver-restart.operator"],"shows":["Live receivers do not serve github yet","Restart the receiver service to take its webhooks."]}
   ]
 }

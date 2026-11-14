@@ -6,6 +6,10 @@ import { tempDir } from "./helpers/temp-dir.mjs";
 import { readTriggers, readTriggersWithInstructions, readTriggersWithStalls, triggerDetailOf, readTriggerEditor, readTriggerSkew, configLocationsOf } from "../src/read-model.mjs";
 import { stateOf } from "../src/console/live.mjs";
 import { stallKey } from "@edgehero/pi-dispatch/scheduler-stall-guard";
+import { githubTriggerTransports } from "@edgehero/pi-dispatch/config";
+import { loadReceiverConfig } from "../../receiver/src/config.mjs";
+import { loadPollerConfig } from "../../receiver/src/poller-config.mjs";
+import { FORGE_NONE_HINT, FORGE_OFFER_HINT, FORGE_RESTART_NOTE, triggerAdd } from "../src/console/panels/trigger.mjs";
 
 const AT = Date.UTC(2026, 9, 30, 12);
 const fileFs = (triggers) => ({ readFileSync: () => JSON.stringify({ triggers }) });
@@ -149,6 +153,74 @@ test("manual console editor resolves endpoint presence and deployment defaults f
   assert.equal(got.progressAvailable, false);
   assert.deepEqual(env, {}, "the original environment and grants are untouched");
   assert.doesNotMatch(JSON.stringify(got), /PRIVATE|untrusted\/grant|999/);
+  assert.equal(got.forgeProblem, null);
+});
+
+test("the editor offers GitHub where a GitHub trigger written now would reach a job, by the receiver's own loaders (#879)", () => {
+  // The question the editor asks is the receiver's, one rule later: with this .env and the new GitHub rule written, does
+  // `serve` start serving GitHub, or does the operator's word send GitHub through a poller that starts? Asked of the real
+  // loaders, never of a copy of their rules, for every setting, with and without the secret and an explicit source.
+  const rule = { on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix" } };
+  const withRule = { fileExists: () => true, readFile: () => JSON.stringify({ triggers: [rule] }) };
+  const editor = (env) => readTriggerEditor({ env, paths: { settingsFile: "/settings" }, fs: { readFileSync: () => "{}" }, folderSkillsFn: () => ({ skills: [] }), overlaySkillsFn: () => ({ skills: [] }), stagedSkillsFn: () => ({ skills: [] }) });
+  for (const ingest of [undefined, "", "webhook", "poll", "both"]) {
+    for (const secret of [undefined, "", "  ", "set"]) {
+      for (const source of [undefined, "gh"]) {
+        const env = { ...(ingest === undefined ? {} : { GITHUB_INGEST: ingest }), ...(secret === undefined ? {} : { WEBHOOK_SECRET: secret }), ...(source ? { GITHUB_AUTH_SOURCE: source } : {}) };
+        let webhook = false;
+        try { webhook = loadReceiverConfig(env, withRule).servesGithub === true; } catch {}
+        let poll = false;
+        try { poll = (ingest === "poll" || ingest === "both") && Array.isArray(loadPollerConfig({ ...env, POLL_REPOS: "acme/web" }, withRule).repos); } catch {}
+        const what = JSON.stringify(env);
+        assert.deepEqual(githubTriggerTransports(env), [...(webhook ? ["webhook"] : []), ...(poll ? ["poll"] : [])], what);
+        assert.equal(editor(env).forges.includes("github"), webhook || poll, what);
+      }
+    }
+  }
+  // The #879 deployment: GitHub polled, no secret, GitLab by webhook. It is offered both, where it was offered GitLab alone.
+  assert.deepEqual(editor({ GITHUB_INGEST: "poll", GITHUB_AUTH_SOURCE: "app", GITLAB_WEBHOOK_SECRET: "PRIVATE_GL" }).forges, ["github", "gitlab"]);
+  // A word every receiver command refuses offers no GitHub trigger, and the editor says why instead of "no webhook".
+  const refused = editor({ GITHUB_INGEST: "pol", WEBHOOK_SECRET: "PRIVATE_GH" });
+  assert.deepEqual(refused.forges, []);
+  assert.match(refused.forgeProblem, /GITHUB_INGEST in the deployment's \.env is not webhook, poll or both/);
+  assert.doesNotMatch(JSON.stringify(refused), /PRIVATE|pol"/);
+  assert.throws(() => githubTriggerTransports({ GITHUB_INGEST: "pol" }), /GITHUB_INGEST must be/);
+  // The field's words say a forge is offered where its events arrive, which the old "configured webhooks" no longer was.
+  assert.match(FORGE_OFFER_HINT, /by a configured webhook, or GitHub by polling/);
+  assert.match(FORGE_NONE_HINT, /No forge's events reach this deployment/);
+});
+
+test("a GitHub trigger that would arm the receiver's GitHub route says to restart the receiver, by the receiver's own rule (#879)", () => {
+  // The receiver arms GitHub when it starts and a reload cannot (reloadTriggers): on a fresh scaffold, with `up`'s secret
+  // and no GitHub rule yet, the first GitHub trigger is reloaded and answered 404 until a restart. The editor asks the
+  // receiver's question of the file and the .env (`githubServedByServe`) and says so before the add.
+  const githubRule = { on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix" } };
+  const gitlabRule = { on: { type: "label", any: ["pi:fix"] }, run: { kind: "gitlab", flow: "fix" } };
+  const editor = (env, triggers, readable = true) => readTriggerEditor({ env, paths: { settingsFile: "/settings", triggersPath: "/triggers" }, fs: { readFileSync: (path) => { if (path === "/settings") return "{}"; if (!readable) throw Object.assign(new Error("EACCES"), { code: "EACCES" }); return JSON.stringify({ triggers }); } }, folderSkillsFn: () => ({ skills: [] }), overlaySkillsFn: () => ({ skills: [] }), stagedSkillsFn: () => ({ skills: [] }) });
+  const fresh = editor({ WEBHOOK_SECRET: "s" }, [gitlabRule]);
+  assert.equal(fresh.githubRestart, true, "no GitHub rule, no source, no setting: the receiver started without `/`");
+  assert.deepEqual(fresh.forges, ["github"]);
+  for (const [what, env, triggers] of [
+    ["a GitHub rule already arms it", { WEBHOOK_SECRET: "s" }, [githubRule]],
+    ["an explicit source arms it", { WEBHOOK_SECRET: "s", GITHUB_AUTH_SOURCE: "gh" }, [gitlabRule]],
+    ["GITHUB_INGEST=webhook arms it", { WEBHOOK_SECRET: "s", GITHUB_INGEST: "webhook" }, []],
+    ["GITHUB_INGEST=both arms it", { WEBHOOK_SECRET: "s", GITHUB_INGEST: "both" }, []],
+    ["the poller serves it", { GITHUB_INGEST: "poll" }, []],
+    ["no webhook can carry it", {}, []],
+  ]) assert.equal(editor(env, triggers).githubRestart, false, what);
+  assert.equal(editor({ WEBHOOK_SECRET: "s" }, [], false).githubRestart, false, "an unread file cannot say whether a GitHub rule exists");
+  // The note is drawn beside the offer, and only then.
+  const draw = (triggerEditor) => String(triggerAdd({ role: "operator", data: { triggerEditor }, query: {} }));
+  assert.ok(draw({ ...fresh }).includes("A first GitHub trigger takes GitHub webhooks only after a restart"), "the note is in the forge field's hint");
+  assert.ok(!draw({ ...fresh, githubRestart: false }).includes("A first GitHub trigger"));
+  assert.match(FORGE_RESTART_NOTE, /restart the receiver once it is added/);
+});
+
+test("the editor reads GITHUB_INGEST from the deployment .env like its other forge facts (#879)", () => {
+  const deploymentDir = tempDir("trigger-editor-ingest-");
+  writeFileSync(join(deploymentDir, ".env"), "GITHUB_INGEST=poll\nGITHUB_AUTH_SOURCE=app\n", { mode: 0o600 });
+  const got = readTriggerEditor({ deploymentDir, env: {}, paths: { settingsFile: join(deploymentDir, "settings.json"), triggersPath: join(deploymentDir, "triggers.json") } });
+  assert.deepEqual(got.forges, ["github"]);
   assert.equal(got.forgeProblem, null);
 });
 

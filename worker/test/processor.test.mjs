@@ -10,6 +10,9 @@ import { makePrepareWorkspace } from "../src/prepare.mjs";
 import { MCP_REFUSAL_COMMENT } from "../src/mcp-preflight.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { computeZeroTouch } from "../src/zero-touch.mjs";
+import { configError } from "../src/config.mjs";
+import { makeGitHubHost } from "../src/github-host.mjs";
+import { REFUSAL_COMMENTS } from "../src/comment-tables.mjs";
 
 // The job-count ledger list the processor takes (issue #499 part B), from a `budgetCapsFor`-shaped object.
 const asLedgers = (c) => (c ? [{ scope: c.scope, keyPrefix: scopeKeyPrefix(c.scope), caps: c.caps, reason: "scope-cap" }] : []);
@@ -94,6 +97,97 @@ test("an unprotected branch refuses BEFORE any container -- and never prepares/s
 	assert.equal(r.reason, "unprotected-branch");
 	assert.ok(!calls.includes("run-container"), "must not spend on an unprotected repo");
 	assert.ok(!calls.includes("prepare"), "must not even clone an unprotected repo");
+});
+
+/**
+ * The real GitHub host over a fake client whose default branch read answers `answer` and whose branch rules read
+ * answers `rules`, each thrown when an Error (issue #876).
+ */
+function githubHostAnswering(answer, rules = []) {
+	const octokitFor = () => ({
+		async request(route) {
+			if (route === "GET /repos/{owner}/{repo}") return { data: { default_branch: "main" } };
+			const canned = route === "GET /repos/{owner}/{repo}/branches/{branch}" ? answer : route === "GET /repos/{owner}/{repo}/rules/branches/{branch}" ? rules : new Error(`unexpected route: ${route}`);
+			if (canned instanceof Error) throw canned;
+			return { data: canned };
+		},
+	});
+	return makeGitHubHost({ octokitFor });
+}
+
+test("the GitHub host decides through the processor: unprotected and a ruleset that blocks nothing refuse, a classic rule and an approval rule run (issue #876)", async () => {
+	for (const [branch, rules, expected] of [
+		[{ name: "main", protected: false, protection: { enabled: false } }, [], "unprotected-branch"],
+		// github/scientist@main, measured: protected by organization rulesets that require nothing of a push.
+		[{ name: "main", protected: true, protection: { enabled: false } }, [{ type: "copilot_code_review" }, { type: "license_compliance_scanning" }], "unprotected-branch"],
+		[{ name: "main", protected: true, protection: { enabled: true } }, new Error("a classic rule needs no rules read"), "completed"],
+		[{ name: "main", protected: true, protection: { enabled: false } }, [{ type: "pull_request", parameters: { required_approving_review_count: 1 } }], "completed"],
+	]) {
+		const posted = [];
+		const { deps: d, calls } = deps({ isDefaultBranchProtected: (job, token) => githubHostAnswering(branch, rules).isDefaultBranchProtected(job, token), comment: async (_job, text) => posted.push(text) });
+		const r = await runJob(ghJob, d);
+		if (expected === "completed") {
+			assert.equal(r.outcome, "completed", JSON.stringify(branch));
+			assert.ok(calls.includes("run-container"));
+		} else {
+			assert.equal(r.reason, expected, JSON.stringify(rules));
+			assert.deepEqual(posted, [REFUSAL_COMMENTS["unprotected-branch"]]);
+			assert.ok(!calls.includes("run-container"), "nothing spent");
+		}
+	}
+});
+const forbidden403 = (headers) => Object.assign(new Error("Resource not accessible by integration"), { name: "HttpError", status: 403, response: { headers } });
+
+test("a token GitHub will not let read branch protection is refused as branch-protection-unreadable: RETURNED, commented, before any spend (issue #876)", async () => {
+	// The real host classifies the 403 and the processor returns its refusal: the two halves of the seam, together.
+	const host = githubHostAnswering(forbidden403({ "content-type": "application/json; charset=utf-8", "x-github-request-id": "C0DE:1:2" }));
+	const posted = [];
+	const logged = [];
+	const { deps: d, calls } = deps({
+		mintToken: async () => "ghs_minted_for_this_job",
+		isDefaultBranchProtected: (job, token) => (calls.push("branch-check"), host.isDefaultBranchProtected(job, token)),
+		comment: async (_job, text) => posted.push(text),
+		log: (event, fields) => logged.push([event, fields]),
+	});
+	const r = await runJob(ghJob, d);
+	assert.equal(r.outcome, "policy", "a determinate refusal RETURNS (CONST-RETRY-INFRA-ONLY): the same token gets the same 403 on every attempt");
+	assert.equal(r.reason, "branch-protection-unreadable");
+	assert.equal(r.budgetReserved, false);
+	assert.equal(r.exitCode, null);
+	assert.equal(d.redis.incrCalls, 0, "no budget slot taken");
+	assert.ok(!calls.includes("prepare"), "no clone");
+	assert.ok(!calls.includes("run-container"), "no container, no spend");
+	assert.deepEqual(posted, [REFUSAL_COMMENTS["branch-protection-unreadable"]], "one comment, the table's fixed text");
+	assert.match(posted[0], /can read this repository's contents/, "it names what the token must be able to do");
+	assert.doesNotMatch(posted[0], /GitHub App|PAT|gh login|Administration/, "no auth source's mechanism: the same 403 reaches all of them");
+	assert.doesNotMatch(posted[0], /ghs_minted_for_this_job|org\/repo/, "no token and no repository in a public comment");
+	assert.deepEqual(logged.filter(([event]) => event.startsWith("refused_")), [["refused_branch_protection_unreadable", { repo: "org/repo", status: 403, requestId: "C0DE:1:2" }]], "GitHub's status and request id, never its message");
+});
+
+test("a rate-limited 403 on the protection read still THROWS for the queue to retry, and posts nothing (issue #876)", async () => {
+	const host = githubHostAnswering(forbidden403({ "content-type": "application/json", "x-ratelimit-remaining": "0" }));
+	const posted = [];
+	const { deps: d, calls } = deps({ isDefaultBranchProtected: (job, token) => host.isDefaultBranchProtected(job, token), comment: async (_job, text) => posted.push(text) });
+	await assert.rejects(() => runJob(ghJob, d), (e) => e instanceof InfraRetry);
+	assert.deepEqual(posted, []);
+	assert.ok(!calls.includes("run-container"));
+});
+
+test("only the tagged refusal is caught at the protection step: another config error keeps the config-refused backstop (issue #876)", async () => {
+	const posted = [];
+	const { deps: d } = deps({ isDefaultBranchProtected: async () => { throw configError("some other determinate fault"); }, comment: async (_job, text) => posted.push(text) });
+	const r = await runJob(ghJob, d);
+	assert.equal(r.reason, "config-refused");
+	assert.deepEqual(posted, [REFUSAL_COMMENTS["config-refused"]]);
+});
+
+test("an answer draft refused as branch-protection-unreadable posts nothing, like every answer helper refusal (issue #876)", async () => {
+	const host = githubHostAnswering(forbidden403({ "content-type": "application/json" }));
+	const posted = [];
+	const { deps: d } = deps({ isDefaultBranchProtected: (job, token) => host.isDefaultBranchProtected(job, token), comment: async (_job, text) => posted.push(text), imagePreflight: async () => ({ ok: true, piVersion: "1.4.0", capabilities: ["answerDraft", "exitAuth"] }) });
+	const r = await runJob({ ...ghJob, answerDraft: { runId: "parent", ruleId: "help" }, purpose: "answer-draft" }, d);
+	assert.equal(r.reason, "branch-protection-unreadable");
+	assert.deepEqual(posted, []);
 });
 
 test("over budget refuses AFTER prepare but BEFORE the container -- no provider spend", async () => {

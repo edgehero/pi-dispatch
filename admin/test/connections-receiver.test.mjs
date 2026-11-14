@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { makeReceiverObservations, parseReceiverStatus, RECEIVER_FORGES, RECEIVER_OUTCOMES } from "@edgehero/pi-dispatch/receiver-status";
 import { readConnections, modelConnections } from "../src/connections-view.mjs";
-import { connectionsForges, RESEND_ADVICE } from "../src/console/panels/connections.mjs";
+import { connectionsForges, RESEND_ADVICE, RESTART_TO_SERVE } from "../src/console/panels/connections.mjs";
 import { parseDocument } from "./helpers/script-dom.mjs";
 
 const AT = Date.UTC(2026, 10, 1, 12, 0, 3);
@@ -74,6 +74,20 @@ test("an absent receiver is a warning only after a complete read; malformed, par
   for (const status of [{ hosts: [], complete: false, more: 0 }, { hosts: [receiver()], complete: false, more: 3 }, { hosts: [{ name: "mini1", unreadable: true }], complete: false, more: 0 }]) {
     const markup = draw(await view(status)); assert.doesNotMatch(markup, /No live receiver reported for github|only unauthorized/); assert.match(markup, /Counts and receiver absence are unknown/);
   }
+});
+
+test("a live receiver that does not serve an armed forge is told to restart, not to check a service that is up (#879)", async () => {
+  // The receiver arms a forge when it starts: a GitHub rule added while it runs (a fresh scaffold sets no auth source, so
+  // the first rule is what arms GitHub) is reloaded and answered 404. The service is up and reporting, so the old banner's
+  // "check the receiver service" sent the operator to the wrong cause.
+  const gitlabOnly = { ...receiver(), forges: ["gitlab"] };
+  const markup = draw(await view({ hosts: [gitlabOnly], complete: true, more: 0 }));
+  assert.match(markup, /Live receivers do not serve github yet/);
+  assert.ok(markup.includes(RESTART_TO_SERVE.replace(/'/g, "&#39;")) || markup.includes(RESTART_TO_SERVE), "the restart sentence is drawn");
+  assert.match(RESTART_TO_SERVE, /Restart the receiver service to take its webhooks/);
+  assert.doesNotMatch(markup, /No live receiver reported for github/);
+  // With no receiver reporting at all, the absence banner stands as before.
+  assert.match(draw(await view({ hosts: [], complete: true, more: 0 })), /No live receiver reported for github/);
 });
 
 test("a forge answered 503 in 24 UTC hours warns with the count, that the forge does not resend, and where to send it again (issue #809)", async () => {

@@ -85,7 +85,7 @@ import { runMirrorMaxRunsOf } from "@edgehero/pi-dispatch/retention";
 import { stallKey } from "@edgehero/pi-dispatch/scheduler-stall-guard";
 import { makeCheckWaitSkew } from "@edgehero/pi-dispatch/triggers-file";
 import { expectRefusal } from "@edgehero/pi-dispatch/file-expect";
-import { modelFrom, providerFrom, jobImageFrom, allowedModelsFrom } from "@edgehero/pi-dispatch/config";
+import { modelFrom, providerFrom, jobImageFrom, allowedModelsFrom, githubServedByServe, githubTriggerTransports } from "@edgehero/pi-dispatch/config";
 import { parseSandboxes, parseBudgetFrom, parseCpuReserve } from "@edgehero/pi-dispatch/host-telemetry";
 import { parseJobsMore, parseLiveJobs } from "@edgehero/pi-dispatch/live-jobs";
 import { CAP_SECRET, parseCaps } from "@edgehero/pi-dispatch/capabilities";
@@ -2934,14 +2934,21 @@ export function readTriggerEditor({ paths, env = {}, folder = null, deploymentDi
   const overlay = settings.overlay ?? {};
   // These are display facts only. In particular, this never resolves PI_BACKENDS or paid-start grants from .env.
   // Credentials are read only to decide endpoint presence and are projected to forge names before leaving here.
-  const metadata = deploymentDir === null ? null : deploymentServiceEnv({ env, dir: deploymentDir, keys: ["WEBHOOK_SECRET", "GITLAB_WEBHOOK_SECRET", "FORGEJO_WEBHOOK_SECRET", "AZURE_WEBHOOK_SECRET", "PI_MODEL", "PI_PROVIDER", "PI_MAX_TURNS", "PI_RUN_PROGRESS", "PI_JOB_IMAGE", "PI_ALLOWED_MODELS", "PI_MAX_COST_USD"], platform, fs, uid });
+  const metadata = deploymentDir === null ? null : deploymentServiceEnv({ env, dir: deploymentDir, keys: ["WEBHOOK_SECRET", "GITHUB_INGEST", "GITHUB_AUTH_SOURCE", "GITLAB_WEBHOOK_SECRET", "FORGEJO_WEBHOOK_SECRET", "AZURE_WEBHOOK_SECRET", "PI_MODEL", "PI_PROVIDER", "PI_MAX_TURNS", "PI_RUN_PROGRESS", "PI_JOB_IMAGE", "PI_ALLOWED_MODELS", "PI_MAX_COST_USD"], platform, fs, uid });
   const hints = metadata?.env ?? env;
   let backends = [];
   let venueProblem = null;
   try { backends = parseBackendList(env.PI_BACKENDS).map((name) => ({ name, serves: servesOf(name) })); } catch { venueProblem = "The deployment's blessed venues do not load."; }
   const has = (k) => typeof hints[k] === "string" && hints[k].trim() !== "";
+  // Issue #879: GitHub is offered where a GitHub trigger written now would reach a job, by webhook or by the poller
+  // (`githubTriggerTransports`, the worker's rule, held to the receiver's loaders by a test). Before, only a webhook
+  // secret counted, so a deployment that polls GitHub could not add a GitHub trigger here. A GITHUB_INGEST every
+  // receiver command refuses offers nothing, and says so.
+  let githubTransports = [];
+  let ingestProblem = null;
+  try { githubTransports = githubTriggerTransports(hints); } catch { ingestProblem = "GITHUB_INGEST in the deployment's .env is not webhook, poll or both, so no GitHub trigger can fire until it is corrected."; }
   const forges = [
-    ...(has("WEBHOOK_SECRET") ? ["github"] : []),
+    ...(githubTransports.length > 0 ? ["github"] : []),
     ...(has("GITLAB_WEBHOOK_SECRET") ? ["gitlab"] : []),
     ...(has("FORGEJO_WEBHOOK_SECRET") ? ["forgejo"] : []),
     ...(has("AZURE_WEBHOOK_SECRET") ? ["azure"] : []),
@@ -2950,6 +2957,16 @@ export function readTriggerEditor({ paths, env = {}, folder = null, deploymentDi
   // cloned for a suggestion. Bound these advisory git reads, and disclose a cut alongside an unread tier.
   const triggersRead = readTriggers({ triggersPath: paths.triggersPath, fs });
   const configured = triggersRead.triggers ?? [];
+  // Issue #879: a GitHub trigger that would reach jobs by webhook, added where `serve` does not serve GitHub now (no
+  // GitHub rule yet, nor GITHUB_AUTH_SOURCE or GITHUB_INGEST saying so), is served only after the receiver restarts:
+  // the receiver arms GitHub when it starts, and a reload cannot (receiver/src/config.mjs, reloadTriggers). The question
+  // is the receiver's own (`githubServedByServe`), asked of this file and this .env. Asked only of a file that was read:
+  // an unread file cannot say whether the deployment has a GitHub rule.
+  let githubRestart = false;
+  if (githubTransports.includes("webhook") && Array.isArray(triggersRead.triggers)) {
+    const githubRules = configured.some((t) => t.forge === "github" && t.type !== "cron" && t.type !== "watch" && !t.disarmed);
+    try { githubRestart = !githubServedByServe(hints, githubRules); } catch { /* A refused GITHUB_INGEST offers no GitHub at all. */ }
+  }
   const folders = [...new Set([folder, ...configured.filter((t) => t.type === "cron").map((t) => t.folder)].filter((f) => typeof f === "string" && f !== ""))];
   const repositories = folders.slice(0, 16).map((folder) => folderSkillsFn({ folder }));
   const tiers = [
@@ -2966,7 +2983,7 @@ export function readTriggerEditor({ paths, env = {}, folder = null, deploymentDi
   return {
     defaults: { flow: "required by the trigger", kind: "selected by the trigger kind", folder: "required for cron", task: "required for cron", repository: "forge routing", backend: backends[0]?.name ?? null, provider, model, image, models: models ?? "unrestricted", maxCostUsd: overlay.maxCostUsd ?? hints.PI_MAX_COST_USD ?? "no per-job dollar cap", packages: true, github: false, replicas: 1, resume: false, awaitInput: false, secrets: "none", secretsProfile: "none", secretBundle: "project default", waitFor: "none", skillsDir: "none", instructions: "none", command: "none", portfolio: false, fallbackModels: "none", excludeTools: "none", excludeExtensions: "none", excludeExtensionTools: "none", mcp: "none unless named by the trigger", gates: "none", gateTimeout: "no trigger expiry override", gateBudgetRaiseUsd: "none", maxTurns: overlay.maxTurns ?? parseNonNegInt(hints.PI_MAX_TURNS, 30), progress: false, statusComment: false, recover: false, steer: false },
     ...readTriggerEgress({ deploymentDir, env, fs }),
-    backends, venueProblem, forges, settingsProblem: settings.invalid ?? null, progressAvailable: hints.PI_RUN_PROGRESS !== "0", forgeProblem: metadata && (metadata.unreadable || metadata.untrusted || metadata.hazardSkipped.length || metadata.unread.length) ? "The deployment metadata could not be read completely; configured webhook endpoints may be missing." : null,
+    backends, venueProblem, forges, githubRestart, settingsProblem: settings.invalid ?? null, progressAvailable: hints.PI_RUN_PROGRESS !== "0", forgeProblem: metadata && (metadata.unreadable || metadata.untrusted || metadata.hazardSkipped.length || metadata.unread.length) ? "The deployment metadata could not be read completely; configured webhook endpoints may be missing." : ingestProblem,
     flows: tiers.flatMap((t) => (t.skills ?? []).filter((s) => !s.isSub).map((s) => ({ name: s.name, tier: t.tier }))),
     flowProblems: tiers.filter((t) => t.unreachable || t.truncated).map((t) => ({ tier: t.tier, unavailable: Boolean(t.unreachable), truncated: Boolean(t.truncated) })),
   };

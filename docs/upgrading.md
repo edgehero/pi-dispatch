@@ -289,6 +289,12 @@ queued: an older BullMQ need not read what a newer one wrote. The release notes 
 
 Release numbers come from the git tags.
 
+### Next release
+
+| Store | What changed, and what an older release does with it | Guide |
+|---|---|---|
+| `.env` | `GITHUB_INGEST` says which transport carries GitHub (#879): `poll` makes `pi-dispatch-receiver serve` mount no GitHub route and need no `WEBHOOK_SECRET`, `webhook` makes `poll` refuse to start, and `pi-dispatch setup github --no-webhook` writes `poll` (a later run with a webhook turns it into `both`). A receiver older than this release ignores the line and decides as before, so under `poll` its `serve` still refuses to start without `WEBHOOK_SECRET` wherever your triggers name github or `GITHUB_AUTH_SOURCE` is set: move the receiver with the workers. An existing `.env` keeps what it says and boots as before; where only a `GITHUB_AUTH_SOURCE=gh` line makes `serve` serve GitHub, `pi-dispatch doctor` says so and that the line may go. A new scaffold carries that line commented out, so a new deployment's receiver serves GitHub only once a GitHub rule exists when it starts: its first GitHub trigger, added while it runs, takes webhooks after a restart, and the receiver logs `github_rules_unserved` until then | [polling.md](polling.md) |
+
 ### 5.2.1
 
 | Store | What changed, and what an older release does with it | Guide |
