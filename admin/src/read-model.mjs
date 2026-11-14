@@ -5234,6 +5234,13 @@ export function createFleetReader(
       const queues = await fleetQueues().catch(() => lastNames.map((n) => pool.get(n)));
       return readPendingAnswer({ queues, kind, target, runId, timeoutMs: FLEET_READ_TIMEOUT_MS });
     },
+    // The jobs queued or running on several targets in one scan (issue #882: a short link, which names no forge, asks
+    // for its target on every forge kind at once): `readPendingOnTargets`' answer, read with `pendingScanFor`, in the
+    // `states` order given (`PENDING_STATES` by default). Never throws.
+    async pendingOnTargets(targets, { states = PENDING_STATES } = {}) {
+      const queues = await fleetQueues().catch(() => lastNames.map((n) => pool.get(n)));
+      return readPendingOnTargets({ queues, targets, states, timeoutMs: FLEET_READ_TIMEOUT_MS });
+    },
     // Whether a parked run's retained job can take a console answer (issue #647): the planner's own predicate
     // (`parkedAnswerRefusalOf`) over the job's data and the triggers file, so the Chat panel offers the reply form
     // exactly where `planParkedAnswer` would plan it. `{ refusal }` (a sentence), `{ ok: true }` or `{ unreachable: true }`.
@@ -8086,8 +8093,13 @@ async function pendingData(q, ids) {
  * carries, whose `repo<sep>number` prefix IS `targetFor`'s target. Only a forge job of a wanted kind without one (a
  * recovery or a late message's job) has its `.data` parsed, for what `targetFor` reads and `recoveryOf` (`runIdOf`).
  * Compared in memory; ids alone come back. It stops early once every target is matched. Never throws.
+ *
+ * `states` (issue #882) are the queue states read, in order, `PENDING_STATES` by default: a target's first match wins,
+ * so a caller that wants a running job before a waiting one reads `active` first (`run-api.mjs` `RUN_PATH_STATES`, a
+ * short link's), and keeps `PENDING_STATES` after it so a job that moves while the scan pages is still met. Every state
+ * read counts against the one budget.
  */
-export async function readPendingOnTargets({ queues, targets, budget = PENDING_SCAN_BUDGET, page = PENDING_SCAN_PAGE, dataMax = PENDING_DATA_MAX, timeoutMs = FLEET_READ_TIMEOUT_MS } = {}) {
+export async function readPendingOnTargets({ queues, targets, budget = PENDING_SCAN_BUDGET, page = PENDING_SCAN_PAGE, dataMax = PENDING_DATA_MAX, timeoutMs = FLEET_READ_TIMEOUT_MS, states = PENDING_STATES } = {}) {
   const want = new Map();
   for (const t of Array.isArray(targets) ? targets : []) {
     const key = targetKeyOf(t?.kind, t?.target);
@@ -8120,7 +8132,7 @@ export async function readPendingOnTargets({ queues, targets, budget = PENDING_S
       match(id, targetKeyOf(data.kind, target), runIdOf({ id, data }));
     };
     scan: for (const q of Array.isArray(queues) ? queues : []) {
-      for (const state of PENDING_STATES) {
+      for (const state of states) {
         for (let start = 0; ; ) {
           if (byKey.size === want.size) break scan;
           const room = budget - listed;

@@ -15,7 +15,9 @@
  *     the runs page's own `q` rule accepts it (`run-filter.mjs`, at most 200 characters of an id's or a target's
  *     letters, so every id the run page takes), so the search it fills is one the runs page answers; any other id
  *     leaves the field empty. It is escaped by `html` as every value is, and appears nowhere else on the page: not in
- *     a title, a heading or a sentence.
+ *     a title, a heading or a sentence. A short link's (issue #882, `run-path.mjs`) is the same page with the issue or
+ *     request it names in that field, as the run's target spells it (`acme/web#12`), under the same rule: rebuilt
+ *     from the link by `parseRunPath`, never the path as sent.
  *   - On a 421, any navigation or session data: every link would hit the same refused name, and the request came by a
  *     name the console does not answer to, so who is signed in is none of its business. The tunnel command uses the
  *     address and port this connection reached (`req.socket.localAddress` and `localPort`, which the requester already
@@ -29,6 +31,7 @@
  * whole by the server; the script only reveals the theme button and wires the copy box, as on every page.
  */
 import { isIP, isIPv4 } from "node:net";
+import { RUNS_PAGE_EXAMINE_MAX } from "../read-model.mjs";
 import { parseRunFilter } from "../run-filter.mjs";
 import { html } from "./html.mjs";
 import * as ui from "./kit.mjs";
@@ -86,6 +89,17 @@ export const ERROR_SENTENCES = Object.freeze({
   method: entry("Not a page", "The browser opened an address that only takes the console's own requests.", "This address is not a page", "It takes requests from the console's own buttons, which send them themselves. Go to one of its screens instead.", "idle", "info"),
   "no-run": entry("Run not found", "The console could not find a run with this id.", "No run with this id", "No run with that id is in this host's history, the fleet's run mirror or the queue. It may be another host's run with the fleet's run mirror off, or one the history no longer keeps.", "idle", "search"),
   "no-project": entry("Project not found", "The console could not find a project with this id.", "No project with this id", "No project with that id is in the projects file. It may have been removed; records already written keep their project id.", "idle", "search"),
+});
+
+/**
+ * What the no-run page says for a short link (issue #882, `run-path.mjs`), in place of the run id's words: `absent`, the
+ * 404, when every place a run is kept was read and none holds a run on that issue or request; `untold`, a 503, when none
+ * was found while one of them could not be read, which is not "no run". The same card, its search filled with the
+ * target (`runSearch`), the same way back.
+ */
+export const RUN_PATH_SENTENCES = Object.freeze({
+  absent: entry("Run not found", "The console could not find a run on this issue or request.", "No run on this issue or request", `No run on that issue, pull request or merge request is in this host's history, the fleet's run mirror or the queue. It may be another host's run with the fleet's run mirror off, older than the newest ${RUNS_PAGE_EXAMINE_MAX.toLocaleString("en-US")} runs a short link looks through, or one the history no longer keeps.`, "idle", "search"),
+  untold: entry("Run not known", "The console could not tell whether this issue or request has a run.", "Whether this issue or request has a run could not be told", "This host's run history, the fleet's run mirror or the queue could not be read, so the console cannot say there is no run. Reload to try again.", "attention", "attention"),
 });
 
 /** The kit's tone of a catalog status (`ui.STATUS`), or a throw: the catalog is code, so an unknown status is a bug. */
@@ -218,16 +232,22 @@ function runSearch(runId) {
   return html`<form class="er-search" method="get" action="${PAGES.runs.path}" role="search">${ui.searchPill({ id: ui.SEARCH_ID, name: "q", value: searchedId(runId) })}</form>`;
 }
 
+/** The words a no-run page says: a short link's (`target` given) by its status, else the run id's. */
+function noRunSaid(status, target) {
+  if (typeof target !== "string") return ERROR_SENTENCES["no-run"];
+  return status === 503 ? RUN_PATH_SENTENCES.untold : RUN_PATH_SENTENCES.absent;
+}
+
 /** The card for `kind` (every kind but host), with its way back. */
-function cardOf(kind, { status, sentence, page, runId }) {
-  const said = ERROR_SENTENCES[kind];
+function cardOf(kind, { status, sentence, page, runId, target }) {
+  const said = kind === "no-run" ? noRunSaid(status, target) : ERROR_SENTENCES[kind];
   switch (kind) {
     case "no-page":
       return errorCard({ status, said, actions: html`${goTo("runs", true)}${goTo("overview", false)}` });
     case "no-project":
       return errorCard({ status, said, actions: goTo("config", true) });
     case "no-run":
-      return errorCard({ status, said, extra: runSearch(runId), actions: html`${goTo("runs", true)}${goTo("overview", false)}` });
+      return errorCard({ status, said, extra: runSearch(typeof target === "string" ? target : runId), actions: html`${goTo("runs", true)}${goTo("overview", false)}` });
     case "bad-query": {
       const back = backTo(page);
       const told = typeof sentence === "string" && sentence.trim() !== "" ? html`${said.sentence}: ${refusalTail(sentence)}` : html`${said.sentence}.`;
@@ -252,15 +272,17 @@ function cardOf(kind, { status, sentence, page, runId }) {
  * restart banner under its title (issue #845, `shell.mjs` `restartBannerHtml`); `theme` is the request's theme choice.
  * `sentence` and `page` are the 400's refusal and the page that refused it; `host`, `port` and
  * `address` the 421's refused name and the connection's local port and address; `runId` the no-run page's asked id,
- * shown only as its search field's value (see the header). Every value goes through `html`. A no-run page's navigation
- * marks Runs current, as the run page's does: it stands where the run's page would.
+ * shown only as its search field's value (see the header); `target` (issue #882) a short link's issue or request, as
+ * `parseRunPath` rebuilt it, in place of `runId`, with the short link's words (`RUN_PATH_SENTENCES`, a 503 the
+ * `untold` one). Every value goes through `html`. A no-run page's navigation marks Runs current, as the run page's
+ * does: it stands where the run's page would.
  */
-export function errorPage({ status, kind, theme = null, session = null, readOnly = false, restart = null, sentence = null, host = null, port = null, address = null, page = null, runId = null }) {
+export function errorPage({ status, kind, theme = null, session = null, readOnly = false, restart = null, sentence = null, host = null, port = null, address = null, page = null, runId = null, target = null }) {
   if (typeof kind !== "string" || !ERROR_KINDS.includes(kind)) throw new RangeError(`error-pages: unknown kind ${JSON.stringify(kind)} (one of ${ERROR_KINDS.join(", ")})`);
   const code = Number.isInteger(status) && status >= 400 && status <= 599 ? status : KIND_STATUS[kind];
-  const said = ERROR_SENTENCES[kind];
+  const said = kind === "no-run" ? noRunSaid(code, target) : ERROR_SENTENCES[kind];
   const nav = NAV_KINDS.has(kind) && session !== null && typeof session === "object";
-  const inner = kind === "host" ? hostCard({ status: code, host, port, address }) : cardOf(kind, { status: code, sentence, page, runId });
+  const inner = kind === "host" ? hostCard({ status: code, host, port, address }) : cardOf(kind, { status: code, sentence, page, runId, target });
   return {
     status: code,
     html: frameHtml({ name: "error", title: said.title, sub: said.sub, theme, session: nav ? session : null, readOnly: nav ? Boolean(readOnly) : false, restart: nav ? restart : null, nav, here: kind === "no-run" ? "runs" : kind === "no-project" ? "config" : null }, inner),
