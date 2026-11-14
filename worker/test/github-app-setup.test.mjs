@@ -361,6 +361,27 @@ test("setup github --no-webhook replaces an older GITHUB_INGEST, and the webhook
 	assert.equal(declined.store.get(ENV_PATH), SEED_ENV);
 });
 
+test("setup github with a webhook turns an earlier GITHUB_INGEST=poll into both, shown first, and names webhook for later (issue #879)", async () => {
+	// After a --no-webhook run, a run with --webhook-url leaves an App whose hook is active; keeping `poll` would keep
+	// `serve` from mounting the route that App delivers to, so the receiver this wizard's next step starts would answer
+	// every delivery 404. `both` serves it while the poller still runs; `webhook` would refuse that poller.
+	const h = harness({ files: { [ENV_PATH]: `${SEED_ENV}GITHUB_INGEST=poll\n` }, answers: ["y", "y", "y"] });
+	assert.equal(await h.run(), 0);
+	const env = h.store.get(ENV_PATH);
+	assert.match(env, /^GITHUB_INGEST=both$/m);
+	assert.doesNotMatch(env, /^GITHUB_INGEST=poll$/m);
+	assert.match(h.text(), /setup would write:[\s\S]*GITHUB_INGEST=both \(replaces poll\)[\s\S]*✓ credentials written/, "shown in the block the one consent covers");
+	assert.match(h.text(), /set GITHUB_INGEST=webhook once the poller is stopped \(docs\/polling\.md, "Moving to webhooks later"\)/);
+	assert.match(h.text(), /GitHub ingest\s+GITHUB_INGEST=both written to \.env/);
+	// Any other value is the operator's, and stays.
+	for (const kept of ["webhook", "both"]) {
+		const k = harness({ files: { [ENV_PATH]: `${SEED_ENV}GITHUB_INGEST=${kept}\n` }, answers: ["y", "y", "y"] });
+		assert.equal(await k.run(), 0);
+		assert.match(k.store.get(ENV_PATH), new RegExp(`^GITHUB_INGEST=${kept}$`, "m"));
+		assert.doesNotMatch(k.text(), /GITHUB_INGEST=both \(replaces/);
+	}
+});
+
 test("docs/polling.md names the --no-webhook placeholder the wizard sends, so the guide cannot drift from it (issue #874)", () => {
 	const doc = readFileSync(new URL("../../docs/polling.md", import.meta.url), "utf8");
 	assert.ok(doc.includes(`\`${NO_WEBHOOK_URL}\``), `docs/polling.md quotes ${NO_WEBHOOK_URL}`);
