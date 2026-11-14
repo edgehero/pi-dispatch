@@ -155,7 +155,7 @@ test("issue #888: once the activity watch is armed the wall clock is handed over
 	const ac = new AbortController();
 	const running = processor({ id: "j1", data: { kind: "github", repo: "o/r" } }, "tok", ac.signal).catch(() => {});
 	assert.notEqual(await within(startedOnce, 10_000), "bound", "the container never started");
-	assert.deepEqual(args.activityWatch, { idleMs: 15 * 60_000, stallMs: 240 * 60_000, keepWallClock: false }, "the deployment defaults, in milliseconds");
+	assert.deepEqual(args.activityWatch, { idleMs: 15 * 60_000, stallMs: 240 * 60_000, keepWallClock: false, why: null }, "the deployment defaults, in milliseconds");
 	// Five times the 20 ms wall clock: handed over, it never fires.
 	assert.equal(await within(cancelled, 100), "bound", `the wall clock fired after the hand-over: ${cancels}`);
 	args.requestStop("idle");
@@ -178,7 +178,7 @@ test("issue #888: a job no watch covers keeps the wall clock (an image without i
 test("issue #888: a job holding a forge token that expires keeps the wall clock beside the watch", { skip }, async () => {
 	let args = null;
 	const { processor, cancelled } = watchedProcessor({
-		extraDeps: { tokenExpires: async () => true },
+		extraDeps: { tokenExpiresAt: async () => Date.now() + 3_600_000 },
 		// run-container.mjs's own rule: a watch that must keep the wall clock never hands it over.
 		onStart: (a) => {
 			args = a;
@@ -191,6 +191,41 @@ test("issue #888: a job holding a forge token that expires keeps the wall clock 
 	assert.equal(args?.activityWatch?.keepWallClock, true, "the watch still runs, so an idle job still ends sooner");
 	ac.abort();
 	await running;
+});
+
+test("issue #888, part 3: on an image that applies renewals, an expiring forge token is handed to the container for renewal", { skip }, async () => {
+	let args = null;
+	const minted = [];
+	const { processor, cancelled } = watchedProcessor({
+		capabilities: ["idleWatch", "credentialRefresh"],
+		extraDeps: { tokenExpiresAt: async () => 9_000_000_000_000, refreshForgeToken: async (job) => (minted.push(job.repo), { token: "ghs_new", expiresAt: 9_100_000_000_000 }) },
+		onStart: (a) => (args = a),
+	});
+	const ac = new AbortController();
+	const running = processor({ id: "j5", data: { kind: "github", repo: "o/r" } }, "tok", ac.signal).catch(() => {});
+	assert.equal(await within(cancelled, 10_000), "job-timeout-30m", "this fake container never arms the watch, so the clock still runs");
+	assert.equal(args.activityWatch.keepWallClock, true, "kept unless the container can arm the renewal");
+	assert.equal(args.activityWatch.why, "forge-token");
+	assert.equal(args.credentialRefresh.forge.expiresAt, 9_000_000_000_000);
+	assert.deepEqual(args.credentialRefresh.subscriptions, []);
+	assert.deepEqual(await args.credentialRefresh.forge.mint(), { token: "ghs_new", expiresAt: 9_100_000_000_000 });
+	assert.deepEqual(minted, ["o/r"], "the job's own repository");
+	ac.abort();
+	await running;
+});
+
+test("issue #888, part 3: without the image's capability, or without a way to renew, nothing is handed over", { skip }, async () => {
+	for (const [capabilities, extraDeps] of [[["idleWatch"], { tokenExpiresAt: async () => 9_000_000_000_000, refreshForgeToken: async () => ({}) }], [["idleWatch", "credentialRefresh"], { tokenExpiresAt: async () => 9_000_000_000_000 }]]) {
+		let args = null;
+		const { processor, cancelled } = watchedProcessor({ capabilities, extraDeps, onStart: (a) => (args = a) });
+		const ac = new AbortController();
+		const running = processor({ id: "j6", data: { kind: "github", repo: "o/r" } }, "tok", ac.signal).catch(() => {});
+		await within(cancelled, 10_000);
+		assert.equal(args.credentialRefresh, undefined, JSON.stringify(capabilities));
+		assert.equal(args.activityWatch.keepWallClock, true);
+		ac.abort();
+		await running;
+	}
 });
 
 test("issue #888: a ceiling cancels as max-minutes, whatever the watch does", { skip }, async () => {

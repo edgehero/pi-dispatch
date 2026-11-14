@@ -71,6 +71,7 @@ import { FRAME_FD, frameFdOpen, isolateStdin, openFrameReader } from "./src/stee
 import { RECOVERY_PROMPT, recoverSession } from "./src/recover.mjs";
 import { attachTurnBudget } from "./src/turn-budget.mjs";
 import { activityFileWriter, activitySettleMs, createActivityWatch, readActivityLimits } from "./src/activity.mjs";
+import { createCredentialRefresher, readCredentialRefreshWanted } from "./src/credential-refresh.mjs";
 import { createToolStartLatch, installProviderFailureObserver, providerReplaySafe } from "./src/provider-failure.mjs";
 import { LAYOUT } from "./src/layout.mjs";
 import { applyBundleEnv } from "./src/bundle-env.mjs";
@@ -190,6 +191,9 @@ async function main() {
 	// Issue #888: the idle and stall limits the worker asked for, read and taken out of the environment here, before any
 	// extension or tool exists to inherit them. A broken value is refused now, free (exit 2).
 	const activityLimits = readActivityLimits(process.env);
+	// Issue #888, part 3: whether the worker renews this job's expiring credentials while it runs (a GitHub App token, a
+	// subscription snapshot), through the read-only drop it mounts. Read and removed here, with the limits.
+	const credentialRefreshWanted = readCredentialRefreshWanted(process.env);
 	let subscriptionEntries = [];
 	try { subscriptionEntries = verifySubscriptionAuthEntries(JSON.parse(process.env.PI_SUBSCRIPTION_AUTH ?? "[]")); }
 	catch { throw configError("the subscription snapshot or adapter is unavailable; reconnect or re-stage on its owner host"); }
@@ -287,6 +291,20 @@ async function main() {
 	const modelRuntime = await createJobModelRuntime({ ModelRuntime, AuthStorage: await loadPiAuthStorage(), agentDir, modelsPath, subscriptionAuth: subscriptionEntries });
 	const subscriptionCredentials = subscriptionEntries.length ? installSubscriptionCredentials({ ModelRuntime, entries: subscriptionEntries }) : null;
 	const subscriptionRegistration = subscriptionEntries.length ? installSubscriptionRegistrationGuard({ ModelRuntime, entries: subscriptionEntries }) : null;
+	// Issue #888, part 3: the renewed credentials, applied from the worker's drop as they come (credential-refresh.mjs). A
+	// drop already there is applied now, before any request; every later one within 15 s of the worker writing it.
+	// A renewed snapshot also goes into PI_SUBSCRIPTION_AUTH, which a role child reads when it starts: the entries the
+	// guard just moved forward, so a child started after the old deadline is judged against the new one.
+	const credentialRefresher = credentialRefreshWanted
+		? createCredentialRefresher({
+				subscriptions: subscriptionCredentials,
+				log,
+				onSubscriptions: () => {
+					process.env.PI_SUBSCRIPTION_AUTH = JSON.stringify(subscriptionEntries);
+				},
+			})
+		: null;
+	credentialRefresher?.start();
 
 	// Pin the model explicitly. With `model` omitted, pi picks from settings and provider defaults
 	// -- nondeterministic across images, and it silently changes cost per job. hasConfiguredAuth takes the
@@ -375,7 +393,7 @@ async function main() {
 	// Built before the guard, whose `external` is every child's spend and in-flight bound as of the last fold. From here
 	// on the exit line carries childTotal, childProcesses and unmeteredChildren, zeros with no children.
 	childWatch = createChildWatch({ dir: childLedger.dir ?? null, meter, guard: () => policyGuard, log });
-	const policyGuard = createPolicyGuard({ maxCostMicros: cfg.maxCostMicros, allowedModels: cfg.allowedModels, log, external: () => childWatch.external(), subscriptionAdmission: subscriptionRegistration ? (provider) => subscriptionRegistration.admitted(provider) : null });
+	const policyGuard = createPolicyGuard({ maxCostMicros: cfg.maxCostMicros, allowedModels: cfg.allowedModels, log, external: () => childWatch.external(), subscriptionAdmission: subscriptionRegistration ? (provider) => subscriptionRegistration.admitted(provider) : null, subscriptions: subscriptionEntries });
 	costRefusalWhy = () => policyGuard?.refusedWhy() ?? null;
 	const usageMeter = await installProcessUsageMeter({ ModelRuntime, runtime: modelRuntime, meter, log, guard: policyGuard, children: childWatch });
 	// The price table the meter pinned from this runtime, before any extension loads, handed to pi children (issue #587's
@@ -868,6 +886,7 @@ async function main() {
 		budget.unsubscribe();
 		activity?.stop();
 		unsubscribeActivity();
+		credentialRefresher?.stop();
 		if (activitySettle !== null) clearTimeout(activitySettle);
 		tokenBudget?.unsubscribe();
 		answerTools?.finish();

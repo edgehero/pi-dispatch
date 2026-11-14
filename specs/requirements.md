@@ -484,8 +484,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   (`run.idleTimeoutMinutes`, `run.stallTimeoutMinutes`, `run.maxMinutes`, `INT-TRIGGERS-FILE-CONTRACT`), the backstop,
   the `max-minutes` timer, the 30-minute fallback for a job no watch covers, the renewed fleet claims, the activity-aware
   boot sweep and the record's `limits` (`INT-RUN-HISTORY-FILE-CONTRACT`). A job holding a credential that expires while it
-  runs (a subscription snapshot, a GitHub App token) keeps the 30-minute wall clock beside the watch until the refresh
-  of running jobs' credentials lands; its record says `limits.why`.
+  runs (a subscription snapshot, a GitHub App token) has it renewed while it runs (`INT-CREDENTIAL-DROP`, issue #888 part
+  3) on a venue that binds its folders and an image declaring `credentialRefresh`, and is stopped as `credential-expired`
+  when a renewal cannot be delivered in time; elsewhere it keeps the 30-minute wall clock beside the watch, and its
+  record says `limits.why`.
 - **Statement**: A running job shall be stopped when it is IDLE (no step by the agent and no activity in its container
   for the idle limit, default 15 minutes) or STALLED (no step by the agent for the stall limit, default 4 hours, however
   busy the container), and when it reaches an optional wall-clock ceiling an operator set; never merely because it is
@@ -8958,6 +8960,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-14 (#888, part 3) | **`REQ-JOB-ACTIVITY-LIMITS` AMENDED**: a job holding an expiring credential (a GitHub App token, a subscription snapshot) has it renewed while it runs where the venue binds its folders and the image declares `credentialRefresh`, and is stopped as `credential-expired` when a renewal cannot reach it in time; elsewhere it keeps the 30-minute wall clock. `REQ-TOKEN-ACCOUNTING-AND-CAPS` and the subscription requirements UNCHANGED, checked: a renewal admits nothing new. |
 | 2026-11-14 (#888, part 2: the worker) | **`REQ-JOB-ACTIVITY-LIMITS` BUILT**: the deployment settings and the three trigger fields, the backstop, `max-minutes`, the 30-minute fallback for a job no watch covers (and, until credential refresh lands, for one holding a subscription or a GitHub App token), the renewed claims, the activity-aware boot sweep and the record's `limits`; Acceptance gains the worker's tests. **`REQ-JOB-TIMEOUT-30M` SUPERSEDED** by it, kept as an address: its 30 minutes survive as the fallback and the watch jobs' ceiling. `REQ-RUNNER-TURN-BUDGET`, `REQ-OPERATOR-JOB-CANCEL` (the cancel keeps its reason) and `REQ-HOST-BUDGET` UNCHANGED, checked. |
 | 2026-11-14 (#888, part 1: the runner) | **NEW `REQ-JOB-ACTIVITY-LIMITS`**, PARTIAL: a job is stopped when idle (no step and no activity, 15 minutes by default) or stalled (no step, 4 hours by default, however busy), or at an optional ceiling, never for being old; what a step and activity are; why (the 30-minute kill of working jobs, spend already bounded elsewhere, the agent waiting on its own background work, the stall limit for an endless loop and the owner's eight-hour runs); the runner's half built, the worker's half next. **`REQ-JOB-TIMEOUT-30M` UNCHANGED, checked**: it still holds until the worker half asks for the watch. `REQ-RUNNER-TURN-BUDGET` UNCHANGED, checked. |
 | 2026-11-14 (#882, part 7) | **`REQ-CONSOLE-SECURITY` AMENDED**: the console on the local network, opt-in (`PI_CONSOLE_LAN=1`): a second listener on the host's network address (on macOS the wildcard on port 80 first, measured), announced as `pi-dispatch.local` by `dns-sd` or `avahi-publish`, with (b) gaining that name and address once bound; a request that arrived on it is never remembered, judged by its socket and never a header, and its sign-in page says so and names the host. UNCHANGED, checked: (a)'s loopback bind and refusals, `PI_CONSOLE_BIND_PUBLIC`, (i) the code and link, part 5's approval (whose window already names the peer's address), `OQ-058`. |

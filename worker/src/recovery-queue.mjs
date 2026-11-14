@@ -118,7 +118,7 @@ const HOST_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
  * mid-job never removed. The staging directories hold a copy of the job's inputs (its prompt among them) and of its
  * outputs, so they must not outlive the job dir they were copied from.
  */
-export const BESIDE_JOB_DIR = Object.freeze([".cid", ".openshell-policy.json", ".openshell-profile.json", ".openshell-up", ".openshell-down", ".openshell-bind"]);
+export const BESIDE_JOB_DIR = Object.freeze([".cid", ".openshell-policy.json", ".openshell-profile.json", ".openshell-up", ".openshell-down", ".openshell-bind", ".credentials"]);
 
 /**
  * The run a queue job belongs to: its own id, or for a recovery the id of the run it continues. Every per-RUN key (the

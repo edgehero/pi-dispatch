@@ -25,7 +25,7 @@ import { COST_CAP_WHYS, EXIT_OOM_KILLED, RECORD_CLOCK_SKEW_MS, RUNNER_POLICY_REA
 import { baseHasExtensions as baseHasExtensionsDefault, resetTrustPaths as resetTrustPathsDefault } from "./trust-paths.mjs";
 import { normalizeHost, removeCheckpointPointer as removePointerDefault } from "./run-checkpoint.mjs";
 import { DEFAULT_EGRESS_PROXY } from "./egress.mjs";
-import { CAPABILITY_GATES, EXIT_AUTH_CAPABILITY, IDLE_WATCH_CAPABILITY, STEER_STDIN_CAPABILITY, TRANSCRIPT_STDERR_CAPABILITY } from "./image-preflight.mjs";
+import { CAPABILITY_GATES, CREDENTIAL_REFRESH_CAPABILITY, EXIT_AUTH_CAPABILITY, IDLE_WATCH_CAPABILITY, STEER_STDIN_CAPABILITY, TRANSCRIPT_STDERR_CAPABILITY } from "./image-preflight.mjs";
 import { modelListProblem, modelOnList, splitModelEntry } from "./model-ref.mjs";
 import { ALLOCATION_CAP_REASON, ENVELOPE_MISMATCH_REASON } from "./allocation.mjs";
 
@@ -343,7 +343,7 @@ export async function checkDraftAnswerSource(job, deps) {
 /** The job images this process has already said lack `idleWatch` (issue #888), so the line is once per image. */
 const IMAGES_WITHOUT_IDLE_WATCH = new Set();
 
-export const ABORT_RECORD_REASONS = Object.freeze({ "operator-cancel": "operator-cancel", "agent-cancel": "agent-cancel", idle: "idle", stalled: "stalled", "max-minutes": "max-minutes", "job-timeout-30m": "max-minutes" });
+export const ABORT_RECORD_REASONS = Object.freeze({ "operator-cancel": "operator-cancel", "agent-cancel": "agent-cancel", idle: "idle", stalled: "stalled", "max-minutes": "max-minutes", "job-timeout-30m": "max-minutes", "credential-expired": "credential-expired" });
 
 export async function runJob(job, deps) {
 	const sourceRefusal = await checkDraftAnswerSource(job, deps);
@@ -2457,20 +2457,39 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// is said to the record (`noteActivity`), `limits.why`.
 		const activityLimits = deps.activityLimits ?? null;
 		let activityWatch = null;
+		let credentialRefresh = null;
 		if (activityLimits !== null && typeof activityLimits === "object") {
-			const idleWatch = (img.capabilities ?? []).includes(IDLE_WATCH_CAPABILITY);
-			const tokenExpires = typeof token === "string" && typeof deps.tokenExpires === "function" ? await Promise.resolve(deps.tokenExpires(job)).catch(() => true) : false;
-			const credential = subscriptionAuth.length > 0 ? "subscription" : tokenExpires === true ? "forge-token" : null;
-			if (idleWatch) activityWatch = { idleMs: activityLimits.idleMinutes * 60_000, stallMs: activityLimits.stallMinutes > 0 ? activityLimits.stallMinutes * 60_000 : null, keepWallClock: credential !== null };
+			const caps = img.capabilities ?? [];
+			const idleWatch = caps.includes(IDLE_WATCH_CAPABILITY);
+			// When the job's forge token expires (epoch ms; only a GitHub App's does), or null. A seam that throws reads as a token
+			// that does expire, 50 minutes after this mint (an installation token's hour, with room), never as one that does not.
+			const forgeExpiresAt = typeof token === "string" && typeof deps.tokenExpiresAt === "function" ? await Promise.resolve(deps.tokenExpiresAt(job, token)).catch(() => Date.now() + 50 * 60_000) : null;
+			const forgeExpires = Number.isSafeInteger(forgeExpiresAt);
+			const credential = subscriptionAuth.length > 0 ? "subscription" : forgeExpires ? "forge-token" : null;
+			if (idleWatch) activityWatch = { idleMs: activityLimits.idleMinutes * 60_000, stallMs: activityLimits.stallMinutes > 0 ? activityLimits.stallMinutes * 60_000 : null, keepWallClock: credential !== null, why: credential };
+			// Issue #888, part 3: an expiring credential renewed while the job runs, on an image whose runner applies it and a
+			// deployment that can renew each kind it holds. run-container arms it on a venue that binds the drop folder, and
+			// only then lets the watch take the wall clock over; elsewhere the job keeps the 30 minutes, as without it.
+			const renewsForge = !forgeExpires || typeof deps.refreshForgeToken === "function";
+			const renewsSubscriptions = subscriptionAuth.length === 0 || typeof deps.extendSubscriptionAuth === "function";
+			if (idleWatch && credential !== null && caps.includes(CREDENTIAL_REFRESH_CAPABILITY) && renewsForge && renewsSubscriptions) {
+				credentialRefresh = {
+					forge: forgeExpires ? { expiresAt: forgeExpiresAt, mint: () => deps.refreshForgeToken(job) } : null,
+					subscriptions: subscriptionAuth,
+					extend: (snapshot, options) => deps.extendSubscriptionAuth(snapshot, options),
+				};
+			}
 			// Said once per image per process: every job on it keeps the 30-minute limit until it is rebuilt, and a line per job
 			// would say the same thing on every run. The image's NAME only, never its digest or labels.
 			else if (!IMAGES_WITHOUT_IDLE_WATCH.has(img.image ?? "")) {
 				if (IMAGES_WITHOUT_IDLE_WATCH.size < 64) IMAGES_WITHOUT_IDLE_WATCH.add(img.image ?? "");
 				log("idle_watch_unavailable", { image: img.image ?? null, reason: "image" });
 			}
-			try {
-				deps.noteActivity?.(idleWatch ? (credential !== null ? { basis: "wall-clock", why: credential } : {}) : { basis: "wall-clock", why: "image" });
-			} catch {}
+			if (!idleWatch) {
+				try {
+					deps.noteActivity?.({ basis: "wall-clock", why: "image" });
+				} catch {}
+			}
 		}
 		// Issue #645: a FRESH armed run seeds the checkpoint store from its clone, now, before the container: the one moment
 		// the workspace's `.git` is still the worker's own (workspace-checkpoint.mjs `primeBase`). After every reserve, so a
@@ -2505,7 +2524,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// thing before the container, and not at the prepare above: a refusal between the two loaded nothing, so it has nothing
 		// to point at, and its record stays byte-identical to what it was. Every way out from here keeps it, a retried attempt's too.
 		if (deps.canaryFacts) deps.canaryFacts.loaded = loadedWithBase(deps.canaryFacts.loaded, baseSha);
-		const { canaryLoad: canaryLoadOfRun = null, loaded: loadedOfRun = null, code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, approval: approvalMetadata = null, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null, checkpoint: ranCheckpoint = null, recovery: ranRecovery = null, lingering = false } = await runContainer({ job: containerJob, token, prepared, secrets, ...(subscriptionAuth.length ? { subscriptionAuth } : {}), ...(bundleKeys !== null ? { bundleKeys } : {}), user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(transcriptStderr ? { transcriptStderr: true } : {}), ...(steerStdin ? { steerStdin: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}), ...(checkpointArgs !== null ? { recover: true, recovering: isRecovery, checkpoint: checkpointArgs } : {}), ...(activityWatch !== null ? { activityWatch, onActivityArmed: deps.onActivityArmed ?? null, requestStop: deps.requestStop ?? null, noteActivity: deps.noteActivity ?? null } : {}) });
+		const { canaryLoad: canaryLoadOfRun = null, loaded: loadedOfRun = null, code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, approval: approvalMetadata = null, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null, checkpoint: ranCheckpoint = null, recovery: ranRecovery = null, lingering = false } = await runContainer({ job: containerJob, token, prepared, secrets, ...(subscriptionAuth.length ? { subscriptionAuth } : {}), ...(bundleKeys !== null ? { bundleKeys } : {}), user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(transcriptStderr ? { transcriptStderr: true } : {}), ...(steerStdin ? { steerStdin: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}), ...(checkpointArgs !== null ? { recover: true, recovering: isRecovery, checkpoint: checkpointArgs } : {}), ...(activityWatch !== null ? { activityWatch, onActivityArmed: deps.onActivityArmed ?? null, requestStop: deps.requestStop ?? null, noteActivity: deps.noteActivity ?? null, ...(credentialRefresh !== null ? { credentialRefresh } : {}) } : {}) });
 		const answeredPark = prepared.session?.parkedSource;
 		// A phrase-prefixed comment uses ordinary routing, but resuming this exact parked transcript still
 		// answers its question. A held receipt also identifies an answer whose legacy source cannot be proved.

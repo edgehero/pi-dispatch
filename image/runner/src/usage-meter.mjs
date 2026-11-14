@@ -2657,7 +2657,7 @@ export function parseDeploymentNameMap(value) {
 	return map;
 }
 
-export function createModelGuard({ allowedModels, log = () => {}, env = process.env, now = Date.now, subscriptionAdmission = null }) {
+export function createModelGuard({ allowedModels, log = () => {}, env = process.env, now = Date.now, subscriptionAdmission = null, subscriptions: givenSubscriptions = null }) {
 	if (!Array.isArray(allowedModels) || allowedModels.length === 0) throw new Error("invalid PI_ALLOWED_MODELS: want a non-empty list");
 	// The operator's own deployment map, read ONCE, now (issue #587's review): the environment the worker gave the job
 	// (PI_FORWARD_ENV, which env-allowlist.mjs tells an Azure operator to use for it). A map that arrives later (a stored
@@ -2665,9 +2665,17 @@ export function createModelGuard({ allowedModels, log = () => {}, env = process.
 	// The map is pi-ai's own variable, reserved from run.secrets (provider-steering.mjs).
 	const startDeployments = parseDeploymentNameMap(env?.[AZURE_DEPLOYMENT_MAP]);
 	const allowed = new Set(allowedModels.map((entry) => pairKey(entry.provider, entry.model)));
+	// The job runner hands its own verified entries (issue #888, part 3), the very objects a renewal moves forward
+	// (subscription-credentials.mjs `refresh`), so this guard judges a call against the deadline the job holds NOW. A
+	// child process reads them from the environment, which the runner rewrites on each renewal.
 	let subscriptions;
-	try { subscriptions = JSON.parse(env.PI_SUBSCRIPTION_AUTH ?? "[]"); } catch { subscriptions = null; }
-	const subscriptionKeys = new Map((Array.isArray(subscriptions) ? subscriptions : []).map((row) => [row.provider, subscriptionAccess(row.provider, env)]));
+	if (Array.isArray(givenSubscriptions)) subscriptions = givenSubscriptions;
+	else {
+		try { subscriptions = JSON.parse(env.PI_SUBSCRIPTION_AUTH ?? "[]"); } catch { subscriptions = null; }
+	}
+	const subscriptionProviders = new Set((Array.isArray(subscriptions) ? subscriptions : []).map((row) => row.provider));
+	// Read at each call, never kept: a renewed access token arrives in the environment (credential-refresh.mjs).
+	const subscriptionKeys = { has: (provider) => subscriptionProviders.has(provider), get: (provider) => subscriptionAccess(provider, env) };
 	const state = { refused: 0 };
 	let pending = null;
 
@@ -2794,8 +2802,8 @@ export function createModelGuard({ allowedModels, log = () => {}, env = process.
  * order, so with no list the exit line is byte-identical to before. `unjudged` reaches the cost guard only: it is
  * the cap's counter of displaced compat entries.
  */
-export function createPolicyGuard({ maxCostMicros = null, allowedModels = null, log = () => {}, env = process.env, external = null, now = Date.now, subscriptionAdmission = null }) {
-	const model = allowedModels === null ? null : createModelGuard({ allowedModels, log, env, now, subscriptionAdmission });
+export function createPolicyGuard({ maxCostMicros = null, allowedModels = null, log = () => {}, env = process.env, external = null, now = Date.now, subscriptionAdmission = null, subscriptions = null }) {
+	const model = allowedModels === null ? null : createModelGuard({ allowedModels, log, env, now, subscriptionAdmission, subscriptions });
 	// `external` (issue #500) reaches the cost guard only: it is spend, which only a cap judges.
 	const cost = maxCostMicros === null ? null : createCostGuard({ capMicros: maxCostMicros, env, log, external });
 	const guards = [model, cost].filter((guard) => guard !== null);

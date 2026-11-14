@@ -457,7 +457,11 @@ LABEL dev.pi-dispatch.forges="github,gitlab,forgejo"
 # job itself (exit 2, reason idle or stalled) and writes its activity counters (activity.json beside the session file, or an
 # `a` record on the stderr transcript). NOT a gate: an image without it is never refused; the worker keeps the 30-minute
 # wall clock for its jobs instead, and the record says so (`limits.basis: "wall-clock"`).
-LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,modelRoles,modelFailover,exitAuth,mcp,forgeMcp,awaitInput,approvalGates,reportProgress,recover,steer,sandboxLayout,transcriptStderr,steerStdin,bundleEnvFile,observableRunner,fork,watch,questionGrouping,answerDraft,subscriptionAuth,loadExclusions,packageCanary,idleWatch"
+# `credentialRefresh` (issue #888, part 3) tells the worker this runner reads PI_CREDENTIAL_REFRESH and applies the renewed
+# credentials it drops in /run/pi-dispatch/credentials (read-only): a GitHub App token into the environment new tool processes
+# inherit, a subscription snapshot into the subscription guard. NOT a gate: a job holding an expiring credential on an image
+# without it keeps the 30-minute wall clock (`limits.why`).
+LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,modelRoles,modelFailover,exitAuth,mcp,forgeMcp,awaitInput,approvalGates,reportProgress,recover,steer,sandboxLayout,transcriptStderr,steerStdin,bundleEnvFile,observableRunner,fork,watch,questionGrouping,answerDraft,subscriptionAuth,loadExclusions,packageCanary,idleWatch,credentialRefresh"
 
 # The binaries in this image that may need the network, at their real paths (issue #683). A venue whose egress policy
 # names binaries rather than hosts alone (OpenShell decides every connection per executable) needs the paths before it

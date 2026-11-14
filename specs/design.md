@@ -490,6 +490,13 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     refresh acting only on a key still its own; the TTL now bounds only how long a claim outlives a dead worker.
   - **The boot sweep** reads a job directory's newest sign of life (its mtime or its counters'), against a bound above
     the longest a running job's counters stay unchanged.
+  - **Credentials renewed, not the job cut short** (part 3, the owner's decision). A job holding a GitHub App token or a
+    subscription snapshot has each renewed before it runs out and dropped in a read-only mount (`INT-CREDENTIAL-DROP`),
+    and only then hands its wall clock over. REJECTED: stopping such a job before its credential expires
+    (`token-expiry`), which keeps every job on the owner's deployment (both providers on subscriptions, GitHub through
+    an App) at an hour or less; and a refresh grant in the container, which `CONST-TOKEN-SCOPED-PER-JOB` forbids. A
+    renewal that cannot be delivered stops the job (`credential-expired`) two minutes before the credential it holds
+    runs out, judged on what the runner HOLDS, never on a renewal only the worker has.
   - **The stops are named.** `ABORT_RECORD_REASONS` maps the abort's reason to the record's (closed, as before): `idle`,
     `stalled`, `max-minutes`, and the fallback's `job-timeout-30m` as `max-minutes`; the runner's own `idle` and
     `stalled` are `RUNNER_POLICY_REASONS`. Each has its comment and catalog row.
@@ -18073,6 +18080,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-11-14 (#888, part 3) | **`DES-JOB-ACTIVITY-WATCH` AMENDED**: credentials renewed in a running job rather than the job cut short, with the rejected stop before expiry and refresh grant in the container, and the stop judged on what the runner holds. `DES-GH-APP-MANIFEST-SETUP` UNCHANGED, checked: the App's permissions do not move. |
 | 2026-11-14 (#888, part 2: the worker) | **`DES-JOB-ACTIVITY-WATCH` AMENDED** with the worker's half: one 30-minute timer handed over to the watch and kept for a job no watch covers (with the rejected unbounded run on an expiring credential), the backstop and its grace, the `max-minutes` timer, the renewed fleet claims, the activity-aware boot sweep, and the named stops. **`DES-STORE-VERSION-WHEN-NEEDED` UNCHANGED, checked**: its rule is applied (three trigger run fields at triggers file version 3, three job data fields at version 4, each a row of `AUTHORED_NARROWING_FIELDS`), not changed. `DES-CONCURRENCY-3` and `DES-CANCEL-VIA-REDIS-REQUEST-KEY` UNCHANGED, checked. |
 | 2026-11-14 (#888, part 1: the runner) | **NEW `DES-JOB-ACTIVITY-WATCH`**: the runner judges idle and stalled from steps (root-bus events but output updates, and the meter's counts) and activity (tool output, other processes' CPU, network), and stops the job itself; the worker is a backstop reading counters it stamps with its own clock; why the runner, why counters and not times; rejected: a wall clock, events only, CPU only, activity as enough for ever, the container's clock; what suspends the clocks. `DES-CONCURRENCY-3` and `DES-CANCEL-VIA-REDIS-REQUEST-KEY` UNCHANGED, checked: the worker half amends the abort path. |
 | 2026-11-14 (#882, part 7) | **`DES-OPERATOR-CONSOLE` AMENDED**: a new bullet after "Remote use", "On the local network, by name": the opt-in second listener announced as `pi-dispatch.local`, its costs and where each is said, the never-remembered rule judged by the arriving socket, the measured macOS port 80, and what was rejected (an mDNS library, announcing loopback, a wildcard on Linux, a `Secure` cookie over plain HTTP, a chosen name). UNCHANGED, checked: part 1 (the loopback listener and its refusals), "Remote use" (SSH, still the only remembered way from another machine), the six threats' answers, "Sign in on this computer". |

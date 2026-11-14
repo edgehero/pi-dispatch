@@ -86,3 +86,21 @@ test("lifecycle diagnostics map to closed actionable run-record reasons", async 
 		assert.deepEqual(calls, []);
 	}
 });
+test("issue #888, part 3: a running job's snapshot is extended for the same connection and binding only, with no quota admission", async () => {
+	const { runtime, calls, auth } = fixture();
+	const started = (await runtime.prepare(job, { deadlineAt: instant + 1_800_000, attemptId: "delivery-1" })).snapshots[0];
+	const admissions = calls.filter((c) => typeof c === "object" && c?.policy).length;
+	auth.prepareSnapshot = async (provider, { deadlineAt }) => (calls.push("extend"), { ok: true, snapshot: { ...connection, generation: 3, expiresAt: deadlineAt + 3_600_000, deadlineAt, env: { ANTHROPIC_OAUTH_TOKEN: "renewed-access" } } });
+	const extended = await runtime.extend(started, { deadlineAt: instant + 3_600_000 });
+	assert.equal(extended.deadlineAt, instant + 3_600_000);
+	assert.equal(extended.env.ANTHROPIC_OAUTH_TOKEN, "renewed-access");
+	assert.equal(extended.connectionId, started.connectionId);
+	assert.equal(calls.filter((c) => typeof c === "object" && c?.policy).length, admissions, "no second quota admission or trial");
+	// Another connection, another account group or a refused preparation: nothing is handed to the job.
+	for (const swap of [{ connectionId: "other" }, { accountGroup: "another-group" }, { adapter: "@gotgenes/pi-anthropic-auth@3.4.3" }]) {
+		auth.prepareSnapshot = async (provider, { deadlineAt }) => ({ ok: true, snapshot: { ...connection, ...swap, deadlineAt, env: { ANTHROPIC_OAUTH_TOKEN: "x" } } });
+		assert.equal(await runtime.extend(started, { deadlineAt: instant + 3_600_000 }), null, JSON.stringify(swap));
+	}
+	auth.prepareSnapshot = async () => ({ ok: false, reason: "auth-reauth-required" });
+	assert.equal(await runtime.extend(started, { deadlineAt: instant + 3_600_000 }), null);
+});

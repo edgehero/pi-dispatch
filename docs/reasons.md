@@ -61,6 +61,15 @@ exist, and the run is not retried.
 What to do: read the job log for the command that never ended. If the work really needs longer without a step, raise
 `run.stallTimeoutMinutes` or `PI_JOB_STALL_MINUTES` ([job-limits.md](job-limits.md)).
 
+### credential-expired
+
+A credential the run uses (a GitHub App token, or a subscription sign-in's deadline) could not be renewed before it
+ran out, so the run was stopped before its calls started failing. Partial work may exist, and the run is not retried.
+
+What to do: read the worker log's `credential_renew_failed` lines. For a GitHub App, check that the worker can still
+mint tokens (`pi-dispatch doctor`). For a subscription, sign in to it again on its owner host. Then run the job again
+([job-limits.md](job-limits.md#credentials-that-expire-while-a-job-runs)).
+
 ### max-minutes
 
 The run reached its time limit: a ceiling the trigger (`run.maxMinutes`) or the deployment (`PI_JOB_MAX_MINUTES`) set,

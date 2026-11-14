@@ -2,7 +2,9 @@
 
 An explicit subscription connection lets the worker use OpenAI ChatGPT authentication or a supported Claude
 community OAuth extension. The owning host handles login and renewal. Jobs receive only a short-lived access
-credential that remains valid beyond their deadline; refresh grants stay in a private host store.
+credential that remains valid beyond their deadline; refresh grants stay in a private host store. A job's deadline is
+30 minutes ahead, and the host moves it on while the job runs, for the same connection only
+([job limits](job-limits.md#credentials-that-expire-while-a-job-runs)).
 
 This is opt-in. Without a provider binding, existing environment/API-key behavior stays the same. A binding
 continues to own its provider when disconnected or exhausted: it never silently spends an API key, selects
@@ -58,7 +60,8 @@ pi-dispatch auth logout chatgpt-main
 
 Login follows the selected adapter's browser authorization. The browser console does not receive credentials
 or perform renewal. Logout disconnects future snapshots and prints `logout.remoteRevocationConfirmed` separately. A false value means remote revocation is unconfirmed, including when an adapter was removed or changed.
-Already running jobs retain the access snapshot they received until they finish or it expires.
+Already running jobs retain the access snapshot they received until they finish or it expires. A logout or a changed
+binding stops the renewal of a running job's snapshot, so such a job ends as `credential-expired` before its deadline.
 
 OpenAI proactive usage lookup is unavailable on this direct Responses integration unless its adapter publishes
 a supported typed observation. Known quota failures still supply closed exhaustion/reset evidence; other

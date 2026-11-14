@@ -205,6 +205,13 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
   with it an injected agent can close issues and edit or delete comments. The constitution's stated ideal
   (`CONST-TOKEN-SCOPED-PER-JOB`, "contents + pull-requests only") is **narrower than what ships**; this
   paragraph is that gap, written down.
+  **A running job keeps receiving tokens** (issue #888). A job runs as long as it keeps working, so before its
+  token's hour runs out the worker mints it a new one, scoped to the same one repository, and drops it in a folder
+  mounted read-only in the job ([job limits](docs/job-limits.md#credentials-that-expire-while-a-job-runs)). Each token
+  still dies after its hour; what changes is that an injected agent that sends each one out as it arrives holds a
+  valid token until its job ends plus at most an hour. The job's own limits (idle, stalled, an optional ceiling) are
+  what bound that, and a subscription sign-in's snapshot is renewed the same way, with its refresh grant kept on the
+  host.
   **It does NOT hold on GitLab.** A project access token needs `api` to post a note, and `api` grants full
   project API read/write; `write_repository` alone already permits pushing `.gitlab-ci.yml`. GitLab offers
   no contents-vs-CI split, so an injected agent on a GitLab job **can** rewrite your pipeline definition,

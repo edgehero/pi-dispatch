@@ -1742,6 +1742,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 						catch (cause) { throw new InfraRetry("subscription authentication could not be prepared", { cause, reason: "container-never-started", budgetReserved: false }); }
 					},
 					validateSubscriptionAuth: (snapshots) => deps.subscriptionRuntime.validate(snapshots),
+					// Issue #888, part 3: a running job's snapshot renewed to a later deadline (subscription-runtime.mjs `extend`),
+					// bounded by the job's own signal, so a renewal in flight ends with the job.
+					...(typeof deps.subscriptionRuntime.extend === "function" ? { extendSubscriptionAuth: (snapshot, { deadlineAt }) => deps.subscriptionRuntime.extend(snapshot, { deadlineAt, signal }) } : {}),
 				} : {}),
 				// Issue #502: the skew check must see `models` as the job ARRIVED, not as `effectiveJobOf` filled it from
 				// PI_ALLOWED_MODELS, or a trigger list a stale receiver dropped would read as present and the job would run on
