@@ -726,6 +726,7 @@ The audit log lists every write, sign-in and refusal in a hash chain, and says f
 # =====================================================================================
 VARIANTS = [
     ("failed", "failed", "That token is not valid for this console", "Check that you copied all of it, or make a new one."),
+    ("failed", "failed", "That sign-in code did not work", "It may be mistyped, used already or more than 5 minutes old. Run <span class='code'>pi-dispatch-console link</span> on the host for a new one."),
     ("attention", "clock", "This sign-in link was used or has expired", "A link works once, for 60 seconds. Make a new one with <span class='code'>/dispatch console</span>."),
     ("idle", "clock", "You were signed out after 60 minutes idle", "Sign in again to carry on. Nothing you were doing was lost."),
     ("idle", "hourglass", "You were signed out after 12 hours", "That is the longest a session lasts. Sign in again."),
@@ -742,7 +743,7 @@ VARIANTS = [
     ("attention", "slot-held", "You are signed out, but this browser's remembered sign-in could not be erased", "An operator should run <span class='code'>pi-dispatch doctor</span> on the host, fix what it names, then remove this browser with <span class='code'>pi-dispatch-console device revoke</span>."),
     ("attention", "beat", "Console not reachable, retrying", "Your page stays as it is. Retrying every 5 seconds."),
 ]
-SIGNIN = f"""<a class="skip" href="#si-token">Skip to sign-in</a>
+SIGNIN = f"""<a class="skip" href="#si-code">Skip to sign-in</a>
 <main id="main" class="page si-page">
   <header class="top"><a class="brandpill" href="#"><span class="brandpill__m">pi</span>pi-dispatch</a>
     <div class="top__end"><button class="roundbtn" type="button" aria-label="Theme: follows the system">{ic('theme')}</button></div></header>
@@ -750,14 +751,19 @@ SIGNIN = f"""<a class="skip" href="#si-token">Skip to sign-in</a>
     <section class="si-card" id="p-signin" data-panel aria-labelledby="si-h">
       <span class="brandpill__m si-mark">pi</span>
       <h1 id="si-h">Sign in to the console</h1>
-      <p class="muted">Paste a console token, or open a one-time link.</p>
-      <form class="si-form" aria-label="Sign in">
-        <div class="field"><label for="si-token">Console token</label><input id="si-token" class="input si-input" type="password" autocomplete="off" placeholder="pdc_…"></div>
-        <label class="si-remember"><input type="checkbox"><span><b>Remember this trusted device</b><small>Stay signed in on this browser across idle time and restarts, until you sign out. Only on a browser that is yours alone.</small></span></label>
+      <p class="muted">Type the sign-in code from your terminal, or paste a console token.</p>
+      <form class="si-form" aria-label="Sign in with a code">
+        <div class="field"><label for="si-code">Sign-in code</label><input id="si-code" class="input si-input si-code" type="text" autocomplete="one-time-code" placeholder="XXXX-XXXX" value="K7QX-9M2D"><p class="si-hint">The 8 characters <span class="code">pi-dispatch-console link</span> prints. It works once, for 5 minutes.</p></div>
         <button class="btn btn--primary btn--lg si-go" type="button">Sign in</button>
       </form>
+      <p class="si-or">or</p>
+      <form class="si-form" aria-label="Sign in with a token">
+        <div class="field"><label for="si-token">Console token</label><input id="si-token" class="input si-input" type="password" autocomplete="off" placeholder="pdc_…"></div>
+        <label class="si-remember"><input type="checkbox" checked><span><b>Remember this trusted device</b><small>Stay signed in on this browser across idle time and restarts, until you sign out. Only on a browser that is yours alone.</small></span></label>
+        <button class="btn btn--lg si-go" type="button">Sign in with the token</button>
+      </form>
       <div class="si-help">
-        <p class="si-help__h">No token yet?</p>
+        <p class="si-help__h">No code yet?</p>
         <p class="muted">Run this in your deployment folder to sign in:</p>
         {cmd('./pi-dispatch console')}
         <p class="muted">If that file is not there:</p>
@@ -765,14 +771,14 @@ SIGNIN = f"""<a class="skip" href="#si-token">Skip to sign-in</a>
         <p class="muted">On a global install: <span class="code">pi-dispatch console</span></p>
         <p class="muted">Or in pi:</p>
         {cmd('/dispatch console --link')}
-        <details><summary>In a browser that is not your default one</summary><p class="muted">The commands above open your default browser, which uses the link at once. This one prints a link to paste where you want it:</p>{cmd('./node_modules/.bin/pi-dispatch-console link')}</details>
+        <details><summary>In another browser, or on another device</summary><p class="muted">The commands above open your default browser, which uses the link at once. This one prints a link to paste, and a sign-in code to type above:</p>{cmd('./node_modules/.bin/pi-dispatch-console link')}</details>
         <details><summary>Make a token instead</summary><p class="muted">On the host, with your own name in place of &lt;you&gt;. In a local install it is under <span class="code">./node_modules/.bin/</span>:</p>{cmd('pi-dispatch-console token add --name <you> --role operator')}</details>
       </div>
-      <p class="si-foot faint">This console answers on 127.0.0.1 only. Reach it locally or through an SSH tunnel.</p>
+      <p class="si-foot faint">This console answers at localhost, on this host only. Reach it here, or through an SSH tunnel.</p>
     </section>
     <section class="si-variants" aria-labelledby="si-v">
       <h2 id="si-v">What this page says</h2>
-      <p class="muted si-v__s">One notice at a time, above the token field.</p>
+      <p class="muted si-v__s">One notice at a time, above the code field.</p>
       <div class="stack si-v__list">{''.join(banner(t, i, h, s, small=True) for t, i, h, s in VARIANTS)}</div>
     </section>
   </div>
@@ -788,6 +794,10 @@ SIGNIN_CSS = """
 .si-form { display: grid; gap: var(--space-3); }
 .si-input { height: var(--control-h); border-radius: var(--radius-pill); padding: 0 20px; font-family: var(--font-mono); }
 .si-go { width: 100%; }
+.si-code { letter-spacing: 0.12em; text-transform: uppercase; }
+.si-hint { margin-top: 6px; font-size: 12px; line-height: 18px; color: var(--ink-muted); }
+.si-or { display: flex; align-items: center; gap: var(--space-3); font-size: 12px; color: var(--ink-faint); }
+.si-or::before, .si-or::after { content: ""; flex: 1; height: 1px; background: var(--line); }
 .si-remember { display: flex; gap: 10px; align-items: flex-start; font-size: 13px; line-height: 18px; cursor: pointer; }
 .si-remember input { flex: none; width: 16px; height: 16px; margin-top: 1px; accent-color: var(--ink); }
 .si-remember span { display: grid; gap: 2px; min-width: 0; }
@@ -805,28 +815,29 @@ SIGNIN_CSS = """
 @media (max-width: 760px) { .si-grid { grid-template-columns: minmax(0, 1fr); gap: var(--space-5); margin-top: 0; } .si-card { padding: var(--space-5); } .si-card h1 { font-size: 26px; line-height: 32px; } }
 """
 
-write("SignIn", card_marker("Screens", 1120, 1440, "Sign in: a token field, help on where tokens and links come from, and every notice this page can show"),
+write("SignIn", card_marker("Screens", 1280, 1440, "Sign in: a code to type or a token, help on where they come from, and every notice this page can show"),
       "Sign in", SIGNIN, SIGNIN_CSS)
 readme("SignIn", """
-Sign-in is a single centered card: paste a console token or open a one-time link, with help that says exactly where both come from.
+Sign-in is a single centered card: type the sign-in code from your terminal, or paste a console token, with help that says exactly where both come from.
 
 **How a person uses it.**
-- **The token.** A person pastes the token and presses *Sign in*.
-- **Remember this trusted device.** A box under the token field, never ticked for you, keeps this browser signed in across idle time and restarts until it signs out. It is drawn only where the console would remember the browser: never on a Windows host, and never over plain HTTP across a network.
-- **Another browser.** A disclosure under the help gives `./node_modules/.bin/pi-dispatch-console link`, which prints a link rather than opening the default browser, for signing in a browser that is not the default one.
-- **No token yet.** The help block leads with the one command to remember, `./pi-dispatch console` in the deployment folder, which signs you in. It gives the spelling for a folder without that shortcut and `/dispatch console --link` in pi, each with a copy button. Making a token, `pi-dispatch-console token add --name <you> --role operator` on the host, sits in a disclosure below them.
-- **Arriving from elsewhere.** A person who opens a console page from another site and is signed in goes straight to that page. A person who is not signed in returns to that page after signing in with a token.
-- **Notices.** One notice at a time sits above the token field, each saying what happened and what to do.
+- **The sign-in code.** A person types the 8 characters `pi-dispatch-console link` printed, such as `K7QX-9M2D`, and presses *Sign in*. Capitals or not, with the dash or without, and an O for a zero or an I or L for a one all work. A code works once, for 5 minutes, and the browser it signs in is remembered.
+- **The token.** Below a rule marked *or*, a person can paste a console token instead and press *Sign in with the token*.
+- **Remember this trusted device.** A box under the token field, ticked to start with, keeps this browser signed in across idle time and restarts until it signs out. Untick it on a browser that is not yours alone. It is drawn only where the console would remember the browser: never on a Windows host, and never over plain HTTP across a network.
+- **Another browser or device.** A disclosure under the help gives `./node_modules/.bin/pi-dispatch-console link`, which prints a link to paste and a code to type rather than opening the default browser.
+- **No code yet.** The help block leads with the one command to remember, `./pi-dispatch console` in the deployment folder, which signs you in. It gives the spelling for a folder without that shortcut and `/dispatch console --link` in pi, each with a copy button. Making a token, `pi-dispatch-console token add --name <you> --role operator` on the host, sits in a disclosure below them.
+- **Arriving from elsewhere.** A person who opens a console page from another site and is signed in goes straight to that page. A person who is not signed in returns to that page after signing in with a code or a token.
+- **Notices.** One notice at a time sits above the code field, each saying what happened and what to do.
   - Why a session ended: 60 minutes idle (an open live tab does not count), the 12-hour maximum, a revoked or rotated token, a changed role, an operator ending every session, signing out in another tab, a console restart, or a remembered device being removed. A remembered sign-in that could not be checked or erased says so.
-  - Why a sign-in was refused: a wrong token, a used or expired link, too many attempts (5 a minute), a tokens file the console cannot use, or an audit log it cannot write.
+  - Why a sign-in was refused: a wrong token, a code that did not work, a used or expired link, too many attempts (5 a minute), a tokens file the console cannot use, or an audit log it cannot write.
   - "Console not reachable, retrying" keeps the page instead of going to the browser's error page.
-- **Where it answers.** The footer says the console answers on 127.0.0.1 only.
+- **Where it answers.** The footer says the console answers at localhost, on this host only.
 
 **Panels.** `p-signin`.
 
-**The server provides.** The notice as a closed reason, never echoed input: `ended=idle|max|revoked|role|all|elsewhere|restart|device|device-store|device-kept`, or the refusal (401 wrong token, 401 link used or expired, 429 too many attempts, 503 tokens file, 500 audit log). Today the repo's login page says nothing about why a session ended; the `ended` reason is the change this design asks for.
+**The server provides.** The notice as a closed reason, never echoed input: `ended=idle|max|revoked|role|all|elsewhere|restart|device|device-store|device-kept`, or the refusal (401 wrong token, 401 code that did not work, 401 link used or expired, 429 too many attempts, 503 tokens file, 500 audit log). Today the repo's login page says nothing about why a session ended; the `ended` reason is the change this design asks for.
 
-**Fixture note.** The token placeholder `pdc_…` and the 5-second retry interval are sample values.
+**Fixture note.** The code `K7QX-9M2D` in the field, the token placeholder `pdc_…` and the 5-second retry interval are sample values.
 """)
 
 # =====================================================================================

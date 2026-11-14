@@ -209,6 +209,20 @@ LINKS = f"""<div class="cards-3 ac-links">
 </div>
 <p class="ac-noscript">{ic('info', 'ic ic--sm')}Without JavaScript the sign-in page says only: <b>The console needs JavaScript to sign in.</b></p>"""
 
+# Issue #882: the sign-in code, as the terminal prints it beside the link, and what a sign-in with either leaves behind.
+CODE_TERM = """<pre class="ac-term"><span class="ac-term__p">$ ./node_modules/.bin/pi-dispatch-console link</span>
+http://localhost:4790/login/code#q3Vd…
+open it within 60 seconds; it works once
+or type this sign-in code at http://localhost:4790/login within 5 minutes; it works once too: <b>K7QX-9M2D</b></pre>"""
+CODES = f"""<div class="cards-2 ac-codes">
+<section class="card ac-code" aria-labelledby="ac-code-h"><div class="card__head"><h2 id="ac-code-h">A link and a code, from the host</h2></div>
+{CODE_TERM}
+<p class="muted ac-small">Each works once. The link is opened, the code is typed on the sign-in page, on this computer or another one through its tunnel.</p></section>
+<section class="card ac-code" aria-labelledby="ac-kept-h"><div class="card__head"><h2 id="ac-kept-h">Signed in, and remembered</h2></div>
+<div class="ac-who"><span class="who who--remembered"><span><b>ops</b><small>Operator, remembered</small></span><span class="avatar">op</span></span></div>
+<p class="muted ac-small">A link or a code the host made remembers the browser it signs in, without asking, wherever the console may remember one: at localhost, through an SSH tunnel, or at its HTTPS address. It stays signed in across idle time and restarts until it signs out. A viewer invitation and an agent token are never remembered.</p></section>
+</div>"""
+
 # roles board
 ROLES = [("Operator", "ops", "Operator", ""), ("Viewer", "watcher", "Viewer", ""), ("Read-only console", "ops", "Operator", "ro")]
 
@@ -266,9 +280,11 @@ RESTART = banner('attention', 'rerun', 'This console needs a restart',
 
 ACCESS = f"""<a class="skip" href="#main">Skip to content</a>
 <main id="main" class="page">
-{titlebar('Access states', 'The one-time sign-in link, and what each role sees on the same page')}
+{titlebar('Access states', 'The one-time sign-in link and code, and what each role sees on the same page')}
 <div class="sect"><h2>One-time link</h2><span class="card__sub">/login/code, opened from pi or from pi-dispatch-console link</span></div>
 {LINKS}
+<div class="sect"><h2>Sign-in code</h2><span class="card__sub">typed on /login, printed by pi-dispatch-console link beside the link</span></div>
+{CODES}
 <div class="sect"><h2>What each role sees</h2><span class="card__sub">the same failed job and the same live run</span></div>
 {ROLEBOARD}
 {banner('attention', 'shield', 'This console is read-only', 'It was started with <span class="code">PI_CONSOLE_READ_ONLY=1</span>, so every change is refused and no page shows a form. Operators still see reasons, transcripts and the audit log.', small=True)}
@@ -303,26 +319,34 @@ ACCESS_CSS = """
 .ac-ta { min-height: 64px; }
 .ac-small { font-size: 12px; }
 .ac-row .cmd { background: var(--surface); }
+.ac-codes { align-items: stretch; }
+.ac-code { display: grid; align-content: start; gap: 10px; min-width: 0; }
+.ac-term { margin: 0; padding: 12px 14px; border-radius: var(--radius-md); background: var(--surface-2); font-family: var(--font-mono); font-size: 12px; line-height: 18px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink); }
+.ac-term__p { color: var(--ink-muted); }
+/* A remembered browser's avatar wears the ring the top bar gives it (the DevicesScreen card's). */
+.ac-code .who--remembered .avatar { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--ink); }
 @media (max-width: 760px) { .ac-link { padding: var(--space-5); } .ac-link .tile { top: var(--space-5); right: var(--space-5); } }
 """
 
-write("AccessStates", card_marker("Access", 1280, 1440, "The one-time link page in its five states, operator, viewer and read-only side by side, and the restart banner"),
+write("AccessStates", card_marker("Access", 1560, 1440, "The one-time link page in its five states, the sign-in code beside it, operator, viewer and read-only side by side, and the restart banner"),
       "Access states", ACCESS, ACCESS_CSS)
 readme("AccessStates", """
-The access states that are not the sign-in form itself: the one-time link page, what an operator, a viewer and a read-only console each see on the same page, and the banner a console shows when it needs a restart.
+The access states that are not the sign-in form itself: the one-time link page, the sign-in code beside it, what an operator, a viewer and a read-only console each see on the same page, and the banner a console shows when it needs a restart.
 
 **How a person uses it.**
 - **One-time link.** `/login/code#<code>` shows "Signing in with a one-time link" while it posts the code, after taking the code out of the browser history. If the link was used, has expired or is unknown, it says so, gives the command for a new link, and offers "Sign in with a token instead". A browser that is already signed in is told that instead, with a link to go on. A link with no code says so too. Without JavaScript the page says only "The console needs JavaScript to sign in."
+- **Sign-in code.** `pi-dispatch-console link` prints a code to type beside the link: 8 characters such as `K7QX-9M2D`, typed in the sign-in page's Sign-in code field. The link works once within 60 seconds and the code once within 5 minutes; each is its own, so a person can open the link here and type the code on a phone.
+- **Remembered.** A sign-in with a link or a code the host made remembers the browser without asking, wherever the console may remember one (at localhost, through an SSH tunnel, at its HTTPS address), and the top bar says "remembered". A viewer invitation and an agent token are never remembered.
 - **Operator.** Sees reasons, transcripts, phase names, chat, Audit and every action, each as preview then Confirm.
 - **Viewer.** Sees the same rows and numbers. In place of a hidden detail, the viewer gets the repo's sentence, such as "Failure reasons are shown to operators only.", "Phase names and the run's note are shown to operators only.", "Transcripts are shown to operators only." or "Chat is for operators; a viewer sees the run's status only." There are no action buttons, and no Audit in the nav.
 - **Read-only console.** A console started with `PI_CONSOLE_READ_ONLY=1` shows a "Read-only console" chip in the top bar and a banner. Operators keep every detail, but no page has a form, and talking to a run points to the terminal command.
 - **Restart needed.** A console keeps what it read from the deployment's `.env` at start. When that file has changed since, or Valkey refused the database `VALKEY_URL` names, every page shows a banner for every role, "This console needs a restart", naming the settings but never their values. Its log says the same once. A `.env` gone since the console started, or one that cannot be read now, asks for a fix before the restart instead. A password changed in that file needs no restart, unless the file names the console's Valkey otherwise than the console dials it: then the banner names `VALKEY_PASSWORD` too.
 
-**Panels.** `p-link-wait`, `p-link-used`, `p-link-expired`, `p-link-signed-in`, `p-link-nocode`, `p-role-operator`, `p-role-viewer`, `p-role-read-only`.
+**Panels.** `p-link-wait`, `p-link-used`, `p-link-expired`, `p-link-signed-in`, `p-link-nocode`, `p-role-operator`, `p-role-viewer`, `p-role-read-only`. The sign-in code's two cards are not panels of a page: the first is a terminal, the second the top bar after a sign-in.
 
 **The server provides.** The signed-in token's name and role, the read-only flag, whether this console needs a restart and why (setting names and a database number), and for the link page a closed answer: signing in, used/expired/unknown, expired, already signed in, or no code. A role decides on the server which panels and fields are sent at all. A viewer's page never carries the hidden text.
 
-**Fixture note.** gh-f0c2 (failed on mini1) and gh-b3d7 (running, phase 2 of 4) are fixture runs. The failure text and the phase name are sample copy.
+**Fixture note.** gh-f0c2 (failed on mini1) and gh-b3d7 (running, phase 2 of 4) are fixture runs. The failure text and the phase name are sample copy. The link's code `q3Vd…` and the sign-in code `K7QX-9M2D` are sample values.
 """)
 
 # =====================================================================================
