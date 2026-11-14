@@ -11602,7 +11602,7 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
     holds a code in any spelling. `CONSOLE_AUDIT_ACTIONS`, `CONSOLE_AUDIT_OUTCOMES` and their shapes are UNCHANGED,
     checked: an older verifier reads `kind` by its charset alone, so these rows verify on every release.
   - `action`: the writer writes exactly one of `login`, `login-failed`, `login-code`, `logout`, `refused`, `write`,
-    `write-applied`, `token-added`, `token-revoked`, `token-rotated`, `sessions-ended`, `serve-started`, `login-device`, `device-remembered`, `device-ended`
+    `write-applied`, `token-added`, `token-revoked`, `token-rotated`, `sessions-ended`, `serve-started`, `login-device`, `device-remembered`, `device-ended`, `login-approval`
     (`CONSOLE_AUDIT_ACTIONS`), and the verifier links any action of the shape every one of them has,
     `^[a-z][a-z0-9-]{0,39}$` (`CONSOLE_AUDIT_ACTION_RE`, "Across versions" below). CORRECTED 2026-11-03 (#761): the
     list lacked `write-applied`, written since #766; a test now holds it to the code. A `login-code` row
@@ -11628,7 +11628,13 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
     out, another person signed in on this browser, unused for longer than any browser keeps the cookie, its token entry
     no longer matches), outcome `failed` when the end could not be written; by a sign-in over a record the console
     could not read, as the person signing in, outcome `failed`, since the record is left; and by
-    `pi-dispatch-console device revoke` as `shell`.
+    `pi-dispatch-console device revoke` as `shell`. ADDED 2026-11-14 (#882): a `login-approval` row is a sign-in by
+    approving a window on the host's desktop (`approve-dialog.mjs`). The allowed sign-in is written when its browser
+    collects it, with that session's actor, outcome `ok`, as `login` and `login-code` are; a window that was denied or
+    left unanswered is written when it lands, `anonymous`, target `/login/approve`, outcome `refused`, with the reason;
+    one that could not be shown, outcome `failed`; and a second request while one waits, outcome `refused`. No row
+    holds the request's id or its match code. The new action has the shape every action has, so an older verifier
+    links it and counts it as `unknown`.
   - `outcome`: the writer writes exactly one of `ok`, `refused`, `failed` (`CONSOLE_AUDIT_OUTCOMES`), and the verifier
     links any outcome of the same shape (`CONSOLE_AUDIT_OUTCOME_RE`).
   - `target`, `reason` (optional, absent when unset): short strings, control characters written out as `\u{XXXX}`,
@@ -13804,6 +13810,7 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 
 | Date | Change |
 |---|---|
+| 2026-11-14 (#882, part 5) | **`INT-CONSOLE-AUDIT-LOG` AMENDED**: a new action, `login-approval`, a sign-in by approving a window on the host: `ok` with the session's actor when the allowed browser collects it, `refused` (anonymous, target `/login/approve`) for a window denied or left unanswered and for a second request while one waits, `failed` for a window that could not be shown. No row holds the request's id or its match code. It has the shape every action has, so an older verifier links it as `unknown`. `CONSOLE_AUDIT_OUTCOMES` and both shapes are UNCHANGED, checked. |
 | 2026-11-14 (#882, part 4, review round 1) | **`INT-CONSOLE-TOKENS-FILE-CONTRACT` CORRECTED** in its #882 amendment: a short code's file is named by scrypt (`SHORT_CODE_SCRYPT`) of its canonical spelling under the drop's `.short-code-salt`, not by a plain sha256, which a listing of the folder gave away in minutes; the salt's rules. **`INT-CONSOLE-DEVICES-STORE` AMENDED**, Limits: `makeRoom` ends the least recently used live device at the cap, as `removed`, answered as `replaced`; this CORRECTS the first row's UNCHANGED for this contract. **`INT-CONSOLE-AUDIT-LOG` AMENDED**: the `device-ended` row of a browser forgotten at the cap. UNCHANGED, checked: `CONSOLE_AUDIT_ACTIONS`, `CONSOLE_AUDIT_OUTCOMES`, `DEVICE_END_REASONS` and the device record's shape. |
 | 2026-11-14 (#882, part 4) | **`INT-CONSOLE-TOKENS-FILE-CONTRACT` AMENDED**: the login codes beside it, two kinds (a link's 43 characters for 60 seconds, a short code of 8 Crockford base32 symbols for 5 minutes, hashed in its canonical spelling), how a consumer tells them apart and folds a typed one, each held to its own life, minted both or neither, spent alone; the file shape UNCHANGED, checked. **`INT-CONSOLE-AUDIT-LOG` AMENDED**: a `login-code` row's `kind` (`link`, `short-code`, `link-and-short-code`, or none for a link alone) and a refused typed code's target `/login/typed-code`. UNCHANGED, checked: `CONSOLE_AUDIT_ACTIONS`, `CONSOLE_AUDIT_OUTCOMES` and their shapes, so every older verifier reads these rows; `INT-CONSOLE-DEVICES-STORE` (a device is made by the same writer, only sooner). |
 | 2026-11-14 (#876) | **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the record's `reason` enum gains `branch-protection-unreadable`, a GitHub job refused because its token may not read the repository, its default branch or that branch's rules (a determinate 403, `REQ-BRANCH-PROTECTION-PRECONDITION`): `outcome: "policy"`, `budgetReserved: false`, no container, no exit code. Such a 403 used to end as a `failed` run with `worker-error` after its retries. The record's `v` stays 1: a new token of a fixed enum changes no field's meaning, unit or type (`DES-STORE-VERSION-WHEN-NEEDED`), and an older console or panel shows the token with no explanation (`explainReason` answers `{ known: false }`), as for any newer worker's reason. **`INT-REASON-CATALOG` UNCHANGED, checked**: the token's row is derived from `REFUSAL_COMMENTS`, the comment the job posts, and `docs/reasons.md` gains its heading, both held both ways by `reason-catalog.test.mjs`. **`INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked**: the job's token is minted and passed as before, with the same grant. |

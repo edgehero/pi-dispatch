@@ -4,7 +4,7 @@ import { test } from "node:test";
 import { CONFIRM_NO_ANSWER, CONFIRM_SIGNED_OUT, CONFIRM_SLOT_ID, HELD_NOTE_CHIP, HELD_NOTE_TEXT, bulkResultsHtml, heldNoteHtml, previewBarHtml, refusalHtml, unchangedBarHtml } from "../src/console/confirm-view.mjs";
 import { html, page } from "../src/console/html.mjs";
 import { actForm, area, editor, field } from "../src/console/panels/common.mjs";
-import { CONSOLE_SCRIPT, RETRY_MS, SIGN_IN_GAVE_UP, SIGN_IN_RETRY_FOR_MS, SIGN_IN_TRIES_MAX, SIGN_OUT_TIMEOUT_MS, SIGN_OUT_UNCONFIRMED, STALE_DEVICE_BODY, STALE_TOKENS_BODY } from "../src/console/script.mjs";
+import { APPROVE_POLL_MS, CONSOLE_SCRIPT, RETRY_MS, SIGN_IN_GAVE_UP, SIGN_IN_RETRY_FOR_MS, SIGN_IN_TRIES_MAX, SIGN_OUT_TIMEOUT_MS, SIGN_OUT_UNCONFIRMED, STALE_DEVICE_BODY, STALE_TOKENS_BODY } from "../src/console/script.mjs";
 import { PERSON_CHANGED } from "../src/console/server.mjs";
 import { ENDED_REASONS, NOTICE_OF_STATUS, PERSON_HEADER, PERSON_PARAM, SIGN_IN_NOTICES, STREAM_ENDS, STREAM_SHUTDOWN } from "../src/console/session-ends.mjs";
 import { LIVE_NOTES, LIVE_STATES, SEARCH_HREF, loginCodePage, loginPage, shellHtml } from "../src/console/shell.mjs";
@@ -1973,7 +1973,7 @@ test("the script's closed lists are written in from their one source each, never
   assert.deepEqual(named("mark"), Object.keys(LIVE_STATES).filter((k) => k !== "start").sort());
   // The sign-in page goes where a reason is the console's own, and nowhere else.
   // Sign-out's only one is its 200's (issue #737): an unconfirmed sign-out stays on the page.
-  assert.deepEqual(CONSOLE_SCRIPT.match(/location\.assign\(.*?\);/g), ['location.assign(query.length ? "/login?" + query.join("&") : "/login");', 'location.assign(ownPage(r.body && r.body.next));', 'location.assign(r.body && r.body.device === "unerased" ? "/login?ended=device-kept" : "/login");', 'location.assign("/runs/sandboxes?request=" + encodeURIComponent(b.requestId) + "&host=" + encodeURIComponent(b.host));']);
+  assert.deepEqual(CONSOLE_SCRIPT.match(/location\.assign\(.*?\);/g), ['location.assign(query.length ? "/login?" + query.join("&") : "/login");', 'location.assign(ownPage(r.body && r.body.next));', 'location.assign(ownPage(a.body && a.body.next));', 'location.assign(r.body && r.body.device === "unerased" ? "/login?ended=device-kept" : "/login");', 'location.assign("/runs/sandboxes?request=" + encodeURIComponent(b.requestId) + "&host=" + encodeURIComponent(b.host));']);
   assert.match(CONSOLE_SCRIPT, /if \(r\.status === 200\) location\.assign\(r\.body && r\.body\.device === "unerased" \? "\/login\?ended=device-kept" : "\/login"\);\n\s+else unconfirmed\(\);\n\s+\}, unconfirmed\);/);
   // The signed-out sentence is said as text, in the slot's message line (slotSays), never as markup.
   assert.match(CONSOLE_SCRIPT, /function signedOut\(r\) \{[^]*?slotSays\(CONFIRM_SIGNED_OUT\);/);
@@ -2366,6 +2366,48 @@ test("the Remember choice starts ticked (issue #882), and is posted only while i
   input.value = "tok-2";
   w.submit(w.document.getElementById("login-form"));
   assert.deepEqual(calls(w, "/login").at(-1).body, { token: "tok-2" }, "unticked by the person: an ordinary sign-in");
+});
+
+// Issue #882: Sign in on this computer, approved in a window on the host.
+
+test("sign in on this computer: one request, its match code shown, a wait on its id until the window answers, then the page it came for (#882)", async () => {
+  const w = boot(String(loginPage({ approve: true, next: "/runs" })), { url: "/login?next=%2Fruns" });
+  const form = w.document.getElementById("approve-form");
+  const wait = w.document.getElementById("approve-wait");
+  assert.ok(form && wait, "drawn where the console can show a window");
+  assert.equal(wait.hidden, true, "nothing to wait for yet");
+  w.submit(form);
+  assert.deepEqual(calls(w, "/login/approve").at(-1).body, {}, "nothing is sent but the ask");
+  await w.fetch.open("/login/approve").answer(202, { request: "r".repeat(43), match: "AB2C", waitSec: 60 });
+  assert.equal(wait.hidden, false);
+  assert.equal(wait.querySelector("[data-approve-match]").textContent, "AB2C", "the code the window shows too");
+  w.timers.tick(APPROVE_POLL_MS);
+  assert.deepEqual(calls(w, "/login/approve/wait").at(-1).body, { request: "r".repeat(43), next: "/runs" });
+  await w.fetch.open("/login/approve/wait").answer(202, { state: "pending" });
+  assert.equal(calls(w, "/login/approve/wait").length, 1, "asked again only after the poll interval");
+  w.timers.tick(APPROVE_POLL_MS);
+  assert.equal(calls(w, "/login/approve/wait").length, 2);
+  await w.fetch.open("/login/approve/wait").answer(200, { ok: true, name: "alice", role: "operator", next: "/runs", remembered: true });
+  assert.deepEqual(w.location.assigned, ["/runs"]);
+});
+
+test("sign in on this computer, refused: a denied or unanswered window, one already waiting, and no window here each show their own notice (#882)", async () => {
+  const denied = boot(String(loginPage({ approve: true })), { url: "/login" });
+  denied.submit(denied.document.getElementById("approve-form"));
+  await denied.fetch.open("/login/approve").answer(202, { request: "r".repeat(43), match: "AB2C" });
+  denied.timers.tick(APPROVE_POLL_MS);
+  await denied.fetch.open("/login/approve/wait").answer(401, { error: "this computer denied the sign-in", state: "deny" });
+  assert.deepEqual(notices(denied), ["denied"]);
+  assert.equal(denied.document.getElementById("approve-wait").hidden, true, "no longer waiting");
+  assert.deepEqual(denied.location.assigned, []);
+  for (const [status, notice] of [[409, "busy"], [404, "nodialog"], [429, "rate"]]) {
+    const w = boot(String(loginPage({ approve: true })), { url: "/login" });
+    w.submit(w.document.getElementById("approve-form"));
+    await w.fetch.open("/login/approve").answer(status, { error: "refused" });
+    assert.deepEqual(notices(w), [notice], String(status));
+  }
+  // Where the console cannot show a window, the page draws no button at all.
+  assert.equal(boot(String(loginPage({})), { url: "/login" }).document.getElementById("approve-form"), null);
 });
 
 // Issue #882: the Sign-in code field.

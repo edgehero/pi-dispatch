@@ -195,6 +195,7 @@ import { CONFIG_FIX_ACTIONS } from "./actions.mjs";
 import { FIT_JS } from "../graph-html.mjs";
 import { CONFIRM_NO_ANSWER, CONFIRM_SIGNED_OUT, CONFIRM_SLOT_ID } from "./confirm-view.mjs";
 import { PAGES } from "./pages.mjs";
+import { APPROVAL_WAIT_MS } from "./approve-dialog.mjs";
 import { RUN_PATH_LINK_RE } from "./run-path.mjs";
 import { ENDED_REASONS, NOTICE_OF_STATUS, PERSON_HEADER, PERSON_PARAM, STREAM_ENDS, STREAM_SHUTDOWN } from "./session-ends.mjs";
 import { SEARCH_ID } from "./kit.mjs";
@@ -230,7 +231,16 @@ export const SIGN_IN_GAVE_UP = Object.freeze({
   // Issue #882: a typed code lasts 5 minutes, so it may still work: typed again, or a new one made, once the console is back.
   code: "Nothing more is sent, and this page no longer holds the code. Type it again once the console is back; a code lasts 5 minutes.",
   link: "Nothing more is sent, and a link lasts 60 seconds, so this one has expired. Ask for a new one once the console is back.",
+  // Issue #882: a request to this computer's window, whose answer the page could not collect.
+  approve: "Nothing more is sent. Press Sign in on this computer again once the console is back.",
 });
+
+/**
+ * Issue #882: how often the page asks whether the host's window was answered, and when it stops asking with no answer
+ * from the console: the window's own give-up (`APPROVAL_WAIT_MS`) and a little more.
+ */
+export const APPROVE_POLL_MS = 1500;
+export const APPROVE_GIVE_UP_MS = APPROVAL_WAIT_MS + 15_000;
 
 /**
  * How long a sign-out waits for the console's answer before it says it was not confirmed (a console that took the post
@@ -288,6 +298,8 @@ export const CONSOLE_SCRIPT = `"use strict";
   var SIGN_IN_TRIES_MAX = ${JSON.stringify(SIGN_IN_TRIES_MAX)};
   var SIGN_IN_RETRY_FOR_MS = ${JSON.stringify(SIGN_IN_RETRY_FOR_MS)};
   var SIGN_IN_GAVE_UP = ${JSON.stringify(SIGN_IN_GAVE_UP)};
+  var APPROVE_POLL_MS = ${JSON.stringify(APPROVE_POLL_MS)};
+  var APPROVE_GIVE_UP_MS = ${JSON.stringify(APPROVE_GIVE_UP_MS)};
   var SIGN_OUT_TIMEOUT_MS = ${JSON.stringify(SIGN_OUT_TIMEOUT_MS)};
   var SIGN_OUT_UNCONFIRMED = ${JSON.stringify(SIGN_OUT_UNCONFIRMED)};
   var STALE_TOKENS_BODY = ${JSON.stringify(STALE_TOKENS_BODY)};
@@ -410,6 +422,9 @@ export const CONSOLE_SCRIPT = `"use strict";
     // Issue #882: the Sign-in code form, beside the token's. Each posts what it holds to its own route, so a refusal selects its own notice.
     var codeForm = document.getElementById("code-form");
     var codeInput = document.getElementById("signin-code");
+    // Issue #882: Sign in on this computer, drawn only where the console can show the host a window.
+    var approveForm = document.getElementById("approve-form");
+    var approveWait = document.getElementById("approve-wait");
     // Each submit is an attempt, of either form; a retry belongs to its attempt, so a new submit (another token or code) ends the old loop, and
     // an older attempt's answer, arriving late, does nothing.
     var attempt = 0;
@@ -444,6 +459,7 @@ export const CONSOLE_SCRIPT = `"use strict";
       });
     };
     var start = function (route, body) {
+      if (approveWait) approveWait.hidden = true;
       if (loginNext !== null) body.next = loginNext;
       held = body;
       heldRoute = route;
@@ -473,6 +489,56 @@ export const CONSOLE_SCRIPT = `"use strict";
       var typed = codeInput.value;
       codeInput.value = "";
       start("/login/typed-code", { code: typed });
+    });
+    // Issue #882: one request to the host's window, then a wait on its id (a secret only this page holds) until the window is answered. Its
+    // match code is shown, as the window shows it. A new submit of any form is a new attempt and ends this one's wait.
+    if (approveForm) approveForm.addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      attempt += 1;
+      var mine = attempt;
+      if (retrying !== null && typeof clearTimeout === "function") clearTimeout(retrying);
+      retrying = null;
+      showOnly(null);
+      if (approveWait) approveWait.hidden = true;
+      var from = nowMs();
+      var stopApprove = function () {
+        if (approveWait) approveWait.hidden = true;
+        gaveUp("approve");
+      };
+      var wait = function (request) {
+        if (mine !== attempt) return;
+        var body = { request: request };
+        if (loginNext !== null) body.next = loginNext;
+        post("/login/approve/wait", body).then(function (a) {
+          if (mine !== attempt) return;
+          if (a.status === 202) {
+            retrying = later(function () { retrying = null; wait(request); }, APPROVE_POLL_MS);
+            return;
+          }
+          if (approveWait) approveWait.hidden = true;
+          if (a.ok) location.assign(ownPage(a.body && a.body.next));
+          else refusedSignIn("/login/approve/wait", a);
+        }, function () {
+          if (mine !== attempt) return;
+          var t = nowMs();
+          if (from !== null && t !== null && t - from > APPROVE_GIVE_UP_MS) return stopApprove();
+          showOnly("unreachable");
+          retrying = later(function () { retrying = null; wait(request); }, RETRY_MS);
+        });
+      };
+      post("/login/approve", {}).then(function (r) {
+        if (mine !== attempt) return;
+        if (r.status !== 202 || !r.body || typeof r.body.request !== "string") return refusedSignIn("/login/approve", r);
+        if (approveWait) {
+          var m = typeof approveWait.querySelector === "function" ? approveWait.querySelector("[data-approve-match]") : null;
+          if (m) m.textContent = typeof r.body.match === "string" ? r.body.match : "";
+          approveWait.hidden = false;
+        }
+        retrying = later(function () { retrying = null; wait(r.body.request); }, APPROVE_POLL_MS);
+      }, function () {
+        if (mine !== attempt) return;
+        stopApprove();
+      });
     });
   } else if (page === "login-code") {
     revealScripted();

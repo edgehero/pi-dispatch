@@ -257,6 +257,26 @@ nothing about it on a public bind. Signing in needs JavaScript. A page without i
 still holds: both forms, their lead-in and the link page's "Signing in" state are drawn hidden, and the page's script
 shows them as it loads.
 
+### Sign in on this computer
+
+Where the console can show a window on the host's desktop, the sign-in page leads with **Sign in on this computer**,
+and no code or token is needed. Press it and the host shows a window: a browser wants to sign in, as which operator,
+from where, and a 4-character code. The page shows the same code while it waits. Check that the two codes match, then
+press **Allow**: the page signs in and the browser is remembered, as with a code. **Deny**, or no answer within a
+minute, is said on the page, and so is a second press while a window is still open. Every outcome is in the audit log
+as `login-approval`.
+
+It works on macOS, and on Linux where the console's environment has a display (`DISPLAY` or `WAYLAND_DISPLAY`) and
+`zenity` or `kdialog` is installed. A console started as the user service from `pi-dispatch service install --console`
+on a Mac shows the window in your session. A console on a host with no desktop, a Linux server for example, does not
+draw the button; use a code from `pi-dispatch-console link` there. Only operator tokens can sign in this way.
+
+The window is what lets the browser in, and that is deliberate. A job runs in a container, and its traffic reaches the
+host through helpers that run under your account (Docker Desktop, OrbStack, rootless Podman), so the console cannot
+tell an agent's request from your browser's by where it comes from. A container can send a request, but it cannot
+click a window on your screen. So only press Allow for a request you just made, with the code your page shows; a window
+you did not expect is one to deny.
+
 ### From pi: `/dispatch console`
 
 In pi, `/dispatch console` does the same in one step, without a second terminal:

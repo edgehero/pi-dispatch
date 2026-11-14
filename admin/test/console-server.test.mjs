@@ -12,7 +12,7 @@ import * as realPages from "../src/console/pages.mjs";
 import { ACTIONS } from "../src/console/actions.mjs";
 import { ERROR_KINDS, ERROR_SENTENCES, HOST_SHOWN_MAX, errorPage, forbiddenContent } from "../src/console/error-pages.mjs";
 import { ICON_NAMES } from "../src/console/pulse-icons.mjs";
-import { BODY_LIMIT, createConsoleServer, loginNoticeOf, lookupRoute, PERSON_CHANGED, PERSON_CHANGED_STREAM, REFUSAL_ROWS_PER_MINUTE, ROUTES, SERVER_LIMITS, SIGN_IN_FIRST, STATE_UNREADABLE, STREAMS_TOTAL_MAX, TOKENS_UNUSABLE, wantsHtml } from "../src/console/server.mjs";
+import { BODY_LIMIT, approvalSettled, createConsoleServer, loginNoticeOf, lookupRoute, PERSON_CHANGED, PERSON_CHANGED_STREAM, REFUSAL_ROWS_PER_MINUTE, ROUTES, SERVER_LIMITS, SIGN_IN_FIRST, STATE_UNREADABLE, STREAMS_TOTAL_MAX, TOKENS_UNUSABLE, wantsHtml } from "../src/console/server.mjs";
 import { ENDED_REASONS, NOTICE_OF_STATUS, PERSON_HEADER, PERSON_PARAM } from "../src/console/session-ends.mjs";
 import { makeSessionStore, readSessionCookies } from "../src/console/sessions.mjs";
 import { CONSOLE_CSS } from "../src/console/style.mjs";
@@ -20,6 +20,7 @@ import { writePauseWindows as realWritePauseWindows } from "../src/read-model.mj
 import { findToken as realFindToken, parseTokensFile } from "@edgehero/pi-dispatch/console-tokens";
 import { makeConsoleAudit, readConsoleAudit, verifyConsoleAudit } from "@edgehero/pi-dispatch/console-audit";
 import { STATUS_KINDS } from "../src/words.mjs";
+import { makeApprovals } from "../src/console/approve-dialog.mjs";
 
 // The console's dispatcher over a real node:http server on 127.0.0.1:0 (issue #640, REQ-CONSOLE-SECURITY). Requests
 // are raw `http.request` calls so each test controls Host, Origin and Sec-Fetch-Site exactly as a hostile page or a
@@ -258,6 +259,7 @@ async function start(overrides = {}) {
     hub: overrides.hub ?? null,
     ...(overrides.errorPage && { errorPage: overrides.errorPage }),
     ...(overrides.limits && { limits: overrides.limits }),
+    ...(overrides.approvals && { approvals: overrides.approvals }),
   });
   servers.push(server);
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -489,7 +491,7 @@ test("the route table: every route declares auth and write, writes are POST, and
   }
   // Only signing in and out, and remembering this browser (issue #849), exempt a write from read-only mode: each changes this browser's own credential and
   // nothing else. Reads need no exemption.
-  assert.deepEqual(ROUTES.filter((r) => r.readOnlyExempt).map((r) => r.path).sort(), ["/api/device/remember", "/login", "/login/code", "/login/typed-code", "/logout"]);
+  assert.deepEqual(ROUTES.filter((r) => r.readOnlyExempt).map((r) => r.path).sort(), ["/api/device/remember", "/login", "/login/approve", "/login/approve/wait", "/login/code", "/login/typed-code", "/logout"]);
   assert.deepEqual(ROUTES.filter((r) => r.readJson).map((r) => [r.path, r.auth, r.write]), [["/api/trigger-check", "viewer", false]], "the event checker is the sole read-only JSON POST, never an operator action");
   assert.deepEqual(lookupRoute("PUT", "/login"), { allow: ["GET", "HEAD", "POST"] });
   assert.equal(lookupRoute("HEAD", "/healthz").route.path, "/healthz");
@@ -1589,12 +1591,12 @@ test("a sign-in link refused 429 by the rate limit is never read: the limiter an
 });
 
 test("the login routes answer every status NOTICE_OF_STATUS maps, so each notice the script can show is one the server can cause", async () => {
-  assert.deepEqual(Object.keys(NOTICE_OF_STATUS).sort(), ["/login", "/login/code", "/login/typed-code"]);
+  assert.deepEqual(Object.keys(NOTICE_OF_STATUS).sort(), ["/login", "/login/approve", "/login/approve/wait", "/login/code", "/login/typed-code"]);
   for (const path of Object.keys(NOTICE_OF_STATUS)) {
     const route = lookupRoute("POST", path)?.route;
     assert.ok(route?.readOnlyExempt && route.auth === "none", `${path} is a sign-in route`);
   }
-  const seenStatus = { "/login": new Set(), "/login/code": new Set(), "/login/typed-code": new Set() };
+  const seenStatus = { "/login": new Set(), "/login/code": new Set(), "/login/typed-code": new Set(), "/login/approve": new Set(), "/login/approve/wait": new Set() };
   // A link's code on /login/code, a typed short code on /login/typed-code (issue #882): each route as its page posts it.
   const codes = { "/login/code": ["n", "m", "q", "k"].map((ch) => ch.repeat(43)), "/login/typed-code": ["NNNN-NNNN", "MMMM-MMMM", "QQQQ-QQQQ", "KKKK-KKKK"] };
   let readable = true;
@@ -1617,9 +1619,92 @@ test("the login routes answer every status NOTICE_OF_STATUS maps, so each notice
     readable = true;
     seenStatus[path].add((await limited.post(path, { code: limitedCode })).status);
   }
+  // Issue #882, signing in by approving a window on the host: no window here (404), one already waiting (409), the
+  // limiter (429), the tokens file (503); then the wait: an unknown request (401), an allowed one whose sign-in cannot be
+  // audited (500) or whose tokens file went bad (503). Each window is the test's own, answering at once.
+  const answering = (answer) => makeApprovals({ runner: { available: true, ask: async ({ names }) => ({ answer, name: names[0] }) }, now: () => Date.now() });
+  seenStatus["/login/approve"].add((await c.post("/login/approve", {})).status);
+  const waiting = await start({ approvals: makeApprovals({ runner: { available: true, ask: () => new Promise(() => {}) } }) });
+  assert.equal((await waiting.post("/login/approve", {})).status, 202);
+  seenStatus["/login/approve"].add((await waiting.post("/login/approve", {})).status);
+  seenStatus["/login/approve"].add((await (await start({ approvals: answering("allow"), limiter: { take: () => false, retryAfterSec: () => 3 } })).post("/login/approve", {})).status);
+  let approveReadable = true;
+  const approving = await start({ approvals: answering("allow"), readTokens: () => (approveReadable ? { file: FILE } : { refusal: "unreadable" }) });
+  approveReadable = false;
+  seenStatus["/login/approve"].add((await approving.post("/login/approve", {})).status);
+  approveReadable = true;
+  seenStatus["/login/approve/wait"].add((await approving.post("/login/approve/wait", { request: "never-asked" })).status);
+  const asked = async () => {
+    const r = await approving.post("/login/approve", {});
+    assert.equal(r.status, 202);
+    await new Promise((resolve) => setImmediate(resolve));
+    return r.json().request;
+  };
+  approving.audit.failNext = 1;
+  seenStatus["/login/approve/wait"].add((await approving.post("/login/approve/wait", { request: await asked() })).status);
+  const second = await asked();
+  approveReadable = false;
+  seenStatus["/login/approve/wait"].add((await approving.post("/login/approve/wait", { request: second })).status);
+  approveReadable = true;
   for (const [path, statuses] of Object.entries(seenStatus)) {
     assert.deepEqual([...statuses].sort(), Object.keys(NOTICE_OF_STATUS[path]).map(Number).sort(), path);
   }
+});
+
+test("sign in by approving a window on the host: an allowed request signs in THIS browser once, as the operator the window named; a denied one, an unknown id and a second request are refused, and none holds the id or the match in a row (#882)", async () => {
+  let next = "allow";
+  const asked = [];
+  const approvals = makeApprovals({ runner: { available: true, ask: async ({ message, names }) => { asked.push({ message, names }); return { answer: next, name: names[0] }; } } });
+  const c = await start({ approvals });
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
+  const r = await c.post("/login/approve", {});
+  assert.equal(r.status, 202);
+  const { request, match, waitSec } = r.json();
+  assert.match(request, /^[A-Za-z0-9_-]{43}$/);
+  assert.match(match, /^[A-Z2-9]{4}$/);
+  assert.equal(waitSec, 60);
+  await tick();
+  assert.deepEqual(asked[0].names, ["alice"], "only the operator tokens are offered (FILE's viewer is not)");
+  assert.ok(asked[0].message.includes(match) && asked[0].message.includes("From: this computer"), "the window shows the page's match code and where the request came from");
+  const signedIn = await c.post("/login/approve/wait", { request, next: "/runs" });
+  assert.equal(signedIn.status, 200);
+  assert.equal(signedIn.json().name, "alice");
+  assert.equal(signedIn.json().next, "/runs");
+  assert.ok(signedIn.headers["set-cookie"]?.length > 0, "a session cookie for this browser");
+  const row = c.audit.rows.at(-1);
+  assert.deepEqual([row.action, row.outcome, row.actor.name], ["login-approval", "ok", "alice"]);
+  assert.equal((await c.post("/login/approve/wait", { request })).status, 401, "an allowed request signs in one browser, once");
+  assert.equal((await c.post("/login/approve/wait", { request: "never-asked" })).status, 401);
+  next = "deny";
+  const d = await c.post("/login/approve", {});
+  await tick();
+  const denied = await c.post("/login/approve/wait", { request: d.json().request });
+  assert.equal(denied.status, 401);
+  assert.equal(denied.json().state, "deny");
+  assert.equal(denied.headers["set-cookie"], undefined);
+  for (const row of c.audit.rows) assert.ok(!JSON.stringify(row).includes(request) && !JSON.stringify(row).includes(match), "no row holds the id or the match");
+  // A second request while one waits is refused, and on the record.
+  const hanging = await start({ approvals: makeApprovals({ runner: { available: true, ask: () => new Promise(() => {}) } }) });
+  assert.equal((await hanging.post("/login/approve", {})).status, 202);
+  const busy = await hanging.post("/login/approve", {});
+  assert.equal(busy.status, 409);
+  assert.deepEqual([hanging.audit.rows.at(-1).action, hanging.audit.rows.at(-1).outcome], ["login-approval", "refused"]);
+  // No window on this host: 404, and the page draws no button.
+  const none = await start({});
+  assert.equal((await none.post("/login/approve", {})).status, 404);
+});
+
+test("an approval that did not sign anyone in is on the record when it lands: refused for a deny or no answer, failed for a window that could not be shown (#882)", () => {
+  const rows = [];
+  const settle = approvalSettled({ append: (row) => rows.push(row) }, () => {});
+  settle({ state: "allow" });
+  settle({ state: "deny" });
+  settle({ state: "timeout" });
+  settle({ state: "error" });
+  assert.deepEqual(rows.map((r) => [r.action, r.outcome, r.target]), [["login-approval", "refused", "/login/approve"], ["login-approval", "refused", "/login/approve"], ["login-approval", "failed", "/login/approve"]]);
+  const logs = [];
+  approvalSettled({ append: () => { throw Object.assign(new Error("full"), { code: "ENOSPC" }); } }, (line) => logs.push(line))({ state: "deny" });
+  assert.match(logs[0], /audit append failed \(ENOSPC\)/);
 });
 
 test("each sign-in refusal's cause, on both routes, is the status whose notice says that cause (literal, not the table read back: issue #737)", async () => {

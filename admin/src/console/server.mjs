@@ -108,6 +108,7 @@ import { themeOf } from "./theme.mjs";
 import { TRANSCRIPT_FORMATS } from "./transcript.mjs";
 import { gatewayApi, gatewayLanding } from "./gateway.mjs";
 import { ENDED_OF_DEVICE_REASON, REMEMBER_FRESH_MS, bindingFailure } from "./device-trust.mjs";
+import { APPROVAL_WAIT_MS } from "./approve-dialog.mjs";
 import { streamEndOf } from "./session-ends.mjs";
 import { MAX_DEVICES_PER_NAME, REMEMBER_ROLES, deviceIdOf, deviceLabelOf } from "@edgehero/pi-dispatch/console-devices";
 import { DEVICE_COOKIE_MAX_AGE_SEC } from "./sessions.mjs";
@@ -667,6 +668,84 @@ async function postLoginCode(ctx) {
 }
 
 /**
+ * Where an approval request came from, as the host's dialog names it: "this computer" for a loopback peer, else the
+ * peer's address. Only ever the socket's own address, never a forwarding header a request could write.
+ */
+function requesterWord(req) {
+  const addr = String(req.socket?.remoteAddress ?? "");
+  const bare = addr.startsWith("::ffff:") ? addr.slice("::ffff:".length) : addr;
+  if (bare === "") return "an unknown address";
+  return isLoopbackAddress(bare) ? "this computer" : bare;
+}
+
+/**
+ * Ask the host's desktop to let this browser in (issue #882; approve-dialog.mjs has the why). One request at a time,
+ * each spending the sign-in limiter, for the operator tokens only (a viewer is invited, an agent never signs in this
+ * way). The answer carries the request's id, a 256-bit secret this browser alone holds and waits on, and the match code
+ * the dialog shows too. An unanswered, denied or failed dialog is recorded when it lands (`approvalSettled`).
+ */
+async function postLoginApprove(ctx) {
+  if (rateLimited(ctx, "/login/approve")) return;
+  const approvals = ctx.deps.approvals;
+  if (!approvals?.available) return sendJson(ctx.res, 404, { error: "this computer cannot show a sign-in dialog; use the code from pi-dispatch-console link, or run pi-dispatch console on the host" });
+  const file = tokensOr503(ctx);
+  if (!file) return;
+  const names = file.tokens.filter((t) => t.role === "operator").map((t) => t.name);
+  // 422, not a status the page has a notice for: its own sentence is shown, in the page's "other" notice.
+  if (names.length === 0) return sendJson(ctx.res, 422, { error: "this console has no operator token to sign in as; make one with pi-dispatch-console token add" });
+  const started = approvals.start({ names, from: requesterWord(ctx.req) });
+  if (started.refusal === "busy") {
+    ctx.record({ actor: ANONYMOUS, action: "login-approval", target: "/login/approve", outcome: "refused", reason: "a sign-in request was already waiting for an answer" });
+    return sendJson(ctx.res, 409, { error: "a sign-in request is already waiting for an answer on this computer; answer or close it, then try again", approve: "busy" });
+  }
+  if (started.refusal) return sendJson(ctx.res, 404, { error: "this computer cannot show a sign-in dialog right now" });
+  return sendJson(ctx.res, 202, { request: started.id, match: started.match, waitSec: Math.round(APPROVAL_WAIT_MS / 1000) });
+}
+
+/**
+ * Wait for the host's answer: 202 while it is pending, 401 once it is denied, unanswered or failed (or the request is
+ * unknown), and an allowed request signs in THIS browser, once, as the operator the dialog named. A host-made
+ * credential, so the browser is remembered where a host-made sign-in may be (`hostMade`).
+ */
+async function postLoginApproveWait(ctx) {
+  const approvals = ctx.deps.approvals;
+  const id = typeof ctx.body.request === "string" ? ctx.body.request : "";
+  const status = approvals ? approvals.status(id) : null;
+  if (!status) return sendJson(ctx.res, 401, { error: "that sign-in request is unknown or no longer waiting; ask again", state: "unknown" });
+  if (status.state === "pending") return sendJson(ctx.res, 202, { state: "pending" });
+  if (status.state !== "allow") {
+    const said = { deny: "this computer denied the sign-in", timeout: "no one answered the sign-in on this computer in time", error: "this computer could not show the sign-in dialog" }[status.state] ?? "the sign-in was not allowed";
+    return sendJson(ctx.res, 401, { error: said, state: status.state });
+  }
+  const file = tokensOr503(ctx);
+  if (!file) return;
+  const taken = approvals.take(id);
+  const entry = taken ? file.tokens.find((t) => t.name === taken.name && t.role === "operator") : null;
+  if (!entry) {
+    ctx.record({ actor: ANONYMOUS, action: "login-approval", target: "/login/approve", outcome: "refused", reason: "the allowed operator token no longer exists" });
+    return sendJson(ctx.res, 401, { error: "the operator the dialog allowed is no longer in the tokens file; ask again", state: "unknown" });
+  }
+  return startSession(ctx, entry, file, "login-approval", { next: realPages.returnPathOf(ctx.body.next) ?? "/" }, { hostMade: true });
+}
+
+/**
+ * The audit row for an approval that did not sign anyone in (a deny, a dialog left unanswered, one that could not be
+ * shown), written when it lands, whether or not the page is still waiting. An allowed one is recorded by `startSession`
+ * when its browser collects it. The CLI wires this as the store's `onSettle`.
+ */
+export function approvalSettled(audit, log) {
+  return (request) => {
+    if (request.state === "allow") return;
+    const reason = { deny: "the host denied the sign-in", timeout: "no one answered the dialog in time", error: "the dialog could not be shown" }[request.state] ?? "not allowed";
+    try {
+      audit.append({ actor: ANONYMOUS, action: "login-approval", target: "/login/approve", outcome: request.state === "error" ? "failed" : "refused", reason });
+    } catch (e) {
+      log(`console: audit append failed (${e?.code ?? "error"}) for a sign-in approval that was ${request.state}`);
+    }
+  };
+}
+
+/**
  * Sign out (issue #737): EVERY session the browser presents ends, each the store holds (`readSessionCookies`: a cookie
  * planted beside the real one, `Path=/logout` from another loopback port's page, must not turn the sign-out into a no-op
  * answered 200), and the answer is 200 with the clearing Set-Cookie ALWAYS, also when no session was held (the
@@ -874,7 +953,7 @@ function getLogin(ctx) {
   const arrival = notice === null && ctx.req.headers["sec-fetch-site"] === "cross-site";
   const idleMinutes = Number.isSafeInteger(config.idleMs) ? Math.floor(config.idleMs / 60000) : undefined;
   const maxHours = Number.isSafeInteger(config.maxMs) ? Math.floor(config.maxMs / 3600000) : undefined;
-  return sendHtml(ctx.res, 200, loginPage({ theme: themeOf(ctx.req.headers.cookie), notice, limits: { idleMinutes, maxHours }, listen: listenWord(config), next, arrival, remember: rememberableHere(ctx.deps, ctx.req) }));
+  return sendHtml(ctx.res, 200, loginPage({ theme: themeOf(ctx.req.headers.cookie), notice, limits: { idleMinutes, maxHours }, listen: listenWord(config), next, arrival, remember: rememberableHere(ctx.deps, ctx.req), approve: Boolean(ctx.deps.approvals?.available) }));
 }
 
 /** The sign-in page's `ended` notice from its query: exactly one `ended`, a member of `ENDED_REASONS`, else null. */
@@ -1087,6 +1166,8 @@ export const ROUTES = Object.freeze([
   { method: "POST", path: "/login/code", auth: "none", write: true, readOnlyExempt: true, handler: postLoginCode },
   // Issue #882: the sign-in page's Sign-in code field. The same handler as the link page's; its own path picks the sign-in page's notices.
   { method: "POST", path: "/login/typed-code", auth: "none", write: true, readOnlyExempt: true, handler: postLoginCode },
+  { method: "POST", path: "/login/approve", auth: "none", write: true, readOnlyExempt: true, handler: postLoginApprove },
+  { method: "POST", path: "/login/approve/wait", auth: "none", write: true, readOnlyExempt: true, handler: postLoginApproveWait },
   // `auth: "none"` (issue #737): a sign-out judges no session, it ends the one the cookie names (`postLogout`), so an
   // unreadable tokens file cannot keep a browser signed in that asked to sign out.
   { method: "POST", path: "/logout", auth: "none", write: true, readOnlyExempt: true, handler: postLogout },
@@ -1520,10 +1601,11 @@ export function createConsoleServer({
   consoleOrigin = null,
   devices = null,
   restartNotice = null,
+  approvals = null,
 }) {
   const limits = { ...SERVER_LIMITS, streamsTotal: STREAMS_TOTAL_MAX, streamsOperatorReserve: STREAMS_OPERATOR_RESERVE, ...limitsOverride };
   const refusalRows = makeLoginLimiter({ now, perMinute: REFUSAL_ROWS_PER_MINUTE, burst: 2 * REFUSAL_ROWS_PER_MINUTE });
-  const deps = { devices, config, fs, now, random, audit, sessions, cookies, tickets, limiter, log, readTokens, findToken, keptTokens, consumeLoginCode, writePauseWindows, actionDeps, refusalRows, quieted: { count: 0 }, pages, pageDeps, hub, stateOf, errorPage, limits, streams: { open: 0 }, gateway, consoleOrigin, restartNotice };
+  const deps = { devices, config, fs, now, random, audit, sessions, cookies, tickets, limiter, log, readTokens, findToken, keptTokens, consumeLoginCode, writePauseWindows, actionDeps, refusalRows, quieted: { count: 0 }, pages, pageDeps, hub, stateOf, errorPage, limits, streams: { open: 0 }, gateway, consoleOrigin, restartNotice, approvals };
   // `connectionsCheckingInterval` makes the two timeouts bite within a second of expiring rather than within node's
   // default 30: a client holding connections open without sending holds a slot of `maxConnections` only that long.
   const server = createServer({ headersTimeout: limits.headersTimeout, requestTimeout: limits.requestTimeout, connectionsCheckingInterval: limits.connectionsCheckingInterval }, (req, res) => {

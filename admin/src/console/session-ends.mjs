@@ -96,6 +96,10 @@ export const SIGN_IN_NOTICES = Object.freeze({
   audit: notice("failed", "audit", "The audit log could not be written, so the sign-in was refused", "Check the console's log directory. Nothing else changed."),
   unreachable: notice("attention", "beat", "Console not reachable, retrying", "This page stays as it is. Retrying every 2 seconds."),
   other: notice("failed", "failed", "The console refused the sign-in", ""),
+  // Issue #882: signing in by approving a dialog on the host.
+  denied: notice("failed", "failed", "This computer did not let the browser in", "The request was denied, or no one answered it within a minute. Try again, or type a code from `pi-dispatch-console link`."),
+  busy: notice("attention", "clock", "A sign-in request is already waiting", "Answer or close the window this computer shows first, then try again."),
+  nodialog: notice("attention", "info", "This computer cannot show a sign-in window", "Type a code from `pi-dispatch-console link` instead, or run `./pi-dispatch console` on the host."),
 });
 
 /**
@@ -107,4 +111,6 @@ export const NOTICE_OF_STATUS = Object.freeze({
   "/login": Object.freeze({ 401: "wrong", 429: "rate", 503: "tokens", 500: "audit" }),
   "/login/code": Object.freeze({ 401: null, 429: "rate", 503: "tokens", 500: "audit" }),
   "/login/typed-code": Object.freeze({ 401: "code", 429: "rate", 503: "tokens", 500: "audit" }),
+  "/login/approve": Object.freeze({ 404: "nodialog", 409: "busy", 429: "rate", 503: "tokens" }),
+  "/login/approve/wait": Object.freeze({ 401: "denied", 503: "tokens", 500: "audit" }),
 });

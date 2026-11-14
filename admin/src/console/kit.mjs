@@ -60,7 +60,7 @@ const ICONS = new Set(ICON_NAMES);
  * page's panels and every id the script names in a `getElementById("...")` is refused (listed here, the sprite's, or
  * one of the families below), and each one listed here is still one of those.
  */
-export const RESERVED_IDS = Object.freeze(["main", "logout", "live-status", "p-nav-parked", "p-headline", "live-note", "confirm-slot", "held-note", "login-form", "token", "notice", "code-form", "signin-code", "tip", "wrap", "graph", "root", "insights-tips", "graph-nodes", "q", "transcript"]);
+export const RESERVED_IDS = Object.freeze(["main", "logout", "live-status", "p-nav-parked", "p-headline", "live-note", "confirm-slot", "held-note", "login-form", "token", "notice", "code-form", "signin-code", "approve-form", "approve-wait", "tip", "wrap", "graph", "root", "insights-tips", "graph-nodes", "q", "transcript"]);
 
 /**
  * The runs search field's id (the RunsScreen card's search pill): the top bar's Search button links to `/runs#q`

@@ -49,6 +49,7 @@ import { makeAnswererService } from "../answerer-data.mjs";
 import { readAgentWritesToday } from "../agent-write-count.mjs";
 import { readSandboxGateways } from "../sandbox-gateways.mjs";
 import { makeGatewayBroker } from "./gateway-broker.mjs";
+import { dialogRunnerFor, makeApprovals } from "./approve-dialog.mjs";
 
 export const USAGE = `usage: pi-dispatch-console <command> [--deployment <dir>]
 
@@ -1000,6 +1001,9 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
       consoleOrigin: () => { const read = gatewayRegistry(); return read.refusal ? false : read.config?.consoleOrigin ?? null; },
       // Issue #845: the banner every page draws when this console needs a restart, for every role.
       restartNotice: () => restart.current(),
+      // Issue #882: sign in by approving a window on this host's desktop, where it can show one (approve-dialog.mjs). `io.dialogRunner` is the
+      // test seam: a test never shows a real window.
+      approvals: makeApprovals({ runner: io.dialogRunner ?? dialogRunnerFor({ platform: io.platform ?? process.platform, env: shellEnv }), now, onSettle: m.server.approvalSettled(audit, log) }),
     });
     const bound = await listenOn(server, config.listen, { fs, uid });
     if (bound.refusal) throw new Refusal(bound.refusal);

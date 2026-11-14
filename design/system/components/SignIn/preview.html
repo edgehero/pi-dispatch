@@ -1,4 +1,4 @@
-<!-- @dsCard group="Access and audit" height=1610 width=1440 subtitle="Sign in: a code to type or a token, help on where they come from, and every notice this page can show" -->
+<!-- @dsCard group="Access and audit" height=1870 width=1440 subtitle="Sign in: on this computer, with a code to type or with a token, help on where they come from, and every notice this page can show" -->
 <!doctype html>
 <html lang="en">
 <head>
@@ -55,10 +55,16 @@
     <section class="si-card" id="p-signin" data-panel aria-labelledby="si-h">
       <span class="brandpill__m si-mark">pi</span>
       <h1 id="si-h">Sign in to the console</h1>
-      <p class="muted">Type the sign-in code from your terminal, or paste a console token.</p>
+      <p class="muted">Sign in on this computer, type the sign-in code from your terminal, or paste a console token.</p>
+      <form class="si-form" aria-label="Sign in on this computer">
+        <button class="btn btn--primary btn--lg si-go" type="button">Sign in on this computer</button>
+        <p class="si-hint">This computer shows a window asking to let this browser in. No code or token is needed, and the browser then stays signed in until you sign out, so use it on a browser that is yours.</p>
+        <p class="si-hint si-wait">Allow it in the window this computer shows. The code there should be <b class="code">AB2C</b>.</p>
+      </form>
+      <p class="si-or">or</p>
       <form class="si-form" aria-label="Sign in with a code">
         <div class="field"><label for="si-code">Sign-in code</label><input id="si-code" class="input si-input si-code" type="text" autocomplete="one-time-code" placeholder="XXXX-XXXX" value="K7QX-9M2D"><p class="si-hint">The 8 characters <span class="code">pi-dispatch-console link</span> prints. It works once, within 5 minutes, and this browser then stays signed in until you sign out, so use it on a browser that is yours.</p></div>
-        <button class="btn btn--primary btn--lg si-go" type="button">Sign in</button>
+        <button class="btn btn--lg si-go" type="button">Sign in</button>
       </form>
       <p class="si-or">or</p>
       <form class="si-form" aria-label="Sign in with a token">
@@ -151,6 +157,18 @@
 </div><div class="banner banner--sm tone-attention" role="status">
   <span class="tile"><svg class="ic" aria-hidden="true"><use href="#i-beat"/></svg></span>
   <div><p class="banner__t">Console not reachable, retrying</p><p class="banner__s">Your page stays as it is. Retrying every 5 seconds.</p></div>
+  
+</div><div class="banner banner--sm tone-failed" role="status">
+  <span class="tile"><svg class="ic" aria-hidden="true"><use href="#i-failed"/></svg></span>
+  <div><p class="banner__t">This computer did not let the browser in</p><p class="banner__s">The request was denied, or no one answered it within a minute. Try again, or type a code from <span class='code'>pi-dispatch-console link</span>.</p></div>
+  
+</div><div class="banner banner--sm tone-attention" role="status">
+  <span class="tile"><svg class="ic" aria-hidden="true"><use href="#i-clock"/></svg></span>
+  <div><p class="banner__t">A sign-in request is already waiting</p><p class="banner__s">Answer or close the window this computer shows first, then try again.</p></div>
+  
+</div><div class="banner banner--sm tone-attention" role="status">
+  <span class="tile"><svg class="ic" aria-hidden="true"><use href="#i-info"/></svg></span>
+  <div><p class="banner__t">This computer cannot show a sign-in window</p><p class="banner__s">Type a code from <span class='code'>pi-dispatch-console link</span> instead, or run <span class='code'>./pi-dispatch console</span> on the host.</p></div>
   
 </div></div>
     </section>
