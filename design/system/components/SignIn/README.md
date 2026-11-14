@@ -13,6 +13,7 @@ Sign-in is a single centered card: sign in on this computer, type the sign-in co
   - Why signing in on this computer did not work: the window was denied or not answered, a request was already waiting, or this computer cannot show a window.
   - "Console not reachable, retrying" keeps the page instead of going to the browser's error page.
 - **Where it answers.** The footer says the console answers at `pi-dispatch.localhost`, on this host only: a name of the console's own, so its cookies are sent to no other local web server.
+- **From a phone or a second computer.** Where the host turned on `PI_CONSOLE_LAN=1`, a device on the same network opens the console at `pi-dispatch.local`, in plain HTTP. There "this computer" would be the phone, so the card names the host instead. The button reads *Ask the host to let me in*, and the window on the host shows the device's address beside the code. The code's hint says it signs the browser in for this visit, because a browser is never remembered over the network, so the Remember box is not drawn. The approval notices name the host, and the footer says the page came over the local network in plain HTTP and that the browser can be remembered on the host or through an SSH tunnel.
 
 **Panels.** `p-signin`.
 
