@@ -1715,7 +1715,8 @@ has.
 When no run on the issue or request is found, the console answers with its run-not-found page, with the search filled
 with the issue (`acme/web#12`) so you can look further. When the run history or the queue could not be read, the page
 says the console cannot tell, with status 503, rather than say there is no run. When two of the deployment's forges
-both have runs on the same repository path and number, the link opens the runs search for it and you choose. A path
+both have runs on the same repository path and number, the link opens the runs search for it and you choose. That
+search matches any target holding the text, so it can list `acme/web#120` beside `acme/web#12`. A path
 that is not a short link, or one with anything after a `?`, is refused with the shape a short link has. If you are
 signed out, you sign in and land on the run the link opens.
 

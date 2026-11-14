@@ -1879,6 +1879,36 @@ stateTest(T.arrival, async () => {
   assert.deepEqual(chosen.location.assigned, ["/runs"]);
 });
 
+test("a sign-in from a run's short link lands on it, by a token, an arrival that kept its cookie and a one-time link (#882)", async () => {
+  const link = "/run/acme/web/12";
+  const mr = "/run/group/sub/project/!7";
+  // A token typed on the sign-in page that the short link's redirect drew (`/login?next=...`).
+  const typed = boot(String(loginPage({ next: link })), { url: `/login?next=${encodeURIComponent(link)}` });
+  typed.document.getElementById("token").value = "tok-1";
+  typed.submit(typed.document.getElementById("login-form"));
+  assert.deepEqual(calls(typed, "/login").map((c) => c.body), [{ token: "tok-1", next: link }]);
+  await typed.fetch.open("/login").answer(200, { next: link });
+  assert.deepEqual(typed.location.assigned, [link]);
+  // A link clicked in a chat or a mail: SameSite=Strict kept the cookie off that navigation, and the page's own fetch finds it.
+  const arrived = boot(String(loginPage({ arrival: true, next: mr })), { url: `/login?next=${encodeURIComponent(mr)}` });
+  await arrived.fetch.open("/api/whoami").answer(200, { name: "ops", role: "operator", readOnly: false });
+  assert.deepEqual(arrived.location.replaced, [mr]);
+  // A one-time link that names the short link.
+  const code = "k".repeat(43);
+  const once = boot(String(loginCodePage()), { url: `/login/code#${code}&next=${encodeURIComponent(link)}` });
+  assert.deepEqual(calls(once, "/login/code").map((c) => c.body), [{ code, next: link }]);
+  await once.fetch.open("/login/code").answer(200, { ok: true, next: link });
+  assert.deepEqual(once.location.replaced, [link]);
+  // The script's own check still lands anything else on the overview, whatever the server answered.
+  for (const evil of ["/run/acme/web/12?x=1", "/run/acme/12", "/run//acme/web/12", "/run/acme/web/12#x", "/run/acme/web/x12", "/runs/acme/web/12", "//evil.example/run/acme/web/12", "/run/acme/web/12/../../../evil"]) {
+    const w = boot(String(loginPage({ next: "/runs" })), { url: "/login" });
+    w.document.getElementById("token").value = "tok-1";
+    w.submit(w.document.getElementById("login-form"));
+    await w.fetch.open("/login").answer(200, { next: evil });
+    assert.deepEqual(w.location.assigned, ["/"], evil);
+  }
+});
+
 test("a session that ends in an open tab keeps its page for the sign-in (#849)", async () => {
   const ended = boot(fleetPage(), { url: "/runs?outcome=failed" });
   ended.streams[0].emit("end", { ended: "idle" });

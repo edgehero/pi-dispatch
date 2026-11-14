@@ -5236,10 +5236,22 @@ export function createFleetReader(
     },
     // The jobs queued or running on several targets in one scan (issue #882: a short link, which names no forge, asks
     // for its target on every forge kind at once): `readPendingOnTargets`' answer, read with `pendingScanFor`, in the
-    // `states` order given (`PENDING_STATES` by default). Never throws.
+    // `states` order given (`PENDING_STATES` by default). Over the by-id lookup's queues (`lookUp`, a request's: the
+    // registry's and the queues that exist), so a job waiting on a stopped host's own queue is found as `/run?id=` finds
+    // it, and a set that is not whole (the registry unread, the keyspace scan part-read, the set cut) makes the scan
+    // incomplete, so a miss is "cannot tell", never "none". A miss over a set older than the question is asked again
+    // over a scan started after it, as an id's is. Bounded by three read timeouts in all. Never throws.
     async pendingOnTargets(targets, { states = PENDING_STATES } = {}) {
-      const queues = await fleetQueues().catch(() => lastNames.map((n) => pool.get(n)));
-      return readPendingOnTargets({ queues, targets, states, timeoutMs: FLEET_READ_TIMEOUT_MS });
+      const ask = async ({ queues, whole }) => {
+        const got = await readPendingOnTargets({ queues, targets, states, timeoutMs: FLEET_READ_TIMEOUT_MS });
+        return got?.unreachable || whole ? got : { ...got, complete: false };
+      };
+      const found = (got) => (!got || got.unreachable ? undefined : got.byKey?.size > 0 ? true : got.complete === true ? false : null);
+      try {
+        return (await withTimeout(lookUp(ask, found, {}), 3 * FLEET_READ_TIMEOUT_MS, undefined)) ?? { unreachable: true };
+      } catch {
+        return { unreachable: true };
+      }
     },
     // Whether a parked run's retained job can take a console answer (issue #647): the planner's own predicate
     // (`parkedAnswerRefusalOf`) over the job's data and the triggers file, so the Chat panel offers the reply form
@@ -8094,10 +8106,10 @@ async function pendingData(q, ids) {
  * recovery or a late message's job) has its `.data` parsed, for what `targetFor` reads and `recoveryOf` (`runIdOf`).
  * Compared in memory; ids alone come back. It stops early once every target is matched. Never throws.
  *
- * `states` (issue #882) are the queue states read, in order, `PENDING_STATES` by default: a target's first match wins,
- * so a caller that wants a running job before a waiting one reads `active` first (`run-api.mjs` `RUN_PATH_STATES`, a
- * short link's), and keeps `PENDING_STATES` after it so a job that moves while the scan pages is still met. Every state
- * read counts against the one budget.
+ * `states` (issue #882) are the queue states read, in order, `PENDING_STATES` by default, each over every queue before
+ * the next: a target's first match wins, so a caller that wants a running job before a waiting one reads `active` first
+ * (`run-api.mjs` `RUN_PATH_STATES`, a short link's) and gets the one running on any queue, and keeps `PENDING_STATES`
+ * after it so a job that moves while the scan pages is still met. Every state read counts against the one budget.
  */
 export async function readPendingOnTargets({ queues, targets, budget = PENDING_SCAN_BUDGET, page = PENDING_SCAN_PAGE, dataMax = PENDING_DATA_MAX, timeoutMs = FLEET_READ_TIMEOUT_MS, states = PENDING_STATES } = {}) {
   const want = new Map();
@@ -8131,8 +8143,14 @@ export async function readPendingOnTargets({ queues, targets, budget = PENDING_S
       }
       match(id, targetKeyOf(data.kind, target), runIdOf({ id, data }));
     };
-    scan: for (const q of Array.isArray(queues) ? queues : []) {
-      for (const state of states) {
+    // The states outside and the queues inside (issue #882): a target's first match wins, so a state read first wins on
+    // EVERY queue, and a job running on one host's queue is met before one waiting on the shared queue. A job still meets
+    // its later states later, whichever queue holds it. A queue this reader cannot list is skipped for every later state.
+    const list = Array.isArray(queues) ? queues : [];
+    const unlistable = new Set();
+    scan: for (const state of states) {
+      for (const q of list) {
+        if (unlistable.has(q)) continue;
         for (let start = 0; ; ) {
           if (byKey.size === want.size) break scan;
           const room = budget - listed;
@@ -8141,7 +8159,8 @@ export async function readPendingOnTargets({ queues, targets, budget = PENDING_S
           const rows = take > 0 ? await pendingPage(q, state, start, start + take) : await pendingPage(q, state, start, start);
           if (rows === null) {
             complete = false; // a queue this reader cannot list
-            continue scan;
+            unlistable.add(q);
+            break;
           }
           if (take <= 0) {
             if (rows.length > 0) {

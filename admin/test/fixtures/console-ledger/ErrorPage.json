@@ -1,7 +1,7 @@
 {
   "card": "ErrorPage",
   "pr": 2,
-  "words": "e3e769d2b587188a47c2b89ea5ee7267f8683fa32f2649175ed9a681b033a4bb",
+  "words": "e67150222dd5b77be2464b18c024b8e8e178d78971d6e06207db62572e42e18f",
   "elements": [
     {"el":"p-error","kind":"panel","status":"new","source":"admin/src/console/error-pages.mjs#errorPage","golden":["error-404.operator","error-404.viewer","error-400.operator","error-403.viewer","error-503.anonymous","audit.viewer","panels/run-not-found.operator","panels/run-not-found.viewer","panels/run-path-not-found.operator","panels/run-path-unknown.operator"]},
     {"el":"p-error-421","kind":"panel","status":"new","source":"admin/src/console/error-pages.mjs#errorPage","golden":["error-421.anonymous"]},
@@ -22,6 +22,7 @@
     {"el":"The requested id, escaped","kind":"provides","status":"new","source":"admin/src/console/error-pages.mjs#errorPage","holds":"runId","golden":["panels/run-not-found.operator","panels/run-not-found.viewer"],"shows":"value=\"gh-7777\"","reason":"on the run page's 404 alone, as its search field's value, escaped by html, and only when the runs search accepts it (at most 200 characters of an id's or a target's letters, a run id's own bound), else the field is empty; it is in no title, heading or sentence, and no other 404 carries a value from the request"},
     {"el":"The issue or request a short link names, rebuilt from the link, escaped","kind":"provides","status":"new","source":"admin/src/console/run-path.mjs#parseRunPath","golden":["panels/run-path-not-found.operator","panels/run-path-unknown.operator"],"shows":"value=\"acme/web#999\"","reason":"as the run's target spells it, the search field's value alone, under the runs search's own rule as the id is"},
     {"el":"For 421, the Host it refused","kind":"provides","status":"new","source":"admin/src/console/error-pages.mjs#HOST_SHOWN_MAX","reason":"the normalized hostname, escaped and cut to HOST_SHOWN_MAX characters"},
-    {"el":"gh-zzzz, /run/acme/web/999, myhost.lan, port 7788 and build3","kind":"sample","status":"illustrative","reason":"sample values: the run 404 golden asks for gh-7777, the short link goldens for /run/acme/web/999, the page prints the request's own Host and the port the connection reached (the 421 golden asks for myhost.lan and 7788), and the tunnel names <this host>, never a host the console knows"}
+    {"el":"gh-zzzz, /run/acme/web/999, myhost.lan, port 7788 and build3","kind":"sample","status":"illustrative","reason":"sample values: the run 404 golden asks for gh-7777, the short link goldens for /run/acme/web/999, the page prints the request's own Host and the port the connection reached (the 421 golden asks for myhost.lan and 7788), and the tunnel names <this host>, never a host the console knows"},
+    {"el":"When two forges both have runs on the same repository path and number, the short link opens the runs search instead of guessing","kind":"readme","status":"new","source":"admin/src/console/run-api.mjs#resolveRunPath","holds":"several: true"}
   ]
 }

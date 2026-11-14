@@ -194,6 +194,7 @@ import { CONFIG_FIX_ACTIONS } from "./actions.mjs";
 import { FIT_JS } from "../graph-html.mjs";
 import { CONFIRM_NO_ANSWER, CONFIRM_SIGNED_OUT, CONFIRM_SLOT_ID } from "./confirm-view.mjs";
 import { PAGES } from "./pages.mjs";
+import { RUN_PATH_LINK_RE } from "./run-path.mjs";
 import { ENDED_REASONS, NOTICE_OF_STATUS, PERSON_HEADER, PERSON_PARAM, STREAM_ENDS, STREAM_SHUTDOWN } from "./session-ends.mjs";
 import { SEARCH_ID } from "./kit.mjs";
 import { LIVE_NOTES, LIVE_STATES, SEARCH_HREF } from "./shell.mjs";
@@ -262,6 +263,7 @@ export const CONSOLE_SCRIPT = `"use strict";
 (function () {
   var page = document.body ? document.body.getAttribute("data-page") : null;
   var PAGE_PATHS = ${JSON.stringify(Object.values(PAGES).map((p) => p.path))};
+  var RUN_PATH_LINK_RE = new RegExp(${JSON.stringify(RUN_PATH_LINK_RE.source)});
   var CONFIG_FIX_ACTIONS = ${JSON.stringify(CONFIG_FIX_ACTIONS)};
   // The console's outcome words (words.mjs, issue #710), written in from the one table: a stream's end says "refused",
   // never the record's "policy". An outcome not in it shows as itself.
@@ -513,13 +515,15 @@ export const CONSOLE_SCRIPT = `"use strict";
       sendCode(0, nowMs());
     }
   }
-  // Where a sign-in may land: one of this console's own page paths, else the overview. The server has already judged
-  // the return path with the page parser; this repeats the shape check, so a navigation off this origin needs both
-  // to be wrong.
+  // Where a sign-in may land: one of this console's own page paths, or since issue #882 a run's short link
+  // (run-path.mjs RUN_PATH_LINK_RE: /run/<repository>/<number>, no query), else the overview. The server has already
+  // judged the return path with the page parser and parseRunPath; this repeats the shape check, so a navigation off this
+  // origin needs both to be wrong.
   function ownPage(path) {
     if (typeof path !== "string" || path.charAt(0) !== "/" || path.charAt(1) === "/" || path.indexOf("\\\\") >= 0 || path.indexOf("#") >= 0) return "/";
     var q = path.indexOf("?");
-    return PAGE_PATHS.indexOf(q < 0 ? path : path.slice(0, q)) >= 0 ? path : "/";
+    if (PAGE_PATHS.indexOf(q < 0 ? path : path.slice(0, q)) >= 0) return path;
+    return q < 0 && RUN_PATH_LINK_RE.test(path) ? path : "/";
   }
   // ---- local time (issue #710) ----
   // The server writes every instant as UTC text inside <time datetime="<ISO, UTC>">, the same bytes for every reader.

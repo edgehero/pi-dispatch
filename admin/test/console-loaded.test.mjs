@@ -373,7 +373,9 @@ test("each loaded card's design status holds at Built: a status is a claim about
   assert.ok(cardPreview("LoadedStates").includes("under each row of What its jobs get, a trigger"), "it names where the same record is repeated");
   assert.ok(!cardPreview("LoadedStates").includes("comes with part 2") && !cardReadme("LoadedStates").includes("not built yet"), "and promises nothing it has built");
   const markers = readFileSync(new URL("../../design/tools/fix_markers.py", import.meta.url), "utf8");
-  assert.match(markers, /for n in \["RunLoaded", "ProjectLoads"\]\},/);
+  // Each by name (issue #882 gave RunLoaded a status line of its own, for the short link beside its id).
+  assert.match(markers, /"RunLoaded": \(BUILT, /);
+  assert.match(markers, /"ProjectLoads": \(BUILT, /);
   assert.match(markers, /"LoadedStates": \(BUILT, /);
 });
 

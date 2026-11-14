@@ -49,6 +49,16 @@ const NUMBER_RE = /^(!?)(\d{1,30})$/;
 /** A run target as the worker writes a forge's: the repository, `#` or `!`, and the number. */
 const TARGET_PARTS_RE = /^(.+)([#!])(\d{1,30})$/;
 
+/**
+ * A short link as the browser's script may land on it after a sign-in (`script.mjs` `ownPage`), written on the path as
+ * a URL carries it (percent-encoded): `/run/`, two to `RUN_PATH_SEGMENTS_MAX` segments of letters, digits, `.`, `_`, `-`
+ * and `%` escapes, then the number with `!` (or `%21`) before it for a merge request. No `?`, no `#`, no `//`, no `\`,
+ * so a destination it passes stays on this origin and on this route. It is the script's own second check: the server
+ * has already judged the path with `parseRunPath` (`pages.mjs` `returnPathOf`), and a navigation off the console needs
+ * both to be wrong. Every link `runPathOf` draws passes it (a test holds that).
+ */
+export const RUN_PATH_LINK_RE = /^\/run\/(?:[A-Za-z0-9._%-]+\/){2,21}(?:!|%21)?[0-9]{1,30}\/?$/;
+
 /** What a short link that cannot be read is told: the shape, never the value (`parsePageQuery`'s rule). */
 export const RUN_PATH_REFUSAL = "a short run link is /run/<repository>/<number>, with ! before the number for a merge request";
 
