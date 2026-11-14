@@ -46,6 +46,10 @@ const show = (x) =>
  * from `dispatch_triggers`, and it goes by a field's name at any depth of any data, so one page's wording is no reason to move it.
  */
 const AGENT_UNREAD = "not in an agent’s read";
+// The forge field's two hints (issue #879): a forge is offered where its events reach this deployment, which for GitHub
+// is a webhook or the poller (`githubTriggerTransports`), so "configured webhooks" alone was no longer true.
+export const FORGE_OFFER_HINT = "Only forges whose events reach this deployment are offered: by a configured webhook, or GitHub by polling.";
+export const FORGE_NONE_HINT = "No forge's events reach this deployment yet. Configure a forge connection, or choose cron.";
 const isAgent = (v) => v.role === "agent";
 /** One row of what the file says of `run.<k>`, beside the deployment's default where this view can read that. */
 function fieldRow(v, t, k) {
@@ -408,7 +412,7 @@ export function triggerAdd(v) {
               "Task", { required: prefill.kind === "cron", hint: null },
             )}`
           : html`${field("forge", "Forge", {
-              options: missingForge ? [{ value: "", label: "Choose a configured forge" }, ...forges] : forges, value: missingForge ? "" : prefill.forge ?? "", required: true, hint: opts(v).forges?.length ? "Only forges with configured webhooks are offered." : "No webhook is configured. Configure a forge connection or choose cron.",
+              options: missingForge ? [{ value: "", label: "Choose a configured forge" }, ...forges] : forges, value: missingForge ? "" : prefill.forge ?? "", required: true, hint: opts(v).forgeProblem ?? (opts(v).forges?.length ? FORGE_OFFER_HINT : FORGE_NONE_HINT),
             })}${["label", "comment"].includes(kind)
               ? field("repository", "Repository (optional)")
               : null}${kind === "comment"
@@ -435,7 +439,7 @@ export function triggerAdd(v) {
   )}`;
   return card(
     "Add a trigger",
-    html`${recipe ? html`<p class="su-small">Recipe: <b>${recipe.title}</b>. Change any field before the preview.${missingForge ? " This recipe needs a GitHub webhook; configure Connections or choose a different configured forge." : null}${prefill.kind === "cron" ? " Add the existing folder; the schedule is 02:00 in the deployment’s configured timezone (UTC by default)." : null}</p>` : null}<p>
+    html`${recipe ? html`<p class="su-small">Recipe: <b>${recipe.title}</b>. Change any field before the preview.${missingForge ? " This recipe needs GitHub, by webhook or by polling; configure it in Connections or choose a different configured forge." : null}${prefill.kind === "cron" ? " Add the existing folder; the schedule is 02:00 in the deployment’s configured timezone (UTC by default)." : null}</p>` : null}<p>
         Preview the added lines, then confirm with a person's single-use
         five-minute ticket.
       </p>

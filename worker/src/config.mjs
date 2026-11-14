@@ -855,6 +855,31 @@ export function githubIngestFrom(env) {
 	return raw;
 }
 
+/**
+ * The transports that would carry a GitHub trigger added to this deployment now (issue #879): `"webhook"` and `"poll"`,
+ * in that order, or none. The console's trigger editor offers GitHub exactly when this is not empty, so a deployment
+ * that polls GitHub can add a GitHub trigger, and one that has said nothing about GitHub is offered it as before.
+ *
+ * It answers a different question from the receiver's `servesGithub` (does `serve` mount `/` NOW), and that difference
+ * is the point: with GITHUB_INGEST unset, a deployment's FIRST GitHub rule is what makes `serve` serve GitHub at its next
+ * start, so asking "is GitHub served now" would never offer the first one. The webhook half is therefore "would `serve`
+ * start serving GitHub once the rule is written": every word but `poll` mounts `/` for a GitHub rule, and `serve` starts
+ * with `/` only beside a `WEBHOOK_SECRET` (the receiver's own nonblank test). The poll half is the operator's word:
+ * `poll` or `both`, since `poll` refuses to start under `webhook` and an unset deployment has said nothing about a
+ * poller. Both halves are held to the receiver's real loaders by a test (`admin/test/trigger-detail-read.test.mjs`).
+ * A refused GITHUB_INGEST throws, as the receiver's commands do, and nothing can carry a trigger then.
+ */
+export function githubTriggerTransports(env) {
+	const ingest = githubIngestFrom(env);
+	const raw = env.WEBHOOK_SECRET;
+	const secret = typeof raw === "string" && raw.trim() !== "";
+	// Under `both` the poller loads `serve`'s config, which serves GitHub and so judges the secret: an absent or empty one
+	// is papered over for that call (poller-config.mjs), but whitespace alone is a value no signature can be checked
+	// against, and the poller refuses it too (docs/polling.md). Under `poll` the loader asks for no secret at all.
+	const blankValue = typeof raw === "string" && raw !== "" && !secret;
+	return [...(ingest !== "poll" && secret ? ["webhook"] : []), ...(ingest === "poll" || (ingest === "both" && !blankValue) ? ["poll"] : [])];
+}
+
 // env-internal TMPDIR, TEMP: the OS temp dir, read to place the default job and sandbox paths
 // below -- and, only on a host with no home directory to name, as the last-resort fallback for the
 // durable state root. Not a variable of this project's and not a deployment knob: PI_JOBS_DIR,

@@ -2390,8 +2390,11 @@ A row is found by its place in the file, as a change finds it, so an entry the f
 entry at this row is not a usable trigger" with no other row's facts or Delete in its place, and the lists link past it.
 A spent one-shot explains how to re-arm it. Cron health uses the configured stall threshold.
 
-Add a trigger opens a structured editor for cron, label, comment, pull request and issue triggers. Only
-configured webhook forges and blessed venues are offered. Forge actions use that forge's own words.
+Add a trigger opens a structured editor for cron, label, comment, pull request and issue triggers. Only blessed
+venues and the forges whose events reach this deployment are offered: a forge whose webhook secret is set, and GitHub
+where a new GitHub trigger would fire, by its webhook or, under `GITHUB_INGEST=poll` or `both`, by the poller. A
+`GITHUB_INGEST` the receiver refuses offers no GitHub, and the forge field says why. Forge actions use that forge's own
+words.
 The JSON fallback accepts the same add-tool fields. Both forms retain the add tool's `run.secretBundle: false`;
 only a reviewed file edit can grant a project's bundle. The editor explains which fields are set by hand.
 
