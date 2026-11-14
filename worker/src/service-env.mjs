@@ -237,7 +237,8 @@ export function readDeploymentEnv({ dir, fs, uid = process.geteuid?.(), names = 
 /**
  * The `.env` of the deployment in `dir`, read the way doctor reads it (a regular file only, as bytes, one read) and
  * resolved for `keys` (`resolveServiceEnv`). For a caller that has no file of its own in hand (the admin panel).
- * Returns the resolution plus `path`, `unreadable` (a reason, when something is at the path and could not be read) and
+ * Returns the resolution plus `path`, `absent` (true when nothing is at the path: issue #845's console tells a file that
+ * went away from one that never was), `unreadable` (a reason, when something is at the path and could not be read) and
  * `untrusted` (`envFileTrust`'s reason); in either case nothing was taken from it. `shellRunsLine` is the line a sourcing shell does
  * not read as an assignment, whatever keys were asked for: it can set any of them without spelling one (`. ./more.env`, `eval`), so
  * `hazardSkipped`, which needs the key spelled, says nothing of it. Only for that loader: systemd ignores such a line and the cmd wrapper
@@ -245,11 +246,11 @@ export function readDeploymentEnv({ dir, fs, uid = process.geteuid?.(), names = 
  */
 export function deploymentServiceEnv({ env, dir, keys, platform = process.platform, fs, uid = process.geteuid?.() }) {
 	// Issue #471 (gate rounds 1 and 2): one descriptor, and nothing taken from a file another account can change.
-	const { path, bytes, unreadable, untrusted } = readDeploymentEnv({ dir, fs, uid });
+	const { path, bytes, absent, unreadable, untrusted } = readDeploymentEnv({ dir, fs, uid });
 	const raw = untrusted ? null : bytes;
 	const file = raw === null ? null : serviceEnvFileOf(raw, path, serviceEnvLoader(platform));
 	const shellRunsLine = file?.loader === "shell" && file.hazard !== null && file.hazard.shape !== "shell-crlf-comment" ? file.hazard.line : null;
-	return { ...resolveServiceEnv({ env, file, keys }), path, unreadable, untrusted, hazard: file?.hazard ?? null, shellRunsLine };
+	return { ...resolveServiceEnv({ env, file, keys }), path, absent, unreadable, untrusted, hazard: file?.hazard ?? null, shellRunsLine };
 }
 
 /**

@@ -30,6 +30,7 @@ import { originRefusal } from "../../src/console/guards.mjs";
 import { html } from "../../src/console/html.mjs";
 import { loadPageData, pagePanels, parsePageQuery, renderPage } from "../../src/console/pages.mjs";
 import { PERSON_CHANGED } from "../../src/console/server.mjs";
+import { restartNoticeOf, restartReasons } from "../../src/console/restart-notice.mjs";
 import { ENDED_REASONS } from "../../src/console/session-ends.mjs";
 import { LIVE_STATES, loginCodePage, loginPage } from "../../src/console/shell.mjs";
 import * as RM from "../../src/read-model.mjs";
@@ -79,6 +80,17 @@ const VIEWER = Object.freeze({ id: "s-panel-goldens-viewer", name: "watcher", ro
 
 /** The token's live-stream limit as a console started with no settings has it (`config.mjs`, PI_CONSOLE_MAX_STREAMS). */
 const MAX_STREAMS = 4;
+
+/**
+ * The restart banner's notice (issue #845): `restart-notice.mjs`'s own answer for a console started on database 16 of a
+ * Valkey that refused it, whose deployment `.env` has since named another VALKEY_URL. The readings are what the watch
+ * compares, never shown.
+ */
+const RESTART_NOTICE = restartNoticeOf(restartReasons({
+  start: { values: { VALKEY_URL: JSON.stringify(["redis://127.0.0.1:6379/16", "redis://127.0.0.1:6379/16"]), PI_LOGS_DIR: JSON.stringify(["/srv/pi-dispatch/logs", "/srv/pi-dispatch/logs"]) }, problem: null },
+  now: { values: { VALKEY_URL: JSON.stringify(["redis://127.0.0.1:6379/2", "redis://127.0.0.1:6379/2"]), PI_LOGS_DIR: JSON.stringify(["/srv/pi-dispatch/logs", "/srv/pi-dispatch/logs"]) }, problem: null },
+  refused: [{ db: 16 }, { db: 16 }],
+}));
 
 /** The sign-in page's limits as a console started with no settings has them (60 idle minutes, 12 hours). */
 const LIMITS = Object.freeze({ idleMinutes: 60, maxHours: 12 });
@@ -343,10 +355,10 @@ function holdPanel(page, id) {
 // ---- the pages ---------------------------------------------------------------------------------------------------------
 
 /** Page `name` (fleet or config) over the canned snapshot, as serve draws it for `session`, as a string. */
-async function screen(name, { session = OPERATOR, readOnly = false, flash = null } = {}) {
+async function screen(name, { session = OPERATOR, readOnly = false, flash = null, restart = null } = {}) {
   const parsed = parsePageQuery(name, "");
   const data = await loadPageData(name, parsed.query, { fleet: { snapshot: async () => SNAPSHOT }, now: () => NOW });
-  const ctx = { query: parsed.query, session: { name: session.name, role: session.role }, data, readOnly, theme: null, flash, maxStreams: MAX_STREAMS };
+  const ctx = { query: parsed.query, session: { name: session.name, role: session.role }, data, readOnly, theme: null, flash, maxStreams: MAX_STREAMS, ...(restart ? { restart } : {}) };
   const page = await renderPage(name, ctx);
   assert.equal(page.status, 200, name);
   // The panels the page holds are what the stream would send: a state golden starts from a page the hub agrees with.
@@ -1048,6 +1060,10 @@ const DRAW = {
   // AccessStates: a console started read-only, for each role.
   "read-only.operator": async () => fleetLive({ readOnly: true }),
   "read-only.viewer": async () => fleetLive({ session: VIEWER, readOnly: true }),
+  // AccessStates (issue #845): a console whose .env has a new VALKEY_URL since it started, and whose held clients were
+  // refused the database the old one named, for each role. The notice is the restart watch's own, from canned readings.
+  "restart-needed.operator": async () => fleetLive({ restart: RESTART_NOTICE }),
+  "restart-needed.viewer": async () => fleetLive({ session: VIEWER, restart: RESTART_NOTICE }),
   // AuditScreen: the newest row's link to the one before does not hold; then a damaged row with two written after it;
   // then an intact chain a newer console wrote into.
   "audit-damaged.operator": async () => auditPage(auditDeps({ rows: 5, tamper: (lines) => relink(lines, 4) })),

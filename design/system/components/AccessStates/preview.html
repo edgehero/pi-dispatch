@@ -1,4 +1,4 @@
-<!-- @dsCard group="Access and audit" height=2030 width=1440 subtitle="The one-time link page in its five states, and operator, viewer and read-only side by side" -->
+<!-- @dsCard group="Access and audit" height=2140 width=1440 subtitle="The one-time link page in its five states, operator, viewer and read-only side by side, and the restart banner" -->
 <!doctype html>
 <html lang="en">
 <head>
@@ -120,6 +120,11 @@
 <div class="banner banner--sm tone-attention" role="status">
   <span class="tile"><svg class="ic" aria-hidden="true"><use href="#i-shield"/></svg></span>
   <div><p class="banner__t">This console is read-only</p><p class="banner__s">It was started with <span class="code">PI_CONSOLE_READ_ONLY=1</span>, so every change is refused and no page shows a form. Operators still see reasons, transcripts and the audit log.</p></div>
+  
+</div>
+<div class="banner banner--sm tone-attention" role="status">
+  <span class="tile"><svg class="ic" aria-hidden="true"><use href="#i-rerun"/></svg></span>
+  <div><p class="banner__t">This console needs a restart</p><p class="banner__s"><span class="code">VALKEY_URL</span> has changed in the deployment's .env since this console started, and the console keeps the value it started with until it is restarted. Pause the fleet and Resume the fleet already use the <span class="code">VALKEY_URL</span> the .env names now; the pages read the one the console started with. Valkey refused database 16, the one <span class="code">VALKEY_URL</span> named when this console started, and the console does not try a refused database again. Name one that Valkey has, or raise <span class="code">databases</span> in its configuration, then restart the console.</p></div>
   
 </div>
 </main>

@@ -248,13 +248,14 @@ function cardOf(kind, { status, sentence, page, runId }) {
 /**
  * The whole error page for a refusal: `{ status, html }`. `kind` is one of `ERROR_KINDS` (anything else throws: the
  * server names kinds in code). `status` is what the server answers (its kind's when not a 4xx or 5xx number);
- * `session` (`{name, role}`) and `readOnly` draw the signed-in bar for a kind that keeps the navigation; `theme` is the
- * request's theme choice. `sentence` and `page` are the 400's refusal and the page that refused it; `host`, `port` and
+ * `session` (`{name, role}`) and `readOnly` draw the signed-in bar for a kind that keeps the navigation, and `restart` the
+ * restart banner under its title (issue #845, `shell.mjs` `restartBannerHtml`); `theme` is the request's theme choice.
+ * `sentence` and `page` are the 400's refusal and the page that refused it; `host`, `port` and
  * `address` the 421's refused name and the connection's local port and address; `runId` the no-run page's asked id,
  * shown only as its search field's value (see the header). Every value goes through `html`. A no-run page's navigation
  * marks Runs current, as the run page's does: it stands where the run's page would.
  */
-export function errorPage({ status, kind, theme = null, session = null, readOnly = false, sentence = null, host = null, port = null, address = null, page = null, runId = null }) {
+export function errorPage({ status, kind, theme = null, session = null, readOnly = false, restart = null, sentence = null, host = null, port = null, address = null, page = null, runId = null }) {
   if (typeof kind !== "string" || !ERROR_KINDS.includes(kind)) throw new RangeError(`error-pages: unknown kind ${JSON.stringify(kind)} (one of ${ERROR_KINDS.join(", ")})`);
   const code = Number.isInteger(status) && status >= 400 && status <= 599 ? status : KIND_STATUS[kind];
   const said = ERROR_SENTENCES[kind];
@@ -262,6 +263,6 @@ export function errorPage({ status, kind, theme = null, session = null, readOnly
   const inner = kind === "host" ? hostCard({ status: code, host, port, address }) : cardOf(kind, { status: code, sentence, page, runId });
   return {
     status: code,
-    html: frameHtml({ name: "error", title: said.title, sub: said.sub, theme, session: nav ? session : null, readOnly: nav ? Boolean(readOnly) : false, nav, here: kind === "no-run" ? "runs" : kind === "no-project" ? "config" : null }, inner),
+    html: frameHtml({ name: "error", title: said.title, sub: said.sub, theme, session: nav ? session : null, readOnly: nav ? Boolean(readOnly) : false, restart: nav ? restart : null, nav, here: kind === "no-run" ? "runs" : kind === "no-project" ? "config" : null }, inner),
   };
 }

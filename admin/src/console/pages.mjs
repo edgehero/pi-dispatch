@@ -1161,11 +1161,12 @@ function runPlacesOf(data) {
 
 /**
  * The whole page for screen `name`: `{ status, html }`. `ctx = { query, session: { name, role }, data, readOnly,
- * theme }`, `theme` the request's theme choice (`theme.mjs` `themeOf`). Status 200, but: for a run id no place shows a
- * run for, with every place read and saying it holds none (`runAbsent`), the run-not-found page, 404; for one no place
- * shows a run for while a place could not be read, the run page, 503, its outcome banner saying which could not be read;
- * and 403 for the audit log asked by a viewer (the route table refuses that first; this is the belt, and it draws no
- * panel). A run page some place shows a run for is 200, a queued job's included.
+ * restart, theme }`, `restart` the restart watch's notice or null (issue #845), `theme` the request's theme choice
+ * (`theme.mjs` `themeOf`). Status 200, but: for a run id no place shows a run for, with every place read and saying it
+ * holds none (`runAbsent`), the run-not-found page, 404; for one no place shows a run for while a place could not be
+ * read, the run page, 503, its outcome banner saying which could not be read; and 403 for the audit log asked by a viewer
+ * (the route table refuses that first; this is the belt, and it draws no panel). A run page some place shows a run for
+ * is 200, a queued job's included.
  */
 export async function renderPage(name, ctx) {
   if (!Object.hasOwn(PAGES, name)) throw new RangeError(`no such page: ${String(name)}`);
@@ -1181,10 +1182,10 @@ export async function renderPage(name, ctx) {
   }
   const places = name === "run" ? runPlacesOf(ctx?.data) : null;
   if (places !== null && runAbsent(places)) {
-    return errorPage({ kind: "no-run", status: 404, session: ctx?.session ?? null, readOnly: Boolean(ctx?.readOnly), theme, runId: typeof ctx?.query?.id === "string" ? ctx.query.id : null });
+    return errorPage({ kind: "no-run", status: 404, session: ctx?.session ?? null, readOnly: Boolean(ctx?.readOnly), restart: ctx?.restart ?? null, theme, runId: typeof ctx?.query?.id === "string" ? ctx.query.id : null });
   }
   if (name === "project" && ctx?.data?.projectView?.state === "missing") {
-    return errorPage({ kind: "no-project", status: 404, session: ctx?.session ?? null, readOnly: Boolean(ctx?.readOnly), theme });
+    return errorPage({ kind: "no-project", status: 404, session: ctx?.session ?? null, readOnly: Boolean(ctx?.readOnly), restart: ctx?.restart ?? null, theme });
   }
   const panels = panelFragments(name, ctx);
   // The run detail's live transcript (issue #643) is a section of its own, never a panel: a panel is what the hub

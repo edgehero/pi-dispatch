@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { connect as netConnect, createServer } from "node:net";
 import { test } from "node:test";
 import { Command, Redis } from "ioredis";
-import { JudgedConnector, VALKEY_ERROR_QUIET_MS, givesUp, makeRedisClient, onValkeyError, parseConnection, useValkeyContext } from "../src/connection.mjs";
+import { JudgedConnector, VALKEY_ERROR_QUIET_MS, givesUp, makeRedisClient, onValkeyError, parseConnection, passwordDeclinedOf, useValkeyContext } from "../src/connection.mjs";
 
 // Issue #464, gate round 1 (measured on Fedora 44): WHATWG URL keeps an IPv6 literal's brackets in `hostname`, and the
 // queue client then looked up the name "[::1]", which never resolves, so a `redis://[::1]:port` VALKEY_URL never
@@ -60,7 +60,7 @@ test("a scheme no client here speaks is named as such, never as a database or a 
 
 const valkeyTest = process.env.VALKEY_TEST_URL;
 test("against a real Valkey, a database it does not have is refused by every client, never database 0 (gate round 2 of PR #478, VALKEY_TEST_URL)", { skip: valkeyTest ? false : "needs VALKEY_TEST_URL", timeout: 30_000 }, async (t) => {
-	const { DB_REFUSED, defaultValkeyContext, judgeValkeyAtStart, makeRedisClient, valkeyAuthState } = await import("../src/connection.mjs");
+	const { DB_REFUSED, defaultValkeyContext, judgeValkeyAtStart, makeRedisClient, refusedDatabaseOf, valkeyAuthState } = await import("../src/connection.mjs");
 	const base = new URL(valkeyTest);
 	base.pathname = "";
 	const plain = makeRedisClient(base.toString(), {});
@@ -87,6 +87,10 @@ test("against a real Valkey, a database it does not have is refused by every cli
 	for (let i = 0; i < 50 && client.status !== "end"; i++) await new Promise((r) => setTimeout(r, 20));
 	assert.equal(client.status, "end", "the client closed and does not reconnect");
 	assert.ok(client[DB_REFUSED] && seen.length === 1 && seen[0] === client[DB_REFUSED], "one error event, the refusal");
+	// Issue #845: the number the console's restart banner names, from the client that holds the refusal; none for one that does not.
+	assert.deepEqual(refusedDatabaseOf(client), { db: databases });
+	assert.equal(refusedDatabaseOf(plain), null);
+	assert.equal(refusedDatabaseOf(null), null);
 	await assert.rejects(client.get(key));
 	assert.equal(await plain.get(key), null, "nothing was written to database 0");
 	assert.equal(await plain.exists(key), 0);
@@ -273,6 +277,168 @@ test("freshContext: a context read that throws fails that connect the way a refu
 		assert.equal(stream.destroyed, true);
 		assert.match(connector.firstError.message, /the context could not be read/);
 	} finally {
+		useValkeyContext(null);
+	}
+});
+
+// Issue #845: a `freshContext` client's password is the context's as it is at each connect, so a password rotated in the
+// deployment's `.env` reaches a running console. What ioredis sends is `condition.auth`, which `_connect` builds from the
+// options, so that is what is read here. No dial: the judge refuses each connect, and the client retries by its strategy.
+test("freshContext: each connect sends the password the context gives then; the URL's own, a throwing, broken or missing context, another deployment's, and withoutPassword keep theirs (#845)", async () => {
+	const refuse = async () => {
+		throw new Error("no dial in this test");
+	};
+	// The deployment's own VALKEY_URL is the one the clients below dial, as a console's is.
+	const ctx = (password, over = {}) => ({ envPath: "/d/.env", shared: false, rootRefused: false, error: null, password: { environment: null, file: password }, url: { environment: null, file: "redis://127.0.0.1:1" }, ...over });
+	let now = ctx("first-password");
+	useValkeyContext(() => {
+		if (now instanceof Error) throw now;
+		return now;
+	});
+	const clients = [];
+	// No retry, so the client's every connect is one the test makes: the judge's refusal ends it, and the next starts
+	// from "end", which ioredis' `connect()` accepts.
+	const made = (url, opts = {}) => {
+		const c = makeRedisClient(url, { lazyConnect: true, judge: refuse, ...opts });
+		c.options.retryStrategy = () => null;
+		c.on("error", () => {});
+		clients.push(c);
+		return c;
+	};
+	/** The AUTH a connect of `c` was built with: its password, or null for none. */
+	const connectOnce = async (c) => {
+		await c.connect().catch(() => {});
+		assert.equal(c.status, "end");
+		return c.condition?.auth ?? null;
+	};
+	try {
+		const fresh = made("redis://127.0.0.1:1", { freshContext: true });
+		const frozen = made("redis://127.0.0.1:1");
+		const fromUrl = made("redis://:fromTheUrl@127.0.0.1:1", { freshContext: true });
+		const probe = made("redis://127.0.0.1:1", { freshContext: true, withoutPassword: true });
+		assert.deepEqual([await connectOnce(fresh), await connectOnce(frozen), await connectOnce(fromUrl), await connectOnce(probe)], ["first-password", "first-password", "fromTheUrl", null]);
+		now = ctx("rotated-password");
+		assert.equal(await connectOnce(fresh), "rotated-password", "the rotation, at the next connect, on the same client");
+		assert.equal(await connectOnce(frozen), "first-password", "without freshContext: the password read at construction");
+		assert.equal(await connectOnce(fromUrl), "fromTheUrl", "a password in VALKEY_URL is the URL's, whatever the .env says");
+		assert.equal(await connectOnce(probe), null, "a probe that sends none never gets one");
+		const twin = fresh.duplicate();
+		twin.on("error", () => {});
+		clients.push(twin);
+		now = ctx("third-password");
+		assert.equal(await connectOnce(twin), "third-password", "a duplicate (BullMQ's blocking connections) reads it too");
+		assert.equal(await connectOnce(fresh), "third-password");
+		now = new Error("the context could not be read");
+		assert.equal(await connectOnce(fresh), "third-password", "a context that throws keeps the last password, and the connect still runs");
+		now = ctx(null, { error: "/d/.env line 3 has an open quote" });
+		assert.equal(await connectOnce(fresh), "third-password", "a .env that cannot be told keeps the last password rather than dropping one that works");
+		now = ctx(null, { absent: true });
+		assert.equal(await connectOnce(fresh), "third-password", "a .env gone (for good, or while an editor replaces it) is not one that sets none");
+		// The pi extension's context follows the deployment pointer: a client built for one deployment's Valkey never sends
+		// another deployment's password to it, and takes its own again once the context is its deployment's.
+		now = ctx("the-next-deployments-password", { envPath: "/other/.env" });
+		assert.equal(await connectOnce(fresh), "third-password", "another deployment's context: the last password stays");
+		now = ctx("the-next-deployments-password", { envPath: null });
+		assert.equal(await connectOnce(fresh), "third-password", "no deployment at all: the same");
+		now = ctx("fourth-password");
+		assert.equal(await connectOnce(fresh), "fourth-password", "its own deployment again");
+		// Review of PR #878, measured with two Valkeys: a password that came with another VALKEY_URL is that Valkey's, and a
+		// held client never moves there. One deployment moving to another Valkey changes both lines together; a symlinked
+		// deployment folder repointed reads another deployment's file through the same .env path.
+		now = ctx("the-new-valkeys-password", { url: { environment: null, file: "redis://127.0.0.1:2" } });
+		assert.equal(await connectOnce(fresh), "fourth-password", "the deployment moved to another Valkey: the old one's password stays");
+		now = ctx("deployment-b-password", { envPath: "/d/.env", url: { environment: null, file: "redis://127.0.0.1:3" } });
+		assert.equal(await connectOnce(fresh), "fourth-password", "the same .env path naming another Valkey: the same");
+		now = ctx("fifth-password", { url: { environment: null, file: "redis://127.0.0.1:1" } });
+		assert.equal(await connectOnce(fresh), "fifth-password", "the URL it was built on, rotated: taken");
+		now = ctx(null, { url: { environment: null, file: "redis://127.0.0.1:2" } });
+		assert.equal(await connectOnce(fresh), "fifth-password", "another Valkey's file that sets none drops nothing either");
+		// Third review of PR #878, measured with two Valkeys: a shell that exports VALKEY_URL keeps the client on that URL,
+		// so the context's own choice of URL never moved; the file's password belongs to the file's Valkey all the same.
+		now = ctx("shell-first", { url: { environment: "redis://127.0.0.1:1", file: "redis://127.0.0.1:1" } });
+		const shelled = made("redis://127.0.0.1:1", { freshContext: true });
+		assert.equal(await connectOnce(shelled), "shell-first");
+		now = ctx("valkey-2-password", { url: { environment: "redis://127.0.0.1:1", file: "redis://127.0.0.1:2" } });
+		assert.equal(await connectOnce(shelled), "shell-first", "the file moved to another Valkey under the shell's URL: its password is not this client's");
+		now = ctx("shell-rotated", { url: { environment: "redis://127.0.0.1:1", file: "redis://127.0.0.1:1" } });
+		assert.equal(await connectOnce(shelled), "shell-rotated", "the file names the client's Valkey again, rotated: taken");
+		now = ctx("valkey-2-password", { url: { environment: "redis://127.0.0.1:1", file: null } });
+		assert.equal(await connectOnce(shelled), "shell-rotated", "a file naming no VALKEY_URL speaks for the default Valkey, which is not this client's");
+		// A password a bad line hid at start: the client was built on the default URL (the line hid VALKEY_URL too) with no
+		// password; once the line is fixed it is taken where the file names that same Valkey, and not where it names another.
+		now = ctx(null, { error: "/d/.env line 1 has a carriage return", url: { environment: null, file: null } });
+		const hidden = made("redis://127.0.0.1:6379", { freshContext: true });
+		assert.equal(await connectOnce(hidden), null);
+		now = ctx("found-after-the-fix", { url: { environment: null, file: "redis://127.0.0.1:9" } });
+		assert.equal(await connectOnce(hidden), null, "the fixed file names another Valkey: the banner says VALKEY_URL changed, and nothing is sent here");
+		now = ctx("found-after-the-fix", { url: { environment: null, file: "redis://127.0.0.1:6379" } });
+		assert.equal(await connectOnce(hidden), "found-after-the-fix", "the fixed file names this client's Valkey: taken, no restart");
+		// A password from this process's environment is not the file's, and is taken whatever the file names.
+		now = ctx(null, { password: { environment: "exported-password", file: null }, url: { environment: null, file: "redis://127.0.0.1:9" } });
+		assert.equal(await connectOnce(hidden), "exported-password");
+		// Fourth review of PR #878: the default Valkey's file, a file that names another Valkey than a shell's, and a bad
+		// line that hid the URL under a shell's. Each of the first two fails a wrong version of the check: one without the
+		// default for a file that names none, and one against the URL the file named at construction.
+		now = ctx("default-rotated", { url: { environment: null, file: null } });
+		assert.equal(await connectOnce(hidden), "default-rotated", "a file naming no VALKEY_URL speaks for the default Valkey, which this client dials");
+		now = ctx("t-first", { url: { environment: "redis://127.0.0.1:1", file: "redis://127.0.0.1:2" } });
+		const split = made("redis://127.0.0.1:1", { freshContext: true });
+		assert.equal(await connectOnce(split), "t-first", "at start a client takes the file's password for any Valkey on this machine, as before");
+		assert.equal(passwordDeclinedOf(split), false, "the password it holds is the file's: nothing to say");
+		now = ctx("t-rotated", { url: { environment: "redis://127.0.0.1:1", file: "redis://127.0.0.1:2" } });
+		assert.equal(await connectOnce(split), "t-first", "the file never named this client's Valkey: its rotation is not taken");
+		assert.equal(passwordDeclinedOf(split), true, "and the decline is recorded, so the console says a restart is needed");
+		now = ctx(null, { error: "x", url: { environment: "redis://127.0.0.1:1", file: null } });
+		const hiddenShell = made("redis://127.0.0.1:1", { freshContext: true });
+		assert.equal(await connectOnce(hiddenShell), null);
+		now = ctx("s-found", { url: { environment: "redis://127.0.0.1:1", file: "redis://127.0.0.1:1" } });
+		assert.equal(await connectOnce(hiddenShell), "s-found", "the fixed file names the shell's Valkey: taken");
+		// The same Valkey spelled another way is the same server: a scheme alias, a database path, a trailing slash and the
+		// default port. `localhost` is another name than 127.0.0.1, so its rotation is declined, and said.
+		for (const [file, password] of [["valkey://127.0.0.1:1/0", "alias"], ["redis://127.0.0.1:1/", "slash"], ["redis://127.0.0.1:1/3", "database"]]) {
+			now = ctx(password, { url: { environment: "redis://127.0.0.1:1", file } });
+			assert.equal(await connectOnce(hiddenShell), password, file);
+			assert.equal(passwordDeclinedOf(hiddenShell), false, file);
+		}
+		const onDefault = made("redis://127.0.0.1", { freshContext: true });
+		now = ctx("default-port", { url: { environment: null, file: "redis://127.0.0.1:6379/0" } });
+		assert.equal(await connectOnce(onDefault), "default-port", "no port is 6379");
+		now = ctx("by-name", { url: { environment: "redis://127.0.0.1:1", file: "redis://localhost:1" } });
+		assert.equal(await connectOnce(hiddenShell), "database", "localhost is not 127.0.0.1 by name");
+		assert.equal(passwordDeclinedOf(hiddenShell), true);
+		now = ctx("database", { url: { environment: "redis://127.0.0.1:1", file: "redis://localhost:1" } });
+		assert.equal(await connectOnce(hiddenShell), "database");
+		assert.equal(passwordDeclinedOf(hiddenShell), false, "the same password as it holds is no news");
+		// Fifth review of PR #878: a recorded decline stands only while the file as it is now still gives a password held
+		// back. The refresh runs on connect alone, so without this a decline outlived the file that caused it.
+		const byName = (password, file = "redis://localhost:1", over = {}) => ctx(password, { url: { environment: "redis://127.0.0.1:1", file }, ...over });
+		now = byName("by-name-again");
+		assert.equal(await connectOnce(hiddenShell), "database");
+		assert.equal(passwordDeclinedOf(hiddenShell), true);
+		now = byName("database");
+		assert.equal(passwordDeclinedOf(hiddenShell), false, "the file put back to the held password: cleared, with no reconnect");
+		now = byName("by-name-again");
+		assert.equal(passwordDeclinedOf(hiddenShell), true, "and the decline it recorded stands again while the file gives that password");
+		now = byName("by-name-again", "redis://127.0.0.1:1");
+		assert.equal(passwordDeclinedOf(hiddenShell), false, "the file names the client's Valkey: nothing is held back, with no reconnect");
+		now = byName("by-name-again", "redis://localhost:1", { error: "/d/.env line 2 is half written" });
+		assert.equal(passwordDeclinedOf(hiddenShell), false, "a file that cannot be read now says nothing of a password (the console names the file instead)");
+		now = byName("by-name-again", "redis://localhost:1", { absent: true });
+		assert.equal(passwordDeclinedOf(hiddenShell), false);
+		// The taken path clears the record: a new password for the client's own Valkey is sent, and a later declining file
+		// is no news until a reconnect declines it.
+		now = byName("named-again", "redis://127.0.0.1:1");
+		assert.equal(await connectOnce(hiddenShell), "named-again");
+		assert.equal(passwordDeclinedOf(hiddenShell), false);
+		now = byName("by-name-later");
+		assert.equal(passwordDeclinedOf(hiddenShell), false, "no reconnect has declined it yet");
+		assert.equal(await connectOnce(hiddenShell), "named-again");
+		assert.equal(passwordDeclinedOf(hiddenShell), true);
+		now = ctx(null);
+		assert.equal(await connectOnce(fresh), null, "a context that gives none sends none, as a restart would");
+		assert.equal(Object.hasOwn(fresh.options, "password"), false);
+	} finally {
+		for (const c of clients) c.disconnect();
 		useValkeyContext(null);
 	}
 });

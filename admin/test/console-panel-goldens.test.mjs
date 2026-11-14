@@ -20,6 +20,7 @@ import { join } from "node:path";
 import { CONFIRM_SLOT_ID } from "../src/console/confirm-view.mjs";
 import { ENDED_REASONS } from "../src/console/session-ends.mjs";
 import { LIVE_NOTES, READ_ONLY_TITLE } from "../src/console/shell.mjs";
+import { RESTART_TITLE } from "../src/console/restart-notice.mjs";
 import { UNDO_SENTENCES } from "../src/console/actions.mjs";
 import { PERSON_CHANGED } from "../src/console/server.mjs";
 import { DEFER_BUCKETS, DEFER_BUCKET_WORDS } from "@edgehero/pi-dispatch/defer-reasons";
@@ -59,7 +60,7 @@ test("the panel goldens are the states the cards name, by name: the ledgers and 
   const runs = ["runs-mirror-off.operator", "runs-mirror-degraded.operator", "runs-truncated.operator", "runs-unreadable.viewer", "runs-empty.viewer", "runs-unknown-reason.viewer"];
   const parked = ["parked-approval.operator", "parked-approval.viewer", "parked-answerable.operator", "parked-unanswerable.operator", "parked-being-answered.operator", "parked-unknown.operator", "parked-empty.viewer"];
   const more = ["run-not-found.operator", "run-not-found.viewer", "confirm-refused-timeout.operator", "confirm-preview-resume-incomplete.operator", "confirm-preview-many-queues.operator"];
-  assert.deepEqual([...PANEL_STATES], [...SETUP_PANEL_STATES, ...ANSWERER_PANEL_STATES, ...Object.keys(AGENT_OVERVIEW_DRAW), ...SANDBOX_PANEL_STATES, ...UPDATES_PANEL_STATES, ...UPDATES_CONFIRM_STATES, ...DEVICES_PANEL_STATES, ...WORKSPACE_PANEL_STATES, ...LOADED_PANEL_STATES, ...TRIGGER_GETS_PANEL_STATES, ...TRIGGER_GETS_CONFIRM_STATES, ...MODELS_PANEL_STATES, ...ZERO_TOUCH_PANEL_STATES, ...CONFIGURATION_PANEL_STATES, ...TRIGGER_LIST_PANEL_STATES, ...TRIGGER_PANEL_STATES, ...SPEND_PANEL_STATES, ...FLEET_PANEL_STATES, ...RUN_PANEL_STATES, ...confirm, ...live, "read-only.operator", "read-only.viewer", "audit-damaged.operator", "audit-not-verified.operator", "audit-newer.operator", ...overview, ...runs, ...parked, ...more, ...signIn, ...link]);
+  assert.deepEqual([...PANEL_STATES], [...SETUP_PANEL_STATES, ...ANSWERER_PANEL_STATES, ...Object.keys(AGENT_OVERVIEW_DRAW), ...SANDBOX_PANEL_STATES, ...UPDATES_PANEL_STATES, ...UPDATES_CONFIRM_STATES, ...DEVICES_PANEL_STATES, ...WORKSPACE_PANEL_STATES, ...LOADED_PANEL_STATES, ...TRIGGER_GETS_PANEL_STATES, ...TRIGGER_GETS_CONFIRM_STATES, ...MODELS_PANEL_STATES, ...ZERO_TOUCH_PANEL_STATES, ...CONFIGURATION_PANEL_STATES, ...TRIGGER_LIST_PANEL_STATES, ...TRIGGER_PANEL_STATES, ...SPEND_PANEL_STATES, ...FLEET_PANEL_STATES, ...RUN_PANEL_STATES, ...confirm, ...live, "read-only.operator", "read-only.viewer", "restart-needed.operator", "restart-needed.viewer", "audit-damaged.operator", "audit-not-verified.operator", "audit-newer.operator", ...overview, ...runs, ...parked, ...more, ...signIn, ...link]);
   // `<state>.<role>`, the role one the width check knows (`console-width-check.mjs` `GOLDEN_ROLES`).
   for (const state of PANEL_STATES) assert.match(state, /^[a-z0-9][a-z0-9-]*\.(?:operator|viewer|anonymous)$/, state);
 });
@@ -197,6 +198,16 @@ test("the read-only banner for both roles, with no form and no slot; the damaged
     const page = pages[`read-only.${role}`];
     assert.ok(page.includes(`<p class="banner__t">${READ_ONLY_TITLE}</p>`) && page.includes('<span class="code">PI_CONSOLE_READ_ONLY=1</span>'), `${role}: the banner`);
     assert.ok(!page.includes("<form data-action") && slotOf(page) === null, `${role}: no write form, no slot`);
+    assert.ok(!page.includes(RESTART_TITLE), `${role}: no restart banner on a console that needs none`);
+  }
+  // Issue #845: the restart banner, for both roles, under the title bar: the setting by name and the database by number,
+  // never a value or an address (the readings behind it hold both).
+  for (const role of ["operator", "viewer"]) {
+    const page = pages[`restart-needed.${role}`];
+    assert.ok(page.includes(`<p class="banner__t">${RESTART_TITLE}</p>`), `${role}: the banner`);
+    assert.ok(page.includes('<span class="code">VALKEY_URL</span> has changed in the deployment&#39;s .env since this console started') && page.includes("Valkey refused database 16, the one"), `${role}: what changed, by name`);
+    assert.ok(page.indexOf(`<p class="banner__t">${RESTART_TITLE}</p>`) < page.indexOf('id="p-fleetbar"'), `${role}: under the title bar, above the panels`);
+    for (const value of ["redis://", "127.0.0.1", "/srv/pi-dispatch"]) assert.ok(!page.includes(value), `${role}: no value (${value})`);
   }
   // Row 5's prev was rewritten: row 5 is the damaged place, and row 4, the other end of the broken link, is not vouched
   // for either (the chain cannot tell which of the two changed), so the verified range ends at row 3.
