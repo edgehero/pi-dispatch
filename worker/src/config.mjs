@@ -85,7 +85,8 @@ export function positiveInt(env, name, fallback) {
 }
 
 // min=0: accepts 0 (a sentinel, e.g. "keep forever" for log retention), still rejects negatives and non-integers.
-function nonNegativeInt(env, name, fallback, max = undefined) {
+// Exported for the poller's POLL_CATCHUP_MINUTES (issue #880), whose 0 is a sentinel too: one parse, one message.
+export function nonNegativeInt(env, name, fallback, max = undefined) {
 	return boundedInt(env, name, fallback, 0, max === undefined ? "a non-negative integer" : `an integer 0-${max}`, max);
 }
 

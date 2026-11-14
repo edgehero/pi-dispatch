@@ -179,8 +179,9 @@ export function resolvePaths(env = process.env) {
     sandboxRetentionHours: parseNonNegInt(env.PI_SANDBOX_RETENTION_HOURS, 24),
     sandboxIdleMinutes: parseNonNegInt(env.PI_SANDBOX_IDLE_MINUTES, 30),
     // The two dispatch_run bounds the extension enforces producer-side, read DIRECTLY from env (never
-    // loadConfig, which throws on unrelated GitHub-auth problems). `delimitedList`/`nonNegativeInt` are
-    // private to the worker's config, so the same shapes are reimplemented here. Default roots [] fails
+    // loadConfig, which throws on unrelated GitHub-auth problems). `delimitedList`/`nonNegativeInt` were
+    // private to the worker's config when this was written, so the same shapes are reimplemented here; both
+    // are exported now (`nonNegativeInt` since #880, for the poller). Default roots [] fails
     // closed: no folder passes the allowlist, so an AI-invoked dispatch_run refuses everything
     // (DES-AI-TRIGGER-FLOW-GATE). Default per-hour cap 3 (DES-ADMIN-VIA-PI-EXTENSION).
     dispatchRunRoots: (env.PI_DISPATCH_RUN_ROOTS ?? "")

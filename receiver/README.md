@@ -41,8 +41,10 @@ Who may fire a trigger is decided by your forge. See
 Configuration comes from the environment (the worker's `.env.example` lists all of it). The main settings
 are `WEBHOOK_SECRET`, `VALKEY_URL` and `VALKEY_PASSWORD`, `PI_TRIGGERS_FILE`, `RECEIVER_PORT` and
 `RECEIVER_BIND`, `POLL_REPOS` with `POLL_INTERVAL_SECONDS` for polling, `GITHUB_INGEST` to say whether
-GitHub arrives by webhook, by polling or both, and each forge's token and webhook secret (see its setup guide). It needs `@edgehero/pi-dispatch` of the same major
-version, which it installs as a dependency.
+GitHub arrives by webhook, by polling or both, and each forge's token and webhook secret (see its setup
+guide). It installs `@edgehero/pi-dispatch` as a dependency and needs that package from its own release, so
+install the two at the same version: an older one can lack what the receiver imports, and `poll` then stops
+at start.
 
 Setup guides: [GitHub](https://github.com/edgehero/pi-dispatch/blob/main/docs/github.md),
 [GitLab](https://github.com/edgehero/pi-dispatch/blob/main/docs/gitlab.md),
