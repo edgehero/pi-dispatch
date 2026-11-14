@@ -87,6 +87,21 @@
  * A fresh poller must not replay a repo's backlog -- a label applied months ago was a human approval
  * for THAT moment's issue text and budget, not a standing order; the operator arms polling from now.
  *
+ * A POLLER STARTED AGAIN (issue #880) gets the same rule once its stop outlasts the catch-up horizon
+ * (POLL_CATCHUP_MINUTES, default 60). Before a repo's first poll in this process, the poller reads how
+ * long ago its last full poll of that repo finished: touchRepo renews the whole family to
+ * CURSOR_TTL_SECONDS at the end of every successful repo poll, so CURSOR_TTL_SECONDS minus the events
+ * cursor's remaining TTL IS that time. Inside the horizon the feeds resume from their cursors and catch
+ * up (`poll_resumed`, saying how far back); past it the family is deleted and every feed re-arms through
+ * its own first-boot branch above (`poll_rearmed`). Before this, any restart inside the 35-day TTL
+ * resumed every feed from where it stopped (up to five pages of label events, every comment since),
+ * including the events a webhook receiver had already run while the poller was down -- `poll-e<id>`
+ * and a delivery GUID never share a jobId, and the 10-minute semantic window was long past. The check
+ * runs when a repo JOINS the roster (boot, or a repo the App installation lists again) and never per
+ * cycle: inside a running poller, a rate-limit sleep (up to about an hour) or one repo's outage is a
+ * gap the cursors exist to close, and re-arming there would drop events the poller was always going to
+ * catch up on.
+ *
  * WHICH REPOS: POLL_REPOS wins when set (see poller-config.mjs). With GITHUB_AUTH_SOURCE=app and no
  * POLL_REPOS, the App installation's repository list is the source of truth, refreshed every
  * DISCOVERY_EVERY cycles so an operator who installs the App on a new repo gets polling without a
@@ -126,6 +141,10 @@ const API_URL = "https://api.github.com";
 // lengthening the retention cannot leave the cursor the shorter of the poller's two dedup layers -- see the header's
 // cursor/TTL section.
 export const CURSOR_TTL_SECONDS = FORGE_JOB_RETENTION_S + 4 * 86_400;
+// The catch-up horizon's ceiling, in minutes (issue #880): the cursor family's own lifetime. A family older than its
+// TTL is already gone, so a horizon at or past this resumes every cursor that still exists, which is the poller's
+// behaviour from before the horizon existed, and startPoller then reads nothing to decide it.
+export const CATCH_UP_CAP_MINUTES = CURSOR_TTL_SECONDS / 60;
 // Installation repo-list refresh cadence, in cycles (~10 minutes at the default interval): fresh
 // enough that a newly installed repo starts polling soon, cheap enough to be invisible in the quota.
 const DISCOVERY_EVERY = 10;
@@ -288,6 +307,27 @@ export async function startPoller(env = process.env, deps = {}) {
 
 	out({ event: "poller_started", repos: repos.length, intervalSeconds: cfg.intervalSeconds, valkey: cfg.valkeyUrl, discovery: cfg.repos === null });
 
+	// The catch-up horizon (issue #880; the header's "A POLLER STARTED AGAIN"), run for every repo as it joins the
+	// roster. A check that cannot run leaves its repo in `unchecked`, and such a repo is SKIPPED, loudly, and checked
+	// again before each cycle would poll it: polling it would resume from cursors nobody dated, which is the replay
+	// the check exists to refuse. A repo checked late measures its gap late, so the time Valkey was failing counts
+	// toward the horizon, the safe direction.
+	const horizonMinutes = Math.min(cfg.catchUpMinutes, CATCH_UP_CAP_MINUTES);
+	const unchecked = new Set();
+	const checkJoining = async (joining) => {
+		if (horizonMinutes >= CATCH_UP_CAP_MINUTES) return;
+		for (const repo of joining) {
+			try {
+				await catchUpOrRearm(ctx, repo, horizonMinutes);
+				unchecked.delete(repo);
+			} catch (err) {
+				unchecked.add(repo);
+				out({ event: "poll_catchup_check_failed", repo, reason: err?.message });
+			}
+		}
+	};
+	await checkJoining(repos);
+
 	let stopped = false;
 	let wake;
 	const stopWaker = new Promise((resolve) => {
@@ -322,8 +362,14 @@ export async function startPoller(env = process.env, deps = {}) {
 				if (cfg.repos === null && cycleNo > 0 && cycleNo % DISCOVERY_EVERY === 0) {
 					try {
 						const found = await discoverRepos(ctx, api);
-						if (found.length > 0) repos = found;
-						else out({ event: "poll_discovery_empty", kept: repos.length });
+						if (found.length > 0) {
+							// A repo the installation lists AGAIN may still hold a live family from before it left, and
+							// resuming that is the same replay as a restart's: it joins through the same check.
+							const joining = found.filter((r) => !repos.includes(r));
+							for (const r of unchecked) if (!found.includes(r)) unchecked.delete(r);
+							repos = found;
+							await checkJoining(joining);
+						} else out({ event: "poll_discovery_empty", kept: repos.length });
 					} catch (err) {
 						if (err instanceof RateLimited) rateResetMs = err.resetMs;
 						else out({ event: "poll_discovery_failed", reason: err?.message });
@@ -333,6 +379,10 @@ export async function startPoller(env = process.env, deps = {}) {
 				if (rateResetMs === null) {
 					for (const repo of repos) {
 						if (stopped) break; // graceful: finish the in-flight repo, not the whole roster
+						if (unchecked.has(repo)) {
+							await checkJoining([repo]);
+							if (unchecked.has(repo)) continue; // still undated: its line is written, its cursors stay untouched
+						}
 						try {
 							await pollRepo(ctx, api, repo, stats);
 						} catch (err) {
@@ -447,12 +497,54 @@ async function setWithTtl(ctx, key, value) {
 	await ctx.redis.set(key, value, "EX", CURSOR_TTL_SECONDS);
 }
 
+/** The whole family as one list: what touchRepo refreshes as a unit is, by construction, what a re-arm deletes. */
+function familyKeys(repo) {
+	return Object.values(keyNames(repo));
+}
+
 /** Refresh the whole key family together -- coherence over per-key precision (see module header). */
 async function touchRepo(ctx, repo) {
-	const k = keyNames(repo);
-	for (const key of [k.events, k.comments, k.prsArmed, k.prs, k.etagEvents, k.etagComments, k.etagPulls, k.reviews, k.etagReviews]) {
+	for (const key of familyKeys(repo)) {
 		await ctx.redis.expire(key, CURSOR_TTL_SECONDS);
 	}
+}
+
+/**
+ * The catch-up check for one repo joining the roster (issue #880; the header's "A POLLER STARTED AGAIN").
+ *
+ * The clock is the events cursor's TTL: touchRepo renews it with the family after every successful repo poll, and
+ * the events feed renews it on every write, so CURSOR_TTL_SECONDS minus what is left of it is how long ago the
+ * poller last finished a look at this repo. Rejected: a "last polled" key of its own, which would be one more key
+ * for the family to keep coherent, and which no family an older release wrote would have, where every release has
+ * written this cursor with this TTL. Clamped at 0, so a family written under a longer TTL (a release with a longer
+ * job retention, then a downgrade) reads as just polled, once.
+ *
+ * TTL -2 (no events cursor) or -1 (one with no expiry, which nothing here writes) leaves the age unknown, and an
+ * unknown age is treated as an old one: whatever is left of the family is deleted, because a comments cursor or a
+ * PR snapshot with no events cursor beside it is the partial family the header warns about, and resuming it would
+ * replay a gap nobody can measure. On a first boot nothing is there, DEL removes nothing and no line is written;
+ * the feeds' own `poll_armed` lines say it.
+ *
+ * Past the horizon the WHOLE family goes in ONE DEL, which Valkey runs atomically, so no half-deleted family is ever
+ * read (the armed marker without the sha hash would read every open PR as opened). The ETags go with it: keeping
+ * them saves one full body per endpoint on the arming cycle, which never sends a validator anyway, and would leave
+ * a mix of state no branch was written for (the comments validator answered a `since=` query that no longer
+ * exists). The `close-gate:<delivery>` counters stay: they count attempts on events the re-armed cursor is already
+ * past, so nothing reads them again, and their own one-day TTL removes them.
+ *
+ * Throws on a Valkey failure, for the caller to keep the repo out of the cycle until a check succeeds.
+ */
+async function catchUpOrRearm(ctx, repo, horizonMinutes) {
+	const ttl = await ctx.redis.ttl(keyNames(repo).events);
+	const stoppedSeconds = Number.isInteger(ttl) && ttl >= 0 ? Math.max(0, CURSOR_TTL_SECONDS - ttl) : null;
+	const stoppedMinutes = stoppedSeconds === null ? null : Math.floor(stoppedSeconds / 60);
+	// 0 is "never catch up", not "catch up on a gap of 0 seconds": a restart inside the same second re-arms too.
+	if (stoppedSeconds !== null && horizonMinutes > 0 && stoppedSeconds <= horizonMinutes * 60) {
+		ctx.out({ event: "poll_resumed", repo, stoppedMinutes, horizonMinutes });
+		return;
+	}
+	const removed = await ctx.redis.del(...familyKeys(repo));
+	if (removed > 0) ctx.out({ event: "poll_rearmed", repo, stoppedMinutes, horizonMinutes });
 }
 
 /** Second-precision ISO (GitHub's own timestamp shape), so cursor comparisons never mix precisions. */

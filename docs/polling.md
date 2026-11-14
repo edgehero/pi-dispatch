@@ -97,6 +97,21 @@ than one expiring under the other.
 are initialized to the current position without enqueuing anything. A label applied months ago was a
 human approval for that moment's issue text and that moment's budget, not a standing order.
 
+A poller started again after a stop gets the same treatment once the stop is longer than
+`POLL_CATCHUP_MINUTES`, an hour by default. When it starts, it works out for each repository how long ago
+it last finished polling it: every successful poll renews the cursors' 35 days, so what is left of them
+gives the time. A repository last polled longer ago than the setting allows has its cursors cleared and
+starts from now, with a `poll_rearmed` line that names it and says how many minutes it was stopped.
+Nothing that happened in the gap starts a job, including events a webhook receiver already ran while the
+poller was down. A shorter stop, a host restart say, catches up on what it missed, with a `poll_resumed`
+line saying how many minutes back it reached. `0` never catches up. A repository the App installation
+lists again after leaving it is checked the same way when it comes back.
+
+The check runs only when a repository joins the poller, so a rate limit sleep or one repository's outage
+inside a running poller is still caught up on afterwards, however long it lasted. If Valkey cannot answer
+the check, that repository is skipped with a `poll_catchup_check_failed` line and checked again before
+each cycle, and it is never polled from cursors whose age is unknown.
+
 **Dedup without a delivery id.** Polling has no `X-GitHub-Delivery`, so each source mints a
 deterministic stand in that survives a retried cycle: `poll-e<eventId>`, `poll-c<commentId>`,
 `poll-pr<number>-<headSha7>` and `poll-rv<reviewId>`. The PR id is keyed on the sha so a retried cycle
@@ -175,12 +190,17 @@ An App made with `--no-webhook` can take webhooks once you have a public URL for
    steering: a comment can reach such a run twice, and once it has ended, the other copy of an event can start it again
    ([steering.md](steering.md#per-forge)). Keep the overlap short.
 
+If you start the poller again later after more than `POLL_CATCHUP_MINUTES` (an hour by default), it starts from now
+and acts on none of the events the webhook handled meanwhile; sooner than that it catches up on them, and an event the
+webhook ran more than ten minutes before can then start a second job.
+
 ## Reference
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `POLL_REPOS` | unset | comma separated `owner/name`, deduplicated. Unset means discover from the App installation, and is a boot refusal under any auth source but `app` |
 | `POLL_INTERVAL_SECONDS` | 60 | seconds between cycles, floored at 30 (a positive value below it is raised; 0, a negative, a fraction or junk refuses at boot), raised further by GitHub's own `x-poll-interval` |
+| `POLL_CATCHUP_MINUTES` | 60 | how long a poller may have been stopped and still catch up when it starts again; a repository last polled longer ago starts from now (see [How it works](#how-it-works)). `0` never catches up. 50400 (35 days, the cursors' lifetime) or more always resumes, as the poller did before this setting; a negative, a fraction or junk refuses at boot |
 | `RECEIVER_IDENTITY_RETRY_SECONDS` | 600 | how long the boot's identity lookup retries a transient failure (a 502, a refused connection, GitHub mid-restart) before exiting 1 for the supervisor, floored at 60 with the same raise-or-refuse rules; the poller's gate and `serve`'s arms share the one window |
 
 `WEBHOOK_SECRET`, `RECEIVER_PORT` and `RECEIVER_BIND` are `serve` concerns and `poll` uses none of

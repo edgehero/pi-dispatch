@@ -26,13 +26,20 @@
  *   - POLL_INTERVAL_SECONDS: the cycle delay, default 60, floored at 30. The floor is a courtesy to
  *     GitHub's polling guidance (the API asks pollers to respect `X-Poll-Interval`, typically 60s);
  *     a typo'd `1` must not turn the harness into a hammer.
+ *   - POLL_CATCHUP_MINUTES: the catch-up horizon (issue #880), default 60. A repository whose last full poll
+ *     finished longer ago than this when the poller starts is re-armed from now instead of resumed (see the
+ *     poller's header). 0 is a sentinel, never catch up, which is why this is the non-negative parse and not
+ *     the interval's positive one. There is no refusal above the cursor TTL: a horizon at or past the TTL
+ *     means exactly what the operator asked, catch up as far as the stored cursors reach, so the poller
+ *     clamps it there (`CATCH_UP_CAP_MINUTES`) rather than this loader refusing a value that is not wrong.
+ *     The cap lives in poller.mjs beside the TTL it is made of; importing it here would make a cycle.
  *
  * Errors are tagged `piDispatchConfig` (shared `configError`), so the receiver bin's entryExitCode
  * maps them to EXIT_POLICY (2) and a supervisor never restart-loops a config that cannot parse.
  */
 
 import { existsSync, readFileSync } from "node:fs";
-import { configError, positiveInt } from "@edgehero/pi-dispatch/config";
+import { configError, nonNegativeInt, positiveInt } from "@edgehero/pi-dispatch/config";
 import { loadReceiverConfig } from "./config.mjs";
 
 // Never a real secret and never returned: it exists only to satisfy loadReceiverConfig's fail-loud
@@ -41,13 +48,16 @@ const PLACEHOLDER_SECRET = "poller-has-no-webhook-to-verify";
 
 const POLL_INTERVAL_FLOOR_SECONDS = 30;
 const POLL_INTERVAL_DEFAULT_SECONDS = 60;
+// An hour (issue #880): long enough for a host restart, an upgrade or a supervisor's restart loop to catch up
+// on what it missed, short of the days after which a label is no longer an approval for that moment.
+const POLL_CATCHUP_DEFAULT_MINUTES = 60;
 
 /**
  * Parse the poller's config from `env`. Filesystem access is injected (`readFile`, `fileExists`) and
  * forwarded to the receiver loader, so the whole thing is hermetically testable.
  *
- * Returns `{ valkeyUrl, triggers, github, repos, intervalSeconds, identityRetryWindowMs }` -- and
- * deliberately nothing else.
+ * Returns `{ valkeyUrl, triggers, github, repos, intervalSeconds, catchUpMinutes, identityRetryWindowMs }` --
+ * and deliberately nothing else.
  * `webhookSecret`, `port`, `bind` and the other-forge blocks are receiver-only concerns: the poller
  * binds no port and speaks only GitHub (the other forges' producers stay webhook-armed).
  * `repos === null` means "discover from the App installation each boot" and is only reachable when
@@ -77,6 +87,8 @@ export function loadPollerConfig(env = process.env, { readFile = readFileSync, f
 		github: base.github, // validated by the shared loadGitHubAuth, exactly as serve validates it
 		repos,
 		intervalSeconds: Math.max(POLL_INTERVAL_FLOOR_SECONDS, positiveInt(env, "POLL_INTERVAL_SECONDS", POLL_INTERVAL_DEFAULT_SECONDS)),
+		// Unclamped here; startPoller caps it at the cursor TTL (see the header's POLL_CATCHUP_MINUTES note).
+		catchUpMinutes: nonNegativeInt(env, "POLL_CATCHUP_MINUTES", POLL_CATCHUP_DEFAULT_MINUTES),
 		// Passed THROUGH the receiver loader rather than re-parsed: one parse, one floor (issue #318).
 		// The poller's boot identity gate is the same hard-fail gate serve has, so it retries under the
 		// same window -- a pure-polling deployment loses deliveries to a stopped process just as surely.
