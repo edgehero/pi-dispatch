@@ -289,13 +289,18 @@ queued: an older BullMQ need not read what a newer one wrote. The release notes 
 
 Release numbers come from the git tags.
 
+### Next release
+
+| Store | What changed, and what an older release does with it | Guide |
+|---|---|---|
+| `.env` | `GITHUB_INGEST` says which transport carries GitHub (#879): `poll` makes `pi-dispatch-receiver serve` mount no GitHub route and need no `WEBHOOK_SECRET`, `webhook` makes `poll` refuse to start, and `pi-dispatch setup github --no-webhook` writes `poll` (a later run with a webhook turns it into `both`). A receiver older than this release ignores the line and decides as before, so under `poll` its `serve` still refuses to start without `WEBHOOK_SECRET` wherever your triggers name github or `GITHUB_AUTH_SOURCE` is set: move the receiver with the workers. An existing `.env` keeps what it says and boots as before; where only a `GITHUB_AUTH_SOURCE=gh` line makes `serve` serve GitHub, `pi-dispatch doctor` says so and that the line may go. A new scaffold carries that line commented out, so a new deployment's receiver serves GitHub only once a GitHub rule exists when it starts: its first GitHub trigger, added while it runs, takes webhooks after a restart, and the receiver logs `github_rules_unserved` until then | [polling.md](polling.md) |
+
 ### 5.2.1
 
 | Store | What changed, and what an older release does with it | Guide |
 |---|---|---|
 | `triggers.json`, secret bundles, the overlay `mcp.json` and `PI_FORWARD_ENV` | The worker now writes `PI_JOB_SIZE_CPUS` and `PI_JOB_SIZE_MEMORY_MIB` into every job (#865), so both names are reserved: a `run.secrets` key or a bundle's `endpoints` key with either name is refused when the file loads, and `PI_FORWARD_ENV` naming either stops the worker at boot. A project secret bundle whose resolver returns a variable of either name is refused when each job of that project is picked up (`secret-name-reserved`, before anything is spent; the worker log names the variable, and `pi-dispatch doctor --secrets`, which resolves the bundles, fails its bundle line), so every job of the project refuses until it is renamed in the secrets manager. An overlay `mcp.json` server that references either name is refused for the jobs that name it (`mcp-secret-reserved`). Rename such a variable before you upgrade. An older worker sets neither name and passes such a value through | [sizing.md](sizing.md#how-many-cpus-a-jobs-tools-see) |
 | `doctor:loads:<name>` in Valkey | Each flow row carries `basis`, a short digest of the trigger fields doctor judged its answer from (#869), and the trigger page and a fresh sandbox answer from a row only where it matches the triggers file they read. The record stays `"v": 1`. An older console drops the field and reads every row as before. A row an older doctor wrote has none and is read as before too, and a host keeps writing such rows until it runs this release | [console.md](console.md#what-a-triggers-jobs-get) |
-| `.env` | `GITHUB_INGEST` says which transport carries GitHub (#879): `poll` makes `pi-dispatch-receiver serve` mount no GitHub route and need no `WEBHOOK_SECRET`, `webhook` makes `poll` refuse to start, and `pi-dispatch setup github --no-webhook` writes `poll`. A receiver older than this release ignores the line and decides as before, so under `poll` its `serve` still refuses to start without `WEBHOOK_SECRET` wherever your triggers name github or `GITHUB_AUTH_SOURCE` is set: move the receiver with the workers. A new scaffold carries `GITHUB_AUTH_SOURCE=gh` commented out; an existing `.env` keeps its line, which `pi-dispatch doctor` names when it is what makes `serve` ask for a secret | [polling.md](polling.md) |
 
 ### 5.2.0
 
