@@ -1,7 +1,7 @@
 {
   "card": "ConnectionsScreen",
   "pr": 784,
-  "words": "b2559fb9e4c668ca7c1ee59264ebaea95cc70468c728228e4a4ab76e147f1de5",
+  "words": "b591d74e05ec27db980af2262b891365aa409083140882b8bb7d6db9b97ef499",
   "elements": [
     {"el":"p-connection-problems","kind":"panel","status":"new","source":"admin/src/console/panels/connections.mjs#connectionsProblems","golden":["panels/connections-proxy.operator","panels/connections-populated.viewer"]},
     {"el":"p-forges","kind":"panel","status":"new","source":"admin/src/console/panels/connections.mjs#connectionsForges","golden":["panels/connections-proxy.operator","panels/connections-populated.viewer"],"shows":["X-GitHub-Delivery","HMAC-SHA256","Developer or above"]},
@@ -38,6 +38,7 @@
     {"el":"GitHub is enabled as the receiver decides: GITHUB_INGEST when it is set, else a trigger or an explicit auth source","kind":"readme","status":"new","panel":"p-forges","source":"admin/src/connections-view.mjs#forgeConnections","holds":"githubIngestState(env)"},
     {"el":"Under GITHUB_INGEST=poll GitHub's row reads polled: no webhook, its path answers 404, its auth, polling and who may fire stay","kind":"state","status":"new","panel":"p-forges","source":"admin/src/console/panels/connections.mjs#connectionsForges","golden":["panels/connections-github-polled.operator"],"shows":["polled","GITHUB_INGEST=poll","No webhook:","mounts no GitHub route","answers 404","App installation repositories","write access"]},
     {"el":"A GITHUB_INGEST the receiver refuses leads the problems in the missing secret's place","kind":"state","status":"new","panel":"p-connection-problems","source":"admin/src/connections-view.mjs#connectionsProblems","holds":"GITHUB_INGEST is not webhook, poll or both","golden":["panels/connections-github-ingest-refused.operator"],"shows":"GITHUB_INGEST is not webhook, poll or both"},
-    {"el":"For GitHub, the GITHUB_INGEST word","kind":"provides","status":"new","source":"admin/src/connections-view.mjs#modelConnections","holds":"\"inferred\""}
+    {"el":"For GitHub, the GITHUB_INGEST word","kind":"provides","status":"new","source":"admin/src/connections-view.mjs#modelConnections","holds":"\"inferred\""},
+    {"el":"An armed forge whose live receivers report but none serves it is told a restart takes its webhooks","kind":"state","status":"new","panel":"p-forges","source":"admin/src/console/panels/connections.mjs#RESTART_TO_SERVE","golden":["panels/connections-receiver-restart.operator"],"shows":["Live receivers do not serve github yet","Restart the receiver service to take its webhooks."]}
   ]
 }

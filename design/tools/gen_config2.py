@@ -755,7 +755,7 @@ A viewer never sees this page.
 
 **The server provides.**
 - The blessed venues and the deployment defaults.
-- The forges whose events reach this deployment: a forge with its webhook secret set, and GitHub where a new GitHub trigger would fire, by its webhook or by the poller under `GITHUB_INGEST`.
+- The forges whose events reach this deployment: a forge with its webhook secret set, and GitHub where a new GitHub trigger would fire, by its webhook or by the poller under `GITHUB_INGEST`. Where that trigger would be the first to make the receiver serve GitHub, the form says to restart the receiver once it is added.
 - The flows found in the repository skill tiers, for suggestions.
 - For a preview: the entry as JSON, the diff against the file, the plan summary, the undo plan and the ticket.
 - For a refusal: the field and the loader's sentence.
@@ -818,7 +818,7 @@ A viewer sees the tables, with no Remove or forms.
   - An unconfigured forge collapses to one line saying its path answers 404. GitHub is enabled as the receiver decides: by `GITHUB_INGEST` when it is set (`webhook` or `both`), else by a trigger or an explicit auth source; each other forge by any of its receiver variables. GitHub's implicit default auth source is shown as such.
   - Under `GITHUB_INGEST=poll` GitHub's row reads polled rather than not configured: no webhook, so its path answers 404, while its auth, polling and who may fire stay. A `GITHUB_INGEST` the receiver refuses leads the problems in the missing secret's place.
   - Live receivers name their host, socket port, closed bind category and beat age. Complete receiver identities wrap within their section at phone widths, including unreadable observations. Each forge has its last taken/refused time and 24 UTC-hour counts by every outcome. Native disclosures show hourly counts. Unserved routes retain their last taken/refused times after their window counts reach zero; routes without history stay hidden.
-  - Warnings name an armed forge without a reported receiver, only-unauthorized traffic and any not-configured refusal; incomplete reads stay unknown.
+  - Warnings name an armed forge without a reported receiver, only-unauthorized traffic and any not-configured refusal; incomplete reads stay unknown. An armed forge whose live receivers report but none serves it is told a restart takes its webhooks, since a receiver arms a forge only when it starts.
 - **Egress.** The posture, the allowlist (first hosts, then "and N more"), and each host's proxy with its last doctor check.
 - **Provider API keys.** A permanent card lists configured provider slots, their safe source and the default badge. Add or Replace selects a provider explicitly, takes a new write-only value and previews the exact slot and shared-provider effects. Adding a key never changes the default provider. Native guides link directly to the official key pages for Anthropic, OpenAI, Google Gemini, OpenRouter and DeepSeek. Existing saved values are never shown.
 - **Model endpoints.** Each endpoint's host and port, whether it is keyless, fleet leases first and each host's own slots in use with beat age and scope. Per-machine aliases and unnamed workers publish host occupancy with no fleet bound; unread or absent publications stay unknown. Different shared bounds are flagged with “one server, one id”; independent per-machine capacities may differ. A banner covers the case where a host's own copy of the file does not load, quoting doctor.
