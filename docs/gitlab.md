@@ -34,7 +34,8 @@ boundary the next steps rely on.
 
 ```bash
 GITLAB_TOKEN=glpat-xxxxxxxxxxxx
-GITLAB_URL=https://gitlab.com          # your instance, if self-hosted
+# your instance, if self-hosted
+GITLAB_URL=https://gitlab.com
 ```
 
 There is no source to choose. `GITLAB_AUTH_SOURCE` exists, accepts only `pat`, and defaults to it: GitLab
@@ -56,7 +57,8 @@ strong:
 
 ```bash
 GITLAB_WEBHOOK_MODE=signature
-GITLAB_WEBHOOK_SECRET=whsec_...        # the "Signing token" GitLab shows you
+# the "Signing token" GitLab shows you
+GITLAB_WEBHOOK_SECRET=whsec_...
 ```
 
 or
@@ -74,7 +76,7 @@ pick the weaker one.
 mounts a forge's route, resolves its identity for the bot-loop guard, and requires its credentials only
 when your triggers name that forge. So no `WEBHOOK_SECRET` and no `gh` login are needed here, and `/`
 (the GitHub endpoint) answers 404 rather than 401, because an endpoint that answers is one you could
-believe is armed. Add a `github` trigger later, or set `GITHUB_AUTH_SOURCE`, and both become required again,
+believe is armed. Add a `github` trigger later, or set `GITHUB_AUTH_SOURCE`, and both become required again from the receiver's next start,
 as they should. The exception is GitHub by polling ([polling.md](polling.md)): set `GITHUB_INGEST=poll`, which
 `pi-dispatch setup github --no-webhook` writes for you, and the receiver keeps serving GitLab alone from the same
 `.env`.

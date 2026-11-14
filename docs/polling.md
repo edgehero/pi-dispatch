@@ -20,9 +20,11 @@ The cost is latency. A webhook fires in about a second; a cycle is 60 seconds by
 ```
 # .env
 POLL_REPOS=acme/web,acme/api
-GITHUB_AUTH_SOURCE=pat        # or app, see below
+# or app, see below
+GITHUB_AUTH_SOURCE=pat
 GITHUB_PAT=github_pat_...
-GITHUB_INGEST=poll            # GitHub comes from the poller, so serve mounts no GitHub route
+# GitHub comes from the poller, so serve mounts no GitHub route
+GITHUB_INGEST=poll
 VALKEY_URL=redis://127.0.0.1:6379
 ```
 
@@ -173,7 +175,8 @@ An App made with `--no-webhook` can take webhooks once you have a public URL for
    unticked for now. If `.env` already has a `WEBHOOK_SECRET` that another GitHub webhook uses, give the App that
    value: the receiver checks every GitHub delivery against that one secret. Otherwise make a new one and put it in
    `WEBHOOK_SECRET`. The wizard wrote none for this App. Then set `GITHUB_INGEST=both` in `.env` (the wizard wrote
-   `poll`), so the receiver serves GitHub while the poller keeps running.
+   `poll`), so the receiver serves GitHub while the poller keeps running. A new App made with
+   `pi-dispatch setup github --webhook-url` over this `.env` writes `both` itself, and its secret.
 2. Start `pi-dispatch-receiver` where that URL reaches it. If one already runs, restart it: it decides whether to
    serve GitHub, and reads `WEBHOOK_SECRET`, only when it starts. Until then a GitHub delivery gets a 404, or a 401
    against an older secret.

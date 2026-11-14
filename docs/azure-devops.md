@@ -38,10 +38,14 @@ comfortable with it, this is the arm not to enable.
 
 ```bash
 AZURE_ORG_URL=https://dev.azure.com/your-org
-AZURE_TOKEN=...                  # a PAT for a dedicated identity -- see the scope trade-off
-AZURE_WEBHOOK_MODE=basic         # or: header
-AZURE_WEBHOOK_SECRET=...         # for basic: the base64 of "user:password" you set on the subscription
-# AZURE_WEBHOOK_HEADER=X-Pi-Secret   # required only when MODE=header
+# a PAT for a dedicated identity -- see the scope trade-off
+AZURE_TOKEN=...
+# or: header
+AZURE_WEBHOOK_MODE=basic
+# for basic: the base64 of "user:password" you set on the subscription
+AZURE_WEBHOOK_SECRET=...
+# required only when MODE=header
+# AZURE_WEBHOOK_HEADER=X-Pi-Secret
 ```
 
 `AZURE_AUTH_SOURCE` accepts only `pat` and defaults to it. Azure DevOps has no App or installation-token
@@ -67,7 +71,7 @@ An Azure-only deployment needs nothing from GitHub. Every forge arm is condition
 forge's route, resolves its identity for the bot-loop guard, and requires its credentials only when your
 triggers name that forge. So no `WEBHOOK_SECRET` and no `gh` login are needed here, and `/` (the GitHub
 endpoint) answers 404 rather than 401, because an endpoint that answers is one you could believe is armed.
-Add a `github` trigger later, or set `GITHUB_AUTH_SOURCE`, and both become required again, as they should,
+Add a `github` trigger later, or set `GITHUB_AUTH_SOURCE`, and both become required again from the receiver's next start, as they should,
 unless `GITHUB_INGEST=poll` says GitHub comes from the poller ([polling.md](polling.md)).
 
 Then start it: `pi-dispatch-receiver` from your deployment folder, where `serve` is the default command, or

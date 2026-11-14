@@ -155,7 +155,8 @@ and reference it as `"apiKey": "$MY_PROVIDER_KEY"`:
 
 ```bash
 # .env
-PI_FORWARD_ENV=MY_PROVIDER_KEY      # comma-separated NAMES; forwarded by exact -e NAME=VALUE, never a pass-through
+# comma-separated NAMES; forwarded by exact -e NAME=VALUE, never a pass-through
+PI_FORWARD_ENV=MY_PROVIDER_KEY
 ```
 
 **Upgrade: models the worker can see.** Since issue #502 the worker checks, before a job spends anything, that

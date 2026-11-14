@@ -43,11 +43,16 @@ mkdir -p ~/.pi-dispatch/sessions && chmod 700 ~/.pi-dispatch/sessions
 
 ```bash
 PI_SESSIONS_DIR=/home/you/.pi-dispatch/sessions
-PI_SESSIONS_TTL_DAYS=14        # default 14; 0 = keep forever
-PI_SESSION_MAX_BYTES=8388608   # default 8 MiB; 0 = no cap
-PI_SESSION_MAX_AGE_DAYS=       # unset/0 = no bound; how old the conversation itself may be
-PI_SESSION_MAX_RESUME_CHAIN=   # unset/0 = no bound; how many times in a row one key may be resumed
-PI_SESSION_MAX_CONTEXT_PCT=    # unset = no bound; 1-100, e.g. 80: refuse a resume into a context already this full
+# default 14; 0 = keep forever
+PI_SESSIONS_TTL_DAYS=14
+# default 8 MiB; 0 = no cap
+PI_SESSION_MAX_BYTES=8388608
+# unset/0 = no bound; how old the conversation itself may be
+PI_SESSION_MAX_AGE_DAYS=
+# unset/0 = no bound; how many times in a row one key may be resumed
+PI_SESSION_MAX_RESUME_CHAIN=
+# unset = no bound; 1-100, e.g. 80: refuse a resume into a context already this full
+PI_SESSION_MAX_CONTEXT_PCT=
 ```
 
 `pi-dispatch doctor` reports the store whenever a trigger arms the flag, and fails that check when
