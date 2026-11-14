@@ -952,7 +952,7 @@ export const STEERING_SERVICE_KEYS = Object.freeze({
  * rule (this shell's value where it sets one, else the deployment `.env`'s, as `panelEnv` does for the panel). Not
  * service keys: no service reads them, so they are kept out of SERVICE_ENV_KEYS and its "set in this shell only" line.
  */
-export const CONSOLE_ENV_KEYS = Object.freeze(["PI_CONSOLE_LISTEN", "PI_CONSOLE_TOKENS_FILE", "PI_CONSOLE_ALLOWED_HOSTS", "PI_CONSOLE_READ_ONLY", "PI_CONSOLE_BIND_PUBLIC", "PI_CONSOLE_IDLE_MINUTES", "PI_CONSOLE_MAX_HOURS", "PI_CONSOLE_MAX_STREAMS"]);
+export const CONSOLE_ENV_KEYS = Object.freeze(["PI_CONSOLE_LISTEN", "PI_CONSOLE_TOKENS_FILE", "PI_CONSOLE_ALLOWED_HOSTS", "PI_CONSOLE_READ_ONLY", "PI_CONSOLE_BIND_PUBLIC", "PI_CONSOLE_IDLE_MINUTES", "PI_CONSOLE_MAX_HOURS", "PI_CONSOLE_MAX_STREAMS", "PI_CONSOLE_LAN", "PI_CONSOLE_LAN_PORT"]);
 
 /**
  * Issue #471: the variables doctor reads from THIS shell on purpose, each with why, so the bolt test can tell a read
@@ -5808,6 +5808,10 @@ export function consoleChecks(env, { cwd = process.cwd(), fs = nodeFs, uid = pro
 	if (bindPublic && !listen.refusal && !listen.loopback) {
 		const devices = devicesState({ dir: consoleDevicesDir(path), fs, uid, platform });
 		if (devices.live > 0) checks.push({ ok: false, warn: true, label: `console: ${devices.live} remembered device${devices.live === 1 ? "" : "s"} on a console that listens on a non-loopback address, where cookies cross the network in plain HTTP`, fix: "listen on a loopback address and reach the console through a tunnel, or put it behind a proxy that terminates TLS" });
+	}
+	// Issue #882: the opt-in listener on the local network (admin/src/console/lan.mjs), beside the loopback one: warned every time, as a public bind is.
+	if (env.PI_CONSOLE_LAN === "1") {
+		checks.push({ ok: false, warn: true, label: "console: PI_CONSOLE_LAN=1 also answers on this host's local network as pi-dispatch.local, in plain HTTP: every device there reaches the sign-in page, and a sign-in there crosses the network unencrypted (no browser is remembered on it)", fix: "keep it only on a network you trust, or unset PI_CONSOLE_LAN and reach the console through ssh -L" });
 	}
 	if (bindPublic) {
 		checks.push({ ok: false, warn: true, label: "console: PI_CONSOLE_BIND_PUBLIC=1 lets the console listen on a non-loopback address, where tokens and session cookies cross the network in plain HTTP", fix: "keep it only behind a TLS proxy on a network you trust; otherwise unset PI_CONSOLE_BIND_PUBLIC, listen on 127.0.0.1, [::1] or a unix: socket, and reach it with ssh -L" });

@@ -48,7 +48,7 @@ const rendered = renderPanelStates();
 test("the panel goldens are the states the cards name, by name: the ledgers and the width check read them so", () => {
   const confirm = ["previewing", "preview", "preview-paid", "preview-danger", "unchanged", "bulk-preview", "bulk-results", "refused-preview", "refused-confirm", "preview-long-line", "preview-long-names", "preview-long-queue", "refused-partial", "refused-person", "preview-cancel-queued", "refused-started", "done", "done-rerun", "done-no-undo"].map((s) => `confirm-${s}.operator`);
   const live = ["reconnecting", "not-live", "signed-out", "stale", "kept-still"].map((s) => `live-${s}.operator`);
-  const signIn = [...ENDED_REASONS.map((r) => `login-ended-${r}.anonymous`), ...["wrong", "code", "rate", "tokens", "audit", "other"].map((k) => `login-refused-${k}.anonymous`), "login-unreachable.anonymous"];
+  const signIn = [...ENDED_REASONS.map((r) => `login-ended-${r}.anonymous`), ...["wrong", "code", "rate", "tokens", "audit", "other"].map((k) => `login-refused-${k}.anonymous`), "login-unreachable.anonymous", "login-lan.anonymous"];
   // The link page: its two states the script switches to, then each notice it can show (signin.mjs LINK_NOTICES).
   const link = ["login-code-used.anonymous", "login-code-expired.anonymous", "login-code-signed-in.anonymous", "login-code-nocode.anonymous", ...["rate", "tokens", "audit", "other"].map((k) => `login-code-refused-${k}.anonymous`), "login-code-unreachable.anonymous"];
   // The overview's states (issue #737): all clear and the first run for both roles where the role changes the page, the

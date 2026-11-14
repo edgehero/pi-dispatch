@@ -1132,6 +1132,8 @@ const DRAW = {
   ...Object.fromEntries(["wrong", "code", "rate", "tokens", "audit"].map((k) => [`login-refused-${k}.anonymous`, () => loginPage({ theme: null, notice: k, limits: LIMITS, listen: "localhost" })])),
   "login-refused-other.anonymous": () => noticeText(String(loginPage({ theme: null, notice: "other", limits: LIMITS, listen: "localhost" })), OTHER_REFUSAL),
   "login-unreachable.anonymous": () => loginPage({ theme: null, notice: "unreachable", limits: LIMITS, listen: "localhost" }),
+  // Issue #882: the page a phone or a second computer gets from the opt-in LAN listener, with the host able to show a window.
+  "login-lan.anonymous": () => loginPage({ theme: null, notice: null, limits: LIMITS, listen: "lan", approve: true }),
   // AccessStates: the one-time link's other two states; then each notice the link page can show (`LINK_NOTICES`): a
   // refusal is the used state with the notice that says why, except too many attempts, which the console answers
   // before it reads the code, so the link is not spent and the page keeps waiting; the console out of reach keeps

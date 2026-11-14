@@ -324,7 +324,9 @@ The admin extension binds no port. The optional sandbox gateway binds its own, o
 that serves a web page to manage the deployment ([`docs/console.md`](docs/console.md), `DES-OPERATOR-CONSOLE`,
 `REQ-CONSOLE-SECURITY`, `REQ-OPERATOR-CONSOLE-ACTIONS`). It never runs on the receiver, which faces the internet. It listens on `127.0.0.1:4790` by
 default, or on a unix socket at mode 0600, and refuses any other address unless you set `PI_CONSOLE_BIND_PUBLIC=1`
-(doctor then warns). It terminates no TLS: reach it from another machine through `ssh -L`.
+(doctor then warns). It terminates no TLS: reach it from another machine through `ssh -L`. Since issue #882
+`PI_CONSOLE_LAN=1` (off by default, doctor warns every time) adds a second listener on the host's network address,
+named `pi-dispatch.local` over mDNS, beside the loopback one, and its own entry below says what that opens.
 
 The threat model, and what answers each part:
 
@@ -351,6 +353,17 @@ The threat model, and what answers each part:
   dialled; a program in the job can send `Host: localhost` instead, so against a job the token is the barrier, and
   failed sign-ins are rate limited. Unix-socket mode removes the path, because no job mounts the socket, and is the
   recommended mode on Docker Desktop.
+- **The opt-in listener on the local network** (`PI_CONSOLE_LAN=1`, issue #882). It is plain HTTP, so everything on
+  it, a sign-in included, crosses the network unencrypted, and every device on that network reaches its sign-in page
+  (on a Mac on port 80, every network the Mac is on, a VPN included). Three things hold there. No browser is
+  remembered on it: the console decides by the socket a request arrived on, never by a header, so a request on that
+  listener that sends `Host: localhost` is still not remembered, and the page draws no Remember box. Signing in still
+  takes a token, a code only the deployment's account can mint, or a person at the host pressing Allow in a window that
+  names the requesting device's address. And the Host check holds as on loopback, with `pi-dispatch.local` and that
+  address added to the names the console answers to. The name is announced by the system's own tool (`dns-sd`,
+  `avahi-publish`) as a child of the console that stops with it. Another device can announce the same name; the
+  console logs that, and a person who wants to be sure of what they reach uses the address the banner prints, or an
+  SSH tunnel, which is also the only way to be remembered from another machine.
 - **A hostile page on another localhost port.** Browsers treat `localhost:3000` and the console as the same SITE (a
   site ignores ports), so a page there would ride a `SameSite=Strict` cookie. Every write needs
   `Sec-Fetch-Site: same-origin` exactly (`same-site` is refused), or, from a browser that does not send that header,

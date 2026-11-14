@@ -251,10 +251,20 @@ test("CONSOLE_ENV_KEYS is the contract's PI_CONSOLE_* set", () => {
 	// The PI_CONSOLE_* keys the CONSOLE reads. PI_CONSOLE_AUDIT_RETENTION_DAYS (issue #761) is not one, though named for
 	// it: the worker reads it (its retention sweep reaps the audit files), so it is a worker service key, and listed here
 	// it would make doctor judge a console on a deployment that only set how long the audit trail is kept.
-	assert.deepEqual([...CONSOLE_ENV_KEYS].sort(), ["PI_CONSOLE_ALLOWED_HOSTS", "PI_CONSOLE_BIND_PUBLIC", "PI_CONSOLE_IDLE_MINUTES", "PI_CONSOLE_LISTEN", "PI_CONSOLE_MAX_HOURS", "PI_CONSOLE_MAX_STREAMS", "PI_CONSOLE_READ_ONLY", "PI_CONSOLE_TOKENS_FILE"]);
+	assert.deepEqual([...CONSOLE_ENV_KEYS].sort(), ["PI_CONSOLE_ALLOWED_HOSTS", "PI_CONSOLE_BIND_PUBLIC", "PI_CONSOLE_IDLE_MINUTES", "PI_CONSOLE_LAN", "PI_CONSOLE_LAN_PORT", "PI_CONSOLE_LISTEN", "PI_CONSOLE_MAX_HOURS", "PI_CONSOLE_MAX_STREAMS", "PI_CONSOLE_READ_ONLY", "PI_CONSOLE_TOKENS_FILE"]);
 	assert.ok(WORKER_SERVICE_KEYS.includes("PI_CONSOLE_AUDIT_RETENTION_DAYS") && WORKER_SERVICE_KEYS.includes("PI_RUN_MIRROR_MAX_RUNS"));
 	const d = deployment();
 	assert.deepEqual(consoleChecks({ ...d.env, PI_CONSOLE_AUDIT_RETENTION_DAYS: "90" }, { cwd: d.cwd }), [], "no console line for the worker's key");
+});
+
+test("PI_CONSOLE_LAN=1 is warned every time: the console also answers on the local network in plain HTTP (#882)", () => {
+	const d = deployment();
+	const lines = consoleChecks({ ...d.env, PI_CONSOLE_LAN: "1" }, { cwd: d.cwd }).filter((c) => /PI_CONSOLE_LAN=1/.test(c.label));
+	assert.equal(lines.length, 1);
+	assert.equal(lines[0].warn, true);
+	assert.match(lines[0].label, /pi-dispatch\.local, in plain HTTP/);
+	assert.match(lines[0].fix, /ssh -L/);
+	assert.equal(consoleChecks({ ...d.env }, { cwd: d.cwd }).filter((c) => /PI_CONSOLE_LAN/.test(c.label)).length, 0, "nothing without it");
 });
 
 // Issue #708: whether a service unit keeps this deployment's console running, and whether the console answers.
