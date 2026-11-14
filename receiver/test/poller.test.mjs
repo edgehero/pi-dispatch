@@ -111,28 +111,41 @@ function fakeFetch(routes) {
 }
 
 /**
- * Map-backed redis fake exposing its state (kv/hashes/ttls) so cursors and TTLs are assertable. `ttls` holds the
- * TTL a key was last given and never counts down, so a test dates a family by seeding what TTL is LEFT of it
- * (`seedFamily`), which is exactly what Valkey's own TTL answers. `ttlFailures` makes the first n TTL reads throw,
- * Valkey refusing the catch-up check (issue #880).
+ * Map-backed redis fake exposing its state (kv/hashes/ttls) so cursors and TTLs are assertable. `ttls` holds the TTL
+ * a key was last GIVEN; `ttl()` answers what is LEFT of it under `clock`, the same clock object runPoller advances, so
+ * a TTL counts down as the poller sleeps, the way Valkey's does (issue #880's check reads that remainder). `setTtl`
+ * and `clearTtl` seed and remove one, and a plain SET clears it, as in Valkey. Keys are not evicted when their TTL
+ * runs out: no test here waits 35 days. `ttlFailures` makes the first n TTL reads answer a Valkey error reply.
  */
-function fakeRedis({ ttlFailures = 0 } = {}) {
+function fakeRedis({ ttlFailures = 0, clock = { ms: NOW } } = {}) {
 	const kv = new Map();
 	const hashes = new Map();
 	const ttls = new Map();
+	const expiresAt = new Map();
 	let failuresLeft = ttlFailures;
+	const setTtl = (key, ttl) => {
+		ttls.set(key, ttl);
+		expiresAt.set(key, clock.ms + ttl * 1000);
+	};
+	const clearTtl = (key) => {
+		ttls.delete(key);
+		expiresAt.delete(key);
+	};
 	return {
 		kv,
 		hashes,
 		ttls,
 		ttlReads: [],
 		dels: [],
+		setTtl,
+		clearTtl,
 		async get(key) {
 			return kv.has(key) ? kv.get(key) : null;
 		},
 		async set(key, value, ex, ttl) {
 			kv.set(key, String(value));
-			if (ex === "EX") ttls.set(key, ttl);
+			if (ex === "EX") setTtl(key, ttl);
+			else clearTtl(key);
 		},
 		async hgetall(key) {
 			return Object.fromEntries(hashes.get(key) ?? []);
@@ -146,17 +159,19 @@ function fakeRedis({ ttlFailures = 0 } = {}) {
 			hashes.get(key).set(String(field), String(value));
 		},
 		async expire(key, ttl) {
-			if (kv.has(key) || hashes.has(key)) ttls.set(key, ttl);
+			if (kv.has(key) || hashes.has(key)) setTtl(key, ttl);
 		},
-		// Valkey's TTL: -2 for a missing key, -1 for one with no expiry, else the seconds left.
+		// Valkey's TTL: -2 for a missing key, -1 for one with no expiry, else the seconds left, rounded as Valkey does.
+		// The failure is the kind the poller's client surfaces: its offline queue WAITS out a dropped connection, so
+		// what reaches the check is an error reply (a replica still loading, a password changed underneath it).
 		async ttl(key) {
 			this.ttlReads.push(key);
 			if (failuresLeft > 0) {
 				failuresLeft -= 1;
-				throw new Error("connect ECONNREFUSED 127.0.0.1:6379");
+				throw Object.assign(new Error("LOADING Valkey is loading the dataset in memory"), { name: "ReplyError" });
 			}
 			if (!kv.has(key) && !hashes.has(key)) return -2;
-			return ttls.has(key) ? ttls.get(key) : -1;
+			return expiresAt.has(key) ? Math.round((expiresAt.get(key) - clock.ms) / 1000) : -1;
 		},
 		// Valkey's DEL: any number of keys, answering how many existed.
 		async del(...keys) {
@@ -166,7 +181,7 @@ function fakeRedis({ ttlFailures = 0 } = {}) {
 				const existed = kv.has(key) || hashes.has(key);
 				kv.delete(key);
 				hashes.delete(key);
-				ttls.delete(key);
+				clearTtl(key);
 				if (existed) removed += 1;
 			}
 			return removed;
@@ -184,13 +199,16 @@ function fakeRedis({ ttlFailures = 0 } = {}) {
 
 /**
  * Boot the poller with everything faked and run exactly `cycles` cycles: the injected sleep counts
- * cycle boundaries, advances the fake clock, and calls stop() after the last one.
+ * cycle boundaries, advances the fake clock, and calls stop() after the last one. `clock` may be shared
+ * with the fake Redis so its TTLs count down with the sleeps (issue #880), and with a second runPoller to
+ * play a restart. `nap(ms, n)` says how far the clock moves in cycle n's wait: by default the whole wait,
+ * a part of it to stop the poller in the middle of it, more than it for a host that slept. `tokenFn`
+ * overrides the mint.
  */
-async function runPoller({ env = { POLL_REPOS: "o/r" }, cycles = 1, routes = [], redis = fakeRedis(), selfId = SELF, fsDeps = FS, queueFn: queueFnOver } = {}) {
+async function runPoller({ env = { POLL_REPOS: "o/r" }, cycles = 1, routes = [], clock = { ms: NOW }, redis = fakeRedis({ clock }), selfId = SELF, fsDeps = FS, queueFn: queueFnOver, nap = (ms) => ms, tokenFn = async () => "poll-token" } = {}) {
 	const queued = [];
 	const out = [];
 	const sleeps = [];
-	const clock = { ms: NOW };
 	const fetchFn = fakeFetch(routes);
 	let remaining = cycles;
 	let poller;
@@ -208,11 +226,11 @@ async function runPoller({ env = { POLL_REPOS: "o/r" }, cycles = 1, routes = [],
 		now: () => clock.ms,
 		random: () => 0.5,
 		selfIdFn: async () => selfId,
-		tokenFn: async () => "poll-token",
+		tokenFn,
 		fsDeps,
 		sleep: async (ms) => {
 			sleeps.push(ms);
-			clock.ms += ms;
+			clock.ms += nap(ms, sleeps.length);
 			remaining -= 1;
 			if (remaining <= 0) poller.stop();
 		},
@@ -369,7 +387,7 @@ test("a re-polled review does not fire twice, and the per-PR validator rides in 
 	assert.equal(reviewCalls[0].headers["if-none-match"], undefined, "arming must not send a validator");
 	assert.equal(reviewCalls[1].headers["if-none-match"], 'W/"r1"', "the armed cycle revalidates with the stored per-PR validator");
 	assert.equal(redis.hashes.get("poll:o/r:etag:reviews")?.get("9"), 'W/"r1"', "validators live in ONE hash keyed by PR number, so touchRepo can still expire the family as a unit");
-	assert.equal(redis.ttls.get("poll:o/r:cursor:reviews"), 35 * 24 * 3600, "the reviews cursor carries the same 35-day TTL as the rest of the family");
+	assert.equal(redis.ttls.get("poll:o/r:cursor:reviews"), 35 * 24 * 3600 + 60, "the reviews cursor carries the same 35-day TTL as the rest of the family, plus the wait (#880)");
 });
 
 test("a 304 on the open-PR list still sweeps reviews, taking its PR numbers from the snapshot hash", async () => {
@@ -489,10 +507,15 @@ test("first boot arms cursors from the seeded backlog and enqueues NOTHING -- ol
 test("cursor keys carry the ~35-day TTL (outliving the 31-day gh-* jobId retention)", async () => {
 	const routes = [
 		{ path: "/repos/o/r/issues/events", replies: [ghResponse(200, [EV201])] },
+		{ path: "/repos/o/r/pulls/9/reviews", replies: [ghResponse(200, [])] },
 		{ path: "/repos/o/r/pulls?state=open", replies: [ghResponse(200, [PR9A])] },
 	];
-	const { redis } = await runPoller({ cycles: 1, routes });
-	const ttl = 35 * 24 * 3600;
+	const { redis, out } = await runPoller({ cycles: 1, routes });
+	// Polled THROUGH: a repo that fails is not renewed at the end of the cycle (#880), and this test once passed on
+	// the TTLs the writes alone set, with the reviews sweep unrouted and the repo failing.
+	assertNoRepoFailure(out);
+	// Renewed at the end of the cycle to the TTL plus the 60-second wait before the next poll (issue #880).
+	const ttl = 35 * 24 * 3600 + 60;
 	for (const key of ["poll:o/r:cursor:events", "poll:o/r:cursor:comments", "poll:o/r:cursor:prs", "poll:o/r:prs"]) {
 		assert.equal(redis.ttls.get(key), ttl, `${key} must expire with the rest of its family`);
 	}
@@ -514,18 +537,18 @@ test("the cursor TTL is derived from the gh-* job retention and strictly outlive
 const FAMILY = ["cursor:events", "cursor:comments", "cursor:prs", "prs", "etag:events", "etag:comments", "etag:pulls", "cursor:reviews", "etag:reviews"].map((k) => `poll:o/r:${k}`);
 
 /**
- * The family a poller leaves behind when it stops `stoppedSeconds` before NOW: every key present, each dated by
- * what is left of its TTL (touchRepo renewed them together at the end of the last poll). Events cursor 100, the
- * comments cursor at the stop, PR 9 open at sha a, the reviews cursor 500, and an old validator on every endpoint.
+ * The family a poller leaves behind when its next poll has been due for `stoppedSeconds` at NOW: every key present,
+ * each with CURSOR_TTL_SECONDS minus that left (a negative `stoppedSeconds` is a restart inside the planned wait).
+ * Events cursor 100, the comments cursor at the stop, PR 9 open at sha a, the reviews cursor 500, and an old
+ * validator on every endpoint. The redis must run on a clock at NOW, as runPoller's default one does.
  */
 function seedFamily(redis, stoppedSeconds) {
-	const left = CURSOR_TTL_SECONDS - stoppedSeconds;
-	const at = new Date(NOW - stoppedSeconds * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
+	const at = new Date(NOW - Math.max(0, stoppedSeconds) * 1000).toISOString().replace(/\.\d{3}Z$/, "Z");
 	const values = { "cursor:events": "100", "cursor:comments": at, "cursor:prs": at, "cursor:reviews": "500", "etag:events": 'W/"old-e"', "etag:comments": 'W/"old-c"', "etag:pulls": 'W/"old-p"' };
 	for (const [k, v] of Object.entries(values)) redis.kv.set(`poll:o/r:${k}`, v);
 	redis.hashes.set("poll:o/r:prs", new Map([["9", PR9A.head.sha]]));
 	redis.hashes.set("poll:o/r:etag:reviews", new Map([["9", 'W/"old-r"']]));
-	for (const key of FAMILY) redis.ttls.set(key, left);
+	for (const key of FAMILY) redis.setTtl(key, CURSOR_TTL_SECONDS - stoppedSeconds);
 }
 
 // A comment made five minutes before NOW: inside the gap of every stop these tests seed, after the comments cursor of
@@ -544,8 +567,18 @@ function gapRoutes() {
 	];
 }
 const GAP_JOBS = ["poll-c310", "poll-e201", "poll-e202", `poll-pr9-${"b".repeat(7)}`, "poll-rv600"];
+
+/** A repo with nothing but label events: each argument is one cycle's page, a reply as is or a list for a 200. */
+function eventRoutes(...pages) {
+	return [
+		{ path: "/repos/o/r/issues/events", replies: pages.map((p) => (Array.isArray(p) ? ghResponse(200, p) : p)) },
+		{ path: "/repos/o/r/issues/comments", replies: [ghResponse(200, [])] },
+		{ path: "/repos/o/r/pulls?state=open", replies: [ghResponse(200, [])] },
+	];
+}
 const deliveries = (queued) => queued.map((j) => j.trigger.deliveryId).sort();
 const lines = (out, event) => out.filter((o) => o.event === event);
+const resumedOrRearmed = (out) => out.filter((o) => o.event === "poll_resumed" || o.event === "poll_rearmed").map(({ event, stoppedMinutes }) => [event, stoppedMinutes]);
 
 test("a poller started again inside the catch-up horizon resumes on every feed and says how far back it reached (#880)", async () => {
 	const redis = fakeRedis();
@@ -586,23 +619,35 @@ test("a poller started again past the horizon re-arms every feed from now and en
 	assert.equal(fetch.calls.find((c) => c.url.includes("/issues/events")).headers["if-none-match"], undefined, "arming sends no validator");
 });
 
-test("the horizon is inclusive at its edge, and a minute past it re-arms (#880)", async () => {
-	for (const [stopped, event] of [[3600, "poll_resumed"], [3660, "poll_rearmed"]]) {
+test("the horizon is inclusive at its edge, a second past it re-arms, and the minutes logged round up (#880)", async () => {
+	for (const [stopped, expected] of [[3600, ["poll_resumed", 60]], [3601, ["poll_rearmed", 61]]]) {
 		const redis = fakeRedis();
 		seedFamily(redis, stopped);
 		const { out } = await runPoller({ redis, routes: gapRoutes() });
 		assertNoRepoFailure(out);
-		assert.deepEqual(lines(out, event).map((o) => o.stoppedMinutes), [stopped / 60], `${stopped}s stopped: ${event}`);
+		assert.deepEqual(resumedOrRearmed(out), [expected], `${stopped}s overdue`);
 	}
 });
 
-test("POLL_CATCHUP_MINUTES=0 never catches up: a poller stopped for a minute re-arms too (#880)", async () => {
+test("POLL_CATCHUP_MINUTES=0 never catches up: a minute away, and even a restart inside the same second, re-arm (#880)", async () => {
+	for (const stopped of [60, 0]) {
+		const redis = fakeRedis();
+		seedFamily(redis, stopped);
+		const { queued, out } = await runPoller({ env: { POLL_REPOS: "o/r", POLL_CATCHUP_MINUTES: "0" }, redis, routes: gapRoutes() });
+		assertNoRepoFailure(out);
+		assert.deepEqual(queued, [], `${stopped}s`);
+		assert.deepEqual(lines(out, "poll_rearmed"), [{ event: "poll_rearmed", repo: "o/r", stoppedMinutes: stopped / 60, horizonMinutes: 0 }]);
+	}
+});
+
+test("a restart inside the planned wait reads as 0 minutes away: the age is clamped at 0, never negative (#880)", async () => {
 	const redis = fakeRedis();
-	seedFamily(redis, 60);
-	const { queued, out } = await runPoller({ env: { POLL_REPOS: "o/r", POLL_CATCHUP_MINUTES: "0" }, redis, routes: gapRoutes() });
+	seedFamily(redis, -5 * 60); // its next poll was five minutes off when it was started again
+	const { queued, out } = await runPoller({ redis, routes: gapRoutes() });
 	assertNoRepoFailure(out);
-	assert.deepEqual(queued, []);
-	assert.deepEqual(lines(out, "poll_rearmed"), [{ event: "poll_rearmed", repo: "o/r", stoppedMinutes: 1, horizonMinutes: 0 }]);
+	assert.deepEqual(lines(out, "poll_resumed"), [{ event: "poll_resumed", repo: "o/r", stoppedMinutes: 0, horizonMinutes: 60 }]);
+	// The comment from 11:55 predates the comments cursor such a recent poll left (NOW), so it is not new; the rest is.
+	assert.deepEqual(deliveries(queued), GAP_JOBS.filter((id) => id !== "poll-c310"));
 });
 
 test("a horizon at or past the cursor TTL is the poller from before #880: it resumes and reads nothing to decide it", async () => {
@@ -611,7 +656,7 @@ test("a horizon at or past the cursor TTL is the poller from before #880: it res
 	for (const value of [String(CATCH_UP_CAP_MINUTES), "100000"]) {
 		const redis = fakeRedis();
 		seedFamily(redis, 30 * 24 * 3600);
-		redis.ttls.delete("poll:o/r:cursor:events"); // even an undated cursor resumes, as it always did
+		redis.clearTtl("poll:o/r:cursor:events"); // even an undated cursor resumes, as it always did
 		const { queued, out } = await runPoller({ env: { POLL_REPOS: "o/r", POLL_CATCHUP_MINUTES: value }, redis, routes: gapRoutes() });
 		assertNoRepoFailure(out);
 		assert.deepEqual(deliveries(queued), GAP_JOBS, `${value}: thirty days stopped, and the gap is caught up`);
@@ -624,7 +669,7 @@ test("a horizon at or past the cursor TTL is the poller from before #880: it res
 test("a family that cannot be dated is re-armed: an events cursor without a TTL, or a family without its events cursor (#880)", async () => {
 	const undated = fakeRedis();
 	seedFamily(undated, 60);
-	undated.ttls.delete("poll:o/r:cursor:events");
+	undated.clearTtl("poll:o/r:cursor:events");
 	const partial = fakeRedis();
 	seedFamily(partial, 60);
 	partial.kv.delete("poll:o/r:cursor:events");
@@ -637,8 +682,7 @@ test("a family that cannot be dated is re-armed: an events cursor without a TTL,
 });
 
 test("a first boot has nothing to date: no rearm line, only the feeds' own arming (#880)", async () => {
-	const redis = fakeRedis();
-	const { queued, out } = await runPoller({ redis, routes: gapRoutes() });
+	const { queued, out, redis } = await runPoller({ routes: gapRoutes() });
 	assertNoRepoFailure(out);
 	assert.deepEqual(queued, []);
 	assert.deepEqual(redis.ttlReads, ["poll:o/r:cursor:events"], "the check ran");
@@ -647,46 +691,185 @@ test("a first boot has nothing to date: no rearm line, only the feeds' own armin
 	assert.equal(lines(out, "poll_armed").length, 4);
 });
 
-test("a Valkey error at start skips the repo, loudly, until a check succeeds; it never polls from undated cursors (#880)", async () => {
-	// Two failures: the check at start, and its retry before cycle 1 would poll the repo.
-	const redis = fakeRedis({ ttlFailures: 2 });
+test("an error reply to the check skips the repo, loudly, until a check succeeds; it never polls from undated cursors (#880)", async () => {
+	const clock = { ms: NOW };
+	const redis = fakeRedis({ ttlFailures: 1, clock });
 	seedFamily(redis, 10 * 60);
-	const { queued, out, fetch } = await runPoller({ redis, cycles: 2, routes: gapRoutes() });
+	const { queued, out } = await runPoller({ clock, redis, cycles: 2, routes: gapRoutes() });
 	assertNoRepoFailure(out);
 	const failed = lines(out, "poll_catchup_check_failed");
-	assert.equal(failed.length, 2, "one line for each check that could not run");
-	for (const line of failed) {
-		assert.equal(line.repo, "o/r");
-		assert.match(line.reason, /ECONNREFUSED/);
-	}
+	assert.equal(failed.length, 1);
+	assert.equal(failed[0].repo, "o/r");
+	assert.match(failed[0].reason, /^LOADING /);
 	const cycles = lines(out, "poll_cycle");
 	assert.equal(cycles[0].fetched, 0, "cycle 1 reads nothing of the repo whose check failed");
-	assert.equal(cycles[0].enqueued, 0);
-	assert.ok(out.indexOf(failed[1]) < out.indexOf(cycles[0]));
-	assert.deepEqual(redis.ttlReads, Array(3).fill("poll:o/r:cursor:events"), "checked at start, before cycle 1, and before cycle 2, which polled it");
-	assert.deepEqual(lines(out, "poll_resumed").map((o) => o.stoppedMinutes), [10]);
-	assert.deepEqual(deliveries(queued), GAP_JOBS, "and then it catches up as any restart inside the horizon does");
-	assert.ok(fetch.calls.length > 0 && cycles[1].fetched > 0, "cycle 2 polled it");
+	assert.ok(out.indexOf(failed[0]) < out.indexOf(cycles[0]));
+	assert.deepEqual(redis.ttlReads, Array(2).fill("poll:o/r:cursor:events"), "checked again before cycle 2 polled it");
+	assert.deepEqual(lines(out, "poll_resumed").map((o) => o.stoppedMinutes), [11], "and dated then, the failed cycle counted");
+	assert.deepEqual(deliveries(queued), GAP_JOBS);
+	assert.ok(cycles[1].fetched > 0, "cycle 2 polled it");
 });
 
-test("a repository the App installation lists again joins through the same check (#880)", async () => {
+test("a repository the App installation lists again is checked before its first poll back (#880)", async () => {
 	const env = { GITHUB_AUTH_SOURCE: "app", GITHUB_APP_ID: "7", GITHUB_APP_INSTALLATION_ID: "11", GITHUB_APP_PRIVATE_KEY_PATH: "/k.pem" };
 	const list = (...names) => ghResponse(200, { total_count: names.length, repositories: names.map((full_name) => ({ full_name })) });
-	const redis = fakeRedis();
+	const clock = { ms: NOW };
+	const redis = fakeRedis({ clock });
 	seedFamily(redis, 2 * 3600);
 	const routes = [
-		// Boot lists o/a alone; the refresh on the tenth cycle lists o/r again.
+		// Boot lists o/a alone; the refresh on the eleventh cycle lists o/r again.
 		{ path: "/installation/repositories", replies: [list("o/a"), list("o/a", "o/r")] },
 		{ path: "/repos/o/a/issues/events", replies: [ghResponse(200, [])] },
 		{ path: "/repos/o/a/issues/comments", replies: [ghResponse(200, [])] },
 		{ path: "/repos/o/a/pulls?state=open", replies: [ghResponse(200, [])] },
 		...gapRoutes(),
 	];
-	const { queued, out } = await runPoller({ env, cycles: 11, routes, redis });
+	const { queued, out } = await runPoller({ env, cycles: 11, routes, clock, redis });
 	assertNoRepoFailure(out);
-	assert.deepEqual(redis.ttlReads, ["poll:o/a:cursor:events", "poll:o/r:cursor:events"], "o/a at boot, o/r when it came back");
-	assert.deepEqual(lines(out, "poll_rearmed"), [{ event: "poll_rearmed", repo: "o/r", stoppedMinutes: 120, horizonMinutes: 60 }]);
+	assert.deepEqual(redis.ttlReads, ["poll:o/a:cursor:events", "poll:o/r:cursor:events"], "o/a before its first poll, o/r before its first poll back");
+	assert.deepEqual(lines(out, "poll_rearmed"), [{ event: "poll_rearmed", repo: "o/r", stoppedMinutes: 130, horizonMinutes: 60 }], "two hours, and the ten cycles it waited out of the list");
 	assert.deepEqual(queued, [], "its family from before it left is not resumed");
+});
+
+// The review of #880's first version: the age counted from the LAST poll, so the wait the poller had planned before
+// its next one was read as time away. These restart a real loop on a shared clock and Valkey fake, the second poller
+// reading what the first one's renewals left behind, counted down by the clock.
+
+test("a stop during the planned wait is not time away: an hour's interval, stopped at its end and started a minute later, catches up (#880)", async () => {
+	const clock = { ms: NOW };
+	const redis = fakeRedis({ clock });
+	const env = { POLL_REPOS: "o/r", POLL_INTERVAL_SECONDS: "3600" };
+	await runPoller({ env, clock, redis, routes: eventRoutes([EV100]) });
+	clock.ms += 60_000;
+	const { queued, out } = await runPoller({ env, clock, redis, routes: eventRoutes([EV201, EV100]) });
+	assertNoRepoFailure(out);
+	assert.deepEqual(resumedOrRearmed(out), [["poll_resumed", 1]], "one minute past when its next poll was due, not 61");
+	assert.deepEqual(deliveries(queued), ["poll-e201"], "the label applied in that hour starts its job");
+});
+
+test("a stop one minute into an hour's wait, started again at once, reads 0 minutes and catches up (#880)", async () => {
+	const clock = { ms: NOW };
+	const redis = fakeRedis({ clock });
+	const env = { POLL_REPOS: "o/r", POLL_INTERVAL_SECONDS: "3600" };
+	await runPoller({ env, clock, redis, routes: eventRoutes([EV100]), nap: () => 60_000 });
+	const { queued, out } = await runPoller({ env, clock, redis, routes: eventRoutes([EV201, EV100]) });
+	assertNoRepoFailure(out);
+	assert.deepEqual(resumedOrRearmed(out), [["poll_resumed", 0]]);
+	assert.deepEqual(deliveries(queued), ["poll-e201"]);
+});
+
+test("a one-minute horizon is not 0 at the default interval: a restart 30 seconds after the next poll was due catches up (#880)", async () => {
+	const clock = { ms: NOW };
+	const redis = fakeRedis({ clock });
+	const env = { POLL_REPOS: "o/r", POLL_CATCHUP_MINUTES: "1" };
+	await runPoller({ env, clock, redis, routes: eventRoutes([EV100]) });
+	clock.ms += 30_000;
+	const { queued, out } = await runPoller({ env, clock, redis, routes: eventRoutes([EV201, EV100]) });
+	assertNoRepoFailure(out);
+	assert.deepEqual(resumedOrRearmed(out), [["poll_resumed", 1]]);
+	assert.deepEqual(deliveries(queued), ["poll-e201"]);
+});
+
+test("a rate-limit sleep is a planned wait too: stopped 80 minutes into a 90-minute reset, it catches up (#880)", async () => {
+	const clock = { ms: NOW };
+	const redis = fakeRedis({ clock });
+	const reset = (NOW + 60_000) / 1000 + 90 * 60; // cycle 2 starts a minute after NOW and is told to wait 90 minutes
+	const first = await runPoller({
+		clock,
+		redis,
+		cycles: 2,
+		routes: eventRoutes([EV100], ghResponse(403, { message: "rate limited" }, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(reset) })),
+		nap: (ms, n) => (n === 1 ? ms : 80 * 60_000),
+	});
+	assert.equal(first.sleeps[1], 90 * 60_000 + 15_500, "the reset plus the fixed jitter");
+	const { queued, out } = await runPoller({ clock, redis, routes: eventRoutes([EV201, EV100]) });
+	assertNoRepoFailure(out);
+	assert.deepEqual(resumedOrRearmed(out), [["poll_resumed", 0]]);
+	assert.deepEqual(deliveries(queued), ["poll-e201"]);
+});
+
+test("an idle cycle, every endpoint a 304, renews every key of the family to the TTL plus the wait (#880)", async () => {
+	const clock = { ms: NOW };
+	const redis = fakeRedis({ clock });
+	seedFamily(redis, 2 * 3600);
+	const routes = [
+		{ path: "/repos/o/r/issues/events", replies: [ghResponse(304, null)] },
+		{ path: "/repos/o/r/issues/comments", replies: [ghResponse(304, null)] },
+		{ path: "/repos/o/r/pulls/9/reviews", replies: [ghResponse(304, null)] },
+		{ path: "/repos/o/r/pulls?state=open", replies: [ghResponse(304, null)] },
+	];
+	const { out } = await runPoller({ env: { POLL_REPOS: "o/r", POLL_CATCHUP_MINUTES: "180" }, clock, redis, routes });
+	assertNoRepoFailure(out);
+	assert.deepEqual(resumedOrRearmed(out), [["poll_resumed", 120]]);
+	assert.equal(lines(out, "poll_cycle")[0].notModified, 4, "nothing was written: every key's TTL can only have come from the renewal");
+	for (const key of FAMILY) {
+		assert.equal(redis.ttls.get(key), CURSOR_TTL_SECONDS + 60, `${key} renewed to the TTL plus the 60-second wait`);
+		assert.equal(await redis.ttl(key), CURSOR_TTL_SECONDS, `${key}: once the wait has passed, the next poll is due now, 0 minutes overdue`);
+	}
+});
+
+test("a graceful stop renews what the cycle polled with no wait, so a restart reads the stop itself (#880)", async () => {
+	const clock = { ms: NOW };
+	const redis = fakeRedis({ clock });
+	seedFamily(redis, 10 * 60);
+	let poller;
+	const out = [];
+	poller = await startPoller({ POLL_REPOS: "o/r" }, {
+		fetchFn: fakeFetch(gapRoutes()),
+		redis,
+		// Stop while the repo is being polled: the in-flight repo finishes, then the loop ends.
+		queueFn: async () => poller.stop(),
+		out: (o) => out.push(o),
+		now: () => clock.ms,
+		random: () => 0.5,
+		selfIdFn: async () => SELF,
+		tokenFn: async () => "poll-token",
+		fsDeps: FS,
+		sleep: async () => assert.fail("a stopped poller never waits"),
+	});
+	await poller.done;
+	assertNoRepoFailure(out);
+	for (const key of FAMILY) assert.equal(await redis.ttl(key), CURSOR_TTL_SECONDS, `${key}: due at the stop`);
+});
+
+test("the check waits for the repo's first poll: a token mint that fails for two hours at boot counts toward the age (#880)", async () => {
+	const clock = { ms: NOW };
+	const redis = fakeRedis({ clock });
+	seedFamily(redis, 10 * 60);
+	let mints = 0;
+	const { queued, out } = await runPoller({
+		env: { POLL_REPOS: "o/r", POLL_INTERVAL_SECONDS: "3600" },
+		clock,
+		redis,
+		cycles: 3,
+		routes: gapRoutes(),
+		tokenFn: async () => {
+			mints += 1;
+			if (mints <= 2) throw new Error("gh auth token: not logged in");
+			return "poll-token";
+		},
+	});
+	assertNoRepoFailure(out);
+	assert.equal(lines(out, "poll_token_failed").length, 2);
+	assert.deepEqual(resumedOrRearmed(out), [["poll_rearmed", 130]], "checked when it was first polled, two hours and ten minutes on");
+	assert.deepEqual(queued, []);
+});
+
+test("a wait that ends later than the horizon is read as a host suspend and every repo is checked again; a shorter one is not (#880)", async () => {
+	const run = (env, lateMs) => runPoller({ env, cycles: 2, routes: eventRoutes([EV100], [EV201, EV100]), nap: (ms, n) => (n === 1 ? ms + lateMs : ms) });
+
+	const slept = await run({ POLL_REPOS: "o/r" }, 2 * 3600_000);
+	assertNoRepoFailure(slept.out);
+	assert.deepEqual(lines(slept.out, "poll_woke_late"), [{ event: "poll_woke_late", lateMinutes: 120, horizonMinutes: 60 }]);
+	assert.deepEqual(resumedOrRearmed(slept.out), [["poll_rearmed", 120]], "dated from Valkey's TTL, which the suspend ran down");
+	assert.deepEqual(slept.queued, [], "the label from while the host slept is not acted on");
+
+	for (const [env, lateMs, why] of [[{ POLL_REPOS: "o/r" }, 30 * 60_000, "inside the horizon"], [{ POLL_REPOS: "o/r", POLL_CATCHUP_MINUTES: "0" }, 30_000, "under the one-minute floor, at a horizon of 0"]]) {
+		const late = await run(env, lateMs);
+		assertNoRepoFailure(late.out);
+		assert.deepEqual(lines(late.out, "poll_woke_late"), [], why);
+		assert.deepEqual(deliveries(late.queued), ["poll-e201"], `${why}: caught up as a running poller does`);
+	}
 });
 
 // ---------------------------------------------------------------------------------------------------

@@ -26,10 +26,13 @@
  *   - POLL_INTERVAL_SECONDS: the cycle delay, default 60, floored at 30. The floor is a courtesy to
  *     GitHub's polling guidance (the API asks pollers to respect `X-Poll-Interval`, typically 60s);
  *     a typo'd `1` must not turn the harness into a hammer.
- *   - POLL_CATCHUP_MINUTES: the catch-up horizon (issue #880), default 60. A repository whose last full poll
- *     finished longer ago than this when the poller starts is re-armed from now instead of resumed (see the
- *     poller's header). 0 is a sentinel, never catch up, which is why this is the non-negative parse and not
- *     the interval's positive one. There is no refusal above the cursor TTL: a horizon at or past the TTL
+ *   - POLL_CATCHUP_MINUTES: the catch-up horizon (issue #880), default 60. A repository whose next poll has
+ *     been due for longer than this when a starting poller first polls it is re-armed from now instead of
+ *     resumed (see the poller's header). 0 is a sentinel, never catch up, which is why this is the
+ *     non-negative parse and not the interval's positive one. No floor ties it to POLL_INTERVAL_SECONDS:
+ *     the age counts from when the next poll was DUE, so the interval (and GitHub's x-poll-interval, and a
+ *     rate-limit sleep) never adds to it, and a one-minute horizon means one minute past the planned wait,
+ *     not a refusal to catch up at all. There is no refusal above the cursor TTL: a horizon at or past the TTL
  *     means exactly what the operator asked, catch up as far as the stored cursors reach, so the poller
  *     clamps it there (`CATCH_UP_CAP_MINUTES`) rather than this loader refusing a value that is not wrong.
  *     The cap lives in poller.mjs beside the TTL it is made of; importing it here would make a cycle.
