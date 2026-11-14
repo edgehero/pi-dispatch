@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 import { createVerify, generateKeyPairSync } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { buildFormPage, buildManifest, defaultAppName, mintAppJwt, NO_WEBHOOK_URL, runGithubAppSetup, sanitizeAppName } from "../src/github-app-setup.mjs";
+import { GITHUB_APP_PERMISSIONS } from "../src/identity.mjs";
 
 // A REAL RSA keypair, generated once: the conversion response carries the private half as its `pem`,
 // so the wizard's hand-rolled JWT is signed with a key the test can VERIFY against the public half —
@@ -201,6 +202,15 @@ test("buildManifest: no webhook URL yields an INACTIVE hook that still names a U
 	assert.match(new URL(NO_WEBHOOK_URL).hostname, /\.invalid$/, "RFC 6761: a name that never resolves, so no host can receive what GitHub sends there");
 	assert.deepEqual(manifest.default_permissions, { contents: "write", pull_requests: "write", issues: "write", metadata: "read" });
 	assert.deepEqual(manifest.default_events, ["issues", "issue_comment", "pull_request", "pull_request_review"]);
+});
+
+test("buildManifest: the permissions are the list the worker's boot check reads, and no administration (issue #876)", () => {
+	// The worker's branch protection check reads the branch's own protected flag, which Contents covers; the protection
+	// endpoint, which needs Administration: read, is not read, so no job's token needs to read the repository's settings.
+	const manifest = buildManifest({ name: "pi-dispatch-x", redirectUrl: "http://127.0.0.1:1/callback", webhookUrl: "https://hooks.example/github" });
+	assert.equal(Object.hasOwn(manifest.default_permissions, "administration"), false);
+	assert.deepEqual(manifest.default_permissions, { ...GITHUB_APP_PERMISSIONS });
+	assert.notEqual(manifest.default_permissions, GITHUB_APP_PERMISSIONS, "a copy, so the frozen list is never the object sent");
 });
 
 test("buildManifest: every shape's hook_attributes carries a url, which GitHub requires whenever the object is sent, inactive or not (issue #874)", () => {
