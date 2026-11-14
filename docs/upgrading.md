@@ -32,6 +32,10 @@ Each guide keeps the notes about its own feature. [The last sections](#notes-kep
 6. **Before 5.2.0**, if you edit `pause-windows.json` by hand: check that no key is written twice
    anywhere in it, such as two `windows` keys or one field twice in a window. 5.2.0 refuses such a file and the
    worker does not start on it. Earlier releases kept the last value, so what applied was not what the file seemed to say.
+7. **Before 5.2.1**, check that nothing you configure names `PI_JOB_SIZE_CPUS` or `PI_JOB_SIZE_MEMORY_MIB`: not a
+   trigger's `run.secrets`, a secret bundle's `endpoints` or what its resolver returns, an overlay `mcp.json` server, or
+   `PI_FORWARD_ENV`. From 5.2.1 the worker sets both in every job and refuses them anywhere else
+   ([the 5.2.1 row](#521)).
 
 ## The order
 
@@ -285,7 +289,7 @@ queued: an older BullMQ need not read what a newer one wrote. The release notes 
 
 Release numbers come from the git tags.
 
-### Next release
+### 5.2.1
 
 | Store | What changed, and what an older release does with it | Guide |
 |---|---|---|

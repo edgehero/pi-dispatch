@@ -1260,7 +1260,7 @@ From an empty folder, one command does all of it (Mac and Linux):
 
 ```bash
 mkdir my-dispatch && cd my-dispatch
-npx --yes --ignore-scripts @edgehero/pi-dispatch@5.2.0 up --console
+npx --yes --ignore-scripts @edgehero/pi-dispatch@5.2.1 up --console
 ```
 
 Run from npm's cache, `up --console` checks the platform, the folder, the deployment's settings, the tokens file and the
@@ -1275,7 +1275,7 @@ The same thing by hand, for a folder you want to control yourself:
 
 ```bash
 npm init -y
-npm install --save-exact @edgehero/pi-dispatch@5.2.0 @edgehero/pi-dispatch-admin@5.2.0 @earendil-works/pi-coding-agent@1.5.2 --omit=dev --omit=optional --ignore-scripts --no-audit --no-fund
+npm install --save-exact @edgehero/pi-dispatch@5.2.1 @edgehero/pi-dispatch-admin@5.2.1 @earendil-works/pi-coding-agent@1.5.2 --omit=dev --omit=optional --ignore-scripts --no-audit --no-fund
 ./node_modules/.bin/pi-dispatch up --console
 ```
 
