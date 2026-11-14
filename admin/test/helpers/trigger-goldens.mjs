@@ -20,6 +20,7 @@ export async function triggerGolden({
   invalid = false,
   editor = false,
   forges = ["github", "gitlab"],
+  githubRestart = false,
 } = {}) {
   const snapshot = {
     readAt: NOW,
@@ -53,6 +54,7 @@ export async function triggerGolden({
           },
         ],
         forges,
+        ...(githubRestart ? { githubRestart } : {}),
         flows: [{ name: "tidy", tier: "repository" }],
         defaults: { backend: "local", maxTurns: 30 },
       }),
@@ -68,6 +70,8 @@ export async function triggerGolden({
 }
 export const TRIGGER_DRAW = {
   "trigger-editor-no-webhook.operator": () => triggerGolden({ editor: true, forges: [] }),
+  // Issue #879: the first GitHub trigger of a receiver that started without a GitHub route.
+  "trigger-editor-github-restart.operator": () => triggerGolden({ editor: true, forges: ["github", "gitlab"], githubRestart: true }),
   "trigger-cron.operator": () => triggerGolden(),
   "trigger-spent.operator": () =>
     triggerGolden({
