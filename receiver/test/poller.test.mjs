@@ -924,6 +924,22 @@ test("POLL_INTERVAL_SECONDS: default 60, floored at 30 so a typo cannot hammer t
 	assert.throws(() => loadPollerConfig({ POLL_REPOS: "o/r", POLL_INTERVAL_SECONDS: "x" }, FS), (e) => e.piDispatchConfig === true);
 });
 
+test("GITHUB_INGEST: webhook refuses poll at boot naming both ways on; poll, both and unset start it (issue #879)", () => {
+	assert.throws(
+		() => loadPollerConfig({ POLL_REPOS: "o/r", GITHUB_INGEST: "webhook" }, FS),
+		(e) => e.piDispatchConfig === true && /GITHUB_INGEST=webhook/.test(e.message) && /GITHUB_INGEST=both/.test(e.message) && /poll to poll only/.test(e.message),
+		"a webhook-only deployment is never polled by accident, and the refusal says how to poll on purpose",
+	);
+	for (const ingest of [undefined, "", "poll", "both"]) {
+		const env = { POLL_REPOS: "o/r", ...(ingest === undefined ? {} : { GITHUB_INGEST: ingest }) };
+		assert.deepEqual(loadPollerConfig(env, FS).repos, ["o/r"], `GITHUB_INGEST=${ingest}`);
+	}
+	// A word outside the three refuses here as it does for serve: one parse, so the two commands cannot disagree on it.
+	assert.throws(() => loadPollerConfig({ POLL_REPOS: "o/r", GITHUB_INGEST: "pol" }, FS), (e) => e.piDispatchConfig === true && /GITHUB_INGEST must be/.test(e.message));
+	// `both` routes serve's secret requirement through as ever: an absent secret is papered over for this call only.
+	assert.ok(!("webhookSecret" in loadPollerConfig({ POLL_REPOS: "o/r", GITHUB_INGEST: "both" }, FS)));
+});
+
 test("WEBHOOK_SECRET: not required for poll, still required for serve", () => {
 	// The poller has nothing to verify -- its credential authenticates the other direction -- so the
 	// same env that boots poll must still refuse to boot serve.

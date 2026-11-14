@@ -61,10 +61,14 @@ id explicitly:
 
 ```bash
 FORGEJO_URL=https://forgejo.example.com
-FORGEJO_TOKEN=...            # the harness account (a write collaborator): every job carries it
-FORGEJO_PERMISSION_TOKEN=... # an admin account's read:repository token: the receiver's alone
-FORGEJO_BOT_ID=42          # the harness account's numeric id, from its profile page
-FORGEJO_WEBHOOK_SECRET=... # a long random string
+# the harness account (a write collaborator): every job carries it
+FORGEJO_TOKEN=...
+# an admin account's read:repository token: the receiver's alone
+FORGEJO_PERMISSION_TOKEN=...
+# the harness account's numeric id, from its profile page
+FORGEJO_BOT_ID=42
+# a long random string
+FORGEJO_WEBHOOK_SECRET=...
 ```
 
 With the egress policy on (the default), Forgejo must be served over `https://` on port 443. git in a job never
@@ -110,7 +114,8 @@ the weakest one available. You pick the path when you configure the hook; the se
 mounts a forge's route, resolves its identity for the bot-loop guard, and requires its credentials only
 when your triggers name that forge. So no `WEBHOOK_SECRET` and no `gh` login are needed here, and `/`
 (the GitHub endpoint) answers 404 rather than 401, because an endpoint that answers is one you could
-believe is armed. Add a `github` trigger later and both become required again, as they should.
+believe is armed. Add a `github` trigger later, or set `GITHUB_AUTH_SOURCE`, and both become required again from the receiver's next start,
+as they should, unless `GITHUB_INGEST=poll` says GitHub comes from the poller ([polling.md](polling.md)).
 
 **5. Start it.** `pi-dispatch-receiver` from your deployment folder; `serve` is the default command, so
 there is nothing to type after the name. A container profile is the alternative

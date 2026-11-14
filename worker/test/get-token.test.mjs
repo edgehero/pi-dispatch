@@ -235,12 +235,107 @@ test("app mint passes a caller's permissions narrowing through to the installati
 	assert.deepEqual(calls[0].repositoryNames, ["widgets"], "narrowing never loosens the repo scope");
 });
 
+// -- the installation's grant, said at boot (issue #876) ------------------------------------------------------------
+
+/** A fake Octokit whose clients share one record of every (route, params), so the boot reads can be counted. */
+function RecordingOctokit(routes, seen) {
+	return class {
+		async request(route, params) {
+			seen.push({ route, params });
+			if (!(route in routes)) throw new Error(`unexpected route: ${route}`);
+			const canned = routes[route];
+			if (canned instanceof Error) throw canned;
+			return { data: canned };
+		}
+	};
+}
+const INSTALLATION_ROUTE = "GET /app/installations/{installation_id}";
+const APP_CFG = { source: "app", appId: "123", installationId: "456", privateKeyPath: "/keys/app.pem" };
+/** Let a not-awaited read settle: a few turns of the event loop, no timer the test would have to clear. */
+const settle = async () => {
+	for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
+};
+
+test("app with checkPermissions: an installation short of a permission logs github_app_permission_missing, and boot goes on", async () => {
+	const seen = [];
+	const lines = [];
+	const routes = { ...APP_ROUTES, [INSTALLATION_ROUTE]: { permissions: { contents: "write", pull_requests: "write", issues: "read", metadata: "read" } } };
+	const auth = await makeGitHubAuth(APP_CFG, { Octokit: RecordingOctokit(routes, seen), createAppAuth: fakeCreateAppAuth({ result: { token: "ghs_x" }, calls: [] }), readFile: async () => "PEM", log: (event, fields) => lines.push({ event, fields }), checkPermissions: true });
+	assert.equal(auth.selfId, 555123, "the identity is resolved as before");
+	await settle();
+	assert.deepEqual(seen.filter((c) => c.route === INSTALLATION_ROUTE), [{ route: INSTALLATION_ROUTE, params: { installation_id: "456" } }], "the configured installation, read once");
+	const missing = lines.filter((l) => l.event === "github_app_permission_missing");
+	assert.equal(missing.length, 1);
+	assert.deepEqual(missing[0].fields.missing, ["issues:write"]);
+});
+
+test("app with checkPermissions: a failed read logs that it failed and the auth still works", async () => {
+	const seen = [];
+	const lines = [];
+	const routes = { ...APP_ROUTES, [INSTALLATION_ROUTE]: httpError(502) };
+	const auth = await makeGitHubAuth(APP_CFG, { Octokit: RecordingOctokit(routes, seen), createAppAuth: fakeCreateAppAuth({ result: { token: "ghs_x" }, calls: [] }), readFile: async () => "PEM", log: (event, fields) => lines.push({ event, fields }), checkPermissions: true });
+	await settle();
+	assert.deepEqual(lines.map((l) => l.event).filter((e) => e.startsWith("github_app_")), ["github_app_permissions_unread"]);
+	assert.equal(await auth.mintToken({ kind: "github", repo: "o/r" }), "ghs_x");
+});
+
+test("app with checkPermissions: the read never holds the boot up", async () => {
+	// A read that never answers: makeGitHubAuth must still resolve, or a slow GitHub would count against the worker's
+	// bound on re-resolving its auth and turn a working credential into an unavailable one.
+	const seen = [];
+	const never = new Promise(() => {});
+	const Octokit = class {
+		async request(route, params) {
+			seen.push({ route, params });
+			if (route === INSTALLATION_ROUTE) return never;
+			return { data: APP_ROUTES[route] };
+		}
+	};
+	const auth = await makeGitHubAuth(APP_CFG, { Octokit, createAppAuth: fakeCreateAppAuth({ result: { token: "ghs_x" }, calls: [] }), readFile: async () => "PEM", log: () => {}, checkPermissions: true });
+	assert.equal(auth.selfId, 555123);
+	assert.ok(seen.some((c) => c.route === INSTALLATION_ROUTE), "the read was sent");
+});
+
+test("app with checkPermissions: a logger that throws is no unhandled rejection", async () => {
+	const unhandled = [];
+	const onUnhandled = (reason) => unhandled.push(reason);
+	process.on("unhandledRejection", onUnhandled);
+	try {
+		const routes = { ...APP_ROUTES, [INSTALLATION_ROUTE]: { permissions: {} } };
+		await makeGitHubAuth(APP_CFG, {
+			Octokit: RecordingOctokit(routes, []),
+			createAppAuth: fakeCreateAppAuth({ result: { token: "ghs_x" }, calls: [] }),
+			readFile: async () => "PEM",
+			log: (event) => {
+				if (event.startsWith("github_app_")) throw new Error("a logger that throws");
+			},
+			checkPermissions: true,
+		});
+		await settle();
+		assert.deepEqual(unhandled, []);
+	} finally {
+		process.off("unhandledRejection", onUnhandled);
+	}
+});
+
+test("checkPermissions is opt-in, and app-only: no installation read without it, and none for pat or gh", async () => {
+	const seen = [];
+	await makeGitHubAuth(APP_CFG, { Octokit: RecordingOctokit({ ...APP_ROUTES }, seen), createAppAuth: fakeCreateAppAuth({ result: { token: "ghs_x" }, calls: [] }), readFile: async () => "PEM", log: () => {} });
+	await makeGitHubAuth({ source: "pat" }, { Octokit: RecordingOctokit(USER_ROUTES, seen), env: { GITHUB_PAT: "ghp_x" }, log: () => {}, checkPermissions: true });
+	await makeGitHubAuth({ source: "gh" }, { Octokit: RecordingOctokit(USER_ROUTES, seen), execFile: fakeExecFile({ stdout: "gho_x\n" }), log: () => {}, checkPermissions: true });
+	await settle();
+	assert.deepEqual(seen.filter((c) => c.route === INSTALLATION_ROUTE), []);
+});
+
 test("an answer draft's App token is scoped to one repository with read permissions, despite a supplied wider grant (#772)", async () => {
 	const calls = [];
 	const auth = await makeGitHubAuth({ source: "app", appId: "123", installationId: "456", privateKeyPath: "/keys/app.pem" }, { Octokit: FakeOctokit(APP_ROUTES), createAppAuth: fakeCreateAppAuth({ result: { token: "ghs_x" }, calls }), readFile: async () => "PEM" });
 	await auth.mintToken({ kind: "github", purpose: "answer-draft", repo: "acme-corp/widgets", permissions: { contents: "write", issues: "write" } });
 	assert.deepEqual(calls[0].repositoryNames, ["widgets"]);
+	// The draft job's branch protection read is the branch's `protected` flag, which contents: read reaches, so the
+	// narrowing needs nothing more for it (issue #876). Every permission stays a read.
 	assert.deepEqual(calls[0].permissions, { contents: "read", issues: "read", pull_requests: "read", metadata: "read" });
+	assert.ok(Object.values(calls[0].permissions).every((level) => level === "read"));
 });
 
 test("app mintToken with no repo (local run.github job) is a config error steering to gh/pat", async () => {

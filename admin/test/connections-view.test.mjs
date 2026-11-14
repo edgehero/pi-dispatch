@@ -59,6 +59,65 @@ test("forge activation agrees with the actual receiver loader, including non-act
   }
 });
 
+test("GitHub's activation follows GITHUB_INGEST exactly as the receiver loader does, over rules and auth sources (issue #879)", () => {
+  // Each setting against a file with and without a github rule, and with and without an explicit source: the loader's
+  // `servesGithub` is the answer the console must give, so it is asked rather than restated. The secret is set so a
+  // served route boots and the comparison is between two answers, never against a refusal.
+  const rule = { on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix" } };
+  for (const ingest of [undefined, "", "webhook", "poll", "both"]) {
+    for (const withRule of [false, true]) {
+      for (const source of [undefined, "gh"]) {
+        const env = { WEBHOOK_SECRET: "unused", ...(ingest === undefined ? {} : { GITHUB_INGEST: ingest }), ...(source ? { GITHUB_AUTH_SOURCE: source } : {}) };
+        const deps = { fileExists: () => true, readFile: () => JSON.stringify({ triggers: withRule ? [rule] : [] }) };
+        const rows = withRule ? [{ ...normalizeTriggerForDisplay(rule), index: 0 }] : [];
+        const [github] = forgeConnections(env, rows);
+        const what = JSON.stringify({ ingest, withRule, source });
+        assert.equal(github.enabled, loadReceiverConfig(env, deps).servesGithub, what);
+        assert.equal(github.ingest, ingest === undefined || ingest === "" ? "inferred" : ingest, what);
+        // A set value is the receiver's whole answer, so it is the one activation key named then.
+        if (ingest === "webhook" || ingest === "both") assert.deepEqual(github.activationKeys, ["GITHUB_INGEST"], what);
+      }
+    }
+  }
+  // A value the loader refuses is a refusal of the whole receiver, named for GitHub, as a missing GitHub field is above.
+  const deps = { fileExists: () => true, readFile: () => '{"triggers":[]}' };
+  assert.throws(() => loadReceiverConfig({ GITHUB_INGEST: "pol" }, deps), /GITHUB_INGEST must be/);
+  const [invalid] = forgeConnections({ GITHUB_INGEST: "pol" }, []);
+  assert.equal(invalid.enabled, true);
+  assert.equal(invalid.ingest, "invalid");
+  assert.equal(invalid.polling.state, "unknown", "the poller refuses it too, so its configuration is not on or off");
+  // Unknown metadata cannot prove a setting either way.
+  assert.equal(forgeConnections({ GITHUB_INGEST: "poll" }, [], { unknown: true })[0].ingest, null);
+});
+
+test("polling reads off under GITHUB_INGEST=webhook, where the real poller refuses to start (issue #879)", () => {
+  const deps = { fileExists: () => true, readFile: () => '{"triggers":[]}' };
+  const env = { GITHUB_INGEST: "webhook", POLL_REPOS: "acme/web" };
+  assert.throws(() => loadPollerConfig(env, deps), /GITHUB_INGEST=webhook/);
+  assert.deepEqual(forgeConnections(env, [])[0].polling, { state: "off", repos: [], source: null, seconds: null });
+  for (const ingest of ["poll", "both"]) {
+    const on = { GITHUB_INGEST: ingest, POLL_REPOS: "acme/web" };
+    assert.deepEqual(forgeConnections(on, [])[0].polling.repos, loadPollerConfig(on, deps).repos, ingest);
+  }
+});
+
+test("a refused GITHUB_INGEST leads the problems alone, and GITHUB_INGEST=poll asks for no WEBHOOK_SECRET (issue #879)", async () => {
+  const trigger = { on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix" } };
+  const active = snapshot({ triggers: { triggers: [{ ...normalizeTriggerForDisplay(trigger), index: 2 }] } });
+  const invalid = await readConnections({ now: AT, snapshot: active, reads: reads({ GITHUB_INGEST: "PRIVATE_VALUE_SENTINEL_LONG" }) });
+  const receiver = invalid.problems.filter((p) => p.kind === "receiver");
+  assert.equal(receiver.length, 1, "one root cause, one problem: serve refuses on GITHUB_INGEST before it asks for a secret");
+  assert.match(receiver[0].title, /GITHUB_INGEST is not webhook, poll or both/);
+  assert.doesNotMatch(JSON.stringify(invalid), /PRIVATE_VALUE_SENTINEL/, "the value is never shown");
+  assert.equal(invalid.environment.find((e) => e.key === "GITHUB_INGEST").value, "set (invalid option)");
+  const polled = await readConnections({ now: AT, snapshot: active, reads: reads({ GITHUB_INGEST: "poll", GITHUB_AUTH_SOURCE: "app" }) });
+  assert.ok(!polled.problems.some((p) => p.kind === "receiver"), "a polled GitHub needs no webhook secret");
+  assert.equal(polled.forges[0].enabled, false);
+  assert.equal(polled.environment.find((e) => e.key === "GITHUB_INGEST").value, "poll");
+  assert.equal(connectionEnvValue("GITHUB_INGEST", ""), "not set", "the receiver reads empty as unset");
+  assert.equal(modelConnections(polled).forges[0].ingest, "poll", "the agent view carries the closed word");
+});
+
 test("GitHub active rules and explicit intent count; spent, cron and watch rules do not arm its webhook", () => {
   const rows = [ { forge: "github", type: "issue", index: 5 }, { forge: "github", type: "issue", index: 6, disarmed: true }, { forge: "github", type: "cron", index: 7 }, { forge: null, type: "watch", index: 8 } ];
   assert.deepEqual(forgeConnections({}, rows)[0].triggers, [5]);

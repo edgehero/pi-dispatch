@@ -50,6 +50,25 @@ test("forge configuration unknown and not-configured remain distinct non-colour 
   assert.doesNotMatch(cardText(github), /not configured|not set|60 s/);
 });
 
+test("GitHub polled by GITHUB_INGEST=poll reads as polled, keeps its auth, polling and authority, and says its route is not served (issue #879)", async () => {
+  for (const [env, tone, glyph] of [
+    [{ GITHUB_INGEST: "poll", GITHUB_AUTH_SOURCE: "app" }, "ok", "done"],
+    [{ GITHUB_INGEST: "poll" }, "attention", "attention"],
+  ]) {
+    const facts = await consoleConnectionsFixture(AT, { change: (_, reads) => { reads.environment = () => ({ env }); } });
+    const github = row(draw("connectionsForges", facts), "github");
+    marked(github, "polled", glyph, tone);
+    const text = cardText(github);
+    assert.match(text, /GITHUB_INGEST=poll/);
+    assert.match(text, /No webhook: serve mounts no GitHub route, so path \/ answers 404/);
+    assert.match(text, /write access/, "the poller runs the same gate, so who may fire still applies");
+    assert.doesNotMatch(text, /not configured|No activation setting/, "polled on purpose is not unconfigured");
+    if (env.GITHUB_AUTH_SOURCE === "app") assert.match(text, /GitHub App.*App installation repositories/);
+    else marked(github, "off", "minus", "idle");
+    assert.ok(!facts.problems.some((p) => p.kind === "receiver"), "no WEBHOOK_SECRET is asked of a polled GitHub");
+  }
+});
+
 test("polling prints an interval only for a configured poller, never for off or unknown", async () => {
   for (const [env, expected, interval] of [
     [{ GITHUB_AUTH_SOURCE: "gh", WEBHOOK_SECRET: "private-value" }, "off", null],

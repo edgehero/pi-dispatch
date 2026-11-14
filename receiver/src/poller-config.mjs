@@ -26,6 +26,8 @@
  *   - POLL_INTERVAL_SECONDS: the cycle delay, default 60, floored at 30. The floor is a courtesy to
  *     GitHub's polling guidance (the API asks pollers to respect `X-Poll-Interval`, typically 60s);
  *     a typo'd `1` must not turn the harness into a hammer.
+ *   - GITHUB_INGEST (issue #879, shared with serve and parsed by the receiver loader): `webhook` refuses this command
+ *     at boot; `poll`, `both` and unset start it as before.
  *
  * Errors are tagged `piDispatchConfig` (shared `configError`), so the receiver bin's entryExitCode
  * maps them to EXIT_POLICY (2) and a supervisor never restart-loops a config that cannot parse.
@@ -60,6 +62,13 @@ export function loadPollerConfig(env = process.env, { readFile = readFileSync, f
 		env.WEBHOOK_SECRET ? env : { ...env, WEBHOOK_SECRET: PLACEHOLDER_SECRET },
 		{ readFile, fileExists },
 	);
+
+	// Issue #879: an operator who wrote GITHUB_INGEST=webhook said the webhook alone carries GitHub here, so a poller
+	// started anyway (an old unit, a copied command) would enqueue every event a second time under its own ids, and
+	// around a steered run a copy can start a job again (docs/steering.md). Refused at boot, naming the two ways on.
+	if (base.githubIngest === "webhook") {
+		throw configError("GITHUB_INGEST=webhook says GitHub events reach this deployment by webhook, so the poller refuses to start: set GITHUB_INGEST=both to run it beside the webhook (as when moving between the two), or poll to poll only");
+	}
 
 	const repos = parsePollRepos(env.POLL_REPOS);
 	if (repos === null && base.github.source !== "app") {

@@ -1,7 +1,7 @@
 {
   "card": "TriggerEditor",
   "pr": 750,
-  "words": "178546e37aaded758fb6a70f9d1be4d650a036d61ea12badec92096191b60840",
+  "words": "d4819878e0bba6fd8c8adc6d4ee07b6459823a52e0540f11024458d6a5debcac",
   "elements": [
     {"el":"p-trigger-add","kind":"panel","status":"new","source":"admin/src/console/panels/trigger.mjs#triggerAdd","golden":["trigger-add.operator"],"reason":"Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."},
     {"el":"p-kinds","kind":"panel","status":"new","source":"admin/src/console/panels/trigger.mjs#triggerKindHelp","golden":["trigger-add.operator"],"reason":"Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."},
@@ -9,7 +9,7 @@
     {"el":"p-refusals","kind":"panel","status":"new","source":"admin/src/console/panels/trigger.mjs#triggerRefusals","golden":["trigger-add.operator"],"reason":"Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."},
     {"el":"Five kinds with kind-specific fields","kind":"readme","status":"new","panel":"p-trigger-add","source":"admin/src/console/panels/trigger.mjs#triggerAdd","golden":["trigger-add.operator"],"shows":["data-trigger-kind=\"cron\"","data-trigger-kind=\"issue\""]},
     {"el":"Forge actions in their own words and review-state narrowing","kind":"readme","status":"new","panel":"p-forge-words","source":"admin/src/console/panels/trigger.mjs#triggerForgeWords","golden":["trigger-add.operator"],"shows":["review_submitted","synchronize"]},
-    {"el":"Only configured webhook forges and blessed venues are offered","kind":"provides","status":"new","source":"admin/src/read-model.mjs#readTriggerEditor"},
+    {"el":"Only blessed venues and the forges whose events reach this deployment are offered: a webhook secret set, or GitHub by its webhook or the poller under GITHUB_INGEST","kind":"provides","status":"new","source":"admin/src/read-model.mjs#readTriggerEditor","holds":"githubTriggerTransports(hints)"},
     {"el":"Flow suggestions from repository, overlay and staged skill tiers","kind":"provides","status":"new","source":"admin/src/read-model.mjs#readTriggerEditor"},
     {"el":"Blank run fields show their deployment default","kind":"readme","status":"new","panel":"p-trigger-add","source":"admin/src/console/panels/trigger.mjs#editFields","golden":["trigger-add.operator"],"shows":"Deployment default"},
     {"el":"Progress, status comments, steering and recovery name their prerequisites","kind":"readme","status":"new","panel":"p-trigger-add","source":"admin/src/console/panels/trigger.mjs#triggerAdd","golden":["trigger-add.operator"],"shows":["run.progress","run.recover"]},
@@ -19,6 +19,9 @@
     {"el":"Preview added lines, reserve, destination, undo and five-minute ticket","kind":"provides","status":"new","source":"admin/src/console/actions.mjs#previewAction"},
     {"el":"Viewer cannot open the editor; read-only console says forms off","kind":"readme","status":"new","source":"admin/src/console/panels/trigger.mjs#triggerAdd"},
     {"el":"Trigger 8 address-review and six illustrative refusal examples","kind":"sample","status":"illustrative","reason":"Real loader/planner refusals and browser tests prove behavior; the card’s row 8 and example values are illustrative."},
-    {"el":"Segmented kinds and checkboxes","kind":"readme","status":"illustrative","reason":"the page uses selects, which the generic form draws and which work without the script"}
+    {"el":"Segmented kinds and checkboxes","kind":"readme","status":"illustrative","reason":"the page uses selects, which the generic form draws and which work without the script"},
+    {"el":"The forge field says which forges are offered: by a configured webhook, or GitHub by polling","kind":"readme","status":"new","panel":"p-trigger-add","source":"admin/src/console/panels/trigger.mjs#FORGE_OFFER_HINT","golden":["trigger-add.operator"],"shows":"Only forges whose events reach this deployment are offered: by a configured webhook, or GitHub by polling."},
+    {"el":"With no forge reachable the field says so and points to Connections or cron","kind":"state","status":"new","panel":"p-trigger-add","source":"admin/src/console/panels/trigger.mjs#FORGE_NONE_HINT","golden":["panels/trigger-editor-no-webhook.operator"],"shows":"No forge's events reach this deployment yet. Configure a forge connection, or choose cron."},
+    {"el":"Where a GitHub trigger would be the first to make the receiver serve GitHub, the form says to restart it once added","kind":"state","status":"new","panel":"p-trigger-add","source":"admin/src/console/panels/trigger.mjs#FORGE_RESTART_NOTE","golden":["panels/trigger-editor-github-restart.operator"],"shows":"A first GitHub trigger takes GitHub webhooks only after a restart"}
   ]
 }

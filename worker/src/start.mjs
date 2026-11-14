@@ -1484,7 +1484,9 @@ export async function startWorker(
 		}
 	};
 
-	await attachAuth("github", (cfg) => makeAuth(cfg, { log }), config.github);
+	// `checkPermissions` (issue #876): under the app source, one line names each permission the installation lacks of the
+	// four `pi-dispatch setup github` asks for. Said at boot and never a gate: each job's own reads are what refuse.
+	await attachAuth("github", (cfg) => makeAuth(cfg, { log, checkPermissions: true }), config.github);
 	// GitLab joins the same map on the same best-effort terms. It appears only when configured: a forge
 	// with no entry refuses its jobs at mint time with a message naming what is missing, which is a better
 	// answer than an entry that exists and cannot authenticate.
