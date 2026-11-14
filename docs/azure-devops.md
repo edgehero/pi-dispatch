@@ -67,7 +67,8 @@ An Azure-only deployment needs nothing from GitHub. Every forge arm is condition
 forge's route, resolves its identity for the bot-loop guard, and requires its credentials only when your
 triggers name that forge. So no `WEBHOOK_SECRET` and no `gh` login are needed here, and `/` (the GitHub
 endpoint) answers 404 rather than 401, because an endpoint that answers is one you could believe is armed.
-Add a `github` trigger later and both become required again, as they should.
+Add a `github` trigger later, or set `GITHUB_AUTH_SOURCE`, and both become required again, as they should,
+unless `GITHUB_INGEST=poll` says GitHub comes from the poller ([polling.md](polling.md)).
 
 Then start it: `pi-dispatch-receiver` from your deployment folder, where `serve` is the default command, or
 the container profile instead (`docker compose --env-file .env -f deploy/docker-compose.yml --profile receiver up -d`,

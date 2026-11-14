@@ -60,7 +60,7 @@ import { basename, dirname, isAbsolute, join, posix, resolve, win32 } from "node
 import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { DEFAULT_MODEL, DEFAULT_PROVIDER, DEFAULT_VALKEY_URL, accountTempRoot, checkpointStoreCollision, checkpointsDirPath, allowedModelsFrom, modelFrom, providerFrom, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirOwnerFix, jobsDirPath, sandboxDirOwnerFix, legacyTempStateDir, logsDirPath, modelEndpointsFilePath, delimitedList, envelopeFilePath, pauseWindowsFilePath, projectsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir, workerName as workerNameFrom } from "./config.mjs";
+import { DEFAULT_MODEL, DEFAULT_PROVIDER, DEFAULT_VALKEY_URL, accountTempRoot, githubIngestFrom, checkpointStoreCollision, checkpointsDirPath, allowedModelsFrom, modelFrom, providerFrom, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirOwnerFix, jobsDirPath, sandboxDirOwnerFix, legacyTempStateDir, logsDirPath, modelEndpointsFilePath, delimitedList, envelopeFilePath, pauseWindowsFilePath, projectsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir, workerName as workerNameFrom } from "./config.mjs";
 import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue, envFileWrapperInternal, wrapperInternalSentence } from "./env-file.mjs";
 import { canonicalScope, danglingProjectRows, dollarRowsBelowJobCap, dollarRowsWithoutCap, isModelScope, isProjectScope, loadScopedLimits, parseScopedLimits, scopedLimitsVersionFor } from "./scoped-limits.mjs";
 import { EMPTY_PROJECTS_FINGERPRINT, escapeControls, loadProjects, projectOf, projectsFingerprint } from "./projects.mjs";
@@ -804,7 +804,7 @@ export const GITHUB_SERVICE_KEYS = Object.freeze(["GITHUB_AUTH_SOURCE", "GITHUB_
  *  console: the worker reads it (it runs the audit reaper), and a console key set alone makes doctor judge a console. */
 export const WORKER_SERVICE_KEYS = Object.freeze(["PI_JOB_IMAGE", "PI_JOB_MEMORY", "PI_JOB_CPUS", "PI_CONCURRENCY", ...Object.values(HOST_BUDGET_KEYS), "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_LOG_RETENTION_DAYS", "PI_CONSOLE_AUDIT_RETENTION_DAYS", "PI_RUN_MIRROR_MAX_RUNS", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_CHECKPOINTS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_AUTH_CONNECTIONS_FILE", "PI_AUTH_STORE_DIR", "PI_CODING_AGENT_DIR", "PI_BACKEND_FLOOR", "PI_OPENSHELL_ENGINE", "PI_OPENSHELL_GATEWAY", "PI_SECRET_PROFILES", "PI_SECRET_BUNDLES", "PI_SECRET_RESOLVER_ROOTS", "PI_SECRET_RESOLVE_TIMEOUT_MS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "PI_DOCTOR_INTERVAL_HOURS", "PI_ALLOWED_MODELS", "PI_DISPATCH_RUN_ROOTS", "GITHUB_PAT_VAR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
 /** Issue #471: the receiver's keys doctor judges its boot by (the receiver's unit reads the same `.env`). */
-export const RECEIVER_SERVICE_KEYS = Object.freeze(["WEBHOOK_SECRET", "RECEIVER_PORT", "GITLAB_TOKEN", "GITLAB_URL", "GITLAB_WEBHOOK_MODE", "GITLAB_WEBHOOK_SECRET", "FORGEJO_URL", "FORGEJO_TOKEN", "FORGEJO_PERMISSION_TOKEN", "FORGEJO_WEBHOOK_SECRET", "AZURE_ORG_URL", "AZURE_TOKEN", "AZURE_WEBHOOK_MODE", "AZURE_WEBHOOK_SECRET", "AZURE_WEBHOOK_HEADER"]);
+export const RECEIVER_SERVICE_KEYS = Object.freeze(["WEBHOOK_SECRET", "GITHUB_INGEST", "RECEIVER_PORT", "GITLAB_TOKEN", "GITLAB_URL", "GITLAB_WEBHOOK_MODE", "GITLAB_WEBHOOK_SECRET", "FORGEJO_URL", "FORGEJO_TOKEN", "FORGEJO_PERMISSION_TOKEN", "FORGEJO_WEBHOOK_SECRET", "AZURE_ORG_URL", "AZURE_TOKEN", "AZURE_WEBHOOK_MODE", "AZURE_WEBHOOK_SECRET", "AZURE_WEBHOOK_HEADER"]);
 /**
  * Issue #471 (follow-up): the variables the CLIs doctor spawns read from their environment, by the CLI that reads them.
  * The worker starts podman, docker and gh with its OWN environment (no `env` option: `image-preflight.mjs`,
@@ -1070,6 +1070,7 @@ export const EMPTY_READ_AS_UNSET = Object.freeze({
 	PI_WAIT_AFTER_MAX_MS: "empty",
 	PI_SANDBOX_RETENTION_HOURS: "empty",
 	WEBHOOK_SECRET: "blank",
+	GITHUB_INGEST: "empty",
 	RECEIVER_PORT: "empty",
 	GITLAB_TOKEN: "empty",
 	GITLAB_WEBHOOK_MODE: "empty",
@@ -2555,24 +2556,53 @@ export async function collectChecks(shellVars, seams) {
 	}
 
 	section("forges");
-	// The receiver itself, when the triggers file names ANY forge (issue #80). Only forge deliveries need
-	// the receiver at all, so a cron/local-only deployment gets no receiver noise here. WARNS rather than
-	// fails, same doctrine as the gitlab block below: a deployment can legitimately be mid-setup (or run
-	// the receiver on another host with its own env), and doctor's job is to say what will not work, not
-	// to refuse.
-	if (forges.length > 0) {
-		// Presence only, value never read out (secrets-and-pii) -- without it the receiver refuses to boot,
-		// because a webhook it cannot verify is a forgeable paid-agent trigger (CONST-HMAC-OVER-RAW-BODY).
-		const webhookSecret = env.WEBHOOK_SECRET;
-		if (typeof webhookSecret !== "string" || webhookSecret.trim() === "") {
+	// The receiver itself, when the triggers file names ANY forge (issue #80), or GITHUB_INGEST says how GitHub reaches
+	// this deployment (issue #879: an operator who set it runs a receiver command). Only forge deliveries need the
+	// receiver at all, so a cron/local-only deployment gets no receiver noise here. WARNS rather than fails, same
+	// doctrine as the gitlab block below: a deployment can legitimately be mid-setup (or run the receiver on another
+	// host with its own env), and doctor's job is to say what will not work, not to refuse.
+	const githubServe = githubServeDecision(env, forges);
+	if (forges.length > 0 || githubServe.invalid || githubServe.ingest !== null) {
+		if (githubServe.invalid) {
+			// The receiver's own refusal, which comes before its WEBHOOK_SECRET check, so it is the one line said here: one
+			// root cause, one line. Shown only when short and plain, as GITHUB_AUTH_SOURCE's line does (PR #485 round 1).
+			const raw = env.GITHUB_INGEST;
+			const shown = /^[A-Za-z0-9_-]{1,12}$/.test(raw) ? quotedShown(raw) : `an unrecognised value (${raw.length} characters, not shown)`;
 			checks.push({
 				ok: false,
 				warn: true,
-				label: `triggers.json has ${forges.join("/")} triggers but WEBHOOK_SECRET is unset -- the receiver will refuse to start`,
-				fix: "generate one (`openssl rand -hex 32`) and set WEBHOOK_SECRET in .env -- `pi-dispatch-receiver` verifies every delivery's signature against it and refuses to boot without it",
+				label: `GITHUB_INGEST is ${shown}, which is none of webhook, poll or both: every \`pi-dispatch-receiver\` command (serve, poll, watch) refuses to start on it (exit 2)${fromFileNote(fileSays("GITHUB_INGEST"))}`,
+				fix: "set GITHUB_INGEST to webhook, poll or both, or delete the line to let `serve` infer it from your triggers and GITHUB_AUTH_SOURCE (.env.example)",
 			});
 		} else {
-			checks.push({ ok: true, label: "WEBHOOK_SECRET set -- the receiver (`pi-dispatch-receiver`) can verify deliveries" });
+			// Issue #879: the transport, named, so an operator reads which command carries GitHub here rather than inferring
+			// it from whether a WEBHOOK_SECRET line warns. Said only where GitHub is in play: a GitLab-only deployment with
+			// the setting unset gets the secret line below and nothing about GitHub's transport.
+			if (githubServe.serves || githubServe.ingest === "poll") checks.push({ ok: true, label: githubTransportLabel(githubServe) });
+			if (githubServe.serves) {
+				// Presence only, value never read out (secrets-and-pii) -- without it the receiver refuses to boot,
+				// because a webhook it cannot verify is a forgeable paid-agent trigger (CONST-HMAC-OVER-RAW-BODY).
+				const webhookSecret = env.WEBHOOK_SECRET;
+				if (typeof webhookSecret !== "string" || webhookSecret.trim() === "") {
+					checks.push({
+						ok: false,
+						warn: true,
+						label: `${githubServe.why} but WEBHOOK_SECRET is unset -- the receiver will refuse to start`,
+						// The way out an inferred answer leaves (issue #879): a deployment whose GitHub events come from the poller
+						// needs no secret, and said here because this is the line such an operator meets. An operator who set
+						// GITHUB_INGEST to webhook or both chose the webhook, so the fix is the secret alone. Where only a
+						// GITHUB_AUTH_SOURCE=gh line armed it, that line repeats the default (every scaffold before #879 carried it
+						// uncommented), so deleting it is a way out too; any other source is a choice the worker reads.
+						fix: `generate one (\`openssl rand -hex 32\`) and set WEBHOOK_SECRET in .env -- \`pi-dispatch-receiver\` verifies every delivery's signature against it and refuses to boot without it${githubServe.ingest === null ? `; or, if no GitHub webhook comes to this deployment (\`pi-dispatch-receiver poll\` brings GitHub's events, or none are wanted), set GITHUB_INGEST=poll and \`serve\` needs none${githubServe.why === "GITHUB_AUTH_SOURCE is set" && env.GITHUB_AUTH_SOURCE === "gh" ? ", or delete the GITHUB_AUTH_SOURCE=gh line, which only repeats the default" : ""}` : ""}`,
+					});
+				} else {
+					checks.push({ ok: true, label: "WEBHOOK_SECRET set -- the receiver (`pi-dispatch-receiver`) can verify deliveries" });
+				}
+			} else {
+				// It used to warn here for ANY forge, so a GitLab-only deployment was told its receiver would refuse to start
+				// when the receiver had stopped needing the secret there in issue #99 (issue #879 found it).
+				checks.push({ ok: true, label: `WEBHOOK_SECRET not needed: \`pi-dispatch-receiver serve\` serves no GitHub route here (${githubServe.why})` });
+			}
 		}
 		// Validated only WHEN SET: unset (or empty) means the loader's own default of 3000, which needs no
 		// line. The malformed value IS echoed -- a port is not a secret, and naming the shape it actually
@@ -7245,6 +7275,38 @@ export async function sweepStaleCanaryNetworks({ run, pid, isAlive, endpoint, bi
 		} else checks.push(canaryCheck("notRemoved", { name, command: outcome.command }, venue));
 	}
 	return checks;
+}
+
+/**
+ * Issue #879: what `pi-dispatch-receiver serve` will decide about GitHub on this deployment, `{ ingest, invalid,
+ * serves, why }`, `why` naming what decided it for the lines that print it. The receiver's rule (`decideServesGithub`,
+ * receiver/src/config.mjs) restated, because doctor lives in the package the receiver depends on and cannot import it
+ * back; `worker/test/doctor.test.mjs` holds the two to the same answers through the receiver's real loader. The word is
+ * parsed by the one parser both use (`githubIngestFrom`). `forges` is the triggers file's unspent forge kinds, which for
+ * github is exactly the receiver's non-empty github group: cron and watch entries run `local`, and a spent one-shot is
+ * a sentinel with no kind. An explicit `GITHUB_AUTH_SOURCE` is read from `env` and not from a parsed block, for the
+ * receiver's reason: the parsed source defaults to gh and cannot tell a choice from a default.
+ */
+export function githubServeDecision(env, forges = []) {
+	let ingest;
+	try {
+		ingest = githubIngestFrom(env);
+	} catch {
+		return { ingest: null, invalid: true, serves: null, why: null };
+	}
+	if (ingest === "poll") return { ingest, invalid: false, serves: false, why: "GITHUB_INGEST=poll" };
+	if (ingest !== null) return { ingest, invalid: false, serves: true, why: `GITHUB_INGEST=${ingest}` };
+	if (forges.includes("github")) return { ingest, invalid: false, serves: true, why: "triggers.json has github triggers" };
+	if (typeof env.GITHUB_AUTH_SOURCE === "string" && env.GITHUB_AUTH_SOURCE !== "") return { ingest, invalid: false, serves: true, why: "GITHUB_AUTH_SOURCE is set" };
+	return { ingest, invalid: false, serves: false, why: "no github triggers, and GITHUB_AUTH_SOURCE and GITHUB_INGEST are unset" };
+}
+
+/** Issue #879: the one line naming which receiver command carries GitHub here, from `githubServeDecision`. */
+export function githubTransportLabel(decision) {
+	if (decision.ingest === "poll") return "GitHub events come by polling (GITHUB_INGEST=poll): `pi-dispatch-receiver poll` brings them, and `serve` mounts no GitHub route";
+	if (decision.ingest === "webhook") return "GitHub events come by webhook (GITHUB_INGEST=webhook): `pi-dispatch-receiver serve` takes them at /, and `poll` refuses to start";
+	if (decision.ingest === "both") return "GitHub events come by webhook and by polling (GITHUB_INGEST=both): `serve` takes them at / and `poll` may run beside it, so each event arrives twice, under different ids; keep it to a move between the two";
+	return `GitHub events come by webhook: \`pi-dispatch-receiver serve\` takes them at /, because ${decision.why} and GITHUB_INGEST is unset (set it to say which transport carries GitHub, docs/polling.md)`;
 }
 
 /**

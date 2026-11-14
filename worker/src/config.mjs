@@ -824,6 +824,37 @@ export function loadGitHubAuth(env, fileExists) {
 	return { source, patVar, appId, installationId, privateKeyPath, privateKey };
 }
 
+/** The three answers `GITHUB_INGEST` takes (issue #879). Exported so the console's display vocabulary is this list. */
+export const GITHUB_INGEST_VALUES = Object.freeze(["webhook", "poll", "both"]);
+
+/**
+ * Which transport brings GitHub events to this deployment, from `GITHUB_INGEST` (issue #879): `"webhook"`, `"poll"`
+ * or `"both"`, or `null` when the variable is unset or empty. Read by the receiver's commands (through its one loader)
+ * and by doctor and the console, which say what those commands will do, so none of them can read the word differently.
+ *
+ * Why the setting exists at all: `serve` used to infer that it serves GitHub from the triggers file and from an
+ * explicitly set `GITHUB_AUTH_SOURCE`, and both are shared with `poll` on purpose (docs/polling.md). So a deployment
+ * that polls GitHub and takes webhooks for another forge could not start `serve` without a `WEBHOOK_SECRET` that no
+ * GitHub App was given, and with one it mounted a GitHub route nothing should deliver to. Neither input can say which
+ * transport carries GitHub; this one does. `null` keeps the inference (`decideServesGithub`, the #231 rule), so a
+ * deployment that never sets it boots exactly as before.
+ *
+ * Empty is unset, as a blank scaffolded line is for most keys here: the receiver's own reading of an empty
+ * `GITHUB_AUTH_SOURCE` as "not explicit" is the precedent. Anything else outside the three words refuses at boot
+ * rather than falling back to the inference, because a typo'd `pol` that quietly kept a GitHub route armed is the
+ * believed-off-while-on state this setting exists to end. The value is shown only when it is short and plain: a
+ * token pasted into the wrong line must not reach a journal.
+ */
+export function githubIngestFrom(env) {
+	const raw = env.GITHUB_INGEST;
+	if (raw === undefined || raw === "") return null;
+	if (!GITHUB_INGEST_VALUES.includes(raw)) {
+		const shown = /^[A-Za-z0-9_-]{1,12}$/.test(raw) ? JSON.stringify(raw) : `a value of ${raw.length} characters, not shown`;
+		throw configError(`GITHUB_INGEST must be webhook, poll or both (or unset, to infer it); got ${shown}`);
+	}
+	return raw;
+}
+
 // env-internal TMPDIR, TEMP: the OS temp dir, read to place the default job and sandbox paths
 // below -- and, only on a host with no home directory to name, as the last-resort fallback for the
 // durable state root. Not a variable of this project's and not a deployment knob: PI_JOBS_DIR,

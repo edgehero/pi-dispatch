@@ -7,8 +7,9 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { DOCTOR_PUBLISH_SKIPPED_PREFIX } from "../src/doctor-spawner.mjs";
-import { defaultPublishDoctor, doctorHostLoads, dollarChecks, overlayDollarProblem, scopedDollarRowChecks, startAdvice, CANARY_LINES, CANARY_PROBE_SLUGS, DOCTOR_SHELL_KEYS, EGRESS_CANARY_RUNNER_MODULE, EGRESS_CANARY_STALE_RUNNER, ENV_FILE_READABLE_KEYS, RECEIVER_SERVICE_KEYS, RUN_TIMEOUTS, SERVICE_ENV_KEYS, STEERING_SERVICE_KEYS, WORKER_SERVICE_KEYS, backendChecks, countRetained, defaultPromptFn, dockerRunVia, egressCanaryPlainScript, egressCanaryProbeArgs, forgeUrlEgressChecks, egressCanaryScript, envFileKeys, bootFileEnv, UNREAD_BOOT_KEYS, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, podmanLiveChecks, render, sandboxTombstoneChecks, serviceEnvKeys, serviceEnvLoader, sweepStaleCanaryNetworks, urlShown, resolveDoctorEnv, jobImageOf, CLI_SERVICE_KEYS, cliNotHandedLines, fileConfigures, triggersPath, valkeyPasswordUpgradeStep, undeclaredPortNear, ENDPOINT_PROBE_SLUGS, allowlistHostAliases, egressEndpointScript, lanIPv4Addresses, overlayLoopbackModels } from "../src/doctor.mjs";
+import { defaultPublishDoctor, githubServeDecision, doctorHostLoads, dollarChecks, overlayDollarProblem, scopedDollarRowChecks, startAdvice, CANARY_LINES, CANARY_PROBE_SLUGS, DOCTOR_SHELL_KEYS, EGRESS_CANARY_RUNNER_MODULE, EGRESS_CANARY_STALE_RUNNER, ENV_FILE_READABLE_KEYS, RECEIVER_SERVICE_KEYS, RUN_TIMEOUTS, SERVICE_ENV_KEYS, STEERING_SERVICE_KEYS, WORKER_SERVICE_KEYS, backendChecks, countRetained, defaultPromptFn, dockerRunVia, egressCanaryPlainScript, egressCanaryProbeArgs, forgeUrlEgressChecks, egressCanaryScript, envFileKeys, bootFileEnv, UNREAD_BOOT_KEYS, githubProtectionPreflight, jobUserChecks, liveChecks, liveRunVia, podmanLiveChecks, render, sandboxTombstoneChecks, serviceEnvKeys, serviceEnvLoader, sweepStaleCanaryNetworks, urlShown, resolveDoctorEnv, jobImageOf, CLI_SERVICE_KEYS, cliNotHandedLines, fileConfigures, triggersPath, valkeyPasswordUpgradeStep, undeclaredPortNear, ENDPOINT_PROBE_SLUGS, allowlistHostAliases, egressEndpointScript, lanIPv4Addresses, overlayLoopbackModels } from "../src/doctor.mjs";
 import { collectChecks, runDoctor } from "./helpers/doctor.mjs";
+import { loadReceiverConfig } from "../../receiver/src/config.mjs";
 import { valkeyPasswordFor } from "../src/valkey-endpoint.mjs";
 import { serviceEnvFileOf } from "../src/service-env.mjs";
 import { VALKEY_SHARED_KEY as VALKEY_SHARED_NAME } from "../src/podman-stack.mjs";
@@ -3020,6 +3021,103 @@ test("doctor: a malformed RECEIVER_PORT is echoed by value and warned about; a s
 	const { out: o3, text: t3 } = capture();
 	await runDoctor(imgEnv({ PI_TRIGGERS_FILE: forgeTriggersFile("github"), RECEIVER_PORT: "3000" }), imgDeps(o3, green));
 	assert.doesNotMatch(t3(), /RECEIVER_PORT/, "a valid port needs no line");
+});
+
+// -- issue #879: GITHUB_INGEST, and the WEBHOOK_SECRET line that follows the receiver's own rule --------------------
+
+test("doctor: a gitlab-only deployment is told WEBHOOK_SECRET is not needed, not that the receiver will refuse to start (#879)", async () => {
+	// It warned for ANY forge, so this deployment, which the receiver has booted without a secret since issue #99, was told
+	// its receiver would refuse.
+	const { out, text } = capture();
+	await runDoctor(imgEnv({ PI_TRIGGERS_FILE: forgeTriggersFile("gitlab") }), imgDeps(out, green));
+	assert.doesNotMatch(text(), /but WEBHOOK_SECRET is unset/);
+	assert.match(text(), /✓ WEBHOOK_SECRET not needed: `pi-dispatch-receiver serve` serves no GitHub route here \(no github triggers, and GITHUB_AUTH_SOURCE and GITHUB_INGEST are unset\)/);
+	assert.doesNotMatch(text(), /GitHub events come by/, "nothing about GitHub's transport where GitHub is not in play");
+});
+
+test("doctor: GITHUB_INGEST=poll names the poller as GitHub's transport and asks for no WEBHOOK_SECRET, github triggers or not (#879)", async () => {
+	for (const file of [forgeTriggersFile("github"), forgeTriggersFile("gitlab"), triggersFile()]) {
+		const { out, text } = capture();
+		const code = await runDoctor(imgEnv({ PI_TRIGGERS_FILE: file, GITHUB_INGEST: "poll", GITHUB_AUTH_SOURCE: "gh" }), imgDeps(out, green));
+		assert.match(text(), /✓ GitHub events come by polling \(GITHUB_INGEST=poll\): `pi-dispatch-receiver poll` brings them, and `serve` mounts no GitHub route/);
+		assert.match(text(), /✓ WEBHOOK_SECRET not needed: `pi-dispatch-receiver serve` serves no GitHub route here \(GITHUB_INGEST=poll\)/);
+		assert.doesNotMatch(text(), /but WEBHOOK_SECRET is unset/);
+		assert.equal(code, 0);
+	}
+});
+
+test("doctor: GITHUB_INGEST=webhook or both needs WEBHOOK_SECRET with no rule, and its fix offers no polling way out (#879)", async () => {
+	for (const ingest of ["webhook", "both"]) {
+		const { out, text } = capture();
+		await runDoctor(imgEnv({ PI_TRIGGERS_FILE: triggersFile(), GITHUB_INGEST: ingest }), imgDeps(out, green));
+		assert.match(text(), new RegExp(`✓ GitHub events come by webhook.*\\(GITHUB_INGEST=${ingest}\\)`));
+		assert.match(text(), new RegExp(`⚠ GITHUB_INGEST=${ingest} but WEBHOOK_SECRET is unset -- the receiver will refuse to start`));
+		assert.doesNotMatch(text(), /set GITHUB_INGEST=poll/, "the operator chose the webhook; the fix is the secret");
+	}
+});
+
+test("doctor: unset GITHUB_INGEST keeps the inference, names it, and offers poll as the way out of the secret (#879)", async () => {
+	const { out, text } = capture();
+	await runDoctor(imgEnv({ PI_TRIGGERS_FILE: forgeTriggersFile("github") }), imgDeps(out, green));
+	assert.match(text(), /✓ GitHub events come by webhook: `pi-dispatch-receiver serve` takes them at \/, because triggers\.json has github triggers and GITHUB_INGEST is unset/);
+	assert.match(text(), /⚠ triggers\.json has github triggers but WEBHOOK_SECRET is unset -- the receiver will refuse to start/);
+	assert.match(text(), /if no GitHub webhook comes to this deployment \(`pi-dispatch-receiver poll` brings GitHub's events, or none are wanted\), set GITHUB_INGEST=poll and `serve` needs none/);
+	assert.doesNotMatch(text(), /delete the GITHUB_AUTH_SOURCE=gh line/, "the triggers armed it, not a default-repeating line");
+	// An explicit source alone arms it too, as the receiver reads it: the GitLab-only folder an older scaffold made, whose
+	// uncommented GITHUB_AUTH_SOURCE=gh only repeats the default, so deleting that line is named as a way out.
+	const { out: o2, text: t2 } = capture();
+	await runDoctor(imgEnv({ PI_TRIGGERS_FILE: forgeTriggersFile("gitlab"), GITHUB_AUTH_SOURCE: "gh" }), imgDeps(o2, green));
+	assert.match(t2(), /⚠ GITHUB_AUTH_SOURCE is set but WEBHOOK_SECRET is unset -- the receiver will refuse to start/);
+	assert.match(t2(), /or delete the GITHUB_AUTH_SOURCE=gh line, which only repeats the default/);
+	// Any other source is a choice the worker reads, so deleting it is never offered.
+	const { out: o3, text: t3 } = capture();
+	await runDoctor(imgEnv({ PI_TRIGGERS_FILE: forgeTriggersFile("gitlab"), GITHUB_AUTH_SOURCE: "pat", GITHUB_PAT: "github_pat_x" }), imgDeps(o3, green));
+	assert.match(t3(), /⚠ GITHUB_AUTH_SOURCE is set but WEBHOOK_SECRET is unset/);
+	assert.doesNotMatch(t3(), /delete the GITHUB_AUTH_SOURCE/);
+});
+
+test("doctor: a GITHUB_INGEST the receiver refuses is one warning, shown only when short and plain (#879)", async () => {
+	const { out, text } = capture();
+	const code = await runDoctor(imgEnv({ PI_TRIGGERS_FILE: forgeTriggersFile("github"), GITHUB_INGEST: "pol" }), imgDeps(out, green));
+	assert.equal(code, 0, "a receiver setting warns on the worker's host, never fails");
+	assert.match(text(), /⚠ GITHUB_INGEST is "pol", which is none of webhook, poll or both: every `pi-dispatch-receiver` command \(serve, poll, watch\) refuses to start on it \(exit 2\)/);
+	assert.doesNotMatch(text(), /WEBHOOK_SECRET is unset|WEBHOOK_SECRET not needed|GitHub events come by/, "one root cause, one line");
+	const { out: o2, text: t2 } = capture();
+	await runDoctor(imgEnv({ PI_TRIGGERS_FILE: triggersFile(), GITHUB_INGEST: "ghp_PRIVATE_SENTINEL_0123456789" }), imgDeps(o2, green));
+	assert.match(t2(), /GITHUB_INGEST is an unrecognised value \(31 characters, not shown\)/, "a set value opens the receiver lines even with no forge trigger");
+	assert.doesNotMatch(t2(), /PRIVATE_SENTINEL/);
+});
+
+test("githubServeDecision answers what the receiver's own loader decides, over every setting, rule and source (#879)", () => {
+	// Doctor restates `decideServesGithub` because it cannot import the receiver; this is the bolt that holds the two
+	// together, asked of the real loader rather than of a copy of its rule.
+	const rule = { on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix" } };
+	for (const ingest of [undefined, "", "webhook", "poll", "both", "pol"]) {
+		for (const withRule of [false, true]) {
+			for (const source of [undefined, "", "gh", "pat"]) {
+				const env = { WEBHOOK_SECRET: "s", ...(ingest === undefined ? {} : { GITHUB_INGEST: ingest }), ...(source === undefined ? {} : { GITHUB_AUTH_SOURCE: source }), ...(source === "pat" ? { GITHUB_PAT: "p" } : {}) };
+				const deps = { fileExists: () => true, readFile: () => JSON.stringify({ triggers: withRule ? [rule] : [] }) };
+				const decision = githubServeDecision(env, withRule ? ["github"] : []);
+				const what = JSON.stringify({ ingest, withRule, source });
+				let cfg;
+				let error;
+				try { cfg = loadReceiverConfig(env, deps); } catch (e) { error = e; }
+				if (decision.invalid) {
+					// The loader parses the auth block first, so an empty source is the refusal it names then; either way it refuses.
+					assert.match(error?.message ?? "", source === "" ? /GITHUB_AUTH_SOURCE/ : /GITHUB_INGEST must be/, what);
+					continue;
+				}
+				if (source === "") {
+					// An empty source refuses both processes at boot (doctor says so in its own line, issue #481); this
+					// decision only has to agree that it is not an explicit choice.
+					assert.match(error?.message ?? "", /GITHUB_AUTH_SOURCE/, what);
+					assert.equal(decision.serves, ingest === "webhook" || ingest === "both" || (ingest !== "poll" && withRule), what);
+					continue;
+				}
+				assert.equal(decision.serves, cfg.servesGithub, what);
+			}
+		}
+	}
 });
 
 test("doctor: forgejo triggers with nothing set warn with the exact vars receiver boot requires", async () => {
@@ -9543,6 +9641,8 @@ test("doctor.mjs reads no service key from this shell outside the resolver: ever
 		observeHost: (e) => runtimeObs.observeHost({ endpoint: rootfulEndpoint, daemon: rootfulDaemon, fs: noFs, unit: null, env: e }),
 		observeRootfulConf: (e) => runtimeObs.observeRootfulConf({ endpoint: rootfulEndpoint, daemon: rootfulDaemon, fs: noFs, readService: async () => ({ code: 1, stdout: "" }), env: e, unit: { read: false, reason: "probe" } }),
 		pauseWindowsFilePath: (e) => cfg.pauseWindowsFilePath(e),
+		// Issue #879: the receiver's transport setting, which doctor judges by the receiver's own parse.
+		githubIngestFrom: (e) => cfg.githubIngestFrom(e),
 		// Issue #596: the default job size, as the worker's config reads it.
 		jobSizeDefaults: async (e) => (await import("../src/job-size.mjs")).jobSizeDefaults(e),
 		// Issue #596, phase 2: the host budget's settings and a project's size, as the worker reads them.
@@ -9659,8 +9759,10 @@ test("a .env straight from init: the settings line names no key init left empty 
 	const named = line.slice(line.lastIndexOf(": ") + 2).split(", ");
 	assert.deepEqual(named.filter((k) => empty.includes(k)), [], line);
 	assert.ok(named.includes("PI_JOB_IMAGE") && named.includes("RECEIVER_PORT"), "and the keys init did set are still named");
-	const gh = printed().split("\n").find((l) => l.startsWith("✓ GitHub auth settings read from "));
-	assert.ok(gh?.endsWith(": GITHUB_AUTH_SOURCE"), printed());
+	// Issue #879: the scaffold carries GITHUB_AUTH_SOURCE commented out (unset already means gh to every reader, and a set
+	// value tells the receiver it serves GitHub), and its App keys are left empty, so no GitHub auth key is named at all.
+	assert.ok(!/^GITHUB_AUTH_SOURCE=/m.test(text), "init scaffolds no GitHub auth source");
+	assert.equal(printed().split("\n").find((l) => l.startsWith("✓ GitHub auth settings read from ")), undefined, printed());
 });
 
 // Issue #481: the venue line, the CLI-variable warnings and the closing line judge an empty value by the same allowlist.

@@ -217,6 +217,9 @@ export async function runGithubAppSetup(argv = [], deps = {}) {
 		say("      GITHUB_AUTH_SOURCE=app\n");
 		say(`      GITHUB_APP_ID=${app.id}\n`);
 		say(`      GITHUB_APP_PRIVATE_KEY_PATH=${pemPath}\n`);
+		if (noWebhook) {
+			say("      GITHUB_INGEST=poll — this App delivers no webhook, so `pi-dispatch-receiver serve` mounts no GitHub route and needs no WEBHOOK_SECRET\n");
+		}
 		if (offerSecret) {
 			say("      WEBHOOK_SECRET=<value not shown> — only if .env has none; an existing secret is KEPT, because your configured hooks verify deliveries against it\n");
 		}
@@ -254,6 +257,15 @@ export async function runGithubAppSetup(argv = [], deps = {}) {
 			updateEnvFile(envPath, "GITHUB_APP_ID", String(app.id), { fs, overwrite: true });
 			updateEnvFile(envPath, "GITHUB_APP_PRIVATE_KEY_PATH", pemPath, { fs, overwrite: true });
 			summary.push(["auth source", "GITHUB_AUTH_SOURCE=app (+ app id and key path) written to .env"]);
+			if (noWebhook) {
+				// Issue #879. GITHUB_AUTH_SOURCE=app, written just above, is one of the two signals `serve` reads as "this
+				// deployment serves GitHub" while GITHUB_INGEST is unset, so without this line a receiver for another forge
+				// sharing this `.env` refused at its next restart for want of a WEBHOOK_SECRET this App will never sign with.
+				// OVERWRITE, like the three App lines: an older value describes the App this one replaces, and this App has
+				// no webhook, so `poll` is the only transport that can carry its events. Shown in the consent above.
+				updateEnvFile(envPath, "GITHUB_INGEST", "poll", { fs, overwrite: true });
+				summary.push(["GitHub ingest", "GITHUB_INGEST=poll written to .env (no GitHub route on `serve`)"]);
+			}
 			if (offerSecret) {
 				// setEnvKeyIfEmpty, NOT overwrite: an operator's existing webhook secret is what their
 				// already-configured hooks sign with — replacing it would invalidate working deliveries.
@@ -263,7 +275,7 @@ export async function runGithubAppSetup(argv = [], deps = {}) {
 			}
 		} catch (err) {
 			say(`error: could not write the App's lines into ${envPath}: ${err?.message}\n`);
-			say(`    → the App exists on GitHub and its key is at ${pemPath}. Add GITHUB_AUTH_SOURCE=app, GITHUB_APP_ID=${app.id} and GITHUB_APP_PRIVATE_KEY_PATH=${pemPath} to that file by hand\n`);
+			say(`    → the App exists on GitHub and its key is at ${pemPath}. Add GITHUB_AUTH_SOURCE=app, GITHUB_APP_ID=${app.id}${noWebhook ? ", GITHUB_INGEST=poll" : ""} and GITHUB_APP_PRIVATE_KEY_PATH=${pemPath} to that file by hand\n`);
 			summary.push(["auth source", `NOT written: ${err?.message}`]);
 		}
 		say(`✓ credentials written\n`);

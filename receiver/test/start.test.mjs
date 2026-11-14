@@ -289,6 +289,7 @@ test("a gitlab-only deployment boots without ever calling makeAuth, and says so 
 	assert.ok(skipped, `the skip must be logged; boot lines were: ${JSON.stringify(lines)}`);
 	assert.match(skipped.reason, /github triggers/);
 	assert.match(skipped.reason, /GITHUB_AUTH_SOURCE/, "the reason names both signals, which are the two ways out");
+	assert.match(skipped.reason, /GITHUB_INGEST unset/, "and the setting that overrides them (issue #879), the third way out");
 	assert.equal(lines.some((l) => l.event === "self_identity" && l.forge === undefined), false, "no github identity line, because no github identity was resolved");
 	// The gitlab arm is untouched by any of this: its own identity resolution still ran, hard-fail as ever.
 	assert.equal(lines.find((l) => l.event === "self_identity" && l.forge === "gitlab")?.id, 4242);
@@ -305,6 +306,34 @@ test("a github-serving deployment still HARD-FAILS when makeAuth throws -- no se
 	);
 	assert.equal(captured.handler, undefined, "the handler must never be built without selfId");
 	assert.equal(captured.listen, undefined, "the receiver must never listen without the bot-loop guard");
+});
+
+test("GITHUB_INGEST=poll boots a receiver whose triggers name github, resolves no GitHub identity, 404s `/`, and says why (issue #879)", async () => {
+	// The deployment of docs/polling.md's "GitHub only" trap: GitHub polled, GitLab by webhook, one `.env`, one triggers
+	// file holding both forges' rules, and the app source `setup github --no-webhook` writes. Before the setting this
+	// refused to boot for want of a WEBHOOK_SECRET.
+	const path = join(tempDir("receiver-start-polled-github-"), "triggers.json");
+	writeFileSync(path, JSON.stringify({ triggers: [
+		{ on: { type: "label", any: ["pi:frontend"] }, run: { kind: "gitlab", flow: "gl-fix" } },
+		{ on: { type: "label", any: ["pi:frontend"] }, run: { kind: "github", flow: "frontend-fix" } },
+	] }), "utf8");
+	const env = gitlabOnlyEnv({ PI_TRIGGERS_FILE: path, GITHUB_INGEST: "poll", GITHUB_AUTH_SOURCE: "app", GITHUB_APP_ID: "1", GITHUB_APP_INSTALLATION_ID: "2", GITHUB_APP_PRIVATE_KEY_PATH: path });
+	const { captured, createServer } = capturingServer();
+	const lines = await bootLogLines((write) =>
+		startReceiverClosed(env, { write, makeAuth: async () => assert.fail("no github arm under GITHUB_INGEST=poll"), makeQueueFn: stubQueue, createServer, ...gitlabFakes }),
+	);
+	const skipped = lines.find((l) => l.event === "github_arm_skipped");
+	assert.ok(skipped, `the skip is logged; boot lines were: ${JSON.stringify(lines)}`);
+	assert.match(skipped.reason, /GITHUB_INGEST=poll/, "the line names the rule that decided, not the inference it overrode");
+	assert.match(skipped.reason, /pi-dispatch-receiver poll/);
+	assert.equal(lines.find((l) => l.event === "self_identity" && l.forge === "gitlab")?.id, 4242, "the other forge's arm ran as ever");
+
+	const payload = JSON.stringify({ action: "labeled", sender: { id: 1 }, repository: { full_name: "octo/repo" }, issue: { number: 42, labels: [{ name: "pi:frontend" }] } });
+	const req = mockReq({ headers: headersFor("issues", "d-polled", payload) });
+	req.url = "/";
+	const res = mockRes();
+	await drive(captured.handler, req, res, payload);
+	assert.equal(res.statusCode, 404, "no GitHub route: a delivery nothing should send is refused as unrouted, not verified against a secret");
 });
 
 test("an explicit GITHUB_AUTH_SOURCE re-arms the boot gate even with no github triggers", async () => {

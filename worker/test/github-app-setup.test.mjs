@@ -324,6 +324,10 @@ test("setup github: --no-webhook never touches WEBHOOK_SECRET and says the App i
 	assert.equal(await h.run(), 0);
 	assert.match(h.store.get(ENV_PATH), /^WEBHOOK_SECRET=$/m, "the empty scaffold line stays empty — nothing will sign deliveries with it");
 	assert.doesNotMatch(h.text(), /WEBHOOK_SECRET=<value not shown>/, "no secret line is even offered");
+	// Issue #879: GITHUB_AUTH_SOURCE=app alone reads to `serve` as "this deployment serves GitHub", so the polling shape
+	// says which transport carries it, in the consented lines, and a receiver for another forge sharing the file starts.
+	assert.match(h.store.get(ENV_PATH), /^GITHUB_INGEST=poll$/m, "the transport is written with the App's lines");
+	assert.match(h.text(), /setup would write:[\s\S]*GITHUB_INGEST=poll — this App delivers no webhook[\s\S]*✓ credentials written/, "and shown in the block the one consent covers, like every line");
 	assert.match(h.text(), /webhook INACTIVE \(--no-webhook\)/);
 	assert.match(h.text(), /`pi-dispatch-receiver poll`/, "the poller is named, not called a follow-up: it shipped");
 	assert.doesNotMatch(h.text(), /follow-up|until it lands/, "polling is no longer a promise");
@@ -338,6 +342,25 @@ test("setup github: --no-webhook never touches WEBHOOK_SECRET and says the App i
 	assertNoSecrets(h.text());
 });
 
+test("setup github --no-webhook replaces an older GITHUB_INGEST, and the webhook path writes none (issue #879)", async () => {
+	// OVERWRITE, like the App's own lines: an older value described the App this one replaces, and this App delivers no
+	// webhook, so poll is the only transport that can carry its events.
+	const h = harness({ argv: ["--no-webhook"], files: { [ENV_PATH]: `${SEED_ENV}GITHUB_INGEST=webhook\n` }, answers: ["y", "y", "y"] });
+	assert.equal(await h.run(), 0);
+	assert.match(h.store.get(ENV_PATH), /^GITHUB_INGEST=poll$/m);
+	assert.doesNotMatch(h.store.get(ENV_PATH), /^GITHUB_INGEST=webhook$/m);
+	assert.match(h.text(), /GitHub ingest\s+GITHUB_INGEST=poll written to \.env/, "the summary says it");
+	// With a webhook the inference is right as it stands (a source is set and the secret is offered), so nothing is written.
+	const hooked = harness({ files: { [ENV_PATH]: SEED_ENV }, answers: ["y", "y", "y"] });
+	assert.equal(await hooked.run(), 0);
+	assert.doesNotMatch(hooked.store.get(ENV_PATH), /GITHUB_INGEST/);
+	assert.doesNotMatch(hooked.text(), /GITHUB_INGEST/);
+	// Declined: nothing written, the transport line included.
+	const declined = harness({ argv: ["--no-webhook"], files: { [ENV_PATH]: SEED_ENV }, answers: ["n"] });
+	assert.equal(await declined.run(), 0);
+	assert.equal(declined.store.get(ENV_PATH), SEED_ENV);
+});
+
 test("docs/polling.md names the --no-webhook placeholder the wizard sends, so the guide cannot drift from it (issue #874)", () => {
 	const doc = readFileSync(new URL("../../docs/polling.md", import.meta.url), "utf8");
 	assert.ok(doc.includes(`\`${NO_WEBHOOK_URL}\``), `docs/polling.md quotes ${NO_WEBHOOK_URL}`);
@@ -350,7 +373,9 @@ test("docs/polling.md's move to webhooks keeps its order: the secret, the receiv
 	const at = doc.indexOf("\n## Moving to webhooks later\n");
 	assert.ok(at >= 0, "the section the wizard names exists, under that exact heading");
 	const section = doc.slice(at, doc.indexOf("\n## ", at + 1));
-	const steps = ["`WEBHOOK_SECRET`", "Start `pi-dispatch-receiver`", "restart it", "Tick **Active**", "green tick, a 2xx answer", "Then stop the poller"].map((needle) => {
+	// Issue #879 adds the transport at both ends: `both` before the receiver starts, since it reads GITHUB_INGEST only then,
+	// and `webhook` once the poller is stopped, so a poller started again by mistake refuses.
+	const steps = ["`WEBHOOK_SECRET`", "`GITHUB_INGEST=both`", "Start `pi-dispatch-receiver`", "restart it", "Tick **Active**", "green tick, a 2xx answer", "Then stop the poller", "`GITHUB_INGEST=webhook`"].map((needle) => {
 		const i = section.indexOf(needle);
 		assert.ok(i >= 0, `the section says ${needle}`);
 		return i;

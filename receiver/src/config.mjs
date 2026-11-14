@@ -32,7 +32,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { groupTriggers } from "./trigger-groups.mjs";
-import { configError, loadGitHubAuth, positiveInt } from "@edgehero/pi-dispatch/config";
+import { configError, githubIngestFrom, loadGitHubAuth, positiveInt } from "@edgehero/pi-dispatch/config";
 import { FORGE_KINDS, parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
 
 // Cwd-relative, matching what `pi-dispatch init` scaffolds (and the admin's default): the receiver's
@@ -73,7 +73,10 @@ export function loadReceiverConfig(env = process.env, { readFile = readFileSync,
 	// complaint about WEBHOOK_SECRET.
 	const triggers = loadTriggers(env, readFile, fileExists);
 	const github = loadGitHubAuth(env, fileExists);
-	const servesGithub = decideServesGithub(env, triggers.github);
+	// Before the secret check for the same reason as the two above: a typo'd GITHUB_INGEST is reported as itself,
+	// never as a WEBHOOK_SECRET the deployment may not need (issue #879).
+	const githubIngest = githubIngestFrom(env);
+	const servesGithub = decideServesGithub(env, triggers.github, githubIngest);
 
 	const webhookSecret = env.WEBHOOK_SECRET;
 	if (servesGithub && (webhookSecret === undefined || webhookSecret.trim() === "")) {
@@ -89,6 +92,9 @@ export function loadReceiverConfig(env = process.env, { readFile = readFileSync,
 		// is what says so, so an unread absent secret can never be mistaken for an armed endpoint.
 		webhookSecret,
 		servesGithub,
+		// What the operator said about the transport (`null`: unset, so `servesGithub` was inferred). Carried so the boot
+		// line that skips the GitHub arm can name which rule decided, and so `poll` can refuse under `webhook`.
+		githubIngest,
 		valkeyUrl: env.VALKEY_URL ?? "redis://127.0.0.1:6379", // mirrors worker config: producer and consumer share one queue
 		port: positiveInt(env, "RECEIVER_PORT", 3000),
 		bind: env.RECEIVER_BIND ?? "0.0.0.0",
@@ -120,7 +126,16 @@ export function servedForges(cfg, kinds = FORGE_KINDS) {
  * GitHub id to arm the bot-loop guard (start.mjs) -- so it is decided once, here, from the operator's own
  * files rather than assumed.
  *
- * Either of two signals is a yes:
+ * `GITHUB_INGEST` (issue #879), when set, IS the answer and nothing below is consulted: `poll` is no, because the
+ * events come from `pi-dispatch-receiver poll` and a route here would verify deliveries against a secret no App was
+ * given; `webhook` and `both` are yes, rules or none, because the operator has said the webhook carries GitHub. The
+ * setting exists because the two signals below cannot tell the transports apart: the triggers file and the auth
+ * block are shared by `serve` and `poll` on purpose, so a deployment that polls GitHub and takes webhooks for another
+ * forge read as a GitHub webhook deployment and refused to start without a `WEBHOOK_SECRET`. A `poll` answer is not
+ * the silently dead trigger the #231 note below refuses: the operator named the transport that fires those rules, and
+ * the boot line says the arm was skipped and why.
+ *
+ * Unset, it is inferred, exactly as before the setting existed. Either of two signals is a yes:
  *
  *  - THE TRIGGERS FILE NAMES A GITHUB WEBHOOK RULE. `triggers.github` is the group `loadTriggers` built
  *    from every `run.kind: "github"` webhook entry, and `emptyGroup()` is what a forge the file never
@@ -139,7 +154,9 @@ export function servedForges(cfg, kinds = FORGE_KINDS) {
  * shared env file may carry for the worker (which mints per-job tokens and is a separate process); a
  * credential lying around is not a statement that this receiver terminates GitHub webhooks.
  */
-function decideServesGithub(env, githubGroup) {
+function decideServesGithub(env, githubGroup, githubIngest) {
+	if (githubIngest === "poll") return false;
+	if (githubIngest === "webhook" || githubIngest === "both") return true;
 	// The close groups count too (issue #231): a deployment whose ONLY github rule is a close trigger
 	// must still mount `/`, require WEBHOOK_SECRET and build auth, or the one-shot the operator armed
 	// can never fire -- and the receiver would report nothing, the silent no-op this file's header

@@ -165,8 +165,9 @@ export async function startReceiver(
 		resolveAuthority = makeResolveGitHubAuthorityFn({ mintToken: (job) => auth.mintToken({ ...job, permissions: { metadata: "read" } }) });
 	} else {
 		// Said out loud, because the alternative is an operator staring at a label trigger that does nothing.
-		// The two ways out are the two signals `decideServesGithub` reads, so the line names both.
-		log({ event: "github_arm_skipped", reason: "no github triggers and GITHUB_AUTH_SOURCE unset" });
+		// The line names the rule that decided (issue #879): GITHUB_INGEST=poll when the operator said the poller
+		// carries GitHub, else the inference's two signals and the setting that overrides them, which are the ways out.
+		log({ event: "github_arm_skipped", reason: cfg.githubIngest === "poll" ? "GITHUB_INGEST=poll: GitHub events come from `pi-dispatch-receiver poll`, so no GitHub route is served" : "no github triggers, GITHUB_AUTH_SOURCE unset and GITHUB_INGEST unset" });
 	}
 
 	// Ride-out connection (no failFast): the receiver is long-running and should survive a Valkey
