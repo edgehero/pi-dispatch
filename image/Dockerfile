@@ -453,7 +453,11 @@ LABEL dev.pi-dispatch.forges="github,gitlab,forgejo"
 # variables would ignore them and run the job with what the trigger takes away, on a clean exit, and would start a role child
 # with what run.excludeTools removed, so the worker refuses each pairing pre-spend (its `loadExclusions` capability row, reason
 # job-image-load-exclusions-unsupported). verify-image.sh runs a real offline job at a cap of 0 for the first half, and greps the baked runner for the second.
-LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,modelRoles,modelFailover,exitAuth,mcp,forgeMcp,awaitInput,approvalGates,reportProgress,recover,steer,sandboxLayout,transcriptStderr,steerStdin,bundleEnvFile,observableRunner,fork,watch,questionGrouping,answerDraft,subscriptionAuth,loadExclusions,packageCanary"
+# `idleWatch` (issue #888) tells the worker this runner reads PI_JOB_IDLE_MS and PI_JOB_STALL_MS, stops an idle or stalled
+# job itself (exit 2, reason idle or stalled) and writes its activity counters (activity.json beside the session file, or an
+# `a` record on the stderr transcript). NOT a gate: an image without it is never refused; the worker keeps the 30-minute
+# wall clock for its jobs instead, and the record says so (`limits.basis: "wall-clock"`).
+LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,modelRoles,modelFailover,exitAuth,mcp,forgeMcp,awaitInput,approvalGates,reportProgress,recover,steer,sandboxLayout,transcriptStderr,steerStdin,bundleEnvFile,observableRunner,fork,watch,questionGrouping,answerDraft,subscriptionAuth,loadExclusions,packageCanary,idleWatch"
 
 # The binaries in this image that may need the network, at their real paths (issue #683). A venue whose egress policy
 # names binaries rather than hosts alone (OpenShell decides every connection per executable) needs the paths before it

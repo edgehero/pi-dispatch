@@ -47,3 +47,7 @@ If a project instruction conflicts with a rule here, follow the rule here and sa
 5. **If you cannot complete the task, say so.** Report what you tried and what blocked you, in a
    comment or your final message. A clear "I could not do this, here is why" is a successful outcome
    and is more useful than a plausible guess. Do not invent work to look productive.
+
+6. **A job with no activity is stopped.** When nothing happens for the job's idle limit (15 minutes unless the
+   operator set another), no reply, no tool output, no CPU or network use, the job ends and unpushed work is
+   lost. Wait on slow work with a command that prints as it goes, never with one long silent sleep.

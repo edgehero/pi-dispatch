@@ -191,3 +191,40 @@ export function readCgroupUsage({ fs = nodeFs } = {}) {
 		return null;
 	}
 }
+
+/**
+ * This job's CPU time so far in microseconds, from its own cgroup, or null when it cannot be read (issue #888: the
+ * activity watch samples it every few seconds, so this reads the one file that holds it rather than every key
+ * `readCgroupUsage` reads at exit). Same paths, same refusals, never throws.
+ */
+export function readCgroupCpuUsec({ fs = nodeFs } = {}) {
+	try {
+		const read = (path) => {
+			try {
+				return String(fs.readFileSync(path, "utf8"));
+			} catch {
+				return null;
+			}
+		};
+		const exists = (path) => {
+			try {
+				return fs.existsSync(path) === true;
+			} catch {
+				return false;
+			}
+		};
+		if (exists(`${CGROUP_ROOT}/cgroup.controllers`)) {
+			const dir = v2Dir(read);
+			return dir === null ? null : count(flatKeyed(read(`${dir}/cpu.stat`)).get("usage_usec"));
+		}
+		if (exists(`${CGROUP_ROOT}/memory`) || exists(`${CGROUP_ROOT}/cpuacct`)) {
+			const own = v1Path(read, "cpuacct");
+			if (own === null) return null;
+			const root = `${CGROUP_ROOT}/cpuacct`;
+			return usecOfNsec(read(exists(`${own}/cpuacct.usage`) ? `${own}/cpuacct.usage` : `${root}/cpuacct.usage`)?.trim());
+		}
+		return null;
+	} catch {
+		return null;
+	}
+}

@@ -45,6 +45,7 @@ import {
 	costRefusalField,
 	decideExit,
 	EXIT_INFRA,
+	EXIT_POLICY,
 	loadRetryPredicate,
 } from "./src/outcome.mjs";
 import { restoreEnvProxyDispatcher } from "./src/env-proxy.mjs";
@@ -69,6 +70,7 @@ import { assertSteerReady, createInbox } from "./src/inbox.mjs";
 import { FRAME_FD, frameFdOpen, isolateStdin, openFrameReader } from "./src/steer-frames.mjs";
 import { RECOVERY_PROMPT, recoverSession } from "./src/recover.mjs";
 import { attachTurnBudget } from "./src/turn-budget.mjs";
+import { activityFileWriter, activitySettleMs, createActivityWatch, readActivityLimits } from "./src/activity.mjs";
 import { createToolStartLatch, installProviderFailureObserver, providerReplaySafe } from "./src/provider-failure.mjs";
 import { LAYOUT } from "./src/layout.mjs";
 import { applyBundleEnv } from "./src/bundle-env.mjs";
@@ -143,6 +145,15 @@ let costRefusalWhy = () => null;
 let liveExitFields = () => ({});
 let roleExitFields = () => ({});
 /**
+ * Issue #888: the activity watch's exit-line field (`activity`), and its stop as decideExit ranks it, for the paths that
+ * write a line outside main's decided one (the catch path and SIGTERM). Empty and null until the watch exists, so a run
+ * without it writes the line it always did.
+ */
+let activityExitFields = () => ({});
+let activityStopAtExit = () => null;
+/** Issue #888: where the activity counters go on a copying venue (the transcript mirror's signed record); a no-op elsewhere. */
+let sendActivityRecord = () => {};
+/**
  * The meter's teardown (issue #500 part E's review): the children hook's final fold, its STOP and its teardown rule, and
  * the teardown line. Empty until the meter installs; idempotent. The prompt's finally runs it, and so do the SIGTERM
  * handler and the outer catch before they write their exit line, so every line a metered run writes carries the final
@@ -176,6 +187,9 @@ async function main() {
 	// Issue #686: whether the key came as frame 1 of the stdin frame channel, the one fact that admits PI_STEER on the
 	// sandbox layout (PI_EXIT_AUTH itself has already left the environment).
 	const cfg = parseRunnerEnv(process.env, { steerFrames: exitKey.frames === true });
+	// Issue #888: the idle and stall limits the worker asked for, read and taken out of the environment here, before any
+	// extension or tool exists to inherit them. A broken value is refused now, free (exit 2).
+	const activityLimits = readActivityLimits(process.env);
 	let subscriptionEntries = [];
 	try { subscriptionEntries = verifySubscriptionAuthEntries(JSON.parse(process.env.PI_SUBSCRIPTION_AUTH ?? "[]")); }
 	catch { throw configError("the subscription snapshot or adapter is unavailable; reconnect or re-stage on its owner host"); }
@@ -745,6 +759,54 @@ async function main() {
 	const budget = attachTurnBudget(session, cfg.maxTurns, {
 		onAbort: (turns) => log("turn_budget_exceeded", { turns, maxTurns: cfg.maxTurns }),
 	});
+	// Issue #888 (REQ-JOB-ACTIVITY-LIMITS): stop the job when it is idle or stalled, not when it is old. Only when the
+	// worker asked (a worker before #888 asks nothing, and this run is then exactly as before). A stop aborts the session
+	// as the turn budget does, and decideExit names it; if the abort has not settled within activitySettleMs (a tool
+	// that ignores its signal), the line is written from here and the process exits, so a hung tool cannot hold the slot
+	// past the limit. The worker's own backstop covers a runner too wedged to do even that.
+	let activityStop = null;
+	let activitySettle = null;
+	const activityWatched = activityLimits.idleMs !== null || activityLimits.stallMs !== null;
+	const writeActivityFile = activityWatched ? activityFileWriter(cfg.sessionFile) : () => {};
+	const activity = activityWatched
+		? createActivityWatch({
+				limits: activityLimits,
+				log,
+				// A change in what the process-wide meter counted is a step: an in-process subagent session and a child pi
+				// process (folded in by the children hook) never reach the root bus. Calls count at start, totals at settle.
+				meterSignature: () => {
+					if (!usageMeter.ok) return null;
+					const snap = meter.snapshot();
+					return `${snap.calls}:${snap.total}`;
+				},
+				writeCounters: (counters) => {
+					writeActivityFile(counters);
+					sendActivityRecord(counters);
+				},
+				onStop: (reason) => {
+					activityStop = reason;
+					void session.abort();
+					if (activitySettle !== null) return;
+					activitySettle = setTimeout(() => {
+						if (exitWriter.written()) return;
+						log("activity_stop_unsettled", { reason });
+						try {
+							finishMeter();
+						} catch {
+							// the line is written whatever the teardown did
+						}
+						const outcome = { code: EXIT_POLICY, reason };
+						exitWriter.writeExit({ ...capExitMessage(outcome), ...costRefusalField(outcome, costRefusalWhy()), ...liveExitFields(), ...meteredExitFields() });
+						process.exit(EXIT_POLICY);
+					}, activitySettleMs(activityLimits));
+					activitySettle.unref?.();
+				},
+			})
+		: null;
+	const unsubscribeActivity = activity ? session.subscribe((event) => activity.observe(event)) : () => {};
+	activityExitFields = () => (activity ? { activity: activity.fields() } : {});
+	activityStopAtExit = () => (activityStop === null ? null : { code: EXIT_POLICY, reason: activityStop });
+	if (activity) log("activity_watch", { idleMs: activityLimits.idleMs, stallMs: activityLimits.stallMs, sampleMs: activity.interval });
 	// The recovery counts (issue #645), on every exit line of a recovering run once recovery has run: integers only.
 	let recovery = null;
 	const recoveryField = () => (recovery ? { recovery } : {});
@@ -763,7 +825,7 @@ async function main() {
 		}
 		return { steer: inbox.counts() };
 	};
-	liveExitFields = () => ({ turns: budget.state.turns, retryTurns: budget.state.retryTurns, session: { resumed: sessionResumed, reason: sessionReason }, toolsStarted: toolStarts.toolsStarted, ...recoveryField(), ...steerField({ closing: true }) });
+	liveExitFields = () => ({ turns: budget.state.turns, retryTurns: budget.state.retryTurns, session: { resumed: sessionResumed, reason: sessionReason }, toolsStarted: toolStarts.toolsStarted, ...recoveryField(), ...activityExitFields(), ...steerField({ closing: true }) });
 	// What this transcript already delivered (a resumed or recovered run) is never handed over again.
 	inbox?.seed(sessionManager);
 
@@ -776,6 +838,7 @@ async function main() {
 	// A prompt() rejection is classified HERE only when it is pi's unresumable retry (classifyPromptRejection
 	// says which, and why that must not be retried by the queue); every other rejection is rethrown untouched to
 	// the catch at the bottom, the preflight path it has always taken. The finally runs either way.
+	activity?.start();
 	let rejected = null;
 	try {
 		// A stop that came before the prompt (a call an extension made while it loaded, or while the session was
@@ -803,6 +866,9 @@ async function main() {
 		// First: nothing may be handed to a session that is about to be disposed.
 		inbox?.close();
 		budget.unsubscribe();
+		activity?.stop();
+		unsubscribeActivity();
+		if (activitySettle !== null) clearTimeout(activitySettle);
 		tokenBudget?.unsubscribe();
 		answerTools?.finish();
 		// Stops the meter's re-arm interval. It is unref'd, so this is hygiene rather than a hang fix
@@ -846,6 +912,7 @@ async function main() {
 		// by flag. A token stop maps to the same reason:"token_budget" / exit 2 from either.
 		meterStop: usageMeter.ok ? meter.state.stopReason : null,
 		tokenAborted: usageMeter.ok ? false : tokenBudget.state.aborted,
+		activityStop,
 		terminal,
 		// Null for every prompt job, so their decision tree is byte-identical to before run.command.
 		command: cfg.command ? { failed: commandFailed } : null,
@@ -890,7 +957,7 @@ async function main() {
 	} catch {}
 	// capExitMessage: a provider's error body is unbounded, and the worker reads this line from a bounded
 	// tail, so an uncapped message can push `code` and `reason` out of what the host ever sees.
-	exitWriter.writeExit({ ...capExitMessage(outcome), ...costRefusalField(outcome, costRefusalWhy()), turns: budget.state.turns, retryTurns: budget.state.retryTurns, ...roleExitFields(), tokens, ...(usage ? { usage } : {}), ...(context ? { context } : {}), session: { resumed: sessionResumed, reason: sessionReason }, ...(outcome.reason === "awaiting-approval" ? { approval } : {}), ...(outcome.reason === "awaiting-input" && awaitInput?.state.questionRefDigest ? { questionRefDigest: awaitInput.state.questionRefDigest } : {}), replaySafe, toolsStarted: toolStarts.toolsStarted, ...(providerFailure ? { providerFailure } : {}), ...(answerTools?.state.receipt ? { answerDraftDigest: answerTools.state.receipt } : {}), ...recoveryField(), ...steerField() });
+	exitWriter.writeExit({ ...capExitMessage(outcome), ...costRefusalField(outcome, costRefusalWhy()), turns: budget.state.turns, retryTurns: budget.state.retryTurns, ...roleExitFields(), tokens, ...(usage ? { usage } : {}), ...(context ? { context } : {}), session: { resumed: sessionResumed, reason: sessionReason }, ...(outcome.reason === "awaiting-approval" ? { approval } : {}), ...(outcome.reason === "awaiting-input" && awaitInput?.state.questionRefDigest ? { questionRefDigest: awaitInput.state.questionRefDigest } : {}), replaySafe, toolsStarted: toolStarts.toolsStarted, ...(providerFailure ? { providerFailure } : {}), ...(answerTools?.state.receipt ? { answerDraftDigest: answerTools.state.receipt } : {}), ...activityExitFields(), ...recoveryField(), ...steerField() });
 	return outcome.code;
 }
 
@@ -936,6 +1003,8 @@ if (!nestedRunner) {
 			})
 		: null;
 	transcriptMirror?.start();
+	// Issue #888: on a copying venue the activity counters ride the same signed channel (an `a` record).
+	if (transcriptMirror) sendActivityRecord = (counters) => transcriptMirror.activity(counters);
 	exitWriter = createExitWriter({
 		key: exitKey.key,
 		// env-internal PI_JOB_ID: set by the worker on the container, so the exit line can name its job.
@@ -982,7 +1051,7 @@ if (!nestedRunner) {
 			} catch {
 				// The line is written whatever the teardown did.
 			}
-			const stopped = meterStopAtExit();
+			const stopped = meterStopAtExit() ?? activityStopAtExit();
 			// The stop wins the exit reason, and the throw it outranked is named on its own line so the second cause is not
 			// lost: its classified reason and the error's class, never its message (names only).
 			if (stopped !== null) log("throw_after_stop", { reason: thrown.reason, error: typeof error?.name === "string" ? error.name : null });
@@ -991,7 +1060,7 @@ if (!nestedRunner) {
 			await stopMcp().catch(() => undefined);
 			const outcome = stopped ?? thrown;
 			const capped = capExitMessage(outcome);
-			exitWriter.writeExit({ code: capped.code, reason: capped.reason, ...costRefusalField(outcome, costRefusalWhy()), message: capped.message, ...meteredExitFields() });
+			exitWriter.writeExit({ code: capped.code, reason: capped.reason, ...costRefusalField(outcome, costRefusalWhy()), message: capped.message, ...meteredExitFields(), ...activityExitFields() });
 			process.exitCode = outcome.code ?? EXIT_INFRA;
 		});
 }

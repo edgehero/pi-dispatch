@@ -473,6 +473,33 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 - **Acceptance**: Given a job that hangs, the container is stopped at 30 minutes and the slot is freed.
 - **Open**: 30 minutes is inherited unmeasured. Honest v1 default, not an evidenced threshold.
 
+## REQ-JOB-ACTIVITY-LIMITS
+
+- **Status**: PARTIAL (issue #888). Part 1, the runner's half, is built: the activity watch, its stop and its counters
+  (`INT-RUNNER-EXIT-CODE-PROTOCOL`, "The activity watch"; `INT-JOB-ACTIVITY-FILE`). The worker's half (the settings,
+  the backstop, `max-minutes`, the claims and the record) is the next part, and until it lands no worker asks for the
+  watch, so `REQ-JOB-TIMEOUT-30M` still holds unchanged.
+- **Statement**: A running job shall be stopped when it is IDLE (no step by the agent and no activity in its container
+  for the idle limit, default 15 minutes) or STALLED (no step by the agent for the stall limit, default 4 hours, however
+  busy the container), and when it reaches an optional wall-clock ceiling an operator set; never merely because it is
+  old. A step is the agent itself moving (a model turn or output, a tool call starting or ending, a subagent's call);
+  activity is what it may be waiting on (a tool's output, CPU used by processes other than the runner, network
+  traffic). The record says which limit ended the job.
+- **Why**: the 30-minute wall clock (`REQ-JOB-TIMEOUT-30M`) killed jobs that were working, losing the work they had not
+  pushed (a 5.0.0 run stopped at 30:00 after 90 turns, $1.39 of a $40 cap). Spend is bounded by `REQ-RUNNER-TURN-BUDGET`
+  and the token and cost caps, so the wall clock only ever bounded the SLOT, and a slot is wasted by a job that does
+  nothing, not by one that works. Activity counts, not only steps, because the agent often waits on something it started
+  (a silent build, a CI watch): killing it then is the same mistake. The stall limit exists because activity alone can
+  be endless (a test stuck in a loop keeps the CPU busy); four hours, and only without a step, because the owner runs
+  jobs that keep working for eight.
+- **Traces to**: `REQ-JOB-TIMEOUT-30M` (which it replaces once the worker half lands), `REQ-RUNNER-TURN-BUDGET`,
+  `DES-JOB-ACTIVITY-WATCH`, `INT-JOB-ACTIVITY-FILE`
+- **Acceptance**: given a job whose tool sleeps in silence, it is stopped as `idle` at the idle limit though the tool never
+  returns; given a tool that keeps printing while the agent takes no step, it is stopped as `stalled` at the stall
+  limit and not at the idle one; given a job that keeps taking steps, it runs past both and completes
+  (`image/runner/test/activity.integration.test.mjs`, the real runner and pi); given a background process using the CPU
+  while the agent sleeps, it is not idle (`activity.test.mjs`, and the image's own proof in `verify-image.sh`).
+
 ## REQ-OPERATOR-JOB-CANCEL
 
 - **Statement**: An operator shall be able to stop ONE job from a surface that needs no model: the CLI
@@ -8920,6 +8947,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-14 (#888, part 1: the runner) | **NEW `REQ-JOB-ACTIVITY-LIMITS`**, PARTIAL: a job is stopped when idle (no step and no activity, 15 minutes by default) or stalled (no step, 4 hours by default, however busy), or at an optional ceiling, never for being old; what a step and activity are; why (the 30-minute kill of working jobs, spend already bounded elsewhere, the agent waiting on its own background work, the stall limit for an endless loop and the owner's eight-hour runs); the runner's half built, the worker's half next. **`REQ-JOB-TIMEOUT-30M` UNCHANGED, checked**: it still holds until the worker half asks for the watch. `REQ-RUNNER-TURN-BUDGET` UNCHANGED, checked. |
 | 2026-11-14 (#882, part 7) | **`REQ-CONSOLE-SECURITY` AMENDED**: the console on the local network, opt-in (`PI_CONSOLE_LAN=1`): a second listener on the host's network address (on macOS the wildcard on port 80 first, measured), announced as `pi-dispatch.local` by `dns-sd` or `avahi-publish`, with (b) gaining that name and address once bound; a request that arrived on it is never remembered, judged by its socket and never a header, and its sign-in page says so and names the host. UNCHANGED, checked: (a)'s loopback bind and refusals, `PI_CONSOLE_BIND_PUBLIC`, (i) the code and link, part 5's approval (whose window already names the peer's address), `OQ-058`. |
 | 2026-11-14 (#882, part 5) | **`REQ-CONSOLE-SECURITY` AMENDED**: sign in by approving a window on the host's desktop ("Sign in on this computer"), where the console can show one: one request at a time behind the sign-in limiter, a 256-bit id only the asking browser holds, a 4-character match code shown on the page and in the window, Deny the default, a 60-second give-up, the operator tokens only, and a `login-approval` row for every outcome. The window is the credential, since a job's container reaches the console through helpers running as the operator, so neither the peer's account nor any header tells its request from a browser's. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, the sign-in page: the button, its waiting line and three notices. UNCHANGED, checked: `OQ-058` (the host approves, never a browser), (a) and (b) (the listener and the names it answers). |
 | 2026-11-14 (#882, part 3) | **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, clause (c): a run's short link, `/run/<repository>/<number>` (`!` before the number for a merge request), drawn beside the run page's id and answered with a 303 to the newest run on that issue or request (a running job, then a queued one, then the newest record), the runs search for two forges on one path, and the run page's not-found card at 404, or at 503 when a place could not be read; 400 for a path that is not one, 405 for a write, and sign-in returns to it. UNCHANGED, checked: clause (c)'s `/run?id=`, its 404 and its id charset; `REQ-CONSOLE-SECURITY`, since the route is a viewer's read under every guard a page has, its 404 and 503 pages show the target only as the search field's value under the runs search's rule, and its refusals never echo the path; and `REQ-JOB-STATUS-COMMENTS`, since no comment gains a console link. Review of PR #886: "lands on the run it opens" was true of the server only; the browser's destination check now takes the short link too, and a client-states test holds all three sign-in paths. A job waiting on a stopped host's own queue answers its short link, and a scan over a set that is not whole answers 503, as the clause says. |

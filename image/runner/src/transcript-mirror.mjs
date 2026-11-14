@@ -33,6 +33,9 @@ import { writeAllSync } from "./exit-line.mjs";
  *   - `r`, a RESET: the file was rewritten (it shrank, its inode changed, or its first line changed, as pi's in-place
  *     rewrite does), `end` its size then, payload empty; the mirror reads it again from 0, and the worker treats what
  *     follows as its tail treats a rewritten file (lines ending at or before `end` are a `replay`).
+ *   - `a`, ACTIVITY (issue #888, `INT-JOB-ACTIVITY-FILE`): the payload is the activity watch's counters as the file on a
+ *     binding venue holds them (`{"v":1,"steps":N,"active":N}`), `end` the offset whole lines were read up to, which the
+ *     worker does not read. Sent only while the worker asked for the watch, so a worker before it never sees one.
  * A line longer than `TRANSCRIPT_LINE_MAX_BYTES` is not sent but still takes its `seq`, so the worker sees the gap and
  * shows a `skipped` entry, as its file tail does for a line past the same bound; the next line's own `end` keeps every
  * position exact across the gap.
@@ -65,10 +68,11 @@ export const TRANSCRIPT_POLL_MS = 250;
 /** The most bytes one read takes, so a burst is mirrored over several reads rather than in one allocation. */
 const READ_CHUNK_BYTES = 4 * 1024 * 1024;
 
-/** The three record types: the baseline, a line, a reset. */
+/** The record types: the baseline, a line, a reset, and (issue #888) the activity counters. */
 export const RECORD_BASELINE = "b";
 export const RECORD_LINE = "l";
 export const RECORD_RESET = "r";
+export const RECORD_ACTIVITY = "a";
 
 /** The record's MAC: its seq, type and end, then the payload's raw bytes. */
 export function transcriptRecordMac(key, runId, seq, type, end, payload) {
@@ -299,6 +303,15 @@ export function createTranscriptMirror({
 			timer?.unref?.();
 		},
 		drain,
+		/** Issue #888: one activity record, under the next seq, after the baseline. Never throws. */
+		activity({ steps, active }) {
+			if (!started || !announce()) return;
+			try {
+				emit(RECORD_ACTIVITY, lineStart, Buffer.from(JSON.stringify({ v: 1, steps, active })));
+			} catch {
+				counts.errors += 1;
+			}
+		},
 		stop() {
 			if (timer !== null) timers.clearInterval(timer);
 			timer = null;

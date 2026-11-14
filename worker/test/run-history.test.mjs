@@ -1990,7 +1990,9 @@ test("the runner writes the code it exits with on BOTH exit lines (pinned: the s
 	const src = readFileSync(new URL("../../image/runner/run-job.mjs", import.meta.url), "utf8");
 	assert.match(src, /exitWriter\.writeExit\(\{ \.\.\.capExitMessage\(outcome\), \.\.\.costRefusalField\(outcome, costRefusalWhy\(\)\), turns: /, "the decided path spreads the outcome, whose `code` is the exit code");
 	assert.match(src, /\n\treturn outcome\.code;\n\}/, "and returns that same code as the process exit code");
-	assert.match(src, /exitWriter\.writeExit\(\{ code: capped\.code, reason: capped\.reason, \.\.\.costRefusalField\(outcome, costRefusalWhy\(\)\), message: capped\.message, \.\.\.meteredExitFields\(\) \}\)/, "the catch path writes its code too (and, after the meter installed, its counts: issue #543)");
+	assert.match(src, /exitWriter\.writeExit\(\{ code: capped\.code, reason: capped\.reason, \.\.\.costRefusalField\(outcome, costRefusalWhy\(\)\), message: capped\.message, \.\.\.meteredExitFields\(\), \.\.\.activityExitFields\(\) \}\)/, "the catch path writes its code too (and, after the meter installed, its counts: issue #543)");
+	assert.match(src, /const outcome = \{ code: EXIT_POLICY, reason \};\n\t+exitWriter\.writeExit\(\{ \.\.\.capExitMessage\(outcome\), /, "the activity stop that did not settle writes the policy code it exits with (issue #888)");
+	assert.match(src, /\n\t+process\.exit\(EXIT_POLICY\);/, "and exits with it");
 });
 
 // ---- issue #545: with a key, only the runner's signed exit line is read ----

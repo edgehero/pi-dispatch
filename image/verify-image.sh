@@ -874,6 +874,33 @@ LEGONE
 				docker run --rm --entrypoint grep "$IMAGE_REF" -q -- "--exclude-tools" /app/image/runner/src/model-roles.mjs 2>/dev/null \
 					|| fail "the image declares loadExclusions but its baked runner never hands a role child the trigger's exclusions"
 				;;
+			idleWatch)
+				# Issue #888. The claim is that the runner reads PI_JOB_IDLE_MS, stops a job in which nothing happens (exit 2, reason
+				# idle, with its `activity` field on the line) even when a handler never returns, and writes its activity counters
+				# beside the session file for the worker. Proved through the real runner with no network and no model call: a
+				# command job whose handler waits for ever, under a 3-second idle limit, so the run ends within seconds.
+				iw_dir=$(mktemp -d)
+				mkdir -p "$iw_dir/job" "$iw_dir/global/extensions" "$iw_dir/session"
+				echo "Reply with the single word ok." >"$iw_dir/job/prompt.md"
+				: >"$iw_dir/session/current.jsonl"
+				cat >"$iw_dir/global/extensions/hang.js" <<'IWHANG'
+export default function (pi) { pi.registerCommand("hang", { description: "waits for ever", handler: () => new Promise((resolve) => setTimeout(resolve, 600000)) }); }
+IWHANG
+				chmod -R a+rX "$iw_dir"
+				chmod 0777 "$iw_dir/session"
+				chmod 0666 "$iw_dir/session/current.jsonl"
+				iw_out=$(docker run --rm --network none --cap-drop=ALL --security-opt no-new-privileges -v "$iw_dir/job:/job:ro" \
+					-v "$iw_dir/global:/opt/pi-global:ro" -v "$iw_dir/session:/session" -e PI_SESSION_FILE=/session/current.jsonl \
+					-e PI_COMMAND=hang -e PI_JOB_IDLE_MS=3000 -e PI_PROVIDER=anthropic -e PI_MODEL=claude-sonnet-4-5-20250929 -e PI_MAX_TURNS=1 \
+					-e ANTHROPIC_API_KEY=sk-ant-not-a-real-key -e PI_MAX_COST_MICROS=0 "$IMAGE_REF" 2>&1) && iw_code=0 || iw_code=$?
+				iw_exit=$(echo "$iw_out" | grep '"event":"exit"' | tail -1)
+				iw_counters=$(cat "$iw_dir/session/activity.json" 2>/dev/null || true)
+				rm -rf "$iw_dir"
+				[ "$iw_code" = 2 ] && echo "$iw_exit" | grep -q '"reason":"idle"' && echo "$iw_exit" | grep -q '"activity":{' \
+					|| fail "the image declares idleWatch but a job in which nothing happened did not stop as idle (exit $iw_code): $iw_exit"
+				echo "$iw_counters" | grep -q '"v":1,"steps":[1-9]' \
+					|| fail "the image declares idleWatch but wrote no activity counters beside the session file: $iw_counters"
+				;;
 			questionGrouping)
 				# The dedicated classifier mode must reach the cost guard before any executable discovery.
 				# A zero cap and no network make this a real runner proof that cannot spend provider tokens.
