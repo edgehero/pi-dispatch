@@ -1,6 +1,6 @@
 The live run page leads with progress and the live transcript; steering and the terminal command sit beside them, and everything that only exists after the run ends collapses to one line.
 
-**How a person uses it.** The Progress card answers "how far along is it":
+**How a person uses it.** The title is the run's id, and beside it stands the run's short link, `/run/acme/web/415`, which opens the newest run on that issue: a person can read it out or type it where the id is hard to say. The Progress card answers "how far along is it":
 - elapsed timecode, turn 7 of 40, 12 steps with 1 failed;
 - the tool running now and for how long;
 - phase 2 of 4 as chapters, with 3 of 10 ticks on the current phase;
@@ -10,7 +10,7 @@ The live transcript streams below. Tool arguments and results fold; a failed res
 
 **Panels.** `p-progress`, `p-transcript`, `p-record` (one line), `p-chat`, `p-terminal`, `p-run`.
 
-**The server provides.** Progress events (turn, steps, running tool, phase names, item counts, note) and transcript entries with kind, time and a truncated flag, over the live stream. Whether the trigger sets `run.steer`, and the queued and delivered steering messages.
+**The server provides.** Progress events (turn, steps, running tool, phase names, item counts, note) and transcript entries with kind, time and a truncated flag, over the live stream. Whether the trigger sets `run.steer`, and the queued and delivered steering messages. The run's forge target, which the short link is built from: `/run/<repository>/<number>`, with `!` before the number for a merge request. A local or scheduled run has no short link.
 
 **Why it works this way.**
 - A run whose trigger sets no run.steer takes no messages. Its side column then shows "This run takes no messages: its trigger sets no run.steer. Watch it here instead, or continue it in a terminal once it ends." in place of the Steer card (drawn on RunChatStates as *Not steer-armed*).

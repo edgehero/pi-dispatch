@@ -87,7 +87,7 @@ import { ACTIONS, actionNamed, cancelAction, confirmAction, plural, previewActio
 import { refusalHtml } from "./confirm-view.mjs";
 import { codeKindOf, invitationMatches } from "./login-codes.mjs";
 import { renderTriggerCheckResult } from "./panels/triggers.mjs";
-import { errorPage as realErrorPage } from "./error-pages.mjs";
+import { errorPage as realErrorPage, RUN_PATH_SENTENCES } from "./error-pages.mjs";
 import { LOOPBACK_HOSTS, contentTypeRefusal, hostnameOf, hostRefusal, makeLoginLimiter, originRefusal, readOnlyRefusal, roleRefusal } from "./guards.mjs";
 import { applySecurityHeaders } from "./headers.mjs";
 import * as ui from "./kit.mjs";
@@ -95,7 +95,9 @@ import { isLocalhostAddress, isLoopbackAddress } from "./listen.mjs";
 import { STATE_VERSION, stateOf as defaultStateOf } from "./live.mjs";
 import { RUN_ID_RE } from "./panels.mjs";
 import { getWatchTrace } from "./watch.mjs";
-import { getRun } from "./run-api.mjs";
+import { getRun, resolveRunPath } from "./run-api.mjs";
+import { parseRunPath, RUN_PATH_PREFIX, RUN_PATH_QUERY_REFUSAL } from "./run-path.mjs";
+import { parseRunFilter } from "../run-filter.mjs";
 import { getForkPoints } from "./fork-api.mjs";
 import * as realPages from "./pages.mjs";
 import { CONSOLE_SCRIPT } from "./script.mjs";
@@ -1086,6 +1088,33 @@ async function getTranscript(ctx) {
   return openStream(ctx, () => deps.hub.subscribeTranscript({ res, sessionId: session.id, session: { name: session.name, role: session.role }, jobId, lastEventId, format }));
 }
 
+/**
+ * A run's short link (issue #882, `run-path.mjs`): `/run/<repository>/<number>`, `!` before the number for a merge
+ * request, answered with a 303 to the newest run on that issue or request, `/run?id=<id>` (`run-api.mjs`
+ * `resolveRunPath`: a job queued or running on it first, since its record is written at its end, then the newest
+ * record). A viewer's, as the run page is: the answer is an id. A link that is not one, or that carries a query, is the
+ * run page's 400 (Runs is the way back); runs on two forges for one path go to the runs search for it (the person
+ * picks); none is the run page's own not-found page, its search filled with the issue or request, 404 when every place
+ * was read and 503 when one could not be, which is not "no run". The redirect carries no body and, as every answer,
+ * `cache-control: no-store`, since the newest run moves.
+ */
+async function getRunPath(ctx) {
+  const parsed = parseRunPath(ctx.pathname);
+  const refusal = parsed.refusal ?? ([...ctx.searchParams.keys()].length > 0 ? RUN_PATH_QUERY_REFUSAL : null);
+  if (refusal) return sendFailure(ctx, 400, refusal, { page: { kind: "bad-query", sentence: refusal, page: "run" } });
+  const got = ctx.deps.pageDeps?.fleet ? await resolveRunPath(ctx.deps.pageDeps.fleet, parsed.target) : { untold: true };
+  if (got.id) return redirect(ctx.res, `${realPages.PAGES.run.path}?${new URLSearchParams({ id: got.id })}`);
+  if (got.several) {
+    // The runs search for the target, where its rule takes it (a target past 200 characters does not fit): the runs on
+    // every forge, and the person picks.
+    const q = parseRunFilter({ q: parsed.target }).filter?.q === parsed.target ? `?${new URLSearchParams({ q: parsed.target })}` : "";
+    return redirect(ctx.res, `${realPages.PAGES.runs.path}${q}`);
+  }
+  const status = got.absent ? 404 : 503;
+  const said = got.absent ? RUN_PATH_SENTENCES.absent : RUN_PATH_SENTENCES.untold;
+  return sendFailure(ctx, status, said.sentence, { page: { kind: "no-run", target: parsed.target } });
+}
+
 /** One GET route per screen, from the pages' own table, so a screen cannot exist without its auth. */
 function pageRoutes(PAGES) {
   return Object.entries(PAGES).map(([name, spec]) => ({ method: "GET", path: spec.path, auth: spec.auth, write: false, page: name, handler: pageHandler(name) }));
@@ -1148,6 +1177,9 @@ export const ROUTES = Object.freeze([
   ...["launch", "authorize", "return", "select"].map((mode) => ({ method: "GET", path: `/sandbox/gateway/${mode}`, auth: "none", write: false, handler: (ctx) => sendHtml(ctx.res, 200, gatewayLanding({ mode, theme: themeOf(ctx.req.headers.cookie), gesture: ctx.req.headers["sec-fetch-site"] !== "same-origin" })) })),
   ...["launch", "context", "authorize"].map((method) => ({ method: "POST", path: `/api/sandbox-gateway/${method}`, auth: "operator", write: true, handler: (ctx) => { ctx.gatewayTheme = themeOf(ctx.req.headers.cookie); return gatewayApi(ctx, method); } })),
   ...pageRoutes(realPages.PAGES),
+  // Issue #882: a run's short link, the one route matched by its prefix (`lookupRoute`), never an exact path: the
+  // repository and the number are the path itself. `/run` with `?id=` stays the run page's own exact route.
+  { method: "GET", path: RUN_PATH_PREFIX, prefix: true, auth: "viewer", write: false, handler: getRunPath },
   { method: "GET", path: "/api/whoami", auth: "viewer", write: false, handler: (ctx) => sendJson(ctx.res, 200, { name: ctx.session.name, role: ctx.session.role, readOnly: Boolean(ctx.deps.config.readOnly) }) },
   { method: "GET", path: "/static/console.js", auth: "none", write: false, anyHost: true, handler: (ctx) => {
     ctx.res.writeHead(200, { "content-type": "text/javascript; charset=utf-8" });
@@ -1189,11 +1221,13 @@ export const ROUTES = Object.freeze([
 
 /**
  * `{route}`, `{allow}` (the path exists under other methods) or null. HEAD is served by the GET route, except a route
- * marked `noHead` (the event stream), which answers HEAD with 405 and `Allow: GET`.
+ * marked `noHead` (the event stream), which answers HEAD with 405 and `Allow: GET`. A path no route names exactly is
+ * then looked up among the routes marked `prefix` (the short run link alone, issue #882), whose `path` it starts with.
  */
 export function lookupRoute(method, pathname) {
   const want = method === "HEAD" ? "GET" : method;
-  const onPath = ROUTES.filter((r) => r.path === pathname);
+  const exact = ROUTES.filter((r) => r.path === pathname && r.prefix !== true);
+  const onPath = exact.length > 0 || typeof pathname !== "string" ? exact : ROUTES.filter((r) => r.prefix === true && pathname.startsWith(r.path));
   if (onPath.length === 0) return null;
   const route = onPath.find((r) => r.method === want && !(method === "HEAD" && r.noHead));
   return route ? { route } : { allow: [...new Set(onPath.flatMap((r) => (r.method === "GET" ? (r.noHead ? ["GET"] : ["GET", "HEAD"]) : [r.method])))] };

@@ -12,7 +12,7 @@ Three cards:
 Nothing here starts a container from the browser: the gateway stays attach-only (#754). Starting a shell from the run
 page is a separate decision, and these cards do not assume it."""
 from pulse import *
-from gen_runs import RUN_STYLE, run_title, ended_facts, ended_tokens, ended_resources, ended_session
+from gen_runs import RUN_STYLE, run_path, run_title, ended_facts, ended_tokens, ended_resources, ended_session
 from gen_sandboxes import command
 from gen_gateway import CSS as GW_CSS
 from gen_gateway_workbench import CSS as WORKBENCH_CSS, run_reference
@@ -82,7 +82,7 @@ def run_workspace_page():
     main = f'<div class="stack">{workspace_panel()}{ended_facts()}{actions()}</div>'
     side = f"""<div class="stack">{ended_tokens()}{ended_resources()}{ended_session()}
   <p class="collapsed" id="p-chain" data-panel>{ic('chain', 'ic ic--sm')}<b>Chain:</b> no parent and no child runs.</p></div>"""
-    return shell("Runs", oc + f'<div class="cols">{main}{side}</div>', run_title("gh-9575"), sub=sub, end=badge("completed"), back="Runs")
+    return shell("Runs", oc + f'<div class="cols">{main}{side}</div>', run_title("gh-9575"), sub=sub, end=badge("completed"), back="Runs", beside=run_path("acme/web#490"))
 
 
 # ---------------------------------------------------------------- RunWorkspaceStates: the row, outcome by outcome
@@ -147,7 +147,7 @@ A completed run's page with a shell open on its kept workspace. One rule keeps i
 - **The outcome** offers *Try it in its workspace* beside the pull request, since trying a change before merging it is the main reason to open a run's workspace.
 - **Workspace** (`p-workspace`) is one row: where it is kept and until when, who has a shell open (opening it joins that shell), and Open in browser or Open in Terminal. Copying the command and End fold under one line.
 - **Found something?** One line with two links: choose its trigger and add it to the instructions (the usual trigger edit, with its preview and Confirm; a historical index never silently selects a current rule), or fork it with a message (#648).
-- The run's facts, Actions and the side column are RunEnded's.
+- The run's facts, Actions and the side column are RunEnded's, and so is the title with its short link, `/run/acme/web/490`.
 
 With no shell open, the row offers Open in Terminal; RunWorkspaceStates draws each outcome's row. On a phone the open buttons hide and the command is there to copy.
 

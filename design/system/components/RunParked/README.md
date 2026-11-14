@@ -4,6 +4,7 @@ The run page for a parked run: the agent's question is the hero, with the answer
 - The question card shows who asked (gh-2f6a, `api`, acme/api#131), how long it has waited and the question in large text.
 - The person writes an answer and previews it. The preview says it is posted to acme/api#131 as a reply and resumes the run, that the session continues, and what is reserved before the first token. **Post answer and resume** confirms; the undo line says how to take it back.
 - A terminal route stays available: `pi-dispatch chat gh-2f6a`.
+- Beside the id, the short link `/run/acme/api/131` opens the newest run on the issue, so once the answer resumes it, the link opens the resumed run.
 - When the queue no longer holds the run's data, the answer box is replaced by an attention banner that sends the person to the issue, where a reply still resumes the run. Both states are shown on this card.
 - The side column holds the run facts, tokens and dollars against the job cap, and the last three transcript entries.
 

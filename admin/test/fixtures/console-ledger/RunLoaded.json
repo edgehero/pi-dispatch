@@ -1,7 +1,7 @@
 {
   "card": "RunLoaded",
   "pr": 800,
-  "words": "92845bed14e690eb69df5341103cbe8b6a57c852706a247eb267a5771662de1b",
+  "words": "9825a7c03a78098eace41d4cb1d1436641314ee6eef06360bf5e540e4b4f5e3b",
   "elements": [
     {
       "el": "p-outcome",
@@ -298,6 +298,7 @@
       "kind": "sample",
       "status": "illustrative",
       "reason": "Sample values."
-    }
+    },
+    {"el":"The title is RunEnded's: the id, and beside it the run's short link","kind":"readme","status":"new","source":"admin/src/console/run-path.mjs#runPathLink"}
   ]
 }

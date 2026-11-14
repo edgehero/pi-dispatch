@@ -12,7 +12,7 @@ Three cards:
 - LoadedStates: that card's one line, run by run, and where it is repeated (a sandbox and a trigger).
 - ProjectLoads: the project page's What its runs load, which says when runs of one project differ by host."""
 from pulse import *
-from gen_runs import RUN_STYLE, RUNS_STYLE, RUNS, run_title, ended_facts, ended_tokens, ended_resources, ended_session, row as runs_row
+from gen_runs import RUN_STYLE, RUNS_STYLE, RUNS, run_path, run_title, ended_facts, ended_tokens, ended_resources, ended_session, row as runs_row
 from gen_config2 import table, code, COMMON_CSS
 
 
@@ -166,7 +166,7 @@ def run_loaded_page():
                  run_actions())
     main = f'<div class="stack">{ended_facts()}{loaded_panel()}</div>'
     side = f'<div class="stack">{ended_tokens()}{ended_resources()}{ended_session()}</div>'
-    return shell("Runs", oc + f'<div class="cols">{main}{side}</div>', run_title("gh-9575"), sub=sub, end=badge("completed"), back="Runs")
+    return shell("Runs", oc + f'<div class="cols">{main}{side}</div>', run_title("gh-9575"), sub=sub, end=badge("completed"), back="Runs", beside=run_path("acme/web#490"))
 
 
 # ---------------------------------------------------------------- LoadedStates: the one line, run by run
@@ -382,6 +382,7 @@ README = {
 A completed run's **Loaded** card: what the job had when it started, one line per kind. Today a run page names the model and the flow; nothing says which extensions, skills, MCP servers or tools the job loaded, or which pi and image it ran on. Those depend on the host, the repository at its base commit, the trigger and the image, and the configuration pages show only what should load.
 
 **How a person uses it.**
+- **The title** is RunEnded's: the id, and beside it the run's short link, `/run/acme/web/490`.
 - **The top line** says whether everything the trigger asks for loaded. When something did not (LoadedStates draws each case), it names what, and the outcome says it too.
 - **One line per kind:**
   - **pi:** the version and image the job ran, with the image id.

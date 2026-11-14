@@ -7,6 +7,11 @@ export const RUN_CSS = `${QCARD_CSS}${WORKSPACE_CSS}
 .facts--1 { grid-template-columns: minmax(0, 1fr); }
 .fact { grid-template-columns: minmax(0, min(128px, 40%)) minmax(0, 1fr); }
 .titlebar h1 { overflow-wrap: anywhere; word-break: break-word; font-family: var(--font-mono); font-size: 26px; }
+/* Issue #882, the RunEnded card's: the short link on the id's line, after it, wrapping under the id when the line is full. */
+.titlebar__head { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: var(--space-4); row-gap: 2px; min-width: 0; }
+.titlebar__head h1 { min-width: 0; }
+.run-path { min-width: 0; font-family: var(--font-mono); font-size: 14px; font-weight: 500; color: var(--ink-muted); text-underline-offset: 3px; overflow-wrap: anywhere; }
+.run-path:hover { color: var(--ink); }
 .titlebar__sub [data-panel] { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .titlebar__sub .act { margin-left: auto; }
 .card { min-width: 0; }

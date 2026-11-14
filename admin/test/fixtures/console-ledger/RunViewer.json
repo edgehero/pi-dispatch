@@ -1,7 +1,7 @@
 {
   "card": "RunViewer",
   "pr": 5,
-  "words": "ad793ce2a0262e6e8cf20ccd1493e0cfa17512c76810f93a4312cd9bdda5074f",
+  "words": "2c3bd2cfbbec46dff752503580e395d1435f7a828330d2d6279285459a914aea",
   "elements": [
     {"el":"p-progress","kind":"panel","status":"new","source":"admin/src/console/panels/run.mjs#runProgress","golden":["panels/run-failed-no-reason.viewer"]},
     {"el":"p-chat","kind":"panel","status":"new","source":"admin/src/console/panels/run.mjs#runChat","golden":["panels/run-failed-no-reason.viewer"]},
@@ -30,6 +30,7 @@
     {"el":"A message's text is never listed, for any role: the run reads it, and the audit log keeps its sha256.","kind":"readme","status":"new","source":"admin/src/console/panels/run.mjs#runSummary"},
     {"el":"A reason a newer worker wrote that this console has no sentence for is shown as its token, as written. An outcome it does not know shows with the failed glyph.","kind":"readme","status":"new","source":"admin/src/console/panels/run.mjs#runOutcome"},
     {"el":"**Fixture note.** gh-b3d7's progress and steps are the fixture, as on RunLive. The inbox rows, the stale time, the failed run and the token `scope-cap-window` are sample.","kind":"sample","status":"illustrative","reason":"Sample values: production uses real records and catalog words, and the card's sample values are not runtime contracts."},
-    {"el":"Phases as done, now and next","kind":"readme","status":"illustrative","reason":"a viewer never reads phase names, so the page numbers them (REQ-CONSOLE-SECURITY)"}
+    {"el":"Phases as done, now and next","kind":"readme","status":"illustrative","reason":"a viewer never reads phase names, so the page numbers them (REQ-CONSOLE-SECURITY)"},
+    {"el":"The short link beside the id is the viewer's as well","kind":"readme","status":"new","source":"admin/src/console/run-path.mjs#runPathLink","reason":"the run page draws the same title bar for every role that may read the run"}
   ]
 }

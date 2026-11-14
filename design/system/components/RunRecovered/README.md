@@ -1,6 +1,7 @@
 A durable run whose first attempt was lost: the outcome says it goes on, a track shows the attempt, its checkpoints and the recovery, and the side column keeps the facts and what each attempt spent.
 
 **How a person uses it.**
+- Beside the id, the short link `/run/acme/api/140` opens the newest run on the issue, so while the recovery runs it opens the recovery job.
 - The outcome reads "Failed, continuing" with the running glyph, because the run is not over. Its one action opens the recovery job.
 - *Recovery* draws the run on one track (15:00 to 15:45 UTC):
   - attempt 1 as a red pill;

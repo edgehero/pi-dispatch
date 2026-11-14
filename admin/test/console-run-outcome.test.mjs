@@ -6,9 +6,9 @@ import { REASONS, SESSION_REASON_TEXT, PLAN_REASON_TEXT } from "@edgehero/pi-dis
 import { CHAT_REFUSALS } from "@edgehero/pi-dispatch/chat-mode";
 import { loadPageData, pagePanels, panelIds, renderPage } from "../src/console/pages.mjs";
 import { refusedBeforeStart, runOutcome } from "../src/console/panels.mjs";
-import { rerunCheckOf, sandboxCheckOf } from "../src/console/run-api.mjs";
+import { RUN_PATH_STATES, rerunCheckOf, sandboxCheckOf } from "../src/console/run-api.mjs";
 import { makeLiveHub } from "../src/console/live.mjs";
-import { createFleetReader, fleetQueuesOn, readFleetQueues, RUN_FILE_UNREADABLE, RUN_MIRROR_UNREAD, RUN_PLACES, RUN_RECORD_UNREAD } from "../src/read-model.mjs";
+import { createFleetReader, fleetQueuesOn, readFleetQueues, RUN_FILE_UNREADABLE, RUN_MIRROR_UNREAD, RUN_PLACES, RUN_RECORD_UNREAD, targetKeyOf } from "../src/read-model.mjs";
 import { runUnreadText, runUntoldText } from "../src/console/panels/run.mjs";
 import { sandboxRetentionOf } from "../src/sandbox-verdict.mjs";
 import { parkedAnswerRefusalOf, RERUN_DATA_KEPT_MS, RERUN_DATA_KEPT_TEXT, RERUN_KEPT_SLACK_MS, rerunRefusalOf } from "../src/job-actions.mjs";
@@ -359,6 +359,31 @@ function namedQueueReader(redis, jobs) {
   const reader = createFleetReader({ valkeyUrl: "redis://unused", logsDir: tempDir("pd-710-logs-") }, { makeQueueFn: (_c, opts) => queueOf(opts?.name ?? "pi-jobs"), parseConnectionFn: () => ({}), redisFn: () => redis, nowFn: () => NOW, readOnly: true });
   return { reader, asked };
 }
+
+test("a short link's queue scan reads the by-id lookup's queues: a host out of the registry, running before waiting on ANY queue, and a set not whole is never none (#882, review of PR #886)", async () => {
+  const job = (id) => ({ id, data: { kind: "github", repo: "acme/web", target: { type: "issue", number: 12 } } });
+  // Each queue named, holding `byQueue[name][state]`, read by the real pending scan through `getJobs`.
+  const readerOf = (redis, byQueue) => createFleetReader({ valkeyUrl: "redis://unused", logsDir: tempDir("pd-882-logs-") }, {
+    makeQueueFn: (_c, opts) => {
+      const name = opts?.name ?? "pi-jobs";
+      return { name, getJob: async () => null, getJobs: async ([state], start, end) => ((byQueue[name] ?? {})[state] ?? []).slice(start, end + 1), close: async () => {} };
+    },
+    parseConnectionFn: () => ({}), redisFn: () => redis, nowFn: () => NOW, readOnly: true,
+  });
+  const targets = [{ kind: "github", target: "acme/web#12" }];
+  const key = targetKeyOf("github", "acme/web#12");
+  // A job waiting on a stopped host's own queue: the registry no longer lists the host, its queue still exists.
+  const departed = readerOf(fleetRedis({ members: [], metas: ["bull:pi-jobs@mini2:meta"] }), { "pi-jobs@mini2": { waiting: [job("gh-waiting-mini2")] } });
+  const found = await departed.pendingOnTargets(targets, { states: RUN_PATH_STATES });
+  assert.equal(found.byKey.get(key), "gh-waiting-mini2", "found as /run?id= finds it, not a 404");
+  // A job running on one host's queue is met before one waiting on the shared queue, whichever queue is read first.
+  const both = readerOf(fleetRedis({ members: [], metas: ["bull:pi-jobs@mini1:meta"] }), { "pi-jobs": { waiting: [job("gh-waiting-shared")] }, "pi-jobs@mini1": { active: [job("gh-running-mini1")] } });
+  assert.equal((await both.pendingOnTargets(targets, { states: RUN_PATH_STATES })).byKey.get(key), "gh-running-mini1");
+  // The keyspace scan failed: a miss over a set that is not whole is "cannot tell", never "no run".
+  const partial = readerOf(fleetRedis({ members: [], scanThrows: true }), {});
+  const miss = await partial.pendingOnTargets(targets, { states: RUN_PATH_STATES });
+  assert.ok(miss.unreachable === true || miss.complete === false, `not a whole miss: ${JSON.stringify({ ...miss, byKey: undefined })}`);
+});
 
 test("the retained-job read asks the planner's queues: a host out of the registry still has its queue asked (review round 1)", async () => {
   const redis = fleetRedis({ members: [], metas: ["bull:pi-jobs@mini2:meta"] });

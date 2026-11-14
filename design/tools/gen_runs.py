@@ -174,6 +174,13 @@ ISSUE = "the checkout page double-charges when the user presses Pay twice"
 def run_title(jid):
     return f'<span class="run-id">{E(jid)}</span>'
 
+def run_path(target):
+    """The run's short link beside its id: `/run/<repository>/<number>`, `!` before the number for a merge request. It
+    opens the newest run on that issue or request, so on an older run's page it leads to the later one."""
+    repo, sep, n = target.rpartition("!") if "!" in target else target.rpartition("#")
+    path = f'/run/{repo}/{"!" if sep == "!" else ""}{n}'
+    return f'<a class="run-path" href="#" title="Opens the newest run on {E(target)}">{E(path)}</a>'
+
 def live_progress(recent=True):
     """The Progress card. The phone (recent=False) leaves out the recent steps: the transcript below shows them."""
     steps = [("edit", "done", "ok", "-", "15:38"), ("bash", "failed", "error", "2.3 s", "15:38"), ("read", "done", "ok", "0.1 s", "15:37")]
@@ -248,7 +255,7 @@ def run_live_page():
     main = f"""<div class="stack">{live_progress()}{live_transcript()}
   <p class="collapsed" id="p-record" data-panel>{ic('clock', 'ic ic--sm')}<b>Run record, tokens, resources, session and chain</b> are written when the run ends.</p></div>"""
     side = f'<div class="stack">{steer_card()}{chat_card()}{live_facts()}</div>'
-    return shell("Runs", f'<div class="cols">{main}{side}</div>', run_title("gh-b3d7"), sub=sub, end=end, back="Runs")
+    return shell("Runs", f'<div class="cols">{main}{side}</div>', run_title("gh-b3d7"), sub=sub, end=end, back="Runs", beside=run_path("acme/web#415"))
 
 # ---------------- RunLivePhone: the same run on a phone ----------------
 def run_live_phone_page():
@@ -271,7 +278,7 @@ def run_live_phone_page():
     record = (f'<p class="collapsed" id="p-record" data-panel>{ic("clock", "ic ic--sm")}<b>Run record, tokens and resources</b> '
               'are written when the run ends.</p>')
     inner = f'<div class="stack">{live_progress(recent=False)}{cost}{tr}{steer}{foot}{record}</div>'
-    return shell("Runs", inner, run_title("gh-b3d7"), sub=sub, end=badge("running"), back="Runs")
+    return shell("Runs", inner, run_title("gh-b3d7"), sub=sub, end=badge("running"), back="Runs", beside=run_path("acme/web#415"))
 
 RUN_PHONE_STYLE = """
 .rlp-small { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; margin-top: var(--space-3); font-size: 12px; line-height: 18px; color: var(--ink-muted); }
@@ -280,12 +287,22 @@ RUN_PHONE_STYLE = """
 #p-progress .run-prog { gap: var(--space-4); }
 """
 
+# The short link (#882) sits on the id's line, after it, and wraps under it when the line is full. Its own block, so
+# every run card's style takes the same rules (gen_parked's cards add it to theirs).
+RUN_PATH_STYLE = """
+.titlebar__head { display: flex; flex-wrap: wrap; align-items: baseline; column-gap: var(--space-4); row-gap: 2px; min-width: 0; }
+.titlebar__head h1 { min-width: 0; overflow-wrap: anywhere; }
+.run-path { font-family: var(--font-mono); font-size: 14px; font-weight: 500; color: var(--ink-muted); text-underline-offset: 3px; overflow-wrap: anywhere; }
+.run-path:hover { color: var(--ink); }
+"""
+
 RUN_STYLE = """
 /* Keep fact values readable inside a narrow desktop card as well as on a phone. */
 .facts, .facts--3 { grid-template-columns: repeat(auto-fit, minmax(min(100%, 240px), 1fr)); }
 .facts--1 { grid-template-columns: minmax(0, 1fr); }
 .fact { grid-template-columns: minmax(0, min(128px, 40%)) minmax(0, 1fr); }
 .run-id { font-family: var(--font-mono); font-weight: 700; letter-spacing: -0.03em; }
+""" + RUN_PATH_STYLE + """
 .titlebar__sub .link { margin-left: 4px; }
 .titlebar__sub .muted { margin-left: 4px; }
 .run-prog { display: flex; align-items: flex-end; gap: var(--space-6); flex-wrap: wrap; margin-bottom: var(--space-4); }
@@ -385,7 +402,7 @@ def run_ended_page():
     main = f'<div class="stack">{ended_facts()}{ended_actions()}</div>'
     side = f"""<div class="stack">{ended_tokens()}{ended_resources()}{ended_session()}
   <p class="collapsed" id="p-chain" data-panel>{ic('chain', 'ic ic--sm')}<b>Chain:</b> no parent and no child runs.</p></div>"""
-    return shell("Runs", oc + f'<div class="cols">{main}{side}</div>', run_title("gh-9575"), sub=sub, end=badge("completed"), back="Runs")
+    return shell("Runs", oc + f'<div class="cols">{main}{side}</div>', run_title("gh-9575"), sub=sub, end=badge("completed"), back="Runs", beside=run_path("acme/web#490"))
 
 # ---------------- READMEs ----------------
 README = {
@@ -423,7 +440,7 @@ Ids never break. Flow, venue, model, tokens and job cap are on the run page.
 **Fixture note.** The same rows as RunsScreen.""",
 "RunLive": """The live run page leads with progress and the live transcript; steering and the terminal command sit beside them, and everything that only exists after the run ends collapses to one line.
 
-**How a person uses it.** The Progress card answers "how far along is it":
+**How a person uses it.** The title is the run's id, and beside it stands the run's short link, `/run/acme/web/415`, which opens the newest run on that issue: a person can read it out or type it where the id is hard to say. The Progress card answers "how far along is it":
 - elapsed timecode, turn 7 of 40, 12 steps with 1 failed;
 - the tool running now and for how long;
 - phase 2 of 4 as chapters, with 3 of 10 ticks on the current phase;
@@ -433,7 +450,7 @@ The live transcript streams below. Tool arguments and results fold; a failed res
 
 **Panels.** `p-progress`, `p-transcript`, `p-record` (one line), `p-chat`, `p-terminal`, `p-run`.
 
-**The server provides.** Progress events (turn, steps, running tool, phase names, item counts, note) and transcript entries with kind, time and a truncated flag, over the live stream. Whether the trigger sets `run.steer`, and the queued and delivered steering messages.
+**The server provides.** Progress events (turn, steps, running tool, phase names, item counts, note) and transcript entries with kind, time and a truncated flag, over the live stream. Whether the trigger sets `run.steer`, and the queued and delivered steering messages. The run's forge target, which the short link is built from: `/run/<repository>/<number>`, with `!` before the number for a merge request. A local or scheduled run has no short link.
 
 **Why it works this way.**
 - A run whose trigger sets no run.steer takes no messages. Its side column then shows "This run takes no messages: its trigger sets no run.steer. Watch it here instead, or continue it in a terminal once it ends." in place of the Steer card (drawn on RunChatStates as *Not steer-armed*).
@@ -441,7 +458,7 @@ The live transcript streams below. Tool arguments and results fold; a failed res
 **Fixture note.** Progress, recent steps and the transcript's entry kinds and times are the fixture (gh-b3d7). The tool arguments, the read result, the test failure text, the bash command and the inbox messages are sample copy. The fixture run is not steer-armed, so on the fixture its Chat panel would show the not-armed sentence instead of the Steer card.""",
 "RunEnded": """The page of a finished run leads with its outcome, what happened and the next step, then the facts, costs and resources, with the actions to run it again or continue it.
 
-**How a person uses it.** The outcome banner says "Completed: finished in 22m on mini1" and reminds the reader that merges are never automatic. Its buttons open the issue and preview a re-run. *Run* lists the record's facts in plain words: trigger, turns against maxTurns, attempt, exit code and recovery. *Actions* explains each next step in a sentence:
+**How a person uses it.** Beside the run's id stands its short link, `/run/acme/web/490`, which opens the newest run on that issue; on the page of an older run it leads to the later one. The outcome banner says "Completed: finished in 22m on mini1" and reminds the reader that merges are never automatic. Its buttons open the issue and preview a re-run. *Run* lists the record's facts in plain words: trigger, turns against maxTurns, attempt, exit code and recovery. *Actions* explains each next step in a sentence:
 - **Preview a re-run** (paid). Its confirm bar is shown open with the reservation against today's cap and an undo line.
 - **Preview a fork** (paid) selects a saved entry boundary and optional provider, permitted model, thinking level and follow-up message. Its preview names the reservation and independent branch. Unavailable source state is named.
 - **Terminal chat** and **sandbox** commands copy with one click.
@@ -450,12 +467,13 @@ The side column has tokens and dollars (job cap as a bar with the soft-hold line
 
 **Panels.** `p-outcome`, `p-run`, `p-actions`, `p-cost`, `p-resources`, `p-session`, `p-chain`.
 
-**The server provides.** The run record: facts, outcome, reason and next-step sentences from the catalog, tokens, cost class and reservation, resource figures, session state in words (not raw tokens such as "fresh (absent)"), chain, and whether a workspace was kept. It also says whether a re-run is allowed, so the button is hidden or disabled with its reason when the planner would refuse it.
+**The server provides.** The run record: facts, outcome, reason and next-step sentences from the catalog, tokens, cost class and reservation, resource figures, session state in words (not raw tokens such as "fresh (absent)"), chain, and whether a workspace was kept. It also says whether a re-run is allowed, so the button is hidden or disabled with its reason when the planner would refuse it. The short link is built from the record's forge target.
 
 **Fixture note.** gh-9575's target, flow, host, venue, model, tokens, cost, cap and end time are the fixture. The start time (14:50), turns, trigger, token split, model calls, resources, session wording and transcript size are sample values.""",
 "RunLivePhone": """The live run page laid out for a phone: what the run is doing now comes first, and the one action is Steer.
 
 **How a person uses it.**
+- **The title.** The run's id, and its short link `/run/acme/web/415` on the line under it when the id fills the width.
 - **Progress.** The elapsed timecode, turn 7 of 40, 12 steps with 1 failed, the tool running now and for how long, phase 2 of 4 with 3 of 10 ticks, and the run's own note. The recent steps are left to the transcript below.
 - **Spend so far.** $0.14 metered against the $2.00 job cap, as a bar with the soft-hold line, and what was reserved at the start.
 - **Live transcript.** The newest two entries (the edit result and the bash call still running), with *Show all 10 entries* to open the rest.
