@@ -311,6 +311,9 @@ function actorOf(ctx) {
  * both headers to loopback names looks like a local browser, and it makes every write look local; this rule does not claim to catch that.
  */
 function rememberTransportOk(ctx) {
+  // Issue #882, first: a request that came in on the LAN listener crossed the network in plain HTTP, whatever Host and Origin it sent (a script
+  // can send `Host: localhost`, or an enrolled HTTPS origin's names), so it is never remembered. The listener's mark says so; no header can.
+  if (arrivedOverLan(ctx.req)) return false;
   const https = typeof ctx.consoleOrigin === "string" && ctx.consoleOrigin.startsWith("https://");
   if (https) return true;
   if (listenWord(ctx.deps.config) === "public") return false;
@@ -355,6 +358,8 @@ function rememberRefusalHere(deps, req) {
   if (!deps.devices) return "store";
   const kind = typeof deps.devices.unavailableKind === "function" ? deps.devices.unavailableKind() : deps.devices.unavailable() !== null ? "store" : null;
   if (kind !== null) return kind;
+  // Issue #882: the LAN listener's page never offers it, also beside an enrolled HTTPS origin (whose proxy arrives on loopback, never here).
+  if (arrivedOverLan(req)) return "transport";
   if (secureOrigin(deps) === true) return null;
   return listenWord(deps.config) !== "public" && LOOPBACK_HOSTS.includes(hostnameOf(req.headers.host)) ? null : "transport";
 }
@@ -365,6 +370,8 @@ function rememberRefusalHere(deps, req) {
  * re-set without `Secure` on a name a network carries, which would send it in the clear from then on. It simply ages, and the browser signs in again.
  */
 function renewSecureOf(ctx) {
+  // Issue #882: a request on the LAN listener re-sets nothing, whatever Host it sent: no browser is remembered there.
+  if (arrivedOverLan(ctx.req)) return null;
   const secure = secureOrigin(ctx.deps);
   if (secure !== false) return secure;
   return listenWord(ctx.deps.config) !== "public" && LOOPBACK_HOSTS.includes(hostnameOf(ctx.req.headers.host)) ? false : null;
@@ -953,7 +960,7 @@ function getLogin(ctx) {
   const arrival = notice === null && ctx.req.headers["sec-fetch-site"] === "cross-site";
   const idleMinutes = Number.isSafeInteger(config.idleMs) ? Math.floor(config.idleMs / 60000) : undefined;
   const maxHours = Number.isSafeInteger(config.maxMs) ? Math.floor(config.maxMs / 3600000) : undefined;
-  return sendHtml(ctx.res, 200, loginPage({ theme: themeOf(ctx.req.headers.cookie), notice, limits: { idleMinutes, maxHours }, listen: listenWord(config), next, arrival, remember: rememberableHere(ctx.deps, ctx.req), approve: Boolean(ctx.deps.approvals?.available) }));
+  return sendHtml(ctx.res, 200, loginPage({ theme: themeOf(ctx.req.headers.cookie), notice, limits: { idleMinutes, maxHours }, listen: arrivedOverLan(ctx.req) ? "lan" : listenWord(config), next, arrival, remember: rememberableHere(ctx.deps, ctx.req), approve: Boolean(ctx.deps.approvals?.available) }));
 }
 
 /** The sign-in page's `ended` notice from its query: exactly one `ended`, a member of `ENDED_REASONS`, else null. */
@@ -1608,7 +1615,8 @@ export function createConsoleServer({
   const deps = { devices, config, fs, now, random, audit, sessions, cookies, tickets, limiter, log, readTokens, findToken, keptTokens, consumeLoginCode, writePauseWindows, actionDeps, refusalRows, quieted: { count: 0 }, pages, pageDeps, hub, stateOf, errorPage, limits, streams: { open: 0 }, gateway, consoleOrigin, restartNotice, approvals };
   // `connectionsCheckingInterval` makes the two timeouts bite within a second of expiring rather than within node's
   // default 30: a client holding connections open without sending holds a slot of `maxConnections` only that long.
-  const server = createServer({ headersTimeout: limits.headersTimeout, requestTimeout: limits.requestTimeout, connectionsCheckingInterval: limits.connectionsCheckingInterval }, (req, res) => {
+  const serverOptions = { headersTimeout: limits.headersTimeout, requestTimeout: limits.requestTimeout, connectionsCheckingInterval: limits.connectionsCheckingInterval };
+  const handle = (req, res) => {
     dispatch(req, res, deps).catch((e) => {
       log(`console: internal error (${e?.code ?? e?.name ?? "error"})`);
       if (res.headersSent) return res.destroy();
@@ -1616,8 +1624,34 @@ export function createConsoleServer({
       // and `sendFailure` falls back to the JSON when the page cannot be drawn, so the 500 always goes out.
       sendFailure({ req, res, deps }, 500, CONSOLE_FAILED, { page: { kind: "failed" } });
     });
-  });
+  };
+  const server = createServer(serverOptions, handle);
   server.once("close", () => { actionDeps?.setup?.close?.(); tickets?.close?.(); gateway?.close?.(); });
   server.maxConnections = limits.maxConnections;
+  // Issue #882: a second listener for the local network (lan.mjs, `PI_CONSOLE_LAN`), the same console behind it: the same routes, guards,
+  // sessions and limits. What differs is told by the connection a request came in on, which this listener marks (`arrivedOverLan`),
+  // never by a header.
+  server.lanListener = () => {
+    const lan = createServer(serverOptions, handle);
+    lan.maxConnections = limits.maxConnections;
+    lan.on("connection", (socket) => {
+      socket[LAN_SOCKET] = true;
+    });
+    return lan;
+  };
   return server;
+}
+
+/** The mark the LAN listener puts on each connection it accepts: a symbol, so nothing a request sends can set it. */
+const LAN_SOCKET = Symbol("pi-dispatch console LAN connection");
+
+/**
+ * Whether a request came in on the opt-in LAN listener (issue #882, `server.lanListener`), by the mark that listener
+ * puts on its connections. Not "did not arrive on loopback": that would also catch a console on a public bind behind a
+ * TLS proxy on another machine, whose browsers are remembered over HTTPS as they always were. On macOS the LAN
+ * listener may hold the wildcard on port 80, so a connection to 127.0.0.1:80 is marked too, and is treated as the
+ * network: the safe side.
+ */
+export function arrivedOverLan(req) {
+  return req?.socket?.[LAN_SOCKET] === true;
 }

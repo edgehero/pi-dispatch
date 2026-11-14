@@ -33,6 +33,8 @@ export const CONSOLE_ENV_KEYS = Object.freeze([
   "PI_LOGS_DIR",
   "VALKEY_URL",
   "PI_PAUSE_WINDOWS_FILE",
+  "PI_CONSOLE_LAN",
+  "PI_CONSOLE_LAN_PORT",
 ]);
 
 // Path-valued keys a `.env` may write relative; resolved against the deployment folder, as panelEnv does.
@@ -124,6 +126,13 @@ export function consoleConfig({ env, dir, platform = process.platform, tokensFil
   if (maxHours.refusal) return maxHours;
   const streams = boundedInt(env.PI_CONSOLE_MAX_STREAMS, "PI_CONSOLE_MAX_STREAMS", 4, 1, 32);
   if (streams.refusal) return streams;
+  // Issue #882: the opt-in listener on the local network, announced as pi-dispatch.local (lan.mjs). Its port is the console's
+  // own, or 80 on macOS where that binds, unless PI_CONSOLE_LAN_PORT names one.
+  const lan = flag(env.PI_CONSOLE_LAN, "PI_CONSOLE_LAN");
+  if (lan.refusal) return lan;
+  const lanPortSet = String(env.PI_CONSOLE_LAN_PORT ?? "").trim() !== "";
+  const lanPort = lanPortSet ? boundedInt(env.PI_CONSOLE_LAN_PORT, "PI_CONSOLE_LAN_PORT", 4790, 1, 65535) : { value: null };
+  if (lanPort.refusal) return lanPort;
 
   const inDir = (p) => (isAbsolute(p) ? p : resolvePath(dir, p));
   const tokensPath = typeof tokensFilePath === "function" ? tokensFilePath(env, dir) : inDir(env.PI_CONSOLE_TOKENS_FILE || "console-tokens.json");
@@ -137,6 +146,7 @@ export function consoleConfig({ env, dir, platform = process.platform, tokensFil
     idleMs: idle.value * 60_000,
     maxMs: maxHours.value * 3_600_000,
     maxStreams: streams.value,
+    lan: { on: lan.value, port: lanPort.value },
     logsDir: inDir(logsDirPath(env)),
     // The worker's own default, by its one constant: a Valkey client compares the URL it dials with the one a `.env`
     // names (issue #845), so a second spelling of the default would be a second Valkey there.

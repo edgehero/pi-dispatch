@@ -103,6 +103,18 @@ export const SIGN_IN_NOTICES = Object.freeze({
 });
 
 /**
+ * The three approval notices as a device on the local network reads them (issue #882, `PI_CONSOLE_LAN`): there "this
+ * computer" is that device, so they name the host, and `./pi-dispatch console` (which opens a browser on the host) is
+ * no help. Same kinds, statuses and icons as above; signin.mjs draws these in their place on a page the LAN listener
+ * answered.
+ */
+export const LAN_SIGN_IN_NOTICES = Object.freeze({
+  denied: notice("failed", "failed", "The host did not let this browser in", "The request was denied, or no one answered it within a minute. Try again, or type a code from `pi-dispatch-console link` on the host."),
+  busy: notice("attention", "clock", "A sign-in request is already waiting", "Someone at the host has a window to answer or close first, then try again."),
+  nodialog: notice("attention", "info", "The host cannot show a sign-in window", "Type a code from `pi-dispatch-console link` on the host instead."),
+});
+
+/**
  * Which sign-in notice an HTTP status from each sign-in route selects, or null for none: the link page's 401 is its
  * `used` state alone (see `SIGN_IN_NOTICES`). The script hides every notice for a null, and shows `other` with the
  * server's sentence for a status that is not listed.

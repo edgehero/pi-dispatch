@@ -188,6 +188,41 @@ A page opened by a name the console does not answer to (a hostname of your own t
 `PI_CONSOLE_ALLOWED_HOSTS`, say) says so and gives the `ssh -L` command for the address and port you came in on
 ([Error pages](#error-pages)).
 
+### From a phone on the same network
+
+To open the console from a phone or another computer on your home or office network without a tunnel, set
+`PI_CONSOLE_LAN=1` in the deployment's `.env` and restart the console. It keeps its loopback address as it is, adds a
+second listener on this host's network address, and announces the name `pi-dispatch.local` there. The banner prints
+the address to open:
+
+```text
+on your local network: http://pi-dispatch.local/ (plain HTTP: every device on the network reaches the sign-in page, and no browser is remembered there)
+```
+
+On a Mac the name needs no port: macOS lets the console listen on port 80 of every address, so it does when 80 is
+free, and falls back to the console's own port (`http://pi-dispatch.local:4790/`) when it is not. On Linux it is
+always the console's own port, since port 80 there needs privileges the console never takes.
+`PI_CONSOLE_LAN_PORT=<port>` picks another. The name is announced by `dns-sd` on macOS and by `avahi-publish` (the
+`avahi-utils` package) on Linux. Without either, or when another device on the network already uses
+`pi-dispatch.local`, the console says so in its log and still answers at the host's address, which the banner names.
+
+What it costs, and why it is off by default:
+
+- **Plain HTTP.** Everything crosses your network unencrypted, including a sign-in. Use it only on a network you trust.
+- **Not remembered.** A browser that signs in over the network gets an ordinary session (60 minutes idle, 12 hours at
+  most) and is never remembered, whatever it sends: the console decides by the connection it arrived on, which no
+  header can change. The page says so in its footer, and draws no Remember box. Remembered sign-in stays for this host
+  and for an SSH tunnel ([From another machine](#from-another-machine)).
+- **Every device on the network reaches the sign-in page.** On a Mac listening on port 80, that is every address the
+  Mac has, so a VPN it is connected to as well; with `PI_CONSOLE_LAN_PORT` set, or on Linux, only the network address
+  the banner names. Signing in still takes a code from
+  `pi-dispatch-console link` on the host, a console token, or someone at the host pressing **Allow**. The page's
+  button reads **Ask the host to let me in** there, and the window on the host names the device's address, not "this
+  computer".
+- **No copy buttons.** A browser allows copying only on a secure page, and plain HTTP over a network is not one.
+
+Doctor warns every time `PI_CONSOLE_LAN=1` is set. To turn it off, remove the line and restart the console.
+
 ## Sign in without pasting the token
 
 On the host, as the deployment's account:
@@ -737,6 +772,7 @@ worker's settings). It then checks:
 - no token carries a role this release does not know (a warning: it signs in nowhere until you upgrade);
 - `PI_CONSOLE_LISTEN` is a value `serve` would accept;
 - `PI_CONSOLE_BIND_PUBLIC=1` (a warning, every time);
+- `PI_CONSOLE_LAN=1` (a warning, every time: the console also answers on the local network, in plain HTTP);
 - the audit chain verifies (a warning when it does not; rows with an action or outcome of the console's shape that
   this release does not know are counted on an intact chain, not warned about).
 - whether a console service is installed for this folder (`pi-dispatch service install --console`) and whether the
@@ -2429,6 +2465,8 @@ through the same code, so the two never disagree about what is waiting.
 | `PI_CONSOLE_ALLOWED_HOSTS` | none | Extra hostnames the console answers to, comma separated. |
 | `PI_CONSOLE_READ_ONLY` | off | `1` refuses every write. |
 | `PI_CONSOLE_BIND_PUBLIC` | off | `1` allows a non-loopback IP literal in `PI_CONSOLE_LISTEN`. |
+| `PI_CONSOLE_LAN` | off | `1` adds a listener on this host's network address, announced as `pi-dispatch.local`, in plain HTTP and never remembered ([From a phone on the same network](#from-a-phone-on-the-same-network)). |
+| `PI_CONSOLE_LAN_PORT` | 80 on macOS when free, else the console's port | The port of that listener, 1 to 65535. |
 | `PI_CONSOLE_IDLE_MINUTES` | 60 | Idle limit of a session, 5 to 1440. |
 | `PI_CONSOLE_MAX_HOURS` | 12 | Absolute limit of a session, 1 to 168. |
 | `PI_CONSOLE_MAX_STREAMS` | 4 | Live pages one token may hold open across its sign-ins, 1 to 32. The whole console holds at most 32, 8 of them kept for operators. |

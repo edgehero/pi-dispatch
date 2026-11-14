@@ -1221,6 +1221,25 @@ writes retain their existing interactive confirmation. This adds no unattended p
 
 ## REQ-CONSOLE-SECURITY
 
+- **AMENDED 2026-11-14 (#882, part 7), the console on the local network, opt-in**: given `PI_CONSOLE_LAN=1` (off by
+  default; any other value but unset refuses `serve`, as does a `PI_CONSOLE_LAN_PORT` that is not a whole number from
+  1 to 65535), `serve` keeps its loopback listener as (a) says and adds a SECOND listener on the host's first
+  non-internal, non-link-local IPv4 address (`lanAddressOf`, `admin/src/console/lan.mjs`): on macOS with no port named,
+  the wildcard on port 80 first (an unprivileged bind macOS allows, measured on macOS 27: `0.0.0.0:80` bound,
+  `127.0.0.1:80` refused), then that address on the console's own port; elsewhere, or with `PI_CONSOLE_LAN_PORT`, that
+  address on that port. It announces `pi-dispatch.local` for that address through the system's own tool (`dns-sd -P` on
+  macOS, `avahi-publish -a -R` on Linux), run as a child the console supervises and stops. (a) is otherwise UNCHANGED,
+  checked: the loopback bind, its refusals and `PI_CONSOLE_BIND_PUBLIC` are as they were, and doctor warns on
+  `PI_CONSOLE_LAN=1` every time, as on a public bind. (b) gains, only once the LAN listener has bound,
+  `pi-dispatch.local` and that address; a rebound name still meets 421. Given a request that arrived on that listener
+  (the mark that listener puts on each connection it accepts: `arrivedOverLan`, which no header can set), the browser is
+  never remembered, whatever Host or Origin it sent: a host-made sign-in there is an ordinary session, the token form draws no
+  Remember box, its tick is refused, and no device cookie is renewed; the sign-in page says it was reached over the
+  network in plain HTTP and names the host where it would say "this computer" (`LAN_WORDS`, `LAN_SIGN_IN_NOTICES`).
+  Each step that cannot happen is said and the console carries on without it: with no network address or no port it
+  answers on loopback alone, and with no tool to announce the name, or a name another device holds, it answers at the
+  address the banner prints. `OQ-058` is UNCHANGED, checked. Tests:
+  `admin/test/console-lan.test.mjs`, `worker/test/doctor-console.test.mjs` ("PI_CONSOLE_LAN=1 is warned every time ...").
 - **AMENDED 2026-11-14 (#882, part 5), signing in by approving a window on the host**: where the console can show a
   window on the host's desktop (macOS through `osascript`; Linux with `DISPLAY` or `WAYLAND_DISPLAY` and `zenity` or
   `kdialog`: `dialogRunnerFor` in `admin/src/console/approve-dialog.mjs`), the sign-in page offers "Sign in on this
@@ -8901,6 +8920,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-14 (#882, part 7) | **`REQ-CONSOLE-SECURITY` AMENDED**: the console on the local network, opt-in (`PI_CONSOLE_LAN=1`): a second listener on the host's network address (on macOS the wildcard on port 80 first, measured), announced as `pi-dispatch.local` by `dns-sd` or `avahi-publish`, with (b) gaining that name and address once bound; a request that arrived on it is never remembered, judged by its socket and never a header, and its sign-in page says so and names the host. UNCHANGED, checked: (a)'s loopback bind and refusals, `PI_CONSOLE_BIND_PUBLIC`, (i) the code and link, part 5's approval (whose window already names the peer's address), `OQ-058`. |
 | 2026-11-14 (#882, part 5) | **`REQ-CONSOLE-SECURITY` AMENDED**: sign in by approving a window on the host's desktop ("Sign in on this computer"), where the console can show one: one request at a time behind the sign-in limiter, a 256-bit id only the asking browser holds, a 4-character match code shown on the page and in the window, Deny the default, a 60-second give-up, the operator tokens only, and a `login-approval` row for every outcome. The window is the credential, since a job's container reaches the console through helpers running as the operator, so neither the peer's account nor any header tells its request from a browser's. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, the sign-in page: the button, its waiting line and three notices. UNCHANGED, checked: `OQ-058` (the host approves, never a browser), (a) and (b) (the listener and the names it answers). |
 | 2026-11-14 (#882, part 3) | **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, clause (c): a run's short link, `/run/<repository>/<number>` (`!` before the number for a merge request), drawn beside the run page's id and answered with a 303 to the newest run on that issue or request (a running job, then a queued one, then the newest record), the runs search for two forges on one path, and the run page's not-found card at 404, or at 503 when a place could not be read; 400 for a path that is not one, 405 for a write, and sign-in returns to it. UNCHANGED, checked: clause (c)'s `/run?id=`, its 404 and its id charset; `REQ-CONSOLE-SECURITY`, since the route is a viewer's read under every guard a page has, its 404 and 503 pages show the target only as the search field's value under the runs search's rule, and its refusals never echo the path; and `REQ-JOB-STATUS-COMMENTS`, since no comment gains a console link. Review of PR #886: "lands on the run it opens" was true of the server only; the browser's destination check now takes the short link too, and a client-states test holds all three sign-in paths. A job waiting on a stopped host's own queue answers its short link, and a scan over a set that is not whole answers 503, as the clause says. |
 | 2026-11-14 (#882, part 4, review round 1) | **`REQ-CONSOLE-SECURITY` AMENDED** again in its #882 amendment, with the owner's decision on the address: every command prints `pi-dispatch.localhost`, not `localhost`, so the device cookie lives on a name no other local server uses; where gateway enrollment names a `consoleOrigin`, that origin, since the console takes a sign-in from it alone (an enrolled `http://127.0.0.1:<port>` was refused at sign-in otherwise); (b) gains exactly that one name, so it is AMENDED where the first row said UNCHANGED; the short code's files are named by scrypt under a per-drop salt, CORRECTING the plain sha256 a listing could be searched against; the 35 guesses are per console process; an `agent` token signs in with the ticked box, CORRECTING a 403 that locked it out of the form; at the cap a host-made sign-in forgets the least recently used browser. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: (g9) the agent's ticked box and the cap; the sign-in pages' help leads with the command that prints a code, and a stopped attempt says its own sentence. UNCHANGED, checked: (a), (c), (d), (e), (g), (h); `OQ-058`. |

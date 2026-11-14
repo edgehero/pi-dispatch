@@ -38,7 +38,7 @@
 import { html } from "./html.mjs";
 import * as ui from "./kit.mjs";
 import { CONSOLE_HOSTNAME, isLocalhostAddress, isLoopbackAddress } from "./listen.mjs";
-import { ENDED_REASONS, SIGN_IN_NOTICES, endedNotices } from "./session-ends.mjs";
+import { ENDED_REASONS, LAN_SIGN_IN_NOTICES, SIGN_IN_NOTICES, endedNotices } from "./session-ends.mjs";
 
 /** The notices a link page can show: it has no ended session and no token to be wrong, so a subset of the sign-in's. */
 export const LINK_NOTICES = Object.freeze(["unreachable", "rate", "tokens", "audit", "other"]);
@@ -83,6 +83,8 @@ export const LISTEN_FOOTERS = Object.freeze({
   localhost: `This console answers at ${CONSOLE_HOSTNAME}, on this host only. Reach it here, or through an SSH tunnel.`,
   loopback: "This console answers on this host's loopback address only. Reach it on this host, or through an SSH tunnel.",
   unix: "This console answers on its unix socket only. Reach it on this host, or through an SSH tunnel to the socket.",
+  // Issue #882: the page as a device on the network sees it, on the opt-in LAN listener (lan.mjs).
+  lan: "You reached this console over the local network, in plain HTTP. This browser is not remembered here; on the host, or through an SSH tunnel, it can be.",
   public: null,
 });
 
@@ -158,7 +160,7 @@ export const CODE_HINT = "The 8 characters `pi-dispatch-console link` prints. It
  * pattern; `one-time-code` lets a phone offer a code it was sent, and capitals are what the terminal shows. Its
  * placeholder is the code's shape, never a code.
  */
-const CODE_FORM = html`<form id="code-form" class="signin__form" autocomplete="off"${REVEAL}><div class="field"><label for="signin-code">${CODE_LABEL}</label><input id="signin-code" class="input input--code" name="code" type="text" inputmode="text" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" maxlength="32" placeholder="XXXX-XXXX" required aria-describedby="notice"><p class="signin__hint muted">${ui.withCode(CODE_HINT)}</p></div><button class="btn btn--primary btn--lg" type="submit">Sign in</button></form>`;
+const codeForm = (hint) => html`<form id="code-form" class="signin__form" autocomplete="off"${REVEAL}><div class="field"><label for="signin-code">${CODE_LABEL}</label><input id="signin-code" class="input input--code" name="code" type="text" inputmode="text" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" maxlength="32" placeholder="XXXX-XXXX" required aria-describedby="notice"><p class="signin__hint muted">${ui.withCode(hint)}</p></div><button class="btn btn--primary btn--lg" type="submit">Sign in</button></form>`;
 
 /**
  * Signing in by approving a window on the host (issue #882, approve-dialog.mjs): drawn only where this console can show
@@ -168,7 +170,22 @@ const CODE_FORM = html`<form id="code-form" class="signin__form" autocomplete="o
 export const APPROVE_LABEL = "Sign in on this computer";
 export const APPROVE_HINT = "This computer shows a window asking to let this browser in. No code or token is needed, and the browser then stays signed in until you sign out, so use it on a browser that is yours.";
 export const APPROVE_WAIT = "Allow it in the window this computer shows. The code there should be";
-const APPROVE_FORM = html`<form id="approve-form" class="signin__form" autocomplete="off"${REVEAL}><button class="btn btn--primary btn--lg" type="submit">${APPROVE_LABEL}</button><p class="signin__hint muted">${APPROVE_HINT}</p><p id="approve-wait" class="signin__hint" role="status" aria-live="polite" hidden>${APPROVE_WAIT} <b class="code" data-approve-match></b>.</p></form>`;
+const approveForm = (label, hint, wait) => html`<form id="approve-form" class="signin__form" autocomplete="off"${REVEAL}><button class="btn btn--primary btn--lg" type="submit">${label}</button><p class="signin__hint muted">${hint}</p><p id="approve-wait" class="signin__hint" role="status" aria-live="polite" hidden>${wait} <b class="code" data-approve-match></b>.</p></form>`;
+
+/**
+ * The page as a device on the local network sees it (issue #882, `PI_CONSOLE_LAN`, lan.mjs). There "this computer" is
+ * the person's phone or laptop, not the host, and a browser is never remembered over plain HTTP (server.mjs
+ * `rememberTransportOk`), so every sentence that says either is said for that device instead: the lead-in, the
+ * approval button and its lines, the code's hint, and the three approval notices (session-ends.mjs
+ * `LAN_SIGN_IN_NOTICES`). The rest of the page is the same.
+ */
+export const LAN_WORDS = Object.freeze({
+  lead: "Ask the host to let you in, type a sign-in code from the host's terminal, or paste a console token.",
+  approveLabel: "Ask the host to let me in",
+  approveHint: "The computer this console runs on shows a window with this device's address and a code. When someone there allows it, this browser is signed in for this visit: over the network it is not remembered.",
+  approveWait: "Ask whoever is at that computer to allow it. The code there should be",
+  codeHint: "The 8 characters `pi-dispatch-console link` prints on the host. It works once, within 5 minutes, and signs this browser in for this visit: over the network it is not remembered.",
+});
 
 /**
  * The sign-in panel: `notice` (see `noticeKey`), the console's session `limits` (`{ idleMinutes, maxHours }`, so the
@@ -178,18 +195,20 @@ const APPROVE_FORM = html`<form id="approve-form" class="signin__form" autocompl
  */
 export function signInContent({ notice = null, limits = {}, listen = null, next = undefined, arrival = false, remember = false, approve = false } = {}) {
   const ended = endedNotices({ idleMinutes: limitOf(limits?.idleMinutes), maxHours: limitOf(limits?.maxHours) });
-  const entries = [...ENDED_REASONS.map((r) => [`ended-${r}`, ended[r]]), ...Object.entries(SIGN_IN_NOTICES)];
+  const lan = listenKey(listen) === "lan";
+  const entries = [...ENDED_REASONS.map((r) => [`ended-${r}`, ended[r]]), ...Object.entries(SIGN_IN_NOTICES).map(([k, n]) => [k, lan ? LAN_SIGN_IN_NOTICES[k] ?? n : n])];
   const footer = LISTEN_FOOTERS[listenKey(listen)];
+  const lead = lan ? LAN_WORDS.lead : approve ? "Sign in on this computer, type the sign-in code from your terminal, or paste a console token." : "Type the sign-in code from your terminal, or paste a console token.";
   // `data-next` and `data-arrival` are the script's: where a sign-in returns to (a value the page parser accepted), and to check first whether this
   // browser is already signed in (`server.mjs` `getLogin`).
   return html`<section id="p-signin" data-panel${next === undefined ? null : html` data-next="${next}"`}${arrival ? html` data-arrival` : null}><div class="card signin">
 ${NO_SCRIPT}
 ${MARK}
 <h2>Sign in to the console</h2>
-<p class="muted"${REVEAL}>${approve ? "Sign in on this computer, type the sign-in code from your terminal, or paste a console token." : "Type the sign-in code from your terminal, or paste a console token."}</p>
+<p class="muted"${REVEAL}>${lead}</p>
 ${noticeRegion(entries, noticeKey(notice))}
-${approve ? html`${APPROVE_FORM}<p class="signin__or faint"${REVEAL}>or</p>
-` : null}${CODE_FORM}
+${approve ? html`${lan ? approveForm(LAN_WORDS.approveLabel, LAN_WORDS.approveHint, LAN_WORDS.approveWait) : approveForm(APPROVE_LABEL, APPROVE_HINT, APPROVE_WAIT)}<p class="signin__or faint"${REVEAL}>or</p>
+` : null}${codeForm(lan ? LAN_WORDS.codeHint : CODE_HINT)}
 <p class="signin__or faint"${REVEAL}>or</p>
 <form id="login-form" class="signin__form" autocomplete="off"${REVEAL}><div class="field"><label for="token">Console token</label><input id="token" class="input input--code" name="token" type="password" autocomplete="off" spellcheck="false" required aria-describedby="notice"></div>${remember ? REMEMBER_CHOICE : null}<button class="btn btn--lg" type="submit">Sign in with the token</button></form>
 <div class="signin__help"><p class="signin__help-h">${SIGN_IN_HELP.heading}</p><p class="muted">${SIGN_IN_HELP.code}</p>${ui.cmd([...LINK_PRINTED])}<p class="muted">${SIGN_IN_HELP.here}</p>${ui.cmd([...CONSOLE_HERE])}<p class="muted">If that file is not there:</p>${ui.cmd([...CONSOLE_INSTALLED])}<p class="muted">On a global install: <span class="code">pi-dispatch-console link</span> and <span class="code">pi-dispatch console</span></p><p class="muted">Or in pi:</p>${ui.cmd([...PI_LINK])}<details><summary>Make a token instead</summary><p class="muted">On the host, with your own name in place of &lt;you&gt;. In a local install it is under <span class="code">./node_modules/.bin/</span>:</p>${ui.cmd([...TOKEN_ADD])}</details></div>

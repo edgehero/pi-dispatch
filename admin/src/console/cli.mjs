@@ -50,6 +50,7 @@ import { readAgentWritesToday } from "../agent-write-count.mjs";
 import { readSandboxGateways } from "../sandbox-gateways.mjs";
 import { makeGatewayBroker } from "./gateway-broker.mjs";
 import { dialogRunnerFor, makeApprovals } from "./approve-dialog.mjs";
+import { LAN_HOSTNAME, announceCommandFor, lanAddressOf, lanBindsFor, lanUrlOf, superviseAnnouncer } from "./lan.mjs";
 
 export const USAGE = `usage: pi-dispatch-console <command> [--deployment <dir>]
 
@@ -692,6 +693,10 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
   let setup = null;
   let setupBroker = null;
   let gateway = null;
+  // Issue #882: the opt-in listener on the local network, the port it bound, and the child that announces its name.
+  let lanServer = null;
+  let lanBound = null;
+  let announcer = null;
   let restart = null;
   try {
     // Every Valkey client of this process (the audit copy's, the fleet reader's) takes its password and its facts
@@ -1030,11 +1035,51 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
     // local port, which only the operator knows. Issue #882: `link` prints a code to type as well, so it leads.
     io.out(`sign in: pi-dispatch-console link --name <you>${config.listen.kind === "tcp" ? "" : " --port <your tunnel's local port>"} prints a one-time link and a code to type; or paste a token (pi-dispatch-console token add --name <you> --role operator makes one)`);
     if (config.readOnly) io.out("read-only: every change is refused (PI_CONSOLE_READ_ONLY=1)");
+    // Issue #882: the opt-in listener on the local network, as pi-dispatch.local (lan.mjs). The loopback listener above is unchanged. Each step
+    // that cannot happen is said and the console carries on without it: no address, no port, no tool to announce the name.
+    if (config.lan?.on) {
+      const platform = io.platform ?? process.platform;
+      const address = (io.lanAddress ?? lanAddressOf)();
+      if (address === null) {
+        io.err("pi-dispatch-console: PI_CONSOLE_LAN=1, but this host has no address on a local network, so the console answers on this host only");
+      } else {
+        const loopbackPort = config.listen.kind === "tcp" ? bound.address.port : 4790;
+        for (const at of lanBindsFor({ platform, address, port: config.lan.port, loopbackPort })) {
+          const candidate = server.lanListener();
+          const ok = await new Promise((resolve) => {
+            candidate.once("error", () => resolve(false));
+            candidate.listen(at.port, at.host, () => resolve(true));
+          });
+          if (ok) {
+            lanServer = candidate;
+            lanBound = at;
+            break;
+          }
+        }
+        if (lanServer === null) {
+          io.err(`pi-dispatch-console: PI_CONSOLE_LAN=1, but no port could be bound on ${address}; the console answers on this host only`);
+        } else {
+          // Its own names on that listener: the announced one and the address a person may type instead. Nothing else is added.
+          config.allowedHosts.push(LAN_HOSTNAME, address);
+          io.out(`on your local network: ${lanUrlOf(lanBound.port)} (plain HTTP: every device on the network reaches the sign-in page, and no browser is remembered there)`);
+          const command = announceCommandFor({ platform, env: shellEnv, address, port: lanBound.port });
+          if (command.refusal) io.err(`pi-dispatch-console: ${command.refusal}; on the network, open http://${address}${lanBound.port === 80 ? "" : `:${lanBound.port}`}/ instead`);
+          else announcer = (io.superviseAnnouncer ?? superviseAnnouncer)({ command, log: (line) => io.err(line) });
+        }
+      }
+    }
     if (io.onListening) io.onListening(server);
     await (io.until ?? untilSignal());
     return 0;
   } finally {
     // The streams first, so closing the server is not held open by them; then the listener, the reader, the copy.
+    announcer?.stop();
+    if (lanServer?.listening) {
+      await new Promise((resolve) => {
+        lanServer.close(() => resolve());
+        lanServer.closeAllConnections?.();
+      });
+    }
     restart?.close();
     setup?.close();
     setupBroker?.close();

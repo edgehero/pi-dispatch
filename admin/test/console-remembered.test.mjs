@@ -1841,3 +1841,49 @@ test("a browser at pi-dispatch.localhost is remembered as at localhost, under it
   assert.equal((await c.send({ path: "/api/whoami", headers: { host, cookie } })).status, 200);
   assert.match((await c.send({ path: "/login", headers: { host } })).text, /name="remember" checked/, "the box is drawn there too");
 });
+
+// ---- issue #882, part 7: the opt-in LAN listener ----
+
+test("the LAN listener's sign-ins are never remembered, by its mark and not its address: here it listens on loopback and is sent a loopback Host", async () => {
+  const w = world();
+  const c = await w.boot();
+  const lan = c.server.lanListener();
+  servers.push(lan);
+  await new Promise((r) => lan.listen(0, "127.0.0.1", r));
+  const port = lan.address().port;
+  const host = `127.0.0.1:${port}`;
+  const viaLan = ({ method = "GET", path, body = null, cookie = null }) => new Promise((resolve, reject) => {
+    const write = body === null ? {} : { origin: `http://${host}`, "sec-fetch-site": "same-origin", "content-type": "application/json", "content-length": String(Buffer.byteLength(JSON.stringify(body))) };
+    const req = request({ host: "127.0.0.1", port, method, path, headers: { host, ...write, ...(cookie ? { cookie } : {}) }, setHost: false }, (res) => {
+      const chunks = [];
+      res.on("data", (d) => chunks.push(d));
+      res.on("end", () => { const text = Buffer.concat(chunks).toString("utf8"); resolve({ status: res.statusCode, headers: res.headers, text, json: () => JSON.parse(text) }); });
+    });
+    req.on("error", reject);
+    if (body !== null) req.write(JSON.stringify(body));
+    req.end();
+  });
+  // The page says where it was reached and offers no Remember box; the loopback listener's page, beside it, still does.
+  const page = await viaLan({ path: "/login" });
+  assert.equal(page.status, 200);
+  assert.ok(page.text.includes("You reached this console over the local network, in plain HTTP."), "the LAN footer");
+  assert.ok(!page.text.includes("signin__remember"), "no Remember box over the network");
+  const here = await c.send({ path: "/login" });
+  assert.ok(here.text.includes("signin__remember") && !here.text.includes("over the local network"), "the loopback listener is unchanged");
+  // A ticked box is refused, never quietly ignored.
+  const ticked = await viaLan({ method: "POST", path: "/login", body: { token: OPERATOR, remember: true } });
+  assert.equal(ticked.status, 403, ticked.text);
+  // A host-made code, which remembers its browser on loopback, signs in for this visit only over the network.
+  w.shared.codes = new Map([["r".repeat(43), { name: "rob" }]]);
+  const coded = await viaLan({ method: "POST", path: "/login/code", body: { code: "r".repeat(43) } });
+  assert.equal(coded.status, 200, coded.text);
+  assert.equal(deviceCookieOf(coded), null, "no device cookie");
+  const session = sessionCookieOf(coded);
+  assert.ok(session, "an ordinary session");
+  assert.equal(c.trust.list().devices.length, 0);
+  assert.equal((await viaLan({ path: "/api/whoami", cookie: session })).json().name, "rob");
+  // The same code shape through the loopback listener is remembered, as it always was.
+  w.shared.codes = new Map([["s".repeat(43), { name: "rob" }]]);
+  const local = await c.post("/login/code", { code: "s".repeat(43) });
+  assert.ok(deviceCookieOf(local), "remembered on loopback");
+});
