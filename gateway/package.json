@@ -1,6 +1,6 @@
 {
   "name": "@edgehero/pi-dispatch-sandbox-gateway",
-  "version": "5.2.0",
+  "version": "5.2.1",
   "type": "module",
   "description": "An optional, separately hosted browser attachment for an existing pi-dispatch sandbox.",
   "license": "MIT",
