@@ -256,17 +256,17 @@ const settle = async () => {
 	for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
 };
 
-test("app with checkPermissions: an installation without Administration logs github_app_permission_missing, and boot goes on", async () => {
+test("app with checkPermissions: an installation short of a permission logs github_app_permission_missing, and boot goes on", async () => {
 	const seen = [];
 	const lines = [];
-	const routes = { ...APP_ROUTES, [INSTALLATION_ROUTE]: { permissions: { contents: "write", pull_requests: "write", issues: "write", metadata: "read" } } };
+	const routes = { ...APP_ROUTES, [INSTALLATION_ROUTE]: { permissions: { contents: "write", pull_requests: "write", issues: "read", metadata: "read" } } };
 	const auth = await makeGitHubAuth(APP_CFG, { Octokit: RecordingOctokit(routes, seen), createAppAuth: fakeCreateAppAuth({ result: { token: "ghs_x" }, calls: [] }), readFile: async () => "PEM", log: (event, fields) => lines.push({ event, fields }), checkPermissions: true });
 	assert.equal(auth.selfId, 555123, "the identity is resolved as before");
 	await settle();
 	assert.deepEqual(seen.filter((c) => c.route === INSTALLATION_ROUTE), [{ route: INSTALLATION_ROUTE, params: { installation_id: "456" } }], "the configured installation, read once");
 	const missing = lines.filter((l) => l.event === "github_app_permission_missing");
 	assert.equal(missing.length, 1);
-	assert.deepEqual(missing[0].fields.missing, ["administration:read"]);
+	assert.deepEqual(missing[0].fields.missing, ["issues:write"]);
 });
 
 test("app with checkPermissions: a failed read logs that it failed and the auth still works", async () => {
@@ -332,9 +332,9 @@ test("an answer draft's App token is scoped to one repository with read permissi
 	const auth = await makeGitHubAuth({ source: "app", appId: "123", installationId: "456", privateKeyPath: "/keys/app.pem" }, { Octokit: FakeOctokit(APP_ROUTES), createAppAuth: fakeCreateAppAuth({ result: { token: "ghs_x" }, calls }), readFile: async () => "PEM" });
 	await auth.mintToken({ kind: "github", purpose: "answer-draft", repo: "acme-corp/widgets", permissions: { contents: "write", issues: "write" } });
 	assert.deepEqual(calls[0].repositoryNames, ["widgets"]);
-	// Administration read too (issue #876): the draft job passes the same branch protection read as every forge job,
-	// with this token, and GitHub answers that read 403 without it. Every permission stays a read.
-	assert.deepEqual(calls[0].permissions, { contents: "read", issues: "read", pull_requests: "read", metadata: "read", administration: "read" });
+	// The draft job's branch protection read is the branch's `protected` flag, which contents: read reaches, so the
+	// narrowing needs nothing more for it (issue #876). Every permission stays a read.
+	assert.deepEqual(calls[0].permissions, { contents: "read", issues: "read", pull_requests: "read", metadata: "read" });
 	assert.ok(Object.values(calls[0].permissions).every((level) => level === "read"));
 });
 

@@ -129,9 +129,9 @@ export async function makeGitHubAuth(cfg, deps = {}) {
 			// for `{ metadata: "read" }`, so the token it holds for that one question cannot write anything
 			// even if leaked. Job mints never pass this and keep the installation's full grant -- narrowing
 			// is the caller's statement of intent, not a default this mint could guess.
-			// The answer draft's read set includes `administration: read` (issue #876): its job passes the same branch
-			// protection read as every forge job, with this token, and GitHub answers that read 403 without it.
-			const permissions = job?.purpose === "answer-draft" ? { contents: "read", issues: "read", pull_requests: "read", metadata: "read", administration: "read" } : job?.permissions;
+			// The answer draft's reads cover its job's branch protection read too: that is the branch's `protected` flag,
+			// which `contents: read` reaches (issue #876).
+			const permissions = job?.purpose === "answer-draft" ? { contents: "read", issues: "read", pull_requests: "read", metadata: "read" } : job?.permissions;
 			let minted;
 			try {
 				const appAuth = createAppAuth({ ...auth, request: mintRequest });

@@ -2006,8 +2006,8 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			try {
 				branchProtected = await isDefaultBranchProtected(job, token);
 			} catch (error) {
-				// Issue #876: the forge refused the read itself, determinately (GitHub's 403 to a token without
-				// Administration: read, which is not a rate limit). Neither answer is known, so the job is refused as
+				// Issue #876: the forge refused the read itself, determinately (GitHub's 403 to a token that may not
+				// read the default branch, which is not a rate limit). Neither answer is known, so the job is refused as
 				// neither: not "unprotected", whose fix is wrong here, and never run, since the backstop is unconfirmed.
 				// A RETURN, not a throw (CONST-RETRY-INFRA-ONLY): the same token gets the same 403 on every attempt, and
 				// the queue used to retry it into a failure the record could only call `worker-error`. The host tags

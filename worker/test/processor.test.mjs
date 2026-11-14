@@ -99,17 +99,31 @@ test("an unprotected branch refuses BEFORE any container -- and never prepares/s
 	assert.ok(!calls.includes("prepare"), "must not even clone an unprotected repo");
 });
 
-/** The real GitHub host over a fake client whose protection read answers `answer` (issue #876). */
+/** The real GitHub host over a fake client whose default branch read answers `answer`, thrown when an Error (issue #876). */
 function githubHostAnswering(answer) {
 	const octokitFor = () => ({
 		async request(route) {
 			if (route === "GET /repos/{owner}/{repo}") return { data: { default_branch: "main" } };
-			if (route === "GET /repos/{owner}/{repo}/branches/{branch}/protection") throw answer;
+			if (route === "GET /repos/{owner}/{repo}/branches/{branch}") {
+				if (answer instanceof Error) throw answer;
+				return { data: answer };
+			}
 			throw new Error(`unexpected route: ${route}`);
 		},
 	});
 	return makeGitHubHost({ octokitFor });
 }
+
+test("the GitHub host's protected flag decides through the processor: false refuses as unprotected-branch, true runs (issue #876)", async () => {
+	const posted = [];
+	const { deps: off } = deps({ isDefaultBranchProtected: (job, token) => githubHostAnswering({ name: "main", protected: false }).isDefaultBranchProtected(job, token), comment: async (_job, text) => posted.push(text) });
+	const refused = await runJob(ghJob, off);
+	assert.equal(refused.reason, "unprotected-branch");
+	assert.deepEqual(posted, [REFUSAL_COMMENTS["unprotected-branch"]]);
+	const { deps: on, calls } = deps({ isDefaultBranchProtected: (job, token) => githubHostAnswering({ name: "main", protected: true }).isDefaultBranchProtected(job, token) });
+	assert.equal((await runJob(ghJob, on)).outcome, "completed", "a branch GitHub calls protected, by a rule or a ruleset, runs");
+	assert.ok(calls.includes("run-container"));
+});
 const forbidden403 = (headers) => Object.assign(new Error("Resource not accessible by integration"), { name: "HttpError", status: 403, response: { headers } });
 
 test("a token GitHub will not let read branch protection is refused as branch-protection-unreadable: RETURNED, commented, before any spend (issue #876)", async () => {
@@ -132,7 +146,8 @@ test("a token GitHub will not let read branch protection is refused as branch-pr
 	assert.ok(!calls.includes("prepare"), "no clone");
 	assert.ok(!calls.includes("run-container"), "no container, no spend");
 	assert.deepEqual(posted, [REFUSAL_COMMENTS["branch-protection-unreadable"]], "one comment, the table's fixed text");
-	assert.match(posted[0], /Administration: Read-only/, "it names the fix in GitHub's own words");
+	assert.match(posted[0], /can read this repository's contents/, "it names what the token must be able to do");
+	assert.doesNotMatch(posted[0], /GitHub App|PAT|gh login|Administration/, "no auth source's mechanism: the same 403 reaches all of them");
 	assert.doesNotMatch(posted[0], /ghs_minted_for_this_job|org\/repo/, "no token and no repository in a public comment");
 	assert.deepEqual(logged.filter(([event]) => event.startsWith("refused_")), [["refused_branch_protection_unreadable", { repo: "org/repo", status: 403, requestId: "C0DE:1:2" }]], "GitHub's status and request id, never its message");
 });

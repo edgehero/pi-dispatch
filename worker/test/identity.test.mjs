@@ -174,19 +174,19 @@ function recordingLog() {
 	log.lines = lines;
 	return log;
 }
-/** The grant `pi-dispatch setup github` made before #876: everything but administration. */
-const PRE_876_GRANT = { contents: "write", pull_requests: "write", issues: "write", metadata: "read" };
+/** A grant short of one permission the worker needs: the comments it posts would be refused. */
+const SHORT_GRANT = { contents: "write", pull_requests: "write", metadata: "read" };
 
-test("checkAppPermissions: an installation without Administration gets one line naming administration:read and the fix", async () => {
-	const octokit = fakeOctokit({ [INSTALLATION_ROUTE]: { id: 456, permissions: PRE_876_GRANT } });
+test("checkAppPermissions: an installation short of a permission gets one line naming it and the fix", async () => {
+	const octokit = fakeOctokit({ [INSTALLATION_ROUTE]: { id: 456, permissions: SHORT_GRANT } });
 	const log = recordingLog();
-	assert.deepEqual(await checkAppPermissions({ octokit, installationId: "456", log }), { missing: ["administration:read"] });
+	assert.deepEqual(await checkAppPermissions({ octokit, installationId: "456", log }), { missing: ["issues:write"] });
 	assert.deepEqual(octokit.calls, [{ route: INSTALLATION_ROUTE, params: { installation_id: "456" } }], "the INSTALLATION's grant, which tokens are minted from, read once");
 	assert.equal(log.lines.length, 1, "one line");
 	const [{ event, fields }] = log.lines;
 	assert.equal(event, "github_app_permission_missing");
-	assert.deepEqual(fields.missing, ["administration:read"]);
-	assert.match(fields.fix, /Administration: Read-only/, "names the setting as GitHub's settings page writes it");
+	assert.deepEqual(fields.missing, ["issues:write"]);
+	assert.match(fields.fix, /write is Read and write/, "names the level as GitHub's settings page writes it");
 	assert.match(fields.fix, /accept the change on the App's installation/, "an App's new permission reaches tokens only once the installation accepts it");
 	assert.match(fields.fix, /docs\/github\.md#app-permissions/);
 });
@@ -201,8 +201,8 @@ test("checkAppPermissions: the full grant, or a wider level, says nothing", asyn
 
 test("checkAppPermissions: a level below the one needed is named, and so is a level GitHub may add that this build does not know", async () => {
 	const log = recordingLog();
-	const permissions = { ...GITHUB_APP_PERMISSIONS, issues: "read", administration: "triage" };
-	assert.deepEqual(await checkAppPermissions({ octokit: fakeOctokit({ [INSTALLATION_ROUTE]: { permissions } }), installationId: "456", log }), { missing: ["issues:write", "administration:read"] });
+	const permissions = { ...GITHUB_APP_PERMISSIONS, issues: "read", contents: "triage" };
+	assert.deepEqual(await checkAppPermissions({ octokit: fakeOctokit({ [INSTALLATION_ROUTE]: { permissions } }), installationId: "456", log }), { missing: ["contents:write", "issues:write"] });
 	assert.equal(log.lines[0].event, "github_app_permission_missing");
 });
 
@@ -238,9 +238,9 @@ test("checkAppPermissions: a client that throws synchronously is a failed read t
 	assert.equal(log.lines[0].event, "github_app_permissions_unread");
 });
 
-test("GITHUB_APP_PERMISSIONS is frozen and every level is one GitHub uses, administration a read", () => {
+test("GITHUB_APP_PERMISSIONS is frozen, every level is one GitHub uses, and it holds no administration (issue #876)", () => {
 	assert.ok(Object.isFrozen(GITHUB_APP_PERMISSIONS));
-	assert.deepEqual(Object.keys(GITHUB_APP_PERMISSIONS).sort(), ["administration", "contents", "issues", "metadata", "pull_requests"]);
-	assert.equal(GITHUB_APP_PERMISSIONS.administration, "read");
+	assert.deepEqual(Object.keys(GITHUB_APP_PERMISSIONS).sort(), ["contents", "issues", "metadata", "pull_requests"]);
+	assert.equal(Object.hasOwn(GITHUB_APP_PERMISSIONS, "administration"), false, "the protection check reads the branch's protected flag, which contents covers");
 	for (const level of Object.values(GITHUB_APP_PERMISSIONS)) assert.ok(["read", "write"].includes(level), level);
 });

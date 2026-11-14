@@ -411,11 +411,10 @@ export function sanitizeAppName(raw) {
 /**
  * The manifest GitHub converts into the App — the narrowest shape this system needs
  * (SECURITY.md's auth-source ladder): write on exactly the three surfaces jobs touch, metadata read
- * because the API requires it, administration read because the worker's branch protection check cannot
- * be answered without it (issue #876: an App made without it had every forge job fail on a 403 before
- * it started), private, and only the event families the triggers file can name. The permissions are
- * `GITHUB_APP_PERMISSIONS` (identity.mjs), the same list the worker's boot check holds an installation
- * to, so the two cannot drift apart.
+ * because the API requires it, private, and only the event families the triggers file can name. The
+ * permissions are `GITHUB_APP_PERMISSIONS` (identity.mjs), the same list the worker's boot check holds an
+ * installation to, so the two cannot drift apart. No `administration`: the worker's branch protection
+ * check reads the branch's own `protected` flag, which Contents: read covers (issue #876).
  * `hook_attributes` carries the receiver URL, or under --no-webhook an INACTIVE hook at `NO_WEBHOOK_URL`. GitHub
  * refuses a manifest whose `hook_attributes` has no `url`, inactive or not ("url" wasn't supplied, issue #874), and one
  * that leaves `hook_attributes` out while it subscribes events ("Hook url cannot be blank"). What it accepts was

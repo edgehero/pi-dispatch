@@ -7,9 +7,10 @@
  * the free gate the processor consults before spending. The agent's scoped token carries
  * contents:write, which covers push AND merge, so branch protection is the only technical barrier
  * to a self-merge. A transient read failure must therefore NOT collapse to "unprotected" and let
- * the job run: only a real 404 (the repo has no protection object) is the determinate unprotected
- * state that drives the policy refusal; a determinate 403 (the token may not read protection, issue
- * #876) is a refusal of its own; any other error is retryable and never a silent `false`.
+ * the job run: only the branch object's own `protected: false` is the determinate unprotected state
+ * that drives the policy refusal; a determinate 403 (the token may not read the branch, issue #876)
+ * is a refusal of its own; any other error, and an answer without a boolean `protected`, is
+ * retryable and never a silent `false`.
  *
  * REQ-JOB-STATUS-COMMENTS: `postStatusComment` reports outcome to the issue or PR. It is content-
  * agnostic -- the no-trigger-phrase guard belongs to the caller -- and never logs the comment body or
@@ -61,47 +62,66 @@ export function makeGitHubHost({ log, octokitFor = (token) => new Octokit({ auth
 	}
 
 	/**
-	 * True when the default branch has a protection object, false when it provably does not (404).
-	 * A determinate 403 throws a config error tagged `reason: BRANCH_PROTECTION_UNREADABLE`, which the
-	 * processor returns as a refusal (issue #876). Any other error is retryable, NOT `false`: a transient
-	 * blip must not read as "unprotected" and bypass the never-merge backstop.
+	 * Whether the default branch is protected, as GitHub itself answers it: the `protected` boolean of
+	 * `GET /repos/{owner}/{repo}/branches/{branch}`, which GitHub sets for a branch "protected by branch
+	 * protections or rulesets" (its "List branches" reference) and which the pinned
+	 * `@octokit/openapi-types` marks required on that response.
+	 *
+	 * WHY THE BRANCH AND NOT `.../branches/{branch}/protection` (issue #876), which this read used, with
+	 * its 404 as "unprotected". That endpoint needs the repository permission Administration: read
+	 * ("Permissions required for GitHub Apps"), which the App `pi-dispatch setup github` makes never
+	 * asked for, so every job on such an App was answered 403 and retried into a failure; and it reads
+	 * only the classic protection rule, so a branch protected by a ruleset alone (the repository's, an
+	 * organization's, an enterprise's) was refused as unprotected. The branch read needs only
+	 * Contents: read, which every job's token holds anyway, and counts both. Forgejo's host answers from
+	 * the same field for the same reason (forgejo-host.mjs, OQ-043).
+	 *
+	 * A determinate 403 on either read throws a config error tagged `reason: BRANCH_PROTECTION_UNREADABLE`,
+	 * which the processor returns as a refusal. Any other error, a missing default branch and a
+	 * `protected` that is not a boolean are retryable (InfraRetry), NOT `false`: a blip, or a GitHub that
+	 * stopped sending the field, must not read as "unprotected" and bypass the never-merge backstop.
 	 */
 	async function isDefaultBranchProtected(repo, token) {
 		const [owner, name] = splitRepo(repo);
 		const octokit = octokitFor(token);
-		const { data: repoData } = await octokit.request("GET /repos/{owner}/{repo}", {
-			owner,
-			repo: name,
-		});
-		const branch = repoData.default_branch;
+		let branchData;
 		try {
-			await octokit.request("GET /repos/{owner}/{repo}/branches/{branch}/protection", {
+			const { data: repoData } = await octokit.request("GET /repos/{owner}/{repo}", {
+				owner,
+				repo: name,
+			});
+			const branch = repoData?.default_branch;
+			if (typeof branch !== "string" || branch === "") {
+				throw new InfraRetry(`github-host: ${owner}/${name} reported no default branch`);
+			}
+			({ data: branchData } = await octokit.request("GET /repos/{owner}/{repo}/branches/{branch}", {
 				owner,
 				repo: name,
 				branch,
-			});
-			return true;
+			}));
 		} catch (error) {
-			// A missing protection object is a real, determinate state -- the repo is unprotected.
-			if (error?.status === 404) return false;
-			// A 403 that is not a rate limit (issue #876) is the token being refused this read: an App without
-			// Administration: read, which every App `setup github` made before #876 lacks, a fine-grained token without
-			// it, an account GitHub does not let read protection, a private repository on a plan without branch
-			// protection. Each answers the same on every retry, so it used to be retried into a `worker-error` failure
-			// that named no cause. It is neither `true` nor `false`: the backstop is unconfirmed, so the job must not
-			// run, and "unprotected" would send the operator to fix the wrong thing. `isTransientStatus` is the
-			// project's one rule for a 403 (transient.mjs): GitHub's primary limit (`x-ratelimit-remaining: 0`), its
-			// secondary limit by header or by body, and a proxy's non-JSON page in front of the API all stay retryable.
-			// The cause rides along so a log line can name GitHub's request id (`githubFailureFields`).
+			if (error instanceof InfraRetry) throw error;
+			// A 403 that is not a rate limit (issue #876) is the token being refused the read: a fine-grained token
+			// without Contents: read, a token not yet authorized for an organization's single sign-on, an address an
+			// organization's IP allow list refuses. Each answers the same on every retry, so it used to be retried into a
+			// `worker-error` failure that named no cause. It is neither `true` nor `false`: the backstop is unconfirmed,
+			// so the job must not run, and "unprotected" would send the operator to fix the wrong thing.
+			// `isTransientStatus` is the project's one rule for a 403 (transient.mjs): GitHub's primary limit
+			// (`x-ratelimit-remaining: 0`), its secondary limit by header or by body, and a proxy's non-JSON page in
+			// front of the API all stay retryable. The cause rides along so the refusal's log line can name GitHub's
+			// request id (`githubFailureFields`).
 			if (error?.status === 403 && !isTransientStatus(403, octokitHeaderReader(error), error?.message)) {
-				throw Object.assign(configError(`github-host: the token may not read branch protection for ${owner}/${name} (status 403)`), { reason: BRANCH_PROTECTION_UNREADABLE, cause: error });
+				throw Object.assign(configError(`github-host: the token may not read the default branch of ${owner}/${name} (status 403)`), { reason: BRANCH_PROTECTION_UNREADABLE, cause: error });
 			}
-			// Any other status is retryable rather than resolved. Collapsing non-404 to false would
-			// silently bypass never-merge.
-			throw new InfraRetry(
-				`github-host: branch-protection read failed for ${owner}/${name} (status ${error?.status ?? "unknown"})`,
-			);
+			// Everything else is retryable rather than resolved, a 404 included: the default branch was named a moment
+			// ago, so a branch that is not there now is a rename racing this read or a repository the token cannot see,
+			// never a statement that the branch is unprotected. Forgejo's host answers a missing branch the same way.
+			throw new InfraRetry(`github-host: the default branch of ${owner}/${name} could not be read (status ${error?.status ?? "unknown"})`);
 		}
+		if (typeof branchData?.protected !== "boolean") {
+			throw new InfraRetry(`github-host: the default branch of ${owner}/${name} came back without a boolean protected`);
+		}
+		return branchData.protected;
 	}
 
 	/**

@@ -190,7 +190,7 @@ test("buildManifest: --webhook-url shape is exactly the narrow permission/event 
 		redirect_url: "http://127.0.0.1:1/callback",
 		hook_attributes: { url: "https://hooks.example/github" },
 		public: false,
-		default_permissions: { contents: "write", pull_requests: "write", issues: "write", metadata: "read", administration: "read" },
+		default_permissions: { contents: "write", pull_requests: "write", issues: "write", metadata: "read" },
 		default_events: ["issues", "issue_comment", "pull_request", "pull_request_review"],
 	});
 });
@@ -200,15 +200,15 @@ test("buildManifest: no webhook URL yields an INACTIVE hook that still names a U
 	assert.deepEqual(manifest.hook_attributes, { url: "https://no-webhook.invalid/", active: false });
 	assert.equal(manifest.hook_attributes.url, NO_WEBHOOK_URL);
 	assert.match(new URL(NO_WEBHOOK_URL).hostname, /\.invalid$/, "RFC 6761: a name that never resolves, so no host can receive what GitHub sends there");
-	assert.deepEqual(manifest.default_permissions, { contents: "write", pull_requests: "write", issues: "write", metadata: "read", administration: "read" });
+	assert.deepEqual(manifest.default_permissions, { contents: "write", pull_requests: "write", issues: "write", metadata: "read" });
 	assert.deepEqual(manifest.default_events, ["issues", "issue_comment", "pull_request", "pull_request_review"]);
 });
 
-test("buildManifest: the App asks for Administration: read, which the worker's branch protection read needs, and nothing else beyond the four (issue #876)", () => {
-	// GitHub answers GET .../branches/{branch}/protection 403 to an installation token without it, so an App this wizard
-	// made before #876 could run no forge job. The manifest and the worker's boot check read one list.
+test("buildManifest: the permissions are the list the worker's boot check reads, and no administration (issue #876)", () => {
+	// The worker's branch protection check reads the branch's own protected flag, which Contents covers; the protection
+	// endpoint, which needs Administration: read, is not read, so no job's token needs to read the repository's settings.
 	const manifest = buildManifest({ name: "pi-dispatch-x", redirectUrl: "http://127.0.0.1:1/callback", webhookUrl: "https://hooks.example/github" });
-	assert.equal(manifest.default_permissions.administration, "read", "read only: the worker never changes a repository's settings");
+	assert.equal(Object.hasOwn(manifest.default_permissions, "administration"), false);
 	assert.deepEqual(manifest.default_permissions, { ...GITHUB_APP_PERMISSIONS });
 	assert.notEqual(manifest.default_permissions, GITHUB_APP_PERMISSIONS, "a copy, so the frozen list is never the object sent");
 });

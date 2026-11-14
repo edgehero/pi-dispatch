@@ -2,11 +2,13 @@
  * The Forgejo/Gitea half of the per-job forge dependency (`DES-FORGE-IS-A-PER-JOB-DEPENDENCY`): the same
  * four methods `makeGitHubHost` and `makeGitLabHost` expose, against Forgejo's `/api/v1`.
  *
- * BRANCH PROTECTION IS THE REASON TO READ THIS FILE. `github-host.mjs` treats a 404 from
+ * BRANCH PROTECTION IS THE REASON TO READ THIS FILE. `github-host.mjs` used to treat a 404 from
  * `/repos/{o}/{r}/branches/{b}/protection` as "not protected", which is correct on GitHub, where that
- * endpoint exists and 404 means "no protection on this branch". Forgejo has no such endpoint at all, so
+ * endpoint exists and 404 means "no protection rule on this branch". Forgejo has no such endpoint at all, so
  * carrying GitHub's assumption across would make EVERY branch report unprotected. Issue #61 records this, and
  * `REQ-BRANCH-PROTECTION-PRECONDITION` already cites it by number as the failure that ordering exists to avoid.
+ * Since issue #876 the GitHub host reads the branch object's `protected` field too, for the reason this file
+ * gives below: the dedicated endpoint needed a permission the job's token should not need.
  *
  * The answer is the branch object's own `protected` field, from `GET /repos/{o}/{r}/branches/{branch}`. Forgejo
  * computes it with the GLOB match itself: at v14.0.5 `GetBranch` (routers/api/v1/repo/branch.go) calls
