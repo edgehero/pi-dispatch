@@ -2310,10 +2310,10 @@ test("this build's own tables: a live host that reads less, or says nothing, ref
 });
 
 test("this build's own tables: a file above what it reads is refused, and an edit that needs nothing reads no host", async () => {
-  const f = fixture({ doc: { version: 3, triggers: [cron, comment()] }, deps: { readHosts: async () => assert.fail("no host is read") } });
+  const f = fixture({ doc: { version: 4, triggers: [cron, comment()] }, deps: { readHosts: async () => assert.fail("no host is read") } });
   const out = await f.service.preview(ask(f, { flow: "review" }), operator);
   assert.equal(out.status, 409);
-  assert.match(out.refusal, /written by a newer pi-dispatch \(version 3; this build understands 2\)/);
+  assert.match(out.refusal, /written by a newer pi-dispatch \(version 4; this build understands 3\)/);
   const plain = fixture({ deps: { readHosts: async () => assert.fail("no host is read while the need is 1") } });
   const fine = await plain.service.preview(ask(plain, { flow: "review" }), operator);
   assert.deepEqual(fine.plan.need, { triggersVersion: 1, jobDataVersion: 1 });

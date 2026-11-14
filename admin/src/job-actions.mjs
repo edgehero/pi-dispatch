@@ -462,6 +462,10 @@ function runFieldsOf(run, flow) {
     ...(run.models !== undefined ? { models: run.models } : {}),
     ...(run.fallbackModels !== undefined ? { fallbackModels: run.fallbackModels } : {}),
     ...(run.maxCostUsd !== undefined ? { maxCostUsd: run.maxCostUsd } : {}),
+    // Issue #888: the trigger's limits, by the cap's rule.
+    ...(run.idleTimeoutMinutes !== undefined ? { idleTimeoutMinutes: run.idleTimeoutMinutes } : {}),
+    ...(run.stallTimeoutMinutes !== undefined ? { stallTimeoutMinutes: run.stallTimeoutMinutes } : {}),
+    ...(run.maxMinutes !== undefined ? { maxMinutes: run.maxMinutes } : {}),
     ...(run.skillsDir !== undefined ? { skillsDir: run.skillsDir } : {}),
     ...(run.secrets !== undefined ? { secrets: run.secrets } : {}),
     ...(run.secretsProfile !== undefined ? { secretsProfile: run.secretsProfile } : {}),

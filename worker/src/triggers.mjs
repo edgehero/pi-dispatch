@@ -56,6 +56,7 @@ import { neededVersion, underDeclared, valueNeededVersion, valueUnderDeclared, v
 // how a file that loads clean starts holding for an instant nobody wrote. wait-for.mjs is pure and
 // fs-free, so importing it keeps parseTriggers pure.
 import { WAIT_CONDITION_KEYS, WAIT_CONDITION_MAX, afterInstantMs } from "./wait-for.mjs";
+import { JOB_LIMIT_FIELDS, validateJobLimits } from "./job-limit-rules.mjs";
 
 // Re-exported so the console checks a provider or model it is about to write with the loader's own
 // grammar, through the subpath it already imports, rather than a copy that could drift.
@@ -320,7 +321,7 @@ function isNonEmptyString(value) {
  * `version`, absent meaning 1, which `writeTriggers` owns and writes only when the content needs more than 1, so every
  * file of today's fields stays byte-identical.
  */
-export const TRIGGERS_FILE_VERSION = 2;
+export const TRIGGERS_FILE_VERSION = 3;
 
 /**
  * Each `run` key whose ABSENCE an older build would misread, with the version that introduced it. The raw `run` keys
@@ -330,8 +331,11 @@ export const TRIGGERS_FILE_VERSION = 2;
  *
  * `excludeExtensions` and `excludeExtensionTools` (issue #800): an older loader drops either and runs the job with the
  * extension or the tool the file takes away, on a clean record.
+ *
+ * `idleTimeoutMinutes`, `stallTimeoutMinutes` and `maxMinutes` (issue #888): an older loader drops each and runs the job
+ * under the deployment's limits, which for a ceiling the trigger set is a longer run than the file allows.
  */
-export const TRIGGER_RUN_FIELD_VERSIONS = Object.freeze({ excludeExtensions: 2, excludeExtensionTools: 2 });
+export const TRIGGER_RUN_FIELD_VERSIONS = Object.freeze({ excludeExtensions: 2, excludeExtensionTools: 2, idleTimeoutMinutes: 3, stallTimeoutMinutes: 3, maxMinutes: 3 });
 
 /** Each top-level block (beside `triggers`) whose absence an older build would misread, as above. Empty until one does. */
 export const TRIGGERS_BLOCK_VERSIONS = Object.freeze({});
@@ -745,7 +749,7 @@ function normalizeCron(on, run, index, path, state) {
 	// freeze today's default into every stored repeatable.
 	return {
 		on: { type: "cron", id, pattern },
-		run: { kind: "local", folder: run.folder, flow: run.flow, task: run.task, provider: ref.provider, model: ref.model, maxTurns: ref.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(excludeExtensions !== undefined && { excludeExtensions }), ...(excludeExtensionTools !== undefined && { excludeExtensionTools }), ...(mcp !== undefined && { mcp }), ...(ref.models !== undefined && { models: ref.models }), ...(ref.fallbackModels !== undefined && { fallbackModels: ref.fallbackModels }), ...(ref.maxCostUsd !== undefined && { maxCostUsd: ref.maxCostUsd }), ...(portfolio !== undefined && { portfolio }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }) },
+		run: { kind: "local", folder: run.folder, flow: run.flow, task: run.task, provider: ref.provider, model: ref.model, maxTurns: ref.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(excludeExtensions !== undefined && { excludeExtensions }), ...(excludeExtensionTools !== undefined && { excludeExtensionTools }), ...(mcp !== undefined && { mcp }), ...(ref.models !== undefined && { models: ref.models }), ...(ref.fallbackModels !== undefined && { fallbackModels: ref.fallbackModels }), ...(ref.maxCostUsd !== undefined && { maxCostUsd: ref.maxCostUsd }), ...(ref.idleTimeoutMinutes !== undefined && { idleTimeoutMinutes: ref.idleTimeoutMinutes }), ...(ref.stallTimeoutMinutes !== undefined && { stallTimeoutMinutes: ref.stallTimeoutMinutes }), ...(ref.maxMinutes !== undefined && { maxMinutes: ref.maxMinutes }), ...(portfolio !== undefined && { portfolio }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }) },
 	};
 }
 
@@ -1925,7 +1929,44 @@ function validateRunModel(on, run, at, path) {
 			throw configError(`${at}: ${label}.${key} is not a field -- did you mean ${meant}? A model choice the loader drops runs the job on the deployment default while the file reads as though it chose, so a near miss is refused rather than dropped: ${path}`);
 		}
 	}
-	return { ...validateModelRef(run, at, path), ...validateMaxCostUsd(run, at, path) };
+	return { ...validateModelRef(run, at, path), ...validateMaxCostUsd(run, at, path), ...validateRunLimits(on, run, at, path) };
+}
+
+/**
+ * The spellings of the three limits (issue #888) the loader refuses rather than drops, case and separators removed, each
+ * with the field it means. A dropped limit runs the job under the deployment's while the file reads as though it set
+ * one, which for a ceiling is a wider job: the destructive absence the model fields' sweep refuses. New keys, so no file
+ * that loaded yesterday holds one. Deliberately NOT a synonym hunt (`timeout`, `deadline`): those mean nothing exact.
+ */
+const RUN_LIMIT_NEAR_MISS_TARGETS = Object.freeze({
+	idletimeoutminutes: "run.idleTimeoutMinutes", idletimeoutminute: "run.idleTimeoutMinutes", idletimeout: "run.idleTimeoutMinutes", idletimeoutmins: "run.idleTimeoutMinutes", idleminutes: "run.idleTimeoutMinutes", idlemins: "run.idleTimeoutMinutes", idlelimitminutes: "run.idleTimeoutMinutes",
+	stalltimeoutminutes: "run.stallTimeoutMinutes", stalltimeoutminute: "run.stallTimeoutMinutes", stalltimeout: "run.stallTimeoutMinutes", stalltimeoutmins: "run.stallTimeoutMinutes", stallminutes: "run.stallTimeoutMinutes", stallmins: "run.stallTimeoutMinutes",
+	maxminutes: "run.maxMinutes", maxminute: "run.maxMinutes", maxmins: "run.maxMinutes", maxruntimeminutes: "run.maxMinutes",
+});
+
+/**
+ * `run.idleTimeoutMinutes`, `run.stallTimeoutMinutes` and `run.maxMinutes` (issue #888, `REQ-JOB-ACTIVITY-LIMITS`): how long a
+ * job of this trigger may go with nothing happening, with no step by the agent, and at all. Whole minutes, each optional,
+ * the rule job-limit-rules.mjs `validateJobLimits` holds (the leaf the worker's own effective limits use, so a value the
+ * loader admits is one the worker reads). Carried as written and emitted only when present. A near miss of a name, under
+ * `run` or `on`, is refused (RUN_LIMIT_NEAR_MISS_TARGETS), and the exact names under `on` too.
+ */
+function validateRunLimits(on, run, at, path) {
+	for (const [label, source, exactIsLegal] of [
+		["run", run, true],
+		["on", on, false],
+	]) {
+		for (const key of Object.keys(source ?? {})) {
+			if (exactIsLegal && JOB_LIMIT_FIELDS.includes(key)) continue;
+			const normalized = key.replace(/[^a-z0-9]/gi, "").toLowerCase();
+			const meant = Object.hasOwn(RUN_LIMIT_NEAR_MISS_TARGETS, normalized) ? RUN_LIMIT_NEAR_MISS_TARGETS[normalized] : null;
+			if (meant === null) continue;
+			throw configError(`${at}: ${label}.${key} is not a field -- did you mean ${meant}? A limit the loader drops runs the job under the deployment's limit while the file reads as though it set one, so a near miss is refused rather than ignored: ${path}`);
+		}
+	}
+	return validateJobLimits(run, (message) => {
+		throw configError(`${at}: ${message}: ${path}`);
+	});
 }
 
 // `run.maxCostUsd` (issue #501): `{ maxCostUsd }` when present and valid, `{}` when absent or null. The

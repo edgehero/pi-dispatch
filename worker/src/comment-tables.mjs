@@ -40,7 +40,11 @@ export const TERMINAL_COMMENTS = {
 	"question-group-unanswered": "Stopped: the classifier returned no confident grouping. Check Zero touch status. Not retried.",
 	"model-roles-invalid": "Stopped: the job image could not read its reviewed model roles and agent definitions. Rebuild the image and check its job inputs. Not retried.",
 	"model-roles-shadowed": "Stopped: another extension registered the reserved subagent tool, so reviewed model role resolution cannot be guaranteed. Remove the conflicting extension. Not retried.",
-	"worker-abort": "Stopped: the worker ended this run before it finished (the 30-minute job limit, or a worker shutdown). Partial work may exist. Not retried.",
+	"worker-abort": "Stopped: the worker ended this run before it finished (a worker shutdown). Partial work may exist. Not retried.",
+	// Issue #888. Which limit ended the run, never its value: the limits are operator configuration.
+	"idle": "Stopped: nothing happened in this run for its idle limit (no AI reply, no tool output, no work in the container), so it was ended. Partial work may exist. Not retried.",
+	"stalled": "Stopped: the AI took no step in this run for its stall limit, although the container stayed busy (often a command that never ends), so it was ended. Partial work may exist. Not retried.",
+	"max-minutes": "Stopped: this run reached its time limit. Partial work may exist. Not retried.",
 	"operator-cancel": "Stopped: the operator cancelled this run. Partial work may exist. Not retried.",
 	"agent-cancel": "Stopped by a delegated agent. Partial work may exist. Not retried.",
 	"answer-draft-refused": "Stopped: the restricted draft job refused its configuration or inputs. No answer was sent. Not retried.",

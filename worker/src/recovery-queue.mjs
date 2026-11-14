@@ -511,8 +511,10 @@ export async function pointedJobDirs({ redis, hostName, maxKeys = 10_000, count 
 /**
  * The boot sweep of orphaned `jobs/job-*` directories: what a crashed worker left behind (the processor's cleanup never
  * ran). Only a name `mkdtemp` makes, only a REAL directory (lstat: a link is never followed, never removed through), only
- * one older than `olderThanMs` (the job timeout bounds every running job's life, so nothing running here can own it), and
- * never one in `keep` (a pointer names it for a salvage). `fs.rm` recursive removes a link inside as the link, without
+ * one older than `olderThanMs`, and never one in `keep` (a pointer names it for a salvage). Since issue #888 a job runs
+ * as long as it keeps working, so a directory's age is its NEWEST sign of life: its own mtime, or the activity counters
+ * the runner rewrites while the job does anything (`session/activity.json`, INT-JOB-ACTIVITY-FILE), whichever is later;
+ * the caller's bound is above the longest a running job's counters stay unchanged before its limit stops it. `fs.rm` recursive removes a link inside as the link, without
  * following it. Never throws; per-entry faults are counted and logged by code.
  */
 export async function sweepOrphanJobDirs({ jobsDir, olderThanMs, now = () => Date.now(), keep = new Set(), fs = nodeFsp, log = () => {} } = {}) {
@@ -549,7 +551,16 @@ export async function sweepOrphanJobDirs({ jobsDir, olderThanMs, now = () => Dat
 		const dir = join(jobsDir, name);
 		try {
 			const st = await fs.lstat(dir);
-			if (!st.isDirectory() || keep.has(name) || now() - st.mtimeMs <= olderThanMs) {
+			let lastSign = st.mtimeMs;
+			if (st.isDirectory()) {
+				try {
+					const counters = await fs.lstat(join(dir, "session", "activity.json"));
+					if (counters.isFile()) lastSign = Math.max(lastSign, counters.mtimeMs);
+				} catch {
+					// no counters: a job no watch covered, or one that never started; the directory's own mtime stands
+				}
+			}
+			if (!st.isDirectory() || keep.has(name) || now() - lastSign <= olderThanMs) {
 				out.kept++;
 				continue;
 			}

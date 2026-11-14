@@ -227,7 +227,13 @@ export const EXCLUDE_RUNNER_REASONS = Object.freeze(["exclude-tool-not-loaded"])
  * with the mount and a key; named for MCP_RUNNER_REASONS' reason, the operator's fix is not a budget.
  */
 export const STEER_RUNNER_REASONS = Object.freeze(["steer-inbox-missing", "steer-no-exit-key"]);
-export const RUNNER_POLICY_REASONS = new Set(["provider-auth-refused", "cost-cap", "model-not-allowed", "model-roles-invalid", "model-roles-shadowed", "cost-cap-unenforceable", "model-policy-unenforceable", ...MCP_RUNNER_REASONS, ...EXCLUDE_RUNNER_REASONS, ...ANSWER_DRAFT_RUNNER_REASONS, ...AWAIT_INPUT_RUNNER_REASONS, ...PROGRESS_RUNNER_REASONS, ...STEER_RUNNER_REASONS, "question-group-refused", "question-group-unanswered", "approval-config-invalid", "approval-without-session", "approval-shadowed", "approval-decision-invalid"]);
+/**
+ * The runner's exit-2 stops of an idle or stalled job (issue #888, image/runner/src/activity.mjs): nothing happened for the
+ * idle limit, or the agent took no step for the stall limit. Named for MCP_RUNNER_REASONS' reason: the operator's fix is a
+ * limit or the command the job waited on, not a budget.
+ */
+export const ACTIVITY_RUNNER_REASONS = Object.freeze(["idle", "stalled"]);
+export const RUNNER_POLICY_REASONS = new Set(["provider-auth-refused", "cost-cap", "model-not-allowed", "model-roles-invalid", "model-roles-shadowed", "cost-cap-unenforceable", "model-policy-unenforceable", ...MCP_RUNNER_REASONS, ...EXCLUDE_RUNNER_REASONS, ...ANSWER_DRAFT_RUNNER_REASONS, ...AWAIT_INPUT_RUNNER_REASONS, ...PROGRESS_RUNNER_REASONS, ...STEER_RUNNER_REASONS, ...ACTIVITY_RUNNER_REASONS, "question-group-refused", "question-group-unanswered", "approval-config-invalid", "approval-without-session", "approval-shadowed", "approval-decision-invalid"]);
 
 /**
  * The runner's reasons that ride a COMPLETED exit (`code: 0`) and that the worker acts on, closed (issue #625). One so
@@ -1041,7 +1047,7 @@ export function recordReadable(record, { supported = RUN_RECORD_VERSION } = {}) 
  * default to `null` when the outcome does not carry them, so the record shape is stable whether or not
  * the source reports those fields.
  */
-export function buildRecord({ job, result, error, startedAt, endedAt, host = null, defaultBackend = null, project = null, size = null, capacity = null, earlier = null, maxTurns = null, touchTracking = false }) {
+export function buildRecord({ job, result, error, startedAt, endedAt, host = null, defaultBackend = null, project = null, size = null, capacity = null, earlier = null, maxTurns = null, limits = null, touchTracking = false }) {
 	const data = job.data ?? {};
 	const fork = recordedFork(data.fork, sourceModel(result, error));
 	const kind = data.kind ?? job.name;
@@ -1338,6 +1344,12 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		// representable timestamp, and a reader then applies no bound. Additive, so `v` stays 1. A number's rendering,
 		// so PII-free.
 		...(jobCreatedAt !== null ? { jobCreatedAt } : {}),
+		// The limits the run ran under (issue #888, INT-RUN-HISTORY-FILE-CONTRACT): idle, stall and ceiling in whole minutes,
+		// whether the activity watch bounded it or the 30-minute wall clock did (`basis`) and why (`why`), the counters'
+		// channel and, from the worker's backstop, the last step and the last activity it saw (this worker's clock). REBUILT
+		// (`recordedLimits`), closed keys and enums only. CONDITIONAL, after `jobCreatedAt`: present only for a job that was
+		// admitted, so every refusal before a slot, and every older record, is byte-identical. Additive, so `v` stays.
+		...(recordedLimits(limits) !== null ? { limits: recordedLimits(limits) } : {}),
 		// The record's version (issue #761, `RUN_RECORD_VERSION`), the LAST key on every record and after every conditional
 		// key, so it stays last whatever a record carries and every earlier position is untouched. Unconditional: a reader
 		// asks one key, and a missing one reads as 1.
@@ -1446,6 +1458,33 @@ export function recordedCapacity(value) {
 export function recordedHostBudget(value) {
 	if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
 	return { memMiB: recordBudget(value.memMiB), cpuCenti: recordBudget(value.cpuCenti), hostShare: recordInt(value.hostShare) };
+}
+
+/** Why a run kept the 30-minute wall clock instead of the activity watch (issue #888, `limits.why`). */
+export const LIMITS_WHY = Object.freeze(["image", "subscription", "forge-token"]);
+/** Why a watched run had no channel for its counters (issue #888, `limits.unavailable`): run-container's reasons. */
+export const LIMITS_UNAVAILABLE = Object.freeze(["venue-copies", "no-capability", "no-exit-key", "no-transcript"]);
+
+/**
+ * A run's limits as a record carries them (issue #888): `{ idleMinutes, stallMinutes, maxMinutes, basis, why?, channel?,
+ * unavailable?, lastStepAt?, lastActivityAt? }`, else null. Minutes are safe integers (`maxMinutes` null for none, `stallMinutes`
+ * 0 for off); `basis` is `activity` or `wall-clock`; the rest only when known, each a closed value or an ISO instant.
+ */
+export function recordedLimits(value) {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+	const minutes = (v, min) => (Number.isSafeInteger(v) && v >= min ? v : null);
+	const basis = value.basis === "activity" || value.basis === "wall-clock" ? value.basis : null;
+	if (basis === null) return null;
+	const instant = (v) => (typeof v === "string" && v.length <= 40 && Number.isFinite(Date.parse(v)) ? new Date(Date.parse(v)).toISOString() : null);
+	const out = { idleMinutes: minutes(value.idleMinutes, 1), stallMinutes: minutes(value.stallMinutes, 0), maxMinutes: minutes(value.maxMinutes, 1), basis };
+	if (LIMITS_WHY.includes(value.why)) out.why = value.why;
+	if (value.channel === "file" || value.channel === "stdio") out.channel = value.channel;
+	if (LIMITS_UNAVAILABLE.includes(value.unavailable)) out.unavailable = value.unavailable;
+	const step = instant(value.lastStepAt);
+	const active = instant(value.lastActivityAt);
+	if (step !== null) out.lastStepAt = step;
+	if (active !== null) out.lastActivityAt = active;
+	return out;
 }
 
 /** What became of a collected plan. */

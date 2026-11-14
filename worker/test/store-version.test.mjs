@@ -106,7 +106,7 @@ const jobDataFields = () => {
 };
 
 test("the job data tables hold the rule", () => {
-	assert.equal(JOB_DATA_VERSION, 3, "issue #796: packageCanary at 2; issue #800: run.excludeExtensions and run.excludeExtensionTools at 3");
+	assert.equal(JOB_DATA_VERSION, 4, "issue #796: packageCanary at 2; issue #800: run.excludeExtensions and run.excludeExtensionTools at 3; issue #888: the three limits at 4");
 	assert.equal(JOB_DATA_VERSION_FIELD, "dataVersion");
 	const known = jobDataFields();
 	assert.ok(known.includes("waitFor") && known.includes("models"), "the job data fields were found");
@@ -122,7 +122,8 @@ test("jobDataNewer: no field or a readable integer passes; above the build, or a
 	assert.equal(jobDataNewer({ dataVersion: 1 }), null);
 	assert.equal(jobDataNewer({ dataVersion: 2 }, { supported: 2 }), null);
 	assert.equal(jobDataNewer({ dataVersion: 3 }), null);
-	assert.deepEqual(jobDataNewer({ dataVersion: 4 }), { version: 4 });
+	assert.equal(jobDataNewer({ dataVersion: 4 }), null);
+	assert.deepEqual(jobDataNewer({ dataVersion: 5 }), { version: 5 });
 	for (const odd of ["2", 0, 1.5, null, {}]) assert.deepEqual(jobDataNewer({ dataVersion: odd }), { version: null }, JSON.stringify(odd));
 	assert.equal(jobDataNewer(null), null);
 	assert.equal(jobDataNewer("x"), null);
@@ -142,22 +143,22 @@ test("withJobDataVersion stamps the lowest version a field needs, keeps a higher
 	assert.deepEqual(withJobDataVersion({ repo: "a/b" }, { table, supported: 2 }), { repo: "a/b" }, "unsetting the field drops the stamp");
 	assert.deepEqual(withJobDataVersion({ repo: "a/b", dataVersion: 2 }, { table, supported: 2 }), { repo: "a/b", dataVersion: 2 }, "a re-enqueue keeps the version the job arrived with");
 	assert.throws(() => withJobDataVersion({ repo: "a/b", dataVersion: 3 }, { table, supported: 2 }), RangeError, "a builder never re-enqueues a newer job under a lower version");
-	assert.throws(() => withJobDataVersion({ repo: "a/b", dataVersion: 4 }), RangeError, "this build's own version is 3");
+	assert.throws(() => withJobDataVersion({ repo: "a/b", dataVersion: 5 }), RangeError, "this build's own version is 4");
 	assert.equal(jobDataVersionFor({ narrowing: true, dataVersion: 9 }, { table }), 2, "the version field is not a field that needs a version");
 });
 
 test("with an injected value table, a wider value is stamped, an ordinary one is not, and the processor's gate sees the stamp", () => {
 	// A condition kind this build does not have stands in for one a later release adds to `waitFor`.
-	const valueTable = Object.freeze({ waitFor: (conditions) => (Array.isArray(conditions) && conditions.some((c) => c !== null && typeof c === "object" && Object.hasOwn(c, "issueClosed")) ? 4 : 1) });
+	const valueTable = Object.freeze({ waitFor: (conditions) => (Array.isArray(conditions) && conditions.some((c) => c !== null && typeof c === "object" && Object.hasOwn(c, "issueClosed")) ? 5 : 1) });
 	const wider = { kind: "github", waitFor: [{ profile: "jira" }, { issueClosed: 12 }] };
-	assert.equal(jobDataVersionFor(wider, { valueTable }), 4);
-	const stamped = withJobDataVersion(wider, { valueTable, supported: 4 });
-	assert.deepEqual(stamped, { ...wider, dataVersion: 4 });
-	assert.deepEqual(jobDataNewer(stamped), { version: 4 }, "a build that reads less defers it as newer, never refuses it as unreadable");
-	assert.equal(jobDataNewer(stamped, { supported: 4 }), null, "and the build that wrote it reads it");
+	assert.equal(jobDataVersionFor(wider, { valueTable }), 5);
+	const stamped = withJobDataVersion(wider, { valueTable, supported: 5 });
+	assert.deepEqual(stamped, { ...wider, dataVersion: 5 });
+	assert.deepEqual(jobDataNewer(stamped), { version: 5 }, "a build that reads less defers it as newer, never refuses it as unreadable");
+	assert.equal(jobDataNewer(stamped, { supported: 5 }), null, "and the build that wrote it reads it");
 	const ordinary = { kind: "github", waitFor: [{ profile: "jira" }] };
-	assert.equal(JSON.stringify(withJobDataVersion(ordinary, { valueTable, supported: 4 })), JSON.stringify(ordinary), "byte-identical");
-	assert.equal(jobDataVersionFor({ ...wider, dataVersion: 1 }, { valueTable }), 4, "the version field itself is never a value a rule judges");
+	assert.equal(JSON.stringify(withJobDataVersion(ordinary, { valueTable, supported: 5 })), JSON.stringify(ordinary), "byte-identical");
+	assert.equal(jobDataVersionFor({ ...wider, dataVersion: 1 }, { valueTable }), 5, "the version field itself is never a value a rule judges");
 	assert.equal(jobDataVersionFor(wider), 1, "the shipped table stamps nothing");
 });
 

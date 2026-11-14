@@ -153,7 +153,7 @@ test("a newer triggers file or settings overlay never takes the finding: the run
 	const counted = { async takeFinding() { takes++; return { status: "ready", finding: {} }; } };
 	const f = fixture({ storeOverrides: counted });
 	const doc = JSON.parse(readFileSync(f.triggersPath, "utf8"));
-	writeFileSync(f.triggersPath, JSON.stringify({ version: 3, ...doc }));
+	writeFileSync(f.triggersPath, JSON.stringify({ version: 4, ...doc }));
 	assert.deepEqual(await f.runtime.resolve(f.ref, "run1"), { newer: "the triggers file" });
 	const newerSettings = fixture({ decision: true, storeOverrides: counted, getSettings: () => ({ invalid: "settings file written by a newer pi-dispatch (version 2; this build understands 1)", newer: true }) });
 	assert.deepEqual(await newerSettings.runtime.resolve(newerSettings.ref, "gate1"), { newer: "the settings file" });

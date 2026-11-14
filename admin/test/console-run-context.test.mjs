@@ -131,3 +131,14 @@ test("a lost attempt that is continuing offers its recovery and sibling, without
   assert.match(out, /Open recovery run/); assert.match(out, /Open sibling replica/); assert.doesNotMatch(out, /data-action="rerun"|Open target on the forge/);
   assert.equal(String(runActionsPanel(view(data))), "");
 });
+
+test("issue #888: resources say what bounded the run, and why it kept the 30-minute limit when it did", () => {
+  const watched = record({ limits: { idleMinutes: 15, stallMinutes: 240, maxMinutes: null, basis: "activity", channel: "file", lastStepAt: "2026-11-14T10:00:00.000Z", lastActivityAt: "2026-11-14T10:05:00.000Z" } });
+  const out = String(runResources(view({ run: { record: watched } })));
+  assert.match(out, /idle 15 min, stall 240 min, no ceiling; stopped only when idle, stalled or at the ceiling/);
+  assert.match(out, /Last step seen/);
+  assert.match(out, /Last activity seen/);
+  const kept = record({ limits: { idleMinutes: 15, stallMinutes: 0, maxMinutes: 60, basis: "wall-clock", why: "subscription" } });
+  assert.match(String(runResources(view({ run: { record: kept } }))), /idle 15 min, stall off, ceiling 60 min; kept the 30-minute limit because it signed in to its model with a subscription/);
+  assert.doesNotMatch(String(runResources(view({ run: { record: record({}) } }))), /Limits|Last step seen/, "a record without limits shows no row");
+});

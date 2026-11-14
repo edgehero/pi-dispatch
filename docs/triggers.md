@@ -697,6 +697,27 @@ writes exactly one thing back, the `on.disarmed` mark. That mark spends a one-sh
 receives a read-only `/job/event.json`. It contains source, folder, and HEAD sha. Cron adds its id,
 pattern and schedule instants. A scheduled flow can triage only what changed since its last run.
 
+## How long a trigger's jobs may run
+
+A job is stopped when it stops doing anything, not when it is old ([job limits](job-limits.md)). Any trigger type but a
+watch's can set its own limits, in whole minutes:
+
+```json
+{ "on": { "type": "label", "any": ["pi:refactor"] },
+  "run": { "kind": "github", "flow": "refactor", "idleTimeoutMinutes": 30, "maxMinutes": 480 } }
+```
+
+- `"idleTimeoutMinutes"` (1 to 1440): how long nothing may happen before the job is stopped. Replaces
+  `PI_JOB_IDLE_MINUTES` for this trigger's jobs, longer or shorter.
+- `"stallTimeoutMinutes"` (0 to 43200, 0 for off): how long the AI may take no step, however busy the container is.
+  Replaces `PI_JOB_STALL_MINUTES`.
+- `"maxMinutes"` (1 to 43200): a wall-clock ceiling. When the deployment sets `PI_JOB_MAX_MINUTES` too, the smaller wins.
+
+A value that is not a whole number in range, a near miss of a name (`idleTimeout`, `max_minutes`), or one of these
+names under `on` is refused when the file loads. A file that uses one is stamped version 3, which an older release
+refuses, so move every host first ([upgrading](upgrading.md)). Like `maxCostUsd`, a job that arrived without a limit its
+trigger sets is refused as `trigger-skew`, and no AI tool sets them: the console shows them under By hand.
+
 ## A dollar cap per job
 
 Any trigger type can set the most one of its jobs may spend, in US dollars:

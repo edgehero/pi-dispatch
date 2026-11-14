@@ -322,7 +322,7 @@ PROPS = [  # key, short label, question, armedBy
     ("jobToJobIsolation", "Jobs cannot reach each other", "two jobs cannot reach each other, structurally rather than by policy", "PI_EGRESS"),
     ("imagePinning", "Image never pulled", "the image cannot be fetched at run time, so a typo'd name is unreachable (--pull=never)", None),
     ("exitCodes", "Exit code unmodified", "the container's integer exit code reaches the processor unmodified", None),
-    ("abortable", "Stoppable on timeout", "a running job can be stopped on the 30-minute timeout or a shutdown, and the abort is distinguishable from a crash", None),
+    ("abortable", "Stoppable on timeout", "a running job can be stopped on a job limit, a cancel or a shutdown, and the abort is distinguishable from a crash", None),
     ("readOnlyJobInputs", "Read-only /job", "/job is read-only by the kernel, not by convention", None),
     ("nonRoot", "Agent not root", "the agent runs as a non-root user", None),
     ("secretsCustody", "No secret value logged", "no resolved secret VALUE reaches a log, a run record or a forge comment", None),

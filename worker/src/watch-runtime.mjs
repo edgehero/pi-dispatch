@@ -7,6 +7,7 @@ import { createHash } from "node:crypto";
 import { parseTriggersDocument } from "./triggers.mjs";
 import { selectWatchDecision, projectWatchDecisionState } from "./watch-decision.mjs";
 import { validateWatchBoard } from "./watch-board.mjs";
+import { WATCH_DECISION_RECHECK_MS } from "./job-limits.mjs";
 
 const digest = value => createHash("sha256").update(JSON.stringify(value)).digest("hex");
 const refusal = reason => ({ outcome: "policy", reason, budgetReserved: false });
@@ -40,7 +41,9 @@ export function makeWatchRuntime({ store, triggersPath, readFile = nodeFs.readFi
 		async started(job) {
 			if (job.watch?.stage !== "decision") return;
 			await store.updateFinding(job.watch.findingId, { status: "deciding", runId: job.watch.runId });
-			await store.scheduleAction(job.watch.findingId, job.watch.ruleId, now() + 35 * 60 * 1000);
+			// The decision job is bounded at WATCH_MAX_MINUTES (job-limits.mjs, issue #888), so its finding is looked at again
+			// five minutes after that, by the same derivation the 30-minute job timeout gave it before.
+			await store.scheduleAction(job.watch.findingId, job.watch.ruleId, now() + WATCH_DECISION_RECHECK_MS);
 		},
 		async drain() {
 			if (draining) return;

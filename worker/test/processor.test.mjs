@@ -357,11 +357,32 @@ test("an authenticated agent cancellation ends as agent-cancel and never creates
 	assert.equal(counted.totals.touched, 0, "the delegated cancel is not relabelled as a person's intervention");
 });
 
-test("the abortReason match is CLOSED: shutdown, the timer's reason, and garbage all stay worker-abort", async () => {
-	for (const abortReason of ["shutdown", "job-timeout-30m", "operator-cancel-2", "", undefined]) {
+test("the abortReason match is CLOSED: shutdown and garbage all stay worker-abort", async () => {
+	for (const abortReason of ["shutdown", "operator-cancel-2", "idle-ish", "", undefined]) {
 		const { deps: d } = deps({ runContainer: async () => ({ code: 137, aborted: true, abortReason }) });
 		const r = await runJob(ghJob, d);
 		assert.equal(r.reason, "worker-abort", `${JSON.stringify(abortReason)} must classify conservatively -- a pin bump changing what rides the signal can widen nothing`);
+	}
+});
+
+test("issue #888: a worker stop names its limit -- idle, stalled, the ceiling, and the 30-minute wall clock as a time limit", async () => {
+	for (const [abortReason, reason] of [["idle", "idle"], ["stalled", "stalled"], ["max-minutes", "max-minutes"], ["job-timeout-30m", "max-minutes"]]) {
+		const posted = [];
+		const { deps: d } = deps({ runContainer: async () => ({ code: 137, aborted: true, abortReason }), comment: async (_j, t) => posted.push(t) });
+		const r = await runJob(ghJob, d);
+		assert.equal(r.reason, reason, abortReason);
+		assert.equal(r.outcome, "policy", "never retried");
+		assert.deepEqual(posted, [TERMINAL_COMMENTS[reason]]);
+	}
+});
+
+test("issue #888: the runner's own idle or stalled stop is a policy exit under its own name, with its own comment", async () => {
+	for (const exitReason of ["idle", "stalled"]) {
+		const posted = [];
+		const { deps: d } = deps({ runContainer: async () => ({ code: 2, aborted: false, exitReason }), comment: async (_j, t) => posted.push(t) });
+		const r = await runJob(ghJob, d);
+		assert.equal(r.reason, exitReason);
+		assert.deepEqual(posted, [TERMINAL_COMMENTS[exitReason]]);
 	}
 });
 

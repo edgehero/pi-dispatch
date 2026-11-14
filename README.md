@@ -954,7 +954,7 @@ These forges have one auth source each, a token you create, so setting theirs to
 **Watching and steering:** [steering](docs/steering.md), [chat](docs/chat.md), [sessions](docs/sessions.md),
 [durable runs](docs/durable-runs.md), [approval gates](docs/approval-gates.md), [answer rules](docs/answer-rules.md),
 [Zero touch](docs/zero-touch.md), [watch](docs/watch.md), [watch decisions](docs/watch-decisions.md),
-[reasons](docs/reasons.md).
+[reasons](docs/reasons.md), [job limits](docs/job-limits.md).
 
 **Triggers and flows:** [triggers](docs/triggers.md), [workflows](docs/workflows.md), [wait for](docs/wait-for.md),
 [pause windows](docs/pause-windows.md), [replicas](docs/replicas.md), [canary](docs/canary.md),

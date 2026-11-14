@@ -37,10 +37,39 @@ page still shows the reason as it was recorded.
 
 ### worker-abort
 
-The worker ended the run before it finished. That is the 30 minute job limit, or the worker shutting down. Partial
-work may exist, and the run is not retried.
+The worker ended the run before it finished because the worker was shutting down. Partial work may exist, and the
+run is not retried.
 
-What to do: check the worker log for which one it was. Run the job again if its work is still wanted.
+What to do: check the worker log for the shutdown. Run the job again if its work is still wanted.
+
+### idle
+
+Nothing happened in the run for its idle limit: no reply from the AI, no output from a tool, and no work in the
+container (CPU or network) that the AI might have been waiting on. A command waiting for input that never comes, or a
+long silent sleep with nothing behind it, ends this way. Partial work may exist, and the run is not retried.
+
+What to do: read the job log for what it was waiting on. If a command really needs longer in silence, raise the
+trigger's `run.idleTimeoutMinutes` or the deployment's `PI_JOB_IDLE_MINUTES`, or make the command print as it goes
+([job-limits.md](job-limits.md)).
+
+### stalled
+
+The AI took no step for the run's stall limit (four hours unless changed), although the container stayed busy. That
+is usually a command that never ends: a test stuck in a loop, or a server started in the foreground. Partial work may
+exist, and the run is not retried.
+
+What to do: read the job log for the command that never ended. If the work really needs longer without a step, raise
+`run.stallTimeoutMinutes` or `PI_JOB_STALL_MINUTES` ([job-limits.md](job-limits.md)).
+
+### max-minutes
+
+The run reached its time limit: a ceiling the trigger (`run.maxMinutes`) or the deployment (`PI_JOB_MAX_MINUTES`) set,
+or the 30-minute limit a job keeps when nothing else can bound it (an image without the `idleWatch` capability, or a
+credential that expires while it runs). The run record's `limits` says which. Partial work may exist, and the run is
+not retried.
+
+What to do: raise the ceiling if the work needs longer. For the 30-minute limit, rebuild a derived job image on a
+current base ([job-limits.md](job-limits.md)).
 
 ### operator-cancel
 

@@ -27,7 +27,8 @@ failure comment exists on the issue", REQ-JOB-STATUS-COMMENTS):
 
 | What happened | The comment |
 |---|---|
-| the 30-minute kill timer (or a worker shutdown) stopped the run | `Stopped: the worker ended this run before it finished ... Not retried.` |
+| a worker shutdown stopped the run | `Stopped: the worker ended this run before it finished ... Not retried.` |
+| a limit stopped the run ([job limits](job-limits.md)): nothing happened for its idle limit (`idle`), the AI took no step for its stall limit (`stalled`), or it reached its time limit (`max-minutes`) | `Stopped: nothing happened in this run for its idle limit ...`, `Stopped: the AI took no step in this run for its stall limit ...` or `Stopped: this run reached its time limit. ...`, each ending `Not retried.` |
 | the operator cancelled the run (`pi-dispatch cancel`) | `Stopped: the operator cancelled this run. ... Not retried.` |
 | the run ended inside the container (turn or token budget, an in-container config refusal, exit 2), for every runner reason except the ones named below | `Stopped: the run ended inside the container before finishing ... Not retried.` |
 | the AI provider refused the key as an authentication or permission error (exit 2, reason `provider-auth-refused`): a bad or revoked key, or a key that may not use this model or route | `Stopped: the AI provider refused this worker's credentials or access (an authentication or permission error). The operator needs to check the provider key and what it is allowed to use. Not retried.` |
@@ -101,7 +102,7 @@ arguments:
   flattened before) now sees the token.
 - `host` is the worker's declared name, possibly empty.
 
-It fires for: the 30-minute kill, an in-container policy stop (exit 2, including a provider's refusal of
+It fires for: a stop by a job limit (`idle`, `stalled`, `max-minutes`), a worker shutdown, an in-container policy stop (exit 2, including a provider's refusal of
 the key), a job killed for memory (`oom-killed`), and the final infrastructure
 failure, including a job killed by a worker crash (the stall path fails it at the next pickup, and the
 observing worker fires the hook). It does NOT fire for completions, for free pre-spend refusals (they

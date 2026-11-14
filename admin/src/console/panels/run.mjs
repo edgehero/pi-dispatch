@@ -844,6 +844,20 @@ export const runCostPanel = withRun("Tokens and dollars", (r, view) => {
 /** Bytes as MiB. */
 const mib = (bytes) => (Number.isFinite(bytes) ? `${count(bytes / (1024 * 1024))} MiB` : "-");
 
+/** Why a run kept the 30-minute limit (issue #888, the record's `limits.why` and `limits.unavailable`), in words. */
+const LIMITS_WHY_WORDS = Object.freeze({ image: "its job image does not declare idleWatch", subscription: "it signed in to its model with a subscription", "forge-token": "its GitHub token comes from an App and lives an hour" });
+const LIMITS_UNAVAILABLE_WORDS = Object.freeze({ "venue-copies": "its venue has no channel for the activity counters", "no-capability": "its image cannot sign the counters on this venue", "no-exit-key": "it had no exit key to sign the counters with", "no-transcript": "it had no transcript folder for the counters" });
+
+/** The record's `limits` in one line (issue #888), or null for a record without it. */
+function limitsText(l) {
+  if (!l || typeof l !== "object") return null;
+  const minutes = (n) => (Number.isSafeInteger(n) ? `${n} min` : "?");
+  const parts = [`idle ${minutes(l.idleMinutes)}`, `stall ${l.stallMinutes === 0 ? "off" : minutes(l.stallMinutes)}`, l.maxMinutes ? `ceiling ${minutes(l.maxMinutes)}` : "no ceiling"];
+  const reason = LIMITS_WHY_WORDS[l.why] ?? LIMITS_UNAVAILABLE_WORDS[l.unavailable] ?? null;
+  const basis = l.basis === "activity" ? "stopped only when idle, stalled or at the ceiling" : `kept the 30-minute limit${reason ? ` because ${reason}` : ""}`;
+  return `${parts.join(", ")}; ${basis}`;
+}
+
 export const runResources = withRun("Resources", (r) => {
   const x = r.resources ?? null;
   const size = r.size ?? null;
@@ -857,6 +871,9 @@ export const runResources = withRun("Resources", (r) => {
     ["Peak swap", x?.swapPeak != null ? mib(x.swapPeak) : null],
     ["Memory pressure", x ? `${(x.memSomeUsec ?? 0) / 1e6} s some, ${(x.memFullUsec ?? 0) / 1e6} s full` : null],
     ["Throttled periods", x?.throttledPeriods],
+    ["Limits", limitsText(r.limits)],
+    ["Last step seen", r.limits?.lastStepAt ? timeHtml(msOf(r.limits.lastStepAt)) : null],
+    ["Last activity seen", r.limits?.lastActivityAt ? timeHtml(msOf(r.limits.lastActivityAt)) : null],
     ["Host offered at admission", r.capacity ? `${r.capacity.slots ?? "?"} slots, ${r.capacity.memMiB ?? "?"} MiB, ${r.capacity.cpuCenti === "off" ? "CPU budget off" : r.capacity.cpuCenti != null ? coresText(r.capacity.cpuCenti) : "CPU budget unknown"}; ${r.capacity.cpus ?? "?"} physical CPUs` : null],
   ])}`;
 });

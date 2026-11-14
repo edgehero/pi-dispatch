@@ -475,6 +475,24 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   - Trusting the container's clock: see "Why counters".
 - **What suspends the clocks**: pi's own retry back-off (`auto_retry_start`'s `delayMs`), and a freeze (a sample more
   than three intervals late), which shifts both clocks by the gap: a frozen process did nothing it could be blamed for.
+- **The worker's half** (issue #888 part 2):
+  - **One timer handed over.** The processor keeps the 30-minute wall clock from the pickup (it bounds the clone and the
+    start too) and clears it when the container's watch is armed (`onActivityArmed`), so a watched job then runs until a
+    limit or its end. A job no watch covers keeps it, and says why in its record: an image without `idleWatch`, a venue
+    with no channel for the counters, or a credential that expires while it runs (`keepWallClock`: a subscription
+    snapshot's 30-minute deadline, a GitHub App token's hour). REJECTED: running such a job unbounded and letting its
+    credential fail mid-run: the agent's calls would fail one by one on a slot it keeps.
+  - **The backstop** reads the counters every 15 s and stops the container two minutes after the runner should have
+    (`BACKSTOP_GRACE_MS`), so it fires only for a runner too wedged to stop its own job.
+  - **`max-minutes`** is the worker's own timer, from the pickup, armed only when a ceiling is set.
+  - **Claims are renewed.** A fleet claim's TTL was safe without a refresh only because no container outlived 30
+    minutes. The processor renews every claim it holds every 5 minutes while its job runs (`CLAIM_REFRESH_MS`), each
+    refresh acting only on a key still its own; the TTL now bounds only how long a claim outlives a dead worker.
+  - **The boot sweep** reads a job directory's newest sign of life (its mtime or its counters'), against a bound above
+    the longest a running job's counters stay unchanged.
+  - **The stops are named.** `ABORT_RECORD_REASONS` maps the abort's reason to the record's (closed, as before): `idle`,
+    `stalled`, `max-minutes`, and the fallback's `job-timeout-30m` as `max-minutes`; the runner's own `idle` and
+    `stalled` are `RUNNER_POLICY_REASONS`. Each has its comment and catalog row.
 - **Traces to**: `REQ-JOB-ACTIVITY-LIMITS`, `INT-RUNNER-EXIT-CODE-PROTOCOL` ("The activity watch"), `INT-JOB-ACTIVITY-FILE`,
   `REQ-RUNNER-TURN-BUDGET`
 
@@ -18055,6 +18073,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-11-14 (#888, part 2: the worker) | **`DES-JOB-ACTIVITY-WATCH` AMENDED** with the worker's half: one 30-minute timer handed over to the watch and kept for a job no watch covers (with the rejected unbounded run on an expiring credential), the backstop and its grace, the `max-minutes` timer, the renewed fleet claims, the activity-aware boot sweep, and the named stops. **`DES-STORE-VERSION-WHEN-NEEDED` UNCHANGED, checked**: its rule is applied (three trigger run fields at triggers file version 3, three job data fields at version 4, each a row of `AUTHORED_NARROWING_FIELDS`), not changed. `DES-CONCURRENCY-3` and `DES-CANCEL-VIA-REDIS-REQUEST-KEY` UNCHANGED, checked. |
 | 2026-11-14 (#888, part 1: the runner) | **NEW `DES-JOB-ACTIVITY-WATCH`**: the runner judges idle and stalled from steps (root-bus events but output updates, and the meter's counts) and activity (tool output, other processes' CPU, network), and stops the job itself; the worker is a backstop reading counters it stamps with its own clock; why the runner, why counters and not times; rejected: a wall clock, events only, CPU only, activity as enough for ever, the container's clock; what suspends the clocks. `DES-CONCURRENCY-3` and `DES-CANCEL-VIA-REDIS-REQUEST-KEY` UNCHANGED, checked: the worker half amends the abort path. |
 | 2026-11-14 (#882, part 7) | **`DES-OPERATOR-CONSOLE` AMENDED**: a new bullet after "Remote use", "On the local network, by name": the opt-in second listener announced as `pi-dispatch.local`, its costs and where each is said, the never-remembered rule judged by the arriving socket, the measured macOS port 80, and what was rejected (an mDNS library, announcing loopback, a wildcard on Linux, a `Secure` cookie over plain HTTP, a chosen name). UNCHANGED, checked: part 1 (the loopback listener and its refusals), "Remote use" (SSH, still the only remembered way from another machine), the six threats' answers, "Sign in on this computer". |
 | 2026-11-14 (#882, part 5) | **`DES-OPERATOR-CONSOLE` AMENDED**, a new bullet, "Sign in on this computer": the sign-in page asks the host's desktop, in a system window, to let the browser in (`approve-dialog.mjs`), one request at a time behind the limiter, with a 256-bit id the page alone holds, a match code on both sides, Deny the default and a minute's give-up; Allow is a host-made credential, remembered where one may be, and every outcome a `login-approval` row. Measured on macOS 27: a LaunchAgent shows the window with no permission asked. Rejected: trusting a loopback peer that runs under the console's own account, because a job's container reaches the host through helpers running under it. UNCHANGED, checked: the threats' answers for rebinding, cross-site writes and same-site localhost, and `OQ-058`. |

@@ -38,7 +38,7 @@ import { createHmac, timingSafeEqual } from "node:crypto";
 export const TRANSCRIPT_RECORD_MARKER = "\x1epidt ";
 const MARKER = Buffer.from(TRANSCRIPT_RECORD_MARKER, "latin1");
 const TRANSCRIPT_DOMAIN = "pi-dispatch-transcript";
-const TYPES = new Set(["b", "l", "r"]);
+const TYPES = new Set(["a", "b", "l", "r"]);
 
 /**
  * The most payload bytes one record holds before it is given up on. A genuine record's payload is at most 4/3 of the
@@ -76,7 +76,7 @@ export function verifyTranscriptRecord(body, { key, runId }) {
 	const payload = Buffer.from(b64, "base64");
 	// Canonical only: base64 has spellings that differ in their unused trailing bits and decode to the same bytes.
 	if (payload.toString("base64") !== b64) return null;
-	if (type !== "l" && payload.length > 0) return null;
+	if (type !== "l" && type !== "a" && payload.length > 0) return null;
 	if (!timingSafeEqual(Buffer.from(transcriptRecordMac(key, runId, seqText, type, endText, payload), "hex"), Buffer.from(mac, "hex"))) return null;
 	return { seq, type, end, payload };
 }
@@ -84,7 +84,8 @@ export function verifyTranscriptRecord(body, { key, runId }) {
 const isDigit = (c) => c >= 0x30 && c <= 0x39;
 const isHex = (c) => isDigit(c) || (c >= 0x61 && c <= 0x66);
 const isB64 = (c) => isDigit(c) || (c >= 0x41 && c <= 0x5a) || (c >= 0x61 && c <= 0x7a) || c === 0x2b || c === 0x2f || c === 0x3d;
-const isType = (c) => c === 0x62 || c === 0x6c || c === 0x72;
+// `b`, `l`, `r` and, since issue #888, `a` (the activity counters).
+const isType = (c) => c === 0x61 || c === 0x62 || c === 0x6c || c === 0x72;
 // Each field before the payload: the bytes it admits and its longest length. Field 4, the payload, is base64 to the newline.
 const FIELDS = [
 	{ ok: isDigit, max: 16 },
@@ -99,7 +100,7 @@ const FIELDS = [
  *
  *   - `push(chunk)` takes one stderr chunk and returns the bytes to pass on (a Buffer, possibly empty), in order. The
  *     verified records it completed are handed out before it returns: `onBaseline(size)`, `onLine(lineBytes, end)`,
- *     `onReset(size)`, and `onGap(missing)` first when `seq` jumped. A throw from `push` (none is known) leaves the
+ *     `onReset(size)`, `onActivity(counterBytes)` (issue #888), and `onGap(missing)` first when `seq` jumped. A throw from `push` (none is known) leaves the
  *     state as it was before the call, so the caller can `end()` and pass the chunk on itself without a byte twice.
  *   - `end()` returns what is still held and is not a record (the head of a line that matched the marker's first
  *     bytes), so nothing the CLI wrote is lost at close. An unterminated record is dropped and counted.
@@ -107,7 +108,7 @@ const FIELDS = [
  *
  * Every callback is guarded: a throw in one costs that record only, never the demux or the bytes passed on.
  */
-export function makeStderrTranscript({ key, runId, onLine = () => {}, onBaseline = () => {}, onReset = () => {}, onGap = () => {}, maxRecordBytes = TRANSCRIPT_RECORD_MAX_BYTES } = {}) {
+export function makeStderrTranscript({ key, runId, onLine = () => {}, onBaseline = () => {}, onReset = () => {}, onGap = () => {}, onActivity = () => {}, maxRecordBytes = TRANSCRIPT_RECORD_MAX_BYTES } = {}) {
 	// `start`: at a line start, `probe` holding the bytes so far that match the marker's head. `pass`: inside a line that
 	// is not a record, passed through to its newline. `record`: inside a record, in field `field` (0 to 4).
 	let mode = "start";
@@ -147,6 +148,9 @@ export function makeStderrTranscript({ key, runId, onLine = () => {}, onBaseline
 		counts.records += 1;
 		if (verified.type === "b") call(onBaseline, verified.end);
 		else if (verified.type === "r") call(onReset, verified.end);
+		// Issue #888: the activity counters' bytes, exactly as the file on a binding venue holds them. Not a line: the
+		// transcript never shows it, and `end` is not read.
+		else if (verified.type === "a") call(onActivity, verified.payload);
 		else if (verified.payload.length > 0) call(onLine, verified.payload, verified.end);
 	};
 
