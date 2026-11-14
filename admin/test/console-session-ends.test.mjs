@@ -70,7 +70,7 @@ test("endedNotices: one notice per reason, in the list's order, each frozen, dra
 });
 
 test("SIGN_IN_NOTICES: each kind drawn in a STATUS_KINDS status with a sprite icon; only other has no body (the server's sentence fills it)", () => {
-  assert.deepEqual(Object.keys(SIGN_IN_NOTICES), ["wrong", "code", "rate", "tokens", "audit", "unreachable", "other"]);
+  assert.deepEqual(Object.keys(SIGN_IN_NOTICES), ["wrong", "code", "rate", "tokens", "audit", "unreachable", "other", "denied", "busy", "nodialog"]);
   assert.ok(Object.isFrozen(SIGN_IN_NOTICES));
   for (const [kind, n] of Object.entries(SIGN_IN_NOTICES)) {
     assert.ok(Object.isFrozen(n), kind);
@@ -88,7 +88,7 @@ test("SIGN_IN_NOTICES: each kind drawn in a STATUS_KINDS status with a sprite ic
 
 test("NOTICE_OF_STATUS maps each sign-in route's statuses to a SIGN_IN_NOTICES kind, or to none; network failures and other statuses are the script's", () => {
   assert.ok(Object.isFrozen(NOTICE_OF_STATUS));
-  assert.deepEqual(Object.keys(NOTICE_OF_STATUS), ["/login", "/login/code", "/login/typed-code"]);
+  assert.deepEqual(Object.keys(NOTICE_OF_STATUS), ["/login", "/login/code", "/login/typed-code", "/login/approve", "/login/approve/wait"]);
   for (const [route, byStatus] of Object.entries(NOTICE_OF_STATUS)) {
     assert.ok(Object.isFrozen(byStatus), route);
     for (const [status, kind] of Object.entries(byStatus)) {
@@ -104,6 +104,10 @@ test("NOTICE_OF_STATUS maps each sign-in route's statuses to a SIGN_IN_NOTICES k
   // Issue #882: a code typed on the sign-in page is refused in that page's own notice.
   assert.equal(NOTICE_OF_STATUS["/login/typed-code"][401], "code");
   assert.match(SIGN_IN_NOTICES.code.body, /5 minutes/);
+  // Issue #882: a window on the host that was denied or not answered, one already waiting, and no window here.
+  assert.equal(NOTICE_OF_STATUS["/login/approve/wait"][401], "denied");
+  assert.equal(NOTICE_OF_STATUS["/login/approve"][409], "busy");
+  assert.equal(NOTICE_OF_STATUS["/login/approve"][404], "nodialog");
 });
 
 test("every notice a sign-in page draws is one it can show: a status selects it, or it is the script's own", () => {
@@ -112,7 +116,8 @@ test("every notice a sign-in page draws is one it can show: a status selects it,
   const selected = (route) => Object.values(NOTICE_OF_STATUS[route]).filter((k) => k !== null);
   // The sign-in page draws every SIGN_IN_NOTICES kind (signin.mjs signInContent) and posts to two routes, its token's and (issue #882) its typed
   // code's; the link page draws its LINK_NOTICES.
-  assert.deepEqual(new Set([...selected("/login"), ...selected("/login/typed-code"), ...theScripts]), new Set(Object.keys(SIGN_IN_NOTICES)), "/login");
+  // Issue #882: and its Sign in on this computer's two routes, the ask and the wait.
+  assert.deepEqual(new Set([...selected("/login"), ...selected("/login/typed-code"), ...selected("/login/approve"), ...selected("/login/approve/wait"), ...theScripts]), new Set(Object.keys(SIGN_IN_NOTICES)), "/login");
   assert.deepEqual(new Set([...selected("/login/code"), ...theScripts]), new Set(LINK_NOTICES), "/login/code");
 });
 

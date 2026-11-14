@@ -1,7 +1,7 @@
 {
   "card": "SignIn",
   "pr": 2,
-  "words": "1f254782de920be972a9d4a4073fbc2d33e68e72085153d4321e29a71a76c751",
+  "words": "d5d63cc47a3ac6e37fdbd1f482331e4bf25e9a961bdb857019dba06107496348",
   "elements": [
     {"el":"p-signin","kind":"panel","status":"new","source":"admin/src/console/signin.mjs#signInContent","golden":["login.anonymous"]},
     {"el":"A single centered card: a sign-in code or a console token","kind":"readme","status":"new","panel":"p-signin","source":"admin/src/console/signin.mjs#signInContent","holds":"class=\"card signin\"","golden":["login.anonymous"],"shows":"class=\"card signin\""},
@@ -48,6 +48,9 @@
     {"el":"The code K7QX-9M2D in the field","kind":"sample","status":"illustrative","reason":"a sample code; the page draws the field empty, with the code's shape, XXXX-XXXX, as its placeholder"},
     {"el":"The token placeholder (the token prefix and an ellipsis)","kind":"sample","status":"illustrative","reason":"the leak canary fails any body holding the token prefix, so the field has no placeholder"},
     {"el":"The 5-second retry interval","kind":"sample","status":"illustrative","reason":"the script retries every 2 s (script.mjs RETRY_MS, the stream's own retry), and the notice says 2 seconds"},
-    {"el":"The \"What this page says\" column","kind":"sample","status":"illustrative","reason":"a design-only listing of the notices; the page shows one at a time, and each is its own panel golden"}
+    {"el":"The \"What this page says\" column","kind":"sample","status":"illustrative","reason":"a design-only listing of the notices; the page shows one at a time, and each is its own panel golden"},
+    {"el":"Sign in on this computer: a button that asks the host's desktop to let this browser in, and the match code the page shows while it waits","kind":"readme","status":"new","source":"admin/src/console/signin.mjs#APPROVE_WAIT","holds":"Allow it in the window this computer shows"},
+    {"el":"Why signing in on this computer did not work: denied or unanswered, a request already waiting, no window here","kind":"readme","status":"new","source":"admin/src/console/session-ends.mjs#SIGN_IN_NOTICES","holds":"This computer did not let the browser in"},
+    {"el":"Whether this console can show a window, and for a request its match code, then waiting, denied or unanswered, already waiting, or no window here","kind":"provides","status":"new","source":"admin/src/console/approve-dialog.mjs#makeApprovals"}
   ]
 }

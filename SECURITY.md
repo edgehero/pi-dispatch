@@ -338,7 +338,10 @@ The threat model, and what answers each part:
   billion; the limit lives in the process, so a restart starts it again, and only the deployment's account can restart
   the console. That limit is shared, so a local account that keeps spending it slows the operator's own sign-in; the
   unix socket removes that. In unix-socket mode the socket is 0600 in a directory only the deployment's account can enter, so another
-  account cannot connect at all.
+  account cannot connect at all. "Sign in on this computer" (issue #882) asks the host's desktop in a system window, and
+  only a person at that screen can press Allow: a local account or a job's container can make the window appear, and
+  each window is a refused row in the audit log once it is denied or left unanswered, but neither can answer it. So
+  press Allow only for a request you just made, with the code your page shows.
 - **The job container reaching loopback through the host gateway.** On Docker Desktop `host.docker.internal`
   reaches the host's loopback listeners, so a job may be able to open a connection to the console. The console
   refuses every request whose Host is `host.docker.internal`, `host.containers.internal` or

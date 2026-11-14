@@ -161,12 +161,22 @@ export const CODE_HINT = "The 8 characters `pi-dispatch-console link` prints. It
 const CODE_FORM = html`<form id="code-form" class="signin__form" autocomplete="off"${REVEAL}><div class="field"><label for="signin-code">${CODE_LABEL}</label><input id="signin-code" class="input input--code" name="code" type="text" inputmode="text" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" maxlength="32" placeholder="XXXX-XXXX" required aria-describedby="notice"><p class="signin__hint muted">${ui.withCode(CODE_HINT)}</p></div><button class="btn btn--primary btn--lg" type="submit">Sign in</button></form>`;
 
 /**
+ * Signing in by approving a window on the host (issue #882, approve-dialog.mjs): drawn only where this console can show
+ * one (`approve`), first, since it asks for nothing to be typed. The waiting line names the match code the host's window
+ * shows too, so the person can tell their own request from another (the script fills it in).
+ */
+export const APPROVE_LABEL = "Sign in on this computer";
+export const APPROVE_HINT = "This computer shows a window asking to let this browser in. No code or token is needed, and the browser then stays signed in until you sign out, so use it on a browser that is yours.";
+export const APPROVE_WAIT = "Allow it in the window this computer shows. The code there should be";
+const APPROVE_FORM = html`<form id="approve-form" class="signin__form" autocomplete="off"${REVEAL}><button class="btn btn--primary btn--lg" type="submit">${APPROVE_LABEL}</button><p class="signin__hint muted">${APPROVE_HINT}</p><p id="approve-wait" class="signin__hint" role="status" aria-live="polite" hidden>${APPROVE_WAIT} <b class="code" data-approve-match></b>.</p></form>`;
+
+/**
  * The sign-in panel: `notice` (see `noticeKey`), the console's session `limits` (`{ idleMinutes, maxHours }`, so the
  * ended notices state the limits it runs with) and where it `listen`s (`listenKey`). The forms and their lead-in are the
  * script's to reveal (see the header). `remember` draws the Remember choice (issue #849), only where the console would
  * remember this browser (`server.mjs` `rememberableHere`): never on a Windows host or over plain HTTP across a network.
  */
-export function signInContent({ notice = null, limits = {}, listen = null, next = undefined, arrival = false, remember = false } = {}) {
+export function signInContent({ notice = null, limits = {}, listen = null, next = undefined, arrival = false, remember = false, approve = false } = {}) {
   const ended = endedNotices({ idleMinutes: limitOf(limits?.idleMinutes), maxHours: limitOf(limits?.maxHours) });
   const entries = [...ENDED_REASONS.map((r) => [`ended-${r}`, ended[r]]), ...Object.entries(SIGN_IN_NOTICES)];
   const footer = LISTEN_FOOTERS[listenKey(listen)];
@@ -176,9 +186,10 @@ export function signInContent({ notice = null, limits = {}, listen = null, next 
 ${NO_SCRIPT}
 ${MARK}
 <h2>Sign in to the console</h2>
-<p class="muted"${REVEAL}>Type the sign-in code from your terminal, or paste a console token.</p>
+<p class="muted"${REVEAL}>${approve ? "Sign in on this computer, type the sign-in code from your terminal, or paste a console token." : "Type the sign-in code from your terminal, or paste a console token."}</p>
 ${noticeRegion(entries, noticeKey(notice))}
-${CODE_FORM}
+${approve ? html`${APPROVE_FORM}<p class="signin__or faint"${REVEAL}>or</p>
+` : null}${CODE_FORM}
 <p class="signin__or faint"${REVEAL}>or</p>
 <form id="login-form" class="signin__form" autocomplete="off"${REVEAL}><div class="field"><label for="token">Console token</label><input id="token" class="input input--code" name="token" type="password" autocomplete="off" spellcheck="false" required aria-describedby="notice"></div>${remember ? REMEMBER_CHOICE : null}<button class="btn btn--lg" type="submit">Sign in with the token</button></form>
 <div class="signin__help"><p class="signin__help-h">${SIGN_IN_HELP.heading}</p><p class="muted">${SIGN_IN_HELP.code}</p>${ui.cmd([...LINK_PRINTED])}<p class="muted">${SIGN_IN_HELP.here}</p>${ui.cmd([...CONSOLE_HERE])}<p class="muted">If that file is not there:</p>${ui.cmd([...CONSOLE_INSTALLED])}<p class="muted">On a global install: <span class="code">pi-dispatch-console link</span> and <span class="code">pi-dispatch console</span></p><p class="muted">Or in pi:</p>${ui.cmd([...PI_LINK])}<details><summary>Make a token instead</summary><p class="muted">On the host, with your own name in place of &lt;you&gt;. In a local install it is under <span class="code">./node_modules/.bin/</span>:</p>${ui.cmd([...TOKEN_ADD])}</details></div>
