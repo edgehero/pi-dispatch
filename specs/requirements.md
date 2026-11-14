@@ -1146,7 +1146,7 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   (`admin/test/write-plans.test.mjs`); given the panel's `r` while the shell's and the deployment's Valkeys disagree,
   the resume is refused and said in the footer (`admin/test/panel-audit-wiring.test.mjs`, "the panel's r on a
   two-Valkey disagreement", through index.ts's own wiring). Given `/dispatch insights 7d` with no `PI_CONSOLE_LISTEN`,
-  then it prints `http://127.0.0.1:4790/insights?range=7d` and says to start the console with `pi-dispatch-console
+  then it prints `http://localhost:4790/insights?range=7d` (since issue #882 a console on 127.0.0.1 or ::1 is printed as `localhost`, its bind unchanged) and says to start the console with `pi-dispatch-console
   serve` if it is not running; given a unix socket listen, then it prints the ssh tunnel hint with the path as one
   shell word; given an any-address listen (`0.0.0.0`, `[::]`) under PI_CONSOLE_BIND_PUBLIC=1, then it prints
   `<this host>` for the address; given port 0, then it prints no URL and says only the running console knows the
@@ -1221,6 +1221,36 @@ writes retain their existing interactive confirmation. This adds no unattended p
 
 ## REQ-CONSOLE-SECURITY
 
+- **AMENDED 2026-11-14 (#882, part 4), an address to type, a code to type, and remembered by default**: every command that
+  prints the console's address (`serve`'s banner, `link`, `open`, `/dispatch console`, `/dispatch insights`, doctor's line)
+  prints a console on 127.0.0.1 or ::1 as `http://pi-dispatch.localhost:<port>/` (`CONSOLE_HOSTNAME`, `listenUrl`,
+  `consoleProbeTarget`'s `url`), a loopback name (RFC 6761) whose cookies no other local server is sent; where gateway
+  enrollment names a `consoleOrigin`, that origin instead, since the console takes a sign-in from it alone
+  (`enrolledConsoleOrigin`). The bind and the health probe stay IP literals, so (a) is UNCHANGED, checked; (b) gains
+  exactly that one name beside `127.0.0.1`, `localhost` and `[::1]`, for the Host check, the remember rule and the
+  footer, and no other `.localhost` name. Doctor warns while the console answers and this host does not resolve the
+  name to its own loopback. `pi-dispatch-console link` and an asked-for `/dispatch console --link` make, beside the
+  link, a short code to type on the sign-in page: 8 characters of Crockford's base32 (40 bits), shown `K7QX-9M2D`, read
+  case- and dash-insensitively with O read as 0 and I and L as 1, single use by the same file store and `unlinkSync`
+  race as the link, filed under scrypt of its canonical spelling and a random per-drop salt, for 5 minutes, through the
+  one global sign-in limiter (5 a minute after a burst of 10: at most 35 guesses in a code's life per console process,
+  the bucket being the process's), and audited like a link, its `login-code` rows saying which kind ((h), (i),
+  `INT-CONSOLE-AUDIT-LOG`). The two are separate credentials, each single use. The drop's 0700, which the console
+  already refuses to use when it is open to other accounts (a), and the scrypt names (about 30 ms a guess) guard the
+  files against an offline search of 2^40. A sign-in with a credential the host made (a link or a code) creates the
+  remembered device at once, wherever remembering is allowed at all (the #849 amendment below), at the 32-browser cap
+  ending the least recently used one of that token's person as `removed`, with a `device-ended` row; the token form's
+  Remember box starts ticked, and a token whose role no browser may remember (`agent`) signs in with it ticked as an
+  ordinary session and is told so on its first page. Viewer invitations and `agent` tokens are never remembered, as
+  before, and `OQ-058` is UNCHANGED, checked: every sign-in still starts from a credential the host made. Tests:
+  `admin/test/console-login-codes.test.mjs` (the short code's tests), `admin/test/console-remembered.test.mjs` (the
+  issue #882 tests, the kept session's and the cap's among them), `admin/test/console-server.test.mjs` ("the login
+  routes answer every status NOTICE_OF_STATUS maps ...", "the console's own name, pi-dispatch.localhost, is a loopback
+  name ..."), `admin/test/console-listen.test.mjs`, `admin/test/console-cli.test.mjs` ("link prints a one-time URL
+  ...", "an enrolled console origin is the address link prints ..."), `admin/test/console-command.test.mjs`,
+  `worker/test/console-devices.test.mjs` ("makeRoom ..."), `worker/test/doctor-console.test.mjs` ("consoleNameChecks
+  ...").
+
 - **ADOPTED AND IMPLEMENTED 2026-11-02 (#754)**: `REQ-SANDBOX-BROWSER-GATEWAY` permits only a separate
   process, hostname and tab for an existing sandbox's terminal. Console launch/step-up actions are person-only,
   require the original live operator session and fresh same-token authentication, and disclose no durable token,
@@ -1255,7 +1285,7 @@ writes retain their existing interactive confirmation. This adds no unattended p
   session and session-person guards as an action; it remains available in read-only mode and creates neither
   a ticket nor an audit row. This explicit read exception grants no write capability or delivery authority.
 
-- **AMENDED 2026-11-08 (#849 part 4), remembered devices**: on top of the sessions below, a person may ask the console to remember a browser. A remembered browser holds one credential, the device cookie, and survives idle periods, browser restarts and console restarts until it is signed out, removed, or its token is revoked, rotated, changes role or `sessions end-all` runs, or until its record goes unused for 400 days (longer than any browser keeps the cookie, so what is presented then is a copy and is ended as removed). A device is created only by a sign-in with a token or link that has just proved itself (within 10 minutes), for an `operator` or a `viewer` (an allowlist), over loopback, a unix socket reached as `localhost` or an enrolled HTTPS origin, and never for a viewer invitation. Restoring one is a sign-in: it has its audit row first. Non-remembered sessions keep every limit below (UNCHANGED, checked). `INT-CONSOLE-DEVICES-STORE`.
+- **AMENDED 2026-11-08 (#849 part 4), remembered devices**: on top of the sessions below, a person may ask the console to remember a browser. A remembered browser holds one credential, the device cookie, and survives idle periods, browser restarts and console restarts until it is signed out, removed, or its token is revoked, rotated, changes role or `sessions end-all` runs, or until its record goes unused for 400 days (longer than any browser keeps the cookie, so what is presented then is a copy and is ended as removed). A device is created only by a sign-in with a token or link that has just proved itself (within 10 minutes), for an `operator` or a `viewer` (an allowlist), over loopback, a unix socket reached as `localhost` or an enrolled HTTPS origin, and never for a viewer invitation. AMENDED 2026-11-14 (#882): a sign-in with a link or a short code the host made creates it at once, without a box, wherever those rules allow one; a token's sign-in creates it when its box, ticked to start with, is left ticked. Restoring one is a sign-in: it has its audit row first. Non-remembered sessions keep every limit below (UNCHANGED, checked). `INT-CONSOLE-DEVICES-STORE`.
 
 - **Statement**: The operator console (`pi-dispatch-console serve`, `DES-OPERATOR-CONSOLE`) shall be a separate
   process that listens only on loopback or on a 0600 unix socket unless the operator opts into a public bind; shall
@@ -1321,7 +1351,7 @@ writes retain their existing interactive confirmation. This adds no unattended p
     ("a token kept for a role this console does not know signs in nowhere: its secret and its one-time code are both
     401 (issue #761)").
   - (b) **The Host hostname allowlist.** Given a request whose Host hostname is not `127.0.0.1`, `localhost`,
-    `[::1]` or a name in `PI_CONSOLE_ALLOWED_HOSTS` (`evil.test`, `127.0.0.1.nip.io`, `host.docker.internal`,
+    `[::1]`, since issue #882 `pi-dispatch.localhost` (the console's printed name, and no other `.localhost` name), or a name in `PI_CONSOLE_ALLOWED_HOSTS` (`evil.test`, `127.0.0.1.nip.io`, `host.docker.internal`,
     `host.containers.internal`, `gateway.docker.internal`), it is answered 421 and its handler never runs; given
     `localhost:8080` (a tunnel on another port), it is accepted; given `PI_CONSOLE_ALLOWED_HOSTS` naming a
     container gateway name, the console refuses to start. AMENDED 2026-10-24 (#737 PR 2): three routes marked
@@ -1361,7 +1391,7 @@ writes retain their existing interactive confirmation. This adds no unattended p
     one stylesheet and one script, both from the console's own files, an inline SVG sprite whose references stay in
     the page ((m)), and a theme stamped by the server. A real browser now holds every page to the CSP as well:
     `REQ-OPERATOR-CONSOLE-SCREENS` (o) fails on any violation it reports.
-  - (f) **No token, code or device secret anywhere it could leak.** Given a full test session (token login, one-time code login, a remembered device,
+  - (f) **No token, code or device secret anywhere it could leak.** Given a full test session (token login, one-time code login (since #882 a typed short code's too, in any of the spellings it is read in), a remembered device,
     a write, a refusal, logout, the CLI's token commands), no captured log line, audit row or response body
     contains the test token, the test code, the session cookie's value, or the `pdc_` prefix outside the one line
     `token add` and `token rotate` print; `token list` prints names and roles only. A device secret reaches no page, log
@@ -1427,7 +1457,9 @@ writes retain their existing interactive confirmation. This adds no unattended p
     changed, or `sessions end-all` run, its next request is unauthenticated; login issues a new session id each
     time (since issue #849, but for a one-time link for the person the browser's live session already belongs to,
     which keeps that session: no new id is issued, so nothing a planted cookie names is promoted either); the login rate limit answers 429 past its burst and every failed login is audited; a one-time login code
-    works once, also under two concurrent consumers, and not after 60 seconds; the tokens file is in the pi
+    works once, also under two concurrent consumers, and not after 60 seconds (since #882 a short code works once and not
+    after 5 minutes, each kind held to its own life, so a file claiming a longer one is refused, and a link and the
+    code printed beside it are two credentials, each single use); the tokens file is in the pi
     extension's `guardedFiles()`. Tests: `admin/test/console-sessions.test.mjs`,
     `admin/test/write-guard.test.mjs`, `admin/test/write-guard.wired.test.mjs`, `admin/test/write-guard.cwd.test.mjs`,
     `admin/test/console-login-codes.test.mjs`, `admin/test/console-guards.test.mjs`,
@@ -2914,9 +2946,11 @@ writes retain their existing interactive confirmation. This adds no unattended p
     `pi-dispatch-console sessions end-all` as the way to end it for good (such a browser is refused in memory only where this process holds its session).
     A person who ticked the box and was not remembered is told so on the next page, with what to do. The
     Configuration page links it, and the top bar says "remembered" beside the role on a remembered browser. The sign-in form's Remember this trusted
-    device box, never ticked, is drawn only where the console would remember the browser (never on a Windows host, never over plain HTTP across a
-    network), and a fresh sign-in that did not ask is offered it once, on its next page, while it can still be remembered (10 minutes): never in a
-    panel, never to an `agent` token or a viewer invitation.
+    device box, ticked to start with since issue #882 (it was never ticked), is drawn only where the console would remember the browser (never on a Windows host, never over plain HTTP across a
+    network); an `agent` token posted with it ticked signs in as an ordinary session and its first page says it was not remembered (#849 refused it 403, which the ticked box would have made every agent sign-in); a token sign-in that left it unticked is offered it once, on its next page, while it can still be remembered (10 minutes): never in a
+    panel, never to an `agent` token or a viewer invitation. AMENDED 2026-11-14 (#882): a sign-in with a link or a code the host made is remembered at
+    once wherever the box would be drawn, and is never offered it; one the store could not remember is told so on its next page, as a ticked box is. At
+    the cap of 32 such a sign-in forgets the person's least recently used browser in its place, where a ticked box at the cap is told to remove one.
   - (g7) **One project** (`/config/project?id=`, page `project`, viewer, not live; #751). ProjectDetail validates
     PROJECT_ID_RE. An unknown id in a successfully read file yields the dedicated no-project 404; an unread file
     yields an unavailable state. Configuration stays current, with its back link and Runs filtered to the id.
@@ -3404,7 +3438,11 @@ writes retain their existing interactive confirmation. This adds no unattended p
     page's `h1` and tab title naming the page ("One-time sign-in link", `LINK_PAGE_TITLE`), never what happens on it;
     without a script either page says first, in its card, that the console needs JavaScript to sign in, and shows
     nothing that cannot work (the token form, its lead-in and the link page's first state are drawn `hidden
-    data-reveal`, which the script reveals before anything else); a sign-in or a link's post that reaches nothing is
+    data-reveal`, which the script reveals before anything else; since issue #882 the sign-in page's Sign-in code form
+    and the rule between it and the token's form too); AMENDED 2026-11-14 (#882): the sign-in page offers a Sign-in
+    code field first, for the code `pi-dispatch-console link` prints, posted to `POST /login/typed-code`, whose 401 is
+    the page's own `code` notice ("That sign-in code did not work"), and the token form below it, its button the
+    secondary one, and its help answers "No code yet?" with `pi-dispatch-console link`, the command that prints one; its footer says the console answers at `pi-dispatch.localhost` when it listens on 127.0.0.1 or ::1; a sign-in that stops, a code's or a token's, says the stopped one's own sentence; a sign-in or a link's post that reaches nothing is
     posted again every 2 seconds for at most 30 posts or 60 seconds (`SIGN_IN_TRIES_MAX`, `SIGN_IN_RETRY_FOR_MS`),
     whichever comes first, and then the page drops the token or the code and says so in a notice of its own; a link's
     post the sign-in limiter refuses (429) leaves the link page in its first state under the rate notice, since the
@@ -8825,6 +8863,8 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-14 (#882, part 4, review round 1) | **`REQ-CONSOLE-SECURITY` AMENDED** again in its #882 amendment, with the owner's decision on the address: every command prints `pi-dispatch.localhost`, not `localhost`, so the device cookie lives on a name no other local server uses; where gateway enrollment names a `consoleOrigin`, that origin, since the console takes a sign-in from it alone (an enrolled `http://127.0.0.1:<port>` was refused at sign-in otherwise); (b) gains exactly that one name, so it is AMENDED where the first row said UNCHANGED; the short code's files are named by scrypt under a per-drop salt, CORRECTING the plain sha256 a listing could be searched against; the 35 guesses are per console process; an `agent` token signs in with the ticked box, CORRECTING a 403 that locked it out of the form; at the cap a host-made sign-in forgets the least recently used browser. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: (g9) the agent's ticked box and the cap; the sign-in pages' help leads with the command that prints a code, and a stopped attempt says its own sentence. UNCHANGED, checked: (a), (c), (d), (e), (g), (h); `OQ-058`. |
+| 2026-11-14 (#882, part 4) | An address to type, a code to type, and remembered by default. **`REQ-CONSOLE-SECURITY` AMENDED**: a new amendment (the printed address is `localhost` for 127.0.0.1 and ::1, the bind and the probe unchanged; the short code: 8 characters of Crockford's base32, 5 minutes, single use, filed under its sha256, behind the one global limiter, audited with its kind; a host-made link or code remembers the browser at once where remembering is allowed, the token form's box starts ticked); the #849 remembered-devices amendment gains how a device is made since; (f) covers the short code in every spelling it is read in; (i) holds the short code to 5 minutes and single use, each kind to its own life. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: (g9), the box starts ticked and a host-made sign-in is remembered rather than offered; the sign-in pages gain the Sign-in code field, its route and notice, and the localhost footer. UNCHANGED, checked: (a) and (b) (the bind, the Host allowlist, which already holds `localhost`), (c), (d) (the new route is a sign-in route, exempt as `/login/code` is), (e), (g), (h); `OQ-058` (every sign-in still starts from a credential the host made). |
 | 2026-11-14 (#879, review of PR #884) | **`REQ-DEPLOYMENT-BOOTSTRAP` CORRECTED**, the `.env.example` clause: commenting out `GITHUB_AUTH_SOURCE=gh` was said to change nothing else; it changes what a new scaffold's receiver does (no GitHub route until a GitHub rule exists at its start), which the receiver, the console and doctor each now say. The guides' `.env` examples follow the clause's #392 rule too: an assignment in a fenced block of `docs/` or a README keeps its comment on a line of its own (`docs/polling.md` had `GITHUB_INGEST=poll   # ...`, which systemd keeps as part of the value, so a copied line made every receiver command refuse), held by a test in `worker/test/env-docs.test.mjs`; the seven guides that had such lines are rewritten. **`REQ-ADMIN-VIA-PI-EXTENSION` AMENDED**, one parenthesis: the live reload of `triggers.json` has the one exception `DES-TRIGGER-OUTSIDE-PI` now records. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**: (g2) where a GitHub trigger added now would be the first to make the receiver serve GitHub, by the receiver's own rule (`githubServedByServe`) asked of the file and the `.env`, the forge field says to restart the receiver once it is added; (g6) an armed forge whose live receivers report but none serves it says a restart takes its webhooks, where it said to check a service that was up. The "#879, the trigger editor" and "#879, the console" rows below are CORRECTED in place: their tests cover every setting with an unset or `gh` source, not every auth source; a source the loaders refuse is doctor's to report. The setup wizard's receiver-container sentence no longer says `WEBHOOK_SECRET` is always needed. **`REQ-CONSOLE-SECURITY` UNCHANGED, checked**: the new sentences are fixed words and show no value. **Code evidence**: admin/src/read-model.mjs -> readTriggerEditor (githubRestart); admin/src/console/panels/trigger.mjs -> FORGE_RESTART_NOTE; admin/src/console/panels/connections.mjs -> RESTART_TO_SERVE; admin/src/setup-wizard.ts; worker/test/env-docs.test.mjs; admin/test/trigger-detail-read.test.mjs; admin/test/connections-receiver.test.mjs; admin/test/fixtures/console-ledger/ConnectionsScreen.json; admin/test/fixtures/console-ledger/TriggerEditor.json. |
 | 2026-11-14 (#879, the trigger editor) | **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, (g2) Add a trigger: the editor offers the forges whose events reach the deployment. GitHub was offered only when `WEBHOOK_SECRET` was set, so a deployment that polls GitHub (the shape #879 is about) could not add a GitHub trigger from the console. It is now offered where a GitHub trigger written now would fire (`githubTriggerTransports`, `worker/src/config.mjs`): by its webhook where `serve` would start serving GitHub once the rule is written (every `GITHUB_INGEST` word but `poll`, beside a nonblank secret), or by the poller under `poll` or `both`. The rule asks one rule ahead of the receiver's `servesGithub` on purpose: with `GITHUB_INGEST` unset a deployment's first GitHub rule is what makes `serve` serve GitHub, so "served now" would never offer it. A test holds the rule and the editor's offer to the receiver's real loaders (`loadReceiverConfig` and `loadPollerConfig` with the new rule written) over every `GITHUB_INGEST` word, every secret shape, and an unset or `gh` auth source (CORRECTED in review, PR #884: it said every auth source). A source the loaders refuse, an unknown word, `pat` without its token or an incomplete App, refuses every receiver command whatever the editor offers; doctor reports it, and the offer does not read it, as the secret-only offer before it did not. A `GITHUB_INGEST` every receiver command refuses offers no GitHub and the forge field says why (`forgeProblem`, computed before and drawn nowhere, is now that field's hint, so the older sentence for deployment metadata read incompletely shows there too), and the field's hints say a forge is offered where its events arrive. The other forges' offer is UNCHANGED, checked (their webhook secret). The ConnectionsScreen and TriggerEditor design cards say the same (`design/tools/gen_config2.py`, rebuilt), and their ledgers hold the cards' new words to the console's goldens, two of them new (`panels/connections-github-polled.operator`, `panels/connections-github-ingest-refused.operator`). **Code evidence**: worker/src/config.mjs -> githubTriggerTransports; admin/src/read-model.mjs -> readTriggerEditor; admin/src/console/panels/trigger.mjs -> FORGE_OFFER_HINT, FORGE_NONE_HINT; admin/test/trigger-detail-read.test.mjs; admin/test/fixtures/console-ledger/ConnectionsScreen.json; admin/test/fixtures/console-ledger/TriggerEditor.json. |
 | 2026-11-14 (#879, the console) | **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, (g6) Connections: GitHub's enablement follows the receiver's rule with `GITHUB_INGEST` first, held to the real loader by a test over every setting, with and without a GitHub rule, and with an unset or `gh` source; under `poll` GitHub's row reads polled rather than unconfigured and keeps its auth, polling and fire authority; under `webhook` polling reads off, as the poller refuses to start; and a `GITHUB_INGEST` every receiver command refuses takes the missing-secret problem's place, alone. The Deployment environment table gains the `GITHUB_INGEST` row (its three words, empty read as not set). The rest of (g6) UNCHANGED, checked. **`REQ-CONSOLE-SECURITY` UNCHANGED, checked**: the new row and problem show no value, and the agent's view carries the closed word only. **Code evidence**: admin/src/connections-view.mjs -> CONNECTION_ENV_TYPES, FORGE_ACTIVATION_KEYS, forgeConnections, connectionsProblems, modelConnections; admin/src/console/panels/connections.mjs -> forgeRow; admin/test/connections-view.test.mjs; admin/test/connections-panels.test.mjs. |

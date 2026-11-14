@@ -40,7 +40,8 @@
  *     only with this script (the token form, the link page's states) hidden with `data-reveal`, so a browser without
  *     script shows the noscript sentence alone.
  *   - `login`: submits the token as JSON (a form-encoded POST is refused by the server) and clears the field at once;
- *     the token is held in this closure only, for the retries. The answer's status picks one notice
+ *     the token is held in this closure only, for the retries. Since issue #882 the Sign-in code form beside it does the
+ *     same with the code as typed, to `/login/typed-code`; either submit is an attempt. The answer's status picks one notice
  *     (`NOTICE_OF_STATUS`; any other refusal is `other`, with the server's sentence through `textContent`), shown alone
  *     in `#notice`. A post that reaches nothing shows `unreachable` and is posted again every `RETRY_MS`, so the page
  *     stays instead of turning into the browser's error page, until any answer comes or the attempt has made
@@ -225,6 +226,8 @@ export const SIGN_IN_RETRY_FOR_MS = 60_000;
 export const SIGN_IN_GAVE_UP = Object.freeze({
   title: "Console not reachable",
   login: "Nothing more is sent, and this page no longer holds the token. Paste it and press Sign in again once the console is back.",
+  // Issue #882: a typed code lasts 5 minutes, so it may still work: typed again, or a new one made, once the console is back.
+  code: "Nothing more is sent, and this page no longer holds the code. Type it again once the console is back; a code lasts 5 minutes.",
   link: "Nothing more is sent, and a link lasts 60 seconds, so this one has expired. Ask for a new one once the console is back.",
 });
 
@@ -382,12 +385,14 @@ export const CONSOLE_SCRIPT = `"use strict";
       if (!from || typeof from.cloneNode !== "function" || typeof box.appendChild !== "function") return;
       mine = from.cloneNode(true);
       mine.setAttribute("data-notice", "gaveup");
-      var t = mine.querySelector(".banner__t");
-      var s = mine.querySelector(".banner__s");
-      if (t) t.textContent = SIGN_IN_GAVE_UP.title;
-      if (s) s.textContent = SIGN_IN_GAVE_UP[kind];
       box.appendChild(mine);
     }
+    // Its words on every call, not only when it is made (issue #882, review): a stopped code and then a stopped token on one page are two
+    // attempts, and the second must not be told the first one's sentence.
+    var t = mine.querySelector(".banner__t");
+    var s = mine.querySelector(".banner__s");
+    if (t) t.textContent = SIGN_IN_GAVE_UP.title;
+    if (s) s.textContent = SIGN_IN_GAVE_UP[kind];
     showOnly("gaveup");
   }
   // What works only with this script (the sign-in form, the link page's states) is drawn hidden with data-reveal, so a
@@ -400,7 +405,10 @@ export const CONSOLE_SCRIPT = `"use strict";
     revealScripted();
     var form = document.getElementById("login-form");
     var input = document.getElementById("token");
-    // Each submit is an attempt; a retry belongs to its attempt, so a new submit (another token) ends the old loop, and
+    // Issue #882: the Sign-in code form, beside the token's. Each posts what it holds to its own route, so a refusal selects its own notice.
+    var codeForm = document.getElementById("code-form");
+    var codeInput = document.getElementById("signin-code");
+    // Each submit is an attempt, of either form; a retry belongs to its attempt, so a new submit (another token or code) ends the old loop, and
     // an older attempt's answer, arriving late, does nothing.
     var attempt = 0;
     var retrying = null;
@@ -408,31 +416,39 @@ export const CONSOLE_SCRIPT = `"use strict";
     var loginNext = signInPanel && typeof signInPanel.getAttribute === "function" ? signInPanel.getAttribute("data-next") : null;
     // The Remember choice (issue #849), drawn only where the console would remember this browser; found by name, so it needs no id.
     var rememberBox = form && typeof form.querySelector === "function" ? form.querySelector('input[name="remember"]') : null;
-    // The current attempt's token, for its retries alone: dropped once the attempt is answered or has stopped. With it, whether it asked to be remembered.
+    // The current attempt's route and body (the token or the code, and whether it asked to be remembered), for its retries alone: dropped once
+    // the attempt is answered or has stopped.
     var held = null;
-    var heldRemember = false;
+    var heldRoute = "/login";
     var stopLogin = function () {
       held = null;
       if (input) input.value = "";
-      gaveUp("login");
+      if (codeInput) codeInput.value = "";
+      gaveUp(heldRoute === "/login" ? "login" : "code");
     };
     var signIn = function (mine, tries, from) {
       if (mine !== attempt) return;
       if (!mayPost(tries, from, nowMs())) return stopLogin();
-      var asked = { token: held };
-      if (loginNext !== null) asked.next = loginNext;
-      if (heldRemember) asked.remember = true;
-      post("/login", asked).then(function (r) {
+      post(heldRoute, held).then(function (r) {
         if (mine !== attempt) return;
         held = null;
         if (r.ok) location.assign(ownPage(r.body && r.body.next));
-        else refusedSignIn("/login", r);
+        else refusedSignIn(heldRoute, r);
       }, function () {
         if (mine !== attempt) return;
         if (!mayPost(tries + 1, from, nextAt())) return stopLogin();
         showOnly("unreachable");
         retrying = later(function () { retrying = null; signIn(mine, tries + 1, from); }, RETRY_MS);
       });
+    };
+    var start = function (route, body) {
+      if (loginNext !== null) body.next = loginNext;
+      held = body;
+      heldRoute = route;
+      attempt += 1;
+      if (retrying !== null && typeof clearTimeout === "function") clearTimeout(retrying);
+      retrying = null;
+      signIn(attempt, 0, nowMs());
     };
     // SameSite=Strict kept the cookie off the navigation that brought this browser here from another site, but this fetch carries it
     // (server.mjs getLogin). Anything but a 200 leaves the form exactly as it is.
@@ -444,13 +460,17 @@ export const CONSOLE_SCRIPT = `"use strict";
     if (form && input) form.addEventListener("submit", function (ev) {
       ev.preventDefault();
       // Out of the field at once, whatever the answer: the token stays in this closure for the retries alone.
-      held = input.value;
-      heldRemember = Boolean(rememberBox && rememberBox.checked);
+      var asked = { token: input.value };
+      if (rememberBox && rememberBox.checked) asked.remember = true;
       input.value = "";
-      attempt += 1;
-      if (retrying !== null && typeof clearTimeout === "function") clearTimeout(retrying);
-      retrying = null;
-      signIn(attempt, 0, nowMs());
+      start("/login", asked);
+    });
+    // The code as typed: the server reads it the forgiving way (case, dashes and the letters people mistake for digits), so this sends it as it is.
+    if (codeForm && codeInput) codeForm.addEventListener("submit", function (ev) {
+      ev.preventDefault();
+      var typed = codeInput.value;
+      codeInput.value = "";
+      start("/login/typed-code", { code: typed });
     });
   } else if (page === "login-code") {
     revealScripted();

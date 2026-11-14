@@ -1127,10 +1127,11 @@ const DRAW = {
   },
   // SignIn: why the last session ended, each reason; each refusal, and one no notice names (the server's sentence, as
   // the script sets it); the console out of reach.
-  ...Object.fromEntries(ENDED_REASONS.map((r) => [`login-ended-${r}.anonymous`, () => loginPage({ theme: null, notice: r, limits: LIMITS, listen: "tcp" })])),
-  ...Object.fromEntries(["wrong", "rate", "tokens", "audit"].map((k) => [`login-refused-${k}.anonymous`, () => loginPage({ theme: null, notice: k, limits: LIMITS, listen: "tcp" })])),
-  "login-refused-other.anonymous": () => noticeText(String(loginPage({ theme: null, notice: "other", limits: LIMITS, listen: "tcp" })), OTHER_REFUSAL),
-  "login-unreachable.anonymous": () => loginPage({ theme: null, notice: "unreachable", limits: LIMITS, listen: "tcp" }),
+  // `localhost`: the default console's bind, 127.0.0.1, as the server words it since issue #882.
+  ...Object.fromEntries(ENDED_REASONS.map((r) => [`login-ended-${r}.anonymous`, () => loginPage({ theme: null, notice: r, limits: LIMITS, listen: "localhost" })])),
+  ...Object.fromEntries(["wrong", "code", "rate", "tokens", "audit"].map((k) => [`login-refused-${k}.anonymous`, () => loginPage({ theme: null, notice: k, limits: LIMITS, listen: "localhost" })])),
+  "login-refused-other.anonymous": () => noticeText(String(loginPage({ theme: null, notice: "other", limits: LIMITS, listen: "localhost" })), OTHER_REFUSAL),
+  "login-unreachable.anonymous": () => loginPage({ theme: null, notice: "unreachable", limits: LIMITS, listen: "localhost" }),
   // AccessStates: the one-time link's other two states; then each notice the link page can show (`LINK_NOTICES`): a
   // refusal is the used state with the notice that says why, except too many attempts, which the console answers
   // before it reads the code, so the link is not spent and the page keeps waiting; the console out of reach keeps

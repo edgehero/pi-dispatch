@@ -139,7 +139,7 @@ export async function renderStatic() {
   const err = (opts) => errorPage({ theme: null, readOnly: false, ...opts });
   const draws = {
     // A default console listens on loopback, where a browser may be remembered (issue #849), so its sign-in page offers it.
-    "login.anonymous": () => ({ status: 200, html: loginPage({ theme: null, notice: null, limits, listen: "tcp", remember: true }) }),
+    "login.anonymous": () => ({ status: 200, html: loginPage({ theme: null, notice: null, limits, listen: "localhost", remember: true }) }),
     "login-code.anonymous": () => ({ status: 200, html: loginCodePage({ theme: null }) }),
     "error-404.operator": () => err({ kind: "no-page", status: 404, session: STATIC_SESSIONS.operator }),
     "error-404.viewer": () => err({ kind: "no-page", status: 404, session: STATIC_SESSIONS.viewer }),

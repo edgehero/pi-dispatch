@@ -83,9 +83,14 @@ export function endedNotices({ idleMinutes = 60, maxHours = 12 } = {}) {
  * NO NOTICE FOR A USED LINK. A link's own refusal (the 401 of `/login/code`) is said by the link page's `used` state,
  * whole ("This sign-in link is used, expired or unknown", with the commands for a new one), and `/login` never answers a
  * link (its 401 is `wrong`), so a `link` notice was drawn on the sign-in page and never shown. `NOTICE_OF_STATUS` maps that 401 to no notice instead.
+ *
+ * A TYPED CODE'S NOTICE IS THE SIGN-IN PAGE'S (issue #882): the Sign-in code field posts to `/login/typed-code`, whose
+ * 401 is `code`. It says used, expired and mistyped in one breath, since the server cannot tell an unknown code from a
+ * mistyped one, and an expired one only while its file is still there.
  */
 export const SIGN_IN_NOTICES = Object.freeze({
   wrong: notice("failed", "failed", "That token is not valid for this console", "Check that you copied all of it, or make a new one."),
+  code: notice("failed", "failed", "That sign-in code did not work", "It may be mistyped, used already or more than 5 minutes old. Run `pi-dispatch-console link` on the host for a new one."),
   rate: notice("attention", "clock", "Too many sign-in attempts", "Wait a minute and try again."),
   tokens: notice("failed", "config", "The console's tokens file cannot be used right now", "An operator should run `pi-dispatch doctor` on the host."),
   audit: notice("failed", "audit", "The audit log could not be written, so the sign-in was refused", "Check the console's log directory. Nothing else changed."),
@@ -101,4 +106,5 @@ export const SIGN_IN_NOTICES = Object.freeze({
 export const NOTICE_OF_STATUS = Object.freeze({
   "/login": Object.freeze({ 401: "wrong", 429: "rate", 503: "tokens", 500: "audit" }),
   "/login/code": Object.freeze({ 401: null, 429: "rate", 503: "tokens", 500: "audit" }),
+  "/login/typed-code": Object.freeze({ 401: "code", 429: "rate", 503: "tokens", 500: "audit" }),
 });

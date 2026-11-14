@@ -23,6 +23,7 @@ import { restartBannerHtml } from "../src/console/shell.mjs";
 const T0 = Date.UTC(2026, 9, 14, 12, 0, 0);
 const TOKEN = `pdc_${"t".repeat(43)}`;
 const CODE = "k".repeat(43);
+const SHORT = "K7QX9M2D";
 
 function fakeModules({ tokens = [{ name: "alice", role: "operator", sha256: "a".repeat(64), createdAt: "2026-10-01T00:00:00.000Z" }], kept = [], tokensRefusal = null, auditFails = false, verify = { ok: true, rows: 3, startsAt: null } } = {}) {
   const rows = [];
@@ -104,7 +105,7 @@ function fakeModules({ tokens = [{ name: "alice", role: "operator", sha256: "a".
     },
     loginCodes: {
       loginCodesDir: (p) => join(p, "..", "console-login-codes"),
-      mintLoginCode: (args) => (calls.push(["mint", args]), { code: CODE }),
+      mintLoginCode: (args) => (calls.push(["mint", args]), { code: CODE, ...(args.short ? { short: SHORT } : {}) }),
       consumeLoginCode: () => ({ refusal: "unknown" }),
     },
     confirm: { makeConfirmTickets: () => ({ issue: () => ({ ticket: "t", expiresAt: T0 + 300_000 }), redeem: () => ({ refusal: "no" }) }) },
@@ -191,23 +192,44 @@ test("a failed audit append after a CLI change is said loudly and exits 1; the t
 test("link prints a one-time URL with the code in the fragment, for a known name only", async () => {
   const r = await cli(["link", "--name", "alice"], { env: deployment({ PI_CONSOLE_LISTEN: "127.0.0.1:4790" }).env });
   assert.equal(r.code, 0);
-  assert.deepEqual(r.out, [`http://127.0.0.1:4790/login/code#${CODE}`]);
+  assert.deepEqual(r.out, [`http://pi-dispatch.localhost:4790/login/code#${CODE}`], "stdout is the link alone, as it always was");
   assert.equal(r.modules.rows[0].action, "login-code");
   assert.ok(!JSON.stringify(r.modules.rows).includes(CODE), "the audit row never holds the code");
+  // Issue #882: a short code to type beside it, each with its life, and one row saying both were made.
+  assert.deepEqual(r.err, ["open it within 60 seconds; it works once", "or type this sign-in code at http://pi-dispatch.localhost:4790/login within 5 minutes; it works once too: K7QX-9M2D"]);
+  assert.equal(r.modules.calls.find((c) => c[0] === "mint")[1].short, true);
+  assert.equal(r.modules.rows[0].kind, "link-and-short-code");
+  assert.ok(!JSON.stringify(r.modules.rows).includes(SHORT) && !JSON.stringify(r.modules.rows).includes("K7QX-9M2D"), "nor the short code");
+  const setup = await cli(["link", "--name", "alice", "--next", "/setup"], { env: deployment({ PI_CONSOLE_LISTEN: "127.0.0.1:4790" }).env });
+  assert.match(setup.err[1], /at http:\/\/pi-dispatch\.localhost:4790\/login\?next=\/setup within 5 minutes/, "the sign-in page that lands on /setup");
   assert.equal((await cli(["link", "--name", "nobody"])).code, 2);
   const unix = await cli(["link", "--name", "alice"], { env: deployment({ PI_CONSOLE_LISTEN: "unix:/tmp/pd.sock" }).env });
-  assert.match(unix.out[0], /^http:\/\/localhost:<the local port of your ssh -L tunnel>\/login\/code#/);
+  assert.match(unix.out[0], /^http:\/\/pi-dispatch\.localhost:<the local port of your ssh -L tunnel>\/login\/code#/);
 });
 
-test("link --port prints the link for the tunnel's local port on localhost, over tcp or a unix socket; a bad port mints nothing", async () => {
+test("an enrolled console origin is the address link prints its link and code for, as it is the one the write guard accepts (issue #882, review)", async () => {
+  const dep = deployment({ PI_CONSOLE_LISTEN: "127.0.0.1:4790" });
+  writeFileSync(join(dep.dir, "sandbox-gateways.json"), JSON.stringify({ version: 1, consoleOrigin: "http://127.0.0.1:4790", hosts: {} }), { mode: 0o600 });
+  const r = await cli(["link", "--name", "alice"], { env: dep.env, dir: dep.dir });
+  assert.equal(r.code, 0, r.err.join("\n"));
+  assert.deepEqual(r.out, [`http://127.0.0.1:4790/login/code#${CODE}`]);
+  assert.equal(r.err[1], "or type this sign-in code at http://127.0.0.1:4790/login within 5 minutes; it works once too: K7QX-9M2D");
+  // --port is the person's own tunnel, said on purpose: it wins.
+  assert.deepEqual((await cli(["link", "--name", "alice", "--port", "8080"], { env: dep.env, dir: dep.dir })).out, [`http://pi-dispatch.localhost:8080/login/code#${CODE}`]);
+  // An enrollment that cannot be read names no origin: the listen address, as with none.
+  writeFileSync(join(dep.dir, "sandbox-gateways.json"), "not json", { mode: 0o600 });
+  assert.deepEqual((await cli(["link", "--name", "alice"], { env: dep.env, dir: dep.dir })).out, [`http://pi-dispatch.localhost:4790/login/code#${CODE}`]);
+});
+
+test("link --port prints the link for the tunnel's local port at pi-dispatch.localhost, over tcp or a unix socket; a bad port mints nothing", async () => {
   for (const listen of ["127.0.0.1:4790", "unix:/tmp/pd.sock"]) {
     const r = await cli(["link", "--name", "alice", "--port", "8080"], { env: deployment({ PI_CONSOLE_LISTEN: listen }).env });
     assert.equal(r.code, 0, listen);
-    assert.deepEqual(r.out, [`http://localhost:8080/login/code#${CODE}`], listen);
+    assert.deepEqual(r.out, [`http://pi-dispatch.localhost:8080/login/code#${CODE}`], listen);
   }
-  assert.deepEqual((await cli(["link", "--name", "alice", "--port", "1"])).out, [`http://localhost:1/login/code#${CODE}`]);
-  assert.deepEqual((await cli(["link", "--name", "alice", "--port", "65535"])).out, [`http://localhost:65535/login/code#${CODE}`]);
-  assert.deepEqual((await cli(["link", "--name", "alice", "--port", "0080"])).out, [`http://localhost:80/login/code#${CODE}`], "the number, not the digits typed");
+  assert.deepEqual((await cli(["link", "--name", "alice", "--port", "1"])).out, [`http://pi-dispatch.localhost:1/login/code#${CODE}`]);
+  assert.deepEqual((await cli(["link", "--name", "alice", "--port", "65535"])).out, [`http://pi-dispatch.localhost:65535/login/code#${CODE}`]);
+  assert.deepEqual((await cli(["link", "--name", "alice", "--port", "0080"])).out, [`http://pi-dispatch.localhost:80/login/code#${CODE}`], "the number, not the digits typed");
   for (const bad of ["0", "65536", "99999", "123456", "abc", "80a", " 80", "-1", "8.0", "", "0x50"]) {
     // `--port=<v>`, so a value that starts with a dash reaches the rule rather than the parser's own refusal.
     const r = await cli(["link", "--name", "alice", `--port=${bad}`]);
@@ -228,14 +250,14 @@ test("--port on any command but link and open is refused before anything runs: i
     assert.deepEqual(r.err, ["pi-dispatch-console: --port is for link and open only"], argv.join(" "));
     assert.deepEqual([r.out, r.modules.calls, r.modules.rows], [[], [], []], `${argv.join(" ")}: nothing ran`);
   }
-  assert.match(USAGE, /^  link \[--name <name>\] \[--port <n>\] \[--next \/setup\] {2}a one-time sign-in link to pass along, valid 60 seconds$/m);
+  assert.match(USAGE, /^  link \[--name <name>\] \[--port <n>\] \[--next \/setup\] {2}a one-time sign-in link \(60 seconds\) and a code to type \(5 minutes\)$/m);
 });
 
 test("link needs no --name with exactly one operator, says why with none or several, and still refuses an empty one", async () => {
   const tokenOf = (name) => ({ name, role: "operator", sha256: "a".repeat(64), createdAt: "2026-10-01T00:00:00.000Z" });
   const sole = await cli(["link"], { env: deployment({ PI_CONSOLE_LISTEN: "127.0.0.1:4790" }).env });
   assert.equal(sole.code, 0);
-  assert.deepEqual(sole.out, [`http://127.0.0.1:4790/login/code#${CODE}`]);
+  assert.deepEqual(sole.out, [`http://pi-dispatch.localhost:4790/login/code#${CODE}`]);
   const none = await cli(["link"], { modules: fakeModules({ tokens: [] }) });
   assert.equal(none.code, 2);
   assert.match(none.err.join(" "), /no operator token yet/);
@@ -250,7 +272,7 @@ test("open: audit, then mint, hand the link to the browser, print no code, and p
   const r = await cli(["open", "--next", "/setup"], { env: deployment({ PI_CONSOLE_LISTEN: "127.0.0.1:4790" }).env, isTTY: false, isLocal: () => true, openLink: (url) => { opened.push(url); return {}; } });
   assert.equal(r.code, 0);
   assert.deepEqual(r.out, [], "no code on stdout");
-  assert.deepEqual(opened, [`http://127.0.0.1:4790/login/code#${CODE}&next=/setup`]);
+  assert.deepEqual(opened, [`http://pi-dispatch.localhost:4790/login/code#${CODE}&next=/setup`]);
   assert.equal(r.modules.rows.filter((row) => row.action === "login-code").length, 1);
 });
 
@@ -277,11 +299,11 @@ test("open: over SSH on a socket the printed link carries the tunnel's port, and
   modules.loginCodes.codePending = () => false;
   const r = await cli(["open"], { modules, env: deployment({ PI_CONSOLE_LISTEN: "unix:/tmp/pd.sock" }).env, isTTY: true, isLocal: () => false, enter, sleep: async () => {} });
   assert.equal(r.code, 0);
-  assert.deepEqual(r.out, [`http://localhost:4790/login/code#${CODE}`]);
+  assert.deepEqual(r.out, [`http://pi-dispatch.localhost:4790/login/code#${CODE}`]);
   const opened = [];
   const ported = await cli(["open", "--port", "8080"], { env: deployment({ PI_CONSOLE_LISTEN: "127.0.0.1:4790" }).env, isTTY: false, isLocal: () => true, openLink: (url) => { opened.push(url); return {}; } });
   assert.equal(ported.code, 0);
-  assert.deepEqual(opened, [`http://localhost:8080/login/code#${CODE}`]);
+  assert.deepEqual(opened, [`http://pi-dispatch.localhost:8080/login/code#${CODE}`]);
 });
 
 test("open and link name this deployment's own binary when it has one", async () => {
@@ -417,6 +439,23 @@ function get(port, path, host = `127.0.0.1:${port}`) {
   });
 }
 
+test("serve prints an enrolled console origin as its address, naming where it listens (issue #882, review)", async (t) => {
+  const dep = deployment();
+  writeFileSync(join(dep.dir, "sandbox-gateways.json"), JSON.stringify({ version: 1, consoleOrigin: "http://127.0.0.1:4790", hosts: {} }), { mode: 0o600 });
+  let stop;
+  const until = new Promise((resolve) => (stop = resolve));
+  t.after(() => stop());
+  let listening;
+  const up = new Promise((resolve) => (listening = resolve));
+  const out = [];
+  const running = runCli(["serve", "--deployment", dep.dir], { env: dep.env, modules: fakeModules(), now: () => T0, uid: process.geteuid?.(), out: (l) => out.push(l), err: () => {}, until, onListening: listening });
+  const server = await up;
+  assert.equal(out[0], `pi-dispatch console on http://127.0.0.1:4790/ (its address in sandbox-gateways.json; it listens on 127.0.0.1:${server.address().port})`);
+  assert.equal(out.length, 2, "no tunnel line: the enrollment names the address a browser uses");
+  stop();
+  assert.equal(await running, 0);
+});
+
 test("serve prints the URL and an ssh -L hint (never a token), answers, holds the lock against a second serve, and releases it", async (t) => {
   const dep = deployment();
   let stop;
@@ -431,9 +470,9 @@ test("serve prints the URL and an ssh -L hint (never a token), answers, holds th
   const running = runCli(["serve", "--deployment", dep.dir], { env: dep.env, modules, now: () => T0, uid: process.geteuid?.(), out: (l) => out.push(l), err: (l) => err.push(l), until, onListening: listening });
   const server = await up;
   const port = server.address().port;
-  assert.match(out[0], new RegExp(`^pi-dispatch console on http://127\\.0\\.0\\.1:${port}/$`));
+  assert.match(out[0], new RegExp(`^pi-dispatch console on http://pi-dispatch.localhost:${port}/$`));
   assert.match(out[1], new RegExp(`ssh -L ${port}:127\\.0\\.0\\.1:${port} <this host>`));
-  assert.equal(out[2], "sign in: paste a token (pi-dispatch-console token add --name <you> --role operator makes one), or open a one-time link: pi-dispatch-console link --name <you>", "how to get in, never a token");
+  assert.equal(out[2], "sign in: pi-dispatch-console link --name <you> prints a one-time link and a code to type; or paste a token (pi-dispatch-console token add --name <you> --role operator makes one)", "how to get in, never a token");
   assert.equal(out.length, 3);
   assert.ok(![...out, ...err].join("\n").includes("pdc_"));
   assert.equal(modules.rows.at(-1).action, "serve-started");
@@ -806,7 +845,7 @@ test("serve wires the hub's endedReason to the store's pure verdict, and a unix 
   const file = { version: 1, generation: 0, tokens: [] };
   assert.deepEqual(["a", "b", "c", "d"].map((id) => hubOpts.endedReason(id, file)), ["revoked", null, null, null]);
   assert.deepEqual(verdicts.map(([id, f]) => [id, f === file]), [["a", true], ["b", true], ["c", true], ["d", true]]);
-  assert.equal(out[2], "sign in: paste a token (pi-dispatch-console token add --name <you> --role operator makes one), or open a one-time link: pi-dispatch-console link --name <you> --port <your tunnel's local port>");
+  assert.equal(out[2], "sign in: pi-dispatch-console link --name <you> --port <your tunnel's local port> prints a one-time link and a code to type; or paste a token (pi-dispatch-console token add --name <you> --role operator makes one)");
   assert.equal(out.length, 3);
   stop();
   assert.equal(await running, 0);
@@ -1361,7 +1400,7 @@ test("the console's own command is what wires a person's trigger change, each re
 test("CLI setup destinations and grants reject misuse before any token or code write", async () => {
   const linked = await cli(["link", "--name", "alice", "--next", "/setup"], { env: deployment({ PI_CONSOLE_LISTEN: "127.0.0.1:4790" }).env });
   assert.equal(linked.code, 0);
-  assert.equal(linked.out[0], `http://127.0.0.1:4790/login/code#${CODE}&next=/setup`);
+  assert.equal(linked.out[0], `http://pi-dispatch.localhost:4790/login/code#${CODE}&next=/setup`);
   for (const argv of [["link", "--name", "alice", "--next", "https://evil.example"], ["link", "--name", "alice", "--next", "/runs"], ["token", "list", "--host-setup"], ["serve", "--next", "/setup"]]) {
     const res = await cli(argv, { until: Promise.resolve() });
     assert.equal(res.code, 2, argv.join(" "));

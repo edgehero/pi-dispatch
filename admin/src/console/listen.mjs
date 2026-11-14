@@ -17,6 +17,9 @@
 import * as nodeFs from "node:fs";
 import { BlockList, createConnection, isIPv4, isIPv6 } from "node:net";
 import { dirname, isAbsolute } from "node:path";
+import { CONSOLE_HOSTNAME } from "@edgehero/pi-dispatch/console-probe";
+
+export { CONSOLE_HOSTNAME };
 
 // `sun_path` sizes, NUL terminator included: 104 bytes on macOS and the BSDs, 108 on Linux. Other platforms get the
 // Linux figure, the larger, so a refusal there is never stricter than the kernel's.
@@ -77,10 +80,32 @@ export function parseListen(value, { bindPublic = false, platform = process.plat
   return { kind: "tcp", host, port: Number(portText) };
 }
 
-/** The URL a browser on this host opens for a TCP spec; null for a socket (the browser reaches it through a tunnel). */
+/**
+ * True for the two addresses a browser reaches as `localhost`, and as `pi-dispatch.localhost`: 127.0.0.1 and ::1, in any
+ * spelling. Another loopback address (127.0.0.2) is not one: no `localhost` name resolves to it, so a console bound there
+ * is printed by its number.
+ */
+export function isLocalhostAddress(address) {
+  if (isIPv4(address)) return address === "127.0.0.1";
+  if (!isIPv6(address)) return false;
+  try {
+    return new URL(`http://[${address}]/`).hostname === "[::1]";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The URL a browser on this host opens for a TCP spec; null for a socket (the browser reaches it through a tunnel).
+ * `pi-dispatch.localhost` (`CONSOLE_HOSTNAME`) for 127.0.0.1 and ::1 (issue #882): a name a person can read and type,
+ * loopback by RFC 6761, and the console's own, so its cookies go to no other local web server. ONLY THE PRINTED
+ * ADDRESS: the bind stays the IP literal (`parseListen` refuses a name), and so does the health probe, since what a name
+ * resolves to is a file's or a resolver's to decide.
+ */
 export function listenUrl(spec, port = spec.port) {
   if (spec.kind !== "tcp") return null;
-  return `http://${isIPv6(spec.host) ? `[${spec.host}]` : spec.host}:${port}/`;
+  const host = isLocalhostAddress(spec.host) ? CONSOLE_HOSTNAME : isIPv6(spec.host) ? `[${spec.host}]` : spec.host;
+  return `http://${host}:${port}/`;
 }
 
 /** Does something accept on the unix socket at `path`? A refusal or any error means nobody does. */

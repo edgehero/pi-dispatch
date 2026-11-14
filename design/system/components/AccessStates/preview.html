@@ -1,4 +1,4 @@
-<!-- @dsCard group="Access and audit" height=2140 width=1440 subtitle="The one-time link page in its five states, operator, viewer and read-only side by side, and the restart banner" -->
+<!-- @dsCard group="Access and audit" height=2460 width=1440 subtitle="The one-time link page in its five states, the sign-in code beside it, operator, viewer and read-only side by side, and the restart banner" -->
 <!doctype html>
 <html lang="en">
 <head>
@@ -33,6 +33,12 @@
 .ac-ta { min-height: 64px; }
 .ac-small { font-size: 12px; }
 .ac-row .cmd { background: var(--surface); }
+.ac-codes { align-items: stretch; }
+.ac-code { display: grid; align-content: start; gap: 10px; min-width: 0; }
+.ac-term { margin: 0; padding: 12px 14px; border-radius: var(--radius-md); background: var(--surface-2); font-family: var(--font-mono); font-size: 12px; line-height: 18px; white-space: pre-wrap; overflow-wrap: anywhere; color: var(--ink); }
+.ac-term__p { color: var(--ink-muted); }
+/* A remembered browser's avatar wears the ring the top bar gives it (the DevicesScreen card's). */
+.ac-code .who--remembered .avatar { box-shadow: 0 0 0 2px var(--surface), 0 0 0 4px var(--ink); }
 @media (max-width: 760px) { .ac-link { padding: var(--space-5); } .ac-link .tile { top: var(--space-5); right: var(--space-5); } }
 </style>
 <style data-ds-status>
@@ -50,7 +56,7 @@
 <a class="skip" href="#main">Skip to content</a>
 <main id="main" class="page">
 <div class="titlebar">
-  <div class="titlebar__lead"><h1>Access states</h1><p class="titlebar__sub">The one-time sign-in link, and what each role sees on the same page</p></div>
+  <div class="titlebar__lead"><h1>Access states</h1><p class="titlebar__sub">The one-time sign-in link and code, and what each role sees on the same page</p></div>
   
 </div>
 <div class="sect"><h2>One-time link</h2><span class="card__sub">/login/code, opened from pi or from pi-dispatch-console link</span></div>
@@ -87,6 +93,18 @@
 </section>
 </div>
 <p class="ac-noscript"><svg class="ic ic--sm" aria-hidden="true"><use href="#i-info"/></svg>Without JavaScript the sign-in page says only: <b>The console needs JavaScript to sign in.</b></p>
+<div class="sect"><h2>Sign-in code</h2><span class="card__sub">typed on /login, printed by pi-dispatch-console link beside the link</span></div>
+<div class="cards-2 ac-codes">
+<section class="card ac-code" aria-labelledby="ac-code-h"><div class="card__head"><h2 id="ac-code-h">A link and a code, from the host</h2></div>
+<pre class="ac-term"><span class="ac-term__p">$ ./node_modules/.bin/pi-dispatch-console link</span>
+http://pi-dispatch.localhost:4790/login/code#q3Vd…
+open it within 60 seconds; it works once
+or type this sign-in code at http://pi-dispatch.localhost:4790/login within 5 minutes; it works once too: <b>K7QX-9M2D</b></pre>
+<p class="muted ac-small">Each works once. The link is opened, the code is typed on the sign-in page, on this computer or another one through its tunnel.</p></section>
+<section class="card ac-code" aria-labelledby="ac-kept-h"><div class="card__head"><h2 id="ac-kept-h">Signed in, and remembered</h2></div>
+<div class="ac-who"><span class="who who--remembered"><span><b>ops</b><small>Operator, remembered</small></span><span class="avatar">op</span></span></div>
+<p class="muted ac-small">A link or a code the host made remembers the browser it signs in, without asking, wherever the console may remember one: at pi-dispatch.localhost, through an SSH tunnel, or at its HTTPS address. It stays signed in across idle time and restarts until it signs out. A viewer invitation and an agent token are never remembered.</p></section>
+</div>
 <div class="sect"><h2>What each role sees</h2><span class="card__sub">the same failed job and the same live run</span></div>
 <div class="cards-3 ac-roles"><section class="card ac-col" id="p-role-operator" data-panel aria-labelledby="ac-operator">
   <div class="card__head"><h2 id="ac-operator">Operator</h2></div>

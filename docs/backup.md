@@ -173,7 +173,8 @@ These are all regenerated or bounded, and copying them buys nothing:
   the console's tokens, and the pause windows, projects, scoped-limits and subscriptions files the panel and the
   console write) use the same shape, so if you keep one of them in the run history folder, a temp file it left behind
   goes the same way after an hour.
-- `console-login-codes/` beside the tokens file: one-time sign-in codes, each gone 60 seconds after it was made.
+- `console-login-codes/` beside the tokens file: one-time sign-in codes, each gone 60 seconds after it was made (a code
+  to type, 5 minutes), and `.short-code-salt`, which names the codes to type and is made again with the next one.
 - `<PI_LOGS_DIR>/sandbox-gateway-active/`: the sandbox gateway's journal of the attachments open right now, named by
   their process ids, so that a restarted gateway can close their audit rows. A copy describes processes that no longer
   exist.

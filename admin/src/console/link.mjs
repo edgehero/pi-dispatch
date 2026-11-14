@@ -8,10 +8,32 @@
  * the panel printed an address that did not answer, with nothing to say so, which is the silent failure this project
  * refuses. The probe stays bounded to this host's loopback or the socket (`consoleProbeTarget`).
  */
+import * as nodeFs from "node:fs";
 import { isIPv4 } from "node:net";
+import { isAbsolute, resolve as resolvePath } from "node:path";
 
+import { readSandboxGateways } from "../sandbox-gateways.mjs";
 import { DEFAULT_LISTEN } from "./config.mjs";
-import { listenUrl, parseListen } from "./listen.mjs";
+import { CONSOLE_HOSTNAME, listenUrl, parseListen } from "./listen.mjs";
+
+/**
+ * The console's address in its gateway enrollment (`sandbox-gateways.json`, `PI_SANDBOX_GATEWAYS_FILE`), or null when
+ * there is none or it cannot be read (issue #882, review). Where one is enrolled it IS the console's canonical origin:
+ * the write guard accepts that exact Origin and no other (`guards.mjs` `originRefusal`), so a link or a code printed
+ * for any other address would be refused at sign-in. Every printer prefers it. The file is found as `consoleConfig`
+ * finds it, `dir` being the deployment folder; a relative path with no folder known is no enrollment known here.
+ */
+export function enrolledConsoleOrigin({ env, dir = null, fs = nodeFs, uid = process.geteuid?.(), platform = process.platform } = {}) {
+  const named = env?.PI_SANDBOX_GATEWAYS_FILE || "sandbox-gateways.json";
+  const path = isAbsolute(named) ? named : typeof dir === "string" && dir !== "" ? resolvePath(dir, named) : null;
+  if (path === null) return null;
+  try {
+    const read = readSandboxGateways(path, { fs, uid, platform });
+    return typeof read.config?.consoleOrigin === "string" ? read.config.consoleOrigin : null;
+  } catch {
+    return null;
+  }
+}
 
 /** True for the any-address binds, `0.0.0.0` and `::` in any spelling (`[::]`, `0:0:0:0:0:0:0:0`, `::0`). */
 export function isUnspecified(host) {
@@ -37,12 +59,15 @@ export function shellWord(text) {
  * TCP listener (`anyHost` set when it binds every address: the URL then names `<this host>`, since `http://0.0.0.0`
  * is no address a browser elsewhere can open), `{ socket, path }` for a unix socket (reach it through a tunnel),
  * `{ ephemeral: true }` for port 0 (the OS picks the port at bind, so only the running console knows it), or
- * `{ refusal }` for a `PI_CONSOLE_LISTEN` the console would refuse or this line cannot print.
+ * `{ refusal }` for a `PI_CONSOLE_LISTEN` the console would refuse or this line cannot print. With `origin`, the
+ * console's enrolled origin (issue #882), `{ url, enrolled: true }` on it.
  */
-export function consolePageUrl(env, path, { platform = process.platform } = {}) {
+export function consolePageUrl(env, path, { platform = process.platform, origin = null } = {}) {
   const declared = String(env?.PI_CONSOLE_LISTEN ?? "").trim();
   const listen = parseListen(declared || DEFAULT_LISTEN, { bindPublic: env?.PI_CONSOLE_BIND_PUBLIC === "1", platform });
   if (listen.refusal) return { refusal: listen.refusal };
+  // An enrolled console origin is where a browser must open it (`enrolledConsoleOrigin`), whatever the bind.
+  if (typeof origin === "string" && origin !== "") return { url: `${origin}/${path}`, enrolled: true, defaulted: false };
   if (listen.kind === "unix") {
     // Control bytes are refused rather than quoted: inside quotes they still reach the terminal the line is shown in.
     if (/[\u0000-\u001f\u007f]/.test(listen.path)) return { refusal: "PI_CONSOLE_LISTEN unix socket path holds a control character; choose a plain path" };
@@ -69,7 +94,8 @@ export const CONSOLE_START_HINT = `if the console is not running, ${CONSOLE_STAR
 export function consolePageLines(env, path, opts) {
   const at = consolePageUrl(env, path, opts);
   if (at.refusal) return [`the console's address is not usable: ${at.refusal}`, `fix PI_CONSOLE_LISTEN in the deployment's .env, start the console with pi-dispatch-console serve, and open /${path}`];
-  if (at.socket) return [`the console listens on the unix socket ${at.socket}: ssh -L 4790:${shellWord(at.socket)} <this host>, then open http://localhost:4790/${path}`, CONSOLE_START_HINT];
+  if (at.enrolled) return [at.url, `that is the console's address in its gateway enrollment (sandbox-gateways.json); ${CONSOLE_START_HINT}`];
+  if (at.socket) return [`the console listens on the unix socket ${at.socket}: ssh -L 4790:${shellWord(at.socket)} <this host>, then open http://${CONSOLE_HOSTNAME}:4790/${path}`, CONSOLE_START_HINT];
   if (at.ephemeral) return [`the console listens on a port the OS picks (PI_CONSOLE_LISTEN port 0), so its address is not known here: pi-dispatch-console serve prints it; open /${path} there`, CONSOLE_START_HINT];
   if (at.anyHost) return [at.url, `the console binds every address of this host, so open it by this host's name or address; ${CONSOLE_START_HINT}`];
   return [at.url, at.defaulted ? `PI_CONSOLE_LISTEN is not set, so that is the console's default address; ${CONSOLE_START_HINT}` : CONSOLE_START_HINT];

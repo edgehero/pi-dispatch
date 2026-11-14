@@ -253,8 +253,15 @@ function allRecords(dir, { fs, uid }) {
  * what lets every existing way of ending a sign-in also end this: revoke and rotate change the hash, a role change the role, `sessions end-all` the
  * generation. The caller judges a record against the tokens file at each use. `tokenCreatedAt` is the entry's own `createdAt`: a device older than the
  * entry cannot belong to it, which is the only way to order a hash, so a caller holding a stale entry cannot end a newer device.
+ *
+ * `makeRoom` (issue #882): at the cap, end the live device of this name that was used least recently, as `removed`, and
+ * remember this one in its place, answering it as `replaced: {hash, record}` for the caller's audit row. Since a host-made
+ * link or code remembers a browser without asking, browsers used once and thrown away would otherwise fill the 32 places
+ * and turn every later sign-in into one that is not remembered. Without it, the cap refuses (`full`), for the caller that
+ * can tell a person to remove one first. A record the folder cannot read holds no place either way: only `mine`, read
+ * whole, is counted.
  */
-export function rememberDevice({ dir, name, role, tokenHash, generation, tokenCreatedAt = null, label = "Browser on this system", fs = nodeFs, uid = process.geteuid?.(), now = Date.now, random = randomBytes }) {
+export function rememberDevice({ dir, name, role, tokenHash, generation, tokenCreatedAt = null, label = "Browser on this system", fs = nodeFs, uid = process.geteuid?.(), now = Date.now, random = randomBytes, makeRoom = false }) {
 	if (!REMEMBER_ROLES.includes(role)) return { refusal: `a ${String(role).slice(0, 32)} token cannot be remembered on a device` };
 	if (typeof name !== "string" || !TOKEN_NAME_RE.test(name) || typeof tokenHash !== "string" || !HASH_RE.test(tokenHash) || !Number.isSafeInteger(generation) || generation < 0) return { refusal: "this sign-in cannot be remembered: its token entry is not one the store accepts" };
 	const problem = devicesDirProblem(dir, { fs, uid, create: true });
@@ -269,9 +276,19 @@ export function rememberDevice({ dir, name, role, tokenHash, generation, tokenCr
 			if (reason === null) continue;
 			if (endDevice({ dir, hash: row.hash, reason, fs, uid, now, random }).ok) row.record.ended = { reason, at: new Date(now()).toISOString() };
 		}
-		const live = mine.filter((row) => row.record.ended === undefined).length;
+		const liveRows = mine.filter((row) => row.record.ended === undefined);
+		const live = liveRows.length;
+		let replaced = null;
+		if (live >= MAX_DEVICES_PER_NAME && makeRoom) {
+			// Last use is the file's mtime (`touchDevice`); the oldest goes, the newest record breaking a tie so the order is total.
+			const oldest = [...liveRows].sort((a, b) => a.mtimeMs - b.mtimeMs || (a.record.createdAt < b.record.createdAt ? -1 : 1))[0];
+			const done = endDevice({ dir, hash: oldest.hash, reason: "removed", fs, uid, now, random });
+			if (!done.ok) return { refusal: `the least recently used remembered device of "${name}" could not be ended to make room (${done.problem ?? "it is gone"}); nothing was remembered` };
+			oldest.record.ended = { reason: "removed", at: new Date(now()).toISOString() };
+			replaced = { hash: oldest.hash, record: oldest.record };
+		}
 		// `full` lets a page say what a person can do about it (remove one), where every other refusal is the operator's to fix.
-		if (live >= MAX_DEVICES_PER_NAME) return { refusal: `"${name}" already has ${live} remembered devices, the most one sign-in may have; remove one first`, full: true };
+		else if (live >= MAX_DEVICES_PER_NAME) return { refusal: `"${name}" already has ${live} remembered devices, the most one sign-in may have; remove one first`, full: true };
 		const dead = mine.filter((row) => row.record.ended !== undefined).sort((a, b) => Date.parse(b.record.ended.at) - Date.parse(a.record.ended.at));
 		for (const row of dead.slice(MAX_DEVICES_PER_NAME - 1)) {
 			try { fs.unlinkSync(join(dir, `${row.hash}.json`)); } catch { /* the next remember */ }
@@ -280,7 +297,7 @@ export function rememberDevice({ dir, name, role, tokenHash, generation, tokenCr
 		const hash = hashDeviceSecret(secret);
 		const record = { version: 1, name, role, tokenHash, generation, createdAt: new Date(now()).toISOString(), label: labelIsClosed(label) ? label : "Browser on this system" };
 		writeRecord({ dir, hash, record, fs, random });
-		return { secret, hash, record };
+		return { secret, hash, record, ...(replaced ? { replaced } : {}) };
 	} catch (e) {
 		return { refusal: `this device could not be remembered (${errCode(e)}); check the folder ${dir}` };
 	}
