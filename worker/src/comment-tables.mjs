@@ -45,6 +45,7 @@ export const TERMINAL_COMMENTS = {
 	"idle": "Stopped: nothing happened in this run for its idle limit (no AI reply, no tool output, no work in the container), so it was ended. Partial work may exist. Not retried.",
 	"stalled": "Stopped: the AI took no step in this run for its stall limit, although the container stayed busy (often a command that never ends), so it was ended. Partial work may exist. Not retried.",
 	"max-minutes": "Stopped: this run reached its time limit. Partial work may exist. Not retried.",
+	"credential-expired": "Stopped: a credential this run uses could not be renewed before it ran out, so its next calls would have failed. Partial work may exist. Not retried.",
 	"operator-cancel": "Stopped: the operator cancelled this run. Partial work may exist. Not retried.",
 	"agent-cancel": "Stopped by a delegated agent. Partial work may exist. Not retried.",
 	"answer-draft-refused": "Stopped: the restricted draft job refused its configuration or inputs. No answer was sent. Not retried.",

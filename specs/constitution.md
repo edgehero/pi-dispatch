@@ -1268,7 +1268,13 @@ passing, on the record — issue #80.)
   repository), **minimally-permissioned** (contents + pull-requests only), **short-lived**,
   **host-held** and **env-injected** (never written to an agent-reachable file), and **not
   merge-capable in practice** (branch protection is the barrier — see `CONST-MERGE-NEVER-AUTOMATIC`).
-  A freshly-minted GitHub App installation token satisfies these properties. A tightly-scoped,
+  A freshly-minted GitHub App installation token satisfies these properties. **Renewal in a running job (issue
+  #888)**: since a job runs as long as it keeps working, the worker mints the job a new installation token before
+  the old one's hour runs out and hands it in through a read-only mount (`INT-CREDENTIAL-DROP`). Each renewed token
+  has every property above, the one repository and the hour included; what renewal changes is how long a JOB holds a
+  valid token, which is now as long as it runs. An injected agent that exfiltrates each token as it arrives therefore
+  holds a valid one until the job ends plus at most an hour, where before it was the job's 30 minutes plus an hour.
+  The bound on the job itself is its limits (`REQ-JOB-ACTIVITY-LIMITS`): idle, stalled, and an operator's ceiling. A tightly-scoped,
   short-expiry **fine-grained** PAT satisfies them for a **single-owner** deployment. A **broad or
   long-lived classic PAT does not** and shall not enter a container. The App path remains strictly
   stronger on the token axis and is **mandatory for multi-tenant** deployments — a fine-grained PAT is
@@ -1321,7 +1327,9 @@ passing, on the record — issue #80.)
   asymmetry is deliberate and documented rather than pretended away.
   **Opt-in subscription access tokens (#781)** are another explicit provider-credential case, not forge
   credentials. They are access-only, expire after a bounded job, and never carry the reusable refresh grant
-  into a container. The host private store is outside every overlay, workspace and sandbox; no auth file is
+  into a container. Since issue #888 a running job's snapshot is renewed by the host before its 30-minute deadline,
+  for the same connection only and without a new quota admission, so a snapshot outlives its job by at most 30
+  minutes; the refresh grant still never leaves the host. The host private store is outside every overlay, workspace and sandbox; no auth file is
   mounted. An access token is still readable by trusted in-process extensions and, on container-custody
   venues, the job's tools. Job count, token and conservative dollar bounds remain mandatory where configured;
   account quota observations supplement them and cannot promise a provider-side monetary cap. Paid extra
@@ -1341,7 +1349,9 @@ passing, on the record — issue #80.)
 - **Acceptance**: (a) **Code-checkable** — no container environment holds a credential that is
   broad-scope or long-lived; the App path scopes the token to exactly one repository; the token is
   env-injected, or held by a venue's own layer with a placeholder in the environment (`CONST-VENUE-EGRESS-LAYER`,
-  issue #680, none yet), and never written to `/workspace`, `.git/config`, the CONTAINER's argv, or logs; no acceptance clause
+  issue #680, none yet), or, for a running job's renewal (issue #888), dropped in a folder the worker alone writes,
+  mounted read-only outside `/job` and `/workspace` and removed with the run (`INT-CREDENTIAL-DROP`), and never
+  written to `/workspace`, `.git/config`, the CONTAINER's argv, or logs; no acceptance clause
   mandates a specific expiry duration. (b) **Operator obligation** — a single-owner deployment must
   supply a repo-scoped, minimally-permissioned, short-expiry fine-grained PAT (or use the App); a broad
   or long-lived classic PAT is non-conformant. Multi-tenant deployments must use the App. A GitLab
@@ -1449,6 +1459,7 @@ passing, on the record — issue #80.)
 
 | Date | Change |
 |---|---|
+| 2026-11-14 (#888, part 3) | **`CONST-TOKEN-SCOPED-PER-JOB` AMENDED**, the owner's decision ("refresh it in running jobs"): a running job is minted a new GitHub App installation token before the old one's hour runs out and is handed it through a read-only mount the worker alone writes (`INT-CREDENTIAL-DROP`); each token keeps every property, the one repository and the hour included, and what changes is that a job holds a valid token for as long as it runs, so an exfiltrating agent holds one until the job ends plus at most an hour (before: 30 minutes plus an hour); a subscription snapshot is renewed before its 30-minute deadline, same connection only, no new admission, the refresh grant still host-only; Acceptance (a) admits the drop beside env injection. The other constraints UNCHANGED, checked. |
 | 2026-11-14 (#876) | All statements UNCHANGED, checked. `CONST-TOKEN-SCOPED-PER-JOB`: the job's token keeps the grant it had. The worker's branch protection check moved off the protection endpoint, which needs Administration: read, to the default branch read and the branch rules read, which Contents and Metadata cover; adding Administration to every App, and so to every job's token, was considered and rejected (`DES-GH-APP-MANIFEST-SETUP`). `CONST-MERGE-NEVER-AUTOMATIC`: branch protection is still the barrier. Every branch the check admits is covered by a classic rule, as before, or by an active `pull_request` rule that requires an approval, which the agent's own token cannot supply; nothing the old check admitted is refused, and the one widening is that second kind. GitHub's `protected` flag alone does not pass, since an organization ruleset that blocks nothing (an automatic Copilot review) sets it on every repository it covers, and admitting that would have removed the barrier there. `CONST-RETRY-INFRA-ONLY`: a determinate 403 on any of those reads is returned as `branch-protection-unreadable`, a rate-limited one still throws, and an empty repository is refused rather than retried. `CONST-BUDGET-BEFORE-TOKENS`: the refusals sit where `unprotected-branch` did, after the mint and before the clone and every reservation. **Code evidence**: worker/src/github-host.mjs -> isDefaultBranchProtected, requiresApprovedPullRequest; worker/src/processor.mjs -> runAttempt. |
 | 2026-11-04 (#809) | What a 503 means for each forge. **`CONST-TRIGGER-AUTHOR-GATE` CORRECTED**, two places that assumed a resend GitHub never makes: the close arm's indeterminate lookup answers 503, and GitHub does not resend a failed delivery on its own (docs.github.com, Handling failed webhook deliveries), so the close waits for a hand redelivery within 3 days, which keeps the GUID, with the polling transport the backstop on a repository it polls; and the GitLab acceptance's 503 is no longer called redeliverable: GitLab never resends a 5xx or a timeout, and a Resend Request keeps the `Idempotency-Key`. The close acceptance now says a hand redelivery of the same GUID enqueues at most one job. Every 503 answer is kept as it was. **`CONST-RETRY-INFRA-ONLY` UNCHANGED, checked**: the 503 is still the infrastructure answer and a determinate refusal still a 204; only the words about who sends it again changed. **`CONST-HMAC-OVER-RAW-BODY` UNCHANGED, checked**: a GitLab resend is signed afresh at send time with a new `webhook-timestamp`, so the replay window holds for it. **Code evidence**: receiver/src/receiver.mjs -> makeGitHubHandler, answerEnqueueFailed (WHAT A 503 MEANS); receiver/src/github-members.mjs, receiver/src/gitlab-members.mjs -> their headers. |
 | 2026-11-03 (#812) | `CONST-RETRY-INFRA-ONLY` UNCHANGED, checked: the attempt key's expiry and delete add no attempt, no retry and no paid path, and a console retry whose key has expired is refused `model-failover-no-candidate` before anything is spent, a returned refusal, never a throw the queue would retry. **Code evidence**: worker/src/model-attempts.mjs -> finishModelAttempt, dropModelAttempt; worker/src/model-failover.mjs -> selectFailoverJob. |

@@ -82,6 +82,9 @@ export const CONTAINER_ENV_NAMES = new Set([
 	// set its own limits past what the file and the deployment allow.
 	"PI_JOB_IDLE_MS",
 	"PI_JOB_STALL_MS",
+	// Issue #888, part 3: a trigger binding it through run.secrets would make the runner read a drop folder the worker never
+	// mounted, or stop it from applying one it did.
+	"PI_CREDENTIAL_REFRESH",
 	"PI_MODEL_ROLES_FILE",
 	"PI_AGENTS_FILE",
 	// Issue #545: tells the runner the exit line's key waits on stdin. A trigger setting it would block its own runner

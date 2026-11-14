@@ -119,5 +119,19 @@ export function makeSubscriptionRuntime({ auth, quota, now = Date.now, lookup = 
 		const rows = await auth.status();
 		return { state: "ready", partial: false, connections: await Promise.all(rows.map(async (row) => ({ ...row, ...(row.accountGroup ? { quota: await quota.read(subscriptionIdentity(row)) } : {}) }))) };
 	}
-	return { check, prepare, validate, observe, usage, status };
+	/**
+	 * Issue #888, part 3: a running job's snapshot renewed, its deadline moved to `deadlineAt` (the credential refreshed
+	 * first when it would not cover it, `prepareSnapshot`'s own rule), or null. ONLY the same connection under the same
+	 * binding as the snapshot the job started with: a binding changed since (another account, another adapter) is never
+	 * handed to a job that started under the old one. No quota admission and no trial: the job was admitted at its pickup.
+	 */
+	async function extend(snapshot, { deadlineAt, signal } = {}) {
+		if (!snapshot || typeof snapshot.provider !== "string") return null;
+		const prepared = await auth.prepareSnapshot(snapshot.provider, { deadlineAt, signal });
+		if (!prepared?.ok || !prepared.snapshot) return null;
+		const next = prepared.snapshot;
+		if (next.connectionId !== snapshot.connectionId || next.bindingSignature !== snapshot.bindingSignature || next.adapter !== snapshot.adapter || next.accountGroup !== snapshot.accountGroup) return null;
+		return { ...snapshot, ...next };
+	}
+	return { check, prepare, validate, observe, usage, status, extend };
 }

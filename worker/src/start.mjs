@@ -3366,17 +3366,31 @@ export async function startWorker(
 				}
 				throw configError(`no forge credentials are configured for job kind ${JSON.stringify(job?.kind)} -- see .env.example`);
 			},
-			// Issue #888: whether the job's forge token expires while a long job runs. Only the GitHub App source's does (an
-			// installation token lives an hour); every other source hands a credential that outlives any run. A job holding
-			// one keeps the 30-minute wall clock until the refresh of running jobs lands. Never throws: an auth that cannot
-			// be resolved here already refused at the mint.
-			tokenExpires: async (job) => {
+			// Issue #888: when the job's forge token expires (epoch ms), or null when it outlives any run. Only the GitHub App
+			// source's does (an installation token lives an hour); every other source hands a credential that outlives any run.
+			// A job holding one has it renewed while it runs (`refreshForgeToken`) or keeps the 30-minute wall clock. An auth
+			// that cannot be resolved here already refused at the mint, so this answers "expires now" rather than throw.
+			// A token whose expiry this auth did not record (an auth re-resolved since the mint) was still minted at this pickup,
+			// and an installation token lives an hour: 50 minutes is the safe reading, never "now", which would stop the job
+			// on its first failed renewal while its token had most of an hour left.
+			tokenExpiresAt: async (job, token) => {
 				const kind = job?.kind === "local" ? "github" : job?.kind;
+				const assumed = Date.now() + 50 * 60_000;
 				try {
-					return (await ensureAuth(kind))?.source === "app";
+					const auth = await ensureAuth(kind);
+					if (auth?.source !== "app") return null;
+					return auth.expiryOf?.(token) ?? assumed;
 				} catch {
-					return true;
+					return assumed;
 				}
+			},
+			// Issue #888, part 3: a new token for a running job, `{ token, expiresAt }`, from the App source only. Throws on any
+			// failure; the refresher tries again a minute later and stops the job only when its token is about to run out.
+			refreshForgeToken: async (job) => {
+				const kind = job?.kind === "local" ? "github" : job?.kind;
+				const auth = await ensureAuth(kind);
+				if (auth?.source !== "app" || typeof auth.mintFresh !== "function") throw new Error("this forge's token is not renewed");
+				return await auth.mintFresh(job);
 			},
 			isDefaultBranchProtected: async (job, token) => {
 				const host = forgeFor(job)?.host;

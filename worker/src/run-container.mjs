@@ -24,6 +24,7 @@ import { makeSteerAck } from "./steer-ack.mjs";
 import { keyFrame } from "./steer-framing.mjs";
 import { makeStderrTranscript } from "./stderr-transcript.mjs";
 import { ACTIVITY_POLL_MS, makeActivityBackstop, parseActivityCounters, readActivityFile } from "./job-limits.mjs";
+import { makeCredentialRefresher, makeCredentialsDir, removeCredentialsDir } from "./credential-refresh.mjs";
 
 /**
  * The real `runContainer` the processor injects. Launches one job container and returns
@@ -201,7 +202,7 @@ export function makeRunContainer({
 	// `bundleKeys` (issue #704 part 3) is the processor's `{ endpoints, plain }` split of a project secret bundle's received
 	// variables: handed on in the build options for a venue whose own layer holds credentials (openshell), which binds the
 	// first kind to their hosts and passes the second as values. Every other venue ignores it: the values are in `secrets`.
-	return async function runContainer({ job, token, prepared, secrets = {}, bundleKeys = null, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, transcriptStderr = false, steerStdin = false, size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null, unenforced = [], jobId = null, onLive = null, recover = false, recovering = false, checkpoint = null, pause = null, unpause = null, binds = false, subscriptionAuth = [], activityWatch = null, onActivityArmed = null, requestStop = null, noteActivity = null }) {
+	return async function runContainer({ job, token, prepared, secrets = {}, bundleKeys = null, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, transcriptStderr = false, steerStdin = false, size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null, unenforced = [], jobId = null, onLive = null, recover = false, recovering = false, checkpoint = null, pause = null, unpause = null, binds = false, subscriptionAuth = [], activityWatch = null, onActivityArmed = null, requestStop = null, noteActivity = null, credentialRefresh = null }) {
 		if (signal?.aborted) return { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null }; // killed before it could start
 		// Minted per attempt, held in this closure and the sink's, and handed to the container on its stdin only: never in
 		// the argv (a host `ps` shows it), never in the env (the container's /proc/1/environ shows it), never logged.
@@ -279,6 +280,22 @@ export function makeRunContainer({
 		const activityChannel = !activityWanted ? null : stdioArmed ? "stdio" : activityByFile && transcriptDir ? "file" : null;
 		const activityUnavailable = activityWanted && activityChannel === null ? (transcript === "stdio" || layout !== "mounts" ? liveSkipped ?? "venue-copies" : "no-transcript") : null;
 		if (activityUnavailable !== null) log("idle_watch_unavailable", { container: name, reason: activityUnavailable });
+		// Issue #888, part 3: the folder a watched job's expiring credentials are renewed through, on a venue that binds it
+		// (the counters' file channel says it does). Without one the job keeps the wall clock, as the processor's
+		// `keepWallClock` says, and the line names why.
+		let credentialsDir = null;
+		if (activityChannel !== null && credentialRefresh !== null && typeof credentialRefresh === "object") {
+			if (activityChannel !== "file") log("credential_refresh_unavailable", { container: name, reason: "venue-copies" });
+			else {
+				credentialsDir = makeCredentialsDir(prepared.jobDir);
+				if (credentialsDir === null) log("credential_refresh_unavailable", { container: name, reason: "no-folder" });
+			}
+		}
+		const removeCredentials = () => {
+			removeCredentialsDir(credentialsDir);
+		};
+		const keepWallClock = activityWatch?.keepWallClock === true && credentialsDir === null;
+		let refresher = null;
 		// The inbox: `<jobDir>.inbox`, BESIDE the job directory (`/job` is merge-gated input only, and the processor removes
 		// the job directory itself), mode 0700, made fresh per attempt (a retry's messages are written again into its own),
 		// removed in this function's `finally`. Then the relay, built now (it starts with the container) because the env
@@ -338,6 +355,7 @@ export function makeRunContainer({
 				return fn();
 			} catch (error) {
 				removeInbox();
+				removeCredentials();
 				throw error;
 			}
 		};
@@ -476,6 +494,7 @@ export function makeRunContainer({
 			// Issue #888: the activity watch's limits, only with a channel for its counters (above). Without one the runner is
 			// asked for nothing and the job keeps the wall clock, so a counter no one reads is never written.
 			idleMs: activityChannel !== null ? activityWatch.idleMs : null,
+			credentialRefresh: credentialsDir !== null,
 			stallMs: activityChannel !== null && Number.isSafeInteger(activityWatch.stallMs) && activityWatch.stallMs > 0 ? activityWatch.stallMs : null,
 			authFromPi, // source the provider key from pi's auth.json when the env has none
 			// REQ-TRIGGER-SECRETS: this trigger's resolved secrets, fetched by the processor BEFORE anything
@@ -534,6 +553,8 @@ export function makeRunContainer({
 			sessionDir: transcriptDir ?? undefined,
 			// Issue #646: the inbox, read-only at /inbox, for an armed attempt only; undefined leaves the argv byte-identical.
 			steerInboxDir: steerArmed && !stdinSteered ? inboxDir : undefined,
+			// Issue #888, part 3: the renewed credentials' folder, read-only at /run/pi-dispatch/credentials; undefined when not armed.
+			credentialsDir: credentialsDir ?? undefined,
 			globalPiDir, // undefined/null -> docker-run's guard skips the /opt/pi-global mount
 			name,
 			size, // issue #596: memory, swap equal to it, the CPU weight and /dev/shm, through containerSpec's one function
@@ -575,6 +596,7 @@ export function makeRunContainer({
 		// `container-never-started` is literally true, so the reservation is given back (processor.mjs).
 		if (network && !(await createJobNetwork(spawnFn, { network, proxy: egressProxy, bin }))) {
 			removeInbox();
+			removeCredentials();
 			throw new InfraRetry("container-never-started", { reason: "container-never-started" });
 		}
 
@@ -597,6 +619,7 @@ export function makeRunContainer({
 			} catch (cause) {
 				await teardown();
 				removeInbox();
+				removeCredentials();
 				if (network) await removeJobNetwork(spawnFn, { network, proxy: egressProxy, bin });
 				if (cause instanceof InfraRetry) throw cause;
 				throw new InfraRetry("container-never-started", { cause, reason: "container-never-started" });
@@ -607,6 +630,7 @@ export function makeRunContainer({
 			if (signal?.aborted) {
 				await teardown();
 				removeInbox();
+				removeCredentials();
 				if (network) await removeJobNetwork(spawnFn, { network, proxy: egressProxy, bin });
 				return { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null };
 			}
@@ -728,6 +752,7 @@ export function makeRunContainer({
 		} catch (error) {
 			await teardown();
 			removeInbox();
+			removeCredentials();
 			throw error;
 		}
 		// Issue #596: the head of the CLI's stderr, kept only to recognise the runtime's refusal of a stale `--cpus`
@@ -761,12 +786,34 @@ export function makeRunContainer({
 				backstop.check();
 			}, activityPollMs);
 			backstopTimer?.unref?.();
-			// The wall clock this job carried until now is handed over to the watch (index.mjs clears it), unless the processor
-			// said the job keeps it: a credential that expires while it runs (`keepWallClock`) still bounds it.
-			if (activityWatch.keepWallClock !== true) {
+			// The wall clock this job carried until now is handed over to the watch (index.mjs clears it), unless the job keeps
+			// it: a credential that expires while it runs and that nothing renews (`keepWallClock`) still bounds it, and the
+			// record says which.
+			if (!keepWallClock) {
 				try {
 					onActivityArmed?.();
 				} catch {}
+			} else {
+				try {
+					noteActivity?.({ basis: "wall-clock", why: activityWatch.why ?? null });
+				} catch {}
+			}
+			// Issue #888, part 3: the renewals, from the spawn, for as long as the container runs. A credential that cannot be
+			// renewed before it runs out stops the job through the processor's own abort (`credential-expired`).
+			if (credentialsDir !== null) {
+				refresher = makeCredentialRefresher({
+					dir: credentialsDir,
+					forge: credentialRefresh.forge ?? null,
+					subscriptions: credentialRefresh.subscriptions ?? [],
+					extend: credentialRefresh.extend,
+					log: (event, fields) => log(event, { container: name, ...fields }),
+					onExpired: () => {
+						try {
+							requestStop?.("credential-expired");
+						} catch {}
+					},
+				});
+				refresher.start();
 			}
 		};
 		// Ends the reads, once, and hands the record what the backstop saw (this worker's clock): through `noteActivity`, so
@@ -775,6 +822,8 @@ export function makeRunContainer({
 		const disarmActivity = () => {
 			if (backstopTimer !== null) activityTimers.clearInterval(backstopTimer);
 			backstopTimer = null;
+			refresher?.stop();
+			removeCredentials();
 			if (activityNoted || !activityWanted) return;
 			activityNoted = true;
 			try {
@@ -1143,6 +1192,7 @@ export function makeRunContainer({
 			// Issue #646: the relay is stopped on every path (a throw before the spawn included), then its directory goes.
 			await stopRelay();
 			removeInbox();
+			removeCredentials();
 		}
 	};
 }

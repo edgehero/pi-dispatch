@@ -901,6 +901,33 @@ IWHANG
 				echo "$iw_counters" | grep -q '"v":1,"steps":[1-9]' \
 					|| fail "the image declares idleWatch but wrote no activity counters beside the session file: $iw_counters"
 				;;
+			credentialRefresh)
+				# Issue #888, part 3. The claim is that the runner reads PI_CREDENTIAL_REFRESH and puts a renewed forge token from the
+				# read-only drop into the environment a tool process inherits. Proved through the real runner with no network and no
+				# model call: a command job whose handler prints the token's last characters, started with an old token and a drop
+				# holding a new one; and the same job without the variable, which must keep the old one.
+				cr_dir=$(mktemp -d)
+				mkdir -p "$cr_dir/job" "$cr_dir/global/extensions" "$cr_dir/creds"
+				echo "Reply with the single word ok." >"$cr_dir/job/prompt.md"
+				echo '{"v":1,"seq":1,"forge":{"token":"ghs_renewed_token_new2"},"subscriptions":[]}' >"$cr_dir/creds/current.json"
+				cat >"$cr_dir/global/extensions/show.js" <<'CRSHOW'
+export default function (pi) { pi.registerCommand("show", { description: "prints the token's tail", handler: async () => { console.log(`FORGE-TOKEN-TAIL=${String(process.env.GH_TOKEN).slice(-4)}`); } }); }
+CRSHOW
+				chmod -R a+rX "$cr_dir"
+				cr_run() {
+					docker run --rm --network none --cap-drop=ALL --security-opt no-new-privileges -v "$cr_dir/job:/job:ro" \
+						-v "$cr_dir/global:/opt/pi-global:ro" -v "$cr_dir/creds:/run/pi-dispatch/credentials:ro" \
+						-e PI_COMMAND=show -e GH_TOKEN=ghs_original_token_old1 -e PI_PROVIDER=anthropic -e PI_MODEL=claude-sonnet-4-5-20250929 -e PI_MAX_TURNS=1 \
+						-e ANTHROPIC_API_KEY=sk-ant-not-a-real-key -e PI_MAX_COST_MICROS=0 "$@" "$IMAGE_REF" 2>&1
+				}
+				cr_on=$(cr_run -e PI_CREDENTIAL_REFRESH=1) || true
+				cr_off=$(cr_run) || true
+				rm -rf "$cr_dir"
+				echo "$cr_on" | grep -q 'FORGE-TOKEN-TAIL=new2' \
+					|| fail "the image declares credentialRefresh but a renewed forge token in the drop did not reach a tool's environment: $(echo "$cr_on" | grep -o 'FORGE-TOKEN-TAIL=[a-z0-9]*')"
+				echo "$cr_off" | grep -q 'FORGE-TOKEN-TAIL=old1' \
+					|| fail "the image applies a credential drop the worker did not ask for: $(echo "$cr_off" | grep -o 'FORGE-TOKEN-TAIL=[a-z0-9]*')"
+				;;
 			questionGrouping)
 				# The dedicated classifier mode must reach the cost guard before any executable discovery.
 				# A zero cap and no network make this a real runner proof that cannot spend provider tokens.

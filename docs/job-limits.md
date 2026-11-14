@@ -70,13 +70,35 @@ A job keeps a fixed 30-minute limit when nothing else can bound it, and its run 
 
 - `image`: the job image does not declare the `idleWatch` capability. A derived image built on a base from before
   5.3.0 lacks it until it is rebuilt ([job image](job-image.md)).
-- `subscription`: the job calls a model through a subscription sign-in, whose credential is handed to the job for 30
-  minutes ([subscription auth](subscription-auth.md)).
-- `forge-token`: the job's GitHub token comes from a GitHub App, and an App's token lives one hour.
+- `subscription` or `forge-token`: the job holds a credential that expires while it runs (below), and it cannot be
+  renewed here: the job image does not declare `credentialRefresh`, or the venue copies the job's files instead of
+  binding them (`openshell`).
 - a venue with no channel for the counters (a copying venue whose image cannot sign its transcript, for example):
   `limits.unavailable` names it.
 
 The idle and stall limits still apply to such a job: it is stopped sooner when it stops working.
+
+## Credentials that expire while a job runs
+
+Two credentials a job is handed do not last as long as a job may now run:
+
+- a GitHub token from a GitHub App (`GITHUB_AUTH_SOURCE=app`) lives one hour;
+- a model sign-in through a subscription ([subscription auth](subscription-auth.md)) is handed to the job with a
+  deadline 30 minutes ahead.
+
+The worker renews both while the job runs: a new App token, for the same one repository, 15 minutes before the old one
+runs out, and the subscription's deadline moved 30 minutes ahead (the host refreshes the sign-in first when it would not
+last that long) 10 minutes before the old one. It drops each new value in a folder beside the job's folder, mounted
+read-only in the job, and the runner applies it: `git`, `gh` and every other command started afterwards get the new
+token, and the next model call uses the new sign-in.
+
+A renewal that fails is tried again every minute. If the credential the job holds is two minutes from running out and
+nothing newer reached it, the job is stopped as `credential-expired`: every call after that would fail. The worker log
+has `credential_renew_failed` lines saying which kind.
+
+Two things keep the old token: a process the job started before the renewal (a server left running in the background),
+and the forge's own MCP server ([MCP](mcp.md)), which reads its token when it starts. After the token's hour such a
+process's GitHub calls fail, while new commands keep working.
 
 ## What the run record says
 

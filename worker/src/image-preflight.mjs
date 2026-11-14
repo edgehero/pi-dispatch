@@ -387,6 +387,13 @@ export const BUNDLE_ENV_FILE_CAPABILITY = "bundleEnvFile";
 export const IDLE_WATCH_CAPABILITY = "idleWatch";
 
 /**
+ * The capability an image declares when its runner reads PI_CREDENTIAL_REFRESH and applies the credentials the worker
+ * renews for a running job from the read-only drop (issue #888 part 3, image/runner/src/credential-refresh.mjs). NOT a
+ * gate: a job holding an expiring credential on an image without it keeps the 30-minute wall clock (`limits.why`).
+ */
+export const CREDENTIAL_REFRESH_CAPABILITY = "credentialRefresh";
+
+/**
  * Exported so the test cannot drift from the format string above. `|` because an image id is
  * `sha256:<hex>` and a version is a version, so neither can contain one -- and because a literal control
  * character in source is the kind of thing that survives a copy/paste and then does not.

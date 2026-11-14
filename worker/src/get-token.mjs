@@ -45,6 +45,9 @@ import { isDeterminateFetchFailure, isDeterminateFsCode, isTransientStatus, octo
  * Fails CLOSED at construction: an empty PAT, an unreadable PEM, a logged-out `gh`, or an
  * unresolvable identity throws before returning, so a misconfigured worker refuses to boot.
  */
+/** How many minted tokens' expiries the App auth keeps (issue #888): far above the jobs one worker runs at once. */
+const EXPIRY_MEMORY_MAX = 256;
+
 export async function makeGitHubAuth(cfg, deps = {}) {
 	// The explicit, named opt-out for the gh-source resume refusal below (PI_SESSIONS_ALLOW_GH_SOURCE).
 	// Read once at construction, and strictly `=== true` so a hand-set string cannot arm it.
@@ -115,7 +118,16 @@ export async function makeGitHubAuth(cfg, deps = {}) {
 		// which would otherwise be an unhandled rejection, and that stops a Node process.
 		if (checkPermissions === true) checkAppPermissions({ octokit, installationId: cfg.installationId, ...(typeof log === "function" ? { log } : {}) }).catch(() => {});
 
-		const mintToken = async (job) => {
+		// Issue #888, part 3: when each token this auth minted expires, by the token, so a long job's token can be renewed
+		// before it runs out. Bounded (the newest EXPIRY_MEMORY_MAX), and never logged or written: it holds token strings.
+		const expiries = new Map();
+		const remember = (token, expiresAt) => {
+			const at = Date.parse(expiresAt ?? "");
+			if (!Number.isFinite(at)) return;
+			expiries.set(token, at);
+			while (expiries.size > EXPIRY_MEMORY_MAX) expiries.delete(expiries.keys().next().value);
+		};
+		const mintMinted = async (job) => {
 			const repo = job?.repo;
 			// A local run.github job carries no repo, and an installation token MUST be scoped to one
 			// (CONST-TOKEN-SCOPED-PER-JOB) -- refuse deterministically rather than mint broad.
@@ -134,14 +146,26 @@ export async function makeGitHubAuth(cfg, deps = {}) {
 			const permissions = job?.purpose === "answer-draft" ? { contents: "read", issues: "read", pull_requests: "read", metadata: "read" } : job?.permissions;
 			let minted;
 			try {
+				// A fresh auth per mint, so its cache never hands back an older token: every mint is a new hour.
 				const appAuth = createAppAuth({ ...auth, request: mintRequest });
 				minted = await appAuth({ type: "installation", repositoryNames, ...(permissions && { permissions }) });
 			} catch (error) {
 				throw classifyAppMintError(error);
 			}
-			return requireToken(minted?.token, "app installation token");
+			const token = requireToken(minted?.token, "app installation token");
+			remember(token, minted?.expiresAt);
+			return { token, expiresAt: expiries.get(token) ?? null };
 		};
-		return { mintToken, selfId, source };
+		const mintToken = async (job) => (await mintMinted(job)).token;
+		// Issue #888, part 3: the token's expiry (epoch ms), or null for one this auth did not mint or whose expiry it could
+		// not read; and a new token with its expiry, for a running job's renewal (credential-refresh.mjs).
+		const expiryOf = (token) => expiries.get(token) ?? null;
+		const mintFresh = async (job) => {
+			const minted = await mintMinted(job);
+			if (!Number.isSafeInteger(minted.expiresAt)) throw new InfraRetry("the renewed installation token carried no expiry");
+			return minted;
+		};
+		return { mintToken, selfId, source, expiryOf, mintFresh };
 	}
 
 	throw configError(`makeGitHubAuth: unknown or missing source: ${JSON.stringify(source)}`);

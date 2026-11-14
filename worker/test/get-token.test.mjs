@@ -181,6 +181,30 @@ test("app happy: installation token minted, selfId is the bot-user id via the tw
 	assert.equal(await auth.mintToken({ kind: "github", repo: "some-owner/some-repo" }), "ghs_installtoken");
 });
 
+test("issue #888, part 3: the App auth says when each token it minted expires, and mints a fresh one with its expiry", async () => {
+	const calls = [];
+	const auth = await makeGitHubAuth(
+		{ source: "app", appId: "123", installationId: "456", privateKeyPath: "/keys/app.pem" },
+		{
+			Octokit: FakeOctokit(APP_ROUTES),
+			createAppAuth: fakeCreateAppAuth({ result: { token: "ghs_installtoken", expiresAt: "2026-11-14T13:00:00Z" }, calls }),
+			readFile: async () => "-----BEGIN RSA PRIVATE KEY-----\nx\n-----END RSA PRIVATE KEY-----\n",
+		},
+	);
+	const token = await auth.mintToken({ kind: "github", repo: "some-owner/some-repo" });
+	assert.equal(auth.expiryOf(token), Date.parse("2026-11-14T13:00:00Z"));
+	assert.equal(auth.expiryOf("ghs_some_other_token"), null, "a token it did not mint has no expiry here");
+	assert.deepEqual(await auth.mintFresh({ kind: "github", repo: "some-owner/some-repo" }), { token: "ghs_installtoken", expiresAt: Date.parse("2026-11-14T13:00:00Z") });
+	const scoped = calls.filter((c) => c.type === "installation");
+	assert.deepEqual(scoped.at(-1)?.repositoryNames, ["some-repo"], "renewed for the same one repository");
+	// Without an expiry the renewal refuses rather than hand over a token nobody can schedule.
+	const bare = await makeGitHubAuth(
+		{ source: "app", appId: "123", installationId: "456", privateKeyPath: "/keys/app.pem" },
+		{ Octokit: FakeOctokit(APP_ROUTES), createAppAuth: fakeCreateAppAuth({ result: { token: "ghs_noexpiry" }, calls: [] }), readFile: async () => "k" },
+	);
+	await assert.rejects(bare.mintFresh({ kind: "github", repo: "some-owner/some-repo" }), /carried no expiry/);
+});
+
 test("app happy with an inline key: mints without ever touching the filesystem (issue #208)", async () => {
 	const calls = [];
 	const pem = "-----BEGIN RSA PRIVATE KEY-----\ninline\n-----END RSA PRIVATE KEY-----\n";

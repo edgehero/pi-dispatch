@@ -54,6 +54,11 @@ export const CONTAINER_SESSION_FILE = `${CONTAINER_SESSION_DIR}/current.jsonl`;
  * the host's layout is legible inside the job.
  */
 export const CONTAINER_INBOX_DIR = "/inbox";
+/**
+ * Where a running job's renewed credentials are mounted, read-only (issue #888 part 3, `INT-CREDENTIAL-DROP`): the
+ * runner's `CREDENTIAL_DIR`, held equal by a test. Outside `/job`, which is merge-gated input only.
+ */
+export const CONTAINER_CREDENTIALS_DIR = "/run/pi-dispatch/credentials";
 
 /**
  * The job image's home, and the uid its `USER` directive runs as (issue #341, `DES-JOB-USER-INFERRED-READ-BACK-ON-
@@ -179,6 +184,7 @@ export function containerSpec({
 	sessionDir,
 	globalPiDir,
 	steerInboxDir,
+	credentialsDir,
 	name,
 	size = DEFAULT_JOB_SIZE,
 	hostCpus = null,
@@ -241,6 +247,10 @@ export function containerSpec({
 	// BESIDE the job directory, never inside it: `/job` is merge-gated input only. Relabelled like the other per-job
 	// directories (issue #355), since it is made for this one container. Absent unless armed.
 	if (steerInboxDir) mounts.push({ host: steerInboxDir, container: CONTAINER_INBOX_DIR, readOnly: true, ...own });
+	// Issue #888, part 3: the folder the worker drops a running job's renewed credentials in, `<jobDir>.credentials`, beside
+	// the job directory like the inbox and READ-ONLY for the same reason: the worker writes it, the agent cannot change what
+	// the runner applies. Relabelled like the other per-job directories. Absent unless armed.
+	if (credentialsDir) mounts.push({ host: credentialsDir, container: CONTAINER_CREDENTIALS_DIR, readOnly: true, ...own });
 
 	// The operator's global pi overlay (REQ-GLOBAL-PI-OVERLAY): custom models, global skills, a global
 	// persona, layered UNDER each repo's own .pi/. Read-only -- it is operator-authored deploy-time config,

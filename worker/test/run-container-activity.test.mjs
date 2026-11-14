@@ -36,7 +36,7 @@ function heldSpawn(recorder) {
 const envOf = (args) => Object.fromEntries(args.flatMap((arg, i, all) => (arg === "-e" ? [all[i + 1].split(/=(.*)/s).slice(0, 2)] : [])));
 
 /** A run with the watch asked for, on a binding venue, with a fake clock and a timer the test ticks. */
-function watchedRun({ activityWatch = { idleMs: 15 * MIN, stallMs: 240 * MIN, keepWallClock: false }, stageLive } = {}) {
+function watchedRun({ activityWatch = { idleMs: 15 * MIN, stallMs: 240 * MIN, keepWallClock: false }, stageLive, credentialRefresh = null } = {}) {
 	const recorder = {};
 	const h = { t: 1_000_000, ticks: [], armed: 0, stops: [], noted: [], logs: [] };
 	const jobDir = tempDir("activity-run-");
@@ -58,6 +58,7 @@ function watchedRun({ activityWatch = { idleMs: 15 * MIN, stallMs: 240 * MIN, ke
 		onActivityArmed: () => (h.armed += 1),
 		requestStop: (reason) => h.stops.push(reason),
 		noteActivity: (fields) => h.noted.push(fields),
+		...(credentialRefresh ? { credentialRefresh } : {}),
 	});
 	h.tick = (ms) => {
 		h.t += ms;
@@ -137,4 +138,28 @@ test("without the watch asked for, the run is exactly as before: no variable, no
 	await done;
 	assert.equal(armed, 0);
 	assert.deepEqual(noted, []);
+});
+
+test("issue #888, part 3: an expiring credential with a renewal armed is mounted read-only, and the wall clock is handed over after all", { skip }, async () => {
+	const credentialRefresh = { forge: { expiresAt: Date.now() + 3_600_000, mint: async () => ({ token: "ghs_x", expiresAt: Date.now() + 7_200_000 }) }, subscriptions: [], extend: async () => null };
+	const { h, recorder, done, jobDir } = watchedRun({ activityWatch: { idleMs: 15 * MIN, stallMs: null, keepWallClock: true, why: "forge-token" }, credentialRefresh });
+	await new Promise((resolve) => setImmediate(resolve));
+	const folder = `${jobDir}.credentials`;
+	assert.ok(recorder.args.includes(`${folder}:/run/pi-dispatch/credentials:ro`), recorder.args.join(" "));
+	assert.equal(envOf(recorder.args).PI_CREDENTIAL_REFRESH, "1");
+	assert.equal(h.armed, 1, "renewed credentials no longer need the 30-minute bound");
+	recorder.close(0);
+	await done;
+	const { existsSync } = await import("node:fs");
+	assert.equal(existsSync(folder), false, "the folder goes with the run");
+});
+
+test("issue #888, part 3: an expiring credential with no renewal keeps the wall clock, and the record says why", { skip }, async () => {
+	const { h, recorder, done } = watchedRun({ activityWatch: { idleMs: 15 * MIN, stallMs: null, keepWallClock: true, why: "subscription" } });
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(envOf(recorder.args).PI_CREDENTIAL_REFRESH, undefined);
+	assert.equal(h.armed, 0);
+	assert.ok(h.noted.some((n) => n.basis === "wall-clock" && n.why === "subscription"), JSON.stringify(h.noted));
+	recorder.close(0);
+	await done;
 });
