@@ -705,7 +705,7 @@ readers ([Live updates](#live-updates)).
 | `/runs` | Every run this host and the fleet's run mirror know of, newest first, grouped by the day they ended (UTC), each run's Ended cell the time alone under its day's heading, with paging. Above them the filters (one search for a repository, a target or a job id, a chip per project, a list per field, and the filters you applied as chips you can remove) and the last 24 hours counted by outcome, each count a link to those runs, with the spend they settled and an **Only problems** switch ([Finding runs](#finding-runs)). The Outcome column says completed, refused, failed, awaiting input or cancelled on a badge with its icon; every outcome but completed and the two words that say why (awaiting input, cancelled) is followed by its reason as a short sentence ([Outcomes and reasons](#outcomes-and-reasons)), and a completed run that lacked its flow or an extension says so on its badge ([What a run loaded](#what-a-run-loaded)). On a phone each run is a block of its own, and the filters fold behind a Filters button. In a window narrower than 1440 pixels, as on a phone, the table leaves out the flow, venue, model, tokens and job cap (the run's own page shows them), so it fits without scrolling sideways; a long job id (past 22 characters, so a forge delivery's id takes two lines), host, flow or model (past 20) breaks inside its own box rather than widen its column. |
 | `/runs/sandboxes` | Operators only: kept workspaces and registered shells across hosts, terminal handoff and copy commands, confirmed preparation/pin/End requests. See [Opening a sandbox](#opening-a-sandbox). |
 | `/runs/zero-touch` | How often workload runs needed a person over 7, 30 or 90 days, by project and by cause ([Zero touch](#zero-touch)). |
-| `/run?id=<job id>` | One run in the Pulse main/side grid: a job id, status, project/target/host headline and state panels for live, ended, refused, parked or recovering runs. Progress and the transcript update on one connection, attaching without reload. A **Loaded** card says what the run had ([What a run loaded](#what-a-run-loaded)). Chat, Inbox, Sandbox, Secrets, cost/model usage, resources, sessions and chain appear where relevant. Operators get eligible Cancel, answer, re-run and terminal actions through previews; viewers see status, numbers and the Loaded card's names, versions, image and tool names, with a banner explaining what is hidden. |
+| `/run?id=<job id>` | One run in the Pulse main/side grid: a job id, with the run's short link beside it for an issue, pull request or merge request ([A run's short link](#a-runs-short-link)), status, project/target/host headline and state panels for live, ended, refused, parked or recovering runs. Progress and the transcript update on one connection, attaching without reload. A **Loaded** card says what the run had ([What a run loaded](#what-a-run-loaded)). Chat, Inbox, Sandbox, Secrets, cost/model usage, resources, sessions and chain appear where relevant. Operators get eligible Cancel, answer, re-run and terminal actions through previews; viewers see status, numbers and the Loaded card's names, versions, image and tool names, with a banner explaining what is hidden. |
 | `/parked` | A card for each run waiting for an answer: who asked (the run, linked to its page), how long it has waited, its project, a link to where the question was asked, its forge and how many times the session was resumed, and where to read the question (on its issue or pull request, or on its run page while the live transcript is kept); the card never shows the question itself. Then how it can be answered: being answered by a run (linked), not known, an answer box, or why it cannot be answered here ([A parked run](#outcomes-and-reasons)). |
 | `/parked/rules` | Operators only: the answer rules, read only, as `triggers.json` declares them ([Answer rules](answer-rules.md)). |
 | `/insights?range=30d` | Spend's five linked views: Spend, Budget split (`/insights/budget-split`), Capacity (`/insights/capacity`), Breakdown (`/insights/breakdown`) and Flows map (`/insights/flows`, also `view=list`). All are viewer-readable, drawn once per load, with supported range/project/path choices preserved. Budget split actions and plan reasons are operator-only. See [Spend views](insights.md). |
@@ -1698,6 +1698,36 @@ The runs come from two places, merged as the panel merges them: this host's run 
 in Valkey, which holds every host's recent runs (see [multi-host](multi-host.md)). When the mirror cannot be reached,
 the page shows this host's runs and says so. Reading the pages never changes the mirror.
 
+### A run's short link
+
+A run on an issue, a pull request or a merge request shows a short link beside its id at the top of its page:
+`/run/acme/web/12` for issue or pull request 12 of `acme/web`, and `/run/group/project/!7` for merge request 7 of a
+GitLab project. It is easier to read out, or to type on another device, than an id such as `gh-5f0c9a3e-...`. The
+repository is written as the forge writes it, with every GitLab subgroup, and an Azure DevOps project's space as
+`%20`. Its case makes no difference, and neither do leading zeros in the number. A local, scheduled or watch run has
+no short link.
+
+The link names the issue or request, so it opens the newest run on it. A run running on it now comes first, then one
+waiting in the queue, then the newest run that ended. On the page of an older run the link therefore leads to the later
+one, as its tooltip says. It opens the run's page at its usual address, `/run?id=<job id>`, which works as it always
+has.
+
+When no run on the issue or request is found, the console answers with its run-not-found page, with the search filled
+with the issue (`acme/web#12`) so you can look further. When the run history or the queue could not be read, the page
+says the console cannot tell, with status 503, rather than say there is no run. When two of the deployment's forges
+both have runs on the same repository path and number, the link opens the runs search for it and you choose. A path
+that is not a short link, or one with anything after a `?`, is refused with the shape a short link has. If you are
+signed out, you sign in and land on the run the link opens.
+
+The `!` is the forge's own mark for a merge request. GitLab and Azure DevOps number merge requests apart from issues,
+so `/run/group/project/7` and `/run/group/project/!7` are two different things. A browser keeps the `!` as you type it.
+An interactive shell reads `!7` as a history reference, so put the link in single quotes there
+(`'/run/group/project/!7'`).
+
+The short link is drawn as a link, with no Copy button; the page has Copy only beside its commands. The comments a
+job posts on the issue carry no console link at all: the console listens on this machine's loopback address unless
+you set it up otherwise, so a link to it would open nothing for the people reading the forge.
+
 ## Actions
 
 Operators can change the deployment from the pages that show it. Every action is the same two steps as any write
@@ -2180,7 +2210,7 @@ or a value you sent.
 | Status | When | What it offers |
 |---|---|---|
 | 404 | no page at that address | Go to Runs, Go to Overview |
-| 404 | a run page (`/run?id=`) for an id that this host's run history, the fleet's run mirror, every queue (a stopped host's included, looked for again after you asked), the live transcript and the progress were each read for and found none of (when the console could not read one of those, or it did not answer in time, the run page itself answers 503 and says what it could not read) | the runs search filled with that id (only an id the search takes, and nowhere else on the page), Go to Runs, Go to Overview, with Runs marked as the page you are on |
+| 404 | a run page (`/run?id=`) for an id that this host's run history, the fleet's run mirror, every queue (a stopped host's included, looked for again after you asked), the live transcript and the progress were each read for and found none of (when the console could not read one of those, or it did not answer in time, the run page itself answers 503 and says what it could not read); and a run's short link (`/run/acme/web/12`) that no run in the history or the queue answers, in its own words, or with status 503 when one of them could not be read ([A run's short link](#a-runs-short-link)) | the runs search filled with that id, or with the short link's issue (`acme/web#12`) (only one the search takes, and nowhere else on the page), Go to Runs, Go to Overview, with Runs marked as the page you are on |
 | 404 | Project not found: `/config/project?id=` names no project in a successfully read projects file; an unreadable file stays unavailable | Configuration and Runs, with Configuration current; existing records keep their project id |
 | 405 | an address that takes requests from the console's own buttons, not a page | Go to Overview |
 | 400 | a page refused its address (a filter or a cursor it cannot use); the sentence names the parameter and its rule | that page without its query (Runs, for a run page), and Overview |
