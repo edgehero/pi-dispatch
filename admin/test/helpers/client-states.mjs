@@ -45,6 +45,8 @@ export const T = Object.freeze({
   getsDiscard: "what a trigger's jobs get: Discard is the form's reset, the bar goes, and a preview of what was discarded closes with it",
   getsMoveCloses: "what a trigger's jobs get: any move of a control closes an open preview and takes its Confirm away, because it no longer says what the form says",
   getsNothing: "what a trigger's jobs get: a name already on a list is no change, Enter with no change asks the server and reads its answer, and a refusal goes in the slot and under no field",
+  code: "the Sign-in code form posts what was typed to /login/typed-code, clears the field at once, and lands where the answer says",
+  codeRefused: "a refused code says so in the code's own notice, a 429 in the limiter's, and the token form is left as it was",
   link: "the one-time link: no code, a used link, a refusal with its notice, a rate refusal that leaves it untried, a post that reaches nothing kept waiting and retried, a new link pasted in loaded, and the drawn state kept until an answer moves it",
 });
 
@@ -82,6 +84,9 @@ export const CLIENT_STATES = Object.freeze([
   row("SignIn", "A person signed in who arrives from another site goes straight to the page, and one who is not returns to it after signing in with a token", T.arrival),
   // The retry's stop: the script's own notice, a copy of the server's unreachable one.
   row("SignIn", "The retry stops after 30 tries or 60 s, and asks for Sign in again", T.signInStops),
+  // Issue #882: the Sign-in code field.
+  row("SignIn", "A typed code signs in and lands where the answer says, the field cleared at once", T.code),
+  row("SignIn", "A code that did not work says so in its own notice", T.codeRefused),
   // TriggerEnvironment
   row("TriggerEnvironment", "The bar collects the changes, with Preview the change and Discard", T.getsBar),
   row("TriggerEnvironment", "Discard is the form's reset, and takes a preview of it away", T.getsDiscard),

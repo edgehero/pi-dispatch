@@ -77,10 +77,30 @@ export function parseListen(value, { bindPublic = false, platform = process.plat
   return { kind: "tcp", host, port: Number(portText) };
 }
 
-/** The URL a browser on this host opens for a TCP spec; null for a socket (the browser reaches it through a tunnel). */
+/**
+ * True for the two addresses a browser reaches as `localhost`: 127.0.0.1 and ::1, in any spelling. Another loopback
+ * address (127.0.0.2) is not one: `localhost` never resolves to it, so a console bound there is printed by its number.
+ */
+export function isLocalhostAddress(address) {
+  if (isIPv4(address)) return address === "127.0.0.1";
+  if (!isIPv6(address)) return false;
+  try {
+    return new URL(`http://[${address}]/`).hostname === "[::1]";
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The URL a browser on this host opens for a TCP spec; null for a socket (the browser reaches it through a tunnel).
+ * `localhost` for 127.0.0.1 and ::1 (issue #882): a name a person can read and type, which every browser resolves to
+ * loopback without asking a DNS server. ONLY THE PRINTED ADDRESS: the bind stays the IP literal (`parseListen` refuses a
+ * name), and so does the health probe, since what a name resolves to is a file's or a resolver's to decide.
+ */
 export function listenUrl(spec, port = spec.port) {
   if (spec.kind !== "tcp") return null;
-  return `http://${isIPv6(spec.host) ? `[${spec.host}]` : spec.host}:${port}/`;
+  const host = isLocalhostAddress(spec.host) ? "localhost" : isIPv6(spec.host) ? `[${spec.host}]` : spec.host;
+  return `http://${host}:${port}/`;
 }
 
 /** Does something accept on the unix socket at `path`? A refusal or any error means nobody does. */

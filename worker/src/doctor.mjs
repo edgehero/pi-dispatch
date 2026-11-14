@@ -5817,7 +5817,8 @@ export async function consoleServiceChecks(env, seams = {}) {
 	} catch (err) {
 		answer = { state: "unknown", reason: `the probe failed (${escapeControls(err?.message ?? String(err))})` };
 	}
-	const at = answer.target ? ` on ${escapeControls(answer.target)}` : "";
+	// Issue #882: where a person opens it, `http://localhost:<port>/`, for a TCP console; the probe itself asked the literal.
+	const at = answer.url ? ` at ${escapeControls(answer.url)}` : answer.target ? ` on ${escapeControls(answer.target)}` : "";
 	const why = answer.reason ? ` (${escapeControls(answer.reason)})` : "";
 	const unitShown = unit ? quotedShown(unit.path) : null;
 	const logs = platform === "linux" ? "`journalctl --user -u pi-dispatch-console` (or without --user for a system unit)" : platform === "darwin" ? `${join(cwd, "logs", "console.err.log")}` : `${join(cwd, "logs", "console.err.log")} and \`nssm status ${CONSOLE_NSSM_SERVICE}\``;

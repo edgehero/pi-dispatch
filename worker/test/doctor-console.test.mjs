@@ -267,17 +267,18 @@ async function renderedConsoleUnit(platform, cwd) {
 	return out.join("");
 }
 
-const RUNNING = async () => ({ state: "running", target: "127.0.0.1:4790" });
-const DOWN = async () => ({ state: "not-running", target: "127.0.0.1:4790", reason: "nothing listens there" });
+// As probeConsole answers for the default address: the literal it asked, and (issue #882) the address a person opens.
+const RUNNING = async () => ({ state: "running", target: "127.0.0.1:4790", url: "http://localhost:4790/" });
+const DOWN = async () => ({ state: "not-running", target: "127.0.0.1:4790", url: "http://localhost:4790/", reason: "nothing listens there" });
 
 test("consoleServiceChecks: a unit for this deployment and the console answering is ok; installed but not answering fails", async () => {
 	for (const [platform, path] of [["linux", "/home/t/.config/systemd/user/pi-dispatch-console.service"], ["darwin", "/home/t/Library/LaunchAgents/com.pi-dispatch.console.plist"]]) {
 		const cwd = "/srv/deploy";
 		const text = await renderedConsoleUnit(platform, cwd);
 		const seams = { platform, cwd, home: "/home/t", fileExists: (p) => p === path, readUnit: (p) => (p === path ? text : assert.fail(`read ${p}`)) };
-		assert.deepEqual(labels(await consoleServiceChecks({}, { ...seams, consoleProbe: RUNNING })), [`ok console: the service ${JSON.stringify(path)} keeps it running, and it answers on 127.0.0.1:4790`], platform);
+		assert.deepEqual(labels(await consoleServiceChecks({}, { ...seams, consoleProbe: RUNNING })), [`ok console: the service ${JSON.stringify(path)} keeps it running, and it answers at http://localhost:4790/`], platform);
 		const down = await consoleServiceChecks({}, { ...seams, consoleProbe: DOWN });
-		assert.deepEqual(labels(down), [`fail console: the service ${JSON.stringify(path)} is installed for this deployment, but nothing answers on 127.0.0.1:4790 (nothing listens there)`], platform);
+		assert.deepEqual(labels(down), [`fail console: the service ${JSON.stringify(path)} is installed for this deployment, but nothing answers at http://localhost:4790/ (nothing listens there)`], platform);
 		assert.match(down[0].fix, /pi-dispatch service status --console/);
 		assert.match(down[0].fix, /console-audit\/\.console\.lock can name a pid another process has since taken.*remove the lock/, "the stale-lock case after a crash");
 		assert.match(down[0].fix, platform === "linux" ? /journalctl --user -u pi-dispatch-console/ : /\/srv\/deploy\/logs\/console\.err\.log/);
@@ -290,10 +291,13 @@ test("consoleServiceChecks: a unit for this deployment and the console answering
 test("consoleServiceChecks: no unit warns while nothing runs, and is ok (started by hand) while the console answers", async () => {
 	const seams = { platform: "linux", cwd: "/srv/deploy", home: "/home/t", fileExists: () => false };
 	const none = await consoleServiceChecks({}, { ...seams, consoleProbe: DOWN });
-	assert.deepEqual(labels(none), ["warn console: not running on 127.0.0.1:4790 (nothing listens there), and no service unit keeps it running"]);
+	assert.deepEqual(labels(none), ["warn console: not running at http://localhost:4790/ (nothing listens there), and no service unit keeps it running"]);
 	assert.match(none[0].fix, /pi-dispatch service install --console/);
 	assert.match(none[0].fix, /pi-dispatch-console serve/);
-	assert.deepEqual(labels(await consoleServiceChecks({}, { ...seams, consoleProbe: RUNNING })), ["ok console: answers on 127.0.0.1:4790, started by hand (no service unit for this deployment, so it stops with the terminal that runs it)"]);
+	assert.deepEqual(labels(await consoleServiceChecks({}, { ...seams, consoleProbe: RUNNING })), ["ok console: answers at http://localhost:4790/, started by hand (no service unit for this deployment, so it stops with the terminal that runs it)"]);
+	// A unix socket has no address a browser opens, so the line names the socket the probe asked.
+	const socket = async () => ({ state: "running", target: "unix:/run/pd.sock" });
+	assert.deepEqual(labels(await consoleServiceChecks({}, { ...seams, consoleProbe: socket })), ["ok console: answers on unix:/run/pd.sock, started by hand (no service unit for this deployment, so it stops with the terminal that runs it)"]);
 });
 
 test("consoleServiceChecks: the probe is asked with the resolved env, an unknown answer is said, and an unusable listen asks nothing", async () => {
@@ -337,7 +341,7 @@ test("collectChecks: the console's service line follows its other lines, and a d
 	assert.equal(probes, 0);
 	withToken(d);
 	const lines = labels((await collectChecks({ ...d.env, PI_PROVIDER: "anthropic" }, seams(DOWN))).filter((c) => c.label.startsWith("console:")));
-	assert.equal(lines.at(-1), "warn console: not running on 127.0.0.1:4790 (nothing listens there), and no service unit keeps it running");
+	assert.equal(lines.at(-1), "warn console: not running at http://localhost:4790/ (nothing listens there), and no service unit keeps it running");
 	assert.equal(probes, 1);
 });
 

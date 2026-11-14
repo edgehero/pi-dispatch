@@ -5,9 +5,9 @@
  *   token add --name N --role operator|viewer
  *   token list | token revoke --name N | token rotate --name N
  *   sessions end-all                        sign every browser out (bumps the tokens file's generation)
- *   link [--name N] [--port P]              a one-time sign-in link for token N, valid 60 seconds (P: an ssh -L
- *                                           tunnel's local port, which the console cannot know); N may be left
- *                                           out when there is exactly one operator
+ *   link [--name N] [--port P]              a one-time sign-in link for token N, valid 60 seconds, and a code to
+ *                                           type, valid 5 minutes (P: an ssh -L tunnel's local port, which the
+ *                                           console cannot know); N may be left out when there is exactly one operator
  *   open [--name N] [--port P]              sign in the person at this terminal: opens the browser here, or waits for
  *                                           their tunnel over SSH (`open-command.mjs`)
  *   audit verify                            walk the audit log's hash chain
@@ -17,8 +17,10 @@
  *
  * ONLY `token add` AND `token rotate` PRINT A TOKEN, on one line of its own, so a terminal log or a pasted transcript
  * holds a token only where the operator asked for one. `link` prints a one-time code inside a URL, which is its
- * purpose; the code is not the token and dies in 60 seconds or at first use. `open` prints one only where there is no
- * local browser to hand it to, or when the person presses Enter for one.
+ * purpose; the code is not the token and dies in 60 seconds or at first use. Since issue #882 it prints a short code to
+ * type as well, on stderr beside the words that say how to use it (stdout stays the link alone), which dies in 5
+ * minutes or at first use. `open` prints a link only where there is no local browser to hand it to, or when the person
+ * presses Enter for one.
  *
  * The real collaborators (tokens, sessions, codes, tickets, audit, the pause-windows writer, for #641 the server
  * with its pages, the fleet reader, the insights assembler and its pricing, and the live hub, and for #642 the write
@@ -37,7 +39,7 @@ import { CONSOLE_ENV_KEYS, consoleConfig, consoleEnv, deploymentDirOf } from "./
 import { makeLoginLimiter } from "./guards.mjs";
 import { isLoopbackAddress, listenOn, listenUrl } from "./listen.mjs";
 import { acquireConsoleLock } from "./lock.mjs";
-import { codePending, keptTokenLinkRefusal, operatorNames, soleOperatorName } from "./login-codes.mjs";
+import { codePending, keptTokenLinkRefusal, operatorNames, showShortCode, soleOperatorName } from "./login-codes.mjs";
 import { enterReader, runOpenCommand } from "./open-command.mjs";
 import { openLinkViaFile } from "./open-link.mjs";
 import { envProblemOf, makeRestartWatch, thrownProblem } from "./restart-notice.mjs";
@@ -59,7 +61,7 @@ export const USAGE = `usage: pi-dispatch-console <command> [--deployment <dir>]
   device list                              the browsers that stay signed in, by id, never a secret
   device revoke --id <id> | --name <name>  stop remembering one browser, or every browser of a token
   open [--name <name>] [--port <n>] [--next /setup]  sign in here: opens your browser, or waits for your ssh tunnel
-  link [--name <name>] [--port <n>] [--next /setup]  a one-time sign-in link to pass along, valid 60 seconds
+  link [--name <name>] [--port <n>] [--next /setup]  a one-time sign-in link (60 seconds) and a code to type (5 minutes)
   serve --host-setup                       explicitly allow local person-only setup actions
   audit verify                             check the audit log's hash chain
 
@@ -491,10 +493,13 @@ async function run(argv, io) {
     throw new Refusal(`there is no token named "${name}"; see ${localCommand("pi-dispatch-console")} token list`);
   };
 
-  /** Audit, then mint, then build the URL: `{url, code}`, or `{exit}` once the failure has been said. Refusals throw. */
-  const mintSignIn = (name, port) => {
+  /**
+   * Audit, then mint, then build the URL: `{url, code, base}`, and with `short` (issue #882) the short code to type as well (`short`), or `{exit}`
+   * once the failure has been said. Refusals throw. One row for what one command made, its `kind` saying a short code was made beside the link.
+   */
+  const mintSignIn = (name, port, { short = false } = {}) => {
     // Bootstrap composes this command, so its audit intent must exist before a code file can be created.
-    const row = { actor: SHELL, action: "login-code", target: name, ticket: (random ?? randomBytes)(6).toString("hex") };
+    const row = { actor: SHELL, action: "login-code", ...(short ? { kind: "link-and-short-code" } : {}), target: name, ticket: (random ?? randomBytes)(6).toString("hex") };
     try { audit.append({ ...row, outcome: "ok" }); }
     catch (e) { io.err(`pi-dispatch-console: no sign-in code was minted because its audit row could not be written (${e?.code ?? "error"}); check PI_LOGS_DIR and run audit verify`); return { exit: 1 }; }
     const failed = () => {
@@ -502,11 +507,11 @@ async function run(argv, io) {
       catch (e) { io.err(`pi-dispatch-console: the sign-in code was not minted, but its failed audit row could not be written (${e?.code ?? "error"}); run audit verify`); }
     };
     let minted;
-    try { minted = m.loginCodes.mintLoginCode(withRandom({ dir: m.loginCodes.loginCodesDir(config.tokensPath), name, fs, now })); }
+    try { minted = m.loginCodes.mintLoginCode(withRandom({ dir: m.loginCodes.loginCodesDir(config.tokensPath), name, fs, now, short })); }
     catch (e) { failed(); throw e; }
     if (minted.refusal) { failed(); throw new Refusal(minted.refusal); }
     const base = port !== null ? `http://localhost:${port}/` : (listenUrl(config.listen) ?? "http://localhost:<the local port of your ssh -L tunnel>/");
-    return { url: `${base}login/code#${minted.code}${values.next === "/setup" ? "&next=/setup" : ""}`, code: minted.code };
+    return { url: `${base}login/code#${minted.code}${values.next === "/setup" ? "&next=/setup" : ""}`, code: minted.code, base, ...(short ? { short: minted.short } : {}) };
   };
 
   /** The device store, for the commands that act on it. Real path, as `serve` uses it, so both name one cookie. */
@@ -585,10 +590,12 @@ async function run(argv, io) {
     case "link": {
       // Judged before the code is minted, so a mistyped port costs no code and no audit row.
       const port = values.port === undefined ? null : linkPortOf(values.port);
-      const made = mintSignIn(signInName(), port);
+      const made = mintSignIn(signInName(), port, { short: true });
       if (made.exit !== undefined) return made.exit;
+      // The link alone on stdout, as it always was, for whatever reads it; the code is for the person, beside the words that say how to use it.
       io.out(made.url);
       io.err("open it within 60 seconds; it works once");
+      io.err(`or type this sign-in code at ${made.base}login${values.next === "/setup" ? "?next=/setup" : ""} within 5 minutes; it works once too: ${showShortCode(made.short)}`);
       return 0;
     }
     case "open": {
@@ -999,8 +1006,8 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
       io.out(`from another machine: ssh -L 4790:${config.listen.path} <this host>, then open http://localhost:4790/`);
     }
     // How to get in, never a token: the commands that make one (issue #737). A unix socket's link needs the tunnel's
-    // local port, which only the operator knows.
-    io.out(`sign in: paste a token (pi-dispatch-console token add --name <you> --role operator makes one), or open a one-time link: pi-dispatch-console link --name <you>${config.listen.kind === "tcp" ? "" : " --port <your tunnel's local port>"}`);
+    // local port, which only the operator knows. Issue #882: `link` prints a code to type as well, so it leads.
+    io.out(`sign in: pi-dispatch-console link --name <you>${config.listen.kind === "tcp" ? "" : " --port <your tunnel's local port>"} prints a one-time link and a code to type; or paste a token (pi-dispatch-console token add --name <you> --role operator makes one)`);
     if (config.readOnly) io.out("read-only: every change is refused (PI_CONSOLE_READ_ONLY=1)");
     if (io.onListening) io.onListening(server);
     await (io.until ?? untilSignal());

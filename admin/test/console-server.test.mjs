@@ -473,7 +473,7 @@ test("the route table: every route declares auth and write, writes are POST, and
   }
   // Only signing in and out, and remembering this browser (issue #849), exempt a write from read-only mode: each changes this browser's own credential and
   // nothing else. Reads need no exemption.
-  assert.deepEqual(ROUTES.filter((r) => r.readOnlyExempt).map((r) => r.path).sort(), ["/api/device/remember", "/login", "/login/code", "/logout"]);
+  assert.deepEqual(ROUTES.filter((r) => r.readOnlyExempt).map((r) => r.path).sort(), ["/api/device/remember", "/login", "/login/code", "/login/typed-code", "/logout"]);
   assert.deepEqual(ROUTES.filter((r) => r.readJson).map((r) => [r.path, r.auth, r.write]), [["/api/trigger-check", "viewer", false]], "the event checker is the sole read-only JSON POST, never an operator action");
   assert.deepEqual(lookupRoute("PUT", "/login"), { allow: ["GET", "HEAD", "POST"] });
   assert.equal(lookupRoute("HEAD", "/healthz").route.path, "/healthz");
@@ -1573,28 +1573,34 @@ test("a sign-in link refused 429 by the rate limit is never read: the limiter an
 });
 
 test("the login routes answer every status NOTICE_OF_STATUS maps, so each notice the script can show is one the server can cause", async () => {
-  assert.deepEqual(Object.keys(NOTICE_OF_STATUS).sort(), ["/login", "/login/code"]);
+  assert.deepEqual(Object.keys(NOTICE_OF_STATUS).sort(), ["/login", "/login/code", "/login/typed-code"]);
   for (const path of Object.keys(NOTICE_OF_STATUS)) {
     const route = lookupRoute("POST", path)?.route;
     assert.ok(route?.readOnlyExempt && route.auth === "none", `${path} is a sign-in route`);
   }
-  const seenStatus = { "/login": new Set(), "/login/code": new Set() };
-  const code = "n".repeat(43);
+  const seenStatus = { "/login": new Set(), "/login/code": new Set(), "/login/typed-code": new Set() };
+  // A link's code on /login/code, a typed short code on /login/typed-code (issue #882): each route as its page posts it.
+  const codes = { "/login/code": ["n", "m", "q", "k"].map((ch) => ch.repeat(43)), "/login/typed-code": ["NNNN-NNNN", "MMMM-MMMM", "QQQQ-QQQQ", "KKKK-KKKK"] };
   let readable = true;
-  const c = await start({ codes: [[code, "alice"], ["m".repeat(43), "alice"], ["q".repeat(43), "alice"]], readTokens: () => (readable ? { file: FILE } : { refusal: "unreadable" }) });
+  const c = await start({ codes: [...codes["/login/code"].slice(0, 3), ...codes["/login/typed-code"].slice(0, 3)].map((code) => [code, "alice"]), readTokens: () => (readable ? { file: FILE } : { refusal: "unreadable" }) });
+  const limited = await start({ limiter: { take: () => false, retryAfterSec: () => 3 } });
   seenStatus["/login"].add((await c.post("/login", { token: "wrong" })).status);
-  seenStatus["/login/code"].add((await c.post("/login/code", { code: "k".repeat(43) })).status);
   c.audit.failNext = 1;
   seenStatus["/login"].add((await c.post("/login", { token: OP_TOKEN })).status);
-  c.audit.failNext = 1;
-  seenStatus["/login/code"].add((await c.post("/login/code", { code })).status);
   readable = false;
   seenStatus["/login"].add((await c.post("/login", { token: OP_TOKEN })).status);
-  seenStatus["/login/code"].add((await c.post("/login/code", { code: "m".repeat(43) })).status);
   readable = true;
-  const limited = await start({ limiter: { take: () => false, retryAfterSec: () => 3 } });
   seenStatus["/login"].add((await limited.post("/login", { token: OP_TOKEN })).status);
-  seenStatus["/login/code"].add((await limited.post("/login/code", { code: "q".repeat(43) })).status);
+  for (const path of ["/login/code", "/login/typed-code"]) {
+    const [code, unreadableCode, limitedCode, unknown] = codes[path];
+    seenStatus[path].add((await c.post(path, { code: unknown })).status);
+    c.audit.failNext = 1;
+    seenStatus[path].add((await c.post(path, { code })).status);
+    readable = false;
+    seenStatus[path].add((await c.post(path, { code: unreadableCode })).status);
+    readable = true;
+    seenStatus[path].add((await limited.post(path, { code: limitedCode })).status);
+  }
   for (const [path, statuses] of Object.entries(seenStatus)) {
     assert.deepEqual([...statuses].sort(), Object.keys(NOTICE_OF_STATUS[path]).map(Number).sort(), path);
   }
@@ -1605,12 +1611,14 @@ test("each sign-in refusal's cause, on both routes, is the status whose notice s
   // the expectation from NOTICE_OF_STATUS itself would pass.
   const CAUSES = [["the audit log", 500, "audit"], ["the tokens file", 503, "tokens"], ["the rate limit", 429, "rate"]];
   let readable = true;
-  const codes = ["G", "H", "J", "K", "L", "M"].map((ch) => [ch.repeat(43), "alice"]);
+  // Each route's own kind of code: a link's on /login/code, a typed short code on /login/typed-code (issue #882), which either route takes.
+  const kinds = { "/login/code": "GHJ".split("").map((ch) => ch.repeat(43)), "/login/typed-code": "NPQ".split("").map((ch) => `${ch.repeat(4)}-${ch.repeat(4)}`) };
+  const codes = [...kinds["/login/code"], ...kinds["/login/typed-code"]].map((code) => [code, "alice"]);
   const c = await start({ codes, readTokens: () => (readable ? { file: FILE } : { refusal: "unreadable" }) });
   const limited = await start({ limiter: { take: () => false, retryAfterSec: () => 3 }, codes });
   let k = 0;
   const attempt = async (path, cause) => {
-    const body = path === "/login" ? { token: OP_TOKEN } : { code: codes[k++][0] };
+    const body = path === "/login" ? { token: OP_TOKEN } : { code: kinds[path][k++ % 3] };
     if (cause === "the audit log") c.audit.failNext = 1;
     if (cause === "the tokens file") readable = false;
     const res = await (cause === "the rate limit" ? limited : c).post(path, body);
@@ -1618,7 +1626,7 @@ test("each sign-in refusal's cause, on both routes, is the status whose notice s
     c.audit.failNext = 0;
     return res;
   };
-  for (const path of ["/login", "/login/code"]) {
+  for (const path of ["/login", "/login/code", "/login/typed-code"]) {
     for (const [cause, status, notice] of CAUSES) {
       const res = await attempt(path, cause);
       assert.equal(res.status, status, `${path}, ${cause}`);
@@ -1627,6 +1635,8 @@ test("each sign-in refusal's cause, on both routes, is the status whose notice s
     }
   }
   assert.equal(NOTICE_OF_STATUS["/login"]["401"], "wrong");
+  assert.equal(NOTICE_OF_STATUS["/login/typed-code"]["401"], "code", "a typed code's own refusal is the sign-in page's code notice");
+  assert.equal(k, 6, "three codes on each code route");
 });
 
 test("GET /login selects a notice only for exactly one ended that is a member of ENDED_REASONS, and never echoes the query", async () => {
@@ -1656,8 +1666,10 @@ test("the sign-in footer follows how the console listens: loopback, a unix socke
   const v6 = await footer({ kind: "tcp", host: "::1", port: 4790 });
   const unix = await footer({ kind: "unix", path: "/run/pi/console.sock" });
   const pub = await footer({ kind: "tcp", host: "0.0.0.0", port: 4790 });
-  assert.match(loopback, /loopback address only/);
-  assert.match(v6, /loopback address only/);
+  // Issue #882: 127.0.0.1 and ::1 are where every command says localhost; another loopback address is not.
+  assert.match(loopback, /answers at localhost, on this host only/);
+  assert.match(v6, /answers at localhost, on this host only/);
+  assert.match(await footer({ kind: "tcp", host: "127.0.0.2", port: 4790 }), /loopback address only/);
   assert.match(unix, /unix socket only/);
   assert.ok(!unix.includes("/run/pi/console.sock"), "the socket's path is not printed");
   assert.ok(!/loopback|unix socket only/.test(pub), "a public bind is never called loopback");
@@ -2299,7 +2311,8 @@ test("browser invitation redemption refuses rotation, role escalation, recreatio
     const file = structuredClone(FILE);
     const original = file.tokens.find(entry => entry.role === "viewer");
     const binding = { sha256: original.sha256, createdAt: original.createdAt, role: "viewer", generation: file.generation };
-    const code = "invitation-binding-canary-" + "b".repeat(24);
+    // A link's shape exactly, 43 characters: since issue #882 the server refuses any other before the code store sees it.
+    const code = "invitation-binding-canary-" + "b".repeat(17);
     secrets.add(code);
     let consumed = false;
     const c = await start({ readTokens: () => ({ file }), consumeLoginCode: () => { if (consumed) return { refusal: "used" }; consumed = true; return { name: original.name, binding }; } });

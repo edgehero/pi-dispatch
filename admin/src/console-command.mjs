@@ -37,7 +37,7 @@ import { keptTokens, readTokensFile } from "@edgehero/pi-dispatch/console-tokens
 import { isLocalBrowserSession, openBrowser } from "@edgehero/pi-dispatch/open-browser";
 import { panelActor, panelAudit, writeTicket } from "./audited-write.mjs";
 import { consolePageLines, consolePageUrl } from "./console/link.mjs";
-import { keptTokenLinkRefusal, loginCodesDir, mintLoginCode, operatorNames } from "./console/login-codes.mjs";
+import { keptTokenLinkRefusal, loginCodesDir, mintLoginCode, operatorNames, showShortCode } from "./console/login-codes.mjs";
 import { openLinkViaFile } from "./console/open-link.mjs";
 import { probeConsole } from "@edgehero/pi-dispatch/console-probe";
 import { CONSOLE_START_ADVICE } from "./console/link.mjs";
@@ -106,7 +106,8 @@ export function consolePagePath(page) {
 
 /**
  * `<url>` a fragment value: the characters that would end it or be read as another part (`%`, `&`, `#`, `+`, a space)
- * percent-encoded, the rest as it is, so `/run?id=a.b` stays readable in the printed link.
+ * percent-encoded, the rest as it is, so `/run?id=a.b` stays readable in the printed link. A query's value too (the
+ * sign-in page's `?next=`, issue #882), where the same characters are the ones that would end it.
  */
 function fragmentValue(text) {
   return text.replace(/[%&#+\s]/g, (c) => encodeURIComponent(c));
@@ -287,21 +288,25 @@ export async function consoleCommand(words, deps) {
         name = picked;
       }
       decided = true;
+      // Issue #882: an asked-for `--link` makes a code to type as well, for another browser or a phone. The default does not: it hands its link to
+      // this machine's browser, and a code nobody asked for would only sit in the notice, live, for 5 minutes.
+      const short = !auto;
       // Audit, then mint (the panel's rule): a code with no row in the log is never made.
       // One ticket on both rows, as `auditedWrite` does, so a reader ties a `failed` row to its `ok` row.
       const audit = deps.audit ?? panelAudit(deps.logsDir);
       const ticket = deps.ticket ?? writeTicket();
+      const kind = short ? { kind: "link-and-short-code" } : {};
       try {
-        audit.append({ actor: deps.actor ?? panelActor(), action: "login-code", target: name, outcome: "ok", ticket });
+        audit.append({ actor: deps.actor ?? panelActor(), action: "login-code", ...kind, target: name, outcome: "ok", ticket });
       } catch (e) {
         return refuse(`the audit log could not be written (${typeof e?.code === "string" ? e.code : "error"}), so no code was made; check PI_LOGS_DIR`);
       }
       const mint = deps.mint ?? ((o) => mintLoginCode(o));
-      const made = mint({ dir: codesDir, name });
+      const made = mint({ dir: codesDir, name, ...(short ? { short: true } : {}) });
       if (made.refusal) {
         // The row says ok and no code exists: the safe direction to be wrong in, and said here.
         try {
-          audit.append({ actor: deps.actor ?? panelActor(), action: "login-code", target: name, outcome: "failed", reason: made.refusal, ticket });
+          audit.append({ actor: deps.actor ?? panelActor(), action: "login-code", ...kind, target: name, outcome: "failed", reason: made.refusal, ticket });
         } catch {
           // the refusal below is what the operator must see
         }
@@ -309,14 +314,15 @@ export async function consoleCommand(words, deps) {
       }
       minted = true;
       const next = path === "" ? "" : `&next=${fragmentValue(`/${path}`)}`;
+      const base = at.socket ? "http://localhost:4790/" : at.url.slice(0, at.url.length - path.length);
       if (at.socket) {
-        lines.push(`sign-in link for "${name}" (through that tunnel; it works once, within 60 seconds): http://localhost:4790/login/code#${made.code}${next}`);
+        lines.push(`sign-in link for "${name}" (through that tunnel; it works once, within 60 seconds): ${base}login/code#${made.code}${next}`);
       } else {
-        const base = at.url.slice(0, at.url.length - path.length);
         const link = `${base}login/code#${made.code}${next}`;
         lines.push(`sign-in link for "${name}" (it works once, within 60 seconds): ${link}`);
         url = at.anyHost ? null : link;
       }
+      if (short && typeof made.short === "string") lines.push(`or type the sign-in code ${showShortCode(made.short)} at ${base}login${path === "" ? "" : `?next=${fragmentValue(`/${path}`)}`} (it works once, within 5 minutes)`);
       return null;
     })();
     if (linked === SKIP) {

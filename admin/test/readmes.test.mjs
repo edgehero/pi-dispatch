@@ -174,19 +174,21 @@ test("Open the web page says what the console's commands do", () => {
   const section = ROOT.slice(ROOT.indexOf("## Open the web page"), ROOT.indexOf("## How to use it"));
   const words = section.replace(/\s+/g, " ");
   const consoleCli = read("admin/src/console/cli.mjs");
-  assert.ok(section.includes("http://127.0.0.1:4790"));
+  // Issue #882: the address a person opens is localhost, while the console still binds the number.
+  assert.ok(section.includes("http://localhost:4790"));
   assert.match(consoleCli, /default 127\.0\.0\.1:4790/);
-  // A link sign-in, which every way in here is, asks once on the first page; a token's form has the box instead.
-  const shell = read("admin/src/console/shell.mjs");
-  assert.ok(words.includes("the page asks whether to remember this browser. Choose **Remember this browser**"));
-  assert.match(shell, /OFFER_TITLE = "Remember this browser\?"/);
-  assert.match(shell, /OFFER_YES = "Remember this browser"/);
-  assert.ok(words.includes("tick **Remember this trusted device** under it"));
+  assert.match(read("admin/src/console/listen.mjs"), /isLocalhostAddress\(spec\.host\) \? "localhost"/);
+  // Issue #882: a link or a code from the host, which every way in here is, remembers the browser at once; a token's form has the box, ticked.
+  assert.ok(words.includes("Once you sign in, the browser remembers you"));
+  assert.match(read("admin/src/console/server.mjs"), /const remembering = remember \|\| \(hostMade && rememberAllowed\(ctx, entry\.role, invited\)\);/);
+  assert.ok(words.includes("leave **Remember this trusted device** ticked under it"));
   assert.match(read("admin/src/console/signin.mjs"), /REMEMBER_LABEL = "Remember this trusted device"/);
-  // Signing out first: a link for the person a browser is signed in as keeps that session, which is not asked again.
-  assert.ok(words.includes("Sign out, sign in again, and it is asked again"));
-  assert.match(read("docs/console.md"), /once 10 minutes have passed it is not offered again: sign out and sign in/);
-  assert.match(read("admin/src/console/device-trust.mjs"), /REMEMBER_FRESH_MS = 10 \* 60000/);
+  assert.match(read("admin/src/console/signin.mjs"), /<input type="checkbox" name="remember" checked>/);
+  // The code to type, as `link` prints it, with each one's life.
+  assert.ok(words.includes("`./node_modules/.bin/pi-dispatch-console link` prints a link and a short code such as `K7QX-9M2D`. Open the link within 60 seconds, or type the code on the sign-in page within 5 minutes"));
+  assert.match(read("admin/src/console/login-codes.mjs"), /export const LINK_TTL_MS = 60000;/);
+  assert.match(read("admin/src/console/login-codes.mjs"), /export const SHORT_TTL_MS = 5 \* 60000;/);
+  assert.match(read("admin/src/console/cli.mjs"), /const made = mintSignIn\(signInName\(\), port, \{ short: true \}\);/);
   // The folder's shortcut: bootstrap makes it, and it starts a stopped console before signing in.
   assert.ok(words.includes("`./pi-dispatch console` starts the page if it stopped, opens it and signs you in"));
   assert.match(read("worker/src/console-install.mjs"), /const shortcut = ensureConsoleShortcut\(dir, fs\);/);

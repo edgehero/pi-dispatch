@@ -325,7 +325,10 @@ test("the sign-in pages: the skip link to sign-in, the sprite, a top bar of the 
   }
   // What each page's script finds, by id, drawn by hand with the kit's classes (the kit refuses those ids).
   const login = String(loginPage());
-  assert.ok(login.includes(`<form id="login-form" class="signin__form" autocomplete="off" hidden data-reveal><div class="field"><label for="token">Console token</label><input id="token" class="input input--code" name="token" type="password" autocomplete="off" spellcheck="false" required aria-describedby="notice"></div><button class="btn btn--primary btn--lg" type="submit">Sign in</button></form>`));
+  assert.ok(login.includes(`<form id="login-form" class="signin__form" autocomplete="off" hidden data-reveal><div class="field"><label for="token">Console token</label><input id="token" class="input input--code" name="token" type="password" autocomplete="off" spellcheck="false" required aria-describedby="notice"></div><button class="btn btn--lg" type="submit">Sign in with the token</button></form>`));
+  // Issue #882: the Sign-in code form, first, with the primary button; the script finds it and its field by id.
+  assert.ok(login.includes(`<form id="code-form" class="signin__form" autocomplete="off" hidden data-reveal><div class="field"><label for="signin-code">Sign-in code</label><input id="signin-code" class="input input--code" name="code" type="text" inputmode="text" autocomplete="one-time-code" autocapitalize="characters" spellcheck="false" maxlength="32" placeholder="XXXX-XXXX" required aria-describedby="notice"><p class="signin__hint muted">The 8 characters <span class="code">pi-dispatch-console link</span> prints. It works once, for 5 minutes.</p></div><button class="btn btn--primary btn--lg" type="submit">Sign in</button></form>`));
+  assert.ok(login.indexOf('id="code-form"') < login.indexOf('id="login-form"'), "the code first");
   assert.equal(count(login, 'id="notice"'), 1);
   assert.equal(count(String(loginCodePage()), 'id="notice"'), 1);
 });
@@ -362,27 +365,31 @@ test("the sign-in card: one notice region holding every notice, hidden but the s
   assert.ok(text.includes('<p class="muted">Run this in your deployment folder to sign in:</p><div class="cmd"><code><span>./pi-dispatch</span> <span>console</span></code>'), "the one command first, with nothing to fill in");
   assert.ok(text.includes("<code><span>./node_modules/.bin/pi-dispatch</span> <span>console</span></code>") && text.includes("<code><span>/dispatch</span> <span>console</span> <span>--link</span></code>"));
   assert.ok(text.indexOf("<details><summary>Make a token instead</summary>") < text.indexOf("<code><span>pi-dispatch-console</span> <span>token</span>"), "the token is behind its disclosure");
-  // Without a script the form and its lead-in are not drawn (signin.mjs); the script reveals the two of them.
-  assert.ok(text.includes('<p class="muted" hidden data-reveal>Paste a console token, or open a one-time link.</p>'));
-  assert.equal(count(text, "data-reveal"), 2);
+  // Without a script the forms and their lead-in are not drawn (signin.mjs); the script reveals them: the lead-in, the code's form, the rule
+  // between the two forms and the token's form (issue #882).
+  assert.ok(text.includes('<p class="muted" hidden data-reveal>Type the sign-in code from your terminal, or paste a console token.</p>'));
+  assert.equal(count(text, "data-reveal"), 4);
   // A command in a notice is in the code face; the other notice's text stays the script's, set as text.
   assert.ok(text.includes('<p class="banner__s">An operator should run <span class="code">pi-dispatch doctor</span> on the host.</p>'));
   assert.ok(!Object.values(SIGN_IN_NOTICES).some((n) => /`/.test(n.title)), "no title carries a code mark");
-  // No token's prefix anywhere, so the leak canary holds on the sign-in page too; no placeholder at all.
-  assert.ok(!/pdc_/.test(text) && !/placeholder=/.test(text));
-  // The footer follows the bind: loopback, a unix socket, or nothing for a bind that may not be loopback.
+  // No token's prefix anywhere, so the leak canary holds on the sign-in page too; the one placeholder is the code's shape (issue #882), never a code.
+  assert.ok(!/pdc_/.test(text));
+  assert.deepEqual([...text.matchAll(/placeholder="([^"]*)"/g)].map((m) => m[1]), ["XXXX-XXXX"]);
+  // The footer follows the bind: localhost (issue #882), another loopback address, a unix socket, or nothing for a bind that may not be loopback.
   const foot = (listen) => /<p class="signin__foot faint">([^<]*)<\/p>/.exec(String(signInContent({ listen })))?.[1] ?? null;
-  for (const host of ["127.0.0.1", "127.1.2.3", "::1"]) assert.equal(foot({ kind: "tcp", host, port: 4790 }), LISTEN_FOOTERS.loopback.replace("'", "&#39;"), host);
+  for (const host of ["127.0.0.1", "::1", "0:0:0:0:0:0:0:1"]) assert.equal(foot({ kind: "tcp", host, port: 4790 }), LISTEN_FOOTERS.localhost, host);
+  for (const host of ["127.1.2.3", "127.0.0.2"]) assert.equal(foot({ kind: "tcp", host, port: 4790 }), LISTEN_FOOTERS.loopback.replace("'", "&#39;"), host);
   assert.equal(foot({ kind: "unix", path: "/run/x.sock" }), LISTEN_FOOTERS.unix.replace("'", "&#39;"));
   for (const listen of [{ kind: "tcp", host: "0.0.0.0", port: 4790 }, { kind: "tcp", host: "192.168.1.2" }, { kind: "tcp" }, "public", null, undefined, {}, "nope", "TCP"]) assert.equal(foot(listen), null, JSON.stringify(listen));
-  // The server's own words: "tcp" is a loopback TCP listener (it sends "public" for any other), "unix" a socket.
+  // The server's own words: "localhost" is 127.0.0.1 or ::1, "tcp" another loopback TCP listener (it sends "public" for any other), "unix" a socket.
   for (const word of ["tcp", "loopback"]) assert.equal(foot(word), LISTEN_FOOTERS.loopback.replace("'", "&#39;"), word);
+  assert.equal(foot("localhost"), LISTEN_FOOTERS.localhost);
   assert.equal(foot("unix"), LISTEN_FOOTERS.unix.replace("'", "&#39;"));
   assert.ok(!String(signInContent({ listen: { kind: "unix", path: "/run/secret/x.sock" } })).includes("/run/secret"), "never the socket's path");
   // The page as the server draws it carries the reason it was given and the footer of its bind.
   const page = String(loginPage({ notice: "revoked", listen: { kind: "tcp", host: "127.0.0.1" } }));
   assert.deepEqual(shown(page), ["ended-revoked"]);
-  assert.ok(page.includes(LISTEN_FOOTERS.loopback.replace("'", "&#39;")));
+  assert.ok(page.includes(LISTEN_FOOTERS.localhost));
   assertClean("login.revoked", page);
 });
 

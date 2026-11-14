@@ -77,7 +77,7 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
 | The operator's browser | **Operator, while it holds a session** | A signed-in browser acts as the token's person. Every other page that browser opens, including one on another `localhost` port, is **None**: the console refuses its writes by origin, not by trust in the browser |
 | The console tokens file (`PI_CONSOLE_TOKENS_FILE`) | **Operator, the same trust as the deployment's `.env`** | It says who may sign in. It holds sha256 hashes only, so a copy signs no one in, but whoever can WRITE it can add a person. The console refuses to start on one that is group or world accessible, a symlink or another account's; the pi extension guards it from its own session's `write` and `edit`; doctor fails it inside any path a job container can see (a local trigger's `run.folder` or `run.skillsDir`, a `PI_DISPATCH_RUN_ROOTS` root, `PI_GLOBAL_PI_DIR`) |
 | The remembered devices (`console-devices/` beside the tokens file) | **Operator, the same trust as the tokens file** | Each record is a standing sign-in as its token, so whoever can write the folder can sign in. It holds hashes only, so a copy signs no one in, and it is owner-only, guarded from the agent's `write` and `edit`, and judged by doctor. Residual: cookies ignore ports, so a remembered browser sends its device cookie to every port on the console's host name for up to 400 days, where an ordinary session cookie lasted at most 12 hours. Any local service the browser opens on that name receives it. Use the console's own name for nothing else, and remove a device you no longer use. |
-| The login-code drop directory (`console-login-codes/` beside the tokens file) | **Operator, the same trust as the tokens file** | `pi-dispatch-console link`, `pi-dispatch-console open` (issue #849) and, since issue #708, `/dispatch console --link` write a one-time code's hash there (directory 0700, file 0600, 60 seconds, consumed by the first `unlink` that wins; the panel appends its audit row first). Whoever can write it can mint a login, which is why it must be the deployment account's alone, and why the pi extension guards the directory, every path under it, from its own session's `write` and `edit`, as it guards the tokens file |
+| The login-code drop directory (`console-login-codes/` beside the tokens file) | **Operator, the same trust as the tokens file** | `pi-dispatch-console link`, `pi-dispatch-console open` (issue #849) and, since issue #708, `/dispatch console --link` write a one-time code's hash there (directory 0700, file 0600, 60 seconds, consumed by the first `unlink` that wins; the panel appends its audit row first), and since issue #882 `link` and `/dispatch console --link` a short code's beside it (8 characters of base32 to type, 5 minutes, the same rules). Whoever can write it can mint a login, and whoever can list it can work a short code out of its file name in minutes, which is why it must be the deployment account's alone, and why the pi extension guards the directory, every path under it, from its own session's `write` and `edit`, as it guards the tokens file |
 | Receiver, worker, queue, admin extension, operator console, sandbox gateway | Trusted | They never execute agent-authored content: the admin extension feeds only PII-free, fixed-enum run records to the model; raw container output stays in the overlay viewer. The operator console renders untrusted text as data only: escaped, behind the operator role, and never in a list view |
 
 ## What is defended
@@ -328,7 +328,9 @@ The threat model, and what answers each part:
   and the console's script and stylesheet needs a session, and a session needs a named token (256 random bits) or a
   one-time login code that only the deployment's account can mint, or a remembered device that one of those made
   (issue #849, below). Login attempts are rate limited and every failure is
-  audited. In unix-socket mode the socket is 0600 in a directory only the deployment's account can enter, so another
+  audited. The short sign-in code a person types (issue #882) holds 40 bits, not 256: the one global limit (5 attempts a
+  minute after a burst of 10) leaves at most 35 guesses in its 5 minutes, about one chance in 30 billion. That limit is
+  shared, so a local account that keeps spending it slows the operator's own sign-in; the unix socket removes that. In unix-socket mode the socket is 0600 in a directory only the deployment's account can enter, so another
   account cannot connect at all.
 - **The job container reaching loopback through the host gateway.** On Docker Desktop `host.docker.internal`
   reaches the host's loopback listeners, so a job may be able to open a connection to the console. The console
@@ -418,7 +420,8 @@ The threat model, and what answers each part:
 - **A remembered browser** (issue #849). A person may ask the console to remember a browser, which then stays signed in
   across idle periods and restarts: its cookie holds a 256-bit secret, HttpOnly and SameSite=Strict, and the console
   keeps only its hash, in an owner-only folder beside the tokens file. A device is made only by a sign-in that has just
-  proved itself (a token, or a one-time link, within 10 minutes), only for an operator or a viewer (never an `agent`
+  proved itself (a token, or a one-time link, within 10 minutes; since issue #882 a link or a sign-in code the host
+  made remembers the browser at once, and the token form's box starts ticked), only for an operator or a viewer (never an `agent`
   token, never a viewer invitation), and only where its cookie does not cross a network in plain text: a loopback
   bind, a unix socket reached as `localhost` through its tunnel, or an enrolled HTTPS origin, judged by the bind and
   the origin: under a public bind the Host header decides nothing, since any client can set it, and under a loopback

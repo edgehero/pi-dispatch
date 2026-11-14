@@ -1,7 +1,7 @@
 {
   "card": "AccessStates",
   "pr": 2,
-  "words": "58bb04f2e6013155b9ebd212300053a432dd3d4d9f0f1645761936957d095cbc",
+  "words": "0acd449f69ec462bba57d5d0a906428ba7781e425e20836447872d7fe323c9b4",
   "elements": [
     {"el":"p-link-wait","kind":"panel","status":"new","as":"p-link","source":"admin/src/console/signin.mjs#linkContent","golden":["login-code.anonymous","panels/login-code-refused-rate.anonymous"],"shows":"data-link-state=\"wait\" hidden data-reveal>","reason":"the state the page opens in, drawn for the script to reveal: without a script it never signs in, and the page says only that it needs one"},
     {"el":"p-link-used","kind":"panel","status":"new","as":"p-link","source":"admin/src/console/signin.mjs#linkContent","golden":["panels/login-code-used.anonymous","panels/login-code-refused-tokens.anonymous","panels/login-code-refused-audit.anonymous","panels/login-code-refused-other.anonymous"],"shows":"data-link-state=\"used\" hidden data-reveal>","reason":"a golden draws the state the script switches to as the state the page opens in; after a 503, 500 or another status the used state carries the notice that says why; a 429 is the limiter's, answered before the code is read, so the page stays in the wait state with the rate notice"},
@@ -13,6 +13,11 @@
     {"el":"A used, expired or unknown link says so and gives the command for a new link","kind":"readme","status":"new","panel":"p-link","source":"admin/src/console/signin.mjs#linkContent","golden":["panels/login-code-used.anonymous"],"shows":"<code><span>./pi-dispatch</span> <span>console</span></code>"},
     {"el":"\"Sign in with a token instead\"","kind":"readme","status":"new","panel":"p-link","source":"admin/src/console/signin.mjs#linkContent","golden":["login-code.anonymous"],"shows":"Sign in with a token instead"},
     {"el":"Without JavaScript the page says only \"The console needs JavaScript to sign in.\"","kind":"readme","status":"new","source":"admin/src/console/signin.mjs#linkContent","holds":"${NO_SCRIPT}\n${states}","sentence":"admin/src/console/signin.mjs#NO_SCRIPT_TEXT","golden":["login-code.anonymous","login.anonymous"],"shows":"<div class=\"card signin\">\n<noscript>","reason":"first in each sign-in card, as a notice; every state of the link page, and the sign-in page's token form, are drawn hidden for the script to reveal, so without one the link page says that alone and the sign-in page shows only what works (why a session ended, the help, where it answers)"},
+    {"el":"Sign-in code: pi-dispatch-console link prints a code to type beside the link","kind":"readme","status":"new","source":"admin/src/console/cli.mjs#USAGE","holds":"a one-time sign-in link (60 seconds) and a code to type (5 minutes)"},
+    {"el":"The link works once within 60 seconds and the code once within 5 minutes; each is its own","kind":"readme","status":"new","source":"admin/src/console/login-codes.mjs#mintLoginCode","holds":"shortTtlMs","reason":"each is filed under its own hash and spent by its own unlink; tying the two so the first one used ends the other is rejected in login-codes.mjs, since /dispatch console --link hands its link to this machine's browser at once"},
+    {"el":"Remembered: a sign-in with a link or a code the host made remembers the browser without asking, wherever the console may remember one","kind":"readme","status":"new","source":"admin/src/console/server.mjs#rememberAllowed","holds":"rememberTransportOk(ctx)"},
+    {"el":"The top bar says remembered","kind":"readme","status":"real","source":"admin/src/console/shell.mjs#REMEMBERED_WORD","golden":["panels/devices-remembered.operator"],"shows":"Operator, remembered","reason":"issue #849's mark, drawn after any remembered sign-in"},
+    {"el":"A viewer invitation and an agent token are never remembered","kind":"readme","status":"new","source":"admin/src/console/server.mjs#rememberAllowed","holds":"!invited && REMEMBER_ROLES.includes(role)"},
     {"el":"An operator sees reasons, transcripts, phase names, chat, Audit and every action, each as preview then Confirm","kind":"readme","status":"real","source":"admin/src/console/panels/common.mjs#canAct"},
     {"el":"Viewer: \"Failure reasons are shown to operators only.\"","kind":"readme","status":"real","source":"admin/src/console/panels/fleet.mjs#fleetFailed","golden":["fleet.viewer"],"shows":"Failure reasons are shown to operators only."},
     {"el":"Viewer: \"Phase names and the run's note are shown to operators only.\"","kind":"readme","status":"real","source":"admin/src/console/panels/run.mjs#runProgress","golden":["run-live.viewer"],"shows":"Phase names and the run's note are shown to operators only."},
@@ -39,6 +44,7 @@
     {"el":"p-role-operator","kind":"panel","status":"illustrative","reason":"a card-only comparison; each role's real page is that page's golden for the role"},
     {"el":"p-role-viewer","kind":"panel","status":"illustrative","reason":"a card-only comparison; each role's real page is that page's golden for the role"},
     {"el":"p-role-read-only","kind":"panel","status":"illustrative","reason":"a card-only comparison; the read-only frame is panels/read-only.<role>"},
-    {"el":"gh-f0c2 (failed on mini1) and gh-b3d7 (running, phase 2 of 4), their failure text and phase name","kind":"sample","status":"illustrative","reason":"fixture runs and sample copy (the card's own note)"}
+    {"el":"gh-f0c2 (failed on mini1) and gh-b3d7 (running, phase 2 of 4), their failure text and phase name","kind":"sample","status":"illustrative","reason":"fixture runs and sample copy (the card's own note)"},
+    {"el":"The link's code q3Vd… and the sign-in code K7QX-9M2D","kind":"sample","status":"illustrative","reason":"sample values (the card's own note); a code is never drawn on a console page"}
   ]
 }

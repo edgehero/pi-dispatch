@@ -57,28 +57,30 @@ can read, or one another account owns, and says which. `token add` creates it th
 pi-dispatch-console serve
 ```
 
-`serve` runs in the foreground and listens on `127.0.0.1:4790`. Open `http://127.0.0.1:4790/` and paste your token.
+`serve` runs in the foreground and listens on `127.0.0.1:4790`. Open `http://localhost:4790/` and sign in. Every
+command that prints the console's address names it `localhost`, which every browser takes to this machine; the listen
+address itself stays a number (`PI_CONSOLE_LISTEN`, below).
 Only one `serve` runs per deployment: a second one refuses, naming the first one's lock, because two of them would
 fork the audit log's chain.
 
 As it starts, it prints where it listens, the tunnel for another machine, and how to sign in. It never prints a
-token, only the commands that make one or a one-time link:
+token, only the commands that make one or a one-time link and code:
 
 ```text
-pi-dispatch console on http://127.0.0.1:4790/
+pi-dispatch console on http://localhost:4790/
 from another machine: ssh -L 4790:127.0.0.1:4790 <this host>, then open http://localhost:4790/
-sign in: paste a token (pi-dispatch-console token add --name <you> --role operator makes one), or open a one-time link: pi-dispatch-console link --name <you>
+sign in: pi-dispatch-console link --name <you> prints a one-time link and a code to type; or paste a token (pi-dispatch-console token add --name <you> --role operator makes one)
 ```
 
-On a unix socket the last line ends with `--port <your tunnel's local port>`: a link through a tunnel needs the port
+On a unix socket the `link` command in the last line takes `--port <your tunnel's local port>`: a link through a tunnel needs the port
 you forward, which only you know ([From another machine](#from-another-machine)). The sign-in page gives the commands for a link, with each in a box to copy.
 
 To listen somewhere else, set `PI_CONSOLE_LISTEN`:
 
 | Value | What it does |
 |---|---|
-| `127.0.0.1:4790` | The default. Loopback only. |
-| `[::1]:4790` | IPv6 loopback. |
+| `127.0.0.1:4790` | The default. Loopback only, printed as `http://localhost:4790/`. |
+| `[::1]:4790` | IPv6 loopback, printed as `localhost` too. Another loopback address (`127.0.0.2`) is printed as itself, since `localhost` never reaches it. |
 | `unix:/home/pi/.pi-dispatch/console/console.sock` | A unix socket at mode 0600. The folder must exist, belong to you and be closed to everyone else (`chmod 700`). The path must fit the platform's limit: at most 103 bytes on macOS, 107 on Linux. |
 | any other IP literal | Refused, unless `PI_CONSOLE_BIND_PUBLIC=1`. Doctor then warns. |
 
@@ -159,7 +161,8 @@ To sign in through the tunnel without pasting the token, make the link for your 
 pi-dispatch-console link --name rob --port 4790
 ```
 
-It prints `http://localhost:4790/login/code#<code>`, ready to open on your own machine. The console cannot know that
+It prints `http://localhost:4790/login/code#<code>`, ready to open on your own machine, and a sign-in code to type at
+`http://localhost:4790/login` there instead ([below](#sign-in-without-pasting-the-token)). The console cannot know that
 port (a unix socket has none, and a tunnel can forward any free one), so you name it: `--port` takes a number from 1
 to 65535, a bad one is refused before any link is made, and it is refused on every command but `link` and `open`. Without
 `--port`, `link` on a unix socket prints `<the local port of your ssh -L tunnel>` where the port goes, and `open` uses 4790.
@@ -176,13 +179,36 @@ On the host, as the deployment's account:
 pi-dispatch-console link --name rob
 ```
 
-It prints a link like `http://127.0.0.1:4790/login/code#<code>`. Open it within 60 seconds (through a tunnel, add
-`--port <your tunnel's local port>` and the link is printed for it, [above](#from-another-machine)). The code is not
-your token: it signs in `rob` once and is then gone, and it sits after the `#`, which your browser never sends to a
-server, so it does not land in a request log or a `Referer`. A small script on the page posts it. The codes are files
-in `console-login-codes/` beside the tokens file, a folder only the deployment's account can open. If that folder is
-ever open to other accounts, the console refuses it: remove the folder (what it holds cannot be trusted) and make a
-new link, which creates it again.
+It prints two ways in, each good for one sign-in:
+
+```text
+http://localhost:4790/login/code#<code>
+open it within 60 seconds; it works once
+or type this sign-in code at http://localhost:4790/login within 5 minutes; it works once too: K7QX-9M2D
+```
+
+Open the link within 60 seconds, or type the code on the sign-in page within 5 minutes: on this machine, on another
+computer through its tunnel, or on a phone that can reach the console. The link alone goes to standard output, so a
+script that reads it reads what it always did; the code and the words around it go to standard error, for you. (Through
+a tunnel, add `--port <your tunnel's local port>` and both are printed for it, [above](#from-another-machine).) The two
+are separate: using one leaves the other working until its own time runs out, so you can open the link here and type
+the code on a phone.
+
+The **code** is 8 characters in two groups of four. Type it as you like: capitals or not, with the dash or without,
+and an O for a zero or an I or L for a one all work, since the code uses no letter you could mistake for another
+(Crockford's base32: no I, L, O or U). Every sign-in attempt counts against the console's sign-in limit (5 a minute,
+after a burst of 10), so in a code's 5 minutes at most 35 guesses can be made against about a million million codes.
+Like the link, a code is a file in `console-login-codes/` named by its hash, and is gone once used.
+
+The **link**'s code is not your token: it signs in `rob` once and is then gone, and it sits after the `#`, which your
+browser never sends to a server, so it does not land in a request log or a `Referer`. A small script on the page
+posts it. The codes are files in `console-login-codes/` beside the tokens file, a folder only the deployment's account
+can open: whoever could list it could work out a short code from its file name, which is why the console refuses the
+folder the moment it is open to other accounts. Remove it then (what it holds cannot be trusted) and make a new link,
+which creates it again.
+
+A link or a code **remembers the browser** it signs in ([Remembered browsers](#remembered-browsers)): someone at the host
+made it, so the browser stays signed in without asking.
 
 The link's page says "Signing in with a one-time link" while it works. A link that was used, has expired or is
 unknown says so and gives the command for a new one (`./pi-dispatch console` in the deployment folder, and
@@ -195,19 +221,22 @@ attempts at once (the console's sign-in limit) do not use the link up: the conso
 reads the code, so the page keeps saying it is signing in, tells you to wait a minute, and the same link still works
 within its 60 seconds; open it again. A new link pasted into a tab that shows this page loads the page again for it.
 
-The sign-in page itself says why a sign-in was refused, one notice at a time above the field: a token that is not
-valid for this console, too many attempts (wait a minute), a tokens file the console cannot use right now (an
-operator should run `pi-dispatch doctor` on the host), or an audit log it could not write, which refuses the sign-in.
-(A used or expired link is said on the link's own page, above.) A sign-in that reaches nothing keeps the page and is
-sent again every 2 seconds until the console answers, for at most 30 tries or 60 seconds: then nothing more is sent,
-the page no longer holds the token, and it asks you to paste it and press Sign in again once the console is back.
-The field is cleared as soon as you press Sign in. Under it, "No token yet?" gives the command that signs you in (`./pi-dispatch console` in the deployment folder), its longer spelling, and
-the pi command for a link (`/dispatch console --link`), then, behind "In a browser that is not your default one",
-`./node_modules/.bin/pi-dispatch-console link`, which prints a link to paste rather than opening the default browser
-(which would use it at once), and the host command for a token behind "Make a token instead", each in a box to copy, and a line says where
-the console answers: on this host's loopback address only, on its unix socket only, or nothing about it on a public
-bind. Signing in needs JavaScript. A page without it says so first, and shows only what still holds: the token form,
-its lead-in and the link page's "Signing in" state are drawn hidden, and the page's script shows them as it loads.
+The sign-in page has two fields: **Sign-in code** first, for the code `link` prints, and below it **Console token**,
+for a token pasted whole. It says why a sign-in was refused, one notice at a time above the fields: a code that did not
+work (mistyped, used already or more than 5 minutes old), a token that is not valid for this console, too many
+attempts (wait a minute), a tokens file the console cannot use right now (an operator should run `pi-dispatch doctor`
+on the host), or an audit log it could not write, which refuses the sign-in. (A used or expired link is said on the
+link's own page, above.) A sign-in that reaches nothing keeps the page and is sent again every 2 seconds until the
+console answers, for at most 30 tries or 60 seconds: then nothing more is sent, the page no longer holds the code or
+the token, and it asks you to type or paste it again once the console is back.
+A field is cleared as soon as you press its Sign in. Under them, "No code yet?" gives the command that signs you in (`./pi-dispatch console` in the deployment folder), its longer spelling, and
+the pi command for a link (`/dispatch console --link`), then, behind "In another browser, or on another device",
+`./node_modules/.bin/pi-dispatch-console link`, which prints a link to paste and a code to type rather than opening the
+default browser (which would use the link at once), and the host command for a token behind "Make a token instead", each in a box to copy, and a line says where
+the console answers: at localhost on this host only, on another loopback address only, on its unix socket only, or
+nothing about it on a public bind. Signing in needs JavaScript. A page without it says so first, and shows only what
+still holds: both forms, their lead-in and the link page's "Signing in" state are drawn hidden, and the page's script
+shows them as it loads.
 
 ### From pi: `/dispatch console`
 
@@ -231,9 +260,12 @@ In pi, `/dispatch console` does the same in one step, without a second terminal:
   tunnel, or a `PI_CONSOLE_LISTEN` that points at another deployment's console) it opens or prints the address as it always did, and one line says why no link was made. `--no-link`
   turns the link off. "Local" is judged from the environment pi started in, so a pi started at your desk inside tmux
   and reattached over SSH still hands the link to the desk's browser; use `--no-link` there.
-- **`--link`** makes a one-time sign-in link, like `pi-dispatch-console link`, for an operator token: the one there
-  is, the one you name (`--link rob`; the page goes before `--link`), or the one you pick when there are several. It
-  is shown only to you, in pi's notice: never in the conversation, never a tool. Its row is written to the audit log
+- **`--link`** makes a one-time sign-in link and a code to type, like `pi-dispatch-console link`, for an operator
+  token: the one there is, the one you name (`--link rob`; the page goes before `--link`), or the one you pick when
+  there are several. The code's line names the sign-in page to type it on, with the same page to land on
+  (`/login?next=/runs`). Without `--link`, the link it makes by default comes alone: your browser here uses it at once,
+  so a code beside it would only sit in the notice. Both are
+  shown only to you, in pi's notice: never in the conversation, never a tool. Its row is written to the audit log
   (actor role `panel`) before the code is made, so no code exists that the log does not hold. None is made unless the
   console answers as running, and none in pi's RPC mode (where the notice goes to another program) or where the panel
   cannot see the deployment's tokens file (start pi in the deployment folder, or run `/dispatch setup`). The link
@@ -247,8 +279,8 @@ In pi, `/dispatch console` does the same in one step, without a second terminal:
   The page is opened by your desktop's handler for `.html` files, usually the browser. A snap or Flatpak browser on
   Linux has a private `/tmp` and shows the page as not found; the notice says so, so open the printed link instead.
 
-One-time links do not work on a Windows host: Windows reports every folder as open to other accounts, so the console
-refuses the `console-login-codes/` folder there. Paste the token instead.
+One-time links do not work on a Windows host, and nor do sign-in codes: Windows reports every folder as open to other
+accounts, so the console refuses the `console-login-codes/` folder there. Paste the token instead.
 
 It never starts the console: run `pi-dispatch-console serve` for that, or keep it running with `pi-dispatch service
 install --console` ([above](#keep-it-running-as-a-service)).
@@ -272,10 +304,10 @@ session ends:
 
 A remembered browser's session is the exception to the first two and the last ([Remembered browsers](#remembered-browsers)).
 
-Signing in again in the same browser ends the session it held before, except that a one-time link for the person
+Signing in again in the same browser ends the session it held before, except that a one-time link or code for the person
 this browser is already signed in as keeps that session while it has an hour or more of its longest life left (so
 `/dispatch console`, which makes one by default, does not interrupt what the browser is doing; in a session's last
-stretch the link signs in afresh). Its other open live tabs wait a moment, ask
+stretch the link signs in afresh). The session it keeps is remembered from then on, as a fresh one would be. Its other open live tabs wait a moment, ask
 the console who this browser is now, and reload on the new session only if it is the same person (the same name and
 role); otherwise they go to the sign-in page, which says this browser is now signed in as someone else, so a
 one-time link someone else sent you, opened in another tab, never puts their console into a tab you were using.
@@ -287,12 +319,19 @@ without a token or a link each time. It stays signed in until you sign out in it
 token is revoked or rotated, changes role or `sessions end-all` runs; each of those ends it at its next request, with
 the reason on the sign-in page, also after a restart. Every other rule on this page holds for it.
 
-- **How.** Tick **Remember this trusted device** under the token field when you sign in. It is never ticked for you,
-  and it is drawn only where the console would remember the browser (below). A one-time link has no moment to ask, so
-  the first page after a fresh sign-in that did not ask offers it once: **Remember this browser** or **Not now**.
-  Ignoring it leaves an ordinary sign-in, and once 10 minutes have passed it is not offered again: sign out and sign in
-  with the box ticked. (For a script: `remember: true` with the token on `POST /login`, or `POST /api/device/remember`
-  within 10 minutes of signing in.)
+- **How.** A one-time link or a sign-in code from the host remembers the browser it signs in, at once and without
+  asking: whoever ran `./pi-dispatch console`, `pi-dispatch-console link` or `/dispatch console` on the host has
+  already vouched for it. With a token, **Remember this trusted device** under the token field does it; the box starts
+  ticked, so untick it on a browser that is not yours alone. The box is drawn only where the console would remember the
+  browser (below), and a link or a code remembers nothing anywhere else either: there it is an ordinary sign-in, as
+  before. A token sign-in with the box unticked is offered it once, on its first page: **Remember this browser** or
+  **Not now**. Ignoring it leaves an ordinary sign-in, and once 10 minutes have passed it is not offered again:
+  sign out and sign in with the box ticked. (For a script: `remember: true` with the token on `POST /login`, or
+  `POST /api/device/remember` within 10 minutes of signing in.)
+- **`localhost` and `127.0.0.1` are two browsers' worth.** A browser keeps its cookies by the name in the address bar,
+  so one remembered at `http://127.0.0.1:4790/` is not remembered at `http://localhost:4790/`, the address every
+  command prints now. Sign in once at `localhost` (`./pi-dispatch console` opens it signed in), and remove the old
+  one on Remembered browsers when you like.
 - **Seeing and undoing it.** The top bar says **remembered** beside your role, and puts a ring round your avatar,
   which is what a phone shows. **Remembered browsers**
   (`/config/devices`, linked from Configuration) shows this browser, every remembered browser (a viewer sees their own)
@@ -528,6 +567,11 @@ target and its outcome, and for a write the digests of the file before and after
 the reserve it showed (`reserve`, in micro-dollars), and a bulk action writes one line per job, each with the size of
 the batch (`count`). It never holds a token, a code, a cookie or what was sent: an answer to a parked run is recorded
 by its sha256, never its text.
+
+A sign-in with a one-time code (`login-code`) says which kind it was in `kind`: `link` for a link opened, `short-code`
+for a code typed on the sign-in page, on the sign-in row and on a refused one alike. The line `pi-dispatch-console link`
+or `/dispatch console --link` writes when it makes a link and a code together has `kind` `link-and-short-code`; one
+for a link alone (`pi-dispatch console`, a bare `/dispatch console`) has none, as before.
 
 **Writes from pi are in the same log.** What you change from the `/dispatch` panel, its commands and dialogs, or what
 the pi extension's tools change after your confirm, is written to this log too, with the role `panel` and your

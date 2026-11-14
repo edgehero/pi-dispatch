@@ -43,8 +43,9 @@ function unspecified(host, family) {
 }
 
 /**
- * Where the probe would ask, for a PI_CONSOLE_LISTEN value: `{ kind: "tcp", host, port, shown }`,
- * `{ kind: "unix", path, shown }`, or `{ unknown: reason }` when nothing may or can be asked.
+ * Where the probe would ask, for a PI_CONSOLE_LISTEN value: `{ kind: "tcp", host, port, shown, url }`,
+ * `{ kind: "unix", path, shown }`, or `{ unknown: reason }` when nothing may or can be asked. `url` is the address a
+ * browser on this host opens (issue #882): `http://localhost:<port>/` for 127.0.0.1, ::1 and an any-address bind.
  */
 export function consoleProbeTarget(value) {
 	const text = typeof value === "string" && value.trim() !== "" ? value.trim() : CONSOLE_DEFAULT_LISTEN;
@@ -62,15 +63,31 @@ export function consoleProbeTarget(value) {
 	if (port === 0) return { unknown: "PI_CONSOLE_LISTEN asks for port 0, so the OS picks the port and only the running console knows it" };
 	if (unspecified(host, family)) {
 		const loopback = family === "ipv4" ? "127.0.0.1" : "::1";
-		return { kind: "tcp", host: loopback, port, shown: `${family === "ipv4" ? loopback : `[${loopback}]`}:${port}` };
+		return { kind: "tcp", host: loopback, port, shown: `${family === "ipv4" ? loopback : `[${loopback}]`}:${port}`, url: `http://localhost:${port}/` };
 	}
 	if (!LOOPBACK.check(host, family)) return { unknown: `PI_CONSOLE_LISTEN names ${host}, which is not a loopback address, and the probe asks nothing across a network` };
-	return { kind: "tcp", host, port, shown: family === "ipv6" ? `[${host}]:${port}` : `${host}:${port}` };
+	const shown = family === "ipv6" ? `[${host}]:${port}` : `${host}:${port}`;
+	return { kind: "tcp", host, port, shown, url: `http://${localhostAddress(host, family) ? `localhost:${port}` : shown}/` };
 }
 
 /**
- * `{ state: "running" | "not-running" | "unknown", target?, reason? }` for the console of `env` (its PI_CONSOLE_LISTEN).
- * `target` is the address asked, as shown; `reason` says why it is not running or cannot be told. Never throws.
+ * True for 127.0.0.1 and ::1 (any spelling), the two addresses a browser reaches as `localhost` (issue #882). The address
+ * a person is told to open says `localhost` for them; the probe itself still dials the literal. The admin's `listenUrl`
+ * (`isLocalhostAddress`) draws the same line, and `admin/test/console-listen.test.mjs` holds the two together.
+ */
+function localhostAddress(host, family) {
+	if (family === "ipv4") return host === "127.0.0.1";
+	try {
+		return new URL(`http://[${host}]/`).hostname === "[::1]";
+	} catch {
+		return false;
+	}
+}
+
+/**
+ * `{ state: "running" | "not-running" | "unknown", target?, url?, reason? }` for the console of `env` (its PI_CONSOLE_LISTEN).
+ * `target` is the address asked, as shown, and `url` the one a browser opens (a TCP console only); `reason` says why it
+ * is not running or cannot be told. Never throws.
  */
 export function probeConsole(env, { request = httpRequest, timeoutMs = 1000 } = {}) {
 	const target = consoleProbeTarget(env?.PI_CONSOLE_LISTEN);
@@ -86,7 +103,7 @@ export function probeConsole(env, { request = httpRequest, timeoutMs = 1000 } = 
 			try {
 				req?.destroy();
 			} catch {}
-			resolvePromise({ target: target.shown, ...result });
+			resolvePromise({ target: target.shown, ...(target.url ? { url: target.url } : {}), ...result });
 		};
 		// Our own timer rather than the socket's idle timeout: that one restarts on every byte, so a listener that trickles
 		// bytes would hold doctor past the second this promises.
