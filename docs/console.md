@@ -2645,8 +2645,10 @@ these extra file/lease reads.
 
 - **Forges:** receiver port, configured forges and their triggering rows, auth source and job token, webhook
   verification and secret key presence, delivery identity, GitHub polling and who may fire. An unconfigured
-  forge explains its 404 route. Missing `WEBHOOK_SECRET` in the deployment's `.env` leads with a warning when
-  GitHub is armed: the receiver refuses to start unless its service environment supplies it. States pair a
+  forge explains its 404 route. GitHub under `GITHUB_INGEST=poll` reads as polled rather than unconfigured: its route
+  answers 404 too, and its auth, polling and who may fire stay shown. Missing `WEBHOOK_SECRET` in the deployment's
+  `.env` leads with a warning when GitHub is armed: the receiver refuses to start unless its service environment
+  supplies it. A `GITHUB_INGEST` the receiver refuses leads with its own warning in that place. States pair a
   glyph with a word. Webhook method/key state and route/delivery identity occupy separate lines; polling
   shows its interval only when configured on. Phone fields keep readable label widths even for a forge armed
   by many triggers; numeric trigger links retain their full accessible names. Live receivers now name their host, actual listening port, bind category, version and beat age. Each served forge

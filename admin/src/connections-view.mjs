@@ -13,7 +13,7 @@ import { isPerMachineHost } from "@edgehero/pi-dispatch/backends";
 import { loadModelEndpoints, MAX_SLOTS, MODEL_ENDPOINT_ID_RE } from "@edgehero/pi-dispatch/model-endpoints";
 import { EXACT_VERSION_RE, NPM_NAME_RE } from "@edgehero/pi-dispatch/packages";
 import { MCP_SERVER_NAME_RE } from "@edgehero/pi-dispatch/mcp-config";
-import { modelEndpointsFilePath, positiveInt, providerFrom, workerName } from "@edgehero/pi-dispatch/config";
+import { GITHUB_INGEST_VALUES, githubIngestFrom, modelEndpointsFilePath, positiveInt, providerFrom, workerName } from "@edgehero/pi-dispatch/config";
 import { providerKeyNames as providerKeyCandidates } from "./provider-key-names.mjs";
 import { endpointSlotKey, hash16 } from "@edgehero/pi-dispatch/fleet-lease";
 import { makeRedisClient } from "@edgehero/pi-dispatch/connection";
@@ -26,7 +26,7 @@ import { readHookRuns, hookRunsView } from "@edgehero/pi-dispatch/hook-runs";
 /** A closed display vocabulary: arbitrary strings, even numeric-looking secrets, are never printed. */
 export const CONNECTION_ENV_TYPES = Object.freeze({
   ...Object.fromEntries(PANEL_SERVICE_KEYS.map((key) => [key, /(?:_FILE|_DIR)$|^(?:TMPDIR|TEMP)$/.test(key) ? "path" : Object.values(DOLLAR_ENV_NAMES).includes(key) ? "decimal" : "present"])),
-  RECEIVER_PORT: "port", RECEIVER_BIND: "present", GITHUB_AUTH_SOURCE: ["app", "pat", "gh"],
+  RECEIVER_PORT: "port", RECEIVER_BIND: "present", GITHUB_AUTH_SOURCE: ["app", "pat", "gh"], GITHUB_INGEST: GITHUB_INGEST_VALUES,
   WEBHOOK_SECRET: "present", GITHUB_PAT: "present", GITHUB_APP_ID: "present", GITHUB_APP_PRIVATE_KEY_PATH: "path", GITHUB_APP_INSTALLATION_ID: "present",
   GITLAB_WEBHOOK_MODE: ["signature", "token"], GITLAB_WEBHOOK_SECRET: "present", GITLAB_TOKEN: "present", GITLAB_URL: "present",
   FORGEJO_WEBHOOK_SECRET: "present", FORGEJO_TOKEN: "present", FORGEJO_URL: "present", FORGEJO_BOT_ID: "present", FORGEJO_PERMISSION_TOKEN: "present",
@@ -41,7 +41,7 @@ export const CONNECTION_ENV_TYPES = Object.freeze({
   PI_MAX_USD_PER_DAY: "decimal", PI_MAX_USD_PER_WEEK: "decimal", PI_MAX_USD_PER_MONTH: "decimal", VALKEY_URL: "present",
 });
 export const FORGE_ACTIVATION_KEYS = Object.freeze({
-  github: ["GITHUB_AUTH_SOURCE"], gitlab: ["GITLAB_WEBHOOK_MODE", "GITLAB_WEBHOOK_SECRET", "GITLAB_TOKEN"],
+  github: ["GITHUB_AUTH_SOURCE", "GITHUB_INGEST"], gitlab: ["GITLAB_WEBHOOK_MODE", "GITLAB_WEBHOOK_SECRET", "GITLAB_TOKEN"],
   forgejo: ["FORGEJO_WEBHOOK_SECRET", "FORGEJO_TOKEN", "FORGEJO_URL"], azure: ["AZURE_WEBHOOK_MODE", "AZURE_WEBHOOK_SECRET", "AZURE_TOKEN", "AZURE_ORG_URL"],
 });
 const ROUTES = Object.freeze({ github: "/", gitlab: "/gitlab", forgejo: "/forgejo", azure: "/azure" });
@@ -66,6 +66,8 @@ export function connectionEnvValue(key, raw, type = CONNECTION_ENV_TYPES[key]) {
   if (typeof raw !== "string") return (CAP_KEY.test(key) || Object.values(DOLLAR_ENV_NAMES).includes(key)) ? "unknown (worker env or default)" : "not set";
   if (type === "path") return raw === "" ? "not set" : basename(raw);
   if (key === "PI_EGRESS" && raw === "") return "empty (on by default)";
+  // The receiver reads an empty GITHUB_INGEST as unset (`githubIngestFrom`), so it is not an invalid option here.
+  if (key === "GITHUB_INGEST" && raw === "") return "not set";
   if (Array.isArray(type)) return type.includes(raw) ? raw : "set (invalid option)";
   if (type === "integer" || type === "port") return /^\d{1,9}$/.test(raw) && (type !== "port" || Number(raw) >= 1 && Number(raw) <= 65535) ? raw : "set (invalid number)";
   if (type === "decimal") return /^\d{1,9}(?:\.\d{1,6})?$/.test(raw) ? raw : "set (invalid number)";
@@ -92,26 +94,40 @@ export async function readEndpointSlots(redis, endpoints, { timeoutMs = 2500 } =
   finally { clearTimeout(timer); }
 }
 
+/**
+ * Which transport carries GitHub here, as the receiver reads GITHUB_INGEST (issue #879): one of its three words,
+ * `inferred` when it is unset (the receiver then decides from the triggers and GITHUB_AUTH_SOURCE), or `invalid` for a
+ * value every receiver command refuses to start on. The parse is the receiver's own, so the two cannot read a word apart.
+ */
+function githubIngestState(env) {
+  try { return githubIngestFrom(env ?? {}) ?? "inferred"; } catch { return "invalid"; }
+}
+
 /** Mirrors receiver activation, pinned against its real loader in connections-view.test.mjs. */
 export function forgeConnections(env, triggers, { unknown = false } = {}) {
   const list = Array.isArray(triggers) ? triggers : [];
   return Object.keys(FORGES).map((name) => {
     const rows = list.filter((t) => t.forge === name && t.type !== "cron" && t.type !== "watch" && !t.disarmed).map((t) => t.index).filter(Number.isInteger);
-    const keys = FORGE_ACTIVATION_KEYS[name].filter((key) => has(env, key));
-    const enabled = unknown ? null : keys.length > 0 || name === "github" && rows.length > 0 ? true : !Array.isArray(triggers) && name === "github" ? null : false;
+    const ingest = name !== "github" || unknown ? null : githubIngestState(env);
+    // A set GITHUB_INGEST is the receiver's whole answer for GitHub, so it is the one activation key then: `poll` arms no
+    // route whatever the rules and auth source say, and `webhook` or `both` arms it with none (issue #879).
+    const keys = ingest !== null && ingest !== "inferred" ? ["GITHUB_INGEST"] : FORGE_ACTIVATION_KEYS[name].filter((key) => has(env, key));
+    const enabled = unknown ? null : ingest === "poll" ? false : keys.length > 0 || name === "github" && rows.length > 0 ? true : !Array.isArray(triggers) && name === "github" ? null : false;
     const source = name === "github" ? (["app", "gh", "pat"].includes(env.GITHUB_AUTH_SOURCE) ? env.GITHUB_AUTH_SOURCE : has(env, "GITHUB_AUTH_SOURCE") ? "invalid" : "gh (default)") : "shared token";
     const auth = name === "github" ? source === "app" ? "GitHub App; a short-lived token for the one repository" : source === "pat" ? "GITHUB_PAT; the host's own token" : source === "invalid" ? "GITHUB_AUTH_SOURCE is invalid; the receiver cannot start" : "gh; the host's own token" : `${name === "azure" ? "AZURE" : name.toUpperCase()}_TOKEN; one shared token`;
     const mode = name === "gitlab" ? env.GITLAB_WEBHOOK_MODE : name === "azure" ? env.AZURE_WEBHOOK_MODE : "hmac";
     const verification = name === "github" || name === "forgejo" ? "HMAC-SHA256" : name === "gitlab" ? mode === "signature" ? "HMAC signature (GitLab 19.0+)" : mode === "token" ? "X-Gitlab-Token; shared secret, no body integrity" : "GITLAB_WEBHOOK_MODE must be signature or token" : mode === "basic" ? "HTTP Basic; shared secret, no body integrity" : mode === "header" ? "Configured header; shared secret, no body integrity" : "AZURE_WEBHOOK_MODE must be basic or header";
     const secretKey = name === "github" ? "WEBHOOK_SECRET" : `${name.toUpperCase()}_WEBHOOK_SECRET`;
-    return { name, path: ROUTES[name], enabled, triggers: rows, activationKeys: keys, source, auth, verification, secret: { key: secretKey, set: unknown ? null : nonblank(env, secretKey) }, deliveryId: FORGES[name].deliveryIdName, access: ACCESS[name], polling: name === "github" ? githubPolling(env, source, unknown) : null };
+    return { name, path: ROUTES[name], enabled, triggers: rows, activationKeys: keys, source, auth, verification, secret: { key: secretKey, set: unknown ? null : nonblank(env, secretKey) }, deliveryId: FORGES[name].deliveryIdName, access: ACCESS[name], polling: name === "github" ? githubPolling(env, source, unknown, ingest) : null, ingest };
   });
 }
 
 /** The poller's own repository/default/floor rules; configured polling does not prove a process is running. */
-function githubPolling(env, auth, unknown) {
+function githubPolling(env, auth, unknown, ingest = "inferred") {
   const unread = { state: "unknown", repos: [], source: null, seconds: null };
-  if (unknown || auth === "invalid") return unread;
+  if (unknown || auth === "invalid" || ingest === "invalid") return unread;
+  // `poll` refuses to start under GITHUB_INGEST=webhook (issue #879), so it is off however the repositories are named.
+  if (ingest === "webhook") return { state: "off", repos: [], source: null, seconds: null };
   const raw = env.POLL_REPOS;
   const declared = typeof raw === "string" && raw.trim() !== "";
   const repos = declared ? [...new Set(raw.split(",").map((s) => s.trim()).filter(Boolean))] : [];
@@ -143,7 +159,10 @@ export function connectionsProblems(hosts, runs = [], forges = []) {
     for (const check of host.forge) problems.push({ kind: "forge", host: host.name, title: `Forge connection failing on ${host.name}`, text: check.label ?? "The host's forge check failed.", fix: check.fix ?? "Check the forge credentials with doctor on that host.", run: null });
     if (host.endpoints) problems.push({ kind: "endpoints", host: host.name, title: `${host.name} reads its own model-endpoints file, and it does not load`, text: host.endpoints.label ?? "The host's endpoints file does not load.", fix: host.endpoints.fix ?? "Correct model-endpoints.json on that host, then render its egress rules.", run: null });
   }
-  if (forges.some((forge) => forge.name === "github" && forge.enabled === true && forge.secret?.set === false)) problems.push({ kind: "receiver", host: null, title: "GitHub receiver needs WEBHOOK_SECRET", text: "WEBHOOK_SECRET is not set in the deployment's .env. The receiver refuses to start unless its service environment sets it.", fix: "Set WEBHOOK_SECRET for the receiver, then restart it.", run: null });
+  // Issue #879: a GITHUB_INGEST every receiver command refuses leads alone, since `serve` refuses on it before it asks for
+  // WEBHOOK_SECRET; a secret problem beside it would send the operator to the wrong line.
+  if (forges.some((forge) => forge.name === "github" && forge.ingest === "invalid")) problems.push({ kind: "receiver", host: null, title: "GITHUB_INGEST is not webhook, poll or both", text: "The deployment's .env sets GITHUB_INGEST to a value every pi-dispatch-receiver command refuses to start on.", fix: "Set GITHUB_INGEST to webhook, poll or both, or delete the line to let the receiver infer it, then restart the receiver's services.", run: null });
+  else if (forges.some((forge) => forge.name === "github" && forge.enabled === true && forge.secret?.set === false)) problems.push({ kind: "receiver", host: null, title: "GitHub receiver needs WEBHOOK_SECRET", text: "WEBHOOK_SECRET is not set in the deployment's .env. The receiver refuses to start unless its service environment sets it.", fix: "Set WEBHOOK_SECRET for the receiver, then restart it.", run: null });
   return problems.sort((a, b) => ["proxy", "receiver", "forge", "endpoints"].indexOf(a.kind) - ["proxy", "receiver", "forge", "endpoints"].indexOf(b.kind));
 }
 
@@ -294,7 +313,7 @@ export function modelConnections(view) {
     hookRuns: hookRunsView(view?.notify?.history),
     subscriptionAuth: subscriptionAuthForAgent(view?.subscriptionAuth),
     receivers: modelReceivers(view?.receiver, view?.now),
-    forges: (view?.forges ?? []).filter((f) => Object.hasOwn(FORGES, f.name)).map((f) => ({ name: f.name, configured: typeof f.enabled === "boolean" ? f.enabled : null, path: ROUTES[f.name], authSource: ["app", "gh", "pat", "gh (default)", "invalid", "shared token"].includes(f.source) ? f.source : "unknown", activationKeys: (f.activationKeys ?? []).filter((k) => FORGE_ACTIVATION_KEYS[f.name].includes(k)), secret: { key: f.name === "github" ? "WEBHOOK_SECRET" : `${f.name.toUpperCase()}_WEBHOOK_SECRET`, set: typeof f.secret?.set === "boolean" ? f.secret.set : null }, triggerCount: (f.triggers ?? []).filter((i) => Number.isSafeInteger(i) && i >= 0).length })),
+    forges: (view?.forges ?? []).filter((f) => Object.hasOwn(FORGES, f.name)).map((f) => ({ name: f.name, configured: typeof f.enabled === "boolean" ? f.enabled : null, path: ROUTES[f.name], authSource: ["app", "gh", "pat", "gh (default)", "invalid", "shared token"].includes(f.source) ? f.source : "unknown", ingest: f.name === "github" && ["webhook", "poll", "both", "inferred", "invalid"].includes(f.ingest) ? f.ingest : null, activationKeys: (f.activationKeys ?? []).filter((k) => FORGE_ACTIVATION_KEYS[f.name].includes(k)), secret: { key: f.name === "github" ? "WEBHOOK_SECRET" : `${f.name.toUpperCase()}_WEBHOOK_SECRET`, set: typeof f.secret?.set === "boolean" ? f.secret.set : null }, triggerCount: (f.triggers ?? []).filter((i) => Number.isSafeInteger(i) && i >= 0).length })),
     egress: { on: typeof view?.egress?.on === "boolean" ? view.egress.on : null, hosts: (view?.egress?.hosts ?? []).filter((h) => name(h.name)).map((h) => ({ name: h.name, state: h.unreadable ? "unknown" : ["ok", "warn", "fail"].includes(h.proxy?.level) ? h.proxy.level : "not-published", stale: h.stale === true })) },
     endpoints: Array.isArray(view?.endpoints) ? view.endpoints.slice(0, 64).filter((ep) => typeof ep.id === "string" && MODEL_ENDPOINT_ID_RE.test(ep.id)).map((ep) => {
       const host = typeof ep.host === "string" && /^[A-Za-z0-9.:[\]-]+$/.test(ep.host) ? ep.host : null;

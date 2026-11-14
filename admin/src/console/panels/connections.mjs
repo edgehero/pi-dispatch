@@ -27,6 +27,12 @@ function polling(poll) {
 }
 
 function forgeRow(f) {
+  // Issue #879: GitHub polled on purpose is not an unconfigured forge. Its auth, polling and who may fire still apply
+  // (the poller runs the same gate), so the row keeps them and says only that the webhook route is not served.
+  if (f.enabled === false && f.name === "github" && f.ingest === "poll") {
+    const auth = f.auth.split("; ");
+    return { cells: [html`<b>${f.name}</b>`, cell(state("polled", f.polling?.state === "on" ? "ok" : "attention"), html`<span class="code">GITHUB_INGEST=poll</span>`), { html: cell(auth[0], auth.length > 1 ? auth.slice(1).join("; ") : null), wide: true }, { html: html`<span class="muted">No webhook: <span class="code">serve</span> mounts no GitHub route, so path <span class="code">${f.path}</span> answers 404</span>`, wide: true }, { html: polling(f.polling), wide: true }, { html: f.access, wide: true }] };
+  }
   if (f.enabled === false) return { cells: [html`<b>${f.name}</b>`, state("not configured"), { html: html`<span class="muted">No activation setting${f.name === "github" ? " or active GitHub trigger" : ""} names it.</span>`, wide: true }, { html: html`<span class="muted">path <span class="code">${f.path}</span> answers 404</span>`, wide: true }, { html: null, hidePhone: true }, { html: null, hidePhone: true }] };
   const auth = f.auth.split("; ");
   const enabled = f.enabled === null ? state("configuration unknown", "attention", "info") : state(html`armed by ${f.triggers.length ? html`${f.triggers.length === 1 ? "trigger" : "triggers"} ${f.triggers.map((index, n) => html`${n ? ", " : null}<a href="${`/config/trigger?index=${index}`}" aria-label="${`Trigger ${index + 1}`}">${index + 1}</a>`)}` : "settings"}`, "ok");
