@@ -10,8 +10,8 @@
  * The id is in every webhook payload and rides the job, so the grammar never has to be parsed at all.
  *
  * REQ-BRANCH-PROTECTION-PRECONDITION / CONST-MERGE-NEVER-AUTOMATIC: `isDefaultBranchProtected` is the free
- * gate the processor consults before spending. GitHub answers it on the branch object (a boolean
- * `protected` since issue #876; before that, a 404 from its protection endpoint meant "unprotected"), and
+ * gate the processor consults before spending. GitHub answers it from the branch object and its active rules
+ * (since issue #876; before that, a 404 from its protection endpoint meant "unprotected"), and
  * issue #61 documents what happens when one forge's answer is carried across a forge boundary -- every
  * branch reports unprotected and the never-merge backstop is silently disarmed. So this reads GitLab's
  * protected-branches LIST, which answers 200 with an array, and treats every non-200 as retryable. There is no code path that turns an error into

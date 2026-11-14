@@ -18,7 +18,8 @@ function fakeOctokitFor(routes) {
 			async request(route, params) {
 				calls.push({ route, params });
 				if (!(route in routes)) throw new Error(`unexpected route: ${route}`);
-				const canned = routes[route];
+				// A function answers per call (a paged read); anything else is the answer every time.
+				const canned = typeof routes[route] === "function" ? routes[route](params) : routes[route];
 				if (canned instanceof Error) throw canned;
 				return { data: canned };
 			},
@@ -37,81 +38,131 @@ const REPO = "owner/name";
 
 // -- isDefaultBranchProtected --------------------------------------------------------------------
 
+const REPO_ROUTE = "GET /repos/{owner}/{repo}";
 const BRANCH_ROUTE = "GET /repos/{owner}/{repo}/branches/{branch}";
-const PROTECTION_ROUTE = "GET /repos/{owner}/{repo}/branches/{branch}/protection";
-/** The host over a fake whose default branch read answers `answer` (a canned body or an Error). */
-const branchReturning = (answer, repoAnswer = { default_branch: "main" }) =>
-	makeGitHubHost({
-		octokitFor: fakeOctokitFor({
-			"GET /repos/{owner}/{repo}": repoAnswer,
-			[BRANCH_ROUTE]: answer,
-		}),
-	});
+const RULES_ROUTE = "GET /repos/{owner}/{repo}/rules/branches/{branch}";
+/** A branch answer: `protected`, and a classic rule (`protection.enabled`) when `classic`. */
+const branchBody = (isProtected, classic = false) => ({ name: "main", commit: { sha: "abc" }, protected: isProtected, protection: { enabled: classic } });
+/** One rule as GitHub's branch rules read answers it. */
+const rule = (type, parameters) => ({ type, ruleset_source_type: "Organization", ruleset_source: "octo", ruleset_id: 7, ...(parameters ? { parameters } : {}) });
+const pullRequestRule = (count) => rule("pull_request", { required_approving_review_count: count, dismiss_stale_reviews_on_push: false });
+/** The host over a fake whose reads answer `branch` and `rules` (a canned body, a function of the params, or an Error). */
+function hostAnswering({ repoAnswer = { default_branch: "main" }, branch = branchBody(true, true), rules } = {}) {
+	const octokitFor = fakeOctokitFor({ [REPO_ROUTE]: repoAnswer, [BRANCH_ROUTE]: branch, ...(rules === undefined ? {} : { [RULES_ROUTE]: rules }) });
+	return { host: makeGitHubHost({ octokitFor }), octokitFor, routes: () => octokitFor.constructions.flatMap((c) => c.calls.map((call) => call.route)) };
+}
 
-test("isDefaultBranchProtected: the default branch's own protected flag answers, true and false (issue #876)", async () => {
-	for (const flag of [true, false]) {
-		const octokitFor = fakeOctokitFor({
-			"GET /repos/{owner}/{repo}": { default_branch: "trunk" },
-			[BRANCH_ROUTE]: { name: "trunk", commit: { sha: "abc" }, protected: flag },
-		});
-		assert.equal(await makeGitHubHost({ octokitFor }).isDefaultBranchProtected(REPO, "tok"), flag);
-		// Reads default_branch first, then the branch it named. Never the protection endpoint, which needs
-		// Administration: read and sees no ruleset.
-		const calls = octokitFor.constructions[0].calls;
-		assert.deepEqual(calls.map((c) => c.route), ["GET /repos/{owner}/{repo}", BRANCH_ROUTE]);
-		assert.deepEqual(calls[1].params, { owner: "owner", repo: "name", branch: "trunk" });
-		assert.ok(!calls.some((c) => c.route === PROTECTION_ROUTE));
-		assert.equal(octokitFor.constructions.length, 1, "one client, for this token");
+test("isDefaultBranchProtected: a classic rule admits the branch from the branch read alone, as the old check did (issue #876)", async () => {
+	const octokitFor = fakeOctokitFor({ [REPO_ROUTE]: { default_branch: "trunk" }, [BRANCH_ROUTE]: branchBody(true, true) });
+	assert.equal(await makeGitHubHost({ octokitFor }).isDefaultBranchProtected(REPO, "tok"), true);
+	const calls = octokitFor.constructions[0].calls;
+	assert.deepEqual(calls.map((c) => c.route), [REPO_ROUTE, BRANCH_ROUTE], "no rules read, and never the protection endpoint, which needs Administration: read");
+	assert.deepEqual(calls[1].params, { owner: "owner", repo: "name", branch: "trunk" });
+	assert.equal(octokitFor.constructions.length, 1, "one client, for this token");
+});
+
+test("isDefaultBranchProtected: protected false refuses from the branch read alone", async () => {
+	const { host, routes } = hostAnswering({ branch: branchBody(false) });
+	assert.equal(await host.isDefaultBranchProtected(REPO, "tok"), false);
+	assert.deepEqual(routes(), [REPO_ROUTE, BRANCH_ROUTE]);
+});
+
+test("isDefaultBranchProtected: a ruleset that blocks nothing does not protect -- protected: true from copilot_code_review alone refuses (issue #876)", async () => {
+	// Measured read-only on 2026-11-14: github/scientist@main answers protected: true, protection.enabled: false, and
+	// these two organization rules are all it has. Read as protected, every repository of such an organization would
+	// pass while nothing stopped the job's token pushing to the default branch.
+	const { host, routes, octokitFor } = hostAnswering({ branch: branchBody(true, false), rules: [rule("copilot_code_review", { review_on_push: false }), rule("license_compliance_scanning")] });
+	assert.equal(await host.isDefaultBranchProtected(REPO, "tok"), false);
+	assert.deepEqual(routes(), [REPO_ROUTE, BRANCH_ROUTE, RULES_ROUTE]);
+	assert.deepEqual(octokitFor.constructions[0].calls[2].params, { owner: "owner", repo: "name", branch: "main", per_page: 100, page: 1 });
+});
+
+test("isDefaultBranchProtected: a ruleset's pull_request rule protects only when it requires an approval (issue #876)", async () => {
+	for (const [rules, expected, why] of [
+		[[pullRequestRule(1)], true, "one approval"],
+		[[rule("deletion"), pullRequestRule(2)], true, "two approvals beside another rule"],
+		[[pullRequestRule(0), pullRequestRule(0), pullRequestRule(1)], true, "rulesets aggregate: the strictest pull_request rule counts"],
+		[[pullRequestRule(0)], false, "no approval: the agent could open and merge its own pull request"],
+		[[rule("deletion"), rule("non_fast_forward"), rule("required_linear_history")], false, "rules that stop no push of a new commit"],
+		[[rule("pull_request")], false, "no parameters"],
+		[[pullRequestRule("1")], false, "a count that is not an integer"],
+		[[], false, "no active rule (an evaluated or disabled ruleset is not returned)"],
+	]) {
+		const { host } = hostAnswering({ branch: branchBody(true, false), rules });
+		assert.equal(await host.isDefaultBranchProtected(REPO, "tok"), expected, why);
 	}
 });
 
-test("isDefaultBranchProtected: an answer without a boolean protected is retried, never read as unprotected (issue #876)", async () => {
+test("isDefaultBranchProtected: the rules read is paged, stops at the first qualifying rule, and retries past its cap (issue #876)", async () => {
+	const full = Array.from({ length: 100 }, () => rule("deletion"));
+	const asked = [];
+	const { host } = hostAnswering({ branch: branchBody(true, false), rules: (params) => (asked.push(params.page), params.page === 1 ? full : params.page === 2 ? [pullRequestRule(1)] : new Error("read past the answer")) });
+	assert.equal(await host.isDefaultBranchProtected(REPO, "tok"), true, "a qualifying rule on the second page");
+	assert.deepEqual(asked, [1, 2]);
+
+	const { host: shortSecond } = hostAnswering({ branch: branchBody(true, false), rules: (params) => (params.page === 1 ? full : [rule("deletion")]) });
+	assert.equal(await shortSecond.isDefaultBranchProtected(REPO, "tok"), false, "a short page is the last");
+
+	const pages = [];
+	const { host: endless } = hostAnswering({ branch: branchBody(true, false), rules: (params) => (pages.push(params.page), full) });
+	await assert.rejects(() => endless.isDefaultBranchProtected(REPO, "tok"), (e) => e.piDispatchRetry === true && /more than 1000 active rules/.test(e.message));
+	assert.equal(pages.length, 10, "bounded");
+});
+
+test("isDefaultBranchProtected: an empty repository's missing default branch is unprotected, determinately (issue #876)", async () => {
+	// GitHub answers an empty repository's default branch 404 "Branch not found". The repository read just succeeded,
+	// so this is no blind token; the protection endpoint's 404 refused it as unprotected-branch before #876 too.
+	const { host, routes } = hostAnswering({ branch: Object.assign(httpError(404), { message: "Branch not found" }) });
+	assert.equal(await host.isDefaultBranchProtected(REPO, "tok"), false);
+	assert.deepEqual(routes(), [REPO_ROUTE, BRANCH_ROUTE]);
+});
+
+test("isDefaultBranchProtected: an answer of the wrong shape is retried, never read as unprotected (issue #876)", async () => {
 	for (const body of [{ name: "main" }, { name: "main", protected: null }, { name: "main", protected: "false" }, { name: "main", protected: 0 }, null]) {
 		await assert.rejects(
-			() => branchReturning(body).isDefaultBranchProtected(REPO, "tok"),
+			() => hostAnswering({ branch: body }).host.isDefaultBranchProtected(REPO, "tok"),
 			(e) => e.piDispatchRetry === true && e.name === "InfraRetry" && /without a boolean protected/.test(e.message),
 			JSON.stringify(body),
 		);
 	}
-});
-
-test("isDefaultBranchProtected: a repository that names no default branch is retried, not unprotected", async () => {
+	for (const rules of [{ rules: [] }, null, "pull_request"]) {
+		await assert.rejects(
+			() => hostAnswering({ branch: branchBody(true, false), rules }).host.isDefaultBranchProtected(REPO, "tok"),
+			(e) => e.piDispatchRetry === true && /without a list/.test(e.message),
+			JSON.stringify(rules),
+		);
+	}
 	for (const repoAnswer of [{}, { default_branch: "" }, { default_branch: 7 }]) {
 		await assert.rejects(
-			() => branchReturning({ protected: true }, repoAnswer).isDefaultBranchProtected(REPO, "tok"),
+			() => hostAnswering({ repoAnswer }).host.isDefaultBranchProtected(REPO, "tok"),
 			(e) => e.piDispatchRetry === true && /no default branch/.test(e.message),
 			JSON.stringify(repoAnswer),
 		);
 	}
 });
 
-test("isDefaultBranchProtected: a 404 on the branch is retried -- it is never the unprotected answer any more (issue #876)", async () => {
-	// The protection endpoint's 404 meant "no rule"; the branch's 404 means the branch or the repository is not
-	// there for this token, which says nothing about protection.
-	await assert.rejects(
-		() => branchReturning(httpError(404)).isDefaultBranchProtected(REPO, "tok"),
-		(e) => e.piDispatchRetry === true && e.name === "InfraRetry",
-	);
-});
-
 /** A 403 as octokit builds one: `HttpError`, a status, GitHub's message, and the response's headers. */
 function forbidden(message, headers = { "content-type": "application/json; charset=utf-8" }) {
 	return Object.assign(new Error(message), { name: "HttpError", status: 403, response: { headers } });
 }
+/** The same answer placed at each of the three reads in turn. */
+const atEachRead = (answer) => [
+	hostAnswering({ repoAnswer: answer }).host,
+	hostAnswering({ branch: answer }).host,
+	hostAnswering({ branch: branchBody(true, false), rules: answer }).host,
+];
 
-test("isDefaultBranchProtected: a 403 that is no rate limit refuses determinately as branch-protection-unreadable, never true or false (issue #876)", async () => {
-	// GitHub's answer to a token that may not read the branch: a fine-grained token without Contents: read, a token
-	// not authorized for an organization's single sign-on. Each is the same on every retry, so it is a config error
-	// carrying the reason, on the branch read and on the repository read before it alike.
-	const answers = [
+test("isDefaultBranchProtected: a 403 that is no rate limit refuses determinately as branch-protection-unreadable, at any of the three reads (issue #876)", async () => {
+	// GitHub's answer to a token that may not make the read: a fine-grained token without access to the repository's
+	// contents, a token not authorized for an organization's single sign-on. Each is the same on every retry.
+	for (const answer of [
 		forbidden("Resource not accessible by personal access token"),
 		forbidden("Resource not accessible by integration"),
 		forbidden("Resource protected by organization SAML enforcement. You must grant your Personal Access token access to this organization."),
 		forbidden("Resource not accessible by integration", {}),
 		httpError(403),
-	];
-	for (const answer of answers) {
-		for (const host of [branchReturning(answer), branchReturning({ protected: true }, answer)]) {
+	]) {
+		for (const host of atEachRead(answer)) {
 			await assert.rejects(
 				() => host.isDefaultBranchProtected(REPO, "tok"),
 				(e) => {
@@ -127,24 +178,28 @@ test("isDefaultBranchProtected: a 403 that is no rate limit refuses determinatel
 	}
 });
 
-test("isDefaultBranchProtected: a rate-limited 403 is retried, by every signal transient.mjs reads (issue #876)", async () => {
+test("isDefaultBranchProtected: a rate-limited 403 is retried at any of the three reads, by every signal transient.mjs reads (issue #876)", async () => {
 	for (const answer of [
 		forbidden("API rate limit exceeded for installation", { "content-type": "application/json", "x-ratelimit-remaining": "0", "x-ratelimit-reset": "1999999999" }),
 		forbidden("You have exceeded a secondary rate limit", { "content-type": "application/json", "retry-after": "60" }),
 		forbidden("You have exceeded a secondary rate limit. Please wait a few minutes before you try again."),
 		forbidden("<html>Access denied</html>", { "content-type": "text/html" }),
 	]) {
-		await assert.rejects(
-			() => branchReturning(answer).isDefaultBranchProtected(REPO, "tok"),
-			(e) => e.piDispatchRetry === true && e.name === "InfraRetry" && e.piDispatchConfig !== true,
-			answer.message,
-		);
+		for (const host of atEachRead(answer)) {
+			await assert.rejects(
+				() => host.isDefaultBranchProtected(REPO, "tok"),
+				(e) => e.piDispatchRetry === true && e.name === "InfraRetry" && e.piDispatchConfig !== true,
+				answer.message,
+			);
+		}
 	}
 });
 
-test("isDefaultBranchProtected: every other refusal is retried, on either read (issue #876)", async () => {
+test("isDefaultBranchProtected: every other refusal is retried at any read, but the branch read's 404 (issue #876)", async () => {
 	for (const status of [401, 404, 429, 500, 502]) {
-		for (const host of [branchReturning(httpError(status)), branchReturning({ protected: true }, httpError(status))]) {
+		const hosts = atEachRead(httpError(status));
+		const retried = status === 404 ? [hosts[0], hosts[2]] : hosts;
+		for (const host of retried) {
 			await assert.rejects(
 				() => host.isDefaultBranchProtected(REPO, "tok"),
 				(e) => e.piDispatchRetry === true && e.piDispatchConfig !== true,
@@ -152,6 +207,8 @@ test("isDefaultBranchProtected: every other refusal is retried, on either read (
 			);
 		}
 	}
+	// A plain Error with no status (a client fault) is retried too.
+	await assert.rejects(() => hostAnswering({ branch: branchBody(true, false), rules: new Error("socket hang up") }).host.isDefaultBranchProtected(REPO, "tok"), (e) => e.piDispatchRetry === true);
 });
 
 // -- resolveDefaultBranchSha ---------------------------------------------------------------------

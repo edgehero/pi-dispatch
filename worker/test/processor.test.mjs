@@ -99,30 +99,42 @@ test("an unprotected branch refuses BEFORE any container -- and never prepares/s
 	assert.ok(!calls.includes("prepare"), "must not even clone an unprotected repo");
 });
 
-/** The real GitHub host over a fake client whose default branch read answers `answer`, thrown when an Error (issue #876). */
-function githubHostAnswering(answer) {
+/**
+ * The real GitHub host over a fake client whose default branch read answers `answer` and whose branch rules read
+ * answers `rules`, each thrown when an Error (issue #876).
+ */
+function githubHostAnswering(answer, rules = []) {
 	const octokitFor = () => ({
 		async request(route) {
 			if (route === "GET /repos/{owner}/{repo}") return { data: { default_branch: "main" } };
-			if (route === "GET /repos/{owner}/{repo}/branches/{branch}") {
-				if (answer instanceof Error) throw answer;
-				return { data: answer };
-			}
-			throw new Error(`unexpected route: ${route}`);
+			const canned = route === "GET /repos/{owner}/{repo}/branches/{branch}" ? answer : route === "GET /repos/{owner}/{repo}/rules/branches/{branch}" ? rules : new Error(`unexpected route: ${route}`);
+			if (canned instanceof Error) throw canned;
+			return { data: canned };
 		},
 	});
 	return makeGitHubHost({ octokitFor });
 }
 
-test("the GitHub host's protected flag decides through the processor: false refuses as unprotected-branch, true runs (issue #876)", async () => {
-	const posted = [];
-	const { deps: off } = deps({ isDefaultBranchProtected: (job, token) => githubHostAnswering({ name: "main", protected: false }).isDefaultBranchProtected(job, token), comment: async (_job, text) => posted.push(text) });
-	const refused = await runJob(ghJob, off);
-	assert.equal(refused.reason, "unprotected-branch");
-	assert.deepEqual(posted, [REFUSAL_COMMENTS["unprotected-branch"]]);
-	const { deps: on, calls } = deps({ isDefaultBranchProtected: (job, token) => githubHostAnswering({ name: "main", protected: true }).isDefaultBranchProtected(job, token) });
-	assert.equal((await runJob(ghJob, on)).outcome, "completed", "a branch GitHub calls protected, by a rule or a ruleset, runs");
-	assert.ok(calls.includes("run-container"));
+test("the GitHub host decides through the processor: unprotected and a ruleset that blocks nothing refuse, a classic rule and an approval rule run (issue #876)", async () => {
+	for (const [branch, rules, expected] of [
+		[{ name: "main", protected: false, protection: { enabled: false } }, [], "unprotected-branch"],
+		// github/scientist@main, measured: protected by organization rulesets that require nothing of a push.
+		[{ name: "main", protected: true, protection: { enabled: false } }, [{ type: "copilot_code_review" }, { type: "license_compliance_scanning" }], "unprotected-branch"],
+		[{ name: "main", protected: true, protection: { enabled: true } }, new Error("a classic rule needs no rules read"), "completed"],
+		[{ name: "main", protected: true, protection: { enabled: false } }, [{ type: "pull_request", parameters: { required_approving_review_count: 1 } }], "completed"],
+	]) {
+		const posted = [];
+		const { deps: d, calls } = deps({ isDefaultBranchProtected: (job, token) => githubHostAnswering(branch, rules).isDefaultBranchProtected(job, token), comment: async (_job, text) => posted.push(text) });
+		const r = await runJob(ghJob, d);
+		if (expected === "completed") {
+			assert.equal(r.outcome, "completed", JSON.stringify(branch));
+			assert.ok(calls.includes("run-container"));
+		} else {
+			assert.equal(r.reason, expected, JSON.stringify(rules));
+			assert.deepEqual(posted, [REFUSAL_COMMENTS["unprotected-branch"]]);
+			assert.ok(!calls.includes("run-container"), "nothing spent");
+		}
+	}
 });
 const forbidden403 = (headers) => Object.assign(new Error("Resource not accessible by integration"), { name: "HttpError", status: 403, response: { headers } });
 

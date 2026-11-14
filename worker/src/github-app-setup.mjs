@@ -414,7 +414,7 @@ export function sanitizeAppName(raw) {
  * because the API requires it, private, and only the event families the triggers file can name. The
  * permissions are `GITHUB_APP_PERMISSIONS` (identity.mjs), the same list the worker's boot check holds an
  * installation to, so the two cannot drift apart. No `administration`: the worker's branch protection
- * check reads the branch's own `protected` flag, which Contents: read covers (issue #876).
+ * check reads the branch and its active rules, which Contents and Metadata cover (issue #876).
  * `hook_attributes` carries the receiver URL, or under --no-webhook an INACTIVE hook at `NO_WEBHOOK_URL`. GitHub
  * refuses a manifest whose `hook_attributes` has no `url`, inactive or not ("url" wasn't supplied, issue #874), and one
  * that leaves `hook_attributes` out while it subscribes events ("Hook url cannot be blank"). What it accepts was

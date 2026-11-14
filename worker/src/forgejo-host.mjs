@@ -7,8 +7,8 @@
  * endpoint exists and 404 means "no protection rule on this branch". Forgejo has no such endpoint at all, so
  * carrying GitHub's assumption across would make EVERY branch report unprotected. Issue #61 records this, and
  * `REQ-BRANCH-PROTECTION-PRECONDITION` already cites it by number as the failure that ordering exists to avoid.
- * Since issue #876 the GitHub host reads the branch object's `protected` field too, for the reason this file
- * gives below: the dedicated endpoint needed a permission the job's token should not need.
+ * Since issue #876 the GitHub host reads the branch object too, and the branch's active rules, for the reason
+ * this file gives below: the dedicated endpoint needed a permission the job's token should not need.
  *
  * The answer is the branch object's own `protected` field, from `GET /repos/{o}/{r}/branches/{branch}`. Forgejo
  * computes it with the GLOB match itself: at v14.0.5 `GetBranch` (routers/api/v1/repo/branch.go) calls

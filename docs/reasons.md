@@ -681,8 +681,10 @@ What to do: rebuild the job image from a release that declares `bundleEnvFile`. 
 ### unprotected-branch
 
 The repository's default branch is not protected. The job's token can merge, so branch protection is the only thing
-that stops a job from merging its own work. Nothing was spent. On GitHub, a branch protection rule and a ruleset both
-count.
+that stops a job from merging its own work. Nothing was spent. On GitHub, a classic branch protection rule counts, and
+so does an active ruleset whose pull request rule requires at least one approving review. A ruleset that requires no
+approval, such as an organization's automatic Copilot review, does not count. An empty repository is refused this way
+too: its default branch has no commit yet, so nothing protects it.
 
 What to do: protect the default branch, then run the job again. See [SECURITY.md](../SECURITY.md).
 

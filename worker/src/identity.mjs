@@ -22,15 +22,16 @@ import { isDeterminateFetchFailure, isTransientStatus, octokitHeaderReader, tran
  * an installation's grant with them, so the App the wizard makes and the line that says what an installation lacks
  * read one list.
  *
- * - `contents`: the agent pushes its branch, and the worker reads the default branch, its `protected` flag among it
- *   (`REQ-BRANCH-PROTECTION-PRECONDITION`, `github-host.mjs`), with Contents: read.
+ * - `contents`: the agent pushes its branch, and the worker reads the default branch with Contents: read, its classic
+ *   protection rule and `protected` flag among it (`REQ-BRANCH-PROTECTION-PRECONDITION`, `github-host.mjs`).
  * - `pull_requests`: the agent opens its pull request.
  * - `issues`: the worker's status and refusal comments, and the agent's own replies.
- * - `metadata`: GitHub grants it to every App and requires it.
+ * - `metadata`: GitHub grants it to every App and requires it. The worker's read of the default branch's active
+ *   ruleset rules needs it.
  *
- * NOT `administration`, which the dedicated protection endpoint needs. The branch's `protected` flag answers the same
- * question, counts rulesets too, and needs nothing beyond Contents: read, so no job's token carries a read of the
- * repository's settings (issue #876).
+ * NOT `administration`, which the dedicated protection endpoint needs. The branch read and the branch rules read
+ * answer the same question with Contents and Metadata, count rulesets too, and need no read of the repository's
+ * settings in any job's token (issue #876).
  */
 export const GITHUB_APP_PERMISSIONS = Object.freeze({ contents: "write", pull_requests: "write", issues: "write", metadata: "read" });
 
