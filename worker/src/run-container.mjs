@@ -23,6 +23,7 @@ import { makeRedactor, secretValuesOf } from "./redact-secrets.mjs";
 import { makeSteerAck } from "./steer-ack.mjs";
 import { keyFrame } from "./steer-framing.mjs";
 import { makeStderrTranscript } from "./stderr-transcript.mjs";
+import { ACTIVITY_POLL_MS, makeActivityBackstop, parseActivityCounters, readActivityFile } from "./job-limits.mjs";
 
 /**
  * The real `runContainer` the processor injects. Launches one job container and returns
@@ -135,6 +136,12 @@ export function makeRunContainer({
 	transcript = "file",
 	// Issue #686: the stderr demux's factory (stderr-transcript.mjs). A seam so a test can make it fail.
 	makeDemux = makeStderrTranscript,
+	// Issue #888: the activity backstop's seams. Its clock is this worker's (the counters carry no time), its timer reads
+	// the counters every ACTIVITY_POLL_MS, and `readActivity(dir)` is the file channel's guarded read.
+	activityClock = () => Date.now(),
+	activityTimers = { setInterval, clearInterval },
+	activityPollMs = ACTIVITY_POLL_MS,
+	readActivity = readActivityFile,
 	// Review round 1, M1: how long a stdin-steered attempt's pipe stays open after an exit-shaped line that does not verify.
 	stdinExitGraceMs = 5_000,
 	// Issue #686 part 3, review round 2 of #714: `({ opts, aborted }) => boolean`, a binding venue whose box OUTLIVES its CLI
@@ -194,7 +201,7 @@ export function makeRunContainer({
 	// `bundleKeys` (issue #704 part 3) is the processor's `{ endpoints, plain }` split of a project secret bundle's received
 	// variables: handed on in the build options for a venue whose own layer holds credentials (openshell), which binds the
 	// first kind to their hosts and passes the second as values. Every other venue ignores it: the values are in `secrets`.
-	return async function runContainer({ job, token, prepared, secrets = {}, bundleKeys = null, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, transcriptStderr = false, steerStdin = false, size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null, unenforced = [], jobId = null, onLive = null, recover = false, recovering = false, checkpoint = null, pause = null, unpause = null, binds = false, subscriptionAuth = [] }) {
+	return async function runContainer({ job, token, prepared, secrets = {}, bundleKeys = null, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, transcriptStderr = false, steerStdin = false, size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null, unenforced = [], jobId = null, onLive = null, recover = false, recovering = false, checkpoint = null, pause = null, unpause = null, binds = false, subscriptionAuth = [], activityWatch = null, onActivityArmed = null, requestStop = null, noteActivity = null }) {
 		if (signal?.aborted) return { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null }; // killed before it could start
 		// Minted per attempt, held in this closure and the sink's, and handed to the container on its stdin only: never in
 		// the argv (a host `ps` shows it), never in the env (the container's /proc/1/environ shows it), never logged.
@@ -254,7 +261,12 @@ export function makeRunContainer({
 			else if (typeof openInboxRelay !== "function" || typeof openLiveTranscript !== "function" || jobId === null || jobId === undefined) steerSkipped = "no-transcript";
 			else if (viaStdin && !stdioArmed) steerSkipped = "no-transcript";
 		}
-		if (transcriptDir === null && (recover === true || (steerAsked && steerSkipped === null)) && typeof stageLive === "function") {
+		// Issue #888: the activity watch wants the counters' channel. On a venue whose transcript is a host file, that is
+		// the transcript's own directory (the runner writes `activity.json` beside the session file), so it is staged here
+		// for a watched job as for an armed one; on a copying venue it is the stderr records (`stdioArmed`).
+		const activityWanted = activityWatch !== null && typeof activityWatch === "object" && Number.isSafeInteger(activityWatch.idleMs) && activityWatch.idleMs > 0;
+		const activityByFile = activityWanted && !stdioArmed && transcript !== "stdio" && layout === "mounts";
+		if (transcriptDir === null && (recover === true || (steerAsked && steerSkipped === null) || activityByFile) && typeof stageLive === "function") {
 			try {
 				transcriptDir = stageLive(prepared.jobDir)?.hostDir ?? null;
 			} catch {
@@ -262,6 +274,11 @@ export function makeRunContainer({
 			}
 		}
 		if (steerAsked && steerSkipped === null && transcriptDir === null) steerSkipped = "no-transcript";
+		// Issue #888: which channel the counters come back on, or null, and why not. Without one the watch is not asked for
+		// at all: the job keeps the processor's 30-minute wall clock (index.mjs), and the record says why (`limits.why`).
+		const activityChannel = !activityWanted ? null : stdioArmed ? "stdio" : activityByFile && transcriptDir ? "file" : null;
+		const activityUnavailable = activityWanted && activityChannel === null ? (transcript === "stdio" || layout !== "mounts" ? liveSkipped ?? "venue-copies" : "no-transcript") : null;
+		if (activityUnavailable !== null) log("idle_watch_unavailable", { container: name, reason: activityUnavailable });
 		// The inbox: `<jobDir>.inbox`, BESIDE the job directory (`/job` is merge-gated input only, and the processor removes
 		// the job directory itself), mode 0700, made fresh per attempt (a retry's messages are written again into its own),
 		// removed in this function's `finally`. Then the relay, built now (it starts with the container) because the env
@@ -456,6 +473,10 @@ export function makeRunContainer({
 			// the deployment's PI_ALLOWED_MODELS in under the trigger's own, so `job.models` is already the one list.
 			allowedModels: Array.isArray(job.models) && job.models.length > 0 ? job.models : null,
 			subscriptionAuth,
+			// Issue #888: the activity watch's limits, only with a channel for its counters (above). Without one the runner is
+			// asked for nothing and the job keeps the wall clock, so a counter no one reads is never written.
+			idleMs: activityChannel !== null ? activityWatch.idleMs : null,
+			stallMs: activityChannel !== null && Number.isSafeInteger(activityWatch.stallMs) && activityWatch.stallMs > 0 ? activityWatch.stallMs : null,
 			authFromPi, // source the provider key from pi's auth.json when the env has none
 			// REQ-TRIGGER-SECRETS: this trigger's resolved secrets, fetched by the processor BEFORE anything
 			// spent. Off the call bag rather than off `job` or the closure: it is neither a per-job fact the
@@ -717,6 +738,49 @@ export function makeRunContainer({
 		// attempt's exit key against the string in the container's PI_JOB_ID (`name`, as the steer ack's `ackRunId`), and
 		// their lines pushed into the publisher; every other byte is passed on unchanged to the tee and the head below.
 		// Demuxed even when the opener returned no publisher, so the records never reach the job log or the terminal.
+		// Issue #888: the worker's activity backstop, for a runner too wedged to stop its own job. Built here so the stderr
+		// demux below can hand it the counters; its clocks start at the spawn (`armActivity`), and a stop it asks for goes
+		// through the processor's own abort (`requestStop`), the path every worker-initiated stop takes.
+		let backstop = null;
+		let backstopTimer = null;
+		const armActivity = () => {
+			if (activityChannel === null || backstop !== null) return;
+			backstop = makeActivityBackstop({
+				idleMs: activityWatch.idleMs,
+				stallMs: Number.isSafeInteger(activityWatch.stallMs) ? activityWatch.stallMs : null,
+				now: activityClock,
+				onStop: (reason) => {
+					log("activity_backstop_stop", { container: name, reason });
+					try {
+						requestStop?.(reason);
+					} catch {}
+				},
+			});
+			backstopTimer = activityTimers.setInterval(() => {
+				if (activityChannel === "file") backstop.observe(readActivity(transcriptDir));
+				backstop.check();
+			}, activityPollMs);
+			backstopTimer?.unref?.();
+			// The wall clock this job carried until now is handed over to the watch (index.mjs clears it), unless the processor
+			// said the job keeps it: a credential that expires while it runs (`keepWallClock`) still bounds it.
+			if (activityWatch.keepWallClock !== true) {
+				try {
+					onActivityArmed?.();
+				} catch {}
+			}
+		};
+		// Ends the reads, once, and hands the record what the backstop saw (this worker's clock): through `noteActivity`, so
+		// the result this function resolves stays exactly what it always was. Only for an attempt the watch was wanted for.
+		let activityNoted = false;
+		const disarmActivity = () => {
+			if (backstopTimer !== null) activityTimers.clearInterval(backstopTimer);
+			backstopTimer = null;
+			if (activityNoted || !activityWanted) return;
+			activityNoted = true;
+			try {
+				noteActivity?.(backstop !== null ? { channel: activityChannel, lastStepAt: new Date(backstop.state.lastStepAt).toISOString(), lastActivityAt: new Date(backstop.state.lastActivityAt).toISOString() } : { channel: null, unavailable: activityUnavailable });
+			} catch {}
+		};
 		const demux = stdioArmed
 			? makeDemux({
 					key: exitKey,
@@ -725,6 +789,8 @@ export function makeRunContainer({
 					onLine: (line, end) => live?.push?.(line, end),
 					onGap: (missing) => live?.skip?.(missing),
 					onReset: (size) => live?.reset?.(size),
+					// Issue #888: the activity counters, as the file on a binding venue holds them.
+					onActivity: (bytes) => backstop?.observe(parseActivityCounters(Buffer.from(bytes).toString("utf8"))),
 				})
 			: null;
 		let demuxEnded = false;
@@ -745,6 +811,8 @@ export function makeRunContainer({
 
 		const run = new Promise((resolve, reject) => {
 			const child = spawnFn(bin, args, { stdio: [exitKey !== null ? "pipe" : "ignore", "pipe", "pipe"] });
+			// Issue #888: the container exists from here, so the backstop's clocks start now.
+			armActivity();
 			// Issue #686: a stdin-steered attempt's key is frame 1, written at the spawn, and the pipe is NOT closed: it is
 			// handed to the relay, which writes each message as a frame after it and closes the pipe at its stop. The relay
 			// writes nothing before the publisher's baseline (the runner's signed baseline record and the lines up to it, so a
@@ -859,6 +927,7 @@ export function makeRunContainer({
 			// (CONST-RETRY-INFRA-ONLY). `reason` also cues the processor to release the budget slot,
 			// since a container that never started spent nothing.
 			child.on("error", (err) => {
+				disarmActivity();
 				stderrOut(endDemux());
 				void closeCheckpoint();
 				void finishLive("failed").then(stopRelay);
@@ -867,6 +936,7 @@ export function makeRunContainer({
 			});
 			child.on("close", async (code) => {
 				const aborted = signal?.aborted === true; // capture BEFORE the await
+				disarmActivity();
 				// Issue #686: the demux's held tail (a last line with no newline) goes out before anything closes, and every
 				// record it completed is in the publisher before the final flush below.
 				stderrOut(endDemux());

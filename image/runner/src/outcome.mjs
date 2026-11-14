@@ -198,9 +198,8 @@ export function decideExit({ budgetAborted, budgetTurns, meterStop = null, token
 	// Issue #888: the activity watch stopped an idle or stalled job (activity.mjs). After the spend stops, which say more
 	// about a job that was also spending, and before everything the aborted session's last message would otherwise decide:
 	// that message is pi's abort, which classifyStopReason reads as infrastructure and the queue would retry.
-	if (activityStop === "idle" || activityStop === "stalled") {
-		return { code: EXIT_POLICY, reason: activityStop };
-	}
+	if (activityStop === "idle") return { code: EXIT_POLICY, reason: "idle" };
+	if (activityStop === "stalled") return { code: EXIT_POLICY, reason: "stalled" };
 	if (rejected) return rejected;
 	if (approval) return { code: EXIT_COMPLETED, reason: AWAITING_APPROVAL };
 	if (parked) return { code: EXIT_COMPLETED, reason: AWAITING_INPUT };

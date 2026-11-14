@@ -235,7 +235,8 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
 - **We never merge.** No code path in this project calls a merge API; grep is the test. Note carefully
   what that does and does not mean — see below.
 - **Spend.** A daily cap checked *before* tokens are spent, a per-job turn budget enforced by our runner
-  (pi has no turn limit of its own), and a 30-minute container wall-clock timeout. An agent that concluded
+  (pi has no turn limit of its own), and a job that stops doing anything is stopped: idle after 15 minutes, stalled
+  after 4 hours without a step by the agent, or at a wall-clock ceiling the operator sets ([job limits](docs/job-limits.md)). An agent that concluded
   "I can't fix this" is a success and is never blind-retried.
 - **A policy refusal is never restarted into a second bill.** `pi-dispatch service` installs the worker as a
   user-level unit, and on all three platforms exit 2 (a determinate config or budget refusal) is excluded
@@ -1317,7 +1318,7 @@ Stated openly rather than discovered later:
   ledger (on Linux) stops a capped job and makes an uncapped one's record a floor. The agent holds the provider
   key and runs as the runner's user, so a child that hides from both, a client that is not pi, or a direct API
   call is still absent from the run record and the daily token counter (`OQ-011`). `PI_MAX_TURNS` likewise bounds
-  only the root session's turns. The backstops there are the 30-minute container timeout, the job-count caps, and
+  only the root session's turns. The backstops there are the job limits (idle, stalled, an optional ceiling), the job-count caps, and
   your provider-side spend limit, not the meter.
 - **The admin surface is not a network service.** It is a pi extension in your own terminal session plus
   a `settings.json` file, and it binds no port. The operator console is the exception you start yourself: a separate

@@ -25,7 +25,7 @@ import { COST_CAP_WHYS, EXIT_OOM_KILLED, RECORD_CLOCK_SKEW_MS, RUNNER_POLICY_REA
 import { baseHasExtensions as baseHasExtensionsDefault, resetTrustPaths as resetTrustPathsDefault } from "./trust-paths.mjs";
 import { normalizeHost, removeCheckpointPointer as removePointerDefault } from "./run-checkpoint.mjs";
 import { DEFAULT_EGRESS_PROXY } from "./egress.mjs";
-import { CAPABILITY_GATES, EXIT_AUTH_CAPABILITY, STEER_STDIN_CAPABILITY, TRANSCRIPT_STDERR_CAPABILITY } from "./image-preflight.mjs";
+import { CAPABILITY_GATES, EXIT_AUTH_CAPABILITY, IDLE_WATCH_CAPABILITY, STEER_STDIN_CAPABILITY, TRANSCRIPT_STDERR_CAPABILITY } from "./image-preflight.mjs";
 import { modelListProblem, modelOnList, splitModelEntry } from "./model-ref.mjs";
 import { ALLOCATION_CAP_REASON, ENVELOPE_MISMATCH_REASON } from "./allocation.mjs";
 
@@ -332,6 +332,18 @@ export async function checkDraftAnswerSource(job, deps) {
 	try { return await deps.answerDraftRuntime.checkSource(input.source) === true ? null : refused("answer-draft-config-changed"); }
 	catch { throw new InfraRetry("answer draft current forge identity could not be read", { reason: "container-never-started", budgetReserved: false }); }
 }
+
+/**
+ * Who stopped a job the worker aborted, by the abort's own reason (`cancelJob(id, reason)`), as the record names it.
+ * CLOSED and exact (the aborted branch's rule): "shutdown", an absent reason and any future value stay `worker-abort`, so
+ * a pin bump changing what rides the signal can widen nothing. Issue #888 adds the limits: the activity backstop's
+ * `idle` and `stalled`, an operator's ceiling `max-minutes`, and the 30-minute wall clock a job no watch covers keeps
+ * (`job-timeout-30m`), which is a time limit too and is named as one, its record's `limits` saying which.
+ */
+/** The job images this process has already said lack `idleWatch` (issue #888), so the line is once per image. */
+const IMAGES_WITHOUT_IDLE_WATCH = new Set();
+
+export const ABORT_RECORD_REASONS = Object.freeze({ "operator-cancel": "operator-cancel", "agent-cancel": "agent-cancel", idle: "idle", stalled: "stalled", "max-minutes": "max-minutes", "job-timeout-30m": "max-minutes" });
 
 export async function runJob(job, deps) {
 	const sourceRefusal = await checkDraftAnswerSource(job, deps);
@@ -2437,6 +2449,29 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// Issue #686, part 2: an image whose runner reads steer frames on stdin. Handed as a fact, like the one above;
 		// runContainer arms it only for a steer job on a venue that copies, so every other run is called as before.
 		const steerStdin = (img.capabilities ?? []).includes(STEER_STDIN_CAPABILITY);
+		// Issue #888 (REQ-JOB-ACTIVITY-LIMITS): the activity watch, for a job index.mjs gave limits to (`deps.activityLimits`,
+		// job-limits.mjs `effectiveJobLimits`) on an image whose runner has one (`idleWatch`). run-container arms it only
+		// with a channel for the counters and then hands the job's wall clock over to it, unless `keepWallClock`: a job
+		// holding a credential that expires while it runs (a subscription snapshot's deadline, a GitHub App token's hour)
+		// keeps the 30-minute wall clock, with the watch still stopping it sooner when it is idle. Why the wall clock stays
+		// is said to the record (`noteActivity`), `limits.why`.
+		const activityLimits = deps.activityLimits ?? null;
+		let activityWatch = null;
+		if (activityLimits !== null && typeof activityLimits === "object") {
+			const idleWatch = (img.capabilities ?? []).includes(IDLE_WATCH_CAPABILITY);
+			const tokenExpires = typeof token === "string" && typeof deps.tokenExpires === "function" ? await Promise.resolve(deps.tokenExpires(job)).catch(() => true) : false;
+			const credential = subscriptionAuth.length > 0 ? "subscription" : tokenExpires === true ? "forge-token" : null;
+			if (idleWatch) activityWatch = { idleMs: activityLimits.idleMinutes * 60_000, stallMs: activityLimits.stallMinutes > 0 ? activityLimits.stallMinutes * 60_000 : null, keepWallClock: credential !== null };
+			// Said once per image per process: every job on it keeps the 30-minute limit until it is rebuilt, and a line per job
+			// would say the same thing on every run. The image's NAME only, never its digest or labels.
+			else if (!IMAGES_WITHOUT_IDLE_WATCH.has(img.image ?? "")) {
+				if (IMAGES_WITHOUT_IDLE_WATCH.size < 64) IMAGES_WITHOUT_IDLE_WATCH.add(img.image ?? "");
+				log("idle_watch_unavailable", { image: img.image ?? null, reason: "image" });
+			}
+			try {
+				deps.noteActivity?.(idleWatch ? (credential !== null ? { basis: "wall-clock", why: credential } : {}) : { basis: "wall-clock", why: "image" });
+			} catch {}
+		}
 		// Issue #645: a FRESH armed run seeds the checkpoint store from its clone, now, before the container: the one moment
 		// the workspace's `.git` is still the worker's own (workspace-checkpoint.mjs `primeBase`). After every reserve, so a
 		// refused job never writes to the store. A recovery's base is already there. A base that could not be primed means
@@ -2470,7 +2505,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// thing before the container, and not at the prepare above: a refusal between the two loaded nothing, so it has nothing
 		// to point at, and its record stays byte-identical to what it was. Every way out from here keeps it, a retried attempt's too.
 		if (deps.canaryFacts) deps.canaryFacts.loaded = loadedWithBase(deps.canaryFacts.loaded, baseSha);
-		const { canaryLoad: canaryLoadOfRun = null, loaded: loadedOfRun = null, code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, approval: approvalMetadata = null, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null, checkpoint: ranCheckpoint = null, recovery: ranRecovery = null, lingering = false } = await runContainer({ job: containerJob, token, prepared, secrets, ...(subscriptionAuth.length ? { subscriptionAuth } : {}), ...(bundleKeys !== null ? { bundleKeys } : {}), user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(transcriptStderr ? { transcriptStderr: true } : {}), ...(steerStdin ? { steerStdin: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}), ...(checkpointArgs !== null ? { recover: true, recovering: isRecovery, checkpoint: checkpointArgs } : {}) });
+		const { canaryLoad: canaryLoadOfRun = null, loaded: loadedOfRun = null, code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, approval: approvalMetadata = null, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null, checkpoint: ranCheckpoint = null, recovery: ranRecovery = null, lingering = false } = await runContainer({ job: containerJob, token, prepared, secrets, ...(subscriptionAuth.length ? { subscriptionAuth } : {}), ...(bundleKeys !== null ? { bundleKeys } : {}), user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(transcriptStderr ? { transcriptStderr: true } : {}), ...(steerStdin ? { steerStdin: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}), ...(checkpointArgs !== null ? { recover: true, recovering: isRecovery, checkpoint: checkpointArgs } : {}), ...(activityWatch !== null ? { activityWatch, onActivityArmed: deps.onActivityArmed ?? null, requestStop: deps.requestStop ?? null, noteActivity: deps.noteActivity ?? null } : {}) });
 		const answeredPark = prepared.session?.parkedSource;
 		// A phrase-prefixed comment uses ordinary routing, but resuming this exact parked transcript still
 		// answers its question. A held receipt also identifies an answer whose legacy source cannot be proved.
@@ -2692,7 +2727,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// `abortReason` itself never reaches the record -- buildRecord copies named fields only.
 		// exitCode/turns/tokens carry the container's own exit, turn count, and usage totals; budgetReserved true post-reserve.
 		if (aborted) {
-			const reason = ["operator-cancel", "agent-cancel"].includes(abortReason) ? abortReason : "worker-abort";
+			const reason = Object.hasOwn(ABORT_RECORD_REASONS, abortReason ?? "") ? ABORT_RECORD_REASONS[abortReason] : "worker-abort";
 			// Awaited bare like every determinate refusal above: the adapter never throws by contract, and
 			// the one swallowed comment in this file (the catch's) justifies itself by its position.
 			await comment(job, TERMINAL_COMMENTS[reason]);

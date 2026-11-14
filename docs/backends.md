@@ -48,7 +48,7 @@ anywhere, but the declaration lands here.
   runContainer,     // start one job container
   imagePreflight,   // free, credential-less: is the image usable on this venue?
   egressPreflight,  // free: is the egress policy serviceable here?
-  stopContainer,    // stop a running job by name (the 30-minute timeout, and shutdown)
+  stopContainer,    // stop a running job by name (a job limit, a cancel, and shutdown)
   reap,             // boot sweep: clear strays, and say whether you ENUMERATED
   listJobContainers,  // host budget, at boot: your job containers that may still run, with their sizes
   containerGone,      // host budget: is this orphan's container gone, so its room can be given back?
@@ -129,7 +129,7 @@ ones adapters get wrong:
 - **`egress` and `jobToJobIsolation` carry `armedBy: "PI_EGRESS"`.** A declaration is a **capability**, not a
   posture. `local` can enforce egress; a deployment with `PI_EGRESS=0` is not getting it. Those are two
   different sentences and doctor prints both.
-- **`abortable`** is the 30-minute kill. Declaring it means `stopContainer` actually ends the container.
+- **`abortable`** is the worker's stop: a job limit ([job limits](job-limits.md)), a cancel, a shutdown. Declaring it means `stopContainer` actually ends the container.
 - **`pausable`** is the cgroup freezer (`docker pause`, `podman pause`). It exists so the host can read a job's
   workspace while nothing in the container runs, and it grants the container nothing. Declaring it means the bundle
   carries `pause(name)` and `unpause(name)`, each resolving `{ ok: true }` or `{ ok: false, reason }` and never
@@ -643,7 +643,7 @@ attached at create and every endpoint of the job's policy is bound to it, so the
 the policy admits (measured for headers and for git's Basic auth). A job whose policy has no rule at all reaches
 nothing, so no provider is made and its secrets go nowhere (logged `openshell_secrets_unbound`). The teardown deletes
 the provider and its profile after the sandbox; a crashed job's are deleted by the boot sweep, by the owner label.
-Rotation does not reach a running job: a job is bounded at 30 minutes and an App token lives about an hour.
+Rotation does not reach a running job: a job holding a GitHub App token keeps a 30-minute limit, inside the token's hour ([job limits](job-limits.md#when-the-30-minute-limit-still-applies)).
 
 **A project secret bundle** (issue #704, [`docs/secrets.md`](secrets.md#on-an-openshell-venue-placeholders-for-the-variables-you-bind-to-a-host)).
 A bundle variable the bundle's `endpoints` binds to a host goes into a provider of that host's own (`<sandbox>-b<n>`,

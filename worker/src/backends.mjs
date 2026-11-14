@@ -197,11 +197,11 @@ const PROPERTIES_TABLE = {
 		armedBy: null,
 	},
 	abortable: {
-		// REQ-JOB-TIMEOUT-30M. Declared two slices before the seam existed, on purpose: `stopContainer` was
+		// REQ-JOB-ACTIVITY-LIMITS (REQ-JOB-TIMEOUT-30M before issue #888). Declared two slices before the seam existed, on purpose: `stopContainer` was
 		// hard-wired in index.mjs's abort path, so a second backend could have passed every other check with
 		// no way to stop a runaway container and nothing in this table would have moved. A gap that is
 		// declared is a refusal; a gap that is unnamed is a surprise. The seam landed in slice 4.
-		question: "a running job can be stopped on the 30-minute timeout or a shutdown, and the abort is distinguishable from a crash",
+		question: "a running job can be stopped on a job limit, a cancel or a shutdown, and the abort is distinguishable from a crash",
 		armedBy: null,
 	},
 	readOnlyJobInputs: {

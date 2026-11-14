@@ -190,7 +190,7 @@ const triggersPathWith = (doc) => {
 };
 
 test("triggers: the shipped tables hold the rule, against the run keys and blocks the loader reads", () => {
-	assert.equal(TRIGGERS_FILE_VERSION, 2, "issue #800: run.excludeExtensions and run.excludeExtensionTools");
+	assert.equal(TRIGGERS_FILE_VERSION, 3, "issue #800: run.excludeExtensions and run.excludeExtensionTools at 2; issue #888: the three limits at 3");
 	// Every `run.<key>` any worker module reads: a lenient superset (comments add names), which is enough to refuse a
 	// table row naming a key nothing reads.
 	const runKeys = new Set();
@@ -528,13 +528,14 @@ test("triggers: the nine narrowing fields are the baseline, and a row added late
 });
 
 test("triggers: the version is judged after the duplicate check and before the array, newer apart from broken", () => {
-	assert.throws(() => parseTriggersDocument('{"version": 3, "triggers": "reshaped"}', "/t"), (error) => error.piDispatchConfig === true && error.newer === true && error.message === "triggers file written by a newer pi-dispatch (version 3; this build understands 2): /t");
-	assert.throws(() => parseTriggersDocument('{"version": 3, "version": 3, "triggers": []}', "/t"), /duplicate key "version"/);
+	assert.throws(() => parseTriggersDocument('{"version": 4, "triggers": "reshaped"}', "/t"), (error) => error.piDispatchConfig === true && error.newer === true && error.message === "triggers file written by a newer pi-dispatch (version 4; this build understands 3): /t");
+	assert.throws(() => parseTriggersDocument('{"version": 4, "version": 4, "triggers": []}', "/t"), /duplicate key "version"/);
 	assert.throws(() => parseTriggers('{"version": "1", "triggers": []}', "/t"), (error) => error.newer === undefined && error.message === 'triggers file "version" must be an integer of 1 or more: /t');
 	assert.deepEqual(parseTriggersDocument('{"version": 1, "triggers": []}', "/t").triggers, []);
-	assert.equal(triggersFileNewer('{"version": 3, "triggers": []}'), true);
+	assert.equal(triggersFileNewer('{"version": 4, "triggers": []}'), true);
 	assert.equal(triggersFileNewer('{"version": 2, "triggers": []}'), false, "this build reads version 2");
-	assert.equal(triggersFileNewer({ version: 3 }, { supported: 3 }), false);
+	assert.equal(triggersFileNewer('{"version": 3, "triggers": []}'), false, "and version 3 (issue #888)");
+	assert.equal(triggersFileNewer({ version: 4 }, { supported: 4 }), false);
 	assert.equal(triggersFileNewer('{"version": "2"}'), false, "broken, not newer");
 	assert.equal(triggersFileNewer("{ not json"), false);
 	assert.equal(triggersFileVersionProblem({ triggers: [] }), null);
@@ -624,12 +625,12 @@ test("triggers: with an injected block value table a wider block is stamped, an 
 });
 
 test("triggers: a newer file is refused BEFORE mutate runs, newer:true, the file and its lock untouched", () => {
-	const text = `${JSON.stringify({ version: 3, triggers: [label()], later: { x: 1 } }, null, 2)}\n`;
+	const text = `${JSON.stringify({ version: 4, triggers: [label()], later: { x: 1 } }, null, 2)}\n`;
 	const path = triggersPathWith(text);
 	let called = 0;
 	const res = writeTriggers({ triggersPath: path, mutate: () => { called++; return []; }, mutateDocument: (doc) => { called++; return doc; } });
 	assert.equal(res.newer, true);
-	assert.equal(res.invalid, `triggers file written by a newer pi-dispatch (version 3; this build understands 2), so nothing was written and nothing in it was lost; change it with that release: ${path}`);
+	assert.equal(res.invalid, `triggers file written by a newer pi-dispatch (version 4; this build understands 3), so nothing was written and nothing in it was lost; change it with that release: ${path}`);
 	assert.equal(called, 0, "mutate and mutateDocument never ran");
 	assert.equal(readFileSync(path, "utf8"), text);
 	assert.equal(existsSync(`${path}.lock`), false, "the lock was released");
@@ -680,7 +681,7 @@ test("triggers: the disarm writes its one key into a newer file and keeps every 
 });
 
 test("triggers: a duplicate version key is broken to every reader, never newer", async () => {
-	const text = `{"triggers": [${JSON.stringify(once())}], "version": 1, "version": 3}`;
+	const text = `{"triggers": [${JSON.stringify(once())}], "version": 1, "version": 4}`;
 	assert.equal(triggersFileNewer(text), false);
 	assert.throws(() => parseTriggersDocument(text, "/t"), (error) => error.newer === undefined && /duplicate key "version"/.test(error.message));
 	assert.equal(triggersFileNewer(JSON.parse(text)), true, "a parsed document cannot show the duplicate, which is why the readers pass the text");
@@ -695,12 +696,12 @@ test("triggers: a duplicate version key is broken to every reader, never newer",
 	assert.equal(readFileSync(path, "utf8"), text);
 	// The approval digest check parses through the loader, which refuses the duplicate: unavailable, as for any broken file.
 	const gated = { on: { type: "comment", phrase: "/fix" }, run: { kind: "github", flow: "fix", resume: true, gates: ["deploy"] } };
-	writeFileSync(path, `{"triggers": [${JSON.stringify(gated)}], "version": 1, "version": 3}`);
+	writeFileSync(path, `{"triggers": [${JSON.stringify(gated)}], "version": 1, "version": 4}`);
 	assert.deepEqual(makeCheckApprovalPolicy({ triggersPath: path, parseTriggers })({ kind: "github", gates: ["deploy"], trigger: { matched: { index: 0, type: "comment" } } }), { refused: "approval-policy-unavailable" });
 });
 
 test("triggers: the skew check keeps a newer answer for a second read of the same file, and reads an unreadable one as not newer", async () => {
-	const newerText = JSON.stringify({ version: 3, triggers: [once()] });
+	const newerText = JSON.stringify({ version: 4, triggers: [once()] });
 	let reads = 0;
 	let stat = { mtimeMs: 1000, size: newerText.length };
 	let text = newerText;
@@ -730,7 +731,7 @@ test("triggers: the skew check keeps a newer answer for a second read of the sam
 });
 
 test("triggers: the worker's live reads report a newer file as newer, never as a run (a one-shot would fire again)", async () => {
-	const path = triggersPathWith({ version: 3, triggers: [once()] });
+	const path = triggersPathWith({ version: 4, triggers: [once()] });
 	assert.deepEqual(readDisarmState({ triggersPath: path, index: 0, number: 40, flow: "deploy" }), { state: "newer" });
 	const job = { kind: "github", flow: "deploy", trigger: { matched: { index: 0, type: "issue", once: true, number: 40 } } };
 	assert.deepEqual(await makeCheckOnceSpent({ triggersPath: path })(job, { queueJobId: "q1" }), { newer: true });
@@ -747,7 +748,7 @@ test("triggers: the worker's live reads report a newer file as newer, never as a
 
 test("approval: the live digest check says newer for a newer file and keeps its other answers", () => {
 	const gated = { on: { type: "comment", phrase: "/fix" }, run: { kind: "github", flow: "fix", resume: true, gates: ["deploy"] } };
-	const path = triggersPathWith({ version: 3, triggers: [gated] });
+	const path = triggersPathWith({ version: 4, triggers: [gated] });
 	const check = makeCheckApprovalPolicy({ triggersPath: path, parseTriggers });
 	const job = { kind: "github", gates: ["deploy"], trigger: { matched: { index: 0, type: "comment" } } };
 	assert.deepEqual(check(job), { newer: true });

@@ -155,8 +155,8 @@ test("no key the loader or a worker reads is a near miss of an exclusion's: ever
 });
 
 test("each field needs file version 2 by itself: an older loader would drop it, so one written by hand with no stamp refuses, and the writer stamps it", () => {
-	assert.equal(TRIGGERS_FILE_VERSION, 2);
-	assert.deepEqual(TRIGGER_RUN_FIELD_VERSIONS, { excludeExtensions: 2, excludeExtensionTools: 2 });
+	assert.equal(TRIGGERS_FILE_VERSION, 3, "issue #888's three limits need 3; these two still need 2 by themselves");
+	assert.deepEqual(TRIGGER_RUN_FIELD_VERSIONS, { excludeExtensions: 2, excludeExtensionTools: 2, idleTimeoutMinutes: 3, stallTimeoutMinutes: 3, maxMinutes: 3 });
 	for (const field of ["excludeExtensions", "excludeExtensionTools"]) {
 		const entry = KINDS[1][1]({ [field]: ["x"] });
 		assert.throws(() => parseTriggers(JSON.stringify({ triggers: [entry] }), "/t"), (e) => e.newer === undefined && e.message === `trigger at index 0: run.${field} needs triggers file version 2, and the file declares 1: /t`);

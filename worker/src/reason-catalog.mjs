@@ -107,7 +107,10 @@ const ROWS = [
 	["job-image-model-roles-unsupported", "Refused: the job image does not declare modelRoles support. Rebuild it before running role-mapped jobs. Not run.", REBUILD],
 	...Object.entries(APPROVAL_COMMENTS).map(([token, sentence]) => [token, sentence, "Check the current approval, its saved session, and the trigger declaration; reload before replying again."]),
 	// ── Stopped while running ───────────────────────────────────────────────────────────────────────────────────────
-	["worker-abort", TERMINAL_COMMENTS["worker-abort"], "Check the worker log for the 30-minute limit or a shutdown, then run the job again if its work is still wanted."],
+	["worker-abort", TERMINAL_COMMENTS["worker-abort"], "Check the worker log for the shutdown, then run the job again if its work is still wanted."],
+	["idle", TERMINAL_COMMENTS["idle"], "Read the job log for what it waited on. If a command really needs longer in silence, raise the trigger's `run.idleTimeoutMinutes` or `PI_JOB_IDLE_MINUTES`, or make the command print as it goes."],
+	["stalled", TERMINAL_COMMENTS["stalled"], "Read the job log for the command that never ended (a test in a loop, a server started in the foreground). If the work really needs longer without a step, raise `run.stallTimeoutMinutes` or `PI_JOB_STALL_MINUTES`."],
+	["max-minutes", TERMINAL_COMMENTS["max-minutes"], "Raise the trigger's `run.maxMinutes` or `PI_JOB_MAX_MINUTES` if the work needs longer. A job on an image without `idleWatch`, or holding a credential that expires, keeps a 30-minute limit: rebuild the image, and see docs/job-limits.md."],
 	["operator-cancel", "Stopped: the operator cancelled this run. If it had started, partial work may exist; if it was cancelled before it started, nothing was spent. Not retried.", "Nothing to fix. Run the job again if its work is still wanted."],
 	["agent-cancel", TERMINAL_COMMENTS["agent-cancel"], "Ask an operator to review the agent's audit record before starting replacement work."],
 	["answer-draft-refused", TERMINAL_COMMENTS["answer-draft-refused"], "Check the hand-written answer rule and the source run; no answer was sent."],

@@ -379,6 +379,14 @@ export const STEER_STDIN_CAPABILITY = "steerStdin";
 export const BUNDLE_ENV_FILE_CAPABILITY = "bundleEnvFile";
 
 /**
+ * The capability an image declares when its runner reads PI_JOB_IDLE_MS and PI_JOB_STALL_MS, stops an idle or stalled
+ * job itself and writes its activity counters (issue #888, image/runner/src/activity.mjs). NOT a gate: no job is refused
+ * for lacking it. A job on an image without it keeps the 30-minute wall clock, and its record says so
+ * (`limits.basis: "wall-clock"`, `limits.why: "image"`).
+ */
+export const IDLE_WATCH_CAPABILITY = "idleWatch";
+
+/**
  * Exported so the test cannot drift from the format string above. `|` because an image id is
  * `sha256:<hex>` and a version is a version, so neither can contain one -- and because a literal control
  * character in source is the kind of thing that survives a copy/paste and then does not.

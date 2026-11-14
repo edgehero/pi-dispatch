@@ -401,7 +401,7 @@ for (const [key, value] of [["excludeExtensions", ["pi-lint"]], ["excludeExtensi
     assert.ok(out.summary.includes("mini1 reads what this change needs."));
     const stamped = w.read();
     assert.deepEqual(Object.keys(JSON.parse(stamped)), ["version", "triggers"], "first in the file");
-    assert.equal(JSON.parse(stamped).version, TRIGGERS_FILE_VERSION);
+    assert.equal(JSON.parse(stamped).version, 2, "the version the content needs, which issue #888's fields raised the build's own above");
     const trail = parseTriggers(stamped, "t")[1].run;
     assert.deepEqual(trail[key], value, "and the loader keeps it");
     assert.equal(out.plan.undo, "Put trigger row 2 back as it was");

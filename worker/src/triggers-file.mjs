@@ -596,6 +596,12 @@ export const AUTHORED_NARROWING_FIELDS = Object.freeze([
 	// tool, on a clean record.
 	Object.freeze({ key: "excludeExtensions", authored: (v) => Array.isArray(v) && v.length > 0 }),
 	Object.freeze({ key: "excludeExtensionTools", authored: (v) => Array.isArray(v) && v.length > 0 }),
+	// Issue #888: a trigger's limits. Dropped by a service below the version floor, the job runs under the deployment's
+	// limits, which for a ceiling the trigger set is a longer run than the file allows, on a clean record. Any present
+	// value counts as authored; whether it is in range is the loader's question.
+	Object.freeze({ key: "idleTimeoutMinutes", authored: (v) => v !== undefined && v !== null }),
+	Object.freeze({ key: "stallTimeoutMinutes", authored: (v) => v !== undefined && v !== null }),
+	Object.freeze({ key: "maxMinutes", authored: (v) => v !== undefined && v !== null }),
 ]);
 
 export function makeCheckWaitSkew({ triggersPath, fs = nodeFs }) {

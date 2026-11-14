@@ -810,9 +810,9 @@ test("the stored fallback job is stamped with the version its fields need: nothi
 	const job = { repo: "acme/web", target: { type: "issue", number: 7 }, flow: "fix", steerMode: "steer", waitFor: [{ profile: "jira", ticket: "PD-1" }], trigger: { deliveryId: "d-761", sender: { id: 1 } } };
 	const today = fallbackJobOf(job, "github");
 	assert.equal(JSON.stringify(today), '{"repo":"acme/web","target":{"type":"issue","number":7},"flow":"fix","waitFor":[{"profile":"jira","ticket":"PD-1"}],"trigger":{"deliveryId":"d-761","sender":{"id":1}},"kind":"github","jobId":"gh-d-761"}');
-	const later = { table: Object.freeze({ waitFor: 4 }), supported: 4 };
+	const later = { table: Object.freeze({ waitFor: 5 }), supported: 5 };
 	const stamped = fallbackJobOf(job, "github", { dataVersions: later });
-	assert.equal(stamped.dataVersion, 4);
+	assert.equal(stamped.dataVersion, 5);
 	const { waitFor: _w, ...without } = job;
 	assert.equal(Object.hasOwn(fallbackJobOf(without, "github", { dataVersions: later }), "dataVersion"), false);
 	// An older worker (this build, which reads a lower version) refuses to rebuild the stamped fallback, and queues nothing.
@@ -821,5 +821,5 @@ test("the stored fallback job is stamped with the version its fields need: nothi
 	assert.equal(adds.length, 0);
 	// A worker that reads it keeps the stamp.
 	await enqueueLateForgeJob({ add: async (...a) => adds.push(a) }, "github", stamped, { dataVersions: later });
-	assert.equal(adds[0][1].dataVersion, 4);
+	assert.equal(adds[0][1].dataVersion, 5);
 });

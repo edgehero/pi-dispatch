@@ -63,6 +63,7 @@ import { budgetField, readUserServiceLimits } from "./host-budget.mjs";
 import { makeCpuReserve, reservePlan } from "./cpu-reserve.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
 import { createWorker, JOB_TIMEOUT_MS, STALLED_FAILED_REASON } from "./index.mjs";
+import { BACKSTOP_GRACE_MS } from "./job-limits.mjs";
 import { BOOT_REFUSING_JOB_USER_CAUSES, DAEMON_FACTS_TIMEOUT_MS, jobUserRefusal, makeDaemonFactsReader, makeJobUserResolver, relabelsPrivateMounts, resolveImageUser } from "./job-user.mjs";
 import { unenforcedSizeFlags } from "./job-size.mjs";
 import { makeCollectChain } from "./outbox.mjs";
@@ -179,10 +180,10 @@ const AUTH_RETRY_COOLDOWN_MS = 30_000;
 const AUTH_RESOLVE_TIMEOUT_MS = 10_000;
 
 /**
- * How long a fleet-wide scope claim lives. `JOB_TIMEOUT_MS` plus slack: a container cannot outlive that
- * ceiling, so the claim cannot expire underneath a live job -- which is what makes a refresh unnecessary
- * rather than merely unimplemented. DERIVED from that constant rather than written as a number, so the
- * coupling maintains itself if the timeout ever moves.
+ * How long a fleet-wide scope claim lives. `JOB_TIMEOUT_MS` plus slack. Until issue #888 a container could not outlive
+ * that ceiling, which is what made a refresh unnecessary. Since #888 a job runs as long as it keeps working, so the
+ * processor RENEWS every claim it holds every `CLAIM_REFRESH_MS` (index.mjs) for as long as the job runs: the TTL now
+ * bounds only how long a claim outlives a worker that died, which is what it bounded before for a job that ended.
  */
 const SCOPE_CLAIM_TTL_MS = JOB_TIMEOUT_MS + 5 * 60 * 1000;
 
@@ -1779,7 +1780,9 @@ export async function startWorker(
 	try {
 		const keep = workspaceCheckpointer ? await settleWithin(pointedJobDirs({ redis, hostName: durableHost }), 5_000, null) : new Set();
 		if (keep === null) throw new Error("the checkpoint pointers were not read within 5 s");
-		await sweepOrphanJobDirsFn({ jobsDir: config.jobsDir, olderThanMs: JOB_TIMEOUT_MS + 5 * 60 * 1000, now, keep, log });
+		// Issue #888: a running job's counters stay unchanged at most its idle limit plus the backstop's grace before it is
+		// stopped, so the bound is that or the wall clock, whichever is longer, plus the same margin as before.
+		await sweepOrphanJobDirsFn({ jobsDir: config.jobsDir, olderThanMs: Math.max(JOB_TIMEOUT_MS, config.jobIdleMinutes * 60_000 + BACKSTOP_GRACE_MS) + 5 * 60 * 1000, now, keep, log });
 	} catch (err) {
 		log("job_dir_sweep_skipped", { reason: scrubCredentials(err?.message) });
 	}
@@ -1958,7 +1961,7 @@ export async function startWorker(
 			// The comment decides nothing: a failure here costs a stale comment, never the record path.
 		}
 	};
-	const recordRun = ({ job, result, error, startedAt, endedAt, project, size = null, capacity = null, earlier = null, maxTurns = null }) => {
+	const recordRun = ({ job, result, error, startedAt, endedAt, project, size = null, capacity = null, earlier = null, maxTurns = null, limits = null }) => {
 		// The project (issue #499) was resolved at the pickup gate and rides here as `project` (an id or null), so a live
 		// edit of projects.json mid-run cannot make the record disagree with what the job was counted against. A record
 		// path that ends BEFORE the pickup gate (the wait gate's refusals) passes none, and resolves from the live ref
@@ -1968,7 +1971,7 @@ export async function startWorker(
 		// four `recordRun` call sites byte-unchanged and `buildRecord` a pure function of its arguments.
 		// The default venue rides the same way and for the same reason (#277): it is the value the registry
 		// below is built with, so the record resolves a job's venue exactly as dispatch does.
-		const record = buildRecord({ job, result, error, startedAt, endedAt, host: config.workerName, defaultBackend: config.defaultBackend, project: projectId, size, capacity, earlier, maxTurns, touchTracking: true });
+		const record = buildRecord({ job, result, error, startedAt, endedAt, host: config.workerName, defaultBackend: config.defaultBackend, project: projectId, size, capacity, earlier, maxTurns, limits, touchTracking: true });
 		writeRecord(record);
 		// Issue #644: the status comment's last edit, from the record's classification. An infrastructure failure the queue
 		// will retry says the attempt ended and is being retried, not "finished": BullMQ retries an error that is not
@@ -3039,6 +3042,9 @@ export async function startWorker(
 		// processor, so it is one value with one home; the wait state shares the budget's redis client
 		// because it describes the same delayed jobs that client already reasons about.
 		afterMaxMs: () => config.waitAfterMaxMs,
+		// Issue #888: the deployment's job limits (PI_JOB_IDLE_MINUTES, PI_JOB_STALL_MINUTES, PI_JOB_MAX_MINUTES), read per pickup
+		// from config so they have one home; a trigger's own take precedence (job-limits.mjs `effectiveJobLimits`).
+		jobLimits: () => ({ idleMinutes: config.jobIdleMinutes, stallMinutes: config.jobStallMinutes, maxMinutes: config.jobMaxMinutes }),
 		waitState: makeWaitState({ redis }),
 		// The polled tier's bounds, read per pickup from config so they are one value with one home. The
 		// slot count is a CEILING the gate clamps against the live concurrency, never the final number.
@@ -3046,16 +3052,15 @@ export async function startWorker(
 		// queue: declaring a name is declaring a fleet. Its TTL is DERIVED rather than guessed -- the gate
 		// holds the lease across every profile in turn, each bounded by the check timeout, so one timeout
 		// per profile plus one for the overhead between them.
-		// The fleet-wide half of a scoped `concurrent` ceiling. Its TTL is DERIVED rather than guessed, and
-		// derived is what makes a heartbeat unnecessary: `JOB_TIMEOUT_MS` is a hard 30-minute ceiling on how
-		// long any container can run, so a TTL above it cannot expire underneath a live job -- which is the
-		// failure that would matter, because it would let another host start a second container on a scope
-		// the operator limited to one. Nothing refreshes this claim, deliberately: a refresher would be a
-		// second thing to get wrong for a window that cannot be reached.
+		// The fleet-wide half of a scoped `concurrent` ceiling. Its TTL is `SCOPE_CLAIM_TTL_MS`. Until issue #888 a TTL
+		// above the 30-minute ceiling could not expire underneath a live job, and nothing refreshed the claim. Since #888
+		// a job runs as long as it keeps working, and a claim expiring under it would let another host start a second
+		// container on a scope the operator limited to one, so the processor renews every claim it holds while its job
+		// runs (index.mjs `CLAIM_REFRESH_MS`), each refresh acting only on a key still its own (fleet-lease.mjs).
 		scopeLease: hostQueue ? makeFleetLease({ redis, holderPrefix: config.workerName, keyFor: scopeSlotKey, ttlMs: SCOPE_CLAIM_TTL_MS, log }) : null,
 		// Issue #503: the fleet-wide half of a model endpoint's `slots`, armed like the scope lease (declaring a name is
-		// declaring a fleet) and with its TTL for its reason: the claim lives as long as the job's container, which
-		// `JOB_TIMEOUT_MS` bounds. Without a declared name only the in-process bound applies, per host.
+		// declaring a fleet) and with its TTL for its reason: the claim lives as long as the job's container, renewed
+		// while it runs since issue #888. Without a declared name only the in-process bound applies, per host.
 		endpointLease: hostQueue ? makeFleetLease({ redis, holderPrefix: config.workerName, keyFor: endpointSlotKey, ttlMs: SCOPE_CLAIM_TTL_MS, log }) : null,
 		// The endpoint gate's snapshot, read per pickup: the live-reloaded declaration and the overlay models.json, which
 		// the operator edits without a restart too. Read only when an endpoint is declared (the gate's own rule).
@@ -3360,6 +3365,18 @@ export async function startWorker(
 					throw configError("github jobs and cron triggers with run.github require a working GITHUB_AUTH_SOURCE (gh/pat/app)");
 				}
 				throw configError(`no forge credentials are configured for job kind ${JSON.stringify(job?.kind)} -- see .env.example`);
+			},
+			// Issue #888: whether the job's forge token expires while a long job runs. Only the GitHub App source's does (an
+			// installation token lives an hour); every other source hands a credential that outlives any run. A job holding
+			// one keeps the 30-minute wall clock until the refresh of running jobs lands. Never throws: an auth that cannot
+			// be resolved here already refused at the mint.
+			tokenExpires: async (job) => {
+				const kind = job?.kind === "local" ? "github" : job?.kind;
+				try {
+					return (await ensureAuth(kind))?.source === "app";
+				} catch {
+					return true;
+				}
 			},
 			isDefaultBranchProtected: async (job, token) => {
 				const host = forgeFor(job)?.host;

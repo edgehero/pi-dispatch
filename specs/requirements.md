@@ -463,6 +463,9 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 ## REQ-JOB-TIMEOUT-30M
 
+- **Status**: SUPERSEDED by `REQ-JOB-ACTIVITY-LIMITS` (issue #888). Kept as an address. The 30-minute wall clock survives
+  only as the fallback a job keeps when no activity watch covers it (an image without `idleWatch`, a venue with no
+  channel for the counters, a credential that expires while it runs), and as the watch jobs' own ceiling.
 - **Statement**: A container exceeding 30 minutes shall be stopped and the job failed.
 - **Why**: Bounds *wall-clock*, which `REQ-RUNNER-TURN-BUDGET` does not. A wedged agent otherwise holds
   one of three worker slots indefinitely — a single runaway costs 33% of throughput. 30 minutes is ~3×
@@ -475,10 +478,14 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 ## REQ-JOB-ACTIVITY-LIMITS
 
-- **Status**: PARTIAL (issue #888). Part 1, the runner's half, is built: the activity watch, its stop and its counters
-  (`INT-RUNNER-EXIT-CODE-PROTOCOL`, "The activity watch"; `INT-JOB-ACTIVITY-FILE`). The worker's half (the settings,
-  the backstop, `max-minutes`, the claims and the record) is the next part, and until it lands no worker asks for the
-  watch, so `REQ-JOB-TIMEOUT-30M` still holds unchanged.
+- **Status**: BUILT (issue #888, both halves). The runner's activity watch, its stop and its counters
+  (`INT-RUNNER-EXIT-CODE-PROTOCOL`, "The activity watch"; `INT-JOB-ACTIVITY-FILE`), and the worker's half: the
+  deployment settings (`PI_JOB_IDLE_MINUTES`, `PI_JOB_STALL_MINUTES`, `PI_JOB_MAX_MINUTES`) and the trigger fields
+  (`run.idleTimeoutMinutes`, `run.stallTimeoutMinutes`, `run.maxMinutes`, `INT-TRIGGERS-FILE-CONTRACT`), the backstop,
+  the `max-minutes` timer, the 30-minute fallback for a job no watch covers, the renewed fleet claims, the activity-aware
+  boot sweep and the record's `limits` (`INT-RUN-HISTORY-FILE-CONTRACT`). A job holding a credential that expires while it
+  runs (a subscription snapshot, a GitHub App token) keeps the 30-minute wall clock beside the watch until the refresh
+  of running jobs' credentials lands; its record says `limits.why`.
 - **Statement**: A running job shall be stopped when it is IDLE (no step by the agent and no activity in its container
   for the idle limit, default 15 minutes) or STALLED (no step by the agent for the stall limit, default 4 hours, however
   busy the container), and when it reaches an optional wall-clock ceiling an operator set; never merely because it is
@@ -498,7 +505,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   returns; given a tool that keeps printing while the agent takes no step, it is stopped as `stalled` at the stall
   limit and not at the idle one; given a job that keeps taking steps, it runs past both and completes
   (`image/runner/test/activity.integration.test.mjs`, the real runner and pi); given a background process using the CPU
-  while the agent sleeps, it is not idle (`activity.test.mjs`, and the image's own proof in `verify-image.sh`).
+  while the agent sleeps, it is not idle (`activity.test.mjs`, and the image's own proof in `verify-image.sh`). Given a
+  watched job, the worker's 30-minute timer is handed over and does not fire, and a stop the watch asks for cancels under
+  its own name; given an image without `idleWatch`, the timer fires as `job-timeout-30m` and records `max-minutes`; given
+  a ceiling, it cancels as `max-minutes` (`worker/test/wiring.test.mjs`); given a runner whose counters stop changing,
+  the backstop stops the run at the idle limit plus its grace (`run-container-activity.test.mjs`).
 
 ## REQ-OPERATOR-JOB-CANCEL
 
@@ -8947,6 +8958,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-14 (#888, part 2: the worker) | **`REQ-JOB-ACTIVITY-LIMITS` BUILT**: the deployment settings and the three trigger fields, the backstop, `max-minutes`, the 30-minute fallback for a job no watch covers (and, until credential refresh lands, for one holding a subscription or a GitHub App token), the renewed claims, the activity-aware boot sweep and the record's `limits`; Acceptance gains the worker's tests. **`REQ-JOB-TIMEOUT-30M` SUPERSEDED** by it, kept as an address: its 30 minutes survive as the fallback and the watch jobs' ceiling. `REQ-RUNNER-TURN-BUDGET`, `REQ-OPERATOR-JOB-CANCEL` (the cancel keeps its reason) and `REQ-HOST-BUDGET` UNCHANGED, checked. |
 | 2026-11-14 (#888, part 1: the runner) | **NEW `REQ-JOB-ACTIVITY-LIMITS`**, PARTIAL: a job is stopped when idle (no step and no activity, 15 minutes by default) or stalled (no step, 4 hours by default, however busy), or at an optional ceiling, never for being old; what a step and activity are; why (the 30-minute kill of working jobs, spend already bounded elsewhere, the agent waiting on its own background work, the stall limit for an endless loop and the owner's eight-hour runs); the runner's half built, the worker's half next. **`REQ-JOB-TIMEOUT-30M` UNCHANGED, checked**: it still holds until the worker half asks for the watch. `REQ-RUNNER-TURN-BUDGET` UNCHANGED, checked. |
 | 2026-11-14 (#882, part 7) | **`REQ-CONSOLE-SECURITY` AMENDED**: the console on the local network, opt-in (`PI_CONSOLE_LAN=1`): a second listener on the host's network address (on macOS the wildcard on port 80 first, measured), announced as `pi-dispatch.local` by `dns-sd` or `avahi-publish`, with (b) gaining that name and address once bound; a request that arrived on it is never remembered, judged by its socket and never a header, and its sign-in page says so and names the host. UNCHANGED, checked: (a)'s loopback bind and refusals, `PI_CONSOLE_BIND_PUBLIC`, (i) the code and link, part 5's approval (whose window already names the peer's address), `OQ-058`. |
 | 2026-11-14 (#882, part 5) | **`REQ-CONSOLE-SECURITY` AMENDED**: sign in by approving a window on the host's desktop ("Sign in on this computer"), where the console can show one: one request at a time behind the sign-in limiter, a 256-bit id only the asking browser holds, a 4-character match code shown on the page and in the window, Deny the default, a 60-second give-up, the operator tokens only, and a `login-approval` row for every outcome. The window is the credential, since a job's container reaches the console through helpers running as the operator, so neither the peer's account nor any header tells its request from a browser's. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, the sign-in page: the button, its waiting line and three notices. UNCHANGED, checked: `OQ-058` (the host approves, never a browser), (a) and (b) (the listener and the names it answers). |

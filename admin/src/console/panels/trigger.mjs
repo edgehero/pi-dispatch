@@ -178,6 +178,10 @@ export const HAND_FIELDS = Object.freeze([
   "gates",
   "gateTimeout",
   "gateBudgetRaiseUsd",
+  // Issue #888: the limits a trigger's jobs run under. By hand, like the job cap: a limit is operator policy.
+  "idleTimeoutMinutes",
+  "stallTimeoutMinutes",
+  "maxMinutes",
 ]);
 export function triggerRun(v) {
   const t = trigger(v);

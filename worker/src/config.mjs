@@ -21,6 +21,7 @@ import { imageRefProblem } from "./image-ref.mjs";
 import { jobSizeDefaults } from "./job-size.mjs";
 import { hostBudgetSettings } from "./host-budget.mjs";
 import { CONTAINER_ENV_NAMES, KEYLESS_ENV_NAME, RUNNER_ENV_NAMES } from "./reserved-env.mjs";
+import { JOB_IDLE_MINUTES_DEFAULT, JOB_IDLE_MINUTES_MAX, JOB_MINUTES_MAX, JOB_STALL_MINUTES_DEFAULT } from "./job-limits.mjs";
 import { modelIdProblem, modelListProblem, providerIdProblem } from "./model-ref.mjs";
 import { WORKER_NAME_RE } from "./worker-name.mjs";
 
@@ -511,6 +512,13 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		provider: providerFrom(env),
 		model,
 		maxTurns: positiveInt(env, "PI_MAX_TURNS", 30), // pi has no turn limit; we impose one
+		// Issue #888 (REQ-JOB-ACTIVITY-LIMITS): a running job's limits, in whole minutes. Idle: nothing happened and nothing
+		// was waited on. Stall: the agent took no step, however busy the container (0 turns it off). Max: a wall-clock
+		// ceiling, unset by default. A trigger's run.idleTimeoutMinutes, run.stallTimeoutMinutes and run.maxMinutes take
+		// precedence (job-limits.mjs `effectiveJobLimits` says how).
+		jobIdleMinutes: boundedInt(env, "PI_JOB_IDLE_MINUTES", JOB_IDLE_MINUTES_DEFAULT, 1, `an integer 1-${JOB_IDLE_MINUTES_MAX}`, JOB_IDLE_MINUTES_MAX),
+		jobStallMinutes: nonNegativeInt(env, "PI_JOB_STALL_MINUTES", JOB_STALL_MINUTES_DEFAULT, JOB_MINUTES_MAX),
+		jobMaxMinutes: optionalBoundedInt(env, "PI_JOB_MAX_MINUTES", 1, JOB_MINUTES_MAX),
 		allowedModels: allowedModelsFrom(env), // issue #502: the deployment's allowed-model list; null = unrestricted. ENV ONLY, never the settings overlay
 		maxTokens: optionalBoundedInt(env, "PI_MAX_TOKENS", 1), // issue #25; null = per-job token budget disabled (lagging in-run backstop)
 		dailyTokenCap: optionalBoundedInt(env, "PI_DAILY_TOKEN_CAP", 1), // issue #25; null = daily token counter disabled (check-AFTER, host-side)

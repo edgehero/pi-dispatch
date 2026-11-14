@@ -36,6 +36,7 @@ import { releaseSemanticWindow } from "./queue.mjs";
 import { runIdOf } from "./recovery-queue.mjs";
 import { isFinalOutcome, settleInbox } from "./inbox-settle.mjs";
 import { makeAwaitKeeper } from "./held-settle.mjs";
+import { effectiveJobLimits, malformedJobLimits, WALL_CLOCK_FALLBACK_MS } from "./job-limits.mjs";
 import { isProjectId } from "./project-id.mjs";
 
 
@@ -43,7 +44,21 @@ export const QUEUE = "pi-jobs";
 
 /** The key the host-wide in-flight count lives under. One machine, one counter, whatever the queue. */
 export const HOST_SLOT_KEY = "host";
-export const JOB_TIMEOUT_MS = 30 * 60 * 1000; // REQ-JOB-TIMEOUT-30M
+/**
+ * The wall clock a job keeps until its activity watch takes over (issue #888, `REQ-JOB-ACTIVITY-LIMITS`): from the pickup
+ * through the clone and the container's start, and for the whole run of a job no watch covers (an image without
+ * `idleWatch`, a venue with no channel for its counters, a credential that expires while it runs). Once a watch is armed
+ * (run-container.mjs `onActivityArmed`) this timer is cleared and the job runs until it is idle, stalled, at its
+ * `maxMinutes`, or done. It was REQ-JOB-TIMEOUT-30M's fixed kill for every job before #888.
+ */
+export const JOB_TIMEOUT_MS = WALL_CLOCK_FALLBACK_MS;
+/**
+ * How often a running job's fleet claims (a scoped `concurrent` slot, a model endpoint's slot) are renewed (issue #888). The
+ * claims' TTL is `JOB_TIMEOUT_MS` plus slack (start.mjs `SCOPE_CLAIM_TTL_MS`), which a job past 30 minutes would outlive;
+ * renewing every 5 minutes keeps a claim alive exactly as long as its job runs, and lets it lapse within the TTL of a
+ * worker that died.
+ */
+export const CLAIM_REFRESH_MS = 5 * 60 * 1000;
 
 /**
  * The failed reason BullMQ gives a job its stall check failed (`maxStalledCount: 0` below): the literal in the pinned
@@ -288,7 +303,7 @@ function makeBeforePickupRecorder({ projects, settleSteerBeforePickup, recordRun
 	};
 }
 
-export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, readModelRoles = () => ({}), hostBudget = null, abortGraceMs = ABORT_GRACE_MS, applyConcurrency = () => {}, pauseUntil = () => null, pauseWindowsNewer = () => false, triggersNewer = () => false, scopedLimits = () => [], projects = () => [], jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, settledRecord = null, previousRecord = null, timeoutMs = JOB_TIMEOUT_MS, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", multiHost = false, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random, cpus = availableParallelism, runningJobs = makeRunningJobs(), valkeyTag = null }) {
+export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, readModelRoles = () => ({}), hostBudget = null, abortGraceMs = ABORT_GRACE_MS, applyConcurrency = () => {}, pauseUntil = () => null, pauseWindowsNewer = () => false, triggersNewer = () => false, scopedLimits = () => [], projects = () => [], jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, settledRecord = null, previousRecord = null, timeoutMs = JOB_TIMEOUT_MS, jobLimits = () => ({}), claimRefreshMs = CLAIM_REFRESH_MS, minuteMs = 60_000, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", multiHost = false, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random, cpus = availableParallelism, runningJobs = makeRunningJobs(), valkeyTag = null }) {
 	// The lost-lock gate's rejection lines, said ONCE per job id, stall count and attempt. The gate runs before every
 	// deferral (pause window, wait, scope or endpoint busy), and BullMQ never resets a job's stall count, so a stalled
 	// scheduled job whose record is refused meets the gate again on every deferred pickup: a 30-minute scope-busy hold
@@ -1017,7 +1032,12 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// set): every record of a refusal before that point says, by its null, that the job never held a slot.
 		let capacity = null;
 		let pickupMaxTurns = null;
-		const recordAfterGate = (args) => recordRun({ ...args, project, size, capacity, earlier, maxTurns: pickupMaxTurns });
+		// Issue #888: the limits the job ran under and which one bounded it (`limits`, INT-RUN-HISTORY-FILE-CONTRACT): set when
+		// the job is admitted, its `basis` moved to "activity" when a watch takes over the wall clock, and the processor and
+		// the container add why the wall clock stayed and what the backstop saw. Null, like `capacity`, before admission.
+		let jobLimitsNow = null;
+		let limitsRecord = null;
+		const recordAfterGate = (args) => recordRun({ ...args, project, size, capacity, earlier, maxTurns: pickupMaxTurns, limits: limitsRecord });
 
 		// The MATCHED ROW's scope keys both the in-process slot and the fleet lease (issue #498), the same string
 		// `budgetCapsFor` hashes below and the boot sweeper hashes from the file: a qualified `github:acme/web` row holds
@@ -1370,6 +1390,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 
 		let startedAt;
 		let timer;
+		// Issue #888: the job's ceiling (`max-minutes`, only when one is set) and the renewal of its fleet claims.
+		let maxTimer = null;
+		let claimRefresh = null;
 		let subscriptionDeadlineAt = null;
 		let cancelPoll;
 		let cancelPolling = false;
@@ -1428,6 +1451,18 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// This host runs the job from here on (issue #599, phase 2): its entry, at the same instant as `startedAt`, given
 			// back by `releaseAllHolds` on every exit. `add` is total, so this block still cannot throw.
 			runningKey = runningJobs.add({ id: job.id, project, memMiB: size.memMiB, cpuCenti: size.cpuCenti, at: Date.parse(startedAt), holdMicros: 0, holdAt: Date.parse(startedAt) });
+			// Issue #888: the limits, read once here like the capacity. A malformed queued value counts as unset and is said
+			// by name. Total: `effectiveJobLimits` never throws, so this block still cannot.
+			jobLimitsNow = effectiveJobLimits(job.data, (() => {
+				try {
+					return jobLimits() ?? {};
+				} catch {
+					return {};
+				}
+			})());
+			const malformedLimits = malformedJobLimits(job.data);
+			if (malformedLimits.length > 0) deps?.log?.("job_limits_malformed", { jobId: job.id, fields: malformedLimits });
+			limitsRecord = { idleMinutes: jobLimitsNow.idleMinutes, stallMinutes: jobLimitsNow.stallMinutes, maxMinutes: jobLimitsNow.maxMinutes, basis: "wall-clock" };
 			// The producer of the name both boot reapers sweep by substring. Built from the shared prefix
 			// rather than typed here, so a rename cannot land in the producer and not in the sweeps (#227).
 			// From the VENUE that will build the container, not from the local adapter reached for directly:
@@ -1465,9 +1500,26 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			}
 			subscriptionDeadlineAt = now() + timeoutMs;
 			timer = setTimeout(() => {
-				// BullMQ has no per-job kill timer; this is ours. cancelJob raises the AbortSignal.
+				// BullMQ has no per-job kill timer; this is ours. cancelJob raises the AbortSignal. Issue #888: the wall clock a job
+				// keeps until its activity watch takes over (`onActivityArmed` clears it), and for good when none does.
 				Promise.resolve(cancelJob(job.id, "job-timeout-30m")).catch(() => {});
 			}, timeoutMs);
+			// Issue #888: an operator's ceiling, from the pickup, whatever the watch does. Only when one is set.
+			if (jobLimitsNow?.maxMinutes) {
+				maxTimer = setTimeout(() => {
+					Promise.resolve(cancelJob(job.id, "max-minutes")).catch(() => {});
+				}, jobLimitsNow.maxMinutes * minuteMs);
+			}
+			// Issue #888: the fleet claims this job holds are renewed while it runs (`CLAIM_REFRESH_MS` says why). Each refresh
+			// acts on its own key only while the value is still this job's (`fleet-lease.mjs`), and never throws.
+			claimRefresh = setInterval(() => {
+				for (const hold of [...scopeHolds, ...endpointHolds]) {
+					try {
+						Promise.resolve(hold?.fleet?.refresh?.()).catch(() => {});
+					} catch {}
+				}
+			}, claimRefreshMs);
+			claimRefresh.unref?.();
 
 			// Abort (timeout OR shutdown) => stop the container. docker stop sends SIGTERM then SIGKILL
 			// after the grace period; the runner exits and runContainer returns/throws.
@@ -1537,6 +1589,8 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// releasable twice -- a double release frees another holder's slot. Last taken, first given back.
 			void releaseAllHolds();
 			clearTimeout(timer);
+			clearTimeout(maxTimer);
+			clearInterval(claimRefresh);
 			clearInterval(cancelPoll);
 			throw error;
 		}
@@ -1618,6 +1672,18 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 
 			const result = await runJob(effectiveJob, {
 				queueJobId: String(job.id),
+				// Issue #888: the job's limits and the three hooks its activity watch needs. A dep, never a field of the job:
+				// the job's data is what a recovery re-enqueues, and a worker-computed value must not ride into the queue.
+				activityLimits: jobLimitsNow,
+				onActivityArmed: () => {
+					clearTimeout(timer);
+					timer = null;
+					if (limitsRecord !== null) limitsRecord = { ...limitsRecord, basis: "activity" };
+				},
+				requestStop: (reason) => Promise.resolve(cancelJob(job.id, reason)).catch(() => {}),
+				noteActivity: (fields) => {
+					if (limitsRecord !== null && fields !== null && typeof fields === "object") limitsRecord = { ...limitsRecord, ...fields };
+				},
 				deploymentMaxCostUsd: settings.maxCostUsd,
 				rawApprovalJob: job.data,
 				redis,
@@ -2035,6 +2101,8 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// (issue #503), then the scope holds (project, then repo), then the host slot.
 			await releaseAllHolds({ orphan: stopDidNotTake });
 			clearTimeout(timer);
+			clearTimeout(maxTimer);
+			clearInterval(claimRefresh);
 			clearInterval(cancelPoll);
 			signal.removeEventListener("abort", onAbort);
 			// After the settle (issue #638): a final outcome stopped it already; an attempt that will be retried leaves its
@@ -2199,7 +2267,7 @@ export function keeperHoldState(job, at) {
 	return { at, since, startedMs };
 }
 
-export function createWorker({ connection, name, stopContainer, containerName, hostQueue = null, checkLease = null, scopeLease = null, checkTimeoutMs, concurrency, getSettings, readModelRoles, redis, deps, recordRun, settledRecord = null, previousRecord = null, limiter, pauseUntil, pauseWindowsNewer, triggersNewer, scopedLimits, projects, jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), waitState, afterMaxMs, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels, extraClosers = [], hostBudget: hostBudgetOptions = null, runningJobs = makeRunningJobs() }) {
+export function createWorker({ connection, name, stopContainer, containerName, hostQueue = null, checkLease = null, scopeLease = null, checkTimeoutMs, concurrency, getSettings, readModelRoles, redis, deps, recordRun, settledRecord = null, previousRecord = null, limiter, pauseUntil, pauseWindowsNewer, triggersNewer, scopedLimits, projects, jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), waitState, afterMaxMs, jobLimits, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels, extraClosers = [], hostBudget: hostBudgetOptions = null, runningJobs = makeRunningJobs() }) {
 	// One Worker per queue name (issue #57). A host-affine job -- one whose folder, secret resolver or wait
 	// check lives on THIS machine -- is enqueued to `pi-jobs@<name>` rather than filtered for at pickup,
 	// because BullMQ has no selective pop and the put-it-back alternative does not work: promotion out of
@@ -2302,6 +2370,7 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 			// redis client, and the shared 30-day `after` ceiling), so a bare wiring behaves like a wired one.
 			waitState,
 			afterMaxMs,
+			jobLimits,
 			// Issue #230, the polled tier. `concurrencyNow` reads the LIVE slot count rather than the boot value,
 			// because the overlay can lower it through `dispatch_set` and a check must never take the last free
 			// slot from a paid job.

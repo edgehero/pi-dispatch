@@ -102,6 +102,106 @@ test("the timeout fires cancelJob after timeoutMs", { skip }, async () => {
 	await running;
 });
 
+/** Issue #888: a processor whose container calls `onArmed(args)` once it starts, then waits for the abort. */
+function watchedProcessor({ timeoutMs = 20, jobLimits = () => ({}), minuteMs = 60_000, onStart = () => {}, capabilities = ["idleWatch"], extraDeps = {} }) {
+	const cancels = [];
+	let fired;
+	const cancelled = new Promise((resolve) => (fired = resolve));
+	const processor = mod.makeProcessor({
+		cancelJob: (id, reason) => {
+			cancels.push(reason);
+			fired(reason);
+		},
+		stopContainer: () => {},
+		redis: { async incr() { return 1; }, async expire() {} },
+		getSettings: () => ({ provider: "anthropic", model: "m", maxTurns: 30, dailyCap: 10, concurrency: 3 }),
+		timeoutMs,
+		jobLimits,
+		minuteMs,
+		deps: {
+			mintToken: async () => "t",
+			isDefaultBranchProtected: async () => true,
+			prepareWorkspace: async () => ({}),
+			imagePreflight: async () => ({ ok: true, image: "i", capabilities }),
+			runContainer: (args) =>
+				new Promise((_, reject) => {
+					args.signal.addEventListener("abort", () => reject(new Error("stopped")), { once: true });
+					onStart(args);
+				}),
+			cleanup: async () => {},
+			comment: async () => {},
+			...extraDeps,
+		},
+	});
+	return { processor, cancels, cancelled };
+}
+
+const within = (promise, ms) => {
+	let bound;
+	return Promise.race([promise, new Promise((resolve) => (bound = setTimeout(() => resolve("bound"), ms)))]).finally(() => clearTimeout(bound));
+};
+
+test("issue #888: once the activity watch is armed the wall clock is handed over, and the watch's own stop cancels under its name", { skip }, async () => {
+	let args = null;
+	let started;
+	const startedOnce = new Promise((resolve) => (started = resolve));
+	const { processor, cancels, cancelled } = watchedProcessor({
+		onStart: (a) => {
+			args = a;
+			a.onActivityArmed?.();
+			started();
+		},
+	});
+	const ac = new AbortController();
+	const running = processor({ id: "j1", data: { kind: "github", repo: "o/r" } }, "tok", ac.signal).catch(() => {});
+	assert.notEqual(await within(startedOnce, 10_000), "bound", "the container never started");
+	assert.deepEqual(args.activityWatch, { idleMs: 15 * 60_000, stallMs: 240 * 60_000, keepWallClock: false }, "the deployment defaults, in milliseconds");
+	// Five times the 20 ms wall clock: handed over, it never fires.
+	assert.equal(await within(cancelled, 100), "bound", `the wall clock fired after the hand-over: ${cancels}`);
+	args.requestStop("idle");
+	assert.equal(await within(cancelled, 10_000), "idle");
+	ac.abort();
+	await running;
+});
+
+test("issue #888: a job no watch covers keeps the wall clock (an image without idleWatch)", { skip }, async () => {
+	let args = null;
+	const { processor, cancelled } = watchedProcessor({ capabilities: [], onStart: (a) => (args = a) });
+	const ac = new AbortController();
+	const running = processor({ id: "j2", data: { kind: "github", repo: "o/r" } }, "tok", ac.signal).catch(() => {});
+	assert.equal(await within(cancelled, 10_000), "job-timeout-30m");
+	assert.equal(args?.activityWatch, undefined, "the runner is asked for nothing");
+	ac.abort();
+	await running;
+});
+
+test("issue #888: a job holding a forge token that expires keeps the wall clock beside the watch", { skip }, async () => {
+	let args = null;
+	const { processor, cancelled } = watchedProcessor({
+		extraDeps: { tokenExpires: async () => true },
+		// run-container.mjs's own rule: a watch that must keep the wall clock never hands it over.
+		onStart: (a) => {
+			args = a;
+			if (a.activityWatch?.keepWallClock !== true) a.onActivityArmed?.();
+		},
+	});
+	const ac = new AbortController();
+	const running = processor({ id: "j3", data: { kind: "github", repo: "o/r" } }, "tok", ac.signal).catch(() => {});
+	assert.equal(await within(cancelled, 10_000), "job-timeout-30m");
+	assert.equal(args?.activityWatch?.keepWallClock, true, "the watch still runs, so an idle job still ends sooner");
+	ac.abort();
+	await running;
+});
+
+test("issue #888: a ceiling cancels as max-minutes, whatever the watch does", { skip }, async () => {
+	const { processor, cancelled } = watchedProcessor({ timeoutMs: 60_000, jobLimits: () => ({ maxMinutes: 1 }), minuteMs: 20, onStart: (a) => a.onActivityArmed?.() });
+	const ac = new AbortController();
+	const running = processor({ id: "j4", data: { kind: "github", repo: "o/r" } }, "tok", ac.signal).catch(() => {});
+	assert.equal(await within(cancelled, 10_000), "max-minutes");
+	ac.abort();
+	await running;
+});
+
 test("an abort stops the container", { skip }, async () => {
 	let stopped = null;
 	const processor = mod.makeProcessor({

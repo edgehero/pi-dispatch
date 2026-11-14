@@ -604,7 +604,7 @@ test("no assignment in .env.example carries an inline comment, live or commented
 	// POLL_CATCHUP_MINUTES adds the poller's catch-up horizon (#880).
 	// GITHUB_INGEST adds the GitHub transport (#879), commented out like GITHUB_AUTH_SOURCE beside it now is.
 	// PI_CONSOLE_LAN and PI_CONSOLE_LAN_PORT add the console's opt-in listener on the local network (#882).
-	assert.equal(scanned, 140, "the scan must actually reach every assignment in the file");
+	assert.equal(scanned, 143, "the scan must actually reach every assignment in the file");
 	assert.match("  PI_X=1 # c", /^\s*(# )?([A-Z_][A-Z0-9_]*)=(.*)$/, "and the shape it scans for is the shape the file uses, indented or not");
 
 	// systemd drops an `export` line entirely (measured: "Ignoring invalid environment assignment"), and a BOM
