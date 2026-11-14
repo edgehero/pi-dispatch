@@ -1,7 +1,7 @@
 {
   "card": "RunRecovered",
   "pr": 5,
-  "words": "d2e72358bfb142ef0762ba8798b8ac92774b3533cb3babde0926ba8ec2828a48",
+  "words": "ae7bbc64d98a4343cc387c46c1cbeae8471dd9b7e4d7ff3b0aeb868b30054885",
   "elements": [
     {"el":"p-outcome","kind":"panel","status":"new","source":"admin/src/console/panels/run.mjs#runOutcome","golden":["panels/run-recovering.operator"]},
     {"el":"p-recovery","kind":"panel","status":"new","source":"admin/src/console/panels/run.mjs#runRecovery","golden":["panels/run-recovering.operator"]},
@@ -49,6 +49,7 @@
     {"el":"Re-picked: \"The first attempt stalled (its worker stopped answering), and this pickup ran it again. Stalled re-pick: yes.\"","kind":"readme","status":"new","source":"admin/src/console/panels/run.mjs#runChat"},
     {"el":"**Fixture note.** All of it is sample: gh-5d10-r2, its sibling gh-5d10-r1, acme/api#140, trigger 7 (pi:triage, which the fixture gives two replicas and recovery), the times, the checkpoint markers, the costs, and the earlier attempt on mini1. The sentences are the catalog's (`recovery-enqueued`, `recovery-failed`, `recovery-host-lost`, `recovery-cap`, `recovery-checkpoint-absent`, `recovery-unsafe-extensions`, `recovery-superseded`, `workspace-extensions`). The checkpoint markers' times are illustrative: the record keeps only counts.","kind":"sample","status":"illustrative","reason":"Sample values: production uses real records and catalog words, and the card's sample values are not runtime contracts."},
     {"el":"A time axis with a now line","kind":"readme","status":"illustrative","reason":"the page draws the attempts as a track, without one"},
-    {"el":"Tiles and a per attempt cost comparison","kind":"readme","status":"illustrative","reason":"the page lists what the record holds; a comparison waits for a record that stores it per attempt"}
+    {"el":"Tiles and a per attempt cost comparison","kind":"readme","status":"illustrative","reason":"the page lists what the record holds; a comparison waits for a record that stores it per attempt"},
+    {"el":"Beside the id, the short link opens the newest run on the issue, so while the recovery runs it opens the recovery job","kind":"readme","status":"new","source":"admin/src/console/run-path.mjs#runPathLink"}
   ]
 }

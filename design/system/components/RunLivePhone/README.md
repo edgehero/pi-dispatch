@@ -1,6 +1,7 @@
 The live run page laid out for a phone: what the run is doing now comes first, and the one action is Steer.
 
 **How a person uses it.**
+- **The title.** The run's id, and its short link `/run/acme/web/415` on the line under it when the id fills the width.
 - **Progress.** The elapsed timecode, turn 7 of 40, 12 steps with 1 failed, the tool running now and for how long, phase 2 of 4 with 3 of 10 ticks, and the run's own note. The recent steps are left to the transcript below.
 - **Spend so far.** $0.14 metered against the $2.00 job cap, as a bar with the soft-hold line, and what was reserved at the start.
 - **Live transcript.** The newest two entries (the edit result and the bash call still running), with *Show all 10 entries* to open the rest.

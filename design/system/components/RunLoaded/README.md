@@ -1,6 +1,7 @@
 A completed run's **Loaded** card: what the job had when it started, one line per kind. Today a run page names the model and the flow; nothing says which extensions, skills, MCP servers or tools the job loaded, or which pi and image it ran on. Those depend on the host, the repository at its base commit, the trigger and the image, and the configuration pages show only what should load.
 
 **How a person uses it.**
+- **The title** is RunEnded's: the id, and beside it the run's short link, `/run/acme/web/490`.
 - **The top line** says whether everything the trigger asks for loaded. When something did not (LoadedStates draws each case), it names what, and the outcome says it too.
 - **One line per kind:**
   - **pi:** the version and image the job ran, with the image id.

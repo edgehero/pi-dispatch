@@ -1,7 +1,7 @@
 {
   "card": "RunRefused",
   "pr": 5,
-  "words": "b148a956ee0dfafec03bd912c0c3842f5c1d63e67cef4a914977575b5da7964f",
+  "words": "80c6916be5937927a0ee0d0f5ce81f3729f47da78908611ef784446ff9f8cea3",
   "elements": [
     {"el":"p-outcome","kind":"panel","status":"new","source":"admin/src/console/panels/run.mjs#runOutcome","golden":["panels/run-refused.operator"]},
     {"el":"p-run","kind":"panel","status":"new","source":"admin/src/console/panels/run.mjs#runSummary","golden":["panels/run-refused.operator"]},
@@ -24,6 +24,7 @@
     {"el":"## Fixture note","kind":"readme","status":"new","source":"admin/src/console/panels/run.mjs#runSummary"},
     {"el":"From the fixture: gh-e9a0, acme/billing#260, fix, build3, podman, trigger 3 (index 2 in the fixture file), claude-sonnet-5-5, attempt 1, 15:30 UTC, 0s, not metered, no dollar window, `egress-proxy-missing`. The fixture record says project `api`; the page follows the project config, which maps acme/billing to `billing`. The rule text, the doctor link and \"same reason in 24 hours\" are sample copy.","kind":"readme","status":"new","source":"admin/src/console/panels/run.mjs#runCostPanel"},
     {"el":"Run with flow, trigger, model, attempt and times","kind":"readme","status":"illustrative","reason":"a refused run stopped before those were decided, so the record may not hold them; only what it holds is drawn"},
-    {"el":"Re-run disabled with a reason","kind":"readme","status":"illustrative","reason":"the page offers it when the planner allows it, and its preview says what a retry would meet"}
+    {"el":"Re-run disabled with a reason","kind":"readme","status":"illustrative","reason":"the page offers it when the planner allows it, and its preview says what a retry would meet"},
+    {"el":"Beside the id, the short link opens the newest run on the issue, so once the run is re-run it opens the new one","kind":"readme","status":"new","source":"admin/src/console/run-path.mjs#runPathLink"}
   ]
 }

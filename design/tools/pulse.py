@@ -60,19 +60,21 @@ def topbar(active="Overview", parked=1, role="operator", live="live"):
   </div>
 </header>"""
 
-def titlebar(title, sub="", end="", back=""):
+def titlebar(title, sub="", end="", back="", beside=""):
+    """`beside` sits on the title's own line, after it (the run page's short link): the title stays the heading alone."""
     b = f'<a class="back" href="#">{ic("chev-l", "ic ic--sm")}{E(back)}</a>' if back else ""
+    head = f'<div class="titlebar__head"><h1>{title}</h1>{beside}</div>' if beside else f'<h1>{title}</h1>'
     return f"""<div class="titlebar">
-  <div class="titlebar__lead">{b}<h1>{title}</h1>{f'<p class="titlebar__sub">{sub}</p>' if sub else ''}</div>
+  <div class="titlebar__lead">{b}{head}{f'<p class="titlebar__sub">{sub}</p>' if sub else ''}</div>
   {f'<div class="titlebar__end">{end}</div>' if end else ''}
 </div>"""
 
-def shell(active, inner, title, sub="", end="", back="", parked=1, role="operator", live="live", topextra=""):
+def shell(active, inner, title, sub="", end="", back="", parked=1, role="operator", live="live", topextra="", beside=""):
     return f"""<a class="skip" href="#main">Skip to content</a>
 <main id="main" class="page">
 {topbar(active, parked, role, live)}
 {topextra}
-{titlebar(title, sub, end, back)}
+{titlebar(title, sub, end, back, beside)}
 {inner}
 </main>"""
 

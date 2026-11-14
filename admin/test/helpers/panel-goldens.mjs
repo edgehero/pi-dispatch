@@ -30,6 +30,9 @@ import { originRefusal } from "../../src/console/guards.mjs";
 import { html } from "../../src/console/html.mjs";
 import { loadPageData, pagePanels, parsePageQuery, renderPage } from "../../src/console/pages.mjs";
 import { PERSON_CHANGED } from "../../src/console/server.mjs";
+import { errorPage } from "../../src/console/error-pages.mjs";
+import { resolveRunPath } from "../../src/console/run-api.mjs";
+import { parseRunPath } from "../../src/console/run-path.mjs";
 import { restartNoticeOf, restartReasons } from "../../src/console/restart-notice.mjs";
 import { ENDED_REASONS } from "../../src/console/session-ends.mjs";
 import { LIVE_STATES, loginCodePage, loginPage } from "../../src/console/shell.mjs";
@@ -511,6 +514,22 @@ async function runNotFoundPage(session) {
   const data = await loadPageData("run", parsed.query, { fleet, now: () => NOW });
   const out = await renderPage("run", { query: parsed.query, session: { name: session.name, role: session.role }, data, readOnly: false, theme: null, flash: null, maxStreams: MAX_STREAMS });
   assert.equal(out.status, 404);
+  return String(out.html);
+}
+
+/**
+ * A short link (issue #882) no run answers, as `server.mjs` `getRunPath` draws it: the link read by `parseRunPath`, the
+ * fleet asked by `resolveRunPath` (a whole queue scan with no job on it, and a history with no run on it), and the run
+ * page's not-found page with the link's target in its search, 404; or, with a queue that could not be read, the same
+ * card saying so, 503.
+ */
+async function runPathNotFoundPage(session, { queue = { byKey: new Map(), complete: true, tooMany: false } } = {}) {
+  const parsed = parseRunPath("/run/acme/web/999");
+  const fleet = { runsPage: async () => ({ runs: [], next: null, mirror: "ok", truncated: false }), pendingOnTargets: async () => queue };
+  const got = await resolveRunPath(fleet, parsed.target);
+  assert.ok(got.absent || got.untold, "no run answers the link");
+  const out = errorPage({ kind: "no-run", status: got.absent ? 404 : 503, target: parsed.target, session: { name: session.name, role: session.role }, theme: null, readOnly: false, restart: null });
+  assert.equal(out.status, got.absent ? 404 : 503);
   return String(out.html);
 }
 
@@ -1109,6 +1128,9 @@ const DRAW = {
   // ErrorPage: a run id the console looked for everywhere and did not find, the search holding it.
   "run-not-found.operator": async () => runNotFoundPage(OPERATOR),
   "run-not-found.viewer": async () => runNotFoundPage(VIEWER),
+  // ErrorPage, issue #882: a run's short link that no run answers, and one whose queue could not be read.
+  "run-path-not-found.operator": async () => runPathNotFoundPage(OPERATOR),
+  "run-path-unknown.operator": async () => runPathNotFoundPage(OPERATOR, { queue: { unreachable: true } }),
   // ConfirmStates: a preview the fleet did not answer in time; Resume fleet over a scan for the queues that did not
   // finish; and over more paused queues than a sentence names.
   "confirm-refused-timeout.operator": async () => {

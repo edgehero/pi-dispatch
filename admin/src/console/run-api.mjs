@@ -25,7 +25,7 @@
 import { WATCH_ID_RE as WATCH_RULE_ID_RE } from "@edgehero/pi-dispatch/watch-contract";
 import { MODEL_WHY, providerFailureOf } from "@edgehero/pi-dispatch/model-failover-protocol";
 import { LIVE_OUTCOMES } from "@edgehero/pi-dispatch/live-transcript";
-import { RUN_KINDS } from "@edgehero/pi-dispatch/forges";
+import { FORGE_KINDS, RUN_KINDS, isForgeKind } from "@edgehero/pi-dispatch/forges";
 import { SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
 import { PROJECT_ID_RE } from "@edgehero/pi-dispatch/projects";
 import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
@@ -33,7 +33,7 @@ import { SESSION_NOT_SAVED } from "@edgehero/pi-dispatch/record-reason";
 import { modelRolesTelemetryOf, approvalRecordOf, recordedProgress } from "@edgehero/pi-dispatch/run-history";
 import { chatModeOf, pendingFactsOf, runStateOf } from "@edgehero/pi-dispatch/chat-mode";
 import { repoOfTarget } from "../costs.mjs";
-import { activeProgressOf, FORGE_URL_MAX, forgeLinkOf, forgeTargetOf, isProgressSnapshot, recordRecovery, RUN_RECORD_UNREAD, RUNS_PAGE_EXAMINE_MAX, runAbsent, runPlaces, runPlacesText, targetKeyOf } from "../read-model.mjs";
+import { activeProgressOf, FORGE_URL_MAX, forgeLinkOf, forgeTargetOf, isProgressSnapshot, PENDING_STATES, pendingScanFor, recordRecovery, RUN_RECORD_UNREAD, RUNS_PAGE_EXAMINE_MAX, runAbsent, runPlaces, runPlacesText, targetKeyOf } from "../read-model.mjs";
 import { recordReason } from "../words.mjs";
 import { loadedOf, outcomeNote } from "../loaded-words.mjs";
 import { coreRecordOf, fromNewerRelease, NEWER_RECORD_SENTENCE } from "../newer-release.mjs";
@@ -213,13 +213,16 @@ export function progressFactsOf(progress, record, { continues = false } = {}) {
  * here, so a reader that ignores the predicate still answers exactly. `{ runs, truncated, floor }` (`floor` the instant
  * at and below which a truncated scan did not look, else null), or `{ unreadable: true }`, also for a page whose own
  * history or run mirror could not be read (a partial history is not a known absence).
+ *
+ * `kind` null (issue #882, a short link, which names no forge) is every forge's runs, unfiltered by kind, `match` then
+ * handed each record's own kind beside its target.
  */
 async function runsOnTarget(fleet, kind, match) {
   if (typeof fleet?.runsPage !== "function") return { unreadable: true };
-  const pred = (r) => Boolean(r) && r.purpose !== "answer-draft" && r.kind === kind && typeof r.target === "string" && match(r.target);
+  const pred = (r) => Boolean(r) && r.purpose !== "answer-draft" && (kind === null ? isForgeKind(r.kind) : r.kind === kind) && typeof r.target === "string" && match(r.target, r.kind);
   let page;
   try {
-    page = await fleet.runsPage({ before: null, limit: TARGET_RUNS_MAX, filter: { kind }, match: pred });
+    page = await fleet.runsPage({ before: null, limit: TARGET_RUNS_MAX, filter: kind === null ? null : { kind }, match: pred });
   } catch {
     return { unreadable: true };
   }
@@ -471,6 +474,56 @@ async function resolveUrl(fleet, url, env) {
     return { status: 409, body: { error: "that work item has runs in more than one repository of its project; give one of these run ids", candidates } };
   }
   return { id: runs[0].jobId };
+}
+
+/**
+ * The queue states a short link's scan reads, in order (issue #882): `active` first, so a run running now on the issue
+ * is the one its link opens rather than a follow-up that waits behind it, then every state `readPendingOnTargets`
+ * reads, in its own order, `active` again among them. Reading `active` twice is what keeps that order's guarantee: a
+ * job that moves from waiting to active while the scan pages is met in the second read, never lost between two.
+ */
+export const RUN_PATH_STATES = Object.freeze(["active", ...PENDING_STATES]);
+
+/**
+ * The run a short link names (issue #882, `run-path.mjs`): the newest run on `target` on any forge, which the route
+ * redirects to. `{ id }`; `{ several: true }` when runs on more than one forge match (two forges serving one repository
+ * path: the person picks, never a guess); `{ absent: true, truncated }` when every place was read and none holds one
+ * (`truncated` when the history scan stopped at its bound first, `RUNS_PAGE_EXAMINE_MAX`); `{ untold: true }` when none
+ * was found while the run history or the queue could not be read, which is not a known absence.
+ *
+ * THE QUEUE FIRST. A run's record is written when it ends, so a run queued or running on the issue has none, and a
+ * history search alone would open the run before it, or answer 404 for an issue's first run. So the queue is scanned
+ * (`fleet.pendingOnTargets`, `readPendingOnTargets` over every forge kind at once, one scan within its budget, a
+ * running job before a waiting one: `RUN_PATH_STATES`), and a job it finds is the newest run; else the newest record on
+ * the target (`runsOnTarget`, every forge's, the exact-target rule `targetKeyOf`, so `#120` never answers `#12`). A
+ * queue that cannot be read does not stop a record from opening: the run page it opens reads the queue itself and says
+ * so. Never throws.
+ */
+export async function resolveRunPath(fleet, target) {
+  const sameAs = (t, kind) => {
+    const key = targetKeyOf(kind, target);
+    return key !== null && targetKeyOf(kind, t) === key;
+  };
+  let queue;
+  if (typeof fleet?.pendingOnTargets === "function") {
+    try {
+      queue = await fleet.pendingOnTargets(FORGE_KINDS.map((kind) => ({ kind, target, runId: null })), { states: RUN_PATH_STATES });
+    } catch {
+      queue = { unreachable: true };
+    }
+  } else queue = { unreachable: true };
+  const scans = FORGE_KINDS.map((kind) => ({ kind, got: pendingScanFor(queue, targetKeyOf(kind, target)) }));
+  const queued = scans.filter((s) => typeof s.got.jobId === "string" && RUN_ID_RE.test(s.got.jobId));
+  // Every forge's answer is a job or a known none (a whole scan), so a miss is one.
+  const queueWhole = scans.every((s) => Object.hasOwn(s.got, "jobId"));
+  const got = await runsOnTarget(fleet, null, sameAs);
+  const runs = got.unreadable ? [] : [...got.runs].sort((a, b) => runAt(b) - runAt(a)).filter((r) => RUN_ID_RE.test(String(r.jobId ?? "")));
+  const kinds = new Set([...queued.map((s) => s.kind), ...runs.map((r) => r.kind)]);
+  if (kinds.size > 1) return { several: true };
+  if (queued.length > 0) return { id: queued[0].got.jobId };
+  if (runs.length > 0) return { id: runs[0].jobId };
+  if (got.unreadable || !queueWhole) return { untold: true };
+  return { absent: true, truncated: got.truncated === true };
 }
 
 /**

@@ -1,6 +1,7 @@
 A completed run in an OpenShell sandbox, with a project secret bundle, a cost that is only a floor, per-model usage, and two chained children.
 
 **How a person uses it.**
+- A scheduled run names no issue, so its title has no short link.
 - The outcome says it finished and what it queued. Its actions open the children or preview a re-run (paid).
 - *Run* covers:
   - the cron job id, which wraps rather than overflows;
