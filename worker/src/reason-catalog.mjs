@@ -231,6 +231,7 @@ const ROWS = [
 	["openshell-bundle-image-too-old", OPENSHELL_REFUSALS["openshell-bundle-image-too-old"], "Rebuild the job image from a release that declares `bundleEnvFile`."],
 	// ── The repository or folder ────────────────────────────────────────────────────────────────────────────────────
 	["unprotected-branch", REFUSAL_COMMENTS["unprotected-branch"], "Protect the repository's default branch, then run the job again."],
+	["branch-protection-unreadable", REFUSAL_COMMENTS["branch-protection-unreadable"], "Check that the deployment's GitHub token can read this repository's contents, then run the job again."],
 	["sha-gone", "Refused: the commit this job was resolved to is no longer on the forge (the default branch moved past it), so it could not be fetched. Not run.", "Run the job again: it resolves the default branch afresh."],
 	["local-folder-is-sandbox", "Refused: this folder is a kept sandbox workspace for a person, so it cannot become an agent job workspace. Not run.", "Choose the original repository outside the sandbox retention directory."],
 	["local-folder-not-a-repo", "Refused: this job's folder is not a git repository (it has no `.git` at its root). Not run.", "Run `git init` in the folder and commit once, or point the job at a repository."],

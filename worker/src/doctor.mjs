@@ -8656,10 +8656,12 @@ async function envSetupChecks(env, seams, sources) {
  * them, so the fix line SHOWS the settings page rather than running a PUT.
  *
  * A non-zero exit on the protection endpoint deliberately conflates GitHub's determinate 404 ("no
- * protection") with transient errors. The worker's own gate does the 404-vs-retryable split, because there
- * a false "unprotected" would disarm the never-merge backstop (github-host.mjs, issue #61) -- here every
- * answer is an advisory warn, and a warn that occasionally fires on a flaky API is acceptable where a
- * false ✓ would not be.
+ * protection rule") with transient errors. The worker's own gate keeps every unclear answer retryable,
+ * because there a false "unprotected" would disarm the never-merge backstop (github-host.mjs, issue #61) --
+ * here every answer is an advisory warn, and a warn that occasionally fires on a flaky API is acceptable
+ * where a false ✓ would not be. Since issue #876 the worker no longer asks this endpoint: it reads the
+ * branch's classic rule and its active rulesets' rules, so this dormant preflight would warn on a branch
+ * protected by a ruleset alone that the worker admits. Moving it is left to the change that wakes it.
  *
  * Exported rather than folded into runDoctor: the shared schema admits `run.repository` only on azure
  * triggers today (see readTriggerFacts), so no valid triggers file can reach this loop through runDoctor

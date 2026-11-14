@@ -213,7 +213,12 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
   protected.
 - **Branch protection is required.** The worker refuses to run against a repository whose default branch
   is unprotected, checked before any money is spent. This is the control that makes human review real
-  rather than customary — without it, nothing technical stops a merge.
+  rather than customary — without it, nothing technical stops a merge. On GitHub two things count
+  (issue #876): a classic branch protection rule, whatever it requires, so make it require a pull request
+  review; or an active ruleset whose pull request rule requires at least one approving review. A ruleset
+  that requires no approval does not count, even though GitHub then marks the branch protected: an
+  organization's automatic Copilot review is such a ruleset, and it stops no push. A ruleset that is
+  disabled or only evaluated does not count either.
 - **System-prompt integrity, and the boundary that actually holds it.** A job's `/workspace` is **always
   the base repository at its default-branch SHA** — the worker resolves that SHA, fetches that one commit
   and checks it out detached. A pull request's branch is **never** checked out; its `head`/`base` travel

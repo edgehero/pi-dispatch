@@ -681,9 +681,26 @@ What to do: rebuild the job image from a release that declares `bundleEnvFile`. 
 ### unprotected-branch
 
 The repository's default branch is not protected. The job's token can merge, so branch protection is the only thing
-that stops a job from merging its own work. Nothing was spent.
+that stops a job from merging its own work. Nothing was spent. On GitHub, a classic branch protection rule counts, and
+so does an active ruleset whose pull request rule requires at least one approving review. A ruleset that requires no
+approval, such as an organization's automatic Copilot review, does not count. An empty repository is refused this way
+too: its default branch has no commit yet, so nothing protects it.
 
 What to do: protect the default branch, then run the job again. See [SECURITY.md](../SECURITY.md).
+
+### branch-protection-unreadable
+
+GitHub refused to let the job's token read the repository or its default branch (a 403 that was not a rate limit), so
+the worker could not tell whether the branch is protected. The worker runs a job only on a branch it knows is
+protected, so this one was refused. Nothing was spent, and it is not retried: the same token gets the same answer every time.
+
+The read needs only read access to the repository's contents. GitHub refuses it to a fine-grained token without access
+to the repository's contents, and to a classic token or `gh` login not yet authorized for an organization that uses
+single sign-on. Under `GITHUB_AUTH_SOURCE=app`, the worker's start log names a permission the App's installation lacks
+with a `github_app_permission_missing` line.
+
+What to do: check that the deployment's GitHub token can read this repository's contents, then run the job again. See
+[github.md](github.md#a-token-that-cannot-read-the-branch).
 
 ### sha-gone
 

@@ -30,7 +30,8 @@ flowchart LR
   token-carrying job. It has full scope and does not expire. This is what `pi-dispatch doctor` warns
   about. Under every source it *can* merge, because GitHub gates push and merge behind the same scope.
   **Branch protection on your default branch is the real control.** The worker refuses an unprotected
-  repo before any spend.
+  repo before any spend. A classic branch protection rule counts, and so does a ruleset that requires an
+  approved pull request ([which branches count as protected](#which-branches-count-as-protected)).
 - The checkout is always the base repo at its default-branch SHA. It is never a PR branch. Landing a
   commit on your default branch is enough to run code in a job container. Issue and comment text never
   runs code. It stays data.
@@ -42,6 +43,44 @@ loopback. One browser click creates the App id, private key and webhook secret. 
 before one consent. The key lands with mode 0600. No secret is ever printed. The App is the strongest
 auth source (per-repo one-hour tokens). A fine-grained PAT carries an expiry you set. `gh` carries
 neither (`GITHUB_AUTH_SOURCE`).
+
+## App permissions
+
+The App that `pi-dispatch setup github` makes asks for these repository permissions, named as GitHub's settings page
+names them:
+
+| Permission | Access | What needs it |
+|---|---|---|
+| Contents | Read and write | the agent pushes its branch, and before each job the worker reads whether the default branch is protected |
+| Pull requests | Read and write | the agent opens its pull request |
+| Issues | Read and write | the worker's status comments and the agent's replies |
+| Metadata | Read-only | GitHub gives it to every App; the worker reads the default branch's ruleset rules with it |
+
+When the worker starts under `GITHUB_AUTH_SOURCE=app`, it reads what the App's installation was granted and logs a
+`github_app_permission_missing` line naming any of these it lacks. To add one, set it in the App's settings on GitHub
+(Developer settings, GitHub Apps, then the App, then Permissions & events), save, and accept the new permission on
+the App's installation. Until the installation accepts it, its tokens do not carry it.
+
+### Which branches count as protected
+
+Before each job, the worker reads the default branch, and it counts the branch as protected in two cases:
+
+- A classic branch protection rule covers it. The worker does not read what the rule requires, so make it require a
+  pull request review.
+- An active ruleset covers it with a pull request rule that requires at least one approving review. The ruleset can
+  be the repository's own, or one its organization or enterprise applies.
+
+GitHub marks a branch protected for any active ruleset, including one that stops no push, such as the ruleset behind
+an organization's automatic Copilot reviews. The worker reads the branch's rules and does not count such a ruleset, so
+a repository whose only ruleset is that kind is refused as [`unprotected-branch`](reasons.md#unprotected-branch). A
+ruleset that is disabled, or only evaluated, does not count either.
+
+### A token that cannot read the branch
+
+GitHub refuses the worker's read of the default branch to a fine-grained PAT without access to the repository's
+contents, and to a classic token or `gh` login not yet authorized for an organization that uses single sign-on. The
+worker then refuses each job as [`branch-protection-unreadable`](reasons.md#branch-protection-unreadable), before
+anything is spent.
 
 ## Three ways to run the trigger edge
 
