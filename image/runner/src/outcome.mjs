@@ -185,7 +185,7 @@ export function captureTerminal(previous, event) {
 // `parked` (issue #625) is true only when the job was armed with run.awaitInput AND the run ended on that tool's own
 // result (await-input.mjs parkedTerminal). It ranks below every budget stop and a classified rejection, which are the
 // better-named causes, and above everything else: a parked run is completed, and its reason is what the worker reads.
-export function decideExit({ budgetAborted, budgetTurns, meterStop = null, tokenAborted, terminal, command = null, isRetryable = null, rejected = null, parked = false, approval = false }) {
+export function decideExit({ budgetAborted, budgetTurns, meterStop = null, tokenAborted, activityStop = null, terminal, command = null, isRetryable = null, rejected = null, parked = false, approval = false }) {
 	if (budgetAborted) {
 		return { code: EXIT_POLICY, reason: "turn_budget", turns: budgetTurns };
 	}
@@ -194,6 +194,12 @@ export function decideExit({ budgetAborted, budgetTurns, meterStop = null, token
 	}
 	if (tokenAborted) {
 		return { code: EXIT_POLICY, reason: TOKEN_BUDGET };
+	}
+	// Issue #888: the activity watch stopped an idle or stalled job (activity.mjs). After the spend stops, which say more
+	// about a job that was also spending, and before everything the aborted session's last message would otherwise decide:
+	// that message is pi's abort, which classifyStopReason reads as infrastructure and the queue would retry.
+	if (activityStop === "idle" || activityStop === "stalled") {
+		return { code: EXIT_POLICY, reason: activityStop };
 	}
 	if (rejected) return rejected;
 	if (approval) return { code: EXIT_COMPLETED, reason: AWAITING_APPROVAL };

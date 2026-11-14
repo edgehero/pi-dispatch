@@ -449,6 +449,35 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   functions and pins its heap, FIFO ceiling, environment parsing and timeout accounting.
 - **Traces to**: `DES-HOST-BUDGET`, `INT-CONTAINER-RUNTIME-CONTRACT`, `CONST-ISOLATION-CONTAINER-PER-JOB`.
 
+## DES-JOB-ACTIVITY-WATCH
+
+- **Decision** (issue #888, `REQ-JOB-ACTIVITY-LIMITS`): the RUNNER judges whether a job is idle or stalled, from what
+  only it can see, and stops it itself; the WORKER is a backstop for a runner too wedged to do that, reading counters
+  the runner writes and stamping their changes with its own clock. Progress has two kinds: a STEP (the agent moving: any
+  root-bus event but a tool's output update, and a change in the process-wide meter's counts, which is how in-process
+  subagent sessions and child pi processes show) and ACTIVITY (what the agent may be waiting on: a tool's output, CPU of
+  processes other than the runner above 5% of a core, network traffic above 4 KiB a sample). Idle needs neither for its
+  limit; stalled needs no step for its limit, whatever the activity.
+- **Why the runner and not the worker alone**: the worker cannot see pi's events, and on Docker Desktop and a Podman
+  machine the container's cgroup lives in a VM the worker does not read. The runner sees both, cheaply. It cannot be
+  the only judge, because an extension can wedge its event loop; hence the counters and the backstop.
+- **Why counters and not times**: a time written in the container is a time the container chose. The worker stamps
+  each counter change with its own clock, so a skewed VM clock or a forged timestamp cannot move the backstop; a forged
+  COUNTER can hold the backstop off, but only for a runner that has also stopped judging (`INT-JOB-ACTIVITY-FILE`).
+- **Rejected**:
+  - A wall clock (`REQ-JOB-TIMEOUT-30M`): it measures age, not progress, and killed working jobs.
+  - Events only: the agent waiting on a background build with a silent `sleep` makes no event while the build runs at
+    full CPU, and killing it is the mistake #888 is about.
+  - CPU only: a tool waiting on a slow remote uses none, and the runner's own event loop is CPU too (so the runner's
+    own use is subtracted from the cgroup's total, never counted).
+  - Activity as enough to keep a job alive for ever: an endless loop is activity. The stall limit bounds it, set long
+    and keyed on steps only, so a job that keeps working is never cut off.
+  - Trusting the container's clock: see "Why counters".
+- **What suspends the clocks**: pi's own retry back-off (`auto_retry_start`'s `delayMs`), and a freeze (a sample more
+  than three intervals late), which shifts both clocks by the gap: a frozen process did nothing it could be blamed for.
+- **Traces to**: `REQ-JOB-ACTIVITY-LIMITS`, `INT-RUNNER-EXIT-CODE-PROTOCOL` ("The activity watch"), `INT-JOB-ACTIVITY-FILE`,
+  `REQ-RUNNER-TURN-BUDGET`
+
 ## DES-JOB-SIZE-IN-THE-ENV
 
 - **Decision** (issue #865): every job carries its resolved size in its closed env map, `PI_JOB_SIZE_CPUS` (the size's
@@ -18026,6 +18055,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-11-14 (#888, part 1: the runner) | **NEW `DES-JOB-ACTIVITY-WATCH`**: the runner judges idle and stalled from steps (root-bus events but output updates, and the meter's counts) and activity (tool output, other processes' CPU, network), and stops the job itself; the worker is a backstop reading counters it stamps with its own clock; why the runner, why counters and not times; rejected: a wall clock, events only, CPU only, activity as enough for ever, the container's clock; what suspends the clocks. `DES-CONCURRENCY-3` and `DES-CANCEL-VIA-REDIS-REQUEST-KEY` UNCHANGED, checked: the worker half amends the abort path. |
 | 2026-11-14 (#882, part 7) | **`DES-OPERATOR-CONSOLE` AMENDED**: a new bullet after "Remote use", "On the local network, by name": the opt-in second listener announced as `pi-dispatch.local`, its costs and where each is said, the never-remembered rule judged by the arriving socket, the measured macOS port 80, and what was rejected (an mDNS library, announcing loopback, a wildcard on Linux, a `Secure` cookie over plain HTTP, a chosen name). UNCHANGED, checked: part 1 (the loopback listener and its refusals), "Remote use" (SSH, still the only remembered way from another machine), the six threats' answers, "Sign in on this computer". |
 | 2026-11-14 (#882, part 5) | **`DES-OPERATOR-CONSOLE` AMENDED**, a new bullet, "Sign in on this computer": the sign-in page asks the host's desktop, in a system window, to let the browser in (`approve-dialog.mjs`), one request at a time behind the limiter, with a 256-bit id the page alone holds, a match code on both sides, Deny the default and a minute's give-up; Allow is a host-made credential, remembered where one may be, and every outcome a `login-approval` row. Measured on macOS 27: a LaunchAgent shows the window with no permission asked. Rejected: trusting a loopback peer that runs under the console's own account, because a job's container reaches the host through helpers running under it. UNCHANGED, checked: the threats' answers for rebinding, cross-site writes and same-site localhost, and `OQ-058`. |
 | 2026-11-14 (#882, part 3) | **`DES-OPERATOR-CONSOLE` AMENDED**, "The screens": one route is matched by its prefix, a run's short link `/run/<repository>/<number>` (`!` before the number for a merge request), a viewer's 303 to `/run?id=` of the newest run on that issue or request, the queue asked first (`active` first, every forge kind in one scan) and then the newest record through `/api/run?url=`'s own `runsOnTarget`; two forges on one path go to the runs search, none found is the run page's not-found page (404, or 503 when a place could not be read); the run page draws the link beside its id. Seven rejected alternatives recorded: a query, the forge in the path, a word for a merge request, the records alone, the newest across two forges, a Copy button, and a console link in a forge comment. UNCHANGED, checked: the route table's other entries stay exact paths, `/run?id=` and `RUN_ID_RE` accept what they accepted, and `/api/run` resolves a URL as before (`runsOnTarget` takes a null kind only for the short link); `INT-CONSOLE-STATE-API`, since the short link is a page route that answers a redirect, and `/api/run` and `/api/state` keep their shapes. **Code evidence**: admin/src/console/run-path.mjs -> parseRunPath, runPathOf, runPathLink; admin/src/console/run-api.mjs -> resolveRunPath, RUN_PATH_STATES; admin/src/console/server.mjs -> getRunPath, lookupRoute; admin/src/read-model.mjs -> readPendingOnTargets. Review of PR #886: a sign-in from a short link landed on the overview, because the browser's own check of the destination (`script.mjs` `ownPage`) knew only the page paths; it now also takes the short link's shape (`RUN_PATH_LINK_RE`), and the #849 bullet in "Coming back to the page you asked for" says so. The queue scan now reads the by-id lookup's queues, so a job waiting on a stopped host's own queue is found, and a set that is not whole makes a miss "cannot tell" (503), never none. Running beats waiting across every queue, not within one. Every run card now draws the short link the page draws, and the ErrorPage card names the two-forge case as the runs search, with no 409 chooser. |

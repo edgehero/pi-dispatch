@@ -267,13 +267,13 @@ test("run-job installs the meter and the guards before any extension loads, and 
 	// that spent before a later refusal (command-unregistered) must reach the settlement.
 	const armed = src.indexOf("\t\tmeteredExitFields = () => {");
 	assert.ok(armed > install && armed < loader, "the exit fields are armed right after the install, before any extension loads");
-	assert.match(src, /exitWriter\.writeExit\(\{ code: capped\.code, reason: capped\.reason, \.\.\.costRefusalField\(outcome, costRefusalWhy\(\)\), message: capped\.message, \.\.\.meteredExitFields\(\) \}\);/, "the outer catch's exit line carries the meter's fields");
+	assert.match(src, /exitWriter\.writeExit\(\{ code: capped\.code, reason: capped\.reason, \.\.\.costRefusalField\(outcome, costRefusalWhy\(\)\), message: capped\.message, \.\.\.meteredExitFields\(\), \.\.\.activityExitFields\(\) \}\);/, "the outer catch's exit line carries the meter's fields (and, issue #888, the activity watch's)");
 	assert.match(src, /const tokens = usageMeter\.ok \? meteredExitFields\(\)\.tokens :/, "the success line reads the same fields");
 	// `usage` rides only when a call was observed: a run with none keeps the key absent, never `usage: null`.
 	assert.match(src, /\{ tokens: \{ \.\.\.meter\.snapshot\(\), \.\.\.\(policyGuard \? childWatch\.guardFields\(policyGuard\.snapshot\(\)\) : \{\}\) \}, \.\.\.\(usage \? \{ usage \} : \{\}\) \}/, "usage is omitted when no call was observed");
 	// A throw after a stop (a refused load-time call, then command-unregistered) exits with the stop, as decideExit ranks it.
 	assert.match(src, /meterStopAtExit = \(\) => \(meter\.state\.stopReason === null \? null : decideExit\(\{ budgetAborted: false, meterStop: meter\.state\.stopReason \}\)\);/, "the stop is decided by decideExit");
-	assert.match(src, /const thrown = classifyThrow\(error\);\n(?:[^\n]*\n){0,6}?\t\t\tconst stopped = meterStopAtExit\(\);/, "the throw is classified and the stop read");
+	assert.match(src, /const thrown = classifyThrow\(error\);\n(?:[^\n]*\n){0,6}?\t\t\tconst stopped = meterStopAtExit\(\) \?\? activityStopAtExit\(\);/, "the throw is classified and the stop read (the meter's first, then the activity watch's, issue #888)");
 	assert.match(src, /const outcome = stopped \?\? thrown;/, "the stop wins the catch path's exit reason");
 	// The outranked throw keeps a trace: its classified reason and its class, never its message.
 	assert.match(src, /if \(stopped !== null\) log\("throw_after_stop", \{ reason: thrown\.reason, error: typeof error\?\.name === "string" \? error\.name : null \}\);/, "the second cause is logged, names only");
@@ -343,8 +343,8 @@ test("the outer catch and the SIGTERM handler tear the meter down before they re
 	// Async since REQ-MCP-OPERATOR-SERVERS: the catch awaits the job's MCP servers' close before its line.
 	const catchAt = src.indexOf(".catch(async (error) => {");
 	const finish = src.indexOf("finishMeter();", catchAt);
-	assert.ok(catchAt > 0 && finish > catchAt && finish < src.indexOf("const stopped = meterStopAtExit();", catchAt), "the catch tears down before it reads the stop");
-	assert.ok(finish < src.indexOf("...meteredExitFields() });", catchAt), "and before it reads the fields");
+	assert.ok(catchAt > 0 && finish > catchAt && finish < src.indexOf("const stopped = meterStopAtExit() ?? activityStopAtExit();", catchAt), "the catch tears down before it reads the stop");
+	assert.ok(finish < src.indexOf("...meteredExitFields(), ...activityExitFields() });", catchAt), "and before it reads the fields");
 	const sigterm = src.indexOf('process.on("SIGTERM", () => {');
 	assert.ok(sigterm > 0 && src.indexOf("finishMeter();", sigterm) < src.indexOf("exitWriter.terminate(", sigterm), "SIGTERM tears down before it writes");
 });
@@ -382,7 +382,7 @@ test("every exit-line path of run-job.mjs names the cost guard's rule on a cost-
 	// accessor is set from the policy guard once it exists.
 	const src = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
 	const writes = src.match(/exitWriter\.writeExit\([^\n]*/g) ?? [];
-	assert.equal(writes.length, 4, "chat, deterministic watch classifier, answer classifier/pass and throw exit lines");
+	assert.equal(writes.length, 5, "chat, deterministic watch classifier, answer classifier/pass, the activity stop that did not settle (issue #888) and throw exit lines");
 	for (const line of writes) assert.match(line, /\.\.\.costRefusalField\(outcome, costRefusalWhy\(\)\)/, line);
 	assert.match(src, /costRefusalWhy = \(\) => policyGuard\?\.refusedWhy\(\) \?\? null;/);
 });

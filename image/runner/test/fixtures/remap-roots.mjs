@@ -8,7 +8,11 @@ import fs from "node:fs";
 import { syncBuiltinESMExports } from "node:module";
 
 const ROOT = process.env.PI_DISPATCH_TEST_ROOT;
-const MOUNTS = ["/job", "/workspace", "/session", "/outbox", "/inbox", "/opt/pi-global", "/opt/pi-dispatch"];
+// Issue #888: with PI_DISPATCH_TEST_HIDE_PROBES=1 the activity watch's CPU and network probes read under the test root too,
+// where nothing is, so they read as unreadable. Outside a container the cgroup is the whole test session's, and a busy
+// test machine would read as a busy job. Test-only: this preload is the fixture's, and the runner never reads the name.
+const PROBES = process.env.PI_DISPATCH_TEST_HIDE_PROBES === "1" ? ["/sys/fs/cgroup", "/proc/net/dev", "/proc/self/cgroup"] : [];
+const MOUNTS = ["/job", "/workspace", "/session", "/outbox", "/inbox", "/opt/pi-global", "/opt/pi-dispatch", ...PROBES];
 
 const remap = (path) => {
 	const text = path instanceof URL ? (path.protocol === "file:" ? path.pathname : null) : typeof path === "string" ? path : null;
