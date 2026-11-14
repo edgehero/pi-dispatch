@@ -9,7 +9,7 @@ import { stallKey } from "@edgehero/pi-dispatch/scheduler-stall-guard";
 import { githubTriggerTransports } from "@edgehero/pi-dispatch/config";
 import { loadReceiverConfig } from "../../receiver/src/config.mjs";
 import { loadPollerConfig } from "../../receiver/src/poller-config.mjs";
-import { FORGE_NONE_HINT, FORGE_OFFER_HINT } from "../src/console/panels/trigger.mjs";
+import { FORGE_NONE_HINT, FORGE_OFFER_HINT, FORGE_RESTART_NOTE, triggerAdd } from "../src/console/panels/trigger.mjs";
 
 const AT = Date.UTC(2026, 9, 30, 12);
 const fileFs = (triggers) => ({ readFileSync: () => JSON.stringify({ triggers }) });
@@ -188,6 +188,32 @@ test("the editor offers GitHub where a GitHub trigger written now would reach a 
   // The field's words say a forge is offered where its events arrive, which the old "configured webhooks" no longer was.
   assert.match(FORGE_OFFER_HINT, /by a configured webhook, or GitHub by polling/);
   assert.match(FORGE_NONE_HINT, /No forge's events reach this deployment/);
+});
+
+test("a GitHub trigger that would arm the receiver's GitHub route says to restart the receiver, by the receiver's own rule (#879)", () => {
+  // The receiver arms GitHub when it starts and a reload cannot (reloadTriggers): on a fresh scaffold, with `up`'s secret
+  // and no GitHub rule yet, the first GitHub trigger is reloaded and answered 404 until a restart. The editor asks the
+  // receiver's question of the file and the .env (`githubServedByServe`) and says so before the add.
+  const githubRule = { on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix" } };
+  const gitlabRule = { on: { type: "label", any: ["pi:fix"] }, run: { kind: "gitlab", flow: "fix" } };
+  const editor = (env, triggers, readable = true) => readTriggerEditor({ env, paths: { settingsFile: "/settings", triggersPath: "/triggers" }, fs: { readFileSync: (path) => { if (path === "/settings") return "{}"; if (!readable) throw Object.assign(new Error("EACCES"), { code: "EACCES" }); return JSON.stringify({ triggers }); } }, folderSkillsFn: () => ({ skills: [] }), overlaySkillsFn: () => ({ skills: [] }), stagedSkillsFn: () => ({ skills: [] }) });
+  const fresh = editor({ WEBHOOK_SECRET: "s" }, [gitlabRule]);
+  assert.equal(fresh.githubRestart, true, "no GitHub rule, no source, no setting: the receiver started without `/`");
+  assert.deepEqual(fresh.forges, ["github"]);
+  for (const [what, env, triggers] of [
+    ["a GitHub rule already arms it", { WEBHOOK_SECRET: "s" }, [githubRule]],
+    ["an explicit source arms it", { WEBHOOK_SECRET: "s", GITHUB_AUTH_SOURCE: "gh" }, [gitlabRule]],
+    ["GITHUB_INGEST=webhook arms it", { WEBHOOK_SECRET: "s", GITHUB_INGEST: "webhook" }, []],
+    ["GITHUB_INGEST=both arms it", { WEBHOOK_SECRET: "s", GITHUB_INGEST: "both" }, []],
+    ["the poller serves it", { GITHUB_INGEST: "poll" }, []],
+    ["no webhook can carry it", {}, []],
+  ]) assert.equal(editor(env, triggers).githubRestart, false, what);
+  assert.equal(editor({ WEBHOOK_SECRET: "s" }, [], false).githubRestart, false, "an unread file cannot say whether a GitHub rule exists");
+  // The note is drawn beside the offer, and only then.
+  const draw = (triggerEditor) => String(triggerAdd({ role: "operator", data: { triggerEditor }, query: {} }));
+  assert.ok(draw({ ...fresh }).includes("A first GitHub trigger takes GitHub webhooks only after a restart"), "the note is in the forge field's hint");
+  assert.ok(!draw({ ...fresh, githubRestart: false }).includes("A first GitHub trigger"));
+  assert.match(FORGE_RESTART_NOTE, /restart the receiver once it is added/);
 });
 
 test("the editor reads GITHUB_INGEST from the deployment .env like its other forge facts (#879)", () => {

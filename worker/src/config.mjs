@@ -836,8 +836,9 @@ export const GITHUB_INGEST_VALUES = Object.freeze(["webhook", "poll", "both"]);
  * explicitly set `GITHUB_AUTH_SOURCE`, and both are shared with `poll` on purpose (docs/polling.md). So a deployment
  * that polls GitHub and takes webhooks for another forge could not start `serve` without a `WEBHOOK_SECRET` that no
  * GitHub App was given, and with one it mounted a GitHub route nothing should deliver to. Neither input can say which
- * transport carries GitHub; this one does. `null` keeps the inference (`decideServesGithub`, the #231 rule), so a
- * deployment that never sets it boots exactly as before.
+ * transport carries GitHub; this one does. `null` keeps the inference (`decideServesGithub`, the #231 rule), so an
+ * existing deployment that never sets it boots as before. A new scaffold does not: it no longer sets
+ * GITHUB_AUTH_SOURCE, so its receiver serves GitHub only once a GitHub rule exists at its start (reloadTriggers).
  *
  * Empty is unset, as a blank scaffolded line is for most keys here: the receiver's own reading of an empty
  * `GITHUB_AUTH_SOURCE` as "not explicit" is the precedent. Anything else outside the three words refuses at boot
@@ -856,6 +857,21 @@ export function githubIngestFrom(env) {
 }
 
 /**
+ * Whether `pi-dispatch-receiver serve` serves GitHub (mounts `/`, needs `WEBHOOK_SECRET`, resolves the GitHub identity)
+ * given this env and whether the triggers file holds an unspent GitHub webhook rule (issue #879). The receiver decides
+ * with it at boot (`decideServesGithub`, whose comment gives the reasons) and the console's trigger editor asks it of
+ * the file as it stands, so the two cannot answer apart: `GITHUB_INGEST` when set (`poll` no, `webhook` and `both`
+ * yes), else a GitHub rule or an explicitly set `GITHUB_AUTH_SOURCE` (read raw: the parsed source defaults to `gh` and
+ * cannot tell a choice from a default). Throws on a refused `GITHUB_INGEST`, as the receiver does.
+ */
+export function githubServedByServe(env, hasGithubRules) {
+	const ingest = githubIngestFrom(env);
+	if (ingest === "poll") return false;
+	if (ingest !== null) return true;
+	return hasGithubRules === true || (env.GITHUB_AUTH_SOURCE !== undefined && env.GITHUB_AUTH_SOURCE !== "");
+}
+
+/**
  * The transports that would carry a GitHub trigger added to this deployment now (issue #879): `"webhook"` and `"poll"`,
  * in that order, or none. The console's trigger editor offers GitHub exactly when this is not empty, so a deployment
  * that polls GitHub can add a GitHub trigger, and one that has said nothing about GitHub is offered it as before.
@@ -866,7 +882,10 @@ export function githubIngestFrom(env) {
  * start serving GitHub once the rule is written": every word but `poll` mounts `/` for a GitHub rule, and `serve` starts
  * with `/` only beside a `WEBHOOK_SECRET` (the receiver's own nonblank test). The poll half is the operator's word:
  * `poll` or `both`, since `poll` refuses to start under `webhook` and an unset deployment has said nothing about a
- * poller. Both halves are held to the receiver's real loaders by a test (`admin/test/trigger-detail-read.test.mjs`).
+ * poller. Both halves are held to the receiver's real loaders by a test (`admin/test/trigger-detail-read.test.mjs`) over
+ * every word, every secret shape and an unset or `gh` source. A source the loaders refuse (an unknown word, `pat` without
+ * its token, an incomplete App) refuses every receiver command whatever this says; doctor reports it, and this does not
+ * read it, as the secret-only offer it replaced did not.
  * A refused GITHUB_INGEST throws, as the receiver's commands do, and nothing can carry a trigger then.
  */
 export function githubTriggerTransports(env) {

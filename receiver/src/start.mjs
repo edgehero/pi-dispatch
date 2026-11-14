@@ -370,6 +370,11 @@ function watchTriggers(env, cfg, log, triggersAtBoot) {
 		const res = reloadTriggers(env, cfg);
 		if (res.ok) closer.reloadLog("triggers_reloaded");
 		else closer.reloadLog("triggers_reload_invalid", { reason: res.invalid, kept: true });
+		// Issue #879: GitHub rules this receiver holds and does not serve, because it started without `/` and arms GitHub
+		// only at its start (reloadTriggers says why it never arms it live). Said on every reload while it holds, beside
+		// `triggers_reloaded`, because each delivery for them is answered 404 and GitHub does not resend. Fixed words and a
+		// count only: nothing from the file.
+		if (res.ok && res.githubUnserved > 0) closer.reloadLog("github_rules_unserved", { rules: res.githubUnserved, reason: "this receiver started without a GitHub route, so it answers GitHub deliveries 404 until it restarts: restart it to take GitHub webhooks (it needs WEBHOOK_SECRET then), or set GITHUB_INGEST=poll if `pi-dispatch-receiver poll` brings GitHub's events" });
 	};
 	// The baseline is the BOOT LOAD's own read, handed in (issue #386). Comparing against a read taken here
 	// would measure the arming instead of the window: this service arms LAST, behind identity resolution that

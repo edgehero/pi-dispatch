@@ -671,7 +671,8 @@ test("reloadTriggers does NOT recompute servesGithub -- a live edit can never mo
 	assert.equal(cfg.servesGithub, false);
 	const withGithub = JSON.stringify({ triggers: [{ on: { type: "label", any: ["pi:x"] }, run: { kind: "github", flow: "fix" } }] });
 	const res = reloadTriggers({}, cfg, { fileExists: () => true, readFile: () => withGithub });
-	assert.deepEqual(res, { ok: true }, "the reload itself succeeds -- the new rules ARE live for every configured forge");
+	// Issue #879: and it says so, since GitHub does not resend what `/` refuses (start.mjs logs `github_rules_unserved`).
+	assert.deepEqual(res, { ok: true, githubUnserved: 1 }, "the reload itself succeeds -- the new rules ARE live for every configured forge");
 	assert.equal(cfg.triggers.github.label.length, 1, "and the github group is loaded, so nothing is silently dropped");
 	assert.equal(cfg.servesGithub, false, "but the endpoint stays absent: no route without a bot-loop guard");
 });
@@ -682,6 +683,20 @@ test("a present WEBHOOK_SECRET on a github-free deployment is passed through unt
 	const c = loadReceiverConfig({ WEBHOOK_SECRET: "shh" }, gitlabOnlyTriggers);
 	assert.equal(c.servesGithub, false);
 	assert.equal(c.webhookSecret, "shh");
+});
+
+test("reloadTriggers flags GitHub rules only where the boot left `/` unmounted and the poller does not serve them (#879)", () => {
+	const withGithub = { fileExists: () => true, readFile: () => JSON.stringify({ triggers: [
+		{ on: { type: "label", any: ["pi:x"] }, run: { kind: "github", flow: "fix" } },
+		{ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix" } },
+	] }) };
+	const polled = loadReceiverConfig({ GITHUB_INGEST: "poll" }, gitlabOnlyTriggers);
+	assert.deepEqual(reloadTriggers({ GITHUB_INGEST: "poll" }, polled, withGithub), { ok: true }, "poll: the poller serves them, nothing to say");
+	const served = loadReceiverConfig({ WEBHOOK_SECRET: "shh", GITHUB_AUTH_SOURCE: "gh" }, gitlabOnlyTriggers);
+	assert.deepEqual(reloadTriggers({}, served, withGithub), { ok: true }, "`/` is mounted already: the rules are served live");
+	const bare = loadReceiverConfig({}, gitlabOnlyTriggers);
+	assert.deepEqual(reloadTriggers({}, bare, withGithub), { ok: true, githubUnserved: 2 }, "the count is the rules held, comment included");
+	assert.deepEqual(reloadTriggers({}, bare, gitlabOnlyTriggers), { ok: true }, "and a reload with none says nothing");
 });
 
 // --- GITHUB_INGEST: the operator says which transport carries GitHub (issue #879) -------------------

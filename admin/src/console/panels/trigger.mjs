@@ -50,6 +50,9 @@ const AGENT_UNREAD = "not in an agent’s read";
 // is a webhook or the poller (`githubTriggerTransports`), so "configured webhooks" alone was no longer true.
 export const FORGE_OFFER_HINT = "Only forges whose events reach this deployment are offered: by a configured webhook, or GitHub by polling.";
 export const FORGE_NONE_HINT = "No forge's events reach this deployment yet. Configure a forge connection, or choose cron.";
+// Issue #879: said beside the offer where a GitHub trigger added now would be the one that makes the receiver serve
+// GitHub, which it does only from its next start (`githubRestart`, read-model.mjs).
+export const FORGE_RESTART_NOTE = "A first GitHub trigger takes GitHub webhooks only after a restart: restart the receiver once it is added, since the receiver arms GitHub when it starts.";
 const isAgent = (v) => v.role === "agent";
 /** One row of what the file says of `run.<k>`, beside the deployment's default where this view can read that. */
 function fieldRow(v, t, k) {
@@ -412,7 +415,7 @@ export function triggerAdd(v) {
               "Task", { required: prefill.kind === "cron", hint: null },
             )}`
           : html`${field("forge", "Forge", {
-              options: missingForge ? [{ value: "", label: "Choose a configured forge" }, ...forges] : forges, value: missingForge ? "" : prefill.forge ?? "", required: true, hint: opts(v).forgeProblem ?? (opts(v).forges?.length ? FORGE_OFFER_HINT : FORGE_NONE_HINT),
+              options: missingForge ? [{ value: "", label: "Choose a configured forge" }, ...forges] : forges, value: missingForge ? "" : prefill.forge ?? "", required: true, hint: opts(v).forgeProblem ?? (opts(v).forges?.length ? `${FORGE_OFFER_HINT}${opts(v).githubRestart === true ? ` ${FORGE_RESTART_NOTE}` : ""}` : FORGE_NONE_HINT),
             })}${["label", "comment"].includes(kind)
               ? field("repository", "Repository (optional)")
               : null}${kind === "comment"

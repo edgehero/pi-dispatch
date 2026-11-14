@@ -32,7 +32,7 @@
 
 import { existsSync, readFileSync } from "node:fs";
 import { groupTriggers } from "./trigger-groups.mjs";
-import { configError, githubIngestFrom, loadGitHubAuth, positiveInt } from "@edgehero/pi-dispatch/config";
+import { configError, githubIngestFrom, githubServedByServe, loadGitHubAuth, positiveInt } from "@edgehero/pi-dispatch/config";
 import { FORGE_KINDS, parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
 
 // Cwd-relative, matching what `pi-dispatch init` scaffolds (and the admin's default): the receiver's
@@ -76,7 +76,7 @@ export function loadReceiverConfig(env = process.env, { readFile = readFileSync,
 	// Before the secret check for the same reason as the two above: a typo'd GITHUB_INGEST is reported as itself,
 	// never as a WEBHOOK_SECRET the deployment may not need (issue #879).
 	const githubIngest = githubIngestFrom(env);
-	const servesGithub = decideServesGithub(env, triggers.github, githubIngest);
+	const servesGithub = decideServesGithub(env, triggers.github);
 
 	const webhookSecret = env.WEBHOOK_SECRET;
 	if (servesGithub && (webhookSecret === undefined || webhookSecret.trim() === "")) {
@@ -154,20 +154,23 @@ export function servedForges(cfg, kinds = FORGE_KINDS) {
  * shared env file may carry for the worker (which mints per-job tokens and is a separate process); a
  * credential lying around is not a statement that this receiver terminates GitHub webhooks.
  */
-function decideServesGithub(env, githubGroup, githubIngest) {
-	if (githubIngest === "poll") return false;
-	if (githubIngest === "webhook" || githubIngest === "both") return true;
-	// The close groups count too (issue #231): a deployment whose ONLY github rule is a close trigger
-	// must still mount `/`, require WEBHOOK_SECRET and build auth, or the one-shot the operator armed
-	// can never fire -- and the receiver would report nothing, the silent no-op this file's header
-	// calls the worst outcome. Conversely a deployment whose last github one-shot is SPENT stops
-	// counting here at its next boot (the sentinel groups nowhere), which is deliberate: nothing is
-	// left to serve, and INT-TRIGGERS-FILE-CONTRACT states it.
-	const hasGithubTriggers = githubGroup.label.length > 0 || githubGroup.comment !== null || githubGroup.pullRequest.length > 0 || githubGroup.issue.length > 0 || githubGroup.prClose.length > 0;
-	// `loadGitHubAuth` has already refused a garbled value by the time we get here, so anything non-empty
-	// here is one of pat|gh|app -- a real choice, not a typo we would be reading as consent.
-	const explicitAuthSource = env.GITHUB_AUTH_SOURCE !== undefined && env.GITHUB_AUTH_SOURCE !== "";
-	return hasGithubTriggers || explicitAuthSource;
+function decideServesGithub(env, githubGroup) {
+	// The rule itself lives in the worker's config (`githubServedByServe`, issue #879), so the console's trigger editor
+	// asks the same question of the file and the `.env` and cannot answer apart from this. `loadGitHubAuth` has already
+	// refused a garbled GITHUB_AUTH_SOURCE by the time we get here, so a non-empty one is a real choice, never a typo read
+	// as consent.
+	return githubServedByServe(env, hasGithubRules(githubGroup));
+}
+
+/**
+ * Does the receiver's github group hold any rule? The close groups count too (issue #231): a deployment whose ONLY
+ * github rule is a close trigger must still mount `/`, require WEBHOOK_SECRET and build auth, or the one-shot the
+ * operator armed can never fire -- and the receiver would report nothing, the silent no-op this file's header calls the
+ * worst outcome. Conversely a deployment whose last github one-shot is SPENT stops counting here at its next boot (the
+ * sentinel groups nowhere), which is deliberate: nothing is left to serve, and INT-TRIGGERS-FILE-CONTRACT states it.
+ */
+function hasGithubRules(group) {
+	return group.label.length > 0 || group.comment !== null || group.pullRequest.length > 0 || group.issue.length > 0 || group.prClose.length > 0;
 }
 
 /**
@@ -355,6 +358,11 @@ function loadTriggers(env, readFile, fileExists) {
 	return groupTriggers(parsed, { watchSources });
 }
 
+/** How many rules the github group holds, for the line that says they are not served. */
+function githubRuleCount(group) {
+	return group.label.length + (group.comment !== null ? 1 : 0) + group.pullRequest.length + group.issue.length + group.prClose.length;
+}
+
 /** The triggers file path the receiver reads (env override or the cwd default matching what `pi-dispatch init` scaffolds). */
 export function triggersFilePath(env = process.env) {
 	return env.PI_TRIGGERS_FILE ?? DEFAULT_TRIGGERS_PATH;
@@ -370,14 +378,24 @@ export function triggersFilePath(env = process.env) {
  * `servesGithub` is deliberately NOT recomputed. It is a BOOT decision, because the two other things it
  * governs are boot facts: whether `/` was mounted and whether the harness's GitHub identity was resolved.
  * Recomputing it here would let a live file edit mount a github endpoint whose bot-loop guard was never
- * armed -- the one state this design exists to make unreachable. Both directions of a live edit are
- * therefore safe and neither is silent: adding a github rule to a github-free receiver leaves `/` 404ing
- * until a restart (the operator's next step anyway, since the deployment also needs a webhook secret), and
- * removing the last github rule leaves `/` verifying deliveries that now match nothing and answer 204.
+ * armed -- the one state this design exists to make unreachable. Removing the last github rule leaves `/`
+ * verifying deliveries that now match nothing and answer 204.
+ *
+ * Adding a github rule to a receiver that started without `/` leaves `/` answering 404 until a restart, and GitHub
+ * does not resend. That used to be assumed harmless, "the operator's next step anyway, since the deployment also needs a
+ * webhook secret", and issue #879 broke the premise twice: `up` writes a secret into every `.env`, and a new scaffold no
+ * longer sets GITHUB_AUTH_SOURCE, so a fresh deployment starts without `/` and its first GitHub rule, added from the
+ * console or a tool, reloads here while every delivery for it is refused. So the reload says so: `githubUnserved`
+ * counts the github rules this receiver now holds and will not serve until it restarts, and the caller logs it loudly
+ * (`github_rules_unserved`, start.mjs). Never under GITHUB_INGEST=poll, where the poller serves them and `/` is meant
+ * to be absent. Arming `/` here instead was rejected: it needs the GitHub identity resolved (a call that may retry for
+ * minutes or fail outright, and a reload cannot refuse to boot) and a handler built into a server already listening,
+ * the boot-only coupling DES-TRIGGER-OUTSIDE-PI exists to keep.
  */
 export function reloadTriggers(env, cfg, { readFile = readFileSync, fileExists = existsSync } = {}) {
 	try {
 		cfg.triggers = loadTriggers(env, readFile, fileExists);
+		if (cfg.servesGithub === false && cfg.githubIngest !== "poll" && hasGithubRules(cfg.triggers.github)) return { ok: true, githubUnserved: githubRuleCount(cfg.triggers.github) };
 		return { ok: true };
 	} catch (e) {
 		return { invalid: e?.message ?? String(e) };

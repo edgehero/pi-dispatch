@@ -2393,7 +2393,9 @@ A spent one-shot explains how to re-arm it. Cron health uses the configured stal
 Add a trigger opens a structured editor for cron, label, comment, pull request and issue triggers. Only blessed
 venues and the forges whose events reach this deployment are offered: a forge whose webhook secret is set, and GitHub
 where a new GitHub trigger would fire, by its webhook or, under `GITHUB_INGEST=poll` or `both`, by the poller. A
-`GITHUB_INGEST` the receiver refuses offers no GitHub, and the forge field says why. Forge actions use that forge's own
+`GITHUB_INGEST` the receiver refuses offers no GitHub, and the forge field says why. Where a GitHub trigger added now
+would be the first to make the receiver serve GitHub, the field says to restart the receiver once it is added: the
+receiver arms GitHub only when it starts. Forge actions use that forge's own
 words.
 The JSON fallback accepts the same add-tool fields. Both forms retain the add tool's `run.secretBundle: false`;
 only a reviewed file edit can grant a project's bundle. The editor explains which fields are set by hand.
@@ -2651,7 +2653,8 @@ these extra file/lease reads.
   forge explains its 404 route. GitHub under `GITHUB_INGEST=poll` reads as polled rather than unconfigured: its route
   answers 404 too, and its auth, polling and who may fire stay shown. Missing `WEBHOOK_SECRET` in the deployment's
   `.env` leads with a warning when GitHub is armed: the receiver refuses to start unless its service environment
-  supplies it. A `GITHUB_INGEST` the receiver refuses leads with its own warning in that place. States pair a
+  supplies it. A `GITHUB_INGEST` the receiver refuses leads with its own warning in that place. An armed forge whose
+  live receivers report but do not serve it says to restart the receiver, which arms a forge only when it starts. States pair a
   glyph with a word. Webhook method/key state and route/delivery identity occupy separate lines; polling
   shows its interval only when configured on. Phone fields keep readable label widths even for a forge armed
   by many triggers; numeric trigger links retain their full accessible names. Live receivers now name their host, actual listening port, bind category, version and beat age. Each served forge

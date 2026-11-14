@@ -893,6 +893,55 @@ test("every identity arm rides retryIdentity, and no bare identity await remains
 	assert.ok(!/await resolveAzureSelfIdFn\(/.test(startSrc), "the bare azure await must stay gone");
 });
 
+test("a GitHub rule reloaded into a receiver that started without `/` is said loudly, and `/` still 404s until a restart (issue #879)", async () => {
+	// A fresh scaffold no longer sets GITHUB_AUTH_SOURCE and `up` writes a secret, so a deployment can start with no
+	// GitHub route and get its first GitHub rule from the console while it runs. The reload takes the rule and cannot
+	// arm `/` (a boot decision, DES-TRIGGER-OUTSIDE-PI), so it must say so: GitHub does not resend what a 404 refused.
+	// The edit is made from inside identity resolution, issue #386's deterministic window, so the reload is not left
+	// to a file watch's timing. Under GITHUB_INGEST=poll the same reload is silent: the poller serves the rule.
+	for (const ingest of [undefined, "poll"]) {
+		const dir = tempDir("receiver-github-unserved-");
+		const triggersPath = join(dir, "triggers.json");
+		const gitlabRule = { on: { type: "label", any: ["pi:frontend"] }, run: { kind: "gitlab", flow: "gl-fix" } };
+		const githubRule = { on: { type: "label", any: ["pi:frontend"] }, run: { kind: "github", flow: "frontend-fix" } };
+		writeFileSync(triggersPath, JSON.stringify({ triggers: [gitlabRule] }));
+		const chunks = [];
+		const write = (chunk) => (chunks.push(String(chunk)), true);
+		const { captured, createServer } = capturingServer();
+		const closers = [];
+		await startReceiver(
+			{ PI_TRIGGERS_FILE: triggersPath, WEBHOOK_SECRET: SECRET, GITLAB_WEBHOOK_MODE: "token", GITLAB_WEBHOOK_SECRET: "gl-secret", GITLAB_TOKEN: "glpat-x", ...(ingest ? { GITHUB_INGEST: ingest } : {}) },
+			{
+				write, makeQueueFn: stubQueue, createServer, closers, ...gitlabFakes,
+				makeAuth: async () => assert.fail("no GitHub arm: the boot saw no GitHub rule"),
+				resolveGitLabSelfId: async () => {
+					writeFileSync(triggersPath, JSON.stringify({ triggers: [gitlabRule, githubRule] }));
+					return 4242;
+				},
+			},
+		);
+		for (const c of closers) c.close?.();
+		const seen = chunks.join("").split("\n").filter((l) => l.startsWith("{")).map((l) => JSON.parse(l));
+		assert.ok(seen.some((l) => l.event === "triggers_reloaded"), `${ingest}: the rule was reloaded`);
+		const unserved = seen.find((l) => l.event === "github_rules_unserved");
+		if (ingest === "poll") {
+			assert.equal(unserved, undefined, "the poller serves it, and `/` is meant to be absent");
+			continue;
+		}
+		assert.ok(unserved, `the line is said; boot lines were: ${JSON.stringify(seen)}`);
+		assert.equal(unserved.rules, 1);
+		assert.match(unserved.reason, /restart it to take GitHub webhooks/);
+		assert.match(unserved.reason, /GITHUB_INGEST=poll/);
+		assert.doesNotMatch(JSON.stringify(unserved), /frontend|pi:/, "fixed words and a count, nothing from the file");
+		const payload = JSON.stringify({ action: "labeled", sender: { id: 1 }, repository: { full_name: "octo/repo" }, issue: { number: 42, labels: [{ name: "pi:frontend" }] } });
+		const req = mockReq({ headers: headersFor("issues", "d-unserved", payload) });
+		req.url = "/";
+		const res = mockRes();
+		await drive(captured.handler, req, res, payload);
+		assert.equal(res.statusCode, 404, "the route is still absent: what the line says is true");
+	}
+});
+
 test("an edit that lands DURING THE BOOT is picked up, not left for the next one (issue #386)", async () => {
 	// THE REAL WINDOW, and the correction of a first attempt that measured the wrong one. This service loads
 	// its triggers at the top of `startReceiver` and arms the watch LAST, behind identity resolution that
