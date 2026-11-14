@@ -500,6 +500,41 @@ test("the hand written stripper agrees with a real parser on every file in the t
 	assert.deepEqual(missed.sort(), [], "a real parser found reads the stripper missed");
 });
 
+test("no .env example in the docs carries an inline comment either: a copied line would carry it into the value (#879)", () => {
+	// The same hazard as the test below, one step away: an operator copies `KEY=value   # note` from a guide into `.env`,
+	// and systemd's EnvironmentFile keeps everything after the `=` as the value, comment included. A copied
+	// `GITHUB_INGEST=poll   # ...` from docs/polling.md made every receiver command refuse to start. So every assignment
+	// line in a fenced block of the docs and the READMEs, live or commented out, keeps its comment on a line of its own.
+	// The scan is of the shape the guides use (`KEY=value` then whitespace and `#`), not of every shell line: a command
+	// with an environment prefix (`FOO=1 cmd  # note`) is not an assignment and is not matched.
+	const files = [];
+	const walk = (dir) => {
+		for (const name of readdirSync(dir)) {
+			const path = join(dir, name);
+			if (statSync(path).isDirectory()) walk(path);
+			else if (name.endsWith(".md")) files.push(path);
+		}
+	};
+	walk(join(REPO_ROOT, "docs"));
+	for (const readme of ["README.md", "worker/README.md", "receiver/README.md", "admin/README.md", "gateway/README.md"]) {
+		try { statSync(join(REPO_ROOT, readme)); files.push(join(REPO_ROOT, readme)); } catch {}
+	}
+	const offenders = [];
+	let assignments = 0;
+	for (const file of files) {
+		let fenced = false;
+		readFileSync(file, "utf8").split("\n").forEach((line, i) => {
+			if (/^\s*```/.test(line)) { fenced = !fenced; return; }
+			if (!fenced || !/^\s*(?:# )?[A-Z_][A-Z0-9_]*=/.test(line)) return;
+			assignments += 1;
+			if (/^\s*(?:# )?[A-Z_][A-Z0-9_]*=\S*\s+#/.test(line)) offenders.push(`${file.slice(REPO_ROOT.length + 1)}:${i + 1}`);
+		});
+	}
+	assert.deepEqual(offenders, [], "put the comment on its own line above the key");
+	assert.ok(assignments > 50, `the scan reaches the guides' examples (${assignments} assignment lines)`);
+	assert.ok(/^\s*(?:# )?[A-Z_][A-Z0-9_]*=\S*\s+#/.test("GITHUB_INGEST=poll   # note"), "and the shape it refuses is the one that broke");
+});
+
 test("no assignment in .env.example carries an inline comment, live or commented out (#392)", () => {
 	// `init` copies this file verbatim, `deploy/worker.service` and `deploy/receiver.service` read it with
 	// `EnvironmentFile=`, and `deploy/docker-compose.yml` hands it to compose's `env_file`. THREE parsers,
@@ -566,7 +601,8 @@ test("no assignment in .env.example carries an inline comment, live or commented
 	// PI_AUTH_CONNECTIONS_FILE and PI_AUTH_STORE_DIR add the host-owned subscription boundary (#781).
 	// PI_SANDBOX_GATEWAYS_FILE adds the hand-owned browser gateway enrollment (#754).
 	// PI_CONSOLE_AUDIT_RETENTION_DAYS and PI_RUN_MIRROR_MAX_RUNS add the audit trail's own retention and the run index cap (#761).
-	assert.equal(scanned, 136, "the scan must actually reach every assignment in the file");
+	// GITHUB_INGEST adds the GitHub transport (#879), commented out like GITHUB_AUTH_SOURCE beside it now is.
+	assert.equal(scanned, 137, "the scan must actually reach every assignment in the file");
 	assert.match("  PI_X=1 # c", /^\s*(# )?([A-Z_][A-Z0-9_]*)=(.*)$/, "and the shape it scans for is the shape the file uses, indented or not");
 
 	// systemd drops an `export` line entirely (measured: "Ignoring invalid environment assignment"), and a BOM

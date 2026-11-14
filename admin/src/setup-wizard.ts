@@ -1310,7 +1310,7 @@ async function offerTriggerEdge(
       : "";
     const ok = await ui.confirm(
       "Start the receiver container",
-      `Run in ${dir}:\n  ${handoverLines}${shown}\n\nthe receiver profile reads ${join(dir, ".env")}: WEBHOOK_SECRET and the forge credentials must be in there, or the container refuses to boot.`,
+      `Run in ${dir}:\n  ${handoverLines}${shown}\n\nthe receiver profile reads ${join(dir, ".env")}: the credentials of each forge it serves must be in there, and WEBHOOK_SECRET too wherever it serves GitHub by webhook (not under GITHUB_INGEST=poll, nor with no GitHub at all), or the container refuses to boot.`,
     );
     if (!ok) {
       // The whole of what would have run, the override's contents included, so it can be done by hand.

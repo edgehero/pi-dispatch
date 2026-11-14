@@ -165,8 +165,9 @@ export async function startReceiver(
 		resolveAuthority = makeResolveGitHubAuthorityFn({ mintToken: (job) => auth.mintToken({ ...job, permissions: { metadata: "read" } }) });
 	} else {
 		// Said out loud, because the alternative is an operator staring at a label trigger that does nothing.
-		// The two ways out are the two signals `decideServesGithub` reads, so the line names both.
-		log({ event: "github_arm_skipped", reason: "no github triggers and GITHUB_AUTH_SOURCE unset" });
+		// The line names the rule that decided (issue #879): GITHUB_INGEST=poll when the operator said the poller
+		// carries GitHub, else the inference's two signals and the setting that overrides them, which are the ways out.
+		log({ event: "github_arm_skipped", reason: cfg.githubIngest === "poll" ? "GITHUB_INGEST=poll: GitHub events come from `pi-dispatch-receiver poll`, so no GitHub route is served" : "no github triggers, GITHUB_AUTH_SOURCE unset and GITHUB_INGEST unset" });
 	}
 
 	// Ride-out connection (no failFast): the receiver is long-running and should survive a Valkey
@@ -369,6 +370,11 @@ function watchTriggers(env, cfg, log, triggersAtBoot) {
 		const res = reloadTriggers(env, cfg);
 		if (res.ok) closer.reloadLog("triggers_reloaded");
 		else closer.reloadLog("triggers_reload_invalid", { reason: res.invalid, kept: true });
+		// Issue #879: GitHub rules this receiver holds and does not serve, because it started without `/` and arms GitHub
+		// only at its start (reloadTriggers says why it never arms it live). Said on every reload while it holds, beside
+		// `triggers_reloaded`, because each delivery for them is answered 404 and GitHub does not resend. Fixed words and a
+		// count only: nothing from the file.
+		if (res.ok && res.githubUnserved > 0) closer.reloadLog("github_rules_unserved", { rules: res.githubUnserved, reason: "this receiver started without a GitHub route, so it answers GitHub deliveries 404 until it restarts: restart it to take GitHub webhooks (it needs WEBHOOK_SECRET then), or set GITHUB_INGEST=poll if `pi-dispatch-receiver poll` brings GitHub's events" });
 	};
 	// The baseline is the BOOT LOAD's own read, handed in (issue #386). Comparing against a read taken here
 	// would measure the arming instead of the window: this service arms LAST, behind identity resolution that

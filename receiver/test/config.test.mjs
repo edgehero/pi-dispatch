@@ -671,7 +671,8 @@ test("reloadTriggers does NOT recompute servesGithub -- a live edit can never mo
 	assert.equal(cfg.servesGithub, false);
 	const withGithub = JSON.stringify({ triggers: [{ on: { type: "label", any: ["pi:x"] }, run: { kind: "github", flow: "fix" } }] });
 	const res = reloadTriggers({}, cfg, { fileExists: () => true, readFile: () => withGithub });
-	assert.deepEqual(res, { ok: true }, "the reload itself succeeds -- the new rules ARE live for every configured forge");
+	// Issue #879: and it says so, since GitHub does not resend what `/` refuses (start.mjs logs `github_rules_unserved`).
+	assert.deepEqual(res, { ok: true, githubUnserved: 1 }, "the reload itself succeeds -- the new rules ARE live for every configured forge");
 	assert.equal(cfg.triggers.github.label.length, 1, "and the github group is loaded, so nothing is silently dropped");
 	assert.equal(cfg.servesGithub, false, "but the endpoint stays absent: no route without a bot-loop guard");
 });
@@ -682,6 +683,92 @@ test("a present WEBHOOK_SECRET on a github-free deployment is passed through unt
 	const c = loadReceiverConfig({ WEBHOOK_SECRET: "shh" }, gitlabOnlyTriggers);
 	assert.equal(c.servesGithub, false);
 	assert.equal(c.webhookSecret, "shh");
+});
+
+test("reloadTriggers flags GitHub rules only where the boot left `/` unmounted and the poller does not serve them (#879)", () => {
+	const withGithub = { fileExists: () => true, readFile: () => JSON.stringify({ triggers: [
+		{ on: { type: "label", any: ["pi:x"] }, run: { kind: "github", flow: "fix" } },
+		{ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix" } },
+	] }) };
+	const polled = loadReceiverConfig({ GITHUB_INGEST: "poll" }, gitlabOnlyTriggers);
+	assert.deepEqual(reloadTriggers({ GITHUB_INGEST: "poll" }, polled, withGithub), { ok: true }, "poll: the poller serves them, nothing to say");
+	const served = loadReceiverConfig({ WEBHOOK_SECRET: "shh", GITHUB_AUTH_SOURCE: "gh" }, gitlabOnlyTriggers);
+	assert.deepEqual(reloadTriggers({}, served, withGithub), { ok: true }, "`/` is mounted already: the rules are served live");
+	const bare = loadReceiverConfig({}, gitlabOnlyTriggers);
+	assert.deepEqual(reloadTriggers({}, bare, withGithub), { ok: true, githubUnserved: 2 }, "the count is the rules held, comment included");
+	assert.deepEqual(reloadTriggers({}, bare, gitlabOnlyTriggers), { ok: true }, "and a reload with none says nothing");
+});
+
+// --- GITHUB_INGEST: the operator says which transport carries GitHub (issue #879) -------------------
+//
+// The two signals above cannot tell a webhook deployment from a polling one: the triggers file and the auth block
+// are shared by `serve` and `poll` on purpose. So a deployment that polls GitHub and takes webhooks for another forge
+// could not start `serve`. Each case pins one direction of the setting, and the unset case pins that nothing moved.
+
+const GITLAB_ENV = { GITLAB_WEBHOOK_MODE: "token", GITLAB_WEBHOOK_SECRET: "gl-secret", GITLAB_TOKEN: "glpat-x" };
+const APP_ENV = { GITHUB_AUTH_SOURCE: "app", GITHUB_APP_ID: "1", GITHUB_APP_INSTALLATION_ID: "2", GITHUB_APP_PRIVATE_KEY_PATH: "/k.pem" };
+const GITLAB_AND_GITHUB_JSON = JSON.stringify({
+	triggers: [
+		{ on: { type: "label", any: ["pi:frontend"] }, run: { kind: "gitlab", flow: "gl-fix" } },
+		{ on: { type: "label", any: ["pi:x"] }, run: { kind: "github", flow: "fix" } },
+	],
+});
+const gitlabAndGithubTriggers = { fileExists: () => true, readFile: () => GITLAB_AND_GITHUB_JSON };
+
+test("GITHUB_INGEST=poll: serve boots for its other forge with no WEBHOOK_SECRET, over every signal that used to arm GitHub", () => {
+	// The issue's three cases: GitLab alone, the `.env` that `setup github --no-webhook` leaves (an explicit app source),
+	// and a GitHub trigger the poller fires. Each now boots, with no GitHub route.
+	for (const [what, env, fs] of [
+		["a gitlab-only file", { ...GITLAB_ENV, GITHUB_INGEST: "poll" }, gitlabOnlyTriggers],
+		["the app source setup github --no-webhook writes", { ...GITLAB_ENV, ...APP_ENV, GITHUB_INGEST: "poll" }, gitlabOnlyTriggers],
+		["a github trigger the poller fires", { ...GITLAB_ENV, GITHUB_INGEST: "poll" }, gitlabAndGithubTriggers],
+		["a github trigger and an explicit source", { ...GITLAB_ENV, GITHUB_AUTH_SOURCE: "gh", GITHUB_INGEST: "poll" }, gitlabAndGithubTriggers],
+	]) {
+		const c = loadReceiverConfig(env, fs);
+		assert.equal(c.servesGithub, false, `${what}: no GitHub route`);
+		assert.equal(c.githubIngest, "poll", `${what}: the setting is carried, for the boot line`);
+		assert.ok(c.gitlab, `${what}: the forge it does serve is configured`);
+	}
+	// The github rules are still grouped: the poller reads this same loader's groups, so polling them is untouched.
+	assert.equal(loadReceiverConfig({ GITHUB_INGEST: "poll" }, gitlabAndGithubTriggers).triggers.github.label.length, 1);
+});
+
+test("GITHUB_INGEST=webhook or both serves GitHub with no rule and no auth source, and the secret is required again", () => {
+	for (const ingest of ["webhook", "both"]) {
+		const c = loadReceiverConfig({ WEBHOOK_SECRET: "shh", GITHUB_INGEST: ingest }, gitlabOnlyTriggers);
+		assert.equal(c.servesGithub, true, `${ingest}: the operator said the webhook carries GitHub`);
+		assert.equal(c.githubIngest, ingest);
+		assert.throws(
+			() => loadReceiverConfig({ GITHUB_INGEST: ingest }, gitlabOnlyTriggers),
+			(e) => e.piDispatchConfig === true && /WEBHOOK_SECRET is required/.test(e.message),
+			`${ingest}: the route and its secret move together, as they always have`,
+		);
+	}
+});
+
+test("GITHUB_INGEST unset or empty keeps the inference byte for byte: the #231 rule still decides", () => {
+	for (const unset of [{}, { GITHUB_INGEST: "" }]) {
+		assert.equal(loadReceiverConfig({ WEBHOOK_SECRET: "shh", ...unset }, validTriggers).servesGithub, true, "a github rule still arms");
+		assert.throws(() => loadReceiverConfig({ ...unset }, validTriggers), /WEBHOOK_SECRET is required/, "and still needs the secret");
+		assert.equal(loadReceiverConfig({ ...unset }, gitlabOnlyTriggers).servesGithub, false, "no rule, no source: no route");
+		assert.equal(loadReceiverConfig({ WEBHOOK_SECRET: "shh", GITHUB_AUTH_SOURCE: "gh", ...unset }, gitlabOnlyTriggers).servesGithub, true, "an explicit source still arms");
+		assert.equal(loadReceiverConfig({ ...unset }, gitlabOnlyTriggers).githubIngest, null);
+	}
+});
+
+test("a GITHUB_INGEST outside the three words refuses at boot as itself, before any WEBHOOK_SECRET complaint", () => {
+	for (const bad of ["pol", "Poll", " poll", "webhooks", "none"]) {
+		assert.throws(
+			() => loadReceiverConfig({ GITHUB_INGEST: bad }, validTriggers),
+			(e) => e.piDispatchConfig === true && /GITHUB_INGEST must be webhook, poll or both/.test(e.message) && !/WEBHOOK_SECRET/.test(e.message),
+			JSON.stringify(bad),
+		);
+	}
+	// A long or odd value is not echoed: a token pasted into the wrong line must not reach the journal.
+	assert.throws(
+		() => loadReceiverConfig({ GITHUB_INGEST: "ghp_PRIVATE_TOKEN_SENTINEL_1234567890" }, gitlabOnlyTriggers),
+		(e) => /not shown/.test(e.message) && !/PRIVATE_TOKEN_SENTINEL/.test(e.message),
+	);
 });
 
 // --- disarmed sentinel + not-yet-grouped issue entries hold their positions (issue #231) ---

@@ -107,7 +107,8 @@ credentials step:
 3. **No public URL at all**: Run `pi-dispatch-receiver poll` to fetch issue events, comments and PRs over TLS
    with your own credential. It uses conditional requests, nearly free against the rate limit. Same
    gates, same
-   queue, about 60 seconds of latency, zero public surface. Pair with `setup github --no-webhook`. A
+   queue, about 60 seconds of latency, zero public surface. Pair with `setup github --no-webhook`, which
+   also writes `GITHUB_INGEST=poll`, so a webhook receiver you run for another forge serves no GitHub route. A
    fresh poller starts from now and never replays old labels. Name the repositories in `POLL_REPOS`. Or
    run under `GITHUB_AUTH_SOURCE=app` and let the App installation name them
    ([`docs/polling.md`](polling.md)).
