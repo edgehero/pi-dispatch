@@ -40,7 +40,10 @@ commands.
 
 Everything else is shared with `serve`: the same `triggers.json` (`PI_TRIGGERS_FILE`), the same GitHub
 auth block, the same queue. Pair it with `pi-dispatch setup github --no-webhook`, which mints
-credentials without asking you for a public URL.
+credentials without asking you for a public URL. The App it creates has its webhook switched off. GitHub requires a
+webhook URL all the same, so the App names `https://no-webhook.invalid/`, an address that never resolves. The ping
+GitHub sends when it creates the App fails there, and nothing can ever be delivered to it. To switch to webhooks
+later, see [Moving to webhooks later](#moving-to-webhooks-later).
 
 ## Which repos, and the two ways to say
 
@@ -151,6 +154,26 @@ they are the price of diffing a list rather than receiving events.
 The events endpoint has no `since`, so the poller reads at most five pages of it per repository per
 cycle. A backlog deeper than that is skipped with an explicit log line rather than stalling the cycle.
 Comments self heal, because their cursor advances and the next cycle collects the rest.
+
+## Moving to webhooks later
+
+An App made with `--no-webhook` can take webhooks once you have a public URL for the receiver. In this order:
+
+1. In the App's settings on GitHub, under Webhook, set your receiver's URL and a webhook secret, and leave **Active**
+   unticked for now. If `.env` already has a `WEBHOOK_SECRET` that another GitHub webhook uses, give the App that
+   value: the receiver checks every GitHub delivery against that one secret. Otherwise make a new one and put it in
+   `WEBHOOK_SECRET`. The wizard wrote none for this App.
+2. Start `pi-dispatch-receiver` where that URL reaches it. If one already runs, restart it: it decides whether to
+   serve GitHub, and reads `WEBHOOK_SECRET`, only when it starts. Until then a GitHub delivery gets a 404, or a 401
+   against an older secret.
+3. Tick **Active**, and wait until the App's **Recent Deliveries** (under **Advanced**) shows the next event with a
+   green tick, a 2xx answer. The poller keeps running meanwhile, so nothing is missed while you wait. A 401 there means
+   the two secrets differ, and a 404 that the receiver is not serving GitHub yet. If nothing shows at all, check the
+   App's **Permissions & events**, under Subscribe to events.
+4. Then stop the poller. Stopping it first leaves a gap in which no event is seen, by either. While both run, each
+   event arrives twice, under different ids. Repeats are normally merged into one job, but not around a run that takes
+   steering: a comment can reach such a run twice, and once it has ended, the other copy of an event can start it again
+   ([steering.md](steering.md#per-forge)). Keep the overlap short.
 
 ## Reference
 

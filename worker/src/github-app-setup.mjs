@@ -49,6 +49,11 @@ const API_ROOT = "https://api.github.com";
 const USER_AGENT = "pi-dispatch-setup-github";
 // The repo homepage, shown on the App's about page — informational, not a trust anchor.
 const HOMEPAGE = "https://github.com/edgehero/pi-dispatch";
+// The webhook URL of an App made with --no-webhook (issue #874). GitHub requires one even for an inactive hook. A
+// `.invalid` name (RFC 6761) never resolves, so nothing GitHub sends there reaches any host: not the ping an inactive
+// hook still got at creation (in the measurement that `buildManifest`'s comment cites), and not an event if someone
+// ticks Active later without changing the URL. A real host would get both, and a domain can change owner.
+export const NO_WEBHOOK_URL = "https://no-webhook.invalid/";
 // GitHub app names are GLOBALLY unique and capped at 34 characters.
 const NAME_MAX = 34;
 
@@ -363,7 +368,11 @@ function printSummary(say, summary, { noWebhook }) {
 	say("\nNext:\n");
 	if (noWebhook) {
 		say("  the App was created with its webhook INACTIVE (--no-webhook) — the polling-ready shape.\n");
-		say("  Polling delivery is a follow-up; until it lands, forge triggers for this App will not fire on their own.\n");
+		say("  start the poller so events reach the queue: `pi-dispatch-receiver poll`. Under GITHUB_AUTH_SOURCE=app it\n");
+		say("  watches the repositories of the installation GITHUB_APP_INSTALLATION_ID names; POLL_REPOS names a list of\n");
+		say("  your own instead. See docs/polling.md.\n");
+		say(`  the App's webhook URL is a placeholder, ${NO_WEBHOOK_URL}, which nothing can receive. Moving to webhooks\n`);
+		say("  later takes a webhook secret and an order of steps: docs/polling.md, \"Moving to webhooks later\".\n");
 	} else {
 		say("  start the receiver so deliveries have somewhere to land: `pi-dispatch-receiver`\n");
 		say("  (or, where the folder holds deploy/docker-compose.yml, its receiver profile), reachable at the --webhook-url you gave GitHub.\n");
@@ -402,8 +411,12 @@ export function sanitizeAppName(raw) {
  * The manifest GitHub converts into the App — the narrowest shape this system needs
  * (SECURITY.md's auth-source ladder): write on exactly the three surfaces jobs touch, metadata read
  * because the API requires it, private, and only the event families the triggers file can name.
- * `hook_attributes` carries the receiver URL, or `active: false` under --no-webhook — the
- * no-public-URL shape the polling transport will consume.
+ * `hook_attributes` carries the receiver URL, or under --no-webhook an INACTIVE hook at `NO_WEBHOOK_URL`. GitHub
+ * refuses a manifest whose `hook_attributes` has no `url`, inactive or not ("url" wasn't supplied, issue #874), and one
+ * that leaves `hook_attributes` out while it subscribes events ("Hook url cannot be blank"). What it accepts was
+ * measured against github.com on 2026-11-09 by another project's throwaway Apps: a `.invalid` URL with
+ * `active: false` was accepted, only `localhost` and `127.0.0.1` were refused as not reachable over the public
+ * Internet, and the App with the inactive hook recorded one delivery, its creation's ping, and no event after it.
  *
  * `pull_request_review` (issue #66) is subscribed for every new App, armed trigger or not. That is the
  * posture `pull_request` already has for a label-only deployment: an unsubscribed event cannot be turned
@@ -415,7 +428,7 @@ export function buildManifest({ name, redirectUrl, webhookUrl }) {
 		name,
 		url: HOMEPAGE,
 		redirect_url: redirectUrl,
-		hook_attributes: webhookUrl ? { url: webhookUrl } : { active: false },
+		hook_attributes: webhookUrl ? { url: webhookUrl } : { url: NO_WEBHOOK_URL, active: false },
 		public: false,
 		default_permissions: { contents: "write", pull_requests: "write", issues: "write", metadata: "read" },
 		default_events: ["issues", "issue_comment", "pull_request", "pull_request_review"],

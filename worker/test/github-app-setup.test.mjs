@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createVerify, generateKeyPairSync } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { buildFormPage, buildManifest, defaultAppName, mintAppJwt, runGithubAppSetup, sanitizeAppName } from "../src/github-app-setup.mjs";
+import { buildFormPage, buildManifest, defaultAppName, mintAppJwt, NO_WEBHOOK_URL, runGithubAppSetup, sanitizeAppName } from "../src/github-app-setup.mjs";
 
 // A REAL RSA keypair, generated once: the conversion response carries the private half as its `pem`,
 // so the wizard's hand-rolled JWT is signed with a key the test can VERIFY against the public half —
@@ -194,11 +194,24 @@ test("buildManifest: --webhook-url shape is exactly the narrow permission/event 
 	});
 });
 
-test("buildManifest: no webhook URL yields hook_attributes {active:false} — the polling-ready shape", () => {
+test("buildManifest: no webhook URL yields an INACTIVE hook that still names a URL, one that can never resolve — the polling-ready shape (issue #874)", () => {
 	const manifest = buildManifest({ name: "pi-dispatch-x", redirectUrl: "http://127.0.0.1:1/callback", webhookUrl: undefined });
-	assert.deepEqual(manifest.hook_attributes, { active: false });
+	assert.deepEqual(manifest.hook_attributes, { url: "https://no-webhook.invalid/", active: false });
+	assert.equal(manifest.hook_attributes.url, NO_WEBHOOK_URL);
+	assert.match(new URL(NO_WEBHOOK_URL).hostname, /\.invalid$/, "RFC 6761: a name that never resolves, so no host can receive what GitHub sends there");
 	assert.deepEqual(manifest.default_permissions, { contents: "write", pull_requests: "write", issues: "write", metadata: "read" });
 	assert.deepEqual(manifest.default_events, ["issues", "issue_comment", "pull_request", "pull_request_review"]);
+});
+
+test("buildManifest: every shape's hook_attributes carries a url, which GitHub requires whenever the object is sent, inactive or not (issue #874)", () => {
+	// GitHub answered the {active:false} shape with "Invalid GitHub App configuration ... "url" wasn't supplied", and no
+	// App was made. This is that rule written down: nothing here talks to GitHub, so the shape is the only thing to hold.
+	for (const webhookUrl of [undefined, "", "https://hooks.example/github"]) {
+		const { hook_attributes: hook } = buildManifest({ name: "pi-dispatch-x", redirectUrl: "http://127.0.0.1:1/callback", webhookUrl });
+		assert.equal(typeof hook.url, "string", `webhookUrl ${JSON.stringify(webhookUrl)}: a url is sent`);
+		assert.equal(new URL(hook.url).protocol, "https:", `webhookUrl ${JSON.stringify(webhookUrl)}: an https url`);
+		if (!webhookUrl) assert.equal(hook.active, false, "with no receiver URL the hook is inactive, so the placeholder receives nothing");
+	}
 });
 
 // -- the served form page: embeds the manifest, POSTs to the right target ------------------------------
@@ -229,7 +242,7 @@ test("form page: --org switches the POST target to the organization endpoint", a
 	await h.run();
 	const page = h.getPageFor()("http://127.0.0.1:43210");
 	assert.match(page, /action="https:\/\/github\.com\/organizations\/acme\/settings\/apps\/new"/);
-	assert.deepEqual(embeddedManifest(page).hook_attributes, { active: false });
+	assert.deepEqual(embeddedManifest(page).hook_attributes, { url: "https://no-webhook.invalid/", active: false });
 });
 
 test("buildFormPage: the embedded JSON is HTML-escaped (quotes cannot break out of the input value)", () => {
@@ -312,8 +325,40 @@ test("setup github: --no-webhook never touches WEBHOOK_SECRET and says the App i
 	assert.match(h.store.get(ENV_PATH), /^WEBHOOK_SECRET=$/m, "the empty scaffold line stays empty — nothing will sign deliveries with it");
 	assert.doesNotMatch(h.text(), /WEBHOOK_SECRET=<value not shown>/, "no secret line is even offered");
 	assert.match(h.text(), /webhook INACTIVE \(--no-webhook\)/);
-	assert.match(h.text(), /[Pp]olling/, "the follow-up transport is named so the shape is not a surprise");
+	assert.match(h.text(), /`pi-dispatch-receiver poll`/, "the poller is named, not called a follow-up: it shipped");
+	assert.doesNotMatch(h.text(), /follow-up|until it lands/, "polling is no longer a promise");
+	assert.ok(h.text().includes("webhook URL is a placeholder, https://no-webhook.invalid/"), "the placeholder URL is printed, so ticking Active later is not a surprise");
+	// The move to webhooks has an order and a secret the wizard never wrote; it lives in one place, the guide's section
+	// (held below), and the closing lines point there rather than restating it.
+	assert.match(h.text(), /a webhook secret and an order of steps: docs\/polling\.md, "Moving to webhooks later"/);
+	// The App path polls ONE installation, the one GITHUB_APP_INSTALLATION_ID names (receiver/src/poller.mjs
+	// discoverRepos), never every place the App is installed: an operator with two installations must not be told so.
+	assert.match(h.text(), /the installation GITHUB_APP_INSTALLATION_ID names/);
+	assert.doesNotMatch(h.text(), /every repository the App is installed on/);
 	assertNoSecrets(h.text());
+});
+
+test("docs/polling.md names the --no-webhook placeholder the wizard sends, so the guide cannot drift from it (issue #874)", () => {
+	const doc = readFileSync(new URL("../../docs/polling.md", import.meta.url), "utf8");
+	assert.ok(doc.includes(`\`${NO_WEBHOOK_URL}\``), `docs/polling.md quotes ${NO_WEBHOOK_URL}`);
+});
+
+test("docs/polling.md's move to webhooks keeps its order: the secret, the receiver (re)started, Active and a 2xx seen, then the poller stopped (issue #874)", () => {
+	// The order is the content. A receiver started before WEBHOOK_SECRET is written verifies with the old value (it reads
+	// it once, at start), so every delivery fails; a poller stopped before the hook is Active leaves a gap no one reads.
+	const doc = readFileSync(new URL("../../docs/polling.md", import.meta.url), "utf8");
+	const at = doc.indexOf("\n## Moving to webhooks later\n");
+	assert.ok(at >= 0, "the section the wizard names exists, under that exact heading");
+	const section = doc.slice(at, doc.indexOf("\n## ", at + 1));
+	const steps = ["`WEBHOOK_SECRET`", "Start `pi-dispatch-receiver`", "restart it", "Tick **Active**", "green tick, a 2xx answer", "Then stop the poller"].map((needle) => {
+		const i = section.indexOf(needle);
+		assert.ok(i >= 0, `the section says ${needle}`);
+		return i;
+	});
+	assert.deepEqual([...steps].sort((a, b) => a - b), steps, "in this order");
+	// No step may tell the operator to MAKE an event to see a delivery: a label added to an issue that still carries a
+	// trigger's label matches that trigger again (filter.mjs matches the issue's whole label set) and starts a paid job.
+	assert.doesNotMatch(section, /adding a label/i);
 });
 
 test("setup github: an existing file at the PEM path is a refusal — key files are never clobbered", async () => {
