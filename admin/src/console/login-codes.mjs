@@ -16,15 +16,22 @@
  * person to read off a terminal and type on the sign-in page, on another computer or a phone; it lives
  * `SHORT_TTL_MS` (5 minutes), because typing takes longer than a click. Typing forgives what a person gets wrong without
  * meaning anything by it: case, dashes and spaces are ignored, and O is read as 0 and I and L as 1 (`shortCodeOf`), so the
- * code a person types and the code that was printed hash the same. It goes in the same drop, by the same rules: filed
- * under the sha256 of its canonical spelling, written 0600 and exclusively, spent by the one `unlinkSync` that wins.
+ * code a person types and the code that was printed hash the same. It goes in the same drop, by the same rules: written
+ * 0600 and exclusively, spent by the one `unlinkSync` that wins; but filed under a slow keyed hash of its canonical
+ * spelling (`shortCodeName`), never a plain sha256 (below).
  *
  * WHY 40 BITS ARE ENOUGH, and what they are not enough against. A guess reaches a code only through `POST /login/code` or
  * `/login/typed-code`, behind the console's one global sign-in limiter (`guards.mjs`: 5 a minute after a burst of 10), so
- * in a code's 5 minutes at most 35 guesses are made, against 2^40 codes: about one chance in 30 billion per live code.
- * The FILES are a different matter: whoever can list the drop can try every 40-bit code against the names offline in
- * minutes. That is why the drop is 0700 and refused when it is not (`dirProblem`): only the deployment's own account
- * can list it, and that account can mint a code anyway. A link's 256 bits need no such care.
+ * in a code's 5 minutes at most 35 guesses are made by one console process, against 2^40 codes: about one chance in 30
+ * billion per live code. (The bucket lives in the process, so a restart refills it; restarting the console is the
+ * deployment account's to do, and that account can mint a code anyway.) The FILES are a different matter: a file named
+ * by the plain sha256 of a 40-bit code gives the code away to anyone who can list the folder and try every code in
+ * minutes, and the deployment's own pi session can list it (`ls`, `find`; the extension guards only `write` and `edit`).
+ * So a short code's file is named by scrypt (N 2^14, r 8, p 1: about 30 ms and 16 MiB a try) of the code under a random
+ * per-drop salt (`.short-code-salt`, 0600): one hash per attempt behind the limiter for the console, and for a search
+ * of the listing about a thousand CPU-years per drop, against a code that lives 5 minutes. REJECTED: an HMAC under a
+ * key kept in the drop, which pi's `read` tool can read as easily as it lists the folder, so a key buys nothing a salt
+ * does not, while scrypt's cost holds whoever reads it. A link's 256 bits need none of this.
  *
  * Each code is its own credential. `link` prints a link and a short code together, and each works once: signing in with
  * one leaves the other as it was, so a person can open the link here and type the code on a phone. REJECTED: tying the
@@ -32,7 +39,7 @@
  * which uses it at once, so the code it prints beside it would always be dead by the time anyone read it.
  */
 import * as nodeFs from "node:fs";
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, scryptSync } from "node:crypto";
 import { dirname, join } from "node:path";
 
 /** A link's code: 32 random bytes as base64url, always 43 characters. */
@@ -105,6 +112,49 @@ export function loginCodesDir(tokensPath) {
 
 function codeHash(code) {
   return createHash("sha256").update(code, "utf8").digest("hex");
+}
+
+/** The drop's salt for short codes: 32 random bytes as hex, in one 0600 file of this account, made with the first short code. */
+const SALT_FILE = ".short-code-salt";
+const SALT_RE = /^[0-9a-f]{64}$/;
+/** scrypt's cost for a short code's name (see the header): what one guess costs whoever reads the folder. */
+export const SHORT_CODE_SCRYPT = Object.freeze({ N: 16384, r: 8, p: 1 });
+
+/**
+ * The drop's short-code salt: `{salt}`, or `{refusal}`. With `create` (a mint), one is made when there is none, exclusively,
+ * so two minters racing agree on the one that won. Read as `take` reads a code: a regular file of this account with no group
+ * or other bit, else refused (a salt another account could write would let it choose the names).
+ */
+function shortSalt(dir, fs, { create, random = randomBytes, uid = processUid() }) {
+  const file = join(dir, SALT_FILE);
+  const read = () => {
+    const st = fs.lstatSync(file);
+    if (!st.isFile() || (uid !== undefined && ((st.mode & 0o077) !== 0 || st.uid !== uid))) return { refusal: `the short-code salt ${file} is not a private file of this account; remove it and make a new code` };
+    const text = fs.readFileSync(file, "utf8").trim();
+    return SALT_RE.test(text) ? { salt: text } : { refusal: `the short-code salt ${file} is not one this console wrote; remove it and make a new code` };
+  };
+  try {
+    return read();
+  } catch (e) {
+    if (e?.code !== "ENOENT") return { refusal: `the short-code salt in ${dir} could not be read (${errCode(e)})` };
+    if (!create) return { refusal: "no short code was ever made here" };
+  }
+  try {
+    fs.writeFileSync(file, `${random(32).toString("hex")}\n`, { mode: 0o600, flag: "wx" });
+    fs.chmodSync(file, 0o600);
+  } catch (e) {
+    if (e?.code !== "EEXIST") return { refusal: `the short-code salt in ${dir} could not be written (${errCode(e)}); nothing was made` };
+  }
+  try {
+    return read();
+  } catch (e) {
+    return { refusal: `the short-code salt in ${dir} could not be read (${errCode(e)})` };
+  }
+}
+
+/** A short code's file name (without `.json`): scrypt of its canonical spelling under the drop's salt, as 64 hex characters, so it fits `CODE_FILE_RE`. */
+export function shortCodeName(code, salt) {
+  return scryptSync(code, salt, 32, { ...SHORT_CODE_SCRYPT, maxmem: 64 * 1024 * 1024 }).toString("hex");
 }
 
 function errCode(e) {
@@ -237,9 +287,9 @@ export function clearLoginCodes({ dir, fs = nodeFs }) {
   return { removed, left };
 }
 
-/** Write one code's file, 0600 and exclusively: null, or the refusal having removed whatever it wrote. */
-function writeCode(dir, fs, key, body) {
-  const file = join(dir, `${codeHash(key)}.json`);
+/** Write one code's file, named `name` (64 hex), 0600 and exclusively: null, or the refusal having removed whatever it wrote. */
+function writeCode(dir, fs, name, body) {
+  const file = join(dir, `${name}.json`);
   try {
     fs.writeFileSync(file, `${JSON.stringify(body)}\n`, { mode: 0o600, flag: "wx" });
   } catch (e) {
@@ -249,15 +299,15 @@ function writeCode(dir, fs, key, body) {
     // The create's mode is masked by the umask; set it exactly.
     fs.chmodSync(file, 0o600);
   } catch (e) {
-    removeCode(dir, fs, key);
+    removeCode(dir, fs, name);
     return `the login code in ${dir} could not be made private (${errCode(e)}); nothing was made`;
   }
   return null;
 }
 
-function removeCode(dir, fs, key) {
+function removeCode(dir, fs, name) {
   try {
-    fs.unlinkSync(join(dir, `${codeHash(key)}.json`));
+    fs.unlinkSync(join(dir, `${name}.json`));
   } catch {
     // already gone
   }
@@ -279,14 +329,19 @@ export function mintLoginCode({ dir, name, fs = nodeFs, now = () => Date.now(), 
   const t = now();
   reap(dir, fs, t);
   const code = random(32).toString("base64url");
-  const refused = writeCode(dir, fs, code, { name, expiresAt: new Date(t + ttlMs).toISOString(), ...(binding === undefined ? {} : { binding }) });
+  const refused = writeCode(dir, fs, codeHash(code), { name, expiresAt: new Date(t + ttlMs).toISOString(), ...(binding === undefined ? {} : { binding }) });
   if (refused) return { refusal: refused };
   if (!short) return { code };
+  // Both or neither: a person told that nothing was made must not leave a live link behind.
+  const salted = shortSalt(dir, fs, { create: true, random });
+  if (salted.refusal) {
+    removeCode(dir, fs, codeHash(code));
+    return { refusal: salted.refusal };
+  }
   const shortCode = shortFrom(random(5));
-  const shortRefused = writeCode(dir, fs, shortCode, { name, expiresAt: new Date(t + shortTtlMs).toISOString() });
+  const shortRefused = writeCode(dir, fs, shortCodeName(shortCode, salted.salt), { name, expiresAt: new Date(t + shortTtlMs).toISOString() });
   if (shortRefused) {
-    // Both or neither: a person told that nothing was made must not leave a live link behind.
-    removeCode(dir, fs, code);
+    removeCode(dir, fs, codeHash(code));
     return { refusal: shortRefused };
   }
   return { code, short: shortCode };
@@ -326,7 +381,18 @@ export function consumeLoginCode({ dir, code, fs = nodeFs, now = () => Date.now(
   const problem = dirProblem(dir, fs, { create: false });
   if (problem) return { refusal: problem, codeKind };
   const t = now();
-  const taken = take(join(dir, `${codeHash(codeKind === "link" ? code : shortCodeOf(code))}.json`), fs, uid);
+  // A short code's name costs one scrypt, this attempt's alone (see the header); a drop with no salt has never held one.
+  let fileName;
+  if (codeKind === "link") fileName = codeHash(code);
+  else {
+    const salted = shortSalt(dir, fs, { create: false, uid });
+    if (salted.refusal) {
+      reap(dir, fs, t);
+      return { refusal: used, codeKind };
+    }
+    fileName = shortCodeName(shortCodeOf(code), salted.salt);
+  }
+  const taken = take(join(dir, `${fileName}.json`), fs, uid);
   reap(dir, fs, t);
   if (!taken) return { refusal: used, codeKind };
   if (!Number.isFinite(taken.expiresAt) || taken.expiresAt <= t) {

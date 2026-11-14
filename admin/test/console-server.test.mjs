@@ -5,7 +5,7 @@ import { request } from "node:http";
 import { join } from "node:path";
 import { after, test } from "node:test";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { makeLoginLimiter } from "../src/console/guards.mjs";
+import { LOOPBACK_HOSTS, makeLoginLimiter } from "../src/console/guards.mjs";
 import { SECURITY_HEADERS } from "../src/console/headers.mjs";
 import { html, page } from "../src/console/html.mjs";
 import * as realPages from "../src/console/pages.mjs";
@@ -319,6 +319,22 @@ test("a tunnel's Host on another port is accepted: localhost:9999, 127.0.0.1:1 a
   // and a write through the tunnel, with the tunnel's own Origin, passes every guard and signs in
   const res = await c.send({ method: "POST", path: "/login", headers: { ...c.writeHeaders(), host: "localhost:9999", origin: "http://localhost:9999" }, body: JSON.stringify({ token: OP_TOKEN }) });
   assert.equal(res.status, 200);
+});
+
+test("the console's own name, pi-dispatch.localhost, is a loopback name with any port; no other .localhost name is (issue #882)", async () => {
+  const c = await start();
+  for (const host of ["pi-dispatch.localhost:4790", "pi-dispatch.localhost", "PI-DISPATCH.LOCALHOST:8080", "pi-dispatch.localhost.:4790"]) {
+    assert.equal((await c.send({ path: "/healthz", headers: { host } })).status, 200, host);
+  }
+  // A write from the console's own page under that name: its Origin is http://<Host>, as a browser sends it there.
+  const res = await c.send({ method: "POST", path: "/login", headers: { ...c.writeHeaders(), host: "pi-dispatch.localhost:4790", origin: "http://pi-dispatch.localhost:4790" }, body: JSON.stringify({ token: OP_TOKEN }) });
+  assert.equal(res.status, 200, res.text);
+  // Another tool's .localhost name is any other name: refused, so a page it serves is no console page.
+  for (const host of ["other.localhost:4790", "evil.pi-dispatch.localhost", "pi-dispatch.localhost.evil.test", "localhost.pi-dispatch"]) {
+    assert.equal((await c.send({ path: "/healthz", headers: { host } })).status, 421, host);
+  }
+  // And the remember rule reads the same list: a sign-in there may be remembered (console-remembered.test.mjs drives it whole).
+  assert.ok(LOOPBACK_HOSTS.includes("pi-dispatch.localhost"));
 });
 
 test("an extra name in allowedHosts is accepted, with any port", async () => {
@@ -1667,8 +1683,8 @@ test("the sign-in footer follows how the console listens: loopback, a unix socke
   const unix = await footer({ kind: "unix", path: "/run/pi/console.sock" });
   const pub = await footer({ kind: "tcp", host: "0.0.0.0", port: 4790 });
   // Issue #882: 127.0.0.1 and ::1 are where every command says localhost; another loopback address is not.
-  assert.match(loopback, /answers at localhost, on this host only/);
-  assert.match(v6, /answers at localhost, on this host only/);
+  assert.match(loopback, /answers at pi-dispatch\.localhost, on this host only/);
+  assert.match(v6, /answers at pi-dispatch\.localhost, on this host only/);
   assert.match(await footer({ kind: "tcp", host: "127.0.0.2", port: 4790 }), /loopback address only/);
   assert.match(unix, /unix socket only/);
   assert.ok(!unix.includes("/run/pi/console.sock"), "the socket's path is not printed");
@@ -1772,7 +1788,7 @@ test("a 421 to a browser names the refused Host escaped and cut, gives the tunne
   assert.deepEqual(panelsOf(res.text), ["p-error-421"]);
   assert.match(res.text, /<span class="code">myhost\.lan<\/span>/);
   assert.ok(panelText(res.text, "p-error-421").includes(`<span>ssh</span> <span>-L</span> <span>${c.port}:127.0.0.1:${c.port}</span> <span>&#39;&lt;this host&gt;&#39;</span>`), "the tunnel uses this connection's own port");
-  assert.match(res.text, /answers only to the names it was started with \(127\.0\.0\.1, localhost and \[::1\] unless more were added\)/);
+  assert.match(res.text, /answers only to the names it was started with \(pi-dispatch\.localhost, localhost, 127\.0\.0\.1 and \[::1\] unless more were added\)/);
   for (const absent of ["alice", "Operator", 'id="logout"', "pillnav", 'href="/runs"', 'href="/audit"', "aria-current"]) assert.ok(!res.text.includes(absent), `no ${absent}`);
   assert.equal(c.sessions.peeked.length, peekedBefore, "no session was even read");
   const long = `${"a".repeat(70)}.test`;
@@ -2029,7 +2045,7 @@ test("errorPage 421: the name escaped and cut, the tunnel for the connection's p
   const tcp = card({ host: "myhost.lan", port: 7788, address: "127.0.0.1" });
   assert.match(tcp, /Your browser asked for <span class="code">myhost\.lan<\/span>, so the request was refused/);
   assert.ok(tcp.includes("<span>ssh</span> <span>-L</span> <span>7788:127.0.0.1:7788</span> <span>&#39;&lt;this host&gt;&#39;</span>"));
-  assert.ok(tcp.includes("http://localhost:7788/"));
+  assert.ok(tcp.includes("http://pi-dispatch.localhost:7788/"));
   // The address the connection reached, as serve's own hint names its bound host: never a fixed 127.0.0.1.
   const tunnel = (address) => /<span>ssh<\/span> <span>-L<\/span> <span>([^<]*)<\/span>/.exec(card({ host: "h", port: 7788, address }))[1];
   assert.deepEqual(
@@ -2039,7 +2055,7 @@ test("errorPage 421: the name escaped and cut, the tunnel for the connection's p
   );
   const socket = card({ host: "myhost.lan", port: null });
   assert.ok(socket.includes("<span>ssh</span> <span>-L</span> <span>&#39;4790:&lt;console socket&gt;&#39;</span> <span>&#39;&lt;this host&gt;&#39;</span>"), "a placeholder, never the socket's path");
-  assert.ok(socket.includes("http://localhost:4790/"));
+  assert.ok(socket.includes("http://pi-dispatch.localhost:4790/"));
   for (const odd of [0, 65536, -1, 1.5, "7788", NaN]) assert.ok(card({ host: "h", port: odd }).includes("4790:&lt;console socket&gt;"), String(odd));
   assert.match(card({ host: null }), /asked for a Host that is not a plain name,/);
   assert.match(card({ host: "" }), /asked for a Host that is not a plain name,/);

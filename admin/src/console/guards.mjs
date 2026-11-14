@@ -21,12 +21,22 @@
  * write is a refusal even beside a `same-origin` claim.
  */
 import { isJsonContentType } from "@edgehero/pi-dispatch/http-body";
+import { CONSOLE_HOSTNAME } from "@edgehero/pi-dispatch/console-probe";
 
 /** The names a container uses to reach the host it runs on. Never a valid console Host, whatever is configured. */
 export const GATEWAY_HOSTS = Object.freeze(["host.docker.internal", "host.containers.internal", "gateway.docker.internal"]);
 
-/** The loopback names a browser on this host uses for the console. Extras come from PI_CONSOLE_ALLOWED_HOSTS. */
-export const LOOPBACK_HOSTS = Object.freeze(["127.0.0.1", "localhost", "[::1]"]);
+/**
+ * The loopback names a browser on this host uses for the console. Extras come from PI_CONSOLE_ALLOWED_HOSTS. Since issue
+ * #882 the console's own name, `pi-dispatch.localhost` (`CONSOLE_HOSTNAME`), the one every command prints: exactly that
+ * name, not every `.localhost` one, so a page another local tool serves under some other `.localhost` name is refused as
+ * any other name is. It keeps rebinding out for the reason `localhost` does: a `.localhost` name never leaves the host in
+ * a conforming resolver (RFC 6761; Chrome and Firefox answer it themselves), so no outside page can be served under it.
+ * Where a resolver does send it out (a minimal Linux without systemd-resolved or nss-myhostname, using a browser that
+ * asks the system), whoever answers that DNS query could serve a page under the name; doctor warns when the name does
+ * not resolve to loopback here.
+ */
+export const LOOPBACK_HOSTS = Object.freeze(["127.0.0.1", "localhost", "[::1]", CONSOLE_HOSTNAME]);
 
 const NAME_RE = /^[a-z0-9]([a-z0-9-]*[a-z0-9])?(\.[a-z0-9]([a-z0-9-]*[a-z0-9])?)*$/;
 const BRACKETED_RE = /^\[[0-9a-f:.]+\]$/;
@@ -81,7 +91,7 @@ export function hostRefusal(hostHeader, allowedHosts = []) {
   }
   if (LOOPBACK_HOSTS.includes(name)) return null;
   for (const extra of allowedHosts) if (hostnameOf(extra) === name) return null;
-  return `the Host ${name} is not 127.0.0.1, localhost or [::1], nor listed in PI_CONSOLE_ALLOWED_HOSTS; open the console by one of those names (any port)`;
+  return `the Host ${name} is not ${CONSOLE_HOSTNAME}, localhost, 127.0.0.1 or [::1], nor listed in PI_CONSOLE_ALLOWED_HOSTS; open the console by one of those names (any port)`;
 }
 
 /**

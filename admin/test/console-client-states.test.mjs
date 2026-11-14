@@ -1578,6 +1578,24 @@ stateTest(T.signInStops, async () => {
   }
   assert.equal(calls(slow, "/login").length, 3, "three posts: the third failed past 60 s from the first");
   assert.deepEqual(notices(slow), ["gaveup"]);
+  // Issue #882 (review): a stopped code and then a stopped token on one page each say their own sentence, the notice made once.
+  const both = boot(String(loginPage()), { url: "/login" });
+  const stop = async (route, tries = SIGN_IN_TRIES_MAX) => {
+    for (let i = 0; i < tries; i++) {
+      await both.fetch.open(route).fail();
+      both.tick(RETRY_MS);
+    }
+  };
+  both.document.getElementById("signin-code").value = "K7QX-9M2D";
+  both.submit(both.document.getElementById("code-form"));
+  await stop("/login/typed-code");
+  const said = () => text(both.document.querySelector('[data-notice="gaveup"] .banner__s'));
+  assert.deepEqual([notices(both), said()], [["gaveup"], SIGN_IN_GAVE_UP.code]);
+  both.document.getElementById("token").value = "tok-b";
+  both.submit(both.document.getElementById("login-form"));
+  await stop("/login");
+  assert.deepEqual([notices(both), said()], [["gaveup"], SIGN_IN_GAVE_UP.login], "the token's own sentence, not the code's");
+  assert.equal(both.document.querySelectorAll('[data-notice="gaveup"]').length, 1);
   assert.equal(SIGN_IN_TRIES_MAX * RETRY_MS, SIGN_IN_RETRY_FOR_MS, "the two caps agree at the retry pace");
   // The boundary, judged before each post goes out: a retry due 59,999 ms after the first post goes out; one
   // due at 60,000 ms is never sent, and the stop is said at the failure that would have scheduled it.

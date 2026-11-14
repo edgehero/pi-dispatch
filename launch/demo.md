@@ -13,7 +13,7 @@ recipe; it needs a real terminal and pi itself, so it's yours to run (the still 
    `pi -e admin/src/index.ts`; the published extension's entry point is its built `./dist/index.mjs`.)
 2. `↵` on a trigger → the MATCHES / RUNS / TRUST MODEL drill-in.
 3. `↵` on a run → the colored post-mortem.
-4. `i` → a notice with the console's insights URL (`http://localhost:4790/insights?range=30d` by default). Open it in
+4. `i` → a notice with the console's insights URL (`http://pi-dispatch.localhost:4790/insights?range=30d` by default). Open it in
    the browser, with the console started (`pi-dispatch-console serve`), for the budget lever, the plan verdicts, how
    busy each host was, the spend charts and the topology, one page. (In a pure-terminal recording, the notice is the
    beat.)

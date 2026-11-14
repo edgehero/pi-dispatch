@@ -31,6 +31,7 @@
 import { isIP, isIPv4 } from "node:net";
 import { parseRunFilter } from "../run-filter.mjs";
 import { html } from "./html.mjs";
+import { CONSOLE_HOSTNAME } from "./listen.mjs";
 import * as ui from "./kit.mjs";
 // A cycle by design, as the shell's own: `pages.mjs` draws the 403 belt with `forbiddenContent`, and this module reads
 // the page table and the shell's frame. Nothing here touches either while it loads, only when a page is drawn.
@@ -80,7 +81,7 @@ export const ERROR_SENTENCES = Object.freeze({
   "no-page": entry("Page not found", "The console could not find what this address points to.", "No page at this address", "This console has no page at this address. Go to one of its screens instead.", "idle", "search"),
   "bad-query": entry("Address not understood", "The console could not read what this address asks for.", "This page could not use its address", "The page refused its address, so it read nothing", "attention", "attention"),
   "operators-only": entry("Operators only", "This page is not for a viewer's sign-in.", "This page is for operators", "This page is for operators only. Ask an operator for what you need from it.", "idle", "shield"),
-  host: entry("Not this console's name", "The request came by a name this console does not answer to.", "This console did not answer to that name", "This console answers only to the names it was started with (127.0.0.1, localhost and [::1] unless more were added).", "attention", "shield"),
+  host: entry("Not this console's name", "The request came by a name this console does not answer to.", "This console did not answer to that name", "This console answers only to the names it was started with (pi-dispatch.localhost, localhost, 127.0.0.1 and [::1] unless more were added).", "attention", "shield"),
   unavailable: entry("Console unavailable", "The console cannot check who is signed in right now.", "The console's tokens file cannot be used right now", "No page can be shown until it can be read again, and nobody was signed out. An operator should run `pi-dispatch doctor` on the host; then reload this page.", "failed", "config"),
   failed: entry("Something went wrong", "The console could not draw this page.", "The console failed on this request", "Its log has the reason. Reload to try again.", "failed", "failed"),
   method: entry("Not a page", "The browser opened an address that only takes the console's own requests.", "This address is not a page", "It takes requests from the console's own buttons, which send them themselves. Go to one of its screens instead.", "idle", "info"),
@@ -180,7 +181,7 @@ function hostCard({ status, host, port, address }) {
   const tunnelPort = local ?? SOCKET_TUNNEL_PORT;
   const argv = local === null ? ["ssh", "-L", `${SOCKET_TUNNEL_PORT}:<console socket>`, "<this host>"] : ["ssh", "-L", `${local}:${tunnelHost(address)}:${local}`, "<this host>"];
   const asked = shown === null ? html`a Host that is not a plain name` : html`<span class="code">${shown}</span>`;
-  return html`<section id="p-error-421" data-panel><div class="card er-421">${ui.tile(said.status, { icon: said.icon })}<div class="er-421__t"><p class="er-code">${String(status)}</p><h2>${said.heading}</h2><p class="muted">${ui.withCode(said.sentence)}</p><p class="muted">Your browser asked for ${asked}, so the request was refused. From another machine, open an SSH tunnel and use http://localhost:${String(tunnelPort)}/ instead:</p>${ui.cmd(argv)}</div></div></section>`;
+  return html`<section id="p-error-421" data-panel><div class="card er-421">${ui.tile(said.status, { icon: said.icon })}<div class="er-421__t"><p class="er-code">${String(status)}</p><h2>${said.heading}</h2><p class="muted">${ui.withCode(said.sentence)}</p><p class="muted">Your browser asked for ${asked}, so the request was refused. From another machine, open an SSH tunnel and use http://${CONSOLE_HOSTNAME}:${String(tunnelPort)}/ instead:</p>${ui.cmd(argv)}</div></div></section>`;
 }
 
 /**

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
-import { CONSOLE_ENV_KEYS, WORKER_INT_SETTINGS, WORKER_SERVICE_KEYS, consoleChecks, consoleListenOf, consoleServiceChecks, workerIntSettingChecks } from "../src/doctor.mjs";
+import { CONSOLE_ENV_KEYS, WORKER_INT_SETTINGS, WORKER_SERVICE_KEYS, consoleChecks, consoleListenOf, consoleNameChecks, consoleServiceChecks, workerIntSettingChecks } from "../src/doctor.mjs";
 import { loadConfig } from "../src/config.mjs";
 import { runService } from "../src/service.mjs";
 import { collectChecks } from "./helpers/doctor.mjs";
@@ -268,17 +268,19 @@ async function renderedConsoleUnit(platform, cwd) {
 }
 
 // As probeConsole answers for the default address: the literal it asked, and (issue #882) the address a person opens.
-const RUNNING = async () => ({ state: "running", target: "127.0.0.1:4790", url: "http://localhost:4790/" });
-const DOWN = async () => ({ state: "not-running", target: "127.0.0.1:4790", url: "http://localhost:4790/", reason: "nothing listens there" });
+const RUNNING = async () => ({ state: "running", target: "127.0.0.1:4790", url: "http://pi-dispatch.localhost:4790/" });
+/** The system resolver as macOS, systemd-resolved and nss-myhostname answer for a `.localhost` name (issue #882), so no test asks the real one. */
+const RESOLVES = async () => [{ address: "::1", family: 6 }, { address: "127.0.0.1", family: 4 }];
+const DOWN = async () => ({ state: "not-running", target: "127.0.0.1:4790", url: "http://pi-dispatch.localhost:4790/", reason: "nothing listens there" });
 
 test("consoleServiceChecks: a unit for this deployment and the console answering is ok; installed but not answering fails", async () => {
 	for (const [platform, path] of [["linux", "/home/t/.config/systemd/user/pi-dispatch-console.service"], ["darwin", "/home/t/Library/LaunchAgents/com.pi-dispatch.console.plist"]]) {
 		const cwd = "/srv/deploy";
 		const text = await renderedConsoleUnit(platform, cwd);
-		const seams = { platform, cwd, home: "/home/t", fileExists: (p) => p === path, readUnit: (p) => (p === path ? text : assert.fail(`read ${p}`)) };
-		assert.deepEqual(labels(await consoleServiceChecks({}, { ...seams, consoleProbe: RUNNING })), [`ok console: the service ${JSON.stringify(path)} keeps it running, and it answers at http://localhost:4790/`], platform);
+		const seams = { platform, cwd, home: "/home/t", fileExists: (p) => p === path, readUnit: (p) => (p === path ? text : assert.fail(`read ${p}`)), lookupName: RESOLVES };
+		assert.deepEqual(labels(await consoleServiceChecks({}, { ...seams, consoleProbe: RUNNING })), [`ok console: the service ${JSON.stringify(path)} keeps it running, and it answers at http://pi-dispatch.localhost:4790/`], platform);
 		const down = await consoleServiceChecks({}, { ...seams, consoleProbe: DOWN });
-		assert.deepEqual(labels(down), [`fail console: the service ${JSON.stringify(path)} is installed for this deployment, but nothing answers at http://localhost:4790/ (nothing listens there)`], platform);
+		assert.deepEqual(labels(down), [`fail console: the service ${JSON.stringify(path)} is installed for this deployment, but nothing answers at http://pi-dispatch.localhost:4790/ (nothing listens there)`], platform);
 		assert.match(down[0].fix, /pi-dispatch service status --console/);
 		assert.match(down[0].fix, /console-audit\/\.console\.lock can name a pid another process has since taken.*remove the lock/, "the stale-lock case after a crash");
 		assert.match(down[0].fix, platform === "linux" ? /journalctl --user -u pi-dispatch-console/ : /\/srv\/deploy\/logs\/console\.err\.log/);
@@ -289,12 +291,12 @@ test("consoleServiceChecks: a unit for this deployment and the console answering
 });
 
 test("consoleServiceChecks: no unit warns while nothing runs, and is ok (started by hand) while the console answers", async () => {
-	const seams = { platform: "linux", cwd: "/srv/deploy", home: "/home/t", fileExists: () => false };
+	const seams = { platform: "linux", cwd: "/srv/deploy", home: "/home/t", fileExists: () => false, lookupName: RESOLVES };
 	const none = await consoleServiceChecks({}, { ...seams, consoleProbe: DOWN });
-	assert.deepEqual(labels(none), ["warn console: not running at http://localhost:4790/ (nothing listens there), and no service unit keeps it running"]);
+	assert.deepEqual(labels(none), ["warn console: not running at http://pi-dispatch.localhost:4790/ (nothing listens there), and no service unit keeps it running"]);
 	assert.match(none[0].fix, /pi-dispatch service install --console/);
 	assert.match(none[0].fix, /pi-dispatch-console serve/);
-	assert.deepEqual(labels(await consoleServiceChecks({}, { ...seams, consoleProbe: RUNNING })), ["ok console: answers at http://localhost:4790/, started by hand (no service unit for this deployment, so it stops with the terminal that runs it)"]);
+	assert.deepEqual(labels(await consoleServiceChecks({}, { ...seams, consoleProbe: RUNNING })), ["ok console: answers at http://pi-dispatch.localhost:4790/, started by hand (no service unit for this deployment, so it stops with the terminal that runs it)"]);
 	// A unix socket has no address a browser opens, so the line names the socket the probe asked.
 	const socket = async () => ({ state: "running", target: "unix:/run/pd.sock" });
 	assert.deepEqual(labels(await consoleServiceChecks({}, { ...seams, consoleProbe: socket })), ["ok console: answers on unix:/run/pd.sock, started by hand (no service unit for this deployment, so it stops with the terminal that runs it)"]);
@@ -341,7 +343,7 @@ test("collectChecks: the console's service line follows its other lines, and a d
 	assert.equal(probes, 0);
 	withToken(d);
 	const lines = labels((await collectChecks({ ...d.env, PI_PROVIDER: "anthropic" }, seams(DOWN))).filter((c) => c.label.startsWith("console:")));
-	assert.equal(lines.at(-1), "warn console: not running at http://localhost:4790/ (nothing listens there), and no service unit keeps it running");
+	assert.equal(lines.at(-1), "warn console: not running at http://pi-dispatch.localhost:4790/ (nothing listens there), and no service unit keeps it running");
 	assert.equal(probes, 1);
 });
 
@@ -554,4 +556,34 @@ test("remembered devices are warned of only on a console that really listens off
 	const none = deployment();
 	withToken(none);
 	assert.equal(consoleChecks({ ...none.env, PI_CONSOLE_BIND_PUBLIC: "1", PI_CONSOLE_LISTEN: "0.0.0.0:4790" }, { cwd: none.cwd }).find((c) => /remembered device/.test(c.label)), undefined, "nothing to warn of");
+});
+
+test("consoleNameChecks: nothing where pi-dispatch.localhost is this host's loopback, a warning where it is not, and nothing asked otherwise (issue #882)", async () => {
+	const running = { state: "running", target: "127.0.0.1:4790", url: "http://pi-dispatch.localhost:4790/" };
+	assert.deepEqual(await consoleNameChecks(running, { lookupName: RESOLVES }), []);
+	assert.deepEqual(await consoleNameChecks(running, { lookupName: async () => [{ address: "127.0.0.1", family: 4 }] }), [], "IPv4 alone is loopback too");
+	assert.deepEqual(await consoleNameChecks(running, { lookupName: async () => [{ address: "::ffff:127.0.0.1", family: 6 }] }), []);
+	const asked = [];
+	const failed = await consoleNameChecks(running, { lookupName: async (name) => { asked.push(name); throw Object.assign(new Error("no"), { code: "ENOTFOUND" }); } });
+	assert.deepEqual(asked, ["pi-dispatch.localhost"]);
+	assert.deepEqual(labels(failed), ["warn console: pi-dispatch.localhost, the address the console's commands print, does not lead to this host: this host could not resolve it (ENOTFOUND)"]);
+	assert.match(failed[0].fix, /open http:\/\/localhost:4790\/ instead/);
+	assert.match(failed[0].fix, /systemd-resolved or nss-myhostname/);
+	const elsewhere = await consoleNameChecks(running, { lookupName: async () => [{ address: "127.0.0.1", family: 4 }, { address: "203.0.113.9", family: 4 }] });
+	assert.match(labels(elsewhere)[0], /resolves it to an address that is not its own loopback/, "one answer off the host is enough to warn");
+	assert.match(labels(await consoleNameChecks(running, { lookupName: async () => [] }))[0], /resolves it to nothing/);
+	// Not asked: a console that is not running, one printed by another name (an enrolled origin, another loopback number), a socket.
+	const never = async () => assert.fail("asked");
+	for (const answer of [{ ...running, state: "not-running" }, { ...running, url: "http://127.0.0.2:4790/" }, { state: "running", target: "unix:/run/pd.sock" }, null]) {
+		assert.deepEqual(await consoleNameChecks(answer, { lookupName: never }), [], JSON.stringify(answer));
+	}
+});
+
+test("consoleServiceChecks: the name's warning follows the console's own line, only while it answers", async () => {
+	const seams = { platform: "linux", cwd: "/srv/deploy", home: "/home/t", fileExists: () => false, lookupName: async () => { throw Object.assign(new Error("no"), { code: "EAI_AGAIN" }); } };
+	assert.deepEqual(labels(await consoleServiceChecks({}, { ...seams, consoleProbe: RUNNING })), [
+		"ok console: answers at http://pi-dispatch.localhost:4790/, started by hand (no service unit for this deployment, so it stops with the terminal that runs it)",
+		"warn console: pi-dispatch.localhost, the address the console's commands print, does not lead to this host: this host could not resolve it (EAI_AGAIN)",
+	]);
+	assert.equal((await consoleServiceChecks({}, { ...seams, consoleProbe: DOWN })).length, 1);
 });

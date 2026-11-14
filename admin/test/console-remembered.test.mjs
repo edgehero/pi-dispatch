@@ -298,10 +298,17 @@ test("a sign-out the store cannot write still signs out, says so, and refuses th
 test("an agent cannot be remembered, by sign-in or afterwards", async () => {
   const w = world();
   const c = await w.boot();
+  // Issue #882 (review): the box starts ticked, so an agent token arrives asking. It signs in, as an ordinary session, and is told on its first page.
   const res = await c.post("/login", { token: AGENT, remember: true });
-  assert.equal(res.status, 403);
-  assert.ok(w.shared.rows.some((r) => r.action === "login-failed"));
+  assert.equal(res.status, 200, res.text);
+  assert.deepEqual([deviceCookieOf(res), Boolean(sessionCookieOf(res)), res.json().remembered], [null, true, undefined]);
+  assert.ok(!w.shared.rows.some((r) => r.action === "login-failed"), "no refusal: it signed in");
+  assert.ok(w.shared.rows.some((r) => r.action === "login" && r.actor.role === "agent" && r.outcome === "ok"));
   assert.equal(c.trust.list().devices.length, 0);
+  await c.send({ path: "/runs", headers: { cookie: sessionCookieOf(res), accept: "text/html" } });
+  assert.deepEqual([w.shared.pageCtx.flash?.status, w.shared.pageCtx.flash?.summary], ["attention", "This browser was not remembered"]);
+  assert.match(w.shared.pageCtx.flash.body, /An agent token is never remembered on a browser, so you are signed in for this session only/);
+  assert.equal(w.shared.pageCtx.offer, false, "and never offered it either");
   const session = sessionCookieOf(await c.post("/login", { token: AGENT }));
   const up = await c.post("/api/device/remember", {}, { cookie: session });
   assert.equal(up.status, 403);
@@ -1705,4 +1712,132 @@ test("the sign-in page's Remember box starts ticked", async () => {
   const w = world();
   const c = await w.boot();
   assert.match((await c.send({ path: "/login" })).text, /<input type="checkbox" name="remember" checked>/);
+});
+
+// ---- issue #882, review: the kept session's remember step, the cap, and the routes ----
+
+/** A live ordinary session for `token`, and a link for the same person, posted with it: the kept path. */
+async function keptLink(c, w, token = OPERATOR, name = "rob") {
+  const held = sessionCookieOf(await c.post("/login", { token }));
+  w.shared.codes = new Map([["r".repeat(43), { name }]]);
+  return { held, res: await c.post("/login/code", { code: "r".repeat(43) }, { cookie: held }) };
+}
+
+test("a kept session is not remembered over plain HTTP across a network, and keeps its own cookie", async () => {
+  const w = world({ config: { listen: { kind: "tcp", host: "0.0.0.0", port: 0 }, allowedHosts: ["127.0.0.1"] } });
+  const c = await w.boot();
+  const { held, res } = await keptLink(c, w);
+  assert.deepEqual([res.status, res.json().kept, res.json().remembered, res.headers["set-cookie"]], [200, true, undefined, undefined]);
+  assert.equal((await whoami(c, held)).status, 200, "the same pdc_session carries on");
+  assert.equal(c.trust.list().devices.length, 0);
+});
+
+test("an agent's kept session is not remembered", async () => {
+  const w = world();
+  const c = await w.boot();
+  const { held, res } = await keptLink(c, w, AGENT, "bot");
+  assert.deepEqual([res.status, res.json().kept, res.json().remembered, res.headers["set-cookie"]], [200, true, undefined, undefined]);
+  assert.equal((await whoami(c, held)).status, 200);
+  assert.equal(c.trust.list().devices.length, 0);
+});
+
+test("a kept session under an enrolled HTTPS origin is remembered with a Secure device cookie", async () => {
+  const w = world({ config: { listen: { kind: "tcp", host: "0.0.0.0", port: 0 }, allowedHosts: ["127.0.0.1", "console.example"] }, consoleOrigin: "https://console.example" });
+  const c = await w.boot();
+  const held = sessionCookieOf(await c.post("/login", { token: OPERATOR }, { host: "console.example" }));
+  w.shared.codes = new Map([["r".repeat(43), { name: "rob" }]]);
+  const res = await c.post("/login/code", { code: "r".repeat(43) }, { host: "console.example", cookie: held });
+  assert.deepEqual([res.status, res.json().kept, res.json().remembered], [200, true, true]);
+  const device = res.headers["set-cookie"].find((x) => x.startsWith("pdc_device_"));
+  assert.match(device, /; Secure/);
+  assert.ok(res.headers["set-cookie"].some((x) => x.startsWith("pdc_session=;")), "and the old pdc_session cleared");
+});
+
+test("a kept session whose store refuses is told on its next page, and keeps its pdc_session", async () => {
+  const w = world();
+  await w.boot();
+  w.shared.fsOverride = unwritable();
+  const c = await w.boot();
+  const { held, res } = await keptLink(c, w);
+  assert.deepEqual([res.status, res.json().kept, res.json().remembered, res.headers["set-cookie"]], [200, true, false, undefined]);
+  await c.send({ path: "/runs", headers: { cookie: held, accept: "text/html" } });
+  assert.deepEqual([w.shared.pageCtx.flash?.status, w.shared.pageCtx.flash?.summary], ["attention", "This browser was not remembered"]);
+  assert.match(w.shared.pageCtx.flash.body, /signed in for this session only/);
+});
+
+test("at the cap, a host-made sign-in forgets the least recently used browser of that person, on the record, and is remembered", async () => {
+  const w = world();
+  const c = await w.boot();
+  const cookies = [];
+  for (let i = 0; i < 32; i++) cookies.push((await remember(c)).cookie);
+  // Last use is each record's mtime: set by hand, so the one least recently used is known and the clock is the test's.
+  const hashes = cookies.map((cookie) => c.trust.hashOf(cookie.split("=")[1]));
+  const setUse = (hash, ms) => fs.utimesSync(join(c.trust.dir, `${hash}.json`), ms / 1000, ms / 1000);
+  hashes.forEach((hash, i) => setUse(hash, T0 - (i + 1) * HOUR));
+  setUse(hashes[7], T0 - 40 * 24 * HOUR);
+  w.shared.codes = new Map([["r".repeat(43), { name: "rob" }]]);
+  const res = await c.post("/login/code", { code: "r".repeat(43) });
+  assert.deepEqual([res.status, res.json().remembered], [200, true]);
+  assert.ok(deviceCookieOf(res));
+  const after = c.trust.list().devices;
+  assert.equal(after.filter((d) => !d.ended).length, 32, "still 32: one in, one out");
+  const ended = after.filter((d) => d.ended);
+  assert.deepEqual(ended.map((d) => [d.hash, d.ended.reason]), [[hashes[7], "removed"]], "the least recently used one, as removed");
+  const row = w.shared.rows.find((r) => r.action === "device-ended");
+  assert.deepEqual([row.actor.name, row.target, row.outcome], ["rob", ended[0].id, "ok"]);
+  assert.match(row.reason, /least recently used of the 32 browsers one sign-in may remember/);
+  const gone = await whoami(c, cookies[7]);
+  assert.deepEqual([gone.status, gone.json().ended], [401, "device"], "that browser is signed out at its next request, and told why");
+  assert.equal((await whoami(c, cookies[0])).status, 200, "the others stay");
+});
+
+test("at the cap, a token's ticked box still says the browser was not remembered, with what to do", async () => {
+  const w = world();
+  const c = await w.boot();
+  for (let i = 0; i < 32; i++) await remember(c);
+  const over = await c.post("/login", { token: OPERATOR, remember: true });
+  assert.equal(over.json().remembered, false);
+  await c.send({ path: "/runs", headers: { cookie: sessionCookieOf(over), accept: "text/html" } });
+  assert.match(w.shared.pageCtx.flash.body, /already has 32 remembered browsers.*Remove one on Remembered browsers/);
+  assert.equal(c.trust.list().devices.filter((d) => d.ended).length, 0, "nothing forgotten for a box: the person can choose which to remove");
+});
+
+test("/login/code takes a typed short code too, as /login/typed-code takes a link's code: one handler, one rule", async () => {
+  const w = world();
+  const c = await w.boot();
+  w.shared.codes = new Map([["K7QX-9M2D", { name: "ann" }], ["q".repeat(43), { name: "rob" }]]);
+  const short = await c.post("/login/code", { code: "K7QX-9M2D" });
+  assert.deepEqual([short.status, short.json().remembered], [200, true]);
+  assert.equal(w.shared.rows.find((r) => r.action === "login-code").kind, "short-code");
+  const link = await c.post("/login/typed-code", { code: "q".repeat(43) });
+  assert.equal(link.status, 200);
+  assert.equal(w.shared.rows.filter((r) => r.action === "login-code").at(-1).kind, "link");
+  for (const odd of ["K7QX-9M2", "q".repeat(42), "<script>"]) {
+    const res = await c.post("/login/code", { code: odd });
+    assert.equal(res.status, 401, odd);
+    assert.equal(w.shared.rows.at(-1).kind, undefined, `${odd}: a code of neither shape names no kind`);
+  }
+});
+
+test("a viewer invitation is no host-made sign-in: never remembered, never offered, nothing forgotten for it", async () => {
+  const w = world();
+  const c = await w.boot();
+  w.shared.codes = new Map([["i".repeat(43), { name: "ann", binding: { createdAt: "2026-10-01T00:00:00.000Z", generation: 0, role: "viewer", sha256: sha(VIEWER) } }]]);
+  const res = await c.post("/login/code", { code: "i".repeat(43) });
+  assert.deepEqual([res.status, deviceCookieOf(res), res.json().remembered], [200, null, undefined]);
+  assert.ok(!w.shared.rows.some((r) => r.action === "device-remembered"));
+});
+
+test("a browser at pi-dispatch.localhost is remembered as at localhost, under its own name's cookie (issue #882)", async () => {
+  const w = world();
+  const c = await w.boot();
+  const host = `pi-dispatch.localhost:${c.server.address().port}`;
+  w.shared.codes = new Map([["r".repeat(43), { name: "rob" }]]);
+  const res = await c.post("/login/code", { code: "r".repeat(43) }, { host, origin: `http://${host}` });
+  assert.deepEqual([res.status, res.json().remembered], [200, true]);
+  const cookie = deviceCookieOf(res);
+  assert.ok(cookie);
+  assert.doesNotMatch(res.headers["set-cookie"].join("\n"), /Domain=/i, "host-only: the browser keeps it for pi-dispatch.localhost alone");
+  assert.equal((await c.send({ path: "/api/whoami", headers: { host, cookie } })).status, 200);
+  assert.match((await c.send({ path: "/login", headers: { host } })).text, /name="remember" checked/, "the box is drawn there too");
 });

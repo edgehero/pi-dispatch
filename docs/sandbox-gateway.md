@@ -17,7 +17,7 @@ directory, owned by the console account and writable only by that account (mode 
 ```json
 {
   "version": 1,
-  "consoleOrigin": "http://localhost:4790",
+  "consoleOrigin": "http://pi-dispatch.localhost:4790",
   "hosts": {
     "mini1": { "origin": "https://sandbox.example.com" }
   }
@@ -26,7 +26,9 @@ directory, owned by the console account and writable only by that account (mode 
 
 `PI_SANDBOX_GATEWAYS_FILE` selects another protected enrollment file. These settings are not the downloadable native
 opener host mapping. Browser controls and model tools cannot edit them. The console origin is the exact address
-the person's browser uses, including a tunnel's port. If an existing TLS reverse proxy fronts the console, enroll
+the person's browser uses, including a tunnel's port: the console then takes a sign-in from that origin alone, so its
+commands (`serve`, `link`, `open`, `pi-dispatch console`, `/dispatch console`) print that origin, links and codes
+included. `http://pi-dispatch.localhost:4790` is the address they print without enrollment. If an existing TLS reverse proxy fronts the console, enroll
 its exact HTTPS origin and allow its hostname through `PI_CONSOLE_ALLOWED_HOSTS`. Writes then require that exact
 Origin and Host, and sign-in sets a Secure console session cookie; proxy forwarding headers confer no trust.
 Without enrollment, the existing loopback HTTP rule and plain-cookie browser compatibility apply.
@@ -37,7 +39,7 @@ On `mini1`, install `@edgehero/pi-dispatch-sandbox-gateway`. Write a protected a
 {
   "version": 1,
   "origin": "https://sandbox.example.com",
-  "consoleOrigin": "http://localhost:4790",
+  "consoleOrigin": "http://pi-dispatch.localhost:4790",
   "host": "mini1",
   "deployment": "/opt/pi-dispatch",
   "sockets": { "local": "/var/run/docker.sock" },
@@ -60,8 +62,8 @@ The program reads only the deployment's host identity, sandbox idle limit, log d
 It does not load provider/forge credentials or the console token file. The optional `deploy/sandbox-gateway.service`
 is a manual starting point for systemd. Use the existing runtime account; the gateway needs no new root service.
 For remote access, put TLS in front of its loopback listener and preserve the exact configured Host and WebSocket
-upgrade. Its own origin checks remain mandatory. For local development, `http://localhost:4790` for the console and
-`http://127.0.0.1:8788` for the gateway provide distinct hostnames.
+upgrade. Its own origin checks remain mandatory. For local development, `http://pi-dispatch.localhost:4790` for the
+console and `http://127.0.0.1:8788` for the gateway provide distinct hostnames.
 
 The gateway writes its audit rows to `<PI_LOGS_DIR>/console-audit/`, the audit log a console on the same host writes
 and shows, and its journal of the attachments open right now to `<PI_LOGS_DIR>/sandbox-gateway-active/`. Unset or

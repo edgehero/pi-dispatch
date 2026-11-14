@@ -57,9 +57,24 @@ can read, or one another account owns, and says which. `token add` creates it th
 pi-dispatch-console serve
 ```
 
-`serve` runs in the foreground and listens on `127.0.0.1:4790`. Open `http://localhost:4790/` and sign in. Every
-command that prints the console's address names it `localhost`, which every browser takes to this machine; the listen
-address itself stays a number (`PI_CONSOLE_LISTEN`, below).
+`serve` runs in the foreground and listens on `127.0.0.1:4790`. Open `http://pi-dispatch.localhost:4790/` and sign
+in. Every command that prints the console's address names it `pi-dispatch.localhost`; the listen address itself stays
+a number (`PI_CONSOLE_LISTEN`, below), and `http://localhost:4790/` and `http://127.0.0.1:4790/` still work.
+
+**Why `pi-dispatch.localhost`.** A name ending in `.localhost` always means this machine (RFC 6761): Chrome and Firefox
+answer it themselves, macOS does for every program, and on Linux systemd-resolved and nss-myhostname (the
+`myhostname` entry in `/etc/nsswitch.conf`) do. A browser keeps its cookies by the
+name in the address bar and ignores the port, so at `localhost` every other web server on this machine that your
+browser visits (a dev server, a container's published port) would be sent the console's cookies, the remembered
+browser's 400-day one included. `pi-dispatch.localhost` is a name no other server uses, so its cookies go to the
+console alone. On a Linux host without systemd-resolved or nss-myhostname, a browser other than Chrome or Firefox
+may not find the name: use `http://localhost:4790/` there, and doctor warns when this machine does not resolve the
+name to itself. Safari has not been checked for treating the name as a secure context; where it does not, the Copy
+buttons beside commands are hidden, and you select a command to copy it. Everything else works there.
+
+**With gateway enrollment**, the console's address is the `consoleOrigin` in `sandbox-gateways.json`
+([sandbox-gateway.md](sandbox-gateway.md)): the console takes a sign-in only from that exact origin, so `serve`, `link`,
+`open`, `pi-dispatch console` and `/dispatch console` print that origin instead.
 Only one `serve` runs per deployment: a second one refuses, naming the first one's lock, because two of them would
 fork the audit log's chain.
 
@@ -67,8 +82,8 @@ As it starts, it prints where it listens, the tunnel for another machine, and ho
 token, only the commands that make one or a one-time link and code:
 
 ```text
-pi-dispatch console on http://localhost:4790/
-from another machine: ssh -L 4790:127.0.0.1:4790 <this host>, then open http://localhost:4790/
+pi-dispatch console on http://pi-dispatch.localhost:4790/
+from another machine: ssh -L 4790:127.0.0.1:4790 <this host>, then open http://pi-dispatch.localhost:4790/
 sign in: pi-dispatch-console link --name <you> prints a one-time link and a code to type; or paste a token (pi-dispatch-console token add --name <you> --role operator makes one)
 ```
 
@@ -79,8 +94,8 @@ To listen somewhere else, set `PI_CONSOLE_LISTEN`:
 
 | Value | What it does |
 |---|---|
-| `127.0.0.1:4790` | The default. Loopback only, printed as `http://localhost:4790/`. |
-| `[::1]:4790` | IPv6 loopback, printed as `localhost` too. Another loopback address (`127.0.0.2`) is printed as itself, since `localhost` never reaches it. |
+| `127.0.0.1:4790` | The default. Loopback only, printed as `http://pi-dispatch.localhost:4790/`. |
+| `[::1]:4790` | IPv6 loopback, printed as `pi-dispatch.localhost` too. Another loopback address (`127.0.0.2`) is printed as itself, since no `localhost` name reaches it. |
 | `unix:/home/pi/.pi-dispatch/console/console.sock` | A unix socket at mode 0600. The folder must exist, belong to you and be closed to everyone else (`chmod 700`). The path must fit the platform's limit: at most 103 bytes on macOS, 107 on Linux. |
 | any other IP literal | Refused, unless `PI_CONSOLE_BIND_PUBLIC=1`. Doctor then warns. |
 
@@ -145,8 +160,10 @@ To a console on a unix socket:
 ssh -L 4790:/home/pi/.pi-dispatch/console/console.sock host
 ```
 
-Then open `http://localhost:4790/` on your own machine. The local port can be anything: the console checks the
-hostname your browser sends (`127.0.0.1`, `localhost` or `[::1]`), not the port, so `ssh -L 8080:...` works too.
+Then open `http://pi-dispatch.localhost:4790/` on your own machine (or `http://localhost:4790/`). The local port can
+be anything: the console checks the hostname your browser sends (`pi-dispatch.localhost`, `localhost`, `127.0.0.1` or
+`[::1]`), not the port, so `ssh -L 8080:...` works too. No other `.localhost` name is accepted, so a page another tool
+serves under one of its own is not the console's.
 Any other hostname is refused with 421, which is what defeats DNS rebinding. Three files answer on any name: the
 console's script, its stylesheet and its empty favicon, which hold nothing a session or a rebound name could use, and
 which the 421 page itself loads to draw. If you reach the console through a name of your own, list it in
@@ -161,8 +178,8 @@ To sign in through the tunnel without pasting the token, make the link for your 
 pi-dispatch-console link --name rob --port 4790
 ```
 
-It prints `http://localhost:4790/login/code#<code>`, ready to open on your own machine, and a sign-in code to type at
-`http://localhost:4790/login` there instead ([below](#sign-in-without-pasting-the-token)). The console cannot know that
+It prints `http://pi-dispatch.localhost:4790/login/code#<code>`, ready to open on your own machine, and a sign-in code
+to type at `http://pi-dispatch.localhost:4790/login` there instead ([below](#sign-in-without-pasting-the-token)). The console cannot know that
 port (a unix socket has none, and a tunnel can forward any free one), so you name it: `--port` takes a number from 1
 to 65535, a bad one is refused before any link is made, and it is refused on every command but `link` and `open`. Without
 `--port`, `link` on a unix socket prints `<the local port of your ssh -L tunnel>` where the port goes, and `open` uses 4790.
@@ -182,9 +199,9 @@ pi-dispatch-console link --name rob
 It prints two ways in, each good for one sign-in:
 
 ```text
-http://localhost:4790/login/code#<code>
+http://pi-dispatch.localhost:4790/login/code#<code>
 open it within 60 seconds; it works once
-or type this sign-in code at http://localhost:4790/login within 5 minutes; it works once too: K7QX-9M2D
+or type this sign-in code at http://pi-dispatch.localhost:4790/login within 5 minutes; it works once too: K7QX-9M2D
 ```
 
 Open the link within 60 seconds, or type the code on the sign-in page within 5 minutes: on this machine, on another
@@ -197,14 +214,16 @@ the code on a phone.
 The **code** is 8 characters in two groups of four. Type it as you like: capitals or not, with the dash or without,
 and an O for a zero or an I or L for a one all work, since the code uses no letter you could mistake for another
 (Crockford's base32: no I, L, O or U). Every sign-in attempt counts against the console's sign-in limit (5 a minute,
-after a burst of 10), so in a code's 5 minutes at most 35 guesses can be made against about a million million codes.
-Like the link, a code is a file in `console-login-codes/` named by its hash, and is gone once used.
+after a burst of 10, kept by the running console), so in a code's 5 minutes at most 35 guesses can be made per console
+process against about a million million codes; a restart starts the count again, and restarting the console is
+something only the deployment's own account can do. Like the link, a code is a file in `console-login-codes/`, gone
+once used, but named by a slow hash (scrypt, under a random salt kept in the same folder), so a listing of the folder
+does not give the code away.
 
 The **link**'s code is not your token: it signs in `rob` once and is then gone, and it sits after the `#`, which your
 browser never sends to a server, so it does not land in a request log or a `Referer`. A small script on the page
 posts it. The codes are files in `console-login-codes/` beside the tokens file, a folder only the deployment's account
-can open: whoever could list it could work out a short code from its file name, which is why the console refuses the
-folder the moment it is open to other accounts. Remove it then (what it holds cannot be trusted) and make a new link,
+can open, which is why the console refuses the folder the moment it is open to other accounts. Remove it then (what it holds cannot be trusted) and make a new link,
 which creates it again.
 
 A link or a code **remembers the browser** it signs in ([Remembered browsers](#remembered-browsers)): someone at the host
@@ -233,7 +252,7 @@ A field is cleared as soon as you press its Sign in. Under them, "No code yet?" 
 the pi command for a link (`/dispatch console --link`), then, behind "In another browser, or on another device",
 `./node_modules/.bin/pi-dispatch-console link`, which prints a link to paste and a code to type rather than opening the
 default browser (which would use the link at once), and the host command for a token behind "Make a token instead", each in a box to copy, and a line says where
-the console answers: at localhost on this host only, on another loopback address only, on its unix socket only, or
+the console answers: at `pi-dispatch.localhost` on this host only, on another loopback address only, on its unix socket only, or
 nothing about it on a public bind. Signing in needs JavaScript. A page without it says so first, and shows only what
 still holds: both forms, their lead-in and the link page's "Signing in" state are drawn hidden, and the page's script
 shows them as it loads.
@@ -328,10 +347,13 @@ the reason on the sign-in page, also after a restart. Every other rule on this p
   **Not now**. Ignoring it leaves an ordinary sign-in, and once 10 minutes have passed it is not offered again:
   sign out and sign in with the box ticked. (For a script: `remember: true` with the token on `POST /login`, or
   `POST /api/device/remember` within 10 minutes of signing in.)
-- **`localhost` and `127.0.0.1` are two browsers' worth.** A browser keeps its cookies by the name in the address bar,
-  so one remembered at `http://127.0.0.1:4790/` is not remembered at `http://localhost:4790/`, the address every
-  command prints now. Sign in once at `localhost` (`./pi-dispatch console` opens it signed in), and remove the old
-  one on Remembered browsers when you like.
+- **Each name is its own browser.** A browser keeps its cookies by the name in the address bar, so one remembered at
+  `http://127.0.0.1:4790/` or `http://localhost:4790/` is not remembered at `http://pi-dispatch.localhost:4790/`, the
+  address every command prints now. Sign in once there (`./pi-dispatch console` opens it signed in), and remove the
+  old one on Remembered browsers when you like.
+- **Thirty-two browsers.** One token may have 32 remembered browsers. A link or a code that signs in a 33rd forgets the
+  one used least recently, which is signed out at its next request and told it is no longer remembered, with a row in
+  the audit log; a token's box at the limit is not remembered, and the next page says to remove one.
 - **Seeing and undoing it.** The top bar says **remembered** beside your role, and puts a ring round your avatar,
   which is what a phone shows. **Remembered browsers**
   (`/config/devices`, linked from Configuration) shows this browser, every remembered browser (a viewer sees their own)
@@ -341,15 +363,17 @@ the reason on the sign-in page, also after a restart. Every other rule on this p
   browser whose record the console cannot read at that moment is named in its answer instead of forgotten: run
   `pi-dispatch-console sessions end-all` on the host, which ends it for good. An `agent`
   token can do none of this, and is refused the page.
-- **Who and where.** Operator and viewer tokens only, never an `agent` token or a viewer invitation's sign-in. Only on
-  a loopback console reached as `localhost` or `127.0.0.1`, a unix socket reached through its `ssh -L` tunnel as
-  `localhost`, or a console behind an enrolled HTTPS origin ([gateway enrollment](sandbox-gateway.md)): plain HTTP
+- **Who and where.** Operator and viewer tokens only, never an `agent` token or a viewer invitation's sign-in (an
+  `agent` token signs in with the box ticked all the same, for that session only, and its first page says so). Only on
+  a loopback console reached as `pi-dispatch.localhost`, `localhost` or `127.0.0.1`, a unix socket reached through its
+  `ssh -L` tunnel as one of those names, or a console behind an enrolled HTTPS origin ([gateway enrollment](sandbox-gateway.md)): plain HTTP
   across a network would carry the cookie in the clear, so it is refused there. Not on a Windows host.
 - **The cookie.** `pdc_device_` and 10 hex characters named after this deployment's tokens file (cookies ignore ports,
   so two deployments on one machine need two names), `HttpOnly`, `SameSite=Strict`, `Path=/`, 400 days, `Secure`
   under an enrolled HTTPS origin. It replaces `pdc_session`, so a remembered browser holds one credential, and the
-  console renews it at most once a day. Like every cookie it is sent to every port on the console's host name, so
-  use that name for nothing else.
+  console renews it at most once a day. Like every cookie it is sent to every port on the console's host name, which
+  is why the console's address is `pi-dispatch.localhost`, a name no other local server uses: open it by that name,
+  and use the name for nothing else.
 - **Where it is kept.** The console keeps a hash of it in `console-devices/` beside the tokens file, one file per
   browser, owner-only ([Backup](backup.md)). A browser unused for 400 days is ended at its next use, since no browser
   keeps the cookie that long.
@@ -698,6 +722,9 @@ worker's settings). It then checks:
 - whether a console service is installed for this folder (`pi-dispatch service install --console`) and whether the
   console answers on its address: a failure when the service is installed and nothing answers, a warning when there
   is no service and nothing runs.
+- while it answers at `pi-dispatch.localhost`, whether this machine resolves that name to its own loopback (one
+  lookup through the system's resolver, a second at most): a warning when it does not, with `http://localhost:<port>/`
+  as the address to use meanwhile.
 
 ## The screens
 
@@ -2238,7 +2265,7 @@ neither keeps a session alive nor ends one. The 421, 503 and 500 have no navigat
 same name it refused, and the other two cannot vouch for the session behind the request.
 
 The 421 shows no session data at all. It names the hostname your browser asked for (cut to 64 characters), says the
-console "answers only to the names it was started with (127.0.0.1, localhost and [::1] unless more were added)",
+console "answers only to the names it was started with (pi-dispatch.localhost, localhost, 127.0.0.1 and [::1] unless more were added)",
 never which names were added, and gives the tunnel to open instead, for the address and port your request reached
 (`127.0.0.1` below; `[::1]` for a console listening there, or the address it listens on):
 
@@ -2246,8 +2273,9 @@ never which names were added, and gives the tunnel to open instead, for the addr
 ssh -L 4790:127.0.0.1:4790 '<this host>'
 ```
 
-Copy needs a page the browser treats as secure: https, or a loopback name such as localhost; other names over plain
-http may not offer it, and there you select the command instead.
+Copy needs a page the browser treats as secure: https, or a loopback name such as localhost or `pi-dispatch.localhost`
+(Chrome and Firefox; Safari unchecked); other names over plain http may not offer it, and there you select the command
+instead.
 
 On a unix socket, which has no port, it gives `ssh -L '4790:<console socket>' '<this host>'`: put in your socket's
 path, which the page does not show.

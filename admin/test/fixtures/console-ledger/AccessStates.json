@@ -1,7 +1,7 @@
 {
   "card": "AccessStates",
   "pr": 2,
-  "words": "0acd449f69ec462bba57d5d0a906428ba7781e425e20836447872d7fe323c9b4",
+  "words": "2b49f1ec1031e9a2725d137fc02bd4a71423e2fbf3fc76f870371a47f7cba867",
   "elements": [
     {"el":"p-link-wait","kind":"panel","status":"new","as":"p-link","source":"admin/src/console/signin.mjs#linkContent","golden":["login-code.anonymous","panels/login-code-refused-rate.anonymous"],"shows":"data-link-state=\"wait\" hidden data-reveal>","reason":"the state the page opens in, drawn for the script to reveal: without a script it never signs in, and the page says only that it needs one"},
     {"el":"p-link-used","kind":"panel","status":"new","as":"p-link","source":"admin/src/console/signin.mjs#linkContent","golden":["panels/login-code-used.anonymous","panels/login-code-refused-tokens.anonymous","panels/login-code-refused-audit.anonymous","panels/login-code-refused-other.anonymous"],"shows":"data-link-state=\"used\" hidden data-reveal>","reason":"a golden draws the state the script switches to as the state the page opens in; after a 503, 500 or another status the used state carries the notice that says why; a 429 is the limiter's, answered before the code is read, so the page stays in the wait state with the rate notice"},

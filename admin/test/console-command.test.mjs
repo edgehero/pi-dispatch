@@ -4,6 +4,10 @@ import { test } from "node:test";
 import { CONSOLE_USAGE, consoleCommand, consoleDeploymentCheck, consolePagePath, parseConsoleArgs, probeLine } from "../src/console-command.mjs";
 import { keptTokenLinkRefusal, loginCodesDir } from "../src/console/login-codes.mjs";
 import { parseTokensFile } from "@edgehero/pi-dispatch/console-tokens";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { consolePageLines, enrolledConsoleOrigin } from "../src/console/link.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 
 // Issue #708: `/dispatch console`, driven through its seams. Every word goes to `notify`; the probe, the tokens file,
 // the audit log, the mint and the opener are fakes that record what was asked of them, in order.
@@ -89,12 +93,12 @@ test("the address and the state: running, not running (with how to start it), un
   const r = await consoleCommand(["runs"], running.deps);
   assert.equal(r.state, "running");
   assert.equal(running.notes.length, 1);
-  assert.deepEqual(running.notes[0][0].split("\n").slice(0, 2), ["http://localhost:4790/runs", "the console: running"]);
+  assert.deepEqual(running.notes[0][0].split("\n").slice(0, 2), ["http://pi-dispatch.localhost:4790/runs", "the console: running"]);
   assert.equal(running.notes[0][1], "info");
 
   const stopped = harness({ state: "not-running" });
   await consoleCommand(["gh-1"], stopped.deps);
-  assert.match(text(stopped), /^http:\/\/localhost:4790\/run\?id=gh-1\nthe console: not running: start it with pi-dispatch-console serve, or keep it running with pi-dispatch service install --console/);
+  assert.match(text(stopped), /^http:\/\/pi-dispatch\.localhost:4790\/run\?id=gh-1\nthe console: not running: start it with pi-dispatch-console serve, or keep it running with pi-dispatch service install --console/);
   assert.equal(stopped.notes[0][1], "warning");
   assert.deepEqual(stopped.opened, [], "a console that is not running is not opened");
 
@@ -105,7 +109,7 @@ test("the address and the state: running, not running (with how to start it), un
 
   const sock = harness({ env: { PI_CONSOLE_LISTEN: "unix:/run/pd/c.sock" } });
   await consoleCommand(["fleet"], sock.deps);
-  assert.match(text(sock), /ssh -L 4790:\/run\/pd\/c\.sock <this host>, then open http:\/\/localhost:4790\/fleet/);
+  assert.match(text(sock), /ssh -L 4790:\/run\/pd\/c\.sock <this host>, then open http:\/\/pi-dispatch\.localhost:4790\/fleet/);
   assert.deepEqual(sock.opened, [], "a socket is reached through a tunnel, never opened");
   assert.equal(sock.probes[0].PI_CONSOLE_LISTEN, "unix:/run/pd/c.sock", "the probe reads the deployment's env");
 });
@@ -116,11 +120,11 @@ test("--link with one operator token: audit first, then the mint, then the link 
   assert.equal(r.minted, true);
   assert.deepEqual(h.order, ["probe", "guarded", "read", "audit:ok", "mint", "openLink"], "a link is opened through the private page, never handed to the opener");
   assert.deepEqual(h.rows, [{ actor: { name: "rob", role: "panel", session: null }, action: "login-code", kind: "link-and-short-code", target: "alice", outcome: "ok", ticket: "0123456789ab" }]);
-  const link = `http://localhost:4790/login/code#${CODE}&next=/runs`;
+  const link = `http://pi-dispatch.localhost:4790/login/code#${CODE}&next=/runs`;
   assert.ok(text(h).includes(`sign-in link for "alice" (it works once, within 60 seconds): ${link}`), text(h));
   // Issue #882: an asked-for link comes with a code to type, for another browser or a phone, on the sign-in page that lands on the same page.
   assert.equal(h.minted[0].short, true);
-  assert.ok(text(h).includes("or type the sign-in code K7QX-9M2D at http://localhost:4790/login?next=/runs (it works once, within 5 minutes)"), text(h));
+  assert.ok(text(h).includes("or type the sign-in code K7QX-9M2D at http://pi-dispatch.localhost:4790/login?next=/runs (it works once, within 5 minutes)"), text(h));
   assert.ok(!JSON.stringify(h.rows).includes("K7QX"), "the audit row never holds the short code either");
   assert.deepEqual(h.opened, [link], "the local browser gets the link itself");
   assert.match(text(h), /handed to your browser$/m, "darwin: no snap or Flatpak note");
@@ -215,7 +219,7 @@ test("--link refuses for a stopped console or an address it cannot name; through
   assert.equal((await consoleCommand(["--link"], ephemeral.deps)).refused, "link");
   const sock = harness({ env: { PI_CONSOLE_LISTEN: "unix:/run/pd/c.sock" } });
   await consoleCommand(["audit", "--link"], sock.deps);
-  assert.ok(text(sock).includes(`http://localhost:4790/login/code#${CODE}&next=/audit`));
+  assert.ok(text(sock).includes(`http://pi-dispatch.localhost:4790/login/code#${CODE}&next=/audit`));
   assert.deepEqual(sock.opened, []);
   const unknown = harness({ state: "unknown" });
   assert.equal((await consoleCommand(["--link"], unknown.deps)).refused, "link", "only a console found running gets a link");
@@ -240,20 +244,20 @@ test("--link mints only into a drop the write guard holds, and only in pi's term
   }
   const rpc = harness({ mode: "rpc" });
   await consoleCommand(["runs"], rpc.deps);
-  assert.match(text(rpc), /^http:\/\/localhost:4790\/runs\nthe console: running/, "the address and the state are fine in rpc mode");
+  assert.match(text(rpc), /^http:\/\/pi-dispatch\.localhost:4790\/runs\nthe console: running/, "the address and the state are fine in rpc mode");
 });
 
 test("the browser: opened on a local session for a TCP listener, never with --no-open or off a local session", async () => {
   const local = harness();
   assert.equal((await consoleCommand(["config", "--no-link"], local.deps)).opened, true);
-  assert.deepEqual(local.opened, ["http://localhost:4790/config"]);
+  assert.deepEqual(local.opened, ["http://pi-dispatch.localhost:4790/config"]);
   assert.match(text(local), /handed to your browser$/m);
 
   const noOpen = harness();
   const r = await consoleCommand(["config", "--no-open", "--no-link"], noOpen.deps);
   assert.equal(r.opened, false);
   assert.deepEqual(noOpen.opened, []);
-  assert.ok(text(noOpen).includes("http://localhost:4790/config"), "the URL is printed all the same");
+  assert.ok(text(noOpen).includes("http://pi-dispatch.localhost:4790/config"), "the URL is printed all the same");
 
   const remote = harness({ local: false });
   await consoleCommand(["config", "--no-link"], remote.deps);
@@ -274,7 +278,7 @@ test("the default local-session check reads the session's env: SSH prints only",
   assert.deepEqual(h.opened, []);
   h.deps.sessionEnv = {};
   await consoleCommand(["--no-link"], h.deps);
-  assert.deepEqual(h.opened, ["http://localhost:4790/"], "darwin with no SSH variable is local");
+  assert.deepEqual(h.opened, ["http://pi-dispatch.localhost:4790/"], "darwin with no SSH variable is local");
 });
 
 test("the probe is the worker's one rule: through its request seam only loopback or the socket is ever contacted", async () => {
@@ -328,7 +332,7 @@ test("setup link uses the private guarded opener and validated /setup destinatio
   assert.equal(result.minted, true);
   assert.equal(consolePagePath("setup"), "setup");
   assert.deepEqual(h.order, ["probe", "guarded", "read", "audit:ok", "mint", "openLink"]);
-  assert.equal(h.opened[0], `http://localhost:4790/login/code#${CODE}&next=/setup`);
+  assert.equal(h.opened[0], `http://pi-dispatch.localhost:4790/login/code#${CODE}&next=/setup`);
   assert.ok(!JSON.stringify(h.rows).includes(CODE));
   const unsafe = harness({ guarded: false });
   assert.equal((await consoleCommand(["setup", "--link"], unsafe.deps)).minted, undefined);
@@ -340,6 +344,31 @@ test("setup link uses the private guarded opener and validated /setup destinatio
 });
 
 // Issue #849, part 6: with neither flag the link is made where the choice is plain, and the command is otherwise what it was.
+
+test("an enrolled console origin is the address the panel prints and the link and code it makes (issue #882, review)", async () => {
+  const h = harness();
+  h.deps.origin = "http://127.0.0.1:4790";
+  await consoleCommand(["runs", "--link"], h.deps);
+  assert.match(text(h), /^http:\/\/127\.0\.0\.1:4790\/runs\nthe console: running/);
+  assert.ok(text(h).includes(`sign-in link for "alice" (it works once, within 60 seconds): http://127.0.0.1:4790/login/code#${CODE}&next=/runs`), text(h));
+  assert.ok(text(h).includes("or type the sign-in code K7QX-9M2D at http://127.0.0.1:4790/login?next=/runs (it works once, within 5 minutes)"));
+  assert.deepEqual(h.opened, [`http://127.0.0.1:4790/login/code#${CODE}&next=/runs`]);
+  // The same rule for /dispatch insights' lines.
+  assert.deepEqual(consolePageLines({}, "insights?range=7d", { origin: "http://127.0.0.1:4790" }), ["http://127.0.0.1:4790/insights?range=7d", "that is the console's address in its gateway enrollment (sandbox-gateways.json); if the console is not running, start it with pi-dispatch-console serve, or keep it running with pi-dispatch service install --console (docs/console.md)"]);
+});
+
+test("enrolledConsoleOrigin reads the enrollment where the console reads it, and is null where there is none or it cannot be read", () => {
+  const dir = tempDir("console-command-enrolled-");
+  assert.equal(enrolledConsoleOrigin({ env: {}, dir }), null, "no file: no enrollment");
+  writeFileSync(join(dir, "sandbox-gateways.json"), JSON.stringify({ version: 1, consoleOrigin: "http://127.0.0.1:4790", hosts: {} }), { mode: 0o600 });
+  assert.equal(enrolledConsoleOrigin({ env: {}, dir }), "http://127.0.0.1:4790");
+  assert.equal(enrolledConsoleOrigin({ env: {}, dir: null }), null, "a relative file with no folder known");
+  writeFileSync(join(dir, "other.json"), JSON.stringify({ version: 1, consoleOrigin: "https://console.example", hosts: {} }), { mode: 0o600 });
+  assert.equal(enrolledConsoleOrigin({ env: { PI_SANDBOX_GATEWAYS_FILE: "other.json" }, dir }), "https://console.example");
+  assert.equal(enrolledConsoleOrigin({ env: { PI_SANDBOX_GATEWAYS_FILE: join(dir, "other.json") }, dir: null }), "https://console.example", "an absolute file needs no folder");
+  writeFileSync(join(dir, "sandbox-gateways.json"), "{", { mode: 0o600 });
+  assert.equal(enrolledConsoleOrigin({ env: {}, dir }), null);
+});
 
 test("with no flag, one operator and a running console in pi's terminal UI, /dispatch console signs in as --link does", async () => {
   const h = harness();
@@ -381,7 +410,7 @@ test("with no flag, anything less plain is the old plain address with one line s
   const failed = await consoleCommand(["runs"], audit.deps);
   assert.deepEqual([failed.refused, failed.minted, failed.opened], [undefined, false, true]);
   assert.match(text(audit), /no sign-in link was made: the audit log could not be written/);
-  assert.deepEqual(audit.opened, ["http://localhost:4790/runs"]);
+  assert.deepEqual(audit.opened, ["http://pi-dispatch.localhost:4790/runs"]);
   assert.equal(audit.notes.at(-1)[1], "warning", "a fault after deciding is a warning, never the dim status line");
   const mintFails = harness({ mintRefusal: "the code drop could not be written" });
   const refusedMint = await consoleCommand(["runs"], mintFails.deps);

@@ -5,7 +5,7 @@ import { createServer, request } from "node:http";
 import { join } from "node:path";
 import { test } from "node:test";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { isLoopbackAddress, listenOn, listenUrl, parseListen } from "../src/console/listen.mjs";
+import { CONSOLE_HOSTNAME, isLoopbackAddress, listenOn, listenUrl, parseListen } from "../src/console/listen.mjs";
 
 // Where the console binds (issue #640, REQ-CONSOLE-SECURITY a and j).
 
@@ -52,12 +52,13 @@ test("isLoopbackAddress and listenUrl", () => {
   assert.equal(listenUrl({ kind: "unix", path: "/x" }), null);
 });
 
-test("listenUrl prints localhost for 127.0.0.1 and ::1, and any other address by its number (issue #882)", () => {
-  assert.equal(listenUrl({ kind: "tcp", host: "127.0.0.1", port: 4790 }), "http://localhost:4790/");
-  assert.equal(listenUrl({ kind: "tcp", host: "127.0.0.1", port: 0 }, 5555), "http://localhost:5555/");
-  assert.equal(listenUrl({ kind: "tcp", host: "::1", port: 80 }), "http://localhost:80/");
-  assert.equal(listenUrl({ kind: "tcp", host: "0:0:0:0:0:0:0:1", port: 80 }), "http://localhost:80/");
-  // localhost never resolves to another loopback address, so a console bound there is printed as it binds.
+test("listenUrl prints pi-dispatch.localhost for 127.0.0.1 and ::1, and any other address by its number (issue #882)", () => {
+  assert.equal(CONSOLE_HOSTNAME, "pi-dispatch.localhost");
+  assert.equal(listenUrl({ kind: "tcp", host: "127.0.0.1", port: 4790 }), "http://pi-dispatch.localhost:4790/");
+  assert.equal(listenUrl({ kind: "tcp", host: "127.0.0.1", port: 0 }, 5555), "http://pi-dispatch.localhost:5555/");
+  assert.equal(listenUrl({ kind: "tcp", host: "::1", port: 80 }), "http://pi-dispatch.localhost:80/");
+  assert.equal(listenUrl({ kind: "tcp", host: "0:0:0:0:0:0:0:1", port: 80 }), "http://pi-dispatch.localhost:80/");
+  // No localhost name resolves to another loopback address, so a console bound there is printed as it binds.
   assert.equal(listenUrl({ kind: "tcp", host: "127.0.0.2", port: 4790 }), "http://127.0.0.2:4790/");
   assert.equal(listenUrl({ kind: "tcp", host: "192.168.1.5", port: 4790 }), "http://192.168.1.5:4790/");
   assert.equal(listenUrl({ kind: "tcp", host: "fe80::1", port: 4790 }), "http://[fe80::1]:4790/");

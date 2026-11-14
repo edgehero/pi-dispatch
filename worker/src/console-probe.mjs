@@ -28,6 +28,16 @@ import { isAbsolute } from "node:path";
 /** The console's default listen address, as `pi-dispatch-console serve` binds it. */
 export const CONSOLE_DEFAULT_LISTEN = "127.0.0.1:4790";
 
+/**
+ * The name every command prints for a console on 127.0.0.1 or ::1 (issue #882), and one the console answers to as it
+ * answers to `localhost`. A `.localhost` name is loopback by RFC 6761 (Chrome and Firefox resolve it themselves, macOS
+ * resolves it system-wide, as do systemd-resolved and nss-myhostname on Linux), and a name of the console's own has a
+ * cookie jar of its own: cookies ignore ports, so at `localhost` every other local web server the browser visits would
+ * be sent the console's 400-day device cookie. ONE spelling, here: the admin's printer (`listen.mjs`) and Host check
+ * (`guards.mjs`) import it.
+ */
+export const CONSOLE_HOSTNAME = "pi-dispatch.localhost";
+
 const LOOPBACK = new BlockList();
 LOOPBACK.addSubnet("127.0.0.0", 8, "ipv4");
 LOOPBACK.addAddress("::1", "ipv6");
@@ -45,7 +55,7 @@ function unspecified(host, family) {
 /**
  * Where the probe would ask, for a PI_CONSOLE_LISTEN value: `{ kind: "tcp", host, port, shown, url }`,
  * `{ kind: "unix", path, shown }`, or `{ unknown: reason }` when nothing may or can be asked. `url` is the address a
- * browser on this host opens (issue #882): `http://localhost:<port>/` for 127.0.0.1, ::1 and an any-address bind.
+ * browser on this host opens (issue #882): `http://pi-dispatch.localhost:<port>/` for 127.0.0.1, ::1 and an any-address bind.
  */
 export function consoleProbeTarget(value) {
 	const text = typeof value === "string" && value.trim() !== "" ? value.trim() : CONSOLE_DEFAULT_LISTEN;
@@ -63,16 +73,16 @@ export function consoleProbeTarget(value) {
 	if (port === 0) return { unknown: "PI_CONSOLE_LISTEN asks for port 0, so the OS picks the port and only the running console knows it" };
 	if (unspecified(host, family)) {
 		const loopback = family === "ipv4" ? "127.0.0.1" : "::1";
-		return { kind: "tcp", host: loopback, port, shown: `${family === "ipv4" ? loopback : `[${loopback}]`}:${port}`, url: `http://localhost:${port}/` };
+		return { kind: "tcp", host: loopback, port, shown: `${family === "ipv4" ? loopback : `[${loopback}]`}:${port}`, url: `http://${CONSOLE_HOSTNAME}:${port}/` };
 	}
 	if (!LOOPBACK.check(host, family)) return { unknown: `PI_CONSOLE_LISTEN names ${host}, which is not a loopback address, and the probe asks nothing across a network` };
 	const shown = family === "ipv6" ? `[${host}]:${port}` : `${host}:${port}`;
-	return { kind: "tcp", host, port, shown, url: `http://${localhostAddress(host, family) ? `localhost:${port}` : shown}/` };
+	return { kind: "tcp", host, port, shown, url: `http://${localhostAddress(host, family) ? `${CONSOLE_HOSTNAME}:${port}` : shown}/` };
 }
 
 /**
  * True for 127.0.0.1 and ::1 (any spelling), the two addresses a browser reaches as `localhost` (issue #882). The address
- * a person is told to open says `localhost` for them; the probe itself still dials the literal. The admin's `listenUrl`
+ * a person is told to open says `CONSOLE_HOSTNAME` for them; the probe itself still dials the literal. The admin's `listenUrl`
  * (`isLocalhostAddress`) draws the same line, and `admin/test/console-listen.test.mjs` holds the two together.
  */
 function localhostAddress(host, family) {

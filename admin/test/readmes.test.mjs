@@ -174,10 +174,11 @@ test("Open the web page says what the console's commands do", () => {
   const section = ROOT.slice(ROOT.indexOf("## Open the web page"), ROOT.indexOf("## How to use it"));
   const words = section.replace(/\s+/g, " ");
   const consoleCli = read("admin/src/console/cli.mjs");
-  // Issue #882: the address a person opens is localhost, while the console still binds the number.
-  assert.ok(section.includes("http://localhost:4790"));
+  // Issue #882: the address a person opens is the console's own name, while the console still binds the number.
+  assert.ok(section.includes("http://pi-dispatch.localhost:4790"));
   assert.match(consoleCli, /default 127\.0\.0\.1:4790/);
-  assert.match(read("admin/src/console/listen.mjs"), /isLocalhostAddress\(spec\.host\) \? "localhost"/);
+  assert.match(read("admin/src/console/listen.mjs"), /isLocalhostAddress\(spec\.host\) \? CONSOLE_HOSTNAME/);
+  assert.match(read("worker/src/console-probe.mjs"), /export const CONSOLE_HOSTNAME = "pi-dispatch\.localhost";/);
   // Issue #882: a link or a code from the host, which every way in here is, remembers the browser at once; a token's form has the box, ticked.
   assert.ok(words.includes("Once you sign in, the browser remembers you"));
   assert.match(read("admin/src/console/server.mjs"), /const remembering = remember \|\| \(hostMade && rememberAllowed\(ctx, entry\.role, invited\)\);/);

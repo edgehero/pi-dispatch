@@ -3,7 +3,7 @@ import * as fs from "node:fs";
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { test } from "node:test";
-import { SHORT_CODE_ALPHABET, SHORT_TTL_MS, codeKindOf, consumeLoginCode, loginCodesDir, mintLoginCode, shortCodeOf, showShortCode } from "../src/console/login-codes.mjs";
+import { SHORT_CODE_ALPHABET, SHORT_CODE_SCRYPT, SHORT_TTL_MS, clearLoginCodes, codeKindOf, consumeLoginCode, loginCodesDir, mintLoginCode, shortCodeName, shortCodeOf, showShortCode } from "../src/console/login-codes.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 // One-time login codes (issue #640). Real files: single use rests on the kernel's unlink, and the refusals on modes and
@@ -246,6 +246,11 @@ test("browser viewer codes retain a validated exact-incarnation binding while or
 
 // ---- the short code (issue #882) ----
 
+/** The drop's short-code salt, as the minter wrote it. */
+const saltOf = (dir) => fs.readFileSync(join(dir, ".short-code-salt"), "utf8").trim();
+/** Where a short code's file is: its scrypt name under the drop's salt. */
+const shortFile = (dir, code) => join(dir, `${shortCodeName(code, saltOf(dir))}.json`);
+
 test("a short code is 8 symbols of Crockford's base32, shown in two groups of four, from 5 random bytes", () => {
   assert.equal(SHORT_CODE_ALPHABET, "0123456789ABCDEFGHJKMNPQRSTVWXYZ");
   assert.equal(SHORT_CODE_ALPHABET.length, 32);
@@ -264,34 +269,48 @@ test("typing a short code forgives case, dashes, spaces and the letters people m
   assert.equal(codeKindOf("hello"), null);
 });
 
-test("mint with short makes a link and a short code, each a 0600 file under its own hash, the short one living 5 minutes", { skip: !posix }, () => {
+test("mint with short makes a link and a short code, the short one a 0600 file under a slow salted name, living 5 minutes", { skip: !posix }, () => {
   const { dir } = setup();
   const now = clock();
   const made = mintLoginCode({ dir, name: "rob", now, random: counter(), short: true });
   assert.match(made.code, /^[A-Za-z0-9_-]{43}$/);
-  assert.match(made.short, /^[0-9A-HJKMNP-TV-Z]{8}$/);
-  // counter() gives 32 bytes of 1 for the link, then 5 bytes of 2: 0x0202020202, read 5 bits at a time from the top.
-  assert.equal(made.short, "081040G2");
-  const file = join(dir, `${sha(made.short)}.json`);
+  // counter() gives 32 bytes of 1 for the link, 32 bytes of 2 for the drop's salt, then 5 bytes of 3: 0x0303030303, read 5 bits at a time.
+  assert.equal(made.short, "0C1G60R3");
+  assert.equal(saltOf(dir), "02".repeat(32));
+  assert.equal(fs.statSync(join(dir, ".short-code-salt")).mode & 0o777, 0o600);
+  const file = shortFile(dir, made.short);
   assert.equal(fs.statSync(file).mode & 0o777, 0o600);
   assert.deepEqual(JSON.parse(fs.readFileSync(file, "utf8")), { name: "rob", expiresAt: new Date(T0 + SHORT_TTL_MS).toISOString() });
-  assert.deepEqual(fs.readdirSync(dir).sort(), [`${sha(made.code)}.json`, `${sha(made.short)}.json`].sort());
+  // Not the plain sha256 a listing could be searched against in minutes (review, issue #882).
+  assert.ok(!fs.existsSync(join(dir, `${sha(made.short)}.json`)));
+  assert.deepEqual(fs.readdirSync(dir).sort(), [".short-code-salt", `${sha(made.code)}.json`, `${shortCodeName(made.short, saltOf(dir))}.json`].sort());
   assert.ok(!fs.readFileSync(file, "utf8").includes(made.short), "the code itself is never on disk");
   assert.match(mintLoginCode({ dir, name: "ann", now, short: true, binding: { sha256: "a".repeat(64), createdAt: new Date(T0).toISOString(), role: "viewer", generation: 0 } }).refusal, /a link alone/, "an invitation is never typed");
+  // A second mint keeps the drop's salt: every code of the drop under one.
+  const again = mintLoginCode({ dir, name: "rob", now, short: true });
+  assert.equal(saltOf(dir), "02".repeat(32));
+  assert.ok(fs.existsSync(shortFile(dir, again.short)));
+});
+
+test("a short code's name is scrypt at the declared cost, and depends on the drop's salt", () => {
+  assert.deepEqual({ ...SHORT_CODE_SCRYPT }, { N: 16384, r: 8, p: 1 });
+  assert.match(shortCodeName("K7QX9M2D", "a".repeat(64)), /^[0-9a-f]{64}$/);
+  assert.notEqual(shortCodeName("K7QX9M2D", "a".repeat(64)), shortCodeName("K7QX9M2D", "b".repeat(64)), "another drop, another name");
+  assert.notEqual(shortCodeName("K7QX9M2D", "a".repeat(64)), sha("K7QX9M2D"));
 });
 
 test("a short code signs in once, typed any way, for 5 minutes; the link beside it is its own and works once too", { skip: !posix }, () => {
   const { dir } = setup();
   const now = clock();
-  const { code, short } = mintLoginCode({ dir, name: "rob", now, random: counter(), short: true });
+  const { short } = mintLoginCode({ dir, name: "rob", now, random: counter(), short: true });
   const typed = showShortCode(short).toLowerCase().replace(/0/g, "o").replace(/1/g, "l");
   now.advance(SHORT_TTL_MS - 1);
   assert.deepEqual(consumeLoginCode({ dir, code: typed, now }), { name: "rob", codeKind: "short-code" });
   const again = consumeLoginCode({ dir, code: short, now });
   assert.match(again.refusal, /this sign-in code is not valid: it was already used/);
   assert.equal(again.codeKind, "short-code");
-  // The link expired a while ago, and was reaped by the consume.
-  assert.deepEqual(fs.readdirSync(dir), []);
+  // The link expired a while ago, and was reaped by the consume; the salt stays for the next code.
+  assert.deepEqual(fs.readdirSync(dir), [".short-code-salt"]);
 
   const both = mintLoginCode({ dir, name: "rob", now, random: counter(9), short: true });
   assert.deepEqual(consumeLoginCode({ dir, code: both.code, now }), { name: "rob", codeKind: "link" });
@@ -306,23 +325,47 @@ test("a short code past 5 minutes is refused as expired, and one whose file clai
   const late = consumeLoginCode({ dir, code: short, now });
   assert.equal(late.kind, "expired");
   assert.match(late.refusal, /this sign-in code has expired/);
-  // A file under a short code's hash that claims to live longer than a short code may, or carries an invitation's binding.
-  const plant = (key, body) => { const f = join(dir, `${sha(key)}.json`); fs.writeFileSync(f, JSON.stringify(body)); fs.chmodSync(f, 0o600); };
-  plant("AAAAAAAA", { name: "rob", expiresAt: new Date(now() + SHORT_TTL_MS + 6000).toISOString() });
+  const plant = (name, body) => { const f = join(dir, `${name}.json`); fs.writeFileSync(f, JSON.stringify(body)); fs.chmodSync(f, 0o600); };
+  const salt = saltOf(dir);
+  plant(shortCodeName("AAAAAAAA", salt), { name: "rob", expiresAt: new Date(now() + SHORT_TTL_MS + 6000).toISOString() });
   assert.match(consumeLoginCode({ dir, code: "aaaa-aaaa", now }).refusal, /not valid/);
-  plant("BBBBBBBB", { name: "ann", expiresAt: new Date(now() + 1000).toISOString(), binding: { sha256: "a".repeat(64), createdAt: new Date(T0).toISOString(), role: "viewer", generation: 0 } });
+  plant(shortCodeName("BBBBBBBB", salt), { name: "ann", expiresAt: new Date(now() + 1000).toISOString(), binding: { sha256: "a".repeat(64), createdAt: new Date(T0).toISOString(), role: "viewer", generation: 0 } });
   assert.match(consumeLoginCode({ dir, code: "BBBBBBBB", now }).refusal, /not valid/);
   // A link's code is held to a link's life: a file under a link's hash may not claim a short code's 5 minutes.
-  plant("l".repeat(43), { name: "rob", expiresAt: new Date(now() + SHORT_TTL_MS).toISOString() });
+  plant(sha("l".repeat(43)), { name: "rob", expiresAt: new Date(now() + SHORT_TTL_MS).toISOString() });
   assert.match(consumeLoginCode({ dir, code: "l".repeat(43), now }).refusal, /not valid/);
+  // A file under the plain sha256 of a short code is no short code's.
+  plant(sha("CCCCCCCC"), { name: "rob", expiresAt: new Date(now() + 1000).toISOString() });
+  assert.match(consumeLoginCode({ dir, code: "CCCC-CCCC", now }).refusal, /not valid/);
+});
+
+test("the short-code salt: none means no short code can match, and one another account could write is refused", { skip: !posix }, () => {
+  const { dir } = setup();
+  const now = clock();
+  mintLoginCode({ dir, name: "rob", now });
+  assert.match(consumeLoginCode({ dir, code: "K7QX-9M2D", now }).refusal, /not valid/, "a drop that never held a short code");
+  assert.ok(!fs.existsSync(join(dir, ".short-code-salt")), "a consume makes none");
+  const { short } = mintLoginCode({ dir, name: "rob", now, short: true });
+  fs.chmodSync(join(dir, ".short-code-salt"), 0o644);
+  assert.match(consumeLoginCode({ dir, code: short, now }).refusal, /not valid/, "a loose salt matches nothing");
+  assert.match(mintLoginCode({ dir, name: "rob", now, short: true }).refusal, /not a private file/);
+  fs.chmodSync(join(dir, ".short-code-salt"), 0o600);
+  fs.writeFileSync(join(dir, ".short-code-salt"), "not hex\n");
+  assert.match(mintLoginCode({ dir, name: "rob", now, short: true }).refusal, /not one this console wrote/);
+  // Sign everyone out clears the codes, not the salt.
+  fs.writeFileSync(join(dir, ".short-code-salt"), `${"c".repeat(64)}\n`);
+  mintLoginCode({ dir, name: "rob", now, short: true });
+  clearLoginCodes({ dir });
+  assert.deepEqual(fs.readdirSync(dir), [".short-code-salt"]);
 });
 
 test("a short code that cannot be written takes its link with it: both or neither", { skip: !posix }, () => {
   const { dir } = setup();
   const now = clock();
   let writes = 0;
-  const failing = { ...fs, writeFileSync: (...args) => { writes += 1; if (writes === 2) throw Object.assign(new Error("full"), { code: "ENOSPC" }); return fs.writeFileSync(...args); } };
+  // The link's file, the salt, then the short code's file, which fails.
+  const failing = { ...fs, writeFileSync: (...args) => { writes += 1; if (writes === 3) throw Object.assign(new Error("full"), { code: "ENOSPC" }); return fs.writeFileSync(...args); } };
   const made = mintLoginCode({ dir, name: "rob", now, random: counter(), short: true, fs: failing });
   assert.match(made.refusal, /could not be written .*ENOSPC/);
-  assert.deepEqual(fs.readdirSync(dir), [], "no live link was left behind");
+  assert.deepEqual(fs.readdirSync(dir), [".short-code-salt"], "no live link was left behind");
 });

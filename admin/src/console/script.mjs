@@ -385,12 +385,14 @@ export const CONSOLE_SCRIPT = `"use strict";
       if (!from || typeof from.cloneNode !== "function" || typeof box.appendChild !== "function") return;
       mine = from.cloneNode(true);
       mine.setAttribute("data-notice", "gaveup");
-      var t = mine.querySelector(".banner__t");
-      var s = mine.querySelector(".banner__s");
-      if (t) t.textContent = SIGN_IN_GAVE_UP.title;
-      if (s) s.textContent = SIGN_IN_GAVE_UP[kind];
       box.appendChild(mine);
     }
+    // Its words on every call, not only when it is made (issue #882, review): a stopped code and then a stopped token on one page are two
+    // attempts, and the second must not be told the first one's sentence.
+    var t = mine.querySelector(".banner__t");
+    var s = mine.querySelector(".banner__s");
+    if (t) t.textContent = SIGN_IN_GAVE_UP.title;
+    if (s) s.textContent = SIGN_IN_GAVE_UP[kind];
     showOnly("gaveup");
   }
   // What works only with this script (the sign-in form, the link page's states) is drawn hidden with data-reveal, so a

@@ -45,7 +45,7 @@ import { RUN_ID_RE } from "./read-model.mjs";
 import * as nodeFs from "node:fs";
 import { deploymentServiceEnv } from "@edgehero/pi-dispatch/service-env";
 import { DEFAULT_LISTEN } from "./console/config.mjs";
-import { parseListen } from "./console/listen.mjs";
+import { CONSOLE_HOSTNAME, parseListen } from "./console/listen.mjs";
 
 export const CONSOLE_USAGE = "usage: /dispatch console [setup|runs|fleet|insights|config|parked|audit|<run id>] [--link [token name]] [--no-link] [--no-open]";
 
@@ -185,7 +185,8 @@ export function probeLine(answer) {
  *   - `hasUI`, `mode` (pi's `ctx.mode`), `notify(text, level)`, `select(title, options)` (pi's `ctx.ui.select`,
  *     already gated);
  *   - `env`, the deployment's env (`PI_CONSOLE_LISTEN`, `PI_CONSOLE_BIND_PUBLIC`); `sessionEnv`, this process's env
- *     (the SSH and display variables); `platform`;
+ *     (the SSH and display variables); `platform`; `origin`, the console's enrolled origin or null
+ *     (`enrolledConsoleOrigin`, issue #882), which every address and link is printed for when it is set;
  *   - `logsDir` (the audit log's), `tokensPath` (the console tokens file, or null where the panel guards none),
  *     `guarded(dir)` (is `dir` a directory `guardedFiles()` guards now) and `deployment` (`consoleDeploymentCheck`'s
  *     answer: whether the address and the tokens file are one deployment's, which only the default link reads);
@@ -209,9 +210,11 @@ export async function consoleCommand(words, deps) {
   const env = deps.env ?? {};
   const platform = deps.platform ?? process.platform;
   const probe = deps.probe ?? probeConsole;
-  const at = consolePageUrl(env, path, { platform });
+  // Issue #882: the console's enrolled origin, where it has one, is where a browser must open it; a link for any other address is refused.
+  const origin = typeof deps.origin === "string" && deps.origin !== "" ? deps.origin : null;
+  const at = consolePageUrl(env, path, { platform, origin });
   const answer = await probe(env, deps.request ? { request: deps.request } : {});
-  const lines = at.refusal ? consolePageLines(env, path, { platform }) : [consolePageLines(env, path, { platform })[0]];
+  const lines = at.refusal ? consolePageLines(env, path, { platform, origin }) : [consolePageLines(env, path, { platform, origin })[0]];
   lines.push(`the console: ${probeLine(answer)}`);
 
   let url = at.url && !at.anyHost ? at.url : null;
@@ -314,7 +317,7 @@ export async function consoleCommand(words, deps) {
       }
       minted = true;
       const next = path === "" ? "" : `&next=${fragmentValue(`/${path}`)}`;
-      const base = at.socket ? "http://localhost:4790/" : at.url.slice(0, at.url.length - path.length);
+      const base = at.socket ? `http://${CONSOLE_HOSTNAME}:4790/` : at.url.slice(0, at.url.length - path.length);
       if (at.socket) {
         lines.push(`sign-in link for "${name}" (through that tunnel; it works once, within 60 seconds): ${base}login/code#${made.code}${next}`);
       } else {

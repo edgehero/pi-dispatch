@@ -116,7 +116,7 @@ server for good has [its own steps](#set-up-a-host).
 
 ## Open the web page
 
-The web page, which the rest of this README calls the console, runs on your own machine at `http://localhost:4790`. Bookmark it.
+The web page, which the rest of this README calls the console, runs on your own machine at `http://pi-dispatch.localhost:4790`. Bookmark it.
 Once you sign in, the browser remembers you: closing it, a restart of the console or days away do not sign you out. (Signing in
 with a token instead, leave **Remember this trusted device** ticked under it.) A browser that is not remembered stays signed in
 for up to 12 hours, and an hour with nothing happening ends it sooner.

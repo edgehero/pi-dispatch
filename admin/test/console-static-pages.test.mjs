@@ -64,12 +64,12 @@ test("each static page answers its status, names its page for the script and the
 
 test("the static pages say what their card says: who is signed in only where a session is known, and nothing from the request but the 421's host", async () => {
   const pages = await renderStatic();
-  // The sign-in page: the code's and the token's forms, both commands for a way in (pi's prints a link with --link), localhost only.
+  // The sign-in page: the code's and the token's forms, both commands for a way in (pi's prints a link with --link), pi-dispatch.localhost only.
   const login = pages["login.anonymous"].html;
   assert.ok(login.includes('<form id="login-form" class="signin__form" autocomplete="off" hidden data-reveal>'), "the token form, for the script to reveal");
   assert.ok(login.includes("<code><span>/dispatch</span> <span>console</span> <span>--link</span></code>"), "the pi command that prints a link");
   assert.ok(login.includes("<code><span>pi-dispatch-console</span> <span>token</span> <span>add</span> <span>--name</span> <span>&#39;&lt;you&gt;&#39;</span> <span>--role</span> <span>operator</span></code>"), "the host command, its placeholder quoted");
-  assert.ok(login.includes("This console answers at localhost, on this host only."), "the default listener's footer (issue #882: 127.0.0.1 is localhost)");
+  assert.ok(login.includes("This console answers at pi-dispatch.localhost, on this host only."), "the default listener's footer (issue #882: 127.0.0.1 is the console's own name)");
   assert.ok(login.includes('<form id="code-form" class="signin__form" autocomplete="off" hidden data-reveal>'), "the sign-in code's form, for the script to reveal (issue #882)");
   assert.ok(login.includes('<input type="checkbox" name="remember" checked>'), "the Remember box, ticked");
   assert.equal((login.match(/<div data-notice="[^"]+">/g) ?? []).length, 0, "no notice shown on a plain visit");

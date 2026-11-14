@@ -289,6 +289,14 @@ queued: an older BullMQ need not read what a newer one wrote. The release notes 
 
 Release numbers come from the git tags.
 
+### Next release
+
+| Store | What changed, and what an older release does with it | Guide |
+|---|---|---|
+| `console-login-codes/` | `pi-dispatch-console link` and `/dispatch console --link` make a sign-in code to type beside the link (#882), filed under a slow salted hash with the salt in `.short-code-salt`. A console of an older release has no field to type it in and refuses its shape, so restart the console after the upgrade before you use a code. The link beside it works with either | [console.md](console.md#sign-in-without-pasting-the-token) |
+| `console-devices/` | A link or a code from the host remembers the browser it signs in, and at 32 remembered browsers for one token the one used least recently is ended as `removed` to make room (#882). The record shape is unchanged; an older console reads every record as before | [console.md](console.md#remembered-browsers) |
+| `sandbox-gateways.json` | Where it enrolls a `consoleOrigin`, every command now prints that origin, links and codes included (#882); before, they printed the listen address, which the console refused at sign-in unless the two were the same. Without enrollment they print `http://pi-dispatch.localhost:<port>/`, so a browser remembered at `localhost` or `127.0.0.1` signs in once more there | [sandbox-gateway.md](sandbox-gateway.md) |
+
 ### 5.2.1
 
 | Store | What changed, and what an older release does with it | Guide |

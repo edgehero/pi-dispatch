@@ -37,7 +37,7 @@ import { deploymentServiceEnv } from "@edgehero/pi-dispatch/service-env";
 import { sandboxHostsPath } from "@edgehero/pi-dispatch/sandbox-hosts";
 import { CONSOLE_ENV_KEYS, consoleConfig, consoleEnv, deploymentDirOf } from "./config.mjs";
 import { makeLoginLimiter } from "./guards.mjs";
-import { isLoopbackAddress, listenOn, listenUrl } from "./listen.mjs";
+import { CONSOLE_HOSTNAME, isLoopbackAddress, listenOn, listenUrl } from "./listen.mjs";
 import { acquireConsoleLock } from "./lock.mjs";
 import { codePending, keptTokenLinkRefusal, operatorNames, showShortCode, soleOperatorName } from "./login-codes.mjs";
 import { enterReader, runOpenCommand } from "./open-command.mjs";
@@ -381,7 +381,8 @@ function needName(values) {
 /**
  * `link --port`'s value as a port number, refused unless it is 1 to 5 digits from 1 to 65535. The console cannot know
  * the local end of an operator's `ssh -L` tunnel (a unix socket has no port at all, and a tunnel may map 4790 to any
- * free one), so the operator says it and the link is printed for `localhost` there, the one name a tunnel answers on.
+ * free one), so the operator says it and the link is printed for `pi-dispatch.localhost` there (`CONSOLE_HOSTNAME`), a
+ * loopback name the tunnel's local end answers on, as `localhost` is (issue #882).
  */
 function linkPortOf(text) {
   if (typeof text !== "string" || !/^[0-9]{1,5}$/.test(text) || Number(text) < 1 || Number(text) > 65535) {
@@ -463,6 +464,16 @@ async function run(argv, io) {
     if (res?.invalid) throw new Refusal(res.invalid);
   };
 
+  /**
+   * The console's enrolled origin, or null (issue #882, review): where `sandbox-gateways.json` enrolls one, the write guard accepts that exact
+   * Origin alone, so every address this command prints is that one. Read when it is needed, as `serve` reads it, never cached.
+   */
+  const enrolledOrigin = () => {
+    if (!config.sandboxGatewaysFile) return null;
+    const read = readSandboxGateways(config.sandboxGatewaysFile, { fs, uid, platform: io.platform ?? process.platform });
+    return typeof read.config?.consoleOrigin === "string" ? read.config.consoleOrigin : null;
+  };
+
   /** What to type for a command of this deployment: its own binary when one is installed here, because a local install puts nothing on PATH. */
   const localCommand = (name) => {
     const local = `node_modules/.bin/${name}`;
@@ -510,7 +521,9 @@ async function run(argv, io) {
     try { minted = m.loginCodes.mintLoginCode(withRandom({ dir: m.loginCodes.loginCodesDir(config.tokensPath), name, fs, now, short })); }
     catch (e) { failed(); throw e; }
     if (minted.refusal) { failed(); throw new Refusal(minted.refusal); }
-    const base = port !== null ? `http://localhost:${port}/` : (listenUrl(config.listen) ?? "http://localhost:<the local port of your ssh -L tunnel>/");
+    // `--port` is the person's own tunnel; else the enrolled origin, the one a sign-in is accepted from; else the listen address.
+    const origin = port === null ? enrolledOrigin() : null;
+    const base = port !== null ? `http://${CONSOLE_HOSTNAME}:${port}/` : origin !== null ? `${origin}/` : (listenUrl(config.listen) ?? `http://${CONSOLE_HOSTNAME}:<the local port of your ssh -L tunnel>/`);
     return { url: `${base}login/code#${minted.code}${values.next === "/setup" ? "&next=/setup" : ""}`, code: minted.code, base, ...(short ? { short: minted.short } : {}) };
   };
 
@@ -616,7 +629,7 @@ async function run(argv, io) {
           // A socket console answers nothing a browser here could open without a tunnel, so it is the tunnel path, whoever is at the keyboard.
           local: listen.kind !== "unix" && (io.isLocal ?? isLocalBrowserSession)({ env, platform }),
           consoleCommand: localCommand("pi-dispatch-console"),
-          plainUrl: listenUrl(listen),
+          plainUrl: ((origin) => (origin !== null ? `${origin}/` : listenUrl(listen)))(enrolledOrigin()),
           snapHint: platform !== "darwin",
           print: (text) => io.out(text),
           // The name again at each mint: a token revoked during a long wait must not get a code.
@@ -997,13 +1010,17 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
     } catch (e) {
       throw new Refusal(`the console audit log cannot be written (${e?.code ?? "error"}: ${e?.message ?? ""}); fix it before serving`);
     }
-    if (config.listen.kind === "tcp") {
+    // Issue #882 (review): an enrolled origin is the one address a browser may sign in from, so it is the one printed.
+    const enrolled = gatewayEnrollment.config?.consoleOrigin ?? null;
+    if (enrolled !== null) {
+      io.out(`pi-dispatch console on ${enrolled}/ (its address in sandbox-gateways.json; it listens on ${config.listen.kind === "tcp" ? `${config.listen.host.includes(":") ? `[${config.listen.host}]` : config.listen.host}:${bound.address.port}` : `unix socket ${config.listen.path}`})`);
+    } else if (config.listen.kind === "tcp") {
       const port = bound.address.port;
       io.out(`pi-dispatch console on ${listenUrl(config.listen, port)}`);
-      io.out(`from another machine: ssh -L ${port}:${config.listen.host.includes(":") ? `[${config.listen.host}]` : config.listen.host}:${port} <this host>, then open http://localhost:${port}/`);
+      io.out(`from another machine: ssh -L ${port}:${config.listen.host.includes(":") ? `[${config.listen.host}]` : config.listen.host}:${port} <this host>, then open http://${CONSOLE_HOSTNAME}:${port}/`);
     } else {
       io.out(`pi-dispatch console on unix socket ${config.listen.path}`);
-      io.out(`from another machine: ssh -L 4790:${config.listen.path} <this host>, then open http://localhost:4790/`);
+      io.out(`from another machine: ssh -L 4790:${config.listen.path} <this host>, then open http://${CONSOLE_HOSTNAME}:4790/`);
     }
     // How to get in, never a token: the commands that make one (issue #737). A unix socket's link needs the tunnel's
     // local port, which only the operator knows. Issue #882: `link` prints a code to type as well, so it leads.

@@ -561,18 +561,18 @@ test("bare insights prints the console's spend screen address for the window, sa
     assert.equal(level, "info");
     assert.deepEqual(text.split("\n"), [
       "insights are on the operator console's spend screen:",
-      "http://localhost:4790/insights?range=30d",
+      "http://pi-dispatch.localhost:4790/insights?range=30d",
       "PI_CONSOLE_LISTEN is not set, so that is the console's default address; if the console is not running, start it with pi-dispatch-console serve, or keep it running with pi-dispatch service install --console (docs/console.md)",
     ], "the default window is 30d, the page's own");
     const seven = fakeCtx({ withCustom: true });
     await def.handler("insights 7d", seven.ctx);
-    assert.match(seven.notes[0][0], /\nhttp:\/\/localhost:4790\/insights\?range=7d\n/);
+    assert.match(seven.notes[0][0], /\nhttp:\/\/pi-dispatch\.localhost:4790\/insights\?range=7d\n/);
   });
   await withEnv({ PI_CONSOLE_LISTEN: "[::1]:4811" }, async () => {
     const { def } = await loadRegistered();
     const view = fakeCtx({ withCustom: true });
     await def.handler("insights mtd", view.ctx);
-    assert.deepEqual(view.notes[0][0].split("\n").slice(1), ["http://localhost:4811/insights?range=mtd", "if the console is not running, start it with pi-dispatch-console serve, or keep it running with pi-dispatch service install --console (docs/console.md)"], "the deployment's own port, at localhost, which names ::1 too (issue #882)");
+    assert.deepEqual(view.notes[0][0].split("\n").slice(1), ["http://pi-dispatch.localhost:4811/insights?range=mtd", "if the console is not running, start it with pi-dispatch-console serve, or keep it running with pi-dispatch service install --console (docs/console.md)"], "the deployment's own port, at localhost, which names ::1 too (issue #882)");
   });
 });
 
@@ -584,11 +584,11 @@ test("insights whatif prints the console's what-if address; a unix socket gets t
     return notes;
   };
   const [what] = notesOf(["insights", "whatif", "anthropic/claude-sonnet-4-5", "--flow", "tidy"], { PI_CONSOLE_LISTEN: "127.0.0.1:4790" });
-  assert.equal(what[0].split("\n")[1], "http://localhost:4790/insights/breakdown?range=30d&whatif=anthropic%2Fclaude-sonnet-4-5&flow=tidy");
+  assert.equal(what[0].split("\n")[1], "http://pi-dispatch.localhost:4790/insights/breakdown?range=30d&whatif=anthropic%2Fclaude-sonnet-4-5&flow=tidy");
   // A model id may hold a slash after the provider's (an OpenRouter id): the target splits on the first one.
   assert.match(notesOf(["insights", "whatif", "openrouter/anthropic/claude-x", "--flow", "fix"], {})[0][0], /whatif=openrouter%2Fanthropic%2Fclaude-x&flow=fix/);
   const [unix] = notesOf(["insights"], { PI_CONSOLE_LISTEN: "unix:/run/pd/console.sock" });
-  assert.equal(unix[0].split("\n")[1], "the console listens on the unix socket /run/pd/console.sock: ssh -L 4790:/run/pd/console.sock <this host>, then open http://localhost:4790/insights?range=30d");
+  assert.equal(unix[0].split("\n")[1], "the console listens on the unix socket /run/pd/console.sock: ssh -L 4790:/run/pd/console.sock <this host>, then open http://pi-dispatch.localhost:4790/insights?range=30d");
   const [bad] = notesOf(["insights"], { PI_CONSOLE_LISTEN: "0.0.0.0:4790" });
   assert.match(bad[0], /the console's address is not usable: /);
   assert.match(bad[0], /fix PI_CONSOLE_LISTEN in the deployment's \.env, start the console with pi-dispatch-console serve, and open \/insights\?range=30d/);
@@ -621,7 +621,7 @@ test("the dashboard's i key shows the console's insights address between overlay
     await mod.handleDashboardAction({ action: "openInsights" }, {}, { ui: { notify: (m, l) => notes.push([m, l]) } });
     assert.equal(notes.length, 1);
     assert.equal(notes[0][1], "info");
-    assert.equal(notes[0][0].split("\n")[1], "http://localhost:4799/insights?range=30d");
+    assert.equal(notes[0][0].split("\n")[1], "http://pi-dispatch.localhost:4799/insights?range=30d");
   });
 });
 
@@ -652,13 +652,14 @@ test("/dispatch console --link: the link reaches notify alone, never the model, 
       const [text, level] = view.notes[0];
       assert.equal(level, "info");
       assert.match(text, /the console: running/);
-      const m = /sign-in link for "alice" \(through that tunnel; it works once, within 60 seconds\): (http:\/\/localhost:4790\/login\/code#([A-Za-z0-9_-]{43})&next=\/runs)$/m.exec(text);
+      const m = /sign-in link for "alice" \(through that tunnel; it works once, within 60 seconds\): (http:\/\/pi-dispatch\.localhost:4790\/login\/code#([A-Za-z0-9_-]{43})&next=\/runs)$/m.exec(text);
       assert.ok(m, text);
       assert.ok(!text.includes(added.token), "the token is never shown");
       // Issue #882: an asked-for --link makes a code to type beside the link, for the sign-in page through the same tunnel.
-      const typed = /^or type the sign-in code ([0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}) at http:\/\/localhost:4790\/login\?next=\/runs \(it works once, within 5 minutes\)$/m.exec(text);
+      const typed = /^or type the sign-in code ([0-9A-HJKMNP-TV-Z]{4}-[0-9A-HJKMNP-TV-Z]{4}) at http:\/\/pi-dispatch\.localhost:4790\/login\?next=\/runs \(it works once, within 5 minutes\)$/m.exec(text);
       assert.ok(typed, text);
-      assert.equal(readdirSync(join(dir, "console-login-codes")).length, 2, "two codes in the drop: the link's and the one to type");
+      assert.deepEqual(readdirSync(join(dir, "console-login-codes")).filter((f) => f.endsWith(".json")).length, 2, "two codes in the drop: the link's and the one to type");
+      assert.ok(readdirSync(join(dir, "console-login-codes")).includes(".short-code-salt"), "and the drop's salt for short codes");
       const auditDir = join(process.env.PI_LOGS_DIR, "console-audit");
       const rows = readdirSync(auditDir).filter((f) => f.endsWith(".jsonl")).flatMap((f) => readFileSync(join(auditDir, f), "utf8").trim().split("\n").map((l) => JSON.parse(l)));
       const row = rows.findLast((r) => r.action === "login-code");
@@ -671,7 +672,7 @@ test("/dispatch console --link: the link reaches notify alone, never the model, 
       const headless = fakeCtx({ withCustom: false });
       await def.handler("console --link", headless.ctx);
       assert.match(headless.notes[0][0], /needs pi's interactive UI/);
-      assert.equal(readdirSync(join(dir, "console-login-codes")).length, 2);
+      assert.equal(readdirSync(join(dir, "console-login-codes")).filter((f) => f.endsWith(".json")).length, 2);
       assert.equal(calls.sendMessage.length, 0);
     });
   } finally {

@@ -37,7 +37,7 @@
  */
 import { html } from "./html.mjs";
 import * as ui from "./kit.mjs";
-import { isLocalhostAddress, isLoopbackAddress } from "./listen.mjs";
+import { CONSOLE_HOSTNAME, isLocalhostAddress, isLoopbackAddress } from "./listen.mjs";
 import { ENDED_REASONS, SIGN_IN_NOTICES, endedNotices } from "./session-ends.mjs";
 
 /** The notices a link page can show: it has no ended session and no token to be wrong, so a subset of the sign-in's. */
@@ -57,20 +57,30 @@ const CONSOLE_HERE = Object.freeze(["./pi-dispatch", "console"]);
 const CONSOLE_INSTALLED = Object.freeze(["./node_modules/.bin/pi-dispatch", "console"]);
 const PI_LINK = Object.freeze(["/dispatch", "console", "--link"]);
 const TOKEN_ADD = Object.freeze(["pi-dispatch-console", "token", "add", "--name", "<you>", "--role", "operator"]);
-/** A link printed rather than opened (issue #849): the commands above hand theirs to the default browser, which uses it at once. */
+/** The command that prints a sign-in code (issue #882), and a link beside it: the one the sign-in page's help leads with. */
 const LINK_PRINTED = Object.freeze(["./node_modules/.bin/pi-dispatch-console", "link"]);
-export const OTHER_BROWSER = Object.freeze({ summary: "In another browser, or on another device", lead: "The commands above open your default browser, which uses the link at once. This one prints a link to paste, and a sign-in code to type above:" });
+
+/**
+ * The sign-in page's help (issue #882, review): it answers "No code yet?" with the command that prints one, first, and
+ * only then the commands that open the console already signed in, for a person at the host itself (they print no code:
+ * they hand a link to this host's own browser). A token, made on the host, is behind its disclosure.
+ */
+export const SIGN_IN_HELP = Object.freeze({
+  heading: "No code yet?",
+  code: "Run this on the host. It prints a code to type above, and a link:",
+  here: "On the host itself, this opens the console already signed in:",
+});
 
 /** How to get a fresh link, said the same way wherever one is needed. */
 const NEW_LINK = html`<p class="muted">Run this in your deployment folder to sign in:</p>${ui.cmd([...CONSOLE_HERE])}<p class="muted">If that file is not there:</p>${ui.cmd([...CONSOLE_INSTALLED])}<p class="muted">On a global install: <span class="code">pi-dispatch console</span></p><p class="muted">Or in pi:</p>${ui.cmd([...PI_LINK])}`;
 
 /**
  * The footer's sentence by where the console listens (see the header); null says nothing. `localhost` (issue #882) is a
- * console on 127.0.0.1 or ::1, the address every command prints as `localhost`; `loopback` another loopback address,
- * which `localhost` does not reach.
+ * console on 127.0.0.1 or ::1, the address every command prints as `pi-dispatch.localhost` (`CONSOLE_HOSTNAME`);
+ * `loopback` another loopback address, which no `localhost` name reaches.
  */
 export const LISTEN_FOOTERS = Object.freeze({
-  localhost: "This console answers at localhost, on this host only. Reach it here, or through an SSH tunnel.",
+  localhost: `This console answers at ${CONSOLE_HOSTNAME}, on this host only. Reach it here, or through an SSH tunnel.`,
   loopback: "This console answers on this host's loopback address only. Reach it on this host, or through an SSH tunnel.",
   unix: "This console answers on its unix socket only. Reach it on this host, or through an SSH tunnel to the socket.",
   public: null,
@@ -141,7 +151,7 @@ const REMEMBER_CHOICE = html`<label class="signin__remember"><input type="checkb
 
 /** The Sign-in code field's words (issue #882): its label, and the sentence under it that says where a code comes from and how long it lasts. */
 export const CODE_LABEL = "Sign-in code";
-export const CODE_HINT = "The 8 characters `pi-dispatch-console link` prints. It works once, for 5 minutes.";
+export const CODE_HINT = "The 8 characters `pi-dispatch-console link` prints. It works once, within 5 minutes, and this browser then stays signed in until you sign out, so use it on a browser that is yours.";
 
 /**
  * The Sign-in code form (issue #882). Typing is forgiving (`login-codes.mjs` `shortCodeOf`), so the field asks for no
@@ -171,7 +181,7 @@ ${noticeRegion(entries, noticeKey(notice))}
 ${CODE_FORM}
 <p class="signin__or faint"${REVEAL}>or</p>
 <form id="login-form" class="signin__form" autocomplete="off"${REVEAL}><div class="field"><label for="token">Console token</label><input id="token" class="input input--code" name="token" type="password" autocomplete="off" spellcheck="false" required aria-describedby="notice"></div>${remember ? REMEMBER_CHOICE : null}<button class="btn btn--lg" type="submit">Sign in with the token</button></form>
-<div class="signin__help"><p class="signin__help-h">No code yet?</p>${NEW_LINK}<details><summary>${OTHER_BROWSER.summary}</summary><p class="muted">${OTHER_BROWSER.lead}</p>${ui.cmd([...LINK_PRINTED])}</details><details><summary>Make a token instead</summary><p class="muted">On the host, with your own name in place of &lt;you&gt;. In a local install it is under <span class="code">./node_modules/.bin/</span>:</p>${ui.cmd([...TOKEN_ADD])}</details></div>
+<div class="signin__help"><p class="signin__help-h">${SIGN_IN_HELP.heading}</p><p class="muted">${SIGN_IN_HELP.code}</p>${ui.cmd([...LINK_PRINTED])}<p class="muted">${SIGN_IN_HELP.here}</p>${ui.cmd([...CONSOLE_HERE])}<p class="muted">If that file is not there:</p>${ui.cmd([...CONSOLE_INSTALLED])}<p class="muted">On a global install: <span class="code">pi-dispatch-console link</span> and <span class="code">pi-dispatch console</span></p><p class="muted">Or in pi:</p>${ui.cmd([...PI_LINK])}<details><summary>Make a token instead</summary><p class="muted">On the host, with your own name in place of &lt;you&gt;. In a local install it is under <span class="code">./node_modules/.bin/</span>:</p>${ui.cmd([...TOKEN_ADD])}</details></div>
 ${footer === null ? null : html`<p class="signin__foot faint">${footer}</p>`}
 </div></section>`;
 }

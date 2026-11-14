@@ -13955,36 +13955,72 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
 
 - **Remembered by default, an address to type and a code to type (ADDED 2026-11-14, #882 part 4).** The owner asked for a
   sign-in that is "really really easy" and remembers a browser once it has signed in. Three changes, one rule each.
-  (1) THE ADDRESS. Every command prints a console on 127.0.0.1 or ::1 as `http://localhost:<port>/` (`listenUrl`, and the
-  worker probe's `url` for doctor, held equal by a test across the two packages). Only the printed address: the bind
-  stays an IP literal (part 1: a name resolves where a file says) and the probe dials the literal. Another loopback
-  address keeps its number, since `localhost` never reaches it. Cookies belong to a host name, so a browser remembered at
-  `127.0.0.1` is not remembered at `localhost`; the docs say so, and `pi-dispatch console` signs the new name in.
+  (1) THE ADDRESS. Every command prints a console on 127.0.0.1 or ::1 as `http://pi-dispatch.localhost:<port>/`
+  (`CONSOLE_HOSTNAME`, one constant in the worker's `console-probe.mjs`; `listenUrl`, and the probe's `url` for doctor,
+  held equal by a test across the two packages). The owner chose the name over `localhost` (review round 1): a cookie
+  is scoped to a host name and ignores ports, so at `localhost` every other local web server a browser visits (a dev
+  server, a container's published port) would be sent the console's 400-day device cookie, where a name of the
+  console's own has a cookie jar of its own. `.localhost` names are loopback by RFC 6761: Chrome and Firefox resolve
+  them internally, macOS system-wide (measured with `dscacheutil` and node's `dns.lookup` on macOS 27), and on Linux
+  systemd-resolved and nss-myhostname do. Only the printed address: the bind stays an IP literal (part 1: a name
+  resolves where a file says) and the probe dials the literal. Another loopback address keeps its number, since no
+  `localhost` name reaches it. The Host check (`LOOPBACK_HOSTS`), the remember rule and the footer accept exactly that
+  one name beside `127.0.0.1`, `localhost` and `[::1]`; a browser sends it `Origin: http://pi-dispatch.localhost:<port>`
+  and `Sec-Fetch-Site: same-origin` from the console's own pages, as at `localhost`, so the write guard is unchanged.
+  Where gateway enrollment names a `consoleOrigin`, every printer uses it instead (`enrolledConsoleOrigin`), since the
+  write guard accepts that exact origin alone: an enrolled `http://127.0.0.1:<port>`, valid before, would otherwise
+  have had every printed link refused (review round 1). Cookies belong to a host name, so a browser remembered at
+  `127.0.0.1` or `localhost` is not remembered at the new name; the docs say so, and `pi-dispatch console` signs the new
+  name in. Doctor warns, while the console answers, when one system lookup of the name (a second at most) does not
+  give this host's loopback.
   (2) REMEMBERED BY DEFAULT. A sign-in with a credential the host made, a one-time link or a short code, remembers the
   browser at once wherever `rememberAllowed` holds, which is exactly where #849 made the one-time offer: a role in
-  `REMEMBER_ROLES`, never a viewer invitation, a device store that works, and `rememberTransportOk`. A link for the
-  person a live session already belongs to keeps that session and remembers it in place (the remember route's own
-  `rememberOnto` and adoption). The token form's box starts ticked; the offer stays for a token sign-in that unticked
-  it. A third host-approved way in passes `hostMade` and gets the same rule. A store that refuses leaves an ordinary
-  session and says so on the next page, as a ticked box does. `OQ-058` is UNCHANGED, checked.
+  `REMEMBER_ROLES`, never a viewer invitation (whose sign-in is not host-made), a device store that works, and
+  `rememberTransportOk`. A link for the person a live session already belongs to keeps that session and remembers it
+  in place (the remember route's own `rememberOnto` and adoption). The token form's box starts ticked; the offer stays
+  for a token sign-in that unticked it; a token of a role no browser may remember posted with the box ticked signs in
+  as an ordinary session and is told so (review round 1: #849's 403 for it would have locked every `agent` token out of
+  the form). A third host-approved way in passes `hostMade` and gets the same rule. A store that refuses leaves an
+  ordinary session and says so on the next page, as a ticked box does. At the 32-browser cap a host-made sign-in ends
+  that person's least recently used browser as `removed` (`rememberDevice`'s `makeRoom`, with a `device-ended` row), or
+  browsers used once and thrown away would fill the cap and turn every later link into a sign-in that is not
+  remembered; a ticked box at the cap is still told to remove one, since a person there can choose which. `OQ-058` is
+  UNCHANGED, checked.
   (3) A CODE TO TYPE. Beside the link, `link` and an asked-for `/dispatch console --link` make a short code: 8 symbols of
   Crockford's base32, 40 bits, read forgivingly (`shortCodeOf`), 5 minutes, in the same drop by the same rules, each
-  kind held to its own life on consume. The sign-in page posts it to `POST /login/typed-code`, a sibling of
-  `/login/code` with the same handler, so a refusal selects the sign-in page's own notice (`NOTICE_OF_STATUS` is keyed
-  by route); both accept both kinds, and anything of neither shape is refused before it is hashed.
+  kind held to its own life on consume, but named by scrypt (N 2^14, r 8, p 1) of its canonical spelling under a
+  random salt kept in the drop (`.short-code-salt`), never by a plain sha256. The sign-in page posts it to
+  `POST /login/typed-code`, a sibling of `/login/code` with the same handler, so a refusal selects the sign-in page's
+  own notice (`NOTICE_OF_STATUS` is keyed by route); both accept both kinds, and anything of neither shape is refused
+  before it is hashed.
   THREATS. A short code is guessable where a 256-bit link is not: online, the one global limiter allows at most 35
-  guesses in its 5 minutes (about one in 30 billion per live code); offline, whoever can list the drop can search 2^40
-  hashes in minutes, which is why the drop's 0700, and the console's refusal of a drop open to other accounts, are the
-  code's boundary, and that account can mint a code anyway. The limiter is global, so a local account spending it slows
-  the operator's own sign-in, the residual already named for it, which the unix socket removes. A link forwarded to another person's browser
-  now remembers that browser as its maker for up to 400 days, where it was offered before: a forwarded credential is
-  the maker's to answer for, and Remembered browsers lists and removes it. A default `/dispatch console` makes no code,
-  since its browser takes the link at once and a code would only sit in the notice.
+  guesses in its 5 minutes per console process (about one in 30 billion per live code; a restart refills the bucket,
+  and only the deployment's account can restart the console); offline, a name of plain sha256 gave a code away to
+  anyone who could list the drop in minutes, and the deployment's own pi session can list it (`ls`, `find`: the
+  extension guards `write` and `edit` only), so the names are scrypt, about 30 ms and 16 MiB a guess, a thousand
+  CPU-years for the space against a code that lives 5 minutes. The drop's 0700, and the console's refusal of a drop
+  open to other accounts, keep everyone else out. The limiter is global, so a local account spending it slows the
+  operator's own sign-in, the residual already named for it, which the unix socket removes. DNS rebinding stays out
+  under the new name as under `localhost`: a page is only same-origin with the console when the browser fetched it
+  from the console, and a conforming resolver never lets a `.localhost` name leave the host, so no outside server can
+  serve a page under it. The residual is a resolver that does send the name out (a minimal Linux without
+  systemd-resolved or nss-myhostname, with a browser that asks the system rather than resolving it itself): whoever
+  answers that query could serve a page under the name and be sent its cookies; doctor's lookup warns of exactly that
+  host. Whether Safari counts the name a secure context is unknown (the Copy buttons need one); where it does not, they
+  are hidden there and the rest works. A link forwarded to another person's browser now remembers that browser as its
+  maker for up to 400 days, where it was offered before: a forwarded credential is the maker's to answer for, and
+  Remembered browsers lists and removes it. A default `/dispatch console` makes no code, since its browser takes the
+  link at once and a code would only sit in the notice.
   **REJECTED**: tying the link and the code so the first one used ends the other (an asked-for `--link` opens this
   machine's browser with the link, so its code would always be dead when read); a code that lives 60 seconds like the
   link (too short to read off a terminal and type on a phone); 6 digits (20 bits: 35 guesses would then be one in
   30,000); a limiter per code (a guesser spreads over codes, and one global bucket already bounds every route);
-  printing the bind's number (a person cannot read or type it, which is the issue).
+  printing the bind's number (a person cannot read or type it, which is the issue); printing `localhost` (its cookies
+  reach every local server, above); accepting every `.localhost` name (the console has one name, and a wider rule
+  would accept names it never printed, each a cookie jar of its own); naming a short code's file by an HMAC under a key
+  kept in the drop (pi's `read` reaches the key as easily as `ls` lists the names, where scrypt's cost holds whoever
+  reads the salt); persisting the limiter's bucket across restarts (only the account that can mint a code can restart
+  the console, so the bound it would add is against nobody).
 
 - **Coming back to the page you asked for, and arriving from elsewhere (ADDED 2026-11-08, #849).** The redirect to `/login` carries the page asked for
   as `next`, judged by the page parser (`returnPathOf`) on the way out and again when it is used, so only this console's own pages can be a destination.
@@ -17801,6 +17837,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-11-14 (#882, part 4, review round 1) | **`DES-OPERATOR-CONSOLE` AMENDED**, the #882 bullet rewritten: the printed name is `pi-dispatch.localhost` by the owner's decision, and why (a cookie ignores ports, so at `localhost` every local server would get the device cookie), how it resolves (RFC 6761; Chrome and Firefox internally, macOS system-wide as measured, systemd-resolved and nss-myhostname on Linux), the Host check taking exactly that name, what a browser sends there, the enrolled origin printed where there is one, doctor's lookup; the agent token signing in with the ticked box; the cap forgetting the least recently used browser for a host-made sign-in; THREATS CORRECTED, the short code's files are scrypt under a salt (a plain sha256 was searchable from a listing pi can make), the guesses are per process, DNS rebinding under the new name and its one residual, Safari's secure context unknown; REJECTED gains printing `localhost`, every `.localhost` name, an HMAC key in the drop and persisting the bucket. UNCHANGED, checked: part 1 (the bind), the cookie's attributes, the visual system. |
 | 2026-11-14 (#882, part 4) | **`DES-OPERATOR-CONSOLE` AMENDED**: a new bullet, "Remembered by default, an address to type and a code to type", with its threats (a 40-bit code against the global limiter and offline against the drop's 0700, a forwarded link now remembering the browser it lands in) and what was rejected (tying the link and the code, a 60-second or 6-digit code, a limiter per code, printing the bind's number); "Remembered devices" marks its rejected "a link carrying consent" REVERSED by the owner and its never-ticked box as ticked since. The insights pointer in `DES-ADMIN-VIA-PI-EXTENSION`'s analytics bullet prints `localhost` for 127.0.0.1 and ::1. UNCHANGED, checked: part 1 (the bind stays an IP literal), the six threats' answers, "Remote use", the cookie's attributes. |
 | 2026-11-13 (#874) | **`DES-GH-APP-MANIFEST-SETUP` CORRECTED**: `--no-webhook` sent `hook_attributes` as `{ active: false }`, and GitHub refuses that manifest ("url" wasn't supplied), so the polling shape could not create an App at all; the tests pinned the refused shape and nothing sent a manifest to GitHub. The inactive hook now names `https://no-webhook.invalid/`. What GitHub accepts here was measured against github.com on 2026-11-09 by another project's throwaway Apps: a `.invalid` hook URL with `active: false` was accepted, `localhost` and `127.0.0.1` were refused as not reachable over the public Internet, leaving `hook_attributes` out was refused ("Hook url cannot be blank") on an App that subscribes events, as this one does, and the App with the inactive hook recorded one delivery, its creation's ping, and no event after it. Rejected: the project homepage, which GitHub would post the creation ping to (and every event, should someone tick Active without changing the URL), and which reads as the maintainer receiving an operator's events; and any real host, which would receive the same ping and events, and because a domain can change owner. The wizard's closing lines now name `pi-dispatch-receiver poll` instead of calling polling a follow-up, say the poller watches the installation `GITHUB_APP_INSTALLATION_ID` names, print the placeholder, and point to `docs/polling.md`'s new "Moving to webhooks later", which gives the order a test holds: a webhook secret in the App and in `WEBHOOK_SECRET` (the wizard writes none under `--no-webhook`; an existing one another GitHub webhook uses is kept), the receiver started or restarted after it, Active ticked and one delivery seen answered 2xx, and only then the poller stopped. The entry's Rejected list gains the real-host placeholder. A test holds GitHub's rule, a `url` in every shape. UNCHANGED, checked: `DES-GH-POLLING-TRANSPORT` and every other entry (the App's permissions, events and the credential flow are as they were), `CONST-TOKEN-SCOPED-PER-JOB`. No `REQ-` or `INT-` entry states the manifest's shape, so neither file moves. |
 | 2026-11-13 (#845) | **`DES-OPERATOR-CONSOLE` AMENDED**, "A Valkey outage": the reader's raw client and the console's own client send the password the deployment's context gives at each connect (`freshPassword`, a hook on ioredis' `connect()` delegated to the client's `JudgedConnector`, pinned against the installed ioredis by text), so a password rotated in the `.env`, or one a bad line kept from being read at start, needs no restart; a password in `VALKEY_URL`, a context that cannot be read, one that finds no file (`absent`), one read from another `.env` path, and one that would answer from a file naming another Valkey than the one the client dials keep the last. A new bullet, "What takes a restart is said": the console compares what it read at start with what it would read now and draws a banner on every page and every error page drawn with the navigation bar, for every role, naming settings and a refused database number, never a value or an address, and logs each change of the reasons once. CORRECTED after review, in the same pull request, five times. First round: the comparison claimed `makeSetupExposureReader`'s environment, which re-reads the file alone; problems are judged over the Valkey context's keys too (a broken VALKEY_PASSWORD line went unsaid), a `.env` that went away is a problem rather than a list of changed keys, a path is compared by what it names, a problem by kind and keys and not its line, and only an error's code is shown; the kill switch's reading of `VALKEY_URL` at each use is stated, and pinning it to the start's is rejected. Second round: the `envPath` gate compared how a path is spelled, not which Valkey a password belongs to, so the refresh also required the context's `VALKEY_URL` to be the one it named at construction (two Valkeys, measured); a blank path line became its own value. Third round: that URL was `valkeyUrlFor`'s, which prefers the shell's and never moved, so the check is now the file's URL (the default with none) against the URL the client dials, for a password the file gives; and a blank path line is no line for `RESTART_BLANK_IS_UNSET`, the nine keys every console reader takes so, held key by key to those readers by a test, and its own value for the rest. Fourth round: the file's Valkey and the one a client dials are compared by `valkeyTarget`'s host and port, so a scheme alias, a database path or a trailing `/` no longer stops a rotation healing; a changed password still declined is recorded on the connector (`passwordDeclinedOf`) and is a fourth reason on the banner; the text says this holds after start, while `parseConnection` keeps `valkeyPasswordFor`'s loopback rule at start; the console's two default URLs import `DEFAULT_VALKEY_URL`; and the blank-line table gains a run page's `readForkPoints` for PI_SESSIONS_DIR. Fifth round: the recorded decline was read alone and outlived the file that caused it until the next reconnect; one pure verdict (`freshPasswordVerdict`) now serves the refresh and `passwordDeclinedOf`, which is true only while a decline is recorded and the `.env` read then still gives a password held back. Rejected also: re-reading the whole `.env` live, dropping a held database refusal, rebuilding a client on a password change, and wrapping `connect` per client. UNCHANGED, checked: `valkeyDbRangeSentence` and the log's own Valkey error lines (`onValkeyError`), the setup preview's own drift refusal (`makeSetupExposureReader`), `killSwitchPlan`, `resolvePaths`, and `INT-CONSOLE-STATE-API` and `INT-CONSOLE-EVENT-STREAM` (the notice is drawn into a page by the server, never sent in `/api/state`, `/api/whoami` or a stream's panel). |
