@@ -211,16 +211,16 @@ LINKS = f"""<div class="cards-3 ac-links">
 
 # Issue #882: the sign-in code, as the terminal prints it beside the link, and what a sign-in with either leaves behind.
 CODE_TERM = """<pre class="ac-term"><span class="ac-term__p">$ ./node_modules/.bin/pi-dispatch-console link</span>
-http://localhost:4790/login/code#q3Vd…
+http://pi-dispatch.localhost:4790/login/code#q3Vd…
 open it within 60 seconds; it works once
-or type this sign-in code at http://localhost:4790/login within 5 minutes; it works once too: <b>K7QX-9M2D</b></pre>"""
+or type this sign-in code at http://pi-dispatch.localhost:4790/login within 5 minutes; it works once too: <b>K7QX-9M2D</b></pre>"""
 CODES = f"""<div class="cards-2 ac-codes">
 <section class="card ac-code" aria-labelledby="ac-code-h"><div class="card__head"><h2 id="ac-code-h">A link and a code, from the host</h2></div>
 {CODE_TERM}
 <p class="muted ac-small">Each works once. The link is opened, the code is typed on the sign-in page, on this computer or another one through its tunnel.</p></section>
 <section class="card ac-code" aria-labelledby="ac-kept-h"><div class="card__head"><h2 id="ac-kept-h">Signed in, and remembered</h2></div>
 <div class="ac-who"><span class="who who--remembered"><span><b>ops</b><small>Operator, remembered</small></span><span class="avatar">op</span></span></div>
-<p class="muted ac-small">A link or a code the host made remembers the browser it signs in, without asking, wherever the console may remember one: at localhost, through an SSH tunnel, or at its HTTPS address. It stays signed in across idle time and restarts until it signs out. A viewer invitation and an agent token are never remembered.</p></section>
+<p class="muted ac-small">A link or a code the host made remembers the browser it signs in, without asking, wherever the console may remember one: at pi-dispatch.localhost, through an SSH tunnel, or at its HTTPS address. It stays signed in across idle time and restarts until it signs out. A viewer invitation and an agent token are never remembered.</p></section>
 </div>"""
 
 # roles board
@@ -336,7 +336,7 @@ The access states that are not the sign-in form itself: the one-time link page, 
 **How a person uses it.**
 - **One-time link.** `/login/code#<code>` shows "Signing in with a one-time link" while it posts the code, after taking the code out of the browser history. If the link was used, has expired or is unknown, it says so, gives the command for a new link, and offers "Sign in with a token instead". A browser that is already signed in is told that instead, with a link to go on. A link with no code says so too. Without JavaScript the page says only "The console needs JavaScript to sign in."
 - **Sign-in code.** `pi-dispatch-console link` prints a code to type beside the link: 8 characters such as `K7QX-9M2D`, typed in the sign-in page's Sign-in code field. The link works once within 60 seconds and the code once within 5 minutes; each is its own, so a person can open the link here and type the code on a phone.
-- **Remembered.** A sign-in with a link or a code the host made remembers the browser without asking, wherever the console may remember one (at localhost, through an SSH tunnel, at its HTTPS address), and the top bar says "remembered". A viewer invitation and an agent token are never remembered.
+- **Remembered.** A sign-in with a link or a code the host made remembers the browser without asking, wherever the console may remember one (at pi-dispatch.localhost, through an SSH tunnel, at its HTTPS address), and the top bar says "remembered". A viewer invitation and an agent token are never remembered.
 - **Operator.** Sees reasons, transcripts, phase names, chat, Audit and every action, each as preview then Confirm.
 - **Viewer.** Sees the same rows and numbers. In place of a hidden detail, the viewer gets the repo's sentence, such as "Failure reasons are shown to operators only.", "Phase names and the run's note are shown to operators only.", "Transcripts are shown to operators only." or "Chat is for operators; a viewer sees the run's status only." There are no action buttons, and no Audit in the nav.
 - **Read-only console.** A console started with `PI_CONSOLE_READ_ONLY=1` shows a "Read-only console" chip in the top bar and a banner. Operators keep every detail, but no page has a form, and talking to a run points to the terminal command.
