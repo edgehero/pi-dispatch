@@ -825,6 +825,81 @@ export function loadGitHubAuth(env, fileExists) {
 	return { source, patVar, appId, installationId, privateKeyPath, privateKey };
 }
 
+/** The three answers `GITHUB_INGEST` takes (issue #879). Exported so the console's display vocabulary is this list. */
+export const GITHUB_INGEST_VALUES = Object.freeze(["webhook", "poll", "both"]);
+
+/**
+ * Which transport brings GitHub events to this deployment, from `GITHUB_INGEST` (issue #879): `"webhook"`, `"poll"`
+ * or `"both"`, or `null` when the variable is unset or empty. Read by the receiver's commands (through its one loader)
+ * and by doctor and the console, which say what those commands will do, so none of them can read the word differently.
+ *
+ * Why the setting exists at all: `serve` used to infer that it serves GitHub from the triggers file and from an
+ * explicitly set `GITHUB_AUTH_SOURCE`, and both are shared with `poll` on purpose (docs/polling.md). So a deployment
+ * that polls GitHub and takes webhooks for another forge could not start `serve` without a `WEBHOOK_SECRET` that no
+ * GitHub App was given, and with one it mounted a GitHub route nothing should deliver to. Neither input can say which
+ * transport carries GitHub; this one does. `null` keeps the inference (`decideServesGithub`, the #231 rule), so an
+ * existing deployment that never sets it boots as before. A new scaffold does not: it no longer sets
+ * GITHUB_AUTH_SOURCE, so its receiver serves GitHub only once a GitHub rule exists at its start (reloadTriggers).
+ *
+ * Empty is unset, as a blank scaffolded line is for most keys here: the receiver's own reading of an empty
+ * `GITHUB_AUTH_SOURCE` as "not explicit" is the precedent. Anything else outside the three words refuses at boot
+ * rather than falling back to the inference, because a typo'd `pol` that quietly kept a GitHub route armed is the
+ * believed-off-while-on state this setting exists to end. The value is shown only when it is short and plain: a
+ * token pasted into the wrong line must not reach a journal.
+ */
+export function githubIngestFrom(env) {
+	const raw = env.GITHUB_INGEST;
+	if (raw === undefined || raw === "") return null;
+	if (!GITHUB_INGEST_VALUES.includes(raw)) {
+		const shown = /^[A-Za-z0-9_-]{1,12}$/.test(raw) ? JSON.stringify(raw) : `a value of ${raw.length} characters, not shown`;
+		throw configError(`GITHUB_INGEST must be webhook, poll or both (or unset, to infer it); got ${shown}`);
+	}
+	return raw;
+}
+
+/**
+ * Whether `pi-dispatch-receiver serve` serves GitHub (mounts `/`, needs `WEBHOOK_SECRET`, resolves the GitHub identity)
+ * given this env and whether the triggers file holds an unspent GitHub webhook rule (issue #879). The receiver decides
+ * with it at boot (`decideServesGithub`, whose comment gives the reasons) and the console's trigger editor asks it of
+ * the file as it stands, so the two cannot answer apart: `GITHUB_INGEST` when set (`poll` no, `webhook` and `both`
+ * yes), else a GitHub rule or an explicitly set `GITHUB_AUTH_SOURCE` (read raw: the parsed source defaults to `gh` and
+ * cannot tell a choice from a default). Throws on a refused `GITHUB_INGEST`, as the receiver does.
+ */
+export function githubServedByServe(env, hasGithubRules) {
+	const ingest = githubIngestFrom(env);
+	if (ingest === "poll") return false;
+	if (ingest !== null) return true;
+	return hasGithubRules === true || (env.GITHUB_AUTH_SOURCE !== undefined && env.GITHUB_AUTH_SOURCE !== "");
+}
+
+/**
+ * The transports that would carry a GitHub trigger added to this deployment now (issue #879): `"webhook"` and `"poll"`,
+ * in that order, or none. The console's trigger editor offers GitHub exactly when this is not empty, so a deployment
+ * that polls GitHub can add a GitHub trigger, and one that has said nothing about GitHub is offered it as before.
+ *
+ * It answers a different question from the receiver's `servesGithub` (does `serve` mount `/` NOW), and that difference
+ * is the point: with GITHUB_INGEST unset, a deployment's FIRST GitHub rule is what makes `serve` serve GitHub at its next
+ * start, so asking "is GitHub served now" would never offer the first one. The webhook half is therefore "would `serve`
+ * start serving GitHub once the rule is written": every word but `poll` mounts `/` for a GitHub rule, and `serve` starts
+ * with `/` only beside a `WEBHOOK_SECRET` (the receiver's own nonblank test). The poll half is the operator's word:
+ * `poll` or `both`, since `poll` refuses to start under `webhook` and an unset deployment has said nothing about a
+ * poller. Both halves are held to the receiver's real loaders by a test (`admin/test/trigger-detail-read.test.mjs`) over
+ * every word, every secret shape and an unset or `gh` source. A source the loaders refuse (an unknown word, `pat` without
+ * its token, an incomplete App) refuses every receiver command whatever this says; doctor reports it, and this does not
+ * read it, as the secret-only offer it replaced did not.
+ * A refused GITHUB_INGEST throws, as the receiver's commands do, and nothing can carry a trigger then.
+ */
+export function githubTriggerTransports(env) {
+	const ingest = githubIngestFrom(env);
+	const raw = env.WEBHOOK_SECRET;
+	const secret = typeof raw === "string" && raw.trim() !== "";
+	// Under `both` the poller loads `serve`'s config, which serves GitHub and so judges the secret: an absent or empty one
+	// is papered over for that call (poller-config.mjs), but whitespace alone is a value no signature can be checked
+	// against, and the poller refuses it too (docs/polling.md). Under `poll` the loader asks for no secret at all.
+	const blankValue = typeof raw === "string" && raw !== "" && !secret;
+	return [...(ingest !== "poll" && secret ? ["webhook"] : []), ...(ingest === "poll" || (ingest === "both" && !blankValue) ? ["poll"] : [])];
+}
+
 // env-internal TMPDIR, TEMP: the OS temp dir, read to place the default job and sandbox paths
 // below -- and, only on a host with no home directory to name, as the last-resort fallback for the
 // durable state root. Not a variable of this project's and not a deployment knob: PI_JOBS_DIR,

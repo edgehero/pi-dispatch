@@ -20,8 +20,11 @@ The cost is latency. A webhook fires in about a second; a cycle is 60 seconds by
 ```
 # .env
 POLL_REPOS=acme/web,acme/api
-GITHUB_AUTH_SOURCE=pat        # or app, see below
+# or app, see below
+GITHUB_AUTH_SOURCE=pat
 GITHUB_PAT=github_pat_...
+# GitHub comes from the poller, so serve mounts no GitHub route
+GITHUB_INGEST=poll
 VALKEY_URL=redis://127.0.0.1:6379
 ```
 
@@ -36,11 +39,18 @@ genuinely empty value is swapped for a placeholder before that loader ever sees 
 boots while `WEBHOOK_SECRET=" "` does not: a space is a value, and the loader rejects it as one that
 cannot verify a signature. A malformed `RECEIVER_PORT` refuses too, even though `poll` binds no port. A
 secret with a real value is simply carried and unused, which is what lets one env file serve both
-commands.
+commands. Under `GITHUB_INGEST=poll` the loader asks for no secret at all, so neither value refuses.
+
+`GITHUB_INGEST` says which transport carries GitHub, and `serve` reads it too. `poll` is the one to set here: `serve`,
+if it runs for another forge, then mounts no GitHub route and needs no `WEBHOOK_SECRET`. Left unset, `serve` takes a
+GitHub trigger, or a set `GITHUB_AUTH_SOURCE`, to mean it serves GitHub, and refuses to start without the secret.
+`webhook` makes `poll` refuse to start, and `both` runs the two side by side, which is for the move described in
+[Moving to webhooks later](#moving-to-webhooks-later).
 
 Everything else is shared with `serve`: the same `triggers.json` (`PI_TRIGGERS_FILE`), the same GitHub
 auth block, the same queue. Pair it with `pi-dispatch setup github --no-webhook`, which mints
-credentials without asking you for a public URL. The App it creates has its webhook switched off. GitHub requires a
+credentials without asking you for a public URL, and writes `GITHUB_INGEST=poll` with them. The App it creates has
+its webhook switched off. GitHub requires a
 webhook URL all the same, so the App names `https://no-webhook.invalid/`, an address that never resolves. The ping
 GitHub sends when it creates the App fails there, and nothing can ever be delivered to it. To switch to webhooks
 later, see [Moving to webhooks later](#moving-to-webhooks-later).
@@ -152,7 +162,9 @@ path. A deployment with a poller and no worker fills a queue.
 ### 2. GitHub only
 
 GitLab, Forgejo and Azure DevOps have no polling path at all, and their setup docs say so. A deployment
-servicing those forges needs the webhook edge for them, and can still poll GitHub beside it.
+servicing those forges needs the webhook edge for them, and can still poll GitHub beside it. Set
+`GITHUB_INGEST=poll` in the `.env` the two share. Without it, `serve` reads your GitHub triggers, or a set
+`GITHUB_AUTH_SOURCE`, as GitHub webhooks it must take, and refuses to start without a `WEBHOOK_SECRET`.
 
 ### 3. Latency is a cycle, and the floor is 30 seconds
 
@@ -182,18 +194,23 @@ An App made with `--no-webhook` can take webhooks once you have a public URL for
 1. In the App's settings on GitHub, under Webhook, set your receiver's URL and a webhook secret, and leave **Active**
    unticked for now. If `.env` already has a `WEBHOOK_SECRET` that another GitHub webhook uses, give the App that
    value: the receiver checks every GitHub delivery against that one secret. Otherwise make a new one and put it in
-   `WEBHOOK_SECRET`. The wizard wrote none for this App.
+   `WEBHOOK_SECRET`. The wizard wrote none for this App. Then set `GITHUB_INGEST=both` in `.env` (the wizard wrote
+   `poll`), so the receiver serves GitHub while the poller keeps running. A new App made with
+   `pi-dispatch setup github --webhook-url` over this `.env` writes `both` itself, and its secret.
 2. Start `pi-dispatch-receiver` where that URL reaches it. If one already runs, restart it: it decides whether to
    serve GitHub, and reads `WEBHOOK_SECRET`, only when it starts. Until then a GitHub delivery gets a 404, or a 401
    against an older secret.
 3. Tick **Active**, and wait until the App's **Recent Deliveries** (under **Advanced**) shows the next event with a
    green tick, a 2xx answer. The poller keeps running meanwhile, so nothing is missed while you wait. A 401 there means
-   the two secrets differ, and a 404 that the receiver is not serving GitHub yet. If nothing shows at all, check the
+   the two secrets differ, and a 404 that the receiver is not serving GitHub yet (it read `GITHUB_INGEST=poll` when it
+   started: set `both` and restart it). If nothing shows at all, check the
    App's **Permissions & events**, under Subscribe to events.
 4. Then stop the poller. Stopping it first leaves a gap in which no event is seen, by either. While both run, each
    event arrives twice, under different ids. Repeats are normally merged into one job, but not around a run that takes
    steering: a comment can reach such a run twice, and once it has ended, the other copy of an event can start it again
-   ([steering.md](steering.md#per-forge)). Keep the overlap short.
+   ([steering.md](steering.md#per-forge)). Keep the overlap short. Once the poller is stopped, set
+   `GITHUB_INGEST=webhook`: a poller started again by mistake then refuses to start. The receiver treats `both` and
+   `webhook` alike, so it needs no restart for this.
 
 If you start the poller again later after more than `POLL_CATCHUP_MINUTES` (an hour by default), it starts from now
 and acts on none of the events the webhook handled meanwhile; sooner than that it catches up on them, and an event
@@ -203,6 +220,7 @@ whose webhook job was queued more than ten minutes before, or whose run has park
 
 | Variable | Default | Meaning |
 |---|---|---|
+| `GITHUB_INGEST` | unset | which transport carries GitHub, read by `serve` and `poll` alike. `poll`: `serve` mounts no GitHub route and needs no `WEBHOOK_SECRET`. `webhook`: `poll` refuses to start. `both`: the two run side by side, for a move between them. Unset, `serve` serves GitHub when your triggers name it or `GITHUB_AUTH_SOURCE` is set. Any other value refuses every receiver command at boot |
 | `POLL_REPOS` | unset | comma separated `owner/name`, deduplicated. Unset means discover from the App installation, and is a boot refusal under any auth source but `app` |
 | `POLL_INTERVAL_SECONDS` | 60 | seconds between cycles, floored at 30 (a positive value below it is raised; 0, a negative, a fraction or junk refuses at boot), raised further by GitHub's own `x-poll-interval` |
 | `POLL_CATCHUP_MINUTES` | 60 | how long a poller may have been away and still catch up when it starts again, counted from when its next poll was due; a repository overdue by longer starts from now (see [How it works](#how-it-works)). `0` never catches up. 50400 (35 days, the cursors' lifetime) or more always resumes, as the poller did before this setting; a negative, a fraction or junk refuses at boot |
@@ -210,7 +228,7 @@ whose webhook job was queued more than ten minutes before, or whose run has park
 
 `WEBHOOK_SECRET`, `RECEIVER_PORT` and `RECEIVER_BIND` are `serve` concerns and `poll` uses none of
 them, but it does load them, because it reuses the receiver's loader rather than forking it. A
-malformed `WEBHOOK_SECRET` or `RECEIVER_PORT` therefore refuses a `poll` boot with that loader's own
-message. `RECEIVER_BIND` is taken verbatim and validated by nothing, so there is no malformed value of
+malformed `WEBHOOK_SECRET` (unless `GITHUB_INGEST=poll`) or `RECEIVER_PORT` therefore refuses a `poll` boot with
+that loader's own message. `RECEIVER_BIND` is taken verbatim and validated by nothing, so there is no malformed value of
 it to refuse. Everything in [`docs/secrets.md`](secrets.md) about the receiver applies here unchanged:
 the poller holds the same forge credential and the same queue URL.

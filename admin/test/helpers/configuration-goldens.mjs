@@ -116,6 +116,12 @@ export const CONFIGURATION_DRAW = Object.freeze({
   "connections-hook-timeout.viewer": () => connection({ change: (_, reads) => { reads.hookRuns = () => ({ partial: false, more: 0, hosts: [{ name: "mini1", runs: [buildHookRun({ jobId: "gh-f0c2", outcome: "failed", reason: "infra", detail: "timeout", code: null }, NOW - 60_000)] }] }); } }, "viewer"),
   "connections-hook-unreadable.viewer": () => connection({ change: (_, reads) => { reads.hookRuns = () => ({ partial: true, more: 3, hosts: [{ name: "build3", runs: [], unreadable: true }] }); } }, "viewer"),
   "connections-receiver-missing-secret.operator": () => connection({ change: (_, r) => { r.environment = () => ({ env: { GITHUB_AUTH_SOURCE: "gh" } }); } }),
+  // Issue #879: GitHub polled on purpose (`setup github --no-webhook`'s .env, with no webhook secret), beside GitLab by
+  // webhook, and a GITHUB_INGEST every receiver command refuses.
+  // A live receiver that started before GitHub was armed: it reports, serves GitLab, and not GitHub.
+  "connections-receiver-restart.operator": () => connection({ change: (_, r) => { r.receivers = async () => ({ hosts: [receiverFixture(NOW, { forges: ["gitlab"] })], complete: true, more: 0 }); } }),
+  "connections-github-polled.operator": () => connection({ change: (_, r) => { const original = r.environment; r.environment = (o) => { const { WEBHOOK_SECRET: _w, ...env } = original(o).env; return { env: { ...env, GITHUB_INGEST: "poll" } }; }; } }),
+  "connections-github-ingest-refused.operator": () => connection({ change: (_, r) => { const original = r.environment; r.environment = (o) => ({ env: { ...original(o).env, GITHUB_INGEST: "pull" } }); } }),
   "connections-endpoint-bounds.operator": () => connection({ change: (_, r) => { r.endpointStatus = async () => ({ state: "reported", partial: false, more: 0, hosts: [
     { name: "mini1", at: NOW - 1000, ageMs: 1000, state: "reported", endpointsMore: 0, endpoints: [{ id: "ollama-mini2", slots: 2, used: 1, fleet: 1 }] },
     { name: "mini2", at: NOW - 2000, ageMs: 2000, state: "reported", endpointsMore: 0, endpoints: [{ id: "ollama-mini2", slots: 3, used: 2, fleet: 1 }] },

@@ -53,11 +53,16 @@ which is the case worth serving. It does not pretend to be a snapshot, because i
 On by default, with a 24-hour window:
 
 ```bash
-PI_SANDBOX_RETENTION_HOURS=24   # 0 = OFF. Note: not "keep forever" — see below
-PI_SANDBOX_DIR=                 # default <PI_JOBS_DIR>/sandboxes, created mode 0700 (PI_JOBS_DIR: <tmp>/pi-dispatch-<uid>/jobs)
-PI_SANDBOX_PIN_DAYS=7           # what --pin extends a run to
-PI_SANDBOX_IDLE_MINUTES=30      # TMOUT inside the sandbox; 0 = no idle logout
-PI_SWEEP_INTERVAL_HOURS=24      # how often the sweep re-runs while the worker is up; 0 = boot-only
+# 0 = OFF. Note: not "keep forever" — see below
+PI_SANDBOX_RETENTION_HOURS=24
+# default <PI_JOBS_DIR>/sandboxes, created mode 0700 (PI_JOBS_DIR: <tmp>/pi-dispatch-<uid>/jobs)
+PI_SANDBOX_DIR=
+# what --pin extends a run to
+PI_SANDBOX_PIN_DAYS=7
+# TMOUT inside the sandbox; 0 = no idle logout
+PI_SANDBOX_IDLE_MINUTES=30
+# how often the sweep re-runs while the worker is up; 0 = boot-only
+PI_SWEEP_INTERVAL_HOURS=24
 ```
 
 **The `0` sentinel is inverted here, and that is on purpose.** `PI_LOG_RETENTION_DAYS=0` and

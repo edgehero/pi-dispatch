@@ -27,6 +27,12 @@ function polling(poll) {
 }
 
 function forgeRow(f) {
+  // Issue #879: GitHub polled on purpose is not an unconfigured forge. Its auth, polling and who may fire still apply
+  // (the poller runs the same gate), so the row keeps them and says only that the webhook route is not served.
+  if (f.enabled === false && f.name === "github" && f.ingest === "poll") {
+    const auth = f.auth.split("; ");
+    return { cells: [html`<b>${f.name}</b>`, cell(state("polled", f.polling?.state === "on" ? "ok" : "attention"), html`<span class="code">GITHUB_INGEST=poll</span>`), { html: cell(auth[0], auth.length > 1 ? auth.slice(1).join("; ") : null), wide: true }, { html: html`<span class="muted">No webhook: <span class="code">serve</span> mounts no GitHub route, so path <span class="code">${f.path}</span> answers 404</span>`, wide: true }, { html: polling(f.polling), wide: true }, { html: f.access, wide: true }] };
+  }
   if (f.enabled === false) return { cells: [html`<b>${f.name}</b>`, state("not configured"), { html: html`<span class="muted">No activation setting${f.name === "github" ? " or active GitHub trigger" : ""} names it.</span>`, wide: true }, { html: html`<span class="muted">path <span class="code">${f.path}</span> answers 404</span>`, wide: true }, { html: null, hidePhone: true }, { html: null, hidePhone: true }] };
   const auth = f.auth.split("; ");
   const enabled = f.enabled === null ? state("configuration unknown", "attention", "info") : state(html`armed by ${f.triggers.length ? html`${f.triggers.length === 1 ? "trigger" : "triggers"} ${f.triggers.map((index, n) => html`${n ? ", " : null}<a href="${`/config/trigger?index=${index}`}" aria-label="${`Trigger ${index + 1}`}">${index + 1}</a>`)}` : "settings"}`, "ok");
@@ -83,13 +89,21 @@ export const RESEND_ADVICE = Object.freeze({
   azure: Object.freeze({ doc: "azure-devops.md", resend: "Azure DevOps resends a delivery answered 503 for about 3 minutes, and every resend answered 503 counts here too. One still failing after that puts the subscription on probation: Azure retries it up to 7 more times over about 36 hours and sends no new events meanwhile. Check its history under Service hooks." }),
 });
 
+/** Said where live receivers serve other forges but not an armed one (issue #879): they armed what they saw at their start. */
+export const RESTART_TO_SERVE = "The forge is armed, and the receivers reporting started before it was: a receiver arms a forge when it starts, and answers its deliveries 404 until then. Restart the receiver service to take its webhooks.";
+
 function receiverWarnings(v) {
   const read = v.receiver;
   const hosts = (read?.hosts ?? []).filter((h) => !h.unreadable);
   const banners = [];
   if (read?.complete === true) {
     for (const forge of v.forges.filter((f) => f.enabled === true)) {
-      if (!hosts.some((h) => h.forges.includes(forge.name))) banners.push(ui.banner({ status: "attention", title: `No live receiver reported for ${forge.name}`, body: "The forge is armed. Check the receiver service on its host; an absent observation does not prove the service stopped.", sm: true }));
+      if (hosts.some((h) => h.forges.includes(forge.name))) continue;
+      // Issue #879: live receivers that serve other forges but not this one started before it was armed, since a receiver
+      // arms a forge only when it starts (a GitHub rule added to a running receiver is reloaded and answered 404). Their
+      // service is up, so "check the receiver service" pointed at the wrong cause; a restart is the fix.
+      if (hosts.length > 0) banners.push(ui.banner({ status: "attention", title: `Live receivers do not serve ${forge.name} yet`, body: RESTART_TO_SERVE, sm: true }));
+      else banners.push(ui.banner({ status: "attention", title: `No live receiver reported for ${forge.name}`, body: "The forge is armed. Check the receiver service on its host; an absent observation does not prove the service stopped.", sm: true }));
     }
     for (const forge of RECEIVER_FORGES) {
       const counts = Object.fromEntries(RECEIVER_OUTCOMES.map((word) => [word, hosts.reduce((sum, h) => sum + receiverForgeFacts(h, forge, v.now).counts[word], 0)]));

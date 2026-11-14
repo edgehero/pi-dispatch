@@ -39,9 +39,10 @@ import { outputCapView } from "./output-cap.mjs";
 import { answerTrailComment, consoleAnswerBy, consoleDraftOf } from "./console-answer.mjs";
 import { forgeDeliveryJobId } from "./job-id.mjs";
 import { FORGE_JOB_RETENTION_MS } from "./retention.mjs";
+import { githubFailureFields } from "./octokit-log.mjs";
 // The forge-comment tables (issue #710): every fixed sentence this file posts, in one leaf the reason catalog can import
 // without the job path. Re-exported below under the names they always had here.
-import { MODEL_AGENTS_INVALID_COMMENT, APPROVAL_COMMENTS, APPROVAL_PARK_NEWER_COMMENT, BUNDLE_COMMENTS, ENVELOPE_MISMATCH_COMMENTS, HELD_TAKEN_COMMENT, JOB_USER_COMMENTS, MODEL_NOT_ALLOWED_COMMENTS, MODEL_UNKNOWN_COMMENT, modelUnknownComment, NETNS_KEEPER_CRASH_LOOP, NETNS_KEEPER_NOT_HOLDING, OVERLAY_REFUSED_COMMENT, PARKED_COMMENT, PARKED_COMMENT_PR, PODMAN_CONF_COMMENTS, RECOVERY_COMMENTS, REFUSAL_COMMENTS, TERMINAL_COMMENTS, VENUE_BUNDLE_REFUSED_COMMENT, VENUE_REFUSED_COMMENT, parkedComment } from "./comment-tables.mjs";
+import { MODEL_AGENTS_INVALID_COMMENT, APPROVAL_COMMENTS, APPROVAL_PARK_NEWER_COMMENT, BRANCH_PROTECTION_UNREADABLE, BUNDLE_COMMENTS, ENVELOPE_MISMATCH_COMMENTS, HELD_TAKEN_COMMENT, JOB_USER_COMMENTS, MODEL_NOT_ALLOWED_COMMENTS, MODEL_UNKNOWN_COMMENT, modelUnknownComment, NETNS_KEEPER_CRASH_LOOP, NETNS_KEEPER_NOT_HOLDING, OVERLAY_REFUSED_COMMENT, PARKED_COMMENT, PARKED_COMMENT_PR, PODMAN_CONF_COMMENTS, RECOVERY_COMMENTS, REFUSAL_COMMENTS, TERMINAL_COMMENTS, VENUE_BUNDLE_REFUSED_COMMENT, VENUE_REFUSED_COMMENT, parkedComment } from "./comment-tables.mjs";
 
 /**
  * The forge comment's reason for each observation a floor refusal missed (issues #278 and #345), keyed like
@@ -2001,7 +2002,25 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			// REQ-BRANCH-PROTECTION-PRECONDITION. The agent's token can merge, so branch protection is the
 			// only technical barrier to a self-merge. Refuse before spending anything. Forge-backed jobs
 			// only: a local job has no remote branch to protect.
-			if (!(await isDefaultBranchProtected(job, token))) {
+			let branchProtected;
+			try {
+				branchProtected = await isDefaultBranchProtected(job, token);
+			} catch (error) {
+				// Issue #876: the forge refused the read itself, determinately (GitHub's 403 to a token that may not
+				// read the default branch, which is not a rate limit). Neither answer is known, so the job is refused as
+				// neither: not "unprotected", whose fix is wrong here, and never run, since the backstop is unconfirmed.
+				// A RETURN, not a throw (CONST-RETRY-INFRA-ONLY): the same token gets the same 403 on every attempt, and
+				// the queue used to retry it into a failure the record could only call `worker-error`. The host tags
+				// the error; anything else it throws (a transient read, a rate limit) still goes to the queue.
+				if (error?.piDispatchConfig === true && error?.reason === BRANCH_PROTECTION_UNREADABLE) {
+					await comment(job, REFUSAL_COMMENTS[BRANCH_PROTECTION_UNREADABLE]);
+					// GitHub's status and request id, never its message or the response (octokit-log.mjs `githubFailureFields`).
+					log("refused_branch_protection_unreadable", { repo: job.repo, ...githubFailureFields(error) });
+					return { outcome: "policy", reason: BRANCH_PROTECTION_UNREADABLE, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+				}
+				throw error;
+			}
+			if (!branchProtected) {
 				await comment(job, REFUSAL_COMMENTS["unprotected-branch"]);
 				log("refused_unprotected", { repo: job.repo });
 				// exitCode/turns/tokens null: refused pre-container, so no container exit, turn, or token count exists.
