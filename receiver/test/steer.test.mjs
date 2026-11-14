@@ -642,6 +642,13 @@ function pollerRedis(steer) {
 		async incr() {
 			return 1;
 		},
+		// The catch-up check at start (issue #880): no cursor family, so nothing to date and nothing to delete.
+		async ttl() {
+			return -2;
+		},
+		async del() {
+			return 0;
+		},
 		async quit() {},
 	});
 }

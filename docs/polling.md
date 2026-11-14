@@ -98,14 +98,34 @@ scheduler and has nothing to do with ingest, so it is not here.
 ## How it works
 
 **Cursors, per repository, in Valkey.** Each source keeps its own position: the last event id, the
-comment `since` timestamp, the open PR head sha snapshot, the last review id. They carry a 35 day TTL
-and are refreshed together after each successful poll of that repository. 35 days deliberately outlives
-the 31 day `gh-*` job id retention, so the cursor and the job id stay two coherent dedup layers rather
-than one expiring under the other.
+comment `since` timestamp, the open PR head sha snapshot, the last review id. They carry a 35 day TTL,
+counted from when the repository's next poll is due, and are refreshed together at the end of each cycle
+that polled it. 35 days deliberately outlives the 31 day `gh-*` job id retention, so the cursor and the
+job id stay two coherent dedup layers rather than one expiring under the other.
 
 **A fresh poller starts from now.** On first boot, and on a repository newly added to the set, cursors
 are initialized to the current position without enqueuing anything. A label applied months ago was a
 human approval for that moment's issue text and that moment's budget, not a standing order.
+
+A poller started again after a stop gets the same treatment once it has been away longer than
+`POLL_CATCHUP_MINUTES`, an hour by default. Just before it first polls each repository, it works out how
+long that poll is overdue. Every cycle renews the cursors' 35 days counting from when the next poll is
+due, so what is left of them gives the time, and the wait the poller had planned anyway (the interval,
+GitHub's `x-poll-interval`, a rate limit sleep) does not count as time away. A repository overdue by
+longer than the setting allows has its cursors cleared and starts from now, with a `poll_rearmed` line
+that names it and says how many minutes it was away. Nothing that happened in the gap starts a job,
+including events a webhook receiver already ran while the poller was down. A shorter stop, a host restart
+say, catches up on what it missed, with a `poll_resumed` line saying how many minutes back it reached.
+`0` never catches up. A repository the App installation lists again after leaving it is checked the same
+way when it comes back.
+
+A host that sleeps is a stop the poller does not see, so a wait that ends later than the setting (and
+more than a minute late) is treated as one: a `poll_woke_late` line, and every repository is checked again
+before its next poll. Otherwise the check does not run inside a running poller, so a failed token mint or
+one repository's outage is still caught up on afterwards, however long it lasted. If Valkey answers the
+check with an error, that repository is skipped with a `poll_catchup_check_failed` line and checked again
+before each cycle, and it is never polled from cursors whose age is unknown. Those failed cycles count
+toward its age.
 
 **Dedup without a delivery id.** Polling has no `X-GitHub-Delivery`, so each source mints a
 deterministic stand in that survives a retried cycle: `poll-e<eventId>`, `poll-c<commentId>`,
@@ -192,6 +212,10 @@ An App made with `--no-webhook` can take webhooks once you have a public URL for
    `GITHUB_INGEST=webhook`: a poller started again by mistake then refuses to start. The receiver treats `both` and
    `webhook` alike, so it needs no restart for this.
 
+If you start the poller again later after more than `POLL_CATCHUP_MINUTES` (an hour by default), it starts from now
+and acts on none of the events the webhook handled meanwhile; sooner than that it catches up on them, and an event
+whose webhook job was queued more than ten minutes before, or whose run has parked, can then start a second job.
+
 ## Reference
 
 | Variable | Default | Meaning |
@@ -199,6 +223,7 @@ An App made with `--no-webhook` can take webhooks once you have a public URL for
 | `GITHUB_INGEST` | unset | which transport carries GitHub, read by `serve` and `poll` alike. `poll`: `serve` mounts no GitHub route and needs no `WEBHOOK_SECRET`. `webhook`: `poll` refuses to start. `both`: the two run side by side, for a move between them. Unset, `serve` serves GitHub when your triggers name it or `GITHUB_AUTH_SOURCE` is set. Any other value refuses every receiver command at boot |
 | `POLL_REPOS` | unset | comma separated `owner/name`, deduplicated. Unset means discover from the App installation, and is a boot refusal under any auth source but `app` |
 | `POLL_INTERVAL_SECONDS` | 60 | seconds between cycles, floored at 30 (a positive value below it is raised; 0, a negative, a fraction or junk refuses at boot), raised further by GitHub's own `x-poll-interval` |
+| `POLL_CATCHUP_MINUTES` | 60 | how long a poller may have been away and still catch up when it starts again, counted from when its next poll was due; a repository overdue by longer starts from now (see [How it works](#how-it-works)). `0` never catches up. 50400 (35 days, the cursors' lifetime) or more always resumes, as the poller did before this setting; a negative, a fraction or junk refuses at boot |
 | `RECEIVER_IDENTITY_RETRY_SECONDS` | 600 | how long the boot's identity lookup retries a transient failure (a 502, a refused connection, GitHub mid-restart) before exiting 1 for the supervisor, floored at 60 with the same raise-or-refuse rules; the poller's gate and `serve`'s arms share the one window |
 
 `WEBHOOK_SECRET`, `RECEIVER_PORT` and `RECEIVER_BIND` are `serve` concerns and `poll` uses none of
