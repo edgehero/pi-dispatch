@@ -32,12 +32,14 @@ function fakeRequest(answer, seen) {
 }
 
 test("probe targets: loopback as written, an any-address bind on its own family's loopback, the socket by path, and nothing else", () => {
-	assert.deepEqual(consoleProbeTarget(undefined), { kind: "tcp", host: "127.0.0.1", port: 4790, shown: "127.0.0.1:4790" }, "unset is the console's default");
-	assert.deepEqual(consoleProbeTarget("   "), { kind: "tcp", host: "127.0.0.1", port: 4790, shown: "127.0.0.1:4790" }, "whitespace is unset, as the console trims it");
-	assert.deepEqual(consoleProbeTarget(" 127.0.0.2:4800 "), { kind: "tcp", host: "127.0.0.2", port: 4800, shown: "127.0.0.2:4800" });
-	assert.deepEqual(consoleProbeTarget("[::1]:4791"), { kind: "tcp", host: "::1", port: 4791, shown: "[::1]:4791" });
-	assert.deepEqual(consoleProbeTarget("0.0.0.0:4790"), { kind: "tcp", host: "127.0.0.1", port: 4790, shown: "127.0.0.1:4790" });
-	for (const any of ["[::]:4790", "[::0]:4790", "[0:0:0:0:0:0:0:0]:4790"]) assert.deepEqual(consoleProbeTarget(any), { kind: "tcp", host: "::1", port: 4790, shown: "[::1]:4790" }, any);
+	assert.deepEqual(consoleProbeTarget(undefined), { kind: "tcp", host: "127.0.0.1", port: 4790, shown: "127.0.0.1:4790", url: "http://pi-dispatch.localhost:4790/" }, "unset is the console's default");
+	assert.deepEqual(consoleProbeTarget("   "), { kind: "tcp", host: "127.0.0.1", port: 4790, shown: "127.0.0.1:4790", url: "http://pi-dispatch.localhost:4790/" }, "whitespace is unset, as the console trims it");
+	// Issue #882: the console's name, pi-dispatch.localhost, reaches 127.0.0.1 and ::1 only, so another loopback address is printed as it binds.
+	assert.deepEqual(consoleProbeTarget(" 127.0.0.2:4800 "), { kind: "tcp", host: "127.0.0.2", port: 4800, shown: "127.0.0.2:4800", url: "http://127.0.0.2:4800/" });
+	assert.deepEqual(consoleProbeTarget("[::1]:4791"), { kind: "tcp", host: "::1", port: 4791, shown: "[::1]:4791", url: "http://pi-dispatch.localhost:4791/" });
+	assert.equal(consoleProbeTarget("[0:0:0:0:0:0:0:1]:4791").url, "http://pi-dispatch.localhost:4791/");
+	assert.deepEqual(consoleProbeTarget("0.0.0.0:4790"), { kind: "tcp", host: "127.0.0.1", port: 4790, shown: "127.0.0.1:4790", url: "http://pi-dispatch.localhost:4790/" });
+	for (const any of ["[::]:4790", "[::0]:4790", "[0:0:0:0:0:0:0:0]:4790"]) assert.deepEqual(consoleProbeTarget(any), { kind: "tcp", host: "::1", port: 4790, shown: "[::1]:4790", url: "http://pi-dispatch.localhost:4790/" }, any);
 	assert.deepEqual(consoleProbeTarget("unix:/run/pd/console.sock"), { kind: "unix", path: "/run/pd/console.sock", shown: "unix:/run/pd/console.sock" });
 	for (const [value, why] of [
 		["127.0.0.1:0", /port 0/],
@@ -57,7 +59,7 @@ test("probe targets: loopback as written, an any-address bind on its own family'
 
 test("probeConsole: one GET /healthz with Host 127.0.0.1, answered running, not running or unknown", async () => {
 	const seen = [];
-	assert.deepEqual(await probeConsole({}, { request: fakeRequest({ status: 200 }, seen) }), { target: "127.0.0.1:4790", state: "running" });
+	assert.deepEqual(await probeConsole({}, { request: fakeRequest({ status: 200 }, seen) }), { target: "127.0.0.1:4790", url: "http://pi-dispatch.localhost:4790/", state: "running" });
 	assert.equal(seen.length, 1);
 	assert.equal(seen[0].method, "GET");
 	assert.equal(seen[0].path, "/healthz");
@@ -69,13 +71,13 @@ test("probeConsole: one GET /healthz with Host 127.0.0.1, answered running, not 
 	assert.equal(other.state, "not-running");
 	assert.match(other.reason, /HTTP 404, not the console's 200/);
 	const refused = await probeConsole({}, { request: fakeRequest({ error: "ECONNREFUSED" }, []) });
-	assert.deepEqual(refused, { target: "127.0.0.1:4790", state: "not-running", reason: "nothing listens there" });
+	assert.deepEqual(refused, { target: "127.0.0.1:4790", url: "http://pi-dispatch.localhost:4790/", state: "not-running", reason: "nothing listens there" });
 	const gone = await probeConsole({ PI_CONSOLE_LISTEN: "unix:/run/pd.sock" }, { request: fakeRequest({ error: "ENOENT" }, []) });
 	assert.equal(gone.reason, "nothing listens there");
 	const reset = await probeConsole({}, { request: fakeRequest({ error: "ECONNRESET" }, []) });
 	assert.match(reset.reason, /ECONNRESET/);
 	const hung = await probeConsole({}, { request: fakeRequest("hang", []), timeoutMs: 20 });
-	assert.deepEqual(hung, { target: "127.0.0.1:4790", state: "not-running", reason: "nothing answered within 20 ms" });
+	assert.deepEqual(hung, { target: "127.0.0.1:4790", url: "http://pi-dispatch.localhost:4790/", state: "not-running", reason: "nothing answered within 20 ms" });
 	const threw = await probeConsole({}, {
 		request: () => {
 			throw Object.assign(new Error("bad"), { code: "ERR_INVALID_ARG_VALUE" });

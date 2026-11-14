@@ -52,6 +52,7 @@ import { createHash } from "node:crypto";
  */
 import { accessSync, chmodSync, closeSync, constants as fsConstants, existsSync, fstatSync, lstatSync, mkdirSync, mkdtempSync, openSync, readdirSync, readFileSync, readSync, realpathSync, rmSync, statSync } from "node:fs";
 import { lookup as dnsLookup } from "node:dns/promises";
+import { CONSOLE_HOSTNAME } from "./console-probe.mjs";
 import { homedir, networkInterfaces, release as osRelease, tmpdir, userInfo } from "node:os";
 import { BlockList, isIPv4, isIPv6 } from "node:net";
 import * as nodeFs from "node:fs";
@@ -5871,20 +5872,65 @@ export async function consoleServiceChecks(env, seams = {}) {
 	} catch (err) {
 		answer = { state: "unknown", reason: `the probe failed (${escapeControls(err?.message ?? String(err))})` };
 	}
-	const at = answer.target ? ` on ${escapeControls(answer.target)}` : "";
+	// Issue #882: where a person opens it, `http://pi-dispatch.localhost:<port>/`, for a TCP console; the probe itself asked the literal.
+	const at = answer.url ? ` at ${escapeControls(answer.url)}` : answer.target ? ` on ${escapeControls(answer.target)}` : "";
+	const named = await consoleNameChecks(answer, seams);
 	const why = answer.reason ? ` (${escapeControls(answer.reason)})` : "";
 	const unitShown = unit ? quotedShown(unit.path) : null;
 	const logs = platform === "linux" ? "`journalctl --user -u pi-dispatch-console` (or without --user for a system unit)" : platform === "darwin" ? `${join(cwd, "logs", "console.err.log")}` : `${join(cwd, "logs", "console.err.log")} and \`nssm status ${CONSOLE_NSSM_SERVICE}\``;
 	if (answer.state === "unknown") {
 		return [{ ok: true, label: `console: ${unit ? `the service ${unitShown} serves this deployment; ` : "no service unit keeps it running; "}whether it answers is not checked${why}` }];
 	}
-	if (unit && answer.state === "running") return [{ ok: true, label: `console: the service ${unitShown} keeps it running, and it answers${at}` }];
+	if (unit && answer.state === "running") return [{ ok: true, label: `console: the service ${unitShown} keeps it running, and it answers${at}` }, ...named];
 	if (unit) {
 		const lock = join(logsDirPath(env, seams.home), "console-audit", ".console.lock");
 		return [{ ok: false, label: `console: the service ${unitShown} is installed for this deployment, but nothing answers${at}${why}`, fix: `\`pi-dispatch service status --console\` says whether it runs, and ${logs} says why it stopped: \`pi-dispatch-console serve\` exits 2 on a refusal (no operator token, the lock held by another console, an address in use), and the unit then stays stopped until it is started again (\`pi-dispatch service start --console\`). After a crash the lock ${escapeControls(lock)} can name a pid another process has since taken, which keeps every start refusing: when that pid is not a console, remove the lock, then start the unit` }];
 	}
-	if (answer.state === "running") return [{ ok: true, label: `console: answers${at}, started by hand (no service unit for this deployment, so it stops with the terminal that runs it)` }];
+	if (answer.state === "running") return [{ ok: true, label: `console: answers${at}, started by hand (no service unit for this deployment, so it stops with the terminal that runs it)` }, ...named];
 	return [{ ok: false, warn: true, label: `console: not running${at}${why}, and no service unit keeps it running`, fix: "`pi-dispatch service install --console` keeps it running (it needs an operator token); or start it in a terminal with `pi-dispatch-console serve`" }];
+}
+
+/**
+ * Issue #882: whether this host resolves the console's printed name, `pi-dispatch.localhost`, to its own loopback. Asked
+ * only of a running console whose printed address is that name (`answer.url`), with the system's resolver (`lookup`, a
+ * seam; `getaddrinfo` underneath, which systemd-resolved, nss-myhostname and macOS answer for any `.localhost` name on the
+ * host itself, RFC 6761) and bounded to `NAME_LOOKUP_MS`. Nothing when it does: the line exists for the host where it
+ * does not (a minimal Linux without either), where a browser that asks the system for the name, Safari and a few others,
+ * may not reach the console, and `http://localhost:<port>/` still does. Chrome and Firefox answer the name themselves.
+ * Where the system sends the name out instead, whatever answers could point it elsewhere: a warning, never a failure,
+ * since the console itself answers by IP literal and is unaffected.
+ */
+export const NAME_LOOKUP_MS = 1000;
+export async function consoleNameChecks(answer, seams = {}) {
+	if (answer?.state !== "running" || typeof answer.url !== "string") return [];
+	let url;
+	try { url = new URL(answer.url); } catch { return []; }
+	if (url.hostname !== CONSOLE_HOSTNAME) return [];
+	const lookup = seams.lookupName ?? ((name) => dnsLookup(name, { all: true }));
+	let addresses;
+	let failed = null;
+	try {
+		addresses = await Promise.race([lookup(CONSOLE_HOSTNAME), new Promise((_, reject) => setTimeout(() => reject(Object.assign(new Error("timeout"), { code: "a timeout" })), NAME_LOOKUP_MS).unref?.())]);
+	} catch (err) {
+		failed = typeof err?.code === "string" ? err.code : "an error";
+	}
+	const list = Array.isArray(addresses) ? addresses.map((a) => a?.address) : [];
+	const loopbackOnly = failed === null && list.length > 0 && list.every((a) => typeof a === "string" && isLoopbackLiteral(a));
+	if (loopbackOnly) return [];
+	const port = url.port || "80";
+	const said = failed !== null ? `this host could not resolve it (${failed})` : list.length === 0 ? "this host resolves it to nothing" : "this host resolves it to an address that is not its own loopback";
+	return [{ ok: false, warn: true, label: `console: ${CONSOLE_HOSTNAME}, the address the console's commands print, does not lead to this host: ${said}`, fix: `Chrome and Firefox reach it all the same; in another browser open http://localhost:${port}/ instead. On Linux, systemd-resolved or nss-myhostname (the \`myhostname\` entry of /etc/nsswitch.conf) makes every .localhost name this host's loopback (docs/console.md)` }];
+}
+
+/** True for 127.0.0.0/8 and ::1 written as an address (an IPv4-mapped one too), the answers a `.localhost` name may have. */
+function isLoopbackLiteral(address) {
+	const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(address);
+	const a = mapped ? mapped[1] : address;
+	if (isIPv4(a)) return a.startsWith("127.");
+	if (isIPv6(a)) {
+		try { return new URL(`http://[${a}]/`).hostname === "[::1]"; } catch { return false; }
+	}
+	return false;
 }
 
 /**

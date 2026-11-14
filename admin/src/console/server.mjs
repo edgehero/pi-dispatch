@@ -85,13 +85,13 @@ import { keptTokens as realKeptTokens } from "@edgehero/pi-dispatch/console-toke
 import { TRANSCRIPT_ID_RE } from "../read-model.mjs";
 import { ACTIONS, actionNamed, cancelAction, confirmAction, plural, previewAction } from "./actions.mjs";
 import { refusalHtml } from "./confirm-view.mjs";
-import { invitationMatches } from "./login-codes.mjs";
+import { codeKindOf, invitationMatches } from "./login-codes.mjs";
 import { renderTriggerCheckResult } from "./panels/triggers.mjs";
 import { errorPage as realErrorPage, RUN_PATH_SENTENCES } from "./error-pages.mjs";
 import { LOOPBACK_HOSTS, contentTypeRefusal, hostnameOf, hostRefusal, makeLoginLimiter, originRefusal, readOnlyRefusal, roleRefusal } from "./guards.mjs";
 import { applySecurityHeaders } from "./headers.mjs";
 import * as ui from "./kit.mjs";
-import { isLoopbackAddress } from "./listen.mjs";
+import { isLocalhostAddress, isLoopbackAddress } from "./listen.mjs";
 import { STATE_VERSION, stateOf as defaultStateOf } from "./live.mjs";
 import { RUN_ID_RE } from "./panels.mjs";
 import { getWatchTrace } from "./watch.mjs";
@@ -143,8 +143,6 @@ export const REFUSAL_ROWS_PER_MINUTE = 60;
 export const PAUSE_WINDOWS_ACTION = "pause-windows";
 
 const ANONYMOUS = Object.freeze({ name: "anonymous", role: "none", session: null });
-// One-time codes are base64url(32 bytes), 43 characters; anything far off that is refused before it is hashed.
-const CODE_RE = /^[A-Za-z0-9_-]{16,128}$/;
 
 /**
  * What every request answers while the tokens file cannot be used (a sign-in, and since issue #737 any request with a
@@ -321,6 +319,17 @@ function rememberTransportOk(ctx) {
   return LOOPBACK_HOSTS.includes(hostnameOf(ctx.req.headers.host));
 }
 
+/**
+ * Whether this sign-in may become a remembered device without a box to tick (issue #882): a role a device may be remembered for, never a viewer
+ * invitation, a device store that works on this host, and the transport `rememberTransportOk` asks for. The one rule for both of its uses, so they
+ * cannot drift: a sign-in with a credential the host made (a one-time link or code) is remembered at once where it holds, and a token sign-in that
+ * left the box unticked is offered it once where it holds. A sign-in where it does not hold stays an ordinary session, as it always was there.
+ */
+export function rememberAllowed(ctx, role, invited) {
+  const { deps } = ctx;
+  return !invited && REMEMBER_ROLES.includes(role) && Boolean(deps.devices) && deps.devices.unavailable() === null && rememberTransportOk(ctx);
+}
+
 /** Whether this origin is an enrolled HTTPS one, for a cookie's `Secure` on a GET, which has no `ctx.consoleOrigin`. Null when it cannot be told. A write uses the one its guard read. */
 function secureOrigin(deps) {
   try {
@@ -383,8 +392,15 @@ function renewSecureOf(ctx) {
  * they read `elsewhere` and left a browser that had just signed in. (The script also waits `RETRY_MS` before that
  * probe, for the browser to store the cookie; and should this answer never finish, the hub's next tick ends them, the
  * old session being gone already.)
+ *
+ * REMEMBERED BY DEFAULT (issue #882): `hostMade` is a sign-in with a credential the host made, a one-time link or code. It
+ * remembers the browser at once wherever `rememberAllowed` holds, as a ticked box would, because the person who ran the
+ * command on the host has already vouched for this browser, and asking again was the step people missed. `remember` is
+ * the token form's box, which asks and is refused when it cannot be honoured (`postLogin`). A third host-approved way in
+ * passes `hostMade` too, and gets the same rule. `audit` is extra fields for the sign-in's own row (a code's `kind`), and
+ * `note` a notice for the first page (a token whose role no browser may remember, signed in all the same).
  */
-function startSession(ctx, entry, file, action, extra = {}, { remember = false, invited = false } = {}) {
+function startSession(ctx, entry, file, action, extra = {}, { remember = false, invited = false, hostMade = false, audit = {}, note = null } = {}) {
   const { deps, res } = ctx;
   const presented = deps.cookies.readSessionCookie(ctx.req.headers.cookie);
   // The write guard already judged this request against the protected canonical origin. Reuse that exact
@@ -395,8 +411,8 @@ function startSession(ctx, entry, file, action, extra = {}, { remember = false, 
   const secret = deps.devices ? deps.cookies.readDeviceCookie(deps.devices.cookieName, ctx.req.headers.cookie) : null;
   let replacing = null;
   let unreadable = null;
-  // What this sign-in's first page should say about the browser (issue #849), gathered into one flash below.
-  const notices = [];
+  // What this sign-in's first page should say about the browser (issue #849), gathered into one flash below. `note` is the caller's (issue #882).
+  const notices = note ? [note] : [];
   if (secret) {
     const hash = deps.devices.hashOf(secret);
     const read = deps.devices.read(hash);
@@ -404,7 +420,7 @@ function startSession(ctx, entry, file, action, extra = {}, { remember = false, 
       // The same person signing in on a browser that already remembers them: nothing about the browser changes, and the sign-in is still on the record.
       const made = deps.sessions.ensureDevice({ deviceHash: hash, name: entry.name, role: entry.role, tokenHash: entry.sha256, generation: file.generation });
       try {
-        deps.audit.append({ actor: { name: entry.name, role: entry.role, session: deps.cookies.sessionDigest(made.id) }, action, outcome: "ok" });
+        deps.audit.append({ actor: { name: entry.name, role: entry.role, session: deps.cookies.sessionDigest(made.id) }, action, ...audit, outcome: "ok" });
       } catch (e) {
         // A session made just now with no row would be restored later with none.
         if (made.created) deps.sessions.destroy(made.id, null);
@@ -428,7 +444,7 @@ function startSession(ctx, entry, file, action, extra = {}, { remember = false, 
   }
   const { id } = deps.sessions.create({ name: entry.name, role: entry.role, tokenHash: entry.sha256, generation: file.generation, invited });
   try {
-    deps.audit.append({ actor: { name: entry.name, role: entry.role, session: deps.cookies.sessionDigest(id) }, action, outcome: "ok" });
+    deps.audit.append({ actor: { name: entry.name, role: entry.role, session: deps.cookies.sessionDigest(id) }, action, ...audit, outcome: "ok" });
   } catch (e) {
     deps.sessions.destroy(id, null);
     deps.log(`console: audit append failed (${e?.code ?? "error"}), so the sign-in was refused`);
@@ -466,9 +482,11 @@ function startSession(ctx, entry, file, action, extra = {}, { remember = false, 
     deps.tickets?.endSession?.(presented);
     res.once("finish", () => deps.hub?.endSession(presented, "elsewhere"));
   }
+  // Judged once here: the box asked for it (already found allowed by `postLogin`), or a host-made credential where remembering is allowed.
+  const remembering = remember || (hostMade && rememberAllowed(ctx, entry.role, invited));
   let remembered = false;
-  if (remember) {
-    const made = rememberOnto(ctx, id, entry, file, secure);
+  if (remembering) {
+    const made = rememberOnto(ctx, id, entry, file, secure, { makeRoom: hostMade && !remember });
     if (made.cookie) {
       cookies.push(made.cookie);
       // One credential: an ordinary cookie that came in goes, since its session has just ended above.
@@ -482,18 +500,19 @@ function startSession(ctx, entry, file, action, extra = {}, { remember = false, 
   // One flash holds what this sign-in has to say, so a second notice never replaces a warning the first one gave (both come with a full disk).
   if (notices.length > 0) deps.sessions.setFlash?.(id, { notice: true, status: notices.some((n) => n.status === "attention") ? "attention" : "idle", summary: notices.map((n, i) => (i === 0 ? n.summary : n.summary.charAt(0).toLowerCase() + n.summary.slice(1))).join(", and "), body: notices.map((n) => n.body).join(" ") });
   if (!remembered) cookies.push(deps.cookies.sessionCookie(id, { maxAgeSec: Math.floor(deps.config.maxMs / 1000), secure }));
-  // Offered once, on the next page, to a sign-in that could be remembered and did not ask (issue #849): a one-time link has no moment to ask, and a
-  // person who left the box unticked is asked once more there, where Not now is the answer and nothing follows from ignoring it.
-  if (!remember && !invited && REMEMBER_ROLES.includes(entry.role) && deps.devices && deps.devices.unavailable() === null && rememberTransportOk(ctx)) deps.sessions.setOffer?.(id);
-  return sendJson(res, 200, { ok: true, name: entry.name, role: entry.role, ...extra, ...(remember ? { remembered } : {}), ...(deviceEnded ? { deviceEnded: true } : {}) }, { "set-cookie": cookies.length === 1 ? cookies[0] : cookies });
+  // Offered once, on the next page, to a token sign-in that could be remembered and left the box unticked (issue #849), where Not now is the answer
+  // and nothing follows from ignoring it. A host-made credential is remembered above instead (issue #882), so it is never offered.
+  if (!remembering && !hostMade && rememberAllowed(ctx, entry.role, invited)) deps.sessions.setOffer?.(id);
+  return sendJson(res, 200, { ok: true, name: entry.name, role: entry.role, ...extra, ...(remembering ? { remembered } : {}), ...(deviceEnded ? { deviceEnded: true } : {}) }, { "set-cookie": cookies.length === 1 ? cookies[0] : cookies });
 }
 
 /**
- * Make session `id` a remembered device: `{cookie}`, or `{refusal}` having said why in the log, `full` when this sign-in already has the most remembered browsers one may
+ * Make session `id` a remembered device (with `makeRoom`, for a host-made credential, at the cap the least recently used browser of this person is
+ * forgotten in its place, issue #882): `{cookie}`, or `{refusal}` having said why in the log, `full` when this sign-in already has the most remembered browsers one may
  * have (a person can remove one), `failed` for anything else (the operator's to fix). The audit row comes first, as for every mint; a store that refuses leaves an
  * ordinary session, which the person is told.
  */
-function rememberOnto(ctx, id, entry, file, secure) {
+function rememberOnto(ctx, id, entry, file, secure, { makeRoom = false } = {}) {
   const { deps } = ctx;
   const actor = { name: entry.name, role: entry.role, session: deps.cookies.sessionDigest(id) };
   try {
@@ -502,7 +521,12 @@ function rememberOnto(ctx, id, entry, file, secure) {
     deps.log(`console: audit append failed (${e?.code ?? "error"}), so this device was not remembered`);
     return { refusal: "failed" };
   }
-  const made = deps.devices.remember({ name: entry.name, role: entry.role, tokenHash: entry.sha256, generation: file.generation, tokenCreatedAt: entry.createdAt, label: deviceLabelOf(ctx.req.headers["user-agent"]) });
+  const made = deps.devices.remember({ name: entry.name, role: entry.role, tokenHash: entry.sha256, generation: file.generation, tokenCreatedAt: entry.createdAt, label: deviceLabelOf(ctx.req.headers["user-agent"]), ...(makeRoom ? { makeRoom: true } : {}) });
+  if (made.replaced) {
+    // Issue #882: the oldest of this person's remembered browsers gave up its place. On the record with why, and its session here ends now.
+    ctx.record({ actor: { name: made.replaced.record.name, role: made.replaced.record.role, session: null }, action: "device-ended", target: deviceIdOf(made.replaced.hash), outcome: "ok", reason: `the least recently used of the ${MAX_DEVICES_PER_NAME} browsers one sign-in may remember, forgotten to remember a new one` });
+    dropDeviceSession(deps, made.replaced.hash, "device", ctx.res);
+  }
   if (!made.hash) {
     ctx.record({ actor, action: "device-remembered", outcome: "failed", reason: "the store refused" });
     deps.log(`console: this device could not be remembered: ${made.refusal}`);
@@ -517,11 +541,15 @@ function rememberOnto(ctx, id, entry, file, secure) {
   return { cookie: deps.cookies.deviceCookie(deps.devices.cookieName, made.secret, { secure }) };
 }
 
-/** What a person is told when a browser they asked to remember was not (issue #849): never left believing it is. A viewer has no Remove, so is told what she can do. */
+/**
+ * What a person is told when a browser they asked to remember, or one a host-made link or code would have remembered (issue #882), was not (issue #849):
+ * never left believing it is. A viewer has no Remove, so is told what she can do. "Sign in again" names no box: a link, a code and the token form's box,
+ * which starts ticked, each remember a browser.
+ */
 export const NOT_REMEMBERED = Object.freeze({
-  full: `This sign-in already has ${MAX_DEVICES_PER_NAME} remembered browsers, the most it may have. Remove one on Remembered browsers, then sign in again with the box ticked. You are signed in for this session only.`,
-  fullViewer: `This sign-in already has ${MAX_DEVICES_PER_NAME} remembered browsers, the most it may have. Sign out on one you no longer use, or ask an operator to remove one, then sign in again with the box ticked. You are signed in for this session only.`,
-  fullReadOnly: `This sign-in already has ${MAX_DEVICES_PER_NAME} remembered browsers, the most it may have. This console is read-only, so sign out on one you no longer use, or remove one with pi-dispatch-console device revoke on the host, then sign in again with the box ticked. You are signed in for this session only.`,
+  full: `This sign-in already has ${MAX_DEVICES_PER_NAME} remembered browsers, the most it may have. Remove one on Remembered browsers, then sign out and sign in again here. You are signed in for this session only.`,
+  fullViewer: `This sign-in already has ${MAX_DEVICES_PER_NAME} remembered browsers, the most it may have. Sign out on one you no longer use, or ask an operator to remove one, then sign out and sign in again here. You are signed in for this session only.`,
+  fullReadOnly: `This sign-in already has ${MAX_DEVICES_PER_NAME} remembered browsers, the most it may have. This console is read-only, so sign out on one you no longer use, or remove one with pi-dispatch-console device revoke on the host, then sign out and sign in again here. You are signed in for this session only.`,
   failed: "You are signed in for this session only. The console's log says why, and an operator should run pi-dispatch doctor on the host.",
 });
 /** Which of `NOT_REMEMBERED` a person gets: Remove is offered only to an operator on a console that takes changes. */
@@ -562,26 +590,42 @@ async function postLogin(ctx) {
     return sendError(ctx.res, 401, "that token is not valid for this console");
   }
   // Only when the page asked, so the answer to a plain sign-in is what it always was. The page parser judges it, as for a link.
-  const remember = ctx.body.remember === true;
+  const asked = ctx.body.remember === true;
+  // Issue #882 (review): the box starts ticked, so an `agent` token, which no browser may remember, arrives asking. It signs in as an ordinary
+  // session and its first page says it was not remembered; refusing it, as #849 did when the box was a choice, locked agent tokens out of the form.
+  const roleNotRemembered = asked && !REMEMBER_ROLES.includes(entry.role);
+  const remember = asked && !roleNotRemembered;
   if (remember) {
-    // Refused rather than ignored: someone who asked to be remembered must not walk away believing they are.
-    const why = !REMEMBER_ROLES.includes(entry.role) ? "this token cannot be remembered on a device" : !ctx.deps.devices ? "remembering a device is not available on this console" : !rememberTransportOk(ctx) ? "this console is reached over plain HTTP, where a remembered sign-in would cross the network" : null;
+    // Refused rather than ignored: someone who asked to be remembered must not walk away believing they are. The page draws the box only where
+    // neither holds (`rememberableHere`), so these are a script's or a console changed since the page was drawn.
+    const why = !ctx.deps.devices ? "remembering a device is not available on this console" : !rememberTransportOk(ctx) ? "this console is reached over plain HTTP, where a remembered sign-in would cross the network" : null;
     if (why) {
       ctx.record({ actor: { name: entry.name, role: entry.role, session: null }, action: "login-failed", target: "/login", outcome: "refused", reason: why });
       return sendError(ctx.res, 403, why);
     }
   }
-  return startSession(ctx, entry, file, "login", ctx.body.next === undefined ? {} : { next: realPages.returnPathOf(ctx.body.next) ?? "/" }, { remember });
+  const note = roleNotRemembered ? { status: "attention", summary: "This browser was not remembered", body: `An ${entry.role} token is never remembered on a browser, so you are signed in for this session only.` } : null;
+  return startSession(ctx, entry, file, "login", ctx.body.next === undefined ? {} : { next: realPages.returnPathOf(ctx.body.next) ?? "/" }, { remember, note });
 }
 
+/**
+ * Sign in with a one-time code the host made (issue #640), either kind (issue #882): the link page posts a link's code
+ * to `/login/code`, and the sign-in page's Sign-in code field posts what was typed to `/login/typed-code`. ONE HANDLER:
+ * the two routes differ only in which page's notices a refusal selects (`NOTICE_OF_STATUS`), so each code is judged the
+ * same way whichever page sent it. CODE_RE's 43 characters are widened DELIBERATELY to the two shapes `codeKindOf`
+ * names, a link's 43 characters or a typed short code, and anything else is refused before it is hashed or read. The
+ * audit rows say which kind (`kind`, `link` or `short-code`), never the code.
+ */
 async function postLoginCode(ctx) {
-  if (rateLimited(ctx, "/login/code")) return;
+  const route = ctx.route.path;
+  if (rateLimited(ctx, route)) return;
   const code = typeof ctx.body.code === "string" ? ctx.body.code : "";
-  const consumed = CODE_RE.test(code) ? ctx.deps.consumeLoginCode(code) : { refusal: "malformed" };
+  const kind = codeKindOf(code);
+  const consumed = kind !== null ? ctx.deps.consumeLoginCode(code) : { refusal: "malformed" };
   const refuse = (reason) => {
-    ctx.record({ actor: ANONYMOUS, action: "login-code", target: "/login/code", outcome: "refused", reason });
-    // `link` picks the page's state. Only what the code alone shows is told apart: a used code and one never made look the same to the server.
-    return sendJson(ctx.res, 401, { error: "this sign-in link is used, expired or unknown; ask for a new one with ./pi-dispatch console", link: consumed?.kind === "expired" ? "expired" : "used" });
+    ctx.record({ actor: ANONYMOUS, action: "login-code", ...(kind === null ? {} : { kind }), target: route, outcome: "refused", reason });
+    // `link` picks the link page's state. Only what the code alone shows is told apart: a used code and one never made look the same to the server.
+    return sendJson(ctx.res, 401, { error: kind === "short-code" ? "that sign-in code is used, expired or unknown; make a new one with pi-dispatch-console link" : "this sign-in link is used, expired or unknown; ask for a new one with ./pi-dispatch console", link: consumed?.kind === "expired" ? "expired" : "used" });
   };
   if (!consumed || consumed.refusal) return refuse("code refused");
   const file = tokensOr503(ctx);
@@ -602,17 +646,24 @@ async function postLoginCode(ctx) {
   const timeLeft = held ? held.createdAt + ctx.deps.config.maxMs - ctx.deps.now() : 0;
   if (held && timeLeft >= keepSessionMinLeftMs(ctx.deps.config.maxMs) && !held.deviceHash && !held.invited && held.name === entry.name && held.role === entry.role && held.tokenHash === entry.sha256 && held.generation === file.generation) {
     try {
-      ctx.deps.audit.append({ actor: { name: entry.name, role: entry.role, session: ctx.deps.cookies.sessionDigest(held.id) }, action: "login-code", outcome: "ok", reason: "the browser was already signed in as this person, so its session was kept" });
+      ctx.deps.audit.append({ actor: { name: entry.name, role: entry.role, session: ctx.deps.cookies.sessionDigest(held.id) }, action: "login-code", kind, outcome: "ok", reason: "the browser was already signed in as this person, so its session was kept" });
     } catch (e) {
       ctx.deps.log(`console: audit append failed (${e?.code ?? "error"}), so the sign-in was refused`);
       return sendError(ctx.res, 500, "the audit log could not be written, so the sign-in was refused; check the console's log directory");
     }
-    return sendJson(ctx.res, 200, { ok: true, name: entry.name, role: entry.role, next: realPages.returnPathOf(ctx.body.next) ?? "/", kept: true });
+    // Issue #882: the kept session is remembered too, as a fresh one would be: the host has just vouched for this browser. It is the remember route's
+    // own step (`rememberOnto`, then the device cookie in place of `pdc_session`), so the session, its streams and its tickets carry on as they were.
+    const kept = { ok: true, name: entry.name, role: entry.role, next: realPages.returnPathOf(ctx.body.next) ?? "/", kept: true };
+    if (!rememberAllowed(ctx, entry.role, false)) return sendJson(ctx.res, 200, kept);
+    const made = rememberOnto(ctx, held.id, entry, file, typeof ctx.consoleOrigin === "string" && ctx.consoleOrigin.startsWith("https://"), { makeRoom: true });
+    if (made.cookie) return sendJson(ctx.res, 200, { ...kept, remembered: true }, { "set-cookie": [made.cookie, ctx.deps.cookies.clearSessionCookie()] });
+    ctx.deps.sessions.setFlash?.(held.id, { notice: true, status: "attention", summary: "This browser was not remembered", body: notRemembered(made.refusal, entry.role, Boolean(ctx.deps.config.readOnly)) });
+    return sendJson(ctx.res, 200, { ...kept, remembered: false });
   }
   // Issue #708: the page the link returns to, judged HERE by the page parser (`returnPathOf`), so the browser is only
   // ever sent to one of this console's own pages; anything else, or nothing, lands on the overview. The script checks
-  // the answer's shape again before it navigates.
-  return startSession(ctx, entry, file, "login-code", { next: realPages.returnPathOf(ctx.body.next) ?? "/" }, { invited: consumed.binding !== undefined });
+  // the answer's shape again before it navigates. Issue #882: a code the host made remembers the browser where it may.
+  return startSession(ctx, entry, file, "login-code", { next: realPages.returnPathOf(ctx.body.next) ?? "/" }, { invited: consumed.binding !== undefined, hostMade: consumed.binding === undefined, audit: { kind } });
 }
 
 /**
@@ -833,15 +884,18 @@ export function loginNoticeOf(searchParams) {
 }
 
 /**
- * How the console listens, as the sign-in footer words it: `unix` for a unix socket, `tcp` for a loopback
- * address, and `public` for an address that is not loopback (PI_CONSOLE_BIND_PUBLIC=1), where saying "loopback only"
- * would be untrue. The loopback test is the listener's own (`isLoopbackAddress`; `parseListen` refuses a hostname, so
- * the host is always a literal), so the footer and the bind cannot disagree about what loopback is.
+ * How the console listens, as the sign-in footer words it: `unix` for a unix socket, `localhost` for 127.0.0.1 or ::1
+ * (issue #882: the address every command prints as `localhost`), `tcp` for another loopback address, and `public` for
+ * an address that is not loopback (PI_CONSOLE_BIND_PUBLIC=1), where saying "loopback only" would be untrue. The
+ * loopback test is the listener's own (`isLoopbackAddress`; `parseListen` refuses a hostname, so the host is always a
+ * literal), so the footer and the bind cannot disagree about what loopback is. Every rule but the footer's reads only
+ * whether this is `public`.
  */
 function listenWord(config) {
   const listen = config?.listen;
   if (listen?.kind === "unix") return "unix";
   if (listen?.kind === "tcp" && typeof listen.host === "string" && !isLoopbackAddress(listen.host)) return "public";
+  if (listen?.kind === "tcp" && typeof listen.host === "string" && isLocalhostAddress(listen.host)) return "localhost";
   return "tcp";
 }
 
@@ -1031,6 +1085,8 @@ export const ROUTES = Object.freeze([
   { method: "POST", path: "/login", auth: "none", write: true, readOnlyExempt: true, handler: postLogin },
   { method: "GET", path: "/login/code", auth: "none", write: false, handler: (ctx) => sendHtml(ctx.res, 200, loginCodePage({ theme: themeOf(ctx.req.headers.cookie) })) },
   { method: "POST", path: "/login/code", auth: "none", write: true, readOnlyExempt: true, handler: postLoginCode },
+  // Issue #882: the sign-in page's Sign-in code field. The same handler as the link page's; its own path picks the sign-in page's notices.
+  { method: "POST", path: "/login/typed-code", auth: "none", write: true, readOnlyExempt: true, handler: postLoginCode },
   // `auth: "none"` (issue #737): a sign-out judges no session, it ends the one the cookie names (`postLogout`), so an
   // unreadable tokens file cannot keep a browser signed in that asked to sign out.
   { method: "POST", path: "/logout", auth: "none", write: true, readOnlyExempt: true, handler: postLogout },

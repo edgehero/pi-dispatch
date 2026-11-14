@@ -115,7 +115,7 @@ export { setConfigToolReadsForTest } from "./config-tools.mjs";
 // deployment's money files, which only the confirm-gated tools and the operator's own hand may change.
 import { DEVICE_STORE_GUARD, envNamedFiles, makeWriteGuard } from "./write-guard.mjs";
 import { consoleDevicesDir } from "@edgehero/pi-dispatch/console-devices";
-import { consolePageLines } from "./console/link.mjs";
+import { consolePageLines, enrolledConsoleOrigin } from "./console/link.mjs";
 import { CONSOLE_PAGE_WORDS, consoleCommand, consoleDeploymentCheck } from "./console-command.mjs";
 import { loginCodesDir } from "./console/login-codes.mjs";
 import { whatIfAnswer, WHATIF_MODEL_RE } from "./console/whatif.mjs";
@@ -455,6 +455,17 @@ function consoleTokenGuards(tokensPath: string | null): Guarded[] {
  * an init scaffold. ONE helper for the guard and for `/dispatch console --link` (issue #708, review round 1), so the
  * command mints only into the drop beside a tokens file this guard holds, never one it computed some other way.
  */
+/**
+ * The console's enrolled origin as the panel can find it (issue #882): the gateway enrollment of the pointer's deployment
+ * folder, else of the session folder when it is an init scaffold, as `consoleTokensPathFor` finds the tokens file. Null
+ * where none is found, and then every printed address is the listen address's.
+ */
+function consoleOriginFor(env: any, dir: unknown): string | null {
+  const cwd = process.cwd();
+  const folder = typeof dir === "string" && dir !== "" ? dir : DEPLOYMENT_SCAFFOLD_FILES.every((f) => nodeFs.existsSync(join(cwd, f))) ? cwd : null;
+  return enrolledConsoleOrigin({ env, dir: folder });
+}
+
 function consoleTokensPathFor(env: any, dir: unknown): string | null {
   if (typeof dir === "string" && dir !== "") return tokensFilePath(env, dir);
   const cwd = process.cwd();
@@ -1531,6 +1542,7 @@ async function dispatch(pi: ExtensionAPI, args: string, rawCtx: any): Promise<vo
       select: typeof ctx?.ui?.select === "function" ? ctx.ui.select.bind(ctx.ui) : undefined,
       env, sessionEnv: process.env, logsDir: currentPaths.logsDir,
       tokensPath: consoleTokensPathFor(env, dir),
+      origin: consoleOriginFor(env, dir),
       guarded: (codesDir: string) => guardedFiles().some(g => g.dir === true && g.path === codesDir),
     });
   };
@@ -1664,6 +1676,7 @@ async function dispatch(pi: ExtensionAPI, args: string, rawCtx: any): Promise<vo
         sessionEnv: process.env,
         logsDir: paths.logsDir,
         tokensPath,
+        origin: consoleOriginFor(env, dir),
         guarded: (codesDir: string) => guardedFiles().some((g) => g.dir === true && g.path === codesDir),
         // Whether the address is pi's own export, which a pointer's .env does not outrank: it decides the advice.
         deployment: consoleDeploymentCheck({ env, folder, exported: exported("PI_CONSOLE_LISTEN") }),
@@ -1830,9 +1843,9 @@ const INSIGHTS_USAGE = "usage: /dispatch insights [7d|30d|mtd] | /dispatch insig
  * the whole answer. Default window 30d, the page's own. The retired flags (`--no-open`, `--full-paths`) and any junk
  * answer the usage line, which is what teaches the new grammar. Exported for its tests: `env` is the deployment's
  * environment (`deploymentEnv()` by default), read for `PI_CONSOLE_LISTEN` and `PI_CONSOLE_BIND_PUBLIC` alone
- * (`link.mjs`, which parses them as the console does).
+ * (`link.mjs`, which parses them as the console does), and `origin` the console's enrolled origin, where it has one (issue #882).
  */
-export function insightsLink(tokens: string[], notify: Notify, env: any = deploymentEnv()): void {
+export function insightsLink(tokens: string[], notify: Notify, env: any = deploymentEnv(), origin: string | null = consoleOriginFor(env, pointerState().deploymentDir)): void {
   const rest = tokens.slice(1);
   let query: URLSearchParams;
   if (rest[0] === "whatif") {
@@ -1854,7 +1867,7 @@ export function insightsLink(tokens: string[], notify: Notify, env: any = deploy
     }
     query = new URLSearchParams({ range: window });
   }
-  notify?.(["insights are on the operator console's spend screen:", ...consolePageLines(env, `${rest[0] === "whatif" ? "insights/breakdown" : "insights"}?${query}`)].join("\n"), "info");
+  notify?.(["insights are on the operator console's spend screen:", ...consolePageLines(env, `${rest[0] === "whatif" ? "insights/breakdown" : "insights"}?${query}`, { origin })].join("\n"), "info");
 }
 
 /**

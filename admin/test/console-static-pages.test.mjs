@@ -64,12 +64,14 @@ test("each static page answers its status, names its page for the script and the
 
 test("the static pages say what their card says: who is signed in only where a session is known, and nothing from the request but the 421's host", async () => {
   const pages = await renderStatic();
-  // The sign-in page: the token form, both commands for a way in (pi's prints a link with --link), loopback only.
+  // The sign-in page: the code's and the token's forms, both commands for a way in (pi's prints a link with --link), pi-dispatch.localhost only.
   const login = pages["login.anonymous"].html;
   assert.ok(login.includes('<form id="login-form" class="signin__form" autocomplete="off" hidden data-reveal>'), "the token form, for the script to reveal");
   assert.ok(login.includes("<code><span>/dispatch</span> <span>console</span> <span>--link</span></code>"), "the pi command that prints a link");
   assert.ok(login.includes("<code><span>pi-dispatch-console</span> <span>token</span> <span>add</span> <span>--name</span> <span>&#39;&lt;you&gt;&#39;</span> <span>--role</span> <span>operator</span></code>"), "the host command, its placeholder quoted");
-  assert.ok(login.includes("This console answers on this host&#39;s loopback address only."), "the default listener's footer");
+  assert.ok(login.includes("This console answers at pi-dispatch.localhost, on this host only."), "the default listener's footer (issue #882: 127.0.0.1 is the console's own name)");
+  assert.ok(login.includes('<form id="code-form" class="signin__form" autocomplete="off" hidden data-reveal>'), "the sign-in code's form, for the script to reveal (issue #882)");
+  assert.ok(login.includes('<input type="checkbox" name="remember" checked>'), "the Remember box, ticked");
   assert.equal((login.match(/<div data-notice="[^"]+">/g) ?? []).length, 0, "no notice shown on a plain visit");
   assert.ok(!login.includes('class="pillnav"') && !login.includes('id="logout"'), "nobody is signed in");
   // The link page starts signing in, for the script to reveal; the other two states drawn hidden for it to switch to.
@@ -132,17 +134,19 @@ test("without a script the sign-in pages show only what works, the sentence that
   assert.ok(card.firstElementChild.hasAttribute("data-noscript"), "the no-script notice is the card's first child");
   assert.ok(seen(card).startsWith(NO_SCRIPT_TEXT), seen(card));
   assert.ok(!shown(off.getElementById("login-form")), "no token form that cannot post");
-  for (const gone of ["Paste a console token", "Console token"]) assert.ok(!seen(card).includes(gone), `${gone}: not shown without a script`);
+  assert.ok(!shown(off.getElementById("code-form")), "nor a code form (issue #882)");
+  for (const gone of ["Type the sign-in code", "Console token", "Sign-in code"]) assert.ok(!seen(card).includes(gone), `${gone}: not shown without a script`);
   assert.deepEqual([...card.querySelectorAll("button, input")].filter(shown).map((el) => el.outerHTML), [], "no control: Sign in and the copy buttons need the script");
   // What is true without a script stays: why the session ended, where a token or a link comes from, where it answers.
-  for (const kept of ["You were signed out after 60 minutes without a request", "No token yet?", "pi-dispatch-console token add", "loopback address only"]) assert.ok(seen(card).includes(kept), kept);
-  // With the script: the noscript is not drawn, and the reveal shows the form and its lead-in.
+  for (const kept of ["You were signed out after 60 minutes without a request", "No code yet?", "pi-dispatch-console token add", "loopback address only"]) assert.ok(seen(card).includes(kept), kept);
+  // With the script: the noscript is not drawn, and the reveal shows the forms and their lead-in.
   const on = drawn(login, { script: true });
-  assert.ok(shown(on.getElementById("login-form")) && !on.querySelector("[data-noscript]"));
-  assert.ok(seen(on.querySelector(".signin")).startsWith("pi Sign in to the console Paste a console token, or open a one-time link."), seen(on.querySelector(".signin")));
+  assert.ok(shown(on.getElementById("login-form")) && shown(on.getElementById("code-form")) && !on.querySelector("[data-noscript]"));
+  assert.ok(seen(on.querySelector(".signin")).startsWith("pi Sign in to the console Type the sign-in code from your terminal, or paste a console token."), seen(on.querySelector(".signin")));
   // The reveal is the only thing that shows them: drawn hidden, and nothing else on the page is marked for it.
   assert.ok(!shown(drawn(login, { script: true, reveal: false }).getElementById("login-form")));
-  assert.deepEqual([...on.querySelectorAll("[data-reveal]")].map((el) => el.localName), ["p", "form"]);
+  assert.ok(!shown(drawn(login, { script: true, reveal: false }).getElementById("code-form")));
+  assert.deepEqual([...on.querySelectorAll("[data-reveal]")].map((el) => el.localName), ["p", "form", "p", "form"]);
 
   // The link page without a script says that sentence and nothing else; never "Signing in", in its card or its title.
   const link = loginCodePage();

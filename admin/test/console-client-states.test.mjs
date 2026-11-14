@@ -1578,6 +1578,24 @@ stateTest(T.signInStops, async () => {
   }
   assert.equal(calls(slow, "/login").length, 3, "three posts: the third failed past 60 s from the first");
   assert.deepEqual(notices(slow), ["gaveup"]);
+  // Issue #882 (review): a stopped code and then a stopped token on one page each say their own sentence, the notice made once.
+  const both = boot(String(loginPage()), { url: "/login" });
+  const stop = async (route, tries = SIGN_IN_TRIES_MAX) => {
+    for (let i = 0; i < tries; i++) {
+      await both.fetch.open(route).fail();
+      both.tick(RETRY_MS);
+    }
+  };
+  both.document.getElementById("signin-code").value = "K7QX-9M2D";
+  both.submit(both.document.getElementById("code-form"));
+  await stop("/login/typed-code");
+  const said = () => text(both.document.querySelector('[data-notice="gaveup"] .banner__s'));
+  assert.deepEqual([notices(both), said()], [["gaveup"], SIGN_IN_GAVE_UP.code]);
+  both.document.getElementById("token").value = "tok-b";
+  both.submit(both.document.getElementById("login-form"));
+  await stop("/login");
+  assert.deepEqual([notices(both), said()], [["gaveup"], SIGN_IN_GAVE_UP.login], "the token's own sentence, not the code's");
+  assert.equal(both.document.querySelectorAll('[data-notice="gaveup"]').length, 1);
   assert.equal(SIGN_IN_TRIES_MAX * RETRY_MS, SIGN_IN_RETRY_FOR_MS, "the two caps agree at the retry pace");
   // The boundary, judged before each post goes out: a retry due 59,999 ms after the first post goes out; one
   // due at 60,000 ms is never sent, and the stop is said at the failure that would have scheduled it.
@@ -2334,20 +2352,50 @@ stateTest("viewer invitation stays in the initiating slot, disappears on expiry 
 
 // Issue #849, part 5: the Remember choice on the sign-in form, and the offer a fresh sign-in sees once.
 
-test("the Remember choice is posted only when ticked, and never ticked for you", async () => {
+test("the Remember choice starts ticked (issue #882), and is posted only while it is ticked", async () => {
   const page = String(loginPage({ remember: true }));
-  assert.match(page, /<input type="checkbox" name="remember">/, "drawn unticked");
+  assert.match(page, /<input type="checkbox" name="remember" checked>/, "drawn ticked");
   assert.doesNotMatch(String(loginPage()), /name="remember"/, "drawn only where the console would remember");
   const w = boot(page, { url: "/login" });
   const input = w.document.getElementById("token");
   input.value = "tok-1";
   w.submit(w.document.getElementById("login-form"));
-  assert.deepEqual(calls(w, "/login").at(-1).body, { token: "tok-1" });
+  assert.deepEqual(calls(w, "/login").at(-1).body, { token: "tok-1", remember: true });
   await w.fetch.open("/login").answer(401, { error: "that token is not valid for this console" });
-  w.document.querySelector('input[name="remember"]').checked = true;
+  w.document.querySelector('input[name="remember"]').checked = false;
   input.value = "tok-2";
   w.submit(w.document.getElementById("login-form"));
-  assert.deepEqual(calls(w, "/login").at(-1).body, { token: "tok-2", remember: true });
+  assert.deepEqual(calls(w, "/login").at(-1).body, { token: "tok-2" }, "unticked by the person: an ordinary sign-in");
+});
+
+// Issue #882: the Sign-in code field.
+
+stateTest(T.code, async () => {
+  const w = boot(String(loginPage({ remember: true, next: "/runs" })), { url: "/login?next=%2Fruns" });
+  const field = w.document.getElementById("signin-code");
+  field.value = "k7qx-9m2d";
+  w.submit(w.document.getElementById("code-form"));
+  assert.deepEqual(calls(w, "/login/typed-code").at(-1).body, { code: "k7qx-9m2d", next: "/runs" }, "as typed: the server reads it the forgiving way, and no Remember box: a code remembers by itself");
+  assert.equal(field.value, "", "out of the field at once");
+  assert.equal(calls(w, "/login").length, 0, "the token's route is not asked");
+  await w.fetch.open("/login/typed-code").answer(200, { ok: true, next: "/runs", remembered: true });
+  assert.deepEqual(w.location.assigned, ["/runs"]);
+});
+
+stateTest(T.codeRefused, async () => {
+  const w = boot(String(loginPage({ remember: true })), { url: "/login" });
+  w.document.getElementById("signin-code").value = "AAAA-AAAA";
+  w.submit(w.document.getElementById("code-form"));
+  await w.fetch.open("/login/typed-code").answer(401, { error: "that sign-in code is used, expired or unknown", link: "used" });
+  assert.deepEqual(notices(w), ["code"]);
+  assert.equal(text(w.document.querySelector('[data-notice="code"] .banner__t')), SIGN_IN_NOTICES.code.title);
+  w.document.getElementById("signin-code").value = "BBBB-BBBB";
+  w.submit(w.document.getElementById("code-form"));
+  await w.fetch.open("/login/typed-code").answer(429, { error: "too many sign-in attempts; wait a minute and try again" });
+  assert.deepEqual(notices(w), ["rate"]);
+  // Literal, not the table read back.
+  assert.deepEqual(NOTICE_OF_STATUS["/login/typed-code"], { 401: "code", 429: "rate", 503: "tokens", 500: "audit" });
+  assert.equal(w.location.assigned.length, 0);
 });
 
 function offerPage() {

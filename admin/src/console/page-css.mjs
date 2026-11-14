@@ -437,8 +437,10 @@ section[data-panel]>.held{margin:0 0 var(--space-3)}
 /**
  * The sign-in pages (the SignIn and AccessStates cards): one card, centred, 560 px at most, under the sign-in bar, its
  * heading the card's (the page's `<h1>` is for a screen reader alone, `shell.mjs` `frameHtml`). The help is an inset
- * with its copy boxes on the card's ground; the token field and Sign in are the card's pills. The notice region is out
- * of the card's flow while it shows nothing (see `SHELL_CSS`: an empty live region must stay rendered).
+ * with its copy boxes on the card's ground; the code and token fields and their buttons are the card's pills. The notice
+ * region is out of the card's flow while it shows nothing (see `SHELL_CSS`: an empty live region must stay rendered).
+ * Issue #882: the Sign-in code is shown in capitals, spaced, as the terminal prints it, whatever case it is typed in
+ * (the server reads either), and a rule with "or" parts it from the token's form.
  */
 const SIGN_IN_CSS = `
 main{justify-items:center}
@@ -452,6 +454,11 @@ main>section[data-panel]{width:100%;max-width:560px;margin-top:var(--space-6)}
 .signin__form{display:grid;gap:var(--space-3)}
 .signin__form .input{height:var(--control-h);padding:0 20px;border-radius:var(--radius-pill)}
 .signin__form .btn{width:100%}
+.signin__form input[name="code"]{letter-spacing:0.12em;text-transform:uppercase}
+.signin__form input[name="code"]::placeholder{letter-spacing:0.12em}
+.signin__hint{margin-top:6px;font-size:12px;line-height:18px}
+.signin__or{display:flex;align-items:center;gap:var(--space-3);font-size:12px}
+.signin__or::before,.signin__or::after{content:"";flex:1;height:1px;background:var(--line)}
 .signin__help{display:grid;grid-template-columns:minmax(0,1fr);gap:8px;padding:var(--space-4);border-radius:var(--radius-md);background:var(--surface-2);font-size:13px}
 .signin__help .cmd{background:var(--surface)}
 .signin__help-h{font-weight:650}

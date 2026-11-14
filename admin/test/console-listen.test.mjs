@@ -5,7 +5,7 @@ import { createServer, request } from "node:http";
 import { join } from "node:path";
 import { test } from "node:test";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { isLoopbackAddress, listenOn, listenUrl, parseListen } from "../src/console/listen.mjs";
+import { CONSOLE_HOSTNAME, isLoopbackAddress, listenOn, listenUrl, parseListen } from "../src/console/listen.mjs";
 
 // Where the console binds (issue #640, REQ-CONSOLE-SECURITY a and j).
 
@@ -49,9 +49,23 @@ test("parseListen refuses a socket path longer than the platform's sun_path, by 
 test("isLoopbackAddress and listenUrl", () => {
   assert.ok(isLoopbackAddress("127.0.0.1") && isLoopbackAddress("127.255.0.1") && isLoopbackAddress("::1") && isLoopbackAddress("0:0:0:0:0:0:0:1"));
   assert.ok(!isLoopbackAddress("128.0.0.1") && !isLoopbackAddress("::") && !isLoopbackAddress("localhost"));
-  assert.equal(listenUrl({ kind: "tcp", host: "::1", port: 80 }), "http://[::1]:80/");
-  assert.equal(listenUrl({ kind: "tcp", host: "127.0.0.1", port: 0 }, 5555), "http://127.0.0.1:5555/");
   assert.equal(listenUrl({ kind: "unix", path: "/x" }), null);
+});
+
+test("listenUrl prints pi-dispatch.localhost for 127.0.0.1 and ::1, and any other address by its number (issue #882)", () => {
+  assert.equal(CONSOLE_HOSTNAME, "pi-dispatch.localhost");
+  assert.equal(listenUrl({ kind: "tcp", host: "127.0.0.1", port: 4790 }), "http://pi-dispatch.localhost:4790/");
+  assert.equal(listenUrl({ kind: "tcp", host: "127.0.0.1", port: 0 }, 5555), "http://pi-dispatch.localhost:5555/");
+  assert.equal(listenUrl({ kind: "tcp", host: "::1", port: 80 }), "http://pi-dispatch.localhost:80/");
+  assert.equal(listenUrl({ kind: "tcp", host: "0:0:0:0:0:0:0:1", port: 80 }), "http://pi-dispatch.localhost:80/");
+  // No localhost name resolves to another loopback address, so a console bound there is printed as it binds.
+  assert.equal(listenUrl({ kind: "tcp", host: "127.0.0.2", port: 4790 }), "http://127.0.0.2:4790/");
+  assert.equal(listenUrl({ kind: "tcp", host: "192.168.1.5", port: 4790 }), "http://192.168.1.5:4790/");
+  assert.equal(listenUrl({ kind: "tcp", host: "fe80::1", port: 4790 }), "http://[fe80::1]:4790/");
+  assert.equal(listenUrl({ kind: "tcp", host: "0.0.0.0", port: 4790 }), "http://0.0.0.0:4790/");
+  // The bind itself stays the literal: a name is refused, localhost included.
+  assert.ok(parseListen("localhost:4790").refusal);
+  assert.deepEqual(parseListen("127.0.0.1:4790"), { kind: "tcp", host: "127.0.0.1", port: 4790 });
 });
 
 function close(server) {
@@ -129,4 +143,12 @@ test("unix socket: a stale socket (its process killed) is replaced; a regular fi
   const file = join(dir, "f.sock");
   writeFileSync(file, "not a socket");
   assert.match((await listenOn(createServer(), { kind: "unix", path: file })).refusal, /not a socket.*left alone/);
+});
+
+test("the worker's probe and the console print one address for every loopback listen value (issue #882)", async () => {
+  // doctor's line reads the probe's `url`, every console command `listenUrl`: two packages, one rule, held here.
+  const { consoleProbeTarget } = await import("@edgehero/pi-dispatch/console-probe");
+  for (const value of ["127.0.0.1:4790", "127.0.0.1:1", "127.0.0.2:4800", "127.255.0.1:9", "[::1]:4791", "[0:0:0:0:0:0:0:1]:4791"]) {
+    assert.equal(consoleProbeTarget(value).url, listenUrl(parseListen(value)), value);
+  }
 });

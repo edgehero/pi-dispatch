@@ -214,6 +214,29 @@ test("the cap holds per name, counts only live devices, and leaves others alone"
 	assert.ok(made(s).hash, "a slot freed by ending one");
 });
 
+test("makeRoom: at the cap the least recently used live device of that name is ended as removed and named, and this one is remembered (issue #882)", () => {
+	const s = store();
+	const all = Array.from({ length: MAX_DEVICES_PER_NAME }, () => made(s));
+	// Last use is the mtime: one used long ago, the rest recently; an ended one and another name's never count.
+	all.forEach((d, i) => fs.utimesSync(join(s.dir, `${d.hash}.json`), (T0 - i * 1000) / 1000, (T0 - i * 1000) / 1000));
+	fs.utimesSync(join(s.dir, `${all[5].hash}.json`), (T0 - 86400 * 1000) / 1000, (T0 - 86400 * 1000) / 1000);
+	const other = made(s, { name: "ann" });
+	fs.utimesSync(join(s.dir, `${other.hash}.json`), 1, 1);
+	const room = made(s, { makeRoom: true });
+	assert.ok(room.hash, room.refusal);
+	assert.deepEqual([room.replaced.hash, room.replaced.record.name, room.replaced.record.ended.reason], [all[5].hash, "rob", "removed"]);
+	assert.equal(readDevice({ dir: s.dir, hash: all[5].hash }).record.ended.reason, "removed");
+	assert.equal(readDevice({ dir: s.dir, hash: other.hash }).record.ended, undefined, "another name's device is never the one");
+	assert.equal(listDevices({ dir: s.dir }).devices.filter((d) => d.name === "rob" && !d.ended).length, MAX_DEVICES_PER_NAME);
+	// Without makeRoom the cap still refuses, for the caller that tells a person to remove one.
+	assert.equal(made(s).full, true);
+	// Below the cap nothing is ended to make room.
+	const t = store();
+	const one = made(t);
+	assert.equal(made(t, { makeRoom: true }).replaced, undefined);
+	assert.equal(readDevice({ dir: t.dir, hash: one.hash }).record.ended, undefined);
+});
+
 test("reaping removes only dead records past retention and old temporaries", () => {
 	const s = store();
 	const live = made(s);
