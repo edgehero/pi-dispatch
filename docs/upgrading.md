@@ -36,6 +36,10 @@ Each guide keeps the notes about its own feature. [The last sections](#notes-kep
    trigger's `run.secrets`, a secret bundle's `endpoints` or what its resolver returns, an overlay `mcp.json` server, or
    `PI_FORWARD_ENV`. From 5.2.1 the worker sets both in every job and refuses them anywhere else
    ([the 5.2.1 row](#521)).
+8. **Before 5.3.0**, the same check for `PI_JOB_IDLE_MS`, `PI_JOB_STALL_MS` and `PI_CREDENTIAL_REFRESH`, which 5.3.0
+   sets in jobs itself ([job limits](job-limits.md)). Then plan to rebuild every job image you derived from ours on
+   the 5.3.0 image: until it is rebuilt, its jobs keep the 30-minute limit and their credentials are not renewed
+   ([the 5.3.0 rows](#530)). The console moves to `http://pi-dispatch.localhost:4790/`, so each browser signs in once more.
 
 ## The order
 
@@ -289,7 +293,7 @@ queued: an older BullMQ need not read what a newer one wrote. The release notes 
 
 Release numbers come from the git tags.
 
-### Next release
+### 5.3.0
 
 | Store | What changed, and what an older release does with it | Guide |
 |---|---|---|

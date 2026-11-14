@@ -1,6 +1,6 @@
 {
   "name": "@edgehero/pi-dispatch-admin",
-  "version": "5.2.1",
+  "version": "5.3.0",
   "description": "Go from sitting next to one AI coding agent to running many in the background: the web console and /dispatch panel of pi-dispatch, over the queue, spend caps, scoped limits, run history and insights, editable cron and GitHub, GitLab, Forgejo and Azure DevOps triggers, pause windows, and human-confirmed tools your AI can operate.",
   "keywords": [
     "pi-package",
