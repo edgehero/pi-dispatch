@@ -804,7 +804,7 @@ export const GITHUB_SERVICE_KEYS = Object.freeze(["GITHUB_AUTH_SOURCE", "GITHUB_
  *  console: the worker reads it (it runs the audit reaper), and a console key set alone makes doctor judge a console. */
 export const WORKER_SERVICE_KEYS = Object.freeze(["PI_JOB_IMAGE", "PI_JOB_MEMORY", "PI_JOB_CPUS", "PI_CONCURRENCY", ...Object.values(HOST_BUDGET_KEYS), "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_LOG_RETENTION_DAYS", "PI_CONSOLE_AUDIT_RETENTION_DAYS", "PI_RUN_MIRROR_MAX_RUNS", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_CHECKPOINTS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_AUTH_CONNECTIONS_FILE", "PI_AUTH_STORE_DIR", "PI_CODING_AGENT_DIR", "PI_BACKEND_FLOOR", "PI_OPENSHELL_ENGINE", "PI_OPENSHELL_GATEWAY", "PI_SECRET_PROFILES", "PI_SECRET_BUNDLES", "PI_SECRET_RESOLVER_ROOTS", "PI_SECRET_RESOLVE_TIMEOUT_MS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "PI_DOCTOR_INTERVAL_HOURS", "PI_ALLOWED_MODELS", "PI_DISPATCH_RUN_ROOTS", "GITHUB_PAT_VAR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
 /** Issue #471: the receiver's keys doctor judges its boot by (the receiver's unit reads the same `.env`). */
-export const RECEIVER_SERVICE_KEYS = Object.freeze(["WEBHOOK_SECRET", "GITHUB_INGEST", "RECEIVER_PORT", "GITLAB_TOKEN", "GITLAB_URL", "GITLAB_WEBHOOK_MODE", "GITLAB_WEBHOOK_SECRET", "FORGEJO_URL", "FORGEJO_TOKEN", "FORGEJO_PERMISSION_TOKEN", "FORGEJO_WEBHOOK_SECRET", "AZURE_ORG_URL", "AZURE_TOKEN", "AZURE_WEBHOOK_MODE", "AZURE_WEBHOOK_SECRET", "AZURE_WEBHOOK_HEADER"]);
+export const RECEIVER_SERVICE_KEYS = Object.freeze(["WEBHOOK_SECRET", "GITHUB_INGEST", "POLL_REPOS", "RECEIVER_PORT", "GITLAB_TOKEN", "GITLAB_URL", "GITLAB_WEBHOOK_MODE", "GITLAB_WEBHOOK_SECRET", "FORGEJO_URL", "FORGEJO_TOKEN", "FORGEJO_PERMISSION_TOKEN", "FORGEJO_WEBHOOK_SECRET", "AZURE_ORG_URL", "AZURE_TOKEN", "AZURE_WEBHOOK_MODE", "AZURE_WEBHOOK_SECRET", "AZURE_WEBHOOK_HEADER"]);
 /**
  * Issue #471 (follow-up): the variables the CLIs doctor spawns read from their environment, by the CLI that reads them.
  * The worker starts podman, docker and gh with its OWN environment (no `env` option: `image-preflight.mjs`,
@@ -2578,7 +2578,31 @@ export async function collectChecks(shellVars, seams) {
 			// Issue #879: the transport, named, so an operator reads which command carries GitHub here rather than inferring
 			// it from whether a WEBHOOK_SECRET line warns. Said only where GitHub is in play: a GitLab-only deployment with
 			// the setting unset gets the secret line below and nothing about GitHub's transport.
-			if (githubServe.serves || githubServe.ingest === "poll") checks.push({ ok: true, label: githubTransportLabel(githubServe) });
+			// Issue #879 (PR #884 review): where only a `GITHUB_AUTH_SOURCE=gh` line makes `serve` serve GitHub (no GitHub rule,
+			// no setting), the line repeats the default and every scaffold before #879 carried it uncommented, so it is most
+			// likely an older scaffold's, not a choice: a GitLab-only folder with `up`'s secret then serves a GitHub route nobody
+			// delivers to, and a polling-only one does the same. Said as a warning with or without the secret; any other source
+			// is a choice the worker reads, and gets the plain transport line.
+			const ghLineOnly = githubServe.serves && githubServe.ingest === null && githubServe.why === "GITHUB_AUTH_SOURCE is set" && env.GITHUB_AUTH_SOURCE === "gh";
+			if (ghLineOnly) {
+				checks.push({
+					ok: false,
+					warn: true,
+					label: "`pi-dispatch-receiver serve` will serve GitHub at / only because GITHUB_AUTH_SOURCE=gh is set (no github triggers, GITHUB_INGEST unset); that line repeats the default, and scaffolds before this release carried it",
+					fix: "delete the GITHUB_AUTH_SOURCE=gh line (unset is gh to every reader), or set GITHUB_INGEST to say how GitHub reaches this deployment: webhook keeps the route, poll removes it",
+				});
+			} else if (githubServe.serves || githubServe.ingest === "poll") checks.push({ ok: true, label: githubTransportLabel(githubServe) });
+			// Issue #879 (PR #884 review): `poll` and `both` say the poller carries GitHub, so whether it can start is part of
+			// the answer. Its repository rule, restated from the poller (`pollRepositoriesProblem`) and held to it by a test.
+			const pollProblem = githubServe.ingest === "poll" || githubServe.ingest === "both" ? pollRepositoriesProblem(env) : null;
+			if (pollProblem !== null) {
+				checks.push({
+					ok: false,
+					warn: true,
+					label: `GITHUB_INGEST=${githubServe.ingest} but \`pi-dispatch-receiver poll\` would refuse to start: ${pollProblem}`,
+					fix: "set POLL_REPOS=owner/name[,owner/name...] or use GITHUB_AUTH_SOURCE=app, so the poller lists the App installation's repositories (docs/polling.md); if nothing here takes GitHub events, delete the GITHUB_INGEST line",
+				});
+			}
 			if (githubServe.serves) {
 				// Presence only, value never read out (secrets-and-pii) -- without it the receiver refuses to boot,
 				// because a webhook it cannot verify is a forgeable paid-agent trigger (CONST-HMAC-OVER-RAW-BODY).
@@ -2593,7 +2617,7 @@ export async function collectChecks(shellVars, seams) {
 						// GITHUB_INGEST to webhook or both chose the webhook, so the fix is the secret alone. Where only a
 						// GITHUB_AUTH_SOURCE=gh line armed it, that line repeats the default (every scaffold before #879 carried it
 						// uncommented), so deleting it is a way out too; any other source is a choice the worker reads.
-						fix: `generate one (\`openssl rand -hex 32\`) and set WEBHOOK_SECRET in .env -- \`pi-dispatch-receiver\` verifies every delivery's signature against it and refuses to boot without it${githubServe.ingest === null ? `; or, if no GitHub webhook comes to this deployment (\`pi-dispatch-receiver poll\` brings GitHub's events, or none are wanted), set GITHUB_INGEST=poll and \`serve\` needs none${githubServe.why === "GITHUB_AUTH_SOURCE is set" && env.GITHUB_AUTH_SOURCE === "gh" ? ", or delete the GITHUB_AUTH_SOURCE=gh line, which only repeats the default" : ""}` : ""}`,
+						fix: `generate one (\`openssl rand -hex 32\`) and set WEBHOOK_SECRET in .env -- \`pi-dispatch-receiver\` verifies every delivery's signature against it and refuses to boot without it${githubServe.ingest === null ? `; or, if no GitHub webhook comes to this deployment (\`pi-dispatch-receiver poll\` brings GitHub's events, or none are wanted), set GITHUB_INGEST=poll and \`serve\` needs none${ghLineOnly ? ", or delete the GITHUB_AUTH_SOURCE=gh line, which only repeats the default" : ""}` : ""}`,
 					});
 				} else {
 					checks.push({ ok: true, label: "WEBHOOK_SECRET set -- the receiver (`pi-dispatch-receiver`) can verify deliveries" });
@@ -7301,12 +7325,32 @@ export function githubServeDecision(env, forges = []) {
 	return { ingest, invalid: false, serves: false, why: "no github triggers, and GITHUB_AUTH_SOURCE and GITHUB_INGEST are unset" };
 }
 
-/** Issue #879: the one line naming which receiver command carries GitHub here, from `githubServeDecision`. */
+/**
+ * Issue #879: the one line saying what the receiver's commands will do with GitHub here, from `githubServeDecision`.
+ * Worded as what `serve` will do, never as where events come from (PR #884 review): doctor cannot see a delivery, and
+ * an inferred answer was false for a deployment that polls with the setting unset. The inferred case says so.
+ */
 export function githubTransportLabel(decision) {
-	if (decision.ingest === "poll") return "GitHub events come by polling (GITHUB_INGEST=poll): `pi-dispatch-receiver poll` brings them, and `serve` mounts no GitHub route";
-	if (decision.ingest === "webhook") return "GitHub events come by webhook (GITHUB_INGEST=webhook): `pi-dispatch-receiver serve` takes them at /, and `poll` refuses to start";
-	if (decision.ingest === "both") return "GitHub events come by webhook and by polling (GITHUB_INGEST=both): `serve` takes them at / and `poll` may run beside it, so each event arrives twice, under different ids; keep it to a move between the two";
-	return `GitHub events come by webhook: \`pi-dispatch-receiver serve\` takes them at /, because ${decision.why} and GITHUB_INGEST is unset (set it to say which transport carries GitHub, docs/polling.md)`;
+	if (decision.ingest === "poll") return "`pi-dispatch-receiver serve` mounts no GitHub route (GITHUB_INGEST=poll): GitHub's events are `pi-dispatch-receiver poll`'s to bring";
+	if (decision.ingest === "webhook") return "`pi-dispatch-receiver serve` serves GitHub at / (GITHUB_INGEST=webhook), and `poll` refuses to start";
+	if (decision.ingest === "both") return "`pi-dispatch-receiver serve` serves GitHub at / and `poll` may run beside it (GITHUB_INGEST=both): each event then arrives twice, under different ids, so keep it to a move between the two";
+	return `\`pi-dispatch-receiver serve\` will serve GitHub at / (inferred, since GITHUB_INGEST is unset: ${decision.why}); if \`pi-dispatch-receiver poll\` brings GitHub's events instead, set GITHUB_INGEST=poll (docs/polling.md)`;
+}
+
+/**
+ * Issue #879 (PR #884 review): why `pi-dispatch-receiver poll` would refuse to start on this env's repositories, or null.
+ * The poller's own rule (receiver/src/poller-config.mjs, `parsePollRepos` and the no-repos refusal), restated because
+ * doctor cannot import the receiver, and held to `loadPollerConfig` by a test in worker/test/doctor.test.mjs: unset or
+ * blank POLL_REPOS needs the App source (it lists the installation's repositories), and a set one must parse to at
+ * least one `owner/name`. Values are never echoed: a repository name is the operator's, not doctor's to print.
+ */
+export function pollRepositoriesProblem(env) {
+	const raw = env.POLL_REPOS;
+	if (typeof raw !== "string" || raw.trim() === "") return env.GITHUB_AUTH_SOURCE === "app" ? null : "nothing to poll (POLL_REPOS is unset and GITHUB_AUTH_SOURCE is not app)";
+	const entries = raw.split(",").map((e) => e.trim()).filter((e) => e !== "");
+	if (entries.length === 0) return "POLL_REPOS is set but names no repositories";
+	if (entries.some((e) => !/^[^\s/]+\/[^\s/]+$/.test(e))) return "a POLL_REPOS entry is not owner/name";
+	return null;
 }
 
 /**
