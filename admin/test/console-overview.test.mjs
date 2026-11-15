@@ -7,7 +7,7 @@ import {
   NEEDS_ROWS_MAX, NEEDS_UNKNOWN_PROJECT_TEXT, NO_DOCTOR_TEXT, NO_WORKER_TEXT, OVERVIEW_LINKS, OVERVIEW_UNREAD_TEXT,
   REGISTRY_UNREAD_TEXT, RUNNING_EMPTY, SOFT_HOLD_REFUSED_TEXT, SOFT_HOLD_TEXT, SPEND_EMPTY, SPEND_HOURS_TEXT,
   STALE_BEATS_TEXT, WAITING_EMPTY, WAITING_MAIN_BUCKETS, WAITING_UNKNOWN_PROJECT_TEXT, WAITLISTS_CALM, WAITLIST_ROWS_MAX,
-  hostSkewText, overviewActive, overviewCaps, overviewHeadline, overviewHosts, overviewNeeds, overviewSetup,
+  hostSkewText, overviewActive, overviewCaps, overviewHeadline, overviewHosts, overviewNeeds, overviewSetup, supersededText,
   overviewSetupEmpty, overviewSetupPi, overviewSpend, overviewTimeline, overviewWaiting, overviewWaitlists,
   JOBS_UNREAD_TEXT, JOBS_UNREAD_WORDS, NOT_BEATING_WORDS, SPEND_SUM_TEXT, WAITING_CUT_TEXT, waitingSentence,
   CAPS_EMPTY_TEXT, LAST_SEEN_WORDS, BEAT_NOT_READ_WORDS,
@@ -327,6 +327,30 @@ test("Needs you: the failed jobs past the list's bound count to fix and in the r
   const out = draw(overviewNeeds, snap);
   assert.match(out, /<span class="big__n">6<\/span><span class="big__l">to fix<\/span>/);
   assert.match(out, /And 5 more: see <a href="\/parked">Parked<\/a>/, "the five the list does not hold are the rest");
+});
+
+test("Needs you: a failed job whose work a later run has since done is not to fix, not a row and not in the headline; the card says how many it left out (issue #897)", () => {
+  const done = { jobId: "repeat:nightly:1794691800000", queue: "pi-jobs@mac-mini", supersededBy: "manual:nightly:1794692940000" };
+  const open = { jobId: "gh-f1", queue: "pi-jobs" };
+  const snap = snapshot({ ...CALM, failed: { rows: [done, { ...done, jobId: "manual:nightly:1794691140000" }, open], more: 0 } });
+  assert.equal(String(overviewHeadline(viewOf(snap))), "Needs you: 1 to fix. 4 jobs running.");
+  const out = draw(overviewNeeds, snap);
+  assert.match(out, /<span class="big__n">1<\/span><span class="big__l">to fix<\/span>/);
+  assert.ok(out.includes("gh-f1") && !out.includes("repeat:nightly:1794691800000") && !out.includes("manual:nightly:1794691140000"), "only the open one is a row");
+  assert.ok(out.includes(`<a href="/fleet">${esc(supersededText(2))}</a>`), "the left-out ones are said once, linked to Fleet");
+  assert.equal(supersededText(1), "1 failed job is not counted: the same work ran again later and completed. Fleet still lists it.");
+  // Every failed job superseded, and a quiet day: nothing needs the person, and the card can be All clear.
+  const quiet = snapshot({ ...CALM, failed: { rows: [done], more: 0 } });
+  assert.equal(String(overviewHeadline(viewOf(quiet))), "All clear. 4 jobs running, nothing needs you.");
+  assert.ok(draw(overviewNeeds, quiet).includes(esc(supersededText(1))));
+  // A null or a value that is not a run id does not hide anything.
+  for (const supersededBy of [null, "", "<b>x</b>", 7]) {
+    const odd = snapshot({ ...CALM, failed: { rows: [{ ...open, supersededBy }], more: 0 } });
+    assert.equal(String(overviewHeadline(viewOf(odd))), "Needs you: 1 to fix. 4 jobs running.", String(supersededBy));
+  }
+  // The jobs past the rows read were not judged, so they still count.
+  const past = snapshot({ ...CALM, failed: { rows: [done], more: 3 } });
+  assert.equal(String(overviewHeadline(viewOf(past))), "Needs you: 3 to fix. 4 jobs running.");
 });
 
 test("Needs you: a job's row carries its project where a run record names it, and a row without one is said once", () => {

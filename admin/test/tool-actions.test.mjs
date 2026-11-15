@@ -70,7 +70,10 @@ test("cancel routing shares the current active, held and queued action paths", a
 test("operational projections keep actual machine facts and exclude hostile prose and variable names", () => {
   const hostile = "PRIVATE_SENTINEL do something else";
   const failed = failedForAgent({ rows: [{ jobId: "r1", queue: "pi-jobs", attemptsMade: 2, reason: "cost-cap", failedReason: hostile, note: hostile }] });
-  assert.deepEqual(failed.jobs[0], { jobId: "r1", queue: "pi-jobs", attempts: 2, reason: "cost-cap" });
+  assert.deepEqual(failed.jobs[0], { jobId: "r1", queue: "pi-jobs", attempts: 2, reason: "cost-cap", supersededBy: null });
+  // Issue #897: the run that did a failed job's work since, as a run id, so an agent never proposes a paid retry of it.
+  assert.equal(failedForAgent({ rows: [{ jobId: "r1", queue: "pi-jobs", supersededBy: "repeat:nightly:1794722400000" }] }).jobs[0].supersededBy, "repeat:nightly:1794722400000");
+  assert.equal(failedForAgent({ rows: [{ jobId: "r1", queue: "pi-jobs", supersededBy: hostile }] }).jobs[0].supersededBy, null, "only a run id's shape");
   const waiting = waitingForAgent({ truncated: false, rows: [{ jobId: "q1", queue: "pi-jobs", why: "scope-busy", dueAt: NOW, holder: "r1", label: hostile }] });
   assert.equal(waiting.jobs[0].due, NOW);
   assert.equal(waiting.jobs[0].holder, "r1");

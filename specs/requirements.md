@@ -1965,7 +1965,9 @@ writes retain their existing interactive confirmation. This adds no unattended p
       stands in for "Nothing needs you.". On a first run it says how many steps stand before the first job.
     - (a2) **Needs you** counts the questions (unanswered parks; a park a queued or running job is answering, the parked
       rows' `answering`, is named in a line of its own and not counted, as since #647) and what to fix (the failed jobs
-      the queue keeps, and the hosts in the registry whose published doctor result has a failing check, never a host
+      the queue keeps whose work no later run has done since, #897: one that a later run of the same cron trigger, or of
+      the same forge target and flow, completed after it is left out and the card says how many in a line of its own,
+      `supersededText`; and the hosts in the registry whose published doctor result has a failing check, never a host
       gone from it, `NEEDS_DEFINITION`, and none while the registry was not read this tick, whose rows are then the last
       ones seen); each number is a whole count, a true 0, only where every read behind it was made (the questions the
       parked runs; "to fix" the failed jobs, the doctor results and the host registry), else what was read as a floor
@@ -8960,6 +8962,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-15 (#897) | **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, (a2): "to fix" is the failed jobs the queue keeps whose work no later run has done since; a failed job a later run of the same cron trigger, or of the same forge target and flow, completed after is left out, and the card says how many. Fleet's failed card and a bulk Retry follow the same rule (`DES-OPERATOR-CONSOLE`). UNCHANGED, checked: the day line and All clear's rule over the last 24 hours, and the failed jobs the list's bound leaves unread, which still count. |
 | 2026-11-14 (#888, part 3) | **`REQ-JOB-ACTIVITY-LIMITS` AMENDED**: a job holding an expiring credential (a GitHub App token, a subscription snapshot) has it renewed while it runs where the venue binds its folders and the image declares `credentialRefresh`, and is stopped as `credential-expired` when a renewal cannot reach it in time; elsewhere it keeps the 30-minute wall clock. `REQ-TOKEN-ACCOUNTING-AND-CAPS` and the subscription requirements UNCHANGED, checked: a renewal admits nothing new. |
 | 2026-11-14 (#888, part 2: the worker) | **`REQ-JOB-ACTIVITY-LIMITS` BUILT**: the deployment settings and the three trigger fields, the backstop, `max-minutes`, the 30-minute fallback for a job no watch covers (and, until credential refresh lands, for one holding a subscription or a GitHub App token), the renewed claims, the activity-aware boot sweep and the record's `limits`; Acceptance gains the worker's tests. **`REQ-JOB-TIMEOUT-30M` SUPERSEDED** by it, kept as an address: its 30 minutes survive as the fallback and the watch jobs' ceiling. `REQ-RUNNER-TURN-BUDGET`, `REQ-OPERATOR-JOB-CANCEL` (the cancel keeps its reason) and `REQ-HOST-BUDGET` UNCHANGED, checked. |
 | 2026-11-14 (#888, part 1: the runner) | **NEW `REQ-JOB-ACTIVITY-LIMITS`**, PARTIAL: a job is stopped when idle (no step and no activity, 15 minutes by default) or stalled (no step, 4 hours by default, however busy), or at an optional ceiling, never for being old; what a step and activity are; why (the 30-minute kill of working jobs, spend already bounded elsewhere, the agent waiting on its own background work, the stall limit for an endless loop and the owner's eight-hour runs); the runner's half built, the worker's half next. **`REQ-JOB-TIMEOUT-30M` UNCHANGED, checked**: it still holds until the worker half asks for the watch. `REQ-RUNNER-TURN-BUDGET` UNCHANGED, checked. |

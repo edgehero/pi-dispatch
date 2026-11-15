@@ -235,6 +235,31 @@ test("failed queue text is escaped, collapsed and exclusive to operators", () =>
   );
 });
 
+test("Fleet lists a failed job whose work a later run has since done with that run, offers Remove and no paid Retry, and Retry all counts the rest (issue #897)", () => {
+  const s = base();
+  const row = (jobId, extra = {}) => ({ jobId, queue: "pi-jobs", hasRecord: true, target: "acme/web#1", reason: null, attemptsMade: 1, attempts: 1, failedReason: "x", ...extra });
+  s.failed.rows = [row("gh-done", { supersededBy: "gh-later" }), row("gh-open")];
+  const out = draw(fleet.fleetFailed, view(s));
+  const cut = (id) => out.slice(out.indexOf(`>${id}<`), out.indexOf("</tr>", out.indexOf(`>${id}<`)));
+  const done = cut("gh-done");
+  assert.ok(done.includes(fleet.SUPERSEDED_ROW_TEXT) && done.includes("gh-later"), "the row names the run that did its work");
+  assert.doesNotMatch(done, /data-action="retry-failed"/, "never a paid retry of work already done");
+  assert.match(done, /data-action="remove-failed"/, "Remove stays: that is how it leaves the queue");
+  assert.match(cut("gh-open"), /data-action="retry-failed"/);
+  // The card's head counts: Retry all what a retry would still do, Remove all every row. The bulk form in its details
+  // filters the whole failed set, past these rows too, so it stays, and its preview leaves superseded jobs out.
+  const head = (html) => html.slice(html.indexOf('<span class="end">'), html.indexOf("</div>", html.indexOf('<span class="end">')));
+  assert.match(head(out), /Retry all 1</, "Retry all counts what a retry would still do");
+  assert.match(head(out), /Remove all 2</);
+  // Every one superseded: no Retry all in the head.
+  s.failed.rows = [row("gh-done", { supersededBy: "gh-later" })];
+  const all = draw(fleet.fleetFailed, view(s));
+  assert.doesNotMatch(head(all), /Retry all/);
+  assert.match(head(all), /Remove all 1</);
+  // A viewer reads the run that did the work too: it is a run id, not the queue's text.
+  assert.ok(draw(fleet.fleetFailed, view(s, "viewer")).includes("gh-later"));
+});
+
 test("orphan cleanup chooses the correct runtime and hashes the actual OpenShell container name", () => {
   assert.deepEqual(host.orphanCommand({ id: "gh-1", v: "local" }), [
     "docker",

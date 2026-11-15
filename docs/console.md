@@ -860,7 +860,10 @@ Fleet lists all waiting jobs within the reader's bounds (200 per queue list and 
 recorded reason. A truncated read says that rows may be missing. Overview's remainder links to this list. The
 Delayed panel separates scheduled runs and held jobs from other waits; a missing reason is named rather than guessed.
 Held rows show the after time, check answers and limits. Failed jobs show their record's target, reason and next step;
-a record without a reason is distinct from no record. Queue error text remains scrubbed and operator-only.
+a record without a reason is distinct from no record. Queue error text remains scrubbed and operator-only. A failed job
+whose work has been done since (see Needs you, below) names the run that did it and offers Remove but no Retry, since
+a retry would do the work again and pay for it. Retry all counts only the others, and a bulk Retry leaves such jobs out
+and says how many; when the run records cannot be read it leaves none out and says it could not tell.
 
 Open a host from Fleet or Overview. A stale beat, missing registry row, retained doctor result and missing history are
 separate states. Its orphan rows show the venue and failed-stop time when published. **Free the slot** opens guidance
@@ -1041,7 +1044,16 @@ Four cards come first, in a row:
   counting runs an operator cancelled.", each count linked to those runs on the runs list, and "at least" when the run
   history the console read does not reach back a day; when that history holds neither, the line says so ("Last 24
   hours: no failed or refused run among the runs read, but the run history read does not reach back a day."), since
-  it is why the card is not All clear. A durable run that was lost and could not be continued (`recovery-cap`,
+  it is why the card is not All clear.
+
+  A failed job whose work has been done since is not to fix. That is one where a later run of the same work completed
+  after it failed: the next run of the same cron trigger (scheduled or run by hand), or a run of the same issue or pull
+  request with the same flow. The card leaves it out of the count, the rows and the line under the title, and says how
+  many it left out ("2 failed jobs are not counted: the same work ran again later and completed. Fleet still lists
+  them."). The console decides this from the run records it reads; when they cannot settle it (the failed job's own
+  record or the later run is not among them, or it was a `run --task` job), the job is still to fix. Nothing is removed
+  from the queue: the job stays until it expires or you remove it, and the last-24-hours line still counts it, since
+  that line is what happened that day. A durable run that was lost and could not be continued (`recovery-cap`,
   `recovery-checkpoint-absent`, `recovery-unsafe-extensions`) counts as failed, as the console calls it, though its
   record says `policy` ([durable-runs.md](durable-runs.md)).
 
@@ -2422,6 +2434,8 @@ it judges neither way. `lastBeatAgeMs` is the age the card judges by: when Valke
 the console read it, so a host whose clock runs behind reads as beating to a script as it does to the card. A
 scheduler's `name` in `schedulers` is its cron trigger's id, or null for a schedule whose id the console does not take
 (never its job name).
+Each failed job in `failed.rows` carries `supersededBy`: the id of a later run of the same work that completed after
+it failed, or null (both roles; a job with one is not counted as to fix).
 Whether a park is being answered is not in `/api/state`; `/api/run` says it per run (`pendingRunOnTarget`).
 
 `GET /api/run?id=<job id>` (or `?url=<issue or pull request link>`, which finds the newest run on that target) returns
