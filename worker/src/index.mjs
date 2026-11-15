@@ -33,6 +33,7 @@ import { answerOf, makeWaitState } from "./wait-state.mjs";
 import { makeDeferTo } from "./defer-write.mjs";
 import { jobDataNewer } from "./job-data-version.mjs";
 import { releaseSemanticWindow } from "./queue.mjs";
+import { shouldReleaseSemanticWindow } from "./semantic-window-policy.mjs";
 import { runIdOf } from "./recovery-queue.mjs";
 import { isFinalOutcome, settleInbox } from "./inbox-settle.mjs";
 import { makeAwaitKeeper } from "./held-settle.mjs";
@@ -2113,7 +2114,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			await awaitKeeper?.stop().catch(() => {});
 		}
 	};
-	return async function processor(job, token, signal) {
+	const processJob = async (job, token, signal) => {
 		// First, before any gate reads the data: a job queued by a newer pi-dispatch, whose fields this build would drop
 		// or misread, waits for a worker that can read it (issue #761). A deferral, never a refusal: a refusal would use up
 		// a forge delivery (its id deduplicates a redelivery for `FORGE_JOB_RETENTION_DAYS`) and spend a one-shot
@@ -2232,6 +2233,17 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		} finally {
 			hostBudget.leave(job.id);
 		}
+	};
+	return async function processor(job, token, signal) {
+		// One boundary covers pre-pickup refusals, ordinary results and a cancel that replaced a retry. Waiting for
+		// processJob also waits for pickup's finally and its held resources, so a mere cancel request never frees the
+		// window while the attempt is still settling. Throws (retries and deferrals included) leave it alone. The real
+		// BullMQ job owns the stored key; its compare-and-delete cannot clear a newer run's window (#899).
+		// A terminal cancel is not proof that a failed container stop succeeded: that existing exception retains its
+		// orphaned resource holds. The semantic window bounds repeated intent, not isolation or resource admission.
+		const result = await processJob(job, token, signal);
+		if (shouldReleaseSemanticWindow(result)) await releaseSemanticWindow(job, deps?.log, { cause: "policy" });
+		return result;
 	};
 }
 

@@ -154,6 +154,29 @@ actor's permission through their APIs because a label proves less on those). The
 every delivery passes are the signature check, the bot-loop guard, that permission check, dedup, quiet
 hours, the image preflight, branch protection, and the spend caps. None of them are per-trigger.
 
+## When another event starts a job
+
+Forge deliveries have two duplicate checks. Sending the same delivery again finds its original job while that job
+is retained. Different deliveries for the same target and flow normally share a ten-minute window, so rapidly
+removing and adding a label does not start several copies of the same work.
+
+A job that finishes with a policy refusal or a cancellation releases that second window. Fix the cause, then send a
+**new event**, such as removing and adding the label again: it can start a job immediately, without waiting ten
+minutes. This applies to a refusal before the container starts, such as `secret-bundle-trigger-changed`, and to a job
+you cancel after it starts. Wait until the worker records the cancellation; acceptance of the stop request alone
+does not release the window. The new job still passes every permission, configuration and spend check. If the worker
+logs `stop_did_not_take`, inspect the runtime before starting more work: cancellation was recorded, but the old
+container's exit could not be confirmed and its existing resource holds remain.
+
+The receiver and poller also repair a window left by a completed policy job when they see the next event. A running
+or waiting job keeps its normal window, as does an ordinary successful run. Sending the original delivery again
+still finds its retained original job; releasing the window does not replay it. A parked run's answer and steering
+keep their existing behavior ([sessions](sessions.md), [steering](steering.md)).
+
+**Upgrading:** move the workers and the receiver/poller to the release containing issue #899, following the
+[upgrade order](upgrading.md#the-order). The [rollout note](upgrading.md#pending-release-refused-and-cancelled-jobs)
+explains which half of the fix each component supplies.
+
 ## Close triggers and one-shots
 
 "When this closes, run that, once." An `issue` trigger fires when an issue closes. A PR close uses

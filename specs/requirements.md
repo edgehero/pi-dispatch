@@ -331,8 +331,31 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   key, was swallowed against the finished run whenever it came within ten minutes of the delivery that started that
   run, and quick answers are the normal case. Once a run has parked, the next delivery on its key is a deliberate
   answer, never a duplicate, so the worker deletes the key on the park, through the job's own compare-and-delete
-  (the key is freed only while it still names that job). Every other job keeps its window to the end of its ttl,
-  except a steer-armed one (below).
+  (the key is freed only while it still names that job). A terminal policy outcome releases it too (below), as does
+  a steer-armed run at its final outcome; ordinary successful runs and infrastructure failures keep their window.
+  **A terminal policy outcome releases its window** (AMENDED 2026-11-15, issue #899). The worker releases the
+  real queue job's stored semantic key after terminal processing and cleanup, including refusals before a container
+  starts and `operator-cancel` or `agent-cancel` after one has started. The decision follows the structured outcome,
+  not a list of refusal reasons or whether a budget was reserved. `recovery-enqueued` and `recovery-superseded` are
+  handoffs, not terminal refusals, and do not release it. A pending cancellation or its acknowledgment is not a
+  terminal outcome. The existing `stop_did_not_take` path can return a terminal cancellation without confirmation
+  of physical exit; its orphan resource holds remain unchanged. The release is the job's own compare-and-delete,
+  so an old job cannot free a newer job's window;
+  a failed release is named and never rewrites the outcome or causes a policy refusal to retry. Queued and held
+  cancellation keep BullMQ's atomic job removal, which already frees a key only while that job owns it.
+  **Ingress repairs a missed terminal release** (issue #899). If `enqueueForgeJob` is given a different surviving
+  id, it reads that job from the actual destination queue. BullMQ's add result is not the survivor's data: at the
+  pin it is the incoming job object with its id replaced. A survivor completed with a terminal policy result permits
+  a conditional release only while its terminal state, result, stored dedup id and key ownership still match the
+  evidence; the producer then tries the ordinary add again. Concurrent producers still compete through BullMQ's
+  normal add, and a changed owner is never deleted. A live job, ordinary success, infrastructure failure or recovery
+  handoff remains a duplicate. A legacy null or non-policy return value retains the window. An invalid JSON result
+  or a structured policy result without a valid reason token is an enqueue failure with the key retained; worker
+  cleanup keeps that outcome unchanged and does not release it. A failed read or repair, or contention past the repair bound, takes the existing
+  enqueue-failure path, never a successful deduplicated answer based on uncertainty. The final add result decides
+  the receiver's response and the poller's count and log. The same delivery id still finds its retained original
+  job, even after that job released its semantic window. The window's ten minutes, its key grammar, replicas, queue
+  routing, retention and job-data shape are UNCHANGED, checked.
   **An answer to an awaitInput run, written within five minutes before it parks and arriving before the park has
   taken its held replies, is held and becomes the one resumed job once it has parked; otherwise coalescing is
   unchanged** (issue #638, `DES-AWAIT-INPUT-ENDS-THE-JOB`). The agent posts its question before it ends, so an answer
@@ -381,13 +404,14 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   `#5` and a merge request `!5` in one project firing the same flow, both run. Given a redelivery after retention has expired, a new job runs — this
   is accepted and documented, not a defect, but it must be a *chosen* window rather than an inherited
   default. Given a run that parks, a new delivery on its key inside the ten minutes creates a job, while a
-  run that ends without parking still coalesces one there. Given a resume comment of an awaitInput comment trigger
+  successful ordinary run that ends without parking still coalesces one there. Given a resume comment of an awaitInput comment trigger
   swallowed by the window while the run it meets is live, it is held (`202 {status:"held"}`), and when that run parks
   it is enqueued as the one resumed job with the window, a second held answer gets the one fixed comment, a reply
   after the park is coalesced against that job or held on it (never a second run), and a run that ends without
   parking drops them with no job and no comment (`worker/test/held-replies.test.mjs`, "live, end to end",
   and `receiver/test/held.test.mjs`). Given a steer-armed run's final outcome, its window is
-  released with or without late messages, and never for a job that is not steer-armed or not final; given a late
+  released with or without late messages; that steering release never runs for a job that is not steer-armed or not
+  final, independently of the terminal-policy release above. Given a late
   message's resumed job, it is added under the delivery's job id with no `deduplication` option
   (`worker/test/steer-settle.test.mjs`, "THE WINDOW: released at a steer-armed run's final outcome (no late message
   needed), never for a job that is not steer-armed or not final" and the `enqueueLateForgeJob` test). Given a
@@ -397,6 +421,14 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   (`receiver/test/steer.test.mjs`, "every arm: a redelivered GUID steered before, whose run has ended, answers
   steered with no runs and enqueues NOTHING", "poller: a retried cycle's comment steered before is never enqueued,
   and not counted again", "trySteer: a steer leaves the delivery's marker, NX with the 31-day retention").
+  Given `secret-bundle-trigger-changed` or a terminal operator cancellation, a new label delivery inside ten minutes
+  creates a replacement job; a new terminal policy reason requires no change to a reason allowlist. Given an old
+  worker or a failed completion release, the shared enqueue path repairs the completed policy survivor and creates
+  the replacement. Two such producers racing create one surviving replacement, and an old release cannot remove its
+  key. Replaying the original retained delivery creates none. Given a queued removal that loses to a locked pickup,
+  the active job keeps its key. The poller and webhook paths report the final enqueue result, including a repair
+  failure as an enqueue failure. Active, delayed, retrying, successful ordinary and recovery-handoff jobs keep their
+  existing window behavior, and a cancellation merely requested or acknowledged does not release early.
 
 ## REQ-TRIGGER-AUTHOR-GATE
 
@@ -536,7 +568,12 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   CLI's held and queued branches now are, and which deletes the removed job's defer record. An active job is aborted
   on whichever host owns it and its run record says `outcome: "policy", reason: "operator-cancel"`; a queued, delayed or
   held job is removed and the cancel records
-  NOTHING. What the CLI and the panel's footer say of the removed job's past is read off the job (issue #477): with no attempt made it never
+  NOTHING. Since issue #899, a terminal active cancellation releases the job's semantic duplicate window after
+  processing and cleanup, so a new event can start corrected work immediately. A request or acknowledgment alone
+  does not release it. A queued or held removal retains BullMQ's own atomic release; a failed removal never clears a
+  still-owned window separately. `REQ-DEDUP-BY-DELIVERY-GUID` defines recovery from a missed release and keeps the
+  retained delivery-id shield independent. What the CLI and the panel's footer say of the removed job's past is read
+  off the job (issue #477): with no attempt made it never
   ran and has no record; with one or more (a job waiting to retry after a failed attempt) it made that many attempts,
   and whatever they recorded stays (most write a run record; a gate that fails above the processor's `try` writes
   none, so no record is promised). A cancel that no reachable worker acknowledges is a named refusal, never a silent no-op.
@@ -8980,6 +9017,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-15 (#899) | `REQ-DEDUP-BY-DELIVERY-GUID` and `REQ-OPERATOR-JOB-CANCEL` AMENDED: terminal policy results release the owned semantic window after processing and cleanup, including early refusals and active cancellations; recovery handoffs remain excluded. Shared ingress repairs missed releases from completed policy state with atomic evidence and ownership checks, bounded retry and truthful final enqueue reporting. Retained delivery ids, window length/key grammar, replicas, successful ordinary runs, infrastructure failures and live deferrals UNCHANGED, checked. Parking and steering keep their existing ordering; their blanket non-release wording is narrowed to their own mechanisms. |
 | 2026-11-15 (#897) | **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, (a2): "to fix" is the failed jobs the queue keeps whose work no later run has done since; a failed job a later run of the same cron trigger, or of the same forge target and flow, completed after is left out, and the card says how many. Fleet's failed card and a bulk Retry follow the same rule (`DES-OPERATOR-CONSOLE`). UNCHANGED, checked: the day line and All clear's rule over the last 24 hours, and the failed jobs the list's bound leaves unread, which still count. |
 | 2026-11-15 (#895, review) | `REQ-JOB-ACTIVITY-LIMITS` changes regular defaults to idle-only: no implicit stall timeout or maximum age for continuing activity, including tools without agent steps. A twelve-hour runner/backstop composition covers CPU, network and tool-output activity, then idleness. Explicit stall/maximum settings, Watch jobs' ceiling, credential failure stops, spend guards and compatibility fallbacks UNCHANGED, checked. |
 | 2026-11-15 (#895) | AMENDED `REQ-SUBSCRIPTION-AUTHENTICATION` and `REQ-JOB-ACTIVITY-LIMITS`: usable renewable leases admit across the token cycle, renew through provider eligibility, bound unanswered renewal work independently of expiry supervision, refuse unsafe startup and expose actual holds. Quota, trial, paid-overage and model authority UNCHANGED, checked. |

@@ -236,7 +236,7 @@ comes off once a run continues without asking again.
 
 You can answer right away. A run that stops to ask gives up the ten-minute window in which pi-dispatch treats a
 second comment on the same issue as a repeat of the first, so a quick answer is never mistaken for one. (If the
-worker cannot reach Valkey at that moment it logs `parked_window_release_failed`, and an answer within those ten
+worker cannot reach Valkey at that moment it logs `semantic_window_release_failed` (`cause: "parked"`), and an answer within those ten
 minutes is then answered `deduplicated`; post it again after the window.)
 
 You can even answer before the run has finished stopping. The agent posts its question first and only then ends, so

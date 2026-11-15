@@ -26,7 +26,7 @@ export const BULLMQ_VERIFIED_VERSION = "5.80.4";
 export const BULL_PREFIX = "bull";
 
 /** The per-queue keys this project reads, each `bull:<queue>:<type>` (queue-keys.js `getKeys`). */
-export const QUEUE_KEY = Object.freeze({ meta: "meta", wait: "wait", paused: "paused", delayed: "delayed", prioritized: "prioritized", repeat: "repeat" });
+export const QUEUE_KEY = Object.freeze({ meta: "meta", wait: "wait", paused: "paused", delayed: "delayed", prioritized: "prioritized", repeat: "repeat", completed: "completed" });
 
 /** A queue's key for `type` (queue-keys.js `toKey`: `${prefix}:${name}:${type}`). A job's own hash is `type` = its id. */
 export const queueKey = (queueName, type, prefix = BULL_PREFIX) => `${prefix}:${queueName}:${type}`;
@@ -42,9 +42,50 @@ export const jobKeyOf = (q, jobId) => queueKeyOf(q, jobId);
 /**
  * The fields of a job's own hash this project reads, as job.js `fromJSON` reads them: its kind (`name`), its data, its
  * enqueue instant, its dedup id (`deid`), its scheduler (`rjk`), its attempts (`atm`, and the older `attemptsMade`,
- * which `fromJSON` reads first) and its stall count (`stc`).
+ * which `fromJSON` reads first), its stall count (`stc`), and its completed result (`returnvalue`).
  */
-export const JOB_FIELD = Object.freeze({ name: "name", data: "data", timestamp: "timestamp", dedupId: "deid", schedulerKey: "rjk", attempts: "atm", attemptsOld: "attemptsMade", stalls: "stc" });
+export const JOB_FIELD = Object.freeze({ name: "name", data: "data", timestamp: "timestamp", dedupId: "deid", schedulerKey: "rjk", attempts: "atm", attemptsOld: "attemptsMade", stalls: "stc", result: "returnvalue" });
+
+/** The stored semantic key (scripts.js removeDeduplicationKey, removeDeduplicationKey-1.lua). */
+export const semanticWindowKeyOf = (queue, id) => queueKeyOf(queue, `de:${id}`);
+
+// Issue #899: a completed refusal may still own its TTL key. Read its actual hash, not queue.add's returned Job:
+// job.js create builds that object from the INCOMING data, then replaces only its id with the surviving id.
+// getState-8.lua judges completion by membership in the completed set; moveToFinished-14.lua writes the result
+// under returnvalue. Both reads and ownership are one snapshot, so a disappearing owner is never called live.
+const READ_SEMANTIC_OWNER = `
+if redis.call("GET", KEYS[1]) ~= ARGV[1] then return {"changed"} end
+if redis.call("HGET", KEYS[2], "${JOB_FIELD.dedupId}") ~= ARGV[2] then return {"invalid"} end
+if not redis.call("ZSCORE", KEYS[3], ARGV[1]) then return {"retained"} end
+local result = redis.call("HGET", KEYS[2], "${JOB_FIELD.result}")
+if not result then return {"invalid"} end
+return {"completed", result}
+`;
+
+// The predicate belongs to the caller. This script checks the exact bytes it judged, together with terminal state
+// and ownership, before deleting. A public retry, replacement owner, or result edit between reads makes it a no-op.
+// Comparing JSON.stringify(parsed) would not compare the bytes stored by an older writer (or even its key order).
+const RELEASE_COMPLETED_SEMANTIC_OWNER = `
+if redis.call("GET", KEYS[1]) ~= ARGV[1] then return 0 end
+if redis.call("HGET", KEYS[2], "${JOB_FIELD.dedupId}") ~= ARGV[2] then return 0 end
+if not redis.call("ZSCORE", KEYS[3], ARGV[1]) then return 0 end
+if redis.call("HGET", KEYS[2], "${JOB_FIELD.result}") ~= ARGV[3] then return 0 end
+return redis.call("DEL", KEYS[1])
+`;
+
+const semanticOwnerKeys = (queue, dedupId, jobId) => [semanticWindowKeyOf(queue, dedupId), jobKeyOf(queue, jobId), queueKeyOf(queue, QUEUE_KEY.completed)];
+
+/** Atomic snapshot of the key's actual owner, including the raw result witness for a conditional release. */
+export async function readSemanticWindowOwner(queue, dedupId, jobId) {
+	const reply = await (await queue.client).eval(READ_SEMANTIC_OWNER, 3, ...semanticOwnerKeys(queue, dedupId, jobId), jobId, dedupId);
+	if (!Array.isArray(reply) || !["changed", "invalid", "retained", "completed"].includes(reply[0])) throw new Error("semantic-window-state-unavailable");
+	return { state: reply[0], rawResult: reply[1] };
+}
+
+/** Delete only the terminal owner whose exact result the caller classified; false means it must read again. */
+export async function releaseCompletedSemanticWindow(queue, dedupId, jobId, rawResult) {
+	return (await (await queue.client).eval(RELEASE_COMPLETED_SEMANTIC_OWNER, 3, ...semanticOwnerKeys(queue, dedupId, jobId), jobId, dedupId, rawResult)) === 1;
+}
 
 /** The meta hash's fields: the pause flag (pause-7.lua writes `1`, a resume deletes it) and the library's version. */
 export const META_FIELD = Object.freeze({ paused: "paused", version: "version" });

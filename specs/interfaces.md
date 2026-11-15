@@ -10660,6 +10660,18 @@ job can only be stopped by asking whichever worker owns it to raise its own abor
   through, and classified by the CLOSED exact-match `INT-RUNNER-EXIT-CODE-PROTOCOL` records. The record
   gains `reason: "operator-cancel"` and nothing else: `abortReason` itself never reaches `buildRecord`'s
   explicit literal (pinned).
+- **Semantic-window release** (issue #899): the active request and its acknowledgment do not release a key.
+  Once the worker finishes a terminal `policy` result (including `operator-cancel` and `agent-cancel`) and cleanup,
+  its common result boundary releases the real job's stored semantic key only while the key still names that job.
+  Release waits at most two seconds and logs `semantic_window_released {jobId, cause, released}` or
+  `semantic_window_release_failed {jobId, cause, code}`, with `cause: "policy"` here. A release fault leaves the
+  result and retry class intact; a command that arrives late still compares ownership. A terminal cancellation
+  is the worker's result, not a new guarantee of physical exit: `stop_did_not_take` retains its existing orphan
+  resource holds while the runtime's answer is unknown. The shared forge enqueue can repair a
+  completed policy survivor after validating its terminal state/result and key ownership atomically
+  (`REQ-DEDUP-BY-DELIVERY-GUID`). Queued and held cancellation already release an owned key atomically inside
+  BullMQ's job removal; failure to remove does not authorize a separate release. The request/ack key shapes and TTLs,
+  cancellation origin, result/record shapes, and retained-job delivery-id shield are UNCHANGED, checked.
 - **State dispatch at the requester** (`cancel-cli.mjs`, seams throughout): held (a `wait:job:` hash with
   a `since` clock) goes through the shared `removeHeldJob` FIRST, because a held job IS delayed and the
   plain path would strand its hold keys as a lying panel row; plain delayed/waiting/prioritized gets
@@ -11256,8 +11268,9 @@ panel read (part 3): never the text.
   `steer_late_resumed {jobId, runId, n, queue}`, `steer_late_replied {runId, n}`, `steer_late_fallback_unread
   {runId, code}`, `steer_late_fallback_mismatch {runId}`, `steer_late_resume_failed {runId, queue, code}`,
   `steer_late_preseed_failed {jobId, runId, code}` and `steer_late_failed {runId, code}`, and the window release's
-  `parked_window_released {jobId, released}` or `parked_window_release_failed {jobId, code}` (the park's names, the
-  same function); the receiver's and the poller's `steered {delivery, repo, target, mode, runs, runIds}`,
+  `semantic_window_released {jobId, cause, released}` or `semantic_window_release_failed {jobId, cause, code}`
+  (`cause: "steer"` here, `"parked"` at a park and `"policy"` at terminal policy cleanup, the same bounded function);
+  the receiver's and the poller's `steered {delivery, repo, target, mode, runs, runIds}`,
   `steer_fell_through {delivery, kind, reason, runs?, outcomes?}` (reason `no-delivery-id`, `entry-refused`,
   `no-target`, `no-live-run`, or the one push outcome every run gave, `gone`, `closed` or `full`, else `mixed`),
   `steer_comment_skipped {delivery, kind, reason}` (`no-body`, `malformed`, `empty`, `too-large`; renamed in review
@@ -13971,6 +13984,7 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 
 | Date | Change |
 |---|---|
+| 2026-11-15 (#899) | `INT-CANCEL-CHANNEL-CONTRACT` AMENDED: terminal active cancellation releases its owned semantic window after cleanup, and shared ingress can repair a missed release after atomic verification. A pending request or acknowledgment cannot release early; queued and held removal retain BullMQ's atomic release. Request/ack keys and TTLs, origin rules, stored job/result/run-record shapes and retained delivery-id protection UNCHANGED, checked. `INT-RUN-HISTORY-FILE-CONTRACT` and `INT-TRIGGERS-FILE-CONTRACT` UNCHANGED, checked: no new persisted fields or vocabulary. `INT-STEER-INBOX-CONTRACT` AMENDED for the neutral window-release log names and closed cause; steering and held-reply order, origin and orphan resource holds UNCHANGED, checked. |
 | 2026-11-15 (#897) | **`INT-CONSOLE-STATE-API` AMENDED**: each failed row gains `supersededBy`, a run id or null, for both roles, added within `version: 1` as the contract allows. `INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked: the rule reads `jobId`, `kind`, `target`, `flow`, `outcome`, `startedAt` and `endedAt` as they are, and writes nothing. |
 | 2026-11-15 (#895, review) | `INT-RUNNER-EXIT-CODE-PROTOCOL` clarifies the idle-only regular-job default: the worker omits the stall variable unless configured. `INT-CREDENTIAL-DROP` requires renewable admission and final validation to satisfy the existing access-token wire grammar, refusing unsupported values before spend while preserving a rotated grant. `INT-RUN-HISTORY-FILE-CONTRACT`, stored credential grammar, counter/drop shapes and versions UNCHANGED, checked. |
 | 2026-11-15 (#895) | AMENDED `INT-SUBSCRIPTION-CREDENTIAL-STORE`, `INT-CREDENTIAL-DROP`, `INT-CONTAINER-RUNTIME-CONTRACT` and `INT-DEFER-REASON-KEY`: renewable timing and compatibility, private scheduling metadata, bounded renewal, startup refusal and retained secrets, plus CLI waiting details and safe hold events. Credential-store, drop, defer and run-history persisted shapes UNCHANGED, checked; no migration or new store/key is needed. |

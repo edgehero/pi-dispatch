@@ -122,7 +122,7 @@ export function makeLateForge({ redis, queues, comment = async () => {}, log = (
 	return async function onLateForge(entries, { job, runId = runIdOf(job), result = null, error = null, queueName = null, heldResumed = false } = {}) {
 		try {
 			if (job?.data?.steer !== true) return;
-			await release(job, log);
+			await release(job, log, { cause: "steer" });
 			const late = Array.isArray(entries) ? entries.filter((e) => e?.source === "forge") : [];
 			if (late.length === 0) return;
 			// Closing the old inbox must not carry its private fallback to a newly configured forge.

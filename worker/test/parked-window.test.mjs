@@ -65,7 +65,7 @@ test("a parked run's window is closed on the real BullMQ job by the wired worker
 	const { job, asked } = bullJob();
 	await harness({ exitReason: "awaiting-input", lines })(job, "tok", new AbortController().signal);
 	assert.deepEqual(asked, ["gh-d"], "the job's own removeDeduplicationKey, once");
-	assert.ok(lines.some((l) => l.event === "parked_window_released" && l.jobId === "gh-d" && l.released === true));
+	assert.ok(lines.some((l) => l.event === "semantic_window_released" && l.jobId === "gh-d" && l.released === true));
 });
 
 test("a run that did not park keeps its window under the wired worker", { skip }, async () => {

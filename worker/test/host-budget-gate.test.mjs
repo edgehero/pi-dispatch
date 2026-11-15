@@ -425,8 +425,14 @@ test("the processor's waiter bookkeeping lives in ONE wrapper: budget deferral k
 	for (const [call, n] of [["hostBudget.suspend(", 1], ["hostBudget.forget(", 2], ["hostBudget.enter(", 1], ["hostBudget.leave(", 1]]) {
 		assert.equal(body.split(call).length - 1, n, `${call} ${n} time(s), in the wrapper (forget: on a return and on a non-deferral throw)`);
 	}
-	const wrapper = body.slice(body.indexOf("return async function processor(job, token, signal) {"));
+	// #899 adds an outer terminal-result boundary. Budget bookkeeping still wraps the whole pickup inside
+	// processJob; the outer boundary must await it, including its finally, before it may release the window.
+	const start = body.indexOf("const processJob = async (job, token, signal) => {");
+	const end = body.indexOf("return async function processor(job, token, signal) {");
+	assert.ok(start !== -1 && end > start, "both wrappers are present and ordered");
+	const wrapper = body.slice(start, end);
 	for (const call of ["hostBudget.suspend(", "hostBudget.forget(", "hostBudget.enter(", "hostBudget.leave("]) assert.ok(wrapper.includes(call), `${call} is in the wrapper`);
+	assert.match(body.slice(end), /const result = await processJob\(job, token, signal\);\s*if \(shouldReleaseSemanticWindow\(result\)\) await releaseSemanticWindow/);
 	assert.equal(body.split("hostBudget.gate(").length - 1, 1, "one gate");
 });
 

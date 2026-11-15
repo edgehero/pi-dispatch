@@ -92,7 +92,7 @@ test("the installed BullMQ's text says what the module says (a bump that moves o
 	for (const line of ["const data = JSON.parse(json.data || '{}');", "const job = new this(queue, json.name, data, opts, json.id || jobId);", "job.timestamp = parseInt(json.timestamp);", "job.repeatJobKey = json.rjk;", "job.deduplicationId = json.deid;", "job.attemptsMade = parseInt(json.attemptsMade || json.atm || '0');", "job.stalledCounter = parseInt(json.stc || '0');"]) {
 		assert.ok(job.includes(line), `job.js fromJSON: ${line}`);
 	}
-	assert.deepEqual(Object.values(JOB_FIELD).sort(), ["atm", "attemptsMade", "data", "deid", "name", "rjk", "stc", "timestamp"]);
+	assert.deepEqual(Object.values(JOB_FIELD).sort(), ["atm", "attemptsMade", "data", "deid", "name", "returnvalue", "rjk", "stc", "timestamp"]);
 	// The keys: `${prefix}:${name}:${type}`, prefix `bull`, and every key type the module names is one getKeys lists.
 	const keys = bullmqFile("classes/queue-keys.js");
 	assert.ok(keys.includes("constructor(prefix = 'bull') {"), "queue-keys.js: the default prefix");
@@ -113,6 +113,29 @@ test("the installed BullMQ's text says what the module says (a bump that moves o
 	assert.ok(pause.includes('rcall("HSET", KEYS[3], "paused", 1)') && pause.includes('rcall("HDEL", KEYS[3], "paused")'), "pause-7.lua writes 1 and deletes the field");
 	assert.equal(META_FIELD.paused, "paused");
 	assert.equal(QUEUE_KEY.meta, "meta");
+});
+
+test("semantic-window repair is pinned to BullMQ's owner, state, result and add behavior (#899)", { skip }, () => {
+	const job = bullmqFile("classes/job.js");
+	assert.ok(job.includes("job.id = await job.addJob(client,"), "create replaces the incoming object's id, never loads the survivor");
+	assert.ok(job.includes("job.returnvalue = getReturnValue(json.returnvalue);"), "fromJSON reads returnvalue");
+	assert.equal(JOB_FIELD.result, "returnvalue");
+	const scripts = bullmqFile("classes/scripts.js");
+	assert.ok(scripts.includes("const keys = [`${queueKeys.de}:${deduplicationId}`];"), "the semantic key suffix");
+	assert.ok(scripts.includes("'returnvalue',"), "moveToCompletedArgs passes the result field name");
+	const state = bullmqFile("commands/getState-8.lua");
+	assert.ok(state.includes('if rcall("ZSCORE", KEYS[1], ARGV[1]) then\n  return "completed"'), "completed membership determines terminal state");
+	const finish = bullmqFile("commands/moveToFinished-14.lua");
+	assert.ok(finish.includes('rcall("ZADD", targetSet, timestamp, jobId)'));
+	assert.ok(finish.includes('rcall("HSET", jobIdKey, ARGV[3], ARGV[4], "finishedOn", timestamp)'));
+	const release = bullmqFile("commands/removeDeduplicationKey-1.lua");
+	assert.ok(release.includes("local currentJobId = rcall('GET', deduplicationKey)"));
+	assert.ok(release.includes('if currentJobId and currentJobId == jobId then'));
+	const remove = bullmqFile("commands/includes/removeDeduplicationKeyIfNeededOnRemoval.lua");
+	assert.ok(remove.includes('if currentJobId and currentJobId == jobId then'));
+	assert.ok(bullmqFile("commands/includes/removeJobWithChildren.lua").includes('removeDeduplicationKeyIfNeededOnRemoval(prefix, jobId, deduplicationId)'));
+	const finalize = bullmqFile("commands/includes/removeDeduplicationKeyIfNeededOnFinalization.lua");
+	assert.ok(finalize.includes('if pttl == 0 then') && finalize.includes('if pttl == -1 then'), "positive TTL survives completion");
 });
 
 test("customJobIdAllowed answers as BullMQ's own validateOptions does, id for id", { skip }, async () => {
@@ -323,7 +346,8 @@ const OWNER_PATTERNS = Object.freeze({
 	"a quoted bull:, repeat: or manual: prefix": /["'`](?:bull|repeat|manual):/,
 	"a cron run parser": /\^\(?(?:\?:)?(?:repeat|manual)\b/,
 	"a quoted :meta suffix": /:meta["'`]/,
-	"a quoted job hash field": /["'`](?:rjk|deid|atm|stc|attemptsMade)["'`]/,
+	"a quoted semantic-key prefix": /["'`]de:/,
+	"a quoted job hash field": /["'`](?:rjk|deid|atm|stc|attemptsMade|returnvalue)["'`]/,
 	"a queue key built from a literal type": /\b(?:toKey|queueKeyOf|queueKey|jobKeyOf)\((?:[^,()]*,\s*)?["'`]/,
 	"the delayed score's shift": /\bDELAYED_SCORE_SHIFT\s*=|[*/]\s*(?:4096|0x1000)\b/,
 	"BullMQ's three-part custom id rule": /split\(\s*["'`]:["'`]\s*\)\.length\s*[!=]==?\s*3/,
@@ -387,7 +411,8 @@ test("the one-owner scan is not vacuous: each pattern catches a spelling the sou
 		"a quoted bull:, repeat: or manual: prefix": ['if (!jobId.startsWith("repeat:")) return;', "const prefix = `bull:${QUEUE}@`;", "return `manual:${triggerId}:${millis}`;", "const key = 'bull:' + name;"],
 		"a cron run parser": ["const m = /^(?:repeat|manual):(.+):\\d+$/.exec(jobId);", "const RE = /^repeat:([A-Za-z0-9._-]{1,200}):(0|[1-9][0-9]{0,15})$/;", "const re = new RegExp(`^(?:repeat|manual):${id}:(\\\\d+)$`);", "const RE = /^(repeat|manual):(x):(1)$/;"],
 		"a quoted :meta suffix": ['redis.scan(cursor, "MATCH", "bull:pi-jobs*:meta");', 'const name = key.slice(prefix.length, -":meta".length);'],
-		"a quoted job hash field": ['const FIELDS = ["name", "deid", "rjk", "atm", "attemptsMade", "stc"];', "pipe.hmget(key, 'rjk');"],
+		"a quoted semantic-key prefix": ['const key = q.toKey(`de:${id}`);'],
+		"a quoted job hash field": ['const FIELDS = ["name", "deid", "rjk", "atm", "attemptsMade", "stc"];', "pipe.hmget(key, 'rjk');", 'redis.hget(key, "returnvalue");'],
 		"a queue key built from a literal type": ['q.toKey("repeat")', 'queueKeyOf(q, "delayed")', "queueKey(name, 'meta')", 'jobKeyOf(q, "x")'],
 		"the delayed score's shift": ["export const DELAYED_SCORE_SHIFT = 4096;", "const due = Math.floor(n / 4096);", "const score = due * 0x1000;"],
 		"BullMQ's three-part custom id rule": ['if (id.includes(":") && id.split(":").length !== 3) return null;', "return id.split(':').length === 3;"],
