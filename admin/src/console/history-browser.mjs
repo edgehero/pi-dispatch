@@ -44,6 +44,15 @@ export function historyBrowser({ document, location, history, fetch, render, zoo
       t.textContent = counts.get(word) > 1 ? time(at).split(" ").slice(1).join(" ") : word;
       t.setAttribute("aria-label", time(at));
     }
+    // Repeated-hour offsets are wider than HH:mm. Keep both offsets legible on the narrowest SVG lane;
+    // intermediate tick lines remain, and a run's preview always gives its exact timestamp.
+    let right = -Infinity;
+    for (const t of ticks) {
+      if (!t.matches(".tax") || !t.getBoundingClientRect) continue;
+      const box = t.getBoundingClientRect();
+      if (box.left < right + 8) t.textContent = "";
+      else right = box.right;
+    }
     for (const t of panel.querySelectorAll("[data-timeline-zone]")) t.textContent = "Local";
     for (const link of panel.querySelectorAll(".tl-run")) {
       const start = Number(link.getAttribute("data-run-start")), end = Number(link.getAttribute("data-run-end"));
@@ -173,6 +182,7 @@ export function historyBrowser({ document, location, history, fetch, render, zoo
   for (const event of ["pointerover", "focusin"]) panel.addEventListener(event, (e) => { const link = e.target.closest?.(".tl-run"); if (link) preview(link); });
   panel.addEventListener("touchstart", (e) => { const link = e.target.closest?.(".tl-run"); if (link) { touched = link; preview(link); } }, { passive: true });
   panel.addEventListener("keydown", (e) => { if (e.key === "Escape") { const box = panel.querySelector("[data-history-preview]"); if (box) box.hidden = true; } });
+  window.addEventListener("resize", init);
   init();
   if (pinned) load();
   return { held: () => pinned || loading || panel.contains(document.activeElement) || panel.querySelector("[data-history-preview]")?.hidden === false, init };
