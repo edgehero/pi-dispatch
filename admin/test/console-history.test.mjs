@@ -7,7 +7,7 @@ import { historyPageHtml } from "../src/console/history-view.mjs";
 import { timelineModel } from "../src/console/timeline.mjs";
 import { execFileSync } from "node:child_process";
 import { CONSOLE_SCRIPT } from "../src/console/script.mjs";
-import { Event, runConsoleScript, fakeTimers, flush } from "./helpers/script-dom.mjs";
+import { Event, parseDocument, runConsoleScript, fakeTimers, flush } from "./helpers/script-dom.mjs";
 
 const NOW = Date.parse("2026-11-15T12:00:00Z");
 const q = () => parseHistoryQuery(new URLSearchParams({ anchor: String(NOW), zoom: "24h" }), NOW);
@@ -50,6 +50,9 @@ test("dense overlapping runs and projects beyond the picture's cap remain indivi
   const text = String(historyPageHtml({ query: q(), now: NOW, page: { runs, next: "a".repeat(32), partial: false, olderAt: null }, runHref: (id) => "/run?id=" + id }));
   for (const r of runs) assert.ok(text.includes(`href="/run?id=${r.jobId}"`));
   assert.match(text, /More runs in this window/);
+  const doc = parseDocument(`<html><body>${text}</body></html>`), track = doc.querySelector(".history-track");
+  assert.equal(track.children.length, 3, "only Older, the plot and Newer occupy the track");
+  assert.ok(doc.querySelectorAll("[data-history-reveal]").some((button) => !doc.querySelector(".history-window").contains(button)), "the row overflow action remains outside the scroll box");
 });
 
 test("invalid and duplicate inputs are refused before history reads", () => {

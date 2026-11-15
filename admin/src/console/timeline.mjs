@@ -1150,7 +1150,7 @@ function headHtml(row, by) {
  * for a screen reader ("Runs by project"). A model with no row draws the band and the axis alone; the page says why
  * beside it (`model.empty`).
  */
-export function timelineHtml(model, { label, runHref = null } = {}) {
+export function timelineHtml(model, { label, runHref = null, overflow = true } = {}) {
   if (typeof label !== "string" || label === "") throw new TypeError("timeline: the timeline is named (label)");
   const nowX = model.nowX;
   const future = pc(100 - Number(nowX));
@@ -1180,12 +1180,17 @@ export function timelineHtml(model, { label, runHref = null } = {}) {
   // The rows left out (`TIMELINE_ROWS_MAX`): a card's sentence under the scroll box, not a line inside it. Inside, it was
   // as wide as the 720 px timeline, and a phone, whose timeline opens scrolled to its end, showed its last words alone,
   // or none of it.
-  const cut = model.rowsMore?.rows > 0 ? html`<p class="card__sub">${rowsMoreText(model.rowsMore)}${runHref ? html` <button class="btn btn--sm" type="button" data-history-reveal>Inspect every run</button>` : null}</p>` : null;
+  const cut = overflow ? timelineOverflowHtml(model, { interactive: Boolean(runHref) }) : null;
   const ticks = model.axis.filter((t) => t.label !== null).map((t) => html`<text class="tax" data-timeline-at="${t.at}" x="${t.x}%" y="14" text-anchor="middle">${t.label}</text>`);
   // "UTC" is written left of the lane's start, in the heads' column, beside the times it names (the SVG draws outside
   // its box); as a head of its own it read as one more line of the last row's head.
   const axis = html`<span></span><svg class="tl__r" height="${BAND_H}" aria-hidden="true"><text class="tax" data-timeline-zone x="0" dx="-8" y="14" text-anchor="end">${TIMELINE_BAND.axis}</text>${ticks}${model.current === false ? null : html`<rect class="tnowcap" x="${nowX}%" y="2" width="46" height="18" rx="9" transform="translate(-23 0)"/><text class="tnowcap-t" data-timeline-at="${model.now}" x="${nowX}%" y="15" text-anchor="middle">${model.nowLabel}</text>`}</svg>`;
   return html`<div class="tl-wrap"><div class="tl" role="group" aria-label="${label}">${band}${rows}${axis}</div></div>${cut}`;
+}
+
+/** The overflow notice belongs outside a scrolling track, where a phone can read it without panning. */
+export function timelineOverflowHtml(model, { interactive = false } = {}) {
+  return model.rowsMore?.rows > 0 ? html`<p class="card__sub">${rowsMoreText(model.rowsMore)}${interactive ? html` <button class="btn btn--sm" type="button" data-history-reveal>Inspect every run</button>` : null}</p>` : null;
 }
 
 const GROUPED = new Intl.NumberFormat("en-US");

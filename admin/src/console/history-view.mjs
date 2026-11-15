@@ -2,7 +2,7 @@ import { outcomeWord } from "../words.mjs";
 import { timeHtml } from "./panels/common.mjs";
 import { html } from "./html.mjs";
 import * as ui from "./kit.mjs";
-import { TIMELINE_ROWS, TIMELINE_ZOOMS, timelineHtml, timelineLegend, timelineModel } from "./timeline.mjs";
+import { TIMELINE_ROWS, TIMELINE_ZOOMS, timelineHtml, timelineLegend, timelineModel, timelineOverflowHtml } from "./timeline.mjs";
 
 export function historyHref(q, over = {}) {
   const next = { ...q, ...over };
@@ -29,8 +29,8 @@ ${runs === null ? null : TIMELINE_ROWS.map((rows) => navLink(historyHref(query, 
     </form>
     <p class="card__sub" data-history-zone>UTC. Scroll sideways to browse time, or use Older and Newer.</p>
     <div class="history-window" tabindex="0" role="region" aria-label="Scrollable run history"><div class="history-track">
-      <div class="history-edge">${navLink(older, "Older")}</div>${timelineHtml(model, { label: model.by === "host" ? "Runs by host" : "Runs by project", runHref })}<div class="history-edge">${navLink(newer, "Newer")}</div>
-    </div></div>
+      <div class="history-edge">${navLink(older, "Older")}</div>${timelineHtml(model, { label: model.by === "host" ? "Runs by host" : "Runs by project", runHref, overflow: false })}<div class="history-edge">${navLink(newer, "Newer")}</div>
+    </div></div>${timelineOverflowHtml(model, { interactive: true })}
     <aside class="history-preview" data-history-preview hidden aria-live="polite"></aside>
     <p class="card__sub history-status" role="status" data-history-status>${note ?? "Open a run for details. Browse retained history to inspect every run and project."}</p>
 ${list}
