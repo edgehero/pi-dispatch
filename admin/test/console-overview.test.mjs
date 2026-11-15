@@ -579,15 +579,20 @@ test("the timeline card: rows and zoom as links that keep the rest of the query,
   const out = draw(overviewTimeline, snapshot());
   assert.match(out, /<h2>Runs by project<\/h2><span class="card__sub">left of now: what ran; right of now: what is in line<\/span>/);
   assert.match(out, /<div class="seg" role="group" aria-label="Rows"><a href="\/" aria-current="page">Project<\/a><a href="\/\?rows=host">Host<\/a><\/div>/);
-  assert.match(out, /<div class="seg" role="group" aria-label="Zoom"><a href="\/\?zoom=1h">1h<\/a><a href="\/" aria-current="page">3h<\/a><a href="\/\?zoom=24h">24h<\/a><\/div>/);
+  // 24h is the default (issue #896): its button is the bare page, and the others carry their zoom.
+  assert.match(out, /<div class="seg" role="group" aria-label="Zoom"><a href="\/\?zoom=1h">1h<\/a><a href="\/\?zoom=3h">3h<\/a><a href="\/" aria-current="page">24h<\/a><\/div>/);
   assert.match(out, /<div class="projseg" role="group" aria-label="Project"><span class="projseg__l">Project<\/span><a href="\/" aria-current="page">All<b>\d+<\/b><\/a>/);
   assert.match(out, /<a href="\/\?project=web"><span class="ptag">web<\/span><b>\d+<\/b><\/a>/);
   assert.match(out, /class="tl-wrap"/);
   assert.match(out, /class="keyrow"/);
-  const host = draw(overviewTimeline, snapshot(), { query: { rows: "host", zoom: "24h", project: "web" } });
+  const host = draw(overviewTimeline, snapshot(), { query: { rows: "host", zoom: "3h", project: "web" } });
   assert.match(host, /<h2>Runs by host<\/h2>/);
-  assert.match(host, /<a href="\/\?zoom=24h&amp;project=web">Project<\/a><a href="\/\?rows=host&amp;zoom=24h&amp;project=web" aria-current="page">Host<\/a>/);
-  assert.match(host, /<a href="\/\?rows=host&amp;zoom=24h"( aria-current="page")?>All<b>/);
+  assert.match(host, /<a href="\/\?zoom=3h&amp;project=web">Project<\/a><a href="\/\?rows=host&amp;zoom=3h&amp;project=web" aria-current="page">Host<\/a>/);
+  assert.match(host, /<a href="\/\?rows=host&amp;zoom=3h"( aria-current="page")?>All<b>/);
+  // The default asked for by name is drawn the same and its links leave it out, so one window has one address.
+  const named = draw(overviewTimeline, snapshot(), { query: { rows: "host", zoom: "24h", project: "web" } });
+  assert.match(named, /<a href="\/\?project=web">Project<\/a><a href="\/\?rows=host&amp;project=web" aria-current="page">Host<\/a>/);
+  assert.match(named, /<a href="\/\?rows=host&amp;project=web" aria-current="page">24h<\/a>/);
   // A value the page parser would refuse never reaches the timeline (it draws the defaults).
   assert.match(draw(overviewTimeline, snapshot(), { query: { rows: "<x>", zoom: "9y", project: "NOT A PROJECT" } }), /<h2>Runs by project<\/h2>/);
 });
