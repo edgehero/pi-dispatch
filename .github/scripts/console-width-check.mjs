@@ -128,7 +128,9 @@ import { checkTriggersBrowser } from "./console-triggers-browser.mjs";
 import { checkConfigBrowser } from "./console-config-browser.mjs";
 import { checkSpendBrowser } from "./console-spend-browser.mjs";
 import { checkZeroTouchBrowser } from "./console-zero-touch-browser.mjs";
+import { checkTimelineBrowser } from "./console-timeline-browser.mjs";
 import { frozenDateSource, openChrome } from "../../launch/chrome-pipe.mjs";
+import { TIMELINE_SCRIPT, TIMELINE_CSS } from "../../admin/src/console/timeline-assets.generated.mjs";
 import { findOnPath } from "../../launch/server-binary.mjs";
 
 const REPO = fileURLToPath(new URL("../../", import.meta.url));
@@ -1907,6 +1909,13 @@ export async function checkPageLane({ chrome, docs, shellDocs: sweep = [], contr
 			res.writeHead(200, { "content-type": `${type}; charset=utf-8` }).end(body);
 		} else if (path === "/static/console.js") {
 			res.writeHead(200, { "content-type": "text/javascript; charset=utf-8" }).end(script);
+		} else if (path === "/static/timeline.js") {
+			res.writeHead(200, { "content-type": "text/javascript; charset=utf-8" }).end(TIMELINE_SCRIPT);
+		} else if (path === "/static/timeline.css") {
+			res.writeHead(200, { "content-type": "text/css; charset=utf-8" }).end(TIMELINE_CSS);
+		} else if (path === "/api/timeline") {
+			// The golden carries the sample history seed. Live archive behavior has its own browser check.
+			res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ items: [], next: null, partial: false, olderAt: null, unavailable: [] }));
 		} else if (path === "/api/events" || path === "/api/transcript") {
 			// Held open with nothing sent: the page shows its live state, and nothing it draws moves under the measure.
 			res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8" });
@@ -2315,7 +2324,10 @@ async function main(opts) {
 		return checkPages({ ...args, shots: opts.shots, sandbox: !ci, work, children, log: (line) => console.log(line), onOpen: (browser) => browsers.add(browser) });
 	};
 	try {
-		return await runCheck(opts, { find: () => findChrome(), modules, check, ci, log: (line) => console.log(line), started });
+		const code = await runCheck(opts, { find: () => findChrome(), modules, check, ci, log: (line) => console.log(line), started });
+		const chrome = findChrome()?.path;
+		if (code === 0 && chrome) console.log("Timeline interaction check: " + JSON.stringify(await checkTimelineBrowser({ chrome, sandbox: !ci })));
+		return code;
 	} finally {
 		if (deadline) clearTimeout(deadline);
 	}

@@ -1,7 +1,7 @@
 {
   "card": "OverviewPhone",
   "pr": 3,
-  "words": "6882bcdd9daf0994943ce51ddfa18d0f04c772c87699516d3152843dd84cb341",
+  "words": "00313bc220413661fb8233e1ba942a6bd25944c4c6c75d1d9517552d8ec679d5",
   "elements": [
     {"el":"The same cards in one column at 390","kind":"readme","status":"new","source":"admin/src/console/page-css.mjs#PAGE_CSS","holds":"main>.cards-4{grid-template-columns:minmax(0,1fr)}","golden":["overview.operator"],"shows":"class=\"cards-4\""},
     {"el":"The pill nav scrolls inside itself","kind":"readme","status":"real","source":"admin/src/console/page-css.mjs#SHELL_CSS","holds":".pillnav{flex:0 0 auto"},
@@ -22,6 +22,7 @@
     {"el":"p-waitlists","kind":"panel","status":"new","source":"admin/src/console/panels/overview.mjs#overviewWaitlists","golden":["overview.operator","overview.viewer"],"reason":"the same panel as the OverviewScreen card's"},
     {"el":"p-hosts","kind":"panel","status":"real","source":"admin/src/console/panels/overview.mjs#overviewHosts","golden":["overview.operator","overview.viewer"],"reason":"the same panel as the OverviewScreen card's"},
     {"el":"A one line summary with no sign out","kind":"readme","status":"illustrative","reason":"the phone keeps the live dot and Sign out, because the shell is the same on every page"},
-    {"el":"Retained history navigation and individual run inspection","kind":"readme","status":"new","panel":"p-timeline","source":"admin/src/console/history-view.mjs#historyFrame","reason":"Older, Newer and Return to now move the time window. Every fetched record has a detail link even where the SVG caps omit it. The served browser keeps the anchor and localizes each instant."}
+    {"el":"Retained history navigation and individual run inspection","kind":"readme","status":"new","panel":"p-timeline","source":"admin/src/console/history-view.mjs#historyFrame","reason":"The enhanced library timeline supports continuous pan, zoom, visual group expansion and individual detail links. Legacy fixed-window controls remain the fallback. Times use each instant’s offset."},
+    {"el":"Library timeline controls and visual group expansion","kind":"readme","status":"new","panel":"p-timeline","source":"admin/src/console/timeline-view.mjs#libraryTimelineHtml","holds":"data-rt-chart","reason":"The static design depicts the toolbar and sample intervals. Real vis interactions, density paging and restored navigation are checked by console-timeline-browser.mjs; the fallback SVG remains in server HTML."}
   ]
 }

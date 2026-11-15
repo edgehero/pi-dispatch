@@ -1,4 +1,6 @@
 import { historyFrame } from "../history-view.mjs";
+import { libraryTimelineHtml } from "../timeline-view.mjs";
+import { timelineSeed } from "../timeline-data.mjs";
 /**
  * The overview screen's panels (issue #737: the OverviewScreen, OverviewAllClear, OverviewPhone, SetupScreen,
  * TimelineAndWaitlists, Status and CardsAndBanners cards), re-exported by `../panels.mjs`. The rules every panel keeps
@@ -729,7 +731,9 @@ export const overviewTimeline = overviewPanel("Runs by project", (s, view) => {
     runsRead && s.runsDay.floor ? "Only the newest runs are read, so older runs in this window may be missing." : null,
     q.anchor === null && model.empty && runsWhole && w !== null && w.truncated !== true ? "No run in this window, and nothing in line." : null,
   ].filter(Boolean);
-  const body = html`${chipsHtml(view, q, model)}${historyFrame({ model, query: q, runHref: (id) => runHref(view, id), note: q.anchor === null ? null : "Reading this window from retained history…" })}<noscript><p class="card__sub">Enable JavaScript to browse retained history here, or open <a href="/runs">Runs</a>.</p></noscript>${notes.map((n) => html`<p class="card__sub">${n}</p>`)}${timelineLegend()}`;
+  const seed = { now: view.now, start: model.start, end: model.end, project: q.project, rows: model.by, notes, items: timelineSeed({ now: view.now, start: model.start, runs: s.runsDay ?? [], active: s.active ?? [], hostJobs: hostsOf(s), waiting: s.waiting, parked }) };
+  if (seed.items.length === 2000) seed.notes = [...notes, "The live snapshot reached its 2,000-run limit. Retained history loads separately."];
+  const body = html`${libraryTimelineHtml(seed)}<div data-timeline-fallback>${chipsHtml(view, q, model)}${historyFrame({ model, query: q, runHref: (id) => runHref(view, id), note: q.anchor === null ? null : "Reading this window from retained history…" })}<noscript><p class="card__sub">Enable JavaScript to browse retained history here, or open <a href="/runs">Runs</a>.</p></noscript>${notes.map((n) => html`<p class="card__sub">${n}</p>`)}</div>${timelineLegend()}`;
   return ui.card({ title, sub: "left of now: what ran; right of now: what is in line", end: html`${rowsSeg}${zoomSeg}`, body });
 });
 

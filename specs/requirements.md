@@ -1879,6 +1879,19 @@ writes retain their existing interactive confirmation. This adds no unattended p
 
 ## REQ-OPERATOR-CONSOLE-SCREENS
 
+- **AMENDED 2026-11-15 (#907), (a4), continuous visual run history.** The default enhanced timeline spans the
+  Overview's available width, with an expanded view, fixed group labels, range/zone/zoom controls and Now. Pointer,
+  horizontal wheel and touch navigation move the same viewport across bounded archive pages. Every loaded run is
+  visually reachable through stacking and expandable groups with visual paging; a separate list is supplementary.
+  History loading remains bounded and cancellable, with explicit partial/unavailable/dense continuation states.
+  Hover/focus previews, keyboard inspection and direct detail links work in both themes and at phone widths; touch
+  separates selection from Open run. Panning never edits or activates a record. SSE updates preserve historical range,
+  focus and selection; Back restores custom range and group expansion. Winter/summer and both DST transitions use
+  each instant's own offset, with repeated hours disambiguated and elapsed durations unchanged. The prior SVG and
+  fixed-window controls remain the script-failure fallback. The PR supplies actual-browser interaction evidence,
+  desktop/phone images in both themes and a pan/zoom/detail recording. REQ-CONSOLE-SECURITY UNCHANGED, checked.
+
+
 - **AMENDED 2026-11-15 (#903), (a4), interactive retained history.** The Overview timeline has a movable time
   anchor independent of now. Horizontal scrolling, keyboard navigation and Older/Newer browse retained history;
   Return to now restores live following. Every record is reachable through bounded pages, including overlapping runs
@@ -9440,3 +9453,5 @@ instead of drifting.
 | 2026-11-05 (#800, what an issue-only rule starts) | **`REQ-OPERATOR-CONSOLE-SCREENS` CORRECTED**: a watch rule that only files an issue starts no agent and no container. It said no job, and a queue job does run, and its run is listed on Runs. UNCHANGED, checked: `worker/src/index.mjs`, what such a rule does. |
 | 2026-11-05 (#800, #695, one release) | **`REQ-PER-TRIGGER-TOOL-EXCLUSIONS` AMENDED** in Scope: 5.0.0 is the first release that reads both keys, so what a released worker does is one of two answers, and a file that lost its stamp is refused rather than loaded (`DES-STORE-VERSION-WHEN-NEEDED`). `REQ-OPERATOR-CONSOLE-SCREENS` UNCHANGED, checked: a host that reads less is still what the card says of a build from `main`, and of any later version row. |
 | 2026-11-15 (#903) | REQ-OPERATOR-CONSOLE-SCREENS (a4) AMENDED for horizontal retained-history paging, accessible run links and previews, persistent time position and per-instant browser offsets. The prior UTC-only axis and noninteractive overflow statements are superseded by the amendment. REQ-CONSOLE-SECURITY UNCHANGED, checked: existing authentication, roles and person binding apply. |
+
+| 2026-11-15 (#907) | REQ-OPERATOR-CONSOLE-SCREENS (a4) AMENDED for continuous library navigation, visual overlap expansion, bounded history loading, keyboard/touch inspection and stable live/Back state. REQ-CONSOLE-SECURITY UNCHANGED, checked: roles, CSP and read boundaries remain intact. |

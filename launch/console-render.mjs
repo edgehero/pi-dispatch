@@ -14,6 +14,7 @@ import { createServer } from "node:http";
 import { join } from "node:path";
 import { CONSOLE_PICKS, CONSOLE_TRANSCRIPT } from "./console-picks.mjs";
 import { openChrome } from "./chrome-pipe.mjs";
+import { TIMELINE_SCRIPT, TIMELINE_CSS } from "../admin/src/console/timeline-assets.generated.mjs";
 
 export const CONSOLE_WIDTHS = Object.freeze([1440, 375]);
 export const CONSOLE_THEMES = Object.freeze(["light", "dark"]);
@@ -51,6 +52,10 @@ export function servePages({ docs, css, script, applyHeaders, frames }) {
 		if (doc) res.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end(doc.html);
 		else if (url.pathname === "/static/console.css") res.writeHead(200, { "content-type": "text/css; charset=utf-8" }).end(css);
 		else if (url.pathname === "/static/console.js") res.writeHead(200, { "content-type": "text/javascript; charset=utf-8" }).end(script);
+		else if (url.pathname === "/static/timeline.js") res.writeHead(200, { "content-type": "text/javascript; charset=utf-8" }).end(TIMELINE_SCRIPT);
+		else if (url.pathname === "/static/timeline.css") res.writeHead(200, { "content-type": "text/css; charset=utf-8" }).end(TIMELINE_CSS);
+		// The golden's metadata seed is the sample history. No other archive exists in this renderer.
+		else if (url.pathname === "/api/timeline") res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ items: [], next: null, partial: false, olderAt: null, unavailable: [] }));
 		else if (url.pathname === "/api/whoami") res.writeHead(200, { "content-type": "application/json; charset=utf-8" }).end("{}");
 		else if (url.pathname === "/api/events") {
 			res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8" });
@@ -109,6 +114,7 @@ export async function renderConsole({ chrome, shots, out, work, children, Refusa
 					clockMs,
 				});
 				try {
+					if (doc.html.includes("data-timeline-seed")) await page.evaluate(`new Promise((resolve, reject) => { const deadline = performance.now() + 5000; const look = () => document.querySelector('.vis-timeline') && getComputedStyle(document.querySelector('.vis-timeline')).visibility==='visible' && document.querySelector('[data-rt-status]').textContent.includes('Range read') ? requestAnimationFrame(() => requestAnimationFrame(resolve)) : performance.now() > deadline ? reject(new Error('Timeline did not render')) : setTimeout(look, 50); look(); })`, true);
 					// The stream's entries arrive after the page settles, and the status says when the last one landed.
 					if (shot.transcript) await page.evaluate(`new Promise((done) => { const look = () => (document.querySelectorAll("[data-transcript] .tx__entry").length >= ${CONSOLE_TRANSCRIPT[shot.transcript].length} || performance.now() > 5000 ? done() : setTimeout(look, 50)); look(); })`, true);
 					const clip = await clipOf(page, shot);
