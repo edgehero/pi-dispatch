@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { installSubscriptionCredentials, subscriptionRequestOverrides } from "../src/subscription-credentials.mjs";
+import { verifySubscriptionLease } from "./fixtures/subscription-lease-smoke.mjs";
 
 const instant = 1_800_000_000_000;
 const now = () => instant;
@@ -15,6 +16,10 @@ async function runtimeWith(config) {
 	writeFileSync(modelsPath, JSON.stringify({ providers: config }));
 	return ModelRuntime.create({ modelsPath, allowModelNetwork: false, credentials: { async read() { return { type: "api_key", key: "stored-paid-api-key", env: { OPENAI_API_KEY: "stored-override" } }; }, async list() { return []; }, async modify() {}, async delete() {} } });
 }
+
+test("the image's lease proof exercises pinned request preparation before and after a credential drop", async () => {
+	assert.equal(await verifySubscriptionLease(), true);
+});
 
 test("actual pinned auth and request preparation use selected access over stored and models.json keys/headers", async () => {
 	const runtime = await runtimeWith({ openai: { apiKey: "configured-paid-api-key", headers: { Authorization: "Bearer configured-paid-api-key", "X-Api-Key": "configured-other-key", "OpenAI-Project": "another-project", "X-Trace": "fixture" } } });

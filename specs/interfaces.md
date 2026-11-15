@@ -1429,6 +1429,16 @@ refactor apart.
 
 ## INT-CREDENTIAL-DROP
 
+- **Renewable subscription correction (#895)**: `subscriptionLease` declares the runner's one-minute access
+  expiry floor. On that image the host caps each 30-minute requested lease below actual expiry less one minute,
+  and waits until provider eligibility before rotation. A repeated unchanged lease is a wait, not a failure.
+  Every credential has an independent in-flight renewal bounded at one minute; the expiry check never awaits
+  one. It stops two minutes before the last published lease, even while a mint or lock is unanswered. A late
+  completion after stop is discarded for delivery, although a rotated grant is still durably preserved on
+  the host. Before each drop, replacement values join the run's literal redaction/workspace-scan collection.
+  A short-lease run without the delivery folder, renewal callback, stop callback or startup runway does not
+  spawn. The version-1 drop fields and read-only mount are UNCHANGED, checked.
+
 - **Status**: NEW 2026-11-14 (issue #888 part 3, `CONST-TOKEN-SCOPED-PER-JOB`, `REQ-JOB-ACTIVITY-LIMITS`).
 - **What**: a running job's renewed credentials, written by the worker and read by the runner. The folder is
   `<jobDir>.credentials` on the host (beside the job directory, made fresh at mode 0700 for each attempt, removed when
@@ -1444,7 +1454,8 @@ refactor apart.
   subscriptions, `openai` or `anthropic`; integers for the rest).
 - **Who writes what** (`worker/src/credential-refresh.mjs`): a GitHub App token 15 minutes before the current one
   expires (`get-token.mjs` `mintFresh`: the same one repository, a new hour); a subscription snapshot 10 minutes before
-  its deadline, extended 30 minutes ahead (`subscription-runtime.mjs` `extend`: the same connection, binding, adapter and
+  its deadline, extended toward 30 minutes ahead (clipped to usable expiry on a `subscriptionLease` image,
+  `subscription-runtime.mjs` `extend`: the same connection, binding, adapter and
   account group, no quota admission). A renewal that fails is tried again every minute; when a credential the RUNNER
   holds is two minutes from running out with nothing newer delivered, the job is stopped as `credential-expired`
   (`INT-RUN-HISTORY-FILE-CONTRACT`), never retried.
@@ -1873,6 +1884,11 @@ refactor apart.
   is owed before any OpenShell job runs (beside #695's).
 
 ## INT-CONTAINER-RUNTIME-CONTRACT
+
+- **Renewable subscription capability (#895)**: `subscriptionLease` proves the runner accepts renewable
+  subscription leases with a one-minute access expiry floor. The worker requires it beside `idleWatch` and
+  `credentialRefresh` before shortening admission coverage; older images retain full deadline coverage.
+  The offline image proof exercises pinned request preparation near expiry and replacement through the drop.
 
 - **Failover capability (#716)**: an image serving a job with `run.fallbackModels` must declare `modelFailover` in `dev.pi-dispatch.capabilities`, in addition to the existing allowed-model and authenticated-exit contracts. The worker refuses an older image before spend as `job-image-model-failover-unsupported`. `image/verify-image.sh` runs the normal entrypoint against an offline fake 429, verifying the exit code, closed failure/reset fields, root-tool/replay fields and signature rather than trusting the label alone.
 
@@ -12990,6 +13006,14 @@ the worker's, exported from `@edgehero/pi-dispatch/doctor-results`, so the reade
 
 ## INT-DEFER-REASON-KEY
 
+**CLI reader and event (#895).** `pi-dispatch status` adds `waitingDetails`: `rows`, `partial`, `truncated`,
+`skippedQueues`, `unavailableQueues`, `invalidEntries`, and `discoveryIncomplete` when discovery is degraded.
+Each successful row has `jobId`, `queue`, `dueAt`, `bucket`, `why`, `until`; an unreadable explanation keeps
+membership and `unavailable: true`. At most 64 queues and 100 delayed entries per queue are inspected, with
+a concurrent two-second budget per queue. Only delayed membership and `DEFER_FIELDS` are read. The worker
+leaf owns the shared due-match predicate and ten-second overdue grace. `subscription_auth_hold` carries
+`jobId`, `why`, `until` only after a successful move, through a fail-open logger. No key, field or TTL changes.
+
 - **Canary exclusion (#717)**: ordinary worker pickup checks `dispatch:canary:exclusive` before paid gates and defers with reason `canary`. The experiment takes its compare-owned renewable lease before proving shared/host queue active lists empty. Lost ownership aborts the experiment. All consuming workers must run this implementation before experiments begin, and legacy consumers must not be started during an experiment: older code does not honor the lease. This closes the standalone command concurrency bypass; queue pause still refuses canaries.
 
 **The worker → Valkey → the admin console's waiting reader.** Why the worker put a job that has not started back on
@@ -13844,7 +13868,11 @@ during selected preparation uses the same closed free-delay path. The host relea
 before moving the job, and checks cancellation before handing it back; no terminal run is recorded for a wait.
 
 The prepared snapshot is host-private: provider, connection id, adapter, account group, generation, expiry,
-deadline and the access-only environment map. Expiry must exceed deadline plus six minutes. Its provider binding
+deadline and the access-only environment map. Legacy expiry must exceed deadline plus six minutes.
+For a verified renewable path (#895), the host-private snapshot additionally carries `renewable: true` and
+`refreshAt` (the provider eligibility instant or null). Neither field enters job data or the drop. The deadline
+is at most the requested horizon and `expiresAt - 60_000 - 1`; admission and final validation require more
+than four minutes left. A future eligibility instant permits a usable bounded lease but never a refresh request. Its provider binding
 and generation are rechecked before use. The job's reserved `PI_SUBSCRIPTION_AUTH` contains profile/binding/expiry
 metadata and prepared package root/digest, never refresh grants; access values use only the selected provider's
 derived credential variables. Other credential sources cannot shadow that selection. A host-only
@@ -13854,7 +13882,10 @@ mint, clone or reservations; queued data cannot arm or disable it. An older imag
 checks and final shaped-body cost refusal under no network. Each supported profile also runs through the normal
 entrypoint with a valid binding: its initial cost refusal must precede dispatch, and an offline synthetic 429
 proves authoritative auth, final request shaping, bounded retry and signed subscription attribution. The runner validates
-metadata and the exact package before provider calls, then holds the credential snapshot immutable. No auth
+metadata and the exact package before provider calls. A runner without `credentialRefresh` keeps its
+snapshot immutable; a runner with it may accept same-connection renewals through `INT-CREDENTIAL-DROP`,
+keeping its deadline and generation monotone. `subscriptionLease` additionally lowers its expiry floor
+to one minute, permitting the shorter renewable leases. No auth
 file or host credential directory is mounted. Ordinary subprocess, transcript and checkpoint redaction includes
 every admitted access credential. A sandbox receives none.
 
@@ -13931,6 +13962,7 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 
 | Date | Change |
 |---|---|
+| 2026-11-15 (#895) | AMENDED `INT-SUBSCRIPTION-CREDENTIAL-STORE`, `INT-CREDENTIAL-DROP`, `INT-CONTAINER-RUNTIME-CONTRACT` and `INT-DEFER-REASON-KEY`: renewable timing and compatibility, private scheduling metadata, bounded renewal, startup refusal and retained secrets, plus CLI waiting details and safe hold events. Credential-store, drop, defer and run-history persisted shapes UNCHANGED, checked; no migration or new store/key is needed. |
 | 2026-11-14 (#888, part 3: credentials renewed in a running job) | **NEW `INT-CREDENTIAL-DROP`**: the read-only folder a running job's renewed GitHub App token and subscription snapshots arrive in, its shape and `seq`, who writes what and when, what the runner does with each, the `credential-expired` stop, and the residuals (a process started earlier, the forge's own MCP server, the folder on host disk, copying venues). **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `credential-expired` in the reason enum. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: `PI_CREDENTIAL_REFRESH` and the read-only mount. **UNCHANGED, checked**: `INT-JOB-ACTIVITY-FILE`, `INT-CONTAINER-JOB-INPUTS` (the mount is outside `/job`), `INT-SUBSCRIPTION-CREDENTIAL-STORE` (the host store keeps the refresh grant). **Code evidence**: worker/src/credential-refresh.mjs, worker/src/get-token.mjs (`expiryOf`, `mintFresh`), worker/src/subscription-runtime.mjs (`extend`), worker/src/run-container.mjs, worker/src/container-spec.mjs (`CONTAINER_CREDENTIALS_DIR`), image/runner/src/credential-refresh.mjs, image/runner/src/subscription-credentials.mjs (`refresh`). |
 | 2026-11-14 (#888, part 2: the worker) | **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: a CONDITIONAL `limits` key after `jobCreatedAt` (the effective limits, `basis`, `why`, `channel`, `unavailable`, the backstop's two instants), and `idle`, `stalled` and `max-minutes` in the reason enum. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: a bullet for `run.idleTimeoutMinutes`, `run.stallTimeoutMinutes` and `run.maxMinutes` (ranges, near misses, precedence, forwarding, skew, versions); `TRIGGERS_FILE_VERSION` 3 and `JOB_DATA_VERSION` 4. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: `PI_JOB_IDLE_MS` and `PI_JOB_STALL_MS`, when they are written and that they are reserved. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: a worker-initiated stop names its limit through the closed `ABORT_RECORD_REASONS`, `job-timeout-30m` now recorded as `max-minutes`. **`INT-JOB-ACTIVITY-FILE` AMENDED**: its readers are built (the backstop on both channels, and the boot sweep's mtime). **`INT-HOST-REGISTRY-CONTRACT` AMENDED** in its version sentence: `jobDataVersion` 4 and `triggersVersion` 3 since #888. **UNCHANGED, checked**: `INT-CANCEL-CHANNEL-CONTRACT` (an operator's cancel keeps its reason), `INT-CONTAINER-JOB-INPUTS`, `INT-CONFIG-OVERLAY-CONTRACT` (the three settings are env only, never the overlay). **Code evidence**: worker/src/job-limits.mjs, worker/src/job-limit-rules.mjs, worker/src/run-container.mjs, worker/src/index.mjs, worker/src/processor.mjs (`ABORT_RECORD_REASONS`), worker/src/run-history.mjs (`recordedLimits`, `ACTIVITY_RUNNER_REASONS`), worker/src/triggers.mjs, worker/src/stderr-transcript.mjs. |
 | 2026-11-14 (#888, part 1: the runner) | **NEW `INT-JOB-ACTIVITY-FILE`**: the activity counters, `{"v":1,"steps":N,"active":N}` in `activity.json` beside the session file and as an `a` transcript record on a copying venue; no time written (the worker stamps changes with its own clock); atomic, never through a link; its trust (a forged counter can hold off only the worker's backstop, never the runner's own judgement) and the residual that leaves. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: a row for the activity watch's stop (`2` / `idle` or `stalled`, named after the turn budget and the meter's stops and before the aborted message, with the runner's own line and exit when the abort does not settle); a NEW "The activity watch" paragraph (`PI_JOB_IDLE_MS` and `PI_JOB_STALL_MS`, what a step and activity are, the sample, the suspensions, the exit line's `activity` field on every path); the transcript records gain a fourth type, `a`. A worker that sets neither variable gets a byte-identical line. **UNCHANGED, checked**: `INT-CONTAINER-JOB-INPUTS` (no new mount: the counters go in the session directory that is already mounted), `INT-CONTAINER-RUNTIME-CONTRACT` (no new flag), `INT-RUN-HISTORY-FILE-CONTRACT` (the worker does not read the field or the reasons until #888's worker half, which amends it). **Code evidence**: image/runner/src/activity.mjs, image/runner/src/cgroup-usage.mjs (`readCgroupCpuUsec`), image/runner/src/outcome.mjs (`decideExit`), image/runner/src/transcript-mirror.mjs (`RECORD_ACTIVITY`), image/runner/run-job.mjs. |

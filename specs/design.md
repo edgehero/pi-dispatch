@@ -451,6 +451,14 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 
 ## DES-JOB-ACTIVITY-WATCH
 
+- **Credential correction (#895)**: renewable subscription leases may be shorter than the requested horizon.
+  Expiry supervision runs without awaiting renewal, and each credential has its own in-flight operation bounded
+  to a minute. A timed-out operation keeps its lane occupied until it settles, so an unresolved rotation is not
+  repeated; late results after stop/expiry are never published. Stops still judge the last successful drop.
+  Every replacement is added to host literal redaction and workspace-scan inputs before publication, retaining
+  previous values for the run; completed fork capture uses the same private collection. The existing
+  read-only drop mount and custody remain unchanged. A missing drop or inadequate startup runway prevents spawn.
+
 - **Decision** (issue #888, `REQ-JOB-ACTIVITY-LIMITS`): the RUNNER judges whether a job is idle or stalled, from what
   only it can see, and stops it itself; the WORKER is a backstop for a runner too wedged to do that, reading counters
   the runner writes and stamping their changes with its own clock. Progress has two kinds: a STEP (the agent moving: any
@@ -16829,6 +16837,14 @@ is introduced. The design generator owns the published card before the console u
 
 ## DES-WAITING-REASONS
 
+- **CLI and auth holds (#895)**: `pi-dispatch status` adds `waitingDetails`, reading at most 64 discovered
+  queues and 100 delayed entries per queue, each queue under a concurrent two-second read budget. It reads
+  membership, scores and `DEFER_FIELDS`, never job payloads. Partial, unavailable, truncated, invalid and
+  incomplete-discovery states are explicit. CLI and console share `recordMatchesDue` and the ten-second due
+  grace from the worker leaf. An overdue entry says due; a stale record does not explain the current delay.
+  `subscription_auth_hold` logs validated job id, closed reason and retry instant only after a successful
+  move; logger failure cannot affect the move or its `DelayedError`. Storage, TTL and nonce cleanup stay unchanged.
+
 - **Fleet's complete bounded list (#748).** Fleet asks for the same waiting read as Overview and lists every row
   within its existing limits, with the same truncation notice. Overview's remainder links there. Host budget
   refusals distinguish memory, CPU and count without changing hold ranking or retry cadence; legacy budget words
@@ -17536,6 +17552,21 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 ## DES-HOST-OWNED-SUBSCRIPTION-AUTH
 
+- **Renewable leases (#895)**: the processor selects the host-private `renewable` mode only for local/Podman
+  execution with activity limits, a stop callback, renewal seams and the three image capabilities `idleWatch`,
+  `credentialRefresh`, `subscriptionLease`. `prepareSnapshot` retains a 30-minute target but clips the lease
+  to `expiresAt - 60_000 - 1`, requiring more than four minutes of startup runway, checked again before spawn.
+  The mode and provider refresh instant remain host-private; the existing access/drop wire shapes suffice.
+  A future earliest refresh instant does not prevent a usable clipped lease; it prevents rotation. An unchanged
+  lease returns an expected wait, avoiding failure logs and repeated identical drops. Old images retain the
+  full deadline plus six-minute guarantee. Rejected: shortening admission alone (the old runner rejects at
+  five minutes to expiry), clipping at the old six-minute margin (the worker stops before refresh is legal),
+  and assuming the old `credentialRefresh` label proves the new request guard.
+  Timing: a token expiring at minute 60 with eligibility at 54 has its latest lease just before 59 and a stop
+  just before 57. A minute check, a bounded minute attempt including lock waits, 15-second runner polling and
+  30-second scheduling/skew allowance fit inside those three minutes. Longer outages stop safely, never widen
+  the lease. Each credential renews independently; a timeout does not replay an unresolved rotating grant.
+
 - **OpenAI callback correction (#774)**: the host adapter's authorization, code exchange and callback
   validation use `http://127.0.0.1:1455/auth/callback`, matching the actual pinned pi 1.4.0 artifact and current
   OpenAI registration contract. A whole-file pin alone did not hold the local mirror's former `localhost`
@@ -17562,7 +17593,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 - **Renewal**: one owner serializes a connection's transactions. Before a rotating refresh it persists an
   uncertain marker; successful replacement is atomically written and synchronized before admission. A caller
   cannot cancel and discard an already rotated refresh grant. An ambiguous result requires explicit recovery,
-  not automatic fallback to another credential. A snapshot must outlive the job deadline by the safety margin;
+  not automatic fallback to another credential. An access token must outlive its authorization lease by the applicable safety margin;
   there is no refresh grant or host auth-file mount inside the container.
 - **Quota**: the separate subscription store keeps closed, bounded observations and permanent unknown-reset
   exhaustion. Missing values stay null. A complete newer usage observation may retire generic error exhaustion;
@@ -18080,6 +18111,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-11-15 (#895) | AMENDED `DES-HOST-OWNED-SUBSCRIPTION-AUTH`, `DES-JOB-ACTIVITY-WATCH` and `DES-WAITING-REASONS`: capability-gated short leases, independent bounded renewal and expiry supervision, retained replacement secrets for redaction and workspace scans, success-only hold events and bounded CLI details. `DES-STORE-VERSION-WHEN-NEEDED` UNCHANGED, checked: no persisted field, value or version is added; lease scheduling metadata stays host-private. |
 | 2026-11-14 (#888, part 3) | **`DES-JOB-ACTIVITY-WATCH` AMENDED**: credentials renewed in a running job rather than the job cut short, with the rejected stop before expiry and refresh grant in the container, and the stop judged on what the runner holds. `DES-GH-APP-MANIFEST-SETUP` UNCHANGED, checked: the App's permissions do not move. |
 | 2026-11-14 (#888, part 2: the worker) | **`DES-JOB-ACTIVITY-WATCH` AMENDED** with the worker's half: one 30-minute timer handed over to the watch and kept for a job no watch covers (with the rejected unbounded run on an expiring credential), the backstop and its grace, the `max-minutes` timer, the renewed fleet claims, the activity-aware boot sweep, and the named stops. **`DES-STORE-VERSION-WHEN-NEEDED` UNCHANGED, checked**: its rule is applied (three trigger run fields at triggers file version 3, three job data fields at version 4, each a row of `AUTHORED_NARROWING_FIELDS`), not changed. `DES-CONCURRENCY-3` and `DES-CANCEL-VIA-REDIS-REQUEST-KEY` UNCHANGED, checked. |
 | 2026-11-14 (#888, part 1: the runner) | **NEW `DES-JOB-ACTIVITY-WATCH`**: the runner judges idle and stalled from steps (root-bus events but output updates, and the meter's counts) and activity (tool output, other processes' CPU, network), and stops the job itself; the worker is a backstop reading counters it stamps with its own clock; why the runner, why counters and not times; rejected: a wall clock, events only, CPU only, activity as enough for ever, the container's clock; what suspends the clocks. `DES-CONCURRENCY-3` and `DES-CANCEL-VIA-REDIS-REQUEST-KEY` UNCHANGED, checked: the worker half amends the abort path. |

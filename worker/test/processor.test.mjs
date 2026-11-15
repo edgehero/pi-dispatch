@@ -3120,3 +3120,20 @@ test("a throw before the container started keeps the image alone, and never a li
 	assert.equal(thrown.loaded.runner, "absent");
 	assert.equal(thrown.loaded.image, LOADED_IMAGE.image);
 });
+
+
+test("short subscription leases require host-observed renewal support, never a queued opt-in", async () => {
+	const full = ["subscriptionAuth", "idleWatch", "credentialRefresh", "subscriptionLease"];
+	for (const missing of [null, "subscriptionLease", "idleWatch", "credentialRefresh", "stop", "extend"]) {
+		let mode;
+		const { deps: d } = deps({
+			imagePreflight: async () => ({ ok: true, capabilities: full.filter((cap) => cap !== missing) }),
+			activityLimits: { idleMinutes: 15, stallMinutes: 240 },
+			requestStop: missing === "stop" ? undefined : () => {},
+			extendSubscriptionAuth: missing === "extend" ? undefined : async () => null,
+			prepareSubscriptionAuth: async (_job, options) => { mode = options.renewable; return { ok: true, snapshots: [] }; },
+		});
+		assert.equal((await runJob({ ...ghJob, renewable: true, subscriptionLease: true }, d)).outcome, "completed");
+		assert.equal(mode, missing === null, String(missing));
+	}
+});

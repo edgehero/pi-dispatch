@@ -336,7 +336,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 		let code = 0;
 		for (const url of picked.urls) {
 			const label = picked.urls.length > 1 ? `[${urlShown(url)}] ` : "";
-			code = Math.max(code, await killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal }));
+			code = Math.max(code, await killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal, now }));
 		}
 		return code;
 	}
@@ -537,7 +537,7 @@ export async function workerHint(queue, { timeoutMs = 2000 } = {}) {
 }
 
 /** One Valkey's pause, resume or status: every queue the deployment drains there (issue #57). Returns the exit code. */
-async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal }) {
+async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal, now }) {
 	const { parseConnection, makeRedisClient } = await import("./connection.mjs");
 	const { fleetQueueNames, discoverHostQueues, unionQueueNames, makeQueue } = await import("./queue.mjs");
 	const { readLiveHosts } = await import("./host-registry.mjs");
@@ -608,7 +608,10 @@ async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal
 			// the one it makes visible: pause ran while a host was invisible, so that host still spends.
 			const pausedState = states.every(Boolean);
 			const pausedPartial = !pausedState && states.some(Boolean);
-			const out = { ...(label ? { valkey: urlShown(url) } : {}), pausedState, ...(pausedPartial ? { pausedPartial, pausedQueues: names.filter((_, i) => states[i]) } : {}), ...counts, ...(blind ? { fleet: blind } : {}) };
+			const { readStatusWaiting } = await import("./status-waiting.mjs");
+			const waiting = await readStatusWaiting(queues, { now: () => Number(now()) });
+			if (blind || existing?.incomplete) { waiting.partial = true; waiting.discoveryIncomplete = true; }
+			const out = { ...(label ? { valkey: urlShown(url) } : {}), pausedState, ...(pausedPartial ? { pausedPartial, pausedQueues: names.filter((_, i) => states[i]) } : {}), ...counts, ...(blind ? { fleet: blind } : {}), waitingDetails: waiting };
 			write(`${JSON.stringify(out)}\n`);
 		}
 	} catch (error) {

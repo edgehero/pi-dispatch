@@ -8,6 +8,10 @@ export { parseAuthConnections } from "./auth-policy.mjs";
 
 export const AUTH_CONNECTIONS_VERSION = 1;
 export const AUTH_SNAPSHOT_MARGIN_MS = 5 * 60_000 + 60_000;
+// A renewable lease must reach the provider's refresh window. The legacy six-minute
+// margin ended it before OpenAI permits renewal; the runner capability proves this shorter floor.
+export const AUTH_RENEWABLE_MARGIN_MS = 60_000;
+export const AUTH_RENEWABLE_MIN_RUNWAY_MS = 4 * 60_000;
 export const authBindingSignature = (connection) => createHash("sha256").update(JSON.stringify(connection)).digest("hex");
 function authFailure(error, fallback) {
 	const code = typeof error?.code === "string" && /^auth-[a-z-]+$/.test(error.code) ? error.code : null;
@@ -77,7 +81,7 @@ export function createAuthService({ policy = null, readPolicy = () => policy, st
 			return safe(row, next, (await read()).bindings[row.provider] === id);
 		}, { signal });
 	}
-	async function prepareSnapshotWithPolicy(provider, { deadlineAt, signal } = {}) {
+	async function prepareSnapshotWithPolicy(provider, { deadlineAt, signal, renewable = false, extending = false } = {}) {
 		if (!Number.isSafeInteger(deadlineAt) || deadlineAt <= now()) return { ok: false, reason: "auth-deadline-invalid" };
 		const checked = await check(provider);
 		if (!checked.ok || !checked.managed) return { ...checked, ...(!checked.managed ? { snapshot: null } : {}) };
@@ -86,10 +90,14 @@ export function createAuthService({ policy = null, readPolicy = () => policy, st
 		return store.transaction(row.id, async (saved, write) => {
 			if (!(await bindingStillCurrent(row))) return { ok: false, reason: "auth-binding-changed" };
 			if (!matching(row, saved) || saved.state !== "connected" || !saved.credential) return { ok: false, reason: saved?.state === "refresh-uncertain" ? "auth-refresh-uncertain" : "auth-reauth-required" };
-			const neededUntil = deadlineAt + marginMs;
+			const margin = renewable ? AUTH_RENEWABLE_MARGIN_MS : marginMs;
+			const leaseEnd = (credential) => renewable ? Math.min(deadlineAt, credential.expires - margin - 1) : deadlineAt;
+			const minimum = renewable && !extending ? AUTH_RENEWABLE_MIN_RUNWAY_MS : 0;
+			const neededUntil = deadlineAt + margin;
 			let current = saved;
-			if (current.credential.expires <= neededUntil) {
-				if (Number.isSafeInteger(current.credential.earliestRefreshAt) && current.credential.earliestRefreshAt > now()) return { ok: false, reason: "auth-refresh-too-early", wait: "subscription-auth", until: current.credential.earliestRefreshAt, unavailable: false };
+			const tooEarly = Number.isSafeInteger(current.credential.earliestRefreshAt) && current.credential.earliestRefreshAt > now();
+			if (current.credential.expires <= neededUntil && tooEarly && (!renewable || leaseEnd(current.credential) <= now() + minimum)) return { ok: false, reason: "auth-refresh-too-early", wait: "subscription-auth", until: current.credential.earliestRefreshAt, unavailable: false };
+			if (current.credential.expires <= neededUntil && !tooEarly) {
 				await write({ ...current, state: "refresh-uncertain" });
 				try {
 					// Once renewal begins, caller cancellation cannot discard a rotated replacement.
@@ -105,9 +113,10 @@ export function createAuthService({ policy = null, readPolicy = () => policy, st
 			}
 			signal?.throwIfAborted();
 			if (!(await bindingStillCurrent(row))) return { ok: false, reason: "auth-binding-changed" };
-			if (current.credential.expires <= neededUntil || deadlineAt <= now()) return { ok: false, reason: "auth-snapshot-too-short" };
+			const leaseDeadline = leaseEnd(current.credential);
+			if (current.credential.expires <= leaseDeadline + margin || leaseDeadline <= now() + minimum) return { ok: false, reason: "auth-snapshot-too-short" };
 			const variable = provider === "openai" ? "OPENAI_API_KEY" : "ANTHROPIC_OAUTH_TOKEN";
-			return { ok: true, managed: true, snapshot: { kind: "subscription", provider, connectionId: row.id, adapter: row.adapter, accountGroup: current.accountGroup, generation: current.generation, expiresAt: current.credential.expires, deadlineAt, bindingSignature: authBindingSignature(row), env: { [variable]: current.credential.access } } };
+			return { ok: true, managed: true, snapshot: { kind: "subscription", provider, connectionId: row.id, adapter: row.adapter, accountGroup: current.accountGroup, generation: current.generation, expiresAt: current.credential.expires, deadlineAt: leaseDeadline, ...(renewable ? { renewable: true, refreshAt: current.credential.earliestRefreshAt ?? null } : {}), bindingSignature: authBindingSignature(row), env: { [variable]: current.credential.access } } };
 		}, { signal });
 	}
 	async function prepareSnapshot(provider, options = {}) {
@@ -116,7 +125,9 @@ export function createAuthService({ policy = null, readPolicy = () => policy, st
 	}
 	async function validateSnapshot(snapshot) {
 		const checked = await check(snapshot?.provider);
-		if (!(checked.ok === true && checked.managed === true && snapshot.kind === "subscription" && checked.connectionId === snapshot.connectionId && checked.bindingSignature === snapshot.bindingSignature && checked.generation === snapshot.generation && checked.accountGroup === snapshot.accountGroup && snapshot.expiresAt > snapshot.deadlineAt + marginMs && snapshot.deadlineAt > now())) return false;
+		const margin = snapshot?.renewable === true ? AUTH_RENEWABLE_MARGIN_MS : marginMs;
+		const minimum = snapshot?.renewable === true ? AUTH_RENEWABLE_MIN_RUNWAY_MS : 0;
+		if (!(checked.ok === true && checked.managed === true && snapshot.kind === "subscription" && checked.connectionId === snapshot.connectionId && checked.bindingSignature === snapshot.bindingSignature && checked.generation === snapshot.generation && checked.accountGroup === snapshot.accountGroup && snapshot.expiresAt > snapshot.deadlineAt + margin && snapshot.deadlineAt > now() + minimum)) return false;
 		return store.transaction(snapshot.connectionId, async (saved) => {
 			const variable = snapshot.provider === "openai" ? "OPENAI_API_KEY" : "ANTHROPIC_OAUTH_TOKEN";
 			return saved?.state === "connected" && saved.generation === snapshot.generation && saved.adapter === snapshot.adapter && saved.credential?.expires === snapshot.expiresAt && snapshot.env && Object.keys(snapshot.env).length === 1 && snapshot.env[variable] === saved.credential.access;

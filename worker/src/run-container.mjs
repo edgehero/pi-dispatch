@@ -25,6 +25,7 @@ import { keyFrame } from "./steer-framing.mjs";
 import { makeStderrTranscript } from "./stderr-transcript.mjs";
 import { ACTIVITY_POLL_MS, makeActivityBackstop, parseActivityCounters, readActivityFile } from "./job-limits.mjs";
 import { makeCredentialRefresher, makeCredentialsDir, removeCredentialsDir } from "./credential-refresh.mjs";
+import { AUTH_RENEWABLE_MIN_RUNWAY_MS } from "./auth-connections.mjs";
 
 /**
  * The real `runContainer` the processor injects. Launches one job container and returns
@@ -143,6 +144,8 @@ export function makeRunContainer({
 	activityTimers = { setInterval, clearInterval },
 	activityPollMs = ACTIVITY_POLL_MS,
 	readActivity = readActivityFile,
+	// A failed drop must never silently downgrade a short subscription lease to the legacy wall clock.
+	makeCredentialDirectory = makeCredentialsDir,
 	// Review round 1, M1: how long a stdin-steered attempt's pipe stays open after an exit-shaped line that does not verify.
 	stdinExitGraceMs = 5_000,
 	// Issue #686 part 3, review round 2 of #714: `({ opts, aborted }) => boolean`, a binding venue whose box OUTLIVES its CLI
@@ -204,6 +207,7 @@ export function makeRunContainer({
 	// first kind to their hosts and passes the second as values. Every other venue ignores it: the values are in `secrets`.
 	return async function runContainer({ job, token, prepared, secrets = {}, bundleKeys = null, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, transcriptStderr = false, steerStdin = false, size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null, unenforced = [], jobId = null, onLive = null, recover = false, recovering = false, checkpoint = null, pause = null, unpause = null, binds = false, subscriptionAuth = [], activityWatch = null, onActivityArmed = null, requestStop = null, noteActivity = null, credentialRefresh = null }) {
 		if (signal?.aborted) return { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null }; // killed before it could start
+		const renewableAuth = subscriptionAuth.filter((snapshot) => snapshot.renewable === true);
 		// Minted per attempt, held in this closure and the sink's, and handed to the container on its stdin only: never in
 		// the argv (a host `ps` shows it), never in the env (the container's /proc/1/environ shows it), never logged.
 		const exitKey = exitAuth === true ? mintExitKey() : null;
@@ -287,13 +291,17 @@ export function makeRunContainer({
 		if (activityChannel !== null && credentialRefresh !== null && typeof credentialRefresh === "object") {
 			if (activityChannel !== "file") log("credential_refresh_unavailable", { container: name, reason: "venue-copies" });
 			else {
-				credentialsDir = makeCredentialsDir(prepared.jobDir);
+				credentialsDir = makeCredentialDirectory(prepared.jobDir);
 				if (credentialsDir === null) log("credential_refresh_unavailable", { container: name, reason: "no-folder" });
 			}
 		}
 		const removeCredentials = () => {
 			removeCredentialsDir(credentialsDir);
 		};
+		if (renewableAuth.length > 0 && (credentialsDir === null || typeof credentialRefresh?.extend !== "function" || typeof requestStop !== "function")) {
+			removeCredentials();
+			throw new InfraRetry("subscription credential renewal could not be armed", { reason: "container-never-started" });
+		}
 		const keepWallClock = activityWatch?.keepWallClock === true && credentialsDir === null;
 		let refresher = null;
 		// The inbox: `<jobDir>.inbox`, BESIDE the job directory (`/job` is merge-gated input only, and the processor removes
@@ -515,11 +523,25 @@ export function makeRunContainer({
 		// Issue #800: a tool name is the one string on the line nothing here can compare with anything, so at least it must
 		// not hold this job's own secrets. Built off THIS job's env, as the transcript's is below. If it cannot be built, nothing
 		// can be judged: every name reads as one it would change and is withheld, and a `pi` reads as invalid, rather than as fine.
-		try {
-			loadedKnown.redact = makeRedactor({ values: secretValuesOf(env, [token, exitKey], { workerSet: egressEnv({ proxy: egressProxy, armed: egress }) }) });
-		} catch {
-			loadedKnown.redact = () => "";
+		// The redactors and checkpoint scanner keep ALL credentials this attempt has held. A renewal changes
+		// what later tools use, while earlier output can still contain the old token. Register a replacement
+		// before publishing its drop; pattern matching alone cannot recognize an opaque OAuth bearer.
+		const retainedSecrets = Array.isArray(checkpoint?.secretValues) ? checkpoint.secretValues : [];
+		for (const value of secretValuesOf(env, [token, exitKey], { workerSet: egressEnv({ proxy: egressProxy, armed: egress }) })) {
+			if (!retainedSecrets.includes(value)) retainedSecrets.push(value);
 		}
+		// Completed fork snapshots are taken by the processor after this function returns, even without
+		// a live checkpointer. Keep the same collection available privately through that final boundary.
+		beforeSpawn(() => Object.defineProperty(prepared, "credentialSecretValues", { value: retainedSecrets, configurable: true }));
+		let currentRedactor = beforeSpawn(() => makeRedactor({ values: retainedSecrets }));
+		const redact = (text) => currentRedactor(text);
+		const registerCredentials = (payload) => {
+			for (const value of [payload.forge?.token, ...payload.subscriptions.map((row) => row.token)]) {
+				if (typeof value === "string" && value !== "" && !retainedSecrets.includes(value)) retainedSecrets.push(value);
+			}
+			currentRedactor = makeRedactor({ values: retainedSecrets });
+		};
+		loadedKnown.redact = redact;
 
 		// `-net` on this container's own name (egress.mjs). null when no policy is armed, and docker-run's
 		// guard then omits the flag entirely, so the argv is byte-identical to one built before this feature.
@@ -635,6 +657,15 @@ export function makeRunContainer({
 				return { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null };
 			}
 		}
+		// Clone, network setup or venue preparation can consume the initial lease. The last check is on
+		// the host clock immediately before spawn, never a fresh wall-clock assumption after preparation.
+		if (renewableAuth.some((snapshot) => !Number.isSafeInteger(snapshot.deadlineAt) || snapshot.deadlineAt - activityClock() <= AUTH_RENEWABLE_MIN_RUNWAY_MS)) {
+			await teardown();
+			removeInbox();
+			removeCredentials();
+			if (network) await removeJobNetwork(spawnFn, { network, proxy: egressProxy, bin });
+			throw new InfraRetry("subscription credential lease ran short before container start", { reason: "container-never-started" });
+		}
 
 		// Issue #643: the live transcript publisher, opened only beside a transcript file, an opener and a job id. Its
 		// redactor is built from THIS job's env (the secret-bearing keys, redact-secrets.mjs) plus the two credentials that
@@ -643,9 +674,9 @@ export function makeRunContainer({
 		let live = null;
 		// Question grouping reads the canonical (raw) transcript after promotion. Keep the exact job-env
 		// redactor available even when live streaming is disabled: token shapes alone miss forwarded values.
-		try { Object.defineProperty(prepared, "questionRedact", { value: makeRedactor({ values: secretValuesOf(env, [token, exitKey], { workerSet: egressEnv({ proxy: egressProxy, armed: egress }) }) }), configurable: true }); }
+		try { Object.defineProperty(prepared, "questionRedact", { value: redact, configurable: true }); }
 		catch { log("question_redactor_unavailable", {}); }
-		if (job.watch) Object.defineProperty(prepared, "watchRedact", { value: makeRedactor({ values: secretValuesOf(env, [token, exitKey], { workerSet: egressEnv({ proxy: egressProxy, armed: egress }) }) }), configurable: true });
+		if (job.watch) Object.defineProperty(prepared, "watchRedact", { value: redact, configurable: true });
 		// Issue #645: a container whose unpause failed UNPAUSE_TRIES times never runs again, and the worker would wait on it
 		// for the whole job timeout. It is killed (SIGKILL reaches a frozen container: the runtime thaws it to deliver it),
 		// then removed if the kill was refused, and the run ends as an infrastructure exit (`checkpointStopped`).
@@ -662,13 +693,13 @@ export function makeRunContainer({
 			try {
 				// `workerSet`: the proxy variables count as structural only with the values this worker wrote for this job's
 				// egress; a proxy URL an operator forwarded with PI_EGRESS=0 is redacted like any other forwarded value.
-				const workerSet = egressEnv({ proxy: egressProxy, armed: egress });
 				// `job` (issue #644) for its two switches, `progress` (read phases) and `statusComment` (the forge comment).
 				// `checkpoint` (issue #645): the open args this side adds to the processor's, the container's name and venue
 				// verbs, the workspace and job dir, and `onStop` for an unpause that never took. Only for an armed job.
 				const checkpointArgs = armed
 					? {
 							...checkpoint,
+							secretValues: retainedSecrets,
 							containerName: name,
 							pause: typeof pause === "function" ? pause : null,
 							unpause: typeof unpause === "function" ? unpause : null,
@@ -681,7 +712,7 @@ export function makeRunContainer({
 				// `run.recover` before spend). The steer acks ride it as they ride a tailed file (issue #686): the records are
 				// the session's lines, so a delivered message's `custom_message` reaches the ack consumer the same way.
 				const source = stdioArmed ? { source: "stdio", file: null } : { file: join(transcriptDir, LIVE_FILE_NAME) };
-				live = openLiveTranscript({ ...source, jobId, redact: makeRedactor({ values: secretValuesOf(env, [token, exitKey], { workerSet }) }), job, ...(checkpointArgs && !stdioArmed ? { checkpoint: checkpointArgs } : {}), ...(steerAck ? { steer: steerAck } : {}) }) ?? null;
+				live = openLiveTranscript({ ...source, jobId, redact, job, ...(checkpointArgs && !stdioArmed ? { checkpoint: checkpointArgs } : {}), ...(steerAck ? { steer: steerAck } : {}) }) ?? null;
 			} catch {
 				live = null;
 			}
@@ -806,6 +837,9 @@ export function makeRunContainer({
 					forge: credentialRefresh.forge ?? null,
 					subscriptions: credentialRefresh.subscriptions ?? [],
 					extend: credentialRefresh.extend,
+					now: activityClock,
+					timers: activityTimers,
+					onCredentials: registerCredentials,
 					log: (event, fields) => log(event, { container: name, ...fields }),
 					onExpired: () => {
 						try {

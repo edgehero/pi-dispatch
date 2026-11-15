@@ -60,8 +60,8 @@ pi-dispatch auth logout chatgpt-main
 
 Login follows the selected adapter's browser authorization. The browser console does not receive credentials
 or perform renewal. Logout disconnects future snapshots and prints `logout.remoteRevocationConfirmed` separately. A false value means remote revocation is unconfirmed, including when an adapter was removed or changed.
-Already running jobs retain the access snapshot they received until they finish or it expires. A logout or a changed
-binding stops the renewal of a running job's snapshot, so such a job ends as `credential-expired` before its deadline.
+Already running jobs may receive renewed access snapshots for the same connection. A logout or a changed binding
+stops further renewal, so such a job ends as `credential-expired` before its last published lease ends.
 
 OpenAI proactive usage lookup is unavailable on this direct Responses integration unless its adapter publishes
 a supported typed observation. Known quota failures still supply closed exhaustion/reset evidence; other
@@ -79,9 +79,39 @@ credentials to several independent worker stores: the declared owner serializes 
 replacements. A refresh with an uncertain result requires reauthentication rather than blindly replaying it.
 An unreadable filesystem retries without disconnecting the stored credential. Missing or damaged adapter
 metadata refuses until the reviewed adapter is restored or staged again; it does not spend an API key instead.
-If the provider declares an earliest refresh time and the existing access token is too short for the job, the
-job waits until that instant without a refresh call, uncertain marker or spent queue attempt. The same free
+If the existing access token cannot safely cover startup and the provider declares a future earliest refresh time,
+the job waits until that instant without a refresh call, uncertain marker or spent queue attempt. The same free
 deferral handles quota or owner state that changed during selected preparation.
+
+## Admission and renewal
+
+On the `local` and `podman` venues, an image with `subscriptionLease`, `idleWatch` and `credentialRefresh` lets the
+worker admit a job using the access token that is valid now. The worker requests a lease up to 30 minutes ahead,
+shortening it when necessary to end more than 60 seconds before the token expires. More than four minutes of lease
+must remain at admission and immediately before the container starts. This lease is the job's local permission to
+use the token; it does not change the bearer token's actual expiry at the provider.
+
+The host extends the lease while the job runs, using the existing token until the provider permits renewal.
+It never rotates a token before `earliestRefreshAt`. A lease that cannot advance until that instant is an expected
+wait, not a failed renewal. A real renewal failure is retried while there is time; if no replacement can be
+published, the worker stops the job as `credential-expired` two minutes before the last published lease ends.
+The runner keeps checking its own lease and expiry on model requests. See [job limits](job-limits.md#credentials-that-expire-while-a-job-runs).
+
+The short lease requires the worker's renewal path and its read-only credential drop to work. If the drop cannot be
+prepared, the container does not start. An older image without the new capability keeps the full deadline plus
+six-minute coverage requirement, so it can still wait for renewal even while the token is valid. Update the worker
+and job image, rebuilding derived images, to remove that wait ([upgrade order](upgrading.md#the-order)). OpenShell
+subscription jobs remain unsupported.
+
+Renewed access values are added to the run's literal secret redaction before publication, including opaque OAuth
+tokens without a recognizable prefix. Earlier values stay covered for the rest of the run. Transformed or encoded
+copies are outside literal redaction's protection; refresh grants remain only in the host store.
+
+A remaining authentication hold writes `subscription_auth_hold` to the worker log after the queue accepts the
+delay, with only the job id, `why: "subscription-auth"` and the retry instant `until` in epoch milliseconds.
+`pi-dispatch status` includes the reason and retry time in `waitingDetails`, with explicit partial/unavailable
+indicators when it cannot read everything. A job already past its due time is marked `due`, so an old auth reason
+does not claim it is still waiting for renewal. See [status output](service.md#status-output).
 
 ## OpenAI Sign in with ChatGPT
 

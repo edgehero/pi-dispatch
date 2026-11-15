@@ -73,6 +73,29 @@ test("the writer is built only with BullMQ's DelayedError class: a stand-in woul
 	assert.equal(typeof make({ redis: {} }).deferTo, "function");
 });
 
+test("subscription holds are logged after a successful move, even if the advisory record is unavailable", { skip }, async () => {
+	for (const redis of [withDeferRecords({}), {}]) {
+		const events = [];
+		const { job } = spyJob({ events });
+		const w = make({ redis, now: () => NOW, log: (event, fields) => events.push({ event, fields }) });
+		await assert.rejects(() => w.deferTo(job, "private-lock-token", NOW + 60_000, "subscription-auth"), bullmq.DelayedError);
+		assert.deepEqual(events, ["move", { event: "subscription_auth_hold", fields: { jobId: "gh-1", why: "subscription-auth", until: NOW + 60_000 } }]);
+	}
+	const lost = new Error("private-provider-error");
+	const failed = writer();
+	await assert.rejects(() => failed.deferTo(spyJob({ move: async () => { throw lost; } }).job, "token", NOW + 60_000, "subscription-auth"), (error) => error === lost);
+	assert.deepEqual(failed.logs, []);
+});
+
+test("a hold logger cannot change scheduling or print a malformed identifier", { skip }, async () => {
+	const { job, moves } = spyJob({ id: "private account\nsecret" });
+	const logs = [];
+	const w = make({ redis: {}, now: () => NOW, log: (event, fields) => { logs.push({ event, fields }); throw new Error("logger failed"); } });
+	await assert.rejects(() => w.deferTo(job, "token", NOW + 10_000, "subscription-auth"), bullmq.DelayedError);
+	assert.equal(moves.length, 1);
+	assert.deepEqual(logs, [{ event: "subscription_auth_hold", fields: { jobId: null, why: "subscription-auth", until: NOW + 10_000 } }]);
+});
+
 test("a field that fails its rule is left out, and the record is still written", { skip }, async () => {
 	const w = writer({ hostName: "not a host name" });
 	const { job } = spyJob({ data: { trigger: { matched: { index: 1.5 } } } });

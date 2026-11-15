@@ -84,17 +84,26 @@ Two credentials a job is handed do not last as long as a job may now run:
 
 - a GitHub token from a GitHub App (`GITHUB_AUTH_SOURCE=app`) lives one hour;
 - a model sign-in through a subscription ([subscription auth](subscription-auth.md)) is handed to the job with a
-  deadline 30 minutes ahead.
+  lease ending at most 30 minutes ahead, possibly sooner to fit the current token's remaining life.
 
 The worker renews both while the job runs: a new App token, for the same one repository, 15 minutes before the old one
-runs out, and the subscription's deadline moved 30 minutes ahead (the host refreshes the sign-in first when it would not
-last that long) 10 minutes before the old one. It drops each new value in a folder beside the job's folder, mounted
-read-only in the job, and the runner applies it: `git`, `gh` and every other command started afterwards get the new
-token, and the next model call uses the new sign-in.
+runs out, and a subscription lease reconsidered 10 minutes before its deadline. For a subscription on `local` or
+`podman`, the image must declare `subscriptionLease`, `idleWatch` and `credentialRefresh` to use a shorter lease:
+the worker requests 30 minutes ahead, capped to end more than 60 seconds before the access token expires. More than
+four minutes of lease must remain when the job starts. The host may extend the lease with the existing token,
+then rotates it only once the provider permits renewal. An older image keeps the full deadline plus six-minute
+coverage requirement; rebuild derived images on the updated base to use short leases.
 
-A renewal that fails is tried again every minute. If the credential the job holds is two minutes from running out and
-nothing newer reached it, the job is stopped as `credential-expired`: every call after that would fail. The worker log
-has `credential_renew_failed` lines saying which kind.
+Each new value is dropped in a folder beside the job's folder, mounted read-only in the job. The runner applies it:
+`git`, `gh` and every other command started afterwards get the new token, and the next model call uses the new
+sign-in. The host registers replacement values for literal redaction before publishing them.
+
+A renewal that fails is tried again every minute while there is time. A provider's future refresh instant is an
+expected wait and does not produce `credential_renew_failed`. If a forge token, or the subscription's last published
+lease, is two minutes from its end with nothing newer published, the worker stops the job as `credential-expired`.
+It checks that deadline independently of pending renewal calls, so one hung provider cannot prevent the stop.
+The worker log has `credential_renew_failed` lines saying which kind actually failed. A local subscription lease
+does not shorten the token's provider-side expiry.
 
 Two things keep the old token: a process the job started before the renewal (a server left running in the background),
 and the forge's own MCP server ([MCP](mcp.md)), which reads its token when it starts. After the token's hour such a

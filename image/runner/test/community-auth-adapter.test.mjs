@@ -1,7 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { verifySubscriptionAuthEntries, validateSubscriptionRequest, installSubscriptionRegistrationGuard } from "../src/community-auth-adapter.mjs";
+import { SUBSCRIPTION_ACCESS_MARGIN_MS, verifySubscriptionAuthEntries, validateSubscriptionRequest, installSubscriptionRegistrationGuard } from "../src/community-auth-adapter.mjs";
+import { AUTH_RENEWABLE_MARGIN_MS } from "../../../worker/src/auth-connections.mjs";
 
 const instant = 1_800_000_000_000;
 const now = () => instant;
@@ -25,6 +26,18 @@ test("subscription calls reject Decisions, alternate hosts and expired snapshots
 	assert.equal(validateSubscriptionRequest({ provider: "openai", api: "openai-responses", baseUrl: "https://proxy.invalid/v1" }, entries, { now }), false);
 	assert.equal(validateSubscriptionRequest({ provider: "openai", api: "openai-responses", baseUrl: "https://api.openai.com/v1" }, entries, { now: () => instant + 31 * 60_000 }), false);
 	assert.equal(validateSubscriptionRequest({ provider: "other", api: "anything", baseUrl: "anything" }, entries, { now }), true);
+});
+
+test("a rolling lease stays usable through refresh eligibility but refuses at either expiry safety or its own deadline", () => {
+	assert.equal(SUBSCRIPTION_ACCESS_MARGIN_MS, AUTH_RENEWABLE_MARGIN_MS, "worker and compatible runner share the lease safety margin");
+	const model = { provider: "openai", api: "openai-responses", baseUrl: "https://api.openai.com/v1" };
+	const entry = { ...openai(), deadlineAt: instant + 59 * 60_000 - 1 };
+	assert.equal(validateSubscriptionRequest(model, [entry], { now: () => instant + 55 * 60_000 }), true, "the former five-minute floor must not stop a renewable lease");
+	assert.equal(validateSubscriptionRequest(model, [entry], { now: () => entry.deadlineAt - 1 }), true);
+	assert.equal(validateSubscriptionRequest(model, [entry], { now: () => entry.deadlineAt }), false);
+	const beyondMargin = { ...entry, deadlineAt: entry.expiresAt - 1 };
+	assert.equal(validateSubscriptionRequest(model, [beyondMargin], { now: () => entry.expiresAt - SUBSCRIPTION_ACCESS_MARGIN_MS - 1 }), true);
+	assert.equal(validateSubscriptionRequest(model, [beyondMargin], { now: () => entry.expiresAt - SUBSCRIPTION_ACCESS_MARGIN_MS }), false);
 });
 
 test("worker and runner source pins and deterministic adaptations remain byte identical", () => {

@@ -25,7 +25,7 @@ import { COST_CAP_WHYS, EXIT_OOM_KILLED, RECORD_CLOCK_SKEW_MS, RUNNER_POLICY_REA
 import { baseHasExtensions as baseHasExtensionsDefault, resetTrustPaths as resetTrustPathsDefault } from "./trust-paths.mjs";
 import { normalizeHost, removeCheckpointPointer as removePointerDefault } from "./run-checkpoint.mjs";
 import { DEFAULT_EGRESS_PROXY } from "./egress.mjs";
-import { CAPABILITY_GATES, CREDENTIAL_REFRESH_CAPABILITY, EXIT_AUTH_CAPABILITY, IDLE_WATCH_CAPABILITY, STEER_STDIN_CAPABILITY, TRANSCRIPT_STDERR_CAPABILITY } from "./image-preflight.mjs";
+import { CAPABILITY_GATES, CREDENTIAL_REFRESH_CAPABILITY, SUBSCRIPTION_LEASE_CAPABILITY, EXIT_AUTH_CAPABILITY, IDLE_WATCH_CAPABILITY, STEER_STDIN_CAPABILITY, TRANSCRIPT_STDERR_CAPABILITY } from "./image-preflight.mjs";
 import { modelListProblem, modelOnList, splitModelEntry } from "./model-ref.mjs";
 import { ALLOCATION_CAP_REASON, ENVELOPE_MISMATCH_REASON } from "./allocation.mjs";
 
@@ -1316,7 +1316,13 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// Access-only handoff is prepared after local determinate gates and before any paid work.
 		let subscriptionAuth = [];
 		if (prepareSubscriptionAuth) {
-			const preparedAuth = await prepareSubscriptionAuth(job);
+			// These are host facts, never a queued switch. Existing images keep the
+			// full lifetime guarantee because their request guard still needs five minutes.
+			const renewable = ["local", "podman"].includes(venueName) && deps.activityLimits != null
+				&& typeof deps.requestStop === "function" && typeof deps.extendSubscriptionAuth === "function"
+				&& (typeof deps.tokenExpiresAt !== "function" || typeof deps.refreshForgeToken === "function")
+				&& [IDLE_WATCH_CAPABILITY, CREDENTIAL_REFRESH_CAPABILITY, SUBSCRIPTION_LEASE_CAPABILITY].every((cap) => (img.capabilities ?? []).includes(cap));
+			const preparedAuth = await prepareSubscriptionAuth(job, { renewable });
 			if (!preparedAuth.ok) {
 				if (preparedAuth.wait) throw new SubscriptionWait(preparedAuth);
 				if (preparedAuth.unavailable) throw new InfraRetry("subscription authentication unavailable", { reason: "container-never-started", budgetReserved: false });
@@ -2549,7 +2555,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			// Dead-container snapshots also make the completed boundary available without live recovery.
 			if (typeof forkStore.capturePoint === "function") {
 				try {
-					const captured = await forkStore.capturePoint({ runId: sourceRunId, workspace: prepared.workspace, baseSha: prepared.sha, quiesced: "dead", kind: "exit", attempt: durable.seq ?? 0, transcriptPath, offset: lstatSync(transcriptPath).size, secretValues: [token, ...Object.values(secrets ?? {})].filter((v) => typeof v === "string" && v !== ""), meta: { piVersion, venue: resolveBackendName(job, blessedBackends[0]), provider: job.provider ?? null, model: job.model ?? null } });
+					const captured = await forkStore.capturePoint({ runId: sourceRunId, workspace: prepared.workspace, baseSha: prepared.sha, quiesced: "dead", kind: "exit", attempt: durable.seq ?? 0, transcriptPath, offset: lstatSync(transcriptPath).size, secretValues: [token, ...Object.values(secrets ?? {}), ...subscriptionAuth.flatMap((s) => Object.values(s.env ?? {})), ...(prepared.credentialSecretValues ?? [])].filter((v) => typeof v === "string" && v !== ""), meta: { piVersion, venue: resolveBackendName(job, blessedBackends[0]), provider: job.provider ?? null, model: job.model ?? null } });
 					if (!captured?.ok) {
 						pointSkipped = captured?.refused ?? captured?.skipped ?? "checkpoint-unavailable";
 						log("fork_checkpoint_skipped", { reason: pointSkipped });

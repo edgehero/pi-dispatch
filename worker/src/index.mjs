@@ -1737,14 +1737,14 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				...(endpointSnapshot ? { modelEndpoints: endpointSnapshot } : {}),
 				...deps,
 				...(deps?.subscriptionRuntime ? {
-					prepareSubscriptionAuth: async (j) => {
-						try { return await deps.subscriptionRuntime.prepare(j, { deadlineAt: subscriptionDeadlineAt, signal, attemptId: `${modelAttemptId}:${job.attemptsMade ?? 0}:${job.stalledCounter ?? 0}` }); }
+					prepareSubscriptionAuth: async (j, { renewable = false } = {}) => {
+						try { return await deps.subscriptionRuntime.prepare(j, { deadlineAt: subscriptionDeadlineAt, signal, renewable, attemptId: `${modelAttemptId}:${job.attemptsMade ?? 0}:${job.stalledCounter ?? 0}` }); }
 						catch (cause) { throw new InfraRetry("subscription authentication could not be prepared", { cause, reason: "container-never-started", budgetReserved: false }); }
 					},
 					validateSubscriptionAuth: (snapshots) => deps.subscriptionRuntime.validate(snapshots),
 					// Issue #888, part 3: a running job's snapshot renewed to a later deadline (subscription-runtime.mjs `extend`),
 					// bounded by the job's own signal, so a renewal in flight ends with the job.
-					...(typeof deps.subscriptionRuntime.extend === "function" ? { extendSubscriptionAuth: (snapshot, { deadlineAt }) => deps.subscriptionRuntime.extend(snapshot, { deadlineAt, signal }) } : {}),
+					...(typeof deps.subscriptionRuntime.extend === "function" ? { extendSubscriptionAuth: (snapshot, { deadlineAt, signal: renewalSignal }) => deps.subscriptionRuntime.extend(snapshot, { deadlineAt, signal: renewalSignal ? AbortSignal.any([signal, renewalSignal]) : signal }) } : {}),
 				} : {}),
 				// Issue #502: the skew check must see `models` as the job ARRIVED, not as `effectiveJobOf` filled it from
 				// PI_ALLOWED_MODELS, or a trigger list a stale receiver dropped would read as present and the job would run on

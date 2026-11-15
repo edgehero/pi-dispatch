@@ -63,7 +63,8 @@ import { STEER_ID_RE, STEER_MODES, STEER_SOURCES, STEER_STATES, isOpen as steerI
 import { HELD_SET, jobKey, WAIT_ANSWER_PREFIX, WAIT_ANSWERS, WAIT_PROFILE_FIELD_RE } from "@edgehero/pi-dispatch/wait-state";
 // Why a waiting job waits (issue #737): the worker's closed vocabulary and the rules each field of its record is held to,
 // from the leaf the worker writes with, so the reader and the writer cannot drift on the key, a field or a bucket.
-import { DEFER_BUCKETS, DEFER_FIELDS, DEFER_HOST_RE, DEFER_PROJECT_RE, DEFER_TIME_MAX_MS, deferKey, parseDefer } from "@edgehero/pi-dispatch/defer-reasons";
+import { DEFER_BUCKETS, DEFER_FIELDS, DEFER_HOST_RE, DEFER_PROJECT_RE, DEFER_TIME_MAX_MS, WAITING_DUE_GRACE_MS, deferKey, parseDefer, recordMatchesDue } from "@edgehero/pi-dispatch/defer-reasons";
+export { WAITING_DUE_GRACE_MS };
 import { JOB_FIELD, META_FIELD, QUEUE_KEY, SCHEDULER_ID_MAX, SCHEDULER_ID_RE, SCHEDULER_JOB_PREFIX, cronRunOf, dueOfScore, isPausedFlag, isSchedulerNext, jobKeyOf, queueKeyOf } from "@edgehero/pi-dispatch/bullmq-internals";
 // The subscriptions validator is shared for the same anti-drift reason: the admin prices finished runs
 // against the exact schema the file declares, and re-deriving it here is how the two would disagree.
@@ -5701,7 +5702,7 @@ export const WAITING_QUEUES_MAX = 64;
  * its course: its record outlives the due by only `DEFER_TTL_SLACK_MS`, so without this the job would read as that
  * reason and then as "no reason was recorded".
  */
-export const WAITING_DUE_GRACE_MS = 10_000;
+// The grace is shared with CLI status through defer-reasons.mjs.
 
 /**
  * How long the fleet reader keeps its keyspace discovery of the queues that exist (`discoverHostQueuesFn`, the planners'
@@ -5756,14 +5757,7 @@ const DEID_MAX = 1024;
  * an earlier episode, and the job now waits for a reason nobody recorded: it reads as "no reason was recorded", never
  * as the old reason. The record lives `DEFER_TTL_SLACK_MS` past its `until`, which is the window this closes.
  */
-const DEFER_STALE_MS = 5_000;
-
-/** Whether a delayed job's due instant agrees with its record: inside `[until, max(until, at)]`, give or take the bound. */
-function recordMatchesDue(record, dueAt) {
-  if (record === null || record.until === null || dueAt === null) return true; // nothing to judge it by
-  const latest = Math.max(record.until, record.at ?? record.until);
-  return dueAt >= record.until - DEFER_STALE_MS && dueAt <= latest + DEFER_STALE_MS;
-}
+// recordMatchesDue in the shared leaf owns this rule for both readers.
 
 /** A hold's label as the worker builds it (`waitLabel`): profile names and `after <instant>`, joined by ` + `. */
 const WAIT_LABEL_RE = /^[A-Za-z0-9._:+ -]{1,512}$/;

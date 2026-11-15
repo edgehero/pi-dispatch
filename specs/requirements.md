@@ -478,6 +478,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 ## REQ-JOB-ACTIVITY-LIMITS
 
+- **Renewal correction (#895)**: subscription authorization uses a renewable lease on a compatible image;
+  the requested 30-minute extension is not a minimum token lifetime. A renewal operation that stops answering
+  cannot block another credential or the expiry watchdog. Failure to arm delivery prevents a short-lease job
+  from spawning; it never silently substitutes the 30-minute fallback.
+
 - **Status**: BUILT (issue #888, both halves). The runner's activity watch, its stop and its counters
   (`INT-RUNNER-EXIT-CODE-PROTOCOL`, "The activity watch"; `INT-JOB-ACTIVITY-FILE`), and the worker's half: the
   deployment settings (`PI_JOB_IDLE_MINUTES`, `PI_JOB_STALL_MINUTES`, `PI_JOB_MAX_MINUTES`) and the trigger fields
@@ -8782,6 +8787,15 @@ instead of drifting.
 
 ## REQ-SUBSCRIPTION-AUTHENTICATION
 
+- **Renewable admission (#895)**: on a verified `subscriptionLease` image with `idleWatch`, `credentialRefresh`
+  and a working binding delivery path, healthy access credentials admit throughout their usable token cycle.
+  A host-only lease is at most 30 minutes and strictly below expiry less 60 seconds, with more than four minutes
+  remaining at admission and spawn. Renewal respects provider eligibility, and repeated extensions keep a
+  working job alive through successive token rotations. Waiting for eligibility is not a renewal failure.
+  Every actual `subscription-auth` hold appears in a safe worker event and bounded CLI status details.
+  Acceptance includes the real host lifecycle and runner guard composed on an injected clock for three hours,
+  exact timing boundaries, concurrent rotation, hung renewal, failed delivery, startup delay and legacy images.
+
 - **Statement (#781)**: an operator may explicitly bind `openai` or `anthropic` to a host-owned subscription
   connection. Unbound providers retain the existing environment/API-key behavior. A binding owns its provider
   even when disconnected, expired, exhausted or unavailable; it never silently falls back to an API key,
@@ -8791,7 +8805,8 @@ instead of drifting.
 - **Host lifecycle**: login, logout and renewal run on the connection's declared host. Durable credentials are
   private, owned regular files outside every job/overlay/sandbox root. Renewal is serialized with a durable
   uncertain marker, replacement persistence and bounded cancellation handling. Only an access credential
-  valid beyond the admitted job deadline plus safety margin enters a job. Refresh grants, registration
+  valid beyond the admitted authorization lease plus safety margin enters a job. A compatible renewable job
+  may start with less than the full 30-minute horizon covered; legacy execution still requires full coverage. Refresh grants, registration
   secrets and raw account/profile data never enter job inputs or public telemetry.
 - **Execution**: a subscription job requires a finite reviewed `models` list. The host and image reject an
   unsupported endpoint, API, classifier role, venue or missing/disabled required extension before spending.
@@ -8960,6 +8975,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-15 (#895) | AMENDED `REQ-SUBSCRIPTION-AUTHENTICATION` and `REQ-JOB-ACTIVITY-LIMITS`: usable renewable leases admit across the token cycle, renew through provider eligibility, bound unanswered renewal work independently of expiry supervision, refuse unsafe startup and expose actual holds. Quota, trial, paid-overage and model authority UNCHANGED, checked. |
 | 2026-11-14 (#888, part 3) | **`REQ-JOB-ACTIVITY-LIMITS` AMENDED**: a job holding an expiring credential (a GitHub App token, a subscription snapshot) has it renewed while it runs where the venue binds its folders and the image declares `credentialRefresh`, and is stopped as `credential-expired` when a renewal cannot reach it in time; elsewhere it keeps the 30-minute wall clock. `REQ-TOKEN-ACCOUNTING-AND-CAPS` and the subscription requirements UNCHANGED, checked: a renewal admits nothing new. |
 | 2026-11-14 (#888, part 2: the worker) | **`REQ-JOB-ACTIVITY-LIMITS` BUILT**: the deployment settings and the three trigger fields, the backstop, `max-minutes`, the 30-minute fallback for a job no watch covers (and, until credential refresh lands, for one holding a subscription or a GitHub App token), the renewed claims, the activity-aware boot sweep and the record's `limits`; Acceptance gains the worker's tests. **`REQ-JOB-TIMEOUT-30M` SUPERSEDED** by it, kept as an address: its 30 minutes survive as the fallback and the watch jobs' ceiling. `REQ-RUNNER-TURN-BUDGET`, `REQ-OPERATOR-JOB-CANCEL` (the cancel keeps its reason) and `REQ-HOST-BUDGET` UNCHANGED, checked. |
 | 2026-11-14 (#888, part 1: the runner) | **NEW `REQ-JOB-ACTIVITY-LIMITS`**, PARTIAL: a job is stopped when idle (no step and no activity, 15 minutes by default) or stalled (no step, 4 hours by default, however busy), or at an optional ceiling, never for being old; what a step and activity are; why (the 30-minute kill of working jobs, spend already bounded elsewhere, the agent waiting on its own background work, the stall limit for an endless loop and the owner's eight-hour runs); the runner's half built, the worker's half next. **`REQ-JOB-TIMEOUT-30M` UNCHANGED, checked**: it still holds until the worker half asks for the watch. `REQ-RUNNER-TURN-BUDGET` UNCHANGED, checked. |

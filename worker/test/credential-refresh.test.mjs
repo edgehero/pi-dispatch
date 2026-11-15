@@ -17,6 +17,7 @@ import { CONTAINER_CREDENTIALS_DIR } from "../src/container-spec.mjs";
 import { forgeSpec } from "../src/forges.mjs";
 import { BESIDE_JOB_DIR } from "../src/recovery-queue.mjs";
 import { CREDENTIAL_DIR, FORGE_TOKEN_VARS, parseCredentialDrop } from "../../image/runner/src/credential-refresh.mjs";
+import { installSubscriptionCredentials } from "../../image/runner/src/subscription-credentials.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 const MIN = 60_000;
@@ -62,7 +63,7 @@ test("a GitHub App token is renewed 15 minutes before it expires, and again for 
 	assert.deepEqual(h.writes[0], { v: 1, seq: 1, forge: { token: "ghs_renewed_1" }, subscriptions: [] });
 	await h.at(HOUR + 20 * MIN);
 	assert.equal(h.writes.length, 1, "the new token lives to 1h45, so nothing is due before 1h30");
-	await h.at(2 * HOUR - FORGE_RENEW_BEFORE_MS + 45 * MIN);
+	await h.at(HOUR + 30 * MIN);
 	assert.equal(h.writes.length, 2);
 	assert.equal(h.writes[1].seq, 2);
 	assert.deepEqual(h.stops, []);
@@ -123,6 +124,81 @@ test("an extension for another connection, or one that does not move the deadlin
 		const h = harness({ forge: null, subscriptions: [SNAP], extend: async (snap, { deadlineAt }) => ({ ...snap, generation: 4, deadlineAt, env: { ANTHROPIC_OAUTH_TOKEN: "sk-ant-oat-x" }, ...bad }) });
 		await h.at(25 * MIN);
 		assert.equal(h.writes.length, 0, JSON.stringify(bad));
+	}
+});
+
+test("an oversized opaque replacement cannot advance delivery, and the old lease still stops the job", async () => {
+	const snapshot = { ...SNAP, provider: "openai", env: { OPENAI_API_KEY: "original.opaque.access" } };
+	const oversized = "a".repeat(4097);
+	const h = harness({ forge: null, subscriptions: [snapshot], extend: async (snap, { deadlineAt }) => ({ ...snap, generation: 4, deadlineAt, env: { OPENAI_API_KEY: oversized } }) });
+	await h.at(25 * MIN);
+	assert.equal(h.writes.length, 0);
+	assert.deepEqual(h.r.state.delivered.subscriptions, [snapshot.deadlineAt]);
+	assert.equal(h.r.state.subscriptions[0].env.OPENAI_API_KEY, snapshot.env.OPENAI_API_KEY);
+	assert.equal(h.r.state.failures, 1);
+	await h.at(28 * MIN);
+	assert.deepEqual(h.stops, ["subscription"]);
+	assert.ok(!JSON.stringify(h.logs).includes(oversized));
+});
+
+test("replacement token shapes and integer bounds cannot publish a drop the runner refuses", async () => {
+	for (const token of ["short", "a".repeat(4097), "contains space", "has\nnewline", "nonascii-é"]) {
+		const h = harness({ mint: async () => ({ token, expiresAt: 2 * HOUR }) });
+		await h.at(50 * MIN);
+		assert.equal(h.writes.length, 0);
+		assert.equal(h.r.state.delivered.forge, HOUR);
+	}
+	for (const bad of [
+		{ generation: -1 }, { generation: 2 }, { generation: 3.5 }, { generation: Number.MAX_SAFE_INTEGER + 1 },
+		{ expiresAt: NaN }, { expiresAt: Number.MAX_SAFE_INTEGER + 1 }, { expiresAt: 40 * MIN },
+		{ env: { ANTHROPIC_OAUTH_TOKEN: "not-a-subscription" } }, { env: { ANTHROPIC_OAUTH_TOKEN: "sk-ant-oat has-space" } },
+		{ env: { ANTHROPIC_OAUTH_TOKEN: "sk-ant-oat".padEnd(4097, "x") } },
+	]) {
+		const h = harness({ forge: null, subscriptions: [SNAP], extend: async (snap, { deadlineAt }) => ({ ...snap, generation: 4, deadlineAt, ...bad }) });
+		await h.at(25 * MIN);
+		assert.equal(h.writes.length, 0, JSON.stringify(bad));
+		assert.deepEqual(h.r.state.delivered.subscriptions, [SNAP.deadlineAt]);
+	}
+	const openai = { ...SNAP, provider: "openai", env: { OPENAI_API_KEY: "original.opaque.access" } };
+	const h = harness({ forge: null, subscriptions: [openai], extend: async (snap, { deadlineAt }) => ({ ...snap, deadlineAt, env: { OPENAI_API_KEY: "sk-paid-api-key" } }) });
+	await h.at(25 * MIN);
+	assert.equal(h.writes.length, 0);
+});
+
+test("accepted boundary tokens parse in the runner and apply to its real subscription guard", async () => {
+	for (const token of ["a".repeat(8), "a".repeat(4096), Array.from({ length: 94 }, (_, i) => String.fromCharCode(33 + i)).join("")]) {
+		const h = harness({ mint: async () => ({ token, expiresAt: 2 * HOUR }) });
+		await h.at(50 * MIN);
+		assert.equal(h.writes.length, 1);
+		assert.equal(parseCredentialDrop(JSON.stringify(h.writes[0])).forge.token, token);
+	}
+	for (const [provider, variable, tokens] of [
+		["openai", "OPENAI_API_KEY", ["a".repeat(8), "a".repeat(4096), "opaque._~+/-=token"]],
+		["anthropic", "ANTHROPIC_OAUTH_TOKEN", ["sk-ant-oat", "sk-ant-oat".padEnd(4096, "x")]],
+	]) {
+		for (const token of tokens) {
+			const snapshot = { ...SNAP, provider, connectionId: "a".repeat(64), env: { [variable]: provider === "openai" ? "original.opaque.access" : SNAP.env.ANTHROPIC_OAUTH_TOKEN } };
+			const h = harness({ forge: null, subscriptions: [snapshot], extend: async (snap, { deadlineAt }) => ({ ...snap, generation: Number.MAX_SAFE_INTEGER, deadlineAt, env: { [variable]: token } }) });
+			await h.at(25 * MIN);
+			assert.equal(h.writes.length, 1);
+			const drop = parseCredentialDrop(JSON.stringify(h.writes[0]));
+			assert.ok(drop);
+			class Runtime { getAuth() {} prepareRequest() {} }
+			const guard = installSubscriptionCredentials({ ModelRuntime: Runtime, entries: [{ ...snapshot }], env: snapshot.env, now: () => h.t });
+			try { assert.equal(guard.refresh(drop.subscriptions[0]), true); }
+			finally { guard.uninstall(); }
+		}
+	}
+});
+
+test("an invalid unchanged subscription prevents the whole drop from claiming delivery", async () => {
+	for (const bad of [{ connectionId: "invalid/id" }, { generation: undefined }, { env: { ANTHROPIC_OAUTH_TOKEN: "sk-ant-oat".padEnd(4097, "x") } }]) {
+		const h = harness({ subscriptions: [{ ...SNAP, deadlineAt: 90 * MIN, ...bad }] });
+		await h.at(50 * MIN);
+		assert.equal(h.writes.length, 0);
+		assert.equal(h.r.state.delivered.forge, HOUR);
+		await h.at(HOUR - CREDENTIAL_STOP_BEFORE_MS);
+		assert.deepEqual(h.stops, ["forge-token"]);
 	}
 });
 

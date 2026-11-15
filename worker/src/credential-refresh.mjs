@@ -6,15 +6,15 @@ import { join } from "node:path";
  * `CONST-TOKEN-SCOPED-PER-JOB`).
  *
  * Since #888 a job runs as long as it keeps working, and two of the credentials it is handed expire on a clock of their
- * own: a GitHub App installation token lives an hour, and a subscription snapshot carries a deadline (30 minutes after
- * the pickup, the window `prepareSnapshot` guarantees the credential covers). Without renewal such a job had to keep the
+ * own: a GitHub App installation token lives an hour, and a subscription snapshot carries a bounded authorization
+ * lease (at most 30 minutes, clipped to usable token expiry on a compatible image). Without renewal such a job had to keep the
  * 30-minute wall clock. With it, the worker renews each one before it runs out and drops the new values in a folder beside
  * the job directory, mounted read-only at `/run/pi-dispatch/credentials`, where the runner applies them
  * (image/runner/src/credential-refresh.mjs).
  *
  * WHAT STAYS BOUNDED. Each value is exactly what a fresh job would be handed: a GitHub token scoped to the job's one
- * repository that lives an hour, a subscription snapshot whose deadline is 30 minutes ahead. A stolen one works no longer
- * than it did; only a running job keeps receiving new ones, and it stops receiving them when it ends.
+ * repository that lives an hour, a subscription lease no more than 30 minutes ahead. A local lease does not revoke a
+ * stolen bearer: the provider's actual expiry bounds that value. Only a running job keeps receiving replacements.
  *
  * WHEN A RENEWAL FAILS. It is tried again every minute. When the credential it renews is two minutes from running out,
  * the job is stopped (`credential-expired`, never retried): every call it makes after that would fail on a slot it keeps.
@@ -25,6 +25,8 @@ export const CREDENTIALS_DIR_SUFFIX = ".credentials";
 export const CREDENTIALS_FILE = "current.json";
 /** How often the refresher looks at what is due. */
 export const CREDENTIAL_CHECK_MS = 60_000;
+/** Includes lock acquisition and provider work, not just the HTTP request. */
+export const CREDENTIAL_RENEW_TIMEOUT_MS = 60_000;
 /** A GitHub App token is renewed this long before it expires. */
 export const FORGE_RENEW_BEFORE_MS = 15 * 60_000;
 /** A subscription snapshot is renewed this long before its deadline, and extended to this far ahead. */
@@ -34,6 +36,16 @@ export const SUBSCRIPTION_DEADLINE_AHEAD_MS = 30 * 60_000;
 export const CREDENTIAL_STOP_BEFORE_MS = 2 * 60_000;
 /** The subscription token's variable by provider (auth-connections.mjs `prepareSnapshot`'s `env`). */
 const SUBSCRIPTION_VARS = Object.freeze({ openai: "OPENAI_API_KEY", anthropic: "ANTHROPIC_OAUTH_TOKEN" });
+
+// Held to the runner's parseCredentialDrop and subscription guard by credential-refresh.test.mjs.
+// A successful rename is not delivery if the runner must refuse the bytes it contains.
+const tokenShaped = (token) => typeof token === "string" && /^[\x21-\x7e]{8,4096}$/.test(token);
+const subscriptionShaped = (row) => Object.hasOwn(SUBSCRIPTION_VARS, row?.provider)
+	&& typeof row.connectionId === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(row.connectionId)
+	&& [row.generation, row.expiresAt, row.deadlineAt].every((value) => Number.isSafeInteger(value) && value >= 0)
+	&& row.expiresAt > row.deadlineAt && tokenShaped(row.token)
+	&& (row.provider === "openai" ? !row.token.startsWith("sk-") : row.token.startsWith("sk-ant-oat"));
+const subscriptionRow = (snapshot) => ({ provider: snapshot.provider, connectionId: snapshot.connectionId, generation: snapshot.generation, expiresAt: snapshot.expiresAt, deadlineAt: snapshot.deadlineAt, token: snapshot.env?.[SUBSCRIPTION_VARS[snapshot.provider]] });
 
 /**
  * Make the drop folder beside `jobDir`, fresh and owner-only (0700, the inbox's rule), and return its path, or null when it
@@ -76,12 +88,12 @@ export function writeCredentialDrop(dir, payload, { fs = nodeFs } = {}) {
  *   - `forge`: `{ expiresAt, mint }` for a GitHub App token, or null. `mint()` resolves `{ token, expiresAt }` (a FRESH
  *     token, never the auth library's cache) or throws.
  *   - `subscriptions`: the snapshots the job started with; `extend(snapshot, { deadlineAt })` resolves the renewed
- *     snapshot for the same connection, or null.
- *   - `check()` renews what is due, writes one drop when anything was renewed, and asks for a stop (`onExpired()`, once)
+ *     snapshot for the same connection, { wait: true, until } for expected eligibility waiting, or null.
+ *   - `check()` renews what is due, publishes each independent renewal, and asks for a stop (`onExpired()`, once)
  *     when a credential that could not be renewed is CREDENTIAL_STOP_BEFORE_MS from running out.
  * Logs `credential_renewed { forge, subscriptions, seq }` and `credential_renew_failed { kind }`, never a value.
  */
-export function makeCredentialRefresher({ dir, forge = null, subscriptions = [], extend = async () => null, now = () => Date.now(), timers = { setInterval, clearInterval }, onExpired = () => {}, log = () => {}, write = (payload) => writeCredentialDrop(dir, payload), checkMs = CREDENTIAL_CHECK_MS }) {
+export function makeCredentialRefresher({ dir, forge = null, subscriptions = [], extend = async () => null, now = () => Date.now(), timers = { setInterval, clearInterval }, onExpired = () => {}, onCredentials = () => {}, log = () => {}, renewalTimeout = () => AbortSignal.timeout(CREDENTIAL_RENEW_TIMEOUT_MS), write = (payload) => writeCredentialDrop(dir, payload), checkMs = CREDENTIAL_CHECK_MS }) {
 	const state = {
 		seq: 0,
 		forge: forge ? { expiresAt: forge.expiresAt, token: null } : null,
@@ -95,95 +107,121 @@ export function makeCredentialRefresher({ dir, forge = null, subscriptions = [],
 		expired: false,
 	};
 	let timer = null;
-	let busy = false;
+	let stopped = false;
+	const pending = new Set();
+	const controllers = new Set();
+	const nextChecks = subscriptions.map(() => 0);
+	const say = (event, fields) => { try { log(event, fields); } catch {} };
 
 	const payload = () => ({
 		v: 1,
 		seq: state.seq,
 		forge: state.forge?.token ? { token: state.forge.token } : null,
-		subscriptions: state.subscriptions.map((s) => ({ provider: s.provider, connectionId: s.connectionId, generation: s.generation, expiresAt: s.expiresAt, deadlineAt: s.deadlineAt, token: s.env?.[SUBSCRIPTION_VARS[s.provider]] })),
+		subscriptions: state.subscriptions.map(subscriptionRow),
 	});
 
 	const expire = (kind) => {
 		if (state.expired) return;
 		state.expired = true;
-		log("credential_expired", { kind });
+		say("credential_expired", { kind });
 		try {
 			onExpired(kind);
 		} catch {}
 	};
 
-	async function check() {
-		if (busy || state.expired) return;
-		busy = true;
+	// This watchdog never awaits a mint or a store lock. Even a hung adapter cannot
+	// keep a slot alive after the last credential published to the runner runs out.
+	function checkExpiry() {
+		if (stopped || state.expired) return;
+		const at = now();
+		if (state.delivered.forge !== null && at >= state.delivered.forge - CREDENTIAL_STOP_BEFORE_MS) return expire("forge-token");
+		if (state.delivered.subscriptions.some((deadline) => at >= deadline - CREDENTIAL_STOP_BEFORE_MS)) expire("subscription");
+	}
+	function failed(kind, provider) {
+		state.failures += 1;
+		say("credential_renew_failed", { kind, ...(provider ? { provider } : {}) });
+	}
+	function publish() {
+		if (!state.dirty || stopped || state.expired) return;
 		try {
-			const at = now();
-			let forgeRenewed = false;
-			let subsRenewed = 0;
-			if (state.forge && at >= state.forge.expiresAt - FORGE_RENEW_BEFORE_MS) {
-				try {
-					const minted = await forge.mint();
-					if (typeof minted?.token !== "string" || minted.token === "" || !Number.isSafeInteger(minted.expiresAt) || minted.expiresAt <= at) throw new Error("no usable token");
-					state.forge = { expiresAt: minted.expiresAt, token: minted.token };
-					forgeRenewed = true;
-				} catch {
-					state.failures += 1;
-					log("credential_renew_failed", { kind: "forge-token" });
-				}
-			}
-			for (let i = 0; i < state.subscriptions.length; i++) {
-				const current = state.subscriptions[i];
-				if (at < current.deadlineAt - SUBSCRIPTION_RENEW_BEFORE_MS) continue;
-				let next = null;
-				try {
-					next = await extend(current, { deadlineAt: now() + SUBSCRIPTION_DEADLINE_AHEAD_MS });
-				} catch {
-					next = null;
-				}
-				const usable = next && next.connectionId === current.connectionId && next.provider === current.provider && Number.isSafeInteger(next.deadlineAt) && next.deadlineAt > current.deadlineAt && typeof next.env?.[SUBSCRIPTION_VARS[current.provider]] === "string";
-				if (!usable) {
-					state.failures += 1;
-					log("credential_renew_failed", { kind: "subscription", provider: current.provider });
-					continue;
-				}
-				state.subscriptions[i] = { ...current, ...next };
-				subsRenewed += 1;
-			}
-			if (forgeRenewed || subsRenewed > 0) {
+			const drop = payload();
+			if (!Number.isSafeInteger(drop.seq) || drop.seq < 1 || (drop.forge !== null && !tokenShaped(drop.forge.token)) || drop.subscriptions.length > 2 || !drop.subscriptions.every(subscriptionShaped)) throw new Error("unusable credential drop");
+			// Register new literal secrets before a tool can print one. A failed collector
+			// prevents publication, just like a failed disk write.
+			onCredentials(drop);
+			write(drop);
+			state.dirty = false;
+			state.renewals += 1;
+			state.delivered = { forge: state.forge ? state.forge.expiresAt : null, subscriptions: state.subscriptions.map((s) => s.deadlineAt) };
+			say("credential_renewed", { seq: state.seq, forge: Boolean(drop.forge), subscriptions: drop.subscriptions.length });
+		} catch { failed("drop"); }
+	}
+	async function renew(key, call, accept, kind, provider) {
+		if (pending.has(key)) return;
+		pending.add(key);
+		const controller = new AbortController();
+		controllers.add(controller);
+		const signal = AbortSignal.any([controller.signal, renewalTimeout()]);
+		let abort;
+		// A timed-out rotation may still need to persist its replacement. Keep this
+		// lane occupied until it settles, but neither wait on it nor accept its late result.
+		const work = Promise.resolve().then(() => call(signal)).finally(() => { pending.delete(key); controllers.delete(controller); });
+		try {
+			const cancelled = new Promise((_, reject) => {
+				abort = () => reject(new Error("credential renewal ended"));
+				if (signal.aborted) abort();
+				else signal.addEventListener("abort", abort, { once: true });
+			});
+			const result = await Promise.race([work, cancelled]);
+			if (stopped || state.expired || signal.aborted) return;
+			if (accept(result)) {
 				state.seq += 1;
 				state.dirty = true;
+				publish();
 			}
-			// A renewal the runner does not have yet (this one, or one a failed write left behind) is written now.
-			if (state.dirty) {
-				try {
-					write(payload());
-					state.dirty = false;
-					state.renewals += 1;
-					state.delivered = { forge: state.forge ? state.forge.expiresAt : null, subscriptions: state.subscriptions.map((s) => s.deadlineAt) };
-					log("credential_renewed", { seq: state.seq, forge: forgeRenewed, subscriptions: subsRenewed });
-				} catch {
-					state.failures += 1;
-					log("credential_renew_failed", { kind: "drop" });
-				}
-			}
-			// The stop: a credential the runner holds is about to run out, and nothing newer reached it.
-			const later = now();
-			if (state.delivered.forge !== null && later >= state.delivered.forge - CREDENTIAL_STOP_BEFORE_MS) return expire("forge-token");
-			if (state.delivered.subscriptions.some((deadline) => later >= deadline - CREDENTIAL_STOP_BEFORE_MS)) return expire("subscription");
-		} finally {
-			busy = false;
+		} catch { if (!stopped && !state.expired) failed(kind, provider); }
+		finally { signal.removeEventListener("abort", abort); }
+	}
+	async function check() {
+		checkExpiry();
+		if (stopped || state.expired) return;
+		publish();
+		const at = now();
+		const work = [];
+		if (state.forge && at >= state.forge.expiresAt - FORGE_RENEW_BEFORE_MS) {
+			work.push(renew("forge", (signal) => forge.mint({ signal }), (minted) => {
+				if (!tokenShaped(minted?.token) || !Number.isSafeInteger(minted.expiresAt) || minted.expiresAt <= now() + CREDENTIAL_STOP_BEFORE_MS) throw new Error("no usable token");
+				state.forge = { expiresAt: minted.expiresAt, token: minted.token };
+				return true;
+			}, "forge-token"));
 		}
+		for (let i = 0; i < state.subscriptions.length; i++) {
+			const current = state.subscriptions[i];
+			if (at < current.deadlineAt - SUBSCRIPTION_RENEW_BEFORE_MS || at < nextChecks[i]) continue;
+			work.push(renew(`subscription:${i}`, (signal) => extend(current, { deadlineAt: now() + SUBSCRIPTION_DEADLINE_AHEAD_MS, signal }), (next) => {
+				if (next?.wait === true && Number.isSafeInteger(next.until) && next.until > now()) { nextChecks[i] = next.until; return false; }
+				const usable = next && subscriptionShaped(subscriptionRow(next)) && next.connectionId === current.connectionId && next.provider === current.provider && next.generation >= current.generation && next.deadlineAt > current.deadlineAt && next.deadlineAt > now() + CREDENTIAL_STOP_BEFORE_MS;
+				if (!usable) throw new Error("no usable lease");
+				state.subscriptions[i] = { ...current, ...next };
+				return true;
+			}, "subscription", current.provider));
+		}
+		await Promise.all(work);
+		checkExpiry();
 	}
 
 	return {
 		state,
 		check,
+		checkExpiry,
 		start() {
-			if (timer !== null) return;
+			if (timer !== null || stopped) return;
 			timer = timers.setInterval(() => void check(), checkMs);
 			timer?.unref?.();
 		},
 		stop() {
+			stopped = true;
+			for (const controller of controllers) controller.abort();
 			if (timer !== null) timers.clearInterval(timer);
 			timer = null;
 		},
