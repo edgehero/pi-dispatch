@@ -358,7 +358,7 @@ export async function readMirroredRuns(redis, { limit = 50, sinceMs = 0, prune =
  * caller how deep it has read, which the runs alone cannot, since an expired body leaves no run behind. Nothing is
  * pruned and nothing is written: two reads, the range WITHSCORES and one MGET.
  */
-export async function readMirroredPage(redis, { before = null, offset = 0, limit = 50, timeoutMs = OP_TIMEOUT_MS } = {}) {
+export async function readMirroredPage(redis, { before = null, offset = 0, limit = 50, timeoutMs = OP_TIMEOUT_MS, continuation = false } = {}) {
 	if (!redis) return { runs: [], fetched: 0, frontier: null, degraded: "off" };
 	const max = Number.isFinite(before) ? `(${before}` : "+inf";
 	let flat;
@@ -392,7 +392,9 @@ export async function readMirroredPage(redis, { before = null, offset = 0, limit
 			// unparseable is not showable, and this read prunes nothing
 		}
 	}
-	return { runs, fetched: ids.length, frontier, degraded: "ok" };
+	// A missing body must not end an archive traversal or skip its equal-score peers (#903).
+	const tied = Array.from({ length: ids.length }, (_, i) => Number(flat[i * 2 + 1])).filter((score) => score === frontier).length;
+	return { runs, fetched: ids.length, frontier, degraded: "ok", ...(continuation ? { next: frontier === null ? null : { before: frontier + 1, offset: tied + (before === frontier + 1 ? offset : 0) }, partial: runs.length < ids.length } : {}) };
 }
 
 /**

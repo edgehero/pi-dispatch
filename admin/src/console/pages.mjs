@@ -298,10 +298,10 @@ export function panelIds(name) {
 const PAGE_PARAMS = Object.freeze({
   setup: [],
   sandboxes: ["id", "repo", "index", "ref", "host", "pin", "request", "gatewaySelect", "fromRun"],
-  overview: ["rows", "zoom", "project"],
+  overview: ["rows", "zoom", "project", "anchor"],
   runs: [...RUN_FILTER_FIELDS, "before", "touched", "days", "scope"],
   "zero-touch": ["days", "project", "scope"],
-  run: ["id"],
+  run: ["id", "historyHost"],
   models: [],
   parked: [],
   "answer-rules": [],
@@ -472,7 +472,9 @@ export function parsePageQuery(name, searchParams) {
       const id = one("id");
       if (id === null) return { refusal: "the run page needs ?id= with a run's job id" };
       if (!RUN_ID_RE.test(id)) return { refusal: "id must be a run id (letters, digits and . _ : -, at most 200 characters)" };
-      return { query: Object.freeze({ id }) };
+      const historyHost = one("historyHost");
+      if (historyHost !== null && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(historyHost)) return { refusal: "historyHost must be a host name" };
+      return { query: Object.freeze({ id, ...(historyHost ? { historyHost } : {}) }) };
     }
     case "insights-budget-split":
     case "insights-capacity":
@@ -512,7 +514,9 @@ export function parsePageQuery(name, searchParams) {
       if (zoom !== null && !Object.hasOwn(TIMELINE_ZOOMS, zoom)) return { refusal: `zoom must be one of ${Object.keys(TIMELINE_ZOOMS).join(", ")}` };
       const project = one("project");
       if (project !== null && !PROJECT_ID_RE.test(project)) return { refusal: "project must be a project id (lowercase letters, digits and '-', at most 32 characters)" };
-      return { query: Object.freeze({ rows, zoom, project }) };
+      const rawAnchor = one("anchor");
+      if (rawAnchor !== null && (!/^\d{1,16}$/.test(rawAnchor) || !Number.isSafeInteger(Number(rawAnchor)) || Number(rawAnchor) < 86_400_000 || Number(rawAnchor) > 253402214400000)) return { refusal: "anchor must be an instant in milliseconds" };
+      return { query: Object.freeze({ rows, zoom, project, ...(rawAnchor !== null ? { anchor: Number(rawAnchor) } : {}) }) };
     }
     case "trigger-add": {
       const recipe = one("recipe");
@@ -921,7 +925,7 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   }
   if (reads.includes("run")) {
     try {
-      data.run = await deps.fleet.runById(q.id);
+      data.run = await deps.fleet.runById(q.id, { historyHost: q.historyHost ?? null });
     } catch {
       data.run = { unreadable: RUN_RECORD_UNREAD };
       data.readFailed = true;

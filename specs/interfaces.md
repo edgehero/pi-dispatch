@@ -12045,6 +12045,18 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
 
 ## INT-CONSOLE-STATE-API
 
+**Extension (#903).** `GET /api/timeline` is an authenticated viewer read under the existing session/person checks,
+no-store policy and agent projection. Parameters: `rows` (project/host), `zoom` (1h/3h/24h), optional `project`,
+`anchor` (milliseconds) and opaque `cursor` (32 lowercase hex digits). Duplicate or unknown parameters are 400.
+The range is bounded by the zoom. A 200 carries `{ html, next, count, partial }`, with escaped, server-rendered
+Overview markup, a continuation or null, the page count and coverage. A stale or mismatched continuation is 409;
+an unavailable reader is 503. A cursor binds its person, range and source list, expires after five idle minutes,
+and occupies one of at most 32 reader slots. No history query enters the per-tick overview data key: one shared
+live snapshot remains shared, and historical reads are explicit requests. A history run link may add `historyHost`
+to `/run?id=...`; it is a bounded host name, resolved only against the live registry, never a browser-supplied URL.
+The ordinary detail role rules apply to the fetched record. The state response itself is UNCHANGED, checked.
+
+
 - **Agent projection and answer privacy (#766, #772)**: An `agent` session receives a separate allowlisted projection and cache/event group: no operator/job prose, private phase names/notes, raw failure text, resolver paths, variable names, draft bodies, citations, classifications, rules or standing answers. Catalog failure tokens and typed numeric facts remain. `/api/run` keeps its existing text-free shape; draft helpers are excluded when resolving a target URL or a newer workload. Private answer data is page-specific and operator-only, including live refresh, never added to shared `/api/state`. The operator Parked list may show verdict/source names and links, while viewer/agent rows carry only draft existence and answering identity/time. `/parked/rules` is operator-only and shows reviewed configuration; it is not a rule mutation API.
 
 **Extension (#751):** `/config/secrets`, `/config/connections` and `/config/project?id=` are non-live viewer pages.
@@ -13967,6 +13979,34 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 `final-payload` cost refusal. `INT-RUNNER-EXIT-CODE-PROTOCOL` and `INT-RUN-HISTORY-FILE-CONTRACT` add that one
 `why` token; provider text, account identity, credentials and quota snapshots never become public run facts.
 
+## INT-HISTORY-READ-TRANSPORT
+
+The retained JSON files are the archive. `makeHistoryReader` holds at most 32 opaque directory cursors, each bound to
+one range and project and idle-expiring after five minutes. One page examines at most 400 entries and returns at most
+100 matching records. Regular `.json` files alone are opened, without following symlinks; each read is capped at
+256 KiB. Bad or oversized files mark coverage partial. Directory failure, expiry and contention have closed error
+words. Record metadata is rebuilt by field; a newer version contributes its readable core. A run is included when
+its interval intersects the window, not only when its end lies inside it. Each page also carries the newest earlier
+run it has seen. Files may change or disappear during browsing; rereading a window starts a fresh scan.
+
+For separate disks, a worker subscribes on the deployment's existing authenticated Valkey connection to
+`history:request:<host>`. A request is at most 1024 bytes, with `{ id, query, cursor }`: id is a random 32-hex reply
+nonce, query is `{ start, end, project }` (at most seven days), or `{ id: jobId }` for an existing run's detail.
+It answers on `history:reply:<nonce>`. These are pub/sub channels, not keys: nothing is retained and no job is queued.
+The worker serves one request at a time. The console waits at most five seconds and closes its reply subscription.
+Metadata pages contain only ids, project, host, target, outcome/reason tokens, attempt and start/end milliseconds;
+the by-id response is the existing JSON record, judged by the normal detail reader and role projection. Raw logs,
+transcripts and filesystem paths never enter the transport. No incoming query selects a path or network address.
+A worker closes the subscription and its cursors on shutdown. A failed subscription is logged with a fixed event and
+never stops paid-job boot. Earlier workers do not subscribe and are explicitly unavailable to an archive read.
+
+Sources are the console's files, each live worker's files, and mirror records for hosts not read directly. A source
+failure leaves partial coverage while other sources remain browsable. Offline or no-longer-registered hosts may hold
+unreachable files, so completion names only the sources read, never an unconditional fleet-wide beginning. One record
+per job id remains the storage rule: overwritten attempts are not recoverable history. The existing cross-host retry
+residual applies if an older file survives on another host after the mirror has expired. `INT-RUN-HISTORY-FILE-CONTRACT`
+and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` are UNCHANGED, checked: no file shape, write or retention rule moves.
+
 ## Revision History
 
 | Date | Change |
@@ -14432,3 +14472,4 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 | 2026-11-05 (#800, a job's tool's name) | **`INT-TRIGGERS-FILE-CONTRACT` CORRECTED** in the bullet on `run.excludeExtensions` and `run.excludeExtensionTools`: the second refuses the name of a tool pi-dispatch gives some jobs, where it said a tool the job itself offers, and a plain job offers none of them. `run.excludeTools` removes a server's only beside `run.mcp`. UNCHANGED, checked: `LOADED_JOB_TOOLS`, and which names are refused. |
 | 2026-11-05 (#800, #695, one release) | `INT-TRIGGERS-FILE-CONTRACT`, `INT-HOST-REGISTRY-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT` and `INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked: both keys ship in 5.0.0 with #761 (`DES-STORE-VERSION-WHEN-NEEDED`), which changes when they arrive and no version, field or key. |
 | 2026-11-05 (#695, doctor's words) | **`INT-CONFIG-OVERLAY-CONTRACT` AMENDED**: the fix of `settings.unknown-keys` says 5.0.0 where it said issue #761's release, now that the release has its number. |
+| 2026-11-15 (#903) | NEW INT-HISTORY-READ-TRANSPORT and extension to INT-CONSOLE-STATE-API for authenticated paged history markup and bounded worker file reads over ephemeral pub/sub. INT-RUN-HISTORY-FILE-CONTRACT UNCHANGED, checked: JSON shape and retention stand. INT-CONSOLE-EVENT-STREAM UNCHANGED, checked: the browser holds its historical panel and no archive reads enter the shared live data key. |

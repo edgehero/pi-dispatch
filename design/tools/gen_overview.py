@@ -3,6 +3,27 @@ from pulse import *
 
 OVERVIEW_LOCAL_CSS = ".wl__l li > .btn { max-width: 100%; height: auto; min-height: 32px; white-space: normal; overflow-wrap: anywhere; }"
 
+# Pasted into the console's page stylesheet, with its source hash (#903).
+HISTORY_CSS = """
+.history-nav{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:12px 0}
+.history-nav input{min-width:0;max-width:180px}
+.history-window{overflow-x:auto;overscroll-behavior-x:contain;direction:ltr;scrollbar-gutter:stable}
+.history-track{width:calc(100% + 160px);display:grid;grid-template-columns:80px minmax(720px,1fr) 80px;min-width:880px}
+.history-edge{display:flex;align-items:center;justify-content:center;background:var(--surface-2)}
+.history-window .tl-wrap{overflow:visible;direction:ltr;margin:0;padding:0}
+.history-window .tl__h{position:sticky;left:0;z-index:1;background:var(--surface)}
+.history-window .tl-run:focus{outline:3px solid var(--ink);outline-offset:2px}
+.history-preview{padding:12px;border:1px solid var(--line);border-radius:12px;overflow-wrap:anywhere}
+.history-preview[hidden]{display:none}
+.history-list{max-height:320px;overflow:auto;padding-left:24px}
+.history-list li{padding:8px 0;border-bottom:1px solid var(--line)}
+.history-list a{overflow-wrap:anywhere}
+.history-status{min-height:24px}
+.history-window .tl{min-width:720px}
+"""
+OVERVIEW_LOCAL_CSS += HISTORY_CSS
+HISTORY_NAV = '<nav class="history-nav" aria-label="Run history"><a class="btn" href="#">Older</a><a class="btn" href="#">Newer</a><a class="btn" href="#">Return to now</a><span>2026-10-25 · UTC</span></nav>'
+
 PROJECTS = [("All", "31"), ("web", "13"), ("api", "4"), ("billing", "12"), ("ops", "2")]
 def projseg(counts=PROJECTS):
     return ('<div class="projseg" role="group" aria-label="Project"><span class="projseg__l">Project</span>'
@@ -107,7 +128,7 @@ KEY = f"""<p class="keyrow">
 ZOOM = '<div class="seg" role="group" aria-label="Rows"><button aria-pressed="true">Project</button><button aria-pressed="false">Host</button></div><div class="seg" role="group" aria-label="Zoom"><button aria-pressed="false">1h</button><button aria-pressed="true">3h</button><button aria-pressed="false">24h</button></div>'
 
 def tl_card(rows):
-    return card("Runs by project", timeline(rows) + KEY, end=ZOOM, sub="left of now: what ran; right of now: what is in line", id_="p-timeline")
+    return card("Runs by project", HISTORY_NAV + timeline(rows) + '<details><summary>Inspect every run in this window</summary><p>Open a run for its details. Older pages keep every overlapping run reachable.</p></details>' + KEY, end=ZOOM, sub="left of now: what ran; right of now: what is in line", id_="p-timeline")
 
 # ---------------- KPI cards ----------------
 def needs_card(clear=False):

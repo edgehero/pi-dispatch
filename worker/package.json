@@ -64,6 +64,7 @@
     "./inbox-relay": "./src/inbox-relay.mjs",
     "./held-replies": "./src/held-replies.mjs",
     "./live-transcript": "./src/live-transcript.mjs",
+    "./history-reader": "./src/history-reader.mjs",
     "./run-progress": "./src/run-progress.mjs",
     "./reserve-estimate": "./src/reserve-estimate.mjs",
     "./endpoint-status": "./src/endpoint-status.mjs",

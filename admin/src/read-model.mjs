@@ -1,3 +1,4 @@
+import { makeHistoryReader, readHostHistory, historyRow } from "@edgehero/pi-dispatch/history-reader";
 import { readSubscriptionStatus } from "@edgehero/pi-dispatch/subscription-status";
 import { readSandboxInventories } from "@edgehero/pi-dispatch/sandbox-inventory";
 import { readSandboxSessions, requestSandboxEnd } from "@edgehero/pi-dispatch/sandbox-sessions";
@@ -4516,6 +4517,8 @@ export function createFleetReader(
   // wide window here and for `runsPage` below, so neither walks the logs directory on every tick or every request. Held
   // to the deployment's mirror cap (issue #761, `resolvePaths`), the built-in one for paths that name none.
   const localIndex = makeLocalRunIndex({ logsDir: paths.logsDir, fs, now: nowFn, ...(Number.isSafeInteger(paths.runMirrorMaxRuns) ? { max: paths.runMirrorMaxRuns } : {}) });
+  const archive = makeHistoryReader({ logsDir: paths.logsDir, now: nowFn, ...(fs.promises ? { fs: fs.promises } : {}) });
+
   // The wide window, `{ at, runs, mirror }`, refreshed at the same rhythm. The mirror is read READ-ONLY (`prune:
   // false`) on every reader: the TUI's per-tick `mergedRunsOn` already prunes, and a second pruning read would only
   // race it.
@@ -5161,11 +5164,35 @@ export function createFleetReader(
       }
     },
     /** This reader's held client, local index and clock, for `readRunsPage`/`readRunById` off the same connection. */
+    async historySources() {
+      await fleetQueues();
+      return { hosts: lastHosts.map((h) => h.name).filter((h) => h !== doctorSelfName(dollarEnvFn() ?? {})), partial: fleetDegraded };
+    },
+    async historyPage({ query, cursor = null, host = null, excludeHosts = [] }) {
+      if (host === "@mirror") {
+        const before = cursor ? Number(BigInt("0x" + cursor.slice(0, 16))) : nowFn() + 1;
+        const offset = cursor ? Number(BigInt("0x" + cursor.slice(16))) : 0;
+        const got = await readMirroredPage(redis, { before, offset, limit: 100, timeoutMs: FLEET_READ_TIMEOUT_MS, continuation: true });
+        if (got.degraded !== "ok" && got.degraded !== "off") return { error: "mirror-unavailable" };
+        const raw = got.runs ?? [];
+        const next = got.fetched === 100 && got.next ? got.next.before.toString(16).padStart(16, "0") + got.next.offset.toString(16).padStart(16, "0") : null;
+        const rows = raw.map(historyRow).filter(Boolean).filter((r) => !excludeHosts.includes(r.host) && (query.project === null || r.project === query.project));
+        const older = rows.filter((r) => (r.endedAt ?? r.startedAt) < query.start);
+        return { runs: rows.filter((r) => (r.startedAt ?? r.endedAt) < query.end && (r.endedAt ?? r.startedAt) >= query.start), next, partial: rows.length > 0 || got.partial === true, olderAt: older.length ? Math.max(...older.map((r) => r.endedAt ?? r.startedAt)) : null };
+      }
+      if (host === null) return archive.page(query, cursor);
+      return readHostHistory({ redis, host, query, cursor });
+    },
     async runsPage(opts = {}) {
       return readRunsPage(redis, { ...opts, logsDir: paths.logsDir, fs, now: nowFn, localIndex });
     },
-    async runById(jobId) {
-      return readRunById(redis, { logsDir: paths.logsDir, jobId, fs });
+    async runById(jobId, { historyHost = null } = {}) {
+      const local = await readRunById(redis, { logsDir: paths.logsDir, jobId, fs });
+      if (local.record || local.invalid || !historyHost) return local;
+      await fleetQueues();
+      if (!lastHosts.some((h) => h.name === historyHost)) return { unreadable: "the host holding this run is not available" };
+      const got = await readHostHistory({ redis, host: historyHost, query: { id: jobId } });
+      return got.record?.jobId === jobId ? { record: shownRecord(got.record), source: "host" } : { unreadable: "the host could not provide this run's record" };
     },
     // The live transcript (issue #643), off this reader's held client and bounded by its timeout: `readTranscriptSince`
     // and `readTranscriptMeta`, whose shapes these return. Non-blocking XRANGE reads only, so a tail open beside the
@@ -5406,6 +5433,7 @@ export function createFleetReader(
     },
     async dispose() {
       disposed = true;
+      await archive.close();
       for (const q of sandboxQueues.values()) { try { await q.close(); } catch { /* best effort teardown */ } }
       for (const q of pool.values()) {
         try {

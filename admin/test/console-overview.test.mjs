@@ -627,7 +627,7 @@ test("the timeline card: past the chips it draws, All still counts every project
   const chips = out.match(/<a href="\/\?project=p\d\d"><span class="ptag">/g) ?? [];
   assert.ok(chips.length > 0 && chips.length < 30, `${chips.length} chips drawn`);
   assert.match(out, /aria-current="page">All<b>30<\/b><\/a>/, "All counts the projects not drawn");
-  assert.match(out, new RegExp(`<span class="muted">\\+${30 - chips.length} more</span></div>`));
+  assert.match(out, new RegExp(`<button[^>]+data-history-reveal>\\+${30 - chips.length} more</button></div>`), "the omitted projects can be revealed");
 });
 
 test("the timeline card: a day read only to its newest runs says older ones may be missing; a park takes its project from its record", () => {

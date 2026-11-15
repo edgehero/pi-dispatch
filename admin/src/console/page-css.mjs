@@ -1,3 +1,21 @@
+// History styles from design/tools/gen_overview.py, sha256 936310b44aeed968c8dc72588ed3de360d373b7eada0d293bcfcb8866c6f5ed9
+const HISTORY_CSS = `
+.history-nav{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin:12px 0}
+.history-nav input{min-width:0;max-width:180px}
+.history-window{overflow-x:auto;overscroll-behavior-x:contain;direction:ltr;scrollbar-gutter:stable}
+.history-track{width:calc(100% + 160px);display:grid;grid-template-columns:80px minmax(720px,1fr) 80px;min-width:880px}
+.history-edge{display:flex;align-items:center;justify-content:center;background:var(--surface-2)}
+.history-window .tl-wrap{overflow:visible;direction:ltr;margin:0;padding:0}
+.history-window .tl__h{position:sticky;left:0;z-index:1;background:var(--surface)}
+.history-window .tl-run:focus{outline:3px solid var(--ink);outline-offset:2px}
+.history-preview{padding:12px;border:1px solid var(--line);border-radius:12px;overflow-wrap:anywhere}
+.history-preview[hidden]{display:none}
+.history-list{max-height:320px;overflow:auto;padding-left:24px}
+.history-list li{padding:8px 0;border-bottom:1px solid var(--line)}
+.history-list a{overflow-wrap:anywhere}
+.history-status{min-height:24px}
+.history-window .tl{min-width:720px}
+`;
 import { GATEWAY_CONSOLE_CSS } from "./gateway-css.mjs";
 import { SETUP_CSS } from "./setup-css.mjs";
 import { ANSWERER_CSS } from "./answerer-css.mjs";
@@ -766,7 +784,7 @@ ${FLEET_CSS}
 `;
 
 /** Each page's own rules, by page name, unscoped as written; `pageCss()` confines them. */
-export const PAGE_CSS = Object.freeze({ "sandbox-gateway": GATEWAY_CONSOLE_CSS, setup: SETUP_CSS, sandboxes: SANDBOX_CSS, "zero-touch": ZERO_TOUCH_CSS, insights: SPEND_CSS, "insights-budget-split": SPEND_CSS, "insights-capacity": SPEND_CSS, "insights-breakdown": SPEND_CSS, "insights-flows": SPEND_CSS, login: SIGN_IN_CSS, "login-code": SIGN_IN_CSS, error: ERROR_CSS, audit: `${AUDIT_CSS}${ERROR_CSS}`, overview: OVERVIEW_CSS, run: `${RUN_CSS}${ANSWERER_CSS}${LOADED_CSS}`, project: LOADED_CSS, trigger: `${LOADED_CSS}
+export const PAGE_CSS = Object.freeze({ "sandbox-gateway": GATEWAY_CONSOLE_CSS, setup: SETUP_CSS, sandboxes: SANDBOX_CSS, "zero-touch": ZERO_TOUCH_CSS, insights: SPEND_CSS, "insights-budget-split": SPEND_CSS, "insights-capacity": SPEND_CSS, "insights-breakdown": SPEND_CSS, "insights-flows": SPEND_CSS, login: SIGN_IN_CSS, "login-code": SIGN_IN_CSS, error: ERROR_CSS, audit: `${AUDIT_CSS}${ERROR_CSS}`, overview: `${OVERVIEW_CSS}${HISTORY_CSS}`, run: `${RUN_CSS}${ANSWERER_CSS}${LOADED_CSS}`, project: LOADED_CSS, trigger: `${LOADED_CSS}
 ${TRIGGER_GETS_CSS}`, runs: RUNS_CSS, parked: `${PARKED_CSS}${ANSWERER_CSS}`, "answer-rules": ANSWERER_CSS, fleet: FLEET_CSS, host: `${HOST_DETAIL_CSS}
 ${FLEET_CSS}`, venue: VENUE_CSS });
 

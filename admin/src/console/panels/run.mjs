@@ -259,7 +259,7 @@ function newerSummary(r, source) {
     ["Started", timeHtml(started)],
     ["Ended", timeHtml(ended)],
     ["Took", Number.isFinite(started) && Number.isFinite(ended) ? ageText(ended - started) : "-"],
-    ["Read from", source === "mirror" ? "the fleet's run mirror" : "this host's run history"],
+    ["Read from", source === "host" ? "the worker holding this run" : source === "mirror" ? "the fleet's run mirror" : "this host's run history"],
   ]));
 }
 
@@ -808,7 +808,7 @@ const recordSummary = withRun("Run", (r, view, source) => {
     ["Started", timeHtml(started)],
     ["Ended", timeHtml(ended)],
     ["Took", Number.isFinite(started) && Number.isFinite(ended) ? ageText(ended - started) : "-"],
-    ["Read from", source === "mirror" ? "the fleet's run mirror" : "this host's run history"],
+    ["Read from", source === "host" ? "the worker holding this run" : source === "mirror" ? "the fleet's run mirror" : "this host's run history"],
   ])}`;
 });
 

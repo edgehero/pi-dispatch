@@ -1189,11 +1189,39 @@ is still here, or one click away:
 
 ### The overview's timeline
 
+Scroll horizontally to move through time, or use **Older**, **Newer** and **Return to now**. The initial view follows
+current activity. Once you browse retained history, live updates leave that window and its keyboard focus in place.
+The address keeps its time anchor (`anchor`, milliseconds), zoom, grouping and project, so returning from a run page
+restores the same time window. **Read window again** restarts a scan after a failed read or an expired cursor.
+
+Click a run to open its details. Hover or focus a mark for its dated preview; touching it shows the preview too.
+The list under a historical window links every run on the current page, including runs omitted from the picture's
+lane and row limits. **More runs in this window** continues the bounded scan, and **Previous page** revisits up to
+eight recent pages. Start the window again to revisit pages outside that browser cache. A project can be typed into
+the Project field even when it has no recent run or no chip. Clearing the field shows all projects. The date range
+stays above the picture. Left/Right and Page Up/Page Down in the scroll region move through time; End returns to now.
+
+The zone named above the picture is the reader's browser zone. The axis, marks, previews and run details use each
+instant's offset, so Amsterdam reads UTC+1 in winter and UTC+2 in summer. Repeated autumn clock labels carry their
+offsets. Positions, ordering and elapsed durations always use actual timestamps. Without browser scripting, times
+stay explicitly UTC and the ordinary Runs page remains available.
+
+**History means records still retained**, not deleted runs or overwritten retry attempts. Each request examines at
+most 400 directory entries and returns at most 100 matching records. A run spanning the window is included even if
+it ended later. Loading and incomplete reads are stated explicitly. The console scans its own files, then the live
+workers' files using the existing Valkey connection, then the mirror for hosts whose records were not read directly.
+No paid job is started. Upgrade and restart the workers as well as the console to read beyond the mirror on other
+hosts; an older worker cannot answer the new read protocol. Offline hosts may hold older records, and a truncated
+mirror cannot establish the beginning of their history. A failed host or file read never means an empty history.
+Historical windows describe retained records; they do not reconstruct an old queue or assert that an old question
+is still unanswered today. No new persistent store or retention policy is introduced.
+
+
 The timeline ("Runs by project", or "Runs by host") draws the last hours as one row per project or per host: left of
 the now line what ran and runs ("Ran and running"), right of it what is in line ("In line"). Each mark is a pill with
 its id where it fits (a cron trigger's run in line by its trigger and its run time instead, "hourly-sync" with "15:00
 run", since `repeat:hourly-sync:1791471600000` says neither), and its tooltip says the id, the target and what
-happened, with UTC times. A run that just ended can take up to 15 seconds to appear among the ended runs: the console
+happened. Times are localized by the browser, including the winter or summer offset at each instant. A run that just ended can take up to 15 seconds to appear among the ended runs: the console
 reads the run history at most that often. The key under it names each kind, so a colour is never the only cue:
 
 - **Completed**: a run that ended completed. A run an operator cancelled, and a question answered since, are drawn the
@@ -1214,8 +1242,8 @@ reads the run history at most that often. The key under it names each kind, so a
   "due since 15:30"). Each reason has one latest start: the last place in the window where its mark, a name of ten
   characters (a longer one cut to its first nine), its reason's word and a time still fit. A pill starts at its due
   time, the dotted gap from now leading to it, unless that is later than its reason's latest start; then it is drawn
-  there, further left, and says its due time, since where it starts is no longer when ("check 07:00", in UTC as the axis
-  is; "window in 2d 4h" for one more than a day off). So of two jobs waiting for the same reason, the one due later is
+  there, further left, and says its due time, since where it starts is no longer when ("check 07:00", in the axis
+  timezone; "window in 2d 4h" for one more than a day off). So of two jobs waiting for the same reason, the one due later is
   never drawn left of the other, whatever their names; only near now can a pill moved left stand before one of another
   reason due earlier, and then it says its time. A pill too narrow for its words says its reason in one ("slot",
   "retry", "due", "not ready"). Every pill keeps its mark and its reason's word: when room is short its name is what is
@@ -1236,7 +1264,7 @@ start (a job that waits for something on its row first, then the soonest due), a
 thousands wait (the Waitlists card lists them). The timeline draws at most 12 rows, the ones with the most pressing
 marks first (then the most marks, then by name), in name order; a line under the timeline, outside its scroll box,
 says how many more rows it left out and how many runs and jobs they hold ("3 more rows are not drawn (41 runs and jobs
-in them)."), so a phone shows it whole. A screen reader hears each row once, with every count ("web: 5 completed, 1
+in them)."), so a phone shows it whole. A screen reader can focus each linked run and hears each row with every count ("web: 5 completed, 1
 failed, 2 running, 3 in line").
 
 Above it, the project chips: All, then each project the window holds, with how many marks it has, at most 24 of them,
