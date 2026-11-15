@@ -1,5 +1,7 @@
 import { cleanTouch, touchScopeOf } from "./touch-state.mjs";
 import { SubscriptionWait } from "./subscription-wait.mjs";
+import { mergePolicyJobProblem } from "./merge-policy.mjs";
+import { MERGE_POLICY_COMMENTS } from "./comment-tables.mjs";
 import { readQuestionContext } from "./question-context.mjs";
 import { stageModelRoleInputs } from "./agent-snapshot.mjs";
 import { effectiveCostCapMicros } from "./money.mjs";
@@ -506,6 +508,8 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// Issue #230. Admit-everything by default, like checkOnceSpent above and for its reason: an
 		// unwired seam must not refuse, and the wiring is what turns the check on.
 		checkWaitSkew = async () => ({ ok: true }),
+		// An unwired worker must never authorize an opted-in job from queue data alone.
+		checkMergePolicy = async () => ({ refused: "merge-policy-unavailable" }),
 		// () => { ok } | { message } | { unavailable } (issue #503: a transient overlay read, retried). Issue #310. Resolves this deployment's provider credential the way
 		// buildContainerEnv will, and answers whether it exists AT ALL, so an unconfigured provider refuses
 		// here rather than inside runContainer with the budget already reserved. Admit-everything by default,
@@ -863,7 +867,23 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			}
 		}
 
-		// The wait-skew check (issue #230), second on the ladder and for the first one's reasons: the same
+		// The queue's opt-in is only a claim about reviewed configuration. Revalidate it before every attempt,
+		// including recovery; never elevate an unflagged job from a newer file or reuse a last-good permission.
+		if (job.mayMerge !== undefined || job.mayMergePolicy !== undefined) {
+			const invalid = mergePolicyJobProblem(job);
+			const permission = invalid ? { refused: invalid } : job.mayMerge === true
+				? await checkMergePolicy(job, { queueJobId: deps.queueJobId }) : { ok: true };
+			if (permission?.newer === true) throw new NewerReleaseHold("the triggers file");
+			if (permission?.unreadable === true) throw new InfraRetry("the merge policy file could not be read", { reason: "container-never-started", budgetReserved: false });
+			if (permission?.ok !== true) {
+				const reason = Object.hasOwn(MERGE_POLICY_COMMENTS, permission?.refused) ? permission.refused : "merge-policy-unavailable";
+				await comment(job, MERGE_POLICY_COMMENTS[reason]);
+				log("refused_merge_policy", { reason, triggerIndex: Number.isSafeInteger(job.trigger?.matched?.index) ? job.trigger.matched.index : null });
+				return { outcome: "policy", reason, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false };
+			}
+		}
+
+		// The wait-skew check (issue #230), on the free ladder for the first one's reasons: the same
 		// file read, free, determinate, credential-less, and pre-spend. It answers a question no other layer
 		// can: does the AUTHORED trigger carry wait conditions this job arrived without? That happens when a
 		// service below the version floor dropped the field as an unknown key, and the resulting run is

@@ -27,6 +27,7 @@ import { makeCheckApprovalPolicy } from "./approval-policy.mjs";
 import { APPROVAL_LABEL } from "./parked.mjs";
 import { createForkStore } from "./fork-store.mjs";
 import { makeCheckForkPolicy } from "./fork-policy.mjs";
+import { makeCheckMergePolicy } from "./merge-policy.mjs";
 import { thinkingLevelAllowed } from "./thinking-level.mjs";
 import { readdirSync, readFileSync, statSync, watch } from "node:fs";
 import { lookup as dnsLookup } from "node:dns/promises";
@@ -3189,6 +3190,7 @@ export async function startWorker(
 			// one. In the compose topology the worker's read is the live inode while the receiver's is dead
 			// until restart, which is exactly the deployment where the skew happens.
 			checkWaitSkew: makeCheckWaitSkew({ triggersPath: onceTriggersFile }),
+			checkMergePolicy: makeCheckMergePolicy({ triggersPath: onceTriggersFile }),
 			// Issue #505. Whether the live file still flags a portfolio job's cron trigger, read when such a job is picked
 			// up, from the same file and by the same rule as the two checks above (built once, beside collectPlan).
 			checkPortfolioFlag,

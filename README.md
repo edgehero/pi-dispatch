@@ -24,8 +24,9 @@ A dark factory runs with the lights off, because nobody needs to stand on the fl
 work: **dark engineering**. It runs the [pi](https://github.com/earendil-works/pi) coding agent for you in the background, on
 your own computer or server. Agents start on their own and do the work, and a second agent can review it. Each job happens in
 a sealed box that is thrown away afterwards, stops at the spending limit you set, and shows up live on one web page. On a project
-on GitHub or GitLab, the work stops today at a proposed change: pi-dispatch never merges it into your project, so what ships
-stays a person's decision.
+on GitHub or GitLab, the work stops by default at a proposed change, so what ships stays a person's decision.
+You can [explicitly allow a kind of job to land its change](docs/triggers.md#allowing-a-job-to-land-its-change),
+subject to your project's checks and approvals.
 
 It is free and open source. You pay your AI provider for what the agent uses, or use a subscription you already have.
 
@@ -217,8 +218,8 @@ back. You are out of the loop for that work, and still in charge of what ships.
   <img src="docs/images/console/console-zero-touch.png?v=2026-11-03" alt="The Zero touch page: how often runs needed a person, what the cause was, and which projects run without help">
 </picture>
 
-Out of the loop does not mean out of control. The spending limits hold with nobody watching, every job stays in its
-box, and a person still merges.
+Out of the loop does not mean out of control. The spending limits hold with nobody watching and every job stays in its
+box. By default, a person still merges. You can explicitly [allow a job to land its change](docs/triggers.md#allowing-a-job-to-land-its-change).
 
 ## Manage a swarm of agents
 
@@ -924,7 +925,7 @@ Label an issue, and a container works on a fresh clone, opens a PR and comments 
 - **Only a collaborator's label, `@pi` comment or formal review starts a job.** A PR from a stranger's fork never starts a job on its
   own. A review is gated on the **reviewer**, so a collaborator reviewing that fork PR does start one.
 - **The token can merge.** GitHub puts push and merge behind the same permission, so under every auth source the job's token could
-  merge. pi-dispatch never does, and **branch protection on your default branch is the real control**. The worker refuses a repo
+  merge. The harness never calls merge, and a job may do so only with explicit trigger permission. **Branch protection on your default branch is the real control**. The worker refuses a repo
   without it, before any spend.
 - **Which token a job holds depends on the auth source.** The GitHub App mints one per job, for one repo, valid for an hour. The default
   `gh` source forwards **your own login, full scope and never expiring**, and `pi-dispatch doctor` warns about that.
@@ -1024,8 +1025,9 @@ Jobs start with `--pull=never`, so build or pull every image first ([job image](
 | `launch/` | the recipes that render every image here |
 
 **What a change needs.** The specs change in the same pull request as the code, with a revision row. A pull request that breaks a `CONST-*` entry is
-asked to justify changing the rule first, not the code. pi and its packages stay on exact pins. Nothing in this project merges anything, and CI greps
-for it. Sign off your commits with `git commit -s`: this project uses the [DCO](https://developercertificate.org/), not a CLA.
+asked to justify changing the rule first, not the code. pi and its packages stay on exact pins. The harness never calls a merge or approval API, and CI greps
+for those calls. A reviewed trigger can explicitly permit its job's agent to land its own change through the forge's checks and approvals.
+Sign off your commits with `git commit -s`: this project uses the [DCO](https://developercertificate.org/), not a CLA.
 
 **The look.** A change to the console lands in `design/` first and is pasted into the console by hash. `python3 design/tools/build.py` rebuilds and checks
 the cards, and `node launch/render-images.mjs --console --only <golden>` draws any state of any page, so you can look at it. [`AGENTS.md`](AGENTS.md) is the

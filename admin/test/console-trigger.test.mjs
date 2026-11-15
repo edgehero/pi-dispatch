@@ -72,3 +72,15 @@ test("comment detail explains the actual phrase-and-flow override syntax, escape
     assert.doesNotMatch(markup, /@pi<safe>/);
   }
 });
+
+
+test("merge permission is visible as a hand-written field and never as an input", async () => {
+  const { triggerRun } = await import("../src/console/panels/trigger.mjs");
+  const base = { role: "operator", query: { index: 0 }, data: { triggerEditor: { defaults: { mayMerge: false } }, triggerDetail: { trigger: { type: "label", forge: "github", flow: "fix", mayMerge: true } } } };
+  const shown = String(triggerRun(base));
+  assert.match(shown, /run.mayMerge/);
+  assert.match(shown, /true; deployment default: false/);
+  assert.doesNotMatch(shown, /name="mayMerge"/);
+  delete base.data.triggerDetail.trigger.mayMerge;
+  assert.doesNotMatch(String(triggerRun(base)), /run.mayMerge/);
+});

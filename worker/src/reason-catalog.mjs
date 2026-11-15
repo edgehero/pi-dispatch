@@ -33,6 +33,7 @@
  */
 
 import {
+	MERGE_POLICY_COMMENTS,
 	MODEL_AGENTS_INVALID_COMMENT, APPROVAL_COMMENTS,	BUNDLE_COMMENTS,
 	MODEL_NOT_ALLOWED_COMMENTS,
 	FAILED_COMMENT_BY_REASON,
@@ -57,6 +58,8 @@ const REBUILD = "Rebuild the job image from a release that declares the feature,
  * table read is derived; a string literal is written here for one of the three reasons in the header.
  */
 const ROWS = [
+	...Object.entries(MERGE_POLICY_COMMENTS).map(([token, sentence]) => [token, sentence, "Review the current trigger on the worker, restart stale services and re-run the job."]),
+	["job-image-merge-policy-unsupported", "Refused: the job image cannot honor the trigger's merge permission. Nothing was spent.", REBUILD],
 	["watch-unavailable", "The worker could not resolve the watch reference safely. No investigation started.", "Check watch runtime configuration and worker availability."],
 	["watch-query-credential-missing", "A reviewed log query requires a host credential that is unavailable. No investigation started.", "Configure the named read-only query credential on the worker host."],
 	["watch-cooldown", "The finding arrived during its fingerprint cooldown. No additional investigation started.", "Wait for cooldown to end or inspect the existing finding."],

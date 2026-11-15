@@ -215,12 +215,12 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
   **It does NOT hold on GitLab.** A project access token needs `api` to post a note, and `api` grants full
   project API read/write; `write_repository` alone already permits pushing `.gitlab-ci.yml`. GitLab offers
   no contents-vs-CI split, so an injected agent on a GitLab job **can** rewrite your pipeline definition,
-  bounded only by branch protection and by the human who reviews the merge request. If that matters to
+  bounded only by branch protection and by the required review process, human by default. If that matters to
   you, protect `.gitlab-ci.yml` with a CODEOWNERS-equivalent approval rule and keep the default branch
   protected.
 - **Branch protection is required.** The worker refuses to run against a repository whose default branch
-  is unprotected, checked before any money is spent. This is the control that makes human review real
-  rather than customary — without it, nothing technical stops a merge. On GitHub two things count
+  is unprotected, checked before any money is spent. The requirements configured there are the technical
+  landing barrier; a prompt prohibition alone stops no merge. On GitHub two things count
   (issue #876): a classic branch protection rule, whatever it requires, so make it require a pull request
   review; or an active ruleset whose pull request rule requires at least one approving review. A ruleset
   that requires no approval does not count, even though GitHub then marks the branch protected: an
@@ -239,11 +239,22 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
   composed explicitly, so a repo's own `.pi/APPEND_SYSTEM.md` **cannot shadow the safety floor**. And the
   line that has not moved: **webhook issue, PR and comment text is data** — it goes in the user prompt,
   never the system prompt, whatever a repository's files say.
-- **We never merge.** No code path in this project calls a merge API; grep is the test. Note carefully
-  what that does and does not mean — see below.
+- **The harness never merges.** No harness code path calls a merge or approval API; grep is the test.
+  Jobs are instructed never to merge by default. A reviewed forge-flow trigger can explicitly set
+  [`run.mayMerge: true`](docs/triggers.md#allowing-a-job-to-land-its-change) to permit its agent to land its own
+  change, or request landing once the forge's requirements pass. The operator then owns the choice of
+  independent checks and approvals: the agent can change tests in its repository, so green tests alone do
+  not replace independent review. This setting changes the user and system instructions, not token scope,
+  branch-protection admission or the bundled MCP servers' withheld tools. Direct protected-branch pushes,
+  self-approval, bypasses and protection/settings changes remain prohibited.
+  The worker compares the queued permission and trigger digest against the current reviewed trigger before
+  each container, including retries and recovery; untrusted payloads and model-callable tools cannot grant it.
+  Revoking the setting affects the next container start, not a running container or an operation already
+  accepted by the forge. A default branch receiving an authorized agent's merge still supplies trusted context
+  and executable extensions to later jobs; opting in deliberately accepts that consequence.
 - **Spend.** A daily cap checked *before* tokens are spent, a per-job turn budget enforced by our runner
-  (pi has no turn limit of its own), and a job that stops doing anything is stopped: idle after 15 minutes, stalled
-  after 4 hours without a step by the agent, or at a wall-clock ceiling the operator sets ([job limits](docs/job-limits.md)). An agent that concluded
+  (pi has no turn limit of its own), and a job that stops doing anything is stopped: idle after 15 minutes by
+  default, or at an explicit stall or maximum-time limit the operator sets ([job limits](docs/job-limits.md)). An agent that concluded
   "I can't fix this" is a success and is never blind-retried.
 - **A policy refusal is never restarted into a second bill.** `pi-dispatch service` installs the worker as a
   user-level unit, and on all three platforms exit 2 (a determinate config or budget refusal) is excluded
@@ -1050,7 +1061,7 @@ Stated openly rather than discovered later:
 - **Prompt injection is not prevented, only bounded.** Untrusted text is kept out of the trusted region
   of the prompt by *placement*, not by filtering — content-filtering natural language is not a security
   boundary and this project does not pretend otherwise. The bound is the container, the scoped token,
-  branch protection, and the human merge gate.
+  branch protection, and the operator's required review process (human by default).
 - **A project's own instructions can argue with the guardrails.** The baked safety floor cannot be
   *deleted* from the prompt — that is asserted by a test. It can be *contradicted* by a project persona,
   because prompt ordering is not an enforcement mechanism. This is the same honesty as the point above:

@@ -167,6 +167,7 @@ export const HAND_FIELDS = Object.freeze([
   "replicas",
   "skillsDir",
   "instructions",
+  "mayMerge",
   "task",
   "kind",
   "folder",
@@ -201,7 +202,7 @@ export function triggerRun(v) {
         ).map((k) => fieldRow(v, t, k)),
       )}
       <h3>By hand</h3>
-      ${facts(HAND_FIELDS.map((k) => fieldRow(v, t, k)))}
+      ${facts(HAND_FIELDS.filter((k) => k !== "mayMerge" || t.mayMerge === true).map((k) => fieldRow(v, t, k)))}
       <h3>Its runs' sandbox</h3>
       ${hostRows.length ? facts(hostRows.map((h) => [h.name, `${h.backend ?? "venue not published"}${h.deploymentDefault ? " (that host's deployment default)" : " (trigger override)"}; ${h.blessed === null ? "blessing not published" : h.blessed ? "blessed" : "not blessed"}${h.capabilityUnknown ? "; required profile capabilities not published" : ""}${h.backend && BACKENDS[h.backend] ? `; ${Object.entries(BACKENDS[h.backend].serves).map(([key, value]) => `${key}: ${value === "image" ? "with the image" : value}`).join(", ")}` : ""}`])) : html`<p>No live host blessing facts are available.</p>`}
       <p>These live host declarations show published venue choices; a host that does not bless the selected venue refuses it before spend. ${t.type === "cron" ? "The schedule's owning host runs a cron trigger's local folder; the registry alone does not prove which host has that folder." : isAgent(v) ? null : "Hosts missing its required secret or wait profile are excluded where their capability list is published."}</p>
@@ -306,7 +307,7 @@ export function triggerTrust(v) {
       </p>
       <p>
         Keeping a session continues its retained conversation on the same issue.
-        Nothing merges by itself.
+        ${t.mayMerge === true ? "This trigger permits merging through the forge’s checks and approvals when its flow or operator instructions ask for it." : "Nothing merges by itself."}
       </p>
       ${isAgent(v) ? html`<p>Whether it has instructions is ${AGENT_UNREAD}.</p>` : t.instructions
         ? v.role === "operator"
@@ -371,9 +372,9 @@ export function triggerChange(v) {
   return card(
     "Before you change it",
     html`<p>
-        A job already in line keeps what it was queued with and runs without a
+        ${t?.mayMerge === true ? "A queued job with merge permission runs only while its reviewed trigger remains unchanged. A job queued without it does not gain permission from a later edit." : html`A job already in line keeps what it was queued with and runs without a
         change here, unless this trigger has gained a narrowing field the job
-        lacks, such as a list of models, a cap or a server: then it is refused.
+        lacks, such as a list of models, a cap or a server: then it is refused.`}
         Adding or deleting a row renumbers the rows after it.
       </p>
       <p>

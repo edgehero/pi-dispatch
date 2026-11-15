@@ -202,6 +202,24 @@ else
 				docker run --rm --entrypoint grep "$IMAGE_REF" -q "the branch your prompt names" /opt/pi-dispatch/HARD_RULES.md 2>/dev/null \
 					|| fail "the image declares 'replicas' but its baked HARD_RULES.md still hard-codes a single branch name -- the system prompt would contradict the replica prompt and both replicas would push to one branch"
 				;;
+			mergePolicy)
+				# Read the real marker and build the real pinned loader, offline in both modes.
+				merge_job=$(mktemp -d)
+				chmod a+rx "$merge_job"
+				for merge_mode in deny allow; do
+					if [ "$merge_mode" = allow ]; then
+						printf '%s\n' '{"version":1,"mayMerge":true}' >"$merge_job/merge-policy.json"
+						chmod a+r "$merge_job/merge-policy.json"
+					fi
+					merge_out=$(docker run --rm --network none --cap-drop=ALL --security-opt no-new-privileges -v "$merge_job:/job:ro" \
+						--entrypoint node "$IMAGE_REF" /app/image/runner/test/fixtures/merge-policy-smoke.mjs "$merge_mode" 2>&1) && merge_code=0 || merge_code=$?
+					if [ "$merge_code" != 0 ] || ! echo "$merge_out" | grep -q "merge-policy-$merge_mode-ok"; then
+						rm -rf "$merge_job"
+						fail "the image declares 'mergePolicy' but its $merge_mode system floor did not match the worker marker (exit $merge_code)"
+					fi
+				done
+				rm -rf "$merge_job"
+				;;
 			commands)
 				# The claim is about the RUNNER, so the evidence is the baked runner source: the reason string
 				# only the command classification emits. A runner without it would run a PI_COMMAND job to

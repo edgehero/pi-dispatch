@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { existsSync, readFileSync } from "node:fs";
+import { existsSync, readFileSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { prepareGithubWorkspace } from "../src/prepare-github.mjs";
@@ -547,4 +547,24 @@ test("a store that cannot hand over its base is an InfraRetry, never sha-gone po
 	const git = fakeGit({ failOn: "fetch", error: Object.assign(new Error("fatal"), { stderr: "fatal: couldn't find remote ref" }) });
 	const h = harness({ git });
 	await assert.rejects(prepareGithubWorkspace(JOB, TOKEN, { ...h.deps, pin: { sha: "c".repeat(40), from: "file:///s/repo.git" } }), (e) => e.name === "InfraRetry" && e.reason === "container-never-started");
+});
+
+test("merge permission is an explicit separate read-only input and reaches the shared forge prompt", async () => {
+	const { MERGE_POLICY_INPUT, readMergePolicy } = await import("../../image/runner/src/merge-policy.mjs");
+	for (const mayMerge of [undefined, false, true]) {
+		const h = harness({ git: fakeGit() });
+		await prepareGithubWorkspace({ ...JOB, ...(mayMerge !== undefined ? { mayMerge } : {}) }, TOKEN, h.deps);
+		const path = join(h.jobDir, "merge-policy.json");
+		assert.equal(existsSync(path), mayMerge === true);
+		assert.equal(readMergePolicy({ path }), mayMerge === true);
+		if (mayMerge === true) {
+			assert.equal(readFileSync(path, "utf8"), MERGE_POLICY_INPUT, "writer and runner agree on exact versioned encoding");
+			assert.equal(statSync(path).mode & 0o777, 0o444);
+		}
+		const prompt = readFileSync(join(h.jobDir, "prompt.md"), "utf8");
+		assert.equal(prompt.includes("Never merge"), mayMerge !== true);
+		const event = JSON.parse(readFileSync(join(h.jobDir, "event.json"), "utf8"));
+		assert.equal(Object.hasOwn(event, "mayMerge"), false);
+		assert.equal(Object.hasOwn(event, "mayMergePolicy"), false);
+	}
 });

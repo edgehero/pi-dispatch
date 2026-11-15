@@ -563,6 +563,8 @@ export function makeCheckOnceSpent({ triggersPath, fs = nodeFs }) {
  * index.mjs hands this check the arrived value.
  */
 export const AUTHORED_NARROWING_FIELDS = Object.freeze([
+	// A stale producer must not drop the reviewed permission and spend on a contradictory job prompt.
+	Object.freeze({ key: "mayMerge", authored: (v) => v === true }),
 	Object.freeze({ key: "models", authored: (v) => Array.isArray(v) && v.length > 0 }),
 	// A stale receiver dropping the reviewed retry order must not silently disable failover.
 	Object.freeze({ key: "fallbackModels", authored: (v) => Array.isArray(v) && v.length > 0 }),

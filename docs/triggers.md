@@ -222,8 +222,9 @@ Four deployment notes:
 writer (the panel, the console and the trigger tools) writes it, first in the file, only when an entry uses a `run`
 field, a top-level block or a value (a new `on.type`, a new `waitFor` condition, a new `run.kind`) that an older
 release would misread (a field whose absence would let a job run wider than the file says, or a value it would refuse
-as broken). Today that is a trigger with `run.excludeExtensions` or `run.excludeExtensionTools`, which needs version 2. Any other file has
-no `version`, and every write leaves it byte for byte as before. A
+as broken). `run.excludeExtensions` or `run.excludeExtensionTools` needs version 2; `idleTimeoutMinutes`,
+`stallTimeoutMinutes` or `maxMinutes` needs version 3; `mayMerge` needs version 4. A file without a field or value
+needing a newer version still needs only version 1. A
 file that uses such a field or value with a lower `version`, or with none, is refused like any malformed file.
 
 **A file written by a newer pi-dispatch** names the versions in its refusal ("triggers file written by a newer
@@ -334,6 +335,11 @@ how a run is followed or picked up, and that page's Edit form and `dispatch_trig
   committed to the repo or added to the deployment wide persona. Cron triggers use `task` instead, which
   is the same text in the same place.
 
+- `"mayMerge": true` permits this trigger's agent to land its own pull or merge request when its flow or
+  `instructions` asks it to, subject to the forge's checks, approvals and token permissions. Absent or false
+  keeps the original rule that a human lands the change. This setting belongs in the reviewed file, on a forge
+  flow trigger; it is refused on local, cron, Watch and command jobs. See [the policy and prerequisites](#allowing-a-job-to-land-its-change).
+
 - `"secrets": { "STRIPE_KEY": "op://ci-vault/stripe/api-key" }` names vault references this trigger's
   jobs receive as environment variables. Use `"secretsProfile"` to choose which of your declared
   resolvers reads them. The worker runs your one line script (`exec op read --no-newline "$1"`) on the
@@ -419,6 +425,63 @@ anything (`job-image-steer-unsupported`), and a venue that bind-mounts. Every tr
 included; it is refused beside `"command"`. It must be `true` or `false`, the AI tools that add and edit a trigger
 can set it behind the operator's confirm, and like `models`, adding it refuses the trigger's jobs that were already
 queued (`trigger-skew`). How messages reach a running job is in [`docs/steering.md`](steering.md).
+
+## Allowing a job to land its change
+
+By default, both the job prompt and the image's standing rules say never to merge, and that a human reviews and
+lands the change. `run.mayMerge: true` removes that prohibition from both layers for this trigger's jobs. It gives
+permission; it does not tell the agent to merge every change. Put the requested behavior in the flow or in
+`run.instructions`, for example:
+
+```json
+{
+  "version": 4,
+  "triggers": [
+    {
+      "on": { "type": "label", "any": ["reviewed-fix"] },
+      "run": {
+        "kind": "github",
+        "flow": "fix",
+        "mayMerge": true,
+        "instructions": "After the independent review succeeds, enable auto-merge for the pull request you open. Keep every required check and approval in force."
+      }
+    }
+  ]
+}
+```
+
+The setting applies to forge flow jobs on GitHub, GitLab, Forgejo and Azure, including resumed jobs. The job still
+must not push directly to the default or a protected branch, change branch protection or repository settings,
+approve its own change, or bypass checks and approvals. A managed fork may land its own new request, never the
+original attempt's. False or absent leaves the existing user and system prompts byte for byte unchanged.
+
+**Permissions still decide what can happen.** The setting changes instructions, not credentials or forge policy.
+The harness starts no merge itself, and the bundled forge MCP servers still withhold their dedicated merge and
+approval tools. The agent can use the CLI it already has, if its token permits it. The existing branch-protection
+check still runs: on GitHub, a classic rule qualifies, but a ruleset-only branch needs an active pull-request rule
+requiring an approval, so required status checks alone do not qualify. On GitLab, a Developer token cannot merge
+into a branch whose Allowed to merge setting is Maintainers. See [GitHub protection](github.md#which-branches-count-as-protected)
+and [GitLab credentials](gitlab.md). Choose the required checks, independent approvals and token scope deliberately;
+an agent can edit tests in the same repository, so green tests alone are not an independent review.
+
+**The current trigger must still authorize the job.** The queued job carries the opt-in and a digest of the whole
+normalized trigger. Before each container, the worker compares them with the current trigger file. Editing the
+trigger, removing the permission or replacing its entry refuses the old enabled job before spending; run it again
+against the new entry. A retry of a one-shot excuses only that same queue job's own disarm mark, as the existing
+one-shot gate does. An older unflagged job never gains permission because the file was changed later. Polling,
+webhooks, replicas, parked answers, reruns, forks and recovery all carry the same policy. A comment or message into
+a running job cannot grant it.
+
+Removing the setting takes effect at the next container start. It does not change a running job's snapshot, undo
+a completed merge, or cancel a pending auto-merge request already accepted by the forge. Cancel the job or the
+forge's pending request separately when needed. Project or flow instructions may still impose stricter rules;
+the setting removes the harness's blanket prohibition, not rules written elsewhere.
+
+**Upgrade order.** Upgrade the image, every worker, the receivers and every console before adding the field, as
+described in [the upgrade guide](upgrading.md#pending-release-trigger-merge-permission). The image needs the
+`mergePolicy` capability; an older image refuses an enabled job before spending. The file needs version 4 and its
+enabled jobs use data version 5. Do not lower either version to make an older service accept them. Triggers that
+omit the setting keep their previous behavior and image requirements.
 
 ## Firing a cron trigger by hand
 

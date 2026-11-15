@@ -136,6 +136,13 @@ export const RECOVERY_COMMENTS = Object.freeze({
 	"recovery-checkpoint-absent": "Failed: this run was lost, and its checkpoint could not be used to continue it (absent, damaged, or taken on another host, pi version or venue). Partial work may exist. Ask the operator to check the worker log.",
 });
 
+/** Merge permission is checked at pickup; these refusals expose no configuration text or filesystem details. */
+export const MERGE_POLICY_COMMENTS = Object.freeze({
+	"merge-policy-invalid": "Refused: this job's merge permission is missing its trigger policy or is malformed. Re-run it from the current reviewed trigger. Not run.",
+	"merge-policy-unavailable": "Refused: this worker cannot verify the reviewed trigger that permits this job to merge. Restore a valid triggers file on this worker and re-run the job. Not run.",
+	"merge-policy-changed": "Refused: the trigger that permitted this job to merge changed or withdrew that permission after the job was queued. Review the current trigger and re-run the job. Not run.",
+});
+
 /** The public comments of the bundle refusals (issue #704). Fixed text: no bundle id, profile, variable or path. */
 export const BUNDLE_COMMENTS = Object.freeze({
 	"secret-bundle-trigger-changed": "Refused: this job's project has a secret bundle, and the trigger that queued this job is no longer in the triggers file as it was, so whether it opted out of the bundle is unknown. Re-run it from the current trigger. Not run.",

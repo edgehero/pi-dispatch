@@ -607,6 +607,7 @@ test("every refusal sentence in write-plans.mjs is asserted word for word, and a
     // is another module's words, already pinned there)].
     const rows = [
       ["operator answer fields", plans.wideningFieldRefusal({ answerRules: [] }, "dispatch_trigger_edit"), "dispatch_trigger_edit cannot set answerRules: answer rules are hand-written and standing answers are adopted only by a person in the console"],
+      ["reviewed merge permission", plans.wideningFieldRefusal({ mayMerge: true }, "dispatch_trigger_edit"), "dispatch_trigger_edit cannot set run.mayMerge or its policy reference: merge permission is set by hand in the reviewed triggers file, never by a tool"],
       ["reviewed role map", plans.wideningFieldRefusal({ modelRoles: {} }, "dispatch_trigger_edit"), "dispatch_trigger_edit cannot set modelRoles: the role map is a reviewed operator file edit, never a tool write"],
       ["unknown trigger kind", plans.planTriggerAdd({ params: { kind: "telepathy", flow: "fix" }, paths, env }).refusal, "unknown trigger kind: kind must be one of cron, label, comment, pull_request, issue"],
       ["unknown trigger field", plans.planTriggerAdd({ params: { kind: "label", flow: "fix", labels: ["bug"], colour: "red" }, paths, env }).refusal, "dispatch_trigger_add does not take colour for a label trigger; it takes kind, flow, forge, repository, labels, any, backend, model, provider, maxTurns, progress, statusComment, recover, steer. Nothing was changed"],
@@ -893,8 +894,8 @@ test("no trigger tool can carry fallbackModels or its near misses, even to clear
 test("trigger edit merges maxTurns and explicit false flags, preserves omitted fields and refuses invalid turns before confirmation (#750)", () => {
   const { paths, restore } = deployment({ PI_BACKENDS: "local" });
   try {
-    const before = { on: { type: "label", any: ["bug"] }, run: { kind: "github", flow: "fix", maxTurns: 30, progress: true, statusComment: true, recover: true, steer: true, model: "kept", secretsProfile: "private" } };
-    writeFileSync(paths.triggersPath, JSON.stringify({ triggers: [before] }));
+    const before = { on: { type: "label", any: ["bug"] }, run: { kind: "github", flow: "fix", mayMerge: true, maxTurns: 30, progress: true, statusComment: true, recover: true, steer: true, model: "kept", secretsProfile: "private" } };
+    writeFileSync(paths.triggersPath, JSON.stringify({ version: 4, triggers: [before] }));
     const params = { index: 0, flow: "review", maxTurns: 12, progress: false, statusComment: false, recover: false, steer: false };
     const { plan } = plans.planTriggerEdit({ params, paths, env: process.env });
     assert.ok(plan);
@@ -923,4 +924,22 @@ test("a pause-windows file that cannot be read is not a file with no windows, fo
   for (const planned of [plans.planPauseWindowDelete({ index: 0, paths, fs }), plans.planPauseWindowEdit({ index: 0, fields: {}, paths, fs })]) {
     assert.match(planned.refusal, /^the pause-windows file does not load, so one window of it cannot be changed/);
   }
+});
+
+
+test("merge permission and its policy reference cannot be supplied by a tool at any nesting", async () => {
+  const { wideningFieldRefusal } = await import("../src/write-plans.mjs");
+  for (const key of ["mayMerge", "may_merge", "May-Merge", "mayMergePolicy", "may_merge_policy"]) {
+    for (const value of [true, false, null, "a".repeat(64)]) {
+      for (const params of [{ [key]: value }, { run: { [key]: value } }, { extra: [{ deep: { [key]: value } }] }]) assert.match(wideningFieldRefusal(params, "dispatch_trigger_edit"), /cannot set run.mayMerge/);
+    }
+  }
+});
+
+
+test("job previews show enabled merge permission without exposing its reference", async () => {
+  const { runFieldsLines } = await import("../src/console/actions.mjs");
+  assert.match(runFieldsLines({ mayMerge: true, mayMergePolicy: "a".repeat(64) }, "It runs")[0], /may merge through the forge’s checks and approvals/);
+  assert.doesNotMatch(runFieldsLines({ mayMerge: true, mayMergePolicy: "a".repeat(64) }, "It runs")[0], /a{64}/);
+  for (const mayMerge of [undefined, false, "true"]) assert.doesNotMatch(runFieldsLines({ mayMerge }, "It runs")[0], /may merge/);
 });

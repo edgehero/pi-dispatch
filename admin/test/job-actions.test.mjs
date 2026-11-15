@@ -33,6 +33,8 @@ import {
   STEER_INBOX_ROWS_MAX,
   steerAuditTarget,
 } from "../src/read-model.mjs";
+import { mergePolicyDigest } from "@edgehero/pi-dispatch/merge-policy";
+import { parseTriggers } from "@edgehero/pi-dispatch/triggers";
 import { createHash } from "node:crypto";
 import { makeApprovalStore } from "../../worker/src/approval-state.mjs";
 import { finishModelAttempt, modelAttemptIdOf, modelAttemptKey } from "@edgehero/pi-dispatch/model-attempts";
@@ -346,10 +348,10 @@ test("the expect a retry or remove carries is checked before anything is read: a
 // ---- re-run ----
 
 /** The label trigger a forge run in these tests matched (index 0), with the run fields a re-run must take from the file. */
-const LABEL_RUN = { kind: "github", flow: "fix", secretsProfile: "prod", secrets: { TOKEN: "op://x" }, maxCostUsd: "1.5", model: "claude-sonnet-5-5", provider: "anthropic", image: "pi-job:v1", excludeExtensions: ["pi-lint"], excludeExtensionTools: ["lint_run"] };
+const LABEL_RUN = { kind: "github", flow: "fix", mayMerge: true, secretsProfile: "prod", secrets: { TOKEN: "op://x" }, maxCostUsd: "1.5", model: "claude-sonnet-5-5", provider: "anthropic", image: "pi-job:v1", excludeExtensions: ["pi-lint"], excludeExtensionTools: ["lint_run"] };
 function forgeTriggers(path, entries = [{ on: { type: "label", any: ["pi"] }, run: LABEL_RUN }]) {
   // Version 2 for the two exclusions, which a re-run takes from the file too (issue #800).
-  writeFileSync(path, JSON.stringify({ version: 2, triggers: entries }));
+  writeFileSync(path, JSON.stringify({ version: 4, triggers: entries }));
 }
 
 test("planRerun of a forge run: the where from retained data, the run fields from the trigger now, a fresh console delivery id, routed like the receiver; the window and expiry refuse by name", live, async () => {
@@ -371,13 +373,15 @@ test("planRerun of a forge run: the where from retained data, the run fields fro
     const planned = await planRerun({ url: URL12, logsDir, jobId, triggersPath, env: { PI_MAX_COST_USD: "2" }, random });
     assert.equal(planned.plan.kind, "forge", JSON.stringify(planned));
     assert.equal(planned.plan.deliveryId, "console-abababababababab");
+    assert.equal(planned.plan.job.mayMerge, true);
+    assert.equal(planned.plan.job.mayMergePolicy, mergePolicyDigest(parseTriggers(JSON.stringify({ version: 4, triggers: [{ on: { type: "label", any: ["pi"] }, run: LABEL_RUN }] }), "/t")[0]));
     assert.equal(planned.plan.queue, "pi-jobs@mini1", "a secret profile only mini1 serves: routed to its queue, as the receiver would");
     // An unchanged trigger: the re-run is the receiver's job for the same delivery, but for the delivery id.
     const cfg = {};
     assert.deepEqual(reloadTriggers({ PI_TRIGGERS_FILE: triggersPath }, cfg), { ok: true });
     const fresh = filter("issues", { action: "labeled", sender: { id: 9 }, repository: { full_name: "org/repo" }, issue: { number: 7, title: "T", body: "B", labels: [{ name: "pi" }] } }, cfg, 1, "orig-1").job;
     assert.deepEqual(planned.plan.job, { ...fresh, trigger: { ...fresh.trigger, deliveryId: "console-abababababababab" } }, "field for field the receiver's job");
-    assert.deepEqual(planned.plan.runFields, { flow: "fix", model: "anthropic/claude-sonnet-5-5", models: null, maxCostUsd: "1.5", secretsProfile: "prod", image: "pi-job:v1", backend: null });
+    assert.deepEqual(planned.plan.runFields, { flow: "fix", model: "anthropic/claude-sonnet-5-5", models: null, maxCostUsd: "1.5", secretsProfile: "prod", image: "pi-job:v1", backend: null, mayMerge: true });
     assert.equal(JSON.stringify(planned.plan.runFields).includes("op://"), false, "names only: no secret reference in what the preview shows");
     assert.deepEqual(planned.plan.reserve, { slots: 1, dollarsMicros: 1_500_000, capMicros: 1_500_000, zeroRated: false });
     // The original's semantic window still holds (same target and flow, minutes ago): the enqueue says so, nothing queued.
@@ -457,7 +461,7 @@ test("a forge re-run takes its authority from the trigger NOW: deleted, replaced
     const shared = await v.q("pi-jobs");
     // The retained job carries the WIDE fields it ran with, and a `console` field built by hand (enqueueForgeJob would
     // keep it), which a re-run must never carry: it is not an answer.
-    const data = { kind: "github", repo: "org/repo", target: { type: "issue", number: 7, title: "T", body: "B" }, flow: "fix", maxCostUsd: "5", models: ["anthropic/claude-opus-5-5"], secretsProfile: "prod", image: "pi-job:wide", console: { by: "alice" }, trigger: { event: "issues", action: "labeled", deliveryId: "auth-1", sender: { id: 9 }, matched: { index: 1, type: "label", label: "pi" } } };
+    const data = { kind: "github", mayMerge: true, mayMergePolicy: "a".repeat(64), repo: "org/repo", target: { type: "issue", number: 7, title: "T", body: "B" }, flow: "fix", maxCostUsd: "5", models: ["anthropic/claude-opus-5-5"], secretsProfile: "prod", image: "pi-job:wide", console: { by: "alice" }, trigger: { event: "issues", action: "labeled", deliveryId: "auth-1", sender: { id: 9 }, matched: { index: 1, type: "label", label: "pi" } } };
     await shared.add("github", data, { jobId: "gh-auth-1" });
     writeRecord(logsDir, { jobId: "gh-auth-1", kind: "github", target: "org/repo#7", outcome: "completed" });
     const cron = { on: { type: "cron", id: "n", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/tmp", flow: "audit", task: "t" } };
@@ -486,7 +490,7 @@ test("a forge re-run takes its authority from the trigger NOW: deleted, replaced
     assert.equal(narrowed.plan.job.maxCostUsd, "0.5");
     assert.deepEqual(narrowed.plan.job.models, ["anthropic/claude-sonnet-5-5"]);
     assert.deepEqual(narrowed.plan.job.fallbackModels, ["anthropic/claude-sonnet-5-5"]);
-    for (const k of ["secretsProfile", "image", "console"]) assert.equal(k in narrowed.plan.job, false, `${k} is not replayed from the retained job`);
+    for (const k of ["secretsProfile", "image", "console", "mayMerge", "mayMergePolicy"]) assert.equal(k in narrowed.plan.job, false, `${k} is not replayed from the retained job`);
     assert.deepEqual(narrowed.plan.runFields, { flow: "fix", model: null, models: ["anthropic/claude-sonnet-5-5"], fallbackModels: ["anthropic/claude-sonnet-5-5"], maxCostUsd: "0.5", secretsProfile: null, image: null, backend: null });
     assert.equal(narrowed.plan.reserve.capMicros, 500_000, "the reserve is the narrowed cap");
     assert.equal(narrowed.plan.queue, "pi-jobs", "no secret profile any more: the shared queue");
@@ -666,10 +670,10 @@ function parkedTriggers(path, kind) {
   writeFileSync(
     path,
     JSON.stringify({
-      version: 2,
+      version: 4,
       triggers: [
         { on: { type: "label", any: ["pi"] }, run: { kind, flow: "fix", resume: true, awaitInput: true } },
-        { on: { type: "comment", phrase: "@pi" }, run: { kind, flow: "fix", resume: true, awaitInput: true, progress: true, statusComment: true, recover: true, steer: true, model: "claude-sonnet-5-5", provider: "anthropic", maxCostUsd: "1.25", instructions: "be brief", excludeExtensions: ["pi-lint"], excludeExtensionTools: ["lint_run"] } },
+        { on: { type: "comment", phrase: "@pi" }, run: { kind, flow: "fix", mayMerge: true, resume: true, awaitInput: true, progress: true, statusComment: true, recover: true, steer: true, model: "claude-sonnet-5-5", provider: "anthropic", maxCostUsd: "1.25", instructions: "be brief", excludeExtensions: ["pi-lint"], excludeExtensionTools: ["lint_run"] } },
       ],
     }),
   );

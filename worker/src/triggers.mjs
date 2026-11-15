@@ -321,7 +321,7 @@ function isNonEmptyString(value) {
  * `version`, absent meaning 1, which `writeTriggers` owns and writes only when the content needs more than 1, so every
  * file of today's fields stays byte-identical.
  */
-export const TRIGGERS_FILE_VERSION = 3;
+export const TRIGGERS_FILE_VERSION = 4;
 
 /**
  * Each `run` key whose ABSENCE an older build would misread, with the version that introduced it. The raw `run` keys
@@ -332,10 +332,11 @@ export const TRIGGERS_FILE_VERSION = 3;
  * `excludeExtensions` and `excludeExtensionTools` (issue #800): an older loader drops either and runs the job with the
  * extension or the tool the file takes away, on a clean record.
  *
+ * `mayMerge` (issue #908), at 4: an older loader drops the explicit permission and starts a paid job with contradictory standing rules.
  * `idleTimeoutMinutes`, `stallTimeoutMinutes` and `maxMinutes` (issue #888): an older loader drops each and runs the job
  * under the deployment's limits, which for a ceiling the trigger set is a longer run than the file allows.
  */
-export const TRIGGER_RUN_FIELD_VERSIONS = Object.freeze({ excludeExtensions: 2, excludeExtensionTools: 2, idleTimeoutMinutes: 3, stallTimeoutMinutes: 3, maxMinutes: 3 });
+export const TRIGGER_RUN_FIELD_VERSIONS = Object.freeze({ excludeExtensions: 2, excludeExtensionTools: 2, idleTimeoutMinutes: 3, stallTimeoutMinutes: 3, maxMinutes: 3, mayMerge: 4 });
 
 /** Each top-level block (beside `triggers`) whose absence an older build would misread, as above. Empty until one does. */
 export const TRIGGERS_BLOCK_VERSIONS = Object.freeze({});
@@ -549,6 +550,8 @@ function normalizeTrigger(entry, index, path, state) {
 	if (!RUN_KINDS.includes(run.kind)) {
 		throw configError(`${at}: run.kind must be one of ${RUN_KINDS.join("|")} (got ${JSON.stringify(run.kind)}): ${path}`);
 	}
+
+	validateMayMerge(run, on.type, at, path);
 
 	// The on x run matrix -- the trust boundary, fail-loud (mirrors the old schedules kind:github refusal).
 	if (on.type === "watch") return normalizeWatch(entry, index, path, state);
@@ -1062,6 +1065,15 @@ function validateSkillsDir(run, at, path) {
  * refusal message names both destinations, so the cap teaches rather than merely blocks.
  */
 const INSTRUCTIONS_MAX = 2000;
+
+/** Explicit operator permission only on forge flow envelopes; false has the legacy meaning. */
+function validateMayMerge(run, onType, at, path) {
+	if (run.mayMerge === undefined) return;
+	if (typeof run.mayMerge !== "boolean") throw configError(`${at}: run.mayMerge must be a boolean: ${path}`);
+	if (!isForgeKind(run.kind) || onType === "cron" || onType === "watch" || run.command !== undefined) {
+		throw configError(`${at}: run.mayMerge is accepted only on a forge flow trigger, not local, watch or command jobs: ${path}`);
+	}
+}
 
 /**
  * `run.instructions` (issue #60): one line of operator standing text, rendered into the USER prompt's
@@ -2451,7 +2463,7 @@ function normalizeLabel(on, run, index, path) {
 	const ref = validateRunModel(on, run, at, path);
 	return {
 		on: { type: "label", any: predicate.any, all: predicate.all, none: predicate.none },
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...validateApprovalConfig(run), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(excludeExtensions !== undefined && { excludeExtensions }), ...(excludeExtensionTools !== undefined && { excludeExtensionTools }), ...(mcp !== undefined && { mcp }), ...ref },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...validateApprovalConfig(run), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(run.mayMerge === true && { mayMerge: true }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(excludeExtensions !== undefined && { excludeExtensions }), ...(excludeExtensionTools !== undefined && { excludeExtensionTools }), ...(mcp !== undefined && { mcp }), ...ref },
 	};
 }
 
@@ -2501,7 +2513,7 @@ function normalizeComment(on, run, index, path, state) {
 	const ref = validateRunModel(on, run, at, path);
 	return {
 		on: { type: "comment", phrase: on.phrase },
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...validateApprovalConfig(run), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(excludeExtensions !== undefined && { excludeExtensions }), ...(excludeExtensionTools !== undefined && { excludeExtensionTools }), ...(mcp !== undefined && { mcp }), ...ref },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...validateApprovalConfig(run), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(run.mayMerge === true && { mayMerge: true }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(excludeExtensions !== undefined && { excludeExtensions }), ...(excludeExtensionTools !== undefined && { excludeExtensionTools }), ...(mcp !== undefined && { mcp }), ...ref },
 	};
 }
 
@@ -2585,7 +2597,7 @@ function normalizeIssue(on, run, index, path) {
 			...(number !== undefined && { number }),
 			...(once !== undefined && { once }),
 		},
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...validateApprovalConfig(run), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(excludeExtensions !== undefined && { excludeExtensions }), ...(excludeExtensionTools !== undefined && { excludeExtensionTools }), ...(mcp !== undefined && { mcp }), ...ref },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...validateApprovalConfig(run), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(run.mayMerge === true && { mayMerge: true }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(excludeExtensions !== undefined && { excludeExtensions }), ...(excludeExtensionTools !== undefined && { excludeExtensionTools }), ...(mcp !== undefined && { mcp }), ...ref },
 	};
 }
 
@@ -2685,7 +2697,7 @@ function normalizePullRequest(on, run, index, path) {
 			...(number !== undefined && { number }),
 			...(once !== undefined && { once }),
 		},
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...validateApprovalConfig(run), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(excludeExtensions !== undefined && { excludeExtensions }), ...(excludeExtensionTools !== undefined && { excludeExtensionTools }), ...(mcp !== undefined && { mcp }), ...ref },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...validateApprovalConfig(run), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(run.mayMerge === true && { mayMerge: true }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(excludeExtensions !== undefined && { excludeExtensions }), ...(excludeExtensionTools !== undefined && { excludeExtensionTools }), ...(mcp !== undefined && { mcp }), ...ref },
 	};
 }
 

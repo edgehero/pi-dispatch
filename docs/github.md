@@ -16,7 +16,7 @@ flowchart LR
   end
   Q --> W
   W -->|"docker run --rm"| C["job container: the agent commits,<br/>pushes --force-with-lease, gh pr create, comments"]
-  C -->|"GITHUB_TOKEN via env only, never merges"| GH
+  C -->|"GITHUB_TOKEN via env only, human lands by default"| GH
 ```
 
 ## Who can start a job, and what the token can do

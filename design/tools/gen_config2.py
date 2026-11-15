@@ -149,6 +149,11 @@ def trigger_detail():
     for g, note in groups:
         pairs = [(f'<span class="c2-cell"><b>{lab}</b><small class="code">run.{E(k)}</small></span>', v) for k, lab, v, w in F if w == g]
         body += f'<div class="c2-grp"><p class="c2-grp__h">{where(g)}<span class="muted">{note}</span></p>{facts(pairs, 2)}</div>'
+    body += '<h3>Optional permission: enabled example</h3><p>This trigger keeps the default. A trigger that explicitly permits landing its change adds this row under By hand:</p>'
+    body += facts([('run.mayMerge', 'true; deployment default: false')], 2)
+    body += '<p>The row is absent when the permission is off. The trigger list adds a may merge marker only when it is on. Required checks and approvals still apply.</p>'
+    body += '<p>Its Trust model says: This trigger permits merging through the forge’s checks and approvals when its flow or operator instructions ask for it.</p>'
+    body += '<p>Its queued-job note says: A queued job with merge permission runs only while its reviewed trigger remains unchanged. A job queued without it does not gain permission from a later edit.</p>'
     body += '<h3>Its runs’ sandbox</h3><p>Local (deployment default): live transcript yes, steering yes, recovery yes, sandbox shell yes. Retained workspaces can be reopened for 24 hours. Each event starts one sandbox. Secret profile and bundle names only.</p>'
     p_run = card("What it runs", body, sub="every field, set or not", id_="p-trigger-run")
 
@@ -707,6 +712,7 @@ README = {
   - *By hand*: everything else, including the job cap, allowed models, MCP servers, secrets and the bundle opt-out, which only the triggers file sets.
 - **Edit.** Changing the venue previews the triggers file as a diff, then a confirm bar with the plan's own line, what it means for runs in line, the undo and the ticket.
 - **Instructions.** The trigger's instructions, quoted and escaped.
+- **May merge.** When explicitly enabled, By hand adds `run.mayMerge`: `true; deployment default: false`, immediately after instructions. An unflagged trigger adds no row. The trigger list adds a `may merge` marker. Only the reviewed file sets the permission; the page offers no setter. Its Trust model says: “This trigger permits merging through the forge’s checks and approvals when its flow or operator instructions ask for it.” Its queued-job note says: “A queued job with merge permission runs only while its reviewed trigger remains unchanged. A job queued without it does not gain permission from a later edit.” The unflagged fixture retains its default-policy wording.
 - **Other kinds.** A cron trigger shows its next fire and health (on time, overdue, stalls N of 3). A one-shot shows armed or "spent by" a run, and how to re-arm it. Fire now is a paid action with its reserve sentence.
 - **Before you change it.** The trigger-skew rule with the jobs it would refuse now, renumbering, and the file-trouble sentence that quotes doctor.
 
@@ -726,12 +732,13 @@ A viewer sees the same facts and runs, and no Edit, Delete or Fire now.
 - **Who may start it.** A collaborator with write access who comments. A comment from anyone else, or from a bot, starts nothing.
 - **Checked on every delivery:** the signature (HMAC with `WEBHOOK_SECRET`), the bot-loop guard, the commenter's permission, duplicates (by `X-GitHub-Delivery`, 31 days), quiet hours, the job image, default-branch protection and the spend caps.
 - **Keeps a session.** The transcript stays in the session store on the host that ran it for 14 days, and the next run on the same issue continues it.
-- **Never merges.** A run opens or updates a pull request; a person merges it.
-- These hold for every comment trigger, so the page shows the trigger's own facts and leaves the rules here.
+- **Human lands by default.** A run opens or updates a pull request. An explicitly enabled `run.mayMerge` permits its agent to land its own change through the forge's checks and approvals. The worker validates the current trigger before each container. Turning it off does not undo a running job or a request already accepted by the forge.
+- The page shows the trigger's own facts; permission appears only when explicitly enabled.
 
 **Fixture note.**
 - **From the fixture:** trigger 3 (comment "@pi", flow fix, github, keeps a session, has instructions) and the runs gh-e9a0, gh-9575, gh-ebd7, gh-7cdf and gh-4a7e. Every card numbers triggers from 1, as this page does.
 - **Sample values:** progress and statusComment on trigger 3, the instructions text, the 24-hour totals, gh-c9e1 as a job from it, the cron timings, the slip example, the spent one-shot gh-40a1, and the doctor quote.
+- **Separate enabled example:** the `run.mayMerge` row illustrates the optional state; trigger 3 in the shared fixture keeps the default and carries no permission.
 - **Fire now** previews a paid start of a cron trigger, as `pi-dispatch run --trigger` does from the terminal.""",
 
 "TriggerEditor": """Add a trigger with a form that knows the five kinds and each forge's own words, then preview it as the lines it adds to the triggers file.

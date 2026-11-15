@@ -23,7 +23,7 @@ const copyStrings = (value) => Array.isArray(value) ? value.filter((v) => typeof
 const recordOf = (r) => Object.fromEntries(["jobId", "target", "project", "kind", "triggerIndex", "triggerType", "flow", "startedAt", "endedAt", "outcome"].filter((k) => typeof r?.[k] === "string" || Number.isSafeInteger(r?.[k])).map((k) => [k, r[k]]).concat([["reason", recordReason(r)]]));
 
 function ruleOf(t) {
-  const scalar = ["index", "type", "forge", "id", "pattern", "phrase", "folder", "flow", "command", "provider", "model", "maxTurns", "backend", "image", "repository", "number", "once", "packages", "resume", "portfolio", "replicas", "maxCostUsd", "secretsProfile", "secretBundle", "awaitInput", "github", "progress", "statusComment", "recover", "steer", "skillsDir", "gateTimeout", "gateBudgetRaiseUsd"];
+  const scalar = ["index", "type", "forge", "id", "pattern", "phrase", "folder", "flow", "command", "provider", "model", "maxTurns", "backend", "image", "repository", "number", "once", "packages", "resume", "portfolio", "replicas", "maxCostUsd", "secretsProfile", "secretBundle", "awaitInput", "github", "progress", "statusComment", "recover", "steer", "mayMerge", "skillsDir", "gateTimeout", "gateBudgetRaiseUsd"];
   const out = Object.fromEntries(scalar.filter((k) => typeof t[k] === "string" || typeof t[k] === "boolean" || Number.isSafeInteger(t[k])).map((k) => [k, t[k]]));
   for (const key of ["maxCostUsd", "gateBudgetRaiseUsd"]) {
     if (typeof t[key] === "number" && Number.isFinite(t[key]) && t[key] >= 0) out[key] = t[key];
@@ -72,6 +72,7 @@ function chipsOf(t, packagesAvailable) {
   if (t.type === "cron") add("writes", "edits its local folder");
   if (t.portfolio === true) add("writes", "budget split");
   if (t.instructions) add("writes", "standing instructions");
+  if (t.mayMerge === true) add("writes", "may merge");
   if (t.awaitInput === true || t.gates?.length) add("asks", "may wait for a person");
   if (t.steer === true) add("asks", "takes messages");
   if (t.recover === true) add("writes", "recovers a lost run");

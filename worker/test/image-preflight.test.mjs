@@ -339,13 +339,13 @@ test("Podman's bare-hex image id is published in docker's sha256: spelling, and 
 // --- the capability gates are ONE table (issues #501, #502) ---
 
 test("CAPABILITY_GATES: the old three in their old order, then modelPolicy (#502), costCap (#501), mcp, forgeMcp, awaitInput (#625), reportProgress (#644), recover (#645), steer (#646), sandboxLayout (#683) and observableRunner (#730), each keyed once, each free for a job without its feature", async () => {
-	assert.deepEqual(CAPABILITY_GATES.map((gate) => gate.token), ["replicas", "commands", "excludeTools", "modelPolicy", "costCap", "mcp", "forgeMcp", "awaitInput", "reportProgress", "recover", "steer", "sandboxLayout", "observableRunner", "fork", "approvalGates", "modelFailover", "modelRoles", "watch", "questionGrouping", "answerDraft", "subscriptionAuth", "loadExclusions", "packageCanary"], "the order the branches had, so a job carrying several is refused for the same one; a new row appends, in the order the features landed");
+	assert.deepEqual(CAPABILITY_GATES.map((gate) => gate.token), ["replicas", "commands", "excludeTools", "modelPolicy", "costCap", "mcp", "forgeMcp", "awaitInput", "reportProgress", "recover", "steer", "sandboxLayout", "observableRunner", "fork", "approvalGates", "modelFailover", "modelRoles", "watch", "questionGrouping", "answerDraft", "subscriptionAuth", "loadExclusions", "packageCanary", "mergePolicy"], "the order the branches had, so a job carrying several is refused for the same one; a new row appends, in the order the features landed");
 	for (const key of ["token", "result", "reason", "event"]) {
 		assert.equal(new Set(CAPABILITY_GATES.map((gate) => gate[key])).size, CAPABILITY_GATES.length, `${key} is unique per row`);
 	}
 	const label = (caps) => `sha256:abc${FIELD_SEP}0.99.1${FIELD_SEP}github${FIELD_SEP}${caps}\n`;
 	// A job carrying EVERY gated feature, on an image that declares none: the first row refuses.
-	const all = { packageCanary: { name: "a", version: "1.0.0" }, excludeExtensions: ["pi-lint"], answerDraft: {}, questionGrouping: {}, watch: {}, modelRoles: { editor: "anthropic/claude-x" }, kind: "local", replica: 2, replicas: 2, command: "wf run", excludeTools: ["bash"], models: ["anthropic/claude-x"], maxCostMicros: 2_500_000, mcp: ["docs", "forge"], awaitInput: true, progress: true, recover: true, steer: true, fork: {}, gates: ["deploy:staging"], fallbackModels: ["anthropic/claude-x"] };
+	const all = { mayMerge: true, packageCanary: { name: "a", version: "1.0.0" }, excludeExtensions: ["pi-lint"], answerDraft: {}, questionGrouping: {}, watch: {}, modelRoles: { editor: "anthropic/claude-x" }, kind: "local", replica: 2, replicas: 2, command: "wf run", excludeTools: ["bash"], models: ["anthropic/claude-x"], maxCostMicros: 2_500_000, mcp: ["docs", "forge"], awaitInput: true, progress: true, recover: true, steer: true, fork: {}, gates: ["deploy:staging"], fallbackModels: ["anthropic/claude-x"] };
 	const none = makeImagePreflight({ image: "i", spawnFn: fakeSpawn([], { image: 0, info: 0 }, label("")) });
 	assert.deepEqual(await none(all), { replicaUnsupported: "i", declared: [] });
 	// Declare tokens one at a time: each declaration moves the refusal to the next row, then passes.
@@ -530,4 +530,16 @@ test("sandboxLayout (#683): armed by the VENUE, on every job of a copying one, a
 	assert.equal(row.needed({ kind: "github" }, { copies: "yes" }), false, "only `true` arms it");
 	// The option is the venue's and a boolean, refused otherwise, so a truthy string cannot arm or disarm the row.
 	for (const copies of ["true", 1, null]) assert.throws(() => makeImagePreflight({ image: "i", copies }), TypeError, String(copies));
+});
+
+test("mergePolicy: opted-in jobs refuse old images while default jobs remain compatible", async () => {
+	for (const kind of ["github", "gitlab", "forgejo", "azure"]) {
+		for (const declared of [[], ["mergePolicy"]]) {
+			const preflight = makeImagePreflight({ image: "i", spawnFn: fakeSpawn([], { image: 0 }, `sha256:abc${FIELD_SEP}1.5.2${FIELD_SEP}${kind}${FIELD_SEP}${declared.join(",")}`) });
+			for (const mayMerge of [undefined, false]) assert.equal((await preflight({ kind, mayMerge })).ok, true);
+			const result = await preflight({ kind, mayMerge: true });
+			if (declared.length) assert.equal(result.ok, true);
+			else assert.deepEqual(result, { mergePolicyUnsupported: "i", declared });
+		}
+	}
 });

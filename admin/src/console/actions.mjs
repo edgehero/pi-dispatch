@@ -1016,6 +1016,7 @@ export function runFieldsLines(f, lead) {
     ...(f.backend !== null && f.backend !== undefined ? [`backend ${fieldText(f.backend)}`] : []),
     ...(f.packages !== null && f.packages !== undefined ? [`packages ${fieldText(f.packages)}`] : []),
     ...(f.mcp !== null && f.mcp !== undefined ? [`MCP ${fieldText(f.mcp)}`] : []),
+    ...(f.mayMerge === true ? ["may merge through the forge’s checks and approvals"] : []),
   ];
   return [`${lead}: ${parts.join("; ")}`];
 }

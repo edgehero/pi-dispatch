@@ -5154,10 +5154,9 @@ writes retain their existing interactive confirmation. This adds no unattended p
   itself, so bounding it by a budget meant for subprocesses would refuse the most obvious use of the field
   ("hold this until the maintenance window next month") for a reason that does not apply to it.
 
-  **A wait gates STARTING, never merging.** `CONST-MERGE-NEVER-AUTOMATIC` forbids completing a pull request
-  "on any condition", and "wait until CI is green" is one syntactic step from it. The distinction is that a
-  wait decides WHEN this harness begins work a human already authorized; it never decides that a human's
-  review is unnecessary.
+  **A wait gates STARTING, never merging.** A wait decides WHEN this harness begins work a human already
+  authorized; it never grants merge permission or decides that a required review is unnecessary. An explicitly
+  enabled job still needs `REQ-TRIGGER-MERGE-POLICY` authorization, and must obey the forge's checks and approvals.
 
 - **Traces to**: `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-TRIGGER-AUTHOR-GATE`,
   `CONST-MERGE-NEVER-AUTOMATIC`, `REQ-SCOPED-PAUSE-WINDOWS`, `REQ-SCOPED-LIMITS`, `REQ-TRIGGER-SECRETS`,
@@ -5628,8 +5627,9 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
 
 - **Statement**: A webhook trigger may carry one line of operator standing text (`run.instructions`),
   rendered into the USER prompt's instruction region: above the fenced data region, below the harness's
-  own steps, and before the never-merge paragraph. Absent, the prompt is byte-identical to before.
-- **Scope**: The three webhook types, on all four forges. **Refused on cron**, which already has
+  own steps, and before the harness's merge-policy paragraph. With the default merge policy, that is the
+  original never-merge paragraph. Absent, the prompt is byte-identical to before.
+- **Scope**: The forge trigger types, on all four forges. **Refused on cron**, which already has
   `run.task`. Operator-authored config only, and no model-callable tool may set it.
 - **Why**: Label, comment and pull_request triggers carried no prompt text at all, so "for this trigger
   specifically: the tests run with X, this repo's convention is Y" had to be committed into the repo's
@@ -5649,11 +5649,42 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
 - **Traces to**: `CONST-ISSUE-TEXT-IS-DATA`, `INT-TRIGGERS-FILE-CONTRACT`, `INT-CONTAINER-JOB-INPUTS`,
   `DES-TRIGGER-INSTRUCTION-IN-THE-ENVELOPE`, `DES-FLOWS-ARE-DATA-PERSONA-IS-CODE`
 - **Acceptance**: Given a trigger carrying `run.instructions`, the text appears in `/job/prompt.md` above
-  the data heading and below the harness's steps, is never fenced, and the never-merge paragraph still
+  the data heading and below the harness's steps, is never fenced, and the effective merge-policy paragraph
   follows it. The data region is byte-identical with and without it, on all three prompt shapes and all
   four forges, and a job without one produces a byte-identical prompt to before the feature. It never
   appears in `/job/event.json` or the run record. A cron trigger carrying it is refused at load with a
   message naming `run.task`; one over the cap is refused with a message naming both destinations.
+
+## REQ-TRIGGER-MERGE-POLICY
+
+- **Statement**: A reviewed forge-flow trigger may set the boolean `run.mayMerge` to `true`. Its job is then
+  permitted, never required by the flag alone, to land its own pull or merge request, or enable the forge's
+  waiting-for-requirements mechanism, according to its flow or `run.instructions`. All required checks and
+  approvals still apply. Direct pushes to default/protected branches, self-approval, protection/settings
+  changes and bypasses remain forbidden.
+- **Scope**: `label`, `comment`, `pull_request` and `issue` flow triggers, on every forge that supports that
+  trigger type. Any present value on local, cron, Watch or command jobs is refused; non-booleans are refused.
+  Absent and false preserve the original prompt bytes and do not enable the feature. Only reviewed trigger
+  configuration can set it; model-callable tools and untrusted event or transcript data cannot.
+- **Authority**: An enabled queued job carries `mayMerge: true` and `mayMergePolicy`, a SHA-256 digest of
+  the normalized trigger entry from which it was built. Before each container, including retries and recovery,
+  the worker reads the current trigger and requires the same enabled entry and digest. A missing flag cannot
+  be promoted by the current file. Changed or revoked authority refuses before tokens, clone and reservation;
+  a newer file defers, and infrastructure failure retries without spending. An authorization is a snapshot
+  for that container, not a live revocation channel for a running job or a pending operation at the forge.
+- **Compatibility**: The trigger field needs triggers file version 4, and the queue fields need job data
+  version 5. An enabled job needs the image's `mergePolicy` capability; unsupported images refuse before
+  spending. Existing unflagged jobs keep their previous minimum versions and image behavior.
+- **Traces to**: `CONST-MERGE-NEVER-AUTOMATIC`, `CONST-ISSUE-TEXT-IS-DATA`,
+  `CONST-BUDGET-BEFORE-TOKENS`, `DES-TRIGGER-MERGE-POLICY`, `INT-TRIGGERS-FILE-CONTRACT`,
+  `INT-CONTAINER-JOB-INPUTS`, `INT-CONTAINER-RUNTIME-CONTRACT`, `INT-SDK-SESSION-OPTIONS`
+- **Acceptance**: All four forge builders' issue/work-item, pull/merge-request and resumed variants keep
+  byte-identical output for absent and false. With true, neither the user prompt nor the image's selected
+  system floor carries the unconditional merge prohibition or human-only landing sentence; the data region
+  and other restrictions are unchanged. The pinned loader proves both modes, including recovered sessions.
+  Every producer and continuation preserves the queued flag and provenance. Tests cover edits, revocation,
+  trigger reordering/replacement, untrusted attempts to supply the flag, old services, old images and unrelated
+  configuration edits. The harness's direct merge-call scan, MCP withholding and branch-protection gates remain.
 
 ## REQ-PER-TRIGGER-SKILLS
 
@@ -9029,6 +9060,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-15 (#908) | Added `REQ-TRIGGER-MERGE-POLICY`: reviewed `run.mayMerge`, exact default prompt preservation, current-trigger digest authorization before each container, all-forge forwarding, versioned data and the image capability proof. `REQ-PER-TRIGGER-INSTRUCTION` now precedes the effective policy paragraph and names the forge trigger types. The wait gate's explanation now distinguishes starting work from granting merge permission. UNCHANGED, checked: `REQ-BRANCH-PROTECTION-PRECONDITION`, author admission, budget gates, ordinary retries, MCP withholding and all unflagged job behavior. |
 | 2026-11-15 (#899) | `REQ-DEDUP-BY-DELIVERY-GUID` and `REQ-OPERATOR-JOB-CANCEL` AMENDED: terminal policy results release the owned semantic window after processing and cleanup, including early refusals and active cancellations; recovery handoffs remain excluded. Shared ingress repairs missed releases from completed policy state with atomic evidence and ownership checks, bounded retry and truthful final enqueue reporting. Retained delivery ids, window length/key grammar, replicas, successful ordinary runs, infrastructure failures and live deferrals UNCHANGED, checked. Parking and steering keep their existing ordering; their blanket non-release wording is narrowed to their own mechanisms. |
 | 2026-11-15 (#897) | **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, (a2): "to fix" is the failed jobs the queue keeps whose work no later run has done since; a failed job a later run of the same cron trigger, or of the same forge target and flow, completed after is left out, and the card says how many. Fleet's failed card and a bulk Retry follow the same rule (`DES-OPERATOR-CONSOLE`). UNCHANGED, checked: the day line and All clear's rule over the last 24 hours, and the failed jobs the list's bound leaves unread, which still count. |
 | 2026-11-15 (#895, review) | `REQ-JOB-ACTIVITY-LIMITS` changes regular defaults to idle-only: no implicit stall timeout or maximum age for continuing activity, including tools without agent steps. A twelve-hour runner/backstop composition covers CPU, network and tool-output activity, then idleness. Explicit stall/maximum settings, Watch jobs' ceiling, credential failure stops, spend guards and compatibility fallbacks UNCHANGED, checked. |

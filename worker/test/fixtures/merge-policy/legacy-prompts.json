@@ -1,0 +1,357 @@
+{
+  "base": "20e8cc1b",
+  "cases": {
+    "github-issue-plain": {
+      "input": {
+        "flow": "fix-issue",
+        "target": {
+          "type": "issue",
+          "number": 42,
+          "title": "Example title",
+          "body": "Example body"
+        }
+      },
+      "sha256": "7503babd0e020d90ec6523affd1a01801e98cb7974f891c41ec4e979d5a7871b"
+    },
+    "github-issue-detailed": {
+      "input": {
+        "flow": "fix-issue",
+        "target": {
+          "type": "issue",
+          "number": 42,
+          "title": "Example title",
+          "body": "Example body"
+        },
+        "instructions": "Run the full suite.",
+        "comment": {
+          "body": "Please address the finding."
+        },
+        "replica": 2,
+        "replicas": 3
+      },
+      "sha256": "d850ff32913dc47c0588f139076fad3d669fbcb33de29552335830929bec8a08"
+    },
+    "github-pr-plain": {
+      "input": {
+        "flow": "fix-issue",
+        "target": {
+          "type": "pull_request",
+          "number": 42,
+          "title": "Example title",
+          "body": "Example body"
+        }
+      },
+      "sha256": "0e4990508658a910690834b0b94d4e51e1963a6e309616564ecfd66171fa7238"
+    },
+    "github-pr-detailed": {
+      "input": {
+        "flow": "fix-issue",
+        "target": {
+          "type": "pull_request",
+          "number": 42,
+          "title": "Example title",
+          "body": "Example body"
+        },
+        "instructions": "Run the full suite.",
+        "comment": {
+          "body": "Please address the finding."
+        }
+      },
+      "sha256": "2c40b970b910f7ba4acecebb175c1a2ac6d3daed1e8f8f6f95b8c6972a0064d4"
+    },
+    "github-resumed-plain": {
+      "input": {
+        "flow": "fix-issue",
+        "target": {
+          "type": "pull_request",
+          "number": 42,
+          "title": "Example title",
+          "body": "Example body"
+        },
+        "resumed": true
+      },
+      "sha256": "617dfda46a237a14419e87d4167ea639fba2a17cd070383ff026a967cf63806d"
+    },
+    "github-resumed-detailed": {
+      "input": {
+        "flow": "fix-issue",
+        "target": {
+          "type": "pull_request",
+          "number": 42,
+          "title": "Example title",
+          "body": "Example body"
+        },
+        "resumed": true,
+        "instructions": "Run the full suite.",
+        "comment": {
+          "body": "Please address the finding."
+        }
+      },
+      "sha256": "cfd8457f0121515f13e7fd5c1d7ec10a538de8a258a1f8481578523187321e5a"
+    },
+    "gitlab-issue-plain": {
+      "input": {
+        "flow": "fix-issue",
+        "target": {
+          "type": "issue",
+          "number": 42,
+          "title": "Example title",
+          "body": "Example body"
+        }
+      },
+      "sha256": "cb24b05f9726a74b03f85254a9d19766e902b5336ad1d50784f8f3b9cb18ffa7"
+    },
+    "gitlab-issue-detailed": {
+      "input": {
+        "flow": "fix-issue",
+        "target": {
+          "type": "issue",
+          "number": 42,
+          "title": "Example title",
+          "body": "Example body"
+        },
+        "instructions": "Run the full suite.",
+        "comment": {
+          "body": "Please address the finding."
+        },
+        "replica": 2,
+        "replicas": 3
+      },
+      "sha256": "5e362928cd059447e2e91342c98a483b11fdb2a2d588aa674f2b5a88ffeaf349"
+    },
+    "gitlab-pr-plain": {
+      "input": {
+        "flow": "fix-issue",
+        "target": {
+          "type": "pull_request",
+          "number": 42,
+          "title": "Example title",
+          "body": "Example body"
+        }
+      },
+      "sha256": "cacda7a3a7c9861bdc2bf074aed59776b4051108830292d7e51524ae81e83134"
+    },
+    "gitlab-pr-detailed": {
+      "input": {
+        "flow": "fix-issue",
+        "target": {
+          "type": "pull_request",
+          "number": 42,
+          "title": "Example title",
+          "body": "Example body"
+        },
+        "instructions": "Run the full suite.",
+        "comment": {
+          "body": "Please address the finding."
+        }
+      },
+      "sha256": "3ecc35f90b8c5b8d47fc3c4f82e197d84335beeb09b69bf8e888f76a73d38f5a"
+    },
+    "gitlab-resumed-plain": {
+      "input": {
+        "flow": "fix-issue",
+        "target": {
+          "type": "pull_request",
+          "number": 42,
+          "title": "Example title",
+          "body": "Example body"
+        },
+        "resumed": true
+      },
+      "sha256": "3f35624b0e26a183f51d2a816305fdb5ef960f15f60233e68114d03a171526ce"
+    },
+    "gitlab-resumed-detailed": {
+      "input": {
+        "flow": "fix-issue",
+        "target": {
+          "type": "pull_request",
+          "number": 42,
+          "title": "Example title",
+          "body": "Example body"
+        },
+        "resumed": true,
+        "instructions": "Run the full suite.",
+        "comment": {
+          "body": "Please address the finding."
+        }
+      },
+      "sha256": "76ce41de156fe0167896ed4430c6a4e47e71ffe42081adb68d15159c8ffc6e92"
+    },
+    "forgejo-issue-plain": {
+      "input": {
+        "flow": "fix-issue",
+        "target": {
+          "type": "issue",
+          "number": 42,
+          "title": "Example title",
+          "body": "Example body"
+        }
+      },
+      "sha256": "4370c44fe5bb0622c41cae01dff71a3f7cfef106b22b7021d4c27517a68ca8c0"
+    },
+    "forgejo-issue-detailed": {
+      "input": {
+        "flow": "fix-issue",
+        "target": {
+          "type": "issue",
+          "number": 42,
+          "title": "Example title",
+          "body": "Example body"
+        },
+        "instructions": "Run the full suite.",
+        "comment": {
+          "body": "Please address the finding."
+        },
+        "replica": 2,
+        "replicas": 3
+      },
+      "sha256": "a43d46f8d93febe4a708fd6d0cc310de8f34ed527fd41d4f122a2f79689ea51f"
+    },
+    "forgejo-pr-plain": {
+      "input": {
+        "flow": "fix-issue",
+        "target": {
+          "type": "pull_request",
+          "number": 42,
+          "title": "Example title",
+          "body": "Example body"
+        }
+      },
+      "sha256": "8171136654554c0d01d49caa2e687a7ed4b4371c3cd88f6ded43097f651143e8"
+    },
+    "forgejo-pr-detailed": {
+      "input": {
+        "flow": "fix-issue",
+        "target": {
+          "type": "pull_request",
+          "number": 42,
+          "title": "Example title",
+          "body": "Example body"
+        },
+        "instructions": "Run the full suite.",
+        "comment": {
+          "body": "Please address the finding."
+        }
+      },
+      "sha256": "2fec6a21c4a0b18cd95daf3531697a884e10054cb1237b2c0efe17af764e5466"
+    },
+    "forgejo-resumed-plain": {
+      "input": {
+        "flow": "fix-issue",
+        "target": {
+          "type": "pull_request",
+          "number": 42,
+          "title": "Example title",
+          "body": "Example body"
+        },
+        "resumed": true
+      },
+      "sha256": "831660183b48ad0df27b06de82d673069eb2dac84bce0070a40fcf5b35b938f9"
+    },
+    "forgejo-resumed-detailed": {
+      "input": {
+        "flow": "fix-issue",
+        "target": {
+          "type": "pull_request",
+          "number": 42,
+          "title": "Example title",
+          "body": "Example body"
+        },
+        "resumed": true,
+        "instructions": "Run the full suite.",
+        "comment": {
+          "body": "Please address the finding."
+        }
+      },
+      "sha256": "0633b893e2abbdd30a6e2789364fbd4fe28394bc70e06f538c33a7ce05c1578a"
+    },
+    "azure-issue-plain": {
+      "input": {
+        "flow": "fix-issue",
+        "target": {
+          "type": "issue",
+          "number": 42,
+          "title": "Example title",
+          "body": "Example body"
+        }
+      },
+      "sha256": "fdfcf789532fd7e3070bd6c704537eaeae06e4b9bd881f43dc7b21fb16e8d346"
+    },
+    "azure-issue-detailed": {
+      "input": {
+        "flow": "fix-issue",
+        "target": {
+          "type": "issue",
+          "number": 42,
+          "title": "Example title",
+          "body": "Example body"
+        },
+        "instructions": "Run the full suite.",
+        "comment": {
+          "body": "Please address the finding."
+        },
+        "replica": 2,
+        "replicas": 3
+      },
+      "sha256": "22e89f200979883e98a794d033818e3d29c43b02923af1f78c63bd9914eb47d7"
+    },
+    "azure-pr-plain": {
+      "input": {
+        "flow": "fix-issue",
+        "target": {
+          "type": "pull_request",
+          "number": 42,
+          "title": "Example title",
+          "body": "Example body"
+        }
+      },
+      "sha256": "4d033506cc5560da5417d2ea5b96e4a52c63bddd0b15dc8dca595e890c881c5d"
+    },
+    "azure-pr-detailed": {
+      "input": {
+        "flow": "fix-issue",
+        "target": {
+          "type": "pull_request",
+          "number": 42,
+          "title": "Example title",
+          "body": "Example body"
+        },
+        "instructions": "Run the full suite.",
+        "comment": {
+          "body": "Please address the finding."
+        }
+      },
+      "sha256": "c828682d528ea745a1cc0d4354c6c8dc47eba34a21aa50b28582573871d52209"
+    },
+    "azure-resumed-plain": {
+      "input": {
+        "flow": "fix-issue",
+        "target": {
+          "type": "pull_request",
+          "number": 42,
+          "title": "Example title",
+          "body": "Example body"
+        },
+        "resumed": true
+      },
+      "sha256": "1cc96384cc00ee938f85cc767ea060f1f17008a24fa0c1c6a90b994d9b56ecfc"
+    },
+    "azure-resumed-detailed": {
+      "input": {
+        "flow": "fix-issue",
+        "target": {
+          "type": "pull_request",
+          "number": 42,
+          "title": "Example title",
+          "body": "Example body"
+        },
+        "resumed": true,
+        "instructions": "Run the full suite.",
+        "comment": {
+          "body": "Please address the finding."
+        }
+      },
+      "sha256": "902927be5921b1cbd246861f51cfd076b8b0e8445785f4b0bbdc71c22d0fbf53"
+    }
+  }
+}

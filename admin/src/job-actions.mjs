@@ -1,3 +1,4 @@
+import { mergePolicyDigest } from "@edgehero/pi-dispatch/merge-policy";
 import { makeTouchStore, touchScopeOf } from "@edgehero/pi-dispatch/touch-state";
 import { trackTouchAction } from "@edgehero/pi-dispatch/touch-outbox";
 /**
@@ -446,7 +447,8 @@ function cronTriggerId(jobId) {
  * parked-answer test builds a receiver job and a console job for the same issue and compares them field for field,
  * which is what holds this builder to the filters.
  */
-function runFieldsOf(run, flow) {
+function runFieldsOf(entry, flow) {
+  const { run } = entry;
   return {
     flow,
     ...(run.packages !== undefined ? { packages: run.packages } : {}),
@@ -471,6 +473,7 @@ function runFieldsOf(run, flow) {
     ...(run.secretsProfile !== undefined ? { secretsProfile: run.secretsProfile } : {}),
     ...(run.waitFor !== undefined ? { waitFor: run.waitFor } : {}),
     ...(run.instructions !== undefined ? { instructions: run.instructions } : {}),
+    ...(run.mayMerge === true ? { mayMerge: true, mayMergePolicy: mergePolicyDigest(entry) } : {}),
     ...(run.resume !== undefined ? { resume: run.resume } : {}),
     ...(run.awaitInput === true ? { awaitInput: true } : {}),
     ...(run.gates !== undefined ? { gates: run.gates } : {}),
@@ -502,6 +505,7 @@ function runFieldsSummary(job) {
     backend: job.backend ?? null,
     ...(job.packages !== undefined ? { packages: job.packages } : {}),
     ...(job.mcp !== undefined ? { mcp: job.mcp } : {}),
+    ...(job.mayMerge === true ? { mayMerge: true } : {}),
   };
 }
 
@@ -543,7 +547,7 @@ function currentTriggerFor(entries, kind, data) {
     const routed = matched.type === "comment" && entries.some((e) => e.on.type !== "cron" && e.run.flow === data.flow);
     if (!routed) return { refusal: `${TRIGGER_CHANGED} (the trigger at index ${index} runs ${JSON.stringify(run.flow)} now, not ${JSON.stringify(data.flow)})` };
   }
-  return { run };
+  return { run, entry };
 }
 
 /** A fix must retain the source trigger's identity, not merely reuse its array position and forge kind. */
@@ -1193,7 +1197,7 @@ export async function planRerun({
         ...(data.projectId !== undefined ? { projectId: data.projectId } : {}),
         ...(data.azure !== undefined ? { azure: data.azure } : {}),
         target: data.target,
-        ...runFieldsOf(current.run, data.flow),
+        ...runFieldsOf(current.entry, data.flow),
         ...(data.replica !== undefined ? { replica: data.replica } : {}),
         trigger: { ...(data.trigger ?? {}), deliveryId },
       };
@@ -1282,7 +1286,7 @@ function commentTriggerFor(triggersPath, kind, fs) {
   if (loaded.refusal) return loaded;
   for (const [index, { on, run }] of loaded.entries.entries()) {
     if (on.type !== "comment" || run.kind !== kind) continue;
-    return { index, phrase: on.phrase, run };
+    return { index, phrase: on.phrase, run, entry: { on, run } };
   }
   return null;
 }
@@ -1312,7 +1316,7 @@ export function parkedAnswerRefusalOf({ jobId, data, triggersPath, approval = fa
     const index = data.trigger?.matched?.index;
     const entry = loaded.entries[index];
     if (!entry || entry.run.kind !== kind || entry.on.type !== data.trigger?.matched?.type || !entry.run.gates || entry.run.resume !== true) return { refusal: "the approval's original trigger no longer declares resumable gates; nothing was queued" };
-    return { kind, delivery, rule: { index, run: entry.run }, approval: true };
+    return { kind, delivery, rule: { index, run: entry.run, entry }, approval: true };
   }
   if (data.target?.type !== "issue") return { refusal: `${jobId} parked on a pull request, whose reply must carry the trigger phrase (the receiver's rule: its key needs the head branch); answer on the forge` };
   if (typeof triggersPath !== "string" || triggersPath === "") return { refusal: "the triggers file is not known here (PI_TRIGGERS_FILE), so the reply cannot be built as the receiver builds it" };
@@ -1444,7 +1448,7 @@ export async function planParkedAnswer({
       ...(data.projectId !== undefined ? { projectId: data.projectId } : {}),
       ...(data.azure !== undefined ? { azure: data.azure } : {}),
       target: approval ? { ...data.target } : { type: "issue", number: data.target.number, title: data.target.title, body: data.target.body },
-      ...runFieldsOf(rule.run, rule.run.flow),
+      ...runFieldsOf(rule.entry, rule.run.flow),
       parkedReply: !(approval && data.target.type !== "issue"),
       ...(approval ? { approvalRequestId: record.approval.requestId } : {}),
       console: { by: who, ...(draftBinding ?? {}) },

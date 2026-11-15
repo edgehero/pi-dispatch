@@ -56,7 +56,7 @@ export async function triggerGolden({
         forges,
         ...(githubRestart ? { githubRestart } : {}),
         flows: [{ name: "tidy", tier: "repository" }],
-        defaults: { backend: "local", maxTurns: 30 },
+        defaults: { backend: "local", maxTurns: 30, mayMerge: false },
       }),
       triggerFireCheck: () => ({
         refusal: "The schedule is not served by this deployment's queue.",
@@ -73,6 +73,7 @@ export const TRIGGER_DRAW = {
   // Issue #879: the first GitHub trigger of a receiver that started without a GitHub route.
   "trigger-editor-github-restart.operator": () => triggerGolden({ editor: true, forges: ["github", "gitlab"], githubRestart: true }),
   "trigger-cron.operator": () => triggerGolden(),
+  "trigger-may-merge.operator": () => triggerGolden({ trigger: { type: "label", index: 0, forge: "github", flow: "fix", any: ["pi"], instructions: true, mayMerge: true } }),
   "trigger-spent.operator": () =>
     triggerGolden({
       trigger: {
