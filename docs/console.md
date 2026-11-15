@@ -1237,8 +1237,12 @@ title, Project and Host pick the rows, and 1h, 3h and 24h the window:
 | Window | Reaches back | Looks ahead |
 |---|---|---|
 | `1h` | an hour | 30 minutes |
-| `3h` (the default) | 3 hours | an hour and a half |
-| `24h` | a day | 12 hours |
+| `3h` | 3 hours | an hour and a half |
+| `24h` (the default) | a day | 12 hours |
+
+It opens on the whole day the overview reads runs for, so a project whose last run ended hours ago is still on the
+card. At a day, a run is drawn at least about 43 minutes wide: a schedule that runs every half hour fills its row's
+four lanes, and the rest of its quiet completed runs is counted as "+N more". 3h and 1h draw each run at its length.
 
 Now is two thirds of the way across at every window. The axis is UTC and says so: its times are drawn inside the
 picture, where the page's script cannot turn them into your time zone as it does every other time on the page. The
@@ -1255,7 +1259,7 @@ may be missing here."). "No run in this window, and nothing in line." shows only
 and every waiting job was read.
 
 **The overview's address.** The choices are its query: `?rows=project` or `?rows=host`, `?zoom=1h`, `3h` or `24h`, and
-`?project=<project id>`, each optional (the defaults are by project, 3 hours and every project), and the links the
+`?project=<project id>`, each optional (the defaults are by project, 24 hours and every project), and the links the
 card draws leave a default out. The overview takes no other parameter, and a value outside these is refused with the
 400 page, which names the parameter and what it takes, never what was sent. Every grouping, window and project is
 drawn from the same read of the deployment: three open tabs on three groupings are read once a second together, as one

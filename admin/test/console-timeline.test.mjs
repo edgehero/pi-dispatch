@@ -26,13 +26,20 @@ import {
   TIMELINE_ZOOMS,
   timelineHtml,
   timelineLegend,
-  timelineModel,
+  timelineModel as timelineModelOf,
 } from "../src/console/timeline.mjs";
 
 // Issue #737: the overview's timeline, a pure module. The model is pinned by its numbers and words, the markup by the
 // TimelineAndWaitlists card's own sample (kept here as the card's bytes, each held to the card in design/system by `onCard`,
 // issue #752), with only what a drawing of other data must change taken out (positions, titles) and the kit's one spelling applied
 // (the card closes `<use>` with `/>`, the console with `</use>`).
+
+/**
+ * The model at the card's zoom. Every drawing pinned here is the TimelineAndWaitlists card's, which draws the 3h window,
+ * while the overview opens on 24h since issue #896: a call that names no zoom means the card's, never the default.
+ * The default itself is asked of the module (`timelineModelOf`) in the tests that pin it.
+ */
+const timelineModel = (opts) => timelineModelOf(opts === undefined ? opts : { zoom: "3h", ...opts });
 
 /** The instant every test draws at: 15:39 UTC, the card's now. */
 const NOW = Date.parse("2026-10-25T15:39:00Z");
@@ -155,7 +162,7 @@ test("the zooms, groupings, defaults and lane cap are the contract's, frozen", (
   for (const z of Object.values(TIMELINE_ZOOMS)) assert.ok(Object.isFrozen(z));
   assert.ok(Object.isFrozen(TIMELINE_ZOOMS) && Object.isFrozen(TIMELINE_ROWS) && Object.isFrozen(TIMELINE_DEFAULTS));
   assert.deepEqual(TIMELINE_ROWS, ["project", "host"]);
-  assert.deepEqual(TIMELINE_DEFAULTS, { rows: "project", zoom: "3h" });
+  assert.deepEqual(TIMELINE_DEFAULTS, { rows: "project", zoom: "24h" });
   assert.equal(TIMELINE_LANES_MAX, 4);
   assert.equal(TIMELINE_ROWS_MAX, 12);
   assert.equal(TIMELINE_CHIPS_MAX, 24);
@@ -261,8 +268,12 @@ test("the model is deterministic: the same parts in any order draw the same byte
 });
 
 test("the zoom and grouping are closed values; none is the default; a bad instant throws", () => {
-  assert.equal(timelineModel({ now: NOW }).zoom, "3h");
-  assert.equal(timelineModel({ now: NOW, zoom: null, rows: undefined }).by, "project");
+  // The whole day the run history is read for (issue #896), so a project whose last run is hours old is still drawn.
+  assert.equal(timelineModelOf({ now: NOW }).zoom, "24h");
+  assert.equal(timelineModelOf({ now: NOW, zoom: null }).zoom, "24h");
+  assert.equal(timelineModelOf({ now: NOW, zoom: null, rows: undefined }).by, "project");
+  const old = timelineModelOf({ now: NOW, runs: [rec("gh-early", { project: "quiet", from: -600, to: -590 })] });
+  assert.deepEqual(old.chips.map((c) => c.project), ["quiet"], "a project whose one run ended 10 hours ago is on the card");
   assert.throws(() => timelineModel({ now: NOW, zoom: "2h" }), RangeError);
   assert.throws(() => timelineModel({ now: NOW, zoom: "toString" }), RangeError);
   assert.throws(() => timelineModel({ now: NOW, rows: "repo" }), RangeError);
