@@ -29,6 +29,15 @@ test("loads conservative defaults with an empty-ish env", () => {
 	assert.ok(c.logsDir.endsWith("/.pi-dispatch/logs"), c.logsDir); // the DURABLE root (issue #290), not the OS temp dir
 	assert.equal(c.captureJobLogs, false);
 	assert.equal(c.logRetentionDays, 30);
+	assert.equal(c.jobIdleMinutes, 15);
+	assert.equal(c.jobStallMinutes, 0, "no default ceiling on active work without a step");
+	assert.equal(c.jobMaxMinutes, null);
+});
+
+test("job limits retain an explicitly configured stall timeout and wall-clock ceiling", () => {
+	const c = loadConfig({ PI_JOB_STALL_MINUTES: "240", PI_JOB_MAX_MINUTES: "720" });
+	assert.equal(c.jobStallMinutes, 240);
+	assert.equal(c.jobMaxMinutes, 720);
 });
 
 test("AI-trigger / chaining knobs default conservatively", () => {

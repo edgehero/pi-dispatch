@@ -39,11 +39,11 @@ const SUBSCRIPTION_VARS = Object.freeze({ openai: "OPENAI_API_KEY", anthropic: "
 
 // Held to the runner's parseCredentialDrop and subscription guard by credential-refresh.test.mjs.
 // A successful rename is not delivery if the runner must refuse the bytes it contains.
-const tokenShaped = (token) => typeof token === "string" && /^[\x21-\x7e]{8,4096}$/.test(token);
+export const credentialDropTokenAllowed = (token) => typeof token === "string" && /^[\x21-\x7e]{8,4096}$/.test(token);
 const subscriptionShaped = (row) => Object.hasOwn(SUBSCRIPTION_VARS, row?.provider)
 	&& typeof row.connectionId === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(row.connectionId)
 	&& [row.generation, row.expiresAt, row.deadlineAt].every((value) => Number.isSafeInteger(value) && value >= 0)
-	&& row.expiresAt > row.deadlineAt && tokenShaped(row.token)
+	&& row.expiresAt > row.deadlineAt && credentialDropTokenAllowed(row.token)
 	&& (row.provider === "openai" ? !row.token.startsWith("sk-") : row.token.startsWith("sk-ant-oat"));
 const subscriptionRow = (snapshot) => ({ provider: snapshot.provider, connectionId: snapshot.connectionId, generation: snapshot.generation, expiresAt: snapshot.expiresAt, deadlineAt: snapshot.deadlineAt, token: snapshot.env?.[SUBSCRIPTION_VARS[snapshot.provider]] });
 
@@ -145,7 +145,7 @@ export function makeCredentialRefresher({ dir, forge = null, subscriptions = [],
 		if (!state.dirty || stopped || state.expired) return;
 		try {
 			const drop = payload();
-			if (!Number.isSafeInteger(drop.seq) || drop.seq < 1 || (drop.forge !== null && !tokenShaped(drop.forge.token)) || drop.subscriptions.length > 2 || !drop.subscriptions.every(subscriptionShaped)) throw new Error("unusable credential drop");
+			if (!Number.isSafeInteger(drop.seq) || drop.seq < 1 || (drop.forge !== null && !credentialDropTokenAllowed(drop.forge.token)) || drop.subscriptions.length > 2 || !drop.subscriptions.every(subscriptionShaped)) throw new Error("unusable credential drop");
 			// Register new literal secrets before a tool can print one. A failed collector
 			// prevents publication, just like a failed disk write.
 			onCredentials(drop);
@@ -190,7 +190,7 @@ export function makeCredentialRefresher({ dir, forge = null, subscriptions = [],
 		const work = [];
 		if (state.forge && at >= state.forge.expiresAt - FORGE_RENEW_BEFORE_MS) {
 			work.push(renew("forge", (signal) => forge.mint({ signal }), (minted) => {
-				if (!tokenShaped(minted?.token) || !Number.isSafeInteger(minted.expiresAt) || minted.expiresAt <= now() + CREDENTIAL_STOP_BEFORE_MS) throw new Error("no usable token");
+				if (!credentialDropTokenAllowed(minted?.token) || !Number.isSafeInteger(minted.expiresAt) || minted.expiresAt <= now() + CREDENTIAL_STOP_BEFORE_MS) throw new Error("no usable token");
 				state.forge = { expiresAt: minted.expiresAt, token: minted.token };
 				return true;
 			}, "forge-token"));

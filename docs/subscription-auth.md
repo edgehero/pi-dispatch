@@ -98,7 +98,10 @@ published, the worker stops the job as `credential-expired` two minutes before t
 The runner keeps checking its own lease and expiry on model requests. See [job limits](job-limits.md#credentials-that-expire-while-a-job-runs).
 
 The short lease requires the worker's renewal path and its read-only credential drop to work. If the drop cannot be
-prepared, the container does not start. An older image without the new capability keeps the full deadline plus
+prepared, the container does not start. Renewable access must also fit the existing drop format (8 to 4096 printable
+ASCII characters); an incompatible value is refused before startup as `auth-capability-unsupported`. This does not
+change the host store's credential format, and a rotated replacement is saved before any delivery refusal.
+An older image without the new capability keeps the full deadline plus
 six-minute coverage requirement, so it can still wait for renewal even while the token is valid. Update the worker
 and job image, rebuilding derived images, to remove that wait ([upgrade order](upgrading.md#the-order)). OpenShell
 subscription jobs remain unsupported.

@@ -8,7 +8,8 @@
 
 /** The deployment defaults and the ranges a value may take, in whole minutes. */
 export const JOB_IDLE_MINUTES_DEFAULT = 15;
-export const JOB_STALL_MINUTES_DEFAULT = 240;
+// A long tool can stay busy without an agent step. Only an operator may bound that wait.
+export const JOB_STALL_MINUTES_DEFAULT = 0;
 export const JOB_IDLE_MINUTES_MAX = 1440;
 /** 30 days in minutes: a stall or a ceiling longer than that is a typo, not a plan. Under the runner's own 31-day bound. */
 export const JOB_MINUTES_MAX = 30 * 24 * 60;

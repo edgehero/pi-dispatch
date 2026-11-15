@@ -106,7 +106,7 @@ with a consent per action:  pi install npm:@edgehero/pi-dispatch-admin`;
 	// injects a collector instead of reassigning `process.stdout.write`. That matters because `node --test`
 	// runs each file in a child process that serialises its own results over that same stdout, so a test
 	// holding a replacement across an `await` swallows the runner's result frames (issue #266).
-export async function main(argv = process.argv.slice(2), env = process.env, { write = (chunk) => process.stdout.write(chunk), writeErr = (chunk) => process.stderr.write(chunk), valkeyRefusal = valkeyRefusalAtStart, now = () => new Date() } = {}) {
+export async function main(argv = process.argv.slice(2), env = process.env, { write = (chunk) => process.stdout.write(chunk), writeErr = (chunk) => process.stderr.write(chunk), valkeyRefusal = valkeyRefusalAtStart, now = () => new Date(), controlClients = {} } = {}) {
 	const cmd = argv[0];
 	if (cmd === "auth") {
 		const { runAuth } = await import("./auth-cli.mjs");
@@ -336,7 +336,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 		let code = 0;
 		for (const url of picked.urls) {
 			const label = picked.urls.length > 1 ? `[${urlShown(url)}] ` : "";
-			code = Math.max(code, await killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal, now }));
+			code = Math.max(code, await killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal, now, controlClients }));
 		}
 		return code;
 	}
@@ -537,9 +537,9 @@ export async function workerHint(queue, { timeoutMs = 2000 } = {}) {
 }
 
 /** One Valkey's pause, resume or status: every queue the deployment drains there (issue #57). Returns the exit code. */
-async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal, now }) {
+async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal, now, controlClients }) {
 	const { parseConnection, makeRedisClient } = await import("./connection.mjs");
-	const { fleetQueueNames, discoverHostQueues, unionQueueNames, makeQueue } = await import("./queue.mjs");
+	const { fleetQueueNames, discoverHostQueuesReporting, unionQueueNames, makeQueue } = await import("./queue.mjs");
 	const { readLiveHosts } = await import("./host-registry.mjs");
 	// EVERY queue this deployment drains (issue #57), not just the shared one. This is the kill switch:
 	// pausing `pi-jobs` alone would stop forge deliveries while a named host's cron, chained children
@@ -554,7 +554,7 @@ async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal
 	// value and the `.catch` below is only for a client that throws before it can answer.
 	const refused = await valkeyRefusal(url, env);
 	if (refused) return fail(refused);
-	const probe = makeRedisClient(url);
+	const probe = (controlClients.makeRedisClient ?? makeRedisClient)(url);
 	// Without this, a down Valkey dumps nine `[ioredis] Unhandled error event` traces before the one clean
 	// line -- the exact noise `defaultProbeValkey` exists to suppress.
 	probe.on?.("error", () => {});
@@ -565,11 +565,11 @@ async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal
 	// key outlives its worker; a registry row does not.
 	const [fleet, existing] = await Promise.all([
 		readLiveHosts(probe, { timeoutMs: FLEET_READ_TIMEOUT_MS }).catch((error) => ({ unreachable: error?.message ?? String(error) })),
-		discoverHostQueues(probe, { timeoutMs: FLEET_READ_TIMEOUT_MS }),
+		discoverHostQueuesReporting(probe, { timeoutMs: FLEET_READ_TIMEOUT_MS }),
 	]);
 	probe.disconnect?.();
 	const blind = fleet?.unreachable ?? null;
-	const names = unionQueueNames(fleetQueueNames(fleet?.hosts), existing);
+	const names = unionQueueNames(fleetQueueNames(fleet?.hosts), existing.names);
 	// The registry being unreadable no longer means we saw one queue: the keyspace scan may well have
 	// found them. Report the count we ACTED on, and name the degraded read separately.
 	const span = `${names.length > 1 ? ` [${names.length} queues]` : ""}${blind ? ` [registry unreadable: ${blind}]` : ""}`;
@@ -577,7 +577,7 @@ async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal
 	try {
 		// Constructed INSIDE the try: `makeQueue` can throw on a malformed peer-written name, and a throw
 		// at index k > 0 would otherwise leak the k connections already opened.
-		for (const name of names) queues.push(makeQueue(parseConnection(url, { failFast: true }), { name }));
+		for (const name of names) queues.push((controlClients.makeQueue ?? makeQueue)(parseConnection(url, { failFast: true }), { name }));
 		if (cmd === "pause" || cmd === "resume") {
 			const done = [];
 			try {

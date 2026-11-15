@@ -54,9 +54,9 @@ trigger's `run.idleTimeoutMinutes` or the deployment's `PI_JOB_IDLE_MINUTES`, or
 
 ### stalled
 
-The AI took no step for the run's stall limit (four hours unless changed), although the container stayed busy. That
-is usually a command that never ends: a test stuck in a loop, or a server started in the foreground. Partial work may
-exist, and the run is not retried.
+The AI took no step for an explicitly configured stall limit, although the container stayed busy. The stall limit is
+off by default. When enabled, it can end a command that never finishes, such as a test in a loop or a server started
+in the foreground, but also a long build. Partial work may exist, and the run is not retried.
 
 What to do: read the job log for the command that never ended. If the work really needs longer without a step, raise
 `run.stallTimeoutMinutes` or `PI_JOB_STALL_MINUTES` ([job-limits.md](job-limits.md)).

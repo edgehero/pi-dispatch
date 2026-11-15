@@ -451,6 +451,12 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 
 ## DES-JOB-ACTIVITY-WATCH
 
+- **Idle-only defaults (#895)**: regular jobs have no default stall limit (`JOB_STALL_MINUTES_DEFAULT=0`) and no
+  default maximum age. A busy tool may take arbitrarily long without an agent step. The owner explicitly chose this
+  over the former four-hour stall default, which could kill active work. Operators retain the stall and maximum-time
+  settings for workloads that need them; Watch jobs keep their separate 30-minute ceiling. Credential failure stops,
+  spend limits and legacy-image fallbacks are unchanged.
+
 - **Credential correction (#895)**: renewable subscription leases may be shorter than the requested horizon.
   Expiry supervision runs without awaiting renewal, and each credential has its own in-flight operation bounded
   to a minute. A timed-out operation keeps its lane occupied until it settles, so an unresolved rotation is not
@@ -478,8 +484,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     full CPU, and killing it is the mistake #888 is about.
   - CPU only: a tool waiting on a slow remote uses none, and the runner's own event loop is CPU too (so the runner's
     own use is subtracted from the cgroup's total, never counted).
-  - Activity as enough to keep a job alive for ever: an endless loop is activity. The stall limit bounds it, set long
-    and keyed on steps only, so a job that keeps working is never cut off.
+  - An implicit stall limit on active work (#895): an endless loop and a long useful build can both be active without
+    a step. An operator may configure a stall limit; the default only stops idleness.
   - Trusting the container's clock: see "Why counters".
 - **What suspends the clocks**: pi's own retry back-off (`auto_retry_start`'s `delayMs`), and a freeze (a sample more
   than three intervals late), which shifts both clocks by the gap: a frozen process did nothing it could be blamed for.
@@ -18111,6 +18117,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-11-15 (#895, review) | `DES-JOB-ACTIVITY-WATCH` replaces the default four-hour stall limit with 0 (off), the owner's choice that regular active jobs have no time ceiling even without agent steps. Explicit limits and Watch jobs retain their bounds. `DES-STORE-VERSION-WHEN-NEEDED` UNCHANGED, checked: existing zero/null values already represent disabled limits; no field or stored version changes. |
 | 2026-11-15 (#895) | AMENDED `DES-HOST-OWNED-SUBSCRIPTION-AUTH`, `DES-JOB-ACTIVITY-WATCH` and `DES-WAITING-REASONS`: capability-gated short leases, independent bounded renewal and expiry supervision, retained replacement secrets for redaction and workspace scans, success-only hold events and bounded CLI details. `DES-STORE-VERSION-WHEN-NEEDED` UNCHANGED, checked: no persisted field, value or version is added; lease scheduling metadata stays host-private. |
 | 2026-11-14 (#888, part 3) | **`DES-JOB-ACTIVITY-WATCH` AMENDED**: credentials renewed in a running job rather than the job cut short, with the rejected stop before expiry and refresh grant in the container, and the stop judged on what the runner holds. `DES-GH-APP-MANIFEST-SETUP` UNCHANGED, checked: the App's permissions do not move. |
 | 2026-11-14 (#888, part 2: the worker) | **`DES-JOB-ACTIVITY-WATCH` AMENDED** with the worker's half: one 30-minute timer handed over to the watch and kept for a job no watch covers (with the rejected unbounded run on an expiring credential), the backstop and its grace, the `max-minutes` timer, the renewed fleet claims, the activity-aware boot sweep, and the named stops. **`DES-STORE-VERSION-WHEN-NEEDED` UNCHANGED, checked**: its rule is applied (three trigger run fields at triggers file version 3, three job data fields at version 4, each a row of `AUTHORED_NARROWING_FIELDS`), not changed. `DES-CONCURRENCY-3` and `DES-CANCEL-VIA-REDIS-REQUEST-KEY` UNCHANGED, checked. |

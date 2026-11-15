@@ -2,6 +2,7 @@
 import { randomUUID, createHash } from "node:crypto";
 import { authError, createAuthStore, validateAuthCredential } from "./auth-store.mjs";
 import { createDefaultAuthAdapters } from "./community-auth-adapters.mjs";
+import { credentialDropTokenAllowed } from "./credential-refresh.mjs";
 
 import { parseAuthConnections } from "./auth-policy.mjs";
 export { parseAuthConnections } from "./auth-policy.mjs";
@@ -115,6 +116,10 @@ export function createAuthService({ policy = null, readPolicy = () => policy, st
 			if (!(await bindingStillCurrent(row))) return { ok: false, reason: "auth-binding-changed" };
 			const leaseDeadline = leaseEnd(current.credential);
 			if (current.credential.expires <= leaseDeadline + margin || leaseDeadline <= now() + minimum) return { ok: false, reason: "auth-snapshot-too-short" };
+			// The private store accepts larger provider bearers than the version-1 drop. Starting one
+			// on a renewable lease would make its first unchanged-token extension impossible to deliver.
+			// Keep a rotated grant above durable even when this transport cannot carry its access value.
+			if (renewable && !credentialDropTokenAllowed(current.credential.access)) return { ok: false, managed: true, reason: "auth-capability-unsupported", unavailable: false };
 			const variable = provider === "openai" ? "OPENAI_API_KEY" : "ANTHROPIC_OAUTH_TOKEN";
 			return { ok: true, managed: true, snapshot: { kind: "subscription", provider, connectionId: row.id, adapter: row.adapter, accountGroup: current.accountGroup, generation: current.generation, expiresAt: current.credential.expires, deadlineAt: leaseDeadline, ...(renewable ? { renewable: true, refreshAt: current.credential.earliestRefreshAt ?? null } : {}), bindingSignature: authBindingSignature(row), env: { [variable]: current.credential.access } } };
 		}, { signal });
@@ -130,7 +135,7 @@ export function createAuthService({ policy = null, readPolicy = () => policy, st
 		if (!(checked.ok === true && checked.managed === true && snapshot.kind === "subscription" && checked.connectionId === snapshot.connectionId && checked.bindingSignature === snapshot.bindingSignature && checked.generation === snapshot.generation && checked.accountGroup === snapshot.accountGroup && snapshot.expiresAt > snapshot.deadlineAt + margin && snapshot.deadlineAt > now() + minimum)) return false;
 		return store.transaction(snapshot.connectionId, async (saved) => {
 			const variable = snapshot.provider === "openai" ? "OPENAI_API_KEY" : "ANTHROPIC_OAUTH_TOKEN";
-			return saved?.state === "connected" && saved.generation === snapshot.generation && saved.adapter === snapshot.adapter && saved.credential?.expires === snapshot.expiresAt && snapshot.env && Object.keys(snapshot.env).length === 1 && snapshot.env[variable] === saved.credential.access;
+			return saved?.state === "connected" && saved.generation === snapshot.generation && saved.adapter === snapshot.adapter && saved.credential?.expires === snapshot.expiresAt && snapshot.env && Object.keys(snapshot.env).length === 1 && snapshot.env[variable] === saved.credential.access && (snapshot.renewable !== true || credentialDropTokenAllowed(saved.credential.access));
 		});
 	}
 	async function logout(id, { signal } = {}) {

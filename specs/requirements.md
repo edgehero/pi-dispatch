@@ -494,8 +494,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   when a renewal cannot be delivered in time; elsewhere it keeps the 30-minute wall clock beside the watch, and its
   record says `limits.why`.
 - **Statement**: A running job shall be stopped when it is IDLE (no step by the agent and no activity in its container
-  for the idle limit, default 15 minutes) or STALLED (no step by the agent for the stall limit, default 4 hours, however
-  busy the container), and when it reaches an optional wall-clock ceiling an operator set; never merely because it is
+  for the idle limit, default 15 minutes), when an explicitly configured STALLED limit is reached (no step by the agent
+  for that limit, however busy the container), or when it reaches an optional wall-clock ceiling an operator set; never merely because it is
   old. A step is the agent itself moving (a model turn or output, a tool call starting or ending, a subagent's call);
   activity is what it may be waiting on (a tool's output, CPU used by processes other than the runner, network
   traffic). The record says which limit ended the job.
@@ -503,20 +503,23 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   pushed (a 5.0.0 run stopped at 30:00 after 90 turns, $1.39 of a $40 cap). Spend is bounded by `REQ-RUNNER-TURN-BUDGET`
   and the token and cost caps, so the wall clock only ever bounded the SLOT, and a slot is wasted by a job that does
   nothing, not by one that works. Activity counts, not only steps, because the agent often waits on something it started
-  (a silent build, a CI watch): killing it then is the same mistake. The stall limit exists because activity alone can
-  be endless (a test stuck in a loop keeps the CPU busy); four hours, and only without a step, because the owner runs
-  jobs that keep working for eight.
+  (a silent build, a CI watch): killing it then is the same mistake. Since #895 the stall limit is off by default
+  (`PI_JOB_STALL_MINUTES=0`): activity alone keeps a regular job alive, even without a step for twelve hours or longer.
+  An operator may enable a stall limit to bound endless activity for a particular workload. Explicit stall and maximum
+  limits, Watch jobs' separate 30-minute ceiling, credential failure stops and legacy-image fallbacks stay effective.
 - **Traces to**: `REQ-JOB-TIMEOUT-30M` (which it replaces once the worker half lands), `REQ-RUNNER-TURN-BUDGET`,
   `DES-JOB-ACTIVITY-WATCH`, `INT-JOB-ACTIVITY-FILE`
 - **Acceptance**: given a job whose tool sleeps in silence, it is stopped as `idle` at the idle limit though the tool never
-  returns; given a tool that keeps printing while the agent takes no step, it is stopped as `stalled` at the stall
-  limit and not at the idle one; given a job that keeps taking steps, it runs past both and completes
+  returns; given a tool that keeps printing while the agent takes no step, it continues without a time ceiling by
+  default, and is stopped as `stalled` only when a stall limit was explicitly set; given a job that keeps taking steps, it runs past both and completes
   (`image/runner/test/activity.integration.test.mjs`, the real runner and pi); given a background process using the CPU
   while the agent sleeps, it is not idle (`activity.test.mjs`, and the image's own proof in `verify-image.sh`). Given a
   watched job, the worker's 30-minute timer is handed over and does not fire, and a stop the watch asks for cancels under
   its own name; given an image without `idleWatch`, the timer fires as `job-timeout-30m` and records `max-minutes`; given
   a ceiling, it cancels as `max-minutes` (`worker/test/wiring.test.mjs`); given a runner whose counters stop changing,
-  the backstop stops the run at the idle limit plus its grace (`run-container-activity.test.mjs`).
+  the backstop stops the run at the idle limit plus its grace (`run-container-activity.test.mjs`). The real runner and
+  worker backstop composed with defaults keep CPU, network and tool-output activity alive without steps for twelve
+  hours, then stop when it becomes idle (`worker/test/job-limits.test.mjs`).
 
 ## REQ-OPERATOR-JOB-CANCEL
 
@@ -8975,6 +8978,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-15 (#895, review) | `REQ-JOB-ACTIVITY-LIMITS` changes regular defaults to idle-only: no implicit stall timeout or maximum age for continuing activity, including tools without agent steps. A twelve-hour runner/backstop composition covers CPU, network and tool-output activity, then idleness. Explicit stall/maximum settings, Watch jobs' ceiling, credential failure stops, spend guards and compatibility fallbacks UNCHANGED, checked. |
 | 2026-11-15 (#895) | AMENDED `REQ-SUBSCRIPTION-AUTHENTICATION` and `REQ-JOB-ACTIVITY-LIMITS`: usable renewable leases admit across the token cycle, renew through provider eligibility, bound unanswered renewal work independently of expiry supervision, refuse unsafe startup and expose actual holds. Quota, trial, paid-overage and model authority UNCHANGED, checked. |
 | 2026-11-14 (#888, part 3) | **`REQ-JOB-ACTIVITY-LIMITS` AMENDED**: a job holding an expiring credential (a GitHub App token, a subscription snapshot) has it renewed while it runs where the venue binds its folders and the image declares `credentialRefresh`, and is stopped as `credential-expired` when a renewal cannot reach it in time; elsewhere it keeps the 30-minute wall clock. `REQ-TOKEN-ACCOUNTING-AND-CAPS` and the subscription requirements UNCHANGED, checked: a renewal admits nothing new. |
 | 2026-11-14 (#888, part 2: the worker) | **`REQ-JOB-ACTIVITY-LIMITS` BUILT**: the deployment settings and the three trigger fields, the backstop, `max-minutes`, the 30-minute fallback for a job no watch covers (and, until credential refresh lands, for one holding a subscription or a GitHub App token), the renewed claims, the activity-aware boot sweep and the record's `limits`; Acceptance gains the worker's tests. **`REQ-JOB-TIMEOUT-30M` SUPERSEDED** by it, kept as an address: its 30 minutes survive as the fallback and the watch jobs' ceiling. `REQ-RUNNER-TURN-BUDGET`, `REQ-OPERATOR-JOB-CANCEL` (the cancel keeps its reason) and `REQ-HOST-BUDGET` UNCHANGED, checked. |

@@ -7,6 +7,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { buildHostLoads, hostLoadsKey } from "@edgehero/pi-dispatch/host-loads";
+import { JOB_IDLE_MINUTES_DEFAULT, JOB_STALL_MINUTES_DEFAULT } from "@edgehero/pi-dispatch/job-limit-rules";
 import { agentReadProjection } from "../src/agent-read.mjs";
 import { CONSOLE_SCRIPT } from "../src/console/script.mjs";
 import { PAGE_CSS } from "../src/console/page-css.mjs";
@@ -520,6 +521,21 @@ test("a flow doctor found nowhere is drawn with attention, for whoever reads the
     assert.ok(note >= 0 && textOf(panel.slice(note)).includes(line), role);
   }
   assert.ok(!textOf(panelOf(await triggerGetsPage({ entry, records: [], loads: loads(answer("overlay", "absent")) }), "p-trigger-gets")).includes("would not find"));
+});
+
+test("the trigger editor shares the worker's idle-only defaults and still shows explicit limits", () => {
+  const absent = () => { throw Object.assign(new Error("absent"), { code: "ENOENT" }); };
+  const fs = { readFileSync: absent, existsSync: () => false, readdirSync: absent, statSync: absent };
+  const read = (env) => readTriggerEditor({ paths: { settingsFile: "/none/settings.json", triggersPath: "/none/triggers.json", globalPiDir: "/none/pi" }, env, fs,
+    folderSkillsFn: () => ({ skills: [] }), overlaySkillsFn: () => ({ skills: [] }), stagedSkillsFn: () => ({ skills: [] }) }).defaults;
+  const defaults = read({});
+  assert.equal(defaults.idleTimeoutMinutes, JOB_IDLE_MINUTES_DEFAULT);
+  assert.equal(defaults.stallTimeoutMinutes, JOB_STALL_MINUTES_DEFAULT);
+  assert.equal(defaults.stallTimeoutMinutes, 0);
+  assert.equal(defaults.maxMinutes, "none");
+  const explicit = read({ PI_JOB_IDLE_MINUTES: "20", PI_JOB_STALL_MINUTES: "240", PI_JOB_MAX_MINUTES: "90" });
+  assert.deepEqual([explicit.idleTimeoutMinutes, explicit.stallTimeoutMinutes, explicit.maxMinutes], [20, 240, 90]);
+  assert.equal(read({ PI_JOB_STALL_MINUTES: "0" }).stallTimeoutMinutes, 0);
 });
 
 test("the flow picker says it is not the whole list where it is drawn, and what it leaves out is what its readers cannot list", async () => {

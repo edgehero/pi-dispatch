@@ -1125,6 +1125,9 @@ refactor apart.
   (the decided line, the catch path, SIGTERM): whole seconds since the last step and the last activity, measured on
   the runner's monotonic clock, and whether the CPU and network probes could read (`false` where a venue hides them:
   such a probe never counts as activity). The counters the worker's backstop reads are `INT-JOB-ACTIVITY-FILE`.
+  Since #895 the worker omits `PI_JOB_STALL_MS` by default (`PI_JOB_STALL_MINUTES=0`), so continuing activity alone
+  keeps a regular job alive. Explicit stall or maximum-time settings and Watch jobs' ceiling are unchanged. The
+  environment and counters retain their existing shapes; this changes only the worker's default.
 
   **The transcript records (AMENDED 2026-10-19, issue #686 part 1): on a copying venue, the session file's lines on
   STDERR, signed with this key.** Given `PI_TRANSCRIPT=stderr` (written by the worker only for an attempt it armed: a
@@ -1437,7 +1440,10 @@ refactor apart.
   completion after stop is discarded for delivery, although a rotated grant is still durably preserved on
   the host. Before each drop, replacement values join the run's literal redaction/workspace-scan collection.
   A short-lease run without the delivery folder, renewal callback, stop callback or startup runway does not
-  spawn. The version-1 drop fields and read-only mount are UNCHANGED, checked.
+  spawn. Renewable admission and final validation require the existing drop's printable-ASCII token grammar,
+  8 to 4096 bytes; unsupported access values refuse before spend as `auth-capability-unsupported`. The stored
+  credential grammar is unchanged, and an already rotated grant is persisted before this refusal. The version-1
+  drop fields and read-only mount are UNCHANGED, checked.
 
 - **Status**: NEW 2026-11-14 (issue #888 part 3, `CONST-TOKEN-SCOPED-PER-JOB`, `REQ-JOB-ACTIVITY-LIMITS`).
 - **What**: a running job's renewed credentials, written by the worker and read by the runner. The folder is
@@ -13962,6 +13968,7 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 
 | Date | Change |
 |---|---|
+| 2026-11-15 (#895, review) | `INT-RUNNER-EXIT-CODE-PROTOCOL` clarifies the idle-only regular-job default: the worker omits the stall variable unless configured. `INT-CREDENTIAL-DROP` requires renewable admission and final validation to satisfy the existing access-token wire grammar, refusing unsupported values before spend while preserving a rotated grant. `INT-RUN-HISTORY-FILE-CONTRACT`, stored credential grammar, counter/drop shapes and versions UNCHANGED, checked. |
 | 2026-11-15 (#895) | AMENDED `INT-SUBSCRIPTION-CREDENTIAL-STORE`, `INT-CREDENTIAL-DROP`, `INT-CONTAINER-RUNTIME-CONTRACT` and `INT-DEFER-REASON-KEY`: renewable timing and compatibility, private scheduling metadata, bounded renewal, startup refusal and retained secrets, plus CLI waiting details and safe hold events. Credential-store, drop, defer and run-history persisted shapes UNCHANGED, checked; no migration or new store/key is needed. |
 | 2026-11-14 (#888, part 3: credentials renewed in a running job) | **NEW `INT-CREDENTIAL-DROP`**: the read-only folder a running job's renewed GitHub App token and subscription snapshots arrive in, its shape and `seq`, who writes what and when, what the runner does with each, the `credential-expired` stop, and the residuals (a process started earlier, the forge's own MCP server, the folder on host disk, copying venues). **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `credential-expired` in the reason enum. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: `PI_CREDENTIAL_REFRESH` and the read-only mount. **UNCHANGED, checked**: `INT-JOB-ACTIVITY-FILE`, `INT-CONTAINER-JOB-INPUTS` (the mount is outside `/job`), `INT-SUBSCRIPTION-CREDENTIAL-STORE` (the host store keeps the refresh grant). **Code evidence**: worker/src/credential-refresh.mjs, worker/src/get-token.mjs (`expiryOf`, `mintFresh`), worker/src/subscription-runtime.mjs (`extend`), worker/src/run-container.mjs, worker/src/container-spec.mjs (`CONTAINER_CREDENTIALS_DIR`), image/runner/src/credential-refresh.mjs, image/runner/src/subscription-credentials.mjs (`refresh`). |
 | 2026-11-14 (#888, part 2: the worker) | **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: a CONDITIONAL `limits` key after `jobCreatedAt` (the effective limits, `basis`, `why`, `channel`, `unavailable`, the backstop's two instants), and `idle`, `stalled` and `max-minutes` in the reason enum. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**: a bullet for `run.idleTimeoutMinutes`, `run.stallTimeoutMinutes` and `run.maxMinutes` (ranges, near misses, precedence, forwarding, skew, versions); `TRIGGERS_FILE_VERSION` 3 and `JOB_DATA_VERSION` 4. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: `PI_JOB_IDLE_MS` and `PI_JOB_STALL_MS`, when they are written and that they are reserved. **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: a worker-initiated stop names its limit through the closed `ABORT_RECORD_REASONS`, `job-timeout-30m` now recorded as `max-minutes`. **`INT-JOB-ACTIVITY-FILE` AMENDED**: its readers are built (the backstop on both channels, and the boot sweep's mtime). **`INT-HOST-REGISTRY-CONTRACT` AMENDED** in its version sentence: `jobDataVersion` 4 and `triggersVersion` 3 since #888. **UNCHANGED, checked**: `INT-CANCEL-CHANNEL-CONTRACT` (an operator's cancel keeps its reason), `INT-CONTAINER-JOB-INPUTS`, `INT-CONFIG-OVERLAY-CONTRACT` (the three settings are env only, never the overlay). **Code evidence**: worker/src/job-limits.mjs, worker/src/job-limit-rules.mjs, worker/src/run-container.mjs, worker/src/index.mjs, worker/src/processor.mjs (`ABORT_RECORD_REASONS`), worker/src/run-history.mjs (`recordedLimits`, `ACTIVITY_RUNNER_REASONS`), worker/src/triggers.mjs, worker/src/stderr-transcript.mjs. |

@@ -10,8 +10,8 @@ const MIN = 60_000;
 const BASE = 1_800_000_000_000;
 const model = { provider: "openai", id: "fixture", api: "openai-responses", baseUrl: "https://api.openai.com/v1" };
 const job = { provider: "openai", model: "fixture", models: ["openai/fixture"] };
-function harness() {
-	const h = { t: BASE, refreshes: [], admissions: 0, writes: [], stops: [], logs: [] };
+function harness({ access = null } = {}) {
+	const h = { t: BASE, access, refreshes: [], admissions: 0, writes: [], stops: [], logs: [] };
 	const now = () => h.t;
 	let saved = null;
 	let tail = Promise.resolve();
@@ -20,7 +20,7 @@ function harness() {
 		tail = result.catch(() => {});
 		return result;
 	} };
-	const credential = () => ({ access: `opaque.lease.${h.t}`, refresh: `private.grant.${h.t}`, expires: h.t + 60 * MIN, earliestRefreshAt: h.t + 54 * MIN });
+	const credential = () => ({ access: h.access ?? `opaque.lease.${h.t}`, refresh: `private.grant.${h.t}`, expires: h.t + 60 * MIN, earliestRefreshAt: h.t + 54 * MIN });
 	const policy = { version: 1, connections: [{ id: "fixture", provider: "openai", adapter: "openai-chatgpt", ownerHost: "owner" }], bindings: { openai: "fixture" } };
 	h.auth = createAuthService({ policy, host: "owner", store, now, adapters: { "openai-chatgpt": {
 		login: async () => credential(), refresh: async ({ credential: previous }) => {
@@ -81,6 +81,54 @@ test("real host lifecycle and runner guard keep requests usable through three ho
 			assert.ok(!h.logs.includes("credential_renew_failed"), "waiting for eligibility is ordinary");
 		} finally { host.stop(); runner.stop(); guard.uninstall(); }
 	}
+});
+
+test("renewable admission and final validation require access that the unchanged-token drop can deliver", async () => {
+	for (const length of [7, 8, 4096, 4097]) {
+		const access = "a".repeat(length);
+		const h = harness({ access }); await h.auth.login("fixture");
+		const options = { deadlineAt: h.t + 30 * MIN };
+		const legacy = await h.auth.prepareSnapshot("openai", options);
+		assert.equal(legacy.ok, true, "the provider/store's existing token range stays valid for legacy admission");
+		const supported = length >= 8 && length <= 4096;
+		assert.equal(await h.auth.validateSnapshot({ ...legacy.snapshot, renewable: true }), supported, `final validation, length ${length}`);
+		const result = await h.runtime.prepare(job, { ...options, renewable: true });
+		assert.equal(result.ok, supported, `admission, length ${length}`);
+		if (!supported) {
+			assert.equal(result.reason, "auth-capability-unsupported");
+			assert.equal(result.unavailable, false, "a known transport limit is a policy refusal, never a retry");
+			assert.equal(result.snapshots, undefined);
+			assert.equal(JSON.stringify(result).includes(access), false);
+			assert.deepEqual(h.refreshes, [], "a fresh bearer is not rotated to work around a transport limit");
+			continue;
+		}
+		const host = makeCredentialRefresher({ now: h.now, subscriptions: result.snapshots, extend: (s, opts) => h.runtime.extend(s, opts), write: (drop) => h.writes.push(drop) });
+		h.t += 20 * MIN;
+		await host.check();
+		const drop = parseCredentialDrop(JSON.stringify(h.writes[0]));
+		assert.equal(drop.subscriptions[0].token, access, "the first lease extension reuses the admitted bearer");
+		class Runtime { async getAuth() { return {}; } async prepareRequest(model, options) { return { model, options }; } }
+		const guard = installSubscriptionCredentials({ ModelRuntime: Runtime, entries: result.snapshots.map((s) => ({ ...s })), env: { OPENAI_API_KEY: access }, now: h.now });
+		try { assert.equal(guard.refresh(drop.subscriptions[0]), true, "the actual runner guard accepts the published extension"); }
+		finally { guard.uninstall(); host.stop(); }
+	}
+});
+
+test("a rotation that exceeds the drop's token limit remains durable before renewable admission refuses", async () => {
+	const h = harness(); await h.auth.login("fixture");
+	h.t += 54 * MIN;
+	h.access = "a".repeat(4097);
+	const options = { deadlineAt: h.t + 30 * MIN };
+	const result = await h.auth.prepareSnapshot("openai", { ...options, renewable: true });
+	assert.equal(result.ok, false);
+	assert.equal(result.reason, "auth-capability-unsupported");
+	assert.equal(result.unavailable, false);
+	assert.equal((await h.auth.status())[0].state, "connected", "delivery incompatibility must not discard a rotated grant");
+	const legacy = await h.auth.prepareSnapshot("openai", options);
+	assert.equal(legacy.ok, true);
+	assert.equal(legacy.snapshot.env.OPENAI_API_KEY, h.access);
+	assert.equal(legacy.snapshot.generation, 2);
+	assert.equal(h.refreshes.length, 1, "the saved replacement is reused, never rotated twice");
 });
 
 test("startup validation refuses a lease consumed by preparation, including the exact runway boundary", async () => {

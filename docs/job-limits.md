@@ -1,7 +1,8 @@
 # Job limits
 
-A running job is stopped when it stops doing anything, never because it is old. A job that keeps working for eight
-hours runs for eight hours. A job that hangs is stopped within minutes.
+A regular job has no time ceiling by default while it keeps doing work, including a tool that runs for hours without
+another AI step. It stops after 15 minutes of inactivity. An operator can explicitly set a stall limit or time ceiling;
+Watch jobs retain their separate 30-minute ceiling.
 
 Money is bounded separately, as before: the turn limit (`PI_MAX_TURNS`, `run.maxTurns`) and the cost caps
 (`PI_MAX_COST_USD`, `run.maxCostUsd`) end a job that spends too much, whatever its limits below say.
@@ -11,7 +12,7 @@ Money is bounded separately, as before: the turn limit (`PI_MAX_TURNS`, `run.max
 | Limit | Stops a job when | Default | Deployment setting | Trigger field |
 |---|---|---|---|---|
 | idle | nothing happened for this many minutes | 15 | `PI_JOB_IDLE_MINUTES` (1 to 1440) | `run.idleTimeoutMinutes` |
-| stalled | the AI took no step for this many minutes, however busy the container was | 240 | `PI_JOB_STALL_MINUTES` (0 turns it off) | `run.stallTimeoutMinutes` |
+| stalled | the AI took no step for this many minutes, however busy the container was | off (0) | `PI_JOB_STALL_MINUTES` (0 turns it off) | `run.stallTimeoutMinutes` |
 | max-minutes | the job has run this long, whatever it was doing | none | `PI_JOB_MAX_MINUTES` | `run.maxMinutes` |
 
 A trigger's idle and stall limits replace the deployment's for its jobs, longer or shorter. Its `run.maxMinutes` can
@@ -34,9 +35,9 @@ and a call by a subagent or a child pi process the job started.
   background that the AI waits on with `sleep`;
 - network traffic in the container, such as `gh run watch` polling a remote CI.
 
-The idle limit needs neither a step nor activity for its whole length. The stall limit needs no step for its whole
-length, however busy the container is: a test stuck in an endless loop keeps the CPU busy for ever, and the stall limit
-is what ends it.
+The idle limit needs neither a step nor activity for its whole length. An explicitly configured stall limit needs no
+step for its whole length, however busy the container is. It can bound an endless loop, but it can also end a long build,
+so it is off by default. Continuing CPU use, network traffic or tool output keeps a regular job alive without a step.
 
 Two things pause the clocks. pi's own wait before it retries a model call does not count, and neither does a moment the
 container was paused (a checkpoint of a durable run, [durable runs](durable-runs.md)).

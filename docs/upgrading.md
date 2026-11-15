@@ -296,6 +296,11 @@ the job image before the worker, following [the normal order](#the-order), and r
 must declare `subscriptionLease` beside `idleWatch` and `credentialRefresh`; the new worker deliberately retains
 the earlier full-deadline coverage on an older image. The short-lease path is available on `local` and `podman`.
 
+Regular jobs now default to idle-only time limits: `PI_JOB_STALL_MINUTES` defaults to 0 instead of 240, and there is
+still no default `maxMinutes`. A busy tool can keep running without an AI step for as long as needed. Explicit stall
+and maximum-time settings remain effective, and Watch jobs keep their 30-minute ceiling. To retain the former stall
+behavior, set `PI_JOB_STALL_MINUTES=240`. Credential failures, spend limits and legacy-image fallbacks still apply.
+
 No credential-store, queued-job or defer-record migration is needed. The same host-owned refresh grant stays in its
 private store. `pi-dispatch status` gains additive `waitingDetails`, and a remaining authentication hold is logged
 as `subscription_auth_hold`. See [subscription renewal](subscription-auth.md#admission-and-renewal),
