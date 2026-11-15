@@ -4,6 +4,7 @@ import { EventEmitter } from "node:events";
 import { test } from "node:test";
 import { makeReceiver } from "../src/receiver.mjs";
 import { makeReceiverObservations, RECEIVER_FORGES, RECEIVER_OUTCOMES } from "@edgehero/pi-dispatch/receiver-status";
+import { JOB_FIELD, QUEUE_KEY, jobKeyOf, queueKeyOf, semanticWindowKeyOf } from "@edgehero/pi-dispatch/bullmq-internals";
 
 const AT = Date.UTC(2026, 10, 1, 12);
 const now = () => AT;
@@ -23,13 +24,21 @@ function rawOf(forge, body = "@pi work") {
 }
 function build(forge, { disabled = false, dedup = false, lookup = false, enqueue = false, error = false, observations = makeReceiverObservations({ now }) } = {}) {
 	let adds = 0; let clients = 0;
+	const reads = [];
+	let addedOpts = null;
 	const rule = { index: 1, phrase: "@pi", defaultFlow: "triage", repository: "widgets" };
 	const groups = Object.fromEntries(RECEIVER_FORGES.map((f) => [f, { label: [], comment: rule, pullRequest: [], issue: [{ index: 2, actions: new Set(["closed"]), number: 7, once: true, flow: "triage" }] }]));
-	const queue = { get client() { clients++; throw new Error("request telemetry must stay in memory"); }, add: async (_name, _data, opts) => { adds++; if (enqueue) throw new Error("infrastructure"); return { id: dedup ? "survivor" : opts.jobId }; } };
+	// #899 adds one read-only survivor snapshot on a semantic duplicate. Telemetry still performs no storage I/O:
+	// record every client use and eval for assertions outside the receiver's error-catching boundary below.
+	const queue = {
+		name: "pi-jobs-telemetry",
+		get client() { clients++; return Promise.resolve({ eval: async (...args) => { reads.push(args); return ["retained"]; } }); },
+		add: async (_name, _data, opts) => { adds++; addedOpts = opts; if (enqueue) throw new Error("infrastructure"); return { id: dedup ? "survivor" : opts.jobId }; },
+	};
 	const resolveAuthority = async () => lookup ? { indeterminate: "lookup-failed" } : { authorized: true };
 	const handler = makeReceiver({ queue, selfId: 999, cfg: { servesGithub: !disabled, webhookSecret: SECRET, triggers: { ...groups, knownFlows: new Set(["triage"]) } }, log: error ? () => { throw new Error("sink"); } : () => {}, now, observations,
 		gitlab: disabled ? null : { mode: "token", secret: SECRET, selfId: 999, resolveAuthority }, forgejo: disabled ? null : { secret: SECRET, selfId: 999, resolveAuthority }, azure: disabled ? null : { mode: "header", headerName: "x-auth", secret: SECRET, selfId: { id: "self", email: "bot@example.com" }, resolveAuthority }, resolveAuthority });
-	return { handler, observations, adds: () => adds, clients: () => clients };
+	return { handler, observations, adds: () => adds, clients: () => clients, reads, snapshotArgs: () => [3, semanticWindowKeyOf(queue, addedOpts.deduplication.id), jobKeyOf(queue, "survivor"), queueKeyOf(queue, QUEUE_KEY.completed), "survivor", addedOpts.deduplication.id] };
 }
 async function drive(handler, req, raw) {
 	const res = { statusCode: 0, headersSent: false, body: null, ended: false, writeHead(status) { this.statusCode = status; this.headersSent = true; }, end(body) { this.ended = true; this.body = body; return this; } };
@@ -58,7 +67,19 @@ for (const forge of RECEIVER_FORGES) {
 			assert.equal(res.statusCode, status, `${word}/${status}`);
 			const result = fixture.observations.snapshot();
 			for (const f of RECEIVER_FORGES) for (const w of RECEIVER_OUTCOMES) assert.equal(result[f][w].hours.reduce((n, r) => n + r[1], 0), f === forge && w === word ? 1 : 0, `${word}: ${f}/${w}`);
-			assert.equal(fixture.clients(), 0); assert.doesNotMatch(JSON.stringify(result), new RegExp(SENTINEL));
+			const snapshots = word === "deduplicated" ? 1 : 0;
+			assert.equal(fixture.clients(), snapshots, "only semantic dedup may read its survivor; telemetry never opens a client");
+			assert.equal(fixture.reads.length, snapshots, "exactly one read, with no telemetry storage call");
+			if (snapshots) {
+				const [script, ...args] = fixture.reads[0];
+				assert.deepEqual(args, fixture.snapshotArgs(), "the read names only this semantic key and its surviving job");
+				assert.deepEqual([...script.matchAll(/redis\.call\("([A-Z]+)"/g)].map((match) => match[1]), ["GET", "HGET", "ZSCORE", "HGET"], "the snapshot has only reads, no telemetry write hidden in its script");
+				assert.ok(script.includes('redis.call("GET", KEYS[1]) ~= ARGV[1]'), "the key's current owner is checked");
+				assert.ok(script.includes(`redis.call("HGET", KEYS[2], "${JOB_FIELD.dedupId}") ~= ARGV[2]`), "the stored semantic identity is checked");
+				assert.ok(script.includes('redis.call("ZSCORE", KEYS[3], ARGV[1])'), "completed membership is checked");
+				assert.ok(script.includes(`redis.call("HGET", KEYS[2], "${JOB_FIELD.result}")`), "the actual survivor's result is read");
+			}
+			assert.doesNotMatch(JSON.stringify(result), new RegExp(SENTINEL));
 		}
 	});
 }

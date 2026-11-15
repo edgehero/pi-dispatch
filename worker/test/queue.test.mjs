@@ -685,16 +685,16 @@ test("releaseSemanticWindow asks the job's own compare-and-delete, fails open wi
 	const job = { id: "gh-a", deduplicationId: "o/r#7:fix", removeDeduplicationKey: async () => (asked++, true) };
 	assert.equal(await releaseSemanticWindow(job, log), true);
 	assert.equal(asked, 1);
-	assert.deepEqual(lines, [{ event: "parked_window_released", jobId: "gh-a", released: true }], "the id is logged, never the key: it carries the repo");
+	assert.deepEqual(lines, [{ event: "semantic_window_released", jobId: "gh-a", cause: "parked", released: true }], "the id is logged, never the key: it carries the repo");
 
 	lines.length = 0;
 	assert.equal(await releaseSemanticWindow({ ...job, removeDeduplicationKey: async () => false }, log), false, "a lapsed window is not an error");
-	assert.deepEqual(lines, [{ event: "parked_window_released", jobId: "gh-a", released: false }]);
+	assert.deepEqual(lines, [{ event: "semantic_window_released", jobId: "gh-a", cause: "parked", released: false }]);
 
 	lines.length = 0;
 	const failing = { ...job, removeDeduplicationKey: async () => Promise.reject(Object.assign(new Error("down"), { code: "ECONNREFUSED" })) };
 	assert.equal(await releaseSemanticWindow(failing, log), false, "never throws");
-	assert.deepEqual(lines, [{ event: "parked_window_release_failed", jobId: "gh-a", code: "ECONNREFUSED" }]);
+	assert.deepEqual(lines, [{ event: "semantic_window_release_failed", jobId: "gh-a", cause: "parked", code: "ECONNREFUSED" }]);
 
 	lines.length = 0;
 	assert.equal(await releaseSemanticWindow({ id: "local-1", removeDeduplicationKey: async () => assert.fail("no key to free") }, log), false, "a local job carries no window");

@@ -1671,6 +1671,101 @@ test("poller: a semantic-window swallow is its own out-line with the survivor, a
 	assert.ok(dedup.every((l) => l.survivingJobId === "the-survivor" && typeof l.jobId === "string"));
 });
 
+const semanticValkeyUrl = process.env.VALKEY_TEST_URL;
+if (!semanticValkeyUrl && process.env.PI_DISPATCH_REQUIRE_RECEIVER_TESTS === "1") throw new Error("the #899 poller integration requires VALKEY_TEST_URL");
+const semanticSkip = semanticValkeyUrl ? false : "VALKEY_TEST_URL not set; poller semantic-window integration skipped";
+
+/** A real old-worker result, deliberately finalized without the new worker's eager window release. */
+async function semanticPollWorld(reason) {
+	const { randomUUID } = await import("node:crypto");
+	const { Queue, Worker } = await import("bullmq");
+	const { parseConnection } = await import("@edgehero/pi-dispatch/connection");
+	const { enqueueGitHubJob } = await import("@edgehero/pi-dispatch/queue");
+	const connection = parseConnection(semanticValkeyUrl);
+	const queue = new Queue(`poll-policy-${randomUUID()}`, { connection });
+	const worker = new Worker(queue.name, null, { connection, autorun: false });
+	const close = async () => {
+		await worker.close();
+		await queue.obliterate({ force: true }).catch(() => {});
+		await queue.close();
+	};
+	try {
+		const cfg = loadPollerConfig({ POLL_REPOS: "o/r" }, FS);
+		const first = filter("issues", parseSubset({ action: "labeled", sender: { id: 5 }, issue: ISSUE7, repository: REPOSITORY }), cfg, SELF, "poll-e100");
+		assert.equal(first.enqueue, true);
+		await enqueueGitHubJob(queue, first.job);
+		const active = await worker.getNextJob("original-token", { block: false });
+		await active.moveToCompleted({ outcome: "policy", reason, budgetReserved: reason === "operator-cancel" }, "original-token", false);
+		assert.equal(await queue.getDeduplicationJobId(active.deduplicationId), "gh-poll-e100", "the reproducer starts with the stale window still held");
+		return { queue, worker, enqueue: (job, target = queue) => enqueueGitHubJob(target, job), close };
+	} catch (error) {
+		await close();
+		throw error;
+	}
+}
+
+function semanticPollRoutes(events) {
+	return [
+		{ path: "/repos/o/r/issues/events", replies: [ghResponse(200, [EV100]), ghResponse(200, events)] },
+		{ path: "/repos/o/r/issues/comments", replies: [ghResponse(200, [])] },
+		{ path: "/repos/o/r/pulls?state=open", replies: [ghResponse(200, [])] },
+	];
+}
+
+for (const reason of ["secret-bundle-trigger-changed", "operator-cancel"]) {
+	test(`poller re-label after ${reason} enqueues a replacement and counts only the real survivor (#899)`, { skip: semanticSkip }, async () => {
+		const world = await semanticPollWorld(reason);
+		try {
+			const { out, redis } = await runPoller({ cycles: 2, clock: { ms: Date.now() }, routes: semanticPollRoutes([{ ...EV201, id: 203 }, EV201, EV100]), queueFn: world.enqueue });
+			assertNoRepoFailure(out);
+			assert.deepEqual(out.filter((line) => line.event === "enqueued").map((line) => [line.delivery, line.replicas]), [["poll-e201", 1]]);
+			assert.deepEqual(out.filter((line) => line.event === "deduplicated").map((line) => [line.delivery, line.survivingJobId]), [["poll-e203", "gh-poll-e201"]]);
+			assert.deepEqual(out.filter((line) => line.event === "poll_cycle").map((line) => line.enqueued), [0, 1]);
+			assert.equal(redis.kv.get("poll:o/r:cursor:events"), "203");
+			const replacement = await world.worker.getNextJob("replacement-token", { block: false });
+			assert.equal(replacement.id, "gh-poll-e201");
+			await replacement.moveToCompleted({ outcome: "completed" }, "replacement-token", false);
+		} finally {
+			await world.close();
+		}
+	});
+}
+
+test("poller keeps the event cursor when semantic repair fails, then retries that label rather than losing it (#899)", { skip: semanticSkip }, async () => {
+	const world = await semanticPollWorld("secret-bundle-trigger-changed");
+	try {
+		const client = await world.queue.client;
+		let faults = 1;
+		const faulted = {
+			name: world.queue.name,
+			toKey: world.queue.toKey.bind(world.queue),
+			add: world.queue.add.bind(world.queue),
+			client: Promise.resolve({ eval: (...args) => {
+				if (faults-- > 0) throw new Error("semantic-read-unavailable");
+				return client.eval(...args);
+			} }),
+		};
+		const clock = { ms: Date.now() };
+		const redis = fakeRedis({ clock });
+		const cursors = [];
+		const attempted = [];
+		const { out } = await runPoller({
+			cycles: 3, clock, redis, routes: semanticPollRoutes([EV201, EV100]),
+			queueFn: (job) => { attempted.push(job.trigger.deliveryId); return world.enqueue(job, faulted); },
+			nap: (ms) => { cursors.push(redis.kv.get("poll:o/r:cursor:events")); return ms; },
+		});
+		assert.deepEqual(attempted, ["poll-e201", "poll-e201"], "the failed event is offered again with the same delivery id");
+		assert.deepEqual(cursors, ["100", "100", "201"], "no cursor advances past a failed repair");
+		assert.deepEqual(out.filter((line) => line.event === "poll_repo_failed").map((line) => line.reason), ["semantic-read-unavailable"]);
+		assert.deepEqual(out.filter((line) => line.event === "poll_cycle").map((line) => line.enqueued), [0, 0, 1]);
+		assert.deepEqual(out.filter((line) => line.event === "deduplicated"), [], "a failed lookup is never reported as a handled duplicate");
+		assert.deepEqual(out.filter((line) => line.event === "enqueued").map((line) => line.delivery), ["poll-e201"]);
+		assert.ok(await world.queue.getJob("gh-poll-e201"));
+	} finally {
+		await world.close();
+	}
+});
+
 // Issue #464 (gate round 3): the poller judges its Valkey before it builds its own clients, as the receiver does.
 test("the poller judges VALKEY_URL before building its own Valkey clients, and a refusal stops it (#464)", async () => {
 	const refusal = Object.assign(new Error("the Valkey VALKEY_URL reaches is refused"), { piDispatchConfig: true, valkeyRefused: true });

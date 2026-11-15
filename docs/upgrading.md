@@ -289,6 +289,26 @@ pause flag, the delayed score, the run ids of a cron trigger) is in one module, 
 checked against that version by its tests. Never roll back across a release that moved the BullMQ pin while jobs are
 queued: an older BullMQ need not read what a newer one wrote. The release notes name such a bump.
 
+## Pending release: refused and cancelled jobs
+
+Issue #899 changes the lifetime of a forge job's semantic duplicate window. A terminal policy refusal or an active
+cancellation releases its owned window after the worker finishes processing and cleanup. A new event for the same
+target and flow can then start a job inside the usual ten minutes. The original retained delivery still resolves to
+its original job. A queued or held cancellation already removes its owned window with the job.
+
+Follow [the normal order](#the-order): upgrade every worker, then the receiver/poller, using the release's matching
+packages. New workers release windows as jobs end, including jobs an older receiver queued. New receiver/poller
+processes repair a completed policy job's window on the next event, including one left by an older worker or a
+failed completion cleanup. An old receiver with an old worker can still suppress that event until the window ends;
+a mixed fleet therefore needs both upgrades. A cancellation still in progress, a live or deferred job, an ordinary
+successful run, and recovery handoffs retain their existing window behavior.
+
+No queued-job, run-record or key-format migration is needed, and no new persistent state is added. The duplicate
+window remains ten minutes and delivery retention stays unchanged. Rolling back restores the old window-release
+behavior; already released keys are not recreated. Fix the original refusal, wait for cancellation to finish when
+applicable, then send a new event ([triggers](triggers.md#when-another-event-starts-a-job)). This note has no release
+number until the change ships.
+
 ## 5.3.1: subscription renewal
 
 Issue #895 removes the recurring authentication wait and premature credential stops for subscription jobs. Move

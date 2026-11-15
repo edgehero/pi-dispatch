@@ -2,7 +2,8 @@ import { makeApprovalStore } from "./approval-state.mjs";
 import { validateFork } from "./fork-job.mjs";
 import { randomUUID } from "node:crypto";
 import { Queue } from "bullmq";
-import { metaKeyPattern, queueNameOfMetaKey } from "./bullmq-internals.mjs";
+import { metaKeyPattern, queueNameOfMetaKey, readSemanticWindowOwner, releaseCompletedSemanticWindow } from "./bullmq-internals.mjs";
+import { semanticWindowDisposition } from "./semantic-window-policy.mjs";
 import { assertJudgedConnection, givesUp, onValkeyError } from "./connection.mjs";
 import { chainedJobId, localJobId, deliveryJobId, gitlabDeliveryJobId, forgeDeliveryJobId, manualCanaryJobId, manualTriggerJobId } from "./job-id.mjs";
 import { targetSeparator } from "./forges.mjs";
@@ -351,7 +352,7 @@ async function addLocalJob(queue, { folder, flow, task, command, provider, model
 const SEMANTIC_WINDOW_MS = 10 * 60 * 1000;
 
 /**
- * Close the semantic window of a run that PARKED (REQ-AWAIT-INPUT, DES-AWAIT-INPUT-ENDS-THE-JOB). Never throws.
+ * Close a terminal run's semantic window (#899, REQ-DEDUP-BY-DELIVERY-GUID). Never throws.
  *
  * The window exists to coalesce rapid duplicate deliveries into one ACTIVE job. A ttl-mode key outlives the job it
  * was set for (bullmq 5.80.4, `removeDeduplicationKeyIfNeededOnFinalization.lua`: a finished job deletes its key only
@@ -370,15 +371,60 @@ const SEMANTIC_WINDOW_MS = 10 * 60 * 1000;
  * `released` is false, logged as a release and not as a failure, when the key is already gone (the window lapsed
  * during a long run) or now names another job.
  */
-export async function releaseSemanticWindow(job, log = () => {}) {
+export async function releaseSemanticWindow(job, log = () => {}, { cause = "parked", timeoutMs = 2_000 } = {}) {
 	if (!job?.deduplicationId || typeof job.removeDeduplicationKey !== "function") return false;
+	const source = ["parked", "steer", "policy"].includes(cause) ? cause : "policy";
+	const note = (event, fields) => { try { log(event, { jobId: job.id ?? null, cause: source, ...fields }); } catch {} };
+	let timer;
 	try {
-		const released = (await job.removeDeduplicationKey()) === true;
-		log("parked_window_released", { jobId: job.id ?? null, released });
+		// Worker connections wait through reconnects indefinitely. Cleanup must not keep a refused job active that
+		// long; a late command remains safe because the job's method compares ownership inside its delete.
+		const released = (await Promise.race([
+			Promise.resolve().then(() => job.removeDeduplicationKey()),
+			new Promise((_, reject) => { timer = setTimeout(() => reject(Object.assign(new Error("semantic window release timed out"), { code: "ETIMEDOUT" })), timeoutMs); }),
+		])) === true;
+		note("semantic_window_released", { released });
 		return released;
 	} catch (error) {
-		log("parked_window_release_failed", { jobId: job.id ?? null, code: typeof error?.code === "string" ? error.code : "error" });
+		note("semantic_window_release_failed", { code: typeof error?.code === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(error.code) ? error.code : "error" });
 		return false;
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+const SEMANTIC_REPAIR_LIMIT = 3;
+const semanticStateError = (code) => Object.assign(new Error(code), { code });
+
+/**
+ * Repair only a stale terminal policy owner, then ask the ordinary add to arbitrate the new delivery (#899).
+ * No pre-read on a normal enqueue or GUID replay. The add's returned Job has the INCOMING data and options even
+ * when its id names a different job, so it is never evidence of what the survivor did. All repair reads are of
+ * that actual owner's hash and completed membership on the destination queue, through the pinned internals leaf.
+ */
+async function addForgeWithSemanticRepair(queue, kind, data, opts) {
+	for (let repairs = 0; ; repairs++) {
+		const added = await queue.add(kind, data, opts);
+		if (!added?.id || added.id === opts.jobId) return added;
+		// Old dependency-injected queues have only add; a real BullMQ queue always has a client. Their historical
+		// comparison remains useful in producer tests, while repair itself is proved against the actual library.
+		if (!("client" in queue)) return added;
+		const owner = await readSemanticWindowOwner(queue, opts.deduplication.id, added.id);
+		if (owner.state === "invalid") throw semanticStateError("semantic-window-state-invalid");
+		if (owner.state === "retained") return added;
+		if (owner.state === "completed") {
+			let result;
+			try { result = JSON.parse(owner.rawResult); } catch { throw semanticStateError("semantic-window-result-invalid"); }
+			const disposition = semanticWindowDisposition(result);
+			if (disposition === "invalid") throw semanticStateError("semantic-window-result-invalid");
+			if (disposition === "retain") return added;
+		}
+		// Every conditional delete gets its following add, including the final allowed repair. A replacement
+		// that keeps changing is an enqueue failure, never a 202 claiming this event was safely coalesced.
+		if (repairs >= SEMANTIC_REPAIR_LIMIT) throw semanticStateError("semantic-window-repair-contended");
+		if (owner.state === "completed") await releaseCompletedSemanticWindow(queue, opts.deduplication.id, added.id, owner.rawResult);
+		// An expired/replaced key or a failed compare also asks add again; it may now be this event's turn, or a
+		// different live job may own the key. No bespoke insertion and no deletion of the delivery's job hash.
 	}
 }
 
@@ -469,7 +515,7 @@ export async function enqueueForgeJob(queue, kind, fields, { dataVersions } = {}
 	const routed = routedName !== null && routedName !== queue.name ? makeQueue(queue.opts.connection, { name: routedName }) : null;
 	let added;
 	try {
-		added = await (routed ?? queue).add(kind, data, {
+		added = await addForgeWithSemanticRepair(routed ?? queue, kind, data, {
 			jobId,
 			deduplication: { id: dedupId, ttl: SEMANTIC_WINDOW_MS }, // ttl in ms
 			...forgeJobOpts(),

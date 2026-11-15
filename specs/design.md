@@ -163,7 +163,35 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   id -- so `enqueueForgeJob` compares and returns `{ jobId, deduplicated, survivingJobId? }`, and the
   receiver stops logging `enqueued` and answering "queued" for a delivery that created nothing
   (`REQ-DEDUP-BY-DELIVERY-GUID` carries the surface contract).
+- **Policy outcomes end the semantic window** (issue #899): the worker's common result boundary releases a terminal
+  policy job's stored key after processing and cleanup. The classifier follows `outcome: "policy"`, not individual
+  refusal reasons or spend; `recovery-enqueued` and `recovery-superseded` keep their handoff behavior. The real job's
+  `removeDeduplicationKey()` compares ownership atomically. Its failure is logged and does not turn a policy return
+  into an infrastructure throw. The release waits at most two seconds; a command that finishes later is still safe
+  because ownership is checked inside its delete. The neutral log names are `semantic_window_released` and
+  `semantic_window_release_failed`, with a closed `cause` of `parked`, `steer` or `policy`. Successful ordinary jobs
+  and infrastructure failures retain the existing ttl; parking and steering retain their own earlier releases and
+  ordering.
+  The shared forge enqueue also repairs a completed policy survivor left by a crashed or older worker. It reads the
+  survivor from the destination queue, never from `queue.add`'s returned object, which holds incoming data with the
+  survivor's id at BullMQ 5.80.4. The repair atomically checks the terminal state/result and stored key identity and
+  ownership before deletion, then uses the normal BullMQ add. Its atomic read captures the actual owner hash and
+  completed-set membership; JavaScript classifies the result, and the delete compares the exact raw result bytes
+  together with the stored dedup id, owner and completed membership. Each of at most three repairs gets a following
+  ordinary add. A storage fault or exhausted repair bound is an enqueue failure, never a confirmed duplicate. Pinned
+  storage details belong to `bullmq-internals.mjs`. The shared disposition retains legacy null and non-policy results,
+  but marks a structured policy result with no valid reason token invalid: ingress fails explicitly and keeps the
+  key, while best-effort worker cleanup preserves the result without releasing it. No new state family, queue format
+  or subscriber is needed. The result reported is the final
+  add's, so an event admitted by repair is queued on the wire and counted by the poller.
 - **Rejected**:
+  - *A refusal-reason allowlist* (issue #899): a new policy refusal would silently regain the defect. The existing
+    outcome class and explicit recovery handoffs carry the distinction.
+  - *Deleting the whole job or shortening the ttl after refusal* (issue #899): the first destroys retained delivery
+    replay protection and the second leaves a period in which a corrected event still disappears.
+  - *An unconditional key delete* (issue #899): a delayed old release could erase the window a replacement now owns.
+  - *Completion cleanup alone* (issue #899): a crash, an unavailable Valkey or an older worker can leave the key behind;
+    the next producer must be able to repair it from authoritative terminal state.
   - *Hand-rolled Redis list* — reimplements the five mechanisms above, badly, forever.
   - *GitHub Actions `concurrency:` groups* — claude-code-action's own docs concede the action has no
     queue either; concurrency groups cancel or serialise, they do not hold a wait-list.
@@ -7399,8 +7427,8 @@ free local model, or using a few successful live probes as proof of every routin
   `deid` the add stored. After the promotion, so an answer that gets in finds the `parked` mark and the transcript;
   before the comment and the label, because those are what invite an answer (the label routes a phrase-free reply,
   the comment tells a pull request's author to reply). A resumed run that parks again takes the same branch. It fails
-  open with `parked_window_release_failed`: a failure only restores the old behaviour, the answer waiting out the
-  window.
+  open with `semantic_window_release_failed` (`cause: "parked"`): a failure only restores the old behaviour, the
+  answer waiting out the window.
   - *Rejected: rebuilding the key from the job data* (a shared id function in `queue.mjs`). It would work, but the job
     already carries the id its add stored; a rebuild is a second reading of the format that must agree with the
     add's for every job ever queued, and it would need every field the key encodes (target type, `closed:`, `cmd:`,
@@ -7460,9 +7488,9 @@ free local model, or using a few successful live probes as proof of every routin
     the run was cancelled, not parked). A held reply and a steered late message never both start a job: when a held
     reply was taken (here or by another job), the steer settle answers its late messages instead (`heldResumed`). So the rule is: an answer to
     an awaitInput run, written within five minutes before it parks and arriving before the park has taken its held
-    replies, is held and becomes the one resumed job once it has parked; otherwise coalescing is unchanged. Not done:
-    a release at the final outcome, since the park already released the window and a run that did not park keeps
-    today's coalescing. Its own residuals, named: a comment written in the last five minutes before the question and
+    replies, is held and becomes the one resumed job once it has parked; otherwise coalescing is unchanged. The held
+    reply settle itself releases no window: the park already released it, while the separate steering and terminal
+    policy releases follow `REQ-DEDUP-BY-DELIVERY-GUID`. Its own residuals, named: a comment written in the last five minutes before the question and
     not meant as an answer is taken as one (the resumed agent reads it as a reply and may ask again); a reply that
     meets the taken job while it is still queued is answered `deduplicated` (its keeper registers it only once it
     runs), as any reply into a queued job always was; a keeper that cannot reach Valkey leaves its run unregistered,
@@ -8429,7 +8457,7 @@ free local model, or using a few successful live probes as proof of every routin
     the close) and must start a job of its own, which the window the run's start delivery still holds would swallow
     for the rest of its ten minutes (`REQ-DEDUP-BY-DELIVERY-GUID`). It is the parked branch's release
     (`releaseSemanticWindow`, the job's own compare-and-delete, so it never frees a window a later job holds), and it
-    logs under that branch's names (`parked_window_released`, `parked_window_release_failed`). `settleInbox` awaits
+    logs `semantic_window_released` or `semantic_window_release_failed`, with `cause: "steer"`. `settleInbox` awaits
     the seam with the run's context (`{ job, runId, result, error }`) at the FIRST successful close only, with no late
     entries too, so the release and either branch finish before the record is written. `closeInbox` answers `first`
     (true only for the call that made the closing transition, review round 1): a terminal thrown failure is settled
@@ -10120,6 +10148,15 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
   `connect` event), and "could not reach", with the hint, where none ever was; and `removeQueuedJob` refuses when the
   hold's hash cannot be read, nothing sent, since reading it as no hold removed a held job by the plain path when the
   read timed out and Valkey then woke, leaving the hold as a panel row for a job that was gone.
+- **Semantic window** (issue #899): a completed active cancellation is a terminal policy result and releases its
+  window at the common worker result boundary, after processing and cleanup. The request/ack channel remains only
+  the requester's evidence that the worker accepted the stop, not permission to release while the job still runs.
+  Queued and held cancels keep `job.remove()` and its atomic owned-key removal. No separately issued delete precedes
+  a removal, so a locked job or failed removal retains its protection. The common producer repair in
+  `DES-QUEUE-BULLMQ-OVER-CUSTOM` covers a completed cancellation whose release was missed. Terminal means the
+  worker's outcome, not proof that a broken runtime obeyed its stop: the existing `stop_did_not_take` path can finish
+  with cancellation while physical exit is unknown. Its orphan resource holds and reaping remain unchanged;
+  releasing duplicate suppression is no release of those holds.
 - **Why**: the abort machinery was complete with exactly two triggers, both automatic, and the only
   human-shaped door (`dispatch_wait_cancel`) reached held jobs only and was model-callable only -- an
   operator had to ask a model to stop a job the panel was showing them, or type `docker stop` by hand.
@@ -18138,6 +18175,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-11-15 (#899) | `DES-QUEUE-BULLMQ-OVER-CUSTOM` and `DES-CANCEL-VIA-REDIS-REQUEST-KEY` AMENDED: one terminal-policy classifier and a common worker result boundary release only the job-owned key; shared ingress repairs a completed policy survivor from its stored state, never the incoming data of the add result. Atomic state/result/identity/ownership checks and the ordinary add preserve races. Reason allowlists, unconditional deletion, changed TTLs and cleanup alone are rejected. Existing cancellation acknowledgment, queued removal, parking/steering order, orphan resource holds and retry/recovery contracts UNCHANGED, checked. `DES-AWAIT-INPUT-ENDS-THE-JOB` and `DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY` AMENDED for the neutral `semantic_window_released` / `semantic_window_release_failed` log names with a closed cause; release waits at most two seconds and late deletes retain ownership checks. |
 | 2026-11-15 (#897) | **`DES-OPERATOR-CONSOLE` AMENDED**: a new bullet before "One rule for what needs the person", "A failed job whose work has since been done asks nothing": `supersededFailures` judges each failed row against the wide window's records (the same cron trigger, or the same forge target and flow, a run that completed and started after the failure ended), the snapshot's failed rows carry `supersededBy`, and Needs you, the headline, Fleet's failed card, a bulk Retry's preview, the `/dispatch` panel, `/api/state` and the agent's failed read each act on it; what the records cannot settle is not judged and keeps asking; nothing is written. REJECTED: removing a superseded job from the queue, the trigger's index as the work's key, any later run, and one that started before the failure ended. UNCHANGED, checked: the failed set's read (`FAILED_PER_QUEUE`, `FAILED_LIMIT`, the projection's other keys), the day line and All clear's day rule (a failed record of the last 24 hours still counts there: it is the day's history, not a request), `retry-failed` for one job (no surface offers it for a superseded row; asked for anyway, it retries as before), and `remove-failed` and `remove-all-failed`. |
 | 2026-11-15 (#896) | **`DES-OPERATOR-CONSOLE` AMENDED**, the timeline: the overview opens on `24h`, the whole day `runsDay` is read for, where it opened on `3h` and a project whose last run ended more than three hours earlier was not on the card at all, with nothing saying older runs existed. The cost is density: a pill is at least `PILL_MIN_PCT` wide, about 43 minutes at a day, so a schedule every half hour fills its row's four lanes and its quiet completed runs are counted, the packing rule unchanged. The overview's links leave the default out by `TIMELINE_DEFAULTS` itself, where the zoom's was a `3h` literal. REJECTED: remembering each browser's last window, which needs a cookie or the page's script for a choice one click makes. UNCHANGED, checked: `TIMELINE_ZOOMS` and every drawing at a named zoom; `REQ-OPERATOR-CONSOLE-SCREENS` (a4), which names the three windows and no default; the design cards, which draw the `3h` window, one of the three, and claim no default (`TimelineAndWaitlists`, whose bytes the timeline tests hold, and the three overview screens). |
 | 2026-11-15 (#895, review) | `DES-JOB-ACTIVITY-WATCH` replaces the default four-hour stall limit with 0 (off), the owner's choice that regular active jobs have no time ceiling even without agent steps. Explicit limits and Watch jobs retain their bounds. `DES-STORE-VERSION-WHEN-NEEDED` UNCHANGED, checked: existing zero/null values already represent disabled limits; no field or stored version changes. |

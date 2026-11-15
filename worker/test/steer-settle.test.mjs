@@ -441,7 +441,7 @@ test("THE WINDOW: released at a steer-armed run's final outcome (no late message
 	const env = lateEnv();
 	await settleInbox({ redis: {}, job: env.runJob, result: { outcome: "completed" }, inbox: { closeInbox: async () => closed }, onLateForge: env.onLateForge });
 	assert.deepEqual(env.calls.releases, ["removed"], "released through the job's own compare-and-delete");
-	assert.ok(env.logs.some(([e, f]) => e === "parked_window_released" && f.released === true));
+	assert.ok(env.logs.some(([e, f]) => e === "semantic_window_released" && f.released === true));
 	assert.equal(env.calls.comments.length, 0);
 
 	const plain = lateEnv({ jobOver: { data: { kind: "github", repo: "o/r", target: { type: "issue", number: 7 } } } });

@@ -258,3 +258,54 @@ test("a re-label inside the semantic window answers 202 deduplicated on a REAL V
 		await queue.close();
 	}
 });
+
+for (const reason of ["secret-bundle-trigger-changed", "operator-cancel"]) {
+	test(`a new webhook label after ${reason} repairs the old window, while its GUID replay stays the old job (#899)`, { skip }, async () => {
+		const { Queue, Worker } = await import("bullmq");
+		const { parseConnection } = await import("@edgehero/pi-dispatch/connection");
+		const connection = parseConnection(url);
+		const queue = new Queue(`recv-policy-${crypto.randomUUID()}`, { connection });
+		const worker = new Worker(queue.name, null, { connection, autorun: false });
+		try {
+			const raw = JSON.stringify({ action: "labeled", sender: { id: 1 }, repository: { full_name: "octo/repo" }, issue: { number: 42, title: "T", body: "B", labels: [{ name: "pi:frontend" }] } });
+			const logs = [];
+			const handler = makeReceiver({ queue, selfId: SELF_ID, cfg, now: Date.now, log: (line) => logs.push(line) });
+			const post = async (delivery, target = handler) => {
+				const req = mockReq({ headers: { "content-type": "application/json", "x-hub-signature-256": sign(SECRET, raw), "x-github-event": "issues", "x-github-delivery": delivery } });
+				const res = mockRes();
+				await drive(target, req, res, raw);
+				return { code: res.statusCode, body: JSON.parse(res.body) };
+			};
+			const original = crypto.randomUUID();
+			assert.deepEqual(await post(original), { code: 202, body: { status: "queued" } });
+			const active = await worker.getNextJob("original-token", { block: false });
+			assert.equal(active.id, `gh-${original}`);
+			// An old worker (or a failed cleanup) writes the terminal policy result but leaves BullMQ's timed key.
+			await active.moveToCompleted({ outcome: "policy", reason, budgetReserved: reason === "operator-cancel" }, "original-token", false);
+			assert.equal(await queue.getDeduplicationJobId(active.deduplicationId), active.id);
+			assert.deepEqual(await post(original), { code: 202, body: { status: "queued" } });
+			assert.deepEqual(await queue.getJobCounts("completed", "waiting"), { completed: 1, waiting: 0, paused: 0 }, "the retained GUID is never revived");
+			logs.length = 0;
+			const corrected = crypto.randomUUID();
+			const duplicate = crypto.randomUUID();
+			if (reason === "secret-bundle-trigger-changed") {
+				const faultedQueue = { name: queue.name, toKey: queue.toKey.bind(queue), add: queue.add.bind(queue), client: Promise.resolve({ eval: async () => { throw new Error("semantic-read-unavailable"); } }) };
+				const unavailable = makeReceiver({ queue: faultedQueue, selfId: SELF_ID, cfg, now: Date.now, log: (line) => logs.push(line) });
+				assert.deepEqual(await post(corrected, unavailable), { code: 503, body: { error: "enqueue-failed" } });
+				assert.deepEqual(logs.filter((line) => ["enqueued", "deduplicated", "enqueue_failed"].includes(line.event)), [{ event: "enqueue_failed", delivery: corrected, reason: "semantic-read-unavailable" }], "an unreadable survivor is never reported as handled");
+				assert.equal(await queue.getJob(`gh-${corrected}`), undefined);
+			}
+			assert.deepEqual(await post(corrected), { code: 202, body: { status: "queued" } });
+			assert.deepEqual(await post(duplicate), { code: 202, body: { status: "deduplicated" } });
+			assert.deepEqual(logs.filter((line) => line.event === "enqueued").map((line) => [line.delivery, line.replicas]), [[corrected, 1]], "a repaired delivery is reported as queued exactly once");
+			assert.deepEqual(logs.filter((line) => line.event === "deduplicated").map((line) => [line.delivery, line.survivingJobId]), [[duplicate, `gh-${corrected}`]], "the next duplicate names the replacement, never the refused job");
+			const replacement = await worker.getNextJob("replacement-token", { block: false });
+			assert.equal(replacement.id, `gh-${corrected}`, "the corrected event is executable inside the original window");
+			await replacement.moveToCompleted({ outcome: "completed" }, "replacement-token", false);
+		} finally {
+			await worker.close();
+			await queue.obliterate({ force: true }).catch(() => {});
+			await queue.close();
+		}
+	});
+}
