@@ -189,10 +189,6 @@ async function main() {
 	// Issue #686: whether the key came as frame 1 of the stdin frame channel, the one fact that admits PI_STEER on the
 	// sandbox layout (PI_EXIT_AUTH itself has already left the environment).
 	const cfg = parseRunnerEnv(process.env, { steerFrames: exitKey.frames === true });
-	// Snapshot before any extension loads. Only the worker's read-only job input selects this floor;
-	// neither a prompt nor a replayed transcript can turn a default job into a permitted one.
-	const mayMerge = readMergePolicy();
-	if (mayMerge && cfg.command !== null) throw configError("a command job cannot carry merge permission");
 	// Issue #888: the idle and stall limits the worker asked for, read and taken out of the environment here, before any
 	// extension or tool exists to inherit them. A broken value is refused now, free (exit 2).
 	const activityLimits = readActivityLimits(process.env);
@@ -229,6 +225,11 @@ async function main() {
 	// UNWRITABLE stays advisory (mountAdvisories below): "a read-only review of a folder the job user cannot write
 	// is a legitimate job", so only a workspace the job cannot even read is refused here.
 	assertJobInputsReadable([JOB_DIR, GLOBAL_PI_DIR, WORKSPACE]);
+	// Preserve the shared mount diagnostic before reading the optional policy file, but snapshot before any
+	// extension loads. Only the worker's read-only job input selects this floor; neither a prompt nor a replayed
+	// transcript can turn a default job into a permitted one.
+	const mayMerge = readMergePolicy();
+	if (mayMerge && cfg.command !== null) throw configError("a command job cannot carry merge permission");
 	// Diagnose the shared mount boundary before inspecting optional watch or role files.
 	const watchReadOnly = readWatchMode();
 	const answerDraftInput = readAnswerDraft();

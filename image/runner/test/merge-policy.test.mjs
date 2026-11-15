@@ -62,10 +62,13 @@ test("the pinned real loader places the selected floor before every persona, als
 	assert.throws(() => loaderModule.buildResourceLoader({ guardrailsPath, watchReadOnly: true, mayMerge: true }), policyError);
 });
 
-test("the real runner reads policy before executable loading and passes it on the recovery path too", () => {
+test("the real runner diagnoses unreadable mounts before policy, then loads the selected floor for recovery too", () => {
 	const source = readFileSync(new URL("../run-job.mjs", import.meta.url), "utf8");
+	const inputs = source.indexOf("assertJobInputsReadable([JOB_DIR, GLOBAL_PI_DIR, WORKSPACE]);");
 	const read = source.indexOf("const mayMerge = readMergePolicy();");
+	const command = source.indexOf("if (mayMerge && cfg.command !== null) throw configError(\"a command job cannot carry merge permission\");");
 	const loader = source.indexOf("const resourceLoader = await buildLoadedResourceLoader({\n\t\tmayMerge,");
-	assert.ok(read > 0 && loader > read);
+	assert.ok(inputs > 0 && read > inputs, "an untraversable /job keeps its job-inputs-unreadable diagnostic instead of a policy read error");
+	assert.ok(command > read && loader > command, "permission is read and command jobs refused before any extension loads");
 	assert.ok(source.indexOf("if (cfg.recovering) {", loader) > loader, "recovery uses the same already-built loader");
 });
