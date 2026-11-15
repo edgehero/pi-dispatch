@@ -1,3 +1,4 @@
+import { JOB_DATA_VERSION } from "@edgehero/pi-dispatch/job-data-version";
 import assert from "node:assert/strict";
 import { createHmac } from "node:crypto";
 import { EventEmitter } from "node:events";
@@ -810,9 +811,9 @@ test("the stored fallback job is stamped with the version its fields need: nothi
 	const job = { repo: "acme/web", target: { type: "issue", number: 7 }, flow: "fix", steerMode: "steer", waitFor: [{ profile: "jira", ticket: "PD-1" }], trigger: { deliveryId: "d-761", sender: { id: 1 } } };
 	const today = fallbackJobOf(job, "github");
 	assert.equal(JSON.stringify(today), '{"repo":"acme/web","target":{"type":"issue","number":7},"flow":"fix","waitFor":[{"profile":"jira","ticket":"PD-1"}],"trigger":{"deliveryId":"d-761","sender":{"id":1}},"kind":"github","jobId":"gh-d-761"}');
-	const later = { table: Object.freeze({ waitFor: 5 }), supported: 5 };
+	const later = { table: Object.freeze({ waitFor: JOB_DATA_VERSION + 1 }), supported: JOB_DATA_VERSION + 1 };
 	const stamped = fallbackJobOf(job, "github", { dataVersions: later });
-	assert.equal(stamped.dataVersion, 5);
+	assert.equal(stamped.dataVersion, JOB_DATA_VERSION + 1);
 	const { waitFor: _w, ...without } = job;
 	assert.equal(Object.hasOwn(fallbackJobOf(without, "github", { dataVersions: later }), "dataVersion"), false);
 	// An older worker (this build, which reads a lower version) refuses to rebuild the stamped fallback, and queues nothing.
@@ -821,5 +822,5 @@ test("the stored fallback job is stamped with the version its fields need: nothi
 	assert.equal(adds.length, 0);
 	// A worker that reads it keeps the stamp.
 	await enqueueLateForgeJob({ add: async (...a) => adds.push(a) }, "github", stamped, { dataVersions: later });
-	assert.equal(adds[0][1].dataVersion, 5);
+	assert.equal(adds[0][1].dataVersion, JOB_DATA_VERSION + 1);
 });

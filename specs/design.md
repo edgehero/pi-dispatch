@@ -4726,7 +4726,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 ## DES-FLOWS-ARE-DATA-PERSONA-IS-CODE
 
 - **Decision**: Split the agent's instructions by mutability. **The persona is baked into the image** and
-  carries the *hard rules* — never merge, issue text is data, work only in `/workspace`. **Flows are user
+  carries the *hard rules* — the effective merge policy, issue text is data, work only in `/workspace`. The
+  default policy forbids merging. `DES-TRIGGER-MERGE-POLICY` selects a second fixed rule only from an explicitly
+  authorized worker marker; neither flows nor free-form instructions can select or rewrite it. **Flows are user
   data** in a mounted volume, seeded from repo defaults on first run, and carry the *task recipe* —
   screenshot, iterate, open a PR. The admin surface may edit flows in principle; it may never touch the
   persona. **Flow display and editing are deferred, out of this slice** — the mutable/immutable split is
@@ -4736,8 +4738,9 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   pi-version-proof*. The resolution is not a compromise between the two; it is the observation that
   **those two properties were being asked of one file that was doing two jobs.**
   The rules the agent must not be talked out of need immutability, and `INT-CONTAINER-JOB-INPUTS` already
-  mounts `/job` read-only and bakes the persona *precisely* so that a total compromise of `/job` cannot
-  reach the system prompt. That same reasoning extends one step: an admin-surface compromise must not
+  mounts `/job` read-only and bakes the persona so that free-form task text cannot rewrite the system prompt.
+  The strict merge-policy marker selects one of two image-baked rules; it supplies no prompt text.
+  That same reasoning extends one step: an admin-surface compromise must not
   reach it either. Meanwhile the task recipe is genuinely configuration — the thing an operator
   legitimately wants to tune at 11pm without a rebuild — and gains nothing from being immutable.
   So the security property survives *and* the admin surface can gain real power over flows when editing
@@ -6451,13 +6454,14 @@ free local model, or using a few successful live probes as proof of every routin
 ## DES-TRIGGER-INSTRUCTION-IN-THE-ENVELOPE
 
 - **Decision**: `run.instructions` is rendered into the USER prompt's **envelope** -- above the fenced
-  data region, below the harness's numbered steps, and **before** the never-merge paragraph -- as a
+  data region, below the harness's numbered steps, and **before** the harness's merge-policy paragraph -- as a
   provenance-labelled block with no `##` heading and no fence. One shared `instructionBlock` serves all
   four forge builders. `dataRegion` is untouched.
 - **Why**: `CONST-ISSUE-TEXT-IS-DATA` governs event PAYLOADS. This is operator text from a reviewed,
   git-tracked file, which passes the same mutability test `DES-FLOWS-ARE-DATA-PERSONA-IS-CODE` already
   applies to the overlay persona: "Mutability, not the persona/flow label, is the boundary." So it may be
-  read as instruction. It goes **before** the never-merge paragraph because later text reads as more
+  read as instruction. It goes **before** the merge-policy paragraph (the original never-merge paragraph
+  unless `run.mayMerge` is authorized) because later text reads as more
   specific, and the harness's non-negotiables must be the last thing before the data region rather than
   something an operator instruction appears to qualify -- that costs nothing and forecloses the argument.
   Putting it in the envelope is also what leaves `dataRegion` alone: the shared export keeps its
@@ -6494,6 +6498,46 @@ free local model, or using a few successful live probes as proof of every routin
     real heading is emitted after theirs and still opens the real region.
 - **Traces to**: `REQ-PER-TRIGGER-INSTRUCTION`, `CONST-ISSUE-TEXT-IS-DATA`,
   `CONST-PERSONA-IN-CACHED-PREFIX`, `INT-CONTAINER-JOB-INPUTS`, `DES-FLOWS-ARE-DATA-PERSONA-IS-CODE`
+
+## DES-TRIGGER-MERGE-POLICY
+
+- **Decision** (#908): `run.mayMerge` is an explicit, reviewed per-trigger boolean for forge flow jobs.
+  It is permission for the job's agent, not a harness merge operation or a new credential. No deployment
+  default is introduced: one trigger's opt-in cannot silently change another trigger's instructions.
+  False normalizes to the same execution shape as absent, and both preserve the legacy prompt bytes.
+- **Two prompt layers, one decision.** The four forge envelopes omit the unconditional prohibition only
+  for the enabled job. The shared preparer writes a small versioned `merge-policy.json` into that job's
+  existing read-only inputs. The runner reads it before loading project code and selects a fixed system
+  floor variant. The legacy `HARD_RULES.md` remains byte-identical when the flag is absent; the enabled
+  variant changes only the merge rule, retaining the other rules and the guardrail sentinel. The input
+  carries no prose, command, path or credential. Payloads and transcripts are never searched for permission.
+  The same floor applies during recovery, whose continuation prompt is separate from `prompt.md`.
+- **Authority is checked again at pickup.** Producers derive `mayMergePolicy` from the complete normalized
+  trigger entry, alongside `mayMerge: true`. A worker checks the current file, the trigger identity and the
+  digest before any paid gate. Changes to the entry, including instructions and routing, invalidate its
+  queued opt-in; re-run against the new reviewed entry. An unflagged job cannot gain permission from a
+  later edit. Each new container repeats the check. A running container keeps its admitted snapshot, and
+  the worker does not cancel an operation already accepted by the forge when the file changes.
+- **Compatibility fails visibly.** `DES-STORE-VERSION-WHEN-NEEDED` stamps triggers at 4 and jobs at 5
+  when they carry the new fields. An older service cannot silently discard the permission and run a paid
+  job with conflicting rules. The image declares `mergePolicy`, and the worker refuses enabled jobs on
+  older images before spend. The image proof exercises the actual pinned loader in both modes rather than
+  trusting a label or the generated prompt alone. Absence remains a supported current shape, so it is not
+  an `older-state` finding or a migration to force onto an operator.
+- **Unchanged boundaries.** The harness contains no merge or approval call, and the existing CI scan and
+  required check name stay. Forge MCP wrappers still withhold their dedicated merge and approval tools.
+  Token scope, branch-protection admission, container isolation, author gates and budget ordering stay.
+  The job may use the CLI it already receives, subject to the token and forge policy. The instruction is
+  not an enforcement boundary; opting in replaces mandatory human review with the operator's chosen
+  approval process and accepts the risk recorded in `CONST-MERGE-NEVER-AUTOMATIC`.
+- **Rejected**: removing only the user-prompt sentence (the system floor still forbids it); allowing
+  ordinary `run.instructions` to override the floor (implicit permission); deriving permission from a
+  queued transcript or comment (untrusted authority); setting permission from a model-callable tool
+  (unreviewed elevation); accepting the field on an envelope-free command or local job (an inert option);
+  globally disabling the merge-call CI guard (the harness and pi-bump workflow still must never merge).
+- **Traces to**: `REQ-TRIGGER-MERGE-POLICY`, `CONST-MERGE-NEVER-AUTOMATIC`,
+  `INT-TRIGGERS-FILE-CONTRACT`, `INT-CONTAINER-JOB-INPUTS`, `INT-CONTAINER-RUNTIME-CONTRACT`,
+  `INT-SDK-SESSION-OPTIONS`
 
 ## DES-TRIGGER-SKILLS-COPIED-NOT-MOUNTED
 
@@ -18213,6 +18257,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-11-15 (#908) | Added `DES-TRIGGER-MERGE-POLICY`: one explicit per-trigger permission reaches the forge envelope and a fixed image floor through a read-only worker input, with current-trigger digest checks, version gates and an image capability. Records the rejected user-prompt-only fix and deployment-wide default, the next-container revocation limit, and the absence of a migration for still-valid unflagged state. `DES-TRIGGER-INSTRUCTION-IN-THE-ENVELOPE` now names the effective merge-policy paragraph; `DES-FLOWS-ARE-DATA-PERSONA-IS-CODE` names the fixed rule selected by the strict worker marker without accepting free-form system prompt text. The required contract-test job gains a 90-minute overall limit after all tests passed but cleanup reached the former 60-minute limit; its check name, triggers, coverage, file and step deadlines, the release job's 60-minute limit and runtime job limits are UNCHANGED, checked. UNCHANGED, checked: `DES-FORGE-MCP` withholding, branch protection, credentials, image mounts, spend ordering and the harness merge-call scan. |
 | 2026-11-15 (#899) | `DES-QUEUE-BULLMQ-OVER-CUSTOM` and `DES-CANCEL-VIA-REDIS-REQUEST-KEY` AMENDED: one terminal-policy classifier and a common worker result boundary release only the job-owned key; shared ingress repairs a completed policy survivor from its stored state, never the incoming data of the add result. Atomic state/result/identity/ownership checks and the ordinary add preserve races. Reason allowlists, unconditional deletion, changed TTLs and cleanup alone are rejected. Existing cancellation acknowledgment, queued removal, parking/steering order, orphan resource holds and retry/recovery contracts UNCHANGED, checked. `DES-AWAIT-INPUT-ENDS-THE-JOB` and `DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY` AMENDED for the neutral `semantic_window_released` / `semantic_window_release_failed` log names with a closed cause; release waits at most two seconds and late deletes retain ownership checks. |
 | 2026-11-15 (#897) | **`DES-OPERATOR-CONSOLE` AMENDED**: a new bullet before "One rule for what needs the person", "A failed job whose work has since been done asks nothing": `supersededFailures` judges each failed row against the wide window's records (the same cron trigger, or the same forge target and flow, a run that completed and started after the failure ended), the snapshot's failed rows carry `supersededBy`, and Needs you, the headline, Fleet's failed card, a bulk Retry's preview, the `/dispatch` panel, `/api/state` and the agent's failed read each act on it; what the records cannot settle is not judged and keeps asking; nothing is written. REJECTED: removing a superseded job from the queue, the trigger's index as the work's key, any later run, and one that started before the failure ended. UNCHANGED, checked: the failed set's read (`FAILED_PER_QUEUE`, `FAILED_LIMIT`, the projection's other keys), the day line and All clear's day rule (a failed record of the last 24 hours still counts there: it is the day's history, not a request), `retry-failed` for one job (no surface offers it for a superseded row; asked for anyway, it retries as before), and `remove-failed` and `remove-all-failed`. |
 | 2026-11-15 (#896) | **`DES-OPERATOR-CONSOLE` AMENDED**, the timeline: the overview opens on `24h`, the whole day `runsDay` is read for, where it opened on `3h` and a project whose last run ended more than three hours earlier was not on the card at all, with nothing saying older runs existed. The cost is density: a pill is at least `PILL_MIN_PCT` wide, about 43 minutes at a day, so a schedule every half hour fills its row's four lanes and its quiet completed runs are counted, the packing rule unchanged. The overview's links leave the default out by `TIMELINE_DEFAULTS` itself, where the zoom's was a `3h` literal. REJECTED: remembering each browser's last window, which needs a cookie or the page's script for a choice one click makes. UNCHANGED, checked: `TIMELINE_ZOOMS` and every drawing at a named zoom; `REQ-OPERATOR-CONSOLE-SCREENS` (a4), which names the three windows and no default; the design cards, which draw the `3h` window, one of the three, and claim no default (`TimelineAndWaitlists`, whose bytes the timeline tests hold, and the three overview screens). |

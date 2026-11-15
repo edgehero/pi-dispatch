@@ -57,8 +57,9 @@ test("every module that names a container path follows the layout the process st
 		const config = await import(${JSON.stringify(`${src}config.mjs`)});
 		const loader = await import(${JSON.stringify(`${src}loader.mjs`)});
 		const mcp = await import(${JSON.stringify(`${src}mcp.mjs`)});
+		const merge = await import(${JSON.stringify(`${src}merge-policy.mjs`)});
 		console.log(JSON.stringify({ skills: packages.PROTECTED_SKILL_ROOTS, outbox: plan.OUTBOX_DIR, snapshot: plan.SNAPSHOT_PATH, inbox: inbox.INBOX_DIR, home: config.HOME_FORBIDDEN_ROOTS,
-			loader: [loader.OUTBOX_MOUNT, loader.PORTFOLIO_SNAPSHOT_PATH, loader.JOB_PI_DIR, loader.TRIGGER_SKILLS_DIR, loader.GLOBAL_PI_DIR, loader.WORKSPACE], mcp: mcp.JOB_MCP_PATH }));
+			loader: [loader.OUTBOX_MOUNT, loader.PORTFOLIO_SNAPSHOT_PATH, loader.JOB_PI_DIR, loader.TRIGGER_SKILLS_DIR, loader.GLOBAL_PI_DIR, loader.WORKSPACE], mcp: mcp.JOB_MCP_PATH, merge: merge.MERGE_POLICY_PATH }));
 	`;
 	const read = (layout) => JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", script], { env: { ...process.env, [LAYOUT_ENV]: layout }, encoding: "utf8" }));
 	assert.deepEqual(read("sandbox"), {
@@ -69,6 +70,7 @@ test("every module that names a container path follows the layout the process st
 		home: ["/sandbox/workspace", "/sandbox/job", "/sandbox/outbox", "/sandbox/session"],
 		loader: ["/sandbox/outbox", "/sandbox/job/portfolio.json", "/sandbox/job/pi", "/sandbox/job/trigger-skills", "/sandbox/pi-global", "/sandbox/workspace"],
 		mcp: "/sandbox/job/mcp.json",
+		merge: "/sandbox/job/merge-policy.json",
 	});
 	assert.deepEqual(read("mounts"), {
 		skills: ["/job/pi/skills", "/job/trigger-skills", "/opt/pi-global/skills"],
@@ -78,6 +80,7 @@ test("every module that names a container path follows the layout the process st
 		home: ["/workspace", "/job", "/outbox", "/session"],
 		loader: ["/outbox", "/job/portfolio.json", "/job/pi", "/job/trigger-skills", "/opt/pi-global", "/workspace"],
 		mcp: "/job/mcp.json",
+		merge: "/job/merge-policy.json",
 	});
 });
 

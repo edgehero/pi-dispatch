@@ -1,7 +1,7 @@
 {
   "card": "TriggerDetail",
   "pr": 750,
-  "words": "ce5540e99572eb6215ad3f21a0d0d943a37b30ad5de0be54bedbfa5968f49771",
+  "words": "1ea3f1476aa4584342f392c83a78a51d006c0b165aa6d2059bfc364be3393d62",
   "elements": [
     {"el":"p-trigger-on","kind":"panel","status":"new","source":"admin/src/console/panels/trigger.mjs#triggerOn","golden":["trigger.operator"],"reason":"Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."},
     {"el":"p-trigger-runs","kind":"panel","status":"new","source":"admin/src/console/panels/trigger.mjs#triggerRuns","golden":["trigger.operator"],"reason":"Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."},
@@ -17,6 +17,9 @@
     {"el":"Last 24 hours: count, metered spend, last five runs, and queued jobs","kind":"provides","status":"new","panel":"p-trigger-runs","source":"admin/src/console/panels/trigger.mjs#triggerRuns","golden":["trigger.operator"],"shows":"metered spend"},
     {"el":"Incomplete history and partially metered spend are named","kind":"readme","status":"new","source":"admin/src/read-model.mjs#triggerDetailOf"},
     {"el":"Deployment defaults and every run field, set or unset","kind":"provides","status":"new","panel":"p-trigger-run","source":"admin/src/console/panels/trigger.mjs#triggerRun","golden":["trigger.operator"],"shows":["run.maxTurns","run.image","By hand"]},
+    {"el":"Explicit merge permission is a true-only By hand row","kind":"readme","status":"new","panel":"p-trigger-run","source":"admin/src/console/panels/trigger.mjs#triggerRun","golden":["panels/trigger-may-merge.operator"],"shows":["run.mayMerge","true; deployment default: false"],"reason":"Issue #908 shows the reviewed opt-in without adding a setter; the card’s separate enabled example leaves its shared trigger fixture unchanged."},
+    {"el":"Enabled trust text names the flow instruction and forge requirements","kind":"readme","status":"new","panel":"p-trigger-trust","source":"admin/src/console/panels/trigger.mjs#triggerTrust","golden":["panels/trigger-may-merge.operator"],"shows":"This trigger permits merging through the forge’s checks and approvals when its flow or operator instructions ask for it.","reason":"Issue #908 changes this sentence only for explicitly enabled triggers."},
+    {"el":"Enabled queued-job note names unchanged authority and no later promotion","kind":"readme","status":"new","panel":"p-trigger-change","source":"admin/src/console/panels/trigger.mjs#triggerChange","golden":["panels/trigger-may-merge.operator"],"shows":"A queued job with merge permission runs only while its reviewed trigger remains unchanged. A job queued without it does not gain permission from a later edit.","reason":"Issue #908 keeps the default fixture’s note unchanged and explains the enabled policy’s stricter current-trigger check."},
     {"el":"Sandbox declaration, retention, OpenShell mode, replicas and secret names","kind":"readme","status":"new","panel":"p-trigger-run","source":"admin/src/console/panels/trigger.mjs#triggerRun","golden":["panels/trigger-cron.operator"],"shows":["Its runs","sandbox","OpenShell"]},
     {"el":"Edit previews the file and uses the shared five-minute confirmation","kind":"readme","status":"new","panel":"p-trigger-edit","source":"admin/src/console/panels/trigger.mjs#triggerEdit","golden":["trigger.operator"],"shows":"trigger-edit"},
     {"el":"Trust model and operator-only escaped instructions and task","kind":"readme","status":"new","panel":"p-trigger-trust","source":"admin/src/console/panels/trigger.mjs#triggerTrust","golden":["trigger.operator","trigger.viewer"]},

@@ -53,7 +53,11 @@ Two consequences worth internalising before you design anything:
 - **Verify against the pinned artifact, not against HEAD.** pi is pinned to an exact npm version. A sha is
   not a version, and this rule is in the constitution because ignoring it once nearly shipped a runner that
   imported an export the pinned release did not have. Docs are a hint; source at the pin is evidence.
-- **`CONST-MERGE-NEVER-AUTOMATIC`.** Nothing in this project merges anything, ever. CI greps
+- **`CONST-MERGE-NEVER-AUTOMATIC`.** The harness never calls a merge or approval API. A reviewed forge-flow
+  trigger may explicitly permit its agent to land its own change with `run.mayMerge: true` (#908), through
+  the forge's ordinary checks and approvals, with no permission or protection bypass. The worker validates
+  that authority again before each container, and the image must declare `mergePolicy`; absent or false
+  keeps the original user and system prompts. This is an instruction policy, not a credential boundary. CI greps
   `worker/src`, `receiver/src`, `image/runner`, `gateway/src`, `.github/workflows/pi-bump.yml` and `.github/scripts` for
   `pulls.merge`, `gh pr merge`, any spelling of auto merge, a self-approval and friends, so even a comment
   mentioning one fails the build.

@@ -3765,6 +3765,7 @@ function renderTriggerDetail(raw: any, inner: number, styler: any, sched: any = 
   // capped at six lines, since up to 2000 characters would otherwise push the trust model off the pane.
   // `true` without text is a file changed between reads of an older panel: said, not faked.
   const insText = typeof instructionsText === "string" && instructionsText.trim() !== "" ? cellOf(instructionsText) : null;
+  if (t.mayMerge === true) kvWrap("may merge", "yes, through the forge’s checks and approvals", "accent", 6);
   kvWrap("instructions", insText ?? (t.instructions === true ? "attached (text not read)" : "none"), t.instructions === true || insText ? "accent" : "dim", 6);
   // Rendered on BOTH branches and on every kind, with the same "I checked" dim default the image row uses.
   // `warning` when armed, because this is the one row on this pane that describes something LEAVING the

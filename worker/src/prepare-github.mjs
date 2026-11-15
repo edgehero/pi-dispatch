@@ -198,9 +198,12 @@ export async function prepareGithubWorkspace(
 			// they move together will widen the wrong one.
 			job.command
 				? `/${job.command}`
-				: managedForkPrompt(job, buildPrompt({ flow: job.flow, target: job.target, comment: job.trigger?.comment, resumed: session?.resume === true, replica: job.replica, replicas: job.replicas, review: job.trigger?.review, instructions: job.instructions, fork: job.fork })),
+				: managedForkPrompt(job, buildPrompt({ flow: job.flow, target: job.target, comment: job.trigger?.comment, resumed: session?.resume === true, replica: job.replica, replicas: job.replicas, review: job.trigger?.review, instructions: job.instructions, fork: job.fork, mayMerge: job.mayMerge === true })),
 			{ mode: 0o444 },
 		);
+		// The processor revalidates the reviewed trigger before prepare. This separate input selects the
+		// system floor too: a user prompt cannot override the image's unconditional default merge rule.
+		if (job.mayMerge === true) writeFile(join(jobDir, "merge-policy.json"), `${JSON.stringify({ version: 1, mayMerge: true })}\n`, { mode: 0o444 });
 
 		// The INT-WEBHOOK-PAYLOAD-SUBSET body fields ONLY — no header, no signature, no token. `matched`
 		// is the single harness-computed addition: the filter's decision record, not a webhook field.

@@ -36,6 +36,7 @@ import {
 	readPrompt,
 } from "./src/config.mjs";
 import { buildLoadedResourceLoader, GLOBAL_PI_DIR, JOB_PI_DIR, TRIGGER_SKILLS_DIR, WORKSPACE } from "./src/loader.mjs";
+import { readMergePolicy } from "./src/merge-policy.mjs";
 import {
 	capExitMessage,
 	captureTerminal,
@@ -224,6 +225,11 @@ async function main() {
 	// UNWRITABLE stays advisory (mountAdvisories below): "a read-only review of a folder the job user cannot write
 	// is a legitimate job", so only a workspace the job cannot even read is refused here.
 	assertJobInputsReadable([JOB_DIR, GLOBAL_PI_DIR, WORKSPACE]);
+	// Preserve the shared mount diagnostic before reading the optional policy file, but snapshot before any
+	// extension loads. Only the worker's read-only job input selects this floor; neither a prompt nor a replayed
+	// transcript can turn a default job into a permitted one.
+	const mayMerge = readMergePolicy();
+	if (mayMerge && cfg.command !== null) throw configError("a command job cannot carry merge permission");
 	// Diagnose the shared mount boundary before inspecting optional watch or role files.
 	const watchReadOnly = readWatchMode();
 	const answerDraftInput = readAnswerDraft();
@@ -486,6 +492,7 @@ async function main() {
 	// Teed, so an extension is failed or dropped on the record exactly when the log says so (issue #800).
 	const loadTee = createLoadTee(log, { overlayExtensions: `${GLOBAL_PI_DIR}/extensions` });
 	const resourceLoader = await buildLoadedResourceLoader({
+		mayMerge,
 		...(answerTools ? { watchExtensionFactories: answerTools.factories } : watchTools ? { watchExtensionFactories: watchTools.factories } : {}),
 		watchReadOnly: watchReadOnly || Boolean(answerDraftInput),
 		settingsManager,

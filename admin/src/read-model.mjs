@@ -2985,7 +2985,7 @@ export function readTriggerEditor({ paths, env = {}, folder = null, deploymentDi
   let models = null;
   try { provider = overlay.provider ?? providerFrom(hints); model = overlay.model ?? modelFrom(hints); image = jobImageFrom(hints); models = allowedModelsFrom(hints); } catch {}
   return {
-    defaults: { flow: "required by the trigger", kind: "selected by the trigger kind", folder: "required for cron", task: "required for cron", repository: "forge routing", backend: backends[0]?.name ?? null, provider, model, image, models: models ?? "unrestricted", maxCostUsd: overlay.maxCostUsd ?? hints.PI_MAX_COST_USD ?? "no per-job dollar cap", packages: true, github: false, replicas: 1, resume: false, awaitInput: false, secrets: "none", secretsProfile: "none", secretBundle: "project default", waitFor: "none", skillsDir: "none", instructions: "none", command: "none", portfolio: false, fallbackModels: "none", excludeTools: "none", excludeExtensions: "none", excludeExtensionTools: "none", mcp: "none unless named by the trigger", gates: "none", gateTimeout: "no trigger expiry override", gateBudgetRaiseUsd: "none", maxTurns: overlay.maxTurns ?? parseNonNegInt(hints.PI_MAX_TURNS, 30), progress: false, statusComment: false, recover: false, steer: false,
+    defaults: { flow: "required by the trigger", kind: "selected by the trigger kind", folder: "required for cron", task: "required for cron", repository: "forge routing", backend: backends[0]?.name ?? null, provider, model, image, models: models ?? "unrestricted", maxCostUsd: overlay.maxCostUsd ?? hints.PI_MAX_COST_USD ?? "no per-job dollar cap", packages: true, github: false, replicas: 1, resume: false, awaitInput: false, secrets: "none", secretsProfile: "none", secretBundle: "project default", waitFor: "none", skillsDir: "none", instructions: "none", mayMerge: false, command: "none", portfolio: false, fallbackModels: "none", excludeTools: "none", excludeExtensions: "none", excludeExtensionTools: "none", mcp: "none unless named by the trigger", gates: "none", gateTimeout: "no trigger expiry override", gateBudgetRaiseUsd: "none", maxTurns: overlay.maxTurns ?? parseNonNegInt(hints.PI_MAX_TURNS, 30), progress: false, statusComment: false, recover: false, steer: false,
       // Issue #888: the deployment's job limits, as its service env says them (the worker's own defaults when unset).
       idleTimeoutMinutes: parseNonNegInt(hints.PI_JOB_IDLE_MINUTES, JOB_IDLE_MINUTES_DEFAULT), stallTimeoutMinutes: parseNonNegInt(hints.PI_JOB_STALL_MINUTES, JOB_STALL_MINUTES_DEFAULT), maxMinutes: hints.PI_JOB_MAX_MINUTES ? parseNonNegInt(hints.PI_JOB_MAX_MINUTES, null) : "none" },
     ...readTriggerEgress({ deploymentDir, env, fs }),
@@ -3252,6 +3252,7 @@ export function normalizeTriggerForDisplay(entry) {
     // project's bundle, so the row and the drill-in say so beside the secrets they do bind. Spread only when false, so
     // every other trigger keeps exactly its keys; `true` is the default and says nothing.
     ...(run.secretBundle === false && { secretBundle: false }),
+    ...(run.mayMerge === true && { mayMerge: true }),
   };
   switch (on.type) {
     case "watch":

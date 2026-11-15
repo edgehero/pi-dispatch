@@ -1,3 +1,4 @@
+import { JOB_DATA_VERSION } from "../src/job-data-version.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { makeInFlight, rowScopeFor } from "../src/scoped-limits.mjs";
@@ -271,7 +272,7 @@ test("a newer triggers file defers EVERY kind of job at the processor's head, be
 	}
 	// Job data a newer release wrote is asked first, and says so; the triggers gate is the second.
 	const both = harness({ triggersNewer: () => true });
-	const { job } = spyJob({ kind: "local", folder: "/srv/site", flow: "tidy", task: "t", dataVersion: 5 });
+	const { job } = spyJob({ kind: "local", folder: "/srv/site", flow: "tidy", task: "t", dataVersion: JOB_DATA_VERSION + 1 });
 	await assert.rejects(() => both.processor(job, "tok", new AbortController().signal), deferred);
 	assert.deepEqual(both.seen.logs.filter(([event]) => event === "newer_release_hold").map(([, fields]) => fields.what), ["job data"]);
 	// Cleared (the next good reload), the same job runs.

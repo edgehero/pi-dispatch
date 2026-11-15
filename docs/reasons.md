@@ -271,6 +271,30 @@ is older than the field, or still reads an older copy of the triggers file.
 What to do: run the job again if the trigger changed. Otherwise update the old service, or restart the one reading the
 old file. See [triggers.md](triggers.md).
 
+### merge-policy-invalid
+
+The queued job's merge permission or its trigger digest is malformed or attached to an unsupported kind of job.
+Nothing was spent.
+
+What to do: upgrade the services together and rerun from the reviewed trigger. Do not edit the queued data to add
+permission. See [trigger merge permission](triggers.md#allowing-a-job-to-land-its-change).
+
+### merge-policy-unavailable
+
+The worker could not establish merge permission from a valid current trigger file. The file may be missing,
+unconfigured or invalid. Nothing was spent.
+
+What to do: restore the worker's valid reviewed triggers file and rerun. A temporary storage read failure follows
+the infrastructure retry path instead of this refusal.
+
+### merge-policy-changed
+
+The current trigger no longer matches the reviewed entry that authorized this queued job, or no longer grants
+merge permission. Nothing was spent.
+
+What to do: inspect the current trigger and rerun if its new policy is intended. Removing permission does not cancel
+an operation already accepted by the forge. See [trigger merge permission](triggers.md#allowing-a-job-to-land-its-change).
+
 ### wait-skew
 
 The trigger declares wait conditions, but the job reached the worker without them, so it would have run at once. The
@@ -372,6 +396,14 @@ What to do: pull or build the image on the worker, or point `run.image` at one t
 The image ships no client for this job's forge. Most often the trigger forgot `run.image`.
 
 What to do: set the trigger's `run.image` to an image that declares this forge.
+
+### job-image-merge-policy-unsupported
+
+The image does not declare support for the trigger's merge permission. Its standing rules could still forbid the
+operation even though the trigger permits it. Nothing was spent.
+
+What to do: rebuild or replace the image with one declaring `mergePolicy`, then rerun. See
+[job images](job-image.md) and [trigger merge permission](triggers.md#allowing-a-job-to-land-its-change).
 
 ### job-image-replicas-unsupported
 

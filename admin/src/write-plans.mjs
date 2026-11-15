@@ -320,6 +320,7 @@ export function wideningFieldRefusal(params, tool) {
     visited.add(value);
     for (const [key, entry] of Object.entries(value)) {
       const folded = key.toLowerCase().replace(/[_\-. ]/g, "");
+      if (["maymerge", "maymergepolicy"].includes(folded)) return "run.mayMerge";
       if (["answerrule", "answerrules", "standinganswer", "standinganswers"].includes(folded)) return folded.startsWith("standing") ? "standingAnswers" : "answerRules";
       const nested = operatorAnswerField(entry);
       if (nested) return nested;
@@ -327,6 +328,7 @@ export function wideningFieldRefusal(params, tool) {
     return null;
   };
   const answerField = operatorAnswerField(params);
+  if (answerField === "run.mayMerge") return `${tool} cannot set run.mayMerge or its policy reference: merge permission is set by hand in the reviewed triggers file, never by a tool`;
   if (answerField) return `${tool} cannot set ${answerField}: answer rules are hand-written and standing answers are adopted only by a person in the console`;
   const seen = new Set();
   const hasRoles = (value) => {

@@ -41,6 +41,7 @@
     "pi-dispatch": "src/cli.mjs"
   },
   "exports": {
+    "./merge-policy": "./src/merge-policy.mjs",
     "./receiver-status": "./src/receiver-status.mjs",
     "./setup-contract": "./src/setup-contract.mjs",
     "./auth-policy": "./src/auth-policy.mjs",

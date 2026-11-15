@@ -1,3 +1,5 @@
+import { parseTriggers, TRIGGERS_FILE_VERSION } from "../src/triggers.mjs";
+import { mergePolicyDigest } from "../src/merge-policy.mjs";
 import { setDesired } from "../src/updates.mjs";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
@@ -5507,8 +5509,8 @@ test("issue #761: a pause windows or triggers file a newer pi-dispatch wrote ref
 	writeFileSync(pausePath, `${JSON.stringify({ version: 2, windows: [] }, null, 2)}\n`);
 	await assert.rejects(() => runStart({ env: { VALKEY_URL, PI_PAUSE_WINDOWS_FILE: pausePath } }), (e) => e.piDispatchConfig === true && e.newer === true && e.message === `pause-windows file written by a newer pi-dispatch (version 2; this build understands 1): ${pausePath}`);
 	const triggersPath = join(dir, "triggers.json");
-	writeFileSync(triggersPath, `${JSON.stringify({ version: 4, triggers: [] }, null, 2)}\n`);
-	await assert.rejects(() => runStart({ env: { VALKEY_URL, PI_TRIGGERS_FILE: triggersPath } }), (e) => e.piDispatchConfig === true && e.newer === true && e.message === `triggers file written by a newer pi-dispatch (version 4; this build understands 3): ${triggersPath}`);
+	writeFileSync(triggersPath, `${JSON.stringify({ version: TRIGGERS_FILE_VERSION + 1, triggers: [] }, null, 2)}\n`);
+	await assert.rejects(() => runStart({ env: { VALKEY_URL, PI_TRIGGERS_FILE: triggersPath } }), (e) => e.piDispatchConfig === true && e.newer === true && e.message === `triggers file written by a newer pi-dispatch (version 5; this build understands 4): ${triggersPath}`);
 });
 
 test("issue #761: a pause windows reload that meets a newer file keeps the last good windows and sets the newer state, which only a good reload clears", { skip }, () => {
@@ -5589,7 +5591,7 @@ test("issue #761: a running worker's watchers carry a newer pause windows or tri
 			assert.equal(captured.triggersNewer(), false);
 			await until("the pause windows reload", () => captured.pauseWindowsNewer() === true, [[pausePath, today({ version: 2, windows: [] })]]);
 			// The triggers watcher was handed the state the processor reads; with its own default the gate never moves.
-			await until("the triggers reload", () => captured.triggersNewer() === true, [[triggersPath, today({ version: 4, triggers: [] })]]);
+			await until("the triggers reload", () => captured.triggersNewer() === true, [[triggersPath, today({ version: TRIGGERS_FILE_VERSION + 1, triggers: [] })]]);
 			await until("both good reloads", () => captured.pauseWindowsNewer() === false && captured.triggersNewer() === false, [[pausePath, today({ windows: [] })], [triggersPath, today({ triggers: [] })]]);
 			seen = "cleared";
 		},
@@ -7399,4 +7401,23 @@ test("endpoint heartbeat thunks share startWorker's admission map and follow a l
 			assert.equal(JSON.parse(fields.endpoints())[0].slots, 1, "invalid reload keeps the same last good file as admission");
 		},
 	});
+});
+
+
+test("issue #908: the wired merge policy gate reads the configured file on every pickup and never upgrades an unflagged job", { skip }, async () => {
+	const path = join(tempDir("pi-908-policy-"), "triggers.json");
+	const raw = { version: TRIGGERS_FILE_VERSION, triggers: [{ on: { type: "label", any: ["pi"] }, run: { kind: "github", flow: "fix", mayMerge: true } }] };
+	const text = JSON.stringify(raw);
+	writeFileSync(path, text);
+	const job = { kind: "github", flow: "fix", trigger: { matched: { type: "label", index: 0, label: "pi" } }, mayMerge: true, mayMergePolicy: mergePolicyDigest(parseTriggers(text, path)[0]) };
+	const { captured } = await runStart({ env: { PI_TRIGGERS_FILE: path }, makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost() });
+	assert.equal(typeof captured.deps.checkMergePolicy, "function");
+	assert.deepEqual(await captured.deps.checkMergePolicy(job), { ok: true });
+	const { mayMerge, mayMergePolicy, ...unflagged } = job;
+	assert.deepEqual(await captured.deps.checkMergePolicy(unflagged), { ok: true });
+	assert.equal(unflagged.mayMerge, undefined, "the enabled current trigger does not grant a legacy job permission");
+	raw.triggers[0].run.mayMerge = false;
+	writeFileSync(path, JSON.stringify(raw));
+	assert.deepEqual(await captured.deps.checkMergePolicy(job), { refused: "merge-policy-changed" });
+	assert.deepEqual(await captured.deps.checkMergePolicy(unflagged), { ok: true });
 });

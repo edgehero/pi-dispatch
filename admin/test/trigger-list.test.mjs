@@ -246,3 +246,12 @@ test("fractional reviewed dollar caps survive projection while invalid money is 
     assert.ok(!Object.hasOwn(invalid.rows[0].trigger, "gateBudgetRaiseUsd"));
   }
 });
+
+
+test("trigger lists show enabled merge permission without carrying its queue policy reference", () => {
+  const got = build({ snapshot: snapshot([rule({ mayMerge: true, mayMergePolicy: "private-digest" })]) });
+  assert.equal(got.rows[0].trigger.mayMerge, true);
+  assert.ok(got.rows[0].chips.some((c) => c.text === "may merge"));
+  assert.equal(JSON.stringify(got).includes("private-digest"), false);
+  assert.equal(build().rows[0].trigger.mayMerge, undefined);
+});

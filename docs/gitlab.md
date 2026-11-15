@@ -279,6 +279,10 @@ agent follows an envelope naming a command that is not there, explains itself in
 
 Everything else is identical to a GitHub job: the same isolation flags, the same `/job:ro` inputs, the
 same budget and pause windows, the same run history, and the same rule that **the harness never merges**.
+The agent is also instructed never to merge by default. A reviewed trigger may
+[explicitly permit its job to land its own merge request](triggers.md#allowing-a-job-to-land-its-change),
+but this grants no GitLab permission: a Developer token still cannot land on a protected branch whose
+Allowed to merge setting permits only Maintainers.
 
 **`run.replicas` works here** (issue #187). `"replicas": 2` on a `label`, `comment` or `pull_request` rule
 races two independent sandboxes on one delivery, each on its own `pi/issue-<iid>-r<i>` branch, each opening

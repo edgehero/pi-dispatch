@@ -3089,3 +3089,10 @@ test("normalizeTriggerForDisplay carries run.mcp names on every kind, and no key
     assert.equal("mcp" in normalizeTriggerForDisplay(entry), false, entry.on.type);
   }
 });
+
+
+test("normalizeTriggerForDisplay shows reviewed merge permission only for strict true", () => {
+  const base = { on: { type: "label", any: ["pi"] }, run: { kind: "github", flow: "fix" } };
+  for (const mayMerge of [undefined, false, null, "true", 1]) assert.equal("mayMerge" in normalizeTriggerForDisplay({ ...base, run: { ...base.run, mayMerge } }), false);
+  assert.equal(normalizeTriggerForDisplay({ ...base, run: { ...base.run, mayMerge: true } }).mayMerge, true);
+});

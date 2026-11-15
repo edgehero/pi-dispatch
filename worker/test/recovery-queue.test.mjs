@@ -811,3 +811,16 @@ test("the boot sweep takes the openshell venue's beside-files with their dir, an
 	for (const gone of ["job-old003", "job-old003.openshell-policy.json", "job-old003.openshell-up", "job-old003.openshell-down", "job-gone04.openshell-up", "job-gone05.openshell-policy.json"]) assert.equal(existsSync(join(jobsDir, gone)), false, gone);
 	for (const kept of ["job-gone06.openshell-down", "job-gone07.openshell-up"]) assert.ok(lstatSync(join(jobsDir, kept)), kept);
 });
+
+
+test("issue #908: an enqueued recovery retains both reviewed merge policy fields and their data version", async () => {
+	const { hosts, queues } = queuesOf();
+	const original = { ...ARMED, mayMerge: true, mayMergePolicy: "a".repeat(64), dataVersion: 5 };
+	const enqueue = makeRecoveryEnqueuer({ redis: fakeRedis(), queues, now: clock() });
+	const result = await enqueue({ job: bullJob("gh-policy", original), cause: "infra", pointer: POINTER() });
+	assert.equal(result.enqueued, true);
+	const stored = hosts.get("pi-jobs@h1").adds[0].data;
+	assert.equal(stored.mayMerge, true);
+	assert.equal(stored.mayMergePolicy, original.mayMergePolicy);
+	assert.equal(stored.dataVersion, 5);
+});

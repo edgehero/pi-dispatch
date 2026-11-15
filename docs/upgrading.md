@@ -289,6 +289,31 @@ pause flag, the delayed score, the run ids of a cron trigger) is in one module, 
 checked against that version by its tests. Never roll back across a release that moved the BullMQ pin while jobs are
 queued: an older BullMQ need not read what a newer one wrote. The release notes name such a bump.
 
+## Pending release: trigger merge permission
+
+Issue #908 adds opt-in `run.mayMerge` to reviewed forge-flow triggers. Before adding it, follow
+[the normal order](#the-order): image first, every worker, receivers, then every console and `/dispatch`.
+The image must declare `mergePolicy`; rebuild derived images too. An enabled job on an older image refuses
+before spending, because that image would retain an unconditional prohibition in its system prompt.
+
+The trigger field needs file version 4. Enabled queued jobs carry `mayMerge: true` and a `mayMergePolicy` digest
+at job data version 5. Older services refuse the newer file or defer the newer job, rather than silently dropping
+the permission. A receiver retaining an older configuration cannot grant permission to a job; the upgraded worker
+never promotes an unflagged job from the current file. Finish the upgrade before changing triggers, and rerun a
+job refused because its trigger changed. See [the setting and its prerequisites](triggers.md#allowing-a-job-to-land-its-change).
+
+No existing state is rewritten. Files and jobs without the new fields remain valid current shapes, so they are
+not `state.older` findings. The per-container `merge-policy.json` selector is an ordinary temporary job input,
+covered by the existing job-directory lifecycle, not a new persistent store. The run record gains the refusal
+reasons `merge-policy-invalid`, `merge-policy-unavailable`, `merge-policy-changed` and
+`job-image-merge-policy-unsupported`; its field shape is unchanged.
+
+Before rolling back, pause and let active enabled jobs finish or cancel them, remove the setting from triggers
+using a current writer, and finish or cancel queued, parked and recovering jobs carrying data version 5. Do not
+lower a version by hand. A rollback does not undo completed merges or requests already accepted by the forge;
+cancel pending automatic landing at the forge when that is intended. Existing unflagged jobs do not need a
+migration, and the older behavior remains their default.
+
 ## 5.3.2: refused and cancelled jobs
 
 Issue #899 changes the lifetime of a forge job's semantic duplicate window. A terminal policy refusal or an active
@@ -328,6 +353,12 @@ as `subscription_auth_hold`. See [subscription renewal](subscription-auth.md#adm
 ## What each release changed in stored state
 
 Release numbers come from the git tags.
+
+### Pending release (#908)
+
+`triggers.json` gains optional `run.mayMerge` at version 4, and enabled queued jobs carry `mayMerge` and
+`mayMergePolicy` at data version 5. Older services refuse or defer these versions. The input selector and new
+refusal reasons are described [above](#pending-release-trigger-merge-permission); no existing file or job is migrated.
 
 ### 5.3.0
 

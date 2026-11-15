@@ -126,3 +126,23 @@ test("await-input triggers refuse managed forks until parked answers can preserv
   const got = await planRunFork({ ...request, ...d, planRerunFn: async () => ({ plan: { ...basePlan.plan, job: { ...basePlan.plan.job, awaitInput: true } } }) });
   assert.equal(got.refusal, "fork-await-input-unsupported");
 });
+
+
+test("a managed fork carries the current merge policy and requires a fresh preview if permission changes", async () => {
+  let mayMerge = true;
+  const d = deps();
+  const base = d.planRerunFn;
+  d.planRerunFn = async () => {
+    const result = await base();
+    if (mayMerge) Object.assign(result.plan.job, { mayMerge: true, mayMergePolicy: "d".repeat(64) });
+    return result;
+  };
+  const { plan } = await planRunFork({ ...request, ...d });
+  assert.equal(plan.job.mayMerge, true);
+  assert.equal(plan.job.mayMergePolicy, "d".repeat(64));
+  mayMerge = false;
+  let enqueued = false;
+  const result = await enqueueRunFork(plan, { ...d, enqueueFn: async () => { enqueued = true; return { ok: true }; } });
+  assert.match(result.refusal, /trigger or fork destination changed/);
+  assert.equal(enqueued, false);
+});

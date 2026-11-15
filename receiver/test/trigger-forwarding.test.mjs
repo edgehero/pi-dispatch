@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { enqueueForgeJob } from "@edgehero/pi-dispatch/queue";
+import { makeCheckMergePolicy, mergePolicyDigest } from "@edgehero/pi-dispatch/merge-policy";
 import { parseTriggers } from "@edgehero/pi-dispatch/triggers";
 import { reloadTriggers } from "../src/config.mjs";
 import { filterAzure } from "../src/filter-azure.mjs";
@@ -71,7 +72,7 @@ const MAX_RUN = {
 const VARIANTS = {
 	// Issue #645: run.recover is refused beside run.command, so it rides the flow variant. Only `true` rides the job.
 	// Issue #646: run.steer likewise.
-	"flow+replicas": { flow: "work", instructions: "Keep it short.", replicas: 2, recover: true, steer: true },
+	"flow+replicas": { flow: "work", instructions: "Keep it short.", replicas: 2, recover: true, steer: true, mayMerge: true },
 	"command+waitFor": { command: "wf run", waitFor: [{ profile: "jira" }] },
 };
 
@@ -86,6 +87,7 @@ const ENTRIES = {
 		{ route: "issue close", on: { type: "issue", action: ["closed"] } },
 	],
 	gitlab: [
+		{ route: "mr label", on: { type: "pull_request", action: ["update"], any: ["pi:go"] } },
 		{ route: "label", on: { type: "label", any: ["pi:go"] } },
 		{ route: "comment", on: { type: "comment", phrase: "@pi" } },
 		{ route: "pull_request", on: { type: "pull_request", action: ["open"] } },
@@ -116,6 +118,7 @@ const GH = {
 };
 const GL_PROJECT = { id: 42, path_with_namespace: "group/proj", default_branch: "main" };
 const GL = {
+	"mr label": { object_kind: "merge_request", user: { id: 7, username: "dev" }, project: GL_PROJECT, object_attributes: { iid: 12, title: "MR", description: "D", action: "update", labels: [{ title: "pi:go" }] }, changes: { labels: { previous: [], current: [{ title: "pi:go" }] } } },
 	label: { object_kind: "issue", user: { id: 7, username: "dev" }, project: GL_PROJECT, object_attributes: { iid: 5, title: "T", description: "B", action: "update", labels: [{ title: "pi:go" }] }, changes: { labels: { previous: [], current: [{ title: "pi:go" }] } } },
 	comment: { object_kind: "note", user: { id: 7, username: "dev" }, project: GL_PROJECT, object_attributes: { action: "create", note: "@pi", noteable_type: "Issue" }, issue: { iid: 5, title: "T", description: "B", labels: [] } },
 	pull_request: { object_kind: "merge_request", user: { id: 7, username: "dev" }, project: GL_PROJECT, object_attributes: { iid: 12, title: "MR", description: "D", action: "open", labels: [] } },
@@ -158,13 +161,13 @@ function drive(forge, route, triggers) {
 // One triggers file holding ONE entry, so the only rule a delivery can match is the maximal one.
 function load(forge, entry, variant) {
 	const raw = { on: entry.on, run: { kind: forge, ...MAX_RUN, ...variant, ...(entry.extra ?? {}) } };
-	// Version 2: the fixture is maximal, and the file must say what it needs (issue #800).
-	const json = JSON.stringify({ version: 2, triggers: [raw] });
+	// The maximal fixture declares the newest trigger field it uses (mayMerge, issue #908).
+	const json = JSON.stringify({ version: 4, triggers: [raw] });
 	const [normalized] = parseTriggers(json, "/t.json");
 	const cfg = {};
 	const res = reloadTriggers({ PI_TRIGGERS_FILE: "/t.json" }, cfg, { fileExists: () => true, readFile: () => json });
 	assert.deepEqual(res, { ok: true }, `${forge} ${entry.route}: the maximal fixture must load`);
-	return { normalized, triggers: cfg.triggers };
+	return { normalized, triggers: cfg.triggers, json };
 }
 
 // The grouped rule config.mjs built for this entry, wherever the route put it.
@@ -172,7 +175,7 @@ function ruleOf(triggers, forge, route) {
 	const g = triggers[forge];
 	if (route === "label") return g.label[0];
 	if (route === "comment") return g.comment;
-	if (route === "pull_request") return g.pullRequest[0];
+	if (route === "pull_request" || route === "mr label") return g.pullRequest[0];
 	if (route === "pr close") return g.prClose[0];
 	return g.issue[0];
 }
@@ -192,13 +195,13 @@ test("the maximal fixture really is maximal: it sets every field this test exist
 	// A guard on the guard. If the loader stopped emitting one of these, the derived set would shrink and
 	// every assertion below would pass vacuously for that field.
 	const keys = new Set(Object.values(VARIANTS).flatMap((v) => execKeys(load("github", ENTRIES.github[0], v).normalized)));
-	for (const k of [...Object.keys(MAX_RUN), "flow", "command", "instructions", "replicas", "waitFor"]) assert.ok(keys.has(k), `normalized run lacks ${k}`);
+	for (const k of [...Object.keys(MAX_RUN), "flow", "command", "instructions", "replicas", "waitFor", "mayMerge"]) assert.ok(keys.has(k), `normalized run lacks ${k}`);
 });
 
 for (const [forge, entries] of Object.entries(ENTRIES)) {
 	for (const entry of entries) {
 		for (const [vname, variant] of Object.entries(VARIANTS)) test(`${forge} ${entry.route} (${vname}): every execution key the loader emits reaches the job, through the group copy`, async () => {
-			const { normalized, triggers } = load(forge, entry, variant);
+			const { normalized, triggers, json } = load(forge, entry, variant);
 			const keys = execKeys(normalized);
 
 			// The group copy (receiver/src/config.mjs). The comment group names the flow `defaultFlow`.
@@ -216,7 +219,7 @@ for (const [forge, entries] of Object.entries(ENTRIES)) {
 				assert.deepEqual(r.job[k], normalized.run[k], `${forge} ${entry.route}: the filter dropped run.${k} on the way to the job`);
 			}
 			// And execution knobs stay OUT of `trigger`, which is copied verbatim into /job/event.json.
-			for (const k of ["provider", "model", "maxTurns", "models", "fallbackModels", "maxCostUsd"]) {
+			for (const k of ["provider", "model", "maxTurns", "models", "fallbackModels", "maxCostUsd", "mayMerge", "mayMergePolicy"]) {
 				assert.equal(k in r.job.trigger, false, `${forge} ${entry.route}: ${k} leaked into trigger`);
 			}
 
@@ -224,6 +227,13 @@ for (const [forge, entries] of Object.entries(ENTRIES)) {
 			// every field, so a name it forgets is dropped between the filter and the stored job data.
 			// The receiver hands the filter's job to it whole (receiver.mjs fanout), and so does this.
 			const data = await enqueuedData(forge, r.job);
+			if (normalized.run.mayMerge === true) {
+				const digest = mergePolicyDigest(normalized);
+				for (const [stage, value] of [["group", rule], ["filter", r.job], ["queue", data]]) assert.equal(value.mayMergePolicy, digest, `${stage} lost the reviewed trigger reference`);
+				assert.equal(data.dataVersion, 5);
+				const check = makeCheckMergePolicy({ triggersPath: "/t.json", fs: { readFileSync: () => json } });
+				assert.deepEqual(check(data), { ok: true }, `${forge} ${entry.route}: the real pickup gate must accept the receiver's queued policy`);
+			}
 			for (const k of keys) {
 				assert.deepEqual(data[k], normalized.run[k], `${forge} ${entry.route}: enqueueForgeJob dropped run.${k} from the job data`);
 			}
@@ -240,9 +250,9 @@ test("absent stays absent: a trigger naming no model or cap enqueues a job with 
 			reloadTriggers({ PI_TRIGGERS_FILE: "/t.json" }, cfg, { fileExists: () => true, readFile: () => json });
 			const r = drive(forge, entry.route, cfg.triggers);
 			assert.equal(r.enqueue, true, `${forge} ${entry.route}: ${r.reason}`);
-			for (const k of ["provider", "model", "maxTurns", "models", "fallbackModels", "maxCostUsd"]) assert.equal(k in r.job, false, `${forge} ${entry.route}: ${k}`);
+			for (const k of ["provider", "model", "maxTurns", "models", "fallbackModels", "maxCostUsd", "mayMerge", "mayMergePolicy"]) assert.equal(k in r.job, false, `${forge} ${entry.route}: ${k}`);
 			const data = await enqueuedData(forge, r.job);
-			for (const k of ["provider", "model", "maxTurns", "models", "fallbackModels", "maxCostUsd"]) assert.equal(k in data, false, `${forge} ${entry.route}: ${k} in stored data`);
+			for (const k of ["provider", "model", "maxTurns", "models", "fallbackModels", "maxCostUsd", "mayMerge", "mayMergePolicy"]) assert.equal(k in data, false, `${forge} ${entry.route}: ${k} in stored data`);
 		}
 	}
 });
@@ -252,11 +262,11 @@ test("each field ALONE reaches the job: one folded into a neighbour's conditiona
 	// be, under `excludeTools`) passes it while a trigger naming that field alone loses it. Each field here is the
 	// trigger's only optional one, with the companions the loader requires of it and nothing else.
 	const needs = { secretsProfile: { secrets: MAX_RUN.secrets }, models: { provider: MAX_RUN.provider, model: MAX_RUN.model } };
-	for (const [field, value] of Object.entries(MAX_RUN)) {
+	for (const [field, value] of Object.entries({ ...MAX_RUN, mayMerge: true })) {
 		for (const [forge, entries] of Object.entries(ENTRIES)) {
 			for (const entry of entries) {
 				const raw = { on: entry.on, run: { kind: forge, flow: "work", ...(needs[field] ?? {}), [field]: value, ...(entry.extra ?? {}) } };
-				const json = JSON.stringify({ version: 2, triggers: [raw] });
+				const json = JSON.stringify({ version: 4, triggers: [raw] });
 				const [normalized] = parseTriggers(json, "/t.json");
 				const cfg = {};
 				assert.deepEqual(reloadTriggers({ PI_TRIGGERS_FILE: "/t.json" }, cfg, { fileExists: () => true, readFile: () => json }), { ok: true }, `${forge} ${entry.route}: ${field} alone must load`);

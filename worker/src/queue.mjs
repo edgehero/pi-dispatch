@@ -568,8 +568,11 @@ export async function enqueueLateForgeJob(queue, kind, fields, { dataVersions } 
  * semantic dedup id. Throws on a bad delivery id or console name, and on input a newer release stored with a
  * `dataVersion` above this build's (issue #761; every caller that rebuilds stored input answers with a reply then).
  */
-function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, models, fallbackModels, maxCostUsd, idleTimeoutMinutes, stallTimeoutMinutes, maxMinutes, packages, image, backend, excludeTools, excludeExtensions, excludeExtensionTools, mcp, skillsDir, instructions, resume, awaitInput, gates, approvalRequestId, gateTimeout, gateBudgetRaiseUsd, progress, statusComment, recover, steer, fork, forkPolicy, forkReserveMicros, thinkingLevel, parkedReply, replyReceivedAt, console: consoleMeta, secrets, secretsProfile, waitFor, replica, replicas, dataVersion }, { dataVersions } = {}) {
+function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, models, fallbackModels, maxCostUsd, idleTimeoutMinutes, stallTimeoutMinutes, maxMinutes, packages, image, backend, excludeTools, excludeExtensions, excludeExtensionTools, mcp, skillsDir, instructions, mayMerge, mayMergePolicy, resume, awaitInput, gates, approvalRequestId, gateTimeout, gateBudgetRaiseUsd, progress, statusComment, recover, steer, fork, forkPolicy, forkReserveMicros, thinkingLevel, parkedReply, replyReceivedAt, console: consoleMeta, secrets, secretsProfile, waitFor, replica, replicas, dataVersion }, { dataVersions } = {}) {
 	const jobId = forgeDeliveryJobId(kind, trigger?.deliveryId, replica);
+	if (mayMerge !== undefined && typeof mayMerge !== "boolean") throw new TypeError("merge-policy-invalid");
+	if (mayMerge === true && (command !== undefined || typeof mayMergePolicy !== "string" || !/^[a-f0-9]{64}$/.test(mayMergePolicy))) throw new TypeError("merge-policy-invalid");
+	if (mayMerge !== true && mayMergePolicy !== undefined) throw new TypeError("merge-policy-invalid");
 	if (approvalRequestId !== undefined && (typeof approvalRequestId !== "string" || !/^[A-Za-z0-9._:-]{1,200}$/.test(approvalRequestId))) throw new TypeError("approval-request-invalid");
 	if (replyReceivedAt !== undefined && (!Number.isSafeInteger(replyReceivedAt) || replyReceivedAt < 0 || resume !== true || typeof trigger?.comment?.body !== "string")) throw new TypeError("reply-receipt-invalid");
 	// Issue #642: an answer typed into the operator console carries WHO typed it, `{ by: <token name> }`, and nothing
@@ -641,6 +644,7 @@ function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigg
 		// the rest, and at JOB level rather than inside `trigger`: it is operator config, not a fact about the
 		// delivery, and `trigger` is what /job/event.json is built from.
 		...(instructions !== undefined && { instructions }),
+		...(mayMerge === true && { mayMerge: true, mayMergePolicy }),
 		...(resume !== undefined && { resume }),
 		// REQ-AWAIT-INPUT (issue #625): only when armed, so an unflagged job's data is byte-identical, and at JOB level
 		// for resume's reason: `trigger` is copied verbatim into /job/event.json.

@@ -3,6 +3,7 @@ import { readFileSync, writeFileSync, mkdirSync, symlinkSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { makeWatchRuntime, readWatchOutput } from "../src/watch-runtime.mjs";
+import { TRIGGERS_FILE_VERSION } from "../src/triggers.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { makeRedactor } from "../src/redact-secrets.mjs";
 const findingId = "a".repeat(64);
@@ -153,7 +154,7 @@ test("a newer triggers file or settings overlay never takes the finding: the run
 	const counted = { async takeFinding() { takes++; return { status: "ready", finding: {} }; } };
 	const f = fixture({ storeOverrides: counted });
 	const doc = JSON.parse(readFileSync(f.triggersPath, "utf8"));
-	writeFileSync(f.triggersPath, JSON.stringify({ version: 4, ...doc }));
+	writeFileSync(f.triggersPath, JSON.stringify({ ...doc, version: TRIGGERS_FILE_VERSION + 1 }));
 	assert.deepEqual(await f.runtime.resolve(f.ref, "run1"), { newer: "the triggers file" });
 	const newerSettings = fixture({ decision: true, storeOverrides: counted, getSettings: () => ({ invalid: "settings file written by a newer pi-dispatch (version 2; this build understands 1)", newer: true }) });
 	assert.deepEqual(await newerSettings.runtime.resolve(newerSettings.ref, "gate1"), { newer: "the settings file" });

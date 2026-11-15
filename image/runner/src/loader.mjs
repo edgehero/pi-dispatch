@@ -5,6 +5,8 @@ import { DefaultResourceLoader, SettingsManager, getAgentDir, loadSkillsFromDir 
 import { LAYOUT } from "./layout.mjs";
 import { overlayEntryNamed } from "./loaded.mjs";
 import { extensionEntryName, isUnderAnyRoot, owningRoot, partitionAdminExtensions } from "./packages.mjs";
+import { guardrailsForMerge } from "./merge-policy.mjs";
+import { configError } from "./outcome.mjs";
 
 /** Where the image bakes the guardrails. Outside agentDir, on purpose -- see buildResourceLoader. */
 export const GUARDRAILS_PATH = "/opt/pi-dispatch/HARD_RULES.md";
@@ -566,8 +568,10 @@ export function buildResourceLoader({
 	extensionFactories = [],
 	watchReadOnly = false,
 	watchExtensionFactories = [],
+	mayMerge = false,
 } = {}) {
-	const guardrails = readFileSync(guardrailsPath, "utf8");
+	if (watchReadOnly && mayMerge !== false) throw configError("a read-only job cannot carry merge permission");
+	const guardrails = guardrailsForMerge(readFileSync(guardrailsPath, "utf8"), mayMerge);
 	// Watch evidence has no author gate. Reject executable resources before their modules run;
 	// filtering a loaded extension afterward cannot undo module-level side effects.
 	if (watchReadOnly) return new DefaultResourceLoader({
