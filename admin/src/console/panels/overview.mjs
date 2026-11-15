@@ -50,7 +50,7 @@ import { usd2 } from "../../panel.mjs";
 import { NO_EXPLANATION, docsHref } from "../../words.mjs";
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
-import { TIMELINE_ROWS, TIMELINE_WAIT_WORDS, TIMELINE_ZOOMS, timelineHtml, timelineLegend, timelineModel } from "../timeline.mjs";
+import { TIMELINE_DEFAULTS, TIMELINE_ROWS, TIMELINE_WAIT_WORDS, TIMELINE_ZOOMS, timelineHtml, timelineLegend, timelineModel } from "../timeline.mjs";
 import { BEAT_FRESH_MS, RUN_ID_RE, ageText, beatAgeOf, beatFresh, canAct, count, moneyHtml, shownPath, timeHtml, usdText, workersOnline } from "./common.mjs";
 
 // ---- the sentences -----------------------------------------------------------------------------------------------------
@@ -661,10 +661,14 @@ function timelineQuery(view) {
   };
 }
 
-/** The overview's own link with the timeline's query changed by `over`. */
+/**
+ * The overview's own link with the timeline's query changed by `over`. A default is left out by `TIMELINE_DEFAULTS`
+ * itself: the zoom's was a "3h" literal here, which would have kept `/?zoom=3h` canonical and drawn the default's own
+ * button as a link to itself with a query once the default moved (issue #896).
+ */
 function overviewHref(view, q, over) {
   const next = { ...q, ...over };
-  return hrefTo(view, "overview", { rows: next.rows === TIMELINE_ROWS[0] ? null : next.rows, zoom: next.zoom === "3h" ? null : next.zoom, project: next.project });
+  return hrefTo(view, "overview", { rows: next.rows === TIMELINE_DEFAULTS.rows ? null : next.rows, zoom: next.zoom === TIMELINE_DEFAULTS.zoom ? null : next.zoom, project: next.project });
 }
 
 /**

@@ -123,8 +123,14 @@ export const TIMELINE_ZOOMS = Object.freeze({
  */
 export const TIMELINE_ROWS = Object.freeze(["project", "host"]);
 
-/** What an overview with no `?rows=` or `?zoom=` draws. */
-export const TIMELINE_DEFAULTS = Object.freeze({ rows: "project", zoom: "3h" });
+/**
+ * What an overview with no `?rows=` or `?zoom=` draws. The window is the whole day the run history is read for
+ * (`runsDay`, issue #896): at 3h, a project whose last run ended more than three hours ago was not on the card at all,
+ * and nothing on it said older runs existed. The cost is density, since a pill is at least `PILL_MIN_PCT` (about 43
+ * minutes at 24h) wide: a schedule every half hour fills its row's lanes and the rest is counted, quiet completed runs
+ * first (`TIMELINE_KINDS`).
+ */
+export const TIMELINE_DEFAULTS = Object.freeze({ rows: "project", zoom: "24h" });
 
 /** The most lanes one row draws; the items that fit in none are counted in the row's `more`. */
 export const TIMELINE_LANES_MAX = 4;
