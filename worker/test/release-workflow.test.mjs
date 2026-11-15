@@ -34,6 +34,6 @@ test("release.yml's suite runs with the contract job's Valkey, VALKEY_TEST_URL a
 	assert.ok(contract.services?.valkey?.image, "the contract job's Valkey service is where this test reads it");
 	assert.deepEqual(release.services?.valkey, contract.services.valkey, "the release job runs the contract job's Valkey service");
 	assert.ok(release.services.valkey.ports.includes(`${new URL(releaseSuite.env.VALKEY_TEST_URL).port}:6379`), "VALKEY_TEST_URL names the port the service publishes");
-	assert.equal(release["timeout-minutes"], 60, "a hang ends in an hour, the contract job's own limit, not at Actions' six");
-	assert.equal(contract["timeout-minutes"], 60);
+	assert.equal(release["timeout-minutes"], 60, "the release runs one suite and retains its one-hour bound");
+	assert.equal(contract["timeout-minutes"], 90, "repeated suites and browser checks have headroom beyond the measured hour; individual file and step deadlines still hold");
 });
