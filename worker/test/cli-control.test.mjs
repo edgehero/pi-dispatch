@@ -50,6 +50,48 @@ test("an unknown command still exits 1", async () => {
 	assert.equal(await main(["frobnicate"], {}), 1);
 });
 
+test("status marks a failed queue scan incomplete even when the registry and visible queue answer", async () => {
+	for (const scanFails of [false, true]) {
+		let disconnected = false;
+		const opened = [], closed = [];
+		let output = "";
+		const code = await main(["status", "--valkey-url", "redis://127.0.0.1:6379"], {}, {
+			now: () => new Date(1_800_000_000_000),
+			write: (text) => { output += text; }, valkeyRefusal: async () => null,
+			controlClients: {
+				makeRedisClient: () => ({
+					on() {}, disconnect() { disconnected = true; },
+					async smembers() { return []; },
+					async scan() {
+						if (scanFails) throw new Error("scan refused: private connection detail");
+						return ["0", []];
+					},
+				}),
+				makeQueue: (_connection, { name }) => {
+					opened.push(name);
+					return {
+						name, client: { async zrange() { return []; } },
+						async isPaused() { return false; },
+						async getJobCounts() { return { waiting: 1, active: 0, paused: 0, delayed: 0, failed: 0 }; },
+						async close() { closed.push(name); },
+					};
+				},
+			},
+		});
+		assert.equal(code, 0);
+		const result = JSON.parse(output);
+		assert.equal(result.waiting, 1);
+		assert.equal(result.waitingDetails.partial, scanFails);
+		assert.equal(result.waitingDetails.discoveryIncomplete, scanFails ? true : undefined);
+		assert.deepEqual(result.waitingDetails.rows, []);
+		assert.ok(!Object.hasOwn(result, "fleet"), "the registry answered; only the keyspace discovery failed");
+		assert.ok(!output.includes("private connection detail"));
+		assert.deepEqual(opened, ["pi-jobs"]);
+		assert.deepEqual(closed, opened);
+		assert.equal(disconnected, true);
+	}
+});
+
 // Issue #464 (gate round 3): the kill switch and status judge the Valkey before they talk to it.
 test("pause, resume and status stop on the Valkey refusal before they talk to it (#464)", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL" }, async () => {
 	for (const cmd of ["pause", "resume", "status"]) {

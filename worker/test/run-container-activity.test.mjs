@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
-import { writeFileSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -36,7 +36,7 @@ function heldSpawn(recorder) {
 const envOf = (args) => Object.fromEntries(args.flatMap((arg, i, all) => (arg === "-e" ? [all[i + 1].split(/=(.*)/s).slice(0, 2)] : [])));
 
 /** A run with the watch asked for, on a binding venue, with a fake clock and a timer the test ticks. */
-function watchedRun({ activityWatch = { idleMs: 15 * MIN, stallMs: 240 * MIN, keepWallClock: false }, stageLive, credentialRefresh = null } = {}) {
+function watchedRun({ activityWatch = { idleMs: 15 * MIN, stallMs: 240 * MIN, keepWallClock: false }, stageLive, credentialRefresh = null, subscriptionAuth = [], makeCredentialDirectory, stageRun, openLiveTranscript = null, job = JOB, checkpoint = null, recover = false } = {}) {
 	const recorder = {};
 	const h = { t: 1_000_000, ticks: [], armed: 0, stops: [], noted: [], logs: [] };
 	const jobDir = tempDir("activity-run-");
@@ -49,11 +49,18 @@ function watchedRun({ activityWatch = { idleMs: 15 * MIN, stallMs: 240 * MIN, ke
 		activityClock: () => h.t,
 		activityTimers: { setInterval: (fn) => (h.ticks.push(fn), { unref() {} }), clearInterval: () => (h.ticks = []) },
 		...(stageLive ? { stageLive } : {}),
+		...(makeCredentialDirectory ? { makeCredentialDirectory } : {}),
+		...(stageRun ? { stageRun: (args) => stageRun(args, h) } : {}),
+		openLiveTranscript,
 	});
 	const done = run({
-		job: JOB,
+		job,
 		prepared,
 		name: "pi-job-act-1",
+		jobId: "act-1",
+		subscriptionAuth,
+		checkpoint,
+		recover,
 		activityWatch,
 		onActivityArmed: () => (h.armed += 1),
 		requestStop: (reason) => h.stops.push(reason),
@@ -64,7 +71,7 @@ function watchedRun({ activityWatch = { idleMs: 15 * MIN, stallMs: 240 * MIN, ke
 		h.t += ms;
 		for (const fn of h.ticks) fn();
 	};
-	return { h, recorder, done, jobDir };
+	return { h, recorder, done, jobDir, prepared };
 }
 
 test("a watched run on a binding venue stages the transcript, hands the runner its limits and the wall clock over to the watch", { skip }, async () => {
@@ -162,4 +169,74 @@ test("issue #888, part 3: an expiring credential with no renewal keeps the wall 
 	assert.ok(h.noted.some((n) => n.basis === "wall-clock" && n.why === "subscription"), JSON.stringify(h.noted));
 	recorder.close(0);
 	await done;
+});
+
+const leaseSnapshot = () => ({ provider: "openai", connectionId: "chatgpt", adapter: "openai-chatgpt", generation: 1, renewable: true, expiresAt: 1_000_000 + 60 * MIN, deadlineAt: 1_000_000 + 30 * MIN, env: { OPENAI_API_KEY: "opaque.original.access.value" } });
+const leaseJob = { kind: "local", provider: "openai", model: "gpt-4.1", maxTurns: 5 };
+
+test("a short subscription lease never starts when its renewal folder or activity channel cannot be armed", { skip }, async () => {
+	for (const options of [{ makeCredentialDirectory: () => null }, { stageLive: () => null }, { credentialRefresh: null }]) {
+		const snapshot = leaseSnapshot();
+		const h = watchedRun({ job: leaseJob, subscriptionAuth: [snapshot], credentialRefresh: { subscriptions: [snapshot], extend: async () => null }, ...options });
+		await assert.rejects(h.done, (error) => error.reason === "container-never-started");
+		assert.equal(h.recorder.args, undefined, "no paid container starts on the legacy wall-clock fallback");
+		assert.equal(existsSync(`${h.jobDir}.credentials`), false);
+	}
+});
+
+test("a lease consumed during venue preparation refuses before spawn and removes its drop folder", { skip }, async () => {
+	for (const elapsed of [0, 1]) {
+		const snapshot = leaseSnapshot();
+		const h = watchedRun({ job: leaseJob, subscriptionAuth: [snapshot], credentialRefresh: { subscriptions: [snapshot], extend: async () => null }, stageRun: (_args, state) => { state.t = snapshot.deadlineAt - 4 * MIN + elapsed; } });
+		await assert.rejects(h.done, (error) => error.reason === "container-never-started");
+		assert.equal(h.recorder.args, undefined);
+		assert.equal(existsSync(`${h.jobDir}.credentials`), false);
+	}
+});
+
+test("rotated opaque access is registered before publication in live, question and checkpoint consumers, retaining prior values", { skip }, async () => {
+	const snapshot = leaseSnapshot();
+	const replacement = "opaque.rotated.access.value";
+	const checkpoint = { runId: "act-1", baseSha: "a".repeat(40), secretValues: ["existing.workspace.secret"] };
+	let opened;
+	const h = watchedRun({
+		job: leaseJob,
+		subscriptionAuth: [snapshot],
+		checkpoint,
+		recover: true,
+		activityWatch: { idleMs: 120 * MIN, stallMs: 240 * MIN, keepWallClock: true, why: "subscription" },
+		openLiveTranscript: (options) => { opened = options; return { start() {}, async finish() {} }; },
+		credentialRefresh: { subscriptions: [snapshot], extend: async (current, { deadlineAt }) => ({ ...current, generation: 2, deadlineAt, expiresAt: deadlineAt + 20 * MIN, env: { OPENAI_API_KEY: replacement } }) },
+	});
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(opened.checkpoint.secretValues, checkpoint.secretValues, "the scanner keeps this collection by reference");
+	h.h.tick(20 * MIN);
+	await new Promise((resolve) => setImmediate(resolve));
+	const content = `${snapshot.env.OPENAI_API_KEY} ${replacement} existing.workspace.secret`;
+	assert.equal(opened.redact(content), "[redacted] [redacted] [redacted]");
+	assert.equal(h.prepared.questionRedact(content), "[redacted] [redacted] [redacted]");
+	assert.ok(opened.checkpoint.secretValues.includes(replacement), "a checkpoint after rotation scans the new bearer");
+	assert.ok(opened.checkpoint.secretValues.includes(snapshot.env.OPENAI_API_KEY), "old output and files remain protected");
+	assert.equal(Object.keys(h.prepared).includes("questionRedact"), false);
+	assert.equal(h.prepared.credentialSecretValues, checkpoint.secretValues, "the final fork snapshot shares the same retained values");
+	assert.equal(Object.keys(h.prepared).includes("credentialSecretValues"), false, "private values cannot become preparation telemetry");
+	const drop = JSON.parse((await import("node:fs")).readFileSync(`${h.jobDir}.credentials/current.json`, "utf8"));
+	assert.equal(drop.subscriptions[0].token, replacement, "the same replacement is published only after registration");
+	assert.equal(JSON.stringify(h.h.logs).includes(replacement), false);
+	h.recorder.close(0);
+	await h.done;
+	assert.equal(h.prepared.questionRedact(replacement), "[redacted]", "the final transcript consumer sees all credentials after the run ends");
+});
+
+test("watch output uses the updated credential redactor after rotation", { skip }, async () => {
+	const snapshot = leaseSnapshot();
+	const replacement = "opaque.watch.replacement.access";
+	const h = watchedRun({ job: { ...leaseJob, watch: { mode: "investigate" } }, subscriptionAuth: [snapshot], activityWatch: { idleMs: 120 * MIN, stallMs: null, keepWallClock: true }, credentialRefresh: { subscriptions: [snapshot], extend: async (current, { deadlineAt }) => ({ ...current, generation: 2, deadlineAt, expiresAt: deadlineAt + 20 * MIN, env: { OPENAI_API_KEY: replacement } }) } });
+	await new Promise((resolve) => setImmediate(resolve));
+	h.h.tick(20 * MIN);
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(h.prepared.watchRedact(`${snapshot.env.OPENAI_API_KEY} ${replacement}`), "[redacted] [redacted]");
+	assert.ok(h.prepared.credentialSecretValues.includes(replacement), "values remain available even without a live checkpoint");
+	h.recorder.close(0);
+	await h.done;
 });

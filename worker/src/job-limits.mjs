@@ -4,7 +4,7 @@ import { join } from "node:path";
 /**
  * A running job's limits (issue #888, `REQ-JOB-ACTIVITY-LIMITS`, `DES-JOB-ACTIVITY-WATCH`): when the worker stops a job.
  *
- * The runner judges idle and stalled itself (image/runner/src/activity.mjs) and stops the job with a policy exit; this
+ * The runner judges idleness and an explicitly configured stall limit (image/runner/src/activity.mjs) and stops the job with a policy exit; this
  * module is the worker's half:
  *   - which limits a job runs under (`effectiveJobLimits`: the trigger's, else the deployment's);
  *   - the BACKSTOP for a runner too wedged to stop its own job (`makeActivityBackstop`): it reads the counters the runner

@@ -155,7 +155,7 @@ test("issue #888: once the activity watch is armed the wall clock is handed over
 	const ac = new AbortController();
 	const running = processor({ id: "j1", data: { kind: "github", repo: "o/r" } }, "tok", ac.signal).catch(() => {});
 	assert.notEqual(await within(startedOnce, 10_000), "bound", "the container never started");
-	assert.deepEqual(args.activityWatch, { idleMs: 15 * 60_000, stallMs: 240 * 60_000, keepWallClock: false, why: null }, "the deployment defaults, in milliseconds");
+	assert.deepEqual(args.activityWatch, { idleMs: 15 * 60_000, stallMs: null, keepWallClock: false, why: null }, "regular jobs have only the idle limit by default");
 	// Five times the 20 ms wall clock: handed over, it never fires.
 	assert.equal(await within(cancelled, 100), "bound", `the wall clock fired after the hand-over: ${cancels}`);
 	args.requestStop("idle");

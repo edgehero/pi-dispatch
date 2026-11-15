@@ -1,3 +1,6 @@
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tempDir } from "./helpers/temp-dir.mjs";
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { runJob } from "../src/processor.mjs";
@@ -175,4 +178,29 @@ test("recovery env continues the checkpoint rather than branching the source a s
 	assert.equal(env.PI_FORK_POSITION, undefined);
 	assert.equal(env.PI_RECOVERING, "1");
 	assert.equal(env.PI_THINKING_LEVEL, "high");
+});
+
+
+test("completed fork capture scans initial and rotated subscription credentials", async () => {
+	const f = fixture();
+	const root = tempDir("fork-rotated-secret-");
+	const session = join(root, "session");
+	mkdirSync(session);
+	writeFileSync(join(session, "current.jsonl"), "{}\n");
+	f.deps.prepareWorkspace = async () => ({ workspace: root, jobDir: root, sha: baseSha });
+	f.deps.stageRecovered = async () => ({ hostDir: session, key: `${fork.rootKey}.${fork.id}`, resume: true });
+	f.deps.prepareSubscriptionAuth = async () => ({ ok: true, snapshots: [{ provider: "openai", env: { OPENAI_API_KEY: "initial-opaque-access" } }] });
+	f.deps.validateSubscriptionAuth = async () => true;
+	f.deps.runContainer = async ({ prepared }) => {
+		Object.defineProperty(prepared, "credentialSecretValues", { value: ["rotated-opaque-access", "rotated-forge-access"] });
+		return { code: 0, aborted: false };
+	};
+	let captured = null;
+	f.deps.forkStore.capturePoint = async ({ secretValues }) => {
+		captured = [...secretValues];
+		return { refused: "job-secret-in-tree" };
+	};
+	assert.equal((await runJob(f.job, f.deps)).outcome, "completed");
+	assert.ok(captured);
+	for (const value of ["scoped-token", "initial-opaque-access", "rotated-opaque-access", "rotated-forge-access"]) assert.ok(captured.includes(value), value);
 });

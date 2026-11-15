@@ -110,6 +110,18 @@ export const DEFER_TIME_MAX_MS = 253402300799999;
 
 /** How long a record outlives the job's due time, so a record is still there while the job is promoted and picked up. */
 export const DEFER_TTL_SLACK_MS = 60_000;
+/** A due job gets this clock-skew grace before readers report it as waiting for pickup, whatever its record says. */
+export const WAITING_DUE_GRACE_MS = 10_000;
+/** A retry's due can be a little after the record's until; a larger difference belongs to an earlier episode. */
+const DEFER_STALE_MS = 5_000;
+
+/** Shared by console and CLI: a delayed score agrees with the record's span, allowing bounded clock/write skew. */
+export function recordMatchesDue(record, dueAt) {
+	if (record === null || record.until === null || dueAt === null) return true;
+	const latest = Math.max(record.until, record.at ?? record.until);
+	return dueAt >= record.until - DEFER_STALE_MS && dueAt <= latest + DEFER_STALE_MS;
+}
+
 /** A record's lifetime: until the job is due, plus the slack, and never less than the slack. */
 export const deferTtlMs = (untilMs, nowMs) => Math.max(DEFER_TTL_SLACK_MS, untilMs - nowMs + DEFER_TTL_SLACK_MS);
 

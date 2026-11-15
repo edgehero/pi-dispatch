@@ -49,6 +49,7 @@
     "./provider-key": "./src/provider-key.mjs",
     ".": "./src/index.mjs",
     "./config": "./src/config.mjs",
+    "./job-limit-rules": "./src/job-limit-rules.mjs",
     "./exit-code": "./src/exit-code.mjs",
     "./entry": "./src/entry.mjs",
     "./git-hardening": "./src/git-hardening.mjs",

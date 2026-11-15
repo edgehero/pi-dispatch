@@ -901,6 +901,15 @@ IWHANG
 				echo "$iw_counters" | grep -q '"v":1,"steps":[1-9]' \
 					|| fail "the image declares idleWatch but wrote no activity counters beside the session file: $iw_counters"
 				;;
+			subscriptionLease)
+				# Issue #895. Use the baked guard, drop reader and pinned ModelRuntime with an injected clock:
+				# requests inside the old five-minute floor must work, then use a replacement beyond the old
+				# expiry and refuse at the new deadline. No network or model inference is involved.
+				sl_out=$(docker run --rm --network none --cap-drop=ALL --security-opt no-new-privileges \
+					--entrypoint node "$IMAGE_REF" /app/image/runner/test/fixtures/subscription-lease-smoke.mjs 2>&1) && sl_code=0 || sl_code=$?
+				[ "$sl_code" = 0 ] && echo "$sl_out" | grep -q '^SUBSCRIPTION-LEASE-VERIFIED$' \
+					|| fail "the image declares subscriptionLease but its request/renewal proof failed (exit $sl_code): $sl_out"
+				;;
 			credentialRefresh)
 				# Issue #888, part 3. The claim is that the runner reads PI_CREDENTIAL_REFRESH and puts a renewed forge token from the
 				# read-only drop into the environment a tool process inherits. Proved through the real runner with no network and no

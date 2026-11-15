@@ -36,7 +36,7 @@
  * the delayed set, which is how a reader tells a record that describes the wait from one that does not.
  */
 import { randomBytes } from "node:crypto";
-import { DEFER_N_RE, DEFER_WHY_RE, deferHsetArgs, deferKey, deferTtlMs } from "./defer-reasons.mjs";
+import { DEFER_ID_RE, DEFER_N_RE, DEFER_TIME_MAX_MS, DEFER_WHY_RE, deferHsetArgs, deferKey, deferTtlMs } from "./defer-reasons.mjs";
 
 /** How long a gate waits for its reason's write, and a failed move for its compare-and-delete, before going on. */
 export const DEFER_WRITE_TIMEOUT_MS = 2_000;
@@ -190,6 +190,13 @@ export function makeDeferTo({ redis, DelayedError, now = () => Date.now(), hostN
 			}
 			throw error;
 		}
+		// A successful move is the evidence for this line, even when its advisory record could not be written.
+		// Logging before the move would describe a hold that a lost queue lock may never have made.
+		if (why === "subscription-auth") say("subscription_auth_hold", {
+			jobId: typeof job.id === "string" && DEFER_ID_RE.test(job.id) ? job.id : null,
+			why,
+			until: Number.isFinite(untilMs) && untilMs >= 0 && untilMs <= DEFER_TIME_MAX_MS ? Math.floor(untilMs) : null,
+		});
 		throw new DelayedError();
 	};
 

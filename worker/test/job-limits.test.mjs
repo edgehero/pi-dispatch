@@ -24,11 +24,14 @@ import { ABORT_RECORD_REASONS } from "../src/processor.mjs";
 import { makeStderrTranscript } from "../src/stderr-transcript.mjs";
 import { buildRecord, recordedLimits, RUNNER_POLICY_REASONS } from "../src/run-history.mjs";
 import { TERMINAL_COMMENTS } from "../src/comment-tables.mjs";
+import { ACTIVITY_NET_FLOOR_BYTES, ACTIVITY_SAMPLE_MS, createActivityWatch } from "../../image/runner/src/activity.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 const MIN = 60_000;
 
 test("the effective limits: the trigger's idle and stall, else the deployment's, else the defaults", () => {
+	assert.equal(JOB_IDLE_MINUTES_DEFAULT, 15);
+	assert.equal(JOB_STALL_MINUTES_DEFAULT, 0, "active work has no implicit stall ceiling");
 	assert.deepEqual(effectiveJobLimits({}, {}), { idleMinutes: JOB_IDLE_MINUTES_DEFAULT, stallMinutes: JOB_STALL_MINUTES_DEFAULT, maxMinutes: null });
 	assert.deepEqual(effectiveJobLimits({}, { idleMinutes: 20, stallMinutes: 0, maxMinutes: null }), { idleMinutes: 20, stallMinutes: 0, maxMinutes: null });
 	// A trigger may raise either as well as lower it: neither bounds money.
@@ -94,11 +97,49 @@ test("the counters file is read as the job's own: a regular file only, never thr
 });
 
 /** A backstop on a fake clock. */
-function backstop({ idleMs = 15 * MIN, stallMs = 240 * MIN } = {}) {
+function backstop({ idleMs = 15 * MIN, stallMs = null } = {}) {
 	const h = { t: 0, stops: [] };
 	h.b = makeActivityBackstop({ idleMs, stallMs, now: () => h.t, onStop: (r) => h.stops.push(r) });
 	return h;
 }
+
+test("default regular jobs stay alive for twelve hours of activity without a step, then stop only when idle", () => {
+	const limits = effectiveJobLimits({}, {});
+	assert.equal(limits.maxMinutes, null);
+	for (const activity of ["cpu", "network", "tool-output"]) {
+		let at = 1_000_000, cpu = 0, net = 0, counters = null;
+		const runnerStops = [], workerStops = [];
+		const durations = { idleMs: limits.idleMinutes * MIN, stallMs: limits.stallMinutes > 0 ? limits.stallMinutes * MIN : null };
+		const worker = makeActivityBackstop({ ...durations, now: () => at, onStop: (reason) => workerStops.push(reason) });
+		const runner = createActivityWatch({ limits: durations, now: () => at,
+			timers: { setInterval: () => null, clearInterval: () => {} },
+			readCpuUsec: () => cpu, readOwnCpuUsec: () => 0, readNet: () => net, meterSignature: () => "0:0",
+			writeCounters: (value) => { counters = value; }, onStop: (reason) => runnerStops.push(reason),
+		});
+		const sample = () => { runner.sample(); worker.observe(counters); worker.check(); };
+		runner.start();
+		const initialSteps = runner.state.steps; // The startup counter is a baseline, not an agent step.
+		try {
+			for (let elapsed = 0; elapsed < 12 * 60 * MIN; elapsed += ACTIVITY_SAMPLE_MS) {
+				at += ACTIVITY_SAMPLE_MS;
+				if (activity === "cpu") cpu += ACTIVITY_SAMPLE_MS * 1000 / 2;
+				if (activity === "network") net += ACTIVITY_NET_FLOOR_BYTES;
+				if (activity === "tool-output") runner.observe({ type: "tool_execution_update" });
+				sample();
+			}
+			assert.equal(runner.state.steps, initialSteps, activity);
+			assert.deepEqual(runnerStops, [], activity);
+			assert.deepEqual(workerStops, [], activity);
+			for (let elapsed = ACTIVITY_SAMPLE_MS; elapsed <= durations.idleMs + BACKSTOP_GRACE_MS; elapsed += ACTIVITY_SAMPLE_MS) {
+				at += ACTIVITY_SAMPLE_MS;
+				sample();
+				if (elapsed < durations.idleMs) assert.deepEqual(runnerStops, [], activity);
+			}
+			assert.deepEqual(runnerStops, ["idle"], activity);
+			assert.deepEqual(workerStops, ["idle"], activity);
+		} finally { runner.stop(); }
+	}
+});
 
 test("the backstop stops a job whose counters stopped changing, a grace after the runner should have", () => {
 	const h = backstop();

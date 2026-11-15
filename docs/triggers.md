@@ -710,7 +710,7 @@ watch's can set its own limits, in whole minutes:
 - `"idleTimeoutMinutes"` (1 to 1440): how long nothing may happen before the job is stopped. Replaces
   `PI_JOB_IDLE_MINUTES` for this trigger's jobs, longer or shorter.
 - `"stallTimeoutMinutes"` (0 to 43200, 0 for off): how long the AI may take no step, however busy the container is.
-  Replaces `PI_JOB_STALL_MINUTES`.
+  Replaces `PI_JOB_STALL_MINUTES`, which is off by default.
 - `"maxMinutes"` (1 to 43200): a wall-clock ceiling. When the deployment sets `PI_JOB_MAX_MINUTES` too, the smaller wins.
 
 A value that is not a whole number in range, a near miss of a name (`idleTimeout`, `max_minutes`), or one of these

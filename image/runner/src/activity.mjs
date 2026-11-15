@@ -22,9 +22,9 @@ import { configError } from "./outcome.mjs";
  *   - IDLE (`PI_JOB_IDLE_MS`): neither a step nor activity for that long. Nothing is happening and nothing is being
  *     waited on, so the slot is held for nothing: a hung tool (a prompt waiting on stdin, a deadlock, a silent sleep
  *     with nothing behind it), a provider that never answers.
- *   - STALLED (`PI_JOB_STALL_MS`): no STEP for that long, however busy the container is. Activity alone cannot end a
- *     job, so a test stuck in an endless loop would hold its slot for ever; the stall limit is the bound on that, set
- *     long (the worker's default is four hours) so that a run that keeps working for eight hours is never cut off.
+ *   - STALLED (`PI_JOB_STALL_MS`): no STEP for that long, however busy the container is. Off by default: a long build
+ *     and an endless loop can both stay busy without a step, so activity alone keeps a regular job alive. An operator
+ *     may set a stall limit for a workload whose steps are known to finish sooner.
  * Spend is bounded elsewhere, as before (the turn budget, the token and cost caps), and a wall-clock ceiling, when an
  * operator sets one, is the worker's own timer.
  *

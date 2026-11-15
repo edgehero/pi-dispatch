@@ -703,7 +703,7 @@ export async function discoverHostQueues(redis, opts = {}) {
  * `incomplete` null for a scan that reached its end, else why it did not (the scan threw, or ran out of time with
  * `names` the part it read). For a reader for which a queue it did not ask is not an answer: the console's run page
  * asks whether a job's data is still held, and "no queue holds it" off a scan that never finished is a false refusal.
- * The kill switch keeps `discoverHostQueues`, which fails open to what it read.
+ * The CLI also reads this result so status can name an incomplete scan; pause/resume still act on the names it read.
  */
 export async function discoverHostQueuesReporting(redis, { timeoutMs = 2_000, count = 500 } = {}) {
 	const prefix = `${QUEUE}@`;

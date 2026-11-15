@@ -392,6 +392,8 @@ export const IDLE_WATCH_CAPABILITY = "idleWatch";
  * gate: a job holding an expiring credential on an image without it keeps the 30-minute wall clock (`limits.why`).
  */
 export const CREDENTIAL_REFRESH_CAPABILITY = "credentialRefresh";
+/** The runner accepts renewable subscription leases with a one-minute expiry floor (#895). */
+export const SUBSCRIPTION_LEASE_CAPABILITY = "subscriptionLease";
 
 /**
  * Exported so the test cannot drift from the format string above. `|` because an image id is

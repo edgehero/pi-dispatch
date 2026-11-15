@@ -62,7 +62,7 @@ export function makeSubscriptionRuntime({ auth, quota, now = Date.now, lookup = 
 		if (managed.length && unmanaged) return { ok: false, managed: true, reason: "auth-mixed-billing" };
 		return { ok: true, managed };
 	}
-	async function prepare(job, { deadlineAt, signal, attemptId } = {}) {
+	async function prepare(job, { deadlineAt, signal, attemptId, renewable = false } = {}) {
 		const preview = await check(job);
 		if (!preview.ok) return preview;
 		for (const row of preview.managed) if (row.needsUsage) {
@@ -73,7 +73,7 @@ export function makeSubscriptionRuntime({ auth, quota, now = Date.now, lookup = 
 		if (!checked.ok) return checked;
 		const snapshots = [];
 		for (const row of checked.managed) {
-			const prepared = await auth.prepareSnapshot(row.provider, { deadlineAt, signal });
+			const prepared = await auth.prepareSnapshot(row.provider, { deadlineAt, signal, renewable });
 			if (!prepared.ok) return recordRefusal(prepared);
 			if (!prepared.snapshot) return { ok: false, managed: true, reason: "auth-binding-changed" };
 			snapshots.push({ ...prepared.snapshot, ownerHost: row.ownerHost, ...packageRootFor(row.adapter) });
@@ -121,16 +121,17 @@ export function makeSubscriptionRuntime({ auth, quota, now = Date.now, lookup = 
 	}
 	/**
 	 * Issue #888, part 3: a running job's snapshot renewed, its deadline moved to `deadlineAt` (the credential refreshed
-	 * first when it would not cover it, `prepareSnapshot`'s own rule), or null. ONLY the same connection under the same
+	 * first when eligible, or a renewable lease clipped to expiry), an eligibility wait, or null. ONLY the same connection under the same
 	 * binding as the snapshot the job started with: a binding changed since (another account, another adapter) is never
 	 * handed to a job that started under the old one. No quota admission and no trial: the job was admitted at its pickup.
 	 */
 	async function extend(snapshot, { deadlineAt, signal } = {}) {
 		if (!snapshot || typeof snapshot.provider !== "string") return null;
-		const prepared = await auth.prepareSnapshot(snapshot.provider, { deadlineAt, signal });
-		if (!prepared?.ok || !prepared.snapshot) return null;
+		const prepared = await auth.prepareSnapshot(snapshot.provider, { deadlineAt, signal, renewable: snapshot.renewable === true, extending: true });
+		if (!prepared?.ok || !prepared.snapshot) return prepared?.wait === "subscription-auth" ? { wait: true, until: prepared.until } : null;
 		const next = prepared.snapshot;
 		if (next.connectionId !== snapshot.connectionId || next.bindingSignature !== snapshot.bindingSignature || next.adapter !== snapshot.adapter || next.accountGroup !== snapshot.accountGroup) return null;
+		if (snapshot.renewable === true && next.deadlineAt === snapshot.deadlineAt && next.generation === snapshot.generation) return { wait: true, until: Math.max(now() + 60_000, next.refreshAt ?? 0) };
 		return { ...snapshot, ...next };
 	}
 	return { check, prepare, validate, observe, usage, status, extend };

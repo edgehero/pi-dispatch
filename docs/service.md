@@ -33,7 +33,7 @@ never restarts the service, on any OS, so no supervisor keeps retrying against a
 From any terminal:
 
 - `pi-dispatch pause` stops taking new jobs. It is stored in the queue, so it survives restarts. Jobs still queue up and wait.
-  `pi-dispatch resume` takes jobs again, and `pi-dispatch status` prints counts.
+  `pi-dispatch resume` takes jobs again, and `pi-dispatch status` prints counts and [waiting details](#status-output).
 - `pi-dispatch service restart --drain` restarts the worker without stopping a job halfway. It pauses the queues this host's worker takes
   jobs from: the shared one and, when `PI_WORKER_NAME` is set, the host's own (`pi-jobs@<name>`, where its cron, chained and manual runs and
   the forge deliveries [routed to it](multi-host.md#a-forge-delivery-that-needs-one-particular-machine) wait). It waits until none of them has
@@ -56,3 +56,23 @@ From any terminal:
   logs directory defaults to `~/.pi-dispatch/logs`, the worker name to this machine's hostname as the worker names itself: lowercased, with
   any other character a dash), so a broken forge setting cannot stop it. It counts jobs only, so a machine busy with other work reads as idle
   ([capacity](insights.md)).
+
+## Status output
+
+`pi-dispatch status` prints JSON for the shared queue and the named hosts' queues. The existing `waiting`, `active`,
+`paused`, `delayed` and `failed` fields are queue counts; `pausedState` says whether every queue is paused, with
+`pausedPartial` and `pausedQueues` when only some are.
+
+`waitingDetails.rows` explains a bounded sample of delayed entries. A row contains `jobId`, `queue`, `dueAt`,
+`bucket`, `why` and `until`; the two times are epoch milliseconds, and absent reason fields are `null`. For example,
+`why: "subscription-auth"` and `until` identify a remaining [authentication hold](subscription-auth.md#admission-and-renewal).
+The reader asks only for queue membership and the worker's defer record, never the queued task or webhook payload.
+Future scheduled runs can appear with no recorded reason. A stale record is ignored; a delayed entry more than
+10 seconds past its due time has `bucket: "due"`, whatever reason was recorded before.
+
+The details inspect at most 64 queues and 100 delayed entries per queue, with a concurrent two-second read budget.
+`partial` is true when the sample is incomplete. `truncated` and `skippedQueues` name the limits, `unavailableQueues`
+names reads that failed or timed out, and `invalidEntries` counts malformed members left out. A row whose membership
+was read but whose record could not be read carries `unavailable: true`. `discoveryIncomplete: true` means queue
+discovery itself was incomplete. An empty partial sample does not mean that no job is held. These details do not
+replace or reduce the queue counts.

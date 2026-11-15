@@ -2,10 +2,15 @@
 import { verifyCommunityAuthAdapter } from "./community-auth-patches.mjs";
 export { verifyCommunityAuthAdapter as verifyRunnerCommunityAuthAdapter } from "./community-auth-patches.mjs";
 
+// A rolling lease must remain usable until the provider allows its renewal. The former five-minute
+// request floor left only one minute after OpenAI's six-minute refresh boundary, less than delivery can take.
+// The worker's subscriptionLease capability gate and its own margin are held to this value by a test.
+export const SUBSCRIPTION_ACCESS_MARGIN_MS = 60_000;
+
 export function validateSubscriptionRequest({ provider, api, baseUrl }, entries, { now = () => Date.now() } = {}) {
 	const entry = entries.find((row) => row.provider === provider);
 	if (!entry) return true;
-	if (!Number.isSafeInteger(entry.expiresAt) || !Number.isSafeInteger(entry.deadlineAt) || entry.deadlineAt <= now() || entry.expiresAt <= now() + 5 * 60_000 || entry.expiresAt <= entry.deadlineAt) return false;
+	if (!Number.isSafeInteger(entry.expiresAt) || !Number.isSafeInteger(entry.deadlineAt) || entry.deadlineAt <= now() || entry.expiresAt <= now() + SUBSCRIPTION_ACCESS_MARGIN_MS || entry.expiresAt <= entry.deadlineAt) return false;
 	return api === (provider === "openai" ? "openai-responses" : "anthropic-messages") && baseUrl?.replace(/\/$/, "") === (provider === "openai" ? "https://api.openai.com/v1" : "https://api.anthropic.com");
 }
 

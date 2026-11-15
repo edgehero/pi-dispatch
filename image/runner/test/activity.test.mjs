@@ -26,7 +26,7 @@ const MIN = 60_000;
  * A watch on a fake clock with fake readers. `cpu` is the cgroup's total, `own` the runner's own CPU, `net` the bytes on
  * the interfaces; a test moves them and the clock, then calls `tick()` (one sample at the watch's interval).
  */
-function harness({ idleMs = 15 * MIN, stallMs = 240 * MIN, sampleMs = ACTIVITY_SAMPLE_MS, cpu = 0, own = 0, net = 0, signature = () => "0:0" } = {}) {
+function harness({ idleMs = 15 * MIN, stallMs = null, sampleMs = ACTIVITY_SAMPLE_MS, cpu = 0, own = 0, net = 0, signature = () => "0:0" } = {}) {
 	const h = { t: 1_000_000, cpu, own, net, stops: [], counters: [], logs: [] };
 	h.watch = createActivityWatch({
 		limits: { idleMs, stallMs },
@@ -106,8 +106,8 @@ test("a background build the agent waits on with a silent sleep is activity, not
 	assert.deepEqual(h.stops, ["idle"]);
 });
 
-test("a test stuck in an endless loop keeps the CPU busy, so it is stopped as stalled at the stall limit, not before", () => {
-	const h = harness();
+test("an explicit stall limit stops a busy loop without a step at the configured limit, not before", () => {
+	const h = harness({ stallMs: 240 * MIN });
 	h.run(240 * MIN - ACTIVITY_SAMPLE_MS, (x) => {
 		x.cpu += ACTIVITY_SAMPLE_MS * 1000;
 	});

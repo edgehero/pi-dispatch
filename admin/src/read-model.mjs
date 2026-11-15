@@ -29,6 +29,7 @@ import { join, delimiter, sep, isAbsolute, resolve as resolvePath } from "node:p
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
 import { DEFAULT_VALKEY_URL, logsDirPath, defaultSandboxDir, delimitedList, workerName, CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT, WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
+import { JOB_IDLE_MINUTES_DEFAULT, JOB_STALL_MINUTES_DEFAULT } from "@edgehero/pi-dispatch/job-limit-rules";
 import { settingsFilePath, readOverlay, readOverlayDocument, writeOverlay, KNOWN_KEYS, OPERATOR_ONLY_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
 import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant, formatMicros } from "@edgehero/pi-dispatch/money";
 import { modelRolesTelemetryOf, approvalRecordOf, BUNDLE_SKIPPED_REASONS, LIVE_SKIPPED_REASONS, OPENSHELL_RULE_HOSTS_MAX, RECOVER_SKIPPED_REASONS, STEER_SKIPPED_REASONS, recordedBundle, recordedCheckpoints, recordedOpenshell, recordedSecretsProfile, recordedRecovered, makeReadRecord, recordedRecoveryOf, sanitizeJobId, targetFor, queuedAtOf, UNREADABLE_RECORD } from "@edgehero/pi-dispatch/run-history";
@@ -63,7 +64,8 @@ import { STEER_ID_RE, STEER_MODES, STEER_SOURCES, STEER_STATES, isOpen as steerI
 import { HELD_SET, jobKey, WAIT_ANSWER_PREFIX, WAIT_ANSWERS, WAIT_PROFILE_FIELD_RE } from "@edgehero/pi-dispatch/wait-state";
 // Why a waiting job waits (issue #737): the worker's closed vocabulary and the rules each field of its record is held to,
 // from the leaf the worker writes with, so the reader and the writer cannot drift on the key, a field or a bucket.
-import { DEFER_BUCKETS, DEFER_FIELDS, DEFER_HOST_RE, DEFER_PROJECT_RE, DEFER_TIME_MAX_MS, deferKey, parseDefer } from "@edgehero/pi-dispatch/defer-reasons";
+import { DEFER_BUCKETS, DEFER_FIELDS, DEFER_HOST_RE, DEFER_PROJECT_RE, DEFER_TIME_MAX_MS, WAITING_DUE_GRACE_MS, deferKey, parseDefer, recordMatchesDue } from "@edgehero/pi-dispatch/defer-reasons";
+export { WAITING_DUE_GRACE_MS };
 import { JOB_FIELD, META_FIELD, QUEUE_KEY, SCHEDULER_ID_MAX, SCHEDULER_ID_RE, SCHEDULER_JOB_PREFIX, cronRunOf, dueOfScore, isPausedFlag, isSchedulerNext, jobKeyOf, queueKeyOf } from "@edgehero/pi-dispatch/bullmq-internals";
 // The subscriptions validator is shared for the same anti-drift reason: the admin prices finished runs
 // against the exact schema the file declares, and re-deriving it here is how the two would disagree.
@@ -2984,7 +2986,7 @@ export function readTriggerEditor({ paths, env = {}, folder = null, deploymentDi
   return {
     defaults: { flow: "required by the trigger", kind: "selected by the trigger kind", folder: "required for cron", task: "required for cron", repository: "forge routing", backend: backends[0]?.name ?? null, provider, model, image, models: models ?? "unrestricted", maxCostUsd: overlay.maxCostUsd ?? hints.PI_MAX_COST_USD ?? "no per-job dollar cap", packages: true, github: false, replicas: 1, resume: false, awaitInput: false, secrets: "none", secretsProfile: "none", secretBundle: "project default", waitFor: "none", skillsDir: "none", instructions: "none", command: "none", portfolio: false, fallbackModels: "none", excludeTools: "none", excludeExtensions: "none", excludeExtensionTools: "none", mcp: "none unless named by the trigger", gates: "none", gateTimeout: "no trigger expiry override", gateBudgetRaiseUsd: "none", maxTurns: overlay.maxTurns ?? parseNonNegInt(hints.PI_MAX_TURNS, 30), progress: false, statusComment: false, recover: false, steer: false,
       // Issue #888: the deployment's job limits, as its service env says them (the worker's own defaults when unset).
-      idleTimeoutMinutes: parseNonNegInt(hints.PI_JOB_IDLE_MINUTES, 15), stallTimeoutMinutes: parseNonNegInt(hints.PI_JOB_STALL_MINUTES, 240), maxMinutes: hints.PI_JOB_MAX_MINUTES ? parseNonNegInt(hints.PI_JOB_MAX_MINUTES, null) : "none" },
+      idleTimeoutMinutes: parseNonNegInt(hints.PI_JOB_IDLE_MINUTES, JOB_IDLE_MINUTES_DEFAULT), stallTimeoutMinutes: parseNonNegInt(hints.PI_JOB_STALL_MINUTES, JOB_STALL_MINUTES_DEFAULT), maxMinutes: hints.PI_JOB_MAX_MINUTES ? parseNonNegInt(hints.PI_JOB_MAX_MINUTES, null) : "none" },
     ...readTriggerEgress({ deploymentDir, env, fs }),
     backends, venueProblem, forges, githubRestart, settingsProblem: settings.invalid ?? null, progressAvailable: hints.PI_RUN_PROGRESS !== "0", forgeProblem: metadata && (metadata.unreadable || metadata.untrusted || metadata.hazardSkipped.length || metadata.unread.length) ? "The deployment metadata could not be read completely; configured webhook endpoints may be missing." : ingestProblem,
     flows: tiers.flatMap((t) => (t.skills ?? []).filter((s) => !s.isSub).map((s) => ({ name: s.name, tier: t.tier }))),
@@ -5786,7 +5788,7 @@ export const WAITING_QUEUES_MAX = 64;
  * its course: its record outlives the due by only `DEFER_TTL_SLACK_MS`, so without this the job would read as that
  * reason and then as "no reason was recorded".
  */
-export const WAITING_DUE_GRACE_MS = 10_000;
+// The grace is shared with CLI status through defer-reasons.mjs.
 
 /**
  * How long the fleet reader keeps its keyspace discovery of the queues that exist (`discoverHostQueuesFn`, the planners'
@@ -5841,14 +5843,7 @@ const DEID_MAX = 1024;
  * an earlier episode, and the job now waits for a reason nobody recorded: it reads as "no reason was recorded", never
  * as the old reason. The record lives `DEFER_TTL_SLACK_MS` past its `until`, which is the window this closes.
  */
-const DEFER_STALE_MS = 5_000;
-
-/** Whether a delayed job's due instant agrees with its record: inside `[until, max(until, at)]`, give or take the bound. */
-function recordMatchesDue(record, dueAt) {
-  if (record === null || record.until === null || dueAt === null) return true; // nothing to judge it by
-  const latest = Math.max(record.until, record.at ?? record.until);
-  return dueAt >= record.until - DEFER_STALE_MS && dueAt <= latest + DEFER_STALE_MS;
-}
+// recordMatchesDue in the shared leaf owns this rule for both readers.
 
 /** A hold's label as the worker builds it (`waitLabel`): profile names and `after <instant>`, joined by ` + `. */
 const WAIT_LABEL_RE = /^[A-Za-z0-9._:+ -]{1,512}$/;

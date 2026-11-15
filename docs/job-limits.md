@@ -1,7 +1,8 @@
 # Job limits
 
-A running job is stopped when it stops doing anything, never because it is old. A job that keeps working for eight
-hours runs for eight hours. A job that hangs is stopped within minutes.
+A regular job has no time ceiling by default while it keeps doing work, including a tool that runs for hours without
+another AI step. It stops after 15 minutes of inactivity. An operator can explicitly set a stall limit or time ceiling;
+Watch jobs retain their separate 30-minute ceiling.
 
 Money is bounded separately, as before: the turn limit (`PI_MAX_TURNS`, `run.maxTurns`) and the cost caps
 (`PI_MAX_COST_USD`, `run.maxCostUsd`) end a job that spends too much, whatever its limits below say.
@@ -11,7 +12,7 @@ Money is bounded separately, as before: the turn limit (`PI_MAX_TURNS`, `run.max
 | Limit | Stops a job when | Default | Deployment setting | Trigger field |
 |---|---|---|---|---|
 | idle | nothing happened for this many minutes | 15 | `PI_JOB_IDLE_MINUTES` (1 to 1440) | `run.idleTimeoutMinutes` |
-| stalled | the AI took no step for this many minutes, however busy the container was | 240 | `PI_JOB_STALL_MINUTES` (0 turns it off) | `run.stallTimeoutMinutes` |
+| stalled | the AI took no step for this many minutes, however busy the container was | off (0) | `PI_JOB_STALL_MINUTES` (0 turns it off) | `run.stallTimeoutMinutes` |
 | max-minutes | the job has run this long, whatever it was doing | none | `PI_JOB_MAX_MINUTES` | `run.maxMinutes` |
 
 A trigger's idle and stall limits replace the deployment's for its jobs, longer or shorter. Its `run.maxMinutes` can
@@ -34,9 +35,9 @@ and a call by a subagent or a child pi process the job started.
   background that the AI waits on with `sleep`;
 - network traffic in the container, such as `gh run watch` polling a remote CI.
 
-The idle limit needs neither a step nor activity for its whole length. The stall limit needs no step for its whole
-length, however busy the container is: a test stuck in an endless loop keeps the CPU busy for ever, and the stall limit
-is what ends it.
+The idle limit needs neither a step nor activity for its whole length. An explicitly configured stall limit needs no
+step for its whole length, however busy the container is. It can bound an endless loop, but it can also end a long build,
+so it is off by default. Continuing CPU use, network traffic or tool output keeps a regular job alive without a step.
 
 Two things pause the clocks. pi's own wait before it retries a model call does not count, and neither does a moment the
 container was paused (a checkpoint of a durable run, [durable runs](durable-runs.md)).
@@ -84,17 +85,26 @@ Two credentials a job is handed do not last as long as a job may now run:
 
 - a GitHub token from a GitHub App (`GITHUB_AUTH_SOURCE=app`) lives one hour;
 - a model sign-in through a subscription ([subscription auth](subscription-auth.md)) is handed to the job with a
-  deadline 30 minutes ahead.
+  lease ending at most 30 minutes ahead, possibly sooner to fit the current token's remaining life.
 
 The worker renews both while the job runs: a new App token, for the same one repository, 15 minutes before the old one
-runs out, and the subscription's deadline moved 30 minutes ahead (the host refreshes the sign-in first when it would not
-last that long) 10 minutes before the old one. It drops each new value in a folder beside the job's folder, mounted
-read-only in the job, and the runner applies it: `git`, `gh` and every other command started afterwards get the new
-token, and the next model call uses the new sign-in.
+runs out, and a subscription lease reconsidered 10 minutes before its deadline. For a subscription on `local` or
+`podman`, the image must declare `subscriptionLease`, `idleWatch` and `credentialRefresh` to use a shorter lease:
+the worker requests 30 minutes ahead, capped to end more than 60 seconds before the access token expires. More than
+four minutes of lease must remain when the job starts. The host may extend the lease with the existing token,
+then rotates it only once the provider permits renewal. An older image keeps the full deadline plus six-minute
+coverage requirement; rebuild derived images on the updated base to use short leases.
 
-A renewal that fails is tried again every minute. If the credential the job holds is two minutes from running out and
-nothing newer reached it, the job is stopped as `credential-expired`: every call after that would fail. The worker log
-has `credential_renew_failed` lines saying which kind.
+Each new value is dropped in a folder beside the job's folder, mounted read-only in the job. The runner applies it:
+`git`, `gh` and every other command started afterwards get the new token, and the next model call uses the new
+sign-in. The host registers replacement values for literal redaction before publishing them.
+
+A renewal that fails is tried again every minute while there is time. A provider's future refresh instant is an
+expected wait and does not produce `credential_renew_failed`. If a forge token, or the subscription's last published
+lease, is two minutes from its end with nothing newer published, the worker stops the job as `credential-expired`.
+It checks that deadline independently of pending renewal calls, so one hung provider cannot prevent the stop.
+The worker log has `credential_renew_failed` lines saying which kind actually failed. A local subscription lease
+does not shorten the token's provider-side expiry.
 
 Two things keep the old token: a process the job started before the renewal (a server left running in the background),
 and the forge's own MCP server ([MCP](mcp.md)), which reads its token when it starts. After the token's hour such a

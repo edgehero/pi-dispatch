@@ -289,6 +289,24 @@ pause flag, the delayed score, the run ids of a cron trigger) is in one module, 
 checked against that version by its tests. Never roll back across a release that moved the BullMQ pin while jobs are
 queued: an older BullMQ need not read what a newer one wrote. The release notes name such a bump.
 
+## Pending release: subscription renewal
+
+Issue #895 removes the recurring authentication wait and premature credential stops for subscription jobs. Move
+the job image before the worker, following [the normal order](#the-order), and rebuild derived images. The image
+must declare `subscriptionLease` beside `idleWatch` and `credentialRefresh`; the new worker deliberately retains
+the earlier full-deadline coverage on an older image. The short-lease path is available on `local` and `podman`.
+
+Regular jobs now default to idle-only time limits: `PI_JOB_STALL_MINUTES` defaults to 0 instead of 240, and there is
+still no default `maxMinutes`. A busy tool can keep running without an AI step for as long as needed. Explicit stall
+and maximum-time settings remain effective, and Watch jobs keep their 30-minute ceiling. To retain the former stall
+behavior, set `PI_JOB_STALL_MINUTES=240`. Credential failures, spend limits and legacy-image fallbacks still apply.
+
+No credential-store, queued-job or defer-record migration is needed. The same host-owned refresh grant stays in its
+private store. `pi-dispatch status` gains additive `waitingDetails`, and a remaining authentication hold is logged
+as `subscription_auth_hold`. See [subscription renewal](subscription-auth.md#admission-and-renewal),
+[job limits](job-limits.md#credentials-that-expire-while-a-job-runs) and [status output](service.md#status-output).
+This note has no release number until the change ships.
+
 ## What each release changed in stored state
 
 Release numbers come from the git tags.
