@@ -289,7 +289,7 @@ pause flag, the delayed score, the run ids of a cron trigger) is in one module, 
 checked against that version by its tests. Never roll back across a release that moved the BullMQ pin while jobs are
 queued: an older BullMQ need not read what a newer one wrote. The release notes name such a bump.
 
-## Pending release: refused and cancelled jobs
+## 5.3.2: refused and cancelled jobs
 
 Issue #899 changes the lifetime of a forge job's semantic duplicate window. A terminal policy refusal or an active
 cancellation releases its owned window after the worker finishes processing and cleanup. A new event for the same
@@ -306,8 +306,7 @@ successful run, and recovery handoffs retain their existing window behavior.
 No queued-job, run-record or key-format migration is needed, and no new persistent state is added. The duplicate
 window remains ten minutes and delivery retention stays unchanged. Rolling back restores the old window-release
 behavior; already released keys are not recreated. Fix the original refusal, wait for cancellation to finish when
-applicable, then send a new event ([triggers](triggers.md#when-another-event-starts-a-job)). This note has no release
-number until the change ships.
+applicable, then send a new event ([triggers](triggers.md#when-another-event-starts-a-job)).
 
 ## 5.3.1: subscription renewal
 

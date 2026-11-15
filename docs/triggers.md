@@ -173,8 +173,8 @@ or waiting job keeps its normal window, as does an ordinary successful run. Send
 still finds its retained original job; releasing the window does not replay it. A parked run's answer and steering
 keep their existing behavior ([sessions](sessions.md), [steering](steering.md)).
 
-**Upgrading:** move the workers and the receiver/poller to the release containing issue #899, following the
-[upgrade order](upgrading.md#the-order). The [rollout note](upgrading.md#pending-release-refused-and-cancelled-jobs)
+**Upgrading:** move the workers and the receiver/poller to 5.3.2 or later (issue #899), following the
+[upgrade order](upgrading.md#the-order). The [rollout note](upgrading.md#532-refused-and-cancelled-jobs)
 explains which half of the fix each component supplies.
 
 ## Close triggers and one-shots
