@@ -75,7 +75,18 @@ export const COUNT_WINDOWS_UTC_TEXT = "Days, weeks (Monday to Sunday) and months
 export const OVERVIEW_UNREAD_TEXT = "The deployment's Valkey could not be read, so this panel has nothing to show. The next refresh tries again.";
 
 /** Needs you's definition, under its numbers: drawn with them, so not under "0 nothing needs you" (the card's). */
-export const NEEDS_DEFINITION = "A question is a parked run nobody has answered; to fix is a failed job the queue still keeps, or a registered host whose doctor fails.";
+export const NEEDS_DEFINITION = "A question is a parked run nobody has answered; to fix is a failed job the queue still keeps whose work has not been done since, or a registered host whose doctor fails.";
+
+/**
+ * Issue #897: the failed jobs Needs you leaves out because a later run of the same work completed (`supersededBy`,
+ * read-model.mjs `supersededFailures`), said once so the count here and the queue's own failed count can be told apart.
+ * They are not asked for: a retry would do the work again and pay for it. Fleet still lists them, with their run.
+ */
+export function supersededText(n) {
+  return n === 1
+    ? "1 failed job is not counted: the same work ran again later and completed. Fleet still lists it."
+    : `${n} failed jobs are not counted: the same work ran again later and completed. Fleet still lists them.`;
+}
 
 /** Needs you's foot line when the day's read is a floor that holds no failure or refusal: why it is not All clear. */
 export const DAY_FLOOR_TEXT = "Last 24 hours: no failed or refused run among the runs read, but the run history read does not reach back a day.";
@@ -321,7 +332,12 @@ function needsOf(s) {
   const parked = parkedRead ? s.parked.filter((p) => p && p.answered !== true) : [];
   const answering = parked.filter((p) => typeof p.answering === "string").length;
   const questions = parked.filter((p) => typeof p.answering !== "string");
-  const failedRows = failedRead ? s.failed.rows : [];
+  // A failed job whose work a later run has since done (issue #897) asks nothing of anyone: it is not a row, not in "to
+  // fix" and not in the headline, and the card says how many it left out. The jobs past the rows read (`more`) were not
+  // judged, so they still count.
+  const keptRows = failedRead ? s.failed.rows : [];
+  const failedRows = keptRows.filter((r) => !(typeof r?.supersededBy === "string" && RUN_ID_RE.test(r.supersededBy)));
+  const superseded = keptRows.length - failedRows.length;
   const failedJobs = failedRows.length + (failedRead && Number.isSafeInteger(s.failed.more) && s.failed.more > 0 ? s.failed.more : 0);
   // A host's failing doctor counts while the host is in the registry: a gone host's record outlives it by days.
   const live = new Set(hostsOf(s).map((h) => h.name));
@@ -333,7 +349,7 @@ function needsOf(s) {
   const read = unread.length === 0;
   const noWorker = workers.none;
   const clear = read && !noWorker && questions.length === 0 && fix === 0 && day.read && !day.floor && day.failed === 0 && day.refused === 0;
-  return { questions, answering, failedRows, failedJobs, failingHosts, fix, unread, questionsKnown: parkedRead, fixKnown: failedRead && doctorRead && registryRead, read, day, noWorker, workerKnown: workers.online !== null || workers.connected > 0, clear };
+  return { questions, answering, failedRows, failedJobs, superseded, failingHosts, fix, unread, questionsKnown: parkedRead, fixKnown: failedRead && doctorRead && registryRead, read, day, noWorker, workerKnown: workers.online !== null || workers.connected > 0, clear };
 }
 
 /** How many jobs run, as the headline says it. */
@@ -434,6 +450,7 @@ export const overviewNeeds = overviewPanel("Needs you", (s, view) => {
   const shown = rows.slice(0, NEEDS_ROWS_MAX);
   const hidden = rows.length - shown.length + (need.failedJobs - need.failedRows.length);
   const answering = need.answering > 0 ? html`<p class="card__sub">${plural(need.answering, "more question is", "more questions are")} being answered now.</p>` : null;
+  const superseded = need.superseded > 0 ? html`<p class="card__sub"><a href="${hrefTo(view, "fleet")}">${supersededText(need.superseded)}</a></p>` : null;
   const more = hidden > 0 ? html`<p class="card__sub">And ${count(hidden)} more: see <a href="${hrefTo(view, "parked")}">Parked</a> and <a href="${hrefTo(view, "fleet")}">Fleet</a>.</p>` : null;
   // The 0 and its "nothing needs you" only where all four reads were made and found nothing, and a worker is online to
   // run what is in line; else the two numbers, each a count, a floor or "not known".
@@ -445,7 +462,7 @@ export const overviewNeeds = overviewPanel("Needs you", (s, view) => {
   // where the queue sees none connected (BullMQ's list answers that alone).
   const unreadText = (key) => (key === "registry" && !need.workerKnown ? UNREAD.registryNoWorker : UNREAD[key]);
   const notes = [...(need.noWorker ? [NO_WORKER_TEXT] : []), ...need.unread.map(unreadText), ...(shown.some((r) => r.tagless) ? [NEEDS_UNKNOWN_PROJECT_TEXT] : [])];
-  const body = html`${head}${shown.length > 0 ? html`<ul class="rows">${shown.map((r) => r.pill)}</ul>` : null}${more}${answering}${need.clear ? ui.empty({ status: "ok", icon: "done", title: "All clear", body: NEEDS_EMPTY.body }) : null}${notes.map((n) => html`<p class="card__sub">${n}</p>`)}${dayLine(need.day, view)}${zero ? null : html`<p class="card__sub">${NEEDS_DEFINITION}</p>`}`;
+  const body = html`${head}${shown.length > 0 ? html`<ul class="rows">${shown.map((r) => r.pill)}</ul>` : null}${more}${answering}${superseded}${need.clear ? ui.empty({ status: "ok", icon: "done", title: "All clear", body: NEEDS_EMPTY.body }) : null}${notes.map((n) => html`<p class="card__sub">${n}</p>`)}${dayLine(need.day, view)}${zero ? null : html`<p class="card__sub">${NEEDS_DEFINITION}</p>`}`;
   return ui.card({ title: "Needs you", body });
 });
 

@@ -1303,6 +1303,11 @@ test("stateOf: the named fields only, numbers as numbers, no error text, no host
   assert.equal(op.failed.rows[0].failedReason, "repo o/r: token for alice@example.test refused");
   assert.equal("failedReason" in viewer.failed.rows[0], false, "a viewer gets the row without BullMQ's free text");
   assert.equal(viewer.failed.rows[0].jobId, "j7");
+  // Issue #897: the run that did a failed job's work since is a run id, so both roles read it; null when none did.
+  assert.equal(viewer.failed.rows[0].supersededBy, null);
+  const later = stateOf({ ...SNAPSHOT, failed: { rows: [{ ...SNAPSHOT.failed.rows[0], supersededBy: "repeat:nightly:1794722400000" }], more: 0 } }, "viewer");
+  assert.equal(later.failed.rows[0].supersededBy, "repeat:nightly:1794722400000");
+  assert.deepEqual(Object.keys(later.failed.rows[0]).sort(), ["attemptsMade", "endedAt", "jobId", "queue", "supersededBy"]);
   assert.equal(viewer.role, "viewer");
   assert.equal(stateOf(SNAPSHOT, "anything-else").role, "viewer", "an unknown role is the lesser one");
   const text = JSON.stringify(viewer);

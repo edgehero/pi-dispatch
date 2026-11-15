@@ -521,6 +521,15 @@ export function failedWhy(r) {
     : html`Its run record says: <span class="code">${r.reason}</span>, this console has no explanation for this reason.`;
 }
 
+/**
+ * Issue #897: a failed job whose work a later run has since done (`supersededBy`, read-model.mjs `supersededFailures`)
+ * is listed with that run, and offers Remove but never Retry, which would do the work again and pay for it.
+ */
+export const SUPERSEDED_ROW_TEXT = "The same work ran again later and completed:";
+
+/** Whether a failed row's work has since been done by a later run. */
+const supersededRow = (r) => typeof r?.supersededBy === "string" && RUN_ID_RE.test(r.supersededBy);
+
 export const fleetFailed = wrap(
   "Failed jobs",
   (s, v) => {
@@ -557,7 +566,7 @@ export const fleetFailed = wrap(
       ],
       rows: rows.map((r) => [
         {
-          html: html`${runLink(r.jobId)}<span class="reason fl-why">${failedWhy(r)}</span>`,
+          html: html`${runLink(r.jobId)}<span class="reason fl-why">${failedWhy(r)}</span>${supersededRow(r) ? html`<span class="reason fl-why">${SUPERSEDED_ROW_TEXT} ${runLink(r.supersededBy)}</span>` : null}`,
           wide: true,
         },
         r.queue,
@@ -566,7 +575,7 @@ export const fleetFailed = wrap(
         r.endedAt ? timeHtml(r.endedAt) : "unknown",
         ...(canAct(v)
           ? [
-              html`${jobAct(v, "retry-failed", "Retry", r)}${jobAct(
+              html`${supersededRow(r) ? null : jobAct(v, "retry-failed", "Retry", r)}${jobAct(
                 v,
                 "remove-failed",
                 "Remove",
@@ -588,9 +597,12 @@ export const fleetFailed = wrap(
   {
     flush: true,
     sub: "kept by the queue until you retry or remove",
-    end: (s, v) =>
-      list(s.failed?.rows).length
-        ? html`${act(v, "retry-all-failed", `Retry all ${list(s.failed.rows).length}`)}${act(v, "remove-all-failed", `Remove all ${list(s.failed.rows).length}`)}`
-        : null,
+    // Retry all counts the rows a retry would still do work for; the bulk preview leaves the others out the same way.
+    end: (s, v) => {
+      const rows = list(s.failed?.rows);
+      if (!rows.length) return null;
+      const retryable = rows.filter((r) => !supersededRow(r)).length;
+      return html`${retryable ? act(v, "retry-all-failed", `Retry all ${retryable}`) : null}${act(v, "remove-all-failed", `Remove all ${rows.length}`)}`;
+    },
   },
 );

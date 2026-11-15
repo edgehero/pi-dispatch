@@ -3374,6 +3374,31 @@ test("the FAILED section bounds itself, counts the rest from the queue's own num
   assert.match(text, /↓ 7 more/, "and the remainder is counted, not lost");
 });
 
+test("a failed job whose work a later run has since done is dimmed with that run's id, and the header's count is red only for what is left to fix (issue #897)", async () => {
+  // A theme that names each colour, so a test can tell an error's red from a dim.
+  const theme = { fg: (c, t) => `\x1b[38;5;${c === "error" ? 196 : 245}m${t}\x1b[39m`, bold: (t) => t, bg: (_c, t) => t };
+  const RED = "\x1b[38;5;196m";
+  const render = async (rows) => {
+    const counts = { ...SNAPSHOT.queue.counts, failed: rows.length };
+    const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, theme, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, queue: { ...SNAPSHOT.queue, counts }, failed: { rows, more: 0 } }) }) });
+    await flush();
+    const raw = comp.render(120).join("\n");
+    await comp.dispose();
+    return raw;
+  };
+  const done = { ...FAILED_ROWS[0], jobId: "gh-done", supersededBy: "gh-later" };
+  const allDone = await render([done]);
+  assert.ok(!allDone.includes(`${RED}1 failed`), "nothing left to fix: the count is not red");
+  assert.ok(!allDone.includes(`${RED}✗`), "nor is the row's mark");
+  assert.match(stripAnsi(allDone), /1 failed \(1 done since\)/);
+  assert.match(stripAnsi(allDone), /✗ gh-done · a2 · pi-jobs · done since by gh-later/);
+  assert.match(stripAnsi(allDone), /1 in the queue \(1 done since\) · f view/);
+  const mixed = await render([done, FAILED_ROWS[0]]);
+  assert.ok(mixed.includes(`${RED}2 failed`), "one is still to fix: red");
+  assert.match(stripAnsi(mixed), /2 failed \(1 done since\)/);
+  assert.ok(mixed.includes(`${RED}✗`), "the open one keeps its red mark");
+});
+
 test("an unreadable failed set degrades that section alone, with no view claimed", async () => {
   const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, failed: { unreachable: "timed out reaching the queue" } }) }) });
   await flush();
@@ -3422,8 +3447,11 @@ test("the deps layer projects a failed Job to host-chosen fields and its record'
   const row = snap.failed.rows[0];
   // Issue #710 grew it by `reason`, answered in review: it is NOT read off the Job but off the job's own run record (the
   // newest in the wide window), the record's closed enum alone, null without one; the Job still gives five fields.
-  assert.deepEqual(Object.keys(row).sort(), ["attempts", "attemptsMade", "endedAt", "failedReason", "hasRecord", "jobId", "outcome", "queue", "reason", "target"], "the projection is CLOSED -- a grown key is a review question, not a drive-by");
+  // Issue #897 grew it by `supersededBy`, also off the window's records and never the Job: the id of a later run of the
+  // same work that completed, or null.
+  assert.deepEqual(Object.keys(row).sort(), ["attempts", "attemptsMade", "endedAt", "failedReason", "hasRecord", "jobId", "outcome", "queue", "reason", "supersededBy", "target"], "the projection is CLOSED -- a grown key is a review question, not a drive-by");
   assert.equal(row.reason, null, "no record of the job in the window: no reason, never a guess");
+  assert.equal(row.supersededBy, null, "no record of the job: not judged, so it still asks");
   assert.equal(row.hasRecord, false);
   assert.equal(row.target, null);
   assert.equal(row.outcome, null);
