@@ -583,7 +583,7 @@ export function noScriptRun(sweep) {
  * whose box ends past `width` in document order, each `{ tag, id, cls, inside, rect, up, text, font, scrollers }`:
  * `inside` the id of its nearest ancestor that has one, `up` the index of its nearest ancestor in the same list (or
  * -1), `text` whether it holds text of its own, `scrollers` its ancestors below `<body>` whose computed `overflow-x` is
- * auto or scroll, with their boxes.
+ * auto or scroll, or the mounted timeline pan viewport, with their boxes.
  *
  * An element is an offender unless one of its scrollers fits the viewport. The report names the ROOTS (offenders with
  * no offending ancestor: where a `min-width: 0` or a scroll box belongs), widest first, and `fontAt`, the first
@@ -593,7 +593,7 @@ export function widthVerdict({ scrollWidth, elements }, width = VIEWPORT.width, 
 	const fits = (r) => r.left >= -slack && r.right <= width + slack;
 	// `<body>` and `<html>` never excuse: their overflow propagates to the viewport, and a scrolling viewport is the
 	// failure itself. The page's collector stops below `<body>`; this repeats it so the rule holds on any input.
-	const excused = (e) => (e.scrollers ?? []).some((s) => (s.overflowX === "auto" || s.overflowX === "scroll") && s.tag !== "body" && s.tag !== "html" && fits(s.rect));
+	const excused = (e) => (e.scrollers ?? []).some((s) => (s.overflowX === "auto" || s.overflowX === "scroll" || s.pan === true) && s.tag !== "body" && s.tag !== "html" && fits(s.rect));
 	const past = elements.map((e) => e.rect.right > width + slack && !excused(e));
 	const offenders = elements.map((e, i) => ({ e, i })).filter(({ i }) => past[i]);
 	// Widest first, ties in document order: the widest root is the one that sets the page's width, so it leads.
@@ -1545,7 +1545,10 @@ export function measureSource(width, slack) {
 		const scrollers = [];
 		for (let a = el.parentElement; a && a !== document.body && a !== document.documentElement; a = a.parentElement) {
 			const ox = getComputedStyle(a).overflowX;
-			if (ox === "auto" || ox === "scroll") scrollers.push(Object.assign(name(a), { overflowX: ox, rect: box(a.getBoundingClientRect()) }));
+			// vis overscans axis cells and run bars inside this clipped, interactive viewport. The real-console
+			// timeline check proves its pointer, wheel and touch panning; generic hidden overflow stays an error.
+			const pan = a.matches("#p-timeline.timeline-enhanced [data-rt-chart] > .vis-timeline") && ox === "hidden";
+			if (ox === "auto" || ox === "scroll" || pan) scrollers.push(Object.assign(name(a), { overflowX: ox, pan, rect: box(a.getBoundingClientRect()) }));
 		}
 		let text = false;
 		for (const n of el.childNodes) if (n.nodeType === 3 && n.nodeValue.trim() !== "") { text = true; break; }
