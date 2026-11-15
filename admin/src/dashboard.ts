@@ -1959,7 +1959,7 @@ function buildListLines(snapshot: any, selected: number, inner: number, styler: 
   // the collapsed divider names. Status and runs carry no priority: the header is the panel's one
   // constant and the runs viewport already bounds itself.
   const sections: any[] = [
-    { key: "status", head: null, body: [statusHeader(snapshot.queue, inner, styler, snapshot.fetchedAt), ...delayedBreakdownLine(snapshot, inner, styler)] },
+    { key: "status", head: null, body: [statusHeader(snapshot.queue, inner, styler, snapshot.fetchedAt, supersededCount(snapshot.failed)), ...delayedBreakdownLine(snapshot, inner, styler)] },
     // `b split` rides this divider's meta when the deployment has an allocation envelope (issue #504 part C): the footer
     // has no headroom for another hint (`keyHints`' arithmetic), the `j projects` precedent on the runs divider.
     { key: "spend", head: [`${SPEND_TITLE.toLowerCase()} & limits`, `jobs & tokens/day · s set${snapshot.envelopeSet ? " · b split" : ""}`], body: spendLines(snapshot.budget, snapshot.settings, inner, styler, snapshot.fetchedAt), priority: 4, viewKey: "s" },
@@ -2239,7 +2239,8 @@ function failedSection(failed: any, inner: number, styler: any): any[] {
   const body = shown.map((r: any) => failedRow(r, inner, styler));
   if (hidden > 0) body.push(styler.cell(`↓ ${hidden} more`, inner, { color: "dim" }));
   const total = rows.length + (Number(failed.more) || 0);
-  return [{ key: "failed", priority: 6, viewKey: "f", head: ["failed", `${total} in the queue · f view`], body }];
+  const done = supersededCount(failed);
+  return [{ key: "failed", priority: 6, viewKey: "f", head: ["failed", `${total} in the queue${done > 0 ? ` (${done} done since)` : ""} · f view`], body }];
 }
 
 /** One failed row: id, attempt count, queue, and the worker's own scrubbed throw message. */
@@ -2248,10 +2249,13 @@ function failedRow(r: any, inner: number, styler: any): string {
   // (issue #367): the projection's key-set pin keeps `.data` and the payload out, and a job id is still
   // derived from forge data. `failedReason` was scrubbed by the projection and `jobId` taken raw on the
   // very next key, so one field had a belt and the two beside it did not. Every cell goes through `cellOf`.
+  // A row whose work a later run has since done (issue #897) is dimmed and names that run: nothing about it is to fix.
+  const done = typeof r.supersededBy === "string" && r.supersededBy !== "";
   const bits = [
-    `${styler.fg("error", "✗")} ${styler.fg("text", cellOf(r.jobId))}`,
+    `${styler.fg(done ? "dim" : "error", "✗")} ${styler.fg(done ? "muted" : "text", cellOf(r.jobId))}`,
     styler.fg("dim", `a${r.attemptsMade ?? 0}`),
     styler.fg("muted", cellOf(r.queue)),
+    ...(done ? [styler.fg("dim", `done since by ${cellOf(r.supersededBy)}`)] : []),
     styler.fg("dim", cellOf(r.failedReason)),
   ];
   return fitLine(bits.join(styler.fg("dim", " · ")), inner, styler);
@@ -2349,8 +2353,17 @@ function fmtDuration(ms: any): string {
   return h < 24 ? `${h}h${m % 60}m` : `${Math.floor(h / 24)}d${h % 24}h`;
 }
 
+/**
+ * Issue #897: how many failed rows a later run of the same work has since completed (`supersededBy`, read-model.mjs
+ * `supersededFailures`). Only the rows read are judged; the failed count's rest is not.
+ */
+function supersededCount(failed: any): number {
+  const rows: any[] = Array.isArray(failed?.rows) ? failed.rows : [];
+  return rows.filter((r: any) => typeof r?.supersededBy === "string" && r.supersededBy !== "").length;
+}
+
 /** The one-line STATUS header: `● RUNNING  N waiting · … · K workers        HH:MM:SS`. */
-function statusHeader(queue: any, inner: number, styler: any, fetchedAt: any): string {
+function statusHeader(queue: any, inner: number, styler: any, fetchedAt: any, superseded = 0): string {
   if (!queue || queue.unreachable) {
     return styler.cell(`queue unreachable (${cellOf(queue?.unreachable ?? "?")})`, inner, { color: "error" });
   }
@@ -2375,7 +2388,10 @@ function statusHeader(queue: any, inner: number, styler: any, fetchedAt: any): s
   const vitals =
     `${c.waiting ?? 0} waiting` + sep + `${c.active ?? 0} active` + sep +
     (delayed > 0 ? `${delayed} delayed` + sep : "") +
-    (failed > 0 ? styler.fg("error", `${failed} failed`) : `${failed} failed`) + sep +
+    // Red only for a failure whose work has not been done since (issue #897): the queue keeps a superseded job until it
+    // expires, and a red count it can never clear by itself would teach an operator to ignore the colour.
+    (failed > superseded ? styler.fg("error", `${failed} failed`) : `${failed} failed`) +
+    (superseded > 0 && failed > 0 ? styler.fg("dim", ` (${Math.min(superseded, failed)} done since)`) : "") + sep +
     `${queue.workers ?? "?"} workers`;
   // From the SNAPSHOT, never from the wall clock here: a renderer that reads the time is not a function
   // of its input, and two renders of one snapshot could disagree across a second boundary.

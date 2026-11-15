@@ -15140,6 +15140,27 @@ unknown data, invalid files and additional Forgejo/Azure groups retain readable 
     Waitlists draws its calm line only over a read made whole. REJECTED: an empty state over a read that failed, which
     says a deployment with no data is calm (over an unread dollar read, "No cap is set." said it spends without a limit,
     and over an overlay the worker refuses, on which it refuses every job, it said no cap was set).
+  - **A failed job whose work has since been done asks nothing (#897).** The queue keeps a failed job for days (a forge
+    job's 31, a local one's week), and a later run often does its work meanwhile: the next run of a cron trigger, or a
+    rerun of the same issue's flow. `supersededFailures` (read-model.mjs, pure) judges each failed row against the wide
+    window's records: a run of THE SAME WORK (`workKeyOf`: a cron trigger's id, its `repeat:` and `manual:` runs alike,
+    by `cronRunOf`; a forge run's target by `targetKeyOf` and its flow) that ended `completed` and started after the
+    failure ended. The snapshot's failed row carries that run's id as `supersededBy` (else null), and every surface reads
+    it: Needs you leaves the row out of "to fix", its rows and the headline and says how many it left out
+    (`supersededText`, linked to Fleet); Fleet lists the row with that run, offers Remove and no Retry, and its Retry
+    all counts the others; a bulk Retry's preview leaves such jobs out and says how many (`supersededLeftOut`, through
+    the reader's `supersededOf` over the same cached window), or that it could not tell (`SUPERSEDED_UNREAD_SENTENCE`)
+    and leaves none out; the `/dispatch` panel dims the row with that run's id and paints its header's count red only
+    for what is left to fix; `/api/state` and the agent's failed read carry the id. What the records cannot settle is
+    NOT JUDGED and keeps asking: a forge job without its own record in the window (its target and flow are its
+    record's), a failed job with no end, the rows past the failed list's bound (`more`), a local `run --task`, and a
+    record a newer release wrote (cut to its core, which has no target). Nothing is written: the job stays in the
+    failed set until it expires or an operator removes it. REJECTED: removing a superseded job from the queue, from the
+    worker when the later run completes or from the reader, which would make a read write and lose the failure's
+    reason before anyone looked; the trigger's index as the work's key, which moves when the triggers file is edited, so
+    a deleted row's failures would pass to whatever slid into its place; any later run, where only one that completed
+    did the work; and one that started before the failure ended, which can be its sibling replica or an attempt of its
+    own.
   - **One rule for what needs the person** (`needsOf`, which the headline and Needs you both read, so the two cannot
     disagree). All clear is every read behind Needs you made (the parked runs, the failed jobs, the doctor results, and
     the host registry itself, read this tick: its rows a list and `queue.fleetDegraded` unset, `registryRead`), a worker
@@ -18117,6 +18138,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-11-15 (#897) | **`DES-OPERATOR-CONSOLE` AMENDED**: a new bullet before "One rule for what needs the person", "A failed job whose work has since been done asks nothing": `supersededFailures` judges each failed row against the wide window's records (the same cron trigger, or the same forge target and flow, a run that completed and started after the failure ended), the snapshot's failed rows carry `supersededBy`, and Needs you, the headline, Fleet's failed card, a bulk Retry's preview, the `/dispatch` panel, `/api/state` and the agent's failed read each act on it; what the records cannot settle is not judged and keeps asking; nothing is written. REJECTED: removing a superseded job from the queue, the trigger's index as the work's key, any later run, and one that started before the failure ended. UNCHANGED, checked: the failed set's read (`FAILED_PER_QUEUE`, `FAILED_LIMIT`, the projection's other keys), the day line and All clear's day rule (a failed record of the last 24 hours still counts there: it is the day's history, not a request), `retry-failed` for one job (no surface offers it for a superseded row; asked for anyway, it retries as before), and `remove-failed` and `remove-all-failed`. |
 | 2026-11-15 (#896) | **`DES-OPERATOR-CONSOLE` AMENDED**, the timeline: the overview opens on `24h`, the whole day `runsDay` is read for, where it opened on `3h` and a project whose last run ended more than three hours earlier was not on the card at all, with nothing saying older runs existed. The cost is density: a pill is at least `PILL_MIN_PCT` wide, about 43 minutes at a day, so a schedule every half hour fills its row's four lanes and its quiet completed runs are counted, the packing rule unchanged. The overview's links leave the default out by `TIMELINE_DEFAULTS` itself, where the zoom's was a `3h` literal. REJECTED: remembering each browser's last window, which needs a cookie or the page's script for a choice one click makes. UNCHANGED, checked: `TIMELINE_ZOOMS` and every drawing at a named zoom; `REQ-OPERATOR-CONSOLE-SCREENS` (a4), which names the three windows and no default; the design cards, which draw the `3h` window, one of the three, and claim no default (`TimelineAndWaitlists`, whose bytes the timeline tests hold, and the three overview screens). |
 | 2026-11-15 (#895, review) | `DES-JOB-ACTIVITY-WATCH` replaces the default four-hour stall limit with 0 (off), the owner's choice that regular active jobs have no time ceiling even without agent steps. Explicit limits and Watch jobs retain their bounds. `DES-STORE-VERSION-WHEN-NEEDED` UNCHANGED, checked: existing zero/null values already represent disabled limits; no field or stored version changes. |
 | 2026-11-15 (#895) | AMENDED `DES-HOST-OWNED-SUBSCRIPTION-AUTH`, `DES-JOB-ACTIVITY-WATCH` and `DES-WAITING-REASONS`: capability-gated short leases, independent bounded renewal and expiry supervision, retained replacement secrets for redaction and workspace scans, success-only hold events and bounded CLI details. `DES-STORE-VERSION-WHEN-NEEDED` UNCHANGED, checked: no persisted field, value or version is added; lease scheduling metadata stays host-private. |

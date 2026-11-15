@@ -16,7 +16,7 @@ const fields = (value, names) => Object.fromEntries(names.flatMap((name) => n(va
 
 export function failedForAgent(read) {
   return { unavailable: Boolean(read?.unreachable || read?.invalid), more: n(read?.more), complete: read?.examinedAll === true,
-    jobs: (read?.jobs ?? read?.rows ?? []).map((r) => ({ jobId: id(r.jobId), queue: id(r.queue), attempts: n(r.attemptsMade), reason: agentReasonToken(recordReason(r)) })) };
+    jobs: (read?.jobs ?? read?.rows ?? []).map((r) => ({ jobId: id(r.jobId), queue: id(r.queue), attempts: n(r.attemptsMade), reason: agentReasonToken(recordReason(r)), supersededBy: id(r.supersededBy) })) };
 }
 
 export function waitingForAgent(read) {

@@ -820,6 +820,8 @@ export function stateOf(snapshot, role, { now = Date.now() } = {}) {
           queue: str(r?.queue),
           attemptsMade: num(r?.attemptsMade),
           endedAt: num(r?.endedAt),
+          // Issue #897: the run that did this job's work since, or null (a run id: either role may read it).
+          supersededBy: str(r?.supersededBy),
           ...(operator && { failedReason: str(r?.failedReason) }),
         })),
         more: num(s.failed?.more) ?? 0,

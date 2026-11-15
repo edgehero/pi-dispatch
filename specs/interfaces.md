@@ -12138,7 +12138,7 @@ script reads the console without scraping a page (issue #641, `DES-OPERATOR-CONS
     "active": [ { "jobId": "gh-...", "queue": "pi-jobs", "startedAt": 1760432400000, "host": "mac" } ],
     "schedulers": [ { "name": "nightly", "next": 1760432400000, "overdue": false, "overdueMs": 0, "stalls": 0 } ],
     "schedulerStallMax": 3,
-    "failed": { "unreachable": false, "rows": [ { "jobId": "...", "queue": "pi-jobs", "attemptsMade": 3, "endedAt": 1760432400000, "failedReason": "..." } ], "more": 0 } }
+    "failed": { "unreachable": false, "rows": [ { "jobId": "...", "queue": "pi-jobs", "attemptsMade": 3, "endedAt": 1760432400000, "supersededBy": null, "failedReason": "..." } ], "more": 0 } }
   ```
   `parkedUnknown` true means the parked list could not be read, so an empty `parked` is not "nobody waiting". A
   folder-scoped dollar window's `scope` is null rather than a host path. **Since issue #644 each `active` row gains
@@ -12190,6 +12190,9 @@ script reads the console without scraping a page (issue #641, `DES-OPERATOR-CONS
   message's text or sender. A record's
   `jobId`, `target` and `parentJobId` are JSON strings, encoded by `JSON.stringify` and never interpreted; a script
   that puts one in HTML escapes it itself.
+- **`failed.rows[].supersededBy`** (added 2026-11-15, #897, within `version: 1`): the id of a later run of the same work
+  (the same cron trigger, or the same forge target and flow) that completed after the job failed, or null where none
+  did or the run records could not settle it (`DES-OPERATOR-CONSOLE`). A run id, so both roles get it.
 - **The role difference**: for a viewer, every failed job's `failedReason` key is absent (not null), the one free text the snapshot carries. The operator gets it scrubbed (control bytes replaced, 120
   characters at most, `DES-ADMIN-VIA-PI-EXTENSION`'s FAILED surface). Nothing else differs between the roles.
 - **Unreachable parts**: a part the reader could not read says so with a boolean (`failed.unreachable`,
@@ -13968,6 +13971,7 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 
 | Date | Change |
 |---|---|
+| 2026-11-15 (#897) | **`INT-CONSOLE-STATE-API` AMENDED**: each failed row gains `supersededBy`, a run id or null, for both roles, added within `version: 1` as the contract allows. `INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked: the rule reads `jobId`, `kind`, `target`, `flow`, `outcome`, `startedAt` and `endedAt` as they are, and writes nothing. |
 | 2026-11-15 (#895, review) | `INT-RUNNER-EXIT-CODE-PROTOCOL` clarifies the idle-only regular-job default: the worker omits the stall variable unless configured. `INT-CREDENTIAL-DROP` requires renewable admission and final validation to satisfy the existing access-token wire grammar, refusing unsupported values before spend while preserving a rotated grant. `INT-RUN-HISTORY-FILE-CONTRACT`, stored credential grammar, counter/drop shapes and versions UNCHANGED, checked. |
 | 2026-11-15 (#895) | AMENDED `INT-SUBSCRIPTION-CREDENTIAL-STORE`, `INT-CREDENTIAL-DROP`, `INT-CONTAINER-RUNTIME-CONTRACT` and `INT-DEFER-REASON-KEY`: renewable timing and compatibility, private scheduling metadata, bounded renewal, startup refusal and retained secrets, plus CLI waiting details and safe hold events. Credential-store, drop, defer and run-history persisted shapes UNCHANGED, checked; no migration or new store/key is needed. |
 | 2026-11-14 (#888, part 3: credentials renewed in a running job) | **NEW `INT-CREDENTIAL-DROP`**: the read-only folder a running job's renewed GitHub App token and subscription snapshots arrive in, its shape and `seq`, who writes what and when, what the runner does with each, the `credential-expired` stop, and the residuals (a process started earlier, the forge's own MCP server, the folder on host disk, copying venues). **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: `credential-expired` in the reason enum. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: `PI_CREDENTIAL_REFRESH` and the read-only mount. **UNCHANGED, checked**: `INT-JOB-ACTIVITY-FILE`, `INT-CONTAINER-JOB-INPUTS` (the mount is outside `/job`), `INT-SUBSCRIPTION-CREDENTIAL-STORE` (the host store keeps the refresh grant). **Code evidence**: worker/src/credential-refresh.mjs, worker/src/get-token.mjs (`expiryOf`, `mintFresh`), worker/src/subscription-runtime.mjs (`extend`), worker/src/run-container.mjs, worker/src/container-spec.mjs (`CONTAINER_CREDENTIALS_DIR`), image/runner/src/credential-refresh.mjs, image/runner/src/subscription-credentials.mjs (`refresh`). |

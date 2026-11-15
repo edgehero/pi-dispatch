@@ -1973,7 +1973,9 @@ writes retain their existing interactive confirmation. This adds no unattended p
       stands in for "Nothing needs you.". On a first run it says how many steps stand before the first job.
     - (a2) **Needs you** counts the questions (unanswered parks; a park a queued or running job is answering, the parked
       rows' `answering`, is named in a line of its own and not counted, as since #647) and what to fix (the failed jobs
-      the queue keeps, and the hosts in the registry whose published doctor result has a failing check, never a host
+      the queue keeps whose work no later run has done since, #897: one that a later run of the same cron trigger, or of
+      the same forge target and flow, completed after it is left out and the card says how many in a line of its own,
+      `supersededText`; and the hosts in the registry whose published doctor result has a failing check, never a host
       gone from it, `NEEDS_DEFINITION`, and none while the registry was not read this tick, whose rows are then the last
       ones seen); each number is a whole count, a true 0, only where every read behind it was made (the questions the
       parked runs; "to fix" the failed jobs, the doctor results and the host registry), else what was read as a floor
@@ -8978,6 +8980,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-15 (#897) | **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, (a2): "to fix" is the failed jobs the queue keeps whose work no later run has done since; a failed job a later run of the same cron trigger, or of the same forge target and flow, completed after is left out, and the card says how many. Fleet's failed card and a bulk Retry follow the same rule (`DES-OPERATOR-CONSOLE`). UNCHANGED, checked: the day line and All clear's rule over the last 24 hours, and the failed jobs the list's bound leaves unread, which still count. |
 | 2026-11-15 (#895, review) | `REQ-JOB-ACTIVITY-LIMITS` changes regular defaults to idle-only: no implicit stall timeout or maximum age for continuing activity, including tools without agent steps. A twelve-hour runner/backstop composition covers CPU, network and tool-output activity, then idleness. Explicit stall/maximum settings, Watch jobs' ceiling, credential failure stops, spend guards and compatibility fallbacks UNCHANGED, checked. |
 | 2026-11-15 (#895) | AMENDED `REQ-SUBSCRIPTION-AUTHENTICATION` and `REQ-JOB-ACTIVITY-LIMITS`: usable renewable leases admit across the token cycle, renew through provider eligibility, bound unanswered renewal work independently of expiry supervision, refuse unsafe startup and expose actual holds. Quota, trial, paid-overage and model authority UNCHANGED, checked. |
 | 2026-11-14 (#888, part 3) | **`REQ-JOB-ACTIVITY-LIMITS` AMENDED**: a job holding an expiring credential (a GitHub App token, a subscription snapshot) has it renewed while it runs where the venue binds its folders and the image declares `credentialRefresh`, and is stopped as `credential-expired` when a renewal cannot reach it in time; elsewhere it keeps the 30-minute wall clock. `REQ-TOKEN-ACCOUNTING-AND-CAPS` and the subscription requirements UNCHANGED, checked: a renewal admits nothing new. |

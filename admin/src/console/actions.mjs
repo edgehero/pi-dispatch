@@ -1076,6 +1076,28 @@ function failedOne({ name, kind, verb, fn }) {
   };
 }
 
+/** Issue #897: the bulk Retry preview's line when the run records could not be read to judge which jobs ran again since. */
+export const SUPERSEDED_UNREAD_SENTENCE = "Whether any of these ran again later and completed could not be read, so none is left out.";
+
+/** Issue #897: the bulk Retry preview's line for the failed jobs it leaves out because their work has since been done. */
+export function supersededLeftOut(n) {
+  return `Left out: ${plural(n, "failed job")} whose work ran again later and completed, so a retry would do it twice (Remove clears ${n === 1 ? "it" : "them"}).`;
+}
+
+/**
+ * Issue #897: which of a bulk preview's failed jobs a later run has superseded, off the fleet reader's cached run window
+ * (`supersededOf`), as a Set of job ids; null when the reader is not there or could not read the window. Never throws.
+ */
+async function supersededAmong(ctx, jobs) {
+  if (typeof ctx?.a?.fleet?.supersededOf !== "function") return null;
+  try {
+    const got = await ctx.a.fleet.supersededOf(jobs.map((j) => ({ jobId: j.jobId, endedAt: Number(j.finishedOn ?? 0) })));
+    return got instanceof Map ? new Set(got.keys()) : null;
+  } catch {
+    return null;
+  }
+}
+
 function failedAll({ name, kind, verb, fn }) {
   return {
     name,
@@ -1089,8 +1111,16 @@ function failedAll({ name, kind, verb, fn }) {
       const read = await ctx.a.rm.planFailedBulk({ url: ctx.a.paths.valkeyUrl, filter: { ...(queue ? { queue } : {}), ...(repo ? { repo } : {}) }, limit: BULK_MAX });
       if (read?.invalid) return { refusal: String(read.invalid) };
       if (read?.unreachable) return { refusal: "the failed jobs could not be read (is Valkey reachable?); nothing was changed", status: 503 };
-      const jobs = (read?.jobs ?? []).slice(0, BULK_MAX);
+      let jobs = (read?.jobs ?? []).slice(0, BULK_MAX);
       if (jobs.length === 0) return { refusal: `no failed job matches${queue ? ` in ${queue}` : ""}${repo ? ` for ${repo}` : ""}; nothing to do` };
+      // Issue #897: a retry of a job whose work a later run has since done would do it again and pay for it, so Retry
+      // leaves those out and says how many; Remove takes them, which is how they leave the queue. Where the run records
+      // cannot be read, nothing is left out and the preview says it could not tell, as Retry did before.
+      const judged = verb === "Retry" ? await supersededAmong(ctx, jobs) : null;
+      const leftOut = judged === null ? 0 : jobs.filter((j) => judged.has(j.jobId)).length;
+      if (judged !== null) jobs = jobs.filter((j) => !judged.has(j.jobId));
+      if (jobs.length === 0) return { refusal: `every failed job that matches${queue ? ` in ${queue}` : ""}${repo ? ` for ${repo}` : ""} ran again later and completed, so none needs a retry; Remove clears them` };
+      const supersededLine = verb !== "Retry" ? null : judged === null ? SUPERSEDED_UNREAD_SENTENCE : leftOut > 0 ? supersededLeftOut(leftOut) : null;
       const more = Number(read.more ?? 0);
       const reserves = verb === "Retry" ? await retryReserves(ctx, jobs) : null;
       const reserveOf = (j) => (reserves ? reserves.get(j.jobId) : null);
@@ -1104,8 +1134,8 @@ function failedAll({ name, kind, verb, fn }) {
         // The filter rides the ticket for the banner after the write (`WRITE_RULES` `done`); the apply never reads it.
         payload: { ...(queue ? { queue } : {}), ...(repo ? { repo } : {}) },
         reserve: reserves ? bulkReserve(jobs.map(reserveOf)) : null,
-        summary: [`${verb} ${plural(jobs.length, "failed job")}${queue ? ` in ${queue}` : ""}${repo ? ` for ${repo}` : ""}; each is re-checked and acted on alone`, ...lines, ...(past ? [past.text] : [])],
-        barLines: [...lines, ...(past ? [past.bar] : [])],
+        summary: [`${verb} ${plural(jobs.length, "failed job")}${queue ? ` in ${queue}` : ""}${repo ? ` for ${repo}` : ""}; each is re-checked and acted on alone`, ...lines, ...(past ? [past.text] : []), ...(supersededLine ? [supersededLine] : [])],
+        barLines: [...lines, ...(past ? [past.bar] : []), ...(supersededLine ? [supersededLine] : [])],
       };
     },
     async apply(entry, ctx) {

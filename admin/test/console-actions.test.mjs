@@ -16,7 +16,7 @@ import { DEFER_BUCKET_WORDS, DEFER_TIME_MAX_MS, DEFER_WHYS } from "@edgehero/pi-
 import { enqueueForgeJob, forgeDeliveryJobId, makeQueue } from "@edgehero/pi-dispatch/queue";
 import { buildRecord, makeRecordWriter, sanitizeJobId } from "@edgehero/pi-dispatch/run-history";
 import { closeInbox, markState, readInbox, registerLive } from "@edgehero/pi-dispatch/steer-inbox";
-import { ACTIONS, CONFIG_FIX_ACTIONS, atIndex, AUDIT_FAILED, BULK_MAX, CANCEL_TIMEOUT_SENTENCE, capturingAudit, confirmAction, DIFF_LINES_MAX, diffHtmlOf, dryRunFs, lineDiff, PREVIEW_AGAIN, previewAction, reserveText, queueUnreadRefusal, RESUME_WAITING_UNKNOWN, resumeManyUndo, SNAPSHOT_TIMEOUT_MS, SNAPSHOT_TIMEOUT_SENTENCE, SNAPSHOT_UNREAD_SENTENCE, SWITCH_QUEUES_NAMED, SWITCH_SHORT_LINES, switchReadLine, textHtml, TRIGGER_FORM, UNDO_SENTENCES, VALKEY_UNREACHABLE, waitingLine } from "../src/console/actions.mjs";
+import { ACTIONS, SUPERSEDED_UNREAD_SENTENCE, supersededLeftOut, CONFIG_FIX_ACTIONS, atIndex, AUDIT_FAILED, BULK_MAX, CANCEL_TIMEOUT_SENTENCE, capturingAudit, confirmAction, DIFF_LINES_MAX, diffHtmlOf, dryRunFs, lineDiff, PREVIEW_AGAIN, previewAction, reserveText, queueUnreadRefusal, RESUME_WAITING_UNKNOWN, resumeManyUndo, SNAPSHOT_TIMEOUT_MS, SNAPSHOT_TIMEOUT_SENTENCE, SNAPSHOT_UNREAD_SENTENCE, SWITCH_QUEUES_NAMED, SWITCH_SHORT_LINES, switchReadLine, textHtml, TRIGGER_FORM, UNDO_SENTENCES, VALKEY_UNREACHABLE, waitingLine } from "../src/console/actions.mjs";
 import { CONSOLE_SCRIPT } from "../src/console/script.mjs";
 import { makeConfirmTickets } from "../src/console/confirm.mjs";
 import { CONFIRM_SLOT_ID, doneBannerHtml, PARTIAL_NOTE } from "../src/console/confirm-view.mjs";
@@ -2331,6 +2331,42 @@ test("a switch preview names at most SWITCH_QUEUES_NAMED queues, then how many m
   assert.equal(s.confirm.json().change.undo, `Pause queues ${twenty.slice(3).join(", ")} again by hand, one at a time: no single write pauses only those.`);
 });
 
+test("retry-all-failed leaves out a job whose work a later run has done since, says how many, and acts on the rest (issue #897)", async () => {
+  const { paths } = deployment();
+  const acted = [];
+  const jobs = [{ jobId: "gh-a", queue: "pi-jobs", attemptsMade: 1, finishedOn: 5 }, { jobId: "gh-b", queue: "pi-jobs", attemptsMade: 2, finishedOn: 6 }];
+  const rm = { ...RM, planFailedBulk: async () => ({ jobs, more: 0, examinedAll: true }), retryFailedJobs: async ({ jobs: js }) => (acted.push(js), { results: js.map((j) => ({ jobId: j.jobId, ok: true, queue: "pi-jobs" })) }) };
+  const asked = [];
+  const fleet = { supersededOf: async (rows) => (asked.push(rows), new Map([["gh-a", "gh-c"]])) };
+  const c = await start({ paths, a: { rm, readJobsData: async () => new Map(), fleet } });
+  const p = (await c.act("retry-all-failed", {})).json();
+  assert.deepEqual(asked[0], [{ jobId: "gh-a", endedAt: 5 }, { jobId: "gh-b", endedAt: 6 }], "judged on each job's own end, the queue's finishedOn");
+  assert.deepEqual(p.targets.map((t) => t.jobId), ["gh-b"], "the superseded job is not in the action");
+  assert.equal(p.summary[0], "Retry 1 failed job; each is re-checked and acted on alone");
+  assert.equal(p.summary.at(-1), supersededLeftOut(1));
+  assert.match(supersededLeftOut(1), /^Left out: 1 failed job whose work ran again later and completed, so a retry would do it twice \(Remove clears it\)\.$/);
+  assert.match(supersededLeftOut(2), /\(Remove clears them\)\.$/);
+  const res = await c.confirm("retry-all-failed", p.ticket);
+  assert.equal(res.status, 200, res.text);
+  assert.deepEqual(acted[0].map((j) => j.jobId), ["gh-b"]);
+  // Remove takes every match: that is how a superseded job leaves the queue.
+  const removed = (await c.act("remove-all-failed", {})).json();
+  assert.deepEqual(removed.targets.map((t) => t.jobId), ["gh-a", "gh-b"]);
+  assert.ok(!removed.summary.includes(supersededLeftOut(1)));
+  // Every match superseded: nothing to retry, said, and nothing is changed.
+  const all = await start({ paths, a: { rm, readJobsData: async () => new Map(), fleet: { supersededOf: async () => new Map([["gh-a", "gh-c"], ["gh-b", "gh-d"]]) } } });
+  const none = await all.act("retry-all-failed", {});
+  assert.equal(none.status, 400, none.text);
+  assert.match(none.json().error, /^every failed job that matches ran again later and completed, so none needs a retry; Remove clears them$/);
+  // No reader, or one that cannot read its window: nothing is left out, and the preview says it could not tell.
+  for (const f of [undefined, { supersededOf: async () => null }, { supersededOf: async () => { throw new Error("down"); } }]) {
+    const blind = await start({ paths, a: { rm, readJobsData: async () => new Map(), ...(f ? { fleet: f } : {}) } });
+    const q = (await blind.act("retry-all-failed", {})).json();
+    assert.deepEqual(q.targets.map((t) => t.jobId), ["gh-a", "gh-b"]);
+    assert.equal(q.summary.at(-1), SUPERSEDED_UNREAD_SENTENCE);
+  }
+});
+
 test("retry-all-failed shows each job's reserve and the sum; a job whose data cannot be read is 'reserve unknown', never $0", async () => {
   const { paths } = deployment();
   const acted = [];
@@ -2340,7 +2376,8 @@ test("retry-all-failed shows each job's reserve and the sum; a job whose data ca
     retryFailedJobs: async ({ jobs }) => (acted.push(jobs), { results: [{ jobId: "gh-a", ok: true, queue: "pi-jobs" }, { jobId: "gh-b", invalid: "job gh-b failed again since the preview (it changed since the preview)" }] }),
   };
   const readData = async ({ jobs }) => new Map(jobs.map((j) => [j.jobId, j.jobId === "gh-a" ? { kind: "github", maxCostUsd: "1.5" } : null]));
-  const c = await start({ paths, a: { rm, readJobsData: readData } });
+  // A reader that finds no job superseded (issue #897), so the preview is what it was before supersession.
+  const c = await start({ paths, a: { rm, readJobsData: readData, fleet: { supersededOf: async () => new Map() } } });
   const p = (await c.act("retry-all-failed", {})).json();
   assert.deepEqual(p.reserve, { bulk: true, slots: 2, dollarsMicros: 1_500_000, unknown: 1 });
   assert.match(p.html, /<li>gh-a on pi-jobs, 1 attempt, reserve \$1\.50<\/li>/);

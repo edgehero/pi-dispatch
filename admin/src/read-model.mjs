@@ -4949,6 +4949,8 @@ export function createFleetReader(
           parkedUnreachable: w.partial ? scrubReason(w.partial) : null,
           recordReasons: newestReasonsOf(w.runs),
           recordDetails: new Map(w.runs.map((r) => [r.jobId, r]).reverse()),
+          // Issue #897: the window's runs, for which failed jobs a later run has superseded (`supersededFailures`).
+          windowRuns: w.runs,
           // Issue #737: the overview's day of runs, its spend per hour and its soft-hold refusals, off the same window.
           runsDay: runsDayOf(w, nowMs),
           spendByHour: spendByHourOf(w, nowMs),
@@ -4965,6 +4967,13 @@ export function createFleetReader(
         row.hasRecord = fold.recordReasons.has(row.jobId);
         row.target = fold.recordDetails?.get(row.jobId)?.target ?? null;
         row.outcome = fold.recordDetails?.get(row.jobId)?.outcome ?? null;
+      }
+      // Issue #897: the run that did a failed job's work since (its id), or null: Needs you no longer asks for it, Fleet
+      // links the run instead of offering a paid Retry, and bulk Retry leaves it out. Null throughout when the window
+      // could not be read, so a read that failed never hides a failure.
+      if (Array.isArray(failed?.rows)) {
+        const superseded = Array.isArray(fold.windowRuns) ? supersededFailures(failed.rows, fold.windowRuns) : new Map();
+        for (const row of failed.rows) row.supersededBy = superseded.get(row.jobId) ?? null;
       }
 
       // Issue #647: whether each waiting park is being answered now (a job queued or running on its target, which has no
@@ -5135,6 +5144,18 @@ export function createFleetReader(
     async runsWindow() {
       try {
         return runsWindowOf(await wideRuns(), nowFn());
+      } catch {
+        return null;
+      }
+    },
+    /**
+     * Issue #897: `supersededFailures` over the same cached wide window, for a bulk Retry's preview, which reads the
+     * failed jobs itself (`planFailedBulk`) and must leave out the ones whose work has since been done. `jobs` are
+     * `{ jobId, endedAt }`. Null when the window cannot be read, so the caller says it could not tell. Never throws.
+     */
+    async supersededOf(jobs) {
+      try {
+        return supersededFailures(jobs, (await wideRuns()).runs);
       } catch {
         return null;
       }
@@ -5435,6 +5456,70 @@ export function refusalsIn(runs, nowMs) {
 }
 
 /** Each job id's newest record reason in `runs` (newest first, as `mergeRuns` orders them), charset-checked, else null. */
+/**
+ * Issue #897: what makes two runs THE SAME WORK, for a failed job's supersession (`supersededFailures`), or null for a run
+ * no later run can stand in for. A cron trigger's runs share its id, minted by its scheduler (`repeat:`) or fired by
+ * hand (`manual:`) alike (`cronRunOf`, the run id grammar's one owner). A forge run's work is its target (`targetKeyOf`,
+ * the one rule for "the same target") and its flow: a later review of an issue is not its delivery. Any other run (a
+ * local `run --task`, whose prompt is its own) is never superseded.
+ *
+ * REJECTED: the trigger's index, which moves when the triggers file is edited, so a deleted row would hand its failures
+ * to whatever slid into its place; and the job id's prefix alone, which gives a forge run no target.
+ */
+function workKeyOf(r) {
+  const cron = cronRunOf(r?.jobId);
+  if (cron !== null) return `cron\u0000${cron.id}`;
+  if (!isForgeKind(r?.kind)) return null;
+  const target = targetKeyOf(r.kind, r.target);
+  if (target === null) return null;
+  return `forge\u0000${target}\u0000${typeof r.flow === "string" ? r.flow : ""}`;
+}
+
+/**
+ * Issue #897: which failed jobs a later run has superseded, `Map<failed jobId, superseding jobId>`. `rows` are the
+ * failed set's rows (`{ jobId, endedAt }`, `endedAt` BullMQ's `finishedOn` in ms), `runs` the run records read
+ * (newest first, as the wide window holds them). A failed job is superseded when a run of the same work (`workKeyOf`)
+ * ended `completed` and STARTED after the failed job ended: the work it was asked to do has since been done, so retrying
+ * it would do the work again and pay for it, and nothing about it needs a person.
+ *
+ * Judged from the records alone, and only inside them: a failed job whose own record (a forge job's target and flow are
+ * its record's) or whose later run is not among `runs` is not judged, and keeps asking, as it did. Its end is the queue's
+ * `finishedOn`, else its record's `endedAt`; with neither it is not judged. A later run that failed, was refused or is
+ * still running supersedes nothing. Pure: the queue is not read and nothing is written, so a superseded job stays in
+ * the failed set until it expires or an operator removes it, and Fleet still lists it.
+ *
+ * REJECTED: removing a superseded job from the queue, from the worker when the later run completes or from here, which
+ * would make a read write and lose the failure's own reason before anyone looked; and counting a later run that
+ * started before the failure ended, which can be the failure's own sibling replica or an earlier attempt.
+ */
+export function supersededFailures(rows, runs) {
+  const latest = new Map();
+  const byId = new Map();
+  for (const r of Array.isArray(runs) ? runs : []) {
+    if (typeof r?.jobId !== "string" || !RUN_ID_RE.test(r.jobId)) continue;
+    if (!byId.has(r.jobId)) byId.set(r.jobId, r);
+    if (r.outcome !== "completed") continue;
+    const key = workKeyOf(r);
+    const at = msOf(r.startedAt);
+    if (key === null || at === null) continue;
+    const prev = latest.get(key);
+    if (prev === undefined || at > prev.at) latest.set(key, { jobId: r.jobId, at });
+  }
+  const out = new Map();
+  for (const row of Array.isArray(rows) ? rows : []) {
+    const id = row?.jobId;
+    if (typeof id !== "string" || !RUN_ID_RE.test(id)) continue;
+    const own = byId.get(id) ?? null;
+    const key = workKeyOf(own ?? { jobId: id });
+    if (key === null) continue;
+    const ended = Number.isSafeInteger(row.endedAt) && row.endedAt > 0 ? row.endedAt : msOf(own?.endedAt);
+    if (ended === null) continue;
+    const later = latest.get(key);
+    if (later !== undefined && later.jobId !== id && later.at > ended) out.set(id, later.jobId);
+  }
+  return out;
+}
+
 function newestReasonsOf(runs) {
   const out = new Map();
   for (const r of Array.isArray(runs) ? runs : []) {

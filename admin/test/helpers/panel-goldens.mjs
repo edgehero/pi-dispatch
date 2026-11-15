@@ -206,6 +206,11 @@ function actionWorld({ fleet: fleetOver = {}, rm: rmOver = {}, updates = null, t
   const fleet = {
     snapshot: async () => SNAPSHOT,
     pause: async () => ({ results: [{ shown: "redis://valkey:6379", res: { ok: true, queues: ["pi-jobs", "pi-jobs@build3"] } }] }),
+    // Issue #897: what the real reader answers from its run window, here the snapshot's own rows' `supersededBy`.
+    supersededOf: async (jobs) => new Map(jobs.flatMap((j) => {
+      const row = (SNAPSHOT.failed?.rows ?? []).find((r) => r.jobId === j.jobId);
+      return typeof row?.supersededBy === "string" ? [[j.jobId, row.supersededBy]] : [];
+    })),
     ...fleetOver,
   };
   const deps = {
