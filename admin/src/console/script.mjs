@@ -1,3 +1,5 @@
+import { TIMELINE_ZOOMS } from "./timeline.mjs";
+import { historyBrowser, timelineLocalTime } from "./history-browser.mjs";
 /**
  * The console's one browser script, served from `/static/console.js` (issue #640). A string module rather than a file
  * beside the bundle: `dist/console.mjs` ships as one file, and a script read from disk at runtime would need a second
@@ -1750,6 +1752,7 @@ ${FIT_JS}
   // Explicit data-live-hold opts native GET pickers into the same rule without giving them filterbar styling.
   var HELD_FORMS = "form[data-action], form.filterbar, form[data-live-hold]";
   function inUse(panel) {
+    if (panel.id === "p-timeline" && historyUi && historyUi.held()) return true;
     if (slot && !slot.hidden && slotOwner === panel) return true;
     if (panel.querySelector("details[open] form[data-action]")) return true;
     var active = document.activeElement;
@@ -1791,6 +1794,7 @@ ${FIT_JS}
       // connection status must not overwrite it when question/tail slots are refilled after another panel swap.
       if (el.id === "p-transcript") tstate = null;
       try { enableAnswererControls(el); enableConfigControls(el); } catch (e) { /* actions remain disabled if they cannot be armed */ }
+      if (el.id === "p-timeline" && historyUi) historyUi.init();
       try { localTimes(el); } catch (e) { /* the swapped panel's times stay UTC */ }
       try { copyButtons(el); } catch (e) { /* the swapped panel's Copy buttons stay hidden */ }
       try { foldBars(el); } catch (e) { /* the swapped panel's filters stay shown */ }
@@ -2771,6 +2775,7 @@ ${FIT_JS}
     es.addEventListener("open", function () { if (tstate && tstate.text === "reconnecting" && !tdone) tmark("live", "on"); });
     filterTranscript();
   }
+  var historyUi = page === "overview" ? (${historyBrowser.toString()})({ document: document, location: location, history: history, fetch: typeof fetch === "function" ? fetch : null, render: function (markup) { swapPanel(document.getElementById("p-timeline"), markup); }, zooms: ${JSON.stringify(TIMELINE_ZOOMS)}, time: (${timelineLocalTime.toString()}), localTimes: localTimes, personHeader: PERSON_HEADER, person: pagePerson, onAuth: function () { probe(); } }) : null;
 })();
 ${GATEWAY_CONSOLE_SCRIPT}
 `;

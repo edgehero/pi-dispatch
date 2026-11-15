@@ -45,9 +45,9 @@
  * word alone fit and else further left where its word and its time fit, a job due later stood left of one due before
  * it (at 1h, a check due in 10 minutes at 77.78 and every one due 14 to 25 minutes on at 71.95).
  *
- * TIMES ON THE AXIS ARE UTC TEXT INSIDE THE SVG. The browser script turns `<time>` elements into the reader's local
- * time, and an SVG `<text>` is not one, so the axis, the now cap and the titles are UTC, and the axis writes "UTC"
- * beside its times. Every other time on the page is a `<time>`.
+ * TIMES ARE UTC IN SERVER HTML. Timestamp attributes let the browser localize the axis, now cap, pill labels and
+ * titles using each instant's offset, including winter time. Geometry and duration stay on the UTC millisecond axis.
+ * `anchor` moves the window independently of now; `recorded` draws archive outcomes without inferring live state.
  *
  * LABELS ARE FITTED AGAINST THE NARROWEST LANE. The server cannot measure text, so a label is judged by an estimate of
  * its width against `TRACK_PX`: the bundle keeps `.tl` at least 720 px wide on a phone, which leaves 596 px beside the
@@ -408,19 +408,20 @@ function rowsOf(rows) {
  * a park's words over its tail (from `tailX`), null where they would reach now (its label carries them then, or
  * nothing does) and for every other kind.
  */
-export function timelineModel({ now, zoom = null, rows = null, project = null, runs = [], active = [], hostJobs = [], waiting = null, parked = [] } = {}) {
+export function timelineModel({ now, anchor = now, recorded = false, zoom = null, rows = null, project = null, runs = [], active = [], hostJobs = [], waiting = null, parked = [] } = {}) {
   if (!Number.isFinite(now)) throw new TypeError(`timeline: now is an instant in ms, not ${JSON.stringify(now)}`);
   const zoomKey = zoomOf(zoom);
   const by = rowsOf(rows);
   const filter = str(project);
   const z = TIMELINE_ZOOMS[zoomKey];
   const span = z.pastMs + z.futureMs;
-  const start = now - z.pastMs;
-  const end = now + z.futureMs;
+  const start = anchor - z.pastMs;
+  const end = anchor + z.futureMs;
   const xOf = (t) => clamp(((t - start) / span) * 100, 0, 100);
-  const nowX = (z.pastMs / span) * 100;
+  const nowX = xOf(now);
+  const current = now >= start && now <= end;
 
-  const items = collect({ now, start, runs, active, hostJobs, waiting, parked });
+  const items = collect({ now, start, recorded, runs, active: current ? active : [], hostJobs: current ? hostJobs : [], waiting: current ? waiting : null, parked: current ? parked : [] }).filter((i) => current || i.startAt <= end);
   const { chips, chipsMore } = chipsOf(items, filter);
   const shown = filter === null ? items : items.filter((i) => i.project === filter);
   const { rows: grouped, rowsMore } = groupRows(shown, by);
@@ -430,11 +431,12 @@ export function timelineModel({ now, zoom = null, rows = null, project = null, r
   for (let t = Math.ceil(start / z.tickMs) * z.tickMs; t <= end; t += z.tickMs) {
     const x = xOf(t);
     const hidden = Math.abs(x - nowX) < CAP_CLEAR_PCT || x < EDGE_CLEAR_PCT || x > 100 - EDGE_CLEAR_PCT;
-    axis.push({ x: pc(x), label: hidden ? null : hhmm(t) });
+    axis.push({ at: t, x: pc(x), label: hidden ? null : hhmm(t) });
   }
 
   return {
     now,
+    current,
     zoom: zoomKey,
     by,
     project: filter,
@@ -456,7 +458,7 @@ export function timelineModel({ now, zoom = null, rows = null, project = null, r
  * endAt, ... }` with times in ms (`endAt` null for a waiting job, which has no end yet). What ended before the window's
  * start is left out.
  */
-function collect({ now, start, runs, active, hostJobs, waiting, parked }) {
+function collect({ now, start, recorded, runs, active, hostJobs, waiting, parked }) {
   const records = list(Array.isArray(runs) ? runs : runs?.runs).filter((r) => str(r?.jobId) !== null);
   const recordOf = new Map();
   for (const r of records) if (!recordOf.has(r.jobId)) recordOf.set(r.jobId, r);
@@ -515,6 +517,11 @@ function collect({ now, start, runs, active, hostJobs, waiting, parked }) {
     const startAt = Math.min(s ?? endAt, endAt);
     const base = { jobId: r.jobId, target: str(r.target), project: str(r.project), host: str(r.host), startAt, endAt };
     if (r.outcome === "completed" && ["awaiting-input", "awaiting-approval"].includes(r.reason)) {
+      // An archive page has no live parked-state read. It can say what the run asked for, never whether it was answered.
+      if (recorded) {
+        if (endAt >= start) out.push({ kind: "parked", ...base, recorded: true, word: "requested " + (r.reason === "awaiting-approval" ? "approval" : "input") });
+        continue;
+      }
       if (unanswered.has(r.jobId)) {
         unanswered.delete(r.jobId);
         out.push({ kind: "parked", ...base, word: TIMELINE_WORDS.parked });
@@ -893,6 +900,11 @@ function shape(i, { by, now, start, nowX, xOf }) {
     }
     s.title = () => `${i.jobId}: running${i.host ? ` on ${i.host}` : ""} since ${whenText(i.startAt, now)} UTC${i.host ? "" : ", host not known"}`;
   } else if (i.kind === "parked") {
+    if (i.recorded) {
+      s.variants = [own(inner(12 + labelPx(id) + 8) ? { text: id, sub: null, side: "in" } : null)];
+      s.title = () => `${i.jobId}${target}: ${i.word} at ${whenText(i.endAt, now)} UTC`;
+      return s;
+    }
     // A park that ended before the window has no pill in it: its tail alone runs from the window's start to now.
     s.pill = i.endAt >= start;
     if (!s.pill) {
@@ -1030,6 +1042,7 @@ function itemOut(s) {
     w: pc(s.x1 - s.x0),
     pill: s.pill,
     title: s.title(),
+    clockTimes: [...new Set([i.startAt, i.endAt, i.endedAt, i.dueAt, i.untilAt, i.scheduled?.at].filter(Number.isFinite))],
     label: s.label ?? null,
     dep: s.dep,
     depX: s.depX === null ? null : pc(s.depX),
@@ -1103,7 +1116,7 @@ function itemHtml(it, nowX, lead) {
     case "run":
       return html`${rect("tp--run", it)}${label}`;
     case "parked": {
-      const tail = Number(it.tailX) < Number(nowX) ? (it.pill ? html`<line class="tail" x1="${it.tailX}%" x2="${nowX}%" y1="${TAIL_Y}" y2="${TAIL_Y}"/>` : html`<line class="tail" x1="${it.tailX}%" x2="${nowX}%" y1="${TAIL_Y}" y2="${TAIL_Y}"><title>${it.title}</title></line>`) : null;
+      const tail = it.tailX !== null && Number(it.tailX) < Number(nowX) ? (it.pill ? html`<line class="tail" x1="${it.tailX}%" x2="${nowX}%" y1="${TAIL_Y}" y2="${TAIL_Y}"/>` : html`<line class="tail" x1="${it.tailX}%" x2="${nowX}%" y1="${TAIL_Y}" y2="${TAIL_Y}"><title>${it.title}</title></line>`) : null;
       const words = it.tailText === null ? null : html`<text class="tail-t" x="${it.tailX}%" dx="6" y="${TAIL_TEXT_Y}">${it.tailText}</text>`;
       return html`${it.pill ? rect("tp--parked", it) : null}${label}${tail}${words}`;
     }
@@ -1137,7 +1150,7 @@ function headHtml(row, by) {
  * for a screen reader ("Runs by project"). A model with no row draws the band and the axis alone; the page says why
  * beside it (`model.empty`).
  */
-export function timelineHtml(model, { label } = {}) {
+export function timelineHtml(model, { label, runHref = null, overflow = true } = {}) {
   if (typeof label !== "string" || label === "") throw new TypeError("timeline: the timeline is named (label)");
   const nowX = model.nowX;
   const future = pc(100 - Number(nowX));
@@ -1148,27 +1161,36 @@ export function timelineHtml(model, { label } = {}) {
     return it.dep === "gap" ? html`<line class="gapline" x1="${it.depX}%" x2="${it.x}%" y1="${MID_Y}" y2="${MID_Y}"/>` : null;
   };
   const grid = (h) => html`<rect class="tl-future" x="${nowX}%" y="0" width="${future}%" height="${h}"/>${model.axis.map((t) => html`<line class="tg" x1="${t.x}%" x2="${t.x}%" y1="0" y2="${h}"/>`)}<line class="tnow" x1="${nowX}%" x2="${nowX}%" y1="0" y2="${h}"/>`;
-  const band = html`<span></span><svg class="tl__r" height="${BAND_H}" aria-hidden="true"><rect class="tl-future" x="${nowX}%" y="0" width="${future}%" height="${BAND_H}"/><text class="tband" x="${nowX}%" dx="-10" y="16" text-anchor="end">${TIMELINE_BAND.past}</text><text class="tband tband--in" x="${nowX}%" dx="10" y="16">${TIMELINE_BAND.future}</text></svg>`;
+  const band = model.current === false ? html`<span></span><svg class="tl__r" height="${BAND_H}" aria-hidden="true"><text class="tband" x="0" y="16">Run history</text></svg>` : html`<span></span><svg class="tl__r" height="${BAND_H}" aria-hidden="true"><rect class="tl-future" x="${nowX}%" y="0" width="${future}%" height="${BAND_H}"/><text class="tband" x="${nowX}%" dx="-10" y="16" text-anchor="end">${TIMELINE_BAND.past}</text><text class="tband tband--in" x="${nowX}%" dx="10" y="16">${TIMELINE_BAND.future}</text></svg>`;
   const rows = model.rows.map((row) => {
     const lanes = row.lanes.length === 0 ? [[]] : row.lanes;
     return lanes.map((lane, li) => {
       const first = li === 0;
       const last = li === lanes.length - 1;
-      const more = last && row.more > 0 ? html`<span class="tl__repo">+${row.more} more</span>` : null;
+      const more = last && row.more > 0 ? runHref ? html`<button type="button" class="btn btn--sm btn--ghost" data-history-reveal>+${row.more} more</button>` : html`<span class="tl__repo">+${row.more} more</span>` : null;
       const head = html`<span class="${first ? "tl__h tl__h--first" : "tl__h"}">${first ? headHtml(row, model.by) : null}${more}</span>`;
-      const named = first ? html` role="img" aria-label="${rowName(row)}"` : html` aria-hidden="true"`;
-      return html`${head}<svg class="${first ? "tl__r tl__r--first" : "tl__r"}" height="${LANE_H}"${named}>${grid(LANE_H)}${lane.map((it) => itemHtml(it, nowX, lead))}</svg>`;
+      const named = runHref ? html` role="group" aria-label="${rowName(row)}"` : first ? html` role="img" aria-label="${rowName(row)}"` : html` aria-hidden="true"`;
+      return html`${head}<svg class="${first ? "tl__r tl__r--first" : "tl__r"}" height="${LANE_H}"${named}>${grid(LANE_H)}${lane.map((it) => {
+        const drawing = itemHtml(it, nowX, lead);
+        const href = runHref?.(it.jobId);
+        return href ? html`<a class="tl-run" href="${href}" aria-label="${it.title}" data-run-kind="${it.kind}" data-run-times="${JSON.stringify(it.clockTimes)}" data-run-now="${model.now}" data-run-title="${it.title}" data-run-id="${it.jobId}" data-run-target="${it.target}" data-run-word="${it.word}" data-run-project="${it.project}" data-run-start="${it.startAt}" data-run-end="${it.endAt}">${drawing}</a>` : drawing;
+      })}</svg>`;
     });
   });
   // The rows left out (`TIMELINE_ROWS_MAX`): a card's sentence under the scroll box, not a line inside it. Inside, it was
   // as wide as the 720 px timeline, and a phone, whose timeline opens scrolled to its end, showed its last words alone,
   // or none of it.
-  const cut = model.rowsMore?.rows > 0 ? html`<p class="card__sub">${rowsMoreText(model.rowsMore)}</p>` : null;
-  const ticks = model.axis.filter((t) => t.label !== null).map((t) => html`<text class="tax" x="${t.x}%" y="14" text-anchor="middle">${t.label}</text>`);
+  const cut = overflow ? timelineOverflowHtml(model, { interactive: Boolean(runHref) }) : null;
+  const ticks = model.axis.filter((t) => t.label !== null).map((t) => html`<text class="tax" data-timeline-at="${t.at}" x="${t.x}%" y="14" text-anchor="middle">${t.label}</text>`);
   // "UTC" is written left of the lane's start, in the heads' column, beside the times it names (the SVG draws outside
   // its box); as a head of its own it read as one more line of the last row's head.
-  const axis = html`<span></span><svg class="tl__r" height="${BAND_H}" aria-hidden="true"><text class="tax" x="0" dx="-8" y="14" text-anchor="end">${TIMELINE_BAND.axis}</text>${ticks}<rect class="tnowcap" x="${nowX}%" y="2" width="46" height="18" rx="9" transform="translate(-23 0)"/><text class="tnowcap-t" x="${nowX}%" y="15" text-anchor="middle">${model.nowLabel}</text></svg>`;
+  const axis = html`<span></span><svg class="tl__r" height="${BAND_H}" aria-hidden="true"><text class="tax" data-timeline-zone x="0" dx="-8" y="14" text-anchor="end">${TIMELINE_BAND.axis}</text>${ticks}${model.current === false ? null : html`<rect class="tnowcap" x="${nowX}%" y="2" width="46" height="18" rx="9" transform="translate(-23 0)"/><text class="tnowcap-t" data-timeline-at="${model.now}" x="${nowX}%" y="15" text-anchor="middle">${model.nowLabel}</text>`}</svg>`;
   return html`<div class="tl-wrap"><div class="tl" role="group" aria-label="${label}">${band}${rows}${axis}</div></div>${cut}`;
+}
+
+/** The overflow notice belongs outside a scrolling track, where a phone can read it without panning. */
+export function timelineOverflowHtml(model, { interactive = false } = {}) {
+  return model.rowsMore?.rows > 0 ? html`<p class="card__sub">${rowsMoreText(model.rowsMore)}${interactive ? html` <button class="btn btn--sm" type="button" data-history-reveal>Inspect every run</button>` : null}</p>` : null;
 }
 
 const GROUPED = new Intl.NumberFormat("en-US");

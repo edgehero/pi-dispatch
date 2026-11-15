@@ -1,3 +1,4 @@
+import { getTimeline } from "./history-api.mjs";
 /**
  * The console's HTTP server: the route table and the one dispatcher every request goes through (issue #640,
  * DES-OPERATOR-CONSOLE, REQ-CONSOLE-SECURITY).
@@ -1208,6 +1209,7 @@ export const ROUTES = Object.freeze([
     if (!result?.config) return sendError(ctx.res, 503, result?.refusal ?? "The terminal host configuration could not be read.");
     return sendJson(ctx.res, 200, result.config, { "content-disposition": 'attachment; filename="sandbox-hosts.json"' });
   } },
+  { method: "GET", path: "/api/timeline", auth: "viewer", write: false, handler: getTimeline },
   { method: "GET", path: "/api/state", auth: "viewer", write: false, handler: getState },
   { method: "POST", path: "/api/trigger-check", auth: "viewer", write: false, readJson: true, handler: postTriggerCheck },
   // Issue #647: one run and the chat it can have (`run-api.mjs`); a viewer's, since the answer carries no text at all.

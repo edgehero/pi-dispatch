@@ -1,3 +1,4 @@
+import { historyFrame } from "../history-view.mjs";
 /**
  * The overview screen's panels (issue #737: the OverviewScreen, OverviewAllClear, OverviewPhone, SetupScreen,
  * TimelineAndWaitlists, Status and CardsAndBanners cards), re-exported by `../panels.mjs`. The rules every panel keeps
@@ -675,6 +676,7 @@ function timelineQuery(view) {
     rows: TIMELINE_ROWS.includes(q.rows) ? q.rows : null,
     zoom: typeof q.zoom === "string" && Object.hasOwn(TIMELINE_ZOOMS, q.zoom) ? q.zoom : null,
     project: projectId(q.project),
+    anchor: Number.isSafeInteger(q.anchor) ? q.anchor : null,
   };
 }
 
@@ -685,7 +687,7 @@ function timelineQuery(view) {
  */
 function overviewHref(view, q, over) {
   const next = { ...q, ...over };
-  return hrefTo(view, "overview", { rows: next.rows === TIMELINE_DEFAULTS.rows ? null : next.rows, zoom: next.zoom === TIMELINE_DEFAULTS.zoom ? null : next.zoom, project: next.project });
+  return hrefTo(view, "overview", { rows: next.rows === TIMELINE_DEFAULTS.rows ? null : next.rows, zoom: next.zoom === TIMELINE_DEFAULTS.zoom ? null : next.zoom, project: next.project, anchor: next.anchor });
 }
 
 /**
@@ -698,7 +700,7 @@ function chipsHtml(view, q, model) {
   const moreCount = Number.isSafeInteger(more?.count) ? more.count : 0;
   const all = model.chips.reduce((a, c) => a + (Number.isSafeInteger(c.count) ? c.count : 0), 0) + moreCount;
   const link = (href, on, inner) => html`<a href="${href}"${on ? html` aria-current="page"` : null}>${inner}</a>`;
-  const rest = Number.isSafeInteger(more?.projects) && more.projects > 0 ? html`<span class="muted">+${count(more.projects)} more</span>` : null;
+  const rest = Number.isSafeInteger(more?.projects) && more.projects > 0 ? html`<button class="btn btn--sm btn--ghost" type="button" data-history-reveal>+${count(more.projects)} more</button>` : null;
   return html`<div class="projseg" role="group" aria-label="Project"><span class="projseg__l">Project</span>${link(overviewHref(view, q, { project: null }), model.project === null, html`All<b>${count(all)}</b>`)}${model.chips.map((c) => link(overviewHref(view, q, { project: c.project }), c.on === true, html`${ui.ptag(c.project)}<b>${count(c.count)}</b>`))}${rest}</div>`;
 }
 
@@ -710,7 +712,7 @@ export const overviewTimeline = overviewPanel("Runs by project", (s, view) => {
   const parked = (Array.isArray(s.parked) ? s.parked : []).map((p) => ({ ...p, project: projectId(p?.project) ?? projects.get(p?.jobId) ?? null }));
   // The waiting read whole, for every role: the timeline reads no hold's label or answers (the wait check's profiles,
   // an operator's), so there is nothing in it a viewer may not read.
-  const model = timelineModel({ now: view.now, zoom: q.zoom, rows: q.rows, project: q.project, runs: s.runsDay ?? [], active: Array.isArray(s.active) ? s.active : [], hostJobs: hostsOf(s), waiting: s.waiting ?? null, parked });
+  const model = timelineModel({ now: view.now, anchor: q.anchor ?? view.now, zoom: q.zoom, rows: q.rows, project: q.project, runs: s.runsDay ?? [], active: Array.isArray(s.active) ? s.active : [], hostJobs: hostsOf(s), waiting: s.waiting ?? null, parked });
   const byHost = model.by === "host";
   const title = byHost ? "Runs by host" : "Runs by project";
   const rowsSeg = ui.seg(TIMELINE_ROWS.map((r) => ({ label: r === "host" ? "Host" : "Project", href: overviewHref(view, q, { rows: r }), on: model.by === r })), { label: "Rows" });
@@ -725,9 +727,9 @@ export const overviewTimeline = overviewPanel("Runs by project", (s, view) => {
     w === null ? UNREAD.waiting : w.truncated === true ? UNREAD.waitingCut : null,
     runsRead && s.runsDay.partial === true ? UNREAD.runsPartial : null,
     runsRead && s.runsDay.floor ? "Only the newest runs are read, so older runs in this window may be missing." : null,
-    model.empty && runsWhole && w !== null && w.truncated !== true ? "No run in this window, and nothing in line." : null,
+    q.anchor === null && model.empty && runsWhole && w !== null && w.truncated !== true ? "No run in this window, and nothing in line." : null,
   ].filter(Boolean);
-  const body = html`${chipsHtml(view, q, model)}${timelineHtml(model, { label: title })}${notes.map((n) => html`<p class="card__sub">${n}</p>`)}${timelineLegend()}`;
+  const body = html`${chipsHtml(view, q, model)}${historyFrame({ model, query: q, runHref: (id) => runHref(view, id), note: q.anchor === null ? null : "Reading this window from retained history…" })}<noscript><p class="card__sub">Enable JavaScript to browse retained history here, or open <a href="/runs">Runs</a>.</p></noscript>${notes.map((n) => html`<p class="card__sub">${n}</p>`)}${timelineLegend()}`;
   return ui.card({ title, sub: "left of now: what ran; right of now: what is in line", end: html`${rowsSeg}${zoomSeg}`, body });
 });
 

@@ -1879,6 +1879,18 @@ writes retain their existing interactive confirmation. This adds no unattended p
 
 ## REQ-OPERATOR-CONSOLE-SCREENS
 
+- **AMENDED 2026-11-15 (#903), (a4), interactive retained history.** The Overview timeline has a movable time
+  anchor independent of now. Horizontal scrolling, keyboard navigation and Older/Newer browse retained history;
+  Return to now restores live following. Every record is reachable through bounded pages, including overlapping runs
+  and projects omitted by display caps. Marks are accessible run links with hover/focus/touch previews; each page's
+  complete run list is the alternative to the capped picture. The URL preserves project, rows, zoom and anchor on return
+  from details. Historical browsing holds the timeline against live replacement. A historical window never reconstructs
+  a past queue from today's queue. The browser localizes axis, pill and preview times using the offset of each instant,
+  including both daylight-saving transitions; repeated clock labels carry offsets. UTC remains the static fallback.
+  Loading, unreadable/partial coverage and the end of the sources read are distinct. A mirror cutoff or offline host
+  is never asserted to be the deployment's oldest retained run. `INT-HISTORY-READ-TRANSPORT` owns file and host paging.
+
+
 - **Extension (#800), what a run loaded.** Four surfaces say what a run had, each in the words of
   `admin/src/loaded-words.mjs` (`DES-OPERATOR-CONSOLE`) and from the record's `loaded` (`INT-RUN-HISTORY-FILE-CONTRACT`),
   never from today's triggers file, because a host's overlay, its staged packages and the repository each change on their
@@ -9427,3 +9439,4 @@ instead of drifting.
 | 2026-11-04 (#800, which host does what, and what a person reads) | **`REQ-PER-TRIGGER-TOOL-EXCLUSIONS` CORRECTED** in Scope. A worker that reads `version` and reads less than these waits only on a stamped file: a file that lost its stamp, as a 4.3.1 writer or one-shot disarm leaves it or a hand edit can, loads there with both keys dropped and runs wider, and only a worker that reads these refuses that shape. No 4.3.1 writer may touch the file once either key is used. The console's refusal asks no receiver and no stopped worker. The boundary is an agent that can write or edit files, or run commands, since pi's `edit` tool also reaches `~/.pi/agent/`. **`REQ-OPERATOR-CONSOLE-SCREENS` CORRECTED** in (g1): a host that reads less of the triggers file than a hand-written file says read "the same" while it held every job, and now holds them in words; "The triggers file loads." is "This console loads the triggers file.", which is all that read knows. In (g8): an agent's Updates row named a trigger for a package that trigger leaves out, and now says what holds without knowing. UNCHANGED, checked: `agentReadProjection`, which still drops the names; what the console refuses; the version tables. |
 | 2026-11-05 (#800, what an issue-only rule starts) | **`REQ-OPERATOR-CONSOLE-SCREENS` CORRECTED**: a watch rule that only files an issue starts no agent and no container. It said no job, and a queue job does run, and its run is listed on Runs. UNCHANGED, checked: `worker/src/index.mjs`, what such a rule does. |
 | 2026-11-05 (#800, #695, one release) | **`REQ-PER-TRIGGER-TOOL-EXCLUSIONS` AMENDED** in Scope: 5.0.0 is the first release that reads both keys, so what a released worker does is one of two answers, and a file that lost its stamp is refused rather than loaded (`DES-STORE-VERSION-WHEN-NEEDED`). `REQ-OPERATOR-CONSOLE-SCREENS` UNCHANGED, checked: a host that reads less is still what the card says of a build from `main`, and of any later version row. |
+| 2026-11-15 (#903) | REQ-OPERATOR-CONSOLE-SCREENS (a4) AMENDED for horizontal retained-history paging, accessible run links and previews, persistent time position and per-instant browser offsets. The prior UTC-only axis and noninteractive overflow statements are superseded by the amendment. REQ-CONSOLE-SECURITY UNCHANGED, checked: existing authentication, roles and person binding apply. |

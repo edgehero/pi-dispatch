@@ -1115,9 +1115,9 @@ test("the frame is the card's: the wrapper, the band, a head per row, the lanes'
   for (const l of lanes) assert.equal([...l[1].matchAll(/class="tg"/g)].length, m.axis.length);
   // The axis: UTC beside the times, the times as HH:MM, none under the now cap, and the cap as the card draws it.
   assert.deepEqual(m.axis.map((a) => a.label), ["13:00", "13:30", "14:00", "14:30", "15:00", null, "16:00", "16:30", "17:00"]);
-  assert.ok(out.includes(`<span></span><svg class="tl__r" height="24" aria-hidden="true"><text class="tax" x="0" dx="-8" y="14" text-anchor="end">UTC</text><text class="tax" x="7.78%" y="14" text-anchor="middle">13:00</text>`));
+  assert.ok(out.includes(`<span></span><svg class="tl__r" height="24" aria-hidden="true"><text class="tax" data-timeline-zone x="0" dx="-8" y="14" text-anchor="end">UTC</text><text class="tax" data-timeline-at="${t(-159)}" x="7.78%" y="14" text-anchor="middle">13:00</text>`));
   const cap = onCard("TimelineAndWaitlists", `<rect class="tnowcap" x="68.57%" y="2" width="46" height="18" rx="9" transform="translate(-23 0)"/><text class="tnowcap-t" x="68.57%" y="15" text-anchor="middle">15:39</text></svg>`);
-  assert.ok(shapeOf(out).endsWith(`${shapeOf(cap)}</div></div>`));
+  assert.ok(shapeOf(out.replace(/ data-timeline-at="[0-9]+"/g, "")).endsWith(`${shapeOf(cap)}</div></div>`));
 });
 
 test("each item is drawn as the card draws it", () => {

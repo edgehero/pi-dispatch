@@ -1973,7 +1973,7 @@ test("the script's closed lists are written in from their one source each, never
   assert.deepEqual(named("mark"), Object.keys(LIVE_STATES).filter((k) => k !== "start").sort());
   // The sign-in page goes where a reason is the console's own, and nowhere else.
   // Sign-out's only one is its 200's (issue #737): an unconfirmed sign-out stays on the page.
-  assert.deepEqual(CONSOLE_SCRIPT.match(/location\.assign\(.*?\);/g), ['location.assign(query.length ? "/login?" + query.join("&") : "/login");', 'location.assign(ownPage(r.body && r.body.next));', 'location.assign(ownPage(a.body && a.body.next));', 'location.assign(r.body && r.body.device === "unerased" ? "/login?ended=device-kept" : "/login");', 'location.assign("/runs/sandboxes?request=" + encodeURIComponent(b.requestId) + "&host=" + encodeURIComponent(b.host));']);
+  assert.deepEqual(CONSOLE_SCRIPT.match(/location\.assign\(.*?\);/g), ['location.assign(query.length ? "/login?" + query.join("&") : "/login");', 'location.assign(ownPage(r.body && r.body.next));', 'location.assign(ownPage(a.body && a.body.next));', 'location.assign(r.body && r.body.device === "unerased" ? "/login?ended=device-kept" : "/login");', 'location.assign("/runs/sandboxes?request=" + encodeURIComponent(b.requestId) + "&host=" + encodeURIComponent(b.host));', 'location.assign("/" + destination.search);']);
   assert.match(CONSOLE_SCRIPT, /if \(r\.status === 200\) location\.assign\(r\.body && r\.body\.device === "unerased" \? "\/login\?ended=device-kept" : "\/login"\);\n\s+else unconfirmed\(\);\n\s+\}, unconfirmed\);/);
   // The signed-out sentence is said as text, in the slot's message line (slotSays), never as markup.
   assert.match(CONSOLE_SCRIPT, /function signedOut\(r\) \{[^]*?slotSays\(CONFIRM_SIGNED_OUT\);/);

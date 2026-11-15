@@ -344,3 +344,5 @@ Two more lines speak about what this page covers:
 - **`dollars.window-reset`** warns when a dollar window's counter in Valkey is missing, or below what this host's own
   run records settled into it, which is what a flushed, replaced or restored Valkey looks like
   ([When a counter resets](costs.md#when-a-counter-resets)).
+
+The `history:request:` and `history:reply:` names are transient Valkey pub/sub channels, not stored keys. Overview history browsing writes no archive or index to back up. Its directory cursors and recent browser pages live only in memory; the run JSON files above remain the durable source.

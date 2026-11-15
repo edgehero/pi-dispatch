@@ -1,7 +1,7 @@
 {
   "card": "TimelineAndWaitlists",
   "pr": 3,
-  "words": "ec25bb2f7090dc0dbe141e8e0a931d04ca62eee10fe963d2fd7b8ac86e227973",
+  "words": "86a78e5307291f38fa14638a0d4c9dd920e5a612e3907de4049ee2af77bdfc65",
   "elements": [
     {"el":"p-timeline","kind":"panel","status":"new","source":"admin/src/console/panels/overview.mjs#overviewTimeline","golden":["overview.operator","overview.viewer"]},
     {"el":"p-waitlists","kind":"panel","status":"new","source":"admin/src/console/panels/overview.mjs#overviewWaitlists","golden":["overview.operator","overview.viewer"]},
@@ -17,7 +17,8 @@
     {"el":"A reason this console does not know","kind":"readme","status":"new","panel":"p-waitlists","source":"admin/src/console/panels/overview.mjs#waitingSentence","holds":"Recorded reason: ","sentence":"worker/src/defer-reasons.mjs#DEFER_BUCKET_WORDS.unknown.title","golden":["panels/waitlist-unknown.operator"],"shows":"Recorded reason: <span class=\"code\">brand-new-why</span>","reason":"a kind of wait the card does not draw, the reader's own: a recorded reason this console has no words for (a newer worker's), said by its token for every role, never as no reason recorded"},
     {"el":"The Reason and Queue toggle","kind":"readme","status":"illustrative","reason":"one grouping, by reason; the queues are its counts row"},
     {"el":"1h, 3h, 24h","kind":"readme","status":"new","panel":"p-timeline","source":"admin/src/console/timeline.mjs#TIMELINE_ZOOMS","holds":"24h","golden":["overview.operator","overview.viewer"],"shows":">24h<"},
-    {"el":"The axis times","kind":"readme","status":"new","panel":"p-timeline","source":"admin/src/console/timeline.mjs#timelineHtml","golden":["overview.operator","overview.viewer"],"shows":"UTC","reason":"UTC text inside the SVG, which the browser's script cannot localize as it does a <time>; the axis says UTC"},
-    {"el":"Sample rows","kind":"sample","status":"illustrative","reason":"sample values"}
+    {"el":"The axis times","kind":"readme","status":"new","panel":"p-timeline","source":"admin/src/console/timeline.mjs#timelineHtml","golden":["overview.operator","overview.viewer"],"shows":"UTC","reason":"UTC in the static markup; the served browser script localizes timestamp attributes using each instant’s offset, including winter time."},
+    {"el":"Sample rows","kind":"sample","status":"illustrative","reason":"sample values"},
+    {"el":"Retained history navigation and individual run inspection","kind":"readme","status":"new","panel":"p-timeline","source":"admin/src/console/history-view.mjs#historyFrame","reason":"Older, Newer and Return to now move the time window. Every fetched record has a detail link even where the SVG caps omit it. The served browser keeps the anchor and localizes each instant."}
   ]
 }

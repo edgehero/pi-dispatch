@@ -131,14 +131,16 @@ function fakeRedis({ fail = false, hang = false } = {}) {
 			await guard();
 			calls.push(["pexpire", k, ms]);
 		},
-		async zrevrangebyscore(_k, _max, min, _lim, _off, count) {
+		async zrevrangebyscore(_k, max, min, ...options) {
 			await guard();
-			const cut = Number(String(min).replace("(", ""));
-			return [...zset.entries()]
-				.filter(([, s]) => s > cut)
-				.sort((a, b) => b[1] - a[1])
-				.slice(0, count)
-				.map(([m]) => m);
+			const lo = min === "-inf" ? -Infinity : Number(String(min).replace("(", ""));
+			const hi = max === "+inf" ? Infinity : Number(String(max).replace("(", ""));
+			const limit = options.indexOf("LIMIT"), offset = Number(options[limit + 1]), count = Number(options[limit + 2]);
+			const rows = [...zset.entries()]
+				.filter(([, s]) => (String(min).startsWith("(") ? s > lo : s >= lo) && (String(max).startsWith("(") ? s < hi : s <= hi))
+				.sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? 1 : -1))
+				.slice(offset, offset + count);
+			return options.includes("WITHSCORES") ? rows.flatMap(([m, score]) => [m, String(score)]) : rows.map(([m]) => m);
 		},
 		async mget(...keys) {
 			await guard();
@@ -275,6 +277,24 @@ test("readMirroredPage: no client is off, an unreachable one says so, and it nev
 	assert.deepEqual([dead.runs, dead.fetched, dead.frontier], [[], 0, null]);
 	const hung = await readMirroredPage(fakeRedis({ hang: true }), { timeoutMs: 20 });
 	assert.match(hung.degraded, /^unreachable \(mirror timeout\)/);
+});
+
+test("archive continuations cross equal-score pages and missing bodies without skipping retained runs", async () => {
+	const redis = fakeRedis();
+	const mirror = anchored({ redis, retentionDays: 7 });
+	for (let i = 0; i < 9; i++) await mirror.mirror(record(`j${i}`, new Date(AT - (i < 6 ? 0 : 1000)).toISOString()), `j${i}`);
+	redis.strings.delete(runRecordKey("j4"));
+	let cursor = { before: AT + 1 }, partial = false;
+	const seen = [];
+	for (let i = 0; i < 10; i++) {
+		const page = await readMirroredPage(redis, { ...cursor, limit: 2, continuation: true });
+		partial ||= page.partial === true;
+		seen.push(...page.runs.map((r) => r.jobId));
+		if (!page.next) break;
+		cursor = page.next;
+	}
+	assert.equal(partial, true);
+	assert.deepEqual(seen.sort(), ["j0", "j1", "j2", "j3", "j5", "j6", "j7", "j8"]);
 });
 
 test("OFF and UNREACHABLE are different facts and must not collapse", async () => {

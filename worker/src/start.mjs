@@ -1,3 +1,4 @@
+import { makeHistoryReader, serveHistory } from "./history-reader.mjs";
 import { subscriptionRoutes } from "./subscription-runtime.mjs";
 import { configuredSubscriptions } from "./subscription-config.mjs";
 import { publishSubscriptionStatus } from "./subscription-status.mjs";
@@ -2756,6 +2757,13 @@ export async function startWorker(
 	// a spread, a freeze, a snapshot inside `createWorker` -- un-registers the watchers in SILENCE and puts
 	// issue #295 back. Append only: two tests pin `[0]` as the runtime queue and `[1]` as the registry.
 	const extraClosers = [runtimeQueue, registry, ...(cronQueue === runtimeQueue ? [] : [cronQueue])];
+	// Archive reads are independent of paid jobs; a failed subscription must not delay worker boot.
+	let historyClosed = false;
+	let historyService = null;
+	extraClosers.push({ async close() { historyClosed = true; await historyService?.close(); } });
+	serveHistory({ redis, host: config.workerName, reader: makeHistoryReader({ logsDir: config.logsDir }) }).then(async (service) => {
+		if (historyClosed) await service.close(); else historyService = service;
+	}).catch(() => log("history_reader_unavailable", {}));
 	if (subscriptions) {
 		const publish = () => publishSubscriptionStatus(redis, config.workerName, subscriptions.runtime).catch(() => log("subscription_status_unavailable", {}));
 		await publish();
