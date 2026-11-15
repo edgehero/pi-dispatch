@@ -13994,6 +13994,22 @@ increase its existing cost ticket only before dispatch; a larger/unboundable pay
 
 ## INT-HISTORY-READ-TRANSPORT
 
+**AMENDED #907:** `GET /api/timeline?format=data&start=<ms>&end=<ms>&project=<id>&cursor=<opaque>`
+accepts a positive ordered interval of at most seven days; end is at most seven days beyond the injected current
+instant. Project/cursor are optional; unknown or duplicate keys are refused before any archive read. It returns
+`{ items, next, partial, olderAt, unavailable }`, with a closed item shape: `id`, `jobId`, `host`, `project`, `target`,
+`start`, `end`, `startedAt`, `endedAt`, `href`, `kind`, `word`. Geometry may use the known endpoint of an incomplete
+record, but the missing recorded timestamp stays null. The opaque item identity combines job and host; server-built
+links preserve historyHost. Roles are projected before shaping items. No transcript, path or free-form error crosses
+this response. Unavailable sources are explicit; a completed cursor does not erase partial coverage. A failed
+continuation returns 409 with a fixed error sentence. The HTML response and preset-window query remain compatible.
+
+At either cursor-map cap, a new reader evicts the least recently used idle cursor; a returning evicted cursor receives
+cursor-expired. Active readers are never evicted. Directory handles are closed on eviction. This prevents repeated
+abandoned pans from exhausting readers until their five-minute TTL elapses. The request/page/file bounds below and
+the transient worker wire format are unchanged; no stored-state migration is introduced.
+
+
 The retained JSON files are the archive. `makeHistoryReader` holds at most 32 opaque directory cursors, each bound to
 one range and project and idle-expiring after five minutes. One page examines at most 400 entries and returns at most
 100 matching records. Regular `.json` files alone are opened, without following symlinks; each read is capped at
@@ -14487,3 +14503,5 @@ and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` are UNCHANGED, checked: no file shape, wr
 | 2026-11-05 (#800, #695, one release) | `INT-TRIGGERS-FILE-CONTRACT`, `INT-HOST-REGISTRY-CONTRACT`, `INT-CONTAINER-RUNTIME-CONTRACT` and `INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked: both keys ship in 5.0.0 with #761 (`DES-STORE-VERSION-WHEN-NEEDED`), which changes when they arrive and no version, field or key. |
 | 2026-11-05 (#695, doctor's words) | **`INT-CONFIG-OVERLAY-CONTRACT` AMENDED**: the fix of `settings.unknown-keys` says 5.0.0 where it said issue #761's release, now that the release has its number. |
 | 2026-11-15 (#903) | NEW INT-HISTORY-READ-TRANSPORT and extension to INT-CONSOLE-STATE-API for authenticated paged history markup and bounded worker file reads over ephemeral pub/sub. INT-RUN-HISTORY-FILE-CONTRACT UNCHANGED, checked: JSON shape and retention stand. INT-CONSOLE-EVENT-STREAM UNCHANGED, checked: the browser holds its historical panel and no archive reads enter the shared live data key. |
+
+| 2026-11-15 (#907) | INT-HISTORY-READ-TRANSPORT AMENDED: validated structured interval responses, role projection, source failures and idle-cursor eviction under pressure. Worker pub/sub shape, file/page limits, run-record format and retention UNCHANGED, checked. INT-RUN-HISTORY-FILE-CONTRACT and INT-CONSOLE-STATE-API UNCHANGED, checked. |

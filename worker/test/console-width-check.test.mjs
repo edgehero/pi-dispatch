@@ -227,6 +227,17 @@ test("the Chrome that ran: the pinned build passes, another fails in CI and is a
 const el = (tag, left, right, extra = {}) => ({ tag, id: "", cls: "", inside: "", rect: { left, top: 0, right, bottom: 20 }, up: -1, text: false, font: "", scrollers: [], ...extra });
 const scroller = (tag, left, right, overflowX = "auto") => ({ tag, id: "", cls: "scroll", overflowX, rect: { left, top: 0, right, bottom: 20 } });
 
+test("width: a bounded interactive pan viewport permits overscan without excusing page or control overflow", () => {
+	const pan = { ...scroller("div", 16, 359, "hidden"), pan: true };
+	const check = (scrollers, scrollWidth = 375) => widthVerdict({ scrollWidth, elements: [el("div", 171, 389, { scrollers })] }).ok;
+	assert.equal(check([pan]), true);
+	assert.equal(check([{ ...pan, pan: false }]), false, "ordinary clipped content is still an error");
+	assert.equal(check([{ ...pan, rect: { ...pan.rect, right: 400 } }]), false, "the viewport itself must fit");
+	assert.equal(check([{ ...pan, tag: "body" }]), false);
+	assert.equal(check([pan], 400), false, "a wide page is never excused");
+	assert.equal(check([]), false, "controls outside the viewport get no exemption");
+});
+
 test("width: a page fits when nothing scrolls the viewport and every element past the edge sits in a scroll box that fits", () => {
 	assert.equal(widthVerdict({ scrollWidth: 375, elements: [] }).ok, true);
 	const inBox = widthVerdict({ scrollWidth: 375, elements: [el("table", 16, 900, { scrollers: [scroller("div", 16, 359)] })] });

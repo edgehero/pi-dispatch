@@ -458,7 +458,7 @@ export function timelineModel({ now, anchor = now, recorded = false, zoom = null
  * endAt, ... }` with times in ms (`endAt` null for a waiting job, which has no end yet). What ended before the window's
  * start is left out.
  */
-function collect({ now, start, recorded, runs, active, hostJobs, waiting, parked }) {
+export function collect({ now, start, recorded, runs, active, hostJobs, waiting, parked }) {
   const records = list(Array.isArray(runs) ? runs : runs?.runs).filter((r) => str(r?.jobId) !== null);
   const recordOf = new Map();
   for (const r of records) if (!recordOf.has(r.jobId)) recordOf.set(r.jobId, r);

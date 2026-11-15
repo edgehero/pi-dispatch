@@ -66,6 +66,9 @@
     "@earendil-works/pi-coding-agent": "1.5.2",
     "@edgehero/pi-dispatch": "*",
     "esbuild": "^0.28.1",
-    "typebox": "1.3.27"
+    "moment": "2.31.0",
+    "typebox": "1.3.27",
+    "vis-data": "8.0.6",
+    "vis-timeline": "8.5.6"
   }
 }

@@ -1,7 +1,7 @@
 {
   "card": "TimelineAndWaitlists",
   "pr": 3,
-  "words": "86a78e5307291f38fa14638a0d4c9dd920e5a612e3907de4049ee2af77bdfc65",
+  "words": "15d6b81a4d75d6f16876172e79d28154bd747bbf2508f133f4d8af1e326b2da4",
   "elements": [
     {"el":"p-timeline","kind":"panel","status":"new","source":"admin/src/console/panels/overview.mjs#overviewTimeline","golden":["overview.operator","overview.viewer"]},
     {"el":"p-waitlists","kind":"panel","status":"new","source":"admin/src/console/panels/overview.mjs#overviewWaitlists","golden":["overview.operator","overview.viewer"]},
@@ -19,6 +19,7 @@
     {"el":"1h, 3h, 24h","kind":"readme","status":"new","panel":"p-timeline","source":"admin/src/console/timeline.mjs#TIMELINE_ZOOMS","holds":"24h","golden":["overview.operator","overview.viewer"],"shows":">24h<"},
     {"el":"The axis times","kind":"readme","status":"new","panel":"p-timeline","source":"admin/src/console/timeline.mjs#timelineHtml","golden":["overview.operator","overview.viewer"],"shows":"UTC","reason":"UTC in the static markup; the served browser script localizes timestamp attributes using each instant’s offset, including winter time."},
     {"el":"Sample rows","kind":"sample","status":"illustrative","reason":"sample values"},
-    {"el":"Retained history navigation and individual run inspection","kind":"readme","status":"new","panel":"p-timeline","source":"admin/src/console/history-view.mjs#historyFrame","reason":"Older, Newer and Return to now move the time window. Every fetched record has a detail link even where the SVG caps omit it. The served browser keeps the anchor and localizes each instant."}
+    {"el":"Retained history navigation and individual run inspection","kind":"readme","status":"new","panel":"p-timeline","source":"admin/src/console/history-view.mjs#historyFrame","reason":"The enhanced library timeline supports continuous pan, zoom, visual group expansion and individual detail links. Legacy fixed-window controls remain the fallback. Times use each instant’s offset."},
+    {"el":"Library timeline controls and visual group expansion","kind":"readme","status":"new","panel":"p-timeline","source":"admin/src/console/timeline-view.mjs#libraryTimelineHtml","holds":"data-rt-chart","reason":"The static design depicts the toolbar and sample intervals. Real vis interactions, density paging and restored navigation are checked by console-timeline-browser.mjs; the fallback SVG remains in server HTML."}
   ]
 }

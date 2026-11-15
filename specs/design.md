@@ -12796,6 +12796,29 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
 
 ## DES-OPERATOR-CONSOLE
 
+- **AMENDED 2026-11-15 (#907), the library timeline.** The enhanced Overview uses pinned vis-timeline 8.5.6,
+  vis-data 8.0.6 and Moment 2.31.0, compiled reproducibly into locally served JS and external CSS. Moment's override
+  also replaces vis's older exact dependency. The comparison and measurements are in `design/research/run-timeline-907.md`.
+  This is a narrow exception to the rejected client build step and JSON rendering below: one read-only chart, no
+  client framework, with a closed metadata projection and DOM text nodes for every record string. The existing CSP,
+  role projection and same-origin/person binding remain unchanged. The source package's standalone CSS injection is
+  rejected; the ESM distribution uses an external stylesheet. Generated assets are tested against a fresh build.
+  One Timeline and persistent DataSets receive incremental updates. One/day or seven/day ranges cover the visible
+  window with neighbouring prefetch, at most eight cached ranges and 5,000 records per range, plus 2,000 live seed
+  items. A dense range explicitly continues in a new batch; no claim of completeness is made before its cursor ends.
+  At most 50 groups and 600 individual collapsed marks plus group summaries render; expansion shows 200 runs per
+  visual page, including fully concurrent or sub-second runs. The list complements this visual navigation.
+  Recorded runs cannot be moved or resized. Pointer dragging and sideways wheel movement pan; touch selects a preview
+  with an explicit detail link. Keyboard selection, group expansion and paging preserve visual reachability.
+  Live server panels update only the seed, never replace the chart. Historical browsing freezes the viewport, Now
+  resumes following, and browser history retains the exact range, selection and expanded page. History-state writes
+  are throttled for WebKit. Axis and preview offsets belong to each instant; durations use elapsed milliseconds.
+  The old bounded SVG/history controls remain the failure and no-script fallback, superseding #903's primary picture.
+  REJECTED: widening the CSP, loading from a CDN, placing run strings in HTML templates, losing overlap records behind
+  a list-only escape, persisting a new archive/index, and claiming an offline source's beginning. API data and idle
+  cursor eviction are specified in `INT-HISTORY-READ-TRANSPORT`. Counter and spend buckets remain UTC.
+
+
 - **AMENDED 2026-11-15 (#903), the interactive timeline.** `history-view.mjs` wraps the existing pure timeline
   geometry with time navigation and a complete, bounded run list. `timelineModel` takes an anchor separately from its
   injected now; historical windows leave current queues out. The browser holds a historical panel, preserving the
@@ -18713,3 +18736,5 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-11-05 (#800, what an issue-only rule starts, and a job's tool's name) | **`DES-PER-TRIGGER-LOAD-EXCLUSIONS` CORRECTED** in Rejected: of a tool with the name of one pi-dispatch gives some jobs, a staged package's or an overlay extension's goes with it, and a repository extension's stays. It said another extension's goes with its extension. In Residuals: `extensions/my ext.js`, a file directly in that folder with a space in its name, has no name to take. **`DES-OPERATOR-CONSOLE` CORRECTED**: a rule that only files an issue starts no agent and no container. It said no job, and a queue job does run. UNCHANGED, checked: `LOADED_JOB_TOOLS`. |
 | 2026-11-05 (#800, #695, one release) | **`DES-STORE-VERSION-WHEN-NEEDED` AMENDED** in the release rule: a first row of a version table must not be used until every host runs #761's release, where it said must not ship. `run.excludeExtensions` and `run.excludeExtensionTools` ship in 5.0.0 with #761. REJECTED, the two tags the rule asked for: the release between them reads `version` and less, so it loads a file that lost its stamp and runs wider, which is the residual this removes, and nothing makes a fleet stop at it. What stays is a 4.3.1 host on a half-upgraded fleet: the console refuses and names it, doctor warns, and a hand edit is not stopped. `packageCanary` already shipped on these terms. UNCHANGED, checked: `TRIGGERS_FILE_VERSION` at 2, `JOB_DATA_VERSION` at 3 and `DES-PER-TRIGGER-LOAD-EXCLUSIONS`: the versions and the console's check still guard a build from `main` between #761 and #800, and any later row. **`DES-RUN-PROGRESS` CORRECTED** in Residuals: a recovered run's synthetic results are read by their mark, in `RECOVERY_MARKS`, and were not counted as ordinary results since #645 settled their shape; the release's own issue named the sentence stale. |
 | 2026-11-15 (#903) | DES-OPERATOR-CONSOLE AMENDED: separate now from the displayed anchor, hold historical panels during live updates, reuse bounded SVG geometry with a complete page list, and localize timestamps in the browser. REJECTED: an unbounded SVG, treating the hot index as the archive, and applying today’s offset to history. DES-RUN-HISTORY-FLAT-FILES-NO-DB and DES-STORE-VERSION-WHEN-NEEDED UNCHANGED, checked: the new transport retains no state. |
+
+| 2026-11-15 (#907) | DES-OPERATOR-CONSOLE AMENDED: locally bundled read-only vis timeline, text-only metadata rendering, bounded range cache and visual density drill-down, stable SSE/Back and per-instant offsets. Narrowly supersedes the rejected browser build step and general JSON rendering for this chart alone. DES-RUN-HISTORY-FLAT-FILES-NO-DB and DES-STORE-VERSION-WHEN-NEEDED UNCHANGED, checked: no new persistent state. |

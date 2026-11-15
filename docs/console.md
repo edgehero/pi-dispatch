@@ -827,7 +827,7 @@ readers ([Live updates](#live-updates)).
 
 | Page | What it shows |
 |---|---|
-| `/` | The overview ([The overview](#the-overview)): a line under the title that says what needs you, then four cards (Needs you: the questions nobody has answered, the failed jobs the queue keeps and the registered hosts whose doctor fails, with the day's failed and refused runs under them; In line: how many jobs wait to start and why; Running: the jobs in each host's slots; Spend today), then the timeline of what ran and what is in line ([The overview's timeline](#the-overviews-timeline)) with the caps under it, and beside them the waiting jobs by reason ([Waitlists](#waitlists)) and the hosts. A deployment that has never run a job sees what stands before its first job instead ([First run](#first-run)). `?rows=`, `?zoom=` and `?project=` choose how the timeline is drawn. |
+| `/` | The overview ([The overview](#the-overview)): a line under the title that says what needs you, then four cards (Needs you: the questions nobody has answered, the failed jobs the queue keeps and the registered hosts whose doctor fails, with the day's failed and refused runs under them; In line: how many jobs wait to start and why; Running: the jobs in each host's slots; Spend today), then the timeline of what ran and what is in line ([The overview's timeline](#the-overviews-timeline)) across the page, with the caps, waiting jobs by reason ([Waitlists](#waitlists)) and hosts below it. A deployment that has never run a job sees what stands before its first job instead ([First run](#first-run)). `?rows=`, `?zoom=` and `?project=` choose how the timeline is drawn. |
 | `/setup` | The live first-run checklist, bounded person-only host setup when explicitly granted, and terminal alternatives ([First run](#first-run)). |
 | `/runs` | Every run this host and the fleet's run mirror know of, newest first, grouped by the day they ended (UTC), each run's Ended cell the time alone under its day's heading, with paging. Above them the filters (one search for a repository, a target or a job id, a chip per project, a list per field, and the filters you applied as chips you can remove) and the last 24 hours counted by outcome, each count a link to those runs, with the spend they settled and an **Only problems** switch ([Finding runs](#finding-runs)). The Outcome column says completed, refused, failed, awaiting input or cancelled on a badge with its icon; every outcome but completed and the two words that say why (awaiting input, cancelled) is followed by its reason as a short sentence ([Outcomes and reasons](#outcomes-and-reasons)), and a completed run that lacked its flow or an extension says so on its badge ([What a run loaded](#what-a-run-loaded)). On a phone each run is a block of its own, and the filters fold behind a Filters button. In a window narrower than 1440 pixels, as on a phone, the table leaves out the flow, venue, model, tokens and job cap (the run's own page shows them), so it fits without scrolling sideways; a long job id (past 22 characters, so a forge delivery's id takes two lines), host, flow or model (past 20) breaks inside its own box rather than widen its column. |
 | `/runs/sandboxes` | Operators only: kept workspaces and registered shells across hosts, terminal handoff and copy commands, confirmed preparation/pin/End requests. See [Opening a sandbox](#opening-a-sandbox). |
@@ -1101,7 +1101,7 @@ Four cards come first, in a row:
   today was read, so these hours may be missing spend.", and when the dollar counters could not be read, it says that
   too.
 
-Under them, on the left, the [timeline](#the-overviews-timeline) and the caps; on the right, the
+Under them, the [timeline](#the-overviews-timeline) spans the page. Below it, the caps sit beside the
 [waitlists](#waitlists) and the hosts.
 
 - **Caps**: a capsule for each window that has a cap, filled to its percent used: the jobs started today, this week
@@ -1189,121 +1189,52 @@ is still here, or one click away:
 
 ### The overview's timeline
 
-Scroll horizontally to move through time, or use **Older**, **Newer** and **Return to now**. The initial view follows
-current activity. Once you browse retained history, live updates leave that window and its keyboard focus in place.
-The address keeps its time anchor (`anchor`, milliseconds), zoom, grouping and project, so returning from a run page
-restores the same time window. **Read window again** restarts a scan after a failed read or an expired cursor.
+**Runs by project** uses an interactive timeline across the Overview's width. Drag horizontally or scroll sideways
+with a trackpad to explore retained history. Ordinary vertical scrolling moves through the project rows and page.
+Use **+**, **−**, Ctrl + wheel, or the **Window** selector to zoom. **Now** returns to live following;
+**Expand** gives the timeline more room. The fixed left column keeps project names visible. **Rows** can group by host.
 
-Click a run to open its details. Hover or focus a mark for its dated preview; touching it shows the preview too.
-The list under a historical window links every run on the current page, including runs omitted from the picture's
-lane and row limits. **More runs in this window** continues the bounded scan, and **Previous page** revisits up to
-eight recent pages. Start the window again to revisit pages outside that browser cache. A project can be typed into
-the Project field even when it has no recent run or no chip. Clearing the field shows all projects. The date range
-stays above the picture. Left/Right and Page Up/Page Down in the scroll region move through time; End returns to now.
+Type a project id into **Project** and choose **Show** to filter, including a project with no recent activity.
+Clear the field to return to all projects. The suggestions come from loaded records, so they are not a complete
+catalogue of every retained project. **Previous run** jumps across an empty gap when an earlier run has been found.
 
-The zone named above the picture is the reader's browser zone. The axis, marks, previews and run details use each
-instant's offset, so Amsterdam reads UTC+1 in winter and UTC+2 in summer. Repeated autumn clock labels carry their
-offsets. Positions, ordering and elapsed durations always use actual timestamps. Without browser scripting, times
-stay explicitly UTC and the ordinary Runs page remains available.
+Hover or focus a run to preview its identity, target, outcome, timestamps and elapsed duration. Click it or press
+Enter to open the existing run details. On a touch screen, tap selects the preview; **Open run** opens details.
+Dragging never edits a run or opens its detail page. The preview uses text and an outcome symbol as well as colour.
+Arrow keys inspect runs and move between projects; Shift + Left/Right pans. Escape closes the preview.
 
-**History means records still retained**, not deleted runs or overwritten retry attempts. Each request examines at
-most 400 directory entries and returns at most 100 matching records. A run spanning the window is included even if
-it ended later. Loading and incomplete reads are stated explicitly. The console scans its own files, then the live
-workers' files using the existing Valkey connection, then the mirror for hosts whose records were not read directly.
-No paid job is started. Upgrade and restart the workers as well as the console to read beyond the mirror on other
-hosts; an older worker cannot answer the new read protocol. Offline hosts may hold older records, and a truncated
-mirror cannot establish the beginning of their history. A failed host or file read never means an empty history.
-Historical windows describe retained records; they do not reconstruct an old queue or assert that an old question
-is still unanswered today. No new persistent store or retention policy is introduced.
+Overlapping runs stack into lanes. A **+N runs · Expand** mark or a project name opens that group, with individual
+runs in the timeline. Extremely dense groups have **Previous runs** and **Next runs** controls, 200 individual runs
+per view. **All projects** returns to the grouped view. More than 50 groups use those same navigation controls.
+**Runs as a list** provides links for the current visual page as an additional way to navigate.
 
+Loaded neighbouring time ranges stay cached, so reversing direction does not replace the entire chart. The browser
+keeps at most eight ranges, each up to 5,000 records, plus the bounded live snapshot; a range still containing more
+records offers **More runs in this range**. Continuing discards that range's earlier batch. **Retry** or revisiting
+an evicted range starts a fresh bounded scan. Zooming in or filtering a project reduces the amount that must be read.
 
-The timeline ("Runs by project", or "Runs by host") draws the last hours as one row per project or per host: left of
-the now line what ran and runs ("Ran and running"), right of it what is in line ("In line"). Each mark is a pill with
-its id where it fits (a cron trigger's run in line by its trigger and its run time instead, "hourly-sync" with "15:00
-run", since `repeat:hourly-sync:1791471600000` says neither), and its tooltip says the id, the target and what
-happened. Times are localized by the browser, including the winter or summer offset at each instant. A run that just ended can take up to 15 seconds to appear among the ended runs: the console
-reads the run history at most that often. The key under it names each kind, so a colour is never the only cue:
+Browsing history suspends live following. Live updates preserve the time range and selection while refreshing
+current facts. Returning from run details restores the range, grouping, project and expanded group's page. The
+address retains a compatible anchor/project/grouping; browser history state retains the exact custom range and
+selection. The first view spans one day, with Now near the right edge. The old `zoom=1h`, `3h`, `24h` links and static
+history controls remain supported as a fallback when the interactive assets cannot load.
 
-- **Completed**: a run that ended completed. A run an operator cancelled, and a question answered since, are drawn the
-  same and titled so.
-- **Running**: a running job, from its start to now, labelled with its host (by project) or its project (by host).
-- **Awaiting input**: a run that asked a question nobody has answered, its pill and then a tail to now. "Waiting for
-  you" is written over the tail where it ends before the now line, else with the id before the pill; neither ever
-  reaches now, since right of it is what is in line, which a question is not. A question older than the window is
-  still drawn, as the tail alone.
-- **Failed**: a run that failed, a durable run that was lost and could not be continued (recorded `policy`, but a
-  failure in the console's words), or one whose outcome this console does not know.
-- **Refused**: a circle at the instant the run was refused: a refusal spends nothing and takes no time.
-- **Slot held**: a job that is gone while its container still holds a slot on its host ("still holds a build3 slot"),
-  from when it took the slot to now.
-- **In line**: a job waiting to start, from when it is due (or just right of now, when it is due already) to the
-  window's end, with its reason's mark (each reason its own: a bell for a job past its due that no worker has taken, a
-  tag for a reason this console does not know) and words ("needs a build3 slot", "retry in 4m", "checks again in 12m",
-  "due since 15:30"). Each reason has one latest start: the last place in the window where its mark, a name of ten
-  characters (a longer one cut to its first nine), its reason's word and a time still fit. A pill starts at its due
-  time, the dotted gap from now leading to it, unless that is later than its reason's latest start; then it is drawn
-  there, further left, and says its due time, since where it starts is no longer when ("check 07:00", in the axis
-  timezone; "window in 2d 4h" for one more than a day off). So of two jobs waiting for the same reason, the one due later is
-  never drawn left of the other, whatever their names; only near now can a pill moved left stand before one of another
-  reason due earlier, and then it says its time. A pill too narrow for its words says its reason in one ("slot",
-  "retry", "due", "not ready"). Every pill keeps its mark and its reason's word: when room is short its name is what is
-  cut, down to nothing on a narrow pill far from its due, and its tooltip and the Waitlists card name it whole. A cron
-  trigger's next run is drawn here once it is overdue, since then it waits in line like any other job. An arrow ("waits
-  for a run") leads to it from what it waits for, when that is in the same lane: the run a chained job follows, the run
-  a recovery continues, or the gone job whose slot it needs (a job past its due waits on none of them). A dotted line
-  leads to a due time still to come.
+The browser's timezone is named above the chart. Axis ticks include the offset of their own instant; Amsterdam
+therefore uses UTC+1 in winter and UTC+2 in summer, including distinct labels for the repeated autumn hour. Previews
+and details refer to the same instants. Geometry, ordering and elapsed duration use timestamps, so crossing a clock
+change never adds or removes an hour from a run's duration. Without scripting, the fallback explicitly displays UTC.
 
-By project, a row is the record's project, with its repositories (at most two, the ones it ran most) under its name,
-and what carries no project comes last as "no project". By host, a row is the host the record, the registry or the
-waiting job names (a job in a host's own queue is that host's); the shared queue's waiting jobs are "any host", and
-what ran on a host nobody named is "host not known". A name too long for the row heads' column is cut with an
-ellipsis; hover it for the whole name. A row has at most four lanes: when more overlap it keeps what a person acts on
-(running, held and awaiting input, then failed, refused and in line) and fits completed runs in what is left, and its
-head says "+3 more". Each job in line takes a lane of its own, so a row draws at most four of them, the next four to
-start (a job that waits for something on its row first, then the soonest due), and counts the rest, however many
-thousands wait (the Waitlists card lists them). The timeline draws at most 12 rows, the ones with the most pressing
-marks first (then the most marks, then by name), in name order; a line under the timeline, outside its scroll box,
-says how many more rows it left out and how many runs and jobs they hold ("3 more rows are not drawn (41 runs and jobs
-in them)."), so a phone shows it whole. A screen reader can focus each linked run and hears each row with every count ("web: 5 completed, 1
-failed, 2 running, 3 in line").
+**History means records still retained**, including records beyond the hot index. Deleted records and overwritten
+retry attempts cannot be reconstructed. A run spanning a range boundary is included. Each request examines at most
+400 directory entries and returns at most 100 records; wider views are split into requests of at most seven days.
+The console reads its files, live workers' files over the existing Valkey connection, then mirror records for hosts
+not read directly. No paid job starts. Upgrade the workers as well as the console to read beyond the mirror on other
+hosts. Old or offline workers may hold inaccessible records, and the mirror cannot establish their oldest history.
 
-Above it, the project chips: All, then each project the window holds, with how many marks it has, at most 24 of them,
-chosen as the rows are and shown in name order, the rest said as "+5 more"; All counts every project, those too. The
-chips wrap onto as many lines as they need, so every one shows; on a phone they are one line that scrolls sideways.
-One shows that project's rows alone; All goes back. A project you filter by that has nothing in the window, or would
-not be among the 24, still has its chip (with 0 when it has nothing), so the way back is always there. Beside the
-title, Project and Host pick the rows, and 1h, 3h and 24h the window:
-
-| Window | Reaches back | Looks ahead |
-|---|---|---|
-| `1h` | an hour | 30 minutes |
-| `3h` | 3 hours | an hour and a half |
-| `24h` (the default) | a day | 12 hours |
-
-It opens on the whole day the overview reads runs for, so a project whose last run ended hours ago is still on the
-card. At a day, a run is drawn at least about 43 minutes wide: a schedule that runs every half hour fills its row's
-four lanes, and the rest of its quiet completed runs is counted as "+N more". 3h and 1h draw each run at its length.
-
-Now is two thirds of the way across at every window. The axis is UTC and says so: its times are drawn inside the
-picture, where the page's script cannot turn them into your time zone as it does every other time on the page. The
-times written on the pills are UTC too.
-
-The timeline is at least 720 pixels wide and scrolls sideways inside its card wherever the card is narrower: on a
-phone, just above a phone's width (up to about 810 pixels), and beside the right column on windows from 1,200 to about
-1,300 pixels wide. On a phone it opens scrolled to its end, where now and what is in line are; scroll back for the row
-heads and the earlier hours. Under it a line says each read that was not whole: the run history could not be read
-(then only what runs and waits is drawn), some run records could not be read ("Some run records could not be read, so
-runs in this window may be missing."), the console read only the newest runs and older ones in the window may be
-missing, or the waiting jobs could not be read, or not all of them ("Not every waiting job was read, so jobs in line
-may be missing here."). "No run in this window, and nothing in line." shows only when the run history was read whole
-and every waiting job was read.
-
-**The overview's address.** The choices are its query: `?rows=project` or `?rows=host`, `?zoom=1h`, `3h` or `24h`, and
-`?project=<project id>`, each optional (the defaults are by project, 24 hours and every project), and the links the
-card draws leave a default out. The overview takes no other parameter, and a value outside these is refused with the
-400 page, which names the parameter and what it takes, never what was sent. Every grouping, window and project is
-drawn from the same read of the deployment: three open tabs on three groupings are read once a second together, as one
-tab is ([Live updates](#live-updates)).
+Loading, empty ranges, incomplete reads, unavailable hosts and retryable errors are distinct states. A finished scan
+says which sources were read; it never claims to have proved the beginning of an offline host's history. A historical
+record that requested input states that fact, without asserting that it remains unanswered. Current running, waiting,
+parked and slot-holding facts still come from the live snapshot. Retention and run-record formats are unchanged.
 
 ### Waitlists
 
@@ -1514,8 +1445,7 @@ one when your date is the UTC date (`17:39 UTC+2`), and shows your date when it 
 under the heading "2026-10-08 UTC"), so it is never read against the wrong day. Every other time shows your date,
 "Drawn at" on a page drawn once included. The console sends UTC (the same page
 for every reader), and the page's script turns it into local time, so with scripts off a page reads UTC. Some times
-stay UTC on purpose: the overview timeline's axis, its marks' tooltips (they say UTC) and the times on its pills, the
-hours under the Spend today card's dots (plain `HH:00`, under a chart of UTC hours), the live transcript's entry
+stay UTC on purpose: the hours under the Spend today card's dots (plain `HH:00`, under a chart of UTC hours), the live transcript's entry
 times (`HH:MM:SS UTC`, to the second), the hover tips on the Spend page's charts (they say "UTC"), the charts' day
 labels and daily buckets (UTC days, the budget's), and the budget split's short "at MM-DD HH:MM" notice, which uses
 the panel's words.

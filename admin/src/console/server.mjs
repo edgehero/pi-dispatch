@@ -1,4 +1,5 @@
 import { getTimeline } from "./history-api.mjs";
+import { TIMELINE_SCRIPT, TIMELINE_CSS } from "./timeline-assets.generated.mjs";
 /**
  * The console's HTTP server: the route table and the one dispatcher every request goes through (issue #640,
  * DES-OPERATOR-CONSOLE, REQ-CONSOLE-SECURITY).
@@ -1197,6 +1198,9 @@ export const ROUTES = Object.freeze([
     ctx.res.writeHead(200, { "content-type": "text/css; charset=utf-8" });
     ctx.res.end(CONSOLE_CSS);
   } },
+  ...[["js", TIMELINE_SCRIPT, "text/javascript"], ["css", TIMELINE_CSS, "text/css"]].map(([ext, body, mime]) => ({ method: "GET", path: "/static/timeline." + ext, auth: "none", write: false, anyHost: true, handler: (ctx) => {
+    ctx.res.writeHead(200, { "content-type": mime + "; charset=utf-8" }); ctx.res.end(body);
+  } })),
   // Issue #737: a browser asks for /favicon.ico when a page names no icon (no console page does), and the 404 it got
   // on a first visit was logged as an error in the browser's console. No content and no auth: the answer holds nothing,
   // and like every route it carries the security headers.

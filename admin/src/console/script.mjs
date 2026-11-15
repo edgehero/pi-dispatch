@@ -2590,6 +2590,7 @@ ${FIT_JS}
       if (!el || !el.hasAttribute("data-panel")) return;
       mark("on");
       unnote("retry");
+      if (msg.id === "p-timeline" && historyUi && historyUi.updateMarkup) { historyUi.updateMarkup(msg.html); return; }
       // Waits without the held note: inserting it would move the very thing being pressed.
       if (pressed && typeof el.contains === "function" && el.contains(pressed)) pending[el.id] = msg.html;
       else if (inUse(el)) hold(el, msg.html);
@@ -2775,7 +2776,27 @@ ${FIT_JS}
     es.addEventListener("open", function () { if (tstate && tstate.text === "reconnecting" && !tdone) tmark("live", "on"); });
     filterTranscript();
   }
-  var historyUi = page === "overview" ? (${historyBrowser.toString()})({ document: document, location: location, history: history, fetch: typeof fetch === "function" ? fetch : null, render: function (markup) { swapPanel(document.getElementById("p-timeline"), markup); }, zooms: ${JSON.stringify(TIMELINE_ZOOMS)}, time: (${timelineLocalTime.toString()}), localTimes: localTimes, personHeader: PERSON_HEADER, person: pagePerson, onAuth: function () { probe(); } }) : null;
+  var historyUi = null;
+  function legacyHistory() { return (${historyBrowser.toString()})({ document: document, location: location, history: history, fetch: typeof fetch === "function" ? fetch : null, render: function (markup) { swapPanel(document.getElementById("p-timeline"), markup); }, zooms: ${JSON.stringify(TIMELINE_ZOOMS)}, time: (${timelineLocalTime.toString()}), localTimes: localTimes, personHeader: PERSON_HEADER, person: pagePerson, onAuth: function () { probe(); } }); }
+  if (page === "overview") {
+    var timelinePanel = document.getElementById("p-timeline");
+    if (timelinePanel && timelinePanel.querySelector("[data-timeline-seed]") && typeof ResizeObserver === "function") {
+      var latestTimeline = null;
+      historyUi = { held: function () { return true; }, init: function () {}, updateMarkup: function (markup) { latestTimeline = markup; } };
+      var timelineCss = document.createElement("link"); timelineCss.rel = "stylesheet"; timelineCss.href = "/static/timeline.css";
+      var timelineJs = document.createElement("script"); timelineJs.src = "/static/timeline.js";
+      function timelineFallback() { var status = timelinePanel.querySelector("[data-history-status]"); if (status) status.textContent = "Interactive timeline could not load. The history controls below remain available."; historyUi = legacyHistory(); }
+      timelineCss.onerror = timelineFallback;
+      timelineCss.onload = function () {
+        timelineJs.onload = function () {
+          try { historyUi = window.piDispatchTimeline({ panel: timelinePanel, person: pagePerson, personHeader: PERSON_HEADER, onAuth: function () { probe(); } }); if (latestTimeline) historyUi.updateMarkup(latestTimeline); }
+          catch (e) { timelinePanel.classList.remove("timeline-enhanced"); timelinePanel.querySelector("[data-timeline-app]").hidden = true; timelinePanel.querySelector("[data-timeline-fallback]").hidden = false; timelineFallback(); }
+        };
+        timelineJs.onerror = timelineFallback; document.head.appendChild(timelineJs);
+      };
+      document.head.appendChild(timelineCss);
+    } else historyUi = legacyHistory();
+  }
 })();
 ${GATEWAY_CONSOLE_SCRIPT}
 `;

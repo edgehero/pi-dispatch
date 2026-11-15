@@ -69,6 +69,12 @@ export function makeHistoryReader({ logsDir, fs = fsPromises, now = () => Date.n
 		if (cursor !== null && (!c || JSON.stringify(c.query) !== JSON.stringify(q))) return { error: "cursor-expired" };
 		if (c?.busy) return { error: "cursor-busy" };
 		if (!c) {
+			// A browser abandoning ranges must not exhaust every directory handle until their idle TTL passes.
+			// Eviction is explicit to a returning reader (cursor-expired); a page in flight is never closed.
+			if (cursors.size + opening >= HISTORY_CURSORS_MAX) {
+				const idle = [...cursors.entries()].filter(([, value]) => !value.busy).sort((a, b) => a[1].at - b[1].at)[0];
+				if (idle) await drop(idle[0]);
+			}
 			if (cursors.size + opening >= HISTORY_CURSORS_MAX) return { error: "too-many-readers" };
 			let dir;
 			opening++;

@@ -128,7 +128,9 @@ import { checkTriggersBrowser } from "./console-triggers-browser.mjs";
 import { checkConfigBrowser } from "./console-config-browser.mjs";
 import { checkSpendBrowser } from "./console-spend-browser.mjs";
 import { checkZeroTouchBrowser } from "./console-zero-touch-browser.mjs";
+import { checkTimelineBrowser } from "./console-timeline-browser.mjs";
 import { frozenDateSource, openChrome } from "../../launch/chrome-pipe.mjs";
+import { TIMELINE_SCRIPT, TIMELINE_CSS } from "../../admin/src/console/timeline-assets.generated.mjs";
 import { findOnPath } from "../../launch/server-binary.mjs";
 
 const REPO = fileURLToPath(new URL("../../", import.meta.url));
@@ -581,7 +583,7 @@ export function noScriptRun(sweep) {
  * whose box ends past `width` in document order, each `{ tag, id, cls, inside, rect, up, text, font, scrollers }`:
  * `inside` the id of its nearest ancestor that has one, `up` the index of its nearest ancestor in the same list (or
  * -1), `text` whether it holds text of its own, `scrollers` its ancestors below `<body>` whose computed `overflow-x` is
- * auto or scroll, with their boxes.
+ * auto or scroll, or the mounted timeline pan viewport, with their boxes.
  *
  * An element is an offender unless one of its scrollers fits the viewport. The report names the ROOTS (offenders with
  * no offending ancestor: where a `min-width: 0` or a scroll box belongs), widest first, and `fontAt`, the first
@@ -591,7 +593,7 @@ export function widthVerdict({ scrollWidth, elements }, width = VIEWPORT.width, 
 	const fits = (r) => r.left >= -slack && r.right <= width + slack;
 	// `<body>` and `<html>` never excuse: their overflow propagates to the viewport, and a scrolling viewport is the
 	// failure itself. The page's collector stops below `<body>`; this repeats it so the rule holds on any input.
-	const excused = (e) => (e.scrollers ?? []).some((s) => (s.overflowX === "auto" || s.overflowX === "scroll") && s.tag !== "body" && s.tag !== "html" && fits(s.rect));
+	const excused = (e) => (e.scrollers ?? []).some((s) => (s.overflowX === "auto" || s.overflowX === "scroll" || s.pan === true) && s.tag !== "body" && s.tag !== "html" && fits(s.rect));
 	const past = elements.map((e) => e.rect.right > width + slack && !excused(e));
 	const offenders = elements.map((e, i) => ({ e, i })).filter(({ i }) => past[i]);
 	// Widest first, ties in document order: the widest root is the one that sets the page's width, so it leads.
@@ -1543,7 +1545,10 @@ export function measureSource(width, slack) {
 		const scrollers = [];
 		for (let a = el.parentElement; a && a !== document.body && a !== document.documentElement; a = a.parentElement) {
 			const ox = getComputedStyle(a).overflowX;
-			if (ox === "auto" || ox === "scroll") scrollers.push(Object.assign(name(a), { overflowX: ox, rect: box(a.getBoundingClientRect()) }));
+			// vis overscans axis cells and run bars inside this clipped, interactive viewport. The real-console
+			// timeline check proves its pointer, wheel and touch panning; generic hidden overflow stays an error.
+			const pan = a.matches("#p-timeline.timeline-enhanced [data-rt-chart] > .vis-timeline") && ox === "hidden";
+			if (ox === "auto" || ox === "scroll" || pan) scrollers.push(Object.assign(name(a), { overflowX: ox, pan, rect: box(a.getBoundingClientRect()) }));
 		}
 		let text = false;
 		for (const n of el.childNodes) if (n.nodeType === 3 && n.nodeValue.trim() !== "") { text = true; break; }
@@ -1907,6 +1912,13 @@ export async function checkPageLane({ chrome, docs, shellDocs: sweep = [], contr
 			res.writeHead(200, { "content-type": `${type}; charset=utf-8` }).end(body);
 		} else if (path === "/static/console.js") {
 			res.writeHead(200, { "content-type": "text/javascript; charset=utf-8" }).end(script);
+		} else if (path === "/static/timeline.js") {
+			res.writeHead(200, { "content-type": "text/javascript; charset=utf-8" }).end(TIMELINE_SCRIPT);
+		} else if (path === "/static/timeline.css") {
+			res.writeHead(200, { "content-type": "text/css; charset=utf-8" }).end(TIMELINE_CSS);
+		} else if (path === "/api/timeline") {
+			// The golden carries the sample history seed. Live archive behavior has its own browser check.
+			res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ items: [], next: null, partial: false, olderAt: null, unavailable: [] }));
 		} else if (path === "/api/events" || path === "/api/transcript") {
 			// Held open with nothing sent: the page shows its live state, and nothing it draws moves under the measure.
 			res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8" });
@@ -2315,7 +2327,10 @@ async function main(opts) {
 		return checkPages({ ...args, shots: opts.shots, sandbox: !ci, work, children, log: (line) => console.log(line), onOpen: (browser) => browsers.add(browser) });
 	};
 	try {
-		return await runCheck(opts, { find: () => findChrome(), modules, check, ci, log: (line) => console.log(line), started });
+		const code = await runCheck(opts, { find: () => findChrome(), modules, check, ci, log: (line) => console.log(line), started });
+		const chrome = findChrome()?.path;
+		if (code === 0 && chrome) console.log("Timeline interaction check: " + JSON.stringify(await checkTimelineBrowser({ chrome, sandbox: !ci })));
+		return code;
 	} finally {
 		if (deadline) clearTimeout(deadline);
 	}

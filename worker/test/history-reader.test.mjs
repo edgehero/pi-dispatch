@@ -72,6 +72,23 @@ test("a newer record is readable at its core, and metadata never carries free te
 	assert.equal(historyQuery({ start: -1, end: NOW }), null);
 });
 
+test("abandoned ranges evict only idle cursors and leave the archive browsable", async () => {
+	const dir = tempDir("history-abandoned-");
+	for (let n = 0; n < 101; n++) seed(dir, record("gh-" + n));
+	let at = NOW;
+	const reader = makeHistoryReader({ logsDir: dir, now: () => at });
+	try {
+		const first = await reader.page(query);
+		for (let n = 0; n < 40; n++) {
+			at++;
+			const page = await reader.page({ ...query, start: query.start - n });
+			assert.equal(page.error, undefined);
+			assert.equal(page.runs.length, 100);
+		}
+		assert.equal((await reader.page(query, first.next)).error, "cursor-expired");
+	} finally { await reader.close(); }
+});
+
 function bus() {
 	const clients = new Set();
 	const make = () => {
