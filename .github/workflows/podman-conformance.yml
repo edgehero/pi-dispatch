@@ -198,6 +198,18 @@ jobs:
           image="$(sed -n 's/^ *image: *\(ubuntu\/squid@sha256:[0-9a-f]\{64\}\) *$/\1/p' deploy/docker-compose.yml)"
           test -n "$image"
           as-pdjob podman network create pi-dispatch-egress-out
+          # Issue #918: a throwaway device on the proxy's upstream network (a TCP listener in the job image), declared as a
+          # private endpoint and rendered before the proxy starts, so the harness's canary proves the binding through this
+          # real squid: granted reached, the next port and a plain request refused, and refused again once the grant goes.
+          as-pdjob podman run -d --name pi-dispatch-conformance-device --network pi-dispatch-egress-out --entrypoint node \
+            "$PI_JOB_IMAGE" -e 'require("node:net").createServer((s) => s.end("device\n")).listen(2222)'
+          as-pdjob sh -c "printf '%s\n' '{ \"version\": 1, \"endpoints\": [ { \"id\": \"conformance-device\", \"host\": \"pi-dispatch-conformance-device\", \"port\": 2222, \"slots\": 1 } ] }' > /home/$PDJOB/deploy/private-endpoints.json"
+          as-pdjob node --input-type=module -e "
+            import { loadPrivateEndpoints, renderPrivateInclude } from '/home/$PDJOB/repo/worker/src/private-endpoints.mjs';
+            import { writeFileSync } from 'node:fs';
+            const declared = loadPrivateEndpoints({ privateEndpointsFile: '/home/$PDJOB/deploy/private-endpoints.json' }, { cwd: '/home/$PDJOB/deploy' });
+            writeFileSync('/home/$PDJOB/deploy/egress-private/private-endpoints.conf', renderPrivateInclude(declared), { mode: 0o644 });
+          "
           as-pdjob podman run -d --name pi-dispatch-egress-proxy --network pi-dispatch-egress-out \
             -v "/home/$PDJOB/repo/deploy/egress-proxy.conf:/etc/squid/squid.conf:ro,z" \
             -v "/home/$PDJOB/deploy/egress-allowlist.conf:/etc/pi-dispatch/allowlist.conf:ro,z" \
@@ -219,7 +231,7 @@ jobs:
       # network case (#450) SKIP with egress off, and a required check whose cases skip is blind. `as-pdjob` runs with
       # `env -i`, so only what this line passes reaches the script.
       - name: Run the conformance harness against the real podman bundle
-        run: as-pdjob env PI_JOB_IMAGE="$PI_JOB_IMAGE" PI_EGRESS=1 node .github/scripts/podman-conformance.mjs
+        run: as-pdjob env PI_JOB_IMAGE="$PI_JOB_IMAGE" PI_EGRESS=1 PI_CONFORMANCE_DEPLOYMENT="/home/$PDJOB/deploy" node .github/scripts/podman-conformance.mjs
 
       - name: "Sandbox SSH uses this account's rootless store and holds detach, attach and End (#771)"
         run: as-pdjob env PI_JOB_IMAGE="$PI_JOB_IMAGE" PI_EGRESS=1 PI_SANDBOX_SMOKE_VENUE=podman node .github/scripts/sandbox-ssh-smoke.mjs

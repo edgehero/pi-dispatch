@@ -80,6 +80,8 @@ const { runLiveProbes } = await load("worker/src/live-probes.mjs");
 const { cgroupParentFor, makeCpuReserve, readQuota, reservePlan, writeQuota } = await load("worker/src/cpu-reserve.mjs");
 const { computeHostBudget, hostBudgetSettings, readUserServiceLimits } = await load("worker/src/host-budget.mjs");
 const { jobSizeDefaults } = await load("worker/src/job-size.mjs");
+const { grantOnAttach, grantsDirOf, removeGrantsOf } = await load("worker/src/endpoint-grants.mjs");
+const { loadPrivateEndpoints } = await load("worker/src/private-endpoints.mjs");
 
 const refuse = (why) => {
 	console.error(`podman-conformance: ${why}`);
@@ -242,9 +244,27 @@ async function egressCanary() {
 	const state = await podman(["inspect", "--format={{.State.Status}}", proxy]);
 	const proxyRunning = state.code === 0 && state.stdout.trim() === "running";
 	if (!proxyRunning) return { results: [], proxyRunning };
-	const canary = await runEgressCanary({ run: liveRunVia(spawn, { bin: "podman" }), bin: "podman", proxy, image, pid: process.pid, user: decision.user, hostCpus: read.info?.hostCpus ?? null });
+	// Issue #918: the deployment folder the workflow made (`PI_CONFORMANCE_DEPLOYMENT`), whose private-endpoints.json
+	// declares a throwaway device on the proxy's upstream network: the canary grants itself every declared endpoint by the
+	// worker's own write and read back, and probes each four ways through this real squid (`runPrivateEndpointProbes`).
+	const deployment = process.env.PI_CONFORMANCE_DEPLOYMENT;
+	let privateEndpoints = [];
+	let privateUnread = null;
+	if (deployment) {
+		try {
+			privateEndpoints = loadPrivateEndpoints({ privateEndpointsFile: join(deployment, "private-endpoints.json") }, { cwd: deployment });
+		} catch (err) {
+			privateUnread = `private-endpoints.json in ${deployment} does not load: ${err?.message ?? err}`;
+		}
+		// Named by the workflow, so a device it declared that is not read is a FAILURE here, never a skip.
+		if (privateUnread === null && privateEndpoints.length === 0) privateUnread = `PI_CONFORMANCE_DEPLOYMENT names ${deployment}, whose private-endpoints.json declares no private endpoint`;
+	}
+	const dir = deployment ? grantsDirOf(deployment, "podman") : null;
+	const grants = dir ? { attach: ({ network, ids }) => grantOnAttach({ spawnFn: spawn, bin: "podman", proxy, network, dir, ids }), remove: ({ network }) => removeGrantsOf({ dir, network }) } : null;
+	const canary = await runEgressCanary({ run: liveRunVia(spawn, { bin: "podman" }), bin: "podman", proxy, image, pid: process.pid, user: decision.user, hostCpus: read.info?.hostCpus ?? null, privateEndpoints, grants });
 	for (const check of canary.checks) if (!check.ok) console.error(`podman-conformance: ${check.label}`);
-	return { results: canary.results, proxyRunning };
+	const privateChecks = canary.checks.filter((c) => /^podman: Private endpoint/.test(c.label));
+	return { results: canary.results, proxyRunning, privateDeclared: privateEndpoints.length, privateChecks, privateUnread };
 }
 
 /**
@@ -318,8 +338,18 @@ let parentRead = null;
 
 let ranAs = null;
 /** The harness's `readBack`: the live probes, run as `doctor --live` runs them on this venue, with the verdict ARRAY. */
+let privateCase = null;
 async function readBack() {
 	const canary = await egressCanary();
+	// Issue #918: the private endpoint binding through this real squid: every one of the canary's private lines must pass
+	// (granted reached, the next port, a plain request and the revoked grant refused), and a device declared but never
+	// probed fails too, so a required check never reads as passed on nothing.
+	if (canary.privateUnread) privateCase = { ok: false, detail: canary.privateUnread };
+	else if (canary.privateDeclared > 0) {
+		const bad = canary.privateChecks.filter((c) => c.ok !== true);
+		const probed = canary.privateChecks.filter((c) => c.ok === true).length;
+		privateCase = bad.length === 0 && probed >= 4 * canary.privateDeclared ? { ok: true, detail: `${canary.privateDeclared} declared, ${probed} probe line(s) passed: granted reached, the next port and a plain request refused, and refused again with the grant removed` } : { ok: false, detail: bad.length > 0 ? bad.map((c) => c.label).join("; ") : `only ${probed} of ${4 * canary.privateDeclared} probe lines came back` };
+	}
 	const jobsDir = nodeFs.mkdtempSync(join(scratch, "jobs-"));
 	const result = await runLiveProbes({
 		image,
@@ -536,6 +566,9 @@ const parentHeld = parentRead?.ok === true && parentRead.warn !== true;
 console.log(`  ${(reserveHeld && parentHeld ? "PASS" : "FAIL").padEnd(8)} cpu reserve: the worker's reserve ${reserveHeld ? `held ${budget.cpuCenti / 100} CPUs on pidispatch.slice` : `did not hold (${reserveState?.status ?? "not run"}, ${reserveState?.reason ?? "no reason"})`}; read back: ${parentRead?.detail ?? "not read"}`);
 if (!reserveHeld) failures.push(`cpu reserve: the quota was not held (${reserveState?.status ?? "not run"}, ${reserveState?.reason ?? "no reason"})`);
 if (!parentHeld) failures.push(`cpu reserve: ${parentRead?.detail ?? "the probe's cgroup parent was not read back"}`);
+// Issue #918. No declared device is a skip: the workflow declares one, so a skip there is itself worth reading.
+console.log(`  ${(privateCase === null ? "SKIP" : privateCase.ok ? "PASS" : "FAIL").padEnd(8)} private endpoint binding: ${privateCase?.detail ?? "no private endpoint is declared in PI_CONFORMANCE_DEPLOYMENT"}`);
+if (privateCase && !privateCase.ok) failures.push(`private endpoint binding: ${privateCase.detail}`);
 // Issue #458. Egress off is a skip, not a pass: there is then no teardown under a proxy to read.
 console.log(`  ${(!teardowns.ok ? "FAIL" : teardowns.ran ? "PASS" : "SKIP").padEnd(8)} egress after ${TEARDOWN_RUNS} job teardowns: ${teardowns.detail}`);
 if (!teardowns.ok) failures.push(`egress after ${TEARDOWN_RUNS} job teardowns: ${teardowns.detail}`);

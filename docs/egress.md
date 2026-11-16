@@ -363,10 +363,10 @@ nothing more about them.
 
 ## Private endpoints
 
-**Status (#918, parts 1 and 2 of 4):** you can declare private endpoints, render their rules and name them on a
-trigger, and the worker grants them to that trigger's jobs on the `local` and `podman` venues. A job on an OpenShell
-venue that names one is refused before it spends anything, until a later part of the same release; doctor's lines and
-the console's view come in the same release too.
+**Status (#918, parts 1 to 3 of 4):** you can declare private endpoints, render their rules and name them on a
+trigger, the worker grants them to that trigger's jobs on the `local` and `podman` venues, and doctor checks the
+binding through the running proxy. A job on an OpenShell venue that names one is refused before it spends anything in
+this release. The console's view comes in the same release.
 
 A private endpoint is one host and one TCP port on your own network, a test device's SSH on port 22 say, that only
 the jobs of the triggers naming it may reach. Like a model server, it is a `CONNECT` tunnel through the proxy to
@@ -463,12 +463,42 @@ takes turns and resets nothing: what one job leaves on the device, the next one 
 | Where the job runs | A job its trigger grants an endpoint |
 |---|---|
 | `local` (Docker) and `podman` | reaches it through the proxy, which enforces the grant; the run record says `privateEndpoints.basis: "proxy"` |
-| `openshell` and `openshell-bind` | is refused before it spends (`private-endpoint-venue-unsupported`) for now |
+| `openshell` and `openshell-bind` | is refused before it spends (`private-endpoint-venue-unsupported`) in this release: OpenShell's own policy has not been measured carrying such a rule yet |
 | a proxy started before #918, without the two folder mounts | is refused before it spends (`private-endpoint-proxy-outdated`): `pi-dispatch up` replaces the proxy |
 | any venue with `PI_EGRESS=0` | dials the device directly, as every job can, since no proxy stands in between; its environment is set as above, and the record says `basis: "unenforced"` |
 
 The run record names the endpoints a job was granted by id (never a host or a port), with that basis
 (`INT-RUN-HISTORY-FILE-CONTRACT`).
+
+### What doctor says
+
+`pi-dispatch doctor` reads the file and the triggers as the service does, and says, per endpoint:
+
+- which triggers are granted it, or that none is (⚠: no job reaches it);
+- a trigger this host serves naming an id this host does not declare: ✗, since its jobs are refused here; for a forge
+  trigger on a fleet it is ⚠, since its jobs wait on the shared queue for a host that declares it (a cron or local
+  trigger's jobs are queued on this host's own queue, and refused);
+- a trigger whose jobs run on a venue that cannot carry a grant (✗);
+- a forge or local event trigger granted one (⚠): an issue or a comment starts its jobs, so the agent there reads text
+  anyone who can post on that forge wrote, and can do on the device whatever its account allows;
+- the egress policy off (⚠): every job can reach every declared device;
+- a model endpoint whose name resolves to a private endpoint's address on the same port (⚠): one server, open to
+  every job through the model endpoint's rule.
+
+On the Docker venue, under rules that include the private file, it also reads the include the running proxy mounts
+against what the file renders, and asks the grant helper there, as squid's own user, a line no grant can match. Then its
+egress canary grants itself every declared endpoint, by the worker's own write and read back, and probes each one
+through the proxy (on the `podman` venue the canary runs under `doctor --live`):
+
+| Probe | Must get |
+|---|---|
+| a `CONNECT` to the declared host and port | 200; a 503 is ⚠, the proxy let it through and nothing answered |
+| a `CONNECT` to the next port nobody declared | the proxy's 403 |
+| a plain request to the declared port | the proxy's 403 `ERR_ACCESS_DENIED` |
+| the first `CONNECT` again, once the canary's grant is removed | the proxy's 403 |
+
+Under `doctor --live` the job-to-job isolation probe also tries the proxy at its address on the other job's network: a
+job that reached it could use that job's grant.
 
 ### What it does not cover
 

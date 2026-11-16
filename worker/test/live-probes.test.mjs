@@ -1613,3 +1613,24 @@ test("issue #596, phase 2: the reading container's cgroup parent is read back fr
 	assert.match(parentless.cgroupParent.detail, /without the pidispatch\.slice parent/);
 	assert.equal(bare.calls.some((a) => a.some((x) => String(x).startsWith("--cgroup-parent"))), false);
 });
+
+test("jobToJobIsolationVerdict: the proxy at its address on peer2's network is a target too, and reaching it fails (#918)", () => {
+	const peerTargets = ["pi-dispatch-live-peer2-1-n:47431", "10.99.0.3:47431"];
+	const crossTargets = ["10.99.0.2:3128", "[fd07::2]:3128"];
+	const base = { armed: true, proxyRunning: true, networksCreated: true, peersStarted: true, proxyTarget: "pi-dispatch-egress-proxy:3128", peerTargets, peerAddresses: ["10.99.0.3:47431"], crossTargets };
+	const answered = new Map([["10.99.0.3:47431", "reached"]]);
+	const fromPeer1 = (over = {}) => new Map([["pi-dispatch-egress-proxy:3128", "connected"], ["pi-dispatch-live-peer2-1-n:47431", "eai_again"], ["10.99.0.3:47431", "enetunreach"], ["10.99.0.2:3128", "enetunreach"], ["[fd07::2]:3128", "enetunreach"], ...Object.entries(over)]);
+	const held = jobToJobIsolationVerdict({ ...base, fromPeer1: fromPeer1(), controlBefore: answered, controlAfter: answered });
+	assert.equal(held.ok, true);
+	assert.match(held.detail, /nor the proxy at its address on peer2's network \(10\.99\.0\.2:3128 enetunreach, \[fd07::2\]:3128 enetunreach\)/);
+	const crossed = jobToJobIsolationVerdict({ ...base, fromPeer1: fromPeer1({ "10.99.0.2:3128": "connected" }), controlBefore: answered, controlAfter: answered });
+	assert.equal(crossed.ok, false);
+	assert.equal(crossed.cause, "proxy-cross");
+	assert.match(crossed.detail, /one job reached the proxy at its address on another job's network, at 10\.99\.0\.2:3128, so it could use that job's private endpoint grant/);
+	// Unanswered for a cross target: not read back, never a pass.
+	const partial = fromPeer1();
+	partial.delete("[fd07::2]:3128");
+	assert.equal(jobToJobIsolationVerdict({ ...base, fromPeer1: partial, controlBefore: answered, controlAfter: answered }).warn, true);
+	// No cross target read (the proxy's networks unread): the rest of the verdict stands as before.
+	assert.equal(jobToJobIsolationVerdict({ ...base, crossTargets: [], fromPeer1: fromPeer1(), controlBefore: answered, controlAfter: answered }).ok, true);
+});

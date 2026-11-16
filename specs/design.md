@@ -9103,7 +9103,9 @@ free local model, or using a few successful live probes as proof of every routin
 
 - **Status**: the declaration, the rendered rules, the shipped helper and the proxy's two folder mounts are LANDED
   (#918, part 1). The worker's grants, the trigger field that asks for them and the slots are LANDED (#918, part 2),
-  on the `local` and `podman` venues; the OpenShell venues refuse a granted job until part 3.
+  on the `local` and `podman` venues. Doctor's lines and probes are LANDED (#918, part 3). The OpenShell venues refuse a
+  granted job in this release: OpenShell (pinned 0.1.x) could not be measured on the host this was built on, and a
+  plain TCP rule with no credential binding is not shipped to the venue that holds a job's credentials unmeasured.
 - **Decision** (issue #918, `INT-PRIVATE-ENDPOINTS-FILE-CONTRACT`): a private endpoint, one host and one TCP port the
   operator declares in `private-endpoints.json`, is reachable through the egress proxy only by the jobs the worker
   grants it to. The proxy tells jobs apart by its OWN address on the network a request arrives on: every job has its
@@ -9180,7 +9182,20 @@ free local model, or using a few successful live probes as proof of every routin
   names a job only because a job cannot route to the proxy's address on another job's network. An `--internal`
   network has no default route, the daemon isolates bridges from one another, and a job runs with
   `--cap-drop=ALL` and `no-new-privileges`, so it can add no address or route and send no raw packet. Measured above
-  on Docker; part 3 adds the read back to doctor's live isolation probe on the host it runs on.
+  on Docker. `doctor --live`'s isolation probe reads it back on the host it runs on (#918, part 3): peer1 tries the
+  proxy at its address on peer2's network and must not connect (`proxy-cross` otherwise).
+- **Doctor and the lane** (part 3, `worker/src/private-endpoints-doctor.mjs`, `runPrivateEndpointProbes`):
+  - plain doctor names each endpoint and the triggers granted it; for the triggers this host serves, an id one names
+    that this host does not declare (✗, but ⚠ for a forge trigger on a fleet, whose jobs wait on the shared queue), a
+    venue that refuses a grant (read off the venue table), the blast radius of every trigger an issue or comment starts
+    (⚠); the policy off (⚠); a model endpoint that resolves to a private endpoint's address on its port (⚠); and on the
+    Docker venue the include the proxy mounts against the render and the helper's `ERR` as squid's user (whether squid
+    has reloaded it, only the probes show);
+  - the canary grants itself every declared endpoint by the worker's own write and read back, then per endpoint: a
+    granted CONNECT (200, or 503 when nothing answers), the next port (403), a plain request (403), and, once its grant
+    is removed, the granted CONNECT again (403). Its attach clears a stale grant in its subnet like every attach;
+  - the rootless Podman lane (`podman-conformance.yml`, a required check) declares a throwaway TCP listener on the
+    proxy's upstream network and requires all four probes to pass through the real squid.
 - **Rejected**:
   - per-job `squid -k reconfigure` with `src` ACLs: every job start would reload the proxy every running job uses, a
     second writer would share the include with `egress render`, and two workers would race on one file;
@@ -19038,3 +19053,4 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-11-16 (#912) | DES-OPERATOR-CONSOLE AMENDED for the restored Pulse timeline styling, short-label layout and library-managed future background. Reject unchanged tokens as a sufficient visual-preservation claim. Bounded history loading, text-only projection, CSP, dependency pins, DES-RUN-HISTORY-FLAT-FILES-NO-DB and DES-STORE-VERSION-WHEN-NEEDED are UNCHANGED, checked. |
 | 2026-11-16 (#922) | DES-MODEL-FAILOVER and the person-only console field contract AMENDED for random initial model selection, durable CAS choice, quota-safe replacement, exact continuation binding and unchanged-style person controls. UNCHANGED, checked: CONST-ISOLATION-CONTAINER-PER-JOB, CONST-BUDGET-BEFORE-TOKENS, CONST-RETRY-INFRA-ONLY and CONST-PI-VERSION-PINNED; no additional paid attempt, new provider library or dependency pin. Legacy fixed and ordered-fallback policies retain their behavior. |
 | 2026-11-16 (#918, part 2) | `DES-PROJECT-SECRET-BUNDLES` AMENDED: a bundle variable starting `PI_DISPATCH_ENDPOINT_` is reserved. `DES-PRIVATE-ENDPOINT-GRANTS` AMENDED: the grants, the trigger field and the slots are LANDED on `local` and `podman`, with the grant's life written down (the subnet clear at every attach as the guarantee, the write and helper read back before start, removal before the network, the boot sweep by live network names, the live recheck before every attempt) and the environment's reserved, non-secret prefix. `DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` AMENDED: still no per-trigger opt-out; a grant adds declared pairs for one job's network and removes no rule. `DES-FLEET-LEASES-FOR-SHARED-BOUNDS` AMENDED: a private endpoint's `slots` take both halves under `private:<id>`, in their own step after the model endpoints' and outside the failover branch, swept at boot with them. `DES-MCP-EGRESS-PREFLIGHT` UNCHANGED, checked: a private endpoint's port is never 80 or 443 and it is never a model endpoint, so a server there is refused as any undeclared host is. |
+| 2026-11-16 (#918, part 3) | `DES-PRIVATE-ENDPOINT-GRANTS` AMENDED: doctor's lines, the canary's four probes per endpoint on a granted canary network, the cross-address read in `--live`, and the rootless Podman lane's real-squid case are LANDED; the OpenShell venues keep refusing a granted job in this release, with the reason (not measured here; nothing unmeasured is shipped to the venue that holds the credentials). `DES-OPENSHELL-VENUE` UNCHANGED, checked: no rule is added to its policy. |

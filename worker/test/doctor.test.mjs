@@ -7023,8 +7023,9 @@ function livePeersOk({ reach = () => "enetunreach" } = {}) {
 			net2 = args.find((a) => a.startsWith("--network=")).slice("--network=".length);
 			return { code: 0, output: `${PEER2_ID}\n` };
 		},
-		"docker inspect --format={{json .NetworkSettings.Networks}}": () => ({ code: 0, output: JSON.stringify({ [net2]: { IPAddress: "10.99.0.3", DNSNames: ["pi-dispatch-live-peer2-1-n"] } }) }),
-		[`docker exec ${PEER1_ID} node --eval`]: (_cmd, args) => ({ code: 0, output: args.slice(6).map((t) => `${t} ${t.includes(":3128") ? "connected" : reach(t)}`).join("\n") }),
+		// The proxy's own networks (issue #918: its address on peer2's network, which peer1 must not reach), else peer2's.
+		"docker inspect --format={{json .NetworkSettings.Networks}}": (_cmd, args) => ({ code: 0, output: JSON.stringify(args.at(-1) === "pi-dispatch-egress-proxy" ? { [net2]: { IPAddress: "10.99.0.2", IPPrefixLen: 24 } } : { [net2]: { IPAddress: "10.99.0.3", DNSNames: ["pi-dispatch-live-peer2-1-n"] } }) }),
+		[`docker exec ${PEER1_ID} node --eval`]: (_cmd, args) => ({ code: 0, output: args.slice(6).map((t) => `${t} ${t.startsWith("pi-dispatch-egress-proxy:") ? "connected" : reach(t)}`).join("\n") }),
 		[`docker exec ${PEER2_ID} node --eval`]: (_cmd, args) => ({ code: 0, output: args.slice(6).map((t) => `${t} reached`).join("\n") }),
 		"docker rm -f": 0,
 	};
@@ -10768,7 +10769,7 @@ const dockerCanaryPinRun = async (scenario, t = null) => {
 const DOCKER_CANARY_PIN = {
 	green: {
 		code: 0,
-		total: 52, // issue #596, phase 2: +1, the probe's cgroup parent inspect
+		total: 53, // issue #596, phase 2: +1, the probe's cgroup parent inspect; issue #918: +1, the proxy's networks for the cross-address target
 		collection: [
 			"docker info",
 			"docker context inspect --format={{json .Name}}|{{json .Endpoints.docker.Host}}",
@@ -10839,7 +10840,7 @@ const DOCKER_CANARY_PIN = {
 			"✓ read back on local: ephemeral holds (two runs under one name each removed themselves (in 0 ms and 0 ms), and the second found nothing of the first)",
 			"✓ read back on local: mountSet holds (/job:ro, /workspace, /outbox, /session, /opt/pi-global:ro and nothing else, in docker inspect and in /proc/self/mountinfo)",
 			"✓ read back on local: egress holds (the provider was reached, an unlisted host was not, and plain HTTP off port 80 was refused)",
-			"✓ read back on local: jobToJobIsolation holds (peer1 reached the proxy and none of peer2's 3 name(s) and address(es) (pi-dispatch-live-peer2-7-n:47431 enetunreach, pi-dispatch-live-peer2-1-n:47431 enetunreach, 10.99.0.3:47431 enetunreach); peer2 answered itself before and after)",
+			"✓ read back on local: jobToJobIsolation holds (peer1 reached the proxy and none of peer2's 3 name(s) and address(es) (pi-dispatch-live-peer2-7-n:47431 enetunreach, pi-dispatch-live-peer2-1-n:47431 enetunreach, 10.99.0.3:47431 enetunreach), nor the proxy at its address on peer2's network (10.99.0.2:3128 enetunreach); peer2 answered itself before and after)",
 			"✓ read back on local: imagePinning holds (an absent image was refused without a pull)",
 			"✓ read back on local: nonRoot holds (Uid 1001 1001 1001 1001)",
 			"✓ read back on local: localFolders holds (every mount a job uses was used as the job user, and the files written inside /workspace, /outbox and /session were read back on the host, owned by this shell's uid 1001)",
@@ -10854,7 +10855,7 @@ const DOCKER_CANARY_PIN = {
 	},
 	stale: {
 		code: 0,
-		total: 50, // issue #596, phase 2: +1, the probe's cgroup parent inspect
+		total: 51, // issue #596, phase 2: +1, the probe's cgroup parent inspect; issue #918: +1, the proxy's networks for the cross-address target
 		collection: [
 			"docker info",
 			"docker context inspect --format={{json .Name}}|{{json .Endpoints.docker.Host}}",
@@ -10923,7 +10924,7 @@ const DOCKER_CANARY_PIN = {
 			"✓ read back on local: mountSet holds (/job:ro, /workspace, /outbox, /session, /opt/pi-global:ro and nothing else, in docker inspect and in /proc/self/mountinfo)",
 			"⚠ read back on local: egress not read back: the egress canary did not run all three probes (see the egress lines above)",
 			"    → this property was not read back, which is not the same as holding: see the reason, fix it if you can, and re-run `pi-dispatch doctor --live`",
-			"✓ read back on local: jobToJobIsolation holds (peer1 reached the proxy and none of peer2's 3 name(s) and address(es) (pi-dispatch-live-peer2-7-n:47431 enetunreach, pi-dispatch-live-peer2-1-n:47431 enetunreach, 10.99.0.3:47431 enetunreach); peer2 answered itself before and after)",
+			"✓ read back on local: jobToJobIsolation holds (peer1 reached the proxy and none of peer2's 3 name(s) and address(es) (pi-dispatch-live-peer2-7-n:47431 enetunreach, pi-dispatch-live-peer2-1-n:47431 enetunreach, 10.99.0.3:47431 enetunreach), nor the proxy at its address on peer2's network (10.99.0.2:3128 enetunreach); peer2 answered itself before and after)",
 			"✓ read back on local: imagePinning holds (an absent image was refused without a pull)",
 			"✓ read back on local: nonRoot holds (Uid 1001 1001 1001 1001)",
 			"✓ read back on local: localFolders holds (every mount a job uses was used as the job user, and the files written inside /workspace, /outbox and /session were read back on the host, owned by this shell's uid 1001)",
@@ -10938,7 +10939,7 @@ const DOCKER_CANARY_PIN = {
 	},
 	unfinished: {
 		code: 0,
-		total: 53, // issue #596, phase 2: +1, the probe's cgroup parent inspect
+		total: 54, // issue #596, phase 2: +1, the probe's cgroup parent inspect; issue #918: +1, the proxy's networks for the cross-address target
 		collection: [
 			"docker info",
 			"docker context inspect --format={{json .Name}}|{{json .Endpoints.docker.Host}}",
@@ -11012,7 +11013,7 @@ const DOCKER_CANARY_PIN = {
 			"✓ read back on local: mountSet holds (/job:ro, /workspace, /outbox, /session, /opt/pi-global:ro and nothing else, in docker inspect and in /proc/self/mountinfo)",
 			"⚠ read back on local: egress not read back: an egress probe did not run to an answer (see the egress lines above)",
 			"    → this property was not read back, which is not the same as holding: see the reason, fix it if you can, and re-run `pi-dispatch doctor --live`",
-			"✓ read back on local: jobToJobIsolation holds (peer1 reached the proxy and none of peer2's 3 name(s) and address(es) (pi-dispatch-live-peer2-7-n:47431 enetunreach, pi-dispatch-live-peer2-1-n:47431 enetunreach, 10.99.0.3:47431 enetunreach); peer2 answered itself before and after)",
+			"✓ read back on local: jobToJobIsolation holds (peer1 reached the proxy and none of peer2's 3 name(s) and address(es) (pi-dispatch-live-peer2-7-n:47431 enetunreach, pi-dispatch-live-peer2-1-n:47431 enetunreach, 10.99.0.3:47431 enetunreach), nor the proxy at its address on peer2's network (10.99.0.2:3128 enetunreach); peer2 answered itself before and after)",
 			"✓ read back on local: imagePinning holds (an absent image was refused without a pull)",
 			"✓ read back on local: nonRoot holds (Uid 1001 1001 1001 1001)",
 			"✓ read back on local: localFolders holds (every mount a job uses was used as the job user, and the files written inside /workspace, /outbox and /session were read back on the host, owned by this shell's uid 1001)",
@@ -11027,7 +11028,7 @@ const DOCKER_CANARY_PIN = {
 	},
 	hung: {
 		code: 0,
-		total: 53, // issue #596, phase 2: +1, the probe's cgroup parent inspect
+		total: 54, // issue #596, phase 2: +1, the probe's cgroup parent inspect; issue #918: +1, the proxy's networks for the cross-address target
 		// The kills the provider probe got: none before its 30 s bound, then ONE, with no signal named (so the
 		// default SIGTERM), which is `runCmdCapture`'s. The step runner would send SIGKILL.
 		killsBeforeBound: [],
@@ -11105,7 +11106,7 @@ const DOCKER_CANARY_PIN = {
 			"✓ read back on local: mountSet holds (/job:ro, /workspace, /outbox, /session, /opt/pi-global:ro and nothing else, in docker inspect and in /proc/self/mountinfo)",
 			"⚠ read back on local: egress not read back: an egress probe did not run to an answer (see the egress lines above)",
 			"    → this property was not read back, which is not the same as holding: see the reason, fix it if you can, and re-run `pi-dispatch doctor --live`",
-			"✓ read back on local: jobToJobIsolation holds (peer1 reached the proxy and none of peer2's 3 name(s) and address(es) (pi-dispatch-live-peer2-7-n:47431 enetunreach, pi-dispatch-live-peer2-1-n:47431 enetunreach, 10.99.0.3:47431 enetunreach); peer2 answered itself before and after)",
+			"✓ read back on local: jobToJobIsolation holds (peer1 reached the proxy and none of peer2's 3 name(s) and address(es) (pi-dispatch-live-peer2-7-n:47431 enetunreach, pi-dispatch-live-peer2-1-n:47431 enetunreach, 10.99.0.3:47431 enetunreach), nor the proxy at its address on peer2's network (10.99.0.2:3128 enetunreach); peer2 answered itself before and after)",
 			"✓ read back on local: imagePinning holds (an absent image was refused without a pull)",
 			"✓ read back on local: nonRoot holds (Uid 1001 1001 1001 1001)",
 			"✓ read back on local: localFolders holds (every mount a job uses was used as the job user, and the files written inside /workspace, /outbox and /session were read back on the host, owned by this shell's uid 1001)",
@@ -11120,7 +11121,7 @@ const DOCKER_CANARY_PIN = {
 	},
 	enoent: {
 		code: 0,
-		total: 53, // issue #596, phase 2: +1, the probe's cgroup parent inspect
+		total: 54, // issue #596, phase 2: +1, the probe's cgroup parent inspect; issue #918: +1, the proxy's networks for the cross-address target
 		// The kills the provider probe got: none before its 30 s bound, then ONE, with no signal named (so the
 		// A probe that never launched is never killed.
 		killsBeforeBound: null,
@@ -11198,7 +11199,7 @@ const DOCKER_CANARY_PIN = {
 			"✓ read back on local: mountSet holds (/job:ro, /workspace, /outbox, /session, /opt/pi-global:ro and nothing else, in docker inspect and in /proc/self/mountinfo)",
 			"⚠ read back on local: egress not read back: an egress probe did not run to an answer (see the egress lines above)",
 			"    → this property was not read back, which is not the same as holding: see the reason, fix it if you can, and re-run `pi-dispatch doctor --live`",
-			"✓ read back on local: jobToJobIsolation holds (peer1 reached the proxy and none of peer2's 3 name(s) and address(es) (pi-dispatch-live-peer2-7-n:47431 enetunreach, pi-dispatch-live-peer2-1-n:47431 enetunreach, 10.99.0.3:47431 enetunreach); peer2 answered itself before and after)",
+			"✓ read back on local: jobToJobIsolation holds (peer1 reached the proxy and none of peer2's 3 name(s) and address(es) (pi-dispatch-live-peer2-7-n:47431 enetunreach, pi-dispatch-live-peer2-1-n:47431 enetunreach, 10.99.0.3:47431 enetunreach), nor the proxy at its address on peer2's network (10.99.0.2:3128 enetunreach); peer2 answered itself before and after)",
 			"✓ read back on local: imagePinning holds (an absent image was refused without a pull)",
 			"✓ read back on local: nonRoot holds (Uid 1001 1001 1001 1001)",
 			"✓ read back on local: localFolders holds (every mount a job uses was used as the job user, and the files written inside /workspace, /outbox and /session were read back on the host, owned by this shell's uid 1001)",
@@ -12121,8 +12122,9 @@ test("no program doctor starts receives an environment derived from .env values 
 	// `opts.env` is runCmdCapture forwarding its caller's, which is one of the others.
 	// Issue #521: the probe's extended environment is gone (its token rides stdin), so the shell's own is the only form.
 	for (const e of envOptions) assert.match(e, /^(?:spawnEnv|opts\.env)$/, `a spawn environment built from something other than this shell's: ${e}`);
-	// The one stdin a child is handed: the probe's token, which comes from this shell (pinned just below).
-	assert.deepEqual([...code.matchAll(/\binput: ([^\n]*?) \}\);/g)].map((m) => m[1]), ["`${token}\\n`"]);
+	// The stdins a child is handed: the probe's token, which comes from this shell (pinned just below), and the grant
+	// helper's fixed question (issue #918), a literal that carries nothing from anywhere.
+	assert.deepEqual([...code.matchAll(/\binput: ([^\n]*?) \}\);/g)].map((m) => m[1]), ["`${token}\\n`", '"0.0.0.0 pi-dispatch-doctor-check\\n"']);
 	assert.equal(envOptions.filter((e) => e === "opts.env").length, 1, "one forwarder");
 	assert.doesNotMatch(code, /\bcliSpawn\b|\bspawnWith\b/, "no spawn wrapper that could add to it");
 	// The token that one stdin carries never comes from .env (the probe is skipped instead).
@@ -13762,4 +13764,64 @@ test("doctor describes an event command owner and bounded authority without prin
 	assert.match(text(), /1 command trigger/);
 	assert.doesNotMatch(text(), /private-reviewer/);
 	assert.doesNotMatch(text(), /Trigger flow/);
+});
+
+test("doctor: a declared private endpoint, the trigger granted it and its blast radius, read as the service reads them (#918)", async () => {
+	const dir = tempDir("pi-doctor-918-lines-");
+	writeFileSync(join(dir, "private-endpoints.json"), JSON.stringify({ version: 1, endpoints: [{ id: "bench-device", host: "10.0.5.20", port: 22, slots: 1 }] }));
+	const triggers = join(dir, "triggers.json");
+	writeFileSync(triggers, JSON.stringify({ version: 7, triggers: [{ on: { type: "label", any: ["hil"] }, run: { kind: "github", flow: "test-on-device", privateEndpoints: ["bench-device", "lab"] } }] }));
+	const seams = collectSeams(green, { cwd: dir, nodeVersion: "22.19.0", probeValkey: async () => true, lookupAddresses: async () => [] });
+	const said = (await collectChecks(imgEnv({ PI_TRIGGERS_FILE: triggers }), seams)).filter((c) => /[Pp]rivate endpoint|grants bench-device/.test(c.label));
+	assert.deepEqual(said.map((c) => [c.ok, c.warn === true, c.label]), [
+		[true, false, "Private endpoint bench-device (10.0.5.20:22, 1 job at a time) is granted to label trigger #0"],
+		[false, false, "label trigger #0 names private endpoint lab, which this host does not declare: its jobs are refused before they spend (private-endpoint-unknown)"],
+		[false, true, "label trigger #0 grants bench-device to jobs an event on github starts: their agent reads text anyone who can post there wrote, and can do on the device whatever its account there allows"],
+	]);
+	// With the policy off, every job reaches it, and that is said.
+	const off = await collectChecks(imgEnv({ PI_TRIGGERS_FILE: triggers, PI_EGRESS: "0" }), seams);
+	assert.ok(off.some((c) => c.warn && /^The egress policy is off \(PI_EGRESS=0\), so no proxy enforces private endpoints: every job can reach bench-device$/.test(c.label)));
+	// Nothing declared and nothing named: not a line.
+	const empty = tempDir("pi-doctor-918-none-");
+	assert.equal((await collectChecks(imgEnv(), collectSeams(green, { cwd: empty, nodeVersion: "22.19.0", probeValkey: async () => true }))).some((c) => /[Pp]rivate endpoint/.test(c.label)), false);
+});
+
+test("doctor: the private include inside the running proxy against the render, and the grant helper answering as squid's user (#918)", async () => {
+	const { renderPrivateInclude } = await import("../src/private-endpoints.mjs");
+	const BENCH = { id: "bench-device", host: "10.0.5.20", port: 22, slots: 1 };
+	const CAT = "docker exec pi-dispatch-egress-proxy cat /etc/pi-dispatch/private/private-endpoints.conf";
+	const HELPER = "docker exec -i --user proxy pi-dispatch-egress-proxy /etc/pi-dispatch/private/endpoint-grant";
+	const run918 = async ({ inside = { code: 0, output: renderPrivateInclude([BENCH]) }, helper = { code: 0, output: "ERR\n" }, declared = true } = {}) => {
+		const cwd = folder918(INCLUDE_918_RULES);
+		if (declared) writeFileSync(join(cwd, "private-endpoints.json"), JSON.stringify({ version: 1, endpoints: [BENCH] }));
+		const answer = proxyAnswer("healthy", "running", { cwd, include: join(cwd, "model-endpoints.conf"), privateDir: join(cwd, "egress-private"), grants: join(cwd, "egress-grants", "local") });
+		const c = capture();
+		await runDoctor(ghEnv({ PI_EGRESS: "1" }), { ...ghDeps(c.out, egressPlan({ [PROXY_KEY]: answer, [CAT]: inside, [HELPER]: helper, "gh auth status": { code: 0, output: ghStatusOutput } })), cwd, lookupAddresses: async () => [] });
+		return c.text();
+	};
+	const fine = await run918();
+	assert.match(fine, /✓ Private endpoints: the include the running proxy mounts matches private-endpoints\.json \(bench-device\); squid reads it at its last start or reload, which the canary's probes prove/);
+	assert.match(fine, /✓ Private endpoints: the grant helper answers inside pi-dispatch-egress-proxy as squid's own user/);
+	const stale = await run918({ inside: { code: 0, output: renderPrivateInclude([]) } });
+	assert.match(stale, /✗ Private endpoints: the include the running proxy mounts \(\/etc\/pi-dispatch\/private\/private-endpoints\.conf in pi-dispatch-egress-proxy\) does not match private-endpoints\.json \(bench-device\), so a reload would load other endpoints than the file declares\n {4}→ `pi-dispatch egress render` in the deployment folder, then `docker exec pi-dispatch-egress-proxy squid -k reconfigure`/);
+	assert.match(await run918({ inside: { code: 1, output: "" } }), /⚠ Private endpoints: the include inside the running proxy could not be read/);
+	const broken = await run918({ helper: { code: 126, output: "" } });
+	assert.match(broken, /✗ Private endpoints: the grant helper does not answer inside pi-dispatch-egress-proxy as squid's own user \(`docker exec -i --user proxy pi-dispatch-egress-proxy \/etc\/pi-dispatch\/private\/endpoint-grant` exited 126\)/);
+	assert.match(await run918({ helper: { code: 0, output: "OK\n" } }), /does not answer .*exited 0, answering "OK"/);
+	// Nothing declared: neither is asked.
+	const none = await run918({ declared: false });
+	assert.doesNotMatch(none, /Private endpoints: the (include|grant helper)/);
+});
+
+test("the canary sweep removes a dead run's private endpoint grant before its network, and a removal that throws stops nothing (#918)", async () => {
+	const net = "pi-dispatch-egress-doctor-4242";
+	const d = podmanCanaryDaemon({ nets: { [net]: [["pi-dispatch-egress-proxy", "running"]] } });
+	const removed = [];
+	const grants = { remove: ({ network }) => removed.push({ network, before: d.calls.filter((c) => c.startsWith("network rm")).length }) };
+	await sweepStaleCanaryNetworks({ run: d.run, pid: 1, isAlive: () => false, endpoint: { local: true }, bin: "podman", grants });
+	assert.deepEqual(removed, [{ network: net, before: 0 }], "the dead canary's grant, before its network went");
+	assert.ok(d.calls.includes(`network rm ${net}`));
+	const again = podmanCanaryDaemon({ nets: { [net]: [["pi-dispatch-egress-proxy", "running"]] } });
+	await sweepStaleCanaryNetworks({ run: again.run, pid: 1, isAlive: () => false, endpoint: { local: true }, bin: "podman", grants: { remove: () => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); } } });
+	assert.ok(again.calls.includes(`network rm ${net}`), "the network still goes: the next attach in its subnet clears the grant");
 });
