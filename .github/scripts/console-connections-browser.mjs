@@ -8,6 +8,7 @@ import { openChrome } from "../../launch/chrome-pipe.mjs";
 import { findChrome, chromeLaunchArgs, measureSource, widthVerdict, EDGE_SLACK } from "./console-width-check.mjs";
 import { startConnectionsBrowserFixture, CONNECTIONS_BROWSER_TOKENS, CONNECTIONS_SLICES } from "../../admin/test/helpers/connections-browser.mjs";
 import { SECURITY_HEADERS } from "../../admin/src/console/headers.mjs";
+import { RECEIVER_OUTCOMES } from "../../worker/src/receiver-status.mjs";
 
 /** Text geometry is separate from page overflow: a clipping card can keep the page narrow while hiding a name. */
 export function receiverIdentityProblems(evidence, { name, width }) {
@@ -302,7 +303,7 @@ export async function checkConnectionsBrowser({ chrome, slice, shots = null, san
         const observed = await evaluate(`(()=>{const table=document.querySelector(${JSON.stringify(table)}),details=table.closest('details'),facts=details.previousElementSibling;return{open:details.open,heading:facts.previousElementSibling.textContent,counts:[...table.tBodies[0].rows].map(row=>[row.cells[0].textContent.trim(),row.cells[1].textContent.trim()]),lastRefused:[...facts.querySelectorAll('.fact')].find(row=>row.querySelector('dt').textContent==='Last refused').querySelector('time').getAttribute('datetime'),emptyUnserved:[...document.querySelectorAll('table')].some(table=>/^mini1 (forgejo|azure) delivery outcomes$/.test(table.getAttribute('aria-label')??''))};})()`);
         assert.equal(observed.open, true);
         assert.match(observed.heading, /gitlab.*\(not served\)/);
-        assert.equal(observed.counts.length, 11);
+        assert.deepEqual(observed.counts.map(([outcome]) => outcome), RECEIVER_OUTCOMES);
         assert.ok(observed.counts.every(([, count]) => count === "0"));
         assert.equal(observed.lastRefused, new Date(fixture.agedRefusedAt).toISOString());
         assert.equal(observed.emptyUnserved, false);
