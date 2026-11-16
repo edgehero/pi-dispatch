@@ -82,6 +82,12 @@ test("local detail states debounce, authority and current/follow-up state, with 
   assert.match(runs, /3 matching events/);
   view.data.triggerDetail.localEvent.status.current.blocked = "queue-job-missing";
   assert.match(String(triggerRuns(view)), /Queue job missing; reconcile runtime before clearing signal state/);
+  const agentData = agentReadProjection(view.data);
+  assert.equal(agentData.triggerDetail.localEvent.status.current.phase, undefined);
+  assert.equal(agentData.triggerDetail.localEvent.status.current.blocked, undefined);
+  const agentRuns = String(triggerRuns({ ...view, role: "agent", data: agentData }));
+  assert.match(agentRuns, /not in an agent’s read, 3 matching events/);
+  assert.doesNotMatch(agentRuns, /Queue job missing|: ,|undefined/);
   view.data.triggerDetail.localEvent = { unreadable: true };
   assert.match(String(triggerRuns(view)), /Local command state is unavailable/);
 });

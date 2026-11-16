@@ -113,7 +113,7 @@ function tLocalEventState(v, d) {
   const state = d.localEvent.status;
   if (!state) return html`<p>No local command generation is pending or active.</p>`;
   return html`${facts([
-    ["Current generation", state.current ? html`${runLink(state.current.jobId)}: ${state.current.blocked === "queue-job-missing" ? "Queue job missing; reconcile runtime before clearing signal state" : state.current.cancelled ? "cancelled" : state.current.phase}, ${state.current.count} matching events; due ${timeHtml(state.current.dueAt)}` : "none"],
+    ["Current generation", state.current ? html`${runLink(state.current.jobId)}: ${isAgent(v) ? AGENT_UNREAD : state.current.blocked === "queue-job-missing" ? "Queue job missing; reconcile runtime before clearing signal state" : state.current.cancelled ? "cancelled" : state.current.phase}, ${state.current.count} matching events; due ${timeHtml(state.current.dueAt)}` : "none"],
     ["Pending follow-up", state.next ? html`${runLink(state.next.jobId)}: ${state.next.count} matching events; due ${timeHtml(state.next.dueAt)}` : "none"],
   ])}`;
 }

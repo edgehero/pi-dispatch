@@ -103,7 +103,8 @@ function fakeFetch(routes) {
 			if (!url.includes(route.path)) continue;
 			const n = counts.get(route.path) ?? 0;
 			counts.set(route.path, n + 1);
-			return route.replies[Math.min(n, route.replies.length - 1)];
+			const reply = route.replies[Math.min(n, route.replies.length - 1)];
+			return typeof reply === "function" ? reply({ url, headers: opts.headers ?? {} }) : reply;
 		}
 		throw new Error(`fakeFetch: unrouted ${url}`);
 	};
@@ -391,6 +392,120 @@ test("local signal admission failure holds the polling cursor and retries the sa
 	assert.deepEqual(attempts, ["poll-rv600", "poll-rv600"]);
 	assert.deepEqual(cursors, ["0", "0", "600"]);
 	assert.deepEqual(out.filter(line => line.event === "poll_repo_failed").map(line => line.reason), ["local-event-state-unavailable"]);
+});
+
+test("review validators wait for the whole sweep: a later App review admission failure cannot hide behind 304", async () => {
+	const trigger = { on: { type: "pull_request", forge: "github", id: "reviews", action: ["review_submitted"], reviewAuthors: ["review-app[bot]"] }, run: { kind: "local", folder: "/srv/automation", command: "sweep", worker: "runner-a" } };
+	const fsDeps = { fileExists: () => true, readFile: () => JSON.stringify({ version: TRIGGERS_FILE_VERSION, triggers: [trigger] }) };
+	const clock = { ms: NOW };
+	const redis = fakeRedis({ clock });
+	const pr10 = { ...PR9A, number: 10 };
+	const conditional = (tag, body) => ({ headers }) => headers["if-none-match"] === tag ? ghResponse(304) : ghResponse(200, body, { etag: tag });
+	const review = (id) => ({ ...RV600, id, user: { id: 5, login: "review-app[bot]" }, author_association: "NONE" });
+	const attempts = [];
+	const receipts = new Set();
+	const boundaries = [];
+	let fail = true;
+	await runPoller({
+		cycles: 4, clock, redis, fsDeps,
+		localEventStore: { async signal(input) {
+			attempts.push(input.deliveryId);
+			if (input.deliveryId === "poll-rv601" && fail) { fail = false; throw new Error("transient signal failure"); }
+			const coalesced = receipts.has(input.deliveryId);
+			receipts.add(input.deliveryId);
+			return { accepted: true, coalesced };
+		} },
+		nap: (ms) => {
+			boundaries.push({ cursor: redis.kv.get("poll:o/r:cursor:reviews"), tags: Object.fromEntries(redis.hashes.get("poll:o/r:etag:reviews") ?? []) });
+			return ms;
+		},
+		routes: [
+			{ path: "/repos/o/r/issues/events", replies: [ghResponse(200, [])] },
+			{ path: "/repos/o/r/issues/comments", replies: [ghResponse(200, [])] },
+			{ path: "/repos/o/r/pulls/9/reviews", replies: [ghResponse(200, [], { etag: "seed-9" }), conditional("new-9", [review(600)])] },
+			{ path: "/repos/o/r/pulls/10/reviews", replies: [ghResponse(200, [], { etag: "seed-10" }), conditional("new-10", [review(601)])] },
+			{ path: "/repos/o/r/pulls/9", replies: [ghResponse(200, PR9A)] },
+			{ path: "/repos/o/r/pulls/10", replies: [ghResponse(200, pr10)] },
+			{ path: "/repos/o/r/pulls?state=open", replies: [conditional("pulls", [PR9A, pr10])] },
+		],
+	});
+	assert.deepEqual(attempts, ["poll-rv600", "poll-rv601", "poll-rv600", "poll-rv601"]);
+	assert.deepEqual([...receipts], ["poll-rv600", "poll-rv601"]);
+	assert.deepEqual(boundaries, [
+		{ cursor: "0", tags: { 9: "seed-9", 10: "seed-10" } },
+		{ cursor: "0", tags: { 9: "seed-9", 10: "seed-10" } },
+		{ cursor: "601", tags: { 9: "new-9", 10: "new-10" } },
+		{ cursor: "601", tags: { 9: "new-9", 10: "new-10" } },
+	]);
+});
+
+test("review validators never precede the durable cursor, including an uncertain cursor write", async () => {
+	for (const committedBeforeFailure of [false, true]) {
+		const clock = { ms: NOW };
+		const redis = fakeRedis({ clock });
+		const set = redis.set.bind(redis);
+		let fail = true;
+		redis.set = async (key, value, ...args) => {
+			if (key === "poll:o/r:cursor:reviews" && value === "600" && fail) {
+				fail = false;
+				if (committedBeforeFailure) await set(key, value, ...args);
+				throw new Error("cursor write did not confirm");
+			}
+			return set(key, value, ...args);
+		};
+		const boundaries = [];
+		const { queued } = await runPoller({
+			cycles: 3, clock, redis,
+			nap: (ms) => { boundaries.push(redis.hashes.get("poll:o/r:etag:reviews")?.get("9")); return ms; },
+			routes: reviewRoutes({ pulls: [ghResponse(200, [PR9A])], reviews: [
+				ghResponse(200, [], { etag: "seed" }),
+				({ headers }) => headers["if-none-match"] === "new" ? ghResponse(304) : ghResponse(200, [RV600], { etag: "new" }),
+			] }),
+		});
+		assert.deepEqual(boundaries, ["seed", "seed", "new"], `cursor committed before failure: ${committedBeforeFailure}`);
+		assert.equal(redis.kv.get("poll:o/r:cursor:reviews"), "600");
+		assert.equal(queued.filter(job => job.trigger.deliveryId === "poll-rv600").length, committedBeforeFailure ? 1 : 2, "uncertain cursor can only repeat a delivery id, never skip its work");
+	}
+});
+
+test("event, comment and PR validators do not acknowledge failed local admission", async () => {
+	const cases = [
+		{ feed: "events", on: { type: "label", any: ["pi:fix"] }, initial: [EV100], fresh: [EV201], delivery: "poll-e201" },
+		{ feed: "comments", on: { type: "comment", phrase: "@pi" }, fresh: [C301], delivery: "poll-c301" },
+		{ feed: "pulls", on: { type: "pull_request", action: ["opened"] }, initial: [], fresh: [PR9A], delivery: `poll-pr9-${"a".repeat(7)}` },
+	];
+	for (const fixture of cases) {
+		const clock = { ms: NOW };
+		const redis = fakeRedis({ clock });
+		const trigger = { on: { ...fixture.on, forge: "github", id: "listener" }, run: { kind: "local", folder: "/srv/automation", command: "sweep", worker: "runner-a" } };
+		const fsDeps = { fileExists: () => true, readFile: () => JSON.stringify({ version: TRIGGERS_FILE_VERSION, triggers: [trigger] }) };
+		const attempts = [];
+		const boundaries = [];
+		const replies = (feed) => feed !== fixture.feed ? [ghResponse(200, [])] : [
+			...(fixture.initial ? [ghResponse(200, fixture.initial, { etag: "seed" })] : []),
+			({ headers }) => headers["if-none-match"] === "new" ? ghResponse(304) : ghResponse(200, fixture.fresh, { etag: "new" }),
+		];
+		await runPoller({
+			cycles: 3, clock, redis, fsDeps,
+			localEventStore: { async signal(input) {
+				attempts.push(input.deliveryId);
+				if (attempts.length === 1) throw new Error("transient admission failure");
+				return { accepted: true, coalesced: false };
+			} },
+			nap: (ms) => { boundaries.push(redis.kv.get(`poll:o/r:etag:${fixture.feed}`)); return ms; },
+			routes: [
+				{ path: "/issues/events?per_page=100&page=", replies: [ghResponse(200, [])] },
+				{ path: "/repos/o/r/issues/events", replies: replies("events") },
+				{ path: "/repos/o/r/issues/comments", replies: replies("comments") },
+				{ path: "/repos/o/r/issues/7", replies: [ghResponse(200, ISSUE7)] },
+				{ path: "/repos/o/r/pulls/9/reviews", replies: [ghResponse(200, [])] },
+				{ path: "/repos/o/r/pulls?state=open", replies: replies("pulls") },
+			],
+		});
+		assert.deepEqual(attempts, [fixture.delivery, fixture.delivery], fixture.feed);
+		const previous = fixture.initial ? "seed" : undefined;
+		assert.deepEqual(boundaries, [previous, previous, "new"], fixture.feed);
+	}
 });
 
 test("reviews arm WITHOUT replay: a review that predates the cursor never fires, the next one does", async () => {

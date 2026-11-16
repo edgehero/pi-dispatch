@@ -613,8 +613,10 @@ function isoSeconds(ms) {
  * A per-cycle GitHub API view: one token, one stats object, ETag discipline in one place.
  *
  * `get(path, etagKey, revalidate)`: when `etagKey` is set the stored validator is sent as
- * If-None-Match and the fresh one stored on 200; a 304 is counted and returned as `{ notModified }`.
- * `revalidate: false` (used while ARMING, i.e. no cursor yet) still STORES the response's ETag but
+ * If-None-Match and a 200 returns `commitEtag`, called only AFTER the feed's admissions and cursor are
+ * durable; a 304 is counted and returned as `{ notModified }`. Publishing the validator at fetch time
+ * would let a failed admission's next attempt get 304 forever, skipping work before its unchanged cursor.
+ * `revalidate: false` (used while ARMING, i.e. no cursor yet) still stages the response's ETag but
  * never sends one -- arming needs the body, and a stray stored validator answering 304 on an unarmed
  * endpoint would leave it unarmed forever.
  *
@@ -655,18 +657,17 @@ function makeApi(ctx, token, stats) {
 			if (!res.ok) {
 				throw new Error(`GET ${path} -> HTTP ${res.status}`);
 			}
-			if (etagKey) {
-				const tag = res.headers?.get?.("etag");
+			const tag = etagKey && res.headers?.get?.("etag");
+			const commitEtag = async () => {
 				if (tag && etagKey.field === undefined) {
 					await ctx.redis.set(etagKey, tag, "EX", CURSOR_TTL_SECONDS);
 				} else if (tag) {
-					// The hash carries no TTL of its own here; `touchRepo` expires it with the rest of the family.
 					await ctx.redis.hset(etagKey.key, etagKey.field, tag);
 					await ctx.redis.expire(etagKey.key, CURSOR_TTL_SECONDS);
 				}
-			}
+			};
 			stats.fetched += 1;
-			return { json: await res.json() };
+			return { json: await res.json(), commitEtag };
 		},
 	};
 }
@@ -718,6 +719,7 @@ async function pollLabelEvents(ctx, api, repo, stats) {
 		// approvals for a different moment (module header). An empty repo arms at 0.
 		const maxId = pageOne.reduce((m, e) => (typeof e?.id === "number" && e.id > m ? e.id : m), 0);
 		await setWithTtl(ctx, k.events, String(maxId));
+		await first.commitEtag();
 		ctx.out({ event: "poll_armed", repo, endpoint: "events", cursor: maxId });
 		return;
 	}
@@ -770,6 +772,7 @@ async function pollLabelEvents(ctx, api, repo, stats) {
 		// unarmed closes advance past here exactly like every unhandled event always has.
 		await setWithTtl(ctx, k.events, String(ev.id));
 	}
+	await first.commitEtag();
 }
 
 function lastId(events) {
@@ -875,6 +878,7 @@ async function pollComments(ctx, api, repo, stats) {
 		if (typeof c?.updated_at === "string" && c.updated_at > advanced) advanced = c.updated_at;
 	}
 	if (advanced !== cursor) await setWithTtl(ctx, k.comments, advanced);
+	await r.commitEtag();
 	// A backlog deeper than one page self-heals: the cursor advanced to this page's newest update, so
 	// the next cycle's `since` picks up the remainder -- no pagination loop to bound here.
 }
@@ -946,6 +950,7 @@ async function pollPulls(ctx, api, repo, stats) {
 		}
 		await ctx.redis.expire(k.prs, CURSOR_TTL_SECONDS);
 		await setWithTtl(ctx, k.prsArmed, isoSeconds(ctx.now()));
+		await first.commitEtag();
 		ctx.out({ event: "poll_armed", repo, endpoint: "pulls", open: open.length });
 		// Reviews arm on this cycle too. Returning without them would leave the reviews cursor unset for a
 		// whole extra cycle, and the first cycle that DID arm it would silently swallow every review
@@ -980,6 +985,7 @@ async function pollPulls(ctx, api, repo, stats) {
 			await ctx.redis.hset(k.prs, field, CLOSED_MARKER);
 		}
 	}
+	await first.commitEtag();
 
 	// Reviews ride the SAME open-PR list this function already paid for -- one /pulls response feeds both
 	// sources, which is the whole reason this call lives here rather than in its own pollRepo step.
@@ -1035,12 +1041,14 @@ async function pollReviews(ctx, api, repo, open, stats) {
 	const byNumber = new Map((open ?? []).filter((pr) => pr?.number != null).map((pr) => [pr.number, pr]));
 
 	let maxId = cursor;
+	const validators = [];
 	for (const number of bounded) {
 		const field = String(number);
 		// While ARMING, `revalidate: false` for the same reason every other source uses it: arming needs
 		// the body, and a stored validator answering 304 on an unarmed endpoint would strand it unarmed.
 		const res = await api.get(`/repos/${repo}/pulls/${number}/reviews?per_page=100`, { key: k.etagReviews, field }, armed);
 		if (res.notModified) continue;
+		validators.push(res.commitEtag);
 		const reviews = Array.isArray(res.json) ? res.json : [];
 
 		let pr = byNumber.get(number) ?? null;
@@ -1073,6 +1081,9 @@ async function pollReviews(ctx, api, repo, open, stats) {
 	} else if (maxId !== cursor) {
 		await setWithTtl(ctx, k.reviews, String(maxId));
 	}
+	// Review ids interleave across PRs. No validator may acknowledge the sweep before its shared cursor;
+	// a later PR's failure or a crash leaves all fetched endpoints available to retry from that cursor.
+	for (const commitEtag of validators) await commitEtag();
 }
 
 /**

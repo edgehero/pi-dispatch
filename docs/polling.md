@@ -93,18 +93,34 @@ scheduler and has nothing to do with ingest, so it is not here.
 | `GET /repos/{o}/{r}/issues/events` | `label`, and the close action of `pull_request` and `issue` | `labeled` entries cover issues and pull requests alike, because a PR is an issue here. A PR label fetches the PR once so the synthesized payload carries the same author association, labels, head and base a real delivery would. `closed` entries carry the closer as `actor`, and a merged PR emits `closed` too, which is what lets a close trigger release post merge work. The close half is read only when a close rule is armed, so an unarmed deployment's cycle is byte identical to one before close triggers existed |
 | `GET /repos/{o}/{r}/issues/comments?since=` | `comment` | PR conversation comments are issue comments, so one endpoint covers both, as one webhook event does. The comment object lacks the issue fields the subset needs, so each new comment fetches its issue once |
 | `GET /repos/{o}/{r}/pulls?state=open` | `pull_request`, actions `opened` `synchronize` `reopened` | diffed against a per PR head sha snapshot: an unknown number is `opened`, a known number with a new sha is `synchronize`, a number that left the open list and came back is `reopened` |
-| `GET /repos/{o}/{r}/pulls/{n}/reviews` | `pull_request`, action `review_submitted` | per open PR, cursor is the last processed review id. Only open PRs are swept to bound the work, at most 50 per cycle, with a `poll_reviews_gap` line when a repository has more open than that |
+| `GET /repos/{o}/{r}/pulls/{n}/reviews` | `pull_request`, action `review_submitted` | per open PR, cursor is the last processed review id. At most 50 open PRs per cycle, with a `poll_reviews_gap` line when a repository has more; only the first 100 reviews returned for each PR are read, without pagination or a per-PR truncation warning |
 
 These feeds also wake [local event commands](triggers.md#a-forge-event-running-a-local-command). The poller applies
 the same source gates and per-listener App review allowlist as the webhook receiver, then durably signals the local
 trigger's coalescer. It passes the reviewed trigger and a stable delivery identity, never event text. A failed signal
 holds the feed's cursor so the next cycle tries the same identity again. `poll_cycle.localAccepted` counts accepted
 local signals separately from ordinary jobs enqueued; repeated signals may coalesce into one local run.
+Response ETags are saved only after that feed's admissions and cursor or PR snapshot are durable. Review ETags
+wait for the entire sweep and its shared cursor. A failed admission therefore cannot be hidden by a subsequent
+304 response; a crash between cursor and ETag writes may refetch data already handled, whose identities remain
+deduplicated.
 
 The polling limitations still apply: review sweeps cover open PRs, and a close and reopen between cycles can be missed.
 A local command can also listen to the close feed to reconcile after a PR closes. With `GITHUB_INGEST=both`, a webhook
 GUID and the poller's synthetic id are different deliveries. They coalesce within the configured quiet interval,
 but can produce separate runs outside it; this is not an exactly-once guarantee across the two transports.
+
+Two inherited limits matter for local reconciliation commands:
+
+- Only the first page of up to 100 reviews per open PR is read. Reviews outside that page can be missed even
+  while polling reports success. Webhook review deliveries avoid this polling page limit.
+- A synthesized PR event uses `poll-pr<number>-<headSha7>`, without repository or action. Reopening with the same
+  head, or events in different repositories with the same PR number and seven-character head prefix, can reuse
+  an earlier matching event's id and be suppressed while that id is retained. Local receipts use that supplied
+  identity per trigger; they cannot distinguish these events. Webhooks supply distinct delivery GUIDs instead.
+
+A paired cron trigger can call the same local command on the same worker and folder to reconcile current source
+state periodically, even when polling supplies no new signal. The shared folder mutex still prevents overlap.
 
 ## How it works
 
@@ -140,8 +156,8 @@ toward its age.
 
 **Dedup without a delivery id.** Polling has no `X-GitHub-Delivery`, so each source mints a
 deterministic stand in that survives a retried cycle: `poll-e<eventId>`, `poll-c<commentId>`,
-`poll-pr<number>-<headSha7>` and `poll-rv<reviewId>`. The PR id is keyed on the sha so a retried cycle
-cannot enqueue twice while a real new push still mints a new id.
+`poll-pr<number>-<headSha7>` and `poll-rv<reviewId>`. The PR id is keyed on the first seven head-SHA characters,
+so a retried cycle reuses its id and a different prefix mints a new one, subject to the collision limits above.
 
 **Politeness.** Per endpoint, per repository ETags make the idle steady state nearly free, because 304
 responses do not count against the rate limit. GitHub's own `x-poll-interval` header is honored as a
