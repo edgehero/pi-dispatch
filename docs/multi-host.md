@@ -3,7 +3,7 @@
 Two Mac minis, one queue, one budget, one panel. Sandboxes run on whichever host has capacity, and the
 work that can only happen on one machine goes to that machine.
 
-This is a deployment shape, not a feature you switch on per trigger. Most of it is already true: the
+This is a deployment shape. Local triggers can additionally select their worker with `run.worker`. Most of the
 queue, the spend caps and the kill switch have been shared since the beginning. What this page is about
 is the parts that quietly assumed one host, and what each of them now does instead.
 
@@ -148,15 +148,37 @@ whoever enqueues it. Everything else stays on the shared queue and any host can 
 
 | Work | Goes to | Because |
 |---|---|---|
-| A cron trigger's job | the host whose filesystem has its `run.folder` | the folder is on one machine |
+| A cron trigger's job | its named `run.worker`, or otherwise the host whose filesystem has its `run.folder` | an explicit destination takes precedence over folder-based placement |
+| A forge event's local command | the named `run.worker` | the receiver cannot judge another machine's local folder |
 | A chained child | the host that ran its parent | it continues that working tree |
 | `pi-dispatch run <folder>` | the host you ran the command on | it checked that folder against its own disk |
-| `pi-dispatch run --trigger <id>` | the host you ran the command on, which must have the trigger's `run.folder` | the same placement as the trigger's schedule |
+| `pi-dispatch run --trigger <id>` | the host you ran the command on, which must own a named `run.worker` and have the trigger's `run.folder` | a different named owner is refused; this command does not dispatch remotely |
 | `/dispatch run` from the panel | the host the panel is running beside | its `PI_DISPATCH_RUN_ROOTS` resolved the folder |
-| A forge delivery | the shared queue | its workspace is a fresh clone, so any host can build it |
+| A forge delivery producing a forge job | the shared queue | its workspace is a fresh clone, so any host can build it |
 | A forge delivery binding a secret or wait profile | a host that declares that profile | the resolver or check script is on one machine's disk |
 
 For both `pi-dispatch run` forms, which host queue is "this host's" follows the deployment: `PI_WORKER_NAME` comes from your shell, or else from the deployment `.env` in the folder you run the command from. The command refuses when the shell and the `.env` disagree, or when the `.env` cannot be read and the shell does not set it.
+
+### A local command woken by forge events
+
+An event-started local command requires `run.worker`, matching its worker's `PI_WORKER_NAME`. The receiver stores a
+durable signal for that destination, and the named worker publishes it to its queue. This route never falls back
+to the shared queue or to a worker whose similarly spelled folder happens to exist. An unavailable destination leaves
+work pending. Keep the reviewed trigger definition on that worker too; it revalidates the definition before execution.
+
+When a cron trigger and an event trigger share the command and folder, set the same `run.worker` on both. The
+worker's folder mutex prevents overlap, including different spellings that resolve to the same folder. Coalescing
+remains per event trigger, so separate triggers can produce sequential runs. Existing cron entries that omit
+`run.worker` retain folder-based placement and the fleet's existing conflict checks.
+
+After every attempted local container, the worker checks the container runtime before releasing the folder. A
+runtime command exiting does not prove that its container stopped. If that check fails or cannot confirm the
+container is gone, the worker logs `local_workspace_exit_unconfirmed` and keeps the folder blocked, including its
+aliases. A failed stop or a lingering sandbox keeps the same block. The runtime must positively confirm that the
+container is gone before another local job can use the folder, even when memory and CPU budgets are off.
+
+Use one worker process per container daemon as before. Identical absolute paths on separate machines do not prove
+shared storage, and this feature does not discover that two remote mount paths refer to the same files.
 
 ### A forge delivery that needs one particular machine
 
@@ -272,7 +294,8 @@ gets it. And a job that fits several busy machines keeps room on each of them wh
 one; that room is given back within a minute of it starting elsewhere.
 
 **A container that would not stop keeps its room** until the runtime says it is gone (or lists it as exited), so a
-job past its time limit whose stop failed cannot make room for another while it may still be running. When the worker
+job past its time limit whose stop failed cannot make room for another while it may still be running. A local job
+whose runtime exited without confirming the container is gone keeps its room and folder guard too. When the worker
 starts, it removes every job container it can and then counts any that are still there at the size on their labels
 until they are gone. If it cannot list them (the container runtime does not answer), it starts no job until it can,
 and `pi-dispatch doctor` says so.

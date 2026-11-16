@@ -1929,3 +1929,31 @@ What to do: Use only reviewed subscription-bound routes for this job, or use a s
 Stopped before starting: the staged packages contain competing reviewed Claude subscription adapters. No container was started and nothing was spent.
 
 What to do: Keep exactly one reviewed Claude adapter in pi-packages.json, restage with `pi-dispatch import-pi --with-packages`, and check the selected connection's root and digest before retrying.
+
+### local-event-invalid
+
+The queued command metadata does not match its reviewed trigger. Check that the receiver and worker run the same release. Nothing was spent.
+
+### local-event-unavailable
+
+This worker has no local event admission service. Upgrade and restart the named worker. Nothing was spent.
+
+### local-event-wrong-worker
+
+The local job belongs to another named worker. Route it to the trigger's `run.worker`. Nothing was spent.
+
+### local-event-trigger-changed
+
+The reviewed trigger was removed or changed while the command waited. A new matching event uses the current definition. Nothing was spent.
+
+### local-event-config-invalid
+
+The triggers file is invalid. Repair it before sending another matching event. Nothing was spent.
+
+### local-event-superseded
+
+This queued generation no longer owns its trigger signal. Inspect the current generation on the trigger page. Nothing was spent.
+
+### local-folder-changed
+
+The local folder changed identity between admission and preparation. Check its links and send a new event. Nothing was spent.

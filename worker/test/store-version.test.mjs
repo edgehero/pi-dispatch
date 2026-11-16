@@ -95,18 +95,19 @@ test("valueTableProblems holds a value table to the rule: frozen, known fields, 
 });
 
 // Every `data.<key>` and `job.<key>` any worker module reads: a lenient superset of the job data fields (comments add
-// names), which is enough to refuse a table row naming a field nothing reads.
+// names), which is enough to refuse a table row naming a field nothing reads. A lookahead also sees data.worker
+// inside job.data.worker: consuming job.data would otherwise hide that nested access.
 const jobDataFields = () => {
 	const fields = new Set();
 	for (const name of readdirSync(new URL("../src/", import.meta.url))) {
 		if (!name.endsWith(".mjs")) continue;
-		for (const m of readFileSync(new URL(`../src/${name}`, import.meta.url), "utf8").matchAll(/\b(?:data|job)\??\.(\w+)/g)) fields.add(m[1]);
+		for (const m of readFileSync(new URL(`../src/${name}`, import.meta.url), "utf8").matchAll(/\b(?=(?:data|job)\??\.(\w+))/g)) fields.add(m[1]);
 	}
 	return [...fields];
 };
 
 test("the job data tables hold the rule", () => {
-	assert.equal(JOB_DATA_VERSION, 5, "issue #908: merge permission and reviewed policy at 5");
+	assert.equal(JOB_DATA_VERSION, 6, "issue #911: local event authority and named worker at 6");
 	assert.equal(JOB_DATA_VERSION_FIELD, "dataVersion");
 	const known = jobDataFields();
 	assert.ok(known.includes("waitFor") && known.includes("models"), "the job data fields were found");

@@ -34,6 +34,7 @@ import { newerFileFix } from "../src/doctor.mjs";
 import { egressRefusalFor } from "../src/egress-allowlist.mjs";
 import { envelopeDigest, parseEnvelope } from "../src/envelope.mjs";
 import { parseScopedLimits } from "../src/scoped-limits.mjs";
+import { TRIGGERS_FILE_VERSION } from "../src/triggers.mjs";
 import { quotedShown } from "../src/backend-local.mjs";
 
 // env-allowlist imports @earendil-works/pi-ai, which needs node >=22.19.0 and installed deps. doctor.mjs
@@ -9993,7 +9994,7 @@ test("doctor places a cron trigger by the worker's own predicate, not a copy (#4
 	const schedulesSource = readFileSync(new URL("../src/schedules.mjs", import.meta.url), "utf8");
 	// The worker's predicate, imported from the worker's module (issue #504 part B imports envelopeJobPaths beside it).
 	assert.match(doctorSource, /^import \{ cronPlacement(, envelopeJobPaths)? \} from "\.\/schedules\.mjs";$/m);
-	assert.match(schedulesSource, /const placement = cronPlacement\(run, \{ existsSync, fleet \}\);/, "the worker's loader places by the same function");
+	assert.match(schedulesSource, /const placement = cronPlacement\(run, \{ existsSync, fleet, workerName \}\);/, "the worker's loader places by the same function, including an explicit owner");
 	assert.doesNotMatch(doctorSource, /existsSync\(run\.folder\)|fileExists\(t\.run\.folder\)/, "and doctor keeps no folder rule of its own");
 });
 
@@ -13646,4 +13647,19 @@ test("doctor: an untrusted .env's envelope is still judged against that file's p
 	const d = serviceDeployment(["PI_PROJECTS_FILE=projects.json", "PI_ENVELOPE_FILE=envelope.json"], { files });
 	const checks = await collectChecks(imgEnv({ PI_MAX_COST_USD: "2", PI_SETTINGS_FILE: noOverlay() }), d.seams({ envUntrusted: true }));
 	assert.ok(checks.some((c) => c.ok && /^PI_ENVELOPE_FILE is set in .*\.env .* and loads/.test(c.label)), "no false refusal beside the untrusted ✗");
+});
+
+
+test("doctor describes an event command owner and bounded authority without printing the admitted login", async () => {
+	const path = join(tempDir("pi-local-event-doctor-"), "triggers.json");
+	writeFileSync(path, JSON.stringify({ version: TRIGGERS_FILE_VERSION, triggers: [{
+		on: { type: "pull_request", forge: "github", id: "maintenance", action: ["review_submitted"], reviewAuthors: ["private-reviewer[bot]"] },
+		run: { kind: "local", worker: "build1", folder: "/srv/maintenance", command: "maintain-prs" },
+	}] }));
+	const { out, text } = capture();
+	await runDoctor(imgEnv({ PI_TRIGGERS_FILE: path, PI_WORKER_NAME: "build1" }), imgDeps(out, green));
+	assert.match(text(), /Local event command maintenance: github events wake worker build1, after 10s quiet; at most one pending follow-up; event text is not passed to the command; 1 exact review-author login/);
+	assert.match(text(), /1 command trigger/);
+	assert.doesNotMatch(text(), /private-reviewer/);
+	assert.doesNotMatch(text(), /Trigger flow/);
 });

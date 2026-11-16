@@ -1,7 +1,7 @@
 {
   "card": "TriggersScreen",
   "pr": 750,
-  "words": "cd92a834c210b4d745de82b94e0b4f01088bf3ad009ac63571e42fcbae968bb7",
+  "words": "b1b522aec7536ffb7079ad5761c11d01e29e23c133b3a731763e7f288563cdee",
   "elements": [
     {"el":"p-tr-tabs","kind":"panel","status":"new","source":"admin/src/console/panels/triggers.mjs#triggersNavigation","golden":["triggers.operator"],"shows":"Rules","reason":"the Rules and Watch tabs, a panel the console keeps so the page's swap covers them"},
     {"el":"p-tr-viewer","kind":"panel","status":"new","source":"admin/src/console/panels/triggers.mjs#triggersViewer","golden":["triggers.viewer"],"shows":"Viewer.","reason":"the note a viewer reads about what stays hidden, a panel the console adds"},
@@ -50,6 +50,7 @@
     {"el":"Per-rule selectors, scope, flow/model/venue, chip options, one-shot state, history, next fires and pause windows","kind":"provides","status":"new","source":"admin/src/trigger-list.mjs#triggerListOf","golden":["triggers.operator"],"shows":"rules"},
     {"el":"Add a trigger opens the existing editor from the title bar","kind":"readme","status":"new","source":"admin/src/console/pages.mjs#renderPage","golden":["triggers.operator"],"shows":"Add a trigger"},
     {"el":"Filter pills with glyphs","kind":"readme","status":"illustrative","reason":"the page's pills carry words and counts"},
-    {"el":"Schedule rows headed by a sentence","kind":"readme","status":"illustrative","reason":"the page shows the cron pattern with its next fires"}
+    {"el":"Schedule rows headed by a sentence","kind":"readme","status":"illustrative","reason":"the page shows the cron pattern with its next fires"},
+    {"el":"Local command listeners match independently and a hypothetical reviewer login checks explicit authority","kind":"readme","status":"new","source":"admin/src/trigger-check.mjs#checkTriggerEvent","reason":"Issue #911 uses the same pure receiver listener verdicts, with no delivery, queue or command execution.","golden":["panels/trigger-check-match.viewer"],"shows":["Reviewer login (optional)"]}
   ]
 }

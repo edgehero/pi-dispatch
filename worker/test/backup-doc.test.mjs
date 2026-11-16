@@ -207,6 +207,7 @@ const KEY_FAMILIES = new Map([
 	["updates:*", [["worker/src/updates.mjs", '"updates:hosts"']]],
 	["poll:*", [["receiver/src/poller.mjs", "`poll:"]]],
 	["steer:steered:*", [["receiver/src/steer.mjs", "`steer:steered:"]]],
+	["local:event:*", [["worker/src/local-event-store.mjs", '"local:event:state:"'], ["worker/src/local-event-store.mjs", '"local:event:receipt:"'], ["worker/src/local-event-store.mjs", '"local:event:index"']]],
 	["trigger-fire:*", [["admin/src/trigger-fire.mjs", "`trigger-fire:"]]],
 	["pi-dispatch:owner", [["worker/src/valkey-auth.mjs", '"pi-dispatch:owner"']]],
 	["pi-dispatch:sched-stalls", [["worker/src/scheduler-stall-guard.mjs", '"pi-dispatch:sched-stalls"']]],

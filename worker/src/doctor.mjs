@@ -117,7 +117,7 @@ import { mergeSecretProfiles, parseSecretProfiles, servableSecretProfiles } from
 // can share them: doctor NAMES a variable and env-allowlist WRITES one, and they must never differ.
 import { apiKeyVariable, nonApiKeyKind } from "./provider-key.mjs";
 import { WORKER_NAME_RE } from "./worker-name.mjs";
-import { parseTriggersDocument, triggersFileVersionFor } from "./triggers.mjs";
+import { parseTriggersDocument, sourceForgeOf, triggersFileVersionFor } from "./triggers.mjs";
 import { jobDataVersionFor } from "./job-data-version.mjs";
 import { secretBundleChecks } from "./doctor-bundles.mjs";
 import { doctorModelProposalChecks } from "./doctor-model-proposals.mjs";
@@ -2026,7 +2026,7 @@ export async function collectChecks(shellVars, seams) {
 	// runTable, blockTable }, jobData: { table } }`, each part the store module's own when absent. This seam is how a test
 	// drives a need above 1 through the real collection, for a store whose table has no row of its own and at a version no row holds yet.
 	const versionTables = seams.versionTables ?? {};
-	const { watchSources: triggerWatchSources, watchRules: triggerWatchRules, modelRoles: triggerModelRoles, secretBundles: triggerBundles, requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, recovering, replicating, instructing, commands, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, excludedNames, costCaps, modelRuns, triggersVersionNeed, jobDataVersionNeed, parseError, parseNewer: triggersFileIsNewer, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTables);
+	const { watchSources: triggerWatchSources, watchRules: triggerWatchRules, modelRoles: triggerModelRoles, secretBundles: triggerBundles, requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, recovering, replicating, instructing, commands, localEvents, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, excludedNames, costCaps, modelRuns, triggersVersionNeed, jobDataVersionNeed, parseError, parseNewer: triggersFileIsNewer, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTables);
 	const modelRoleProjects = readProjectFacts(bootEnv, fileExists).projects;
 	const scopedLimitFacts = readScopedLimitFacts(bootEnv, fileExists);
 	const pauseWindowFacts = readPauseWindowFacts(bootEnv, fileExists, versionTables.pauseWindows);
@@ -2276,6 +2276,9 @@ export async function collectChecks(shellVars, seams) {
 	// command triggers adds no line at all, so its output is byte-identical.
 	if (commands > 0) {
 		checks.push({ ok: true, label: `${commands} command trigger(s): a command is only verifiable in-container -- the runner refuses an unregistered one before the prompt is sent (command-unregistered)` });
+	}
+	for (const event of localEvents) {
+		checks.push({ ok: true, label: `Local event command ${event.id}: ${event.forge} events wake worker ${event.worker}, after ${event.debounceSeconds}s quiet; at most one pending follow-up; event text is not passed to the command${event.reviewAuthors ? `; ${event.reviewAuthors} exact review-author login(s) are explicitly admitted` : ""}` });
 	}
 
 	section("venues");
@@ -6860,7 +6863,7 @@ function triggerLabel(t, index) {
 }
 
 function readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTables = {}) {
-	const none = { watchSources: {}, watchRules: 0, modelRoles: {}, secretBundles: {}, requiring: 0, waiting: 0, listing: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, recovering: 0, replicating: 0, instructing: 0, commands: 0, secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], folders: [], images: [], imageRoutes: [], namedBackends: [], skillsDirs: [], forges: [], repositories: [], flows: [], excludedNames: [], costCaps: [], modelRuns: [], triggersVersionNeed: 1, jobDataVersionNeed: 1, parseError: null, parseNewer: false, path: null };
+	const none = { watchSources: {}, watchRules: 0, modelRoles: {}, secretBundles: {}, requiring: 0, waiting: 0, listing: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, recovering: 0, replicating: 0, instructing: 0, commands: 0, localEvents: [], secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], folders: [], images: [], imageRoutes: [], namedBackends: [], skillsDirs: [], forges: [], repositories: [], flows: [], excludedNames: [], costCaps: [], modelRuns: [], triggersVersionNeed: 1, jobDataVersionNeed: 1, parseError: null, parseNewer: false, path: null };
 	try {
 		// Unset falls back to ./triggers.json in cwd, MIRRORING the receiver's own default
 		// (receiver/src/config.mjs) -- the two must read the same file, or doctor preflights a deployment
@@ -6892,7 +6895,7 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTable
 		// trigger cannot be derailed by a sibling.
 		// The name collectChecks resolved (issue #464), never this shell's alone.
 		const fleet = Boolean(declaredWorkerName);
-		const cronScheduledHere = (t) => env.PI_TRIGGERS_FILE !== undefined && cronPlacement(t.run, { existsSync: fileExists, fleet }) !== "elsewhere";
+		const cronScheduledHere = (t) => env.PI_TRIGGERS_FILE !== undefined && cronPlacement(t.run, { existsSync: fileExists, fleet, workerName: declaredWorkerName }) !== "elsewhere";
 		return {
 			// Issue #761: the version this file needs (the higher of what it declares and what its keys need), and the version
 			// the jobs its triggers queue need (`jobDataVersionFor`): for the fleet line that names a peer that cannot read
@@ -6902,7 +6905,7 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTable
 			// drops (a hand-written `run.packageCanary`, which only the Updates page's canary job carries) reaches no job,
 			// so it needs no version, and a line claiming one would send an operator to upgrade for nothing.
 			triggersVersionNeed: Math.max(Number.isSafeInteger(rawDocument?.version) ? rawDocument.version : 1, triggersFileVersionFor(rawDocument, versionTables.triggers)),
-			jobDataVersionNeed: triggers.reduce((need, t) => Math.max(need, jobDataVersionFor(t?.run, versionTables.jobData)), 1),
+			jobDataVersionNeed: triggers.reduce((need, t) => Math.max(need, jobDataVersionFor({ ...t?.run, ...(t?.run?.kind === "local" && sourceForgeOf(t) ? { localEvent: {} } : {}) }, versionTables.jobData)), 1),
 			watchSources,
 			watchRules: triggers.filter(t => t.on.type === "watch").length,
 			secretBundles,
@@ -6923,6 +6926,7 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTable
 			// tuple list already filters to `typeof f.flow === "string"`, so a command trigger drops out
 			// of the flow-tier probes naturally -- no exclusion needed there.
 			commands: triggers.filter((t) => typeof t.run.command === "string").length,
+			localEvents: triggers.filter((t) => t.run.kind === "local" && sourceForgeOf(t)).map((t) => ({ id: t.on.id, forge: sourceForgeOf(t), worker: t.run.worker, debounceSeconds: t.on.debounceSeconds, reviewAuthors: t.on.reviewAuthors?.length ?? 0 })),
 			// REQ-TRIGGER-SECRETS. Counted beside `instructing` for its reason: a per-trigger choice that
 			// changes what every job of it can reach, and one that lives only in triggers.json.
 			secreting: triggers.filter((t) => t.run.secrets !== undefined).length,
@@ -6968,7 +6972,7 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTable
 			// Issue #433 review round 1: every trigger that NAMES a venue, with the label the lines below name it by, so
 			// doctor can say which of them this deployment does not bless (the worker refuses each of their jobs).
 			namedBackends: triggers
-				.map((t, index) => ({ label: triggerLabel(t, index), backend: t.run.backend, served: t.on.type !== "cron" || cronScheduledHere(t) }))
+				.map((t, index) => ({ label: triggerLabel(t, index), backend: t.run.backend, served: t.run.kind === "local" && t.run.worker !== undefined ? t.run.worker === declaredWorkerName : t.on.type !== "cron" || cronScheduledHere(t) }))
 				.filter((r) => typeof r.backend === "string"),
 			// REQ-PER-TRIGGER-SKILLS. The distinct host directories the file names, deduped like `images`,
 			// because the checks below cost a filesystem walk each and two triggers sharing a directory are one
@@ -6981,7 +6985,7 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTable
 			// `isForgeKind` rather than a written-out pair: this whole function is wrapped in `catch { return
 			// none }`, so a forge missing from a hand-written filter would not merely be unchecked -- doctor
 			// would report all-green and never mention that the credential it needs was never looked for.
-			forges: [...new Set(triggers.map((t) => t.run.kind).filter(isForgeKind))].sort(),
+			forges: [...new Set(triggers.map(sourceForgeOf).filter(isForgeKind))].sort(),
 			repositories: [...new Set(triggers.filter((t) => t.run.kind === "github" && typeof t.run.repository === "string").map((t) => t.run.repository))].sort(),
 			// REQ-PER-TRIGGER-SKILLS (issue #189). Per-trigger TUPLES, unlike every deduped set above,
 			// because a flow-resolution answer depends on the trigger's own folder/skillsDir/packages --

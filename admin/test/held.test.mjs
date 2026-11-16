@@ -385,6 +385,8 @@ test("every cancel answer driven names its job once and last, after what happene
 			checkUnanswered: { getJob: never },
 			removed: {},
 			removedWithTrackingWarning: { remove: removeQueuedJob, job: { remove: async () => { warnedRemovalCalls++; } }, touchStore: { begin: async (event) => ({ ok: true, event }), write: async () => ({ error: "touch-index-unavailable" }), abort: async () => ({ ok: true }) } },
+			localCancelStored: { remove: answer({ localSignalChanged: "yes", raced: true }) },
+			localCancelUnknown: { remove: answer({ localSignalChanged: "unknown", raced: true }) },
 			removalThrew: { remove: () => { throw new Error("bug"); } },
 			heldRemovalThrew: { held: true, remove: () => { throw new Error("bug"); } },
 			removalUnanswered: { remove: never },
@@ -469,6 +471,10 @@ test("every cancel answer driven names its job once and last, after what happene
 	// The two doors say one thing of one outcome: a held job's removal asked for and not answered within the bound.
 	const said = Object.fromEntries(answers);
 	assert.deepEqual(said["cancelQueuedJob removedWithTrackingWarning"], { ok: true, jobId: id, queue: "pi-jobs", held: false, touchWarning: "touch-tracking-incomplete" }, "a successful removal retains its failed publication warning");
+	assert.equal(said["cancelQueuedJob localCancelStored"].partial, true);
+	assert.match(said["cancelQueuedJob localCancelStored"].invalid, /cancellation was stored; queue removal is unconfirmed/);
+	assert.equal(said["cancelQueuedJob localCancelUnknown"].partial, true);
+	assert.match(said["cancelQueuedJob localCancelUnknown"].invalid, /cancellation may be stored; queue removal is unconfirmed/);
 	assert.equal(warnedRemovalCalls, 1, "the publication failure never repeats the successful removal");
 	assert.deepEqual(said["cancelHeldJob removalUnanswered"], said["cancelQueuedJob heldRemovalUnanswered"]);
 	assert.equal(said["cancelHeldJob removalUnanswered"].partial, true);

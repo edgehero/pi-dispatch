@@ -5510,7 +5510,7 @@ test("issue #761: a pause windows or triggers file a newer pi-dispatch wrote ref
 	await assert.rejects(() => runStart({ env: { VALKEY_URL, PI_PAUSE_WINDOWS_FILE: pausePath } }), (e) => e.piDispatchConfig === true && e.newer === true && e.message === `pause-windows file written by a newer pi-dispatch (version 2; this build understands 1): ${pausePath}`);
 	const triggersPath = join(dir, "triggers.json");
 	writeFileSync(triggersPath, `${JSON.stringify({ version: TRIGGERS_FILE_VERSION + 1, triggers: [] }, null, 2)}\n`);
-	await assert.rejects(() => runStart({ env: { VALKEY_URL, PI_TRIGGERS_FILE: triggersPath } }), (e) => e.piDispatchConfig === true && e.newer === true && e.message === `triggers file written by a newer pi-dispatch (version 5; this build understands 4): ${triggersPath}`);
+	await assert.rejects(() => runStart({ env: { VALKEY_URL, PI_TRIGGERS_FILE: triggersPath } }), (e) => e.piDispatchConfig === true && e.newer === true && e.message === `triggers file written by a newer pi-dispatch (version ${TRIGGERS_FILE_VERSION + 1}; this build understands ${TRIGGERS_FILE_VERSION}): ${triggersPath}`);
 });
 
 test("issue #761: a pause windows reload that meets a newer file keeps the last good windows and sets the newer state, which only a good reload clears", { skip }, () => {

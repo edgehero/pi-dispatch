@@ -8,6 +8,8 @@ import { materializePiDir } from "./materialize.mjs";
 import { InfraRetry } from "./processor.mjs";
 import { isDeterminateFsCode } from "./transient.mjs";
 import { checkSandboxWorkspace } from "./sandbox-workspace-guard.mjs";
+import { readLocalWorkspaceIdentity } from "./local-workspace.mjs";
+import { FORGE_KINDS, LOCAL_EVENT_ID_RE } from "./triggers.mjs";
 import { LOCAL_FOLDER_HOLDS_SUBSCRIPTION_AUTH, privateStoreExposed } from "./private-store-boundary.mjs";
 export { LOCAL_FOLDER_HOLDS_SUBSCRIPTION_AUTH } from "./private-store-boundary.mjs";
 
@@ -47,7 +49,7 @@ export const LOCAL_FOLDER_HOLDS_ENVELOPE = "local-folder-holds-envelope";
  * default keeps a directly-constructed call (tests, older wiring) honest: a job with no derived
  * context is a manual run.
  */
-export async function prepareLocalWorkspace({ folder: named, task, jobDir, git = defaultGit, event = { source: "manual" }, fs = realFs, jobPaths = null, envelopeFile = null, sandboxDir = null, authStoreDir = null, portfolio = null, watch = null, watchDecisionModel = null, watchSecrets = null }) {
+export async function prepareLocalWorkspace({ folder: named, task, jobDir, git = defaultGit, event = { source: "manual" }, fs = realFs, jobPaths = null, envelopeFile = null, sandboxDir = null, authStoreDir = null, portfolio = null, watch = null, watchDecisionModel = null, watchSecrets = null, localWorkspace = null }) {
 	requirePath(fs, named, `local folder does not exist: ${named}`, "the local folder");
 	// Issue #504 part B: the folder is RESOLVED here, once, and the resolved path is the one everything below reads and the
 	// one the container mounts (`workspace`). The raw string was mounted before, so a link below a job path swapped after
@@ -56,6 +58,18 @@ export async function prepareLocalWorkspace({ folder: named, task, jobDir, git =
 	// the container start, and the two checks below judge the folder that will be mounted. Residual, named: a link above
 	// the resolved folder swapped inside that window is followed by the runtime when it mounts.
 	const folder = resolveFolder(fs, named);
+	if (localWorkspace !== null) {
+		let identity;
+		try { identity = readLocalWorkspaceIdentity(folder, { fs }); }
+		catch (error) {
+			if (isDeterminateFsCode(error?.code)) return { outcome: "policy", reason: "local-folder-changed" };
+			throw new InfraRetry("the local workspace identity could not be read");
+		}
+		if (identity.key !== localWorkspace.key) return { outcome: "policy", reason: "local-folder-changed" };
+	}
+	if (event.source === "forge" && (typeof event.trigger?.id !== "string" || !LOCAL_EVENT_ID_RE.test(event.trigger.id) || !FORGE_KINDS.includes(event.forge))) {
+		return { outcome: "policy", reason: "local-event-invalid" };
+	}
 	try {
 		if (privateStoreExposed(named, authStoreDir, { fs, resolvedFolder: folder })) return { outcome: "policy", reason: LOCAL_FOLDER_HOLDS_SUBSCRIPTION_AUTH };
 	} catch (error) {
@@ -153,7 +167,8 @@ export async function prepareLocalWorkspace({ folder: named, task, jobDir, git =
 	// scheduledFor, previousRunAt) appear only for a cron source, nulls preserved.
 	const eventBody = {
 		source: event.source,
-		...(event.trigger ? { trigger: event.trigger } : {}),
+		...(event.trigger ? { trigger: event.source === "forge" ? { id: event.trigger.id } : event.trigger } : {}),
+		...(event.source === "forge" ? { forge: event.forge } : {}),
 		folder: basename(named),
 		sha,
 		...(event.source === "cron" ? { scheduledFor: event.scheduledFor ?? null, previousRunAt: event.previousRunAt ?? null } : {}),

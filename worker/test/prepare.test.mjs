@@ -231,6 +231,23 @@ test("a cron command job still gets the full cron event -- the command changes t
 	}
 });
 
+test("an event-local command receives only its fixed invocation and minimal provenance (#911)", async () => {
+	const { jobsDir, cleanup } = withJobsDir();
+	try {
+		const untrusted = "ATTACKER-TEXT";
+		const localEvent = { id: "reconcile", forge: "github", type: "label", digest: "a".repeat(64), worker: "owner", generation: 1, title: untrusted, repo: untrusted, number: 12 };
+		const arg = await dispatchLocal(jobsDir, { kind: "local", folder: "/some/folder", command: "reconcile --all", localEvent, trigger: { id: "reconcile", body: untrusted, matched: { label: untrusted } } }, { findPreviousRun: () => assert.fail("an event is not a cron occurrence") });
+		assert.equal(arg.task, "/reconcile --all");
+		assert.deepEqual(arg.event, { source: "forge", trigger: { id: "reconcile" }, forge: "github" });
+		assert.equal(JSON.stringify(arg).includes(untrusted), false);
+		for (const invalid of [null, { id: ["reconcile"], forge: "github" }, { id: "bad\nbody", forge: "github" }, { id: "reconcile", forge: "not-a-forge" }]) {
+			await assert.rejects(() => dispatchLocal(jobsDir, { kind: "local", folder: "/some/folder", command: "reconcile", localEvent: invalid }), (error) => error.piDispatchConfig === true);
+		}
+	} finally {
+		cleanup();
+	}
+});
+
 test("a flow job's prompt composition is byte-identical when the command feature is unused", async () => {
 	// The command arm sits FIRST in the ternary, so this pins that an absent command falls through to
 	// exactly the flow-hint + pointer + task string the pre-#189 dispatcher built.

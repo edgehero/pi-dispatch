@@ -85,6 +85,7 @@ behaves as before; the rest is state that a lost or older volume takes with it.
 | `console:audit`, `console:trail:*` | The newest 500 console audit rows (the files in `console-audit/` are the record), and the claim that keeps a console answer to one trail comment |
 | `sandbox:*`, `sandbox-gateway:*` | Kept workspaces per host, open shells, preparation requests, and the sandbox gateway's leases. A display, except pending requests |
 | `updates:*` | What the Updates page found and applied per host, and the canaries run. Any `updates:*` key may be deleted while the fleet runs |
+| `local:event:*` | Reviewed event-local command intents (one current and one next generation), their index and delivery receipts. Active intents have no expiry; receipts use the forge delivery retention. Back these up with the BullMQ queues, never separately. |
 | `poll:*`, `steer:steered:*`, `trigger-fire:*` | The poller's cursors per repository, the marker that keeps a steered comment from also starting a job, and the guard that refuses firing one cron trigger by hand twice in a minute |
 | `pi-dispatch:owner`, `pi-dispatch:sched-stalls` | Which deployment owns this Valkey, and the cron stall counter |
 

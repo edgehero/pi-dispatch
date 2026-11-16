@@ -190,7 +190,7 @@ const triggersPathWith = (doc) => {
 };
 
 test("triggers: the shipped tables hold the rule, against the run keys and blocks the loader reads", () => {
-	assert.equal(TRIGGERS_FILE_VERSION, 4, "issue #908: explicit merge permission at 4");
+	assert.equal(TRIGGERS_FILE_VERSION, 5, "issue #911: local event source and worker ownership at 5");
 	// Every `run.<key>` any worker module reads: a lenient superset (comments add names), which is enough to refuse a
 	// table row naming a key nothing reads.
 	const runKeys = new Set();
@@ -211,7 +211,9 @@ test("triggers: the shipped tables hold the rule, against the run keys and block
 	assert.deepEqual(valueTableProblems(TRIGGER_RUN_VALUE_VERSIONS, { known: [...runKeys], version: TRIGGERS_FILE_VERSION }), []);
 	// A value rule can raise the version with no field-table row, which neither check can see. While there is none, the
 	// version is the field tables'; the first value rule must extend this assertion with the versions it answers.
-	assert.deepEqual([...Object.keys(TRIGGER_VALUE_VERSIONS), ...Object.keys(TRIGGER_RUN_VALUE_VERSIONS), ...Object.keys(TRIGGERS_BLOCK_VALUE_VERSIONS)], []);
+	assert.deepEqual([...Object.keys(TRIGGER_VALUE_VERSIONS), ...Object.keys(TRIGGER_RUN_VALUE_VERSIONS), ...Object.keys(TRIGGERS_BLOCK_VALUE_VERSIONS)], ["on"]);
+	assert.equal(TRIGGER_VALUE_VERSIONS.on({ type: "pull_request", forge: "github" }), TRIGGERS_FILE_VERSION);
+	assert.equal(TRIGGER_VALUE_VERSIONS.on({ type: "pull_request", action: ["opened"] }), 1);
 });
 
 // ── closed domains ─────────────────────────────────────────────────────────────────────────────────────────────────
@@ -528,7 +530,7 @@ test("triggers: the nine narrowing fields are the baseline, and a row added late
 });
 
 test("triggers: the version is judged after the duplicate check and before the array, newer apart from broken", () => {
-	assert.throws(() => parseTriggersDocument('{"version": 5, "triggers": "reshaped"}', "/t"), (error) => error.piDispatchConfig === true && error.newer === true && error.message === "triggers file written by a newer pi-dispatch (version 5; this build understands 4): /t");
+	assert.throws(() => parseTriggersDocument(JSON.stringify({ version: TRIGGERS_FILE_VERSION + 1, triggers: "reshaped" }), "/t"), (error) => error.piDispatchConfig === true && error.newer === true && error.message === `triggers file written by a newer pi-dispatch (version ${TRIGGERS_FILE_VERSION + 1}; this build understands ${TRIGGERS_FILE_VERSION}): /t`);
 	assert.throws(() => parseTriggersDocument('{"version": 4, "version": 4, "triggers": []}', "/t"), /duplicate key "version"/);
 	assert.throws(() => parseTriggers('{"version": "1", "triggers": []}', "/t"), (error) => error.newer === undefined && error.message === 'triggers file "version" must be an integer of 1 or more: /t');
 	assert.deepEqual(parseTriggersDocument('{"version": 1, "triggers": []}', "/t").triggers, []);
@@ -630,7 +632,7 @@ test("triggers: a newer file is refused BEFORE mutate runs, newer:true, the file
 	let called = 0;
 	const res = writeTriggers({ triggersPath: path, mutate: () => { called++; return []; }, mutateDocument: (doc) => { called++; return doc; } });
 	assert.equal(res.newer, true);
-	assert.equal(res.invalid, `triggers file written by a newer pi-dispatch (version 5; this build understands 4), so nothing was written and nothing in it was lost; change it with that release: ${path}`);
+	assert.equal(res.invalid, `triggers file written by a newer pi-dispatch (version ${TRIGGERS_FILE_VERSION + 1}; this build understands ${TRIGGERS_FILE_VERSION}), so nothing was written and nothing in it was lost; change it with that release: ${path}`);
 	assert.equal(called, 0, "mutate and mutateDocument never ran");
 	assert.equal(readFileSync(path, "utf8"), text);
 	assert.equal(existsSync(`${path}.lock`), false, "the lock was released");

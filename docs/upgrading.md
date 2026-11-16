@@ -354,6 +354,22 @@ as `subscription_auth_hold`. See [subscription renewal](subscription-auth.md#adm
 
 Release numbers come from the git tags.
 
+### Pending release (#911)
+
+Event-local commands add `triggers.json` version 5 and queued job data version 6. The new trigger fields are
+`on.forge`, `on.id`, `on.debounceSeconds`, `on.reviewAuthors` and `run.worker`; local queued jobs carry `worker`
+and event-local jobs carry `localEvent`. Existing configurations keep their previous minimum version. Upgrade
+all workers, receivers and operator consoles before enabling these fields; old workers defer newer jobs.
+
+Valkey gains `local:event:*`: durable current/next command intents and delivery receipts. Keep this state and
+BullMQ together when backing up or restoring. Do not remove active intent state to force a retry: first establish
+that its container is gone. An active intent whose queue job disappeared remains blocked and is reported as
+`local_event_queue_job_missing`; inspect the named worker and its runtime before restoring a consistent backup.
+There is no older form of this new state to migrate or detect. Existing run records remain readable and unchanged;
+new event-local records add `localEvent: { id, forge, type, digest }`. Records without it are ordinary older runs,
+not stale state requiring cleanup. Local command queue retention stays unchanged; receipts outlive it so a late
+redelivery cannot recreate a finished command. See [event-local triggers](triggers.md) and [backup.md](backup.md).
+
 ### Pending release (#908)
 
 `triggers.json` gains optional `run.mayMerge` at version 4, and enabled queued jobs carry `mayMerge` and

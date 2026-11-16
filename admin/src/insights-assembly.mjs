@@ -168,7 +168,7 @@ export async function assembleGraph(paths, { pricing, project, fullPaths = false
     schedulers: Array.isArray(schedulers) ? schedulers : [],
     ...collectGraphInputs({ triggers: triggerList, globalPiDir: paths.globalPiDir }),
     cronStats: cronRunStats({ records: recs, schedulerIds: triggerList.filter((t) => t.type === "cron" && typeof t.id === "string").map((t) => t.id) }),
-    runJoin: joinRunsToTriggers({ records: recs, triggerCount: triggers?.count, triggerTypes: Object.fromEntries(triggerList.map((t) => [t.index, t.type])) }),
+    runJoin: joinRunsToTriggers({ records: recs, triggers: triggerList, triggerCount: triggers?.count, triggerTypes: Object.fromEntries(triggerList.map((t) => [t.index, t.type])) }),
     chainEdges: observedChainEdges({ records: recs }),
     forgeRepos: forgeRepoTargets({ records: recs }),
     caps: { chainDepthMax: paths.chainDepthMax, chainMaxPerJob: paths.chainMaxPerJob, windowDays: GRAPH_LIMITS.windowDays },

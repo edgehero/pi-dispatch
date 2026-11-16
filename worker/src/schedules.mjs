@@ -19,6 +19,7 @@ import { triggerCapAboveDeployment } from "./money.mjs";
 import { parseTriggers } from "./triggers.mjs";
 import { withJobDataVersion } from "./job-data-version.mjs";
 import { LOCAL_JOB_KEPT_COMPLETED_S, LOCAL_JOB_KEPT_FAILED_S } from "./retention.mjs";
+import { localRunData } from "./local-job.mjs";
 
 /**
  * Parse, validate, and select the cron schedules from the triggers file named by `config.triggersFile`.
@@ -46,7 +47,7 @@ export function loadSchedules(config, { readFileSync = fsReadFileSync, existsSyn
 		throw configError(`trigger at index ${above}: run.maxCostUsd is above this deployment's PI_MAX_COST_USD. A trigger can only narrow the per-job cost cap, so lower it or remove it (${path})`);
 	}
 
-	return triggers.filter((t) => t.on.type === "cron").map((t) => normalizeCronSchedule(t, path, existsSync, fleet, dataVersions));
+	return triggers.filter((t) => t.on.type === "cron").map((t) => normalizeCronSchedule(t, path, existsSync, fleet, dataVersions, config.workerNameDeclared ? config.workerName : null));
 }
 
 /**
@@ -78,17 +79,18 @@ export function authoredCron(config, { readFileSync = fsReadFileSync, existsSync
 }
 
 /**
- * The host paths a job container can see (issue #504 part B), for `envelopeInsideJobPaths`: every cron trigger's
+ * The host paths a job container can see (issue #504 part B), for `envelopeInsideJobPaths`: every local trigger's
  * `run.folder` and every trigger's `run.skillsDir` in the triggers file, the `PI_DISPATCH_RUN_ROOTS` roots and
  * `PI_GLOBAL_PI_DIR`. Read from the FILE, not from this host's served schedules: a folder another host serves today may
  * be this host's after an edit, and the check costs nothing to be wide. Throws when the triggers file does not parse.
  */
 export function envelopeJobPaths(config, { readFileSync = fsReadFileSync, existsSync = fsExistsSync } = {}) {
+	// Keep the internal key for existing containment readers; event commands expose their folder too (#911).
 	const out = { cronFolders: [], runRoots: [...(config.dispatchRunRoots ?? [])], skillsDirs: [], globalPiDir: config.globalPiDir ?? null };
 	const path = config.triggersFile;
 	if (path === null || path === undefined || !existsSync(path)) return out;
 	for (const t of parseTriggers(readFileSync(path, "utf8"), path)) {
-		if (t?.on?.type === "cron" && typeof t.run?.folder === "string") out.cronFolders.push(t.run.folder);
+		if (t?.run?.kind === "local" && typeof t.run.folder === "string") out.cronFolders.push(t.run.folder);
 		if (typeof t?.run?.skillsDir === "string") out.skillsDirs.push(t.run.skillsDir);
 	}
 	return out;
@@ -111,20 +113,25 @@ export function servedSchedules(schedules) {
 }
 
 /**
- * WHERE a cron trigger runs, from this host's point of view (issue #57): `"here"` when its folder exists on this
+ * WHERE a cron trigger runs, from this host's point of view (issue #57): an explicit owner is judged first (#911),
+ * then `"here"` when its folder exists on this
  * machine, `"elsewhere"` when it does not and this host is on a fleet (another machine's folder, not scheduled here),
  * and `"refused"` when it does not and this host is alone (a typo the worker refuses to boot on). The rule and its
  * reasons are `normalizeCronSchedule`'s, below, which is its first caller. Exported so `pi-dispatch doctor` asks the
  * same question the same way (issue #433) rather than keeping a copy that could drift.
  */
-export function cronPlacement(run, { existsSync = fsExistsSync, fleet = false } = {}) {
+export function cronPlacement(run, { existsSync = fsExistsSync, fleet = false, workerName = null } = {}) {
+	// The reviewed owner wins over filesystem coincidence: the same path can exist on two hosts.
+	if (run.worker !== undefined && run.worker !== workerName) return "elsewhere";
 	if (existsSync(run.folder)) return "here";
+	if (run.worker !== undefined) return "refused";
 	return fleet ? "elsewhere" : "refused";
 }
 
-function normalizeCronSchedule({ on, run }, path, existsSync, fleet, dataVersions = {}) {
+function normalizeCronSchedule({ on, run }, path, existsSync, fleet, dataVersions = {}, workerName = null) {
 	// The pure validator already guaranteed a non-empty, `:`-free, charset-valid, unique id and a
-	// well-formed pattern; folder existence is the one fs-dependent check it deferred to here.
+	// well-formed pattern; folder existence is the one fs-dependent check it deferred to here. An explicit
+	// owner is judged before it, so an offline owner is not replaced by another host with the same path.
 	//
 	// ON A FLEET THAT IS THE WRONG QUESTION. `INT-TRIGGERS-FILE-CONTRACT` splits this as "type here,
 	// reality where it can be known", and issue #57 adds a third level: PLACEMENT, where the fleet is
@@ -139,14 +146,14 @@ function normalizeCronSchedule({ on, run }, path, existsSync, fleet, dataVersion
 	// -- so a single-host deployment with one typo'd folder would reap containers, prune history and delete
 	// sandboxes on every restart before refusing. Declaring a name is the operator saying "this is a
 	// fleet", it is known before anything runs, and it keeps a single-host deployment byte-identical.
-	const placement = cronPlacement(run, { existsSync, fleet });
+	const placement = cronPlacement(run, { existsSync, fleet, workerName });
 	if (placement !== "here") {
 		if (placement === "refused") {
 			throw configError(`cron trigger "${on.id}": run.folder does not exist: ${run.folder} (${path})`);
 		}
 		// Not mine. Its skillsDir is not my business either: `isAbsolute` is OS-dependent, and judging
 		// another host's path on my platform is the exact mistake the shared validator refuses to make.
-		return { schedulerId: on.id, unserved: "folder-absent" };
+		return { schedulerId: on.id, unserved: run.worker !== undefined && run.worker !== workerName ? "worker-mismatch" : "folder-absent" };
 	}
 
 	// `run.skillsDir` gets the same treatment, and for the same reason (REQ-PER-TRIGGER-SKILLS): the pure
@@ -194,7 +201,7 @@ function normalizeCronSchedule({ on, run }, path, existsSync, fleet, dataVersion
 	// Stamped like every builder's (issue #761, `withJobDataVersion`): the template is what every tick of this schedule
 	// stores, so a field that needs a version above 1 says so on every job, and nothing is added while none does.
 	// `dataVersions` is the version rule, injectable for tests.
-	const data = withJobDataVersion({ kind: "local", folder: run.folder, flow: run.flow, task: run.task, ...(run.command !== undefined && { command: run.command }), provider: run.provider, model: run.model, maxTurns: run.maxTurns, github: run.github, packages: run.packages, image: run.image, ...(run.backend !== undefined && { backend: run.backend }), ...(run.excludeTools !== undefined && { excludeTools: run.excludeTools }), ...(run.excludeExtensions !== undefined && { excludeExtensions: run.excludeExtensions }), ...(run.excludeExtensionTools !== undefined && { excludeExtensionTools: run.excludeExtensionTools }), ...(run.mcp !== undefined && { mcp: run.mcp }), ...(run.models !== undefined && { models: run.models }), ...(run.fallbackModels !== undefined && { fallbackModels: run.fallbackModels }), ...(run.maxCostUsd !== undefined && { maxCostUsd: run.maxCostUsd }), ...(run.idleTimeoutMinutes !== undefined && { idleTimeoutMinutes: run.idleTimeoutMinutes }), ...(run.stallTimeoutMinutes !== undefined && { stallTimeoutMinutes: run.stallTimeoutMinutes }), ...(run.maxMinutes !== undefined && { maxMinutes: run.maxMinutes }), ...(run.skillsDir !== undefined && { skillsDir: run.skillsDir }), ...(run.secrets !== undefined && { secrets: run.secrets }), ...(run.secretsProfile !== undefined && { secretsProfile: run.secretsProfile }), resume: run.resume, ...(run.portfolio !== undefined && { portfolio: run.portfolio }), ...(run.progress === true && { progress: true }), ...(run.steer === true && { steer: true }), trigger: { id: on.id, pattern: on.pattern } }, dataVersions);
+	const data = withJobDataVersion({ ...localRunData(run), trigger: { id: on.id, pattern: on.pattern } }, dataVersions);
 	// Retention only; the deterministic repeat:<id>:<millis> jobId supplies dedup, so no jobId here, and
 	// scheduler jobs are not retried (DES-CRON-VIA-BULLMQ-SCHEDULER) so no attempts/backoff. A local job's retention, in
 	// SECONDS (BullMQ's `age`), from the one place the console's re-run reads it too (retention.mjs).

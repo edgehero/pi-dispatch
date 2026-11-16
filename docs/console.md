@@ -1776,7 +1776,7 @@ The same filters can be written in the query string. Each one is matched exactly
 | `repo` | repository, such as `acme/web` |
 | `kind` | forge: `github`, `gitlab`, `forgejo`, `azure`, or `local` |
 | `flow` | flow name |
-| `trigger` | trigger: its position in the triggers file, counted from 0 (the list shows it as "row 1" for 0), or a schedule's id |
+| `trigger` | trigger: its position in the triggers file, counted from 0 (the list shows it as "row 1" for 0), a schedule's id, or `event:forge:id` for a local event command |
 | `project` | project id |
 | `host` | worker name |
 | `backend` | venue, as the Venues panel on `/fleet` names it (a run recorded before venues were recorded counts as `local`) |
@@ -1789,6 +1789,12 @@ The same filters can be written in the query string. Each one is matched exactly
 For example, `/runs?kind=gitlab&outcome=failed`, `/runs?q=web%2312` (a `#` in a query is written `%23`) or
 `/runs?problems=1`. A value is checked against the characters that field can hold and refused by name if it does not
 fit; the page never repeats the refused value back.
+
+For a local event command, `/runs?trigger=event:github:pr-sweep` finds the configured source and stable id
+across edits to that trigger. The trigger detail's own history and counts are narrower: they match its current
+source, id, event type and complete definition. Its status distinguishes pending work, an active generation and
+one successor. If an active generation's queue job is missing, the page reports blocked recovery; it does not
+pretend that uncertain work is safe to run again.
 
 **Paging** goes by time, not by position. The Older link carries `before`, the moment of the last run on the page, so
 runs that finish while you page do not shift anything or show a run twice; Newest goes back to the start. A page holds
@@ -2042,6 +2048,12 @@ error's. Every answer of a cancel, its refusals included, says what happened fir
 very long id. An error's own words appear only with their control characters made spaces and at most 200 characters of
 them, the job they name said as "the job", before the job is named. The preview and the confirm answer within their time
 limit whatever Valkey does. The audit log's line has the kind `cancel-queued`.
+
+For a local event command, cancellation also clears the successor already accepted for that generation. A timeout
+can occur after this write, so the console, panel and CLI disclose that cancellation may have been stored and pending
+signals cleared. Check trigger and run status before retrying. A repeated cancel cannot clear later new events;
+those remain eligible. If the generation instead reports `queue-job-missing`, follow the
+[blocked local event recovery procedure](triggers.md#recovering-a-blocked-local-event) while the queue is paused.
 
 ### Steering a running job
 
@@ -2809,7 +2821,8 @@ these extra file/lease reads.
   hours while it sends no new events), and where to redeliver them, linked to that forge's page. It counts answers,
   so it reads "at least" after an incomplete read and a later redelivery that succeeds does not lower it. Unknown or
   incomplete reads never mean zero or healthy. The window is the current UTC hour plus the
-  preceding 23; last-event times are kept independently. Queued, deduplicated, held and steered count as taken;
+  preceding 23; last-event times are kept independently. Queued, deduplicated, held, steered and accepted count as taken;
+  accepted means a local event signal is durable, before a job is necessarily published or started;
   filter drops are separate. The forge's delivery history still identifies individual deliveries.
 - **Egress:** policy posture, listed hosts and exact model endpoints, then each host's proxy check with its
   date and age. An absent doctor check remains unknown. A failed proxy leads with its latest refused run and fix.

@@ -148,6 +148,10 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 ## DES-QUEUE-BULLMQ-OVER-CUSTOM
 
 - **Decision**: Redis + BullMQ.
+- **Local-event admission (#911)**: `DES-LOCAL-EVENT-COALESCING` adds bounded signal state ahead of
+  BullMQ, not another executor. BullMQ still owns queueing, locking, retries, stalls and delayed waits.
+  The separate state is necessary to retain one successor without replacing a paused or retrying owner;
+  it is not a reimplementation of BullMQ's scheduler or execution protocol.
 - **Why**: BullMQ supplies priorities, a rate limiter, a dedup window, and stalled-job recovery with a
   retry policy — each of which is an independent requirement here, not a bonus. Building four mechanisms
   to avoid one dependency is precisely how a solo-maintainer project drowns in maintenance. Its Bull
@@ -1373,15 +1377,20 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   **both** services. A shared validator (`worker/src/triggers.mjs`, exported as
   `@edgehero/pi-dispatch/triggers` — `@pi-dispatch/worker/triggers` before the issue-#80 rename) parses and
   validates the whole file; the worker selects `on.type:"cron"` and the receiver selects
-  `on.type ∈ {label, comment, pull_request, issue}` for whichever forge each entry's `run.kind`
-  names. Both validate everything; each evaluates only its own subset. This replaces the two prior
+  `on.type ∈ {label, comment, pull_request, issue}` for the source named by `on.forge`, or by the
+  existing forge `run.kind` when that field is absent. Both validate everything; each evaluates only its
+  own subset. This replaces the two prior
   files (`PI_SCHEDULES_FILE` and `receiver.flows.json`) with **no compatibility shim** — a clean cutover.
 - **Why**: The schema unifies the operator's *view* of triggers; it does **not** merge the engines. The
   `receiver`/`worker`, adversarial/trusted boundary is untouched: a `label` `on` is never scheduled (no
   delivery GUID to dedup on, no fresh collaborator approval), and a `cron` `on` never receives a webhook.
-  The `on × run` matrix pairs `cron ↔ local` and webhook ↔ a **forge** (`github`|`gitlab`|`forgejo`|`azure`),
-  and that pairing **is** the trust boundary, encoded as a fail-loud validation rule
-  (`INT-TRIGGERS-FILE-CONTRACT`). One validator means a malformed file fails identically wherever it is read.
+  The `on × run` matrix pairs `cron ↔ local`; a forge event may select its ordinary forge execution or,
+  since #911, an explicitly configured local command. The previous statement that the event/forge-kind
+  pairing itself was the trust boundary is superseded: source authentication and authorization remain
+  mandatory, while execution is chosen entirely by reviewed configuration. A local event requires
+  `on.forge`, a stable id and a named worker, and carries no source data to its command
+  (`DES-LOCAL-EVENT-COALESCING`, `INT-TRIGGERS-FILE-CONTRACT`). One validator means a malformed file fails
+  identically wherever it is read.
   The shared module lives in the worker package because `receiver` and `admin` already depend on it (today
   `@edgehero/pi-dispatch`); the dependency is one-way, so no cycle.
 - **There are THREE readers, and the third holds a FROZEN COPY.** This entry said "one validator, run by
@@ -1446,6 +1455,11 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 - **Traces to**: `INT-TRIGGERS-FILE-CONTRACT`, `REQ-CRON-SCHEDULED-JOBS`, `REQ-TRIGGER-AUTHOR-GATE`
 
 ## DES-ONE-SHOT-DISARM-IN-THE-FILE
+
+- **Local event identities (#911)**: local event disarm matches the stable source/id and complete
+  normalized-definition digest, not an array position. A refusal whose reason starts with `local-event-`
+  does not disarm anything: superseded or invalid queued generations cannot spend the current definition.
+  Ordinary terminal records retain the established rule below, including failed attempts.
 
 - **Decision**: A spent one-shot (issue #231) is recorded **in the triggers file itself**, by the WORKER,
   as one added key: `on.disarmed = { at, jobId }` on the exact entry the job matched, written after the
@@ -2647,14 +2661,107 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 - **Traces to**: `DES-CLI-SURFACE`, `REQ-DEPLOYMENT-BOOTSTRAP`, `CONST-TOKEN-SCOPED-PER-JOB`,
   `REQ-BRANCH-PROTECTION-PRECONDITION`, `SECURITY.md` (auth-source ladder)
 
+## DES-LOCAL-EVENT-COALESCING
+
+- **Decision** (issue #911): a forge event may signal a local command using a stable configured trigger
+  id and explicit destination worker. Source and execution are separate: `on.forge` selects the
+  authenticated source; `run.kind:"local"` selects the existing command preparation and container.
+  Local listeners each evaluate the source's existing pure filter in match-only mode, so every matching
+  listener can signal without stealing the first-match result from ordinary forge triggers. The matcher
+  accepts the normalized transient source subset, but admission receives only the complete normalized
+  trigger and transport delivery id. The command never receives a representative or last event.
+- **Authority**: the only new author grant is exact GitHub `reviewAuthors` on a local-command submitted
+  review. It adds to the association gate and cannot override self refusal or other source predicates.
+  Reviewer login is read from the review, not the PR or sender, with the same projection under polling.
+  A match-only filter exits before forge job construction, avoiding invented clone coordinates for an
+  Azure work-item listener. The existing registered extension command, static arguments, writable local
+  folder and admitted credentials determine its powers. No host command or new shell interpreter exists.
+- **State before publication**: a single atomic Valkey script writes a delivery receipt and one bounded
+  per-trigger state (`INT-LOCAL-EVENT-STATE`). The identity is the source and stable configured id,
+  independent of array position and target. A complete normalized-definition digest fences stale work.
+  A generation has an opaque id, first/last signal times and a due time: the earlier of last signal plus
+  `debounceSeconds` and first signal plus five minutes. Only a genuinely new receipt updates it. A
+  pending current generation coalesces only while its definition is unchanged. A new signal supersedes
+  an unclaimed current generation if its digest or owner changed, or it was cancelled, and starts a
+  fresh generation; any old queue job fails current-generation admission before credentials. This lets
+  a changed destination make progress even when the former worker is offline. An active generation
+  preserves its owner and admits at most one successor. State transitions use Valkey `TIME` in
+  production, with an injected clock only for tests; machine clock skew cannot extend a receipt's
+  quiet interval by making the signal come from another receiver.
+- **BullMQ owns execution**: the named worker periodically reconciles its durable state into its own
+  BullMQ queue using the generation's deterministic job id. An accepted signal survives a receiver crash
+  before publication, and repeating publication is idempotent. No receiver filesystem lookup, shared
+  queue fallback or hidden cross-target payload is needed. At pickup, current configuration and worker
+  authority are checked before spend. With the folder slot held, an atomic claim either waits until the
+  current due time, recognizes an already retired generation or marks that exact generation active.
+  A later signal never deletes or replaces a job parked by a pause, capacity gate or retry. Queue retry
+  retains the active generation; only terminal completion or failure promotes its successor, whose due
+  time is no earlier than completion. A failed generation exhausts ordinary retries before promotion.
+- **Recovery and cancellation**: reconciliation closes the state-to-queue publication gap and observes
+  terminal jobs whose final state transition was interrupted. Live generations never expire blindly.
+  A missing pending job can be republished; an active generation whose BullMQ job is missing is an
+  uncertain execution and remains blocked for operator recovery, reported explicitly rather than run
+  again. Cancellation tombstones the current generation and clears the successor present when accepted;
+  a later new delivery may create a fresh successor. Repeating cancellation is idempotent and cannot
+  clear those later arrivals. A cancellation timeout is uncertainty, including on the CLI, panel and
+  console: its signal tombstone may have committed and cleared pending signals without acknowledgment.
+  The operator checks trigger and run status before another attempt. Blocked missing-job recovery is a
+  deliberate operator operation after pausing the queue, reading the exact generation and positively
+  establishing its runtime container is gone, followed by generation-checked `finish`, never key deletion
+  or automatic replay; `docs/triggers.md` carries the executable procedure.
+  One-shot authority refusals named `local-event-*` do not disarm a live definition. Ordinary one-shot
+  retirement drops only a successor of the same definition; a
+  separately reviewed changed definition retains its own generation. Retired empty state is deleted;
+  delivery receipts use the shared forge delivery-retention interval. Signals do not reset that receipt.
+- **Why not native replace-and-debounce**: source at the pinned BullMQ 5.80.4 was read, including
+  `deduplicateJob.lua` and `storeDeduplicatedNextJob.lua`. Its delayed replacement can delete an owner
+  which is delayed for a pause or infrastructure retry, not just for initial debounce. Its stored next
+  job is outside ordinary job listing and cancellation, and its delay is scheduled from completion.
+  Those semantics cannot represent this feature's current ownership, last-signal deadline and visible
+  cancellation contract without fragile surgery into BullMQ state. The bounded producer state therefore
+  complements `DES-QUEUE-BULLMQ-OVER-CUSTOM`; queue retry, locks, stalls and execution remain BullMQ's.
+- **Other rejected choices**: using the delivery GUID as the coalescing identity (every review becomes a
+  separate run); using target and command as the identity (one sweep splits by repository and unrelated
+  reviewed rules collapse); extending a pending timer on replay (redelivery can starve work); an
+  unbounded trailing timer (continuous activity never runs); receiver-only timers (restart loses work);
+  deleting a delayed job to refresh its deadline (destroys pause and retry ownership); publishing before
+  durably accepting the signal (an acknowledgment can lose work); treating an event's claimed read-only
+  intent as a sandbox (the handler retains its actual mount and credentials); routing by the receiver's
+  folder existence (the receiver may be on another machine); and treating webhook and poll ids as one
+  exactly-once identity (the transports do not supply a shared identity).
+- **Traces to**: `REQ-LOCAL-EVENT-COMMANDS`, `CONST-TRIGGER-AUTHOR-GATE`,
+  `DES-COMMAND-ENTRY-POINT`, `DES-SCOPED-LIMITS-AND-FOLDER-MUTEX`, `INT-LOCAL-EVENT-STATE`.
+
 ## DES-GH-POLLING-TRANSPORT
+
+- **Inherited coverage and identity limits (#911 review)**: review polling reads only the first page
+  of up to 100 reviews for each open PR, with no per-PR pagination or truncation warning. Its separate
+  50-open-PR bound does log `poll_reviews_gap`; that log is not proof that every review was read.
+  Synthetic PR ids are `poll-pr<number>-<headSha7>`, without repository or action: a same-head reopen,
+  different repositories with the same number and head prefix, or a seven-character prefix collision
+  can reuse an earlier matching event's retained identity. Local receipts qualify that supplied id by
+  source and configured trigger, not by an event identity the poller does not possess. These limits
+  predate local listeners and remain unchanged. Webhook review delivery avoids the polling page limit
+  and carries a distinct delivery GUID for a distinct event. A paired cron on the same local command,
+  worker and folder can reconcile current source state despite a missed poll signal, under the existing
+  folder mutex. Neither mitigation grants new authority or changes polling's transport identity.
+
+- **A validator acknowledges processing, not fetching (#911 review)**: a successful HTTP response stages
+  its ETag; the feed commits it only after all relevant admissions and its cursor or PR snapshot are
+  durable. The review sweep commits every fetched PR's validator only after the shared review cursor.
+  Previously an ETag was stored inside `get`, before either step: an admission failure left the cursor
+  behind but the next fetch could answer 304 forever. Catch-time invalidation would retain the crash
+  window, so commit-after-processing is required. A failure after the cursor write but before a validator
+  write merely refetches already handled data. Cursor, receipt and job-id checks absorb that overlap.
 
 - **Decision**: `pi-dispatch-receiver poll` is an **alternative producer** for GitHub triggers that
   needs no public URL: it polls issue events, issue comments, open PRs, and the reviews on those open
   PRs per serviced repo (ETag
   conditional requests, ~60s cadence honoring `x-poll-interval`), synthesizes the exact
-  `INT-WEBHOOK-PAYLOAD-SUBSET` shapes, and feeds the **unchanged** pure `filter()` and the shared
-  enqueue path with `poll-*` delivery ids. **The webhook receiver stays the default and the
+  `INT-WEBHOOK-PAYLOAD-SUBSET` shapes, and feeds the shared pure source filter and the shared
+  forge enqueue path with `poll-*` delivery ids. Local listeners use the same source verdicts and
+  persist signals before the cursor advances (`DES-LOCAL-EVENT-COALESCING`); the reviewer's login is
+  transient matching input for their explicit author grant, never local job data. **The webhook receiver stays the default and the
   documented low-latency path** — polling is for hosts that cannot (or should not) expose a port.
   Repos come from an explicit `POLL_REPOS` allowlist or, under App auth, the installation's repo
   list. A fresh poller initializes cursors to *now* and never replays history — a label applied
@@ -2694,14 +2801,15 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   has no repo-wide form, so a cycle would otherwise spend one request per open PR forever. The validators
   therefore live in one hash keyed by PR number rather than a key per PR — an unbounded key family would
   break the "refresh the cursor family as a unit" TTL argument this design rests on — and the idle steady
-  state is one 304 per open PR, which costs no quota. The sweep is bounded and says so in a log line when
-  it truncates. It also runs when the open-PR list itself answers 304: whether submitting a review
+  state is one 304 per open PR, which costs no quota. The open-PR sweep bound says so in a log line when
+  it truncates; the first-page review bound above has no warning. It also runs when the open-PR list itself answers 304: whether submitting a review
   perturbs that list is GitHub's business, and betting correctness on it would mean review triggers that
   fire only when something else happens to touch the PR. The cursor is persisted **once per sweep**, not
   per review, because many endpoints' ids interleave — advancing per item would either re-enqueue or
   strand, and a mid-sweep failure retrying the whole sweep is idempotent on the `poll-rv<id>` jobIds.
-  Reviews on closed PRs are never synthesized: the open list is the sweep set, and a job started by a
-  review of a merged PR has nothing left to act on. This source exists because the alternative was a
+  Reviews on closed PRs are never synthesized: the open list is the bounded sweep set. The former claim
+  that such a review has nothing left to act on is superseded by local reconciliation commands; the
+  coverage limit remains, and a close listener can wake reconciliation separately. This source exists because the alternative was a
   `review_submitted` trigger that loads clean and can never fire under polling, which is the silently dead
   config this project refuses everywhere else.
   **A restart's catch-up is bounded** (issue #880). Before the horizon, a restart inside the 35-day
@@ -4636,6 +4744,11 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   text is data via `event.json`. And commands are **never AI-reachable, stricter than flows** — built at
   the producers, refused at both model-reachable ones (`DES-AI-TRIGGER-FLOW-GATE` records the mechanism
   and the `OQ-022` inversion).
+- **Local event commands (#911)** reuse this exact runner dispatch. Their prompt is still only the
+  configured command and static arguments. Unlike a forge command, their event file contains no source
+  payload or target, only the configured local trigger's context. A registered handler can still call a
+  model or use its writable mount and credentials; dispatching a command is no promise of a model-free
+  or read-only job. The worker's existing model, credential, capability and budget preflights remain.
 - **Rejected**: the command as the first line of a larger prompt (impossible at the pin — the remainder
   becomes handler args); retrying nothing / policy on handler throws (above); `prompt.md` as the
   in-container authority (above); skipping pre-verification and letting pi's fall-through handle typos
@@ -7153,6 +7266,12 @@ free local model, or using a few successful live probes as proof of every routin
   structural ceiling 1, `min()`-composed with any configured value, no file, no tool, no off-switch —
   because two agents in one bind-mounted working tree is the race `run.replicas` is refused for, and a
   cron trigger reaches it with no operator mistake at all (`DES-CRON-VIA-BULLMQ-SCHEDULER`, corrected).
+- **Event and cron sharing (#911)**: event-local commands join this same mutex. Their explicit
+  `run.worker` and an optional matching cron `run.worker` put both on one host's queue; cron entries
+  without it retain their old folder-based placement. The local mutex uses the resolved directory's
+  device and inode identity, alongside the existing configured budget scope, so aliases of one folder
+  do not make two execution slots. This does not infer shared storage from identical paths on different
+  machines. A worker cannot release a folder's quarantine while a previous container may still be alive.
 - **Dollar windows and model rows** (issues #501 part 5 and #502 part 6, file version 2): a row may also carry
   `dayUsd`/`weekUsd`/`monthUsd`, and a `model:<provider>/<model>` row caps one model across every scope. They
   are dollar ledgers in `DES-DOLLAR-RESERVE-AND-SETTLE` (item 9), not job-count ones: they reserve with the
@@ -10154,6 +10273,12 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
   determinate refusal exits 2 with no added latency; no timer, watcher or closer outlives a refusal.
 
 ## DES-CANCEL-VIA-REDIS-REQUEST-KEY
+
+- **Local signal tombstones (#911)**: the admitted generation has separate durable signal state
+  (`INT-LOCAL-EVENT-STATE`). Cancellation can commit there before an acknowledgment or queue removal
+  answer is lost. CLI, panel and console therefore disclose that uncertainty instead of claiming nothing
+  changed, and tell the operator to inspect trigger/run status. The first cancellation clears the then
+  present successor; repeating it cannot clear later new signals.
 
 - **Decision**: the operator's stop for one job (issue #287) is state-dispatched at the requester and,
   for the ACTIVE case, carried over a durable redis request/ack key pair
@@ -18268,6 +18393,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-11-16 (#911) | Added `DES-LOCAL-EVENT-COALESCING`: independent authenticated listeners, no payload channel, exact local review-author grant, durable atomic receipts and current/successor state, bounded trailing delay, named-worker publication, current-definition fencing, cancellation, retry and uncertainty ownership. Pinned BullMQ replacement was rejected because it can replace pause/retry owners and hides its successor from ordinary cancellation. `DES-QUEUE-BULLMQ-OVER-CUSTOM` AMENDED to name the bounded producer state while retaining BullMQ execution; `DES-TRIGGERS-UNIFIED-FILE` separates source from execution; `DES-GH-POLLING-TRANSPORT` preserves and explains open-review coverage; `DES-COMMAND-ENTRY-POINT` preserves registered-command dispatch without promising model-free execution; `DES-SCOPED-LIMITS-AND-FOLDER-MUTEX` adds explicit cron ownership and canonical directory identity. UNCHANGED, checked: ordinary forge first-match and deduplication, source actions, self refusal, cron scheduling, image capability, credentials, spend order and harness merge policy. Final implementation uses Valkey time, supersedes only unclaimed changed or cancelled generations, and documents explicit generation-checked recovery after proving the container gone. `DES-ONE-SHOT-DISARM-IN-THE-FILE` and `DES-CANCEL-VIA-REDIS-REQUEST-KEY` AMENDED for local authority-refusal and cancellation-uncertainty boundaries. Final polling review corrects ETag commit ordering: validators persist only after durable admission and the feed cursor or PR snapshot, with all review validators after the shared sweep cursor, preventing a failed signal from being hidden behind 304. Existing key shapes and TTLs are UNCHANGED, checked. `DES-GH-POLLING-TRANSPORT` also records inherited first-100-review coverage and repository/action-free truncated-head PR identities, their possible suppression of distinct events, and webhook or paired-cron reconciliation mitigations; transport behavior and receipt identity remain UNCHANGED, checked. |
 | 2026-11-15 (#908) | Added `DES-TRIGGER-MERGE-POLICY`: one explicit per-trigger permission reaches the forge envelope and a fixed image floor through a read-only worker input, with current-trigger digest checks, version gates and an image capability. Records the rejected user-prompt-only fix and deployment-wide default, the next-container revocation limit, and the absence of a migration for still-valid unflagged state. `DES-TRIGGER-INSTRUCTION-IN-THE-ENVELOPE` now names the effective merge-policy paragraph; `DES-FLOWS-ARE-DATA-PERSONA-IS-CODE` names the fixed rule selected by the strict worker marker without accepting free-form system prompt text. The required contract-test job gains a 90-minute overall limit after all tests passed but cleanup reached the former 60-minute limit; its check name, triggers, coverage, file and step deadlines, the release job's 60-minute limit and runtime job limits are UNCHANGED, checked. UNCHANGED, checked: `DES-FORGE-MCP` withholding, branch protection, credentials, image mounts, spend ordering and the harness merge-call scan. |
 | 2026-11-15 (#899) | `DES-QUEUE-BULLMQ-OVER-CUSTOM` and `DES-CANCEL-VIA-REDIS-REQUEST-KEY` AMENDED: one terminal-policy classifier and a common worker result boundary release only the job-owned key; shared ingress repairs a completed policy survivor from its stored state, never the incoming data of the add result. Atomic state/result/identity/ownership checks and the ordinary add preserve races. Reason allowlists, unconditional deletion, changed TTLs and cleanup alone are rejected. Existing cancellation acknowledgment, queued removal, parking/steering order, orphan resource holds and retry/recovery contracts UNCHANGED, checked. `DES-AWAIT-INPUT-ENDS-THE-JOB` and `DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY` AMENDED for the neutral `semantic_window_released` / `semantic_window_release_failed` log names with a closed cause; release waits at most two seconds and late deletes retain ownership checks. |
 | 2026-11-15 (#897) | **`DES-OPERATOR-CONSOLE` AMENDED**: a new bullet before "One rule for what needs the person", "A failed job whose work has since been done asks nothing": `supersededFailures` judges each failed row against the wide window's records (the same cron trigger, or the same forge target and flow, a run that completed and started after the failure ended), the snapshot's failed rows carry `supersededBy`, and Needs you, the headline, Fleet's failed card, a bulk Retry's preview, the `/dispatch` panel, `/api/state` and the agent's failed read each act on it; what the records cannot settle is not judged and keeps asking; nothing is written. REJECTED: removing a superseded job from the queue, the trigger's index as the work's key, any later run, and one that started before the failure ended. UNCHANGED, checked: the failed set's read (`FAILED_PER_QUEUE`, `FAILED_LIMIT`, the projection's other keys), the day line and All clear's day rule (a failed record of the last 24 hours still counts there: it is the day's history, not a request), `retry-failed` for one job (no surface offers it for a superseded row; asked for anyway, it retries as before), and `remove-failed` and `remove-all-failed`. |

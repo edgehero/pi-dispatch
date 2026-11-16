@@ -23,7 +23,7 @@ const copyStrings = (value) => Array.isArray(value) ? value.filter((v) => typeof
 const recordOf = (r) => Object.fromEntries(["jobId", "target", "project", "kind", "triggerIndex", "triggerType", "flow", "startedAt", "endedAt", "outcome"].filter((k) => typeof r?.[k] === "string" || Number.isSafeInteger(r?.[k])).map((k) => [k, r[k]]).concat([["reason", recordReason(r)]]));
 
 function ruleOf(t) {
-  const scalar = ["index", "type", "forge", "id", "pattern", "phrase", "folder", "flow", "command", "provider", "model", "maxTurns", "backend", "image", "repository", "number", "once", "packages", "resume", "portfolio", "replicas", "maxCostUsd", "secretsProfile", "secretBundle", "awaitInput", "github", "progress", "statusComment", "recover", "steer", "mayMerge", "skillsDir", "gateTimeout", "gateBudgetRaiseUsd"];
+  const scalar = ["index", "type", "forge", "runKind", "localEventDigest", "worker", "debounceSeconds", "id", "pattern", "phrase", "folder", "flow", "command", "provider", "model", "maxTurns", "backend", "image", "repository", "number", "once", "packages", "resume", "portfolio", "replicas", "maxCostUsd", "secretsProfile", "secretBundle", "awaitInput", "github", "progress", "statusComment", "recover", "steer", "mayMerge", "skillsDir", "gateTimeout", "gateBudgetRaiseUsd"];
   const out = Object.fromEntries(scalar.filter((k) => typeof t[k] === "string" || typeof t[k] === "boolean" || Number.isSafeInteger(t[k])).map((k) => [k, t[k]]));
   for (const key of ["maxCostUsd", "gateBudgetRaiseUsd"]) {
     if (typeof t[key] === "number" && Number.isFinite(t[key]) && t[key] >= 0) out[key] = t[key];
@@ -35,11 +35,11 @@ function ruleOf(t) {
     out.command = words[0];
     out.commandArgs = words.length > 1;
   }
-  out.displayCut = ["any", "all", "none", "action", "reviewState", "models", "fallbackModels", "mcp", "excludeTools", "excludeExtensions", "excludeExtensionTools", "gates", "waitFor"].some((k) => Array.isArray(t[k]) && t[k].length > 64);
+  out.displayCut = ["any", "all", "none", "action", "reviewState", "reviewAuthors", "models", "fallbackModels", "mcp", "excludeTools", "excludeExtensions", "excludeExtensionTools", "gates", "waitFor"].some((k) => Array.isArray(t[k]) && t[k].length > 64);
   out.task = t.task === true;
   out.instructions = t.instructions === true;
   out.secrets = Number.isSafeInteger(t.secrets) && t.secrets >= 0 ? t.secrets : 0;
-  for (const key of ["any", "all", "none", "action", "reviewState", "models", "fallbackModels", "mcp", "excludeTools", "excludeExtensions", "excludeExtensionTools", "gates"]) if (Array.isArray(t[key])) out[key] = copyStrings(t[key]);
+  for (const key of ["any", "all", "none", "action", "reviewState", "reviewAuthors", "models", "fallbackModels", "mcp", "excludeTools", "excludeExtensions", "excludeExtensionTools", "gates"]) if (Array.isArray(t[key])) out[key] = copyStrings(t[key]);
   if (t.disarmed && typeof t.disarmed === "object") out.disarmed = Object.fromEntries(["at", "jobId"].filter((k) => typeof t.disarmed[k] === "string").map((k) => [k, t.disarmed[k]]));
   if (Array.isArray(t.waitFor)) out.waitFor = t.waitFor.slice(0, 64).flatMap((w) => typeof w?.profile === "string" ? [{ profile: w.profile }] : typeof w?.after === "string" ? [{ after: w.after }] : []);
   return out;
@@ -54,6 +54,7 @@ export function recordMatchesTrigger(record, trigger) {
     const run = cronRunOf(record?.jobId);
     return record?.kind === "local" && run !== null && run.id === trigger.id;
   }
+  if (trigger.runKind === "local") return record?.kind === "local" && record?.localEvent?.id === trigger.id && record?.localEvent?.forge === trigger.forge && record?.localEvent?.type === trigger.type && record?.localEvent?.digest === trigger.localEventDigest;
   return Number.isSafeInteger(record?.triggerIndex) && record.triggerIndex === trigger.index && record.triggerType === trigger.type && record.kind === trigger.forge;
 }
 
@@ -69,7 +70,8 @@ function chipsOf(t, packagesAvailable) {
   if (t.secrets > 0) add("reaches", `${t.secrets} secret variables${t.secretsProfile ? ` via ${t.secretsProfile}` : ""}`);
   if (t.github === true) add("reaches", "GitHub access");
   if (t.resume === true) add("writes", "keeps a session");
-  if (t.type === "cron") add("writes", "edits its local folder");
+  if (t.type === "cron" || t.runKind === "local") add("writes", "edits its local folder");
+  if (t.runKind === "local") add("narrows", `${t.debounceSeconds ?? 10}s debounce, one pending follow-up`);
   if (t.portfolio === true) add("writes", "budget split");
   if (t.instructions) add("writes", "standing instructions");
   if (t.mayMerge === true) add("writes", "may merge");

@@ -2207,6 +2207,7 @@ function listFooter(inner: number, styler: any, pendingCancel: any, actionNote: 
 
 /** One sentence for the footer from a cancel's result shape -- every branch names what actually happened. */
 function cancelNote(res: any): string {
+  if (res?.note) return scrubControl(String(res.note));
   // Three of these interpolate something the panel did not write: `ack` is a value ANOTHER PROCESS put in
   // redis (`cancel-state.mjs`), and `jobId`/`invalid` are queue-side ids. They land in the same footer,
   // through the same render call, as the armed question beside them (issue #337).

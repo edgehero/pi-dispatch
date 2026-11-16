@@ -169,7 +169,7 @@ test("BY SHAPE: below the pickup gate every record goes through the one bound re
 	assert.deepEqual(code.match(/\brecordRun\b/g) ?? [], [], "no recordRun reference below the gate");
 	// Nine: the failover candidate refusal joins the eight existing post-gate paths. The never-fits refusal
 	// remains above the wait gate and carries the pickup project and size by hand (pinned below).
-	assert.equal((code.match(/\brecordAfterGate\(\{/g) ?? []).length, 9, "exactly the 9 post-gate record paths use it; a new one must be counted here");
+	assert.equal((code.match(/\brecordAfterGate\(\{/g) ?? []).length, 10, "exactly the 10 post-gate record paths (including a missing local workspace) use it; a new one must be counted here");
 	const above = src.slice(src.indexOf("const size = resolveJobSize({ project, limits, env: jobSizeEnv });"), at);
 	assert.deepEqual(above.match(/recordRun\(\{ job, result, startedAt: at, endedAt: new Date\(\)\.toISOString\(\), project, size, earlier \}\)/g)?.length, 1, "the never-fits refusal carries the pickup project and size, and the earlier attempts (#599)");
 });

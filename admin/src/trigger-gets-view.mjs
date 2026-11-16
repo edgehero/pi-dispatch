@@ -384,7 +384,7 @@ function flowRow({ trigger, rows, editor }) {
     choices,
     doctor: said.length > 0 ? `${said.join("; ")}.` : null,
     lacking: lacking.length > 0 ? `As doctor last read it, a job on ${listed(lacking)} would not find ${trigger.flow}: it is not at the repository’s HEAD, nor in any other tier this trigger loads from.` : null,
-    forge: Boolean(trigger.forge),
+    forge: trigger.runKind !== "local" && Boolean(trigger.forge),
     skillsDir: trigger.skillsDir ?? null,
   };
 }
@@ -519,7 +519,7 @@ function serverWords(rows, named) {
 }
 
 function mcpRow({ trigger, rows, overlayServers }) {
-  const forge = FORGE_MCP_KINDS.includes(trigger.forge);
+  const forge = trigger.runKind !== "local" && FORGE_MCP_KINDS.includes(trigger.forge);
   const named = trigger.mcp ?? [];
   const published = rows.flatMap((row) => (row.state === "current" ? (row.mcp ?? []) : []).map((server) => server.name));
   const local = (overlayServers ?? []).map((server) => server?.name).filter((name) => typeof name === "string");

@@ -1,3 +1,4 @@
+import { validLocalEvent } from "./local-event-identity.mjs";
 import { CANARY_LOADS, recordedPackageCanary } from "./package-canary-record.mjs";
 import { LOADED_LINE_CUT, recordedLoaded } from "./loaded-record.mjs";
 import { cleanTouch, touchScopeOf } from "./touch-state.mjs";
@@ -1334,6 +1335,7 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		// for what a repository holds. A repository extension can still forge what the line alone says, each held to a
 		// closed shape (loaded-record.mjs says which and what is left).
 		...(loaded !== null ? { loaded } : {}),
+		...(validLocalEvent(data.localEvent) ? { localEvent: { id: data.localEvent.id, forge: data.localEvent.forge, type: data.localEvent.type, digest: data.localEvent.digest } } : {}),
 		// When the job under this id was created (issue #811, INT-RUN-HISTORY-FILE-CONTRACT): BullMQ's `job.timestamp`, the
 		// add's moment, kept across every retry, stall and deferral of the job, as an ISO string. An id comes back after a
 		// lost queue and a hand redelivery, while an older job's touch events stay in the touch index, so the Zero touch

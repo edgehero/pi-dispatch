@@ -106,7 +106,7 @@ test("BY SHAPE: every record write in index.mjs is immediately preceded by the s
 	}
 	// 3 above the gate (grouping source project, never-fits and wait refusals) and the 9 post-gate paths project-pickup counts,
 	// including a failover job with no eligible candidate.
-	assert.equal(sites.length, 13, "the twelve pickup records and the shared pre-slot boundary recorder must all settle");
+	assert.equal(sites.length, 14, "the thirteen pickup records (including a missing local workspace) and the shared pre-slot boundary recorder must all settle");
 	let beforePickup = 0;
 	for (const i of sites) {
 		const l = code(lines[i]);

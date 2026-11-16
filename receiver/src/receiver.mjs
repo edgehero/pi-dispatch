@@ -37,10 +37,17 @@ import { holdAfterDedup, holdBeforeLabel, wantsHoldAfterDedup } from "./held.mjs
 import { makeWatchHandler } from "./watch.mjs";
 import { makeWatchStore } from "@edgehero/pi-dispatch/watch-store";
 import { enqueueWatchJob } from "@edgehero/pi-dispatch/queue";
+import { localEventsWantCloserAuthority, makeLocalEventAdmission } from "./local-event-listeners.mjs";
 
 /** Write a small JSON body with an explicit status; a 204 carries no body. verify's `respond` is private. */
 const responseResults = new WeakMap();
+const localResponseSummaries = new WeakMap();
 function respond(res, status, obj) {
+	const localEvents = localResponseSummaries.get(res);
+	if (localEvents) {
+		if (status === 204) { status = 202; obj = { status: "accepted" }; }
+		obj = { ...obj, localEvents };
+	}
 	// Only our own closed response words disambiguate 202 and 503; no request body is inspected.
 	if (status === 202) responseResults.set(res, obj?.status);
 	if (status === 503) responseResults.set(res, obj?.error === "enqueue-failed" ? "enqueue-failed" : "lookup-failed");
@@ -99,9 +106,9 @@ export function parseSubset(payload) {
 		// carries a review or it does not.
 		//
 		// `id` is here because a review's INLINE comments ride `pull_request_review_comment`, an event this
-		// project deliberately does not ingest -- so the id is the only handle a flow has on them. No
-		// `review.user`: the bot-loop guard reads `sender.id` and nothing else, a second identity field is a
-		// second thing to keep in sync, and a login is PII with no reader (see issue.pull_request above).
+		// project deliberately does not ingest -- so the id is the only handle a flow has on them.
+		// The reviewer login is transient authorization input for an explicitly allowlisted local listener.
+		// The forge job builder still names its review fields individually and never persists this login.
 		review: payload.review
 			? {
 					id: payload.review.id,
@@ -114,6 +121,7 @@ export function parseSubset(payload) {
 					// pin: filter.test.mjs drives both casings so the claim is pinned by behaviour.)
 					state: typeof payload.review.state === "string" ? payload.review.state.toLowerCase() : payload.review.state,
 					author_association: payload.review.author_association,
+					...(typeof payload.review.user?.login === "string" ? { authorLogin: payload.review.user.login } : {}),
 				}
 			: undefined,
 		repository: { full_name: payload.repository?.full_name },
@@ -145,7 +153,7 @@ export function parseSubset(payload) {
  * undefined, i.e. never drops the harness's own comments. Absent property therefore means no route; the
  * failure of a forgotten property is a 404 an operator sees, never a paid recursion they get billed for.
  */
-export function makeReceiver({ queue, selfId, cfg, log, gitlab = null, forgejo = null, azure = null, resolveAuthority, router = null, steerRedis, now = Date.now, watchEnv = process.env, watchStore = null, enqueueWatch = enqueueWatchJob, observations = makeReceiverObservations({ now }) }) {
+export function makeReceiver({ queue, selfId, cfg, log, gitlab = null, forgejo = null, azure = null, resolveAuthority, router = null, steerRedis, now = Date.now, watchEnv = process.env, watchStore = null, localEventStore, enqueueWatch = enqueueWatchJob, observations = makeReceiverObservations({ now }) }) {
 	const watch = makeWatchHandler({ cfg, env: watchEnv, now, log: (event, fields) => log?.({ event, ...fields }), store: watchStore ?? Object.fromEntries(["ingest", "appendTrace", "recordVerdict", "noteIssueActivity"].map(method => [method, async (...args) => makeWatchStore(await queue.client, { now })[method](...args)])), enqueue: fields => enqueueWatch(queue, fields, { now }) });
 	// The Valkey client comment steering (issue #646) reads the live runs with and pushes into: by default the shared
 	// queue's own connection (`queue.client`, BullMQ's promise of its ioredis client), so steering opens no second
@@ -153,6 +161,7 @@ export function makeReceiver({ queue, selfId, cfg, log, gitlab = null, forgejo =
 	// deployment with no steer-armed comment trigger never touches it. `steerRedis` is the seam.
 	const steerClient = typeof steerRedis === "function" ? steerRedis : () => queue?.client;
 	const steer = { steerClient, now, log };
+	const admitLocal = makeLocalEventAdmission({ client: () => queue?.client, store: localEventStore, log });
 	// Which queue a delivery is enqueued onto (issue #57, `OQ-032`). The default is the shared queue for
 	// EVERY job, which is what this receiver did before multi-host existed -- so a deployment that wires no
 	// router, and every test that constructs one without it, is byte-identical.
@@ -165,7 +174,7 @@ export function makeReceiver({ queue, selfId, cfg, log, gitlab = null, forgejo =
 	// `resolveAuthority` is the GITHUB closer resolver (issue #231), riding top-level beside `selfId`
 	// because github's dependencies always have -- the other forges bundle theirs in per-forge objects.
 	// Optional, because only a close delivery an armed close rule matches ever consults it.
-	const github = cfg.servesGithub ? makeGitHubHandler({ queue, routeTo, selfId, cfg, log, resolveAuthority, steer }) : null;
+	const github = cfg.servesGithub ? makeGitHubHandler({ queue, routeTo, selfId, cfg, log, resolveAuthority, steer, admitLocal }) : null;
 
 	// A TABLE, built once, rather than one `if` per forge. Two forges made that a single branch; four make
 	// it a chain, and a chain is where one arm quietly ends up checked after the fallthrough. A path present
@@ -173,9 +182,9 @@ export function makeReceiver({ queue, selfId, cfg, log, gitlab = null, forgejo =
 	// falls through to GitHub, which is what keeps `/` working -- and a configured-off GitHub answers the
 	// same 404 from the fallthrough itself, below.
 	const routes = {
-		"/gitlab": gitlab ? makeGitLabHandler({ queue, routeTo, cfg, log, ...gitlab, steer }) : null,
-		"/forgejo": forgejo ? makeForgejoHandler({ queue, routeTo, cfg, log, ...forgejo, steer }) : null,
-		"/azure": azure ? makeAzureHandler({ queue, routeTo, cfg, log, ...azure, steer }) : null,
+		"/gitlab": gitlab ? makeGitLabHandler({ queue, routeTo, cfg, log, ...gitlab, steer, admitLocal }) : null,
+		"/forgejo": forgejo ? makeForgejoHandler({ queue, routeTo, cfg, log, ...forgejo, steer, admitLocal }) : null,
+		"/azure": azure ? makeAzureHandler({ queue, routeTo, cfg, log, ...azure, steer, admitLocal }) : null,
 	};
 
 	const route = async (req, res) => {
@@ -211,7 +220,7 @@ export function makeReceiver({ queue, selfId, cfg, log, gitlab = null, forgejo =
 			return result;
 		};
 		try { return await route(req, res); }
-		finally { res.end = end; responseResults.delete(res); }
+		finally { res.end = end; responseResults.delete(res); localResponseSummaries.delete(res); }
 	};
 	return Object.assign(receiverHandler, { observations });
 }
@@ -413,6 +422,18 @@ async function heldBeforeLabelOr({ steer, res, kind, delivery, result, targetOf 
 	return "held";
 }
 
+/** Partial listener admission is durable; a redelivery retries the remaining listeners using their own receipts. */
+async function admitLocalOrFail({ admitLocal, res, log, kind, event, subset, cfg, selfId, authorized, delivery }) {
+	try {
+		const results = await admitLocal({ kind, event, subset, triggers: cfg.triggers, selfId, authorized, deliveryId: delivery });
+		if (results.length > 0) localResponseSummaries.set(res, { accepted: results.length, coalesced: results.filter(result => result.coalesced === true).length });
+		return true;
+	} catch (err) {
+		answerEnqueueFailed({ log, res, delivery, err });
+		return false;
+	}
+}
+
 /**
  * The GitHub arm. Returns `makeVerifiedHandler`'s handler directly, so it only ever sees an already-verified
  * request. `onVerified` owns parse, filter, enqueue, and response; a good signature is the sole
@@ -425,7 +446,7 @@ async function heldBeforeLabelOr({ steer, res, kind, delivery, result, targetOf 
  * uses, so a lookup is never spent on a delivery the gate then ignores -- every label, comment, PR and
  * review delivery, and every close nothing wants, stays payload-only and byte-identical to before.
  */
-function makeGitHubHandler({ queue, routeTo, selfId, cfg, log, resolveAuthority, steer }) {
+function makeGitHubHandler({ queue, routeTo, selfId, cfg, log, resolveAuthority, steer, admitLocal }) {
 	return makeVerifiedHandler({ secret: cfg.webhookSecret }, async ({ rawBody, event, delivery }, res) => {
 		let subset;
 		try {
@@ -435,7 +456,7 @@ function makeGitHubHandler({ queue, routeTo, selfId, cfg, log, resolveAuthority,
 		}
 
 		let closerAuthorized;
-		if (wantsCloserAuthority(event, subset, cfg?.triggers?.github, selfId)) {
+		if (wantsCloserAuthority(event, subset, cfg?.triggers?.github, selfId) || localEventsWantCloserAuthority(event, subset, cfg?.triggers?.github, selfId)) {
 			if (!resolveAuthority) {
 				// Defensive only: unreachable in a wired receiver -- start.mjs hard-fails on github auth
 				// before `/` is ever mounted, and the resolver is built over that same auth object. Fail
@@ -459,6 +480,8 @@ function makeGitHubHandler({ queue, routeTo, selfId, cfg, log, resolveAuthority,
 			closerAuthorized = resolved.authorized;
 		}
 
+		if (!await admitLocalOrFail({ admitLocal, res, log, kind: "github", event, subset, cfg, selfId, authorized: closerAuthorized, delivery })) return;
+
 		let result = filter(event, subset, cfg, selfId, delivery, closerAuthorized);
 		if (!result.enqueue) {
 			// Issue #638: a phrase-free reply that missed only the parked marker is held for a run parking on its target, or
@@ -468,7 +491,7 @@ function makeGitHubHandler({ queue, routeTo, selfId, cfg, log, resolveAuthority,
 			if (rescued === "enqueue") {
 				result = { enqueue: true, job: result.heldCandidate };
 			} else {
-				log?.({ event: "dropped", delivery, reason: result.reason });
+				if (!localResponseSummaries.has(res)) log?.({ event: "dropped", delivery, reason: result.reason });
 				return respond(res, 204);
 			}
 		}
@@ -506,7 +529,7 @@ function makeGitHubHandler({ queue, routeTo, selfId, cfg, log, resolveAuthority,
  * The lookup runs only for events that could still fire -- after verification, and after the payload has
  * been projected -- so an unauthenticated flood cannot make this project call GitLab at all.
  */
-function makeGitLabHandler({ routeTo, queue, cfg, log, mode, secret, selfId, resolveAuthority, now, steer }) {
+function makeGitLabHandler({ routeTo, queue, cfg, log, mode, secret, selfId, resolveAuthority, now, steer, admitLocal }) {
 	return makeGitLabVerifiedHandler({ mode, secret, ...(now ? { now } : {}) }, async ({ rawBody, delivery }, res) => {
 		let subset;
 		try {
@@ -524,6 +547,8 @@ function makeGitLabHandler({ routeTo, queue, cfg, log, mode, secret, selfId, res
 			return respond(res, 503, { error: "access-lookup-failed" });
 		}
 
+		if (!await admitLocalOrFail({ admitLocal, res, log, kind: "gitlab", subset, cfg, selfId, authorized: resolved.authorized, delivery })) return;
+
 		let result = filterGitLab(subset, cfg.triggers?.gitlab, cfg.triggers?.knownFlows, selfId, resolved.authorized, delivery);
 		if (!result.enqueue) {
 			// Issue #638: a phrase-free reply that missed only the parked marker is held for a run parking on its target, or
@@ -533,7 +558,7 @@ function makeGitLabHandler({ routeTo, queue, cfg, log, mode, secret, selfId, res
 			if (rescued === "enqueue") {
 				result = { enqueue: true, job: result.heldCandidate };
 			} else {
-				log?.({ event: "dropped", delivery, reason: result.reason });
+				if (!localResponseSummaries.has(res)) log?.({ event: "dropped", delivery, reason: result.reason });
 				return respond(res, 204);
 			}
 		}
@@ -572,7 +597,7 @@ function makeGitLabHandler({ routeTo, queue, cfg, log, mode, secret, selfId, res
  * per construction, and serving two sources from one would mean either sharing a secret between forges or
  * letting the request choose which one it was checked against.
  */
-function makeForgejoHandler({ routeTo, queue, cfg, log, secret, selfId, resolveAuthority, steer }) {
+function makeForgejoHandler({ routeTo, queue, cfg, log, secret, selfId, resolveAuthority, steer, admitLocal }) {
 	return makeVerifiedHandler({ secret }, async ({ rawBody, event, delivery }, res) => {
 		let subset;
 		try {
@@ -590,6 +615,8 @@ function makeForgejoHandler({ routeTo, queue, cfg, log, secret, selfId, resolveA
 			return respond(res, 503, { error: "permission-lookup-failed" });
 		}
 
+		if (!await admitLocalOrFail({ admitLocal, res, log, kind: "forgejo", event, subset, cfg, selfId, authorized: resolved.authorized, delivery })) return;
+
 		let result = filterForgejo(event, subset, cfg.triggers?.forgejo, cfg.triggers?.knownFlows, selfId, resolved.authorized, delivery);
 		if (!result.enqueue) {
 			// Issue #638: a phrase-free reply that missed only the parked marker is held for a run parking on its target, or
@@ -599,7 +626,7 @@ function makeForgejoHandler({ routeTo, queue, cfg, log, secret, selfId, resolveA
 			if (rescued === "enqueue") {
 				result = { enqueue: true, job: result.heldCandidate };
 			} else {
-				log?.({ event: "dropped", delivery, reason: result.reason });
+				if (!localResponseSummaries.has(res)) log?.({ event: "dropped", delivery, reason: result.reason });
 				return respond(res, 204);
 			}
 		}
@@ -635,7 +662,7 @@ function makeForgejoHandler({ routeTo, queue, cfg, log, secret, selfId, resolveA
  * `"Display Name <email>"`. Both the resolver and the bot-loop guard handle both forms -- see
  * filter-azure.mjs, where the ordering constraint is stated in full.
  */
-function makeAzureHandler({ routeTo, queue, cfg, log, mode, secret, headerName, selfId, resolveAuthority, steer }) {
+function makeAzureHandler({ routeTo, queue, cfg, log, mode, secret, headerName, selfId, resolveAuthority, steer, admitLocal }) {
 	return makeAzureVerifiedHandler({ mode, secret, headerName }, async ({ rawBody }, res) => {
 		let subset;
 		try {
@@ -662,6 +689,8 @@ function makeAzureHandler({ routeTo, queue, cfg, log, mode, secret, headerName, 
 			return respond(res, 503, { error: "membership-lookup-failed" });
 		}
 
+		if (!await admitLocalOrFail({ admitLocal, res, log, kind: "azure", subset, cfg, selfId, authorized: resolved.authorized, delivery })) return;
+
 		let result = filterAzure(subset, cfg.triggers?.azure, cfg.triggers?.knownFlows, selfId, resolved.authorized, delivery);
 		if (!result.enqueue) {
 			// Issue #638: a phrase-free reply that missed only the parked marker is held for a run parking on its target, or
@@ -671,7 +700,7 @@ function makeAzureHandler({ routeTo, queue, cfg, log, mode, secret, headerName, 
 			if (rescued === "enqueue") {
 				result = { enqueue: true, job: result.heldCandidate };
 			} else {
-				log?.({ event: "dropped", delivery, reason: result.reason });
+				if (!localResponseSummaries.has(res)) log?.({ event: "dropped", delivery, reason: result.reason });
 				return respond(res, 204);
 			}
 		}

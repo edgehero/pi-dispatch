@@ -3,7 +3,8 @@
  * exists in this module. The filter may construct private job data; only its rule index and entrypoint leave here.
  */
 import * as nodeFs from "node:fs";
-import { FORGE_KINDS, PR_ACTIONS, REVIEW_STATES, parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
+import { FORGE_KINDS, PR_ACTIONS, REVIEW_STATES, REVIEW_AUTHOR_LOGIN_RE, sourceForgeOf, parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
+import { localEventVerdicts } from "../../receiver/src/local-event-listeners.mjs";
 import { groupTriggers } from "../../receiver/src/trigger-groups.mjs";
 import { filter } from "../../receiver/src/filter.mjs";
 import { filterGitLab } from "../../receiver/src/filter-gitlab.mjs";
@@ -18,7 +19,7 @@ export const CHECK_REVIEW_STATES = Object.freeze([...REVIEW_STATES]);
 export const CHECK_PR_ACTIONS = Object.freeze(Object.fromEntries(Object.entries(PR_ACTIONS).map(([k, v]) => [k, Object.freeze([...v])])));
 const events = ["issue-labeled", "issue-opened", "issue-comment", "pull-request", "pull-request-comment", "issue-closed"];
 export const CHECK_EVENTS = Object.freeze(Object.fromEntries(FORGE_KINDS.map((f) => [f, Object.freeze(events.filter((e) => f !== "azure" || e !== "issue-closed"))])));
-export const CHECK_FIELDS = Object.freeze(["forge", "event", "repository", "actor", "action", "number", "labels", "previousLabels", "comment", "prAuthor", "reviewState", "reviewBody"]);
+export const CHECK_FIELDS = Object.freeze(["forge", "event", "repository", "actor", "action", "number", "labels", "previousLabels", "comment", "prAuthor", "reviewState", "reviewBody", "reviewAuthor"]);
 export const CHECK_NOTICE = "Hypothetical matching only: the described identity and permissions are assumptions. No delivery was authenticated, sent or queued, and nothing was spent.";
 const refusal = (code, sentence) => ({ refusal: { code, sentence } });
 
@@ -55,6 +56,7 @@ export function parseTriggerCheckInput(input) {
   const review = input.forge === "github" && input.event === "pull-request" && input.action === "review_submitted";
   if (review && !CHECK_REVIEW_STATES.includes(input.reviewState)) return refusal("input-invalid", "reviewState must name a submitted GitHub review verdict.");
   if (input.reviewBody !== undefined && (!review || !CHECK_REVIEW_BODIES.includes(input.reviewBody))) return refusal("input-invalid", "reviewBody must say present or empty on a submitted GitHub review.");
+  if (input.reviewAuthor !== undefined && (!review || typeof input.reviewAuthor !== "string" || !REVIEW_AUTHOR_LOGIN_RE.test(input.reviewAuthor))) return refusal("input-invalid", "reviewAuthor must be an exact lowercase GitHub login on a submitted review.");
   if (!review && input.reviewState !== undefined) return refusal("input-invalid", "reviewState is only used by a submitted GitHub review.");
   return { input: { ...input, number: input.number ?? 1, labels: input.labels ?? [], ...(hasPrevious ? { previousLabels: input.previousLabels ?? [] } : {}) } };
 }
@@ -91,6 +93,7 @@ function triggerCheckFilterResult(input, groups) {
   const labels = input.labels.map((name) => ({ name }));
   const previous = (input.previousLabels ?? []).map((name) => ({ name }));
   const target = { number: input.number, iid: input.number, labels };
+  const finish = (result, event, subset, selfId = 1) => ({ ...result, localEvents: localEventVerdicts({ kind: input.forge, event, subset, triggers: groups, selfId, authorized, deliveryId: "hypothetical" }) });
   if (input.forge === "github" || input.forge === "forgejo") {
     const isPr = input.event.startsWith("pull-request");
     const isComment = input.event.endsWith("comment");
@@ -100,19 +103,21 @@ function triggerCheckFilterResult(input, groups) {
     const subset = { action, sender: { id }, repository: { full_name: input.repository }, issue: { ...target, ...(isPr && isComment ? { pull_request: true } : {}) }, isPull: isPr,
       comment: { body: input.comment, author_association: authorized ? "COLLABORATOR" : "NONE" },
       pull_request: isPr && !isComment ? { ...target, author_association: input.prAuthor === "write" ? "COLLABORATOR" : "NONE", head: {}, base: {} } : undefined,
-      review: review ? { state: input.reviewState, body: input.reviewBody === "empty" ? "" : "described review", author_association: authorized ? "COLLABORATOR" : "NONE" } : undefined };
-    return input.forge === "github" ? filter(event, subset, { triggers: groups }, 1, "hypothetical", authorized) : filterForgejo(event, subset, groups.forgejo, groups.knownFlows, 1, authorized, "hypothetical");
+      review: review ? { authorLogin: input.reviewAuthor, state: input.reviewState, body: input.reviewBody === "empty" ? "" : "described review", author_association: authorized ? "COLLABORATOR" : "NONE" } : undefined };
+    return finish(input.forge === "github" ? filter(event, subset, { triggers: groups }, 1, "hypothetical", authorized) : filterForgejo(event, subset, groups.forgejo, groups.knownFlows, 1, authorized, "hypothetical"), event, subset);
   }
   if (input.forge === "gitlab") {
     const comment = input.event.endsWith("comment");
     const objectKind = comment ? "note" : input.event === "pull-request" ? "merge_request" : "issue";
     const action = comment ? "create" : input.event === "pull-request" ? input.action : input.event === "issue-opened" ? "open" : input.event === "issue-closed" ? "close" : "update";
-    return filterGitLab({ objectKind, action, user: { id }, project: { id: 1, path: input.repository }, target, note: input.comment, noteableType: input.event === "pull-request-comment" ? "MergeRequest" : "Issue", ...(input.previousLabels !== undefined ? { labelChanges: { previous, current: labels } } : {}) }, groups.gitlab, groups.knownFlows, 1, authorized, "hypothetical");
+    const subset = { objectKind, action, user: { id }, project: { id: 1, path: input.repository }, target, note: input.comment, noteableType: input.event === "pull-request-comment" ? "MergeRequest" : "Issue", ...(input.previousLabels !== undefined ? { labelChanges: { previous, current: labels } } : {}) };
+    return finish(filterGitLab(subset, groups.gitlab, groups.knownFlows, 1, authorized, "hypothetical"), objectKind, subset);
   }
   const [project, repository] = input.repository.split("/");
   const pr = input.event.startsWith("pull-request");
   const eventType = input.event === "pull-request-comment" ? "ms.vss-code.git-pullrequest-comment-event" : input.event === "pull-request" ? `git.pullrequest.${input.action}` : input.event === "issue-comment" ? "workitem.commented" : input.event === "issue-opened" ? "workitem.created" : "workitem.updated";
-  return filterAzure({ eventType, actor: { id: id === 1 ? "checker-self" : "checker-person" }, project: { name: project }, ...(pr ? { repository: { name: repository } } : {}), target, comment: input.comment, tags: labels, ...(input.previousLabels !== undefined ? { tagChanges: { previous, current: labels } } : {}) }, groups.azure, groups.knownFlows, { id: "checker-self" }, authorized, "hypothetical");
+  const subset = { eventType, actor: { id: id === 1 ? "checker-self" : "checker-person" }, project: { name: project }, ...(pr ? { repository: { name: repository } } : {}), target, comment: input.comment, tags: labels, ...(input.previousLabels !== undefined ? { tagChanges: { previous, current: labels } } : {}) };
+  return finish(filterAzure(subset, groups.azure, groups.knownFlows, { id: "checker-self" }, authorized, "hypothetical"), eventType, subset, { id: "checker-self" });
 }
 
 export const CHECK_REASON_SENTENCES = Object.freeze({
@@ -161,21 +166,32 @@ export function checkTriggerEvent({ input, triggersPath, fs = nodeFs } = {}) {
   if (document.refusal) return document;
   const event = parsed.input;
   const decision = triggerCheckFilterResult(event, document.groups);
-  const matched = matchedOf(decision);
+  const ordinaryMatched = matchedOf(decision);
+  const localMatched = decision.localEvents.filter((v) => v.enqueue).map(({ trigger }) => {
+    const index = document.raw.findIndex((raw) => raw.run?.kind === "local" && raw.on?.id === trigger.on.id && sourceForgeOf(raw) === trigger.on.forge);
+    return { index, row: index + 1, route: "local-event", command: trigger.run.command.split(" ", 1)[0] };
+  });
+  const matched = ordinaryMatched ?? localMatched[0] ?? null;
   const rules = document.raw.map((raw, index) => {
     const base = { index, row: index + 1 };
     if (raw.on.disarmed !== undefined) return { ...base, status: "spent", reason: "spent", sentence: "This one-shot is spent and matches nothing until an operator re-arms it." };
     if (raw.on.type === "cron" || raw.on.type === "watch") return { ...base, status: "not-applicable", reason: "different-source", sentence: "This rule is started by its own schedule or watch source, not a forge event." };
-    if (raw.run.kind !== event.forge) return { ...base, status: "not-applicable", reason: "different-forge", sentence: "This rule listens to a different forge." };
-    if (matched?.index === index) return { ...base, status: "matched", reason: "matched", sentence: matched.route === "start" ? "This is the first matching rule for the described event, subject to the delivery's real gates." : "This rule selects a continuation route; the receiver must check the live or parked run before deciding what happens." };
+    if (sourceForgeOf(raw) !== event.forge) return { ...base, status: "not-applicable", reason: "different-forge", sentence: "This rule listens to a different forge." };
+    if (raw.run.kind === "local") {
+      const verdict = decision.localEvents.find((v) => v.trigger.on.id === raw.on.id && v.trigger.on.forge === sourceForgeOf(raw));
+      if (verdict?.enqueue) return { ...base, status: "matched", reason: "matched", sentence: "This local command listener matches independently; the receiver coalesces its wake-up without passing event text." };
+      const reason = Object.hasOwn(CHECK_REASON_SENTENCES, verdict?.reason) ? verdict.reason : "receiver-refused";
+      return { ...base, status: "not-matched", reason, sentence: CHECK_REASON_SENTENCES[reason] ?? "The receiver does not select this local command listener for the described event." };
+    }
+    if (ordinaryMatched?.index === index) return { ...base, status: "matched", reason: "matched", sentence: matched.route === "start" ? "This is the first matching rule for the described event, subject to the delivery's real gates." : "This rule selects a continuation route; the receiver must check the live or parked run before deciding what happens." };
     const isolated = triggerCheckFilterResult(event, onlyRule(document.groups, index));
-    if (matchedOf(isolated)) return matched
-      ? { ...base, status: "shadowed", reason: "earlier-match", sentence: `An earlier receiver route selected row ${matched.row}; this rule would match if that earlier rule were absent.` }
+    if (matchedOf(isolated)) return ordinaryMatched
+      ? { ...base, status: "shadowed", reason: "earlier-match", sentence: `An earlier receiver route selected row ${ordinaryMatched.row}; this rule would match if that earlier rule were absent.` }
       : { ...base, status: "not-matched", reason: "context-dependent", sentence: "This rule matches in isolation, but the full receiver context selects no route; no earlier winner could be proved." };
     const reason = Object.hasOwn(CHECK_REASON_SENTENCES, isolated.reason) ? isolated.reason : "receiver-refused";
     return { ...base, status: "not-matched", reason, sentence: CHECK_REASON_SENTENCES[reason] ?? "The receiver does not select this rule for the described event." };
   });
-  return { matched, rules, gates: [
+  return { matched, ...(decision.localEvents.length ? { localMatched } : {}), rules, gates: [
     { id: "signature", state: "not-checked", sentence: "A genuine forge delivery still needs its signature or configured endpoint authentication verified." },
     { id: "authority", state: "not-checked", sentence: "The sender, service identity, reviewer, author and closer permissions here are described assumptions, not remote permission checks." },
     { id: "repository", state: "not-checked", sentence: "Repository admission and ownership still need the receiver's configured allowlist and forge checks; Azure work items select their repository from the matched rule." },

@@ -1,3 +1,4 @@
+import { makeLocalEventStore } from "./local-event-store.mjs";
 import { makeTouchStore, touchScopeOf } from "./touch-state.mjs";
 import { trackTouchAction } from "./touch-outbox.mjs";
 import { isProjectId } from "./project-id.mjs";
@@ -120,7 +121,9 @@ export async function requestCancel({ redis, jobId, interventionOrigin = "human"
 		if (err && typeof err === "object") err.valkeyMayStillRun = true;
 		throw err;
 	}
-	return { timeout: true };
+	// A worker may have committed the local signal tombstone before its bounded cancel poll stopped waiting for
+	// Valkey. No acknowledgment is not proof of no change to that separate durable intent.
+	return { timeout: true, ...(/^local-event-[a-f0-9]{32}$/.test(jobId) && { note: "No worker acknowledged. The local event cancellation may have been stored and pending signals cleared. Check the trigger and run status before cancelling again; later matching events remain eligible." }) };
 }
 
 /**
@@ -342,11 +345,17 @@ export async function removeQueuedJob({ redis, queue, job, jobId, state = null, 
 	const stop = await guarded(guard, job);
 	if (stop !== null) return stop;
 	let removal;
+	let localSignalChanged = null;
 	try {
 		const store = touchStore === undefined ? (typeof redis?.eval === "function" ? makeTouchStore({ redis, now }) : null) : touchStore;
+		if (job.data?.localEvent) {
+			localSignalChanged = "unknown";
+			await makeLocalEventStore({ redis, now }).cancel(job.data.localEvent);
+			localSignalChanged = "yes";
+		}
 		removal = interventionOrigin === "agent" ? (await job.remove(), { ok: true }) : await trackTouchAction({ store, outbox: touchOutbox, event: stopTouch(job, queue, jobId, now), act: async () => { await job.remove(); return { ok: true }; }, succeeded: () => !(job.attemptsMade > 0) && isWorkload(job) });
 	} catch (error) {
-		return { raced: true, state: await stateOf(job), error };
+		return { raced: true, state: await stateOf(job), error, ...(localSignalChanged && { localSignalChanged }) };
 	}
 	await Promise.all([dropDeferRecord(redis, jobId, timeoutMs), dropAttemptOf(redis, queue, jobId, timeoutMs)]);
 	return { ok: true, held: false, jobId, state: current, attemptsMade: Number.isInteger(job.attemptsMade) && job.attemptsMade > 0 ? job.attemptsMade : 0, ...(removal.touchWarning ? { touchWarning: removal.touchWarning } : {}) };

@@ -39,9 +39,9 @@
  *                   review id (numeric and monotonic, so the events discipline applies). Issue #66's
  *                   fourth source, and it exists because the alternative was a `review_submitted`
  *                   trigger that loads clean under polling and can never fire -- the silently dead
- *                   trigger this project refuses everywhere else. Only open PRs are swept: a review on
- *                   a closed PR has nothing left to act on, the same call `merge`/`close` get in the
- *                   action vocabulary. REST spells `state` in upper case where the webhook spells it
+ *                   trigger this project refuses everywhere else. Only open PRs are swept to bound
+ *                   the work; a local reconciliation command can also wake on the separate close feed.
+ *                   REST spells `state` in upper case where the webhook spells it
  *                   lower; `parseSubset` folds it, so both transports produce the same job.
  *   - closed:       the SAME /issues/events feed as `label` -- `closed` entries carry the CLOSER as
  *                   `actor` and cover issues AND PRs (`issue.pull_request` is the discriminator again,
@@ -136,6 +136,7 @@ import { makeResolveGitHubAuthority } from "./github-members.mjs";
 import { parseSubset } from "./receiver.mjs";
 import { loadPollerConfig } from "./poller-config.mjs";
 import { retryIdentity } from "./boot-retry.mjs";
+import { hasLocalCloseListeners, localEventsWantCloserAuthority, makeLocalEventAdmission } from "./local-event-listeners.mjs";
 
 const API_URL = "https://api.github.com";
 // In SECONDS (`EX`): strictly outlives the gh-* job retention (`FORGE_JOB_RETENTION_S`) by four days, derived so that
@@ -203,6 +204,7 @@ export async function startPoller(env = process.env, deps = {}) {
 		signals = sleep === undefined,
 		redis,
 		queueFn,
+		localEventStore,
 		selfIdFn,
 		tokenFn,
 		readFile = fsReadFile,
@@ -287,7 +289,8 @@ export async function startPoller(env = process.env, deps = {}) {
 		if (ownRedis) await redisClient.quit();
 	};
 
-	const ctx = { cfg, selfId, fetchFn, redis: redisClient, enqueue, out, now, random, resolveCloserAuthority };
+	const admitLocal = makeLocalEventAdmission({ client: () => redisClient, store: localEventStore, log: out });
+	const ctx = { cfg, selfId, fetchFn, redis: redisClient, enqueue, admitLocal, out, now, random, resolveCloserAuthority };
 
 	// The repo set: explicit POLL_REPOS, or the App installation's list (cfg.repos === null only when
 	// the source is app -- poller-config enforces it). An empty discovery is a config error, not an
@@ -424,7 +427,7 @@ export async function startPoller(env = process.env, deps = {}) {
 			cycleNo++;
 			// `steered` (issue #646) only when a comment steered a run this cycle, so a cycle line without one is unchanged;
 			// `held` (issue #638) by the same rule, when a reply was held for a parking run.
-			out({ event: "poll_cycle", repos: repos.length, fetched: stats.fetched, enqueued: stats.enqueued, notModified: stats.notModified, ...(stats.steered > 0 ? { steered: stats.steered } : {}), ...(stats.held > 0 ? { held: stats.held } : {}), ms: now() - startedAt });
+			out({ event: "poll_cycle", repos: repos.length, fetched: stats.fetched, enqueued: stats.enqueued, notModified: stats.notModified, ...(stats.steered > 0 ? { steered: stats.steered } : {}), ...(stats.held > 0 ? { held: stats.held } : {}), ...(stats.localAccepted > 0 ? { localAccepted: stats.localAccepted } : {}), ms: now() - startedAt });
 			if (stopped) {
 				// No wait follows a stop, so the families this cycle polled are due at once: a restart reads the
 				// stop itself.
@@ -610,8 +613,10 @@ function isoSeconds(ms) {
  * A per-cycle GitHub API view: one token, one stats object, ETag discipline in one place.
  *
  * `get(path, etagKey, revalidate)`: when `etagKey` is set the stored validator is sent as
- * If-None-Match and the fresh one stored on 200; a 304 is counted and returned as `{ notModified }`.
- * `revalidate: false` (used while ARMING, i.e. no cursor yet) still STORES the response's ETag but
+ * If-None-Match and a 200 returns `commitEtag`, called only AFTER the feed's admissions and cursor are
+ * durable; a 304 is counted and returned as `{ notModified }`. Publishing the validator at fetch time
+ * would let a failed admission's next attempt get 304 forever, skipping work before its unchanged cursor.
+ * `revalidate: false` (used while ARMING, i.e. no cursor yet) still stages the response's ETag but
  * never sends one -- arming needs the body, and a stray stored validator answering 304 on an unarmed
  * endpoint would leave it unarmed forever.
  *
@@ -652,18 +657,17 @@ function makeApi(ctx, token, stats) {
 			if (!res.ok) {
 				throw new Error(`GET ${path} -> HTTP ${res.status}`);
 			}
-			if (etagKey) {
-				const tag = res.headers?.get?.("etag");
+			const tag = etagKey && res.headers?.get?.("etag");
+			const commitEtag = async () => {
 				if (tag && etagKey.field === undefined) {
 					await ctx.redis.set(etagKey, tag, "EX", CURSOR_TTL_SECONDS);
 				} else if (tag) {
-					// The hash carries no TTL of its own here; `touchRepo` expires it with the rest of the family.
 					await ctx.redis.hset(etagKey.key, etagKey.field, tag);
 					await ctx.redis.expire(etagKey.key, CURSOR_TTL_SECONDS);
 				}
-			}
+			};
 			stats.fetched += 1;
-			return { json: await res.json() };
+			return { json: await res.json(), commitEtag };
 		},
 	};
 }
@@ -715,6 +719,7 @@ async function pollLabelEvents(ctx, api, repo, stats) {
 		// approvals for a different moment (module header). An empty repo arms at 0.
 		const maxId = pageOne.reduce((m, e) => (typeof e?.id === "number" && e.id > m ? e.id : m), 0);
 		await setWithTtl(ctx, k.events, String(maxId));
+		await first.commitEtag();
 		ctx.out({ event: "poll_armed", repo, endpoint: "events", cursor: maxId });
 		return;
 	}
@@ -742,7 +747,7 @@ async function pollLabelEvents(ctx, api, repo, stats) {
 	for (const ev of fresh) {
 		if (ev.event === "labeled" && ev.issue) {
 			await handleLabeledEvent(ctx, api, repo, ev, stats);
-		} else if (ev.event === "closed" && ev.issue && hasCloseTriggers(ctx.cfg?.triggers?.github)) {
+		} else if (ev.event === "closed" && ev.issue && (hasCloseTriggers(ctx.cfg?.triggers?.github) || hasLocalCloseListeners(ctx.cfg?.triggers?.github))) {
 			// The coarse hasCloseTriggers guard IS the byte-identity switch (issue #231): with no close
 			// rule armed, a `closed` entry takes the same do-nothing path every unhandled event always
 			// has -- no PR fetch, no permission traffic, a cycle indistinguishable from a pre-#231 run.
@@ -767,6 +772,7 @@ async function pollLabelEvents(ctx, api, repo, stats) {
 		// unarmed closes advance past here exactly like every unhandled event always has.
 		await setWithTtl(ctx, k.events, String(ev.id));
 	}
+	await first.commitEtag();
 }
 
 function lastId(events) {
@@ -872,6 +878,7 @@ async function pollComments(ctx, api, repo, stats) {
 		if (typeof c?.updated_at === "string" && c.updated_at > advanced) advanced = c.updated_at;
 	}
 	if (advanced !== cursor) await setWithTtl(ctx, k.comments, advanced);
+	await r.commitEtag();
 	// A backlog deeper than one page self-heals: the cursor advanced to this page's newest update, so
 	// the next cycle's `since` picks up the remainder -- no pagination loop to bound here.
 }
@@ -943,6 +950,7 @@ async function pollPulls(ctx, api, repo, stats) {
 		}
 		await ctx.redis.expire(k.prs, CURSOR_TTL_SECONDS);
 		await setWithTtl(ctx, k.prsArmed, isoSeconds(ctx.now()));
+		await first.commitEtag();
 		ctx.out({ event: "poll_armed", repo, endpoint: "pulls", open: open.length });
 		// Reviews arm on this cycle too. Returning without them would leave the reviews cursor unset for a
 		// whole extra cycle, and the first cycle that DID arm it would silently swallow every review
@@ -977,6 +985,7 @@ async function pollPulls(ctx, api, repo, stats) {
 			await ctx.redis.hset(k.prs, field, CLOSED_MARKER);
 		}
 	}
+	await first.commitEtag();
 
 	// Reviews ride the SAME open-PR list this function already paid for -- one /pulls response feeds both
 	// sources, which is the whole reason this call lives here rather than in its own pollRepo step.
@@ -999,9 +1008,8 @@ async function pollPulls(ctx, api, repo, stats) {
  * with it the idle steady state is 50 * 304, which GitHub does not charge against the rate limit. The
  * validators live in one hash (see keyNames) so the key family stays enumerable for touchRepo.
  *
- * A review on a CLOSED pr is never seen, deliberately: the open list is the sweep set, and a job started
- * by a review of a merged PR has nothing left to act on -- the same call `merge` and `close` get in the
- * action vocabulary.
+ * A review on a CLOSED pr is never seen: the open list bounds the sweep. Local reconciliation commands
+ * inherit that polling limitation; the separate close feed can wake one when the PR closes.
  */
 async function pollReviews(ctx, api, repo, open, stats) {
 	const k = keyNames(repo);
@@ -1033,12 +1041,14 @@ async function pollReviews(ctx, api, repo, open, stats) {
 	const byNumber = new Map((open ?? []).filter((pr) => pr?.number != null).map((pr) => [pr.number, pr]));
 
 	let maxId = cursor;
+	const validators = [];
 	for (const number of bounded) {
 		const field = String(number);
 		// While ARMING, `revalidate: false` for the same reason every other source uses it: arming needs
 		// the body, and a stored validator answering 304 on an unarmed endpoint would strand it unarmed.
 		const res = await api.get(`/repos/${repo}/pulls/${number}/reviews?per_page=100`, { key: k.etagReviews, field }, armed);
 		if (res.notModified) continue;
+		validators.push(res.commitEtag);
 		const reviews = Array.isArray(res.json) ? res.json : [];
 
 		let pr = byNumber.get(number) ?? null;
@@ -1071,6 +1081,9 @@ async function pollReviews(ctx, api, repo, open, stats) {
 	} else if (maxId !== cursor) {
 		await setWithTtl(ctx, k.reviews, String(maxId));
 	}
+	// Review ids interleave across PRs. No validator may acknowledge the sweep before its shared cursor;
+	// a later PR's failure or a crash leaves all fetched endpoints available to retry from that cursor.
+	for (const commitEtag of validators) await commitEtag();
 }
 
 /**
@@ -1110,7 +1123,7 @@ async function gate(ctx, eventName, payload, deliveryId, stats) {
 	const subset = parseSubset(payload);
 
 	let closerAuthorized;
-	if (wantsCloserAuthority(eventName, subset, ctx.cfg?.triggers?.github, ctx.selfId)) {
+	if (wantsCloserAuthority(eventName, subset, ctx.cfg?.triggers?.github, ctx.selfId) || localEventsWantCloserAuthority(eventName, subset, ctx.cfg?.triggers?.github, ctx.selfId)) {
 		const repo = subset.repository?.full_name;
 		const resolved = await ctx.resolveCloserAuthority(repo, subset.sender?.login);
 		if (resolved.indeterminate) {
@@ -1128,6 +1141,10 @@ async function gate(ctx, eventName, payload, deliveryId, stats) {
 		closerAuthorized = resolved.authorized;
 	}
 
+	// Admission throws before this feed advances its cursor. A retry signals the same receipt, even when
+	// another listener or the ordinary forge enqueue failed after this listener had already accepted it.
+	const local = await ctx.admitLocal({ kind: "github", event: eventName, subset, triggers: ctx.cfg.triggers, selfId: ctx.selfId, authorized: closerAuthorized, deliveryId });
+	if (local.length > 0) stats.localAccepted = (stats.localAccepted ?? 0) + local.length;
 	const result = filter(eventName, subset, ctx.cfg, ctx.selfId, deliveryId, closerAuthorized);
 	if (!result.enqueue) {
 		// Issue #638, the webhook arms' `heldBeforeLabelOr` at the poller's seam: a phrase-free reply that missed only the
@@ -1143,7 +1160,7 @@ async function gate(ctx, eventName, payload, deliveryId, stats) {
 		}
 		// A run just parked on the target (held.mjs): the reply is the parked reply it would have been, enqueued below.
 		if (rescued?.enqueue !== true) {
-			ctx.out({ event: "dropped", delivery: deliveryId, reason: result.reason });
+			if (local.length === 0) ctx.out({ event: "dropped", delivery: deliveryId, reason: result.reason });
 			return;
 		}
 	}

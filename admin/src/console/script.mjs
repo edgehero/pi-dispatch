@@ -2266,6 +2266,7 @@ ${FIT_JS}
       checkCondition("prAuthor", forge === "github" && pr && ["opened", "synchronize", "reopened", "review_submitted"].indexOf(action) >= 0);
       checkCondition("reviewState", review);
       checkCondition("reviewBody", review);
+      checkCondition("reviewAuthor", review);
       checkCondition("comment", event === "issue-comment" || event === "pull-request-comment");
       checkCondition("labels", !(forge === "azure" && prEvent));
       checkCondition("previousLabels", (forge === "gitlab" && ["issue-labeled", "issue-closed", "pull-request"].indexOf(event) >= 0) || (forge === "azure" && event === "issue-labeled"));

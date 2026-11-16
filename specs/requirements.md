@@ -447,10 +447,14 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   PR `author_association ∈ {OWNER, MEMBER, COLLABORATOR}`; and `action: review_submitted` (the
   `pull_request_review` event's `submitted` action) is gated by the **reviewer's**
   `review.author_association ∈ {OWNER, MEMBER, COLLABORATOR}`, never the PR author's. All three are
-  hard-coded in the filter, never config-optional. A comment carrying `issue.pull_request` is a PR-context
+  hard-coded in the filter, except that a reviewed local-command `review_submitted` listener may add
+  exact `on.reviewAuthors` logins to the reviewer's association gate (`REQ-LOCAL-EVENT-COMMANDS`). This
+  exception never changes an ordinary forge job's gate or the unconditional self-identity refusal.
+  A comment carrying `issue.pull_request` is a PR-context
   comment and enqueues a pull_request target. On a comment rule that names `run.command` (issue #189), the
   `<phrase> <flow>` trailing-word flow override is **inert**: trailing text neither retargets nor
-  suppresses the command and reaches the job only as data (`/job/event.json`), and the receiver's
+  suppresses the command and reaches a forge job only as data (`/job/event.json`); a local event command
+  receives none of it. The receiver's
   known-flows set is built from flow-carrying rules only, so a command name is never summonable by
   comment (`INT-TRIGGERS-FILE-CONTRACT`). A `review_submitted` rule may carry an optional
   `on.reviewState` narrowing which verdicts fire (`INT-TRIGGERS-FILE-CONTRACT`); an unlisted verdict drops
@@ -554,6 +558,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   hours, then stop when it becomes idle (`worker/test/job-limits.test.mjs`).
 
 ## REQ-OPERATOR-JOB-CANCEL
+
+- **Local-event uncertainty (#911)**: cancellation also writes the generation's durable tombstone and
+  clears the successor present then. A timeout does not prove that write failed. Every requester surface
+  shall say pending local signals may have been cleared and direct the operator to trigger/run status;
+  repeated cancellation cannot clear new matching signals admitted after its first committed tombstone.
 
 - **Statement**: An operator shall be able to stop ONE job from a surface that needs no model: the CLI
   (`pi-dispatch cancel <jobId>`, VALKEY_URL-only like `pause`; on a shell/`.env` disagreement about VALKEY_URL it
@@ -800,6 +809,72 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   rate-limited `403`, the job is retried.
   Given a GitLab default branch covered only by a wildcard rule, the job is admitted. Given a Forgejo job
   whose token is a `write` collaborator's, the check answers without an admin route.
+
+## REQ-LOCAL-EVENT-COMMANDS
+
+- **Statement** (issue #911): Every supported forge source may wake a configured local pi extension
+  command through an event trigger with `on.forge`, a stable `on.id`, `run.kind:"local"`, `run.command`,
+  `run.folder` and an explicit `run.worker`. The existing command contract remains intact: it is not a
+  host shell, a local event flow, or a guarantee that the handler will make no model calls. The ordinary
+  image capability, container, credential, folder, free-admission and budget checks still apply.
+- **Source admission**: Each local listener evaluates independently, alongside the existing first
+  matching forge rule. It uses the source's existing action vocabulary, predicates and author gates;
+  several local comment listeners may coexist with the source's one forge comment rule. On GitHub,
+  only local `review_submitted` listeners may add `reviewAuthors` to the association gate: 1 to 32
+  distinct exact lowercase logins, including App `[bot]` names, compared without case. An unlisted
+  reviewer still needs the ordinary collaborator association. Self events always refuse; review-state,
+  label and empty-Commented-review predicates still apply. Polling uses the same transient reviewer login
+  and match function. Its existing open-PR sweep and same-cycle reopen limitations remain.
+- **No source payload**: The source selects whether to signal, never what to execute. Only reviewed
+  trigger configuration and a transport delivery identity enter admission storage. No source title,
+  body, comment, review, labels, actor, branch, repository or item number reaches the command's prompt
+  or event file. Its local event context identifies the configured trigger; the command reads current
+  source state itself. Reviewer login is transient and is absent from queue data, logs and run records.
+- **Bounded durable coalescing**: A trigger has at most one current generation and one successor while
+  that generation executes. Coalescing is per configured source and trigger id across repositories and
+  targets, not per target or command. `debounceSeconds` is an integer from 0 to 300, default 10. The quiet
+  interval moves with each new accepted delivery but never beyond five minutes from that generation's
+  first signal. A delivery receipt is atomic with the signal; receiving the same identity again cannot
+  move the quiet interval. An active generation keeps its queue retry ownership; further signals update
+  only its one successor, eligible no earlier than the current generation ends and its own interval
+  elapses. Pauses, unavailable workers, folder contention and other admission deferrals can delay work
+  beyond the debounce ceiling. Independently configured listeners may produce separate sequential runs.
+  Production signal timestamps and state transitions use Valkey time; tests inject a clock. A fresh
+  signal supersedes an unclaimed cancelled generation or one whose definition or worker changed,
+  using a new generation id. Active work keeps its ownership and places new work in the one successor.
+- **Admission and routing**: A webhook reports durable acceptance, with accepted and coalesced counts,
+  without claiming that a queue job or container already exists. A signal-store failure returns 503;
+  polling leaves the corresponding cursor before the failed event. A named worker reconciles accepted
+  state into its own BullMQ queue idempotently, including after a crash between acceptance and publication.
+  There is no shared-queue fallback. Live state has no blind expiry; retired state is removed and delivery
+  receipts expire by the shared delivery-retention policy. Webhook and polling identities remain distinct;
+  use of both transports is not cross-transport exactly-once processing.
+  A poll response's ETag is committed after that feed's durable admission and cursor or PR snapshot;
+  reviews commit every fetched validator only after the whole sweep cursor. Failed or interrupted
+  admission must not make an unprocessed response disappear behind a conditional 304.
+- **Current authority and serialization**: Before any paid work, the named worker checks the current
+  trigger's stable id, source, complete normalized definition and destination. A changed, removed or
+  disarmed trigger cannot run under a stale signal. Reordering unrelated rows does not revoke it.
+  Cron may optionally name `run.worker`; omitting it retains existing placement. A paired cron and event
+  trigger name the same worker and folder, whose existing canonical-folder mutex prevents overlap.
+  Configuration, cancellation and one-shot handling must not resurrect a retired generation or silently
+  discard a still-authorized signal accepted after that retirement decision.
+  Authority refusals named `local-event-*` must not disarm a local one-shot. A missing active queue job
+  stays blocked until an operator pauses admission, identifies that exact generation, positively proves
+  its runtime container is gone, and retires it through a generation-checked operation that preserves
+  receipts and promotes any successor. No automatic recovery may turn missing evidence into another run.
+- **Traces to**: `CONST-TRIGGER-AUTHOR-GATE`, `CONST-ISSUE-TEXT-IS-DATA`,
+  `CONST-BUDGET-BEFORE-TOKENS`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `REQ-SCOPED-LIMITS`,
+  `DES-LOCAL-EVENT-COALESCING`, `INT-TRIGGERS-FILE-CONTRACT`.
+- **Acceptance**: Five distinct deliveries during the quiet interval cause one run; a continuous burst
+  becomes eligible within five minutes; deliveries during an active run cause at most one successor.
+  Replaying a GUID after restart changes neither count nor deadline. A failed signal write yields 503
+  or an unchanged poll cursor; a crash before queue publication is recovered. A listed App review wakes
+  the local command but does not pass the ordinary forge review gate. Another login, our own identity,
+  wrong review state or a forbidden label cannot use the exception. All four source kinds retain their
+  gates. Captured admission arguments, queue data, event files and logs contain no source text or actor.
+  A paused or retrying generation is not replaced. A changed or absent current rule refuses before spend.
+  A paired cron and event job never execute concurrently in the same canonical folder on their worker.
 
 ## REQ-LOCAL-JOB-VISIBILITY
 
@@ -9081,6 +9156,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-16 (#911) | Added `REQ-LOCAL-EVENT-COMMANDS`: authenticated independent local listeners, explicit worker ownership, exact review-author grants, no source payload, durable per-trigger bounded coalescing, atomic delivery receipts, retry ownership, recovery, current-definition checks and cron-folder serialization. `REQ-TRIGGER-AUTHOR-GATE` AMENDED for the narrowly scoped reviewer grant and the absence of source text from local commands. UNCHANGED, checked: ordinary forge first-match selection and deduplication, action vocabularies, self refusal, polling feed coverage, `REQ-LOCAL-JOB-VISIBILITY`, `REQ-CRON-SCHEDULED-JOBS` scheduler guarantees, isolation, spend checks and registered command execution. Final implementation also amends `REQ-OPERATOR-JOB-CANCEL`: unacknowledged local cancellations disclose possibly committed signal changes; unclaimed changed or cancelled generations can be superseded, active ownership stays, local authority refusals do not spend one-shots, and missing active queue jobs require paused, positively verified manual recovery. Final polling review corrects ETag commit ordering: validators persist only after durable admission and the feed cursor or PR snapshot, with all review validators after the shared sweep cursor, preventing a failed signal from being hidden behind 304. Existing key shapes and TTLs are UNCHANGED, checked. |
 | 2026-11-15 (#908) | Added `REQ-TRIGGER-MERGE-POLICY`: reviewed `run.mayMerge`, exact default prompt preservation, current-trigger digest authorization before each container, all-forge forwarding, versioned data and the image capability proof. `REQ-PER-TRIGGER-INSTRUCTION` now precedes the effective policy paragraph and names the forge trigger types. The wait gate's explanation now distinguishes starting work from granting merge permission. UNCHANGED, checked: `REQ-BRANCH-PROTECTION-PRECONDITION`, author admission, budget gates, ordinary retries, MCP withholding and all unflagged job behavior. |
 | 2026-11-15 (#899) | `REQ-DEDUP-BY-DELIVERY-GUID` and `REQ-OPERATOR-JOB-CANCEL` AMENDED: terminal policy results release the owned semantic window after processing and cleanup, including early refusals and active cancellations; recovery handoffs remain excluded. Shared ingress repairs missed releases from completed policy state with atomic evidence and ownership checks, bounded retry and truthful final enqueue reporting. Retained delivery ids, window length/key grammar, replicas, successful ordinary runs, infrastructure failures and live deferrals UNCHANGED, checked. Parking and steering keep their existing ordering; their blanket non-release wording is narrowed to their own mechanisms. |
 | 2026-11-15 (#897) | **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, (a2): "to fix" is the failed jobs the queue keeps whose work no later run has done since; a failed job a later run of the same cron trigger, or of the same forge target and flow, completed after is left out, and the card says how many. Fleet's failed card and a bulk Retry follow the same rule (`DES-OPERATOR-CONSOLE`). UNCHANGED, checked: the day line and All clear's rule over the last 24 hours, and the failed jobs the list's bound leaves unread, which still count. |

@@ -1,7 +1,7 @@
 {
   "card": "TriggerDetail",
   "pr": 750,
-  "words": "1ea3f1476aa4584342f392c83a78a51d006c0b165aa6d2059bfc364be3393d62",
+  "words": "1e95ad35471566ca49df6979e28c600e55075ec4fe60e071c335164364c966b3",
   "elements": [
     {"el":"p-trigger-on","kind":"panel","status":"new","source":"admin/src/console/panels/trigger.mjs#triggerOn","golden":["trigger.operator"],"reason":"Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."},
     {"el":"p-trigger-runs","kind":"panel","status":"new","source":"admin/src/console/panels/trigger.mjs#triggerRuns","golden":["trigger.operator"],"reason":"Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."},
@@ -30,6 +30,9 @@
     {"el":"Viewer sees facts and runs without edit, delete or fire","kind":"readme","status":"new","source":"admin/src/console/panels/trigger.mjs#triggerEdit","golden":["trigger.viewer"]},
     {"el":"Comment @pi, illustrative five run ids, totals, instructions and doctor quote","kind":"sample","status":"illustrative","reason":"The implementation uses actual fixture data and separate cron/spent/invalid-file goldens; the published card’s totals and prose are sample values."},
     {"el":"Worded run fields","kind":"readme","status":"illustrative","reason":"the page names the file's own `run.*` keys, which is what an operator edits"},
-    {"el":"Delete in the title bar","kind":"readme","status":"illustrative","reason":"the page keeps it in the side panel, away from Edit"}
+    {"el":"Delete in the title bar","kind":"readme","status":"illustrative","reason":"the page keeps it in the side panel, away from Edit"},
+    {"el":"Local event commands show source, identity, debounce and exact review-author authority","kind":"readme","status":"new","panel":"p-trigger-on","source":"admin/src/console/panels/trigger.mjs#triggerOn","golden":["panels/trigger-local-event.operator"],"shows":["Trigger ID","at most one pending follow-up","No event text is passed"]},
+    {"el":"Current generation and one pending follow-up carry safe state only","kind":"readme","status":"new","panel":"p-trigger-runs","source":"admin/src/console/panels/trigger.mjs#triggerRuns","golden":["panels/trigger-local-event.operator"],"shows":["Current generation","Pending follow-up"]},
+    {"el":"Local command owner is a By hand field; the source does not promise a clone","kind":"readme","status":"new","panel":"p-trigger-run","source":"admin/src/console/panels/trigger.mjs#triggerRun","golden":["panels/trigger-local-event.operator"],"shows":["run.worker","Only the worker named by run.worker"]}
   ]
 }

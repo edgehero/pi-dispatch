@@ -9,9 +9,9 @@ export const RECEIVER_FORGES = FORGE_KINDS;
 /** The most `forges` entries a record may name. A fixed bound, never this build's forge count: a newer receiver that
  * serves a forge this build does not know names more forges than this build has, and its record must still be read. */
 export const RECEIVER_FORGES_MAX = 64;
-export const RECEIVER_OUTCOMES = Object.freeze(["queued", "deduplicated", "held", "steered", "dropped", "unauthorized", "not-configured", "lookup-failed", "enqueue-failed", "malformed", "error"]);
-export const RECEIVER_TAKEN = Object.freeze(RECEIVER_OUTCOMES.slice(0, 4));
-export const RECEIVER_REFUSED = Object.freeze(RECEIVER_OUTCOMES.slice(5));
+export const RECEIVER_OUTCOMES = Object.freeze(["queued", "deduplicated", "held", "steered", "accepted", "dropped", "unauthorized", "not-configured", "lookup-failed", "enqueue-failed", "malformed", "error"]);
+export const RECEIVER_TAKEN = Object.freeze(RECEIVER_OUTCOMES.slice(0, 5));
+export const RECEIVER_REFUSED = Object.freeze(RECEIVER_OUTCOMES.slice(6));
 export const RECEIVER_BEAT_MS = 15_000;
 export const RECEIVER_TTL_MS = 90_000;
 export const RECEIVER_HOSTS_MAX = 64;
@@ -52,7 +52,7 @@ export function receiverOutcome(status, result) {
 	return status === 500 ? "error" : null;
 }
 
-/** At most 24 hours and 44 last instants. Clock reversal never resurrects an expired bucket. */
+/** At most 24 hours per outcome and one last instant per forge/outcome pair. Reversal cannot resurrect a bucket. */
 export function makeReceiverObservations({ now = Date.now } = {}) {
 	let newest = hourOf(now());
 	const words = Object.fromEntries(RECEIVER_FORGES.map((forge) => [forge, Object.fromEntries(RECEIVER_OUTCOMES.map((word) => [word, { lastAt: null, hours: new Map() }]))]));
@@ -103,6 +103,12 @@ export function parseReceiverStatus(raw) {
 		}
 		deliveries[forge] = {};
 		for (const word of RECEIVER_OUTCOMES) {
+			// Older v1 receivers could not accept a local signal. Keep their exact absent field readable;
+			// an explicitly malformed counter still refuses, as does any older required outcome missing.
+			if (word === "accepted" && plainObject(d.deliveries[forge]) && !Object.hasOwn(d.deliveries[forge], word)) {
+				deliveries[forge][word] = unobserved(d.at)[word];
+				continue;
+			}
 			const v = d.deliveries[forge]?.[word];
 			if (!v || !(v.lastAt === null || instant(v.lastAt)) || !Array.isArray(v.hours) || v.hours.length !== 24 || v.hours.some((r, i) => !Array.isArray(r) || r.length !== 2 || !instant(r[0]) || r[0] % HOUR !== 0 || !integer(r[1]) || i > 0 && r[0] !== v.hours[i - 1][0] + HOUR)) return null;
 			deliveries[forge][word] = { lastAt: v.lastAt, hours: v.hours.map(([at, n]) => [at, n]) };

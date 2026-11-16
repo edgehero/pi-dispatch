@@ -22,6 +22,7 @@
  * did not complete, and a completed run that lacked its flow or an extension (`loadedProblems`, issue #800), which
  * `outcome=completed` still finds: the record's outcome stays completed, so nothing that counts outcomes moves.
  */
+import { FORGE_KINDS, LOCAL_EVENT_ID_RE } from "@edgehero/pi-dispatch/triggers";
 import { RUN_KINDS } from "@edgehero/pi-dispatch/forges";
 import { PROJECT_ID_RE } from "@edgehero/pi-dispatch/projects";
 import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
@@ -46,6 +47,14 @@ export const RUN_OUTCOME_VALUES = Object.freeze([...OUTCOME_KEYS, "policy"]);
 // which a scheduled run carries in its job id (`repeat:<id>:<millis>`, `manual:<id>:<millis>`); the id charset is the
 // triggers loader's `ID_CHARSET`, bounded.
 const TRIGGER_INDEX_RE = /^\d{1,4}$/;
+/** Stable event identity deliberately includes every definition revision; detail attribution also checks its digest. */
+export function localEventFilterValue(event) {
+  return event && FORGE_KINDS.includes(event.forge) && typeof event.id === "string" && LOCAL_EVENT_ID_RE.test(event.id) ? `event:${event.forge}:${event.id}` : null;
+}
+const localEventFilter = (value) => {
+  const [prefix, forge, id, extra] = value.split(":");
+  return prefix === "event" && extra === undefined && localEventFilterValue({ forge, id }) === value;
+};
 const TRIGGER_ID_RE = /^[A-Za-z0-9._-]{1,128}$/;
 
 /**
@@ -72,7 +81,7 @@ const RULES = Object.freeze({
   repo: { ok: (v) => v.length <= 200 && /^[A-Za-z0-9._/-](?:[A-Za-z0-9._/ -]*[A-Za-z0-9._/-])?$/.test(v), says: "a repository path of letters, digits, '.', '_', '-', '/' and inner spaces, at most 200 characters" },
   kind: { ok: (v) => RUN_KINDS.includes(v), says: `one of ${RUN_KINDS.join(", ")}` },
   flow: { ok: (v) => SKILL_NAME_RE.test(v), says: "a flow name (lowercase letters, digits, '_' and '-', at most 64 characters)" },
-  trigger: { ok: (v) => TRIGGER_INDEX_RE.test(v) || TRIGGER_ID_RE.test(v), says: "a trigger's index or a scheduler id (letters, digits, '.', '_', '-', at most 128 characters)" },
+  trigger: { ok: (v) => TRIGGER_INDEX_RE.test(v) || TRIGGER_ID_RE.test(v) || localEventFilter(v), says: "an event:forge:id reference, a trigger's index or a scheduler id (letters, digits, '.', '_', '-', at most 128 characters)" },
   project: { ok: (v) => PROJECT_ID_RE.test(v), says: "a project id (lowercase letters, digits and '-', at most 32 characters)" },
   host: { ok: (v) => WORKER_NAME_RE.test(v), says: "a worker name (letters, digits, '.', '_', '-', at most 64 characters)" },
   // A venue name (issue #712), by the shape a host row carries one (HOST_VENUE_NAME_RE), not this build's table: a
@@ -148,6 +157,7 @@ export function runVenueOf(record) {
  * a caller that lists it checks it with `parseRunFilter`, as it does every value it lists.
  */
 export function triggerValueOf(record) {
+  if (record?.kind === "local" && record.localEvent) return localEventFilterValue(record.localEvent);
   if (Number.isSafeInteger(record?.triggerIndex) && record.triggerIndex >= 0) return String(record.triggerIndex);
   return schedulerIdOf(record?.jobId);
 }
@@ -167,7 +177,7 @@ export function runMatches(record, filter) {
   if (f.flow !== undefined && record.flow !== f.flow) return false;
   if (f.trigger !== undefined) {
     const byIndex = TRIGGER_INDEX_RE.test(f.trigger) && record.triggerIndex === Number(f.trigger);
-    if (!byIndex && schedulerIdOf(record.jobId) !== f.trigger) return false;
+    if (!byIndex && schedulerIdOf(record.jobId) !== f.trigger && !(record.kind === "local" && localEventFilterValue(record.localEvent) === f.trigger)) return false;
   }
   if (f.project !== undefined && record.project !== f.project) return false;
   if (f.host !== undefined && record.host !== f.host) return false;

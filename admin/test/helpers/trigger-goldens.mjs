@@ -21,6 +21,7 @@ export async function triggerGolden({
   editor = false,
   forges = ["github", "gitlab"],
   githubRestart = false,
+  localEventStatus,
 } = {}) {
   const snapshot = {
     readAt: NOW,
@@ -28,6 +29,7 @@ export async function triggerGolden({
     triggerTasks: { 0: "Review the repository safely." },
     triggerInstructions: { 0: "Keep changes focused." },
     runs: [],
+    ...(localEventStatus ? { localEventStatuses: { 0: { status: localEventStatus } } } : {}),
     waiting: { rows: [] },
     schedulers: [],
     settings: { overlay: {} },
@@ -73,6 +75,10 @@ export const TRIGGER_DRAW = {
   // Issue #879: the first GitHub trigger of a receiver that started without a GitHub route.
   "trigger-editor-github-restart.operator": () => triggerGolden({ editor: true, forges: ["github", "gitlab"], githubRestart: true }),
   "trigger-cron.operator": () => triggerGolden(),
+  "trigger-local-event.operator": () => triggerGolden({
+    trigger: { type: "pull_request", index: 0, forge: "github", runKind: "local", id: "maintain-prs", action: ["review_submitted"], folder: "/srv/maintenance", command: "maintain-prs", worker: "build1", debounceSeconds: 10, reviewAuthors: ["reviewer-app[bot]"] },
+    localEventStatus: { current: { jobId: "event-current", phase: "running", count: 3, dueAt: NOW - 60000 }, next: { jobId: "event-followup", phase: "pending", count: 2, dueAt: NOW + 10000 } },
+  }),
   "trigger-may-merge.operator": () => triggerGolden({ trigger: { type: "label", index: 0, forge: "github", flow: "fix", any: ["pi"], instructions: true, mayMerge: true } }),
   "trigger-spent.operator": () =>
     triggerGolden({

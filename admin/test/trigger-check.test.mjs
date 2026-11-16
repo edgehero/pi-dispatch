@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { build } from "esbuild";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { CHECK_EVENTS, CHECK_LIMITS, CHECK_NOTICE, CHECK_REASON_SENTENCES, checkTriggerEvent, parseTriggerCheckInput } from "../src/trigger-check.mjs";
-import { parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
+import { parseTriggersDocument, triggersFileVersionFor } from "@edgehero/pi-dispatch/triggers";
 import { groupTriggers } from "../../receiver/src/trigger-groups.mjs";
 import { reloadTriggers } from "../../receiver/src/config.mjs";
 import { filter } from "../../receiver/src/filter.mjs";
@@ -22,7 +22,9 @@ const base = { forge: "github", event: "issue-labeled", repository: "acme/web", 
 
 function setup(entries) {
   const triggersPath = join(tempDir("pd-750-check-"), "triggers.json");
-  const source = JSON.stringify({ triggers: entries });
+  const document = { triggers: entries };
+  const version = triggersFileVersionFor(document);
+  const source = JSON.stringify({ ...(version > 1 ? { version } : {}), ...document });
   fs.writeFileSync(triggersPath, source);
   return { triggersPath, source, check: (input = base) => checkTriggerEvent({ input, triggersPath }) };
 }
@@ -213,4 +215,33 @@ test("the checker rejects non-regular sources without a blocking open and bounds
   const grown = checkTriggerEvent({ input: base, triggersPath: f.triggersPath, fs: grownFs });
   assert.equal(grown.refusal.code, "triggers-too-large");
   assert.equal(readBytes, CHECK_LIMITS.fileBytes + 1, "a stat/read race never reads the rest of an oversized file");
+});
+
+const localCommand = (id, on = {}) => ({ on: { type: "pull_request", forge: "github", id, action: ["review_submitted"], ...on }, run: { kind: "local", worker: "build1", folder: "/srv/maintenance", command: "maintain-prs" } });
+test("local listeners match independently alongside the forge winner; exact review logins widen only their own rule", () => {
+  const f = setup([pr("github", ["review_submitted"]), localCommand("one", { reviewAuthors: ["reviewer-app[bot]"] }), localCommand("two", { reviewAuthors: ["reviewer-app[bot]"] })]);
+  const review = { forge: "github", event: "pull-request", action: "review_submitted", repository: "acme/web", actor: "read", prAuthor: "read", reviewState: "approved", reviewAuthor: "reviewer-app[bot]" };
+  const app = f.check(review);
+  assert.deepEqual(app.localMatched.map((m) => m.index), [1, 2]);
+  assert.deepEqual(app.rules.map((r) => r.status), ["not-matched", "matched", "matched"]);
+  assert.equal(app.matched.route, "local-event");
+  const member = f.check({ ...review, actor: "write", reviewAuthor: "member" });
+  assert.equal(member.matched.index, 0);
+  assert.deepEqual(member.localMatched.map((m) => m.index), [1, 2]);
+  for (const over of [{ reviewAuthor: "other-app[bot]" }, { actor: "self" }]) {
+    const refused = f.check({ ...review, ...over });
+    assert.equal(refused.matched, null);
+    assert.deepEqual(refused.localMatched, []);
+  }
+  assert.equal(f.check({ ...review, reviewAuthor: "Reviewer-App[bot]" }).refusal.code, "input-invalid");
+  assert.equal(f.check({ ...review, reviewState: "commented", reviewBody: "empty" }).matched, null);
+  assert.equal(fs.readFileSync(f.triggersPath, "utf8"), f.source, "checking never changes, disarms or queues a rule");
+});
+
+test("local comment listeners keep fixed commands, and Azure source matching needs no clone repository", () => {
+  const comments = setup([localCommand("one", { type: "comment", action: undefined, phrase: "@pi" }), localCommand("two", { type: "comment", action: undefined, phrase: "@pi" })]);
+  const checked = comments.check({ forge: "github", event: "issue-comment", repository: "acme/web", actor: "write", comment: "@pi attacker-chosen-flow body" });
+  assert.deepEqual(checked.localMatched.map((m) => m.command), ["maintain-prs", "maintain-prs"]);
+  const azure = setup([localCommand("azure", { type: "label", forge: "azure", action: undefined, any: ["go"] })]);
+  assert.equal(azure.check({ ...base, forge: "azure" }).matched.route, "local-event");
 });

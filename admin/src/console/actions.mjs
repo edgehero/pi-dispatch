@@ -1061,13 +1061,14 @@ function failedOne({ name, kind, verb, fn }) {
       const got = await failedJob(ctx, jobId, queue);
       if (!got.job) return got;
       const j = got.job;
+      if (verb === "Retry" && typeof j.retryRefusal === "string") return { refusal: j.retryRefusal };
       const reserve = verb === "Retry" ? (await retryReserves(ctx, [j])).get(jobId) : null;
       return {
         target: jobId,
         expect: { attemptsMade: j.attemptsMade, finishedOn: j.finishedOn },
         payload: { jobId },
         reserve,
-        summary: [`${verb} failed job ${failedLine(j)}`, verb === "Retry" ? "It goes back to waiting and runs again through every pre-spend gate, and the worker reserves for it again at pickup." : "The queue's copy goes; the run records its attempts wrote stay."],
+        summary: [`${verb} failed job ${failedLine(j)}`, verb === "Retry" ? "It goes back to waiting and runs again through every pre-spend gate, and the worker reserves for it again at pickup." : "The queue's copy goes; the run records its attempts wrote stay.", ...(verb === "Remove" && j.retryRefusal ? ["Its terminal local event signal is settled first; a pending successor becomes eligible."] : [])],
       };
     },
     async apply(entry, ctx) {
@@ -1114,13 +1115,18 @@ function failedAll({ name, kind, verb, fn }) {
       if (read?.unreachable) return { refusal: "the failed jobs could not be read (is Valkey reachable?); nothing was changed", status: 503 };
       let jobs = (read?.jobs ?? []).slice(0, BULK_MAX);
       if (jobs.length === 0) return { refusal: `no failed job matches${queue ? ` in ${queue}` : ""}${repo ? ` for ${repo}` : ""}; nothing to do` };
+      const noRetry = verb === "Retry" ? jobs.filter((j) => typeof j.retryRefusal === "string") : [];
+      if (noRetry.length) jobs = jobs.filter((j) => typeof j.retryRefusal !== "string");
+      if (noRetry.length && jobs.length === 0) return { refusal: noRetry[0].retryRefusal };
+      const noRetryLine = noRetry.length ? `${plural(noRetry.length, "local event generation")} left out. ${noRetry[0].retryRefusal}` : null;
+      const settleLine = verb === "Remove" && jobs.some((j) => typeof j.retryRefusal === "string") ? "Terminal local event signals are settled first; pending successors become eligible." : null;
       // Issue #897: a retry of a job whose work a later run has since done would do it again and pay for it, so Retry
       // leaves those out and says how many; Remove takes them, which is how they leave the queue. Where the run records
       // cannot be read, nothing is left out and the preview says it could not tell, as Retry did before.
       const judged = verb === "Retry" ? await supersededAmong(ctx, jobs) : null;
       const leftOut = judged === null ? 0 : jobs.filter((j) => judged.has(j.jobId)).length;
       if (judged !== null) jobs = jobs.filter((j) => !judged.has(j.jobId));
-      if (jobs.length === 0) return { refusal: `every failed job that matches${queue ? ` in ${queue}` : ""}${repo ? ` for ${repo}` : ""} ran again later and completed, so none needs a retry; Remove clears them` };
+      if (jobs.length === 0) return { refusal: `${noRetryLine ? `${noRetryLine} Every other` : "every"} failed job that matches${queue ? ` in ${queue}` : ""}${repo ? ` for ${repo}` : ""} ran again later and completed, so none needs a retry; Remove clears them` };
       const supersededLine = verb !== "Retry" ? null : judged === null ? SUPERSEDED_UNREAD_SENTENCE : leftOut > 0 ? supersededLeftOut(leftOut) : null;
       const more = Number(read.more ?? 0);
       const reserves = verb === "Retry" ? await retryReserves(ctx, jobs) : null;
@@ -1135,8 +1141,8 @@ function failedAll({ name, kind, verb, fn }) {
         // The filter rides the ticket for the banner after the write (`WRITE_RULES` `done`); the apply never reads it.
         payload: { ...(queue ? { queue } : {}), ...(repo ? { repo } : {}) },
         reserve: reserves ? bulkReserve(jobs.map(reserveOf)) : null,
-        summary: [`${verb} ${plural(jobs.length, "failed job")}${queue ? ` in ${queue}` : ""}${repo ? ` for ${repo}` : ""}; each is re-checked and acted on alone`, ...lines, ...(past ? [past.text] : []), ...(supersededLine ? [supersededLine] : [])],
-        barLines: [...lines, ...(past ? [past.bar] : []), ...(supersededLine ? [supersededLine] : [])],
+        summary: [`${verb} ${plural(jobs.length, "failed job")}${queue ? ` in ${queue}` : ""}${repo ? ` for ${repo}` : ""}; each is re-checked and acted on alone`, ...lines, ...(past ? [past.text] : []), ...(supersededLine ? [supersededLine] : []), ...(noRetryLine ? [noRetryLine] : []), ...(settleLine ? [settleLine] : [])],
+        barLines: [...lines, ...(past ? [past.bar] : []), ...(supersededLine ? [supersededLine] : []), ...(noRetryLine ? [noRetryLine] : []), ...(settleLine ? [settleLine] : [])],
       };
     },
     async apply(entry, ctx) {
@@ -1243,6 +1249,7 @@ const jobActions = [
     },
     async apply(entry, ctx) {
       const res = await ctx.a.fleet.cancelActive({ jobId: entry.payload.jobId });
+      if (res?.note) return { invalid: res.note };
       if (res?.ack !== undefined) return { ok: true, jobId: entry.payload.jobId, ack: res.ack === "" ? "the worker" : String(res.ack) };
       if (res?.timeout) return { invalid: CANCEL_TIMEOUT_SENTENCE };
       return { invalid: "the cancel was not acknowledged; check the worker log" };

@@ -49,7 +49,7 @@ export const PR_ACTIONS = new Set(["labeled", "opened", "synchronize", "reopened
  * `X-GitHub-Delivery` GUID, which Forgejo emits once per delivery. Forgejo never resends a delivery on its own,
  * and a replay from its UI is a new delivery with a new GUID (receiver.mjs, WHAT A 503 MEANS).
  */
-export function filterForgejo(eventName, subset, triggers, knownFlows, selfId, authorized, deliveryId) {
+export function filterForgejo(eventName, subset, triggers, knownFlows, selfId, authorized, deliveryId, { matchOnly = false } = {}) {
 	// (0) Fail-closed on identity. MUST precede the self compare -- see header.
 	if (typeof subset?.sender?.id !== "number") {
 		return { enqueue: false, reason: "missing-sender-id" };
@@ -113,6 +113,7 @@ export function filterForgejo(eventName, subset, triggers, knownFlows, selfId, a
 	// DES-AWAIT-INPUT-ENDS-THE-JOB): that one also carries `heldCandidate`, the job the parked-reply route would have
 	// built, through the SAME `build` below, so the receiver can hold it for a run that is parking right now and the job
 	// that run starts is byte for byte the one the marker would have produced. Still a drop: nothing here enqueues it.
+	if (matchOnly) return { enqueue: resolved.enqueue === true, ...(resolved.reason ? { reason: resolved.reason } : {}) };
 	if (!resolved.enqueue) return heldCandidateOr(resolved, build);
 	return build(resolved);
 

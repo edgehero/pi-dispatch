@@ -97,7 +97,20 @@ Jobs are a **trigger × target** matrix, and the triggers do not share a threat 
   whether the actor who caused the event has write access, and a submitted review is the first GitHub event
   where the actor and the PR author are different people. So a collaborator's review of a stranger's fork PR
   **does** start a job (the collaborator is the approving human), and a stranger's review of their own PR
-  does not.
+  does not. **An explicit local-command exception** (issue #911) permits a reviewed GitHub
+  `review_submitted` listener to name exact reviewer logins in `on.reviewAuthors`. A listed App or person may
+  wake only that fixed local command, even without a collaborator association. Other event gates, ordinary forge
+  jobs and the unconditional self-identity refusal are unchanged. This is an authorization grant by the operator;
+  a command described as read-only is not thereby restricted to reads.
+- **Events waking a local command.** The command and arguments, folder, worker, credentials and execution limits
+  come from the reviewed trigger. No event title, body, comment, review, label text, branch, actor, repository or
+  item number reaches the command, its prompt or its event file. Reviewer login is transient matching input and
+  is never recorded or logged. The command reads current source state itself. It uses the existing pi extension
+  command contract inside the ordinary container, including the folder's writable mount and normal credential
+  and budget checks; it is neither a host shell nor a guaranteed model-free execution mode. The worker checks the
+  current definition before execution and serializes jobs using the same local folder. Coalescing limits bursts,
+  not the permissions of a handler or a repeated source's total work. The harness's merge policy is unchanged,
+  and `run.mayMerge` remains unavailable on local commands.
 - **Who can trigger, and what a review trigger widens.** Arming `review_submitted` is a wider grant than
   any other GitHub trigger, and there are three things to know before you arm it.
   **It has no second gate.** A comment trigger needs its phrase and a label trigger needs its label, both

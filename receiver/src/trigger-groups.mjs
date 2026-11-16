@@ -1,6 +1,6 @@
 /** The receiver's exact rule grouping, shared with read-only hypothetical matching (#750). */
 import { mergePolicyDigest } from "@edgehero/pi-dispatch/merge-policy";
-import { FORGE_KINDS, PR_CLOSE_ACTIONS } from "@edgehero/pi-dispatch/triggers";
+import { FORGE_KINDS, PR_CLOSE_ACTIONS, sourceForgeOf } from "@edgehero/pi-dispatch/triggers";
 
 export function groupTriggers(parsed, { watchSources = {} } = {}) {
 	// Every forge gets a group whether or not the file names it, so the filter can read
@@ -16,6 +16,13 @@ export function groupTriggers(parsed, { watchSources = {} } = {}) {
 
 	for (const [index, { on, run }] of parsed.entries()) {
 		if (on.type === "cron" || on.type === "watch") continue;
+		// A local listener is additional work, never a rule that can steal the first forge match. Keep
+		// its reviewed configuration whole: the durable signal has no need for any payload-derived job.
+		if (run.kind === "local") {
+			const group = groups[sourceForgeOf({ on, run })];
+			(group.localEvents ??= []).push({ on, run });
+			continue;
+		}
 		// Guarded because a command trigger (issue #189) has NO run.flow, and `Set.add(undefined)` would put
 		// undefined into the comment `<phrase> <flow>` override allowlist. That set exists to bound which
 		// names a collaborator's comment may summon; polluting it with a non-name is how a later loose

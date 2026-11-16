@@ -1755,13 +1755,18 @@ refactor apart.
     fired (`review_submitted`), which GitHub never sent on any event. That follows from what each object
     is for — the record says what the forge said, `matched` names the rule the operator wrote — but it
     means "for `pull_request` the `action`" above must be read as the rule's action, not the payload's.
-  - A **local** job gets one of three `source`-discriminated shapes — naming the fields IS the contract:
+  - A **local** job gets one of four `source`-discriminated shapes — naming the fields IS the contract:
     ```
     cron:    { source: "cron", trigger: { id, pattern }, folder: <basename>, sha: <folder HEAD>,
                scheduledFor: <ISO>|null, previousRunAt: <ISO>|null }
     manual:  { source: "manual", folder: <basename>, sha }   // CLI `pi-dispatch run` / admin dispatch_run
     chain:   { source: "chain", folder: <basename>, sha }    // outbox-chained child
+    event:   { source: "forge", trigger: { id }, forge: <configured source kind>, folder: <basename>, sha }
     ```
+    The event-local shape (#911) is entirely configuration-derived. It contains no source text, actor,
+    repository, item number, branch or last-event representative. Its folder and SHA describe the local
+    workspace, never the event's source repository. A coalesced generation can
+    stand for several repositories; the registered command reads any current source state it needs.
     `folder` is the **basename only** — the full host path embeds the operator's OS account name and
     `/job` is agent-readable, the same restraint `INT-RUN-HISTORY-FILE-CONTRACT` applies to
     `local:<basename>`. `sha` is the folder's HEAD at prepare time. `scheduledFor` derives from the BullMQ
@@ -4133,6 +4138,13 @@ is its only entry point (`worker/src/live-probes.mjs`, driven from `doctor.mjs`)
 
 ## INT-WEBHOOK-PAYLOAD-SUBSET
 
+- **Polling validator commit order (#911 review)**: existing per-repository ETag keys retain their
+  shapes and TTLs. A 200 response's validator is staged in memory, then stored after its feed's admissions
+  and cursor or PR snapshot writes succeed. Review validators commit only after the whole sweep's shared
+  cursor, including when earlier PRs succeeded before a later PR failed. A crash can leave an older ETag
+  beside a newer cursor; that safely refetches handled data. It cannot leave a newly acknowledged body
+  hidden behind 304 while its admission or cursor remains incomplete.
+
 **GitHub → receiver.** *(GitLab's is a separate contract — `INT-GITLAB-PAYLOAD-SUBSET`. This ID keeps
 its name and its GitHub-only body: IDs are permanent addresses, and a second forge's payload is a
 different shape rather than an extension of this one.)*
@@ -4160,13 +4172,15 @@ different shape rather than an extension of this one.)*
     `pull_request.labels[].name`, `pull_request.head.ref`, `pull_request.head.sha`,
     `pull_request.head.repo.full_name`, `pull_request.base.ref`; and for a `pull_request_review` event
     those same `pull_request.*` fields (the payload carries the full PR object) **plus** `review.id`,
-    `review.body`, `review.state`, `review.author_association`.
+    `review.body`, `review.state`, `review.author_association`, and `review.user.login` as transient
+    local-listener matching input (`authorLogin` in the subset, absent when the source has no login).
   - **`review.state` is folded to lower case on projection**, and that fold is normative rather than
     cosmetic. GitHub spells it `approved` on the webhook and `APPROVED` on
     `GET /repos/{o}/{r}/pulls/{n}/reviews`, so without the fold the identical review would produce two
     different jobs depending on transport, and a polled `COMMENTED` would slip past the empty-body refusal
-    below. `review.user` is deliberately **not** consumed: `sender.id` is the only identity the gate and
-    the bot-loop guard read, and a login is PII with no reader.
+    below. Since #911, only `review.user.login` is read from `review.user`: an exact `reviewAuthors`
+    grant on a local command compares that reviewer's login without case. The login is never queued,
+    recorded or logged. `sender.id` still supplies the unconditional self-identity guard.
   - **`review.id` is consumed because the receiver cannot see a review's inline comments.** Those ride
     `pull_request_review_comment`, an event this contract does not consume, so a flow that wants them has
     the id and nothing else. Note the consequence, which is stated plainly rather than buried: a
@@ -4178,17 +4192,19 @@ different shape rather than an extension of this one.)*
   - `issue.labels[].name` and `pull_request.labels[].name` are consumed as a **set**, evaluated by the
     `{any, all, none}` trigger predicate (`REQ-TRIGGER-AUTHOR-GATE`) — this changes *how* the field is
     used, not which fields are read.
-  - For a comment-triggered job, `comment.body` and `comment.author_association` now ride the job as
+  - For a comment-triggered **forge** job, `comment.body` and `comment.author_association` now ride the job as
     `trigger.comment` into `/job/event.json` and the prompt's fenced data region
     (`INT-CONTAINER-JOB-INPUTS`) — the first time these two fields leave the receiver. The subset itself is
     unchanged — both were already named here — and the body stays data-by-placement
     (`CONST-ISSUE-TEXT-IS-DATA`).
-  - For a review-triggered job, all four `review.*` fields ride the job as `trigger.review` into
+  - For a review-triggered **forge** job, the original four `review.*` fields ride the job as `trigger.review` into
     `/job/event.json`, and `review.body` **alone** enters the prompt's fenced data region — `state`, `id`
     and `author_association` are metadata and stay in `event.json`, the same line `comment.author_association`
     has always been on. The body is data-by-placement (`CONST-ISSUE-TEXT-IS-DATA`); it is untrusted text
     from whoever cleared the gate, and it is the whole point of carrying the review at all, since a
     "Request changes: rename the helper" review that starts a job the agent cannot read is a half fix.
+    A local event command receives none of these source fields; its event file has the configuration-only
+    shape in `INT-CONTAINER-JOB-INPUTS`. Its durable receipt is distinct from the ordinary forge queue id.
   - **`pull_request.head.*` and `.base.*` are DATA only.** They are attacker-controlled (the head may be a
     fork) and are carried into `/job/event.json` for the flow's own `gh` use; they are **never** used as a
     clone ref. The worker still clones the base repo's default-branch SHA (`INT-CONTAINER-JOB-INPUTS`).
@@ -4410,6 +4426,101 @@ with it: no delivery-id header, two actor representations, tags as a string, and
 
 ---
 
+## INT-LOCAL-EVENT-STATE
+
+**Authenticated receiver or poller → Valkey → named worker** (issue #911). This is durable admission
+state ahead of BullMQ, never an alternative execution queue (`DES-LOCAL-EVENT-COALESCING`). The leaf
+`worker/src/local-event-store.mjs` is exported as `@edgehero/pi-dispatch/local-event-store`; its caller
+supplies an existing Redis client, and it opens no connection. An injected clock and nonce are test seams;
+production state transitions use Valkey `TIME` so different receiver and worker clocks do not decide the
+quiet interval differently.
+
+```
+local:event:state:<sha256 JSON([forge,id])>             STRING, versioned state below, no live TTL
+local:event:receipt:<sha256 JSON([forge,id,deliveryId])> STRING "1", FORGE_JOB_RETENTION_S expiry
+local:event:index                                     ZSET, state keys scored by last state mutation
+
+{ version: 1, current: <generation>, next?: <generation> }
+generation = { generation: <32 lowercase hex>, data: <local queue data>,
+               phase: "pending"|"active", firstAt: <epoch ms>, lastAt: <epoch ms>,
+               dueAt: <epoch ms>, count: <1..2147483647>, owner?: <attempt owner>,
+               cancelled?: true, blocked?: "queue-job-missing" }
+```
+
+- **Signal**: `signal({trigger,deliveryId})` accepts the complete normalized operator trigger, never the
+  event subset. The receipt id is source-qualified and trigger-qualified; delivery identities are
+  nonempty strings of at most 256 characters without controls. The same script writes receipt and
+  intent atomically. A duplicate returns accepted and coalesced without mutating times or count. The
+  pending current generation coalesces only with the same definition digest. A fresh signal replaces an
+  unclaimed current generation if its definition or owner changed, or it was cancelled, using a new
+  generation; any old queue job then fails current-generation admission before spend. An active current
+  generation is not overwritten, and one successor holds the next reviewed definition.
+  A successor is bounded to one generation, so a later definition supersedes its
+  previous pending definition. The due time is `min(lastAt + debounceSeconds*1000, firstAt + 300000)`.
+  Return: `{accepted:true,coalesced,generation,worker,triggerId}`, or the duplicate result
+  `{accepted:true,duplicate:true,coalesced:true}`. Storage failure throws so HTTP answers 503 and polling
+  holds its cursor; neither path logs source text or exception messages.
+- **Queue data**: a generation carries the ordinary whitelisted `localRunData(run)` plus
+  `trigger:{id}` and `localEvent:{id,forge,type,worker,digest,generation}`. Only a configured one-shot
+  adds `localEvent.once:true` and its configured `number` for retirement; that number is not an incoming
+  event target and does not reach the command's event file. `digest` is 64 lowercase SHA-256 hex over
+  sorted normalized `{on,run}`, excluding `on.disarmed`; row position and object-key ordering do not
+  affect it. `localEvent` and the top-level `worker` require job data version 6. The deterministic job id
+  is `local-event-<generation>`. Job data contains no source body, text, labels, actor or representative
+  repository/item. The command's event file is the smaller `source:"forge"` shape in
+  `INT-CONTAINER-JOB-INPUTS`.
+- **Publication and ownership**: each named worker starts one non-overlapping reconcile loop, normally
+  every second, scanning the index in bounded batches (`ZSCAN COUNT 100`). Only the matching
+  `data.localEvent.worker` can publish to its host queue. Queue add is idempotent on generation id,
+  with ordinary local completed/failed retention and the normal two-attempt exponential retry policy.
+  After current-authority checks and acquisition of the local folder slot, `claim` compares the
+  generation, waits until the current deadline or sets it active with its attempt owner. Only the
+  current generation can finish or cancel; a finishing attempt with a different recorded owner is stale.
+  Finalization promotes the successor with `dueAt >= completion time`. Terminal queue failure promotes
+  only after the queue exhausted retries. Reconciliation repairs a terminal job whose finalization was
+  interrupted. A missing pending job is republished; a missing active job records `queue-job-missing`
+  and remains blocked for operator recovery rather than repeating uncertain execution. Recovery pauses
+  the queue, inspects that exact generation and positively establishes the runtime container is gone
+  before calling generation-checked `finish`; the procedure in `docs/triggers.md` preserves receipts
+  and promotes any successor, without asserting prior success or making a run record.
+- **Local workspace ownership**: all local jobs on the owning worker take an additional mutex keyed by
+  resolved filesystem device/inode; their authored folder still keys spend accounting. Preparation checks
+  that identity again. Before giving the workspace back after a container attempt, the worker asks the
+  owning runtime for positive gone evidence, with a two-second response bound. False, unknown, failure,
+  or a declared lingering sandbox retains an orphan and reports `local_workspace_exit_unconfirmed` when
+  inspection was inconclusive. The host-budget sweep alone releases it after positive gone evidence,
+  including when resource limits are off. Unread boot listings and unknown survivors block local starts.
+  These checks cover enabled venues on that worker; drain a venue before disabling it. They do not lock
+  unrelated host processes or coordinate independently owned workers sharing a filesystem.
+- **Cancel and one-shot**: cancel tombstones the current generation and clears the successor present
+  then. Repeating that cancel cannot clear a successor created by a later new delivery. A queued
+  cancelled job is removed and retired; an active job retains the ordinary acknowledged stop protocol.
+  A timeout can follow a committed signal tombstone; all requester surfaces say pending signals may
+  have been cleared and tell the operator to check trigger and run status before retrying. Queue-removal
+  uncertainty separately says whether signal cancellation was stored or may have been stored.
+  A local-event authority refusal whose reason starts with `local-event-` never disarms a one-shot;
+  otherwise a stale queue entry could spend the live generation that replaced it.
+  One-shot completion discards a successor only when its definition digest equals the spent one.
+  An empty retired state and its index member are removed atomically. Live state has no TTL; receipts
+  expire using the shared forge retention constant, without being refreshed on replay. Store corruption
+  or an unknown state version throws rather than being interpreted as absent work.
+  Manual retry refuses a finished local-event generation; a fresh matching event or reviewed cron
+  fallback supplies new work. Removing a failed queue entry first revalidates its failed state and
+  fingerprint, then settles its generation (including same-definition one-shot retirement), and only
+  then removes the entry. Uncertain settlement keeps the queue entry and reports a partial outcome;
+  removal uncertainty after settlement also reports that the successor may already be ready.
+- **Visibility**: `readLocalEventStatus` rebuilds only `current` and `next`, each with job id, phase,
+  cancelled boolean, count and due time, and the closed blocked token when present. It exposes no
+  execution configuration. `local_event_reconcile_failed` marks a reconciliation outage and
+  `local_event_queue_job_missing` marks uncertain missing execution; neither reports raw exception text.
+  Trigger pages use stable source/id identity and display current pending/active state. Run records carry
+  only the configuration-derived identity and digest (`INT-RUN-HISTORY-FILE-CONTRACT`).
+- **Across releases**: state starts at version 1. No older state shape exists to migrate. All workers,
+  receivers, panels and consoles must understand triggers version 5 and job data version 6 before this
+  shape is written. Backup includes all three key families and ordinary BullMQ data; restoring only one
+  side cannot establish whether an active generation executed. Webhook and poll delivery ids are distinct,
+  so duplicate receipts provide transport-specific deduplication, not cross-transport exactly-once work.
+
 ## INT-TRIGGERS-FILE-CONTRACT
 
 - **What the writer cannot keep (AMENDED 2026-11-05)**: `writeTriggers` starts from an empty set only for a file that
@@ -4464,6 +4575,7 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
                "maxTurns": <optional int >= 1; ALL kinds>,
                "maxCostUsd": <optional dollar amount (INT-CONFIG-OVERLAY-CONTRACT); only narrows; ALL kinds>,
                "github": <optional boolean>, "packages": <optional boolean>,
+               "worker": "<optional named worker; required for event-local commands>",
                "resume": <optional boolean>,
                "image": "<optional: docker image ref; absent = PI_JOB_IMAGE>",
                "skillsDir": "<optional: absolute WORKER-HOST dir of <name>/SKILL.md skills>",
@@ -4484,7 +4596,7 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
                "secretsProfile": "<optional: which declared resolver reads them; absent = the profile named `default`>",
                "secretBundle": <optional boolean; false keeps this trigger's jobs out of their project's bundle; ALL kinds>,
                "mcp": [<optional: 1 to 8 server names of the overlay's mcp.json (INT-OVERLAY-MCP-CONFIG); ALL kinds>] } },
-    { "on": { "type": "comment", "phrase": "<trigger phrase>" },       // at most one
+    { "on": { "type": "comment", "phrase": "<trigger phrase>" },       // at most one forge-job rule per forge
       "run": { "kind": "github", "flow": "<default flow>",
                "command": "<see cron — exactly one of flow/command>", "packages": <optional boolean>,
                "provider": "<optional; see cron>", "model": "<optional>", "maxTurns": <optional>,
@@ -4572,11 +4684,14 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
 - **`version` (top level, optional) and `dataVersion` (job data)** (AMENDED 2026-11-02, #761,
   `DES-STORE-VERSION-WHEN-NEEDED`). An integer, absent meaning 1; `TRIGGERS_FILE_VERSION` (2 since issue #800, for
   `run.excludeExtensions` and `run.excludeExtensionTools`; 3 since issue #888, for `run.idleTimeoutMinutes`,
-  `run.stallTimeoutMinutes` and `run.maxMinutes`) is the highest this build reads. The writer OWNS it: `writeTriggers` writes `triggersFileVersionFor` of the result, the version the entries' raw
+  `run.stallTimeoutMinutes` and `run.maxMinutes`; 4 since #908 for `run.mayMerge`; 5 since #911 for
+  local event `on.forge`, `on.debounceSeconds`, `on.reviewAuthors` and `run.worker`) is the highest this
+  build reads. The writer OWNS it: `writeTriggers` writes `triggersFileVersionFor` of the result, the version the entries' raw
   `run` keys (`TRIGGER_RUN_FIELD_VERSIONS`), the top-level blocks (`TRIGGERS_BLOCK_VERSIONS`) and the VALUES of an
   entry's fields, of its `run` keys and of each block (`TRIGGER_VALUE_VERSIONS`, `TRIGGER_RUN_VALUE_VERSIONS`,
   `TRIGGERS_BLOCK_VALUE_VERSIONS`, `field -> (value) => version`, a block's rule handed the whole block) need, all five
-  frozen, the first naming `excludeExtensions` and `excludeExtensionTools` at 2 and the other four empty today, first when added, in place when kept, and no key at all while that is 1 (a hand-written
+  frozen, with the named run fields in the field table and the new event fields judged by the `on` value
+  rule, first when added, in place when kept, and no key at all while that is 1 (a hand-written
   `"version": 1` is dropped), so a file that uses neither field is written byte for byte as before. That text is
   `triggersFileText(next, nextDocument, versions)` (AMENDED 2026-11-04, #823), which the console's pre-checks call
   too: a standing answer, a model role, a zero-touch group name, an instruction sentence and its Undo are each
@@ -4588,7 +4703,7 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   worker's, the receiver's and the console's bundled copy, through `parseTriggersDocument`) judges it right after the
   duplicate-key check (so a repeated `version` is a broken file, never a newer one) and BEFORE the `triggers` array,
   because a newer file may have reshaped anything below it: a version above this build's throws a configError marked
-  `.newer` ("triggers file written by a newer pi-dispatch (version N; this build understands 3)"); a version that is not
+  `.newer` ("triggers file written by a newer pi-dispatch (version N; this build understands 5)"); a version that is not
   an integer of 1 or more, and a `run` key, block or value that needs more than the file declares ("run.<key> needs
   triggers file version N, and the file declares M"; "trigger at index I: on holds a value that needs triggers file
   version N, and the file declares M"; the same for `run.<key>` and for a top-level block), throw the ordinary one. So a
@@ -4632,7 +4747,10 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   there too, never newer, judged on the text by `triggersFileNewer` ("triggers file has a duplicate key, so it is
   broken, not newer: JSON keeps the last value, so the file that was reviewed and the file that runs are not the same
   file"); a repeated key whose version does not read newer is shown as leniently as before. `dataVersion` is the same
-  rule for a queued job's data (`worker/src/job-data-version.mjs`: `JOB_DATA_VERSION` 3 since #800 and 4 since #888, `JOB_DATA_FIELD_VERSIONS` naming `packageCanary` at 2, `excludeExtensions` and `excludeExtensionTools` at 3, and `idleTimeoutMinutes`, `stallTimeoutMinutes` and `maxMinutes` at 4, and
+  rule for a queued job's data (`worker/src/job-data-version.mjs`: `JOB_DATA_VERSION` 3 since #800, 4 since #888,
+  5 since #908 and 6 since #911; `JOB_DATA_FIELD_VERSIONS` names `packageCanary` at 2,
+  `excludeExtensions` and `excludeExtensionTools` at 3, `idleTimeoutMinutes`, `stallTimeoutMinutes` and
+  `maxMinutes` at 4, `mayMerge` and `mayMergePolicy` at 5, and `localEvent` and `worker` at 6, and
   `JOB_DATA_VALUE_VERSIONS`, the values of its top-level fields, frozen and empty). It is a JOB-level field, never
   inside `trigger`, so it never reaches `/job/event.json` or any other `/job` input (`INT-CONTAINER-JOB-INPUTS`), and
   every builder stamps it (`forgeJobOf`, `addLocalJob`, the cron template and the receiver's `fallbackJobOf`) only when
@@ -4682,12 +4800,29 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   through the shared `parseTriggers`), its message naming the entry's index and the id's length, never the id, and
   why: each run's job id, `repeat:<id>:<up to 16 digits>`, must stay within the 200 characters the readers take; the
   setup wizard's first-trigger dialog refuses it too, without echoing it.
-- **The on × run MATRIX is the trust boundary, enforced fail-loud at load**: `cron ⟹ run.kind:"local"`;
-  every webhook type (`label`, `comment`, `pull_request`, `issue`) `⟹ run.kind ∈ {"github", "gitlab", "forgejo", "azure"}` — a forge
-  job, never a local one. Off-matrix throws a `piDispatchConfig` error — a `cron` trigger has no webhook
-  delivery, issue/PR number, title, or body to supply a forge run, and a webhook trigger is adversarial
-  input that always produces a forge job.
-- **`run.command` (ALL FOUR trigger kinds) — the second entry point, and the file's one either/or pair:
+- **The on × run matrix**: `cron ⟹ run.kind:"local"`; event types (`label`, `comment`,
+  `pull_request`, `issue`) select an ordinary forge job or an explicitly reviewed local command (#911).
+  `sourceForgeOf` reads `on.forge` for that local listener and the existing `run.kind` for a forge job.
+  Source authentication and author gates remain mandatory for both executions. Cron cannot supply a forge
+  job's delivery or target, and an event-local entry cannot select a local flow.
+- **Local event command fields (#911)**: `on.forge` is required and one of `FORGE_KINDS`; `on.id` is
+  required, unique among local event ids and matches `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`. Its source-specific
+  action, label, comment, review-state and close predicates are validated by the same source validators.
+  `on.debounceSeconds` defaults to 10 and must be an integer 0 through 300. `on.reviewAuthors`, only on a
+  GitHub local `pull_request` rule whose action list includes `review_submitted`, is a list of 1 through
+  32 distinct exact lowercase logins matching `^[a-z0-9][a-z0-9-]{0,38}(?:\[bot\])?$`. Matching compares
+  the reviewer's login without case and adds to the ordinary association grant. It does not override the
+  self guard or any other predicate. These three `on` fields are refused outside the local event shape.
+  `run.command`, `run.folder` and `run.worker` are required; local command compatibility checks still
+  apply, and `run.repository` and `run.portfolio` are refused. No source payload is stored with the job.
+  Local listeners do not count against the one ordinary forge comment rule, and each matches independently.
+- **`run.worker` (#911)**: a destination matching `^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`, with no `.json`
+  or `.log` suffix, required on local event commands and optional on cron, refused on other jobs. A named
+  cron belongs only to that worker, even when another worker has the same folder path; an unnamed cron
+  keeps its existing folder placement. A manual `run --trigger` on a different owner refuses rather than
+  dispatching remotely. Pair a cron and event command with the same worker and canonical folder to share
+  the local execution mutex. The receiver never inspects that worker's folder.
+- **`run.command` (all supported trigger types) — the second entry point, and the file's one either/or pair:
   EXACTLY ONE of `run.flow` or `run.command`, refused at parse in both services when both are present and
   when neither is** (`DES-COMMAND-ENTRY-POINT`; the shared validator is what makes the refusal identical
   on both sides, `DES-TRIGGERS-UNIFIED-FILE`). The value names a **registered pi extension command**,
@@ -4701,8 +4836,8 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   **The prompt is EXACTLY `/<command> [args]`** — no envelope, no numbered steps, no data heading, no
   pointer at `event.json`, no trailing newline — **for local AND forge command jobs alike**
   (`DES-TRIGGER-INSTRUCTION-IN-THE-ENVELOPE` records why the bypass changes no existing prompt).
-  Delivery context rides `/job/event.json`, which the handler parses itself; the payload therefore
-  reaches a command job **only as a file the handler chooses to read**, which preserves
+  A forge command's delivery context rides `/job/event.json`, which the handler parses itself; its payload
+  therefore reaches that command **only as a file the handler chooses to read**, which preserves
   `CONST-ISSUE-TEXT-IS-DATA` and arguably strengthens it — nothing attacker-authored is rendered into
   the prompt at all.
   **Args are static, and that is doctrine rather than a limitation**: they come only from the reviewed
@@ -4927,9 +5062,9 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   to repeat jobs. This is the file's one **narrowing** since the widening doctrine was written: an old
   file carrying such a flow now refuses loudly at boot (or keeps last-good on live reload) instead of
   failing paid — named in the release notes because the refusal is new, not because the flow ever worked.
-- **`run.github` (cron only, optional boolean)**: absent or `false` = no token — the zero-GitHub default;
+- **`run.github` (local jobs, optional boolean, including cron and event commands)**: absent or `false` = no token — the zero-GitHub default;
   `true` = the worker mints the same per-job token the GitHub path mints and injects it as
-  `GITHUB_TOKEN`/`GH_TOKEN` (`INT-CONTAINER-RUNTIME-CONTRACT`), so the flow can use the `gh` CLI. A
+  `GITHUB_TOKEN`/`GH_TOKEN` (`INT-CONTAINER-RUNTIME-CONTRACT`), so the flow or command can use the `gh` CLI. A
   non-boolean value is refused at load; with `GITHUB_AUTH_SOURCE=app` a `run.github` job refuses at mint
   time — an installation token is per-repo, and a local job has no repo to scope it to.
 - **`run.portfolio` (cron only, optional boolean; issue #505)**: `true` makes the trigger's jobs portfolio
@@ -5133,7 +5268,7 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   that looks like an opt-out and is not one. The worker's wiring-time re-check inverted to match
   (`job.packages === false ? [] : packagePaths`), and the strictness that used to live in its `=== true`
   did not disappear — it moved to the load-time validator, where a hand-edited string is refused before it
-  can ever become job data. It is carried on all four kinds rather than cron only (unlike `run.github`)
+  can ever become job data. It is carried on forge and local jobs (unlike the local-only `run.github`)
   because a staged package is a **capability of the flow**, and a label/comment/PR trigger runs the same
   flows a cron trigger does. With nothing staged the flag emits nothing at all, which is a silent no-op by
   construction — `doctor` is where that becomes visible.
@@ -5817,7 +5952,7 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
 
 - **Why**: The operator's trigger set is one host file — diffable, reviewable, git-trackable — rather than
   two files in two shapes across two services. The schema unifies the *view*; evaluation still splits by
-  owner (a `label` is never scheduled; a `cron` never receives a webhook). `on.id` (cron only) must be
+  owner (a `label` is never scheduled; a `cron` never receives a webhook). A cron's `on.id` must be
   `:`-free because every reader of a cron run (the stall guard among them) parses BullMQ's `repeat:<id>:<millis>` job
   id, and the hand-fired `manual:<id>:<millis>`, at its colons (`cronRunOf`, `worker/src/bullmq-internals.mjs`; CORRECTED
   2026-11-03, #761, upgrade path: it said "by splitting on `:`"), and BullMQ takes a custom id with a `:` only in exactly
@@ -5829,11 +5964,13 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   (`INT-CONFIG-OVERLAY-CONTRACT`); present → checked at load by the bullet above. `image` is passthrough in the same sense with one deliberate difference:
   it resolves against `PI_JOB_IMAGE` **only**, never the settings overlay, so no admin-editable runtime knob
   can change which code every job executes (`DES-RUNTIME-SETTINGS-FILE-OVERLAY`). A `labeled` PR rule (like a `label` rule) requires a positive selector;
-  at most one `comment` trigger may be configured.
+  at most one ordinary forge-job `comment` trigger per forge may be configured; independent local event
+  listeners are outside that count.
 - **Traces to**: `DES-TRIGGERS-UNIFIED-FILE`, `DES-CRON-VIA-BULLMQ-SCHEDULER`, `REQ-TRIGGER-AUTHOR-GATE`,
   `CONST-ISSUE-TEXT-IS-DATA`, `INT-CONFIG-OVERLAY-CONTRACT`, `INT-PI-PACKAGES-FILE-CONTRACT`,
   `REQ-GLOBAL-PI-OVERLAY`
-- **Acceptance**: Given an off-diagonal entry (`cron`→`github`, or any webhook type→`local`), a duplicate
+- **Acceptance**: Given an invalid execution entry (`cron`→`github`, or an event→local without its
+  explicit source, command, id or destination), a duplicate
   cron `id`, a `:` in a cron `id`, a cron `run.folder` that does not exist, a `labeled` PR/label rule with
   no positive selector, or a second `comment` trigger, when the config loads, then load throws a
   `piDispatchConfig`-tagged error in both services. Given a valid `cron` entry, when it fires, then the
@@ -6089,6 +6226,14 @@ validator rather than a second copy of it.
 
 ## INT-RUN-HISTORY-FILE-CONTRACT
 
+- **Local event identity (#911)**: only a valid local-event job adds
+  `localEvent:{id,forge,type,digest}`. All four values derive from the reviewed trigger; there is no
+  generation, worker destination, event count, source actor, source text, repository or item number in
+  this field. `kind` remains `local`, target remains the folder basename, and ordinary forge
+  `triggerIndex`/`triggerType` remain null. Trigger detail statistics match the current source, id, type
+  and complete-definition digest; the Runs filter `trigger=event:forge:id` deliberately spans definition
+  revisions. Old records without this field remain readable and are not attributed to an event listener.
+
 - **Draft/cancel metadata (#766, #772)**: A validated answer helper carries `purpose: "answer-draft"` and `answerDraft: {sourceRunId,ruleId}` identifiers only. It has its own ordinary metered run record but never counts as answering/superseding the source or as a zero-touch workload. Delegated cancellations add catalog reason `agent-cancel` (cancelled outcome display), distinct from a human’s `operator-cancel`. No draft/question, source text, persona or arbitrary model output enters the record.
 
 **Extension (#770):** `INT-TOUCH-INDEX` defines optional tracking facts, preserved retry uncertainty and internal grouping purpose. Unresolved grouping references retain `kind:null`; resolved executions use the existing local kind. The forge/local vocabulary is unchanged.
@@ -6115,7 +6260,7 @@ validator rather than a second copy of it.
     "flow":    "<flow name>" | null,
     "startedAt": "<ISO-8601>", "endedAt": "<ISO-8601>",
     "outcome":   "completed" | "policy" | "failed",
-    "reason":    "<fixed enum: worker-abort|merge-policy-invalid|merge-policy-unavailable|merge-policy-changed|job-image-merge-policy-unsupported|operator-cancel|agent-cancel|idle|stalled|max-minutes|credential-expired|package-canary-invalid|package-canary-packages-off|package-canary-excluded|exclude-tool-not-loaded|job-image-load-exclusions-unsupported|package-canary-resume|package-canary-not-staged|package-canary-adapter|package-canary-version-missing|package-canary-refused|job-image-package-canary-unsupported|answer-draft-refused|answer-draft-config-changed|answer-draft-unavailable|job-image-answer-draft-unsupported|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|portfolio-snapshot-oversize|local-folder-escaped|local-folder-holds-envelope|local-folder-holds-subscription-auth|local-folder-is-sandbox|local-folder-project-changed|unprotected-branch|branch-protection-unreadable|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|model-roles-invalid|model-roles-shadowed|model-role-unknown|model-role-provider-conflict|model-agents-invalid|job-image-model-roles-unsupported|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-model-failover-unsupported|job-image-cost-cap-unsupported|model-unknown|model-failover-no-candidate|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|secret-bundle-profile-unknown|secret-bundle-profile-ambiguous|secret-bundle-resume|secret-bundle-trigger-changed|openshell-bundle-endpoint-not-allowed|openshell-bundle-endpoint-shared|openshell-bundle-endpoint-unknown|openshell-bundle-name-taken|openshell-bundle-unpassable|openshell-bundle-image-too-old|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|oom-killed|job-size-exceeds-host|job-size-exceeds-share|job-image-mcp-unsupported|job-image-forge-mcp-unsupported|mcp-list-invalid|mcp-config-invalid|mcp-server-unknown|mcp-secret-unmapped|mcp-secret-reserved|mcp-excluded|mcp-egress-unreachable|mcp-package-runner|mcp-unavailable|mcp-config-mismatch|mcp-secret-missing|mcp-command-missing|mcp-shadowed|await-input-shadowed|await-input-without-session|job-image-await-input-unsupported|awaiting-input|not-parked|report-progress-shadowed|steer-inbox-missing|steer-no-exit-key|job-image-progress-unsupported|job-image-recover-unsupported|job-image-steer-unsupported|job-image-sandbox-layout-unsupported|job-image-observable-runner-unsupported|venue-local-folders-unsupported|openshell-gateway-not-local|openshell-global-policy|openshell-landlock-missing|openshell-recover-unsupported|openshell-credential-reads-value|openshell-gateway-untested|openshell-egress-untranslatable|openshell-bind-mounts-disabled|openshell-ptrace-scope-unprotected|openshell-ptrace-scope-too-strict|openshell-bind-sandbox-lingering|recover-store-unset|recovery-enqueued|recovery-host-lost|recovery-cap|recovery-checkpoint-absent|recovery-superseded|recovery-unsafe-extensions|recovery-failed|container-infra-exit|container-exit-unknown|worker-error|awaiting-approval|approval-config-invalid|approval-without-session|approval-shadowed|approval-decision-invalid|approval-author-missing|approval-expired|approval-expiry-invalid|approval-host-mismatch|approval-job-id-missing|approval-park-invalid|approval-pending|approval-policy-changed|approval-policy-unavailable|approval-request-conflict|approval-request-stale|approval-request-unbound|approval-state-conflict|approval-state-unavailable|approval-store-unavailable|approval-finish-unavailable|approval-session-not-saved|approval-session-unavailable|job-image-approval-gates-unsupported|job-image-approval-auth-unsupported|...|question-group-unavailable|question-group-config-changed|question-group-source-expired|question-group-source-unavailable|question-group-source-oversize|question-group-candidates-expired|question-group-limit|question-group-stale|question-group-refused|question-group-unanswered|question-group-output-invalid|job-image-question-grouping-unsupported|watch-unavailable|watch-query-credential-missing|watch-cooldown|watch-cap|watch-unmatched|watch-ignored|decide-refused|decide-unanswered|watch-reference-invalid|watch-config-changed|watch-window-pending|watch-threshold|watch-evidence-expired|watch-issue-target-missing|watch-trace-unavailable|watch-output-unavailable|watch-project-mismatch|watch-config-invalid|watch-issue-cap|watch-issue-uncertain|watch-issue-close-policy-changed|watch-issue-close-raced|watch-issue-close-uncertain|job-image-watch-unsupported|watch-board-invalid|watch-board-oversize|auth-policy-invalid|auth-adapter-unsupported|auth-adapter-unapproved|auth-owner-host|auth-adapter-unavailable|auth-adapter-conflicting|auth-capability-unsupported|auth-endpoint-unsupported|auth-reauth-required|auth-refresh-uncertain|auth-store-unavailable|auth-snapshot-too-short|auth-route-unbounded|auth-venue-unsupported|auth-adapter-disabled|auth-credit-cap-required|auth-binding-changed|auth-mixed-billing|subscription-extra-usage|auth-model-unverified|auth-usage-unavailable|job-image-subscription-auth-unsupported|subscription-quota|subscription-stale-binding|subscription-observation-required>" | null,
+    "reason":    "<fixed enum: worker-abort|local-event-config-invalid|local-event-invalid|local-event-superseded|local-event-trigger-changed|local-event-unavailable|local-event-wrong-worker|local-folder-changed|merge-policy-invalid|merge-policy-unavailable|merge-policy-changed|job-image-merge-policy-unsupported|operator-cancel|agent-cancel|idle|stalled|max-minutes|credential-expired|package-canary-invalid|package-canary-packages-off|package-canary-excluded|exclude-tool-not-loaded|job-image-load-exclusions-unsupported|package-canary-resume|package-canary-not-staged|package-canary-adapter|package-canary-version-missing|package-canary-refused|job-image-package-canary-unsupported|answer-draft-refused|answer-draft-config-changed|answer-draft-unavailable|job-image-answer-draft-unsupported|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|portfolio-snapshot-oversize|local-folder-escaped|local-folder-holds-envelope|local-folder-holds-subscription-auth|local-folder-is-sandbox|local-folder-project-changed|unprotected-branch|branch-protection-unreadable|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|model-roles-invalid|model-roles-shadowed|model-role-unknown|model-role-provider-conflict|model-agents-invalid|job-image-model-roles-unsupported|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-model-failover-unsupported|job-image-cost-cap-unsupported|model-unknown|model-failover-no-candidate|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|secret-bundle-profile-unknown|secret-bundle-profile-ambiguous|secret-bundle-resume|secret-bundle-trigger-changed|openshell-bundle-endpoint-not-allowed|openshell-bundle-endpoint-shared|openshell-bundle-endpoint-unknown|openshell-bundle-name-taken|openshell-bundle-unpassable|openshell-bundle-image-too-old|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|oom-killed|job-size-exceeds-host|job-size-exceeds-share|job-image-mcp-unsupported|job-image-forge-mcp-unsupported|mcp-list-invalid|mcp-config-invalid|mcp-server-unknown|mcp-secret-unmapped|mcp-secret-reserved|mcp-excluded|mcp-egress-unreachable|mcp-package-runner|mcp-unavailable|mcp-config-mismatch|mcp-secret-missing|mcp-command-missing|mcp-shadowed|await-input-shadowed|await-input-without-session|job-image-await-input-unsupported|awaiting-input|not-parked|report-progress-shadowed|steer-inbox-missing|steer-no-exit-key|job-image-progress-unsupported|job-image-recover-unsupported|job-image-steer-unsupported|job-image-sandbox-layout-unsupported|job-image-observable-runner-unsupported|venue-local-folders-unsupported|openshell-gateway-not-local|openshell-global-policy|openshell-landlock-missing|openshell-recover-unsupported|openshell-credential-reads-value|openshell-gateway-untested|openshell-egress-untranslatable|openshell-bind-mounts-disabled|openshell-ptrace-scope-unprotected|openshell-ptrace-scope-too-strict|openshell-bind-sandbox-lingering|recover-store-unset|recovery-enqueued|recovery-host-lost|recovery-cap|recovery-checkpoint-absent|recovery-superseded|recovery-unsafe-extensions|recovery-failed|container-infra-exit|container-exit-unknown|worker-error|awaiting-approval|approval-config-invalid|approval-without-session|approval-shadowed|approval-decision-invalid|approval-author-missing|approval-expired|approval-expiry-invalid|approval-host-mismatch|approval-job-id-missing|approval-park-invalid|approval-pending|approval-policy-changed|approval-policy-unavailable|approval-request-conflict|approval-request-stale|approval-request-unbound|approval-state-conflict|approval-state-unavailable|approval-store-unavailable|approval-finish-unavailable|approval-session-not-saved|approval-session-unavailable|job-image-approval-gates-unsupported|job-image-approval-auth-unsupported|...|question-group-unavailable|question-group-config-changed|question-group-source-expired|question-group-source-unavailable|question-group-source-oversize|question-group-candidates-expired|question-group-limit|question-group-stale|question-group-refused|question-group-unanswered|question-group-output-invalid|job-image-question-grouping-unsupported|watch-unavailable|watch-query-credential-missing|watch-cooldown|watch-cap|watch-unmatched|watch-ignored|decide-refused|decide-unanswered|watch-reference-invalid|watch-config-changed|watch-window-pending|watch-threshold|watch-evidence-expired|watch-issue-target-missing|watch-trace-unavailable|watch-output-unavailable|watch-project-mismatch|watch-config-invalid|watch-issue-cap|watch-issue-uncertain|watch-issue-close-policy-changed|watch-issue-close-raced|watch-issue-close-uncertain|job-image-watch-unsupported|watch-board-invalid|watch-board-oversize|auth-policy-invalid|auth-adapter-unsupported|auth-adapter-unapproved|auth-owner-host|auth-adapter-unavailable|auth-adapter-conflicting|auth-capability-unsupported|auth-endpoint-unsupported|auth-reauth-required|auth-refresh-uncertain|auth-store-unavailable|auth-snapshot-too-short|auth-route-unbounded|auth-venue-unsupported|auth-adapter-disabled|auth-credit-cap-required|auth-binding-changed|auth-mixed-billing|subscription-extra-usage|auth-model-unverified|auth-usage-unavailable|job-image-subscription-auth-unsupported|subscription-quota|subscription-stale-binding|subscription-observation-required>" | null,
     "exitCode":  <int> | null,
     "turns":     <int> | null,
     "tokens":    { "input": <int>, "output": <int>, "total": <int>, "cost": <number>,          // per-job usage totals; null when the container died before the exit line
@@ -6146,7 +6291,9 @@ validator rather than a second copy of it.
     "replica":  <int> | null,       // this job's 1-based index within its replica set; null = an ordinary run
     "replicas": <int> | null,       // the set size, so `r2` is legible without finding the sibling row
     "triggerIndex": <int> | null,   // raw triggers-array index of the entry that fired (cron entries counted); forge jobs only
-    "triggerType": "label" | "comment" | "pull_request" | "issue" | null,   // that entry's on.type; null on cron, chained, and manual jobs
+    "triggerType": "label" | "comment" | "pull_request" | "issue" | null,   // forge entry's on.type; null on local jobs
+    "localEvent": { "id": "<configured local event id>", "forge": "<source kind>",
+                    "type": "label" | "comment" | "pull_request" | "issue", "digest": "<64 lowercase hex>" }, // optional, event-local only
     "session": { "resumed": <bool>,                                                             // what pi ACTUALLY did
                  "reason": "<fixed enum: resumed|absent|expired|conversation-too-old|resume-chain-too-long|context-too-full|compaction-summary-empty|too-large|unparseable|not-a-regular-file|key-not-a-directory|transcript-diverted|venue-changed|pi-version-changed|transcript-replaced|locked|promote-failed|disabled>" | null,
                  "bytes": <int> | null } | null,   // null when the job had no session at all
@@ -10502,7 +10649,9 @@ refuses on it.
 
 **`settingsVersion`, `pauseWindowsVersion`, `triggersVersion` and `jobDataVersion` are integers** (AMENDED 2026-11-02,
 #761, `DES-STORE-VERSION-WHEN-NEEDED`): the build's `SETTINGS_VERSION`, `PAUSE_WINDOWS_VERSION`, `TRIGGERS_FILE_VERSION`
-and `JOB_DATA_VERSION`, all 1 at #761, the last 2 since #796, 3 since #800 and 4 since #888, and `TRIGGERS_FILE_VERSION` 2 since #800 and 3 since #888, on `limitsVersion`'s model, so a row without them is a worker from before #761.
+and `JOB_DATA_VERSION`, all 1 at #761; job data is 2 since #796, 3 since #800, 4 since #888, 5 since #908
+and 6 since #911, while triggers are 2 since #800, 3 since #888, 4 since #908 and 5 since #911, on
+`limitsVersion`'s model, so a row without them is a worker from before #761.
 Beside the console's `trigger-environment-edit` (AMENDED 2026-11-04, #800), whose preview and Confirm read each live host's
 `triggersVersion` and `jobDataVersion` when the proposed file needs a version above 1, and REFUSE on a lower one, none, or a
 registry they cannot read, and read no host while the need is 1, and the trigger page's card, which reads `triggersVersion` over a file above version 1 and says a host that reads less holds that file's jobs, only `doctor` reads them (`doctor.mjs -> fleetStoreVersionChecks`, the named check `fleet.store-versions`,
@@ -10672,6 +10821,13 @@ admin reads them for the live hosts' names beside the index's, so a lost index e
 
 ## INT-CANCEL-CHANNEL-CONTRACT
 
+- **Local event cancellation uncertainty (#911)**: `INT-LOCAL-EVENT-STATE`'s generation tombstone is
+  distinct from the stop request and queue removal. A requester timeout on `local-event-<32hex>` says
+  that cancellation may have been stored and pending signals cleared, with trigger/run status to check
+  before retrying; it never claims nothing changed. CLI, panel and console preserve this note. A queue
+  removal that is not confirmed carries whether its local cancellation was stored or may have been
+  stored. A repeated cancel cannot clear later matching signals after the first tombstone committed.
+
 - **Agent origin (#766)**: Delegated cancellations use `cancel:agent:req:<jobId>` with fixed value `agent-cancel` and `cancel:agent:ack:<jobId>`, with the same request/ack TTL and timeout cleanup. Human requests retain the original keys. The worker checks human then agent requests, acknowledges only the chosen channel and records the fixed matching reason. An older worker cannot misread an agent cancellation as a human intervention; it leaves the new request unanswered, a named timeout. A tool with an interactive human confirmation uses human origin independently of its audit role `agent`. Agent-only removals and cancellations produce no zero-touch stop event; draft helpers are never workload denominators.
 
 **Producer of a request**: the CLI's `cancel` verb or the panel's `x` confirm. **Consumer**: the ONE
@@ -10690,7 +10846,8 @@ job can only be stopped by asking whichever worker owns it to raise its own abor
   cancel:ack:<jobId>   STRING <workerName> ("" on an undeclared host; a NAME, never a path, the
                        INT-HOST-REGISTRY-CONTRACT content rule), TTL 5m -- the answer the requester polls
                        for. No ack within the window is a NAMED refusal at the requester ("no worker
-                       acknowledged ... nothing was changed"), never a silent no-op.
+                       acknowledged ... nothing was changed" for ordinary jobs; the explicit local
+                       event uncertainty note above), never a silent no-op.
 ```
 
 - **The worker side is a per-active-job poll beside the kill timer** (2s cadence, unref'd, cleared in the
@@ -11386,17 +11543,23 @@ The closed outcome vocabulary follows:
 | deduplicated | 202, semantic duplicate |
 | held | 202, held reply |
 | steered | 202, steered comment |
+| accepted | 202, local event durably accepted |
 | dropped | 204, filter drop |
 | unauthorized | 401 |
 | not-configured | 404 |
 | lookup-failed | 503, access lookup failed |
-| enqueue-failed | 503, queue write failed |
+| enqueue-failed | 503, queue or local-signal write failed |
 | malformed | 400, 405, 413 or 415 |
 | error | 500 |
 <!-- receiver-outcomes:end -->
 
 **Across releases (#824).** A forge added to `FORGES` is observed, published and read with no other edit, and does not
 raise `v`: the read is tolerant on forges both ways, and another `v` still means a shape a reader cannot read.
+- Since #911, the exact absence of the `accepted` outcome in a v1 snapshot means an older receiver which
+  could not accept local signals: the reader supplies an empty counter with `lastAt:null`. An explicitly
+  malformed `accepted` counter or any other missing required outcome still refuses. Older readers ignore
+  the extra outcome. This live snapshot expires after 90 seconds, so no durable-state migration or
+  older-state detector is needed.
 - A newer record may name a forge this build does not know. Its `forges` may hold up to `RECEIVER_FORGES_MAX` (64)
   entries, a fixed bound and never this build's forge count (more is unreadable), and is kept to the forges this build
   knows, each once, in the record's order; an entry that is no forge name is dropped the same way. An unknown forge's
@@ -11417,7 +11580,11 @@ No released console reads the record (4.3.1 has none), so this rule holds from t
 are inspected; no delivery identifier, repository, login, header, body field or request value enters these records.
 Root and unrouted paths count as GitHub; `/watch` and its descendants are excluded. No health or admin route is added.
 A request adds **zero telemetry commands** to Valkey; existing queue and steering operations are unchanged. A repeated
-delivery id remains `queued`, because distinguishing it would add a read per delivery.
+ordinary forge delivery id remains `queued`, because distinguishing it would add a read per delivery.
+Local-only acceptance reports `accepted`; its response includes `localEvents: { accepted, coalesced }`
+counts, with no claim that a queue job or container exists yet. Mixed local and forge admission preserves
+the ordinary forge result tag and adds those local counts. A later failed admission can still return
+503 after an earlier local listener accepted; replaying that delivery safely uses its receipt.
 
 The count window is the current UTC hour and its preceding 23, with empty hours represented, rather than an exact
 rolling 24-hour interval. Each word retains its last instant independently for the process lifetime. Connections names the process start,
@@ -11425,7 +11592,7 @@ marks hours before that start as not observed and labels its first partial hour 
 zeros; UTC bucket labels remain UTC with JavaScript enabled. The wide hourly table scrolls in a named,
 keyboard-focusable region with whole unwrapped labels and cells, never a column of vertical letters. Advancing an
 idle window expires its buckets; a backward clock cannot resurrect expired counts. Counts saturate at the largest
-safe integer. Readers shift their window to their own current UTC hour. Taken means the four 202 words; refused
+safe integer. Readers shift their window to their own current UTC hour. Taken means the five 202 words; refused
 means the refusal/error words; dropped is separate.
 
 Each beat is best effort, never awaited by an answer. One actual flight remains occupied until its underlying client
@@ -12101,6 +12268,14 @@ extension's tools too (`DES-OPERATOR-CONSOLE`, one audit chain; `REQ-CONSOLE-SEC
   expected-input writer, session isolation, lifecycle limits, counterexamples and meaningful end-to-end effects.
 
 ## INT-CONSOLE-STATE-API
+
+**Local event views (#911).** The existing Runs `trigger` filter also accepts `event:<forge>:<id>`:
+`forge` is one `FORGE_KINDS` member and `id` matches `LOCAL_EVENT_ID_RE`. It selects only local records
+whose recorded source and id match, across definition revisions. A trigger detail's own counts and
+history additionally require its current type and digest. The hypothetical trigger checker uses the
+receiver's independent local-listener verdicts, including transient reviewer login, and creates no
+durable signal or queue job. Read-only status exposes the bounded pending/active projection of
+`INT-LOCAL-EVENT-STATE`, with an explicit blocked message for `queue-job-missing`.
 
 **Extension (#903).** `GET /api/timeline` is an authenticated viewer read under the existing session/person checks,
 no-store policy and agent projection. Parameters: `rows` (project/host), `zoom` (1h/3h/24h), optional `project`,
@@ -13150,12 +13325,14 @@ reader cannot drift on the key, a field, a reason or a bucket. The writer is `wo
   | `endpoint` | slot | every slot of a model endpoint; `endpoint` is its id |
   | `model-cooldown` | check | no candidate is available and the first transient blocker is a cooldown; asks again at `until` |
   | `model-window` | check | no candidate is available and the first transient blocker is a full model window; asks again at `until` |
+  | `local-event-debounce` | check | a local event generation is collecting matching events until its current due instant |
   | `subscription-quota` | check | a connection/application bucket is exhausted; waits for newer evidence, an observed reset or one person's trial, with `until` only a recheck time when reset is unknown |
   | `subscription-owner` | ready | this host does not own the selected connection; waits for its owning host |
   | `subscription-auth` | check | the credential cannot be renewed yet; waits until its measured earliest refresh instant without consuming an attempt |
   | `host-budget` | slot | the host budget; `budgetWhy` is its verdict |
   | `bundle-profile` | slot | a host that serves the job's secret bundle profile |
   | `recovery-wait` | run | a recovery whose run's attempt still runs; `holder` is that run |
+  | `workspace-orphan` | run | a surviving container still holds the local folder |
   | `wait-after` | check | an `after` hold |
   | `wait-hold` | check | a wait check that said not yet, or could not tell |
   | `wait-throttled` | check | the check lease denied, on this host's or the fleet's |
@@ -13163,6 +13340,7 @@ reader cannot drift on the key, a field, a reason or a bucket. The writer is `wo
   | `wait-aborted` | check | a wait check a restart or a cancel stopped |
   | `wait-unclear` | check | a wait check that answered what the gate cannot read |
   | `podman-restart` | ready | rootful Podman's service, restarting |
+  | `workspace-unseeded` | ready | the runtime has not yet identified surviving local jobs |
   | `netns-keeper` | ready | the rootless network keeper, too young |
   | `newer-release` | ready | job data, or a settings, triggers or pause windows file, written by a newer pi-dispatch than this worker, a model failover retry whose previous attempt's run record one wrote, or a recovery whose run's checkpoint one wrote (`DES-STORE-VERSION-WHEN-NEEDED`) |
   | `retry` | retry | an infrastructure retry's backoff (`noteRetry`) |
@@ -14084,6 +14262,7 @@ and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` are UNCHANGED, checked: no file shape, wr
 
 | Date | Change |
 |---|---|
+| 2026-11-16 (#911) | NEW `INT-LOCAL-EVENT-STATE`: versioned bounded local signals, atomic transport receipts, shared clock, named-worker idempotent publication, current-definition and generation ownership, cancellation, one-shot retirement and uncertain-execution recovery. `INT-TRIGGERS-FILE-CONTRACT` AMENDED for source/execution separation, exact review authors, debounce, required event worker and optional cron worker, triggers version 5 and job data version 6. `INT-WEBHOOK-PAYLOAD-SUBSET` reads reviewer login transiently without queuing it; `INT-CONTAINER-JOB-INPUTS` adds the source-data-free local forge event shape. `INT-RUN-HISTORY-FILE-CONTRACT` adds conditional configured localEvent identity and fixed refusal reasons; `INT-HOST-REGISTRY-CONTRACT` publishes the version floors; `INT-RECEIVER-STATUS-KEY` adds accepted and truthful mixed-admission counts; `INT-DEFER-REASON-KEY` adds debounce and surviving-workspace waits; `INT-CONSOLE-STATE-API` names the event trigger filter and current-definition detail attribution. UNCHANGED, checked: ordinary forge payloads and first-match selection, credential and mount boundaries, command dispatch, exit codes, retention policy and existing cron event files. Final implementation distinguishes unclaimed supersession from active successor ownership, excludes local authority-refusal records from one-shot disarm, and documents manual generation-checked recovery. `INT-CANCEL-CHANNEL-CONTRACT` AMENDED for the possibly committed local tombstone note preserved by every requester; receipt retention and ordinary cancel keys are UNCHANGED, checked. Final polling review corrects ETag commit ordering: validators persist only after durable admission and the feed cursor or PR snapshot, with all review validators after the shared sweep cursor, preventing a failed signal from being hidden behind 304. Existing key shapes and TTLs are UNCHANGED, checked. |
 | 2026-11-15 (#908) | AMENDED `INT-TRIGGERS-FILE-CONTRACT`: `run.mayMerge` at triggers version 4, `mayMerge` and `mayMergePolicy` at job data version 5, reviewed-only provenance and current-trigger validation. `INT-CONTAINER-JOB-INPUTS` gains the fixed versioned merge-policy selector in the existing read-only job directory; `INT-SDK-SESSION-OPTIONS` selects the fixed floor before project loading; `INT-CONTAINER-RUNTIME-CONTRACT` gains the `mergePolicy` capability and offline loader proof. `INT-RUN-HISTORY-FILE-CONTRACT` gains four refusal reason tokens, with its field shape UNCHANGED, checked. CI review preserves the existing mount-readability diagnostic by reading the optional marker after `assertJobInputsReadable`, still before project or extension loading. `INT-WEBHOOK-PAYLOAD-SUBSET`, token scope, mounts, exit codes and MCP withholding UNCHANGED, checked. |
 | 2026-11-15 (#899) | `INT-CANCEL-CHANNEL-CONTRACT` AMENDED: terminal active cancellation releases its owned semantic window after cleanup, and shared ingress can repair a missed release after atomic verification. A pending request or acknowledgment cannot release early; queued and held removal retain BullMQ's atomic release. Request/ack keys and TTLs, origin rules, stored job/result/run-record shapes and retained delivery-id protection UNCHANGED, checked. `INT-RUN-HISTORY-FILE-CONTRACT` and `INT-TRIGGERS-FILE-CONTRACT` UNCHANGED, checked: no new persisted fields or vocabulary. `INT-STEER-INBOX-CONTRACT` AMENDED for the neutral window-release log names and closed cause; steering and held-reply order, origin and orphan resource holds UNCHANGED, checked. |
 | 2026-11-15 (#897) | **`INT-CONSOLE-STATE-API` AMENDED**: each failed row gains `supersededBy`, a run id or null, for both roles, added within `version: 1` as the contract allows. `INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked: the rule reads `jobId`, `kind`, `target`, `flow`, `outcome`, `startedAt` and `endedAt` as they are, and writes nothing. |

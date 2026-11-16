@@ -108,11 +108,11 @@ test('cron -> github is rejected (a cron has no webhook payload)', () => {
 	assert.throws(() => parse([{ ...CRON, run: { ...CRON.run, kind: "github" } }]), (e) => isConfigError(e) && /local/.test(e.message));
 });
 
-test("label -> local is rejected (a webhook trigger produces a github job)", () => {
+test("label -> local without explicit command authority is rejected", () => {
 	assert.throws(() => parse([{ ...LABEL, run: { kind: "local", flow: "x" } }]), (e) => isConfigError(e) && /github/.test(e.message));
 });
 
-test("comment -> local and pull_request -> local are rejected", () => {
+test("comment and pull_request local flows without explicit authority are rejected", () => {
 	assert.throws(() => parse([{ ...COMMENT, run: { kind: "local", flow: "x" } }]), (e) => isConfigError(e) && /github/.test(e.message));
 	assert.throws(() => parse([{ ...PR_AUTO, run: { kind: "local", flow: "x" } }]), (e) => isConfigError(e) && /github/.test(e.message));
 });
@@ -443,12 +443,12 @@ test("a webhook trigger may name gitlab, and the kind survives onto the normaliz
 	}
 });
 
-test("the on x run matrix still refuses local for a webhook type, and any forge for cron", () => {
+test("the on x run matrix still refuses local event flows and any forge for cron", () => {
 	for (const entry of [LABEL, COMMENT, PR_LABELED]) {
 		assert.throws(
 			() => parse([{ ...entry, run: { ...entry.run, kind: "local" } }]),
 			isConfigError,
-			`${entry.on.type}: a webhook trigger is adversarial input and must never produce a local run`,
+			`${entry.on.type}: a webhook trigger cannot produce a local flow`,
 		);
 	}
 	// A cron trigger carries no delivery id, number, title or body -- true of every forge, not just github.
