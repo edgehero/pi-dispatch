@@ -2,7 +2,7 @@
 import { realpathSync } from "node:fs";
 import { isAbsolute } from "node:path";
 import { projectOf } from "./projects.mjs";
-import { splitModelEntry } from "./model-ref.mjs";
+import { splitModelEntry, modelSelectionProblem, modelListProblem, modelOnList } from "./model-ref.mjs";
 import { resolveModelRoles } from "./model-roles.mjs";
 
 /** The same role resolver as pickup, expanded over every project a broad forge trigger can reach. */
@@ -10,6 +10,18 @@ export function resolveConfiguredModelRuns({ runs = [], deployment, envList = nu
 	const resolved = [];
 	const checks = [];
 	for (const run of runs) {
+		// A pool is already physical and reviewed. Role defaults must not invent a primary or widen it.
+		if (run.modelSelection !== undefined) {
+			const ceiling = run.models ?? envList;
+			const invalid = modelSelectionProblem(run.modelSelection) !== null;
+			const allowed = !invalid && modelListProblem(ceiling) === null && run.modelSelection.candidates.every((entry) => {
+				const ref = splitModelEntry(entry);
+				return modelOnList(ceiling, ref.provider, ref.model);
+			});
+			if (!allowed) checks.push({ ok: false, warn: true, sourceIndex: run.sourceIndex ?? null, project: null, reason: "model-selection-policy-changed", label: `${run.label}: the random pool needs a finite allowed-model ceiling that permits every candidate`, fix: "review run.modelSelection and run.models, or PI_ALLOWED_MODELS; a candidate pool does not grant permission" });
+			if (!invalid) resolved.push(run);
+			continue;
+		}
 		if (Object.keys(modelRoles).length === 0 && !run.model?.startsWith("role:")) { resolved.push(run); continue; }
 		const list = run.models ?? envList;
 		const job = { ...run, provider: run.provider ?? deployment.provider, model: run.model ?? deployment.model, ...(list ? { models: list } : {}) };
@@ -38,8 +50,8 @@ export function resolveConfiguredModelRuns({ runs = [], deployment, envList = nu
 export function cooldownModelRefs(runs, deployment, { modelRoles = {}, projects = [], envList = null } = {}) {
 	const refs = new Set();
 	for (const run of resolveConfiguredModelRuns({ runs, deployment, envList, modelRoles, projects }).runs) {
-		if (!Array.isArray(run.fallbackModels) || run.fallbackModels.length === 0) continue;
-		for (const ref of [`${run.provider ?? deployment.provider}/${run.model ?? deployment.model}`, ...run.fallbackModels]) {
+		const candidates = run.modelSelection?.candidates ?? (Array.isArray(run.fallbackModels) && run.fallbackModels.length ? [`${run.provider ?? deployment.provider}/${run.model ?? deployment.model}`, ...run.fallbackModels] : []);
+		for (const ref of candidates) {
 			if (splitModelEntry(ref)) refs.add(ref);
 		}
 	}

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { getAllBuiltinModels, getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 import { readFileSync } from "node:fs";
 import { configError } from "../src/config.mjs";
-import { MAX_ALLOWED_MODELS, MODEL_REF_PATTERN, PROVIDER_REF_PATTERN, modelIdProblem, modelListProblem, modelOnList, providerIdProblem, splitModelEntry, validateModelRef } from "../src/model-ref.mjs";
+import { MAX_ALLOWED_MODELS, MODEL_REF_PATTERN, PROVIDER_REF_PATTERN, modelIdProblem, modelListProblem, modelSelectionProblem, modelOnList, providerIdProblem, splitModelEntry, validateModelRef } from "../src/model-ref.mjs";
 import { parseExitUsage } from "../src/run-history.mjs";
 import { parseTriggers, validateModelRef as reexported } from "../src/triggers.mjs";
 
@@ -382,4 +382,42 @@ test("fallbackModels keeps order on every trigger kind and checks the trigger's 
 		for (const key of ["fallback_models", "FallbackModels", "fallbackModel", "fallbackModelIds", "fallback_model_names", "fallbackM\u043Edels"]) refused(withRun(entry, { [key]: list }), /did you mean run\.fallbackModels/);
 		refused({ ...entry, on: { ...entry.on, fallbackModels: list } }, /did you mean run\.fallbackModels/);
 	}
+});
+
+const RANDOM = { strategy: "random", candidates: ["openai/gpt-5.4", "openrouter/anthropic/claude-sonnet-4"] };
+
+test("random policy preserves exact physical references on every AI trigger and needs version 6", () => {
+	for (const [name, template] of Object.entries(KINDS)) {
+		const run = { ...template.run, modelSelection: RANDOM, models: RANDOM.candidates };
+		const [parsed] = parseTriggers(JSON.stringify({ version: 6, triggers: [{ ...template, run }] }), PATH);
+		assert.deepEqual(parsed.run.modelSelection, RANDOM, name);
+		assert.notEqual(parsed.run.modelSelection.candidates, RANDOM.candidates);
+		assert.throws(() => parseTriggers(JSON.stringify({ version: 5, triggers: [{ ...template, run }] }), PATH), /version/);
+	}
+	assert.equal(modelSelectionProblem({ strategy: "random", candidates: Array.from({ length: 16 }, (_, i) => `openai/model-${i}`) }), null);
+});
+
+test("random policy rejects malformed shapes, weighted lists, case duplicates and roles", () => {
+	for (const value of [null, false, [], {}, { strategy: "ordered", candidates: RANDOM.candidates }, { ...RANDOM, weights: [1, 2] }, { ...RANDOM, candidates: [] }, { ...RANDOM, candidates: Array.from({ length: 17 }, (_, i) => `openai/m${i}`) }, { ...RANDOM, candidates: ["openai/X", "openai/x"] }, { ...RANDOM, candidates: ["openai/role:reviewer"] }, { ...RANDOM, candidates: ["role:reviewer"] }, { ...RANDOM, candidates: ["openai/x", { pool: "nested" }] }]) {
+		assert.notEqual(modelSelectionProblem(value), null, JSON.stringify(value));
+		assert.throws(() => validateModelRef({ modelSelection: value }, "test", PATH), /run.modelSelection/);
+	}
+});
+
+test("random conflicts include explicit null fixed/fallback fields and command-only jobs", () => {
+	for (const key of ["provider", "model", "fallbackModels"]) {
+		for (const value of [null, key === "fallbackModels" ? RANDOM.candidates : "x"]) {
+			assert.throws(() => validateModelRef({ modelSelection: RANDOM, [key]: value }, "test", PATH), new RegExp(`run.${key}`));
+		}
+	}
+	assert.throws(() => validateModelRef({ modelSelection: RANDOM, command: "echo ok" }, "test", PATH), /command-only/);
+	assert.throws(() => validateModelRef({ modelSelection: RANDOM, models: [RANDOM.candidates[0]] }, "test", PATH), /does not list/);
+	assert.deepEqual(validateModelRef({ modelSelection: RANDOM }, "test", PATH), { modelSelection: RANDOM });
+});
+
+test("random near misses and producer generation are refused in authored trigger configuration", () => {
+	for (const key of ["ModelSelection", "model_selection", "modelSelections", "modelSelectionGeneration"]) {
+		assert.throws(() => parseTriggers(JSON.stringify({ triggers: [{ ...KINDS.cron, run: { ...KINDS.cron.run, [key]: RANDOM } }] }), PATH), /run.modelSelection/);
+	}
+	assert.throws(() => parseTriggers(JSON.stringify({ triggers: [{ ...KINDS.cron, on: { ...KINDS.cron.on, modelSelection: RANDOM } }] }), PATH), /run.modelSelection/);
 });

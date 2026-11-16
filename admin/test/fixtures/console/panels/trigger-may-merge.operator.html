@@ -300,6 +300,8 @@ Keep changes focused.</pre
 This trigger is not a schedule or a one-shot.
 </p></div></section><section id="p-trigger-change" data-panel><div class="card"><div class="card__head"><h2>Before you change it</h2></div><p>
 A queued job with merge permission runs only while its reviewed trigger remains unchanged. A job queued without it does not gain permission from a later edit.
+Random jobs recheck this trigger's current pool and allowed-model list before starting.
+A changed pool or a candidate no longer allowed refuses the old queued policy.
 Adding or deleting a row renumbers the rows after it.
 </p>
 <p>

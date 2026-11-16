@@ -1,3 +1,4 @@
+import { subscriptionResetSentence } from "../../model-words.mjs";
 import { historyFrame } from "../history-view.mjs";
 import { libraryTimelineHtml } from "../timeline-view.mjs";
 import { timelineSeed } from "../timeline-data.mjs";
@@ -872,7 +873,7 @@ export function waitingSentence(row) {
     if (line !== null) return line;
   } else if (why !== null && row.known === true && Object.hasOwn(DEFER_WHYS, why)) {
     const line = filledSentence(DEFER_WHYS[why].sentence, row);
-    if (line !== null) return line;
+    if (line !== null) return why === "subscription-quota" ? html`${line}. ${subscriptionResetSentence(row.resetAt)}` : line;
   } else if (why !== null && row.known === false) {
     return html`Recorded reason: <span class="code">${why}</span>, ${NO_EXPLANATION}`;
   }

@@ -103,8 +103,8 @@ function undoBody(inverse) {
 
 // ---- the file ---------------------------------------------------------------------------------------------------------
 
-test("CARD_FIELDS are the eleven the card edits, named once; image, secrets and skillsDir are not among them", () => {
-  assert.deepEqual([...CARD_FIELDS], ["flow", "provider", "model", "maxCostUsd", "models", "fallbackModels", "mcp", "packages", "excludeTools", "excludeExtensions", "excludeExtensionTools"]);
+test("CARD_FIELDS are the twelve the card edits, named once; image, secrets and skillsDir are not among them", () => {
+  assert.deepEqual([...CARD_FIELDS], ["flow", "provider", "model", "maxCostUsd", "models", "fallbackModels", "modelSelection", "mcp", "packages", "excludeTools", "excludeExtensions", "excludeExtensionTools"]);
   assert.ok(Object.isFrozen(CARD_FIELDS));
   for (const key of ["image", "secrets", "secretsProfile", "skillsDir", "backend", "maxTurns"]) assert.ok(!CARD_FIELDS.includes(key), key);
 });
@@ -2186,6 +2186,7 @@ const IN_LINE = [
   [{ maxCostUsd: "2" }, "maxCostUsd"],
   [{ models: [HAIKU] }, "models"],
   [{ fallbackModels: [SONNET] }, "fallbackModels"],
+  [{ modelSelection: { strategy: "random", candidates: [HAIKU, SONNET] } }, "modelSelection"],
   [{ mcp: ["docs"] }, "mcp"],
   [{ packages: false }, null],
   [{ excludeTools: ["bash"] }, null],
@@ -2198,9 +2199,9 @@ test("the rows below hold every field the card writes", () => {
 for (const [change, field] of IN_LINE) {
   test(`a job in line under ${JSON.stringify(change)}: ${field === null ? "runs, and no sentence names it" : `refused, as run.${field}`}, as the worker's own check says of the written file`, async () => {
     // A job that carries the list, so the one thing it lacks is what this row adds.
-    const carried = "fallbackModels" in change ? { models: [HAIKU, SONNET] } : {};
+    const carried = "fallbackModels" in change || "modelSelection" in change ? { models: [HAIKU, SONNET] } : {};
     // A narrowing that needs version 2 asks each live host, and this one reads it.
-    const { f } = skewFixture([queued("gh-1", carried)], { run: { provider: "anthropic", model: "claude-haiku-4-5", ...carried, ...(change.fallbackModels ? { models: [HAIKU, SONNET] } : {}) }, deps: { readHosts: async () => ({ hosts: [{ name: "mini1", triggersVersion: "2", jobDataVersion: "3" }] }), readHostLoads: async () => ({ hosts: [{ name: "mini1", state: "current", packages: [{ name: "pi-lint", version: "1.4.2" }], extensions: [], unread: [], more: {} }] }) } });
+    const { f } = skewFixture([queued("gh-1", carried)], { run: { provider: "anthropic", model: "claude-haiku-4-5", ...carried, ...(change.fallbackModels ? { models: [HAIKU, SONNET] } : {}) }, deps: { readHosts: async () => ({ hosts: [{ name: "mini1", triggersVersion: "6", jobDataVersion: "7" }] }), readHostLoads: async () => ({ hosts: [{ name: "mini1", state: "current", packages: [{ name: "pi-lint", version: "1.4.2" }], extensions: [], unread: [], more: {} }] }) } });
     const out = await f.service.preview(ask(f, change), operator);
     assert.ok(out.plan, JSON.stringify(out));
     assert.deepEqual(out.plan.skew.rows, field === null ? [] : [{ jobId: "gh-1", queue: "pi-jobs", field }], JSON.stringify(change));
@@ -2310,10 +2311,10 @@ test("this build's own tables: a live host that reads less, or says nothing, ref
 });
 
 test("this build's own tables: a file above what it reads is refused, and an edit that needs nothing reads no host", async () => {
-  const f = fixture({ doc: { version: 6, triggers: [cron, comment()] }, deps: { readHosts: async () => assert.fail("no host is read") } });
+  const f = fixture({ doc: { version: 7, triggers: [cron, comment()] }, deps: { readHosts: async () => assert.fail("no host is read") } });
   const out = await f.service.preview(ask(f, { flow: "review" }), operator);
   assert.equal(out.status, 409);
-  assert.match(out.refusal, /written by a newer pi-dispatch \(version 6; this build understands 5\)/);
+  assert.match(out.refusal, /written by a newer pi-dispatch \(version 7; this build understands 6\)/);
   const plain = fixture({ deps: { readHosts: async () => assert.fail("no host is read while the need is 1") } });
   const fine = await plain.service.preview(ask(plain, { flow: "review" }), operator);
   assert.deepEqual(fine.plan.need, { triggersVersion: 1, jobDataVersion: 1 });
@@ -2441,4 +2442,47 @@ test("a person at the operator console alone: refused at the preview and at the 
     assert.deepEqual(await service.apply(out, ctx), { invalid: "Only a person in the operator console can change what a trigger's jobs get." }, JSON.stringify(ctx));
   }
   assert.equal(f.read(), before);
+});
+
+test("random mode previews removal of a fixed primary and fallback order, confirms, and undoes exactly", async () => {
+  const f = fixture({ run: { provider: "anthropic", model: "claude-haiku-4-5", fallbackModels: [SONNET], models: [HAIKU, SONNET] }, deps: { readHosts: async () => ({ hosts: [] }) } });
+  const before = f.read();
+  const out = await f.service.preview(ask(f, { modelSelection: { strategy: "random", candidates: [HAIKU, SONNET] } }), operator);
+  assert.ok(out.plan, JSON.stringify(out));
+  assert.equal(f.read(), before, "preview writes nothing and chooses nothing");
+  assert.ok(out.summary.join(" ").includes("one eligible model"));
+  assert.ok(!out.summary.join(" ").includes("so its jobs use the deployment's"));
+  const livePolicy = "Random jobs recheck this trigger's current pool and allowed-model list before starting. A changed pool or a candidate no longer allowed refuses the old queued policy.";
+  assert.ok(out.summary.includes(livePolicy));
+  assert.deepEqual(await f.service.apply(out, operator), { ok: true });
+  assert.deepEqual(f.entry().run.modelSelection, { strategy: "random", candidates: [HAIKU, SONNET] });
+  for (const key of ["provider", "model", "fallbackModels"]) assert.ok(!Object.hasOwn(f.entry().run, key));
+  assert.deepEqual(f.entry().run.models, [HAIKU, SONNET]);
+  const undo = await f.service.preview(out.plan.inverse.body, operator);
+  assert.ok(undo.plan, JSON.stringify(undo));
+  assert.ok(undo.summary.includes(livePolicy), "leaving random mode also names the old queued jobs' live-policy check");
+  assert.deepEqual(await f.service.apply(undo, operator), { ok: true });
+  assert.equal(f.read(), before);
+});
+
+test("random candidate pool is person-only and invalid or off-list candidates refuse before confirmation", async () => {
+  const f = fixture({ run: { models: [HAIKU] }, deps: { readHosts: async () => ({ hosts: [] }) } });
+  const before = f.read();
+  for (const candidates of [[], [HAIKU, HAIKU.toUpperCase()], ["role:planner"], [SONNET]]) {
+    const out = await f.service.preview(ask(f, { modelSelection: { strategy: "random", candidates } }), operator);
+    assert.ok(out.refusal, JSON.stringify(out));
+  }
+  for (const ctx of [{ surface: "tool", role: "operator" }, { surface: "console", role: "agent" }, { surface: "console", role: "viewer" }]) {
+    assert.equal((await f.service.preview(ask(f, { modelSelection: { strategy: "random", candidates: [HAIKU] } }), ctx)).status, 403);
+  }
+  assert.equal(f.read(), before);
+});
+
+
+test("a random pool cannot grant its own authority when both allowed-model ceilings are absent", async () => {
+  const f = fixture({ deps: { readHosts: async () => ({ hosts: [] }) } });
+  const out = await f.service.preview(ask(f, { modelSelection: { strategy: "random", candidates: [HAIKU] } }), operator);
+  assert.match(out.refusal, /random pool needs an explicit allowed-model list/);
+  const allowed = await f.service.preview(ask(f, { modelSelection: { strategy: "random", candidates: [HAIKU] }, models: [HAIKU] }), operator);
+  assert.ok(allowed.plan, JSON.stringify(allowed));
 });

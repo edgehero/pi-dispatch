@@ -180,3 +180,9 @@ test("current service trigger selection replaces startup paths and preserves exp
   assert.equal(empty.state, "partial");
   assert.ok(!empty.rows.some(row => row.provider === "openai"), "explicit empty never silently reads triggers.json");
 });
+
+test("random pool providers are inventoried even when no primary or allowed list names them", () => {
+  const f = fixture({ document: { version: 6, triggers: [{ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix", modelSelection: { strategy: "random", candidates: ["openai/gpt-5", "mistral/m"] } } }] } });
+  const inventory = f.read();
+  for (const provider of ["openai", "mistral"]) assert.ok(inventory.rows.some(row => row.provider === provider && row.usage.includes("trigger")), provider);
+});

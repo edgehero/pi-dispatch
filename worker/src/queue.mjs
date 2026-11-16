@@ -1,5 +1,6 @@
 import { makeApprovalStore } from "./approval-state.mjs";
 import { validateFork } from "./fork-job.mjs";
+import { withModelSelectionGeneration } from "./model-selection-generation.mjs";
 import { randomUUID } from "node:crypto";
 import { Queue } from "bullmq";
 import { metaKeyPattern, queueNameOfMetaKey, readSemanticWindowOwner, releaseCompletedSemanticWindow } from "./bullmq-internals.mjs";
@@ -220,7 +221,7 @@ export async function enqueueLocalJobReporting(queue, fields, { dataVersions } =
  */
 export async function enqueueTriggerRunReporting(queue, schedule, { now = new Date(), jobId = manualTriggerJobId({ triggerId: schedule.schedulerId, now }) } = {}) {
 	return addReporting(queue, async (enqueueNonce) => {
-		await queue.add(schedule.name, { ...schedule.data, enqueueNonce }, { ...schedule.opts, jobId });
+		await queue.add(schedule.name, { ...withModelSelectionGeneration(schedule.data), enqueueNonce }, { ...schedule.opts, jobId });
 		return { id: jobId };
 	});
 }
@@ -258,7 +259,7 @@ export function swallowedRunSentence(jobId, existing) {
 	return `an identical run was queued${hhmm} as ${jobId} (${existing?.state ?? "already queued or done"}); nothing new was queued.`;
 }
 
-async function addLocalJob(queue, { folder, flow, task, command, provider, model, maxTurns, models, fallbackModels, maxCostUsd, idleTimeoutMinutes, stallTimeoutMinutes, maxMinutes, packages, image, backend, excludeTools, excludeExtensions, excludeExtensionTools, mcp, skillsDir, secrets, secretsProfile, recover, steer, chainDepth, parentJobId, jobId, enqueueNonce, dataVersion, now = new Date() }, { dataVersions } = {}) {
+async function addLocalJob(queue, { folder, flow, task, command, provider, model, maxTurns, models, fallbackModels, modelSelection, maxCostUsd, idleTimeoutMinutes, stallTimeoutMinutes, maxMinutes, packages, image, backend, excludeTools, excludeExtensions, excludeExtensionTools, mcp, skillsDir, secrets, secretsProfile, recover, steer, chainDepth, parentJobId, jobId, enqueueNonce, dataVersion, now = new Date() }, { dataVersions } = {}) {
 	const minute = now.toISOString().slice(0, 16); // YYYY-MM-DDTHH:MM -- the dedup window
 	// A caller-supplied jobId (the outbox collector's retry-idempotent chainedJobId) wins; otherwise the
 	// minute-windowed localJobId is the dedup key. A command job (issue #189) fills the flow slot with
@@ -267,13 +268,13 @@ async function addLocalJob(queue, { folder, flow, task, command, provider, model
 	// vanish silently -- and the `cmd:` prefix keeps a command named X from colliding with a flow named X
 	// (`:` is outside the skill-name charset, so no real flow can spell the prefixed form). A flow job's
 	// key is byte-identical to before the feature.
-	const id = jobId ?? localJobId({ folder, flow: command !== undefined ? `cmd:${command}` : flow, task, minute, provider, model, models, fallbackModels });
+	const id = jobId ?? localJobId({ folder, flow: command !== undefined ? `cmd:${command}` : flow, task, minute, provider, model, models, fallbackModels, modelSelection });
 	// image/chainDepth/parentJobId land on `data` only when present, so a plain non-chained job's data is
 	// byte-identical. `image` is the container image this job runs in (INT-TRIGGERS-FILE-CONTRACT); absent
 	// resolves the deployment default at job start, never a value frozen here.
 	// Stamped with the version its fields need (issue #761, `stampJobData`): nothing while that is 1. Before the add, so
 	// input from a newer release throws here and nothing is queued.
-	const data = stampJobData({
+	const data = stampJobData(withModelSelectionGeneration({
 		kind: "local",
 		folder,
 		flow,
@@ -289,6 +290,7 @@ async function addLocalJob(queue, { folder, flow, task, command, provider, model
 		// data byte-identical. An outbox child carries its parent's (outbox.mjs), never one its request file names.
 		...(models !== undefined && { models }),
 		...(fallbackModels !== undefined && { fallbackModels }),
+		...(modelSelection !== undefined && { modelSelection }),
 		// Issue #501: the per-job dollar cap, passed through for the outbox child that inherits its parent's.
 		...(maxCostUsd !== undefined && { maxCostUsd }),
 		// Issue #888: the trigger's limits, conditional like the cap, so a job that names none has the data it always had.
@@ -335,7 +337,7 @@ async function addLocalJob(queue, { folder, flow, task, command, provider, model
 		...(parentJobId !== undefined && { parentJobId }),
 		// Issue #524: `enqueueLocalJobReporting`'s own mark, so it can tell whether ITS add is the one stored.
 		...(enqueueNonce !== undefined && { enqueueNonce }),
-	}, dataVersion, dataVersions);
+	}), dataVersion, dataVersions);
 	await queue.add("local", data, {
 		jobId: id,
 		attempts: 2,
@@ -568,7 +570,7 @@ export async function enqueueLateForgeJob(queue, kind, fields, { dataVersions } 
  * semantic dedup id. Throws on a bad delivery id or console name, and on input a newer release stored with a
  * `dataVersion` above this build's (issue #761; every caller that rebuilds stored input answers with a reply then).
  */
-function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, models, fallbackModels, maxCostUsd, idleTimeoutMinutes, stallTimeoutMinutes, maxMinutes, packages, image, backend, excludeTools, excludeExtensions, excludeExtensionTools, mcp, skillsDir, instructions, mayMerge, mayMergePolicy, resume, awaitInput, gates, approvalRequestId, gateTimeout, gateBudgetRaiseUsd, progress, statusComment, recover, steer, fork, forkPolicy, forkReserveMicros, thinkingLevel, parkedReply, replyReceivedAt, console: consoleMeta, secrets, secretsProfile, waitFor, replica, replicas, dataVersion }, { dataVersions } = {}) {
+function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, models, fallbackModels, modelSelection, maxCostUsd, idleTimeoutMinutes, stallTimeoutMinutes, maxMinutes, packages, image, backend, excludeTools, excludeExtensions, excludeExtensionTools, mcp, skillsDir, instructions, mayMerge, mayMergePolicy, resume, awaitInput, gates, approvalRequestId, gateTimeout, gateBudgetRaiseUsd, progress, statusComment, recover, steer, fork, forkPolicy, forkReserveMicros, thinkingLevel, parkedReply, replyReceivedAt, console: consoleMeta, secrets, secretsProfile, waitFor, replica, replicas, dataVersion }, { dataVersions } = {}) {
 	const jobId = forgeDeliveryJobId(kind, trigger?.deliveryId, replica);
 	if (mayMerge !== undefined && typeof mayMerge !== "boolean") throw new TypeError("merge-policy-invalid");
 	if (mayMerge === true && (command !== undefined || typeof mayMergePolicy !== "string" || !/^[a-f0-9]{64}$/.test(mayMergePolicy))) throw new TypeError("merge-policy-invalid");
@@ -588,7 +590,7 @@ function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigg
 	// only when the filter resolved one, exactly like chainDepth/parentJobId above, so an unflagged trigger's
 	// job data is byte-identical. Both sit at JOB level, never inside `trigger` -- that object is descriptive
 	// and is copied verbatim into /job/event.json, where an execution knob has no business.
-	const data = stampJobData({
+	const data = stampJobData(withModelSelectionGeneration({
 		kind,
 		repo,
 		...(projectId !== undefined && { projectId }),
@@ -611,6 +613,7 @@ function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigg
 		// byte-identical, and at JOB level, never inside `trigger` (copied verbatim into /job/event.json).
 		...(models !== undefined && { models }),
 		...(fallbackModels !== undefined && { fallbackModels }),
+		...(modelSelection !== undefined && { modelSelection }),
 		...(packages !== undefined && { packages }),
 		...(image !== undefined && { image }),
 		// #227. WHERE this job's container is built. Conditional like `image`, so a trigger that named no
@@ -696,7 +699,7 @@ function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigg
 		...(thinkingLevel !== undefined && { thinkingLevel }),
 		...(replica !== undefined && { replica }),
 		...(replicas !== undefined && { replicas }),
-	}, dataVersion, dataVersions);
+	}), dataVersion, dataVersions);
 	// A close-triggered job (issue #231) leads the semantic key's flow slot with `closed:`. Without it,
 	// a label/comment/PR job on the same target and flow inside the 10-minute window silently swallows
 	// the close job -- and because a swallowed close job writes no run record, the once trigger it was

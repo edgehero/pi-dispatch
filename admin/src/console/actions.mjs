@@ -1,3 +1,4 @@
+import { subscriptionResetSentence } from "../model-words.mjs";
 /**
  * The console's action table and its ONE preview/confirm pipeline (issue #642, DES-OPERATOR-CONSOLE,
  * REQ-OPERATOR-CONSOLE-ACTIONS). Every write the console can make is an entry in `ACTIONS`, and `server.mjs` generates
@@ -1009,6 +1010,7 @@ export function runFieldsLines(f, lead) {
     ...(f.flow !== null && f.flow !== undefined ? [`flow ${fieldText(f.flow)}`] : []),
     `model ${f.model !== null && f.model !== undefined ? fieldText(f.model) : "the deployment's default"}`,
     ...(f.models !== null && f.models !== undefined ? [`allowed models ${fieldText(f.models)}`] : []),
+    ...(f.modelSelection?.strategy === "random" ? [`random pool ${fieldText(f.modelSelection.candidates)}`] : []),
     ...(Array.isArray(f.fallbackModels) && f.fallbackModels.length > 0 ? [`fallbacks ${fieldText(f.fallbackModels)}`] : []),
     `per-job cap ${f.maxCostUsd !== null && f.maxCostUsd !== undefined ? `$${fieldText(f.maxCostUsd)}` : "the deployment's"}`,
     ...(f.secretsProfile !== null && f.secretsProfile !== undefined ? [`secret profile ${fieldText(f.secretsProfile)}`] : []),
@@ -1196,7 +1198,10 @@ export function waitingLine(row) {
     if (line !== null) return line;
   } else if (why !== null && row.known === true && Object.hasOwn(DEFER_WHYS, why)) {
     const line = filledLine(DEFER_WHYS[why].sentence, row);
-    if (line !== null) return line;
+    if (line !== null) {
+      const reset = subscriptionResetSentence(row.resetAt);
+      return why === "subscription-quota" ? { text: `${line.text}. ${reset}`, bar: html`${line.bar}. ${reset}` } : line;
+    }
   } else if (why !== null && row.known === false) {
     return { text: `Recorded reason: ${why}, ${NO_EXPLANATION}`, bar: html`Recorded reason: <span class="code">${why}</span>, ${NO_EXPLANATION}` };
   }

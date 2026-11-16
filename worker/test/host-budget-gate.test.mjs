@@ -409,8 +409,10 @@ test("BY SHAPE: every hold is given back through the ONE releaseAllHolds, and no
 	assert.equal(drains, 2, "inFlight.release in the scope drain and endpointSlots.release in the endpoint drain, nowhere else");
 	// Every exit calls it: the scope deferral, the endpoint deferral, the budget deferral, the setup guard and the finally
 	// (with the orphan flag). The never-fits check is above the wait gate and every hold: it holds nothing.
-	assert.equal((outside.match(/releaseAllHolds\(/g) ?? []).length, 13, "local workspace identity failure and local event claim debounce, five exits, the all-candidate deferral, three candidate endpoint rollbacks, selected subscription deferral and the newer-release settings deferral (issue #761); new sites must be counted here");
-	assert.match(outside, /if \(error instanceof SubscriptionWait\) \{\s*await releaseAllHolds\(\);\s*if \(error\.wait === "subscription-auth"\) await deferTo\(/, "a known subscription wait gives every hold back before the job moves to its delay");
+	assert.equal((outside.match(/releaseAllHolds\(/g) ?? []).length, 14, "random selector CAS rollback, local workspace identity failure and local event claim debounce, five exits, the all-candidate deferral, three candidate endpoint rollbacks, selected subscription deferral and the newer-release settings deferral (issue #761); new sites must be counted here");
+	const subscriptionWait = outside.slice(outside.indexOf("if (error instanceof SubscriptionWait) {"), outside.indexOf("if (error?.holdUntilRestart === true) {"));
+	assert.ok(subscriptionWait.includes("await releaseAllHolds();"));
+	assert.ok(subscriptionWait.indexOf("await releaseAllHolds();") < subscriptionWait.indexOf("await deferTo("), "subscription bookkeeping precedes release, and every hold is given back before deferral");
 	// Issue #599, phase 2: the running-jobs entry is given back there too, and nowhere else; it is added once, at admission.
 	assert.ok(/runningJobs\.remove\(/.test(inside), "the running entry is removed inside releaseAllHolds");
 	assert.deepEqual(outside.match(/runningJobs\.remove\(/g) ?? [], [], "and nowhere else");

@@ -274,3 +274,16 @@ test("a console cannot infer a remote local folder's project from an unresolved 
   assert.equal(modelsForAgent(got).roles[0].triggers[0].projectUnknown, false);
   assert.ok(!JSON.stringify(modelsForAgent(got)).includes("PRIVATE_TRUTHY_DIAGNOSTIC"));
 });
+
+test("random pools show observed blockers without a default primary or predicted next selection", () => {
+  const now = Date.parse("2026-11-16T12:00:00Z");
+  const pool = { strategy: "random", candidates: ["anthropic/claude-haiku-4-5", "openai/gpt-5"] };
+  const view = modelsViewOf({ now, entries: [{ run: { kind: "github", flow: "fix", modelSelection: pool } }], deployment: { provider: "fake", model: "default" }, status: () => ({ known: true, priced: true }), cooldowns: [{ ref: pool.candidates[0], kind: "quota-exhausted", until: now + 1000 }], records: [{ jobId: "random-922", endedAt: new Date(now).toISOString(), provider: "openai", model: "gpt-5", modelWhy: "random" }] });
+  assert.deepEqual(view.randomPools, [{ index: 0, number: 1, candidates: [{ ref: pool.candidates[0], state: "cooling-down" }, { ref: pool.candidates[1], state: "available" }] }]);
+  assert.ok(!view.models.some(row => row.ref === "fake/default"));
+  assert.ok(!Object.hasOwn(view.randomPools[0], "next"));
+  assert.equal(view.recentRandom[0].model, "gpt-5");
+  const agent = modelsForAgent(view);
+  assert.equal(agent.randomPools[0].candidates.length, 2);
+  assert.equal(agent.recentRandom[0].modelWhy, "random");
+});

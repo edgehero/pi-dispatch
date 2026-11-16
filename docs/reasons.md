@@ -1957,3 +1957,27 @@ This queued generation no longer owns its trigger signal. Inspect the current ge
 ### local-folder-changed
 
 The local folder changed identity between admission and preparation. Check its links and send a new event. Nothing was spent.
+
+### model-selection-no-candidate
+
+No model in the reviewed random pool can run safely. No container started.
+
+Review the pool, allowed models, catalog, credentials, prices and egress; the worker logs a fixed reason for each rejected candidate.
+
+### model-selection-state-unavailable
+
+The durable model choice is missing or invalid, so this run cannot choose again safely.
+
+Restore consistent queue and selection state, or create a fresh run after checking whether the original attempt ran.
+
+### model-selection-policy-changed
+
+The saved choice or random pool is no longer authorized by the current policy.
+
+Review the pool and allowed models, then create a fresh run if the changed policy is intended.
+
+### model-selection-continuation-unavailable
+
+The original model cannot be bound to the saved continuation. Nothing was spent.
+
+Inspect the parked or approval request and its saved session; do not replace its model by retrying a different pool.

@@ -50,6 +50,7 @@
  *         cp-<seq>/manifest.json 0600
  *         cp-<seq>/transcript.jsonl
  */
+import { modelSelectionProblem } from "./model-ref.mjs";
 import { createHash, randomBytes } from "node:crypto";
 import { spawn } from "node:child_process";
 import { constants as FS } from "node:fs";
@@ -92,6 +93,17 @@ export const DEFAULT_CHECKPOINT_LIMITS = Object.freeze({
  * attempt's directory) keeps it and waits instead.
  */
 export const CHECKPOINT_MANIFEST_VERSION = 1;
+
+// A sibling annotation keeps the closed v1 manifest readable by older workers. Only versioned random
+// jobs require it; CURRENT is published after both files have been atomically written under the lock.
+export const CHECKPOINT_MODEL_SELECTION_FILE = "model-selection.json";
+export const CHECKPOINT_MODEL_SELECTION_VERSION = 1;
+const selectionAnnotation = (value) => value && typeof value === "object" && !Array.isArray(value)
+	&& Object.keys(value).length === 3 && ["ref", "billing", "binding"].every((key) => Object.hasOwn(value, key))
+	&& modelSelectionProblem({ strategy: "random", candidates: [value.ref] }) === null
+	&& [null, "api", "subscription"].includes(value.billing)
+	&& (value.billing === "subscription" ? /^[a-f0-9]{64}$/.test(value.binding) : value.binding === null);
+
 
 /**
  * Every manifest version this build reads: exactly the newest and the one before it, with the version written among
@@ -1138,6 +1150,7 @@ export function makeWorkspaceCheckpointer({
 		try {
 			if (typeof runId !== "string" || !runId || !isInt(seq, 1, 999_999_999) || !ANY_HEX_OID.test(String(baseSha))) return { skipped: "bad-args" };
 			if (!KINDS.has(kind) || !QUIESCED.has(quiesced) || !isInt(attempt, 0, 10_000)) return { skipped: "bad-args" };
+			if (meta?.modelSelection !== undefined && (!selectionAnnotation(meta.modelSelection) || meta.modelSelection.ref !== `${meta.provider}/${meta.model}`)) return { skipped: "model-selection-invalid" };
 			const paths = runPaths(runId);
 			if (!(await lstatOrNull(paths.run))?.isDirectory()) return { skipped: "not-primed" };
 			if (await lstatOrNull(paths.tooLarge)) return { skipped: "base-too-large" };
@@ -1241,7 +1254,12 @@ export function makeWorkspaceCheckpointer({
 			// Fail open and say which: a malformed token is dropped to null, and its NAME is logged.
 			if (meta?.[field] != null && manifest[field] === null) log("checkpoint_meta_dropped", { field });
 		}
-		await atomicWrite(dir, "manifest.json", `${JSON.stringify(manifest)}\n`);
+		const manifestText = `${JSON.stringify(manifest)}\n`;
+		await atomicWrite(dir, "manifest.json", manifestText);
+		if (meta?.modelSelection !== undefined) {
+			const annotation = { version: CHECKPOINT_MODEL_SELECTION_VERSION, manifestSha256: createHash("sha256").update(manifestText).digest("hex"), ...meta.modelSelection };
+			await atomicWrite(dir, CHECKPOINT_MODEL_SELECTION_FILE, `${JSON.stringify(annotation)}\n`);
+		}
 		await atomicWrite(paths.run, "CURRENT", `${seq}\n`);
 		log("checkpoint_snapshot", { seq, files: counts.files, newBytes: counts.newBytes, partial: counts.partial, ignoredDropped });
 		if (!keepHistory) await pruneOld(paths, seq, cur.seq ?? null);
@@ -1398,12 +1416,27 @@ export function makeWorkspaceCheckpointer({
 			if (!got || got.bytes !== manifest.transcript.bytes || got.sha256 !== manifest.transcript.sha256) {
 				return { invalid: true, reason: "transcript-mismatch" };
 			}
-			return { ok: true, manifest, transcriptPath };
+			const modelSelection = await readSelectionAnnotation(paths.cp(cur.seq), raw.buf, manifest);
+			return { ok: true, manifest, transcriptPath, ...(modelSelection !== null ? { modelSelection } : {}) };
 		} catch (err) {
 			log("checkpoint_failed", { phase: "read", code: err?.code ?? "internal" });
 			if (keepHistory && retryableStoreError(err)) return { unavailable: err.code };
 			return { invalid: true, reason: "internal-error" };
 		}
+	}
+
+	async function readSelectionAnnotation(dir, manifestBytes, manifest) {
+		const raw = await readRegular(join(dir, CHECKPOINT_MODEL_SELECTION_FILE), 4096);
+		if (raw.error === "ENOENT") return null;
+		if (retryableStoreError(raw.error)) return { unavailable: raw.error };
+		if (!raw.buf) return { invalid: true };
+		let row;
+		try { row = JSON.parse(raw.buf.toString("utf8")); } catch { return { invalid: true }; }
+		if (Number.isSafeInteger(row?.version) && row.version > CHECKPOINT_MODEL_SELECTION_VERSION) return { newer: true };
+		if (!closed(row, ["version", "manifestSha256", "ref", "billing", "binding"]) || row.version !== CHECKPOINT_MODEL_SELECTION_VERSION) return { invalid: true };
+		const selection = { ref: row.ref, billing: row.billing, binding: row.binding };
+		if (!selectionAnnotation(selection) || row.ref !== `${manifest.provider}/${manifest.model}` || row.manifestSha256 !== createHash("sha256").update(manifestBytes).digest("hex")) return { invalid: true };
+		return selection;
 	}
 
 	// ── restore ─────────────────────────────────────────────────────────────────────────────────────────

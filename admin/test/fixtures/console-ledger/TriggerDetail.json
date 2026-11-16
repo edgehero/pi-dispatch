@@ -1,7 +1,7 @@
 {
   "card": "TriggerDetail",
   "pr": 750,
-  "words": "1e95ad35471566ca49df6979e28c600e55075ec4fe60e071c335164364c966b3",
+  "words": "98facf0b6551f2372490f1cdb728f06dba72fcedfe16526d0e155d4d122681df",
   "elements": [
     {"el":"p-trigger-on","kind":"panel","status":"new","source":"admin/src/console/panels/trigger.mjs#triggerOn","golden":["trigger.operator"],"reason":"Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."},
     {"el":"p-trigger-runs","kind":"panel","status":"new","source":"admin/src/console/panels/trigger.mjs#triggerRuns","golden":["trigger.operator"],"reason":"Issue #750 keeps all configuration functionality in the Pulse kit; the shared confirm slot holds previews."},
@@ -33,6 +33,7 @@
     {"el":"Delete in the title bar","kind":"readme","status":"illustrative","reason":"the page keeps it in the side panel, away from Edit"},
     {"el":"Local event commands show source, identity, debounce and exact review-author authority","kind":"readme","status":"new","panel":"p-trigger-on","source":"admin/src/console/panels/trigger.mjs#triggerOn","golden":["panels/trigger-local-event.operator"],"shows":["Trigger ID","at most one pending follow-up","No event text is passed"]},
     {"el":"Current generation and one pending follow-up carry safe state only","kind":"readme","status":"new","panel":"p-trigger-runs","source":"admin/src/console/panels/trigger.mjs#triggerRuns","golden":["panels/trigger-local-event.operator"],"shows":["Current generation","Pending follow-up"]},
-    {"el":"Local command owner is a By hand field; the source does not promise a clone","kind":"readme","status":"new","panel":"p-trigger-run","source":"admin/src/console/panels/trigger.mjs#triggerRun","golden":["panels/trigger-local-event.operator"],"shows":["run.worker","Only the worker named by run.worker"]}
+    {"el":"Local command owner is a By hand field; the source does not promise a clone","kind":"readme","status":"new","panel":"p-trigger-run","source":"admin/src/console/panels/trigger.mjs#triggerRun","golden":["panels/trigger-local-event.operator"],"shows":["run.worker","Only the worker named by run.worker"]},
+    {"el":"Random jobs recheck the current pool and allowed-model list","kind":"readme","status":"new","panel":"p-trigger-change","source":"admin/src/console/panels/trigger.mjs#triggerChange","golden":["trigger.operator"],"shows":"A changed pool or a candidate no longer allowed refuses the old queued policy.","reason":"Issue #922 rechecks current random policy before each pickup; a queued old pool cannot acquire new authority."}
   ]
 }

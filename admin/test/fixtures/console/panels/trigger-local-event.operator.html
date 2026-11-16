@@ -237,6 +237,8 @@ Nothing merges by itself.
 This trigger is not a schedule or a one-shot.
 </p></div></section><section id="p-trigger-change" data-panel><div class="card"><div class="card__head"><h2>Before you change it</h2></div><p>
 Each queued generation is bound to this reviewed trigger definition. Changing or deleting it retires the old generation before another container starts. Running commands finish; later events use the new definition.
+Random jobs recheck this trigger's current pool and allowed-model list before starting.
+A changed pool or a candidate no longer allowed refuses the old queued policy.
 Adding or deleting a row renumbers the rows after it.
 </p>
 <p>

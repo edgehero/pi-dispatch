@@ -1,0 +1,102 @@
+[
+  {
+    "golden": "trigger-gets-random.operator",
+    "width": 1440,
+    "theme": "light",
+    "horizontalOverflow": false
+  },
+  {
+    "golden": "models-random.operator",
+    "width": 1440,
+    "theme": "light",
+    "horizontalOverflow": false
+  },
+  {
+    "golden": "models-random-blocked.operator",
+    "width": 1440,
+    "theme": "light",
+    "horizontalOverflow": false
+  },
+  {
+    "golden": "models-random-blocked.operator",
+    "width": 1440,
+    "theme": "light",
+    "horizontalOverflow": false
+  },
+  {
+    "golden": "trigger-gets-random.operator",
+    "width": 1440,
+    "theme": "dark",
+    "horizontalOverflow": false
+  },
+  {
+    "golden": "models-random.operator",
+    "width": 1440,
+    "theme": "dark",
+    "horizontalOverflow": false
+  },
+  {
+    "golden": "models-random-blocked.operator",
+    "width": 1440,
+    "theme": "dark",
+    "horizontalOverflow": false
+  },
+  {
+    "golden": "models-random-blocked.operator",
+    "width": 1440,
+    "theme": "dark",
+    "horizontalOverflow": false
+  },
+  {
+    "golden": "trigger-gets-random.operator",
+    "width": 375,
+    "theme": "light",
+    "horizontalOverflow": false
+  },
+  {
+    "golden": "models-random.operator",
+    "width": 375,
+    "theme": "light",
+    "horizontalOverflow": false
+  },
+  {
+    "golden": "models-random-blocked.operator",
+    "width": 375,
+    "theme": "light",
+    "horizontalOverflow": false
+  },
+  {
+    "golden": "models-random-blocked.operator",
+    "width": 375,
+    "theme": "light",
+    "horizontalOverflow": false
+  },
+  {
+    "golden": "trigger-gets-random.operator",
+    "width": 375,
+    "theme": "dark",
+    "horizontalOverflow": false
+  },
+  {
+    "golden": "models-random.operator",
+    "width": 375,
+    "theme": "dark",
+    "horizontalOverflow": false
+  },
+  {
+    "golden": "models-random-blocked.operator",
+    "width": 375,
+    "theme": "dark",
+    "horizontalOverflow": false
+  },
+  {
+    "golden": "models-random-blocked.operator",
+    "width": 375,
+    "theme": "dark",
+    "horizontalOverflow": false
+  },
+  {
+    "interaction": "keyboard/select mode, candidate typing, draft summary, discard reset, ordered fallback switching",
+    "passed": true
+  }
+]

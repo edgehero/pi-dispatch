@@ -70,6 +70,7 @@ export const DEFER_WHYS = Object.freeze({
 	"subscription-auth": Object.freeze({ bucket: "check", sentence: "Waits until the subscription credential can be renewed at {until}" }),
 	"model-cooldown": Object.freeze({ bucket: "check", sentence: "No reviewed model is available; a model is cooling down. Asks again at {until}" }),
 	"model-window": Object.freeze({ bucket: "check", sentence: "No reviewed model is available; a model's dollar window is full. Asks again at {until}" }),
+	"model-selection": Object.freeze({ bucket: "check", sentence: "Another pickup is committing this run's model choice. Asks again at {until}" }),
 	"host-budget": Object.freeze({ bucket: "slot", sentence: "{host}'s budget has no room for it yet" }),
 	"bundle-profile": Object.freeze({ bucket: "slot", sentence: "Waits for a host that serves its secret bundle profile" }),
 	chained: Object.freeze({ bucket: "run", sentence: "Chained after {holder}; starts when its folder is free" }),
@@ -87,7 +88,7 @@ export const DEFER_WHYS = Object.freeze({
 });
 
 /** The hash's fields, in the order a reader's HMGET asks for them. `n` is the writer's own nonce, never shown. */
-export const DEFER_FIELDS = Object.freeze(["why", "at", "until", "project", "host", "holder", "endpoint", "budgetWhy", "trigger", "attempt", "attempts", "n"]);
+export const DEFER_FIELDS = Object.freeze(["why", "at", "until", "project", "host", "holder", "endpoint", "budgetWhy", "trigger", "attempt", "attempts", "resetAt", "n"]);
 
 /** A reason's charset: what `parseDefer` takes as a reason word at all (a word outside the table reads as unknown). */
 export const DEFER_WHY_RE = /^[a-z][a-z0-9-]{0,31}$/;
@@ -156,6 +157,7 @@ const FIELD_RULES = Object.freeze({
 	why: (v) => (typeof v === "string" && Object.hasOwn(DEFER_WHYS, v) ? v : null),
 	at: (v) => intIn(v, 0, DEFER_TIME_MAX_MS),
 	until: (v) => intIn(v, 0, DEFER_TIME_MAX_MS),
+	resetAt: (v) => intIn(v, 0, DEFER_TIME_MAX_MS),
 	project: (v) => textOf(v, DEFER_PROJECT_RE),
 	host: (v) => textOf(v, DEFER_HOST_RE),
 	holder: (v) => textOf(v, DEFER_ID_RE),
@@ -211,5 +213,6 @@ export function parseDefer(values) {
 		trigger: FIELD_RULES.trigger(at(8)),
 		attempt: FIELD_RULES.attempt(at(9)),
 		attempts: FIELD_RULES.attempts(at(10)),
+		...(FIELD_RULES.resetAt(at(11)) !== null ? { resetAt: FIELD_RULES.resetAt(at(11)) } : {}),
 	};
 }

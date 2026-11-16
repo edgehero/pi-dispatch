@@ -79,6 +79,15 @@ export function validateModelRef(run, at, path) {
 	// import-free: run-history.mjs imports it too, and must not drag config.mjs's fs and os in with it.
 	const configError = (message) => Object.assign(new Error(message), { piDispatchConfig: true });
 	const out = {};
+	if (run?.modelSelection !== undefined) {
+		const problem = modelSelectionProblem(run.modelSelection);
+		if (problem !== null) throw configError(`${at}: run.modelSelection ${problem}: ${path}`);
+		for (const key of ["provider", "model", "fallbackModels"]) {
+			if (Object.hasOwn(run, key) && run[key] !== undefined) throw configError(`${at}: run.modelSelection cannot be combined with run.${key}: ${path}`);
+		}
+		if (run.command !== undefined) throw configError(`${at}: run.modelSelection is not supported on command-only jobs: ${path}`);
+		out.modelSelection = { strategy: "random", candidates: [...run.modelSelection.candidates] };
+	}
 	// The shape checks (ASCII on the original, then the pattern on the lowercased value) are `providerIdProblem`
 	// and `modelIdProblem`, shared with PI_MODEL, PI_PROVIDER, the settings overlay and `pi-dispatch run` (#673).
 	// NULL IS ABSENT, for all three. Before #502 a hand-written cron entry's `"model": null` loaded and
@@ -130,6 +139,12 @@ export function validateModelRef(run, at, path) {
 			}
 		}
 		out.fallbackModels = [...run.fallbackModels];
+	}
+	if (out.modelSelection && out.models !== undefined) {
+		for (const entry of out.modelSelection.candidates) {
+			const ref = splitModelEntry(entry);
+			if (!modelOnList(out.models, ref.provider, ref.model)) throw configError(`${at}: run.models does not list a run.modelSelection candidate: ${path}`);
+		}
 	}
 	return out;
 }
@@ -205,4 +220,15 @@ export function modelOnList(list, provider, model) {
 		const ref = splitModelEntry(entry);
 		return ref !== null && ref.provider === provider && ref.model === model;
 	});
+}
+
+/** Reviewed physical candidates, distinct from the allowed-model ceiling. No defaults or roles enter a draw. */
+export function modelSelectionProblem(value) {
+	if (value === null || typeof value !== "object" || Array.isArray(value)) return "must be an object with strategy and candidates";
+	if (Object.keys(value).some((key) => key !== "strategy" && key !== "candidates")) return "has an unknown field (only strategy and candidates are supported)";
+	if (value.strategy !== "random") return 'strategy must be "random"';
+	const problem = modelListProblem(value.candidates);
+	if (problem !== null) return `candidates ${problem}`;
+	if (value.candidates.some((entry) => splitModelEntry(entry).model.toLowerCase().startsWith("role:"))) return "candidates must name physical models, not roles";
+	return null;
 }

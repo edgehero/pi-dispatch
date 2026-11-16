@@ -272,3 +272,16 @@ test("budget deferrals preserve each limiting dimension and the legacy verdict d
 		assert.equal(parsed.bucket, "slot");
 	}
 });
+
+test("a subscription reset is optional bounded evidence distinct from the next polling time", () => {
+	const record = { why: "subscription-quota", at: 100, until: 200, resetAt: 10_000 };
+	const args = deferHsetArgs(record);
+	const fields = Object.fromEntries(Array.from({ length: args.length / 2 }, (_, i) => [args[i * 2], args[i * 2 + 1]]));
+	const parsed = parseDefer(DEFER_FIELDS.map((field) => fields[field] ?? null));
+	assert.equal(parsed.until, 200);
+	assert.equal(parsed.resetAt, 10_000);
+	for (const value of [null, "unknown", -1, DEFER_TIME_MAX_MS + 1]) {
+		const values = DEFER_FIELDS.map((field) => field === "resetAt" ? value : fields[field] ?? null);
+		assert.equal(parseDefer(values).resetAt, undefined);
+	}
+});

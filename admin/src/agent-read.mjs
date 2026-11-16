@@ -1,3 +1,4 @@
+import { recordedModelSelection } from "@edgehero/pi-dispatch/model-selection-record";
 /** Model-facing reads are rebuilt before rendering or caching. New prose fields are withheld by default (#766). */
 import { basename } from "node:path";
 import { REASONS, SESSION_REASON_TEXT, PLAN_REASON_TEXT } from "@edgehero/pi-dispatch/reason-catalog";
@@ -20,6 +21,7 @@ const PRIVATE = new Set(["reviewAuthors", "text", "body", "task", "title", "desc
 
 export function agentReadProjection(value, key = "", depth = 0) {
   if (depth > 16 || value === undefined) return undefined;
+  if (key === "modelSelection") return recordedModelSelection(value);
   if (value === null || typeof value === "boolean") return value;
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
   if (typeof value === "string") {

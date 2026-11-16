@@ -149,6 +149,8 @@ test("every subfolder the source makes in the run history or the session store i
 // path test above could find it by, as the page names it, pinned by where its name is made: a file and a literal
 // that must occur in its code. The page drops one, or its literal moves, and this fails.
 const FIXED_STORES = new Map([
+	["model-selection.json", [["worker/src/workspace-checkpoint.mjs", 'CHECKPOINT_MODEL_SELECTION_FILE = "model-selection.json"']]],
+	["model-selection", [["worker/src/session-store.mjs", 'MODEL_SELECTION_FILE = "model-selection"']]],
 	["./.env", [["worker/src/up.mjs", 'join(cwd, ".env")']]],
 	["model-proposals.json", [["worker/src/doctor-model-proposals.mjs", 'join(cwd, "model-proposals.json")']]],
 	["egress-allowlist.conf", [["worker/src/start.mjs", 'join(process.cwd(), "egress-allowlist.conf")']]],
@@ -194,7 +196,7 @@ const KEY_FAMILIES = new Map([
 	["touch:*", [["worker/src/touch-state.mjs", '"touch:index"']]],
 	["zero-touch:*", [["worker/src/question-groups.mjs", '"zero-touch:questions:'], ["worker/src/zero-touch-fixes.mjs", '"zero-touch:fixes:']]],
 	["alloc:*", [["worker/src/allocation.mjs", '"alloc:plan"']]],
-	["dispatch:*", [["worker/src/model-attempts.mjs", "`dispatch:model-attempt:"], ["worker/src/model-cooldowns.mjs", "`dispatch:model-cooldown:"], ["worker/src/subscription-status.mjs", "`dispatch:subscription-status:"], ["worker/src/subscription-quota.mjs", "`dispatch:subscription-quota:"], ["worker/src/canary-lock.mjs", '"dispatch:canary:exclusive"']]],
+	["dispatch:*", [["worker/src/model-selection-state.mjs", '"dispatch:model-selection:v1:"'], ["worker/src/model-attempts.mjs", "`dispatch:model-attempt:"], ["worker/src/model-cooldowns.mjs", "`dispatch:model-cooldown:"], ["worker/src/subscription-status.mjs", "`dispatch:subscription-status:"], ["worker/src/subscription-quota.mjs", "`dispatch:subscription-quota:"], ["worker/src/canary-lock.mjs", '"dispatch:canary:exclusive"']]],
 	["host:*", [["worker/src/host-registry.mjs", '"host:live"']]],
 	["receiver:*", [["worker/src/receiver-status.mjs", '"receiver:live"']]],
 	["doctor:*", [["worker/src/doctor-results.mjs", '"doctor:hosts"']]],

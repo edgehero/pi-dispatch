@@ -1,7 +1,7 @@
 {
   "card": "TriggerEnvironmentChange",
   "pr": 800,
-  "words": "692d2f5d4ac46f245cfae64a70fb18d151b9d2e99c21225b7a6bfb7ac5930fc4",
+  "words": "c17f4fea50fc3497a11a981e73d38f9117b396cef18b3ccbc2f42bc6fe249e1f",
   "elements": [
     {
       "el": "p-trigger-gets-preview",
@@ -239,6 +239,14 @@
       "kind": "sample",
       "status": "illustrative",
       "reason": "Sample values, from the design fixture; the amount is the planner's for anthropic/claude-opus-5-5 at the pinned pi."
+    },
+    {
+      "el": "Random policy changes name the live check for queued jobs",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/trigger-environment-plans.mjs#createTriggerEnvironmentActions",
+      "holds": "A changed pool or a candidate no longer allowed refuses the old queued policy.",
+      "reason": "This conditional note appears when entering or leaving random mode; planner tests exercise both directions while the fixed MCP preview remains unchanged."
     }
   ]
 }

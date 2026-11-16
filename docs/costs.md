@@ -211,7 +211,7 @@ on its own. Removing a trigger's cap, or raising it, is said as a widening when 
 
 **What one call needs.** The runner refuses a call when the most it could cost would pass the cap, and that bound holds the
 model's whole output limit, so a cap can be too small for any call at all. The preview works out two amounts for each model the
-trigger names (its main model, its `run.models` and its fallbacks), from the same bound as the runner:
+trigger names (its main model, its `run.models`, its fallbacks and its random candidates), from the same bound as the runner:
 
 - **The floor**, for a 4,096 byte request, the least any call can be bounded at. It is never the amount you are told to set: no job
   sends so small a request, since the default prompt and tools alone come to about 5 KB at the pinned pi.
@@ -708,3 +708,5 @@ requires verified billing, routing and input/output-limit guarantees beyond a fe
   model anything can re-price.
 - Rates provenance is pinned: each ledgered run remembers the pi-ai version that priced it, and a later
   pin bump shows up as "priced under older rates" — history is never silently repriced.
+
+For a random pool, the preview checks each candidate under the effective cap. The worker reserves against only the chosen singleton after free admission; changing models never increases the cap or adds an attempt. A subscription-limit replacement keeps any usage already charged. See [random selection](triggers.md#choosing-randomly-from-a-reviewed-pool).

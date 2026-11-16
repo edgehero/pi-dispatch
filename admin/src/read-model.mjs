@@ -1,3 +1,4 @@
+import { modelSelectionProblem } from "@edgehero/pi-dispatch/model-ref";
 import { makeHistoryReader, readHostHistory, historyRow } from "@edgehero/pi-dispatch/history-reader";
 import { readSubscriptionStatus } from "@edgehero/pi-dispatch/subscription-status";
 import { readSandboxInventories } from "@edgehero/pi-dispatch/sandbox-inventory";
@@ -2987,7 +2988,7 @@ export function readTriggerEditor({ paths, env = {}, folder = null, deploymentDi
   let models = null;
   try { provider = overlay.provider ?? providerFrom(hints); model = overlay.model ?? modelFrom(hints); image = jobImageFrom(hints); models = allowedModelsFrom(hints); } catch {}
   return {
-    defaults: { flow: "required by the trigger", kind: "selected by the trigger kind", folder: "required for cron", task: "required for cron", repository: "forge routing", backend: backends[0]?.name ?? null, provider, model, image, models: models ?? "unrestricted", maxCostUsd: overlay.maxCostUsd ?? hints.PI_MAX_COST_USD ?? "no per-job dollar cap", packages: true, github: false, replicas: 1, resume: false, awaitInput: false, secrets: "none", secretsProfile: "none", secretBundle: "project default", waitFor: "none", skillsDir: "none", instructions: "none", mayMerge: false, command: "none", portfolio: false, fallbackModels: "none", excludeTools: "none", excludeExtensions: "none", excludeExtensionTools: "none", mcp: "none unless named by the trigger", gates: "none", gateTimeout: "no trigger expiry override", gateBudgetRaiseUsd: "none", maxTurns: overlay.maxTurns ?? parseNonNegInt(hints.PI_MAX_TURNS, 30), progress: false, statusComment: false, recover: false, steer: false,
+    defaults: { flow: "required by the trigger", kind: "selected by the trigger kind", folder: "required for cron", task: "required for cron", repository: "forge routing", backend: backends[0]?.name ?? null, provider, model, image, models: models ?? "unrestricted", maxCostUsd: overlay.maxCostUsd ?? hints.PI_MAX_COST_USD ?? "no per-job dollar cap", packages: true, github: false, replicas: 1, resume: false, awaitInput: false, secrets: "none", secretsProfile: "none", secretBundle: "project default", waitFor: "none", skillsDir: "none", instructions: "none", mayMerge: false, command: "none", portfolio: false, fallbackModels: "none", modelSelection: "fixed or ordered fallback", excludeTools: "none", excludeExtensions: "none", excludeExtensionTools: "none", mcp: "none unless named by the trigger", gates: "none", gateTimeout: "no trigger expiry override", gateBudgetRaiseUsd: "none", maxTurns: overlay.maxTurns ?? parseNonNegInt(hints.PI_MAX_TURNS, 30), progress: false, statusComment: false, recover: false, steer: false,
       // Issue #888: the deployment's job limits, as its service env says them (the worker's own defaults when unset).
       idleTimeoutMinutes: parseNonNegInt(hints.PI_JOB_IDLE_MINUTES, JOB_IDLE_MINUTES_DEFAULT), stallTimeoutMinutes: parseNonNegInt(hints.PI_JOB_STALL_MINUTES, JOB_STALL_MINUTES_DEFAULT), maxMinutes: hints.PI_JOB_MAX_MINUTES ? parseNonNegInt(hints.PI_JOB_MAX_MINUTES, null) : "none" },
     ...readTriggerEgress({ deploymentDir, env, fs }),
@@ -3267,6 +3268,7 @@ export function normalizeTriggerForDisplay(entry) {
     // a dollar amount, the operator's own words, never a value a job chose. Spread only when present, so a trigger
     // that sets neither keeps exactly its keys.
     ...(Array.isArray(run.models) && run.models.length > 0 && run.models.every((m) => typeof m === "string") && { models: [...run.models] }),
+    ...(run.modelSelection != null && modelSelectionProblem(run.modelSelection) === null && { modelSelection: { strategy: "random", candidates: [...run.modelSelection.candidates] } }),
     ...(Array.isArray(run.fallbackModels) && run.fallbackModels.length > 0 && run.fallbackModels.every((m) => typeof m === "string") && { fallbackModels: [...run.fallbackModels] }),
     ...((typeof run.maxCostUsd === "string" || typeof run.maxCostUsd === "number") && { maxCostUsd: String(run.maxCostUsd) }),
     // The overlay MCP servers the jobs connect (REQ-MCP-OPERATOR-SERVERS), by name: the operator's own words, never a
@@ -6114,6 +6116,7 @@ async function hydrateWaiting(redis, entries, { heldIds, projectList, triggerLis
       queuedAt,
       recordedAt: record?.at ?? null,
       untilAt: record?.until ?? null,
+      resetAt: record?.resetAt ?? null,
       project,
       projectFrom: from,
       host: record?.host ?? null,

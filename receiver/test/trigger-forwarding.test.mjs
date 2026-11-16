@@ -70,6 +70,7 @@ const MAX_RUN = {
 // The loader refuses some fields together (flow with command, command with instructions, waitFor with
 // replicas), so each entry is loaded twice and the two variants between them set every field.
 const VARIANTS = {
+	random: { flow: "work", provider: undefined, model: undefined, fallbackModels: undefined, modelSelection: { strategy: "random", candidates: MAX_RUN.models } },
 	// Issue #645: run.recover is refused beside run.command, so it rides the flow variant. Only `true` rides the job.
 	// Issue #646: run.steer likewise.
 	"flow+replicas": { flow: "work", instructions: "Keep it short.", replicas: 2, recover: true, steer: true, mayMerge: true },
@@ -162,7 +163,7 @@ function drive(forge, route, triggers) {
 function load(forge, entry, variant) {
 	const raw = { on: entry.on, run: { kind: forge, ...MAX_RUN, ...variant, ...(entry.extra ?? {}) } };
 	// The maximal fixture declares the newest trigger field it uses (mayMerge, issue #908).
-	const json = JSON.stringify({ version: 4, triggers: [raw] });
+	const json = JSON.stringify({ version: variant?.modelSelection ? 6 : 4, triggers: [raw] });
 	const [normalized] = parseTriggers(json, "/t.json");
 	const cfg = {};
 	const res = reloadTriggers({ PI_TRIGGERS_FILE: "/t.json" }, cfg, { fileExists: () => true, readFile: () => json });
@@ -219,7 +220,7 @@ for (const [forge, entries] of Object.entries(ENTRIES)) {
 				assert.deepEqual(r.job[k], normalized.run[k], `${forge} ${entry.route}: the filter dropped run.${k} on the way to the job`);
 			}
 			// And execution knobs stay OUT of `trigger`, which is copied verbatim into /job/event.json.
-			for (const k of ["provider", "model", "maxTurns", "models", "fallbackModels", "maxCostUsd", "mayMerge", "mayMergePolicy"]) {
+			for (const k of ["provider", "model", "maxTurns", "models", "fallbackModels", "modelSelection", "modelSelectionGeneration", "maxCostUsd", "mayMerge", "mayMergePolicy"]) {
 				assert.equal(k in r.job.trigger, false, `${forge} ${entry.route}: ${k} leaked into trigger`);
 			}
 
@@ -250,9 +251,9 @@ test("absent stays absent: a trigger naming no model or cap enqueues a job with 
 			reloadTriggers({ PI_TRIGGERS_FILE: "/t.json" }, cfg, { fileExists: () => true, readFile: () => json });
 			const r = drive(forge, entry.route, cfg.triggers);
 			assert.equal(r.enqueue, true, `${forge} ${entry.route}: ${r.reason}`);
-			for (const k of ["provider", "model", "maxTurns", "models", "fallbackModels", "maxCostUsd", "mayMerge", "mayMergePolicy"]) assert.equal(k in r.job, false, `${forge} ${entry.route}: ${k}`);
+			for (const k of ["provider", "model", "maxTurns", "models", "fallbackModels", "modelSelection", "modelSelectionGeneration", "maxCostUsd", "mayMerge", "mayMergePolicy"]) assert.equal(k in r.job, false, `${forge} ${entry.route}: ${k}`);
 			const data = await enqueuedData(forge, r.job);
-			for (const k of ["provider", "model", "maxTurns", "models", "fallbackModels", "maxCostUsd", "mayMerge", "mayMergePolicy"]) assert.equal(k in data, false, `${forge} ${entry.route}: ${k} in stored data`);
+			for (const k of ["provider", "model", "maxTurns", "models", "fallbackModels", "modelSelection", "modelSelectionGeneration", "maxCostUsd", "mayMerge", "mayMergePolicy"]) assert.equal(k in data, false, `${forge} ${entry.route}: ${k} in stored data`);
 		}
 	}
 });

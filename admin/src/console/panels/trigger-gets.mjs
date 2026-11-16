@@ -97,15 +97,18 @@ function modelBody(gets, form) {
   const m = gets.model;
   if (!form) return readLine(m.read);
   const deployed = (word, value) => (value ? `Blank uses the deployment’s, ${value}.` : `Blank uses the deployment’s ${word}.`);
-  const add = (key, id, label, word) => html`<div class="field"><label for="${id}">${label}</label><input id="${id}" class="input" list="te-model-refs" maxlength="512" autocomplete="off" spellcheck="false" placeholder="provider/model, separated by spaces" data-gets-add="${key}" data-gets-word="${word}"></div>`;
+  const add = (key, id, label, word) => html`<div class="field"><label for="${id}">${label}</label><input id="${id}" class="input" list="te-model-refs" maxlength="${key === "randomCandidates" ? 8192 : 512}" autocomplete="off" spellcheck="false" placeholder="provider/model, separated by spaces" data-gets-add="${key}" data-gets-word="${word}"></div>`;
   const listed = (key, entries, what) => entries.map((ref) => chip(key, { value: ref, on: true, onWord: `${ref} back on ${what}`, offWord: `${ref} off ${what}` }));
-  return html`<div class="te-grid">
+  return html`<div class="field"><label for="te-selection">Model selection</label><select id="te-selection" class="input" data-gets-mode data-gets-was="${m.mode}"><option value="fixed"${m.mode === "fixed" ? html` selected` : null}>Fixed model</option><option value="fallback"${m.mode === "fallback" ? html` selected` : null}>Ordered fallbacks</option><option value="random"${m.mode === "random" ? html` selected` : null}>Random model pool</option></select><p class="field__hint">A new run chooses once. Retries keep that model unless an evidenced subscription limit permits another choice.</p></div>
+<div class="te-grid" data-gets-fixed${m.mode === "random" ? html` hidden` : null}>
 ${textField({ id: "te-provider", name: "provider", label: "Provider", value: m.provider, hint: deployed("provider", m.deployment.provider), list: "te-providers", word: "provider changed" })}
 ${textField({ id: "te-model", name: "model", label: "Model", value: m.model, hint: deployed("model", m.deployment.model), list: "te-models", word: "model changed" })}
+</div>
 ${textField({ id: "te-cap", name: "maxCostUsd", label: "Job cap, in dollars", value: m.cap, hint: m.capHint, word: "job cap changed", amount: true })}
-</div>${datalist("te-providers", m.providers)}${datalist("te-models", m.models)}${datalist("te-model-refs", m.refs)}
-<div>${sub("Allowed models")}${m.allowed.length > 0 ? chips(listed("models", m.allowed, "the allowed list")) : html`<p class="te-note">${m.allowedNone}</p>`}${add("models", "te-models-add", m.allowed.length > 0 ? "Add a model" : "Limit to a list", "allowed models changed")}</div>
-<div>${sub("If it is rate limited")}${m.fallbacks.length > 0 ? chips(listed("fallbackModels", m.fallbacks, "the fallbacks")) : html`<p class="te-note">No fallback.</p>`}${add("fallbackModels", "te-fallbacks-add", "Add a fallback", "fallbacks changed")}</div>`;
+${datalist("te-providers", m.providers)}${datalist("te-models", m.models)}${datalist("te-model-refs", m.refs)}
+<div data-gets-random${m.mode !== "random" ? html` hidden` : null}>${sub("Random candidate pool")}${m.candidates.length ? chips(listed("randomCandidates", m.candidates, "candidate")) : html`<p class="te-read">Add 1 to 16 exact provider/model references.</p>`}${add("randomCandidates", "te-random-add", "Add candidates", "random pool changed")}<p class="field__hint">Each eligible model has an equal chance. The allowed-model list still applies; the deployment's default is not an extra candidate. No model is chosen by this preview.</p></div>
+<div>${sub("Allowed models")}${m.allowed.length ? chips(listed("models", m.allowed, "the allowed list")) : html`<p class="te-read">${m.allowedNone}</p>`}${add("models", "te-models-add", m.allowed.length > 0 ? "Add a model" : "Limit to a list", "allowed models changed")}</div>
+<div data-gets-fallback${m.mode !== "fallback" ? html` hidden` : null}>${sub("If it is rate limited")}${m.fallbacks.length ? chips(listed("fallbackModels", m.fallbacks, "the fallbacks")) : html`<p class="te-read">No fallback.</p>`}${add("fallbackModels", "te-fallbacks-add", "Add a fallback", "fallbacks changed")}</div>`;
 }
 
 function flowBody(gets, form) {

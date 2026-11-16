@@ -40,11 +40,11 @@ const BASE = {
 	maxCostUsd: 2.5,
 };
 // flow+task and command are exclusive, so the twin loads each.
-const VARIANTS = { flow: { flow: "tidy", task: "run the tidy pass" }, command: { command: "wf run" } };
+const VARIANTS = { random: { flow: "tidy", task: "run tidy", provider: undefined, model: undefined, fallbackModels: undefined, modelSelection: { strategy: "random", candidates: BASE.models } }, flow: { flow: "tidy", task: "run the tidy pass" }, command: { command: "wf run" } };
 
 function load(variant) {
 	// Version 2: the fixture is maximal, and the file must say what it needs (issue #800).
-	const json = JSON.stringify({ version: 2, triggers: [{ on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run: { kind: "local", ...BASE, ...variant } }] });
+	const json = JSON.stringify({ version: variant.modelSelection ? 6 : 2, triggers: [{ on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run: { kind: "local", ...BASE, ...variant } }] });
 	const [normalized] = parseTriggers(json, "/t.json");
 	const [schedule] = loadSchedules({ triggersFile: "/t.json" }, { readFileSync: () => json, existsSync: () => true });
 	return { normalized, data: schedule.data };
@@ -63,7 +63,7 @@ for (const [name, variant] of Object.entries(VARIANTS)) {
 		for (const k of execKeys(normalized)) {
 			assert.deepEqual(data[k], normalized.run[k], `schedules.mjs dropped run.${k} on the way to the job`);
 		}
-		for (const k of ["provider", "model", "maxTurns", "models", "fallbackModels", "maxCostUsd"]) assert.equal(k in data.trigger, false, `${k} leaked into trigger`);
+		for (const k of ["provider", "model", "maxTurns", "models", "fallbackModels", "modelSelection", "modelSelectionGeneration", "maxCostUsd"]) assert.equal(k in data.trigger, false, `${k} leaked into trigger`);
 	});
 }
 
@@ -71,7 +71,7 @@ test("cron absent stays absent: no model or cap named serializes to job data wit
 	const json = JSON.stringify({ triggers: [{ on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/proj", flow: "tidy", task: "t" } }] });
 	const [schedule] = loadSchedules({ triggersFile: "/t.json" }, { readFileSync: () => json, existsSync: () => true });
 	const wire = JSON.parse(JSON.stringify(schedule.data));
-	for (const k of ["provider", "model", "maxTurns", "models", "fallbackModels", "maxCostUsd"]) assert.equal(k in wire, false, k);
+	for (const k of ["provider", "model", "maxTurns", "models", "fallbackModels", "modelSelection", "modelSelectionGeneration", "maxCostUsd"]) assert.equal(k in wire, false, k);
 });
 
 test("cron: each field ALONE reaches the schedule's job data (one folded into a neighbour's conditional is dropped only without it)", () => {

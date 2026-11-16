@@ -13,14 +13,16 @@ test("every selection reason says which physical model ran and why, without inve
     "fallback-window": "primary model's dollar window had no room",
     "fallback-unavailable": "an earlier candidate was unavailable",
     "fallback-context": "needed a larger context window",
+    random: "chosen randomly from its reviewed candidate pool",
+    "random-subscription-limit": "previous selection reached a subscription limit",
   };
   assert.deepEqual(Object.keys(reasons), [...MODEL_WHY]);
   for (const [modelWhy, reason] of Object.entries(reasons)) {
     const sentence = modelChoiceSentence({ ...base, modelWhy });
     assert.ok(sentence.includes("anthropic/claude-sonnet-5-5"));
-    assert.ok(sentence.includes("for role editor"));
+    assert.equal(sentence.includes("for role editor"), !modelWhy.startsWith("random"));
     assert.ok(sentence.includes(reason));
-    assert.equal(sentence.includes("used fallback"), modelWhy !== "primary");
+    assert.equal(sentence.includes("used fallback"), modelWhy.startsWith("fallback-"));
   }
   assert.equal(modelChoiceSentence({ ...base, modelWhy: "PRIVATE_UNKNOWN_REASON" }), null);
   assert.equal(modelChoiceSentence({ ...base, modelWhy: "primary", model: "<private>" }), null);

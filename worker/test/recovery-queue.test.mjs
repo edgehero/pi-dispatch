@@ -824,3 +824,27 @@ test("issue #908: an enqueued recovery retains both reviewed merge policy fields
 	assert.equal(stored.mayMergePolicy, original.mayMergePolicy);
 	assert.equal(stored.dataVersion, 5);
 });
+
+test("salvage carries a random checkpoint's model/account annotation into the next snapshot", async () => {
+	const jobsDir = tempDir("pi-salvage-random-");
+	const dir = staleJobDir(jobsDir, "job-ab12cd");
+	const modelSelection = { ref: "anthropic/m", billing: "subscription", binding: "a".repeat(64) };
+	const snaps = [];
+	const checkpointer = { readManifest: async () => ({ ok: true, manifest: MANIFEST, modelSelection }), snapshot: async (args) => (snaps.push(args), { ok: true, seq: args.seq }) };
+	const salvage = makeSalvager({ jobsDir, hostName: "h1", workspaceCheckpointer: checkpointer });
+	assert.deepEqual(await salvage({ runId: "gh-s", pointer: POINTER(), modelSelection }), { salvaged: true, seq: 5 });
+	assert.deepEqual(snaps[0].meta.modelSelection, modelSelection);
+	assert.equal(existsSync(dir), false);
+});
+
+test("salvage preserves the lost directory when random model authority is missing, changed, unreadable or newer", async () => {
+	const expected = { ref: "anthropic/m", billing: "subscription", binding: "a".repeat(64) };
+	for (const annotation of [undefined, { invalid: true }, { unavailable: "EIO" }, { newer: true }, { ...expected, binding: "b".repeat(64) }]) {
+		const jobsDir = tempDir("pi-salvage-binding-");
+		const dir = staleJobDir(jobsDir, "job-ab12cd");
+		const checkpointer = { readManifest: async () => ({ ok: true, manifest: MANIFEST, ...(annotation ? { modelSelection: annotation } : {}) }), snapshot: async () => assert.fail("invalid random authority must not overwrite the checkpoint") };
+		const salvage = makeSalvager({ jobsDir, hostName: "h1", workspaceCheckpointer: checkpointer });
+		assert.deepEqual(await salvage({ runId: "gh-s", pointer: POINTER(), modelSelection: expected }), { skipped: annotation?.newer ? "checkpoint-newer" : "model-selection-unavailable" });
+		assert.equal(existsSync(dir), true, "the snapshot's directory remains for a worker that can validate it");
+	}
+});

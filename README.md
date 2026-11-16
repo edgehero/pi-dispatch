@@ -347,8 +347,8 @@ order. The page shows which model is resting and why, and suggests a cheaper mod
 ([model roles](docs/model-roles.md), [fallback models](docs/model-failover.md), [canaries](docs/canary.md)).
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/console/console-models-dark.png?v=2026-11-05">
-  <img src="docs/images/console/console-models.png?v=2026-11-03" alt="The Models page: each role with its model and its fallbacks in order, a model cooling down after a rate limit, which models are in use, and proposals with their comparisons">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/console/console-models-dark.png?v=2026-11-16-922">
+  <img src="docs/images/console/console-models.png?v=2026-11-16-922" alt="The Models page: each role with its model and its fallbacks in order, a model cooling down after a rate limit, which models are in use, and proposals with their comparisons">
 </picture>
 
 **Your subscription's limits:** how much of its five hour and seven day windows is used, and when each resets
@@ -412,8 +412,8 @@ updates by itself ([updates](docs/console.md#updates)).
 A schedule also gets a button that fires it now ([triggers](docs/triggers.md)).
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/console/console-trigger-dark.png?v=2026-11-12-847">
-  <img src="docs/images/console/console-trigger.png?v=2026-11-12-847" alt="What its jobs get, on one trigger's page, with two changes not written yet: a pill per machine saying what differs or that it is unknown, then the model and its job cap, the flow, a switch for the staged packages and one for each of your extensions, the outside systems with linear switched on, pi's own tools with bash off and a switch for each tool the newest run that says what it loaded lists, the image and secrets, what the last run had under each, and a bar with Preview the change and Discard">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/console/console-trigger-dark.png?v=2026-11-16-922">
+  <img src="docs/images/console/console-trigger.png?v=2026-11-16-922" alt="What its jobs get, on one trigger's page, with two changes not written yet: a pill per machine saying what differs or that it is unknown, then the model and its job cap, the flow, a switch for the staged packages and one for each of your extensions, the outside systems with linear switched on, pi's own tools with bash off and a switch for each tool the newest run that says what it loaded lists, the image and secrets, what the last run had under each, and a bar with Preview the change and Discard">
 </picture>
 
 **Your phone:** every page fits, for answering a question from wherever you are. The console listens only on its own machine
@@ -501,15 +501,15 @@ machine the console runs on, and says how to undo it. One
 **Confirm** saves it, the console records who did, and **Undo** puts it back, or says what to edit by hand where it cannot.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/console/console-trigger-change-dark.png?v=2026-11-12-847">
-  <img src="docs/images/console/console-trigger-change.png?v=2026-11-12-847" alt="The preview of that change, in words: linear on and where its jobs would now connect, bash off, when the change takes effect, a waiting job that would now be refused, that a job on a machine without linear is refused and which machines have it, who it is recorded under, the lines of the file as they would change, the way to undo it, and one Confirm button">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/console/console-trigger-change-dark.png?v=2026-11-16-922">
+  <img src="docs/images/console/console-trigger-change.png?v=2026-11-16-922" alt="The preview of that change, in words: linear on and where its jobs would now connect, bash off, when the change takes effect, a waiting job that would now be refused, that a job on a machine without linear is refused and which machines have it, who it is recorded under, the lines of the file as they would change, the way to undo it, and one Confirm button">
 </picture>
 
 **Some changes that would only fail later are refused before they cost you anything.** A job cap can only lower the limit you set for all jobs. If a trigger's model is too
 expensive for even one request under its cap, the page refuses the change and names the amount a short task needs, rather than letting a job start and fail.
 If the page is out of date, it asks you to reload rather than write over someone else's change.
 
-**Some of this only a person sets.** The commands pi-dispatch gives an AI cannot set a trigger's job cap, the list of models its jobs may use, its fallback models,
+**Some of this only a person sets.** The commands pi-dispatch gives an AI cannot set a trigger's job cap, the list of models its jobs may use, its fallback models, random model pools,
 its outside systems, which tools its jobs lose (pi's own or those your extensions add), whether they load your packages, or which of your packages and extensions
 they leave out. A command that tries is refused, and you are never asked to confirm it. You set those on the page,
 or your technical person sets them in the triggers file ([what the card can say, and what it refuses](docs/console.md#what-a-triggers-jobs-get)).
@@ -736,12 +736,13 @@ optional reviewed grant for local review listeners below. [`SECURITY.md`](SECURI
 - `excludeExtensions`: leaves named staged packages and overlay extensions out of its jobs ([leaving one out](docs/exclude-tools.md#leaving-an-extension-out-runexcludeextensions)).
 - `excludeExtensionTools`: removes named tools an extension adds. If no staged package or overlay extension brought a name, the job can stop before its agent starts ([an extension's tools](docs/exclude-tools.md#an-extensions-tools-runexcludeextensiontools)).
 - `provider`, `model`: the model its jobs run on ([choosing the model](docs/triggers.md#choosing-the-model-and-the-turn-limit)).
+- `modelSelection`: choose one model at random from a reviewed list, keeping its choice through retries ([random model pools](docs/triggers.md#choosing-randomly-from-a-reviewed-pool)).
 - `models`, `fallbackModels`, `maxCostUsd`: the models a job may call, the ones to try when one is rate limited, and its own dollar cap ([limiting models](docs/triggers.md#limiting-which-models-a-job-may-call), [fallback models](docs/model-failover.md), [a dollar cap](docs/triggers.md#a-dollar-cap-per-job)).
 - `replicas`: races independent sandboxes on one event ([replicas](docs/replicas.md)).
 - `waitFor`: holds a job, unstarted and unbilled, until a time or your own check ([waiting](docs/wait-for.md)).
 - `instructions`, `skillsDir`, `github`, `portfolio`: the rest are in [`docs/triggers.md`](docs/triggers.md#optional-run-fields).
 
-On a trigger's page in the console, a person changes `flow`, `provider`, `model`, `maxCostUsd`, `models`, `fallbackModels`, `mcp`, `packages`, `excludeTools`, `excludeExtensions` and
+On a trigger's page in the console, a person changes `flow`, `provider`, `model`, `maxCostUsd`, `models`, `fallbackModels`, `modelSelection`, `mcp`, `packages`, `excludeTools`, `excludeExtensions` and
 `excludeExtensionTools` with one preview and one Confirm ([what a trigger's jobs get](docs/console.md#what-a-triggers-jobs-get)). The page writes this host's file,
 so on a fleet where each host keeps its own, a host keeps what it has until its copy changes. A few others have the page's Edit form. The rest change in the file, and editing the file works as it always has.
 

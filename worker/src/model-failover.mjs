@@ -65,7 +65,7 @@ export async function checkFailoverCandidate(job, { models = null, endpoints = [
 	return null;
 }
 
-async function modelWindowHasRoom(redis, ref, job, limits, at) {
+export async function modelWindowHasRoom(redis, ref, job, limits, at) {
 	if (job.maxCostMicros === 0) return true;
 	for (const row of modelDollarRows(limits, [ref])) {
 		// reserveDollars remains the atomic authority. This read chooses a candidate without acquiring money;

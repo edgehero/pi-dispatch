@@ -343,7 +343,7 @@ function isNonEmptyString(value) {
  * `version`, absent meaning 1, which `writeTriggers` owns and writes only when the content needs more than 1, so every
  * file of today's fields stays byte-identical.
  */
-export const TRIGGERS_FILE_VERSION = 5;
+export const TRIGGERS_FILE_VERSION = 6;
 
 /**
  * Each `run` key whose ABSENCE an older build would misread, with the version that introduced it. The raw `run` keys
@@ -358,7 +358,7 @@ export const TRIGGERS_FILE_VERSION = 5;
  * `idleTimeoutMinutes`, `stallTimeoutMinutes` and `maxMinutes` (issue #888): an older loader drops each and runs the job
  * under the deployment's limits, which for a ceiling the trigger set is a longer run than the file allows.
  */
-export const TRIGGER_RUN_FIELD_VERSIONS = Object.freeze({ excludeExtensions: 2, excludeExtensionTools: 2, idleTimeoutMinutes: 3, stallTimeoutMinutes: 3, maxMinutes: 3, mayMerge: 4, worker: 5 });
+export const TRIGGER_RUN_FIELD_VERSIONS = Object.freeze({ excludeExtensions: 2, excludeExtensionTools: 2, idleTimeoutMinutes: 3, stallTimeoutMinutes: 3, maxMinutes: 3, mayMerge: 4, worker: 5, modelSelection: 6 });
 
 /** Each top-level block (beside `triggers`) whose absence an older build would misread, as above. Empty until one does. */
 export const TRIGGERS_BLOCK_VERSIONS = Object.freeze({});
@@ -821,7 +821,7 @@ function normalizeCron(on, run, index, path, state) {
 	// freeze today's default into every stored repeatable.
 	return {
 		on: { type: "cron", id, pattern },
-		run: { kind: "local", folder: run.folder, ...(worker !== undefined && { worker }), flow: run.flow, task: run.task, provider: ref.provider, model: ref.model, maxTurns: ref.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(excludeExtensions !== undefined && { excludeExtensions }), ...(excludeExtensionTools !== undefined && { excludeExtensionTools }), ...(mcp !== undefined && { mcp }), ...(ref.models !== undefined && { models: ref.models }), ...(ref.fallbackModels !== undefined && { fallbackModels: ref.fallbackModels }), ...(ref.maxCostUsd !== undefined && { maxCostUsd: ref.maxCostUsd }), ...(ref.idleTimeoutMinutes !== undefined && { idleTimeoutMinutes: ref.idleTimeoutMinutes }), ...(ref.stallTimeoutMinutes !== undefined && { stallTimeoutMinutes: ref.stallTimeoutMinutes }), ...(ref.maxMinutes !== undefined && { maxMinutes: ref.maxMinutes }), ...(portfolio !== undefined && { portfolio }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }) },
+		run: { kind: "local", folder: run.folder, ...(worker !== undefined && { worker }), flow: run.flow, task: run.task, provider: ref.provider, model: ref.model, maxTurns: ref.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(excludeExtensions !== undefined && { excludeExtensions }), ...(excludeExtensionTools !== undefined && { excludeExtensionTools }), ...(mcp !== undefined && { mcp }), ...(ref.models !== undefined && { models: ref.models }), ...(ref.fallbackModels !== undefined && { fallbackModels: ref.fallbackModels }), ...(ref.modelSelection !== undefined && { modelSelection: ref.modelSelection }), ...(ref.maxCostUsd !== undefined && { maxCostUsd: ref.maxCostUsd }), ...(ref.idleTimeoutMinutes !== undefined && { idleTimeoutMinutes: ref.idleTimeoutMinutes }), ...(ref.stallTimeoutMinutes !== undefined && { stallTimeoutMinutes: ref.stallTimeoutMinutes }), ...(ref.maxMinutes !== undefined && { maxMinutes: ref.maxMinutes }), ...(portfolio !== undefined && { portfolio }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }) },
 	};
 }
 
@@ -1973,6 +1973,7 @@ const RUN_MODEL_NEAR_MISS_TARGETS = Object.freeze({
 	model: "run.model", modelid: "run.model", modelname: "run.model",
 	models: "run.models", modelids: "run.models", modelnames: "run.models", allowedmodels: "run.models", allowedmodel: "run.models",
 	fallbackmodels: "run.fallbackModels", fallbackmodel: "run.fallbackModels", fallbackmodelid: "run.fallbackModels", fallbackmodelids: "run.fallbackModels", fallbackmodelname: "run.fallbackModels", fallbackmodelnames: "run.fallbackModels",
+	modelselection: "run.modelSelection", modelselections: "run.modelSelection", modelselectiongeneration: "run.modelSelection",
 	maxturns: "run.maxTurns", maxturn: "run.maxTurns",
 	maxcostusd: "run.maxCostUsd", maxcost: "run.maxCostUsd",
 });
@@ -1998,7 +1999,7 @@ const RUN_MODEL_NEAR_MISS_TARGETS = Object.freeze({
  * were refused here before it was.
  */
 function validateRunModel(on, run, at, path) {
-	const exact = new Set(["provider", "model", "maxTurns", "models", "fallbackModels", "maxCostUsd"]);
+	const exact = new Set(["provider", "model", "maxTurns", "models", "fallbackModels", "modelSelection", "maxCostUsd"]);
 	for (const [label, source, exactIsLegal] of [
 		["run", run, true],
 		["on", on, false],

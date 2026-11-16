@@ -1428,3 +1428,45 @@ test("a cron run is rebuilt from its trigger whatever its id's length; only an i
   }
   for (const jobId of ["repeat:a:b:1", "local-abc"]) assert.match(rerunRefusalOf({ jobId, kind: "local", outcome: "completed" }, Date.now(), null), /no longer holds/, jobId);
 });
+
+test("random Retry keeps the committed choice while a fresh local Re-run inherits the pool and gets new generation", async () => {
+  const { commitModelSelection, finishModelSelection, identityForModelSelection, modelSelectionKey, readModelSelection } = await import("@edgehero/pi-dispatch/model-selection-state");
+  const at = Date.UTC(2026, 10, 16, 12);
+  const policy = { strategy: "random", candidates: ["openai/gpt-5.4", "anthropic/claude-haiku-4-5"] };
+  const job = { id: "local-random", queueName: "pi-jobs", timestamp: at, data: { kind: "local", folder: "/project", flow: "work", modelSelection: policy, models: policy.candidates, maxCostUsd: "1", modelSelectionGeneration: "00000000-0000-4000-8000-000000000001" }, attemptsMade: 1, finishedOn: at, getState: async () => "failed", retry: async () => {} };
+  const rows = new Map();
+  const valkey = {
+    async get(key) { return rows.get(key)?.raw ?? null; },
+    async persist() { return 0; },
+    async eval(_script, _n, key, expected, raw, ttl) {
+      if ((rows.get(key)?.raw ?? "") !== expected) return 0;
+      rows.set(key, { raw, expiry: ttl ? at + ttl : null });
+      return 1;
+    },
+  };
+  const id = identityForModelSelection(job);
+  assert.equal((await commitModelSelection(valkey, id, { candidates: policy.candidates, ref: policy.candidates[1], now: () => at })).ok, true);
+  assert.equal(await finishModelSelection(valkey, id, { attempt: 1 }), true);
+  assert.ok(rows.get(modelSelectionKey(id)).expiry > at);
+  const fakes = {
+    url: "redis://unused", parseConnectionFn: () => ({}), timeoutMs: 200, now: () => at,
+    redisFn: () => ({ on() {}, smembers: async () => [], scan: async () => ["0", []], disconnect() {} }),
+    queueFn: (_connection, { name }) => ({ name, client: Promise.resolve(valkey), getJob: async () => job, close: async () => {} }),
+    touchStore: { begin: async (event) => ({ event, ok: true }), write: async () => ({ ok: true }), abort: async () => ({ ok: true }) },
+  };
+  assert.equal((await retryFailedJob({ ...fakes, jobId: job.id, expect: { attemptsMade: 1, finishedOn: at } })).ok, true);
+  assert.equal(rows.get(modelSelectionKey(id)).expiry, null);
+  assert.equal((await readModelSelection(valkey, id)).ref, policy.candidates[1]);
+  assert.equal((await readModelSelection(valkey, id)).phase, "selected");
+
+  let stored;
+  const freshQueue = { add: async (_name, data, opts) => { stored = { id: opts.jobId, data }; return stored; }, getJob: async () => stored, close: async () => {} };
+  const fresh = await enqueueRerun({ kind: "local", jobId: job.id, queue: "pi-jobs", job: job.data }, { url: "redis://unused", queueFn: () => freshQueue, parseConnectionFn: () => ({}), localRepoProblemFn: () => null, gitDirtyFn: () => false, now: () => at });
+  assert.equal(fresh.ok, true);
+  assert.deepEqual(stored.data.modelSelection, policy);
+  assert.deepEqual(stored.data.models, policy.candidates);
+  assert.equal(stored.data.maxCostUsd, "1");
+  assert.notEqual(stored.data.modelSelectionGeneration, job.data.modelSelectionGeneration);
+  assert.equal(stored.data.provider, undefined);
+  assert.equal(stored.data.model, undefined);
+});

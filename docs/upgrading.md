@@ -354,6 +354,16 @@ as `subscription_auth_hold`. See [subscription renewal](subscription-auth.md#adm
 
 Release numbers come from the git tags.
 
+### Next release
+
+#### Random model selection (#922)
+
+Random pools require `triggers.json` version 6 and queued job-data version 7 (`modelSelection` and producer-owned `modelSelectionGeneration`). Upgrade every worker, receiver and console before enabling them; older readers hold newer work. Existing fixed/fallback configurations retain their previous minimum version.
+
+Back up the new `dispatch:model-selection:v1:*` state with its BullMQ jobs. Active choices have no expiry; terminal choices use the existing finished model-state retention, and Retry preserves them. Do not delete a choice to force another draw: create a fresh run after checking the original. Saved parked sessions gain a bounded version-1 `model-selection` sidecar coupled to their exact transcript. Preserve it with the session and approval stores. Missing or mismatched binding refuses a random continuation.
+
+Random checkpoints add a separate `cp-N/model-selection.json` annotation bound to the unchanged manifest bytes. Preserve it with the snapshot; random recovery refuses if the annotation is missing, and holds a newer version. No older version of these new stores exists to detect or migrate. The optional `resetAt` field on defer records preserves known availability separately from polling; older records omit it and newer readers report an unknown reset. This additive display field needs no state cleanup. Optional run-record selection facts are additive; historical records without them remain valid and do not need cleanup. A rollback must restore the corresponding queue/config/session backup or remove random policies only after their jobs and continuations are settled. Legacy failover state, subscription observations and approval request formats are unchanged. See [random pools](triggers.md#choosing-randomly-from-a-reviewed-pool) and [backup.md](backup.md).
+
 ### 5.3.3
 
 #### Event-driven local commands (#911)

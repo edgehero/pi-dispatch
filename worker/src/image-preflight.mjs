@@ -314,7 +314,7 @@ export const CAPABILITY_GATES = Object.freeze([	// REQ-REPLICA-RUNS: an image bu
 
 	Object.freeze({
 		token: "modelFailover",
-		needed: (job) => job?.fallbackModels !== undefined,
+		needed: (job) => job?.fallbackModels !== undefined || job?.modelSelection !== undefined,
 		result: "modelFailoverUnsupported",
 		reason: "job-image-model-failover-unsupported",
 		event: "refused_image_model_failover_unsupported",

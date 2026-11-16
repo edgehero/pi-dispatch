@@ -29,9 +29,9 @@ The add editor and its JSON fallback write the add tool's entry, including `run.
 
 A trigger's page has two editors, and no key has both:
 
-- **What its jobs get** changes `flow`, `provider`, `model`, `maxCostUsd`, `models`, `fallbackModels`, `mcp`, `packages`,
+- **What its jobs get** changes `flow`, `provider`, `model`, `maxCostUsd`, `models`, `fallbackModels`, `modelSelection`, `mcp`, `packages`,
   `excludeTools`, `excludeExtensions` and `excludeExtensionTools`, with one preview that says each change in words and one Confirm. Only a person can use this form, and no `dispatch_*` tool
-  reaches it. Of those fields, `dispatch_trigger_edit` can still set the first three, and no `dispatch_*` tool can set the other eight
+  reaches it. Of those fields, `dispatch_trigger_edit` can still set the first three, and no `dispatch_*` tool can set the other nine
   ([what a trigger's jobs get](console.md#what-a-triggers-jobs-get)).
 - **Edit** changes the venue (`backend`), `maxTurns`, `progress`, `statusComment`, `steer` and `recover`. Cron cannot enable
   statusComment or recover.
@@ -818,6 +818,28 @@ space, more than 64 characters) now refuses the whole file, in the worker and in
 does a misspelled key such as `modelId`. A `null` value is still accepted on every trigger type and
 means the deployment default, as it did before. Run `pi-dispatch doctor` after upgrading to see any such
 line.
+
+## Choosing randomly from a reviewed pool
+
+A person can choose **Random model pool** on a trigger's **What its jobs get** card, preview the change and confirm it. The existing fixed model and ordered fallback modes remain available. By hand, put this inside an ordinary AI trigger's `run`:
+
+```json
+"modelSelection": {
+  "strategy": "random",
+  "candidates": ["anthropic/claude-haiku-4-5", "openai/gpt-5.5"]
+},
+"models": ["anthropic/claude-haiku-4-5", "openai/gpt-5.5"]
+```
+
+Remove `provider`, `model` and `fallbackModels` when using the pool. Use 1–16 unique exact catalog references. The pool chooses; `models` authorizes. If `models` is absent the deployment's finite allowed-model ceiling must supply it. A pool without either ceiling refuses, and the deployment's default model is never an extra candidate. Role names, weights, command jobs and package canaries are not accepted. No model-callable tool can write this policy.
+
+A fresh run draws uniformly among candidates that pass the current free gates. Its in-process children use that selected model too. A queued outbox child is a new run and draws from the inherited reviewed pool. Retry retains the choice; fresh Re-run draws again. The Models page shows the configured pool and observed blockers without guessing what will be selected. Run history shows the actual model, **Chosen at random**, or **Changed after subscription limit**, with the previous model when it changed.
+
+An exhausted subscription excludes all candidates sharing that account/application allowance. If every candidate is temporarily blocked, the job waits without starting a container. A displayed recheck time is not a promise that the provider has reset the allowance; an unknown reset stays unknown. One model name never creates another account allowance. Pools cannot silently mix subscription and API billing routes, switch accounts, or enable paid extra usage.
+
+A replacement is allowed only when authoritative exhaustion is found before execution, or on an already-authorized retry after a signed failure proves that no tool started and replay is safe, and the host successfully records the exhausted allowance. A generic 429, authentication trouble, a crash or uncertain/tool execution keeps the choice. Already-spent usage remains charged. Recovery, parked answers and approval continuations keep their original exact model; missing or changed saved-session binding refuses safely.
+
+Upgrade every worker, receiver and console before enabling this field: trigger files require version 6 and queued jobs version 7. See [the upgrade guide](upgrading.md) and [backup state](backup.md).
 
 ## Limiting which models a job may call
 

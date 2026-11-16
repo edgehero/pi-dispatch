@@ -1,3 +1,4 @@
+import { DEFER_TIME_MAX_MS } from "@edgehero/pi-dispatch/defer-reasons";
 /** Fixed model-policy sentences shared by Models and Run; provider response text never enters either (#773). */
 import { MODEL_WHY, providerFailureOf } from "@edgehero/pi-dispatch/model-failover-protocol";
 import { splitModelEntry } from "@edgehero/pi-dispatch/model-ref";
@@ -27,6 +28,8 @@ export function modelChoiceSentence(record) {
   if (!splitModelEntry(ref)) return null;
   const role = typeof record.modelRole === "string" && /^[a-z][a-z0-9_-]{0,31}$/.test(record.modelRole) ? ` for role ${record.modelRole}` : "";
   if (record.modelWhy === "primary") return `This run used ${ref} as its primary model${role}.`;
+  if (record.modelWhy === "random") return `This run used ${ref}, chosen randomly from its reviewed candidate pool.`;
+  if (record.modelWhy === "random-subscription-limit") return `This run used ${ref}, chosen randomly after the previous selection reached a subscription limit.`;
   const reason = ({
     "fallback-cooldown": "the primary model was cooling down",
     "fallback-window": "the primary model's dollar window had no room",
@@ -34,4 +37,11 @@ export function modelChoiceSentence(record) {
     "fallback-context": "this attempt needed a larger context window",
   })[record.modelWhy];
   return `This run used fallback ${ref}${role} because ${reason}.`;
+}
+
+/** A provider's observed reset is independent of the worker's next polling instant. */
+export function subscriptionResetSentence(resetAt) {
+  return Number.isSafeInteger(resetAt) && resetAt >= 0 && resetAt <= DEFER_TIME_MAX_MS
+    ? `Earliest observed reset ${new Date(resetAt).toISOString().replace("T", " ").slice(0, 19)} UTC.`
+    : "Reset time unknown.";
 }

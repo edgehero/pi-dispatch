@@ -33,6 +33,7 @@ import * as nodeFsp from "node:fs/promises";
 import { join } from "node:path";
 import { customJobIdAllowed } from "./bullmq-internals.mjs";
 import { dropModelAttempt, modelAttemptIdOf } from "./model-attempts.mjs";
+import { dropModelSelection, identityForModelSelection } from "./model-selection-state.mjs";
 import { QUEUE, hostQueueName as defaultHostQueueName } from "./queue.mjs";
 import { sanitizeJobId } from "./run-history.mjs";
 import { FORGE_JOB_RETENTION_S } from "./retention.mjs";
@@ -338,6 +339,7 @@ export function makeHostLostSweep({ redis, queues, now = () => Date.now(), log =
 				// Issue #812: a recovery that chose a model before it was deferred holds a model attempt key, which nothing
 				// would read again. Bounded, and it never throws, so the run is still told below.
 				await dropModelAttempt(redis, modelAttemptIdOf(m.q, m.id));
+				if (job?.data?.modelSelection) await dropModelSelection(redis, identityForModelSelection(job, { queueName: m.q }));
 				log("job_recovery_host_lost", { jobId: m.id, runId: runIdOf(job), queue: m.q, state, reason: now() >= hard ? "max-wait" : "host-absent" });
 				try {
 					await onLost(job);
@@ -381,7 +383,7 @@ export function makeHostLostSweep({ redis, queues, now = () => Date.now(), log =
  * the run continues from its last committed checkpoint, which is a correct place to continue from.
  */
 export function makeSalvager({ jobsDir, hostName, workspaceCheckpointer, runCheckpointer = null, fs = nodeFsp, log = () => {}, settleJobDir = async () => true } = {}) {
-	return async function salvage({ runId, pointer, attempt = 0 } = {}) {
+	return async function salvage({ runId, pointer, attempt = 0, modelSelection = null } = {}) {
 		try {
 			if (!workspaceCheckpointer || !jobsDir) return { skipped: "no-store" };
 			if (typeof runId !== "string" || runId === "") return { skipped: "bad-args" };
@@ -409,9 +411,14 @@ export function makeSalvager({ jobsDir, hostName, workspaceCheckpointer, runChec
 			// the keep-list (`pointerKeepEntry`) holds the directory until the pointer's TTL. A read that throws lands in the
 			// outer catch, which removes nothing either.
 			const read = await workspaceCheckpointer.readManifest(runId);
-			if (read?.newer === true) {
+			if (read?.newer === true || read?.modelSelection?.newer === true) {
 				log("checkpoint_salvage", { runId: sanitizeJobId(runId), skipped: "checkpoint-newer" });
 				return { skipped: "checkpoint-newer" };
+			}
+			const annotation = read?.modelSelection;
+			if (annotation?.invalid || annotation?.unavailable || modelSelection && (!annotation || ["ref", "billing", "binding"].some((key) => annotation[key] !== modelSelection[key]))) {
+				log("checkpoint_salvage", { runId: sanitizeJobId(runId), skipped: "model-selection-unavailable" });
+				return { skipped: "model-selection-unavailable" };
 			}
 			let result;
 			try {
@@ -442,7 +449,7 @@ export function makeSalvager({ jobsDir, hostName, workspaceCheckpointer, runChec
 			// A transcript shorter than the one the checkpoint already holds is not newer: salvaging it would move the run
 			// BACKWARDS (a session file that was truncated, or one from another attempt).
 			if (offset < m.transcript.bytes) return { skipped: "transcript-older" };
-			const meta = { piVersion: m.piVersion, imageDigest: m.imageDigest, venue: m.venue, provider: m.provider, model: m.model };
+			const meta = { piVersion: m.piVersion, imageDigest: m.imageDigest, venue: m.venue, provider: m.provider, model: m.model, ...(read.modelSelection ? { modelSelection: read.modelSelection } : {}) };
 			const runAttempt = Number.isSafeInteger(attempt) && attempt >= 0 ? Math.min(attempt, 10_000) : 0;
 			// Through the run checkpointer when there is one (run-checkpoint.mjs): a handle opened WITHOUT pause verbs, whose
 			// `exit({ kind: "salvage" })` numbers the checkpoint past the manifest and the pointer, reads the offset itself and

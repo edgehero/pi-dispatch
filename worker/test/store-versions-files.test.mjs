@@ -190,7 +190,7 @@ const triggersPathWith = (doc) => {
 };
 
 test("triggers: the shipped tables hold the rule, against the run keys and blocks the loader reads", () => {
-	assert.equal(TRIGGERS_FILE_VERSION, 5, "issue #911: local event source and worker ownership at 5");
+	assert.equal(TRIGGERS_FILE_VERSION, 6, "issue #922: reviewed random model policy at 6");
 	// Every `run.<key>` any worker module reads: a lenient superset (comments add names), which is enough to refuse a
 	// table row naming a key nothing reads.
 	const runKeys = new Set();
@@ -212,7 +212,7 @@ test("triggers: the shipped tables hold the rule, against the run keys and block
 	// A value rule can raise the version with no field-table row, which neither check can see. While there is none, the
 	// version is the field tables'; the first value rule must extend this assertion with the versions it answers.
 	assert.deepEqual([...Object.keys(TRIGGER_VALUE_VERSIONS), ...Object.keys(TRIGGER_RUN_VALUE_VERSIONS), ...Object.keys(TRIGGERS_BLOCK_VALUE_VERSIONS)], ["on"]);
-	assert.equal(TRIGGER_VALUE_VERSIONS.on({ type: "pull_request", forge: "github" }), TRIGGERS_FILE_VERSION);
+	assert.equal(TRIGGER_VALUE_VERSIONS.on({ type: "pull_request", forge: "github" }), 5);
 	assert.equal(TRIGGER_VALUE_VERSIONS.on({ type: "pull_request", action: ["opened"] }), 1);
 });
 

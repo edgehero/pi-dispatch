@@ -1,5 +1,8 @@
-import { resolveModelRoles } from "./model-roles.mjs";
+import { resolveModelRoles, roleMapFor } from "./model-roles.mjs";
 import { SubscriptionWait } from "./subscription-wait.mjs";
+import { MODEL_SELECTION_FINISH } from "./model-selection-record.mjs";
+import { selectRandomModelJob } from "./model-selection.mjs";
+import { identityForModelSelection, readModelSelection, armModelSelection, allowModelSelectionQuotaReselection, markModelSelectionNeverStarted } from "./model-selection-state.mjs";
 import { zeroRatedFor } from "./reserve-estimate.mjs";
 import { isTransientOverlayRead } from "./model-catalog.mjs";
 import { checkFailoverCandidate, markModelCooldown, readModelAttempt, selectFailoverJob, writeModelAttempt } from "./model-failover.mjs";
@@ -237,8 +240,7 @@ export function effectiveJobOf(data, settings, allowedModels = null, log = () =>
 	const models = data.models ?? allowedModels ?? null;
 	return {
 		...data,
-		provider: data.provider ?? settings.provider,
-		model: data.model ?? settings.model,
+		...(data.modelSelection === undefined ? { provider: data.provider ?? settings.provider, model: data.model ?? settings.model } : {}),
 		maxTurns: data.maxTurns ?? settings.maxTurns,
 		maxTokens: data.maxTokens ?? settings.maxTokens, // optional per-job token budget (issue #25); null => runner meter only
 		...(models !== null ? { models } : {}),
@@ -404,6 +406,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// way and for the same reason; the record rebuilds them (run-history.mjs `recordedOpenshell`), so nothing is trusted here.
 		let openshellRan = null;
 		let selectedEffective = null;
+		let randomSelection = null;
 		let providerFailureRan = null;
 		let modelRolesRan = null;
 		const carryLiveSkip = (target) => {
@@ -414,6 +417,8 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				if (selectedEffective?.modelRole) target.modelRole = selectedEffective.modelRole;
 				if (selectedEffective?.modelRole) { target.provider = selectedEffective.provider; target.model = selectedEffective.model; }
 				if (selectedEffective?.modelWhy) { target.modelWhy = selectedEffective.modelWhy; target.provider = selectedEffective.provider; target.model = selectedEffective.model; }
+				if (selectedEffective?.modelSelectionInfo) target.modelSelectionInfo = selectedEffective.modelSelectionInfo;
+				if (randomSelection) job[MODEL_SELECTION_FINISH] = { attempt: randomSelection.attempt, revision: randomSelection.revision };
 				if (providerFailureRan) target.providerFailure = providerFailureRan;
 				if (modelRolesRan) target.modelRoles = modelRolesRan;
 				// Every attempt replaces the same record. Carry intervention fallback and uncertainty from the
@@ -1172,15 +1177,30 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		let selectionWait = null;
 		let failoverSnapshot = null;
 		let chosenModel = null;
+		const randomSelectionId = identityForModelSelection(job, { queueName: job.queueName ?? QUEUE });
 		// Set by the selection when a retry can be judged only by a record a newer pi-dispatch wrote (issue #761): the job
 		// then waits below, outside this block's `try`, instead of being refused.
 		let priorRecordNewer = false;
+		let newerModelState = "the previous attempt's run record";
 		const modelAttemptId = modelAttemptIdOf(job.queueName ?? QUEUE, job.id);
 		if (!settingsThrew && !settings?.invalid) {
 			try {
-				let effective = resolveModelRoles(effectiveJobOf(job.data, settings, deps?.allowedModels ?? null, (event, fields) => deps?.log?.(event, { jobId: job.id, ...fields })), job.data.watch || job.data.answerDraft ? {} : await readModelRoles(), project, { authoredProvider: job.data.provider });
+				if (job.data.modelSelection !== undefined && ["provider", "model", "fallbackModels"].some((key) => job.data[key] !== undefined)) {
+					const error = new Error("random model policy conflicts with fixed fields");
+					error.modelSelectionReason = "model-selection-policy-changed";
+					throw error;
+				}
+				if (job.data.modelSelection !== undefined && deps?.checkModelSelectionPolicy) {
+					const policy = await deps.checkModelSelectionPolicy(job.data, { queueJobId: job.id });
+					if (policy?.newer) throw new NewerReleaseHold("the random model policy");
+					if (policy?.refused) { const error = new Error("the reviewed random policy changed"); error.modelSelectionReason = policy.refused; throw error; }
+				}
+				const base = effectiveJobOf(job.data, settings, deps?.allowedModels ?? null, (event, fields) => deps?.log?.(event, { jobId: job.id, ...fields }));
+				const roles = job.data.watch || job.data.answerDraft ? {} : await readModelRoles();
+				const aliases = roleMapFor(roles, project);
+				let effective = base.modelSelection === undefined ? resolveModelRoles(base, roles, project, { authoredProvider: job.data.provider }) : { ...base, ...(Object.keys(aliases).length ? { modelRoles: aliases } : {}) };
 				selectedEffective = effective;
-				if (effective.fallbackModels !== undefined || (effective.recover === true && effective.recoveryOf)) {
+				if (effective.modelSelection !== undefined || effective.fallbackModels !== undefined || (effective.recover === true && effective.recoveryOf)) {
 					const endpoints = modelEndpoints?.() ?? [];
 					let models;
 					try { models = overlayModels(); }
@@ -1202,6 +1222,13 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 						else if (read?.newer === true) throw new NewerReleaseHold("the run's checkpoint");
 						// A missing checkpoint is refused by runJob's existing free gate, never replaced by a fresh model.
 						else { const error = new Error("the recovery model is absent"); error.modelSelectionReason = "recovery-checkpoint-absent"; throw error; }
+						if (effective.modelSelection) {
+							const binding = read.modelSelection;
+							if (binding?.newer) throw new NewerReleaseHold("the checkpoint model binding");
+							if (binding?.unavailable) throw new InfraRetry("the checkpoint model binding could not be read", { reason: "container-never-started", budgetReserved: false });
+							if (!binding || binding.invalid || binding.ref !== recoveryModel) { const error = new Error("the checkpoint model binding is absent"); error.modelSelectionReason = "model-selection-continuation-unavailable"; throw error; }
+							effective = { ...effective, modelSelectionRecovery: binding };
+						}
 						const ref = splitModelEntry(recoveryModel);
 						if (!ref) { const error = new Error("the recovery model is invalid"); error.modelSelectionReason = "recovery-checkpoint-absent"; throw error; }
 						effective = { ...effective, provider: ref.provider, model: ref.model };
@@ -1222,10 +1249,24 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 					// record, never held by it. That read held each side to the rule before the higher attempt was kept, so a
 					// stale record at a higher attempt on one side hides nothing on the other, and one read serves the hold,
 					// `retryNeverStarted` below, `earlier` and the touches alike (issue #811).
-					const waitMayApply = effective.fallbackModels !== undefined && retry && !recoveryModel;
-					priorRecordNewer = waitMayApply && priorAttemptRecord !== null && !recordReadable(priorAttemptRecord) && (await readModelAttempt(redis, modelAttemptId)) === null;
-					const selection = priorRecordNewer ? {} : effective.fallbackModels === undefined ? { job: effective } : await selectFailoverJob(effective, {
-						redis, id: modelAttemptId, retry,
+					let continuation = null;
+					if (effective.modelSelection && !recoveryModel && (effective.resume === true || effective.parkedReply === true || effective.approvalRequestId)) {
+						if (typeof deps.readModelSelectionContinuation !== "function" && (effective.parkedReply === true || effective.approvalRequestId)) { const error = new Error("the continuation model reader is absent"); error.modelSelectionReason = "model-selection-continuation-unavailable"; throw error; }
+						continuation = await deps.readModelSelectionContinuation?.({ ...effective, replyReceivedAt: Number.isSafeInteger(job.data.replyReceivedAt) ? job.data.replyReceivedAt : job.timestamp });
+						if (continuation?.newer) throw new NewerReleaseHold("the continuation model binding");
+						if (continuation?.refused) { const error = new Error("the continuation model is unavailable"); error.modelSelectionReason = continuation.refused; throw error; }
+						if (continuation?.ref) effective = { ...effective, modelSelectionContinuation: continuation };
+					}
+					const random = effective.modelSelection !== undefined;
+					const waitMayApply = (random || effective.fallbackModels !== undefined) && retry && !recoveryModel;
+					priorRecordNewer = waitMayApply && priorAttemptRecord !== null && !recordReadable(priorAttemptRecord) && (random ? randomSelectionId && await readModelSelection(redis, randomSelectionId) : await readModelAttempt(redis, modelAttemptId)) === null;
+					const selection = priorRecordNewer ? {} : !random && effective.fallbackModels === undefined ? { job: effective } : await (random ? selectRandomModelJob : selectFailoverJob)(effective, {
+						redis, id: random ? randomSelectionId : modelAttemptId, retry,
+						attempt: attemptsBefore + 1,
+						lockedModel: recoveryModel ?? continuation?.ref ?? null,
+						randomInt: deps?.randomInt,
+						subscriptionPolicyCheck: deps?.subscriptionRuntime?.inspectPolicy ? (candidate) => deps.subscriptionRuntime.inspectPolicy(candidate) : null,
+						releaseEndpoints: async () => { await releaseAllHolds({ candidateEndpoints: endpointHolds.splice(0) }); failoverSnapshot.set = []; },
 						// Read from a record this build can read only (issue #761): a newer one's `reason`, `budgetReserved` and
 						// `exitCode` are outside its stable core. Such a record is no usable prior record, so the retry goes by the
 						// model attempt key alone, locked to the model it names (with no key the job waited above), never started
@@ -1261,7 +1302,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 					});
 					selectedEffective = selection.job ?? null;
 					chosenModel = selection.ref ?? null;
-					if (chosenModel) await writeModelAttempt(redis, modelAttemptId, { ref: chosenModel, modelWhy: selectedEffective.modelWhy });
+					randomSelection = selection.selection ?? null;
+					if (selection.newer) priorRecordNewer = true;
+					if (chosenModel && !random) await writeModelAttempt(redis, modelAttemptId, { ref: chosenModel, modelWhy: selectedEffective.modelWhy });
 					selectionRefused = selection.refused ?? null;
 					selectionWait = selection.wait ? selection : null;
 				}
@@ -1269,13 +1312,22 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 					const subscription = await deps.subscriptionRuntime.check(selectedEffective);
 					if (!subscription.ok) {
 						if (subscription.unavailable) throw new Error("subscription state unavailable");
-						if (subscription.wait) selectionWait = subscription;
-						else selectionRefused = subscription.reason;
+						if (subscription.wait) {
+							selectionWait = subscription;
+							if (randomSelection && subscription.wait === "subscription-quota") {
+								selectionWait = { ...subscription, until: Math.min(subscription.until, now() + 60_000), resetAt: subscription.status?.until ?? null };
+								if (!selectedEffective.modelSelectionContinuation && !selectedEffective.recoveryOf && subscription.status?.state === "exhausted" && subscription.status.bindingValid !== false) {
+									const allowed = await allowModelSelectionQuotaReselection(redis, randomSelectionId, randomSelection, { beforeStart: true, quotaConfirmed: true });
+									if (allowed.ok) { randomSelection = allowed.state; selectionWait.until = now() + 1_000; }
+								}
+							}
+						} else selectionRefused = subscription.reason;
 					}
 				}
 			} catch (error) {
-				if (error?.modelSelectionReason) selectionRefused = error.modelSelectionReason;
-				else if (error?.modelSelectionRefused) selectionRefused = "model-failover-no-candidate";
+				if (error instanceof NewerReleaseHold) { priorRecordNewer = true; newerModelState = error.what; }
+				else if (error?.modelSelectionReason) selectionRefused = error.modelSelectionReason;
+				else if (error?.modelSelectionRefused) selectionRefused = job.data.modelSelection ? "model-selection-no-candidate" : "model-failover-no-candidate";
 				else selectionError = error instanceof InfraRetry ? error : new InfraRetry("the model candidates could not be read", { cause: error, reason: "container-never-started", budgetReserved: false });
 			}
 		}
@@ -1285,10 +1337,10 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		if (priorRecordNewer || selectionWait) {
 			await releaseAllHolds();
 			if (priorRecordNewer) {
-				deps?.log?.("newer_release_hold", { jobId: job.id, what: "the previous attempt's run record", delayMs: NEWER_RELEASE_RECHECK_MS });
+				deps?.log?.("newer_release_hold", { jobId: job.id, what: newerModelState, delayMs: NEWER_RELEASE_RECHECK_MS });
 				await deferTo(job, token, now() + NEWER_RELEASE_RECHECK_MS, "newer-release", { project });
 			}
-			await deferTo(job, token, selectionWait.until, selectionWait.wait, { project });
+			await deferTo(job, token, selectionWait.until, selectionWait.wait, { project, resetAt: selectionWait.resetAt });
 		}
 
 		// THE MODEL ENDPOINT GATE (issue #503, INT-MODEL-ENDPOINTS-FILE-CONTRACT). A declared local model server
@@ -1792,7 +1844,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// the deployment's list. Only when the wiring supplies the check, so a bare processor keeps the default.
 				// The same for `maxCostUsd` (#501): `effectiveJobOf` keeps the arrived value under its own key and writes the
 				// resolved cap as `maxCostMicros`, but it is read off `job.data` here too, so no later fill can hide a drop.
-				...(deps?.checkWaitSkew ? { checkWaitSkew: (j, ...rest) => deps.checkWaitSkew({ ...j, models: job.data?.models, fallbackModels: job.data?.fallbackModels, maxCostUsd: job.data?.maxCostUsd }, ...rest) } : {}),
+				...(deps?.checkWaitSkew ? { checkWaitSkew: (j, ...rest) => deps.checkWaitSkew({ ...j, models: job.data?.models, fallbackModels: job.data?.fallbackModels, modelSelection: job.data?.modelSelection, maxCostUsd: job.data?.maxCostUsd }, ...rest) } : {}),
 				// #227. BOUNDED AFTER THE ABORT, and this is what makes `abortable` an honest declaration.
 				//
 				// `makeRunContainer`'s promise settles ONLY on the docker child's `close` or `error`. Nothing
@@ -1825,7 +1877,11 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// promised: the run is recorded as that cancel (the existing path, "partial work may exist") even when the
 				// container happened to exit on its own, because the operator was told the record would say operator-cancel.
 				runContainer: async (ctx) => {
-					if (chosenModel) {
+					if (randomSelection) {
+						const armed = await armModelSelection(redis, randomSelectionId, randomSelection, { attempt: attemptsBefore + 1, now });
+						if (!armed.ok) throw new InfraRetry("the selected model could not be armed", { reason: "container-never-started" });
+						randomSelection = armed.state;
+					} else if (chosenModel) {
 						try { await writeModelAttempt(redis, modelAttemptId, { ref: chosenModel, modelWhy: selectedEffective.modelWhy }); }
 						catch (cause) { throw new InfraRetry("the model attempt could not be recorded", { cause, reason: "container-never-started" }); }
 					}
@@ -1848,8 +1904,12 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 						if (r?.exitAuth === "verified" && r?.exitLineCode === r?.code && r?.code === 1 && r?.aborted !== true) {
 							providerFailureRan = r.providerFailure ?? null;
 							try {
-								if (chosenModel) await writeModelAttempt(redis, modelAttemptId, { ref: chosenModel, modelWhy: selectedEffective.modelWhy, safe: r.toolsStarted === false && r.replaySafe === true && !!r.providerFailure, failure: r.providerFailure });
-								if (deps?.subscriptionRuntime) await deps.subscriptionRuntime.observe(effectiveJob, r, ctx.subscriptionAuth ?? []);
+								if (chosenModel && !randomSelection) await writeModelAttempt(redis, modelAttemptId, { ref: chosenModel, modelWhy: selectedEffective.modelWhy, safe: r.toolsStarted === false && r.replaySafe === true && !!r.providerFailure, failure: r.providerFailure });
+								const observed = deps?.subscriptionRuntime ? await deps.subscriptionRuntime.observe(effectiveJob, r, ctx.subscriptionAuth ?? []) : null;
+								if (randomSelection && observed?.quotaExhausted === true) {
+									const allowed = await allowModelSelectionQuotaReselection(redis, randomSelectionId, randomSelection, { result: r, quotaConfirmed: true, now });
+									if (allowed.ok) randomSelection = allowed.state;
+								}
 								if (r.providerFailure) await markModelCooldown(redis, `${effectiveJob.provider}/${effectiveJob.model}`, r.providerFailure, { now });
 							} catch (cause) {
 								// Issue #800: a verified line was read, and the processor never sees this result, so the throw carries what it said.
@@ -2026,15 +2086,26 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// other recorded. A retryable error reads that request too, since the job would otherwise run again.
 			await stopCancelPoll();
 			const retryable = error instanceof InfraRetry;
+			if (randomSelection && retryable && error.reason === "container-never-started") {
+				// This reason is the runtime/processor's positive never-started verdict, never inferred from absent output.
+				const reset = await markModelSelectionNeverStarted(redis, randomSelectionId, randomSelection, { proven: true });
+				if (reset.ok) randomSelection = reset.state;
+			}
 			if (await operatorCancelled({ readPending: retryable || error instanceof SubscriptionWait || error instanceof LocalEventWait })) return await endCancelled({ retryable });
 			if (error instanceof LocalEventWait) {
 				await releaseAllHolds();
 				await deferTo(job, token, error.untilMs, "local-event-debounce", { project });
 			}
 			if (error instanceof SubscriptionWait) {
+				let reconsider = false;
+				// This typed wait comes only from the processor's pre-spend subscription prepare.
+				if (error.wait === "subscription-quota" && error.quotaConfirmed === true && randomSelection && !selectedEffective?.modelSelectionContinuation && !selectedEffective?.recoveryOf) {
+					const allowed = await allowModelSelectionQuotaReselection(redis, randomSelectionId, randomSelection, { beforeStart: true, quotaConfirmed: true, now });
+					if (allowed.ok) { randomSelection = allowed.state; reconsider = true; }
+				}
 				await releaseAllHolds();
 				if (error.wait === "subscription-auth") await deferTo(job, token, error.until, "subscription-auth", { project });
-				if (error.wait === "subscription-quota") await deferTo(job, token, error.until, "subscription-quota", { project });
+				if (error.wait === "subscription-quota") await deferTo(job, token, reconsider ? now() + 1_000 : error.until, "subscription-quota", { project, resetAt: error.resetAt });
 				if (error.wait === "subscription-owner") await deferTo(job, token, error.until, "subscription-owner", { project });
 			}
 			if (error?.holdUntilRestart === true) {

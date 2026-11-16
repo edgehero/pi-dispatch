@@ -987,7 +987,7 @@ test("Waitlists: a job in the queue of a host the registry no longer names says 
 // ---- why a job waits -------------------------------------------------------------------------------------------------
 
 test("waitingSentence fills the worker's own sentence; a hole, an instant past the clock's range or a missing row says the bucket", () => {
-  const fill = { host: "build3", holder: "gh-1", endpoint: "ollama", untilAt: NOW + M, attempt: 2, attempts: 3 };
+  const fill = { host: "build3", holder: "gh-1", endpoint: "ollama", untilAt: NOW + M, resetAt: NOW + 90 * M, attempt: 2, attempts: 3 };
   for (const [why, { bucket }] of Object.entries(DEFER_WHYS)) {
     const out = String(waitingSentence(row({ bucket, why, known: true, ...fill })));
     assert.doesNotMatch(out, /[{}]|unknown/, why);
@@ -1213,4 +1213,17 @@ test("first run: a command with a placeholder carries the sentence that fills it
   assert.ok(out.includes("<p class=\"su-alt\">Put the public URL of this deployment&#39;s pi-dispatch-receiver, where GitHub delivers events, in place of <span class=\"code\">&lt;receiver URL&gt;</span>; without a receiver, pass <span class=\"code\">--no-webhook</span> instead of <span class=\"code\">--webhook-url</span> and its URL.</p>"));
   assert.ok(out.includes("<p class=\"su-alt\">Put a name for whoever will hold the token in place of <span class=\"code\">&lt;name&gt;</span>; the command prints the token once.</p>"));
   assert.ok(!draw(overviewSetup, fresh(), { role: "viewer" }).includes("in place of"), "a viewer reads no command, nor its hint");
+});
+
+test("subscription waits distinguish the observed reset from the earlier polling instant, including unknown resets", () => {
+  for (const resetAt of [NOW + 90 * M, undefined, -1]) {
+    const waiting = row({ bucket: "check", why: "subscription-quota", known: true, untilAt: NOW + M, dueAt: NOW + M, resetAt });
+    const line = String(waitingSentence(waiting));
+    assert.equal(line, String(waitingLine(waiting).bar));
+    assert.ok(line.includes("Asks again at"));
+    if (resetAt === NOW + 90 * M) {
+      assert.ok(line.includes("Earliest observed reset"));
+      assert.ok(line.includes(new Date(resetAt).toISOString().replace("T", " ").slice(0, 19)));
+    } else assert.ok(line.includes("Reset time unknown."));
+  }
 });

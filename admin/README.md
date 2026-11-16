@@ -262,7 +262,7 @@ One command puts a live terminal view over the whole deployment:
   turning existing run flags off, cancellation, failed-job removal and bounded priorities. Scope, size,
   minimums, inherited limits and mixed widening requests stay confirmed. The deployment file and pointer
   cannot grant this authority. Answers, draft decisions, standing-answer adoption and forge reruns remain person actions, and no
-  `dispatch_*` tool can set a trigger's job cap, allowed models, fallbacks, MCP servers, tool exclusions, staged packages, extension exclusions or extension tool exclusions, while `dispatch_trigger_edit` can still move its flow, provider and model behind a confirm. A pi process's own `bash`, `write` and
+  `dispatch_*` tool can set a trigger's job cap, allowed models, fallbacks, random model pools, MCP servers, tool exclusions, staged packages, extension exclusions or extension tool exclusions, while `dispatch_trigger_edit` can still move its flow, provider and model behind a confirm. A pi process's own `bash`, `write` and
   `edit` tools are outside this policy, so an unattended one must run with them disabled
   ([`SECURITY.md`](https://github.com/edgehero/pi-dispatch/blob/main/SECURITY.md)). Tool writes are audited as agents; human-confirmed intervention is tracked separately.
 - **Paid starts stay bounded.** `dispatch_run`, Fire now and local or cron reruns need explicit valid
@@ -376,7 +376,7 @@ The editor and its JSON fallback preserve the add tool's secret-bundle opt-out.
 **What its jobs get**, on a trigger's page, says what a job of it would start with on each host, with a label for each host, and under each row what
 a recent run really had.
 
-There a person changes the flow, the provider and model, the job cap, the allowed models and fallbacks, the MCP
+There a person changes the flow, the provider and model, the job cap, the allowed models and fallbacks, the random pool, the MCP
 servers, the tools, the all-or-nothing switch for staged packages, each extension the trigger leaves out and each extension's tool it removes, with one preview that
 says each change in words, one Confirm, and Undo.
 

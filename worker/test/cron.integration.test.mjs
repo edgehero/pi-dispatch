@@ -356,3 +356,26 @@ test("reconcile installs cleanly and idempotently against live upsert (sentinel 
 		await teardown({ queue, redis });
 	}
 });
+
+test("random scheduler generation persists through the pinned BullMQ template and changes after removal", { skip }, async () => {
+	const { Queue, parseConnection, makeRedisClient, reconcile } = await load();
+	const name = uniqueQueueName();
+	const redis = makeRedisClient(url);
+	const queue = new Queue(name, { connection: parseConnection(url) });
+	try {
+		const { provider: _provider, model: _model, ...base } = localTemplate("t");
+		const modelSelection = { strategy: "random", candidates: ["openai/gpt-5.4"] };
+		const schedule = { schedulerId: "random", name: "local", pattern: FAR_FUTURE, data: { ...base, modelSelection, dataVersion: 7 }, opts: RETENTION };
+		await reconcile(queue, [schedule]);
+		const first = (await queue.getJobScheduler("random")).template.data.modelSelectionGeneration;
+		assert.equal(typeof first, "string");
+		assert.equal((await queue.getDelayed())[0].data.modelSelectionGeneration, first);
+		await reconcile(queue, [schedule]);
+		assert.equal((await queue.getJobScheduler("random")).template.data.modelSelectionGeneration, first);
+		await queue.removeJobScheduler("random");
+		await reconcile(queue, [schedule]);
+		assert.notEqual((await queue.getJobScheduler("random")).template.data.modelSelectionGeneration, first);
+	} finally {
+		await teardown({ queue, redis });
+	}
+});

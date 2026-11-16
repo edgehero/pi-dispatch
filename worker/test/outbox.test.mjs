@@ -589,3 +589,19 @@ test("a chained child of a portfolio job does not inherit run.portfolio, from th
 	assert.equal(added.length, 1);
 	assert.equal("portfolio" in added[0], false);
 });
+
+
+test("random outbox children inherit only the parent's reviewed pool, with their own logical generation", async () => {
+	const policy = { strategy: "random", candidates: ["openai/gpt-5.4"] };
+	const fs = makeFakeFs({ files: { "request-1.json": { content: req({ flow: "ok", task: "do it", modelSelection: { strategy: "random", candidates: ["MARKER/agent"] }, modelSelectionGeneration: "MARKER" }) } } });
+	const cap = makeCapture();
+	const collect = makeCollectChain({ queue: cap.queue, enqueue: cap.enqueue, readFlowGate: makeGate().gate, config: { chainMaxPerJob: 2, chainDepthMax: 1 }, fs });
+	const parent = localJob();
+	parent.data = { ...parent.data, modelSelection: policy, models: policy.candidates, modelSelectionGeneration: "parent-generation" };
+	await collect({ job: parent, prepared: PREPARED });
+	const { args } = cap.enqueued[0];
+	assert.deepEqual(args.modelSelection, policy);
+	assert.deepEqual(args.models, policy.candidates);
+	assert.equal("modelSelectionGeneration" in args, false, "the queue builder mints the child generation");
+	assert.equal(JSON.stringify(args).includes("MARKER"), false);
+});

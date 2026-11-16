@@ -19,7 +19,7 @@ import { scrubCredentials } from "./redact.mjs";
 import { FORK_SESSION_KEY_PATTERN, SESSION_KEY_PATTERN, sessionKeyFor } from "./session-key.mjs";
 import { resolveBackendName } from "./backend-registry.mjs";
 import { UNATTRIBUTED_BACKEND } from "./backends.mjs";
-import { MODEL_REF_PATTERN } from "./model-ref.mjs";
+import { MODEL_REF_PATTERN, splitModelEntry } from "./model-ref.mjs";
 
 /**
  * session-store.mjs -- the host side of a resumable session (INT-SESSION-STORE-CONTRACT).
@@ -99,6 +99,7 @@ const VENUE_FILE = "venue";
  * writes it, any other completed run on the key removes it, so it never outlives the transcript it describes.
  */
 export const PARKED_FILE = "parked";
+export const MODEL_SELECTION_FILE = "model-selection";
 /**
  * What the venue stamp reads while a promotion is swapping the transcript under it. It matches no venue:
  * parentheses are outside the charset every backend name is validated against (a test pins every name this
@@ -442,7 +443,11 @@ export function makeSessionStore({
 			// Bind answer lineage to the descriptor's transcript, not an earlier park lookup. Another flow on
 			// this issue may have promoted a different park while this job was passing its admission gates.
 			const parkedSource = verdict.resume ? readBoundParkedSource(key, judged) : null;
-			return { hostDir, key, modelId, venue, ...verdict, ...(parkedSource ? { parkedSource } : {}) };
+			const binding = job.modelSelectionContinuation ? readModelSelectionBinding(job, { sessionKey: key, required: true }) : null;
+			const modelSelectionBound = !job.modelSelectionContinuation || verdict.resume && binding?.ref === job.modelSelectionContinuation.ref && binding?.transcriptIdentity === judged && binding?.transcriptIdentity === job.modelSelectionContinuation.transcriptIdentity
+				&& binding?.parkedSource?.runId === job.modelSelectionContinuation.parkedSource?.runId && binding?.parkedSource?.at === job.modelSelectionContinuation.parkedSource?.at
+				&& binding?.billing === job.modelSelectionContinuation.billing && binding?.binding === job.modelSelectionContinuation.binding;
+			return { hostDir, key, modelId, venue, ...verdict, ...(parkedSource ? { parkedSource } : {}), ...(job.modelSelectionContinuation ? { modelSelectionBound } : {}) };
 		} catch (err) {
 			// A history fault must never fail the prepare that asked.
 			log("session_store_failed", { phase: "resolve", reason: err?.message });
@@ -552,7 +557,7 @@ export function makeSessionStore({
 		return st.isDirectory() ? `${st.dev}:${st.ino}` : null;
 	}
 
-	function promoteSession(session, { piVersion = null, context = null, parked = false, parkedSource = null } = {}) {
+	function promoteSession(session, { piVersion = null, context = null, parked = false, parkedSource = null, modelSelectionRef = null, modelSelectionBilling = null, modelSelectionBinding = null } = {}) {
 		// The second DI-seam backstop, and unreachable for the same reason as the `!sessionsDir` return
 		// above: sessionKeyFor is total and binary (null, or 32 hex chars), so resolveSession returns null
 		// rather than a keyless session, and processor.mjs only calls this when prepare handed it one. Kept
@@ -724,6 +729,10 @@ export function makeSessionStore({
 				// it is reporting.
 				writeSidecar(dir, RESUME_CHAIN_FILE, session.key, chainValue(session));
 				writeContextSidecar(dir, session, context);
+				// Bind the exact host-selected model to this promotion, never to agent-written transcript fields.
+				if (parked && splitModelEntry(modelSelectionRef)) {
+					writeSidecar(dir, MODEL_SELECTION_FILE, session.key, JSON.stringify({ version: 1, ref: modelSelectionRef, billing: modelSelectionBilling, binding: modelSelectionBinding, transcriptIdentity: readIdentity(canonicalFile(session.key)) }));
+				} else removeSidecar(dir, MODEL_SELECTION_FILE, session.key);
 				writeParkedSidecar(dir, session, parked, parkedSource);
 			} finally {
 				fs.closeSync(fd);
@@ -769,6 +778,11 @@ export function makeSessionStore({
 	 * `promote-failed` for a promotion that demonstrably happened, telling an operator the next run will
 	 * cold start when it will in fact resume. The bookkeeping loss is logged and the truth is kept.
 	 */
+	function removeSidecar(dir, name, key) {
+		try { fs.unlinkSync(join(dir, name)); }
+		catch (error) { if (error?.code !== "ENOENT") log("session_sidecar_failed", { key, file: name, reason: error?.code ?? "error" }); }
+	}
+
 	function writeSidecar(dir, name, key, value) {
 		try {
 			replaceSidecar(dir, name, value);
@@ -1490,5 +1504,30 @@ export function makeSessionStore({
 		}
 	}
 
-	return { resolveSession, promoteSession, reapSessions, isParked, readParkedInfo, stageRecovered };
+	/** Read-only authority for a human continuation, before choosing or pricing a model. */
+	function readModelSelectionBinding(job, { sessionKey = null, required = false, sourceRunId = null } = {}) {
+		required ||= job?.parkedReply === true;
+		const refused = { refused: "model-selection-continuation-unavailable" };
+		if (job?.resume !== true && !required) return null;
+		const key = sessionKey ?? sessionKeyFor(job);
+		if (!key || !sessionsDir) return required ? refused : null;
+		if (!SESSION_KEY_PATTERN.test(key) && !FORK_SESSION_KEY_PATTERN.test(key)) return refused;
+		if (!inspectKeyDir(key).ok) return required ? refused : null;
+		const parked = readSidecar(key, PARKED_FILE);
+		if (!required && parked === null) return null;
+		try {
+			const row = JSON.parse(readSidecar(key, MODEL_SELECTION_FILE));
+			if (row?.version > 1) return { newer: true };
+			const identity = readIdentity(canonicalFile(key));
+			const parkedSource = readBoundParkedSource(key, identity);
+			if (row?.version !== 1 || !splitModelEntry(row.ref) || ![null, "api", "subscription"].includes(row.billing) || !(row.billing === "subscription" ? /^[a-f0-9]{64}$/.test(row.binding) : row.binding === null) || !identity || row.transcriptIdentity !== identity || !parkedSource) return refused;
+			// A queued answer cannot answer a replacement question merely because it shares the issue's
+			// session key. Approval has an exact origin; ordinary replies have their host receipt instant.
+			if (sourceRunId !== null && parkedSource.runId !== sourceRunId) return refused;
+			if (Number.isSafeInteger(job?.replyReceivedAt) && parkedSource.at > job.replyReceivedAt) return refused;
+			return { ref: row.ref, key, transcriptIdentity: identity, parkedSource, billing: row.billing, binding: row.binding };
+		} catch { return refused; }
+	}
+
+	return { resolveSession, promoteSession, reapSessions, isParked, readParkedInfo, readModelSelectionBinding, stageRecovered };
 }

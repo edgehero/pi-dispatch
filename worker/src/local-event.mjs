@@ -34,6 +34,7 @@ export function buildLocalEventJob(trigger, generation) {
 	const { on, run } = trigger;
 	localEventIdentity({ id: on.id, forge: on.forge });
 	localEventJobId(generation);
+	if (run.modelSelection !== undefined) throw new Error("random model selection is not supported on command-only local events");
 	if (run.kind !== "local" || typeof run.command !== "string" || !LOCAL_EVENT_WORKER_RE.test(run.worker ?? "")) throw new Error("invalid local event execution");
 	return withJobDataVersion({
 		...localRunData(run),

@@ -211,6 +211,7 @@ def trigger_detail():
 
     change = f"""<ul class="c2-list">
   <li class="tone-attention">{ic('attention')}<span><b>Adding a field the queue does not know</b> (steer, recover, progress, statusComment, awaitInput, mcp, models, maxCostUsd) refuses this trigger's jobs already in line as <span class="code">trigger-skew</span>. 1 waits now: {runlink('gh-c9e1')}.</span></li>
+  <li class="tone-attention">{ic('attention')}<span><b>Random jobs</b> recheck this trigger's current pool and allowed-model list before starting. A changed pool or a candidate no longer allowed refuses the old queued policy.</span></li>
   <li class="tone-attention">{ic('attention')}<span><b>Inserting a trigger above row 3</b> renumbers it, and jobs in line refer to rows by number.</span></li>
   <li class="tone-failed">{ic('failed')}<span><b>If the file does not load</b>, no trigger fires. The page says why, quoting doctor: <span class="muted">"The triggers file does not load. pi-dispatch doctor on this host (mini1, 2h ago) says: trigger 5: once needs number."</span></span></li>
 </ul>"""
@@ -716,7 +717,7 @@ README = {
 - **May merge.** When explicitly enabled, By hand adds `run.mayMerge`: `true; deployment default: false`, immediately after instructions. An unflagged trigger adds no row. The trigger list adds a `may merge` marker. Only the reviewed file sets the permission; the page offers no setter. Its Trust model says: “This trigger permits merging through the forge’s checks and approvals when its flow or operator instructions ask for it.” Its queued-job note says: “A queued job with merge permission runs only while its reviewed trigger remains unchanged. A job queued without it does not gain permission from a later edit.” The unflagged fixture retains its default-policy wording.
 - **Local event commands.** The existing facts show source forge, stable trigger ID, debounce seconds and exact review-author allowlist separately from `run.kind: local`, folder, command and owning worker. These are set in the reviewed file. The runs panel distinguishes a current generation and its one pending follow-up, with event counts and due instants; an unread state is unknown, never idle. No event text reaches the command. Source forge never implies forge MCP or a cloned workspace. A command cannot be fired by a tool or this page.
 - **Other kinds.** A cron trigger shows its next fire and health (on time, overdue, stalls N of 3). A one-shot shows armed or "spent by" a run, and how to re-arm it. Fire now is a paid action with its reserve sentence.
-- **Before you change it.** The trigger-skew rule with the jobs it would refuse now, renumbering, and the file-trouble sentence that quotes doctor.
+- **Before you change it.** The trigger-skew rule with the jobs it would refuse now, renumbering, and the file-trouble sentence that quotes doctor. Random jobs recheck this trigger's current pool and allowed-model list before starting; a changed pool or a candidate no longer allowed refuses the old queued policy.
 
 A viewer sees the same facts and runs, and no Edit, Delete or Fire now.
 
