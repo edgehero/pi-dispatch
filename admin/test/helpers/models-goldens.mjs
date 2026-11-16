@@ -31,6 +31,8 @@ export const MODELS_DRAW = Object.freeze({
   "models-subscription-stale.operator": () => draw({ change: m => { m.subscriptionAuth = consoleSubscriptionFixture(NOW, v => { v.connections[0].quota.observedAt = NOW - 600_000; }); } }),
   "models-subscription-unknown-reset.operator": () => draw({ change: m => { m.subscriptionAuth = consoleSubscriptionFixture(NOW, v => { const q = v.connections[0].quota; q.blockedUnknownReset = true; q.until = null; q.trialAvailable = true; q.windows[0].resetAt = null; }); } }),
   "models-subscription-unknown.viewer": () => draw({ role: "viewer", change: m => { m.subscriptionAuth = consoleSubscriptionFixture(NOW, v => { v.connections[0].quota = null; }); } }),
+  "models-random.operator": () => draw({ change: m => { m.randomPools = [{ index: 2, number: 3, candidates: [{ ref: "anthropic/claude-haiku-4-5", state: "unknown" }, { ref: "openai/gpt-5", state: "cooling-down" }] }]; m.recentRandom = [{ jobId: "gh-random-initial", provider: "anthropic", model: "claude-haiku-4-5", modelWhy: "random" }, { jobId: "gh-random", provider: "openai", model: "gpt-5", modelWhy: "random-subscription-limit" }]; } }),
+  "models-random-blocked.operator": () => draw({ change: m => { m.randomPools = [{ index: 2, number: 3, candidates: [{ ref: "anthropic/claude-haiku-4-5", state: "cooling-down" }, { ref: "openai/gpt-5", state: "window-full" }] }]; m.waiting = [{ jobId: "gh-random-wait", reason: "subscription-quota", resetAt: NOW + 1_800_000 }, { jobId: "gh-random-unknown-reset", reason: "subscription-quota" }]; m.subscriptionAuth = consoleSubscriptionFixture(NOW); } }),
   "models-populated.operator": () => draw(),
   "models-populated.viewer": () => draw({ role: "viewer" }),
   "models-readonly.operator": () => draw({ readOnly: true }),

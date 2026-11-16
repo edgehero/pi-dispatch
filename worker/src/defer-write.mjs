@@ -144,7 +144,7 @@ export function makeDeferTo({ redis, DelayedError, now = () => Date.now(), hostN
 		say("defer_reason_restored", { why: said(why) });
 	};
 
-	const writeReason = async (job, { why, untilMs, atMs, project = null, holder, endpoint, budgetWhy, attempt, attempts } = {}) => {
+	const writeReason = async (job, { why, untilMs, atMs, project = null, holder, endpoint, budgetWhy, attempt, attempts, resetAt } = {}) => {
 		if (typeof redis?.multi !== "function") return null;
 		if (typeof job?.id !== "string" || job.id === "") return null;
 		let sent;
@@ -156,7 +156,7 @@ export function makeDeferTo({ redis, DelayedError, now = () => Date.now(), hostN
 			// Whole milliseconds: the record's rule takes integers, and a gate's arithmetic (a jittered delay, a keeper's
 			// wait) need not produce one.
 			const until = Number.isFinite(untilMs) ? Math.floor(untilMs) : null;
-			const args = deferHsetArgs({ why, at, until, project, host: hostName, holder, endpoint, budgetWhy, trigger: job.data?.trigger?.matched?.index, attempt, attempts, n });
+			const args = deferHsetArgs({ why, at, until, project, host: hostName, holder, endpoint, budgetWhy, trigger: job.data?.trigger?.matched?.index, attempt, attempts, n, resetAt });
 			const key = deferKey(job.id);
 			const ttl = Math.ceil(deferTtlMs(until ?? at, at));
 			sent = redis.multi().del(key).hset(key, ...args).pexpire(key, ttl).exec();

@@ -178,6 +178,7 @@ details.c2-more > div { padding: 0 14px 14px; display: grid; gap: var(--space-3)
   <div class="card__head"><h2>Before you change it</h2></div>
   <ul class="c2-list">
   <li class="tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-attention"/></svg><span><b>Adding a field the queue does not know</b> (steer, recover, progress, statusComment, awaitInput, mcp, models, maxCostUsd) refuses this trigger's jobs already in line as <span class="code">trigger-skew</span>. 1 waits now: <a class="link code" href="#">gh-c9e1</a>.</span></li>
+  <li class="tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-attention"/></svg><span><b>Random jobs</b> recheck this trigger's current pool and allowed-model list before starting. A changed pool or a candidate no longer allowed refuses the old queued policy.</span></li>
   <li class="tone-attention"><svg class="ic" aria-hidden="true"><use href="#i-attention"/></svg><span><b>Inserting a trigger above row 3</b> renumbers it, and jobs in line refer to rows by number.</span></li>
   <li class="tone-failed"><svg class="ic" aria-hidden="true"><use href="#i-failed"/></svg><span><b>If the file does not load</b>, no trigger fires. The page says why, quoting doctor: <span class="muted">"The triggers file does not load. pi-dispatch doctor on this host (mini1, 2h ago) says: trigger 5: once needs number."</span></span></li>
 </ul>

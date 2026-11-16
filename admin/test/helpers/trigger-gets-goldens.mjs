@@ -7,7 +7,7 @@
  */
 import assert from "node:assert/strict";
 import { flowBasisOf } from "@edgehero/pi-dispatch/host-loads";
-import { parseTriggers } from "@edgehero/pi-dispatch/triggers";
+import { parseTriggers, triggersFileVersionFor } from "@edgehero/pi-dispatch/triggers";
 import { NOW } from "../../../launch/fixture-deployment.mjs";
 import { loadPageData, parsePageQuery, renderPage } from "../../src/console/pages.mjs";
 import { HOST_LOADS, LOADED_SAMPLES as S, LONG_LOADED, longNamesRecord } from "./loaded-samples.mjs";
@@ -26,7 +26,7 @@ export const GETS_ENTRY = Object.freeze({ on: { type: "comment", phrase: "@pi" }
 /** A triggers file holding `entry` as row 3, with two rows above it, in the bytes the writer writes. */
 export function getsFile(entry = GETS_ENTRY) {
   const doc = { triggers: [{ on: { type: "label", any: ["pi"] }, run: { kind: "github", flow: "triage" } }, { on: { type: "label", any: ["frontend"] }, run: { kind: "github", flow: "frontend-fix" } }, entry] };
-  return `${JSON.stringify(doc, null, 2)}\n`;
+  return `${JSON.stringify(entry.run?.modelSelection ? { version: triggersFileVersionFor(doc), ...doc } : doc, null, 2)}\n`;
 }
 
 /** A real watch rule as row 3 of a file the worker loads, with the source it needs. */
@@ -158,6 +158,8 @@ const flowStale = () => {
 };
 
 export const TRIGGER_GETS_DRAW = Object.freeze({
+  "trigger-gets-random.operator": () => triggerGetsPage({ entry: { ...GETS_ENTRY, run: { kind: "github", flow: "fix", models: ["anthropic/claude-haiku-4-5", "openai/gpt-5"], modelSelection: { strategy: "random", candidates: ["anthropic/claude-haiku-4-5", "openai/gpt-5"] } } } }),
+  "trigger-gets-random.viewer": () => triggerGetsPage({ role: "viewer", entry: { ...GETS_ENTRY, run: { kind: "github", flow: "fix", models: ["anthropic/claude-haiku-4-5", "openai/gpt-5"], modelSelection: { strategy: "random", candidates: ["anthropic/claude-haiku-4-5", "openai/gpt-5"] } } } }),
   "trigger-gets.operator": () => triggerGetsPage(),
   "trigger-gets.viewer": () => triggerGetsPage({ role: "viewer" }),
   "trigger-gets-changed.operator": async () => asChanged(await triggerGetsPage(), GETS_CHANGES),

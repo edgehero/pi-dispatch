@@ -13,6 +13,7 @@
  * it runs against live Valkey, so BOTH the thrown path and the negative-return path are loud failures.
  */
 
+import { withModelSelectionGeneration, modelSelectionGenerationValid } from "./model-selection-generation.mjs";
 import { configError } from "./config.mjs";
 import { cronFingerprint } from "./fingerprint.mjs";
 import { authoredCron, loadSchedules, servedSchedules } from "./schedules.mjs";
@@ -29,12 +30,22 @@ function sentinelName(code) {
  * `removeJobScheduler`; `log(event, fields)` records stable scheduler ids only. Returns
  * `{ installed, removed }`.
  */
-export async function reconcile(queue, schedules, { log = () => {} } = {}) {
+export async function reconcile(queue, schedules, { log = () => {}, nonce } = {}) {
 	for (const { schedulerId, name, pattern, data, opts } of schedules) {
 		let res;
 		try {
 			// No custom jobId: BullMQ mints the deterministic repeat:<schedulerId>:<nextMillis> id itself.
-			res = await queue.upsertJobScheduler(schedulerId, { pattern }, { name, data, opts });
+			let templateData = data;
+			if (data.modelSelection !== undefined) {
+				// A scheduler template is shared by its occurrences, whose own id/timestamp completes the
+				// selection identity. Preserve it on reload; recreating a deleted scheduler mints a new one.
+				const resident = await queue.getJobScheduler(schedulerId);
+				const { modelSelectionGeneration, ...authored } = resident?.template?.data ?? {};
+				const unchanged = resident?.pattern === pattern && modelSelectionGenerationValid(modelSelectionGeneration)
+					&& JSON.stringify(authored) === JSON.stringify(data);
+				templateData = unchanged ? { ...data, modelSelectionGeneration } : withModelSelectionGeneration(data, { nonce });
+			}
+			res = await queue.upsertJobScheduler(schedulerId, { pattern }, { name, data: templateData, opts });
 		} catch (error) {
 			const loud = configError(`scheduler "${schedulerId}": upsertJobScheduler threw: ${error?.message ?? error}`);
 			loud.cause = error;

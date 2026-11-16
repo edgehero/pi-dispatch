@@ -71,6 +71,7 @@ export async function enqueueTriggerFire(plan, options = {}) {
   const fresh = await planTriggerFire({ ...options, index: plan.index });
   if (!fresh.plan) return fresh;
   const current = fresh.plan;
+  if (options.packageCanary != null && current.schedule.data.modelSelection !== undefined) return { refusal: "An extension canary requires a fixed model trigger. Random model selection is not supported for canaries." };
   if (current.fileDigest !== plan.fileDigest || current.queue !== plan.queue || current.schedulerId !== plan.schedulerId) return { refusal: changed };
   const admission = await admissionFn({ folder: current.schedule.data.folder, flow: current.schedule.data.flow, aiInvoked: true, consumeRate: true, env: { ...grantsEnv, VALKEY_URL: url }, now });
   if (admission.refused) return { refusal: admission.refused };

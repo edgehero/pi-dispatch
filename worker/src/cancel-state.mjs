@@ -52,6 +52,7 @@ function stopTouch(job, queue, jobId, now) {
 
 import { deferKey } from "./defer-reasons.mjs";
 import { dropKey, dropModelAttempt, modelAttemptIdOf } from "./model-attempts.mjs";
+import { dropModelSelection, identityForModelSelection } from "./model-selection-state.mjs";
 import { HELD_SET, jobKey, leaseKey } from "./wait-state.mjs";
 
 /** How long an unanswered request may sit before redis reaps it (the requester deletes it sooner). */
@@ -261,7 +262,7 @@ export async function removeHeldJob({ redis, queue, jobId, timeoutMs = 2_000, dr
 		};
 		const removal = interventionOrigin === "agent" ? await remove() : await trackTouchAction({ store, outbox: touchOutbox, event: stopTouch(job, queue, jobId, now), act: remove, succeeded: () => !(job.attemptsMade > 0) && isWorkload(job) });
 		step = null;
-		await Promise.all([dropDefer ? dropDeferRecord(redis, jobId, timeoutMs) : null, dropAttemptOf(redis, queue, jobId, timeoutMs)]);
+		await Promise.all([dropDefer ? dropDeferRecord(redis, jobId, timeoutMs) : null, dropAttemptOf(redis, queue, jobId, timeoutMs, job)]);
 		// Issue #477: what the job had done, for the caller's sentence (`ranBefore`); read off the job just removed.
 		return { ok: true, jobId, attemptsMade: Number.isInteger(job.attemptsMade) && job.attemptsMade > 0 ? job.attemptsMade : 0, ...(removal.touchWarning ? { touchWarning: removal.touchWarning } : {}) };
 	} catch (err) {
@@ -357,7 +358,7 @@ export async function removeQueuedJob({ redis, queue, job, jobId, state = null, 
 	} catch (error) {
 		return { raced: true, state: await stateOf(job), error, ...(localSignalChanged && { localSignalChanged }) };
 	}
-	await Promise.all([dropDeferRecord(redis, jobId, timeoutMs), dropAttemptOf(redis, queue, jobId, timeoutMs)]);
+	await Promise.all([dropDeferRecord(redis, jobId, timeoutMs), dropAttemptOf(redis, queue, jobId, timeoutMs, job)]);
 	return { ok: true, held: false, jobId, state: current, attemptsMade: Number.isInteger(job.attemptsMade) && job.attemptsMade > 0 ? job.attemptsMade : 0, ...(removal.touchWarning ? { touchWarning: removal.touchWarning } : {}) };
 }
 
@@ -383,9 +384,10 @@ function stateOf(job) {
  * Delete a removed job's model attempt key (issue #812), under the id the processor wrote it with: the job's queue's name
  * and its id. A queue handle without a name (BullMQ's always has one) names no key, so nothing is sent.
  */
-async function dropAttemptOf(redis, queue, jobId, timeoutMs) {
+async function dropAttemptOf(redis, queue, jobId, timeoutMs, job) {
 	if (typeof queue?.name !== "string" || queue.name === "") return;
 	await dropModelAttempt(redis, modelAttemptIdOf(queue.name, jobId), timeoutMs);
+	if (job?.data?.modelSelection) await dropModelSelection(redis, identityForModelSelection(job, { queueName: queue.name }), timeoutMs);
 }
 
 /**

@@ -6495,6 +6495,12 @@ export function modelSubjects({ runs = [], deployment, envList = null, modelRole
 	};
 	const subjects = [{ label: "the deployment default", main: { provider: deployment.provider, id: deployment.model }, list: listOf(envList), cap: capOf(undefined), secretNames: [], named: false, deployment: true }];
 	for (const run of resolveDoctorModelRuns({ runs, deployment, envList, modelRoles, projects }).runs) {
+		if (run.modelSelection) {
+			// Authorization was checked separately by resolveDoctorModelRuns. Each possible execution is a
+			// singleton: unrelated allowed providers need no forwarded credential and cannot widen its cost bound.
+			for (const ref of listOf(run.modelSelection.candidates)) subjects.push({ label: `${run.label} (random candidate ${ref.provider}/${ref.id})`, main: ref, list: [ref], cap: capOf(run.maxCostUsd), secretNames: run.secretNames ?? [], named: true, random: true });
+			continue;
+		}
 		subjects.push({
 			label: run.label,
 			main: { provider: run.provider ?? deployment.provider, id: run.model ?? deployment.model },
@@ -6615,6 +6621,7 @@ export function costCapFitChecks(subjects, modelOf, { unboundable = () => false,
 export function unknownModelChecks(subjects, checkModelsKnown, readOverlay) {
 	const unknown = [];
 	const fallbacks = [];
+	const randomExcluded = [];
 	const checks = [];
 	// The deployment's own default model and PI_ALLOWED_MODELS (PR #551's review): a typo there refuses every job
 	// whose trigger names neither, so it gets a line of its own, worded for the settings that hold it.
@@ -6637,9 +6644,13 @@ export function unknownModelChecks(subjects, checkModelsKnown, readOverlay) {
 	for (const s of subjects) {
 		if (!s.named) continue;
 		const verdict = checkModelsKnown([{ ...s.main, main: true }, ...s.list], { readOverlay });
-		if (verdict?.unknown) unknown.push(`${s.label}: ${printable(`${verdict.unknown.provider}/${verdict.unknown.id}`)} (${verdict.why})`);
+		if (s.random === true && (verdict?.unknown || verdict?.fallbackUnlisted)) {
+			const ref = verdict.unknown ?? verdict.fallbackUnlisted;
+			randomExcluded.push(`${s.label}: ${printable(`${ref.provider}/${ref.id}`)} (${verdict.unknown ? verdict.why : "model-not-allowed"})`);
+		} else if (verdict?.unknown) unknown.push(`${s.label}: ${printable(`${verdict.unknown.provider}/${verdict.unknown.id}`)} (${verdict.why})`);
 		else if (verdict?.fallbackUnlisted) fallbacks.push(`${s.label}: ${printable(`${verdict.fallbackUnlisted.provider}/${verdict.fallbackUnlisted.id}`)}`);
 	}
+	if (randomExcluded.length > 0) checks.push({ ok: false, warn: true, label: `Random model candidates are excluded by catalog or singleton policy checks: ${randomExcluded.join("; ")}. Other eligible candidates can still run; a pool with none is refused before spending`, fix: "use known physical candidates without server-side model fallbacks; the selected run permits one model" });
 	if (unknown.length > 0) {
 		checks.push({
 			ok: false,
@@ -7015,6 +7026,7 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTable
 				model: typeof t.run.model === "string" ? t.run.model : undefined,
 				models: Array.isArray(t.run.models) ? t.run.models : undefined,
 				fallbackModels: Array.isArray(t.run.fallbackModels) ? t.run.fallbackModels : undefined,
+				...(t.run.modelSelection ? { modelSelection: t.run.modelSelection } : {}),
 				maxCostUsd: t.run.maxCostUsd ?? undefined,
 				secretNames: t.run.secrets !== undefined && t.run.secrets !== null ? Object.keys(t.run.secrets) : [],
 			})),

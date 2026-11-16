@@ -218,7 +218,7 @@ test("the browser holds no money or policy: its part of the script compares what
   const to = CONSOLE_SCRIPT.indexOf("function bodyOf");
   const part = CONSOLE_SCRIPT.slice(from, to);
   assert.ok(from > 0 && to > from);
-  assert.doesNotMatch(part, /cap|cost|usd|micro|floor|version|skew|widen|mcp|provider|model/i, "no rule of the planner's");
+  assert.doesNotMatch(part, /cap|cost|usd|micro|floor|version|skew|widen|mcp|Math.random|randomInt/i, "no gate or selection rule of the planner's; model keys only serialize the authored mode");
   assert.doesNotMatch(part, /innerHTML|insertAdjacentHTML/, "text alone, from the server's attributes");
 });
 
@@ -746,4 +746,30 @@ test("a bad row reads the same on the page and to the action, first, middle and 
     const links = [...new Set([...page.matchAll(/\/config\/trigger\?index=(\d+)/g)].map((m) => Number(m[1])))].sort();
     assert.deepEqual(links, [1, 2], name);
   }
+});
+
+test("the browser switches from ordered fallbacks to a pool in one preview body and clears conflicting fields", async () => {
+  const entry = { ...GETS_ENTRY, run: { ...GETS_ENTRY.run, provider: "anthropic", model: "claude-haiku-4-5", fallbackModels: ["openai/gpt-5"] } };
+  const w = runConsoleScript(CONSOLE_SCRIPT, await triggerGetsPage({ entry }));
+  const form = w.document.querySelector('form[data-action="trigger-environment-edit"]');
+  const mode = form.querySelector("[data-gets-mode]");
+  assert.equal(mode.value, "fallback");
+  for (const option of mode.querySelectorAll("option")) option.liveSelected = option.getAttribute("value") === "random";
+  mode.dispatchEvent(new Event("change", { bubbles: true }));
+  assert.equal(form.querySelector("[data-gets-fixed]").hidden, true);
+  assert.equal(form.querySelector("[data-gets-random]").hidden, false);
+  const candidates = form.querySelector('[data-gets-add="randomCandidates"]');
+  candidates.value = "anthropic/claude-haiku-4-5 openai/gpt-5";
+  candidates.dispatchEvent(new Event("input", { bubbles: true }));
+  w.submit(form);
+  const body = w.fetch.calls.at(-1).body;
+  assert.deepEqual(body.modelSelection, { strategy: "random", candidates: ["anthropic/claude-haiku-4-5", "openai/gpt-5"] });
+  assert.equal(body.provider, null); assert.equal(body.model, null); assert.equal(body.fallbackModels, null);
+  assert.ok(!Object.hasOwn(body, "randomCandidates"));
+});
+
+test("agent reads retain only the closed random pool metadata, never host state or response prose", () => {
+  const modelSelection = { strategy: "random", candidates: ["openai/gpt-5"], previous: "anthropic/claude-haiku-4-5", state: "PRIVATE_HOST_STATE", response: "PRIVATE_PROVIDER_RESPONSE" };
+  assert.deepEqual(agentReadProjection({ modelSelection }), { modelSelection: { strategy: "random", candidates: ["openai/gpt-5"], previous: "anthropic/claude-haiku-4-5" } });
+  assert.deepEqual(agentReadProjection({ modelSelection: { strategy: "random", candidates: ["<private>"] } }), { modelSelection: null });
 });

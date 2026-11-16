@@ -4,6 +4,7 @@ import { LOADED_LINE_CUT, recordedLoaded } from "./loaded-record.mjs";
 import { cleanTouch, touchScopeOf } from "./touch-state.mjs";
 import { ANSWER_ID_RE, ANSWER_RUN_RE } from "./answerer.mjs";
 import { MODEL_WHY, providerFailureOf } from "./model-failover-protocol.mjs";
+import { recordedModelSelection } from "./model-selection-record.mjs";
 import { forkArchiveFact, recordedFork } from "./fork-job.mjs";
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import * as nodeFs from "node:fs";
@@ -1102,6 +1103,7 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		...(typeof source.modelRole === "string" && /^[a-z][a-z0-9_-]{0,31}$/.test(source.modelRole) ? { modelRole: source.modelRole } : {}),
 		...(recordedCanary(data.canary) ? { canary: recordedCanary(data.canary) } : {}),
 		...(MODEL_WHY.includes(source.modelWhy) ? { modelWhy: source.modelWhy } : {}),
+		...(recordedModelSelection(source.modelSelectionInfo) ? { modelSelection: recordedModelSelection(source.modelSelectionInfo) } : {}),
 		...(providerFailureOf(source.providerFailure) ? { providerFailure: providerFailureOf(source.providerFailure) } : {}),
 		...(modelRolesTelemetryOf(source.modelRoles) ? { modelRoles: modelRolesTelemetryOf(source.modelRoles) } : {}),
 		budgetReserved: source.budgetReserved ?? null,

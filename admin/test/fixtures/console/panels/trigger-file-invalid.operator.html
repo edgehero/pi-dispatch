@@ -82,6 +82,8 @@ The triggers file does not load. pi-dispatch doctor on this host (build3, 2m ago
 A job already in line keeps what it was queued with and runs without a
 change here, unless this trigger has gained a narrowing field the job
 lacks, such as a list of models, a cap or a server: then it is refused.
+Random jobs recheck this trigger's current pool and allowed-model list before starting.
+A changed pool or a candidate no longer allowed refuses the old queued policy.
 Adding or deleting a row renumbers the rows after it.
 </p>
 <p>

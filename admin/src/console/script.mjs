@@ -2097,11 +2097,38 @@ ${FIT_JS}
     for (var f = 0; f < flags.length; f++) if (flags[f].checked !== flags[f].defaultChecked) out[flags[f].getAttribute("data-gets-flag")] = flags[f].checked ? null : false;
     var lists = getsLists(form);
     for (var key in lists) if (JSON.stringify(lists[key].now) !== JSON.stringify(lists[key].was)) out[key] = lists[key].now.length > 0 ? lists[key].now : null;
+    var mode = form.querySelector("[data-gets-mode]");
+    if (mode) {
+      var wasMode = mode.getAttribute("data-gets-was");
+      var pool = lists.randomCandidates || { was: [], now: [] };
+      delete out.randomCandidates;
+      if (mode.value === "random") {
+        delete out.provider; delete out.model; delete out.fallbackModels;
+        if (wasMode !== "random" || JSON.stringify(pool.was) !== JSON.stringify(pool.now)) {
+          out.modelSelection = { strategy: "random", candidates: pool.now };
+          out.provider = null; out.model = null; out.fallbackModels = null;
+        }
+      } else {
+        if (wasMode === "random") out.modelSelection = null;
+        if (mode.value === "fixed") { delete out.fallbackModels; if (wasMode === "fallback") out.fallbackModels = null; }
+        if (mode.value === "fixed") delete out.randomCandidates;
+      }
+    }
     return out;
   }
   // The bar's count and words, each from the server's own text on the control that changed (\`data-gets-*\`), through \`textContent\`.
   function getsRefresh(form) {
     var words = [];
+    var mode = form.querySelector("[data-gets-mode]");
+    if (mode) {
+      var fixed = form.querySelector("[data-gets-fixed]");
+      var random = form.querySelector("[data-gets-random]");
+      var fallback = form.querySelector("[data-gets-fallback]");
+      if (fixed) fixed.hidden = mode.value === "random";
+      if (random) random.hidden = mode.value !== "random";
+      if (fallback) fallback.hidden = mode.value !== "fallback";
+      if (mode.value !== mode.getAttribute("data-gets-was")) words.push("model selection mode changed");
+    }
     var lists = getsLists(form);
     var boxes = form.querySelectorAll("input[data-gets-word]");
     for (var i = 0; i < boxes.length; i++) {

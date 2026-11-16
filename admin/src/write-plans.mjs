@@ -273,9 +273,9 @@ function unknownTriggerField(params, kind) {
  * existing value is never touched: the add tool builds entries without these keys and the edit tool spreads the entry's own
  * `run` under the fields it sets.
  */
-const TOOL_PROOF_FIELDS = new Set(["run.maxCostUsd", "run.models", "run.fallbackModels", "run.mcp", "run.excludeTools", "run.packages", "run.excludeExtensions", "run.excludeExtensionTools"]);
+const TOOL_PROOF_FIELDS = new Set(["run.maxCostUsd", "run.models", "run.fallbackModels", "run.modelSelection", "run.mcp", "run.excludeTools", "run.packages", "run.excludeExtensions", "run.excludeExtensionTools"]);
 /** Each tool-proof field as its refusal says it. */
-const TOOL_PROOF_WORDS = Object.freeze({ "run.maxCostUsd": "per-job dollar cap", "run.models": "allowed-model list", "run.fallbackModels": "fallback-model list", "run.mcp": "list of MCP servers", "run.excludeTools": "list of removed tools", "run.packages": "staged-package switch", "run.excludeExtensions": "list of extensions it leaves out", "run.excludeExtensionTools": "list of an extension's tools it removes" });
+const TOOL_PROOF_WORDS = Object.freeze({ "run.maxCostUsd": "per-job dollar cap", "run.models": "allowed-model list", "run.fallbackModels": "fallback-model list", "run.modelSelection": "random model pool", "run.mcp": "list of MCP servers", "run.excludeTools": "list of removed tools", "run.packages": "staged-package switch", "run.excludeExtensions": "list of extensions it leaves out", "run.excludeExtensionTools": "list of an extension's tools it removes" });
 /**
  * `run.mcp` (REQ-MCP-OPERATOR-SERVERS) is tool-proof for the same reason: which outside systems a trigger's jobs act
  * on, with which credentials, is the operator's to write. Its near misses are the loader's own (`isMcpNearMiss`: the
@@ -337,6 +337,20 @@ export function wideningFieldRefusal(params, tool) {
     return Object.entries(value).some(([key, entry]) => isModelRolesField(key) || hasRoles(entry));
   };
   if (hasRoles(params)) return `${tool} cannot set modelRoles: the role map is a reviewed operator file edit, never a tool write`;
+  const policySeen = new Set();
+  const selectionPath = (value, path = "") => {
+    if (!value || typeof value !== "object" || policySeen.has(value)) return null;
+    policySeen.add(value);
+    for (const [key, entry] of Object.entries(value)) {
+      const at = `${path}${key}`;
+      if (runModelFieldNearMiss(key) === "run.modelSelection") return at;
+      const nested = selectionPath(entry, `${at}.`);
+      if (nested !== null) return nested;
+    }
+    return null;
+  };
+  const selection = selectionPath(params);
+  if (selection !== null) return `${tool} cannot set run.modelSelection (sent as ${selection}): a random model pool is set by a person on that trigger's page or by hand in the triggers file, never by a tool.`;
   const bundle = secretBundleFieldRefusal(params, tool);
   if (bundle !== null) return bundle;
   const objects = [["", params], ["run.", params?.run], ["on.", params?.on]];

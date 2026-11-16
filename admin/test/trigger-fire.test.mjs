@@ -177,3 +177,18 @@ test("a queue add whose readback failed is an unknown result, never a successful
   assert.match(res.invalid, /could not verify/);
   assert.equal(res.jobId, f.adds[0].opts.jobId);
 });
+
+
+test("a random trigger refuses an extension canary before consuming the hourly allowance or enqueueing", async () => {
+  const f = fixture();
+  delete f.raw.run.provider;
+  delete f.raw.run.model;
+  f.raw.run.modelSelection = { strategy: "random", candidates: ["openai/gpt-5.4"] };
+  writeFileSync(f.triggersPath, JSON.stringify({ version: 6, triggers: [f.raw] }));
+  const { plan } = await planTriggerFire(f.options);
+  assert.ok(plan);
+  const res = await enqueueTriggerFire(plan, { ...f.options, packageCanary: { name: "pi-lint", version: "1.4.3" } });
+  assert.match(res.refusal, /fixed model trigger/);
+  assert.equal(f.adds.length, 0);
+  assert.ok(f.admissions.every((a) => a.consumeRate === false));
+});

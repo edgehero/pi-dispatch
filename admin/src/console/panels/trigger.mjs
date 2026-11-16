@@ -394,6 +394,8 @@ export function triggerChange(v) {
         ${t?.runKind === "local" ? "Each queued generation is bound to this reviewed trigger definition. Changing or deleting it retires the old generation before another container starts. Running commands finish; later events use the new definition." : t?.mayMerge === true ? "A queued job with merge permission runs only while its reviewed trigger remains unchanged. A job queued without it does not gain permission from a later edit." : html`A job already in line keeps what it was queued with and runs without a
         change here, unless this trigger has gained a narrowing field the job
         lacks, such as a list of models, a cap or a server: then it is refused.`}
+        Random jobs recheck this trigger's current pool and allowed-model list before starting.
+        A changed pool or a candidate no longer allowed refuses the old queued policy.
         Adding or deleting a row renumbers the rows after it.
       </p>
       <p>

@@ -347,3 +347,7 @@ Two more lines speak about what this page covers:
   ([When a counter resets](costs.md#when-a-counter-resets)).
 
 The `history:request:` and `history:reply:` names are transient Valkey pub/sub channels, not stored keys. Overview history browsing writes no archive or index to back up. Its directory cursors and recent browser pages live only in memory; the run JSON files above remain the durable source.
+
+Random-pool runs (#922) add `dispatch:model-selection:v1:*`, within the `dispatch:*` family. Preserve it with BullMQ: a missing choice after possible execution refuses safely. Active/deferred state has no expiry; completed state uses the existing finished model-state retention. Parked random sessions add the host-written `model-selection` sidecar beside the canonical transcript, bound to its identity. Copy that entire session directory with the approval store, never just the transcript. There is no older format of either store.
+
+Random recovery also keeps `cp-N/model-selection.json` with each checkpoint snapshot. Its version-1 annotation binds the exact model and billing identity to the manifest hash. Copy the complete checkpoint directory; its manifest and pointer formats are unchanged.

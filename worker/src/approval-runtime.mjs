@@ -58,6 +58,13 @@ export function makeApprovalRuntime({ store, checkPolicy, now = () => Date.now()
 	};
 	return {
 		finish: ({ requestId, jobId } = {}) => store.finish({ requestId, jobId }),
+		async modelSelectionContext(job) {
+			if (!job?.approvalRequestId) return null;
+			const found = await store.find(job);
+			if (found.newer === true) return { newer: true };
+			if (!found.ok || !found.request || found.request.requestId !== job.approvalRequestId || found.request.host !== host) return { refused: "model-selection-continuation-unavailable" };
+			return { sessionKey: found.request.sessionKey, sourceRunId: found.request.runId, required: true };
+		},
 		async before(job) {
 			let configInvalid = false;
 			if (job.gates !== undefined || job.gateTimeout !== undefined || job.gateBudgetRaiseUsd !== undefined) {

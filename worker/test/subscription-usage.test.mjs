@@ -70,7 +70,7 @@ test("a measured Claude throttle invalidates fresh availability before usage, th
 		assert.equal(blocked.ok, false, "the previous fresh observation cannot authorize another physical model");
 		return available();
 	});
-	await f.runtime.observe(job, throttled, [connection]);
+	assert.equal(await f.runtime.observe(job, throttled, [connection]), undefined, "an available authoritative refresh does not authorize random reselection");
 	const status = await f.quota.read(f.identity);
 	assert.deepEqual([status.version, status.probeRequired, status.state, status.extraUsage.enabled, f.writes], [3, false, "available", false, 3]);
 	assert.equal((await f.quota.admit(f.identity, { attemptId: "ordinary-next", requireExtraUsageKnownDisabled: true })).ok, true);
@@ -121,10 +121,18 @@ test("a partial usage observation cannot erase prior weekly exhaustion during a 
 	const f = fixture();
 	await f.seed({ five_hour: { utilization: 20 }, seven_day: { utilization: 100, resets_at: new Date(NOW + WEEK).toISOString() }, extra_usage: { is_enabled: false } });
 	f.setUsage(async () => ({ five_hour: { utilization: 30 }, extra_usage: { is_enabled: false } }));
-	await f.runtime.observe(job, throttled, [connection]);
+	assert.deepEqual(await f.runtime.observe(job, throttled, [connection]), { quotaExhausted: true });
 	const status = await f.quota.read(f.identity);
 	assert.deepEqual([status.probeRequired, status.state, status.until], [false, "exhausted", NOW + WEEK]);
 	assert.equal((await f.quota.admit(f.identity, { attemptId: "still-exhausted" })).reason, "subscription-quota");
+});
+
+test("authoritative usage refreshed after a random attempt remains bound to its original account and credential generation", async () => {
+	const f = fixture();
+	await f.seed();
+	f.setUsage(async () => { f.changeBinding({ generation: 3 }); return { ...available(), seven_day: { utilization: 100 } }; });
+	await assert.rejects(f.runtime.observe(job, throttled, [connection]), /subscription usage unavailable after throttling/);
+	assert.equal((await f.quota.read(f.identity)).probeRequired, true);
 });
 
 test("untrusted, aborted, mismatched and unattributed failures cannot invalidate a subscription", async () => {

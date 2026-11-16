@@ -107,7 +107,7 @@ const jobDataFields = () => {
 };
 
 test("the job data tables hold the rule", () => {
-	assert.equal(JOB_DATA_VERSION, 6, "issue #911: local event authority and named worker at 6");
+	assert.equal(JOB_DATA_VERSION, 7, "issue #922: random model policy and logical run generation at 7");
 	assert.equal(JOB_DATA_VERSION_FIELD, "dataVersion");
 	const known = jobDataFields();
 	assert.ok(known.includes("waitFor") && known.includes("models"), "the job data fields were found");

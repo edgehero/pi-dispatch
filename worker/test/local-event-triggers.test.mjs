@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { JOB_DATA_VERSION, jobDataNewer, withJobDataVersion } from "../src/job-data-version.mjs";
+import { jobDataNewer, withJobDataVersion } from "../src/job-data-version.mjs";
 import { TRIGGERS_FILE_VERSION, parseTriggers, sourceForgeOf, triggersFileVersionFor } from "../src/triggers.mjs";
 
 const base = () => ({ on: { type: "pull_request", forge: "github", id: "maintain", action: ["review_submitted"] }, run: { kind: "local", folder: "/srv/maintenance", command: "maintain-prs", worker: "build1" } });
@@ -79,7 +79,7 @@ test("new authority stamps only files and jobs using it; previous readers defer"
 	assert.equal(parse([cron])[0].run.worker, "build1");
 	for (const extra of [{ worker: "build1" }, { localEvent: { id: "maintain" } }]) {
 		const job = withJobDataVersion({ kind: "local", ...extra });
-		assert.equal(job.dataVersion, JOB_DATA_VERSION);
+		assert.equal(job.dataVersion, 6, "later policy fields must not raise the minimum for existing local events");
 		assert.deepEqual(jobDataNewer(job, { supported: 5 }), { version: 6 });
 	}
 	assert.deepEqual(withJobDataVersion({ kind: "local" }), { kind: "local" });

@@ -84,6 +84,8 @@
     "./model-failover-protocol": "./src/model-failover-protocol.mjs",
     "./model-failover": "./src/model-failover.mjs",
     "./model-attempts": "./src/model-attempts.mjs",
+    "./model-selection-record": "./src/model-selection-record.mjs",
+    "./model-selection-state": "./src/model-selection-state.mjs",
     "./schedules": "./src/schedules.mjs",
     "./env-file": "./src/env-file.mjs",
     "./service-env": "./src/service-env.mjs",

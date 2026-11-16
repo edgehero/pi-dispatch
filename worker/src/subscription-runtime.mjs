@@ -1,4 +1,5 @@
 import { REASONS } from "./reason-catalog.mjs";
+import { createHash } from "node:crypto";
 /** Host-only orchestration. Private snapshots never become job data, run records or telemetry. */
 import { COMMUNITY_AUTH_ADAPTERS } from "./community-auth-metadata.mjs";
 import { builtinModel } from "./model-catalog.mjs";
@@ -14,6 +15,12 @@ function recordRefusal(value) {
 }
 
 export const subscriptionIdentity = (row) => ({ connectionId: row.connectionId ?? row.id, owner: row.ownerHost, accountDigest: row.accountGroup, bucket: `${row.provider}:subscription`, generation: row.generation });
+/** Credential refresh may change generation; another account, connection or authored binding is a different route. */
+export function subscriptionBindingDigest(row) {
+	const parts = [row.connectionId ?? row.id, row.provider, row.ownerHost, row.accountGroup, row.adapter, row.bindingSignature ?? null];
+	if (parts.slice(0, 5).some((part) => typeof part !== "string" || !part)) return null;
+	return createHash("sha256").update(JSON.stringify(parts)).digest("hex");
+}
 export function subscriptionRoutes(job) {
 	const refs = new Map();
 	const add = (provider, id) => { if (provider && id) refs.set(`${provider}/${id}`, { provider, id }); };
@@ -24,6 +31,25 @@ export function subscriptionRoutes(job) {
 }
 
 export function makeSubscriptionRuntime({ auth, quota, now = Date.now, lookup = builtinModel, packageRootFor = () => null, defaultBackend = "local", isPrivateStoreExposed = () => false } = {}) {
+	/** Whole-pool billing classification cannot return early on a quota wait and hide a paid alternative. */
+	async function inspectPolicy(job) {
+		try {
+			if (await isPrivateStoreExposed(job)) return { ok: false, managed: true, reason: LOCAL_FOLDER_HOLDS_SUBSCRIPTION_AUTH };
+		} catch (error) {
+			return { ok: false, managed: true, reason: "auth-store-unavailable", unavailable: error?.transient !== false };
+		}
+		let managed = false;
+		let unmanaged = false;
+		const bindings = {};
+		for (const ref of subscriptionRoutes(job)) {
+			const model = lookup(ref.provider, ref.id);
+			const row = await auth.check(ref.provider, { model: ref.id, api: model?.api, baseUrl: model?.baseUrl, readOnly: true });
+			if (row.unavailable) return recordRefusal(row);
+			if (row.managed) managed = true; else unmanaged = true;
+			if (row.ok) bindings[`${ref.provider}/${ref.id}`] = row.managed ? subscriptionBindingDigest(row) : null;
+		}
+		return managed && unmanaged ? { ok: false, managed: true, reason: "auth-mixed-billing" } : { ok: true, managed, bindings };
+	}
 	async function check(job, { attemptId = null, consumeTrial = false } = {}) {
 		try {
 			if (await isPrivateStoreExposed(job)) return { ok: false, managed: true, reason: LOCAL_FOLDER_HOLDS_SUBSCRIPTION_AUTH };
@@ -35,6 +61,7 @@ export function makeSubscriptionRuntime({ auth, quota, now = Date.now, lookup = 
 		for (const ref of subscriptionRoutes(job)) {
 			const model = lookup(ref.provider, ref.id);
 			const row = await auth.check(ref.provider, { model: ref.id, api: model?.api, baseUrl: model?.baseUrl });
+			if (job.modelSelectionBilling === "subscription" && !row.managed || job.modelSelectionBilling === "api" && row.managed || job.modelSelectionBinding && row.ok && subscriptionBindingDigest(row) !== job.modelSelectionBinding) return { ok: false, managed: true, reason: "auth-binding-changed" };
 			if (!row.managed) { unmanaged = true; continue; }
 			if (!row.ok) return row.reason === "auth-owner-host" ? { ok: false, managed: true, wait: "subscription-owner", until: now() + 60_000 } : recordRefusal(row);
 			if (!model?.api || !model?.baseUrl) return { ok: false, managed: true, reason: "auth-model-unverified" };
@@ -60,7 +87,7 @@ export function makeSubscriptionRuntime({ auth, quota, now = Date.now, lookup = 
 			if (!managed.some((entry) => entry.provider === row.provider)) managed.push({ ...row, needsUsage });
 		}
 		if (managed.length && unmanaged) return { ok: false, managed: true, reason: "auth-mixed-billing" };
-		return { ok: true, managed };
+		return { ok: true, managed, ...(job.modelSelection ? { binding: managed.length === 1 ? subscriptionBindingDigest(managed[0]) : null } : {}) };
 	}
 	async function prepare(job, { deadlineAt, signal, attemptId, renewable = false } = {}) {
 		const preview = await check(job);
@@ -76,6 +103,7 @@ export function makeSubscriptionRuntime({ auth, quota, now = Date.now, lookup = 
 			const prepared = await auth.prepareSnapshot(row.provider, { deadlineAt, signal, renewable });
 			if (!prepared.ok) return recordRefusal(prepared);
 			if (!prepared.snapshot) return { ok: false, managed: true, reason: "auth-binding-changed" };
+			if (job.modelSelectionBinding && subscriptionBindingDigest({ ...prepared.snapshot, ownerHost: row.ownerHost }) !== job.modelSelectionBinding) return { ok: false, managed: true, reason: "auth-binding-changed" };
 			snapshots.push({ ...prepared.snapshot, ownerHost: row.ownerHost, ...packageRootFor(row.adapter) });
 		}
 		return { ok: true, snapshots };
@@ -91,26 +119,36 @@ export function makeSubscriptionRuntime({ auth, quota, now = Date.now, lookup = 
 		return true;
 	}
 	async function observe(job, result, snapshots) {
-		if (result?.exitAuth !== "verified" || result?.exitLineCode !== result?.code || result?.aborted === true) return;
+		if (result?.exitAuth !== "verified" || result?.code !== 1 || result?.exitLineCode !== result?.code || result?.aborted === true) return;
 		const snapshot = snapshots.find((row) => row.provider === result.providerFailure?.subscriptionProvider);
+		if (!snapshot) return;
+		const model = lookup(snapshot.provider, job.model);
+		const bound = await auth.check(snapshot.provider, { model: job.model, api: model?.api, baseUrl: model?.baseUrl });
+		if (!bound.ok || !bound.managed || !sameBinding(bound, snapshot)) return;
 		if (snapshot?.provider === "anthropic" && ["quota-exhausted", "rate-limited"].includes(result.providerFailure?.kind)) {
 			await quota.invalidate(subscriptionIdentity(snapshot), { observedAt: now() });
-			const refreshed = await usage(snapshot.connectionId, { signal: AbortSignal.timeout(15_000) });
+			const refreshed = await usage(snapshot.connectionId, { signal: AbortSignal.timeout(15_000), expectedBinding: snapshot });
 			if (refreshed.kind !== "observation") throw new Error("subscription usage unavailable after throttling");
-			return;
+			return refreshed.quota?.state === "exhausted" && refreshed.quota?.bindingValid !== false ? { quotaExhausted: true } : undefined;
 		}
 		if (!snapshot || result.providerFailure?.kind !== "quota-exhausted" || !result.providerFailure.subscriptionCode) return;
 		const observation = normalizeSubscriptionQuotaError({ provider: snapshot.provider, code: result.providerFailure.subscriptionCode, status: 429, resetAt: result.providerFailure.resetAt }, { observedAt: now() });
-		if (observation) await quota.record(subscriptionIdentity(snapshot), observation);
+		if (observation) {
+			const written = await quota.record(subscriptionIdentity(snapshot), observation);
+			if (written.ok && written.status?.state === "exhausted" && written.status?.bindingValid !== false) return { quotaExhausted: true };
+		}
 	}
-	async function usage(id, options) {
+	function sameBinding(row, snapshot) {
+		return (row.connectionId ?? row.id) === snapshot.connectionId && row.provider === snapshot.provider && row.ownerHost === snapshot.ownerHost && row.accountGroup === snapshot.accountGroup && row.generation === snapshot.generation && row.adapter === snapshot.adapter && (row.bindingSignature === undefined || row.bindingSignature === snapshot.bindingSignature);
+	}
+	async function usage(id, { expectedBinding = null, ...options } = {}) {
 		const before = (await auth.status()).find((entry) => entry.id === id && entry.active);
-		if (!before?.accountGroup) return { kind: "unavailable", reason: "auth-binding-changed" };
+		if (!before?.accountGroup || expectedBinding && !sameBinding(before, expectedBinding)) return { kind: "unavailable", reason: "auth-binding-changed" };
 		const version = (await quota.read(subscriptionIdentity(before))).version;
 		const result = await auth.usage(id, options);
 		if (result.kind !== "observation") return result;
 		const row = (await auth.status()).find((entry) => entry.id === id && entry.active);
-		if (!row || row.provider !== result.provider || row.ownerHost !== result.ownerHost || row.accountGroup !== result.accountGroup || row.generation !== result.generation) return { kind: "unavailable", reason: "auth-binding-changed" };
+		if (!row || row.provider !== result.provider || row.ownerHost !== result.ownerHost || row.accountGroup !== result.accountGroup || row.generation !== result.generation || expectedBinding && !sameBinding(row, expectedBinding)) return { kind: "unavailable", reason: "auth-binding-changed" };
 		const observation = (row.provider === "anthropic" ? normalizeClaudeQuota : normalizeOpenAIQuota)(result.payload, { observedAt: result.observedAt });
 		const written = await quota.record(subscriptionIdentity(row), observation, { expectedVersion: version });
 		return { kind: written.ok ? "observation" : "unavailable", reason: written.reason ?? null, quota: written.status };
@@ -134,5 +172,5 @@ export function makeSubscriptionRuntime({ auth, quota, now = Date.now, lookup = 
 		if (snapshot.renewable === true && next.deadlineAt === snapshot.deadlineAt && next.generation === snapshot.generation) return { wait: true, until: Math.max(now() + 60_000, next.refreshAt ?? 0) };
 		return { ...snapshot, ...next };
 	}
-	return { check, prepare, validate, observe, usage, status, extend };
+	return { check, inspectPolicy, prepare, validate, observe, usage, status, extend };
 }

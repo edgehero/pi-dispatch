@@ -1468,3 +1468,67 @@ test("history reads classify transient filesystem errors as unavailable without 
 	const recovery = checkpointer(env.storeDir, { fs }).ck;
 	assert.deepEqual(await recovery.readManifest("run-1"), { invalid: true, reason: "manifest-unreadable" });
 });
+
+test("random checkpoint billing/account authority is a manifest-bound sibling while v1 stays unchanged", async () => {
+	const env = setup();
+	const { ck } = await primed(env);
+	const modelSelection = { ref: "anthropic/claude-haiku-4-5", billing: "subscription", binding: "a".repeat(64) };
+	const args = { runId: "run-1", workspace: env.ws, baseSha: env.baseSha, seq: 1, meta: { provider: "anthropic", model: "claude-haiku-4-5", modelSelection } };
+	const snap = await ck.snapshot(args);
+	assert.equal(snap.ok, true);
+	assert.equal(snap.manifest.v, 1);
+	assert.equal("modelSelection" in snap.manifest, false, "older manifest readers keep the identical closed key set");
+	const first = await ck.readManifest("run-1");
+	assert.equal(first.ok, true);
+	assert.deepEqual(first.modelSelection, modelSelection);
+	const cp = join(env.storeDir, checkpointKey("run-1"), "cp-1");
+	const path = join(cp, "model-selection.json");
+	const raw = JSON.parse(realFs.readFileSync(path, "utf8"));
+	assert.equal(raw.manifestSha256, createHash("sha256").update(realFs.readFileSync(join(cp, "manifest.json"))).digest("hex"));
+	assert.equal(realFs.statSync(path).mode & 0o777, 0o600);
+	for (const patch of [{ manifestSha256: "0".repeat(64) }, { ref: "openai/gpt-5.4" }, { binding: "raw credential" }, { binding: null }, { extra: true }]) {
+		realFs.writeFileSync(path, JSON.stringify({ ...raw, ...patch }));
+		const read = await ck.readManifest("run-1");
+		assert.equal(read.ok, true, "a bad optional annotation does not make a fixed v1 checkpoint unreadable");
+		assert.deepEqual(read.modelSelection, { invalid: true });
+	}
+	realFs.writeFileSync(path, JSON.stringify({ version: 2 }));
+	assert.deepEqual((await ck.readManifest("run-1")).modelSelection, { newer: true });
+	realFs.unlinkSync(path);
+	assert.equal("modelSelection" in await ck.readManifest("run-1"), false, "random recovery must require it; older fixed checkpoints remain readable");
+	realFs.symlinkSync(join(cp, "manifest.json"), path);
+	assert.deepEqual((await ck.readManifest("run-1")).modelSelection, { invalid: true }, "the host never follows an annotation symlink");
+});
+
+test("random checkpoint cannot publish CURRENT before its binding is safely written", async () => {
+	const env = setup();
+	let fail = false;
+	const fs = { ...realFsp, async open(path, ...args) {
+		if (fail && String(path).includes("model-selection.json.") && args[0] === "wx") throw Object.assign(new Error("disk unavailable"), { code: "EIO" });
+		return realFsp.open(path, ...args);
+	} };
+	const { ck } = await primed(env, { fs });
+	const base = { runId: "run-1", workspace: env.ws, baseSha: env.baseSha, meta: { provider: "openai", model: "gpt-5.4", modelSelection: { ref: "openai/gpt-5.4", billing: "api", binding: null } } };
+	assert.equal((await ck.snapshot({ ...base, seq: 1 })).ok, true);
+	fail = true;
+	assert.equal((await ck.snapshot({ ...base, seq: 2 })).ok, undefined);
+	const read = await ck.readManifest("run-1");
+	assert.equal(read.manifest.seq, 1);
+	assert.deepEqual(read.modelSelection, base.meta.modelSelection);
+	assert.equal((await ck.snapshot({ ...base, seq: 3, meta: { ...base.meta, modelSelection: { ...base.meta.modelSelection, ref: "openai/other" } } })).skipped, "model-selection-invalid");
+});
+
+test("transient annotation reads remain a separate infrastructure result and never lose the fixed manifest", async () => {
+	const env = setup();
+	let fail = false;
+	const fs = { ...realFsp, async open(path, ...args) {
+		if (fail && String(path).endsWith("model-selection.json")) throw Object.assign(new Error("disk unavailable"), { code: "EIO" });
+		return realFsp.open(path, ...args);
+	} };
+	const { ck } = await primed(env, { fs });
+	assert.equal((await ck.snapshot({ runId: "run-1", workspace: env.ws, baseSha: env.baseSha, seq: 1 })).ok, true);
+	fail = true;
+	const read = await ck.readManifest("run-1");
+	assert.equal(read.ok, true);
+	assert.deepEqual(read.modelSelection, { unavailable: "EIO" });
+});

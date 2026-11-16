@@ -1,7 +1,7 @@
 {
   "card": "ModelsScreen",
   "pr": 780,
-  "words": "8a01e2dd3539ba755198d7b76026ad20df9a19219e7bb029123fd6cf809de95b",
+  "words": "eff21935cc551e134ea10bcd301ffc804f763c1369f8916782ab0722e66b5fc3",
   "elements": [
     {
       "el": "p-model-problems",
@@ -257,6 +257,35 @@
       "source": "admin/src/console/panels/subscription-auth.mjs#modelsSubscriptionQuota",
       "golden": [
         "panels/models-subscription.operator"
+      ]
+    },
+    {
+      "el": "Random model pools",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-models",
+      "source": "admin/src/console/panels/models.mjs#modelsInUse",
+      "golden": [
+        "panels/models-random.operator"
+      ],
+      "shows": [
+        "Random model pools",
+        "it never predicts the next model",
+        "previous selection reached a subscription limit"
+      ]
+    },
+    {
+      "el": "earliest observed reset",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-cooldowns",
+      "source": "admin/src/console/panels/models.mjs#modelsCooldowns",
+      "golden": [
+        "panels/models-random-blocked.operator"
+      ],
+      "shows": [
+        "Earliest observed reset",
+        "Reset time unknown."
       ]
     }
   ]

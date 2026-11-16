@@ -1123,7 +1123,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			if (!ready.ok) return { outcome: "policy", reason: "approval-session-unavailable", exitCode: null, turns: null, tokens: null, budgetReserved: false };
 		}
 
-		if (job.fallbackModels !== undefined && !(img.capabilities ?? []).includes(EXIT_AUTH_CAPABILITY)) {
+		if ((job.fallbackModels !== undefined || job.modelSelection !== undefined) && !(img.capabilities ?? []).includes(EXIT_AUTH_CAPABILITY)) {
 			const required = CAPABILITY_GATES.find((row) => row.token === "modelFailover");
 			await comment(job, required.comment(img.image ?? job.image ?? "selected image", "lacks authenticated exit support"));
 			return { outcome: "policy", reason: "job-image-model-failover-unsupported", exitCode: null, turns: null, tokens: null, budgetReserved: false };
@@ -1596,7 +1596,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			// checkpoint, which is still a correct place to continue from.
 			if (typeof salvageCheckpoint === "function") {
 				const salvaged = await Promise.resolve()
-					.then(() => salvageCheckpoint({ runId, pointer, attempt: pointer.attempt }))
+					.then(() => salvageCheckpoint({ runId, pointer, attempt: pointer.attempt, ...(job.modelSelection ? { modelSelection: job.modelSelectionRecovery ?? { invalid: true } } : {}) }))
 					.catch(() => ({ skipped: "error" }));
 				log("recovery_salvage", Number.isSafeInteger(salvaged?.seq) ? { seq: salvaged.seq } : { skipped: typeof salvaged?.skipped === "string" ? salvaged.skipped.slice(0, 40) : "unknown" });
 			}
@@ -1620,6 +1620,12 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 				// `why` is a fixed token, and `invalid`'s detail is the store's own fixed reason (`field:seq`, `transcript-mismatch`).
 				log("refused_recovery_checkpoint_absent", { n, why, ...(why === "invalid" && typeof read?.reason === "string" ? { detail: read.reason.slice(0, 40) } : {}) });
 				return { outcome: "policy", reason: "recovery-checkpoint-absent", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
+			}
+			if (job.modelSelection) {
+				const binding = read.modelSelection;
+				if (binding?.newer) throw new NewerReleaseHold("the checkpoint model binding");
+				if (binding?.unavailable) throw new InfraRetry("the checkpoint model binding could not be read", { reason: "container-never-started", budgetReserved: false });
+				if (!job.modelSelectionRecovery || !binding || binding.invalid || ["ref", "billing", "binding"].some((key) => binding[key] !== job.modelSelectionRecovery[key])) return { outcome: "policy", reason: "model-selection-continuation-unavailable", provider: job.provider, model: job.model, budgetReserved: false };
 			}
 			manifest = m;
 			transcriptPath = read.transcriptPath;
@@ -2094,6 +2100,9 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		if (prepared?.outcome === "policy") {
 			return { ...prepared, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false };
 		}
+		if (job.modelSelectionContinuation && prepared?.session?.modelSelectionBound !== true) {
+			return { outcome: "policy", reason: "model-selection-continuation-unavailable", provider: job.provider, model: job.model, budgetReserved: false };
+		}
 		// Issue #796: the candidate goes under this job's own directory, before any reservation: a version that cannot be installed spends nothing. After the prepare, because that
 		// is what makes the directory, and on a forge job that is after the mint. The `finally` below removes the directory whichever way this goes.
 		if (canaryPlan) {
@@ -2551,7 +2560,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			// container number: unique across retries and recoveries, which a BullMQ attempt count is not. `meta` is what the
 			// manifest records and a recovery judges above: never a string the job chose.
 			const secretValues = [token, ...Object.values(secrets ?? {})].filter((v) => typeof v === "string" && v !== "");
-			checkpointArgs = { runId, attempt: durable.seq, baseSha, branch: null, secretValues, meta: { piVersion, imageDigest: img.imageDigest ?? null, venue: resolveBackendName(job, blessedBackends[0]), provider: job.provider ?? null, model: job.model ?? null } };
+			checkpointArgs = { runId, attempt: durable.seq, baseSha, branch: null, secretValues, meta: { piVersion, imageDigest: img.imageDigest ?? null, venue: resolveBackendName(job, blessedBackends[0]), provider: job.provider ?? null, model: job.model ?? null, ...(job.modelSelection ? { modelSelection: { ref: `${job.provider}/${job.model}`, billing: job.modelSelectionBilling ?? null, binding: job.modelSelectionBinding ?? null } } : {}) } };
 		}
 		if (job.watch?.stage === "decision") await deps.watchRuntime?.started(job);
 		if (subscriptionAuth.length > 0 && !(await validateSubscriptionAuth(subscriptionAuth))) throw new InfraRetry("subscription binding changed before container start", { reason: "container-never-started", budgetReserved: true });
@@ -2843,7 +2852,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 				// job is ignored, since that runner was never offered the tool.
 				const approvalParked = exitReason === "awaiting-approval" && Array.isArray(job.gates) && job.gates.includes(approvalMetadata?.action);
 				const parked = (exitReason === "awaiting-input" || approvalParked) && job.awaitInput === true;
-				const promoted = prepared.session ? promoteSession(prepared.session, { piVersion, context, parked, ...(sourceRunId ? { parkedSource: { runId: sourceRunId } } : {}) }) : null;
+				const promoted = prepared.session ? promoteSession(prepared.session, { piVersion, context, parked, ...(job.modelSelection ? { modelSelectionRef: `${job.provider}/${job.model}`, modelSelectionBilling: job.modelSelectionBilling ?? null, modelSelectionBinding: job.modelSelectionBinding ?? null } : {}), ...(sourceRunId ? { parkedSource: { runId: sourceRunId } } : {}) }) : null;
 				if (parked && !approvalParked && promoted?.promoted === true && deps.questionCaptureEnabled?.() === true && deps.questionGroupStore && sourceRunId) {
 					try {
 						const context = typeof prepared.questionRedact === "function"

@@ -318,12 +318,14 @@ function deploymentCapOf(value) {
 
 function modelRow({ trigger, defaults, modelChoices }) {
   const allowed = defaults?.models;
-  const inUse = unique([trigger.provider, defaults?.provider, ...[...(trigger.models ?? []), ...(trigger.fallbackModels ?? [])].map((ref) => String(ref).split("/")[0])].filter(Boolean));
+  const inUse = unique([trigger.provider, defaults?.provider, ...[...(trigger.models ?? []), ...(trigger.fallbackModels ?? []), ...(trigger.modelSelection?.candidates ?? [])].map((ref) => String(ref).split("/")[0])].filter(Boolean));
   const catalog = (Array.isArray(modelChoices) ? modelChoices : []).filter((ref) => typeof ref === "string" && ref.includes("/"));
   const refs = catalog.filter((ref) => inUse.includes(ref.split("/")[0])).slice(0, MODEL_CHOICES_MAX);
   const cap = trigger.maxCostUsd ?? null;
   const deploymentCap = deploymentCapOf(defaults?.maxCostUsd);
   return {
+    mode: trigger.modelSelection?.strategy === "random" ? "random" : trigger.fallbackModels?.length ? "fallback" : "fixed",
+    candidates: trigger.modelSelection?.candidates ?? [],
     provider: trigger.provider ?? "",
     model: trigger.model ?? "",
     cap: cap ?? "",
@@ -336,7 +338,7 @@ function modelRow({ trigger, defaults, modelChoices }) {
     models: unique(refs.map((ref) => ref.slice(ref.indexOf("/") + 1))),
     refs,
     read: [
-      trigger.model ? `${trigger.provider ? `${trigger.provider} / ` : ""}${trigger.model}` : `the deployment’s model${defaults?.model ? `, ${defaults.provider ? `${defaults.provider} / ` : ""}${defaults.model}` : ""}`,
+      trigger.modelSelection?.strategy === "random" ? `random choice from: ${trigger.modelSelection.candidates.join(", ")}` : trigger.model ? `${trigger.provider ? `${trigger.provider} / ` : ""}${trigger.model}` : `the deployment’s model${defaults?.model ? `, ${defaults.provider ? `${defaults.provider} / ` : ""}${defaults.model}` : ""}`,
       trigger.models ? `allowed: ${trigger.models.join(", ")}` : Array.isArray(allowed) ? "the deployment’s allowed list" : "any model allowed",
       trigger.fallbackModels ? `fallbacks: ${trigger.fallbackModels.join(", ")}` : "no fallback",
       cap !== null ? `$${cap} cap` : deploymentCap !== null ? `the deployment’s $${deploymentCap} cap` : "no cap of its own",

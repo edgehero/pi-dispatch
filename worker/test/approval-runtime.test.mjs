@@ -432,3 +432,13 @@ test("real approval transitions publish nonhuman wait ends, and outbox repair ne
 	}
 	assert.equal((await touches.read()).events.length, modes.length);
 });
+
+test("random approval continuation context binds the originating run and preserves newer-state holds", async () => {
+	const { runtime } = setup();
+	assert.deepEqual(await runtime.modelSelectionContext(job()), { sessionKey: "session-1", sourceRunId: "parked-1", required: true });
+	assert.equal(await runtime.modelSelectionContext(job({ approvalRequestId: undefined })), null);
+	for (const options of [{ pending: null }, { pending: request({ host: "other" }) }, { pending: request({ requestId: "other" }) }]) {
+		assert.deepEqual(await setup(options).runtime.modelSelectionContext(job()), { refused: "model-selection-continuation-unavailable" });
+	}
+	assert.deepEqual(await setup({ methods: { find: async () => ({ newer: true }) } }).runtime.modelSelectionContext(job()), { newer: true });
+});

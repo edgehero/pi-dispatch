@@ -181,7 +181,7 @@ export function filter(eventName, subset, cfg, selfId, deliveryId, closerAuthori
 			...(resolved.provider !== undefined ? { provider: resolved.provider } : {}),
 			...(resolved.model !== undefined ? { model: resolved.model } : {}),
 			...(resolved.maxTurns !== undefined ? { maxTurns: resolved.maxTurns } : {}),
-			...(resolved.models !== undefined ? { models: resolved.models } : {}), ...(resolved.fallbackModels !== undefined ? { fallbackModels: resolved.fallbackModels } : {}),
+			...(resolved.models !== undefined ? { models: resolved.models } : {}), ...(resolved.fallbackModels !== undefined ? { fallbackModels: resolved.fallbackModels } : {}), ...(resolved.modelSelection !== undefined ? { modelSelection: resolved.modelSelection } : {}),
 			// #501. Its own spread, the rule above: a dropped cap runs the job under the deployment's cap, or none,
 			// while the file reads as narrowed.
 			...(resolved.maxCostUsd !== undefined ? { maxCostUsd: resolved.maxCostUsd } : {}),
@@ -265,7 +265,7 @@ function routeIssueLabel(subset, triggers) {
 		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 		packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
 		image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools, excludeExtensions: rule.excludeExtensions, excludeExtensionTools: rule.excludeExtensionTools, mcp: rule.mcp,
-		provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models, fallbackModels: rule.fallbackModels, maxCostUsd: rule.maxCostUsd, idleTimeoutMinutes: rule.idleTimeoutMinutes, stallTimeoutMinutes: rule.stallTimeoutMinutes, maxMinutes: rule.maxMinutes,
+		provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models, fallbackModels: rule.fallbackModels, ...(rule.modelSelection !== undefined ? { modelSelection: rule.modelSelection } : {}), maxCostUsd: rule.maxCostUsd, idleTimeoutMinutes: rule.idleTimeoutMinutes, stallTimeoutMinutes: rule.stallTimeoutMinutes, maxMinutes: rule.maxMinutes,
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,
 		secretsProfile: rule.secretsProfile,
@@ -348,7 +348,7 @@ function routeComment(subset, triggers, knownFlows, assumeParked = false) {
 		// <flow>` override changes WHICH flow runs, never which triggers.json entry authorized it.
 		packages: triggers.comment.packages,
 		image: triggers.comment.image, backend: triggers.comment.backend, excludeTools: triggers.comment.excludeTools, excludeExtensions: triggers.comment.excludeExtensions, excludeExtensionTools: triggers.comment.excludeExtensionTools, mcp: triggers.comment.mcp,
-		provider: triggers.comment.provider, model: triggers.comment.model, maxTurns: triggers.comment.maxTurns, models: triggers.comment.models, fallbackModels: triggers.comment.fallbackModels, maxCostUsd: triggers.comment.maxCostUsd, idleTimeoutMinutes: triggers.comment.idleTimeoutMinutes, stallTimeoutMinutes: triggers.comment.stallTimeoutMinutes, maxMinutes: triggers.comment.maxMinutes,
+		provider: triggers.comment.provider, model: triggers.comment.model, maxTurns: triggers.comment.maxTurns, models: triggers.comment.models, fallbackModels: triggers.comment.fallbackModels, ...(triggers.comment.modelSelection !== undefined ? { modelSelection: triggers.comment.modelSelection } : {}), maxCostUsd: triggers.comment.maxCostUsd, idleTimeoutMinutes: triggers.comment.idleTimeoutMinutes, stallTimeoutMinutes: triggers.comment.stallTimeoutMinutes, maxMinutes: triggers.comment.maxMinutes,
 		skillsDir: triggers.comment.skillsDir,
 		secrets: triggers.comment.secrets,
 		secretsProfile: triggers.comment.secretsProfile,
@@ -461,7 +461,7 @@ function routePullRequest(subset, triggers, action, reviewAuthors) {
 			...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 			packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
 			image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools, excludeExtensions: rule.excludeExtensions, excludeExtensionTools: rule.excludeExtensionTools, mcp: rule.mcp,
-			provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models, fallbackModels: rule.fallbackModels, maxCostUsd: rule.maxCostUsd, idleTimeoutMinutes: rule.idleTimeoutMinutes, stallTimeoutMinutes: rule.stallTimeoutMinutes, maxMinutes: rule.maxMinutes,
+			provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models, fallbackModels: rule.fallbackModels, ...(rule.modelSelection !== undefined ? { modelSelection: rule.modelSelection } : {}), maxCostUsd: rule.maxCostUsd, idleTimeoutMinutes: rule.idleTimeoutMinutes, stallTimeoutMinutes: rule.stallTimeoutMinutes, maxMinutes: rule.maxMinutes,
 			skillsDir: rule.skillsDir,
 			secrets: rule.secrets,
 			secretsProfile: rule.secretsProfile,
@@ -584,7 +584,7 @@ function routeClose(rules, number, closerAuthorized, matchedFor, targetFor) {
 		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 		packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
 		image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools, excludeExtensions: rule.excludeExtensions, excludeExtensionTools: rule.excludeExtensionTools, mcp: rule.mcp,
-		provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models, fallbackModels: rule.fallbackModels, maxCostUsd: rule.maxCostUsd, idleTimeoutMinutes: rule.idleTimeoutMinutes, stallTimeoutMinutes: rule.stallTimeoutMinutes, maxMinutes: rule.maxMinutes,
+		provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models, fallbackModels: rule.fallbackModels, ...(rule.modelSelection !== undefined ? { modelSelection: rule.modelSelection } : {}), maxCostUsd: rule.maxCostUsd, idleTimeoutMinutes: rule.idleTimeoutMinutes, stallTimeoutMinutes: rule.stallTimeoutMinutes, maxMinutes: rule.maxMinutes,
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,
 		secretsProfile: rule.secretsProfile,

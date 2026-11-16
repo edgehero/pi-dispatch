@@ -46,6 +46,7 @@ import { runIdOf } from "@edgehero/pi-dispatch/recovery-queue";
 import * as steerInbox from "@edgehero/pi-dispatch/steer-inbox";
 import { parkedVerdictOf } from "@edgehero/pi-dispatch/chat-mode";
 import { removeQueuedJob } from "@edgehero/pi-dispatch/cancel-state";
+import { identityForModelSelection, keepModelSelection } from "@edgehero/pi-dispatch/model-selection-state";
 import { keepModelAttempt, modelAttemptIdOf } from "@edgehero/pi-dispatch/model-attempts";
 import { jobKey } from "@edgehero/pi-dispatch/wait-state";
 import { QUEUE_KEY, SCHEDULER_ID_RE, cronRunOf, isSchedulerNext, queueKeyOf } from "@edgehero/pi-dispatch/bullmq-internals";
@@ -230,6 +231,12 @@ async function retryKeepingAttempt(job, redis, timeoutMs) {
   await job.retry("failed");
   if (typeof job?.queueName !== "string" || job.queueName === "") return;
   await keepModelAttempt(redis, modelAttemptIdOf(job.queueName, job.id), timeoutMs);
+  const selectionId = identityForModelSelection(job, { queueName: job.queueName });
+  if (selectionId !== null) {
+    // The retry is already queued. Keeping evidence is best effort as for the legacy attempt key;
+    // missing evidence still refuses at pickup, it never authorizes another draw.
+    await within(keepModelSelection(redis, selectionId).catch(() => false), timeoutMs, () => false);
+  }
 }
 
 /**
@@ -494,6 +501,7 @@ function runFieldsOf(entry, flow) {
     ...(run.maxTurns !== undefined ? { maxTurns: run.maxTurns } : {}),
     ...(run.models !== undefined ? { models: run.models } : {}),
     ...(run.fallbackModels !== undefined ? { fallbackModels: run.fallbackModels } : {}),
+    ...(run.modelSelection !== undefined ? { modelSelection: run.modelSelection } : {}),
     ...(run.maxCostUsd !== undefined ? { maxCostUsd: run.maxCostUsd } : {}),
     // Issue #888: the trigger's limits, by the cap's rule.
     ...(run.idleTimeoutMinutes !== undefined ? { idleTimeoutMinutes: run.idleTimeoutMinutes } : {}),
@@ -524,12 +532,20 @@ function runFieldsOf(entry, flow) {
  * default. NAMES ONLY: the secret profile's name, never a secret, and not even the `secrets` reference map (a
  * reference is a path into a vault, which an operator reading a preview does not need and a screenshot should not carry).
  */
+// An ad-hoc re-run normally uses deployment defaults. A reviewed random pool and its ceiling must
+// survive a fresh child re-run, while its old generation and physical selection cannot follow it.
+function randomRerunFields(data) {
+  if (data.modelSelection === undefined) return {};
+  return { modelSelection: data.modelSelection, ...(data.models !== undefined ? { models: data.models } : {}), ...(data.maxCostUsd !== undefined ? { maxCostUsd: data.maxCostUsd } : {}) };
+}
+
 function runFieldsSummary(job) {
   return {
     flow: job.flow ?? null,
     model: job.model === undefined ? null : job.provider !== undefined ? `${job.provider}/${job.model}` : job.model,
     models: job.models ?? null,
     ...(job.fallbackModels !== undefined ? { fallbackModels: job.fallbackModels } : {}),
+    ...(job.modelSelection !== undefined ? { modelSelection: job.modelSelection } : {}),
     maxCostUsd: job.maxCostUsd ?? null,
     secretsProfile: job.secretsProfile ?? null,
     image: job.image ?? null,
@@ -1203,7 +1219,7 @@ export async function planRerun({
       if (typeof data.folder !== "string" || data.folder === "") return { refusal: `${jobId}'s data names no folder` };
       const folder = folderRefusal(data.folder, { localRepoProblemFn, gitDirtyFn });
       if (folder) return { refusal: folder };
-      const job = { folder: data.folder, flow: data.flow, task: data.task };
+      const job = { folder: data.folder, flow: data.flow, task: data.task, ...randomRerunFields(data) };
       return { plan: { kind: "local", jobId, ...(touchSource ? { touchSource } : {}), queue: localQueueName(env), job, reserve: reserveOf(job) } };
     }
 
@@ -1282,7 +1298,7 @@ export async function enqueueRerun(plan, { url, queueFn = makeQueue, parseConnec
       intent = await tracker.begin({ ...plan.touchSource, at: now(), nonce: `rerun:${plan.jobId}:${plan.deliveryId ?? now()}` });
     }
     if (kind === "local") {
-      const { id, existing } = await enqueueLocalJobReporting(queue, { folder: plan.job.folder, flow: plan.job.flow, task: plan.job.task, now: new Date(now()) });
+      const { id, existing } = await enqueueLocalJobReporting(queue, { folder: plan.job.folder, flow: plan.job.flow, task: plan.job.task, ...randomRerunFields(plan.job), now: new Date(now()) });
       if (existing) return { refusal: swallowedRunSentence(id, existing), deduplicated: true, jobId: id };
       return await done({ ok: true, jobId: id, queue: plan.queue });
     }
@@ -1482,6 +1498,7 @@ export async function planParkedAnswer({
       target: approval ? { ...data.target } : { type: "issue", number: data.target.number, title: data.target.title, body: data.target.body },
       ...runFieldsOf(rule.entry, rule.run.flow),
       parkedReply: !(approval && data.target.type !== "issue"),
+      ...(rule.run.modelSelection !== undefined ? { replyReceivedAt: now() } : {}),
       ...(approval ? { approvalRequestId: record.approval.requestId } : {}),
       console: { by: who, ...(draftBinding ?? {}) },
       trigger: {

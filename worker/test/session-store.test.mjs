@@ -2995,3 +2995,93 @@ test("staged answer lineage follows the canonical transcript replaced after an e
 	assert.equal(legacy.resume, true);
 	assert.equal(legacy.parkedSource, undefined, "v1 marks lack the transcript identity required to prove a parent");
 });
+
+test("random parked continuations carry the exact physical model and the promoted source identity", () => {
+	const { store, jobDir } = fixture();
+	const first = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	writeFileSync(join(first.hostDir, SESSION_FILE_NAME), `${HEADER}{"question":"first"}\n`);
+	assert.equal(store.promoteSession(first, { piVersion: PI, parked: true, parkedSource: { runId: "parked-1" }, modelSelectionRef: "openrouter/Anthropic/Claude-Sonnet-4" }).promoted, true);
+	const reply = { ...ghIssue, resume: true, parkedReply: true, replyReceivedAt: NOW };
+	const binding = store.readModelSelectionBinding(reply);
+	assert.equal(binding.ref, "openrouter/Anthropic/Claude-Sonnet-4");
+	assert.deepEqual(binding.parkedSource, { runId: "parked-1", at: NOW });
+	assert.equal(binding.key, sessionKeyFor(reply));
+	assert.equal(typeof binding.transcriptIdentity, "string");
+	assert.deepEqual(store.readModelSelectionBinding(reply, { sourceRunId: "other-park" }), { refused: "model-selection-continuation-unavailable" });
+	assert.equal(store.readModelSelectionBinding(reply, { sourceRunId: "parked-1" }).ref, binding.ref);
+});
+
+test("random human replies require a binding even when a preceding answer already removed the park", () => {
+	const { root, store, jobDir } = fixture();
+	const reply = { ...ghIssue, resume: true, parkedReply: true, replyReceivedAt: NOW + 10 };
+	assert.deepEqual(store.readModelSelectionBinding(reply), { refused: "model-selection-continuation-unavailable" });
+	const first = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	writeFileSync(join(first.hostDir, SESSION_FILE_NAME), `${HEADER}{"question":"first"}\n`);
+	store.promoteSession(first, { piVersion: PI, parked: true, parkedSource: { runId: "parked-1" }, modelSelectionRef: "openai/gpt-5.4" });
+	const binding1 = store.readModelSelectionBinding(reply);
+	const binding2 = store.readModelSelectionBinding(reply);
+	assert.equal(binding1.ref, binding2.ref, "simultaneous replies both use the originating choice");
+	const answering = store.resolveSession({ ...reply, modelSelectionContinuation: binding1 }, { jobDir: mkdtempSync(join(root, "answering-")), piVersion: PI });
+	assert.equal(answering.modelSelectionBound, true);
+	writeFileSync(join(answering.hostDir, SESSION_FILE_NAME), `${HEADER}{"answer":"done"}\n`);
+	assert.equal(store.promoteSession(answering, { piVersion: PI }).promoted, true);
+	assert.deepEqual(store.readModelSelectionBinding(reply), { refused: "model-selection-continuation-unavailable" }, "the later reply cannot draw a new model");
+	const stale = store.resolveSession({ ...reply, modelSelectionContinuation: binding2 }, { jobDir: mkdtempSync(join(root, "late-answer-")), piVersion: PI });
+	assert.equal(stale.modelSelectionBound, false, "a binding read before another reply finished is invalid at prepare");
+	assert.equal(store.readModelSelectionBinding({ ...ghIssue, resume: true }), null, "an independent delivery may reuse an ordinary transcript without a locked model");
+});
+
+test("a replacement park invalidates an earlier random continuation and rejects a reply received before it", () => {
+	let at = NOW;
+	const { root, store, jobDir } = fixture({ now: () => at });
+	const first = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	writeFileSync(join(first.hostDir, SESSION_FILE_NAME), `${HEADER}{"question":"first"}\n`);
+	store.promoteSession(first, { piVersion: PI, parked: true, parkedSource: { runId: "parked-1" }, modelSelectionRef: "openai/gpt-5.4" });
+	const reply = { ...ghIssue, resume: true, parkedReply: true, replyReceivedAt: NOW + 10 };
+	const before = store.readModelSelectionBinding(reply);
+	at += 100;
+	const replacement = store.resolveSession(ghIssue, { jobDir: mkdtempSync(join(root, "new-question-")), piVersion: PI });
+	writeFileSync(join(replacement.hostDir, SESSION_FILE_NAME), `${HEADER}{"question":"second"}\n`);
+	store.promoteSession(replacement, { piVersion: PI, parked: true, parkedSource: { runId: "parked-2" }, modelSelectionRef: "anthropic/claude-haiku-4-5" });
+	assert.deepEqual(store.readModelSelectionBinding(reply), { refused: "model-selection-continuation-unavailable" });
+	const stale = store.resolveSession({ ...reply, modelSelectionContinuation: before }, { jobDir: mkdtempSync(join(root, "old-answer-")), piVersion: PI });
+	assert.equal(stale.modelSelectionBound, false);
+	const current = store.readModelSelectionBinding({ ...reply, replyReceivedAt: at });
+	assert.equal(current.ref, "anthropic/claude-haiku-4-5");
+	assert.deepEqual(current.parkedSource, { runId: "parked-2", at });
+});
+
+test("random continuation binding is unavailable for missing/corrupt metadata and newer metadata requests a hold", () => {
+	const { store, jobDir, sessionsDir } = fixture();
+	const first = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	writeFileSync(join(first.hostDir, SESSION_FILE_NAME), `${HEADER}{"question":"first"}\n`);
+	store.promoteSession(first, { piVersion: PI, parked: true, parkedSource: { runId: "parked-1" } });
+	const reply = { ...ghIssue, resume: true, parkedReply: true, replyReceivedAt: NOW };
+	assert.deepEqual(store.readModelSelectionBinding(reply), { refused: "model-selection-continuation-unavailable" });
+	const file = join(sessionsDir, sessionKeyFor(reply), "model-selection");
+	writeFileSync(file, "not json");
+	assert.deepEqual(store.readModelSelectionBinding(reply), { refused: "model-selection-continuation-unavailable" });
+	writeFileSync(file, JSON.stringify({ version: 2 }));
+	assert.deepEqual(store.readModelSelectionBinding(reply), { newer: true });
+});
+
+test("a parked random continuation retains its billing route and exact opaque account binding", () => {
+	const { root, store, jobDir, sessionsDir } = fixture();
+	const first = store.resolveSession(ghIssue, { jobDir, piVersion: PI });
+	writeFileSync(join(first.hostDir, SESSION_FILE_NAME), `${HEADER}{"question":"first"}\n`);
+	const account = "a".repeat(64);
+	store.promoteSession(first, { piVersion: PI, parked: true, parkedSource: { runId: "parked-1" }, modelSelectionRef: "anthropic/claude-haiku-4-5", modelSelectionBilling: "subscription", modelSelectionBinding: account });
+	const reply = { ...ghIssue, resume: true, parkedReply: true, replyReceivedAt: NOW };
+	const binding = store.readModelSelectionBinding(reply);
+	assert.equal(binding.billing, "subscription");
+	assert.equal(binding.binding, account);
+	const file = join(sessionsDir, sessionKeyFor(reply), "model-selection");
+	const row = JSON.parse(readFileSync(file, "utf8"));
+	writeFileSync(file, JSON.stringify({ ...row, binding: "b".repeat(64) }));
+	const stale = store.resolveSession({ ...reply, modelSelectionContinuation: binding }, { jobDir: mkdtempSync(join(root, "old-account-")), piVersion: PI });
+	assert.equal(stale.modelSelectionBound, false, "a swapped account cannot preserve an earlier prepared binding");
+	for (const metadata of [{ billing: "api", binding: account }, { billing: "subscription", binding: null }, { billing: "paid", binding: null }, { billing: "subscription", binding: "credential contents" }]) {
+		writeFileSync(file, JSON.stringify({ ...row, ...metadata }));
+		assert.deepEqual(store.readModelSelectionBinding(reply), { refused: "model-selection-continuation-unavailable" });
+	}
+});

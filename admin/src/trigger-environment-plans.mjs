@@ -66,7 +66,7 @@ const sha = (text) => createHash("sha256").update(text).digest("hex");
 const STRING_FIELDS = Object.freeze(["provider", "model"]);
 const LIST_FIELDS = Object.freeze(["models", "fallbackModels", "mcp", "excludeTools", "excludeExtensions", "excludeExtensionTools"]);
 /** The fields whose change is judged against what a job may call and spend (`judgeModels`), and only then. */
-const MODEL_OR_CAP = Object.freeze(["provider", "model", "models", "fallbackModels", "maxCostUsd"]);
+const MODEL_OR_CAP = Object.freeze(["provider", "model", "models", "fallbackModels", "modelSelection", "maxCostUsd"]);
 /** The fields whose change the pickup's MCP check speaks of. A model edit reaches the same check and is not asked: it would speak of a server nobody touched. */
 const MCP_CHECK_FIELDS = Object.freeze(["mcp", "excludeTools"]);
 /** A server as the most generous host could route it, so what still cuts it off is the file's doing on every host. */
@@ -80,7 +80,7 @@ const JOBS_READ_MS = 10_000;
 /** What `failoverOrder` answers the worker's loop with for a model it has nothing against, so the loop goes on to the next. */
 const NOTHING_AGAINST = "nothing-against";
 /** The fields that decide which models a job has. An edit of any of them changes what the others mean to a job. */
-const MODEL_FIELDS = Object.freeze(["provider", "model", "models", "fallbackModels"]);
+const MODEL_FIELDS = Object.freeze(["provider", "model", "models", "fallbackModels", "modelSelection"]);
 
 /** A built-in tool no job has unless an extension turns it on: `DEFAULT_ON_TOOL_NAMES`' other half. */
 const offByDefault = (name) => EXCLUDABLE_TOOL_NAMES.has(name) && !DEFAULT_ON_TOOL_NAMES.has(name);
@@ -98,6 +98,7 @@ function shapeProblem(body) {
   // that silently is not one, so removing a key says so with null.
   for (const key of STRING_FIELDS) if (body[key] !== undefined && body[key] !== null && (typeof body[key] !== "string" || body[key].trim() === "")) return `${key} must be a non-empty string, or null to remove it.`;
   for (const key of LIST_FIELDS) if (body[key] !== undefined && body[key] !== null && (!Array.isArray(body[key]) || body[key].some((entry) => typeof entry !== "string"))) return `${key} must be a list of names, or null to remove it.`;
+  if (body.modelSelection !== undefined && body.modelSelection !== null && !plain(body.modelSelection)) return "modelSelection must be a random candidate pool, or null to remove it.";
   if (body.keyOrder !== undefined && (!Array.isArray(body.keyOrder) || body.keyOrder.some((key) => typeof key !== "string"))) return "keyOrder must be a list of the entry's run keys.";
   return null;
 }
@@ -166,7 +167,7 @@ function changeWords(key, before, after, facts, effective = null) {
     case "provider":
     case "model": {
       const word = key === "provider" ? "Provider" : "Model";
-      if (removedKey) return { line: `${word}: ${before} removed, so its jobs use the deployment's.` };
+      if (removedKey) return { line: `${word}: ${before} removed${effective?.modelSelection ? ", so its jobs use the random pool" : ", so its jobs use the deployment's"}.` };
       return { line: `${word}: ${before ?? "the deployment's"} to ${after}.` };
     }
     case "maxCostUsd": {
@@ -181,6 +182,8 @@ function changeWords(key, before, after, facts, effective = null) {
     }
     case "models":
       return { line: listChange("Allowed models", before, after) };
+    case "modelSelection":
+      return { line: after === undefined ? "Random selection: removed; fixed or ordered fallback mode applies." : `Random selection: one eligible model from ${after.candidates.join(", ")}, chosen once per new run. No primary or fallback order applies.` };
     case "fallbackModels":
       return { line: listChange("Fallback models", before, after) };
     case "mcp": {
@@ -696,14 +699,17 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
       return known?.unknown !== undefined;
     };
     for (const job of resolved.runs) {
+      const random = job.modelSelection?.strategy === "random";
+      const candidates = refsOf(job.modelSelection?.candidates);
       const main = { provider: job.provider, id: job.model };
       const mainName = `${main.provider}/${main.id}`;
       const list = job.models ?? facts.envList ?? null;
+      if (random && list === null) return refuse("A random pool needs an explicit allowed-model list. Set run.models on this trigger, or PI_ALLOWED_MODELS on the worker; the pool does not grant authority by itself.");
       const fallbacks = refsOf(job.fallbackModels);
       const failover = fallbacks.length > 0;
       const unusable = new Set();
       // The model a job starts on: its main one, or on a job with fallbacks the first the file and this host's settings hold nothing against.
-      let startName = mainName;
+      let startName = random ? null : mainName;
       let selected = false;
       if (failover) {
         const offList = fallbacks.find((ref) => !failoverListUsable({ models: list, fallbackModels: [`${ref.provider}/${ref.id}`] }));
@@ -732,12 +738,15 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
       // A job with fallbacks reaches none of these as itself, since selection answers for each of its models. One whose overlay could
       // not be read is asked what can be said without it, and that names the file and claims nothing of a model.
       if (modelsTouched && !selected) {
-        for (const ref of [{ ...main, main: true }, ...refsOf(run.models), ...fallbacks]) {
+        for (const ref of [...(random ? candidates : [{ ...main, main: true }]), ...refsOf(run.models), ...fallbacks]) {
           if (sayCatalog(ref)) unusable.add(`${ref.provider}/${ref.id}`);
         }
       }
       // Pickup's order, and its one answer: unknown, then a main off the list, then a listed model's own fallbacks. Each says only the first.
-      if (modelsTouched && !failover && Array.isArray(list) && unusable.size === 0) {
+      if (modelsTouched && random && Array.isArray(list)) for (const ref of candidates) {
+        if (!modelOnList(list, ref.provider, ref.id)) warnings.add(onHost("model-not-allowed", `${ref.provider}/${ref.id} is outside this host's allowed models; the worker cannot select it. Choose an allowed candidate, or review PI_ALLOWED_MODELS on the worker.`));
+      }
+      if (modelsTouched && !random && !failover && Array.isArray(list) && unusable.size === 0) {
         // A main model and a list both written in this entry that disagree never get here: the loader refuses them, in the funnel.
         if (!modelOnList(list, main.provider, main.id)) {
           unusable.add(mainName);
@@ -754,13 +763,13 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
       if (cap === null) continue;
       // The main model and what the trigger itself names. Not the deployment's list or a role map's every model: a job under a
       // cap simply cannot call one it does not fit, and lowering this trigger's cap is no fault of a model it never asked for.
-      for (const ref of new Map([main, ...refsOf(run.models), ...fallbacks].map((one) => [`${one.provider}/${one.id}`, one])).values()) {
+      for (const ref of new Map([...(random ? candidates : [main]), ...refsOf(run.models), ...fallbacks].map((one) => [`${one.provider}/${one.id}`, one])).values()) {
         const name = `${ref.provider}/${ref.id}`;
         const said = unusable.has(name);
-        const amountRefuses = name === mainName || name === startName;
+        const amountRefuses = random || name === mainName || name === startName;
         if (said && !amountRefuses) continue;
         // The model a job starts on cannot make a call, inside a container it paid for. Any other is one a job cannot use.
-        const stopped = (refusal, warning, refuses = name === startName) => {
+        const stopped = (refusal, warning, refuses = random || name === startName) => {
           if (refuses) return refuse(refusal);
           if (!said) warnings.add(warning);
           return null;
@@ -815,7 +824,7 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
    * apply runs it again because a deployment's cap can move between the two, and `expect` covers only the triggers file.
    */
   async function judge(rawBody) {
-    const body = plain(rawBody) && typeof rawBody.index === "string" && /^\d{1,6}$/.test(rawBody.index) ? { ...rawBody, index: Number(rawBody.index) } : rawBody;
+    const body = plain(rawBody) ? { ...rawBody, ...(typeof rawBody.index === "string" && /^\d{1,6}$/.test(rawBody.index) ? { index: Number(rawBody.index) } : {}) } : rawBody;
     const problem = shapeProblem(body);
     if (problem) return refuse(problem);
     if (!paths?.triggersPath) return refuse("This console does not name its triggers file.", 409);
@@ -840,6 +849,10 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
     // What the trigger edit's own body judges: a value, by the loader's words. The rest, and a null, this planner applies. A form
     // that had nothing to send and one that sent what the file holds are one answer: a model typed that is already on the list
     // sends nothing, and that is no error, only no change.
+    // The preview owns this transition too: removing the old primary and order must appear in its diff and Undo.
+    if (body.modelSelection !== undefined && body.modelSelection !== null) {
+      for (const key of ["provider", "model", "fallbackModels"]) if (body[key] === undefined) body[key] = null;
+    }
     const sent = CARD_FIELDS.filter((key) => body[key] !== undefined && !sameToAJob(key, entry.run[key], body[key]));
     if (sent.length === 0) return { unchanged: `${row} already says this.` };
     const coreKeys = ["flow", "provider", "model"].filter((key) => typeof body[key] === "string");
@@ -954,12 +967,12 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
     const undo = !beforeLoads ? `Edit ${row} back by hand: the file did not load as it was, and this page will not write that back` : inverse !== null ? (comesBack ? `Put ${row} back as it was` : `Put ${row}'s values back; the file stays in the form the writer gives it`) : heldNull !== undefined ? `Edit ${row} back by hand: the file held run.${heldNull} as null, which this page cannot write` : `Edit ${row} back by hand: this page would refuse what it said before. ${backRefused}`;
 
     const effectiveTools = wasLoaded ? { before: wasRun.excludeTools ?? [], after: nowRun.excludeTools ?? [] } : null;
-    const changes = touched.map((key) => ({ key, ...changeWords(key, entry.run[key] ?? undefined, nextEntry.run[key] ?? undefined, facts, key === "excludeTools" ? effectiveTools : ["packages", "excludeExtensions"].includes(key) ? nowRun : null) }));
+    const changes = touched.map((key) => ({ key, ...changeWords(key, entry.run[key] ?? undefined, nextEntry.run[key] ?? undefined, facts, key === "excludeTools" ? effectiveTools : ["packages", "excludeExtensions", "provider", "model"].includes(key) ? nowRun : null) }));
     if (sent.some((key) => MODEL_OR_CAP.includes(key))) {
       const before = policyOf({ entry, text: afterText, facts });
       const after = policyOf({ entry: nextEntry, text: afterText, facts });
       const callable = before.refusal || after.refusal ? null : callableWidening(before.resolved, after.resolved, facts.envList);
-      const named = changes.filter((change) => ["provider", "model", "models", "fallbackModels"].includes(change.key)).at(-1);
+      const named = changes.filter((change) => ["provider", "model", "models", "fallbackModels", "modelSelection"].includes(change.key)).at(-1);
       if (callable !== null && named) named.widening = `This widens which models its jobs may call: ${callable}.`;
     }
     const need = {
@@ -1125,6 +1138,7 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
       // all this page writes, and a receiver in compose's single-file mount reads it only at its restart.
       "The services reading this file use it from their next reload, for the jobs they queue after that.",
       noSkew ? "A job already in line keeps what it was queued with and runs without this change. A running job is not touched." : "A job already in line keeps what it was queued with and runs without this change, unless it is named below as refused. A running job is not touched.",
+      ...(judged.wasRun?.modelSelection || judged.nextRun?.modelSelection ? ["Random jobs recheck this trigger's current pool and allowed-model list before starting. A changed pool or a candidate no longer allowed refuses the old queued policy."] : []),
       "A host with its own copy of this file keeps what it has until that copy changes.",
       ...(judged.type === "cron" ? ["While hosts' copies differ on a schedule, no host installs a change to one, so this one moves when they agree."] : []),
       ...skewLines(skew),

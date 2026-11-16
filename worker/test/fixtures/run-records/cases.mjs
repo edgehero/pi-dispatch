@@ -178,6 +178,7 @@ export function caseInput(name) {
 					model: "claude-sonnet-4-5",
 					modelRole: "fast",
 					modelWhy: "fallback-cooldown",
+					modelSelectionInfo: { strategy: "random", candidates: ["openai/gpt-5.5", "anthropic/claude-haiku-4-5"], previous: "anthropic/claude-haiku-4-5" },
 					providerFailure: { kind: "rate-limited", resetAt: ms("2026-09-14T14:30:00.000Z") },
 					modelRoles: { refusals: [{ agentHash: hex(64, "d"), reason: "unknown-role" }] },
 					budgetReserved: true,

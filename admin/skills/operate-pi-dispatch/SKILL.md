@@ -124,7 +124,7 @@ not read by the committed repository opt-in. Every worker start still passes its
 ## Person-only fields and operations
 
 Never set, clear or bypass these through a model tool, including alternate spellings:
-`run.models`, `run.fallbackModels`, `run.maxCostUsd`, `run.mcp`, `run.secretBundle`, `modelRoles`,
+`run.models`, `run.fallbackModels`, `run.modelSelection`, `run.maxCostUsd`, `run.mcp`, `run.secretBundle`, `modelRoles`,
 `run.command`, `run.instructions`, `run.skillsDir`, `run.awaitInput`, `run.image`, `run.resume`, `run.packages`,
 `run.excludeTools`, `run.excludeExtensions`, `run.excludeExtensionTools`, `run.secrets`, `run.secretsProfile`, `run.replicas`, `run.portfolio`, `run.waitFor`,
 `on.disarmed`, `answerRules`, `standingAnswers`, `secretBundles`, `secretProfiles`.

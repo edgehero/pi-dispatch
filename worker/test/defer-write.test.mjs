@@ -337,6 +337,10 @@ test("BY SHAPE: every reason in the table is written by a site, and every site w
 	assert.equal(modelWhys.length, 3, "cooldown, model window and endpoint checks assign a wait");
 	assert.match(index, /selectionWait = selection\.wait \? selection : null/);
 	for (const why of modelWhys) literal.add(why);
+	const random = strip(readFileSync(join(SRC, "model-selection.mjs"), "utf8"));
+	const randomWhys = [...random.matchAll(/wait: "([^"]+)"/g)].map((m) => m[1]);
+	assert.ok(randomWhys.includes("model-selection"), "CAS contention has a bounded free wait");
+	for (const why of randomWhys) literal.add(why);
 	const subscription = strip(readFileSync(join(SRC, "subscription-runtime.mjs"), "utf8"));
 	const subscriptionWhys = [...subscription.matchAll(/wait: "([^"]+)"/g)].map((m) => m[1]);
 	assert.equal(subscriptionWhys.length, 2, "subscription owner and quota are the only subscription waits");

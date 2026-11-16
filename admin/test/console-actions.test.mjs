@@ -383,7 +383,7 @@ test("every action has frozen fields, a danger flag never beside paid, and its u
   const FIELDS = {
     "run-enqueue": ["folder", "flow", "task"], "standing-answer-add": ["title", "text", "projects", "repo", "runId"], "answer-draft-drop": ["runId", "draftRunId", "digest"],
     "model-role-edit": [...MODEL_ROLE_EDIT_FIELDS],
-    "trigger-environment-edit": ["index", "pageDigest", "flow", "provider", "model", "maxCostUsd", "models", "fallbackModels", "mcp", "packages", "excludeTools", "excludeExtensions", "excludeExtensionTools", "keyOrder"],
+    "trigger-environment-edit": ["index", "pageDigest", "flow", "provider", "model", "maxCostUsd", "models", "fallbackModels", "modelSelection", "mcp", "packages", "excludeTools", "excludeExtensions", "excludeExtensionTools", "keyOrder"],
     "sandbox-prepare": ["repo", "index", "ref", "host", "pin"], "sandbox-pin": ["host", "id"], "sandbox-end": ["host", "id", "nonce", "containerId"], "device-remove": ["id"], "sessions-end-all": [], "sandbox-host-set": ["host", "target", "deployment", "nodePath", "cliPath", "shell"],
     "cancel-active": ["jobId"], "cancel-held": ["jobId"], "cancel-all-held": [], "cancel-queued": ["jobId", "queue"],
     "retry-failed": ["jobId", "queue"], "remove-failed": ["jobId", "queue"], "retry-all-failed": ["queue", "repo"], "remove-all-failed": ["queue", "repo"],
@@ -1791,7 +1791,7 @@ test("a waiting job's line is the worker's own sentence filled from its row: tim
     const [text, bar] = said({ ...full, why, bucket });
     assert.ok(!/[{}]/.test(text) && !/[{}]/.test(bar), `${why}: ${text}`);
     assert.notEqual(text, DEFER_BUCKET_WORDS[bucket].title, `${why}: its own sentence`);
-    assert.equal(text.split(/build3|gh-parent|local-gpu|2026-10-15 12:12 UTC|\b[23]\b/).join("{}"), sentence.replace(/\{[a-z]+\}/g, "{}"), `${why}: the worker's words`);
+    assert.equal(text.split(/build3|gh-parent|local-gpu|2026-10-15 12:12 UTC|\b[23]\b/).join("{}"), sentence.replace(/\{[a-z]+\}/g, "{}") + (why === "subscription-quota" ? ". Reset time unknown." : ""), `${why}: the worker's words plus the explicitly separate reset evidence`);
   }
 });
 

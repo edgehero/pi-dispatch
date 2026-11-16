@@ -245,6 +245,7 @@ const REFUSALS = Object.freeze({
   "trigger row": () => plannerWorld().preview({ provider: "No Spaces Allowed" }),
   "rejected:": () => plannerWorld().preview({ models: ["nope"] }),
   "A trigger's job cap can only lower the deployment's": () => plannerWorld({ settings: JSON.stringify({ maxCostUsd: "5" }) }).preview({ maxCostUsd: "7" }),
+  "A random pool needs an explicit allowed-model list": () => plannerWorld({ deps: { readHosts: async () => ({ hosts: [] }) } }).preview({ modelSelection: { strategy: "random", candidates: [HAIKU] } }),
   "needs at least": () => plannerWorld({ run: MODEL_RUN, settings: JSON.stringify({ maxCostUsd: "5" }) }).preview({ model: "claude-opus-5-5", maxCostUsd: "2" }),
   "could not be resolved": () => plannerWorld({ doc: { modelRoles: { default: { cheap: HAIKU } }, triggers: [CRON, { on: COMMENT_ON, run: { kind: "github", flow: "fix", model: "role:cheap" } }] } }).preview({ model: "role:nobody" }),
   "has no verified local cost bound": () => plannerWorld({ settings: JSON.stringify({ maxCostUsd: "5" }) }).preview({ provider: "radius", model: "balanced" }),
@@ -272,6 +273,7 @@ const WARNINGS = Object.freeze({
   "could not be read or used for": () => plannerWorld({ run: MODEL_RUN, overlay: LOCAL_MODEL, failing: "models.json", failingCode: "EACCES" }).preview({ model: "claude-sonnet-5-5" }),
   "declares fallback models the allowed list does not name": () => plannerWorld({ run: { provider: "anthropic", model: "claude-fable-5" } }).preview({ models: ["anthropic/claude-fable-5"] }),
   "is not on the models they may call here": () => plannerWorld({ run: { provider: "anthropic", model: "claude-sonnet-5-5" }, env: { PI_ALLOWED_MODELS: SONNET } }).preview({ model: "claude-haiku-4-5" }),
+  "is outside this host's allowed models": () => plannerWorld({ env: { PI_ALLOWED_MODELS: HAIKU }, deps: { readHosts: async () => ({ hosts: [] }) } }).preview({ modelSelection: { strategy: "random", candidates: [HAIKU, SONNET] } }),
   "every fallback must be on the allowed list": () => plannerWorld({ run: MODEL_RUN }).preview({ fallbackModels: [SONNET] }),
   "On this host a job cannot use": () => plannerWorld({ run: { provider: "anthropic", model: "claude-opus-5-5" }, env: { PI_ALLOWED_MODELS: `${HAIKU},${SONNET}` } }).preview({ fallbackModels: [SONNET], model: "claude-typo" }),
   "and has no model left": () => plannerWorld({ run: { provider: "anthropic", model: "claude-haiku-4-5" }, env: { PI_ALLOWED_MODELS: "anthropic/claude-typo,anthropic/claude-nope" } }).preview({ model: "claude-typo", fallbackModels: ["anthropic/claude-nope"] }),
@@ -351,6 +353,7 @@ const REFUSAL_TODO = Object.freeze({
   "A trigger's flow cannot be removed": { says: /Choose another flow/i, shared: true },
   "trigger row": { says: /Correct the value it names, or look again and retry/ },
   "A trigger's job cap can only lower the deployment's": { says: /or less[^|]*remove this trigger's cap[^|]*belongs to its settings/, shared: true },
+  "A random pool needs an explicit allowed-model list": { says: /Set `?run.models`? on this trigger, or `?PI_ALLOWED_MODELS`? on the worker/, shared: true },
   "needs at least": { says: /Choose another model/, shared: true },
   "could not be resolved": { says: /Correct its model or its role/, shared: true },
   "has no verified local cost bound": { says: /Choose another model/ },
@@ -363,6 +366,7 @@ const WARNING_TODO = Object.freeze({
   "is a model this deployment does not know": { says: /Choose one from the catalog, or declare it in the overlay's `?models\.json`?/, shared: true },
   "could not be read or used for": { says: /Fix that file/, shared: true },
   "declares fallback models the allowed list does not name": { says: /Add (?:it|them) to the list/, shared: true },
+  "is outside this host's allowed models": { says: /Choose an allowed candidate, or review `?PI_ALLOWED_MODELS`? on the worker/, shared: true },
   "every fallback must be on the allowed list": { says: /`?run\.models`?[^|]*`?PI_ALLOWED_MODELS`? when the trigger has (?:no list|none)/, shared: true },
   "On this host a job cannot use": { says: /Correct the model it names/ },
   "this trigger's model could not be resolved": { says: /Correct its model or its role/, shared: true },
@@ -679,7 +683,7 @@ test("docs/console.md's table of the card's rows: its rows are the page's, in or
   const titleOf = (section) => /class="te-sec__k">[\s\S]*?<span>([^<]+)<small>/.exec(section)[1].replaceAll("’", "'");
   assert.deepEqual(rows.map(([row]) => row), sections.map(titleOf));
   for (const section of sections) {
-    const drawn = new Set([...section.matchAll(/\bname="([A-Za-z]+)"|data-gets-(?:list|add|flag)="([A-Za-z]+)"/g)].map((m) => m[1] ?? m[2]));
+    const drawn = new Set([...section.matchAll(/\bname="([A-Za-z]+)"|data-gets-(?:list|add|flag)="([A-Za-z]+)"/g)].map((m) => (m[1] ?? m[2]) === "randomCandidates" ? "modelSelection" : m[1] ?? m[2]));
     const row = rows.find(([label]) => label === titleOf(section));
     assert.deepEqual(spans(row[1]).sort(), [...drawn].sort(), row[0]);
   }
@@ -713,7 +717,7 @@ test("docs/console.md's actions table has the card's action, by the button a per
   const row = rows.find(([where]) => where === "A trigger's page");
   assert.ok(row, "the row");
   assert.equal(row[1], "Preview the change");
-  const plain = { flow: "its flow", provider: "its provider", model: "and model", maxCostUsd: "its job cap", models: "its allowed models", fallbackModels: "and fallbacks", mcp: "its servers", packages: "the staged packages", excludeTools: "its tools", excludeExtensions: "each extension it leaves out", excludeExtensionTools: "each extension's tool it removes" };
+  const plain = { flow: "its flow", provider: "its provider", model: "and model", maxCostUsd: "its job cap", models: "its allowed models", fallbackModels: "and fallbacks", modelSelection: "its random pool", mcp: "its servers", packages: "the staged packages", excludeTools: "its tools", excludeExtensions: "each extension it leaves out", excludeExtensionTools: "each extension's tool it removes" };
   assert.deepEqual(Object.keys(plain), [...CARD_FIELDS], "one plain name per field");
   for (const [field, name] of Object.entries(plain)) assert.ok(row[2].includes(name), `${field} is said as ${name}`);
   assert.match(row[2], /A person's action, which no tool reaches/);
@@ -804,7 +808,7 @@ test("docs/console.md says what a tool cannot reach, and names the fields a tool
   // The deployment's caps are a setting, which a tool can raise behind a confirm: "those six" is as far as this holds, and the section says so.
   assert.match(read("admin/src/action-policy.mjs"), /"setting-set": rule\("confirm",[^\n]*"dispatch_set"\)/);
   assert.match(said, /`dispatch_set` still sets the deployment's own caps, behind a confirm wherever a cap could rise/);
-  assert.match(said, /Those eight are the operator's to write/);
+  assert.match(said, /Those nine are the operator's to write/);
   assert.match(said, /pi's own `bash` is outside this, as it is outside every action/);
   // The bar on the Confirm says what is true of this action, and claims nothing of what moves a job's spend elsewhere.
   const reason = /"trigger-environment-edit": rule\("person", "([^"]+)"\)/.exec(read("admin/src/action-policy.mjs"))[1];
@@ -823,7 +827,7 @@ test("docs/triggers.md's two editors are the card's fields and the Edit form's, 
   for (const key of ["flow", "backend", "provider", "model", "maxTurns", ...EDIT_FIELDS.slice(2)]) assert.ok(tool.includes(key), key);
   // Which of the card's fields a tool can still set: "the first three", and that it cannot set the rest, read from what the tool takes.
   assert.deepEqual(CARD_FIELDS.filter((key) => tool.includes(key)), CARD_FIELDS.slice(0, 3));
-  assert.match(doc, /Of those fields, `dispatch_trigger_edit` can still set the first three, and no `dispatch_\*` tool can set the other eight/);
+  assert.match(doc, /Of those fields, `dispatch_trigger_edit` can still set the first three, and no `dispatch_\*` tool can set the other nine/);
   // The opening of the optional fields: most are the file's alone, and which are not is read from what the Edit form and the tool take.
   const flags = /\. ((?:`[A-Za-z]+`(?:, | and )?)+) change how a run is followed or picked up, and that page's Edit form and `dispatch_trigger_edit` take them too/.exec(doc);
   assert.deepEqual(spans(flags[1]), EDIT_FIELDS.slice(2));
@@ -873,7 +877,7 @@ test("docs/costs.md's amounts are the real bound's, at the pin, and each row of 
   assert.ok(text.includes(`"${openLine}"`), openLine);
   // The changes that reach this judgement.
   const judged = /const MODEL_OR_CAP = Object\.freeze\(\[([^\]]*)\]\)/.exec(read("admin/src/trigger-environment-plans.mjs"))[1];
-  assert.deepEqual([...judged.matchAll(/"([^"]+)"/g)].map((m) => m[1]), ["provider", "model", "models", "fallbackModels", "maxCostUsd"]);
+  assert.deepEqual([...judged.matchAll(/"([^"]+)"/g)].map((m) => m[1]), ["provider", "model", "models", "fallbackModels", "modelSelection", "maxCostUsd"]);
   assert.match(text, /only when the change sends the model, the provider, a list or the cap/);
   // A listed or fallback model under the same cap, in the words the row quotes.
   const listed = await plannerWorld({ run: MODEL_RUN }).preview({ models: [HAIKU, "anthropic/claude-opus-5-5"], maxCostUsd: "2" });

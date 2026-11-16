@@ -7,7 +7,7 @@ import { DEFAULT_MODEL, DEFAULT_PROVIDER, allowedModelsFrom } from "@edgehero/pi
 import { parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
 import { parseProjects } from "@edgehero/pi-dispatch/projects";
 import { parseScopedLimits } from "@edgehero/pi-dispatch/scoped-limits";
-import { splitModelEntry, modelIdProblem, providerIdProblem } from "@edgehero/pi-dispatch/model-ref";
+import { splitModelEntry, modelIdProblem, providerIdProblem, modelSelectionProblem } from "@edgehero/pi-dispatch/model-ref";
 import { SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
 import { MODEL_ROLE_RE } from "@edgehero/pi-dispatch/model-roles";
 import { failoverModelStatus } from "@edgehero/pi-dispatch/model-status";
@@ -41,11 +41,11 @@ export function collectModelPolicies({ entries = [], modelRoles = {}, projects =
     const run = entry?.run;
     if (!run || typeof run !== "object") return [];
     return [{ sourceIndex: index, index, label: `trigger ${index + 1}`, authoredProvider: run.provider,
-      ...fields(run, ["kind", "folder", "repository", "provider", "model", "models", "fallbackModels", "maxCostUsd", "flow"]),
+      ...fields(run, ["kind", "folder", "repository", "provider", "model", "models", "fallbackModels", "modelSelection", "maxCostUsd", "flow"]),
     }];
   });
   const out = resolveConfiguredModelRuns({ runs, modelRoles, projects, deployment, envList, conservativeLocal: true, ...(resolveFolder ? { resolveFolder } : {}) });
-  return { ...out, runs: out.runs.map(run => ({ ...run, provider: run.provider ?? deployment.provider, model: run.model ?? deployment.model, project: run.project ?? null })) };
+  return { ...out, runs: out.runs.map(run => ({ ...run, ...(run.modelSelection ? {} : { provider: run.provider ?? deployment.provider, model: run.model ?? deployment.model }), project: run.project ?? null })) };
 }
 
 function metricRows(records) {
@@ -118,9 +118,9 @@ function authoredRefs(entry, deployment, envList) {
   const run = entry?.run;
   if (!run || typeof run !== "object") return [];
   const chosen = run.model ?? deployment.model;
-  const primary = typeof chosen === "string" && !chosen.startsWith("role:") ? `${run.provider ?? deployment.provider}/${chosen}` : null;
+  const primary = !run.modelSelection && typeof chosen === "string" && !chosen.startsWith("role:") ? `${run.provider ?? deployment.provider}/${chosen}` : null;
   const allowed = run.models ?? envList;
-  return [primary, ...(Array.isArray(allowed) ? allowed : []), ...(Array.isArray(run.fallbackModels) ? run.fallbackModels : [])].filter(ref => splitModelEntry(ref));
+  return [primary, ...(run.modelSelection?.candidates ?? []), ...(Array.isArray(allowed) ? allowed : []), ...(Array.isArray(run.fallbackModels) ? run.fallbackModels : [])].filter(ref => splitModelEntry(ref));
 }
 
 /** Caller-supplied clock and I/O facts. No policy oracle here can authorize a run. */
@@ -151,7 +151,7 @@ export function modelsViewOf({ entries = [], modelRoles = {}, projects = [], dep
       triggers, next: nextOf(model, refs, observedCooldowns, status, cooldowns === null, overlayUnknown || configUnknown) };
   }));
   const resolvedRefs = new Set(roles.flatMap(row => [row.model, ...row.fallbackModels.map(item => item.ref)]));
-  for (const run of facts.runs) for (const ref of [`${run.provider}/${run.model}`, ...(run.models ?? []), ...(run.fallbackModels ?? [])]) if (splitModelEntry(ref)) resolvedRefs.add(ref);
+  for (const run of facts.runs) for (const ref of [`${run.provider}/${run.model}`, ...(run.models ?? []), ...(run.fallbackModels ?? []), ...(run.modelSelection?.candidates ?? [])]) if (splitModelEntry(ref)) resolvedRefs.add(ref);
   const namedRefs = new Set(resolvedRefs);
   for (const entry of entries) for (const ref of authoredRefs(entry, deployment, envList)) namedRefs.add(ref);
   const refusedRows = new Set(facts.checks.map(check => check.sourceIndex));
@@ -174,6 +174,9 @@ export function modelsViewOf({ entries = [], modelRoles = {}, projects = [], dep
     return { ref, provider: parsed.provider, model: parsed.model, known: price.known, priced: price.priced, reason: price.reason,
       windows: modelWindowsRows, state: configUnknown || overlayUnknown || cooldowns === null || modelWindowsRows.some(window => window.unavailable) ? "unknown" : refusedRefs.has(ref) && !resolvedRefs.has(ref) ? "policy-refused" : observedCooldowns.some(row => row.ref === ref) ? "cooling-down" : price.priced === null ? "unknown" : !price.known ? "unknown-model" : !price.priced ? "unpriced" : modelWindowsRows.some(window => window.spentMicros >= window.capMicros) ? "window-full" : "available" };
   });
+  const randomPools = entries.flatMap((entry, index) => entry?.run?.modelSelection != null && modelSelectionProblem(entry.run.modelSelection) === null ? [{ index, number: index + 1,
+    candidates: entry.run.modelSelection.candidates.filter(ref => splitModelEntry(ref)).slice(0, 16).map(ref => ({ ref, state: models.find(model => model.ref === ref)?.state ?? "unknown" })),
+  }] : []);
   const hostRows = (snapshot?.doctor?.hosts ?? []).slice(0, MODELS_LIMITS.hosts);
   const proposals = hostRows.flatMap(host => (host.checks ?? []).flatMap(check => {
     const proposal = modelProposalOf(check.proposal);
@@ -187,14 +190,15 @@ export function modelsViewOf({ entries = [], modelRoles = {}, projects = [], dep
   const dedup = new Map(); for (const record of ordered) if (!dedup.has(record.jobId)) dedup.set(record.jobId, record);
   const retained = [...dedup.values()].slice(0, MODELS_LIMITS.records);
   const recentFallbacks = retained.filter(record => MODEL_WHY.includes(record.modelWhy) && record.modelWhy.startsWith("fallback-") && atOf(record) >= now - MODELS_LIMITS.days * DAY).map(record => ({ jobId: record.jobId, ...fields(record, ["provider", "model", "modelRole", "modelWhy"]), providerFailure: providerFailureOf(record.providerFailure) })).slice(0, 20);
-  const waiting = (snapshot?.waiting?.rows ?? []).filter(row => ["model-cooldown", "model-window"].includes(row.why ?? row.reason)).slice(0, MODELS_LIMITS.waits).map(row => ({ jobId: safeId(row.jobId), queue: safeId(row.queue), reason: row.why ?? row.reason })).filter(row => row.jobId);
+  const recentRandom = retained.filter(record => ["random", "random-subscription-limit"].includes(record.modelWhy) && atOf(record) >= now - MODELS_LIMITS.days * DAY).map(record => ({ jobId: record.jobId, ...fields(record, ["provider", "model", "modelWhy"]) })).slice(0, 20);
+  const waiting = (snapshot?.waiting?.rows ?? []).filter(row => ["model-cooldown", "model-window", "subscription-quota"].includes(row.why ?? row.reason)).slice(0, MODELS_LIMITS.waits).map(row => ({ jobId: safeId(row.jobId), queue: safeId(row.queue), reason: row.why ?? row.reason, resetAt: integer(row.resetAt) })).filter(row => row.jobId);
   const notes = ["Comparisons and fallback history use at most 1,000 retained local and mirrored run records over 30 days. Missing remote or expired records are unknown.", "A candidate shown next has not reserved a dollar window or endpoint. Credentials, egress, windows and slots are checked again at pickup.", "Repository agents' role declarations are not readable from this page."];
   if (facts.runs.some(run => run.projectUnknown) || facts.checks.some(check => check.projectUnknown)) notes.push("A local folder could not be resolved on this console host. The possible project scopes are shown; the owning worker resolves its actual folder at pickup.");
   if (records === null) notes.push("Run records could not be read; comparison and fallback history are unknown.");
   if (newerSkipped > 0) notes.push(`${newerSkippedSentence(newerSkipped)}: comparisons and fallback history leave them out.`);
   if (!snapshot?.waiting || snapshot.waiting.unreachable) notes.push("Waiting jobs could not be read; an empty list is not proof that none wait.");
   if (!snapshot?.doctor || snapshot.doctor.unreachable || !hostRows.length) notes.push("No published doctor proposal evidence is available. Reload after doctor publishes on a host.");
-  return { now, scopes: [...new Set(["default", ...projects.map(project => project.id), ...scopes])], state: configUnknown ? "unreadable" : "ready", partial: true, banners, roles, cooldowns: observedCooldowns, models, proposals,
+  return { now, scopes: [...new Set(["default", ...projects.map(project => project.id), ...scopes])], state: configUnknown ? "unreadable" : "ready", partial: true, banners, roles, randomPools, recentRandom, cooldowns: observedCooldowns, models, proposals,
     canaries: canariesOf(retained, roles, deployment, now, sourceRecords), waiting, recentFallbacks,
     coverage: { complete: false, partial: true, records: retained.length, days: MODELS_LIMITS.days, truncated: dedup.size > MODELS_LIMITS.records || coverage.truncated === true, notes } };
 }
@@ -303,6 +307,8 @@ export function modelsForAgent(view) {
   const bannerReasons = { "role-conflict": ["model-role-unknown", "model-role-provider-conflict", "model-roles-invalid"], "radius-cost-cap": ["cost-cap"], "configuration-unavailable": ["model-roles-invalid"], "catalog-unavailable": ["model-unknown"], "cooldowns-unavailable": ["model-cooldown"] };
 
   return { subscriptionAuth: subscriptionAuthForAgent(view?.subscriptionAuth), scopes: (view?.scopes ?? []).filter(scope => safeId(scope)), state: view?.state === "ready" ? "ready" : "unreadable", partial: view?.partial !== false, now: integer(view?.now),
+    randomPools: (view?.randomPools ?? []).slice(0, MODELS_LIMITS.waits).map(pool => ({ index: integer(pool.index), candidates: (pool.candidates ?? []).slice(0, 16).map(candidate => ({ ref: model(candidate.ref), state: ["cooling-down", "window-full", "unknown", "unknown-model", "unpriced", "policy-refused", "available"].includes(candidate.state) ? candidate.state : "unknown" })) })),
+    recentRandom: (view?.recentRandom ?? []).slice(0, 20).map(row => ({ jobId: runId(row.jobId), provider: providerIdProblem(row.provider) === null ? row.provider : null, model: modelIdProblem(row.model) === null ? row.model : null, modelWhy: ["random", "random-subscription-limit"].includes(row.modelWhy) ? row.modelWhy : null })),
     roles: (view?.roles ?? []).map(row => ({ scope: safeId(row.scope), role: roleValid(row.role) ? row.role : null, model: model(row.model),
       fallbackModels: (row.fallbackModels ?? []).map(item => ({ ref: model(item.ref), priced: typeof item.priced === "boolean" ? item.priced : null, skipped: item.skipped === true })),
       triggers: (row.triggers ?? []).map(trigger),
@@ -317,7 +323,7 @@ export function modelsForAgent(view) {
     canaries: (view?.canaries ?? []).map(row => ({ id: safeId(row.id), digest: /^[a-f0-9]{64}$/.test(row.digest ?? "") ? row.digest : null, role: roleValid(row.role) ? row.role : null, candidate: model(row.candidate), flow: safeId(row.flow),
       candidateStats: metrics(row.candidateStats), sourceStats: metrics(row.sourceStats), partial: row.partial === true,
       rows: (row.rows ?? []).map(pair => ({ jobId: safeId(pair.jobId), sourceJobId: safeId(pair.sourceJobId), candidate: { model: model(pair.candidate?.model), outcome: safeId(pair.candidate?.outcome), cost: finite(pair.candidate?.cost), turns: integer(pair.candidate?.turns), tokens: integer(pair.candidate?.tokens) }, source: pair.source ? { model: model(pair.source.model), outcome: safeId(pair.source.outcome), cost: finite(pair.source.cost), turns: integer(pair.source.turns), tokens: integer(pair.source.tokens) } : null })) })),
-    waiting: (view?.waiting ?? []).map(row => ({ jobId: safeId(row.jobId), reason: ["model-cooldown", "model-window"].includes(row.reason) ? row.reason : null })),
+    waiting: (view?.waiting ?? []).map(row => ({ jobId: safeId(row.jobId), reason: ["model-cooldown", "model-window", "subscription-quota"].includes(row.reason) ? row.reason : null, resetAt: integer(row.resetAt) })),
     recentFallbacks: (view?.recentFallbacks ?? []).map(row => ({ jobId: runId(row.jobId), provider: providerIdProblem(row.provider) === null ? row.provider : null, model: modelIdProblem(row.model) === null ? row.model : null, modelRole: roleValid(row.modelRole) ? row.modelRole : null, modelWhy: MODEL_WHY.includes(row.modelWhy) ? row.modelWhy : null, providerFailure: providerFailureOf(row.providerFailure) })),
     banners: (view?.banners ?? []).map(row => ({ kind: Object.hasOwn(bannerReasons, row.kind) ? row.kind : "unknown", reason: Object.hasOwn(bannerReasons, row.kind) && bannerReasons[row.kind].includes(row.reason) ? row.reason : null, index: integer(row.index), project: safeId(row.project), projectUnknown: row.projectUnknown === true })),
     coverage: { complete: false, partial: true, records: integer(view?.coverage?.records), days: MODELS_LIMITS.days, truncated: view?.coverage?.truncated === true } };

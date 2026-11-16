@@ -31,6 +31,7 @@ import { APPROVAL_LABEL } from "./parked.mjs";
 import { createForkStore } from "./fork-store.mjs";
 import { makeCheckForkPolicy } from "./fork-policy.mjs";
 import { makeCheckMergePolicy } from "./merge-policy.mjs";
+import { makeCheckModelSelectionPolicy } from "./model-selection-policy.mjs";
 import { thinkingLevelAllowed } from "./thinking-level.mjs";
 import { readdirSync, readFileSync, statSync, watch } from "node:fs";
 import { lookup as dnsLookup } from "node:dns/promises";
@@ -141,6 +142,8 @@ import { makeRunBudgetLedger } from "./run-budget-ledger.mjs";
 import { normalizeHost } from "./run-checkpoint.mjs";
 import { isRecoveryArmed, makeHostLostSweep, makeRecoveryEnqueuer, makeSalvager, pointedJobDirs, runIdOf, sweepOrphanJobDirs } from "./recovery-queue.mjs";
 import { finishModelAttempt, modelAttemptIdOf } from "./model-attempts.mjs";
+import { MODEL_SELECTION_FINISH } from "./model-selection-record.mjs";
+import { finishModelSelection, identityForModelSelection } from "./model-selection-state.mjs";
 
 
 /** How long boot will wait for `docker image inspect` before shipping without a digest. */
@@ -1008,6 +1011,7 @@ export async function startWorker(
 		// Issue #812: the expiry a finished job's model attempt key is given, a seam so a wiring test sees which id the
 		// listeners below hand it, since the harness's client is closed by the time a test drives one.
 		finishModelAttempt: finishModelAttemptFn = finishModelAttempt,
+		finishModelSelection: finishModelSelectionFn = finishModelSelection,
 	} = {},
 ) {
 	const config = loadConfigFn(env);
@@ -3199,6 +3203,7 @@ export async function startWorker(
 			// one. In the compose topology the worker's read is the live inode while the receiver's is dead
 			// until restart, which is exactly the deployment where the skew happens.
 			checkWaitSkew: makeCheckWaitSkew({ triggersPath: onceTriggersFile }),
+			checkModelSelectionPolicy: makeCheckModelSelectionPolicy({ triggersPath: onceTriggersFile, allowedModels: config.allowedModels }),
 			checkMergePolicy: makeCheckMergePolicy({ triggersPath: onceTriggersFile }),
 			// Issue #505. Whether the live file still flags a portfolio job's cron trigger, read when such a job is picked
 			// up, from the same file and by the same rule as the two checks above (built once, beside collectPlan).
@@ -3242,6 +3247,11 @@ export async function startWorker(
 			...(typeof sessionStore.stageRecovered === "function" ? { stageRecovered: sessionStore.stageRecovered } : {}),
 			isParked: sessionStore.isParked,
 			readParkedInfo: sessionStore.readParkedInfo,
+			readModelSelectionContinuation: async (job) => {
+				const context = await approvalRuntime?.modelSelectionContext?.(job);
+				if (context?.refused || context?.newer) return context;
+				return sessionStore.readModelSelectionBinding?.(job, context ?? {}) ?? (job.approvalRequestId || job.parkedReply === true ? { refused: "model-selection-continuation-unavailable" } : null);
+			},
 			approvalRuntime,
 			approvalSessionCheck,
 			parkedLabel,
@@ -3469,10 +3479,12 @@ export async function startWorker(
 		// bodies: an expiry that fails leaves the key as it was, without one, and the fixed line says so. The id is the
 		// processor's (index.mjs `modelAttemptId`); a job with no queue name to read names no key, so nothing is sent.
 		const finishAttempt = (w, job) => {
+			const selectionFinish = job?.[MODEL_SELECTION_FINISH];
+			if (job?.data?.modelSelection && !selectionFinish) return;
 			const queueName = job?.queueName ?? w.name;
 			if (typeof queueName !== "string" || queueName === "" || job?.id === undefined || job?.id === null) return;
 			void Promise.resolve()
-				.then(() => finishModelAttemptFn(redis, modelAttemptIdOf(queueName, job.id)))
+				.then(() => job.data?.modelSelection ? finishModelSelectionFn(redis, identityForModelSelection(job, { queueName }), { attempt: selectionFinish.attempt, expectedRevision: selectionFinish.revision }) : finishModelAttemptFn(redis, modelAttemptIdOf(queueName, job.id)))
 				.catch(() => log("model_attempt_finish_failed", { jobId: String(job.id) }));
 		};
 		for (const w of allWorkers) w.on("completed", (job, result) => {

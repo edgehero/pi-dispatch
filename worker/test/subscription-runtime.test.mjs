@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { makeSubscriptionRuntime, subscriptionIdentity, subscriptionRoutes } from "../src/subscription-runtime.mjs";
+import { makeSubscriptionRuntime, subscriptionIdentity, subscriptionRoutes, subscriptionBindingDigest } from "../src/subscription-runtime.mjs";
 
 const instant = 1_800_000_000_000;
 const connection = { id: "claude", connectionId: "claude", provider: "anthropic", ownerHost: "owner", adapter: "pi-anthropic-oauth@0.3.6", accountGroup: "opaque-group", generation: 2 };
@@ -19,6 +19,49 @@ function fixture({ row = connection, quotaResult = { ok: true }, checkResult, st
 }
 test("subscription routes include every finite model and decision role exactly once", () => {
 	assert.deepEqual(subscriptionRoutes({ ...job, models: [...job.models, "openai/gpt"], watchDecisionModel: { provider: "openai", id: "gpt" }, answerDecisionModel: { provider: "other", id: "small" } }), [{ provider: "anthropic", id: "sonnet" }, { provider: "openai", id: "gpt" }, { provider: "other", id: "small" }]);
+});
+
+test("whole-pool policy inspection classifies exhausted and unavailable routes without quota, trial or refresh calls", async () => {
+	for (const models of [["anthropic/sonnet", "openai/gpt"], ["openai/gpt", "anthropic/sonnet"]]) {
+		const { runtime, calls } = fixture({ quotaResult: { ok: false, reason: "subscription-quota", until: instant + 100_000 } });
+		assert.equal((await runtime.inspectPolicy({ models })).reason, "auth-mixed-billing");
+		assert.deepEqual(calls, []);
+	}
+	const { runtime, calls } = fixture({ checkResult: { ok: false, managed: true, reason: "auth-store-unavailable", unavailable: true } });
+	assert.equal((await runtime.inspectPolicy(job)).unavailable, true);
+	assert.deepEqual(calls, []);
+});
+
+test("random selected billing/account binding survives preparation while ordinary credential refresh remains valid", async () => {
+	const { runtime, auth, calls } = fixture();
+	const binding = subscriptionBindingDigest(connection);
+	const selected = { ...job, modelSelection: { strategy: "random", candidates: job.models }, modelSelectionBilling: "subscription", modelSelectionBinding: binding };
+	assert.equal(subscriptionBindingDigest({ ...connection, generation: connection.generation + 1 }), binding);
+	assert.notEqual(subscriptionBindingDigest({ ...connection, accountGroup: "another" }), binding);
+	auth.check = async (_provider, request) => { assert.equal(request.readOnly, true); return { ok: true, managed: true, ...connection }; };
+	assert.equal((await runtime.inspectPolicy(selected)).bindings["anthropic/sonnet"], binding);
+	auth.check = async () => ({ ok: true, managed: false });
+	assert.equal((await runtime.prepare(selected)).reason, "auth-binding-changed");
+	assert.deepEqual(calls, []);
+	auth.check = async () => ({ ok: true, managed: true, ...connection, accountGroup: "changed" });
+	assert.equal((await runtime.prepare(selected)).reason, "auth-binding-changed");
+	auth.check = async () => ({ ok: true, managed: true, ...connection });
+	auth.prepareSnapshot = async () => ({ ok: true, snapshot: { ...connection, accountGroup: "changed" } });
+	assert.equal((await runtime.prepare(selected)).reason, "auth-binding-changed", "changed connection after quota admission cannot become the run's snapshot");
+	auth.prepareSnapshot = async () => ({ ok: true, snapshot: { ...connection, generation: 3 } });
+	assert.equal((await runtime.prepare(selected)).ok, true);
+});
+
+test("quota replay permission is returned only after an authoritative exhausted write succeeds for the attempt binding", async () => {
+	const snapshot = { ...connection, provider: "openai", adapter: "openai-chatgpt" };
+	const result = { code: 1, exitLineCode: 1, exitAuth: "verified", providerFailure: { kind: "quota-exhausted", subscriptionProvider: "openai", subscriptionCode: "usage_limit_reached" } };
+	for (const written of [{ ok: true, status: { state: "exhausted", bindingValid: true } }, { ok: false, status: { state: "exhausted" } }, { ok: true, status: { state: "unknown" } }, { ok: true, status: { state: "exhausted", bindingValid: false } }]) {
+		const runtime = makeSubscriptionRuntime({ now: () => instant, auth: { check: async () => ({ ok: true, managed: true, ...snapshot }) }, quota: { record: async () => written } });
+		assert.equal((await runtime.observe({ provider: "openai", model: "gpt" }, result, [snapshot]))?.quotaExhausted === true, written.ok && written.status.state === "exhausted" && written.status.bindingValid !== false);
+		assert.equal(await runtime.observe(job, { ...result, providerFailure: { kind: "rate-limited", subscriptionProvider: "openai" } }, [snapshot]), undefined, "generic 429 is not subscription exhaustion");
+	}
+	const runtime = makeSubscriptionRuntime({ now: () => instant, auth: { check: async () => ({ ok: true, managed: true, ...snapshot, accountGroup: "another-account" }) }, quota: { record: async () => assert.fail("changed binding cannot record attempt evidence") } });
+	assert.equal(await runtime.observe(job, result, [snapshot]), undefined);
 });
 test("candidate preview never refreshes or consumes an operator trial; selected preparation does", async () => {
 	const { runtime, calls } = fixture();

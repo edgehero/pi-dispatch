@@ -177,7 +177,7 @@ test("readWaiting reads no job's data: every command is a pipelined id, score, s
     ["lrange", "bull:pi-jobs:wait", -(WAITING_PER_LIST_MAX + 1), -1],
     ["lrange", "bull:pi-jobs:paused", -(WAITING_PER_LIST_MAX + 1), -1],
   ]);
-  assert.deepEqual(Object.keys(got.rows[0]), ["jobId", "queue", "state", "bucket", "why", "known", "dueAt", "queuedAt", "recordedAt", "untilAt", "project", "projectFrom", "host", "holder", "endpoint", "budgetWhy", "trigger", "attempt", "attempts", "attemptsMade", "stalled", "kind", "recovery", "schedulerNext", "held"], "the row is a closed set of keys");
+  assert.deepEqual(Object.keys(got.rows[0]), ["jobId", "queue", "state", "bucket", "why", "known", "dueAt", "queuedAt", "recordedAt", "untilAt", "resetAt", "project", "projectFrom", "host", "holder", "endpoint", "budgetWhy", "trigger", "attempt", "attempts", "attemptsMade", "stalled", "kind", "recovery", "schedulerNext", "held"], "the row is a closed set of keys");
   assert.deepEqual(Object.keys(got).sort(), ["at", "byBucket", "byQueue", "queuesCut", "rows", "scheduled", "truncated"]);
   assert.deepEqual([...WAITING_STATES], ["delayed", "waiting", "prioritized", "paused"]);
 });
@@ -1065,4 +1065,18 @@ test("setup's freshWaiting observation sees same-count replacement before the di
     assert.equal(confirmed.waiting.at, at);
     assert.deepEqual((await reader.snapshot({ waiting: true })).waiting.rows.map(row => row.jobId), ["replacement-job"], "the new observation also refreshes the ordinary display");
   } finally { await reader.dispose(); }
+});
+
+test("subscription reset evidence remains separate from the next bounded recheck in waiting reads", async () => {
+  const v = fakeValkey();
+  const resetAt = AT + 90 * 60_000;
+  addJob(v, "pi-jobs", "gh-quota-known", { dueAt: AT + 60_000, record: { ...rec("subscription-quota"), resetAt } });
+  addJob(v, "pi-jobs", "gh-quota-unknown", { dueAt: AT + 60_000, record: rec("subscription-quota") });
+  const got = await readWaiting(v.redis, { queues: [fakeQueue("pi-jobs")], now: () => AT });
+  const known = got.rows.find(row => row.jobId === "gh-quota-known");
+  const unknown = got.rows.find(row => row.jobId === "gh-quota-unknown");
+  assert.equal(known.untilAt, AT + 60_000);
+  assert.equal(known.resetAt, resetAt);
+  assert.equal(unknown.untilAt, AT + 60_000);
+  assert.equal(unknown.resetAt, null);
 });

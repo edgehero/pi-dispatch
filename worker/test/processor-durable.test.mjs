@@ -938,3 +938,46 @@ test("a recovered managed fork resumes its own checkpoint and namespace without 
 		assert.equal(names(calls).includes("restore"), true);
 	}
 });
+
+const RANDOM_BINDING = { ref: "anthropic/m", billing: "subscription", binding: "a".repeat(64) };
+const randomRecovery = () => ({ ...recoveryJob(1), modelSelection: { strategy: "random", candidates: [RANDOM_BINDING.ref] }, models: [RANDOM_BINDING.ref], modelSelectionRecovery: RANDOM_BINDING, modelSelectionBilling: RANDOM_BINDING.billing, modelSelectionBinding: RANDOM_BINDING.binding });
+const randomImage = async () => ({ ok: true, piVersion: PI, capabilities: ["recover", "exitAuth", "modelFailover", "modelPolicy"] });
+
+test("random recovery rechecks the saved model/account annotation before mint, clone or reservations", async () => {
+	for (const modelSelection of [undefined, { invalid: true }, { ...RANDOM_BINDING, binding: "b".repeat(64) }, { ...RANDOM_BINDING, billing: "api", binding: null }]) {
+		const store = fakeCheckpointer([]);
+		store.readManifest = async () => ({ ok: true, manifest: MANIFEST, transcriptPath: "/t", ...(modelSelection ? { modelSelection } : {}) });
+		const { deps: d, calls, ledger, redis } = deps({ imagePreflight: randomImage, workspaceCheckpointer: store });
+		const result = await runJob(randomRecovery(), d);
+		assert.equal(result.reason, "model-selection-continuation-unavailable");
+		assert.equal(result.budgetReserved, false);
+		assert.ok(!names(calls).includes("mint") && !names(calls).includes("prepare") && !names(calls).includes("run-container"));
+		assert.ok(!ledger.calls.some((c) => ["claimSlot", "nextSeq"].includes(c[0])));
+		assert.equal(redis.ops.filter((o) => ["incr", "incrby"].includes(o[0])).length, 0);
+	}
+});
+
+test("random recovery holds newer annotations and retries transient reads without removing the checkpoint", async () => {
+	for (const modelSelection of [{ newer: true }, { unavailable: "EIO" }]) {
+		const storeCalls = [];
+		const store = fakeCheckpointer(storeCalls);
+		store.readManifest = async () => ({ ok: true, manifest: MANIFEST, transcriptPath: "/t", modelSelection });
+		const { deps: d, calls, pointers, ledger, redis } = deps({ imagePreflight: randomImage, workspaceCheckpointer: store });
+		await assert.rejects(runJob(randomRecovery(), d), (error) => modelSelection.newer ? error instanceof NewerReleaseHold : error instanceof InfraRetry);
+		assert.ok(!names(calls).includes("mint") && !names(calls).includes("prepare"));
+		assert.ok(!names(storeCalls).includes("store-remove") && !names(calls).includes("pointer-remove"));
+		assert.equal(pointers.has(RUN), true);
+		assert.ok(!ledger.calls.some((c) => ["claimSlot", "nextSeq", "remove"].includes(c[0])));
+		assert.equal(redis.ops.filter((o) => ["incr", "incrby"].includes(o[0])).length, 0);
+	}
+});
+
+test("random recovery passes its locked account to salvage and writes it into every new checkpoint", async () => {
+	let salvage;
+	const store = fakeCheckpointer([]);
+	store.readManifest = async () => ({ ok: true, manifest: MANIFEST, transcriptPath: "/t", modelSelection: RANDOM_BINDING });
+	const { deps: d, calls } = deps({ imagePreflight: randomImage, workspaceCheckpointer: store, salvageCheckpoint: async (args) => (salvage = args, { skipped: "test" }) });
+	assert.equal((await runJob(randomRecovery(), d)).outcome, "completed");
+	assert.deepEqual(salvage.modelSelection, RANDOM_BINDING);
+	assert.deepEqual(calls.find((c) => c[0] === "run-container")[1].checkpoint.meta.modelSelection, RANDOM_BINDING);
+});

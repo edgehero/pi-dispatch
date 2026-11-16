@@ -96,6 +96,7 @@ export function readProviderInventory({ deploymentDir, env = {}, fs = nodeFs, pl
     for (const row of doc.triggers) {
       if (row.run.provider) use(row.run.provider, "trigger");
       for (const entry of row.run.models ?? []) model(entry, "allowed-model");
+      for (const entry of row.run.modelSelection?.candidates ?? []) model(entry, "trigger");
       for (const entry of row.run.fallbackModels ?? []) model(entry, "fallback");
     }
     for (const scope of Object.values(doc.modelRoles)) for (const role of Object.values(scope)) {

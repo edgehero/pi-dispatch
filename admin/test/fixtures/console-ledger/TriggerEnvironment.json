@@ -1,7 +1,7 @@
 {
   "card": "TriggerEnvironment",
   "pr": 800,
-  "words": "857f5ecc83a4f20c21f49468134ee6072914687b1c5501e57d9945c483e4df6b",
+  "words": "c25eeb7790769efe006729c1252b0347e9ca59f655c5308d6c5985728667ea12",
   "elements": [
     {
       "el": "p-trigger-gets",
@@ -480,6 +480,20 @@
       "kind": "sample",
       "status": "illustrative",
       "reason": "Sample times. The goldens' hosts both published an hour before the fixture's clock."
+    },
+    {
+      "el": "Random model pool",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-trigger-gets",
+      "source": "admin/src/console/panels/trigger-gets.mjs#triggerGets",
+      "golden": [
+        "panels/trigger-gets-random.operator"
+      ],
+      "shows": [
+        "Random candidate pool",
+        "No model is chosen by this preview."
+      ]
     }
   ]
 }

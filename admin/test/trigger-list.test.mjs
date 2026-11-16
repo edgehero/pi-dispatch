@@ -255,3 +255,11 @@ test("trigger lists show enabled merge permission without carrying its queue pol
   assert.equal(JSON.stringify(got).includes("private-digest"), false);
   assert.equal(build().rows[0].trigger.mayMerge, undefined);
 });
+
+test("the trigger list retains a validated random pool as a policy without inventing a primary", () => {
+  const modelSelection = { strategy: "random", candidates: ["openai/gpt-5", "anthropic/claude-haiku-4-5"] };
+  const view = build({ snapshot: snapshot([rule({ modelSelection })]) });
+  assert.deepEqual(view.rows[0].trigger.modelSelection, modelSelection);
+  assert.equal(view.rows[0].trigger.provider, undefined);
+  assert.equal(view.rows[0].trigger.model, undefined);
+});
