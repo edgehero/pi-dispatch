@@ -1253,3 +1253,81 @@ test("published endpoint use is the shared processors' map for per-machine and u
 		assert.equal(published().used, 0);
 	}
 });
+
+// Issue #918: a private endpoint's `slots`, in the same two halves as a model endpoint's, keyed `private:<id>`.
+const BENCH_PRIVATE = { id: "bench-device", host: "10.0.5.20", port: 22, slots: 1 };
+const LAB_PRIVATE = { id: "lab", host: "lab.internal", port: 8022, slots: null };
+const grantingDeps = { checkPrivateEndpoints: async (job) => ({ ok: true, ids: job.privateEndpoints ?? [] }) };
+
+test("a granted private endpoint with slots takes one in both halves under private:<id>, a full device defers the next job, and the finally gives both back (#918)", { skip }, async () => {
+	const w = endpointWiring({ endpoints: [], privateEndpoints: () => [BENCH_PRIVATE, LAB_PRIVATE] });
+	let granted = null;
+	const h = harness({ extra: w.extra, extraDeps: grantingDeps, onContainer: (ctx) => (granted = ctx.privateEndpoints) });
+	const a = spyJob("l-1", { kind: "local", folder: "/srv/a", flow: "tidy", task: "t", privateEndpoints: ["bench-device", "lab"] });
+	const first = h.processor(a.job, "tok-a", new AbortController().signal);
+	await h.untilStarted(1);
+	assert.deepEqual(granted, [BENCH_PRIVATE, LAB_PRIVATE], "the processor granted what the pickup read");
+	assert.equal(w.endpointSlots.count("private:bench-device"), 1);
+	assert.equal(w.endpointSlots.count("private:lab"), 0, "no slots, no hold");
+	assert.equal(w.endpointSlots.count("bench-device"), 0, "never the bare id a model endpoint would use");
+	assert.equal(w.redis.store.get(keyOf("private:bench-device")), "mini1#l-1");
+
+	const b = spyJob("l-2", { kind: "local", folder: "/srv/b", flow: "tidy", task: "t", privateEndpoints: ["bench-device"] });
+	await assert.rejects(() => h.processor(b.job, "tok-b", new AbortController().signal), (e) => e.name === "DelayedError");
+	assert.equal(b.moves[0].ts, NOW + mod.ENDPOINT_BUSY_RECHECK_MS, "deferred, never refused");
+	assert.deepEqual(h.seen.logs.find((l) => l.event === "private_endpoint_busy_deferred").fields, { jobId: "l-2", endpoint: "bench-device", where: "host", delayMs: mod.ENDPOINT_BUSY_RECHECK_MS });
+	assert.equal(h.seen.started, 1);
+
+	const c = spyJob("l-3", { kind: "local", folder: "/srv/c", flow: "tidy", task: "t", privateEndpoints: ["lab"] });
+	const third = h.processor(c.job, "tok-c", new AbortController().signal);
+	await h.untilStarted(2);
+	h.releaseNext();
+	h.releaseNext();
+	await first;
+	await third;
+	assert.equal(w.endpointSlots.count("private:bench-device"), 0);
+	assert.equal(w.redis.store.size, 0, "the fleet half too");
+});
+
+test("a job naming a private endpoint this host does not declare takes no slot, and the processor refuses it on a single host (#918)", { skip }, async () => {
+	const w = endpointWiring({ endpoints: [], privateEndpoints: () => [LAB_PRIVATE] });
+	const h = harness({ extra: w.extra, extraDeps: grantingDeps });
+	const a = spyJob("l-1", { kind: "local", folder: "/srv/a", flow: "tidy", task: "t", privateEndpoints: ["bench-device"] });
+	const result = await h.processor(a.job, "tok-a", new AbortController().signal);
+	assert.equal(h.seen.started, 0);
+	assert.equal(result.reason, "private-endpoint-unknown");
+	assert.equal(h.seen.records.at(-1)?.result?.reason, "private-endpoint-unknown", "and it is recorded");
+	assert.equal(w.endpointSlots.count("private:bench-device"), 0);
+	assert.equal(w.redis.store.size, 0);
+});
+
+test("a job its trigger no longer grants takes no slot: it is refused at once, never left waiting on a full device (#918 review)", { skip }, async () => {
+	const w = endpointWiring({ endpoints: [], privateEndpoints: () => [BENCH_PRIVATE] });
+	const withdrawn = { checkPrivateEndpoints: async (job) => (job.folder === "/srv/a" ? { ok: true, ids: job.privateEndpoints } : { refused: "private-endpoint-withdrawn" }) };
+	const h = harness({ extra: w.extra, extraDeps: withdrawn });
+	const a = spyJob("l-1", { kind: "local", folder: "/srv/a", flow: "tidy", task: "t", privateEndpoints: ["bench-device"] });
+	const first = h.processor(a.job, "tok-a", new AbortController().signal);
+	await h.untilStarted(1);
+	assert.equal(w.endpointSlots.count("private:bench-device"), 1, "the granted job holds the device's one slot");
+	const b = spyJob("l-2", { kind: "local", folder: "/srv/b", flow: "tidy", task: "t", privateEndpoints: ["bench-device"] });
+	const result = await h.processor(b.job, "tok-b", new AbortController().signal);
+	assert.equal(result.reason, "private-endpoint-withdrawn", "refused now, not deferred until the slot frees");
+	assert.equal(b.moves.length, 0);
+	assert.equal(h.seen.logs.some((l) => l.event === "private_endpoint_busy_deferred"), false);
+	h.releaseNext();
+	await first;
+});
+
+test("a grant the pickup could not confirm but the processor can is deferred to take its slot, never run beside the slot's holder (#918 review)", { skip }, async () => {
+	const w = endpointWiring({ endpoints: [], privateEndpoints: () => [BENCH_PRIVATE] });
+	let reads = 0;
+	// The file mid-save at the pickup's read, whole again at the processor's.
+	const midSave = { checkPrivateEndpoints: async (job) => (++reads === 1 ? { unreadable: true } : { ok: true, ids: job.privateEndpoints }) };
+	const h = harness({ extra: w.extra, extraDeps: midSave });
+	const a = spyJob("l-1", { kind: "local", folder: "/srv/a", flow: "tidy", task: "t", privateEndpoints: ["bench-device"] });
+	await assert.rejects(() => h.processor(a.job, "tok-a", new AbortController().signal), (e) => e.name === "DelayedError");
+	assert.equal(h.seen.started, 0, "no container without the slot");
+	assert.equal(a.moves[0].ts, NOW + mod.ENDPOINT_BUSY_RECHECK_MS);
+	assert.deepEqual(h.seen.logs.find((l) => l.event === "private_endpoint_hold")?.fields, { jobId: "l-1", delayMs: mod.ENDPOINT_BUSY_RECHECK_MS, slot: true });
+	assert.equal(w.endpointSlots.count("private:bench-device"), 0);
+});

@@ -33,6 +33,7 @@
  * the worker itself writes into the container for this job. The overlay's top-level switches still govern it when the
  * file is there, so a file that is there and cannot be read refuses it like any other server.
  */
+import { isPrivateEndpointEnvName } from "./reserved-env.mjs";
 import { allowlistEntryFor, egressRefusalFor, packageRunnerHosts } from "./egress-allowlist.mjs";
 import { FORGE_MCP_KINDS, FORGE_MCP_SERVER_NAME, forgeMcpEgressUrl, forgeMcpServer, gitlabUrlProblem, jobMcpDocument, MCP_SERVER_NAME_RE, readOverlayMcp } from "./mcp-config.mjs";
 import { MCP_SERVERS_MAX, RESERVED_ENV_NAMES, mcpServerToolPattern } from "./triggers.mjs";
@@ -158,7 +159,7 @@ export function makeMcpCheck({ globalPiDir, forwardEnv = [], hostEnv = {}, egres
 		// writes under exactly that name, which is the reason every other server is refused it.
 		for (const name of overlayNames) {
 			for (const ref of servers[name].refs) {
-				if (own.has(ref)) return { refused: "mcp-secret-reserved", name, why: `it references ${ref}, which this deployment uses for the job's own credentials or settings` };
+				if (own.has(ref) || isPrivateEndpointEnvName(ref)) return { refused: "mcp-secret-reserved", name, why: `it references ${ref}, which this deployment uses for the job's own credentials or settings` };
 			}
 		}
 		for (const name of overlayNames) {

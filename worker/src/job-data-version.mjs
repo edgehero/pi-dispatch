@@ -17,7 +17,7 @@
 import { neededVersion, valueNeededVersion } from "./store-version.mjs";
 
 /** The highest job data version this build reads. */
-export const JOB_DATA_VERSION = 7;
+export const JOB_DATA_VERSION = 8;
 
 /**
  * Each job data field that needs a version above 1, with the version that introduced it.
@@ -27,10 +27,12 @@ export const JOB_DATA_VERSION = 7;
  * reads the job as its own, runs it with both fields ignored, and rebuilds a stored message without them. A new field takes a version no running worker reads.
  * `localEvent` and `worker` (issue #911), at 6: an older worker ignores generation authority and placement, so cannot safely execute these local jobs.
  * `mayMerge` and `mayMergePolicy` (issue #908), at 5: an older worker drops the opt-in and cannot revalidate its reviewed trigger before starting.
+ * `privateEndpoints` (issue #918), at 8: an older worker drops the list and runs the job with no grant, so it cannot reach the
+ * device its trigger named, and records a run its operator reads as having had it.
  * `idleTimeoutMinutes`, `stallTimeoutMinutes` and `maxMinutes` (issue #888), at 4: an older worker would ignore each and run the job under its own fixed
  * 30 minutes, which cuts off a job the trigger allowed longer and runs one the trigger bounded shorter past its ceiling.
  */
-export const JOB_DATA_FIELD_VERSIONS = Object.freeze({ packageCanary: 2, excludeExtensions: 3, excludeExtensionTools: 3, idleTimeoutMinutes: 4, stallTimeoutMinutes: 4, maxMinutes: 4, mayMerge: 5, mayMergePolicy: 5, localEvent: 6, worker: 6, modelSelection: 7, modelSelectionGeneration: 7 });
+export const JOB_DATA_FIELD_VERSIONS = Object.freeze({ packageCanary: 2, excludeExtensions: 3, excludeExtensionTools: 3, idleTimeoutMinutes: 4, stallTimeoutMinutes: 4, maxMinutes: 4, mayMerge: 5, mayMergePolicy: 5, localEvent: 6, worker: 6, modelSelection: 7, modelSelectionGeneration: 7, privateEndpoints: 8 });
 
 /**
  * Each EXISTING top-level field whose range a later release widens, as `field -> (value) => version` (the shared rule,

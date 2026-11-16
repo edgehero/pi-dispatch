@@ -375,6 +375,13 @@ passing, on the record — issue #80.)
   does not apply. An operator's own host firewall is **out of scope** rather than forbidden, on the same
   terms this file already puts an operator's interactive pi session out of scope: it is their control, this
   project makes no claim about it, and `docs/egress.md` still carries its manual form.
+  **AMENDED 2026-11-16 (#918)**: a third carrier on the argv-built venues, for one thing only. A job whose reviewed
+  trigger names private endpoints (`REQ-PRIVATE-ENDPOINTS`) also has a **grant**: a file the worker writes into the
+  folder the proxy reads, named after the proxy's address on that job's network, read back through the proxy before
+  the container starts and removed before the network goes (`DES-PRIVATE-ENDPOINT-GRANTS`). It is the worker's in
+  the same way the argv is: the worker writes it from a decision it can name, it is tied to one job's network, and
+  the worker reads it back before it relies on it. The squid rules themselves stay one file for every job, written
+  by `egress render`.
 - **Why**: Two failure classes, both measured rather than reasoned about, and both silent.
   **The first is what a policy the worker cannot see produces.** For a year the answer to "how do I bound
   egress" was a `DOCKER-USER` recipe applied around the container. The recipe works; what it cannot do is
@@ -417,7 +424,9 @@ passing, on the record — issue #80.)
   (one parse, so `doctor` and `up` cannot disagree with the worker about the posture) ·
   `worker/src/docker-run.mjs → buildDockerRunArgs` (the `--network` argument, beside `--memory`/`--cpus`
   and deliberately NOT a member of `ISOLATION_FLAGS`) · `worker/src/processor.mjs → runJob` (the gate,
-  before `reserveBudget`)
+  before `reserveBudget`) · `worker/src/endpoint-grants.mjs → grantOnAttach` and
+  `worker/src/run-container.mjs` (issue #918: the grant's subnet clear, write and read back at attach, and its
+  removal before every network removal)
 
   **On "argv", scoped rather than quietly left inaccurate** (issue #225): read as ANY argv this clause was
   already wrong before per-trigger secrets existed. The worker passes every container variable as
@@ -452,6 +461,16 @@ passing, on the record — issue #80.)
   #684, and no layer venue ships before #684 decides it. **AMENDED 2026-10-19 (#684 part 2)**: given `PI_EGRESS=0`
   and a blessed venue declaring `credentialCustody: layer`, the worker refuses to boot, naming the venue
   (worker/src/backends.mjs -> backendRefusals).
+  **AMENDED 2026-11-16 (#918)**: given a job whose trigger names private endpoints, on `local` or `podman` with the
+  policy on, a grant naming exactly the ids the processor confirmed exists for each of the proxy's addresses on that
+  job's network from its read back until just before the network is removed; before it is written, every grant in
+  that network's subnets is deleted, so no job starts with another's. Only `run.privateEndpoints` in the reviewed
+  triggers file, confirmed against the live file before each attempt, produces a grant: no runtime-settings key, panel
+  key, model-callable tool or queued job data alone can. A grant that does not read back removes the network and
+  throws `container-never-started` before the container exists, and the attempt is retried. A proxy started without
+  the grant folders refuses a granted job with `outcome: "policy"` before spend. Given `PI_EGRESS=0`, a job that names
+  no private endpoint is byte-identical as above; a granted job writes no grant and its env gains only its
+  `PI_DISPATCH_ENDPOINT_*` pairs.
 
 ## CONST-VENUE-EGRESS-LAYER
 
@@ -1605,3 +1624,4 @@ passing, on the record — issue #80.)
 | 2026-11-02 (#796) | `CONST-PI-VERSION-PINNED` AMENDED in its acceptance, with the justification in place: a person's Adopt and a person's canary are stage-time paths beside `import-pi`, through the one stager, each from one exact version on a preview. The statement and the scope are unchanged. UNCHANGED, checked: `CONST-BUDGET-BEFORE-TOKENS` (a canary's free refusals precede the mint, and its install precedes the reservation with no money spent before the job is proven loadable), `CONST-RETRY-INFRA-ONLY` (a version that does not exist returns a refusal, a registry that cannot be reached throws), `CONST-MERGE-NEVER-AUTOMATIC` (nothing here merges; the bump pull request stays a person's), container isolation (the candidate is a read-only path under the job's own `/job`, and the argv is unchanged in shape), and the run record's PII-free rule (a canary adds an exact name and version validated on the way in, and a closed word). |
 | 2026-11-15 (#903) | All constraints UNCHANGED, checked for #903: retained-history reads start no agent or paid container, change no admission or merge behavior, and carry no raw log or transcript. The file remains the durable source; no dependency pin changes. |
 | 2026-11-16 (#912) | All constraints UNCHANGED, checked: the timeline styling correction changes no dependency pin, credential, paid-work gate, container, merge authority or stored run data. |
+| 2026-11-16 (#918, part 2) | `CONST-EGRESS-POLICY-IN-THE-ARGV` AMENDED, Statement and Acceptance: a per-job grant is a third carrier on the argv-built venues, written by the worker into the folder the proxy reads, cleared by subnet before it is written, read back before the container starts and removed before the network; only `run.privateEndpoints` in the reviewed file, confirmed before each attempt, produces one. The rest of the entry stands, the `PI_EGRESS=0` byte-identity for every job that names no private endpoint included. UNCHANGED, checked: `CONST-ISOLATION-CONTAINER-PER-JOB` (no flag or mount of the job container changes), `CONST-BUDGET-BEFORE-TOKENS` (every private endpoint refusal is free and comes before the mint, the clone and the reservation; a full device defers), `CONST-RETRY-INFRA-ONLY` (the four refusals return policy; an unreadable triggers file and a grant that does not read back throw), `CONST-TOKEN-SCOPED-PER-JOB`, `CONST-TRIGGER-AUTHOR-GATE`, `CONST-MERGE-NEVER-AUTOMATIC`. `CONST-VENUE-EGRESS-LAYER` UNCHANGED for now: the OpenShell venues refuse a granted job until part 3 amends it. |

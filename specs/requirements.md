@@ -6339,6 +6339,12 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
   per-trigger security downgrade and the population that would want one should be editing the deployment
   instead. `DES-PER-TRIGGER-JOB-IMAGE` already drew this line: the image decides what is *in* the box, never
   what the box can *do*.
+  **AMENDED 2026-11-16 (#918)**: one named exception, `REQ-PRIVATE-ENDPOINTS`. A trigger may name private endpoints
+  the operator declared in a file of their own (`INT-PRIVATE-ENDPOINTS-FILE-CONTRACT`). That widens no allowlist
+  entry, opens no port of a listed host and reaches nothing undeclared: each endpoint is one host and one port,
+  admitted for one job's network only, by a grant the worker writes and reads back before the job starts. The line
+  drawn here holds for everything else: still no `run.network`, no settings key and no model-callable parameter, and
+  every tool is refused the field itself.
 - **A venue with its own egress layer (AMENDED 2026-10-18, issue #680; planned, built in #684).** The Statement's
   network and allowlist proxy are the `local` and `podman` venues', and stay exactly as written there. A venue whose
   table entry declares its own layer (`CONST-VENUE-EGRESS-LAYER`, the planned `credentialCustody: layer`, #683; the
@@ -6446,6 +6452,46 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
   endpoint, an endpoint not marked keyless, any other `apiKey`, or a provider pi knows is refused or keyed exactly as
   before, before any spend, and the refusal names both ways in (a key, or a keyless endpoint). With `PI_EGRESS=0` such
   a job dials its endpoint directly and its argv gains no `--add-host` and no network.
+
+## REQ-PRIVATE-ENDPOINTS
+
+- **Statement** (issue #918): An operator may declare a private endpoint, one host and one TCP port on their own
+  network (`INT-PRIVATE-ENDPOINTS-FILE-CONTRACT`), and name it on a trigger with `run.privateEndpoints`. That
+  trigger's jobs, and no other job, shall reach exactly that host and port through the egress proxy, as a `CONNECT`
+  tunnel, with its host and port in their environment (`PI_DISPATCH_ENDPOINT_<ID>_HOST`, `_PORT`); every other job
+  gets the proxy's refusal for it. A job whose grant cannot be given or confirmed shall be refused or retried before
+  it spends, never run without it: a trigger that no longer names the id (`private-endpoint-withdrawn`), an id this
+  host does not declare (`private-endpoint-unknown`; on a multi-host worker's shared queue the job is handed back
+  for a host that declares it), a proxy started before it could carry a grant (`private-endpoint-proxy-outdated`), a
+  venue whose egress layer cannot carry one yet (`private-endpoint-venue-unsupported`). A grant that does not read
+  back through the helper inside the proxy is infrastructure, retried with nothing spent. An endpoint's `slots`
+  bounds how many jobs hold it at once, on the host and across workers sharing Valkey, deferring (never refusing) a
+  job that finds them taken.
+- **Scope**: forge triggers (label, comment, pull request, issue), cron triggers and local event triggers, on the
+  `local` and `podman` venues with the egress policy on; not a watch rule. Only the worker writes a grant, from
+  `run.privateEndpoints` in the reviewed triggers file, confirmed against the live file before every attempt; no
+  settings key, panel key, model-callable tool or queued job data alone produces one. With `PI_EGRESS=0` no proxy
+  stands between any job and the device, so every job can dial it, as before: a granted job's environment is set
+  as above and its record says `basis: "unenforced"`. The OpenShell venues refuse the field until their per-job
+  policy can carry a grant (#918, part 3). Ports 80 and 443, and a host and port also declared as a model endpoint,
+  are refused in the declaration.
+- **Why** a per-trigger grant when `REQ-EGRESS-ALLOWLIST` refuses per-trigger egress: that refusal is about a
+  trigger widening egress for its jobs on its own say. Here the operator declares the endpoint in its own file and
+  names it on the reviewed trigger, and the proxy admits it port-exact for one job's network, read back before the
+  job starts; nothing a trigger alone can write reaches anything. The case the issue names, a device under test over
+  SSH, cannot be expressed by the allowlist without opening the device to every job.
+- **Acceptance**: Given `bench-device` declared and rendered and a trigger naming it, that trigger's job reaches the
+  device while a concurrent job of another trigger gets the proxy's 403 for it; the granted job's environment carries
+  `PI_DISPATCH_ENDPOINT_BENCH_DEVICE_HOST` and `_PORT`, and its record `privateEndpoints: { ids: ["bench-device"],
+  basis: "proxy" }`. Given the id taken out of the trigger while a job of it is queued, that job is refused
+  `private-endpoint-withdrawn` with no token minted, no clone and no reservation. Given an id the host does not
+  declare, the job is refused `private-endpoint-unknown` on a single host and deferred `private-endpoint-host` on a
+  multi-host worker's shared queue. Given `slots: 1` and two granted jobs, the second is deferred `private-endpoint`
+  until the first ends. Given a grant that does not read back, no container starts, the job's network is removed and
+  the attempt is retried. Given a proxy without the two folder mounts, a granted job is refused
+  `private-endpoint-proxy-outdated` and an ungranted job runs. Given a tool call that carries `privateEndpoints` or a
+  near miss of it, at any depth, it is refused. Given a job's network removed, its grant is gone first; given a grant
+  left by a network that is gone, the next attach in its subnet clears it before that attach's job starts.
 
 ## REQ-RESUMABLE-SESSION
 
@@ -7941,7 +7987,9 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
   malformed or non-string output, more than 64 variables, a duplicate, an empty or NUL value refuse as
   `secret-unresolved`, exit 1 retries as `secret-resolver-unreachable`, and a reserved name (the static set, the
   provider's variables, `PI_FORWARD_ENV`, and for bundles the loader and steering names) refuses as
-  `secret-name-reserved`, the log naming the variable. The record
+  `secret-name-reserved`, the log naming the variable. AMENDED 2026-11-16 (#918): the static set gains a prefix,
+  `PI_DISPATCH_ENDPOINT_` (`REQ-PRIVATE-ENDPOINTS`), refused for a `run.secrets` key at load, for a bundle variable and
+  for `PI_FORWARD_ENV`, since the worker writes those names itself. The record
   carries `bundle: { id, variables, shadowed }` or `bundleSkipped`, names only; no value reaches a record, a log line
   or a comment. `doctor` fails on an undeclared bundle profile and an unknown project, and `doctor --secrets` prints
   each bundle's variable names and count.
@@ -9577,3 +9625,4 @@ instead of drifting.
 | 2026-11-15 (#907) | REQ-OPERATOR-CONSOLE-SCREENS (a4) AMENDED for continuous library navigation, visual overlap expansion, bounded history loading, keyboard/touch inspection and stable live/Back state. REQ-CONSOLE-SECURITY UNCHANGED, checked: roles, CSP and read boundaries remain intact. |
 | 2026-11-16 (#912) | REQ-OPERATOR-CONSOLE-SCREENS (a4) AMENDED to preserve the original timeline presentation beyond colors and fonts: solid pills, project tags, segmented controls, quiet grid, bottom ruler and future shade, verified against original and regressed screenshots. The full-width interactive history behavior and REQ-CONSOLE-SECURITY are UNCHANGED, checked. |
 | 2026-11-16 (#922) | REQ-MODEL-POLICY, REQ-ADMIN-VIA-PI-EXTENSION and REQ-OPERATOR-CONSOLE-ACTIONS AMENDED for random initial model selection, durable CAS choice, quota-safe replacement, exact continuation binding and unchanged-style person controls. UNCHANGED, checked: CONST-ISOLATION-CONTAINER-PER-JOB, CONST-BUDGET-BEFORE-TOKENS, CONST-RETRY-INFRA-ONLY and CONST-PI-VERSION-PINNED; no additional paid attempt, new provider library or dependency pin. Legacy fixed and ordered-fallback policies retain their behavior. |
+| 2026-11-16 (#918, part 2) | `REQ-TRIGGER-SECRETS` AMENDED: `PI_DISPATCH_ENDPOINT_` is a reserved prefix for `run.secrets`, bundles and `PI_FORWARD_ENV`. Added `REQ-PRIVATE-ENDPOINTS`: a trigger's `run.privateEndpoints` grants its jobs, and no other, a declared host and port through the egress proxy, confirmed against the live triggers file before every attempt, with free refusals (`private-endpoint-withdrawn`, `-unknown`, `-proxy-outdated`, `-venue-unsupported`), a deferral for a full device and a hand-back on a fleet's shared queue. `REQ-EGRESS-ALLOWLIST`'s Scope AMENDED: this is its one named exception, and the rest of its line (no `run.network`, no settings key, no model-callable parameter) holds. `REQ-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked: no tool is added, and the existing tools refuse the field. `REQ-MCP-OPERATOR-SERVERS` UNCHANGED, checked: a server on a private endpoint is refused by the preflight as any undeclared host is. |

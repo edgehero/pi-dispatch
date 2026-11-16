@@ -608,6 +608,7 @@ test("every refusal sentence in write-plans.mjs is asserted word for word, and a
     const rows = [
       ["operator answer fields", plans.wideningFieldRefusal({ answerRules: [] }, "dispatch_trigger_edit"), "dispatch_trigger_edit cannot set answerRules: answer rules are hand-written and standing answers are adopted only by a person in the console"],
       ["reviewed merge permission", plans.wideningFieldRefusal({ mayMerge: true }, "dispatch_trigger_edit"), "dispatch_trigger_edit cannot set run.mayMerge or its policy reference: merge permission is set by hand in the reviewed triggers file, never by a tool"],
+      ["private endpoint grant", plans.wideningFieldRefusal({ run: { privateEndpoints: ["bench-device"] } }, "dispatch_trigger_edit"), "dispatch_trigger_edit cannot set run.privateEndpoints (sent as run.privateEndpoints): which private endpoints a trigger's jobs may reach is set by hand in the reviewed triggers file, never by a tool"],
       ["reviewed role map", plans.wideningFieldRefusal({ modelRoles: {} }, "dispatch_trigger_edit"), "dispatch_trigger_edit cannot set modelRoles: the role map is a reviewed operator file edit, never a tool write"],
       ["unknown trigger kind", plans.planTriggerAdd({ params: { kind: "telepathy", flow: "fix" }, paths, env }).refusal, "unknown trigger kind: kind must be one of cron, label, comment, pull_request, issue"],
       ["unknown trigger field", plans.planTriggerAdd({ params: { kind: "label", flow: "fix", labels: ["bug"], colour: "red" }, paths, env }).refusal, "dispatch_trigger_add does not take colour for a label trigger; it takes kind, flow, forge, repository, labels, any, backend, model, provider, maxTurns, progress, statusComment, recover, steer. Nothing was changed"],
@@ -927,6 +928,18 @@ test("a pause-windows file that cannot be read is not a file with no windows, fo
   }
 });
 
+
+test("a private endpoint grant cannot be supplied by a tool, under its name or a near miss the loader refuses, at any nesting (#918)", async () => {
+  const { wideningFieldRefusal } = await import("../src/write-plans.mjs");
+  for (const key of ["privateEndpoints", "private_endpoints", "privateEndpoint", "endpoints", "Endpoint", "PRIVATE-ENDPOINTS"]) {
+    for (const value of [["bench-device"], [], null, "bench-device"]) {
+      for (const params of [{ [key]: value }, { run: { [key]: value } }, { on: { [key]: value } }, { extra: [{ deep: { [key]: value } }] }]) {
+        assert.match(wideningFieldRefusal(params, "dispatch_trigger_edit"), /^dispatch_trigger_edit cannot set run\.privateEndpoints \(sent as [^)]*\): which private endpoints a trigger's jobs may reach is set by hand/, JSON.stringify(params));
+      }
+    }
+  }
+  assert.equal(wideningFieldRefusal({ run: { flow: "fix" } }, "dispatch_trigger_edit"), null, "a call without one is untouched");
+});
 
 test("merge permission and its policy reference cannot be supplied by a tool at any nesting", async () => {
   const { wideningFieldRefusal } = await import("../src/write-plans.mjs");

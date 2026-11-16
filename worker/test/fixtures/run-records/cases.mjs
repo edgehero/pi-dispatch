@@ -199,6 +199,8 @@ export function caseInput(name) {
 					steered: { delivered: 2, late: 1, withdrawn: 0 },
 					steerSkipped: "no-inbox",
 					bundle: { id: "prod-env", variables: ["DB_URL", "API_KEY"], shadowed: [], placeholders: 1, plain: 1, placeholderNames: ["API_KEY"] },
+					// Issue #918: the private endpoints the container was granted, and what enforced the grant.
+					privateEndpoints: { ids: ["lab", "bench-device"], basis: "openshell" },
 					liveSkipped: "no-capability",
 					openshell: { mode: "copy", ruleHosts: ["github.com", "api.anthropic.com"], ruleHostCount: 2, providers: 1, placeholders: 1 },
 					touches: [{ runId: "gh-9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d-r2", at: ms("2026-09-14T14:10:00.000Z"), cause: "steer" }],

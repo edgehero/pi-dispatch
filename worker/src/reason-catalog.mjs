@@ -34,6 +34,7 @@
 
 import {
 	MERGE_POLICY_COMMENTS,
+	PRIVATE_ENDPOINT_COMMENTS,
 	MODEL_AGENTS_INVALID_COMMENT, APPROVAL_COMMENTS,	BUNDLE_COMMENTS,
 	MODEL_NOT_ALLOWED_COMMENTS,
 	FAILED_COMMENT_BY_REASON,
@@ -63,6 +64,11 @@ const ROWS = [
 	["model-selection-policy-changed", "The saved choice or random pool is no longer authorized by the current policy.", "Review the pool and allowed models, then create a fresh run if the changed policy is intended."],
 	["model-selection-continuation-unavailable", "The original model cannot be bound to the saved continuation. Nothing was spent.", "Inspect the parked or approval request and its saved session; do not replace its model by retrying a different pool."],
 	...Object.entries(MERGE_POLICY_COMMENTS).map(([token, sentence]) => [token, sentence, "Review the current trigger on the worker, restart stale services and re-run the job."]),
+	// Issue #918: the private endpoint refusals, each with the step that clears it.
+	["private-endpoint-withdrawn", PRIVATE_ENDPOINT_COMMENTS["private-endpoint-withdrawn"], "Review the trigger's run.privateEndpoints on the worker, then re-run the job."],
+	["private-endpoint-unknown", PRIVATE_ENDPOINT_COMMENTS["private-endpoint-unknown"], "Declare the endpoint in this worker's private-endpoints.json and run `pi-dispatch egress render`, or take the id out of the trigger."],
+	["private-endpoint-proxy-outdated", PRIVATE_ENDPOINT_COMMENTS["private-endpoint-proxy-outdated"], "Run `pi-dispatch up` on the worker (`pi-dispatch service install --force` on rootless Podman), then re-run the job."],
+	["private-endpoint-venue-unsupported", PRIVATE_ENDPOINT_COMMENTS["private-endpoint-venue-unsupported"], "Run the trigger on the local or podman venue."],
 	["job-image-merge-policy-unsupported", "Refused: the job image cannot honor the trigger's merge permission. Nothing was spent.", REBUILD],
 	["watch-unavailable", "The worker could not resolve the watch reference safely. No investigation started.", "Check watch runtime configuration and worker availability."],
 	["watch-query-credential-missing", "A reviewed log query requires a host credential that is unavailable. No investigation started.", "Configure the named read-only query credential on the worker host."],

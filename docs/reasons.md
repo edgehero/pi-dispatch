@@ -295,6 +295,39 @@ merge permission. Nothing was spent.
 What to do: inspect the current trigger and rerun if its new policy is intended. Removing permission does not cancel
 an operation already accepted by the forge. See [trigger merge permission](triggers.md#allowing-a-job-to-land-its-change).
 
+### private-endpoint-withdrawn
+
+The job was queued with a private endpoint its trigger no longer grants (the trigger changed, was removed, or never
+granted it to a job of this kind). The worker reads the trigger again before every attempt, so a withdrawn endpoint is
+never reached. Nothing was spent.
+
+What to do: review the trigger's `run.privateEndpoints`, then run the job again if that is intended. See
+[Private endpoints](egress.md#private-endpoints).
+
+### private-endpoint-unknown
+
+The job's trigger grants a private endpoint this worker host does not declare in its `private-endpoints.json`. On a
+fleet that shares one queue the job waits for a host that declares it instead; this refusal is a host that runs its own
+queue, or a single host. Nothing was spent.
+
+What to do: declare the endpoint on this host and run `pi-dispatch egress render`, or take the id out of the trigger.
+`pi-dispatch doctor` lists what the host declares.
+
+### private-endpoint-proxy-outdated
+
+The job's trigger grants a private endpoint, and the egress proxy on this host was started before it could carry one:
+it mounts neither the private endpoints' folder nor this runtime's grant folder. Nothing was spent.
+
+What to do: run `pi-dispatch up` on the worker host (on rootless Podman, `pi-dispatch service install --force`), which
+replaces the proxy, then run the job again.
+
+### private-endpoint-venue-unsupported
+
+The job's trigger grants a private endpoint, and the venue it runs on writes its own network policy, which does not
+carry one yet. Nothing was spent.
+
+What to do: run the trigger on the `local` or `podman` venue.
+
 ### wait-skew
 
 The trigger declares wait conditions, but the job reached the worker without them, so it would have run at once. The

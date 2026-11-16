@@ -499,6 +499,10 @@ test("PI_FORWARD_ENV refuses every name the worker writes into a job's container
 			assert.throws(() => loadConfig({ ...env, PI_FORWARD_ENV: `FOO,${name}` }), (e) => e.piDispatchConfig === true && new RegExp(`PI_FORWARD_ENV must not forward ${name} -- the worker writes it into every job's container itself`).test(e.message), name);
 		}
 	}
+	// Issue #918: and every private endpoint variable, a prefix the worker writes per granted endpoint.
+	for (const name of ["PI_DISPATCH_ENDPOINT_BENCH_DEVICE_HOST", "PI_DISPATCH_ENDPOINT_X_PORT"]) {
+		assert.throws(() => loadConfig({ PI_FORWARD_ENV: `FOO,${name}` }), (e) => e.piDispatchConfig === true && new RegExp(`PI_FORWARD_ENV must not forward ${name} -- the worker writes it into every job's container itself`).test(e.message), name);
+	}
 	// HOME stays forwardable: the job-user path overrides it beside --user and says so at boot.
 	assert.deepEqual(loadConfig({ PI_FORWARD_ENV: "HOME" }).forwardEnv, ["HOME"]);
 });

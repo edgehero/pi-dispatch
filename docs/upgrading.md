@@ -303,7 +303,17 @@ Follow [the normal order](#the-order), then in each deployment folder:
    new compose file, then `docker compose ... --profile egress up -d` recreates the proxy.
 
 Until then, the proxy keeps the rules it has and nothing changes for any job; `pi-dispatch egress render` refuses to
-write a private endpoint the running proxy cannot carry, and doctor names the step. `up` puts the package's grant
+write a private endpoint the running proxy cannot carry, and doctor names the step. A job whose trigger names a
+private endpoint is refused before it spends (`private-endpoint-proxy-outdated`) until the proxy is replaced.
+
+Before a trigger names one (`run.privateEndpoints`), upgrade every worker, receiver and console: the field needs
+`triggers.json` version 7 and its jobs carry data version 8, which an older service refuses or holds. An older
+receiver that read the file at an older version would drop the field, and the worker refuses such a job
+(`trigger-skew`) rather than run it without the device.
+
+One more refusal: a name starting `PI_DISPATCH_ENDPOINT_` is now reserved for the worker. A `run.secrets` key with
+that prefix refuses the triggers file, a project bundle variable with it refuses its jobs (`secret-name-reserved`),
+and `PI_FORWARD_ENV` naming one refuses the boot. Rename any such variable before you upgrade. `up` puts the package's grant
 helper back whenever this folder's copy differs, keeping the old one beside it. No existing file is rewritten, and
 nothing older is detected: these are new stores.
 
@@ -392,8 +402,12 @@ Random checkpoints add a separate `cp-N/model-selection.json` annotation bound t
 
 `private-endpoints.json` (`PI_PRIVATE_ENDPOINTS_FILE`) is a new store, version 1, which an older release never reads.
 `egress-private/` holds what `egress render` and `init` write from it and from the package; `egress-grants/` holds
-one grant per running job, written and removed by the worker, and is not backed up. The steps are
-[above](#pending-release-private-endpoints).
+one grant per running job, written and removed by the worker, and is not backed up. `triggers.json` gains optional
+`run.privateEndpoints` at version 7, and a job carrying it is stamped job data version 8; an older service refuses
+the file or holds the job, and no existing file or job is migrated. The run record gains
+`privateEndpoints: { ids, basis }` on a granted job's record only, which an older reader ignores. The fleet's
+endpoint leases gain keys for a private endpoint's `slots`, hashed from `private:<id>`, under the model endpoints'
+key family. The steps are [above](#pending-release-private-endpoints).
 
 ### 5.3.3
 

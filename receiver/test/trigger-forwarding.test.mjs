@@ -55,6 +55,8 @@ const MAX_RUN = {
 	excludeExtensionTools: ["lint_run"],
 	// REQ-MCP-OPERATOR-SERVERS: the overlay MCP servers the job connects.
 	mcp: ["docs"],
+	// Issue #918: the private endpoints the job may reach. A route that drops the list runs a job that cannot reach them.
+	privateEndpoints: ["bench-device"],
 	provider: "openai",
 	model: "gpt-5.4",
 	maxTurns: 9,
@@ -162,8 +164,8 @@ function drive(forge, route, triggers) {
 // One triggers file holding ONE entry, so the only rule a delivery can match is the maximal one.
 function load(forge, entry, variant) {
 	const raw = { on: entry.on, run: { kind: forge, ...MAX_RUN, ...variant, ...(entry.extra ?? {}) } };
-	// The maximal fixture declares the newest trigger field it uses (mayMerge, issue #908).
-	const json = JSON.stringify({ version: variant?.modelSelection ? 6 : 4, triggers: [raw] });
+	// The maximal fixture declares the newest trigger field it uses (privateEndpoints, issue #918, at 7).
+	const json = JSON.stringify({ version: 7, triggers: [raw] });
 	const [normalized] = parseTriggers(json, "/t.json");
 	const cfg = {};
 	const res = reloadTriggers({ PI_TRIGGERS_FILE: "/t.json" }, cfg, { fileExists: () => true, readFile: () => json });
@@ -231,7 +233,8 @@ for (const [forge, entries] of Object.entries(ENTRIES)) {
 			if (normalized.run.mayMerge === true) {
 				const digest = mergePolicyDigest(normalized);
 				for (const [stage, value] of [["group", rule], ["filter", r.job], ["queue", data]]) assert.equal(value.mayMergePolicy, digest, `${stage} lost the reviewed trigger reference`);
-				assert.equal(data.dataVersion, 5);
+				// Stamped with the newest field the job carries: privateEndpoints (issue #918), at 8, above mayMerge's 5.
+				assert.equal(data.dataVersion, 8);
 				const check = makeCheckMergePolicy({ triggersPath: "/t.json", fs: { readFileSync: () => json } });
 				assert.deepEqual(check(data), { ok: true }, `${forge} ${entry.route}: the real pickup gate must accept the receiver's queued policy`);
 			}
@@ -267,7 +270,7 @@ test("each field ALONE reaches the job: one folded into a neighbour's conditiona
 		for (const [forge, entries] of Object.entries(ENTRIES)) {
 			for (const entry of entries) {
 				const raw = { on: entry.on, run: { kind: forge, flow: "work", ...(needs[field] ?? {}), [field]: value, ...(entry.extra ?? {}) } };
-				const json = JSON.stringify({ version: 4, triggers: [raw] });
+				const json = JSON.stringify({ version: 7, triggers: [raw] });
 				const [normalized] = parseTriggers(json, "/t.json");
 				const cfg = {};
 				assert.deepEqual(reloadTriggers({ PI_TRIGGERS_FILE: "/t.json" }, cfg, { fileExists: () => true, readFile: () => json }), { ok: true }, `${forge} ${entry.route}: ${field} alone must load`);

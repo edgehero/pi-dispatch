@@ -25,7 +25,7 @@
 import * as nodeFs from "node:fs";
 import { delimitedList } from "@edgehero/pi-dispatch/config";
 import { withinRoots } from "@edgehero/pi-dispatch/secret-profiles";
-import { ISSUE_ACTIONS, excludeExtensionToolsNearMiss, excludeExtensionsNearMiss, excludeToolsNearMiss, isModelRolesField, isMcpNearMiss, runModelFieldNearMiss, validateModelRef } from "@edgehero/pi-dispatch/triggers";
+import { ISSUE_ACTIONS, excludeExtensionToolsNearMiss, excludeExtensionsNearMiss, excludeToolsNearMiss, isModelRolesField, isMcpNearMiss, isPrivateEndpointsNearMiss, runModelFieldNearMiss, validateModelRef } from "@edgehero/pi-dispatch/triggers";
 import { DOLLAR_SETTING_KEYS, formatMicros, parseUsdMicros } from "@edgehero/pi-dispatch/money";
 import { modelIdProblem, providerIdProblem } from "@edgehero/pi-dispatch/model-ref";
 import { SIZE_LIMIT_FIELDS, USD_LIMIT_FIELDS } from "@edgehero/pi-dispatch/scoped-limits";
@@ -328,6 +328,22 @@ export function wideningFieldRefusal(params, tool) {
     return null;
   };
   const answerField = operatorAnswerField(params);
+  // Issue #918: run.privateEndpoints is a grant to reach a device no other job may reach, so, like the merge
+  // permission, no tool call may carry it, its own spelling or a near miss the loader refuses (isPrivateEndpointsNearMiss),
+  // at any depth. The edit tool spreads the entry's own run object, so a value written by hand survives every edit.
+  const privateSeen = new Set();
+  const privatePath = (value, path = "") => {
+    if (!value || typeof value !== "object" || privateSeen.has(value)) return null;
+    privateSeen.add(value);
+    for (const [key, entry] of Object.entries(value)) {
+      if (key === "privateEndpoints" || isPrivateEndpointsNearMiss(key)) return path + key;
+      const nested = privatePath(entry, path + key + ".");
+      if (nested !== null) return nested;
+    }
+    return null;
+  };
+  const privateAt = privatePath(params);
+  if (privateAt !== null) return `${tool} cannot set run.privateEndpoints (sent as ${privateAt}): which private endpoints a trigger's jobs may reach is set by hand in the reviewed triggers file, never by a tool`;
   if (answerField === "run.mayMerge") return `${tool} cannot set run.mayMerge or its policy reference: merge permission is set by hand in the reviewed triggers file, never by a tool`;
   if (answerField) return `${tool} cannot set ${answerField}: answer rules are hand-written and standing answers are adopted only by a person in the console`;
   const seen = new Set();

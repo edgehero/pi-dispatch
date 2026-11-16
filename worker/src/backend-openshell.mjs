@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { isJobNamespace, jobContainerName, JOB_NAME_PREFIX, reaperExec } from "./backend-local.mjs";
 import { FORGES } from "./forges.mjs";
-import { NON_SECRET_ENV_KEYS } from "./redact-secrets.mjs";
+import { isNonSecretEnvKey } from "./redact-secrets.mjs";
 import { BACKENDS, OPENSHELL_BACKEND, OPENSHELL_BIND_BACKEND } from "./backends.mjs";
 import { containerSpec, SHIPPED_IMAGE_UID, SIZE_LABEL_CPU, SIZE_LABEL_MEM, transfersFromSpec } from "./container-spec.mjs";
 import { BUNDLE_ENV_FILE_CAPABILITY, makeImagePreflight, normalizeImageId, resolveJobImage } from "./image-preflight.mjs";
@@ -237,7 +237,7 @@ export function rewriteMcpForSandbox(path, fs) {
  */
 export function secretNamesOf(env = {}) {
 	return Object.entries(env ?? {})
-		.filter(([key, value]) => !NON_SECRET_ENV_KEYS.has(key) && typeof value === "string" && value !== "" && PROVIDER_ENV_NAME.test(key))
+		.filter(([key, value]) => !isNonSecretEnvKey(key) && typeof value === "string" && value !== "" && PROVIDER_ENV_NAME.test(key))
 		.map(([key]) => key);
 }
 
@@ -251,7 +251,7 @@ const PROVIDER_ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/;
  */
 export function unbindableSecretNamesOf(env = {}) {
 	return Object.entries(env ?? {})
-		.filter(([key, value]) => !NON_SECRET_ENV_KEYS.has(key) && typeof value === "string" && value !== "" && !PROVIDER_ENV_NAME.test(key))
+		.filter(([key, value]) => !isNonSecretEnvKey(key) && typeof value === "string" && value !== "" && !PROVIDER_ENV_NAME.test(key))
 		.map(([key]) => key);
 }
 
@@ -596,7 +596,7 @@ export function openshellExecArgs({ name, env = {}, gateway = null, mode = "copy
 	// name). Rejected: `--env` as built first (the log), a provider (the agent would hold useless placeholders for a
 	// value it must use itself), `sandbox create --env` (the same flag, kept in the gateway's sandbox spec besides).
 	const envArgs = [];
-	const carried = Object.fromEntries(Object.entries(env ?? {}).filter(([key]) => NON_SECRET_ENV_KEYS.has(key)));
+	const carried = Object.fromEntries(Object.entries(env ?? {}).filter(([key]) => isNonSecretEnvKey(key)));
 	for (const [key, value] of Object.entries({ ...carried, ...(gitCredentialEnv(env) ?? {}), HOME: "/home/pi" })) {
 		if (value === undefined || value === null) continue;
 		envArgs.push("--env", `${key}=${value}`);

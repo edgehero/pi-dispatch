@@ -307,7 +307,7 @@ function makeBeforePickupRecorder({ projects, settleSteerBeforePickup, recordRun
 	};
 }
 
-export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, readModelRoles = () => ({}), hostBudget = null, abortGraceMs = ABORT_GRACE_MS, applyConcurrency = () => {}, pauseUntil = () => null, pauseWindowsNewer = () => false, triggersNewer = () => false, scopedLimits = () => [], projects = () => [], jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, settledRecord = null, previousRecord = null, timeoutMs = JOB_TIMEOUT_MS, jobLimits = () => ({}), claimRefreshMs = CLAIM_REFRESH_MS, minuteMs = 60_000, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", multiHost = false, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random, cpus = availableParallelism, runningJobs = makeRunningJobs(), valkeyTag = null }) {
+export function makeProcessor({ cancelJob, stopContainer, containerName = (job) => jobContainerName(job.id), redis, getSettings, readModelRoles = () => ({}), hostBudget = null, abortGraceMs = ABORT_GRACE_MS, applyConcurrency = () => {}, pauseUntil = () => null, pauseWindowsNewer = () => false, triggersNewer = () => false, scopedLimits = () => [], projects = () => [], jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), hostBound = null, checkLease = null, scopeLease = null, endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, privateEndpoints = null, overlayModels = () => null, endpointSetFor = mainModelEndpoints, deps, recordRun = () => {}, settledRecord = null, previousRecord = null, timeoutMs = JOB_TIMEOUT_MS, jobLimits = () => ({}), claimRefreshMs = CLAIM_REFRESH_MS, minuteMs = 60_000, cancelPollMs = 2_000, cancelStopBoundMs = CANCEL_STOP_BOUND_MS, hostName = "", multiHost = false, now = () => Date.now(), waitState = makeWaitState({ redis, now }), afterMaxMs = () => WAIT_AFTER_MAX_DEFAULT_MS, checkSlots = makeInFlight(), checkSlotCount = () => 1, checkTimeoutMs = () => 10_000, concurrencyNow = () => 3, intervalMs = () => WAIT_INTERVAL_FLOOR_MS * 2, maxWaitMs = () => 24 * 3600 * 1000, maxChecks = () => 96, maxFaults = () => 5, random = Math.random, cpus = availableParallelism, runningJobs = makeRunningJobs(), valkeyTag = null }) {
 	// The lost-lock gate's rejection lines, said ONCE per job id, stall count and attempt. The gate runs before every
 	// deferral (pause window, wait, scope or endpoint busy), and BullMQ never resets a job's stall count, so a stalled
 	// scheduled job whose record is refused meets the gate again on every deferred pickup: a 30-minute scope-busy hold
@@ -1438,6 +1438,72 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			}
 		}
 
+		// THE PRIVATE ENDPOINT GATE (issue #918, INT-PRIVATE-ENDPOINTS-FILE-CONTRACT). The private endpoints a job's trigger
+		// grants it, read against THIS host's declaration once per pickup; the processor's free gate decides on the same
+		// read (`privateEndpointsDeclared`), so a job takes no slot on a host that then hands it on or refuses it. Each
+		// endpoint that declares `slots` takes one, under `private:<id>`, in id order AFTER the model endpoints' holds, so
+		// the order rule that rules out a cycle holds across both. Its own step, after BOTH the main gate above and the
+		// failover branch: inside the failover's `acquireEndpoints` a full device would read as "skip this model" and push
+		// the job onto a fallback model (model-failover.mjs), and nested in the main gate a host with no model endpoint
+		// would take no private slot at all. The fleet half is keyed `private:<id>`, never the bare id, so a model endpoint
+		// and a private endpoint that share an id on two hosts never share a bound. No `slots`, no hold at all. A full
+		// device defers, never refuses (CONST-RETRY-INFRA-ONLY), with everything taken so far given back.
+		let privateDeclared = [];
+		// Whether this pickup took (or needed none of) every slot the job's private endpoints declare: false when the
+		// recheck here did not confirm the grant or an id is not declared. The processor holds a job it would grant
+		// while this is false, so a job never runs on a device without its slot.
+		let privateHeld = false;
+		const privateIds = Array.isArray(job.data?.privateEndpoints) ? [...new Set(job.data.privateEndpoints.filter((id) => typeof id === "string"))].sort() : [];
+		// The live recheck first, the one the processor makes again before it decides (a file read, free): a job its trigger
+		// no longer grants, or whose file cannot be read or is newer, takes no slot, so it is never left waiting on a device
+		// it will be refused. Only the processor's answer refuses or holds.
+		let privateLive = privateIds.length > 0;
+		if (privateLive && typeof deps?.checkPrivateEndpoints === "function") {
+			try {
+				privateLive = (await deps.checkPrivateEndpoints(job.data, { queueJobId: job.id }))?.ok === true;
+			} catch {
+				privateLive = false;
+			}
+		}
+		if (privateEndpoints && privateIds.length > 0 && !settingsThrew && !settings?.invalid) {
+			// Read whenever the job names one, whatever the recheck said here: the processor decides on this read, and its own
+			// recheck may answer otherwise a moment later.
+			try {
+				privateDeclared = privateEndpoints() ?? [];
+			} catch (err) {
+				// The declaration is a ref the boot and the watcher fill; a throw here is a defect, and the job is then this
+				// host's to refuse or hand on (it declares nothing), never one run without its grant.
+				deps?.log?.("private_endpoint_gate_unavailable", { jobId: job.id, reason: scrubCredentials(err?.message) });
+				privateDeclared = [];
+			}
+			const set = privateIds.map((id) => privateDeclared.find((e) => e?.id === id));
+			if (privateLive && set.every(Boolean)) {
+				privateHeld = true;
+				for (const endpoint of set.filter((e) => Number.isInteger(e.slots))) {
+					const key = `private:${endpoint.id}`;
+					let where = null;
+					let fleet = null;
+					if (!endpointSlots.tryAcquire(key, endpoint.slots)) {
+						where = "host";
+					} else if (endpointLease && !isPerMachineHost(endpoint.host)) {
+						fleet = await endpointLease.acquire(job.id, { slots: endpoint.slots, keyArgs: [hash16(key)] });
+						if (!fleet) {
+							endpointHolds.push({ id: key, fleet: null });
+							where = "fleet";
+						} else if (fleet.degraded) {
+							deps?.log?.("endpoint_lease_degraded", { jobId: job.id, endpoint: endpoint.id });
+						}
+					}
+					if (where !== null) {
+						await releaseAllHolds();
+						deps?.log?.("private_endpoint_busy_deferred", { jobId: job.id, endpoint: endpoint.id, where, delayMs: ENDPOINT_BUSY_RECHECK_MS });
+						await deferTo(job, token, nowMs + ENDPOINT_BUSY_RECHECK_MS, "private-endpoint", { project, endpoint: endpoint.id });
+					}
+					endpointHolds.push({ id: key, fleet });
+				}
+			}
+		}
+
 		// THE HOST BUDGET GATE (issue #596, phase 2, DES-HOST-BUDGET), LAST of the gates, so a job waits on the budget only
 		// when the budget is its only obstacle: a job a scope, its project's `concurrent` or an endpoint deferred never got
 		// here, so its hold (if it had one) is suspended rather than kept (`processor` above). Synchronous: the ledger is
@@ -1803,6 +1869,8 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// Issue #704 review: a bundle profile this host lacks defers a job on a multi-host worker's SHARED queue
 				// (another host may serve it), the never-fits gate's predicate above; elsewhere it refuses.
 				bundleProfileDeferrable: multiHost && (job.queueName ?? QUEUE) === QUEUE,
+				// Issue #918: this host's declaration as the private endpoint gate above read it, and the same hand-back rule.
+				...(privateIds.length > 0 ? { privateEndpointsDeclared: privateDeclared, privateEndpointsDeferrable: multiHost && (job.queueName ?? QUEUE) === QUEUE, privateEndpointsHeld: privateHeld } : {}),
 				folderProject: (folder) => projectOf({ kind: "local", folder }, pickupProjects),
 				// Issue #596: the size resolved at pickup above, for the retained run's manifest and the container's argv.
 				jobSize: size,
@@ -2141,6 +2209,19 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// then skips, and would read the overlay a second time per pickup. The cost of staying is that each recheck
 			// re-runs the gates above it (a held wait is re-asked, the scope is re-acquired, the image and egress
 			// preflights re-run), all free reads, once a minute per held job.
+			// Issue #918: a private endpoint this host does not declare, on a multi-host worker's shared queue
+			// (`PrivateEndpointHold`): handed back for the never-fits gate's recheck without spending an attempt, so a host
+			// that declares it can take the job; the bundle profile's hold below, and for its reasons.
+			// Or, `slot`, a grant the processor confirmed that this pickup's own read did not, so no slot was taken: back
+			// at the endpoint re-check, where the next pickup takes it.
+			if (error?.privateEndpointHold === true && error.slot === true) {
+				deps?.log?.("private_endpoint_hold", { jobId: job.id, delayMs: ENDPOINT_BUSY_RECHECK_MS, slot: true });
+				await deferTo(job, token, now() + ENDPOINT_BUSY_RECHECK_MS, "private-endpoint", { project, ...(typeof error.endpoint === "string" ? { endpoint: error.endpoint } : {}) });
+			}
+			if (error?.privateEndpointHold === true && error.slot !== true) {
+				deps?.log?.("private_endpoint_hold", { jobId: job.id, delayMs: NEVER_FITS_RECHECK_MS, slot: false });
+				await deferTo(job, token, now() + NEVER_FITS_RECHECK_MS, "private-endpoint-host", { project, ...(typeof error.endpoint === "string" ? { endpoint: error.endpoint } : {}) });
+			}
 			if (error?.bundleProfileHold === true) {
 				deps?.log?.("secret_bundle_profile_hold", { jobId: job.id, delayMs: NEVER_FITS_RECHECK_MS, reason: typeof error.reason === "string" ? error.reason : null });
 				await deferTo(job, token, now() + NEVER_FITS_RECHECK_MS, "bundle-profile", { project });
@@ -2426,7 +2507,7 @@ export function keeperHoldState(job, at) {
 	return { at, since, startedMs };
 }
 
-export function createWorker({ connection, name, stopContainer, containerName, hostQueue = null, checkLease = null, scopeLease = null, checkTimeoutMs, concurrency, getSettings, readModelRoles, redis, deps, recordRun, settledRecord = null, previousRecord = null, limiter, pauseUntil, pauseWindowsNewer, triggersNewer, scopedLimits, projects, jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), waitState, afterMaxMs, jobLimits, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, overlayModels, extraClosers = [], hostBudget: hostBudgetOptions = null, runningJobs = makeRunningJobs() }) {
+export function createWorker({ connection, name, stopContainer, containerName, hostQueue = null, checkLease = null, scopeLease = null, checkTimeoutMs, concurrency, getSettings, readModelRoles, redis, deps, recordRun, settledRecord = null, previousRecord = null, limiter, pauseUntil, pauseWindowsNewer, triggersNewer, scopedLimits, projects, jobSizeEnv = {}, allocation = null, inFlight = makeInFlight(), waitState, afterMaxMs, jobLimits, checkSlots = makeInFlight(), checkSlotCount, concurrencyNow, intervalMs, maxWaitMs, maxChecks, maxFaults, hostSlots = makeInFlight(), endpointSlots = makeInFlight(), endpointLease = null, modelEndpoints = null, privateEndpoints = null, overlayModels, extraClosers = [], hostBudget: hostBudgetOptions = null, runningJobs = makeRunningJobs() }) {
 	// One Worker per queue name (issue #57). A host-affine job -- one whose folder, secret resolver or wait
 	// check lives on THIS machine -- is enqueued to `pi-jobs@<name>` rather than filtered for at pickup,
 	// because BullMQ has no selective pop and the put-it-back alternative does not work: promotion out of
@@ -2524,6 +2605,8 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 			endpointSlots,
 			endpointLease,
 			modelEndpoints,
+			// Issue #918: this host's declared private endpoints, read per pickup.
+			privateEndpoints,
 			overlayModels,
 			// Issue #230. Undefined pass-throughs take makeProcessor's own defaults (a wait state over the same
 			// redis client, and the shared 30-day `after` ceiling), so a bare wiring behaves like a wired one.

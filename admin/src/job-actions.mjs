@@ -496,6 +496,9 @@ function runFieldsOf(entry, flow) {
     ...(run.excludeExtensions !== undefined ? { excludeExtensions: run.excludeExtensions } : {}),
     ...(run.excludeExtensionTools !== undefined ? { excludeExtensionTools: run.excludeExtensionTools } : {}),
     ...(run.mcp !== undefined ? { mcp: run.mcp } : {}),
+    // Issue #918: the private endpoints the trigger grants, as the filters carry them; the worker confirms the grant
+    // against the live file before the run, so a console job is granted no more than a receiver one.
+    ...(run.privateEndpoints !== undefined ? { privateEndpoints: run.privateEndpoints } : {}),
     ...(run.provider !== undefined ? { provider: run.provider } : {}),
     ...(run.model !== undefined ? { model: run.model } : {}),
     ...(run.maxTurns !== undefined ? { maxTurns: run.maxTurns } : {}),
@@ -589,6 +592,9 @@ function currentTriggerFor(entries, kind, data) {
   if (!typeOk) return { refusal: `${TRIGGER_CHANGED} (the trigger at index ${index} is a ${String(on.type)} trigger now, not ${String(matched.type)})` };
   if (typeof matched.action === "string" && !(Array.isArray(on.action) && on.action.includes(matched.action))) return { refusal: `${TRIGGER_CHANGED} (the trigger at index ${index} no longer fires on ${matched.action})` };
   if (typeof matched.label === "string" && ![...(on.any ?? []), ...(on.all ?? [])].includes(matched.label)) return { refusal: `${TRIGGER_CHANGED} (the trigger at index ${index} no longer selects the label ${matched.label})` };
+  // The phrase too (issue #918's review): the worker's merge and private endpoint checks hold a comment job to it, so a
+  // re-run planned past a changed phrase would only be refused there, under a reason that names the wrong change.
+  if (typeof matched.phrase === "string" && on.phrase !== matched.phrase) return { refusal: `${TRIGGER_CHANGED} (the trigger at index ${index} no longer answers the phrase it matched)` };
   if (run.command !== undefined) return { refusal: `${TRIGGER_CHANGED} (the trigger at index ${index} runs a command now)` };
   if (data.flow !== run.flow) {
     const routed = matched.type === "comment" && entries.some((e) => e.on.type !== "cron" && e.run.flow === data.flow);

@@ -20,7 +20,7 @@ import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, parseWaitProfiles } 
 import { imageRefProblem } from "./image-ref.mjs";
 import { jobSizeDefaults } from "./job-size.mjs";
 import { hostBudgetSettings } from "./host-budget.mjs";
-import { CONTAINER_ENV_NAMES, KEYLESS_ENV_NAME, RUNNER_ENV_NAMES } from "./reserved-env.mjs";
+import { CONTAINER_ENV_NAMES, KEYLESS_ENV_NAME, RUNNER_ENV_NAMES, isPrivateEndpointEnvName } from "./reserved-env.mjs";
 import { JOB_IDLE_MINUTES_DEFAULT, JOB_IDLE_MINUTES_MAX, JOB_MINUTES_MAX, JOB_STALL_MINUTES_DEFAULT } from "./job-limits.mjs";
 import { modelIdProblem, modelListProblem, providerIdProblem } from "./model-ref.mjs";
 import { WORKER_NAME_RE } from "./worker-name.mjs";
@@ -209,7 +209,8 @@ export function forwardEnvList(raw, egressArmed = false) {
 	// `PI_MAX_TURNS` would lift the turn limit. One rule over the whole closed set rather than a list of the ones that
 	// happen to matter today. HOME is the one exception, and an old one: forwarding it is supported, the job-user path
 	// overrides it beside `--user` and says so at boot (`forward_env_home_overridden`).
-	const owned = names.filter((n) => CONTAINER_ENV_NAMES.has(n) && n !== "HOME" && n !== KEYLESS_ENV_NAME);
+	// Issue #918: and every private endpoint variable, a prefix (`isPrivateEndpointEnvName`): the worker writes each one.
+	const owned = names.filter((n) => (CONTAINER_ENV_NAMES.has(n) || isPrivateEndpointEnvName(n)) && n !== "HOME" && n !== KEYLESS_ENV_NAME);
 	if (owned.length > 0) {
 		throw configError(`PI_FORWARD_ENV must not forward ${owned.join(", ")} -- the worker writes ${owned.length === 1 ? "it" : "them"} into every job's container itself, and a forwarded host value would replace the per-job one (a forwarded PI_MODEL runs a model the pre-spend checks never saw)`);
 	}

@@ -27,6 +27,7 @@
  *     because a malformed line can be the second half of a value.
  */
 
+import { isPrivateEndpointEnvName } from "./reserved-env.mjs";
 import { spawn } from "node:child_process";
 import { providerKeyCandidates } from "./env-allowlist.mjs";
 import { findDuplicateKey } from "./json-duplicates.mjs";
@@ -218,7 +219,7 @@ export function makeBundleResolver({ envBundles = {}, roots = [], forwardEnv = [
 		// the provider credential BEFORE the secrets loop, so a bundle carrying ANTHROPIC_API_KEY would silently
 		// replace the key every job of the project spends (secrets.mjs records the class).
 		const reserved = new Set([...RESERVED_ENV_NAMES, ...providerKeyCandidates(job?.provider), ...forwardEnv]);
-		const clash = Object.keys(parsed.vars).find((name) => reserved.has(name) || bundleLoaderName(name));
+		const clash = Object.keys(parsed.vars).find((name) => reserved.has(name) || isPrivateEndpointEnvName(name) || bundleLoaderName(name));
 		if (clash !== undefined) return { reserved: clash };
 		return { ok: true, vars: parsed.vars };
 	}

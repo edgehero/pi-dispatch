@@ -354,7 +354,7 @@ export const fleetDelayed = wrap("Delayed", (s, v) => {
     DEFER_WHYS,
   ).map(
     ([why, d]) =>
-      html`<li><span class="code">${why}</span>: ${d.sentence.replace(/\{([a-z]+)\}/g, (_match, name) => ({ host: "the host", until: "its next scheduled check", holder: "the preceding run", endpoint: "the model endpoint", attempt: "the current attempt", attempts: "the allowed attempts", due: "its due time" })[name] ?? `its ${name}`)}</li>`,
+      html`<li><span class="code">${why}</span>: ${d.sentence.replace(/\{([a-z]+)\}/g, (_match, name) => ({ host: "the host", until: "its next scheduled check", holder: "the preceding run", endpoint: why.startsWith("private-endpoint") ? "its trigger names" : "the model endpoint", attempt: "the current attempt", attempts: "the allowed attempts", due: "its due time" })[name] ?? `its ${name}`)}</li>`,
   )} </ul> <p> Pause windows move to their end and reserve nothing. Retry backoff starts at 60 seconds and grows; scope and host slots ask after 5 seconds, endpoints after 7 seconds, host budget about every 9 seconds (keeping its place), and never-fits after 60 seconds for another host. </p> </details>`;
 });
 

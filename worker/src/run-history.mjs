@@ -590,6 +590,29 @@ const BUNDLE_NAMES_MAX = 64;
 const BUNDLE_VAR_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 const BUNDLE_ID = /^[A-Za-z0-9._-]{1,128}$/;
 
+/** What enforced a private endpoint grant (issue #918): the proxy, a venue's own policy, or nothing (`PI_EGRESS=0`). */
+export const PRIVATE_ENDPOINT_BASES = Object.freeze(["proxy", "openshell", "unenforced"]);
+/**
+ * The id grammar and the most ids one record's `privateEndpoints` holds: the loaders' `MODEL_ENDPOINT_ID_RE` and
+ * `PRIVATE_ENDPOINTS_MAX`, copied rather than imported so this module stays light enough for the console's bundle, and
+ * held to them by `private-endpoints-job.test.mjs`.
+ */
+export const RECORD_PRIVATE_ID_RE = /^[a-z0-9-]{1,32}$/;
+export const RECORD_PRIVATE_MAX = 8;
+
+/**
+ * The record's `privateEndpoints` (issue #918): `{ ids, basis }` from the processor, or null when there is none or it
+ * does not hold its shape (ids of the id grammar, 1 to 8, unique; a basis from `PRIVATE_ENDPOINT_BASES`). A record never
+ * carries a host or a port: the ids are the operator's names for them, and the console joins them to the declaration.
+ */
+export function recordedPrivateEndpoints(p) {
+	if (p === null || typeof p !== "object" || Array.isArray(p)) return null;
+	const ids = p.ids;
+	if (!Array.isArray(ids) || ids.length === 0 || ids.length > RECORD_PRIVATE_MAX || !ids.every((id) => typeof id === "string" && RECORD_PRIVATE_ID_RE.test(id)) || new Set(ids).size !== ids.length) return null;
+	if (!PRIVATE_ENDPOINT_BASES.includes(p.basis)) return null;
+	return { ids: [...ids].sort(), basis: p.basis };
+}
+
 /**
  * The record's `bundle` (issue #704): `{ id, variables, shadowed, placeholders?, plain?, placeholderNames? }`, the bundle's id and the
  * variable NAMES the job received from it and the ones the trigger's own run.secrets shadowed, sorted, and on an
@@ -1072,6 +1095,7 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 	if (bundle !== null && !Object.hasOwn(OPENSHELL_VENUE_MODES, backend)) delete bundle.placeholderNames;
 	const bundleSkipped = bundle === null && BUNDLE_SKIPPED_REASONS.includes(source.bundleSkipped) ? source.bundleSkipped : null;
 	const loaded = recordedLoaded(source.loaded);
+	const privateEndpoints = recordedPrivateEndpoints(source.privateEndpoints);
 	const jobCreatedAt = jobCreatedAtOf(job);
 	return {
 		jobId: job.id,
@@ -1338,6 +1362,9 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		// closed shape (loaded-record.mjs says which and what is left).
 		...(loaded !== null ? { loaded } : {}),
 		...(validLocalEvent(data.localEvent) ? { localEvent: { id: data.localEvent.id, forge: data.localEvent.forge, type: data.localEvent.type, digest: data.localEvent.digest } } : {}),
+		// Issue #918: the private endpoints this run's container was granted, and what enforced the grant: only on a run
+		// that held one, so every other record is byte-identical. Operator ids, never a host or a port.
+		...(privateEndpoints !== null ? { privateEndpoints } : {}),
 		// When the job under this id was created (issue #811, INT-RUN-HISTORY-FILE-CONTRACT): BullMQ's `job.timestamp`, the
 		// add's moment, kept across every retry, stall and deferral of the job, as an ISO string. An id comes back after a
 		// lost queue and a hand redelivery, while an older job's touch events stay in the touch index, so the Zero touch

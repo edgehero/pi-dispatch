@@ -363,9 +363,10 @@ nothing more about them.
 
 ## Private endpoints
 
-**Status (#918, part 1 of 4):** you can declare private endpoints and render their rules, and the proxy carries them.
-No trigger can name one yet and the worker writes no grant, so every job gets the proxy's refusal for every private
-endpoint until the binding lands in the same release.
+**Status (#918, parts 1 and 2 of 4):** you can declare private endpoints, render their rules and name them on a
+trigger, and the worker grants them to that trigger's jobs on the `local` and `podman` venues. A job on an OpenShell
+venue that names one is refused before it spends anything, until a later part of the same release; doctor's lines and
+the console's view come in the same release too.
 
 A private endpoint is one host and one TCP port on your own network, a test device's SSH on port 22 say, that only
 the jobs of the triggers naming it may reach. Like a model server, it is a `CONNECT` tunnel through the proxy to
@@ -395,6 +396,88 @@ server, every other job gets the proxy's refusal for it. Until a trigger names i
    grant helper answers inside it as squid's own user. If not, it writes nothing and names the step that fixes it.
 
 3. **Reload** the proxy with the command it printed. A reload keeps running jobs and their tunnels.
+
+### Name it on a trigger
+
+```json
+{ "on": { "type": "label", "any": ["hil"] },
+  "run": { "kind": "github", "flow": "test-on-device", "privateEndpoints": ["bench-device"] } }
+```
+
+`run.privateEndpoints` lists 1 to 8 ids from `private-endpoints.json`, on a forge trigger (label, comment, pull
+request, issue), a cron trigger or a local event trigger; a watch trigger takes none. It needs triggers file version 7
+([the file's version](triggers.md#the-files-version)). You write it by hand: the console's trigger tools never write it, and a
+tool call that carries it, or a near miss of its name, is refused. A near miss in the file (`endpoints`,
+`privateEndpoint`, `private_endpoints`) is refused when the file loads rather than dropped.
+
+Before every attempt, a recovered one included, the worker reads the triggers file again, and grants a job only the
+endpoints its trigger still names: take an id out of a trigger and every queued job of it loses that endpoint, and is
+refused (`private-endpoint-withdrawn`) rather than run without it. An id this host does not declare is refused
+(`private-endpoint-unknown`); on a fleet's shared queue the job is handed back for a host that declares it instead.
+Both cost nothing: they come before the token, the clone and the budget ([reasons.md](reasons.md)).
+
+The job's environment holds each granted endpoint's host and port, under the id upper-cased with `-` as `_`:
+
+```text
+PI_DISPATCH_ENDPOINT_BENCH_DEVICE_HOST=10.0.5.20
+PI_DISPATCH_ENDPOINT_BENCH_DEVICE_PORT=22
+```
+
+They are not secrets, so a transcript shows them. No secret, forwarded variable or bundle can set a name that starts
+with `PI_DISPATCH_ENDPOINT_`, and a job granted nothing has none.
+
+### Reach it over SSH
+
+A job reaches the device the one way the proxy allows: a `CONNECT` tunnel through the proxy, whose address is in
+`HTTPS_PROXY`. With OpenSSH and the OpenBSD netcat:
+
+```sh
+ssh -o ProxyCommand="nc -X connect -x ${HTTPS_PROXY#http://} %h %p" \
+  -p "$PI_DISPATCH_ENDPOINT_BENCH_DEVICE_PORT" tester@"$PI_DISPATCH_ENDPOINT_BENCH_DEVICE_HOST" uname -a
+```
+
+The shipped job image has neither `ssh` nor `nc`. Add them, and the device's host key, in a derived image
+([job-image.md](job-image.md)):
+
+```dockerfile
+FROM ghcr.io/edgehero/pi-job:5.3.3
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends openssh-client netcat-openbsd \
+    && rm -rf /var/lib/apt/lists/*
+COPY bench_known_hosts /etc/ssh/ssh_known_hosts
+USER pi
+```
+
+The private key is a secret ([secrets.md](secrets.md)). A secret arrives as a variable, and ssh reads a key from a
+file, so until a secret can arrive as a file (issue #919) the flow writes it with `umask 077` before the first `ssh`.
+
+### Slots
+
+`slots` bounds how many jobs hold the device at once, on this host and, when the workers share Valkey, across the
+fleet, as a model server's `slots` do. A job that finds every slot taken waits, and the console's waiting list says
+which endpoint it waits for (`private-endpoint`); it is never refused for it. Without `slots` there is no bound. A slot
+takes turns and resets nothing: what one job leaves on the device, the next one finds.
+
+### Venues, and the egress policy off
+
+| Where the job runs | A job its trigger grants an endpoint |
+|---|---|
+| `local` (Docker) and `podman` | reaches it through the proxy, which enforces the grant; the run record says `privateEndpoints.basis: "proxy"` |
+| `openshell` and `openshell-bind` | is refused before it spends (`private-endpoint-venue-unsupported`) for now |
+| a proxy started before #918, without the two folder mounts | is refused before it spends (`private-endpoint-proxy-outdated`): `pi-dispatch up` replaces the proxy |
+| any venue with `PI_EGRESS=0` | dials the device directly, as every job can, since no proxy stands in between; its environment is set as above, and the record says `basis: "unenforced"` |
+
+The run record names the endpoints a job was granted by id (never a host or a port), with that basis
+(`INT-RUN-HISTORY-FILE-CONTRACT`).
+
+### What it does not cover
+
+- Removing a grant does not cut a tunnel that is already open; the next connection is refused.
+- Processes on the worker host can reach the proxy's address on a job's network, so while that job runs they can use
+  its grant.
+- The device is within reach of every job of every trigger that names it, and keeps its state between them.
+- An MCP server on a private endpoint is not reachable: the MCP preflight admits the allowlist and the model servers
+  only.
 
 ### How the proxy tells one job from another
 

@@ -1,7 +1,7 @@
 import { cleanTouch, touchScopeOf } from "./touch-state.mjs";
 import { SubscriptionWait } from "./subscription-wait.mjs";
 import { mergePolicyJobProblem } from "./merge-policy.mjs";
-import { MERGE_POLICY_COMMENTS } from "./comment-tables.mjs";
+import { MERGE_POLICY_COMMENTS, PRIVATE_ENDPOINT_COMMENTS } from "./comment-tables.mjs";
 import { readQuestionContext } from "./question-context.mjs";
 import { stageModelRoleInputs } from "./agent-snapshot.mjs";
 import { effectiveCostCapMicros } from "./money.mjs";
@@ -18,7 +18,7 @@ import { PROJECT_CAP_REASON } from "./scoped-limits.mjs";
 import { DEFAULT_SECRETS_PROFILE, secretsArmed } from "./secrets.mjs";
 import { mergeBundleSecrets } from "./secret-bundles.mjs";
 import { providerKeyCandidates } from "./env-allowlist.mjs";
-import { RESERVED_ENV_NAMES } from "./triggers.mjs";
+import { isReservedEnvName } from "./triggers.mjs";
 import { imageFactsOf, loadedWithBase, loadedWithImage } from "./loaded-record.mjs";
 import { mcpRefusalComment } from "./mcp-preflight.mjs";
 import { EXIT_COMPLETED, EXIT_INFRA, EXIT_POLICY } from "./exit-code.mjs";
@@ -427,9 +427,11 @@ async function runJobInner(job, deps) {
 	// Issue #704: what this attempt did with the project's secret bundle, for the record (`bundle` or `bundleSkipped`).
 	const bundleFacts = { bundle: null, bundleSkipped: null };
 	const archiveFacts = { value: null };
+	// Issue #918: the private endpoints this attempt's container was granted, for the record (`privateEndpoints`).
+	const privateFacts = { value: null };
 	let result;
 	try {
-		result = await runAttempt(job, deps, durable, bundleFacts, archiveFacts);
+		result = await runAttempt(job, deps, durable, bundleFacts, archiveFacts, privateFacts);
 		if (approval?.audit && !result?.approval) result = { ...result, approval: approval.audit };
 		if (approval?.request && result?.outcome === "policy") {
 			const closed = await deps.approvalRuntime.finish({ requestId: approval.request.requestId, jobId: deps.approvalJobId });
@@ -440,6 +442,7 @@ async function runJobInner(job, deps) {
 		if (approval?.audit && e && typeof e === "object") e.approval = approval.audit;
 		tagDurable(e, durable);
 		tagBundle(e, bundleFacts);
+		tagPrivateEndpoints(e, privateFacts);
 		// A RECOVERY job has one attempt (recovery-queue.mjs), so a never-started retry would fail it for good over a
 		// blip (a pointer read, a ledger write, a restore that met a lock). Every such throw becomes a wait hold instead:
 		// `makeProcessor` delays it without spending the attempt, and the run's recovery deadline (`recoverBy`, the
@@ -448,6 +451,7 @@ async function runJobInner(job, deps) {
 			const hold = new RecoveryWaitHold(e.message, { cause: e, reason: e.reason, provider: e.provider, model: e.model, budgetReserved: e.budgetReserved, dollars: e.dollars, resources: e.resources, exitCode: e.exitCode, turns: e.turns, tokens: e.tokens, session: e.session, usage: e.usage, waitMs: RECOVERY_RETRY_WAIT_MS });
 			tagDurable(hold, durable);
 			tagBundle(hold, bundleFacts);
+			tagPrivateEndpoints(hold, privateFacts);
 			deps?.log?.("recovery_retry_held", { delayMs: RECOVERY_RETRY_WAIT_MS });
 			throw hold;
 		}
@@ -457,7 +461,26 @@ async function runJobInner(job, deps) {
 	// and not `recovery-superseded`: that one is decided on a pointer read that came back empty, and an empty read must
 	// never be the reason another run's store is deleted; the run that settled cleaned up after itself.
 	if (durable.armed && result?.reason !== RECOVERY_ENQUEUED && result?.reason !== RECOVERY_SUPERSEDED) await endDurableRun(durable, deps);
-	return withBundle(withDurable(archiveFacts.value ? { ...result, forkSource: archiveFacts.value } : result, durable), bundleFacts);
+	return withPrivateEndpoints(withBundle(withDurable(archiveFacts.value ? { ...result, forkSource: archiveFacts.value } : result, durable), bundleFacts), privateFacts);
+}
+
+/**
+ * The private endpoints the attempt's container was granted (issue #918), `{ ids, basis }`, added to a result or tagged
+ * on a throw only when there were any, so every other record is unchanged. Ids only: operator config, never a host or
+ * port. Set when the container is about to start, so a job refused before then records no grant.
+ */
+function withPrivateEndpoints(result, p) {
+	if (result === null || typeof result !== "object" || p.value === null) return result;
+	return { ...result, privateEndpoints: p.value };
+}
+
+function tagPrivateEndpoints(e, p) {
+	if (e === null || typeof e !== "object" || p.value === null) return;
+	try {
+		if (e.privateEndpoints === undefined) e.privateEndpoints = p.value;
+	} catch {
+		// a frozen error keeps its own fields
+	}
 }
 
 /**
@@ -481,7 +504,7 @@ function tagBundle(e, b) {
 	}
 }
 
-async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bundleSkipped: null }, archiveFacts = { value: null }) {
+async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bundleSkipped: null }, archiveFacts = { value: null }, privateFacts = { value: null }) {
 	const {
 		redis,
 		caps, // { day, week, month }; week/month null when that window is disabled (REQ-SPEND-CAPS-MULTI-WINDOW)
@@ -510,6 +533,15 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		checkWaitSkew = async () => ({ ok: true }),
 		// An unwired worker must never authorize an opted-in job from queue data alone.
 		checkMergePolicy = async () => ({ refused: "merge-policy-unavailable" }),
+		// Issue #918, the same rule: an unwired worker grants no private endpoint from queue data alone
+		// (triggers-file.mjs `makeCheckPrivateEndpoints` is the wiring). A job that carries none passes.
+		checkPrivateEndpoints = async (job) => (job?.privateEndpoints === undefined ? { ok: true, ids: [] } : { refused: "private-endpoint-withdrawn" }),
+		// Issue #918: the private endpoints this host declares, as the pickup read them (index.mjs), `[]` when it declares
+		// none or the wiring has no seam: then a job that names one is this host's to refuse or hand on, never to run.
+		privateEndpointsDeclared = [],
+		// Issue #918: whether the pickup took every slot the job's endpoints declare (`false` when its own read of the
+		// triggers file did not confirm the grant). Undefined in an unwired call, which takes no slots and checks none.
+		privateEndpointsHeld,
 		// () => { ok } | { message } | { unavailable } (issue #503: a transient overlay read, retried). Issue #310. Resolves this deployment's provider credential the way
 		// buildContainerEnv will, and answers whether it exists AT ALL, so an unconfigured provider refuses
 		// here rather than inside runContainer with the budget already reserved. Admit-everything by default,
@@ -613,6 +645,9 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// on a multi-host worker's shared queue (index.mjs, the never-fits gate's predicate), where another host may serve
 		// it. False by default, so a single host refuses, as it always did.
 		bundleProfileDeferrable = false,
+		// Issue #918, the same predicate: a private endpoint this host does not declare hands a job on a multi-host
+		// worker's shared queue back for a host that does (`PrivateEndpointHold`); elsewhere it is refused.
+		privateEndpointsDeferrable = false,
 		// Issue #704 part 3: the job's venue's judgement of its project secret bundle (the registry's `bundleGate`,
 		// backend-openshell.mjs's for both OpenShell venues), `(job, { endpoints, vars, shadowed })` => `{ ok, placeholders?,
 		// plain? }`, `{ venueRefused: { reason, comment } }` or `{ unavailable }`. The default admits, which is every venue
@@ -881,6 +916,46 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 				log("refused_merge_policy", { reason, triggerIndex: Number.isSafeInteger(job.trigger?.matched?.index) ? job.trigger.matched.index : null });
 				return { outcome: "policy", reason, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false };
 			}
+		}
+
+		// Issue #918 (REQ-PRIVATE-ENDPOINTS). The private endpoints a job may reach are a GRANT, so, like the merge
+		// permission above, they are confirmed against the live triggers file before every attempt, recovery included,
+		// with no last good copy: a trigger that stops naming one withdraws it at the next start. Then each must be one this
+		// host declares (`private-endpoints.json` is per host): on a multi-host worker's shared queue the job is handed
+		// back for a host that does, the bundle profile's hold; elsewhere it is refused. A venue that cannot carry a grant
+		// yet refuses it too. All free and determinate, before the mint, the clone and every reservation
+		// (CONST-BUDGET-BEFORE-TOKENS); an unreadable file is infrastructure and retried (CONST-RETRY-INFRA-ONLY).
+		let privateGrant = [];
+		if (job.privateEndpoints !== undefined) {
+			const refusePrivate = async (reason, fields = {}) => {
+				await comment(job, PRIVATE_ENDPOINT_COMMENTS[reason]);
+				log(`refused_${reason.replaceAll("-", "_")}`, fields);
+				return { outcome: "policy", reason, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false };
+			};
+			// The queue job's id lets a one-shot's own retry keep the grant its first attempt spent (`makeCheckPrivateEndpoints`).
+			const live = await checkPrivateEndpoints(job, { queueJobId: deps.queueJobId });
+			if (live?.newer === true) throw new NewerReleaseHold("the triggers file");
+			if (live?.unreadable === true) throw new InfraRetry("the triggers file could not be read to confirm the job's private endpoints", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false });
+			if (live?.ok !== true) return await refusePrivate("private-endpoint-withdrawn", { triggerIndex: Number.isSafeInteger(job.trigger?.matched?.index) ? job.trigger.matched.index : null });
+			const declared = Array.isArray(privateEndpointsDeclared) ? privateEndpointsDeclared : [];
+			const unknown = live.ids.filter((id) => !declared.some((e) => e?.id === id));
+			if (unknown.length > 0) {
+				if (privateEndpointsDeferrable === true) {
+					log("private_endpoint_deferred", { count: unknown.length });
+					throw new PrivateEndpointHold("this host does not declare a private endpoint the job's trigger grants; another host may", { reason: "private-endpoint-unknown", provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false, endpoint: unknown[0] });
+				}
+				return await refusePrivate("private-endpoint-unknown", { count: unknown.length });
+			}
+			// A venue with its own egress layer writes its policy per job from the allowlist, the model endpoints and the
+			// forge (CONST-VENUE-EGRESS-LAYER); it has no grant to give until that policy carries one (#918, part 3).
+			if (backendFor(resolveBackendName(job, blessedBackends[0]))?.credentialCustody === "layer") return await refusePrivate("private-endpoint-venue-unsupported", { venue: resolveBackendName(job, blessedBackends[0]) });
+			// The pickup's read did not confirm what this one does (a file mid-save), so it took no slot: handed back to take
+			// one, never run on a device without it. Free, and it spends no attempt.
+			if (privateEndpointsHeld === false) {
+				log("private_endpoint_slot_not_taken", { count: live.ids.length });
+				throw new PrivateEndpointHold("the pickup took no slot for a private endpoint this attempt is granted", { reason: "private-endpoint-slot", provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false, endpoint: live.ids[0], slot: true });
+			}
+			privateGrant = live.ids.map((id) => declared.find((e) => e.id === id));
 		}
 
 		// The wait-skew check (issue #230), on the free ladder for the first one's reasons: the same
@@ -1375,6 +1450,13 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		//
 		// A RETURN, never a throw (CONST-RETRY-INFRA-ONLY): retrying never makes an absent proxy appear.
 		const egress = await egressPreflight(job);
+		// Issue #918: the proxy runs, and was started before it could carry a grant (its private folder or this runtime's
+		// grant folder is not mounted). Free and determinate, so refused here rather than at the grant's read back.
+		if (Array.isArray(egress?.privateMissing) && egress.privateMissing.length > 0 && privateGrant.length > 0) {
+			await comment(job, PRIVATE_ENDPOINT_COMMENTS["private-endpoint-proxy-outdated"]);
+			log("refused_private_endpoint_proxy_outdated", { proxy: egress.proxy ?? null });
+			return { outcome: "policy", reason: "private-endpoint-proxy-outdated", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false };
+		}
 		if (egress.proxyMissing || egress.proxyStopped) {
 			const proxy = egress.proxyMissing ?? egress.proxyStopped;
 			const state = egress.proxyMissing ? "is not on this host" : "is not running";
@@ -1784,8 +1866,8 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// The same set the loader uses, imported, so the two cannot drift, and checked before the resolver so
 		// no wiring of it can skip the check.
 		const secondaryCredentialNames = new Set(job.answerDraft && job.answerDecisionModel ? providerKeyCandidates(job.answerDecisionModel.provider) : job.questionGrouping && job.questionGroupModel ? providerKeyCandidates(job.questionGroupModel.provider) : job.watch && job.watchDecisionModel ? providerKeyCandidates(job.watchDecisionModel.provider) : []);
-		const loadReserved = secretsArmed(job) ? Object.keys(job.secrets ?? {}).find((name) => RESERVED_ENV_NAMES.has(name) || secondaryCredentialNames.has(name)) : undefined;
-		const resolved = loadReserved !== undefined ? { reserved: loadReserved, atLoad: RESERVED_ENV_NAMES.has(loadReserved) } : secretsArmed(job) ? await resolveSecrets(job) : { ok: true, secrets: {} };
+		const loadReserved = secretsArmed(job) ? Object.keys(job.secrets ?? {}).find((name) => isReservedEnvName(name) || secondaryCredentialNames.has(name)) : undefined;
+		const resolved = loadReserved !== undefined ? { reserved: loadReserved, atLoad: isReservedEnvName(loadReserved) } : secretsArmed(job) ? await resolveSecrets(job) : { ok: true, secrets: {} };
 		if (resolved.profileUnknown) {
 			await comment(job, REFUSAL_COMMENTS["secret-profile-unknown"]);
 			// The operator's own profile LABEL, and never a path, a reference, or a byte the resolver printed.
@@ -2568,7 +2650,11 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// thing before the container, and not at the prepare above: a refusal between the two loaded nothing, so it has nothing
 		// to point at, and its record stays byte-identical to what it was. Every way out from here keeps it, a retried attempt's too.
 		if (deps.canaryFacts) deps.canaryFacts.loaded = loadedWithBase(deps.canaryFacts.loaded, baseSha);
-		const { canaryLoad: canaryLoadOfRun = null, loaded: loadedOfRun = null, code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, approval: approvalMetadata = null, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null, checkpoint: ranCheckpoint = null, recovery: ranRecovery = null, lingering = false } = await runContainer({ job: containerJob, token, prepared, secrets, ...(subscriptionAuth.length ? { subscriptionAuth } : {}), ...(bundleKeys !== null ? { bundleKeys } : {}), user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(transcriptStderr ? { transcriptStderr: true } : {}), ...(steerStdin ? { steerStdin: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}), ...(checkpointArgs !== null ? { recover: true, recovering: isRecovery, checkpoint: checkpointArgs } : {}), ...(activityWatch !== null ? { activityWatch, onActivityArmed: deps.onActivityArmed ?? null, requestStop: deps.requestStop ?? null, noteActivity: deps.noteActivity ?? null, ...(credentialRefresh !== null ? { credentialRefresh } : {}) } : {}) });
+		// Issue #918: the grant this container gets, recorded from here, where it is about to start, with its basis: the
+		// proxy enforces it when the egress policy is on (`proxy`); with PI_EGRESS=0 no proxy stands between any job and the
+		// device (`unenforced`), and the record says so rather than imply a binding nobody enforced.
+		if (privateGrant.length > 0) privateFacts.value = { ids: privateGrant.map((e) => e.id), basis: egress?.proxy ? "proxy" : "unenforced" };
+		const { canaryLoad: canaryLoadOfRun = null, loaded: loadedOfRun = null, code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, approval: approvalMetadata = null, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null, checkpoint: ranCheckpoint = null, recovery: ranRecovery = null, lingering = false } = await runContainer({ job: containerJob, token, prepared, secrets, ...(subscriptionAuth.length ? { subscriptionAuth } : {}), ...(bundleKeys !== null ? { bundleKeys } : {}), user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(privateGrant.length > 0 ? { privateEndpoints: privateGrant } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(transcriptStderr ? { transcriptStderr: true } : {}), ...(steerStdin ? { steerStdin: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}), ...(checkpointArgs !== null ? { recover: true, recovering: isRecovery, checkpoint: checkpointArgs } : {}), ...(activityWatch !== null ? { activityWatch, onActivityArmed: deps.onActivityArmed ?? null, requestStop: deps.requestStop ?? null, noteActivity: deps.noteActivity ?? null, ...(credentialRefresh !== null ? { credentialRefresh } : {}) } : {}) });
 		const answeredPark = prepared.session?.parkedSource;
 		// A phrase-prefixed comment uses ordinary routing, but resuming this exact parked transcript still
 		// answers its question. A held receipt also identifies an answer whose legacy source cannot be proved.
@@ -3284,6 +3370,23 @@ export class SecretBundleProfileHold extends InfraRetry {
 		super(message, options);
 		this.name = "SecretBundleProfileHold";
 		this.bundleProfileHold = true;
+	}
+}
+
+/**
+ * Issue #918: a private endpoint the job's trigger grants that this host does not declare, on a multi-host worker's
+ * SHARED queue: handed back for a host that declares it, `SecretBundleProfileHold`'s deferral, without spending an
+ * attempt. `endpoint` is the first such id (operator config, for the defer hash), never a host or port.
+ */
+export class PrivateEndpointHold extends InfraRetry {
+	constructor(message, options) {
+		super(message, options);
+		this.name = "PrivateEndpointHold";
+		this.privateEndpointHold = true;
+		this.endpoint = typeof options?.endpoint === "string" ? options.endpoint : null;
+		// `slot`: held for the pickup to take the endpoint's slot (index.mjs defers it as `private-endpoint`), not for a
+		// host that declares it.
+		this.slot = options?.slot === true;
 	}
 }
 

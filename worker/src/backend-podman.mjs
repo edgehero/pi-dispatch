@@ -973,6 +973,8 @@ export const PODMAN_BACKEND_OPTIONS = Object.freeze([
 	"hostEnv",
 	"egress",
 	"egressProxy",
+	// Issue #918: the deployment's podman grant folder (`egress-grants/podman`), which this venue's proxy mounts.
+	"grantsDir",
 	"openJobLog",
 	"globalPiDir",
 	"allowGlobalExtensions",
@@ -1112,6 +1114,7 @@ export function makePodmanBackend(opts = {}) {
 		hostEnv = process.env,
 		egress = false,
 		egressProxy,
+		grantsDir = null,
 		openJobLog,
 		globalPiDir = null,
 		allowGlobalExtensions = true,
@@ -1167,6 +1170,8 @@ export function makePodmanBackend(opts = {}) {
 		hostEnv,
 		egress,
 		egressProxy,
+		// Issue #918: this runtime's own grant folder, which its proxy mounts.
+		...(grantsDir ? { grantsDir } : {}),
 		...(openJobLog ? { openJobLog } : {}),
 		...(onOutput ? { onOutput } : {}),
 		...(openLiveTranscript ? { openLiveTranscript } : {}),

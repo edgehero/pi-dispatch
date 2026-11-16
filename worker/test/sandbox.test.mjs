@@ -2863,3 +2863,25 @@ test("issue #596, phase 2: a sandbox shares the jobs' parent cgroup, and on a ve
 	assert.ok(parentless.includes("--cpu-shares=1024"));
 	assert.ok(podman.includes("--cpu-shares=4096"));
 });
+
+test("a sandbox opened outside the deployment folder says it could not check for a stale private endpoint grant, and still opens (#918)", async () => {
+	const calls = [];
+	const unchecked = [];
+	const result = await openSandbox({
+		...session,
+		...openable(),
+		egress: { armed: true, proxy: "pi-dispatch-egress-proxy" },
+		spawnNetwork: recordingDocker(calls),
+		grantsDirFor: (bin) => `/nowhere-918/egress-grants/${bin === "podman" ? "podman" : "local"}`,
+		onGrantsUnchecked: (dir) => unchecked.push(dir),
+		launch: async () => (calls.push("launch"), { code: 0 }),
+	});
+	assert.deepEqual(result, { code: 0, error: null });
+	assert.deepEqual(unchecked, ["/nowhere-918/egress-grants/local"]);
+	assert.ok(calls.includes("launch"));
+	assert.ok(!calls.some((c) => typeof c === "string" && c.startsWith("docker inspect")), "nothing is asked of a folder that is not here");
+	// Unarmed: no network, nothing to say.
+	const quiet = [];
+	await openSandbox({ ...session, ...openable(), egress: { armed: false, proxy: "p" }, spawnNetwork: recordingDocker([]), onGrantsUnchecked: (dir) => quiet.push(dir), launch: async () => ({ code: 0 }) });
+	assert.deepEqual(quiet, []);
+});

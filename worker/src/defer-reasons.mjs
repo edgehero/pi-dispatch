@@ -65,6 +65,8 @@ export const DEFER_WHYS = Object.freeze({
 	"scope-repo": Object.freeze({ bucket: "slot", sentence: "Its repository's concurrent limit is full" }),
 	"scope-project": Object.freeze({ bucket: "slot", sentence: "Its project's concurrent limit is full" }),
 	endpoint: Object.freeze({ bucket: "slot", sentence: "Every slot of model endpoint {endpoint} is taken" }),
+	// Issue #918: a private endpoint's own words, so the console never calls a device a model endpoint.
+	"private-endpoint": Object.freeze({ bucket: "slot", sentence: "Every slot of the private endpoint {endpoint} is taken" }),
 	"subscription-quota": Object.freeze({ bucket: "check", sentence: "The subscription account is exhausted; waits for newer evidence, a known reset or an operator trial. Asks again at {until}" }),
 	"subscription-owner": Object.freeze({ bucket: "ready", sentence: "Waits for the host that owns its subscription connection" }),
 	"subscription-auth": Object.freeze({ bucket: "check", sentence: "Waits until the subscription credential can be renewed at {until}" }),
@@ -73,6 +75,7 @@ export const DEFER_WHYS = Object.freeze({
 	"model-selection": Object.freeze({ bucket: "check", sentence: "Another pickup is committing this run's model choice. Asks again at {until}" }),
 	"host-budget": Object.freeze({ bucket: "slot", sentence: "{host}'s budget has no room for it yet" }),
 	"bundle-profile": Object.freeze({ bucket: "slot", sentence: "Waits for a host that serves its secret bundle profile" }),
+	"private-endpoint-host": Object.freeze({ bucket: "slot", sentence: "Waits for a host that declares the private endpoint {endpoint}" }),
 	chained: Object.freeze({ bucket: "run", sentence: "Chained after {holder}; starts when its folder is free" }),
 	"recovery-wait": Object.freeze({ bucket: "run", sentence: "Recovers run {holder}, whose attempt is still running" }),
 	"wait-after": Object.freeze({ bucket: "check", sentence: "Held until {until}" }),

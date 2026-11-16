@@ -1,3 +1,4 @@
+import { isPrivateEndpointEnvName } from "./reserved-env.mjs";
 import { egressEnv } from "./egress.mjs";
 import { FORGE_HOST_VARS } from "./forges.mjs";
 import { KEYLESS_ENV_NAME } from "./reserved-env.mjs";
@@ -189,6 +190,16 @@ export const NON_SECRET_ENV_KEYS = new Set([
 export const EGRESS_ENV_KEYS = Object.freeze(Object.keys(egressEnv({ armed: true })));
 
 /**
+ * Whether a container env key carries no secret: one of `NON_SECRET_ENV_KEYS`, or (issue #918) a granted private
+ * endpoint's host or port, which only the worker writes (every other source of the prefix is refused upstream). Every
+ * reader of the list goes through here, so the prefix is never redacted out of a transcript, refused by the checkpoint
+ * scanner, or turned into a credential placeholder on a venue whose layer holds credentials.
+ */
+export function isNonSecretEnvKey(key) {
+	return NON_SECRET_ENV_KEYS.has(key) || isPrivateEndpointEnvName(key);
+}
+
+/**
  * The secret values of one job: every container env value whose key is not in `NON_SECRET_ENV_KEYS`, plus
  * `extra` (the minted token and the exit-line key, which `runContainer` holds outside the env: the key never
  * enters it at all). `workerSet` is the env the worker itself wrote for this job's egress (`egressEnv`, empty when
@@ -198,7 +209,7 @@ export const EGRESS_ENV_KEYS = Object.freeze(Object.keys(egressEnv({ armed: true
 export function secretValuesOf(env = {}, extra = [], { workerSet = {} } = {}) {
 	const values = [];
 	for (const [key, value] of Object.entries(env ?? {})) {
-		if (NON_SECRET_ENV_KEYS.has(key)) continue;
+		if (isNonSecretEnvKey(key)) continue;
 		if (EGRESS_ENV_KEYS.includes(key) && Object.hasOwn(workerSet ?? {}, key) && workerSet[key] === value) continue;
 		if (typeof value === "string" && value !== "") values.push(value);
 	}

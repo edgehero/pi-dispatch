@@ -391,7 +391,7 @@ field, a top-level block or a value (a new `on.type`, a new `waitFor` condition,
 release would misread (a field whose absence would let a job run wider than the file says, or a value it would refuse
 as broken). `run.excludeExtensions` or `run.excludeExtensionTools` needs version 2; `idleTimeoutMinutes`,
 `stallTimeoutMinutes` or `maxMinutes` needs version 3; `mayMerge` needs version 4; local event commands and
-`run.worker` need version 5. A file without a field or value
+`run.worker` need version 5; `modelSelection` needs version 6; `privateEndpoints` needs version 7. A file without a field or value
 needing a newer version still needs only version 1. A
 file that uses such a field or value with a lower `version`, or with none, is refused like any malformed file.
 
@@ -485,6 +485,16 @@ how a run is followed or picked up, and that page's Edit form and `dispatch_trig
   `forge`: the job's own GitHub or GitLab through that forge's MCP server, as the token the job already holds, with
   no overlay entry ([`docs/mcp.md`](mcp.md#the-forges-own-server)). A cron, forgejo or azure trigger naming `forge`
   is refused at load, and an image without the `forgeMcp` capability refuses its jobs before they cost anything.
+
+- `"privateEndpoints": ["bench-device"]` lets this trigger's jobs reach the private endpoints it names from
+  `private-endpoints.json`, a test device's SSH say, which every other job is refused
+  ([private endpoints](egress.md#private-endpoints)). 1 to 8 ids, on any trigger but a watch rule; it makes the file
+  `"version": 7`. Each granted endpoint's host and port reach the job as `PI_DISPATCH_ENDPOINT_<ID>_HOST` and
+  `_PORT`. The worker confirms the grant against this file before every attempt, so removing an id withdraws it from
+  the jobs already queued, which are refused rather than run without it. Adding the field to a forge trigger refuses
+  its jobs that were already queued (`trigger-skew`), and a local event trigger's (`local-event-trigger-changed`):
+  re-run them. Three kinds of queued job run without it instead: a cron run, a GitLab merge request job a label
+  matched, and a comment job that ran another trigger's flow. The admin's tools cannot set it.
 
 - `"skillsDir"` points at a directory of skills on the worker host. The layout is the same as your own
   `~/.pi/agent/skills`, which uses `<name>/SKILL.md`. They are copied into that trigger's jobs. They are
