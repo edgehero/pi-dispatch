@@ -650,7 +650,7 @@ forge's pending request separately when needed. Project or flow instructions may
 the setting removes the harness's blanket prohibition, not rules written elsewhere.
 
 **Upgrade order.** Upgrade the image, every worker, the receivers and every console before adding the field, as
-described in [the upgrade guide](upgrading.md#pending-release-trigger-merge-permission). The image needs the
+described in [the upgrade guide](upgrading.md#533-trigger-merge-permission). The image needs the
 `mergePolicy` capability; an older image refuses an enabled job before spending. The file needs version 4 and its
 enabled jobs use data version 5. Do not lower either version to make an older service accept them. Triggers that
 omit the setting keep their previous behavior and image requirements.

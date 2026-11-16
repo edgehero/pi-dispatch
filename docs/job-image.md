@@ -88,7 +88,7 @@ variant that permits landing the job's own change through the forge's requiremen
 that job before spending (`job-image-merge-policy-unsupported`). A job without the opt-in keeps the original
 `HARD_RULES.md` bytes and needs no new capability. The image verification exercises both modes through the actual
 pinned loader, and malformed input must refuse. Rebuild derived images before enabling the setting, following
-[the upgrade guide](upgrading.md#pending-release-trigger-merge-permission).
+[the upgrade guide](upgrading.md#533-trigger-merge-permission).
 
 **`sandboxLayout` and the WORKDIR (issue #683).** `sandboxLayout` says the runner reads `PI_JOB_LAYOUT` and, under
 `sandbox`, finds every job path under `/sandbox`, and that the image carries `/opt/pi-dispatch/pi-landlock`, the write

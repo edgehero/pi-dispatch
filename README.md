@@ -75,7 +75,7 @@ pi install npm:@edgehero/pi-dispatch-admin
 
 ```bash
 mkdir my-dispatch && cd my-dispatch
-npx --yes --ignore-scripts @edgehero/pi-dispatch@5.3.2 up --console
+npx --yes --ignore-scripts @edgehero/pi-dispatch@5.3.3 up --console
 ```
 
 It checks the folder first, then lists what it will do and asks before it starts anything. It installs into that folder and
@@ -85,7 +85,7 @@ opens your browser on the checklist, already signed in.
 
 ```bash
 mkdir my-dispatch && cd my-dispatch && npm init -y
-npm install --save-exact @edgehero/pi-dispatch@5.3.2 @edgehero/pi-dispatch-admin@5.3.2 @earendil-works/pi-coding-agent@1.5.2 --omit=dev --omit=optional --ignore-scripts --no-audit --no-fund
+npm install --save-exact @edgehero/pi-dispatch@5.3.3 @edgehero/pi-dispatch-admin@5.3.3 @earendil-works/pi-coding-agent@1.5.2 --omit=dev --omit=optional --ignore-scripts --no-audit --no-fund
 ./node_modules/.bin/pi-dispatch up --console
 ```
 
@@ -199,6 +199,10 @@ what reaches you has already been read by an AI. That is a review, not an approv
 results when it suits you. **Zero touch** tells you how far you have
 come: how often runs needed a person, per project, over the last 7, 30 or 90 days.
 ([Triggers](docs/triggers.md), [watching alerts](docs/watch.md), [Zero touch](docs/zero-touch.md))
+
+A label, comment or review can also start a job in a folder on your machine. Several arriving together can become one job;
+more arriving while it works leave at most one follow up. Jobs sharing that folder take turns, including scheduled jobs.
+Your technical person sets up [what runs and who may start it](docs/triggers.md#a-forge-event-running-a-local-command).
 
 **To get here:** read **Zero touch** under Runs. It counts per project and repository, not per kind of work, with a goal of zero
 and a marker at 5%. When a project rarely needs you, add a job that reviews each proposed change, let it run, and read what comes
@@ -717,8 +721,8 @@ live, and which the console and the panel can edit, or you by hand. Each entry i
 | `pull_request` | a PR or MR event, a submitted GitHub review, or a close | the PR title and body |
 | `issue` | an issue closes | the issue title and body |
 
-`run` names a `flow` or a registered pi `command`. **Who may fire a trigger is decided by your forge, not by pi-dispatch**:
-[`SECURITY.md`](SECURITY.md) states each forge's rule. Each optional `run` field, in a line:
+`run` names a `flow` or a registered pi `command`. **Who may fire a trigger follows your forge's permission checks**, with an
+optional reviewed grant for local review listeners below. [`SECURITY.md`](SECURITY.md) states each forge's rule. Each optional `run` field, in a line:
 
 - `steer`: a running job takes messages ([steering](docs/steering.md)).
 - `resume`, `awaitInput`: follow up jobs continue the session, and the agent can ask and wait ([sessions](docs/sessions.md)).
@@ -750,6 +754,32 @@ A whole project can get one environment from your secrets manager, granted once 
 hours pause a repo or folder by weekday and timezone ([`docs/pause-windows.md`](docs/pause-windows.md)). The
 portfolio manager example plans a budget split for the week and reports what it asked for
 ([`docs/portfolio-manager.md`](docs/portfolio-manager.md)).
+
+### Start a local command from a forge event
+
+A forge event can start a registered pi extension command in a local folder, inside the same job container as a scheduled
+command. For example, run your installed `sweep` command when a GitHub review is submitted:
+
+```json
+{
+  "version": 5,
+  "triggers": [{
+    "on": { "type": "pull_request", "forge": "github", "id": "pr-sweep",
+      "action": ["review_submitted"], "debounceSeconds": 10, "reviewAuthors": ["review-app[bot]"] },
+    "run": { "kind": "local", "worker": "runner-a", "folder": "/srv/automation", "command": "sweep" }
+  }]
+}
+```
+
+Set `PI_WORKER_NAME=runner-a` on the owning worker. Matching events coalesce for ten quiet seconds, capped at five minutes;
+events during a run leave at most one pending follow up. Jobs using the same actual folder run one at a time. Give a paired
+cron rule the same `run.worker` and `run.folder`.
+
+The command receives no event text or actor identity, including in `/job/event.json`; it reads the current state it needs itself.
+The optional `reviewAuthors` list admits those exact GitHub logins, including Apps, alongside the usual collaborator check.
+The service's own identity stays refused. This grants permission to start the command; [merge permission remains a separate
+option for forge flows](docs/triggers.md#allowing-a-job-to-land-its-change).
+Upgrade the worker, receiver and console before using this version 5 rule. See the [full setup and matching rules](docs/triggers.md#a-forge-event-running-a-local-command).
 
 ## Flows: the custom prompt a trigger runs
 

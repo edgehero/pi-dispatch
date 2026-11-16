@@ -6,8 +6,11 @@ The trigger edge of **[pi-dispatch](https://github.com/edgehero/pi-dispatch)**, 
 
 The receiver turns forge activity into queued jobs for the
 [worker](https://www.npmjs.com/package/@edgehero/pi-dispatch). It reads the same `triggers.json` as the
-worker, checks each delivery, and queues at most one job per event (one per replica when a trigger sets
-`run.replicas`). It never runs a job itself.
+worker and checks each delivery. Ordinary forge triggers queue at most one job per event (one per replica when a
+trigger sets `run.replicas`). Each matching local command listener independently records a signal for its named
+worker; nearby signals coalesce into one job, with at most one follow up while it runs. Event text never reaches
+the command. The receiver never runs a job itself
+([local command listeners](https://github.com/edgehero/pi-dispatch/blob/main/docs/triggers.md#a-forge-event-running-a-local-command)).
 
 ## Three ways to run it
 
@@ -35,7 +38,8 @@ phrase goes to that running job instead of starting a second one, once the comme
 
 The receiver checks each delivery's signature, the bot loop guard, the forge's own permission check and
 dedup. The worker then applies quiet hours, the image preflight, branch protection and the spend caps.
-Who may fire a trigger is decided by your forge. See
+Who may fire a trigger follows the forge's permission checks. A local GitHub review listener can also explicitly
+allow exact reviewer logins, including Apps, through `on.reviewAuthors`; the service's own identity stays refused. See
 [`SECURITY.md`](https://github.com/edgehero/pi-dispatch/blob/main/SECURITY.md) for each forge's rule.
 
 Configuration comes from the environment (the worker's `.env.example` lists all of it). The main settings

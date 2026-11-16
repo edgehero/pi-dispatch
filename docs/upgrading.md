@@ -289,7 +289,7 @@ pause flag, the delayed score, the run ids of a cron trigger) is in one module, 
 checked against that version by its tests. Never roll back across a release that moved the BullMQ pin while jobs are
 queued: an older BullMQ need not read what a newer one wrote. The release notes name such a bump.
 
-## Pending release: trigger merge permission
+## 5.3.3: trigger merge permission
 
 Issue #908 adds opt-in `run.mayMerge` to reviewed forge-flow triggers. Before adding it, follow
 [the normal order](#the-order): image first, every worker, receivers, then every console and `/dispatch`.
@@ -354,12 +354,14 @@ as `subscription_auth_hold`. See [subscription renewal](subscription-auth.md#adm
 
 Release numbers come from the git tags.
 
-### Pending release (#911)
+### 5.3.3
+
+#### Event-driven local commands (#911)
 
 Event-local commands add `triggers.json` version 5 and queued job data version 6. The new trigger fields are
 `on.forge`, `on.id`, `on.debounceSeconds`, `on.reviewAuthors` and `run.worker`; local queued jobs carry `worker`
 and event-local jobs carry `localEvent`. Existing configurations keep their previous minimum version. Upgrade
-all workers, receivers and operator consoles before enabling these fields; old workers defer newer jobs.
+all workers, receivers and operator consoles to 5.3.3 before enabling these fields; old workers defer newer jobs.
 
 Valkey gains `local:event:*`: durable current/next command intents and delivery receipts. Keep this state and
 BullMQ together when backing up or restoring. Do not remove active intent state to force a retry: first establish
@@ -370,11 +372,11 @@ new event-local records add `localEvent: { id, forge, type, digest }`. Records w
 not stale state requiring cleanup. Local command queue retention stays unchanged; receipts outlive it so a late
 redelivery cannot recreate a finished command. See [event-local triggers](triggers.md) and [backup.md](backup.md).
 
-### Pending release (#908)
+#### Trigger merge permission (#908)
 
 `triggers.json` gains optional `run.mayMerge` at version 4, and enabled queued jobs carry `mayMerge` and
 `mayMergePolicy` at data version 5. Older services refuse or defer these versions. The input selector and new
-refusal reasons are described [above](#pending-release-trigger-merge-permission); no existing file or job is migrated.
+refusal reasons are described [above](#533-trigger-merge-permission); no existing file or job is migrated.
 
 ### 5.3.0
 
