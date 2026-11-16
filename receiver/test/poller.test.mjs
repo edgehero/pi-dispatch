@@ -7,6 +7,7 @@ import { loadReceiverConfig } from "../src/config.mjs";
 import { loadPollerConfig } from "../src/poller-config.mjs";
 import { CATCH_UP_CAP_MINUTES, CURSOR_TTL_SECONDS, cancellableSleep, startPoller as startPollerReal } from "../src/poller.mjs";
 import { FORGE_JOB_RETENTION_S } from "@edgehero/pi-dispatch/retention";
+import { TRIGGERS_FILE_VERSION } from "@edgehero/pi-dispatch/triggers";
 
 // Issue #464 (gate round 3): never this host's Valkey. Every start here is judged as answering, unless a test judges it.
 const startPoller = (env, deps = {}) => startPollerReal(env, { judgeValkey: async () => {}, ...deps });
@@ -205,7 +206,7 @@ function fakeRedis({ ttlFailures = 0, clock = { ms: NOW } } = {}) {
  * a part of it to stop the poller in the middle of it, more than it for a host that slept. `tokenFn`
  * overrides the mint.
  */
-async function runPoller({ env = { POLL_REPOS: "o/r" }, cycles = 1, routes = [], clock = { ms: NOW }, redis = fakeRedis({ clock }), selfId = SELF, fsDeps = FS, queueFn: queueFnOver, nap = (ms) => ms, tokenFn = async () => "poll-token" } = {}) {
+async function runPoller({ env = { POLL_REPOS: "o/r" }, cycles = 1, routes = [], clock = { ms: NOW }, redis = fakeRedis({ clock }), selfId = SELF, fsDeps = FS, queueFn: queueFnOver, localEventStore, nap = (ms) => ms, tokenFn = async () => "poll-token" } = {}) {
 	const queued = [];
 	const out = [];
 	const sleeps = [];
@@ -228,6 +229,7 @@ async function runPoller({ env = { POLL_REPOS: "o/r" }, cycles = 1, routes = [],
 		selfIdFn: async () => selfId,
 		tokenFn,
 		fsDeps,
+		localEventStore,
 		sleep: async (ms) => {
 			sleeps.push(ms);
 			clock.ms += nap(ms, sleeps.length);
@@ -344,6 +346,52 @@ function reviewRoutes({ pulls, reviews }) {
 		{ path: "/repos/o/r/pulls?state=open", replies: pulls },
 	];
 }
+
+test("a polled App review admits the same local listener without queuing payload text", async () => {
+	const trigger = { on: { type: "pull_request", forge: "github", id: "app-review", action: ["review_submitted"], reviewAuthors: ["review-app[bot]"] }, run: { kind: "local", folder: "/srv/automation", command: "sweep", worker: "runner-a" } };
+	const fsDeps = { fileExists: () => true, readFile: () => JSON.stringify({ version: TRIGGERS_FILE_VERSION, triggers: [trigger] }) };
+	const review = { ...RV600, user: { id: 23, login: "review-app[bot]" }, author_association: "NONE" };
+	const admitted = [];
+	const { queued, out, redis } = await runPoller({
+		cycles: 3,
+		fsDeps,
+		localEventStore: { signal: async (input) => { admitted.push(input); return { accepted: true, coalesced: false }; } },
+		routes: reviewRoutes({ pulls: [ghResponse(200, [PR9A])], reviews: [ghResponse(200, []), ghResponse(200, [review])] }),
+	});
+	assertNoRepoFailure(out);
+	assert.deepEqual(queued, []);
+	assert.equal(admitted.length, 1);
+	assert.equal(admitted[0].deliveryId, "poll-rv600");
+	assert.equal(admitted[0].trigger.on.id, "app-review");
+	assert.deepEqual(Object.keys(admitted[0]), ["trigger", "deliveryId"]);
+	assert.equal(JSON.stringify(admitted).includes(RV600.body), false);
+	assert.equal(JSON.stringify(out).includes("review-app[bot]"), false);
+	assert.equal(redis.kv.get("poll:o/r:cursor:reviews"), "600");
+	assert.deepEqual(out.filter(line => line.event === "poll_cycle").map(line => line.localAccepted ?? 0), [0, 1, 0]);
+});
+
+test("local signal admission failure holds the polling cursor and retries the same delivery", async () => {
+	const trigger = { on: { type: "pull_request", forge: "github", id: "review", action: ["review_submitted"] }, run: { kind: "local", folder: "/srv/automation", command: "sweep", worker: "runner-a" } };
+	const fsDeps = { fileExists: () => true, readFile: () => JSON.stringify({ version: TRIGGERS_FILE_VERSION, triggers: [trigger] }) };
+	const attempts = [];
+	const cursors = [];
+	const clock = { ms: NOW };
+	const redis = fakeRedis({ clock });
+	const { out } = await runPoller({
+		cycles: 3,
+		fsDeps, clock, redis,
+		localEventStore: { signal: async (input) => {
+			attempts.push(input.deliveryId);
+			if (attempts.length === 1) throw new Error("signal-unavailable");
+			return { accepted: true, coalesced: false };
+		} },
+		nap: (ms) => { cursors.push(redis.kv.get("poll:o/r:cursor:reviews")); return ms; },
+		routes: reviewRoutes({ pulls: [ghResponse(200, [PR9A])], reviews: [ghResponse(200, []), ghResponse(200, [RV600])] }),
+	});
+	assert.deepEqual(attempts, ["poll-rv600", "poll-rv600"]);
+	assert.deepEqual(cursors, ["0", "0", "600"]);
+	assert.deepEqual(out.filter(line => line.event === "poll_repo_failed").map(line => line.reason), ["local-event-state-unavailable"]);
+});
 
 test("reviews arm WITHOUT replay: a review that predates the cursor never fires, the next one does", async () => {
 	const { queued, out, redis } = await runPoller({

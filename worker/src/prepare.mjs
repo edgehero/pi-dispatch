@@ -4,7 +4,8 @@ import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { rm } from "node:fs/promises";
 import { join } from "node:path";
 import { resolveBackendName } from "./backend-registry.mjs";
-import { ensureJobsDir } from "./config.mjs";
+import { configError, ensureJobsDir } from "./config.mjs";
+import { FORGE_KINDS, LOCAL_EVENT_ID_RE } from "./triggers.mjs";
 import { JOB_MCP_FILE } from "./mcp-config.mjs";
 import { resolveJobImage } from "./image-preflight.mjs";
 import { retainJobDir } from "./sandbox-store.mjs";
@@ -95,7 +96,7 @@ export function makePrepareWorkspace({
 	ensureDir(jobsDir);
 	// `pin` (issue #645) is a recovery job's `{ sha, from }`: clone from the checkpoint store at the checkpoint's base
 	// commit (prepare-github.mjs). Forge jobs only; a local job works on its folder in place and has no clone to pin.
-	return async function prepareWorkspace(job, token, { queueJobId, piVersion = null, jobUser = null, podmanStore = null, portfolio = false, size = null, mcp = null, pin = null, watchSecrets = null } = {}) {
+	return async function prepareWorkspace(job, token, { queueJobId, piVersion = null, jobUser = null, podmanStore = null, portfolio = false, size = null, mcp = null, pin = null, watchSecrets = null, localWorkspace = null } = {}) {
 		ensureDir(jobsDir);
 		const jobDir = mkdtempSync(join(jobsDir, "job-"));
 		// Issue #524: a THROW out of anything below leaves `jobDir` to nobody. The processor tears down only what
@@ -105,7 +106,7 @@ export function makePrepareWorkspace({
 		// covers the thrown ones, in one place for every kind, rather than in each preparer that can throw.
 		// A retry makes a fresh directory, so nothing is lost by removing this one.
 		try {
-			return await prepareInto(job, token, jobDir, { queueJobId, piVersion, jobUser, podmanStore, portfolio, size, mcp, pin, watchSecrets });
+			return await prepareInto(job, token, jobDir, { queueJobId, piVersion, jobUser, podmanStore, portfolio, size, mcp, pin, watchSecrets, localWorkspace });
 		} catch (error) {
 			// GUARDED: a removal that fails (a busy mount, a permission flipped mid-job) must never replace the error
 			// that is the job's actual outcome. The directory is then left, which is what happened before this catch.
@@ -116,7 +117,7 @@ export function makePrepareWorkspace({
 		}
 	};
 
-	async function prepareInto(job, token, jobDir, { queueJobId, piVersion, jobUser, podmanStore, portfolio, size, mcp, pin, watchSecrets }) {
+	async function prepareInto(job, token, jobDir, { queueJobId, piVersion, jobUser, podmanStore, portfolio, size, mcp, pin, watchSecrets, localWorkspace }) {
 		if (job.questionGrouping) return prepareQuestionGrouping(job, { jobDir });
 		// The trigger's injected skills (REQ-PER-TRIGGER-SKILLS, issue #60), COPIED here rather than
 		// mounted, and copied ONCE for every job kind because this is where local and forge converge.
@@ -184,7 +185,7 @@ export function makePrepareWorkspace({
 			// The snapshot only for a confirmed portfolio job, and never for a chained child or a manual run, whatever its data
 			// says (the processor's gate already holds both; this keeps a direct caller to the same rule).
 			const snapshot = portfolio === true && typeof portfolioSnapshot === "function" && event.source === "cron" ? { portfolio: () => portfolioSnapshot(job) } : {};
-			return withLiveFile(discardOnPolicy(stampSandbox(await prepareLocal({ folder: job.folder, task, jobDir, event, ...(job.watch ? { watch: job.watch, watchDecisionModel: job.watchDecisionModel, watchSecrets } : {}), ...(localPlacement ? { jobPaths: localPlacement.jobPaths, envelopeFile: localPlacement.envelopeFile ?? null, authStoreDir: localPlacement.authStoreDir ?? null, ...(typeof localPlacement.sandboxDir === "string" ? { sandboxDir: localPlacement.sandboxDir } : {}) } : {}), ...snapshot }), sandbox), jobDir));
+			return withLiveFile(discardOnPolicy(stampSandbox(await prepareLocal({ folder: job.folder, task, jobDir, event, ...(localWorkspace ? { localWorkspace } : {}), ...(job.watch ? { watch: job.watch, watchDecisionModel: job.watchDecisionModel, watchSecrets } : {}), ...(localPlacement ? { jobPaths: localPlacement.jobPaths, envelopeFile: localPlacement.envelopeFile ?? null, authStoreDir: localPlacement.authStoreDir ?? null, ...(typeof localPlacement.sandboxDir === "string" ? { sandboxDir: localPlacement.sandboxDir } : {}) } : {}), ...snapshot }), sandbox), jobDir));
 		}
 		const prepare = preparers[job.kind];
 		if (prepare) {
@@ -239,6 +240,13 @@ export function makePrepareWorkspace({
  * unparseable the lookup is SKIPPED: both `scheduledFor` and `previousRunAt` are null, never a guess.
  */
 function localEventContext(job, queueJobId, findPreviousRun) {
+	if (job.localEvent !== undefined) {
+		const event = job.localEvent;
+		if (typeof event?.id !== "string" || !LOCAL_EVENT_ID_RE.test(event.id) || !FORGE_KINDS.includes(event?.forge)) throw configError("the local event identity is invalid");
+		// A coalesced run may represent many targets. The handler reads current state itself: even a
+		// valid title, label, author or last target would be misleading and must not become command input.
+		return { source: "forge", trigger: { id: event.id }, forge: event.forge };
+	}
 	if (job.watch) return { source: "watch", trigger: { id: job.watch.ruleId }, fingerprint: job.watch.finding.fingerprint, severity: job.watch.finding.severity, count: job.watch.finding.count, firstSeen: job.watch.finding.firstSeen, lastSeen: job.watch.finding.lastSeen };
 	if (job.parentJobId !== undefined || job.chainDepth !== undefined) return { source: "chain" };
 	if (job.trigger) {

@@ -69,7 +69,7 @@ const REVIEW_EVENT_ACTION = "submitted";
 // raw payload action against it.
 const CLOSE_ACTION = "closed";
 
-export function filter(eventName, subset, cfg, selfId, deliveryId, closerAuthorized) {
+export function filter(eventName, subset, cfg, selfId, deliveryId, closerAuthorized, { matchOnly = false, reviewAuthors } = {}) {
 	// (0) Fail-closed on identity. MUST precede the self compare -- see header, ordering constraint.
 	if (typeof subset?.sender?.id !== "number") {
 		return { enqueue: false, reason: "missing-sender-id" };
@@ -104,7 +104,7 @@ export function filter(eventName, subset, cfg, selfId, deliveryId, closerAuthori
 		// `edited` and `dismissed` fall through to unhandled-event deliberately: an edit would re-fire on
 		// text the harness has already been paid to read, and a dismissal removes a verdict rather than
 		// stating one.
-		resolved = routePullRequest(subset, triggers, REVIEW_ACTION);
+		resolved = routePullRequest(subset, triggers, REVIEW_ACTION, matchOnly ? reviewAuthors : undefined);
 	} else if (eventName === "issues" && action === CLOSE_ACTION) {
 		// The issue close-trigger route (issue #231). The closer-authority gate lives INSIDE the route,
 		// after the rule match -- see routeClose for why it cannot sit up here.
@@ -123,6 +123,9 @@ export function filter(eventName, subset, cfg, selfId, deliveryId, closerAuthori
 	// DES-AWAIT-INPUT-ENDS-THE-JOB): that one also carries `heldCandidate`, the job the parked-reply route would have
 	// built, through the SAME `build` below, so the receiver can hold it for a run that is parking right now and the job
 	// that run starts is byte for byte the one the marker would have produced. Still a drop: nothing here enqueues it.
+	// Local listeners reuse this authorization and predicate decision, but none of the forge job's
+	// text or execution metadata. The author exception above is unreachable on a normal forge job.
+	if (matchOnly) return { enqueue: resolved.enqueue === true, ...(resolved.reason ? { reason: resolved.reason } : {}) };
 	if (!resolved.enqueue) return heldCandidateOr(resolved, build);
 	return build(resolved);
 
@@ -408,11 +411,12 @@ function isEmptyCommentedReview(review) {
 /**
  * Pull-request path, three gates by action. `labeled` is gated by the label predicate
  * (collaborator-applied label = approval); auto actions (`opened|synchronize|reopened`) by the PR
- * author_association; `review_submitted` by the REVIEWER's (see `prAuthorOk`). All hard-coded, never
- * config-optional. A trigger's optional predicate only narrows; an empty predicate is vacuously true.
+ * author_association; `review_submitted` by the REVIEWER's (see `prAuthorOk`). A match-only local
+ * listener may additionally name exact reviewers; ordinary forge jobs never receive that exception.
+ * A trigger's optional label predicate only narrows; an empty predicate is vacuously true.
  * First matching rule (in file order) wins.
  */
-function routePullRequest(subset, triggers, action) {
+function routePullRequest(subset, triggers, action, reviewAuthors) {
 	const pr = subset.pull_request;
 	if (pr === null || typeof pr !== "object") {
 		return { enqueue: false, reason: "missing-pull-request" };
@@ -420,7 +424,8 @@ function routePullRequest(subset, triggers, action) {
 	const L = labelSet(pr.labels);
 	const isReview = action === REVIEW_ACTION;
 	const review = subset.review;
-	const authorOk = prAuthorOk(action, pr, review);
+	const login = typeof review?.authorLogin === "string" ? review.authorLogin.toLowerCase() : null;
+	const authorOk = prAuthorOk(action, pr, review) || (isReview && login !== null && Array.isArray(reviewAuthors) && reviewAuthors.includes(login));
 
 	// The review path refuses BEFORE the rule loop, in the order routeComment uses (author, then is there
 	// anything to act on, then which rule). Two consequences worth stating rather than discovering:

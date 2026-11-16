@@ -610,9 +610,9 @@ test("TRIGGER_LOADER_ENV_KEYS covers every config value loadSchedules reads, so 
 	const start = src.indexOf("export function loadSchedules(");
 	const body = src.slice(start, src.indexOf("\n}\n", start));
 	const read = [...new Set([...body.matchAll(/config\.(\w+)/g)].map((m) => m[1]))].sort();
-	const ENV_OF = { triggersFile: "PI_TRIGGERS_FILE", maxCostUsd: "PI_MAX_COST_USD" };
+	const ENV_OF = { triggersFile: "PI_TRIGGERS_FILE", maxCostUsd: "PI_MAX_COST_USD", workerName: "PI_WORKER_NAME", workerNameDeclared: "PI_WORKER_NAME" };
 	assert.deepEqual(read, Object.keys(ENV_OF).sort(), "loadSchedules reads a config value this bolt does not map");
-	assert.deepEqual([...TRIGGER_LOADER_ENV_KEYS].sort(), [...Object.values(ENV_OF), "PI_WORKER_NAME"].sort());
+	assert.deepEqual([...TRIGGER_LOADER_ENV_KEYS].sort(), [...new Set(Object.values(ENV_OF))].sort());
 });
 
 test("the actual doctor CLI emits one JSON record on stdout without Valkey or publishing (#766)", async () => {

@@ -154,7 +154,7 @@ test("an unserved forge keeps lifetime last-event times after every hourly count
       assert.match(markup, /gitlab.*\(not served\)/s);
       const rows = table.querySelectorAll("tbody tr");
       assert.deepEqual(rows.map((tr) => tr.querySelectorAll("td")[0].textContent.trim()), RECEIVER_OUTCOMES);
-      assert.ok(rows.every((tr) => tr.querySelectorAll("td")[1].textContent === "0"), "all eleven window counts really expired");
+      assert.ok(rows.every((tr) => tr.querySelectorAll("td")[1].textContent === "0"), "all outcome window counts really expired");
       const fact = doc.querySelectorAll(".fact").find((node) => node.querySelector("dt").textContent === label && node.querySelector("time"));
       assert.equal(fact.querySelector("time").getAttribute("datetime"), new Date(lastAt).toISOString());
       assert.doesNotMatch(markup, /gitlab: deliveries reached an unconfigured route|gitlab: only unauthorized/, "lifetime evidence does not invent current-window warnings");
@@ -217,6 +217,6 @@ test("a newly started receiver never presents pre-start hours as measured zeroes
   assert.equal(rows[0].querySelectorAll("td")[1].textContent, "before receiver started");
   assert.ok(rows[0].querySelectorAll("td").slice(2).every((cell) => cell.textContent === "not observed"));
   assert.match(rows.at(-2).querySelectorAll("td")[1].textContent, /since 2026-11-01 11:59 UTC/);
-  assert.equal(rows.at(-1).querySelectorAll("td")[7].textContent, "1", "the actual unauthorized delivery remains counted in its observed hour");
+  assert.equal(rows.at(-1).querySelectorAll("td")[2 + RECEIVER_OUTCOMES.indexOf("unauthorized")].textContent, "1", "the actual unauthorized delivery remains counted in its observed hour");
   assert.match(markup, /counts since then within 24 UTC hours/);
 });

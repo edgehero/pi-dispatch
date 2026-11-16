@@ -1,3 +1,4 @@
+import { localEventDigest, validLocalEvent } from "./local-event.mjs";
 /**
  * The shared triggers-file WRITER (issue #231, DES-ONE-SHOT-DISARM-IN-THE-FILE, OQ-008).
  *
@@ -348,7 +349,7 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
  * not failure), or `{ invalid }` with an operator-actionable reason. NEVER throws, and NEVER repairs:
  * an unreadable file is `{ invalid }` with the bytes untouched.
  */
-export async function disarmTrigger({ triggersPath, index, number, flow, command, jobId, at, fs = nodeFs, log = () => {}, now = () => Date.now() }) {
+export async function disarmTrigger({ triggersPath, index, number, flow, command, jobId, localEvent = null, at, fs = nodeFs, log = () => {}, now = () => Date.now() }) {
 	for (let attempt = 0; attempt < DISARM_LOCK_ATTEMPTS; attempt++) {
 		let fd;
 		try {
@@ -381,6 +382,17 @@ export async function disarmTrigger({ triggersPath, index, number, flow, command
 				return { invalid: `triggers file has a duplicate key ${JSON.stringify(duplicate.key)} at ${duplicate.at}, disarm not written: ${triggersPath}` };
 			}
 			const entries = Array.isArray(raw?.triggers) ? raw.triggers : null;
+			if (localEvent !== null) {
+				if (!validLocalEvent(localEvent)) return { invalid: "invalid local event identity; disarm not written" };
+				index = entries?.findIndex((t) => t?.on?.id === localEvent.id && t.on.forge === localEvent.forge && t.run?.kind === "local") ?? -1;
+				try {
+					parseTriggers(currentText, triggersPath);
+					const copy = structuredClone(raw);
+					if (copy.triggers[index]?.on) delete copy.triggers[index].on.disarmed;
+					const current = parseTriggers(JSON.stringify(copy), triggersPath)[index];
+					if (!current || localEventDigest(current) !== localEvent.digest) return { invalid: "local event definition changed; disarm not written" };
+				} catch { return { invalid: "local event definition unreadable; disarm not written" }; }
+			}
 			const entry = entries?.[index];
 			if (!entry || typeof entry !== "object") {
 				return { invalid: `no trigger at index ${index} -- the file changed since this job matched; not disarming a stranger` };
@@ -456,9 +468,12 @@ export async function disarmTrigger({ triggersPath, index, number, flow, command
  * that can neither disarm nor pre-spend-check).
  */
 export function makeDisarmOnce({ triggersPath, fs = nodeFs, log = () => {}, disarm = disarmTrigger }) {
-	return async function disarmOnce({ job, endedAt }) {
+	return async function disarmOnce({ job, endedAt, result, error }) {
+		// A stale queue entry never spends the live generation that replaced it, even under the same reviewed rule.
+		if (job?.data?.localEvent && String(result?.reason ?? error?.reason ?? "").startsWith("local-event-")) return;
 		try {
-			const matched = job?.data?.trigger?.matched;
+			const localEvent = job?.data?.localEvent;
+			const matched = localEvent?.once === true ? localEvent : job?.data?.trigger?.matched;
 			if (matched?.once !== true) return; // every unflagged job takes zero new code paths
 			const triggerIndex = matched.index ?? null;
 			if (typeof triggersPath !== "string" || triggersPath === "") {
@@ -471,6 +486,7 @@ export function makeDisarmOnce({ triggersPath, fs = nodeFs, log = () => {}, disa
 			const res = await disarm({
 				triggersPath,
 				index: matched.index,
+				...(localEvent ? { localEvent } : {}),
 				number,
 				flow: job?.data?.flow,
 				command: job?.data?.command,
@@ -825,7 +841,11 @@ export function makeFindSecretBundle({ triggersPath, fs = nodeFs, log = () => {}
 		const matched = trigger.matched;
 		let raw;
 		let entry;
-		if (Number.isInteger(matched?.index)) {
+		if (validLocalEvent(job.localEvent)) {
+			entry = "local-event";
+			const candidate = entries.find((t) => t?.on?.id === job.localEvent.id && t.on.forge === job.localEvent.forge && t.run?.kind === "local");
+			if (candidate && ["folder", "command", "worker"].every((key) => candidate.run?.[key] === job[key])) raw = candidate;
+		} else if (Number.isInteger(matched?.index)) {
 			entry = "forge";
 			const candidate = entries[matched.index];
 			const sameType = typeof matched.type !== "string" || candidate?.on?.type === matched.type;

@@ -39,9 +39,9 @@
  *                   review id (numeric and monotonic, so the events discipline applies). Issue #66's
  *                   fourth source, and it exists because the alternative was a `review_submitted`
  *                   trigger that loads clean under polling and can never fire -- the silently dead
- *                   trigger this project refuses everywhere else. Only open PRs are swept: a review on
- *                   a closed PR has nothing left to act on, the same call `merge`/`close` get in the
- *                   action vocabulary. REST spells `state` in upper case where the webhook spells it
+ *                   trigger this project refuses everywhere else. Only open PRs are swept to bound
+ *                   the work; a local reconciliation command can also wake on the separate close feed.
+ *                   REST spells `state` in upper case where the webhook spells it
  *                   lower; `parseSubset` folds it, so both transports produce the same job.
  *   - closed:       the SAME /issues/events feed as `label` -- `closed` entries carry the CLOSER as
  *                   `actor` and cover issues AND PRs (`issue.pull_request` is the discriminator again,
@@ -136,6 +136,7 @@ import { makeResolveGitHubAuthority } from "./github-members.mjs";
 import { parseSubset } from "./receiver.mjs";
 import { loadPollerConfig } from "./poller-config.mjs";
 import { retryIdentity } from "./boot-retry.mjs";
+import { hasLocalCloseListeners, localEventsWantCloserAuthority, makeLocalEventAdmission } from "./local-event-listeners.mjs";
 
 const API_URL = "https://api.github.com";
 // In SECONDS (`EX`): strictly outlives the gh-* job retention (`FORGE_JOB_RETENTION_S`) by four days, derived so that
@@ -203,6 +204,7 @@ export async function startPoller(env = process.env, deps = {}) {
 		signals = sleep === undefined,
 		redis,
 		queueFn,
+		localEventStore,
 		selfIdFn,
 		tokenFn,
 		readFile = fsReadFile,
@@ -287,7 +289,8 @@ export async function startPoller(env = process.env, deps = {}) {
 		if (ownRedis) await redisClient.quit();
 	};
 
-	const ctx = { cfg, selfId, fetchFn, redis: redisClient, enqueue, out, now, random, resolveCloserAuthority };
+	const admitLocal = makeLocalEventAdmission({ client: () => redisClient, store: localEventStore, log: out });
+	const ctx = { cfg, selfId, fetchFn, redis: redisClient, enqueue, admitLocal, out, now, random, resolveCloserAuthority };
 
 	// The repo set: explicit POLL_REPOS, or the App installation's list (cfg.repos === null only when
 	// the source is app -- poller-config enforces it). An empty discovery is a config error, not an
@@ -424,7 +427,7 @@ export async function startPoller(env = process.env, deps = {}) {
 			cycleNo++;
 			// `steered` (issue #646) only when a comment steered a run this cycle, so a cycle line without one is unchanged;
 			// `held` (issue #638) by the same rule, when a reply was held for a parking run.
-			out({ event: "poll_cycle", repos: repos.length, fetched: stats.fetched, enqueued: stats.enqueued, notModified: stats.notModified, ...(stats.steered > 0 ? { steered: stats.steered } : {}), ...(stats.held > 0 ? { held: stats.held } : {}), ms: now() - startedAt });
+			out({ event: "poll_cycle", repos: repos.length, fetched: stats.fetched, enqueued: stats.enqueued, notModified: stats.notModified, ...(stats.steered > 0 ? { steered: stats.steered } : {}), ...(stats.held > 0 ? { held: stats.held } : {}), ...(stats.localAccepted > 0 ? { localAccepted: stats.localAccepted } : {}), ms: now() - startedAt });
 			if (stopped) {
 				// No wait follows a stop, so the families this cycle polled are due at once: a restart reads the
 				// stop itself.
@@ -742,7 +745,7 @@ async function pollLabelEvents(ctx, api, repo, stats) {
 	for (const ev of fresh) {
 		if (ev.event === "labeled" && ev.issue) {
 			await handleLabeledEvent(ctx, api, repo, ev, stats);
-		} else if (ev.event === "closed" && ev.issue && hasCloseTriggers(ctx.cfg?.triggers?.github)) {
+		} else if (ev.event === "closed" && ev.issue && (hasCloseTriggers(ctx.cfg?.triggers?.github) || hasLocalCloseListeners(ctx.cfg?.triggers?.github))) {
 			// The coarse hasCloseTriggers guard IS the byte-identity switch (issue #231): with no close
 			// rule armed, a `closed` entry takes the same do-nothing path every unhandled event always
 			// has -- no PR fetch, no permission traffic, a cycle indistinguishable from a pre-#231 run.
@@ -999,9 +1002,8 @@ async function pollPulls(ctx, api, repo, stats) {
  * with it the idle steady state is 50 * 304, which GitHub does not charge against the rate limit. The
  * validators live in one hash (see keyNames) so the key family stays enumerable for touchRepo.
  *
- * A review on a CLOSED pr is never seen, deliberately: the open list is the sweep set, and a job started
- * by a review of a merged PR has nothing left to act on -- the same call `merge` and `close` get in the
- * action vocabulary.
+ * A review on a CLOSED pr is never seen: the open list bounds the sweep. Local reconciliation commands
+ * inherit that polling limitation; the separate close feed can wake one when the PR closes.
  */
 async function pollReviews(ctx, api, repo, open, stats) {
 	const k = keyNames(repo);
@@ -1110,7 +1112,7 @@ async function gate(ctx, eventName, payload, deliveryId, stats) {
 	const subset = parseSubset(payload);
 
 	let closerAuthorized;
-	if (wantsCloserAuthority(eventName, subset, ctx.cfg?.triggers?.github, ctx.selfId)) {
+	if (wantsCloserAuthority(eventName, subset, ctx.cfg?.triggers?.github, ctx.selfId) || localEventsWantCloserAuthority(eventName, subset, ctx.cfg?.triggers?.github, ctx.selfId)) {
 		const repo = subset.repository?.full_name;
 		const resolved = await ctx.resolveCloserAuthority(repo, subset.sender?.login);
 		if (resolved.indeterminate) {
@@ -1128,6 +1130,10 @@ async function gate(ctx, eventName, payload, deliveryId, stats) {
 		closerAuthorized = resolved.authorized;
 	}
 
+	// Admission throws before this feed advances its cursor. A retry signals the same receipt, even when
+	// another listener or the ordinary forge enqueue failed after this listener had already accepted it.
+	const local = await ctx.admitLocal({ kind: "github", event: eventName, subset, triggers: ctx.cfg.triggers, selfId: ctx.selfId, authorized: closerAuthorized, deliveryId });
+	if (local.length > 0) stats.localAccepted = (stats.localAccepted ?? 0) + local.length;
 	const result = filter(eventName, subset, ctx.cfg, ctx.selfId, deliveryId, closerAuthorized);
 	if (!result.enqueue) {
 		// Issue #638, the webhook arms' `heldBeforeLabelOr` at the poller's seam: a phrase-free reply that missed only the
@@ -1143,7 +1149,7 @@ async function gate(ctx, eventName, payload, deliveryId, stats) {
 		}
 		// A run just parked on the target (held.mjs): the reply is the parked reply it would have been, enqueued below.
 		if (rescued?.enqueue !== true) {
-			ctx.out({ event: "dropped", delivery: deliveryId, reason: result.reason });
+			if (local.length === 0) ctx.out({ event: "dropped", delivery: deliveryId, reason: result.reason });
 			return;
 		}
 	}

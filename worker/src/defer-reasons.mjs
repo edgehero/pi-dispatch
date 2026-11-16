@@ -54,6 +54,9 @@ export const DEFER_DUE_SENTENCE = "Due since {due}; no worker has taken it";
  * written by nobody: `deferHsetArgs` throws on one (a programming error), and `parseDefer` reads one as unknown.
  */
 export const DEFER_WHYS = Object.freeze({
+	"local-event-debounce": Object.freeze({ bucket: "check", sentence: "Collecting matching events until {until}" }),
+	"workspace-unseeded": Object.freeze({ bucket: "ready", sentence: "Waiting for the runtime to identify surviving local jobs" }),
+	"workspace-orphan": Object.freeze({ bucket: "run", sentence: "Waiting for a surviving container to release the folder" }),
 	canary: Object.freeze({ bucket: "run", sentence: "Waiting for the operator model canary to finish" }),
 	"pause-window": Object.freeze({ bucket: "pause", sentence: "In a pause window until {until}" }),
 	"size-never-fits": Object.freeze({ bucket: "slot", sentence: "Its size fits no slot on {host}; another host may take it" }),

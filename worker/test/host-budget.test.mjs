@@ -286,6 +286,73 @@ test("an orphan keeps its hold until the runtime says its container is gone; an 
 	assert.equal(b.gate({ id: "b", project: null, size: { memMiB: 8192, cpuCenti: 100 } }).admitted, true);
 });
 
+test("an orphan's workspace stays excluded across venues and elapsed time until positive gone evidence (#911)", async () => {
+	let answer = null;
+	const clock = { t: 0 };
+	const { b } = budgetWith({ clock, gone: async () => answer });
+	await b.ready;
+	const size = { memMiB: 512, cpuCenti: 25 };
+	assert.equal(b.gate({ id: "a", size, workspaceKey: "local-workspace:1:2", venue: "local" }).admitted, true);
+	b.orphan("a", { name: "pi-job-a", venue: { backend: "local" } });
+	assert.deepEqual(b.gate({ id: "b", size, workspaceKey: "local-workspace:1:2", venue: "podman" }), { admitted: false, why: "workspace-orphan", rank: -1 });
+	assert.equal(b.waiting().length, 0, "the blocked folder reserves no budget headroom");
+	assert.equal(b.gate({ id: "c", size, workspaceKey: "local-workspace:1:3", venue: "podman" }).admitted, true);
+	clock.t += 10 * 24 * 3600 * 1000;
+	await b.sweep();
+	assert.equal(b.workspaceBlocker("local-workspace:1:2"), "workspace-orphan", "elapsed time and an unanswered runtime do not release the folder");
+	answer = false;
+	await b.sweep();
+	assert.equal(b.workspaceBlocker("local-workspace:1:2"), "workspace-orphan");
+	answer = true;
+	await b.sweep();
+	assert.equal(b.workspaceBlocker("local-workspace:1:2"), null);
+	assert.equal(b.gate({ id: "b", size, workspaceKey: "local-workspace:1:2" }).admitted, true);
+});
+
+test("a boot survivor of unknown workspace holds every local folder, including beside an unread other venue (#911)", async () => {
+	let podman = () => { throw new Error("unread"); };
+	let gone = null;
+	const clock = { t: 1000 };
+	const b = makeHostBudget({
+		settings: settingsOf({ PI_HOST_MEMORY_BUDGET: "64g", PI_HOST_CPU_BUDGET: "16" }), countLimit: NO_COUNT,
+		survivors: { local: async () => [{ name: "pi-job-survivor", memMiB: 512, cpuCenti: 25 }], podman: async () => podman() },
+		containerGone: async () => gone, now: () => clock.t,
+	});
+	await b.ready;
+	const request = { id: "new-local", size: { memMiB: 512, cpuCenti: 25 }, workspaceKey: "local-workspace:1:2", venue: "local" };
+	assert.deepEqual(b.gate(request), { admitted: false, why: "workspace-unseeded", rank: -1 });
+	assert.equal(b.gate({ id: "forge", size: request.size, venue: "local" }).admitted, true, "forge execution keeps its existing per-venue admission");
+	podman = () => [];
+	await b.seed();
+	assert.deepEqual(b.gate(request), { admitted: false, why: "workspace-orphan", rank: -1 });
+	clock.t += 10 * 24 * 3600 * 1000;
+	await b.sweep();
+	assert.equal(b.workspaceBlocker(request.workspaceKey), "workspace-orphan");
+	gone = true;
+	await b.sweep();
+	assert.equal(b.gate(request).admitted, true);
+});
+
+test("same-named boot survivors on two venues each require their own positive gone answer (#911)", async () => {
+	const gone = new Set();
+	const clock = { t: 0 };
+	const survivor = (backend) => [{ name: "pi-job-shared-name", memMiB: 512, cpuCenti: 25, venue: { backend } }];
+	const b = makeHostBudget({
+		settings: settingsOf({ PI_HOST_MEMORY_BUDGET: "64g", PI_HOST_CPU_BUDGET: "16" }), countLimit: NO_COUNT,
+		survivors: { local: async () => survivor("local"), podman: async () => survivor("podman") },
+		containerGone: async (_name, venue) => gone.has(venue.backend), now: () => clock.t,
+	});
+	await b.ready;
+	assert.equal(b.entries().length, 2);
+	gone.add("local");
+	await b.sweep();
+	assert.equal(b.entries().length, 1);
+	assert.equal(b.workspaceBlocker("local-workspace:1:2"), "workspace-orphan");
+	gone.add("podman");
+	await b.sweep();
+	assert.equal(b.workspaceBlocker("local-workspace:1:2"), null);
+});
+
 test("a stale hold is verified after 15 s: dropped when finished, gone or active elsewhere, kept while waiting; a Valkey error drops it after 120 s", async () => {
 	const clock = { t: 0 };
 	const { b } = budgetWith({ clock });

@@ -395,7 +395,7 @@ export function buildGraphModel({ triggers, schedulers, folderSkills, injectedSk
     const id = `trigger:${t.index}`;
     const isCron = t.type === "cron";
     let group = null;
-    if (isCron) {
+    if (isCron || t.runKind === "local") {
       if (typeof t.folder === "string" && t.folder !== "") {
         group = folderByPath.get(t.folder) ?? null;
         if (!group) {

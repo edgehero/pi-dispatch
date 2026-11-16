@@ -1,3 +1,4 @@
+import { LOCAL_EVENT_ID_RE } from "./local-event-identity.mjs";
 import { validateAnswerRules, validateStandingAnswers } from "./answerer.mjs";
 import { validateZeroTouchConfig } from "./question-groups.mjs";
 /**
@@ -9,8 +10,8 @@ import { validateZeroTouchConfig } from "./question-groups.mjs";
  *
  * The on x run MATRIX is the trust boundary (DES-TRIGGERS-UNIFIED-FILE): a cron trigger carries no
  * webhook delivery id, issue/PR number, title, or body, so it can only produce a `local` run; a webhook
- * trigger is adversarial input and always produces a FORGE run, never a local one. Off-matrix is
- * rejected fail-loud at load, exactly as the old schedules loader refused a `kind:"github"` schedule.
+ * flow still produces a forge run. An explicit event-local command (#911) carries no event text and names
+ * its source forge and owning worker separately. Every other off-matrix pairing is refused at load.
  *
  * Which forge is `run.kind` (issue #42): the `on.type` vocabulary is shared, because a label is a label
  * and a comment is a comment on every forge, while the ACTION vocabulary is not -- GitHub says
@@ -57,6 +58,7 @@ import { neededVersion, underDeclared, valueNeededVersion, valueUnderDeclared, v
 // fs-free, so importing it keeps parseTriggers pure.
 import { WAIT_CONDITION_KEYS, WAIT_CONDITION_MAX, afterInstantMs } from "./wait-for.mjs";
 import { JOB_LIMIT_FIELDS, validateJobLimits } from "./job-limit-rules.mjs";
+import { WORKER_NAME_RE } from "./worker-name.mjs";
 
 // Re-exported so the console checks a provider or model it is about to write with the loader's own
 // grammar, through the subpath it already imports, rather than a copy that could drift.
@@ -78,10 +80,30 @@ export const DISARMED_TYPE = "disarmed";
 
 // `RUN_KINDS` and `FORGE_KINDS` come from the forge table (forges.mjs) rather than being written out
 // here. They differ by exactly `local`, and that difference IS the on x run matrix below: a webhook
-// trigger produces a forge job, a cron trigger produces a local one. Re-exported because the receiver's
+// flow produces a forge job; local commands name their source explicitly. Re-exported because the receiver's
 // config builds one trigger group per forge and a group it forgot would throw inside a reload that keeps
 // the previous rules -- so the two have to be derived from one list, and a test asserts they are.
 export { FORGE_KINDS };
+
+/** Source authentication follows the event forge; a local command's workspace never changes it. */
+export function sourceForgeOf(trigger) {
+	if (!["label", "comment", "pull_request", "issue"].includes(trigger?.on?.type)) return null;
+	return trigger.run?.kind === "local" ? trigger.on.forge : trigger.run?.kind;
+}
+
+export { LOCAL_EVENT_ID_RE } from "./local-event-identity.mjs";
+export const REVIEW_AUTHOR_LOGIN_RE = /^[a-z0-9](?:[a-z0-9-]{0,38})(?:\[bot\])?$/;
+export const REVIEW_AUTHORS_MAX = 32;
+export const LOCAL_EVENT_DEBOUNCE_DEFAULT = 10;
+export const LOCAL_EVENT_DEBOUNCE_MAX = 300;
+
+function validateWorker(run, at, path, required = false) {
+	if (run.worker === undefined && !required) return undefined;
+	if (typeof run.worker !== "string" || !WORKER_NAME_RE.test(run.worker) || /\.(json|log)$/i.test(run.worker)) {
+		throw configError(`${at}: run.worker must name one worker (1 to 64 letters, digits, dot, underscore or dash, starting with a letter or digit, and no .json or .log suffix): ${path}`);
+	}
+	return run.worker;
+}
 
 /**
  * The `pull_request` action vocabulary, per forge, in each forge's OWN words -- so an operator writes
@@ -321,7 +343,7 @@ function isNonEmptyString(value) {
  * `version`, absent meaning 1, which `writeTriggers` owns and writes only when the content needs more than 1, so every
  * file of today's fields stays byte-identical.
  */
-export const TRIGGERS_FILE_VERSION = 4;
+export const TRIGGERS_FILE_VERSION = 5;
 
 /**
  * Each `run` key whose ABSENCE an older build would misread, with the version that introduced it. The raw `run` keys
@@ -336,7 +358,7 @@ export const TRIGGERS_FILE_VERSION = 4;
  * `idleTimeoutMinutes`, `stallTimeoutMinutes` and `maxMinutes` (issue #888): an older loader drops each and runs the job
  * under the deployment's limits, which for a ceiling the trigger set is a longer run than the file allows.
  */
-export const TRIGGER_RUN_FIELD_VERSIONS = Object.freeze({ excludeExtensions: 2, excludeExtensionTools: 2, idleTimeoutMinutes: 3, stallTimeoutMinutes: 3, maxMinutes: 3, mayMerge: 4 });
+export const TRIGGER_RUN_FIELD_VERSIONS = Object.freeze({ excludeExtensions: 2, excludeExtensionTools: 2, idleTimeoutMinutes: 3, stallTimeoutMinutes: 3, maxMinutes: 3, mayMerge: 4, worker: 5 });
 
 /** Each top-level block (beside `triggers`) whose absence an older build would misread, as above. Empty until one does. */
 export const TRIGGERS_BLOCK_VERSIONS = Object.freeze({});
@@ -347,7 +369,9 @@ export const TRIGGERS_BLOCK_VERSIONS = Object.freeze({});
  * this, and an older loader meeting the wider value refuses the whole file as broken (its schedules keep running, and
  * its next start fails) where a stamp makes it defer. Empty until a value needs one.
  */
-export const TRIGGER_VALUE_VERSIONS = Object.freeze({});
+export const TRIGGER_VALUE_VERSIONS = Object.freeze({
+	on: (on) => on && ["forge", "debounceSeconds", "reviewAuthors"].some((key) => Object.hasOwn(on, key)) ? 5 : 1,
+});
 
 /**
  * Each EXISTING `run` key whose range a later release widens (a new `run.waitFor` condition kind, or a new `run.kind`,
@@ -480,7 +504,7 @@ export function parseTriggersDocument(text, path, { supported = TRIGGERS_FILE_VE
 	}
 
 	const watchSources = normalizeWatchSources(parsed.watchSources);
-	const state = { seenCronIds: new Set(), seenWatchIds: new Set(), watchSources, commentCounts: {} };
+	const state = { seenCronIds: new Set(), seenLocalEventIds: new Set(), seenWatchIds: new Set(), watchSources, commentCounts: {} };
 	const triggers = entries.map((entry, index) => normalizeTrigger(entry, index, path, state));
 	// AFTER the triggers, so a file broken in both places names the trigger first, the message every operator
 	// of an older file already knows.
@@ -552,6 +576,14 @@ function normalizeTrigger(entry, index, path, state) {
 	}
 
 	validateMayMerge(run, on.type, at, path);
+	const localEvent = run.kind === "local" && !["cron", "watch"].includes(on.type);
+	if (!localEvent) {
+		for (const key of ["forge", "debounceSeconds", "reviewAuthors"]) {
+			if (on[key] !== undefined) throw configError(`${at}: on.${key} is only available on a forge event starting a local command: ${path}`);
+		}
+		if (run.worker !== undefined && on.type !== "cron") throw configError(`${at}: run.worker is only available on local command events and cron triggers: ${path}`);
+	}
+	if (localEvent) return normalizeLocalEvent(on, run, index, path, state);
 
 	// The on x run matrix -- the trust boundary, fail-loud (mirrors the old schedules kind:github refusal).
 	if (on.type === "watch") return normalizeWatch(entry, index, path, state);
@@ -583,6 +615,42 @@ function normalizeTrigger(entry, index, path, state) {
 	// normalize to the sentinel, so its raw index survives and nothing downstream can match it.
 	if (on.disarmed !== undefined) return { on: { type: DISARMED_TYPE }, run: {} };
 	return normalized;
+}
+
+/**
+ * Separate admission from execution: existing event validators judge only source selectors, while the local
+ * normalizer keeps every local-workspace restriction. Neither half sees a fabricated event or executes code.
+ */
+function normalizeLocalEvent(on, run, index, path, state) {
+	const at = `trigger at index ${index}`;
+	if (!isForgeKind(on.forge)) throw configError(`${at}: a local event command requires on.forge (${FORGE_KINDS.join("|")}): ${path}`);
+	if (typeof on.id !== "string" || !LOCAL_EVENT_ID_RE.test(on.id)) throw configError(`${at}: a local event command requires on.id (1 to 64 letters, digits, dot, underscore or dash, starting with a letter or digit): ${path}`);
+	if (state.seenLocalEventIds.has(on.id)) throw configError(`${at}: duplicate local event on.id: ${path}`);
+	state.seenLocalEventIds.add(on.id);
+	const worker = validateWorker(run, at, path, true);
+	if (run.command === undefined) throw configError(`${at}: a forge event may start a local run.command only, not a local flow: ${path}`);
+	for (const key of ["portfolio", "repository"]) {
+		if (run[key] !== undefined) throw configError(`${at}: run.${key} is not available on a local event command: ${path}`);
+	}
+	const debounceSeconds = on.debounceSeconds === undefined ? LOCAL_EVENT_DEBOUNCE_DEFAULT : on.debounceSeconds;
+	if (!Number.isInteger(debounceSeconds) || debounceSeconds < 0 || debounceSeconds > LOCAL_EVENT_DEBOUNCE_MAX) throw configError(`${at}: on.debounceSeconds must be an integer from 0 to ${LOCAL_EVENT_DEBOUNCE_MAX}: ${path}`);
+	let reviewAuthors;
+	if (on.reviewAuthors !== undefined) {
+		if (on.forge !== "github" || on.type !== "pull_request" || !Array.isArray(on.action) || !on.action.includes(REVIEW_ACTION)) throw configError(`${at}: on.reviewAuthors requires a GitHub local command on review_submitted: ${path}`);
+		if (!Array.isArray(on.reviewAuthors) || on.reviewAuthors.length === 0 || on.reviewAuthors.length > REVIEW_AUTHORS_MAX || on.reviewAuthors.some((name) => typeof name !== "string" || !REVIEW_AUTHOR_LOGIN_RE.test(name)) || new Set(on.reviewAuthors).size !== on.reviewAuthors.length) throw configError(`${at}: on.reviewAuthors must contain 1 to ${REVIEW_AUTHORS_MAX} distinct exact lowercase GitHub logins (an App may end in [bot]): ${path}`);
+		reviewAuthors = [...on.reviewAuthors];
+	}
+	// Azure's source validators require a clone repository for work items. A local command clones none;
+	// this private placeholder satisfies only that execution check and is never returned or queued.
+	const sourceRun = { kind: on.forge, command: run.command, ...(on.forge === "azure" && ["label", "comment"].includes(on.type) ? { repository: "local-command" } : {}) };
+	let event;
+	if (on.type === "label") event = normalizeLabel(on, sourceRun, index, path);
+	else if (on.type === "comment") event = normalizeComment(on, sourceRun, index, path, { commentCounts: {} });
+	else if (on.type === "issue") event = normalizeIssue(on, sourceRun, index, path);
+	else event = normalizePullRequest(on, sourceRun, index, path);
+	const local = normalizeCron({ type: "cron", id: on.id, pattern: "0 0 * * *" }, run, index, path, { seenCronIds: new Set() });
+	if (on.disarmed !== undefined) return { on: { type: DISARMED_TYPE }, run: {} };
+	return { on: { ...event.on, forge: on.forge, id: on.id, debounceSeconds, ...(reviewAuthors !== undefined ? { reviewAuthors } : {}) }, run: { ...local.run, worker } };
 }
 
 function normalizeWatch(entry, index, path, state) {
@@ -679,6 +747,7 @@ function normalizeCron(on, run, index, path, state) {
 	// add the flow it deliberately does not have, and a flow+command entry gets the exclusion message
 	// rather than whichever single-field check happens to run first.
 	const command = validateCommand(run, `cron trigger "${id}"`, path, { onType: "cron" });
+	const worker = validateWorker(run, `cron trigger "${id}"`, path);
 
 	if (!isNonEmptyString(run.folder)) {
 		throw configError(`cron trigger "${id}": run.folder must be a non-empty string: ${path}`);
@@ -752,7 +821,7 @@ function normalizeCron(on, run, index, path, state) {
 	// freeze today's default into every stored repeatable.
 	return {
 		on: { type: "cron", id, pattern },
-		run: { kind: "local", folder: run.folder, flow: run.flow, task: run.task, provider: ref.provider, model: ref.model, maxTurns: ref.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(excludeExtensions !== undefined && { excludeExtensions }), ...(excludeExtensionTools !== undefined && { excludeExtensionTools }), ...(mcp !== undefined && { mcp }), ...(ref.models !== undefined && { models: ref.models }), ...(ref.fallbackModels !== undefined && { fallbackModels: ref.fallbackModels }), ...(ref.maxCostUsd !== undefined && { maxCostUsd: ref.maxCostUsd }), ...(ref.idleTimeoutMinutes !== undefined && { idleTimeoutMinutes: ref.idleTimeoutMinutes }), ...(ref.stallTimeoutMinutes !== undefined && { stallTimeoutMinutes: ref.stallTimeoutMinutes }), ...(ref.maxMinutes !== undefined && { maxMinutes: ref.maxMinutes }), ...(portfolio !== undefined && { portfolio }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }) },
+		run: { kind: "local", folder: run.folder, ...(worker !== undefined && { worker }), flow: run.flow, task: run.task, provider: ref.provider, model: ref.model, maxTurns: ref.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(excludeExtensions !== undefined && { excludeExtensions }), ...(excludeExtensionTools !== undefined && { excludeExtensionTools }), ...(mcp !== undefined && { mcp }), ...(ref.models !== undefined && { models: ref.models }), ...(ref.fallbackModels !== undefined && { fallbackModels: ref.fallbackModels }), ...(ref.maxCostUsd !== undefined && { maxCostUsd: ref.maxCostUsd }), ...(ref.idleTimeoutMinutes !== undefined && { idleTimeoutMinutes: ref.idleTimeoutMinutes }), ...(ref.stallTimeoutMinutes !== undefined && { stallTimeoutMinutes: ref.stallTimeoutMinutes }), ...(ref.maxMinutes !== undefined && { maxMinutes: ref.maxMinutes }), ...(portfolio !== undefined && { portfolio }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }) },
 	};
 }
 

@@ -84,15 +84,16 @@ staging a workflow extension).
 | `issue` | an issue closing, and only that (labels have `label`, phrases have `comment`) | `action`, the close word in your forge's own words | `number` pins it to one issue (on GitLab, the iid); `once: true` makes it a one-shot and requires `number` | the issue title and body |
 
 One variation changes that last column for every type. A trigger that names `run.command` instead of
-`run.flow` gives the agent exactly `/command args` as its whole prompt. The issue, comment or PR text
-waits in `/job/event.json` for the command's handler to read (see
+`run.flow` gives the agent exactly `/command args` as its whole prompt. For a forge job, the issue, comment or PR text
+waits in `/job/event.json` for the command's handler to read. An event-started local command receives no event text (see
 [Multi-stage workflows](#multi-stage-workflows-and-third-party-pi-extensions)).
 
-Every type also needs `run.kind` (`local` for cron, else the forge). You must pick exactly one of
+Every type also needs `run.kind` (`local` for cron, or the forge for a forge job). A forge event can instead
+start a local command using the additional fields below. You must pick exactly one of
 `run.flow` or `run.command` (naming both, or neither, refuses to load in both services). Cron additionally
 needs `folder` (a host path the worker checks exists when it loads the file; make it absolute, since a
 relative path resolves against the worker's own directory) and, with `flow`, a `task`. Azure `label` and
-`comment` triggers need `run.repository`, because a work item belongs to a project and names no repository.
+`comment` forge jobs need `run.repository`, because a work item belongs to a project and names no repository.
 The webhook types also charset check `run.flow` at load (skill names are lowercase). A flow that could
 never name a repo skill is refused when the file loads, at no cost, instead of failing inside a paid
 container. A cron `id` longer than 176 characters refuses the file too: each run its schedule starts is the job
@@ -106,7 +107,8 @@ Two matching behaviours to know before you turn on a paid trigger:
 - **A comment can choose the flow.** `<phrase> <flow>` in the comment body overrides the trigger's
   `run.flow` whenever that word matches another trigger's flow in the same file. So `run.flow` is a
   default rather than a fixed pairing. On a rule that names `run.command` this channel is inert. Trailing
-  words never retarget or suppress the command, and reach the job only as data in `/job/event.json`.
+  words never retarget or suppress the command. They reach a forge job only as data in `/job/event.json`,
+  and never reach a local event command.
 - **Label triggers match differently per forge.** GitHub and Forgejo match the issue's **whole current
   label set**. Reopening an already-labelled issue, or adding an unrelated label to one, fires
   again. GitLab and Azure match only the labels **that event added**. This is exactly why they do not
@@ -147,16 +149,178 @@ bot that reviews (a CI bot, a review service) can start jobs if it holds write a
 [`SECURITY.md`](../SECURITY.md)
 states both, and the flow gets `review.id` in `/job/event.json` so it can fetch the line comments itself.
 
-**Who may fire a trigger is not ours to grant.** Your forge decides that, differently per forge.
+**The source forge's permission rules still apply.** Your forge decides those permissions, differently per forge.
 [`SECURITY.md`](../SECURITY.md) states each one plainly (short version: on GitHub only collaborators can
 apply a label, which is why the label *is* the approval there; GitLab, Forgejo and Azure resolve the
 actor's permission through their APIs because a label proves less on those). The always-on gates that
 every delivery passes are the signature check, the bot-loop guard, that permission check, dedup, quiet
-hours, the image preflight, branch protection, and the spend caps. None of them are per-trigger.
+hours, the applicable image and branch-protection preflights, and the spend caps. The explicit local-review
+allowlist below is the one additional actor authorization; it does not change ordinary forge jobs.
+
+## A forge event running a local command
+
+A label, comment, pull-request event or supported close event can wake a command in an operator-owned folder.
+This uses the same registered pi extension command as a cron trigger. It still runs inside a job container;
+`run.command` is not a shell command. A handler can do its work without calling a model, but command jobs retain
+their normal model/provider configuration, image checks and spend controls. This setting does not guarantee zero spend.
+
+```json
+{
+  "version": 5,
+  "triggers": [
+    {
+      "on": {
+        "type": "pull_request",
+        "forge": "github",
+        "id": "pr-sweep",
+        "action": ["review_submitted", "synchronize", "labeled"],
+        "any": ["ready"],
+        "debounceSeconds": 10,
+        "reviewAuthors": ["review-app[bot]"]
+      },
+      "run": {
+        "kind": "local",
+        "worker": "runner-a",
+        "folder": "/srv/automation",
+        "command": "sweep"
+      }
+    }
+  ]
+}
+```
+
+Set `PI_WORKER_NAME=runner-a` on that worker. The source is `on.forge`; `run.kind` describes the local execution.
+`on.id` is a stable, unique local-event id, at most 64 letters, digits, dots, underscores or dashes, starting with
+a letter or digit. The folder, command and its arguments come entirely from this reviewed file. The command
+receives no source title, body, comment, review, labels, actor, branch, repository or item number, even in
+`/job/event.json`. That file identifies the configured local trigger; the command reads any current forge state
+it needs itself. A burst can cover several repositories, so there is no misleading "last event" target.
+
+`on.debounceSeconds` is an integer from 0 to 300, default 10. Matching events postpone the pending run until the
+quiet interval ends, capped at five minutes from the first event so continuous activity cannot postpone it forever.
+Five events in that interval produce one run. Once execution starts, further events produce at most one successor;
+it becomes eligible after the first run finishes and its own quiet interval has elapsed. Pauses, unavailable workers,
+folder contention and spend controls can delay either run further. The five-minute limit is a debounce limit,
+not a promise that a worker will be available then.
+
+Coalescing is per trigger, across its source repositories and item numbers. Different triggers pointing at the same
+folder and command can cause separate sequential runs. They do not run in that folder concurrently. Give a paired
+cron trigger the same `run.worker` and `run.folder`; cron without `run.worker` keeps its existing folder-based placement.
+Every matching local listener is considered independently, alongside the existing first matching forge rule.
+Several local comment listeners can therefore coexist with the forge's one comment rule. Close-only action lists
+remain separate from other pull-request actions.
+
+For a GitHub `review_submitted` local command, `on.reviewAuthors` adds 1 to 32 distinct, exact lowercase GitHub
+logins, including App names ending in `[bot]`. The reviewer's login is compared without case; no wildcard or display
+name matches. A listed reviewer may wake this command even when their association is `NONE`. The ordinary
+collaborator gate still works, and the deployment's own identity is always refused. `reviewState`, label predicates
+and the empty Comment-review rule still apply. Other event types and forge jobs cannot use this exception.
+
+The receiver reports `accepted` once the signal is durable, with accepted and coalesced counts. It does not claim
+a container has started or a queue job already exists. A store failure returns 503; polling leaves its cursor before
+the failed signal. Duplicate deliveries do not reset the quiet interval, and restarts preserve pending work.
+The worker checks the current trigger definition before execution, so a queued signal cannot silently use a changed
+command or destination. A fresh matching delivery replaces an unclaimed generation whose definition or worker
+changed, or whose cancellation was recorded. It gets a new generation; an old queue entry refuses before spend.
+An active generation keeps its ownership, with at most one successor. Production admission and state transitions
+use Valkey's clock, so different machine clocks do not reset the quiet interval. Upgrade every reader before using
+these version-5 fields; see [Upgrading](upgrading.md).
+
+Cancelling a local event generation clears the successor present when cancellation is accepted. A later new
+delivery remains eligible. If cancellation times out, the CLI, panel and console say that cancellation may have
+been stored and pending signals cleared: no acknowledgment is not proof that nothing changed. Check both the
+trigger and run before cancelling again. If queue removal was not confirmed, retry cancellation to remove or stop
+that job; the repeated cancellation cannot clear signals accepted after its first successful write.
+
+### Recovering a blocked local event
+
+A finished local event generation cannot be retried by hand. Send a fresh matching event or use a reviewed cron
+fallback. Removing its failed queue entry first settles the signal, then removes the entry, so a waiting successor
+is not stranded. If either operation is uncertain, the console reports a partial outcome and whether the successor
+may already be ready; inspect the trigger before repeating the action.
+
+`queue-job-missing` means a generation was active but its BullMQ entry disappeared. The worker cannot establish
+whether its container is still running, so it preserves the block. It does not start that generation again.
+
+First pause the deployment from its deployment folder with `pi-dispatch pause` (or pause the named worker's queue
+in the console). A pause stops new pickups; it does not stop a running container. Keep it paused throughout recovery.
+Inspect the blocked job using the read-only command below, then use the named worker's actual container runtime
+and socket to locate any container for that job and folder. Positively establish that it has stopped and is gone.
+An empty queue, a missing worker heartbeat or an unacknowledged cancel is insufficient. If the runtime is unavailable
+or its ownership is uncertain, leave the generation blocked.
+
+Save this as `local-event-recovery.mjs` in the deployment folder. Set the identity to the configured trigger. It
+loads the installed worker's exported APIs and uses the same deployment Valkey settings as the CLI; it prints no
+execution configuration or credentials.
+
+```js
+import { createRequire } from "node:module";
+import { resolve } from "node:path";
+
+const identity = { forge: "github", id: "pr-sweep" };
+const mode = process.argv[2];
+const expectedJobId = process.argv[3];
+if (!process.env.DISPATCH_MODULES || !["inspect", "finish"].includes(mode)) {
+  throw new Error("Set DISPATCH_MODULES and choose inspect or finish.");
+}
+const require = createRequire(resolve(process.env.DISPATCH_MODULES, "@edgehero/pi-dispatch/package.json"));
+const { makeRedisClient, cliValkeyUrl } = await import(require.resolve("@edgehero/pi-dispatch/connection"));
+const { makeLocalEventStore } = await import(require.resolve("@edgehero/pi-dispatch/local-event-store"));
+const { localEventJobId } = await import(require.resolve("@edgehero/pi-dispatch/local-event"));
+const redis = makeRedisClient(cliValkeyUrl(process.env), {
+  failFast: true, lazyConnect: true, commandTimeoutMs: 5000, disconnectTimeoutMs: 0,
+});
+redis.on("error", () => {});
+try {
+  await redis.connect();
+  const store = makeLocalEventStore({ redis });
+  const state = await store.read(identity);
+  const current = state?.current;
+  const jobId = current ? localEventJobId(current.generation) : null;
+  if (mode === "inspect") {
+    console.log(JSON.stringify({ jobId, worker: current?.data.localEvent.worker ?? null,
+      phase: current?.phase ?? null, blocked: current?.blocked ?? null }));
+  } else if (!current || current.phase !== "active" || current.blocked !== "queue-job-missing"
+      || expectedJobId !== jobId) {
+    console.error("The inspected blocked active generation does not match; inspect again. Nothing changed.");
+    process.exitCode = 1;
+  } else {
+    const result = await store.finish(current.data.localEvent, { owner: current.owner ?? "" });
+    console.log(result.ok ? "Inspected generation retired; any successor is now eligible."
+      : "Generation changed; inspect again. This retirement did not apply.");
+    if (!result.ok) process.exitCode = 1;
+  }
+} catch {
+  console.error(mode === "finish"
+    ? "Retirement was not confirmed and may have completed. Inspect again before any further change."
+    : "Inspection failed; no recovery was attempted.");
+  process.exitCode = 1;
+} finally {
+  redis.disconnect();
+}
+```
+
+For a global npm installation, inspect first:
+
+```sh
+DISPATCH_MODULES="$(npm root -g)" node ./local-event-recovery.mjs inspect
+```
+
+For a local npm installation, use that installation's absolute `node_modules` path instead. After proving the
+reported job's container is gone, copy its complete job id into this separate mutation command:
+
+```sh
+DISPATCH_MODULES="$(npm root -g)" node ./local-event-recovery.mjs finish local-event-REPLACE_WITH_ID_FROM_INSPECT
+```
+
+The finish operation compares the generation atomically. It retires that blocked generation and promotes any
+successor, preserving delivery receipts; it does not assert success or write a run record. Inspect again if the
+command's answer is uncertain. Resume with `pi-dispatch resume` only when recovery is complete and the runtime is
+known to be safe. Do not delete the state or receipt keys to recover: that loses execution and replay evidence.
 
 ## When another event starts a job
 
-Forge deliveries have two duplicate checks. Sending the same delivery again finds its original job while that job
+Ordinary forge jobs have two duplicate checks. Sending the same delivery again finds its original job while that job
 is retained. Different deliveries for the same target and flow normally share a ten-minute window, so rapidly
 removing and adding a label does not start several copies of the same work.
 
@@ -204,6 +368,9 @@ spent marker while
 matching nothing. Deleting `on.disarmed` re-arms it; nothing else is needed. A one-shot whose
 run **failed** still counts as fired. The record is the definition, so a failed run spends it too. The
 fix is that same one key deletion.
+For a local event one-shot, an authority refusal whose reason starts with `local-event-` does not spend the
+trigger: a stale or invalid queued generation must not disarm the current reviewed definition. An actual run's
+ordinary terminal record keeps the existing spending rule.
 
 Four deployment notes:
 
@@ -223,7 +390,8 @@ writer (the panel, the console and the trigger tools) writes it, first in the fi
 field, a top-level block or a value (a new `on.type`, a new `waitFor` condition, a new `run.kind`) that an older
 release would misread (a field whose absence would let a job run wider than the file says, or a value it would refuse
 as broken). `run.excludeExtensions` or `run.excludeExtensionTools` needs version 2; `idleTimeoutMinutes`,
-`stallTimeoutMinutes` or `maxMinutes` needs version 3; `mayMerge` needs version 4. A file without a field or value
+`stallTimeoutMinutes` or `maxMinutes` needs version 3; `mayMerge` needs version 4; local event commands and
+`run.worker` need version 5. A file without a field or value
 needing a newer version still needs only version 1. A
 file that uses such a field or value with a lower `version`, or with none, is refused like any malformed file.
 
@@ -275,8 +443,8 @@ how a run is followed or picked up, and that page's Edit form and `dispatch_trig
 
 - `"command"` replaces `flow`. You can use exactly one of the two on any trigger type. The job runs a
   registered pi extension command headlessly, with no interactive session. The whole prompt is `/command
-  args`. The arguments are fixed in the reviewed file. The event text reaches the handler only as
-  `/job/event.json`, which it reads itself. A command is never AI-triggerable. Job chaining refuses any
+  args`. The arguments are fixed in the reviewed file. A forge job's event text reaches the handler only as
+  `/job/event.json`, which it reads itself; a local event command receives none of it. A command is never AI-triggerable. Job chaining refuses any
   request that names one. `dispatch_run` cannot express one ([`docs/workflows.md`](workflows.md)). The
   job image must declare the `commands` capability. The shipped image does. A command job on an image
   that does not declare it is refused before it costs anything.
@@ -358,8 +526,12 @@ how a run is followed or picked up, and that page's Edit form and `dispatch_trig
 
 - `"resume": true` continues the session that opened the PR ([`docs/sessions.md`](sessions.md)).
 
-- `"github": true` on a cron trigger gets the same per-job GitHub token the webhook path gets. A
-  scheduled flow can use `gh`.
+- `"github": true` on a local trigger gets the same per-job GitHub token the webhook path gets. A
+  scheduled flow or local event command can use `gh` with this explicit credential setting.
+
+- `"worker": "runner-a"` selects a named worker for a local trigger. It is required for event-started local
+  commands and optional for cron. Use the same worker for a cron and event trigger sharing a folder. A forge
+  job cannot name it; its existing routing rules apply. See [multi-host placement](multi-host.md#where-work-runs).
 
 - `"portfolio": true` on a cron trigger makes its jobs portfolio jobs: the one kind of job that may send a
   budget priorities plan back ([`docs/allocation.md`](allocation.md)). Cron only. The file refuses it on a webhook

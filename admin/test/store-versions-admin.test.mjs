@@ -103,7 +103,7 @@ test("readTriggers reads a triggers file a newer pi-dispatch wrote as invalid, n
   const dir = tempDir("pd-761-tr-");
   const triggersPath = join(dir, "triggers.json");
   writeFileSync(triggersPath, text({ version: TRIGGERS_FILE_VERSION + 1, triggers: [{ on: { type: "label", any: ["pi"] }, run: { kind: "github", flow: "fix" } }] }));
-  assert.deepEqual(readTriggers({ triggersPath }), { invalid: "triggers file written by a newer pi-dispatch (version 5; this build understands 4)", newer: true });
+  assert.deepEqual(readTriggers({ triggersPath }), { invalid: "triggers file written by a newer pi-dispatch (version 6; this build understands 5)", newer: true });
   // A version this build reads, written by hand, is read as before; the display stays lenient on a broken one, and says the loaders refuse it.
   writeFileSync(triggersPath, text({ version: 1, triggers: [] }));
   assert.deepEqual(readTriggers({ triggersPath }), { triggers: [], count: 0 });
@@ -115,8 +115,8 @@ test("readTriggers reads a file whose version is written twice as broken, never 
   const dir = tempDir("pd-761-tr-dup-");
   const triggersPath = join(dir, "triggers.json");
   const broken = "triggers file has a duplicate key, so it is broken, not newer: JSON keeps the last value, so the file that was reviewed and the file that runs are not the same file";
-  // `JSON.parse` keeps the last value, so each of these reads as version 3 once parsed; the text says the file is broken.
-  for (const dup of ['{"triggers":[],"version":1,"version":5}', '{"version":5,"triggers":[],"version":5}', '{"version":5,"triggers":[],"triggers":[]}']) {
+  // `JSON.parse` keeps the last value, so each of these reads as version 6 once parsed; the text says the file is broken.
+  for (const dup of ['{"triggers":[],"version":1,"version":6}', '{"version":6,"triggers":[],"version":6}', '{"version":6,"triggers":[],"triggers":[]}']) {
     writeFileSync(triggersPath, dup);
     const view = readTriggers({ triggersPath });
     assert.deepEqual(view, { invalid: broken }, dup);
@@ -126,9 +126,9 @@ test("readTriggers reads a file whose version is written twice as broken, never 
     assert.throws(() => parseTriggersDocument(dup, triggersPath), (e) => /duplicate key/.test(e.message) && e.newer === undefined, `${dup}: the loader calls it broken`);
   }
   // The same file written once is newer, in all three readers' words.
-  const once = '{"triggers":[],"version":5}';
+  const once = '{"triggers":[],"version":6}';
   writeFileSync(triggersPath, once);
-  assert.deepEqual(readTriggers({ triggersPath }), { invalid: "triggers file written by a newer pi-dispatch (version 5; this build understands 4)", newer: true });
+  assert.deepEqual(readTriggers({ triggersPath }), { invalid: "triggers file written by a newer pi-dispatch (version 6; this build understands 5)", newer: true });
   assert.equal(triggersFileNewer(once), true);
   assert.throws(() => parseTriggersDocument(once, triggersPath), (e) => e.newer === true);
 });

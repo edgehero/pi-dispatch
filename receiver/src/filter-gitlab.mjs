@@ -55,7 +55,7 @@ export const MR_ACTIONS = new Set(["open", "update", "reopen", "approved"]);
  * receiver's resolved verdict for this actor; `deliveryId` is the stable `webhook-id`, carried into the job
  * for dedup.
  */
-export function filterGitLab(subset, triggers, knownFlows, selfId, authorized, deliveryId) {
+export function filterGitLab(subset, triggers, knownFlows, selfId, authorized, deliveryId, { matchOnly = false } = {}) {
 	// (0) Fail-closed on identity. MUST precede the self compare -- see header.
 	if (typeof subset?.user?.id !== "number") {
 		return { enqueue: false, reason: "missing-sender-id" };
@@ -113,6 +113,7 @@ export function filterGitLab(subset, triggers, knownFlows, selfId, authorized, d
 	// DES-AWAIT-INPUT-ENDS-THE-JOB): that one also carries `heldCandidate`, the job the parked-reply route would have
 	// built, through the SAME `build` below, so the receiver can hold it for a run that is parking right now and the job
 	// that run starts is byte for byte the one the marker would have produced. Still a drop: nothing here enqueues it.
+	if (matchOnly) return { enqueue: resolved.enqueue === true, ...(resolved.reason ? { reason: resolved.reason } : {}) };
 	if (!resolved.enqueue) return heldCandidateOr(resolved, build);
 	return build(resolved);
 

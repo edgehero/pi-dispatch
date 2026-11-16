@@ -204,6 +204,7 @@ export async function runCancel(jobId, url, { write = (chunk) => process.stdout.
 		// real hold rather than a counter key, and deletes the removed job's defer record. This verb's reach is its own:
 		// it removes a job waiting to retry as well, which the console refuses.
 		const queued = await removeQueuedJob({ redis: probe, queue: owner, job, jobId, touchStore, touchOutbox, now });
+		if (queued.localSignalChanged) return fail(`local event cancellation ${queued.localSignalChanged === "yes" ? "was stored" : "may have been stored"}, but removal of ${jobId} was not confirmed. Run \`pi-dispatch cancel ${jobId}\` again to remove or stop it; later matching events remain eligible.`);
 		if (queued.ok && queued.touchWarning) errWrite("warning: the job was removed; touch tracking is incomplete. Do not repeat the cancellation.\n");
 		if (queued.ok && queued.held) {
 			// A hold consumes no attempt (`skipAttempt`), so a held job that ran is a retry held again by its conditions.
@@ -265,6 +266,7 @@ export async function runCancel(jobId, url, { write = (chunk) => process.stdout.
 			requested = true;
 			requestedAt = now();
 			const res = await requestCancel({ redis: probe, jobId, ackTimeoutMs, pollMs, now, onWritten: () => (requestedAt = now()), ...(sleep ? { sleep } : {}) });
+			if (res.note) return fail(res.note);
 			if (res.ack !== undefined) {
 				write(`cancel accepted by ${res.ack === "" ? "the worker" : boundedText(res.ack)} — stopping the container (allow ~30s); the run record will say operator-cancel\n`);
 				return 0;

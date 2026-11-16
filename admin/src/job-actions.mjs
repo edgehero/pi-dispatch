@@ -1,5 +1,7 @@
 import { mergePolicyDigest } from "@edgehero/pi-dispatch/merge-policy";
 import { makeTouchStore, touchScopeOf } from "@edgehero/pi-dispatch/touch-state";
+import { validLocalEvent } from "@edgehero/pi-dispatch/local-event";
+import { makeLocalEventStore } from "@edgehero/pi-dispatch/local-event-store";
 import { trackTouchAction } from "@edgehero/pi-dispatch/touch-outbox";
 /**
  * The job actions the operator console adds to what the `/dispatch` TUI and the tools can do (issue #642): retry and
@@ -176,6 +178,7 @@ async function actOnFailed(found, jobId, expect, act) {
     return { invalid: `Nothing was done: it failed again since the preview (it changed since the preview); look again; job ${jobId}` };
   }
   const result = await act(found.job);
+  if (result?.invalid) return result;
   return { ok: true, jobId, queue: found.queue, ...(result?.touchWarning ? { touchWarning: result.touchWarning } : {}) };
 }
 
@@ -221,6 +224,8 @@ export async function retryFailedJob({ url, jobId, expect, queue = null, redisFn
  * already kept none); and a job that ran and finished inside the one round trip between the two is left without the
  * expiry its finish gave it.
  */
+export const LOCAL_EVENT_RETRY_REFUSAL = "A finished local event generation cannot be retried. Wait for a fresh matching forge event or use a reviewed cron fallback.";
+
 async function retryKeepingAttempt(job, redis, timeoutMs) {
   await job.retry("failed");
   if (typeof job?.queueName !== "string" || job.queueName === "") return;
@@ -236,8 +241,32 @@ async function retryKeepingAttempt(job, redis, timeoutMs) {
  * between the re-check and the call would be removed as waiting. Two sessions acting on one job at once is the case,
  * and the audit log names both.
  */
-export async function removeFailedJob({ url, jobId, expect, queue = null, redisFn = makeRedisClient, queueFn = makeQueue, parseConnectionFn = parseConnection, timeoutMs = 2500 } = {}) {
-  return (await failedBulk({ url, jobs: [{ jobId, ...(expect ?? {}), queue, expectGiven: expect }], redisFn, queueFn, parseConnectionFn, timeoutMs, act: (job) => job.remove() })).single;
+export async function removeFailedJob({ url, jobId, expect, queue = null, redisFn = makeRedisClient, queueFn = makeQueue, parseConnectionFn = parseConnection, timeoutMs = 2500, localEventStoreFn = makeLocalEventStore } = {}) {
+  return (await failedBulk({ url, jobs: [{ jobId, ...(expect ?? {}), queue, expectGiven: expect }], redisFn, queueFn, parseConnectionFn, timeoutMs, act: (job, redis) => removeFailedSettled(job, redis, timeoutMs, localEventStoreFn) })).single;
+}
+
+/** The reconciler needs the terminal queue entry until its generation is settled. Deleting first strands an active
+ * signal as a missing queue job. Settlement is idempotent by generation; an uncertain reply leaves the entry for the
+ * reconciler or another removal, and reports that the successor may already have been released. */
+async function removeFailedSettled(job, redis, timeoutMs, localEventStoreFn) {
+  const meta = job.data?.localEvent;
+  if (meta === undefined) return job.remove();
+  if (!validLocalEvent(meta)) return { invalid: "The local event identity is unreadable; reconcile its signal state before removing the failed job." };
+  if (!redis) return { invalid: "The local event signal store is unavailable; the failed job was kept. Try again when Valkey is reachable." };
+  let settled;
+  try {
+    settled = await within(Promise.resolve().then(() => localEventStoreFn({ redis }).finish(meta, { discard: meta.once === true })), timeoutMs, () => null);
+  } catch {
+    settled = null;
+  }
+  if (settled?.ok !== true && settled?.stale !== true) return { invalid: jobLast("signal settlement is unconfirmed; failed job kept; its successor may be ready; try removal again", job.id), partial: true };
+  try {
+    const removed = await within(Promise.resolve().then(() => job.remove()).then(() => true), timeoutMs, () => false);
+    if (removed) return;
+  } catch {
+    // Settlement has already changed state, even when the queue's removal did not answer.
+  }
+  return { invalid: jobLast("signal settled; queue removal is unconfirmed; look at the fleet and try removal again", job.id), partial: true };
 }
 
 /**
@@ -251,8 +280,8 @@ export async function retryFailedJobs({ url, jobs, redisFn = makeRedisClient, qu
 }
 
 /** Remove every job a bulk preview listed (issue #642), `retryFailedJobs`' shapes and per-job re-check. */
-export async function removeFailedJobs({ url, jobs, redisFn = makeRedisClient, queueFn = makeQueue, parseConnectionFn = parseConnection, timeoutMs = 2500 } = {}) {
-  return bulkOf(await failedBulk({ url, jobs: listOf(jobs), redisFn, queueFn, parseConnectionFn, timeoutMs, act: (job) => job.remove() }));
+export async function removeFailedJobs({ url, jobs, redisFn = makeRedisClient, queueFn = makeQueue, parseConnectionFn = parseConnection, timeoutMs = 2500, localEventStoreFn = makeLocalEventStore } = {}) {
+  return bulkOf(await failedBulk({ url, jobs: listOf(jobs), redisFn, queueFn, parseConnectionFn, timeoutMs, act: (job, redis) => removeFailedSettled(job, redis, timeoutMs, localEventStoreFn) }));
 }
 
 /** A bulk list as `failedBulk` takes it, every entry's expect given; a non-array or an oversized one is refused there. */
@@ -268,8 +297,8 @@ function bulkOf(res) {
 
 /**
  * The one body behind the four failed-job actions: one fleet discovery, one re-check and one act per job, every queue
- * closed after. `single` is the first result for the single-job spellings. A tracked act (`touchCause`, the retries) is
- * given the job's queue's client beside the job.
+ * closed after. `single` is the first result for the single-job spellings. Retries and local event removals receive
+ * the job's queue's client beside the job.
  */
 async function failedBulk({ url, jobs, redisFn, queueFn, parseConnectionFn, timeoutMs, act, touchCause = null, touchStore = null, touchOutbox = null, now = Date.now }) {
   if (!Array.isArray(jobs)) return { invalid: "jobs must be the preview's list", single: { invalid: "jobs must be the preview's list" } };
@@ -291,17 +320,19 @@ async function failedBulk({ url, jobs, redisFn, queueFn, parseConnectionFn, time
       fleet ??= await openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs });
       try {
         const found = await fleet.find(jobId, entry.queue);
-        const trackedAct = touchCause ? async (job) => {
+        const trackedAct = async (job) => {
           const q = fleet.queueOf(found.queue);
-          const redis = q.client ? await q.client : null;
+          const redis = (touchCause || job.data?.localEvent !== undefined) && q.client ? await q.client : null;
+          if (!touchCause) return act(job, redis);
           const store = touchStore ?? (redis ? makeTouchStore({ redis, now }) : null);
           return trackTouchAction({ store, outbox: touchOutbox, event: { runId: jobId, cause: touchCause, at: now(), endedAt: entry.finishedOn ?? undefined, scopeId: touchScopeOf(job.data), nonce: `retry:${jobId}:${entry.attemptsMade}:${entry.finishedOn}` }, act: async () => { await act(job, redis); return { ok: true }; } });
-        } : act;
+        };
         // Issue #796: a canary is third-party code a person chose to run once, after a preview that said so. A retry would install it again, its tree resolved again, behind a
         // dialog about retrying a job, and a model holds the retry tool. A person starts another from the Updates page.
         const canary = touchCause === "rerun" && found?.job?.data?.packageCanary !== undefined;
-        const res = canary ? { invalid: "This job was a canary of an extension version. Start another from the Updates page rather than retrying it." } : found ? await actOnFailed(found, jobId, { attemptsMade: entry.attemptsMade, finishedOn: entry.finishedOn ?? null }, trackedAct) : { invalid: notInFleet(jobId, fleet, "Nothing was done; it changed since the preview") };
-        results.push(res.ok ? res : { jobId, invalid: res.invalid });
+        const localEvent = touchCause === "rerun" && found?.job?.data?.localEvent !== undefined;
+        const res = localEvent ? { invalid: LOCAL_EVENT_RETRY_REFUSAL } : canary ? { invalid: "This job was a canary of an extension version. Start another from the Updates page rather than retrying it." } : found ? await actOnFailed(found, jobId, { attemptsMade: entry.attemptsMade, finishedOn: entry.finishedOn ?? null }, trackedAct) : { invalid: notInFleet(jobId, fleet, "Nothing was done; it changed since the preview") };
+        results.push(res.ok ? res : { jobId, invalid: res.invalid, ...(res.partial === true ? { partial: true } : {}) });
       } catch (err) {
         // One job's Valkey error is that job's result; a bulk action reports per job and goes on.
         results.push({ jobId, unreachable: err?.message ?? String(err) });
@@ -377,7 +408,7 @@ export async function planFailedBulk({ url, filter = {}, limit = BULK_MAX, redis
           }
           taken += 1;
           const target = targetOf(job.data);
-          candidates.push({ jobId: job.id, queue: name, ...failedFingerprint(job), ...(target !== null ? { target } : {}) });
+          candidates.push({ jobId: job.id, queue: name, ...failedFingerprint(job), ...(job.data?.localEvent !== undefined ? { retryRefusal: LOCAL_EVENT_RETRY_REFUSAL } : {}), ...(target !== null ? { target } : {}) });
         }
         if (page.length < pageSize) {
           exhausted = true;
@@ -947,6 +978,7 @@ export async function cancelQueuedJob({ url, jobId, expect, redisFn = makeRedisC
     // place): its own sentence, or a client's error, bounded either way, the job named last.
     if (typeof res?.invalid === "string") return heldRefused(jobId, res.invalid);
     if (res?.notQueued) return { invalid: STARTED_STATES.includes(res.state) ? cancelQueuedRefusal("started", { jobId }) : cancelQueuedRefusal("notQueued", { jobId, state: String(res.state ?? "in an unknown state") }) };
+    if (res?.localSignalChanged) return { invalid: jobLast(`local event cancellation ${res.localSignalChanged === "yes" ? "was stored" : "may be stored"}; queue removal is unconfirmed; cancel again; later events stay eligible`, jobId), partial: true };
     if (res?.raced) {
       // Not read back: BullMQ's own "unknown" (in no list) or a read that failed. The remove may have landed.
       if (typeof res.state !== "string" || res.state === "unknown") return removalUnreadBack(jobId);

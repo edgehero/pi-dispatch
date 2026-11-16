@@ -196,6 +196,7 @@ def trigger_detail():
     kinds = f"""<ul class="c2-list">
   <li class="tone-ok">{ic('clock')}<span><b>1 · cron {code('nightly-tidy')}</b> {code('0 3 * * *')}<br>Next 03:00 UTC tomorrow, in 11h 21m. {state_line('ok', 'done', 'On time')}</span></li>
   <li class="tone-attention">{ic('attention')}<span><b>If a schedule slips</b><br>{state_line('attention', 'attention', 'Overdue 4m: due 03:00 UTC, not started. Stalls 1 of 3.')}</span></li>
+  <li class="tone-running">{ic('clock')}<span><b>A local command after a forge event</b><br>GitHub reviews wake {code('maintain-prs')} in {code('…/maintenance')} on build1 after 10s quiet. One run is active; one follow-up waits. The file names exact review-author logins; no event text reaches the command.</span></li>
   <li class="tone-idle">{ic('issue')}<span><b>An armed one-shot</b><br>Fires once, when its issue is closed by someone with write access.</span></li>
   <li class="tone-idle">{ic('done')}<span><b>5 · issue closed, #40, once</b><br>Spent by {runlink('gh-40a1')} on 2 Oct, 11:20 UTC. It matches nothing now; delete {code('on.disarmed')} in the file to arm it again.</span></li>
 </ul>
@@ -713,6 +714,7 @@ README = {
 - **Edit.** Changing the venue previews the triggers file as a diff, then a confirm bar with the plan's own line, what it means for runs in line, the undo and the ticket.
 - **Instructions.** The trigger's instructions, quoted and escaped.
 - **May merge.** When explicitly enabled, By hand adds `run.mayMerge`: `true; deployment default: false`, immediately after instructions. An unflagged trigger adds no row. The trigger list adds a `may merge` marker. Only the reviewed file sets the permission; the page offers no setter. Its Trust model says: “This trigger permits merging through the forge’s checks and approvals when its flow or operator instructions ask for it.” Its queued-job note says: “A queued job with merge permission runs only while its reviewed trigger remains unchanged. A job queued without it does not gain permission from a later edit.” The unflagged fixture retains its default-policy wording.
+- **Local event commands.** The existing facts show source forge, stable trigger ID, debounce seconds and exact review-author allowlist separately from `run.kind: local`, folder, command and owning worker. These are set in the reviewed file. The runs panel distinguishes a current generation and its one pending follow-up, with event counts and due instants; an unread state is unknown, never idle. No event text reaches the command. Source forge never implies forge MCP or a cloned workspace. A command cannot be fired by a tool or this page.
 - **Other kinds.** A cron trigger shows its next fire and health (on time, overdue, stalls N of 3). A one-shot shows armed or "spent by" a run, and how to re-arm it. Fire now is a paid action with its reserve sentence.
 - **Before you change it.** The trigger-skew rule with the jobs it would refuse now, renumbering, and the file-trouble sentence that quotes doctor.
 

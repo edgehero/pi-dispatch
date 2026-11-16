@@ -454,7 +454,7 @@ export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti
 	let budget = { memMiB: null, cpuCenti: null };
 	let detail = null;
 	let unknownSaid = "";
-	/** jobId (or `container:<name>` for a seeded survivor) -> { id, project, memMiB, cpuCenti, at, ticket, name, orphan: null | { name, venue, since } } */
+	/** jobId (or `container:<name>` for a seeded survivor) -> { id, project, memMiB, cpuCenti, at, ticket, name, workspaceKey?, orphan: null | { name, venue, since } } */
 	const ledger = new Map();
 	/** jobId -> { id, project, memMiB, cpuCenti, firstAt, lastAt, checkedAt, suspended, state } */
 	const waiters = new Map();
@@ -472,6 +472,21 @@ export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti
 		if (unseeded.has(WHOLE_HOST)) return true;
 		const v = venue ?? defaultVenue;
 		return v === null || v === undefined ? true : unseeded.has(v);
+	};
+	/**
+	 * A container whose stop was not confirmed still owns its working tree (#911). A live pickup
+	 * supplies the filesystem identity; boot survivors predate this process and have no such fact,
+	 * so they conservatively hold every local workspace. An unread venue may hold the same folder
+	 * through another runtime, which is why this check spans all venues rather than the next job's.
+	 * Only the existing positive-gone sweep releases an orphan, never age or a queue lock's expiry.
+	 */
+	const workspaceBlocker = (workspaceKey) => {
+		if (typeof workspaceKey !== "string" || workspaceKey === "") return null;
+		if (unseeded.size > 0) return "workspace-unseeded";
+		for (const entry of ledger.values()) {
+			if (entry.orphan && (entry.workspaceKey === undefined || entry.workspaceKey === workspaceKey)) return "workspace-orphan";
+		}
+		return null;
 	};
 	const rulesOf = (limits) => ({
 		shareOf: (p) => projectBudgetRow(limits, p).hostShare,
@@ -537,10 +552,14 @@ export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti
 		const t = now();
 		for (const c of listed) {
 			if (typeof c?.name !== "string" || c.name === "") continue;
-			const id = `container:${c.name}`;
+			const baseId = `container:${c.name}`;
+			// Two runtimes can both own this name. Overwriting the first survivor would let the
+			// second runtime's gone answer release a workspace the first still mounts (#911).
+			const prior = ledger.get(baseId);
+			const id = prior && prior.seedVenue !== venue ? `container:${venue}:${c.name}` : baseId;
 			const labelled = Number.isSafeInteger(c.memMiB) && c.memMiB > 0 && Number.isSafeInteger(c.cpuCenti) && c.cpuCenti > 0;
 			const size = labelled ? { memMiB: c.memMiB, cpuCenti: c.cpuCenti } : pessimisticSize([], guess, budget);
-			ledger.set(id, { id, project: null, memMiB: size.memMiB, cpuCenti: size.cpuCenti, at: t, ticket: null, name: c.name, orphan: { name: c.name, venue: c.venue ?? null, since: t }, guess: labelled ? null : guess });
+			ledger.set(id, { id, project: null, memMiB: size.memMiB, cpuCenti: size.cpuCenti, at: t, ticket: null, name: c.name, seedVenue: venue, orphan: { name: c.name, venue: c.venue ?? null, since: t }, guess: labelled ? null : guess });
 			log("host_budget_seeded", { memMiB: size.memMiB, cpuCenti: size.cpuCenti, labelled });
 		}
 		unseeded.delete(venue);
@@ -625,6 +644,7 @@ export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti
 		refresh,
 		/** The budget in force: `{ memMiB, cpuCenti }`, each an integer, `Infinity` (off) or null (unknown). */
 		current: () => ({ ...budget }),
+		workspaceBlocker,
 		/** The runtime's CPU count from the last facts read, or null when no venue answered. */
 		hostCpus: () => hostCpus,
 		detail: () => detail,
@@ -647,9 +667,13 @@ export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti
 		 * THE GATE, synchronous: `{ admitted: true }` with the hold taken under `ticket`, or `{ admitted: false, why }`:
 		 * `unseeded` (the boot listing of the job's `venue` is not read yet) and `running-here` (the ledger already holds
 		 * this id, or an orphan carries the container `name` this pickup will use) make no waiter; dimension refusals and `share`
-		 * keep (or make) the job a waiter. `getState` is the job's own, kept for `verify`.
+		 * keep (or make) the job a waiter. A local `workspaceKey` also waits for unread boot listings across venues
+		 * (`workspace-unseeded`) and its orphan or an unknown survivor (`workspace-orphan`), without a waiter.
+		 * `getState` is the job's own, kept for `verify`.
 		 */
-		gate({ id, ticket = null, project = null, size, venue = null, name = null, getState = null, limits = scopedLimits() }) {
+		gate({ id, ticket = null, project = null, size, venue = null, name = null, workspaceKey = null, getState = null, limits = scopedLimits() }) {
+			const workspaceWhy = workspaceBlocker(workspaceKey);
+			if (workspaceWhy) return { admitted: false, why: workspaceWhy, rank: -1 };
 			if (blockedBySeed(venue)) return { admitted: false, why: "unseeded", rank: -1 };
 			if (ledger.has(id)) return { admitted: false, why: "running-here", rank: -1 };
 			if (name !== null && [...ledger.values()].some((e) => e.orphan?.name === name)) return { admitted: false, why: "running-here", rank: -1 };
@@ -665,7 +689,7 @@ export function makeHostBudget({ settings, jobDefault = { memMiB: 4096, cpuCenti
 			const verdict = admit({ budget: { ...budget, count: countNow() }, ledger: [...ledger.values()], holds, ask, shareOf: rules.shareOf });
 			if (verdict.ok) {
 				waiters.delete(id);
-				ledger.set(id, { id, project, memMiB: size.memMiB, cpuCenti: size.cpuCenti, at: t, ticket, name, orphan: null });
+				ledger.set(id, { id, project, memMiB: size.memMiB, cpuCenti: size.cpuCenti, at: t, ticket, name, orphan: null, ...(typeof workspaceKey === "string" && workspaceKey !== "" ? { workspaceKey } : {}) });
 				return { admitted: true };
 			}
 			// A share-stopped job is a waiter that holds nothing: the budget is not its obstacle.

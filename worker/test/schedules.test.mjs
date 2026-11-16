@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { cronPlacement, loadSchedules } from "../src/schedules.mjs";
+import { cronPlacement, envelopeJobPaths, loadSchedules } from "../src/schedules.mjs";
+import { TRIGGERS_FILE_VERSION } from "../src/triggers.mjs";
 
 // loadSchedules selects the cron subset of the unified triggers file over injected fs -- no real
 // filesystem, no bullmq. The shared validator (triggers.test.mjs) owns the exhaustive validation cases;
@@ -217,6 +218,26 @@ test("cronPlacement is the rule loadSchedules places by, row for row (issue #433
 		if (placement === "refused") assert.throws(run, (e) => isConfigError(e) && e.message.includes("run.folder does not exist"));
 		else assert.equal(run()[0].unserved, placement === "elsewhere" ? "folder-absent" : undefined);
 	}
+});
+
+test("an explicitly owned cron is installed only by its named worker, even when another host has that folder (#911)", () => {
+	const owned = { ...CRON, run: { ...CRON.run, worker: "owner" } };
+	const text = JSON.stringify({ version: TRIGGERS_FILE_VERSION, triggers: [owned] });
+	for (const [name, declared, expected] of [["owner", true, undefined], ["other", true, "worker-mismatch"], ["owner", false, "worker-mismatch"]]) {
+		const [s] = loadSchedules({ ...CONFIG, workerName: name, workerNameDeclared: declared }, { fleet: declared, readFileSync: () => text, existsSync: () => true });
+		assert.equal(s.unserved, expected);
+		if (!expected) assert.equal(s.data.worker, "owner");
+	}
+	assert.equal(cronPlacement(owned.run, { workerName: "other", existsSync: () => assert.fail("another host's filesystem was inspected") }), "elsewhere");
+	assert.equal(cronPlacement(owned.run, { workerName: "owner", fleet: true, existsSync: () => false }), "refused", "a missing folder on the declared owner is a fault, not another host's work");
+});
+
+test("event-local folders join the protected writable path inventory without becoming schedules (#911)", () => {
+	const event = { on: { type: "label", forge: "github", id: "event", any: ["wake"] }, run: { kind: "local", worker: "owner", folder: "/event-folder", command: "reconcile" } };
+	const text = JSON.stringify({ version: TRIGGERS_FILE_VERSION, triggers: [CRON, event] });
+	const seams = { readFileSync: () => text, existsSync: () => true };
+	assert.deepEqual(envelopeJobPaths(CONFIG, seams).cronFolders, ["/proj", "/event-folder"]);
+	assert.deepEqual(loadSchedules(CONFIG, seams).map((s) => s.schedulerId), ["nightly-tidy"]);
 });
 
 // Issue #501: a trigger's run.maxCostUsd may only NARROW the deployment's PI_MAX_COST_USD, so the worker's load of

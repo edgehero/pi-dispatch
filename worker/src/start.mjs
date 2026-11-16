@@ -1,3 +1,6 @@
+import { makeLocalEventStore, startLocalEventReconciler } from "./local-event-store.mjs";
+import { makeLocalEventRuntime } from "./local-event-runtime.mjs";
+import { readLocalWorkspaceIdentity } from "./local-workspace.mjs";
 import { makeHistoryReader, serveHistory } from "./history-reader.mjs";
 import { subscriptionRoutes } from "./subscription-runtime.mjs";
 import { configuredSubscriptions } from "./subscription-config.mjs";
@@ -2005,7 +2008,7 @@ export async function startWorker(
 		// wait on a lock retry. An uncontended disarm completes synchronously inside this call; the
 		// one loss window is a drain's process.exit landing mid-lock-retry sleep, which loses only
 		// the disarm -- the same chosen direction, met at shutdown instead of a crash.
-		void disarmOnce({ job, endedAt });
+		void disarmOnce({ job, endedAt, result, error });
 	};
 	// The record read back, for a job the queue lost the lock of after it finished (DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK,
 	// CONST-RETRY-INFRA-ONLY): this host's own file first, then the fleet's copy where a mirror is armed, because the
@@ -2958,6 +2961,9 @@ export async function startWorker(
 		},
 	});
 
+	const localEventStore = makeLocalEventStore({ redis });
+	if (hostQueue) extraClosers.push(startLocalEventReconciler({ store: localEventStore, worker: config.workerName, queueFor: () => cronQueue, log }));
+	const localEventRuntime = makeLocalEventRuntime({ store: localEventStore, triggersPath: onceTriggersFile, worker: config.workerName, now });
 	const worker = createWorkerFn({
 		endpointSlots,
 		connection: valkeyConn(),
@@ -3111,6 +3117,9 @@ export async function startWorker(
 			settleHeld: heldSettle,
 			// The take inside the park sequence (processor.mjs), which starts the held answer before the parked comment.
 			takeHeld: heldSettle.take,
+			localEventRuntime,
+			localWorkspaceIdentity: readLocalWorkspaceIdentity,
+			localContainerGone: containerGoneFn ?? backends.containerGone,
 			answerDraftRuntime,
 			answerDraftStore,
 			// The one-shot pre-spend check (issue #231): reads the same file the disarm writes, refuses

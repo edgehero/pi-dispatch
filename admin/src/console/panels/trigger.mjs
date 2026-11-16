@@ -65,7 +65,7 @@ function fieldRow(v, t, k) {
       ? (t[k] ? "set (operator only)" : "not set")
       : ["folder", "skillsDir"].includes(k)
         ? show(shownPath(t[k]))
-        : show(k === "kind" ? t.forge ?? "local" : t[k]);
+        : show(k === "kind" ? t.runKind ?? t.forge ?? "local" : t[k]);
   return [`run.${k}`, isAgent(v) ? value : `${value}; deployment default: ${show(defaults(v)[k])}`];
 }
 const gateText = triggerWhoMayFire;
@@ -93,13 +93,31 @@ export function triggerOn(v) {
       ["Phrase or schedule", t.phrase ?? t.pattern ?? (isAgent(v) && t.action === undefined ? AGENT_UNREAD : show(t.action))],
       ["Forge", isAgent(v) ? AGENT_UNREAD : t.forge ?? "local"],
       ["Repository", t.repository ?? "any allowed repository"],
+      ...(t.runKind === "local" ? [
+        ["Trigger ID", t.id],
+        ["Debounce", `${t.debounceSeconds}s quiet; at most one pending follow-up`],
+        ["Extra review authors", isAgent(v) ? AGENT_UNREAD : t.reviewAuthors?.join(", ") ?? "none"],
+        ["Command input", "No event text is passed; the command reads the state it needs itself."],
+      ] : []),
       [
         "Who may fire it",
         whoMayFire(v, t) ?? AGENT_UNREAD,
       ],
-    ])}${t.type === "comment" ? html`<p>Write ${t.phrase ? html`<code>${`${t.phrase} <flow>`}</code>` : "its phrase and a flow"} to choose another flow named by a trigger in this file. Otherwise this trigger's default flow runs.</p>` : null}`,
+    ])}${t.type === "comment" && t.runKind !== "local" ? html`<p>Write ${t.phrase ? html`<code>${`${t.phrase} <flow>`}</code>` : "its phrase and a flow"} to choose another flow named by a trigger in this file. Otherwise this trigger's default flow runs.</p>` : null}`,
   );
 }
+function tLocalEventState(v, d) {
+  const t = trigger(v);
+  if (t?.runKind !== "local") return null;
+  if (d.localEvent?.unreadable || d.localEvent === undefined) return html`<p>Local command state is unavailable; no idle state is inferred.</p>`;
+  const state = d.localEvent.status;
+  if (!state) return html`<p>No local command generation is pending or active.</p>`;
+  return html`${facts([
+    ["Current generation", state.current ? html`${runLink(state.current.jobId)}: ${state.current.blocked === "queue-job-missing" ? "Queue job missing; reconcile runtime before clearing signal state" : state.current.cancelled ? "cancelled" : state.current.phase}, ${state.current.count} matching events; due ${timeHtml(state.current.dueAt)}` : "none"],
+    ["Pending follow-up", state.next ? html`${runLink(state.next.jobId)}: ${state.next.count} matching events; due ${timeHtml(state.next.dueAt)}` : "none"],
+  ])}`;
+}
+
 export function triggerRuns(v) {
   // Runs are matched by what the row says, so with no row in the snapshot neither "no runs" nor "the queue could not be read" is known, whatever the
   // history and the queue hold: the file failed, or the row is not there. REJECTED: drawing the card's zeroes, which denied a run that exists. A file
@@ -118,7 +136,7 @@ export function triggerRuns(v) {
         spend${d.costIncomplete
           ? " (metered portion only; some runs have no cost)"
           : ""}.
-      </p>
+      </p>${tLocalEventState(v, d)}
       ${table(
         "Last five trigger runs",
         ["Run", "Project", "Outcome", "Reason"],
@@ -133,13 +151,13 @@ export function triggerRuns(v) {
         ),
         Array.isArray(d.history) || !othersUnread(v) ? "No runs were found in the available history." : TRIGGER_GETS_WORDS.historyUnread,
       )}
-      <p>
+      ${trigger(v)?.runKind === "local" ? null : html`<p>
         Jobs in line now:
         ${(d.queued ?? []).map((j) => runLink(j.jobId ?? j.id))}${d.queued
           ?.length
           ? null
           : d.queued == null ? "unavailable; the queue could not be read" : "none in view"}.
-      </p>`,
+      </p>`}`,
   );
 }
 /**
@@ -183,6 +201,7 @@ export const HAND_FIELDS = Object.freeze([
   "idleTimeoutMinutes",
   "stallTimeoutMinutes",
   "maxMinutes",
+  "worker",
 ]);
 export function triggerRun(v) {
   const t = trigger(v);
@@ -198,14 +217,14 @@ export function triggerRun(v) {
     html`${triggerGetsDrawn(v) ? html`<p>${triggerGetsHolds(v)}</p>` : html`<h3>What its jobs get</h3>${facts(CARD_FIELDS.map((k) => fieldRow(v, t, k)))}`}<h3>Edit here</h3>
       ${facts(
         EDIT_FIELDS.filter(
-          (k) => t.type !== "cron" || !["statusComment", "recover"].includes(k),
+          (k) => (t.type !== "cron" && t.runKind !== "local") || !["statusComment", "recover"].includes(k),
         ).map((k) => fieldRow(v, t, k)),
       )}
       <h3>By hand</h3>
-      ${facts(HAND_FIELDS.filter((k) => k !== "mayMerge" || t.mayMerge === true).map((k) => fieldRow(v, t, k)))}
+      ${facts(HAND_FIELDS.filter((k) => (k !== "mayMerge" || t.mayMerge === true) && (k !== "worker" || t.worker)).map((k) => fieldRow(v, t, k)))}
       <h3>Its runs' sandbox</h3>
       ${hostRows.length ? facts(hostRows.map((h) => [h.name, `${h.backend ?? "venue not published"}${h.deploymentDefault ? " (that host's deployment default)" : " (trigger override)"}; ${h.blessed === null ? "blessing not published" : h.blessed ? "blessed" : "not blessed"}${h.capabilityUnknown ? "; required profile capabilities not published" : ""}${h.backend && BACKENDS[h.backend] ? `; ${Object.entries(BACKENDS[h.backend].serves).map(([key, value]) => `${key}: ${value === "image" ? "with the image" : value}`).join(", ")}` : ""}`])) : html`<p>No live host blessing facts are available.</p>`}
-      <p>These live host declarations show published venue choices; a host that does not bless the selected venue refuses it before spend. ${t.type === "cron" ? "The schedule's owning host runs a cron trigger's local folder; the registry alone does not prove which host has that folder." : isAgent(v) ? null : "Hosts missing its required secret or wait profile are excluded where their capability list is published."}</p>
+      <p>These live host declarations show published venue choices; a host that does not bless the selected venue refuses it before spend. ${t.runKind === "local" ? "Only the worker named by run.worker may run this local command. Its source forge supplies a wake-up, not a cloned workspace." : t.type === "cron" ? "The schedule's owning host runs a cron trigger's local folder; the registry alone does not prove which host has that folder." : isAgent(v) ? null : "Hosts missing its required secret or wait profile are excluded where their capability list is published."}</p>
       ${isAgent(v) && !t.backend
         ? html`<p>The deployment’s default venue is ${AGENT_UNREAD}.</p>`
         : html`<p>
@@ -227,7 +246,7 @@ export function triggerRun(v) {
         Workspaces are kept for ${detail(v).sandbox?.retentionHours ?? 24} hours; 0
         keeps none.
       </p>`}
-      ${v.role === "operator" ? html`<p><a class="link" href="${`/runs/sandboxes?${new URLSearchParams({ index: String(v.query.index) })}`}">Prepare a sandbox as this trigger</a></p>` : null}
+      ${v.role === "operator" && t.runKind !== "local" ? html`<p><a class="link" href="${`/runs/sandboxes?${new URLSearchParams({ index: String(v.query.index) })}`}">Prepare a sandbox as this trigger</a></p>` : null}
       ${backend.startsWith("openshell")
         ? html`<p>
             OpenShell ${backend === "openshell-bind" ? "bind" : "copy"} mode.
@@ -236,7 +255,7 @@ export function triggerRun(v) {
           </p>`
         : null}
       <p>
-        ${t.once
+        ${t.runKind === "local" ? "Local commands sharing this canonical folder run one at a time, including schedules. A burst while active leaves at most one pending follow-up." : t.once
           ? "A one-shot never races."
           : `${t.replicas ?? 1} independent sandbox(s) race each event, on separate branches and, for development flows, separate pull requests.`}
         ${isAgent(v) ? null : html`Secret profile: ${t.secretsProfile ?? "none"}. Bundle:
@@ -248,7 +267,7 @@ export function triggerRun(v) {
 }
 export function editFields(v, t = {}, group = null) {
   return html`${(group === null ? EDIT_FIELDS : ADD_FIELDS).filter(
-    (k) => (t.type !== "cron" || !["statusComment", "recover"].includes(k)) && (group === null || (group === "options" ? ["progress","statusComment","steer","recover"].includes(k) : !["progress","statusComment","steer","recover"].includes(k))),
+    (k) => ((t.type !== "cron" && t.runKind !== "local") || !["statusComment", "recover"].includes(k)) && (group === null || (group === "options" ? ["progress","statusComment","steer","recover"].includes(k) : !["progress","statusComment","steer","recover"].includes(k))),
   ).map((k) =>
     field(k, k === "backend" ? "Venue (run.backend)" : ({ progress: "Report phases (run.progress)", statusComment: "Status comment (run.statusComment)", steer: "Take messages (run.steer)", recover: "Recover (run.recover)" }[k] ?? `run.${k}`), {
       value: t[k] ?? "",
@@ -302,11 +321,11 @@ export function triggerTrust(v) {
   return card(
     "Trust model",
     html`<p>
-        ${whoMayFire(v, t)} Each forge delivery is checked against its configured authentication, bot-loop guard, sender permissions and duplicate protection, then applicable quiet hours, image, repository protection and spend caps. Cron starts from the deployment schedule instead of a webhook. A comment may select another flow; only one
-        comment trigger per forge may be declared.
+        ${whoMayFire(v, t)} ${t.runKind === "local" ? "Each authenticated, admitted forge event wakes the reviewed command on its named worker. The command receives no event text or actor identity. Each local listener matches independently; a comment cannot replace its command or arguments. Applicable local quiet hours, image and spend caps still gate execution." : html`Each forge delivery is checked against its configured authentication, bot-loop guard, sender permissions and duplicate protection, then applicable quiet hours, image, repository protection and spend caps. Cron starts from the deployment schedule instead of a webhook. A comment may select another flow; only one
+        comment trigger per forge may be declared.`}
       </p>
       <p>
-        Keeping a session continues its retained conversation on the same issue.
+        ${t.runKind === "local" ? "The command runs inside the existing container boundary against its configured local folder." : "Keeping a session continues its retained conversation on the same issue."}
         ${t.mayMerge === true ? "This trigger permits merging through the forge’s checks and approvals when its flow or operator instructions ask for it." : "Nothing merges by itself."}
       </p>
       ${isAgent(v) ? html`<p>Whether it has instructions is ${AGENT_UNREAD}.</p>` : t.instructions
@@ -372,13 +391,13 @@ export function triggerChange(v) {
   return card(
     "Before you change it",
     html`<p>
-        ${t?.mayMerge === true ? "A queued job with merge permission runs only while its reviewed trigger remains unchanged. A job queued without it does not gain permission from a later edit." : html`A job already in line keeps what it was queued with and runs without a
+        ${t?.runKind === "local" ? "Each queued generation is bound to this reviewed trigger definition. Changing or deleting it retires the old generation before another container starts. Running commands finish; later events use the new definition." : t?.mayMerge === true ? "A queued job with merge permission runs only while its reviewed trigger remains unchanged. A job queued without it does not gain permission from a later edit." : html`A job already in line keeps what it was queued with and runs without a
         change here, unless this trigger has gained a narrowing field the job
         lacks, such as a list of models, a cap or a server: then it is refused.`}
         Adding or deleting a row renumbers the rows after it.
       </p>
       <p>
-        ${!t || detail(v).skewed == null
+        ${t?.runKind === "local" ? "Current and pending generation state is shown in Runs it started." : !t || detail(v).skewed == null
           ? (detail(v).skewReason ??
             "Jobs that would be refused cannot be checked here.")
           : `${detail(v).skewIncomplete ? "At least " : ""}${detail(v).skewed?.length ?? 0} jobs in view would be refused now.${detail(v).skewIncomplete ? " The queue check was incomplete." : ""}`}

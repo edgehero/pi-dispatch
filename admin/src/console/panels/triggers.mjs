@@ -676,6 +676,7 @@ export function triggerCheckForm() {
           "Review verdict",
           CHECK_REVIEW_STATES,
         )}${checkSelect("reviewBody", "Review body", CHECK_REVIEW_BODIES)}
+        <div class="field" data-check-field="reviewAuthor"><label>Reviewer login (optional)<input class="input" name="reviewAuthor" maxlength="44" autocomplete="off" placeholder="reviewer-app[bot]"></label></div>
         <div class="field tr-span" data-check-field="labels">
           <label
             >Current labels, one per line<textarea

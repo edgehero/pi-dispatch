@@ -39,6 +39,7 @@ import { isFinalOutcome, settleInbox } from "./inbox-settle.mjs";
 import { makeAwaitKeeper } from "./held-settle.mjs";
 import { effectiveJobLimits, malformedJobLimits, WALL_CLOCK_FALLBACK_MS } from "./job-limits.mjs";
 import { isProjectId } from "./project-id.mjs";
+import { LocalEventWait } from "./local-event-runtime.mjs";
 
 
 export const QUEUE = "pi-jobs";
@@ -373,6 +374,17 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				deps?.log?.("job_lost_lock_after_completion", { jobId: job.id, outcome: record.outcome, ...(record.reason ? { reason: record.reason } : {}) });
 				return { outcome: record.outcome, reason: record.reason ?? null, exitCode: record.exitCode ?? null, turns: record.turns ?? null, tokens: record.tokens ?? null, budgetReserved: record.budgetReserved ?? null };
 			}
+		}
+
+		if (job.data?.worker !== undefined && job.data.worker !== hostName) return recordBeforePickup(job, { outcome: "policy", reason: "local-event-wrong-worker" });
+		if (job.data?.localEvent) {
+			if (!deps.localEventRuntime) return recordBeforePickup(job, { outcome: "policy", reason: "local-event-unavailable" });
+			let admission;
+			try { admission = await deps.localEventRuntime.check(job); }
+			catch { throw new InfraRetry("local event authority could not be read", { reason: "container-never-started" }); }
+			if (admission.newer) await deferTo(job, token, now() + NEWER_RELEASE_RECHECK_MS, "newer-release", {});
+			if (admission.untilMs) await deferTo(job, token, admission.untilMs, "local-event-debounce", {});
+			if (!admission.ok) return recordBeforePickup(job, admission);
 		}
 
 		// THE RUN'S INBOX AT ITS FINAL OUTCOME (issue #646, inbox-settle.mjs). A steer-armed job's inbox is closed, and what
@@ -957,6 +969,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// This pickup's entry in the running jobs (issue #599, phase 2), null until it is admitted below.
 		let runningKey = null;
 		let stopDidNotTake = false;
+		let localContainerAttempted = false;
 		// Issue #644: the attempt's live publisher finish, handed over by runContainer's `onLive` (null until it is open).
 		let finishLive = null;
 		let name;
@@ -964,6 +977,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// THE SCOPE HOLDS, in acquire order (issue #499 part B): the repo or folder slot, then the project slot. Each is
 		// `{ key, fleet }`: the in-process slot under `key` (the row scope) and its fleet claim, or null.
 		const scopeHolds = [];
+		let localWorkspace = null;
 		const releaseScopeHolds = () => {
 			const taken = scopeHolds.splice(0).reverse();
 			for (const hold of taken) inFlight.release(hold.key);
@@ -1057,6 +1071,21 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// The repo or folder slot's reason. A chained child (its parent enqueued it before the parent's finally gave the
 		// folder back) waits on that parent's run; any other job on the scope's own limit, by its kind.
 		const scopeWhy = typeof job.data?.parentJobId === "string" ? "chained" : job.data?.kind === "local" ? "scope-folder" : "scope-repo";
+		if (job.data?.kind === "local" && deps?.localWorkspaceIdentity) {
+			try { localWorkspace = deps.localWorkspaceIdentity(job.data.folder); }
+			catch (error) {
+				await releaseAllHolds();
+				if (["ENOENT", "ENOTDIR"].includes(error?.code)) {
+					const result = { outcome: "policy", reason: "local-folder-not-a-repo", budgetReserved: false };
+					await settleSteer({ result });
+					await recordAfterGate({ job, result, startedAt: new Date(now()).toISOString(), endedAt: new Date(now()).toISOString() });
+					return result;
+				}
+				throw new InfraRetry("the local workspace identity could not be read", { reason: "container-never-started" });
+			}
+			if (!inFlight.tryAcquire(localWorkspace.key, 1)) await deferScope("scope-folder", { event: "scope_busy_deferred" });
+			scopeHolds.push({ key: localWorkspace.key, fleet: null });
+		}
 		if (scope) {
 			const ceiling = concurrencyFor(job.data, limits);
 			if (!inFlight.tryAcquire(scope, ceiling)) {
@@ -1379,11 +1408,13 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			} catch {
 				budgetName = null;
 			}
-			const verdict = hostBudget.gate({ id: job.id, ticket: budgetState.ticket, project, size, venue: job.data?.backend ?? null, name: typeof budgetName === "string" ? budgetName : null, getState: typeof job.getState === "function" ? () => job.getState() : null, limits });
+			const verdict = hostBudget.gate({ ...(localWorkspace ? { workspaceKey: localWorkspace.key } : {}), id: job.id, ticket: budgetState.ticket, project, size, venue: job.data?.backend ?? null, name: typeof budgetName === "string" ? budgetName : null, getState: typeof job.getState === "function" ? () => job.getState() : null, limits });
 			if (!verdict.admitted) {
 				await releaseAllHolds();
 				budgetState.budgetDeferred = true;
 				deps?.log?.("host_budget_deferred", { jobId: job.id, project, why: verdict.why, rank: verdict.rank, memMiB: size.memMiB, cpuCenti: size.cpuCenti, delayMs: BUDGET_RECHECK_MS });
+				if (verdict.why === "workspace-unseeded") await deferTo(job, token, nowMs + BUDGET_RECHECK_MS, "workspace-unseeded", { project });
+				if (verdict.why === "workspace-orphan") await deferTo(job, token, nowMs + BUDGET_RECHECK_MS, "workspace-orphan", { project });
 				await deferTo(job, token, nowMs + BUDGET_RECHECK_MS, "host-budget", { project, budgetWhy: verdict.why });
 			}
 			budgetHeld = true;
@@ -1565,6 +1596,8 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 							// Stopped while this read was in flight: the outcome is being decided, so this request is left
 							// unanswered (its requester's timeout re-reads the job), never acknowledged after the fact.
 							if (pollStopped) return;
+							if (job.data?.localEvent && deps.localEventRuntime) await deps.localEventRuntime.store.cancel(job.data.localEvent);
+							if (pollStopped) return;
 							// Bound to this worker (the injection comment in createWorker): `false` means the job
 							// left the tracked map in this same instant, in which case the finally below clears
 							// this interval anyway and the request's TTL reaps the key.
@@ -1737,6 +1770,13 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// runJob context is unchanged.
 				...(endpointSnapshot ? { modelEndpoints: endpointSnapshot } : {}),
 				...deps,
+				...(job.data?.localEvent && deps.localEventRuntime ? { claimLocalEvent: async () => {
+					try { return await deps.localEventRuntime.claim(job, String(token ?? job.id)); }
+					catch (error) {
+						if (error instanceof LocalEventWait) throw error;
+						throw new InfraRetry("the local event authority could not be read", { cause: error, reason: "container-never-started", budgetReserved: false });
+					}
+				} } : {}),
 				...(deps?.subscriptionRuntime ? {
 					prepareSubscriptionAuth: async (j, { renewable = false } = {}) => {
 						try { return await deps.subscriptionRuntime.prepare(j, { deadlineAt: subscriptionDeadlineAt, signal, renewable, attemptId: `${modelAttemptId}:${job.attemptsMade ?? 0}:${job.stalledCounter ?? 0}` }); }
@@ -1794,10 +1834,14 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 					// Issue #644: `onLive` hands over the attempt's publisher finish, so giving up on a container whose stop did not
 					// take also ends its progress key (outcome `unknown`: nothing saw it exit) instead of leaving its heartbeat to
 					// rewrite the key as running for as long as the worker lives.
+					localContainerAttempted = localWorkspace !== null;
 					return boundAfterAbort(deps.runContainer({ ...ctx, name, signal, jobId: runIdOf(job), onLive: (finish) => (finishLive = finish) }), signal, job, deps.log ?? (() => {}), abortGraceMs, () => {
 						stopDidNotTake = true;
 						return finishLive?.("unknown");
 					}).then(async (r) => {
+						// A bind-mounted sandbox may outlive its command even without an abort. Only the runtime's
+						// positive-gone sweep can free its folder, regardless of the terminal code it reported.
+						if (r?.lingering === true) stopDidNotTake = true;
 						// Only signed, matching terminal metadata can permit a later cross-model replay. The pessimistic
 						// marker written before spawn survives crashes and tools that terminate the runner.
 						if (r?.exitAuth === "verified" && r?.exitLineCode === r?.code && r?.aborted !== true) modelRolesRan = r.modelRoles ?? null;
@@ -1868,7 +1912,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// `promoteSession` writes was correct the whole time; the comparison simply never happened.
 				// The processor tests inject `prepareWorkspace` directly and never see this wrapper, which is
 				// why nothing caught it (REQ-RESUMABLE-SESSION).
-				...(deps.prepareWorkspace ? { prepareWorkspace: (j, t, opts) => deps.prepareWorkspace(j, t, { ...opts, queueJobId: job.id }) } : {}),
+				...(deps.prepareWorkspace ? { prepareWorkspace: (j, t, opts) => deps.prepareWorkspace(j, t, { ...opts, queueJobId: job.id, ...(localWorkspace && { localWorkspace }) }) } : {}),
 				replyReceivedAt: Number.isSafeInteger(job.data?.replyReceivedAt) && job.data.replyReceivedAt >= 0 ? job.data.replyReceivedAt : Number.isSafeInteger(job.timestamp) ? job.timestamp : null,
 				// The one-shot pre-spend check (issue #231) needs the REAL BullMQ job's `.id` to excuse this
 				// delivery's own earlier attempt -- runJob's effectiveJob has no `.id`, prepareWorkspace's
@@ -1941,6 +1985,10 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 					return false;
 				}
 				if (req === null || req === undefined) return false;
+				if (job.data?.localEvent && deps.localEventRuntime) {
+					try { await deps.localEventRuntime.store.cancel(job.data.localEvent); }
+					catch { deps?.log?.("local_event_cancel_failed", { jobId: job.id }); return false; }
+				}
 				await Promise.resolve(redis.set?.(cancellationReason === "agent-cancel" ? agentCancelAckKey(job.id) : cancelAckKey(job.id), hostName, "PX", CANCEL_ACK_TTL_MS)).catch(() => {});
 				await Promise.resolve(redis.del?.(cancellationReason === "agent-cancel" ? agentCancelReqKey(job.id) : cancelReqKey(job.id))).catch(() => {});
 				return true;
@@ -1978,7 +2026,11 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// other recorded. A retryable error reads that request too, since the job would otherwise run again.
 			await stopCancelPoll();
 			const retryable = error instanceof InfraRetry;
-			if (await operatorCancelled({ readPending: retryable || error instanceof SubscriptionWait })) return await endCancelled({ retryable });
+			if (await operatorCancelled({ readPending: retryable || error instanceof SubscriptionWait || error instanceof LocalEventWait })) return await endCancelled({ retryable });
+			if (error instanceof LocalEventWait) {
+				await releaseAllHolds();
+				await deferTo(job, token, error.untilMs, "local-event-debounce", { project });
+			}
 			if (error instanceof SubscriptionWait) {
 				await releaseAllHolds();
 				if (error.wait === "subscription-auth") await deferTo(job, token, error.until, "subscription-auth", { project });
@@ -2094,7 +2146,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// records it as failed-and-distinct in the queue's failed set without a retry.
 			throw new UnrecoverableError(error.message);
 		} finally {
-			// Release FIRST and never throw (release clamps at zero by construction): a throw here would
+			// Stop the run timers before verifying that its local folder is free, then release without throwing:
 			// mask the job's real error, and a missed release wedges the scope until a worker restart.
 			// The in-process halves go back synchronously inside each drain, before its first await.
 			// AWAITED, not fire-and-forget. Two reasons, and the second is the one that bites: an unawaited
@@ -2103,9 +2155,23 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			// full re-check interval while the slot it wanted went free behind it. The finally is already inside
 			// an async function, and `release` never throws. Last taken, first given back: the endpoint holds
 			// (issue #503), then the scope holds (project, then repo), then the host slot.
-			await releaseAllHolds({ orphan: stopDidNotTake });
 			clearTimeout(timer);
 			clearTimeout(maxTimer);
+			if (localContainerAttempted && !stopDidNotTake && typeof deps.localContainerGone === "function") {
+				// A runtime CLI can lose its connection while the daemon still runs the container. Its exit alone
+				// cannot free a writable host folder. An unanswered inspection keeps an orphan for the normal sweep.
+				let bound;
+				const gone = await Promise.race([
+					Promise.resolve().then(() => deps.localContainerGone(name, venue)).catch(() => null),
+					new Promise((resolve) => { bound = setTimeout(() => resolve(null), 2_000); bound.unref?.(); }),
+				]);
+				clearTimeout(bound);
+				if (gone !== true) {
+					stopDidNotTake = true;
+					deps?.log?.("local_workspace_exit_unconfirmed", { jobId: job.id });
+				}
+			}
+			await releaseAllHolds({ orphan: stopDidNotTake });
 			clearInterval(claimRefresh);
 			clearInterval(cancelPoll);
 			signal.removeEventListener("abort", onAbort);
@@ -2243,6 +2309,13 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// orphaned resource holds. The semantic window bounds repeated intent, not isolation or resource admission.
 		const result = await processJob(job, token, signal);
 		if (shouldReleaseSemanticWindow(result)) await releaseSemanticWindow(job, deps?.log, { cause: "policy" });
+		// Settlement failure must not retry a command that already finished. Reconciliation observes its terminal
+		// queue state and completes the same compare-by-generation transition after the connection recovers.
+		if (job.data?.localEvent && deps?.localEventRuntime && !["local-event-wrong-worker", "local-event-invalid", "local-event-unavailable"].includes(result?.reason)) {
+			try {
+				await deps.localEventRuntime.store.finish(job.data.localEvent, { owner: String(token ?? job.id), discard: job.data.localEvent.once === true });
+			} catch { deps?.log?.("local_event_settle_failed", { jobId: job.id }); }
+		}
 		return result;
 	};
 }

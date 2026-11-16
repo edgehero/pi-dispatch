@@ -458,6 +458,7 @@ async function runTrigger(values, positionals, env, { write, valkeyRefusal, now 
 		return fail(`${error?.message ?? error}. Nothing was queued.`);
 	}
 	if (!schedule) return fail(`no cron trigger with id "${id}" in ${path}. Nothing was queued.`);
+	if (schedule.unserved === "worker-mismatch") return fail(`cron trigger "${id}" belongs to its declared run.worker. Run this command on that worker host. Nothing was queued.`);
 	if (schedule.unserved) return fail(`cron trigger "${id}" runs on another host: its folder is not on this machine. Run this command on the host that has the folder. Nothing was queued.`);
 	// The worker's folder rule, `run <folder>`'s check (issue #524): `.git` at the folder and a commit at HEAD, or the job
 	// is refused at pickup. Uncommitted changes stay allowed, as they are for every scheduled tick.

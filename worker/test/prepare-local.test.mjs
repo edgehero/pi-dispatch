@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { GIT_READ_FLAGS } from "../src/git-hardening.mjs";
 import { PI_LIMITS } from "../src/materialize.mjs";
 import { LOCAL_FOLDER_ESCAPED, LOCAL_FOLDER_HOLDS_ENVELOPE, LOCAL_FOLDER_NO_COMMIT, LOCAL_FOLDER_NOT_A_REPO, LOCAL_FOLDER_UNREADABLE_REPO, prepareLocalWorkspace } from "../src/prepare-local.mjs";
+import { readLocalWorkspaceIdentity } from "../src/local-workspace.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 // Issue #504 part B: prepare resolves the folder (realpathSync.native) before anything else, so a fake `fs` that invents a
@@ -141,6 +142,30 @@ test("a cron-shaped event lands as the full frozen cron shape with nulls preserv
 		["source", "trigger", "folder", "sha", "scheduledFor", "previousRunAt"],
 		"frozen key order for the cron shape",
 	);
+});
+
+test("event-local input rebuilds the forge provenance instead of copying event text (#911)", async () => {
+	const folder = localRepo();
+	const jobDir = tempDir("event-local-");
+	const untrusted = "ATTACKER-TEXT";
+	const result = await prepareLocalWorkspace({ folder, task: "/reconcile", jobDir, event: { source: "forge", forge: "github", trigger: { id: "reconcile", body: untrusted }, title: untrusted, label: untrusted, number: 3 } });
+	assert.deepEqual(JSON.parse(readFileSync(join(jobDir, "event.json"), "utf8")), { source: "forge", trigger: { id: "reconcile" }, forge: "github", folder: basename(folder), sha: result.sha });
+	assert.equal(readFileSync(join(jobDir, "prompt.md"), "utf8"), "/reconcile");
+	for (const invalid of [{ source: "forge", forge: "github", trigger: { id: ["reconcile"] } }, { source: "forge", forge: "attacker", trigger: { id: "reconcile" } }]) {
+		const refusedDir = join(tempDir("event-local-invalid-"), "job");
+		assert.deepEqual(await prepareLocalWorkspace({ folder, task: "/reconcile", jobDir: refusedDir, event: invalid, git: () => assert.fail("invalid provenance reached git") }), { outcome: "policy", reason: "local-event-invalid" });
+		assert.equal(existsSync(refusedDir), false);
+	}
+});
+
+test("a workspace identity taken at pickup is rechecked before preparing or mounting (#911)", async () => {
+	const folder = localRepo();
+	const localWorkspace = readLocalWorkspaceIdentity(folder);
+	const jobDir = tempDir("workspace-identity-");
+	assert.equal((await prepareLocalWorkspace({ folder, task: "x", jobDir, localWorkspace })).workspace, localWorkspace.folder);
+	const refusedDir = join(tempDir("workspace-changed-"), "job");
+	assert.deepEqual(await prepareLocalWorkspace({ folder, task: "x", jobDir: refusedDir, localWorkspace: { ...localWorkspace, key: "local-workspace:0:0" }, git: () => assert.fail("git must not run after the directory changed") }), { outcome: "policy", reason: "local-folder-changed" });
+	assert.equal(existsSync(refusedDir), false);
 });
 
 test("a non-git folder is refused by its own reason, RETURNED, before anything is written (#524)", async () => {

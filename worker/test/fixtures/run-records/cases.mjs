@@ -147,6 +147,7 @@ export function caseInput(name) {
 					opts: { delay: 30_000 },
 					delay: 30_000,
 					data: {
+						localEvent: { id: "maintain-prs", forge: "github", type: "pull_request", worker: "mini-1", digest: hex(64, "a"), generation: hex(32, "b") },
 						kind: "github",
 						repo: "acme/api",
 						target: { type: "issue", number: 99 },

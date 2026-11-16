@@ -327,7 +327,7 @@ test("BY SHAPE: no module in worker/src moves a job to the delayed set except th
 test("BY SHAPE: every reason in the table is written by a site, and every site writes a reason from the table", () => {
 	const index = strip(readFileSync(join(SRC, "index.mjs"), "utf8"));
 	const sites = [...index.matchAll(/\bawait deferTo\(job, token, [^\n]*?, ("[^"]*"|why|selectionWait\.wait), /g)].map((m) => m[1]);
-	assert.equal(sites.length, 34, "34 deferTo calls, including canary exclusion, scope and model-selection forwarding, and the ten newer-release waits beside the job data one (the triggers file and the settings file at the head, the settings read, the model selection's previous record, the pause gate, the watch resolve's pause and its newer read, the answer draft's and the question grouping's newer reads, and the processor's hold); a new deferral must be counted here");
+	assert.equal(sites.length, 39, "39 deferTo calls (local event pickup/claim debounce, authority version hold and both workspace blockers added), including canary exclusion, scope and model-selection forwarding, and the ten newer-release waits beside the job data one (the triggers file and the settings file at the head, the settings read, the model selection's previous record, the pause gate, the watch resolve's pause and its newer read, the answer draft's and the question grouping's newer reads, and the processor's hold); a new deferral must be counted here");
 	assert.deepEqual(sites.filter((s) => !s.startsWith("\"")).sort(), ["selectionWait.wait", "why"], "only scope and model selection pass through a closed upstream reason");
 	const literal = new Set(sites.filter((s) => s.startsWith("\"")).map((s) => JSON.parse(s)));
 	// The selector returns only these three transient wait reasons. Include their actual assignments, not a
@@ -343,7 +343,7 @@ test("BY SHAPE: every reason in the table is written by a site, and every site w
 	assert.match(index, /selectionWait = subscription/);
 	for (const why of subscriptionWhys) literal.add(why);
 	for (const m of index.matchAll(/\bawait deferScope\(("[^"]*"|scopeWhy), /g)) if (m[1] !== "scopeWhy") literal.add(JSON.parse(m[1]));
-	assert.equal([...index.matchAll(/\bawait deferScope\(/g)].length, 4, "four scope deferrals");
+	assert.equal([...index.matchAll(/\bawait deferScope\(/g)].length, 5, "five scope deferrals including resolved local workspace identity");
 	const scopeWhy = /const scopeWhy = ([^;]*);/.exec(index)?.[1];
 	assert.ok(scopeWhy, "the repo or folder slot's reason is one expression");
 	// The ternary's results, not the strings it compares against.

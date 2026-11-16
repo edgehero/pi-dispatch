@@ -50,7 +50,9 @@ import { danglingProjectRows, dollarKeyPrefixFor, isModelScope, isProjectScope, 
 import { PROJECT_ID_RE, parseProjects, projectOf, projectsVersionFor } from "@edgehero/pi-dispatch/projects";
 import { BUNDLE_FORMATS, parseSecretBundleProfiles, parseSecretProfiles, withinRoots } from "@edgehero/pi-dispatch/secret-profiles";
 import { ABSENT, BACKEND_NAMES, BACKENDS, CREDENTIAL_CUSTODY, OBSERVATIONS, OPENSHELL_BACKENDS, PROPERTY_NAMES, SERVES, UNATTRIBUTED_BACKEND, declarationOf, effectiveWord, meets, isDeclaration, parseBackendList, parseHostBackends, servesOf } from "@edgehero/pi-dispatch/backends";
-import { parseTriggers, parseTriggersDocument, triggersFileNewer, triggersFileVersionProblem } from "@edgehero/pi-dispatch/triggers";
+import { localEventDigest } from "@edgehero/pi-dispatch/local-event";
+import { readLocalEventStatus } from "@edgehero/pi-dispatch/local-event-store";
+import { parseTriggers, parseTriggersDocument, sourceForgeOf, LOCAL_EVENT_DEBOUNCE_DEFAULT, TRIGGERS_FILE_VERSION, triggersFileNewer, triggersFileVersionProblem } from "@edgehero/pi-dispatch/triggers";
 // The allocation envelope, the plan module and the applied split (issue #504 part C), the worker's own: the admin judges an
 // envelope with the parser the worker boots with, and applies or reverts a plan through the worker's `applyPlan` and
 // `revert`, so the ladder, the step and the compare-and-set are one implementation.
@@ -2971,7 +2973,7 @@ export function readTriggerEditor({ paths, env = {}, folder = null, deploymentDi
     const githubRules = configured.some((t) => t.forge === "github" && t.type !== "cron" && t.type !== "watch" && !t.disarmed);
     try { githubRestart = !githubServedByServe(hints, githubRules); } catch { /* A refused GITHUB_INGEST offers no GitHub at all. */ }
   }
-  const folders = [...new Set([folder, ...configured.filter((t) => t.type === "cron").map((t) => t.folder)].filter((f) => typeof f === "string" && f !== ""))];
+  const folders = [...new Set([folder, ...configured.filter((t) => t.type === "cron" || t.runKind === "local").map((t) => t.folder)].filter((f) => typeof f === "string" && f !== ""))];
   const repositories = folders.slice(0, 16).map((folder) => folderSkillsFn({ folder }));
   const tiers = [
     // The folders come from the file: one that could not be read leaves folders nobody listed, so the tier is not whole.
@@ -3043,11 +3045,21 @@ export async function readTriggersWithStalls({ triggersPath, url, fs = nodeFs, r
  * A trigger's bounded history, using the same raw-index/type guard as attribution and the same cost classifier as
  * Spend. Prompt maps deliberately stay outside this object. Missing queue/record reads remain unknown.
  */
+/** Only declared rules are read; no keyspace scan and no payload or actor enters this view. */
+export async function readLocalEventStatuses(redis, triggers, { timeoutMs = 2500, readStatus = readLocalEventStatus } = {}) {
+  const entries = (Array.isArray(triggers) ? triggers : []).filter((t) => t.runKind === "local" && typeof t.id === "string" && typeof t.forge === "string");
+  const bounded = entries.slice(0, 256);
+  const statuses = await Promise.all(bounded.map(async (t) => [t.index, await withTimeout(Promise.resolve().then(() => readStatus(redis, { id: t.id, forge: t.forge })), timeoutMs, undefined).catch(() => undefined)]));
+  return Object.fromEntries(statuses.map(([index, status]) => [index, status === undefined ? { unreadable: true } : { status }]));
+}
+
 export function triggerDetailOf(snapshot, index, { now = snapshot?.readAt, subscriptions = [], pricing } = {}) {
   const trigger = snapshot?.triggers?.triggers?.find((t) => t.index === index);
   if (!trigger) return null;
   const value = trigger.type === "cron" ? trigger.id : String(index);
-  const matches = (r) => triggerValueOf(r) === value && (trigger.type === "cron" || r.triggerType === trigger.type);
+  const matches = (r) => trigger.runKind === "local"
+    ? r.kind === "local" && r.localEvent?.id === trigger.id && r.localEvent?.forge === trigger.forge && r.localEvent?.type === trigger.type && r.localEvent?.digest === trigger.localEventDigest
+    : triggerValueOf(r) === value && (trigger.type === "cron" || r.triggerType === trigger.type);
   const history = snapshot.recordDetails instanceof Map ? [...snapshot.recordDetails.values()] : snapshot.runs ?? [];
   const runs = history.filter((r) => matches(r) && runAt(r) <= now).sort((a, b) => runAt(b) - runAt(a));
   const runs24h = runs.filter((r) => runAt(r) >= now - DAY_MS && runAt(r) <= now);
@@ -3058,11 +3070,12 @@ export function triggerDetailOf(snapshot, index, { now = snapshot?.readAt, subsc
   const backend = trigger.backend ?? snapshot.defaultBackend ?? null;
   return {
     trigger, index, runs24h, count24h: runs24h.length,
+    ...(trigger.runKind === "local" ? { localEvent: snapshot.localEventStatuses?.[index] ?? { unreadable: true } } : {}),
     cost24h: measured.reduce((sum, n) => sum + (n ?? 0), 0) / 1_000_000,
     cost24hMicros: measured.reduce((sum, n) => sum + (n ?? 0), 0),
     costIncomplete: measured.some((n) => n === null),
     historyIncomplete: Boolean(snapshot.parkedUnreachable || snapshot.failures24hFloor),
-    lastRuns: runs.slice(0, 5), history: runs, queued: trigger.type === "cron" ? queued : snapshot.triggerSkew?.[index]?.queued ?? queued,
+    lastRuns: runs.slice(0, 5), history: runs, queued: trigger.runKind === "local" ? null : trigger.type === "cron" ? queued : snapshot.triggerSkew?.[index]?.queued ?? queued,
     skewed: snapshot.triggerSkew?.[index]?.rows ?? null,
     skewIncomplete: snapshot.triggerSkew?.[index]?.incomplete ?? true,
     cron: trigger.type === "cron" ? { scheduler, next: scheduler?.next ?? null, overdueMs: scheduler?.overdueMs ?? null, stalls, stallLimit: (snapshot.schedulerStallMax ?? 2) + 1 } : null,
@@ -3197,7 +3210,8 @@ export function normalizeTriggerForDisplay(entry) {
   // the difference is the whole point. Getting this polarity wrong is the defect 0.1.4 shipped a fix for:
   // the riskiest triggers rendered with no badge and no warning, quiet exactly where the risk was.
   const resume = run.resume === true;
-  const forge = typeof run.kind === "string" && run.kind.trim() !== "" ? run.kind : null;
+  const sourceForge = sourceForgeOf({ on, run });
+  const forge = typeof sourceForge === "string" && sourceForge.trim() !== "" ? sourceForge : null;
   // How many sandboxes race this trigger (INT-TRIGGERS-FILE-CONTRACT, REQ-REPLICA-RUNS). `null` is the
   // one-run default, matching this function's flow/model/phrase convention, and `> 1` is the test rather
   // than `!== undefined` because the only thing worth rendering is a trigger that MULTIPLIES SPEND -- the
@@ -3222,6 +3236,19 @@ export function normalizeTriggerForDisplay(entry) {
   // present, so a record for a trigger that names none keeps exactly its pre-#502 keys; cron keeps its
   // long-standing `model: null` sentinel below.
   const modelRef = {
+    ...(typeof run.worker === "string" && { worker: run.worker }),
+    ...(run.kind === "local" && !["cron", "watch"].includes(on.type) ? {
+      runKind: "local",
+      localEventDigest: (() => { try {
+        const { disarmed: _spent, ...armed } = on;
+        const [parsed] = parseTriggers(JSON.stringify({ version: TRIGGERS_FILE_VERSION, triggers: [{ on: armed, run }] }), "triggers file");
+        return localEventDigest(parsed);
+      } catch { return null; } })(),
+      id: typeof on.id === "string" ? on.id : null,
+      folder: typeof run.folder === "string" ? run.folder : null,
+      debounceSeconds: Number.isInteger(on.debounceSeconds) ? on.debounceSeconds : LOCAL_EVENT_DEBOUNCE_DEFAULT,
+      ...(Array.isArray(on.reviewAuthors) && { reviewAuthors: on.reviewAuthors.filter((name) => typeof name === "string") }),
+    } : {}),
     // Prompt text stays in the separate operator read. Optional configuration stays absent when absent.
     ...(typeof run.task === "string" && run.task.trim() !== "" && { task: true }),
     ...(typeof run.repository === "string" && { repository: run.repository }),
@@ -3556,7 +3583,7 @@ export function cronRunStats({ records, schedulerIds } = {}) {
  * be unattributed, because cron/local/chained runs never carried a matched index and their
  * attribution lives elsewhere.
  */
-export function joinRunsToTriggers({ records, triggerCount, triggerTypes } = {}) {
+export function joinRunsToTriggers({ records, triggerCount, triggerTypes, triggers = [] } = {}) {
   const byIndex = {};
   let unattributed = 0;
   if (!Array.isArray(records)) return { byIndex, unattributed };
@@ -3564,8 +3591,9 @@ export function joinRunsToTriggers({ records, triggerCount, triggerTypes } = {})
   const count = Number.isInteger(triggerCount) && triggerCount >= 0 ? triggerCount : 0;
   const types = triggerTypes && typeof triggerTypes === "object" ? triggerTypes : null;
   for (const record of records) {
-    if (!isForgeKind(record?.kind)) continue;
-    const idx = record?.triggerIndex;
+    const local = record?.kind === "local" && record.localEvent;
+    if (!local && !isForgeKind(record?.kind)) continue;
+    const idx = local ? localEventTriggerOf(record, triggers)?.index : record?.triggerIndex;
     if (!Number.isInteger(idx) || idx < 0 || idx >= count) {
       unattributed++;
       continue;
@@ -3573,7 +3601,7 @@ export function joinRunsToTriggers({ records, triggerCount, triggerTypes } = {})
     // Type agreement, when the caller supplied the current types: an undefined slot means the row
     // exists in the file but not on the display (an unusable entry), so there is no node to carry
     // the count -- unattributed keeps it visible instead of vanishing it.
-    if (types && (types[idx] === undefined || types[idx] !== record.triggerType)) {
+    if (types && (types[idx] === undefined || types[idx] !== (local ? record.localEvent.type : record.triggerType))) {
       unattributed++;
       continue;
     }
@@ -3601,6 +3629,10 @@ export function joinRunsToTriggers({ records, triggerCount, triggerTypes } = {})
  * "manual". Records that match nothing get no entry; the fold classifies the remainder
  * (chained/manual) from record facts it already holds.
  */
+function localEventTriggerOf(record, triggers) {
+  const event = record?.localEvent;
+  return record?.kind === "local" && event && triggers.find((t) => t.runKind === "local" && t.id === event.id && t.forge === event.forge && t.type === event.type && t.localEventDigest === event.digest);
+}
 export function attributeRunsToTriggers({ records, triggers } = {}) {
   const byJobId = {};
   if (!Array.isArray(records) || !Array.isArray(triggers)) return { byJobId };
@@ -3611,6 +3643,11 @@ export function attributeRunsToTriggers({ records, triggers } = {}) {
   for (const record of records) {
     const jobId = typeof record?.jobId === "string" && record.jobId !== "" ? record.jobId : null;
     if (jobId === null) continue;
+    if (record?.kind === "local" && record.localEvent) {
+      const t = localEventTriggerOf(record, triggers);
+      byJobId[jobId] = t ? { key: `trigger:${t.index}`, index: t.index, type: t.type, label: triggerMatchLabel(t) } : { key: "unattributed", index: null, type: null, label: null };
+      continue;
+    }
     // Cron first: the raw cron jobId names its scheduler outright (`cronRunOf`, any id length).
     const run = cronRunOf(jobId);
     const cron = run === null ? undefined : crons.find((t) => t.id === run.id);
@@ -3932,7 +3969,7 @@ export function collectGraphInputs({
   const folders = [];
   const injectedDirs = [];
   for (const t of triggers) {
-    if (t?.type === "cron" && typeof t.folder === "string" && t.folder !== "" && !folders.includes(t.folder)) folders.push(t.folder);
+    if ((t?.type === "cron" || t?.runKind === "local") && typeof t.folder === "string" && t.folder !== "" && !folders.includes(t.folder)) folders.push(t.folder);
     if (typeof t?.skillsDir === "string" && t.skillsDir !== "" && !injectedDirs.includes(t.skillsDir)) injectedDirs.push(t.skillsDir);
   }
   out.foldersTruncated = folders.length > GRAPH_LIMITS.maxFoldersScanned;
@@ -4800,6 +4837,7 @@ export function createFleetReader(
       // registered. With the instructions TEXT beside the view rather than inside it (issue #482): the view's records
       // are the model-callable `dispatch_triggers` result, and the words belong to the overlay alone.
       const { view: triggersView, instructions: triggerInstructions, tasks: triggerTasks } = readTriggersWithInstructions({ triggersPath: paths.triggersPath, includeTasks: true });
+      const localEventStatusesRead = readLocalEventStatuses(redis, triggersView?.triggers);
       const cronIds = Array.isArray(triggersView?.triggers)
         ? triggersView.triggers.filter((t) => t?.type === "cron" && typeof t?.id === "string" && t.id !== "").map((t) => t.id)
         : [];
@@ -5063,6 +5101,7 @@ export function createFleetReader(
         runMirror: merged.mirror,
         settings,
         triggers: triggersView,
+        ...(triggersView?.triggers?.some((t) => t.runKind === "local") ? { localEventStatuses: await localEventStatusesRead } : {}),
         triggerInstructions,
         triggerTasks,
         pauseWindows: readPauseWindows({ pauseWindowsPath: paths.pauseWindowsPath }),
@@ -7129,7 +7168,7 @@ export function secretProfilesView({ triggers = null, settings = null, env = {},
     const inOverlay = overlayNames.includes(name);
     const source = inEnv && inOverlay ? "ambiguous" : inEnv ? "env" : inOverlay ? "overlay" : "undeclared";
     const users = usedBy.get(name) ?? [];
-    const projectIds = projectList === null ? [] : [...new Set(users.filter((t) => t.type === "cron" && typeof t.folder === "string").map((t) => projectOf({ kind: "local", folder: t.folder }, projectList)).filter((p) => p !== null))].sort();
+    const projectIds = projectList === null ? [] : [...new Set(users.filter((t) => (t.type === "cron" || t.runKind === "local") && typeof t.folder === "string").map((t) => projectOf({ kind: "local", folder: t.folder }, projectList)).filter((p) => p !== null))].sort();
     const hit = recorded.find((r) => recordSecretsProfile(r) === name);
     const ran = hit ? Number.isInteger(hit.exitCode) || (hit.tokens !== null && typeof hit.tokens === "object") || hit.outcome === "completed" : false;
     const reason = hit && typeof hit.reason === "string" && /^[a-z0-9-]{1,64}$/.test(hit.reason) ? hit.reason : null;
@@ -7284,11 +7323,11 @@ export function secretBundlesView({ triggers, settings = null, env = {}, project
   const byIndex = {};
   for (const t of entries) {
     if (!Number.isInteger(t?.index)) continue;
-    const project = t.type === "cron" && typeof t.folder === "string" && projectList !== null ? projectOf({ kind: "local", folder: t.folder }, projectList) : null;
+    const project = (t.type === "cron" || t.runKind === "local") && typeof t.folder === "string" && projectList !== null ? projectOf({ kind: "local", folder: t.folder }, projectList) : null;
     const id = project !== null ? (byProject.get(project) ?? null) : null;
     // An opt-out is said only where it decides something (review L5): a cron trigger in a bundled project, or a webhook
     // trigger, whose jobs may land in any bundled project; a cron trigger outside every bundled project opts out of nothing.
-    byIndex[t.index] = { id, optedOut: t.secretBundle === false && (t.type !== "cron" || id !== null), cron: t.type === "cron" };
+    byIndex[t.index] = { id, optedOut: t.secretBundle === false && ((t.type !== "cron" && t.runKind !== "local") || id !== null), cron: t.type === "cron" || t.runKind === "local" };
   }
   const recorded = (Array.isArray(runs) ? runs : [])
     .map((r) => ({ r, b: r && typeof r === "object" ? recordedBundle(r.bundle) : null }))

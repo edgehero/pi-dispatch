@@ -1333,6 +1333,15 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		}
 
 
+		// A pending event remains coalescible through the free gates. Claim at the credential boundary, never at
+		// queue pickup: a job paused or waiting for its folder has not begun executing (#911).
+		if (job.localEvent) {
+			if (!deps.claimLocalEvent) return { outcome: "policy", reason: "local-event-unavailable", budgetReserved: false };
+			const admitted = await deps.claimLocalEvent();
+			if (admitted?.newer) throw new NewerReleaseHold("the triggers file");
+			if (admitted?.ok !== true) return admitted;
+		}
+
 		// Access-only handoff is prepared after local determinate gates and before any paid work.
 		let subscriptionAuth = [];
 		if (prepareSubscriptionAuth) {

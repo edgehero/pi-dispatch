@@ -22,7 +22,7 @@ function redisFake() {
 }
 
 test("closed response mapping distinguishes every accepted/refused word without reading content (#775)", () => {
-	for (const word of ["queued", "deduplicated", "held", "steered"]) assert.equal(receiverOutcome(202, word), word);
+	for (const word of ["queued", "deduplicated", "held", "steered", "accepted"]) assert.equal(receiverOutcome(202, word), word);
 	for (const [code, expected] of [[204, "dropped"], [401, "unauthorized"], [404, "not-configured"], [400, "malformed"], [405, "malformed"], [413, "malformed"], [415, "malformed"], [500, "error"]]) assert.equal(receiverOutcome(code), expected);
 	assert.equal(receiverOutcome(503, "lookup-failed"), "lookup-failed");
 	assert.equal(receiverOutcome(503, "enqueue-failed"), "enqueue-failed");
@@ -208,8 +208,23 @@ test("expiry is authoritative across clock skew; nonexpiring/corrupt data and fa
 	redis.mget = async () => []; view = await readReceiverStatus(redis, { names: ["mini1"], now: () => AT }); assert.equal(view.complete, false); assert.equal(view.hosts[0].unreadable, true);
 });
 
-test("the complete vocabulary is the forge table's forges and eleven words (#775, #824)", () => {
-	assert.equal(RECEIVER_FORGES, FORGE_KINDS); assert.equal(RECEIVER_OUTCOMES.length, 11); assert.equal(RECEIVER_LIVE, "receiver:live"); assert.equal(RECEIVER_TTL_MS, 90_000);
+test("the complete vocabulary is the forge table's forges and twelve words (#775, #824, #911)", () => {
+	assert.equal(RECEIVER_FORGES, FORGE_KINDS); assert.equal(RECEIVER_OUTCOMES.length, 12); assert.equal(RECEIVER_LIVE, "receiver:live"); assert.equal(RECEIVER_TTL_MS, 90_000);
+});
+
+test("legacy v1 receiver snapshots omit accepted but no other required outcome (#911)", () => {
+	const legacy = written(["github"]);
+	delete legacy.deliveries.github.accepted;
+	const parsed = parseReceiverStatus(JSON.stringify(legacy));
+	assert.ok(parsed);
+	assert.equal(receiverForgeFacts(parsed, "github", AT).counts.accepted, 0);
+	assert.equal(parsed.deliveries.github.accepted.lastAt, null);
+	assert.equal(parsed.deliveries.github.accepted.hours.length, 24);
+	for (const invalid of [null, {}, { lastAt: null, hours: [] }]) {
+		assert.equal(parseReceiverStatus(JSON.stringify({ ...legacy, deliveries: { github: { ...legacy.deliveries.github, accepted: invalid } } })), null);
+	}
+	delete legacy.deliveries.github.queued;
+	assert.equal(parseReceiverStatus(JSON.stringify(legacy)), null);
 });
 
 test("the interface outcome table is pinned both ways to the exported closed vocabulary (#775)", async () => {

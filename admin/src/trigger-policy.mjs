@@ -1,7 +1,7 @@
 /** Human descriptions of the existing receiver gates, shared by a trigger's facts and its add preview. */
 export function triggerWhoMayFire(trigger) {
   const on = trigger.on ?? trigger;
-  const forge = trigger.run?.kind ?? trigger.forge;
+  const forge = trigger.run?.kind === "local" ? on.forge : trigger.run?.kind ?? trigger.forge;
   const kind = on.type;
   if (kind === "cron") return "This deployment's scheduler starts it on its schedule; an operator may fire it by hand.";
   if (forge === "gitlab") return "The actor must be a GitLab project member with Developer access (30) or higher, including inherited membership.";
@@ -13,7 +13,9 @@ export function triggerWhoMayFire(trigger) {
   const gates = [];
   if (kind === "issue" || actions.includes("closed")) gates.push("The closer must have repository write access");
   if (actions.includes("labeled")) gates.push("A collaborator-applied matching label supplies approval");
-  if (actions.includes("review_submitted")) gates.push("The reviewer's association must be OWNER, MEMBER or COLLABORATOR, regardless of the pull request author's association");
+  if (actions.includes("review_submitted")) gates.push(Array.isArray(on.reviewAuthors) && on.reviewAuthors.length > 0
+    ? "The reviewer's association must be OWNER, MEMBER or COLLABORATOR, or their exact login must be in this local command's reviewed allowlist; the service's own identity stays refused"
+    : "The reviewer's association must be OWNER, MEMBER or COLLABORATOR, regardless of the pull request author's association");
   if (actions.some((a) => ["opened", "synchronize", "reopened"].includes(a))) gates.push("The pull request author's association must be OWNER, MEMBER or COLLABORATOR");
   return `${gates.join(". ") || "The receiver checks the actor's authority for the configured event"}.`;
 }

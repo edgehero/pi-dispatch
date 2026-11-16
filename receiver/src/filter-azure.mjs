@@ -40,7 +40,7 @@ export const PR_ACTION_FOR = {
  *
  * `selfId` is `{ id, email }` -- see the header for why it is not one value.
  */
-export function filterAzure(subset, triggers, knownFlows, selfId, authorized, deliveryId) {
+export function filterAzure(subset, triggers, knownFlows, selfId, authorized, deliveryId, { matchOnly = false } = {}) {
 	const actor = subset?.actor ?? {};
 	const hasId = typeof actor.id === "string" && actor.id !== "";
 	const hasEmail = typeof actor.email === "string" && actor.email !== "";
@@ -84,6 +84,7 @@ export function filterAzure(subset, triggers, knownFlows, selfId, authorized, de
 	// DES-AWAIT-INPUT-ENDS-THE-JOB): that one also carries `heldCandidate`, the job the parked-reply route would have
 	// built, through the SAME `build` below, so the receiver can hold it for a run that is parking right now and the job
 	// that run starts is byte for byte the one the marker would have produced. Still a drop: nothing here enqueues it.
+	if (matchOnly) return { enqueue: resolved.enqueue === true, ...(resolved.reason ? { reason: resolved.reason } : {}) };
 	if (!resolved.enqueue) return heldCandidateOr(resolved, build);
 	return build(resolved);
 

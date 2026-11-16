@@ -27,6 +27,7 @@ A viewer sees the same rules, statuses and the check, without *Add a trigger* or
 **Why it works this way.**
 - **One number everywhere.** A rule's number is the same here, in the editor, in previews and in the audit log.
 - **When, then Runs.** *When* says what happens and who may make it happen; *Runs* says which flow, with which model and where.
+- **Local command listeners.** Their source forge is distinct from local execution. A chip says the debounce interval and one pending follow-up; the detail shows the owning worker and exact review-author exception. They match independently beside the ordinary forge winner. The event checker can describe an exact reviewer login without changing the trigger or queuing work.
 - **The chips.** *Costs more* raises the bill. *Reaches* goes further than the repository. *Writes* writes something down: a session, a folder, the budget split. *Asks* may stop and wait for a person. *Narrows* does less than the kind would. *Spent* is finished and matches nothing. Each carries a glyph and a word, so the page needs no key.
 - **Good to know** lines are the forge's own rules that surprise people.
 

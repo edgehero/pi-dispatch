@@ -170,7 +170,7 @@ function decideServesGithub(env, githubGroup) {
  * sentinel groups nowhere), which is deliberate: nothing is left to serve, and INT-TRIGGERS-FILE-CONTRACT states it.
  */
 function hasGithubRules(group) {
-	return group.label.length > 0 || group.comment !== null || group.pullRequest.length > 0 || group.issue.length > 0 || group.prClose.length > 0;
+	return group.label.length > 0 || group.comment !== null || group.pullRequest.length > 0 || group.issue.length > 0 || group.prClose.length > 0 || (group.localEvents?.length ?? 0) > 0;
 }
 
 /**
@@ -360,7 +360,7 @@ function loadTriggers(env, readFile, fileExists) {
 
 /** How many rules the github group holds, for the line that says they are not served. */
 function githubRuleCount(group) {
-	return group.label.length + (group.comment !== null ? 1 : 0) + group.pullRequest.length + group.issue.length + group.prClose.length;
+	return group.label.length + (group.comment !== null ? 1 : 0) + group.pullRequest.length + group.issue.length + group.prClose.length + (group.localEvents?.length ?? 0);
 }
 
 /** The triggers file path the receiver reads (env override or the cwd default matching what `pi-dispatch init` scaffolds). */
