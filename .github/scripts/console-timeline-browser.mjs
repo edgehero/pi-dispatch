@@ -58,7 +58,24 @@ export async function checkTimelineBrowser({ chrome, shots=null, count=10000, pr
       stage=`${width}/${theme}`;
       await tab.send("Emulation.setDeviceMetricsOverride",{width,height:1000,deviceScaleFactor:1,mobile:false});
       await go("/");await ready();await evaluate(`document.documentElement.dataset.theme=${JSON.stringify(theme)}`);
+      const styling=await evaluate(`(()=>{
+        const mark=document.querySelector('.vis-range.rt-ok'),button=mark.querySelector('[data-run]');
+        const pill=getComputedStyle(mark),chart=getComputedStyle(document.querySelector('.vis-timeline'));
+        const frame=document.querySelector('.vis-panel.vis-center').getBoundingClientRect(),axis=document.querySelector('.vis-panel.vis-bottom').getBoundingClientRect();
+        const symbol=button.querySelector('.rt-symbol').getBoundingClientRect(),hit=button.getBoundingClientRect();
+        return {solid:pill.backgroundColor===getComputedStyle(document.querySelector('.lg--ok')).backgroundColor,
+          rounded:parseFloat(pill.borderTopLeftRadius)>=mark.getBoundingClientRect().height/2,
+          borderless:parseFloat(pill.borderTopWidth)===0&&pill.boxShadow==='none'&&parseFloat(chart.borderTopWidth)===0,
+          bottomRuler:axis.top>=frame.bottom-1,projectTag:!!document.querySelector('[data-group] .ptag'),
+          completeSymbol:symbol.top>=hit.top&&symbol.bottom<=hit.bottom&&symbol.width<=hit.width,
+          segmented:document.querySelectorAll('.seg [data-rt-rows]').length===2&&document.querySelectorAll('.seg [data-rt-preset]').length===3};
+      })()`);
+      assert.ok(Object.values(styling).every(Boolean),JSON.stringify({width,theme,styling}));
       await capture("overview-"+width+"-"+theme);
+      await click('[data-rt-rows="host"]');assert.equal(await evaluate("document.querySelector('#p-timeline h2').textContent"),"Runs by host");
+      await click('[data-rt-rows="project"]');
+      await click('[data-rt-filter="billing"]');await ready();assert.deepEqual(await evaluate("[...document.querySelectorAll('[data-group]')].map(b=>b.dataset.group)"),["billing"]);
+      await click('[data-rt-filter=""]');await ready();
       const before=await range();await click("[data-rt-action=older]");await until("document.querySelector('[data-rt-mode]').textContent==='Browsing history'");
       assert.notEqual(await range(),before);
       const historical=await range();await fixture.refresh(5000);await new Promise(resolve=>setTimeout(resolve,300));assert.equal(await range(),historical,"SSE must preserve the historical viewport");
@@ -163,7 +180,7 @@ export async function checkTimelineBrowser({ chrome, shots=null, count=10000, pr
     assert.equal(await evaluate("document.querySelector('[data-rt-preview] img')===null&&!window.timelineInjected"),true);
     assert.match(await evaluate("document.querySelector('[data-rt-preview]').textContent"),/<img src=x/);
     assert.deepEqual(errors,[]);assert.deepEqual(await evaluate("timelineCsp"),[]);
-    return {paints,historyRequests:fixture.calls.length,checks:"real CSP/auth, local assets, pointer/trackpad/touch pan, cancelled reads, preserved focus, zoom, dense expansion and paging, keyboard inspection, detail/Back, stable SSE, UTC and DST axis/preview offsets and durations, offline retry, hostile text"};
+    return {paints,historyRequests:fixture.calls.length,checks:"real CSP/auth, local assets, Pulse pills and bottom ruler, segmented grouping and project filters, pointer/trackpad/touch pan, cancelled reads, preserved focus, zoom, dense expansion and paging, keyboard inspection, detail/Back, stable SSE, UTC and DST axis/preview offsets and durations, offline retry, hostile text"};
   }catch(error){throw new Error(`Timeline browser ${stage}: ${error.message}; exceptions=${JSON.stringify(errors)}`,{cause:error});}
   finally{if(tab)await tab.close().catch(()=>{});if(browser){await browser.close();browser.removeSingleton();}for(const child of children)child.kill("SIGKILL");await fixture?.close();rmSync(work,{recursive:true,force:true});}
 }

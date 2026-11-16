@@ -1,7 +1,7 @@
 {
   "card": "OverviewAllClear",
   "pr": 3,
-  "words": "b708dc70bdc8f637f20fec551edd4b04279f6b2ed713abc4c7c629aef6fbd8d8",
+  "words": "f179ffdd3931e452c9971019b0cb4f1a1ea0f3f893391e79e5bf7b4a11485e96",
   "elements": [
     {"el":"The headline: All clear. 4 jobs running, nothing needs you.","kind":"readme","status":"new","panel":"p-headline","source":"admin/src/console/panels/overview.mjs#overviewHeadline","golden":["panels/overview-all-clear.operator","panels/overview-all-clear.viewer"],"shows":"All clear. 4 jobs running, nothing needs you."},
     {"el":"Needs you's empty state","kind":"readme","status":"new","panel":"p-needs","source":"admin/src/console/panels/overview.mjs#overviewNeeds","sentence":"admin/src/console/panels/overview.mjs#NEEDS_EMPTY.body","golden":["panels/overview-all-clear.operator","panels/overview-all-clear.viewer"]},
@@ -23,6 +23,6 @@
     {"el":"p-hosts","kind":"panel","status":"real","source":"admin/src/console/panels/overview.mjs#overviewHosts","golden":["overview.operator","overview.viewer"],"reason":"the same panel as the OverviewScreen card's"},
     {"el":"Hosts with every doctor passing","kind":"readme","status":"illustrative","reason":"the sample fixture has a host that warns, so the card's own line is not true of its sample; the page says what each host reports"},
     {"el":"Retained history navigation and individual run inspection","kind":"readme","status":"new","panel":"p-timeline","source":"admin/src/console/history-view.mjs#historyFrame","reason":"The enhanced library timeline supports continuous pan, zoom, visual group expansion and individual detail links. Legacy fixed-window controls remain the fallback. Times use each instant’s offset."},
-    {"el":"Library timeline controls and visual group expansion","kind":"readme","status":"new","panel":"p-timeline","source":"admin/src/console/timeline-view.mjs#libraryTimelineHtml","holds":"data-rt-chart","reason":"The static design depicts the toolbar and sample intervals. Real vis interactions, density paging and restored navigation are checked by console-timeline-browser.mjs; the fallback SVG remains in server HTML."}
+    {"el":"Library timeline controls and visual group expansion","kind":"readme","status":"new","panel":"p-timeline","source":"admin/src/console/timeline-view.mjs#libraryTimelineHtml","holds":"data-rt-chart","reason":"The static card and enhanced timeline retain Pulse pills, project tags, segmented grouping and zoom controls, quiet grid lines and a bottom ruler. Real library interaction and computed presentation are checked by console-timeline-browser.mjs; the fallback SVG remains in server HTML."}
   ]
 }

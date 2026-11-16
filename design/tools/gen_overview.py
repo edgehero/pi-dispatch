@@ -23,45 +23,54 @@ HISTORY_CSS = """
 .run-timeline{position:relative;min-width:0}
 .run-timeline[hidden],[data-timeline-fallback][hidden]{display:none}
 .timeline-enhanced>.card>.card__head .end{display:none}
-.rt-toolbar,.rt-actions,.rt-footer,.rt-density{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
-.rt-toolbar{padding:4px 0 12px;border-bottom:1px solid var(--line)}
+.rt-topline,.rt-views,.rt-toolbar,.rt-actions,.rt-footer,.rt-density{display:flex;align-items:center;gap:8px;flex-wrap:wrap}
+.rt-topline{justify-content:space-between;margin:4px 0 12px;gap:12px}
+.rt-projects{max-width:100%;min-width:0;background:var(--surface-2);overflow-x:auto;flex-wrap:nowrap}
+.rt-projects .ptag{max-width:160px;overflow:hidden;text-overflow:ellipsis}
+.rt-views{margin-left:auto}.rt-toolbar{padding:0}
 .rt-toolbar form{display:flex;align-items:end;gap:6px;min-width:0}
 .rt-toolbar label{display:flex;gap:5px;align-items:center;font-size:12px;color:var(--ink-muted)}
 .rt-toolbar input{width:150px;min-width:0}.rt-toolbar select{max-width:120px}
-.rt-toolbar input,.rt-toolbar select{height:34px;border:1px solid var(--line-strong);border-radius:8px;background:var(--surface);color:var(--ink);padding:4px 8px;font:inherit}
+.rt-toolbar input,.rt-toolbar select{height:32px;border:0;border-radius:var(--radius-pill);background:var(--surface-2);color:var(--ink);padding:4px 12px;font:inherit}
 .rt-actions{margin-left:auto}
-.rt-orientation{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:14px 0 4px;font-size:12px;color:var(--ink-muted)}
-.rt-orientation strong{color:var(--ink);font-weight:600}.rt-help{font-size:12px;color:var(--ink-muted);margin:0 0 12px}
-.rt-content{position:relative;min-width:0}.rt-chart{min-width:0;touch-action:pan-y;border-radius:10px;overflow:hidden}
-.run-timeline .vis-timeline{border:1px solid var(--line);font-family:inherit;background:var(--surface);color:var(--ink)}
-.run-timeline .vis-panel.vis-left,.run-timeline .vis-panel.vis-top{background:var(--surface-2)}
-.run-timeline .vis-panel,.run-timeline .vis-labelset .vis-label,.run-timeline .vis-foreground .vis-group{border-color:var(--line)}
-.run-timeline .vis-time-axis .vis-text{font-size:11px;color:var(--ink-muted)}
-.run-timeline .vis-time-axis .vis-grid.vis-minor{border-color:var(--line)}
-.run-timeline .vis-time-axis .vis-grid.vis-major{border-color:var(--line-strong)}
+.rt-orientation{display:flex;align-items:center;gap:10px;flex-wrap:wrap;padding:12px 0 4px;font-size:12px;color:var(--ink-muted)}
+.rt-orientation strong{color:var(--ink);font-weight:500}.rt-help{font-size:12px;color:var(--ink-muted);margin:0 0 12px}
+.rt-content{position:relative;min-width:0}.rt-chart{min-width:0;touch-action:pan-y;overflow:hidden}
+.run-timeline .vis-timeline{border:0;font-family:inherit;background:var(--surface);color:var(--ink)}
+.run-timeline .vis-panel{border:0}
+.run-timeline .vis-panel.vis-left,.run-timeline .vis-panel.vis-top,.run-timeline .vis-panel.vis-bottom{background:var(--surface)}
+.run-timeline .vis-labelset .vis-label,.run-timeline .vis-foreground .vis-group{border:0;border-top:1px solid var(--line)}
+.run-timeline .vis-time-axis .vis-text{font-size:11px;color:var(--ink-faint)}
+.run-timeline .vis-time-axis .vis-grid.vis-minor,.run-timeline .vis-time-axis .vis-grid.vis-major{border:0;border-left:1px dashed var(--line)}
 .run-timeline .vis-labelset .vis-label{color:var(--ink)}
-.rt-group{border:0;background:transparent;color:var(--ink);font:inherit;font-size:12px;font-weight:600;text-align:left;width:132px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;padding:8px;cursor:pointer}
-.run-timeline .vis-item.rt-item{border:0;border-radius:6px;background:var(--surface-3);color:var(--ink);min-width:24px;box-shadow:inset 0 0 0 1px var(--line-strong)}
-.run-timeline .vis-item .vis-item-content{padding:0;max-width:100%}
-.rt-run{display:block;min-height:28px;min-width:24px;max-width:100%;border:0;background:transparent;color:inherit;border-radius:6px;padding:4px 7px;font:inherit;font-size:11px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;cursor:pointer;text-align:left}
-.rt-run:focus-visible,.rt-group:focus-visible,.rt-chart:focus-visible{outline:3px solid var(--focus);outline-offset:-3px}
-.rt-run[aria-pressed=true]{box-shadow:inset 0 0 0 2px var(--ink)}
-.run-timeline .vis-item.rt-run{background:var(--running-tint);color:var(--running-ink);box-shadow:inset 0 0 0 1px var(--running)}
-.run-timeline .vis-item.rt-failed{background:var(--failed-tint);color:var(--failed-ink);box-shadow:inset 0 0 0 1px var(--failed)}
-.run-timeline .vis-item.rt-refused{background:var(--refused-tint);color:var(--refused-ink);box-shadow:inset 0 0 0 1px var(--refused)}
-.run-timeline .vis-item.rt-parked{background:var(--parked-tint);color:var(--parked-ink);box-shadow:inset 0 0 0 1px var(--parked)}
-.run-timeline .vis-item.rt-held{background:var(--attention-tint);color:var(--attention-ink)}
-.run-timeline .vis-item.rt-wait{background:var(--surface-2);border:1px dashed var(--line-strong)}
-.run-timeline .vis-item.rt-aggregate{background:var(--surface-3);color:var(--ink);border:1px dashed var(--line-strong);min-width:132px;z-index:2}
+.run-timeline .vis-labelset .vis-label .vis-inner{padding:0}
+.rt-group{display:flex;flex-direction:column;align-items:flex-start;gap:3px;border:0;background:transparent;color:var(--ink);font:inherit;text-align:left;width:124px;padding:11px 12px 8px 0;cursor:pointer}
+.rt-group .ptag,.rt-group .tl__repo{max-width:100%;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+.run-timeline .vis-item.rt-item{border:0;border-radius:var(--radius-pill);background:var(--surface-3);color:var(--ink);min-width:24px;box-shadow:none}
+.run-timeline .vis-item .vis-item-content{padding:0;width:100%;max-width:100%}
+button.rt-run{display:flex;align-items:center;align-content:flex-start;flex-wrap:wrap;column-gap:6px;height:26px;min-width:24px;width:100%;border:0;background:transparent;color:inherit;border-radius:var(--radius-pill);padding:0 5px;font-family:var(--font-mono);font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;cursor:pointer;text-align:left}
+.rt-symbol{flex:none;font-family:var(--font-sans);font-size:11px;line-height:26px}.rt-run-label{flex:none;line-height:26px}
+button.rt-run:focus-visible,.rt-group:focus-visible,.rt-chart:focus-visible{outline:3px solid var(--focus);outline-offset:-3px}
+button.rt-run[aria-pressed=true]{box-shadow:inset 0 0 0 2px var(--ink)}
+.run-timeline .vis-item.rt-run{background:var(--running);color:var(--on-running)}
+.run-timeline .vis-item.rt-failed{background:var(--failed);color:var(--on-failed)}
+.run-timeline .vis-item.rt-refused{background:var(--refused-tint);color:var(--refused-ink);box-shadow:inset 0 0 0 1.5px var(--refused)}
+.run-timeline .vis-item.rt-parked{background:var(--parked);color:var(--on-parked)}
+.run-timeline .vis-item.rt-held{background:var(--attention-tint);color:var(--attention-ink);border:1.5px dashed var(--attention)}
+.run-timeline .vis-item.rt-wait{background:var(--surface);border:1.5px dashed var(--line-strong)}
+.run-timeline .vis-item.rt-aggregate{background:var(--surface);color:var(--ink-muted);min-width:132px;z-index:2}
+.rt-aggregate button.rt-run{justify-content:flex-start;padding:0 8px;font-family:var(--font-sans);font-size:12px}
 .run-timeline .vis-item.vis-line,.run-timeline .vis-item.vis-dot{display:none}
+.run-timeline .vis-item.rt-future{background:var(--surface-2);pointer-events:none}
 .run-timeline .vis-custom-time{background:var(--running);pointer-events:none;width:2px}
+.rt-now-label{position:absolute;bottom:0;left:1px;transform:translateX(-50%);padding:0 7px;border-radius:var(--radius-pill);background:var(--running);color:var(--on-running);font-size:11px;font-weight:700;line-height:20px;white-space:nowrap}
 .run-timeline .vis-loading-screen{pointer-events:none;background:var(--surface)}
 .rt-preview{position:absolute;right:12px;top:56px;width:280px;max-width:calc(100% - 24px);padding:16px;background:var(--surface);border:1px solid var(--line-strong);border-radius:12px;box-shadow:0 6px 24px #0002;z-index:5;overflow-wrap:anywhere;font-size:12px}
 .rt-preview[hidden],.rt-density[hidden]{display:none}.rt-preview>strong{font-size:14px}.rt-preview p{margin:8px 0}.rt-preview dl{margin:12px 0}.rt-preview dt{color:var(--ink-muted);margin-top:8px}.rt-preview dd{margin:2px 0}.rt-preview .btn{margin-right:6px}
 .rt-footer{justify-content:space-between;padding:10px 0;font-size:12px;color:var(--ink-muted)}.rt-footer p{flex:1 1 280px;margin:0}.rt-density{padding:10px;background:var(--surface-2);border-radius:8px;font-size:12px}
 .rt-list{font-size:12px;color:var(--ink-muted);margin:8px 0}.rt-list ol{max-height:240px;overflow:auto;padding-left:24px}.rt-list li{padding:6px;overflow-wrap:anywhere}
 .rt-expanded{position:fixed;inset:12px;background:var(--surface);border:1px solid var(--line-strong);border-radius:16px;padding:20px;z-index:50;overflow:auto}
-@media (max-width: 760px){.rt-toolbar{gap:10px}.rt-actions{margin-left:0;order:3;width:100%}.rt-toolbar form{flex:1 1 100%}.rt-toolbar input{width:160px}.rt-orientation{align-items:start;gap:6px}.rt-orientation strong{flex:1 1 100%;font-size:11px}.rt-help{font-size:11px}.rt-group{width:84px;padding:6px;font-size:11px}.rt-preview{position:fixed;bottom:12px;top:auto;left:12px;right:12px;width:auto;max-width:none;max-height:50vh;overflow:auto;z-index:60}.rt-expanded{inset:0;border-radius:0;padding:12px}}
+@media (max-width: 760px){.rt-topline{gap:10px}.rt-projects{width:100%}.rt-views{margin-left:0;max-width:100%}.rt-views .seg button{padding:0 11px}.rt-toolbar{gap:10px}.rt-actions{margin-left:0;order:3;width:100%}.rt-toolbar form{flex:1 1 100%}.rt-toolbar input{width:160px}.rt-orientation{align-items:start;gap:6px}.rt-orientation strong{flex:1 1 100%;font-size:11px}.rt-help{font-size:11px}.rt-group{width:84px;padding:11px 8px 8px 0}.rt-preview{position:fixed;bottom:12px;top:auto;left:12px;right:12px;width:auto;max-width:none;max-height:50vh;overflow:auto;z-index:60}.rt-expanded{inset:0;border-radius:0;padding:12px}}
 """
 OVERVIEW_LOCAL_CSS += HISTORY_CSS
 HISTORY_NAV = '<nav class="history-nav" aria-label="Run history"><a class="btn" href="#">Older</a><a class="btn" href="#">Newer</a><a class="btn" href="#">Return to now</a><span>2026-10-25 · UTC</span></nav>'
@@ -170,9 +179,10 @@ KEY = f"""<p class="keyrow">
 ZOOM = '<div class="seg" role="group" aria-label="Rows"><button aria-pressed="true">Project</button><button aria-pressed="false">Host</button></div><div class="seg" role="group" aria-label="Zoom"><button aria-pressed="false">1h</button><button aria-pressed="true">3h</button><button aria-pressed="false">24h</button></div>'
 
 def tl_card(rows):
-    toolbar = '<div class="rt-toolbar"><label>Project <input placeholder="All projects"></label><label>Rows <select><option>Project</option><option>Host</option></select></label><div class="rt-actions"><button class="btn btn--sm">←</button><button class="btn btn--sm">→</button><button class="btn btn--sm">+</button><button class="btn btn--sm">−</button><button class="btn btn--sm">Now</button><button class="btn btn--sm">Expand</button></div><label>Window <select><option>6 hours</option></select></label></div>'
+    topline = '<div class="rt-topline">' + projseg().replace('class="projseg"', 'class="projseg rt-projects"') + '<div class="rt-views"><div class="seg" role="group" aria-label="Rows"><button aria-pressed="true">Project</button><button aria-pressed="false">Host</button></div><div class="seg" role="group" aria-label="Zoom"><button aria-pressed="false">1h</button><button aria-pressed="false">3h</button><button aria-pressed="false">24h</button></div></div></div>'
+    toolbar = '<div class="rt-toolbar"><form><label>Project <input placeholder="All projects"></label><button class="btn btn--sm">Show</button></form><div class="rt-actions"><button class="btn btn--sm btn--ghost">←</button><button class="btn btn--sm btn--ghost">→</button><button class="btn btn--sm btn--ghost">+</button><button class="btn btn--sm btn--ghost">−</button><button class="btn btn--sm">Now</button><button class="btn btn--sm btn--ghost">Expand</button></div><label>Window <select><option>Custom</option></select></label></div>'
     orientation = '<div class="rt-orientation"><strong>25 October 2026, 13:15 to 16:45 UTC</strong><span>UTC</span><span class="chip">Live</span></div><p class="rt-help">Drag to explore · Scroll sideways through time · Ctrl + wheel to zoom · Arrow keys to inspect runs</p>'
-    return card("Runs by project", '<div class="run-timeline">' + toolbar + orientation + timeline(rows) + '<div class="rt-footer"><p>Range read on the available sources.</p></div><details class="rt-list"><summary>Runs as a list</summary><p>Expand a dense project to inspect its individual runs in the timeline.</p></details></div>' + KEY, sub="Explore retained run history", id_="p-timeline")
+    return card("Runs by project", '<div class="run-timeline">' + topline + toolbar + orientation + timeline(rows) + '<div class="rt-footer"><p>Range read on the available sources.</p></div><details class="rt-list"><summary>Runs as a list</summary><p>Expand a dense project to inspect its individual runs in the timeline.</p></details></div>' + KEY, sub="left of now: what ran; right of now: what is in line", id_="p-timeline")
 
 # ---------------- KPI cards ----------------
 def needs_card(clear=False):
