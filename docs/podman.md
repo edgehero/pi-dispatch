@@ -516,9 +516,9 @@ the reasons in the worker's `RUNNER_POLICY_REASONS` (the ones the record names i
 `:Z` relabels a directory recursively on every run, so a forge job whose clone is large pays for relabelling it
 before the container starts. That cost was not measured.
 
-The compose file's config mounts (`egress-proxy.conf`, `egress-allowlist.conf`, `model-endpoints.conf`, `triggers.json`),
-and the three mounts of the proxy that `pi-dispatch up` starts, carry `:ro,z`:
-shared, because they are single files the services read, not a job's directory. Measured: without it squid
+The compose file's config mounts (`egress-proxy.conf`, `egress-allowlist.conf`, `model-endpoints.conf`, `egress-private/`,
+`egress-grants/local/`, `triggers.json`), and the five mounts of the proxy that `pi-dispatch up` starts, carry `:ro,z`:
+shared, because they are files and folders the services read, not a job's directory. Measured: without it squid
 crash-looped with `FATAL: Unable to open configuration file: /etc/squid/squid.conf: (13) Permission denied`; with it
 the proxy reached `healthy`. The receiver's `triggers.json` and `pi-dispatch up`'s proxy carry it for the same reason
 and were not started on that host.
@@ -1019,8 +1019,8 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
    measured, a container on Podman's default rootless network (pasta or slirp4netns) is refused with `"pasta" is not
    supported: invalid network mode`. To start it by hand instead of as a unit (it will not come back after a reboot,
    and `up` and `service install` will then refuse to install the unit over it until you remove it),
-   from the directory holding your `.env` and the `egress-allowlist.conf`, `model-endpoints.conf` and
-   `deploy/egress-proxy.conf` that `pi-dispatch init` wrote, and the keeper FIRST with the same flags its unit generates (a keeper started
+   from the directory holding your `.env` and the `egress-allowlist.conf`, `model-endpoints.conf`, `egress-private/`,
+   `egress-grants/` and `deploy/egress-proxy.conf` that `pi-dispatch init` wrote, and the keeper FIRST with the same flags its unit generates (a keeper started
    more than 15 s after the proxy reads as one that restarted under it):
 
    <!-- PODMAN-NATIVE-PROXY -->
@@ -1035,14 +1035,18 @@ an unprivileged account (uid 1234), on 2026-09-25. Run everything below as the w
      -v "$PWD/deploy/egress-proxy.conf:/etc/squid/squid.conf:ro,z" \
      -v "$PWD/egress-allowlist.conf:/etc/pi-dispatch/allowlist.conf:ro,z" \
      -v "$PWD/model-endpoints.conf:/etc/pi-dispatch/model-endpoints.conf:ro,z" \
+     -v "$PWD/egress-private:/etc/pi-dispatch/private:ro,z" \
+     -v "$PWD/egress-grants/podman:/etc/pi-dispatch/grants:ro,z" \
      docker.io/ubuntu/squid@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029
    ```
    <!-- /PODMAN-NATIVE-PROXY -->
 
    The image is the compose file's, by the same digest, and `:ro,z` is there for SELinux as in the compose file.
-   `model-endpoints.conf` must exist, even with no endpoints declared: the rules include it, and squid will not start
-   without it. After `pi-dispatch egress render`, reload with `podman exec pi-dispatch-egress-proxy squid -k
-   reconfigure` (docs/egress.md, "Local model servers").
+   `model-endpoints.conf` and `egress-private/private-endpoints.conf` must exist, even with no endpoints declared: the
+   rules include them, and squid will not start without them. `egress-grants/podman/` is this account's own grant
+   folder, which the worker writes for the jobs it grants a private endpoint to. After `pi-dispatch egress render`,
+   reload with `podman exec pi-dispatch-egress-proxy squid -k reconfigure` (docs/egress.md, "Local model servers"
+   and "Private endpoints").
    Measured from a job's `--internal` network: the proxy answers by name, and nothing on the host does (the host's
    own addresses, `host.containers.internal` and the gateway all refuse or are unreachable), which is stricter than
    the Docker API route, where a host service listening on `0.0.0.0` answers a job. The units in the previous

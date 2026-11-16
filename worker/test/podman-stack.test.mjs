@@ -1,4 +1,6 @@
 import { test } from "node:test";
+import { readPackagedGrantHelper } from "../src/egress-conf-copy.mjs";
+import { proxyFolderProblem } from "../src/podman-stack.mjs";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -81,13 +83,15 @@ test("templates: the proxy runs the compose file's digest, under the name the wo
 	assert.equal(composeNet, "pi-dispatch-egress-out");
 	assert.match(template("pi-dispatch-egress-out.network"), new RegExp(`^NetworkName=${composeNet}$`, "m"));
 	// The SELinux label matches compose's choice: shared `z`, since a host running both mounts the same allowlist twice.
-	assert.equal([...proxy.matchAll(/^Volume=.*:ro,z$/gm)].length, 3, "every config mount carries :ro,z");
+	assert.equal([...proxy.matchAll(/^Volume=.*:ro,z$/gm)].length, 5, "every config mount carries :ro,z (5 since #918's two folders)");
 	// The same three destinations as the compose service's mounts (issue #503: squid will not start without the include,
 	// so every way of starting the proxy mounts it).
 	const composeProxy = compose.slice(compose.indexOf("  egress-proxy:"), compose.indexOf("\nnetworks:"));
 	const composeTargets = [...composeProxy.matchAll(/^\s+- \S+:(\/etc\/\S+):ro,z$/gm)].map((m) => m[1]);
 	assert.deepEqual([...proxy.matchAll(/^Volume=[^:]+:([^:]+):ro,z$/gm)].map((m) => m[1]), composeTargets);
 	assert.ok(composeTargets.includes("/etc/pi-dispatch/model-endpoints.conf"));
+	// Issue #918: the private endpoints' folder and the grant folder, the same destinations on every way of starting it.
+	for (const target of ["/etc/pi-dispatch/private", "/etc/pi-dispatch/grants"]) assert.ok(composeTargets.includes(target), target);
 	assert.doesNotMatch(proxy, /,Z$/m, "never the private label");
 	// dash has no /dev/tcp: the check must be the exec (JSON array) form running bash, as compose's CMD form does.
 	assert.match(proxy, /^HealthCmd=\["bash", "-c", "exec 3<>\/dev\/tcp\/127\.0\.0\.1\/3128"\]$/m);
@@ -238,6 +242,9 @@ test("planStack: the proxy mounts an ACCOUNT-OWNED copy of the rules and the dep
 	// Issue #503: the deployment folder's own include, mounted directly as the allowlist is (never a copy: the render
 	// writes that file in place, and the reload reads the mounted inode).
 	assert.match(proxy, new RegExp(`^Volume=${ALLOWLIST.replace("egress-allowlist.conf", "model-endpoints.conf")}:/etc/pi-dispatch/model-endpoints.conf:ro,z$`, "m"));
+	// Issue #918: the deployment folder's private endpoints' folder and THIS runtime's grant folder, mounted directly too.
+	assert.match(proxy, new RegExp(`^Volume=${ALLOWLIST.replace("egress-allowlist.conf", "egress-private")}:/etc/pi-dispatch/private:ro,z$`, "m"));
+	assert.match(proxy, new RegExp(`^Volume=${ALLOWLIST.replace("egress-allowlist.conf", "egress-grants/podman")}:/etc/pi-dispatch/grants:ro,z$`, "m"));
 	assert.doesNotMatch(proxy, /^Volume=\/opt\/pi-dispatch/m, "no placeholder survives");
 	assert.deepEqual(plan.start, ["pi-dispatch-valkey.service", "pi-dispatch-egress-proxy.service"]);
 	assert.deepEqual(plan.actions.at(-1), { kind: "run", argv: ["systemctl", "--user", "start", "pi-dispatch-valkey.service", "pi-dispatch-egress-proxy.service"] });
@@ -316,6 +323,11 @@ function svc({ argv = ["install"], files = {}, plan = {}, listening = false, lis
 	// Issue #503: `init` writes the model endpoints' include beside the allowlist, so a folder holding the one holds the
 	// other unless a test says otherwise.
 	if (includeFile && `${cwd}/egress-allowlist.conf` in files && !(`${cwd}/model-endpoints.conf` in files)) files = { ...files, [`${cwd}/model-endpoints.conf`]: "# generated\n" };
+	// Issue #918: and the private endpoints' folder (its include and the grant helper, 0755 as init writes it) and both
+	// grant folders, each folder a key under it (this fs has no folders of its own: a path a stored file sits under is one).
+	if (includeFile && `${cwd}/egress-allowlist.conf` in files && !Object.keys(files).some((k) => k.startsWith(`${cwd}/egress-private/`))) {
+		files = { ...files, [`${cwd}/egress-private/private-endpoints.conf`]: "# generated\n", [`${cwd}/egress-private/endpoint-grant`]: readPackagedGrantHelper(), [`${cwd}/egress-grants/local/.keep`]: "", [`${cwd}/egress-grants/podman/.keep`]: "" };
+	}
 	const hostRead = host ?? hostFiles(listening ? listenerUid : null);
 	const failWrites = new Map();
 	const failUnlinks = new Map();
@@ -354,7 +366,7 @@ function svc({ argv = ["install"], files = {}, plan = {}, listening = false, lis
 		runSync: () => null,
 		realpath,
 		fs: {
-			existsSync: (p) => store.has(p),
+			existsSync: (p) => store.has(p) || [...store.keys()].some((k) => k.startsWith(`${p}/`)),
 			readFileSync: (p, enc) => {
 				// A stored Error is a file that exists and cannot be read (R21).
 				if (store.get(p) instanceof Error) throw store.get(p);
@@ -380,8 +392,9 @@ function svc({ argv = ["install"], files = {}, plan = {}, listening = false, lis
 				modes.set(p, m);
 			},
 			statSync: (p) => {
+				if (!store.has(p) && [...store.keys()].some((k) => k.startsWith(`${p}/`))) return { mode: 0o040755, uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0, isDirectory: () => true };
 				if (!store.has(p)) throw Object.assign(new Error(`ENOENT: ${p}`), { code: "ENOENT" });
-				return { mode: 0o100000 | (modes.get(p) ?? 0o644), uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0 };
+				return { mode: 0o100000 | (modes.get(p) ?? (String(p).endsWith("/endpoint-grant") ? 0o755 : 0o644)), uid: process.getuid?.() ?? 0, gid: process.getgid?.() ?? 0, isDirectory: () => false };
 			},
 			renameSync: (from, to) => {
 				writes.push(to);
@@ -1931,4 +1944,59 @@ test("readStackKeys refuses an odd openshell key line only where an openshell ve
 		assert.match(readStackKeys(odd, { openshellBlessed: true }).error, /PI_OPENSHELL_/, "blessed by this shell's list");
 	}
 	assert.deepEqual(readStackKeys("PI_BACKENDS=openshell\nPI_OPENSHELL_ENGINE=podman\n").keys, { PI_BACKENDS: "openshell", PI_OPENSHELL_ENGINE: "podman" });
+});
+
+test("service install on podman refuses a folder without the private endpoints' folder, its grant folder, or a helper squid can run (#918)", async () => {
+	const base = { [ENV_PATH]: PODMAN_ENV, [ALLOWLIST]: "x\n", [`${DEPLOY_AT}/model-endpoints.conf`]: "# generated\n", [`${DEPLOY_AT}/egress-private/private-endpoints.conf`]: "# generated\n", [`${DEPLOY_AT}/egress-private/endpoint-grant`]: readPackagedGrantHelper(), [`${DEPLOY_AT}/egress-grants/podman/.keep`]: "" };
+	for (const [drop, said] of [
+		[`${DEPLOY_AT}/egress-private/private-endpoints.conf`, /egress-private\/private-endpoints\.conf is not here: the proxy unit mounts it, and squid will not start as it should without it\. Run `pi-dispatch init`/],
+		[`${DEPLOY_AT}/egress-grants/podman/.keep`, /egress-grants\/podman\/ is not here: the proxy unit mounts it/],
+	]) {
+		const files = { ...base };
+		delete files[drop];
+		const h = svc({ files, includeFile: false });
+		assert.equal(await h.run(), 1, drop);
+		assert.match(h.errText(), said, drop);
+		assert.equal(h.writes.length, 0, "nothing written");
+	}
+	// The Docker proxy's grant folder is not this runtime's: its absence is no refusal here.
+	const noDocker = svc({ files: base, includeFile: false });
+	assert.equal(await noDocker.run(), 0, noDocker.errText());
+});
+
+test("proxyFolderProblem: the helper is the package's copy and, on POSIX, runnable by every user; the folders are folders, not links, that squid's user can enter; on Windows no mode is judged (#918)", () => {
+	const helper = readPackagedGrantHelper();
+	const files = (over = {}) => ({ "/d/egress-allowlist.conf": "x", "/d/deploy/egress-proxy.conf": "c", "/d/model-endpoints.conf": "#", "/d/egress-private/private-endpoints.conf": "#", "/d/egress-private/endpoint-grant": helper, "/d/egress-grants/local/.keep": "", ...over });
+	const fsOf = (store, { modes = {}, links = [] } = {}) => ({
+		existsSync: (p) => Object.hasOwn(store, p) || Object.keys(store).some((k) => k.startsWith(`${p}/`)),
+		readFileSync: (p) => {
+			if (!Object.hasOwn(store, p)) throw Object.assign(new Error("ENOENT"), { code: "ENOENT" });
+			return store[p];
+		},
+		statSync: (p) => {
+			const dir = !Object.hasOwn(store, p) && Object.keys(store).some((k) => k.startsWith(`${p}/`));
+			return { mode: modes[p] ?? (dir ? 0o040755 : p.endsWith("/endpoint-grant") ? 0o100755 : 0o100644), isDirectory: () => dir };
+		},
+		lstatSync: (p) => ({ isSymbolicLink: () => links.includes(p) }),
+	});
+	const at = (store, opts, platform = "linux") => proxyFolderProblem(fsOf(store, opts), "/d", { platform });
+	assert.equal(at(files()), null, "a folder init made");
+	assert.match(at(files({ "/d/egress-private/endpoint-grant": helper.replace(/\n/g, "\r\n") })).problem, /^differs from the package's copy \(`pi-dispatch up` puts the package's copy back\)$/, "CRLF line endings are a helper squid cannot run");
+	assert.match(at(files(), { modes: { "/d/egress-private/endpoint-grant": 0o100644 } }).problem, /^cannot be run by squid's own user \(`chmod 0755 egress-private\/endpoint-grant`\)$/);
+	assert.match(at(files(), { modes: { "/d/egress-private": 0o040700 } }).problem, /^cannot be entered by squid's own user \(`chmod 0755 egress-private`\)$/);
+	assert.match(at(files(), { modes: { "/d/egress-grants/local": 0o040700 } }).problem, /^cannot be read by squid's own user \(`chmod 0755 egress-grants\/local`\)$/);
+	assert.deepEqual(at(files(), { links: ["/d/egress-private"] }), { name: "egress-private/", kind: "folder", problem: "here is a symlink, not a folder (the proxy mounts wherever it points: make it a folder of its own)", brief: "is a symlink", missing: false, why: "the proxy mounts it" });
+	assert.equal(at(files(), { links: ["/d/egress-grants/local"] }).name, "egress-grants/local/");
+	assert.equal(at(files(), { links: ["/d/egress-grants"] }).name, "egress-grants/", "the parent too, which lstat of the leaf follows");
+	// A file in the mounted folder that is a link is followed inside the proxy, so it is named as a link, a dangling one
+	// too (never "missing", which would send the operator to an init that keeps the name).
+	for (const store of [files(), files({ "/d/egress-private/endpoint-grant": undefined })]) {
+		const linked = at(Object.fromEntries(Object.entries(store).filter(([, v]) => v !== undefined)), { links: ["/d/egress-private/endpoint-grant"] });
+		assert.deepEqual({ name: linked.name, brief: linked.brief, missing: linked.missing }, { name: "egress-private/endpoint-grant", brief: "is a symlink", missing: false });
+		assert.match(linked.problem, /^here is a symlink, not a file \(the proxy mounts its folder, so the link is followed inside the proxy, not here\): remove the link, then `pi-dispatch init` writes the file$/);
+	}
+	assert.equal(at(files(), { links: ["/d/egress-private/private-endpoints.conf"] }).name, "egress-private/private-endpoints.conf");
+	// Windows: Node reports no execute bit and chmod cannot add one, so no mode is judged there.
+	assert.equal(at(files(), { modes: { "/d/egress-private/endpoint-grant": 0o100666, "/d/egress-private": 0o040666, "/d/egress-grants/local": 0o040666 } }, "win32"), null);
+	assert.match(at(files({ "/d/egress-private/endpoint-grant": "edited" }), {}, "win32").problem, /^differs from the package's copy/, "the copy is judged on every host");
 });

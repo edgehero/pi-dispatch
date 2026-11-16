@@ -58,6 +58,7 @@ import { makeAzureHost } from "./azure-host.mjs";
 import { makeEgressPreflight } from "./egress.mjs";
 import { checkSlotKey, endpointSlotKey, hash16, makeClaimSweeper, makeFleetLease, makeScopeClaimSweeper, scopeSlotKey } from "./fleet-lease.mjs";
 import { MAX_SLOTS, loadModelEndpoints, modelEndpointsPath, readOverlayModels } from "./model-endpoints.mjs";
+import { endpointsOverlap, loadPrivateEndpoints, privateFolderInsideJobPathSentence, privateFoldersInsideJobPaths } from "./private-endpoints.mjs";
 import { builtinModel, checkModelsKnown } from "./model-catalog.mjs";
 import { capabilityTokens, serializeCaps } from "./capabilities.mjs";
 import { cronFingerprint } from "./fingerprint.mjs";
@@ -1165,6 +1166,35 @@ export async function startWorker(
 	const modelEndpointsAt = modelEndpointsPath(config);
 	const modelEndpoints = { current: loadModelEndpoints(config, recording("modelEndpoints", modelEndpointsAt.path)) };
 	const watchModelEndpoints = modelEndpointsAt.explicit || atBoot.modelEndpoints !== null;
+	// Issue #918: the declared private endpoints, the same posture (INT-PRIVATE-ENDPOINTS-FILE-CONTRACT). A bad file
+	// refuses boot, and so does one that names a model endpoint's id or server (`endpointsOverlap`: that server would
+	// not be private), and so does a private endpoint folder a job could write (`privateFoldersInsideJobPaths`).
+	const privateEndpoints = { current: loadPrivateEndpoints(config) };
+	const endpointOverlap = endpointsOverlap(modelEndpoints.current, privateEndpoints.current);
+	if (endpointOverlap.length > 0) throw configError(`model-endpoints and private-endpoints disagree: ${endpointOverlap[0]}`);
+	// A folder the containment rule cannot read (an unreadable job path) is said and the boot goes on: refusing would stop
+	// a deployment for a path that has nothing to do with private endpoints, and doctor names the same path.
+	let privateFolderExposed = null;
+	try {
+		privateFolderExposed = privateFoldersInsideJobPaths(process.cwd(), envelopeJobPathsNow());
+	} catch (err) {
+		log("private_endpoint_folder_unjudged", { reason: escapeControls(err?.code ?? err?.message) });
+	}
+	if (privateFolderExposed) throw configError(privateFolderInsideJobPathSentence(privateFolderExposed));
+	// After a triggers reload, a new job path may hold them: said, as the envelope's place is (the boot refuses it).
+	// One callback for the triggers watcher, which re-judges both places.
+	const checkJobPathPlaces = (say = log) => {
+		checkEnvelopePlace(say);
+		checkPrivateFoldersPlace(say);
+	};
+	const checkPrivateFoldersPlace = (say = log) => {
+		try {
+			const exposed = privateFoldersInsideJobPaths(process.cwd(), envelopeJobPathsNow());
+			if (exposed) say("private_endpoint_folder_inside_job_path", { folder: exposed.folder, kind: exposed.link ? "symlink" : exposed.kind });
+		} catch (err) {
+			say("private_endpoint_folder_inside_job_path", { reason: escapeControls(err?.message) });
+		}
+	};
 
 	// Issue #278: WHICH DOCKER DAEMON the job containers' credentials will travel to. Asked of the CLI at boot,
 	// AFTER the free file validations above (a wedged CLI costs up to its bound, and must not delay them) and
@@ -3733,7 +3763,7 @@ export async function startWorker(
 		// Only when a triggers file is configured; best-effort; a bad edit keeps the running schedulers. The
 		// closer each of the three returns joins `extraClosers`, so the watch stops with the worker (issue #295).
 		if (config.triggersFile) {
-			extraClosers.push(watchTriggersFile(config, cronQueue, log, schedules, registry, hostTz, config.workerNameDeclared, atBoot.triggers, checkEnvelopePlace, triggersState, watchFs));
+			extraClosers.push(watchTriggersFile(config, cronQueue, log, schedules, registry, hostTz, config.workerNameDeclared, atBoot.triggers, checkJobPathPlaces, triggersState, watchFs));
 		}
 
 		// REQ-SCOPED-PAUSE-WINDOWS live edit: watch the pause-windows file and hot-swap the in-memory windows, so

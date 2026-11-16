@@ -87,8 +87,12 @@ export function valkeyPortOf(valkeyUrl) {
  *     matches nothing;
  *   - a DNS name, lowercased. A trailing dot is REFUSED rather than stripped: refuse, never repair, and a URL keeps
  *     the dot, so a stripped declaration would not match the baseUrl it was written for.
+ *
+ * EXPORTED for the private endpoints (issue #918, private-endpoints.mjs), which squid matches the same way: one rule
+ * for both files, so the two can never disagree about a spelling. `urlNote: false` drops the models.json wording a
+ * private endpoint has no use for.
  */
-function canonicalHost(raw) {
+export function canonicalHost(raw, { urlNote = true } = {}) {
 	if (typeof raw !== "string" || raw === "") throw new Error("host must be a non-empty string");
 	if (raw !== raw.trim()) throw new Error("host must not carry spaces");
 	const lower = raw.toLowerCase();
@@ -110,7 +114,7 @@ function canonicalHost(raw) {
 		return lower;
 	}
 	if (lower.includes(":") || lower.startsWith("[")) return canonicalIPv6(raw, lower);
-	return canonicalName(raw, lower);
+	return canonicalName(raw, lower, urlNote);
 }
 
 function canonicalIPv6(raw, lower) {
@@ -135,8 +139,8 @@ function canonicalIPv6(raw, lower) {
 	return host;
 }
 
-function canonicalName(raw, lower) {
-	if (lower.endsWith(".")) throw new Error(`host ${JSON.stringify(raw)} ends in a dot: write it without the dot, as the baseUrl in models.json does`);
+function canonicalName(raw, lower, urlNote = true) {
+	if (lower.endsWith(".")) throw new Error(`host ${JSON.stringify(raw)} ends in a dot: write it without the dot${urlNote ? ", as the baseUrl in models.json does" : ""}`);
 	if (lower.length > 253) throw new Error(`host ${JSON.stringify(raw)} is longer than 253 characters`);
 	const labels = lower.split(".");
 	for (const label of labels) {

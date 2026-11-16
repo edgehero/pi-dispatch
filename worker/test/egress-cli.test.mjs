@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { closeSync, fstatSync, fsyncSync, ftruncateSync, linkSync, mkdirSync, openSync, readFileSync, renameSync, statSync, symlinkSync, writeFileSync, writeSync } from "node:fs";
 import { join } from "node:path";
-import { test } from "node:test";
-import { endpointsFileSetting, reloadCommand, runEgress, writeInPlace } from "../src/egress-cli.mjs";
+import { after, test } from "node:test";
+import { endpointsFileSetting, privateProxyReadiness, reloadCommand, runEgress, writeInPlace } from "../src/egress-cli.mjs";
 import { renderEndpointsInclude } from "../src/model-endpoints.mjs";
+import { parsePrivateEndpoints, renderPrivateInclude } from "../src/private-endpoints.mjs";
 import { main } from "../src/cli.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
@@ -24,11 +25,19 @@ const GOLDEN_ONE = [
 	"",
 ].join("\n");
 
-/** A deployment folder: the endpoints file, the scaffolded empty include, and an optional .env. */
-function deployment({ endpoints = ONE, envText = null, include = renderEndpointsInclude([]) } = {}) {
+/**
+ * A deployment folder: the endpoints file, the scaffolded empty include, and an optional .env. Issue #918: and the
+ * private endpoints' folder with its scaffolded include (`privateInclude`, null for no folder), and their file when given.
+ */
+function deployment({ endpoints = ONE, envText = null, include = renderEndpointsInclude([]), privateInclude = renderPrivateInclude([]), privateEndpoints = null } = {}) {
 	const dir = tempDir("pd-egress-cli-");
 	if (endpoints !== null) writeFileSync(join(dir, "model-endpoints.json"), JSON.stringify(endpoints));
 	if (include !== null) writeFileSync(join(dir, "model-endpoints.conf"), include);
+	if (privateInclude !== null) {
+		mkdirSync(join(dir, "egress-private"));
+		writeFileSync(join(dir, "egress-private", "private-endpoints.conf"), privateInclude);
+	}
+	if (privateEndpoints !== null) writeFileSync(join(dir, "private-endpoints.json"), JSON.stringify(privateEndpoints));
 	if (envText !== null) writeFileSync(join(dir, ".env"), envText);
 	return dir;
 }
@@ -220,4 +229,103 @@ test("egress render names the rules refresh when endpoints are declared and the 
 	mkdirSync(join(empty, "deploy"));
 	writeFileSync(join(empty, "deploy", "egress-proxy.conf"), PRE);
 	assert.doesNotMatch((await render(empty)).out, /predates #503/);
+});
+
+// --- issue #918: the private endpoints' include ------------------------------------------------------------------------
+
+const BENCH = { version: 1, endpoints: [{ id: "bench-device", host: "10.0.5.20", port: 22, slots: 1 }] };
+
+test("egress render writes the private include BY RENAME into its folder, mode 0644 whatever the umask, from private-endpoints.json, once the proxy can run its helper (#918)", { skip: process.platform === "win32" }, async () => {
+	const dir = deployment({ privateEndpoints: BENCH });
+	const path = join(dir, "egress-private", "private-endpoints.conf");
+	const umask = process.umask(0o077);
+	after(() => process.umask(umask));
+	const before = statSync(path).ino;
+	const asked = [];
+	const r = await render(dir, { readiness: (venue, opts) => (asked.push([venue, opts.proxy]), {}) });
+	assert.equal(r.code, 0, r.err);
+	assert.equal(readFileSync(path, "utf8"), renderPrivateInclude(parsePrivateEndpoints(JSON.stringify(BENCH), "pe.json")));
+	assert.notEqual(statSync(path).ino, before, "a new file renamed over the old one: the proxy mounts the FOLDER, which sees the rename");
+	assert.equal(statSync(path).mode & 0o777, 0o644, "squid's own user reads it, under a umask of 077 too");
+	assert.deepEqual(asked, [["docker", "pi-dispatch-egress-proxy"]], "asked once per runtime in use, before anything is written");
+	assert.match(r.out, /wrote .*egress-private\/private-endpoints\.conf\n/);
+	assert.match(r.out, /^ {2}docker exec pi-dispatch-egress-proxy squid -k reconfigure$/m, "the same reload reads both includes");
+	const again = await render(dir, { readiness: () => assert.fail("an unchanged include asks nothing") });
+	assert.match(again.out, /egress-private\/private-endpoints\.conf already matches the declared private endpoints: nothing written/);
+});
+
+test("egress render refuses, writing NEITHER include, when the proxy cannot run the helper, and says what the readiness check said (#918)", async () => {
+	const dir = deployment({ privateEndpoints: BENCH });
+	const model = join(dir, "model-endpoints.conf");
+	const priv = join(dir, "egress-private", "private-endpoints.conf");
+	const r = await render(dir, { readiness: () => ({ refusal: "the grant helper does not answer" }) });
+	assert.equal(r.code, 1);
+	assert.match(r.err, /^✗ the grant helper does not answer\nNothing was written\.\n$/);
+	assert.equal(readFileSync(model, "utf8"), renderEndpointsInclude([]), "the model include too: the render is one step");
+	assert.equal(readFileSync(priv, "utf8"), renderPrivateInclude([]));
+	const noted = await render(dir, { readiness: () => ({ note: "pi-dispatch-egress-proxy is not running under docker" }) });
+	assert.equal(noted.code, 0, noted.err);
+	assert.match(noted.out, /^⚠ pi-dispatch-egress-proxy is not running under docker$/m, "what could not be checked is said");
+	// None declared: nothing would run the helper, so nothing is asked.
+	const none = deployment({ privateEndpoints: { version: 1, endpoints: [] }, privateInclude: "# old\n" });
+	assert.equal((await render(none, { readiness: () => assert.fail("no private endpoint, no question") })).code, 0);
+	// Egress off: no proxy reads it now, so nothing is asked either.
+	const off = deployment({ privateEndpoints: BENCH, envText: "PI_EGRESS=0\n" });
+	assert.equal((await render(off, { readiness: () => assert.fail("egress off, no question") })).code, 0);
+});
+
+test("egress render refuses a server or an id in both files, and a private folder that is missing or a link, before it writes anything (#918)", async () => {
+	const both = deployment({ privateEndpoints: { version: 1, endpoints: [{ id: "x", host: "host.docker.internal", port: 11434 }] } });
+	const r = await render(both, { readiness: () => ({}) });
+	assert.equal(r.code, 1);
+	assert.match(r.err, /model-endpoints and private-endpoints disagree: host\.docker\.internal port 11434 is declared both as model endpoint "mac-ollama"/);
+	assert.match(r.err, /model-endpoints\.conf was not changed, nor was egress-private\/private-endpoints\.conf\./);
+	// No folder and nothing declared: the model endpoints still render, and the missing folder is said.
+	const before918 = deployment({ privateInclude: null });
+	const b = await render(before918);
+	assert.equal(b.code, 0, b.err);
+	assert.equal(readFileSync(join(before918, "model-endpoints.conf"), "utf8"), GOLDEN_ONE);
+	assert.match(b.out, /egress-private\/ is not here, and no private endpoint is declared, so only the model endpoints were rendered/);
+	// No folder with something declared is refused.
+	const missing = deployment({ privateInclude: null, privateEndpoints: BENCH });
+	const m = await render(missing, { readiness: () => ({}) });
+	assert.equal(m.code, 1);
+	assert.match(m.err, /egress-private\/ does not exist: `pi-dispatch init` in the deployment folder writes it/);
+	const linked = deployment({ privateInclude: null });
+	symlinkSync(tempDir("pd-egress-cli-elsewhere-"), join(linked, "egress-private"));
+	assert.match((await render(linked)).err, /egress-private is a symlink: the proxy mounts the folder itself/);
+});
+
+test("egress render reads PI_PRIVATE_ENDPOINTS_FILE from .env, and refuses a shell value that disagrees with it (#918)", async () => {
+	const dir = deployment({ envText: "PI_PRIVATE_ENDPOINTS_FILE=elsewhere.json\n" });
+	writeFileSync(join(dir, "elsewhere.json"), JSON.stringify(BENCH));
+	const r = await render(dir, { readiness: () => ({}) });
+	assert.equal(r.code, 0, r.err);
+	assert.match(readFileSync(join(dir, "egress-private", "private-endpoints.conf"), "utf8"), /# bench-device/);
+	const clash = await render(dir, { env: { PI_PRIVATE_ENDPOINTS_FILE: "other.json" } });
+	assert.equal(clash.code, 1);
+	assert.match(clash.err, /PI_PRIVATE_ENDPOINTS_FILE is "other\.json" in this shell and "elsewhere\.json" in .*\.env, and the service reads the file's/);
+});
+
+test("privateProxyReadiness: the rules, the running proxy's mounts, then the helper run as squid's user, each refused with the step that fixes it (#918)", () => {
+	const cwd = "/dep";
+	const rulesWith = "include /etc/pi-dispatch/private/private-endpoints.conf\n";
+	const state = (mounts, status = "running") => ({ code: 0, stdout: JSON.stringify({ status, health: "none", image: "x", entrypoint: [], cmd: [], mounts: mounts.map((d) => ({ Type: "bind", Source: `/dep${d}`, Destination: d })), networks: {} }) });
+	const base = { cwd, home: "/home/op", exists: () => true };
+	const calls = [];
+	const run = (answers) => (bin, args, opts) => (calls.push([bin, ...args, opts?.input ?? ""]), answers[args[0]]);
+	// Rules from before #918.
+	assert.match(privateProxyReadiness("docker", { ...base, readRules: () => "http_port 3128\n", run: () => assert.fail("not asked") }).refusal, /deploy\/egress-proxy\.conf\) predate #918 .*`pi-dispatch up`, and accept the refresh/);
+	assert.match(privateProxyReadiness("podman", { ...base, readRules: () => "http_port 3128\n", run: () => assert.fail("not asked") }).refusal, /~\/\.config\/pi-dispatch\/egress-proxy\.conf\) predate #918 .*`pi-dispatch service install --force`/);
+	// Not running: a note, never a refusal.
+	assert.match(privateProxyReadiness("docker", { ...base, readRules: () => rulesWith, run: run({ inspect: state([], "exited") }) }).note, /is not running under docker, so its grant helper was not checked/);
+	// Running without the two folders.
+	assert.match(privateProxyReadiness("docker", { ...base, readRules: () => rulesWith, run: run({ inspect: state(["/etc/pi-dispatch/private"]) }) }).refusal, /mounts nothing at \/etc\/pi-dispatch\/grants: it was started before #918/);
+	// The helper does not answer ERR as `proxy`.
+	const both = ["/etc/pi-dispatch/private", "/etc/pi-dispatch/grants"];
+	calls.length = 0;
+	assert.match(privateProxyReadiness("docker", { ...base, readRules: () => rulesWith, run: run({ inspect: state(both), exec: { code: 126, stdout: "" } }) }).refusal, /does not answer inside pi-dispatch-egress-proxy as squid's user \(exit 126\), and squid would respawn it in a loop/);
+	assert.deepEqual(calls.at(-1), ["docker", "exec", "-i", "--user", "proxy", "pi-dispatch-egress-proxy", "/etc/pi-dispatch/private/endpoint-grant", "0.0.0.0 pi-dispatch-render-check\n"], "run as squid's own user, with a line no grant can match");
+	assert.deepEqual(privateProxyReadiness("docker", { ...base, readRules: () => rulesWith, run: run({ inspect: state(both), exec: { code: 0, stdout: "ERR\n" } }) }), {});
+	assert.ok(privateProxyReadiness("docker", { ...base, readRules: () => rulesWith, run: run({ inspect: state(both), exec: { code: 0, stdout: "OK\n" } }) }).refusal, "a helper that grants the impossible line is no helper this render trusts");
 });

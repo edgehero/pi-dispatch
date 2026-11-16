@@ -3209,6 +3209,57 @@ contract governs the argv of one container, this governs the estate that argv jo
       never a prefix (a prefix ending at an allow line opened every port of that host, measured), and says so.
       `PI_MODEL_ENDPOINTS_FILE` in this shell and in `.env` are compared as resolved paths, and a value only this
       shell sets is warned about, since the service does not see it.
+  - **The declared private endpoints are an include too** (issue #918, `INT-PRIVATE-ENDPOINTS-FILE-CONTRACT`,
+    `DES-PRIVATE-ENDPOINT-GRANTS`). The rules carry `include /etc/pi-dispatch/private/private-endpoints.conf`
+    directly BEFORE the model endpoints' include, for its reason: it must be read before the port-443 deny and before
+    the allowlist's allows. The included file is the header alone when nothing is declared. Otherwise it defines the
+    external ACL type `pi_grant` once (`ttl=0 negative_ttl=0 cache=0 children-startup=0 children-max=8
+    queue-size=64 %>la`, running `/etc/pi-dispatch/private/endpoint-grant`) and, per endpoint in id order, a deny of
+    the declared name when it resolves to this host's loopback, `allow CONNECT <host> <port> <grant>`, and
+    `deny <host> <port>` with no method, so the pair is refused to every request that holds no grant, a plain one
+    included, before any later allow is read. A grant is a file the worker writes, named after the proxy's own
+    address on one job's network; this part (#918, part 1) ships the include, the helper and the mounts, and writes
+    no grant, so every private pair is refused to every job.
+    - **Mounted everywhere the proxy starts**, read-only, `z`, beside the other three: the deployment folder's
+      `egress-private/` FOLDER at `/etc/pi-dispatch/private` (the rendered include and the helper), and THIS
+      runtime's grant folder at `/etc/pi-dispatch/grants` (`egress-grants/local/` for the Docker proxy,
+      `egress-grants/podman/` for the rootless one, since an address is unique within one daemon only): the compose
+      service (and its mirror), `up`'s run argv, the Quadlet unit (two more placeholders), the hand-started Podman
+      recipe, `podman-conformance.yml`'s proxy and `podman-host-check.mjs`'s list. Folders, not files: the include is
+      written by rename, and a grant must appear the moment it is written. `init` scaffolds both, mode 0755 (the
+      include 0644), set explicitly so squid's own user can read them and run the helper.
+    - **The same governing rule** as the model endpoints' include: the folder's rules include the private file only
+      together with a proxy that mounts both folders. A proxy without them is current under rules without the
+      include and out of date under rules with it; `up`'s rules refresh and its replacement are one step, naming the
+      file. squid runs the helper as `proxy` and respawns one it cannot run in a loop that fills its log (measured,
+      `DES-PRIVATE-ENDPOINT-GRANTS`), so the helper must be the package's own copy: `up` puts it back when this folder's
+      differs (`grantHelperRefreshStep`, the old bytes kept beside it, mode 0755 on a POSIX host). `up` and `service
+      install` start no proxy while a file or folder it mounts is missing, is a symlink, or is the wrong kind, while the
+      helper differs from the package's copy, or, on a POSIX host, while squid's user cannot run the helper, enter
+      `egress-private/` or read the grant folder (`proxyFolderProblem`, `podman-stack.mjs`). On Windows no mode is
+      judged: Node reports none, and the render's run of the helper inside the proxy answers for it. On the Docker
+      venue, `doctor` says each of them: a missing path or one of the wrong kind ✗ under rules that include the file
+      and ⚠ before, with `init` as the fix; a helper that differs or cannot be run, a folder squid's user cannot enter
+      or a symlink ✗ either way, each with its own fix (`up` puts the package's helper back).
+    - **Rendered by `pi-dispatch egress render`**, with the model endpoints' include, from `private-endpoints.json`
+      (`PI_PRIVATE_ENDPOINTS_FILE` overrides, read by the same shell-or-`.env` rule). Both files are loaded and held to
+      each other (`endpointsOverlap`) before either include is touched, and the private include is written BY
+      RENAME into its folder. A changed include that declares anything is written only once each runtime in use
+      can run it (`privateProxyReadiness`): its rules include the file, the running proxy mounts both folders, and
+      `exec -i --user proxy <proxy> /etc/pi-dispatch/private/endpoint-grant` answers `ERR` to a line no grant can
+      match. A refusal writes neither include; a proxy that is not running is named as not checked. The include is
+      made 0644 before the rename, whatever the umask. A folder made before #918 with nothing declared renders the
+      model endpoints alone and says the folder is missing; with something declared it is refused.
+    - **The worker refuses to start** while `egress-private/` or a grant folder (`egress-grants/local`,
+      `egress-grants/podman`, the leaves the proxy mounts) is a symlink, or while `egress-grants/` itself is one (a check
+      of a leaf follows a linked parent), or while `egress-private/` or a grant folder lies inside a path a job container can see
+      (a cron `run.folder`, an absolute `PI_DISPATCH_RUN_ROOTS` root, a `run.skillsDir`, `PI_GLOBAL_PI_DIR`), judged by
+      the envelope file's rule (`envelopeInsideJobPaths`, by file identity; a relative run root is set aside, as doctor
+      and the local preparation set it aside), and logs `private_endpoint_folder_inside_job_path` after a triggers
+      reload that makes one: a job there could write a grant for itself, or replace the helper squid runs inside the
+      proxy. A path the rule cannot read is logged (`private_endpoint_folder_unjudged`) and the boot goes on; doctor's
+      `dirs` section says both, ✗ and ⚠, judged on the job paths the worker reads (`PI_TRIGGERS_FILE` as the service
+      reads it, never a default the worker does not use).
   - **The proxy image is digest-pinned**, because this container **is the allowlist**: a floating tag would let an
     upstream rebuild change what every job may reach with no commit anywhere. AMENDED 2026-11-03 (#761, upgrade path):
     this bullet used to contrast that with the floating `valkey/valkey:8` one service over, on the reasoning that a
@@ -9759,6 +9810,10 @@ LM Studio) a job may reach through the egress proxy, each by one host and one po
   - `keyless` (optional): a boolean, default `false`. `true` says the server takes no key, and lets a custom provider
     whose every model sits on such an endpoint pass the credential gate (**Keyless** below).
   - One `host` and `port` pair is declared once. Two ids for one server would split its slots.
+  - Issue #918: an id or a `host` and `port` pair that `private-endpoints.json` also declares is refused
+    (`endpointsOverlap`), by the worker's boot, `egress render` and doctor alike: endpoint slots are leased under
+    the id, and a model endpoint is open to every job, so the same server under both would not be private. A file
+    valid before #918 is refused only when the operator declares that overlap.
 - **Derivation**: which models use an endpoint is DERIVED from the overlay `models.json`
   (`<PI_GLOBAL_PI_DIR>/models.json`, read as JSON only, with no `$VAR` expansion), never listed twice. A model's
   effective `baseUrl` is its own `baseUrl`, else its provider's. It uses endpoint E when that URL's hostname
@@ -9991,6 +10046,43 @@ LM Studio) a job may reach through the egress proxy, each by one host and one po
   `apiKey`, or a provider pi knows, the gate refuses or keys exactly as before and the env has no such variable.
 
 ---
+
+## INT-PRIVATE-ENDPOINTS-FILE-CONTRACT
+
+**operator → worker, and worker → egress proxy.** Hosts on the operator's network, each by one host and one TCP port,
+that only the jobs of the triggers naming them may reach through the egress proxy (issue #918, `DES-PRIVATE-ENDPOINT-GRANTS`).
+
+- **Status**: the file, its parser and loader, the rule across it and `model-endpoints.json`, the include's render,
+  the shipped grant helper, the proxy's two folder mounts and the worker's boot refusals are LANDED (#918, part 1;
+  `INT-EGRESS-POLICY-CONTRACT`). No job is granted an endpoint yet, so every private pair is refused to every job.
+- **Producer/Consumer**: the operator writes it by hand. The worker loads it at boot, and a file that does not load, a
+  named file that is missing and an empty value refuse the start (`configError`); `egress render` and doctor load it
+  through the same loader. It is NOT settable by a model-callable tool or by the settings overlay: the proxy's rules
+  derive from it.
+- **Location**: `private-endpoints.json` in the deployment folder, which `pi-dispatch init` scaffolds empty,
+  create-only. `PI_PRIVATE_ENDPOINTS_FILE` overrides it, a relative value resolving against the deployment folder. A
+  missing DEFAULT file declares none; a missing named file and an empty value are refused, as for
+  `PI_MODEL_ENDPOINTS_FILE`.
+- **Shape**: `{ "version": 1, "endpoints": [ { "id", "host", "port", "slots"? } ] }`, at most 64 endpoints.
+  - `version` (required): an integer of at least 1; a newer one is refused, naming both. Unknown keys, at the top
+    level or in an endpoint, are REFUSED, for `INT-MODEL-ENDPOINTS-FILE-CONTRACT`'s reason.
+  - `id` (required): `[a-z0-9-]{1,32}`, unique. It names the squid ACLs (`ppe_<id>_...`) and what a grant lists.
+  - `host` (required): checked and spelled exactly as a model endpoint's (`canonicalHost`, shared), with the same
+    refusals; the trailing-dot refusal names no `models.json`.
+  - `port` (required): 1 to 65535, never the proxy's 3128 or the queue's port, and never 80 or 443: there the
+    allowlist admits every job to a listed name, the proxy matches the host as written, and a listed name that
+    resolves to the device would reach it without the grant.
+  - `slots` (optional): 1 to 64, how many jobs may hold the endpoint at once; absent, no bound (read as `null`).
+  - One `host` and `port` pair is declared once, and an id or a pair `model-endpoints.json` also declares is refused
+    (`endpointsOverlap`).
+- **The include** (`renderPrivateInclude`, `egress-private/private-endpoints.conf`): the header alone when nothing is
+  declared; otherwise the `pi_grant` type once, first, and per endpoint in id order the three lines
+  `INT-EGRESS-POLICY-CONTRACT` gives. Rendered by `pi-dispatch egress render` and written by rename into the folder the
+  proxy mounts.
+- **The grant helper** (`deploy/egress-endpoint-grant`, copied to `egress-private/endpoint-grant` by `init`): bash
+  builtins only. For each line `<address> <id>` it answers `OK` only when `<address>` has an IPv4 or IPv6 shape,
+  `<id>` the id grammar, and `/etc/pi-dispatch/grants/<address>` is a regular file, not a link, one of whose first 16
+  lines is `<id>`; anything else answers `ERR`, which squid's rules turn into a refusal.
 
 ## INT-WAIT-PROFILES-CONTRACT
 
@@ -14286,6 +14378,7 @@ and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` are UNCHANGED, checked: no file shape, wr
 
 | Date | Change |
 |---|---|
+| 2026-11-16 (#918, part 1) | NEW `INT-PRIVATE-ENDPOINTS-FILE-CONTRACT`: `private-endpoints.json`, its parser, the ports 80 and 443 refusal, the rule across it and `model-endpoints.json`, the include and the shipped grant helper. `INT-EGRESS-POLICY-CONTRACT` AMENDED: the private include before the model include, the `pi_grant` external ACL keyed by the proxy's own address on a job's network, two read-only folder mounts on every way the proxy starts, the governing include-and-mount rule, the helper held to the package's copy and its mode (`up` puts it back; no mode judged on Windows), the render's readiness check and by-rename write at 0644, and the worker's boot refusal of a private folder that is a symlink or lies inside a job path. `INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED: an id or server also declared private is refused. No grant is written yet, so every private pair is refused to every job. Every other entry UNCHANGED, checked. |
 | 2026-11-16 (#911) | NEW `INT-LOCAL-EVENT-STATE`: versioned bounded local signals, atomic transport receipts, shared clock, named-worker idempotent publication, current-definition and generation ownership, cancellation, one-shot retirement and uncertain-execution recovery. `INT-TRIGGERS-FILE-CONTRACT` AMENDED for source/execution separation, exact review authors, debounce, required event worker and optional cron worker, triggers version 5 and job data version 6. `INT-WEBHOOK-PAYLOAD-SUBSET` reads reviewer login transiently without queuing it; `INT-CONTAINER-JOB-INPUTS` adds the source-data-free local forge event shape. `INT-RUN-HISTORY-FILE-CONTRACT` adds conditional configured localEvent identity and fixed refusal reasons; `INT-HOST-REGISTRY-CONTRACT` publishes the version floors; `INT-RECEIVER-STATUS-KEY` adds accepted and truthful mixed-admission counts; `INT-DEFER-REASON-KEY` adds debounce and surviving-workspace waits; `INT-CONSOLE-STATE-API` names the event trigger filter and current-definition detail attribution. UNCHANGED, checked: ordinary forge payloads and first-match selection, credential and mount boundaries, command dispatch, exit codes, retention policy and existing cron event files. Final implementation distinguishes unclaimed supersession from active successor ownership, excludes local authority-refusal records from one-shot disarm, and documents manual generation-checked recovery. `INT-CANCEL-CHANNEL-CONTRACT` AMENDED for the possibly committed local tombstone note preserved by every requester; receipt retention and ordinary cancel keys are UNCHANGED, checked. Final polling review corrects ETag commit ordering: validators persist only after durable admission and the feed cursor or PR snapshot, with all review validators after the shared sweep cursor, preventing a failed signal from being hidden behind 304. Existing key shapes and TTLs are UNCHANGED, checked. |
 | 2026-11-15 (#908) | AMENDED `INT-TRIGGERS-FILE-CONTRACT`: `run.mayMerge` at triggers version 4, `mayMerge` and `mayMergePolicy` at job data version 5, reviewed-only provenance and current-trigger validation. `INT-CONTAINER-JOB-INPUTS` gains the fixed versioned merge-policy selector in the existing read-only job directory; `INT-SDK-SESSION-OPTIONS` selects the fixed floor before project loading; `INT-CONTAINER-RUNTIME-CONTRACT` gains the `mergePolicy` capability and offline loader proof. `INT-RUN-HISTORY-FILE-CONTRACT` gains four refusal reason tokens, with its field shape UNCHANGED, checked. CI review preserves the existing mount-readability diagnostic by reading the optional marker after `assertJobInputsReadable`, still before project or extension loading. `INT-WEBHOOK-PAYLOAD-SUBSET`, token scope, mounts, exit codes and MCP withholding UNCHANGED, checked. |
 | 2026-11-15 (#899) | `INT-CANCEL-CHANNEL-CONTRACT` AMENDED: terminal active cancellation releases its owned semantic window after cleanup, and shared ingress can repair a missed release after atomic verification. A pending request or acknowledgment cannot release early; queued and held removal retain BullMQ's atomic release. Request/ack keys and TTLs, origin rules, stored job/result/run-record shapes and retained delivery-id protection UNCHANGED, checked. `INT-RUN-HISTORY-FILE-CONTRACT` and `INT-TRIGGERS-FILE-CONTRACT` UNCHANGED, checked: no new persisted fields or vocabulary. `INT-STEER-INBOX-CONTRACT` AMENDED for the neutral window-release log names and closed cause; steering and held-reply order, origin and orphan resource holds UNCHANGED, checked. |

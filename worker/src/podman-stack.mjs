@@ -28,6 +28,8 @@ import { dirname, join } from "node:path";
 import { openshellSetupOf, venuesOf } from "./backends.mjs";
 import { DEFAULT_EGRESS_PROXY, egressProxyName } from "./egress.mjs";
 import { MODEL_ENDPOINTS_INCLUDE_NAME } from "./model-endpoints.mjs";
+import { GRANT_HELPER_NAME, GRANTS_DIR_NAME, PRIVATE_DIR_NAME, PRIVATE_INCLUDE_NAME } from "./egress-proxy-state.mjs";
+import { readPackagedGrantHelper } from "./egress-conf-copy.mjs";
 import { VALKEY_PASSWORD_KEY, valkeyEnvFileText } from "./valkey-auth.mjs";
 import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envFileSystemdHazard, envFileValueLines, invisibleCharacter, quotedRegions, readEnvAssignments } from "./env-file.mjs";
 import { NETNS_KEEPER, NETNS_KEEPER_FORMAT, NETNS_KEEPER_NOW_FORMAT, STARTED_AT_FORMAT, NETNS_KEEPER_MIN_AGE_MS, NETNS_KEEPER_AFTER_PROXY_GRACE_MS, judgeNetnsKeeper, podmanNeedsNetnsKeeper, makeDetachGate, detachBlockedSentence, DETACH_GATE_READ_TIMEOUT_MS, DETACH_GATE_READ_MAX_BUFFER, runtimeFromFacts } from "./netns-keeper.mjs";
@@ -102,6 +104,120 @@ export const ALLOWLIST_PLACEHOLDER = "/opt/pi-dispatch/egress-allowlist.conf";
  * allowlist is.
  */
 export const MODEL_ENDPOINTS_PLACEHOLDER = "/opt/pi-dispatch/model-endpoints.conf";
+
+/**
+ * The private endpoints' two folders (issue #918): the deployment folder's `egress-private/` (their rendered rules and
+ * the grant helper) and its `egress-grants/podman/`, this runtime's own grant folder, both mounted directly like the
+ * model endpoints' include, for its reason: the worker and `egress render` write into them, and a copy would not be
+ * what they wrote.
+ */
+export const PRIVATE_DIR_PLACEHOLDER = "/opt/pi-dispatch/egress-private";
+export const GRANTS_PLACEHOLDER = "/opt/pi-dispatch/egress-grants/podman";
+
+// The deployment folder's files the shipped proxy mounts, each checked before a start or a recreate (`up`, and `service
+// install` for the files the podman unit mounts from the folder, which are all but the rules). Issue #918: the two
+// files of the private endpoints' folder too, which the folder mount carries, and that folder and this runtime's grant
+// folder (`PROXY_FOLDER_DIRS`). A missing folder source is created by the runtime as an EMPTY root-owned folder, and
+// squid then exits on the missing include, so each is checked like a file.
+const PRIVATE_INCLUDE_PATH = `${PRIVATE_DIR_NAME}/${PRIVATE_INCLUDE_NAME}`;
+const GRANT_HELPER_PATH = `${PRIVATE_DIR_NAME}/${GRANT_HELPER_NAME}`;
+export const PROXY_RULES_PATH = "deploy/egress-proxy.conf";
+export const PROXY_FOLDER_FILES = Object.freeze(["egress-allowlist.conf", PROXY_RULES_PATH, MODEL_ENDPOINTS_INCLUDE_NAME, PRIVATE_INCLUDE_PATH, GRANT_HELPER_PATH]);
+const PROXY_FOLDER_DIRS = Object.freeze({ docker: [`${GRANTS_DIR_NAME}/local`], podman: [`${GRANTS_DIR_NAME}/podman`] });
+
+/**
+ * The first thing in this folder that keeps the shipped proxy from starting as it should, as
+ * `{ name, kind, problem, brief, missing, why }`, or null (issue #918 gathered the checks into one; `up`, `service
+ * install` and doctor ask it). `missing` is true when the path is simply not there; `problem` completes "<name> ...",
+ * `brief` completes "<name> in this folder ...", `why` says what the path is to the proxy.
+ *
+ * A file must be a file and a folder a folder, and neither private endpoint folder a symlink (the runtime mounts wherever
+ * it points, which `init` and `egress render` refuse too). The grant helper must be the package's own copy, since squid
+ * runs it inside the proxy and one it cannot run (truncated, CRLF line endings, edited) is respawned in a loop that fills
+ * its log (measured, DES-PRIVATE-ENDPOINT-GRANTS): `up` puts the package's copy back. On POSIX hosts squid's own `proxy`
+ * user must be able to run the helper and to enter both folders, and read the grant folder; on Windows, where Node
+ * reports no execute bit and `chmod` cannot add one, the modes are not judged (`platform`), and `egress render`'s probe
+ * inside the proxy is what answers for them. `skip` leaves out files a caller judges itself (the docker refresh step
+ * the rules).
+ */
+export function proxyFolderProblem(fs, cwd, { runtime = "docker", skip = [], platform = process.platform, readPackagedHelper = readPackagedGrantHelper } = {}) {
+	const files = PROXY_FOLDER_FILES.filter((f) => !skip.includes(f) && (runtime === "docker" || f !== PROXY_RULES_PATH));
+	// What each path is to the proxy, for the sentence that names it: an include its rules read, or something it mounts.
+	const why = (f) => (f === MODEL_ENDPOINTS_INCLUDE_NAME || f === PRIVATE_INCLUDE_PATH ? "the proxy's rules include it" : "the proxy mounts it");
+	const posix = platform !== "win32";
+	const isLink = (path) => {
+		if (typeof fs.lstatSync !== "function") return false;
+		try {
+			return fs.lstatSync(path).isSymbolicLink() === true;
+		} catch {
+			return false;
+		}
+	};
+	const modeOf = (path) => {
+		try {
+			return typeof fs.statSync === "function" ? fs.statSync(path).mode : null;
+		} catch {
+			return null;
+		}
+	};
+	const linked = (name) => ({ name: `${name}/`, kind: "folder", problem: "here is a symlink, not a folder (the proxy mounts wherever it points: make it a folder of its own)", brief: "is a symlink", missing: false, why: "the proxy mounts it" });
+	for (const f of files) {
+		const path = join(cwd, f);
+		if (f.startsWith(`${PRIVATE_DIR_NAME}/`) && isLink(join(cwd, PRIVATE_DIR_NAME))) return linked(PRIVATE_DIR_NAME);
+		// A file in a MOUNTED folder that is a link is followed inside the proxy, where a host path is not, so squid would
+		// stop on it or run something else; before the folder mount each was mounted alone and the host followed it. Asked
+		// before the exists check, which would read a dangling link as missing and send the operator to `init`, which
+		// keeps whatever holds the name.
+		if (f.startsWith(`${PRIVATE_DIR_NAME}/`) && isLink(path)) return { name: f, kind: "file", problem: "here is a symlink, not a file (the proxy mounts its folder, so the link is followed inside the proxy, not here): remove the link, then `pi-dispatch init` writes the file", brief: "is a symlink", missing: false, why: why(f) };
+		if (!fs.existsSync(path)) return { name: f, kind: "file", problem: "is not here", brief: "is not a file", missing: true, why: why(f) };
+		if (isDirectoryAt(fs, path)) return { name: f, kind: "file", problem: "here is a directory, not a file", brief: "is a directory", missing: false, why: why(f) };
+		if (f === GRANT_HELPER_PATH) {
+			let text = null;
+			let packaged = null;
+			try {
+				text = String(fs.readFileSync(path, "utf8"));
+				packaged = readPackagedHelper();
+			} catch {
+				// unreadable reads as differing: said below
+			}
+			if (text === null || text !== packaged) {
+				const fix = "differs from the package's copy (`pi-dispatch up` puts the package's copy back)";
+				return { name: f, kind: "file", problem: fix, brief: fix, missing: false, why: why(f) };
+			}
+			if (posix && ((modeOf(path) ?? 0) & 0o005) !== 0o005) {
+				const fix = `cannot be run by squid's own user (\`chmod 0755 ${f}\`)`;
+				return { name: f, kind: "file", problem: fix, brief: fix, missing: false, why: why(f) };
+			}
+		}
+	}
+	// The folders squid's user must enter (and the grant folder read), on POSIX hosts.
+	if (files.some((f) => f.startsWith(`${PRIVATE_DIR_NAME}/`)) && posix && ((modeOf(join(cwd, PRIVATE_DIR_NAME)) ?? 0) & 0o001) !== 0o001) {
+		const fix = `cannot be entered by squid's own user (\`chmod 0755 ${PRIVATE_DIR_NAME}\`)`;
+		return { name: `${PRIVATE_DIR_NAME}/`, kind: "folder", problem: fix, brief: fix, missing: false, why: "the proxy mounts it" };
+	}
+	for (const d of PROXY_FOLDER_DIRS[runtime] ?? []) {
+		const path = join(cwd, d);
+		// The parent too: lstat follows every part of a path but the last, so a linked egress-grants/ would pass as a folder.
+		if (isLink(join(cwd, GRANTS_DIR_NAME))) return linked(GRANTS_DIR_NAME);
+		if (isLink(path)) return linked(d);
+		if (!fs.existsSync(path)) return { name: `${d}/`, kind: "folder", problem: "is not here", brief: "is not a folder", missing: true, why: why(d) };
+		if (!isDirectoryAt(fs, path)) return { name: `${d}/`, kind: "folder", problem: "here is not a directory", brief: "is not a folder", missing: false, why: why(d) };
+		if (posix && ((modeOf(path) ?? 0) & 0o005) !== 0o005) {
+			const fix = `cannot be read by squid's own user (\`chmod 0755 ${d}\`)`;
+			return { name: `${d}/`, kind: "folder", problem: fix, brief: fix, missing: false, why: why(d) };
+		}
+	}
+	return null;
+}
+
+/** Whether `path` is a folder, followed through a link. A stat that fails reads as no. */
+function isDirectoryAt(fs, path) {
+	try {
+		return typeof fs.statSync === "function" && fs.statSync(path).isDirectory() === true;
+	} catch {
+		return false;
+	}
+}
 
 /**
  * Where the proxy's RULES are mounted from: an account-owned COPY of the package's `egress-proxy.conf`, never the
@@ -703,8 +819,10 @@ export function planStack({ components, templatesDir, deployDir, home, fs, readT
 	const conf = proxyConfCopyPath(home);
 	const allowlist = join(deployDir, "egress-allowlist.conf");
 	const endpointsInclude = join(deployDir, MODEL_ENDPOINTS_INCLUDE_NAME);
+	const privateDir = join(deployDir, PRIVATE_DIR_NAME);
+	const grantsDir = join(deployDir, GRANTS_DIR_NAME, "podman");
 	if (components.proxy) {
-		for (const p of [conf, allowlist, endpointsInclude]) {
+		for (const p of [conf, allowlist, endpointsInclude, privateDir, grantsDir]) {
 			if (UNSAFE_VOLUME_PATH.test(p)) {
 				return { error: `the egress proxy's Quadlet unit would mount ${JSON.stringify(p)}, and a Quadlet Volume= cannot carry a colon, whitespace, %, $, a quote, a backslash or a control byte in a path (each is split or expanded on the way to podman run). Move the deployment folder, or start the proxy by hand (docs/podman.md)` };
 			}
@@ -717,7 +835,9 @@ export function planStack({ components, templatesDir, deployDir, home, fs, readT
 			text = text
 				.replace(`Volume=${PROXY_CONF_PLACEHOLDER}:`, () => `Volume=${conf}:`)
 				.replace(`Volume=${ALLOWLIST_PLACEHOLDER}:`, () => `Volume=${allowlist}:`)
-				.replace(`Volume=${MODEL_ENDPOINTS_PLACEHOLDER}:`, () => `Volume=${endpointsInclude}:`);
+				.replace(`Volume=${MODEL_ENDPOINTS_PLACEHOLDER}:`, () => `Volume=${endpointsInclude}:`)
+				.replace(`Volume=${PRIVATE_DIR_PLACEHOLDER}:`, () => `Volume=${privateDir}:`)
+				.replace(`Volume=${GRANTS_PLACEHOLDER}:`, () => `Volume=${grantsDir}:`);
 		}
 		if (file === QUADLET_FILES.valkey.file && Number.isInteger(components.valkeyPort) && components.valkeyPort !== DEFAULT_VALKEY_PORT) {
 			// Issue #464: VALKEY_URL's loopback port, where this account's own Valkey is published (the container still

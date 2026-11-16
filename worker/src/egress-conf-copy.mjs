@@ -26,6 +26,13 @@ import { fileURLToPath } from "node:url";
  */
 export const PACKAGED_EGRESS_PROXY_CONF = fileURLToPath(new URL("../deploy/egress-proxy.conf", import.meta.url));
 
+/**
+ * The private endpoints' grant helper (issue #918, DES-PRIVATE-ENDPOINT-GRANTS), the package's own copy beside the rules:
+ * `init` copies it into the deployment folder's `egress-private/`, which the proxy mounts, and doctor compares the two
+ * as it compares the rules.
+ */
+export const PACKAGED_GRANT_HELPER = fileURLToPath(new URL("../deploy/egress-endpoint-grant", import.meta.url));
+
 /** The installed package's version, for the words "the package's copy (<version>)". Null when it cannot be read. */
 export const PACKAGE_VERSION = (() => {
 	try {
@@ -39,6 +46,11 @@ export const PACKAGE_VERSION = (() => {
 /** The installed package's rules, as text: the file `init` copies. */
 export function readPackagedProxyConf() {
 	return String(readFileSync(PACKAGED_EGRESS_PROXY_CONF, "utf8"));
+}
+
+/** The installed package's grant helper, as text: the file `init` copies (issue #918). */
+export function readPackagedGrantHelper() {
+	return String(readFileSync(PACKAGED_GRANT_HELPER, "utf8"));
 }
 
 /** "the package's copy (2.0.0)", or without the version where it could not be read. */

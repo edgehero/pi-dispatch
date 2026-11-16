@@ -1,0 +1,46 @@
+#!/bin/bash
+# The egress proxy's grant helper for PRIVATE ENDPOINTS (issue #918). Shipped by pi-dispatch. DO NOT EDIT.
+#
+# squid runs this program as its `proxy` user for the `pi_grant` external ACL that `private-endpoints.conf` defines
+# (rendered by `pi-dispatch egress render`). For each request whose host and port are a declared private endpoint it
+# writes one line, `<address> <id>`: `<address>` is squid's `%>la`, the proxy's OWN address on the network the
+# request arrived on, which is one job's own network; `<id>` is the endpoint's id from the rendered rules. It answers
+# `OK` when the worker granted that id to the job on that network, and `ERR` for everything else.
+#
+# The grant is a file the worker writes, `/etc/pi-dispatch/grants/<address>`, one granted id per line (and a
+# `network <name>` line naming the job's network), after it attaches the proxy to the job's network and before the
+# job starts, and deletes before it detaches the proxy. The folder is mounted read-only here.
+#
+# Why bash and nothing else: the pinned squid image has no nc, curl or wget, and this must not depend on a tool the
+# image might drop. Only bash builtins are used, so nothing is forked per request.
+#
+# Why it never uses a request value as a path: `<address>` is squid's own value, accepted only in an IPv4 or IPv6
+# shape (no `/`, so nothing outside the folder can be named), and `<id>` is compared, never opened. A symlink, a
+# folder or anything that is not a regular file is no grant, and at most 16 lines of a file are read.
+#
+# Fail direction: anything malformed, missing or unreadable answers ERR, which squid's rules turn into a refusal. If
+# this program cannot run at all (removed, or not executable), squid refuses the request too, but respawns this
+# program in a loop that fills its log until it can run again. So `pi-dispatch egress render` runs it inside the
+# running proxy, as squid's own user, before it writes a rule that would, and `up`, `service install` and doctor hold
+# this copy to the package's and to its mode.
+set -u
+grants=/etc/pi-dispatch/grants
+while IFS= read -r line; do
+	answer=ERR
+	if [[ "$line" =~ ^([0-9]{1,3}(\.[0-9]{1,3}){3}|[0-9a-f]*:[0-9a-f:]*)\ ([a-z0-9-]{1,32})$ ]]; then
+		file="$grants/${BASH_REMATCH[1]}"
+		id="${BASH_REMATCH[3]}"
+		if [[ -f "$file" && ! -L "$file" && -r "$file" ]]; then
+			n=0
+			# `|| [[ -n ... ]]`: a last line with no newline is still read, as the worker writes none without one.
+			while (( n < 16 )) && { IFS= read -r granted || [[ -n "$granted" ]]; }; do
+				n=$((n + 1))
+				if [[ "$granted" == "$id" ]]; then
+					answer=OK
+					break
+				fi
+			done < "$file"
+		fi
+	fi
+	printf '%s\n' "$answer"
+done

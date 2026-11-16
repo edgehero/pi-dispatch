@@ -6,7 +6,7 @@ import { tempDir } from "./helpers/temp-dir.mjs";
 import { planSetupEgress, applySetupEgress } from "../src/setup-egress.mjs";
 import { EGRESS_PROXY_IMAGE } from "../src/egress-proxy-state.mjs";
 import { EGRESS_RUN_ARGS } from "../src/up.mjs";
-import { readPackagedProxyConf } from "../src/egress-conf-copy.mjs";
+import { readPackagedGrantHelper, readPackagedProxyConf } from "../src/egress-conf-copy.mjs";
 
 function fixture() {
 	const dir = fs.realpathSync(tempDir("setup-egress-"));
@@ -15,12 +15,20 @@ function fixture() {
 	fs.writeFileSync(join(dir, "deploy", "egress-proxy.conf"), readPackagedProxyConf());
 	fs.writeFileSync(join(dir, "egress-allowlist.conf"), "api.anthropic.com\n");
 	fs.writeFileSync(join(dir, "model-endpoints.conf"), "# no endpoints\n");
+	// Issue #918: the private endpoints' folder (include and the package's helper, 0755) and both grant folders, as init writes them.
+	fs.mkdirSync(join(dir, "egress-private"), { mode: 0o755 });
+	fs.writeFileSync(join(dir, "egress-private", "private-endpoints.conf"), "# no private endpoints\n", { mode: 0o644 });
+	fs.writeFileSync(join(dir, "egress-private", "endpoint-grant"), readPackagedGrantHelper(), { mode: 0o755 });
+	fs.chmodSync(join(dir, "egress-private", "endpoint-grant"), 0o755);
+	for (const venue of ["local", "podman"]) fs.mkdirSync(join(dir, "egress-grants", venue), { recursive: true, mode: 0o755 });
 	const calls = [];
 	let state = null;
 	const shape = (status = "exited", changes = {}) => ({ status, health: "none", image: EGRESS_PROXY_IMAGE, entrypoint: ["entrypoint.sh"], cmd: ["-f", "/etc/squid/squid.conf", "-NYC"], mounts: [
 		{ Type: "bind", Source: join(dir, "deploy/egress-proxy.conf"), Destination: "/etc/squid/squid.conf" },
 		{ Type: "bind", Source: join(dir, "egress-allowlist.conf"), Destination: "/etc/pi-dispatch/allowlist.conf" },
 		{ Type: "bind", Source: join(dir, "model-endpoints.conf"), Destination: "/etc/pi-dispatch/model-endpoints.conf" },
+		{ Type: "bind", Source: join(dir, "egress-private"), Destination: "/etc/pi-dispatch/private" },
+		{ Type: "bind", Source: join(dir, "egress-grants", "local"), Destination: "/etc/pi-dispatch/grants" },
 	], networks: { "pi-dispatch-egress-out": {} }, ...changes });
 	const ctx = { dir, fs, uid: process.getuid(), platform: "linux", env: {}, resolveEndpoint: async () => ({ local: true }), async run(bin, args) {
 		calls.push([bin, ...args]);
@@ -106,4 +114,18 @@ test("native Podman first install reuses Quadlet files/start order and never rep
 	assert.ok(calls.some((args) => args[0] === "systemctl" && args.includes("daemon-reload")));
 	assert.ok(calls.some((args) => args[0] === "systemctl" && args.includes("start")));
 	assert.equal(calls.some((args) => args.includes("restart") || args.includes("rm")), false);
+});
+
+test("a grant helper squid's user cannot run, or one that is not the package's copy, refuses the start without mutation (#918)", async () => {
+	for (const [label, change, refusal] of [
+		["mode", (dir) => fs.chmodSync(join(dir, "egress-private", "endpoint-grant"), 0o744), "unsafe-proxy"],
+		["content", (dir) => fs.writeFileSync(join(dir, "egress-private", "endpoint-grant"), "#!/bin/bash\necho OK\n"), "proxy-refresh-required"],
+		["grant folder", (dir) => fs.rmSync(join(dir, "egress-grants", "local"), { recursive: true }), "unsafe-proxy"],
+	]) {
+		const { ctx, calls } = fixture();
+		change(ctx.dir);
+		const plan = await planSetupEgress(ctx);
+		assert.equal(plan.refusal, refusal, label);
+		assert.equal(calls.some((argv) => ["run", "start", "create"].includes(argv[1])), false, label);
+	}
 });

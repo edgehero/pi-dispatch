@@ -155,6 +155,10 @@ const FIXED_STORES = new Map([
 	["model-proposals.json", [["worker/src/doctor-model-proposals.mjs", 'join(cwd, "model-proposals.json")']]],
 	["egress-allowlist.conf", [["worker/src/start.mjs", 'join(process.cwd(), "egress-allowlist.conf")']]],
 	["model-endpoints.conf", [["worker/src/model-endpoints.mjs", 'MODEL_ENDPOINTS_INCLUDE_NAME = "model-endpoints.conf"']]],
+	// Issue #918: the private endpoints' folder (the rendered include and the shipped helper) and the grant folders.
+	["egress-private/", [["worker/src/egress-proxy-state.mjs", 'PRIVATE_DIR_NAME = "egress-private"']]],
+	["private-endpoints.conf", [["worker/src/egress-proxy-state.mjs", 'PRIVATE_INCLUDE_NAME = "private-endpoints.conf"']]],
+	["egress-grants/", [["worker/src/egress-proxy-state.mjs", 'GRANTS_DIR_NAME = "egress-grants"']]],
 	["opener/hosts.json", [["worker/src/opener-cli.mjs", '"pi-dispatch", "opener")'], ["worker/src/opener-cli.mjs", 'join(directory, "hosts.json")']]],
 	["valkey.env", [["worker/src/podman-stack.mjs", '".config", "pi-dispatch", "valkey.env"']]],
 	["packages/.undo", [["worker/src/packages.mjs", 'PACKAGES_SUBDIR = "packages"'], ["worker/src/package-stage.mjs", 'UNDO_DIR = ".undo"']]],

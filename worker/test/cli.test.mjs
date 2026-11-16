@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
@@ -365,8 +365,11 @@ test("a pi-dispatch verb whose stdout reader has gone ends quietly, with no unca
 	const cwd = tempDir("pi-cli-epipe-");
 	writeFileSync(join(cwd, "model-endpoints.json"), '{"version":1,"endpoints":[]}\n');
 	writeFileSync(join(cwd, "model-endpoints.conf"), "");
+	// Issue #918: and the private endpoints' folder `init` writes, so the render reaches its stdout, the pipe under test.
+	mkdirSync(join(cwd, "egress-private"));
+	writeFileSync(join(cwd, "egress-private", "private-endpoints.conf"), "");
 	const bin = fileURLToPath(new URL("../src/cli.mjs", import.meta.url));
-	const { PI_MODEL_ENDPOINTS_FILE: _f, ...env } = process.env;
+	const { PI_MODEL_ENDPOINTS_FILE: _f, PI_PRIVATE_ENDPOINTS_FILE: _p, ...env } = process.env;
 	for (let i = 0; i < 3; i++) {
 		const result = await new Promise((resolve) => {
 			const child = spawn(process.execPath, [bin, "egress", "render"], { cwd, env, stdio: ["ignore", "pipe", "pipe"] });

@@ -59,11 +59,11 @@ import { deploymentValkeyEnv, deploymentVenueEnv } from "./deployment-venue.mjs"
 import { resolveServiceEnv, serviceEnvFileOf, serviceEnvLoader } from "./service-env.mjs";
 import { operatorCount, readTokensFile } from "./console-tokens.mjs";
 import { consoleTokensPathFor, installedConsoleUnitPath } from "./service.mjs";
-import { PACKAGED_EGRESS_PROXY_CONF, judgeProxyConfCopy, packageCopyName, readPackagedProxyConf, replaceProxyConfCopy } from "./egress-conf-copy.mjs";
-import { EGRESS_PROXY_IMAGE, MODEL_ENDPOINTS_TARGET, PROXY_STATE_FORMAT, jobNetworksOf, parseProxyState, rulesIncludeEndpoints, shippedProxyDrift } from "./egress-proxy-state.mjs";
+import { PACKAGED_EGRESS_PROXY_CONF, judgeProxyConfCopy, packageCopyName, readPackagedGrantHelper, readPackagedProxyConf, replaceProxyConfCopy } from "./egress-conf-copy.mjs";
+import { EGRESS_PROXY_IMAGE, GRANT_HELPER_NAME, GRANTS_DIR_NAME, GRANTS_TARGET, MODEL_ENDPOINTS_TARGET, PRIVATE_DIR_NAME, PRIVATE_DIR_TARGET, PROXY_STATE_FORMAT, jobNetworksOf, parseProxyState, rulesIncludeEndpoints, rulesIncludePrivate, shippedProxyDrift } from "./egress-proxy-state.mjs";
 import { endpointsDeclaredIn, rulesFileIncludes, rulesPredateEndpointsLine } from "./egress-cli.mjs";
 import { MODEL_ENDPOINTS_INCLUDE_NAME } from "./model-endpoints.mjs";
-import { DEFAULT_VALKEY_PORT, proxyConfCopyPath, NETNS_KEEPER, NETNS_KEEPER_FORMAT, QUADLET_FILES, STACK_KEYS, applyStack, decideValkey, describeRollBack, passwdNameFrom, readSubuidRanges, rollBackWrites, valkeySharedOn, VALKEY_SHARED_KEY, readValkeyKeys, valkeyTarget, judgeNetnsKeeper, keeperUnderRunningProxyHint, managerEnvRefusal, describeAction, foreignContainerRefusal, foreignContainers, lingerNote, planStack, readLinger, readStackKeys, stackComponents, unknownContainerRefusal, userBusRefusal } from "./podman-stack.mjs";
+import { DEFAULT_VALKEY_PORT, PROXY_RULES_PATH, proxyConfCopyPath, proxyFolderProblem, NETNS_KEEPER, NETNS_KEEPER_FORMAT, QUADLET_FILES, STACK_KEYS, applyStack, decideValkey, describeRollBack, passwdNameFrom, readSubuidRanges, rollBackWrites, valkeySharedOn, VALKEY_SHARED_KEY, readValkeyKeys, valkeyTarget, judgeNetnsKeeper, keeperUnderRunningProxyHint, managerEnvRefusal, describeAction, foreignContainerRefusal, foreignContainers, lingerNote, planStack, readLinger, readStackKeys, stackComponents, unknownContainerRefusal, userBusRefusal } from "./podman-stack.mjs";
 
 /** This command's default fs seam: its own calls, and every call the `.env` writer makes (`ENV_WRITER_FS`, issue #522). */
 export const UP_FS = { existsSync, lstatSync, ...ENV_WRITER_FS };
@@ -114,8 +114,8 @@ const EGRESS_UNPAUSE_ARGS = ["unpause", "pi-dispatch-egress-proxy"];
 const EGRESS_RM_ARGS = ["rm", "-f", "-v", "pi-dispatch-egress-proxy"];
 // Issue #484: how a running proxy reads refreshed rules (see the refresh step in `runUp` for why a restart).
 const EGRESS_RESTART_ARGS = ["restart", "pi-dispatch-egress-proxy"];
-// The deployment folder's files the shipped proxy mounts, each checked before a start or a recreate.
-const PROXY_FOLDER_FILES = Object.freeze(["egress-allowlist.conf", "deploy/egress-proxy.conf", MODEL_ENDPOINTS_INCLUDE_NAME]);
+// The deployment folder's files and folders the shipped proxy mounts, each checked before a start or a recreate:
+// `proxyFolderProblem` (podman-stack.mjs, which `service install` asks too).
 export const EGRESS_RUN_ARGS = [
 	"run",
 	"-d",
@@ -136,6 +136,13 @@ export const EGRESS_RUN_ARGS = [
 	// will not start without it. `egress render` rewrites it in place and prints the reload.
 	"-v",
 	`./${MODEL_ENDPOINTS_INCLUDE_NAME}:/etc/pi-dispatch/model-endpoints.conf:ro,z`,
+	// Issue #918: the private endpoints' folder (their rendered rules, which the rules include, and the grant helper they
+	// run) and the Docker proxy's own grant folder, both read-only. Folders, not files: the include is written by rename
+	// and a grant must appear the moment the worker writes it (DES-PRIVATE-ENDPOINT-GRANTS).
+	"-v",
+	`./${PRIVATE_DIR_NAME}:${PRIVATE_DIR_TARGET}:ro,z`,
+	"-v",
+	`./${GRANTS_DIR_NAME}/local:${GRANTS_TARGET}:ro,z`,
 	// How the proxy reaches a model server on this host (issue #503): on Docker Engine the name does not exist without
 	// it, and host-gateway is the bridge gateway. Docker Desktop resolves the name already and host-gateway there is the
 	// same host address, so it is on both, as in the compose file. The PROXY only: no job gets it.
@@ -241,6 +248,8 @@ export async function runUp(argv = [], deps = {}) {
 		// Issue #484: the installed package's rules, which a differing folder copy is compared with and refreshed from, and
 		// the clock the backup's name is stamped with.
 		readPackagedConf = readPackagedProxyConf,
+		// Issue #918: the package's grant helper, which `up` puts back when this folder's copy differs.
+		readPackagedHelper = readPackagedGrantHelper,
 		now = Date.now,
 		// Issue #707: how long `up` waits for a gateway it just started to answer, polled every second (`sleep` above).
 		gatewayWaitMs = 30_000,
@@ -881,8 +890,8 @@ export async function runUp(argv = [], deps = {}) {
 		// Why the replace could not happen from here, or null: a file the run mounts is missing, or a mount of it cannot
 		// be compared on this host while nothing else shows it stale (up never removes a proxy on that ground alone).
 		blocked: (state) => {
-			const missing = PROXY_FOLDER_FILES.find((f) => f !== "deploy/egress-proxy.conf" && (!fs.existsSync(join(cwd, f)) || pathIsDirectory(fs, join(cwd, f))));
-			if (missing) return `${missing} is not a file in this folder, so the proxy could not be started with it`;
+			const missing = proxyFolderProblem(fs, cwd, { skip: [PROXY_RULES_PATH] });
+			if (missing) return `${missing.name} ${missing.missing ? `is not a ${missing.kind} in this folder` : missing.problem}, so the proxy could not be started with it`;
 			const judged = shippedProxyDrift(state, { cwd, platform, realpath: (p) => (typeof fs.realpathSync === "function" ? fs.realpathSync(p) : p) });
 			const configStale = shippedProxyDrift(state, { cwd, compareMounts: false }).drift.length > 0;
 			if (judged.unknown && !configStale) return `its mounts could not be compared on this host (${judged.unknown}), and up does not remove a proxy it cannot show is this folder's`;
@@ -896,6 +905,9 @@ export async function runUp(argv = [], deps = {}) {
 		},
 		handled: false,
 	};
+	// Issue #918: the private endpoints' grant helper, put back to the package's copy BEFORE any proxy is judged, started
+	// or restarted below, on either runtime (`grantHelperRefreshStep`).
+	if (egressArmedFn(venueEnv) && proxyName === DEFAULT_EGRESS_PROXY) grantHelperRefreshStep({ fs, cwd, out, summary, now, platform, readPackagedHelper });
 	const confRefreshed = dockerUsed && egressArmedFn(venueEnv) && proxyName === DEFAULT_EGRESS_PROXY ? await proxyConfRefreshStep({ fs, cwd, out, prompt, summary, readPackagedConf, now, yes, refreshProxyRules, restartProxy, coupled }) : false;
 	if (dockerUsed && egressArmedFn(venueEnv) && proxyName !== DEFAULT_EGRESS_PROXY) {
 		// PI_EGRESS_PROXY names the operator's own proxy (issue #430). This step used to look for, and offer to start, the
@@ -931,7 +943,9 @@ export async function runUp(argv = [], deps = {}) {
 		// AFTER the rules refresh above, so a refreshed copy that includes the file makes a two-mount proxy stale here and
 		// it is replaced rather than restarted into squid's missing-include FATAL.
 		const rulesInclude = rulesFileIncludes(join(cwd, "deploy/egress-proxy.conf"), fs);
-		const judged = state ? shippedProxyDrift(state, { cwd, platform, realpath: (p) => (typeof fs.realpathSync === "function" ? fs.realpathSync(p) : p), rulesInclude }) : { drift: [], unknown: null };
+		// Issue #918: the private endpoints' include, which needs two more mounts, under the same rule.
+		const rulesPrivate = rulesFileIncludes(join(cwd, "deploy/egress-proxy.conf"), fs, rulesIncludePrivate);
+		const judged = state ? shippedProxyDrift(state, { cwd, platform, realpath: (p) => (typeof fs.realpathSync === "function" ? fs.realpathSync(p) : p), rulesInclude, rulesIncludePrivate: rulesPrivate }) : { drift: [], unknown: null };
 		// Endpoints declared under rules that predate #503: not drift (a replace would cut tunnels and change nothing), the
 		// rules refresh's to fix, said in the one line up, doctor and egress render share.
 		if (!rulesInclude && endpointsDeclaredIn({ env, cwd, fs, platform })) {
@@ -943,11 +957,12 @@ export async function runUp(argv = [], deps = {}) {
 		// as a directory the runtime creates in its place (measured, Docker Engine 29.8.1: the host path became a root-owned
 		// directory, and the create failed "not a directory: Are you trying to mount a directory onto a file", exit 127).
 		// A DIRECTORY at either path counts as missing too (PR #488's review): it is mounted where squid reads a file.
-		const fileProblem = (f) => (!fs.existsSync(join(cwd, f)) ? "is not here" : pathIsDirectory(fs, join(cwd, f)) ? "here is a directory, not a file" : null);
 		// Issue #503: and the model endpoints' include, which the rules name; squid will not start without it (measured).
-		const missingFile = PROXY_FOLDER_FILES.find((f) => fileProblem(f) !== null);
-		const missingSaid = missingFile ? `${missingFile} ${fileProblem(missingFile)}` : "";
-		const noFile = missingFile ? (fileProblem(missingFile) === "is not here" ? `no ${missingFile} in this folder` : `${missingFile} in this folder is a directory`) : "";
+		// Issue #918: and the private endpoints' folder and this runtime's grant folder (`proxyFolderProblem`).
+		const folderProblem = proxyFolderProblem(fs, cwd);
+		const missingFile = folderProblem?.name ?? null;
+		const missingSaid = folderProblem ? `${folderProblem.name} ${folderProblem.problem}` : "";
+		const noFile = folderProblem ? (folderProblem.missing ? `no ${folderProblem.name} in this folder` : `${folderProblem.name} in this folder ${folderProblem.brief}`) : "";
 		// Whether the proxy's network is missing, filled by `egressNetworkLines` when an offer is about to be shown.
 		const network = { missing: false };
 		// STALE BY ITS IMAGE, ENTRYPOINT OR COMMAND (PR #456's final check): those are compared on every host, and a
@@ -983,7 +998,7 @@ export async function runUp(argv = [], deps = {}) {
 			out(`\n${paused ? "⚠ Egress proxy is paused (pi-dispatch-egress-proxy), and holds" : "✓ Egress proxy present (pi-dispatch-egress-proxy), still running"} the rules it read at start\n`);
 			const attached = jobNetworksOf(state);
 			if (judged.unknown || missingFile) {
-				const why = judged.unknown ? "its mounts could not be compared on this host (above), so whether it mounts this folder's file is not known" : `${missingSaid}, and a restart would mount it as a directory`;
+				const why = judged.unknown ? "its mounts could not be compared on this host (above), so whether it mounts this folder's file is not known" : `${missingSaid}, and a restart would mount it as it is`;
 				out(`not restarted: ${why}; \`${shown.join(" && ")}\` loads the refreshed rules once that is settled\n`);
 				summary.push(["egress", `proxy left ${state.status} on the rules it started with: not restarted, since ${why}`]);
 			} else {
@@ -1030,7 +1045,7 @@ export async function runUp(argv = [], deps = {}) {
 				out(`not replaced: one of its own mounts could not be compared on this host (above), so up leaves it as it is; \`docker ${EGRESS_RM_ARGS.join(" ")}\` and \`pi-dispatch up\` replace it if you have checked it\n`);
 				summary.push(["egress", "stale proxy left as it is: one of its mounts could not be compared on this host"]);
 			} else if (missingFile) {
-				out(`✗ ${missingSaid}, so up cannot recreate it from this folder; run \`pi-dispatch init\` here (or \`up\` from the deployment folder), then \`up\` again\n`);
+				out(`✗ ${missingSaid}, so up cannot recreate it from this folder; ${initFixes(folderProblem) ? "run `pi-dispatch init` here (or `up` from the deployment folder)" : `fix ${folderProblem.name} as said`}, then \`up\` again\n`);
 				summary.push(["egress", `stale proxy left as it is: ${noFile} to recreate it from; its policy is not this deployment's`]);
 			} else if (
 				await consent(
@@ -1055,7 +1070,8 @@ export async function runUp(argv = [], deps = {}) {
 			}
 		} else if (missingFile) {
 			out(`\n✗ the egress policy is on but ${missingSaid}, so no proxy is started without it\n`);
-			summary.push(["egress", `skipped: ${noFile}; run \`pi-dispatch init\` here (or \`up\` from the deployment folder), then \`up\` again`]);
+			// `init` writes what is missing and never changes what is there, so it is named only for a missing path.
+			summary.push(["egress", `skipped: ${noFile}; ${initFixes(folderProblem) ? "run `pi-dispatch init` here (or `up` from the deployment folder)" : "fix it as said above"}, then \`up\` again`]);
 		} else if (state?.status === "restarting") {
 			// A crash loop: the restart policy is already starting it, and its squid keeps exiting. Nothing to start.
 			out(`\n✗ ${DEFAULT_EGRESS_PROXY} is restarting: its squid keeps exiting and its restart policy keeps bringing it back. \`docker logs ${DEFAULT_EGRESS_PROXY}\` says why; meanwhile each job is retried once, then failed\n`);
@@ -1727,10 +1743,12 @@ async function podmanStackStep({ env, valkeyKeys = {}, state = {}, venues, spawn
 			out(`\n✗ the egress policy is on but egress-allowlist.conf ${pathIsDirectory(fs, join(cwd, "egress-allowlist.conf")) ? "here is a directory, not a file" : "is not here"}, not starting a proxy with no allowlist\n`);
 			summary.push(["egress (podman)", "skipped: no egress-allowlist.conf in this folder; run `pi-dispatch init` here, then `up` again"]);
 			components.proxy = false;
-		} else if (!fs.existsSync(join(cwd, MODEL_ENDPOINTS_INCLUDE_NAME)) || pathIsDirectory(fs, join(cwd, MODEL_ENDPOINTS_INCLUDE_NAME))) {
-			// Issue #503: the rules include it, and squid will not start without it.
-			out(`\n✗ the egress policy is on but ${MODEL_ENDPOINTS_INCLUDE_NAME} ${pathIsDirectory(fs, join(cwd, MODEL_ENDPOINTS_INCLUDE_NAME)) ? "here is a directory, not a file" : "is not here"}, and the proxy's rules include it, so no proxy is started without it\n`);
-			summary.push(["egress (podman)", `skipped: no ${MODEL_ENDPOINTS_INCLUDE_NAME} in this folder; run \`pi-dispatch init\` here, then \`up\` again`]);
+		} else if (proxyFolderProblem(fs, cwd, { runtime: "podman" })) {
+			// Issue #503: the rules include the model endpoints' file, and squid will not start without it. Issue #918: the
+			// private endpoints' folder and this account's grant folder, the same way (`proxyFolderProblem`).
+			const problem = proxyFolderProblem(fs, cwd, { runtime: "podman" });
+			out(`\n✗ the egress policy is on but ${problem.name} ${problem.problem}, and ${problem.why}, so no proxy is started without it\n`);
+			summary.push(["egress (podman)", `skipped: ${problem.missing ? `no ${problem.name} in this folder` : `${problem.name} in this folder ${problem.brief}`}; ${initFixes(problem) ? "run `pi-dispatch init` here" : "fix it as said above"}, then \`up\` again`]);
 			components.proxy = false;
 		}
 	}
@@ -1903,11 +1921,18 @@ async function proxyConfRefreshStep({ fs, cwd, out, prompt, summary, readPackage
 	out(`\n⚠ ${rel} differs from ${packageCopyName()}: ${judged.summary}. An upgrade does not rewrite it, so it is either an older version's rules or an edit of your own (\`diff ${rel} ${PACKAGED_EGRESS_PROXY_CONF}\` shows which)\n`);
 	if (yes) out("--yes does not cover replacing a file that may hold your own edits: answer below\n");
 	// Issue #503's governing rule: new rules that include model-endpoints.conf go in only together with a proxy that
-	// mounts it. A proxy of the shipped name without that mount is replaced in the same step, asked once.
-	if (coupled && rulesIncludeEndpoints(judged.packaged) && !rulesFileIncludes(path, fs)) {
+	// mounts it. A proxy of the shipped name without that mount is replaced in the same step, asked once. Issue #918:
+	// the private endpoints' include the same way, with its two folders.
+	// Each included file the new rules bring, with the mounts it needs.
+	const needs = [
+		...(rulesIncludeEndpoints(judged.packaged) && !rulesFileIncludes(path, fs) ? [{ file: MODEL_ENDPOINTS_INCLUDE_NAME, targets: [MODEL_ENDPOINTS_TARGET] }] : []),
+		...(rulesIncludePrivate(judged.packaged) && !rulesFileIncludes(path, fs, rulesIncludePrivate) ? [{ file: `${PRIVATE_DIR_NAME}/private-endpoints.conf`, targets: [PRIVATE_DIR_TARGET, GRANTS_TARGET] }] : []),
+	];
+	if (coupled && needs.length > 0) {
 		const state = await coupled.inspect();
-		if (state && !state.mounts.some((m) => m.type === "bind" && m.destination === MODEL_ENDPOINTS_TARGET)) {
-			return coupledRefreshStep({ fs, path, rel, judged, state, coupled, out, prompt, summary, now, refreshProxyRules, restartProxy });
+		const unmounted = state ? needs.filter((need) => need.targets.some((target) => !state.mounts.some((m) => m.type === "bind" && m.destination === target))) : [];
+		if (unmounted.length > 0) {
+			return coupledRefreshStep({ fs, path, rel, judged, state, coupled, out, prompt, summary, now, refreshProxyRules, restartProxy, includes: unmounted.map((need) => need.file) });
 		}
 	}
 	const accepted = await consent(
@@ -1933,6 +1958,76 @@ async function proxyConfRefreshStep({ fs, cwd, out, prompt, summary, readPackage
 }
 
 /**
+ * Whether `pi-dispatch init` is the step for a folder problem (`proxyFolderProblem`): a missing path, or a directory or a
+ * file where the other belongs, which the summary has always sent to `init`. A helper that differs, a mode, or a symlink
+ * is not: `init` keeps what is there, so the line above it names the fix instead (issue #918).
+ */
+function initFixes(problem) {
+	return problem.missing || problem.brief === "is a directory" || problem.brief === "is not a folder";
+}
+
+/**
+ * Issue #918: the private endpoints' grant helper, put back to the package's copy. It is shipped code squid runs inside
+ * the proxy, not configuration (its own header says so), and one that differs (an older version's, a truncated or
+ * CRLF-converted copy, an edit) is one squid may be unable to run, which it respawns in a loop that fills its log
+ * (DES-PRIVATE-ENDPOINT-GRANTS). So unlike the rules, whose copy may hold an operator's edit, it is replaced without a
+ * question, said, with the old bytes kept beside it (`replaceProxyConfCopy`'s backup), and made mode 0755 on a POSIX host
+ * when it is not. Nothing happens where there is no helper (`init` writes it; the folder check names it missing), or
+ * where it already is the package's copy and runnable.
+ */
+function grantHelperRefreshStep({ fs, cwd, out, summary, now, platform, readPackagedHelper }) {
+	const rel = `${PRIVATE_DIR_NAME}/${GRANT_HELPER_NAME}`;
+	const path = join(cwd, rel);
+	if (!fs.existsSync(path) || pathIsDirectory(fs, path)) return;
+	// Never through a link, the folder's or the helper's own: a write or a chmod would land wherever it points. The folder
+	// check (`proxyFolderProblem`) names a linked folder, and nothing here touches it.
+	const linked = (p) => {
+		try {
+			return typeof fs.lstatSync === "function" && fs.lstatSync(p).isSymbolicLink() === true;
+		} catch {
+			return false;
+		}
+	};
+	if (linked(join(cwd, PRIVATE_DIR_NAME)) || linked(path)) {
+		out(`\n⚠ ${rel} was not compared with ${packageCopyName()}: ${linked(path) ? rel : `${PRIVATE_DIR_NAME}/`} is a symlink, and nothing here writes through one\n`);
+		return;
+	}
+	let packaged;
+	try {
+		packaged = readPackagedHelper();
+	} catch (err) {
+		out(`\n⚠ ${rel} was not compared with ${packageCopyName()}, which could not be read (${err?.code ?? err?.message})\n`);
+		return;
+	}
+	let current = null;
+	try {
+		current = String(fs.readFileSync(path, "utf8"));
+	} catch {
+		// unreadable reads as differing: the replace below says what is wrong if it cannot proceed
+	}
+	if (current !== packaged) {
+		const done = replaceProxyConfCopy({ path, text: packaged, fs, now });
+		if (!done.ok) {
+			out(`\n✗ ${rel} differs from ${packageCopyName()} and could not be replaced: ${done.reason}\n`);
+			summary.push(["grant helper", `NOT replaced: ${done.reason}`]);
+			return;
+		}
+		const backup = `${rel}${done.backup.slice(path.length)}`;
+		out(`\n✓ replaced ${rel} with ${packageCopyName()}: it is shipped code the proxy runs, not configuration (the old one is kept as ${backup})\n`);
+		summary.push(["grant helper", `${rel} replaced with ${packageCopyName()} (the old one is ${backup})`]);
+	}
+	if (platform === "win32" || typeof fs.chmodSync !== "function") return;
+	try {
+		if ((fs.statSync(path).mode & 0o777) !== 0o755) {
+			fs.chmodSync(path, 0o755);
+			out(`✓ ${rel} is mode 0755, so squid's own user can run it\n`);
+		}
+	} catch (err) {
+		out(`\n✗ ${rel} could not be made mode 0755 (${err?.code ?? err?.message}): \`chmod 0755 ${rel}\`\n`);
+	}
+}
+
+/**
  * Issue #503: the rules refresh and the replacement of a proxy that lacks the model endpoints' mount, as ONE step. The
  * new rules include a file that proxy does not mount, so on their own they would make its next start exit (measured:
  * `docker start` of such a proxy exited 1 on squid's missing-include FATAL). Asked once, never under `--yes` (the
@@ -1942,8 +2037,11 @@ async function proxyConfRefreshStep({ fs, cwd, out, prompt, summary, readPackage
  * rules are in place and the proxy step below judges the proxy as it always does (start a stopped one, unpause a
  * paused one, offer a stale one's replace, name declared endpoints the old rules cannot reach).
  */
-async function coupledRefreshStep({ fs, path, rel, judged, state, coupled, out, prompt, summary, now, refreshProxyRules = false, restartProxy = false }) {
-	const why = "the new rules include model-endpoints.conf, which this proxy does not mount, so they go in only together with a proxy that mounts it";
+async function coupledRefreshStep({ fs, path, rel, judged, state, coupled, out, prompt, summary, now, refreshProxyRules = false, restartProxy = false, includes = [MODEL_ENDPOINTS_INCLUDE_NAME] }) {
+	// The included files this proxy does not mount (issue #503's model-endpoints.conf, issue #918's private file), named
+	// in every sentence below.
+	const named = includes.join(" and ");
+	const why = `the new rules include ${named}, which this proxy does not mount, so they go in only together with a proxy that mounts ${includes.length === 1 ? "it" : "them"}`;
 	const blocked = coupled.blocked(state);
 	if (blocked) {
 		out(`not replaced: ${why}, and up cannot replace the proxy here: ${blocked}. ${rel} and the proxy are left as they are. To take the new rules, remove the proxy with \`docker ${EGRESS_RM_ARGS.join(" ")}\` (fix a missing file first with \`pi-dispatch init\`), then run \`pi-dispatch up\` again, which starts the shipped proxy on them\n`);
@@ -1972,7 +2070,7 @@ async function coupledRefreshStep({ fs, path, rel, judged, state, coupled, out, 
 	const backup = `${rel}${done.backup.slice(path.length)}`;
 	if (await coupled.replace(network)) {
 		coupled.handled = true;
-		out(`✓ replaced ${rel} with ${packageCopyName()} (yours is kept as ${backup}) and the proxy with the shipped one, which mounts model-endpoints.conf\n`);
+		out(`✓ replaced ${rel} with ${packageCopyName()} (yours is kept as ${backup}) and the proxy with the shipped one, which mounts ${named}\n`);
 		summary.push(["egress rules", `${rel} replaced with ${packageCopyName()} (the old one is ${backup})`]);
 		summary.push(["egress", "replaced pi-dispatch-egress-proxy with the shipped one, on the refreshed rules"]);
 		return true;
@@ -1984,7 +2082,7 @@ async function coupledRefreshStep({ fs, path, rel, judged, state, coupled, out, 
 	} catch {
 		// Said below: the new rules stay, and the backup is where it was.
 	}
-	out(`✗ could not start the shipped proxy; ${restored ? `${rel} is put back as it was (from ${backup}), since no proxy that mounts model-endpoints.conf runs` : `and ${rel} could not be put back: \`mv ${backup} ${rel}\` does it`}. Continuing; doctor below will re-check it\n`);
+	out(`✗ could not start the shipped proxy; ${restored ? `${rel} is put back as it was (from ${backup}), since no proxy that mounts ${named} runs` : `and ${rel} could not be put back: \`mv ${backup} ${rel}\` does it`}. Continuing; doctor below will re-check it\n`);
 	summary.push(["egress", `replace FAILED after the rules refresh; ${restored ? `${rel} put back as it was` : `${rel} NOT put back (${backup} holds the old one)`}`]);
 	return false;
 }

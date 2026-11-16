@@ -9095,6 +9095,82 @@ free local model, or using a few successful live probes as proof of every routin
   `CONST-RETRY-INFRA-ONLY`, `DES-WORKER-ON-HOST`, `DES-CONCURRENCY-3`, `DES-PER-TRIGGER-JOB-IMAGE`,
   `OQ-004`, `OQ-011`, `CONST-VENUE-EGRESS-LAYER`, `DES-OPENSHELL-VENUE`
 
+## DES-PRIVATE-ENDPOINT-GRANTS
+
+- **Status**: the declaration, the rendered rules, the shipped helper and the proxy's two folder mounts are LANDED
+  (#918, part 1). The worker's grants, the trigger field that asks for them and the slots are part 2; until then no
+  grant exists and every private pair is refused to every job.
+- **Decision** (issue #918, `INT-PRIVATE-ENDPOINTS-FILE-CONTRACT`): a private endpoint, one host and one TCP port the
+  operator declares in `private-endpoints.json`, is reachable through the egress proxy only by the jobs the worker
+  grants it to. The proxy tells jobs apart by its OWN address on the network a request arrives on: every job has its
+  own `--internal` network whose only other member is the proxy (`DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK`), so that
+  address, squid's `%>la`, is one job's. The rendered include gives each private endpoint one `CONNECT` allow that
+  also needs the external ACL `pi_grant`, which asks the shipped helper `endpoint-grant` whether the worker wrote a
+  grant naming that endpoint's id at that address. The worker writes the grant after the proxy joins the job's
+  network and before the job starts, and deletes it before the proxy leaves. Squid's configuration never changes per
+  job.
+- **The rules, per endpoint, in this order** (`renderPrivateInclude`): a deny of the declared name when it resolves
+  to this host's loopback; `allow CONNECT <host> <port> <grant>`; and `deny <host> <port>` with no method. The last
+  line makes the pair private whatever the allowlist says further down, and refuses a plain forward request and
+  squid's `ftp://` and `https://` gateways to it. The include sits before the model endpoints' include and before
+  `deny CONNECT !SSL_ports`. The external ACL is asked only after the host and the port matched, so no other
+  request reaches the helper. Ports 80 and 443 are refused in the declaration: there the allowlist admits every job
+  to a listed name, the binding is by the declared spelling, and a listed name that resolves to the device would
+  reach it ungranted.
+- **The helper's type** is `external_acl_type pi_grant ttl=0 negative_ttl=0 cache=0 children-startup=0 children-max=8
+  queue-size=64 %>la`, defined once, before any ACL names it, and only when something is declared. Read in squid
+  6.13's source (`src/external_acl.cc`, `src/helper.cc`, tag `SQUID_6_13`, 2026-11-16):
+  - with `ttl=0`, `negative_ttl=0` and `cache=0`, `maybeCacheable` is false, so no answer is ever stored; a grant
+    written or removed holds for the next request, and the "queue full, using stale result" fallback has nothing
+    stale to use;
+  - a helper that fails, times out or is overloaded answers DUNNO, which the `http_access` check denies;
+  - the "helpers are crashing too rapidly" FATAL fires only while fewer helpers run than `children-startup`, so with
+    0 it never can, and squid starts no helper before the first request needs one;
+  - helpers run as squid's effective user, `proxy`.
+- **Measured** on 2026-11-16, OrbStack (Docker Engine 29.8.2) on macOS, the pinned image (squid 6.13), with a
+  throwaway proxy, three throwaway networks and a TCP listener standing in for the device:
+  - no grant: 403 `ERR_ACCESS_DENIED`; a grant for the job's network: 200 and the device's banner; the same grant
+    asked from another job's network: 403; the next port: 403; a plain `GET`: 403; the grant removed: 403 on the
+    next request;
+  - a job on another internal network that connects to the proxy's address on the granted network gets
+    `ENETUNREACH`: its only route is its own subnet;
+  - a grant written by rename into the read-only directory mount and deleted again is seen at once both ways (20 of
+    20 through `exec --user proxy` of the helper);
+  - a helper that is not executable: the granted request is refused (403 in 0.3 s), and squid respawns the helper
+    in a loop, about 12,700 log lines in 10 s, until the file is executable again, when it stops by itself and the
+    next request is admitted with no reload. So `egress render` runs the helper inside the proxy as `proxy` before it
+    writes a rule that would, and `up`, `service install` and doctor hold it to the package's copy and to its mode
+    (`up` puts the package's copy back), refusing or failing while it differs or cannot be run;
+  - `squid -k reconfigure` with the include present keeps an open tunnel;
+  - the proxy's addresses on job networks survive `docker restart` and a `kill -s KILL` followed by `start`;
+  - on an IPv6 network the proxy has an IPv4 and an IPv6 address, a job resolves the proxy's name to IPv6 first,
+    and squid hands the helper the plain IPv6 text (`fd07:b51a:cc66:d000::2 <id>`), so a grant is written for every
+    address the proxy has on the network;
+  - the helper's `printf` reaches squid unbuffered; a symlinked grant, `../`, an upper-case id, an extra field, an
+    empty line and `%2e%2e` all answer `ERR`.
+  Not measured here: Docker Desktop's file sharing, Docker Engine on Linux, rootless Podman and the OpenShell venue.
+  Part 3 reads them back where they run (doctor's live probes and the podman and openshell conformance lanes).
+- **What the identity rests on**: Linux accepts a packet for any of a host's addresses on any interface, so `%>la`
+  names a job only because a job cannot route to the proxy's address on another job's network. An `--internal`
+  network has no default route, the daemon isolates bridges from one another, and a job runs with
+  `--cap-drop=ALL` and `no-new-privileges`, so it can add no address or route and send no raw packet. Measured above
+  on Docker; part 3 adds the read back to doctor's live isolation probe on the host it runs on.
+- **Rejected**:
+  - per-job `squid -k reconfigure` with `src` ACLs: every job start would reload the proxy every running job uses, a
+    second writer would share the include with `egress render`, and two workers would race on one file;
+  - a per-job proxy credential (`Proxy-Authorization`): `ssh -o ProxyCommand='nc -X connect -x <proxy> %h %p'`, the
+    tool shape the issue asks for, cannot send one, and it would be one more secret to scrub;
+  - fixed subnet pools with static `src` ACLs: they collide with the daemon's pools and the operator's LAN, and a job
+    granted two endpoints needs a pool per combination;
+  - a forwarding sidecar per job: a second network path that skips the proxy's port-exact rules and doctor's probes;
+  - keying on the job container's address: unknown before `docker run` unless `--ip`, which needs a user-set subnet;
+  - squid's own `ext_file_userip_acl`: it reads its file once at start;
+  - rows in `model-endpoints.json`: an older worker refuses an unknown key there, so model endpoints would stop on
+    every older host of a mixed fleet, and a device is not a model server.
+- **Residuals**: a grant removed does not cut a tunnel already open; processes on the worker host can reach the
+  proxy's address on a job network, so they can use that job's grant while it lives; a network attached to the proxy
+  by hand is cleared of a stale grant only when pi-dispatch next attaches to that subnet.
+
 ## DES-REPLICA-INDEX-REACHES-THE-BRANCH
 
 - **Decision**: Implement replica runs (`REQ-REPLICA-RUNS`) by threading a single host-assigned integer —
@@ -18397,6 +18473,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-11-16 (#918, part 1) | Added `DES-PRIVATE-ENDPOINT-GRANTS`: a private endpoint is told apart per job by the proxy's own address on the job's network (`%>la`), through one external ACL whose shipped bash helper reads worker-written grant files from a read-only folder, with no answer ever stored (`ttl=0 negative_ttl=0 cache=0`) and no helper started before it is needed (`children-startup=0`, which also rules out squid's helper FATAL). Read in squid 6.13's source and measured on OrbStack 2026-11-16: granted 200 and refused 403 per network, port-exact, no plain request, revocation on the next request, no route to another network's proxy address, a reconfigure keeps tunnels, addresses survive restarts, IPv6 needs a grant per address, and a helper squid cannot run is refused per request but respawned in a loop. Rejected: per-job reconfigure, a proxy credential, subnet pools, a sidecar, the container's own address, `ext_file_userip_acl`, rows in `model-endpoints.json`. `DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` UNCHANGED, checked: part 1 grants nothing, so no job reaches more than before. |
 | 2026-11-16 (#911) | Added `DES-LOCAL-EVENT-COALESCING`: independent authenticated listeners, no payload channel, exact local review-author grant, durable atomic receipts and current/successor state, bounded trailing delay, named-worker publication, current-definition fencing, cancellation, retry and uncertainty ownership. Pinned BullMQ replacement was rejected because it can replace pause/retry owners and hides its successor from ordinary cancellation. `DES-QUEUE-BULLMQ-OVER-CUSTOM` AMENDED to name the bounded producer state while retaining BullMQ execution; `DES-TRIGGERS-UNIFIED-FILE` separates source from execution; `DES-GH-POLLING-TRANSPORT` preserves and explains open-review coverage; `DES-COMMAND-ENTRY-POINT` preserves registered-command dispatch without promising model-free execution; `DES-SCOPED-LIMITS-AND-FOLDER-MUTEX` adds explicit cron ownership and canonical directory identity. UNCHANGED, checked: ordinary forge first-match and deduplication, source actions, self refusal, cron scheduling, image capability, credentials, spend order and harness merge policy. Final implementation uses Valkey time, supersedes only unclaimed changed or cancelled generations, and documents explicit generation-checked recovery after proving the container gone. `DES-ONE-SHOT-DISARM-IN-THE-FILE` and `DES-CANCEL-VIA-REDIS-REQUEST-KEY` AMENDED for local authority-refusal and cancellation-uncertainty boundaries. Final polling review corrects ETag commit ordering: validators persist only after durable admission and the feed cursor or PR snapshot, with all review validators after the shared sweep cursor, preventing a failed signal from being hidden behind 304. Existing key shapes and TTLs are UNCHANGED, checked. `DES-GH-POLLING-TRANSPORT` also records inherited first-100-review coverage and repository/action-free truncated-head PR identities, their possible suppression of distinct events, and webhook or paired-cron reconciliation mitigations; transport behavior and receipt identity remain UNCHANGED, checked. |
 | 2026-11-15 (#908) | Added `DES-TRIGGER-MERGE-POLICY`: one explicit per-trigger permission reaches the forge envelope and a fixed image floor through a read-only worker input, with current-trigger digest checks, version gates and an image capability. Records the rejected user-prompt-only fix and deployment-wide default, the next-container revocation limit, and the absence of a migration for still-valid unflagged state. `DES-TRIGGER-INSTRUCTION-IN-THE-ENVELOPE` now names the effective merge-policy paragraph; `DES-FLOWS-ARE-DATA-PERSONA-IS-CODE` names the fixed rule selected by the strict worker marker without accepting free-form system prompt text. The required contract-test job gains a 90-minute overall limit after all tests passed but cleanup reached the former 60-minute limit; its check name, triggers, coverage, file and step deadlines, the release job's 60-minute limit and runtime job limits are UNCHANGED, checked. UNCHANGED, checked: `DES-FORGE-MCP` withholding, branch protection, credentials, image mounts, spend ordering and the harness merge-call scan. |
 | 2026-11-15 (#899) | `DES-QUEUE-BULLMQ-OVER-CUSTOM` and `DES-CANCEL-VIA-REDIS-REQUEST-KEY` AMENDED: one terminal-policy classifier and a common worker result boundary release only the job-owned key; shared ingress repairs a completed policy survivor from its stored state, never the incoming data of the add result. Atomic state/result/identity/ownership checks and the ordinary add preserve races. Reason allowlists, unconditional deletion, changed TTLs and cleanup alone are rejected. Existing cancellation acknowledgment, queued removal, parking/steering order, orphan resource holds and retry/recovery contracts UNCHANGED, checked. `DES-AWAIT-INPUT-ENDS-THE-JOB` and `DES-STEER-LATE-MESSAGE-RESUME-OR-REPLY` AMENDED for the neutral `semantic_window_released` / `semantic_window_release_failed` log names with a closed cause; release waits at most two seconds and late deletes retain ownership checks. |

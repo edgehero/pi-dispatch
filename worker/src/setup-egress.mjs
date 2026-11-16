@@ -10,8 +10,8 @@ import { venuesOf } from "./backends.mjs";
 import { makeDockerEndpointResolver } from "./backend-local.mjs";
 import { makePodmanInfoReader, decidePodmanJobUser } from "./backend-podman.mjs";
 import { EGRESS_NETWORK_ARGS, EGRESS_RUN_ARGS } from "./up.mjs";
-import { EGRESS_PROXY_IMAGE, PROXY_STATE_FORMAT, jobNetworksOf, parseProxyState, rulesIncludeEndpoints, shippedProxyDrift } from "./egress-proxy-state.mjs";
-import { readPackagedProxyConf } from "./egress-conf-copy.mjs";
+import { EGRESS_PROXY_IMAGE, GRANT_HELPER_NAME, GRANTS_DIR_NAME, PRIVATE_DIR_NAME, PRIVATE_INCLUDE_NAME, PROXY_STATE_FORMAT, jobNetworksOf, parseProxyState, rulesIncludeEndpoints, rulesIncludePrivate, shippedProxyDrift } from "./egress-proxy-state.mjs";
+import { readPackagedGrantHelper, readPackagedProxyConf } from "./egress-conf-copy.mjs";
 import { applyStack, foreignContainers, planStack, stackComponents, managerEnvRefusal, userBusRefusal } from "./podman-stack.mjs";
 
 const digest = (value) => createHash("sha256").update(typeof value === "string" ? value : JSON.stringify(value)).digest("hex");
@@ -39,15 +39,25 @@ export async function planSetupEgress(ctx) {
 	if (!venues.localUsed && !venues.podmanUsed) return no("gateway-egress");
 	if (egressProxyName(env) !== DEFAULT_EGRESS_PROXY) return no("unsafe-proxy");
 	const files = {};
+	// Issue #918: the private endpoints' include and grant helper, in the folder the proxy mounts, and that folder and
+	// this runtime's grant folder, held to the same owner and write-bit rule as the files.
+	const helperRel = `${PRIVATE_DIR_NAME}/${GRANT_HELPER_NAME}`;
 	try {
-		for (const rel of ["deploy/egress-proxy.conf", "egress-allowlist.conf", "model-endpoints.conf"]) {
+		for (const rel of ["deploy/egress-proxy.conf", "egress-allowlist.conf", "model-endpoints.conf", `${PRIVATE_DIR_NAME}/${PRIVATE_INCLUDE_NAME}`, helperRel]) {
 			const path = join(ctx.dir, rel);
 			const st = ctx.fs.lstatSync(path);
 			if (!st.isFile() || st.isSymbolicLink() || st.uid !== ctx.uid || (st.mode & 0o022)) return no("unsafe-proxy");
+			// The helper squid runs as its own user: one it cannot run is respawned in a loop (DES-PRIVATE-ENDPOINT-GRANTS).
+			if (rel === helperRel && (st.mode & 0o005) !== 0o005) return no("unsafe-proxy");
 			files[rel] = String(ctx.fs.readFileSync(path, "utf8"));
+		}
+		for (const rel of [PRIVATE_DIR_NAME, `${GRANTS_DIR_NAME}/${venues.localUsed ? "local" : "podman"}`]) {
+			const st = ctx.fs.lstatSync(join(ctx.dir, rel));
+			if (!st.isDirectory() || st.isSymbolicLink() || st.uid !== ctx.uid || (st.mode & 0o022)) return no("unsafe-proxy");
 		}
 	} catch { return no("unsafe-proxy"); }
 	if (files["deploy/egress-proxy.conf"] !== (ctx.readPackagedConf ?? readPackagedProxyConf)()) return no("proxy-refresh-required");
+	if (files[helperRel] !== (ctx.readPackagedHelper ?? readPackagedGrantHelper)()) return no("proxy-refresh-required");
 	if (!venues.localUsed) {
 		if (ctx.platform !== "linux") return no("unsupported");
 		const info = await (ctx.readPodmanInfo ?? makePodmanInfoReader({ run: (args) => run("podman", args) }))();
@@ -87,7 +97,7 @@ export async function planSetupEgress(ctx) {
 	if (current.code === 0 && !state) return no("unsafe-proxy");
 	if (!state && !/No such (?:object|container)/i.test(current.stderr)) return no("unavailable");
 	if (state) {
-		const drift = shippedProxyDrift(state, { cwd: ctx.dir, realpath: ctx.fs.realpathSync, platform: ctx.platform, rulesInclude: rulesIncludeEndpoints(files["deploy/egress-proxy.conf"]) });
+		const drift = shippedProxyDrift(state, { cwd: ctx.dir, realpath: ctx.fs.realpathSync, platform: ctx.platform, rulesInclude: rulesIncludeEndpoints(files["deploy/egress-proxy.conf"]), rulesIncludePrivate: rulesIncludePrivate(files["deploy/egress-proxy.conf"]) });
 		if (drift.drift.length || drift.unknown || jobNetworksOf(state).length || !["running", "exited", "created", "stopped"].includes(state.status)) return no("unsafe-proxy");
 	}
 	const image = await run("docker", ["image", "inspect", EGRESS_PROXY_IMAGE]);

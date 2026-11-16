@@ -40,6 +40,12 @@ Volume=/opt/pi-dispatch/egress-allowlist.conf:/etc/pi-dispatch/allowlist.conf:ro
 # `podman exec pi-dispatch-egress-proxy squid -k reconfigure` reloads it; a restart is not needed and drops every job
 # network (above). No host-gateway line: rootless Podman resolves host.containers.internal with no flag.
 Volume=/opt/pi-dispatch/model-endpoints.conf:/etc/pi-dispatch/model-endpoints.conf:ro,z
+# The declared PRIVATE endpoints (issue #918): the deployment folder's own folder of their rendered rules, which the
+# rules include, and the shipped grant helper they run; and this account's own grant folder, which the worker writes.
+# Folders, not files: the include is written by rename, and a grant must appear the moment it is written. `init`
+# scaffolds both; squid will not start without the include.
+Volume=/opt/pi-dispatch/egress-private:/etc/pi-dispatch/private:ro,z
+Volume=/opt/pi-dispatch/egress-grants/podman:/etc/pi-dispatch/grants:ro,z
 # The exec form, a JSON array, for the reason the compose file gives: a plain string runs under /bin/sh, which on
 # this image is dash, where /dev/tcp does not exist and the check would fail forever while squid serves.
 HealthCmd=["bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/3128"]

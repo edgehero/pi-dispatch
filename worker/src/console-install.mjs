@@ -46,7 +46,7 @@ const IGNORABLE = new Set([".DS_Store", ".git", ".gitignore", STAGING_DIR]);
  * What a folder may hold and still be a deployment: what `init` scaffolds (a test holds this to a real run of `init`) and what the
  * console and this tooling add there. Anything else is someone's project, whatever else sits beside it.
  */
-export const DEPLOYMENT_FILES = new Set([".env", "triggers.json", "pause-windows.json", "pi-packages.json", "subscriptions.json", "scoped-limits.json", "projects.json", "egress-allowlist.conf", "model-endpoints.conf", "model-endpoints.json", "deploy", "console-tokens.json", "console-login-codes", "console-devices", "pi-dispatch", ".pi-dispatch-setup.lock"]);
+export const DEPLOYMENT_FILES = new Set([".env", "triggers.json", "pause-windows.json", "pi-packages.json", "subscriptions.json", "scoped-limits.json", "projects.json", "egress-allowlist.conf", "model-endpoints.conf", "model-endpoints.json", "private-endpoints.json", "egress-private", "egress-grants", "deploy", "console-tokens.json", "console-login-codes", "console-devices", "pi-dispatch", ".pi-dispatch-setup.lock"]);
 
 /** What only npx puts in the environment. An allowlist of npm's own exports, so a person's `npm_config_registry` is left alone. */
 const NPX_ENV_RE = /^(?:INIT_CWD|NODE|npm_(?:command|execpath|node_execpath|lifecycle_\w+|package_\w+|config_(?:call|cache|global_prefix|globalconfig|ignore_scripts|init_module|local_prefix|node_gyp|noproxy|npm_version|package|prefix|user_agent|userconfig|yes)))$/;

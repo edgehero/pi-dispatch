@@ -202,6 +202,8 @@ jobs:
             -v "/home/$PDJOB/repo/deploy/egress-proxy.conf:/etc/squid/squid.conf:ro,z" \
             -v "/home/$PDJOB/deploy/egress-allowlist.conf:/etc/pi-dispatch/allowlist.conf:ro,z" \
             -v "/home/$PDJOB/deploy/model-endpoints.conf:/etc/pi-dispatch/model-endpoints.conf:ro,z" \
+            -v "/home/$PDJOB/deploy/egress-private:/etc/pi-dispatch/private:ro,z" \
+            -v "/home/$PDJOB/deploy/egress-grants/podman:/etc/pi-dispatch/grants:ro,z" \
             "docker.io/$image"
           for i in $(seq 1 60); do
             if as-pdjob podman exec pi-dispatch-egress-proxy bash -c 'exec 3<>/dev/tcp/127.0.0.1/3128' 2>/dev/null; then
