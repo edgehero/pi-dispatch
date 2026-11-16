@@ -1,7 +1,7 @@
 {
   "card": "OverviewPhone",
   "pr": 3,
-  "words": "00313bc220413661fb8233e1ba942a6bd25944c4c6c75d1d9517552d8ec679d5",
+  "words": "54359300baeea0d32c5ee62feeb0869dc9cb2a1e98c7b4f4ee53078f31f0486c",
   "elements": [
     {"el":"The same cards in one column at 390","kind":"readme","status":"new","source":"admin/src/console/page-css.mjs#PAGE_CSS","holds":"main>.cards-4{grid-template-columns:minmax(0,1fr)}","golden":["overview.operator"],"shows":"class=\"cards-4\""},
     {"el":"The pill nav scrolls inside itself","kind":"readme","status":"real","source":"admin/src/console/page-css.mjs#SHELL_CSS","holds":".pillnav{flex:0 0 auto"},
@@ -23,6 +23,6 @@
     {"el":"p-hosts","kind":"panel","status":"real","source":"admin/src/console/panels/overview.mjs#overviewHosts","golden":["overview.operator","overview.viewer"],"reason":"the same panel as the OverviewScreen card's"},
     {"el":"A one line summary with no sign out","kind":"readme","status":"illustrative","reason":"the phone keeps the live dot and Sign out, because the shell is the same on every page"},
     {"el":"Retained history navigation and individual run inspection","kind":"readme","status":"new","panel":"p-timeline","source":"admin/src/console/history-view.mjs#historyFrame","reason":"The enhanced library timeline supports continuous pan, zoom, visual group expansion and individual detail links. Legacy fixed-window controls remain the fallback. Times use each instant’s offset."},
-    {"el":"Library timeline controls and visual group expansion","kind":"readme","status":"new","panel":"p-timeline","source":"admin/src/console/timeline-view.mjs#libraryTimelineHtml","holds":"data-rt-chart","reason":"The static design depicts the toolbar and sample intervals. Real vis interactions, density paging and restored navigation are checked by console-timeline-browser.mjs; the fallback SVG remains in server HTML."}
+    {"el":"Library timeline controls and visual group expansion","kind":"readme","status":"new","panel":"p-timeline","source":"admin/src/console/timeline-view.mjs#libraryTimelineHtml","holds":"data-rt-chart","reason":"The static card and enhanced timeline retain Pulse pills, project tags, segmented grouping and zoom controls, quiet grid lines and a bottom ruler. Real library interaction and computed presentation are checked by console-timeline-browser.mjs; the fallback SVG remains in server HTML."}
   ]
 }

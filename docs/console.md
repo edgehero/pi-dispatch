@@ -1191,11 +1191,14 @@ is still here, or one click away:
 
 **Runs by project** uses an interactive timeline across the Overview's width. Drag horizontally or scroll sideways
 with a trackpad to explore retained history. Ordinary vertical scrolling moves through the project rows and page.
-Use **+**, **−**, Ctrl + wheel, or the **Window** selector to zoom. **Now** returns to live following;
-**Expand** gives the timeline more room. The fixed left column keeps project names visible. **Rows** can group by host.
+Use **1h**, **3h**, **24h**, **+**, **−**, Ctrl + wheel, or the **Window** selector to zoom. **Now** returns to live following;
+**Expand** gives the timeline more room. The fixed left column keeps project tags visible. **Project / Host** chooses
+the grouping. Runs use the console's original solid rounded pills, with quiet separators, a bottom time ruler and a
+shaded future area. Short pills show an outcome symbol; the run id appears when it fits and remains in the preview
+and accessible name at every zoom level.
 
-Type a project id into **Project** and choose **Show** to filter, including a project with no recent activity.
-Clear the field to return to all projects. The suggestions come from loaded records, so they are not a complete
+Choose a project chip, or type a project id into **Project** and choose **Show** to filter, including a project with no recent activity.
+Choose **All** or clear the field to return to all projects. The chips and suggestions come from loaded records, so they are not a complete
 catalogue of every retained project. **Previous run** jumps across an empty gap when an earlier run has been found.
 
 Hover or focus a run to preview its identity, target, outcome, timestamps and elapsed duration. Click it or press

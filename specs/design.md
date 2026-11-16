@@ -12840,6 +12840,17 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
 
 ## DES-OPERATOR-CONSOLE
 
+- **AMENDED 2026-11-16 (#912), restore the original timeline styling.** `gen_overview.py` owns the enhanced
+  timeline's Pulse presentation as well as the fallback's. The library supplies layout and interaction, while the
+  console draws solid radius-pill marks, project tags, segmented controls, quiet separators and a bottom ruler.
+  Short marks show their outcome glyph without a clipped id or ellipsis; labels wrap into a clipped second line
+  when the first line has insufficient room. The full accessible name and preview remain available. The future
+  shade is a non-interactive background interval, never a run, and the Now label is inserted as a text node after
+  the library mounts its custom-time marker. Project shortcuts name loaded projects; search remains available for
+  every retained project. REJECTED: treating unchanged tokens as proof of unchanged visual styling, outlining every
+  completed run as a button, and inheriting a table-like grid and row-header background from the chart library.
+  #907's bounded loading, persistent DataSets, safe text projection and navigation behavior are UNCHANGED, checked.
+
 - **AMENDED 2026-11-15 (#907), the library timeline.** The enhanced Overview uses pinned vis-timeline 8.5.6,
   vis-data 8.0.6 and Moment 2.31.0, compiled reproducibly into locally served JS and external CSS. Moment's override
   also replaces vis's older exact dependency. The comparison and measurements are in `design/research/run-timeline-907.md`.
@@ -18783,3 +18794,4 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-11-15 (#903) | DES-OPERATOR-CONSOLE AMENDED: separate now from the displayed anchor, hold historical panels during live updates, reuse bounded SVG geometry with a complete page list, and localize timestamps in the browser. REJECTED: an unbounded SVG, treating the hot index as the archive, and applying today’s offset to history. DES-RUN-HISTORY-FLAT-FILES-NO-DB and DES-STORE-VERSION-WHEN-NEEDED UNCHANGED, checked: the new transport retains no state. |
 
 | 2026-11-15 (#907) | DES-OPERATOR-CONSOLE AMENDED: locally bundled read-only vis timeline, text-only metadata rendering, bounded range cache and visual density drill-down, stable SSE/Back and per-instant offsets. Narrowly supersedes the rejected browser build step and general JSON rendering for this chart alone. DES-RUN-HISTORY-FLAT-FILES-NO-DB and DES-STORE-VERSION-WHEN-NEEDED UNCHANGED, checked: no new persistent state. |
+| 2026-11-16 (#912) | DES-OPERATOR-CONSOLE AMENDED for the restored Pulse timeline styling, short-label layout and library-managed future background. Reject unchanged tokens as a sufficient visual-preservation claim. Bounded history loading, text-only projection, CSP, dependency pins, DES-RUN-HISTORY-FLAT-FILES-NO-DB and DES-STORE-VERSION-WHEN-NEEDED are UNCHANGED, checked. |

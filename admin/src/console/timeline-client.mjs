@@ -29,44 +29,59 @@ export function mountTimeline({ panel, person, personHeader, onAuth }) {
   let selected = saved?.selected ?? null, expanded = saved?.expanded ?? null, detailPage = saved?.detailPage ?? 0, groupPage = saved?.groupPage ?? 0;
   let visible = new Map(), allVisible = [], tiles = new Map(), generation = 0, controller, busy = false, timer, destroyed = false;
   let pointer = null, dragged = false, lastTouch = 0, suppressFocus = false, olderAt = null;
-  let savedValue = null, savedAt = -Infinity, saveTimer, previewValue = null, drawnValue = null, focusedRunId = null, revealing = false;
+  let savedValue = null, savedAt = -Infinity, saveTimer, previewValue = null, drawnValue = null, projectChipsValue = null, focusedRunId = null, revealFrame;
   let requestedStart = Math.round(start), requestedEnd = Math.round(end);
   const items = new DataSet(), groups = new DataSet(), itemVersions = new Map();
   const chartEl = $("[data-rt-chart]");
   app.hidden = false;
   panel.querySelector("[data-timeline-fallback]").hidden = true;
   panel.classList.add("timeline-enhanced");
-  $("[data-rt-rows]").value = rows;
   $("[data-rt-zone]").textContent = Intl.DateTimeFormat().resolvedOptions().timeZone || "Local time";
   const chart = new Timeline(chartEl, items, groups, {
     start, end, height: 440, min: 0, max: seed.now + 7 * DAY,
     zoomMin: 1000, zoomMax: 28 * DAY, editable: false, groupEditable: false,
     stack: false, stackSubgroups: true, selectable: false, showTooltips: false,
     horizontalScroll: false, verticalScroll: true, zoomKey: "ctrlKey", moveable: true,
-    orientation: "top", maxMinorChars: 17, loadingScreenTemplate: () => element("p", "Drawing timeline…"), margin: { item: { horizontal: 0, vertical: 5 }, axis: 10 },
+    orientation: { axis: "bottom", item: "top" }, maxMinorChars: 17, loadingScreenTemplate: () => element("p", "Drawing timeline…"), margin: { item: { horizontal: 0, vertical: 8 }, axis: 10 },
     groupOrder: "order", showCurrentTime: false,
     format: { minorLabels: (date, scale) => ["millisecond", "second", "minute", "hour"].includes(scale) ? date.format("HH:mm [UTC]Z") : date.format("D MMM"), majorLabels: (date) => date.format("ddd D MMM YYYY") },
     template: (data) => {
+      if (data.type === "background") return element("span");
       const r = data.run;
-      const node = element("button", r.aggregate ? r.word : (symbols[r.kind] ?? "·") + " " + r.jobId, "rt-run");
+      const node = element("button", r.aggregate ? r.word : null, "rt-run");
+      if (!r.aggregate) {
+        const symbol = element("span", symbols[r.kind] ?? "·", "rt-symbol"); symbol.setAttribute("aria-hidden", "true");
+        node.append(symbol, element("span", r.jobId, "rt-run-label"));
+      }
       node.type = "button"; node.dataset.run = data.id; node.tabIndex = data.id === selected ? 0 : -1;
       node.setAttribute("aria-label", r.aggregate ? r.word + ". Expand this group." : [r.jobId, r.project ?? "No project", r.word, local(r.startedAt), r.endedAt == null ? null : "to " + local(r.endedAt)].filter(Boolean).join(". "));
       return node;
     },
     groupTemplate: (data) => {
-      const button = element("button", data.label, "rt-group"); button.type = "button";
+      const button = element("button", null, "rt-group"); button.type = "button";
+      const tag = element("span", data.label, "ptag"); tag.title = data.label; button.append(tag);
+      if (data.target) button.append(element("span", data.target, "tl__repo"));
       button.dataset.group = data.id; button.setAttribute("aria-label", "Expand " + data.label); return button;
     },
   });
   const trackFocus = e => { focusedRunId = chartEl.contains(e.target) ? e.target.closest("[data-run]")?.dataset.run ?? null : null; };
   document.addEventListener("focusin", trackFocus);
+  const nowLabel = element("span", null, "rt-now-label");
   // vis also redraws asynchronously for layout and custom-time changes, outside a data render.
   chart.on("changed", () => requestAnimationFrame(() => {
-    if (destroyed || !focusedRunId || document.activeElement !== document.body) return;
+    if (destroyed) return;
+    const marker = chartEl.querySelector(".vis-custom-time");
+    if (marker && !marker.contains(nowLabel)) marker.append(nowLabel);
+    if (!focusedRunId || document.activeElement !== document.body) return;
     const button = [...chartEl.querySelectorAll("[data-run]")].find(b => b.dataset.run === focusedRunId);
     button?.focus({preventScroll:true});
   }));
   chart.addCustomTime(seed.now, "now"); chart.setCustomTimeTitle("Now", "now");
+  function labelNow() {
+    nowLabel.textContent = new Intl.DateTimeFormat(undefined, {hour:"2-digit",minute:"2-digit",hourCycle:"h23"}).format(seed.now);
+    nowLabel.title = "Now · " + local(seed.now);
+  }
+  labelNow();
 
   function remember(force = false) {
     const state = { start: Math.round(start), end: Math.round(end), project, rows, following, selected, expanded, detailPage, groupPage };
@@ -89,6 +104,8 @@ export function mountTimeline({ panel, person, personHeader, onAuth }) {
     $("[data-rt-mode]").textContent = following ? "Live" : "Browsing history";
     const span = end - start, option = [...$("[data-rt-span]").options].find(o => Number(o.value) === Math.round(span));
     $("[data-rt-span]").value = option?.value ?? "custom";
+    for (const button of app.querySelectorAll("[data-rt-preset]")) button.setAttribute("aria-pressed", String(Number(button.dataset.rtPreset) === Math.round(span)));
+    for (const button of app.querySelectorAll("[data-rt-rows]")) button.setAttribute("aria-pressed", String(button.dataset.rtRows === rows));
   }
   function tileRanges() {
     const span = end - start, width = span > DAY ? 7 * DAY : DAY;
@@ -140,16 +157,17 @@ export function mountTimeline({ panel, person, personHeader, onAuth }) {
     for (const r of allVisible) { const name = r[rows] ?? "(unassigned)"; if (!byGroup.has(name)) byGroup.set(name,[]); byGroup.get(name).push(r); }
     const names = [...byGroup.keys()].sort();
     const shownNames = expanded && byGroup.has(expanded) ? [expanded] : names.slice(groupPage*GROUP_COUNT,(groupPage+1)*GROUP_COUNT);
-    const draw = [], drawGroups = []; visible = new Map();
+    const draw = [{ id:"background:future", start:seed.now, end:seed.now+7*DAY, type:"background", className:"rt-future" }], drawGroups = []; visible = new Map();
     for (const [order,name] of shownNames.entries()) {
-      drawGroups.push({ id:name, label:name, content:name, order });
       const runs = byGroup.get(name), expandedGroup = expanded === name;
+      const targets = [...new Set(runs.map(r => r.target?.replace(/#\d+$/, "")).filter(Boolean))];
+      drawGroups.push({ id:name, label:name, content:name, target: targets.length === 1 ? targets[0] : null, order });
       const lanes = [], overflow = [];
       for (const r of expandedGroup ? runs.slice(detailPage*DETAIL_COUNT,(detailPage+1)*DETAIL_COUNT) : runs) {
         const minWidth = (end-start)*24/Math.max(200,chartEl.clientWidth-150);
         let lane = lanes.findIndex(e=>e <= r.start);
         if (lane < 0) lane = lanes.length;
-        if (!expandedGroup && (lane >= 3 || draw.length >= 600)) { overflow.push(r); continue; }
+        if (!expandedGroup && (lane >= 3 || draw.length > 600)) { overflow.push(r); continue; }
         lanes[lane] = Math.max(r.end ?? r.start,r.start+minWidth);
         visible.set(r.id,r);
         draw.push({id:r.id,group:name,subgroup:lane, start:r.start,end:Math.max(r.end ?? r.start,r.start+1),type:"range",className:"rt-item rt-"+r.kind,run:r});
@@ -163,14 +181,14 @@ export function mountTimeline({ panel, person, personHeader, onAuth }) {
     const drawing = JSON.stringify(draw), changed = drawing !== drawnValue;
     if (changed) {
       drawnValue = drawing;
-      groups.update(drawGroups.filter(g => groups.get(g.id)?.order !== g.order));
+      groups.update(drawGroups.filter(g => groups.get(g.id)?.order !== g.order || groups.get(g.id)?.target !== g.target));
       groups.remove(groups.getIds().filter(id=>!shownNames.includes(id)));
       items.update(draw.filter(item => {
         const value = JSON.stringify(item);
         if (itemVersions.get(item.id) === value) return false;
         itemVersions.set(item.id, value); return true;
       }));
-      const removed = items.getIds().filter(id=>!visible.has(id));
+      const removed = items.getIds().filter(id=>id!=="background:future"&&!visible.has(id));
       items.remove(removed); for (const id of removed) itemVersions.delete(id);
     }
     const density = $("[data-rt-density]"), expandedRuns = byGroup.get(expanded) ?? [];
@@ -182,6 +200,23 @@ export function mountTimeline({ panel, person, personHeader, onAuth }) {
     renderList();
     const projects=[...new Set([...seed.items,...records.values()].map(r=>r.project).filter(Boolean))].sort().slice(0,200);
     $("#rt-projects").replaceChildren(...projects.map(p=>{const o=element("option");o.value=p;return o;}));
+    const shownProjects = projects.slice(0, 8);
+    if (project && !shownProjects.includes(project)) shownProjects.push(project);
+    const chipsValue = JSON.stringify(shownProjects);
+    if (chipsValue !== projectChipsValue) {
+      projectChipsValue = chipsValue;
+      const chips = $("[data-rt-project-chips]");
+      const focusedFilter = chips.contains(document.activeElement) ? document.activeElement.dataset.rtFilter : undefined;
+      chips.replaceChildren(element("span", "Project", "projseg__l"));
+      for (const name of [null, ...shownProjects]) {
+        const button = element("button", name ? null : "All"); button.type = "button";
+        button.dataset.rtFilter = name ?? ""; button.setAttribute("aria-pressed", String(name === project));
+        if (name) button.append(element("span", name, "ptag"));
+        chips.append(button);
+      }
+      if (focusedFilter !== undefined) [...chips.querySelectorAll("button")].find(button => button.dataset.rtFilter === focusedFilter)?.focus({preventScroll:true});
+    }
+    for (const button of app.querySelectorAll("[data-rt-filter]")) button.setAttribute("aria-pressed", String((button.dataset.rtFilter || null) === project));
     }
     if (selected && records.has(selected)) preview(records.get(selected),false);
     if (focusedRun) requestAnimationFrame(() => {
@@ -219,18 +254,29 @@ export function mountTimeline({ panel, person, personHeader, onAuth }) {
     }
     for(const b of chartEl.querySelectorAll("[data-run]")) { b.tabIndex=b.dataset.run===selected?0:-1;b.setAttribute("aria-pressed",String(b.dataset.run===selected)); }
     if(focus) {
-      let b=[...chartEl.querySelectorAll("[data-run]")].find(b=>b.dataset.run===selected);
-      const rect=b?.getBoundingClientRect(), frame=chartEl.querySelector(".vis-panel.vis-center").getBoundingClientRect();
-      if(rect&&(rect.top<frame.top||rect.bottom>frame.bottom)){
-        // The public focus operation reveals a vertical lane. Restore the time window in the same task.
-        const window=chart.getWindow();revealing=true;
-        try{chart.focus(r.id,{animation:false,zoom:false});chart.setWindow(window.start,window.end,{animation:false});}
-        finally{revealing=false;}
-        b=[...chartEl.querySelectorAll("[data-run]")].find(b=>b.dataset.run===selected);
-      }
+      const b=[...chartEl.querySelectorAll("[data-run]")].find(b=>b.dataset.run===selected);
       b?.focus({preventScroll:true});
+      revealSelected();
     }
     remember();
+  }
+  function revealSelected() {
+    cancelAnimationFrame(revealFrame);
+    // Let the native scroll event and vis's throttled redraw settle before measuring again. WebKit
+    // may otherwise measure an earlier lane during rapid arrow presses and leave the final run clipped.
+    revealFrame=requestAnimationFrame(()=>{revealFrame=requestAnimationFrame(()=>{
+      if(destroyed||focusedRunId!==selected)return;
+      const button=[...chartEl.querySelectorAll("[data-run]")].find(b=>b.dataset.run===selected);
+      const rect=button?.getBoundingClientRect(),frame=chartEl.querySelector(".vis-panel.vis-center").getBoundingClientRect();
+      if(!rect)return;
+      // vis 8.5.6 focus() calculates item height from the axis orientation, which is wrong for a bottom
+      // ruler with top-aligned items. Its native side scrollbar reveals a lane without moving time.
+      const delta=rect.top<frame.top?rect.top-frame.top-8:rect.bottom>frame.bottom?rect.bottom-frame.bottom+8:0;
+      if(!delta)return;
+      const scrollbar=chartEl.querySelector(".vis-panel.vis-left"),before=scrollbar.scrollTop;
+      scrollbar.scrollTop+=delta;
+      if(scrollbar.scrollTop!==before)revealSelected();
+    });});
   }
   function expand(name) {following=false;expanded=name;detailPage=0;render();chart.redraw();}
   function changeRange(a,b,user=true) {
@@ -287,7 +333,6 @@ export function mountTimeline({ panel, person, personHeader, onAuth }) {
   chart.on("rangechanged",e=>{
     // vis can finish measuring sparse data before its initial range notification. Finish that draw as well.
     if (chartEl.querySelector(".vis-timeline")?.style.visibility === "hidden") requestAnimationFrame(() => chart.redraw());
-    if(revealing)return;
     const a=Math.round(+e.start),b=Math.round(+e.end);
     // vis also announces unchanged ranges after layout. Those redraws must not reset an expanded group's page.
     if(a===requestedStart&&b===requestedEnd)return;
@@ -324,10 +369,17 @@ export function mountTimeline({ panel, person, personHeader, onAuth }) {
     }else next=list[Math.max(0,Math.min(list.length-1,at+(e.key==="ArrowLeft"?-1:1)))];
     if(next)preview(next,true);
   });
-  app.addEventListener("submit",e=>{if(!e.target.matches("[data-rt-project]"))return;e.preventDefault();project=e.target.elements.project.value||null;expanded=null;detailPage=0;groupPage=0;tiles.clear();schedule();});
-  $("[data-rt-rows]").addEventListener("change",e=>{rows=e.target.value;expanded=null;detailPage=0;groupPage=0;render();});
+  function filterProject(value) {
+    project=value||null;expanded=null;detailPage=0;groupPage=0;tiles.clear();
+    $("[data-rt-project] input").value=project??"";
+    drawnValue=null;schedule();
+  }
+  app.addEventListener("submit",e=>{if(!e.target.matches("[data-rt-project]"))return;e.preventDefault();filterProject(e.target.elements.project.value);});
   $("[data-rt-span]").addEventListener("change",e=>{const span=Number(e.target.value),at=visible.get(selected)?.start??(start+end)/2;changeRange(at-span/2,at+span/2);});
   app.addEventListener("click",e=>{
+    const filter=e.target.closest("[data-rt-filter]");if(filter){filterProject(filter.dataset.rtFilter);return;}
+    const grouping=e.target.closest("[data-rt-rows]");if(grouping){rows=grouping.dataset.rtRows;expanded=null;detailPage=0;groupPage=0;render();return;}
+    const preset=e.target.closest("[data-rt-preset]");if(preset){const span=Number(preset.dataset.rtPreset),at=visible.get(selected)?.start??(start+end)/2;changeRange(at-span/2,at+span/2);return;}
     const button=e.target.closest("[data-rt-action]");if(!button)return;
     const action=button.dataset.rtAction,span=end-start,at=visible.get(selected)?.start??(start+end)/2;
     if(action==="older"||action==="newer"){const d=span*.6*(action==="older"?-1:1);changeRange(start+d,end+d);}
@@ -344,10 +396,10 @@ export function mountTimeline({ panel, person, personHeader, onAuth }) {
     const template=document.createElement("template");template.innerHTML=markup;
     const incoming=template.content.querySelector("[data-timeline-seed]");if(!incoming)return;
     const next=JSON.parse(decodeURIComponent(incoming.getAttribute("data-timeline-seed"))),delta=next.now-seed.now;seed=next;
-    chart.setCustomTime(seed.now,"now");chart.setOptions({max:seed.now+7*DAY});
+    chart.setCustomTime(seed.now,"now");labelNow();chart.setOptions({max:seed.now+7*DAY});
     if(following&&delta>0)changeRange(start+delta,end+delta,false);else render();
   }
-  function destroy(){destroyed=true;document.removeEventListener("focusin",trackFocus);clearTimeout(timer);clearTimeout(saveTimer);controller?.abort();chart.destroy();tiles.clear();}
+  function destroy(){destroyed=true;document.removeEventListener("focusin",trackFocus);cancelAnimationFrame(revealFrame);clearTimeout(timer);clearTimeout(saveTimer);controller?.abort();chart.destroy();tiles.clear();}
   window.addEventListener("pagehide",()=>{remember(true);clearTimeout(saveTimer);controller?.abort();});
   window.addEventListener("pageshow",e=>{if(e.persisted)schedule();});
   render();pump();

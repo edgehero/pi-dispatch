@@ -1879,6 +1879,14 @@ writes retain their existing interactive confirmation. This adds no unattended p
 
 ## REQ-OPERATOR-CONSOLE-SCREENS
 
+- **AMENDED 2026-11-16 (#912), (a4), preserve the timeline's visual design.** The library timeline keeps the
+  original Pulse presentation: solid rounded run pills, project tags, segmented grouping and zoom controls, subtle
+  dashed time lines, a bottom time ruler and a shaded future area with a labelled Now line. Short marks retain an
+  outcome symbol and their complete accessible name; a run id is drawn inside a pill only when it fits. Preserving
+  colors and fonts alone does not satisfy this requirement. The full-width panel and #907's navigation, inspection,
+  density paging, loading, live updates, Back restoration and timezone behavior remain unchanged. Visual evidence
+  compares the original, regressed and corrected component in both themes at desktop and phone widths.
+
 - **AMENDED 2026-11-15 (#907), (a4), continuous visual run history.** The default enhanced timeline spans the
   Overview's available width, with an expanded view, fixed group labels, range/zone/zoom controls and Now. Pointer,
   horizontal wheel and touch navigation move the same viewport across bounded archive pages. Every loaded run is
@@ -9487,3 +9495,4 @@ instead of drifting.
 | 2026-11-15 (#903) | REQ-OPERATOR-CONSOLE-SCREENS (a4) AMENDED for horizontal retained-history paging, accessible run links and previews, persistent time position and per-instant browser offsets. The prior UTC-only axis and noninteractive overflow statements are superseded by the amendment. REQ-CONSOLE-SECURITY UNCHANGED, checked: existing authentication, roles and person binding apply. |
 
 | 2026-11-15 (#907) | REQ-OPERATOR-CONSOLE-SCREENS (a4) AMENDED for continuous library navigation, visual overlap expansion, bounded history loading, keyboard/touch inspection and stable live/Back state. REQ-CONSOLE-SECURITY UNCHANGED, checked: roles, CSP and read boundaries remain intact. |
+| 2026-11-16 (#912) | REQ-OPERATOR-CONSOLE-SCREENS (a4) AMENDED to preserve the original timeline presentation beyond colors and fonts: solid pills, project tags, segmented controls, quiet grid, bottom ruler and future shade, verified against original and regressed screenshots. The full-width interactive history behavior and REQ-CONSOLE-SECURITY are UNCHANGED, checked. |

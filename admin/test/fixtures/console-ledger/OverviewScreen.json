@@ -1,7 +1,7 @@
 {
   "card": "OverviewScreen",
   "pr": 3,
-  "words": "99808c080e88f979cdeba0837f675c8c72c590210b01b28f14f30c7bf742275c",
+  "words": "dbd009a606ed2e18c670ca9a630a8af9d1a2dc75c2dbaf879b5193a81ed5e5ed",
   "elements": [
     {"el":"p-needs","kind":"panel","status":"new","source":"admin/src/console/panels/overview.mjs#overviewNeeds","golden":["overview.operator","overview.viewer"]},
     {"el":"p-waiting","kind":"panel","status":"new","source":"admin/src/console/panels/overview.mjs#overviewWaiting","golden":["overview.operator","overview.viewer"]},
@@ -57,6 +57,6 @@
     {"el":"Waitlists' Reason and Queue switch","kind":"readme","status":"illustrative","reason":"the page groups by reason and lists queues in a line under it, so nothing is lost without the switch"},
     {"el":"Host pause in grey, and the longest wait as plain text","kind":"readme","status":"illustrative","reason":"the page draws pause red because it stops work, and the wait as a chip beside the title"},
     {"el":"Retained history navigation and individual run inspection","kind":"readme","status":"new","panel":"p-timeline","source":"admin/src/console/history-view.mjs#historyFrame","reason":"The enhanced library timeline supports continuous pan, zoom, visual group expansion and individual detail links. Legacy fixed-window controls remain the fallback. Times use each instant’s offset."},
-    {"el":"Library timeline controls and visual group expansion","kind":"readme","status":"new","panel":"p-timeline","source":"admin/src/console/timeline-view.mjs#libraryTimelineHtml","holds":"data-rt-chart","reason":"The static design depicts the toolbar and sample intervals. Real vis interactions, density paging and restored navigation are checked by console-timeline-browser.mjs; the fallback SVG remains in server HTML."}
+    {"el":"Library timeline controls and visual group expansion","kind":"readme","status":"new","panel":"p-timeline","source":"admin/src/console/timeline-view.mjs#libraryTimelineHtml","holds":"data-rt-chart","reason":"The static card and enhanced timeline retain Pulse pills, project tags, segmented grouping and zoom controls, quiet grid lines and a bottom ruler. Real library interaction and computed presentation are checked by console-timeline-browser.mjs; the fallback SVG remains in server HTML."}
   ]
 }

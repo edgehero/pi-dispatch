@@ -242,8 +242,8 @@ practice, and your job changes: you stop watching an agent and start looking aft
   gone out.
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/console/console-overview-dark.png?v=2026-11-15">
-  <img src="docs/images/console/console-overview.png?v=2026-11-15" alt="The console's overview page: one question and two jobs that need you, five jobs waiting and why, four running, 15 dollars spent of a 25 dollar daily limit, and a timeline of every project's runs with the jobs in line after the now line">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/console/console-overview-dark.png?v=2026-11-16">
+  <img src="docs/images/console/console-overview.png?v=2026-11-16" alt="The console's overview page: one question and two jobs that need you, five jobs waiting and why, four running, 15 dollars spent of a 25 dollar daily limit, and a timeline of every project's runs with the jobs in line after the now line">
 </picture>
 
 <sub>The overview: what needs you, what is waiting, what is running and what today has cost.</sub>
@@ -417,8 +417,8 @@ unless you set it up otherwise, so reaching it from a phone takes a private tunn
 ([from another machine](docs/console.md#from-another-machine)).
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/images/console/console-overview-phone-dark.png?v=2026-11-15">
-  <img src="docs/images/console/console-overview-phone.png?v=2026-11-15" alt="The overview page on a phone, one column, with the questions that need you at the top" width="320">
+  <source media="(prefers-color-scheme: dark)" srcset="docs/images/console/console-overview-phone-dark.png?v=2026-11-16">
+  <img src="docs/images/console/console-overview-phone.png?v=2026-11-16" alt="The overview page on a phone, one column, with the questions that need you at the top" width="320">
 </picture>
 
 ## Bring your own pi setup
