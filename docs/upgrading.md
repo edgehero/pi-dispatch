@@ -289,7 +289,7 @@ pause flag, the delayed score, the run ids of a cron trigger) is in one module, 
 checked against that version by its tests. Never roll back across a release that moved the BullMQ pin while jobs are
 queued: an older BullMQ need not read what a newer one wrote. The release notes name such a bump.
 
-## Pending release: private endpoints
+## 5.4.0: private endpoints
 
 Issue #918 adds private endpoints: a host and one TCP port on your network that only the jobs of the triggers naming
 it may reach through the egress proxy. The proxy gains two read-only folder mounts, `egress-private/` (the rendered
@@ -306,8 +306,8 @@ Until then, the proxy keeps the rules it has and nothing changes for any job; `p
 write a private endpoint the running proxy cannot carry, and doctor names the step. A job whose trigger names a
 private endpoint is refused before it spends (`private-endpoint-proxy-outdated`) until the proxy is replaced.
 
-Before a trigger names one (`run.privateEndpoints`), upgrade every worker, receiver and console: the field needs
-`triggers.json` version 7 and its jobs carry data version 8, which an older service refuses or holds. An older
+Before a trigger names one (`run.privateEndpoints`), upgrade every worker, receiver and console to 5.4.0: the field
+needs `triggers.json` version 7 and its jobs carry data version 8, which an older service refuses or holds. An older
 receiver that read the file at an older version would drop the field, and the worker refuses such a job
 (`trigger-skew`) rather than run it without the device.
 
@@ -388,11 +388,11 @@ as `subscription_auth_hold`. See [subscription renewal](subscription-auth.md#adm
 
 Release numbers come from the git tags.
 
-### Next release
+### 5.4.0
 
 #### Random model selection (#922)
 
-Random pools require `triggers.json` version 6 and queued job-data version 7 (`modelSelection` and producer-owned `modelSelectionGeneration`). Upgrade every worker, receiver and console before enabling them; older readers hold newer work. Existing fixed/fallback configurations retain their previous minimum version.
+Random pools require `triggers.json` version 6 and queued job-data version 7 (`modelSelection` and producer-owned `modelSelectionGeneration`). Upgrade every worker, receiver and console to 5.4.0 before enabling them; older readers hold newer work. Existing fixed/fallback configurations retain their previous minimum version.
 
 Back up the new `dispatch:model-selection:v1:*` state with its BullMQ jobs. Active choices have no expiry; terminal choices use the existing finished model-state retention, and Retry preserves them. Do not delete a choice to force another draw: create a fresh run after checking the original. Saved parked sessions gain a bounded version-1 `model-selection` sidecar coupled to their exact transcript. Preserve it with the session and approval stores. Missing or mismatched binding refuses a random continuation.
 
@@ -407,7 +407,7 @@ one grant per running job, written and removed by the worker, and is not backed 
 the file or holds the job, and no existing file or job is migrated. The run record gains
 `privateEndpoints: { ids, basis }` on a granted job's record only, which an older reader ignores. The fleet's
 endpoint leases gain keys for a private endpoint's `slots`, hashed from `private:<id>`, under the model endpoints'
-key family. The steps are [above](#pending-release-private-endpoints).
+key family. The steps are [above](#540-private-endpoints).
 
 ### 5.3.3
 
