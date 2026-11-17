@@ -1,0 +1,12 @@
+# Build with image/build-display.mjs: BASE is a local tag of the inspected ID and CAPABILITIES comes from that image.
+ARG BASE
+FROM ${BASE}
+USER root
+COPY image/display/ /app/image/display/
+RUN command -v Xvfb && test -f /app/node_modules/playwright/package.json \
+    && chmod 0755 /app/image/display/with-display.mjs /app/image/display/probe.mjs \
+    && ln -s /app/image/display/with-display.mjs /usr/local/bin/pi-display \
+    && ln -s /app/image/display/probe.mjs /usr/local/bin/pi-display-probe
+ARG CAPABILITIES
+LABEL dev.pi-dispatch.capabilities="${CAPABILITIES}"
+USER pi

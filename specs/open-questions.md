@@ -919,6 +919,12 @@ build does not.
 
 ## OQ-012 — An operator-built job image is outside every gate this repo has
 
+- **AMENDED (#921)**: `display` images can opt into an actual headed rendering measurement from `doctor --live`
+  (including trigger-specific images on local and native Podman) and `verify-image.sh`. This narrows one missing
+  measurement, not the trust claim: the image executes the probe and can fabricate its result. OpenShell is
+  explicitly unverified by doctor; its distinct path is exercised by the advisory conformance lane. The risk
+  remains accepted, and no job admission or image-content attestation is added.
+
 - **Status**: **ACCEPTED RISK** — *wants explicit ratification*
 - **Position**: A trigger's `run.image` (`INT-TRIGGERS-FILE-CONTRACT`) may name an image this repo did not
   build, did not assert, and cannot inspect. Such an image carries **its own pi version**
@@ -2840,3 +2846,4 @@ adversarial passes did.
 | 2026-11-02 (#754, measured implementation) | `OQ-050` is ADOPTED and IMPLEMENTED: the recorded decision/threat model preceded gateway code, and subsequent live runtime and genuine-HTTPS distinct-site browser evidence is linked by permanent spec IDs. Final PR closure and final-commit checks remain separate from the adoption answer. Native opener, console CSP/process isolation, socket/renderer/browser/Valkey residuals, zero-touch causes and `OQ-051` human confirmation UNCHANGED, checked. |
 | 2026-11-02 (#792, implemented) | `OQ-050`'s amended limit (one writing driver plus at most three consented read-only watchers) is built, and its pending marker is removed. The threat model stands as written: a watcher sees what is typed, which is why watching starts off and the roster stays on the driver's screen. Evidence: `gateway/test/two-process.test.mjs` (real processes, real sockets, live Valkey), `gateway/test/browser/workbench-browser.mjs` and the permanent TLS browser flow on Docker and rootless Podman. Container isolation, credentials, money and run slots, retries, the exit protocol, the native opener and its monitor and End, preparation admission, retention policy, the run-record schema, fork and answer authority, console CSP, origin and cookies, and OQ-051: UNCHANGED, checked. |
 | 2026-11-03 | Issue #800. **`OQ-003` AMENDED, status unchanged**: "well under a pipe's atomic-write size" is refuted for a line that can now take 7,680 bytes. Over `PIPE_BUF` it can interleave with another writer, fail its MAC and settle at the floor, which fails closed. And the residual for code inside the runner process now names what is on the line: it can be any string, measured, so the worker's rebuild of `loaded` is the boundary there. |
+| 2026-11-17 (#921) | OQ-012 AMENDED (#921): optional display images now have an actual rendering measurement, but a trusted image can fabricate it and OpenShell is not credited by a Docker probe. The accepted image trust residual remains. |

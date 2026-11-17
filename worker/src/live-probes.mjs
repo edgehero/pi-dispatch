@@ -88,6 +88,7 @@ export function liveNames(pid, nonce) {
 		ephemeral: `${LIVE_PREFIX}ephemeral-${pid}-${nonce}`,
 		peer1: `${LIVE_PREFIX}peer1-${pid}-${nonce}`,
 		peer2: `${LIVE_PREFIX}peer2-${pid}-${nonce}`,
+		display: `${LIVE_PREFIX}display-${pid}-${nonce}`,
 		fixturePrefix: `${LIVE_PREFIX}${pid}-`,
 	};
 }
