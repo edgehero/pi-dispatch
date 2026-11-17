@@ -71,9 +71,10 @@ import { EMPTY_USD_FINGERPRINT, usdFingerprint } from "./dollar-fingerprint.mjs"
 import { splitModelEntry } from "./model-ref.mjs";
 import { resolveConfiguredModelRuns as resolveDoctorModelRuns, cooldownModelRefs, RADIUS_COST_CAP_LABEL, RADIUS_COST_CAP_FIX } from "./model-observation.mjs";
 import { ignoredOutputCapModels, outputCapView, outputUnboundable } from "./output-cap.mjs";
-import { PRIVATE_ENDPOINTS_FILE_NAME, endpointsOverlap, loadPrivateEndpoints, privateFolderInsideJobPathSentence, privateFoldersInsideJobPaths } from "./private-endpoints.mjs";
+import { GRANT_HELPER_TARGET, PRIVATE_DIR_TARGET, PRIVATE_ENDPOINTS_FILE_NAME, PRIVATE_INCLUDE_TARGET, endpointsOverlap, loadPrivateEndpoints, privateFolderInsideJobPathSentence, privateFoldersInsideJobPaths, renderPrivateInclude } from "./private-endpoints.mjs";
 import { KEYLESS_API_KEY, KEYLESS_HOW, MODEL_ENDPOINTS_FILE_NAME, MODEL_ENDPOINTS_INCLUDE_NAME, MODEL_ENDPOINT_ID_RE, OVERLAY_LINK_FIX, OVERLAY_NOT_A_FILE_FIX, RENAMED_PROVIDERS, baseUrlTarget, endpointsAt, keylessVerdict, loadModelEndpoints, providerRenameHint, readOverlayModels, renderEndpointsInclude, unreportedUsageModels } from "./model-endpoints.mjs";
-import { declaredEndpointsIn, endpointsDeclaredIn, endpointsFileSetting, reloadCommand, rulesFileIncludes, rulesPredateEndpointsLine } from "./egress-cli.mjs";
+import { declaredEndpointsIn, declaredPrivateEndpointsIn, endpointsDeclaredIn, endpointsFileSetting, reloadCommand, rulesFileIncludes, rulesPredateEndpointsLine } from "./egress-cli.mjs";
+import { privateEndpointChecks, privateRunsOf, sharedServerChecks } from "./private-endpoints-doctor.mjs";
 import { loadPauseWindows, parsePauseWindows, parseScopeString, pauseWindowsVersionFor } from "./pause-windows.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, afterInstantMs, parseWaitProfiles } from "./wait-for.mjs";
 import { isForgeKind } from "./forges.mjs";
@@ -96,6 +97,7 @@ import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_FIRST_START_TIMEOUT_MS, PODMAN_INFO
 import { PODMAN_PINNED_FLAGS, buildDockerRunArgs, buildPodmanRunArgs, containerSpec, podmanArgsFromSpec } from "./docker-run.mjs";
 import { PODMAN_SERVICE_TIMEOUT_MS, PODMAN_SERVICE_UNIT, makePodmanServiceReader, observeHost, observeRootfulConf, readRootfulService, rootfulConfFix, rootfulConfRetries, rootfulConfResidual, rootfulUnreadList } from "./runtime-observations.mjs";
 import { JOB_NAME_PREFIX, endpointShown, makeDockerEndpointResolver, quotedShown } from "./backend-local.mjs";
+import { grantOnAttach, grantsDirOf, removeGrantsOf } from "./endpoint-grants.mjs";
 import { DEFAULT_EGRESS_PROXY, STOPPED_PROXY_STATES, EGRESS_CANARY_NET_PREFIX, EGRESS_CANARY_PROBE_PREFIX, EGRESS_ENDPOINT_PROBE_PREFIX, egressArmed, egressCanaryNetwork, egressCanaryProbe, egressEndpointProbe, egressEnv, egressProxyName, egressProxyUrl, networkEndpoints, removeNetworkOrSay } from "./egress.mjs";
 import { detachBlockedSentence, makeDetachGate, runtimeFromFacts } from "./netns-keeper.mjs";
 import { runLiveProbes } from "./live-probes.mjs";
@@ -2077,7 +2079,7 @@ export async function collectChecks(shellVars, seams) {
 	// runTable, blockTable }, jobData: { table } }`, each part the store module's own when absent. This seam is how a test
 	// drives a need above 1 through the real collection, for a store whose table has no row of its own and at a version no row holds yet.
 	const versionTables = seams.versionTables ?? {};
-	const { watchSources: triggerWatchSources, watchRules: triggerWatchRules, modelRoles: triggerModelRoles, secretBundles: triggerBundles, requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, recovering, replicating, instructing, commands, localEvents, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, excludedNames, costCaps, modelRuns, triggersVersionNeed, jobDataVersionNeed, parseError, parseNewer: triggersFileIsNewer, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTables);
+	const { watchSources: triggerWatchSources, watchRules: triggerWatchRules, modelRoles: triggerModelRoles, secretBundles: triggerBundles, requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, recovering, replicating, instructing, commands, localEvents, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, excludedNames, costCaps, modelRuns, privateRuns, triggersVersionNeed, jobDataVersionNeed, parseError, parseNewer: triggersFileIsNewer, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTables);
 	const modelRoleProjects = readProjectFacts(bootEnv, fileExists).projects;
 	const scopedLimitFacts = readScopedLimitFacts(bootEnv, fileExists);
 	const pauseWindowFacts = readPauseWindowFacts(bootEnv, fileExists, versionTables.pauseWindows);
@@ -2471,6 +2473,32 @@ export async function collectChecks(shellVars, seams) {
 				label: `egress-allowlist.conf lists ${named}, which lets a job open a CONNECT to that host's port 443 and send plain HTTP to its port 80, and reaches no model server's port`,
 				fix: `remove it, and declare the model server in model-endpoints.json instead, which opens a tunnel to exactly its host and port: docs/egress.md, "Local model servers"`,
 			});
+		}
+	}
+	// Issue #918, part 3: the private endpoints as the service would load them, the triggers that name them, and what that
+	// means on this host (private-endpoints-doctor.mjs), for every venue: which device each trigger reaches, an id this
+	// host lacks, a venue that refuses a grant, the device's blast radius, the policy off, and a model endpoint that is the
+	// same server. Nothing declared and nothing named is no line at all.
+	{
+		const { declaredPrivate = ({ env: e, cwd, platform }) => declaredPrivateEndpointsIn({ env: e, cwd, fs: { readFileSync, existsSync }, platform }), lookupAddresses = boundedLookup } = seams;
+		const privateDeclared = declaredPrivate({ env, cwd: seams.cwd, platform: seams.platform ?? process.platform });
+		const runs = parseError ? [] : privateRuns;
+		if (privateDeclared.length > 0 || runs.length > 0) {
+			let armedHere = true;
+			try {
+				armedHere = egressArmed(env) === true;
+			} catch {
+				// A malformed PI_EGRESS: the .env check reports it, and the worker refuses to boot on it.
+			}
+			let defaultBackend = DEFAULT_BACKEND;
+			try {
+				defaultBackend = parseBackendList(env.PI_BACKENDS)[0] ?? DEFAULT_BACKEND;
+			} catch {
+				// An unparseable PI_BACKENDS: the backend section fails on it.
+			}
+			checks.push(...privateEndpointChecks({ endpoints: privateDeclared, runs, egressArmed: armedHere, fleet: Boolean(declaredWorkerName), defaultBackend }));
+			const modelDeclared = (seams.declaredEndpoints ?? (({ env: e, cwd, platform }) => declaredEndpointsIn({ env: e, cwd, fs: { readFileSync, existsSync }, platform })))({ env, cwd: seams.cwd, platform: seams.platform ?? process.platform });
+			checks.push(...(await sharedServerChecks({ endpoints: privateDeclared, modelEndpoints: modelDeclared, lookup: lookupAddresses })));
 		}
 	}
 	if (facts) {
@@ -6952,6 +6980,25 @@ export async function overlayLoaderParityChecks(modelsPath, { pi, checkModelsKno
 }
 
 /**
+ * Issue #918: a name's addresses for `sharedServerChecks`, bounded at 3 s so a resolver that does not answer cannot hold
+ * doctor; a name that does not resolve in time is not judged.
+ */
+async function boundedLookup(host) {
+	let timer;
+	try {
+		return await Promise.race([
+			dnsLookup(host, { all: true }).then((list) => list.map((a) => a.address)),
+			new Promise((resolve) => {
+				timer = setTimeout(() => resolve([]), 3000);
+				timer.unref?.();
+			}),
+		]);
+	} finally {
+		clearTimeout(timer);
+	}
+}
+
+/**
  * How a line names its trigger: cron entries by their id, id-less webhook entries by raw file position (the admin's
  * trigger:<index> identity). One function, because the flow lines and the venue lines must name a trigger alike.
  */
@@ -6960,7 +7007,7 @@ function triggerLabel(t, index) {
 }
 
 function readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTables = {}) {
-	const none = { watchSources: {}, watchRules: 0, modelRoles: {}, secretBundles: {}, requiring: 0, waiting: 0, listing: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, recovering: 0, replicating: 0, instructing: 0, commands: 0, localEvents: [], secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], folders: [], images: [], imageRoutes: [], namedBackends: [], skillsDirs: [], forges: [], repositories: [], flows: [], excludedNames: [], costCaps: [], modelRuns: [], triggersVersionNeed: 1, jobDataVersionNeed: 1, parseError: null, parseNewer: false, path: null };
+	const none = { privateRuns: [], watchSources: {}, watchRules: 0, modelRoles: {}, secretBundles: {}, requiring: 0, waiting: 0, listing: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, recovering: 0, replicating: 0, instructing: 0, commands: 0, localEvents: [], secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], folders: [], images: [], imageRoutes: [], namedBackends: [], skillsDirs: [], forges: [], repositories: [], flows: [], excludedNames: [], costCaps: [], modelRuns: [], triggersVersionNeed: 1, jobDataVersionNeed: 1, parseError: null, parseNewer: false, path: null };
 	try {
 		// Unset falls back to ./triggers.json in cwd, MIRRORING the receiver's own default
 		// (receiver/src/config.mjs) -- the two must read the same file, or doctor preflights a deployment
@@ -7103,6 +7150,8 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTable
 			// Issues #501 and #502 (PR 9 of that round): every trigger's model choice, list, cap and bound secret NAMES, for the
 			// unknown-model, cap-fit and listed-provider credential lines. Every kind, cron included, whatever host serves it:
 			// a model the worker does not know is refused wherever the job runs.
+			// Issue #918: the triggers that name private endpoints (private-endpoints-doctor.mjs).
+			privateRuns: privateRunsOf(triggers, { servedHere: (t) => (t.run.kind === "local" && t.run.worker !== undefined ? t.run.worker === declaredWorkerName : t.on.type !== "cron" || cronScheduledHere(t)) }),
 			modelRuns: triggers.map((t, index) => ({
 				label: triggerLabel(t, index),
 				kind: t.run.kind,
@@ -7300,7 +7349,7 @@ function forRuntime(text, bin) {
  * required CI job runs rather than only on the lab's. `bin` names the runtime for a caller outside this file, which
  * has no venue constant to hand in; doctor's own two callers pass `venue`.
  */
-export async function sweepStaleCanaryNetworks({ run, pid, isAlive, endpoint, bin = "docker", venue = canaryVenueFor(bin), gate = makeDetachGate(run, { bin: venue.bin }) }) {
+export async function sweepStaleCanaryNetworks({ run, pid, isAlive, endpoint, bin = "docker", venue = canaryVenueFor(bin), gate = makeDetachGate(run, { bin: venue.bin }), grants = null }) {
 	// ONE QUESTION: can this shell show the daemon is on this host? Only `local === true` can, so remote and
 	// unknown take the same branch. The whole endpoint is passed rather than that boolean because the line
 	// this sweep prints for a daemon it will not touch now NAMES what the CLI resolved, the way
@@ -7341,7 +7390,7 @@ export async function sweepStaleCanaryNetworks({ run, pid, isAlive, endpoint, bi
 	// The model endpoint probes (issue #503) are matched the same way, their slugs from `ENDPOINT_PROBE_SLUGS` and the id
 	// by the parser's own rule (`MODEL_ENDPOINT_ID_RE`, its anchors dropped), never `\\S+`: a name that matches is one
 	// this file builds, and the class cannot drift from what the parser accepts.
-	const probeOf = (owner) => new RegExp(`^(?:${EGRESS_CANARY_PROBE_PREFIX}(?:${CANARY_PROBE_SLUGS.join("|")})|${EGRESS_ENDPOINT_PROBE_PREFIX}(?:${ENDPOINT_PROBE_SLUGS.join("|")})-${ENDPOINT_ID_CLASS})-${owner.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`);
+	const probeOf = (owner) => new RegExp(`^(?:${EGRESS_CANARY_PROBE_PREFIX}(?:${CANARY_PROBE_SLUGS.join("|")})|${EGRESS_ENDPOINT_PROBE_PREFIX}(?:${[...ENDPOINT_PROBE_SLUGS, ...PRIVATE_PROBE_SLUGS].join("|")})-${ENDPOINT_ID_CLASS})-${owner.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`);
 	const checks = [];
 	for (const name of String(listed.stdout ?? "").split("\n").map((n) => n.trim()).filter(Boolean)) {
 		const m = shape.exec(name);
@@ -7413,6 +7462,15 @@ export async function sweepStaleCanaryNetworks({ run, pid, isAlive, endpoint, bi
 		}
 		// Through the ONE detach helper (issue #452, gate round 3), with `names` as the running members: a refusal leaves
 		// the network whole and is said as `held`, on every venue and through every route to Podman.
+		// Issue #918: a killed doctor's canary grant goes before its network, as the canary's own teardown does it; one that
+		// cannot be removed waits for the next attach in that subnet, which clears it.
+		if (grants !== null) {
+			try {
+				grants.remove({ network: name });
+			} catch {
+				// said by nothing more: the clear at the next attach is the guarantee
+			}
+		}
 		const outcome = await removeNetworkOrSay(run, { network: name, detach: members.filter((n) => !removed.includes(n)), running: names, bin: venue.bin, gate });
 		if (outcome.blocked) {
 			checks.push(canaryCheck("held", { name, because: detachBlockedSentence(outcome.blocked, venue.bin) }, venue));
@@ -7818,7 +7876,7 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 	// ONE detach gate for this doctor run (issue #452, gate round 3), shared by the sweep and the canary: `local` can be a
 	// rootless Podman 4.x reached as `docker`, where both of them detach the running proxy.
 	const gate = makeDetachGate(canaryDocker, { bin: "docker", ...(seams.readFactsOnce ? { readRuntime: async () => runtimeFromFacts(await seams.readFactsOnce()) } : {}) });
-	if (!seams.setupReadOnly) checks.push(...(await sweepStaleCanaryNetworks({ run: canaryDocker, pid, isAlive, endpoint, gate })));
+	if (!seams.setupReadOnly) checks.push(...(await sweepStaleCanaryNetworks({ run: canaryDocker, pid, isAlive, endpoint, gate, grants: seams.cwd ? canaryGrants({ bin: "docker", proxy, dir: grantsDirOf(seams.cwd, "docker"), spawn }) : null })));
 
 	// `docker inspect` on the container, not `ps`: it answers present-vs-absent and running-vs-stopped in
 	// one call, and those are two different fixes. The FIELD_SEP habit is image-preflight.mjs's -- neither
@@ -8005,6 +8063,18 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 		const mounted = readIncludeBindSource(parsed?.mounts);
 		checks.push(endpointsIncludeCheck({ answer: inside, endpoints, bin: "docker", proxy, prefix: "", mounted, recreate: custom ? `recreate ${proxy} so it mounts the file anew` : `\`docker rm -f -v ${proxy}\`, then \`pi-dispatch up\` starts it on the file anew (a restart cuts running jobs' tunnels)` }));
 	}
+	// Issue #918, part 3: the private endpoints' include in the running proxy's mounted folder, against what the
+	// declaration renders, and the grant helper answering inside it as squid's own user, when something is declared under
+	// rules that include the file and the proxy is this deployment's current one. The folder mount shows a render's
+	// rename at once, so a difference is a render not yet run; whether squid has RELOADED the file no read here can see,
+	// and the canary's probes below are what prove the rules squid holds.
+	const privateDeclared = (seams.declaredPrivate ?? (({ env: e, cwd, platform }) => declaredPrivateEndpointsIn({ env: e, cwd, fs: { readFileSync, existsSync }, platform })))({ env, cwd: seams.cwd, platform: seams.platform ?? process.platform });
+	if (privateDeclared.length > 0 && needs.rulesIncludePrivate === true && !(!custom && judged.drift.length > 0)) {
+		const inside = await runCmdCapture(spawn, "docker", ["exec", proxy, "cat", PRIVATE_INCLUDE_TARGET], { stdoutOnly: true, timeoutMs: CANARY_STEP_TIMEOUT_MS });
+		checks.push(privateIncludeCheck({ answer: inside, endpoints: privateDeclared, bin: "docker", proxy }));
+		const helper = await runCmdCapture(spawn, "docker", ["exec", "-i", "--user", "proxy", proxy, GRANT_HELPER_TARGET], { stdoutOnly: true, timeoutMs: CANARY_STEP_TIMEOUT_MS, input: "0.0.0.0 pi-dispatch-doctor-check\n" });
+		checks.push(grantHelperCheck({ answer: helper, bin: "docker", proxy }));
+	}
 	if (seams.setupReadOnly) {
 		checks.push({ ok: false, warn: true, label: "Egress canary: not run by browser setup", fix: "run pi-dispatch doctor in the deployment terminal for the container probe" });
 		return checks;
@@ -8014,7 +8084,10 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 	// script. docker's probes keep `runCmdCapture` (its 30 s bound, stderr merged, SIGTERM at the bound) rather than the
 	// bounded step runner, so docker's spawns, and what a probe that never launched leaves for the teardown, are exactly
 	// what they were: pinned in doctor.test.mjs against the output and argv captured before the move.
-	const canary = await runEgressCanary({ run: liveRunVia(spawn), probeRun: (args) => runCmdCapture(spawn, "docker", args), proxy, image: jobImage, pid, gate, endpoints, mcpOnly });
+	// Issue #918, part 3: the canary's grant, in this deployment's Docker grant folder; its private endpoints only under rules
+	// that include the private file (the subnet clear runs either way).
+	const canaryPrivate = needs.rulesIncludePrivate === true && !(!custom && judged.drift.length > 0) ? privateDeclared : [];
+	const canary = await runEgressCanary({ run: liveRunVia(spawn), probeRun: (args) => runCmdCapture(spawn, "docker", args), proxy, image: jobImage, pid, gate, endpoints, mcpOnly, privateEndpoints: canaryPrivate, grants: seams.cwd ? canaryGrants({ bin: "docker", proxy, dir: grantsDirOf(seams.cwd, "docker"), spawn }) : null });
 	// Through a stale proxy the canary reads THAT proxy's policy (exec round 3): a failure is the proxy's to fix, never
 	// this deployment's allowlist, which it may not even mount.
 	checks.push(...(staleRunning ? canary.checks.map((c) => (c.ok ? c : { ...c, fix: `the canary ran through ${proxy}, which is not this deployment's proxy (above), so this says nothing about egress-allowlist.conf: ${replaceFix}, then re-run doctor` })) : canary.checks));
@@ -8111,11 +8184,13 @@ const CANARY_NO_WORKSPACE = "/nonexistent/pi-dispatch-egress-canary-mounts-nothi
  * `mcpOnly` maps the ids of those only an overlay MCP server uses (`mcpOnlyEndpoints`), whose `models` probe proves
  * the route and is not judged as a model server's answer.
  */
-export async function runEgressCanary({ run, bin = "docker", proxy, image, pid = process.pid, user = null, probeRun = null, endpoints = [], mcpOnly = new Map(), size = DEFAULT_JOB_SIZE, hostCpus = null, gate = makeDetachGate((args, opts) => run(args, { timeoutMs: opts?.timeoutMs ?? CANARY_STEP_TIMEOUT_MS }), { bin }) }) {
+export async function runEgressCanary({ run, bin = "docker", proxy, image, pid = process.pid, user = null, probeRun = null, endpoints = [], mcpOnly = new Map(), size = DEFAULT_JOB_SIZE, hostCpus = null, gate = makeDetachGate((args, opts) => run(args, { timeoutMs: opts?.timeoutMs ?? CANARY_STEP_TIMEOUT_MS }), { bin }), privateEndpoints = [], grants = null }) {
 	const venue = canaryVenueFor(bin);
 	const probe = probeRun ?? ((args) => run(args, { timeoutMs: bin === "podman" ? PODMAN_FIRST_START_TIMEOUT_MS : RUN_TIMEOUTS.cmd }));
 	const checks = [];
 	const net = egressCanaryNetwork(pid);
+	// Issue #918: whether the canary holds a grant for the declared private endpoints (and so probes them).
+	let privateGranted = false;
 	// A runner that captures BOTH streams and is bounded: `runCmd` answers with an exit code only and `stdio:
 	// "ignore"`, so the "network is not there" rule -- whose wording the daemon puts on stderr with stdout
 	// empty when `--format` is passed -- could not read it. `liveRunVia` is already exactly this shape in this
@@ -8175,6 +8250,17 @@ export async function runEgressCanary({ run, bin = "docker", proxy, image, pid =
 		if ((await docker(["network", "connect", net, proxy])).code !== 0) {
 			checks.push({ ok: false, warn: true, label: `${venue.prefix}Egress policy: not proved, because ${proxy} could not be attached to the canary network`, fix: forRuntime(CANARY_UNPROVED_FIX, bin) });
 			return { checks, results: readingsOf(checks) };
+		}
+		// Issue #918, part 3: the canary's attach clears a grant a gone network left in its subnet, as every attach does
+		// (endpoint-grants.mjs), and then grants the canary every declared private endpoint, by the job's own write and
+		// read back, so the probes below meet the grant a job meets. `grants` is null where no grant folder is known
+		// (a caller with no deployment folder): no private endpoint is probed, and that is said.
+		if (grants !== null) {
+			const attached = await grants.attach({ network: net, ids: privateEndpoints.map((e) => e.id) });
+			privateGranted = attached.ok === true && privateEndpoints.length > 0;
+			if (!attached.ok) checks.push({ ok: false, warn: true, label: `${venue.prefix}Private endpoints: the canary network's grant could not be ${privateEndpoints.length > 0 ? "written and read back" : "cleared of one a gone network left"} (${attached.why}), so ${privateEndpoints.length > 0 ? "no private endpoint was probed" : "the canary ran on a subnet that may hold one"}`, fix: "check that the deployment's egress-grants folder is this account's to write and the proxy mounts it, then re-run doctor" });
+		} else if (privateEndpoints.length > 0) {
+			checks.push({ ok: false, warn: true, label: `${venue.prefix}Private endpoints: not probed, because this run knows no grant folder to grant the canary from`, fix: "run doctor from the deployment folder" });
 		}
 		// The unlisted host must be one that RESOLVES and answers. The first version used a reserved `.example` name,
 		// which no proxy can reach, so a proxy allowing every host still read as denying this one (measured: an
@@ -8269,6 +8355,12 @@ export async function runEgressCanary({ run, bin = "docker", proxy, image, pid =
 				checks.push(...(await runEndpointProbes({ probe, bin, pid, network: net, proxy, image, user, endpoints, mcpOnly, venue, unfinished, size, hostCpus })));
 			}
 		}
+		// Issue #918, part 3: each declared private endpoint, granted to this canary: reached with the grant, refused on the
+		// next port and for a plain request, and refused again once the grant is gone, which is the binding itself.
+		if (privateGranted) {
+			if (staleRunner) checks.push({ ok: false, warn: true, label: `${venue.prefix}Private endpoints: not probed, because the job image has no runner module (above)`, fix: "use a job image built after issue #427, then re-run doctor" });
+			else checks.push(...(await runPrivateEndpointProbes({ probe, bin, pid, network: net, proxy, image, user, endpoints: privateEndpoints, taken: endpoints, venue, unfinished, size, hostCpus, revoke: () => grants.remove({ network: net }) })));
+		}
 	} finally {
 		// The probes FIRST, by the name carrying this pid, then the network: a member still attached is exactly
 		// why the old `network rm` failed, and it failed silently. `rm -f` of a name that is not there is docker
@@ -8282,6 +8374,16 @@ export async function runEgressCanary({ run, bin = "docker", proxy, image, pid =
 		// `kept` line reports one run later, so it is reported with the same words, now rather than then.
 		const stuck = [];
 		for (const name of unfinished) if ((await docker(canaryProbeRemoval(bin, name))).code !== 0) stuck.push(name);
+		// Issue #918: the canary's grant goes before its network, as a job's does, whenever one was written, the attach that
+		// failed its read back included (it wrote the file first); one that cannot be removed is said, and the next attach
+		// in that subnet clears it.
+		if (grants !== null && privateEndpoints.length > 0) {
+			try {
+				grants.remove({ network: net });
+			} catch (err) {
+				checks.push({ ok: false, warn: true, label: `${venue.prefix}Private endpoints: the canary's grant could not be removed (${err?.code ?? "unknown"}); the next attach in its subnet clears it`, fix: "check that the deployment's egress-grants folder is this account's to write" });
+			}
+		}
 		// AND THE NETWORK IS THEN KEPT, because that is what the line says. Reusing the sweep's wording while
 		// removing the network anyway printed "the network is the only way left to find it" and then removed
 		// it in the same run -- both halves of the sentence false, and the page's own row for this shape says
@@ -8579,6 +8681,109 @@ async function runEndpointProbes({ probe, bin, pid, network, proxy, image, user,
 }
 
 /**
+ * Issue #918, part 3: the canary's grant operations over one venue's grant folder: the attach's clear and grant
+ * (`grantOnAttach`, a job's own write and read back) and the removal before the canary's network goes.
+ */
+function canaryGrants({ bin, proxy, dir, spawn }) {
+	return {
+		attach: ({ network, ids }) => grantOnAttach({ spawnFn: spawn, bin, proxy, network, dir, ids }),
+		remove: ({ network }) => removeGrantsOf({ dir, network }),
+	};
+}
+
+/**
+ * Issue #918, part 3: the probes doctor runs per declared private endpoint, on the canary's network, which holds a grant
+ * for every one (`runEgressCanary`). One list, which the loop names its containers from and the dead-pid sweep matches:
+ *   - `ptunnel`: a CONNECT to the declared host and port, granted. 200 is the device answering; 503 is the proxy letting
+ *     the tunnel through and nothing there answering (the grant holds; the device is off or out of the proxy's reach);
+ *     403 is the grant not honored.
+ *   - `pnext`: a CONNECT to the nearest port no declaration uses, granted. Must get the proxy's 403: the rule is
+ *     port-exact.
+ *   - `pplain`: a plain forward GET to the declared port. Must get squid's 403 ERR_ACCESS_DENIED.
+ *   - `prevoked`: the `ptunnel` CONNECT again once the canary's grant is removed. Must get the proxy's 403: the device is
+ *     bound to the grant, which is the issue's acceptance read on a real proxy.
+ */
+export const PRIVATE_PROBE_SLUGS = Object.freeze(["ptunnel", "pnext", "pplain", "prevoked"]);
+
+/**
+ * A raw `CONNECT <host>:<port>` through the proxy, for a private endpoint, whose server may speak no HTTP at all (an SSH
+ * daemon). Prints `tunnel <status>` (exit 0 for 200, else 3) from the proxy's status line, or `error <code>` (exit 5).
+ * Plain node, no runner module: no job's route is under test here, only the proxy's rule.
+ */
+export function egressConnectScript(host, port, { proxyUrl, timeoutMs = ENDPOINT_PROBE_TIMEOUT_MS } = {}) {
+	const target = `${host}:${port}`;
+	return `import("node:net").then(n=>{let p;try{p=new URL(${JSON.stringify(String(proxyUrl))})}catch(e){console.log("error",e.message);process.exit(5)}let b="";const s=n.connect({host:p.hostname,port:Number(p.port||80)},()=>s.write(${JSON.stringify(`CONNECT ${target} HTTP/1.1\r\nHost: ${target}\r\n\r\n`)}));s.setTimeout(${Number(timeoutMs)},()=>{console.log("error","timeout");s.destroy();process.exit(5)});s.on("data",d=>{b+=d;const m=/^HTTP\\/1\\.[01] (\\d{3})/.exec(b);if(m){console.log("tunnel",m[1]);s.destroy();process.exit(m[1]==="200"?0:3)}if(b.length>4096){console.log("error","no status");s.destroy();process.exit(5)}});s.on("error",e=>{console.log("error",e.code??e.message);process.exit(5)});s.on("end",()=>{console.log("error","closed");process.exit(5)})},e=>{console.log("error",e.message);process.exit(5)})`;
+}
+
+/** The exits each private probe's script ends a READING with; any other exit is a container that did not run it. */
+const PRIVATE_PROBE_READ_EXITS = Object.freeze({ ptunnel: [0, 3], pnext: [0, 3], pplain: [0, 3], prevoked: [0, 3] });
+
+/**
+ * One private endpoint probe's line. The binding's three refusals (`pnext`, `pplain`, `prevoked`) are ✗ when the proxy
+ * let the request through: each is a device reachable beyond its grant. A probe that did not run, or an answer that is no
+ * reading, is ⚠: nothing was proved either way.
+ */
+function privateProbeCheck({ slug, endpoint, answer, venue, bin, proxy, next }) {
+	const at = endpointAddress(endpoint.host, endpoint.port);
+	const head = `${venue.prefix}Private endpoint ${endpoint.id} (${at})`;
+	const reading = endpointProbeReading(answer);
+	const reload = reloadCommand(bin, proxy);
+	if (!PRIVATE_PROBE_READ_EXITS[slug].includes(answer?.code) || !reading || reading.kind === "error") {
+		return { ok: false, warn: true, label: `${head}: the ${slug} probe did not give a reading (${answer?.code === null || answer?.code === undefined ? `${bin} run did not finish` : `exit ${answer.code}`}${reading?.kind === "error" && reading.detail ? `, ${reading.detail}` : ""})`, fix: "re-run doctor; if it persists, run the job image by hand on a job network to see why a container there cannot reach the proxy" };
+	}
+	const wider = `the proxy's rules are wider than private-endpoints.conf renders: \`pi-dispatch egress render\` in the deployment folder, then \`${reload}\`; check egress-allowlist.conf and model-endpoints.json do not name ${endpoint.host}`;
+	if (slug === "ptunnel") {
+		if (reading.kind === "tunnel" && reading.status === 200) return { ok: true, label: `${head}: a job granted it reaches it through the proxy (CONNECT: 200)` };
+		if (reading.kind === "tunnel" && reading.status === 503) return { ok: false, warn: true, label: `${head}: the proxy let the granted CONNECT through, but nothing answered there (503)`, fix: `check the device is on and listening on ${endpoint.port}, and that the proxy's host reaches ${endpoint.host} (the proxy dials it, not the job)` };
+		return { ok: false, label: `${head}: the proxy refused a granted CONNECT (${reading.status ?? "no status"}), so no job its triggers grant reaches it`, fix: `\`pi-dispatch egress render\` in the deployment folder, then \`${reload}\`; the include and grant helper lines above say what the proxy holds` };
+	}
+	if (slug === "pnext") {
+		const nextAt = endpointAddress(endpoint.host, next);
+		if (reading.kind === "tunnel" && reading.status === 403) return { ok: true, label: `${head}: its rule is port-exact (a granted CONNECT to ${nextAt}, a port nobody declared, got the proxy's 403)` };
+		return { ok: false, label: `${head}: its rule is NOT port-exact: a granted CONNECT to ${nextAt}, a port nobody declared, got ${reading.status ?? "no status"}, not the proxy's 403`, fix: wider };
+	}
+	if (slug === "pplain") {
+		if (reading.status === 403 && reading.detail.startsWith("ERR_ACCESS_DENIED")) return { ok: true, label: `${head}: admits no plain forward request (got the proxy's 403 ${reading.detail})` };
+		return { ok: false, label: `${head}: admits a plain forward request: GET http://${at}/ without a tunnel got ${reading.status ?? "no status"}${reading.detail ? ` ${reading.detail}` : ""}, not the proxy's 403 ERR_ACCESS_DENIED`, fix: wider };
+	}
+	if (reading.kind === "tunnel" && reading.status === 403) return { ok: true, label: `${head}: with the grant removed the same CONNECT gets the proxy's 403, so only a job granted it reaches it` };
+	return { ok: false, label: `${head}: is reached WITHOUT a grant (with the canary's grant removed, the CONNECT got ${reading.status ?? "no status"}, not the proxy's 403)`, fix: wider };
+}
+
+/**
+ * Issue #918, part 3: the four probes for each declared private endpoint, in id order, on the canary's network and
+ * removed by the canary's teardown (`unfinished`). `ptunnel`, `pnext` and `pplain` for every endpoint, then `revoke()`
+ * (the canary's grant removed), then `prevoked` for every endpoint.
+ */
+async function runPrivateEndpointProbes({ probe, bin, pid, network, proxy, image, user, endpoints, taken = [], venue, unfinished, size = DEFAULT_JOB_SIZE, hostCpus = null, revoke }) {
+	const checks = [];
+	const proxyUrl = egressProxyUrl(proxy);
+	const once = async (slug, endpoint, script, next = null) => {
+		const name = egressEndpointProbe(slug, endpoint.id, pid);
+		const answer = await probe(egressCanaryProbeArgs({ bin, slug, name, pid, network, proxy, image, url: `http://${endpointAddress(endpoint.host, endpoint.port)}/`, user, script, httpProxy: true, size, hostCpus }));
+		if (answer?.code === null && answer.ended !== "error") unfinished.push(name);
+		checks.push(privateProbeCheck({ slug, endpoint, answer, venue, bin, proxy, next }));
+	};
+	const sorted = endpointsById(endpoints);
+	for (const endpoint of sorted) {
+		// The next port no declaration of either file uses for that host, so a model endpoint's own rule never reads as this
+		// endpoint's being wider.
+		const next = undeclaredPortNear(endpoint, [...endpoints, ...taken]);
+		await once("ptunnel", endpoint, egressConnectScript(endpoint.host, endpoint.port, { proxyUrl }));
+		if (next !== null) await once("pnext", endpoint, egressConnectScript(endpoint.host, next, { proxyUrl }), next);
+		await once("pplain", endpoint, egressCanaryPlainScript(`http://${endpointAddress(endpoint.host, endpoint.port)}/`, { proxyUrl }));
+	}
+	try {
+		revoke();
+	} catch (err) {
+		checks.push({ ok: false, warn: true, label: `${venue.prefix}Private endpoints: the canary's grant could not be removed (${err?.code ?? "unknown"}), so the binding was not probed`, fix: "check that the deployment's egress-grants folder is this account's to write, then re-run doctor" });
+		return checks;
+	}
+	for (const endpoint of sorted) await once("prevoked", endpoint, egressConnectScript(endpoint.host, endpoint.port, { proxyUrl }));
+	return checks;
+}
+
+/**
  * The include as the RUNNING proxy sees it, against what the declaration renders (issue #503). Read inside the
  * container, never from this folder's file: a single-file bind mount holds the inode, so a file replaced by a rename
  * leaves the container on the OLD one, and a reload then silently loads the old rules (measured on 2026-09-30, M3, on
@@ -8615,6 +8820,31 @@ function endpointsIncludeCheck({ answer, endpoints, bin, proxy, prefix, recreate
 		label: `${prefix}Model endpoints: the include inside the running proxy (${ENDPOINTS_INCLUDE_IN_PROXY} in ${proxy}) does not match model-endpoints.json (${ids}), so a reload would not load the declared rules`,
 		fix: `\`pi-dispatch egress render\` in the deployment folder, then \`${reloadCommand(bin, proxy)}\`. If the render says the file already matches and this line stays, the proxy holds an earlier copy of a file that was replaced rather than written in place, which a reload never sees: ${recreate}`,
 	};
+}
+
+/**
+ * Issue #918, part 3: the private endpoints' include as the running proxy reads it, against `renderPrivateInclude` of
+ * the declaration. A difference is a render not run since the file changed, or not reloaded since: the proxy enforces
+ * other private endpoints than the file declares.
+ */
+function privateIncludeCheck({ answer, endpoints, bin, proxy }) {
+	const read = `${bin} exec ${proxy} cat ${PRIVATE_INCLUDE_TARGET}`;
+	const ids = endpointsById(endpoints).map((e) => e.id).join(", ");
+	if (answer?.code !== 0) {
+		return { ok: false, warn: true, label: `Private endpoints: the include inside the running proxy could not be read (\`${read}\` ${answer?.code === null || answer?.code === undefined ? "did not finish" : `exited ${answer.code}`})`, fix: `the proxy must mount this deployment's egress-private/ at ${PRIVATE_DIR_TARGET}, as the shipped proxy does; run the command yourself to see why it fails` };
+	}
+	if (String(answer.output) === renderPrivateInclude(endpoints)) return { ok: true, label: `Private endpoints: the include the running proxy mounts matches private-endpoints.json (${ids}); squid reads it at its last start or reload, which the canary's probes prove` };
+	return { ok: false, label: `Private endpoints: the include the running proxy mounts (${PRIVATE_INCLUDE_TARGET} in ${proxy}) does not match private-endpoints.json (${ids}), so a reload would load other endpoints than the file declares`, fix: `\`pi-dispatch egress render\` in the deployment folder, then \`${reloadCommand(bin, proxy)}\`` };
+}
+
+/**
+ * Issue #918, part 3: the grant helper inside the running proxy, as squid's own user, asked a line no grant can match:
+ * `ERR` is the one right answer. One it cannot run is respawned by squid in a loop that fills its log on the first request
+ * to a private endpoint (DES-PRIVATE-ENDPOINT-GRANTS), and every granted job is refused meanwhile.
+ */
+function grantHelperCheck({ answer, bin, proxy }) {
+	if (answer?.code === 0 && String(answer.output).trim() === "ERR") return { ok: true, label: `Private endpoints: the grant helper answers inside ${proxy} as squid's own user` };
+	return { ok: false, label: `Private endpoints: the grant helper does not answer inside ${proxy} as squid's own user (\`${bin} exec -i --user proxy ${proxy} ${GRANT_HELPER_TARGET}\` ${answer?.code === null || answer?.code === undefined ? "did not finish" : `exited ${answer.code}`}${answer?.code === 0 ? `, answering ${JSON.stringify(String(answer.output).trim().slice(0, 20))}` : ""})`, fix: "make egress-private/endpoint-grant the package's copy, mode 0755 (`pi-dispatch up` puts it back), then re-run doctor; until then squid refuses every granted job" };
 }
 
 /**
@@ -10895,7 +11125,17 @@ export async function podmanChecks(env, seams, { jobImage, jobImageNote = "" }) 
 		if (keeperNetwork) checks.push(keeperNetwork);
 	}
 
-	forLive = { run: true, user, relabel, info, imagePresent, egress: { armed, proxy, proxyRunning, keeperBlocked, endpoints, mcpOnly } };
+	// Issue #918, part 3: the private endpoints the canary probes on this venue (under account rules that include them),
+	// and its grant operations in this deployment's Podman grant folder.
+	let podmanPrivate = [];
+	try {
+		const rules = String((seams.readProxyConf ?? ((p) => readFileSync(p, "utf8")))(proxyConfCopyPath(home)));
+		if (rulesIncludePrivate(rules)) podmanPrivate = (seams.declaredPrivate ?? (({ env: e, cwd, platform: p }) => declaredPrivateEndpointsIn({ env: e, cwd, fs: { readFileSync, existsSync }, platform: p })))({ env, cwd: seams.cwd, platform: seams.platform ?? process.platform });
+	} catch {
+		// No account copy of the rules: nothing is probed until `service install` writes them.
+	}
+	const podmanGrants = seams.cwd && typeof proxy === "string" ? canaryGrants({ bin: "podman", proxy, dir: grantsDirOf(seams.cwd, "podman"), spawn }) : null;
+	forLive = { run: true, user, relabel, info, imagePresent, egress: { armed, proxy, proxyRunning, keeperBlocked, endpoints, mcpOnly, privateEndpoints: podmanPrivate, grants: podmanGrants } };
 	return { checks, observed, relabel, imagesReadable, imageDigest, forLive };
 }
 
@@ -11414,7 +11654,7 @@ async function podmanEgressCanary({ podman, readInfo, run, image, pid, isAlive, 
 	const canaryRun = (args, opts) => run(args, { timeoutMs: opts?.timeoutMs ?? CANARY_STEP_TIMEOUT_MS });
 	// One detach gate for this pass, shared with the canary below (issue #452, gate round 3).
 	const gate = makeDetachGate(canaryRun, { bin: "podman", readRuntime: async () => (again.info ? { podman: true, rootless: again.info.rootless, version: again.info.version } : null) });
-	const checks = await sweepStaleCanaryNetworks({ run: canaryRun, pid, isAlive, endpoint: { local: true }, venue: CANARY_PODMAN, gate });
+	const checks = await sweepStaleCanaryNetworks({ run: canaryRun, pid, isAlive, endpoint: { local: true }, venue: CANARY_PODMAN, gate, grants: podman.egress.grants ?? null });
 	if (podman.egress.proxyRunning !== true || podman.imagePresent !== true) return { checks, results: [] };
 	// Announced, as `runLiveProbes` announces its own containers: these start before it, and a cold first keep-id start
 	// can take half a minute each, which is a long silence on an operator's terminal.
@@ -11423,7 +11663,7 @@ async function podmanEgressCanary({ podman, readInfo, run, image, pid, isAlive, 
 	const endpoints = podman.egress.endpoints ?? [];
 	const more = endpoints.length > 0 ? `; then three per declared model endpoint (${endpointsById(endpoints).map((e) => e.id).join(", ")}), named ${EGRESS_ENDPOINT_PROBE_PREFIX}<probe>-<id>-${pid}, removed the same way` : "";
 	announce(`starting ${probes.slice(0, -1).join(", ")} and ${probes.at(-1)} from ${image} (as the job user ${podman.user}) on the --internal network ${egressCanaryNetwork(pid)}, with ${podman.egress.proxy} attached, to read the egress allowlist back; all three are removed when the canary ends${more}`);
-	const canary = await runEgressCanary({ run, bin: "podman", proxy: podman.egress.proxy, image, pid, user: podman.user, gate, endpoints, mcpOnly: podman.egress.mcpOnly ?? new Map(), size, hostCpus: again.info?.hostCpus ?? null });
+	const canary = await runEgressCanary({ run, bin: "podman", proxy: podman.egress.proxy, image, pid, user: podman.user, gate, endpoints, mcpOnly: podman.egress.mcpOnly ?? new Map(), size, hostCpus: again.info?.hostCpus ?? null, privateEndpoints: podman.egress.privateEndpoints ?? [], grants: podman.egress.grants ?? null });
 	return { checks: [...checks, ...canary.checks], results: canary.results };
 }
 

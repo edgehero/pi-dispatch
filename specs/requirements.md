@@ -6472,8 +6472,8 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
   `run.privateEndpoints` in the reviewed triggers file, confirmed against the live file before every attempt; no
   settings key, panel key, model-callable tool or queued job data alone produces one. With `PI_EGRESS=0` no proxy
   stands between any job and the device, so every job can dial it, as before: a granted job's environment is set
-  as above and its record says `basis: "unenforced"`. The OpenShell venues refuse the field until their per-job
-  policy can carry a grant (#918, part 3). Ports 80 and 443, and a host and port also declared as a model endpoint,
+  as above and its record says `basis: "unenforced"`. The OpenShell venues refuse a granted job in this release
+  (`private-endpoint-venue-unsupported`). Ports 80 and 443, and a host and port also declared as a model endpoint,
   are refused in the declaration.
 - **Why** a per-trigger grant when `REQ-EGRESS-ALLOWLIST` refuses per-trigger egress: that refusal is about a
   trigger widening egress for its jobs on its own say. Here the operator declares the endpoint in its own file and
@@ -6491,7 +6491,14 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
   the attempt is retried. Given a proxy without the two folder mounts, a granted job is refused
   `private-endpoint-proxy-outdated` and an ungranted job runs. Given a tool call that carries `privateEndpoints` or a
   near miss of it, at any depth, it is refused. Given a job's network removed, its grant is gone first; given a grant
-  left by a network that is gone, the next attach in its subnet clears it before that attach's job starts.
+  left by a network that is gone, the next attach in its subnet clears it before that attach's job starts. Given a
+  declared endpoint and a trigger naming it, `doctor` names both, warns on the trigger's blast radius when an issue or
+  comment starts its jobs, and, for a trigger this host serves, fails one naming an id this host does not declare (a
+  warning only for a forge trigger on a fleet, whose jobs wait on the shared queue) or a venue that refuses a grant; on
+  the Docker venue, under rules that include the file, it reads the include the proxy mounts against the render and the
+  helper's `ERR` as squid's user; and its canary, granted every endpoint, reaches each granted (200, or ⚠ on 503),
+  is refused on the next port, for a plain request, and with its grant removed. `doctor --live` fails
+  `jobToJobIsolation` when one peer reaches the proxy at its address on the other's network.
 
 ## REQ-RESUMABLE-SESSION
 
@@ -9626,3 +9633,4 @@ instead of drifting.
 | 2026-11-16 (#912) | REQ-OPERATOR-CONSOLE-SCREENS (a4) AMENDED to preserve the original timeline presentation beyond colors and fonts: solid pills, project tags, segmented controls, quiet grid, bottom ruler and future shade, verified against original and regressed screenshots. The full-width interactive history behavior and REQ-CONSOLE-SECURITY are UNCHANGED, checked. |
 | 2026-11-16 (#922) | REQ-MODEL-POLICY, REQ-ADMIN-VIA-PI-EXTENSION and REQ-OPERATOR-CONSOLE-ACTIONS AMENDED for random initial model selection, durable CAS choice, quota-safe replacement, exact continuation binding and unchanged-style person controls. UNCHANGED, checked: CONST-ISOLATION-CONTAINER-PER-JOB, CONST-BUDGET-BEFORE-TOKENS, CONST-RETRY-INFRA-ONLY and CONST-PI-VERSION-PINNED; no additional paid attempt, new provider library or dependency pin. Legacy fixed and ordered-fallback policies retain their behavior. |
 | 2026-11-16 (#918, part 2) | `REQ-TRIGGER-SECRETS` AMENDED: `PI_DISPATCH_ENDPOINT_` is a reserved prefix for `run.secrets`, bundles and `PI_FORWARD_ENV`. Added `REQ-PRIVATE-ENDPOINTS`: a trigger's `run.privateEndpoints` grants its jobs, and no other, a declared host and port through the egress proxy, confirmed against the live triggers file before every attempt, with free refusals (`private-endpoint-withdrawn`, `-unknown`, `-proxy-outdated`, `-venue-unsupported`), a deferral for a full device and a hand-back on a fleet's shared queue. `REQ-EGRESS-ALLOWLIST`'s Scope AMENDED: this is its one named exception, and the rest of its line (no `run.network`, no settings key, no model-callable parameter) holds. `REQ-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked: no tool is added, and the existing tools refuse the field. `REQ-MCP-OPERATOR-SERVERS` UNCHANGED, checked: a server on a private endpoint is refused by the preflight as any undeclared host is. |
+| 2026-11-16 (#918, part 3) | `REQ-PRIVATE-ENDPOINTS` AMENDED: Acceptance gains doctor's lines, its canary's four probes and the cross-address read in `--live`; Scope says the OpenShell venues refuse a granted job in this release. |

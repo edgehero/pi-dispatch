@@ -33,6 +33,7 @@ import { CGROUP_PARENT, DEFAULT_JOB_SIZE } from "./job-size.mjs";
 import { cpuMaxLine, parseCpuMaxRead } from "./cpu-reserve.mjs";
 import { ISOLATION_FLAGS, buildDockerRunArgs } from "./docker-run.mjs";
 import { DEFAULT_EGRESS_PROXY, EGRESS_PROXY_PORT, createJobNetworkWith, networkEndpoints, networkNameFor, removeNetworkOrSay } from "./egress.mjs";
+import { proxyAddressesOn } from "./endpoint-grants.mjs";
 import { detachBlockedSentence, makeDetachGate } from "./netns-keeper.mjs";
 
 /**
@@ -593,7 +594,7 @@ export function ephemeralVerdict({ first, second, markers = {}, nonce, bin = "do
  * rootless is not a bridge at all (pasta), so the other runtime says "default network" rather than borrowing docker's
  * noun; docker's sentence is unchanged.
  */
-export function jobToJobIsolationVerdict({ bin = "docker", armed, proxyRunning, keeperBlocked = null, networksCreated, peersStarted, proxyTarget, peerTargets = [], peerAddresses = [], fromPeer1 = new Map(), controlBefore = new Map(), controlAfter = new Map() }) {
+export function jobToJobIsolationVerdict({ bin = "docker", armed, proxyRunning, keeperBlocked = null, networksCreated, peersStarted, proxyTarget, peerTargets = [], peerAddresses = [], crossTargets = [], crossUnread = false, fromPeer1 = new Map(), controlBefore = new Map(), controlAfter = new Map() }) {
 	if (armed === null) return notReadBack("jobToJobIsolation", "PI_EGRESS could not be read (see the .env check above)");
 	if (armed !== true) return notReadBack("jobToJobIsolation", `PI_EGRESS is off, so jobs share ${bin === "docker" ? "docker's default bridge" : `${bin}'s default network`} by design and there is no per-job network to read back`);
 	if (proxyRunning === false) return notReadBack("jobToJobIsolation", "the egress proxy is not running, so no job-shaped network could be built");
@@ -602,8 +603,12 @@ export function jobToJobIsolationVerdict({ bin = "docker", armed, proxyRunning, 
 	if (peersStarted !== true) return notReadBack("jobToJobIsolation", "a peer container did not start");
 	const reached = peerTargets.filter((t) => fromPeer1.get(t) === "reached");
 	if (reached.length > 0) return verdict("jobToJobIsolation", false, `one job reached another across their own networks, at ${reached.join(", ")}`, { cause: "reached" });
+	// Issue #918: the proxy at its address on peer2's network, which a private endpoint grant for peer2 is named after.
+	// Any connection there is a job reaching the proxy at another job's address, so it could use that job's grant.
+	const crossed = crossTargets.filter((t) => ["connected", "reached"].includes(fromPeer1.get(t)));
+	if (crossed.length > 0) return verdict("jobToJobIsolation", false, `one job reached the proxy at its address on another job's network, at ${crossed.join(", ")}, so it could use that job's private endpoint grant`, { cause: "proxy-cross" });
 	if (peerAddresses.length === 0) return notReadBack("jobToJobIsolation", `${bin} inspect gave peer2 no address on its network, so only names could be tried and a name proves nothing about routing`);
-	if (peerTargets.some((t) => !fromPeer1.has(t)) || !fromPeer1.has(proxyTarget)) return notReadBack("jobToJobIsolation", "the connection attempt did not answer for every target");
+	if ([...peerTargets, ...crossTargets].some((t) => !fromPeer1.has(t)) || !fromPeer1.has(proxyTarget)) return notReadBack("jobToJobIsolation", "the connection attempt did not answer for every target");
 	if (!["connected", "reached"].includes(fromPeer1.get(proxyTarget))) return notReadBack("jobToJobIsolation", `peer1 could not reach the proxy (${fromPeer1.get(proxyTarget)}), so an unreached peer proves nothing`);
 	// Keyed by the addresses peer1 was given, never by whatever the control printed: a control that answered one of
 	// two addresses says nothing about the one peer1 was refused on.
@@ -612,7 +617,8 @@ export function jobToJobIsolationVerdict({ bin = "docker", armed, proxyRunning, 
 	if (!answered(controlAfter)) return notReadBack("jobToJobIsolation", "peer2 did not answer its own addresses after the attempt, so its listener was not up throughout");
 	const accepted = peerTargets.filter((t) => fromPeer1.get(t) === "connected");
 	if (accepted.length > 0) return notReadBack("jobToJobIsolation", `something accepted a connection at ${accepted.join(", ")} without the peer's nonce, which is neither reached nor refused`);
-	return verdict("jobToJobIsolation", true, `peer1 reached the proxy and none of peer2's ${peerTargets.length} name(s) and address(es) (${peerTargets.map((t) => `${t} ${fromPeer1.get(t)}`).join(", ")}); peer2 answered itself before and after`);
+	const cross = crossTargets.length > 0 ? `, nor the proxy at its address on peer2's network (${crossTargets.map((t) => `${t} ${fromPeer1.get(t)}`).join(", ")})` : crossUnread ? ` (the proxy's address on peer2's network was not read, so whether a job reaches the proxy at another job's address was not tried)` : "";
+	return verdict("jobToJobIsolation", true, `peer1 reached the proxy and none of peer2's ${peerTargets.length} name(s) and address(es) (${peerTargets.map((t) => `${t} ${fromPeer1.get(t)}`).join(", ")})${cross}; peer2 answered itself before and after`);
 }
 
 /**
@@ -1005,6 +1011,11 @@ export async function runLiveProbes({
 						reading.peerTargets = targets;
 						reading.peerAddresses = addresses;
 						reading.proxyTarget = `${proxy}:${EGRESS_PROXY_PORT}`;
+						// Issue #918: the proxy's own address(es) on peer2's network, which peer1 must not reach (a private endpoint
+						// grant is named after that address). Unread, nothing is added, and the rest of the verdict stands.
+						const proxyOn = await step(["inspect", "--format={{json .NetworkSettings.Networks}}", proxy]);
+						reading.crossTargets = proxyOn?.code === 0 ? proxyAddressesOn(proxyOn.stdout, networkOf.peer2).map(({ address }) => `${address.includes(":") ? `[${address}]` : address}:${EGRESS_PROXY_PORT}`) : [];
+						reading.crossUnread = reading.crossTargets.length === 0;
 						// The control brackets the attempt: peer2 answering its own addresses BEFORE proves a refused connection is
 						// not a listener still starting, and AFTER proves it stayed up.
 						const control = async () => {
@@ -1013,7 +1024,7 @@ export async function runLiveProbes({
 							return self?.code === 0 ? parseConnectResults(self.stdout) : new Map();
 						};
 						reading.controlBefore = await control();
-						const attempt = await step(["exec", ids.peer1, "node", "--eval", CONNECT_SCRIPT, nonce, reading.proxyTarget, ...targets]);
+						const attempt = await step(["exec", ids.peer1, "node", "--eval", CONNECT_SCRIPT, nonce, reading.proxyTarget, ...targets, ...reading.crossTargets]);
 						reading.fromPeer1 = attempt?.code === 0 ? parseConnectResults(attempt.stdout) : new Map();
 						reading.controlAfter = await control();
 					}

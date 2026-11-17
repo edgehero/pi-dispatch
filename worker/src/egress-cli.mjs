@@ -471,6 +471,20 @@ export function endpointsDeclaredIn({ env, cwd, fs, platform = process.platform 
  * `endpointsDeclaredIn`, which counts them): `[]` for none, and for a declaration that does not load, which doctor's
  * boot-file line names. Doctor's endpoint rows (issue #503) are built from this list and from nothing else.
  */
+/**
+ * Issue #918: the private endpoints as the service would load them (`privateEndpointsFileSetting`, then the loader), or
+ * `[]` when the file is missing or does not load: its own boot-file line in doctor says why.
+ */
+export function declaredPrivateEndpointsIn({ env, cwd, fs, platform = process.platform }) {
+	try {
+		const setting = privateEndpointsFileSetting({ env, cwd, platform, readEnv: (p) => fs.readFileSync(p), exists: (p) => fs.existsSync(p) });
+		if (setting.error) return [];
+		return loadPrivateEndpoints({ privateEndpointsFile: setting.value }, { cwd, readFileSync: (p, enc) => fs.readFileSync(p, enc), existsSync: (p) => fs.existsSync(p) });
+	} catch {
+		return [];
+	}
+}
+
 export function declaredEndpointsIn({ env, cwd, fs, platform = process.platform, valkeyUrl = null }) {
 	try {
 		const setting = endpointsFileSetting({ env, cwd, platform, readEnv: (p) => fs.readFileSync(p), exists: (p) => fs.existsSync(p) });
