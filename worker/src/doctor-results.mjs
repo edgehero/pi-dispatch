@@ -147,6 +147,8 @@ export const NAMED_CHECK_IDS = Object.freeze([
 	"projects.file-shell",
 	"model-endpoints.file",
 	"model-endpoints.file-shell",
+	"private-endpoints.file",
+	"private-endpoints.file-shell",
 	"envelope.file",
 	"envelope.file-shell",
 	"settings.overlay",

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { EGRESS_PROXY_CMD, EGRESS_PROXY_ENTRYPOINT, EGRESS_PROXY_IMAGE, jobNetworksOf, parseProxyState, rulesIncludeEndpoints, shippedProxyDrift } from "../src/egress-proxy-state.mjs";
+import { EGRESS_PROXY_CMD, EGRESS_PROXY_ENTRYPOINT, EGRESS_PROXY_IMAGE, jobNetworksOf, parseProxyState, rulesIncludeEndpoints, rulesIncludePrivate, shippedProxyDrift } from "../src/egress-proxy-state.mjs";
 
 // Issue #453, gate round 2: `PROXY_STATE_FORMAT`'s answer for the shipped proxy on a real Docker Engine (29.8.1,
 // compose 5.5.1, Ubuntu, rootful), copied byte for byte from round-446/pr3/m453/raw-m453-docker-engine.txt. C1 was made
@@ -127,4 +127,32 @@ test("rulesIncludeEndpoints reads an uncommented include of exactly the mounted 
 	assert.equal(rulesIncludeEndpoints("include /etc/pi-dispatch/model-endpoints.conf.bak\n"), false);
 	assert.equal(rulesIncludeEndpoints("include /etc/pi-dispatch/model-endpointsXconf\n"), false);
 	assert.equal(rulesIncludeEndpoints(""), false);
+});
+
+test("the private endpoints' two folders: compared when mounted, drift only once the rules include the private file, then out of date; the grant folder is this runtime's own (#918)", () => {
+	const two = parseProxyState(MEASURED_COMPOSE);
+	const cwd = "/var/tmp/m453/dep";
+	const plain = (p) => p;
+	const withMounts = (mounts) => ({ ...two, mounts: [...two.mounts, ...mounts.map(([source, destination]) => ({ type: "bind", source, destination }))] });
+	const both = (grants = `${cwd}/egress-grants/local`) => withMounts([[`${cwd}/egress-private`, "/etc/pi-dispatch/private"], [grants, "/etc/pi-dispatch/grants"]]);
+	assert.deepEqual(shippedProxyDrift(two, { cwd, realpath: plain }).drift, [], "a proxy from before #918, under rules from before it: current");
+	assert.deepEqual(shippedProxyDrift(both(), { cwd, realpath: plain, rulesIncludePrivate: true }).drift, [], "both folders, this folder's: current");
+	assert.deepEqual(shippedProxyDrift(both(`${cwd}/egress-grants/podman`), { cwd, realpath: plain }).drift, [`its /etc/pi-dispatch/grants is ${cwd}/egress-grants/podman, not ${cwd}/egress-grants/local`], "the Docker proxy reads the Docker grants, never the podman ones");
+	assert.deepEqual(shippedProxyDrift(both(`${cwd}/egress-grants/podman`), { cwd, realpath: plain, grantsVenue: "podman" }).drift, [], "and the podman proxy its own");
+	const stale = shippedProxyDrift(two, { cwd, realpath: plain, rulesIncludePrivate: true });
+	assert.equal(stale.drift.length, 2);
+	assert.match(stale.drift[0], /^nothing is mounted at \/etc\/pi-dispatch\/private, where \/var\/tmp\/m453\/dep\/egress-private belongs: this folder's rules include its private-endpoints\.conf, and squid will not start again without it$/);
+	assert.match(stale.drift[1], /^nothing is mounted at \/etc\/pi-dispatch\/grants, where \/var\/tmp\/m453\/dep\/egress-grants\/local belongs: /);
+	assert.equal(stale.outOfDate, true, "this folder's proxy, made before #918: out of date, not foreign");
+	const both503 = shippedProxyDrift(two, { cwd, realpath: plain, rulesInclude: true, rulesIncludePrivate: true });
+	assert.equal(both503.drift.length, 3);
+	assert.equal(both503.outOfDate, true, "made before #503 and #918 alike: still only out of date");
+	assert.ok(!shippedProxyDrift(withMounts([["/tmp/x", "/etc/pi-dispatch/x"]]), { cwd, realpath: plain, rulesIncludePrivate: true }).outOfDate, "with any other drift beside it, it is not merely out of date");
+});
+
+test("rulesIncludePrivate reads an uncommented include of exactly the private file's mounted path (#918)", () => {
+	assert.equal(rulesIncludePrivate("include /etc/pi-dispatch/private/private-endpoints.conf\n"), true);
+	assert.equal(rulesIncludePrivate("# include /etc/pi-dispatch/private/private-endpoints.conf\n"), false);
+	assert.equal(rulesIncludePrivate("include /etc/pi-dispatch/model-endpoints.conf\n"), false);
+	assert.equal(rulesIncludeEndpoints("include /etc/pi-dispatch/private/private-endpoints.conf\n"), false, "the two never answer for each other");
 });

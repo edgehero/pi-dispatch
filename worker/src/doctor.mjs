@@ -56,12 +56,12 @@ import { CONSOLE_HOSTNAME } from "./console-probe.mjs";
 import { homedir, networkInterfaces, release as osRelease, tmpdir, userInfo } from "node:os";
 import { BlockList, isIPv4, isIPv6 } from "node:net";
 import * as nodeFs from "node:fs";
-import { NETNS_KEEPER, NETNS_KEEPER_FORMAT, NETNS_KEEPER_START, STACK_KEYS, STARTED_AT_FORMAT, VALKEY_SHARED_KEY, judgeNetnsKeeper, judgeValkeyListeners, netnsKeeperRemedy, pinnedValkeyUrl, podmanNeedsNetnsKeeper, probeTcpAddress, proxyConfCopyPath, readSubuidRanges, proxyRestartAdvice, readLinger, readValkeyKeys, valkeySharedOn, valkeyTarget } from "./podman-stack.mjs";
+import { NETNS_KEEPER, NETNS_KEEPER_FORMAT, NETNS_KEEPER_START, STACK_KEYS, STARTED_AT_FORMAT, VALKEY_SHARED_KEY, judgeNetnsKeeper, judgeValkeyListeners, netnsKeeperRemedy, pinnedValkeyUrl, podmanNeedsNetnsKeeper, proxyFolderProblem, probeTcpAddress, proxyConfCopyPath, readSubuidRanges, proxyRestartAdvice, readLinger, readValkeyKeys, valkeySharedOn, valkeyTarget } from "./podman-stack.mjs";
 import { basename, dirname, isAbsolute, join, posix, resolve, win32 } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { DEFAULT_MODEL, DEFAULT_PROVIDER, DEFAULT_VALKEY_URL, accountTempRoot, githubIngestFrom, checkpointStoreCollision, checkpointsDirPath, allowedModelsFrom, modelFrom, providerFrom, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirOwnerFix, jobsDirPath, sandboxDirOwnerFix, legacyTempStateDir, logsDirPath, modelEndpointsFilePath, delimitedList, envelopeFilePath, pauseWindowsFilePath, projectsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir, workerName as workerNameFrom } from "./config.mjs";
+import { DEFAULT_MODEL, DEFAULT_PROVIDER, DEFAULT_VALKEY_URL, accountTempRoot, configError, githubIngestFrom, checkpointStoreCollision, checkpointsDirPath, allowedModelsFrom, modelFrom, providerFrom, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirOwnerFix, jobsDirPath, sandboxDirOwnerFix, legacyTempStateDir, logsDirPath, modelEndpointsFilePath, privateEndpointsFilePath, delimitedList, envelopeFilePath, pauseWindowsFilePath, projectsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir, workerName as workerNameFrom } from "./config.mjs";
 import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue, envFileWrapperInternal, wrapperInternalSentence } from "./env-file.mjs";
 import { canonicalScope, danglingProjectRows, dollarRowsBelowJobCap, dollarRowsWithoutCap, isModelScope, isProjectScope, loadScopedLimits, parseScopedLimits, scopedLimitsVersionFor } from "./scoped-limits.mjs";
 import { EMPTY_PROJECTS_FINGERPRINT, escapeControls, loadProjects, projectOf, projectsFingerprint } from "./projects.mjs";
@@ -71,8 +71,9 @@ import { EMPTY_USD_FINGERPRINT, usdFingerprint } from "./dollar-fingerprint.mjs"
 import { splitModelEntry } from "./model-ref.mjs";
 import { resolveConfiguredModelRuns as resolveDoctorModelRuns, cooldownModelRefs, RADIUS_COST_CAP_LABEL, RADIUS_COST_CAP_FIX } from "./model-observation.mjs";
 import { ignoredOutputCapModels, outputCapView, outputUnboundable } from "./output-cap.mjs";
+import { PRIVATE_ENDPOINTS_FILE_NAME, endpointsOverlap, loadPrivateEndpoints, privateFolderInsideJobPathSentence, privateFoldersInsideJobPaths } from "./private-endpoints.mjs";
 import { KEYLESS_API_KEY, KEYLESS_HOW, MODEL_ENDPOINTS_FILE_NAME, MODEL_ENDPOINTS_INCLUDE_NAME, MODEL_ENDPOINT_ID_RE, OVERLAY_LINK_FIX, OVERLAY_NOT_A_FILE_FIX, RENAMED_PROVIDERS, baseUrlTarget, endpointsAt, keylessVerdict, loadModelEndpoints, providerRenameHint, readOverlayModels, renderEndpointsInclude, unreportedUsageModels } from "./model-endpoints.mjs";
-import { declaredEndpointsIn, endpointsDeclaredIn, reloadCommand, rulesFileIncludes, rulesPredateEndpointsLine } from "./egress-cli.mjs";
+import { declaredEndpointsIn, endpointsDeclaredIn, endpointsFileSetting, reloadCommand, rulesFileIncludes, rulesPredateEndpointsLine } from "./egress-cli.mjs";
 import { loadPauseWindows, parsePauseWindows, parseScopeString, pauseWindowsVersionFor } from "./pause-windows.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, afterInstantMs, parseWaitProfiles } from "./wait-for.mjs";
 import { isForgeKind } from "./forges.mjs";
@@ -88,7 +89,7 @@ import { resolveBackendName } from "./backend-registry.mjs";
 import { deploymentVenueEnv, sharedShellIgnored } from "./deployment-venue.mjs";
 import { readDeploymentEnv, resolveServiceEnv, serviceEnvFileOf, serviceEnvLoader } from "./service-env.mjs";
 import { imageRefProblem, jobImageFix, pullOffered } from "./image-ref.mjs";
-import { PROXY_STATE_FORMAT, parseProxyState, rulesIncludeEndpoints, shippedProxyDrift } from "./egress-proxy-state.mjs";
+import { PROXY_STATE_FORMAT, parseProxyState, rulesIncludeEndpoints, rulesIncludePrivate, shippedProxyDrift } from "./egress-proxy-state.mjs";
 import { PACKAGED_EGRESS_PROXY_CONF, PACKAGE_VERSION, judgeProxyConfCopy, packageCopyName, readPackagedProxyConf } from "./egress-conf-copy.mjs";
 import { ABSENT, ASSERTED, BACKENDS, DAEMON_APPLIES_BOUNDS, DEFAULT_BACKEND, DOCKER_ENDPOINT_LOCAL, OBSERVATION_FIX, OBSERVATIONS, PODMAN_ADDS_NO_MOUNTS, PODMAN_BACKEND, PODMAN_BOUNDS_DELEGATED, PODMAN_ROOTFUL_WIDENING_KEYS, PODMAN_SERVICE_LOCAL, PROPERTY_NAMES, RUNTIME_ADDS_NO_MOUNTS, HOST_ROUTE_LAN, HOST_ROUTE_REFUTED, HOST_ROUTE_WORKS, backendRefusals, declarationOf, floorShortfall, hostRouteFor, isProxyLocalHost, openshellSetupOf, parseBackendFloor, parseBackendList, unarmedFloor, unobservedFloor, venuesOf } from "./backends.mjs";
 import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_FIRST_START_TIMEOUT_MS, PODMAN_INFO_TIMEOUT_MS, PODMAN_JOB_USER_FIX, decidePodmanJobUser, makePodmanInfoReader, podmanPausable, observePodman, observeRootlessNetns, podmanConfFix, podmanConfWidening, resolvePodmanImageUser } from "./backend-podman.mjs";
@@ -779,7 +780,7 @@ function asText(content, enc) {
  * set is a key the other reads back the same way -- and it is asked for THIS PLATFORM's loader, because
  * the three loaders of this file disagree and a blended reading is wrong for every deployment at once.
  */
-export const ENV_FILE_READABLE_KEYS = Object.freeze(["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_MODEL_ENDPOINTS_FILE", "PI_ENVELOPE_FILE"]);
+export const ENV_FILE_READABLE_KEYS = Object.freeze(["PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_MODEL_ENDPOINTS_FILE", "PI_PRIVATE_ENDPOINTS_FILE", "PI_ENVELOPE_FILE"]);
 
 /**
  * The keys doctor takes from the deployment's `.env` as the SERVICE's values (issue #453, and since issue #471 every key
@@ -967,6 +968,7 @@ export const DOCTOR_SHELL_KEYS = Object.freeze({
 	PI_SCOPED_LIMITS_FILE: "read from .env by its own two-subject rule (ENV_FILE_READABLE_KEYS)",
 	PI_PROJECTS_FILE: "read from .env by its own two-subject rule (ENV_FILE_READABLE_KEYS), #499",
 	PI_MODEL_ENDPOINTS_FILE: "read from .env by its own two-subject rule (ENV_FILE_READABLE_KEYS), #503",
+	PI_PRIVATE_ENDPOINTS_FILE: "read from .env by its own two-subject rule (ENV_FILE_READABLE_KEYS), #918",
 	PI_ENVELOPE_FILE: "read from .env by its own two-subject rule (ENV_FILE_READABLE_KEYS), #504",
 	[VALKEY_SHARED_KEY]: "read from .env ONLY (#464); a value in this shell is named as ignored",
 	...Object.fromEntries(CONSOLE_ENV_KEYS.map((k) => [k, "the operator console's, not a service's: resolved by the console's own rule (this shell, else the deployment .env) apart from the service record, #640"])),
@@ -1262,10 +1264,10 @@ export function envFileKeys(path, keys, { fileExists, readEnvFile, statFile = st
 
 /**
  * The boot-file keys `bootFileEnv` resolves for doctor's other checks: every `ENV_FILE_READABLE_KEYS` key but
- * `PI_MODEL_ENDPOINTS_FILE`, whose checks keep their own rule (`endpointsFileSetting`: this shell's, else the `.env`'s,
+ * `PI_MODEL_ENDPOINTS_FILE` and `PI_PRIVATE_ENDPOINTS_FILE` (issue #918, the same rule), whose checks keep their own rule (`endpointsFileSetting`: this shell's, else the `.env`'s,
  * and a disagreement is no endpoints), read where they are used.
  */
-export const BOOT_FACT_KEYS = Object.freeze(ENV_FILE_READABLE_KEYS.filter((key) => key !== "PI_MODEL_ENDPOINTS_FILE"));
+export const BOOT_FACT_KEYS = Object.freeze(ENV_FILE_READABLE_KEYS.filter((key) => key !== "PI_MODEL_ENDPOINTS_FILE" && key !== "PI_PRIVATE_ENDPOINTS_FILE"));
 
 /**
  * On the environment `bootFileEnv` returns, the keys whose `.env` value doctor could not read while this shell sets none
@@ -1445,6 +1447,44 @@ export const BOOT_FILES = Object.freeze([
 		// The worker's own default when VALKEY_URL is unset, so both refuse an endpoint on 6379 alike.
 		load: (path, io, env) => loadModelEndpoints({ modelEndpointsFile: path, valkeyUrl: env?.VALKEY_URL ?? DEFAULT_VALKEY_URL }, io),
 	}),
+	// Issue #918. Not off when unset, like the model endpoints above: the worker then reads the scaffold in the deployment
+	// folder. The worker loads it at boot (start.mjs, `loadPrivateEndpoints`), so a file that does not load, a named file
+	// that is missing and an empty value all REFUSE THE START. The rule across the two endpoint files, and where the
+	// private folders lie, are doctor's private endpoint lines' to say.
+	Object.freeze({
+		key: "PI_PRIVATE_ENDPOINTS_FILE",
+		noun: "declared private endpoints",
+		scaffold: PRIVATE_ENDPOINTS_FILE_NAME,
+		defaultsToScaffold: true,
+		unsetMeans: `the worker reads ${PRIVATE_ENDPOINTS_FILE_NAME} in the deployment folder`,
+		unit: "endpoint",
+		nothing: "private endpoints",
+		fails: "REFUSES TO START",
+		whenDeleted: `reads ${PRIVATE_ENDPOINTS_FILE_NAME} in the deployment folder instead`,
+		whenEmpty: "turns the worker off",
+		emptyCost: "refuses the boot",
+		resolve: privateEndpointsFilePath,
+		// The worker's own default when VALKEY_URL is unset, so both refuse an endpoint on 6379 alike. And the rule across
+		// the two files, which refuses the boot too (`endpointsOverlap`): judged here whenever the model endpoints' file
+		// loads, since one that does not is its own line's to name.
+		load: (path, io, env) => {
+			const valkeyUrl = env?.VALKEY_URL ?? DEFAULT_VALKEY_URL;
+			const declared = loadPrivateEndpoints({ privateEndpointsFile: path, valkeyUrl }, io);
+			// The model endpoints' file as the SERVICE reads it (`endpointsFileSetting`: this shell's value, else the
+			// `.env`'s), since `PI_MODEL_ENDPOINTS_FILE` is not among the keys a subject's env carries.
+			let model = null;
+			try {
+				const cwd = io?.cwd ?? process.cwd();
+				const setting = endpointsFileSetting({ env: env ?? {}, cwd, readEnv: (p) => (io?.readFileSync ?? readFileSync)(p), exists: (p) => (io?.existsSync ?? existsSync)(p) });
+				if (!setting.error) model = loadModelEndpoints({ modelEndpointsFile: setting.value, valkeyUrl }, io);
+			} catch {
+				model = null;
+			}
+			const overlap = model === null ? [] : endpointsOverlap(model, declared);
+			if (overlap.length > 0) throw configError(`model-endpoints and private-endpoints disagree: ${overlap[0]}`);
+			return declared;
+		},
+	}),
 	// Issue #504 part B. Off when unset: no envelope and no delegation, and every cap is what the operator's rows and
 	// windows set. The worker loads it at boot (start.mjs, `loadEnvelopeChecked`) against the projects and scoped limits
 	// it loaded, with the merged per-job cap, and refuses the start when it lies inside a job path, so this load asks the
@@ -1494,6 +1534,17 @@ function regularOrAbsent(path) {
 /** A key's value when it is a non-empty string, else null: the boot reads an unset key as off. */
 function nonEmpty(value) {
 	return typeof value === "string" && value.trim() !== "" ? value : null;
+}
+
+/**
+ * Issue #918: the fix doctor names for a private endpoint folder problem `init` cannot fix (`proxyFolderProblem`).
+ */
+function privateFolderFix(problem) {
+	if (/differs from the package/.test(problem.problem)) return "squid runs it inside the proxy, and one it cannot run is respawned in a loop that fills its log: `pi-dispatch up` puts the package's copy back (the old one kept beside it)";
+	if (problem.brief === "is a symlink" && problem.kind === "folder") return "the egress proxy mounts wherever it points: make it a folder of the deployment folder (`pi-dispatch init` writes what goes in it)";
+	if (problem.brief === "is a symlink") return "the egress proxy mounts its folder, so the link is followed inside the proxy, where its target is not: remove the link, then `pi-dispatch init` writes the file";
+	const chmod = /`chmod [^`]+`/.exec(problem.problem)?.[0];
+	return `squid's own user must reach it, and a helper it cannot run is respawned in a loop that fills its log: ${chmod ?? "fix its mode"}`;
 }
 
 /**
@@ -4464,7 +4515,8 @@ export async function collectChecks(shellVars, seams) {
 	// The IO the load verdict uses, injected like everything else this file touches: `statFile` for the
 	// regular-file guard and the loaders' own two reads. A test drives a whole deployment through these
 	// without a real file, which is how the fixtures below stay honest about content.
-	const seamsForLoad = { env, statFile: statSeam, loaderIo: { existsSync: (p) => fileExists(p), readFileSync: readEnvFile ? (p, enc) => asText(readEnvFile(p), enc) : readFileSync } };
+	// `cwd` (issue #918): the deployment folder the private endpoints' line resolves the model endpoints' file against.
+	const seamsForLoad = { env, statFile: statSeam, loaderIo: { cwd, existsSync: (p) => fileExists(p), readFileSync: readEnvFile ? (p, enc) => asText(readEnvFile(p), enc) : readFileSync } };
 	// Issue #859: the SERVICE's subject is loaded with the boot keys as the service reads them, from the file alone, so an
 	// envelope in `.env` is judged against the projects and limits the service names, never against this shell's.
 	const serviceSeamsForLoad = { ...seamsForLoad, env: boot.service };
@@ -4743,6 +4795,7 @@ export async function collectChecks(shellVars, seams) {
 	const consoleEnv = { ...env, ...resolveServiceEnv({ env: consoleShell, file: serviceEnvFile, keys: CONSOLE_ENV_KEYS }).env };
 	const consoleLines = consoleChecks(consoleEnv, { cwd, home, platform, folders, skillsDirs });
 	checks.push(...consoleLines);
+
 	// Issue #708: whether a service keeps the console running, and whether it answers. Only for a deployment that has a
 	// console at all (the lines above), so a deployment that never set one up meets no probe.
 	if (consoleLines.length > 0) checks.push(...(await consoleServiceChecks(consoleEnv, { ...seams, cwd, home, platform })));
@@ -4768,6 +4821,39 @@ export async function collectChecks(shellVars, seams) {
 	}
 
 	section("dirs");
+	// Issue #918: the worker refuses to start while a private endpoint folder lies inside a path a job container can see,
+	// or is a symlink (start.mjs, `privateFoldersInsideJobPaths`), so this is a FAILURE naming the folder and the path.
+	// Judged on the job paths the WORKER reads (`envelopeJobPaths`: `PI_TRIGGERS_FILE` as the service reads it, never a
+	// default the worker does not use), as doctor's envelope line is. One the rule cannot read is said, not passed, as
+	// the worker logs it and boots.
+	// Two steps, each with its own failure: the job paths (a triggers file that does not load throws here, and its own
+	// line fails and the worker refuses to boot on it, so nothing more is said), then the rule (a job path it cannot read
+	// throws, the containment rule's configError with no code, and the worker logs it and boots unjudged: said here).
+	let workerPaths = null;
+	try {
+		// A triggers file that is not a regular file (a FIFO would hang the read, #396) is read as none here; its own line
+		// says what it is.
+		const triggersFile = nonEmpty(bootEnv.PI_TRIGGERS_FILE);
+		workerPaths = envelopeJobPaths({ triggersFile: triggersFile !== null && regularOrAbsent(triggersFile) ? triggersFile : null, dispatchRunRoots: delimitedList(bootEnv.PI_DISPATCH_RUN_ROOTS), globalPiDir: nonEmpty(bootEnv.PI_GLOBAL_PI_DIR) });
+	} catch (err) {
+		workerPaths = null;
+		// A file that is there and cannot be read (EACCES, EIO) has no line of its own (`readTriggerFacts` reads it as
+		// none), so the folders its triggers name go unjudged, which is said; everything that does not come from it (the
+		// symlinks, the run roots, PI_GLOBAL_PI_DIR) is still judged below. A file that does not load (a configError) is the
+		// triggers line's, and the worker refuses to boot on it.
+		if (err?.piDispatchConfig !== true) {
+			checks.push({ ok: false, warn: true, label: `private endpoints: whether egress-private/ or a grant folder lies inside a trigger's run.folder or run.skillsDir could not be judged: the triggers file could not be read here (${escapeControls(err?.code ?? "unreadable")}); the run roots and PI_GLOBAL_PI_DIR are still judged`, fix: "run doctor as the account the worker runs as, or make the triggers file readable to this one" });
+			workerPaths = envelopeJobPaths({ triggersFile: null, dispatchRunRoots: delimitedList(bootEnv.PI_DISPATCH_RUN_ROOTS), globalPiDir: nonEmpty(bootEnv.PI_GLOBAL_PI_DIR) });
+		}
+	}
+	if (workerPaths !== null) {
+		try {
+			const exposed = privateFoldersInsideJobPaths(cwd, workerPaths);
+			if (exposed) checks.push({ ok: false, label: `private endpoints: ${privateFolderInsideJobPathSentence(exposed)}`, fix: "the worker REFUSES TO START until no job path holds the folder and it is a folder of its own" });
+		} catch (err) {
+			checks.push({ ok: false, warn: true, label: `private endpoints: whether egress-private/ or a grant folder lies inside a folder a job can see could not be judged (${escapeControls(err?.code ?? err?.message ?? "a job path could not be read")})`, fix: "the worker boots and logs private_endpoint_folder_unjudged: make the trigger folders, run roots, skills folders and PI_GLOBAL_PI_DIR readable here, then run doctor again" });
+		}
+	}
 	// Issue #464: the jobs dir is this account's to write. PI_JOBS_DIR, PI_SANDBOX_DIR and TMPDIR as the service reads them
 	// (TMPDIR in .env is a documented way out of a squatted default root, so doctor judges the root the service will use).
 	let dirRefused = false;
@@ -7766,8 +7852,9 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 	}
 	// Issue #503's governing rule: what the third mount and the include file cost is decided by whether the rules this
 	// proxy runs (the folder's deploy/egress-proxy.conf) include the file. `includeNeeds` is a seam for tests.
-	const { includeNeeds = ({ env: e, cwd, platform }) => ({ rulesInclude: rulesFileIncludes(join(cwd, "deploy/egress-proxy.conf"), { readFileSync }), endpointsDeclared: endpointsDeclaredIn({ env: e, cwd, fs: { readFileSync, existsSync }, platform }) }) } = seams;
-	const needs = !custom && inFolder ? includeNeeds({ env, cwd: seams.cwd, platform: seams.platform ?? process.platform }) : { rulesInclude: false, endpointsDeclared: false };
+	// Issue #918: and whether they include the private endpoints' file, which needs the private folder and the grant folder.
+	const { includeNeeds = ({ env: e, cwd, platform }) => ({ rulesInclude: rulesFileIncludes(join(cwd, "deploy/egress-proxy.conf"), { readFileSync }), rulesIncludePrivate: rulesFileIncludes(join(cwd, "deploy/egress-proxy.conf"), { readFileSync }, rulesIncludePrivate), endpointsDeclared: endpointsDeclaredIn({ env: e, cwd, fs: { readFileSync, existsSync }, platform }) }) } = seams;
+	const needs = !custom && inFolder ? includeNeeds({ env, cwd: seams.cwd, platform: seams.platform ?? process.platform }) : { rulesInclude: false, rulesIncludePrivate: false, endpointsDeclared: false };
 	if (!custom && inFolder) {
 		// MISSING in a deployment folder: ✗ when the rules include it, since squid then refuses to start (measured); ⚠
 		// otherwise, since a proxy on rules from before #503 runs without it, and the rules refresh needs it.
@@ -7776,6 +7863,30 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 				needs.rulesInclude
 					? { ok: false, label: `${MODEL_ENDPOINTS_INCLUDE_NAME} is not in this folder`, fix: `the egress proxy mounts it and its rules include it, and squid will not start without it: \`pi-dispatch init\` writes it (create-only), then \`pi-dispatch up\` starts the proxy` }
 					: { ok: false, warn: true, label: `${MODEL_ENDPOINTS_INCLUDE_NAME} is not in this folder`, fix: "the proxy's rules here predate #503 and run without it, but the next rules refresh includes it and the proxy will not start without it then: `pi-dispatch init` writes it (create-only)" },
+			);
+		}
+		// Issue #918: the private endpoints' folder (their include and the grant helper squid runs as its own user) and the
+		// Docker proxy's grant folder, by the rule `up` and `service install` use (`proxyFolderProblem`): ✗ when the rules
+		// include the private include, since squid then will not start without it; ⚠ otherwise, since the next rules
+		// refresh brings it. A helper squid cannot run is ✗ either way: a request to a private endpoint makes squid
+		// respawn it in a loop (DES-PRIVATE-ENDPOINT-GRANTS).
+		const { privateFolderProblem = (cwd) => proxyFolderProblem({ existsSync, statSync, lstatSync, readFileSync }, cwd, { runtime: "docker", skip: ["egress-allowlist.conf", "deploy/egress-proxy.conf", MODEL_ENDPOINTS_INCLUDE_NAME], platform: seams.platform ?? process.platform }) } = seams;
+		const privateProblem = privateFolderProblem(seams.cwd);
+		if (privateProblem) {
+			const said = `${privateProblem.name} ${privateProblem.missing ? `is not in this folder` : privateProblem.brief}`;
+			// A missing path or the wrong kind is `init`'s to write, and matters once the rules include the file. Anything else
+			// (a helper that differs or cannot be run, a folder squid's user cannot enter, a symlink) is ✗ whatever the rules
+			// say: squid respawns a helper it cannot run in a loop on the first request to a private endpoint, and `init` keeps
+			// what is there, so the fix is the problem's own.
+			const initFix = privateProblem.missing || privateProblem.brief === "is a directory" || privateProblem.brief === "is not a folder";
+			// `init` writes only what is missing, and refuses a name another kind of thing holds, so that is removed first.
+			const initWrites = privateProblem.missing ? "`pi-dispatch init` writes it (create-only)" : "remove what holds the name, then `pi-dispatch init` writes it";
+			checks.push(
+				!initFix
+					? { ok: false, label: said, fix: privateFolderFix(privateProblem) }
+					: needs.rulesIncludePrivate
+						? { ok: false, label: said, fix: `the egress proxy mounts it and its rules ${privateProblem.why === "the proxy's rules include it" ? "include it" : "run the helper there"}, so the proxy cannot carry private endpoints without it: ${initWrites}, then \`pi-dispatch up\` starts the proxy` }
+						: { ok: false, warn: true, label: said, fix: `the proxy's rules here predate #918 and run without it, but the next rules refresh includes the private endpoints' file and the proxy will not start without it then: ${initWrites}` },
 			);
 		}
 		// Endpoints declared under rules that predate #503: the one line up, doctor and egress render share.
@@ -7794,7 +7905,7 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 		const addresses = hostAddresses();
 		checks.push(...endpointRouteChecks({ runtime: runtime && addresses ? { ...runtime, hostAddresses: addresses } : runtime, endpoints, prefix: "", proof: "The endpoint probes below are the proof, once the proxy runs and the job image is here." }));
 	}
-	const judged = !custom && parsed ? shippedProxyDrift(parsed, { cwd: seams.cwd, platform: seams.platform ?? process.platform, realpath: (p) => realpathSync(p), compareMounts: inFolder, rulesInclude: needs.rulesInclude }) : { drift: [], unknown: null };
+	const judged = !custom && parsed ? shippedProxyDrift(parsed, { cwd: seams.cwd, platform: seams.platform ?? process.platform, realpath: (p) => realpathSync(p), compareMounts: inFolder, rulesInclude: needs.rulesInclude, rulesIncludePrivate: needs.rulesIncludePrivate === true }) : { drift: [], unknown: null };
 	// What `up` does with it, told the way `up` decides it (PR #456's final check): a proxy stale by its image, entrypoint
 	// or command is offered for replacement whatever its mounts; one stale on its mounts alone is not while one of its own
 	// two mounts is unknown, so the fix names the commands rather than an offer that `up` would not make.

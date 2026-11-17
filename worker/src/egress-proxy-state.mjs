@@ -19,7 +19,8 @@
  *     only thing that makes a missing third mount drift. Endpoints declared under rules without the include are NOT
  *     drift: replacing the proxy would cut every tunnel and change nothing, since its rules still lack the include.
  *     That state is the rules refresh's to fix, and `up`, `doctor` and `egress render` name it alike
- *     (`rulesPredateEndpointsLine` in egress-cli.mjs).
+ *     (`rulesPredateEndpointsLine` in egress-cli.mjs). Issue #918's two folders follow the same rule: compared when
+ *     they are mounted, and their absence is drift only when this folder's rules include `private-endpoints.conf`.
  *
  * MEASURED (Docker Engine 29.8.1, compose 5.5.1, rootful, gate round 2; pinned in egress-proxy-state.test.mjs): a proxy
  * made by `docker compose --profile egress up -d` and one made by `up`'s argv carry the pinned reference exactly as
@@ -66,11 +67,46 @@ const ALLOWLIST = "/etc/pi-dispatch/allowlist.conf";
 export const MODEL_ENDPOINTS_TARGET = "/etc/pi-dispatch/model-endpoints.conf";
 
 /**
+ * The private endpoints' folders (issue #918, DES-PRIVATE-ENDPOINT-GRANTS), named HERE, beside the proxy's other mounts,
+ * because this module is the one that judges them and it imports nothing of this project's (the console's setup path
+ * imports it). `private-endpoints.mjs` re-exports them.
+ *
+ *   - `egress-private/`, mounted read-only at `PRIVATE_DIR_TARGET`: the rendered `private-endpoints.conf` the rules
+ *     include, and the shipped grant helper `endpoint-grant` that include runs. A DIRECTORY mount, so the include can
+ *     be written by rename (a single-file mount holds the old inode, the trap #503's in-place write exists for).
+ *   - `egress-grants/<venue>/`, mounted read-only at `GRANTS_TARGET` in that runtime's proxy: the grants the worker
+ *     writes, one file per address. Per runtime because `PI_BACKENDS=local,podman` runs two proxies and two address
+ *     allocators against one folder, and an address is unique within one daemon only.
+ */
+export const PRIVATE_DIR_NAME = "egress-private";
+export const PRIVATE_INCLUDE_NAME = "private-endpoints.conf";
+export const GRANT_HELPER_NAME = "endpoint-grant";
+export const GRANTS_DIR_NAME = "egress-grants";
+export const GRANT_VENUES = Object.freeze(["local", "podman"]);
+export const PRIVATE_DIR_TARGET = "/etc/pi-dispatch/private";
+export const PRIVATE_INCLUDE_TARGET = `${PRIVATE_DIR_TARGET}/${PRIVATE_INCLUDE_NAME}`;
+export const GRANT_HELPER_TARGET = `${PRIVATE_DIR_TARGET}/${GRANT_HELPER_NAME}`;
+export const GRANTS_TARGET = "/etc/pi-dispatch/grants";
+
+/**
  * Whether a copy of the proxy's rules `include`s the model endpoints' file (issue #503): an uncommented include line
  * naming exactly that path. A copy from before #503 does not, and a proxy started on it needs no third mount.
  */
 export function rulesIncludeEndpoints(text) {
-	return new RegExp(`^[ \\t]*include[ \\t]+${MODEL_ENDPOINTS_TARGET.replace(/[.]/g, "\\.")}[ \\t]*$`, "m").test(String(text ?? ""));
+	return includesPath(text, MODEL_ENDPOINTS_TARGET);
+}
+
+/**
+ * Whether a copy of the proxy's rules `include`s the private endpoints' file (issue #918), which lives in the folder
+ * mounted at `PRIVATE_DIR_TARGET`, beside the grant helper it runs. A copy from before #918 does not, and a proxy
+ * started on it needs neither of the two folders #918 mounts.
+ */
+export function rulesIncludePrivate(text) {
+	return includesPath(text, PRIVATE_INCLUDE_TARGET);
+}
+
+function includesPath(text, path) {
+	return new RegExp(`^[ \\t]*include[ \\t]+${path.replace(/[.]/g, "\\.")}[ \\t]*$`, "m").test(String(text ?? ""));
 }
 
 /**
@@ -116,10 +152,13 @@ const sameList = (a, b) => Array.isArray(a) && a.length === b.length && a.every(
  * command alone, for a caller that does not know which folder the service uses. `platform` decides whether a source
  * that does not resolve can be a path of the runtime's own VM (below). `rulesInclude` (this folder's rules include the
  * model endpoints' file, `rulesIncludeEndpoints`) makes an absent third mount drift (issue #503); without it, a proxy
- * mounting the two files is current, as every proxy made before #503 does. `outOfDate` is true when the missing third
- * mount is the ONLY drift: the proxy is this folder's, made before #503.
+ * mounting the two files is current, as every proxy made before #503 does. `rulesIncludePrivate` does the same for the
+ * two folders issue #918 mounts (`rulesIncludePrivate`): the private endpoints' folder and THIS runtime's grant folder,
+ * `grantsVenue` (`local` for the Docker proxy, `podman` for the rootless one), since an address is unique within one
+ * daemon only. `outOfDate` is true when missing mounts that an include needs are the ONLY drift: the proxy is this
+ * folder's, made before #503 or #918.
  */
-export function shippedProxyDrift(state, { cwd, realpath = (p) => p, compareMounts = true, platform = "linux", rulesInclude = false }) {
+export function shippedProxyDrift(state, { cwd, realpath = (p) => p, compareMounts = true, platform = "linux", rulesInclude = false, rulesIncludePrivate = false, grantsVenue = "local" }) {
 	const drift = [];
 	if (digestOf(state.image) !== digestOf(EGRESS_PROXY_IMAGE)) drift.push(`it was created from ${state.image || "an unnamed image"}, not the pinned ${EGRESS_PROXY_IMAGE}`);
 	if (!sameList(state.entrypoint, EGRESS_PROXY_ENTRYPOINT)) drift.push(`its entrypoint is ${JSON.stringify(state.entrypoint)}, not the image's ${JSON.stringify(EGRESS_PROXY_ENTRYPOINT)}`);
@@ -152,10 +191,22 @@ export function shippedProxyDrift(state, { cwd, realpath = (p) => p, compareMoun
 	const endpointsWant = resolve(cwd, "model-endpoints.conf");
 	const endpointsBind = binds.find((m) => m.destination === MODEL_ENDPOINTS_TARGET);
 	if (endpointsBind) expected[MODEL_ENDPOINTS_TARGET] = endpointsWant;
-	let includeMissing = false;
+	let includeMissing = 0;
 	if (!endpointsBind && rulesInclude) {
-		includeMissing = true;
+		includeMissing += 1;
 		drift.push(`nothing is mounted at ${MODEL_ENDPOINTS_TARGET}, where ${endpointsWant} belongs: this folder's rules include it, and squid will not start again without it`);
+	}
+	// Issue #918's two folders, the same way: compared when they are there, and missing only when the rules need them.
+	const privateWants = {
+		[PRIVATE_DIR_TARGET]: [resolve(cwd, PRIVATE_DIR_NAME), "this folder's rules include its private-endpoints.conf, and squid will not start again without it"],
+		[GRANTS_TARGET]: [resolve(cwd, GRANTS_DIR_NAME, grantsVenue), "the private endpoints' grant helper reads the worker's grants there, and without it no job is ever granted one"],
+	};
+	for (const [destination, [want, why]] of Object.entries(privateWants)) {
+		if (binds.some((m) => m.destination === destination)) expected[destination] = want;
+		else if (rulesIncludePrivate) {
+			includeMissing += 1;
+			drift.push(`nothing is mounted at ${destination}, where ${want} belongs: ${why}`);
+		}
 	}
 	const unknownSources = [];
 	for (const [destination, want] of Object.entries(expected)) {
@@ -172,7 +223,7 @@ export function shippedProxyDrift(state, { cwd, realpath = (p) => p, compareMoun
 	}
 	const unknown = unknownSources.length > 0 ? `${unknownSources.join(", ")} ${unknownSources.length === 1 ? "is a path" : "are paths"} this host cannot resolve (the runtime's own VM's, as Docker Desktop reports its sources), so ${unknownSources.length === 1 ? "that mount cannot" : "those mounts cannot"} be compared from here` : null;
 	// `outOfDate` only when true, so a current proxy's judgement keeps its two-key shape.
-	return includeMissing && drift.length === 1 && unknown === null ? { drift, unknown, outOfDate: true } : { drift, unknown };
+	return includeMissing > 0 && drift.length === includeMissing && unknown === null ? { drift, unknown, outOfDate: true } : { drift, unknown };
 }
 
 /** The job and sandbox networks attached to the proxy, which a removal would cut off (issue #453, gate round 2). */

@@ -289,6 +289,30 @@ pause flag, the delayed score, the run ids of a cron trigger) is in one module, 
 checked against that version by its tests. Never roll back across a release that moved the BullMQ pin while jobs are
 queued: an older BullMQ need not read what a newer one wrote. The release notes name such a bump.
 
+## Pending release: private endpoints
+
+Issue #918 adds private endpoints: a host and one TCP port on your network that only the jobs of the triggers naming
+it may reach through the egress proxy. The proxy gains two read-only folder mounts, `egress-private/` (the rendered
+rules and the grant helper they run) and this runtime's `egress-grants/` folder, and its rules gain one `include`.
+Follow [the normal order](#the-order), then in each deployment folder:
+
+1. `pi-dispatch init` adds `private-endpoints.json`, `egress-private/` and `egress-grants/` (it never overwrites).
+2. `pi-dispatch up` offers the rules refresh and the proxy's replacement as one step, asked once, as it did for the
+   model endpoints' include. Replacing the proxy cuts off running jobs, so pause first. On the rootless Podman venue,
+   `pi-dispatch service install --force` refreshes the account's rules and the unit together. With compose, use the
+   new compose file, then `docker compose ... --profile egress up -d` recreates the proxy.
+
+Until then, the proxy keeps the rules it has and nothing changes for any job; `pi-dispatch egress render` refuses to
+write a private endpoint the running proxy cannot carry, and doctor names the step. `up` puts the package's grant
+helper back whenever this folder's copy differs, keeping the old one beside it. No existing file is rewritten, and
+nothing older is detected: these are new stores.
+
+One new boot refusal: the worker no longer starts while `egress-private/` or a folder in `egress-grants/` lies inside a
+cron trigger's `run.folder`, a `PI_DISPATCH_RUN_ROOTS` root, a `run.skillsDir` or `PI_GLOBAL_PI_DIR` (a deployment
+folder inside one of them, say), or is a symlink, because a job there could grant itself a private endpoint. Run
+`pi-dispatch doctor` before you restart the worker: it names the folder and the path. See
+[Private endpoints](egress.md#private-endpoints).
+
 ## 5.3.3: trigger merge permission
 
 Issue #908 adds opt-in `run.mayMerge` to reviewed forge-flow triggers. Before adding it, follow
@@ -363,6 +387,13 @@ Random pools require `triggers.json` version 6 and queued job-data version 7 (`m
 Back up the new `dispatch:model-selection:v1:*` state with its BullMQ jobs. Active choices have no expiry; terminal choices use the existing finished model-state retention, and Retry preserves them. Do not delete a choice to force another draw: create a fresh run after checking the original. Saved parked sessions gain a bounded version-1 `model-selection` sidecar coupled to their exact transcript. Preserve it with the session and approval stores. Missing or mismatched binding refuses a random continuation.
 
 Random checkpoints add a separate `cp-N/model-selection.json` annotation bound to the unchanged manifest bytes. Preserve it with the snapshot; random recovery refuses if the annotation is missing, and holds a newer version. No older version of these new stores exists to detect or migrate. The optional `resetAt` field on defer records preserves known availability separately from polling; older records omit it and newer readers report an unknown reset. This additive display field needs no state cleanup. Optional run-record selection facts are additive; historical records without them remain valid and do not need cleanup. A rollback must restore the corresponding queue/config/session backup or remove random policies only after their jobs and continuations are settled. Legacy failover state, subscription observations and approval request formats are unchanged. See [random pools](triggers.md#choosing-randomly-from-a-reviewed-pool) and [backup.md](backup.md).
+
+#### Private endpoints (#918)
+
+`private-endpoints.json` (`PI_PRIVATE_ENDPOINTS_FILE`) is a new store, version 1, which an older release never reads.
+`egress-private/` holds what `egress render` and `init` write from it and from the package; `egress-grants/` holds
+one grant per running job, written and removed by the worker, and is not backed up. The steps are
+[above](#pending-release-private-endpoints).
 
 ### 5.3.3
 

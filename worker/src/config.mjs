@@ -572,6 +572,7 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		sandboxIdleMinutes: nonNegativeInt(env, "PI_SANDBOX_IDLE_MINUTES", 30), // bash's own TMOUT inside a sandbox; 0 = no idle logout
 		triggersFile: env.PI_TRIGGERS_FILE ?? null, // DES-CRON-VIA-BULLMQ-SCHEDULER: unified triggers file; null = cron disabled for the worker (it selects on.type:"cron")
 		pauseWindowsFile: pauseWindowsFilePath(env), // REQ-SCOPED-PAUSE-WINDOWS: per-folder/repo timed pause; null = no scoped pauses
+		privateEndpointsFile: privateEndpointsFilePath(env), // issue #918: the declared private endpoints (INT-PRIVATE-ENDPOINTS-FILE-CONTRACT); null = private-endpoints.json in the deployment folder, and a missing default file declares none
 		modelEndpointsFile: modelEndpointsFilePath(env), // issue #503: the declared model endpoints (INT-MODEL-ENDPOINTS-FILE-CONTRACT); null = model-endpoints.json in the deployment folder, and a missing default file declares none
 		envelopeFile: envelopeFilePath(env), // issue #504: the allocation envelope (INT-ENVELOPE-FILE-CONTRACT); null = no envelope and no delegation anywhere
 		projectsFile: projectsFilePath(env), // issue #499: named groups of repos and folders (INT-PROJECTS-FILE-CONTRACT); null = no projects, and every record's project is null
@@ -1228,6 +1229,12 @@ export function envelopeFilePath(env = process.env) {
  *  default file in its place. Unlike them, null does not turn anything off: it means the deployment folder's file. */
 export function modelEndpointsFilePath(env = process.env) {
 	return env.PI_MODEL_ENDPOINTS_FILE ?? null;
+}
+
+/** Issue #918, read exactly as `modelEndpointsFilePath` is: an empty value is a value the loader refuses, and null means
+ *  the deployment folder's `private-endpoints.json`. */
+export function privateEndpointsFilePath(env = process.env) {
+	return env.PI_PRIVATE_ENDPOINTS_FILE ?? null;
 }
 
 export function logsDirPath(env = process.env, home) {

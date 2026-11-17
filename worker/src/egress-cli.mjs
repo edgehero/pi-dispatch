@@ -22,22 +22,26 @@
  * addresses, and keeps every open tunnel, so a running job is not cut off. A restart kills every tunnel, takes about
  * 11 s with this image, and changes the proxy's addresses on Podman.
  */
-import { closeSync, constants as fsConstants, fstatSync, ftruncateSync, lstatSync, openSync, readFileSync, fsyncSync, writeSync, existsSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { chmodSync, closeSync, constants as fsConstants, fstatSync, ftruncateSync, lstatSync, openSync, readFileSync, fsyncSync, writeSync, existsSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { venuesOf } from "./backends.mjs";
 import { DEFAULT_VALKEY_URL } from "./config.mjs";
 import { deploymentVenueEnv } from "./deployment-venue.mjs";
 import { egressArmed, egressProxyName } from "./egress.mjs";
-import { rulesIncludeEndpoints } from "./egress-proxy-state.mjs";
+import { GRANT_HELPER_TARGET, GRANTS_TARGET, PRIVATE_DIR_NAME, PRIVATE_DIR_TARGET, PRIVATE_INCLUDE_NAME, PROXY_STATE_FORMAT, parseProxyState, rulesIncludeEndpoints, rulesIncludePrivate } from "./egress-proxy-state.mjs";
 import { proxyConfCopyPath } from "./podman-stack.mjs";
 import { readEnvAssignments } from "./env-file.mjs";
 import { MODEL_ENDPOINTS_INCLUDE_NAME, loadModelEndpoints, renderEndpointsInclude } from "./model-endpoints.mjs";
+import { endpointsOverlap, loadPrivateEndpoints, renderPrivateInclude } from "./private-endpoints.mjs";
 import { valkeyClientContext } from "./valkey-endpoint.mjs";
 
 const USAGE = `pi-dispatch egress render
     write model-endpoints.conf in this deployment folder from model-endpoints.json (PI_MODEL_ENDPOINTS_FILE
-    overrides), in place, then print the command that reloads the egress proxy. It never reloads the proxy itself.
+    overrides), in place, and egress-private/private-endpoints.conf from private-endpoints.json
+    (PI_PRIVATE_ENDPOINTS_FILE overrides), then print the command that reloads the egress proxy. It never reloads
+    the proxy itself.
 `;
 
 /** The reload, for one runtime and one proxy name: a reconfigure, never a restart (see the header). */
@@ -46,37 +50,48 @@ export function reloadCommand(bin, proxy) {
 }
 
 /**
- * PI_MODEL_ENDPOINTS_FILE as the service reads it: this shell's value where it sets one, else the deployment `.env`'s.
- * Both set differently is refused, since the service runs the file's and a render of the other file would write rules
- * the worker does not believe in. A `.env` line this reader cannot vouch for is refused too. Returns `{ value }`
- * (null for unset) or `{ error }`.
+ * A deployment file's path setting as the service reads it: this shell's value where it sets one, else the deployment
+ * `.env`'s. Both set differently is refused, since the service runs the file's and a render of the other file would
+ * write rules the worker does not believe in. A `.env` line this reader cannot vouch for is refused too. Returns
+ * `{ value }` (null for unset) or `{ error }`. `key` is `PI_MODEL_ENDPOINTS_FILE` or, issue #918, `PI_PRIVATE_ENDPOINTS_FILE`;
+ * `what` names the declaration in the error.
  */
-export function endpointsFileSetting({ env, cwd, platform = process.platform, readEnv = (p) => readFileSync(p), exists = existsSync }) {
+export function fileSetting(key, what, { env, cwd, platform = process.platform, readEnv = (p) => readFileSync(p), exists = existsSync }) {
 	const envPath = join(cwd, ".env");
-	const shell = typeof env.PI_MODEL_ENDPOINTS_FILE === "string" ? env.PI_MODEL_ENDPOINTS_FILE : null;
+	const shell = typeof env[key] === "string" ? env[key] : null;
 	let file = null;
 	if (exists(envPath)) {
 		let text;
 		try {
 			text = String(readEnv(envPath));
 		} catch (err) {
-			return { error: `${envPath} could not be read (${err?.code ?? err?.message}), so where the declared model endpoints are is not known` };
+			return { error: `${envPath} could not be read (${err?.code ?? err?.message}), so where ${what} are is not known` };
 		}
 		const loader = platform === "linux" ? "systemd" : platform === "win32" ? "cmd" : "shell";
-		const found = readEnvAssignments(text, ["PI_MODEL_ENDPOINTS_FILE"], { loader }).PI_MODEL_ENDPOINTS_FILE;
+		const found = readEnvAssignments(text, [key], { loader })[key];
 		if (found) {
-			if (!found.plain) return { error: `${envPath} line ${found.line} sets PI_MODEL_ENDPOINTS_FILE in a way this command cannot read the same as the service does: write it as a plain KEY=value line` };
+			if (!found.plain) return { error: `${envPath} line ${found.line} sets ${key} in a way this command cannot read the same as the service does: write it as a plain KEY=value line` };
 			file = found.value;
 		}
 	}
 	// Compared as the paths they name, resolved against the deployment folder as the loader resolves them, so
 	// `./x.json` and `x.json` agree.
 	if (shell !== null && file !== null && (shell === "" || file === "" ? shell !== file : resolve(cwd, shell) !== resolve(cwd, file))) {
-		return { error: `PI_MODEL_ENDPOINTS_FILE is ${JSON.stringify(shell)} in this shell and ${JSON.stringify(file)} in ${envPath}, and the service reads the file's. Make them agree, or unset it in this shell` };
+		return { error: `${key} is ${JSON.stringify(shell)} in this shell and ${JSON.stringify(file)} in ${envPath}, and the service reads the file's. Make them agree, or unset it in this shell` };
 	}
 	// Set in this shell alone: the service does not see it, so its worker reads another file than this render did.
-	const note = shell !== null && file === null ? `PI_MODEL_ENDPOINTS_FILE comes from this shell only, and the service reads ${envPath}, which does not set it: put it in ${envPath}, or the worker reads another file than this render did` : null;
+	const note = shell !== null && file === null ? `${key} comes from this shell only, and the service reads ${envPath}, which does not set it: put it in ${envPath}, or the worker reads another file than this render did` : null;
 	return { value: shell ?? file, note };
+}
+
+/** PI_MODEL_ENDPOINTS_FILE as the service reads it (`fileSetting`). */
+export function endpointsFileSetting(opts) {
+	return fileSetting("PI_MODEL_ENDPOINTS_FILE", "the declared model endpoints", opts);
+}
+
+/** Issue #918: PI_PRIVATE_ENDPOINTS_FILE as the service reads it, by the same rule (`fileSetting`). */
+export function privateEndpointsFileSetting(opts) {
+	return fileSetting("PI_PRIVATE_ENDPOINTS_FILE", "the declared private endpoints", opts);
 }
 
 /** VALKEY_URL as the service reads it (the `.env`'s, else this shell's, else the default), for the port refusal. */
@@ -142,6 +157,87 @@ export function writeInPlace(path, text, fs = { openSync, fstatSync, ftruncateSy
 }
 
 /**
+ * What is at the private endpoints' folder (issue #918), by lstat: null for a real folder holding the include as a
+ * regular file, else the sentence naming what is there and what to do. The folder is the proxy's mount, so a symlinked
+ * folder would put the include wherever the link points, and init refuses it for the same reason.
+ */
+export function privateDirProblem(cwd, { lstat = lstatSync } = {}) {
+	const dir = join(cwd, PRIVATE_DIR_NAME);
+	let st;
+	try {
+		st = lstat(dir);
+	} catch (err) {
+		if (err?.code === "ENOENT") return `${dir}/ does not exist: \`pi-dispatch init\` in the deployment folder writes it, and the egress proxy mounts it from there. Run this command from that folder`;
+		return `${dir}/ could not be read (${err?.code ?? err?.message})`;
+	}
+	if (st.isSymbolicLink() || !st.isDirectory()) return `${dir} is ${st.isSymbolicLink() ? "a symlink" : "not a directory"}: the proxy mounts the folder itself. Make it a directory of this folder, then \`pi-dispatch init\` writes what goes in it`;
+	return includePathProblem(join(dir, PRIVATE_INCLUDE_NAME), { lstat });
+}
+
+/**
+ * Write `text` to the private endpoints' include BY RENAME (issue #918): a temp file beside it, created exclusively,
+ * made 0644, synced, then renamed over the include. The proxy mounts the FOLDER, which sees the rename, so the whole new
+ * file replaces the old one at once and a reader never sees half of it. The temp file is removed when anything fails.
+ */
+export function writeByRename(path, text, fs = { writeFileSync, chmodSync, openSync, fsyncSync, closeSync, renameSync, rmSync }) {
+	const tmp = `${path}.render-${process.pid}`;
+	try {
+		fs.writeFileSync(tmp, text, { flag: "wx", mode: 0o644 });
+		// 0644 whatever the umask: squid reads the include as its own `proxy` user, and a 0600 one is a reload that fails.
+		fs.chmodSync(tmp, 0o644);
+		const fd = fs.openSync(tmp, "r");
+		try {
+			fs.fsyncSync(fd);
+		} finally {
+			fs.closeSync(fd);
+		}
+		fs.renameSync(tmp, path);
+	} catch (e) {
+		try {
+			fs.rmSync(tmp, { force: true });
+		} catch {
+			// best effort: a leftover temp file is named by its pid and read by nothing
+		}
+		throw e;
+	}
+}
+
+/** One bounded, synchronous command for the checks below: `{ code, stdout }`, `code` null when it could not run. */
+function runQuiet(bin, args, { input = "" } = {}) {
+	const res = spawnSync(bin, args, { input, encoding: "utf8", timeout: 15_000, maxBuffer: 256 * 1024 });
+	return { code: typeof res.status === "number" ? res.status : null, stdout: String(res.stdout ?? "") };
+}
+
+/**
+ * Whether the shipped proxy of one runtime can carry declared private endpoints (issue #918), BEFORE a render that
+ * declares any is written: its rules include the private include, it mounts the private folder and its grant folder,
+ * and the grant helper answers there as squid's own user. A helper squid cannot run is respawned in a loop that fills
+ * its log, and a request to a private endpoint is what starts it (measured, DES-PRIVATE-ENDPOINT-GRANTS), so a rule
+ * that would run it is not written while it does not answer. `{ refusal }` names what is wrong and the step that fixes
+ * it; `{ note }` says what could not be checked (no proxy running: \`up\` and doctor check it once it runs); `{}` is
+ * ready.
+ */
+export function privateProxyReadiness(venue, { cwd, home, proxy = "pi-dispatch-egress-proxy", exists = existsSync, readRules = (p, enc) => readFileSync(p, enc), run = runQuiet }) {
+	const bin = venue === "podman" ? "podman" : "docker";
+	const fix = venue === "podman" ? "`pi-dispatch service install --force`" : "`pi-dispatch up`, and accept the refresh";
+	const rules = runningRulesPath(venue, { cwd, home });
+	if (exists(rules) && !rulesFileIncludes(rules, { readFileSync: readRules }, rulesIncludePrivate)) {
+		return { refusal: `the ${venue === "podman" ? "podman proxy's rules (~/.config/pi-dispatch/egress-proxy.conf)" : "proxy's rules (deploy/egress-proxy.conf)"} predate #918 and do not include ${PRIVATE_INCLUDE_NAME}, so a private endpoint would stay unreachable: ${fix}, then render again` };
+	}
+	const inspect = run(bin, ["inspect", PROXY_STATE_FORMAT, proxy]);
+	const state = inspect.code === 0 ? parseProxyState(inspect.stdout) : null;
+	if (state?.status !== "running") return { note: `${proxy} is not running under ${bin}, so its grant helper was not checked: \`pi-dispatch up\` and \`pi-dispatch doctor\` check it once it runs` };
+	const missing = [PRIVATE_DIR_TARGET, GRANTS_TARGET].filter((target) => !state.mounts.some((m) => m.type === "bind" && m.destination === target));
+	if (missing.length > 0) return { refusal: `${proxy} mounts nothing at ${missing.join(" or ")}: it was started before #918, so its rules could not run the grant helper. ${fix} replaces it, then render again` };
+	// A line no grant can match: the helper must read it and answer ERR, which proves it runs as squid's user.
+	const probe = run(bin, ["exec", "-i", "--user", "proxy", proxy, GRANT_HELPER_TARGET], { input: "0.0.0.0 pi-dispatch-render-check\n" });
+	if (probe.code !== 0 || probe.stdout.trim() !== "ERR") {
+		return { refusal: `the grant helper ${GRANT_HELPER_TARGET} does not answer inside ${proxy} as squid's user (exit ${probe.code ?? "none"}), and squid would respawn it in a loop on the first request to a private endpoint: make ${join(cwd, PRIVATE_DIR_NAME, "endpoint-grant")} the package's copy, mode 0755 (\`pi-dispatch init\` writes it when it is missing), then render again` };
+	}
+	return {};
+}
+
+/**
  * The reload lines for this deployment's venues: docker's for the docker venue (Docker Engine, Docker Desktop, and
  * rootful Podman through its Docker API, all reached as `docker`), podman's for the native rootless one. Both when
  * the deployment runs both. The proxy's name is PI_EGRESS_PROXY's when it names the operator's own proxy, which then
@@ -177,6 +273,10 @@ export async function runEgress(argv = [], deps = {}) {
 		valkeyUrl = serviceValkeyUrl,
 		home = homedir(),
 		readRules = (p, enc) => readFileSync(p, enc),
+		// Issue #918: the private endpoints' loader, writer and the proxy readiness check.
+		loadPrivate = loadPrivateEndpoints,
+		writePrivate = writeByRename,
+		readiness = privateProxyReadiness,
 	} = deps;
 	const sub = argv[0];
 	if (sub === undefined || sub === "--help" || sub === "-h" || sub === "help") {
@@ -197,15 +297,31 @@ export async function runEgress(argv = [], deps = {}) {
 		return 1;
 	}
 	if (setting.note) out(`⚠ ${setting.note}\n`);
+	// Issue #918: the private endpoints' file, by the same rule.
+	const privateSetting = privateEndpointsFileSetting({ env, cwd, platform, readEnv, exists });
+	if (privateSetting.error) {
+		err(`✗ ${privateSetting.error}\n`);
+		return 1;
+	}
+	if (privateSetting.note) out(`⚠ ${privateSetting.note}\n`);
 	const path = join(cwd, MODEL_ENDPOINTS_INCLUDE_NAME);
-	// Validated and rendered in memory BEFORE the include is touched: a refused declaration leaves the rules in force.
+	const privatePath = join(cwd, PRIVATE_DIR_NAME, PRIVATE_INCLUDE_NAME);
+	// Validated and rendered in memory BEFORE either include is touched: a refused declaration leaves the rules in force.
+	// Both files together (issue #918, `endpointsOverlap`): a server declared in both would not be private.
 	let text;
 	let endpoints;
+	let privateText;
+	let declared;
 	try {
-		endpoints = load({ modelEndpointsFile: setting.value, valkeyUrl: valkeyUrl({ env, cwd }) }, { cwd });
+		const valkey = valkeyUrl({ env, cwd });
+		endpoints = load({ modelEndpointsFile: setting.value, valkeyUrl: valkey }, { cwd });
+		declared = loadPrivate({ privateEndpointsFile: privateSetting.value, valkeyUrl: valkey }, { cwd });
+		const overlap = endpointsOverlap(endpoints, declared);
+		if (overlap.length > 0) throw new Error(`model-endpoints and private-endpoints disagree: ${overlap[0]}`);
 		text = renderEndpointsInclude(endpoints);
+		privateText = renderPrivateInclude(declared);
 	} catch (e) {
-		err(`✗ ${e?.message ?? e}\n${exists(path) ? `${MODEL_ENDPOINTS_INCLUDE_NAME} was not changed.` : `Nothing was written.`}\n`);
+		err(`✗ ${e?.message ?? e}\n${exists(path) ? `${MODEL_ENDPOINTS_INCLUDE_NAME} was not changed, nor was ${PRIVATE_DIR_NAME}/${PRIVATE_INCLUDE_NAME}.` : "Nothing was written."}\n`);
 		return 1;
 	}
 	const problem = includePathProblem(path, { lstat });
@@ -213,14 +329,54 @@ export async function runEgress(argv = [], deps = {}) {
 		err(`✗ ${problem}\n`);
 		return 1;
 	}
-	let current = null;
-	try {
-		current = String(readInclude(path));
-	} catch {
-		// Unreadable reads as changed: the write below then says what is wrong.
+	// Issue #918: a folder made before #918 has no `egress-private/`. With nothing declared there is no private rule to
+	// write, so the model endpoints' render goes on and the missing folder is said; with something declared it is refused.
+	const privateProblem = privateDirProblem(cwd, { lstat });
+	const skipPrivate = privateProblem !== null && declared.length === 0 && !exists(join(cwd, PRIVATE_DIR_NAME));
+	if (privateProblem && !skipPrivate) {
+		err(`✗ ${privateProblem}\n`);
+		return 1;
 	}
+	const currentOf = (p) => {
+		try {
+			return String(readInclude(p));
+		} catch {
+			// Unreadable reads as changed: the write below then says what is wrong.
+			return null;
+		}
+	};
+	const current = currentOf(path);
+	const privateCurrent = skipPrivate ? privateText : currentOf(privatePath);
 	const venue = venueEnv({ env, fs: { existsSync: exists, readFileSync: readEnv }, envPath: join(cwd, ".env"), platform, command: "egress" });
+	let armed = true;
+	try {
+		armed = venue.error ? true : egressArmed(venue.env);
+	} catch {
+		// A malformed PI_EGRESS is the worker's boot failure, and doctor's to report; it reads as armed here.
+	}
 	const unchanged = current === text;
+	const privateUnchanged = privateCurrent === privateText;
+	// Issue #918: a rule that runs the grant helper is written only where the proxy can run it (`privateProxyReadiness`).
+	// Checked for a CHANGED include that declares anything, on every runtime this deployment uses, before any write.
+	const notes = [];
+	if (!privateUnchanged && declared.length > 0 && armed) {
+		if (venue.error) {
+			err(`✗ the venue could not be read (${venue.error}), so the proxy that would run the private endpoints' grant helper could not be checked. Fix it, then render again.\nNothing was written.\n`);
+			return 1;
+		}
+		const proxy = egressProxyName(venue.env);
+		if (proxy === "pi-dispatch-egress-proxy") {
+			const venues = venuesOf(venue.env);
+			for (const v of [...(venues.localUsed ? ["docker"] : []), ...(venues.podmanUsed ? ["podman"] : [])]) {
+				const ready = readiness(v, { cwd, home, proxy, exists, readRules });
+				if (ready.refusal) {
+					err(`✗ ${ready.refusal}\nNothing was written.\n`);
+					return 1;
+				}
+				if (ready.note) notes.push(ready.note);
+			}
+		}
+	}
 	if (unchanged) {
 		out(`✓ ${path} already matches the declared model endpoints: nothing written.\n`);
 	} else {
@@ -233,23 +389,32 @@ export async function runEgress(argv = [], deps = {}) {
 		}
 		out(`✓ wrote ${path} (in place)\n`);
 	}
+	if (skipPrivate) {
+		out(`⚠ ${join(cwd, PRIVATE_DIR_NAME)}/ is not here, and no private endpoint is declared, so only the model endpoints were rendered. \`pi-dispatch init\` writes it, and the proxy mounts it once \`pi-dispatch up\` refreshes it.\n`);
+	} else if (privateUnchanged) {
+		out(`✓ ${privatePath} already matches the declared private endpoints: nothing written.\n`);
+	} else {
+		try {
+			writePrivate(privatePath, privateText);
+		} catch (e) {
+			err(`✗ could not write ${privatePath} (${e?.message ?? e?.code ?? e}). It was not changed: fix the cause and run this command again\n`);
+			return 1;
+		}
+		out(`✓ wrote ${privatePath}\n`);
+	}
+	for (const note of notes) out(`⚠ ${note}\n`);
+	const nothingChanged = unchanged && privateUnchanged;
 	if (venue.error) {
 		out(`The reload depends on the venue, which could not be read: ${venue.error}\nOn Docker: ${reloadCommand("docker", "pi-dispatch-egress-proxy")}\nOn rootless Podman: ${reloadCommand("podman", "pi-dispatch-egress-proxy")}\n`);
 		return 0;
 	}
-	let armed = true;
-	try {
-		armed = egressArmed(venue.env);
-	} catch {
-		// A malformed PI_EGRESS is the worker's boot failure, and doctor's to report; it reads as armed here.
-	}
 	if (!armed) {
-		out("The egress policy is off (PI_EGRESS=0), so no proxy reads this file now. It takes effect once the policy is on and the proxy starts.\n");
+		out("The egress policy is off (PI_EGRESS=0), so no proxy reads these files now. They take effect once the policy is on and the proxy starts.\n");
 		return 0;
 	}
 	const { lines, proxy } = reloadLines(venue.env);
-	out(`${unchanged ? "If the proxy started before it last changed, reload it" : "Reload the egress proxy so it reads the new rules"} (no restart; open tunnels and running jobs are kept):\n${lines.map((l) => `  ${l}`).join("\n")}\n`);
-	if (proxy !== "pi-dispatch-egress-proxy") out(`${proxy} is your own proxy (PI_EGRESS_PROXY): it must mount ${path} at /etc/pi-dispatch/model-endpoints.conf and include it, as the shipped rules do.\n`);
+	out(`${nothingChanged ? "If the proxy started before it last changed, reload it" : "Reload the egress proxy so it reads the new rules"} (no restart; open tunnels and running jobs are kept):\n${lines.map((l) => `  ${l}`).join("\n")}\n`);
+	if (proxy !== "pi-dispatch-egress-proxy") out(`${proxy} is your own proxy (PI_EGRESS_PROXY): it must mount ${path} at /etc/pi-dispatch/model-endpoints.conf and include it, and mount ${join(cwd, PRIVATE_DIR_NAME)} at ${PRIVATE_DIR_TARGET} and include its ${PRIVATE_INCLUDE_NAME}, as the shipped rules do.\n`);
 	// The one state the reload cannot fix (issue #503): endpoints declared, and the rules the proxy runs predate the include.
 	if (proxy === "pi-dispatch-egress-proxy" && endpoints.length > 0) {
 		const venues = venuesOf(venue.env);
@@ -270,10 +435,13 @@ export function runningRulesPath(venue, { cwd, home }) {
 	return venue === "podman" ? proxyConfCopyPath(home) : join(cwd, "deploy/egress-proxy.conf");
 }
 
-/** Whether the rules file at `path` includes the model endpoints' file. Unreadable or absent reads as no. */
-export function rulesFileIncludes(path, fs) {
+/**
+ * Whether the rules file at `path` includes the model endpoints' file, or what `includes` asks (issue #918:
+ * `rulesIncludePrivate`, the private endpoints' file). Unreadable or absent reads as no.
+ */
+export function rulesFileIncludes(path, fs, includes = rulesIncludeEndpoints) {
 	try {
-		return rulesIncludeEndpoints(String(fs.readFileSync(path, "utf8")));
+		return includes(String(fs.readFileSync(path, "utf8")));
 	} catch {
 		return false;
 	}

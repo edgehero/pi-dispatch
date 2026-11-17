@@ -31,6 +31,9 @@ const MIRRORED_DEPLOY = [
 	// The operator console's systemd unit (issue #708), rendered by `service install --console`.
 	"console.service",
 	"docker-compose.yml",
+	// The private endpoints' grant helper (issue #918), shipped unedited beside the rules, which `init` copies into the
+	// deployment folder's `egress-private/` for the proxy to run, and doctor compares with this copy.
+	"egress-endpoint-grant",
 	// The egress policy's RULES (REQ-EGRESS-ALLOWLIST). A deployment artifact, not operator config, and
 	// the distinction this file's own comment asks to be decided: it ships unedited, the compose service
 	// mounts it, and the operator's own list lives in the deployment folder where `init` scaffolds it.

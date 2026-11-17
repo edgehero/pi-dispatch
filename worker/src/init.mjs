@@ -7,15 +7,16 @@
  * scoped pauses, an empty packages list stages nothing, an empty subscriptions list declares no plan
  * prices — so a fresh deployment starts inert and is opted into feature by feature.
  */
-import { existsSync, copyFileSync, lstatSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, copyFileSync, lstatSync, mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { openshellSetupOf, parseBackendList, venuesOf } from "./backends.mjs";
 import { OPENSHELL_BREW_INSTALL, OPENSHELL_GATEWAY_UNIT, OPENSHELL_NO_WINDOWS, OPENSHELL_RELEASE_URL, OPENSHELL_TESTED_VERSION } from "./openshell-cli.mjs";
 import { deploymentVenueEnv } from "./deployment-venue.mjs";
 import { setEnvKeyIfEmpty } from "./env-file.mjs";
-import { PACKAGED_EGRESS_PROXY_CONF } from "./egress-conf-copy.mjs";
+import { PACKAGED_EGRESS_PROXY_CONF, PACKAGED_GRANT_HELPER } from "./egress-conf-copy.mjs";
 import { EMPTY_MODEL_ENDPOINTS, MODEL_ENDPOINTS_FILE_NAME, MODEL_ENDPOINTS_INCLUDE_NAME, renderEndpointsInclude } from "./model-endpoints.mjs";
+import { EMPTY_PRIVATE_ENDPOINTS, GRANT_HELPER_NAME, GRANT_VENUES, GRANTS_DIR_NAME, PRIVATE_DIR_NAME, PRIVATE_ENDPOINTS_FILE_NAME, PRIVATE_INCLUDE_NAME, renderPrivateInclude } from "./private-endpoints.mjs";
 import { VALKEY_PASSWORD_KEY, newValkeyPassword } from "./valkey-auth.mjs";
 
 const EMPTY_TRIGGERS = `${JSON.stringify({ triggers: [] }, null, 2)}\n`;
@@ -83,7 +84,7 @@ export { PACKAGED_EGRESS_PROXY_CONF };
  * `up` performs that ladder itself and printing it mid-pass told a reader to do by hand what was being done for them.
  */
 export function runInit(cwd = process.cwd(), deps = {}) {
-	const { fs = { existsSync, copyFileSync, lstatSync, mkdirSync, readFileSync, statSync, writeFileSync }, readPackageFile = readFileSync, out = (s) => process.stdout.write(s), env = {}, platform = process.platform, newPassword = newValkeyPassword } = deps;
+	const { fs = { chmodSync, existsSync, copyFileSync, lstatSync, mkdirSync, readFileSync, statSync, writeFileSync }, readPackageFile = readFileSync, out = (s) => process.stdout.write(s), env = {}, platform = process.platform, newPassword = newValkeyPassword } = deps;
 	const results = [];
 	// The list prints even when a write throws part way (PR #488's final review: a read-only deploy/ lost the seven lines
 	// of what init had already created, leaving one EACCES line), so the operator always sees what now exists.
@@ -135,6 +136,20 @@ export function runInit(cwd = process.cwd(), deps = {}) {
 		// (measured), so the include exists from the first init even with nothing declared.
 		scaffold(fs, results, join(cwd, MODEL_ENDPOINTS_FILE_NAME), EMPTY_MODEL_ENDPOINTS, "empty model endpoints list (local or LAN model servers a job may reach through the proxy)");
 		scaffold(fs, results, join(cwd, MODEL_ENDPOINTS_INCLUDE_NAME), renderEndpointsInclude([]), "the proxy's rules for those endpoints, none yet (generated: do not edit)");
+		// Issue #918: the declared private endpoints, empty; the folder the proxy mounts read-only with their rules (the
+		// header-only render, which squid starts on) and the shipped grant helper those rules run; and one grant folder per
+		// container runtime, which the worker writes and that runtime's proxy reads. Folders, not files, so the include can
+		// be written by rename and a grant appears in the proxy the moment it is written (DES-PRIVATE-ENDPOINT-GRANTS).
+		// Mode 0755 (0644 for the include), set explicitly rather than left to the umask: squid reads them as its own
+		// `proxy` user, and a umask of 077 would leave it a helper it cannot run, which it then respawns in a loop.
+		scaffold(fs, results, join(cwd, PRIVATE_ENDPOINTS_FILE_NAME), EMPTY_PRIVATE_ENDPOINTS, "empty private endpoints list (hosts on your network only the jobs of triggers naming them may reach)");
+		if (scaffoldDir(fs, results, join(cwd, PRIVATE_DIR_NAME), `${PRIVATE_DIR_NAME}/`, "the proxy's private endpoint rules and their grant helper")) {
+			scaffold(fs, results, join(cwd, PRIVATE_DIR_NAME, PRIVATE_INCLUDE_NAME), renderPrivateInclude([]), "the proxy's rules for those endpoints, none yet (generated: do not edit)", `${PRIVATE_DIR_NAME}/${PRIVATE_INCLUDE_NAME}`, 0o644);
+			scaffold(fs, results, join(cwd, PRIVATE_DIR_NAME, GRANT_HELPER_NAME), () => readPackageFile(PACKAGED_GRANT_HELPER), "the proxy's grant helper, the package's copy (shipped, not edited)", `${PRIVATE_DIR_NAME}/${GRANT_HELPER_NAME}`, 0o755);
+		}
+		if (scaffoldDir(fs, results, join(cwd, GRANTS_DIR_NAME), `${GRANTS_DIR_NAME}/`, "the grants the worker writes for its jobs, one folder per container runtime")) {
+			for (const venue of GRANT_VENUES) scaffoldDir(fs, results, join(cwd, GRANTS_DIR_NAME, venue), `${GRANTS_DIR_NAME}/${venue}/`, `the ${venue === "local" ? "Docker" : "Podman"} proxy's grants`);
+		}
 		// Issue #480: the proxy's rules, the file beside the allowlist that the docker proxy mounts. Create-only like every
 		// scaffold here, so a clone's own deploy/egress-proxy.conf is reported and kept. The one scaffold whose content is
 		// not this module's: it is the package's file verbatim, read from the package and never through `fs` (the
@@ -193,7 +208,7 @@ const KEPT = "already exists, left untouched";
 
 // `name` is what the list shows, the file's own name unless it sits below the folder; `content` may be a function, so a
 // file read from the package is read only when it is about to be written.
-function scaffold(fs, results, path, content, note, name = path.split(/[\\/]/).pop()) {
+function scaffold(fs, results, path, content, note, name = path.split(/[\\/]/).pop(), mode = null) {
 	// A DIRECTORY where the file belongs (PR #488's review) is not "kept": every reader of these files wants a file, and
 	// docker mounts a directory at deploy/egress-proxy.conf where squid reads its config. Followed through a link, too.
 	if (isDirectory(fs, path)) {
@@ -201,10 +216,41 @@ function scaffold(fs, results, path, content, note, name = path.split(/[\\/]/).p
 	} else if (fs.existsSync(path)) {
 		results.push(["kept", name, KEPT]);
 	} else if (createOnly(fs, path, typeof content === "function" ? content() : content)) {
+		if (mode !== null) fs.chmodSync(path, mode);
 		results.push(["created", name, note]);
 	} else {
 		results.push(["kept", name, KEPT]);
 	}
+}
+
+/**
+ * A folder of this deployment (issue #918): created mode 0755 when absent, kept when it is a real folder, and REFUSED
+ * when it is a symlink or not a folder, for deploy/'s reason above (a write into a linked folder lands wherever the link
+ * points, and the proxy mounts the target). Asked again after the mkdir, so a link that appeared in between is refused.
+ * Returns whether it is this folder's own, so its contents are scaffolded only then.
+ */
+function scaffoldDir(fs, results, path, name, note) {
+	const notOurDir = () => {
+		const st = lstatOrNull(fs, path);
+		return st && (st.isSymbolicLink() || !st.isDirectory()) ? (st.isSymbolicLink() ? "a symlink" : "not a directory") : null;
+	};
+	if (notOurDir()) {
+		results.push(["refused", name, `${name} here is ${notOurDir()}, so init writes nothing into it: make it a directory of this folder, then run \`pi-dispatch init\` again`]);
+		return false;
+	}
+	if (lstatOrNull(fs, path)) {
+		results.push(["kept", name, KEPT]);
+		return true;
+	}
+	fs.mkdirSync(path, { recursive: true });
+	const after = notOurDir();
+	if (after) {
+		results.push(["refused", name, `${name} here is ${after}, so init writes nothing into it: make it a directory of this folder, then run \`pi-dispatch init\` again`]);
+		return false;
+	}
+	fs.chmodSync(path, 0o755);
+	results.push(["created", name, note]);
+	return true;
 }
 
 /**

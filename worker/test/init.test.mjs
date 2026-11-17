@@ -1,9 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { PACKAGED_EGRESS_PROXY_CONF, nextSteps, runInit } from "../src/init.mjs";
+import { PACKAGED_GRANT_HELPER } from "../src/egress-conf-copy.mjs";
+import { EMPTY_PRIVATE_ENDPOINTS, renderPrivateInclude } from "../src/private-endpoints.mjs";
 import { venuesOf } from "../src/backends.mjs";
 import { loadModelEndpoints, renderEndpointsInclude } from "../src/model-endpoints.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -248,7 +250,7 @@ test("init in an empty folder scaffolds deploy/egress-proxy.conf, the package's 
 	const packaged = readFileSync(fileURLToPath(new URL("../deploy/egress-proxy.conf", import.meta.url)));
 	assert.equal(PACKAGED_EGRESS_PROXY_CONF, fileURLToPath(new URL("../deploy/egress-proxy.conf", import.meta.url)), "resolved from the module, as service.mjs resolves its templates");
 	assert.deepEqual(readFileSync(join(dir, "deploy", "egress-proxy.conf")), packaged, "the shipped rules, verbatim");
-	assert.match(text(), /^created deploy\/egress-proxy\.conf the egress proxy's rules/m);
+	assert.match(text(), /^created deploy\/egress-proxy\.conf\s+the egress proxy's rules/m);
 });
 
 test("init never overwrites an existing deploy/egress-proxy.conf, and reports it kept (#480)", () => {
@@ -257,7 +259,8 @@ test("init never overwrites an existing deploy/egress-proxy.conf, and reports it
 	mkdirSync(join(dir, "deploy"));
 	writeFileSync(join(dir, "deploy", "egress-proxy.conf"), "# a clone's own rules\n");
 	const { out, text } = capture();
-	assert.equal(runInit(dir, { out, readPackageFile: () => assert.fail("a kept file is never read from the package") }), 0);
+	// Issue #918: the grant helper is read from the package for a folder without one; the rules are kept, never read.
+	assert.equal(runInit(dir, { out, readPackageFile: (p) => (p === PACKAGED_EGRESS_PROXY_CONF ? assert.fail("a kept file is never read from the package") : readFileSync(p)) }), 0);
 	assert.equal(readFileSync(join(dir, "deploy", "egress-proxy.conf"), "utf8"), "# a clone's own rules\n");
 	assert.match(text(), /^kept\s+deploy\/egress-proxy\.conf\s+already exists/m);
 });
@@ -283,10 +286,10 @@ test("init's ladders name no file the folder does not have, docker and podman (#
 test("init's file column is as wide as the longest name, so every note starts in one column (#480)", () => {
 	const { text } = nextFor({});
 	const rows = text.slice(0, text.indexOf("\nNext:")).split("\n").filter(Boolean);
-	assert.equal(rows.length, 11, text); // 11 since issue #499 scaffolds projects.json
+	assert.equal(rows.length, 18, text); // 11 since issue #499 scaffolds projects.json; 18 since #918 adds its file, folders and their two files
 	const starts = new Set(rows.map((row) => row.match(/^\S+\s+\S+\s+/)[0].length));
 	assert.equal(starts.size, 1, `every note starts in one column:\n${rows.join("\n")}`);
-	assert.ok(rows.some((row) => row.includes("egress-allowlist.conf ")), "the 21-character name is followed by a space before its note");
+	assert.ok(rows.some((row) => row.includes("egress-private/private-endpoints.conf ")), "the longest name, 36 characters, is followed by a space before its note");
 });
 
 test("init with steps: false prints the file list and no Next ladder (what up passes, #480)", () => {
@@ -324,7 +327,7 @@ test("init refuses a symlinked deploy/, or a deploy/ that is not a directory, an
 		const { out, text } = capture();
 		assert.equal(runInit(dir, { out, newPassword: () => PASSWORD }), 1, `${shape}: a refused scaffold fails init`);
 		assert.deepEqual(readdirSync(outside), [], `${shape}: nothing written where deploy/ points`);
-		assert.match(text(), new RegExp(`^refused deploy/egress-proxy\\.conf deploy/ here is ${shape === "symlink" ? "a symlink" : "not a directory"}, so init writes nothing into it`, "m"), shape);
+		assert.match(text(), new RegExp(`^refused deploy/egress-proxy\\.conf\\s+deploy/ here is ${shape === "symlink" ? "a symlink" : "not a directory"}, so init writes nothing into it`, "m"), shape);
 		assert.ok(existsSync(join(dir, "triggers.json")), `${shape}: the other scaffolds are still written`);
 		assert.match(text(), /^created triggers\.json /m, `${shape}: and listed, the refusal beside them`);
 	}
@@ -341,7 +344,7 @@ test("init refuses a directory where a scaffold's file belongs, deploy/egress-pr
 	const { out, text } = capture();
 	assert.equal(runInit(dir, { out }), 1);
 	assert.match(text(), /^refused model-endpoints\.conf\s+model-endpoints\.conf here is a directory, not a file/m);
-	assert.match(text(), /^refused deploy\/egress-proxy\.conf deploy\/egress-proxy\.conf here is a directory, not a file: remove it, then run `pi-dispatch init` again$/m);
+	assert.match(text(), /^refused deploy\/egress-proxy\.conf\s+deploy\/egress-proxy\.conf here is a directory, not a file: remove it, then run `pi-dispatch init` again$/m);
 	assert.match(text(), /^refused triggers\.json\s+triggers\.json here is a directory, not a file/m);
 	assert.doesNotMatch(text(), /^kept\s+(deploy\/egress-proxy\.conf|triggers\.json)/m);
 	assert.ok(existsSync(join(dir, "pause-windows.json")), "the rest are written");
@@ -353,7 +356,7 @@ test("a write that throws part way still prints what init already created, then 
 	const out = (s) => lines.push(s);
 	const eacces = Object.assign(new Error("EACCES: permission denied, open 'deploy/egress-proxy.conf'"), { code: "EACCES" });
 	const fs = {
-		existsSync, lstatSync, mkdirSync, readFileSync, statSync,
+		chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, statSync,
 		copyFileSync: () => {},
 		writeFileSync: (path, ...rest) => {
 			if (String(path).endsWith("egress-proxy.conf")) throw eacces;
@@ -381,4 +384,46 @@ test("init's next steps for the openshell venues: their own ladder alone, one li
 	assert.match(beside, /The openshell venue too: install OpenShell 0\.1\.4/);
 	assert.equal(steps("local"), nextSteps(venuesOf({})), "no openshell, no change");
 	assert.match(steps("openshell", {}, "win32"), /ships no Windows build/);
+});
+
+// --- issue #918: the private endpoints' file, the folder the proxy mounts, and the grant folders -----------------------
+
+test("init scaffolds the private endpoints: the empty file, the folder with its header-only include and the package's helper, and both grant folders, each with an explicit mode (#918)", { skip: process.platform === "win32" }, () => {
+	const dir = tmp();
+	const { out, text } = capture();
+	assert.equal(runInit(dir, { out, newPassword: () => "x" }), 0);
+	assert.equal(readFileSync(join(dir, "private-endpoints.json"), "utf8"), EMPTY_PRIVATE_ENDPOINTS);
+	assert.equal(readFileSync(join(dir, "egress-private", "private-endpoints.conf"), "utf8"), renderPrivateInclude([]));
+	assert.deepEqual(readFileSync(join(dir, "egress-private", "endpoint-grant")), readFileSync(PACKAGED_GRANT_HELPER), "the shipped helper, verbatim");
+	// Explicit, never left to the umask: squid reads them as its own user.
+	const mode = (p) => statSync(join(dir, p)).mode & 0o777;
+	assert.equal(mode("egress-private"), 0o755);
+	assert.equal(mode("egress-private/private-endpoints.conf"), 0o644);
+	assert.equal(mode("egress-private/endpoint-grant"), 0o755);
+	for (const p of ["egress-grants", "egress-grants/local", "egress-grants/podman"]) assert.equal(mode(p), 0o755, p);
+	for (const name of ["private-endpoints.json", "egress-private/", "egress-private/private-endpoints.conf", "egress-private/endpoint-grant", "egress-grants/", "egress-grants/local/", "egress-grants/podman/"]) {
+		assert.match(text(), new RegExp(`^created ${name.replace(/[./]/g, "\\$&")}\\s`, "m"), name);
+	}
+});
+
+test("init keeps an existing private folder and its files, and refuses a symlinked or non-folder egress-private/ without writing into it (#918)", { skip: process.platform === "win32" }, () => {
+	const kept = tmp();
+	mkdirSync(join(kept, "egress-private"));
+	writeFileSync(join(kept, "egress-private", "endpoint-grant"), "# mine\n");
+	const first = capture();
+	assert.equal(runInit(kept, { out: first.out, newPassword: () => "x" }), 0);
+	assert.equal(readFileSync(join(kept, "egress-private", "endpoint-grant"), "utf8"), "# mine\n", "never overwritten");
+	assert.match(first.text(), /^kept\s+egress-private\/endpoint-grant\s+already exists/m);
+	assert.match(first.text(), /^created egress-private\/private-endpoints\.conf\s/m, "a missing file inside a kept folder is still written");
+	for (const shape of ["symlink", "file"]) {
+		const dir = tmp();
+		const outside = tmp();
+		if (shape === "symlink") symlinkSync(outside, join(dir, "egress-private"));
+		else writeFileSync(join(dir, "egress-private"), "not a folder\n");
+		const { out, text } = capture();
+		assert.equal(runInit(dir, { out, newPassword: () => "x" }), 1, `${shape}: a refused scaffold fails init`);
+		assert.deepEqual(readdirSync(outside), [], `${shape}: nothing written where it points`);
+		assert.match(text(), new RegExp(`^refused egress-private/\\s+egress-private/ here is ${shape === "symlink" ? "a symlink" : "not a directory"}, so init writes nothing into it`, "m"));
+		assert.ok(existsSync(join(dir, "egress-grants", "local")), `${shape}: the other scaffolds are still written`);
+	}
 });

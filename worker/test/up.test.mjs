@@ -1,4 +1,5 @@
 import { test } from "node:test";
+import { readPackagedGrantHelper } from "../src/egress-conf-copy.mjs";
 import assert from "node:assert/strict";
 import * as realFs from "node:fs";
 import { lstatSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
@@ -69,6 +70,11 @@ function harness({ plan = {}, listening = true, answers = [], files = {}, doctor
 	// Issue #503: `init` scaffolds the model endpoints' include beside the allowlist, and this harness fakes init, so a
 	// folder that holds the allowlist holds the include too unless a test says otherwise (`includeFile: false`).
 	if (includeFile && `${cwd}/egress-allowlist.conf` in files && !(`${cwd}/model-endpoints.conf` in files)) files = { ...files, [`${cwd}/model-endpoints.conf`]: "# generated\n" };
+	// Issue #918: and the private endpoints' folder (its include and the grant helper) and both grant folders, each folder
+	// a key under it (this fs has no folders of its own: a path some stored file sits under is one).
+	if (includeFile && `${cwd}/egress-allowlist.conf` in files && !Object.keys(files).some((k) => k.startsWith(`${cwd}/egress-private/`))) {
+		files = { ...files, [`${cwd}/egress-private/private-endpoints.conf`]: "# generated\n", [`${cwd}/egress-private/endpoint-grant`]: readPackagedGrantHelper(), [`${cwd}/egress-grants/local/.keep`]: "", [`${cwd}/egress-grants/podman/.keep`]: "" };
+	}
 	// The podman tests (those that inject a podman info reader) get what a real login has unless they say otherwise: a
 	// user manager to talk to (XDG_RUNTIME_DIR, round 2 E8) and a podman that answers "no such container" for the two
 	// names the stack would claim (E3: any other failure now refuses).
@@ -107,7 +113,7 @@ function harness({ plan = {}, listening = true, answers = [], files = {}, doctor
 			return answers.shift() ?? "";
 		},
 		fs: {
-			existsSync: (p) => store.has(p),
+			existsSync: (p) => store.has(p) || [...store.keys()].some((k) => k.startsWith(`${p}/`)),
 			readFileSync: (p) => {
 				if (!store.has(p)) throw Object.assign(new Error(`ENOENT: ${p}`), { code: "ENOENT" });
 				return store.get(p);
@@ -125,7 +131,11 @@ function harness({ plan = {}, listening = true, answers = [], files = {}, doctor
 				store.set(to, store.get(from));
 				store.delete(from);
 			},
-			statSync: () => ({ mode: 0o100600 }),
+			// Issue #918: the grant helper is 0755 as init writes it, and a path some stored file sits under is a folder.
+			statSync: (p) => {
+				const dir = !store.has(p) && [...store.keys()].some((k) => k.startsWith(`${p}/`));
+				return { mode: dir ? 0o040755 : String(p).endsWith("/endpoint-grant") ? 0o100755 : 0o100600, isDirectory: () => dir };
+			},
 			chmodSync: () => {},
 			// Issue #484: what the rules refresh asks, which follows no link. A path in `links` is a symlink; a path some
 			// stored file sits under is a directory.
@@ -1023,6 +1033,8 @@ const EGRESS_RUN = [
 	"-v", "./deploy/egress-proxy.conf:/etc/squid/squid.conf:ro,z",
 	"-v", "./egress-allowlist.conf:/etc/pi-dispatch/allowlist.conf:ro,z",
 	"-v", "./model-endpoints.conf:/etc/pi-dispatch/model-endpoints.conf:ro,z",
+	"-v", "./egress-private:/etc/pi-dispatch/private:ro,z",
+	"-v", "./egress-grants/local:/etc/pi-dispatch/grants:ro,z",
 	"--add-host", "host.docker.internal:host-gateway",
 	"ubuntu/squid@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029",
 ];
@@ -1408,8 +1420,13 @@ test("up on docker: a shipped proxy from another squid or another folder is neve
 	// Stale, and this folder cannot recreate it: said, nothing run.
 	const bare = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: proxyState("exited", { image: "squid:old" }) }, listening: true, files: { "/deploy/egress-allowlist.conf": "x\n" }, argv: ["--yes"] });
 	await bare.run();
-	assert.match(bare.text(), /✗ deploy\/egress-proxy\.conf is not here, so up cannot recreate it from this folder/);
+	assert.match(bare.text(), /✗ deploy\/egress-proxy\.conf is not here, so up cannot recreate it from this folder; run `pi-dispatch init` here/);
 	assert.deepEqual(dockerMutations(bare), []);
+	// One init cannot fix (#918, a linked egress-grants/): the problem's own words, never an init that refuses again.
+	const grantsLinked = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: proxyState("exited", { image: "squid:old" }) }, listening: true, files: { ...PROXY_FILES, "/deploy/model-endpoints.conf": "# generated\n", "/deploy/egress-private/private-endpoints.conf": "# generated\n", "/deploy/egress-private/endpoint-grant": readPackagedGrantHelper(), "/deploy/egress-grants/local/.keep": "" }, links: new Set(["/deploy/egress-grants"]), argv: ["--yes"] });
+	await grantsLinked.run();
+	assert.match(grantsLinked.text(), /✗ egress-grants\/ here is a symlink, not a folder \(the proxy mounts wherever it points: make it a folder of its own\), so up cannot recreate it from this folder; fix egress-grants\/ as said, then `up` again/);
+	assert.deepEqual(dockerMutations(grantsLinked), []);
 });
 
 test("up on docker: running means Status running: a paused proxy is unpaused, a crash-looping one is reported, and a missing egress-proxy.conf is never mounted (#453 gate)", async () => {
@@ -1713,7 +1730,7 @@ test("up goes on past an init that refuses or throws: a FILE named deploy, and a
 	realFs.writeFileSync(join(dir, "deploy"), "not a folder\n");
 	const real = harness({ plan: { "docker version": 0, "docker image inspect": 0, [PROXY_INSPECT]: 1 }, listening: true, argv: ["--yes"], cwd: dir, extra: { fs: realFs, runInitFn: runInit } });
 	await real.run();
-	assert.match(real.text(), /^refused deploy\/egress-proxy\.conf deploy\/ here is not a directory/m);
+	assert.match(real.text(), /^refused deploy\/egress-proxy\.conf\s+deploy\/ here is not a directory/m);
 	assert.match(real.text(), /^created triggers\.json /m, "init listed what it did");
 	assert.match(real.text(), /init\s+ran, and REFUSED a file \(said above\)/);
 	assert.equal(real.doctorCalls.length, 1, "doctor still ran");
@@ -3193,4 +3210,90 @@ test("up's attached-job coupled refresh needs both explicit proxy grants; either
 		assert.deepEqual(dockerMutations(h), combined ? [EGRESS_RM, EGRESS_RUN] : []);
 		assert.deepEqual(restarts(h), [], "a missing mount is replaced rather than restarted");
 	}
+});
+
+// --- issue #918: the private endpoints' folder and grant folder ----------------------------------------------------------
+
+const PRIVATE_RULES = `${INCLUDE_RULES}include /etc/pi-dispatch/private/private-endpoints.conf\n`;
+const PRIVATE_MOUNTS = [
+	{ Type: "bind", Source: "/deploy/egress-private", Destination: "/etc/pi-dispatch/private" },
+	{ Type: "bind", Source: "/deploy/egress-grants/local", Destination: "/etc/pi-dispatch/grants" },
+];
+
+test("up on docker: no proxy is started without the private folder's files, a grant folder, or a helper squid's user can run (#918)", async () => {
+	const without = (drop) => Object.fromEntries(Object.entries({ ...PROXY_FILES, "/deploy/model-endpoints.conf": "# generated\n", "/deploy/egress-private/private-endpoints.conf": "# generated\n", "/deploy/egress-private/endpoint-grant": readPackagedGrantHelper(), "/deploy/egress-grants/local/.keep": "" }).filter(([k]) => !k.startsWith(drop)));
+	for (const [drop, said] of [
+		["/deploy/egress-private/private-endpoints.conf", /✗ the egress policy is on but egress-private\/private-endpoints\.conf is not here, so no proxy is started without it/],
+		["/deploy/egress-grants/local", /✗ the egress policy is on but egress-grants\/local\/ is not here, so no proxy is started without it/],
+	]) {
+		const h = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: 1 }, listening: true, files: without(drop), includeFile: false, argv: ["--yes"] });
+		assert.equal(await h.run(), 0);
+		assert.match(h.text(), said, drop);
+		assert.deepEqual(dockerMutations(h), [], `${drop}: nothing created or started`);
+	}
+	// A helper squid's own user cannot run: it would be respawned in a loop on the first request to a private endpoint.
+	const h = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: 1 }, listening: true, files: PROXY_FILES, argv: ["--yes"] });
+	h.deps.fs.statSync = (p) => ({ mode: 0o100644, isDirectory: () => !h.store.has(p) && [...h.store.keys()].some((k) => k.startsWith(`${p}/`)) });
+	await h.run();
+	assert.match(h.text(), /✗ the egress policy is on but egress-private\/endpoint-grant cannot be run by squid's own user \(`chmod 0755 egress-private\/endpoint-grant`\), so no proxy is started without it/);
+	assert.deepEqual(dockerMutations(h), []);
+});
+
+test("up on docker: refreshing to rules that include the private file and replacing a proxy without its folders are ONE step, naming that file (#918)", async () => {
+	const h = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: proxyState("running", { include: "/deploy/model-endpoints.conf" }), ...RUN_OK }, listening: true, files: { ...PROXY_FILES, [CONF]: INCLUDE_RULES }, argv: ["--yes"], answers: ["y"], packagedConf: PRIVATE_RULES });
+	assert.equal(await h.run(), 0);
+	assert.equal(h.promptCalls.length, 1, "one question for both");
+	assert.match(h.text(), /the new rules include egress-private\/private-endpoints\.conf, which this proxy does not mount, so they go in only together with a proxy that mounts it/);
+	assert.equal(h.store.get(CONF), PRIVATE_RULES);
+	assert.deepEqual(dockerMutations(h), [EGRESS_RM, EGRESS_RUN], "removed, then run with both folders, once");
+	assert.match(h.text(), /and the proxy with the shipped one, which mounts egress-private\/private-endpoints\.conf\n/);
+	// A proxy that already mounts both folders is restarted for the refresh, as before.
+	const mounted = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: proxyState("running", { include: "/deploy/model-endpoints.conf", extra: PRIVATE_MOUNTS }), "docker restart": 0 }, listening: true, files: { ...PROXY_FILES, [CONF]: INCLUDE_RULES }, argv: ["--yes"], answers: ["y"], packagedConf: PRIVATE_RULES });
+	await mounted.run();
+	assert.deepEqual(dockerMutations(mounted), [], "not replaced");
+	// Rules that already include the private file make a proxy without the folders out of date, and it is replaced.
+	const stale = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: proxyState("running", { include: "/deploy/model-endpoints.conf" }), ...RUN_OK }, listening: true, files: { ...PROXY_FILES, [CONF]: PRIVATE_RULES }, argv: ["--yes"], packagedConf: PRIVATE_RULES });
+	await stale.run();
+	assert.match(stale.text(), /is this deployment's proxy but out of date: nothing is mounted at \/etc\/pi-dispatch\/private, where \/deploy\/egress-private belongs/);
+	assert.deepEqual(dockerMutations(stale).at(-1), EGRESS_RUN);
+});
+
+test("up puts the package's grant helper back over a copy that differs, keeping the old one, and makes it 0755, before the proxy is judged (#918)", async () => {
+	const START = { "docker network create": 0, "docker run -d --name pi-dispatch-egress-proxy": 0 };
+	const h = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: 1, ...START }, listening: true, files: { ...PROXY_FILES, "/deploy/egress-private/private-endpoints.conf": "# generated\n", "/deploy/egress-private/endpoint-grant": "#!/bin/bash\r\necho OK\r\n", "/deploy/egress-grants/local/.keep": "" }, argv: ["--yes"] });
+	const chmods = [];
+	h.deps.fs.chmodSync = (p, m) => chmods.push([p, m]);
+	assert.equal(await h.run(), 0);
+	assert.equal(h.store.get("/deploy/egress-private/endpoint-grant"), readPackagedGrantHelper(), "the package's copy");
+	const backup = [...h.store.keys()].find((k) => k.startsWith("/deploy/egress-private/endpoint-grant.bak-"));
+	assert.ok(backup, "the old bytes are kept");
+	assert.equal(h.store.get(backup), "#!/bin/bash\r\necho OK\r\n");
+	assert.match(h.text(), /✓ replaced egress-private\/endpoint-grant with the package's copy[^\n]*: it is shipped code the proxy runs, not configuration \(the old one is kept as egress-private\/endpoint-grant\.bak-/);
+	assert.deepEqual(dockerMutations(h).at(-1), EGRESS_RUN, "and the proxy then starts on it");
+	// The package's copy already there: nothing is written, and nothing said.
+	const same = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: 1, ...START }, listening: true, files: PROXY_FILES, argv: ["--yes"] });
+	await same.run();
+	assert.doesNotMatch(same.text(), /grant-helper|endpoint-grant/);
+});
+
+test("up never writes or chmods the grant helper through a symlinked egress-private/, and starts no proxy on it (#918)", async () => {
+	const START = { "docker network create": 0, "docker run -d --name pi-dispatch-egress-proxy": 0 };
+	const h = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: 1, ...START }, listening: true, files: { ...PROXY_FILES, "/deploy/egress-private/private-endpoints.conf": "# generated\n", "/deploy/egress-private/endpoint-grant": "edited\n", "/deploy/egress-grants/local/.keep": "" }, links: new Set(["/deploy/egress-private"]), argv: ["--yes"] });
+	const chmods = [];
+	h.deps.fs.chmodSync = (p, m) => chmods.push([p, m]);
+	await h.run();
+	assert.equal(h.store.get("/deploy/egress-private/endpoint-grant"), "edited\n", "nothing written through the link");
+	assert.deepEqual(chmods, []);
+	assert.match(h.text(), /✗ the egress policy is on but egress-private\/ here is a symlink, not a folder \(the proxy mounts wherever it points: make it a folder of its own\), so no proxy is started without it/);
+	assert.deepEqual(dockerMutations(h), []);
+});
+
+test("up says why it left a symlinked grant helper alone, writes nothing through it, and starts no proxy on it (#918)", async () => {
+	const START = { "docker network create": 0, "docker run -d --name pi-dispatch-egress-proxy": 0 };
+	const h = harness({ env: EGRESS_ENV, plan: { ...green, [PROXY_INSPECT]: 1, ...START }, listening: true, files: { ...PROXY_FILES, "/deploy/egress-private/private-endpoints.conf": "# generated\n", "/deploy/egress-private/endpoint-grant": "edited\n", "/deploy/egress-grants/local/.keep": "" }, links: new Set(["/deploy/egress-private/endpoint-grant"]), argv: ["--yes"] });
+	await h.run();
+	assert.equal(h.store.get("/deploy/egress-private/endpoint-grant"), "edited\n");
+	assert.match(h.text(), /⚠ egress-private\/endpoint-grant was not compared with the package's copy[^:]*: egress-private\/endpoint-grant is a symlink, and nothing here writes through one/);
+	assert.match(h.text(), /✗ the egress policy is on but egress-private\/endpoint-grant here is a symlink, not a file/);
+	assert.deepEqual(dockerMutations(h), []);
 });

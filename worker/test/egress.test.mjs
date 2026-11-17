@@ -558,14 +558,16 @@ test("plain HTTP reaches a listed host on port 80 only: `deny !Safe_ports !CONNE
 // to a model server is a CONNECT to its port, and first match wins, so the include must come before the port-443 deny
 // or that deny refuses it before any allow inside is read; and after the address deny, so a LISTED name resolving to
 // the host's loopback is still refused first. Read off the shipped file and its published mirror.
-test("the proxy's rules include the model endpoints between the address deny and the port-443 deny (#503)", async () => {
+test("the proxy's rules include the private and the model endpoints between the address deny and the port-443 deny (#503, #918)", async () => {
 	const { readFileSync } = await import("node:fs");
 	for (const path of ["../../deploy/egress-proxy.conf", "../deploy/egress-proxy.conf"]) {
 		const conf = readFileSync(new URL(path, import.meta.url), "utf8");
 		const lines = conf.split("\n").map((line) => line.trim()).filter((line) => line !== "" && !line.startsWith("#"));
 		const include = lines.filter((line) => /^include\s/.test(line));
-		assert.deepEqual(include, ["include /etc/pi-dispatch/model-endpoints.conf"], `${path}: one include, of the mounted path`);
+		// Issue #918: the private endpoints' include, directly BEFORE the model endpoints' one, for the same reason.
+		assert.deepEqual(include, ["include /etc/pi-dispatch/private/private-endpoints.conf", "include /etc/pi-dispatch/model-endpoints.conf"], `${path}: two includes, of the mounted paths`);
 		const at = lines.indexOf(include[0]);
+		assert.equal(lines[at + 1], include[1], `${path}: the model include right after the private one`);
 		assert.ok(at > lines.indexOf("http_access deny allowed to_host_local"), `${path}: after the address deny`);
 		assert.ok(at < lines.indexOf("http_access deny CONNECT !SSL_ports"), `${path}: before the port-443 deny`);
 		assert.equal(lines[at - 1], "http_access deny allowed to_host_local", `${path}: directly after it`);

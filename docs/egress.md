@@ -16,7 +16,7 @@ pi-dispatch doctor
 ```
 
 `up` shows the proxy's `docker run` and asks before it runs it, and it works in any folder `pi-dispatch init`
-made, since init writes the three files the proxy mounts. From a clone, or a folder holding `deploy/docker-compose.yml`,
+made, since init writes the files and folders the proxy mounts. From a clone, or a folder holding `deploy/docker-compose.yml`,
 compose starts the same proxy instead:
 
 ```bash
@@ -361,6 +361,74 @@ together. With compose, use the new compose file (see "Right after an upgrade" b
 and `egress render` all say the endpoints stay unreachable until the rules are refreshed, and `doctor` says
 nothing more about them.
 
+## Private endpoints
+
+**Status (#918, part 1 of 4):** you can declare private endpoints and render their rules, and the proxy carries them.
+No trigger can name one yet and the worker writes no grant, so every job gets the proxy's refusal for every private
+endpoint until the binding lands in the same release.
+
+A private endpoint is one host and one TCP port on your own network, a test device's SSH on port 22 say, that only
+the jobs of the triggers naming it may reach. Like a model server, it is a `CONNECT` tunnel through the proxy to
+exactly that host and port and nothing else: no other port of that host, and no plain forward request. Unlike a model
+server, every other job gets the proxy's refusal for it. Until a trigger names it, no job reaches it at all.
+
+### Declare, render, reload
+
+1. **Declare it** in `private-endpoints.json` in the deployment folder (`PI_PRIVATE_ENDPOINTS_FILE` names another
+   file). `pi-dispatch init` writes it empty.
+
+   ```json
+   { "version": 1, "endpoints": [ { "id": "bench-device", "host": "10.0.5.20", "port": 22, "slots": 1 } ] }
+   ```
+
+   `id`, `host` and `port` follow the model endpoints' rules above. `slots` is optional: how many jobs may hold the
+   endpoint at once (a device usually takes one), and without it there is no bound. Two things are refused that a
+   model endpoint allows. **Ports 80 and 443**: the allowlist opens those ports of a listed host to every job, and the
+   proxy matches the host as it is written, so a listed name that resolves to the device would reach it without the
+   grant. And **anything also declared in `model-endpoints.json`**, by id or by host and port: a model endpoint is
+   open to every job, so the device would not be private. The file's full rules are in
+   `INT-PRIVATE-ENDPOINTS-FILE-CONTRACT` (specs/interfaces.md).
+
+2. **Render** the proxy's rules for it, `pi-dispatch egress render`, the same command as for model endpoints. It writes
+   `egress-private/private-endpoints.conf` too, and prints the same reload. Before it writes a private endpoint, it
+   checks that the running proxy can carry one: its rules include the file, it mounts the folders below, and the
+   grant helper answers inside it as squid's own user. If not, it writes nothing and names the step that fixes it.
+
+3. **Reload** the proxy with the command it printed. A reload keeps running jobs and their tunnels.
+
+### How the proxy tells one job from another
+
+Every job already has its own network whose only other member is the proxy (["The shape"](#the-shape)), so the
+address the proxy has on that network belongs to one job. The worker writes a **grant** named after that address,
+listing the endpoints the job may reach, after the proxy joins the job's network and before the job starts, and
+deletes it before the proxy leaves. For a request to a private endpoint, squid asks the shipped helper whether a grant
+at the address the request came in on names it. Nothing else is asked, and squid's rules never change per job.
+
+Two folders in the deployment folder carry this, both mounted read-only into the proxy and both written by `init`:
+
+| Folder | What it holds | Who writes it |
+|---|---|---|
+| `egress-private/` | `private-endpoints.conf`, the rendered rules, and `endpoint-grant`, the grant helper (a bash script, mode 0755, the package's own copy) | `egress render` and `init` |
+| `egress-grants/local/`, `egress-grants/podman/` | one grant per running job, per container runtime | the worker |
+
+A helper squid cannot run is refused for every request, and squid then starts it again in a loop that fills its log
+until it can run (measured). So the helper must be the package's own copy, mode 0755: `up` puts the package's copy
+back when this folder's differs (keeping the old one beside it), `up` and `service install` start no proxy while it is
+not runnable or either folder cannot be entered, doctor fails on either, and `egress render` runs the helper inside the
+running proxy, as squid's own user, before it writes a rule that would. On Windows the modes are not judged (Node
+reports none); the render's run inside the proxy is what answers there. A link inside `egress-private/` is refused
+too: the proxy mounts the folder, so the link would be followed inside the proxy, where its target is not. Keep both
+folders where no job can write: the
+worker refuses to start while `egress-private/` or a grant folder lies inside a cron trigger's `run.folder`, a
+`PI_DISPATCH_RUN_ROOTS` root, a `run.skillsDir` or `PI_GLOBAL_PI_DIR`, or is a symlink, since a job there could grant
+itself any endpoint, or change the helper the proxy runs. Doctor says the same.
+
+The binding follows the host as you declared it, which is how the proxy matches it. Another name or address of the
+same device is another rule: declared in `model-endpoints.json` on the same port, every job would reach it. Declare a
+device once, here.
+
+The measurements, and the designs that were set aside, are in `DES-PRIVATE-ENDPOINT-GRANTS` (specs/design.md).
+
 ## The shape
 
 | | |
@@ -529,10 +597,10 @@ refused, which needs control of the provider's own answer.
 **Right after an upgrade this line can fail.** squid reads its rules only at start, so until the proxy restarts on
 the refreshed `egress-proxy.conf` it still runs the old rules: the line reads `Egress policy lets plain HTTP through
 to api.anthropic.com on port 443, ...` and `--live`'s egress verdict fails. `pi-dispatch up` refreshes the file and
-restarts the proxy (or replaces it, when it lacks the third mount); on the `podman` venue `pi-dispatch service
-install --force` does. A proxy you started by hand must be RECREATED, never just restarted, since the new rules
-include `model-endpoints.conf` and it does not mount that file: remove it (`docker rm -f -v
-pi-dispatch-egress-proxy`, or `podman rm -f -v`) and start it again with the third mount (`pi-dispatch up` does
+restarts the proxy (or replaces it, when it lacks a mount the new rules need); on the `podman` venue `pi-dispatch service
+install --force` does. A proxy you started by hand must be RECREATED, never just restarted, when the new rules
+include a file it does not mount (`model-endpoints.conf`, or since #918 `egress-private/`): remove it (`docker rm -f -v
+pi-dispatch-egress-proxy`, or `podman rm -f -v`) and start it again with every mount (`pi-dispatch up` does
 this, or the recipe in [podman.md](podman.md)). With compose, the compose file must be the new one too: in a
 folder `/dispatch setup` laid out, `deploy/docker-compose.yml` is a create-only copy no upgrade refreshes, so copy
 it again from the installed package (or pull the clone), or use `pi-dispatch up` instead. The same copy names the

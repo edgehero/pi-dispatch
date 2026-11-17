@@ -8259,8 +8259,8 @@ only one, its own ladder, OpenShell's pinned release first, then `.env`, `up`, `
   networks it makes when the egress policy is armed, and its fixture directory are named before any exists; and
   all are removed when the read ends, or by the next `--live` when that run was interrupted, which names what it
   removed (`INT-LIVE-PROBE-CONTRACT`). Nothing else reaches it: not `up`, not `--fix`, not the panel.
-- **`doctor` reads the deployment's `.env` for the five boot-file keys (`ENV_FILE_READABLE_KEYS`), to decide what to say AND whether to fail**
-  (issues #357, #384, #499, #503 and #504; since issue #859 for every check that reads those files), **and, since issue #453, for the three venue keys `up` and `service install` already read**
+- **`doctor` reads the deployment's `.env` for the six boot-file keys (`ENV_FILE_READABLE_KEYS`), to decide what to say AND whether to fail**
+  (issues #357, #384, #499, #503, #504 and #918; since issue #859 for every check that reads those files), **and, since issue #453, for the three venue keys `up` and `service install` already read**
   (`PI_BACKENDS`, `PI_EGRESS`, `PI_EGRESS_PROXY`, through the same `readStackKeys` and the same shell-wins,
   disagreement-is-a-✗ rule as `up`), **and for the service's own `VALKEY_URL`, `PI_PROVIDER` and the provider's key**
   (its presence, and whether it is whitespace or an OAuth token; never its value), **and, since PR #466's gate round
@@ -8348,7 +8348,7 @@ only one, its own ladder, OpenShell's pinned release first, then `.env`, `up`, `
   deployment folder is trusted exactly as far as the service trusts it, so the job image this account's own `.env`
   names is run by doctor's canary and probes, in containers pinned as a job's are, as the service runs it. Every such key passes
   ONE structural allowlist (`SERVICE_ENV_KEYS` plus pi's own key names for the provider) and one platform-to-loader
-  mapping, beside the five-key `ENV_FILE_READABLE_KEYS`; unlike those five, these values STEER doctor: which venue it
+  mapping, beside the six-key `ENV_FILE_READABLE_KEYS`; unlike those six, these values STEER doctor: which venue it
   judges and so which runtime it spawns, which Valkey it connects to, and which fixes it offers. A URL doctor prints
   is printed as scheme, host, port and database only (`<no host>` without one, `<unparseable URL>` when it does not
   parse), and the fleet host names a chosen Valkey returns are printed with C0 and C1 controls blanked. That widening is the review this paragraph asks for: without it the plain `doctor` a podman-only
@@ -8361,7 +8361,7 @@ only one, its own ladder, OpenShell's pinned release first, then `.env`, `up`, `
   configures the SERVICE through `EnvironmentFile=` and the wrappers and configures nothing about a shell
   an operator later runs `doctor` in; unqualified, the two warnings would then fire hardest at the
   deployments that had just been converged, and this module's own rule is that a check nobody can silence
-  must never cry wolf. So doctor reads that file for exactly the boot-file keys (two then, five now), and judges TWO
+  must never cry wolf. So doctor reads that file for exactly the boot-file keys (two then, six now), and judges TWO
   SUBJECTS from it (issue #384). **The SERVICE** is judged whenever `<cwd>/.env` assigns the key, WHATEVER
   this shell says, because the shell never reaches it: `deploy/worker.service` is `EnvironmentFile=` plus
   `ExecStart` with no `Environment=`, the launchd plist carries only `PATH` and `PI_ENV_SETUP`, and the
@@ -8433,7 +8433,8 @@ only one, its own ladder, OpenShell's pinned release first, then `.env`, `up`, `
   not judged against projects or limits the file names on such a line. One file named two ways (a symlinked folder,
   `/tmp` and `/private/tmp`, a case-insensitive disk) is no difference: where both exist they are compared by what they
   are. The service's own subject reads an untrusted file as the BOOT_FILES lines do, to say what that file would do. `PI_MODEL_ENDPOINTS_FILE` keeps its own rule (`endpointsFileSetting`,
-  which refuses a disagreement), now for the cheaper-route proposals as well. Every file read this way is opened behind
+  which refuses a disagreement), now for the cheaper-route proposals as well, and `PI_PRIVATE_ENDPOINTS_FILE` (issue
+  #918) the same rule (`privateEndpointsFileSetting`); both are left out of `BOOT_FACT_KEYS`. Every file read this way is opened behind
   a regular-file guard. It is one read of the file, and still configures nothing. **An env-setup script THE SERVICE RUNS
   downgrades a service refusal to a WARNING naming it**, because on all three platforms that script runs
   after `.env` and can override the key; without the downgrade doctor and `up` would fail a working
@@ -9158,6 +9159,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-16 (#918, part 1) | **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, doctor's `.env` reading: `PI_PRIVATE_ENDPOINTS_FILE` is the sixth boot-file key ("five" corrected to six in the lead and the body), kept out of `BOOT_FACT_KEYS` by `PI_MODEL_ENDPOINTS_FILE`'s own shell-or-`.env` rule. Its BOOT_FILES line loads the file as the worker's boot does, the rule across it and `model-endpoints.json` included. Every other clause UNCHANGED, checked. `REQ-PRIVATE-ENDPOINTS` arrives with the binding in part 2. |
 | 2026-11-16 (#911) | Added `REQ-LOCAL-EVENT-COMMANDS`: authenticated independent local listeners, explicit worker ownership, exact review-author grants, no source payload, durable per-trigger bounded coalescing, atomic delivery receipts, retry ownership, recovery, current-definition checks and cron-folder serialization. `REQ-TRIGGER-AUTHOR-GATE` AMENDED for the narrowly scoped reviewer grant and the absence of source text from local commands. UNCHANGED, checked: ordinary forge first-match selection and deduplication, action vocabularies, self refusal, polling feed coverage, `REQ-LOCAL-JOB-VISIBILITY`, `REQ-CRON-SCHEDULED-JOBS` scheduler guarantees, isolation, spend checks and registered command execution. Final implementation also amends `REQ-OPERATOR-JOB-CANCEL`: unacknowledged local cancellations disclose possibly committed signal changes; unclaimed changed or cancelled generations can be superseded, active ownership stays, local authority refusals do not spend one-shots, and missing active queue jobs require paused, positively verified manual recovery. Final polling review corrects ETag commit ordering: validators persist only after durable admission and the feed cursor or PR snapshot, with all review validators after the shared sweep cursor, preventing a failed signal from being hidden behind 304. Existing key shapes and TTLs are UNCHANGED, checked. |
 | 2026-11-15 (#908) | Added `REQ-TRIGGER-MERGE-POLICY`: reviewed `run.mayMerge`, exact default prompt preservation, current-trigger digest authorization before each container, all-forge forwarding, versioned data and the image capability proof. `REQ-PER-TRIGGER-INSTRUCTION` now precedes the effective policy paragraph and names the forge trigger types. The wait gate's explanation now distinguishes starting work from granting merge permission. UNCHANGED, checked: `REQ-BRANCH-PROTECTION-PRECONDITION`, author admission, budget gates, ordinary retries, MCP withholding and all unflagged job behavior. |
 | 2026-11-15 (#899) | `REQ-DEDUP-BY-DELIVERY-GUID` and `REQ-OPERATOR-JOB-CANCEL` AMENDED: terminal policy results release the owned semantic window after processing and cleanup, including early refusals and active cancellations; recovery handoffs remain excluded. Shared ingress repairs missed releases from completed policy state with atomic evidence and ownership checks, bounded retry and truthful final enqueue reporting. Retained delivery ids, window length/key grammar, replicas, successful ordinary runs, infrastructure failures and live deferrals UNCHANGED, checked. Parking and steering keep their existing ordering; their blanket non-release wording is narrowed to their own mechanisms. |

@@ -1,5 +1,6 @@
 import { execFileSync, spawnSync } from "node:child_process";
 import { test } from "node:test";
+import { readPackagedGrantHelper } from "../src/egress-conf-copy.mjs";
 import assert from "node:assert/strict";
 import { chmodSync, closeSync, existsSync, fstatSync, lstatSync, mkdtempSync, mkdirSync, openSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, symlinkSync, unlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { makeWaitChecker } from "../src/wait-check.mjs";
@@ -158,7 +159,7 @@ function stripFlowLines(output) {
 // A container `up` or compose made in the folder doctor runs from carries the pinned squid and that folder's two files.
 const PROXY_KEY = 'docker inspect --format={"status":';
 const PINNED_SQUID = "ubuntu/squid@sha256:6a097f68bae708cedbabd6188d68c7e2e7a38cedd05a176e1cc0ba29e3bbe029";
-const proxyAnswer = (health, status, { image = PINNED_SQUID, cwd = process.cwd(), conf = join(cwd, "deploy/egress-proxy.conf"), allowlist = join(cwd, "egress-allowlist.conf"), include = null, entrypoint = ["entrypoint.sh"], cmd = ["-f", "/etc/squid/squid.conf", "-NYC"], stderr } = {}) => ({
+const proxyAnswer = (health, status, { image = PINNED_SQUID, cwd = process.cwd(), conf = join(cwd, "deploy/egress-proxy.conf"), allowlist = join(cwd, "egress-allowlist.conf"), include = null, privateDir = null, grants = null, entrypoint = ["entrypoint.sh"], cmd = ["-f", "/etc/squid/squid.conf", "-NYC"], stderr } = {}) => ({
 	code: 0,
 	output: `${JSON.stringify({
 		status,
@@ -171,6 +172,9 @@ const proxyAnswer = (health, status, { image = PINNED_SQUID, cwd = process.cwd()
 			{ Type: "bind", Source: allowlist, Destination: "/etc/pi-dispatch/allowlist.conf" },
 			// Issue #503: the third mount, the model endpoints' include, on a proxy made since.
 			...(include ? [{ Type: "bind", Source: include, Destination: "/etc/pi-dispatch/model-endpoints.conf" }] : []),
+			// Issue #918: the private endpoints' folder and the grant folder, on a proxy made since.
+			...(privateDir ? [{ Type: "bind", Source: privateDir, Destination: "/etc/pi-dispatch/private" }] : []),
+			...(grants ? [{ Type: "bind", Source: grants, Destination: "/etc/pi-dispatch/grants" }] : []),
 			{ Type: "volume", Source: "/var/lib/docker/volumes/a1/_data", Destination: "/var/log/squid" },
 			{ Type: "volume", Source: "/var/lib/docker/volumes/b2/_data", Destination: "/var/spool/squid" },
 		],
@@ -3542,7 +3546,7 @@ test("doctor --fix: a missing .env is delegated to init's create-only scaffolds,
 	const code = await runDoctor(
 		{ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", GITHUB_AUTH_SOURCE: "pat", GITHUB_PAT: "ghp_fixture" },
 		// The proxy's mounts are this folder's (issue #480): init now scaffolds the files it mounts, so doctor compares them.
-		{ out, cwd, spawn: fakeSpawn({ ...green, [PROXY_KEY]: proxyAnswer("healthy", "running", { cwd, include: join(cwd, "model-endpoints.conf") }) }), probeValkey: async () => true, nodeVersion: "22.19.0", fix: true, promptFn },
+		{ out, cwd, spawn: fakeSpawn({ ...green, [PROXY_KEY]: proxyAnswer("healthy", "running", { cwd, include: join(cwd, "model-endpoints.conf"), privateDir: join(cwd, "egress-private"), grants: join(cwd, "egress-grants", "local") }) }), probeValkey: async () => true, nodeVersion: "22.19.0", fix: true, promptFn },
 	);
 	assert.equal(prompts.length, 0, "scaffold delegation is silent -- init is create-only by contract and can overwrite nothing");
 	assert.ok(existsSync(join(cwd, ".env")), "init created the .env");
@@ -3571,7 +3575,7 @@ test("doctor --fix: accepting the overlay auth.json offer deletes the file and c
 		out,
 		cwd,
 		// This folder's mounts (issue #480): the --fix pass runs init here, which scaffolds the files the proxy mounts.
-		spawn: fakeSpawn({ ...green, [PROXY_KEY]: proxyAnswer("healthy", "running", { cwd, include: join(cwd, "model-endpoints.conf") }) }),
+		spawn: fakeSpawn({ ...green, [PROXY_KEY]: proxyAnswer("healthy", "running", { cwd, include: join(cwd, "model-endpoints.conf"), privateDir: join(cwd, "egress-private"), grants: join(cwd, "egress-grants", "local") }) }),
 		probeValkey: async () => true,
 		nodeVersion: "22.19.0",
 		fix: true,
@@ -4058,6 +4062,49 @@ test("doctor: a missing model-endpoints.conf is ✗ under rules that include it,
 	const dir = await doctor503(cwd);
 	assert.match(dir.text, /✗ model-endpoints\.conf in this folder is a directory, not a file/);
 	assert.doesNotMatch(dir.text, /model-endpoints\.conf is not in this folder/);
+});
+
+// Issue #918: the private endpoints' folder and the Docker proxy's grant folder, by the same rule, and a helper squid
+// cannot run, which is ✗ whatever the rules say (a request to a private endpoint makes squid respawn it in a loop).
+const INCLUDE_918_RULES = `${INCLUDE_503_RULES}include /etc/pi-dispatch/private/private-endpoints.conf\n`;
+function folder918(rules, { helperMode = 0o755, grants = true, privateDir = true } = {}) {
+	const cwd = folder503(rules);
+	if (privateDir) {
+		mkdirSync(join(cwd, "egress-private"));
+		writeFileSync(join(cwd, "egress-private", "private-endpoints.conf"), "# generated\n");
+		writeFileSync(join(cwd, "egress-private", "endpoint-grant"), readPackagedGrantHelper(), { mode: helperMode });
+		chmodSync(join(cwd, "egress-private", "endpoint-grant"), helperMode);
+	}
+	if (grants) mkdirSync(join(cwd, "egress-grants", "local"), { recursive: true });
+	return cwd;
+}
+
+test("doctor: the private endpoints' folder and grant folder are ✗ under rules that include the private file and ⚠ before; a helper squid cannot run is ✗ either way (#918)", { skip: process.platform === "win32" }, async () => {
+	const strict = await doctor503(folder918(INCLUDE_918_RULES, { privateDir: false }));
+	assert.equal(strict.code, 1);
+	assert.match(strict.text, /✗ egress-private\/private-endpoints\.conf is not in this folder\n {4}→ the egress proxy mounts it and its rules include it, so the proxy cannot carry private endpoints without it: `pi-dispatch init` writes it \(create-only\)/);
+	const old = await doctor503(folder918(INCLUDE_503_RULES, { privateDir: false }));
+	assert.match(old.text, /⚠ egress-private\/private-endpoints\.conf is not in this folder\n {4}→ the proxy's rules here predate #918 and run without it/);
+	const grants = await doctor503(folder918(INCLUDE_918_RULES, { grants: false }));
+	assert.match(grants.text, /✗ egress-grants\/local\/ is not in this folder\n {4}→ the egress proxy mounts it and its rules run the helper there/);
+	for (const rules of [INCLUDE_503_RULES, INCLUDE_918_RULES]) {
+		const helper = await doctor503(folder918(rules, { helperMode: 0o700 }));
+		assert.match(helper.text, /✗ egress-private\/endpoint-grant cannot be run by squid's own user \(`chmod 0755 egress-private\/endpoint-grant`\)\n {4}→ squid's own user must reach it, and a helper it cannot run is respawned in a loop that fills its log: `chmod 0755 egress-private\/endpoint-grant`/, rules);
+	}
+	// A name another kind of thing holds: init keeps it, so the fix says to remove it first.
+	const taken = folder918(INCLUDE_918_RULES);
+	rmSync(join(taken, "egress-private", "private-endpoints.conf"));
+	mkdirSync(join(taken, "egress-private", "private-endpoints.conf"));
+	assert.match((await doctor503(taken)).text, /✗ egress-private\/private-endpoints\.conf is a directory\n {4}→ the egress proxy mounts it and its rules include it, so the proxy cannot carry private endpoints without it: remove what holds the name, then `pi-dispatch init` writes it, then `pi-dispatch up` starts the proxy/);
+	// A helper that is a link: followed inside the proxy, where its target is not.
+	const linked = folder918(INCLUDE_918_RULES);
+	rmSync(join(linked, "egress-private", "endpoint-grant"));
+	symlinkSync(join(linked, "elsewhere"), join(linked, "egress-private", "endpoint-grant"));
+	assert.match((await doctor503(linked)).text, /✗ egress-private\/endpoint-grant is a symlink\n {4}→ the egress proxy mounts its folder, so the link is followed inside the proxy, where its target is not: remove the link, then `pi-dispatch init` writes the file/);
+	const whole = folder918(INCLUDE_918_RULES);
+	const fine = await doctor503(whole, proxyAnswer("healthy", "running", { cwd: whole, include: join(whole, "model-endpoints.conf"), privateDir: join(whole, "egress-private"), grants: join(whole, "egress-grants", "local") }));
+	assert.doesNotMatch(fine.text, /egress-private|egress-grants/, "a whole folder and a current proxy say nothing about them");
+	assert.match(fine.text, /✓ Egress proxy running/);
 });
 
 test("doctor: a two-mount proxy is out of date only under rules that include the file; endpoints under older rules name the rules refresh, never a replace (#503)", async () => {
@@ -8150,7 +8197,7 @@ test("doctor: a line systemd reads differently is named with its shape, once, an
 		const code = await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), platform: "linux" });
 		const lines = text().split("\n").filter((l) => /cannot be read off/.test(l));
 		assert.equal(lines.length, 1, `one line for the file: ${JSON.stringify(hazard)}\n${text()}`);
-		assert.ok(lines[0].startsWith(`⚠ whether PI_PAUSE_WINDOWS_FILE or PI_SCOPED_LIMITS_FILE or PI_PROJECTS_FILE or PI_MODEL_ENDPOINTS_FILE or PI_ENVELOPE_FILE reaches the service cannot be read off ${join(cwd, ".env")}: line ${line} `), lines[0]);
+		assert.ok(lines[0].startsWith(`⚠ whether PI_PAUSE_WINDOWS_FILE or PI_SCOPED_LIMITS_FILE or PI_PROJECTS_FILE or PI_MODEL_ENDPOINTS_FILE or PI_PRIVATE_ENDPOINTS_FILE or PI_ENVELOPE_FILE reaches the service cannot be read off ${join(cwd, ".env")}: line ${line} `), lines[0]);
 		assert.match(lines[0], what);
 		assert.match(text(), new RegExp(`on line ${line} of that file, ${fix.source}`), "the fix names the line and what to change");
 		assert.doesNotMatch(text(), /PI_PAUSE_WINDOWS_FILE is set in .* and loads/, "and no reading of a file systemd splits differently");
@@ -8177,7 +8224,7 @@ test("doctor: a .env systemd will not LOAD fails on Linux, naming the line and t
 		writeFileSync(join(cwd, ".env"), Buffer.concat([Buffer.from(`PI_PAUSE_WINDOWS_FILE=${join(cwd, "pause-windows.json")}\n`), tail]));
 		const { out, text } = capture();
 		const code = await runDoctor(imgEnv(), { ...scaffoldDeps(out, cwd), platform: "linux" });
-		assert.match(text(), new RegExp(`✗ whether PI_PAUSE_WINDOWS_FILE or PI_SCOPED_LIMITS_FILE or PI_PROJECTS_FILE or PI_MODEL_ENDPOINTS_FILE or PI_ENVELOPE_FILE reaches the service cannot be read off .*: ${what.source}`));
+		assert.match(text(), new RegExp(`✗ whether PI_PAUSE_WINDOWS_FILE or PI_SCOPED_LIMITS_FILE or PI_PROJECTS_FILE or PI_MODEL_ENDPOINTS_FILE or PI_PRIVATE_ENDPOINTS_FILE or PI_ENVELOPE_FILE reaches the service cannot be read off .*: ${what.source}`));
 		assert.match(text(), fix);
 		assert.doesNotMatch(text(), /PI_PAUSE_WINDOWS_FILE is set in .* and loads/);
 		assert.equal(code, 1, "a service that cannot start fails doctor");
@@ -9697,6 +9744,8 @@ test("doctor.mjs reads no service key from this shell outside the resolver: ever
 		doctorIntervalHours: async (e) => (await import("../src/doctor-results.mjs")).doctorIntervalHours(e),
 		secretValuesIn: async (e) => (await import("../src/doctor-results.mjs")).secretValuesIn(e),
 		endpointsDeclaredIn: async (e) => (await import("../src/egress-cli.mjs")).endpointsDeclaredIn({ env: e, cwd: "/nonexistent-503", fs: { readFileSync: enoent, existsSync: () => false }, platform: "linux" }),
+		// Issue #918: the private endpoints' boot-file line reads the model endpoints' file as the service does.
+		endpointsFileSetting: async (e) => (await import("../src/egress-cli.mjs")).endpointsFileSetting({ env: e, cwd: "/nonexistent-918", readEnv: enoent, exists: () => false }),
 	};
 	assert.deepEqual([...handedEnv].filter((n) => !Object.hasOwn(probes, n)).sort(), [], "every imported helper doctor hands env to is probed here");
 	const probedReads = {};
@@ -12598,6 +12647,57 @@ test("doctor: an envelope the worker would refuse fails: no per-job cap, a floor
 	const c = failing(await collectChecks(inside.env, seams(inside.dir)));
 	assert.match(c.label, /lies inside a job path \(run-root /);
 	assert.match(c.label, /REFUSES TO START/);
+});
+
+test("doctor: a private endpoint folder inside a job path fails, a job path it cannot read is said, and a triggers file that does not load is left to its own line (#918)", async () => {
+	const seams = (dir) => collectSeams(green, { cwd: dir, nodeVersion: "22.19.0", probeValkey: async () => true });
+	const line = (checks) => checks.find((c) => /^private endpoints: /.test(c.label));
+	const dir = tempDir("pi-doctor-918-dirs-");
+	mkdirSync(join(dir, "egress-private"));
+	// The deployment folder is itself a run root: a job could replace the helper the proxy runs.
+	const inside = line(await collectChecks(imgEnv({ PI_DISPATCH_RUN_ROOTS: dir }), seams(dir)));
+	assert.equal(inside.ok, false);
+	assert.ok(!inside.warn);
+	assert.match(inside.label, /^private endpoints: egress-private\/ in the deployment folder lies inside a job path \(run-root /);
+	assert.match(inside.fix, /the worker REFUSES TO START/);
+	// A run root this account cannot read: the worker logs it and boots unjudged, so doctor says so rather than pass.
+	if (process.platform !== "win32" && process.getuid?.() !== 0) {
+		const locked = join(tempDir("pi-doctor-918-locked-"), "locked");
+		mkdirSync(join(locked, "root"), { recursive: true });
+		chmodSync(locked, 0o000);
+		try {
+			const unjudged = line(await collectChecks(imgEnv({ PI_DISPATCH_RUN_ROOTS: join(locked, "root") }), seams(dir)));
+			assert.equal(unjudged.warn, true);
+			assert.match(unjudged.label, /could not be judged/);
+			assert.match(unjudged.fix, /logs private_endpoint_folder_unjudged/);
+		} finally {
+			chmodSync(locked, 0o755);
+		}
+	}
+	// A triggers file that is there and cannot be read: no other line says it, so this one does.
+	if (process.platform !== "win32" && process.getuid?.() !== 0) {
+		const unreadable = join(tempDir("pi-doctor-918-trig-"), "triggers.json");
+		writeFileSync(unreadable, JSON.stringify({ triggers: [] }));
+		chmodSync(unreadable, 0o000);
+		try {
+			const said = line(await collectChecks(imgEnv({ PI_TRIGGERS_FILE: unreadable }), seams(dir)));
+			assert.equal(said?.warn, true);
+			assert.match(said.label, /inside a trigger's run\.folder or run\.skillsDir could not be judged: the triggers file could not be read here \(EACCES\); the run roots and PI_GLOBAL_PI_DIR are still judged/);
+			// And what does not come from the file still is: the deployment folder as a run root fails as before.
+			const both = (await collectChecks(imgEnv({ PI_TRIGGERS_FILE: unreadable, PI_DISPATCH_RUN_ROOTS: dir }), seams(dir))).filter((c) => /^private endpoints: /.test(c.label));
+			assert.equal(both.length, 2);
+			assert.match(both[1].label, /lies inside a job path \(run-root /);
+			assert.ok(!both[1].warn);
+		} finally {
+			chmodSync(unreadable, 0o644);
+		}
+	}
+	// A triggers file that does not load: its own line fails, and this one says nothing more.
+	const broken = join(dir, "triggers.json");
+	writeFileSync(broken, "{ not json");
+	const checks = await collectChecks(imgEnv({ PI_TRIGGERS_FILE: broken }), seams(dir));
+	assert.equal(line(checks), undefined);
+	assert.ok(checks.some((c) => c.ok === false && /triggers/i.test(c.label)), "the triggers file's own line fails");
 });
 
 test("envelopeChecks: a floor below the per-job cap admits no job, and a project outside the envelope joins _other; both WARN (#504)", () => {

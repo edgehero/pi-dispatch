@@ -141,6 +141,12 @@ services:
       # squid refuses to start when an included file is missing. After a render, reload with
       # `docker exec pi-dispatch-egress-proxy squid -k reconfigure`, not a restart.
       - ../model-endpoints.conf:/etc/pi-dispatch/model-endpoints.conf:ro,z
+      # The declared PRIVATE endpoints (issue #918): the folder holding their rendered rules, which the rules include,
+      # and the shipped grant helper those rules run; and the grants the worker writes for its jobs, this runtime's
+      # own folder. Folders, not files: the include is written by rename, and a grant must appear in here the moment
+      # the worker writes it. `init` scaffolds both, and squid will not start without the include.
+      - ../egress-private:/etc/pi-dispatch/private:ro,z
+      - ../egress-grants/local:/etc/pi-dispatch/grants:ro,z
     # How the proxy reaches a model server on this host (issue #503). On Docker Engine (Linux) this name does
     # not exist without the line, and host-gateway is the bridge gateway (docker0, 172.17.0.1). Docker
     # Desktop already resolves the name, and host-gateway there is the same host address, so the line is kept

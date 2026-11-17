@@ -46,7 +46,7 @@
  * peer's own queue is neither paused nor waited for.
  */
 import { spawn as nodeSpawn } from "node:child_process";
-import { accessSync, constants as fsConstants, existsSync, mkdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
+import { accessSync, constants as fsConstants, existsSync, lstatSync, mkdirSync, readFileSync, realpathSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { lookup as dnsLookup } from "node:dns/promises";
 import { connect as netConnect } from "node:net";
 import { homedir, networkInterfaces, tmpdir, userInfo } from "node:os";
@@ -64,10 +64,11 @@ import { cliDeploymentEnv, deploymentServiceEnv } from "./service-env.mjs";
 import * as nodeFs from "node:fs";
 import { MODEL_ENDPOINTS_INCLUDE_NAME } from "./model-endpoints.mjs";
 import { VALKEY_HEALTH_SCRIPT, VALKEY_IMAGE, VALKEY_PASSWORD_KEY, VALKEY_START_SCRIPT, dollarsDoubled, newValkeyPassword, valkeyPasswordDecision } from "./valkey-auth.mjs";
-import { ALL_QUADLET_FILES, ALLOWLIST_PLACEHOLDER, MODEL_ENDPOINTS_PLACEHOLDER, NETNS_KEEPER, NETNS_KEEPER_FORMAT, judgeNetnsKeeper, keeperUnderRunningProxyHint, managerEnvRefusal, PROXY_CONF_PLACEHOLDER, QUADLET_FILES, applyStack, decideValkey, describeAction, passwdNameFrom, readSubuidRanges, readValkeyKeys, valkeySharedOn, VALKEY_SHARED_KEY, describeRollBack, journalWrite, rollBackWrites, foreignContainerRefusal, foreignContainers, lingerNote, planStack, proxyConfCopyPath, proxyRestartWarning, quadletDir, readLinger, readStackKeys, stackComponents, unknownContainerRefusal, userBusRefusal, valkeyEnvPath, valkeyPasswordRestartWarning, workerUnitDeps } from "./podman-stack.mjs";
+import { ALL_QUADLET_FILES, ALLOWLIST_PLACEHOLDER, GRANTS_PLACEHOLDER, MODEL_ENDPOINTS_PLACEHOLDER, PRIVATE_DIR_PLACEHOLDER, proxyFolderProblem, NETNS_KEEPER, NETNS_KEEPER_FORMAT, judgeNetnsKeeper, keeperUnderRunningProxyHint, managerEnvRefusal, PROXY_CONF_PLACEHOLDER, QUADLET_FILES, applyStack, decideValkey, describeAction, passwdNameFrom, readSubuidRanges, readValkeyKeys, valkeySharedOn, VALKEY_SHARED_KEY, describeRollBack, journalWrite, rollBackWrites, foreignContainerRefusal, foreignContainers, lingerNote, planStack, proxyConfCopyPath, proxyRestartWarning, quadletDir, readLinger, readStackKeys, stackComponents, unknownContainerRefusal, userBusRefusal, valkeyEnvPath, valkeyPasswordRestartWarning, workerUnitDeps } from "./podman-stack.mjs";
 
 /** This command's default fs seam: its own calls, and every call the `.env` writer makes (`ENV_WRITER_FS`, issue #522). */
-export const SERVICE_FS = { existsSync, mkdirSync, ...ENV_WRITER_FS };
+// Issue #918: lstatSync too, so the proxy folder check (`proxyFolderProblem`) sees a symlinked private endpoint folder.
+export const SERVICE_FS = { existsSync, lstatSync, mkdirSync, ...ENV_WRITER_FS };
 
 // src/ is where this module lives in BOTH layouts (worker/src in a checkout,
 // node_modules/@edgehero/pi-dispatch/src under npm). Deploy templates resolve one level up from it
@@ -267,6 +268,8 @@ export const TEMPLATE_PINS = {
 		`Volume=${PROXY_CONF_PLACEHOLDER}:/etc/squid/squid.conf:ro,z`, // → the account-owned COPY of the package's egress-proxy.conf (~/.config/pi-dispatch/egress-proxy.conf, podman-stack.mjs proxyConfCopyPath), because `z` cannot relabel a root-owned package file (measured)
 		`Volume=${ALLOWLIST_PLACEHOLDER}:/etc/pi-dispatch/allowlist.conf:ro,z`, // → <deployDir>/egress-allowlist.conf, the list `init` scaffolds
 		`Volume=${MODEL_ENDPOINTS_PLACEHOLDER}:/etc/pi-dispatch/model-endpoints.conf:ro,z`, // → <deployDir>/model-endpoints.conf, the include `init` scaffolds and `egress render` rewrites in place (issue #503)
+		`Volume=${PRIVATE_DIR_PLACEHOLDER}:/etc/pi-dispatch/private:ro,z`, // → <deployDir>/egress-private, the private endpoints' rendered rules and their grant helper (issue #918)
+		`Volume=${GRANTS_PLACEHOLDER}:/etc/pi-dispatch/grants:ro,z`, // → <deployDir>/egress-grants/podman, this runtime's grants, which the worker writes (issue #918)
 		"ContainerName=pi-dispatch-egress-proxy",
 		"Network=pi-dispatch-egress-out.network",
 		"WantedBy=default.target",
@@ -1517,6 +1520,11 @@ async function stackRefusal(ctx, paths, stack) {
 	const endpointsInclude = join(ctx.deployDir, MODEL_ENDPOINTS_INCLUDE_NAME);
 	if (stack.components.proxy && ctx.fs.existsSync(allowlist) && !ctx.fs.existsSync(endpointsInclude)) {
 		blocking.push(`the egress policy is on, and ${endpointsInclude} does not exist: the proxy's rules include it, and squid will not start without it. Run \`pi-dispatch init\` in ${ctx.deployDir} first (it never overwrites), or set PI_EGRESS=0 in .env to opt out of the policy`);
+	} else if (stack.components.proxy && ctx.fs.existsSync(allowlist)) {
+		// Issue #918: the private endpoints' folder (the include the rules name, and the grant helper squid runs as its own
+		// user) and this account's grant folder, the unit's two other mounts from this folder, by the rule `up` uses.
+		const problem = proxyFolderProblem(ctx.fs, ctx.deployDir, { runtime: "podman" });
+		if (problem) blocking.push(`the egress policy is on, and ${join(ctx.deployDir, problem.name)} ${problem.problem}: the proxy unit mounts it, and squid will not start as it should without it. ${problem.missing ? `Run \`pi-dispatch init\` in ${ctx.deployDir} first (it never overwrites), or set PI_EGRESS=0 in .env to opt out of the policy` : "Fix it, then run this again"}`);
 	}
 	const bus = stack.plan.actions.length > 0 ? userBusRefusal({ env: ctx.env, user: ctx.user, euid: ctx.euid }) : null;
 	if (bus) blocking.push(bus);
