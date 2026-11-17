@@ -10,8 +10,8 @@ import { DISPLAY_SCREENSHOT_MAX, displayResult } from "../../worker/src/display-
 import { imageRefProblem } from "../../worker/src/image-ref.mjs";
 import { DEFAULT_JOB_SIZE } from "../../worker/src/job-size.mjs";
 
-const [image, mode = "copy", output] = process.argv.slice(2);
-if (!image || imageRefProblem(image) || !["copy", "bind"].includes(mode)) throw new Error("Usage: node .github/scripts/display-openshell-smoke.mjs <display-image> <copy|bind> [output.png]");
+const [image, mode = "copy", output, expectation] = process.argv.slice(2);
+if (!image || imageRefProblem(image) || !["copy", "bind"].includes(mode) || (expectation && expectation !== "--expect-identity-refusal")) throw new Error("Usage: node .github/scripts/display-openshell-smoke.mjs <display-image> <copy|bind> [output.png] [--expect-identity-refusal]");
 const scratch = fs.mkdtempSync(join(tmpdir(), "pi-display-openshell-"));
 const nonce = randomBytes(6).toString("hex");
 const probeImage = `pi-dispatch-display-probe:${nonce}`;
@@ -21,7 +21,16 @@ let timer;
 try {
 	// This fixed offline fixture has no repository or real credentials. Preserve Xvfb's own diagnostic on failure;
 	// ordinary doctor still receives only the closed reason, never arbitrary application stderr.
-	fs.writeFileSync(join(scratch, "entrypoint.sh"), '#!/bin/sh\nif [ "${PI_JOB_LAYOUT:-}" = sandbox ]; then ws=/sandbox/workspace; else ws=/workspace; fi\npi-display-probe "$ws/display.png"\ncode=$?\nif [ "$code" -eq 70 ]; then\n  timeout 5s Xvfb -displayfd 3 -screen 0 800x600x24 -nolisten tcp -noreset > "$ws/display-diagnostic.txt" 2>&1 3>&1\nfi\nexit "$code"\n');
+	fs.writeFileSync(join(scratch, "entrypoint.sh"), `#!/bin/sh
+if [ "\${PI_JOB_LAYOUT:-}" = sandbox ]; then ws=/sandbox/workspace; else ws=/workspace; fi
+pi-display-probe "$ws/display.png"
+code=$?
+if [ "$code" -eq 70 ]; then
+  node -e 'const result = {}; for (const [set, get] of [["setgid", "getgid"], ["setuid", "getuid"]]) { try { process[set](process[get]()); result[set] = "allowed"; } catch (e) { result[set] = e.code; } } console.log(JSON.stringify(result));' > "$ws/display-diagnostic.txt" 2>&1
+  timeout 5s Xvfb -displayfd 3 -screen 0 800x600x24 -nolisten tcp -noreset >> "$ws/display-diagnostic.txt" 2>&1 3>&1
+fi
+exit "$code"
+`);
 	fs.writeFileSync(join(scratch, "Dockerfile"), `FROM ${image}\nUSER root\nCOPY entrypoint.sh /entrypoint.sh\nRUN chmod 0755 /entrypoint.sh\nUSER pi\n`);
 	if (spawnSync("docker", ["build", "--pull=false", "-q", "-t", probeImage, scratch], { stdio: "inherit" }).status !== 0) throw new Error("display probe image did not build");
 	const jobDir = join(scratch, "job");
@@ -49,14 +58,26 @@ try {
 		return fs.readFileSync(screenshot);
 	});
 	console.log(JSON.stringify({ venue: mode === "copy" ? "openshell" : "openshell-bind", ...verdict }));
+	let startupDiagnostic = "";
 	if (gone && !verdict.ok) {
 		const diagnostic = join(workspace, "display-diagnostic.txt");
 		try {
 			const stat = fs.lstatSync(diagnostic);
-			if (stat.isFile() && stat.size <= 16 * 1024) console.log(`Xvfb startup diagnostic (fixed offline fixture):\n${fs.readFileSync(diagnostic, "utf8")}`);
+			if (stat.isFile() && stat.size <= 16 * 1024) {
+				startupDiagnostic = fs.readFileSync(diagnostic, "utf8");
+				console.log(`Xvfb startup diagnostic (fixed offline fixture):\n${startupDiagnostic}`);
+			}
 		} catch {}
 	}
-	if (!verdict.ok) process.exitCode = 1;
+	// OpenShell 0.1.4 denies even identity-preserving setgid/setuid. Xvfb's Popen exits before xkbcomp.
+	// Assert that measured limitation, not any failure: a changed vendor policy must make us revisit the docs.
+	if (expectation) {
+		const confirmed = verdict.reason === "display-start-failed"
+			&& startupDiagnostic.startsWith('{"setgid":"EPERM","setuid":"EPERM"}\n')
+			&& startupDiagnostic.includes("XKB: Failed to compile keymap");
+		console.log(JSON.stringify({ expectedIdentityRefusalConfirmed: confirmed }));
+		if (!confirmed) process.exitCode = 1;
+	} else if (!verdict.ok) process.exitCode = 1;
 	else if (output) { const path = resolve(output); fs.mkdirSync(dirname(path), { recursive: true }); fs.copyFileSync(screenshot, path); }
 } finally {
 	clearTimeout(timer);

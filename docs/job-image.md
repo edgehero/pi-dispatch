@@ -219,14 +219,19 @@ image does not advertise `display`, so enabling the recipe is an explicit image 
 
 | Venue | Evidence and limits |
 |---|---|
-| Docker (`local`) | Chromium and Electron measured successfully on Docker 29.8.2, Linux arm64 (OrbStack). The required image CI lane runs both on its Linux runner and deliberately removes Xvfb to prove failure. |
-| Native rootless Podman (`podman`) | The same doctor probe uses `buildPodmanRunArgs`, the decided uid, keep-id, resource bounds and private mount relabelling. A real probe is wired into the required Podman lane. Not measured on the implementation host; confirm that lane's result before treating this recipe as verified there. |
+| Docker (`local`) | Chromium and Electron verified on Docker 29.8.2, Linux arm64 (OrbStack), and on the Linux amd64 [required image CI lane](https://github.com/edgehero/pi-dispatch/actions/runs/44182259226/job/134389555366). Both PNG artifacts were inspected for legible text. Removing Xvfb produces the named failure. |
+| Native rootless Podman (`podman`) | Headed Chromium verified on Podman 4.9.3, Linux amd64, with a worker uid of 1234 ([CI measurement](https://github.com/edgehero/pi-dispatch/actions/runs/44182259244/job/134389381228)). The same doctor probe uses `buildPodmanRunArgs`, the decided uid, keep-id, resource bounds and private mount relabelling. The PNG artifact was inspected for legible text. Electron is not measured on this venue. |
 | Rootful Podman through its Docker API (`local`) | Uses the local builder and doctor probe. Not measured for graphical applications here; run doctor on that host. |
-| OpenShell (`openshell`, `openshell-bind`) | Not measured on the implementation host. The advisory OpenShell lane runs the fixture through each real backend, including policy, Landlock and copy/bind output collection. Doctor reports `venue-not-probed` for a declaring image; a Docker result does not attest to OpenShell. Read the lane's result before claiming support. |
+| OpenShell (`openshell`, `openshell-bind`) | **Unsupported on pinned OpenShell 0.1.4.** Both actual adapters fail with `display-start-failed` and Xvfb's `XKB: Failed to compile keymap` ([CI measurement](https://github.com/edgehero/pi-dispatch/actions/runs/44182259319/job/134389382798)). The advisory lane checks this specific restriction in both modes. Doctor reports `venue-not-probed` for a declaring image; a Docker result does not attest to OpenShell. |
 
-OpenShell does not use the Docker/Podman argv builder, so their shared-memory and pid figures cannot be assumed
-there. No per-trigger isolation relaxation is introduced. If its conformance probe fails, record the precise
-vendor restriction and assess a narrow change against the constitution before offering a setting that lifts it.
+OpenShell 0.1.4's [child seccomp filter](https://github.com/NVIDIA/OpenShell/blob/v0.1.4/crates/openshell-sandbox/src/linux/child_seccomp.rs)
+unconditionally denies `setgid` and `setuid`, including calls that keep the current identity. Xvfb's keymap
+compiler launcher calls both before executing `xkbcomp`, and exits when either is denied. Reproducing those two
+denials locally gives the same XKB failure; the CI fixture also checks the identity-preserving calls return
+`EPERM`. This is a vendor restriction, not a missing font, CPU limit or writable-directory setting. There is no
+per-trigger setting that lifts it. A vendor change permitting safe identity-preserving calls would need a fresh
+graphical measurement; disabling seccomp is not part of this recipe. OpenShell also does not use the
+Docker/Podman argv builder, so their shared-memory and pid figures cannot be assumed there.
 
 | Symptom or probe reason | What to check |
 |---|---|
