@@ -588,7 +588,7 @@ README = {
 **Panels.** `p-outcome`, `p-run`, `p-sandbox`, `p-secrets`, `p-chain`, `p-actions`, `p-cost`, `p-models`, `p-resources`, `p-session`.
 
 **The server provides.**
-- The run record: `openshell {mode, ruleHosts, ruleHostCount, providers, placeholders}`, `secretsProfile`, `bundle {id, variables, shadowed, placeholders, plain}`, `bundleSkipped`, `liveSkipped`, `steerSkipped`.
+- The run record: `openshell {mode, ruleHosts, ruleHostCount, providers, placeholders}`, `privateEndpoints {ids, basis}`, `secretsProfile`, `bundle {id, variables, shadowed, placeholders, plain}`, `bundleSkipped`, `liveSkipped`, `steerSkipped`.
 - Tokens: the split keys, `unmeteredChildren`, `usage.models[]` and `dollars {reservedMicros, settledMicros, basis}`.
 - `resources`, `size`, `capacity`, `session`, `plan`, `parentJobId`, `chainDepth` and `chainRefused`.
 - The children, from a search of the newest runs.
@@ -604,6 +604,7 @@ README = {
   - Bundle skipped (`fork`): a pull request from another repository, and the bundle does not set forkReviews.
   - Bundle skipped (`chained`): a chained /outbox child, so it got no bundle: the grant was to the trigger, not to what its job queues.
   - Rule hosts, no rule host: the sandbox reaches nothing.
+  - Private endpoints, on a local or podman run whose trigger granted some: the ids and what enforced the grant, "bench-device: the egress proxy held the grant for this run's network", or that nothing did when the egress policy was off.
 
 **Fixture note.** All of it is sample: the billing-sweep cron trigger, the billing-jobs folder as a billing member, the variable names, the rule hosts, the token and cost figures, and the two chain children. The skip sentences and the chain cap (2 per job) are the repo's.""",
 

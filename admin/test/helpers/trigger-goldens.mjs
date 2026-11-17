@@ -58,7 +58,7 @@ export async function triggerGolden({
         forges,
         ...(githubRestart ? { githubRestart } : {}),
         flows: [{ name: "tidy", tier: "repository" }],
-        defaults: { backend: "local", maxTurns: 30, mayMerge: false },
+        defaults: { backend: "local", maxTurns: 30, mayMerge: false, privateEndpoints: "none" },
       }),
       triggerFireCheck: () => ({
         refusal: "The schedule is not served by this deployment's queue.",
@@ -80,6 +80,8 @@ export const TRIGGER_DRAW = {
     localEventStatus: { current: { jobId: "event-current", phase: "running", count: 3, dueAt: NOW - 60000 }, next: { jobId: "event-followup", phase: "pending", count: 2, dueAt: NOW + 10000 } },
   }),
   "trigger-may-merge.operator": () => triggerGolden({ trigger: { type: "label", index: 0, forge: "github", flow: "fix", any: ["pi"], instructions: true, mayMerge: true } }),
+  // Issue #918: a trigger whose jobs may reach a device: the By hand row, at the end, and nothing else moves.
+  "trigger-private-endpoints.operator": () => triggerGolden({ trigger: { type: "label", index: 0, forge: "github", flow: "fix", any: ["hil"], privateEndpoints: ["bench-device"] } }),
   "trigger-spent.operator": () =>
     triggerGolden({
       trigger: {

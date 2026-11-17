@@ -1,12 +1,14 @@
 {
   "card": "ConnectionsScreen",
   "pr": 784,
-  "words": "b591d74e05ec27db980af2262b891365aa409083140882b8bb7d6db9b97ef499",
+  "words": "eefee5d25e2e30a587ccb3c925b2eaf5d02fa7ad42ecf875e102c607a8dc067e",
   "elements": [
     {"el":"p-connection-problems","kind":"panel","status":"new","source":"admin/src/console/panels/connections.mjs#connectionsProblems","golden":["panels/connections-proxy.operator","panels/connections-populated.viewer"]},
     {"el":"p-forges","kind":"panel","status":"new","source":"admin/src/console/panels/connections.mjs#connectionsForges","golden":["panels/connections-proxy.operator","panels/connections-populated.viewer"],"shows":["X-GitHub-Delivery","HMAC-SHA256","Developer or above"]},
     {"el":"p-egress","kind":"panel","status":"new","source":"admin/src/console/panels/connections.mjs#connectionsEgress","golden":["panels/connections-proxy.operator","panels/connections-populated.viewer"],"shows":["and 1 more","egress-allowlist.conf"]},
     {"el":"p-endpoints","kind":"panel","status":"new","source":"admin/src/console/panels/connections.mjs#connectionsEndpoints","golden":["panels/connections-proxy.operator","panels/connections-populated.viewer"],"shows":["1 of 2","0 of 4"]},
+    {"el":"p-private-endpoints","kind":"panel","status":"new","source":"admin/src/console/panels/connections.mjs#connectionsPrivateEndpoints","golden":["panels/connections-populated.viewer"],"shows":["bench-device","10.0.5.20:22","1 job at a time"]},
+    {"el":"An id a trigger names that this folder does not declare reads not declared here","kind":"readme","status":"new","panel":"p-private-endpoints","source":"admin/src/console/panels/connections.mjs#connectionsPrivateEndpoints","golden":["panels/connections-populated.viewer"],"shows":["lab-ssh","not declared here"],"reason":"Issue #918: each host reads its own copy and none publishes it, so the panel says what it cannot see."},
     {"el":"p-notify","kind":"panel","status":"new","source":"admin/src/console/panels/connections.mjs#connectionsNotify","golden":["panels/connections-proxy.operator","panels/connections-populated.viewer"]},
     {"el":"p-mcp","kind":"panel","status":"new","source":"admin/src/console/panels/connections.mjs#connectionsMcp","golden":["panels/connections-proxy.operator","panels/connections-populated.viewer"]},
     {"el":"p-env","kind":"panel","status":"new","source":"admin/src/console/panels/connections.mjs#connectionsEnvironment","golden":["panels/connections-proxy.operator","panels/connections-populated.viewer"],"shows":["this shell and the .env differ","unknown (worker env or default)"]},

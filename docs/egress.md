@@ -363,10 +363,10 @@ nothing more about them.
 
 ## Private endpoints
 
-**Status (#918, parts 1 to 3 of 4):** you can declare private endpoints, render their rules and name them on a
-trigger, the worker grants them to that trigger's jobs on the `local` and `podman` venues, and doctor checks the
-binding through the running proxy. A job on an OpenShell venue that names one is refused before it spends anything in
-this release. The console's view comes in the same release.
+You declare private endpoints, render their rules and name them on a trigger; the worker grants them to that
+trigger's jobs on the `local` and `podman` venues, doctor checks the binding through the running proxy, and the console
+shows them (Connections, a trigger's page and a run's page). A job on an OpenShell venue that names one is refused
+before it spends anything in this release.
 
 A private endpoint is one host and one TCP port on your own network, a test device's SSH on port 22 say, that only
 the jobs of the triggers naming it may reach. Like a model server, it is a `CONNECT` tunnel through the proxy to

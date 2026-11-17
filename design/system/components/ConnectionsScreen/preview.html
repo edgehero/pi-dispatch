@@ -1,4 +1,4 @@
-<!-- @dsCard group="Configuration" height=4340 width=1440 subtitle="Forges, egress per host, model endpoints, MCP servers, notifications, the deployment environment and staged packages" -->
+<!-- @dsCard group="Configuration" height=4630 width=1440 subtitle="Forges, egress per host, model endpoints, MCP servers, notifications, the deployment environment and staged packages" -->
 <!doctype html>
 <html lang="en">
 <head>
@@ -269,6 +269,12 @@ details.c2-more > div { padding: 0 14px 14px; display: grid; gap: var(--space-3)
   
 </div>
   <p class="c2-sub"><a class="link" href="#p-provider-keys">Manage provider API keys</a> separately from endpoint declarations.</p>
+</div>
+</section><section class="card card--flush" id="p-private-endpoints" data-panel>
+  <div class="card__head"><h2>Private endpoints</h2><span class="card__sub"><span class="code">private-endpoints.json</span> · devices only the named triggers reach</span></div>
+  <div class="tbl-wrap"><table class="tbl tbl--stack"><caption class="sr">Private endpoints</caption><thead><tr><th scope="col">Endpoint</th><th scope="col">Host and port</th><th scope="col">Slots</th><th scope="col">Granted to</th></tr></thead><tbody><tr><td class="id c2-first"><b class="code">bench-device</b></td><td class="wide" data-l="Host and port"><span class="code">10.0.5.20:22</span></td><td data-l="Slots">1 job at a time</td><td class="wide" data-l="Granted to"><a href="#">label trigger #2</a></td></tr><tr><td class="id c2-first"><b class="code">lab-ssh</b></td><td class="wide" data-l="Host and port"><span class="muted">not declared here</span></td><td data-l="Slots">unknown</td><td class="wide" data-l="Granted to"><a href="#">cron "nightly"</a></td></tr></tbody></table></div>
+<div class="c2-pad2">
+  <p class="c2-sub">Declared in this deployment folder's <span class="code">private-endpoints.json</span>. Each host reads its own copy, which is not published here. Only the jobs of the triggers named reach a device, through the egress proxy.</p>
 </div>
 </section><section class="card" id="p-subscription-auth" data-panel>
   <div class="card__head"><h2>Subscription authentication</h2><span class="card__sub">host-owned credentials, safe status only</span></div>

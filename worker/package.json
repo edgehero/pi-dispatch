@@ -70,6 +70,7 @@
     "./reserve-estimate": "./src/reserve-estimate.mjs",
     "./endpoint-status": "./src/endpoint-status.mjs",
     "./model-endpoints": "./src/model-endpoints.mjs",
+    "./private-endpoints": "./src/private-endpoints.mjs",
     "./egress-allowlist": "./src/egress-allowlist.mjs",
     "./egress": "./src/egress.mjs",
     "./openshell-policy": "./src/openshell-policy.mjs",

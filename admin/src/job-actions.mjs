@@ -555,6 +555,8 @@ function runFieldsSummary(job) {
     backend: job.backend ?? null,
     ...(job.packages !== undefined ? { packages: job.packages } : {}),
     ...(job.mcp !== undefined ? { mcp: job.mcp } : {}),
+    // Issue #918: the devices the job may reach, by id (never a host), as the trigger names them.
+    ...(Array.isArray(job.privateEndpoints) && job.privateEndpoints.length > 0 ? { privateEndpoints: job.privateEndpoints } : {}),
     ...(job.mayMerge === true ? { mayMerge: true } : {}),
   };
 }
