@@ -150,9 +150,11 @@ jobs:
           echo "loaded as $name"
           echo "PI_JOB_IMAGE=$name" >> "$GITHUB_ENV"
           docker save pi-job:display-ci | as-pdjob podman load
+          display_image="$(as-pdjob podman image inspect --format '{{index .RepoTags 0}}' pi-job:display-ci)"
+          echo "PI_DISPLAY_IMAGE=$display_image" >> "$GITHUB_ENV"
 
       - name: Headed Chromium under rootless Podman's job boundary (issue 921)
-        run: as-pdjob node .github/scripts/display-smoke.mjs localhost/pi-job:display-ci /tmp/pi-display-podman.png podman
+        run: as-pdjob node .github/scripts/display-smoke.mjs "$PI_DISPLAY_IMAGE" /tmp/pi-display-podman.png podman
 
       - uses: actions/upload-artifact@v4
         if: always()

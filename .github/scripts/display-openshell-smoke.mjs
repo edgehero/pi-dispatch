@@ -19,7 +19,9 @@ const name = `pi-job-conformance-display-${nonce}`;
 let backend;
 let timer;
 try {
-	fs.writeFileSync(join(scratch, "entrypoint.sh"), '#!/bin/sh\nif [ "${PI_JOB_LAYOUT:-}" = sandbox ]; then ws=/sandbox/workspace; else ws=/workspace; fi\nexec pi-display-probe "$ws/display.png"\n');
+	// This fixed offline fixture has no repository or real credentials. Preserve Xvfb's own diagnostic on failure;
+	// ordinary doctor still receives only the closed reason, never arbitrary application stderr.
+	fs.writeFileSync(join(scratch, "entrypoint.sh"), '#!/bin/sh\nif [ "${PI_JOB_LAYOUT:-}" = sandbox ]; then ws=/sandbox/workspace; else ws=/workspace; fi\npi-display-probe "$ws/display.png"\ncode=$?\nif [ "$code" -eq 70 ]; then\n  timeout 5s Xvfb -displayfd 3 -screen 0 800x600x24 -nolisten tcp -noreset > "$ws/display-diagnostic.txt" 2>&1 3>&1\nfi\nexit "$code"\n');
 	fs.writeFileSync(join(scratch, "Dockerfile"), `FROM ${image}\nUSER root\nCOPY entrypoint.sh /entrypoint.sh\nRUN chmod 0755 /entrypoint.sh\nUSER pi\n`);
 	if (spawnSync("docker", ["build", "--pull=false", "-q", "-t", probeImage, scratch], { stdio: "inherit" }).status !== 0) throw new Error("display probe image did not build");
 	const jobDir = join(scratch, "job");
@@ -47,6 +49,13 @@ try {
 		return fs.readFileSync(screenshot);
 	});
 	console.log(JSON.stringify({ venue: mode === "copy" ? "openshell" : "openshell-bind", ...verdict }));
+	if (gone && !verdict.ok) {
+		const diagnostic = join(workspace, "display-diagnostic.txt");
+		try {
+			const stat = fs.lstatSync(diagnostic);
+			if (stat.isFile() && stat.size <= 16 * 1024) console.log(`Xvfb startup diagnostic (fixed offline fixture):\n${fs.readFileSync(diagnostic, "utf8")}`);
+		} catch {}
+	}
 	if (!verdict.ok) process.exitCode = 1;
 	else if (output) { const path = resolve(output); fs.mkdirSync(dirname(path), { recursive: true }); fs.copyFileSync(screenshot, path); }
 } finally {
