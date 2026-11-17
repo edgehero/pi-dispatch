@@ -1,11 +1,12 @@
 {
   "card": "RunSandboxed",
   "pr": 5,
-  "words": "9573243c0c2b4ad44f2d598a14dc25d5a6d3ac4a024263a2111ea090d4bcefcb",
+  "words": "165f9c9d8bcae460ff57c37fa15ff4ee608d04acd9bdc928445530ea8d64f349",
   "elements": [
     {"el":"p-outcome","kind":"panel","status":"new","source":"admin/src/console/panels/run.mjs#runOutcome","golden":["panels/run-sandbox-openshell.operator"]},
     {"el":"p-run","kind":"panel","status":"new","source":"admin/src/console/panels/run.mjs#runSummary","golden":["panels/run-sandbox-openshell.operator"]},
     {"el":"p-sandbox","kind":"panel","status":"new","source":"admin/src/console/panels/run.mjs#runSandbox","golden":["panels/run-sandbox-openshell.operator"]},
+    {"el":"A run that held a private endpoint grant says which, and what enforced it","kind":"readme","status":"new","panel":"p-sandbox","source":"admin/src/console/panels/run.mjs#runSandbox","golden":["panels/run-sandbox-private-endpoints.operator"],"shows":"bench-device: the egress proxy held the grant for this run's network","reason":"Issue #918: ids from the record, rebuilt by the worker's own recordedPrivateEndpoints; never a host or a port."},
     {"el":"p-secrets","kind":"panel","status":"new","source":"admin/src/console/panels/run.mjs#runSecrets","golden":["panels/run-sandbox-openshell.operator"]},
     {"el":"p-chain","kind":"panel","status":"new","source":"admin/src/console/panels/run.mjs#runChain","golden":["panels/run-sandbox-openshell.operator"]},
     {"el":"p-actions","kind":"panel","status":"new","source":"admin/src/console/panels/run.mjs#runActionsPanel","golden":["panels/run-sandbox-openshell.operator"]},

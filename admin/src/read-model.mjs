@@ -34,7 +34,7 @@ import { DEFAULT_VALKEY_URL, logsDirPath, defaultSandboxDir, delimitedList, work
 import { JOB_IDLE_MINUTES_DEFAULT, JOB_STALL_MINUTES_DEFAULT } from "@edgehero/pi-dispatch/job-limit-rules";
 import { settingsFilePath, readOverlay, readOverlayDocument, writeOverlay, KNOWN_KEYS, OPERATOR_ONLY_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
 import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant, formatMicros } from "@edgehero/pi-dispatch/money";
-import { modelRolesTelemetryOf, approvalRecordOf, BUNDLE_SKIPPED_REASONS, LIVE_SKIPPED_REASONS, OPENSHELL_RULE_HOSTS_MAX, RECOVER_SKIPPED_REASONS, STEER_SKIPPED_REASONS, recordedBundle, recordedCheckpoints, recordedOpenshell, recordedSecretsProfile, recordedRecovered, makeReadRecord, recordedRecoveryOf, sanitizeJobId, targetFor, queuedAtOf, UNREADABLE_RECORD } from "@edgehero/pi-dispatch/run-history";
+import { modelRolesTelemetryOf, approvalRecordOf, BUNDLE_SKIPPED_REASONS, LIVE_SKIPPED_REASONS, OPENSHELL_RULE_HOSTS_MAX, RECOVER_SKIPPED_REASONS, STEER_SKIPPED_REASONS, recordedBundle, recordedCheckpoints, recordedOpenshell, recordedPrivateEndpoints, recordedSecretsProfile, recordedRecovered, makeReadRecord, recordedRecoveryOf, sanitizeJobId, targetFor, queuedAtOf, UNREADABLE_RECORD } from "@edgehero/pi-dispatch/run-history";
 import { LOADED_BASE_SHA_RE } from "@edgehero/pi-dispatch/loaded-record";
 import { pendingFactsOf, QUEUED_STATES } from "@edgehero/pi-dispatch/chat-mode";
 import { FORGE_MCP_SERVER_NAME, MCP_SERVER_NAME_RE, mcpServerWhere, readOverlayMcp } from "@edgehero/pi-dispatch/mcp-config";
@@ -2988,7 +2988,7 @@ export function readTriggerEditor({ paths, env = {}, folder = null, deploymentDi
   let models = null;
   try { provider = overlay.provider ?? providerFrom(hints); model = overlay.model ?? modelFrom(hints); image = jobImageFrom(hints); models = allowedModelsFrom(hints); } catch {}
   return {
-    defaults: { flow: "required by the trigger", kind: "selected by the trigger kind", folder: "required for cron", task: "required for cron", repository: "forge routing", backend: backends[0]?.name ?? null, provider, model, image, models: models ?? "unrestricted", maxCostUsd: overlay.maxCostUsd ?? hints.PI_MAX_COST_USD ?? "no per-job dollar cap", packages: true, github: false, replicas: 1, resume: false, awaitInput: false, secrets: "none", secretsProfile: "none", secretBundle: "project default", waitFor: "none", skillsDir: "none", instructions: "none", mayMerge: false, command: "none", portfolio: false, fallbackModels: "none", modelSelection: "fixed or ordered fallback", excludeTools: "none", excludeExtensions: "none", excludeExtensionTools: "none", mcp: "none unless named by the trigger", gates: "none", gateTimeout: "no trigger expiry override", gateBudgetRaiseUsd: "none", maxTurns: overlay.maxTurns ?? parseNonNegInt(hints.PI_MAX_TURNS, 30), progress: false, statusComment: false, recover: false, steer: false,
+    defaults: { flow: "required by the trigger", kind: "selected by the trigger kind", folder: "required for cron", task: "required for cron", repository: "forge routing", backend: backends[0]?.name ?? null, provider, model, image, models: models ?? "unrestricted", maxCostUsd: overlay.maxCostUsd ?? hints.PI_MAX_COST_USD ?? "no per-job dollar cap", packages: true, github: false, replicas: 1, resume: false, awaitInput: false, secrets: "none", secretsProfile: "none", secretBundle: "project default", waitFor: "none", skillsDir: "none", instructions: "none", mayMerge: false, privateEndpoints: "none", command: "none", portfolio: false, fallbackModels: "none", modelSelection: "fixed or ordered fallback", excludeTools: "none", excludeExtensions: "none", excludeExtensionTools: "none", mcp: "none unless named by the trigger", gates: "none", gateTimeout: "no trigger expiry override", gateBudgetRaiseUsd: "none", maxTurns: overlay.maxTurns ?? parseNonNegInt(hints.PI_MAX_TURNS, 30), progress: false, statusComment: false, recover: false, steer: false,
       // Issue #888: the deployment's job limits, as its service env says them (the worker's own defaults when unset).
       idleTimeoutMinutes: parseNonNegInt(hints.PI_JOB_IDLE_MINUTES, JOB_IDLE_MINUTES_DEFAULT), stallTimeoutMinutes: parseNonNegInt(hints.PI_JOB_STALL_MINUTES, JOB_STALL_MINUTES_DEFAULT), maxMinutes: hints.PI_JOB_MAX_MINUTES ? parseNonNegInt(hints.PI_JOB_MAX_MINUTES, null) : "none" },
     ...readTriggerEgress({ deploymentDir, env, fs }),
@@ -3282,6 +3282,10 @@ export function normalizeTriggerForDisplay(entry) {
     // every other trigger keeps exactly its keys; `true` is the default and says nothing.
     ...(run.secretBundle === false && { secretBundle: false }),
     ...(run.mayMerge === true && { mayMerge: true }),
+    // The private endpoints the jobs may reach (issue #918, REQ-PRIVATE-ENDPOINTS), by id: the operator's own names for
+    // devices declared in private-endpoints.json, never a host or port. Shown for `mcp`'s reason: what a job can reach is
+    // set only in this file. Spread only where the file names some, so every other trigger keeps exactly its keys.
+    ...(Array.isArray(run.privateEndpoints) && run.privateEndpoints.length > 0 && run.privateEndpoints.every((id) => typeof id === "string") && { privateEndpoints: [...run.privateEndpoints] }),
   };
   switch (on.type) {
     case "watch":
@@ -7689,6 +7693,28 @@ export function sandboxShellRefusal(venue) {
 export function recordOpenshell(record) {
   if (record === null || typeof record !== "object" || Array.isArray(record) || !Object.hasOwn(record, "openshell")) return null;
   return recordedOpenshell(record.openshell, record.backend);
+}
+
+/**
+ * A record's private endpoint grant (issue #918, INT-RUN-HISTORY-FILE-CONTRACT): the worker's own rebuild
+ * (`recordedPrivateEndpoints`: ids of the id grammar, a known basis), so a record read back from disk cannot put free
+ * text on a page through it; null when absent or invalid.
+ */
+export function recordPrivateEndpoints(record) {
+  if (record === null || typeof record !== "object" || Array.isArray(record) || !Object.hasOwn(record, "privateEndpoints")) return null;
+  return recordedPrivateEndpoints(record.privateEndpoints);
+}
+
+/** What enforced a run's private endpoint grant, as the run page says it (issue #918), keyed by the record's `basis`. */
+export const PRIVATE_ENDPOINT_BASIS_TEXT = Object.freeze({
+  proxy: "the egress proxy held the grant for this run's network",
+  openshell: "the venue's own policy held the grant",
+  unenforced: "nothing enforced it: the egress policy was off (PI_EGRESS=0), so every job could reach these",
+});
+
+/** "bench-device, lab: the egress proxy held the grant for this run's network" (a run page's Private endpoints row). */
+export function privateEndpointsText(p) {
+  return `${p.ids.join(", ")}: ${PRIVATE_ENDPOINT_BASIS_TEXT[p.basis] ?? p.basis}`;
 }
 
 /** A record's `secretsProfile` (issue #712), the worker's charset, or null. */

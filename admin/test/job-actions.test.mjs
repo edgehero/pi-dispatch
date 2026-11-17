@@ -381,7 +381,7 @@ test("planRerun of a forge run: the where from retained data, the run fields fro
     assert.deepEqual(reloadTriggers({ PI_TRIGGERS_FILE: triggersPath }, cfg), { ok: true });
     const fresh = filter("issues", { action: "labeled", sender: { id: 9 }, repository: { full_name: "org/repo" }, issue: { number: 7, title: "T", body: "B", labels: [{ name: "pi" }] } }, cfg, 1, "orig-1").job;
     assert.deepEqual(planned.plan.job, { ...fresh, trigger: { ...fresh.trigger, deliveryId: "console-abababababababab" } }, "field for field the receiver's job");
-    assert.deepEqual(planned.plan.runFields, { flow: "fix", model: "anthropic/claude-sonnet-5-5", models: null, maxCostUsd: "1.5", secretsProfile: "prod", image: "pi-job:v1", backend: null, mayMerge: true });
+    assert.deepEqual(planned.plan.runFields, { flow: "fix", model: "anthropic/claude-sonnet-5-5", models: null, maxCostUsd: "1.5", secretsProfile: "prod", image: "pi-job:v1", backend: null, privateEndpoints: ["bench-device"], mayMerge: true });
     assert.equal(JSON.stringify(planned.plan.runFields).includes("op://"), false, "names only: no secret reference in what the preview shows");
     assert.deepEqual(planned.plan.reserve, { slots: 1, dollarsMicros: 1_500_000, capMicros: 1_500_000, zeroRated: false });
     // The original's semantic window still holds (same target and flow, minutes ago): the enqueue says so, nothing queued.

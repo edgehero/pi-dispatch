@@ -3094,7 +3094,13 @@ writes retain their existing interactive confirmation. This adds no unattended p
     `p-connection-problems` first. Problems lead in order:
     failing host proxy with newest refused run and catalog fix, armed GitHub without WEBHOOK_SECRET in the deployment
     file (or, in that place and alone, a `GITHUB_INGEST` every receiver command refuses, AMENDED 2026-11-14, #879),
-    failing forge doctor check, unreadable host endpoints. The missing-secret warning is qualified: the receiver
+    failing forge doctor check, unreadable host endpoints (since #918 a host's private-endpoints file as well). **AMENDED
+    2026-11-16 (#918)**: `p-private-endpoints`, after `p-endpoints`, lists each device this deployment folder's
+    `private-endpoints.json` declares (id, host and port, slots, the trigger positions granted it, linked) and each id a
+    trigger names that the folder does not declare ("not declared here"); it says that each host reads its own copy and
+    none is published, and a file that does not load reads unavailable. The agent view carries none of it. A trigger's page
+    shows `run.privateEndpoints` under By hand when set, the trigger list a `private:` reaches marker, a run preview the
+    ids, and a run's page a "Private endpoints" row with the record's ids and what enforced the grant. The missing-secret warning is qualified: the receiver
     refuses startup unless its service environment supplies it; file metadata cannot prove the running service lacks it.
     Forges show configured receiver port (3000 default), never an invented host, each forge's actual enablement,
     linked trigger rows, token source/scope, webhook verification mode and secret variable presence, route and
@@ -9634,3 +9640,4 @@ instead of drifting.
 | 2026-11-16 (#922) | REQ-MODEL-POLICY, REQ-ADMIN-VIA-PI-EXTENSION and REQ-OPERATOR-CONSOLE-ACTIONS AMENDED for random initial model selection, durable CAS choice, quota-safe replacement, exact continuation binding and unchanged-style person controls. UNCHANGED, checked: CONST-ISOLATION-CONTAINER-PER-JOB, CONST-BUDGET-BEFORE-TOKENS, CONST-RETRY-INFRA-ONLY and CONST-PI-VERSION-PINNED; no additional paid attempt, new provider library or dependency pin. Legacy fixed and ordered-fallback policies retain their behavior. |
 | 2026-11-16 (#918, part 2) | `REQ-TRIGGER-SECRETS` AMENDED: `PI_DISPATCH_ENDPOINT_` is a reserved prefix for `run.secrets`, bundles and `PI_FORWARD_ENV`. Added `REQ-PRIVATE-ENDPOINTS`: a trigger's `run.privateEndpoints` grants its jobs, and no other, a declared host and port through the egress proxy, confirmed against the live triggers file before every attempt, with free refusals (`private-endpoint-withdrawn`, `-unknown`, `-proxy-outdated`, `-venue-unsupported`), a deferral for a full device and a hand-back on a fleet's shared queue. `REQ-EGRESS-ALLOWLIST`'s Scope AMENDED: this is its one named exception, and the rest of its line (no `run.network`, no settings key, no model-callable parameter) holds. `REQ-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked: no tool is added, and the existing tools refuse the field. `REQ-MCP-OPERATOR-SERVERS` UNCHANGED, checked: a server on a private endpoint is refused by the preflight as any undeclared host is. |
 | 2026-11-16 (#918, part 3) | `REQ-PRIVATE-ENDPOINTS` AMENDED: Acceptance gains doctor's lines, its canary's four probes and the cross-address read in `--live`; Scope says the OpenShell venues refuse a granted job in this release. |
+| 2026-11-16 (#918, part 4) | `REQ-OPERATOR-CONSOLE-SCREENS` AMENDED, (g6) Connections: the `p-private-endpoints` panel (this folder's declaration and the triggers granted each, "not declared here" for an id it lacks), a host whose private-endpoints file does not load among the problems, and the trigger page, trigger list, run preview and run page rows. `REQ-PRIVATE-ENDPOINTS` UNCHANGED, checked: the console reads and shows, and writes nothing. |

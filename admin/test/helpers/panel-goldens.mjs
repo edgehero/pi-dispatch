@@ -917,6 +917,8 @@ const RUN_CARD_STATES = {
   "run-recovering.operator": () => runCard({ rec: record({ jobId: "gh-pulse", outcome: "failed", reason: "recovery-enqueued", checkpoints: { written: 4, failed: 1, skipped: 2 }, recovered: { from: "gh-before", n: 1, fromAttempt: 1, checkpointSeq: 4, replayed: 2, interrupted: 1, notStarted: 1 } }), chat: { state: "active", mode: "live", activeJobId: "gh-pulse.r1", jobState: "failed" } }),
   "run-sandbox-openshell.operator": () => runCard({ rec: record({ jobId: "gh-pulse", backend: "openshell", openshell: { mode: "copy", providers: 2, placeholders: 2, ruleHosts: ["api.example.com"], ruleHostCount: 1 }, secretsProfile: "forge", bundle: { id: "web-ci", variables: ["API_TOKEN", "CONFIG"], shadowed: [], placeholders: 1, plain: 1, placeholderNames: ["API_TOKEN"] } }) }),
   "run-sandbox-openshell-bind.operator": () => runCard({ rec: record({ jobId: "gh-pulse", backend: "openshell-bind" }) }),
+  // Issue #918: a run that held a private endpoint grant, through the proxy; the row reads what the record says enforced it.
+  "run-sandbox-private-endpoints.operator": () => runCard({ rec: record({ jobId: "gh-pulse", backend: "local", privateEndpoints: { ids: ["bench-device"], basis: "proxy" } }) }),
   "run-sandbox-kept.operator": () => runCard({ rec: record({ jobId: "gh-pulse", backend: "local" }), sandboxCheck: { retained: true, until: NOW + 23 * HOUR } }),
   "run-sandbox-past-window.operator": () => runCard({ rec: record({ jobId: "gh-pulse", backend: "local" }), sandboxCheck: { retained: false, why: "past-window" } }),
   "run-sandbox-swept.operator": () => runCard({ rec: record({ jobId: "gh-pulse", backend: "local" }), sandboxCheck: { retained: false, why: "swept" } }),

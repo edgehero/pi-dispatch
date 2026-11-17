@@ -154,6 +154,9 @@ def trigger_detail():
     body += '<p>The row is absent when the permission is off. The trigger list adds a may merge marker only when it is on. Required checks and approvals still apply.</p>'
     body += '<p>Its Trust model says: This trigger permits merging through the forge’s checks and approvals when its flow or operator instructions ask for it.</p>'
     body += '<p>Its queued-job note says: A queued job with merge permission runs only while its reviewed trigger remains unchanged. A job queued without it does not gain permission from a later edit.</p>'
+    body += '<h3>Private endpoints: enabled example</h3><p>A trigger whose jobs may reach a device on the operator’s network adds this row at the end of By hand:</p>'
+    body += facts([('run.privateEndpoints', '["bench-device"]; deployment default: none')], 2)
+    body += '<p>The row is absent when the trigger names none. The trigger list adds a reaches marker naming the devices. Only this trigger’s jobs reach them, through the egress proxy.</p>'
     body += '<h3>Its runs’ sandbox</h3><p>Local (deployment default): live transcript yes, steering yes, recovery yes, sandbox shell yes. Retained workspaces can be reopened for 24 hours. Each event starts one sandbox. Secret profile and bundle names only.</p>'
     p_run = card("What it runs", body, sub="every field, set or not", id_="p-trigger-run")
 
@@ -477,6 +480,15 @@ def connections():
 </div>"""
     p_ep = card("Model endpoints", endpoints, id_="p-endpoints", flush=True, sub=f'{code("model-endpoints.json")} · fleet lease counts where available')
 
+    # Issue #918: the private endpoints this deployment folder declares, and the triggers granted each one.
+    pep_rows = [[(f'<b class="code">bench-device</b>', "id c2-first"), (code("10.0.5.20:22"), "wide"), ("1 job at a time", ""), ('<a href="#">label trigger #2</a>', "wide")],
+                [(f'<b class="code">lab-ssh</b>', "id c2-first"), ('<span class="muted">not declared here</span>', "wide"), ("unknown", ""), ('<a href="#">cron "nightly"</a>', "wide")]]
+    private = f"""{table([("Endpoint", ""), ("Host and port", ""), ("Slots", ""), ("Granted to", "")], pep_rows, caption="Private endpoints", stack=True)}
+<div class="c2-pad2">
+  <p class="c2-sub">Declared in this deployment folder's {code("private-endpoints.json")}. Each host reads its own copy, which is not published here. Only the jobs of the triggers named reach a device, through the egress proxy.</p>
+</div>"""
+    p_pep = card("Private endpoints", private, id_="p-private-endpoints", flush=True, sub=f'{code("private-endpoints.json")} · devices only the named triggers reach')
+
     mcp = f"""<ul class="rows">
   <li class="rowpill">{ic('plug', 'ic ic--sm')}<b class="code">linear</b><span>http · {code('mcp.example.com')}</span><span class="end"><span class="muted">codemode</span>{chip('on', 'ok', 'done')}</span></li>
   <li class="rowpill">{ic('plug', 'ic ic--sm')}<b class="code">docs</b><span>stdio · {code('npx docs-mcp')}</span><span class="end"><span class="muted">deferred</span>{chip('off', '', 'minus')}</span></li>
@@ -513,7 +525,7 @@ def connections():
 <p class="c2-gap2 card__sub">They load into every job except triggers that set {code('"packages": false')} (1 does). Staged with {code('pi-dispatch import-pi --with-packages')}.</p>"""
     p_pkgs = card("Staged pi packages", pkgs, id_="p-packages", sub="2")
 
-    inner = '<section id="p-connection-problems" data-panel>' + top + '</section>' + f'<div class="cols"><div class="stack">{provider_keys_card()}{p_forges}{p_egress}{p_ep}{subscription_auth_card()}</div><div class="stack">{p_notify}{p_mcp}{p_env}{p_pkgs}</div></div>'
+    inner = '<section id="p-connection-problems" data-panel>' + top + '</section>' + f'<div class="cols"><div class="stack">{provider_keys_card()}{p_forges}{p_egress}{p_ep}{p_pep}{subscription_auth_card()}</div><div class="stack">{p_notify}{p_mcp}{p_env}{p_pkgs}</div></div>'
     return shell("Configuration", inner, "Connections", sub="Where jobs come from, what they may reach, and who hears about failures. Names and hosts only.", back="Configuration")
 
 CO_CSS = COMMON_CSS + PROVIDER_KEYS_CSS + SUBSCRIPTION_AUTH_CSS + SUBSCRIPTION_REFERENCE_CSS + """
@@ -714,6 +726,7 @@ README = {
   - *By hand*: everything else, including the job cap, allowed models, MCP servers, secrets and the bundle opt-out, which only the triggers file sets.
 - **Edit.** Changing the venue previews the triggers file as a diff, then a confirm bar with the plan's own line, what it means for runs in line, the undo and the ticket.
 - **Instructions.** The trigger's instructions, quoted and escaped.
+- **Private endpoints.** A trigger that names devices from `private-endpoints.json` adds `run.privateEndpoints` at the end of By hand: `["bench-device"]; deployment default: none`. A trigger that names none adds no row. The trigger list adds a `private: bench-device` marker among what it reaches. Only the reviewed file sets it; the page offers no setter, and no tool may write it.
 - **May merge.** When explicitly enabled, By hand adds `run.mayMerge`: `true; deployment default: false`, immediately after instructions. An unflagged trigger adds no row. The trigger list adds a `may merge` marker. Only the reviewed file sets the permission; the page offers no setter. Its Trust model says: “This trigger permits merging through the forge’s checks and approvals when its flow or operator instructions ask for it.” Its queued-job note says: “A queued job with merge permission runs only while its reviewed trigger remains unchanged. A job queued without it does not gain permission from a later edit.” The unflagged fixture retains its default-policy wording.
 - **Local event commands.** The existing facts show source forge, stable trigger ID, debounce seconds and exact review-author allowlist separately from `run.kind: local`, folder, command and owning worker. These are set in the reviewed file. The runs panel distinguishes a current generation and its one pending follow-up, with event counts and due instants; an unread state is unknown, never idle. No event text reaches the command. Source forge never implies forge MCP or a cloned workspace. A command cannot be fired by a tool or this page.
 - **Other kinds.** A cron trigger shows its next fire and health (on time, overdue, stalls N of 3). A one-shot shows armed or "spent by" a run, and how to re-arm it. Fire now is a paid action with its reserve sentence.
@@ -832,6 +845,7 @@ A viewer sees the tables, with no Remove or forms.
 - **Egress.** The posture, the allowlist (first hosts, then "and N more"), and each host's proxy with its last doctor check.
 - **Provider API keys.** A permanent card lists configured provider slots, their safe source and the default badge. Add or Replace selects a provider explicitly, takes a new write-only value and previews the exact slot and shared-provider effects. Adding a key never changes the default provider. Native guides link directly to the official key pages for Anthropic, OpenAI, Google Gemini, OpenRouter and DeepSeek. Existing saved values are never shown.
 - **Model endpoints.** Each endpoint's host and port, whether it is keyless, fleet leases first and each host's own slots in use with beat age and scope. Per-machine aliases and unnamed workers publish host occupancy with no fleet bound; unread or absent publications stay unknown. Different shared bounds are flagged with “one server, one id”; independent per-machine capacities may differ. A banner covers the case where a host's own copy of the file does not load, quoting doctor.
+- **Private endpoints.** Each device this deployment folder's `private-endpoints.json` declares: its host and port, how many jobs may hold it at once, and the triggers granted it, linked. An id a trigger names that this folder does not declare reads "not declared here". Each host reads its own copy, which no host publishes, so the table is this folder's; a file that does not load reads unavailable.
 - **Notifications.** Forge comments and the `PI_ON_FAILURE` hook. Each host's last hook run links its time and run, with the hook exit detail and counts over its retained entries. Timeout, an unresolvable script and nonzero exits are tinted; no history says "no hook run published", never healthy.
 - **MCP servers, Deployment environment, Staged pi packages.** All read-only, each with the command or file that changes it. Caps set only in the .env read "unknown (worker env or default)".
 
@@ -839,7 +853,7 @@ Viewers read status and provider guides without mutation controls. A read-only o
 
 **Subscription authentication.** Safe connection facts show the selected exact adapter, owner host, compatibility, credential health and expiry. Native help guides explain OpenAI Sign in with ChatGPT on the owning host and Claude community compatibility, with the host setup guide and official provider guidance. Claude community routes are explicitly separate from the official Claude Code setup-token workflow. Only a writable operator gets host-terminal sign-in, logout, usage and explicit trial commands. No browser authentication or credential value is exposed. Viewers and agents read the same safe subscription facts. Other deployment metadata is not published in the agent view.
 
-**Panels.** `p-connection-problems`, `p-provider-keys`, `p-forges`, `p-egress`, `p-endpoints`, `p-subscription-auth`, `p-notify`, `p-mcp`, `p-env`, `p-packages`.
+**Panels.** `p-connection-problems`, `p-provider-keys`, `p-forges`, `p-egress`, `p-endpoints`, `p-private-endpoints`, `p-subscription-auth`, `p-notify`, `p-mcp`, `p-env`, `p-packages`.
 
 **The server provides.**
 - Per forge: the triggers naming it, the auth source, whether verification secrets are set (names only), the webhook mode and path, and the polling settings; for GitHub, the `GITHUB_INGEST` word.

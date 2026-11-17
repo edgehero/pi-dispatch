@@ -41,7 +41,7 @@ export async function consoleConnectionsFixture(now, { problem = null, unread = 
   if (problem === "forge") checks.push({ id: "github.auth", level: "fail", label: "GitHub credentials cannot be used", fix: "Check the GitHub App declaration." });
   if (problem === "endpoints") checks.push({ id: "model-endpoints.file", level: "fail", label: "Endpoint 2: port must be 1 to 65535", fix: "Correct model-endpoints.json and render egress rules." });
   const snapshot = {
-    settings: { overlay: {} }, triggers: { triggers: [{ index: 2, forge: "github", type: "comment", statusComment: true, packages: false }, { index: 3, forge: "gitlab", type: "pull_request" }] },
+    settings: { overlay: {} }, triggers: { triggers: [{ index: 2, forge: "github", type: "comment", statusComment: true, packages: false, privateEndpoints: ["bench-device"] }, { index: 3, forge: "gitlab", type: "pull_request", privateEndpoints: ["lab-ssh"] }] },
     hostBudgets: [{ name: "build3" }], doctor: { hosts: [{ name: "build3", at: now - 2 * 3_600_000, ageMs: 2 * 3_600_000, every: 24, checks }] },
     runs: [{ jobId: "gh-e9a0", host: "build3", reason: "egress-proxy-missing", endedAt: new Date(now - 9 * 60_000).toISOString() }],
     overlayMcp: { servers: [{ name: "linear", transport: "http", where: "mcp.example.com", exposure: "codemode", enabled: true, refs: ["LINEAR_API_KEY"] }], refused: ["dispatch-notes"], problems: [{ name: "dispatch-notes", problem: "a name holding dispatch is reserved for the dispatch admin" }] },
@@ -51,6 +51,8 @@ export async function consoleConnectionsFixture(now, { problem = null, unread = 
     environment: () => unread ? { unreadable: true } : { env },
     allowlist: () => ["api.github.com", ".githubusercontent.com", "registry.npmjs.org", "pypi.org", "files.pythonhosted.org", "mcp.example.com", "api.example.com", "gitlab.example.com", "more.example.com"],
     endpoints: () => [{ id: "ollama-mini2", host: "mini2.lan", port: 11434, keyless: true, slots: 2 }, { id: "vllm-build3", host: "10.0.0.5", port: 8000, keyless: true, slots: 4 }],
+    // Issue #918: one device this folder declares, granted to trigger 2; trigger 3 names one it does not declare.
+    privateEndpoints: () => [{ id: "bench-device", host: "10.0.5.20", port: 22, slots: 1 }],
     slots: async () => [1, 0],
     endpointStatus: async () => ({ state: "reported", partial: false, more: 0, hosts: [
       { name: "mini2", at: now - 1000, ageMs: 1000, state: "reported", endpointsMore: 0, endpoints: [{ id: "ollama-mini2", slots: 2, used: 1, fleet: 1 }] },

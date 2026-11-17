@@ -11,6 +11,7 @@ import { parseAllowlist } from "@edgehero/pi-dispatch/egress-allowlist";
 import { egressArmed } from "@edgehero/pi-dispatch/egress";
 import { isPerMachineHost } from "@edgehero/pi-dispatch/backends";
 import { loadModelEndpoints, MAX_SLOTS, MODEL_ENDPOINT_ID_RE } from "@edgehero/pi-dispatch/model-endpoints";
+import { loadPrivateEndpoints, privateEndpointsPath } from "@edgehero/pi-dispatch/private-endpoints";
 import { EXACT_VERSION_RE, NPM_NAME_RE } from "@edgehero/pi-dispatch/packages";
 import { MCP_SERVER_NAME_RE } from "@edgehero/pi-dispatch/mcp-config";
 import { GITHUB_INGEST_VALUES, githubIngestFrom, modelEndpointsFilePath, positiveInt, providerFrom, workerName } from "@edgehero/pi-dispatch/config";
@@ -145,7 +146,7 @@ function doctorFacts(snapshot) {
   return names.map((name) => {
     const row = rows.find((r) => r.name === name);
     const checks = row?.unreadable ? [] : row?.checks ?? [];
-    return { name, at: Number.isFinite(row?.at) ? row.at : null, ageMs: Number.isFinite(row?.ageMs) ? row.ageMs : null, stale: doctorStale(row), unreadable: !row || Boolean(row.unreadable), proxy: checks.find((c) => /^egress\.proxy(?:-\d+)?$/.test(c.id)) ?? null, forge: checks.filter((c) => /^(?:github|forges)\./.test(c.id) && c.level === "fail"), endpoints: checks.find((c) => c.id === "model-endpoints.file" && c.level !== "ok") ?? null };
+    return { name, at: Number.isFinite(row?.at) ? row.at : null, ageMs: Number.isFinite(row?.ageMs) ? row.ageMs : null, stale: doctorStale(row), unreadable: !row || Boolean(row.unreadable), proxy: checks.find((c) => /^egress\.proxy(?:-\d+)?$/.test(c.id)) ?? null, forge: checks.filter((c) => /^(?:github|forges)\./.test(c.id) && c.level === "fail"), endpoints: checks.find((c) => c.id === "model-endpoints.file" && c.level !== "ok") ?? null, privateFile: checks.find((c) => c.id === "private-endpoints.file" && c.level !== "ok") ?? null };
   });
 }
 
@@ -158,6 +159,8 @@ export function connectionsProblems(hosts, runs = [], forges = []) {
     }
     for (const check of host.forge) problems.push({ kind: "forge", host: host.name, title: `Forge connection failing on ${host.name}`, text: check.label ?? "The host's forge check failed.", fix: check.fix ?? "Check the forge credentials with doctor on that host.", run: null });
     if (host.endpoints) problems.push({ kind: "endpoints", host: host.name, title: `${host.name} reads its own model-endpoints file, and it does not load`, text: host.endpoints.label ?? "The host's endpoints file does not load.", fix: host.endpoints.fix ?? "Correct model-endpoints.json on that host, then render its egress rules.", run: null });
+    // Issue #918: the same, for the host's own private-endpoints file, which its worker refuses to start on.
+    if (host.privateFile) problems.push({ kind: "endpoints", host: host.name, title: `${host.name} reads its own private-endpoints file, and it does not load`, text: host.privateFile.label ?? "The host's private endpoints file does not load.", fix: host.privateFile.fix ?? "Correct private-endpoints.json on that host, then render its egress rules.", run: null });
   }
   // Issue #879: a GITHUB_INGEST every receiver command refuses leads alone, since `serve` refuses on it before it asks for
   // WEBHOOK_SECRET; a secret problem beside it would send the operator to the wrong line.
@@ -196,6 +199,25 @@ export async function readConnections({ deploymentDir, env = {}, paths = {}, sna
   try { allowlist = (reads.allowlist ?? (() => parseAllowlist(fs.readFileSync(join(deploymentDir, "egress-allowlist.conf"), "utf8"))))(); } catch { /* Unknown, not an empty policy. */ }
   let endpoints = null;
   try { endpoints = (reads.endpoints ?? (() => loadModelEndpoints({ modelEndpointsFile: modelEndpointsFilePath(file), valkeyUrl: file.VALKEY_URL ?? paths.valkeyUrl }, { cwd: deploymentDir, readFileSync: fs.readFileSync, existsSync: fs.existsSync })))(); } catch { /* One refused source must not erase the forges or MCP. */ }
+  // Issue #918: this deployment folder's private endpoints, as its worker loads them. Each host reads its own copy, which
+  // no host publishes, so this is the console host's declaration; an id a trigger names that is not declared here is
+  // said as such. One that does not load is unknown, never none.
+  // The file the worker reads: PI_PRIVATE_ENDPOINTS_FILE from the same trusted .env, read on its own so the environment
+  // table keeps its rows; unread or untrusted metadata is unknown, never the default file.
+  let privateDeclared = null;
+  try {
+    privateDeclared = (reads.privateEndpoints ?? (() => {
+      const meta = (reads.environment ?? deploymentServiceEnv)({ env: {}, dir: deploymentDir, keys: ["PI_PRIVATE_ENDPOINTS_FILE"], fs, platform, uid });
+      if (!meta || meta.unreadable || meta.untrusted || meta.hazard || meta.unread?.length || meta.hazardSkipped?.length) throw new Error("deployment metadata unreadable");
+      // Set at all, even empty, is the worker's `?? null`: an empty value is a file the worker refuses to start on, so the
+      // loader throws here too and the panel reads unavailable, never the default file. The queue's port is refused as the
+      // worker refuses it, from the address the model endpoints' read beside this one takes (a VALKEY_URL with a password
+      // is not a key this strict read may hold).
+      const named = typeof meta.env?.PI_PRIVATE_ENDPOINTS_FILE === "string" ? meta.env.PI_PRIVATE_ENDPOINTS_FILE : null;
+      const at = privateEndpointsPath({ privateEndpointsFile: named }, deploymentDir);
+      return loadPrivateEndpoints({ privateEndpointsFile: at.explicit ? at.path : null, valkeyUrl: file.VALKEY_URL ?? paths.valkeyUrl }, { cwd: deploymentDir, readFileSync: fs.readFileSync, existsSync: fs.existsSync });
+    }))();
+  } catch { /* Unknown, said by the panel. */ }
   let owned = null;
   const publicationClient = (injectedRead) => {
     if (redis) return redis;
@@ -276,6 +298,7 @@ export async function readConnections({ deploymentDir, env = {}, paths = {}, sna
     egress: { on: egressOn, problem: egressProblem, allowlist: Array.isArray(allowlist) ? allowlist.slice(0, 8) : null, more: Array.isArray(allowlist) ? Math.max(0, allowlist.length - 8) : 0, hosts },
     endpointFleetDeclared, endpointStatus, endpointsMore,
     endpoints: Array.isArray(endpoints) || shownEndpoints.length ? shownEndpoints.map((ep) => ({ ...ep, used: slots.get(ep.id) ?? null })) : null,
+    privateEndpoints: privateEndpointsView(privateDeclared, triggers),
     providers: providerNames.map((name) => {
       const variables = providerKeyCandidates(name);
       // The worker forwards every truthy candidate in pi's pinned precedence order; no value leaves this reader.
@@ -287,6 +310,25 @@ export async function readConnections({ deploymentDir, env = {}, paths = {}, sna
     mcp, packages, packageOptOuts: Array.isArray(triggers) ? triggers.filter((t) => t.packages === false).length : null,
     problems: connectionsProblems(hosts, snapshot?.runs ?? [], forges), snapshotUnreadable: snapshot === null,
   };
+}
+
+/**
+ * Issue #918: the private endpoints Connections shows, `{ unread, rows }`: each declared one (id, host, port, slots) and
+ * the trigger positions that name it, then each id a trigger names that this folder does not declare (`host: null`).
+ * `declared` null is a file that did not load. Ids and positions only: no trigger text.
+ */
+export function privateEndpointsView(declared, triggers) {
+  const named = (id) => (Array.isArray(triggers) ? triggers : []).filter((t) => Array.isArray(t?.privateEndpoints) && t.privateEndpoints.includes(id) && Number.isInteger(t.index)).map((t) => t.index);
+  const rows = (Array.isArray(declared) ? declared : []).filter((e) => typeof e?.id === "string" && MODEL_ENDPOINT_ID_RE.test(e.id)).sort((a, b) => (a.id < b.id ? -1 : 1)).map((e) => ({ id: e.id, host: e.host, port: e.port, slots: Number.isInteger(e.slots) ? e.slots : null, triggers: named(e.id) }));
+  const ids = new Set(rows.map((r) => r.id));
+  for (const t of Array.isArray(triggers) ? triggers : []) {
+    for (const id of Array.isArray(t?.privateEndpoints) ? t.privateEndpoints : []) {
+      if (typeof id !== "string" || !MODEL_ENDPOINT_ID_RE.test(id) || ids.has(id)) continue;
+      ids.add(id);
+      rows.push({ id, host: null, port: null, slots: null, triggers: named(id) });
+    }
+  }
+  return { unread: declared === null, rows: rows.slice(0, 64), more: Math.max(0, rows.length - 64) };
 }
 
 /** Model context gets source key NAMES and counts, never manager variable names, paths, free doctor text or refs. */

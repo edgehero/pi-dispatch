@@ -36,11 +36,11 @@ function ruleOf(t) {
     out.command = words[0];
     out.commandArgs = words.length > 1;
   }
-  out.displayCut = ["any", "all", "none", "action", "reviewState", "reviewAuthors", "models", "fallbackModels", "mcp", "excludeTools", "excludeExtensions", "excludeExtensionTools", "gates", "waitFor"].some((k) => Array.isArray(t[k]) && t[k].length > 64);
+  out.displayCut = ["any", "all", "none", "action", "reviewState", "reviewAuthors", "models", "fallbackModels", "mcp", "privateEndpoints", "excludeTools", "excludeExtensions", "excludeExtensionTools", "gates", "waitFor"].some((k) => Array.isArray(t[k]) && t[k].length > 64);
   out.task = t.task === true;
   out.instructions = t.instructions === true;
   out.secrets = Number.isSafeInteger(t.secrets) && t.secrets >= 0 ? t.secrets : 0;
-  for (const key of ["any", "all", "none", "action", "reviewState", "reviewAuthors", "models", "fallbackModels", "mcp", "excludeTools", "excludeExtensions", "excludeExtensionTools", "gates"]) if (Array.isArray(t[key])) out[key] = copyStrings(t[key]);
+  for (const key of ["any", "all", "none", "action", "reviewState", "reviewAuthors", "models", "fallbackModels", "mcp", "privateEndpoints", "excludeTools", "excludeExtensions", "excludeExtensionTools", "gates"]) if (Array.isArray(t[key])) out[key] = copyStrings(t[key]);
   if (t.modelSelection !== undefined && modelSelectionProblem(t.modelSelection) === null) out.modelSelection = { strategy: "random", candidates: [...t.modelSelection.candidates] };
   if (t.disarmed && typeof t.disarmed === "object") out.disarmed = Object.fromEntries(["at", "jobId"].filter((k) => typeof t.disarmed[k] === "string").map((k) => [k, t.disarmed[k]]));
   if (Array.isArray(t.waitFor)) out.waitFor = t.waitFor.slice(0, 64).flatMap((w) => typeof w?.profile === "string" ? [{ profile: w.profile }] : typeof w?.after === "string" ? [{ after: w.after }] : []);
@@ -69,6 +69,8 @@ function chipsOf(t, packagesAvailable) {
   if (packagesAvailable && t.packages !== false) add("reaches", "staged packages");
   if (t.skillsDir) add("reaches", "injected skills");
   if (t.mcp?.length) add("reaches", `MCP: ${t.mcp.join(", ")}`);
+  // Issue #918: the devices its jobs may reach, by id, which no other trigger's jobs reach.
+  if (t.privateEndpoints?.length) add("reaches", `private: ${t.privateEndpoints.join(", ")}`);
   if (t.secrets > 0) add("reaches", `${t.secrets} secret variables${t.secretsProfile ? ` via ${t.secretsProfile}` : ""}`);
   if (t.github === true) add("reaches", "GitHub access");
   if (t.resume === true) add("writes", "keeps a session");

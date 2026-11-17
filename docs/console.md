@@ -1743,6 +1743,9 @@ or not started yet."
   rest counted). A run that armed `run.secrets` shows a "Secrets profile" row with the profile's name. The `/dispatch`
   panel's run detail has the same lines. Whether an MCP server connected is the Loaded card's to say, on any venue
   ([What a run loaded](#what-a-run-loaded)), so none of these rows says it.
+- **A run's private endpoints.** A run whose trigger granted it private endpoints shows a "Private endpoints" row: the
+  ids, and what enforced the grant (the egress proxy, or nothing when the egress policy was off). Ids only, never a host
+  or a port ([private endpoints](egress.md#private-endpoints)).
 - The transcript shares the run page's one live connection. A queued run attaches when its transcript appears, without reload. Reconnect resumes entries from their cursor and refreshes every panel. Transcript completion leaves the page connection open for later state updates.
 
 The `/dispatch` panel's live tail (`l`) reads the same transcript.
@@ -2838,6 +2841,13 @@ these extra file/lease reads.
   publications say not reported or unknown; zero appears only after a successful observation. Newer formats
   are refused, and truncated or partial reads are labelled. Each host's failing endpoints-file doctor check
   keeps its own fix. Wider tables scroll in their own labelled region; focus it and use the arrow keys.
+- **Private endpoints:** each device this deployment folder's `private-endpoints.json` declares, its host and port, how
+  many jobs may hold it at once, and the triggers granted it, linked. An id a trigger names that this folder does not
+  declare reads "not declared here". Each host reads its own copy and no host publishes it, so the table is this
+  folder's; a file that does not load reads unavailable, and a host whose own copy does not load is a problem at the
+  top, from its doctor. The agent view does not carry this table. A trigger's page shows `run.privateEndpoints` under By
+  hand when it names any, and the trigger list a `private:` marker
+  ([private endpoints](egress.md#private-endpoints)).
   Phone rows stack their labels. These facts are read on page load; reload to see a later beat.
   Provider rows name the first candidate set in the `.env`, or say none is set there, with the configured
   source at the row's end. Actual per-host credentials remain unpublished.
