@@ -8,6 +8,27 @@
 export const KEYLESS_ENV_NAME = "PI_DISPATCH_KEYLESS";
 
 /**
+ * Issue #918: the variables that carry a granted private endpoint's host and port into a job,
+ * `PI_DISPATCH_ENDPOINT_<ID>_HOST` and `_PORT`, where `<ID>` is the endpoint's id upper-cased with `-` turned into `_`
+ * (one-to-one under the id grammar `[a-z0-9-]{1,32}`). A PREFIX, not names, since the ids are the operator's: every
+ * check that refuses a reserved name refuses the whole prefix (`isPrivateEndpointEnvName`), so no forwarded variable,
+ * trigger secret, bundle or MCP reference can set or read one, and the worker is the only writer. They carry no secret
+ * (an address and a port the operator declared), so the redaction leaves them readable (`isNonSecretEnvKey`).
+ */
+export const PRIVATE_ENDPOINT_ENV_PREFIX = "PI_DISPATCH_ENDPOINT_";
+
+/** Whether `name` is one of the private endpoint variables' names (`PRIVATE_ENDPOINT_ENV_PREFIX`). */
+export function isPrivateEndpointEnvName(name) {
+	return typeof name === "string" && name.startsWith(PRIVATE_ENDPOINT_ENV_PREFIX);
+}
+
+/** The two variables for one endpoint id: `{ host, port }` names. */
+export function privateEndpointEnvNames(id) {
+	const stem = `${PRIVATE_ENDPOINT_ENV_PREFIX}${String(id).toUpperCase().replaceAll("-", "_")}`;
+	return { host: `${stem}_HOST`, port: `${stem}_PORT` };
+}
+
+/**
  * The environment variable names `buildContainerEnv` writes itself, spelled once (issue #225).
  *
  * This exists because `run.secrets` lets a trigger name env variables, and a trigger that names one the

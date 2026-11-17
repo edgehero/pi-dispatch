@@ -8,7 +8,8 @@ import { layoutFor } from "./job-layout.mjs";
 import { cpuCeilingCenti, cpuRangeRefusal, DEFAULT_JOB_SIZE } from "./job-size.mjs";
 import { buildDockerRunArgs, CONTAINER_SESSION_FILE, insideDir } from "./docker-run.mjs";
 import { configError } from "./config.mjs";
-import { createJobNetwork, egressEnv, networkNameFor, removeJobNetwork } from "./egress.mjs";
+import { DEFAULT_EGRESS_PROXY, createJobNetwork, egressEnv, networkNameFor, removeJobNetwork } from "./egress.mjs";
+import { grantOnAttach, removeGrantsOf } from "./endpoint-grants.mjs";
 import { buildContainerEnv } from "./env-allowlist.mjs";
 import { authenticExitLines } from "./run-history.mjs";
 import { extensionsNotHere, leavesOut, leftOutOf, rebuildLoaded } from "./loaded-record.mjs";
@@ -72,6 +73,10 @@ export function makeRunContainer({
 	forgeHosts = {}, // per-forge self-hosted instance URLs, so a forge CLI in the container talks to the right one
 	egress = false, // REQ-EGRESS-ALLOWLIST: put this job on its own --internal network behind the allowlist proxy
 	egressProxy, // the proxy component attached to that network; undefined = egress.mjs's default name
+	// Issue #918: THIS runtime's grant folder in the deployment folder (`egress-grants/local` or `.../podman`), mounted
+	// read-only into its proxy. Null leaves private endpoints out: no grant is written, no stale one cleared.
+	grantsDir = null,
+	grantFs, // a seam for the tests; endpoint-grants.mjs's own fs by default
 	// Issue #345: the exits this runtime spells "never started", after which the cidfile says whether a container was
 	// created anyway; and the host fs the cidfile is read and removed through. Seams for the tests.
 	neverStartedExits = DOCKER_NEVER_STARTED_EXITS,
@@ -205,7 +210,7 @@ export function makeRunContainer({
 	// `bundleKeys` (issue #704 part 3) is the processor's `{ endpoints, plain }` split of a project secret bundle's received
 	// variables: handed on in the build options for a venue whose own layer holds credentials (openshell), which binds the
 	// first kind to their hosts and passes the second as values. Every other venue ignores it: the values are in `secrets`.
-	return async function runContainer({ job, token, prepared, secrets = {}, bundleKeys = null, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, transcriptStderr = false, steerStdin = false, size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null, unenforced = [], jobId = null, onLive = null, recover = false, recovering = false, checkpoint = null, pause = null, unpause = null, binds = false, subscriptionAuth = [], activityWatch = null, onActivityArmed = null, requestStop = null, noteActivity = null, credentialRefresh = null }) {
+	return async function runContainer({ job, token, prepared, secrets = {}, bundleKeys = null, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, transcriptStderr = false, steerStdin = false, privateEndpoints = [], size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null, unenforced = [], jobId = null, onLive = null, recover = false, recovering = false, checkpoint = null, pause = null, unpause = null, binds = false, subscriptionAuth = [], activityWatch = null, onActivityArmed = null, requestStop = null, noteActivity = null, credentialRefresh = null }) {
 		if (signal?.aborted) return { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null }; // killed before it could start
 		const renewableAuth = subscriptionAuth.filter((snapshot) => snapshot.renewable === true);
 		// Minted per attempt, held in this closure and the sink's, and handed to the container on its stdin only: never in
@@ -511,6 +516,7 @@ export function makeRunContainer({
 			secrets,
 			home: user !== null ? home : null, // issue #341: HOME only beside --user, assigned after the forward loops
 			modelEndpoints, // issue #503: the keyless branch of the credential, from the gate's own snapshot
+			privateEndpoints, // issue #918: the private endpoints this job is granted, their host and port in its env
 			exitAuth: exitKey !== null, // issue #545: PI_EXIT_AUTH=stdin, only when a key is actually handed over below
 			// Issue #686: PI_TRANSCRIPT=stderr, only for an attempt armed above, never off the image's label alone: the
 			// worker must be reading the records, or they would reach the job log as noise.
@@ -622,6 +628,49 @@ export function makeRunContainer({
 			throw new InfraRetry("container-never-started", { reason: "container-never-started" });
 		}
 
+		// Issue #918 (DES-PRIVATE-ENDPOINT-GRANTS): the proxy has just joined this job's network, so its address there is one
+		// no other live network has. Any grant left in that subnet by a network that is gone is cleared FIRST (the guarantee:
+		// a job never inherits another's grant), then a job granted private endpoints gets its own, read back through the
+		// helper inside the proxy as squid's user, before anything runs. A failure is INFRA and spent nothing: the network
+		// goes, and the job is retried, never started without the grant it was given or with one it was not.
+		const grantIds = Array.isArray(privateEndpoints) ? privateEndpoints.map((e) => e.id) : [];
+		let granted = false;
+		if (network && grantsDir) {
+			const answer = await grantOnAttach({ spawnFn, bin, proxy: egressProxy ?? DEFAULT_EGRESS_PROXY, network, dir: grantsDir, ids: grantIds, ...(grantFs ? { fs: grantFs } : {}) });
+			if (!answer.ok) {
+				log("endpoint_grant_failed", { network, why: answer.why });
+				try {
+					removeGrantsOf({ dir: grantsDir, network, ...(grantFs ? { fs: grantFs } : {}) });
+				} catch {
+					// the next attach on this subnet clears it
+				}
+				removeInbox();
+				removeCredentials();
+				await removeJobNetwork(spawnFn, { network, proxy: egressProxy, bin });
+				throw new InfraRetry("container-never-started", { reason: "container-never-started" });
+			}
+			granted = grantIds.length > 0;
+		} else if (grantIds.length > 0 && egress) {
+			// A job the processor granted endpoints to, on a runtime this worker gave no grant folder: refused rather than run
+			// without what its trigger says it may reach. Not reachable in a wired worker (both armed runtimes get one).
+			removeInbox();
+			removeCredentials();
+			if (network) await removeJobNetwork(spawnFn, { network, proxy: egressProxy, bin });
+			throw new InfraRetry("container-never-started", { reason: "container-never-started" });
+		}
+		// Before every removal of this network below: a grant goes before its network, so the subnet the network frees can
+		// never meet a grant that still names one of its addresses. A grant that cannot be removed is said; the next attach
+		// on its subnet clears it.
+		const dropGrant = () => {
+			if (!granted) return;
+			try {
+				removeGrantsOf({ dir: grantsDir, network, ...(grantFs ? { fs: grantFs } : {}) });
+			} catch (err) {
+				log("endpoint_grant_unremovable", { network, code: typeof err?.code === "string" ? err.code : null });
+			}
+			granted = false;
+		};
+
 		// Issue #683: a copying venue's create and upload, before anything spawns the job. Its teardown is owed from the
 		// moment it begins, so a stage that fails half way (a sandbox made, an upload refused) is still deleted.
 		let staged = false;
@@ -642,6 +691,7 @@ export function makeRunContainer({
 				await teardown();
 				removeInbox();
 				removeCredentials();
+				dropGrant();
 				if (network) await removeJobNetwork(spawnFn, { network, proxy: egressProxy, bin });
 				if (cause instanceof InfraRetry) throw cause;
 				throw new InfraRetry("container-never-started", { cause, reason: "container-never-started" });
@@ -653,6 +703,7 @@ export function makeRunContainer({
 				await teardown();
 				removeInbox();
 				removeCredentials();
+				dropGrant();
 				if (network) await removeJobNetwork(spawnFn, { network, proxy: egressProxy, bin });
 				return { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null };
 			}
@@ -663,6 +714,7 @@ export function makeRunContainer({
 			await teardown();
 			removeInbox();
 			removeCredentials();
+			dropGrant();
 			if (network) await removeJobNetwork(spawnFn, { network, proxy: egressProxy, bin });
 			throw new InfraRetry("subscription credential lease ran short before container start", { reason: "container-never-started" });
 		}
@@ -782,6 +834,9 @@ export function makeRunContainer({
 			sink = openJobLog(name, { exitKey, ...(job.watch || job.answerDraft ? { suppressCapture: true } : {}) });
 		} catch (error) {
 			await teardown();
+			// Issue #918: this path never removed the job's network (the boot reaper takes it); the grant goes now, so it
+			// does not wait for the reaper.
+			dropGrant();
 			removeInbox();
 			removeCredentials();
 			throw error;
@@ -1209,6 +1264,7 @@ export function makeRunContainer({
 			return result;
 		} finally {
 			await teardown();
+			dropGrant();
 			if (network) {
 				await removeJobNetwork(spawnFn, {
 					network,

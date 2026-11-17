@@ -148,6 +148,7 @@ export function filterForgejo(eventName, subset, triggers, knownFlows, selfId, a
 			// REQ-MCP-OPERATOR-SERVERS. Its own spread, the excludeTools rule above: a dropped list runs
 			// the job without its servers.
 			...(resolved.mcp !== undefined ? { mcp: resolved.mcp } : {}),
+			...(resolved.privateEndpoints !== undefined ? { privateEndpoints: resolved.privateEndpoints } : {}),
 			// #502. One spread PER FIELD, the excludeTools rule above: folded into one conditional, a trigger
 			// that named only a model would have its provider's absence decide whether the model survives,
 			// and a dropped model runs the job on the deployment default while the file reads as chosen.
@@ -225,7 +226,7 @@ function routeIssueLabel(subset, triggers) {
 		// A command rule (issue #189) skips flow resolution entirely: the label match IS the dispatch.
 		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 		packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
-		image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools, excludeExtensions: rule.excludeExtensions, excludeExtensionTools: rule.excludeExtensionTools, mcp: rule.mcp,
+		image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools, excludeExtensions: rule.excludeExtensions, excludeExtensionTools: rule.excludeExtensionTools, mcp: rule.mcp, privateEndpoints: rule.privateEndpoints,
 		provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models, fallbackModels: rule.fallbackModels, ...(rule.modelSelection !== undefined ? { modelSelection: rule.modelSelection } : {}), maxCostUsd: rule.maxCostUsd, idleTimeoutMinutes: rule.idleTimeoutMinutes, stallTimeoutMinutes: rule.stallTimeoutMinutes, maxMinutes: rule.maxMinutes,
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,
@@ -297,7 +298,7 @@ function routeComment(subset, triggers, knownFlows, assumeParked = false) {
 		enqueue: true,
 		...(command !== undefined ? { command } : { flow }),
 		packages: triggers.comment.packages,
-		image: triggers.comment.image, backend: triggers.comment.backend, excludeTools: triggers.comment.excludeTools, excludeExtensions: triggers.comment.excludeExtensions, excludeExtensionTools: triggers.comment.excludeExtensionTools, mcp: triggers.comment.mcp,
+		image: triggers.comment.image, backend: triggers.comment.backend, excludeTools: triggers.comment.excludeTools, excludeExtensions: triggers.comment.excludeExtensions, excludeExtensionTools: triggers.comment.excludeExtensionTools, mcp: triggers.comment.mcp, privateEndpoints: triggers.comment.privateEndpoints,
 		provider: triggers.comment.provider, model: triggers.comment.model, maxTurns: triggers.comment.maxTurns, models: triggers.comment.models, fallbackModels: triggers.comment.fallbackModels, ...(triggers.comment.modelSelection !== undefined ? { modelSelection: triggers.comment.modelSelection } : {}), maxCostUsd: triggers.comment.maxCostUsd, idleTimeoutMinutes: triggers.comment.idleTimeoutMinutes, stallTimeoutMinutes: triggers.comment.stallTimeoutMinutes, maxMinutes: triggers.comment.maxMinutes,
 		skillsDir: triggers.comment.skillsDir,
 		secrets: triggers.comment.secrets,
@@ -341,7 +342,7 @@ function routePullRequest(subset, triggers, action) {
 			// A command rule (issue #189) skips flow resolution entirely: the rule match IS the dispatch.
 			...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 			packages: rule.packages,
-			image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools, excludeExtensions: rule.excludeExtensions, excludeExtensionTools: rule.excludeExtensionTools, mcp: rule.mcp,
+			image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools, excludeExtensions: rule.excludeExtensions, excludeExtensionTools: rule.excludeExtensionTools, mcp: rule.mcp, privateEndpoints: rule.privateEndpoints,
 			provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models, fallbackModels: rule.fallbackModels, ...(rule.modelSelection !== undefined ? { modelSelection: rule.modelSelection } : {}), maxCostUsd: rule.maxCostUsd, idleTimeoutMinutes: rule.idleTimeoutMinutes, stallTimeoutMinutes: rule.stallTimeoutMinutes, maxMinutes: rule.maxMinutes,
 			skillsDir: rule.skillsDir,
 			secrets: rule.secrets,
@@ -403,7 +404,7 @@ function routeIssueClose(subset, triggers, authorized) {
 		enqueue: true,
 		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 		packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
-		image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools, excludeExtensions: rule.excludeExtensions, excludeExtensionTools: rule.excludeExtensionTools, mcp: rule.mcp,
+		image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools, excludeExtensions: rule.excludeExtensions, excludeExtensionTools: rule.excludeExtensionTools, mcp: rule.mcp, privateEndpoints: rule.privateEndpoints,
 		provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models, fallbackModels: rule.fallbackModels, ...(rule.modelSelection !== undefined ? { modelSelection: rule.modelSelection } : {}), maxCostUsd: rule.maxCostUsd, idleTimeoutMinutes: rule.idleTimeoutMinutes, stallTimeoutMinutes: rule.stallTimeoutMinutes, maxMinutes: rule.maxMinutes,
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,
@@ -446,7 +447,7 @@ function routePullRequestClose(subset, triggers, authorized) {
 		enqueue: true,
 		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 		packages: rule.packages,
-		image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools, excludeExtensions: rule.excludeExtensions, excludeExtensionTools: rule.excludeExtensionTools, mcp: rule.mcp,
+		image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools, excludeExtensions: rule.excludeExtensions, excludeExtensionTools: rule.excludeExtensionTools, mcp: rule.mcp, privateEndpoints: rule.privateEndpoints,
 		provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models, fallbackModels: rule.fallbackModels, ...(rule.modelSelection !== undefined ? { modelSelection: rule.modelSelection } : {}), maxCostUsd: rule.maxCostUsd, idleTimeoutMinutes: rule.idleTimeoutMinutes, stallTimeoutMinutes: rule.stallTimeoutMinutes, maxMinutes: rule.maxMinutes,
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,

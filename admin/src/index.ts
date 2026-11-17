@@ -171,7 +171,7 @@ import { COSTS_WINDOWS, PROJECT_KEY_RE } from "./costs.mjs";
 import { getPricedModel, isZeroRated, listPricedModels, piAiVersion, reprice } from "@edgehero/pi-dispatch/pricing";
 import { clipData, escapeInterpreted, scrubControls, scrubControlsPerLine, setGlyphs } from "./panel.mjs";
 import { gateDialogs } from "./dialog-gate.mjs";
-import { openSandbox, sandboxEgress, sandboxVenuePolicy } from "@edgehero/pi-dispatch/sandbox";
+import { grantsDirOf, openSandbox, sandboxEgress, sandboxVenuePolicy } from "@edgehero/pi-dispatch/sandbox";
 import { makeSandboxMonitor } from "@edgehero/pi-dispatch/sandbox-session-watch";
 import { sizeBits, renderStatus, renderRuns, renderBudget, renderScopedLimits, renderTriggers, renderSettingsView, renderAllocations } from "./render.mjs";
 import { makeDashboard, createDashboardDeps, switchFailure, withAuditedWrites } from "./dashboard.ts";
@@ -2106,6 +2106,10 @@ export async function openSandboxSession(paths: any, jobId: string, io: any = {}
     ...(io.detachGate ? { detachGate: io.detachGate } : {}),
     // Issue #452 gate round 4: a teardown the detach gate refused leaves the session's network; said, never silent.
     onNetworkKept: (network: string, reason: string) => write(`\nthe egress network ${network} was kept (${reason}): start the rootless network keeper, and the worker's retention sweep removes it\n`),
+    // Issue #918: the deployment folder's grant folder, never the pi process's working directory, so a private endpoint
+    // grant a gone network left in this sandbox's subnet is cleared before the shell opens; said when it cannot be.
+    grantsDirFor: (bin: string) => grantsDirOf(io.deploymentDir ?? pointerState().deploymentDir ?? process.cwd(), bin),
+    onGrantsUnchecked: (dir: string) => write(`\nwarning: ${dir} is not here, so whether a private endpoint grant left by a job network that is gone sits in this sandbox's subnet could not be checked\n`),
     // Issue #446: the clock the past-window refusal reads, seamed like the rest. No `pin`: the panel offers none, so a
     // run past its window is refused here with the CLI command that pins it.
     ...(io.now ? { now: io.now } : {}),

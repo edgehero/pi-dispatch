@@ -175,6 +175,7 @@ export function filter(eventName, subset, cfg, selfId, deliveryId, closerAuthori
 			// REQ-MCP-OPERATOR-SERVERS. Its own spread, the excludeTools rule above: a dropped list runs
 			// the job without its servers.
 			...(resolved.mcp !== undefined ? { mcp: resolved.mcp } : {}),
+			...(resolved.privateEndpoints !== undefined ? { privateEndpoints: resolved.privateEndpoints } : {}),
 			// #502. One spread PER FIELD, the excludeTools rule above: folded into one conditional, a trigger
 			// that named only a model would have its provider's absence decide whether the model survives,
 			// and a dropped model runs the job on the deployment default while the file reads as chosen.
@@ -264,7 +265,7 @@ function routeIssueLabel(subset, triggers) {
 		// A command rule (issue #189) skips flow resolution entirely: the label match IS the dispatch.
 		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 		packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
-		image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools, excludeExtensions: rule.excludeExtensions, excludeExtensionTools: rule.excludeExtensionTools, mcp: rule.mcp,
+		image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools, excludeExtensions: rule.excludeExtensions, excludeExtensionTools: rule.excludeExtensionTools, mcp: rule.mcp, privateEndpoints: rule.privateEndpoints,
 		provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models, fallbackModels: rule.fallbackModels, ...(rule.modelSelection !== undefined ? { modelSelection: rule.modelSelection } : {}), maxCostUsd: rule.maxCostUsd, idleTimeoutMinutes: rule.idleTimeoutMinutes, stallTimeoutMinutes: rule.stallTimeoutMinutes, maxMinutes: rule.maxMinutes,
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,
@@ -347,7 +348,7 @@ function routeComment(subset, triggers, knownFlows, assumeParked = false) {
 		// The single comment trigger IS the matched rule here, so its opt-in is the job's. A `<phrase>
 		// <flow>` override changes WHICH flow runs, never which triggers.json entry authorized it.
 		packages: triggers.comment.packages,
-		image: triggers.comment.image, backend: triggers.comment.backend, excludeTools: triggers.comment.excludeTools, excludeExtensions: triggers.comment.excludeExtensions, excludeExtensionTools: triggers.comment.excludeExtensionTools, mcp: triggers.comment.mcp,
+		image: triggers.comment.image, backend: triggers.comment.backend, excludeTools: triggers.comment.excludeTools, excludeExtensions: triggers.comment.excludeExtensions, excludeExtensionTools: triggers.comment.excludeExtensionTools, mcp: triggers.comment.mcp, privateEndpoints: triggers.comment.privateEndpoints,
 		provider: triggers.comment.provider, model: triggers.comment.model, maxTurns: triggers.comment.maxTurns, models: triggers.comment.models, fallbackModels: triggers.comment.fallbackModels, ...(triggers.comment.modelSelection !== undefined ? { modelSelection: triggers.comment.modelSelection } : {}), maxCostUsd: triggers.comment.maxCostUsd, idleTimeoutMinutes: triggers.comment.idleTimeoutMinutes, stallTimeoutMinutes: triggers.comment.stallTimeoutMinutes, maxMinutes: triggers.comment.maxMinutes,
 		skillsDir: triggers.comment.skillsDir,
 		secrets: triggers.comment.secrets,
@@ -460,7 +461,7 @@ function routePullRequest(subset, triggers, action, reviewAuthors) {
 			// A command rule (issue #189) skips flow resolution entirely: the rule match IS the dispatch.
 			...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 			packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
-			image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools, excludeExtensions: rule.excludeExtensions, excludeExtensionTools: rule.excludeExtensionTools, mcp: rule.mcp,
+			image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools, excludeExtensions: rule.excludeExtensions, excludeExtensionTools: rule.excludeExtensionTools, mcp: rule.mcp, privateEndpoints: rule.privateEndpoints,
 			provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models, fallbackModels: rule.fallbackModels, ...(rule.modelSelection !== undefined ? { modelSelection: rule.modelSelection } : {}), maxCostUsd: rule.maxCostUsd, idleTimeoutMinutes: rule.idleTimeoutMinutes, stallTimeoutMinutes: rule.stallTimeoutMinutes, maxMinutes: rule.maxMinutes,
 			skillsDir: rule.skillsDir,
 			secrets: rule.secrets,
@@ -583,7 +584,7 @@ function routeClose(rules, number, closerAuthorized, matchedFor, targetFor) {
 		// A command rule (issue #189) skips flow resolution entirely: the rule match IS the dispatch.
 		...(rule.command !== undefined ? { command: rule.command } : { flow: rule.flow }),
 		packages: rule.packages, // the MATCHED rule's fields -- rules in one file may differ on them
-		image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools, excludeExtensions: rule.excludeExtensions, excludeExtensionTools: rule.excludeExtensionTools, mcp: rule.mcp,
+		image: rule.image, backend: rule.backend, excludeTools: rule.excludeTools, excludeExtensions: rule.excludeExtensions, excludeExtensionTools: rule.excludeExtensionTools, mcp: rule.mcp, privateEndpoints: rule.privateEndpoints,
 		provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models, fallbackModels: rule.fallbackModels, ...(rule.modelSelection !== undefined ? { modelSelection: rule.modelSelection } : {}), maxCostUsd: rule.maxCostUsd, idleTimeoutMinutes: rule.idleTimeoutMinutes, stallTimeoutMinutes: rule.stallTimeoutMinutes, maxMinutes: rule.maxMinutes,
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,

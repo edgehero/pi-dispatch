@@ -177,6 +177,8 @@ export async function runSandbox(argv = [], { env = process.env, deps = {} } = {
 		spawnNetwork,
 		...(resolveJobUser ? { resolveJobUser } : {}),
 		...(keeperCheck ? { keeperCheck } : {}),
+		// Issue #918: a sandbox opened outside the deployment folder cannot clear a private endpoint grant a gone network left.
+		onGrantsUnchecked: (dir) => err(`warning: ${dir} is not here, so whether a private endpoint grant left by a job network that is gone sits in this sandbox's subnet could not be checked; open it from the deployment folder (or with --deployment) to have it cleared first\n`),
 		// Issue #452, gate round 4: a teardown the detach gate refused leaves the session's network, said here with its reason.
 		onNetworkKept: (network, reason) => err(`warning: the egress network ${network} was kept (${reason}): detaching the running proxy from it now could cut the proxy's route out on a rootless Podman 4.x whose rootless network keeper does not hold (issue #458); start the keeper, and the worker's retention sweep removes it\n`),
 		// Issue #429: which venues open here, and what a podman sandbox's observations must show, as the worker reads them.

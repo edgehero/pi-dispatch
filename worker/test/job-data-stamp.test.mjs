@@ -43,11 +43,12 @@ function fakeQueue(request = null) {
 const FORGE = { repo: "acme/web", target: { type: "issue", number: 7 }, flow: "fix", trigger: { deliveryId: "d-761", sender: { id: 1 } } };
 const LOCAL = { folder: "/srv/site", flow: "tidy", task: "t", now: new Date("2026-11-02T09:00:00Z") };
 
-test("the shipped table names what an older worker would misread, and this build reads version 6", () => {
+test("the shipped table names what an older worker would misread, and this build reads version 8", () => {
 	// Issue #796: an older worker would run a plain paid job in a canary's place. Issue #800: it would run the job with what its trigger takes away.
 	// Issue #888: it would run the job under its own fixed 30 minutes, past a ceiling the trigger set or short of a long run it allowed.
-	assert.deepEqual(JOB_DATA_FIELD_VERSIONS, { packageCanary: 2, excludeExtensions: 3, excludeExtensionTools: 3, idleTimeoutMinutes: 4, stallTimeoutMinutes: 4, maxMinutes: 4, mayMerge: 5, mayMergePolicy: 5, localEvent: 6, worker: 6, modelSelection: 7, modelSelectionGeneration: 7 });
-	assert.equal(JOB_DATA_VERSION, 7);
+	assert.deepEqual(JOB_DATA_FIELD_VERSIONS, { packageCanary: 2, excludeExtensions: 3, excludeExtensionTools: 3, idleTimeoutMinutes: 4, stallTimeoutMinutes: 4, maxMinutes: 4, mayMerge: 5, mayMergePolicy: 5, localEvent: 6, worker: 6, modelSelection: 7, modelSelectionGeneration: 7, privateEndpoints: 8 });
+	// Issue #918: it would start a paid job that cannot reach the device its trigger names.
+	assert.equal(JOB_DATA_VERSION, 8);
 	assert.equal(JOB_DATA_VERSION_FIELD, "dataVersion");
 });
 

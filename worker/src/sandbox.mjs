@@ -1,3 +1,6 @@
+import { grantOnAttach, grantsDirOf } from "./endpoint-grants.mjs";
+// Issue #918: re-exported for the panel's sandbox, which names the deployment folder's grant folder itself.
+export { grantsDirOf };
 import { execFile, spawn } from "node:child_process";
 import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
@@ -851,6 +854,11 @@ export async function openSandbox({
 	onNetworkKept = () => {},
 	// The CLI's detached monitor registers the shell and owns eventual network cleanup (#771).
 	monitorSession = null,
+	// Issue #918: the deployment folder's grant folder for this runtime (`grantsDirOf`), by default this process's working
+	// directory's, which the `--deployment` re-exec sets; and `(dir) => void`, told when that folder is not here, so a
+	// stale grant could not be checked for and the CLI says so.
+	grantsDirFor = (bin) => grantsDirOf(process.cwd(), bin),
+	onGrantsUnchecked = () => {},
 }) {
 	// The posture is REQUIRED, and a boolean. Every other part of this function defaults safely; this one would
 	// default to the open bridge, which is the dropped part this function exists to stop a caller dropping.
@@ -1022,6 +1030,28 @@ export async function openSandbox({
 			refused: "egress-network-failed",
 			message: `could not create the egress network ${network} -- is the proxy running? ${start}. The egress setting is read from this process's environment (PI_EGRESS, PI_EGRESS_PROXY); a deployment that sets them only in its .env must export them where you run this.`,
 		};
+	}
+	// Issue #918: a sandbox is granted no private endpoint, and must not inherit one: a grant left in this network's subnet
+	// by a network that is gone is cleared before the shell starts, as a job's network is (endpoint-grants.mjs). The grant
+	// folder is the deployment folder's, this process's working directory as the `--deployment` re-exec sets it. Without
+	// it (a sandbox opened from another folder) nothing can be checked, and that is said rather than read as "none", and
+	// the shell still opens: a stale grant is one a worker left (a worker that stopped mid-job, until its next boot's
+	// sweep; or a removal that failed, which the worker logs as `endpoint_grant_unremovable`), and the panel and the
+	// `--deployment` re-exec always name the folder. A folder that cannot be cleared refuses the shell.
+	if (network) {
+		const grantsDir = grantsDirFor(bin);
+		let present = true;
+		try {
+			present = existsSync(grantsDir);
+		} catch {
+			present = false;
+		}
+		if (!present) onGrantsUnchecked(grantsDir);
+		const cleared = present ? await grantOnAttach({ spawnFn: spawnNetwork, bin, proxy: egress.proxy, network, dir: grantsDir, ids: [] }) : { ok: true };
+		if (!cleared.ok) {
+			await removeJobNetwork(spawnNetwork, { network, proxy: egress.proxy, bin });
+			return { refused: "egress-network-failed", message: `the egress network ${network} could not be cleared of a private endpoint grant another network left (${cleared.why}); run \`pi-dispatch doctor\` and try again` };
+		}
 	}
 	let detached = false;
 	let sessionWatch = null;

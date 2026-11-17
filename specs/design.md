@@ -2079,7 +2079,8 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   - **Strict parsing by a DECLARED format**: `dotenv` is `NAME=value` lines with blanks and `#` comments and nothing
     else (no quotes, no `export`, no expansion, no continuation); `json` is one object of non-empty strings. At most
     64 variables, each value at most `MAX_SECRET_BYTES`, no duplicate, no NUL, no empty value.
-  - **Reserved names refuse, naming the variable, never drop**: the static set (`RESERVED_ENV_NAMES`), the job's
+  - **Reserved names refuse, naming the variable, never drop**: the static set (`RESERVED_ENV_NAMES`, and since #918 any
+    name starting `PI_DISPATCH_ENDPOINT_`, `isPrivateEndpointEnvName`), the job's
     provider credential variables and `PI_FORWARD_ENV`, asked of the whole bundle (`secret-name-reserved`), and, for
     bundles only because their contents are unreviewed, the loader and steering names (`PATH`, `LD_*`, `DYLD_*`,
     `NODE_OPTIONS`, `NODE_PATH`, Node's TLS trust variables, `BASH_ENV`, `ENV`, `PROMPT_COMMAND`, git's command and
@@ -8803,7 +8804,10 @@ free local model, or using a few successful live probes as proof of every routin
   to port 80, both to a listed host, and nothing else (issue #508). The provider is an ordinary
   entry on the allowlist. A **pre-spend check** on the proxy refuses a job the policy cannot serve. Off
   unless `PI_EGRESS=0`, and on every job with no per-trigger opt-out (`REQ-EGRESS-ALLOWLIST`,
-  `INT-EGRESS-POLICY-CONTRACT`).
+  `INT-EGRESS-POLICY-CONTRACT`). **AMENDED 2026-11-16 (#918)**: still no opt-out. A trigger may name private
+  endpoints (`REQ-PRIVATE-ENDPOINTS`, `DES-PRIVATE-ENDPOINT-GRANTS`): a grant of declared host and port pairs on top
+  of this policy, admitted by the same proxy for one job's network, which removes no rule and opens nothing
+  undeclared. The per-job network is what makes it possible: the proxy's address on it names one job.
 - **Why**: The rules were already written down and already run (`docs/sandbox.md`, issue #199, which touched
   zero code files). What was missing was not the mechanism but **the worker knowing about it**. Every
   property this project relies on -- reporting a refusal an operator can act on, checking a control in
@@ -9098,8 +9102,8 @@ free local model, or using a few successful live probes as proof of every routin
 ## DES-PRIVATE-ENDPOINT-GRANTS
 
 - **Status**: the declaration, the rendered rules, the shipped helper and the proxy's two folder mounts are LANDED
-  (#918, part 1). The worker's grants, the trigger field that asks for them and the slots are part 2; until then no
-  grant exists and every private pair is refused to every job.
+  (#918, part 1). The worker's grants, the trigger field that asks for them and the slots are LANDED (#918, part 2),
+  on the `local` and `podman` venues; the OpenShell venues refuse a granted job until part 3.
 - **Decision** (issue #918, `INT-PRIVATE-ENDPOINTS-FILE-CONTRACT`): a private endpoint, one host and one TCP port the
   operator declares in `private-endpoints.json`, is reachable through the egress proxy only by the jobs the worker
   grants it to. The proxy tells jobs apart by its OWN address on the network a request arrives on: every job has its
@@ -9150,6 +9154,28 @@ free local model, or using a few successful live probes as proof of every routin
     empty line and `%2e%2e` all answer `ERR`.
   Not measured here: Docker Desktop's file sharing, Docker Engine on Linux, rootless Podman and the OpenShell venue.
   Part 3 reads them back where they run (doctor's live probes and the podman and openshell conformance lanes).
+- **The grant's life** (part 2, `worker/src/endpoint-grants.mjs`, `run-container.mjs`):
+  - **At attach**, after the proxy joins the job's network and before anything runs: the worker reads the proxy's
+    addresses on that network (`inspect`, IPv4 and IPv6), deletes every grant whose address lies in those subnets
+    (a grant left by a network that is gone: the daemon reuses a freed subnet, and the proxy may get the same
+    address), then, for a granted job, writes one grant per address by exclusive temp file, mode 0644 and rename,
+    and asks the helper inside the proxy, as `proxy`, one line per address and id: every answer must be `OK`. Any
+    failure removes what it wrote and the job's network and throws `container-never-started`, so the attempt is
+    retried with nothing spent. The subnet clear runs for an ungranted job too, whenever the folder holds a grant:
+    it is the guarantee that no job inherits another's grant, and the two steps below only keep the folder small.
+  - **At detach**: the grant goes before the network on every path that removes the network, so a freed subnet
+    never meets a grant naming one of its addresses. A grant that cannot be removed is logged
+    (`endpoint_grant_unremovable`), and the next attach in its subnet clears it.
+  - **At boot**, after the reaper: a grant whose `network` line names no network the runtime lists is deleted; a
+    runtime that does not answer sweeps nothing.
+  - **Before every attempt** the processor confirms the grant against the live triggers file
+    (`makeCheckPrivateEndpoints`): the entry that queued the job (a forge job by its matched index and kind, a cron
+    or local event job by its trigger id) must still name each id the job carries; an id it added since is not
+    granted to a job queued before it. A newer file waits for a newer worker, an unreadable one is retried, a
+    missing one refuses. Then each id must be one this host declares, read once per pickup with the slots.
+  - The job's environment carries each granted endpoint's host and port (`PI_DISPATCH_ENDPOINT_<ID>_HOST`,
+    `_PORT`), a prefix reserved against every other source of a variable and counted as no secret, since a
+    transcript that hides the device's address hides nothing and the checkpoint scanner would refuse it.
 - **What the identity rests on**: Linux accepts a packet for any of a host's addresses on any interface, so `%>la`
   names a job only because a job cannot route to the proxy's address on another job's network. An `--internal`
   network has no default route, the daemon isolates bridges from one another, and a job runs with
@@ -9513,6 +9539,14 @@ a tunnel.
     records the reason too, `endpoint` with the endpoint's id, `INT-DEFER-REASON-KEY`, and the instant stays the
     trace for a reader older than that record). Nothing has been
     minted, cloned or reserved (`CONST-BUDGET-BEFORE-TOKENS`).
+  - **AMENDED 2026-11-16 (#918): a private endpoint's `slots`** take the same two halves, keyed `private:<id>` in
+    process and `slot:m:<hash16("private:<id>")>:<i>` in the fleet, so a model endpoint and a private endpoint that
+    share an id never share a bound. They are taken in their own step at pickup, after the model endpoints' holds
+    and outside the failover branch (inside `acquireEndpoints` a full device would read as "skip this model" and move
+    the job to a fallback model), in id order, so the order rule holds across both. An endpoint without `slots`
+    takes none. A miss defers with `private-endpoint` and logs `private_endpoint_busy_deferred`. The boot sweep
+    deletes this host's private claims with the model endpoints', on a host that declares no model endpoint too, and
+    the alias-name rule above applies unchanged.
   - **The settings read moved above it**, once per pickup, because the job's effective provider and model
     can come from the overlay. Its throw is captured and raised at its old place, so the record and the
     retry decision are what they were. Invalid or unreadable settings take no endpoint slot.
@@ -19003,3 +19037,4 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-11-15 (#907) | DES-OPERATOR-CONSOLE AMENDED: locally bundled read-only vis timeline, text-only metadata rendering, bounded range cache and visual density drill-down, stable SSE/Back and per-instant offsets. Narrowly supersedes the rejected browser build step and general JSON rendering for this chart alone. DES-RUN-HISTORY-FLAT-FILES-NO-DB and DES-STORE-VERSION-WHEN-NEEDED UNCHANGED, checked: no new persistent state. |
 | 2026-11-16 (#912) | DES-OPERATOR-CONSOLE AMENDED for the restored Pulse timeline styling, short-label layout and library-managed future background. Reject unchanged tokens as a sufficient visual-preservation claim. Bounded history loading, text-only projection, CSP, dependency pins, DES-RUN-HISTORY-FLAT-FILES-NO-DB and DES-STORE-VERSION-WHEN-NEEDED are UNCHANGED, checked. |
 | 2026-11-16 (#922) | DES-MODEL-FAILOVER and the person-only console field contract AMENDED for random initial model selection, durable CAS choice, quota-safe replacement, exact continuation binding and unchanged-style person controls. UNCHANGED, checked: CONST-ISOLATION-CONTAINER-PER-JOB, CONST-BUDGET-BEFORE-TOKENS, CONST-RETRY-INFRA-ONLY and CONST-PI-VERSION-PINNED; no additional paid attempt, new provider library or dependency pin. Legacy fixed and ordered-fallback policies retain their behavior. |
+| 2026-11-16 (#918, part 2) | `DES-PROJECT-SECRET-BUNDLES` AMENDED: a bundle variable starting `PI_DISPATCH_ENDPOINT_` is reserved. `DES-PRIVATE-ENDPOINT-GRANTS` AMENDED: the grants, the trigger field and the slots are LANDED on `local` and `podman`, with the grant's life written down (the subnet clear at every attach as the guarantee, the write and helper read back before start, removal before the network, the boot sweep by live network names, the live recheck before every attempt) and the environment's reserved, non-secret prefix. `DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` AMENDED: still no per-trigger opt-out; a grant adds declared pairs for one job's network and removes no rule. `DES-FLEET-LEASES-FOR-SHARED-BOUNDS` AMENDED: a private endpoint's `slots` take both halves under `private:<id>`, in their own step after the model endpoints' and outside the failover branch, swept at boot with them. `DES-MCP-EGRESS-PREFLIGHT` UNCHANGED, checked: a private endpoint's port is never 80 or 443 and it is never a model endpoint, so a server there is refused as any undeclared host is. |

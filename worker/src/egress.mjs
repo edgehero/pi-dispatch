@@ -1,12 +1,14 @@
 import { spawn } from "node:child_process";
+import { GRANTS_TARGET, PRIVATE_DIR_TARGET } from "./egress-proxy-state.mjs";
 import { makeDetachGate } from "./netns-keeper.mjs";
 
 /**
  * REQ-EGRESS-ALLOWLIST. The shipped egress policy: what a job container may talk to, expressed in the
  * worker's own `docker run` argv rather than in a host firewall this process cannot see.
  *
- * This module imports nothing but `node:child_process` and the two leaves under the detach gate (`netns-keeper.mjs`,
- * `daemon-facts.mjs`, which import nothing else of this project's) -- deliberately, and for `image-preflight.mjs`'s
+ * This module imports nothing but `node:child_process`, the two leaves under the detach gate (`netns-keeper.mjs`,
+ * `daemon-facts.mjs`, which import nothing else of this project's) and the proxy's mount names (`egress-proxy-state.mjs`,
+ * which imports only `node:path`; issue #918) -- deliberately, and for `image-preflight.mjs`'s
  * exact reason. It holds a money gate: it decides whether a budget slot is spent, so its tests must run
  * everywhere, unconditionally. It also owns every NAME the policy uses, so the gate that checks the proxy,
  * the argv that joins the network and the env that points at the proxy are ONE answer by construction
@@ -211,7 +213,7 @@ export const STOPPED_PROXY_STATES = new Set(["paused", "exited", "dead", "create
 
 export function makeEgressPreflight({ proxy = DEFAULT_EGRESS_PROXY, armed = false, spawnFn = spawn, bin = "docker" } = {}) {
 	// Issue #354: `bin` is the venue's CLI, for both probes, so the proxy is looked for where the job will run.
-	return async function egressPreflight() {
+	return async function egressPreflight(job = null) {
 		if (!armed) return { ok: true };
 		// `.State.Status` "running" (issue #453): measured on Docker Engine 29.8.1, a paused and a restarting container both
 		// read `.State.Running` true, and neither carries a job's traffic; the status word tells them apart.
@@ -223,7 +225,25 @@ export function makeEgressPreflight({ proxy = DEFAULT_EGRESS_PROXY, armed = fals
 			// (restarting, stopping, removing, initialized, podman's `stopped` between restarts, one no runtime prints yet)
 			// is an infra retry with the state in its words. BullMQ gives a job two attempts, so that is one retry, then
 			// the job fails: a retry buys a moment, not a wait.
-			if (status === "running") return { ok: true, proxy };
+			if (status === "running") {
+				// Issue #918: a job its trigger grants private endpoints needs a proxy that mounts their folder and this
+				// runtime's grant folder; one started before #918 cannot carry the grant. A free, determinate state, so the
+				// processor refuses such a job here (`privateMissing`), before the mint and the clone, rather than at the
+				// grant's read back. Asked only for such a job: every other job pays for no second inspect.
+				if (Array.isArray(job?.privateEndpoints) && job.privateEndpoints.length > 0) {
+					const read = await runDocker(spawnFn, ["inspect", "--format={{json .Mounts}}", proxy], true, bin);
+					let mounts = null;
+					try {
+						mounts = read.code === 0 ? JSON.parse(read.stdout) : null;
+					} catch {
+						mounts = null;
+					}
+					if (!Array.isArray(mounts)) return { unavailable: proxy, state: "unreported" };
+					const missing = [PRIVATE_DIR_TARGET, GRANTS_TARGET].filter((target) => !mounts.some((m) => m?.Destination === target));
+					if (missing.length > 0) return { ok: true, proxy, privateMissing: missing };
+				}
+				return { ok: true, proxy };
+			}
 			if (STOPPED_PROXY_STATES.has(status)) return { proxyStopped: proxy };
 			return { unavailable: proxy, state: /^[a-z]{1,20}$/.test(status) ? status : "unreported" };
 		}

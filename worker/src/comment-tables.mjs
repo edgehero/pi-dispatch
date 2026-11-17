@@ -143,6 +143,17 @@ export const MERGE_POLICY_COMMENTS = Object.freeze({
 	"merge-policy-changed": "Refused: the trigger that permitted this job to merge changed or withdrew that permission after the job was queued. Review the current trigger and re-run the job. Not run.",
 });
 
+/**
+ * The public comments of the private endpoint refusals (issue #918). Fixed text: no endpoint id, host or port, the bundle
+ * comments' restraint, since the declared ids and where they point are the operator's network topology.
+ */
+export const PRIVATE_ENDPOINT_COMMENTS = Object.freeze({
+	"private-endpoint-withdrawn": "Refused: the trigger that queued this job no longer grants it a private endpoint it was queued with. Review the current trigger and re-run the job. Not run.",
+	"private-endpoint-unknown": "Refused: this job's trigger grants it a private endpoint that this worker host does not declare. Run `pi-dispatch doctor` on the worker to see which private endpoints it declares. Not run.",
+	"private-endpoint-proxy-outdated": "Refused: this job's trigger grants it a private endpoint, and the egress proxy on this worker host was started before it could carry one. Run `pi-dispatch up` (on rootless Podman, `pi-dispatch service install --force`) on the worker, then re-run the job. Not run.",
+	"private-endpoint-venue-unsupported": "Refused: this job's trigger grants it a private endpoint, and the venue it runs on cannot carry one yet. Run it on the local or podman venue. Not run.",
+});
+
 /** The public comments of the bundle refusals (issue #704). Fixed text: no bundle id, profile, variable or path. */
 export const BUNDLE_COMMENTS = Object.freeze({
 	"secret-bundle-trigger-changed": "Refused: this job's project has a secret bundle, and the trigger that queued this job is no longer in the triggers file as it was, so whether it opted out of the bundle is unknown. Re-run it from the current trigger. Not run.",

@@ -570,7 +570,7 @@ export async function enqueueLateForgeJob(queue, kind, fields, { dataVersions } 
  * semantic dedup id. Throws on a bad delivery id or console name, and on input a newer release stored with a
  * `dataVersion` above this build's (issue #761; every caller that rebuilds stored input answers with a reply then).
  */
-function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, models, fallbackModels, modelSelection, maxCostUsd, idleTimeoutMinutes, stallTimeoutMinutes, maxMinutes, packages, image, backend, excludeTools, excludeExtensions, excludeExtensionTools, mcp, skillsDir, instructions, mayMerge, mayMergePolicy, resume, awaitInput, gates, approvalRequestId, gateTimeout, gateBudgetRaiseUsd, progress, statusComment, recover, steer, fork, forkPolicy, forkReserveMicros, thinkingLevel, parkedReply, replyReceivedAt, console: consoleMeta, secrets, secretsProfile, waitFor, replica, replicas, dataVersion }, { dataVersions } = {}) {
+function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, models, fallbackModels, modelSelection, maxCostUsd, idleTimeoutMinutes, stallTimeoutMinutes, maxMinutes, packages, image, backend, excludeTools, excludeExtensions, excludeExtensionTools, mcp, privateEndpoints, skillsDir, instructions, mayMerge, mayMergePolicy, resume, awaitInput, gates, approvalRequestId, gateTimeout, gateBudgetRaiseUsd, progress, statusComment, recover, steer, fork, forkPolicy, forkReserveMicros, thinkingLevel, parkedReply, replyReceivedAt, console: consoleMeta, secrets, secretsProfile, waitFor, replica, replicas, dataVersion }, { dataVersions } = {}) {
 	const jobId = forgeDeliveryJobId(kind, trigger?.deliveryId, replica);
 	if (mayMerge !== undefined && typeof mayMerge !== "boolean") throw new TypeError("merge-policy-invalid");
 	if (mayMerge === true && (command !== undefined || typeof mayMergePolicy !== "string" || !/^[a-f0-9]{64}$/.test(mayMergePolicy))) throw new TypeError("merge-policy-invalid");
@@ -631,6 +631,9 @@ function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigg
 		...(excludeExtensions !== undefined && { excludeExtensions }),
 		...(excludeExtensionTools !== undefined && { excludeExtensionTools }),
 		...(mcp !== undefined && { mcp }),
+		// Issue #918: the private endpoints this job's trigger grants it, by id, at JOB level for excludeTools' reasons. A
+		// grant, so the worker checks the live trigger again before each attempt and grants only what it still names.
+		...(privateEndpoints !== undefined && { privateEndpoints }),
 		// #501. The trigger's per-job dollar cap, as written. Conditional like `excludeTools`, at JOB level for its
 		// reason, and a narrowing like it: the worker runs the job under the smaller of this and the deployment cap.
 		...(maxCostUsd !== undefined && { maxCostUsd }),

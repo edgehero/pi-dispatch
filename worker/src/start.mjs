@@ -58,7 +58,8 @@ import { makeAzureHost } from "./azure-host.mjs";
 import { makeEgressPreflight } from "./egress.mjs";
 import { checkSlotKey, endpointSlotKey, hash16, makeClaimSweeper, makeFleetLease, makeScopeClaimSweeper, scopeSlotKey } from "./fleet-lease.mjs";
 import { MAX_SLOTS, loadModelEndpoints, modelEndpointsPath, readOverlayModels } from "./model-endpoints.mjs";
-import { endpointsOverlap, loadPrivateEndpoints, privateFolderInsideJobPathSentence, privateFoldersInsideJobPaths } from "./private-endpoints.mjs";
+import { grantsDirOf, runWithInput, sweepGrants } from "./endpoint-grants.mjs";
+import { endpointsOverlap, loadPrivateEndpoints, privateEndpointsPath, privateFolderInsideJobPathSentence, privateFoldersInsideJobPaths } from "./private-endpoints.mjs";
 import { builtinModel, checkModelsKnown } from "./model-catalog.mjs";
 import { capabilityTokens, serializeCaps } from "./capabilities.mjs";
 import { cronFingerprint } from "./fingerprint.mjs";
@@ -96,7 +97,7 @@ import { fileURLToPath } from "node:url";
 import { listSandboxes, sandboxDeadline, makeSandboxReaper } from "./sandbox-store.mjs";
 import { makeSessionStore } from "./session-store.mjs";
 import { scrubCredentials } from "./redact.mjs";
-import { makeCheckOnceSpent, makeCheckPortfolioFlag, makeCheckWaitSkew, makeDisarmOnce, makeFindSecretBundle } from "./triggers-file.mjs";
+import { makeCheckOnceSpent, makeCheckPortfolioFlag, makeCheckPrivateEndpoints, makeCheckWaitSkew, makeDisarmOnce, makeFindSecretBundle } from "./triggers-file.mjs";
 import { makeBundleResolver } from "./secret-bundles.mjs";
 import { WATCH_DEBOUNCE_MS, changedWhileArming, makeWatchCloser, readBeforeArming } from "./watch-closer.mjs";
 import { loadPauseWindows, PAUSE_WINDOWS_VERSION, pauseUntilMs } from "./pause-windows.mjs";
@@ -771,9 +772,14 @@ function watchEnvelopeFile(config, ref, log, atBoot, ctx) {
  * last-good property is testable without fs.watch. A bad edit keeps `ref.current` and logs
  * `model_endpoints_reload_invalid`; a good one swaps it, so a `slots` edit applies to the next pickup.
  */
-export function reloadModelEndpoints(config, ref, log) {
+export function reloadModelEndpoints(config, ref, log, privateRef = null) {
 	try {
-		ref.current = loadModelEndpoints(config);
+		const next = loadModelEndpoints(config);
+		// Issue #918: an edit that names a private endpoint's id or server is refused like a bad one: that server would
+		// not be private any more (`endpointsOverlap`).
+		const overlap = endpointsOverlap(next, privateRef?.current ?? []);
+		if (overlap.length > 0) throw new Error(`model-endpoints and private-endpoints disagree: ${overlap[0]}`);
+		ref.current = next;
 		log("model_endpoints_reloaded", { count: ref.current.length });
 	} catch (err) {
 		log("model_endpoints_reload_invalid", { reason: err?.message });
@@ -785,7 +791,7 @@ export function reloadModelEndpoints(config, ref, log) {
  * or exists at boot: the default path is the deployment folder, and a worker started elsewhere must not watch an
  * arbitrary directory for a file nobody declared. A default file created later is read at the next restart.
  */
-function watchModelEndpointsFile(config, ref, log, atBoot) {
+function watchModelEndpointsFile(config, ref, log, atBoot, privateRef = null) {
 	const { path } = modelEndpointsPath(config);
 	const dir = dirname(path) || ".";
 	const file = basename(path);
@@ -798,7 +804,7 @@ function watchModelEndpointsFile(config, ref, log, atBoot) {
 			if (handles.closed) return;
 			if (changed && changed !== file) return;
 			clearTimeout(handles.timer);
-			handles.timer = setTimeout(() => reloadModelEndpoints(config, ref, closer.reloadLog), WATCH_DEBOUNCE_MS);
+			handles.timer = setTimeout(() => reloadModelEndpoints(config, ref, closer.reloadLog, privateRef), WATCH_DEBOUNCE_MS);
 		});
 		handles.watcher.unref?.();
 		log("model_endpoints_watching", { path });
@@ -807,7 +813,62 @@ function watchModelEndpointsFile(config, ref, log, atBoot) {
 	}
 	if (changedWhileArming(handles, readFile)) {
 		log("model_endpoints_reread_after_arming", { path });
-		reloadModelEndpoints(config, ref, closer.reloadLog);
+		reloadModelEndpoints(config, ref, closer.reloadLog, privateRef);
+	}
+	return closer;
+}
+
+/**
+ * The networks one runtime has now, by name, for the grant sweep (issue #918): a Set, or null when the runtime did not
+ * answer (then nothing is swept, rather than every grant read as orphaned).
+ */
+async function sweepNetworksOf(bin) {
+	const listed = await runWithInput(undefined, bin, ["network", "ls", "--format", "{{.Name}}"], "", { timeoutMs: 15_000 });
+	if (listed.code !== 0) return null;
+	return new Set(listed.stdout.split("\n").map((line) => line.trim()).filter(Boolean));
+}
+
+/**
+ * The private-endpoints reload (issue #918), `reloadModelEndpoints`' posture: a bad edit, or one that names a model
+ * endpoint's id or server, keeps `ref.current` and logs `private_endpoints_reload_invalid`; a good one swaps it, so a
+ * new declaration or a `slots` edit applies to the next pickup. What the proxy enforces changes only on `egress render`.
+ */
+export function reloadPrivateEndpoints(config, ref, log, modelRef = null) {
+	try {
+		const next = loadPrivateEndpoints(config);
+		const overlap = endpointsOverlap(modelRef?.current ?? [], next);
+		if (overlap.length > 0) throw new Error(`model-endpoints and private-endpoints disagree: ${overlap[0]}`);
+		ref.current = next;
+		log("private_endpoints_reloaded", { count: ref.current.length });
+	} catch (err) {
+		log("private_endpoints_reload_invalid", { reason: err?.message });
+	}
+}
+
+/** Watch the private-endpoints file (issue #918) as the model-endpoints watcher does, and by its arming rule. */
+function watchPrivateEndpointsFile(config, ref, log, atBoot, modelRef = null) {
+	const { path } = privateEndpointsPath(config);
+	const dir = dirname(path) || ".";
+	const file = basename(path);
+	const handles = { watcher: null, timer: null, closed: false };
+	const closer = makeWatchCloser(handles, log);
+	const readFile = () => readFileSync(path, "utf8");
+	readBeforeArming(handles, readFile, atBoot);
+	try {
+		handles.watcher = watch(dir, (_event, changed) => {
+			if (handles.closed) return;
+			if (changed && changed !== file) return;
+			clearTimeout(handles.timer);
+			handles.timer = setTimeout(() => reloadPrivateEndpoints(config, ref, closer.reloadLog, modelRef), WATCH_DEBOUNCE_MS);
+		});
+		handles.watcher.unref?.();
+		log("private_endpoints_watching", { path });
+	} catch (err) {
+		log("private_endpoints_watch_unavailable", { reason: err?.message });
+	}
+	if (changedWhileArming(handles, readFile)) {
+		log("private_endpoints_reread_after_arming", { path });
+		reloadPrivateEndpoints(config, ref, closer.reloadLog, modelRef);
 	}
 	return closer;
 }
@@ -1094,7 +1155,7 @@ export async function startWorker(
 	// this race lives in is between these lines and the arming a thousand lines below -- the endpoint probe,
 	// forge auth, the reaper, Valkey -- not the microseconds around the arming itself, which is what a first
 	// attempt measured. `null` where a file is not configured, which reads as "nothing to compare".
-	const atBoot = { triggers: null, pauseWindows: null, scopedLimits: null, projects: null, modelEndpoints: null, envelope: null };
+	const atBoot = { triggers: null, pauseWindows: null, scopedLimits: null, projects: null, modelEndpoints: null, privateEndpoints: null, envelope: null };
 	const recording = (into, path) => ({
 		readFileSync: (file, enc) => {
 			const text = readFileSync(file, enc);
@@ -1169,7 +1230,9 @@ export async function startWorker(
 	// Issue #918: the declared private endpoints, the same posture (INT-PRIVATE-ENDPOINTS-FILE-CONTRACT). A bad file
 	// refuses boot, and so does one that names a model endpoint's id or server (`endpointsOverlap`: that server would
 	// not be private), and so does a private endpoint folder a job could write (`privateFoldersInsideJobPaths`).
-	const privateEndpoints = { current: loadPrivateEndpoints(config) };
+	const privateEndpointsAt = privateEndpointsPath(config);
+	const privateEndpoints = { current: loadPrivateEndpoints(config, recording("privateEndpoints", privateEndpointsAt.path)) };
+	const watchPrivateEndpoints = privateEndpointsAt.explicit || atBoot.privateEndpoints !== null;
 	const endpointOverlap = endpointsOverlap(modelEndpoints.current, privateEndpoints.current);
 	if (endpointOverlap.length > 0) throw configError(`model-endpoints and private-endpoints disagree: ${endpointOverlap[0]}`);
 	// A folder the containment rule cannot read (an unreadable job path) is said and the boot goes on: refusing would stop
@@ -1722,10 +1785,34 @@ export async function startWorker(
 	// live, and a claim on an index above the new value is still this host's to clear. A per-machine endpoint (a host
 	// alias name) takes no fleet claim, so it has none to sweep. The sweep stops at its first fault.
 	try {
-		if (config.workerNameDeclared && modelEndpoints.current.length > 0)
-			await makeClaimSweeperFn({ redis, workerName: config.workerName, keyFor: endpointSlotKey, rows: modelEndpoints.current.filter((e) => !isPerMachineHost(e.host)).map((e) => ({ hash: hash16(e.id), count: MAX_SLOTS })), event: "endpoint_claims", log })({ reaped });
+		// Issue #918: the private endpoints' fleet claims too, under their own `private:<id>` key, and on a host that
+		// declares no model endpoint as well: a private endpoint with `slots` takes a fleet claim on its own.
+		const endpointClaimRows = [
+			...modelEndpoints.current.filter((e) => !isPerMachineHost(e.host)).map((e) => ({ hash: hash16(e.id), count: MAX_SLOTS })),
+			// Every declared one, `slots` or not: a bound removed after a crash and put back must not meet this host's old claim.
+			...privateEndpoints.current.filter((e) => !isPerMachineHost(e.host)).map((e) => ({ hash: hash16(`private:${e.id}`), count: MAX_SLOTS })),
+		];
+		if (config.workerNameDeclared && endpointClaimRows.length > 0)
+			await makeClaimSweeperFn({ redis, workerName: config.workerName, keyFor: endpointSlotKey, rows: endpointClaimRows, event: "endpoint_claims", log })({ reaped });
 	} catch (err) {
 		log("endpoint_claims_sweep_skipped", { reason: scrubCredentials(err?.message) });
+	}
+	// Issue #918: the private endpoint grants left by a worker that stopped mid-job, once the reaper has run (the networks
+	// it removed are gone, and a network still standing keeps its grant). A grant whose `network` line names no network
+	// this runtime still has is deleted. Best effort: the stale clear when the proxy joins a new network is what keeps a
+	// job from ever inheriting another's grant (endpoint-grants.mjs), and this only keeps the folder from growing.
+	if (config.egress) {
+		for (const [bin, blessed] of [["docker", localBlessed], ["podman", podmanBlessed]]) {
+			if (!blessed) continue;
+			try {
+				const listed = await sweepNetworksOf(bin);
+				if (listed === null) continue;
+				const removed = sweepGrants({ dir: grantsDirOf(process.cwd(), bin), live: listed });
+				if (removed.length > 0) log("endpoint_grants_swept", { venue: bin === "podman" ? PODMAN_BACKEND : DEFAULT_BACKEND, count: removed.length });
+			} catch (err) {
+				log("endpoint_grants_sweep_skipped", { reason: scrubCredentials(err?.message) });
+			}
+		}
 	}
 
 	// The persistent runtime queue: the stall guard tears schedulers down through it, AND the outbox
@@ -2285,6 +2372,8 @@ export async function startWorker(
 				hostEnv: env,
 				egress: config.egress,
 				egressProxy: config.egressProxy,
+				// Issue #918: this runtime's grant folder in the deployment folder (the worker's working directory).
+				grantsDir: grantsDirOf(process.cwd(), "podman"),
 				openJobLog,
 				...(openLiveTranscript ? { openLiveTranscript } : {}),
 				...(openInboxRelay ? { openInboxRelay } : {}),
@@ -2708,6 +2797,8 @@ export async function startWorker(
 						hostEnv: env,
 						egress: config.egress, // REQ-EGRESS-ALLOWLIST: the per-job network and the proxy variables
 						egressProxy: config.egressProxy,
+						// Issue #918: the Docker proxy's grant folder in the deployment folder (the worker's working directory).
+						grantsDir: grantsDirOf(process.cwd(), "docker"),
 						openJobLog,
 						openLiveTranscript, // issues #643 and #644: null when PI_LIVE_TRANSCRIPTS=0 and PI_RUN_PROGRESS=0 (and no Valkey client, #646)
 						openInboxRelay, // issue #646: the steer inbox relay, null without a Valkey client
@@ -3114,6 +3205,8 @@ export async function startWorker(
 		// The endpoint gate's snapshot, read per pickup: the live-reloaded declaration and the overlay models.json, which
 		// the operator edits without a restart too. Read only when an endpoint is declared (the gate's own rule).
 		modelEndpoints: () => modelEndpoints.current,
+		// Issue #918: the live-reloaded private endpoint declaration, read per pickup by the private endpoint gate.
+		privateEndpoints: () => privateEndpoints.current,
 		overlayModels: () => readOverlayModels(config.globalPiDir),
 		checkLease: hostQueue
 			? makeFleetLease({
@@ -3235,6 +3328,8 @@ export async function startWorker(
 			checkWaitSkew: makeCheckWaitSkew({ triggersPath: onceTriggersFile }),
 			checkModelSelectionPolicy: makeCheckModelSelectionPolicy({ triggersPath: onceTriggersFile, allowedModels: config.allowedModels }),
 			checkMergePolicy: makeCheckMergePolicy({ triggersPath: onceTriggersFile }),
+			// Issue #918: the private endpoints a job's trigger still grants it, from the live file before every attempt.
+			checkPrivateEndpoints: makeCheckPrivateEndpoints({ triggersPath: onceTriggersFile }),
 			// Issue #505. Whether the live file still flags a portfolio job's cron trigger, read when such a job is picked
 			// up, from the same file and by the same rule as the two checks above (built once, beside collectPlan).
 			checkPortfolioFlag,
@@ -3794,7 +3889,11 @@ export async function startWorker(
 
 		// Issue #503 live edit: the model endpoints, keep-last-good on a bad edit.
 		if (watchModelEndpoints) {
-			extraClosers.push(watchModelEndpointsFile(config, modelEndpoints, log, atBoot.modelEndpoints));
+			extraClosers.push(watchModelEndpointsFile(config, modelEndpoints, log, atBoot.modelEndpoints, privateEndpoints));
+		}
+		// Issue #918: the private endpoints, armed by the same rule (named, or there at boot).
+		if (watchPrivateEndpoints) {
+			extraClosers.push(watchPrivateEndpointsFile(config, privateEndpoints, log, atBoot.privateEndpoints, modelEndpoints));
 		}
 
 		// Arm expiry only for declarations this host serves, including after a live edit first publishes a request.

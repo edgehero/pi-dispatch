@@ -418,3 +418,17 @@ test("a session teardown the detach gate refused is said on the panel, with its 
   await mod.openSandboxSession(paths, "gh-1", io);
   assert.match(written.join(""), /the egress network pi-sandbox-gh-1-net was kept \(keeper-not-holding\)/);
 });
+
+test("the panel's sandbox looks for the private endpoint grants in the deployment folder, and says so when it cannot (#918)", async () => {
+  // env {} arms the egress policy (on by default), so the session gets its network and the stale-grant clear.
+  const missing = panelIo({ deploymentDir: join(tempDir("admin-918-"), "no-such-deployment") });
+  await mod.openSandboxSession(RETAINED, "gh-1", missing.io);
+  assert.match(missing.written.join(""), /warning: .*no-such-deployment\/egress-grants\/local is not here, so whether a private endpoint grant left by a job network that is gone sits in this sandbox's subnet could not be checked/);
+  assert.equal(missing.launched.length, 1, "and the shell still opens");
+  const deployment = tempDir("admin-918-dep-");
+  mkdirSync(join(deployment, "egress-grants", "local"), { recursive: true });
+  const present = panelIo({ deploymentDir: deployment });
+  await mod.openSandboxSession(RETAINED, "gh-1", present.io);
+  assert.doesNotMatch(present.written.join(""), /egress-grants/, "an empty grant folder in the deployment: nothing to say, nothing to clear");
+  assert.equal(present.launched.length, 1);
+});

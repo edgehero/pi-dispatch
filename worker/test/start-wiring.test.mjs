@@ -2358,6 +2358,36 @@ test("reloadModelEndpoints keeps LAST-GOOD on a bad edit and hot-swaps on a good
 	}
 });
 
+test("reloadPrivateEndpoints keeps LAST-GOOD on a bad edit or one that names a model endpoint's server, and both reloads refuse the overlap (#918)", { skip }, async () => {
+	const dir = tempDir("pi-pe-");
+	const file = join(dir, "private-endpoints.json");
+	const config = { privateEndpointsFile: file };
+	const good = [{ id: "bench-device", host: "10.0.5.20", port: 22, slots: 1 }];
+	const ref = { current: good };
+	const modelRef = { current: [{ id: "mac-ollama", host: "host.docker.internal", port: 11434, slots: 2, keyless: true }] };
+	const logs = [];
+	const log = (event, fields) => logs.push({ event, fields });
+	writeFileSync(file, "{ not json");
+	mod.reloadPrivateEndpoints(config, ref, log, modelRef);
+	assert.equal(ref.current, good, "the SAME array: last-good untouched");
+	assert.equal(logs.at(-1).event, "private_endpoints_reload_invalid");
+	writeFileSync(file, JSON.stringify({ version: 1, endpoints: [{ id: "lab", host: "host.docker.internal", port: 11434 }] }));
+	mod.reloadPrivateEndpoints(config, ref, log, modelRef);
+	assert.equal(ref.current, good, "a private endpoint on a model endpoint's server would not be private");
+	assert.match(logs.at(-1).fields.reason, /model-endpoints and private-endpoints disagree/);
+	writeFileSync(file, JSON.stringify({ version: 1, endpoints: [{ id: "bench-device", host: "10.0.5.20", port: 22, slots: 3 }] }));
+	mod.reloadPrivateEndpoints(config, ref, log, modelRef);
+	assert.equal(ref.current[0].slots, 3, "a slots edit applies to the next pickup");
+	assert.deepEqual(logs.at(-1), { event: "private_endpoints_reloaded", fields: { count: 1 } });
+	// And the model endpoints' reload refuses an edit that names a private endpoint's id.
+	const modelFile = join(dir, "model-endpoints.json");
+	writeFileSync(modelFile, JSON.stringify({ version: 1, endpoints: [{ id: "bench-device", host: "10.9.9.9", port: 11434, slots: 1 }] }));
+	const before = modelRef.current;
+	mod.reloadModelEndpoints({ modelEndpointsFile: modelFile }, modelRef, log, ref);
+	assert.equal(modelRef.current, before);
+	assert.equal(logs.at(-1).event, "model_endpoints_reload_invalid");
+});
+
 // ── live-edit watcher lifecycle (issue #295) ────────────────────────────────────────────────────────
 
 test("the live-edit watchers are CLOSED with the worker that armed them", { skip }, async () => {
@@ -4036,7 +4066,7 @@ test("one debounce, shared: the 150ms literal is written once (issue #386)", asy
 	}
 });
 
-test("all SEVEN live-edit watches apply the boot-race rule, not just the one with an end-to-end test (#386, #503, #499, #504)", () => {
+test("all EIGHT live-edit watches apply the boot-race rule, not just the one with an end-to-end test (#386, #503, #499, #504, #918)", () => {
 	// BY SHAPE, and the limit is the point rather than an apology. The rule itself is pinned behaviourally
 	// above, and the receiver's watch is driven end to end through its read seam. The worker's three are
 	// private functions armed from deep inside `startWorker`, so driving each would mean three full worker
@@ -4058,7 +4088,9 @@ test("all SEVEN live-edit watches apply the boot-race rule, not just the one wit
 	// is checked at the end with the scoped-limits one.
 	// Seven since issue #504 part B added the envelope watch, read again: it reads before arming and compares after, its
 	// seam defaults to the real watcher, and its caller hands it the envelope's own boot baseline (checked at the end).
-	assert.deepEqual(armings, [["worker/src/start.mjs", 6], ["receiver/src/start.mjs", 1]], "seven watches, and if that count moves this test must be read again rather than updated");
+	// Eight since issue #918 added the private-endpoints watch, read again: it reads before arming and compares after, the
+	// model-endpoints watch's shape, and its caller hands it its own boot baseline (checked at the end).
+	assert.deepEqual(armings, [["worker/src/start.mjs", 7], ["receiver/src/start.mjs", 1]], "eight watches, and if that count moves this test must be read again rather than updated");
 	for (const [name, src] of Object.entries(sources)) {
 		const arms = (src.match(/handles\.watcher = watch(?:Fn)?\(/g) ?? []).length;
 		assert.equal((src.match(/readBeforeArming\(/g) ?? []).length, arms, `${name}: every watch reads before it arms`);
@@ -4101,6 +4133,11 @@ test("all SEVEN live-edit watches apply the boot-race rule, not just the one wit
 	assert.ok(endpoints, "watchModelEndpointsFile is armed from startWorker");
 	assert.match(endpoints[1], /atBoot\.modelEndpoints\b/);
 	assert.match(worker, /recording\("modelEndpoints", modelEndpointsAt\.path\)/);
+	// Issue #918: the private-endpoints file, by the same rule.
+	const privateWatch = worker.match(/extraClosers\.push\(watchPrivateEndpointsFile\(([^;]*)\)\);/);
+	assert.ok(privateWatch, "watchPrivateEndpointsFile is armed from startWorker");
+	assert.match(privateWatch[1], /atBoot\.privateEndpoints\b/);
+	assert.match(worker, /recording\("privateEndpoints", privateEndpointsAt\.path\)/);
 });
 
 // ── issue #354: `local` is no longer mandatory ─────────────────────────────────────────────────────────
@@ -7420,4 +7457,14 @@ test("issue #908: the wired merge policy gate reads the configured file on every
 	writeFileSync(path, JSON.stringify(raw));
 	assert.deepEqual(await captured.deps.checkMergePolicy(job), { refused: "merge-policy-changed" });
 	assert.deepEqual(await captured.deps.checkMergePolicy(unflagged), { ok: true });
+});
+
+test("each runtime's container start gets its own grant folder, and the boot sweep reads both after the reaper (#918)", () => {
+	const src = readFileSync(new URL("../src/start.mjs", import.meta.url), "utf8");
+	assert.equal((src.match(/grantsDir: grantsDirOf\(process\.cwd\(\), "podman"\)/g) ?? []).length, 1, "the rootless Podman venue's");
+	assert.equal((src.match(/grantsDir: grantsDirOf\(process\.cwd\(\), "docker"\)/g) ?? []).length, 1, "the Docker CLI's");
+	const sweep = src.indexOf("sweepGrants({ dir: grantsDirOf(process.cwd(), bin), live: listed })");
+	assert.ok(sweep > 0, "the boot sweep");
+	assert.ok(src.lastIndexOf("endpoint_claims", sweep) > 0, "after the reaper and the claim sweep");
+	assert.match(src, /checkPrivateEndpoints: makeCheckPrivateEndpoints\(\{ triggersPath: onceTriggersFile \}\)/, "the live recheck reads the file the other free gates read");
 });

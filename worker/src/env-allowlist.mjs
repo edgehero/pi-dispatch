@@ -36,7 +36,7 @@ import { RECEIVER_ONLY_VARS, forgeSpec } from "./forges.mjs";
 import { apiKeyVariable } from "./provider-key.mjs";
 import { isDeterminateFsCode } from "./transient.mjs";
 import { KEYLESS_HOW, keylessVerdict, providerRenameHint, readOverlayModels, RENAMED_PROVIDERS } from "./model-endpoints.mjs";
-import { KEYLESS_ENV_NAME } from "./reserved-env.mjs";
+import { KEYLESS_ENV_NAME, isPrivateEndpointEnvName, privateEndpointEnvNames } from "./reserved-env.mjs";
 
 function configError(message) {
 	const error = new Error(message);
@@ -376,7 +376,7 @@ function layoutEnv(layout) {
  * `allowGlobalExtensions` defaults to TRUE here, matching loadConfig's default (REQ-GLOBAL-PI-OVERLAY): a
  * caller that says nothing gets the operator's staged setup, and only an explicit `false` withholds it.
  */
-export function buildContainerEnv({ size = DEFAULT_JOB_SIZE, provider, secondaryProvider = null, model, maxTurns, maxTokens, maxCostMicros = null, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], packageCanaryPath = undefined, forwardEnv = [], secrets = {}, sessionFile = null, flow = null, command = null, excludeTools = [], excludeExtensions = [], excludeExtensionTools = [], excludeToolsStrict = false, mcpServers = [], awaitInput = false, approvalGates = null, approvalDecision = null, reportProgress = false, recover = false, recovering = false, steer = false, layout = "mounts", allowedModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null, exitAuth = false, transcriptStderr = false, steerStdin = false, bundleEnvFile = false, observableRunner = false, fork = null, thinkingLevel = null, subscriptionAuth = [], idleMs = null, stallMs = null, credentialRefresh = false }) {
+export function buildContainerEnv({ size = DEFAULT_JOB_SIZE, provider, secondaryProvider = null, model, maxTurns, maxTokens, maxCostMicros = null, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], packageCanaryPath = undefined, forwardEnv = [], secrets = {}, sessionFile = null, flow = null, command = null, excludeTools = [], excludeExtensions = [], excludeExtensionTools = [], excludeToolsStrict = false, mcpServers = [], awaitInput = false, approvalGates = null, approvalDecision = null, reportProgress = false, recover = false, recovering = false, steer = false, layout = "mounts", allowedModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null, privateEndpoints = [], exitAuth = false, transcriptStderr = false, steerStdin = false, bundleEnvFile = false, observableRunner = false, fork = null, thinkingLevel = null, subscriptionAuth = [], idleMs = null, stallMs = null, credentialRefresh = false }) {
 	// The provider credential(s), by pi's expected variable name(s) -- from the worker env, or (when
 	// PI_AUTH_FROM_PI is set and the env has none) host-side from pi's auth.json. Throws (config) if
 	// neither source yields one, which the processor turns into a policy refusal that refunds any reserve
@@ -591,6 +591,18 @@ export function buildContainerEnv({ size = DEFAULT_JOB_SIZE, provider, secondary
 	// this is the backstop that keeps a value from either one from replacing it, or from appearing on a keyed job.
 	if (credEnv[KEYLESS_ENV_NAME] === KEYLESS_VALUE) env[KEYLESS_ENV_NAME] = KEYLESS_VALUE;
 	else delete env[KEYLESS_ENV_NAME];
+
+	// env-internal PI_DISPATCH_ENDPOINT_<ID>_HOST, PI_DISPATCH_ENDPOINT_<ID>_PORT: issue #918, each granted private
+	// endpoint's declared host and port, so a job reaches it through the proxy with nothing hard-coded in the repository.
+	// Settled AFTER the forward and secrets loops, PI_DISPATCH_KEYLESS's backstop: both lists refuse the prefix upstream
+	// (`isReservedEnvName`, config.mjs for PI_FORWARD_ENV), and any key with it is dropped here first, so the worker is
+	// the only writer and a job holds exactly the endpoints it was granted.
+	for (const key of Object.keys(env)) if (isPrivateEndpointEnvName(key)) delete env[key];
+	for (const endpoint of Array.isArray(privateEndpoints) ? privateEndpoints : []) {
+		const names = privateEndpointEnvNames(endpoint.id);
+		env[names.host] = endpoint.host;
+		env[names.port] = String(endpoint.port);
+	}
 
 	// Issue #501: the per-job dollar cap is the worker's answer and nothing else's, so it is settled again AFTER the
 	// PI_FORWARD_ENV and secrets loops, PI_DISPATCH_KEYLESS's backstop. Both lists refuse the name upstream (config.mjs

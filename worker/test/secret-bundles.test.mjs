@@ -122,7 +122,7 @@ test("output over 256 KiB in all refuses, never truncated", async () => {
 test("a reserved name refuses naming the variable: the static set, the job's provider key and PI_FORWARD_ENV", async () => {
 	const r = fileBackedResolver();
 	const resolver = makeBundleResolver({ envBundles: { "shop-env": { path: r.script, format: "dotenv" } }, forwardEnv: ["CUSTOM_KEY"] });
-	for (const name of ["GITHUB_TOKEN", "ANTHROPIC_API_KEY", "CUSTOM_KEY", "HOME"]) {
+	for (const name of ["GITHUB_TOKEN", "ANTHROPIC_API_KEY", "CUSTOM_KEY", "HOME", "PI_DISPATCH_ENDPOINT_BENCH_DEVICE_HOST"]) {
 		r.write("shop", `OK=1\n${name}=x\n`);
 		assert.deepEqual(await resolver.resolve(job, binding()), { reserved: name }, name);
 	}

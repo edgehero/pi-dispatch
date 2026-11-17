@@ -296,3 +296,10 @@ test("every server the exclusions cut is named, in the list's order, and a picku
 	assert.deepEqual(mcpRouteCuts(servers, ["b"], excluded), []);
 	assert.equal(mcpRouteProblem(servers, ["b"], excluded), null);
 });
+
+test("makeMcpCheck: a reference to a private endpoint variable is refused as reserved: the worker writes those (#918)", () => {
+	const own = parseOverlayMcp(JSON.stringify({ mcpServers: { bench: { url: "https://mcp.example.com/b", headers: { "X-Device": "${PI_DISPATCH_ENDPOINT_BENCH_DEVICE_HOST}" }, description: "B" } } }));
+	const answer = check({ read: () => own, allowlist: () => ["mcp.example.com"] })(job(["bench"], {}));
+	assert.equal(answer.refused, "mcp-secret-reserved");
+	assert.match(answer.why, /PI_DISPATCH_ENDPOINT_BENCH_DEVICE_HOST/);
+});

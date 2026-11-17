@@ -1,4 +1,5 @@
 import { LOCAL_EVENT_ID_RE } from "./local-event-identity.mjs";
+import { MODEL_ENDPOINT_ID_RE } from "./model-endpoints.mjs";
 import { validateAnswerRules, validateStandingAnswers } from "./answerer.mjs";
 import { validateZeroTouchConfig } from "./question-groups.mjs";
 /**
@@ -50,7 +51,7 @@ import { PROVIDER_STEERING_VARS } from "./provider-steering.mjs";
 import { normalizeWatchSources, normalizeWatchRule, watchDurationMs } from "./watch-contract.mjs";
 import { validateWatchDecision } from "./watch-decision.mjs";
 import { builtinModel } from "./model-catalog.mjs";
-import { CONTAINER_ENV_NAMES, RUNNER_ENV_NAMES } from "./reserved-env.mjs";
+import { CONTAINER_ENV_NAMES, RUNNER_ENV_NAMES, isPrivateEndpointEnvName } from "./reserved-env.mjs";
 import { neededVersion, underDeclared, valueNeededVersion, valueUnderDeclared, versionProblem } from "./store-version.mjs";
 // The wait grammar's two shared halves (issue #230). `afterInstantMs` is imported rather than restated so
 // the loader and the pickup gate cannot disagree about what a legal instant is: a second spelling here is
@@ -332,6 +333,15 @@ export const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
  * Every set is IMPORTED, never retyped, which is the rule `sandbox.test.mjs` keeps for the same reason: a
  * forge added to the table later must not need a second edit here to stay covered.
  */
+/**
+ * Whether `name` is reserved: one of `RESERVED_ENV_NAMES`, or (issue #918) a private endpoint variable, a prefix
+ * whose names the operator's ids decide (`isPrivateEndpointEnvName`). Every check that refuses a reserved name asks
+ * this, never the set alone, so the prefix is refused wherever a single name is.
+ */
+export function isReservedEnvName(name) {
+	return RESERVED_ENV_NAMES.has(name) || isPrivateEndpointEnvName(name);
+}
+
 export const RESERVED_ENV_NAMES = new Set([...MINTED_TOKEN_VARS, ...FORGE_HOST_VARS, ...RECEIVER_ONLY_VARS, ...WORKER_ONLY_SECRET_VARS, ...EGRESS_ENV_VARS, ...CONTAINER_ENV_NAMES, ...RUNNER_ENV_NAMES, ...PROVIDER_STEERING_VARS]);
 
 function isNonEmptyString(value) {
@@ -343,7 +353,7 @@ function isNonEmptyString(value) {
  * `version`, absent meaning 1, which `writeTriggers` owns and writes only when the content needs more than 1, so every
  * file of today's fields stays byte-identical.
  */
-export const TRIGGERS_FILE_VERSION = 6;
+export const TRIGGERS_FILE_VERSION = 7;
 
 /**
  * Each `run` key whose ABSENCE an older build would misread, with the version that introduced it. The raw `run` keys
@@ -355,10 +365,12 @@ export const TRIGGERS_FILE_VERSION = 6;
  * extension or the tool the file takes away, on a clean record.
  *
  * `mayMerge` (issue #908), at 4: an older loader drops the explicit permission and starts a paid job with contradictory standing rules.
+ * `privateEndpoints` (issue #918), at 7: an older loader drops the list and starts a paid job that cannot reach the device its
+ * flow was written against, on a run that records as clean.
  * `idleTimeoutMinutes`, `stallTimeoutMinutes` and `maxMinutes` (issue #888): an older loader drops each and runs the job
  * under the deployment's limits, which for a ceiling the trigger set is a longer run than the file allows.
  */
-export const TRIGGER_RUN_FIELD_VERSIONS = Object.freeze({ excludeExtensions: 2, excludeExtensionTools: 2, idleTimeoutMinutes: 3, stallTimeoutMinutes: 3, maxMinutes: 3, mayMerge: 4, worker: 5, modelSelection: 6 });
+export const TRIGGER_RUN_FIELD_VERSIONS = Object.freeze({ excludeExtensions: 2, excludeExtensionTools: 2, idleTimeoutMinutes: 3, stallTimeoutMinutes: 3, maxMinutes: 3, mayMerge: 4, worker: 5, modelSelection: 6, privateEndpoints: 7 });
 
 /** Each top-level block (beside `triggers`) whose absence an older build would misread, as above. Empty until one does. */
 export const TRIGGERS_BLOCK_VERSIONS = Object.freeze({});
@@ -807,6 +819,7 @@ function normalizeCron(on, run, index, path, state) {
 	const excludeExtensions = validateExcludeExtensions(on, run, `cron trigger "${id}"`, path);
 	const excludeExtensionTools = validateExcludeExtensionTools(on, run, `cron trigger "${id}"`, path);
 	const mcp = validateMcp(on, run, `cron trigger "${id}"`, path, { kind: "local" });
+	const privateEndpoints = validatePrivateEndpoints(on, run, `cron trigger "${id}"`, path);
 	// Validated since #502; before it these three were copied untouched, so `run.provider: 7` loaded.
 	const ref = validateRunModel(on, run, `cron trigger "${id}"`, path);
 	// Issue #505: the portfolio flag. Strictly boolean, the house rule (`run.github`'s reason: a truthy string must not
@@ -821,7 +834,7 @@ function normalizeCron(on, run, index, path, state) {
 	// freeze today's default into every stored repeatable.
 	return {
 		on: { type: "cron", id, pattern },
-		run: { kind: "local", folder: run.folder, ...(worker !== undefined && { worker }), flow: run.flow, task: run.task, provider: ref.provider, model: ref.model, maxTurns: ref.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(excludeExtensions !== undefined && { excludeExtensions }), ...(excludeExtensionTools !== undefined && { excludeExtensionTools }), ...(mcp !== undefined && { mcp }), ...(ref.models !== undefined && { models: ref.models }), ...(ref.fallbackModels !== undefined && { fallbackModels: ref.fallbackModels }), ...(ref.modelSelection !== undefined && { modelSelection: ref.modelSelection }), ...(ref.maxCostUsd !== undefined && { maxCostUsd: ref.maxCostUsd }), ...(ref.idleTimeoutMinutes !== undefined && { idleTimeoutMinutes: ref.idleTimeoutMinutes }), ...(ref.stallTimeoutMinutes !== undefined && { stallTimeoutMinutes: ref.stallTimeoutMinutes }), ...(ref.maxMinutes !== undefined && { maxMinutes: ref.maxMinutes }), ...(portfolio !== undefined && { portfolio }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }) },
+		run: { kind: "local", folder: run.folder, ...(worker !== undefined && { worker }), flow: run.flow, task: run.task, provider: ref.provider, model: ref.model, maxTurns: ref.maxTurns, github: run.github, packages, image, resume, ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(excludeExtensions !== undefined && { excludeExtensions }), ...(excludeExtensionTools !== undefined && { excludeExtensionTools }), ...(mcp !== undefined && { mcp }), ...(privateEndpoints !== undefined && { privateEndpoints }), ...(ref.models !== undefined && { models: ref.models }), ...(ref.fallbackModels !== undefined && { fallbackModels: ref.fallbackModels }), ...(ref.modelSelection !== undefined && { modelSelection: ref.modelSelection }), ...(ref.maxCostUsd !== undefined && { maxCostUsd: ref.maxCostUsd }), ...(ref.idleTimeoutMinutes !== undefined && { idleTimeoutMinutes: ref.idleTimeoutMinutes }), ...(ref.stallTimeoutMinutes !== undefined && { stallTimeoutMinutes: ref.stallTimeoutMinutes }), ...(ref.maxMinutes !== undefined && { maxMinutes: ref.maxMinutes }), ...(portfolio !== undefined && { portfolio }), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }) },
 	};
 }
 
@@ -1542,7 +1555,7 @@ function validateSecrets(run, at, path) {
 		if (name === "__proto__") {
 			throw configError(`${at}: run.secrets key "__proto__" cannot be carried into a container -- it is swallowed by the prototype setter on every object between here and the job, so the resolver would run and the variable would still be unset: ${path}`);
 		}
-		if (RESERVED_ENV_NAMES.has(name)) {
+		if (isReservedEnvName(name)) {
 			// TWO reasons a name can be in here, opposite in direction, and the message asserts NEITHER,
 			// because asserting the wrong one is worse than asserting neither: that is the mistake issue
 			// #309 corrected in the pre-spend gate's message, and #314 widened the set far enough that a
@@ -1730,7 +1743,7 @@ function validateBundleEndpoints(endpoints, at, path) {
 		if (!ENV_NAME.test(name) || name === "__proto__") {
 			throw configError(`${at}: endpoints key ${JSON.stringify(name)} is not an environment variable name (letters, digits and underscore, not starting with a digit): ${path}`);
 		}
-		if (RESERVED_ENV_NAMES.has(name)) {
+		if (isReservedEnvName(name)) {
 			throw configError(`${at}: endpoints key ${JSON.stringify(name)} is reserved: this deployment's own runtime reads or writes it, so a bundle can never carry it: ${path}`);
 		}
 		const entry = endpoints[name];
@@ -2364,6 +2377,76 @@ function validateMcp(on, run, at, path, { kind }) {
 	return [...mcp];
 }
 
+/** The most private endpoints one trigger may name (issue #918). Each is a grant and, with `slots`, a lease at pickup. */
+export const PRIVATE_ENDPOINTS_MAX = 8;
+
+/** The spellings of `run.privateEndpoints` a key is refused for, compared after `mcpKeySkeleton`. `endpoints` is the issue's own. */
+const PRIVATE_ENDPOINTS_NEAR_MISSES = Object.freeze(["privateendpoints", "privateendpoint", "endpoints", "endpoint", "privateendpointids"]);
+
+/**
+ * Whether `key` is refused as a spelling of `run.privateEndpoints` rather than dropped. In plain ASCII, by
+ * `isMcpNearMiss`'s skeleton. Outside it, by position, not by `isMcpNearMiss`'s letter set: a lookalike swaps a letter
+ * for one drawn the same and keeps the length, so a key is one when its letters and digits of any script (everything
+ * else dropped, as the skeleton drops it: a separator, and a zero-width, soft-hyphen or other invisible character that
+ * would otherwise change the length while the key reads the same) have a spelling's length, and every plain letter or
+ * digit sits where that spelling has it. `privateendpoints` holds so many
+ * letters that the letter-set rule would claim a lookalike of another field (`prоvider`, a Cyrillic о, which the model
+ * keys' own rule must name) or a short word in another script (`été`).
+ */
+export function isPrivateEndpointsNearMiss(key) {
+	if (key === "privateEndpoints") return false;
+	if (/^[\x20-\x7E]*$/.test(key)) return PRIVATE_ENDPOINTS_NEAR_MISSES.includes(mcpKeySkeleton(key));
+	const chars = [...key.toLowerCase()].filter((ch) => /[\p{L}\p{N}]/u.test(ch));
+	return PRIVATE_ENDPOINTS_NEAR_MISSES.some((spelling) => spelling.length === chars.length && chars.every((ch, i) => !/[a-z0-9]/.test(ch) || ch === spelling[i]));
+}
+
+/**
+ * `run.privateEndpoints` -- the declared private endpoints this trigger's jobs may reach (issue #918,
+ * `INT-PRIVATE-ENDPOINTS-FILE-CONTRACT`), by id: one host and one TCP port on the operator's network each, a test
+ * device's SSH say, reached through the egress proxy only by a job the worker granted it to.
+ *
+ * IDS ONLY. Where an endpoint is lives in `private-endpoints.json`, the operator's, on each host; this loader is
+ * fs-free, so whether an id is declared is checked at pickup, before anything is spent, where a host that does not
+ * declare it hands the job to one that does, or refuses it. Absent means none: a job reaches no private endpoint unless
+ * its trigger names it. A near miss is refused, `run.mcp`'s sweep and its reason: a dropped list runs the job without
+ * the device its flow was written against while the file reads as though it named it.
+ *
+ * A GRANT, unlike the narrowing fields: what it adds a job can reach. So the worker checks the live file again before
+ * each attempt (a trigger that stops naming an id withdraws it at the next start), and no model-callable tool may write
+ * it (`wideningFieldRefusal`).
+ */
+function validatePrivateEndpoints(on, run, at, path) {
+	for (const [label, source, exactIsLegal] of [
+		["run", run, true],
+		["on", on, false],
+	]) {
+		for (const key of Object.keys(source ?? {})) {
+			if (exactIsLegal ? isPrivateEndpointsNearMiss(key) : key === "privateEndpoints" || isPrivateEndpointsNearMiss(key)) {
+				if (!/^[\x20-\x7E]*$/.test(key)) {
+					throw configError(`${at}: ${label}.${JSON.stringify(key)} is not a field: a key outside plain ASCII with no plain letter other than run.privateEndpoints' can be drawn exactly like it, which the loader would drop while the file reads as though it named endpoints. Write field names in plain ASCII: ${path}`);
+				}
+				throw configError(`${at}: ${label}.${key} is not a field -- did you mean run.privateEndpoints? A list of private endpoints the loader drops runs the job without them while the file reads as though it named them, so a near miss is refused rather than dropped: ${path}`);
+			}
+		}
+	}
+	const ids = run?.privateEndpoints;
+	if (ids === undefined) return undefined;
+	if (!Array.isArray(ids) || ids.length === 0) {
+		throw configError(`${at}: run.privateEndpoints must be a non-empty array of ids from private-endpoints.json when present (got ${JSON.stringify(ids)}); leave it out for none: ${path}`);
+	}
+	if (ids.length > PRIVATE_ENDPOINTS_MAX) throw configError(`${at}: run.privateEndpoints names ${ids.length} endpoints, more than ${PRIVATE_ENDPOINTS_MAX}: ${path}`);
+	const seen = new Set();
+	for (let i = 0; i < ids.length; i++) {
+		const id = ids[i];
+		if (typeof id !== "string" || !MODEL_ENDPOINT_ID_RE.test(id)) {
+			throw configError(`${at}: run.privateEndpoints[${i}] must be the id of an endpoint in private-endpoints.json: 1 to 32 of a-z, 0-9 and - (got ${JSON.stringify(id)}): ${path}`);
+		}
+		if (seen.has(id)) throw configError(`${at}: run.privateEndpoints names ${JSON.stringify(id)} twice: ${path}`);
+		seen.add(id);
+	}
+	return [...ids];
+}
+
 /**
  * `run.waitFor` -- the conditions that must all clear before this trigger's job starts (issue #230).
  *
@@ -2530,10 +2613,11 @@ function normalizeLabel(on, run, index, path) {
 	const excludeExtensions = validateExcludeExtensions(on, run, at, path);
 	const excludeExtensionTools = validateExcludeExtensionTools(on, run, at, path);
 	const mcp = validateMcp(on, run, at, path, { kind: run.kind });
+	const privateEndpoints = validatePrivateEndpoints(on, run, at, path);
 	const ref = validateRunModel(on, run, at, path);
 	return {
 		on: { type: "label", any: predicate.any, all: predicate.all, none: predicate.none },
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...validateApprovalConfig(run), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(run.mayMerge === true && { mayMerge: true }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(excludeExtensions !== undefined && { excludeExtensions }), ...(excludeExtensionTools !== undefined && { excludeExtensionTools }), ...(mcp !== undefined && { mcp }), ...ref },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...validateApprovalConfig(run), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(run.mayMerge === true && { mayMerge: true }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(excludeExtensions !== undefined && { excludeExtensions }), ...(excludeExtensionTools !== undefined && { excludeExtensionTools }), ...(mcp !== undefined && { mcp }), ...(privateEndpoints !== undefined && { privateEndpoints }), ...ref },
 	};
 }
 
@@ -2580,10 +2664,11 @@ function normalizeComment(on, run, index, path, state) {
 	const excludeExtensions = validateExcludeExtensions(on, run, at, path);
 	const excludeExtensionTools = validateExcludeExtensionTools(on, run, at, path);
 	const mcp = validateMcp(on, run, at, path, { kind: run.kind });
+	const privateEndpoints = validatePrivateEndpoints(on, run, at, path);
 	const ref = validateRunModel(on, run, at, path);
 	return {
 		on: { type: "comment", phrase: on.phrase },
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...validateApprovalConfig(run), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(run.mayMerge === true && { mayMerge: true }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(excludeExtensions !== undefined && { excludeExtensions }), ...(excludeExtensionTools !== undefined && { excludeExtensionTools }), ...(mcp !== undefined && { mcp }), ...ref },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...validateApprovalConfig(run), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(run.mayMerge === true && { mayMerge: true }), ...(repository !== undefined && { repository }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(excludeExtensions !== undefined && { excludeExtensions }), ...(excludeExtensionTools !== undefined && { excludeExtensionTools }), ...(mcp !== undefined && { mcp }), ...(privateEndpoints !== undefined && { privateEndpoints }), ...ref },
 	};
 }
 
@@ -2657,6 +2742,7 @@ function normalizeIssue(on, run, index, path) {
 	const excludeExtensions = validateExcludeExtensions(on, run, at, path);
 	const excludeExtensionTools = validateExcludeExtensionTools(on, run, at, path);
 	const mcp = validateMcp(on, run, at, path, { kind: run.kind });
+	const privateEndpoints = validatePrivateEndpoints(on, run, at, path);
 	const ref = validateRunModel(on, run, at, path);
 	return {
 		on: {
@@ -2667,7 +2753,7 @@ function normalizeIssue(on, run, index, path) {
 			...(number !== undefined && { number }),
 			...(once !== undefined && { once }),
 		},
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...validateApprovalConfig(run), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(run.mayMerge === true && { mayMerge: true }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(excludeExtensions !== undefined && { excludeExtensions }), ...(excludeExtensionTools !== undefined && { excludeExtensionTools }), ...(mcp !== undefined && { mcp }), ...ref },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...validateApprovalConfig(run), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(run.mayMerge === true && { mayMerge: true }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(excludeExtensions !== undefined && { excludeExtensions }), ...(excludeExtensionTools !== undefined && { excludeExtensionTools }), ...(mcp !== undefined && { mcp }), ...(privateEndpoints !== undefined && { privateEndpoints }), ...ref },
 	};
 }
 
@@ -2752,6 +2838,7 @@ function normalizePullRequest(on, run, index, path) {
 	const excludeExtensions = validateExcludeExtensions(on, run, at, path);
 	const excludeExtensionTools = validateExcludeExtensionTools(on, run, at, path);
 	const mcp = validateMcp(on, run, at, path, { kind: run.kind });
+	const privateEndpoints = validatePrivateEndpoints(on, run, at, path);
 	const ref = validateRunModel(on, run, at, path);
 	return {
 		on: {
@@ -2767,7 +2854,7 @@ function normalizePullRequest(on, run, index, path) {
 			...(number !== undefined && { number }),
 			...(once !== undefined && { once }),
 		},
-		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...validateApprovalConfig(run), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(run.mayMerge === true && { mayMerge: true }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(excludeExtensions !== undefined && { excludeExtensions }), ...(excludeExtensionTools !== undefined && { excludeExtensionTools }), ...(mcp !== undefined && { mcp }), ...ref },
+		run: { kind: run.kind, flow: run.flow, packages, image, resume, replicas, ...(awaitInput !== undefined && { awaitInput }), ...validateApprovalConfig(run), ...(progress !== undefined && { progress }), ...(statusComment !== undefined && { statusComment }), ...(recover !== undefined && { recover }), ...(steer !== undefined && { steer }), ...(command !== undefined && { command }), ...(skillsDir !== undefined && { skillsDir }), ...(instructions !== undefined && { instructions }), ...(run.mayMerge === true && { mayMerge: true }), ...(secrets !== undefined && { secrets }), ...(secretsProfile !== undefined && { secretsProfile }), ...(secretBundle !== undefined && { secretBundle }), ...(waitFor !== undefined && { waitFor }), ...(backend !== undefined && { backend }), ...(excludeTools !== undefined && { excludeTools }), ...(excludeExtensions !== undefined && { excludeExtensions }), ...(excludeExtensionTools !== undefined && { excludeExtensionTools }), ...(mcp !== undefined && { mcp }), ...(privateEndpoints !== undefined && { privateEndpoints }), ...ref },
 	};
 }
 

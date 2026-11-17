@@ -348,10 +348,10 @@ test("the expect a retry or remove carries is checked before anything is read: a
 // ---- re-run ----
 
 /** The label trigger a forge run in these tests matched (index 0), with the run fields a re-run must take from the file. */
-const LABEL_RUN = { kind: "github", flow: "fix", mayMerge: true, secretsProfile: "prod", secrets: { TOKEN: "op://x" }, maxCostUsd: "1.5", model: "claude-sonnet-5-5", provider: "anthropic", image: "pi-job:v1", excludeExtensions: ["pi-lint"], excludeExtensionTools: ["lint_run"] };
+const LABEL_RUN = { kind: "github", flow: "fix", mayMerge: true, secretsProfile: "prod", secrets: { TOKEN: "op://x" }, maxCostUsd: "1.5", model: "claude-sonnet-5-5", provider: "anthropic", image: "pi-job:v1", excludeExtensions: ["pi-lint"], excludeExtensionTools: ["lint_run"], privateEndpoints: ["bench-device"] };
 function forgeTriggers(path, entries = [{ on: { type: "label", any: ["pi"] }, run: LABEL_RUN }]) {
-  // Version 2 for the two exclusions, which a re-run takes from the file too (issue #800).
-  writeFileSync(path, JSON.stringify({ version: 4, triggers: entries }));
+  // Version 2 for the two exclusions, which a re-run takes from the file too (issue #800); 7 for the private endpoints (#918).
+  writeFileSync(path, JSON.stringify({ version: 7, triggers: entries }));
 }
 
 test("planRerun of a forge run: the where from retained data, the run fields from the trigger now, a fresh console delivery id, routed like the receiver; the window and expiry refuse by name", live, async () => {
@@ -374,7 +374,7 @@ test("planRerun of a forge run: the where from retained data, the run fields fro
     assert.equal(planned.plan.kind, "forge", JSON.stringify(planned));
     assert.equal(planned.plan.deliveryId, "console-abababababababab");
     assert.equal(planned.plan.job.mayMerge, true);
-    assert.equal(planned.plan.job.mayMergePolicy, mergePolicyDigest(parseTriggers(JSON.stringify({ version: 4, triggers: [{ on: { type: "label", any: ["pi"] }, run: LABEL_RUN }] }), "/t")[0]));
+    assert.equal(planned.plan.job.mayMergePolicy, mergePolicyDigest(parseTriggers(JSON.stringify({ version: 7, triggers: [{ on: { type: "label", any: ["pi"] }, run: LABEL_RUN }] }), "/t")[0]));
     assert.equal(planned.plan.queue, "pi-jobs@mini1", "a secret profile only mini1 serves: routed to its queue, as the receiver would");
     // An unchanged trigger: the re-run is the receiver's job for the same delivery, but for the delivery id.
     const cfg = {};
@@ -504,6 +504,9 @@ test("a forge re-run takes its authority from the trigger NOW: deleted, replaced
     forgeTriggers(triggersPath, [review, { on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix", maxCostUsd: "0.25" } }]);
     const overridden = await planRerun({ url: URL12, logsDir, jobId: "gh-auth-2", triggersPath, env: {} });
     assert.deepEqual([overridden.plan?.job.flow, overridden.plan?.job.maxCostUsd], ["review", "0.25"], "the override's flow, the comment trigger's fields");
+    // The phrase it answered changed (issue #918's review): another comment trigger's authority, refused here by name.
+    forgeTriggers(triggersPath, [review, { on: { type: "comment", phrase: "@bot" }, run: { kind: "github", flow: "fix" } }]);
+    assert.match((await planRerun({ url: URL12, logsDir, jobId: "gh-auth-2", triggersPath, env: {} })).refusal, /changed or is gone; .*no longer answers the phrase it matched/);
     forgeTriggers(triggersPath, [review, { on: { type: "comment", phrase: "@pi" }, run: { kind: "github", command: "triage" } }]);
     assert.match((await planRerun({ url: URL12, logsDir, jobId: "gh-auth-2", triggersPath, env: {} })).refusal, /changed or is gone; .*runs a command now/);
     forgeTriggers(triggersPath, [{ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix" } }, cron]);
@@ -670,10 +673,10 @@ function parkedTriggers(path, kind) {
   writeFileSync(
     path,
     JSON.stringify({
-      version: 4,
+      version: 7,
       triggers: [
         { on: { type: "label", any: ["pi"] }, run: { kind, flow: "fix", resume: true, awaitInput: true } },
-        { on: { type: "comment", phrase: "@pi" }, run: { kind, flow: "fix", mayMerge: true, resume: true, awaitInput: true, progress: true, statusComment: true, recover: true, steer: true, model: "claude-sonnet-5-5", provider: "anthropic", maxCostUsd: "1.25", instructions: "be brief", excludeExtensions: ["pi-lint"], excludeExtensionTools: ["lint_run"] } },
+        { on: { type: "comment", phrase: "@pi" }, run: { kind, flow: "fix", mayMerge: true, resume: true, awaitInput: true, progress: true, statusComment: true, recover: true, steer: true, model: "claude-sonnet-5-5", provider: "anthropic", maxCostUsd: "1.25", instructions: "be brief", excludeExtensions: ["pi-lint"], excludeExtensionTools: ["lint_run"], privateEndpoints: ["bench-device"] } },
       ],
     }),
   );

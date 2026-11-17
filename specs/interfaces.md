@@ -2550,7 +2550,14 @@ a sandbox not confirmed gone marks the run's result `lingering`, its exit code u
     `models.json` key is `"apiKey": "$PI_DISPATCH_KEYLESS"` (`INT-MODEL-ENDPOINTS-FILE-CONTRACT`, Keyless). It takes
     the provider credential's place in the map, so a keyless job carries no key and every other job lacks the
     variable. Only the worker may set it: a trigger's `run.secrets` cannot bind it, and
-    `PI_FORWARD_ENV` refuses it at config load whatever the egress policy; `PI_ALLOWED_MODELS` (issue #502),
+    `PI_FORWARD_ENV` refuses it at config load whatever the egress policy; `PI_DISPATCH_ENDPOINT_<ID>_HOST` and
+    `PI_DISPATCH_ENDPOINT_<ID>_PORT` (issue #918, `REQ-PRIVATE-ENDPOINTS`), one pair per private endpoint the
+    processor granted the job, `<ID>` the id upper-cased with `-` as `_` (one-to-one under the id grammar), the host
+    as declared (an IPv6 literal bracketed) and the port in decimal; a job granted nothing has none. The prefix
+    `PI_DISPATCH_ENDPOINT_` is reserved like a single reserved name, so no forwarded variable, `run.secrets` key or
+    bundle variable can carry one (`isReservedEnvName`, `isPrivateEndpointEnvName`), and it is non-secret
+    (`isNonSecretEnvKey`): never redacted from a transcript, refused by the checkpoint scanner or made a credential
+    placeholder; `PI_ALLOWED_MODELS` (issue #502),
     the job's EFFECTIVE allowed-model list (`INT-TRIGGERS-FILE-CONTRACT`'s `run.models`, else the
     deployment's own `PI_ALLOWED_MODELS`), comma-joined `provider/model` entries verbatim, which the runner
     splits at each entry's first `/`; emitted ONLY when the list is non-empty, never as an empty string,
@@ -3218,8 +3225,18 @@ contract governs the argv of one container, this governs the estate that argv jo
     the declared name when it resolves to this host's loopback, `allow CONNECT <host> <port> <grant>`, and
     `deny <host> <port>` with no method, so the pair is refused to every request that holds no grant, a plain one
     included, before any later allow is read. A grant is a file the worker writes, named after the proxy's own
-    address on one job's network; this part (#918, part 1) ships the include, the helper and the mounts, and writes
-    no grant, so every private pair is refused to every job.
+    address on one job's network (#918, part 2; below).
+    - **The grant** (`worker/src/endpoint-grants.mjs`, `DES-PRIVATE-ENDPOINT-GRANTS`). One file per address the proxy
+      has on a granted job's network, in this runtime's grant folder, named the address in squid's spelling (IPv6
+      compressed), holding `network <name>` and then one granted id per line, every line ended, mode 0644, written by
+      exclusive temp file and rename. Written after the proxy joins the job's network and before the container is
+      created, then read back by `<bin> exec -i --user proxy <proxy> /etc/pi-dispatch/private/endpoint-grant`, one
+      `<address> <id>` line per pair, every answer `OK`. Before that, every grant in the new network's subnets is
+      deleted, for an ungranted job too whenever the folder holds one. Removed before the network on every path that
+      removes it; swept at boot for every `network` line no live network of that runtime carries. A failure at
+      attach removes what was written and the network and is `container-never-started`, retried with nothing
+      spent. Only the worker writes one, only for a job whose trigger's `run.privateEndpoints` the processor
+      confirmed, and on a venue with this proxy (`local`, `podman`).
     - **Mounted everywhere the proxy starts**, read-only, `z`, beside the other three: the deployment folder's
       `egress-private/` FOLDER at `/etc/pi-dispatch/private` (the rendered include and the helper), and THIS
       runtime's grant folder at `/etc/pi-dispatch/grants` (`egress-grants/local/` for the Docker proxy,
@@ -4738,8 +4755,8 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   `DES-STORE-VERSION-WHEN-NEEDED`). An integer, absent meaning 1; `TRIGGERS_FILE_VERSION` (2 since issue #800, for
   `run.excludeExtensions` and `run.excludeExtensionTools`; 3 since issue #888, for `run.idleTimeoutMinutes`,
   `run.stallTimeoutMinutes` and `run.maxMinutes`; 4 since #908 for `run.mayMerge`; 5 since #911 for
-  local event `on.forge`, `on.debounceSeconds`, `on.reviewAuthors` and `run.worker`) is the highest this
-  build reads. The writer OWNS it: `writeTriggers` writes `triggersFileVersionFor` of the result, the version the entries' raw
+  local event `on.forge`, `on.debounceSeconds`, `on.reviewAuthors` and `run.worker`; 6 since #922 for
+  `run.modelSelection`; 7 since #918 for `run.privateEndpoints`) is the highest this build reads. The writer OWNS it: `writeTriggers` writes `triggersFileVersionFor` of the result, the version the entries' raw
   `run` keys (`TRIGGER_RUN_FIELD_VERSIONS`), the top-level blocks (`TRIGGERS_BLOCK_VERSIONS`) and the VALUES of an
   entry's fields, of its `run` keys and of each block (`TRIGGER_VALUE_VERSIONS`, `TRIGGER_RUN_VALUE_VERSIONS`,
   `TRIGGERS_BLOCK_VALUE_VERSIONS`, `field -> (value) => version`, a block's rule handed the whole block) need, all five
@@ -4801,9 +4818,10 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   broken, not newer: JSON keeps the last value, so the file that was reviewed and the file that runs are not the same
   file"); a repeated key whose version does not read newer is shown as leniently as before. `dataVersion` is the same
   rule for a queued job's data (`worker/src/job-data-version.mjs`: `JOB_DATA_VERSION` 3 since #800, 4 since #888,
-  5 since #908 and 6 since #911; `JOB_DATA_FIELD_VERSIONS` names `packageCanary` at 2,
+  5 since #908, 6 since #911, 7 since #922 and 8 since #918; `JOB_DATA_FIELD_VERSIONS` names `packageCanary` at 2,
   `excludeExtensions` and `excludeExtensionTools` at 3, `idleTimeoutMinutes`, `stallTimeoutMinutes` and
-  `maxMinutes` at 4, `mayMerge` and `mayMergePolicy` at 5, and `localEvent` and `worker` at 6, and
+  `maxMinutes` at 4, `mayMerge` and `mayMergePolicy` at 5, `localEvent` and `worker` at 6, `modelSelection` and
+  `modelSelectionGeneration` at 7, and `privateEndpoints` at 8, and
   `JOB_DATA_VALUE_VERSIONS`, the values of its top-level fields, frozen and empty). It is a JOB-level field, never
   inside `trigger`, so it never reaches `/job/event.json` or any other `/job` input (`INT-CONTAINER-JOB-INPUTS`), and
   every builder stamps it (`forgeJobOf`, `addLocalJob`, the cron template and the receiver's `fallbackJobOf`) only when
@@ -4992,6 +5010,28 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   `TRIGGER_RUN_FIELD_VERSIONS.mayMerge` is 4; `JOB_DATA_FIELD_VERSIONS.mayMerge` and
   `JOB_DATA_FIELD_VERSIONS.mayMergePolicy` are 5. Existing lower-version data remains valid when the fields
   are absent. The image must declare `mergePolicy` (`INT-CONTAINER-RUNTIME-CONTRACT`).
+- **`run.privateEndpoints`** (issue #918, `REQ-PRIVATE-ENDPOINTS`): 1 to 8 (`PRIVATE_ENDPOINTS_MAX`) unique ids of
+  `INT-PRIVATE-ENDPOINTS-FILE-CONTRACT`'s grammar, on a forge, cron or local event trigger, never a watch rule (whose
+  run keys are a closed list). Anything else is refused: an empty list, a non-array, a malformed or repeated id. So is
+  a near miss under `run` or `on` (`isPrivateEndpointsNearMiss`: `privateEndpoint`, `endpoints`, `endpoint`,
+  `privateEndpointIds` after `mcpKeySkeleton`, and a key outside plain ASCII whose letters and digits of any script
+  (anything else dropped, an invisible character included) have a spelling's length with every plain letter and digit
+  where that spelling has it, so a lookalike of another field is left to that field's rule), since a dropped list runs a job without the device while the file reads as though it named
+  one; `on.privateEndpoints` is not a field. Whether each id is declared is not judged here: the declaration is per
+  host, and the worker judges it at the job. The receiver's filters and the console's job builder carry it to the
+  job as written, and a cron or local event job takes it from the entry (`localRunData`).
+  `TRIGGER_RUN_FIELD_VERSIONS.privateEndpoints` is 7 and `JOB_DATA_FIELD_VERSIONS.privateEndpoints` is 8; it is an
+  `AUTHORED_NARROWING_FIELDS` row (a forge job that arrived without the list is `trigger-skew`, except the two shapes the
+  skew check's identity reads as "run" for every row, a GitLab merge request job a label matched and a comment job
+  routed to another trigger's flow; a local event job whose definition changed is `local-event-trigger-changed`; a
+  cron run queued before the edit runs without it), and the
+  worker confirms the grant against the live file before every attempt (`makeCheckPrivateEndpoints`). The entry must be
+  the trigger that queued the job, never just the one at its position: a forge job's at its matched index with its
+  kind, `on.type`, flow or command and the action, label or phrase it matched (`makeCheckMergePolicy`'s identity); a
+  local event job's by its `on.id` and `on.forge` with its folder, command and worker; a cron or manual job's among
+  the cron entries by `on.id` with its folder, flow, command and task. A one-shot this same queue job spent is read as
+  before its disarm. That entry must still name each id the job carries.
+  Model-callable tools cannot set it, under its name or a near miss, at any depth (`wideningFieldRefusal`).
 - **`run.kind` selects the forge; `on.type` is shared.** A label is a label and a comment is a comment on
   any forge, so the trigger types and their `{any, all, none}` predicates are identical. The **action**
   vocabulary is not, and is validated against the vocabulary of whichever forge the entry names:
@@ -6315,7 +6355,7 @@ validator rather than a second copy of it.
     "flow":    "<flow name>" | null,
     "startedAt": "<ISO-8601>", "endedAt": "<ISO-8601>",
     "outcome":   "completed" | "policy" | "failed",
-    "reason":    "<fixed enum: worker-abort|local-event-config-invalid|local-event-invalid|local-event-superseded|local-event-trigger-changed|local-event-unavailable|local-event-wrong-worker|local-folder-changed|merge-policy-invalid|merge-policy-unavailable|merge-policy-changed|job-image-merge-policy-unsupported|operator-cancel|agent-cancel|idle|stalled|max-minutes|credential-expired|package-canary-invalid|package-canary-packages-off|package-canary-excluded|exclude-tool-not-loaded|job-image-load-exclusions-unsupported|package-canary-resume|package-canary-not-staged|package-canary-adapter|package-canary-version-missing|package-canary-refused|job-image-package-canary-unsupported|answer-draft-refused|answer-draft-config-changed|answer-draft-unavailable|job-image-answer-draft-unsupported|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|portfolio-snapshot-oversize|local-folder-escaped|local-folder-holds-envelope|local-folder-holds-subscription-auth|local-folder-is-sandbox|local-folder-project-changed|unprotected-branch|branch-protection-unreadable|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|model-roles-invalid|model-roles-shadowed|model-role-unknown|model-role-provider-conflict|model-agents-invalid|job-image-model-roles-unsupported|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-model-failover-unsupported|job-image-cost-cap-unsupported|model-unknown|model-failover-no-candidate|model-selection-no-candidate|model-selection-state-unavailable|model-selection-policy-changed|model-selection-continuation-unavailable|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|secret-bundle-profile-unknown|secret-bundle-profile-ambiguous|secret-bundle-resume|secret-bundle-trigger-changed|openshell-bundle-endpoint-not-allowed|openshell-bundle-endpoint-shared|openshell-bundle-endpoint-unknown|openshell-bundle-name-taken|openshell-bundle-unpassable|openshell-bundle-image-too-old|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|oom-killed|job-size-exceeds-host|job-size-exceeds-share|job-image-mcp-unsupported|job-image-forge-mcp-unsupported|mcp-list-invalid|mcp-config-invalid|mcp-server-unknown|mcp-secret-unmapped|mcp-secret-reserved|mcp-excluded|mcp-egress-unreachable|mcp-package-runner|mcp-unavailable|mcp-config-mismatch|mcp-secret-missing|mcp-command-missing|mcp-shadowed|await-input-shadowed|await-input-without-session|job-image-await-input-unsupported|awaiting-input|not-parked|report-progress-shadowed|steer-inbox-missing|steer-no-exit-key|job-image-progress-unsupported|job-image-recover-unsupported|job-image-steer-unsupported|job-image-sandbox-layout-unsupported|job-image-observable-runner-unsupported|venue-local-folders-unsupported|openshell-gateway-not-local|openshell-global-policy|openshell-landlock-missing|openshell-recover-unsupported|openshell-credential-reads-value|openshell-gateway-untested|openshell-egress-untranslatable|openshell-bind-mounts-disabled|openshell-ptrace-scope-unprotected|openshell-ptrace-scope-too-strict|openshell-bind-sandbox-lingering|recover-store-unset|recovery-enqueued|recovery-host-lost|recovery-cap|recovery-checkpoint-absent|recovery-superseded|recovery-unsafe-extensions|recovery-failed|container-infra-exit|container-exit-unknown|worker-error|awaiting-approval|approval-config-invalid|approval-without-session|approval-shadowed|approval-decision-invalid|approval-author-missing|approval-expired|approval-expiry-invalid|approval-host-mismatch|approval-job-id-missing|approval-park-invalid|approval-pending|approval-policy-changed|approval-policy-unavailable|approval-request-conflict|approval-request-stale|approval-request-unbound|approval-state-conflict|approval-state-unavailable|approval-store-unavailable|approval-finish-unavailable|approval-session-not-saved|approval-session-unavailable|job-image-approval-gates-unsupported|job-image-approval-auth-unsupported|...|question-group-unavailable|question-group-config-changed|question-group-source-expired|question-group-source-unavailable|question-group-source-oversize|question-group-candidates-expired|question-group-limit|question-group-stale|question-group-refused|question-group-unanswered|question-group-output-invalid|job-image-question-grouping-unsupported|watch-unavailable|watch-query-credential-missing|watch-cooldown|watch-cap|watch-unmatched|watch-ignored|decide-refused|decide-unanswered|watch-reference-invalid|watch-config-changed|watch-window-pending|watch-threshold|watch-evidence-expired|watch-issue-target-missing|watch-trace-unavailable|watch-output-unavailable|watch-project-mismatch|watch-config-invalid|watch-issue-cap|watch-issue-uncertain|watch-issue-close-policy-changed|watch-issue-close-raced|watch-issue-close-uncertain|job-image-watch-unsupported|watch-board-invalid|watch-board-oversize|auth-policy-invalid|auth-adapter-unsupported|auth-adapter-unapproved|auth-owner-host|auth-adapter-unavailable|auth-adapter-conflicting|auth-capability-unsupported|auth-endpoint-unsupported|auth-reauth-required|auth-refresh-uncertain|auth-store-unavailable|auth-snapshot-too-short|auth-route-unbounded|auth-venue-unsupported|auth-adapter-disabled|auth-credit-cap-required|auth-binding-changed|auth-mixed-billing|subscription-extra-usage|auth-model-unverified|auth-usage-unavailable|job-image-subscription-auth-unsupported|subscription-quota|subscription-stale-binding|subscription-observation-required>" | null,
+    "reason":    "<fixed enum: worker-abort|local-event-config-invalid|local-event-invalid|local-event-superseded|local-event-trigger-changed|local-event-unavailable|local-event-wrong-worker|local-folder-changed|merge-policy-invalid|merge-policy-unavailable|merge-policy-changed|job-image-merge-policy-unsupported|private-endpoint-withdrawn|private-endpoint-unknown|private-endpoint-proxy-outdated|private-endpoint-venue-unsupported|operator-cancel|agent-cancel|idle|stalled|max-minutes|credential-expired|package-canary-invalid|package-canary-packages-off|package-canary-excluded|exclude-tool-not-loaded|job-image-load-exclusions-unsupported|package-canary-resume|package-canary-not-staged|package-canary-adapter|package-canary-version-missing|package-canary-refused|job-image-package-canary-unsupported|answer-draft-refused|answer-draft-config-changed|answer-draft-unavailable|job-image-answer-draft-unsupported|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|portfolio-snapshot-oversize|local-folder-escaped|local-folder-holds-envelope|local-folder-holds-subscription-auth|local-folder-is-sandbox|local-folder-project-changed|unprotected-branch|branch-protection-unreadable|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|model-roles-invalid|model-roles-shadowed|model-role-unknown|model-role-provider-conflict|model-agents-invalid|job-image-model-roles-unsupported|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-model-failover-unsupported|job-image-cost-cap-unsupported|model-unknown|model-failover-no-candidate|model-selection-no-candidate|model-selection-state-unavailable|model-selection-policy-changed|model-selection-continuation-unavailable|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|secret-bundle-profile-unknown|secret-bundle-profile-ambiguous|secret-bundle-resume|secret-bundle-trigger-changed|openshell-bundle-endpoint-not-allowed|openshell-bundle-endpoint-shared|openshell-bundle-endpoint-unknown|openshell-bundle-name-taken|openshell-bundle-unpassable|openshell-bundle-image-too-old|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|oom-killed|job-size-exceeds-host|job-size-exceeds-share|job-image-mcp-unsupported|job-image-forge-mcp-unsupported|mcp-list-invalid|mcp-config-invalid|mcp-server-unknown|mcp-secret-unmapped|mcp-secret-reserved|mcp-excluded|mcp-egress-unreachable|mcp-package-runner|mcp-unavailable|mcp-config-mismatch|mcp-secret-missing|mcp-command-missing|mcp-shadowed|await-input-shadowed|await-input-without-session|job-image-await-input-unsupported|awaiting-input|not-parked|report-progress-shadowed|steer-inbox-missing|steer-no-exit-key|job-image-progress-unsupported|job-image-recover-unsupported|job-image-steer-unsupported|job-image-sandbox-layout-unsupported|job-image-observable-runner-unsupported|venue-local-folders-unsupported|openshell-gateway-not-local|openshell-global-policy|openshell-landlock-missing|openshell-recover-unsupported|openshell-credential-reads-value|openshell-gateway-untested|openshell-egress-untranslatable|openshell-bind-mounts-disabled|openshell-ptrace-scope-unprotected|openshell-ptrace-scope-too-strict|openshell-bind-sandbox-lingering|recover-store-unset|recovery-enqueued|recovery-host-lost|recovery-cap|recovery-checkpoint-absent|recovery-superseded|recovery-unsafe-extensions|recovery-failed|container-infra-exit|container-exit-unknown|worker-error|awaiting-approval|approval-config-invalid|approval-without-session|approval-shadowed|approval-decision-invalid|approval-author-missing|approval-expired|approval-expiry-invalid|approval-host-mismatch|approval-job-id-missing|approval-park-invalid|approval-pending|approval-policy-changed|approval-policy-unavailable|approval-request-conflict|approval-request-stale|approval-request-unbound|approval-state-conflict|approval-state-unavailable|approval-store-unavailable|approval-finish-unavailable|approval-session-not-saved|approval-session-unavailable|job-image-approval-gates-unsupported|job-image-approval-auth-unsupported|...|question-group-unavailable|question-group-config-changed|question-group-source-expired|question-group-source-unavailable|question-group-source-oversize|question-group-candidates-expired|question-group-limit|question-group-stale|question-group-refused|question-group-unanswered|question-group-output-invalid|job-image-question-grouping-unsupported|watch-unavailable|watch-query-credential-missing|watch-cooldown|watch-cap|watch-unmatched|watch-ignored|decide-refused|decide-unanswered|watch-reference-invalid|watch-config-changed|watch-window-pending|watch-threshold|watch-evidence-expired|watch-issue-target-missing|watch-trace-unavailable|watch-output-unavailable|watch-project-mismatch|watch-config-invalid|watch-issue-cap|watch-issue-uncertain|watch-issue-close-policy-changed|watch-issue-close-raced|watch-issue-close-uncertain|job-image-watch-unsupported|watch-board-invalid|watch-board-oversize|auth-policy-invalid|auth-adapter-unsupported|auth-adapter-unapproved|auth-owner-host|auth-adapter-unavailable|auth-adapter-conflicting|auth-capability-unsupported|auth-endpoint-unsupported|auth-reauth-required|auth-refresh-uncertain|auth-store-unavailable|auth-snapshot-too-short|auth-route-unbounded|auth-venue-unsupported|auth-adapter-disabled|auth-credit-cap-required|auth-binding-changed|auth-mixed-billing|subscription-extra-usage|auth-model-unverified|auth-usage-unavailable|job-image-subscription-auth-unsupported|subscription-quota|subscription-stale-binding|subscription-observation-required>" | null,
     "exitCode":  <int> | null,
     "turns":     <int> | null,
     "tokens":    { "input": <int>, "output": <int>, "total": <int>, "cost": <number>,          // per-job usage totals; null when the container died before the exit line
@@ -6405,6 +6445,8 @@ validator rather than a second copy of it.
                     "ruleHostCount": <int>, "providers": <int>, "placeholders": <int> }, // venues only; operator-config names, counts
     "secretsProfile"?: "<profile name>",                                               // issue #712: CONDITIONAL, run.secrets armed
     "loaded"?: { "v": 1, "runner": "reported" | "absent" | "invalid" | "cut", ... },   // issue #800: CONDITIONAL, what the run loaded; below
+    "privateEndpoints"?: { "ids": ["<endpoint id>", ...],                              // issue #918: CONDITIONAL, the private endpoints
+                           "basis": "proxy" | "openshell" | "unenforced" },            // its container was granted; below
     "jobCreatedAt"?: "<ISO 8601>",                                                     // issue #811: CONDITIONAL, when the job was created; below
     "limits"?: { "idleMinutes", "stallMinutes", "maxMinutes", "basis", ... },        // issue #888: CONDITIONAL, the limits it ran under; below
     "v":         <int> }                                                              // issue #761: the record's version, 1, ALWAYS the last key
@@ -7174,6 +7216,14 @@ validator rather than a second copy of it.
   model. `admin/test/run-model-bolt.test.mjs` holds the two rules together over the pinned catalog and over ids
   generated from the worker rule. A job queued before the upgrade with an id outside the shape is the one exception,
   and it ends as it did before.
+  **`privateEndpoints` (issue #918, `REQ-PRIVATE-ENDPOINTS`) is what the run's container was granted**:
+  `{ ids, basis }`, the private endpoint ids the processor confirmed against the live triggers file and this host's
+  declaration, sorted, and what enforced the grant: `proxy` (the egress proxy, on `local` and `podman`), `openshell`
+  (that venue's per-job policy, once it carries one) or `unenforced` (`PI_EGRESS=0`: no proxy stood between any job
+  and the device). CONDITIONAL, after `localEvent` and before `jobCreatedAt`, set only when the container was about to
+  start with a grant, so a refused job and every other record are byte-identical to what they were. Operator ids
+  only, never a host or a port; a value outside the shape (1 to 8 unique ids of `[a-z0-9-]{1,32}`, a known basis)
+  leaves the key out (`recordedPrivateEndpoints`). Adding it leaves `v` at 1.
   **`jobCreatedAt` (issue #811) is when the job under this id was created**: BullMQ's `job.timestamp` (the add's
   moment, kept across every retry, stall and deferral of the job, and never moved by its delay) as an ISO 8601 string
   (`jobCreatedAtOf`, `worker/src/run-history.mjs`). A CONDITIONAL key, TAIL position after `loaded` and the last before
@@ -10054,10 +10104,16 @@ that only the jobs of the triggers naming them may reach through the egress prox
 
 - **Status**: the file, its parser and loader, the rule across it and `model-endpoints.json`, the include's render,
   the shipped grant helper, the proxy's two folder mounts and the worker's boot refusals are LANDED (#918, part 1;
-  `INT-EGRESS-POLICY-CONTRACT`). No job is granted an endpoint yet, so every private pair is refused to every job.
+  `INT-EGRESS-POLICY-CONTRACT`). The grants, `run.privateEndpoints` (`INT-TRIGGERS-FILE-CONTRACT`) and the slots
+  are LANDED (#918, part 2) on the `local` and `podman` venues; the OpenShell venues refuse a granted job until part 3.
 - **Producer/Consumer**: the operator writes it by hand. The worker loads it at boot, and a file that does not load, a
   named file that is missing and an empty value refuse the start (`configError`); `egress render` and doctor load it
-  through the same loader. It is NOT settable by a model-callable tool or by the settings overlay: the proxy's rules
+  through the same loader. The worker then reloads it live, by the model endpoints' watcher rule (named, or there at
+  boot): a bad edit, or one that overlaps `model-endpoints.json` (either file's reload checks both), keeps the last
+  good declaration and logs `private_endpoints_reload_invalid`; a good one applies at the next pickup (an id, a
+  `slots` value). Each pickup reads it once for a job that names an endpoint: the slots, the processor's check that
+  every granted id is declared here, and the job's `PI_DISPATCH_ENDPOINT_<ID>_HOST` and `_PORT` all come from that
+  one read. What the proxy admits changes only when `egress render` writes the include. It is NOT settable by a model-callable tool or by the settings overlay: the proxy's rules
   derive from it.
 - **Location**: `private-endpoints.json` in the deployment folder, which `pi-dispatch init` scaffolds empty,
   create-only. `PI_PRIVATE_ENDPOINTS_FILE` overrides it, a relative value resolving against the deployment folder. A
@@ -13389,7 +13445,7 @@ reader cannot drift on the key, a field, a reason or a bucket. The writer is `wo
     project     the job's project id, as this pickup resolved it, when it has one
     host        the deferring worker's name, as the registry names its row
     holder      a job id the wait is on: the chained parent, the run a recovery continues, or the holder of the target
-    endpoint    the model endpoint's id (`endpoint`)
+    endpoint    the model endpoint's id (`endpoint`), or the private endpoint's (`private-endpoint`, `private-endpoint-host`)
     budgetWhy   the host budget's verdict word: `memory`, `cpu`, `count`, `share`, `running-here` or `unseeded`;
                 legacy `budget` remains readable during rolling upgrades (`host-budget`)
     trigger     the job's matched trigger index, `job.data.trigger.matched.index`, 0-based
@@ -13424,6 +13480,7 @@ reader cannot drift on the key, a field, a reason or a bucket. The writer is `wo
   | `chained` | run | the same slot, for a job with a `parentJobId`; `holder` is that parent |
   | `scope-project` | slot | a project row's concurrent limit |
   | `endpoint` | slot | every slot of a model endpoint; `endpoint` is its id |
+  | `private-endpoint` | slot | every slot of a private endpoint the job's trigger grants (issue #918); `endpoint` is its id |
   | `model-cooldown` | check | no candidate is available and the first transient blocker is a cooldown; asks again at `until` |
   | `model-selection` | check | another pickup is committing this run's model choice; asks again at `until` |
   | `model-window` | check | no candidate is available and the first transient blocker is a full model window; asks again at `until` |
@@ -13433,6 +13490,7 @@ reader cannot drift on the key, a field, a reason or a bucket. The writer is `wo
   | `subscription-auth` | check | the credential cannot be renewed yet; waits until its measured earliest refresh instant without consuming an attempt |
   | `host-budget` | slot | the host budget; `budgetWhy` is its verdict |
   | `bundle-profile` | slot | a host that serves the job's secret bundle profile |
+  | `private-endpoint-host` | slot | a host that declares a private endpoint the job's trigger grants (issue #918), on a fleet's shared queue; `endpoint` is its id |
   | `recovery-wait` | run | a recovery whose run's attempt still runs; `holder` is that run |
   | `workspace-orphan` | run | a surviving container still holds the local folder |
   | `wait-after` | check | an `after` hold |
@@ -14848,3 +14906,4 @@ and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` are UNCHANGED, checked: no file shape, wr
 | 2026-11-15 (#907) | INT-HISTORY-READ-TRANSPORT AMENDED: validated structured interval responses, role projection, source failures and idle-cursor eviction under pressure. Worker pub/sub shape, file/page limits, run-record format and retention UNCHANGED, checked. INT-RUN-HISTORY-FILE-CONTRACT and INT-CONSOLE-STATE-API UNCHANGED, checked. |
 | 2026-11-16 (#912) | INT-HISTORY-READ-TRANSPORT, INT-CONSOLE-STATE-API, INT-CONSOLE-EVENT-STREAM and INT-RUN-HISTORY-FILE-CONTRACT UNCHANGED, checked: the timeline styling correction consumes the same metadata and live seed, changes no endpoint, record, cursor or retention behavior, and creates no persistent state. |
 | 2026-11-16 (#922) | INT-TRIGGERS-FILE-CONTRACT, INT-RUN-HISTORY-FILE-CONTRACT, INT-SESSION-STORE-CONTRACT, INT-WORKSPACE-CHECKPOINT-STORE, INT-APPROVAL-STATE-CONTRACT, INT-MODEL-COOLDOWN-KEY and INT-DEFER-REASON-KEY; NEW INT-MODEL-SELECTION-STATE AMENDED for random initial model selection, durable CAS choice, quota-safe replacement, exact continuation binding and unchanged-style person controls. UNCHANGED, checked: CONST-ISOLATION-CONTAINER-PER-JOB, CONST-BUDGET-BEFORE-TOKENS, CONST-RETRY-INFRA-ONLY and CONST-PI-VERSION-PINNED; no additional paid attempt, new provider library or dependency pin. Legacy fixed and ordered-fallback policies retain their behavior. |
+| 2026-11-16 (#918, part 2) | AMENDED `INT-TRIGGERS-FILE-CONTRACT`: `run.privateEndpoints` (1 to 8 ids, any trigger but a watch rule, near misses refused, an `AUTHORED_NARROWING_FIELDS` row, the live recheck before every attempt, no tool may set it) at triggers version 7 and job data version 8; the version lines also name #922's 6 and 7, which they lacked. AMENDED `INT-EGRESS-POLICY-CONTRACT`: the grant file, its write and read back at attach, the subnet clear, removal before the network, the boot sweep. AMENDED `INT-PRIVATE-ENDPOINTS-FILE-CONTRACT`: grants LANDED on `local` and `podman`, the live reload and the one read per pickup. AMENDED `INT-RUN-HISTORY-FILE-CONTRACT`: the conditional `privateEndpoints: { ids, basis }` and the four refusal reasons. AMENDED `INT-CONTAINER-RUNTIME-CONTRACT`: `PI_DISPATCH_ENDPOINT_<ID>_HOST` and `_PORT`, a reserved and non-secret prefix. AMENDED `INT-DEFER-REASON-KEY`: `private-endpoint` and `private-endpoint-host`. `INT-MODEL-ENDPOINTS-FILE-CONTRACT` UNCHANGED, checked: the cross-file rule landed in part 1, and its live reload now applies it too. `INT-HOST-REGISTRY-CONTRACT` UNCHANGED, checked: the heartbeat field is part 4. |

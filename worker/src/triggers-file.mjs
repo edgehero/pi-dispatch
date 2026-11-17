@@ -46,7 +46,7 @@ import { localEventDigest, validLocalEvent } from "./local-event.mjs";
  */
 
 import nodeFs from "node:fs";
-import { parseTriggers, parseTriggersDocument, triggersFileNewer, triggersFileVersionFor, triggersFileVersionProblem } from "./triggers.mjs";
+import { ON_TYPES, parseTriggers, parseTriggersDocument, triggersFileNewer, triggersFileVersionFor, triggersFileVersionProblem } from "./triggers.mjs";
 import { heldDocument } from "./held-document.mjs";
 import { findDuplicateKey } from "./json-duplicates.mjs";
 import { expectRefusal } from "./file-expect.mjs";
@@ -581,6 +581,9 @@ export function makeCheckOnceSpent({ triggersPath, fs = nodeFs }) {
 export const AUTHORED_NARROWING_FIELDS = Object.freeze([
 	// A stale producer must not drop the reviewed permission and spend on a contradictory job prompt.
 	Object.freeze({ key: "mayMerge", authored: (v) => v === true }),
+	// Issue #918: not a narrowing, the `mcp` row's case: a stale receiver dropping the list would enqueue a paid job that
+	// cannot reach the device its flow was written against, on a run that records as clean.
+	Object.freeze({ key: "privateEndpoints", authored: (v) => Array.isArray(v) && v.length > 0 }),
 	Object.freeze({ key: "models", authored: (v) => Array.isArray(v) && v.length > 0 }),
 	// A stale receiver dropping the reviewed retry order must not silently disable failover.
 	Object.freeze({ key: "fallbackModels", authored: (v) => Array.isArray(v) && v.length > 0 }),
@@ -723,6 +726,90 @@ export function makeCheckPortfolioFlag({ triggersPath, fs = nodeFs }) {
 		} catch {
 			return false;
 		}
+	};
+}
+
+/**
+ * The private endpoints a job may still reach (issue #918, `REQ-PRIVATE-ENDPOINTS`): `(job, { queueJobId }) => answer`,
+ * read from the LIVE triggers file before every attempt, recovery included, with no last good copy, `makeCheckMergePolicy`'s
+ * posture for the same reason: a grant widens what a job reaches, so withdrawing one must take effect at the next start,
+ * and a queued job must never keep what its trigger stopped saying.
+ *
+ * The job's entry is the one that queued it, by that trigger's identity and never by position alone (an entry deleted
+ * above it moves another trigger to its index, and that trigger's grant is not this job's):
+ *   - a forge job: the entry at `trigger.matched.index`, of the job's kind and `on.type` (GitLab's label match on a merge
+ *     request rule included), dispatching the job's flow or command (a comment trigger may dispatch another forge
+ *     trigger's flow), and still holding the action, label or phrase the job matched: `makeCheckMergePolicy`'s identity;
+ *   - a local event job: the local entry with its `on.id` and `on.forge`, and the job's folder, command and worker;
+ *   - a cron or manual job: the cron entry with its `on.id`, and the job's folder, flow, command and task, the identity
+ *     the secret bundle's lookup uses (cron, local event and watch ids are separate namespaces).
+ * A one-shot that this same queue job spent on an earlier attempt (`on.disarmed.jobId`) is read as it was before the
+ * disarm, so the job's own retry keeps its grant; a disarm by any other job, or by hand, withdraws it.
+ * Every id the job carries must still be named by that entry's `run.privateEndpoints`; an id the entry adds since is not
+ * granted to a job queued before it.
+ *
+ * Answers: `{ ok: true, ids }` (ids are the job's own, `[]` for a job that carries none); `{ refused:
+ * "private-endpoint-withdrawn" }` when no entry is that trigger any more or it no longer names an id, or the job carries
+ * a list with no trigger to grant it; `{ newer: true }` for a file a newer pi-dispatch wrote (the job waits for this
+ * host's upgrade); `{ unreadable: true }` when the file cannot be read or does not validate now (the job is retried,
+ * never run on a grant nobody can confirm).
+ */
+export function makeCheckPrivateEndpoints({ triggersPath, fs = nodeFs } = {}) {
+	const forgeType = (type) => ON_TYPES.has(type) && type !== "cron" && type !== "watch";
+	return function checkPrivateEndpoints(job, { queueJobId } = {}) {
+		const ids = job?.privateEndpoints;
+		if (ids === undefined) return { ok: true, ids: [] };
+		if (!Array.isArray(ids) || ids.length === 0 || !ids.every((id) => typeof id === "string" && id !== "")) return { refused: "private-endpoint-withdrawn" };
+		const matched = job?.trigger?.matched;
+		const localEvent = job?.kind === "local" && validLocalEvent(job.localEvent) ? job.localEvent : null;
+		const cronId = job?.kind === "local" && localEvent === null && typeof job?.trigger?.id === "string" ? job.trigger.id : null;
+		const forge = job?.kind !== "local" && Number.isSafeInteger(matched?.index) && matched.index >= 0;
+		if (!forge && localEvent === null && cronId === null) return { refused: "private-endpoint-withdrawn" };
+		if (typeof triggersPath !== "string" || triggersPath === "") return { refused: "private-endpoint-withdrawn" };
+		let text;
+		try {
+			text = fs.readFileSync(triggersPath, "utf8");
+		} catch (error) {
+			return error?.code === "ENOENT" ? { refused: "private-endpoint-withdrawn" } : { unreadable: true };
+		}
+		let entries;
+		try {
+			entries = parseTriggersDocument(text, triggersPath).triggers;
+		} catch (error) {
+			return error?.newer === true ? { newer: true } : { unreadable: true };
+		}
+		// A one-shot this same job spent: read as before the disarm, only after the original document validated, and only
+		// for this queue job's own disarm.
+		if (typeof queueJobId === "string" && queueJobId !== "") {
+			const raw = JSON.parse(text);
+			const own = Array.isArray(raw?.triggers) ? raw.triggers.filter((t) => t?.on?.disarmed?.jobId === queueJobId) : [];
+			if (own.length > 0) {
+				for (const t of own) delete t.on.disarmed;
+				try {
+					entries = parseTriggersDocument(JSON.stringify(raw), triggersPath).triggers;
+				} catch {
+					return { refused: "private-endpoint-withdrawn" };
+				}
+			}
+		}
+		let entry;
+		if (forge) {
+			const candidate = entries[matched.index];
+			const sameType = candidate?.on?.type === matched.type || (matched.type === "label" && candidate?.on?.type === "pull_request" && job.target?.type === "pull_request");
+			const sameLane = job.command !== undefined
+				? candidate?.run?.command === job.command
+				: candidate?.run?.command === undefined && (candidate?.run?.flow === job.flow || (candidate?.on?.type === "comment" && entries.some((t) => forgeType(t?.on?.type) && t.run?.flow === job.flow)));
+			const sameMatch = !(typeof matched.action === "string" && !candidate?.on?.action?.includes(matched.action))
+				&& !(typeof matched.label === "string" && ![...(candidate?.on?.any ?? []), ...(candidate?.on?.all ?? [])].includes(matched.label))
+				&& !(typeof matched.phrase === "string" && candidate?.on?.phrase !== matched.phrase);
+			if (candidate?.run?.kind === job.kind && sameType && sameLane && sameMatch) entry = candidate;
+		} else if (localEvent !== null) {
+			entry = entries.find((t) => t?.run?.kind === "local" && t?.on?.id === localEvent.id && t.on.forge === localEvent.forge && ["folder", "command", "worker"].every((key) => t.run?.[key] === job[key]));
+		} else {
+			entry = entries.find((t) => t?.on?.type === "cron" && t.on.id === cronId && ["folder", "flow", "command", "task"].every((key) => t.run?.[key] === job[key]));
+		}
+		const named = Array.isArray(entry?.run?.privateEndpoints) ? entry.run.privateEndpoints : [];
+		return ids.every((id) => named.includes(id)) ? { ok: true, ids: [...ids] } : { refused: "private-endpoint-withdrawn" };
 	};
 }
 

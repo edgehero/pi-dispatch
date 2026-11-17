@@ -19,7 +19,7 @@ import { FIRST_CALL_SHORT_TASK_BYTES, builtinModel, checkModelsKnown, firstCallF
 import { modelOnList } from "@edgehero/pi-dispatch/model-ref";
 import { parseUsdMicros } from "@edgehero/pi-dispatch/money";
 import { createCostGuard } from "../../image/runner/src/usage-meter.mjs";
-import { DEFAULT_ON_TOOL_NAMES, EXCLUDABLE_TOOL_NAMES, parseTriggers } from "@edgehero/pi-dispatch/triggers";
+import { DEFAULT_ON_TOOL_NAMES, EXCLUDABLE_TOOL_NAMES, TRIGGERS_FILE_VERSION, parseTriggers } from "@edgehero/pi-dispatch/triggers";
 import { createFleetReader, readTriggerSkew } from "../src/read-model.mjs";
 import { readHostLoadsView } from "../src/host-loads-view.mjs";
 import { TRIGGER_GETS_WORDS } from "../src/trigger-gets-view.mjs";
@@ -2311,10 +2311,10 @@ test("this build's own tables: a live host that reads less, or says nothing, ref
 });
 
 test("this build's own tables: a file above what it reads is refused, and an edit that needs nothing reads no host", async () => {
-  const f = fixture({ doc: { version: 7, triggers: [cron, comment()] }, deps: { readHosts: async () => assert.fail("no host is read") } });
+  const f = fixture({ doc: { version: TRIGGERS_FILE_VERSION + 1, triggers: [cron, comment()] }, deps: { readHosts: async () => assert.fail("no host is read") } });
   const out = await f.service.preview(ask(f, { flow: "review" }), operator);
   assert.equal(out.status, 409);
-  assert.match(out.refusal, /written by a newer pi-dispatch \(version 7; this build understands 6\)/);
+  assert.match(out.refusal, new RegExp(`written by a newer pi-dispatch \\(version ${TRIGGERS_FILE_VERSION + 1}; this build understands ${TRIGGERS_FILE_VERSION}\\)`));
   const plain = fixture({ deps: { readHosts: async () => assert.fail("no host is read while the need is 1") } });
   const fine = await plain.service.preview(ask(plain, { flow: "review" }), operator);
   assert.deepEqual(fine.plan.need, { triggersVersion: 1, jobDataVersion: 1 });
