@@ -1,0 +1,8 @@
+# Optional Electron example, built on the display image. The normal job image carries no Electron dependency.
+ARG BASE
+FROM ${BASE}
+USER root
+RUN apt-get update && apt-get install -y --no-install-recommends libgtk-3-0 \
+    && rm -rf /var/lib/apt/lists/* \
+    && npm install --prefix /opt/pi-electron --save-exact --no-audit --no-fund electron@39.2.7
+USER pi

@@ -81,6 +81,8 @@ nothing and an unlabelled image is admitted everywhere; `capabilities` includes,
 and an unlabelled image is refused every replica, command or tool-excluding job. One rule underlies both, that an image declaring
 nothing gets no benefit of the doubt about what it contains, and neither costs an ordinary job anything.
 `image/Dockerfile` declares all of them, so a layer built on top of it inherits them.
+The derived recipe below adds the separate [`display`](#graphical-applications) capability for live graphical
+verification. The shipped image does not declare it, and it adds no job admission requirement.
 
 **`mergePolicy` (issue #908).** An enabled `run.mayMerge` job needs this capability. It proves that the runner
 reads the worker-written `merge-policy.json` input before loading project code and selects the fixed standing-rule
@@ -129,6 +131,121 @@ reason to satisfy them.
 Three rows of the table above it deliberately **cannot** check, and it says so when it finishes: that the pi
 version inside matches the pin, that the entrypoint honours the exit-code protocol on every path, and that
 the loader flags carry the posture you expect. Running a container can observe behaviour, not intent.
+
+## Graphical applications
+
+A job can run a headed Chromium application on a virtual display, including browser automation and screenshots.
+The optional `display` image capability means **headed Chromium with Xvfb and a deterministic rendering probe**.
+It does not promise GPU acceleration, a desktop session, or compatibility with every Electron application.
+Ordinary headless Playwright already works in the shipped image and needs no virtual display.
+
+The shipped image already contains Chromium, its pinned Playwright, Xvfb and fonts. It does not include `xauth`,
+which `xvfb-run` normally requires. This recipe uses Xvfb's `-displayfd` readiness pipe instead: `pi-display`
+allocates a private display, waits until it is listening, sets `DISPLAY` for its child, and removes the display
+and the child's process group afterwards. Xvfb listens on no TCP port. The job's entrypoint stays the runner;
+the flow or repository's test command calls the wrapper when it needs a display.
+
+From a checkout of pi-dispatch, with the base already present on the worker's machine:
+
+```sh
+node image/build-display.mjs ghcr.io/edgehero/pi-job:5.3.3 pi-job:display
+node .github/scripts/display-smoke.mjs pi-job:display ./display-chromium.png
+./image/verify-image.sh pi-job:display
+```
+
+`image/Dockerfile.display` is the complete derived-image recipe. The builder inspects the base, builds through
+a temporary local tag of that exact image ID, preserves its capability labels and appends `display`. It removes
+the temporary tag afterwards. It installs no package at job time. On rootless Podman, run the builder **as the
+worker account**, adding `podman` as its third argument, with the base in that account's store. Use `podman` as
+the smoke command's third argument too. Build a named product release or digest deliberately; a rebuild is how
+the derived image picks up base fixes.
+
+Select it with the existing `run.image`. Inside the job, a typical command is:
+
+```sh
+pi-display npm run test:e2e
+# Or inspect the known fixture independently of your own suite:
+pi-display-probe /workspace/display.png
+```
+
+For Playwright API code, use `chromium.launch({ headless: false, chromiumSandbox: false })`. The CLI's
+`PLAYWRIGHT_MCP_SANDBOX=false` setting is already baked into the base, but that CLI environment variable is not
+a substitute for an API launch option. Direct Chromium and Electron launches need `--no-sandbox`. This disables
+the application's inner sandbox: compromised rendered content has the job user's access inside the container.
+The container remains the boundary. Keep capabilities dropped, no-new-privileges, the runtime's seccomp policy,
+non-root execution and the existing resource bounds. No host display mount, published port, GPU device,
+`--ipc=host`, extra capability or per-trigger security exception is needed for the measured Docker recipe.
+
+**Electron variant.** The separate example adds GTK 3 and Electron **39.2.7**. It inherits `display`; doctor
+still checks Chromium, so run the Electron fixture too when changing that runtime:
+
+```sh
+docker build --pull=false -f image/Dockerfile.display-electron \
+  --build-arg BASE=pi-job:display -t pi-job:display-electron .
+node .github/scripts/display-smoke.mjs pi-job:display-electron ./display-electron.png local electron
+```
+
+For your application's own Electron version, pin it in your build and test it separately. The fixture launches
+through Playwright's `_electron.launch({ chromiumSandbox: false, ... })`; a direct launch is
+`pi-display /path/to/electron --no-sandbox /path/to/app`. Keep application-specific test orchestration in the
+flow or repository. The wrapper returns the application's status, 70 when the display cannot start or dies,
+127 when the requested command cannot start, and 143 when interrupted.
+
+**Size and rendering.** Start with the default job size, **4 GiB and CPU size 2**, and one browser at a time.
+Docker and Podman use CPU size as a weight, not a two-core ceiling. The fixed pid limit is 512; `/dev/shm` is
+half the job's memory, at most 1 GiB, and counts toward the same memory limit. On Docker 29.8.2 / Linux arm64,
+the offline Chromium fixture peaked at 878 MiB and 135 tasks; Electron at 260 MiB and 115 tasks (cgroup v2
+`memory.peak` and `pids.peak`, including cache and the probe, without pi or your dev server). These are observations,
+not minimum sizes or a guarantee for a suite. Size the project for the runner, dev server and browser together;
+limit test parallelism explicitly using `PI_JOB_SIZE_CPUS` where appropriate ([sizing.md](sizing.md)).
+
+The pinned Playwright adds `--disable-dev-shm-usage` for both Chromium and Electron. These measurements therefore
+use its `/tmp` fallback and **do not prove** a suite using `/dev/shm` fits. Increasing memory above 2 GiB does not
+increase `/dev/shm` above 1 GiB. Reduce concurrent pages, use the tested fallback, or measure the workload. No GPU
+is passed through; the fixture proves software-rendered text and page interaction, not WebGL or video acceleration.
+
+**Doctor.** `pi-dispatch doctor --live` checks every distinct configured image/venue pair declaring `display`,
+including `run.image` overrides, in that venue's image store. It runs at the **deployment default size**, printed
+with the result, not every project's size. Its job-user decision is made for that image. It uses the worker's
+container builder, fixture mounts, an empty host-provided environment and no network or credentials. It clicks a
+local page, waits for the changed state, checks decoded PNG colors and text-region contrast, and verifies the PNG's
+size and digest on the host after stopping the container's writers. A browser exiting zero or a nonempty file is insufficient. This detects a blank image;
+it does not perform OCR or certify the appearance of your own application. The image remains trusted code.
+
+Plain doctor starts no display probe. An image without the capability is not probed. A declared display that
+fails makes doctor exit 1; an unavailable venue is explicitly unverified. Doctor removes the PNG with its fixture;
+the smoke commands above save a copy for you to inspect, and CI uploads its screenshots as artifacts. The default
+image does not advertise `display`, so enabling the recipe is an explicit image choice.
+
+| Venue | Evidence and limits |
+|---|---|
+| Docker (`local`) | Chromium and Electron verified on Docker 29.8.2, Linux arm64 (OrbStack), and on the Linux amd64 [required image CI lane](https://github.com/edgehero/pi-dispatch/actions/runs/44182259226/job/134389555366). Both PNG artifacts were inspected for legible text. Removing Xvfb produces the named failure. |
+| Native rootless Podman (`podman`) | Headed Chromium verified on Podman 4.9.3, Linux amd64, with a worker uid of 1234 ([CI measurement](https://github.com/edgehero/pi-dispatch/actions/runs/44182259244/job/134389381228)). The same doctor probe uses `buildPodmanRunArgs`, the decided uid, keep-id, resource bounds and private mount relabelling. The PNG artifact was inspected for legible text. Electron is not measured on this venue. |
+| Rootful Podman through its Docker API (`local`) | Uses the local builder and doctor probe. Not measured for graphical applications here; run doctor on that host. |
+| OpenShell (`openshell`, `openshell-bind`) | **Unsupported on pinned OpenShell 0.1.4.** Both actual adapters fail with `display-start-failed` and Xvfb's `XKB: Failed to compile keymap` ([CI measurement](https://github.com/edgehero/pi-dispatch/actions/runs/44182259319/job/134389382798)). The advisory lane checks this specific restriction in both modes. Doctor reports `venue-not-probed` for a declaring image; a Docker result does not attest to OpenShell. |
+
+OpenShell 0.1.4's [child seccomp filter](https://github.com/NVIDIA/OpenShell/blob/v0.1.4/crates/openshell-sandbox/src/linux/child_seccomp.rs)
+unconditionally denies `setgid` and `setuid`, including calls that keep the current identity. Xvfb's keymap
+compiler launcher calls both before executing `xkbcomp`, and exits when either is denied. Reproducing those two
+denials locally gives the same XKB failure; the CI fixture also checks the identity-preserving calls return
+`EPERM`. This is a vendor restriction, not a missing font, CPU limit or writable-directory setting. There is no
+per-trigger setting that lifts it. A vendor change permitting safe identity-preserving calls would need a fresh
+graphical measurement; disabling seccomp is not part of this recipe. OpenShell also does not use the
+Docker/Podman argv builder, so their shared-memory and pid figures cannot be assumed there.
+
+| Symptom or probe reason | What to check |
+|---|---|
+| `display-start-failed`, or wrapper exit 70 | Xvfb is present and executable, its display socket can be created under `/tmp`, and the job has process/memory headroom. The wrapper waits for readiness for at most ten seconds. |
+| `probe-missing` | The image declares `display` but lacks the executable `pi-display-probe`; rebuild the complete recipe. |
+| `browser-start-failed` | Browser binary and shared libraries, readable browser cache, writable home and launch options. Sandbox errors require the inner `--no-sandbox` option, not changes to container privileges. |
+| `page-check-failed` | The browser started but page interaction or viewport setup failed. Test the deterministic fixture before the application's suite. |
+| `screenshot-invalid`, `probe-result-invalid` | The PNG or bounded result is missing, malformed, too large or inconsistent. A successful process exit is not a rendering pass. |
+| `screenshot-blank`, `text-not-rendered` | The expected rendered regions or text contrast are absent. Check fonts and rendering; inspect the saved smoke image for tofu glyphs or unreadable text. |
+| `probe-timeout` | Display/browser hung or the job lacked resources. Check task and memory pressure before increasing a timeout. |
+| Browser crash, SIGBUS or page closed under load | Possible shared-memory exhaustion, but not proof of it. Check `/dev/shm` usage and whether the application's flags use Playwright's `/tmp` fallback. |
+| Exit 137, OOM evidence, or process/thread creation refused | Check the container's memory events and pid bound. Increase the existing project memory size or reduce suite parallelism; do not remove the bounds. Exit 137 alone does not prove OOM. |
+| `container-start-failed`, `probe-infrastructure-failed`, `venue-not-local` | No rendering verdict was obtained. Check runtime availability, job-user eligibility and fixture access on the worker's own host. |
+| `probe-cleanup-failed` | The container could not be removed. The host does not read its screenshot and retains the fixture until the container is gone; follow the printed cleanup command. |
 
 ## Wire it up
 

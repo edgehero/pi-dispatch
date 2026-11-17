@@ -622,6 +622,21 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   attachments.
 - **Open**: 5 rounds is inherited unmeasured. Honest v1 default.
 
+## REQ-GRAPHICAL-JOB-CHECK
+
+- **Statement** (#921): a documented derived-image recipe shall run a headed Chromium application with a
+  virtual display under the existing job boundary, drive it and produce a screenshot with legible text. An
+  optional `display` declaration shall opt that image into `doctor --live` rendering checks and image
+  verification. The recipe shall state measured sizes, launch options, failure symptoms and evidence per venue.
+- **Acceptance**: a Docker job-shaped container renders the fixed page, a real button click changes the page,
+  and decoded screenshot regions match. A blank image or missing text cannot pass on exit 0. Removing Xvfb
+  produces `display-start-failed` and a hard doctor failure. Images without the capability start no display;
+  plain doctor runs no display probe; trigger-specific images are checked in their own venue's store and as
+  their own decided uid. No credential or provider call is needed. Partial starts and timeouts remove their
+  containers and fixtures or name the cleanup failure. OpenShell is not credited with a Docker measurement.
+- **Traces to**: `INT-CONTAINER-RUNTIME-CONTRACT`, `INT-LIVE-PROBE-CONTRACT`,
+  `DES-PLAYWRIGHT-CLI-NOT-CHROME-DEVTOOLS`, `CONST-ISOLATION-CONTAINER-PER-JOB`.
+
 ## REQ-JOB-STATUS-COMMENTS
 
 - **AMENDED 2026-10-31 (#772)**: Jobs with purpose `answer-draft` never post status, terminal, policy-refusal, failure, recovery, progress or chain comments. Their verdict/failure is reported on the console. This exception does not suppress the source workload’s own question or its later person-confirmed answer trail.
@@ -9641,3 +9656,4 @@ instead of drifting.
 | 2026-11-16 (#918, part 2) | `REQ-TRIGGER-SECRETS` AMENDED: `PI_DISPATCH_ENDPOINT_` is a reserved prefix for `run.secrets`, bundles and `PI_FORWARD_ENV`. Added `REQ-PRIVATE-ENDPOINTS`: a trigger's `run.privateEndpoints` grants its jobs, and no other, a declared host and port through the egress proxy, confirmed against the live triggers file before every attempt, with free refusals (`private-endpoint-withdrawn`, `-unknown`, `-proxy-outdated`, `-venue-unsupported`), a deferral for a full device and a hand-back on a fleet's shared queue. `REQ-EGRESS-ALLOWLIST`'s Scope AMENDED: this is its one named exception, and the rest of its line (no `run.network`, no settings key, no model-callable parameter) holds. `REQ-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked: no tool is added, and the existing tools refuse the field. `REQ-MCP-OPERATOR-SERVERS` UNCHANGED, checked: a server on a private endpoint is refused by the preflight as any undeclared host is. |
 | 2026-11-16 (#918, part 3) | `REQ-PRIVATE-ENDPOINTS` AMENDED: Acceptance gains doctor's lines, its canary's four probes and the cross-address read in `--live`; Scope says the OpenShell venues refuse a granted job in this release. |
 | 2026-11-16 (#918, part 4) | `REQ-OPERATOR-CONSOLE-SCREENS` AMENDED, (g6) Connections: the `p-private-endpoints` panel (this folder's declaration and the triggers granted each, "not declared here" for an id it lacks), a host whose private-endpoints file does not load among the problems, and the trigger page, trigger list, run preview and run page rows. `REQ-PRIVATE-ENDPOINTS` UNCHANGED, checked: the console reads and shows, and writes nothing. |
+| 2026-11-17 (#921) | NEW REQ-GRAPHICAL-JOB-CHECK (#921): headed Chromium recipe, image capability, deterministic screenshot checks, named display failures and venue-specific evidence. REQ-FRONTEND-VISUAL-VERIFY and REQ-DEPLOYMENT-BOOTSTRAP UNCHANGED, checked: application orchestration remains in flows, and the optional live check changes no setup permission or paid action. |

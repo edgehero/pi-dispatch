@@ -93,6 +93,14 @@ jobs:
       - name: Build the job image
         run: docker build -f image/Dockerfile -t pi-job:ci .
 
+      - name: Build the optional display image
+        run: node image/build-display.mjs pi-job:ci pi-job:display-ci
+
+      - name: OpenShell copy mode reports its pinned Xvfb restriction (issue 921)
+        id: display-copy
+        continue-on-error: true
+        run: node .github/scripts/display-openshell-smoke.mjs pi-job:display-ci copy "$RUNNER_TEMP/display/openshell.png" --expect-identity-refusal
+
       # Issue #684: a model server stand-in on the gateway host, which the generated policy reaches through OpenShell's
       # host aliases. It records what each request carried in its credential headers (only fake values reach it), so the
       # script can tell a swapped value from a placeholder, and asks git for Basic auth on info/refs. Issue #704 part 3:
@@ -188,6 +196,26 @@ jobs:
       - name: Bind-mode conformance (the real bind bundle, the real runner)
         if: always()
         run: STEER_SIGNAL_FILE="$RUNNER_TEMP/steer-second-written" STANDIN_LOG="$RUNNER_TEMP/standin.jsonl" PI_JOB_IMAGE=pi-job:ci node .github/scripts/openshell-bind-conformance.mjs
+
+      - name: OpenShell bind mode reports its pinned Xvfb restriction (issue 921)
+        id: display-bind
+        if: always()
+        continue-on-error: true
+        run: node .github/scripts/display-openshell-smoke.mjs pi-job:display-ci bind "$RUNNER_TEMP/display/openshell-bind.png" --expect-identity-refusal
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: display-openshell
+          path: ${{ runner.temp }}/display/
+
+      # Keep both existing conformance passes running when a graphical probe finds a restriction, then report it.
+      - name: Both OpenShell display restrictions matched the documented result
+        if: always()
+        env:
+          COPY_RESULT: ${{ steps.display-copy.outcome }}
+          BIND_RESULT: ${{ steps.display-bind.outcome }}
+        run: test "$COPY_RESULT" = success && test "$BIND_RESULT" = success
 
       # Issue #707: the setup commands on the real host. `pi-dispatch up --yes` in a scratch deployment folder whose .env
       # blesses only the openshell venue: the gateway is already running and registered here, so the gate reads it and

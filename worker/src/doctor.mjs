@@ -101,6 +101,8 @@ import { grantOnAttach, grantsDirOf, removeGrantsOf } from "./endpoint-grants.mj
 import { DEFAULT_EGRESS_PROXY, STOPPED_PROXY_STATES, EGRESS_CANARY_NET_PREFIX, EGRESS_CANARY_PROBE_PREFIX, EGRESS_ENDPOINT_PROBE_PREFIX, egressArmed, egressCanaryNetwork, egressCanaryProbe, egressEndpointProbe, egressEnv, egressProxyName, egressProxyUrl, networkEndpoints, removeNetworkOrSay } from "./egress.mjs";
 import { detachBlockedSentence, makeDetachGate, runtimeFromFacts } from "./netns-keeper.mjs";
 import { runLiveProbes } from "./live-probes.mjs";
+import { runDisplayProbe } from "./display-probe.mjs";
+import { checkDisplays, displayTargets } from "./doctor-display.mjs";
 import { COMPOSE_VALKEY_OVERRIDE, VALKEY_PASSWORD_KEY, VALKEY_PASSWORD_HOWTO, VALKEY_PORT_KEY, isLoopbackHost, valkeyContainerOwner, valkeyPasswordProblem, valkeyPortConflict } from "./valkey-auth.mjs";
 import { urlShown, valkeyContextFromResolution, valkeyPasswordFor, valkeyUrlProblem } from "./valkey-endpoint.mjs";
 import { SANDBOX_TOMBSTONE_STUCK_MS, isSandboxTombstone, sandboxTombstoneAge } from "./sandbox-store.mjs";
@@ -514,6 +516,9 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 			liveRendered.push(...read);
 			if (render(read, out)) failed = true;
 		}
+		const displays = await displayChecks(env, liveSeams, facts);
+		liveRendered.push(...displays);
+		if (render(displays, out)) failed = true;
 	}
 
 	// Issue #712: what was judged, published for the console and the panel, after every check is in (the `--fix`
@@ -2515,6 +2520,7 @@ export async function collectChecks(shellVars, seams) {
 			imageCode,
 			jobImage,
 			triggerImages: images.filter((i) => i !== jobImage),
+			imageRoutes,
 			// `proxyRunning` null means not read (the policy off, docker down): only a proxy SEEN down skips the peer probe.
 			egress: { armed, results: egress.filter((c) => c.readBack?.property === "egress").map((c) => c.readBack), proxy: proxyState?.proxy ?? egressProxyName(env), proxyRunning: proxyState ? proxyState.running : null },
 		});
@@ -11395,6 +11401,51 @@ export function dockerRunVia(spawn, timeoutMs = 5000, { bin = "docker" } = {}) {
 		});
 }
 
+/** Optional, image-specific graphical checks. No fixAction: a failure cannot authorize changing image or isolation. */
+export async function displayChecks(env, seams, facts) {
+	let venues;
+	try { venues = parseBackendList(env.PI_BACKENDS); } catch { return []; }
+	const size = doctorJobSize(env);
+	const targets = displayTargets({ image: facts.jobImage ?? jobImageOf(env).image, venues, routes: facts.imageRoutes ?? [] });
+	const { spawn, liveFs, pid = process.pid, nonce = randomBytes(6).toString("hex"), isAlive = defaultIsAlive, out = () => {}, jobUserIdentity: ids = {} } = seams;
+	const binOf = ({ venue }) => venue === "podman" ? "podman" : venue.startsWith("openshell") && env.PI_OPENSHELL_ENGINE === "podman" ? "podman" : "docker";
+	return checkDisplays({
+		targets,
+		size,
+		inspect: (target) => makeImagePreflight({ image: target.image, spawnFn: spawn, bin: binOf(target) })({}),
+		prepare: async (target, image) => {
+			// OpenShell's policy and Landlock layer are not the docker builder. A Docker pass must never attest to it.
+			if (target.venue.startsWith("openshell")) return { run: false, reason: "venue-not-probed: OpenShell display rendering requires its conformance lane" };
+			// Re-decide against THIS image. The default image's anyUid verdict says nothing about a custom image.
+			if (target.venue === "podman") {
+				const checked = await podmanChecks(env, seams, { jobImage: image.imageDigest ?? target.image });
+				return checked.forLive;
+			}
+			const checked = await jobUserChecks(env, seams, { endpoint: facts.endpoint, dockerCode: facts.dockerCode, imageCode: 0, jobImage: image.imageDigest ?? target.image });
+			return { ...checked.forLive, daemon: checked.daemon };
+		},
+		probe: async (target, image, ready) => {
+			const podman = target.venue === "podman";
+			const bin = binOf(target);
+			const readInfo = makePodmanInfoReader({ run: dockerRunVia(spawn, PODMAN_INFO_TIMEOUT_MS, { bin: "podman" }) });
+			return runDisplayProbe({
+				image: image.imageDigest ?? target.image,
+				buildArgs: podman ? buildPodmanRunArgs : buildDockerRunArgs,
+				bin, run: liveRunVia(spawn, { bin, maxOutputBytes: 16 * 1024 }), fs: liveFs,
+				jobsDir: jobsDirPath(env), pid, nonce, isAlive, size,
+				user: ready.user ?? null,
+				relabel: podman ? ready.relabel : relabelsPrivateMounts(ready.daemon?.facts, facts.endpoint, ids.platform ?? seams.platform),
+				hostCpus: podman ? ready.info?.hostCpus : ready.daemon?.facts?.hostCpus,
+				...(podman ? { cgroupParent: cgroupParentFor({ podman: true, cgroupManager: ready.info?.cgroupManager ?? null }), startTimeoutMs: PODMAN_FIRST_START_TIMEOUT_MS, isLocal: (info) => info?.serviceIsRemote === false } : {}),
+				resolveEndpoint: podman ? async () => { const answer = await readInfo(); return answer?.answered ? answer.info : null; } : makeDockerEndpointResolver({ run: dockerRunVia(spawn) }),
+				announce: (line) => out(`\ndisplay on ${target.venue}: ${line}\n`),
+				...(seams.displayScreenshot ? { onScreenshot: seams.displayScreenshot } : {}),
+				...(seams.displayMode ? { mode: seams.displayMode } : {}),
+			});
+		},
+	});
+}
+
 /**
  * `doctor --live`'s checks (issues #278 and #344, INT-LIVE-PROBE-CONTRACT): the eight declarations a container read can reach,
  * read back off short-lived real containers on this host, rendered as `read back on local: ...`. Exported so the never-tier
@@ -11974,11 +12025,11 @@ export const RUN_TIMEOUTS = Object.freeze({ cmd: 30_000, pull: 600_000 });
  * deciding whether to clean up has to tell those apart -- reading both as "nothing happened" leaks the
  * object, reading both as "it may exist" cries wolf on every host without docker installed and turns this
  * file's own ENOENT test red. So `ended` says which: `"error"` (never launched), `"timeout"` (killed by the
- * bound), or `"close"` (the child exited, and `code` is its own).
+ * bound), `"output-limit"` (a caller's aggregate stdout/stderr bound), or `"close"` (the child exited, and `code` is its own).
  *
  * `bin` (issue #354): the runtime CLI, `docker` unless a caller names another, as `dockerRunVia`'s.
  */
-export function liveRunVia(spawn, { bin = "docker" } = {}) {
+export function liveRunVia(spawn, { bin = "docker", maxOutputBytes = Infinity } = {}) {
 	return (args, { timeoutMs }) =>
 		new Promise((resolve) => {
 			let child;
@@ -12003,8 +12054,16 @@ export function liveRunVia(spawn, { bin = "docker" } = {}) {
 				} catch {}
 				finish(null, "timeout");
 			}, timeoutMs);
-			child.stdout?.on("data", (d) => (stdout += d));
-			child.stderr?.on("data", (d) => (stderr += d));
+			const collect = (stream, d) => {
+				if (done) return;
+				if (Buffer.byteLength(stdout) + Buffer.byteLength(stderr) + d.length > maxOutputBytes) {
+					try { child.kill("SIGKILL"); } catch {}
+					finish(null, "output-limit");
+				} else if (stream === "stdout") stdout += d;
+				else stderr += d;
+			};
+			child.stdout?.on("data", (d) => collect("stdout", d));
+			child.stderr?.on("data", (d) => collect("stderr", d));
 			child.on("error", () => finish(null, "error"));
 			child.on("close", (code) => finish(code, "close"));
 		});

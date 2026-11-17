@@ -1029,6 +1029,11 @@ WATCHDECIDE
 				[ "$watch_gate_code" = 2 ] && [ -n "$watch_mac" ] && [ "$watch_mac" = "$watch_want" ] && echo "$watch_gate_exit" | grep -q '"reason":"cost-cap"' && echo "$watch_gate_exit" | grep -Eq '"costRefused":1[,}]' && echo "$watch_decision" | grep -q '"stopReason":"aborted"' \
 					|| fail "the image declares watch but its deterministic classifier bypassed the cost guard or failed to write its bounded result"
 				;;
+			display)
+				# The worker's own builder and doctor probe, not another hand-written set of isolation flags.
+				node "$(dirname "$0")/../.github/scripts/display-smoke.mjs" "$IMAGE_REF" \
+					|| fail "display: headed Chromium did not render and verify its screenshot under the job's hardening (docs/job-image.md)"
+				;;
 			*) fail "dev.pi-dispatch.capabilities names an unknown capability '$capability'" ;;
 		esac
 	done

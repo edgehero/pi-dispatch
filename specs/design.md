@@ -7186,6 +7186,25 @@ free local model, or using a few successful live probes as proof of every routin
 
 ## DES-PLAYWRIGHT-CLI-NOT-CHROME-DEVTOOLS
 
+- **AMENDED (#921): optional headed applications.** Keep the ordinary image and headless default. A derived
+  display image reuses the base's pinned Playwright/Chromium, Xvfb and fonts, adding an explicit command wrapper
+  and a fixed offline rendering probe. The wrapper uses Xvfb's readiness pipe, avoiding both an arbitrary sleep
+  and `xvfb-run`'s missing xauth dependency. The runner stays the entrypoint; a flow or repository owns its suite's
+  orchestration. The existing image capability label opts into doctor and image verification, without a new
+  trigger field or paid gate. Preserve inherited capabilities by inspecting the exact base used for the build,
+  not copying today's list into another Dockerfile. A separate exactly pinned Electron example is tested on
+  Docker; a Chromium pass does not assert arbitrary Electron compatibility. Reject file-existence-only screenshot
+  checks: decoded color/contrast regions plus a real click must hold, and CI exports the PNG for a person's
+  legibility check. This is not OCR or a general application test. `--no-sandbox` removes only the application's
+  inner sandbox; the container boundary, seccomp and resource limits are unchanged. The pinned Playwright uses
+  `--disable-dev-shm-usage`, so the successful fixture measures its tmp fallback, not shared-memory headroom.
+  Docker/Podman's default size and builder are measured by doctor per declaring image; OpenShell's distinct
+  policy and Landlock path is measured separately by its advisory lane and explicitly unverified by doctor.
+  OpenShell 0.1.4 is measured unsupported: its child seccomp filter denies the identity-preserving setgid/setuid
+  calls in Xvfb's keymap compiler launcher. Both modes assert that specific refusal in CI. Reject weakening the
+  venue's seccomp filter or adding a per-trigger exception to make this recipe pass.
+  A passing image never enlarges the backend's declarations. `OQ-012` remains: an operator image is trusted code.
+
 - **Decision**: `@playwright/cli` with Chromium bundled in the job image, with
   `PLAYWRIGHT_BROWSERS_PATH` set at **both** build and run.
 - **Why**: `@playwright/cli` is headless by default and built for agents, so it works in a container
@@ -19057,3 +19076,4 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-11-16 (#918, part 2) | `DES-PROJECT-SECRET-BUNDLES` AMENDED: a bundle variable starting `PI_DISPATCH_ENDPOINT_` is reserved. `DES-PRIVATE-ENDPOINT-GRANTS` AMENDED: the grants, the trigger field and the slots are LANDED on `local` and `podman`, with the grant's life written down (the subnet clear at every attach as the guarantee, the write and helper read back before start, removal before the network, the boot sweep by live network names, the live recheck before every attempt) and the environment's reserved, non-secret prefix. `DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` AMENDED: still no per-trigger opt-out; a grant adds declared pairs for one job's network and removes no rule. `DES-FLEET-LEASES-FOR-SHARED-BOUNDS` AMENDED: a private endpoint's `slots` take both halves under `private:<id>`, in their own step after the model endpoints' and outside the failover branch, swept at boot with them. `DES-MCP-EGRESS-PREFLIGHT` UNCHANGED, checked: a private endpoint's port is never 80 or 443 and it is never a model endpoint, so a server there is refused as any undeclared host is. |
 | 2026-11-16 (#918, part 3) | `DES-PRIVATE-ENDPOINT-GRANTS` AMENDED: doctor's lines, the canary's four probes per endpoint on a granted canary network, the cross-address read in `--live`, and the rootless Podman lane's real-squid case are LANDED; the OpenShell venues keep refusing a granted job in this release, with the reason (not measured here; nothing unmeasured is shipped to the venue that holds the credentials). `DES-OPENSHELL-VENUE` UNCHANGED, checked: no rule is added to its policy. |
 | 2026-11-16 (#918, part 4) | `DES-PRIVATE-ENDPOINT-GRANTS` AMENDED: Status names the console's view, and why it shows only this folder's declaration (no heartbeat field: the host registry admits no address). `DES-OPERATOR-CONSOLE` UNCHANGED, checked: a panel and rows within its existing rules, design first (`gen_config2.py`). |
+| 2026-11-17 (#921) | DES-PLAYWRIGHT-CLI-NOT-CHROME-DEVTOOLS AMENDED for the optional headed recipe, explicit display wrapper, pinned Electron example and deterministic rendering proof. DES-PER-TRIGGER-JOB-IMAGE, DES-HOST-BUDGET, DES-DOCTOR-RESULTS-PUBLISHED and DES-STORE-VERSION-WHEN-NEEDED UNCHANGED, checked: no new trigger setting, size rule, persisted field or migration. OpenShell 0.1.4 measured unsupported in both modes: identity-preserving setgid/setuid are refused by its child seccomp filter; CI pins that finding without relaxing the policy. |

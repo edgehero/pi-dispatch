@@ -813,7 +813,7 @@ test("the ephemeral and peer argv are the job builder's: every isolation flag, t
 	assert.ok(!peer.includes("--network=none"));
 	assert.deepEqual(peer.slice(-6), ["pi-job:x", "--eval", PEER_SCRIPT, "n", String(PEER_PORT), "90"]);
 	for (const script of [EPHEMERAL_SCRIPT, PEER_SCRIPT, CONNECT_SCRIPT]) assert.ok(!script.includes("${"), "constant: no host value in the text");
-	assert.deepEqual([...LIVE_CONTAINER_KINDS], ["probe", "pin", "ephemeral", "peer1", "peer2"]);
+	assert.deepEqual([...LIVE_CONTAINER_KINDS], ["probe", "pin", "ephemeral", "peer1", "peer2", "display"]);
 });
 
 test("ephemeralVerdict: a survivor, a held name, a reused container or residue fails; anything unfinished is not read back", () => {

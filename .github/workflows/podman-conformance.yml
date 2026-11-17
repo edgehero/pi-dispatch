@@ -76,6 +76,9 @@ jobs:
       - name: Build the job image
         run: docker build -f image/Dockerfile -t pi-job:ci .
 
+      - name: Build the optional display image
+        run: node image/build-display.mjs pi-job:ci pi-job:display-ci
+
       # netavark and aardvark-dns give a rootless named network its DNS, which is how a job reaches the proxy by name;
       # catatonit is what `--init` runs as PID 1; uidmap carries newuidmap. Installed explicitly rather than assumed
       # from the runner image, so a missing one fails here rather than as a confusing verdict later.
@@ -146,6 +149,18 @@ jobs:
           name="$(as-pdjob podman image inspect --format '{{index .RepoTags 0}}' pi-job:ci)"
           echo "loaded as $name"
           echo "PI_JOB_IMAGE=$name" >> "$GITHUB_ENV"
+          docker save pi-job:display-ci | as-pdjob podman load
+          display_image="$(as-pdjob podman image inspect --format '{{index .RepoTags 0}}' pi-job:display-ci)"
+          echo "PI_DISPLAY_IMAGE=$display_image" >> "$GITHUB_ENV"
+
+      - name: Headed Chromium under rootless Podman's job boundary (issue 921)
+        run: as-pdjob node .github/scripts/display-smoke.mjs "$PI_DISPLAY_IMAGE" /tmp/pi-display-podman.png podman
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: display-podman
+          path: /tmp/pi-display-podman.png
 
       # Issue #458: on Podman 4.9, which this runner ships, a job network's teardown disconnects the proxy and, with no
       # other bridge container running, tears this account's rootless network helper down under it: every egress job

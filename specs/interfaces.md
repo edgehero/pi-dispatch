@@ -1917,6 +1917,22 @@ refactor apart.
 
 ## INT-CONTAINER-RUNTIME-CONTRACT
 
+- **Optional graphical image (#921)**: `display` in `dev.pi-dispatch.capabilities` declares executable
+  `pi-display` and `pi-display-probe`, Xvfb, fonts and headed Chromium. `image/Dockerfile.display`, built by
+  `image/build-display.mjs`, adds the helpers to the inspected shipped base and preserves every inherited
+  capability. It does not replace the runner entrypoint or add a paid-job admission gate. `pi-display <command>
+  [args...]` waits at most ten seconds for Xvfb's allocated-display readiness pipe, exposes no TCP listener,
+  gives its child DISPLAY, returns that child's status and kills its owned process groups at exit. Display
+  failure returns 70, a missing command 127, interruption 143. `pi-display-probe <output.png>` runs the fixed
+  800 by 600 page through headed Chromium, clicks it and checks decoded PNG pixels (the changed green region,
+  white background and text-region contrast). Its one JSON result is `{v:1,ok,reason}`; a success additionally
+  holds `width`, `height`, `sha256` and optional nonnegative `memoryPeak`/`pidsPeak` readings. Failure reasons
+  are the closed `DISPLAY_REASONS` list in `worker/src/display-probe.mjs`. Host parsing is bounded to 2048
+  characters, the PNG to 1 MiB, and checks dimensions and digest against the returned file. This is observation
+  of trusted image code, not attestation against an image that fabricates results, and not OCR. The public
+  `verify-image.sh` uses doctor's same offline probe for this capability. The normal shipped image does not
+  declare it; the optional Electron example does not extend the capability's Chromium guarantee.
+
 - **Merge-policy capability (#908)**: `mergePolicy` in `dev.pi-dispatch.capabilities` declares that the
   runner understands the fixed worker-written merge-policy input and selects the appropriate system floor.
   A job with `mayMerge: true` on an image lacking it refuses before spend as
@@ -3945,6 +3961,29 @@ sibling rather than an extension of the GitHub one for the same reason.
   naming each unpinned one for removal and telling the operator never to remove a pinned one.
 
 ## INT-LIVE-PROBE-CONTRACT
+
+**Optional display measurement (#921).** In addition to the backend-declaration probes below, `doctor --live`
+inspects the deployment image and trigger image/venue pairs, deduplicated within each blessed venue. Only a
+`display` declaration starts the graphical probe. On local and native Podman it re-decides the job user against
+that image, re-reads endpoint locality, and runs `runDisplayProbe` through the same job argv builder, deployment
+default size, host CPU ceiling, cgroup parent and private-mount relabelling. No project size is inferred. The
+container uses `--network=none`, `env: {}`, fixture mounts, `--entrypoint sleep` and a bounded exec of
+`pi-display-probe /workspace/display.png`; HOME/DISPLAY are resolved inside the helper, never forwarded from the
+host. There is no credential, token mint, budget reservation, agent invocation or fix action. The container
+name is `pi-dispatch-live-display-<pid>-<nonce>`, included in the existing dead-owner sweep. Its keeper ends
+after 90 seconds, exec after 60 seconds, and runtime output after 16 KiB; partial starts are removed by ID or
+the unique name, fixtures in `finally`, and cleanup failure is named. All container writers are stopped before
+the host checks or reads the screenshot; failed removal retains the fixture and refuses the read. The image's pixel verdict plus the host's
+PNG bounds, regular-file check, dimensions and digest establish the rendering result. Declared rendering failure
+is a hard doctor failure; unavailable runtime, locality or fixture is explicitly unverified. OpenShell images
+are inspected in their configured engine but reported `venue-not-probed`: a Docker probe cannot measure their
+Landlock/policy path. The advisory lane separately runs the fixture through the actual copy and bind adapters,
+asserting OpenShell 0.1.4's measured startup refusal together with EPERM on identity-preserving setgid/setuid.
+A changed refusal or a successful display fails that expectation and requires revisiting the documented support.
+Doctor removes its screenshot; the standalone smoke scripts may export their fixed-page PNG for inspection.
+These are image checks in the existing published `live` section, not new backend properties or stored fields.
+The original eight-property read-back below remains scoped to PI_JOB_IMAGE; only this optional check covers
+trigger images too.
 
 **operator → docker daemon, to read the backend declarations back (issues #278 and #344).** A SIBLING of
 `INT-CONTAINER-RUNTIME-CONTRACT` and `INT-SANDBOX-CONTRACT`, never an amendment to either: the first governs a
@@ -14916,3 +14955,4 @@ and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` are UNCHANGED, checked: no file shape, wr
 | 2026-11-16 (#918, part 2) | AMENDED `INT-TRIGGERS-FILE-CONTRACT`: `run.privateEndpoints` (1 to 8 ids, any trigger but a watch rule, near misses refused, an `AUTHORED_NARROWING_FIELDS` row, the live recheck before every attempt, no tool may set it) at triggers version 7 and job data version 8; the version lines also name #922's 6 and 7, which they lacked. AMENDED `INT-EGRESS-POLICY-CONTRACT`: the grant file, its write and read back at attach, the subnet clear, removal before the network, the boot sweep. AMENDED `INT-PRIVATE-ENDPOINTS-FILE-CONTRACT`: grants LANDED on `local` and `podman`, the live reload and the one read per pickup. AMENDED `INT-RUN-HISTORY-FILE-CONTRACT`: the conditional `privateEndpoints: { ids, basis }` and the four refusal reasons. AMENDED `INT-CONTAINER-RUNTIME-CONTRACT`: `PI_DISPATCH_ENDPOINT_<ID>_HOST` and `_PORT`, a reserved and non-secret prefix. AMENDED `INT-DEFER-REASON-KEY`: `private-endpoint` and `private-endpoint-host`. `INT-MODEL-ENDPOINTS-FILE-CONTRACT` UNCHANGED, checked: the cross-file rule landed in part 1, and its live reload now applies it too. `INT-HOST-REGISTRY-CONTRACT` UNCHANGED, checked: the heartbeat field is part 4. |
 | 2026-11-16 (#918, part 3) | AMENDED `INT-LIVE-PROBE-CONTRACT`: `jobToJobIsolation` also tries the proxy at its address on peer2's network, failing `proxy-cross` when peer1 reaches it, since a private endpoint grant is named after that address. AMENDED `INT-EGRESS-POLICY-CONTRACT`, the names table: four private endpoint probes per declared endpoint on a granted canary network. AMENDED `INT-PRIVATE-ENDPOINTS-FILE-CONTRACT`: Status names part 3, and the OpenShell venues keep refusing a granted job in this release. `INT-DOCTOR-RESULTS-KEY` UNCHANGED, checked: the new lines take derived ids in the `egress` section; no named id is added. |
 | 2026-11-16 (#918, part 4) | `INT-HOST-REGISTRY-CONTRACT` UNCHANGED, checked: no heartbeat field is added for private endpoints; the registry admits no address, and the console shows this deployment folder's own declaration, saying that other hosts' copies are not published. `INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked: the run page reads `privateEndpoints` through the worker's own `recordedPrivateEndpoints`. |
+| 2026-11-17 (#921) | INT-CONTAINER-RUNTIME-CONTRACT AMENDED with the optional display image contract; INT-LIVE-PROBE-CONTRACT AMENDED with image-specific graphical probes and the display sweep namespace. INT-DOCTOR-RESULTS-KEY, INT-TRIGGERS-FILE-CONTRACT, INT-RUN-HISTORY-FILE-CONTRACT and INT-RUNNER-EXIT-CODE-PROTOCOL UNCHANGED, checked: ordinary live check records and the existing image selection suffice; no paid-job result or stored shape changes. The OpenShell lane asserts the measured identity-call refusal, not a graphical pass. |

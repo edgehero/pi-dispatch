@@ -8478,6 +8478,23 @@ test("doctor --live reads relabel from the collection's own daemon answer, end t
 	}
 });
 
+test("the graphical probe's runtime output bound covers stdout and stderr together", async () => {
+	const { EventEmitter } = await import("node:events");
+	let killed = false;
+	const spawn = () => {
+		const child = new EventEmitter();
+		child.stdout = new PassThrough();
+		child.stderr = new PassThrough();
+		child.kill = () => { killed = true; };
+		setImmediate(() => { child.stdout.write("1234"); child.stderr.write("5678"); child.stdout.write("9"); child.stdout.end("ignored"); });
+		return child;
+	};
+	const result = await liveRunVia(spawn, { maxOutputBytes: 8 })(["exec"], { timeoutMs: 1000 });
+	assert.equal(result.ended, "output-limit");
+	assert.equal(killed, true);
+	assert.equal(result.stdout + result.stderr, "12345678");
+});
+
 test("doctor's two docker runners spawn the bin they are given, and docker when none is (#354)", async () => {
 	const { EventEmitter } = await import("node:events");
 	const spawned = [];
@@ -8510,7 +8527,8 @@ test("doctor's two docker runners spawn the bin they are given, and docker when 
 	const named = [...doctorSource.matchAll(/(?<!function )(?:docker|live)RunVia\(spawn[^)\n]*\{ bin: ([^ }]+)/g)].map((m) => m[1]);
 	// Issue #448 added one, ahead of them in the file: the local section's `systemctl show podman.service`, read only where a
 	// local job runs on rootful Podman's Docker API on this host.
-	assert.deepEqual(named, ['"systemctl"', '"podman"', '"podman"', '"podman"'], "only the podman venue's reads and the rootful unit read name a bin");
+	// #921 adds the display probe's locality re-read in this account's Podman.
+	assert.deepEqual(named, ['"systemctl"', '"podman"', '"podman"', '"podman"', '"podman"'], "only the podman venue's reads and the rootful unit read name a bin");
 	// Issue #433: and the spawns that name `podman` directly, by their first two arguments: the trigger-named image and its
 	// entrypoint, `--fix`'s pull and tag of the default image, and the egress proxy's state. One more site picks its
 	// runtime from a variable, the in-image gh probe, which is docker's with `local` and podman's without it. A new podman
@@ -11218,7 +11236,8 @@ test("docker's egress canary prints and spawns exactly what it did before it was
 		const got = await dockerCanaryPinRun(scenario, t);
 		assert.deepEqual(got.collection, want.collection, `${scenario}: the collection's spawns moved`);
 		assert.equal(got.text, want.text, `${scenario}: the output moved`);
-		assert.deepEqual([got.code, got.total], [want.code, want.total], `${scenario}: exit code and spawn count`);
+		// #921 adds one final capability inspection; these older images declare no display, so no probe follows.
+		assert.deepEqual([got.code, got.total], [want.code, want.total + 1], `${scenario}: exit code and spawn count`);
 		// JSON has no `undefined`, so the capture wrote a signal-less kill as null.
 		if ("kills" in want) assert.deepEqual([got.killsBeforeBound, got.kills?.map((k) => k ?? null) ?? null], [want.killsBeforeBound, want.kills], `${scenario}: the probe's bound and its kill`);
 	}
@@ -13824,4 +13843,23 @@ test("the canary sweep removes a dead run's private endpoint grant before its ne
 	const again = podmanCanaryDaemon({ nets: { [net]: [["pi-dispatch-egress-proxy", "running"]] } });
 	await sweepStaleCanaryNetworks({ run: again.run, pid: 1, isAlive: () => false, endpoint: { local: true }, bin: "podman", grants: { remove: () => { throw Object.assign(new Error("EACCES"), { code: "EACCES" }); } } });
 	assert.ok(again.calls.includes(`network rm ${net}`), "the network still goes: the next attach in its subnet clears the grant");
+});
+
+
+test("doctor --live fails a declared display that cannot start, and plain doctor never runs it (#921)", async () => {
+	for (const live of [false, true]) {
+		const { out, text } = capture();
+		const calls = [];
+		const displayId = "d".repeat(64);
+		const plan = {
+			"docker image inspect --format={{.Id}}": { code: 0, output: "sha256:" + displayId + "|1.5.2|github|display,anyUid" },
+			"docker run --name=pi-dispatch-live-display-": { code: 0, output: displayId },
+			["docker exec " + displayId + " pi-display-probe"]: { code: 2, output: JSON.stringify({ v: 1, ok: false, reason: "display-start-failed" }) },
+			...liveOk(), ...green,
+		};
+		const code = await runDoctor(liveEnv(), { ...ghDeps(out, plan, calls), live, ...instantClock(), liveFs: liveFsAs(1001), jobUserIdentity: LINUX_1001, isAlive: () => false, pid: 7, nonce: "n" });
+		assert.equal(code, live ? 1 : 0, text());
+		assert.equal(calls.some((c) => c.args.includes("pi-display-probe")), live);
+		if (live) assert.match(text(), /✗ display on local:.*display-start-failed/);
+	}
 });

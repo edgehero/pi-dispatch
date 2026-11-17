@@ -682,6 +682,26 @@ jobs:
         # PROVED here, never skipped as it is on a host without Landlock (Docker Desktop's LinuxKit kernel).
         run: VERIFY_REQUIRE_LANDLOCK=1 ./image/verify-image.sh "$IMAGE_REF"
 
+      - name: Headed Chromium and Electron under the job boundary (issue 921)
+        run: |
+          node image/build-display.mjs "$IMAGE_REF" pi-job:display-ci
+          node .github/scripts/display-smoke.mjs pi-job:display-ci "$RUNNER_TEMP/display/chromium.png"
+          docker build --pull=false -f image/Dockerfile.display-electron --build-arg BASE=pi-job:display-ci -t pi-job:electron-ci .
+          node .github/scripts/display-smoke.mjs pi-job:electron-ci "$RUNNER_TEMP/display/electron.png" local electron
+          printf 'FROM pi-job:display-ci\nUSER root\nRUN rm /usr/bin/Xvfb\nUSER pi\n' | docker build --pull=false -t pi-job:display-broken-ci -
+          if node .github/scripts/display-smoke.mjs pi-job:display-broken-ci > "$RUNNER_TEMP/display/broken.log" 2>&1; then
+            cat "$RUNNER_TEMP/display/broken.log"
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/display/broken.log"
+          grep -q 'FAIL .*display-start-failed' "$RUNNER_TEMP/display/broken.log"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: display-docker
+          path: ${{ runner.temp }}/display/
+
       # --- DES-JOB-SIZE-IN-THE-ENV (issue #865) ---
       # The size suggestion says how many CPUs an OOM-killed run's tools counted at least, by libuv's own arithmetic
       # (worker/src/size-suggest.mjs `seenCpusOf`), read at one libuv release: 1.52.0 changed it under one CPU. A Node
