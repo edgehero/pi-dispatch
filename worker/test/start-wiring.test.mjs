@@ -1072,17 +1072,22 @@ test("a Podman-only boot can sweep its file secrets without Docker's whole-host 
 });
 
 test("an OpenShell mode switch sweeps both modes' dead file roots only after every boot reaper succeeds (#919)", { skip }, async () => {
+	const nowMs = 1_800_000_000_000;
 	for (const current of ["openshell", "openshell-bind"]) {
 		for (const localReaped of [true, false]) {
 			const previous = current === "openshell" ? "openshell-bind" : "openshell";
 			const jobsDir = tempDir("secret-file-mode-switch-");
 			const jobDir = join(jobsDir, "job-switch");
 			mkdirSync(jobDir);
+			// Boot also ages orphaned job directories. Keep that clock and the fixture together: the kernel's
+			// mtime does not move with CI's shifted Date, so a fresh directory otherwise looks 399 days old.
+			utimesSync(jobDir, new Date(nowMs), new Date(nowMs));
 			const staged = stageSecretFiles(jobDir, { KEY: "mode-switch-secret" }, { backend: previous, owner: { pid: 424242, start: null } });
 			let reaps = 0;
 			const swept = [];
 			await runStart({
 				env: { PI_BACKENDS: `local,${current}`, PI_JOBS_DIR: jobsDir },
+				now: () => nowMs,
 				makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(),
 				makeReaper: () => async () => ({ reaped: localReaped }),
 				makeOpenshellReaper: () => async () => { reaps++; return { reaped: true }; },
