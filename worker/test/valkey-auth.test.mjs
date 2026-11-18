@@ -454,7 +454,8 @@ test("the CLI's VALKEY_URL is this shell's, else the deployment .env's, a disagr
 	}
 	const cli = readFileSync(join(REPO, "worker", "src", "cli.mjs"), "utf8");
 	assert.equal((cli.match(/cliValkeyUrl\(env\)/g) ?? []).length, 2, "run, and run --trigger (#505)");
-	assert.equal((cli.match(/await killSwitchUrls\(argv\.slice\(\d\), env\)/g) ?? []).length, 2, "pause/resume/status, and cancel (round 2: both URLs on a disagreement)");
+	// Issue #932: status passes its one extra option (`--target`) as a third argument; the resolver is the same.
+	assert.equal((cli.match(/await killSwitchUrls\(argv\.slice\(\d\), env(?:, cmd === "status" \? \{ target: \{ type: "string" \} \} : \{\})?\)/g) ?? []).length, 2, "pause/resume/status, and cancel (round 2: both URLs on a disagreement)");
 	// And end to end: `pi-dispatch status` from that folder dials the folder's Valkey (nothing answers there, so it says
 	// where it tried), not 6379.
 	const { main } = await import("../src/cli.mjs");

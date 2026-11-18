@@ -76,6 +76,9 @@ const USAGE = `pi-dispatch — run pi coding-agent flows on your own folders
   pi-dispatch pause        stop taking new jobs (durable; survives worker restart)
   pi-dispatch resume       resume taking jobs
   pi-dispatch status       show paused state + job counts
+  pi-dispatch status --target <owner/repo#12|group/project!7>
+                           what the queue holds for one issue or pull request: its jobs queued or running,
+                           and for each flow whether a new request would be joined to a job or dropped
   pi-dispatch capacity [--since 24h|7d|30d] [--host <name>] [--json] [--valkey-url <url>]
                            how busy each host was: busy and idle time, slots in use, memory and CPU
                            promised and used, waits and projects, read from the run records (jobs only)
@@ -326,9 +329,17 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 		// START spending, refuses until the operator names which. Every URL is printed through `urlShown`: a password in
 		// one never reaches the terminal.
 		const { urlShown } = await import("./connection.mjs");
-		const picked = await killSwitchUrls(argv.slice(1), env);
+		// `status --target <item>` (issue #932): what the queue holds for one issue or pull request. Read-only, so it
+		// takes the kill switch's URL rule and shows every URL it resolves to, as plain `status` does.
+		const picked = await killSwitchUrls(argv.slice(1), env, cmd === "status" ? { target: { type: "string" } } : {});
 		if (picked.error) return fail(picked.error);
-		if (picked.positionals.length > 0) return fail(`pi-dispatch ${cmd} takes no argument but --valkey-url <url> (got ${picked.positionals.map((p) => JSON.stringify(p)).join(" ")})`);
+		if (picked.positionals.length > 0) return fail(`pi-dispatch ${cmd} takes no argument but ${cmd === "status" ? "--target <item> and " : ""}--valkey-url <url> (got ${picked.positionals.map((p) => JSON.stringify(p)).join(" ")})`);
+		let item = null;
+		if (picked.values?.target !== undefined) {
+			const { parseSemanticItem } = await import("./forges.mjs");
+			item = parseSemanticItem(picked.values.target);
+			if (item === null) return fail("--target takes an issue or pull request as the queue names it: owner/repo#12, or group/project!7 for a GitLab merge request or an Azure DevOps pull request");
+		}
 		if (picked.urls.length > 1) {
 			if (cmd === "resume") return fail(`${picked.disagreement}: resume would start jobs on one of them, so it names neither. Say which: pi-dispatch resume --valkey-url <url>`);
 			process.stderr.write(`warning: ${picked.disagreement}: ${cmd === "pause" ? "pausing both" : "showing both"}\n`);
@@ -336,7 +347,9 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 		let code = 0;
 		for (const url of picked.urls) {
 			const label = picked.urls.length > 1 ? `[${urlShown(url)}] ` : "";
-			code = Math.max(code, await killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal, now, controlClients }));
+			code = Math.max(code, item !== null
+				? await targetStatus(item, url, { env, write, label, urlShown, valkeyRefusal, now, controlClients })
+				: await killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal, now, controlClients }));
 		}
 		return code;
 	}
@@ -538,7 +551,54 @@ export async function workerHint(queue, { timeoutMs = 2000 } = {}) {
 }
 
 /** One Valkey's pause, resume or status: every queue the deployment drains there (issue #57). Returns the exit code. */
+/**
+ * `pi-dispatch status --target <item>` (issue #932, target-status.mjs): one JSON line, `{ item, jobs, windows, complete,
+ * unavailableQueues }`, over every queue the kill switch would act on (`deploymentQueueNames`), the same discovery and
+ * the same loud degraded read (`fleet`, `discoveryIncomplete`).
+ */
+async function targetStatus(item, url, { env, write, label, urlShown, valkeyRefusal, now, controlClients }) {
+	const { parseConnection } = await import("./connection.mjs");
+	const { makeQueue } = await import("./queue.mjs");
+	const { readTargetStatus } = await import("./target-status.mjs");
+	const refused = await valkeyRefusal(url, env);
+	if (refused) return fail(refused);
+	const { names, blind, incomplete } = await deploymentQueueNames(url, controlClients);
+	const queues = [];
+	try {
+		for (const name of names) queues.push((controlClients.makeQueue ?? makeQueue)(parseConnection(url, { failFast: true }), { name }));
+		const read = await readTargetStatus(queues, item, { now: () => Number(now()) });
+		const degraded = blind !== null || incomplete;
+		write(`${JSON.stringify({ ...(label ? { valkey: urlShown(url) } : {}), ...read, ...(degraded ? { complete: false, discoveryIncomplete: true } : {}), ...(blind ? { fleet: blind } : {}) })}\n`);
+	} catch (error) {
+		return fail(error?.valkeyRefused ? error.message : `could not reach Valkey at ${urlShown(url)}: ${(await import("./valkey-auth.mjs")).valkeyDownHint(url)}\n  ${error.message}`);
+	} finally {
+		for (const q of queues) await q.close().catch(() => {});
+	}
+	return 0;
+}
+
+/**
+ * Every queue this deployment drains, the kill switch's discovery (issue #57): the registry's live hosts and BullMQ's
+ * own meta keys, read concurrently on one budget, failing open to the shared queue and saying so (`blind`, the
+ * registry's error, and `incomplete`, a keyspace scan that did not finish).
+ */
+async function deploymentQueueNames(url, controlClients) {
+	const { makeRedisClient } = await import("./connection.mjs");
+	const { fleetQueueNames, discoverHostQueuesReporting, unionQueueNames } = await import("./queue.mjs");
+	const { readLiveHosts } = await import("./host-registry.mjs");
+	const probe = (controlClients.makeRedisClient ?? makeRedisClient)(url);
+	probe.on?.("error", () => {});
+	const [fleet, existing] = await Promise.all([
+		readLiveHosts(probe, { timeoutMs: FLEET_READ_TIMEOUT_MS }).catch((error) => ({ unreachable: error?.message ?? String(error) })),
+		discoverHostQueuesReporting(probe, { timeoutMs: FLEET_READ_TIMEOUT_MS }),
+	]);
+	probe.disconnect?.();
+	return { names: unionQueueNames(fleetQueueNames(fleet?.hosts), existing.names), blind: fleet?.unreachable ?? null, incomplete: Boolean(existing?.incomplete), existing };
+}
+
 async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal, now, controlClients }) {
+	// Its own discovery, not `deploymentQueueNames`: `status` also reads consumer health (issue #924) through the same
+	// probe before it is closed, so this keeps the probe open across both reads.
 	const { parseConnection, makeRedisClient } = await import("./connection.mjs");
 	const { fleetQueueNames, discoverHostQueuesReporting, unionQueueNames, makeQueue } = await import("./queue.mjs");
 	const { readLiveHosts } = await import("./host-registry.mjs");

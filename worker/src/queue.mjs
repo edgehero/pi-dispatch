@@ -8,7 +8,7 @@ import { semanticWindowDisposition } from "./semantic-window-policy.mjs";
 import { DUPLICATE_NOTICE_SUFFIX, duplicateNoticeData } from "./duplicate-notice.mjs";
 import { assertJudgedConnection, givesUp, onValkeyError } from "./connection.mjs";
 import { chainedJobId, localJobId, deliveryJobId, gitlabDeliveryJobId, forgeDeliveryJobId, manualCanaryJobId, manualTriggerJobId } from "./job-id.mjs";
-import { targetSeparator } from "./forges.mjs";
+import { semanticItemOf } from "./forges.mjs";
 import { PR_CLOSE_ACTIONS } from "./triggers.mjs";
 import { consoleAnswerBy, consoleDraftOf } from "./console-answer.mjs";
 import { JOB_DATA_VERSION_FIELD, withJobDataVersion } from "./job-data-version.mjs";
@@ -759,7 +759,7 @@ function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigg
 	// `cmd:` prefix keeps a command named X from coalescing against a flow named X -- `:` is outside
 	// the skill-name charset, so no real flow can spell the prefixed form -- and a flow job's key
 	// stays byte-identical to before the feature.
-	const dedupId = `${repo}${targetSeparator(kind, target?.type)}${target.number}:${flowSlot}${fork !== undefined ? `:fork:${fork.id}` : ""}${replica !== undefined ? `:r${replica}` : ""}`;
+	const dedupId = `${semanticItemOf(kind, repo, target)}:${flowSlot}${fork !== undefined ? `:fork:${fork.id}` : ""}${replica !== undefined ? `:r${replica}` : ""}`;
 	return { jobId, data, dedupId };
 }
 

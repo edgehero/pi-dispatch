@@ -97,6 +97,18 @@ export const JOB_FIELD = Object.freeze({ name: "name", data: "data", timestamp: 
 /** The stored semantic key (scripts.js removeDeduplicationKey, removeDeduplicationKey-1.lua). */
 export const semanticWindowKeyOf = (queue, id) => queueKeyOf(queue, `de:${id}`);
 
+/**
+ * The SCAN pattern for every semantic window of one item, `de:<item>:*` (issue #932, `pi-dispatch status --target`).
+ * The caller's item holds no glob character (`parseSemanticItem`), so it is matched as it is.
+ */
+export const semanticWindowItemPatternOf = (queue, item) => semanticWindowKeyOf(queue, `${item}:*`);
+
+/** The dedup id a semantic window key holds, the inverse of `semanticWindowKeyOf`, or null for any other key. */
+export function semanticIdOfKey(queue, key) {
+	const prefix = semanticWindowKeyOf(queue, "");
+	return typeof key === "string" && key.startsWith(prefix) && key.length > prefix.length ? key.slice(prefix.length) : null;
+}
+
 // Issue #899: a completed refusal may still own its TTL key. Read its actual hash, not queue.add's returned Job:
 // job.js create builds that object from the INCOMING data, then replaces only its id with the surviving id.
 // getState-8.lua judges completion by membership in the completed set, and failure (attempts used up) by the failed
