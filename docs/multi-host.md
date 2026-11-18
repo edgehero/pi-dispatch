@@ -637,3 +637,32 @@ Its generation must match the current worker start: an older worker restarting o
 make the previous process's occupancy look fresh.
 The page reads at most 64 hosts and names any omitted observations. Missing or unreadable data never means
 zero use. Deleting these fields cannot admit a job or release a held slot.
+
+## Queue consumer health
+
+A fresh heartbeat proves that the process can publish. It does not prove that its queue consumers are running.
+`pi-dispatch status`, doctor, Fleet and the host page report those separately. The shared job consumer, this
+host's routed-job consumer (when configured), and its sandbox-control consumer each report lifecycle,
+connection state, last fetch and last job taken. The host page shows the observations; timestamps are facts,
+not a claim that an empty queue should have taken a recent job.
+
+Idle, busy, paused and rate-limited consumers are expected states. Starting and reconnecting are shown without
+calling them stalled. A terminal connection or unexpectedly ended loop causes one supervised shutdown with
+exit code 1, bounded to 30 seconds, so the installed service restarts the worker. Check its logs for
+`consumer_failed` and, if cleanup exceeded that bound, `consumer_shutdown_timeout`. A worker launched by hand
+needs its caller to restart it. Running paid jobs retain their existing interruption and recovery rules.
+
+A fresh observation with no successful queue progress for over two minutes is diagnosed as stalled only when
+that consumer's own unpaused queue also has work over two minutes overdue. This diagnosis does not restart
+the process automatically. Inspect the worker service logs and restart that host if it has not recovered.
+An empty queue, a busy processor or an intentional pause is not diagnosed from the age of its last job.
+
+Older workers, stale rows, an unreadable registry and unrecognised observations report unknown. Doctor warns
+and says that configuration was checked but consumer health was not confirmed; a known failed or stalled
+consumer fails doctor even on a single host. The heartbeat cannot override that failure. The console reads
+these facts with its existing polling; status and doctor read them when invoked.
+
+Retention recursively deletes detached directory trees asynchronously, so queue timers can run while a large
+workspace is removed. Short filesystem metadata operations remain synchronous; this is not a hard latency
+guarantee for a failing disk. The original #924 incident is not proven to have been caused by one uninterrupted
+59-second pause. Upgrade and rollback details are in [the upgrade guide](upgrading.md).

@@ -98,8 +98,10 @@ def res(label, pct, value, tone="running"):
 HOSTS = card("Hosts", f"""<ul class="hosts">
   {hostrow("build3", "attention", "podman (default)", "3m", "attention", "rhf",
            res("Memory", 16384/24576, "16 of 24 GiB") + res("CPU", 8/12, "8 of 12 cores") +
+           '<span class="tone-attention">Queue consumer health is unknown; a process heartbeat alone does not prove consumption.</span>' +
            f'<span>Running <span class="code">gh-e802</span> 1h 20m, <span class="code">gh-4a7e</span> orphaned hold 5h 0m</span><span>Routes: yes</span><span class="tinted tone-attention">{ic("attention", "ic ic--sm")}Heartbeat late: 3m (expected within 1m)</span>')}
-  {hostrow("mini1", "ok", "local (default)", "46s", "", "rrff",
+  {hostrow("mini1", "failed", "local (default)", "46s", "", "rrff",
+           '<span class="tone-failed">Queue consumer stopped; the worker needs a restart.</span>' +
            res("Memory", 6144/16384, "6 of 16 GiB") + res("CPU", 3/8, "3 of 8 cores") +
            '<span>Running <span class="code">gh-c41f</span> 41m, <span class="code">gh-b3d7</span> 12m</span><span>Routes: yes</span>')}
   {hostrow("mini2", "ok", "local (default), openshell, openshell-bind", "46s", "", "rf",
@@ -236,7 +238,7 @@ Fleet is where an operator keeps the fleet healthy and unsticks the queue: the k
 - **Active jobs.** Every running job with its project, target, host, start, run time and progress (phases or turns where reported, stripes where the worker reports none). An orphaned hold such as gh-4a7e is flagged in yellow with what it costs ("build3 runs 1 job where it could run 2") and *Free the slot*.
 - **Held.** Each held job with its conditions as a checklist (time, CI green) and whether each is met.
 - **Failed jobs.** The reason sentence and next step inline; Retry is a paid act (amber outline), Remove is destructive (red outline); both also come in bulk.
-- **Hosts.** Slots as dots, memory in GiB and CPU in cores as bars, heartbeat (late beyond 1 minute), venues and routes.
+- **Hosts.** Slots as dots, memory in GiB and CPU in cores as bars, heartbeat (late beyond 1 minute), venues and routes. Consumer health is separate from the process heartbeat: responding, stopped, stalled or unknown, with each queue's role and last activity on the host page when published.
 - **Doctor.** Failing, warning and passing counts per host, each check with its fix; a stale result is flagged; a host with no result says how to get one.
 - **Venues.** One row per venue: where it is blessed and the default, two of its properties (egress, local folders) as enforced, asserted or absent, what it serves (steering, live transcript, recovery) as yes, no or with the image, and who holds the credentials. Each value is a word with a glyph, never colour alone. The footer names build3's floor and links to all 14 properties on the venue's own page.
 

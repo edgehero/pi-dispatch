@@ -251,7 +251,7 @@ test("verify reports where a chain whose head was reaped starts, instead of fail
 	assert.match(verifyConsoleAudit({ logsDir: forged.logsDir }).broken.reason, /first row has no prev but seq 7/);
 });
 
-test("the reaper removes month files past retention by mtime, keeps the newest and every other name", () => {
+test("the reaper removes month files past retention by mtime, keeps the newest and every other name", async () => {
 	const { logsDir, dir } = setup();
 	fs.mkdirSync(dir, { recursive: true });
 	for (const name of ["2026-07.jsonl", "2026-08.jsonl", "2026-09.jsonl", "notes.txt", "2026-7.jsonl"]) fs.writeFileSync(join(dir, name), "");
@@ -259,12 +259,12 @@ test("the reaper removes month files past retention by mtime, keeps the newest a
 	for (const name of ["2026-07.jsonl", "2026-08.jsonl", "2026-09.jsonl", "notes.txt", "2026-7.jsonl"]) fs.utimesSync(join(dir, name), old, old);
 	fs.utimesSync(join(dir, "2026-08.jsonl"), (T0 - 10 * DAY) / 1000, (T0 - 10 * DAY) / 1000);
 	const events = [];
-	makeConsoleAuditReaper({ logsDir, retentionDays: 30, now: () => T0, log: (e, f) => events.push([e, f]) })();
+	await makeConsoleAuditReaper({ logsDir, retentionDays: 30, now: () => T0, log: (e, f) => events.push([e, f]) })();
 	assert.deepEqual(fs.readdirSync(dir).sort(), ["2026-08.jsonl", "2026-09.jsonl", "2026-7.jsonl", "notes.txt"], "the newest file holds the head and stays, however old");
 	assert.deepEqual(events, [["reaped_console_audit", { file: "2026-07.jsonl" }]]);
-	makeConsoleAuditReaper({ logsDir, retentionDays: 0, now: () => T0 + 1000 * DAY })();
+	await makeConsoleAuditReaper({ logsDir, retentionDays: 0, now: () => T0 + 1000 * DAY })();
 	assert.equal(fs.readdirSync(dir).length, 4, "0 keeps everything");
-	makeConsoleAuditReaper({ logsDir: tempDir("pd-console-audit-empty-"), retentionDays: 30, now: () => T0 })();
+	await makeConsoleAuditReaper({ logsDir: tempDir("pd-console-audit-empty-"), retentionDays: 30, now: () => T0 })();
 });
 
 test("mirrorRow pushes then trims console:audit, and never throws", async () => {

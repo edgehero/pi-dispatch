@@ -1,4 +1,5 @@
 import { chmodSync, chownSync, lstatSync, mkdirSync, readFileSync, readdirSync, renameSync, rmdirSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { rm } from "node:fs/promises";
 import { isAbsolute, join, relative } from "node:path";
 import { sanitizeJobId } from "./run-history.mjs";
 import { scrubCredentials } from "./redact.mjs";
@@ -106,7 +107,7 @@ export function isSandboxTombstone(name) {
 
 /**
  * How old a tombstone must be before doctor calls it STUCK rather than a delete in progress (issue #446). A tombstone
- * normally lives for exactly one `rmSync`: seconds for a large clone (200k files took about 10 s, measured under
+ * normally lives for exactly one recursive removal: seconds for a large clone (200k files took about 10 s, measured under
  * #446). One still there ten minutes later is a tree the worker cannot delete, which is not going to resolve itself.
  */
 export const SANDBOX_TOMBSTONE_STUCK_MS = 10 * 60 * 1000;
@@ -421,6 +422,7 @@ export function makeSandboxReaper({
 	sandboxDir,
 	retentionHours,
 	fs = defaultFs,
+	remove = rm,
 	log = () => {},
 	now = () => Date.now(),
 	listRunning = async () => [],
@@ -446,7 +448,7 @@ export function makeSandboxReaper({
 	// The stuck tombstones already said, and when (`SANDBOX_TOMBSTONE_RELOG_MS`). Only rate-limits a log line; losing it
 	// on a restart costs one repeated line.
 	const stuckSaid = new Map();
-	return async function reapSandboxes() {
+	return async function reapSandboxes({ stopped = () => false } = {}) {
 		if (!sandboxDir) return;
 		let names;
 		try {
@@ -485,6 +487,7 @@ export function makeSandboxReaper({
 		// The pinned tombstones this pass could not put back, for ONE retry after the main loop (PR #457's final check).
 		const heldPinned = [];
 		for (const name of names) {
+			if (stopped()) return;
 			if (!isSandboxTombstone(name)) {
 				runs.push(name);
 				continue;
@@ -510,7 +513,11 @@ export function makeSandboxReaper({
 		// comes first now, then the reads, then the question to the runtimes, handed the reads.
 
 		const reads = new Map();
-		for (const name of names) reads.set(name, readRetained(fs, join(sandboxDir, name)));
+		for (const name of names) {
+			if (stopped()) return;
+			reads.set(name, readRetained(fs, join(sandboxDir, name)));
+			await new Promise((resolve) => setImmediate(resolve));
+		}
 
 		let running = new Set();
 		try {
@@ -540,6 +547,7 @@ export function makeSandboxReaper({
 		// each pass retries the delete (`clearTombstone`) while doctor names it.
 		const blocked = new Set();
 		for (const name of names) {
+			if (stopped()) return;
 			const dir = join(sandboxDir, name);
 			// Set ONLY around a removal, so `blocked` means what its name says. The first version added every
 			// throw in this loop, which is a different set: a directory that VANISHED between the listing and
@@ -551,7 +559,8 @@ export function makeSandboxReaper({
 				// lstat: a symlink here resolves on the host, and this tree is agent-written.
 				if (!fs.lstatSync(dir).isDirectory()) {
 					removing = true;
-					fs.rmSync(dir, { recursive: true, force: true });
+					// A non-directory unlink is bounded and must not yield before acting on the lstat above.
+					fs.rmSync(dir, { force: true });
 					log("reaped_sandbox", { entry: name, reason: "not-a-directory" });
 					continue;
 				}
@@ -590,6 +599,7 @@ export function makeSandboxReaper({
 					continue;
 				}
 				const fresh = readRetained(fs, dir);
+				if (stopped()) return;
 				if (fresh.transient || !sameRead(read, fresh)) {
 					log("sandbox_reaper_skipped", { entry: name, reason: fresh.transient ? "manifest-unread" : "manifest-changed" });
 					continue;
@@ -623,7 +633,7 @@ export function makeSandboxReaper({
 					continue;
 				}
 				try {
-					fs.rmSync(tomb, { recursive: true, force: true });
+					await remove(tomb, { recursive: true, force: true });
 				} catch (err) {
 					// A tombstone that would not go STAYS one: the run is already unopenable, and the next pass retries.
 					stuckSaid.set(tombName, at);
@@ -632,12 +642,8 @@ export function makeSandboxReaper({
 					continue;
 				}
 				log("reaped_sandbox", { entry: name, reason: verdict.reason });
-				// Yield after each tree. Free at boot, where nothing is in flight; NOT free since issue
-				// #292 put this on a timer beside draining jobs, because a retained directory is a
-				// repository clone and `rmSync` is synchronous, so deleting a set of them back to back
-				// wedges the event loop for the whole set. `index.mjs` runs with `maxStalledCount: 0`
-				// against BullMQ's 30s lock, so a block past the renewal window FAILS a paid job. This
-				// bounds the contiguous block to ONE directory, which is the part that cannot be yielded.
+				// Also yield with injected removers that finish immediately. The recursive removal itself now
+				// yields too: a single large clone used to exceed the paid job's lock-renewal window (#924).
 				await new Promise((resolve) => setImmediate(resolve));
 			} catch (err) {
 				if (removing) blocked.add(name);
@@ -650,7 +656,11 @@ export function makeSandboxReaper({
 		// (`no-manifest`) in this same pass. Retried here, after the loop and before the network sweep (whose fresh
 		// listing then sees the run back), through the same `clearTombstone`: its reads, its restore that displaces only an
 		// empty directory, its rule that never deletes a live pin, and its once-per-period line when the name is still taken.
-		for (const name of heldPinned) await clearTombstone(name, pass);
+		for (const name of heldPinned) {
+			if (stopped()) return;
+			await clearTombstone(name, pass);
+		}
+		if (stopped()) return;
 
 		// The session networks, after the directories. Reached only when `listRunning` ANSWERED and the
 		// directory listing was read, which is the same precondition the directory pass has: without either,
@@ -751,7 +761,7 @@ export function makeSandboxReaper({
 			}
 		} else {
 			try {
-				fs.rmSync(path, { recursive: true, force: true });
+				await remove(path, { recursive: true, force: true });
 				stuckSaid.delete(name);
 				log("reaped_sandbox", { entry: name, reason: "tombstone" });
 			} catch (err) {

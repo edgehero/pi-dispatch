@@ -23,3 +23,9 @@
  * registry is that `HGETALL host:h:mac-mini-1` is readable by a human.
  */
 export const WORKER_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
+
+/** The control queue is host-bound too; pure readers need its name without loading sandbox preparation. */
+export function sandboxPrepareQueueName(host) {
+	if (!WORKER_NAME_RE.test(host ?? "")) throw new Error("sandbox control queue requires a checked host");
+	return `pi-sandbox-prepare@${host}`;
+}

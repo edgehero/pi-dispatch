@@ -315,6 +315,12 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
 
 ## OQ-007 — Run-history, sandbox and session retention: RESOLVED (a daily sweep; `PI_SWEEP_INTERVAL_HOURS=0` restores boot-only)
 
+**Issue #924 follow-up:** retention deletion now yields through asynchronous recursive removal of committed
+tombstones, and consumers have supervised terminal failure plus independent health observations. The original
+59-second sweep does not establish a 59-second uninterrupted stall; a controlled minute-long pause recovered
+on the pinned queue libraries. Synchronous metadata I/O can still block on a failing filesystem, and the exact
+incident cause remains unproven. See `DES-CONSUMER-LIVENESS` and its recorded experiment.
+
 - **Status**: **RESOLVED 2026-09-07 — a timer-driven sweep, and WIDENED from one store to three.**
   Warranted, at a default cadence of 24 hours, for the supported deployment shape: a service unit that
   restarts only on failure (`deploy/worker.service`).
@@ -346,7 +352,7 @@ Status values: `OPEN` (unanswered) · `WATCH` (not a question — a known-incomi
   those three to FAULTS and give each sweep's per-entry verdicts their own names.) The timer is registered in
   `extraClosers` beside the queues, the registry and the three watches, because
   `DES-WATCHERS-CLOSE-WITH-THE-WORKER` established that **unref'd is not cleaned up** and this handle
-  holds an `rmSync`.
+  owns deletion work (recursive removal is asynchronous since #924).
 - **AMENDED (issue #337, 2026-09-21), and it is the one-grep property above that constrained the naming.**
   The sandbox reaper now sweeps a second kind of object, the session network of a run whose retained
   directory is gone, and the obvious name for its per-network outcome would have been a
@@ -2847,3 +2853,4 @@ adversarial passes did.
 | 2026-11-02 (#792, implemented) | `OQ-050`'s amended limit (one writing driver plus at most three consented read-only watchers) is built, and its pending marker is removed. The threat model stands as written: a watcher sees what is typed, which is why watching starts off and the roster stays on the driver's screen. Evidence: `gateway/test/two-process.test.mjs` (real processes, real sockets, live Valkey), `gateway/test/browser/workbench-browser.mjs` and the permanent TLS browser flow on Docker and rootless Podman. Container isolation, credentials, money and run slots, retries, the exit protocol, the native opener and its monitor and End, preparation admission, retention policy, the run-record schema, fork and answer authority, console CSP, origin and cookies, and OQ-051: UNCHANGED, checked. |
 | 2026-11-03 | Issue #800. **`OQ-003` AMENDED, status unchanged**: "well under a pipe's atomic-write size" is refuted for a line that can now take 7,680 bytes. Over `PIPE_BUF` it can interleave with another writer, fail its MAC and settle at the floor, which fails closed. And the residual for code inside the runner process now names what is on the line: it can be any string, measured, so the worker's rebuild of `loaded` is the boundary there. |
 | 2026-11-17 (#921) | OQ-012 AMENDED (#921): optional display images now have an actual rendering measurement, but a trusted image can fabricate it and OpenShell is not credited by a Docker probe. The accepted image trust residual remains. |
+| 2026-11-18 | Issue #924. `OQ-007` amended for asynchronous recursive deletion and the measured limits of the consumer-liveness incident evidence. |

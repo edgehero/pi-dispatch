@@ -388,6 +388,22 @@ as `subscription_auth_hold`. See [subscription renewal](subscription-auth.md#adm
 
 Release numbers come from the git tags.
 
+### Next release
+
+#### Queue consumer health and retention (#924)
+
+Restart workers after upgrading. New workers add version-1 `consumers` observations to their expiring host
+registry row; doctor, status and the console must also be upgraded to show them. Older workers remain readable
+but report unknown consumer health. An exact 5.3.3 or 5.4.0 row without observations produces a `state.older` warning;
+it retires when the upgraded worker publishes or the old row expires. A retained observation from another
+process generation is ignored. Older readers ignore the new field. No queue, job or run-record migration is needed.
+
+Session and fork-source sweeps may leave `.retired-<pid>-<epoch-ms>-<sequence>` directories while deletion is
+in progress or after interruption. These names mean deletion was committed; they are not recoverable sessions
+and should not be restored under live keys. New workers retry removal. A rollback leaves these reserved names
+untouched, so they may need removal by their exact paths after the worker stops. Sandbox `.reap-*` behavior and
+pin restoration remain compatible. See [consumer health](multi-host.md#queue-consumer-health) and [backup.md](backup.md).
+
 ### 5.4.0
 
 #### Random model selection (#922)

@@ -1684,14 +1684,14 @@ export async function startWorker(
 	// Issue #504 part B: the allocation audit files (`allocations/YYYY-MM.jsonl`) on the same retention, which the log
 	// reaper above never reaches (it reaps the top-level `.log` and `.json` only). Never throws, so no double wrap.
 	const reapAllocationLogs = makeAllocationLogReaper({ logsDir: config.logsDir, retentionDays: config.logRetentionDays, log });
-	reapAllocationLogs();
+	await reapAllocationLogs();
 	// Issue #640: the operator console's audit files (`console-audit/YYYY-MM.jsonl`). The worker runs it, not the console,
 	// because the worker always runs and the console may never; it never reaps the newest file (the chain's head). Never
 	// throws. Issue #761: on its OWN retention (`PI_CONSOLE_AUDIT_RETENTION_DAYS`, which inherits the run history's when
 	// unset), so shortening the run history for privacy does not shorten the security trail. The periodic sweep below
 	// re-runs this closure, so boot and every tick read the one value.
 	const reapConsoleAudit = makeConsoleAuditReaper({ logsDir: config.logsDir, retentionDays: config.consoleAuditRetentionDays, log });
-	reapConsoleAudit();
+	await reapConsoleAudit();
 
 	// REQ-RESURRECTABLE-SANDBOX: sweep retained per-job directories past their window, so what `cleanup`
 	// kept for re-opening stays bounded. Third in the row and deliberately its own sweep -- a different
@@ -1941,7 +1941,7 @@ export async function startWorker(
 	// now covers the DISK half and the open gate covers the INPUT half, which is the one that matters
 	// (OQ-007, RESOLVED).
 	try {
-		sessionStore.reapSessions();
+		await sessionStore.reapSessions();
 	} catch (err) {
 		log("session_reaper_skipped", { reason: scrubCredentials(err?.message) });
 	}
@@ -2534,6 +2534,8 @@ export async function startWorker(
 	// up before its own row does is correct: the row appears when Valkey does.
 	void registry.start({
 		version: WORKER_VERSION,
+		// Bound to THIS registry generation, not another Date.now sample. Before construction the first beat is unknown.
+		consumers: (facts) => worker?.consumerSupervisor?.snapshot(facts.startedAt) ?? "",
 		image: config.jobImage,
 		imageDigest: bootImage.imageDigest ?? "",
 		piVersion: bootImage.piVersion ?? "",
@@ -3579,7 +3581,7 @@ export async function startWorker(
 	try {
 		// Human preparation uses its own bounded control worker, outside the paid processor and its slot ledgers.
 		const prepareSandbox = createSandboxPreparerFn({ config, env, forgeFor, readTriggers: () => readFileSync(onceTriggersFile, "utf8"), projects: () => projects.current, limits: () => scopedLimits.current, now });
-		const sandboxControl = startSandboxPrepareWorkerFn({ connection: valkeyConn(), host: config.workerName, config, prepare: prepareSandbox, now, log });
+		const sandboxControl = startSandboxPrepareWorkerFn({ connection: valkeyConn(), host: config.workerName, config, prepare: prepareSandbox, now, log, supervisor: worker.consumerSupervisor });
 		// Its close waits for the preparation it is running, which nothing aborts first, so that step gets the longer bound.
 		settleCloseOf(sandboxControl, { closeBoundMs: SANDBOX_CONTROL_CLOSE_BOUND_MS });
 		extraClosers.push(sandboxControl);
@@ -3925,8 +3927,8 @@ export async function startWorker(
 		// active list could change no verdict. A run waiting for its recovery is bounded the same way: the host-lost sweep
 		// gives up on it at RECOVERY_MAX_WAIT_MS, which IS that TTL. (The processor's running list holds job ids, not run
 		// ids, so passing it would also name a `.rN` job's store wrongly.)
-		const reapForkSources = forkStore ? () => forkStore.sweep() : null;
-		const reapCheckpoints = workspaceCheckpointer ? async () => void (await workspaceCheckpointer.sweep()) : null;
+		const reapForkSources = forkStore ? (options) => forkStore.sweep(options) : null;
+		const reapCheckpoints = workspaceCheckpointer ? async (options) => void (await workspaceCheckpointer.sweep(options)) : null;
 		const reapHostLost = async () => void (await sweepHostLost());
 		// NOT awaited: the host-lost sweep's first command waits for Valkey however long it is away, and the boot must not.
 		// Each settles into its own log line; neither can reject unhandled.
@@ -3944,7 +3946,7 @@ export async function startWorker(
 					{ name: "console_audit", reap: reapConsoleAudit },
 					{ name: "touch_outbox", reap: () => touchOutbox.repair() },
 					{ name: "sandbox", reap: reapSandboxes },
-					{ name: "session", reap: () => sessionStore.reapSessions() },
+					{ name: "session", reap: (options) => sessionStore.reapSessions(options) },
 					...(reapForkSources ? [{ name: "fork_source", reap: reapForkSources }] : []),
 					{ name: "recovery_host_lost", reap: reapHostLost },
 					...(reapCheckpoints ? [{ name: "checkpoint", reap: reapCheckpoints }] : []),

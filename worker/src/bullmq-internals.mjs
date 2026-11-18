@@ -22,6 +22,54 @@
 /** The bullmq release every fact below was read from. The installed package must be this version (the pins test). */
 export const BULLMQ_VERIFIED_VERSION = "5.80.4";
 
+/**
+ * Observe the real consumer path (worker.js mainLoop calls _getNextJob, NOT public getNextJob). No scheduling
+ * logic is copied. waitForJob swallows connection errors and returns Infinity, which is not a successful read.
+ * processFn wraps the entire processor, including preflight, and retains the signal arity decided at construction.
+ * RedisConnection.init creates _client before its first await; waiting on .client would hide a failed startup.
+ * Pinned by consumer-supervision.test.mjs against the installed worker/redis-connection/ioredis-client files.
+ */
+export function observeConsumer(worker, events) {
+	for (const [method, before, after] of [
+		["_getNextJob", () => events.fetch(), () => {}],
+		["moveToActive", () => {}, () => events.success()],
+		["waitForJob", () => {}, (value) => { if (Number.isFinite(value)) events.success(); }],
+	]) {
+		const original = worker[method];
+		if (typeof original !== "function") continue;
+		worker[method] = async function (...args) {
+			before();
+			const value = await original.apply(this, args);
+			after(value);
+			return value;
+		};
+	}
+	const process = worker.processFn;
+	if (typeof process === "function") worker.processFn = async function (...args) {
+		events.taken();
+		try { return await process.apply(this, args); }
+		finally { events.finished(); }
+	};
+	const clients = [worker.connection?._client, worker.blockingConnection?._client].filter(Boolean);
+	const listeners = [];
+	for (const client of clients) for (const event of ["ready", "close", "reconnecting", "end"]) {
+		const fn = () => events.connection();
+		client.on(event, fn);
+		listeners.push(() => client.removeListener(event, fn));
+	}
+	return {
+		connection() {
+			const statuses = clients.map((c) => c.status);
+			if (statuses.includes("end")) return "ended";
+			if (statuses.length === 2 && statuses.every((s) => s === "ready")) return "ready";
+			if (statuses.some((s) => s === "reconnecting" || s === "close")) return "reconnecting";
+			return "starting";
+		},
+		rateLimited: () => worker.isRateLimited?.() === true,
+		close: () => { for (const remove of listeners) remove(); },
+	};
+}
+
 /** The key prefix every queue's keys share (queue-keys.js: `constructor(prefix = 'bull')`). */
 export const BULL_PREFIX = "bull";
 
@@ -150,6 +198,32 @@ export const dueOfScore = (score) => {
 	const due = Math.floor(n / DELAYED_SCORE_SHIFT);
 	return Number.isSafeInteger(due) && due <= SCORE_DUE_MAX_MS ? due : null;
 };
+
+// Read only the next candidates' stamps, never Job.data. LINDEX -1 is the next FIFO candidate (moveToActive-11.lua
+// uses RPOPLPUSH); the priority head is ZRANGE 0 0 (moveJobFromPrioritizedToActive.lua uses ZPOPMIN).
+const CONSUMER_DEMAND = `
+local paused = redis.call("HEXISTS", KEYS[1], "${META_FIELD.paused}")
+local cutoff = tonumber(ARGV[1]) - tonumber(ARGV[2])
+local due = redis.call("ZRANGE", KEYS[4], 0, 0, "WITHSCORES")
+local overdue = 0
+if #due == 2 and math.floor(tonumber(due[2]) / ${DELAYED_SCORE_SHIFT}) < cutoff then overdue = 1 end
+local waiting = redis.call("LINDEX", KEYS[2], -1)
+local priority = redis.call("ZRANGE", KEYS[3], 0, 0)
+for _, id in ipairs({waiting or "", priority[1] or ""}) do
+  if id ~= "" then
+    local stamp = tonumber(redis.call("HGET", ARGV[3] .. id, "${JOB_FIELD.timestamp}"))
+    if stamp and stamp < cutoff then overdue = 1 end
+  end
+end
+return {paused, overdue}
+`;
+
+export async function readConsumerDemand(redis, name, { now, graceMs }) {
+	const keys = [QUEUE_KEY.meta, QUEUE_KEY.wait, QUEUE_KEY.prioritized, QUEUE_KEY.delayed].map((type) => queueKey(name, type));
+	const result = await redis.eval(CONSUMER_DEMAND, keys.length, ...keys, now, graceMs, queueKey(name, ""));
+	if (!Array.isArray(result) || result.length !== 2 || result.some((n) => n !== 0 && n !== 1)) return null;
+	return { paused: result[0] === 1, overdue: result[1] === 1 };
+}
 
 /** The prefix of every job a job scheduler mints (job-scheduler.js `getSchedulerNextJobId`, addJobScheduler-11.lua). */
 export const SCHEDULER_JOB_PREFIX = "repeat";

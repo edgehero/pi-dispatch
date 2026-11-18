@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { isSandboxTombstone, listSandboxes, makeSandboxReaper, pinSandbox, readManifest, retainJobDir, sandboxDeadline, sandboxEntryName, sandboxExpiry, sandboxTombstoneAge, SANDBOX_MANIFEST, SANDBOX_TOMBSTONE_PREFIX, SANDBOX_TOMBSTONE_RELOG_MS, SANDBOX_TOMBSTONE_STUCK_MS } from "../src/sandbox-store.mjs";
+import { isSandboxTombstone, listSandboxes, makeSandboxReaper as realMakeSandboxReaper, pinSandbox, readManifest, retainJobDir, sandboxDeadline, sandboxEntryName, sandboxExpiry, sandboxTombstoneAge, SANDBOX_MANIFEST, SANDBOX_TOMBSTONE_PREFIX, SANDBOX_TOMBSTONE_RELOG_MS, SANDBOX_TOMBSTONE_STUCK_MS } from "../src/sandbox-store.mjs";
+const makeSandboxReaper = (options) => realMakeSandboxReaper({ ...options, ...(options.fs && !options.remove ? { remove: async (path, opts) => options.fs.rmSync(path, opts) } : {}) });
+
 
 const HOUR = 3600000;
 const DAY = 86400000;

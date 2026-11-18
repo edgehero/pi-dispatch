@@ -120,6 +120,8 @@
     "./capacity-cli": "./src/capacity-cli.mjs",
     "./live-jobs": "./src/live-jobs.mjs",
     "./host-telemetry": "./src/host-telemetry.mjs",
+    "./consumer-health": "./src/consumer-health.mjs",
+    "./consumer-status": "./src/consumer-status.mjs",
     "./size-records": "./src/size-records.mjs",
     "./host-budget": "./src/host-budget.mjs",
     "./backend-conformance": "./src/backend-conformance.mjs",

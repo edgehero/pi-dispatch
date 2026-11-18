@@ -29,14 +29,9 @@ import { scrubCredentials } from "./redact.mjs";
  * divergences from it are marked at their sites, because a reader who knows that file will otherwise
  * "fix" them back.
  *
- * WHAT THIS COSTS THAT THE BOOT SWEEP DID NOT, and it is the one genuinely new failure mode here. All
- * three reapers delete SYNCHRONOUSLY (`rmSync`, `unlinkSync`), which was free at boot because nothing was
- * in flight, and is not free on a timer beside draining jobs: a long delete blocks the event loop, and
- * `index.mjs` sets `maxStalledCount: 0` against BullMQ's 30s lock, so a loop blocked past the renewal
- * window FAILS a paid job rather than silently re-running it. The direction is safe and the outcome is
- * still new. Two things bound it: this loop yields between stores, and the sandbox reaper -- the only one
- * that deletes whole trees, each a repository clone -- yields between entries. What remains is one
- * directory's own `rmSync`, which is why that residual is stated here rather than implied.
+ * Recursive deletes run asynchronously after a store has detached the expired name (#924). Flat-file reapers
+ * yield between expiry-and-unlink decisions. The short metadata decisions stay synchronous so an await cannot
+ * delete a replacement written under the same name. One slow metadata syscall remains a host-filesystem risk.
  */
 
 /** The default cadence. A named constant on HOST_BEAT_MS's precedent, not a literal at the call site. */
@@ -77,7 +72,7 @@ export const SWEEP_INTERVAL_MAX_HOURS = 168;
  * wall-clock-dependent test, which is the exact class issue #293 exists to eliminate, landing in the same
  * change that adds #293's guard.
  */
-export function makeRetentionSweep({ reapers, intervalMs, log = () => {}, setIntervalFn = setInterval, clearIntervalFn = clearInterval }) {
+export function makeRetentionSweep({ reapers, intervalMs, log = () => {}, now = Date.now, setIntervalFn = setInterval, clearIntervalFn = clearInterval }) {
 	let timer = null;
 	let closed = false;
 	let inFlight = null;
@@ -86,7 +81,7 @@ export function makeRetentionSweep({ reapers, intervalMs, log = () => {}, setInt
 		if (closed) return;
 		// DIVERGENCE from host-registry, which has no overlap guard: a beat is three bounded Redis writes
 		// against a 15s interval and two overlapping beats write the same values, while a sweep is
-		// unbounded filesystem I/O with `rmSync` in it. At the 24h default this is close to unreachable --
+		// unbounded filesystem I/O with deletes in it. At the 24h default this is close to unreachable --
 		// `listRunningSandboxes` alone is capped at 5s by its own exec timeout -- but it is what keeps a
 		// short PI_SWEEP_INTERVAL_HOURS against a slow network filesystem from stacking sweeps that race
 		// each other's deletes.
@@ -94,16 +89,16 @@ export function makeRetentionSweep({ reapers, intervalMs, log = () => {}, setInt
 			log("retention_sweep_overlapped", {});
 			return;
 		}
-		const startedAt = Date.now();
+		const startedAt = now();
 		inFlight = (async () => {
 			for (const entry of reapers) {
+				if (closed) break;
 				try {
 					// Destructured INSIDE the try: a malformed entry must be one log line like any other
 					// reaper fault, not a rejection out of a function the interval calls with `void`.
 					const { name, reap } = entry;
-					await reap();
-					// Between stores, so one tick is never a single uninterruptible block. See the note on
-					// synchronous deletes in the module docblock.
+					await reap({ stopped: () => closed });
+					// Between stores, so stores with no eligible entries still yield.
 					await new Promise((resolve) => setImmediate(resolve));
 				} catch (err) {
 					// The existing per-store event names, reused rather than invented: an operator greps one
@@ -118,7 +113,7 @@ export function makeRetentionSweep({ reapers, intervalMs, log = () => {}, setInt
 		})();
 		try {
 			await inFlight;
-			log("retention_sweep", { ms: Date.now() - startedAt });
+			log("retention_sweep", { ms: now() - startedAt, ...(closed ? { stopped: true } : {}) });
 		} catch {
 			// Unreachable today: every reaper is wrapped above. Here because the interval calls this with
 			// `void`, so ANY rejection is an unhandled rejection, and Node kills the process for one by
@@ -148,9 +143,8 @@ export function makeRetentionSweep({ reapers, intervalMs, log = () => {}, setInt
 
 		/**
 		 * `closed` is set FIRST, for host-registry's own reason: a sweep already past the top-of-function
-		 * check must not `rmSync` after the closer has reported done. Then the in-flight sweep is drained,
-		 * so a shutdown never leaves a half-deleted retained workspace behind a worker that has already
-		 * said it stopped cleanly.
+		 * check must not start another store after close. Reapers also check it between entries. The in-flight
+		 * delete drains up to the bound; timing out cannot cancel fs.rm. A restart reaps any detached remainder.
 		 *
 		 * IDEMPOTENCE COMES FROM NULLING THE TIMER, not from an `if (closed) return` at the top. There was
 		 * one here, and a mutation pass proved it pinned nothing: with `timer` already null the second call

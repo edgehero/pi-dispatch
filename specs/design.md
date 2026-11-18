@@ -2546,6 +2546,39 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 - **Traces to**: `DES-SHUTDOWN-RELEASES-THE-SHARED-CLIENT`, `DES-WATCHERS-CLOSE-WITH-THE-WORKER`,
   `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`
 
+## DES-CONSUMER-LIVENESS
+
+- **Decision (#924):** supervise the shared job worker, the optional host job worker and the sandbox-control
+  worker as one process. Construct with `autorun: false`, attach observations, then explicitly run. Every
+  invocation of `run()`, including a local resume, is observed. An unexpected return or rejection, or either
+  queue connection reaching terminal `end`, initiates one infrastructure shutdown. A recoverable socket
+  close/reconnect, local pause and deliberate close do not. The failure drain stops local pickup, uses the
+  existing cancellation/cleanup path and exits 1 within 30 seconds even if queue close never resolves.
+  The service manager performs the restart. A bare command exits for its caller to restart.
+- **Evidence:** BullMQ 5.80.4's consumer uses `_getNextJob`, `moveToActive` and `waitForJob`; the public
+  `getNextJob` is not its loop. `waitForJob` catches connection failures and returns Infinity, so only a finite
+  result counts as successful progress. The ordinary and blocking ioredis 5.11.1 clients can independently end.
+  These assumptions live only in `bullmq-internals.mjs`, with tests against the installed pinned artifacts.
+- **Observation:** the processor wrapper counts the whole preflight as busy and forwards its abort signal.
+  Actual fetch attempts, successful queue operations and jobs taken have separate stamps. Elapsed ages use
+  the producer's monotonic clock; a reader adds the registry's TTL-derived age. A last-taken time alone is
+  never a watchdog: an empty queue can be healthy indefinitely. Paused, busy, rate-limited, starting and
+  reconnecting consumers are distinct from a failed consumer. Stalled requires both stale successful
+  progress and overdue work on that consumer's own unpaused queue. No backlog-triggered restart ships.
+- **Bounded reader:** doctor, status and the console share at most 64 distinct queue-demand reads under one
+  two-second deadline. They inspect the next FIFO/priority candidates' timestamps and the oldest delayed
+  score, without loading job payloads or changing any queue. A missing/failed read cannot prove a stall.
+- **Incident evidence:** the 59-second retention sweep in #924 is a total duration, not proof of one
+  uninterrupted event-loop block. Controlled 60-second blocks on Node 22.19.0 with pinned Valkey 8.1 and Node 22.23.3 with local
+  Valkey 9.1.3 (both BullMQ 5.80.4 and ioredis 5.11.1) recovered all three harmless consumers, due work
+  and a recurring schedule.
+  It did not reproduce the incident. Forced reconnect and terminal-end tests distinguish those paths;
+  no connector change is justified by that experiment. CI also exercises the repository's pinned Valkey.
+- **UNCHANGED, checked:** `CONST-RETRY-INFRA-ONLY`, `CONST-BUDGET-BEFORE-TOKENS`, paid workers'
+  `maxStalledCount: 0`, job admission gates, pause state and scheduler reconciliation. Restarting the
+  process does not authorize another paid execution or introduce a second queue consumer owner.
+- **Traces to:** `REQ-CONSUMER-LIVENESS`, `INT-HOST-CONSUMERS`, `DES-HOST-REGISTRY`.
+
 ## DES-RETENTION-SWEEPS-ON-A-TIMER
 
 - **Decision** (issue #292, resolving `OQ-007`): the three host-side retention reapers — the run history
@@ -2567,7 +2600,7 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     reaper. The test asserts zero constructions rather than counting effects, because "nothing happened"
     is a much weaker claim than "the thing does not exist".
   - **Registered in `extraClosers`, not resting on its unref.** `DES-WATCHERS-CLOSE-WITH-THE-WORKER`
-    established that unref'd is not cleaned up, and this handle holds an `rmSync`: a tick landing during
+    established that unref'd is not cleaned up, and this handle owns deletion work: a tick landing during
     drain could delete a retained workspace behind a worker that already reported a clean shutdown.
     `close()` therefore also DRAINS an in-flight sweep. The suite's own shut-down canary waits 600ms, so a
     leaked daily timer would have been invisible in the tests and real in production — the failure mode is
@@ -2594,6 +2627,19 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 - **Traces to**: `DES-RUN-HISTORY-FLAT-FILES-NO-DB`, `DES-WATCHERS-CLOSE-WITH-THE-WORKER`,
   `DES-HOST-REGISTRY`, `REQ-RESURRECTABLE-SANDBOX`, `REQ-RESUMABLE-SESSION`,
   `INT-SANDBOX-CONTRACT`, `OQ-007`
+
+**Retention amendment (#924):** recursive sandbox, session and fork-source deletion uses asynchronous
+filesystem removal. The sandbox's fresh read, rename and read-back remain one synchronous decision; only its
+committed tombstone is removed asynchronously. Sessions take the existing promotion lock, recheck expiry
+and detach synchronously before releasing the lock; a later promotion may recreate the public name safely.
+Immutable fork sources are detached after archive removal. Session/fork tombstones use the reserved
+`.retired-<pid>-<epoch-ms>-<sequence>` namespace, which normal key readers never open; later sweeps retry them.
+A tombstone already committed is removed even when session retention subsequently becomes keep-forever.
+Flat-file reapers yield between entries, keeping each stat/unlink decision together. Sweeps remain
+non-overlapping and check stop between entries/stores; close retains its existing ten-second drain bound.
+Already-issued filesystem removal cannot be cancelled. Short metadata operations, directory listing,
+manifest reads and atomic renames remain synchronous and have no hard latency bound on a failing disk.
+The hourly/daily cadence, retention windows, pin/open holds and one-worker-per-root rule are unchanged.
 
 ## DES-GH-APP-MANIFEST-SETUP
 
@@ -19077,3 +19123,4 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-11-16 (#918, part 3) | `DES-PRIVATE-ENDPOINT-GRANTS` AMENDED: doctor's lines, the canary's four probes per endpoint on a granted canary network, the cross-address read in `--live`, and the rootless Podman lane's real-squid case are LANDED; the OpenShell venues keep refusing a granted job in this release, with the reason (not measured here; nothing unmeasured is shipped to the venue that holds the credentials). `DES-OPENSHELL-VENUE` UNCHANGED, checked: no rule is added to its policy. |
 | 2026-11-16 (#918, part 4) | `DES-PRIVATE-ENDPOINT-GRANTS` AMENDED: Status names the console's view, and why it shows only this folder's declaration (no heartbeat field: the host registry admits no address). `DES-OPERATOR-CONSOLE` UNCHANGED, checked: a panel and rows within its existing rules, design first (`gen_config2.py`). |
 | 2026-11-17 (#921) | DES-PLAYWRIGHT-CLI-NOT-CHROME-DEVTOOLS AMENDED for the optional headed recipe, explicit display wrapper, pinned Electron example and deterministic rendering proof. DES-PER-TRIGGER-JOB-IMAGE, DES-HOST-BUDGET, DES-DOCTOR-RESULTS-PUBLISHED and DES-STORE-VERSION-WHEN-NEEDED UNCHANGED, checked: no new trigger setting, size rule, persisted field or migration. OpenShell 0.1.4 measured unsupported in both modes: identity-preserving setgid/setuid are refused by its child seccomp filter; CI pins that finding without relaxing the policy. |
+| 2026-11-18 | Issue #924. Adds `DES-CONSUMER-LIVENESS`, amends `DES-RETENTION-SWEEPS-ON-A-TIMER` for asynchronous committed deletion and names synchronous metadata residuals. Incident causality remains unproven; controlled 60-second pause recovered. |

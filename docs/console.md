@@ -3001,3 +3001,8 @@ commands, paths, diffs or repository-agent definitions. See [Model roles](model-
 [Model failover](model-failover.md), [Proposals](model-proposals.md) and [Canaries](canary.md).
 
 Random model pools use the existing Model row: Fixed model, Ordered fallback or Random model pool. The pool has no primary or predicted next model. Models shows observed blockers; run details show the actual model and selection reason. Retry keeps the run's choice, while fresh Re-run chooses anew. Subscription-limit replacement follows the [random-pool rules](triggers.md#choosing-randomly-from-a-reviewed-pool).
+
+Fleet host rows and the host page show queue consumer health separately from the heartbeat (#924): responding,
+stopped, stalled or unknown. The host page includes per-consumer state, last fetch and last job taken. An older
+worker's missing observations are unknown; a fresh process heartbeat cannot clear a stopped consumer.
+See [queue consumer health](multi-host.md#queue-consumer-health) for the thresholds and restart behavior.

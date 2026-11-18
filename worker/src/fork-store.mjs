@@ -7,6 +7,7 @@
  */
 import { createHash, randomBytes } from "node:crypto";
 import * as fs from "node:fs";
+import { makeRetentionRemover } from "./retention-remove.mjs";
 import { hostname } from "node:os";
 import { join, resolve } from "node:path";
 import { DEFAULT_CHECKPOINT_LIMITS, makeWorkspaceCheckpointer, retryableStoreError } from "./workspace-checkpoint.mjs";
@@ -118,6 +119,7 @@ export function createForkStore({ dir, now = Date.now, limits = {}, hostName = h
 	const root = typeof dir === "string" && dir ? resolve(dir) : null;
 	const host = HOST.test(hostName) ? hostName : "unknown";
 	const archive = root ? checkpointer ?? makeWorkspaceCheckpointer({ storeDir: join(root, ".workspaces"), now, hostName: host, keepHistory: true, limits: { ttlMs: L.ttlMs, snapshotTimeoutMs: 5_000, ...checkpointLimits } }) : null;
+	const retire = makeRetentionRemover({ now });
 	const pathOf = (runId) => join(root, forkSourceKey(runId));
 	const pointsOf = (runId) => join(pathOf(runId), "points");
 	let archiveBusy = false;
@@ -310,12 +312,15 @@ export function createForkStore({ dir, now = Date.now, limits = {}, hostName = h
 		const restored = await archive.restore({ runId: options.runId, manifest: source.checkpoint, intoWorkspace });
 		return restored.refused || restored.skipped || restored.unavailable ? restored : { ok: true, ...restored };
 	}
-	async function sweep() {
+	async function sweep({ stopped = () => false } = {}) {
 		if (!root) return { removed: 0 };
 		let removed = 0;
 		try {
 			directory(root);
+			await retire.leftovers(root, { stopped });
 			for (const key of fs.readdirSync(root)) {
+				await new Promise((resolve) => setImmediate(resolve));
+				if (stopped()) break;
 				if (!KEY.test(key) || !fs.lstatSync(join(root, key)).isDirectory()) continue;
 				let runId, at;
 				try { const age = sweepAge(JSON.parse(readRegular(join(root, key, "manifest.json"), 8192)), key); if (age) ({ runId, at } = age); } catch {}
@@ -328,7 +333,8 @@ export function createForkStore({ dir, now = Date.now, limits = {}, hostName = h
 				if (at === undefined) at = fs.lstatSync(join(root, key)).mtimeMs;
 				if (now() - at <= L.ttlMs) continue;
 				if (runId) await archive.remove(runId);
-				fs.rmSync(join(root, key), { recursive: true, force: true });
+				if (stopped()) break;
+				await retire.remove(retire.detach(join(root, key)));
 				removed++;
 			}
 			return { removed };

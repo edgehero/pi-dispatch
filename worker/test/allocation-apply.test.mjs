@@ -536,7 +536,7 @@ test("governedDollars: min(row, allocation) with its source, synthetic ledgers f
 	assert.equal(other.projectDollars, null);
 });
 
-test("the audit file is YYYY-MM.jsonl under allocations/, appended; the reaper removes only aged files of that shape (#504)", () => {
+test("the audit file is YYYY-MM.jsonl under allocations/, appended; the reaper removes only aged files of that shape (#504)", async () => {
 	const logsDir = tempDir("pi-alloc-logs-");
 	const audit = makeAllocationAudit({ logsDir });
 	audit.append({ at: "2026-09-30T23:00:00.000Z", outcome: "refused" });
@@ -551,12 +551,12 @@ test("the audit file is YYYY-MM.jsonl under allocations/, appended; the reaper r
 	utimesSync(join(dir, "2026-09.jsonl"), old, old);
 	utimesSync(join(dir, "notes.txt"), old, old);
 	const reaped = [];
-	makeAllocationLogReaper({ logsDir, retentionDays: 30, now: () => NOW, log: (e, f) => reaped.push([e, f]) })();
+	await makeAllocationLogReaper({ logsDir, retentionDays: 30, now: () => NOW, log: (e, f) => reaped.push([e, f]) })();
 	assert.deepEqual(readdirSync(dir).sort(), ["2020-01.jsonl.d", "2026-10.jsonl", "notes.txt"]);
 	assert.deepEqual(reaped, [["reaped_allocation_log", { file: "2026-09.jsonl" }]]);
-	makeAllocationLogReaper({ logsDir, retentionDays: 0, now: () => NOW + 1000 * 24 * HOUR })();
+	await makeAllocationLogReaper({ logsDir, retentionDays: 0, now: () => NOW + 1000 * 24 * HOUR })();
 	assert.ok(readdirSync(dir).includes("2026-10.jsonl"), "0 keeps everything");
-	makeAllocationLogReaper({ logsDir: join(logsDir, "absent"), retentionDays: 30, now: () => NOW })();
+	await makeAllocationLogReaper({ logsDir: join(logsDir, "absent"), retentionDays: 30, now: () => NOW })();
 });
 
 test("one apply and its expiry give the same answers 399 days from now: every clock is injected (#504)", () => {

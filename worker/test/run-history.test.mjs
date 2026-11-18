@@ -1419,7 +1419,7 @@ test("makeFindPreviousRun NEVER throws: a throwing fs and hostile arguments all 
 // A fixed clock so the reaper's cutoff is deterministic: day 1000, in ms.
 const NOW = 1000 * 86400000;
 
-test("makeLogReaper unlinks files older than the window and keeps newer ones, logging one reaped_log per unlink", () => {
+test("makeLogReaper unlinks files older than the window and keeps newer ones, logging one reaped_log per unlink", async () => {
 	const logs = [];
 	const fs = makeFakeFs({
 		stream: makeFakeStream(),
@@ -1439,14 +1439,14 @@ test("makeLogReaper unlinks files older than the window and keeps newer ones, lo
 		log: (event, fields) => logs.push({ event, fields }),
 	});
 
-	assert.doesNotThrow(reapLogs);
+	await assert.doesNotReject(reapLogs);
 
 	assert.deepEqual(fs.unlinked.sort(), [join("/logs", "old.json"), join("/logs", "old.log")]);
 	const reaped = logs.filter((l) => l.event === "reaped_log").map((l) => l.fields.file).sort();
 	assert.deepEqual(reaped, ["old.json", "old.log"]);
 });
 
-test("makeLogReaper with retentionDays 0 keeps every record and log forever, and still sweeps a crash's record temporary file", () => {
+test("makeLogReaper with retentionDays 0 keeps every record and log forever, and still sweeps a crash's record temporary file", async () => {
 	const tmp = `gh-x.json.4242.${"0".repeat(12)}.tmp`;
 	const fs = makeFakeFs({
 		stream: makeFakeStream(),
@@ -1455,14 +1455,14 @@ test("makeLogReaper with retentionDays 0 keeps every record and log forever, and
 	});
 	const reapLogs = makeLogReaper({ logsDir: "/logs", retentionDays: 0, fs, now: () => NOW });
 
-	reapLogs();
+	await reapLogs();
 
 	// Keep-forever is a promise about records and logs: neither is even statted. A temporary file is neither.
 	assert.deepEqual(fs.calls.stat.map((p) => basename(p)), [tmp]);
 	assert.deepEqual(fs.unlinked, [join("/logs", tmp)]);
 });
 
-test("makeLogReaper sweeps a record temporary file by its own hour, keeps a young one and never touches another .tmp (#761)", () => {
+test("makeLogReaper sweeps a record temporary file by its own hour, keeps a young one and never touches another .tmp (#761)", async () => {
 	const logs = [];
 	const old = `gh-old.json.4242.${"a".repeat(12)}.tmp`;
 	const young = `gh-young.json.4242.${"b".repeat(12)}.tmp`;
@@ -1472,7 +1472,7 @@ test("makeLogReaper sweeps a record temporary file by its own hour, keeps a youn
 	const fs = makeFakeFs({ stream: makeFakeStream(), readdirNames: names, stats });
 	const reapLogs = makeLogReaper({ logsDir: "/logs", retentionDays: 30, fs, now: () => NOW, log: (event, fields) => logs.push({ event, fields }) });
 
-	reapLogs();
+	await reapLogs();
 
 	assert.equal(RECORD_TMP_MAX_AGE_MS, 60 * 60 * 1000);
 	// Its own age, not the 30-day window: a write lives for milliseconds, so an hour-old one is a crash's.
@@ -1481,7 +1481,7 @@ test("makeLogReaper sweeps a record temporary file by its own hour, keeps a youn
 	assert.deepEqual(logs, [{ event: "reaped_log", fields: { file: old } }]);
 });
 
-test("makeLogReaper isolates a per-file failure: one statSync throw does not abort the sweep", () => {
+test("makeLogReaper isolates a per-file failure: one statSync throw does not abort the sweep", async () => {
 	const logs = [];
 	const fs = makeFakeFs({
 		stream: makeFakeStream(),
@@ -1499,14 +1499,14 @@ test("makeLogReaper isolates a per-file failure: one statSync throw does not abo
 		log: (event, fields) => logs.push({ event, fields }),
 	});
 
-	assert.doesNotThrow(reapLogs);
+	await assert.doesNotReject(reapLogs);
 
 	assert.deepEqual(fs.unlinked, [join("/logs", "good.log")]); // the sweep continued past the bad entry
 	const skipped = logs.find((l) => l.event === "log_reaper_skipped");
 	assert.equal(skipped.fields.file, "bad.log");
 });
 
-test("makeLogReaper does not throw and logs log_reaper_skipped when the logs dir is missing", () => {
+test("makeLogReaper does not throw and logs log_reaper_skipped when the logs dir is missing", async () => {
 	const logs = [];
 	const fs = makeFakeFs({ stream: makeFakeStream(), readdirThrows: true });
 	const reapLogs = makeLogReaper({
@@ -1517,13 +1517,13 @@ test("makeLogReaper does not throw and logs log_reaper_skipped when the logs dir
 		log: (event, fields) => logs.push({ event, fields }),
 	});
 
-	assert.doesNotThrow(reapLogs);
+	await assert.doesNotReject(reapLogs);
 
 	assert.equal(fs.unlinked.length, 0);
 	assert.ok(logs.some((l) => l.event === "log_reaper_skipped"), "a missing dir is reported, not thrown");
 });
 
-test("makeLogReaper considers only .log/.json: other extensions are never statted or unlinked", () => {
+test("makeLogReaper considers only .log/.json: other extensions are never statted or unlinked", async () => {
 	const fs = makeFakeFs({
 		stream: makeFakeStream(),
 		readdirNames: ["notes.txt", "worker.out", "keep.log"],
@@ -1531,7 +1531,7 @@ test("makeLogReaper considers only .log/.json: other extensions are never statte
 	});
 	const reapLogs = makeLogReaper({ logsDir: "/logs", retentionDays: 7, fs, now: () => NOW });
 
-	reapLogs();
+	await reapLogs();
 
 	const statted = fs.calls.stat.map((p) => basename(p));
 	assert.ok(!statted.includes("notes.txt"), "a non-matching extension is never statted");
@@ -1539,7 +1539,7 @@ test("makeLogReaper considers only .log/.json: other extensions are never statte
 	assert.deepEqual(fs.unlinked, [join("/logs", "keep.log")]); // only the .log was swept
 });
 
-test("makeLogReaper skips a directory entry: an aged name whose isFile() is false is not unlinked", () => {
+test("makeLogReaper skips a directory entry: an aged name whose isFile() is false is not unlinked", async () => {
 	const logs = [];
 	const fs = makeFakeFs({
 		stream: makeFakeStream(),
@@ -1554,7 +1554,7 @@ test("makeLogReaper skips a directory entry: an aged name whose isFile() is fals
 		log: (event, fields) => logs.push({ event, fields }),
 	});
 
-	reapLogs();
+	await reapLogs();
 
 	assert.equal(fs.calls.stat.length, 1); // it was statted...
 	assert.equal(fs.unlinked.length, 0); // ...but the isFile() guard skipped the unlink

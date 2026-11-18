@@ -1,3 +1,5 @@
+import { consumerHealthOf, consumerHealthText } from "./consumer-health.mjs";
+import { readConsumerStatus } from "./consumer-status.mjs";
 import { createHash } from "node:crypto";
 /**
  * `pi-dispatch doctor` — preflight the host before the first job. Prints a ✓/⚠/✗ line per prerequisite
@@ -146,7 +148,7 @@ import { verifyConsoleAudit } from "./console-audit.mjs";
 import { OTHER } from "./priorities.mjs";
 import { ALLOC_PLAN_KEY, NO_ENVELOPE_FINGERPRINT } from "./allocation.mjs";
 import { assignCheckIds, buildDoctorRecord, doctorIntervalHours, publishRedactor, secretValuesIn } from "./doctor-results.mjs";
-import { olderStateFindings as olderStateFindingsReal, VALKEY_CONTAINER } from "./older-state.mjs";
+import { olderStateFindings as olderStateFindingsReal, olderConsumerHealthFindings, VALKEY_CONTAINER } from "./older-state.mjs";
 import { DOCTOR_PUBLISH_SKIPPED_PREFIX } from "./doctor-spawner.mjs";
 import { extensionsNotHere } from "./loaded-record.mjs";
 import { buildHostLoads, FLOW_INPUT_FIELDS, flowBasisOf, flowInputOf, flowProbes, flowTierOf, mcpRowsOf, pathIsThere, readOverlayExtensionRows, readOverlaySkillNames } from "./host-loads.mjs";
@@ -539,7 +541,7 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 	// Issue #481 (review round 3): and whether doctor accepted a credential only because an env-setup script may export it.
 	const expected = seams.expectedFromSetup ?? [];
 	const fromSetup = expected.length > 0 && seams.envSetupSeen ? { script: seams.envSetupSeen.script, names: [...new Set(expected)] } : null;
-	out(failed ? "\ndoctor: some checks failed: fix the above, then re-run.\n" : `\ndoctor: ready. ${startAdvice({ tookFromFile, envPath, platform, fromSetup, unit: tookFromFile || fromSetup ? installedWorkerUnit(seams, cwd) : null })}\n`);
+	out(failed ? "\ndoctor: some checks failed: fix the above, then re-run.\n" : `\ndoctor: ${checks.some((c) => c.id?.startsWith("fleet.consumers") && c.warn) ? "configuration checked; queue consumer health is not confirmed" : "ready"}. ${startAdvice({ tookFromFile, envPath, platform, fromSetup, unit: tookFromFile || fromSetup ? installedWorkerUnit(seams, cwd) : null })}\n`);
 	return failed ? 1 : 0;
 }
 
@@ -3455,6 +3457,18 @@ export async function collectChecks(shellVars, seams) {
 	// worker, after the peers block so the second is said on a single host too. Workers only: a receiver's status row is
 	// never a doctor input (INT-RECEIVER-STATUS-KEY).
 	checks.push(...fleetVersionChecks({ installed: PACKAGE_VERSION, self: selfRow, selfName: workerNameOf(declaredWorkerName), peers }));
+	// Consumption is checked on one host too. A process row and a reachable Valkey do not prove a live consumer.
+	const consumerStatuses = [...(fleet.consumerStatus ?? (fleet.hosts ?? []).map((h) => ({ name: h.name, ...consumerHealthOf(h) })))];
+	if (!consumerStatuses.some((h) => h.name === workerNameOf(declaredWorkerName))) consumerStatuses.push({ name: workerNameOf(declaredWorkerName), state: "unknown", rows: [] });
+	for (const health of consumerStatuses) {
+		const failed = health.state === "failed" || health.state === "stalled";
+		const detail = health.rows.filter((c) => c.verdict === "failed" || c.verdict === "stalled").map((c) => c.role).join(", ");
+		checks.push({ id: "fleet.consumers", ok: health.state === "healthy", ...(!failed && health.state !== "healthy" ? { warn: true } : {}),
+			label: `${printable(health.name)}: ${consumerHealthText(health)}${detail ? ` (${detail})` : ""}`,
+			...(health.state !== "healthy" ? { fix: failed ? "check the worker service logs; run pi-dispatch service restart on that host if it has not restarted itself" : "check the worker service and its version; new workers publish queue activity, older workers need an upgrade and restart" } : {}),
+		});
+	}
+
 	// Issue #761: a dollar window counter below what this host's own records settled into it (`doctorDollarWindows`).
 	// Re-opened here, where whether this command may talk to the Valkey is known, from the same Valkey at the address the
 	// worker pins.
@@ -5140,7 +5154,7 @@ export async function collectChecks(shellVars, seams) {
 	const valkeyUrlRead = !upValkeyRead.error && (!Object.hasOwn(upValkeyRead.keys, "VALKEY_URL") || upValkeyRead.keys.VALKEY_URL === valkeyUrl);
 	const valkeyContainer = valkeyContainerReader({ spawn, runTimeouts, asked: localUsed && dockerCode === 0 && valkeyUrlRead, cwd, valkeyUrl });
 	const handedOver = typeof fileExists === "function" && typeof cwd === "string" && cwd !== "" ? Boolean(fileExists(join(cwd, COMPOSE_VALKEY_OVERRIDE))) : null;
-	for (const f of await olderStateOf(seams, { cwd, home, valkeyContainer, handedOver })) {
+	for (const f of [...await olderStateOf(seams, { cwd, home, valkeyContainer, handedOver }), ...olderConsumerHealthFindings(fleet.hosts)]) {
 		checks.push({ id: "state.older", ok: false, warn: true, label: f.label, fix: f.fix });
 	}
 
@@ -9466,7 +9480,10 @@ async function defaultReadHosts(url) {
 	try {
 		const { readLiveHosts } = await import("./host-registry.mjs");
 		// readLiveHosts bounds each of its own commands.
-		return await withDoctorClient(url, (client) => readLiveHosts(client));
+		return await withDoctorClient(url, async (client) => {
+			const fleet = await readLiveHosts(client);
+			return { ...fleet, consumerStatus: await readConsumerStatus(client, fleet.hosts ?? []) };
+		});
 	} catch (err) {
 		return { unreachable: err?.message ?? "registry unreadable" };
 	}

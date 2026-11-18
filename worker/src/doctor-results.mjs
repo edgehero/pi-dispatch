@@ -156,6 +156,7 @@ export const NAMED_CHECK_IDS = Object.freeze([
 	"settings.unknown-keys",
 	"fleet.store-versions",
 	"fleet.versions",
+	"fleet.consumers",
 	"dollars.window-reset",
 	"state.older",
 	"egress.proxy",

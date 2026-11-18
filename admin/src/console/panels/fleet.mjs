@@ -1,4 +1,5 @@
 /** Fleet panels use only the reader's bounded projections, never running Job.data or a remote runtime. */
+import { consumerHealthText } from "@edgehero/pi-dispatch/consumer-health";
 import {
   DEFER_BUCKETS,
   DEFER_BUCKET_WORDS,
@@ -390,17 +391,18 @@ export const fleetHosts = wrap(
         const orphans = jobs.filter((j) => j.o).length;
         const known = completeHostJobs(h, s);
         const age = beatAgeOf(h);
+        const consumerFailed = ["failed", "stalled"].includes(h.consumerHealth?.state);
         const queue = list(s.queueCounts).find(
           (q) => q.queue === `pi-jobs@${h.name}`,
         );
-        return html`<li class="hostrow">${ui.dot(age !== null && age <= 60000 ? "ok" : "attention", { label: age === null ? "Heartbeat not known" : age <= 60000 ? "Beating" : "Heartbeat late" })}<span class="hostrow__n"><b>${linkHost(h.name)}</b><span>${
+        return html`<li class="hostrow">${ui.dot(consumerFailed ? "failed" : age !== null && age <= 60000 ? "ok" : "attention", { label: consumerFailed ? "Queue consumer failed" : age === null ? "Heartbeat not known" : age <= 60000 ? "Beating" : "Heartbeat late" })}<span class="hostrow__n"><b>${linkHost(h.name)}</b><span>${
           list(h.backends?.blessed)
             .map(
               (name) =>
                 `${name}${h.backends?.default === name ? " (default)" : ""}`,
             )
             .join(", ") || "venues not published"
-        }</span></span>${known ? ui.slots({ run: jobs.length - orphans, hold: orphans, free: Math.max(0, Number(h.concurrency ?? 0) - jobs.length) }) : html`<span class="faint">Free slots not known</span>`}<span class="hostrow__beat${age === null || age > 60000 ? " tone-attention" : ""}">${ui.icon("beat", { size: "sm" })}${ageText(age)}</span><span class="hostrow__p">${queue ? act(v, queue.paused ? "queue-resume" : "queue-pause", queue.paused ? "Resume" : "Pause", [["queue", queue.queue]]) : null}</span><span class="hostrow__x">${resourceLine(h, "budgetMemMiB", "usedMemMiB", "Memory", 1024, "GiB")}${resourceLine(h, "budgetCpuCenti", "usedCpuCenti", "CPU", 100, "cores")}${!(Number(h.budgetMemMiB) > 0) && !(Number(h.budgetCpuCenti) > 0) ? html`<span class="faint">This host reports no memory or CPU figures</span>` : null}${h.budgetCpuCenti && h.budgetCpuCenti !== "off" && !Number.isFinite(Number(h.budgetCpuCenti)) ? html`<span class="faint">CPU budget unreadable.</span>` : null}<span>Running ${jobs.length ? jobs.map((j, i) => html`${i ? ", " : null}${runLink(j.id)}${j.o ? " (orphaned hold)" : ""}${j.at ? ` ${ageText(v.now - j.at)}` : ""}`) : h.jobsUnreadable || !Array.isArray(h.jobs) ? "job list unreadable" : "none listed"}${h.jobsMore ? `; ${h.jobsMore} more not listed` : ""}</span><span>Routes: ${h.routes === false || h.routes === "false" ? "Shared jobs only" : "Routed and shared jobs"}</span>${age !== null && age > 60000 ? html`<span class="tinted tone-attention">${ui.icon("attention", { size: "sm" })}Heartbeat late: ${ageText(age)} (expected within 1m)</span>` : null}</span></li>`;
+        }</span></span>${known ? ui.slots({ run: jobs.length - orphans, hold: orphans, free: Math.max(0, Number(h.concurrency ?? 0) - jobs.length) }) : html`<span class="faint">Free slots not known</span>`}<span class="hostrow__beat${age === null || age > 60000 ? " tone-attention" : ""}">${ui.icon("beat", { size: "sm" })}${ageText(age)}</span><span class="hostrow__p">${queue ? act(v, queue.paused ? "queue-resume" : "queue-pause", queue.paused ? "Resume" : "Pause", [["queue", queue.queue]]) : null}</span><span class="hostrow__x"><span class="${consumerFailed ? "tone-failed" : "faint"}">${consumerHealthText(h.consumerHealth)}</span>${resourceLine(h, "budgetMemMiB", "usedMemMiB", "Memory", 1024, "GiB")}${resourceLine(h, "budgetCpuCenti", "usedCpuCenti", "CPU", 100, "cores")}${!(Number(h.budgetMemMiB) > 0) && !(Number(h.budgetCpuCenti) > 0) ? html`<span class="faint">This host reports no memory or CPU figures</span>` : null}${h.budgetCpuCenti && h.budgetCpuCenti !== "off" && !Number.isFinite(Number(h.budgetCpuCenti)) ? html`<span class="faint">CPU budget unreadable.</span>` : null}<span>Running ${jobs.length ? jobs.map((j, i) => html`${i ? ", " : null}${runLink(j.id)}${j.o ? " (orphaned hold)" : ""}${j.at ? ` ${ageText(v.now - j.at)}` : ""}`) : h.jobsUnreadable || !Array.isArray(h.jobs) ? "job list unreadable" : "none listed"}${h.jobsMore ? `; ${h.jobsMore} more not listed` : ""}</span><span>Routes: ${h.routes === false || h.routes === "false" ? "Shared jobs only" : "Routed and shared jobs"}</span>${age !== null && age > 60000 ? html`<span class="tinted tone-attention">${ui.icon("attention", { size: "sm" })}Heartbeat late: ${ageText(age)} (expected within 1m)</span>` : null}</span></li>`;
       },
     )}</ul>${!hosts.length ? html`<p>No host is registered.</p>` : null}`;
   },
