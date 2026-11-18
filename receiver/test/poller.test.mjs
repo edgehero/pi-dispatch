@@ -1834,6 +1834,34 @@ test("poller: a semantic-window swallow is its own out-line with the survivor, a
 	assert.ok(dedup.every((l) => l.survivingJobId === "the-survivor" && typeof l.jobId === "string"));
 });
 
+test("poller: a swallow's line says whether its owner ended and names the notice, or that adding it failed (issue #932)", async () => {
+	const answers = [
+		{ survivor: "ended", notice: "gh-poll-e1-dup" },
+		{ survivor: "live" },
+		{ survivor: "ended", noticeFailed: true },
+		{ survivor: "bogus", notice: 7, noticeFailed: "yes" },
+	];
+	const queued = [];
+	const { out } = await runPoller({
+		cycles: 3,
+		routes: scenarioRoutes(),
+		queueFn: async (job) => {
+			queued.push(job);
+			return { jobId: `computed-${queued.length}`, deduplicated: true, survivingJobId: "the-survivor", ...answers[(queued.length - 1) % answers.length] };
+		},
+	});
+	assertNoRepoFailure(out);
+	const dedup = out.filter((l) => l.event === "deduplicated");
+	assert.ok(dedup.length >= answers.length, "the scenario swallowed enough deliveries to see every answer");
+	const facts = dedup.slice(0, answers.length).map(({ survivor, notice, noticeFailed }) => ({ survivor, notice, noticeFailed }));
+	assert.deepEqual(facts, [
+		{ survivor: "ended", notice: "gh-poll-e1-dup", noticeFailed: undefined },
+		{ survivor: "live", notice: undefined, noticeFailed: undefined },
+		{ survivor: "ended", notice: undefined, noticeFailed: true },
+		{ survivor: undefined, notice: undefined, noticeFailed: undefined },
+	], "only the shapes the queue answers are logged");
+});
+
 const semanticValkeyUrl = process.env.VALKEY_TEST_URL;
 if (!semanticValkeyUrl && process.env.PI_DISPATCH_REQUIRE_RECEIVER_TESTS === "1") throw new Error("the #899 poller integration requires VALKEY_TEST_URL");
 const semanticSkip = semanticValkeyUrl ? false : "VALKEY_TEST_URL not set; poller semantic-window integration skipped";

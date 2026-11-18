@@ -154,6 +154,8 @@ const ROWS = [
 	["job-size-exceeds-share", SIZE_REFUSAL_COMMENTS["job-size-exceeds-share"], "Lower this project's job size, or raise its host share (`pi-dispatch doctor` shows both)."],
 	// ── Triggers and waits ──────────────────────────────────────────────────────────────────────────────────────────
 	["once-already-spent", "Refused: this one-shot trigger was already spent by an earlier run, so a later close did not start another. Not run.", "Delete `on.disarmed` from the trigger entry to arm it again."],
+	// Issue #932: its comment carries the ended job's id and a time, so the template stays in duplicate-notice.mjs.
+	["duplicate-request", "Not run: the same request for this flow on this item reached a job less than 10 minutes earlier, and that job had already ended. Requests for one flow on one item are joined for 10 minutes from the first. Nothing was spent.", "Ask again after the 10 minutes, or re-run the earlier job from the console."],
 	["trigger-skew", "Refused: the trigger sets a field the job reached the worker without, so it would have run as though the trigger did not set it. Not run.", "Run the job again if the trigger changed after it was queued; otherwise update or restart the stale service."],
 	["wait-skew", "Refused: the trigger declares wait conditions, but the job reached the worker without them, so it would have run at once. Not run.", "Update the service below the version that carries the field, or restart the one still reading an older triggers file."],
 	["wait-unreadable", "Refused: this job carries wait conditions the worker cannot read or cannot hand to a check, so it cannot honour them. Not run.", "Run the worker at the release of the service that queued the job, or fix the condition in the trigger."],

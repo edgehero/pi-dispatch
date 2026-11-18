@@ -440,6 +440,16 @@ and should not be restored under live keys. New workers retry removal. A rollbac
 untouched, so they may need removal by their exact paths after the worker stops. Sandbox `.reap-*` behavior and
 pin restoration remain compatible. See [consumer health](multi-host.md#queue-consumer-health) and [backup.md](backup.md).
 
+#### Dropped requests answered on the forge (#932)
+
+Queued job data gains `duplicateOf` and `windowEndsAt`, at version 10, on a new kind of queued job: a notice that the
+ten-minute window dropped a request against a job that had already ended. The receiver and the poller add it; the
+worker answers it with one comment and a run record whose reason is `duplicate-request`, and never runs it. A worker
+older than this release holds a notice as `newer-release` instead of reading it as a forge job, so move the workers
+first ([the order](#the-order)): a receiver upgraded first leaves its notices waiting until they are. No existing job,
+record or key changes shape, and nothing older is detected. The read of the window's owner also asks BullMQ's failed
+set and the key's remaining time, both read from the pinned BullMQ 5.80.4; the pin is unchanged.
+
 ### 5.4.0
 
 #### Random model selection (#922)

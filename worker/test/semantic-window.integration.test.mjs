@@ -6,6 +6,8 @@ import { parseConnection } from "../src/connection.mjs";
 import { enqueueForgeJob, makeQueue, releaseSemanticWindow } from "../src/queue.mjs";
 import { JOB_FIELD, jobKeyOf, readSemanticWindowOwner, releaseCompletedSemanticWindow, semanticWindowKeyOf } from "../src/bullmq-internals.mjs";
 import { removeQueuedJob } from "../src/cancel-state.mjs";
+import { duplicateNoticeData } from "../src/duplicate-notice.mjs";
+import { JOB_DATA_VERSION_FIELD } from "../src/job-data-version.mjs";
 import { makeWaitState, jobKey as waitJobKey } from "../src/wait-state.mjs";
 
 const url = process.env.VALKEY_TEST_URL;
@@ -75,7 +77,8 @@ test("successful, continuing and unknown results retain their window", { skip },
 			const { add, finish } = await world(t);
 			const original = await add("original");
 			await finish(result);
-			assert.deepEqual(await add("next"), { jobId: "gh-next", deduplicated: true, survivingJobId: original.jobId });
+			// Issue #932: the swallow says its owner has ended; no notice, since this producer did not ask for one.
+			assert.deepEqual(await add("next"), { jobId: "gh-next", deduplicated: true, survivingJobId: original.jobId, survivor: "ended" });
 		});
 	}
 });
@@ -239,8 +242,9 @@ test("repair contention is bounded, with an ordinary add after the last permitte
 		const queue = {
 			name: "pi-jobs-test",
 			add: async (_kind, _data, opts) => ({ id: ++adds === 4 && succeeds ? opts.jobId : "gh-stale" }),
-			client: Promise.resolve({ eval: async (_script, _count, ...args) => {
-				if (args.length === 6) { deletes++; return 1; }
+			// The conditional delete names 3 keys, the owner snapshot 4 (issue #932 added the failed set).
+			client: Promise.resolve({ eval: async (_script, count) => {
+				if (count === 3) { deletes++; return 1; }
 				return ["completed", JSON.stringify(refusal)];
 			} }),
 		};
@@ -256,11 +260,73 @@ test("an expired owner between add and snapshot retries the ordinary add without
 	const queue = {
 		name: "pi-jobs-test",
 		add: async (_kind, _data, opts) => ({ id: ++adds === 1 ? "gh-expired" : opts.jobId }),
-		client: Promise.resolve({ eval: async (_script, _count, ...args) => {
-			assert.equal(args.length, 5, "only snapshot, never a conditional delete");
+		client: Promise.resolve({ eval: async (_script, count) => {
+			assert.equal(count, 4, "only snapshot, never a conditional delete");
 			return ["changed"];
 		} }),
 	};
 	assert.equal((await enqueueForgeJob(queue, "github", fields("corrected"))).deduplicated, false);
 	assert.equal(adds, 2);
+});
+
+// Issue #932: a request the window drops against an ENDED job leaves one notice the worker answers on the item.
+test("a request dropped against an ended job leaves exactly one notice, with no window of its own (#932)", { skip }, async (t) => {
+	for (const ending of ["completed", "failed"]) {
+		await t.test(ending, async (t) => {
+			const { q, w, add, finish, redis } = await world(t);
+			const original = await add("original");
+			if (ending === "completed") await finish({ outcome: "completed" });
+			else {
+				const token = randomUUID();
+				const job = await w.getNextJob(token, { block: false });
+				job.discard();
+				await job.moveToFailed(new Error("infra"), token, false);
+			}
+			const instant = Date.now();
+			const ask = () => enqueueForgeJob(q, "github", fields("next"), { noticeOnDrop: true, now: () => instant });
+			const dropped = await ask();
+			assert.deepEqual(dropped, { jobId: "gh-next", deduplicated: true, survivingJobId: original.jobId, survivor: "ended", notice: "gh-next-dup" });
+			const notice = await q.getJob("gh-next-dup");
+			const { windowEndsAt } = notice.data;
+			assert.ok(windowEndsAt > instant && windowEndsAt <= instant + 10 * 60 * 1000, "the window's own end, from its key");
+			assert.deepEqual(notice.data, { ...duplicateNoticeData({ kind: "github", ...fields("next") }, { survivingJobId: original.jobId, windowEndsAt }), [JOB_DATA_VERSION_FIELD]: 10 }, "stamped 10, so an older worker holds it instead of running it");
+			assert.equal(JSON.stringify(notice.data).includes("private"), false, "no title or body from the item");
+			assert.equal(notice.deduplicationId, undefined, "a notice holds no window");
+			// A replay of the same delivery is swallowed again and finds the notice it already left.
+			assert.deepEqual(await ask(), dropped);
+			assert.equal((await q.getJobCounts("waiting")).waiting, 1, "one notice for one delivery");
+			// And the notice can never free the window that dropped it.
+			const key = semanticWindowKeyOf(q, (await q.getJob(original.jobId)).deduplicationId);
+			assert.equal(await releaseSemanticWindow(notice, () => {}, { cause: "policy" }), false);
+			assert.equal(await redis.get(key), original.jobId);
+		});
+	}
+});
+
+test("a request joined to a live job leaves no notice, and neither does a producer that did not ask (#932)", { skip }, async (t) => {
+	const { q, add, finish } = await world(t);
+	const original = await add("original");
+	assert.deepEqual(await enqueueForgeJob(q, "github", fields("live"), { noticeOnDrop: true }), { jobId: "gh-live", deduplicated: true, survivingJobId: original.jobId, survivor: "live" });
+	await finish({ outcome: "completed" });
+	assert.deepEqual(await add("console"), { jobId: "gh-console", deduplicated: true, survivingJobId: original.jobId, survivor: "ended" });
+	assert.equal(await q.getJob("gh-live-dup"), undefined);
+	assert.equal(await q.getJob("gh-console-dup"), undefined);
+	assert.equal((await q.getJobCounts("waiting")).waiting, 0);
+});
+
+test("every replica of one dropped delivery shares one notice (#932)", { skip }, async (t) => {
+	const { q, w } = await world(t);
+	const replica = (id, i, options) => enqueueForgeJob(q, "github", { ...fields(id), replica: i, replicas: 2 }, options);
+	await replica("original", 1);
+	await replica("original", 2);
+	for (let i = 0; i < 2; i++) {
+		const token = randomUUID();
+		const job = await w.getNextJob(token, { block: false });
+		await job.moveToCompleted({ outcome: "completed" }, token, false);
+	}
+	const one = await replica("next", 1, { noticeOnDrop: true });
+	const two = await replica("next", 2, { noticeOnDrop: true });
+	assert.equal(one.notice, "gh-next-dup");
+	assert.equal(two.notice, "gh-next-dup", "the replica-free id: BullMQ answers the one it already holds");
+	assert.equal((await q.getJobCounts("waiting")).waiting, 1);
 });

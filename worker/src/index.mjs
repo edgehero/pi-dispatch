@@ -44,6 +44,7 @@ import { makeAwaitKeeper } from "./held-settle.mjs";
 import { effectiveJobLimits, malformedJobLimits, WALL_CLOCK_FALLBACK_MS } from "./job-limits.mjs";
 import { isProjectId } from "./project-id.mjs";
 import { LocalEventWait } from "./local-event-runtime.mjs";
+import { DUPLICATE_REQUEST_REASON, duplicateOfId, duplicateRequestComment, isDuplicateNotice } from "./duplicate-notice.mjs";
 
 
 export const QUEUE = "pi-jobs";
@@ -2364,6 +2365,17 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		if (headSettings?.invalid && headSettings.newer === true) {
 			deps?.log?.("newer_release_hold", { jobId: job.id, what: "the settings file", delayMs: NEWER_RELEASE_RECHECK_MS });
 			await deferTo(job, token, now() + NEWER_RELEASE_RECHECK_MS, "newer-release", {});
+		}
+		// Issue #932: a notice that the semantic window dropped a request against a job that had already ended. It is never
+		// run, so it is answered before every gate that could hold it (a pause window, a full scope, a wait): one fixed
+		// comment on the item and a record, nothing reserved or spent (CONST-BUDGET-BEFORE-TOKENS), and a returned policy
+		// outcome, never a throw (CONST-RETRY-INFRA-ONLY). Its policy outcome reaches the window release below, which is
+		// a no-op for it: a notice is added with no window, so it holds none and can free none.
+		if (isDuplicateNotice(job.data)) {
+			const text = duplicateRequestComment(job.data);
+			if (text !== null && deps?.comment) await Promise.resolve(deps.comment(job.data, text)).catch(() => {});
+			deps?.log?.("refused_duplicate_request", { jobId: job.id, survivingJobId: duplicateOfId(job.data) });
+			return recordBeforePickup(job, { outcome: "policy", reason: DUPLICATE_REQUEST_REASON });
 		}
 		const sourceRefusal = await checkDraftAnswerSource(job.data, deps);
 		if (sourceRefusal) {

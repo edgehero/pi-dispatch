@@ -6,7 +6,7 @@ import { parseTriggers, TRIGGERS_FILE_VERSION } from "../src/triggers.mjs";
 import { makeCheckPrivateEndpoints } from "../src/triggers-file.mjs";
 import { localRunData } from "../src/local-job.mjs";
 import { buildLocalEventJob } from "../src/local-event.mjs";
-import { JOB_DATA_VERSION, withJobDataVersion } from "../src/job-data-version.mjs";
+import { JOB_DATA_FIELD_VERSIONS, withJobDataVersion } from "../src/job-data-version.mjs";
 
 // Issue #918: `run.privateEndpoints`, the private endpoints a trigger's jobs may reach, and the live recheck before each
 // attempt (`makeCheckPrivateEndpoints`).
@@ -23,7 +23,8 @@ test("run.privateEndpoints loads on forge and cron triggers, needs file version 
 	assert.throws(() => load(LABEL, 6), /run\.privateEndpoints needs triggers file version 7, and the file declares 6/);
 	const data = withJobDataVersion({ ...localRunData(load(CRON).run), trigger: { id: "nightly" } });
 	assert.deepEqual(data.privateEndpoints, ["bench-device", "lab"]);
-	assert.equal(data.dataVersion, 8, "a job carrying only this field keeps its introduction version");
+	assert.equal(data.dataVersion, JOB_DATA_FIELD_VERSIONS.privateEndpoints, "a job carrying it is stamped with the version that knows it");
+	assert.equal(JOB_DATA_FIELD_VERSIONS.privateEndpoints, 8);
 	assert.equal(load({ on: LABEL.on, run: { kind: "github", flow: "x" } }).run.privateEndpoints, undefined, "absent means none");
 });
 

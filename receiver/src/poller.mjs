@@ -281,7 +281,8 @@ export async function startPoller(env = process.env, deps = {}) {
 	let enqueue = queueFn ?? null;
 	if (enqueue === null) {
 		queue = makeQueueFn(parseConnection(cfg.valkeyUrl));
-		enqueue = (job) => enqueueGitHubJob(queue, job);
+		// Issue #932: a request the window drops against an ended job gets a notice the worker answers on the issue.
+		enqueue = (job) => enqueueGitHubJob(queue, job, { noticeOnDrop: true, now });
 	}
 
 	const closeOwned = async () => {
@@ -1189,7 +1190,7 @@ async function gate(ctx, eventName, payload, deliveryId, stats) {
 		// gets its own line with the surviving id, `enqueued` counts only what was CREATED, and a bare-id
 		// return from an enqueue seam predating the shape counts as created -- the old behaviour exactly.
 		if (r && typeof r === "object" && r.deduplicated === true) {
-			ctx.out({ event: "deduplicated", delivery: deliveryId, repo: job.repo, target: `${job.target.type}#${job.target.number}`, flow: job.flow, jobId: r.jobId, survivingJobId: r.survivingJobId });
+			ctx.out({ event: "deduplicated", delivery: deliveryId, repo: job.repo, target: `${job.target.type}#${job.target.number}`, flow: job.flow, jobId: r.jobId, survivingJobId: r.survivingJobId, ...(r.survivor === "ended" || r.survivor === "live" ? { survivor: r.survivor } : {}), ...(typeof r.notice === "string" ? { notice: r.notice } : {}), ...(r.noticeFailed === true ? { noticeFailed: true } : {}) });
 			deduplicated.push({ jobId: r.jobId, survivingJobId: r.survivingJobId });
 		} else {
 			created += 1;

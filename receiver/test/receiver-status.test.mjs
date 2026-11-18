@@ -38,7 +38,7 @@ function build(forge, { disabled = false, dedup = false, lookup = false, enqueue
 	const resolveAuthority = async () => lookup ? { indeterminate: "lookup-failed" } : { authorized: true };
 	const handler = makeReceiver({ queue, selfId: 999, cfg: { servesGithub: !disabled, webhookSecret: SECRET, triggers: { ...groups, knownFlows: new Set(["triage"]) } }, log: error ? () => { throw new Error("sink"); } : () => {}, now, observations,
 		gitlab: disabled ? null : { mode: "token", secret: SECRET, selfId: 999, resolveAuthority }, forgejo: disabled ? null : { secret: SECRET, selfId: 999, resolveAuthority }, azure: disabled ? null : { mode: "header", headerName: "x-auth", secret: SECRET, selfId: { id: "self", email: "bot@example.com" }, resolveAuthority }, resolveAuthority });
-	return { handler, observations, adds: () => adds, clients: () => clients, reads, snapshotArgs: () => [3, semanticWindowKeyOf(queue, addedOpts.deduplication.id), jobKeyOf(queue, "survivor"), queueKeyOf(queue, QUEUE_KEY.completed), "survivor", addedOpts.deduplication.id] };
+	return { handler, observations, adds: () => adds, clients: () => clients, reads, snapshotArgs: () => [4, semanticWindowKeyOf(queue, addedOpts.deduplication.id), jobKeyOf(queue, "survivor"), queueKeyOf(queue, QUEUE_KEY.completed), queueKeyOf(queue, QUEUE_KEY.failed), "survivor", addedOpts.deduplication.id] };
 }
 async function drive(handler, req, raw) {
 	const res = { statusCode: 0, headersSent: false, body: null, ended: false, writeHead(status) { this.statusCode = status; this.headersSent = true; }, end(body) { this.ended = true; this.body = body; return this; } };
@@ -73,7 +73,8 @@ for (const forge of RECEIVER_FORGES) {
 			if (snapshots) {
 				const [script, ...args] = fixture.reads[0];
 				assert.deepEqual(args, fixture.snapshotArgs(), "the read names only this semantic key and its surviving job");
-				assert.deepEqual([...script.matchAll(/redis\.call\("([A-Z]+)"/g)].map((match) => match[1]), ["GET", "HGET", "ZSCORE", "HGET"], "the snapshot has only reads, no telemetry write hidden in its script");
+				// Issue #932 adds the key's PTTL and failed membership, both reads, so the receiver can tell an ended owner apart.
+				assert.deepEqual([...script.matchAll(/redis\.call\("([A-Z]+)"/g)].map((match) => match[1]), ["GET", "HGET", "PTTL", "ZSCORE", "HGET", "ZSCORE"], "the snapshot has only reads, no telemetry write hidden in its script");
 				assert.ok(script.includes('redis.call("GET", KEYS[1]) ~= ARGV[1]'), "the key's current owner is checked");
 				assert.ok(script.includes(`redis.call("HGET", KEYS[2], "${JOB_FIELD.dedupId}") ~= ARGV[2]`), "the stored semantic identity is checked");
 				assert.ok(script.includes('redis.call("ZSCORE", KEYS[3], ARGV[1])'), "completed membership is checked");
@@ -107,3 +108,42 @@ test("same-id redelivery stays queued and concurrent requests cannot exchange re
 	const replies = await Promise.all(Array.from({ length: 20 }, () => drive(fixture.handler, request("github", raw), raw)));
 	assert.ok(replies.every((r) => r.statusCode === 202)); assert.equal(fixture.observations.snapshot().github.queued.hours.at(-1)[1], 20); assert.equal(fixture.clients(), 0);
 });
+
+// Issue #932: every arm asks its enqueue for a notice when the window drops a delivery against a job that has ENDED,
+// logs what became of it, and still answers `deduplicated`. A live owner gets no notice.
+for (const forge of RECEIVER_FORGES) {
+	test(`${forge}: a delivery dropped against an ended job leaves a notice the log names; a live one does not (#932)`, async () => {
+		for (const ended of [true, false]) {
+			const adds = [];
+			const lines = [];
+			const queue = {
+				name: "pi-jobs-notice",
+				get client() { return Promise.resolve({ eval: async () => ended ? ["completed", JSON.stringify({ outcome: "completed" }), 420_000] : ["retained", "", 420_000] }); },
+				add: async (_name, data, opts) => { adds.push({ data, opts }); return { id: opts.deduplication ? "survivor" : opts.jobId }; },
+			};
+			const rule = { index: 1, phrase: "@pi", defaultFlow: "triage", repository: "widgets" };
+			const groups = Object.fromEntries(RECEIVER_FORGES.map((f) => [f, { label: [], comment: rule, pullRequest: [], issue: [] }]));
+			const resolveAuthority = async () => ({ authorized: true });
+			const handler = makeReceiver({ queue, selfId: 999, now, cfg: { servesGithub: true, webhookSecret: SECRET, triggers: { ...groups, knownFlows: new Set(["triage"]) } }, log: (line) => lines.push(line),
+				gitlab: { mode: "token", secret: SECRET, selfId: 999, resolveAuthority }, forgejo: { secret: SECRET, selfId: 999, resolveAuthority }, azure: { mode: "header", headerName: "x-auth", secret: SECRET, selfId: { id: "self", email: "bot@example.com" }, resolveAuthority }, resolveAuthority });
+			const raw = rawOf(forge);
+			const res = await drive(handler, request(forge, raw), raw);
+			assert.equal(res.statusCode, 202);
+			assert.deepEqual(JSON.parse(res.body), { status: "deduplicated" }, "the wire still says the delivery was joined");
+			const line = lines.find((l) => l.event === "deduplicated");
+			assert.equal(line.survivor, ended ? "ended" : "live");
+			const notices = adds.filter((a) => a.opts.jobId.endsWith("-dup"));
+			if (ended) {
+				assert.equal(notices.length, 1);
+				assert.equal(line.notice, notices[0].opts.jobId);
+				assert.equal(notices[0].data.duplicateOf, "survivor");
+				assert.equal(notices[0].data.windowEndsAt, AT + 420_000);
+				assert.equal(notices[0].opts.deduplication, undefined, "a notice holds no window");
+				assert.equal(JSON.stringify(notices[0].data.target).includes(SENTINEL), false, "no title or body from the item");
+			} else {
+				assert.equal(notices.length, 0);
+				assert.equal(line.notice, undefined);
+			}
+		}
+	});
+}
