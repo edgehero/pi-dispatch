@@ -131,6 +131,7 @@
     "./mcp-preflight": "./src/mcp-preflight.mjs",
     "./triggers-file": "./src/triggers-file.mjs",
     "./trigger-identity": "./src/trigger-identity.mjs",
+    "./artifacts-record": "./src/artifacts-record.mjs",
     "./file-expect": "./src/file-expect.mjs",
     "./packages": "./src/packages.mjs",
     "./updates": "./src/updates.mjs",

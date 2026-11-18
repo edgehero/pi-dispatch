@@ -28,21 +28,11 @@ import { createHash, randomBytes } from "node:crypto";
 import * as nodeFs from "node:fs";
 import { join } from "node:path";
 import { makeRedactor } from "./redact-secrets.mjs";
-import { ARTIFACT_DROP_REASONS } from "./artifacts-record.mjs";
+import { ARTIFACT_DROP_REASONS, ARTIFACT_NAME_RE, ARTIFACT_RUN_DIR_RE, ARTIFACT_TYPES, ARTIFACTS_FILES_DIR, ARTIFACTS_MANIFEST, ARTIFACTS_MANIFEST_VERSION, artifactRunDirOf } from "./artifacts-record.mjs";
 import { isForgeKind } from "./forges.mjs";
 
-export { ARTIFACT_DROP_REASONS };
+export { ARTIFACT_DROP_REASONS, ARTIFACT_NAME_RE, ARTIFACT_RUN_DIR_RE, ARTIFACT_TYPES, ARTIFACTS_FILES_DIR, ARTIFACTS_MANIFEST, ARTIFACTS_MANIFEST_VERSION, artifactRunDirOf };
 
-/** A kept file's name: a letter or digit first, then letters, digits, dot, dash and underscore, at most 64 in all. */
-export const ARTIFACT_NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
-/** The served types, by what the bytes are. Only the first five are ever shown inline. */
-export const ARTIFACT_TYPES = Object.freeze(["image/png", "image/jpeg", "image/gif", "image/webp", "text/plain", "application/octet-stream"]);
-/** The manifest's name in a run's folder, beside `files/`. */
-export const ARTIFACTS_MANIFEST = "manifest.json";
-export const ARTIFACTS_FILES_DIR = "files";
-export const ARTIFACTS_MANIFEST_VERSION = 1;
-/** The folder a run's files are kept in, under the store: the run's id, which the record's own file name uses too. */
-export const ARTIFACT_RUN_DIR_RE = /^[A-Za-z0-9_-][A-Za-z0-9._-]{0,199}$/;
 
 const MiB = 1024 * 1024;
 const DAY_MS = 24 * 3600 * 1000;
@@ -64,12 +54,6 @@ export function artifactTypeOf(bytes) {
 	}
 }
 
-/** The run's folder name, or null for an id that cannot name one (`.` and `..` included). */
-export function artifactRunDirOf(jobId) {
-	if (typeof jobId !== "string") return null;
-	const name = jobId.replace(/[^A-Za-z0-9._-]/g, "_");
-	return ARTIFACT_RUN_DIR_RE.test(name) && name !== "." && name !== ".." ? name : null;
-}
 
 /** The limits from the settings, in bytes; `maxFiles` 0 turns the feature off. */
 export function artifactLimitsOf({ maxFiles = 0, maxFileMb = 0, maxRunMb = 0 } = {}) {

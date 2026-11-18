@@ -117,6 +117,13 @@ test("docs/console.md's table of the screens: a row for every page's route, and 
   for (const route of routed.keys()) assert.ok(paths.includes(route), `${route} is a page`);
 });
 
+test("docs/console.md's table of the Artifacts card's states: one row per ARTIFACT_STATES member, in order, each saying what to do (issue #920)", async () => {
+  const { ARTIFACT_STATES } = await import("../src/console/panels/run.mjs");
+  const rows = tableRows(read("docs/console.md"), "| State | The card says | What to do |");
+  assert.deepEqual(rows.map(([state]) => state), ARTIFACT_STATES.map((state) => `\`${state}\``));
+  for (const [state, says, todo] of rows) assert.ok(says.length > 0 && todo.length > 0, `${state} says what it means and what to do`);
+});
+
 test("docs/console.md's table of the Loaded card's top lines: one row per LOADED_STATES member, in order, each saying what to do", () => {
   const rows = tableRows(read("docs/console.md"), "| State | The top line says | What to do |");
   assert.deepEqual(rows.map(([state]) => state), LOADED_STATES.map((state) => `\`${state}\``));

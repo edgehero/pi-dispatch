@@ -287,7 +287,7 @@ const PATH_KEY_RE = /_(?:FILE|DIR)$/;
  * fails for a path key it has no reader for, so a new one is judged before it is compared. `.env.example` ships several
  * of these as blank lines, which an operator uncommenting one must not see as a change.
  */
-export const RESTART_BLANK_IS_UNSET = Object.freeze(["PI_AUTH_CONNECTIONS_FILE", "PI_AUTH_STORE_DIR", "PI_CONSOLE_TOKENS_FILE", "PI_GLOBAL_PI_DIR", "PI_LOGS_DIR", "PI_SANDBOX_DIR", "PI_SANDBOX_GATEWAYS_FILE", "PI_SESSIONS_DIR", "PI_SETTINGS_FILE"]);
+export const RESTART_BLANK_IS_UNSET = Object.freeze(["PI_ARTIFACTS_DIR", "PI_AUTH_CONNECTIONS_FILE", "PI_AUTH_STORE_DIR", "PI_CONSOLE_TOKENS_FILE", "PI_GLOBAL_PI_DIR", "PI_LOGS_DIR", "PI_SANDBOX_DIR", "PI_SANDBOX_GATEWAYS_FILE", "PI_SESSIONS_DIR", "PI_SETTINGS_FILE"]);
 
 /**
  * What the restart watch compares (issue #845, `restart-notice.mjs`): each key of `restartKeysOf` as the console's own

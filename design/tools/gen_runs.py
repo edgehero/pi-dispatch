@@ -349,6 +349,22 @@ def ended_facts():
              ("Read from", "mini1's run history")]
     return card("Run", facts(pairs, 2), id_="p-run")
 
+def ended_artifacts():
+    # Issue #920: what the job left in /artifacts. An image is drawn small at width 240 (an attribute, so no new class),
+    # text opens as text, anything else downloads; a dropped file is one line with its reason. Shown to viewers too.
+    thumb = ('<svg width="240" height="135" viewBox="0 0 240 135" role="img" aria-label="after.png">'
+             '<rect width="240" height="135" rx="6" fill="var(--surface-2)"/><rect x="16" y="16" width="208" height="22" rx="4" fill="var(--line)"/>'
+             '<rect x="16" y="50" width="120" height="12" rx="3" fill="var(--line)"/><rect x="16" y="70" width="160" height="12" rx="3" fill="var(--line)"/></svg>')
+    rows = [
+        (f'<a class="link mono" href="#">after.png</a><br>{thumb}', "184.2 KB", "image"),
+        ('<a class="link mono" href="#">e2e-report.txt</a>', "6.1 KB", "text, cleaned of the job's secrets"),
+    ]
+    body = ('<div class="tbl-wrap"><table class="tbl tbl--stack" aria-label="Files this run kept"><thead><tr><th scope="col">File</th><th scope="col">Size</th><th scope="col">Kind</th></tr></thead><tbody>'
+            + "".join(f'<tr><td data-l="File">{a}</td><td data-l="Size">{b}</td><td data-l="Kind">{c}</td></tr>' for a, b, c in rows)
+            + '</tbody></table></div><ul class="plain"><li>1 not kept: it was larger than one file may be (PI_ARTIFACTS_MAX_FILE_MB)</li></ul>'
+            + '<p class="note">Kept until 2 Dec, 15:12 UTC.</p>')
+    return card("Artifacts", body, id_="p-artifacts")
+
 def ended_tokens():
     body = f"""<p class="run-kv"><b>$0.24</b><span>metered, settled</span></p>
   {meterrow("Job cap", "this run", 0.24 / 2, "$0.24", "$2.00")}
@@ -399,7 +415,7 @@ def run_ended_page():
     oc = outcome("completed", "Completed", "Finished in 22m on mini1",
                  "Merges are never automatic: review the pull request on the forge.",
                  btn("Open acme/web#490", "primary", sm=False) + btn("Preview a re-run", "paid", "rerun", sm=False))
-    main = f'<div class="stack">{ended_facts()}{ended_actions()}</div>'
+    main = f'<div class="stack">{ended_facts()}{ended_artifacts()}{ended_actions()}</div>'
     side = f"""<div class="stack">{ended_tokens()}{ended_resources()}{ended_session()}
   <p class="collapsed" id="p-chain" data-panel>{ic('chain', 'ic ic--sm')}<b>Chain:</b> no parent and no child runs.</p></div>"""
     return shell("Runs", oc + f'<div class="cols">{main}{side}</div>', run_title("gh-9575"), sub=sub, end=badge("completed"), back="Runs", beside=run_path("acme/web#490"))
@@ -463,11 +479,13 @@ The live transcript streams below. Tool arguments and results fold; a failed res
 - **Preview a fork** (paid) selects a saved entry boundary and optional provider, permitted model, thinking level and follow-up message. Its preview names the reservation and independent branch. Unavailable source state is named.
 - **Terminal chat** and **sandbox** commands copy with one click.
 
+*Artifacts* lists the files the job left in `/artifacts` (issue #920): each name opens it, an image is drawn small under its name, text opens as text (and says when the job's secrets were cleaned from it), anything else downloads. A file that was not kept is one line with its reason, and the note says when the files go. A viewer sees this panel too. When the files are gone it says they were removed after the host's retention; when another host keeps them it names that host; a run that kept and dropped nothing has no panel.
+
 The side column has tokens and dollars (job cap as a bar with the soft-hold line), resources (peak memory against the size given), session and plan, and the chain as one line.
 
-**Panels.** `p-outcome`, `p-run`, `p-actions`, `p-cost`, `p-resources`, `p-session`, `p-chain`.
+**Panels.** `p-outcome`, `p-run`, `p-artifacts`, `p-actions`, `p-cost`, `p-resources`, `p-session`, `p-chain`.
 
-**The server provides.** The run record: facts, outcome, reason and next-step sentences from the catalog, tokens, cost class and reservation, resource figures, session state in words (not raw tokens such as "fresh (absent)"), chain, and whether a workspace was kept. It also says whether a re-run is allowed, so the button is hidden or disabled with its reason when the planner would refuse it. The short link is built from the record's forge target.
+**The server provides.** The run record: facts, outcome, reason and next-step sentences from the catalog, tokens, cost class and reservation, resource figures, session state in words (not raw tokens such as "fresh (absent)"), chain, whether a workspace was kept, and the run's artifacts: the record's counts and, from this host's artifacts store, each kept file's name, size, kind and whether it was cleaned, what was dropped by reason and when the files go (or that they expired or are kept on another host). It also says whether a re-run is allowed, so the button is hidden or disabled with its reason when the planner would refuse it. The short link is built from the record's forge target.
 
 **Fixture note.** gh-9575's target, flow, host, venue, model, tokens, cost, cap and end time are the fixture. The start time (14:50), turns, trigger, token split, model calls, resources, session wording and transcript size are sample values.""",
 "RunLivePhone": """The live run page laid out for a phone: what the run is doing now comes first, and the one action is Steer.

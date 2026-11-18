@@ -285,6 +285,8 @@ test("a blank path line is compared as no line exactly where every console reade
   // A run page's fork points, read from the read side's environment as the console started with it (pages.mjs).
   const forkPoints = async (env) => JSON.stringify(await readForkPoints({ jobId: "gh-1", env, now: () => 0 }));
   const READERS = {
+    // Issue #920: the artifacts store, read by the run page through the read side's paths.
+    PI_ARTIFACTS_DIR: [side],
     PI_AUTH_CONNECTIONS_FILE: [presence("PI_AUTH_CONNECTIONS_FILE")],
     PI_AUTH_STORE_DIR: [presence("PI_AUTH_STORE_DIR")],
     PI_CONSOLE_TOKENS_FILE: [config],
