@@ -52,6 +52,25 @@ token cannot. Each file is served under a policy that lets it run, load and send
 are shown in the browser. The console reads its own host's store, so a run another host kept files for names that host.
 See [the console](console.md#a-runs-artifacts).
 
+## On the issue or pull request
+
+Once a run's outcome is final, and it kept or dropped a file, pi-dispatch posts one comment of its own on the job's issue
+or pull request, after the agent's closing comment:
+
+```
+pi-dispatch kept 2 files from job `gh-…` for its reviewer:
+- `after.png` (179.9 KB)
+- `e2e-report.txt` (6.1 KB)
+1 file was not kept: it was larger than one file may be (PI_ARTIFACTS_MAX_FILE_MB).
+Open them on the run page: https://console.example.org/run?id=gh-…#p-artifacts
+```
+
+The worker writes it, never the agent, from what the store holds. An attempt the queue retries posts nothing; the last
+attempt's comment is the one. The link needs `PI_CONSOLE_PUBLIC_URL`, the console's address as your reviewers reach it;
+without it the comment names the job and says to open it on the console. File names are the only thing in it a job
+chose: they are held to the plain characters above and set in backticks, and if the comment could contain the phrase
+that starts a comment trigger, the names are left out and only the counts are said.
+
 ## Settings
 
 | Setting | Default | What it does |
@@ -61,6 +80,7 @@ See [the console](console.md#a-runs-artifacts).
 | `PI_ARTIFACTS_MAX_FILE_MB` | 10 | The largest one file may be, 1 to 1024 MiB |
 | `PI_ARTIFACTS_MAX_RUN_MB` | 25 | The most one run may keep in all, 1 to 4096 MiB |
 | `PI_ARTIFACTS_RETENTION_DAYS` | 14 | Days a run's files are kept. 0 keeps them |
+| `PI_CONSOLE_PUBLIC_URL` | unset | The console's address for the comment's link: an `https://` origin, or `http://` on a loopback host. Unset, the comment links nowhere |
 
 A value outside its range stops the worker at start, naming the setting. Lowering the retention also applies to files
 already kept: a run's files go at the earlier of the time recorded when they were kept and its start plus today's

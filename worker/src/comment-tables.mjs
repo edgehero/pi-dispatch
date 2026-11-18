@@ -13,6 +13,10 @@
  * name or anything a payload or a container wrote, because a forge comment's reader may be an issue author and a local
  * job's comment lands in a service log. A comment that must carry a runtime value (a wait profile, an image ref, a cap's
  * numbers) stays a template at its call site, and the catalog holds a general sentence for its reason instead.
+ * ONE COMMENT IS NOT IN THIS TABLE AND NAMES WHAT A CONTAINER WROTE: a forge job's artifacts comment (issue #920,
+ * `artifacts-comment.mjs`), which lists each kept file by name. It is a report on the run, not a refusal, and its names
+ * are held to the artifacts charset (letters, digits, dot, dash, underscore, at most 64), set in backticks, and left out
+ * when the text could spell the trigger's phrase.
  *
  * Moving a sentence here never changes its bytes: the comment tests compare what was posted against these exports, and
  * the catalog's own test holds each derived sentence identical (===) to the entry it came from.
