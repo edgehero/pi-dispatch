@@ -1374,3 +1374,20 @@ test("watch reviewed classifier credential accompanies the primary model without
 	assert.ok(rec.args.includes("OPENROUTER_API_KEY=classifier-key"), "the reviewed classifier cannot authenticate without its own provider credential");
 	assert.equal(rec.args.some((value) => value.includes("unrelated-provider-key")), false);
 });
+
+test("a forge job's staged artifacts folder is mounted at /artifacts on a binding venue, and left off, said once, on a copying one (issue #920)", { skip }, async () => {
+	const githubJob = { kind: "github", provider: "anthropic", model: "m", maxTurns: 5, repo: "o/r" };
+	const prepared = { workspace: "/host/jobs/j9/workspace", jobDir: "/host/jobs/j9", artifactsDir: "/host/jobs/j9/artifacts" };
+	const mounts = (args) => args.filter((_a, i) => args[i - 1] === "-v");
+	const bound = {};
+	await mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawn(bound) })({ job: githubJob, token: "ghs_x", prepared, name: "j9", signal: new AbortController().signal, relabel: true });
+	assert.ok(mounts(bound.args).includes("/host/jobs/j9/artifacts:/artifacts:Z"), "writable, relabelled like the job's other own folders");
+	const none = {};
+	await mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawn(none) })({ job: githubJob, token: "ghs_x", prepared: { workspace: prepared.workspace, jobDir: prepared.jobDir }, name: "j9", signal: new AbortController().signal });
+	assert.equal(mounts(none.args).some((m) => m.includes("/artifacts")), false, "nothing staged, nothing mounted");
+	const logs = [];
+	const copying = {};
+	await mod.makeRunContainer({ image: "pi-job:x", hostEnv: HOST, spawnFn: fakeSpawn(copying), layout: "sandbox", log: (event, fields) => logs.push({ event, fields }) })({ job: githubJob, token: "ghs_x", prepared, name: "j9", signal: new AbortController().signal });
+	assert.equal(mounts(copying.args ?? []).some((m) => m.includes("artifacts")), false);
+	assert.deepEqual(logs.filter((l) => l.event === "artifacts_skipped"), [{ event: "artifacts_skipped", fields: { container: "j9", reason: "venue-copies" } }]);
+});

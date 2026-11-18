@@ -17,6 +17,12 @@ export const OUTBOX_PROTOCOL_PATH = "/opt/pi-dispatch/OUTBOX_PROTOCOL.md";
 /** Read-write mount a local job receives; its presence is what makes the outbox protocol relevant. */
 export const OUTBOX_MOUNT = LAYOUT.outbox;
 
+/** Where the image bakes the artifacts protocol (issue #920). Documentation for the folder a forge job's evidence goes in. */
+export const ARTIFACTS_PROTOCOL_PATH = "/opt/pi-dispatch/ARTIFACTS_PROTOCOL.md";
+
+/** Read-write mount a forge job receives when its host keeps artifacts; its presence is what makes that protocol relevant. */
+export const ARTIFACTS_MOUNT = LAYOUT.artifacts;
+
 /** Where the image bakes the portfolio protocol (issue #505). Documentation for the plan a portfolio job may write. */
 export const PORTFOLIO_PROTOCOL_PATH = "/opt/pi-dispatch/PORTFOLIO_PROTOCOL.md";
 
@@ -547,6 +553,8 @@ export function buildResourceLoader({
 	outboxProtocolPath = OUTBOX_PROTOCOL_PATH,
 	portfolioPath = PORTFOLIO_SNAPSHOT_PATH,
 	portfolioProtocolPath = PORTFOLIO_PROTOCOL_PATH,
+	artifactsMount = ARTIFACTS_MOUNT,
+	artifactsProtocolPath = ARTIFACTS_PROTOCOL_PATH,
 	// ON, matching the runtime posture (REQ-GLOBAL-PI-OVERLAY): the operator staged that dir themselves,
 	// so loading it is the default and PI_GLOBAL_ALLOW_EXTENSIONS=0 is the opt-out. run-job.mjs always
 	// passes an explicit value, so this default is only ever seen by a directly-constructed loader --
@@ -604,6 +612,10 @@ export function buildResourceLoader({
 	// job whose cron trigger the operator flagged `run.portfolio`, and read ONCE here so the prompt stays byte-identical
 	// across turns. After the outbox protocol, whose channel it uses, and before the operator's and the repo's personas.
 	const portfolioProtocol = existsSync(portfolioPath) ? readIfExists(portfolioProtocolPath) : undefined;
+	// Issue #920: the artifacts folder the same way, only when the worker mounted /artifacts (a forge job on a host that
+	// keeps them), read ONCE so the prompt stays byte-identical across turns. After the portfolio protocol and before the
+	// personas, so the floor's own lines come first and an operator's or a repository's words can still add to it.
+	const artifactsProtocol = existsSync(artifactsMount) ? readIfExists(artifactsProtocolPath)?.replaceAll("{artifacts}", artifactsMount) : undefined;
 	// The roots a staged package may never take a skill name from. Both are listed unconditionally: a
 	// root that is not mounted contributes no skill to protect, so gating it would only add a way to
 	// forget one.
@@ -715,7 +727,7 @@ export function buildResourceLoader({
 				packageRoots: packagePaths,
 				protectedPrompts,
 			}),
-		appendSystemPromptOverride: () => [guardrails, outboxProtocol, portfolioProtocol, globalPersona, projectPersona].filter(Boolean),
+		appendSystemPromptOverride: () => [guardrails, outboxProtocol, portfolioProtocol, artifactsProtocol, globalPersona, projectPersona].filter(Boolean),
 	});
 }
 

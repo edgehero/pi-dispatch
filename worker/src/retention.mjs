@@ -49,6 +49,14 @@ export const RUN_MIRROR_MAX_RUNS_MIN = 1_000;
 export const RUN_MIRROR_MAX_RUNS_MAX = 20_000;
 
 /**
+ * A forge job's artifacts (issue #920, `PI_ARTIFACTS_RETENTION_DAYS`): how many days a run's kept files stay, 0 keeping
+ * them for as long as the run history's own retention allows, the log retention's sentinel. Its own setting, apart from
+ * the sandbox store's day: these are the evidence a reviewer opens, not a workspace a person reopens. Here so the
+ * console can say it beside a run whose files are gone.
+ */
+export const ARTIFACTS_RETENTION_DAYS_DEFAULT = 14;
+
+/**
  * `PI_RUN_MIRROR_MAX_RUNS` read leniently, for a reader that must not throw (the admin's paths): unset or empty is the
  * default; a value outside the bounds, or not a plain integer, is the default with `problem` naming why. The worker
  * reads the same key strictly (`config.mjs`) and refuses to start on a bad value, so a lenient reader only ever meets

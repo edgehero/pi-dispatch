@@ -450,6 +450,15 @@ first ([the order](#the-order)): a receiver upgraded first leaves its notices wa
 record or key changes shape, and nothing older is detected. The read of the window's owner also asks BullMQ's failed
 set and the key's remaining time, both read from the pinned BullMQ 5.80.4; the pin is unchanged.
 
+#### Forge job artifacts (#920)
+
+`PI_ARTIFACTS_DIR` (default `~/.pi-dispatch/artifacts`) is a new store: one folder per run holding what a forge job
+left in `/artifacts`, with a version 1 `manifest.json`, kept for `PI_ARTIFACTS_RETENTION_DAYS` (default 14). The run
+record gains an optional `artifacts: { kept, bytes, dropped }`, numbers and reason tokens only, which an older reader
+ignores; its `v` stays 1. No existing file, record or key changes, and nothing older is detected. The job image gains
+`/opt/pi-dispatch/ARTIFACTS_PROTOCOL.md`; rebuild derived images so their agents are told about the folder (a job on
+an older image still gets it). To keep the old behaviour, set `PI_ARTIFACTS_MAX_FILES=0`. See [artifacts](artifacts.md).
+
 ### 5.4.0
 
 #### Random model selection (#922)
@@ -594,6 +603,7 @@ refusal reasons are described [above](#533-trigger-merge-permission); no existin
 
 ## Notes kept in each guide
 
+- [artifacts.md](artifacts.md#upgrading): the new store, the record's optional field, and the image's instruction file.
 - [backup.md](backup.md#a-key-or-a-file-from-a-newer-release): keys and files a newer release wrote, the `version` you
   may have added by hand, and [state from before #290](backup.md#upgrading-from-a-version-that-kept-state-in-the-os-temp-directory).
 - [costs.md](costs.md#a-call-that-reports-no-usage): the image before the worker, and

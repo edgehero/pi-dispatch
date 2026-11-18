@@ -420,5 +420,13 @@
     "basis": "openshell"
   },
   "jobCreatedAt": "2026-09-14T13:59:00.000Z",
+  "artifacts": {
+    "kept": 2,
+    "bytes": 184213,
+    "dropped": {
+      "name": 2,
+      "size": 1
+    }
+  },
   "v": 1
 }

@@ -204,6 +204,9 @@ export function retainJobDir(prepared, { sandboxDir, retentionHours = null, fs =
 		// Issue #796: a canary's candidate is third-party code that was on trial for that one job. Reopening the retained directory loads neither it nor the overlay, so it would only
 		// sit there looking as if it were part of the run's inputs.
 		fs.rmSync(join(jobDir, "canary"), { recursive: true, force: true });
+		// Issue #920: the run's artifacts were kept already, in their own store under their own retention (artifacts.mjs);
+		// a second copy here would outlive or undercut that, and is the agent's output beside a workspace a person reopens.
+		fs.rmSync(join(jobDir, "artifacts"), { recursive: true, force: true });
 
 		fs.mkdirSync(sandboxDir, { recursive: true, mode: 0o700 });
 		// Issue #464 (gate round 1): this account's, asked again here and not only at boot. A sandbox dir absent at boot is

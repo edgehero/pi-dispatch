@@ -182,6 +182,7 @@ export function containerSpec({
 	jobDir,
 	workspace,
 	outboxDir,
+	artifactsDir,
 	sessionDir,
 	globalPiDir,
 	steerInboxDir,
@@ -233,6 +234,10 @@ export function containerSpec({
 	// (DES-WORKER-ON-HOST). github jobs pass no outboxDir, so the request channel does not exist for
 	// them -- an untrusted issue author cannot chain (INT-OUTBOX-CONTRACT).
 	if (outboxDir) mounts.push({ host: outboxDir, container: "/outbox", readOnly: false, ...own });
+	// Issue #920: a forge job's artifacts folder, writable, per job and under its own job directory like the session, made
+	// by the worker and read by it once the container is gone (artifacts.mjs). A NEW path rather than /outbox, which the
+	// runner reads as the chaining protocol and a forge job must not have. Absent unless the feature is on for this job.
+	if (artifactsDir) mounts.push({ host: artifactsDir, container: "/artifacts", readOnly: false, ...own });
 
 	// This job's OWN copy of its session transcript (REQ-RESUMABLE-SESSION, INT-SESSION-STORE-CONTRACT).
 	// Writable, because pi appends to it as the agent works -- and per-job, exactly like jobDir, which is

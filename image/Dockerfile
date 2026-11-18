@@ -264,6 +264,7 @@ RUN mkdir -p /sandbox /workspace && chown pi:pi /sandbox && chmod 0755 /sandbox 
 COPY guardrails/HARD_RULES.md /opt/pi-dispatch/HARD_RULES.md
 COPY guardrails/OUTBOX_PROTOCOL.md /opt/pi-dispatch/OUTBOX_PROTOCOL.md
 COPY guardrails/PORTFOLIO_PROTOCOL.md /opt/pi-dispatch/PORTFOLIO_PROTOCOL.md
+COPY guardrails/ARTIFACTS_PROTOCOL.md /opt/pi-dispatch/ARTIFACTS_PROTOCOL.md
 
 # The runner's own node: an EXEC-ONLY, root-owned copy (issue #545). The kernel marks a process that exec'd a binary its
 # user cannot read as not dumpable, and a non-dumpable process's /proc/<pid>/mem, environ and fd are refused to the

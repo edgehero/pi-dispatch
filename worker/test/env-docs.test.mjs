@@ -605,7 +605,8 @@ test("no assignment in .env.example carries an inline comment, live or commented
 	// GITHUB_INGEST adds the GitHub transport (#879), commented out like GITHUB_AUTH_SOURCE beside it now is.
 	// PI_CONSOLE_LAN and PI_CONSOLE_LAN_PORT add the console's opt-in listener on the local network (#882).
 	// PI_PRIVATE_ENDPOINTS_FILE adds the declared private endpoints (#918).
-	assert.equal(scanned, 144, "the scan must actually reach every assignment in the file");
+	// PI_ARTIFACTS_DIR, _MAX_FILES, _MAX_FILE_MB, _MAX_RUN_MB and _RETENTION_DAYS add a forge job's kept artifacts (#920).
+	assert.equal(scanned, 149, "the scan must actually reach every assignment in the file");
 	assert.match("  PI_X=1 # c", /^\s*(# )?([A-Z_][A-Z0-9_]*)=(.*)$/, "and the shape it scans for is the shape the file uses, indented or not");
 
 	// systemd drops an `export` line entirely (measured: "Ignoring invalid environment assignment"), and a BOM

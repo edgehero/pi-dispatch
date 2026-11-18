@@ -97,6 +97,7 @@ const UPDATES_RECONCILE_EVERY_MS = 2 * 60 * 1000;
 const UPDATES_RECONCILE_TIMEOUT_MS = 15 * 60 * 1000;
 import { fileURLToPath } from "node:url";
 import { listSandboxes, sandboxDeadline, makeSandboxReaper } from "./sandbox-store.mjs";
+import { artifactLimitsOf, makeArtifactsReaper, makeArtifactsRuntime } from "./artifacts.mjs";
 import { makeSessionStore } from "./session-store.mjs";
 import { scrubCredentials } from "./redact.mjs";
 import { makeCheckOnceSpent, makeCheckPortfolioFlag, makeCheckPrivateEndpoints, makeCheckWaitSkew, makeDisarmOnce, makeFindSecretBundle } from "./triggers-file.mjs";
@@ -1753,6 +1754,9 @@ export async function startWorker(
 	} catch (err) {
 		log("sandbox_reaper_skipped", { reason: scrubCredentials(err?.message) });
 	}
+	// Issue #920: the artifacts store's sweep, at boot and on the retention timer. It never throws (artifacts.mjs).
+	const reapArtifacts = makeArtifactsReaper({ storeDir: config.artifactsDir, retentionDays: config.artifactsRetentionDays, now, log });
+	await reapArtifacts();
 
 	// One raw Redis client, shared by the budget (via the worker) and the scheduler stall guard, so it is
 	// hoisted out of the createWorkerFn arg object.
@@ -3107,6 +3111,15 @@ export async function startWorker(
 
 	const localEventStore = makeLocalEventStore({ redis });
 	if (hostQueue) extraClosers.push(startLocalEventReconciler({ store: localEventStore, worker: config.workerName, queueFor: () => cronQueue, log }));
+	// Issue #920 (REQ-FORGE-JOB-ARTIFACTS): what a forge job leaves in /artifacts, kept in PI_ARTIFACTS_DIR within the
+	// operator's limits. Off (`on` false: nothing staged, mounted or kept) when PI_ARTIFACTS_MAX_FILES is 0.
+	const artifactsRuntime = makeArtifactsRuntime({
+		storeDir: config.artifactsDir,
+		limits: artifactLimitsOf({ maxFiles: config.artifactsMaxFiles, maxFileMb: config.artifactsMaxFileMb, maxRunMb: config.artifactsMaxRunMb }),
+		retentionDays: config.artifactsRetentionDays,
+		now,
+		log,
+	});
 	const localEventRuntime = makeLocalEventRuntime({ store: localEventStore, triggersPath: onceTriggersFile, worker: config.workerName, now });
 	const worker = createWorkerFn({
 		endpointSlots,
@@ -3264,6 +3277,8 @@ export async function startWorker(
 			// The take inside the park sequence (processor.mjs), which starts the held answer before the parked comment.
 			takeHeld: heldSettle.take,
 			localEventRuntime,
+			// Issue #920: a forge job's /artifacts folder, staged before its container and kept after it (index.mjs).
+			artifacts: artifactsRuntime,
 			localWorkspaceIdentity: readLocalWorkspaceIdentity,
 			localContainerGone: containerGoneFn ?? backends.containerGone,
 			answerDraftRuntime,
@@ -3965,6 +3980,8 @@ export async function startWorker(
 					{ name: "console_audit", reap: reapConsoleAudit },
 					{ name: "touch_outbox", reap: () => touchOutbox.repair() },
 					{ name: "sandbox", reap: reapSandboxes },
+					// Issue #920: the artifacts store, its own retention, beside the sandbox store it is kept apart from.
+					{ name: "artifacts", reap: (options) => reapArtifacts(options) },
 					{ name: "session", reap: (options) => sessionStore.reapSessions(options) },
 					...(reapForkSources ? [{ name: "fork_source", reap: reapForkSources }] : []),
 					{ name: "recovery_host_lost", reap: reapHostLost },

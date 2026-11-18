@@ -407,6 +407,8 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		// Issue #712: the OpenShell venues' policy facts (runContainer's `openshell`, backend-openshell.mjs), carried the same
 		// way and for the same reason; the record rebuilds them (run-history.mjs `recordedOpenshell`), so nothing is trusted here.
 		let openshellRan = null;
+		// Issue #920: what the attempt's /artifacts folder left (artifacts.mjs), carried onto the result for the record.
+		let artifactsRan = null;
 		let selectedEffective = null;
 		let randomSelection = null;
 		let providerFailureRan = null;
@@ -416,6 +418,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			try {
 				if (liveRan !== null && target.liveSkipped === undefined) target.liveSkipped = liveRan;
 				if (openshellRan !== null && target.openshell === undefined) target.openshell = openshellRan;
+				if (artifactsRan !== null && target.artifacts === undefined) target.artifacts = artifactsRan;
 				if (selectedEffective?.modelRole) target.modelRole = selectedEffective.modelRole;
 				if (selectedEffective?.modelRole) { target.provider = selectedEffective.provider; target.model = selectedEffective.model; }
 				if (selectedEffective?.modelWhy) { target.modelWhy = selectedEffective.modelWhy; target.provider = selectedEffective.provider; target.model = selectedEffective.model; }
@@ -1961,6 +1964,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 					// take also ends its progress key (outcome `unknown`: nothing saw it exit) instead of leaving its heartbeat to
 					// rewrite the key as running for as long as the worker lives.
 					localContainerAttempted = localWorkspace !== null;
+					// Issue #920: a forge job's /artifacts folder, made in its job directory before the container starts and
+					// mounted by run-container.mjs on a venue that binds. Nothing when the host keeps no artifacts.
+					deps.artifacts?.stage?.(ctx.job, ctx.prepared);
 					return boundAfterAbort(deps.runContainer({ ...ctx, name, signal, jobId: runIdOf(job), onLive: (finish) => (finishLive = finish) }), signal, job, deps.log ?? (() => {}), abortGraceMs, () => {
 						stopDidNotTake = true;
 						return finishLive?.("unknown");
@@ -1990,6 +1996,13 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 						steerRan = r && typeof r === "object" ? { steerSkipped: r.steerSkipped ?? null } : null;
 						liveRan = r && typeof r === "object" && typeof r.liveSkipped === "string" ? r.liveSkipped : null;
 						openshellRan = r && typeof r === "object" && r.openshell !== null && typeof r.openshell === "object" ? r.openshell : null;
+						// Issue #920: what the job left in /artifacts, kept under the id its record is written under. Only after a
+						// container that exited on its own: after an abort whose stop may not have taken, or a detached run, a
+						// writer may still be alive, and the files are read once, with every writer gone. The job's own secret
+						// values scrub its text files, the transcript's set (run-container.mjs `credentialSecretValues`).
+						if (deps.artifacts?.collect && r && typeof r === "object" && r.aborted !== true && r.detached !== true) {
+							artifactsRan = deps.artifacts.collect(job.id, ctx.prepared, { secretValues: Array.isArray(ctx.prepared?.credentialSecretValues) ? ctx.prepared.credentialSecretValues : [] });
+						}
 						await stopCancelPoll();
 						const raced = r && r.aborted !== true && signal.aborted === true && ["operator-cancel", "agent-cancel"].includes(signal.reason);
 						if (raced) deps.log?.("cancel_acked_as_container_exited", { jobId: job.id, exitCode: r.code ?? null });

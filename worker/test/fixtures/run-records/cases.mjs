@@ -203,6 +203,8 @@ export function caseInput(name) {
 					// Issue #918: the private endpoints the container was granted, and what enforced the grant.
 					privateEndpoints: { ids: ["lab", "bench-device"], basis: "openshell" },
 					liveSkipped: "no-capability",
+					// Issue #920: what the job's /artifacts folder left, numbers and reason tokens only.
+					artifacts: { kept: 2, bytes: 184_213, dropped: { size: 1, name: 2 } },
 					openshell: { mode: "copy", ruleHosts: ["github.com", "api.anthropic.com"], ruleHostCount: 2, providers: 1, placeholders: 1 },
 					touches: [{ runId: "gh-9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d-r2", at: ms("2026-09-14T14:10:00.000Z"), cause: "steer" }],
 					touchLineageSkipped: "source-unavailable",
