@@ -28,7 +28,8 @@ Each file's type is judged by its content, never by its name: PNG, JPEG, GIF and
 when it is valid UTF-8 with no NUL byte, anything else a download.
 
 **Text files are cleaned of the job's secrets** the same way its transcript is: every credential the job held is
-replaced, in every spelling the transcript cleaner knows. **Images and other files are kept as written**, because a
+replaced, in every spelling the transcript cleaner knows, and so is each line of a secret file the trigger granted
+([secrets](secrets.md)). **Images and other files are kept as written**, because a
 binary file cannot be cleaned without breaking it. One holding a job secret word for word is dropped instead. A
 screenshot shows whatever the screen showed, so a flow that photographs a page with personal data on it keeps that data
 here.

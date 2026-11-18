@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { ARTIFACTS_MANIFEST, artifactLimitsOf, artifactRunDirOf, artifactsDeadline, artifactsWanted, artifactTypeOf, collectArtifacts, makeArtifactsReaper, makeArtifactsRuntime } from "../src/artifacts.mjs";
 import { ARTIFACT_DROP_REASONS, recordedArtifacts } from "../src/artifacts-record.mjs";
+import { secretFileRedactionValues } from "../src/redact-secrets.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 const NOW = Date.UTC(2026, 10, 18, 9, 0, 0);
@@ -167,4 +168,19 @@ test("the sweep stops when the retention sweep closes, issue #924's contract", a
 	let calls = 0;
 	assert.deepEqual(await makeArtifactsReaper({ storeDir: store, retentionDays: 7, now: () => NOW })({ stopped: () => ++calls > 1 }), { removed: 1 });
 	assert.equal(readdirSync(store).length, 2, "it stopped after the first entry");
+});
+
+test("a file secret (#919) copied into the folder is scrubbed a line at a time, and a binary holding one is dropped", async () => {
+	// run-container.mjs puts `secretFileRedactionValues` of the granted files into `credentialSecretValues`, the set
+	// collection scrubs with (#919's own test pins that half); this pins the other: a key printed or copied a line at a time.
+	const pem = "-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAAB\nAAAAMwAAAAtzc2gtZWQyNTUxOQAAACDw1xQkZ2ZlYWtlLXRlc3Qta2V5\n-----END OPENSSH PRIVATE KEY-----\n";
+	const line = pem.split("\n")[1];
+	const w = world();
+	w.put("notes.txt", `copied from /run/secrets:\n${line}\n`);
+	w.put("shot.png", Buffer.concat([PNG, Buffer.from(pem)]));
+	await w.collect({ secretValues: secretFileRedactionValues({ DEVICE_SSH_KEY: pem }) });
+	assert.equal(w.kept("notes.txt").toString().includes(line), false, "the line is redacted");
+	assert.match(w.kept("notes.txt").toString(), /^copied from \/run\/secrets:/);
+	assert.equal(w.manifest().dropped.secret, 1);
+	assert.equal(existsSync(join(w.store, "gh-abc", "files", "shot.png")), false);
 });
