@@ -388,11 +388,11 @@ as `subscription_auth_hold`. See [subscription renewal](subscription-auth.md#adm
 
 Release numbers come from the git tags.
 
-### Next release
+### 5.4.1
 
 #### File secrets (#919)
 
-Upgrade the job image, every worker and receiver, the console and every `/dispatch` before adding
+Upgrade the job image, every worker and receiver, the console and every `/dispatch` to 5.4.1 before adding
 `run.secretFiles` or a bundle binding's `files` selection. Follow [the order](#the-order); derived images must
 advertise `secretFiles` too. Environment-only triggers keep their existing behavior and minimum store versions.
 
@@ -445,7 +445,7 @@ pin restoration remain compatible. See [consumer health](multi-host.md#queue-con
 Queued job data gains `duplicateOf` and `windowEndsAt`, at version 10, on a new kind of queued job: a notice that the
 ten-minute window dropped a request against a job that had already ended. The receiver and the poller add it; the
 worker answers it with one comment and a run record whose reason is `duplicate-request`, and never runs it. A worker
-older than this release holds a notice as `newer-release` instead of reading it as a forge job, so move the workers
+older than 5.4.1 holds a notice as `newer-release` instead of reading it as a forge job, so move the workers
 first ([the order](#the-order)): a receiver upgraded first leaves its notices waiting until they are. No existing job,
 record or key changes shape, and nothing older is detected. The read of the window's owner also asks BullMQ's failed
 set and the key's remaining time, both read from the pinned BullMQ 5.80.4; the pin is unchanged.
