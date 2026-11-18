@@ -2,6 +2,7 @@ import * as nodeFs from "node:fs";
 import { isTransientOverlayRead } from "./model-catalog.mjs";
 import { modelSelectionProblem, modelListProblem, modelOnList, splitModelEntry } from "./model-ref.mjs";
 import { DISARMED_TYPE, parseTriggersDocument } from "./triggers.mjs";
+import { isForgeTriggerOf } from "./trigger-identity.mjs";
 
 const changed = () => ({ refused: "model-selection-policy-changed" });
 const samePool = (a, b) => a.length === b.length && a.every((ref) => b.includes(ref));
@@ -40,13 +41,9 @@ export function makeCheckModelSelectionPolicy({ triggersPath, allowedModels = nu
 		let entry;
 		if (hasMatched) {
 			entry = entries[matched.index];
-			const sameType = entry?.on?.type === matched.type || matched.type === "label" && entry?.on?.type === "pull_request" && job.target?.type === "pull_request";
-			// A reviewed comment rule permits a flow override, just as makeFindSecretBundle's identity check does.
-			const sameFlow = matched.type === "comment" || entry?.run?.flow === job.flow;
-			if (entry?.run?.kind !== job.kind || !sameType || !sameFlow || entry?.run?.command !== job.command) return changed();
-			if (typeof matched.action === "string" && !entry.on.action?.includes(matched.action)) return changed();
-			if (typeof matched.label === "string" && ![...(entry.on.any ?? []), ...(entry.on.all ?? [])].includes(matched.label)) return changed();
-			if (typeof matched.phrase === "string" && entry.on.phrase !== matched.phrase) return changed();
+			// The identity every pre-spend check shares (issue #933). A reviewed comment rule permits a flow override, but
+			// only to a flow the receiver could have routed it to (a forge trigger's in the file), no longer to any flow.
+			if (!isForgeTriggerOf(entries, entry, job)) return changed();
 		} else {
 			entry = entries.find((candidate) => candidate.on.type === "cron" && candidate.on.id === cronId && ["folder", "flow", "command", "task"].every((key) => candidate.run[key] === job[key]));
 		}

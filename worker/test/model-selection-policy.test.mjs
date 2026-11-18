@@ -48,7 +48,12 @@ test("cron identity checks reviewed folder, task and flow while comment flow ove
 	assert.deepEqual(f.check(queued), { ok: true });
 	assert.deepEqual(f.check({ ...queued, folder: "/other" }), refused);
 	const comment = fixture({ ...entry, on: { type: "comment", phrase: "@pi" } });
-	assert.deepEqual(comment.check({ ...job, flow: "override", trigger: { matched: { index: 0, type: "comment", phrase: "@pi" } } }), { ok: true });
+	const routed = { ...job, flow: "override", trigger: { matched: { index: 0, type: "comment", phrase: "@pi" } } };
+	// Issue #933: a comment may name another trigger's flow, never one no forge trigger in the file holds (the receiver's
+	// `knownFlows`, `routableFlows`): such a job is not this trigger's, whatever its comment entry still says.
+	assert.deepEqual(comment.check(routed), refused);
+	comment.doc().triggers.push({ on: { type: "label", any: ["pi:review"] }, run: { kind: "github", flow: "override" } });
+	assert.deepEqual(comment.check(routed), { ok: true });
 });
 
 test("GitLab PR label routing retains the reviewed PR policy identity", () => {

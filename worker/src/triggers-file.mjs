@@ -46,7 +46,8 @@ import { localEventDigest, validLocalEvent } from "./local-event.mjs";
  */
 
 import nodeFs from "node:fs";
-import { ON_TYPES, parseTriggers, parseTriggersDocument, triggersFileNewer, triggersFileVersionFor, triggersFileVersionProblem } from "./triggers.mjs";
+import { parseTriggers, parseTriggersDocument, triggersFileNewer, triggersFileVersionFor, triggersFileVersionProblem } from "./triggers.mjs";
+import { isForgeTriggerOf } from "./trigger-identity.mjs";
 import { heldDocument } from "./held-document.mjs";
 import { findDuplicateKey } from "./json-duplicates.mjs";
 import { expectRefusal } from "./file-expect.mjs";
@@ -687,15 +688,15 @@ export function makeCheckWaitSkew({ triggersPath, fs = nodeFs }) {
 		// The identity guard readDisarmState keeps, and WIDER than flow alone. `triggerIndex` is a RAW array
 		// position, so an insertion, a reorder, or a stray `triggers.json` at the worker's cwd can all put a
 		// different trigger here -- and two rules sharing a flow are indistinguishable on flow alone, which
-		// made a false refusal reachable by ordinary editing. Kind and on-type are compared too, on
-		// `readDisarmState`'s precedent of checking the item number rather than trusting the index.
+		// made a false refusal reachable by ordinary editing. The reading is the one every pre-spend check shares
+		// (`isForgeTriggerOf`, issue #933): it used to be this check's own, strict on `on.type` and on flow, so a
+		// GitLab merge request job a label matched and a comment job routed to another trigger's flow never
+		// matched, and for them a dropped field never refused. It also compares the matched action, label and
+		// phrase, which can only send more jobs to "run".
 		//
 		// Every mismatch folds to "run", never to a refusal: the true answer to "is this job missing
 		// conditions someone wrote for it?" is then unknown, and unknown must not refuse a paid delivery.
-		if (entry?.run?.flow !== job?.flow || entry?.run?.command !== job?.command) return { ok: true };
-		if (entry?.run?.kind !== job?.kind) return { ok: true };
-		const onType = job?.trigger?.matched?.type;
-		if (typeof onType === "string" && entry?.on?.type !== onType) return { ok: true };
+		if (!isForgeTriggerOf(triggers, entry, job)) return { ok: true };
 
 		if (waitSkewed) return { skewed: true, conditions: authored.length };
 		return { skewed: true, field: dropped.key };
@@ -741,7 +742,8 @@ export function makeCheckPortfolioFlag({ triggersPath, fs = nodeFs }) {
  * above it moves another trigger to its index, and that trigger's grant is not this job's):
  *   - a forge job: the entry at `trigger.matched.index`, of the job's kind and `on.type` (GitLab's label match on a merge
  *     request rule included), dispatching the job's flow or command (a comment trigger may dispatch another forge
- *     trigger's flow), and still holding the action, label or phrase the job matched: `makeCheckMergePolicy`'s identity;
+ *     trigger's flow), and still holding the action, label or phrase the job matched: the identity every pre-spend
+ *     check shares (`isForgeTriggerOf`, issue #933);
  *   - a local event job: the local entry with its `on.id` and `on.forge`, and the job's folder, command and worker;
  *   - a cron or manual job: the cron entry with its `on.id`, and the job's folder, flow, command and task, the identity
  *     the secret bundle's lookup uses (cron, local event and watch ids are separate namespaces).
@@ -757,7 +759,6 @@ export function makeCheckPortfolioFlag({ triggersPath, fs = nodeFs }) {
  * never run on a grant nobody can confirm).
  */
 export function makeCheckPrivateEndpoints({ triggersPath, fs = nodeFs } = {}) {
-	const forgeType = (type) => ON_TYPES.has(type) && type !== "cron" && type !== "watch";
 	return function checkPrivateEndpoints(job, { queueJobId } = {}) {
 		const ids = job?.privateEndpoints;
 		if (ids === undefined) return { ok: true, ids: [] };
@@ -797,14 +798,7 @@ export function makeCheckPrivateEndpoints({ triggersPath, fs = nodeFs } = {}) {
 		let entry;
 		if (forge) {
 			const candidate = entries[matched.index];
-			const sameType = candidate?.on?.type === matched.type || (matched.type === "label" && candidate?.on?.type === "pull_request" && job.target?.type === "pull_request");
-			const sameLane = job.command !== undefined
-				? candidate?.run?.command === job.command
-				: candidate?.run?.command === undefined && (candidate?.run?.flow === job.flow || (candidate?.on?.type === "comment" && entries.some((t) => forgeType(t?.on?.type) && t.run?.flow === job.flow)));
-			const sameMatch = !(typeof matched.action === "string" && !candidate?.on?.action?.includes(matched.action))
-				&& !(typeof matched.label === "string" && ![...(candidate?.on?.any ?? []), ...(candidate?.on?.all ?? [])].includes(matched.label))
-				&& !(typeof matched.phrase === "string" && candidate?.on?.phrase !== matched.phrase);
-			if (candidate?.run?.kind === job.kind && sameType && sameLane && sameMatch) entry = candidate;
+			if (isForgeTriggerOf(entries, candidate, job)) entry = candidate;
 		} else if (localEvent !== null) {
 			entry = entries.find((t) => t?.run?.kind === "local" && t?.on?.id === localEvent.id && t.on.forge === localEvent.forge && ["folder", "command", "worker"].every((key) => t.run?.[key] === job[key]));
 		} else {
@@ -861,9 +855,10 @@ export function makeCheckPrivateEndpoints({ triggersPath, fs = nodeFs } = {}) {
  * The identity of the job's entry is checked on the RAW entries, never the normalized ones, because the loader
  * collapses a DISARMED one-shot to a sentinel and a retry of the very job that spent it would otherwise read as a
  * changed trigger. A cron job is found by its id and must agree on folder, flow, command and task
- * (`makeCheckPortfolioFlag`'s rule); a forge job by its matched index, agreeing on kind, `on.type`, command, and
- * flow except on a comment trigger, whose phrase may name another flow (`<phrase> <flow>`) without changing
- * which entry authorized it.
+ * (`makeCheckPortfolioFlag`'s rule); a forge job by its matched index, through the identity every pre-spend check
+ * shares (`isForgeTriggerOf`, issue #933): kind, `on.type` (a GitLab merge request a label matched included), command,
+ * flow (a comment trigger's phrase may name another trigger's flow, `<phrase> <flow>`, without changing which entry
+ * authorized it) and the action, label or phrase the job matched.
  */
 export function makeFindSecretBundle({ triggersPath, fs = nodeFs, log = () => {}, bundlesDeclared = () => false }) {
 	let cache = null; // { mtimeMs, size } of the text `lastGood` came from
@@ -937,10 +932,10 @@ export function makeFindSecretBundle({ triggersPath, fs = nodeFs, log = () => {}
 			if (candidate && ["folder", "command", "worker"].every((key) => candidate.run?.[key] === job[key])) raw = candidate;
 		} else if (Number.isInteger(matched?.index)) {
 			entry = "forge";
+			// The shared reading (issue #933). Its own used to be strict on `on.type`, so a GitLab merge request job a
+			// label matched found no entry and was refused as a changed trigger, every time, in any bundled project.
 			const candidate = entries[matched.index];
-			const sameType = typeof matched.type !== "string" || candidate?.on?.type === matched.type;
-			const sameFlow = matched.type === "comment" || candidate?.run?.flow === job.flow;
-			if (candidate?.run?.kind === job.kind && sameType && sameFlow && candidate?.run?.command === job.command) raw = candidate;
+			if (isForgeTriggerOf(entries, candidate, job)) raw = candidate;
 		} else if (typeof trigger.id === "string") {
 			entry = "cron";
 			raw = entries.find((t) => t?.on?.type === "cron" && t.on.id === trigger.id && ["folder", "flow", "command", "task"].every((k) => t.run?.[k] === job[k]));

@@ -105,7 +105,8 @@ and a run record is read whatever its id's length.
 Two matching behaviours to know before you turn on a paid trigger:
 
 - **A comment can choose the flow.** `<phrase> <flow>` in the comment body overrides the trigger's
-  `run.flow` whenever that word matches another trigger's flow in the same file. So `run.flow` is a
+  `run.flow` whenever that word matches another forge trigger's flow in the same file (a schedule's, a watch
+  rule's or a local event listener's flow does not count). So `run.flow` is a
   default rather than a fixed pairing. On a rule that names `run.command` this channel is inert. Trailing
   words never retarget or suppress the command. They reach a forge job only as data in `/job/event.json`,
   and never reach a local event command.
@@ -493,8 +494,8 @@ how a run is followed or picked up, and that page's Edit form and `dispatch_trig
   `_PORT`. The worker confirms the grant against this file before every attempt, so removing an id withdraws it from
   the jobs already queued, which are refused rather than run without it. Adding the field to a forge trigger refuses
   its jobs that were already queued (`trigger-skew`), and a local event trigger's (`local-event-trigger-changed`):
-  re-run them. Three kinds of queued job run without it instead: a cron run, a GitLab merge request job a label
-  matched, and a comment job that ran another trigger's flow. The admin's tools cannot set it.
+  re-run them. A cron run queued before the edit runs without it instead, because the worker builds a cron job from
+  the file itself and has nothing to compare. The admin's tools cannot set it.
 
 - `"skillsDir"` points at a directory of skills on the worker host. The layout is the same as your own
   `~/.pi/agent/skills`, which uses `<name>/SKILL.md`. They are copied into that trigger's jobs. They are

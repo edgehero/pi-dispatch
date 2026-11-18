@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import * as nodeFs from "node:fs";
 import { isForgeKind } from "./forges.mjs";
 import { DISARMED_TYPE, ON_TYPES, parseTriggersDocument } from "./triggers.mjs";
+import { isForgeTriggerOf } from "./trigger-identity.mjs";
 
 const DIGEST = /^[a-f0-9]{64}$/;
 const forgeTrigger = (type) => ON_TYPES.has(type) && type !== "cron" && type !== "watch";
@@ -59,15 +60,9 @@ export function makeCheckMergePolicy({ triggersPath, fs = nodeFs } = {}) {
 			}
 		}
 		const entry = entries[index];
-		const matched = job.trigger.matched;
-		// GitLab describes an MR rule selected by a changed label as a label match. It still names the PR entry.
-		const sameType = entry?.on?.type === matched.type || (matched.type === "label" && entry?.on?.type === "pull_request" && job.target?.type === "pull_request");
-		const sameFlow = entry?.run?.flow === job.flow || (entry?.on?.type === "comment" && entries.some((t) => forgeTrigger(t.on.type) && t.run.flow === job.flow));
-		if (entry?.run?.mayMerge !== true || entry.run.kind !== job.kind || !sameType || !sameFlow
-			|| entry.run.command !== undefined
-			|| (typeof matched.action === "string" && !entry.on.action?.includes(matched.action))
-			|| (typeof matched.label === "string" && ![...(entry.on.any ?? []), ...(entry.on.all ?? [])].includes(matched.label))
-			|| (typeof matched.phrase === "string" && entry.on.phrase !== matched.phrase)) {
+		// The identity every pre-spend check shares (issue #933), which this check's own reading became: a GitLab merge
+		// request a label matched, and a comment routed to another trigger's flow, are both this entry's jobs.
+		if (entry?.run?.mayMerge !== true || entry.run.command !== undefined || !isForgeTriggerOf(entries, entry, job)) {
 			return { refused: "merge-policy-changed" };
 		}
 		return mergePolicyDigest(entry) === job.mayMergePolicy ? { ok: true } : { refused: "merge-policy-changed" };

@@ -334,7 +334,9 @@ test("the fork check: a determinate forge answer runs without the bundle, and Gi
 	const cased = deployment({ over: { resolvePullRequestHead: async () => ({ headRef: "b", headRepo: "ACME/Shop" }) } });
 	assert.equal((await runJob(prJob, cased.deps)).bundle.id, "shop");
 	const gitlab = deployment({ triggers: [cron, { on: { type: "pull_request", action: ["open"] }, run: { kind: "gitlab", flow: "review" } }], over: { resolvePullRequestHead: async () => ({ headRef: "b", headRepo: "ACME/Shop" }) } });
-	assert.equal((await runJob({ ...prJob, kind: "gitlab" }, gitlab.deps)).bundleSkipped, "fork", "GitLab answers by project id and reports the job's own name, so its comparison stays exact");
+	// The job GitLab's receiver sends: its own action word, which the bundle lookup's trigger identity holds it to (#933).
+	const gitlabJob = { ...prJob, kind: "gitlab", trigger: { ...prJob.trigger, matched: { index: 1, type: "pull_request", action: "open" } } };
+	assert.equal((await runJob(gitlabJob, gitlab.deps)).bundleSkipped, "fork", "GitLab answers by project id and reports the job's own name, so its comparison stays exact");
 });
 
 // The hand-back itself, through makeProcessor: index.mjs imports bullmq, so this skips below the node floor and is
