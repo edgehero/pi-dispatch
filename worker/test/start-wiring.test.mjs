@@ -7558,3 +7558,37 @@ test("each runtime's container start gets its own grant folder, and the boot swe
 	assert.ok(src.lastIndexOf("endpoint_claims", sweep) > 0, "after the reaper and the claim sweep");
 	assert.match(src, /checkPrivateEndpoints: makeCheckPrivateEndpoints\(\{ triggersPath: onceTriggersFile \}\)/, "the live recheck reads the file the other free gates read");
 });
+
+// Issue #920, part 3: the artifacts comment, posted by recordRun once a forge run's outcome is final.
+test("a final forge record with artifacts posts one harness comment with the kept names and the run page's link (#920)", { skip }, async () => {
+	const { InfraRetry } = await import("../src/processor.mjs");
+	const store = tempDir("pi-artifacts-wiring-");
+	mkdirSync(join(store, "gh-art"), { recursive: true });
+	writeFileSync(join(store, "gh-art", "manifest.json"), JSON.stringify({ v: 1, jobId: "gh-art", createdAt: "2026-11-18T09:00:00.000Z", keepUntil: null, files: [{ name: "after.png", size: 2048, sha256: "a".repeat(64), type: "image/png", scrubbed: false }], dropped: {} }));
+	const posted = [];
+	const host = fakeHost({ postStatusComment: async (job, target, text) => void posted.push({ target, text }) });
+	const { recordRun } = await runStartWithRecords({
+		env: { PI_LIVE_TRANSCRIPTS: "0", PI_ARTIFACTS_DIR: store, PI_CONSOLE_PUBLIC_URL: "https://console.example.org" },
+		makeAuth: async () => ({ mintToken: async () => "tok-1", selfId: 1, source: "gh" }),
+		makeHost: () => host,
+	});
+	const data = { kind: "github", repo: "o/n", target: { type: "issue", number: 3 }, flow: "fix" };
+	const settled = async () => {
+		for (let i = 0; i < 20; i++) await new Promise((r) => setImmediate(r));
+	};
+	const artifacts = { kept: 1, bytes: 2048, dropped: {} };
+	// An attempt the queue will retry says nothing: the next attempt replaces its files.
+	recordRun({ job: { id: "gh-art", name: "github", attemptsMade: 0, opts: { attempts: 2 }, data }, error: Object.assign(new InfraRetry("container-infra-exit", { reason: "container-infra-exit" }), { artifacts }), startedAt: "a", endedAt: "b" });
+	await settled();
+	assert.deepEqual(posted, []);
+	recordRun({ job: { id: "gh-art", name: "github", attemptsMade: 1, opts: { attempts: 2 }, data }, result: { outcome: "completed", artifacts }, startedAt: "a", endedAt: "b" });
+	await settled();
+	assert.equal(posted.length, 1);
+	assert.deepEqual(posted[0].target, data.target);
+	assert.equal(posted[0].text, "pi-dispatch kept 1 file from job `gh-art` for its reviewer:\n- `after.png` (2 KB)\nOpen them on the run page: https://console.example.org/run?id=gh-art#p-artifacts");
+	// A record without artifacts, and a local job, post nothing.
+	recordRun({ job: { id: "gh-none", name: "github", data }, result: { outcome: "completed" }, startedAt: "a", endedAt: "b" });
+	recordRun({ job: { id: "local-1", name: "local", data: { kind: "local", folder: "/f", flow: "tidy" } }, result: { outcome: "completed", artifacts }, startedAt: "a", endedAt: "b" });
+	await settled();
+	assert.equal(posted.length, 1);
+});

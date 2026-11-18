@@ -64,6 +64,11 @@ says) or, when the attempt will be retried, that it ended and is being retried
 ([triggers](triggers.md#optional-run-fields)). It holds numbers and fixed words only and comes on top of the comments
 above; it is not the completion or failure comment, and it pages nobody.
 
+And one more when a forge job kept or dropped files in `/artifacts`: once its outcome is final, the worker posts a
+comment listing each kept file by name and size, why any file was not kept, and a link to the run page when
+`PI_CONSOLE_PUBLIC_URL` is set ([artifacts](artifacts.md#on-the-issue-or-pull-request)). Its file names are the one
+thing a job chose that a worker comment carries, held to letters, digits, dot, dash and underscore.
+
 ## `PI_ON_FAILURE`: one command, wired by you
 
 ```sh

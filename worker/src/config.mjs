@@ -581,6 +581,8 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		artifactsMaxRunMb: boundedInt(env, "PI_ARTIFACTS_MAX_RUN_MB", 25, 1, "an integer 1-4096", 4096),
 		// Days a run's files stay; 0 keeps them (the log retention's sentinel, NOT the sandbox's "off").
 		artifactsRetentionDays: nonNegativeInt(env, "PI_ARTIFACTS_RETENTION_DAYS", ARTIFACTS_RETENTION_DAYS_DEFAULT),
+		// Issue #920, part 3: the console's address as a reviewer reaches it, for the link in a run's artifacts comment.
+		consolePublicUrl: consolePublicUrlOf(env),
 		triggersFile: env.PI_TRIGGERS_FILE ?? null, // DES-CRON-VIA-BULLMQ-SCHEDULER: unified triggers file; null = cron disabled for the worker (it selects on.type:"cron")
 		pauseWindowsFile: pauseWindowsFilePath(env), // REQ-SCOPED-PAUSE-WINDOWS: per-folder/repo timed pause; null = no scoped pauses
 		privateEndpointsFile: privateEndpointsFilePath(env), // issue #918: the declared private endpoints (INT-PRIVATE-ENDPOINTS-FILE-CONTRACT); null = private-endpoints.json in the deployment folder, and a missing default file declares none
@@ -1176,6 +1178,28 @@ function tempRoot(env = process.env) {
 export function legacyTempStateDir(env = process.env) {
 	// The SHARED address every account used before issues #290 and #464; not a path anything writes any more.
 	return `${tempRoot(env)}/pi-dispatch`;
+}
+
+/**
+ * `PI_CONSOLE_PUBLIC_URL` (issue #920, part 3): the console's origin as the people who read the forge reach it, for the
+ * link the worker puts in a run's artifacts comment. Unset or empty is null (the comment then names the job and links
+ * nowhere). An `https://` origin, or `http://` on a loopback host only, with no credentials, path, query or fragment; a
+ * trailing slash is dropped. Anything else refuses to boot naming the key: a link to the wrong place in a public comment
+ * is worse than none. Read from this host's environment only, never a trigger.
+ */
+export function consolePublicUrlOf(env = process.env) {
+	const raw = env.PI_CONSOLE_PUBLIC_URL;
+	if (raw === undefined || raw === "") return null;
+	let u;
+	try {
+		u = new URL(raw);
+	} catch {
+		throw configError("PI_CONSOLE_PUBLIC_URL must be the console's address, such as https://console.example.org");
+	}
+	const loopback = ["localhost", "127.0.0.1", "[::1]"].includes(u.hostname);
+	if (!(u.protocol === "https:" || (u.protocol === "http:" && loopback))) throw configError("PI_CONSOLE_PUBLIC_URL must be an https:// address (http:// only on a loopback host)");
+	if (u.username !== "" || u.password !== "" || (u.pathname !== "/" && u.pathname !== "") || u.search !== "" || u.hash !== "") throw configError("PI_CONSOLE_PUBLIC_URL must be an origin alone: no user, path, query or fragment");
+	return u.origin;
 }
 
 /** The artifacts store's default (issue #920): beside the run history, which is what a run's files belong to. Exported so

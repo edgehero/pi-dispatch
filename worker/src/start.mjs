@@ -14,7 +14,7 @@ import { makeQuestionGroupStore } from "./question-groups.mjs";
 import { makeQuestionGroupRuntime } from "./question-group-runtime.mjs";
 import { makeAnswerDraftStore } from "./answerer.mjs";
 import { makeAnswerDraftRuntime, readAnswerPending } from "./answerer-runtime.mjs";
-import { forgeApiRoot } from "./forges.mjs";
+import { forgeApiRoot, isForgeKind } from "./forges.mjs";
 import { enqueueAnswerDraftJob } from "./queue.mjs";
 import { makeWatchRuntime } from "./watch-runtime.mjs";
 import { makeWatchDrainer } from "./watch-drainer.mjs";
@@ -98,6 +98,7 @@ const UPDATES_RECONCILE_TIMEOUT_MS = 15 * 60 * 1000;
 import { fileURLToPath } from "node:url";
 import { listSandboxes, sandboxDeadline, makeSandboxReaper } from "./sandbox-store.mjs";
 import { artifactLimitsOf, makeArtifactsReaper, makeArtifactsRuntime } from "./artifacts.mjs";
+import { artifactsComment } from "./artifacts-comment.mjs";
 import { makeSessionStore } from "./session-store.mjs";
 import { scrubCredentials } from "./redact.mjs";
 import { makeCheckOnceSpent, makeCheckPortfolioFlag, makeCheckPrivateEndpoints, makeCheckWaitSkew, makeDisarmOnce, makeFindSecretBundle } from "./triggers-file.mjs";
@@ -2135,6 +2136,15 @@ export async function startWorker(
 			const runId = runIdOf(job);
 			if (statusComments.has(runId)) void statusComments.settle(runId, outcome);
 			else if (job?.data?.statusComment === true) void settleUnregisteredStatus(job, outcome);
+			// Issue #920, part 3: what a forge job kept in /artifacts, said once on its issue or pull request when its outcome
+			// is FINAL (never for an attempt the queue retries, whose files the next attempt replaces), by the harness and
+			// never the model (artifacts-comment.mjs). After the record, from the store's manifest; not awaited, and the
+			// adapter never throws. A local job has no forge item; its run page says it.
+			if (!retrying && record.artifacts && isForgeKind(job?.data?.kind)) {
+				const text = artifactsComment({ jobId: record.jobId, counts: record.artifacts, storeDir: config.artifactsDir, consoleUrl: config.consolePublicUrl, phrase: job.data.trigger?.matched?.phrase ?? null });
+				if (text !== null) void comment(job.data, text);
+				else log("artifacts_comment_skipped", { jobId: record.jobId, reason: "phrase-collision" });
+			}
 		} catch {}
 		// STRICTLY AFTER the file, and deliberately not awaited. After, because a crash between the two must
 		// leave a record with no fleet row rather than a fleet row with no record -- the mirror is a VIEW,
