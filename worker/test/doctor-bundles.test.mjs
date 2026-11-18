@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { chmodSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { secretBundleChecks } from "../src/doctor-bundles.mjs";
+import { secretBundleChecks, secretFileChecks } from "../src/doctor-bundles.mjs";
 import { realExecutable } from "../src/secrets.mjs";
 import { makeBundleResolver } from "../src/secret-bundles.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -73,4 +73,26 @@ test("--secrets resolves each bundle here and prints its names and count, never 
 
 test("silent on a deployment with no bundle and no bundle profile", async () => {
 	assert.deepEqual(await secretBundleChecks({ bundles: {}, envRaw: undefined }), []);
+});
+
+
+test("bundle file names are marked as file secrets in declared and resolved rows (#919)", async () => {
+	const checks = await secretBundleChecks({ bundles: { shop: { profile: "p", ref: "private-reference", project: "shop", files: ["KEY"] } }, projects, envRaw: "p:/opt/resolve:json", resolveBundle: async () => ({ ok: true, vars: { KEY: "private-key\n", TOKEN: "private-token" } }) });
+	assert.ok(checks.some((c) => c.label.includes("file secrets: KEY")));
+	assert.ok(checks.some((c) => c.label.includes("KEY (file secret), TOKEN")));
+	assert.doesNotMatch(JSON.stringify(checks), /private-key|private-token|private-reference/);
+});
+
+test("file-secret doctor rows show names and type without references or returned bytes (#919)", async () => {
+	const runs = [{ label: "trigger:0", secretFiles: { KEY: "private-reference" } }];
+	let invoked = 0;
+	const checks = await secretFileChecks({ runs, resolveFiles: async (run) => { invoked++; assert.equal(run.secretFiles.KEY, "private-reference"); return { ok: true, secretFiles: { KEY: "private-key\n" } }; } });
+	assert.equal(invoked, 1);
+	assert.ok(checks.every((c) => c.ok));
+	assert.ok(checks.some((c) => c.label.includes("file secrets: KEY (mode 0600")));
+	assert.ok(checks.some((c) => c.label.includes("file secrets resolved on this host: KEY")));
+	assert.doesNotMatch(JSON.stringify(checks), /private-key|private-reference/);
+	const failure = await secretFileChecks({ runs, resolveFiles: async () => ({ unresolved: "KEY", failure: "utf8", stderrBytes: 99 }) });
+	assert.ok(failure.some((c) => !c.ok && c.label.includes("valid UTF-8 text")));
+	assert.doesNotMatch(JSON.stringify(failure), /private-reference/);
 });

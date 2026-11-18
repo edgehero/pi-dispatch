@@ -1,3 +1,4 @@
+import { secretFileNameAllowed, secretFileNamesDistinct } from "./secret-file-names.mjs";
 import { validLocalEvent } from "./local-event-identity.mjs";
 import { CANARY_LOADS, recordedPackageCanary } from "./package-canary-record.mjs";
 import { LOADED_LINE_CUT, recordedLoaded } from "./loaded-record.mjs";
@@ -235,7 +236,7 @@ export const STEER_RUNNER_REASONS = Object.freeze(["steer-inbox-missing", "steer
  * limit or the command the job waited on, not a budget.
  */
 export const ACTIVITY_RUNNER_REASONS = Object.freeze(["idle", "stalled"]);
-export const RUNNER_POLICY_REASONS = new Set(["provider-auth-refused", "cost-cap", "model-not-allowed", "model-roles-invalid", "model-roles-shadowed", "cost-cap-unenforceable", "model-policy-unenforceable", ...MCP_RUNNER_REASONS, ...EXCLUDE_RUNNER_REASONS, ...ANSWER_DRAFT_RUNNER_REASONS, ...AWAIT_INPUT_RUNNER_REASONS, ...PROGRESS_RUNNER_REASONS, ...STEER_RUNNER_REASONS, ...ACTIVITY_RUNNER_REASONS, "question-group-refused", "question-group-unanswered", "approval-config-invalid", "approval-without-session", "approval-shadowed", "approval-decision-invalid"]);
+export const RUNNER_POLICY_REASONS = new Set(["secret-files-unusable", "provider-auth-refused", "cost-cap", "model-not-allowed", "model-roles-invalid", "model-roles-shadowed", "cost-cap-unenforceable", "model-policy-unenforceable", ...MCP_RUNNER_REASONS, ...EXCLUDE_RUNNER_REASONS, ...ANSWER_DRAFT_RUNNER_REASONS, ...AWAIT_INPUT_RUNNER_REASONS, ...PROGRESS_RUNNER_REASONS, ...STEER_RUNNER_REASONS, ...ACTIVITY_RUNNER_REASONS, "question-group-refused", "question-group-unanswered", "approval-config-invalid", "approval-without-session", "approval-shadowed", "approval-decision-invalid"]);
 
 /**
  * The runner's reasons that ride a COMPLETED exit (`code: 0`) and that the worker acts on, closed (issue #625). One so
@@ -611,6 +612,11 @@ export function recordedPrivateEndpoints(p) {
 	if (!Array.isArray(ids) || ids.length === 0 || ids.length > RECORD_PRIVATE_MAX || !ids.every((id) => typeof id === "string" && RECORD_PRIVATE_ID_RE.test(id)) || new Set(ids).size !== ids.length) return null;
 	if (!PRIVATE_ENDPOINT_BASES.includes(p.basis)) return null;
 	return { ids: [...ids].sort(), basis: p.basis };
+}
+
+/** Names of resolved file grants only; later refusals may retain them. Never references, paths or contents. */
+export function recordedSecretFiles(names) {
+	return Array.isArray(names) && names.length > 0 && names.length <= 80 && Array.from(names).every(secretFileNameAllowed) && secretFileNamesDistinct(names) ? [...names].sort() : null;
 }
 
 /**
@@ -1090,6 +1096,7 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 	const backend = resolveBackendName(data, defaultBackend);
 	const openshell = recordedOpenshell(source.openshell, backend);
 	const secretsProfile = recordedSecretsProfile(data);
+	const secretFiles = recordedSecretFiles(source.secretFiles);
 	// Issue #704: only for a job whose project has a secret bundle, so no other record can carry either key.
 	const bundle = recordedBundle(source.bundle);
 	if (bundle !== null && !Object.hasOwn(OPENSHELL_VENUE_MODES, backend)) delete bundle.placeholderNames;
@@ -1333,6 +1340,7 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		//     `placeholders` and `plain`, two counts (issue #704 part 3);
 		//   - `bundleSkipped`: why the job ran without its project's bundle (BUNDLE_SKIPPED_REASONS), a fixed enum.
 		...(bundle !== null ? { bundle } : {}),
+		...(secretFiles !== null ? { secretFiles } : {}),
 		...(bundleSkipped !== null ? { bundleSkipped } : {}),
 		// The live transcript (issue #712, INT-RUN-HISTORY-FILE-CONTRACT), TAIL position after the bundle keys, CONDITIONAL
 		// like them, so a record of a run whose transcript streamed (or that no reader asked for) is byte-identical:
@@ -1678,11 +1686,11 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 	// `exitKey` (issue #545): the key this job's runner signs its exit line with, or null when none was issued (an image
 	// that does not declare `exitAuth`, or a caller that predates the field). With a key, the exit-line fields are read
 	// from the AUTHENTICATED lines only, and none at all reads exactly like a container that wrote no exit line.
-	return function openJobLog(jobId, { exitKey = null, suppressCapture = false } = {}) {
+	return function openJobLog(jobId, { exitKey = null, suppressCapture = false, captureRedactor = null } = {}) {
 		let tail = "";
 		let stream = null;
 
-		function write(chunk) {
+		function write(chunk, channel = "stdout") {
 			try {
 				tail += typeof chunk === "string" ? chunk : chunk.toString("utf8");
 				if (tail.length > TAIL_CAP_BYTES) tail = tail.slice(tail.length - TAIL_CAP_BYTES);
@@ -1693,7 +1701,9 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 					// than an unhandled 'error' that kills the worker.
 					stream.on("error", (e) => log("log_sink_error", { jobId, reason: e?.message }));
 				}
-				stream.write(chunk);
+				// Authentication reads the raw bounded tail above; persisted output takes its own streaming redactor.
+				const safe = captureRedactor ? captureRedactor.write(chunk, channel) : chunk;
+				if (safe.length > 0) stream.write(safe);
 			} catch (err) {
 				log("log_sink_error", { jobId, reason: err?.message });
 			}
@@ -1738,6 +1748,7 @@ export function makeLogSink({ logsDir, enabled, fs = nodeFs, log = () => {} }) {
 			try {
 				if (stream !== null) {
 					const s = stream;
+					if (captureRedactor) s.write(captureRedactor.end());
 					s.end();
 					let timer;
 					const timeout = new Promise((resolve) => {

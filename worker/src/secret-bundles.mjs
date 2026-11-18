@@ -199,7 +199,7 @@ export function makeBundleResolver({ envBundles = {}, roots = [], forwardEnv = [
 	async function resolve(job, binding, { signal, overlayBundles = {} } = {}) {
 		const found = lookup(binding?.profile, { overlayBundles });
 		if (!found.ok) return found;
-		const outcome = await runResolver(spawnFn, found.path, binding.ref, { timeoutMs, hostEnv, signal, maxBytes: MAX_BUNDLE_BYTES });
+		const outcome = await runResolver(spawnFn, found.path, binding.ref, { timeoutMs, hostEnv, signal, maxBytes: MAX_BUNDLE_BYTES, strictUtf8: (binding.files?.length ?? 0) > 0 });
 		if (outcome.failure) {
 			// The bundle ID, our own failure vocabulary, the script's small integer exit and a byte COUNT; never the
 			// reference, the path, or the resolver's words.
@@ -221,6 +221,12 @@ export function makeBundleResolver({ envBundles = {}, roots = [], forwardEnv = [
 		const reserved = new Set([...RESERVED_ENV_NAMES, ...providerKeyCandidates(job?.provider), ...forwardEnv]);
 		const clash = Object.keys(parsed.vars).find((name) => reserved.has(name) || isPrivateEndpointEnvName(name) || bundleLoaderName(name));
 		if (clash !== undefined) return { reserved: clash };
+		for (const name of binding.files ?? []) {
+			if (!Object.hasOwn(parsed.vars, name)) return { unresolved: true, failure: "file-missing", name };
+			// JSON can spell an unpaired surrogate although UTF-8 cannot. Encoding it would replace bytes, so
+			// a file delivery refuses it rather than pretending the manager supplied the replacement character.
+			if (!parsed.vars[name].isWellFormed()) return { unresolved: true, failure: "utf8", name };
+		}
 		return { ok: true, vars: parsed.vars };
 	}
 
@@ -233,14 +239,17 @@ export function makeBundleResolver({ envBundles = {}, roots = [], forwardEnv = [
  * project's default. The shadowed names are returned, sorted, for the record, so an override is visible rather
  * than inferred. Own properties throughout, so no name can reach a prototype.
  */
-export function mergeBundleSecrets(bundleVars = {}, triggerSecrets = {}) {
+export function mergeBundleSecrets(bundleVars = {}, triggerSecrets = {}, { bundleFiles = [], triggerFiles = {} } = {}) {
 	const merged = {};
-	const define = (name, value) => Object.defineProperty(merged, name, { value, enumerable: true, writable: true, configurable: true });
+	const secretFiles = {};
+	const fileNames = new Set(bundleFiles);
+	const define = (target, name, value) => Object.defineProperty(target, name, { value, enumerable: true, writable: true, configurable: true });
 	const shadowed = [];
 	for (const [name, value] of Object.entries(bundleVars)) {
-		if (Object.hasOwn(triggerSecrets, name)) shadowed.push(name);
-		else define(name, value);
+		if (Object.hasOwn(triggerSecrets, name) || Object.hasOwn(triggerFiles, name)) shadowed.push(name);
+		else define(fileNames.has(name) ? secretFiles : merged, name, value);
 	}
-	for (const [name, value] of Object.entries(triggerSecrets)) define(name, value);
-	return { secrets: merged, shadowed: shadowed.sort() };
+	for (const [name, value] of Object.entries(triggerSecrets)) define(merged, name, value);
+	for (const [name, value] of Object.entries(triggerFiles)) define(secretFiles, name, value);
+	return { secrets: merged, shadowed: shadowed.sort(), ...(Object.keys(secretFiles).length > 0 ? { secretFiles } : {}) };
 }

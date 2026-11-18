@@ -58,6 +58,7 @@ import { makeAzureHost } from "./azure-host.mjs";
 import { makeEgressPreflight } from "./egress.mjs";
 import { checkSlotKey, endpointSlotKey, hash16, makeClaimSweeper, makeFleetLease, makeScopeClaimSweeper, scopeSlotKey } from "./fleet-lease.mjs";
 import { MAX_SLOTS, loadModelEndpoints, modelEndpointsPath, readOverlayModels } from "./model-endpoints.mjs";
+import { sweepSecretFiles } from "./secret-files.mjs";
 import { grantsDirOf, runWithInput, sweepGrants } from "./endpoint-grants.mjs";
 import { endpointsOverlap, loadPrivateEndpoints, privateEndpointsPath, privateFolderInsideJobPathSentence, privateFoldersInsideJobPaths } from "./private-endpoints.mjs";
 import { builtinModel, checkModelsKnown } from "./model-catalog.mjs";
@@ -82,6 +83,7 @@ import { makeCleanup, makeForgePreparers, makePrepareWorkspace } from "./prepare
 import { listRunningSandboxes, makeSandboxNetworkSweeper, makeSandboxRuntimeWatch, sandboxSyncRefusal } from "./sandbox.mjs";
 import { createSandboxPreparer } from "./sandbox-prepare.mjs";
 import { checkSandboxWorkspace } from "./sandbox-workspace-guard.mjs";
+import { checkSecretFilesPlacement } from "./secret-files-placement.mjs";
 import { startSandboxPrepareWorker } from "./sandbox-prepare-requests.mjs";
 import { makeSandboxInventory } from "./sandbox-inventory.mjs";
 import { makeRetentionSweep } from "./retention-sweep.mjs";
@@ -1070,6 +1072,7 @@ export async function startWorker(
 		makeHostLostSweep: makeHostLostSweepFn = makeHostLostSweep,
 		// The boot sweep of orphaned job directories, a seam so a wiring test drives it against a directory of its own.
 		sweepOrphanJobDirs: sweepOrphanJobDirsFn = sweepOrphanJobDirs,
+		sweepSecretFiles: sweepSecretFilesFn = sweepSecretFiles,
 		// Issue #812: the expiry a finished job's model attempt key is given, a seam so a wiring test sees which id the
 		// listeners below hand it, since the harness's client is closed by the time a test drives one.
 		finishModelAttempt: finishModelAttemptFn = finishModelAttempt,
@@ -1626,6 +1629,7 @@ export async function startWorker(
 	let backendReaps = {};
 
 	let reaped = false;
+	let reapedSecretBackends = [];
 	try {
 		// CONSTRUCTED INSIDE THE GUARD, not above it. The comment on this try says it "keeps any reaper
 		// failure from blocking boot", and a factory that throws is a reaper failure -- an earlier draft
@@ -1651,6 +1655,15 @@ export async function startWorker(
 			...Object.fromEntries(extraBackends.map((b) => [b?.name, b?.reap])),
 		};
 		const swept = (await reapAll([...new Set(Object.values(backendReaps))], { log }))?.reaped === true;
+		// File secrets record their own venue, so a Podman-only host can clean its files without proving Docker.
+		if (swept) {
+			reapedSecretBackends = config.backends.filter((name) => typeof backendReaps[name] === "function");
+			// OpenShell's shared reaper enumerates by owner label across both modes. A successful call therefore
+			// covers old file roots from either mode even when this boot blesses only the other one.
+			if (typeof openshellReap === "function" && Object.values(backendReaps).includes(openshellReap)) {
+				reapedSecretBackends = [...new Set([...reapedSecretBackends, OPENSHELL_BACKEND, OPENSHELL_BIND_BACKEND])];
+			}
+		}
 		// PROVEN FOR THE WHOLE HOST, or not at all (issue #354). `reapAll` is conservative over the reapers it is
 		// handed, and two gaps sit outside that. A BLESSED venue with no reaper here is refused by the registry, but
 		// only further down, after the scope sweep has already acted on this answer. And a host without `local` can
@@ -1666,6 +1679,10 @@ export async function startWorker(
 	} catch (err) {
 		log("reaper_skipped", { reason: scrubCredentials(err?.message) });
 	}
+
+	// File secrets never wait for recovery or the ordinary job-directory age bound. A live owner on this host
+	// keeps its files, including a job staged by another worker before that worker has started its container.
+	await sweepSecretFilesFn({ jobsDir: config.jobsDir, reapedBackends: reapedSecretBackends, log });
 
 	// REQ-LOCAL-JOB-VISIBILITY: sweep aged `.log`/`.json` history at boot so the logs directory stays
 	// bounded across restarts. Best-effort with the same double-wrap posture as the container reaper: the
@@ -3456,9 +3473,11 @@ export async function startWorker(
 			// is how a fact ends up dispatched on one path and hardcoded on another.
 			neverStartedExits: backends.neverStartedExits,
 			checkSandboxWorkspace: (job) => checkSandboxWorkspace(job, { sandboxDir: config.sandboxDir }),
+			checkSecretFilesPlacement: (job, { prepared = null } = {}) => checkSecretFilesPlacement(job, { jobsDir: config.jobsDir, globalPiDir: config.globalPiDir, prepared }),
 			packageCanary: makePackageCanaryRuntime({ globalPiDir: config.globalPiDir, env, host: config.workerName, log, publishFacts: (facts) => publishCanaryFacts(redis, facts) }),
 			prepareWorkspace: makePrepareWorkspaceFn({
 				jobsDir: config.jobsDir,
+				globalPiDir: config.globalPiDir,
 				// Issue #643: with PI_LIVE_TRANSCRIPTS=0 no live file is staged either, so a job without a resume transcript
 				// runs exactly as it did before the feature (its session in memory, no /session mount). Since issue #644 the
 				// progress reader needs the same file, so it is left out only when both switches are off.

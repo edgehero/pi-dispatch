@@ -390,6 +390,42 @@ Release numbers come from the git tags.
 
 ### Next release
 
+#### File secrets (#919)
+
+Upgrade the job image, every worker and receiver, the console and every `/dispatch` before adding
+`run.secretFiles` or a bundle binding's `files` selection. Follow [the order](#the-order); derived images must
+advertise `secretFiles` too. Environment-only triggers keep their existing behavior and minimum store versions.
+
+The triggers file requires version **8** when a trigger carries `run.secretFiles` or any `secretBundles` binding
+carries `files`; the writer stamps it from the content. Queued jobs carrying direct file references require
+`dataVersion: 9`. Older readers refuse the newer file or defer the newer job, rather than interpreting its grant
+without file delivery. A new worker catches a stale producer that dropped an authored `run.secretFiles` as
+`trigger-skew`; rerun that delivery after upgrading the producer. File-only grants route through their explicit
+profile or `default`, so profiles must be available on the selected hosts.
+
+Run records gain optional `secretFiles`, containing only names resolved for file delivery. The field can remain
+when a later gate refuses or startup fails; it does not prove the container started or read a file. Old records
+remain readable and no run-history rewrite is needed. Upgrade all readers first: an older reader may omit or pass
+through unknown metadata, while this release projects file names to counts for models. The names are not evidence that an old
+run lacking the field received files. No older-state warning is added for this optional field: its absence and
+lower minimum file/job versions are still valid output of this release, so neither identifies an older writer.
+
+Keep `PI_JOBS_DIR` disjoint from every local job folder, skill source and global overlay, in both directions.
+This release refuses an overlapping source even on jobs without a file grant, since it could expose another
+attempt's credentials. Move the jobs directory or narrow the source; symlink and directory aliases count too.
+
+Active jobs stage credentials in sibling `job-*.secret-files` roots under the jobs directory, with `secrets` and
+host-only `owner.json` children. These are temporary secret material, excluded from backups, checkpoints and
+retained workspaces. Stop running jobs and let the upgraded worker clean them before rollback. The new boot sweep
+uses owner identity and successful venue reaping; it preserves live or unknown owners and reports them. An older
+worker does not know this staging shape, so inspect and remove any leftover root only after its owning worker and
+container have stopped. Removing a retained workspace alone does not remove a sibling staging root.
+
+Before rollback, remove file grants from the triggers file and let a current writer recompute its version;
+drain or cancel queued version-9 jobs, because an older worker will defer them. Do not lower a version while
+leaving file fields in place. Restore an older triggers backup only if losing later edits is intended. See
+[secrets](secrets.md#file-secrets-a-key-file-with-a-path-in-the-environment) and [backup](backup.md).
+
 #### Queue consumer health and retention (#924)
 
 Restart workers after upgrading. New workers add version-1 `consumers` observations to their expiring host

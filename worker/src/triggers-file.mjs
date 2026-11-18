@@ -579,6 +579,8 @@ export function makeCheckOnceSpent({ triggersPath, fs = nodeFs }) {
  * index.mjs hands this check the arrived value.
  */
 export const AUTHORED_NARROWING_FIELDS = Object.freeze([
+	// A stale producer dropping file delivery starts a paid job without the credential its trigger promised.
+	Object.freeze({ key: "secretFiles", authored: (v) => v !== null && typeof v === "object" && Object.keys(v).length > 0 }),
 	// A stale producer must not drop the reviewed permission and spend on a contradictory job prompt.
 	Object.freeze({ key: "mayMerge", authored: (v) => v === true }),
 	// Issue #918: not a narrowing, the `mcp` row's case: a stale receiver dropping the list would enqueue a paid job that

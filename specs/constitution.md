@@ -60,6 +60,19 @@ passing, on the record — issue #80.)
 
 ## CONST-ISOLATION-CONTAINER-PER-JOB
 
+- **AMENDED 2026-11-18 (#919)**: A trigger may explicitly grant file secrets, adding one read-only per-attempt
+  mount at `/run/secrets` on binding venues, or a read-only private copy at `/sandbox/secrets` on OpenShell.
+  This widens the mount set and is admitted on its own terms: only reviewed trigger or project-bundle bindings
+  can select it; every job receives a fresh private directory, never a shared secret store. Files are owned by the
+  job user, `0600`, checked before discovery, with exact resolver bytes and path-only environment variables.
+  Staging lives outside retained workspaces, job inputs and checkpoints, is removed on every settled attempt,
+  and after a crash is swept independently once its owner is known dead and its venue has been reaped.
+  Operator-selected workspaces, skill sources and the global overlay must be disjoint from the jobs directory,
+  including aliases and descendants. The worker checks this for ungranted jobs too, so one job cannot reach
+  another attempt's staging through a broader mount or a skill copy.
+  A live or uncertain owner is kept and reported. The agent can read and copy what was granted; cleanup and literal
+  redaction cannot revoke those copies or prevent transformed output. No grant gives no mount or directory.
+
 - **AMENDED 2026-10-31 (#772)**: A draft job adds only a bounded, host-written answer input under `/job`, alongside the existing job inputs. Its workspace is read only. It receives no Valkey, console token, canonical parent session, resolver, overlay extension, arbitrary command or executable repository context. Only the trusted answer-source readers and classifier are available; their structured result is bound to an authenticated exit digest. Existing worker-owned container/network arguments remain the boundary.
 
 - **Statement**: Every agent invocation shall execute inside a single-use container, destroyed on
@@ -1628,3 +1641,4 @@ passing, on the record — issue #80.)
 | 2026-11-16 (#918, part 3) | `CONST-VENUE-EGRESS-LAYER` UNCHANGED, checked: the OpenShell venues keep refusing a granted job (`private-endpoint-venue-unsupported`), so no host appears in a layer policy that its sources do not name. `CONST-EGRESS-POLICY-IN-THE-ARGV` UNCHANGED, checked: doctor's canary grant is written and read back by the worker's own `grantOnAttach` and removed before its network, so it is the same carrier, held to the same Acceptance. |
 | 2026-11-17 (#921) | All constraints UNCHANGED, checked for #921: CONST-ISOLATION-CONTAINER-PER-JOB retains the worker-owned builders, flags, bounds, fixture-only mounts and empty host-provided probe environment; CONST-BUDGET-BEFORE-TOKENS and CONST-RETRY-INFRA-ONLY retain every paid-job gate and outcome. CONST-PI-VERSION-PINNED and CONST-MERGE-NEVER-AUTOMATIC are unchanged. The optional graphical image and offline doctor probe add no credential, model call, privilege setting or stored schema. |
 | 2026-11-18 | Issue #924. UNCHANGED, checked: `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-PI-VERSION-PINNED` and `CONST-MERGE-NEVER-AUTOMATIC`. Consumer failure exits infrastructure status; admission and paid replay bounds do not change. |
+| 2026-11-18 (#919) | AMENDED `CONST-ISOLATION-CONTAINER-PER-JOB`: explicit file-secret grants add one private read-only per-attempt mount or copy, outside retained job state, with mode/owner verification and owner-aware cleanup. The mount-set widening and the residual of an agent copying readable material are stated in the constraint. `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-TOKEN-SCOPED-PER-JOB` and `CONST-PI-VERSION-PINNED` UNCHANGED, checked: file grants use the same resolver and fork gates, determinate refusals return, no broader token or new pin is introduced. |

@@ -439,3 +439,41 @@ test("profile tables answer for OWN names only: toString, constructor and __prot
 		assert.deepEqual(await fn(job({ A: "ref" }, { secretsProfile: name })), { profileUnknown: name });
 	}
 });
+
+test("file-only grants arm the resolver and preserve exact UTF-8 bytes, including the final newline (#919)", async () => {
+	for (const out of ["key", "key\n", "key\r\n", "key\n\n", "  key  \n", "\ufeffclé\n", "\n"]) {
+		const { fn } = resolver({ ref: { out } });
+		const input = { secretFiles: { DEVICE_SSH_KEY: "ref" } };
+		assert.equal(secretsArmed(input), true);
+		const actual = await fn(input);
+		assert.deepEqual(actual.secrets, {});
+		assert.deepEqual(Buffer.from(actual.secretFiles.DEVICE_SSH_KEY), Buffer.from(out));
+	}
+});
+
+test("environment and file deliveries sharing a reference resolve once but normalize independently (#919)", async () => {
+	const { fn, calls } = resolver({ ref: { out: "secret-bytes\r\n" } });
+	const r = await fn({ secrets: { AS_ENV: "ref" }, secretFiles: { AS_FILE: "ref", ANOTHER_FILE: "ref" } });
+	assert.equal(calls.length, 1);
+	assert.deepEqual(r.secrets, { AS_ENV: "secret-bytes" });
+	assert.deepEqual(r.secretFiles, { AS_FILE: "secret-bytes\r\n", ANOTHER_FILE: "secret-bytes\r\n" });
+});
+
+test("file content that cannot round-trip as UTF-8 refuses without returning a partial map (#919)", async () => {
+	for (const [out, failure] of [[Buffer.from([0xc3, 0x28]), "utf8"], ["bad\u0000bytes", "nul"], ["", "empty"], ["x".repeat(MAX_SECRET_BYTES + 1), "overflow"]]) {
+		const { fn } = resolver({ good: { out: "already-read-secret" }, bad: { out } });
+		const r = await fn({ secrets: { ENV: "good" }, secretFiles: { KEY: "bad" } });
+		assert.equal(r.unresolved, "KEY");
+		assert.equal(r.failure, failure);
+		assert.equal(r.secrets, undefined);
+		assert.equal(r.secretFiles, undefined);
+	}
+});
+
+test("file names are checked against provider and forwarded credentials before any reference is read (#919)", async () => {
+	for (const name of ["ANTHROPIC_API_KEY", "FORWARDED"]) {
+		const { fn, calls } = resolver({}, { forwardEnv: ["FORWARDED"] });
+		assert.deepEqual(await fn({ provider: "anthropic", secrets: { SAFE: "first" }, secretFiles: { [name]: "ref" } }), { reserved: name });
+		assert.deepEqual(calls, []);
+	}
+});

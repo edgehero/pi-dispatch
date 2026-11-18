@@ -198,6 +198,7 @@ export function caseInput(name) {
 					forkSource: { saved: false, reason: "fork-source-capacity", pointSkipped: "fork-timeout" },
 					steered: { delivered: 2, late: 1, withdrawn: 0 },
 					steerSkipped: "no-inbox",
+					secretFiles: ["DEVICE_SSH_KEY"],
 					bundle: { id: "prod-env", variables: ["DB_URL", "API_KEY"], shadowed: [], placeholders: 1, plain: 1, placeholderNames: ["API_KEY"] },
 					// Issue #918: the private endpoints the container was granted, and what enforced the grant.
 					privateEndpoints: { ids: ["lab", "bench-device"], basis: "openshell" },

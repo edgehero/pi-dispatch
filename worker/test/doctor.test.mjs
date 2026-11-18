@@ -4947,6 +4947,33 @@ function secretsTriggersFile({ profile, kind = "github", folder, names = ["STRIP
 let secretsHome = null;
 const secretsSeams = () => collectSeams({ ...EGRESS_OK, "docker info": 0, "docker image": 0 }, { nodeVersion: "22.19.0", probeValkey: async () => true, home: (secretsHome ??= tempDir("pi-home-")) });
 
+test("doctor: file-only triggers need a profile and --secrets uses the file resolver contract without printing payloads (#919)", { skip: skipNoPi }, async () => {
+	const dir = realpathSync(tempDir("pi-doctor-secret-files-"));
+	const path = join(dir, "triggers.json");
+	const resolver = join(dir, "resolve");
+	writeFileSync(resolver, "#!/bin/sh\nexit 0\n");
+	chmodSync(resolver, 0o755);
+	writeFileSync(path, JSON.stringify({ version: TRIGGERS_FILE_VERSION, triggers: [{ on: { type: "label", any: ["pi:deploy"] }, run: { kind: "github", flow: "deploy", secretFiles: { SSH_KEY: "private-manager-reference" }, secretsProfile: "lab" } }] }));
+	const env = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_TRIGGERS_FILE: path };
+	const missing = await collectChecks(env, secretsSeams());
+	assert.ok(missing.some((check) => check.ok === false && /bind secrets.*not declared: lab/.test(check.label)));
+	assert.ok(missing.some((check) => /file secrets: SSH_KEY.*mode 0600/.test(check.label)));
+	const configured = { ...env, PI_SECRET_PROFILES: `lab:${resolver}` };
+	const calls = [];
+	const hostEnv = { MANAGER_AUTH: "shell-credential" };
+	const seams = { ...secretsSeams(), spawnEnv: hostEnv, secretSpawn: fakeSpawn({ [resolver]: { code: 0, output: Buffer.from("\n"), stderr: Buffer.from("private-manager-warning") } }, calls) };
+	await collectChecks(configured, seams);
+	assert.equal(calls.length, 0, "plain doctor never resolves references");
+	const checked = await collectChecks(configured, { ...seams, secrets: true });
+	assert.equal(calls.length, 1);
+	assert.deepEqual(calls[0].args, ["private-manager-reference"]);
+	assert.deepEqual(calls[0].opts.env, hostEnv, "only the shell's environment reaches the child");
+	assert.ok(checked.some((check) => check.ok === true && /file secrets resolved on this host: SSH_KEY/.test(check.label)), "a lone final newline is an exact file, though it would be empty after env normalization");
+	assert.doesNotMatch(JSON.stringify(checked), /private-manager-reference|private-manager-warning|shell-credential/);
+	const invalid = await collectChecks(configured, { ...seams, secrets: true, secretSpawn: fakeSpawn({ [resolver]: { code: 0, output: Buffer.from([0xff]) } }) });
+	assert.ok(invalid.some((check) => check.ok === false && /file secrets could not be resolved.*valid UTF-8/.test(check.label)));
+});
+
 test("doctor: a trigger binding secrets with NO profile declared FAILS, and says the jobs refuse until fixed", async () => {
 	// A hard fail rather than a warning, worded like the run.resume/PI_SESSIONS_DIR check: these jobs
 	// refuse pre-spend on purpose, rather than running without their secrets and looking like they worked.
@@ -9668,6 +9695,8 @@ test("doctor.mjs reads no service key from this shell outside the resolver: ever
 		/^const probe = await runCmdCapture\(spawn, ghProbeBin, ghProbeArgs\(jobImage, ghProbeBin\), \{ env: spawnEnv, input: `\$\{token\}\\n` \}\);$/,
 		/^const res = await runCmdCapture\(spawn, process\.execPath, \[cli, "import-pi", "--with-packages", "--no-host-packages", "--to", overlay\], \{ env: spawnEnv, cwd, timeoutMs: 600000 \}\);$/,
 		/^const res = await runCmdCapture\(spawn, file, args, \{ env: spawnEnv, cwd, timeoutMs: 15000 \}\);$/,
+		// Issue #919: file secret resolution follows the same child-environment rule as bundles.
+		/^const resolver = makeSecretsResolver\(\{ envProfiles: parseSecretProfilesSafe\(env\.PI_SECRET_PROFILES\)\.profiles, .*hostEnv: spawnEnv, /,
 		// Issue #704: `--secrets` hands a bundle resolver the environment every other child doctor starts gets, whole.
 		/^const resolver = makeBundleResolver\(\{ envBundles: parseSecretBundleProfilesSafe\(env\.PI_SECRET_BUNDLES\)\.bundles, .*hostEnv: spawnEnv, /,
 	];

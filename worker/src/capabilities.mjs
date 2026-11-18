@@ -126,8 +126,9 @@ export const IMPLICIT_SECRET_PROFILE = "default";
 export function secretProfileNeeded(job) {
 	const named = job?.secretsProfile;
 	if (typeof named === "string" && named !== "") return named;
-	const secrets = job?.secrets;
-	if (secrets !== null && typeof secrets === "object" && Object.keys(secrets).length > 0) return IMPLICIT_SECRET_PROFILE;
+	for (const secrets of [job?.secrets, job?.secretFiles]) {
+		if (secrets !== null && typeof secrets === "object" && Object.keys(secrets).length > 0) return IMPLICIT_SECRET_PROFILE;
+	}
 	return undefined;
 }
 

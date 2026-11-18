@@ -36,7 +36,7 @@ import { DEFAULT_VALKEY_URL, logsDirPath, defaultSandboxDir, delimitedList, work
 import { JOB_IDLE_MINUTES_DEFAULT, JOB_STALL_MINUTES_DEFAULT } from "@edgehero/pi-dispatch/job-limit-rules";
 import { settingsFilePath, readOverlay, readOverlayDocument, writeOverlay, KNOWN_KEYS, OPERATOR_ONLY_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
 import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant, formatMicros } from "@edgehero/pi-dispatch/money";
-import { modelRolesTelemetryOf, approvalRecordOf, BUNDLE_SKIPPED_REASONS, LIVE_SKIPPED_REASONS, OPENSHELL_RULE_HOSTS_MAX, RECOVER_SKIPPED_REASONS, STEER_SKIPPED_REASONS, recordedBundle, recordedCheckpoints, recordedOpenshell, recordedPrivateEndpoints, recordedSecretsProfile, recordedRecovered, makeReadRecord, recordedRecoveryOf, sanitizeJobId, targetFor, queuedAtOf, UNREADABLE_RECORD } from "@edgehero/pi-dispatch/run-history";
+import { modelRolesTelemetryOf, approvalRecordOf, BUNDLE_SKIPPED_REASONS, LIVE_SKIPPED_REASONS, OPENSHELL_RULE_HOSTS_MAX, RECOVER_SKIPPED_REASONS, STEER_SKIPPED_REASONS, recordedBundle, recordedSecretFiles, recordedCheckpoints, recordedOpenshell, recordedPrivateEndpoints, recordedSecretsProfile, recordedRecovered, makeReadRecord, recordedRecoveryOf, sanitizeJobId, targetFor, queuedAtOf, UNREADABLE_RECORD } from "@edgehero/pi-dispatch/run-history";
 import { LOADED_BASE_SHA_RE } from "@edgehero/pi-dispatch/loaded-record";
 import { pendingFactsOf, QUEUED_STATES } from "@edgehero/pi-dispatch/chat-mode";
 import { FORGE_MCP_SERVER_NAME, MCP_SERVER_NAME_RE, mcpServerWhere, readOverlayMcp } from "@edgehero/pi-dispatch/mcp-config";
@@ -2990,7 +2990,7 @@ export function readTriggerEditor({ paths, env = {}, folder = null, deploymentDi
   let models = null;
   try { provider = overlay.provider ?? providerFrom(hints); model = overlay.model ?? modelFrom(hints); image = jobImageFrom(hints); models = allowedModelsFrom(hints); } catch {}
   return {
-    defaults: { flow: "required by the trigger", kind: "selected by the trigger kind", folder: "required for cron", task: "required for cron", repository: "forge routing", backend: backends[0]?.name ?? null, provider, model, image, models: models ?? "unrestricted", maxCostUsd: overlay.maxCostUsd ?? hints.PI_MAX_COST_USD ?? "no per-job dollar cap", packages: true, github: false, replicas: 1, resume: false, awaitInput: false, secrets: "none", secretsProfile: "none", secretBundle: "project default", waitFor: "none", skillsDir: "none", instructions: "none", mayMerge: false, privateEndpoints: "none", command: "none", portfolio: false, fallbackModels: "none", modelSelection: "fixed or ordered fallback", excludeTools: "none", excludeExtensions: "none", excludeExtensionTools: "none", mcp: "none unless named by the trigger", gates: "none", gateTimeout: "no trigger expiry override", gateBudgetRaiseUsd: "none", maxTurns: overlay.maxTurns ?? parseNonNegInt(hints.PI_MAX_TURNS, 30), progress: false, statusComment: false, recover: false, steer: false,
+    defaults: { flow: "required by the trigger", kind: "selected by the trigger kind", folder: "required for cron", task: "required for cron", repository: "forge routing", backend: backends[0]?.name ?? null, provider, model, image, models: models ?? "unrestricted", maxCostUsd: overlay.maxCostUsd ?? hints.PI_MAX_COST_USD ?? "no per-job dollar cap", packages: true, github: false, replicas: 1, resume: false, awaitInput: false, secrets: "none", secretFiles: "none", secretsProfile: "none", secretBundle: "project default", waitFor: "none", skillsDir: "none", instructions: "none", mayMerge: false, privateEndpoints: "none", command: "none", portfolio: false, fallbackModels: "none", modelSelection: "fixed or ordered fallback", excludeTools: "none", excludeExtensions: "none", excludeExtensionTools: "none", mcp: "none unless named by the trigger", gates: "none", gateTimeout: "no trigger expiry override", gateBudgetRaiseUsd: "none", maxTurns: overlay.maxTurns ?? parseNonNegInt(hints.PI_MAX_TURNS, 30), progress: false, statusComment: false, recover: false, steer: false,
       // Issue #888: the deployment's job limits, as its service env says them (the worker's own defaults when unset).
       idleTimeoutMinutes: parseNonNegInt(hints.PI_JOB_IDLE_MINUTES, JOB_IDLE_MINUTES_DEFAULT), stallTimeoutMinutes: parseNonNegInt(hints.PI_JOB_STALL_MINUTES, JOB_STALL_MINUTES_DEFAULT), maxMinutes: hints.PI_JOB_MAX_MINUTES ? parseNonNegInt(hints.PI_JOB_MAX_MINUTES, null) : "none" },
     ...readTriggerEgress({ deploymentDir, env, fs }),
@@ -3230,7 +3230,7 @@ export function normalizeTriggerForDisplay(entry) {
   // do, and unlike a flow (which lives in the repo, behind a merge) this lives only in triggers.json, so
   // nothing else would put it in front of the operator. Carried on every kind, because unlike
   // `replicas` the loader accepts this on cron too.
-  const secrets = run.secrets !== null && typeof run.secrets === "object" && !Array.isArray(run.secrets) ? Object.keys(run.secrets).length : 0;
+  const secrets = [run.secrets, run.secretFiles].reduce((count, value) => count + (value !== null && typeof value === "object" && !Array.isArray(value) ? Object.keys(value).length : 0), 0);
   const secretsProfile = typeof run.secretsProfile === "string" && run.secretsProfile.trim() !== "" ? run.secretsProfile : null;
   // Which model this trigger's jobs run on (issue #502): every kind may name `provider`, `model` and
   // `maxTurns` since #502, and before it the record carried `model` for cron only, so the model-callable
@@ -3239,6 +3239,7 @@ export function normalizeTriggerForDisplay(entry) {
   // present, so a record for a trigger that names none keeps exactly its pre-#502 keys; cron keeps its
   // long-standing `model: null` sentinel below.
   const modelRef = {
+    ...(run.secretFiles && typeof run.secretFiles === "object" && !Array.isArray(run.secretFiles) && Object.keys(run.secretFiles).length ? { secretFiles: Object.keys(run.secretFiles).length } : {}),
     ...(typeof run.worker === "string" && { worker: run.worker }),
     ...(run.kind === "local" && !["cron", "watch"].includes(on.type) ? {
       runKind: "local",
@@ -7775,6 +7776,7 @@ export function modelRunRecord(record, { list = false } = {}) {
   // model's own sentence: it names the fields it is given, where a page's names what the page shows.
   if (fromNewerRelease(record)) return { ...coreRecordOf(record), newer: true, note: NEWER_RECORD_MODEL_NOTE };
   const hasBundle = Object.hasOwn(record, "bundle");
+  const hasSecretFiles = Object.hasOwn(record, "secretFiles");
   // Issue #800: the list of what a run loaded is for the console's operator and viewer views, and no model reads it.
   const hasLoaded = Object.hasOwn(record, "loaded");
   const hasOpenshell = Object.hasOwn(record, "openshell");
@@ -7782,9 +7784,13 @@ export function modelRunRecord(record, { list = false } = {}) {
   const hasRoles = Object.hasOwn(record, "modelRole") || Object.hasOwn(record, "modelRoles");
   const hasFailover = Object.hasOwn(record, "modelWhy") || Object.hasOwn(record, "providerFailure");
   const freeReason = Object.hasOwn(record, "reason") && record.reason !== null && recordReason(record) === null;
-  if (!hasBundle && !hasLoaded && !hasOpenshell && !hasProfile && !freeReason && !hasFailover && !hasRoles) return record;
-  const { modelRole: _modelRole, modelRoles: _modelRoles, bundle: raw, loaded: _loaded, openshell: _openshell, secretsProfile: _profile, modelWhy: _modelWhy, providerFailure: _providerFailure, ...rest } = record;
+  if (!hasSecretFiles && !hasBundle && !hasLoaded && !hasOpenshell && !hasProfile && !freeReason && !hasFailover && !hasRoles) return record;
+  const { secretFiles: _secretFiles, modelRole: _modelRole, modelRoles: _modelRoles, bundle: raw, loaded: _loaded, openshell: _openshell, secretsProfile: _profile, modelWhy: _modelWhy, providerFailure: _providerFailure, ...rest } = record;
   const out = { ...rest };
+  if (hasSecretFiles) {
+    const files = recordedSecretFiles(record.secretFiles);
+    if (files !== null) out.secretFiles = files.length;
+  }
   if (freeReason) out.reason = null;
   const lacked = outcomeNote(record);
   if (lacked !== null) out.note = lacked;

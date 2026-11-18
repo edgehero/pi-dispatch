@@ -48,6 +48,8 @@ const { makeLiveTranscriptOpener } = await load("worker/src/live-transcript.mjs"
 const { makeInboxRelay } = await load("worker/src/inbox-relay.mjs");
 const { KEYLESS_API_KEY } = await load("worker/src/model-endpoints.mjs");
 const { judgeKeyguard, judgeCoreguard, probeFields } = await import(pathToFileURL(join(root, ".github/scripts/openshell-keyguard-judge.mjs")).href);
+const { SECRET_FILE_FIXTURES, SECRET_FILES_PROBE_SOURCE, judgeSecretFilesProbe, secretFileStageRemoved } = await load(".github/scripts/secret-files-conformance.mjs");
+const { reaperExec } = await load("worker/src/backend-local.mjs");
 
 const refuse = (why) => {
 	console.error(`openshell-conformance: ${why}`);
@@ -74,6 +76,7 @@ nodeFs.writeFileSync(
 c=$(cat /sandbox/job/prompt.md 2>/dev/null || cat /job/prompt.md)
 case "$c" in
 	sleep) exec sleep 600 ;;
+	secret-files) exec node /opt/pi-dispatch-secret-files.mjs ;;
 	readback)
 		echo "probe uid=$(id -u)"
 		grep -E '^(CapEff|NoNewPrivs|Seccomp):' /proc/self/status | tr -d '\\t' | sed 's/^/probe /'
@@ -267,6 +270,8 @@ const HELPER_BASE = /^FROM (node:[^ ]+@sha256:[0-9a-f]{64}) AS landlock$/m.exec(
 if (!HELPER_BASE) refuse("image/Dockerfile names no pinned landlock build stage to build the keyguard helper on");
 nodeFs.writeFileSync(join(context, "Dockerfile"), `FROM ${HELPER_BASE} AS keyguard-helper\nRUN apt-get update && apt-get install -y --no-install-recommends gcc libc6-dev && rm -rf /var/lib/apt/lists/*\nCOPY keyguard-memtry.c /src/memtry.c\nRUN gcc -O2 -Wall -Werror -static -o /memtry /src/memtry.c\nFROM ${image}\nUSER root\nCOPY --from=keyguard-helper /memtry /opt/pi-dispatch-keyguard/memtry\nRUN cp /entrypoint.sh /opt/pi-dispatch-keyguard/shipped-entrypoint.sh\nCOPY entrypoint.sh /entrypoint.sh\nCOPY keyguard-parent.mjs /opt/pi-dispatch-keyguard/parent.mjs\nCOPY keyguard-child.mjs /opt/pi-dispatch-keyguard/child.mjs\nCOPY core-parent.mjs core-holder.mjs core-child.mjs /opt/pi-dispatch-keyguard/\nRUN chmod 0755 /entrypoint.sh /opt/pi-dispatch-keyguard /opt/pi-dispatch-keyguard/memtry && chmod 0644 /opt/pi-dispatch-keyguard/parent.mjs /opt/pi-dispatch-keyguard/child.mjs /opt/pi-dispatch-keyguard/core-parent.mjs /opt/pi-dispatch-keyguard/core-holder.mjs /opt/pi-dispatch-keyguard/core-child.mjs /opt/pi-dispatch-keyguard/shipped-entrypoint.sh\nUSER pi\n`);
 const probeImage = `pi-dispatch-openshell-probe:${nonce}`;
+nodeFs.writeFileSync(join(context, "secret-files.mjs"), SECRET_FILES_PROBE_SOURCE, { mode: 0o644 });
+nodeFs.appendFileSync(join(context, "Dockerfile"), "COPY secret-files.mjs /opt/pi-dispatch-secret-files.mjs\n");
 const built = await run(engine, ["build", "--pull=false", "-q", "-t", probeImage, context]);
 if (built.code !== 0) refuse(`the probe image did not build: ${built.stderr.trim().split("\n").slice(-1)[0]}`);
 
@@ -399,6 +404,29 @@ for (const f of r.findings) {
 const BUNDLE_ENDPOINTS = { BUNDLE_TOKEN: { host: "host.docker.internal", auth: "bearer" } };
 const BUNDLE_VALUES = { BUNDLE_TOKEN: "conformance-bundle-not-a-token", BUNDLE_PLAIN: "conformance-bundle-plain-value" };
 const BUNDLE_KEYS = { endpoints: BUNDLE_ENDPOINTS, plain: ["BUNDLE_PLAIN"] };
+// Issue #919: the actual worker stages the files, the actual image verifier admits them, and the same sandbox policy
+// must allow reading but deny modifying them. Capture both CLI routes: create/upload use exec, the job uses spawn.
+{
+	const commands = [];
+	const logsDir = join(scratch, "secret-file-logs");
+	const b = bundleFor(probeImage, {
+		...POLICY_SOURCES,
+		openJobLog: makeLogSink({ logsDir, enabled: true }),
+		spawnFn: (bin, args, opts) => { commands.push([bin, ...args]); return spawn(bin, args, opts); },
+		exec: reaperExec({ execFileFn: (bin, args, opts, callback) => { commands.push([bin, ...args]); return execFile(bin, args, opts, callback); } }),
+	});
+	const dirs = jobDirFor("secret-files");
+	const name = `pi-job-conformance-${nonce}-secret-files`;
+	output.set("last", "");
+	const result = await b.runContainer({ job: JOB, prepared: dirs, name, signal: new AbortController().signal, secretFiles: SECRET_FILE_FIXTURES, jobId: "secret-files", size: { memMiB: 1024, cpuCenti: 100 } });
+	let gatewayLog = null;
+	let persistedLog = null;
+	try { gatewayLog = nodeFs.readFileSync(process.env.GATEWAY_LOG ?? "", "utf8"); } catch {}
+	try { persistedLog = nodeFs.readFileSync(join(logsDir, `${name}.log`), "utf8"); } catch {}
+	const answer = judgeSecretFilesProbe({ code: result.code, output: output.get("last"), jobDir: dirs.jobDir, commands, gatewayLog, persistedLog, copy: true });
+	console.log(`${answer.ok ? "ok     " : "FAIL   "} file secrets in copy mode: ${answer.detail}`);
+	if (!answer.ok) failed = true;
+}
 const providersListed = async () => {
 	const listed = await run("openshell", ["provider", "list", "--label-selector", `${OPENSHELL_OWNER_LABEL}=${OPENSHELL_OWNER}`, "-o", "json"], 30_000);
 	return listed.code === 0 ? (JSON.parse(listed.stdout).providers ?? []).map((p) => p.name) : null;
@@ -516,10 +544,11 @@ for (const [property, why] of Object.entries(UNVERIFIED_BY_THIS_HARNESS)) consol
 	const dirs = jobDirFor("Reply with the single word ok.");
 	// This run's output alone, so the record check below reads nothing an earlier probe wrote.
 	output.set("last", "");
-	const result = await real.runContainer({ job: { ...JOB, maxCostMicros: 0 }, prepared: dirs, name: `pi-job-conformance-${nonce}-runner`, signal: new AbortController().signal, exitAuth: true, transcriptStderr: true, jobId: `conformance-${nonce}`, size: { memMiB: 2048, cpuCenti: 200 } });
+	const result = await real.runContainer({ job: { ...JOB, maxCostMicros: 0 }, prepared: dirs, name: `pi-job-conformance-${nonce}-runner`, signal: new AbortController().signal, exitAuth: true, transcriptStderr: true, jobId: `conformance-${nonce}`, secretFiles: SECRET_FILE_FIXTURES, size: { memMiB: 2048, cpuCenti: 200 } });
 	const session = nodeFs.readFileSync(join(dirs.jobDir, "session", "current.jsonl"), "utf8");
-	const ok = result.code === 2 && result.exitReason === "cost-cap" && result.exitAuth === "verified" && session.length > 0;
-	console.log(`${ok ? "ok     " : "FAIL   "} the real runner: exit ${result.code}, reason ${result.exitReason}, exit line ${result.exitAuth}, session ${session.length} bytes`);
+	const cleaned = secretFileStageRemoved(dirs.jobDir);
+	const ok = result.code === 2 && result.exitReason === "cost-cap" && result.exitAuth === "verified" && session.length > 0 && cleaned;
+	console.log(`${ok ? "ok     " : "FAIL   "} the real runner with file secrets: exit ${result.code}, reason ${result.exitReason}, exit line ${result.exitAuth}, session ${session.length} bytes, secrets removed ${cleaned}`);
 	// Every published entry's kind (the field list is flat: "kind", <kind>, "ts", ...): at least one from the session (the
 	// prompt's `user` entry is the one a cost cap of 0 always leaves), the `end`, and no forged or broken record on the way.
 	const kinds = xadds.map((fields) => fields[fields.indexOf("kind") + 1]);

@@ -21,6 +21,8 @@ import { copySkillTree } from "./copy-tree.mjs";
 import { recordedJobSize } from "./job-size.mjs";
 import { scheduledForMillis } from "./bullmq-internals.mjs";
 import { stageLiveFile } from "./live-transcript.mjs";
+import { checkSecretFilesPlacement } from "./secret-files-placement.mjs";
+import { InfraRetry } from "./processor.mjs";
 
 /**
  * The subdirectory of the per-job dir a trigger's injected skills are copied into, so they reach the
@@ -50,6 +52,7 @@ export const TRIGGER_SKILLS_SUBDIR = "trigger-skills";
  */
 export function makePrepareWorkspace({
 	jobsDir,
+	globalPiDir = null,
 	forgeFor,
 	// #277. The deployment's default venue, for the sandbox stamp: a retained directory records the venue the
 	// job resolved to through the SAME function the registry dispatches on, so the venue that ran and the
@@ -98,6 +101,9 @@ export function makePrepareWorkspace({
 	// commit (prepare-github.mjs). Forge jobs only; a local job works on its folder in place and has no clone to pin.
 	return async function prepareWorkspace(job, token, { queueJobId, piVersion = null, jobUser = null, podmanStore = null, portfolio = false, size = null, mcp = null, pin = null, watchSecrets = null, localWorkspace = null } = {}) {
 		ensureDir(jobsDir);
+		const placement = checkSecretFilesPlacement(job, { jobsDir, globalPiDir });
+		if (placement?.unavailable) throw new InfraRetry("the file secret placement boundary could not be read");
+		if (placement) return placement;
 		const jobDir = mkdtempSync(join(jobsDir, "job-"));
 		// Issue #524: a THROW out of anything below leaves `jobDir` to nobody. The processor tears down only what
 		// it was handed, and a throw hands it nothing, so every config refusal raised in a preparer (a local folder
@@ -185,7 +191,7 @@ export function makePrepareWorkspace({
 			// The snapshot only for a confirmed portfolio job, and never for a chained child or a manual run, whatever its data
 			// says (the processor's gate already holds both; this keeps a direct caller to the same rule).
 			const snapshot = portfolio === true && typeof portfolioSnapshot === "function" && event.source === "cron" ? { portfolio: () => portfolioSnapshot(job) } : {};
-			return withLiveFile(discardOnPolicy(stampSandbox(await prepareLocal({ folder: job.folder, task, jobDir, event, ...(localWorkspace ? { localWorkspace } : {}), ...(job.watch ? { watch: job.watch, watchDecisionModel: job.watchDecisionModel, watchSecrets } : {}), ...(localPlacement ? { jobPaths: localPlacement.jobPaths, envelopeFile: localPlacement.envelopeFile ?? null, authStoreDir: localPlacement.authStoreDir ?? null, ...(typeof localPlacement.sandboxDir === "string" ? { sandboxDir: localPlacement.sandboxDir } : {}) } : {}), ...snapshot }), sandbox), jobDir));
+			return withLiveFile(discardOnPolicy(stampSandbox(await prepareLocal({ folder: job.folder, task, jobDir, event, secretFilesJobsDir: jobsDir, ...(localWorkspace ? { localWorkspace } : {}), ...(job.watch ? { watch: job.watch, watchDecisionModel: job.watchDecisionModel, watchSecrets } : {}), ...(localPlacement ? { jobPaths: localPlacement.jobPaths, envelopeFile: localPlacement.envelopeFile ?? null, authStoreDir: localPlacement.authStoreDir ?? null, ...(typeof localPlacement.sandboxDir === "string" ? { sandboxDir: localPlacement.sandboxDir } : {}) } : {}), ...snapshot }), sandbox), jobDir));
 		}
 		const prepare = preparers[job.kind];
 		if (prepare) {

@@ -2,6 +2,7 @@ import { isPrivateEndpointEnvName } from "./reserved-env.mjs";
 import { egressEnv } from "./egress.mjs";
 import { FORGE_HOST_VARS } from "./forges.mjs";
 import { KEYLESS_ENV_NAME } from "./reserved-env.mjs";
+import { StringDecoder } from "node:string_decoder";
 
 /**
  * Take a job's own secrets out of text the agent wrote, before that text leaves the host (issue #643,
@@ -80,6 +81,69 @@ function spellingsOf(value) {
 	const url = encodeURIComponent(value);
 	const lowerUrl = url.replace(/%[0-9A-F]{2}/g, (pct) => pct.toLowerCase());
 	return [value, json, url, lowerUrl];
+}
+
+/** A file may be printed a line at a time or without its last newline. Register those accidental spellings too. */
+export function secretFileRedactionValues(files = {}) {
+	return [...new Set(Object.values(files).filter((v) => typeof v === "string").flatMap((v) => [v, v.replace(/\r?\n$/, ""), ...v.split(/\r?\n/)]))];
+}
+
+/**
+ * Keep enough original text to recognize a value split across pipe chunks, including escaped PEMs. A secret crossing
+ * the emission boundary moves that boundary back to its start. Redacting each chunk independently leaks both halves.
+ * The parser must still receive the original bytes: this stream is for display/capture only, never exit authentication.
+ */
+export function makeStreamingRedactor({ values = [], redact = makeRedactor({ values }) } = {}) {
+	let forms = [];
+	let overlap = 0;
+	let registered = -1;
+	const refresh = () => {
+		if (registered === values.length) return;
+		registered = values.length;
+		forms = [...new Set(values.filter((v) => typeof v === "string" && v.length >= MIN_SECRET_LENGTH).flatMap(spellingsOf))];
+		overlap = forms.reduce((max, v) => Math.max(max, v.length), 1) - 1;
+	};
+	const decoder = new StringDecoder("utf8");
+	let held = "";
+	let ended = false;
+	return {
+		write(chunk) {
+			if (ended) return "";
+			// Renewed credentials are registered before tools receive them; their longer spellings need a longer tail.
+			refresh();
+			held += decoder.write(Buffer.isBuffer(chunk) ? chunk : Buffer.from(String(chunk)));
+			let cut = Math.max(0, held.length - overlap);
+			let previous;
+			do {
+				previous = cut;
+				for (const form of forms) {
+					const start = held.indexOf(form, Math.max(0, cut - form.length + 1));
+					if (start >= 0 && start < cut && start + form.length > cut) cut = start;
+				}
+			} while (cut !== previous);
+			// Pipe writes encode each string separately; never emit half of a UTF-16 surrogate pair.
+			if (cut > 0 && /[\uD800-\uDBFF]/.test(held[cut - 1]) && /[\uDC00-\uDFFF]/.test(held[cut] ?? "")) cut--;
+			const out = redact(held.slice(0, cut));
+			held = held.slice(cut);
+			return out;
+		},
+		end() {
+			if (ended) return "";
+			ended = true;
+			const out = redact(held + decoder.end());
+			held = "";
+			return out;
+		},
+	};
+}
+
+/** A diagnostic on stderr must not split a secret being printed in chunks on stdout. */
+export function makeOutputRedactor(options) {
+	const streams = { stdout: makeStreamingRedactor(options), stderr: makeStreamingRedactor(options) };
+	return {
+		write: (chunk, channel = "stdout") => streams[channel === "stderr" ? "stderr" : "stdout"].write(chunk),
+		end: () => streams.stdout.end() + streams.stderr.end(),
+	};
 }
 
 const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
@@ -177,6 +241,7 @@ export const NON_SECRET_ENV_KEYS = new Set([
 	"PI_TRANSCRIPT",
 	// Issue #704 part 3: `1`, the bundle env file's flag, never a secret; on openshell it must ride the exec's --env.
 	"PI_BUNDLE_ENV",
+	"PI_SECRET_FILES",
 	// Issue #683: the runner's layout name, `sandbox` on the openshell venue.
 	"PI_JOB_LAYOUT",
 	// Issue #730: `1`, the readable runner's flag, never a secret; on openshell it must ride the exec's --env.

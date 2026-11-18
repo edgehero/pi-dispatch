@@ -20,12 +20,14 @@ import { resolveJobImage } from "./image-preflight.mjs";
 import { LIVE_FILE_NAME, stageLiveFile } from "./live-transcript.mjs";
 import { steerTargetOf } from "./inbox-relay.mjs";
 import { InfraRetry } from "./processor.mjs";
-import { makeRedactor, secretValuesOf } from "./redact-secrets.mjs";
+import { makeRedactor, secretValuesOf, secretFileRedactionValues, makeOutputRedactor } from "./redact-secrets.mjs";
 import { makeSteerAck } from "./steer-ack.mjs";
 import { keyFrame } from "./steer-framing.mjs";
 import { makeStderrTranscript } from "./stderr-transcript.mjs";
 import { ACTIVITY_POLL_MS, makeActivityBackstop, parseActivityCounters, readActivityFile } from "./job-limits.mjs";
 import { makeCredentialRefresher, makeCredentialsDir, removeCredentialsDir } from "./credential-refresh.mjs";
+import { stageSecretFiles, removeSecretFiles, SECRET_FILES_SUBDIR, SECRET_FILES_DIR_SUFFIX } from "./secret-files.mjs";
+import { checkSecretFileSources } from "./secret-files-placement.mjs";
 import { AUTH_RENEWABLE_MIN_RUNWAY_MS } from "./auth-connections.mjs";
 
 /**
@@ -165,6 +167,9 @@ export function makeRunContainer({
 	// PI_BUNDLE_ENV=1. A construction option, the venue's own statement like `transcript`: every binding venue passes
 	// them as env and leaves it off, so its env is byte-identical.
 	bundleEnvFile = false,
+	secretFilesBackend = null,
+	stageFiles = stageSecretFiles,
+	removeFiles = removeSecretFiles,
 	// Issue #730: this venue's connections are mediated by a broker that must read the caller's memory (OpenShell), so
 	// every attempt gets PI_RUNNER_OBSERVABLE=1 and its key holders start from the readable node. Every other venue
 	// leaves it off and its env is byte-identical.
@@ -210,8 +215,13 @@ export function makeRunContainer({
 	// `bundleKeys` (issue #704 part 3) is the processor's `{ endpoints, plain }` split of a project secret bundle's received
 	// variables: handed on in the build options for a venue whose own layer holds credentials (openshell), which binds the
 	// first kind to their hosts and passes the second as values. Every other venue ignores it: the values are in `secrets`.
-	return async function runContainer({ job, token, prepared, secrets = {}, bundleKeys = null, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, transcriptStderr = false, steerStdin = false, privateEndpoints = [], size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null, unenforced = [], jobId = null, onLive = null, recover = false, recovering = false, checkpoint = null, pause = null, unpause = null, binds = false, subscriptionAuth = [], activityWatch = null, onActivityArmed = null, requestStop = null, noteActivity = null, credentialRefresh = null }) {
+	return async function runContainer({ job, token, prepared, checkSecretFilesPlacement = null, secrets = {}, secretFiles = {}, bundleKeys = null, name, signal, user = null, home = null, relabel = false, modelEndpoints = null, exitAuth = false, transcriptStderr = false, steerStdin = false, privateEndpoints = [], size = DEFAULT_JOB_SIZE, hostCpus = null, cpuBudgetCenti = null, unenforced = [], jobId = null, onLive = null, recover = false, recovering = false, checkpoint = null, pause = null, unpause = null, binds = false, subscriptionAuth = [], activityWatch = null, onActivityArmed = null, requestStop = null, noteActivity = null, credentialRefresh = null }) {
 		if (signal?.aborted) return { code: 137, aborted: true, turns: null, tokens: null, session: null, usage: null, context: null, exitReason: null }; // killed before it could start
+		// A host source may have moved after preparation. Check even an ungranted job, which must not see another attempt's files.
+		// Bare callers also keep the exact sibling private. Only the wired worker knows the configured jobs root,
+		// so its callback additionally protects every other attempt without inferring a store from a fixture's parent.
+		const actualPlacement = checkSecretFileSources([prepared.workspace, globalPiDir], `${prepared.jobDir}${SECRET_FILES_DIR_SUFFIX}`);
+		if (actualPlacement || await checkSecretFilesPlacement?.()) throw new InfraRetry("the file secret placement boundary changed before container start", { reason: "container-never-started" });
 		const renewableAuth = subscriptionAuth.filter((snapshot) => snapshot.renewable === true);
 		// Minted per attempt, held in this closure and the sink's, and handed to the container on its stdin only: never in
 		// the argv (a host `ps` shows it), never in the env (the container's /proc/1/environ shows it), never logged.
@@ -292,6 +302,7 @@ export function makeRunContainer({
 		// Issue #888, part 3: the folder a watched job's expiring credentials are renewed through, on a venue that binds it
 		// (the counters' file channel says it does). Without one the job keeps the wall clock, as the processor's
 		// `keepWallClock` says, and the line names why.
+		let secretFilesDir = null;
 		let credentialsDir = null;
 		if (activityChannel !== null && credentialRefresh !== null && typeof credentialRefresh === "object") {
 			if (activityChannel !== "file") log("credential_refresh_unavailable", { container: name, reason: "venue-copies" });
@@ -302,6 +313,7 @@ export function makeRunContainer({
 		}
 		const removeCredentials = () => {
 			removeCredentialsDir(credentialsDir);
+			if (secretFilesDir !== null) removeFiles(secretFilesDir, { log });
 		};
 		if (renewableAuth.length > 0 && (credentialsDir === null || typeof credentialRefresh?.extend !== "function" || typeof requestStop !== "function")) {
 			removeCredentials();
@@ -434,6 +446,14 @@ export function makeRunContainer({
 			// How many and no name: the record says only that a name was left out, and this says why.
 			onWithheld: (count) => log("loaded_names_withheld", { container: name, count }),
 		};
+		const fileNames = Object.keys(secretFiles);
+		if (fileNames.length > 0) {
+			secretFilesDir = beforeSpawn(() => {
+				try { return stageFiles(prepared.jobDir, secretFiles, { backend: secretFilesBackend ?? (bin === "podman" ? "podman" : "local"), workspace: prepared.workspace, globalPiDir, log }); }
+				catch { throw new InfraRetry("secret files could not be staged", { reason: "container-never-started" }); }
+			});
+		}
+		const secretFilePaths = Object.fromEntries(fileNames.map((name) => [name, `${paths.secretFiles}/${name}`]));
 		const env = beforeSpawn(() => buildContainerEnv({
 			size,
 			provider: job.provider,
@@ -514,6 +534,7 @@ export function makeRunContainer({
 			// spent. Off the call bag rather than off `job` or the closure: it is neither a per-job fact the
 			// record may carry nor a deployment setting, it is a live credential, and `token` is its precedent.
 			secrets,
+			secretFilePaths,
 			home: user !== null ? home : null, // issue #341: HOME only beside --user, assigned after the forward loops
 			modelEndpoints, // issue #503: the keyless branch of the credential, from the gate's own snapshot
 			privateEndpoints, // issue #918: the private endpoints this job is granted, their host and port in its env
@@ -533,7 +554,7 @@ export function makeRunContainer({
 		// what later tools use, while earlier output can still contain the old token. Register a replacement
 		// before publishing its drop; pattern matching alone cannot recognize an opaque OAuth bearer.
 		const retainedSecrets = Array.isArray(checkpoint?.secretValues) ? checkpoint.secretValues : [];
-		for (const value of secretValuesOf(env, [token, exitKey], { workerSet: egressEnv({ proxy: egressProxy, armed: egress }) })) {
+		for (const value of secretValuesOf(Object.fromEntries(Object.entries(env).filter(([name]) => !fileNames.includes(name))), [token, exitKey, ...secretFileRedactionValues(secretFiles)], { workerSet: egressEnv({ proxy: egressProxy, armed: egress }) })) {
 			if (!retainedSecrets.includes(value)) retainedSecrets.push(value);
 		}
 		// Completed fork snapshots are taken by the processor after this function returns, even without
@@ -541,6 +562,17 @@ export function makeRunContainer({
 		beforeSpawn(() => Object.defineProperty(prepared, "credentialSecretValues", { value: retainedSecrets, configurable: true }));
 		let currentRedactor = beforeSpawn(() => makeRedactor({ values: retainedSecrets }));
 		const redact = (text) => currentRedactor(text);
+		const outputRedactor = fileNames.length > 0 ? makeOutputRedactor({ values: retainedSecrets, redact }) : null;
+		const captureRedactor = fileNames.length > 0 ? makeOutputRedactor({ values: retainedSecrets, redact }) : null;
+		const displayOutput = (chunk, channel) => {
+			if (job.watch || job.answerDraft) return;
+			const safe = outputRedactor ? outputRedactor.write(chunk, channel) : chunk;
+			if (safe.length > 0) onOutput(safe);
+		};
+		const finishOutput = () => {
+			const safe = outputRedactor?.end() ?? "";
+			if (safe && !job.watch && !job.answerDraft) onOutput(safe);
+		};
 		const registerCredentials = (payload) => {
 			for (const value of [payload.forge?.token, ...payload.subscriptions.map((row) => row.token)]) {
 				if (typeof value === "string" && value !== "" && !retainedSecrets.includes(value)) retainedSecrets.push(value);
@@ -583,6 +615,7 @@ export function makeRunContainer({
 			steerInboxDir: steerArmed && !stdinSteered ? inboxDir : undefined,
 			// Issue #888, part 3: the renewed credentials' folder, read-only at /run/pi-dispatch/credentials; undefined when not armed.
 			credentialsDir: credentialsDir ?? undefined,
+			...(secretFilesDir !== null ? { secretFilesDir: join(secretFilesDir, SECRET_FILES_SUBDIR), secretFileNames: fileNames } : {}),
 			globalPiDir, // undefined/null -> docker-run's guard skips the /opt/pi-global mount
 			name,
 			size, // issue #596: memory, swap equal to it, the CPU weight and /dev/shm, through containerSpec's one function
@@ -831,7 +864,7 @@ export function makeRunContainer({
 		// deletes what the stage made.
 		let sink;
 		try {
-			sink = openJobLog(name, { exitKey, ...(job.watch || job.answerDraft ? { suppressCapture: true } : {}) });
+			sink = openJobLog(name, { exitKey, ...(captureRedactor ? { captureRedactor } : {}), ...(job.watch || job.answerDraft ? { suppressCapture: true } : {}) });
 		} catch (error) {
 			await teardown();
 			// Issue #918: this path never removed the job's network (the boot reaper takes it); the grant goes now, so it
@@ -988,10 +1021,10 @@ export function makeRunContainer({
 				child.stdin?.end(`${exitKey}\n`);
 			}
 			// A throwing sink.write is swallowed so a misbehaving sink cannot break the tee or hang the run.
-			const tee = (chunk) => {
-				if (!job.watch && !job.answerDraft) onOutput(chunk);
+			const tee = (chunk, channel = "stdout") => {
+				displayOutput(chunk, channel);
 				try {
-					sink.write(chunk);
+					sink.write(chunk, channel);
 				} catch {}
 			};
 			child.stdout?.on("data", tee);
@@ -1042,12 +1075,12 @@ export function makeRunContainer({
 			const stderrOut = (chunk) => {
 				if (chunk.length === 0) return;
 				if (stderrHead.length < STDERR_HEAD_MAX) stderrHead = (stderrHead + String(chunk)).slice(0, STDERR_HEAD_MAX);
-				tee(chunk);
+				tee(chunk, "stderr");
 			};
 			child.stderr?.on("data", (chunk) => {
 				if (demux === null || demuxFailed) {
 					if (stderrHead.length < STDERR_HEAD_MAX) stderrHead = (stderrHead + String(chunk)).slice(0, STDERR_HEAD_MAX);
-					tee(chunk);
+					tee(chunk, "stderr");
 					return;
 				}
 				let out;
@@ -1067,6 +1100,7 @@ export function makeRunContainer({
 			child.on("error", (err) => {
 				disarmActivity();
 				stderrOut(endDemux());
+				finishOutput();
 				void closeCheckpoint();
 				void finishLive("failed").then(stopRelay);
 				sink.close().catch(() => {}); // best-effort teardown; a rejecting close cannot leak an unhandled rejection
@@ -1078,6 +1112,7 @@ export function makeRunContainer({
 				// Issue #686: the demux's held tail (a last line with no newline) goes out before anything closes, and every
 				// record it completed is in the publisher before the final flush below.
 				stderrOut(endDemux());
+				finishOutput();
 				// Issue #686 part 3, review round 2: the venue's box ended and confirmed gone first (see `settleRun`).
 				let settled = null;
 				if (typeof settleRun === "function") {

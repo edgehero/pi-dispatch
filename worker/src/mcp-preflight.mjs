@@ -164,6 +164,12 @@ export function makeMcpCheck({ globalPiDir, forwardEnv = [], hostEnv = {}, egres
 		}
 		for (const name of overlayNames) {
 			for (const ref of servers[name].refs) {
+				// A stdio process can open the path in its env or arguments. An HTTP header or URL would send that
+				// path as a credential instead of opening the file, which silently changes the requested authentication.
+				if (Object.hasOwn(job.secretFiles ?? {}, ref)) {
+					if (servers[name].transport === "stdio") continue;
+					return { refused: "mcp-secret-unmapped", name, why: `it references file secret ${ref} in HTTP configuration; file paths are available to stdio servers only` };
+				}
 				if (!mapped.has(ref)) return { refused: "mcp-secret-unmapped", name, why: `it references ${ref}, which the trigger does not pass (run.secrets, or a PI_FORWARD_ENV name the worker holds a value for)` };
 			}
 		}

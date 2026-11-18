@@ -85,7 +85,7 @@ export async function secretBundleChecks({ bundles = {}, triggersPresent = true,
 		const fromEnv = Object.hasOwn(envBundles, b.profile);
 		const fromOverlay = Object.hasOwn(overlayBundles, b.profile);
 		const format = fromEnv ? envBundles[b.profile].format : fromOverlay ? overlayBundles[b.profile]?.format : null;
-		checks.push({ ok: true, label: `secret bundle ${id}: profile ${b.profile}${format ? ` (${format})` : ""}, project ${b.project}${b.forkReviews === true ? ", fork reviews included" : ""}` });
+		checks.push({ ok: true, label: `secret bundle ${id}: profile ${b.profile}${format ? ` (${format})` : ""}, project ${b.project}${b.forkReviews === true ? ", fork reviews included" : ""}${b.files?.length ? `, file secrets: ${b.files.join(", ")}` : ""}` });
 		if (!fromEnv && !fromOverlay) {
 			checks.push({ ok: false, label: `secret bundle ${id} names profile ${b.profile}, which this host does not declare`, fix: "declare it in PI_SECRET_BUNDLES as name:/absolute/path:format (format dotenv or json), on EVERY host that takes this project's jobs -- until then they refuse pre-spend as secret-bundle-profile-unknown" });
 		} else if (!fromEnv && !Object.hasOwn(usableOverlay, b.profile)) {
@@ -103,7 +103,7 @@ export async function secretBundleChecks({ bundles = {}, triggersPresent = true,
 			const project = projects.find((p) => p?.id === b.project);
 			const folders = (project?.members ?? []).filter(isFolderMember);
 			if (folders.length > 0) {
-				checks.push({ ok: true, warn: true, label: `secret bundle ${id}'s project ${b.project} holds ${folders.length} folder(s), whose local jobs run IN the operator's own folder with the whole bundle in their environment`, fix: "a value the agent writes to .env, .netrc or .git-credentials there lands in your real repository (and in a retained sandbox), and nothing scans for that: keep those folders out of anything you push, or set run.secretBundle: false on their triggers" });
+				checks.push({ ok: true, warn: true, label: `secret bundle ${id}'s project ${b.project} holds ${folders.length} folder(s), whose local jobs run IN the operator's own folder with the whole bundle available`, fix: "a value the agent writes to .env, .netrc or .git-credentials there lands in your real repository (and in a retained sandbox), and nothing scans for that: keep those folders out of anything you push, or set run.secretBundle: false on their triggers" });
 			}
 		}
 	}
@@ -119,7 +119,8 @@ export async function secretBundleChecks({ bundles = {}, triggersPresent = true,
 			}
 			if (read?.ok === true) {
 				const names = Object.keys(read.vars).sort();
-				checks.push({ ok: true, label: `secret bundle ${id} resolved on this host: ${names.length} variable(s): ${names.join(", ")}` });
+				const files = new Set(b.files ?? []);
+				checks.push({ ok: true, label: `secret bundle ${id} resolved on this host: ${names.length} variable(s): ${names.map((name) => files.has(name) ? `${name} (file secret)` : name).join(", ")}` });
 			} else if (read?.reserved !== undefined) {
 				checks.push({ ok: false, label: `secret bundle ${id} carries ${read.reserved}, a name this deployment reserves`, fix: "rename it in the secrets manager -- every job of the project refuses pre-spend as secret-name-reserved until you do" });
 			} else if (read?.profileUnknown !== undefined || read?.ambiguous !== undefined) {
@@ -128,6 +129,31 @@ export async function secretBundleChecks({ bundles = {}, triggersPresent = true,
 				const what = read?.unreachable ? "could not reach its manager (exit 1, a timeout or a spawn fault: retried at job time)" : `was refused (${read?.failure ?? "unknown"}${read?.name ? `, variable ${read.name}` : ""}${read?.line ? `, line ${read.line}` : ""})`;
 				checks.push({ ok: false, label: `secret bundle ${id}'s resolver ${what}`, fix: "run the profile's resolver by hand with the bundle's ref as its argument -- doctor prints no byte of what it printed" });
 			}
+		}
+	}
+	return checks;
+}
+
+/** File-grant diagnostics hold references only long enough to ask the real resolver; displayed rows hold names alone. */
+export async function secretFileChecks({ runs = [], resolveFiles = null } = {}) {
+	const checks = [];
+	for (const run of runs) {
+		const names = Object.keys(run.secretFiles ?? {}).sort();
+		if (names.length === 0) continue;
+		checks.push({ ok: true, label: `${run.label}: file secrets: ${names.join(", ")} (mode 0600; the environment receives paths)` });
+		if (typeof resolveFiles !== "function") continue;
+		let read;
+		try { read = await resolveFiles(run); }
+		catch { read = { unreachable: true, failure: "spawn" }; }
+		if (read?.ok === true && names.every((name) => typeof read.secretFiles?.[name] === "string" && read.secretFiles[name] !== "")) {
+			checks.push({ ok: true, label: `${run.label}: file secrets resolved on this host: ${names.join(", ")}` });
+		} else {
+			const why = read?.profileUnknown ? "the resolver profile is not usable on this host"
+				: read?.ambiguous ? "the resolver profile is declared twice"
+				: read?.reserved ? "a file secret name is reserved for the job's credentials or settings"
+				: read?.unreachable ? "the resolver could not reach its manager (retried at job time)"
+				: "the resolver did not return every declared file secret as valid UTF-8 text";
+			checks.push({ ok: false, label: `${run.label}: file secrets could not be resolved: ${why}`, fix: "check the profile and run its resolver by hand; doctor prints no reference or secret value" });
 		}
 	}
 	return checks;

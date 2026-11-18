@@ -407,7 +407,9 @@ export function credentialHostsOf({ forgeHosts = {}, extra = [] } = {}) {
  * A shadowed endpoint name (review round 1, M2) is still a placeholder at its host: the run.secrets value, which is the
  * one that wins, goes into that host's provider (`bundleProviderPlan`), so it counts among the placeholders here.
  */
-export function judgeBundle({ endpoints = {}, vars = null, shadowed = [], network = { network_policies: {} }, credentialHosts = new Set(), capabilities = [] } = {}) {
+export function judgeBundle({ endpoints = {}, vars = null, shadowed = [], fileNames = [], network = { network_policies: {} }, credentialHosts = new Set(), capabilities = [] } = {}) {
+	const takenFile = fileNames.find(isSandboxSetName);
+	if (takenFile !== undefined) return { refused: "openshell-bundle-name-taken", name: takenFile };
 	const policyHosts = Object.values(network?.network_policies ?? {}).flatMap((rule) => (rule?.endpoints ?? []).map((e) => String(e?.host ?? "").toLowerCase()));
 	const exact = new Set(policyHosts.filter((h) => !h.startsWith("*.")));
 	const wildcards = policyHosts.filter((h) => h.startsWith("*.")).map((h) => h.slice(1));
@@ -459,12 +461,12 @@ export function judgeBundle({ endpoints = {}, vars = null, shadowed = [], networ
  * providers exposing one key, and a plain variable beside a placeholder of the same name would shadow one of them. The
  * processor's split and the reserved names make it unreachable; checked anyway.
  */
-export function bundleProviderPlan({ name, env = {}, bundleKeys = null } = {}) {
+export function bundleProviderPlan({ name, env = {}, bundleKeys = null, secretFileNames = [] } = {}) {
 	const endpoints = bundleKeys?.endpoints ?? {};
 	const plainNames = Array.isArray(bundleKeys?.plain) ? bundleKeys.plain : [];
 	const has = (k) => typeof env?.[k] === "string" && env[k] !== "";
 	const bundleNames = new Set([...Object.keys(endpoints), ...plainNames]);
-	const jobKeys = secretNamesOf(env).filter((k) => !bundleNames.has(k));
+	const jobKeys = secretNamesOf(env).filter((k) => !bundleNames.has(k) && !secretFileNames.includes(k));
 	const endpointNames = Object.keys(endpoints).filter(has).sort();
 	const hostOf = (k) => String(endpoints[k].host).toLowerCase();
 	const hosts = [...new Set(endpointNames.map(hostOf))].sort();
@@ -581,7 +583,7 @@ function gatewayArgs(gateway) {
  * profile adds. HOME is the image's home whoever the env says: OpenShell runs the image's own uid, and a tool's cache
  * must land there.
  */
-export function openshellExecArgs({ name, env = {}, gateway = null, mode = "copy" }) {
+export function openshellExecArgs({ name, env = {}, gateway = null, mode = "copy", secretFileNames = [] }) {
 	// Issue #684: no credential value on this argv, ever. ONLY the names the redactor treats as not secret
 	// (`NON_SECRET_ENV_KEYS`) travel here, an allowlist rather than "every name but the provider's": a secret the provider
 	// could not carry (a name no shell can spell) would otherwise fall through to this argv as a value (review H1). Every
@@ -596,7 +598,7 @@ export function openshellExecArgs({ name, env = {}, gateway = null, mode = "copy
 	// name). Rejected: `--env` as built first (the log), a provider (the agent would hold useless placeholders for a
 	// value it must use itself), `sandbox create --env` (the same flag, kept in the gateway's sandbox spec besides).
 	const envArgs = [];
-	const carried = Object.fromEntries(Object.entries(env ?? {}).filter(([key]) => isNonSecretEnvKey(key)));
+	const carried = Object.fromEntries(Object.entries(env ?? {}).filter(([key, value]) => isNonSecretEnvKey(key) || secretFileNames.includes(key) && value === `${(mode === "bind" ? LAYOUTS.mounts : SANDBOX).secretFiles}/${key}`));
 	for (const [key, value] of Object.entries({ ...carried, ...(gitCredentialEnv(env) ?? {}), HOME: "/home/pi" })) {
 		if (value === undefined || value === null) continue;
 		envArgs.push("--env", `${key}=${value}`);
@@ -1002,7 +1004,7 @@ export function makeOpenshellBackend(opts = {}) {
 		// Asked after every step that waits: a stop is the job's answer, and run-container ends the run as stopped.
 		const stopped = () => signal?.aborted === true || stopping.has(name);
 		// Bind mode passes the relabel decision on (review round 1: SELinux `private` on the worker's own directories).
-		const spec = containerSpec({ image: built.image, name: built.name, jobDir, workspace: built.workspace, outboxDir: built.outboxDir, sessionDir: built.sessionDir, steerInboxDir: binding ? built.steerInboxDir : undefined, globalPiDir: built.globalPiDir, ...(binding ? { relabel: built.relabel === true, workspaceOwned: built.workspaceOwned === true } : {}) });
+		const spec = containerSpec({ image: built.image, name: built.name, jobDir, workspace: built.workspace, outboxDir: built.outboxDir, sessionDir: built.sessionDir, secretFilesDir: built.secretFilesDir, steerInboxDir: binding ? built.steerInboxDir : undefined, globalPiDir: built.globalPiDir, ...(binding ? { relabel: built.relabel === true, workspaceOwned: built.workspaceOwned === true } : {}) });
 		// Issue #686 part 3: bind mode hands the spec's mounts to the driver and copies nothing.
 		const binds = binding ? bindMountsOf(spec) : [];
 		if (!binding) {
@@ -1049,7 +1051,7 @@ export function makeOpenshellBackend(opts = {}) {
 		// it, and only that host's endpoints are bound to it (one provider per endpoint at the pin, `judgeBundle` says
 		// why); every other bundle variable goes in plain, by file (`BUNDLE_ENV_FILE`). The bundle was judged before
 		// spend (`bundleGate`), so a plan this cannot build here is a defect, refused as infrastructure, never run around.
-		const plan = bundleProviderPlan({ name, env: built.env ?? {}, bundleKeys: built.bundleKeys ?? null });
+		const plan = bundleProviderPlan({ name, env: built.env ?? {}, bundleKeys: built.bundleKeys ?? null, secretFileNames: built.secretFileNames ?? [] });
 		if (plan.collision) {
 			log("openshell_bundle_collision", { container: name, name: plan.collision });
 			throw new Error(`openshell: ${plan.collision} would be exposed twice in the sandbox`);
@@ -1058,7 +1060,7 @@ export function makeOpenshellBackend(opts = {}) {
 		// Review round 1, L5: a bundle's variables are judged by name before spend (`judgeBundle`), and a plain one is never
 		// a provider key, so none is said here as a secret this venue could not carry.
 		const bundleNames = new Set([...Object.keys(built.bundleKeys?.endpoints ?? {}), ...(built.bundleKeys?.plain ?? [])]);
-		const unbindable = unbindableSecretNamesOf(built.env ?? {}).filter((k) => !bundleNames.has(k));
+		const unbindable = unbindableSecretNamesOf(built.env ?? {}).filter((k) => !bundleNames.has(k) && !(built.secretFileNames ?? []).includes(k));
 		// Review round 1, H1: the plain variables, by file in the job directory, never on the exec. Written before the
 		// upload (copy mode carries the job directory) or the create (bind mode binds it), 0600, removed at teardown.
 		if (plan.plain.length > 0) {
@@ -1283,9 +1285,10 @@ export function makeOpenshellBackend(opts = {}) {
 		neverStartedExits: [],
 		bin: "openshell",
 		// The sandbox's own name; PI_JOB_ID in the env stays the container name, which the exit line and its MAC carry.
-		buildArgs: (built) => openshellExecArgs({ name: sandboxNameOf(built.name), env: built.env, gateway, mode }),
+		buildArgs: (built) => openshellExecArgs({ name: sandboxNameOf(built.name), env: built.env, gateway, mode, secretFileNames: built.secretFileNames ?? [] }),
 		// Issue #704 part 3: a bundle's plain variables reach the runner by file (`BUNDLE_ENV_FILE`), never the exec.
 		bundleEnvFile: true,
+		secretFilesBackend: binding ? "openshell-bind" : "openshell",
 		// Issue #730: the sandbox's connect broker must read the caller's memory, so the key holders start readable.
 		observableRunner: true,
 		memoryLimitOf: (_args, built) => (built.size?.memMiB ?? DEFAULT_JOB_SIZE.memMiB) * 1024 * 1024,
@@ -1407,7 +1410,7 @@ export function makeOpenshellBackend(opts = {}) {
 	// read: with the hosts alone before the resolver runs (a file that names a host this job cannot bind costs no read of
 	// the operator's manager), then with the variables. `{ ok, placeholders?, plain? }`, `{ venueRefused }`, or
 	// `{ unavailable }` when a source cannot be read (retried, as the observation preflight's own read is).
-	const bundleGate = async (job, { endpoints = {}, vars = null, shadowed = [], credentialHosts = [], capabilities = [] } = {}) => {
+	const bundleGate = async (job, { endpoints = {}, vars = null, shadowed = [], fileNames = [], credentialHosts = [], capabilities = [] } = {}) => {
 		let network;
 		try {
 			network = networkFor(job, readEndpoints(), []);
@@ -1416,7 +1419,7 @@ export function makeOpenshellBackend(opts = {}) {
 			return { unavailable: true };
 		}
 		if (network.refused) return { venueRefused: { reason: "openshell-egress-untranslatable", comment: OPENSHELL_REFUSALS["openshell-egress-untranslatable"] } };
-		const judged = judgeBundle({ endpoints, vars, shadowed, network, credentialHosts: credentialHostsOf({ forgeHosts, extra: credentialHosts }), capabilities });
+		const judged = judgeBundle({ endpoints, vars, shadowed, fileNames, network, credentialHosts: credentialHostsOf({ forgeHosts, extra: credentialHosts }), capabilities });
 		if (judged.refused) {
 			// Names and the host only: operator config and the manager's names, never a value.
 			log("refused_openshell_bundle", { reason: judged.refused, name: judged.name ?? null, host: judged.host ?? null });

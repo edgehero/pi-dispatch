@@ -17,13 +17,13 @@ const LABEL = { on: { type: "label", any: ["hil"] }, run: { kind: "github", flow
 const CRON = { on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/srv/app", flow: "test-on-device", task: "run the device suite", privateEndpoints: ["bench-device", "lab"] } };
 
 test("run.privateEndpoints loads on forge and cron triggers, needs file version 7, and rides local job data", () => {
-	assert.equal(TRIGGERS_FILE_VERSION, 7);
+	assert.ok(TRIGGERS_FILE_VERSION >= 7);
 	assert.deepEqual(load(LABEL).run.privateEndpoints, ["bench-device"]);
 	assert.deepEqual(load(CRON).run.privateEndpoints, ["bench-device", "lab"]);
 	assert.throws(() => load(LABEL, 6), /run\.privateEndpoints needs triggers file version 7, and the file declares 6/);
 	const data = withJobDataVersion({ ...localRunData(load(CRON).run), trigger: { id: "nightly" } });
 	assert.deepEqual(data.privateEndpoints, ["bench-device", "lab"]);
-	assert.equal(data.dataVersion, JOB_DATA_VERSION, "a job carrying it is stamped with the version that knows it");
+	assert.equal(data.dataVersion, 8, "a job carrying only this field keeps its introduction version");
 	assert.equal(load({ on: LABEL.on, run: { kind: "github", flow: "x" } }).run.privateEndpoints, undefined, "absent means none");
 });
 

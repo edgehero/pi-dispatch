@@ -22,6 +22,7 @@ const BASE = {
 	resume: false,
 	skillsDir: "/srv/skills",
 	secrets: { STRIPE_KEY: "op://ci/stripe/api-key" },
+	secretFiles: { DEVICE_KEY: "device/key" },
 	secretsProfile: "ci",
 	backend: "local",
 	excludeTools: ["bash"],
@@ -44,7 +45,7 @@ const VARIANTS = { random: { flow: "tidy", task: "run tidy", provider: undefined
 
 function load(variant) {
 	// Version 2: the fixture is maximal, and the file must say what it needs (issue #800).
-	const json = JSON.stringify({ version: variant.modelSelection ? 6 : 2, triggers: [{ on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run: { kind: "local", ...BASE, ...variant } }] });
+	const json = JSON.stringify({ version: 8, triggers: [{ on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run: { kind: "local", ...BASE, ...variant } }] });
 	const [normalized] = parseTriggers(json, "/t.json");
 	const [schedule] = loadSchedules({ triggersFile: "/t.json" }, { readFileSync: () => json, existsSync: () => true });
 	return { normalized, data: schedule.data };
@@ -79,7 +80,7 @@ test("cron: each field ALONE reaches the schedule's job data (one folded into a 
 	for (const [field, value] of Object.entries(BASE)) {
 		if (field === "folder") continue;
 		const run = { kind: "local", folder: "/proj", flow: "tidy", task: "t", ...(needs[field] ?? {}), [field]: value };
-		const json = JSON.stringify({ version: 2, triggers: [{ on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run }] });
+		const json = JSON.stringify({ version: 8, triggers: [{ on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run }] });
 		const [normalized] = parseTriggers(json, "/t.json");
 		const [schedule] = loadSchedules({ triggersFile: "/t.json" }, { readFileSync: () => json, existsSync: () => true });
 		assert.deepEqual(JSON.parse(JSON.stringify(schedule.data))[field], JSON.parse(JSON.stringify(normalized.run))[field], `run.${field} alone was dropped`);

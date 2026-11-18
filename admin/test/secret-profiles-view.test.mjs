@@ -132,7 +132,9 @@ test("resolverRootsStatus is the add's own rule: the judgement and the view agre
 test("SECRET_RESOLVE_REASONS are the processor's own secret refusals", async () => {
   const { readFileSync } = await import("node:fs");
   const src = readFileSync(new URL("../../worker/src/processor.mjs", import.meta.url), "utf8");
-  const found = [...new Set([...src.matchAll(/reason: "(secret-[a-z-]+)"/g)].map((m) => m[1]).filter((r) => !r.startsWith("secret-bundle-")))].sort();
+  // Placement refuses every job before any profile is reached, including jobs with no secret grant.
+  // It is deliberately not a resolver failure; the profile view must keep it as not-reached.
+  const found = [...new Set([...src.matchAll(/reason: "(secret-[a-z-]+)"/g)].map((m) => m[1]).filter((r) => !r.startsWith("secret-bundle-") && r !== "secret-files-placement-unsafe"))].sort();
   assert.deepEqual([...SECRET_RESOLVE_REASONS].sort(), found, "a new secret refusal must be named here or the view calls it not-reached");
 });
 

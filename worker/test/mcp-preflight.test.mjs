@@ -303,3 +303,26 @@ test("makeMcpCheck: a reference to a private endpoint variable is refused as res
 	assert.equal(answer.refused, "mcp-secret-reserved");
 	assert.match(answer.why, /PI_DISPATCH_ENDPOINT_BENCH_DEVICE_HOST/);
 });
+
+
+test("file secret references reach stdio env and args as paths, never HTTP credentials (#919)", () => {
+	const servers = parseOverlayMcp(JSON.stringify({ mcpServers: {
+		local: { command: "/opt/pi-global/mcp/tool", args: ["--key", "${KEY}"], env: { SSH_KEY: "${KEY}" }, description: "Device" },
+		headers: { url: "https://mcp.example.com/tool", headers: { Authorization: "Bearer ${KEY}" }, description: "HTTP" },
+		url: { url: "https://mcp.example.com/tool/${KEY}", description: "URL" },
+	} }));
+	const read = check({ read: () => servers });
+	const granted = { provider: "anthropic", secretFiles: { KEY: "private-reference" } };
+	const local = read({ ...granted, mcp: ["local"] });
+	assert.equal(local.ok, true);
+	assert.deepEqual(local.document.servers.local.env, { SSH_KEY: "${KEY}" });
+	assert.deepEqual(local.document.servers.local.args, ["--key", "${KEY}"]);
+	assert.doesNotMatch(JSON.stringify(local), /private-reference/);
+	for (const name of ["headers", "url"]) {
+		const refused = read({ ...granted, mcp: [name] });
+		assert.equal(refused.refused, "mcp-secret-unmapped");
+		assert.match(refused.why, /file paths are available to stdio servers only/);
+	}
+	assert.equal(read({ mcp: ["local"] }).refused, "mcp-secret-unmapped");
+	assert.equal(check({ read: () => servers, reserved: () => new Set(["KEY"]) })({ ...granted, mcp: ["local"] }).refused, "mcp-secret-reserved");
+});

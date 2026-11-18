@@ -638,6 +638,7 @@ test("every refusal sentence in write-plans.mjs is asserted word for word, and a
       ["nothing to change", plans.planEnvelope({ params: {}, paths, env }).refusal, "nothing to change: name at least one of window, totalUsd, floorsUsd, defaultWeights, enabled, writers, maxStepPct, minIntervalHours, maxPlanDays"],
       ["envelope refused", plans.planEnvelope({ params: { totalUsd: "x" }, paths: alloc, env: {} }).refusal, { prefix: "rejected: " }],
       ["envelope unchanged", plans.planEnvelope({ params: { totalUsd: "100" }, paths: alloc, env: {} }).unchanged, "no change: the envelope already says this"],
+      ["file secret grant", plans.wideningFieldRefusal({ secretFiles: {} }, "dispatch_trigger_add"), "dispatch_trigger_add cannot set run.secretFiles (sent as secretFiles): file secret grants are set by hand in the triggers file, never by a tool."],
       ["no such profile", plans.planSecretProfileRemove({ name: "gone", profiles: {}, settingsFile: "/s" }).refusal, "no such profile. No resolver profiles are declared in the settings overlay."],
       ["no such profile, with some", plans.planSecretProfileRemove({ name: "gone", profiles: { dev: "/d" }, settingsFile: "/s" }).refusal, "no such profile. Resolver profiles (settings overlay):\n  dev: /d"],
       ["profile name", plans.planSecretProfileAdd({ name: "pro d", path: "/x", profiles: {}, settingsFile: "/s" }).refusal, "a profile name may use letters, digits, dot, dash and underscore only \u2014 PI_SECRET_PROFILES is a comma-separated list of name:path pairs"],

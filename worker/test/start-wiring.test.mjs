@@ -14,6 +14,7 @@ import { makeSandboxReaper as realSandboxReaper } from "../src/sandbox-store.mjs
 import { sandboxInventoryKey, SANDBOX_INVENTORY_HOSTS } from "../src/sandbox-inventory.mjs";
 import { hookRunsKey, HOOK_HOSTS } from "../src/hook-runs.mjs";
 import { makeTouchStore } from "../src/touch-state.mjs";
+import { stageSecretFiles, sweepSecretFiles } from "../src/secret-files.mjs";
 
 // start.mjs imports index.mjs (bullmq), connection.mjs (ioredis), and the octokit-backed auth/host
 // modules, so this skips below the node floor / without deps and runs in CI, where
@@ -335,6 +336,8 @@ async function runStart({ env = {}, whileRunning, makeUpdatesRunner, makeDoctorS
 			...(makePortfolioSnapshot ? { makePortfolioSnapshot } : {}),
 			// Issue #645: the durable-run seams (makeWorkspaceCheckpointer, loadRunCheckpoint, makeRunBudgetLedger,
 			// makeRecoveryEnqueuer, sweepOrphanJobDirs), handed through whole.
+			// A fake runtime reap cannot authorize removing this machine's real credential directories.
+			sweepSecretFiles: async () => ({ removed: 0, kept: 0, failed: 0 }),
 			...durable,
 			// THE GATE, ENFORCED (issue #813). Here, because every refusal a refusal-only test drives comes before this
 			// factory, and it is the first one after them that no try surrounds (the reapers between are caught and logged,
@@ -1019,6 +1022,86 @@ test("a reaper that throws does NOT reject startWorker (boot is best-effort)", {
 	const { captured, logs } = await runStart({ makeAuth, makeHost: () => fakeHost(), makeReaper });
 	assert.ok(captured, "startWorker must still construct the worker when the reaper throws");
 	assert.ok(logs.some((l) => l.event === "reaper_skipped"), "a throwing reaper must be logged as reaper_skipped");
+});
+
+test("file-secret boot sweep follows successful venue reaping and precedes the consumer, without recovery keep lists (#919)", { skip }, async () => {
+	const jobsDir = tempDir("secret-file-boot-");
+	const order = [];
+	const swept = [];
+	await runStart({
+		env: { PI_JOBS_DIR: jobsDir }, order,
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(),
+		makeReaper: () => async () => { order.push("reap"); return { reaped: true }; },
+		durable: { sweepSecretFiles: async (args) => { order.push("secret-files"); swept.push(args); return { removed: 0, kept: 0, failed: 0 }; } },
+	});
+	assert.deepEqual(order, ["reap", "secret-files", "createWorker"]);
+	assert.equal(swept.length, 1);
+	assert.equal(swept[0].jobsDir, jobsDir);
+	assert.deepEqual(swept[0].reapedBackends, ["local"]);
+	assert.deepEqual(Object.keys(swept[0]).sort(), ["jobsDir", "log", "reapedBackends"]);
+});
+
+test("file-secret boot sweep receives no reap proof after an unsuccessful or throwing reaper (#919)", { skip }, async () => {
+	for (const reap of [async () => ({ reaped: false }), async () => { throw new Error("enumeration unavailable"); }]) {
+		const swept = [];
+		await runStart({
+			makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(),
+			makeReaper: () => reap,
+			durable: { sweepSecretFiles: async (args) => { swept.push(args); return { removed: 0, kept: 0, failed: 0 }; } },
+		});
+		assert.equal(swept.length, 1);
+		assert.deepEqual(swept[0].reapedBackends, []);
+	}
+});
+
+test("a Podman-only boot can sweep its file secrets without Docker's whole-host proof (#919)", { skip }, async () => {
+	const seen = [];
+	const swept = [];
+	await runStart({
+		env: { PI_BACKENDS: "podman", PI_BACKEND_FLOOR: "isolation=enforced,mountSet=enforced,credentialTransit=enforced", PI_JOB_IMAGE: "pi-job:ci" },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(),
+		jobUserIdentity: PODMAN_ID, observationFs: PODMAN_FILES, readPodmanInfo: PODMAN_INFO(),
+		makePodmanReaper: () => async () => ({ reaped: true }),
+		bootImage: { ok: true, image: "pi-job:ci", imageDigest: "sha256:pod", piVersion: "0.80.7", capabilities: ["anyUid"] },
+		resolveDockerEndpoint: forbidden("resolveDockerEndpoint", seen), readDaemonFacts: forbidden("readDaemonFacts", seen), makeReaper: forbidden("makeReaper", seen),
+		durable: { sweepSecretFiles: async (args) => { swept.push(args); return { removed: 0, kept: 0, failed: 0 }; } },
+	});
+	assert.deepEqual(seen, []);
+	assert.equal(swept.length, 1);
+	assert.deepEqual(swept[0].reapedBackends, ["podman"]);
+});
+
+test("an OpenShell mode switch sweeps both modes' dead file roots only after every boot reaper succeeds (#919)", { skip }, async () => {
+	const nowMs = 1_800_000_000_000;
+	for (const current of ["openshell", "openshell-bind"]) {
+		for (const localReaped of [true, false]) {
+			const previous = current === "openshell" ? "openshell-bind" : "openshell";
+			const jobsDir = tempDir("secret-file-mode-switch-");
+			const jobDir = join(jobsDir, "job-switch");
+			mkdirSync(jobDir);
+			// Boot also ages orphaned job directories. Keep that clock and the fixture together: the kernel's
+			// mtime does not move with CI's shifted Date, so a fresh directory otherwise looks 399 days old.
+			utimesSync(jobDir, new Date(nowMs), new Date(nowMs));
+			const staged = stageSecretFiles(jobDir, { KEY: "mode-switch-secret" }, { backend: previous, owner: { pid: 424242, start: null } });
+			let reaps = 0;
+			const swept = [];
+			await runStart({
+				env: { PI_BACKENDS: `local,${current}`, PI_JOBS_DIR: jobsDir },
+				now: () => nowMs,
+				makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }), makeHost: () => fakeHost(),
+				makeReaper: () => async () => ({ reaped: localReaped }),
+				makeOpenshellReaper: () => async () => { reaps++; return { reaped: true }; },
+				durable: { sweepSecretFiles: async (args) => {
+					swept.push(args.reapedBackends);
+					return sweepSecretFiles({ ...args, identity: () => ({ alive: false, start: null }) });
+				} },
+			});
+			assert.equal(reaps, 1);
+			assert.deepEqual(swept.map((names) => [...names].sort()), localReaped ? [["local", "openshell", "openshell-bind"]] : [[]]);
+			assert.equal(existsSync(staged), !localReaped, `${previous} to ${current}, every reaper succeeded: ${localReaped}`);
+			assert.equal(existsSync(jobDir), true, "secret cleanup leaves the retained workspace alone");
+		}
+	}
 });
 
 test("job_completed carries reason when the result has one and omits it otherwise", { skip }, async () => {
@@ -3575,7 +3658,7 @@ test("a real err.reason token rides the hook's argv end to end, through a REAL s
 	// A real child: poll for its write rather than guessing its scheduling, on a WALL CLOCK. The bound is a
 	// ceiling on a hang, never a wait in the healthy case: the poll measures 146-292ms idle and 1642ms at its
 	// worst under deliberate fork pressure (19 node processes on 14 cores), so the ceiling sits about 6x above
-	// anything observed and the loop leaves on its first look once the file is there.
+	// anything observed and the loop leaves on its first look once the complete line is there.
 	//
 	// NOT `i < n` (issue #369, and issue #221 is the same defect one file over -- see service.test.mjs's
 	// waitForMarker, which this shape is copied from). A nominal count undercharges every iteration by the
@@ -3591,11 +3674,18 @@ test("a real err.reason token rides the hook's argv end to end, through a REAL s
 	// that relationship to be wrong. One caller and one standing opt-out is not a helper, it is a third thing
 	// to keep in step.
 	const deadline = Date.now() + 10_000;
-	while (!existsSync(out) && Date.now() < deadline) await new Promise((r) => setTimeout(r, 20));
-	assert.ok(existsSync(out), "the hook really spawned -- nothing was written within the 10s ceiling, which is a failure to spawn rather than a slow one");
+	let written = "";
+	// The shell creates the redirect before echo writes. Under full-suite pressure, existence alone can win that
+	// interval and read an empty file; the newline proves the script finished the record whose argv we assert.
+	while (Date.now() < deadline) {
+		if (existsSync(out)) written = readFileSync(out, "utf8");
+		if (written.endsWith("\n")) break;
+		await new Promise((r) => setTimeout(r, 20));
+	}
+	assert.ok(written.endsWith("\n"), "the hook did not complete its output within the 10s ceiling");
 	// The host cell is this machine's derived worker name, which varies -- pin the id-only trio exactly
 	// and only the SHAPE of the fourth.
-	const argv = readFileSync(out, "utf8").trim().split(" ");
+	const argv = written.trim().split(" ");
 	assert.deepEqual(argv.slice(0, 3), ["gh-9", "failed", "container-never-started"], "a VALID token passes the guard verbatim; the message never rides");
 	assert.equal(argv.length, 5, "host rides fourth, whatever this machine calls itself, then the marker cell");
 	assert.equal(argv[4], "marker=threaded", "the hook runs with the worker's injected env, never the ambient one");

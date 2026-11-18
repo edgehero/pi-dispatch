@@ -158,6 +158,7 @@ export function filterAzure(subset, triggers, knownFlows, selfId, authorized, de
 			// secret enqueues the job data it always has. The map holds REFERENCES, never values: the
 			// receiver has no resolver and reaches no vault -- the worker resolves them pre-spend.
 			...(resolved.secrets !== undefined ? { secrets: resolved.secrets } : {}),
+			...(resolved.secretFiles !== undefined ? { secretFiles: resolved.secretFiles } : {}),
 			...(resolved.secretsProfile !== undefined ? { secretsProfile: resolved.secretsProfile } : {}),
 			...(resolved.waitFor !== undefined ? { waitFor: resolved.waitFor } : {}),
 			...(resolved.instructions !== undefined ? { instructions: resolved.instructions } : {}),
@@ -249,6 +250,7 @@ function matchLabelRules(subset, triggers, labels, action) {
 		provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models, fallbackModels: rule.fallbackModels, ...(rule.modelSelection !== undefined ? { modelSelection: rule.modelSelection } : {}), maxCostUsd: rule.maxCostUsd, idleTimeoutMinutes: rule.idleTimeoutMinutes, stallTimeoutMinutes: rule.stallTimeoutMinutes, maxMinutes: rule.maxMinutes,
 		skillsDir: rule.skillsDir,
 		secrets: rule.secrets,
+		secretFiles: rule.secretFiles,
 		secretsProfile: rule.secretsProfile,
 		waitFor: rule.waitFor,
 		instructions: rule.instructions,
@@ -316,6 +318,7 @@ function routeComment(subset, triggers, knownFlows, targetType, assumeParked = f
 		provider: triggers.comment.provider, model: triggers.comment.model, maxTurns: triggers.comment.maxTurns, models: triggers.comment.models, fallbackModels: triggers.comment.fallbackModels, ...(triggers.comment.modelSelection !== undefined ? { modelSelection: triggers.comment.modelSelection } : {}), maxCostUsd: triggers.comment.maxCostUsd, idleTimeoutMinutes: triggers.comment.idleTimeoutMinutes, stallTimeoutMinutes: triggers.comment.stallTimeoutMinutes, maxMinutes: triggers.comment.maxMinutes,
 		skillsDir: triggers.comment.skillsDir,
 		secrets: triggers.comment.secrets,
+		secretFiles: triggers.comment.secretFiles,
 		secretsProfile: triggers.comment.secretsProfile,
 		waitFor: triggers.comment.waitFor,
 		instructions: triggers.comment.instructions,
@@ -362,6 +365,7 @@ function routePullRequest(subset, triggers, action) {
 			provider: rule.provider, model: rule.model, maxTurns: rule.maxTurns, models: rule.models, fallbackModels: rule.fallbackModels, ...(rule.modelSelection !== undefined ? { modelSelection: rule.modelSelection } : {}), maxCostUsd: rule.maxCostUsd, idleTimeoutMinutes: rule.idleTimeoutMinutes, stallTimeoutMinutes: rule.stallTimeoutMinutes, maxMinutes: rule.maxMinutes,
 			skillsDir: rule.skillsDir,
 			secrets: rule.secrets,
+			secretFiles: rule.secretFiles,
 			secretsProfile: rule.secretsProfile,
 			waitFor: rule.waitFor,
 			instructions: rule.instructions,

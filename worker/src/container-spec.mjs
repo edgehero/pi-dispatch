@@ -1,3 +1,4 @@
+import { LAYOUTS } from "./job-layout.mjs";
 /**
  * WHAT the box is, with no Docker vocabulary in it (issue #227).
  *
@@ -185,6 +186,7 @@ export function containerSpec({
 	globalPiDir,
 	steerInboxDir,
 	credentialsDir,
+	secretFilesDir,
 	name,
 	size = DEFAULT_JOB_SIZE,
 	hostCpus = null,
@@ -251,6 +253,8 @@ export function containerSpec({
 	// the job directory like the inbox and READ-ONLY for the same reason: the worker writes it, the agent cannot change what
 	// the runner applies. Relabelled like the other per-job directories. Absent unless armed.
 	if (credentialsDir) mounts.push({ host: credentialsDir, container: CONTAINER_CREDENTIALS_DIR, readOnly: true, ...own });
+	// File secrets never nest in the retained job tree; the mount grants only this attempt its files.
+	if (secretFilesDir) mounts.push({ host: secretFilesDir, container: LAYOUTS.mounts.secretFiles, readOnly: true, ...own });
 
 	// The operator's global pi overlay (REQ-GLOBAL-PI-OVERLAY): custom models, global skills, a global
 	// persona, layered UNDER each repo's own .pi/. Read-only -- it is operator-authored deploy-time config,

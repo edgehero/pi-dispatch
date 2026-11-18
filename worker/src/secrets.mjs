@@ -24,6 +24,7 @@
  */
 
 import { spawn } from "node:child_process";
+import { isUtf8 } from "node:buffer";
 import { realpathSync, statSync } from "node:fs";
 import { providerKeyCandidates } from "./env-allowlist.mjs";
 import { EXIT_POLICY } from "./exit-code.mjs";
@@ -58,7 +59,7 @@ export const DEFAULT_SECRETS_PROFILE = "default";
 /**
  * Whether this job asked for secrets at all.
  *
- * EITHER field arms it. `secretsProfile` alone cannot reach a wired worker (parseTriggers refuses a profile
+ * Either delivery map, or its profile, arms it. `secretsProfile` alone cannot reach a wired worker (parseTriggers refuses a profile
  * that resolves nothing), but this predicate also guards the processor's fail-closed default, which runs
  * under wirings that never saw the validator -- a bare `makeProcessor` in a test, or a job whose data was
  * queued by a different version. Treating a lone profile as unarmed there would silently start a job the
@@ -70,8 +71,7 @@ export const DEFAULT_SECRETS_PROFILE = "default";
  */
 export function secretsArmed(job) {
 	if (typeof job?.secretsProfile === "string" && job.secretsProfile !== "") return true;
-	const secrets = job?.secrets;
-	return secrets !== null && typeof secrets === "object" && Object.keys(secrets).length > 0;
+	return [job?.secrets, job?.secretFiles].some((values) => values !== null && typeof values === "object" && Object.keys(values).length > 0);
 }
 
 /**
@@ -89,7 +89,7 @@ export function secretsArmed(job) {
  * `maxBytes` (a whole environment, not one value): one spawn, one exit mapping, one timeout and one abort, so a
  * fix to any of them reaches both rather than one of two copies.
  */
-export function runResolver(spawnFn, path, reference, { timeoutMs, hostEnv, signal, maxBytes = MAX_SECRET_BYTES }) {
+export function runResolver(spawnFn, path, reference, { timeoutMs, hostEnv, signal, maxBytes = MAX_SECRET_BYTES, preserveNewline = false, strictUtf8 = false }) {
 	return new Promise((resolve) => {
 		let child;
 		try {
@@ -169,7 +169,13 @@ export function runResolver(spawnFn, path, reference, { timeoutMs, hostEnv, sign
 			if (overflowed || done) return;
 			if (code === EXIT_POLICY) return finish({ value: null, failure: "policy", detail: "exit", code, stderrBytes });
 			if (code !== 0) return finish({ value: null, failure: "infra", detail: "exit", code, stderrBytes });
-			const value = stripOneNewline(Buffer.concat(chunks).toString("utf8"));
+			const captured = Buffer.concat(chunks);
+			// A file must round-trip the bytes the manager printed. Buffer.toString replaces invalid UTF-8 silently;
+			// refusing it keeps that corruption from becoming a paid authentication failure. Environment-only callers
+			// retain their existing decoding and one-newline normalization.
+			if (strictUtf8 && !isUtf8(captured)) return finish({ value: null, failure: "policy", detail: "utf8", code, stderrBytes });
+			const raw = captured.toString("utf8");
+			const value = preserveNewline ? raw : stripOneNewline(raw);
 			// Exit 0 printing nothing is the silent-no-op class: a vault CLI that says nothing and succeeds
 			// would otherwise bind an empty variable and let the job run as though it were configured.
 			if (value === "") return finish({ value: null, failure: "policy", detail: "empty", code, stderrBytes });
@@ -281,6 +287,8 @@ export function makeSecretsResolver({
 		if (fromOverlay && !withinRoots(path, roots)) return { profileUnknown: wanted };
 
 		const references = job?.secrets ?? {};
+		const fileReferences = job?.secretFiles ?? {};
+		const fileRefs = new Set(Object.values(fileReferences));
 
 		// The half of the reserved-name refusal that parseTriggers structurally cannot make. It refuses every
 		// STATICALLY knowable name (the mint's, each forge's host var, the worker-only secrets, the egress
@@ -317,31 +325,32 @@ export function makeSecretsResolver({
 		// anthropic job binding OPENAI_API_KEY for a flow that talks to OpenAI itself is still allowed. That
 		// is deliberate, and tested; refusing it would be this project inventing a namespace it does not own.
 		const reserved = new Set([...providerKeyCandidates(job?.provider), ...forwardEnv]);
-		for (const name of Object.keys(references)) {
+		for (const name of [...Object.keys(references), ...Object.keys(fileReferences)]) {
 			if (reserved.has(name)) return { reserved: name };
 		}
 		const secrets = {};
+		const secretFiles = {};
 		const seen = new Map();
-		for (const [name, reference] of Object.entries(references)) {
-			if (seen.has(reference)) {
-				// Two names sharing one reference resolve once, so they are guaranteed identical rather than
-				// straddling a rotation that lands between two reads.
-				secrets[name] = seen.get(reference);
-				continue;
+		// Capture once even when an environment name and a file name share a reference. Normalize only the
+		// environment delivery, after capture, so a rotation cannot split them and no newline is lost from the file.
+		for (const [references, destination, file] of [[job?.secrets ?? {}, secrets, false], [fileReferences, secretFiles, true]]) {
+			for (const [name, reference] of Object.entries(references)) {
+				let outcome = seen.get(reference);
+				if (outcome === undefined) {
+					outcome = await runResolver(spawnFn, path, reference, { timeoutMs, hostEnv, signal, preserveNewline: true, strictUtf8: fileRefs.has(reference) });
+					seen.set(reference, outcome);
+				}
+				const value = outcome.failure ? null : file ? outcome.value : stripOneNewline(outcome.value);
+				if (!outcome.failure && value === "") outcome = { ...outcome, value: null, failure: "policy", detail: "empty" };
+				if (outcome.failure) {
+					// Never the resolver's words, reference or path: names and bounded failure facts only.
+					log("secret_resolve_failed", { name, failure: outcome.failure, detail: outcome.detail, code: outcome.code ?? null, stderrBytes: outcome.stderrBytes });
+					const shape = { failure: outcome.detail, code: outcome.code ?? null, stderrBytes: outcome.stderrBytes };
+					return outcome.failure === "infra" ? { unreachable: name, ...shape } : { unresolved: name, ...shape };
+				}
+				Object.defineProperty(destination, name, { value, enumerable: true, writable: true, configurable: true });
 			}
-			const outcome = await runResolver(spawnFn, path, reference, { timeoutMs, hostEnv, signal });
-			if (outcome.failure) {
-				// The NAME, our own failure vocabulary, the script's small integer exit and a byte COUNT.
-				// Never the resolver's words, never the reference, never the path (no-pii-in-logs).
-				log("secret_resolve_failed", { name, failure: outcome.failure, detail: outcome.detail, code: outcome.code ?? null, stderrBytes: outcome.stderrBytes });
-				const shape = { failure: outcome.detail, code: outcome.code ?? null, stderrBytes: outcome.stderrBytes };
-				// The whole job refuses, never a partial set: a job missing one of three secrets fails deep
-				// inside a paid container in a way that reads as a flow bug.
-				return outcome.failure === "infra" ? { unreachable: name, ...shape } : { unresolved: name, ...shape };
-			}
-			seen.set(reference, outcome.value);
-			secrets[name] = outcome.value;
 		}
-		return { ok: true, secrets };
+		return { ok: true, secrets, ...(Object.keys(secretFiles).length > 0 ? { secretFiles } : {}) };
 	};
 }

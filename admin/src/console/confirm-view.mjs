@@ -363,7 +363,7 @@ function redacted(value, keyName = null) {
   }
   if (Array.isArray(value)) return value.map((v) => redacted(v));
   if (value === null || typeof value !== "object") return value;
-  if (keyName === "secrets") return Object.fromEntries(Object.keys(value).map((k) => [k, "(a secret reference, not shown)"]));
+  if (keyName === "secrets" || keyName === "secretFiles") return Object.fromEntries(Object.keys(value).map((k) => [k, "(a secret reference, not shown)"]));
   return Object.fromEntries(Object.entries(value).map(([k, v]) => [k, redacted(v, k)]));
 }
 

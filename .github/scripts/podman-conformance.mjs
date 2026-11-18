@@ -82,6 +82,8 @@ const { computeHostBudget, hostBudgetSettings, readUserServiceLimits } = await l
 const { jobSizeDefaults } = await load("worker/src/job-size.mjs");
 const { grantOnAttach, grantsDirOf, removeGrantsOf } = await load("worker/src/endpoint-grants.mjs");
 const { loadPrivateEndpoints } = await load("worker/src/private-endpoints.mjs");
+const { makeLogSink } = await load("worker/src/run-history.mjs");
+const { SECRET_FILE_FIXTURES, SECRET_FILES_PROBE_SOURCE, judgeSecretFilesProbe } = await load(".github/scripts/secret-files-conformance.mjs");
 
 const refuse = (why) => {
 	console.error(`podman-conformance: ${why}`);
@@ -137,9 +139,18 @@ if ((await podman(["image", "exists", image])).code !== 0) refuse(`${image} is n
 // the entrypoint differs. `--init` is in the job argv, so catatonit is PID 1 and forwards the stop to `sleep`.
 const context = join(scratch, "probe-image");
 nodeFs.mkdirSync(context);
+nodeFs.writeFileSync(join(context, "secret-files.mjs"), SECRET_FILES_PROBE_SOURCE, { mode: 0o644 });
+nodeFs.writeFileSync(join(context, "entrypoint.sh"), `#!/bin/sh
+c=$(cat /job/prompt.md)
+case "$c" in
+	sleep) exec sleep 600 ;;
+	secret-files) exec node /opt/pi-dispatch-secret-files.mjs ;;
+	*) exit "$c" ;;
+esac
+`, { mode: 0o755 });
 nodeFs.writeFileSync(
 	join(context, "Containerfile"),
-	`FROM ${image}\nENTRYPOINT ["sh", "-c", "c=$(cat /job/prompt.md); if [ \\"$c\\" = sleep ]; then exec sleep 600; fi; exit \\"$c\\""]\n`,
+	`FROM ${image}\nCOPY entrypoint.sh /opt/pi-dispatch-conformance.sh\nCOPY secret-files.mjs /opt/pi-dispatch-secret-files.mjs\nENTRYPOINT ["sh", "/opt/pi-dispatch-conformance.sh"]\n`,
 );
 const built = await podman(["build", "--pull=never", "--quiet", "-t", probeImage, "-f", join(context, "Containerfile"), context], { timeoutMs: 600_000 });
 if (built.code !== 0) refuse(`the probe image did not build: ${firstLine(built.stderr)}`);
@@ -185,13 +196,13 @@ let venueRefused = null;
 let venueTransient = false;
 
 /** The harness's `probe`: one real job container through the bundle, exiting `exitCode` or stopped by the worker. */
-async function probe(bundle, { exitCode, aborted = false }) {
+async function probe(bundle, { exitCode, aborted = false, secretFiles = false }) {
 	probes += 1;
 	const jobId = `conformance-${nonce}-${probes}`;
 	const jobDir = nodeFs.mkdtempSync(join(scratch, "job-"));
 	nodeFs.chmodSync(jobDir, 0o700);
 	const workspace = nodeFs.mkdtempSync(join(scratch, "workspace-"));
-	nodeFs.writeFileSync(join(jobDir, "prompt.md"), aborted ? "sleep" : String(exitCode));
+	nodeFs.writeFileSync(join(jobDir, "prompt.md"), secretFiles ? "secret-files" : aborted ? "sleep" : String(exitCode));
 	const job = { id: jobId, kind: "local", provider: "anthropic", model: "conformance", maxTurns: 1 };
 	// The job user the bundle itself decides, through the same two preflights the processor calls, in its order.
 	const observed = await bundle.observationPreflight(job);
@@ -211,9 +222,12 @@ async function probe(bundle, { exitCode, aborted = false }) {
 	const name = bundle.containerName(jobId);
 	lastProbeName = name;
 	const controller = new AbortController();
-	const running = bundle.runContainer({ job, token: null, prepared: { jobDir, workspace }, secrets: {}, name, signal: controller.signal, user: who.user, home: who.home, relabel: who.relabel });
+	const running = bundle.runContainer({ job, token: null, prepared: { jobDir, workspace }, secrets: {}, ...(secretFiles ? { secretFiles: SECRET_FILE_FIXTURES } : {}), name, jobId, signal: controller.signal, user: who.user, home: who.home, relabel: who.relabel });
 	try {
-		if (!aborted) return await running;
+		if (!aborted) {
+			const result = await running;
+			return secretFiles ? { result, jobDir, name } : result;
+		}
 		if (!(await awaitRunning(name))) throw new Error(`${name} never reported running`);
 		// The worker's own order: the abort signal first, then the stop, whose effect arrives through the exit.
 		controller.abort();
@@ -223,6 +237,23 @@ async function probe(bundle, { exitCode, aborted = false }) {
 		nodeFs.rmSync(jobDir, { recursive: true, force: true });
 		nodeFs.rmSync(workspace, { recursive: true, force: true });
 	}
+}
+
+async function fileSecretCase() {
+	const commands = [];
+	let output = "";
+	const logsDir = join(scratch, "secret-file-logs");
+	const bundle = makePodmanBackend({
+		image: probeImage, hostEnv: { ...process.env, ANTHROPIC_API_KEY: "conformance-probe-not-a-key" }, egress: false,
+		readInfo, euid, egid, backendFloor: { isolation: "enforced" },
+		openJobLog: makeLogSink({ logsDir, enabled: true }),
+		onOutput: (chunk) => { output += String(chunk); },
+		spawnFn: (bin, args, opts) => { commands.push([bin, ...args]); return spawn(bin, args, opts); },
+	});
+	const { result, jobDir, name } = await probe(bundle, { exitCode: 0, secretFiles: true });
+	let persistedLog = null;
+	try { persistedLog = nodeFs.readFileSync(join(logsDir, `${name}.log`), "utf8"); } catch {}
+	return judgeSecretFilesProbe({ code: result.code, output, jobDir, commands, persistedLog });
 }
 
 // The reaper's failure path, REAL rather than simulated: the same factory the bundle's reaper comes from, pointed at a
@@ -505,6 +536,7 @@ let report;
 let teardowns;
 let sweepCase;
 let netns;
+let secretFilesCase;
 try {
 	// Before the harness, so its own egress read-back is also one taken after job teardowns rather than on a fresh proxy.
 	try {
@@ -519,6 +551,7 @@ try {
 	}
 	await applyReserve();
 	report = await runBackendConformance(backend, { probe, withBrokenEnumeration, readBack });
+	if (!venueRefused) secretFilesCase = await fileSecretCase();
 	// LAST, see `staleCanarySweep`.
 	sweepCase = venueRefused ? null : await staleCanarySweep();
 } finally {
@@ -537,6 +570,8 @@ if (venueRefused) {
 }
 const failures = [];
 console.log(`\npodman conformance, ${PODMAN_BACKEND} venue, Podman ${read.info.version ?? "(version not reported)"}, as uid:gid ${decision.user}${decision.relabel ? ", SELinux relabel on" : ""}`);
+console.log(`  ${(secretFilesCase?.ok ? "PASS" : "FAIL").padEnd(8)} file secrets: ${secretFilesCase?.detail ?? "not measured"}`);
+if (!secretFilesCase?.ok) failures.push("file secrets did not hold their byte, ownership, read-only, redaction or cleanup contract");
 for (const f of report.findings) {
 	const mark = !f.ok ? "FAIL" : f.unverifiable ? "NOT READ" : "PASS";
 	console.log(`  ${mark.padEnd(8)} ${f.check}: ${f.detail}`);

@@ -49,6 +49,7 @@ export const TERMINAL_COMMENTS = {
 	"operator-cancel": "Stopped: the operator cancelled this run. Partial work may exist. Not retried.",
 	"agent-cancel": "Stopped by a delegated agent. Partial work may exist. Not retried.",
 	"answer-draft-refused": "Stopped: the restricted draft job refused its configuration or inputs. No answer was sent. Not retried.",
+	"secret-files-unusable": "Stopped: the job could not verify its secret files, their ownership or their private permissions. Check the container mounts and rebuild the image. No agent call was made. Not retried.",
 	"runner-policy": "Stopped: the run ended inside the container before finishing (a turn or token budget, or an in-container configuration refusal). Partial work may exist. Not retried.",
 	// Issue #437. Names the cause but never the provider's own message, which may echo a key fragment. "Or
 	// access" because a 403 is as often a key that works but may not use this model or route as a bad key.
@@ -180,6 +181,10 @@ export const BRANCH_PROTECTION_UNREADABLE = "branch-protection-unreadable";
  * and a fixed sentence keeps the catalog's copy identical to what the issue was told.
  */
 export const REFUSAL_COMMENTS = Object.freeze({
+	"secret-files-placement-unsafe": "Refused: the jobs directory overlaps a local workspace, skills source or global pi overlay. Keep PI_JOBS_DIR disjoint from every job-visible source. Nothing was spent.",
+	"secret-file-name-invalid": "Refused: a file secret has an unsafe or unsupported file name. Use a portable environment name of at most 128 characters, excluding reserved device names. Not run.",
+	"secret-file-endpoint-conflict": "Refused: a secret cannot be delivered both as a file and as a bundle endpoint credential. Give them separate variable names in the triggers file. Not run.",
+	"secret-file-name-conflict": "Refused: file secret names differ only by letter case, so they cannot be staged safely on every worker. Give them distinct names in the triggers file. Not run.",
 	"sessions-dir-unset": "Refused: this trigger set `run.resume` but PI_SESSIONS_DIR is unset, so there is nowhere to persist the transcript -- the job would run with no session and still report success. Set PI_SESSIONS_DIR to a private directory outside every repo, or drop `run.resume` from this trigger. Not run.",
 	"skills-dir-missing": "Refused: this trigger set `run.skillsDir`, and that path is absent or is not a directory on the worker host. The job would have run without the skills the flow was written against. Not run.",
 	"secret-profile-unknown": "Refused: this trigger set `run.secrets`, and the resolver profile it names is not usable on this worker host. No profile of that name is declared, or its resolver is absent or not executable. The job would have started with those variables unset, and an agent that gets a 401 writes a plausible report and exits 0. Run `pi-dispatch doctor` on the worker to see which profiles it has. Not run.",

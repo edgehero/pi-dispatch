@@ -294,6 +294,14 @@ test("an unconfigured provider throws a config-tagged error (=> pre-spend refusa
 	);
 });
 
+test("only delivered file paths may arm PI_SECRET_FILES, even if earlier gates were bypassed (#919)", { skip }, () => {
+	const base = { provider: "anthropic", model: "m", jobId: "j", hostEnv: { ...HOST, PI_SECRET_FILES: "FORGED" }, forwardEnv: ["PI_SECRET_FILES"], secrets: { PI_SECRET_FILES: "ALSO_FORGED" } };
+	assert.equal(buildContainerEnv(base).PI_SECRET_FILES, undefined);
+	const env = buildContainerEnv({ ...base, secretFilePaths: { SSH_KEY: "/run/secrets/SSH_KEY" } });
+	assert.equal(env.PI_SECRET_FILES, "SSH_KEY");
+	assert.equal(env.SSH_KEY, "/run/secrets/SSH_KEY");
+});
+
 test("PI_GLOBAL_ALLOW_EXTENSIONS is emitted ONLY to carry the explicit opt-out", { skip }, () => {
 	const base = { provider: "anthropic", model: "m", maxTurns: 5, jobId: "j", hostEnv: HOST };
 	// Absent means LOAD on both sides of the mount, so the loading case emits nothing at all.

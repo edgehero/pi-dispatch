@@ -107,7 +107,7 @@ const jobDataFields = () => {
 };
 
 test("the job data tables hold the rule", () => {
-	assert.equal(JOB_DATA_VERSION, 8, "issue #918: private endpoints at 8");
+	assert.equal(JOB_DATA_VERSION, 9, "issue #919: file secrets at 9");
 	assert.equal(JOB_DATA_VERSION_FIELD, "dataVersion");
 	const known = jobDataFields();
 	assert.ok(known.includes("waitFor") && known.includes("models"), "the job data fields were found");

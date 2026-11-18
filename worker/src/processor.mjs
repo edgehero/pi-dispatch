@@ -16,6 +16,7 @@ import { configError } from "./config.mjs";
 import { unqualifiedScope } from "./pause-windows.mjs";
 import { PROJECT_CAP_REASON } from "./scoped-limits.mjs";
 import { DEFAULT_SECRETS_PROFILE, secretsArmed } from "./secrets.mjs";
+import { secretFileNameAllowed, secretFileNamesDistinct } from "./secret-file-names.mjs";
 import { mergeBundleSecrets } from "./secret-bundles.mjs";
 import { providerKeyCandidates } from "./env-allowlist.mjs";
 import { isReservedEnvName } from "./triggers.mjs";
@@ -489,8 +490,8 @@ function tagPrivateEndpoints(e, p) {
  */
 function withBundle(result, b) {
 	if (result === null || typeof result !== "object") return result;
-	if (b.bundle === null && b.bundleSkipped === null) return result;
-	return { ...result, ...(b.bundle !== null ? { bundle: b.bundle } : {}), ...(b.bundleSkipped !== null ? { bundleSkipped: b.bundleSkipped } : {}) };
+	if (b.bundle === null && b.bundleSkipped === null && !b.secretFiles?.length) return result;
+	return { ...result, ...(b.bundle !== null ? { bundle: b.bundle } : {}), ...(b.bundleSkipped !== null ? { bundleSkipped: b.bundleSkipped } : {}), ...(b.secretFiles?.length ? { secretFiles: b.secretFiles } : {}) };
 }
 
 /** The same on a throw, so a retried or failed attempt's record says what it held (buildRecord reads the error). */
@@ -499,6 +500,7 @@ function tagBundle(e, b) {
 	try {
 		if (b.bundle !== null && e.bundle === undefined) e.bundle = b.bundle;
 		if (b.bundleSkipped !== null && e.bundleSkipped === undefined) e.bundleSkipped = b.bundleSkipped;
+		if (b.secretFiles?.length && e.secretFiles === undefined) e.secretFiles = b.secretFiles;
 	} catch {
 		// a frozen error keeps its own fields
 	}
@@ -522,6 +524,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// this job names is on this host (image-preflight.mjs). Default admits everything, so a wiring that
 		// omits it behaves exactly as before -- the container's own failure stays the backstop.
 		imagePreflight = async () => ({ ok: true }),
+		checkSecretFilesPlacement = () => null,
 		subscriptionAuthRequired = async () => false,
 		// (job) => { ok } | { refused, at, jobId } | { newer } (issue #761). The one-shot pre-spend check (issue #231,
 		// DES-ONE-SHOT-DISARM-IN-THE-FILE). Default admits everything -- an unwired processor behaves
@@ -876,7 +879,14 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 	let progress = null;
 
 	try {
-		// The one-shot pre-spend check (issue #231), FIRST on the ladder: one file read, cheaper than
+		const secretPlacement = await checkSecretFilesPlacement(job);
+		if (secretPlacement?.unavailable) throw new InfraRetry("the file secret placement boundary could not be read", { reason: "container-never-started" });
+		if (secretPlacement?.outcome === "policy") {
+			await comment(job, REFUSAL_COMMENTS["secret-files-placement-unsafe"]);
+			log("refused_secret_files_placement", {});
+			return { outcome: "policy", reason: "secret-files-placement-unsafe", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false };
+		}
+		// The one-shot pre-spend check (issue #231): one file read, cheaper than
 		// the docker inspect below, free, determinate, credential-less. Only a FOREIGN positive
 		// disarmed mark refuses -- the check excuses this queue job's own id, so a retry of the
 		// delivery that spent the trigger still runs (attempts:2 stays attempts:2) -- and anything
@@ -1838,6 +1848,46 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			}
 		}
 
+		const bundleHeadCheck = bundleBinding !== null && job.target?.type === "pull_request" && bundleBinding.forkReviews !== true;
+		// Judge declared delivery before a resolver runs. A fork may skip its bundle entirely, so only the
+		// trigger's own files are judged until that fork check has answered. A retained workspace never decides
+		// which values become files: the reviewed declarations do, on every attempt.
+		const checkSecretFilePlan = async (binding) => {
+			const explicit = job.secretFiles ?? {};
+			const files = [...Object.keys(explicit), ...(binding?.files ?? []).filter((name) => !Object.hasOwn(explicit, name) && !Object.hasOwn(job.secrets ?? {}, name))];
+			let reason = null;
+			const endpointNames = new Set(Object.keys(binding?.endpoints ?? {}).map((name) => name.toLowerCase()));
+			if (files.some((name) => !secretFileNameAllowed(name))) reason = "secret-file-name-invalid";
+			else if (files.some((name) => endpointNames.has(name.toLowerCase()))) reason = "secret-file-endpoint-conflict";
+			else if (!secretFileNamesDistinct(files)) reason = "secret-file-name-conflict";
+			if (reason !== null) {
+				await comment(job, REFUSAL_COMMENTS[reason]);
+				log("refused_secret_file_delivery", { reason });
+				return { outcome: "policy", reason, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false };
+			}
+			if (files.length > 0 && !(img.capabilities ?? []).includes("secretFiles")) {
+				const gate = CAPABILITY_GATES.find((row) => row.token === "secretFiles");
+				await comment(job, gate.comment(img.image ?? job.image ?? "selected image", "lacks file secret support"));
+				log(gate.event, { image: img.image ?? job.image ?? null, declared: img.capabilities ?? [] });
+				return { outcome: "policy", reason: gate.reason, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false };
+			}
+			if (files.length > 0) {
+				// A venue can reserve additional environment names of its own. A path variable must respect
+				// that bound before resolution even though it never joins the venue's credential providers.
+				const judged = await bundleGate(job, { fileNames: files, vars: null, endpoints: {}, capabilities: img.capabilities ?? [] });
+				if (judged?.venueRefused && typeof judged.venueRefused.reason === "string") {
+					const { reason, comment: text } = judged.venueRefused;
+					await comment(job, typeof text === "string" && text !== "" ? text : VENUE_BUNDLE_REFUSED_COMMENT);
+					log("refused_venue", { reason, ...(binding ? { bundle: binding.id } : {}) });
+					return { outcome: "policy", reason, exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false };
+				}
+				if (judged?.unavailable) throw new InfraRetry("the job's venue could not judge its file secret names", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null });
+			}
+			return null;
+		};
+		const filePlanRefusal = await checkSecretFilePlan(bundleHeadCheck ? null : bundleBinding);
+		if (filePlanRefusal !== null) return filePlanRefusal;
+
 		// REQ-TRIGGER-SECRETS. A trigger that named secret references the worker cannot resolve would run its
 		// flow with those variables UNSET, get a 401 from whatever it was meant to reach, write a plausible
 		// report about why the integration is down, and exit 0.
@@ -1866,8 +1916,13 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// The same set the loader uses, imported, so the two cannot drift, and checked before the resolver so
 		// no wiring of it can skip the check.
 		const secondaryCredentialNames = new Set(job.answerDraft && job.answerDecisionModel ? providerKeyCandidates(job.answerDecisionModel.provider) : job.questionGrouping && job.questionGroupModel ? providerKeyCandidates(job.questionGroupModel.provider) : job.watch && job.watchDecisionModel ? providerKeyCandidates(job.watchDecisionModel.provider) : []);
-		const loadReserved = secretsArmed(job) ? Object.keys(job.secrets ?? {}).find((name) => isReservedEnvName(name) || secondaryCredentialNames.has(name)) : undefined;
-		const resolved = loadReserved !== undefined ? { reserved: loadReserved, atLoad: isReservedEnvName(loadReserved) } : secretsArmed(job) ? await resolveSecrets(job) : { ok: true, secrets: {} };
+		const loadReserved = secretsArmed(job) ? [...Object.keys(job.secrets ?? {}), ...Object.keys(job.secretFiles ?? {})].find((name) => isReservedEnvName(name) || secondaryCredentialNames.has(name)) : undefined;
+		let resolved = loadReserved !== undefined ? { reserved: loadReserved, atLoad: isReservedEnvName(loadReserved) } : secretsArmed(job) ? await resolveSecrets(job) : { ok: true, secrets: {} };
+		if (resolved?.ok === true) {
+			const missingFile = Object.keys(job.secretFiles ?? {}).find((name) => typeof resolved.secretFiles?.[name] !== "string" || resolved.secretFiles[name] === "");
+			if (missingFile !== undefined) resolved = { unresolved: missingFile, failure: "file-missing" };
+		}
+
 		if (resolved.profileUnknown) {
 			await comment(job, REFUSAL_COMMENTS["secret-profile-unknown"]);
 			// The operator's own profile LABEL, and never a path, a reference, or a byte the resolver printed.
@@ -1911,8 +1966,8 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			await comment(
 				job,
 				resolved.atLoad
-					? `Refused: this job's \`run.secrets\` binds \`${resolved.reserved}\`, a name the triggers file refuses at load because this deployment writes it or pi reads it to configure a provider or itself. The job was queued before that refusal applied, by a stored cron schedule, or by an older receiver. Rename it in the triggers file. Not run.`
-					: `Refused: this trigger's \`run.secrets\` binds \`${resolved.reserved}\`, which is a variable this deployment already uses for the job's own credentials. Whichever of the two values reached the container, one of them would be silently ignored. Rename it in the triggers file. Not run.`,
+					? `Refused: this job's secret bindings include \`${resolved.reserved}\`, a name the triggers file refuses at load because this deployment writes it or pi reads it to configure a provider or itself. The job was queued before that refusal applied, by a stored cron schedule, or by an older receiver. Rename it in the triggers file. Not run.`
+					: `Refused: this trigger's secret bindings include \`${resolved.reserved}\`, which is a variable this deployment already uses for the job's own credentials. Whichever of the two values reached the container, one of them would be silently ignored. Rename it in the triggers file. Not run.`,
 			);
 			// The variable NAME only. It is the operator's own choice of name, not payload, and naming it is what
 			// makes the refusal actionable -- but the REFERENCE behind it never appears.
@@ -1924,7 +1979,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			// DETERMINATE: the resolver said exit 2, printed nothing, overran the size cap, or returned a value
 			// with a NUL in it. Retrying cannot change any of those, so this RETURNS (CONST-RETRY-INFRA-ONLY).
 			const why = SECRET_FAILURES[resolved.failure] ?? "did not return a value";
-			await comment(job, `Refused: this trigger set \`run.secrets\`, and the resolver for \`${resolved.unresolved}\` ${why}. The job would have started with that variable unset, and an agent that gets a 401 writes a plausible report and exits 0. Run your profile's resolver by hand against that reference to see why: this comment carries neither the reference, nor the resolver's path, nor a byte of what it printed. Not run.`);
+			await comment(job, `Refused: this trigger declares secrets, and the resolver for \`${resolved.unresolved}\` ${why}. The job would have started with that variable unset, and an agent that gets a 401 writes a plausible report and exits 0. Run your profile's resolver by hand against that reference to see why: this comment carries neither the reference, nor the resolver's path, nor a byte of what it printed. Not run.`);
 			// The variable NAME, never a value -- the restraint refused_sessions_dir_unset keeps, and the name is
 			// the operator's own choice rather than payload. `failure` is OUR enum, `code` the script's small
 			// integer exit, `stderrBytes` a COUNT: never the resolver's words.
@@ -1945,6 +2000,8 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		}
 		// `let`: a project bundle's variables join it after the mint (below), under the trigger's own values.
 		let secrets = resolved.secrets ?? {};
+		let secretFiles = resolved.secretFiles ?? {};
+		if (Object.keys(secretFiles).length > 0) bundleFacts.secretFiles = Object.keys(secretFiles).sort();
 		// Issue #704 part 3: the bundle's `{ endpoints, plain }` split, for the venue (null: no bundle reached this job).
 		let bundleKeys = null;
 
@@ -1992,6 +2049,8 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// Returns null, or the result to return.
 		const readBundle = async () => {
 			if (bundleBinding === null) return null;
+			const fileRefusal = bundleHeadCheck ? await checkSecretFilePlan(bundleBinding) : null;
+			if (fileRefusal !== null) return fileRefusal;
 			// Issue #704 part 3: the hosts first, before the resolver runs, so a file naming a host this job's venue cannot
 			// bind costs no read of the operator's manager. Here rather than among the free gates above (where part 2
 			// refused every OpenShell bundle), because only here is the fork check behind it: a fork's job runs without
@@ -2034,13 +2093,13 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			// shadowed names are recorded. The values join `secrets`, so every path that already treats a run.secrets
 			// value as a secret treats these alike: buildContainerEnv injects them, the redaction covers every
 			// non-NON_SECRET_ENV_KEYS name (run-container.mjs), and a checkpoint refuses to store any of them.
-			const merged = mergeBundleSecrets(bundleRead.vars, secrets);
+			const merged = mergeBundleSecrets(bundleRead.vars, secrets, { bundleFiles: bundleBinding.files ?? [], triggerFiles: secretFiles });
 			// Issue #704 part 3: which received variables the bundle binds to a host (`endpoints`) and which go in plain; a
 			// variable a run.secrets value shadowed is in neither unless `endpoints` names it (below). Said to every
 			// venue (`bundleKeys` on the call bag); only a venue whose layer holds credentials reads it, and it judges the
 			// split first, now with the values (`bundleGate`): a value its gateway would refuse is a refusal here, before
 			// spend, never a create that fails as infrastructure and is retried into the same answer.
-			const received = Object.fromEntries(Object.entries(bundleRead.vars).filter(([name]) => !merged.shadowed.includes(name)));
+			const received = Object.fromEntries(Object.entries(bundleRead.vars).filter(([name]) => !merged.shadowed.includes(name) && !Object.hasOwn(merged.secretFiles ?? {}, name)));
 			const post = await askBundleGate({ endpoints, vars: received, shadowed: merged.shadowed });
 			if (post.refused) return post.refused;
 			// Review round 1, M2: a declared endpoint name a run.secrets value shadowed stays on that host's provider, now with
@@ -2050,6 +2109,8 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 				plain: Object.keys(received).filter((name) => !Object.hasOwn(endpoints, name)).sort(),
 			};
 			secrets = merged.secrets;
+			secretFiles = merged.secretFiles ?? {};
+			if (Object.keys(secretFiles).length > 0) bundleFacts.secretFiles = Object.keys(secretFiles).sort();
 			bundleFacts.bundle = { id: bundleBinding.id, variables: Object.keys(bundleRead.vars).sort(), shadowed: merged.shadowed };
 			// On a venue whose own layer holds the credentials, the record says how many reached the agent as placeholders
 			// and how many as values (INT-RUN-HISTORY-FILE-CONTRACT), the venue's own counts.
@@ -2061,14 +2122,13 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			log("secret_bundle_applied", { kind: job.kind ?? null, bundle: bundleBinding.id, count: bundleFacts.bundle.variables.length, shadowed: merged.shadowed.length });
 			return null;
 		};
-		const bundleHeadCheck = bundleBinding !== null && job.target?.type === "pull_request" && bundleBinding.forkReviews !== true;
 		if (bundleBinding !== null && !bundleHeadCheck) {
 			const refused = await readBundle();
 			if (refused !== null) return refused;
 		}
 
 
-		const secondaryCollision = Object.keys(secrets ?? {}).find(name => secondaryCredentialNames.has(name));
+		const secondaryCollision = [...Object.keys(secrets ?? {}), ...Object.keys(secretFiles ?? {})].find(name => secondaryCredentialNames.has(name));
 		if (secondaryCollision !== undefined) {
 			log("refused_watch_provider_credential_override", { name: secondaryCollision });
 			return { outcome: "policy", reason: "secret-name-reserved", budgetReserved: false, provider: job.provider ?? null, model: job.model ?? null };
@@ -2641,7 +2701,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			// the values a snapshot must refuse to store (the job's token and its resolved secrets). `attempt` IS the
 			// container number: unique across retries and recoveries, which a BullMQ attempt count is not. `meta` is what the
 			// manifest records and a recovery judges above: never a string the job chose.
-			const secretValues = [token, ...Object.values(secrets ?? {})].filter((v) => typeof v === "string" && v !== "");
+			const secretValues = [token, ...Object.values(secrets ?? {}), ...Object.values(secretFiles ?? {})].filter((v) => typeof v === "string" && v !== "");
 			checkpointArgs = { runId, attempt: durable.seq, baseSha, branch: null, secretValues, meta: { piVersion, imageDigest: img.imageDigest ?? null, venue: resolveBackendName(job, blessedBackends[0]), provider: job.provider ?? null, model: job.model ?? null, ...(job.modelSelection ? { modelSelection: { ref: `${job.provider}/${job.model}`, billing: job.modelSelectionBilling ?? null, binding: job.modelSelectionBinding ?? null } } : {}) } };
 		}
 		if (job.watch?.stage === "decision") await deps.watchRuntime?.started(job);
@@ -2654,7 +2714,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		// proxy enforces it when the egress policy is on (`proxy`); with PI_EGRESS=0 no proxy stands between any job and the
 		// device (`unenforced`), and the record says so rather than imply a binding nobody enforced.
 		if (privateGrant.length > 0) privateFacts.value = { ids: privateGrant.map((e) => e.id), basis: egress?.proxy ? "proxy" : "unenforced" };
-		const { canaryLoad: canaryLoadOfRun = null, loaded: loadedOfRun = null, code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, approval: approvalMetadata = null, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null, checkpoint: ranCheckpoint = null, recovery: ranRecovery = null, lingering = false } = await runContainer({ job: containerJob, token, prepared, secrets, ...(subscriptionAuth.length ? { subscriptionAuth } : {}), ...(bundleKeys !== null ? { bundleKeys } : {}), user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(privateGrant.length > 0 ? { privateEndpoints: privateGrant } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(transcriptStderr ? { transcriptStderr: true } : {}), ...(steerStdin ? { steerStdin: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}), ...(checkpointArgs !== null ? { recover: true, recovering: isRecovery, checkpoint: checkpointArgs } : {}), ...(activityWatch !== null ? { activityWatch, onActivityArmed: deps.onActivityArmed ?? null, requestStop: deps.requestStop ?? null, noteActivity: deps.noteActivity ?? null, ...(credentialRefresh !== null ? { credentialRefresh } : {}) } : {}) });
+		const { canaryLoad: canaryLoadOfRun = null, loaded: loadedOfRun = null, code, aborted, abortReason, turns, tokens, session, usage, context, detached, exitReason, approval: approvalMetadata = null, exitWhy = null, exitLineCode = null, exitAuth: exitAuthResult = null, exitOomKilled = false, memoryLimit = null, resources: ranResources = null, progress: ranProgress = null, checkpoint: ranCheckpoint = null, recovery: ranRecovery = null, lingering = false } = await runContainer({ job: containerJob, token, prepared, checkSecretFilesPlacement: () => checkSecretFilesPlacement(job, { prepared }), secrets, ...(Object.keys(secretFiles).length > 0 ? { secretFiles } : {}), ...(subscriptionAuth.length ? { subscriptionAuth } : {}), ...(bundleKeys !== null ? { bundleKeys } : {}), user: jobUser?.user ?? null, home: jobUser?.home ?? null, relabel: jobUser?.relabel === true, ...(modelEndpoints?.endpoints?.length > 0 ? { modelEndpoints } : {}), ...(privateGrant.length > 0 ? { privateEndpoints: privateGrant } : {}), ...(exitAuth ? { exitAuth: true } : {}), ...(transcriptStderr ? { transcriptStderr: true } : {}), ...(steerStdin ? { steerStdin: true } : {}), ...(jobSize ? { size: jobSize } : {}), ...(Number.isSafeInteger(jobUser?.hostCpus) ? { hostCpus: jobUser.hostCpus } : {}), ...(Number.isSafeInteger(cpuBudgetCenti) ? { cpuBudgetCenti } : {}), ...(Array.isArray(jobUser?.unenforced) && jobUser.unenforced.length > 0 ? { unenforced: jobUser.unenforced } : {}), ...(checkpointArgs !== null ? { recover: true, recovering: isRecovery, checkpoint: checkpointArgs } : {}), ...(activityWatch !== null ? { activityWatch, onActivityArmed: deps.onActivityArmed ?? null, requestStop: deps.requestStop ?? null, noteActivity: deps.noteActivity ?? null, ...(credentialRefresh !== null ? { credentialRefresh } : {}) } : {}) });
 		const answeredPark = prepared.session?.parkedSource;
 		// A phrase-prefixed comment uses ordinary routing, but resuming this exact parked transcript still
 		// answers its question. A held receipt also identifies an answer whose legacy source cannot be proved.
@@ -2679,7 +2739,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 			// Dead-container snapshots also make the completed boundary available without live recovery.
 			if (typeof forkStore.capturePoint === "function") {
 				try {
-					const captured = await forkStore.capturePoint({ runId: sourceRunId, workspace: prepared.workspace, baseSha: prepared.sha, quiesced: "dead", kind: "exit", attempt: durable.seq ?? 0, transcriptPath, offset: lstatSync(transcriptPath).size, secretValues: [token, ...Object.values(secrets ?? {}), ...subscriptionAuth.flatMap((s) => Object.values(s.env ?? {})), ...(prepared.credentialSecretValues ?? [])].filter((v) => typeof v === "string" && v !== ""), meta: { piVersion, venue: resolveBackendName(job, blessedBackends[0]), provider: job.provider ?? null, model: job.model ?? null } });
+					const captured = await forkStore.capturePoint({ runId: sourceRunId, workspace: prepared.workspace, baseSha: prepared.sha, quiesced: "dead", kind: "exit", attempt: durable.seq ?? 0, transcriptPath, offset: lstatSync(transcriptPath).size, secretValues: [token, ...Object.values(secrets ?? {}), ...Object.values(secretFiles ?? {}), ...subscriptionAuth.flatMap((s) => Object.values(s.env ?? {})), ...(prepared.credentialSecretValues ?? [])].filter((v) => typeof v === "string" && v !== ""), meta: { piVersion, venue: resolveBackendName(job, blessedBackends[0]), provider: job.provider ?? null, model: job.model ?? null } });
 					if (!captured?.ok) {
 						pointSkipped = captured?.refused ?? captured?.skipped ?? "checkpoint-unavailable";
 						log("fork_checkpoint_skipped", { reason: pointSkipped });
@@ -3261,7 +3321,9 @@ const SECRET_FAILURES = {
 	exit: "refused that reference",
 	empty: "printed nothing",
 	overflow: "printed more than the size cap allows",
-	nul: "printed a value containing a NUL byte, which cannot survive the container's argv",
+	nul: "printed a value containing a NUL byte, which the secret contract refuses",
+	utf8: "printed bytes that cannot be delivered as an exact UTF-8 file",
+	"file-missing": "did not return the declared file secret",
 };
 
 /**
@@ -3273,6 +3335,8 @@ const BUNDLE_FAILURES = {
 	empty: "printed no variable",
 	overflow: "printed more than the bundle size cap allows",
 	nul: "printed output containing a NUL byte",
+	utf8: "printed bytes or a JSON string that cannot be delivered as an exact UTF-8 file",
+	"file-missing": "did not return a variable declared for file delivery",
 	malformed: "printed output that is not in the format its profile declares",
 	quoted: "printed a quoted dotenv value, and the dotenv grammar takes no quotes (declare the profile as json instead)",
 	"not-string": "printed a JSON value that is not a string",

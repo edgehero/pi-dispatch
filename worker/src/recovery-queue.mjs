@@ -37,6 +37,7 @@ import { dropModelSelection, identityForModelSelection } from "./model-selection
 import { QUEUE, hostQueueName as defaultHostQueueName } from "./queue.mjs";
 import { sanitizeJobId } from "./run-history.mjs";
 import { FORGE_JOB_RETENTION_S } from "./retention.mjs";
+import { SECRET_FILES_DIR_SUFFIX } from "./secret-files.mjs";
 import { JOB_DIR_RE, lastCompleteLineEnd, normalizeHost, pointerKeepEntry } from "./run-checkpoint.mjs";
 
 /** The most recoveries one run gets: the original, then `.r1`, then `.r2`. A third crash fails the run as before. */
@@ -117,9 +118,10 @@ const HOST_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/;
  * What a run writes BESIDE its job directory, swept with it (issue #683): the cidfile (#345), and the openshell venue's
  * policy file and upload and download staging directories (worker/src/backend-openshell.mjs), which a worker that died
  * mid-job never removed. The staging directories hold a copy of the job's inputs (its prompt among them) and of its
- * outputs, so they must not outlive the job dir they were copied from.
+ * outputs, so they must not outlive the job dir they were copied from. Secret files are recognised here but their
+ * independent process-owner sweep is the only generic remover: neither age nor salvage proves that owner stopped.
  */
-export const BESIDE_JOB_DIR = Object.freeze([".cid", ".openshell-policy.json", ".openshell-profile.json", ".openshell-up", ".openshell-down", ".openshell-bind", ".credentials"]);
+export const BESIDE_JOB_DIR = Object.freeze([".cid", ".openshell-policy.json", ".openshell-profile.json", ".openshell-up", ".openshell-down", ".openshell-bind", ".credentials", SECRET_FILES_DIR_SUFFIX]);
 
 /**
  * The run a queue job belongs to: its own id, or for a recovery the id of the run it continues. Every per-RUN key (the
@@ -429,7 +431,9 @@ export function makeSalvager({ jobsDir, hostName, workspaceCheckpointer, runChec
 				await fs.rm(dir, { recursive: true, force: true }).catch((err) => log("salvage_remove_failed", { code: codeOf(err) }));
 				// The container id file runContainer writes BESIDE the job dir (`<jobDir>.cid`) goes with it (lab of #645: one
 				// was left per crashed attempt). `force` and no recursion: a missing file is fine and a link is removed as a link.
-				for (const suffix of BESIDE_JOB_DIR) await fs.rm(`${dir}${suffix}`, { recursive: true, force: true }).catch((err) => log("salvage_remove_failed", { code: codeOf(err) }));
+				// Settling a container proves nothing about a live worker paused before its spawn. The dedicated secret
+				// sweep owns that process-identity decision even when salvage has removed the sibling job directory.
+				for (const suffix of BESIDE_JOB_DIR) if (suffix !== SECRET_FILES_DIR_SUFFIX) await fs.rm(`${dir}${suffix}`, { recursive: true, force: true }).catch((err) => log("salvage_remove_failed", { code: codeOf(err) }));
 			}
 			log("checkpoint_salvage", { runId: sanitizeJobId(runId), ...(result.salvaged ? { seq: result.seq } : { skipped: result.skipped ?? null, refused: result.refused ?? null }) });
 			return result;
@@ -540,6 +544,9 @@ export async function sweepOrphanJobDirs({ jobsDir, olderThanMs, now = () => Dat
 		// beside-files take the same rule (the policy file, and the upload and download staging directories, which hold a
 		// copy of the job's inputs and outputs), a directory among them removed whole.
 		const beside = BESIDE_JOB_DIR.find((suffix) => name.endsWith(suffix) && JOB_DIR_RE.test(name.slice(0, -suffix.length)));
+		// Secret files have a live process owner as well as a job directory. Their independent sweep must decide
+		// even when this generic age-based pass would remove the directory, or it could undo an owner-alive keep.
+		if (beside === SECRET_FILES_DIR_SUFFIX) { out.kept++; continue; }
 		if (beside !== undefined && !present.has(name.slice(0, -beside.length))) {
 			try {
 				const st = await fs.lstat(join(jobsDir, name));
@@ -572,7 +579,7 @@ export async function sweepOrphanJobDirs({ jobsDir, olderThanMs, now = () => Dat
 				continue;
 			}
 			await fs.rm(dir, { recursive: true, force: true });
-			for (const suffix of BESIDE_JOB_DIR) await fs.rm(`${dir}${suffix}`, { recursive: true, force: true });
+			for (const suffix of BESIDE_JOB_DIR) if (suffix !== SECRET_FILES_DIR_SUFFIX) await fs.rm(`${dir}${suffix}`, { recursive: true, force: true });
 			out.removed++;
 		} catch (err) {
 			out.failed++;

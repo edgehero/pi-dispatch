@@ -605,7 +605,7 @@ export function createTriggerEnvironmentActions({ paths, env = {}, fs = nodeFs, 
         warnings.push([`On this host this trigger's jobs would be refused as mcp-excluded, before they spend. ${hostCut.name}: ${hostCut.why}.`, explainReason("mcp-excluded").next, "Another host's overlay may route it another way."].filter(Boolean).join(" "));
       }
       for (const name of added) {
-        const passed = new Set(Object.keys(run.secrets ?? {}));
+        const passed = new Set([...Object.keys(run.secrets ?? {}), ...(servers[name]?.transport === "stdio" ? Object.keys(run.secretFiles ?? {}) : [])]);
         for (const ref of Object.hasOwn(servers, name) ? servers[name].refs ?? [] : []) {
           if (forwarded.unread.includes(ref) && !passed.has(ref)) warnings.push(`${ref} is forwarded by this host, and its line in the .env could not be read as the worker reads it, so whether ${name} gets that key could not be judged here.`);
         }

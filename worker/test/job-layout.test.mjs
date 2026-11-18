@@ -17,10 +17,10 @@ test("the worker's layout table is the runner's, row for row and path for path",
 });
 
 test("the mounts row is the container paths containerSpec mounts, so a binding venue's argv did not move", () => {
-	const spec = containerSpec({ image: "i", name: "n", jobDir: "/j", workspace: "/w", outboxDir: "/o", sessionDir: "/s", steerInboxDir: "/in", globalPiDir: "/g" });
+	const spec = containerSpec({ image: "i", name: "n", jobDir: "/j", workspace: "/w", outboxDir: "/o", sessionDir: "/s", steerInboxDir: "/in", globalPiDir: "/g", secretFilesDir: "/secrets" });
 	const targets = new Set(spec.mounts.map((m) => m.container));
 	const mounts = layoutFor("mounts");
-	for (const key of ["job", "workspace", "outbox", "session", "inbox", "global"]) assert.ok(targets.has(mounts[key]), `${key}: ${mounts[key]} is a mount target`);
+	for (const key of ["job", "workspace", "outbox", "session", "inbox", "global", "secretFiles"]) assert.ok(targets.has(mounts[key]), `${key}: ${mounts[key]} is a mount target`);
 	assert.equal(mounts.session, CONTAINER_SESSION_DIR);
 	assert.equal(mounts.inbox, CONTAINER_INBOX_DIR);
 	assert.equal(mounts.global, CONTAINER_GLOBAL_PI_DIR);
@@ -48,6 +48,7 @@ test("INT-CONTAINER-JOB-INPUTS' layout table is the table, row for row", () => {
 		["outbox (local jobs)", "outbox"],
 		["steer inbox", "inbox"],
 		["operator overlay", "global"],
+		["secret files", "secretFiles"],
 	];
 	assert.equal(rows.length, want.length, "one row per layout key");
 	for (const [i, [label, key]] of want.entries()) {

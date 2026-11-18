@@ -294,3 +294,24 @@ test("a shadowed bundle variable is never named as a received placeholder (#747)
 	const { recordedBundle } = await import("../src/run-history.mjs");
 	assert.equal(recordedBundle({ id: "shop", variables: ["A"], shadowed: ["A"], placeholders: 1, plain: 0, placeholderNames: ["A"] }).placeholderNames, undefined);
 });
+
+test("a bundle file requires a present value and preserves JSON newlines exactly (#919)", async () => {
+	const r = fileBackedResolver();
+	const resolver = makeBundleResolver({ envBundles: { "shop-env": { path: r.script, format: "json" } } });
+	const pem = "-----BEGIN KEY-----\r\nkey-body\r\n-----END KEY-----\r\n";
+	r.write("shop", JSON.stringify({ KEY: pem, OTHER: "other" }));
+	assert.equal((await resolver.resolve(job, binding({ files: ["KEY"] }))).vars.KEY, pem);
+	const missing = await resolver.resolve(job, binding({ files: ["MISSING"] }));
+	assert.deepEqual(missing, { unresolved: true, failure: "file-missing", name: "MISSING" });
+	assert.equal(JSON.stringify(missing).includes(pem), false);
+	r.write("shop", '{"KEY":"\\ud800"}');
+	assert.deepEqual(await resolver.resolve(job, binding({ files: ["KEY"] })), { unresolved: true, failure: "utf8", name: "KEY" });
+});
+
+test("trigger bindings override a bundle's value and delivery type together (#919)", () => {
+	assert.deepEqual(mergeBundleSecrets({ AS_ENV: "bundle-file", AS_FILE: "bundle-env", KEPT: "file\n" }, { AS_ENV: "trigger-env" }, { bundleFiles: ["AS_ENV", "KEPT"], triggerFiles: { AS_FILE: "trigger-file\n" } }), {
+		secrets: { AS_ENV: "trigger-env" },
+		secretFiles: { KEPT: "file\n", AS_FILE: "trigger-file\n" },
+		shadowed: ["AS_ENV", "AS_FILE"],
+	});
+});

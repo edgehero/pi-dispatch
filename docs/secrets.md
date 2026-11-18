@@ -13,7 +13,7 @@ from it.
 
 
 **On more than one machine** ([`multi-host.md`](multi-host.md)): a resolver is an absolute path on one
-host's disk, so a trigger binding `run.secrets` can only run where its profile is declared. **The receiver
+host's disk, so a trigger binding `run.secrets` or `run.secretFiles` can only run where its profile is declared. **The receiver
 now routes such a delivery to a host that has the profile**, so it no longer succeeds or fails depending on
 which worker happened to pop it.
 
@@ -22,7 +22,7 @@ declared a queue of its own, and when nobody declares the profile the job still 
 `secret-profile-unknown`, which is returned and never retried. Declaring the same profiles and roots on
 every host remains the right shape: it needs no routing at all, and it lets any host take the work.
 
-A trigger that binds `run.secrets` without naming a profile uses the profile called `default`, and it is
+A trigger that binds `run.secrets` or `run.secretFiles` without naming a profile uses the profile called `default`, and it is
 routed the same way, to a host that has one. A host offers the profiles it would actually use: every one in
 `PI_SECRET_PROFILES`, and each one declared through the panel whose resolver is an executable file inside
 `PI_SECRET_RESOLVER_ROOTS`. A panel edit reaches the routing within one heartbeat, about 15 seconds. A host
@@ -408,13 +408,79 @@ Because resolution happens before anything spends, a wrong reference costs nothi
 repository is cloned, no budget slot is reserved. You get a refusal on the issue naming the VARIABLE that
 failed, and never the reference, the resolver's path, or a byte of what it printed.
 
+### File secrets: a key file with a path in the environment
+
+Use `run.secretFiles` when a tool expects a file, such as an SSH key, certificate or text credential. It uses
+Recipe C's resolver and `secretsProfile`, including the implicit `default` profile:
+
+```json
+{
+  "version": 8,
+  "triggers": [{
+    "on": { "type": "label", "any": ["pi:device-test"] },
+    "run": {
+      "kind": "github",
+      "flow": "test-device",
+      "secretsProfile": "lab",
+      "secretFiles": { "DEVICE_SSH_KEY": "lab/device/ssh-key" }
+    }
+  }]
+}
+```
+
+The resolver prints the key on stdout. Inside the job, `DEVICE_SSH_KEY` holds a path, `/run/secrets/DEVICE_SSH_KEY`
+on local Docker and Podman layouts, so a command uses `ssh -i "$DEVICE_SSH_KEY" ...`. The file is read-only,
+owned by the job user with mode `0600`, inside a directory with mode `0700`. Its contents are absent from the environment, container arguments and ordinary job
+inputs. OpenShell copy mode uses `/sandbox/secrets/DEVICE_SSH_KEY`; its bind mode uses `/run/secrets/DEVICE_SSH_KEY`. Its venue conformance check must
+pass before that layout is claimed as supported. Derived job images must advertise the `secretFiles` capability;
+a job needing it refuses before spend when its image does not.
+
+File delivery preserves the resolver's exact nonempty UTF-8 text, including final newlines. Do not strip a
+newline in the resolver if the file needs it: Recipe C's `op read --no-newline` example is for environment values.
+Use a resolver that emits the intended file bytes, such as `cat` for an operator-owned text credential. This
+supports UTF-8 text only: NUL bytes, invalid UTF-8, unpaired JSON surrogates and values larger than 64 KiB refuse. Ordinary
+`run.secrets` keeps its existing normalization. Use bundle JSON for multiline files, as shown below.
+
+The same reserved names, profile checks, resolver exit codes and `run.resume` prohibition apply. The two direct
+maps cannot name the same variable and together have at most 16 references. File names use ASCII letters,
+digits and underscores, start with a letter or underscore and are at most 128 characters. Paths, `__proto__`,
+Windows device names such as `CON` and `LPT1`, and names differing only in case are refused. A file path can be
+passed explicitly to a stdio MCP server; it cannot serve as an HTTP MCP header credential or a watch log-query
+credential. No model-callable tool, manual run or chained child can add this grant.
+
+Plain `pi-dispatch doctor` lists declared names as file secrets without resolving them. `pi-dispatch doctor --secrets`
+also resolves the direct file references and bundle selections on this host, reporting names and file type, never
+references, contents or resolver output. It uses the same exact-text and profile checks as a job.
+
+Keep `PI_JOBS_DIR` disjoint from local job folders, `run.skillsDir` and `PI_GLOBAL_PI_DIR`. Neither tree may contain
+the other, including through symlinks or filesystem aliases. Every job refuses an overlapping configuration as
+`secret-files-placement-unsafe`, even without its own file grant, because it could read another attempt's files.
+Move the jobs directory or narrow the source folder; normal worker-created forge clones remain supported.
+
+The worker stages the files outside the workspace and job-input directory, in a sibling `job-*.secret-files`
+root. Only its `secrets` child enters the container; `owner.json` remains host-only. Normal completion, refusal,
+failure and shutdown remove the managed files. On restart an independent sweep removes a dead owner's files
+only after the venue confirms reaping, without waiting for workspace retention or checkpoint expiry. Live or
+unknown ownership is kept and reported. A retry or recovery resolves fresh values. Do not back up these staging
+roots or copy them into a retained workspace ([backup](backup.md)).
+
+Read access allows an agent to copy a granted secret into its own workspace or output. Cleanup removes managed
+staging, not copies the agent chose to make. Known literal values participate in existing redaction, which skips
+values shorter than eight characters and cannot reliably catch transformed values. Run records keep only the names
+resolved for file delivery; model-callable read tools expose only counts. A later refusal or startup failure can
+still carry these names: they do not prove the job started or read a file. Keep local job folders out of anything you push.
+
+**Upgrade before using the field.** Upgrade the image, workers, receivers, console and every `/dispatch` together
+([upgrade notes](upgrading.md#file-secrets-919)). File grants require triggers version 8 and job-data version 9.
+A worker detects a producer that dropped `run.secretFiles` as `trigger-skew` when it can read the authored trigger.
+
 ### Six things worth knowing before you wire one
 
 1. **Your exit code decides whether the job retries.** This is the same question this page asks of every
    manager, and here it is load-bearing rather than advisory. Exit 2 means "that reference is wrong" and the
    delivery is refused for good. Exit 1 means "I could not reach my manager" and BullMQ retries it. A
    resolver that exits 1 for everything still works; you simply pay one extra retry on a genuine typo.
-2. **`run.secrets` cannot be combined with `run.resume`.** A resumed job replays a transcript kept on host
+2. **`run.secrets` and `run.secretFiles` cannot be combined with `run.resume`.** A resumed job replays a transcript kept on host
    disk, and any command the agent ran that echoed a resolved value wrote it into that transcript, which is
    then prefilled into every later job on the same key. The file is refused at load if you write both.
 3. **On a `local` (cron) trigger, `/workspace` is your own folder**, bind-mounted read-write with no clone.
@@ -643,6 +709,39 @@ Either way: at most **64 variables**, at most **256 KiB** of output in all, each
 an environment variable name, no name twice, no empty value. Anything else refuses the job before it spends,
 and the refusal says which rule (and the worker's log names the variable or the dotenv line, never a value).
 
+### Select bundle values for file delivery
+
+Add `files` to the reviewed binding to deliver selected values as files while keeping the rest as environment
+values. The resolver still runs once and still prints the existing dotenv or JSON format:
+
+```json
+{
+  "version": 8,
+  "triggers": [],
+  "secretBundles": {
+    "lab": {
+      "profile": "lab-env",
+      "ref": "lab",
+      "project": "lab",
+      "files": ["DEVICE_SSH_KEY", "DEVICE_CERT"]
+    }
+  }
+}
+```
+
+For this binding the JSON resolver returns strings under `DEVICE_SSH_KEY` and `DEVICE_CERT`, with newlines
+encoded as `\n`. Those strings become exact file contents; the environment variables hold their paths. An
+unselected variable still delivers its value normally. The list contains 1 to 64 portable file names, all
+present in the resolver output. A missing name refuses the whole job. `files` and `endpoints` cannot overlap,
+including spellings that differ only in case: a mounted file is not an OpenShell endpoint placeholder.
+
+An explicit trigger grant wins both the value and the delivery type. `run.secrets` replaces a bundle file with
+an environment value, and `run.secretFiles` replaces a bundle environment value with a file. The final set must
+still have distinct file names ignoring case. Bundle opt-outs, fork checks, resume refusals, size caps and
+manual/chained exclusions remain the same. The run record's `secretFiles` lists names resolved for file delivery,
+even if a later gate prevents the container from starting. `bundle.variables` lists all resolved bundle names,
+including those direct grants shadowed, without values or references.
+
 ### Worked examples
 
 A plain file, no manager at all (`:dotenv`):
@@ -745,7 +844,7 @@ service-account route, and on an OpenShell venue its values can still be placeho
   refuse to change the members of a project a bundle names (or to create one under a bundled id): change the bundle
   first, or edit `projects.json` by hand.
 
-A trigger's own `run.secrets` **win** over a bundle variable of the same name, and the run record names the
+A trigger's own `run.secrets` or `run.secretFiles` **win** over a bundle variable of the same name, and the run record names the
 shadowed variables. The record also lists, by name, every variable a job received from its bundle
 (`bundle: { id, variables, shadowed }`), never a value: since a grant now changes outside review, each run says
 exactly what it held.
