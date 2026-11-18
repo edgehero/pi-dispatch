@@ -74,7 +74,7 @@ export function observeConsumer(worker, events) {
 export const BULL_PREFIX = "bull";
 
 /** The per-queue keys this project reads, each `bull:<queue>:<type>` (queue-keys.js `getKeys`). */
-export const QUEUE_KEY = Object.freeze({ meta: "meta", wait: "wait", paused: "paused", delayed: "delayed", prioritized: "prioritized", repeat: "repeat", completed: "completed" });
+export const QUEUE_KEY = Object.freeze({ meta: "meta", wait: "wait", paused: "paused", delayed: "delayed", prioritized: "prioritized", repeat: "repeat", completed: "completed", failed: "failed" });
 
 /** A queue's key for `type` (queue-keys.js `toKey`: `${prefix}:${name}:${type}`). A job's own hash is `type` = its id. */
 export const queueKey = (queueName, type, prefix = BULL_PREFIX) => `${prefix}:${queueName}:${type}`;
@@ -99,15 +99,22 @@ export const semanticWindowKeyOf = (queue, id) => queueKeyOf(queue, `de:${id}`);
 
 // Issue #899: a completed refusal may still own its TTL key. Read its actual hash, not queue.add's returned Job:
 // job.js create builds that object from the INCOMING data, then replaces only its id with the surviving id.
-// getState-8.lua judges completion by membership in the completed set; moveToFinished-14.lua writes the result
-// under returnvalue. Both reads and ownership are one snapshot, so a disappearing owner is never called live.
+// getState-8.lua judges completion by membership in the completed set, and failure (attempts used up) by the failed
+// set, checked in that order; moveToFinished-14.lua writes the result under returnvalue. Issue #932 adds the failed
+// answer and the key's PTTL: a request joined to an owner that has ENDED is never served, so its producer says so on
+// the forge, with the time the window closes. All reads and ownership are one snapshot, so a disappearing owner is
+// never called live.
 const READ_SEMANTIC_OWNER = `
 if redis.call("GET", KEYS[1]) ~= ARGV[1] then return {"changed"} end
 if redis.call("HGET", KEYS[2], "${JOB_FIELD.dedupId}") ~= ARGV[2] then return {"invalid"} end
-if not redis.call("ZSCORE", KEYS[3], ARGV[1]) then return {"retained"} end
-local result = redis.call("HGET", KEYS[2], "${JOB_FIELD.result}")
-if not result then return {"invalid"} end
-return {"completed", result}
+local ttl = redis.call("PTTL", KEYS[1])
+if redis.call("ZSCORE", KEYS[3], ARGV[1]) then
+  local result = redis.call("HGET", KEYS[2], "${JOB_FIELD.result}")
+  if not result then return {"invalid"} end
+  return {"completed", result, ttl}
+end
+if redis.call("ZSCORE", KEYS[4], ARGV[1]) then return {"failed", "", ttl} end
+return {"retained", "", ttl}
 `;
 
 // The predicate belongs to the caller. This script checks the exact bytes it judged, together with terminal state
@@ -123,11 +130,15 @@ return redis.call("DEL", KEYS[1])
 
 const semanticOwnerKeys = (queue, dedupId, jobId) => [semanticWindowKeyOf(queue, dedupId), jobKeyOf(queue, jobId), queueKeyOf(queue, QUEUE_KEY.completed)];
 
-/** Atomic snapshot of the key's actual owner, including the raw result witness for a conditional release. */
+/**
+ * Atomic snapshot of the key's actual owner, including the raw result witness for a conditional release: `state` is
+ * `changed`, `invalid`, `completed`, `failed` (it used up its attempts) or `retained` (anything still live: waiting,
+ * delayed, active, prioritized, paused), and `pttlMs` the key's own PTTL (-1 for no expiry), or null when not read.
+ */
 export async function readSemanticWindowOwner(queue, dedupId, jobId) {
-	const reply = await (await queue.client).eval(READ_SEMANTIC_OWNER, 3, ...semanticOwnerKeys(queue, dedupId, jobId), jobId, dedupId);
-	if (!Array.isArray(reply) || !["changed", "invalid", "retained", "completed"].includes(reply[0])) throw new Error("semantic-window-state-unavailable");
-	return { state: reply[0], rawResult: reply[1] };
+	const reply = await (await queue.client).eval(READ_SEMANTIC_OWNER, 4, ...semanticOwnerKeys(queue, dedupId, jobId), queueKeyOf(queue, QUEUE_KEY.failed), jobId, dedupId);
+	if (!Array.isArray(reply) || !["changed", "invalid", "retained", "completed", "failed"].includes(reply[0])) throw new Error("semantic-window-state-unavailable");
+	return { state: reply[0], rawResult: reply[0] === "completed" ? reply[1] : undefined, pttlMs: Number.isSafeInteger(reply[2]) ? reply[2] : null };
 }
 
 /** Delete only the terminal owner whose exact result the caller classified; false means it must read again. */

@@ -277,7 +277,7 @@ async function fanout(job, enqueue) {
 			if (replicas === 1) throw err;
 			throw Object.assign(new Error(err?.message, { cause: err }), { queued: i - 1, replicas });
 		}
-		if (r && typeof r === "object" && r.deduplicated === true) deduplicated.push({ jobId: r.jobId, survivingJobId: r.survivingJobId });
+		if (r && typeof r === "object" && r.deduplicated === true) deduplicated.push({ jobId: r.jobId, survivingJobId: r.survivingJobId, ...dropFacts(r) });
 		else created += 1;
 	}
 	return { replicas, created, deduplicated };
@@ -368,7 +368,7 @@ async function steerOrEnqueue({ steer, res, kind, delivery, job, target }) {
  */
 function respondEnqueueOutcome({ log, res, delivery, repo, target, flow, outcome, held = null }) {
 	for (const d of outcome.deduplicated) {
-		log?.({ event: "deduplicated", delivery, repo, target, flow, jobId: d.jobId, survivingJobId: d.survivingJobId });
+		log?.({ event: "deduplicated", delivery, repo, target, flow, jobId: d.jobId, survivingJobId: d.survivingJobId, ...dropFacts(d) });
 	}
 	if (outcome.created > 0) {
 		log?.({ event: "enqueued", delivery, repo, target, flow, replicas: outcome.created });
@@ -378,6 +378,26 @@ function respondEnqueueOutcome({ log, res, delivery, repo, target, flow, outcome
 	// were written by held.mjs, and the wire says so the same honest way.
 	if (held !== null) return respond(res, 202, { status: "held", runs: held.held });
 	return respond(res, 202, { status: "deduplicated" });
+}
+
+/**
+ * The enqueue options every arm passes (issue #932): add a notice when the window drops a delivery against a job that
+ * has already ended, so the item says the request was dropped (the worker posts it: this process writes to no forge),
+ * dated by the receiver's own clock, which `steer` carries.
+ */
+const dropNotice = (steer) => ({ noticeOnDrop: true, now: typeof steer?.now === "function" ? steer.now : Date.now });
+
+/**
+ * What a swallow's enqueue said of the job that kept the window and of the notice (issue #932, duplicate-notice.mjs):
+ * `survivor` ("ended" or "live") when it was read, `notice` (the notice job's id) when one was added, and
+ * `noticeFailed` when adding it threw. Present only when said, so a swallow from an older enqueue logs as it did.
+ */
+function dropFacts(r) {
+	return {
+		...(r?.survivor === "ended" || r?.survivor === "live" ? { survivor: r.survivor } : {}),
+		...(typeof r?.notice === "string" ? { notice: r.notice } : {}),
+		...(r?.noticeFailed === true ? { noticeFailed: true } : {}),
+	};
 }
 
 /** The Valkey client held replies use: the steer one (`steer.steerClient()`), null when there is none. */
@@ -504,7 +524,7 @@ function makeGitHubHandler({ queue, routeTo, selfId, cfg, log, resolveAuthority,
 		// Fanout (REQ-REPLICA-RUNS) lives in `fanout` above; the 202/503 decision stays here, where it always was.
 		let outcome;
 		try {
-			outcome = await fanout(job, async (j) => await enqueueGitHubJob(await routeTo("github", j), j));
+			outcome = await fanout(job, async (j) => await enqueueGitHubJob(await routeTo("github", j), j, dropNotice(steer)));
 		} catch (err) {
 			// Lost unless redelivered by hand within 3 days; the redelivery keeps the GUID (WHAT A 503 MEANS).
 			return answerEnqueueFailed({ log, res, delivery, err });
@@ -573,7 +593,7 @@ function makeGitLabHandler({ routeTo, queue, cfg, log, mode, secret, selfId, res
 
 		let outcome;
 		try {
-			outcome = await fanout(job, async (j) => await enqueueGitLabJob(await routeTo("gitlab", j), j));
+			outcome = await fanout(job, async (j) => await enqueueGitLabJob(await routeTo("gitlab", j), j, dropNotice(steer)));
 		} catch (err) {
 			// Lost unless resent by hand within 2 days; the resend keeps the webhook-id (WHAT A 503 MEANS).
 			return answerEnqueueFailed({ log, res, delivery, err });
@@ -638,7 +658,7 @@ function makeForgejoHandler({ routeTo, queue, cfg, log, secret, selfId, resolveA
 
 		let outcome;
 		try {
-			outcome = await fanout(job, async (j) => await enqueueForgeJob(await routeTo("forgejo", j), "forgejo", j));
+			outcome = await fanout(job, async (j) => await enqueueForgeJob(await routeTo("forgejo", j), "forgejo", j, dropNotice(steer)));
 		} catch (err) {
 			// Lost unless replayed by hand, and a replay is a new GUID: only the semantic window coalesces it.
 			return answerEnqueueFailed({ log, res, delivery, err });
@@ -715,7 +735,7 @@ function makeAzureHandler({ routeTo, queue, cfg, log, mode, secret, headerName, 
 
 		let outcome;
 		try {
-			outcome = await fanout(job, async (j) => await enqueueForgeJob(await routeTo("azure", j), "azure", j));
+			outcome = await fanout(job, async (j) => await enqueueForgeJob(await routeTo("azure", j), "azure", j, dropNotice(steer)));
 		} catch (err) {
 			// Azure resends the same notification, so the same `id`, for about 3 minutes, then on probation
 			// for about 36 hours, losing new events meanwhile (WHAT A 503 MEANS).

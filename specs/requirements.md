@@ -370,6 +370,22 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   the receiver's response and the poller's count and log. The same delivery id still finds its retained original
   job, even after that job released its semantic window. The window's ten minutes, its key grammar, replicas, queue
   routing, retention and job-data shape are UNCHANGED, checked.
+  **A request joined to a job that has ENDED is answered on the forge** (AMENDED 2026-11-18, issue #932). The window
+  counts from the first request, also after its job has finished, so a request that arrives inside it after an
+  ordinary success or an infrastructure failure is never served, and it used to say so only in the receiver's log; an
+  automated dispatcher waited 50 minutes on one. The producer now reads whether the job that kept the window has ended
+  (completed or failed, in the same atomic snapshot as the #899 repair, with the key's remaining time), and when it
+  has, and the producer is the receiver or the poller, adds a NOTICE job beside the swallow: no window of its own, an
+  id derived from the delivery's (`<delivery job id>-dup`, so every replica and every replay of one delivery make one
+  notice), and only where to comment and what it answers (`duplicateOf`, `windowEndsAt`), never a trigger's run fields
+  or the item's text. The worker answers it before every gate with one fixed comment and a PII-free record whose
+  reason is `duplicate-request`, and never runs it. `duplicateOf` is job data version 10, so a worker older than this
+  holds a notice (`newer-release`) instead of running its flow. A request joined to a job still waiting, held or
+  running gets no comment: that job is serving it, and a comment per coalesced duplicate is the noise the window
+  exists to remove. The console's own enqueue asks for no notice, since its person reads the answer on the page. A
+  notice that cannot be added is logged (`noticeFailed`) and never fails the enqueue. The window's ten minutes, its
+  key grammar, the #899 repair, replicas, routing and the wire answer (`202 {status:"deduplicated"}`) are UNCHANGED,
+  checked.
   **An answer to an awaitInput run, written within five minutes before it parks and arriving before the park has
   taken its held replies, is held and becomes the one resumed job once it has parked; otherwise coalescing is
   unchanged** (issue #638, `DES-AWAIT-INPUT-ENDS-THE-JOB`). The agent posts its question before it ends, so an answer
@@ -694,6 +710,14 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   (`status_comment_skipped`), when progress is off (`progress-off`), when the job has no transcript to read progress
   from (`no-transcript`), when it has no forge target that can post and edit (`no-forge-target`), and when its text
   could contain the phrase that started the job (`phrase-collision`). Off by default.
+  **One more worker-authored comment, for a request that started nothing (issue #932, `REQ-DEDUP-BY-DELIVERY-GUID`)**:
+  when the semantic window drops a request against a job that has already ended, the worker posts one comment on the
+  item: "pi-dispatch did not start a job for this request. Job `<id>` took the same request on this item less than 10
+  minutes ago and has already ended, and requests for one flow on one item are joined for 10 minutes from the first.
+  Ask again after `<HH:MM>` UTC, or re-run job `<id>` from the console." Fixed words, the ended job's id (held to the
+  job id charset, so it carries no markup, mention or link) and a UTC time; no flow name, label or text from the
+  item. It is the notice job's only output besides its record (`duplicate-request`), so the Acceptance's "exactly one
+  completion or failure comment" counts it for that job.
   Once-ness for the infra class is BullMQ's own terminal decision
   (`finishedOn`, set only on the non-retry branch): a retried attempt comments nothing, so a flaky
   daemon cannot post three comments for one recovery, and the seam that reads it also covers the
@@ -705,8 +729,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   with `run.statusComment: true` (issue #644), exactly one further comment, the status comment, exists for the job (a
   retry edits it rather than posting a second), its every edit holds only fixed words, the job id and integers, and it
   is edited through that forge's edit endpoint (`INT-FORGE-STATUS-COMMENT-EDIT`); given a trigger without it, no
-  comment is edited and none is added. Tests: `worker/test/status-comment.test.mjs`, the four
-  `worker/test/*-host.test.mjs`, `worker/test/start-wiring.test.mjs`.
+  comment is edited and none is added. Given a request the semantic window dropped against an ended job (issue #932),
+  exactly one comment on the item, whichever replica or replay of the delivery arrived. Tests:
+  `worker/test/status-comment.test.mjs`, the four `worker/test/*-host.test.mjs`, `worker/test/start-wiring.test.mjs`,
+  `worker/test/duplicate-notice.test.mjs`, `worker/test/semantic-window.integration.test.mjs`.
 
 ## REQ-OPERATOR-FAILURE-NOTIFICATION
 
@@ -9705,3 +9731,4 @@ instead of drifting.
 | 2026-11-17 (#921) | NEW REQ-GRAPHICAL-JOB-CHECK (#921): headed Chromium recipe, image capability, deterministic screenshot checks, named display failures and venue-specific evidence. REQ-FRONTEND-VISUAL-VERIFY and REQ-DEPLOYMENT-BOOTSTRAP UNCHANGED, checked: application orchestration remains in flows, and the optional live check changes no setup permission or paid action. |
 | 2026-11-18 | Issue #924. Adds `REQ-CONSUMER-LIVENESS`. Queue durability and paid retry policy UNCHANGED, checked. |
 | 2026-11-18 (#919) | `REQ-TRIGGER-SECRETS` AMENDED: reviewed per-trigger and selected bundle file delivery, exact text, portable names, disjoint grants, image gate, no tool grant widening, independent staging cleanup and explicit copying/redaction residuals. UNCHANGED, checked: `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-TOKEN-SCOPED-PER-JOB`, `CONST-PI-VERSION-PINNED`; existing environment delivery and resolver exit meanings. The isolation amendment for the additional read-only mount is recorded in the constitution. |
+| 2026-11-18 (#932) | **`REQ-DEDUP-BY-DELIVERY-GUID` AMENDED**: a request the semantic window joins to a job that has already ended is answered on the forge. The receiver and the poller add a notice job (no window, `<delivery job id>-dup`, only `duplicateOf` and `windowEndsAt` beyond where to comment), the worker answers it before every gate with one fixed comment and a `duplicate-request` record, and job data version 10 makes an older worker hold it; a request joined to a live job gets none; the console asks for none. The window, key grammar, #899 repair, replicas, routing and wire answer UNCHANGED, checked. **`REQ-JOB-STATUS-COMMENTS` AMENDED**: that comment's exact words (fixed words, the ended job's id, a UTC time) and its Acceptance line. `REQ-RUN-PROGRESS` and `REQ-REPLICA-RUNS` UNCHANGED, checked: replicas of one dropped delivery share one notice by its id. |

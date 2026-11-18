@@ -54,5 +54,6 @@ test("both forge builders carry the reviewed reference, stamp the job, and omit 
 		for (const bad of [{ mayMerge: "true" }, { mayMerge: true }, { mayMerge: true, mayMergePolicy: "bad" }, { mayMerge: false, mayMergePolicy }, { mayMergePolicy }, { mayMerge: true, mayMergePolicy, command: "go" }]) await assert.rejects(enqueue(queue, "github", { ...fields, ...bad }), /merge-policy-invalid/);
 		assert.equal(got.length, 2, "malformed policy enqueues nothing");
 	}
-	assert.equal(JOB_DATA_VERSION, 9);
+	// The build reads the version it stamps these jobs with; a later field's version (#919's 9, #932's 10) raises it without moving theirs.
+	assert.ok(JOB_DATA_VERSION >= 5);
 });

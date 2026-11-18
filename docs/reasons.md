@@ -262,6 +262,16 @@ another run. Nothing was spent.
 
 What to do: delete `on.disarmed` from the trigger entry to arm it again. See [triggers.md](triggers.md).
 
+### duplicate-request
+
+The same request (the same flow on the same issue or pull request) reached an earlier job less than 10 minutes before,
+and that job had already ended, so no job was started. Requests for one flow on one item are joined for 10 minutes from
+the first one, also when its job has finished. The item got a comment naming the earlier job and when the 10 minutes
+end. Nothing was spent.
+
+What to do: ask again after the time the comment names, or re-run the earlier job from the console. See
+[when another event starts a job](triggers.md#when-another-event-starts-a-job).
+
 ### trigger-skew
 
 The trigger sets a field (such as `run.models` or `run.maxCostUsd`) that the job reached the worker without. Run anyway,

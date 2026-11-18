@@ -338,6 +338,14 @@ or waiting job keeps its normal window, as does an ordinary successful run. Send
 still finds its retained original job; releasing the window does not replay it. A parked run's answer and steering
 keep their existing behavior ([sessions](sessions.md), [steering](steering.md)).
 
+The window counts from the first request, also when its job has already finished. So removing and adding a label
+again within ten minutes of a run that ended starts nothing. The item then gets a comment saying that no job was
+started, which job took the same request, and at what time (UTC) the ten minutes end, so a person, or a tool watching
+the item, can tell a dropped request from one that is still waiting (issue #932). A request that arrives while the
+first job is still waiting or running gets no comment: that job is doing the work. The comment is posted by the worker
+and recorded as `duplicate-request` in the runs list. It needs the workers at the release that carries it, or the
+comment waits as `newer-release` until they are ([upgrading](upgrading.md#the-order)).
+
 **Upgrading:** move the workers and the receiver/poller to 5.3.2 or later (issue #899), following the
 [upgrade order](upgrading.md#the-order). The [rollout note](upgrading.md#532-refused-and-cancelled-jobs)
 explains which half of the fix each component supplies.

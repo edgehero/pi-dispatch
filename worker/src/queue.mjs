@@ -5,6 +5,7 @@ import { randomUUID } from "node:crypto";
 import { Queue } from "bullmq";
 import { metaKeyPattern, queueNameOfMetaKey, readSemanticWindowOwner, releaseCompletedSemanticWindow } from "./bullmq-internals.mjs";
 import { semanticWindowDisposition } from "./semantic-window-policy.mjs";
+import { DUPLICATE_NOTICE_SUFFIX, duplicateNoticeData } from "./duplicate-notice.mjs";
 import { assertJudgedConnection, givesUp, onValkeyError } from "./connection.mjs";
 import { chainedJobId, localJobId, deliveryJobId, gitlabDeliveryJobId, forgeDeliveryJobId, manualCanaryJobId, manualTriggerJobId } from "./job-id.mjs";
 import { targetSeparator } from "./forges.mjs";
@@ -404,23 +405,28 @@ const semanticStateError = (code) => Object.assign(new Error(code), { code });
  * No pre-read on a normal enqueue or GUID replay. The add's returned Job has the INCOMING data and options even
  * when its id names a different job, so it is never evidence of what the survivor did. All repair reads are of
  * that actual owner's hash and completed membership on the destination queue, through the pinned internals leaf.
+ *
+ * Returns `{ added, owner }`: `owner` is what that read found of the job that kept the window (`{ ended, pttlMs }`,
+ * issue #932), null when nothing was swallowed or the queue has no client to read it with.
  */
 async function addForgeWithSemanticRepair(queue, kind, data, opts) {
 	for (let repairs = 0; ; repairs++) {
 		const added = await queue.add(kind, data, opts);
-		if (!added?.id || added.id === opts.jobId) return added;
+		if (!added?.id || added.id === opts.jobId) return { added, owner: null };
 		// Old dependency-injected queues have only add; a real BullMQ queue always has a client. Their historical
 		// comparison remains useful in producer tests, while repair itself is proved against the actual library.
-		if (!("client" in queue)) return added;
+		if (!("client" in queue)) return { added, owner: null };
 		const owner = await readSemanticWindowOwner(queue, opts.deduplication.id, added.id);
+		const kept = { ended: owner.state === "completed" || owner.state === "failed", pttlMs: owner.pttlMs };
 		if (owner.state === "invalid") throw semanticStateError("semantic-window-state-invalid");
-		if (owner.state === "retained") return added;
+		// A live owner, or one that used up its attempts on infrastructure: either keeps its window, as before #932.
+		if (owner.state === "retained" || owner.state === "failed") return { added, owner: kept };
 		if (owner.state === "completed") {
 			let result;
 			try { result = JSON.parse(owner.rawResult); } catch { throw semanticStateError("semantic-window-result-invalid"); }
 			const disposition = semanticWindowDisposition(result);
 			if (disposition === "invalid") throw semanticStateError("semantic-window-result-invalid");
-			if (disposition === "retain") return added;
+			if (disposition === "retain") return { added, owner: kept };
 		}
 		// Every conditional delete gets its following add, including the final allowed repair. A replacement
 		// that keeps changing is an enqueue failure, never a 202 claiming this event was safely coalesced.
@@ -453,8 +459,8 @@ async function addForgeWithSemanticRepair(queue, kind, data, opts) {
  *     re-labels or repeated PR pushes coalesce to one active job. It coexists with jobId; it does not
  *     replace it.
  */
-export async function enqueueGitHubJob(queue, fields) {
-	return await enqueueForgeJob(queue, "github", fields);
+export async function enqueueGitHubJob(queue, fields, options) {
+	return await enqueueForgeJob(queue, "github", fields, options);
 }
 
 /**
@@ -467,8 +473,8 @@ export async function enqueueGitHubJob(queue, fields) {
  * and the project silently becomes its own parent group. Carrying the id sidesteps the grammar entirely;
  * `repo` stays as the human-readable label for logs, run history and pause-window scopes.
  */
-export async function enqueueGitLabJob(queue, fields) {
-	return await enqueueForgeJob(queue, "gitlab", fields);
+export async function enqueueGitLabJob(queue, fields, options) {
+	return await enqueueForgeJob(queue, "gitlab", fields, options);
 }
 
 /**
@@ -494,8 +500,13 @@ export async function enqueueGitLabJob(queue, fields) {
  * added ONLY when a replica is set, so re-deliveries of each replica still coalesce within the 10-minute
  * window, replicas never coalesce against each other, and an unflagged job's dedup id is the same string it
  * has always been.
+ *
+ * `noticeOnDrop` (issue #932, `duplicate-notice.mjs`): when the window swallows this delivery against a job that has
+ * already ENDED, also add a notice job the worker answers with a comment, so the item says the request was dropped.
+ * The receiver's arms and the poller ask for it; the console does not, since it tells its own person on the page. A
+ * notice that cannot be added is answered `noticeFailed` and never fails the enqueue: the swallow already happened.
  */
-export async function enqueueForgeJob(queue, kind, fields, { dataVersions } = {}) {
+export async function enqueueForgeJob(queue, kind, fields, { dataVersions, noticeOnDrop = false, now = Date.now } = {}) {
 	const { jobId, data: built, dedupId } = forgeJobOf(kind, fields, { dataVersions });
 	let data = built;
 	let routedName = null;
@@ -517,12 +528,15 @@ export async function enqueueForgeJob(queue, kind, fields, { dataVersions } = {}
 	// answers and held replies, whose callers may have selected the shared queue before a request existed.
 	const routed = routedName !== null && routedName !== queue.name ? makeQueue(queue.opts.connection, { name: routedName }) : null;
 	let added;
+	let owner = null;
+	let notice = null;
 	try {
-		added = await addForgeWithSemanticRepair(routed ?? queue, kind, data, {
+		({ added, owner } = await addForgeWithSemanticRepair(routed ?? queue, kind, data, {
 			jobId,
 			deduplication: { id: dedupId, ttl: SEMANTIC_WINDOW_MS }, // ttl in ms
 			...forgeJobOpts(),
-		});
+		}));
+		if (noticeOnDrop && added?.id && added.id !== jobId && owner?.ended === true) notice = await addDuplicateNotice(routed ?? queue, kind, data, { survivingJobId: added.id, pttlMs: owner.pttlMs, now, dataVersions });
 	} finally {
 		if (routed) await routed.close();
 	}
@@ -535,8 +549,27 @@ export async function enqueueForgeJob(queue, kind, fields, { dataVersions } = {}
 	// So `added.id !== jobId` means this delivery was swallowed by the window and created nothing, which
 	// the receiver used to log as `enqueued` and answer as success. A defensive undefined (a fake queue
 	// predating the comparison) reads as not-deduplicated, today's behaviour exactly.
-	if (added?.id && added.id !== jobId) return { jobId, deduplicated: true, survivingJobId: added.id, ...(routed ? { queue: routedName } : {}) };
+	// Issue #932: `survivor` says whether the job that kept the window has ended, when it was read; `notice` is the
+	// notice job's id, or `noticeFailed` that adding it threw.
+	if (added?.id && added.id !== jobId) return { jobId, deduplicated: true, survivingJobId: added.id, ...(owner !== null ? { survivor: owner.ended ? "ended" : "live" } : {}), ...(notice ?? {}), ...(routed ? { queue: routedName } : {}) };
 	return { jobId, deduplicated: false, ...(routed ? { queue: routedName } : {}) };
+}
+
+/**
+ * Add the notice for a request the window dropped against an ended job (issue #932): `{ notice: <id> }`, or
+ * `{ noticeFailed: true }` when the add threw. Its id is the delivery's replica-free id with `DUPLICATE_NOTICE_SUFFIX`,
+ * so every replica of one delivery, and every replay of it, makes one notice between them (BullMQ answers an id it
+ * holds with that job). No `deduplication` option: the notice holds no window and so can free none.
+ */
+async function addDuplicateNotice(queue, kind, data, { survivingJobId, pttlMs, now, dataVersions }) {
+	try {
+		const id = `${forgeDeliveryJobId(kind, data.trigger?.deliveryId)}${DUPLICATE_NOTICE_SUFFIX}`;
+		const windowEndsAt = Number.isSafeInteger(pttlMs) && pttlMs >= 0 ? now() + pttlMs : null;
+		await queue.add(kind, stampJobData(duplicateNoticeData(data, { survivingJobId, windowEndsAt }), undefined, dataVersions), { jobId: id, ...forgeJobOpts() });
+		return { notice: id };
+	} catch {
+		return { noticeFailed: true };
+	}
 }
 
 // A forge job's retry policy and retention, one table for both of its enqueue paths (the window-deduplicated one above
