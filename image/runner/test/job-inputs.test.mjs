@@ -160,8 +160,9 @@ test("a HOME inside a mount root is named, and a sibling that merely shares a pr
 	}
 });
 
-test("the forbidden HOME roots are exactly the four job mounts", () => {
-	assert.deepEqual([...HOME_FORBIDDEN_ROOTS], ["/workspace", "/job", "/outbox", "/session"]);
+test("the forbidden HOME roots are exactly the five job mounts a job writes or reads its inputs from", () => {
+	// Issue #920 adds /artifacts: a HOME there would put auth.json and every CLI cache among the run's kept evidence.
+	assert.deepEqual([...HOME_FORBIDDEN_ROOTS], ["/workspace", "/job", "/outbox", "/session", "/artifacts"]);
 	assert.ok(Object.isFrozen(HOME_FORBIDDEN_ROOTS));
 });
 

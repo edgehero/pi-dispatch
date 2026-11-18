@@ -1583,6 +1583,7 @@ refactor apart.
   | steer inbox | `/inbox` | none: `PI_STEER` is refused there (stdio steering is #686) |
   | operator overlay | `/opt/pi-global` | `/sandbox/pi-global` |
   | secret files | `/run/secrets` | `/sandbox/secrets` |
+  | artifacts (forge jobs) | `/artifacts` | `/sandbox/artifacts` |
 
   On `sandbox` the job inputs are read-only by the order of events, not by a bind: the worker uploads them, then
   starts the entrypoint through `/opt/pi-dispatch/pi-landlock --rw <path>... -- <entrypoint>`, which confines every
@@ -2259,8 +2260,10 @@ a sandbox not confirmed gone marks the run's result `lingering`, its exit code u
     `--memory-reservation`, `--memory-swap`, `--memory-swappiness`, `--kernel-memory`, `--blkio-weight*`,
     `--device-{read,write}-{bps,iops}`, `--oom-score-adj`, `--shm-size`, `--cpus`). Disk I/O, disk space and the
     network are NOT bounded per job.
-  - **Mounts**: `/run/secrets:ro` only for a file-secret grant (#919, the private child described above), `/job:ro`, `/workspace:rw`, `/outbox:rw` (local jobs only), `/opt/pi-global:ro` (when
-    configured), and `/session:rw`: a resume job's staged transcript when a trigger armed `run.resume` and the
+  - **Mounts**: `/run/secrets:ro` only for a file-secret grant (#919, the private child described above), `/job:ro`,
+    `/workspace:rw`, `/outbox:rw` (local jobs only), `/artifacts:rw` (a forge job's evidence folder, `<jobDir>/artifacts`,
+    when the host keeps artifacts and the venue binds, issue #920, `INT-ARTIFACTS-STORE-CONTRACT`), `/opt/pi-global:ro`
+    (when configured), and `/session:rw`: a resume job's staged transcript when a trigger armed `run.resume` and the
     worker resolved a key (`INT-SESSION-STORE-CONTRACT`), and since issue #643 every other job's empty live
     transcript file (`INT-CONTAINER-JOB-INPUTS`, `INT-LIVE-TRANSCRIPT-STREAM`). `/session` is a **per-job**
     directory under the job's own dir; the shared store is never bind-mounted into anything. Since issue #646 a
@@ -2838,7 +2841,8 @@ a sandbox not confirmed gone marks the run's result `lingering`, its exit code u
     env would have met it for real.
   - The overlay's host path: `PI_GLOBAL_PI_DIR` must be an absolute path. A relative value is resolved differently
     by the worker and the container runtime, so it refuses the worker's boot (PR #553's review).
-  - Mounts: `/job:ro`, `/workspace:rw`, — **local jobs only** — `/outbox:rw`, and — **only when
+  - Mounts: `/job:ro`, `/workspace:rw`, — **local jobs only** — `/outbox:rw`, — **forge jobs, when the host keeps
+    artifacts and the venue binds (issue #920)** — `/artifacts:rw`, and — **only when
     `PI_GLOBAL_PI_DIR` is configured** — `/opt/pi-global:ro` — delivered by host bind mounts
     (`-v <hostPath>:<containerPath>`, with `Z` in the option list where the SELinux relabel bullet above applies,
     per `DES-WORKER-ON-HOST` and `worker/src/docker-run.mjs`): the worker
@@ -6429,6 +6433,41 @@ validator rather than a second copy of it.
   `/job/mcp.json` from it; and the job.
 - **Location**: worker/src/mcp-config.mjs -> parseOverlayMcp, readOverlayMcp, MCP_* constants.
 
+## INT-ARTIFACTS-STORE-CONTRACT
+
+- **Status**: issue #920, part 1 (`REQ-FORGE-JOB-ARTIFACTS`, `DES-FORGE-JOB-ARTIFACTS`). The console's reader and the
+  closing comment are parts 2 and 3.
+- **Producer**: the worker (`worker/src/artifacts.mjs`, `collectArtifacts`), once per attempt of a forge job whose
+  container exited on its own, reading `<jobDir>/artifacts` (mounted at `/artifacts`, `INT-CONTAINER-JOB-INPUTS`).
+  **Consumer**: the console's run page (part 2), the closing comment (part 3), and the sweep (`makeArtifactsReaper`).
+- **Location**: `PI_ARTIFACTS_DIR`, default `~/.pi-dispatch/artifacts` (`artifactsDirPath`, `worker/src/config.mjs`),
+  0700. One folder per run, named from the record's job id with every character outside `[A-Za-z0-9._-]` made `_`
+  (`artifactRunDirOf`; `.` and `..` refused), holding `files/<name>` (0600) and `manifest.json`. Beside them, only
+  `.tmp-<run>-<hex>` (a collection being written, renamed over the run's folder when whole) and `.reap-<run>-<hex>`
+  (a folder being removed); the sweep removes either after an hour.
+- **`manifest.json`**, version 1:
+  ```
+  { "v": 1, "jobId": "<the record's job id>", "createdAt": "<ISO 8601>", "keepUntil": "<ISO 8601>" | null,
+    "files": [ { "name": "<name>", "size": <int>, "sha256": "<64 hex>", "type": "<served type>", "scrubbed": <bool> } ],
+    "dropped": { "<reason>": <int> } }
+  ```
+  `name` matches `ARTIFACT_NAME_RE` (`^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$`), the files in name order. `type` is judged by
+  content: `image/png`, `image/jpeg`, `image/gif`, `image/webp`, `text/plain` (valid UTF-8, no NUL) or
+  `application/octet-stream`. `scrubbed` is true when the job's secret values were replaced in a text file. `dropped`
+  counts by `ARTIFACT_DROP_REASONS` (`worker/src/artifacts-record.mjs`). `keepUntil` is `createdAt` plus
+  `PI_ARTIFACTS_RETENTION_DAYS`, null for 0.
+- **Limits**: `PI_ARTIFACTS_MAX_FILES` (default 20, 0 to 200, 0 off), `PI_ARTIFACTS_MAX_FILE_MB` (default 10, 1 to 1024,
+  never above the run's), `PI_ARTIFACTS_MAX_RUN_MB` (default 25, 1 to 4096), counted on the kept (cleaned) bytes.
+- **Retention**: a run's folder goes at the earlier of its `keepUntil` and its `createdAt` plus today's
+  `PI_ARTIFACTS_RETENTION_DAYS` (`artifactsDeadline`); a folder whose manifest cannot be read goes by its age against
+  today's setting. Boot and every `PI_SWEEP_INTERVAL_HOURS`, between the sandbox and the session sweeps.
+- **Not a store of record**: the run record's `artifacts` (`INT-RUN-HISTORY-FILE-CONTRACT`) says what a run kept even
+  after its folder is gone. Agent output, so the backup guide names it as such (`docs/backup.md`).
+- **Acceptance**: `worker/test/artifacts.test.mjs` (types, cleaning, every drop reason, limits, the replace, the folder
+  name, the sweep with an injected clock), `worker/test/artifacts-processor.test.mjs` (staged, collected and recorded
+  through the processor; never after an abort), `worker/test/run-container.test.mjs` (the mount on a binding venue,
+  none on a copying one), `worker/test/sandbox-store.test.mjs` (no second copy in a kept sandbox).
+
 ## INT-RUN-HISTORY-FILE-CONTRACT
 
 **Random selection facts (#922).** The closed `modelWhy` vocabulary additionally contains `random` and `random-subscription-limit`. After a choice, the optional public `modelSelection` is `{ strategy: "random", candidates: [exact physical references], previous?: exact physical reference }`. It is rebuilt from host selection metadata, bounded by the same 16-model validator, never copied from arbitrary result extras or current configuration. Actual provider/model remain the existing fields. No eligibility count, credential, account identity, RNG state or selection-store identity is public. Before selection, no deployment default is reported as the chosen model. Historical records without the field stay readable.
@@ -6562,6 +6601,7 @@ validator rather than a second copy of it.
                            "basis": "proxy" | "openshell" | "unenforced" },            // its container was granted; below
     "jobCreatedAt"?: "<ISO 8601>",                                                     // issue #811: CONDITIONAL, when the job was created; below
     "limits"?: { "idleMinutes", "stallMinutes", "maxMinutes", "basis", ... },        // issue #888: CONDITIONAL, the limits it ran under; below
+    "artifacts"?: { "kept": <int>, "bytes": <int>, "dropped": { "<reason>": <int> } }, // issue #920: CONDITIONAL, what /artifacts left; below
     "v":         <int> }                                                              // issue #761: the record's version, 1, ALWAYS the last key
   ```
   **`loaded` (issue #800, `worker/src/loaded-record.mjs`) is what the run loaded, as the runner saw it and as the worker
@@ -7363,6 +7403,14 @@ validator rather than a second copy of it.
   which is this attempt's. A number's rendering, so PII-free. Adding it leaves `v` at 1 (a new field never raises it,
   `DES-STORE-VERSION-WHEN-NEEDED`), `RECORD_CORE_FIELDS` does not name it, and since a record without it is read as
   before, nothing older is left to detect (`worker/src/older-state.mjs`). The shared cases' `next` shapes carry it.
+  **`artifacts` (issue #920, `REQ-FORGE-JOB-ARTIFACTS`) is what a forge job's `/artifacts` folder left**: how many files
+  were kept, their bytes after cleaning, and how many were dropped per reason (`name`, `type`, `size`, `count`, `total`,
+  `secret`, `unreadable`, only the reasons that happened), rebuilt by `recordedArtifacts`
+  (`worker/src/artifacts-record.mjs`) from numbers and those tokens only. The files' NAMES are never in the record (an
+  agent chose them); they are in the run's manifest (`INT-ARTIFACTS-STORE-CONTRACT`). A CONDITIONAL key after `limits`
+  and the last before `v`: present only when a run kept or dropped at least one file, so every other record is
+  byte-identical. Adding it leaves `v` at 1, `RECORD_CORE_FIELDS` does not name it, and nothing older is left to detect.
+  The shared cases' `next.maximal` carries it.
   **`limits` (issue #888, `REQ-JOB-ACTIVITY-LIMITS`) is what bounded the run**: `{ idleMinutes, stallMinutes, maxMinutes,
   basis, why?, channel?, unavailable?, lastStepAt?, lastActivityAt? }`, rebuilt by `recordedLimits`
   (`worker/src/run-history.mjs`) from closed keys only. The three limits are the effective ones (job-limit-rules.mjs
@@ -15113,3 +15161,4 @@ and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` are UNCHANGED, checked: no file shape, wr
 | 2026-11-18 (#933) | **`INT-TRIGGERS-FILE-CONTRACT` AMENDED** (`run.privateEndpoints`): the residual it named, that the skew check's identity read a GitLab merge request job a label matched and a comment job routed to another trigger's flow as "run" for every `AUTHORED_NARROWING_FIELDS` row, is closed; such a job that arrived without a field its trigger sets is `trigger-skew` (or `wait-skew`) like any other forge job, and the entry is found by `isForgeTriggerOf`, the identity every pre-spend check shares. A cron run queued before the edit still runs without it. `INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked: no reason token is added; `trigger-skew`, `wait-skew` and `secret-bundle-trigger-changed` keep their meaning and now reach the right jobs. `INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked. |
 | 2026-11-18 (#932) | **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the `reason` enum gains `duplicate-request`, a free policy refusal (`budgetReserved: false`) recorded for a notice that the semantic window dropped a request against a job that had already ended; the record's shape is UNCHANGED, checked (no field is added, so `buildRecord`'s fixtures stay). Queued job data gains `duplicateOf` (the ended job's id) and `windowEndsAt` (ms since the epoch, or null) on a notice job only, `JOB_DATA_FIELD_VERSIONS` at 10. `INT-RECEIVER-STATUS-KEY` UNCHANGED, checked: a swallow still counts as `deduplicated`, and the notice is no outcome of its own. |
 | 2026-11-18 (#932, part 2) | **`INT-DEFER-REASON-KEY` AMENDED** (its CLI reader): `pi-dispatch status --target <item>`'s one JSON line, its item grammar, what it reads (ids and two hash fields per job, the item's window keys and their owner snapshot), its bounds and when `complete` is false. Plain `status` output UNCHANGED, checked. The semantic dedup id's item has one spelling, `semanticItemOf`/`semanticItemOfId` in `worker/src/forges.mjs`, used by the queue, the console's waiting reader and the CLI: the id itself is UNCHANGED, checked byte for byte by the queue's tests. |
+| 2026-11-18 (#920, part 1) | **NEW `INT-ARTIFACTS-STORE-CONTRACT`**: `PI_ARTIFACTS_DIR`, one folder per run (`files/`, `manifest.json` version 1), the limits, the retention rule and the sweep. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the conditional `artifacts: { kept, bytes, dropped }`, numbers and reason tokens only, after `limits`; `v` stays 1. **`INT-CONTAINER-JOB-INPUTS` AMENDED**: the layout table gains `artifacts (forge jobs)`, `/artifacts` and `/sandbox/artifacts` (the second never mounted while the copying venue leaves the folder off). **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: both mount lists name `/artifacts:rw`. `INT-OUTBOX-CONTRACT` UNCHANGED, checked: a forge job still has no `/outbox`. `INT-LIVE-PROBE-CONTRACT` UNCHANGED, checked: the live probe's job carries no artifacts folder. |

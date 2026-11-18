@@ -320,8 +320,10 @@ passing, on the record — issue #80.)
   `/session:rw` (a resume job's staged transcript when a trigger armed `run.resume` **and** the worker resolved a
   key, `INT-SESSION-STORE-CONTRACT`; since issue #643 every other job's empty live transcript file,
   `INT-LIVE-TRANSCRIPT-STREAM`), and `/inbox:ro` (a steer-armed attempt's inbox, `INT-STEER-INBOX-CONTRACT`, issue
-  #646): every one operator- or worker-supplied, none host-wide, and only `/workspace`, `/outbox` and `/session`
-  writable; and the container is gone after the run. **Given a job that is not steer-armed**, its argv carries no
+  #646), and `/artifacts:rw` (a forge job's evidence folder on a binding venue, when the host keeps artifacts,
+  `REQ-FORGE-JOB-ARTIFACTS`, issue #920: a per-job directory under the job's own, read by the worker once the
+  container is gone): every one operator- or worker-supplied, none host-wide, and only `/workspace`, `/outbox`,
+  `/session` and `/artifacts` writable; and the container is gone after the run. **Given a job that is not steer-armed**, its argv carries no
   `/inbox` mount and no `PI_STEER`, byte-identical to one built before issue #646; **given an armed one**, `/inbox` is
   a per-attempt directory beside the job's own, mounted read-only, and removed when the attempt ends.
   **`/session` is a PER-JOB directory, created and destroyed with `/job`'s.** The canonical store under
@@ -1642,3 +1644,4 @@ passing, on the record — issue #80.)
 | 2026-11-17 (#921) | All constraints UNCHANGED, checked for #921: CONST-ISOLATION-CONTAINER-PER-JOB retains the worker-owned builders, flags, bounds, fixture-only mounts and empty host-provided probe environment; CONST-BUDGET-BEFORE-TOKENS and CONST-RETRY-INFRA-ONLY retain every paid-job gate and outcome. CONST-PI-VERSION-PINNED and CONST-MERGE-NEVER-AUTOMATIC are unchanged. The optional graphical image and offline doctor probe add no credential, model call, privilege setting or stored schema. |
 | 2026-11-18 | Issue #924. UNCHANGED, checked: `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-PI-VERSION-PINNED` and `CONST-MERGE-NEVER-AUTOMATIC`. Consumer failure exits infrastructure status; admission and paid replay bounds do not change. |
 | 2026-11-18 (#919) | AMENDED `CONST-ISOLATION-CONTAINER-PER-JOB`: explicit file-secret grants add one private read-only per-attempt mount or copy, outside retained job state, with mode/owner verification and owner-aware cleanup. The mount-set widening and the residual of an agent copying readable material are stated in the constraint. `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-TOKEN-SCOPED-PER-JOB` and `CONST-PI-VERSION-PINNED` UNCHANGED, checked: file grants use the same resolver and fork gates, determinate refusals return, no broader token or new pin is introduced. |
+| 2026-11-18 (#920) | `CONST-ISOLATION-CONTAINER-PER-JOB` AMENDED, Acceptance: the declared mounts gain `/artifacts:rw`, a forge job's evidence folder on a binding venue. The constraint is unchanged in substance, which is what justifies the amendment: the folder is per job, made by the worker inside the job's own directory like `/session`, never host-wide, and read by the worker once, after the container is gone, so it adds no path to the host and no reach between jobs. `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY` and every other constraint UNCHANGED, checked: nothing about a file can refuse, retry or fail a job. |

@@ -463,6 +463,22 @@ test("the portfolio protocol is absent without /job/portfolio.json, whatever els
 	assert.ok(appended.includes(OUTBOX_SENTINEL), "an ordinary local job still gets the outbox protocol");
 });
 
+// --- issue #920: the artifacts protocol, composed only when the worker mounted /artifacts ---
+const ARTIFACTS_SENTINEL = "pi-dispatch-artifacts-v1";
+const REAL_ARTIFACTS_PROTOCOL = new URL("../../../guardrails/ARTIFACTS_PROTOCOL.md", import.meta.url).pathname;
+
+test("the artifacts protocol layers in when /artifacts is mounted, names that folder, and sits before the personas (#920)", { skip }, async () => {
+	const artifactsMount = tempDir("pi-dispatch-artifacts-");
+	const { loader } = await load({ ...portfolioFixture({ present: false }), artifactsMount, artifactsProtocolPath: REAL_ARTIFACTS_PROTOCOL });
+	const appended = loader.getAppendSystemPrompt().join("\n\n");
+	assert.ok(appended.includes(ARTIFACTS_SENTINEL), "the artifacts protocol is missing when the folder is mounted");
+	assert.ok(appended.includes(`Files you write to \`${artifactsMount}\``), "the folder named is this container's own");
+	assert.ok(!appended.includes("{artifacts}"), "no placeholder reaches the prompt");
+	assert.ok(appended.indexOf(ARTIFACTS_SENTINEL) < appended.indexOf(PERSONA_SENTINEL), "before the project persona");
+	const without = await load({ ...portfolioFixture({ present: false }), artifactsMount: join(artifactsMount, "absent"), artifactsProtocolPath: REAL_ARTIFACTS_PROTOCOL });
+	assert.ok(!without.loader.getAppendSystemPrompt().join("\n\n").includes(ARTIFACTS_SENTINEL), "no folder, no lines paid for");
+});
+
 test("the portfolio gate is read once at loader build: the prompt is byte-identical across turns (#505, CONST-PERSONA-IN-CACHED-PREFIX)", { skip }, async () => {
 	const f = portfolioFixture();
 	const { loader } = await load(f);

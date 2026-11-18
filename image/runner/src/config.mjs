@@ -567,7 +567,7 @@ export function readPrompt(path, { readFile = (p) => readFileSync(p, "utf8"), ui
 
 // Mount roots a HOME must never sit under: pi writes auth.json and every CLI writes its caches into HOME, and a
 // HOME inside a mount lands them in the operator's folder, the job inputs or the transcript store.
-export const HOME_FORBIDDEN_ROOTS = Object.freeze([LAYOUT.workspace, LAYOUT.job, LAYOUT.outbox, LAYOUT.session]);
+export const HOME_FORBIDDEN_ROOTS = Object.freeze([LAYOUT.workspace, LAYOUT.job, LAYOUT.outbox, LAYOUT.session, LAYOUT.artifacts]);
 
 /**
  * The advisory lines a job's mounts earn, as `[event, fields]` pairs for the caller to log (issue #341).

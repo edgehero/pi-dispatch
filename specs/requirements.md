@@ -670,6 +670,30 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 - **Traces to**: `INT-CONTAINER-RUNTIME-CONTRACT`, `INT-LIVE-PROBE-CONTRACT`,
   `DES-PLAYWRIGHT-CLI-NOT-CHROME-DEVTOOLS`, `CONST-ISOLATION-CONTAINER-PER-JOB`.
 
+## REQ-FORGE-JOB-ARTIFACTS
+
+- **Statement** (#920): a forge job shall have a folder, `/artifacts`, whose files the worker keeps after the job, within
+  the operator's limits on their count, each one's size and their total, for the operator's retention, apart from the
+  sandbox store and its day. What is kept shall be judged by content, never by name: text cleaned of the job's own
+  secrets like its transcript, images and other files kept as written except one holding a job secret word for word.
+  Nothing about a file shall refuse, retry or fail the job: what is not kept is counted by reason on the run's record,
+  which holds numbers and closed tokens only. The job shall be told of the folder only where it has one.
+- **Why**: a job that tests more than code (it starts an application with a virtual display, runs an end to end suite,
+  talks to a test device) proves its result with files, and without a home for them a reviewer reads only the job's
+  own sentence that it passed, while the evidence sits in a folder on the worker host that is swept within a day.
+- **Scope**: forge flow and command jobs on a venue that binds (`local`, `podman`, OpenShell's bind mode). Not a local,
+  scheduled, answer draft, watch or question grouping job, and not OpenShell's copy mode, whose write list is fixed
+  per venue (said in the log as `artifacts_skipped`, `venue-copies`). `PI_ARTIFACTS_MAX_FILES=0` turns it off.
+- **Acceptance**: a job that writes two files ends with both kept and counted on its record, and one that writes none
+  adds nothing to its record or the store. A file over the size limit, past the count or total, a link, a folder, a
+  name outside the charset, and a binary holding a job secret are dropped and counted; the job's outcome is unchanged.
+  A text file holding a job secret is kept without it. A retry replaces its earlier attempt's files. After the
+  retention the run's folder is gone and its record still says what it kept. An aborted container's folder is never
+  read. Tests: `worker/test/artifacts.test.mjs`, `worker/test/artifacts-processor.test.mjs`,
+  `worker/test/run-container.test.mjs`, `image/runner/test/loader.test.mjs`, `image/runner/test/guardrails-files.test.mjs`.
+- **Traces to**: `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-RETRY-INFRA-ONLY`, `INT-ARTIFACTS-STORE-CONTRACT`,
+  `INT-RUN-HISTORY-FILE-CONTRACT`, `INT-CONTAINER-JOB-INPUTS`, `DES-FORGE-JOB-ARTIFACTS`, `REQ-GRAPHICAL-JOB-CHECK`.
+
 ## REQ-JOB-STATUS-COMMENTS
 
 - **AMENDED 2026-10-31 (#772)**: Jobs with purpose `answer-draft` never post status, terminal, policy-refusal, failure, recovery, progress or chain comments. Their verdict/failure is reported on the console. This exception does not suppress the source workload’s own question or its later person-confirmed answer trail.
@@ -9736,3 +9760,4 @@ instead of drifting.
 | 2026-11-18 (#919) | `REQ-TRIGGER-SECRETS` AMENDED: reviewed per-trigger and selected bundle file delivery, exact text, portable names, disjoint grants, image gate, no tool grant widening, independent staging cleanup and explicit copying/redaction residuals. UNCHANGED, checked: `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-TOKEN-SCOPED-PER-JOB`, `CONST-PI-VERSION-PINNED`; existing environment delivery and resolver exit meanings. The isolation amendment for the additional read-only mount is recorded in the constitution. |
 | 2026-11-18 (#932) | **`REQ-DEDUP-BY-DELIVERY-GUID` AMENDED**: a request the semantic window joins to a job that has already ended is answered on the forge. The receiver and the poller add a notice job (no window, `<delivery job id>-dup`, only `duplicateOf` and `windowEndsAt` beyond where to comment), the worker answers it before every gate with one fixed comment and a `duplicate-request` record, and job data version 10 makes an older worker hold it; a request joined to a live job gets none; the console asks for none. The window, key grammar, #899 repair, replicas, routing and wire answer UNCHANGED, checked. **`REQ-JOB-STATUS-COMMENTS` AMENDED**: that comment's exact words (fixed words, the ended job's id, a UTC time) and its Acceptance line. `REQ-RUN-PROGRESS` and `REQ-REPLICA-RUNS` UNCHANGED, checked: replicas of one dropped delivery share one notice by its id. |
 | 2026-11-18 (#932, part 2) | **`REQ-DEDUP-BY-DELIVERY-GUID` AMENDED**: `pi-dispatch status --target <item>` lists an item's jobs queued, held or running and, per flow, what a new request would do (`joined` or `dropped`), saying `complete: false` whenever part of the queue was not read. `REQ-JOB-STATUS-COMMENTS` UNCHANGED, checked: the command posts nothing. |
+| 2026-11-18 (#920, part 1) | **NEW `REQ-FORGE-JOB-ARTIFACTS`**: a forge job's `/artifacts` folder, kept after the job within the operator's limits and retention, judged by content, text cleaned of the job's secrets, a binary holding one dropped, every drop counted on the record and none able to refuse, retry or fail the job; binding venues only, off at `PI_ARTIFACTS_MAX_FILES=0`. The console's listing and the closing comment are parts 2 and 3. `REQ-RESURRECTABLE-SANDBOX` UNCHANGED, checked: the kept sandbox drops `artifacts/` like `session/`, so its contents and its day are as they were. `REQ-JOB-STATUS-COMMENTS` UNCHANGED, checked (part 3 amends it). |

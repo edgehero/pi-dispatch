@@ -7298,6 +7298,39 @@ free local model, or using a few successful live probes as proof of every routin
   (`CONST-ISSUE-TEXT-IS-DATA`); lockdown is best effort; a self-hosted GitLab on a port other than 443 needs a
   declared endpoint to pass egress. Forgejo and Azure DevOps are `OQ-040`.
 
+## DES-FORGE-JOB-ARTIFACTS
+
+- **Decision** (#920): a forge job gets a writable mount, `/artifacts`, a per-job folder the worker makes inside the
+  job's own directory (0700, like `session/`). The worker reads it ONCE, after the container has exited on its own (a
+  copying venue's outputs already back), so no process the agent started can change a file between the checks and the
+  read: each entry `lstat`ed, opened `O_NOFOLLOW` and held to the same inode and size. What it keeps goes to its own
+  store, `PI_ARTIFACTS_DIR`, one folder per run with a manifest, under its own retention, and the run record gains
+  counts only. The job learns of the folder from a baked instruction file (`ARTIFACTS_PROTOCOL.md`), composed only when
+  the mount exists and naming the container's own path. Staging and collection happen in the processor's venue-blind
+  wrapper around `runContainer` (`index.mjs`), so no venue's option list grows; `run-container.mjs` mounts the staged
+  folder only on a binding layout.
+- **Types by content**: four image signatures, UTF-8 text without NUL, else binary. The served type comes from this,
+  never the name, so a `.png` holding HTML is text, and an SVG is text, never an image.
+- **Secrets**: text through the job's own redactor values (`credentialSecretValues`, the transcript's set). A binary
+  file cannot be cleaned without breaking it, so one holding a job secret word for word is dropped, the workspace
+  checkpoint's rule for a tree (`job-secret-in-tree`); any other binary is kept as written, and the docs say so.
+- **Rejected**:
+  - *Reusing `/outbox`*: the runner reads its existence as the chaining protocol (`DES-JOB-OUTBOX-CHAINING`), and a
+    forge job must not chain.
+  - *Judging the type by extension*: a name is the agent's choice; the bytes are what a browser would render.
+  - *Renaming a bad name instead of dropping it*: the name reaches the run page and a forge comment, and a rename the
+    agent did not choose would describe a file that does not exist under that name.
+  - *Keeping the files in Valkey*: megabytes per run in the queue's memory, and a key's TTL is not a file's retention.
+  - *Keeping them in the sandbox store*: its day is about reopening a workspace, and a second copy there would outlive
+    or undercut this retention; the kept sandbox now drops `artifacts/` like `session/`.
+  - *A new `makeRunContainer` option*: every venue forwards a closed option list, and the folder needs only a path on
+    `prepared`, which the binding layout mounts like `outboxDir`.
+  - *Collecting after an abort*: a stop that did not take may leave a writer alive.
+  - *Mounting it on OpenShell's copy mode*: pi-landlock refuses a `--rw` path that does not exist, and the list is
+    one per venue, so every job without the folder would fail to start.
+- **Traces to**: `REQ-FORGE-JOB-ARTIFACTS`, `INT-ARTIFACTS-STORE-CONTRACT`, `CONST-ISOLATION-CONTAINER-PER-JOB`,
+  `DES-JOB-OUTBOX-CHAINING`, `DES-SANDBOX-IS-A-FRESH-CONTAINER`.
+
 ## DES-PLAYWRIGHT-CLI-NOT-CHROME-DEVTOOLS
 
 - **AMENDED (#921): optional headed applications.** Keep the ordinary image and headless default. A derived
@@ -19221,3 +19254,4 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-11-18 (#933) | One forge trigger identity for every pre-spend check. **`DES-WAIT-FOR-HOLDS-AND-WAIT-PROFILES` AMENDED**: a dated bullet records why the skew check's own identity never refused a GitLab merge request job a label matched or a comment job routed to another trigger's flow, so a narrowing field a stale receiver dropped ran on a clean record, and that it, the merge policy, the private endpoint grant, the random model policy, the secret bundle lookup and the console's re-run check now ask one module (`worker/src/trigger-identity.mjs`: `isForgeTriggerOf`, `forgeTriggerMismatch`, `routableFlows`), which also builds the receiver's `knownFlows`; what each check does with a mismatch is unchanged. REJECTED: widening the skew check alone, a comment entry accepting any flow, counting a schedule's, watch rule's or local listener's flow as routable. **`DES-PROJECT-SECRET-BUNDLES` AMENDED**: the forge identity is the shared one, which ends the refusal of every GitLab merge request job a label matched in a bundled project (`secret-bundle-trigger-changed`). **`DES-TRIGGER-MERGE-POLICY` AMENDED** and **`DES-PRIVATE-ENDPOINT-GRANTS` AMENDED**: each names the shared identity; their own readings already accepted both shapes, so their behaviour is unchanged except that a comment's routed flow must be a forge trigger's (a local listener's no longer counts, as it never could be routed). `DES-OPERATOR-CONSOLE` UNCHANGED, checked: the trigger-edit preview reads the real skew check, so it now counts these queued jobs among those an edit refuses, with no change of its own. `DES-STORE-VERSION-WHEN-NEEDED` UNCHANGED, checked: nothing stored changes shape. **Code evidence**: worker/src/trigger-identity.mjs; worker/src/triggers-file.mjs -> makeCheckWaitSkew, makeCheckPrivateEndpoints, makeFindSecretBundle; worker/src/merge-policy.mjs; worker/src/model-selection-policy.mjs; receiver/src/trigger-groups.mjs; admin/src/job-actions.mjs -> currentTriggerFor. |
 | 2026-11-18 (#932) | **`DES-QUEUE-BULLMQ-OVER-CUSTOM` AMENDED**: a dropped request is answered on the forge through a notice job the worker refuses for free (`worker/src/duplicate-notice.mjs`), decided on the #899 snapshot, which now also reads BullMQ's failed set and the key's PTTL. REJECTED: a comment from the receiver (no write credential, by design), a reaction (cannot tell two requests apart, carries nothing, absent on Azure work items), a comment on every swallow, releasing the window when its job finishes. `DES-STORE-VERSION-WHEN-NEEDED` UNCHANGED, checked: `duplicateOf` and `windowEndsAt` are `JOB_DATA_FIELD_VERSIONS` rows at 10 under its existing rule (#919 holds 9), and `JOB_DATA_VERSION` is 10. `DES-AWAIT-INPUT-ENDS-THE-JOB` UNCHANGED, checked: a held reply to an awaitInput run is a live owner's swallow and gets no notice. **Code evidence**: worker/src/duplicate-notice.mjs; worker/src/queue.mjs -> enqueueForgeJob, addDuplicateNotice; worker/src/bullmq-internals.mjs -> readSemanticWindowOwner; worker/src/index.mjs -> processJob; receiver/src/receiver.mjs -> dropNotice; receiver/src/poller.mjs. |
 | 2026-11-18 (#932, part 2) | **`DES-QUEUE-BULLMQ-OVER-CUSTOM` AMENDED**: one item's view, `pi-dispatch status --target`, and its two rejections (matching jobs by their data, parsing a forge URL in the CLI). It reads through the public `getRanges` and `getJobState` and the pinned owner snapshot, and adds only two helpers to `bullmq-internals.mjs` (the item's SCAN pattern and its inverse), so the single-owner rule holds. **Code evidence**: worker/src/target-status.mjs; worker/src/cli.mjs -> targetStatus, deploymentQueueNames; worker/src/forges.mjs -> semanticItemOf, semanticItemOfId, parseSemanticItem. |
+| 2026-11-18 (#920, part 1) | **NEW `DES-FORGE-JOB-ARTIFACTS`**: the per-job `/artifacts` mount, read once after the container exited on its own, typed by content, text cleaned with the job's own secret values, a binary holding one dropped, kept in `PI_ARTIFACTS_DIR` under its own retention, staged and collected in the processor's venue-blind wrapper, mounted only on a binding layout. REJECTED: reusing `/outbox`, typing by extension, renaming a bad name, Valkey, the sandbox store, a new `makeRunContainer` option, collecting after an abort, OpenShell's copy mode. `DES-JOB-OUTBOX-CHAINING` UNCHANGED, checked: no forge job gets `/outbox`. `DES-SANDBOX-IS-A-FRESH-CONTAINER` UNCHANGED, checked: a kept sandbox drops `artifacts/` before the rename, so what it reopens is as before. `DES-STORE-VERSION-WHEN-NEEDED` UNCHANGED, checked: the record's new field is conditional and additive, `v` stays 1, and the manifest is version 1 of a new store. **Code evidence**: worker/src/artifacts.mjs; worker/src/artifacts-record.mjs; worker/src/index.mjs -> runContainer wrapper; worker/src/run-container.mjs -> buildOpts; worker/src/container-spec.mjs; worker/src/start.mjs; image/runner/src/loader.mjs; guardrails/ARTIFACTS_PROTOCOL.md. |

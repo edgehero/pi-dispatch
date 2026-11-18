@@ -24,6 +24,7 @@ import { secretProfileNeeded } from "./capabilities.mjs";
 import { cronRunPrefixes, scheduledForMillis } from "./bullmq-internals.mjs";
 import { EARLIER_MAX, recordedEarlier } from "./run-earlier.mjs";
 import { recordReasonOf } from "./record-reason.mjs";
+import { recordedArtifacts } from "./artifacts-record.mjs";
 import { WATCH_ID_RE } from "./watch-contract.mjs";
 import { recordedWatchDecision } from "./watch-record.mjs";
 
@@ -1092,6 +1093,8 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 	const steerSkipped = data.steer === true && STEER_SKIPPED_REASONS.includes(source.steerSkipped) ? source.steerSkipped : null;
 	// Issue #712: on every job, since any job's transcript can be skipped; absent on every venue that streams it.
 	const liveSkipped = LIVE_SKIPPED_REASONS.includes(source.liveSkipped) ? source.liveSkipped : null;
+	// Issue #920: what a forge job's /artifacts folder left, numbers only (artifacts-record.mjs).
+	const artifacts = recordedArtifacts(source.artifacts);
 	// Issue #712: the OpenShell venues' policy facts, held to the venue the job resolved to, and the secrets profile.
 	const backend = resolveBackendName(data, defaultBackend);
 	const openshell = recordedOpenshell(source.openshell, backend);
@@ -1389,6 +1392,11 @@ export function buildRecord({ job, result, error, startedAt, endedAt, host = nul
 		// (`recordedLimits`), closed keys and enums only. CONDITIONAL, after `jobCreatedAt`: present only for a job that was
 		// admitted, so every refusal before a slot, and every older record, is byte-identical. Additive, so `v` stays.
 		...(recordedLimits(limits) !== null ? { limits: recordedLimits(limits) } : {}),
+		// A forge job's artifacts (issue #920, INT-RUN-HISTORY-FILE-CONTRACT): `{ kept, bytes, dropped }`, REBUILT
+		// (`recordedArtifacts`), counts and closed reason tokens only, the files' names staying in the artifacts store's
+		// manifest. CONDITIONAL, after `limits`: present only for a run that kept or dropped a file, so every other record is
+		// byte-identical. Additive, so `v` stays.
+		...(artifacts !== null ? { artifacts } : {}),
 		// The record's version (issue #761, `RUN_RECORD_VERSION`), the LAST key on every record and after every conditional
 		// key, so it stays last whatever a record carries and every earlier position is untouched. Unconditional: a reader
 		// asks one key, and a missing one reads as 1.

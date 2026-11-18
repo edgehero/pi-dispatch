@@ -1145,6 +1145,8 @@ docker run --rm --entrypoint grep "$IMAGE_REF" -q "pi-dispatch-outbox-v1" /opt/p
 	|| fail "the outbox sentinel is missing from /opt/pi-dispatch/OUTBOX_PROTOCOL.md -- a local job would run without the outbox protocol."
 docker run --rm --entrypoint grep "$IMAGE_REF" -q "pi-dispatch-portfolio-v1" /opt/pi-dispatch/PORTFOLIO_PROTOCOL.md 2>/dev/null \
 	|| fail "the portfolio sentinel is missing from /opt/pi-dispatch/PORTFOLIO_PROTOCOL.md -- a portfolio job would run without the plan protocol."
+docker run --rm --entrypoint grep "$IMAGE_REF" -q "pi-dispatch-artifacts-v1" /opt/pi-dispatch/ARTIFACTS_PROTOCOL.md 2>/dev/null \
+	|| fail "the artifacts sentinel is missing from /opt/pi-dispatch/ARTIFACTS_PROTOCOL.md -- a forge job would not be told where to keep its evidence."
 ok "the outbox and portfolio protocols are baked where the runner reads them"
 
 # Root-owned and NOT writable by the runtime user, or the floor is advisory.

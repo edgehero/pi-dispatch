@@ -14,8 +14,8 @@ import { DEFAULT_LAYOUT, LAYOUT, LAYOUT_ENV, LAYOUTS, layoutName } from "../src/
 
 const BASE = { PI_PROVIDER: "anthropic", PI_MODEL: "m", PI_MAX_TURNS: "5" };
 
-test("the mounts layout keeps the original paths and a separate secret-files root", () => {
-	assert.deepEqual(LAYOUTS.mounts, { job: "/job", workspace: "/workspace", session: "/session", outbox: "/outbox", inbox: "/inbox", global: "/opt/pi-global", secretFiles: "/run/secrets" });
+test("the mounts layout keeps the original paths, a separate secret-files root and #920's artifacts folder", () => {
+	assert.deepEqual(LAYOUTS.mounts, { job: "/job", workspace: "/workspace", session: "/session", outbox: "/outbox", inbox: "/inbox", global: "/opt/pi-global", secretFiles: "/run/secrets", artifacts: "/artifacts" });
 	assert.equal(DEFAULT_LAYOUT, "mounts");
 	// This test file runs with no PI_JOB_LAYOUT, so the process layout is the default one.
 	assert.equal(LAYOUT, LAYOUTS.mounts);
@@ -62,7 +62,7 @@ test("every module that names a container path follows the layout the process st
 		const mcp = await import(${JSON.stringify(`${src}mcp.mjs`)});
 		const merge = await import(${JSON.stringify(`${src}merge-policy.mjs`)});
 		console.log(JSON.stringify({ skills: packages.PROTECTED_SKILL_ROOTS, outbox: plan.OUTBOX_DIR, snapshot: plan.SNAPSHOT_PATH, inbox: inbox.INBOX_DIR, home: config.HOME_FORBIDDEN_ROOTS,
-			loader: [loader.OUTBOX_MOUNT, loader.PORTFOLIO_SNAPSHOT_PATH, loader.JOB_PI_DIR, loader.TRIGGER_SKILLS_DIR, loader.GLOBAL_PI_DIR, loader.WORKSPACE], mcp: mcp.JOB_MCP_PATH, merge: merge.MERGE_POLICY_PATH }));
+			loader: [loader.OUTBOX_MOUNT, loader.PORTFOLIO_SNAPSHOT_PATH, loader.JOB_PI_DIR, loader.TRIGGER_SKILLS_DIR, loader.GLOBAL_PI_DIR, loader.WORKSPACE, loader.ARTIFACTS_MOUNT], mcp: mcp.JOB_MCP_PATH, merge: merge.MERGE_POLICY_PATH }));
 	`;
 	const read = (layout) => JSON.parse(execFileSync(process.execPath, ["--input-type=module", "-e", script], { env: { ...process.env, [LAYOUT_ENV]: layout }, encoding: "utf8" }));
 	assert.deepEqual(read("sandbox"), {
@@ -70,8 +70,8 @@ test("every module that names a container path follows the layout the process st
 		outbox: "/sandbox/outbox",
 		snapshot: "/sandbox/job/portfolio.json",
 		inbox: null,
-		home: ["/sandbox/workspace", "/sandbox/job", "/sandbox/outbox", "/sandbox/session"],
-		loader: ["/sandbox/outbox", "/sandbox/job/portfolio.json", "/sandbox/job/pi", "/sandbox/job/trigger-skills", "/sandbox/pi-global", "/sandbox/workspace"],
+		home: ["/sandbox/workspace", "/sandbox/job", "/sandbox/outbox", "/sandbox/session", "/sandbox/artifacts"],
+		loader: ["/sandbox/outbox", "/sandbox/job/portfolio.json", "/sandbox/job/pi", "/sandbox/job/trigger-skills", "/sandbox/pi-global", "/sandbox/workspace", "/sandbox/artifacts"],
 		mcp: "/sandbox/job/mcp.json",
 		merge: "/sandbox/job/merge-policy.json",
 	});
@@ -80,8 +80,8 @@ test("every module that names a container path follows the layout the process st
 		outbox: "/outbox",
 		snapshot: "/job/portfolio.json",
 		inbox: "/inbox",
-		home: ["/workspace", "/job", "/outbox", "/session"],
-		loader: ["/outbox", "/job/portfolio.json", "/job/pi", "/job/trigger-skills", "/opt/pi-global", "/workspace"],
+		home: ["/workspace", "/job", "/outbox", "/session", "/artifacts"],
+		loader: ["/outbox", "/job/portfolio.json", "/job/pi", "/job/trigger-skills", "/opt/pi-global", "/workspace", "/artifacts"],
 		mcp: "/job/mcp.json",
 		merge: "/job/merge-policy.json",
 	});

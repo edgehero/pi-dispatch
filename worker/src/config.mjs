@@ -13,7 +13,7 @@ import { DEFAULT_BACKEND, OPENSHELL_BACKENDS, OPENSHELL_BIND_BACKEND, backendRef
 import { egressArmed, egressProxyName } from "./egress.mjs";
 import { MINTED_TOKEN_VARS, RECEIVER_ONLY_VARS } from "./forges.mjs";
 import { SWEEP_INTERVAL_HOURS, SWEEP_INTERVAL_MAX_HOURS } from "./retention-sweep.mjs";
-import { RUN_MIRROR_MAX_RUNS_DEFAULT, RUN_MIRROR_MAX_RUNS_MAX, RUN_MIRROR_MAX_RUNS_MIN } from "./retention.mjs";
+import { ARTIFACTS_RETENTION_DAYS_DEFAULT, RUN_MIRROR_MAX_RUNS_DEFAULT, RUN_MIRROR_MAX_RUNS_MAX, RUN_MIRROR_MAX_RUNS_MIN } from "./retention.mjs";
 import { DOCTOR_INTERVAL_HOURS, DOCTOR_INTERVAL_MAX_HOURS } from "./doctor-spawner.mjs";
 import { parseSecretBundleProfiles, parseSecretProfiles } from "./secret-profiles.mjs";
 import { WAIT_AFTER_MAX_DEFAULT_MS, WAIT_INTERVAL_FLOOR_MS, parseWaitProfiles } from "./wait-for.mjs";
@@ -571,6 +571,16 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		sandboxRetentionHours: nonNegativeInt(env, "PI_SANDBOX_RETENTION_HOURS", 24),
 		sandboxPinDays: nonNegativeInt(env, "PI_SANDBOX_PIN_DAYS", 7), // `--pin` extends to now + this, never to forever
 		sandboxIdleMinutes: nonNegativeInt(env, "PI_SANDBOX_IDLE_MINUTES", 30), // bash's own TMOUT inside a sandbox; 0 = no idle logout
+		// Issue #920 (REQ-FORGE-JOB-ARTIFACTS): what a forge job leaves in /artifacts, kept here after the job. The store,
+		// `||` like the sandbox's, so an empty string falls back. A count of 0 turns the feature off: no folder is made or
+		// mounted and the agent is not told of one. Each bound is a ceiling, so a value past it refuses to boot naming the
+		// key rather than keep more than the operator meant. The per-file cap is never above the per-run one.
+		artifactsDir: artifactsDirPath(env),
+		artifactsMaxFiles: nonNegativeInt(env, "PI_ARTIFACTS_MAX_FILES", 20, 200),
+		artifactsMaxFileMb: boundedInt(env, "PI_ARTIFACTS_MAX_FILE_MB", 10, 1, "an integer 1-1024", 1024),
+		artifactsMaxRunMb: boundedInt(env, "PI_ARTIFACTS_MAX_RUN_MB", 25, 1, "an integer 1-4096", 4096),
+		// Days a run's files stay; 0 keeps them (the log retention's sentinel, NOT the sandbox's "off").
+		artifactsRetentionDays: nonNegativeInt(env, "PI_ARTIFACTS_RETENTION_DAYS", ARTIFACTS_RETENTION_DAYS_DEFAULT),
 		triggersFile: env.PI_TRIGGERS_FILE ?? null, // DES-CRON-VIA-BULLMQ-SCHEDULER: unified triggers file; null = cron disabled for the worker (it selects on.type:"cron")
 		pauseWindowsFile: pauseWindowsFilePath(env), // REQ-SCOPED-PAUSE-WINDOWS: per-folder/repo timed pause; null = no scoped pauses
 		privateEndpointsFile: privateEndpointsFilePath(env), // issue #918: the declared private endpoints (INT-PRIVATE-ENDPOINTS-FILE-CONTRACT); null = private-endpoints.json in the deployment folder, and a missing default file declares none
@@ -1166,6 +1176,17 @@ function tempRoot(env = process.env) {
 export function legacyTempStateDir(env = process.env) {
 	// The SHARED address every account used before issues #290 and #464; not a path anything writes any more.
 	return `${tempRoot(env)}/pi-dispatch`;
+}
+
+/** The artifacts store's default (issue #920): beside the run history, which is what a run's files belong to. Exported so
+ * the console resolves the same folder without loadConfig. */
+export function defaultArtifactsDir(env = process.env, home = safeHomeDir(), uid = currentUid()) {
+	return `${defaultStateDir(env, home, uid)}/artifacts`;
+}
+
+/** The artifacts store this environment names: `PI_ARTIFACTS_DIR`, else the default. */
+export function artifactsDirPath(env = process.env, home) {
+	return env.PI_ARTIFACTS_DIR || defaultArtifactsDir(env, home);
 }
 
 export function defaultLogsDir(env = process.env, home = safeHomeDir(), uid = currentUid()) {

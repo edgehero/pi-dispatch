@@ -598,6 +598,7 @@ export function makeRunContainer({
 			// an unremovable stale file makes the run itself fail to start, which is reported as that
 		}
 
+		if (layout !== "mounts" && typeof prepared.artifactsDir === "string") log("artifacts_skipped", { container: name, reason: "venue-copies" });
 		const buildOpts = {
 			// Same split as packagePaths above: the per-job value off `job`, the deployment value off the closure,
 			// so a trigger can name its own toolchain (INT-TRIGGERS-FILE-CONTRACT). Resolved through the SAME
@@ -608,6 +609,10 @@ export function makeRunContainer({
 			jobDir: prepared.jobDir,
 			workspace: prepared.workspace,
 			outboxDir: prepared.outboxDir, // undefined for github jobs -> docker-run's guard skips the /outbox mount
+			// Issue #920: a forge job's artifacts folder (index.mjs stages it), mounted at /artifacts on a venue that BINDS. A
+			// copying venue's runner writes only where pi-landlock's list allows, and a path on that list must exist, so the
+			// folder is left off there and said once rather than offered to a job that could not write it.
+			artifactsDir: layout === "mounts" ? prepared.artifactsDir : undefined,
 			// The job's OWN copy, under jobDir -- never the shared store. Undefined only when no transcript file was staged
 			// (a caller that predates issue #643, or a staging that failed), and docker-run's guard then skips the mount.
 			sessionDir: transcriptDir ?? undefined,
