@@ -43,6 +43,15 @@ Nothing about a file can fail the job. What was dropped is counted by reason (`n
 
 A run that left nothing records nothing. A retry of the same job replaces its earlier attempt's files.
 
+## On the console
+
+The run page's **Artifacts** card lists what a run kept: each name opens the file, an image is drawn small under its
+name, text opens as text, anything else downloads, and a file that was not kept is one line with its reason. **Viewers
+see the card and can open the files too**, because the evidence is for the person reviewing the pull request; an agent
+token cannot. Each file is served under a policy that lets it run, load and send nothing, and only images and plain text
+are shown in the browser. The console reads its own host's store, so a run another host kept files for names that host.
+See [the console](console.md#a-runs-artifacts).
+
 ## Settings
 
 | Setting | Default | What it does |

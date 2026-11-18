@@ -1581,7 +1581,12 @@ writes retain their existing interactive confirmation. This adds no unattended p
   explicitly specified above; and,
   since #641, shall end every event stream when its session ends without a stream ever extending one, and shall show
   free run text (BullMQ `failedReason`) and the audit log to the operator role alone; and, since #643, shall show a
-  run's live transcript to the operator role alone, escaped, and only on the run page; and, since 2026-10-18 (insights
+  run's live transcript to the operator role alone, escaped, and only on the run page; and, since #920, shall serve the
+  files a forge job kept (`REQ-FORGE-JOB-ARTIFACTS`) to a signed-in operator OR VIEWER, never an agent token, only from
+  this host's store and only a name its manifest lists, each under a sandboxed policy of its own that allows no script,
+  load or form, inline only for the four image types and plain text and as an attachment otherwise, the first
+  agent-written bytes a viewer may open, bounded by what was kept: text cleaned of the job's secrets, a binary holding
+  one dropped; and, since 2026-10-18 (insights
   move to the console), shall serve the `/insights` page with zero external requests under its CSP, answer its what-if
   as a GET read for either role (bounded and cached, never an action and never a ticket), and draw full local paths
   there (`paths=full`) for the operator role alone; and, since #647, shall hold a non-browser client (the terminal
@@ -2036,6 +2041,13 @@ writes retain their existing interactive confirmation. This adds no unattended p
 
 ## REQ-OPERATOR-CONSOLE-SCREENS
 
+- **AMENDED 2026-11-18 (#920), (c), the run page's Artifacts card.** A run whose record says a forge job kept or dropped
+  files (`INT-RUN-HISTORY-FILE-CONTRACT` `artifacts`) shows an Artifacts card, to an operator and a viewer alike: each
+  kept file from this host's store with its size and kind (an image drawn small, text opened as text, anything else a
+  download, through `/api/artifact`), each reason a file was not kept, and when the files go; or that they were removed
+  after the retention (`expired`), which host keeps them (`elsewhere`), or that they could not be read here
+  (`unreadable`). A run that kept and dropped nothing has no card. The states are `ARTIFACT_STATES`, held to
+  `docs/console.md`'s table by `admin/test/console-doc-tables.test.mjs`.
 - **AMENDED 2026-11-16 (#912), (a4), preserve the timeline's visual design.** The library timeline keeps the
   original Pulse presentation: solid rounded run pills, project tags, segmented grouping and zoom controls, subtle
   dashed time lines, a bottom time ruler and a shaded future area with a labelled Now line. Short marks retain an
@@ -9761,3 +9773,4 @@ instead of drifting.
 | 2026-11-18 (#932) | **`REQ-DEDUP-BY-DELIVERY-GUID` AMENDED**: a request the semantic window joins to a job that has already ended is answered on the forge. The receiver and the poller add a notice job (no window, `<delivery job id>-dup`, only `duplicateOf` and `windowEndsAt` beyond where to comment), the worker answers it before every gate with one fixed comment and a `duplicate-request` record, and job data version 10 makes an older worker hold it; a request joined to a live job gets none; the console asks for none. The window, key grammar, #899 repair, replicas, routing and wire answer UNCHANGED, checked. **`REQ-JOB-STATUS-COMMENTS` AMENDED**: that comment's exact words (fixed words, the ended job's id, a UTC time) and its Acceptance line. `REQ-RUN-PROGRESS` and `REQ-REPLICA-RUNS` UNCHANGED, checked: replicas of one dropped delivery share one notice by its id. |
 | 2026-11-18 (#932, part 2) | **`REQ-DEDUP-BY-DELIVERY-GUID` AMENDED**: `pi-dispatch status --target <item>` lists an item's jobs queued, held or running and, per flow, what a new request would do (`joined` or `dropped`), saying `complete: false` whenever part of the queue was not read. `REQ-JOB-STATUS-COMMENTS` UNCHANGED, checked: the command posts nothing. |
 | 2026-11-18 (#920, part 1) | **NEW `REQ-FORGE-JOB-ARTIFACTS`**: a forge job's `/artifacts` folder, kept after the job within the operator's limits and retention, judged by content, text cleaned of the job's secrets, a binary holding one dropped, every drop counted on the record and none able to refuse, retry or fail the job; binding venues only, off at `PI_ARTIFACTS_MAX_FILES=0`. The console's listing and the closing comment are parts 2 and 3. `REQ-RESURRECTABLE-SANDBOX` UNCHANGED, checked: the kept sandbox drops `artifacts/` like `session/`, so its contents and its day are as they were. `REQ-JOB-STATUS-COMMENTS` UNCHANGED, checked (part 3 amends it). |
+| 2026-11-18 (#920, part 2) | **`REQ-CONSOLE-SECURITY` AMENDED**: the files a forge job kept are served to a signed-in operator or viewer, never an agent token, only from this host's store and only a name its manifest lists, each under a sandboxed policy of its own, inline only for the four image types and plain text; the first agent-written bytes a viewer may open, bounded by what was kept. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED** ((c)): the run page's Artifacts card and its five states. `REQ-FORGE-JOB-ARTIFACTS` UNCHANGED, checked: what is kept is as part 1 says. |

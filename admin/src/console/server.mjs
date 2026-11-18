@@ -101,6 +101,7 @@ import { getRun, resolveRunPath } from "./run-api.mjs";
 import { parseRunPath, RUN_PATH_PREFIX, RUN_PATH_QUERY_REFUSAL } from "./run-path.mjs";
 import { parseRunFilter } from "../run-filter.mjs";
 import { getForkPoints } from "./fork-api.mjs";
+import { getArtifact } from "./artifact-api.mjs";
 import * as realPages from "./pages.mjs";
 import { CONSOLE_SCRIPT } from "./script.mjs";
 import { endedReasonOf, PERSON_HEADER, PERSON_PARAM } from "./session-ends.mjs";
@@ -1220,6 +1221,9 @@ export const ROUTES = Object.freeze([
   { method: "GET", path: "/api/fork-points", auth: "operator", write: false, handler: getForkPoints },
   { method: "GET", path: "/api/watch-trace", auth: "operator", write: false, handler: getWatchTrace },
   { method: "GET", path: "/api/run", auth: "viewer", write: false, handler: getRun },
+  // Issue #920: one file a forge job kept, to a person (an agent token is refused in the handler), under its own
+  // sandboxed policy (artifact-api.mjs). Under /api, clear of the /run/ short-link prefix.
+  { method: "GET", path: "/api/artifact", auth: "viewer", write: false, handler: getArtifact },
   // `noHead`: a HEAD would take a stream slot and hold it with no body ever sent, so it is 405 before anything runs.
   // `stream`: an event stream, which says its page's person in the query (`PERSON_PARAM`, see the header).
   { method: "GET", path: "/api/events", auth: "viewer", write: false, noHead: true, stream: true, handler: getEvents },

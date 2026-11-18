@@ -832,7 +832,7 @@ readers ([Live updates](#live-updates)).
 | `/runs` | Every run this host and the fleet's run mirror know of, newest first, grouped by the day they ended (UTC), each run's Ended cell the time alone under its day's heading, with paging. Above them the filters (one search for a repository, a target or a job id, a chip per project, a list per field, and the filters you applied as chips you can remove) and the last 24 hours counted by outcome, each count a link to those runs, with the spend they settled and an **Only problems** switch ([Finding runs](#finding-runs)). The Outcome column says completed, refused, failed, awaiting input or cancelled on a badge with its icon; every outcome but completed and the two words that say why (awaiting input, cancelled) is followed by its reason as a short sentence ([Outcomes and reasons](#outcomes-and-reasons)), and a completed run that lacked its flow or an extension says so on its badge ([What a run loaded](#what-a-run-loaded)). On a phone each run is a block of its own, and the filters fold behind a Filters button. In a window narrower than 1440 pixels, as on a phone, the table leaves out the flow, venue, model, tokens and job cap (the run's own page shows them), so it fits without scrolling sideways; a long job id (past 22 characters, so a forge delivery's id takes two lines), host, flow or model (past 20) breaks inside its own box rather than widen its column. |
 | `/runs/sandboxes` | Operators only: kept workspaces and registered shells across hosts, terminal handoff and copy commands, confirmed preparation/pin/End requests. See [Opening a sandbox](#opening-a-sandbox). |
 | `/runs/zero-touch` | How often workload runs needed a person over 7, 30 or 90 days, by project and by cause ([Zero touch](#zero-touch)). |
-| `/run?id=<job id>` | One run in the Pulse main/side grid: a job id, with the run's short link beside it for an issue, pull request or merge request ([A run's short link](#a-runs-short-link)), status, project/target/host headline and state panels for live, ended, refused, parked or recovering runs. Progress and the transcript update on one connection, attaching without reload. A **Loaded** card says what the run had ([What a run loaded](#what-a-run-loaded)). Chat, Inbox, Sandbox, Secrets, cost/model usage, resources, sessions and chain appear where relevant. Operators get eligible Cancel, answer, re-run and terminal actions through previews; viewers see status, numbers and the Loaded card's names, versions, image and tool names, with a banner explaining what is hidden. |
+| `/run?id=<job id>` | One run in the Pulse main/side grid: a job id, with the run's short link beside it for an issue, pull request or merge request ([A run's short link](#a-runs-short-link)), status, project/target/host headline and state panels for live, ended, refused, parked or recovering runs. Progress and the transcript update on one connection, attaching without reload. A **Loaded** card says what the run had ([What a run loaded](#what-a-run-loaded)), and an **Artifacts** card lists the files a forge job kept ([A run's artifacts](#a-runs-artifacts)). Chat, Inbox, Sandbox, Secrets, cost/model usage, resources, sessions and chain appear where relevant. Operators get eligible Cancel, answer, re-run and terminal actions through previews; viewers see status, numbers, the Loaded card's names, versions, image and tool names and the files a run kept, with a banner explaining what is hidden. |
 | `/parked` | A card for each run waiting for an answer: who asked (the run, linked to its page), how long it has waited, its project, a link to where the question was asked, its forge and how many times the session was resumed, and where to read the question (on its issue or pull request, or on its run page while the live transcript is kept); the card never shows the question itself. Then how it can be answered: being answered by a run (linked), not known, an answer box, or why it cannot be answered here ([A parked run](#outcomes-and-reasons)). |
 | `/parked/rules` | Operators only: the answer rules, read only, as `triggers.json` declares them ([Answer rules](answer-rules.md)). |
 | `/insights?range=30d` | Spend's five linked views: Spend, Budget split (`/insights/budget-split`), Capacity (`/insights/capacity`), Breakdown (`/insights/breakdown`) and Flows map (`/insights/flows`, also `view=list`). All are viewer-readable, drawn once per load, with supported range/project/path choices preserved. Budget split actions and plan reasons are operator-only. See [Spend views](insights.md). |
@@ -1709,6 +1709,32 @@ run page is a live page: its panels and transcript share one connection and one 
   "This run continues as" and a link to the recovery job.
 
 The `/dispatch` panel's running rows show the same, with the phase name clipped.
+
+### A run's artifacts
+
+A forge job may leave files in `/artifacts` (a screenshot of what it ran, a test report, a log), and the worker keeps
+them for `PI_ARTIFACTS_RETENTION_DAYS` ([artifacts](artifacts.md)). The run page's **Artifacts** card lists them: each
+name opens the file, an image is drawn small under its name and opens whole, text opens as text, and anything else
+downloads. A file that was not kept is one line with its reason. **Viewers see this card and can open the files**, since
+the evidence is for a pull request's reviewer; text files were cleaned of the job's secrets, images and other files were
+kept as written, so a screenshot shows whatever the job's screen showed. An agent token cannot open them.
+
+Each file is served at `/api/artifact?id=<job id>&name=<name>`, looked up in the run's manifest, never a path, under a
+policy of its own: a sandboxed page that may run, load and send nothing. Only the four image types and plain text are
+shown in the browser; every other file is a download. Opening one is not written to the audit log, as reading a
+transcript is not.
+
+The console reads its own host's store only. A run another host kept files for names that host instead.
+
+| State | The card says | What to do |
+|---|---|---|
+| `kept` | Each file with its size and kind, what was not kept and why, and when the files go | Open a file, or read the reason a file was not kept and change the setting it names |
+| `dropped` | This run kept no file, and why each was not kept | Change the job, or the setting a reason names (`PI_ARTIFACTS_MAX_FILES`, `PI_ARTIFACTS_MAX_FILE_MB`, `PI_ARTIFACTS_MAX_RUN_MB`) |
+| `expired` | The files were removed after this host's retention | Nothing to open; raise `PI_ARTIFACTS_RETENTION_DAYS` to keep later runs' files longer |
+| `elsewhere` | Another host keeps the files, and which one | Open the run on that host's console |
+| `unreadable` | The files could not be read here | Check `PI_ARTIFACTS_DIR` on this host and its permissions |
+
+A run that kept and dropped nothing has no Artifacts card.
 
 ### The live transcript
 

@@ -32,7 +32,8 @@ import { GIT_READ_FLAGS } from "@edgehero/pi-dispatch/git-hardening";
 import { join, delimiter, sep, isAbsolute, resolve as resolvePath } from "node:path";
 import { execFileSync } from "node:child_process";
 import { homedir } from "node:os";
-import { DEFAULT_VALKEY_URL, logsDirPath, defaultSandboxDir, delimitedList, workerName, CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT, WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
+import { ARTIFACTS_FILES_DIR, ARTIFACTS_MANIFEST, ARTIFACTS_MANIFEST_MAX_BYTES, ARTIFACT_NAME_RE, artifactRunDirOf, artifactsManifestOf, recordedArtifacts } from "@edgehero/pi-dispatch/artifacts-record";
+import { DEFAULT_VALKEY_URL, artifactsDirPath, logsDirPath, defaultSandboxDir, delimitedList, workerName, CHAIN_DEPTH_MAX_DEFAULT, CHAIN_MAX_PER_JOB_DEFAULT, WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
 import { JOB_IDLE_MINUTES_DEFAULT, JOB_STALL_MINUTES_DEFAULT } from "@edgehero/pi-dispatch/job-limit-rules";
 import { settingsFilePath, readOverlay, readOverlayDocument, writeOverlay, KNOWN_KEYS, OPERATOR_ONLY_KEYS } from "@edgehero/pi-dispatch/runtime-settings";
 import { DOLLAR_ENV_NAMES, DOLLAR_SETTING_KEYS, checkDollarInvariant, formatMicros } from "@edgehero/pi-dispatch/money";
@@ -139,6 +140,30 @@ export { KNOWN_KEYS };
  * kill switch (cli.mjs:80-88), the admin must work when the worker's GitHub auth or other env is broken,
  * so it depends only on the handful of variables it actually reads.
  */
+/**
+ * A file's bytes (a string unless `raw`), opened read-only without following a link, refused (null) when it is not a
+ * regular file or is larger than `max`; throws the open's own error (ENOENT included) for the caller to name. Issue #920's
+ * artifacts reads, the history reader's posture (`worker/src/history-reader.mjs`).
+ */
+function readBoundedFile(path, max, { raw = false } = {}) {
+  const fd = nodeFs.openSync(path, nodeFs.constants.O_RDONLY | nodeFs.constants.O_NOFOLLOW);
+  try {
+    const st = nodeFs.fstatSync(fd);
+    if (!st.isFile() || st.size > max) return null;
+    const bytes = Buffer.alloc(st.size);
+    let read = 0;
+    while (read < bytes.length) {
+      const n = nodeFs.readSync(fd, bytes, read, bytes.length - read, read);
+      if (n === 0) break;
+      read += n;
+    }
+    if (read !== bytes.length) return null;
+    return raw ? bytes : bytes.toString("utf8");
+  } finally {
+    nodeFs.closeSync(fd);
+  }
+}
+
 export function resolvePaths(env = process.env) {
   return {
     valkeyUrl: env.VALKEY_URL ?? DEFAULT_VALKEY_URL,
@@ -184,6 +209,8 @@ export function resolvePaths(env = process.env) {
     // OFF (the panel then says so rather than offering a key that always refuses), which is the opposite
     // of the log/session sentinels; worker/src/config.mjs carries the full reasoning.
     sandboxDir: env.PI_SANDBOX_DIR || defaultSandboxDir(env),
+    // Issue #920: where this host keeps forge jobs' artifacts (INT-ARTIFACTS-STORE-CONTRACT), the worker's own rule.
+    artifactsDir: artifactsDirPath(env),
     sandboxRetentionHours: parseNonNegInt(env.PI_SANDBOX_RETENTION_HOURS, 24),
     sandboxIdleMinutes: parseNonNegInt(env.PI_SANDBOX_IDLE_MINUTES, 30),
     // The two dispatch_run bounds the extension enforces producer-side, read DIRECTLY from env (never
@@ -229,7 +256,7 @@ export const DEPLOYMENT_SCAFFOLD_FILES = Object.freeze([".env", "triggers.json",
  * PI_BACKENDS, PI_BACKEND_FLOOR, PI_EGRESS, PI_EGRESS_PROXY, DOCKER_HOST and PI_DISPATCH_RUN_ROOTS stay this process's
  * own on purpose (`OQ-038`, `INT-DEPLOYMENT-POINTER-CONTRACT`), and so do the panel's own settings (PI_DISPATCH_*).
  */
-export const PANEL_SERVICE_KEYS = Object.freeze(["VALKEY_URL", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_TRIGGERS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_ENVELOPE_FILE", "PI_CONSOLE_TOKENS_FILE", "PI_GLOBAL_PI_DIR", "PI_SANDBOX_DIR", "PI_SANDBOX_RETENTION_HOURS", "PI_SANDBOX_IDLE_MINUTES", "PI_CAPTURE_JOB_LOGS", "PI_SCHEDULER_STALL_MAX", "PI_CHAIN_DEPTH_MAX", "PI_CHAIN_MAX_PER_JOB", "PI_RUN_MIRROR_MAX_RUNS", "PI_WORKER_NAME", "PI_CONSOLE_LISTEN", "PI_CONSOLE_BIND_PUBLIC", "PI_SESSIONS_DIR", "PI_SECRET_BUNDLES", "PI_SECRET_PROFILES", "PI_SECRET_RESOLVER_ROOTS", "PI_AUTH_CONNECTIONS_FILE", "PI_AUTH_STORE_DIR", "TMPDIR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
+export const PANEL_SERVICE_KEYS = Object.freeze(["VALKEY_URL", "PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_TRIGGERS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_ENVELOPE_FILE", "PI_CONSOLE_TOKENS_FILE", "PI_GLOBAL_PI_DIR", "PI_SANDBOX_DIR", "PI_SANDBOX_RETENTION_HOURS", "PI_SANDBOX_IDLE_MINUTES", "PI_ARTIFACTS_DIR", "PI_CAPTURE_JOB_LOGS", "PI_SCHEDULER_STALL_MAX", "PI_CHAIN_DEPTH_MAX", "PI_CHAIN_MAX_PER_JOB", "PI_RUN_MIRROR_MAX_RUNS", "PI_WORKER_NAME", "PI_CONSOLE_LISTEN", "PI_CONSOLE_BIND_PUBLIC", "PI_SESSIONS_DIR", "PI_SECRET_BUNDLES", "PI_SECRET_PROFILES", "PI_SECRET_RESOLVER_ROOTS", "PI_AUTH_CONNECTIONS_FILE", "PI_AUTH_STORE_DIR", "TMPDIR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
 // The console's address (the insights move to the console): `/dispatch insights` and the `i` key print the spend
 // screen's URL from the PI_CONSOLE_LISTEN the console itself reads from this `.env` (`console/link.mjs`).
 // The session store (issue #647, part 2): `/dispatch chat` forks a finished run from the PI_SESSIONS_DIR the worker
@@ -245,7 +272,7 @@ export const PANEL_SERVICE_KEYS = Object.freeze(["VALKEY_URL", "PI_LOGS_DIR", "P
 // The dollar settings (issue #501) are among them: `dispatch_set`'s confirm states a dollar key's effective value, and
 // in a pointer deployment the cap the worker runs under lives in the deployment's `.env`, not in pi's environment.
 // Of those, the paths: a relative one in `.env` is relative to the service's working directory, the deployment folder.
-const PANEL_PATH_KEYS = new Set(["PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_TRIGGERS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_ENVELOPE_FILE", "PI_CONSOLE_TOKENS_FILE", "PI_GLOBAL_PI_DIR", "PI_SANDBOX_DIR", "PI_SESSIONS_DIR", "TMPDIR", "TEMP"]);
+const PANEL_PATH_KEYS = new Set(["PI_LOGS_DIR", "PI_SETTINGS_FILE", "PI_TRIGGERS_FILE", "PI_PAUSE_WINDOWS_FILE", "PI_SCOPED_LIMITS_FILE", "PI_PROJECTS_FILE", "PI_ENVELOPE_FILE", "PI_CONSOLE_TOKENS_FILE", "PI_GLOBAL_PI_DIR", "PI_SANDBOX_DIR", "PI_ARTIFACTS_DIR", "PI_SESSIONS_DIR", "TMPDIR", "TEMP"]);
 
 /**
  * Issue #471: the environment `resolvePaths` should see, by the rule `doctor` judges the service by
@@ -5426,6 +5453,67 @@ export function createFleetReader(
         return got.retained ? { retained: true, why: null, until: typeof got.until === "string" && Number.isFinite(Date.parse(got.until)) ? new Date(got.until).toISOString() : Number.isSafeInteger(got.until) && got.until >= 0 ? got.until : null } : { retained: false, why: got.why, reason: got.reason };
       } catch {
         return { elsewhere: true };
+      }
+    },
+    // A forge job's artifacts for the run page (issue #920, INT-ARTIFACTS-STORE-CONTRACT): null when the record says the run
+    // kept and dropped nothing (no panel), else `{ state, counts, ... }`, `state` one of `ARTIFACT_STATES`:
+    //   - `kept`: this host's store holds the run's manifest, `files` and `dropped` from it, `keepUntil` when it goes;
+    //   - `dropped`: the run kept no file and dropped some (`counts` alone says which);
+    //   - `expired`: the record says files were kept here, and the store no longer holds them (the retention sweep);
+    //   - `elsewhere`: another host ran the job and keeps its files; this console reads its own host's store only;
+    //   - `unreadable`: a manifest this reader cannot take (or a store it cannot open), never read as "none".
+    // The manifest only, never a file, bounded and opened without following a link. Never throws.
+    artifacts(jobId, record) {
+      const counts = recordedArtifacts(record?.artifacts);
+      if (counts === null) return null;
+      if (counts.kept === 0) return { state: "dropped", counts };
+      const host = typeof record?.host === "string" && record.host !== "" ? record.host : null;
+      try {
+        const self = doctorSelfName(dollarEnvFn() ?? {});
+        const dir = typeof jobId === "string" && RUN_ID_RE.test(jobId) ? artifactRunDirOf(jobId) : null;
+        if (dir === null || typeof paths.artifactsDir !== "string") return { state: "unreadable", counts };
+        let text;
+        try {
+          text = readBoundedFile(join(paths.artifactsDir, dir, ARTIFACTS_MANIFEST), ARTIFACTS_MANIFEST_MAX_BYTES);
+        } catch (error) {
+          if (error?.code !== "ENOENT") return { state: "unreadable", counts };
+          return host !== null && host !== self ? { state: "elsewhere", counts, host } : { state: "expired", counts };
+        }
+        const manifest = text === null ? null : artifactsManifestOf(text);
+        if (manifest === null || manifest.jobId !== jobId) return { state: "unreadable", counts };
+        return { state: "kept", counts, files: manifest.files, dropped: manifest.dropped, keepUntil: manifest.keepUntil };
+      } catch {
+        return { state: "unreadable", counts };
+      }
+    },
+    // One kept file of run `jobId`, for `/api/artifact` (issue #920): `{ bytes, type, name }`, `{ missing: true }` for a
+    // name the run's manifest does not list or a file that is gone, or `{ unreadable: true }`. The name is looked up in the
+    // manifest and never joined from the request; the file is opened without following a link, and its size must be the
+    // manifest's, so a file changed under the store is refused rather than served. Never throws.
+    artifactFile(jobId, name) {
+      try {
+        const dir = typeof jobId === "string" && RUN_ID_RE.test(jobId) ? artifactRunDirOf(jobId) : null;
+        if (dir === null || typeof name !== "string" || !ARTIFACT_NAME_RE.test(name) || typeof paths.artifactsDir !== "string") return { missing: true };
+        let text;
+        try {
+          text = readBoundedFile(join(paths.artifactsDir, dir, ARTIFACTS_MANIFEST), ARTIFACTS_MANIFEST_MAX_BYTES);
+        } catch (error) {
+          return error?.code === "ENOENT" ? { missing: true } : { unreadable: true };
+        }
+        const manifest = text === null ? null : artifactsManifestOf(text);
+        if (manifest === null || manifest.jobId !== jobId) return { unreadable: true };
+        const entry = manifest.files.find((f) => f.name === name);
+        if (!entry) return { missing: true };
+        let bytes;
+        try {
+          bytes = readBoundedFile(join(paths.artifactsDir, dir, ARTIFACTS_FILES_DIR, entry.name), entry.size, { raw: true });
+        } catch (error) {
+          return error?.code === "ENOENT" ? { missing: true } : { unreadable: true };
+        }
+        if (bytes === null || bytes.length !== entry.size) return { unreadable: true };
+        return { bytes, type: entry.type, name: entry.name };
+      } catch {
+        return { unreadable: true };
       }
     },
     // The kill switch (issue #642): ONE funnel with the tools' `killSwitchSet`, so a resume across two disagreeing

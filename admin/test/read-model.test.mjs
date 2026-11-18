@@ -212,6 +212,8 @@ test("resolvePaths reads env with safe defaults and never calls loadConfig", () 
     // Pinned so the sandbox default does not drag the OS temp dir into this equality
     // (REQ-RESURRECTABLE-SANDBOX); the defaulting itself is asserted in its own test below.
     PI_SANDBOX_DIR: "/sbx",
+    // Issue #920: pinned for the same reason, so the home folder is not in this equality.
+    PI_ARTIFACTS_DIR: "/art",
     // A retired key (the insights move to the console): set, and read by nothing, so it is in no field below.
     PI_GRAPH_DIR: "/g",
   });
@@ -221,6 +223,7 @@ test("resolvePaths reads env with safe defaults and never calls loadConfig", () 
     settingsFile: "/s.json",
     triggersPath: "/f.json",
     sandboxDir: "/sbx",
+    artifactsDir: "/art",
     sandboxRetentionHours: 24,
     sandboxIdleMinutes: 30,
     globalPiDir: "/srv/pi-global",

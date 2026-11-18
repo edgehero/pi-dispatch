@@ -65,6 +65,7 @@ Every page, panel, state and write of the console has a place here.
 | `/runs`: filters, outcome words, reason sentences, "no explanation yet", mirror and 2,000-run notes, pager | Runs, Runs on a phone |
 | `/run`: outcome, progress and phases, live transcript, chat, inbox, steer and follow-up, re-run with its reserve, sandbox command | Run live, Run ended, Run refused, Run parked, Run chat states, Run workspace and The workspace run by run (proposed) |
 | `/run`: what the run loaded, from its record: pi and its image, the model, extensions, skills and where each came from, MCP servers, tools, and what failed to load (#800) | Run loaded, Loaded states |
+| `/run`: the files a forge job kept in `/artifacts`, served to an operator or a viewer, what was not kept and why, expired and kept-elsewhere states (#920) | Run ended |
 | `/run` for durable runs: continues as, recovery facts, checkpoints, replayed, interrupted and not started calls, earlier attempts, replicas, stalled re-pick | Run recovered |
 | `/run` on OpenShell: sandbox policy, rule hosts, secret bundle variables, shadowed names, bundle skipped, cost floor and settled basis, per-model usage, resources, chain | Run in a sandbox |
 | `/run` for a viewer: numbers, tool names, and what the run loaded (package names, versions and the image), with the operator-only sentences held back | Run as a viewer, Access states |

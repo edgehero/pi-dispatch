@@ -34,6 +34,7 @@ import { fromNewerRelease, NEWER_RECORD_SENTENCE } from "../../newer-release.mjs
 import { sessionKeyOfRecord } from "@edgehero/pi-dispatch/session-key";
 import { isForgeKind } from "@edgehero/pi-dispatch/forges";
 import { isSchedulerJobId } from "@edgehero/pi-dispatch/bullmq-internals";
+import { ARTIFACT_DROP_REASONS, ARTIFACT_DROP_TEXT, artifactSizeText } from "@edgehero/pi-dispatch/artifacts-record";
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
 import { STEER_MAX_MESSAGES, STEER_TOTAL_MAX_BYTES } from "@edgehero/pi-dispatch/steer-inbox";
@@ -1071,7 +1072,60 @@ export function runHost(view) {
 }
 
 export function runViewer(view) {
-  return view.role !== "operator" ? ui.banner({ status: "idle", sm: true, icon: "shield", title: "Signed in as a viewer", body: "Transcripts, chat, phase names, the run's note, failure reasons and every action are shown to operators only." }) : html``;
+  return view.role !== "operator" ? ui.banner({ status: "idle", sm: true, icon: "shield", title: "Signed in as a viewer", body: "Transcripts, chat, phase names, the run's note, failure reasons and every action are shown to operators only. The files a run kept are shown to you too." }) : html``;
+}
+
+// ---- artifacts (issue #920) ------------------------------------------------------------------------------------------
+
+/** The states the Artifacts panel draws, in docs/console.md's order (console-doc-tables.test.mjs holds the table). */
+export const ARTIFACT_STATES = Object.freeze(["kept", "dropped", "expired", "elsewhere", "unreadable"]);
+
+/** A file's own address on this console: the route looks the name up in the run's manifest and serves only that. */
+export function artifactHref(jobId, name) {
+  return `/api/artifact?id=${encodeURIComponent(jobId)}&name=${encodeURIComponent(name)}`;
+}
+
+/** One line per drop reason that happened, in the closed list's order. */
+function droppedLines(dropped) {
+  const rows = ARTIFACT_DROP_REASONS.filter((reason) => Number.isSafeInteger(dropped?.[reason]) && dropped[reason] > 0);
+  if (rows.length === 0) return null;
+  return html`<ul class="plain">${rows.map((reason) => html`<li>${count(dropped[reason])} not kept: ${ARTIFACT_DROP_TEXT[reason]}</li>`)}</ul>`;
+}
+
+/**
+ * What a forge job left in /artifacts (issue #920, `REQ-FORGE-JOB-ARTIFACTS`): the files this host keeps, each served by
+ * `/api/artifact` (an image drawn small and opened whole, text opened as text, anything else downloaded), what was not
+ * kept and why, or why the files cannot be shown here. Shown to viewers too (`RUN_VIEWER_PANELS`): the evidence is for a
+ * pull request's reviewer, who is often one. Nothing at all for a run that kept and dropped nothing.
+ */
+export function runArtifacts(view) {
+  // Not `withRun`: that draws the card whatever its body says, and a run with nothing kept must draw no card at all.
+  const r = view.data?.run?.record;
+  const a = view.data?.artifacts;
+  if (!r || refusedBeforeStart(r) || !a || !ARTIFACT_STATES.includes(a.state)) return html``;
+  return titled("Artifacts", artifactsBody(r, a));
+}
+
+function artifactsBody(r, a) {
+  const kept = a.counts?.kept ?? 0;
+  if (a.state === "dropped") return html`<p>This run kept no file.</p>${droppedLines(a.counts?.dropped)}`;
+  if (a.state === "expired") return html`<p>The ${count(kept)} ${kept === 1 ? "file" : "files"} this run kept (${artifactSizeText(a.counts?.bytes)}) were removed after this host's retention (PI_ARTIFACTS_RETENTION_DAYS).</p>${droppedLines(a.counts?.dropped)}`;
+  if (a.state === "elsewhere") return html`<p>Kept on ${a.host}: ${count(kept)} ${kept === 1 ? "file" : "files"}, ${artifactSizeText(a.counts?.bytes)}. This console reads only its own host's files, so open this run on the console of ${a.host}.</p>${droppedLines(a.counts?.dropped)}`;
+  if (a.state === "unreadable") return html`<p>The ${count(kept)} ${kept === 1 ? "file" : "files"} this run kept could not be read here.</p>`;
+  const files = Array.isArray(a.files) ? a.files : [];
+  const rows = files.map((f) => {
+    const href = artifactHref(r.jobId, f.name);
+    const image = f.type.startsWith("image/");
+    const text = f.type === "text/plain";
+    // A download for anything that is neither an image nor text: the route sends it as an attachment too.
+    const link = image || text ? html`<a class="mono" href="${href}" target="_blank" rel="noopener noreferrer">${f.name}</a>` : html`<a class="mono" href="${href}" download="${f.name}">${f.name}</a>`;
+    return [
+      image ? html`${link}<br><a href="${href}" target="_blank" rel="noopener noreferrer"><img src="${href}" alt="${f.name}" width="240" loading="lazy"></a>` : link,
+      artifactSizeText(f.size),
+      image ? "image" : text ? (f.scrubbed ? "text, cleaned of the job's secrets" : "text") : "download",
+    ];
+  });
+  return html`${ui.tbl({ label: "Files this run kept", heads: ["File", "Size", "Kind"], rows, stack: true })}${droppedLines(a.dropped)}${a.keepUntil ? html`<p class="note">Kept until ${timeHtml(msOf(a.keepUntil))}.</p>` : html`<p class="note">Kept until this host's retention removes them.</p>`}`;
 }
 
 /** Only exact retained points are selectable; ids carry no transcript text into the page. */

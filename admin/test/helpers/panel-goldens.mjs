@@ -896,6 +896,20 @@ const LIVE_ARMED = Object.freeze({
   inbox: { found: true, steer: true, state: "active", open: true, entries: [{ id: "a1b2c3d4", mode: "steer", source: "console", state: "delivered", at: NOW - 70_000, by: "ops", bytes: Buffer.byteLength(STEER_TEXT) }] },
   progress: { v: 1, interrupted: 0, prior: null, startedAt: NOW - 12 * MIN, updatedAt: NOW - 2_000, ended: false, outcome: null, commentId: null, turn: 7, steps: 12, failed: 1, running: [{ tool: "bash", since: NOW - 40_000 }], recent: [{ tool: "read", status: "ok", durationMs: 120, at: NOW - 90_000 }, { tool: "bash", status: "error", durationMs: 2300, at: NOW - 60_000 }, { tool: "edit", status: "ok", durationMs: null, at: NOW - 45_000 }], phase: { index: 1, done: 3, total: 10 }, phases: ["survey", "migrate the schema", "verify", "report"], note: "three of ten tables migrated" },
 });
+// Issue #920: a run that kept a screenshot and a cleaned report, and dropped one file over the size limit.
+const ARTIFACTS_KEPT = Object.freeze({
+  rec: record({ jobId: "gh-pulse", artifacts: { kept: 2, bytes: 190_437, dropped: { size: 1 } } }),
+  artifacts: {
+    state: "kept",
+    counts: { kept: 2, bytes: 190_437, dropped: { size: 1 } },
+    files: [
+      { name: "after.png", size: 184_213, sha256: "a".repeat(64), type: "image/png", scrubbed: false },
+      { name: "e2e-report.txt", size: 6224, sha256: "b".repeat(64), type: "text/plain", scrubbed: true },
+    ],
+    dropped: { size: 1 },
+    keepUntil: new Date(NOW + 14 * 24 * HOUR).toISOString(),
+  },
+});
 const RUN_CARD_STATES = {
   "run-live-armed.operator": () => runCard(LIVE_ARMED),
   // Issue #692: a run that stopped to ask, the page the READMEs open their second stage with. The question is the
@@ -931,6 +945,13 @@ const RUN_CARD_STATES = {
   "run-failed-no-reason.viewer": () => runCard({ role: "viewer", rec: record({ jobId: "gh-pulse", outcome: "failed", reason: null }) }),
   "run-unknown-reason.viewer": () => runCard({ role: "viewer", rec: record({ jobId: "gh-pulse", outcome: "failed", reason: "future-refusal" }) }),
   "run-long-cron.operator": () => runCard({ rec: record({ jobId: `repeat:${"long-trigger".repeat(10)}:1791450000000`, kind: "local", target: "/workspace/repo", session: null }) }),
+  // Issue #920: what a forge job left in /artifacts, in each state the run page draws, read as the fleet reader answers.
+  "run-artifacts-kept.operator": () => runCard(ARTIFACTS_KEPT),
+  "run-artifacts-kept.viewer": () => runCard({ ...ARTIFACTS_KEPT, role: "viewer" }),
+  "run-artifacts-dropped.operator": () => runCard({ rec: record({ jobId: "gh-pulse", artifacts: { kept: 0, bytes: 0, dropped: { name: 1, secret: 1 } } }), artifacts: { state: "dropped", counts: { kept: 0, bytes: 0, dropped: { name: 1, secret: 1 } } } }),
+  "run-artifacts-expired.operator": () => runCard({ rec: record({ jobId: "gh-pulse", artifacts: { kept: 2, bytes: 190_437, dropped: {} } }), artifacts: { state: "expired", counts: { kept: 2, bytes: 190_437, dropped: {} } } }),
+  "run-artifacts-elsewhere.operator": () => runCard({ rec: record({ jobId: "gh-pulse", host: "mini2", artifacts: { kept: 2, bytes: 190_437, dropped: {} } }), artifacts: { state: "elsewhere", host: "mini2", counts: { kept: 2, bytes: 190_437, dropped: {} } } }),
+  "run-artifacts-unreadable.operator": () => runCard({ rec: record({ jobId: "gh-pulse", artifacts: { kept: 2, bytes: 190_437, dropped: {} } }), artifacts: { state: "unreadable", counts: { kept: 2, bytes: 190_437, dropped: {} } } }),
 };
 export const RUN_PANEL_STATES = Object.freeze(Object.keys(RUN_CARD_STATES));
 
