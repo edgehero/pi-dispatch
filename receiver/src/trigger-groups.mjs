@@ -1,6 +1,7 @@
 /** The receiver's exact rule grouping, shared with read-only hypothetical matching (#750). */
 import { mergePolicyDigest } from "@edgehero/pi-dispatch/merge-policy";
 import { FORGE_KINDS, PR_CLOSE_ACTIONS, sourceForgeOf } from "@edgehero/pi-dispatch/triggers";
+import { routableFlows } from "@edgehero/pi-dispatch/trigger-identity";
 
 export function groupTriggers(parsed, { watchSources = {} } = {}) {
 	// Every forge gets a group whether or not the file names it, so the filter can read
@@ -12,7 +13,11 @@ export function groupTriggers(parsed, { watchSources = {} } = {}) {
 	// "invalid" message and their old rules would go on firing indefinitely. A test asserts this object's
 	// keys are exactly FORGE_KINDS, so the two can never drift.
 	const groups = Object.fromEntries(FORGE_KINDS.map((kind) => [kind, emptyGroup()]));
-	const knownFlows = new Set();
+	// The flows a comment's `<phrase> <flow>` may summon. Built by the worker's `routableFlows` (issue #933), the same
+	// function its pre-spend checks use to recognise a comment job routed to another trigger's flow, so the set the
+	// receiver routes by and the set the worker confirms a routed job by cannot differ. A command trigger (issue #189)
+	// has no run.flow and contributes nothing: `undefined` in the set would read as a flow a collaborator could summon.
+	const knownFlows = routableFlows(parsed);
 
 	for (const [index, { on, run }] of parsed.entries()) {
 		if (on.type === "cron" || on.type === "watch") continue;
@@ -22,13 +27,6 @@ export function groupTriggers(parsed, { watchSources = {} } = {}) {
 			const group = groups[sourceForgeOf({ on, run })];
 			(group.localEvents ??= []).push({ on, run });
 			continue;
-		}
-		// Guarded because a command trigger (issue #189) has NO run.flow, and `Set.add(undefined)` would put
-		// undefined into the comment `<phrase> <flow>` override allowlist. That set exists to bound which
-		// names a collaborator's comment may summon; polluting it with a non-name is how a later loose
-		// membership test (or a `[...set]` enumeration in a message) starts treating "no flow" as a flow.
-		if (typeof run.flow === "string") {
-			knownFlows.add(run.flow);
 		}
 		const group = groups[run.kind];
 		const mergePolicy = run.mayMerge === true ? { mayMerge: true, mayMergePolicy: mergePolicyDigest({ on, run }) } : {};

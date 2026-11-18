@@ -103,6 +103,19 @@ test("skew warning uses the worker's identity guard and returns only matching re
 });
 
 
+test("skew warning counts a GitLab merge request a label matched and a comment routed to another flow (issue #933)", async () => {
+  const fs = fileFs([
+    { on: { type: "pull_request", action: ["update"], any: ["pi:go"] }, run: { kind: "gitlab", flow: "work", maxCostUsd: 2 } },
+    { on: { type: "pull_request", action: ["opened"] }, run: { kind: "github", flow: "review" } },
+    { on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "fix", maxCostUsd: 2 } },
+  ]);
+  const read = (index, data) => readTriggerSkew({ index, waiting: { rows: [{ queue: "q", jobId: "j" }] }, triggersPath: "/t", fs, lookupJob: async () => ({ data }) });
+  const mr = await read(0, { kind: "gitlab", flow: "work", target: { type: "pull_request" }, trigger: { matched: { index: 0, type: "label", label: "pi:go" } } });
+  assert.deepEqual(mr.rows, [{ jobId: "j", queue: "q", field: "maxCostUsd" }]);
+  const routed = await read(2, { kind: "github", flow: "review", trigger: { matched: { index: 2, type: "comment", phrase: "@pi" } } });
+  assert.deepEqual(routed.rows, [{ jobId: "j", queue: "q", field: "maxCostUsd" }]);
+});
+
 test("detail metered spend excludes plan-covered and unmetered runs and names the incomplete coverage", () => {
   const runs = [rec("paid", 1), rec("plan", 2, { provider: "plan-provider" }), rec("unknown", 3, { tokens: null })];
   const got = triggerDetailOf({ readAt: AT, triggers: { triggers: [{ index: 2, type: "label" }] }, runs }, 2, { subscriptions: [{ id: "plan", provider: "plan-provider", models: ["*"] }] });

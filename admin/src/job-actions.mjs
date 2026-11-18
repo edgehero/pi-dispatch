@@ -36,6 +36,7 @@ import { QUEUE, makeQueue, enqueueForgeJob, enqueueLocalJobReporting, enqueueTri
 import { jobNeeds, routeForgeJob } from "@edgehero/pi-dispatch/capabilities";
 import { loadSchedules } from "@edgehero/pi-dispatch/schedules";
 import { parseTriggers } from "@edgehero/pi-dispatch/triggers";
+import { forgeTriggerMismatch } from "@edgehero/pi-dispatch/trigger-identity";
 import { targetFor } from "@edgehero/pi-dispatch/run-history";
 import { isForgeKind } from "@edgehero/pi-dispatch/forges";
 import { mergeRuns, readMirroredRuns } from "@edgehero/pi-dispatch/run-mirror";
@@ -576,12 +577,14 @@ const TRIGGER_CHANGED = "the trigger that started this run changed or is gone; s
 
 /**
  * The trigger entry a retained forge job's `trigger.matched` still names, judged against the triggers file NOW, or a
- * refusal (`TRIGGER_CHANGED` plus why). The entry at `matched.index` must be a trigger for the same forge, of the type
- * that matched (a gitlab merge request's label match is a `pull_request` entry with a label selector, so a `label` match
- * may also be that), still listing the matched action or label, and running the same flow (a comment's `<phrase> <flow>`
- * override may name any flow the file still routes, the receiver's `knownFlows`), not a command. An index is a position
- * in the file, so an entry deleted above it moves another trigger under the same index: these checks are what keep a
- * re-run from borrowing that other trigger's authority, and the worker's trigger-skew check from being defeated by it.
+ * refusal (`TRIGGER_CHANGED` plus why, and `reason`, the part that changed). Whether the entry at `matched.index` is the
+ * job's trigger is the worker's one reading (`forgeTriggerMismatch`, issue #933), shared with every pre-spend check: the
+ * same forge, the type that matched (a gitlab merge request's label match is a `pull_request` entry with a label
+ * selector), still the matched action, label and phrase, and the same flow (a comment's `<phrase> <flow>` override may
+ * name a flow the receiver could route it to, `routableFlows`). This function adds only the words for each part, and
+ * its own rule that a re-run is never of a command trigger. An index is a position in the file, so an entry deleted
+ * above it moves another trigger under the same index: these checks are what keep a re-run from borrowing that other
+ * trigger's authority, and the worker's trigger-skew check from being defeated by it.
  */
 function currentTriggerFor(entries, kind, data) {
   const matched = data?.trigger?.matched;
@@ -590,19 +593,17 @@ function currentTriggerFor(entries, kind, data) {
   const entry = entries[index];
   if (!entry) return { refusal: `${TRIGGER_CHANGED} (no trigger at index ${index} any more)` };
   const { on, run } = entry;
-  if (run.kind !== kind) return { refusal: `${TRIGGER_CHANGED} (the trigger at index ${index} is a ${String(run.kind)} trigger now, not ${kind})` };
-  const typeOk = on.type === matched.type || (matched.type === "label" && on.type === "pull_request" && data?.target?.type === "pull_request");
-  if (!typeOk) return { refusal: `${TRIGGER_CHANGED} (the trigger at index ${index} is a ${String(on.type)} trigger now, not ${String(matched.type)})` };
-  if (typeof matched.action === "string" && !(Array.isArray(on.action) && on.action.includes(matched.action))) return { refusal: `${TRIGGER_CHANGED} (the trigger at index ${index} no longer fires on ${matched.action})` };
-  if (typeof matched.label === "string" && ![...(on.any ?? []), ...(on.all ?? [])].includes(matched.label)) return { refusal: `${TRIGGER_CHANGED} (the trigger at index ${index} no longer selects the label ${matched.label})` };
+  const reason = forgeTriggerMismatch(entries, entry, { ...data, kind });
+  const refuse = (why) => ({ refusal: `${TRIGGER_CHANGED} (${why})`, reason });
+  if (reason === "kind") return refuse(`the trigger at index ${index} is a ${String(run.kind)} trigger now, not ${kind}`);
+  if (reason === "type") return refuse(`the trigger at index ${index} is a ${String(on.type)} trigger now, not ${String(matched.type)}`);
+  if (reason === "action") return refuse(`the trigger at index ${index} no longer fires on ${matched.action}`);
+  if (reason === "label") return refuse(`the trigger at index ${index} no longer selects the label ${matched.label}`);
   // The phrase too (issue #918's review): the worker's merge and private endpoint checks hold a comment job to it, so a
   // re-run planned past a changed phrase would only be refused there, under a reason that names the wrong change.
-  if (typeof matched.phrase === "string" && on.phrase !== matched.phrase) return { refusal: `${TRIGGER_CHANGED} (the trigger at index ${index} no longer answers the phrase it matched)` };
-  if (run.command !== undefined) return { refusal: `${TRIGGER_CHANGED} (the trigger at index ${index} runs a command now)` };
-  if (data.flow !== run.flow) {
-    const routed = matched.type === "comment" && entries.some((e) => e.on.type !== "cron" && e.run.flow === data.flow);
-    if (!routed) return { refusal: `${TRIGGER_CHANGED} (the trigger at index ${index} runs ${JSON.stringify(run.flow)} now, not ${JSON.stringify(data.flow)})` };
-  }
+  if (reason === "phrase") return refuse(`the trigger at index ${index} no longer answers the phrase it matched`);
+  if (run.command !== undefined) return { refusal: `${TRIGGER_CHANGED} (the trigger at index ${index} runs a command now)`, reason: "lane" };
+  if (reason !== null) return refuse(`the trigger at index ${index} runs ${JSON.stringify(run.flow)} now, not ${JSON.stringify(data.flow)}`);
   return { run, entry };
 }
 
@@ -620,8 +621,9 @@ export async function checkTriggerFixSource({ url, jobId, index, triggersPath, f
       return (await fleet.find(jobId))?.job?.data ?? null;
     })(), timeoutMs, () => null);
     if (!found) return { refusal: "The queue no longer holds the source run's trigger identity. Open the current trigger configuration instead." };
-    if (found.trigger?.matched?.type === "comment" && typeof found.trigger.matched.phrase === "string" && entries[index]?.on.phrase !== found.trigger.matched.phrase) return { refusal: "The comment trigger phrase changed. Review the current trigger before adding instructions." };
-    if (found.trigger?.matched?.index !== index || currentTriggerFor(entries, found.kind, found).refusal || !raw.triggers?.[index]) return { refusal: "The trigger that started this run changed or moved. Review the current trigger before adding instructions." };
+    const current = found.trigger?.matched?.index === index ? currentTriggerFor(entries, found.kind, found) : null;
+    if (current?.reason === "phrase") return { refusal: "The comment trigger phrase changed. Review the current trigger before adding instructions." };
+    if (current === null || current.refusal || !raw.triggers?.[index]) return { refusal: "The trigger that started this run changed or moved. Review the current trigger before adding instructions." };
     return { ok: true, runId: jobId, index, triggerDigest: createHash("sha256").update(JSON.stringify(raw.triggers[index])).digest("hex") };
   } catch { return { refusal: "The source trigger identity could not be checked. Reload and try again; nothing was changed." }; }
   finally { if (fleet) void fleet.close(); }

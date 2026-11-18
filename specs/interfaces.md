@@ -5107,13 +5107,13 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   host, and the worker judges it at the job. The receiver's filters and the console's job builder carry it to the
   job as written, and a cron or local event job takes it from the entry (`localRunData`).
   `TRIGGER_RUN_FIELD_VERSIONS.privateEndpoints` is 7 and `JOB_DATA_FIELD_VERSIONS.privateEndpoints` is 8; it is an
-  `AUTHORED_NARROWING_FIELDS` row (a forge job that arrived without the list is `trigger-skew`, except the two shapes the
-  skew check's identity reads as "run" for every row, a GitLab merge request job a label matched and a comment job
-  routed to another trigger's flow; a local event job whose definition changed is `local-event-trigger-changed`; a
-  cron run queued before the edit runs without it), and the
+  `AUTHORED_NARROWING_FIELDS` row (a forge job that arrived without the list is `trigger-skew`, a GitLab merge request
+  job a label matched and a comment job routed to another trigger's flow included since issue #933; a local event job
+  whose definition changed is `local-event-trigger-changed`; a cron run queued before the edit runs without it), and the
   worker confirms the grant against the live file before every attempt (`makeCheckPrivateEndpoints`). The entry must be
   the trigger that queued the job, never just the one at its position: a forge job's at its matched index with its
-  kind, `on.type`, flow or command and the action, label or phrase it matched (`makeCheckMergePolicy`'s identity); a
+  kind, `on.type`, flow or command and the action, label or phrase it matched (`isForgeTriggerOf`, the one identity
+  every pre-spend check shares); a
   local event job's by its `on.id` and `on.forge` with its folder, command and worker; a cron or manual job's among
   the cron entries by `on.id` with its folder, flow, command and task. A one-shot this same queue job spent is read as
   before its disarm. That entry must still name each id the job carries.
@@ -15096,3 +15096,4 @@ and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` are UNCHANGED, checked: no file shape, wr
 | 2026-11-18 | Issue #924. Adds `INT-HOST-CONSUMERS`, an additive generation-bound registry field and explicit unknown for older readers/writers; amends `INT-SANDBOX-CONTRACT` at the asynchronous deletion boundary. `INT-RUN-HISTORY-FILE-CONTRACT` and job-data shape UNCHANGED, checked. |
 | 2026-11-18 (#919, trigger and queue contract) | `INT-TRIGGERS-FILE-CONTRACT` AMENDED: `run.secretFiles`, selected bundle `files`, portable case-insensitive file names, combined direct-reference bound, shared profile/resume rules, model-tool refusal and authored skew defense. Trigger file version 8 and queued job-data version 9 protect the new fields. UNCHANGED, checked: ordinary environment-secret delivery, resolver exit codes, manual/chained grant exclusions and existing field minimum versions; no new resolver format. `INT-OUTBOX-CONTRACT` UNCHANGED, checked: a chained child gains no secret grant. Container, lifecycle and run-history amendments are recorded separately. |
 | 2026-11-18 (#919, file custody) | AMENDED `INT-CONTAINER-JOB-INPUTS`, `INT-CONTAINER-RUNTIME-CONTRACT`, `INT-RUNNER-EXIT-CODE-PROTOCOL` and `INT-RUN-HISTORY-FILE-CONTRACT`: private sibling staging, disjoint operator-selected sources, job-owned read-only delivery, capability and early verification, owner-aware crash cleanup, conditional resolved grant names and stream-safe literal redaction. The name field is not proof of container start or file access. UNCHANGED, checked: exit numeric meanings and signatures, record `v`, resolver exit codes, retained workspace/checkpoint shape and existing mount permissions. New policy refusals return; staging and transport failures retry as infrastructure. |
+| 2026-11-18 (#933) | **`INT-TRIGGERS-FILE-CONTRACT` AMENDED** (`run.privateEndpoints`): the residual it named, that the skew check's identity read a GitLab merge request job a label matched and a comment job routed to another trigger's flow as "run" for every `AUTHORED_NARROWING_FIELDS` row, is closed; such a job that arrived without a field its trigger sets is `trigger-skew` (or `wait-skew`) like any other forge job, and the entry is found by `isForgeTriggerOf`, the identity every pre-spend check shares. A cron run queued before the edit still runs without it. `INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked: no reason token is added; `trigger-skew`, `wait-skew` and `secret-bundle-trigger-changed` keep their meaning and now reach the right jobs. `INT-CONTAINER-RUNTIME-CONTRACT` UNCHANGED, checked. |

@@ -2060,8 +2060,10 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     receiver could carry it in, and a carried field is one an older receiver drops. Read where it is used, it cannot
     be dropped or forged by any receiver, so it needs no receiver floor. The per-trigger opt-out
     (`run.secretBundle: false`) is read from the same file, from the entry the job came from (by matched index or
-    cron id, with `makeCheckPortfolioFlag`'s and `makeCheckWaitSkew`'s identity guards on the RAW entries, so a
-    disarmed one-shot's retry still finds its entry), for the same reason: it is a narrowing whose absence widens.
+    cron id, with `makeCheckPortfolioFlag`'s identity for a cron entry and the forge identity every pre-spend check
+    shares, `isForgeTriggerOf` (issue #933), on the RAW entries, so a disarmed one-shot's retry still finds its entry),
+    for the same reason: it is a narrowing whose absence widens. Before #933 its forge reading was strict on `on.type`,
+    so a GitLab merge request job a label matched found no entry and was refused as `secret-bundle-trigger-changed`.
   - **An invalid `secretBundles` refuses the whole file**, in `parseTriggers`, so every reader treats it as every
     malformed trigger is treated: the receiver keeps its running set on a reload (and refuses to boot on one), the
     writers refuse to write it and doctor fails. The worker keeps its LAST GOOD read, as the receiver keeps its running
@@ -6714,8 +6716,8 @@ free local model, or using a few successful live probes as proof of every routin
   carries no prose, command, path or credential. Payloads and transcripts are never searched for permission.
   The same floor applies during recovery, whose continuation prompt is separate from `prompt.md`.
 - **Authority is checked again at pickup.** Producers derive `mayMergePolicy` from the complete normalized
-  trigger entry, alongside `mayMerge: true`. A worker checks the current file, the trigger identity and the
-  digest before any paid gate. Changes to the entry, including instructions and routing, invalidate its
+  trigger entry, alongside `mayMerge: true`. A worker checks the current file, the trigger identity (`isForgeTriggerOf`,
+  shared with every pre-spend check since issue #933) and the digest before any paid gate. Changes to the entry, including instructions and routing, invalidate its
   queued opt-in; re-run against the new reviewed entry. An unflagged job cannot gain permission from a
   later edit. Each new container repeats the check. A running container keeps its admitted snapshot, and
   the worker does not cancel an operation already accepted by the forge when the file changes.
@@ -7639,6 +7641,30 @@ free local model, or using a few successful live probes as proof of every routin
   timeout — the trade is deliberate and this direction is the cheap one, because the counts are advisory
   and the verdict is not); and a worker outage longer than a hold's own TTL loses that job's `since` and
   check count, so its budget silently restarts from the next granted check.
+
+- **One trigger identity for every pre-spend check (issue #933, 2026-11-18)**: the skew check confirms that the entry at
+  `trigger.matched.index` is the trigger that queued the job before it refuses anything, and it used to do so with a
+  reading of its own, strict on `on.type` and on flow. Two shapes the receiver produces every day failed it: a GitLab
+  merge request job a label matched (the receiver reports `matched.type: "label"` for a `pull_request` rule with a
+  label selector) and a comment job whose `<phrase> <flow>` ran another trigger's flow (the job carries the COMMENT
+  entry's own `run` fields under the other flow). For both, every mismatch folded to "run", so a narrowing field a stale
+  receiver dropped (a cost cap, a model list, the MCP servers, a private endpoint, the limits, `waitFor`) never refused,
+  on a record that read as a clean run. Four other checks had their own readings too, each different: the merge
+  policy and the private endpoint grant (which accepted both shapes), the random model policy (which let a comment
+  name any flow at all) and the secret bundle lookup (which, strict on `on.type` as well, refused every GitLab merge
+  request job a label matched in a bundled project as `secret-bundle-trigger-changed`). All five, and the console's
+  re-run check, now ask one module, `worker/src/trigger-identity.mjs`: `isForgeTriggerOf` (the same forge, the matched
+  type or the label-on-merge-request case, the same command, or the same flow or a comment entry's routed flow, and the
+  matched action, label and phrase still held) and `routableFlows`, which is also what the receiver builds `knownFlows`
+  from, so the flows a comment can be routed to and the flows a routed job is recognised by are one set. What each
+  check does with a mismatch is unchanged and its own: the skew check runs the job, the merge policy, the grant and the
+  model policy refuse it, the bundle lookup answers a changed trigger. The console's re-run names the first part that
+  changed, through `forgeTriggerMismatch`. A source scan (`worker/test/trigger-identity.test.mjs`) refuses the shapes
+  the replaced readings were spelled in anywhere else in the trees. REJECTED: widening only the skew check (the drift
+  that caused this stays, and the bundle lookup keeps refusing legitimate jobs); a comment entry accepting any flow (no
+  receiver can produce such a job, so it is a changed file, not this trigger); counting a schedule's, a watch rule's or
+  a local listener's flow as routable (the receiver never has). A cron run stays out of the skew check's reach: it
+  carries no matched index, and the worker builds its data from the file itself.
 
 - **Traces to**: `REQ-WAIT-FOR`, `INT-WAIT-PROFILES-CONTRACT`, `INT-RUNNER-EXIT-CODE-PROTOCOL`,
   `INT-TRIGGERS-FILE-CONTRACT`, `DES-SCOPED-PAUSE-VIA-MOVE-TO-DELAYED`, `DES-PER-TRIGGER-SECRET-PROFILE`,
@@ -9279,8 +9305,9 @@ free local model, or using a few successful live probes as proof of every routin
   - **At boot**, after the reaper: a grant whose `network` line names no network the runtime lists is deleted; a
     runtime that does not answer sweeps nothing.
   - **Before every attempt** the processor confirms the grant against the live triggers file
-    (`makeCheckPrivateEndpoints`): the entry that queued the job (a forge job by its matched index and kind, a cron
-    or local event job by its trigger id) must still name each id the job carries; an id it added since is not
+    (`makeCheckPrivateEndpoints`): the entry that queued the job (a forge job by its matched index through
+    `isForgeTriggerOf`, the identity every pre-spend check shares since issue #933, a cron or local event job by its
+    trigger id) must still name each id the job carries; an id it added since is not
     granted to a job queued before it. A newer file waits for a newer worker, an unreadable one is retried, a
     missing one refuses. Then each id must be one this host declares, read once per pickup with the slots.
   - The job's environment carries each granted endpoint's host and port (`PI_DISPATCH_ENDPOINT_<ID>_HOST`,
@@ -19166,3 +19193,4 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-11-17 (#921) | DES-PLAYWRIGHT-CLI-NOT-CHROME-DEVTOOLS AMENDED for the optional headed recipe, explicit display wrapper, pinned Electron example and deterministic rendering proof. DES-PER-TRIGGER-JOB-IMAGE, DES-HOST-BUDGET, DES-DOCTOR-RESULTS-PUBLISHED and DES-STORE-VERSION-WHEN-NEEDED UNCHANGED, checked: no new trigger setting, size rule, persisted field or migration. OpenShell 0.1.4 measured unsupported in both modes: identity-preserving setgid/setuid are refused by its child seccomp filter; CI pins that finding without relaxing the policy. |
 | 2026-11-18 | Issue #924. Adds `DES-CONSUMER-LIVENESS`, amends `DES-RETENTION-SWEEPS-ON-A-TIMER` for asynchronous committed deletion and names synchronous metadata residuals. Incident causality remains unproven; controlled 60-second pause recovered. |
 | 2026-11-18 (#919) | `DES-PER-TRIGGER-SECRET-PROFILE` and `DES-PROJECT-SECRET-BUNDLES` AMENDED: file delivery shares the existing resolver and authority, explicit trigger delivery wins bundle defaults, staging is separate with independent owner-aware cleanup, operator sources are disjoint from jobs, portable names and image capability are required, and copying/redaction limits are stated. UNCHANGED, checked: existing resolver protocol, bundle formats and fork/opt-out gates, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-PI-VERSION-PINNED`. |
+| 2026-11-18 (#933) | One forge trigger identity for every pre-spend check. **`DES-WAIT-FOR-HOLDS-AND-WAIT-PROFILES` AMENDED**: a dated bullet records why the skew check's own identity never refused a GitLab merge request job a label matched or a comment job routed to another trigger's flow, so a narrowing field a stale receiver dropped ran on a clean record, and that it, the merge policy, the private endpoint grant, the random model policy, the secret bundle lookup and the console's re-run check now ask one module (`worker/src/trigger-identity.mjs`: `isForgeTriggerOf`, `forgeTriggerMismatch`, `routableFlows`), which also builds the receiver's `knownFlows`; what each check does with a mismatch is unchanged. REJECTED: widening the skew check alone, a comment entry accepting any flow, counting a schedule's, watch rule's or local listener's flow as routable. **`DES-PROJECT-SECRET-BUNDLES` AMENDED**: the forge identity is the shared one, which ends the refusal of every GitLab merge request job a label matched in a bundled project (`secret-bundle-trigger-changed`). **`DES-TRIGGER-MERGE-POLICY` AMENDED** and **`DES-PRIVATE-ENDPOINT-GRANTS` AMENDED**: each names the shared identity; their own readings already accepted both shapes, so their behaviour is unchanged except that a comment's routed flow must be a forge trigger's (a local listener's no longer counts, as it never could be routed). `DES-OPERATOR-CONSOLE` UNCHANGED, checked: the trigger-edit preview reads the real skew check, so it now counts these queued jobs among those an edit refuses, with no change of its own. `DES-STORE-VERSION-WHEN-NEEDED` UNCHANGED, checked: nothing stored changes shape. **Code evidence**: worker/src/trigger-identity.mjs; worker/src/triggers-file.mjs -> makeCheckWaitSkew, makeCheckPrivateEndpoints, makeFindSecretBundle; worker/src/merge-policy.mjs; worker/src/model-selection-policy.mjs; receiver/src/trigger-groups.mjs; admin/src/job-actions.mjs -> currentTriggerFor. |
