@@ -218,3 +218,29 @@ export function targetSeparator(kind, targetType) {
 	if (targetType !== "pull_request") return "#";
 	return forgeSpec(kind)?.pullRequestSep ?? "#";
 }
+
+/**
+ * The ITEM a forge job's semantic dedup id begins with, `<repo><sep><number>` (issue #932): the one spelling of it, used
+ * by `enqueueForgeJob` to build the id, by the console to read a waiting job's repository off it, and by
+ * `pi-dispatch status --target` to find an item's jobs and windows. The id goes on with `:` and the flow slot.
+ */
+export function semanticItemOf(kind, repo, target) {
+	// `target.number`, not `?.`: a forge job with no target is a caller's bug, and the key builder has always thrown on it.
+	return `${repo}${targetSeparator(kind, target.type)}${target.number}`;
+}
+
+/** The item a semantic dedup id names, `<repo><sep><number>`, or null when the id has no such prefix. */
+export function semanticItemOfId(dedupId) {
+	const m = typeof dedupId === "string" ? /^([^:]+[#!]\d{1,30}):/.exec(dedupId) : null;
+	return m ? m[1] : null;
+}
+
+/**
+ * An item as a person types it, `owner/repo#12` or `group/project!7`, as `semanticItemOf` spells it (a number's leading
+ * zeros dropped), or null. Never a colon (the id's own separator), whitespace, a control byte or a glob character, so
+ * the item is safe inside a SCAN pattern as it is.
+ */
+export function parseSemanticItem(text) {
+	const m = typeof text === "string" ? /^([^\s:*?[\]\\#!\x00-\x1f\x7f]{1,300})([#!])0*(\d{1,30})$/.exec(text) : null;
+	return m ? `${m[1]}${m[2]}${m[3]}` : null;
+}

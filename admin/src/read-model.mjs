@@ -111,7 +111,7 @@ import { readStageManifest, readStagedSkills } from "@edgehero/pi-dispatch/packa
 // keepOnlyDeclaredSkills drops a subtree that declares no SKILL.md -- re-deriving either here is how
 // the graph would show a skill the job path can never materialise.
 import { selectEntries, keepOnlyDeclaredSkills } from "@edgehero/pi-dispatch/materialize";
-import { FORGES, RUN_KINDS, isForgeKind } from "@edgehero/pi-dispatch/forges";
+import { FORGES, RUN_KINDS, isForgeKind, semanticItemOfId } from "@edgehero/pi-dispatch/forges";
 import { hasControls, scrubControls } from "./panel.mjs";
 import { RUN_MODEL_RE, RUN_PROVIDER_RE, parseRunFilter, runMatches, runVenueOf, triggerValueOf } from "./run-filter.mjs";
 // The two pure text scanners live in graph-model.mjs (the pure side of the graph feature); this module
@@ -6022,8 +6022,8 @@ function projectIdOf(id) {
 function waitingProjectOf({ record, kind, deid, jobId, projectList, triggerList }) {
   if (record?.project) return { project: record.project, from: "record" };
   if (projectList !== null && kind !== null && isForgeKind(kind) && typeof deid === "string" && deid.length <= DEID_MAX) {
-    const m = DEID_TARGET_RE.exec(deid);
-    const repo = m ? repoOfTarget(m[1]) : null;
+    const item = semanticItemOfId(deid);
+    const repo = item !== null ? repoOfTarget(item) : null;
     const id = repo !== null ? projectIdOf(projectOf({ kind, repo }, projectList)) : null;
     if (id !== null) return { project: id, from: "deid" };
   }
@@ -8250,8 +8250,6 @@ export const PENDING_DATA_MAX = 500;
  */
 export const PENDING_STATES = Object.freeze(["waiting-children", "delayed", "prioritized", "paused", "waiting", "active"]);
 
-/** The forge job's semantic dedup id (`enqueueForgeJob`'s `repo<sep>number:flow...`): its target, the part before the flow. */
-const DEID_TARGET_RE = /^([^:]+[#!]\d{1,30}):/;
 
 /**
  * One queue's ids in `state`, `start` to `end` inclusive, and their `name` and `deid` hash fields, read the cheap way:
@@ -8387,8 +8385,9 @@ export async function readPendingOnTargets({ queues, targets, budget = PENDING_S
               continue;
             }
             if (!kinds.has(row.name)) continue; // another kind (a cron or CLI job when no local park is wanted)
-            const deid = isForgeKind(row.name) && typeof row.deid === "string" ? DEID_TARGET_RE.exec(row.deid) : null;
-            if (deid) match(row.id, targetKeyOf(row.name, deid[1]), null);
+            // The item the dedup id begins with, read by the worker's one spelling of it (issue #932).
+            const item = isForgeKind(row.name) && typeof row.deid === "string" ? semanticItemOfId(row.deid) : null;
+            if (item) match(row.id, targetKeyOf(row.name, item), null);
             else needData.push(row.id);
           }
           if (needData.length > 0) {

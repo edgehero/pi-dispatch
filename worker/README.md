@@ -49,6 +49,7 @@ with at least one commit, and `run` refuses any other folder before it queues an
 | `run <folder> --task "..."` | queue one job against a local folder |
 | `run --trigger <id>` | fire one cron trigger from the triggers file now, once, as its schedule would |
 | `status`, `pause`, `resume`, `cancel <jobId>` | control the running worker from any terminal |
+| `status --target owner/repo#12` | what the queue holds for one issue or pull request (`group/project!7` for a GitLab merge request): its jobs queued or running, and for each flow whether asking again would be joined to a job or dropped |
 | `steer <jobId> "..."` | send a running job a message, which the agent reads between its steps (`--later` once it would otherwise stop) |
 | `capacity` | how busy each host was over the last day, week or thirty days, read from the run records |
 | `service render\|install\|uninstall\|status\|start\|stop\|restart` | run the worker (or `--receiver`, or `--console` for the operator console) as a service (user level on macOS and Linux, nssm on Windows) |

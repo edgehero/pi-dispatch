@@ -346,6 +346,13 @@ first job is still waiting or running gets no comment: that job is doing the wor
 and recorded as `duplicate-request` in the runs list. It needs the workers at the release that carries it, or the
 comment waits as `newer-release` until they are ([upgrading](upgrading.md#the-order)).
 
+On the worker's host, `pi-dispatch status --target owner/repo#12` (or `group/project!7` for a GitLab merge request or
+an Azure DevOps pull request) prints, as one JSON line, the jobs queued, held or running for that item and, for each
+flow with an open window, the job holding it, when it closes, and what asking again would do: `joined` to a job that is
+still going, or `dropped` against one that has ended. A tool on the same host can read it before asking again. A job
+queued with no window (a notice, or the job a late reply resumes) is not found by its item, and `complete: false`
+means part of the queue was not read, so an empty list then is not an all-clear.
+
 **Upgrading:** move the workers and the receiver/poller to 5.3.2 or later (issue #899), following the
 [upgrade order](upgrading.md#the-order). The [rollout note](upgrading.md#532-refused-and-cancelled-jobs)
 explains which half of the fix each component supplies.

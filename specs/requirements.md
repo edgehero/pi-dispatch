@@ -385,7 +385,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   exists to remove. The console's own enqueue asks for no notice, since its person reads the answer on the page. A
   notice that cannot be added is logged (`noticeFailed`) and never fails the enqueue. The window's ten minutes, its
   key grammar, the #899 repair, replicas, routing and the wire answer (`202 {status:"deduplicated"}`) are UNCHANGED,
-  checked.
+  checked. On the worker's host, `pi-dispatch status --target <item>` answers the other half of the question before a
+  request is sent: the item's jobs queued, held or running (found by their stored dedup id, never their data) and, per
+  flow, the job holding the window, when it closes and whether a new request would be `joined` or `dropped`, with
+  `complete: false` whenever part of the queue was not read (`INT-DEFER-REASON-KEY`).
   **An answer to an awaitInput run, written within five minutes before it parks and arriving before the park has
   taken its held replies, is held and becomes the one resumed job once it has parked; otherwise coalescing is
   unchanged** (issue #638, `DES-AWAIT-INPUT-ENDS-THE-JOB`). The agent posts its question before it ends, so an answer
@@ -9732,3 +9735,4 @@ instead of drifting.
 | 2026-11-18 | Issue #924. Adds `REQ-CONSUMER-LIVENESS`. Queue durability and paid retry policy UNCHANGED, checked. |
 | 2026-11-18 (#919) | `REQ-TRIGGER-SECRETS` AMENDED: reviewed per-trigger and selected bundle file delivery, exact text, portable names, disjoint grants, image gate, no tool grant widening, independent staging cleanup and explicit copying/redaction residuals. UNCHANGED, checked: `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-TOKEN-SCOPED-PER-JOB`, `CONST-PI-VERSION-PINNED`; existing environment delivery and resolver exit meanings. The isolation amendment for the additional read-only mount is recorded in the constitution. |
 | 2026-11-18 (#932) | **`REQ-DEDUP-BY-DELIVERY-GUID` AMENDED**: a request the semantic window joins to a job that has already ended is answered on the forge. The receiver and the poller add a notice job (no window, `<delivery job id>-dup`, only `duplicateOf` and `windowEndsAt` beyond where to comment), the worker answers it before every gate with one fixed comment and a `duplicate-request` record, and job data version 10 makes an older worker hold it; a request joined to a live job gets none; the console asks for none. The window, key grammar, #899 repair, replicas, routing and wire answer UNCHANGED, checked. **`REQ-JOB-STATUS-COMMENTS` AMENDED**: that comment's exact words (fixed words, the ended job's id, a UTC time) and its Acceptance line. `REQ-RUN-PROGRESS` and `REQ-REPLICA-RUNS` UNCHANGED, checked: replicas of one dropped delivery share one notice by its id. |
+| 2026-11-18 (#932, part 2) | **`REQ-DEDUP-BY-DELIVERY-GUID` AMENDED**: `pi-dispatch status --target <item>` lists an item's jobs queued, held or running and, per flow, what a new request would do (`joined` or `dropped`), saying `complete: false` whenever part of the queue was not read. `REQ-JOB-STATUS-COMMENTS` UNCHANGED, checked: the command posts nothing. |
