@@ -131,6 +131,11 @@ import { checkZeroTouchBrowser } from "./console-zero-touch-browser.mjs";
 import { checkTimelineBrowser } from "./console-timeline-browser.mjs";
 import { frozenDateSource, openChrome } from "../../launch/chrome-pipe.mjs";
 import { TIMELINE_SCRIPT, TIMELINE_CSS } from "../../admin/src/console/timeline-assets.generated.mjs";
+
+// What `/api/artifact` answers here (issue #920): a run's kept image, drawn by the Artifacts card at the thumbnail's own
+// fixed width, so one transparent pixel measures the card as a real screenshot would. A 404 would draw the browser's
+// broken-image box instead, whose size is the browser's and not the console's.
+const ARTIFACT_PIXEL = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=", "base64");
 import { findOnPath } from "../../launch/server-binary.mjs";
 
 const REPO = fileURLToPath(new URL("../../", import.meta.url));
@@ -1925,6 +1930,8 @@ export async function checkPageLane({ chrome, docs, shellDocs: sweep = [], contr
 			res.flushHeaders();
 			held.add(res);
 			req.on("close", () => held.delete(res));
+		} else if (path === "/api/artifact") {
+			res.writeHead(200, { "content-type": "image/png" }).end(ARTIFACT_PIXEL);
 		} else if (path === "/api/whoami") {
 			res.writeHead(200, { "content-type": "application/json; charset=utf-8" }).end("{}");
 		} else {
