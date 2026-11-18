@@ -10,6 +10,7 @@ import { modelAttemptIdOf } from "./model-attempts.mjs";
 import { availableParallelism } from "node:os";
 import { DelayedError, UnrecoverableError, Worker } from "bullmq";
 import { assertJudgedConnection, onValkeyError } from "./connection.mjs";
+import { makeConsumerSupervisor, makeConsumerFailureShutdown } from "./consumer-supervision.mjs";
 import { jobContainerName } from "./backend-local.mjs";
 import { scrubCredentials } from "./redact.mjs";
 import { cleanTouch } from "./touch-state.mjs";
@@ -2522,6 +2523,9 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 	}
 	const names = hostQueue ? [QUEUE, hostQueue] : [QUEUE];
 	const workers = [];
+	let failureShutdown;
+	let fatalExit = false;
+	const consumerSupervisor = makeConsumerSupervisor({ onFatal: (fault) => { fatalExit = true; void failureShutdown(fault); } });
 
 	// THE HOST-WIDE BOUND, and the reason it has to exist at all. `PI_CONCURRENCY` bounds a HOST -- its RAM
 	// and its share of the provider's concurrent-stream budget (DES-CONCURRENCY-3) -- but BullMQ's own
@@ -2639,6 +2643,7 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 		// Issue #464: only a connection `parseConnection` built, which judges and pins the Valkey it dials.
 		assertJudgedConnection(connection);
 		worker = new Worker(queueName, processor, {
+			autorun: false, // listeners and the terminal-loop handler exist before the first fetch (#924)
 			// maxRetriesPerRequest: null is REQUIRED for BullMQ's blocking connections, or it throws.
 			connection: { ...connection, maxRetriesPerRequest: null },
 			concurrency,
@@ -2652,6 +2657,7 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 		// (which carried a failed AUTH's password in `command.args` before connection.mjs scrubbed it).
 		onValkeyError(worker, `worker ${queueName}`);
 		workers.push(worker);
+		consumerSupervisor.attach(worker, queueName === QUEUE ? "shared" : "host");
 	}
 
 	const primary = workers[0];
@@ -2662,8 +2668,11 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 	primary.hostBudget = hostBudget;
 	// Issue #599, phase 2: the jobs this host runs now, for the registry beat's `jobs` thunk (start.mjs).
 	primary.runningJobs = runningJobs;
+	primary.consumerSupervisor = consumerSupervisor;
 
-	const stop = async () => {
+	let stopping;
+	const stop = () => stopping ??= (async () => {
+		consumerSupervisor.stop();
 		// Abort active jobs (=> docker stop via onAbort), then close. Without the cancel,
 		// worker.close() would wait up to 30 minutes for the container. ONE shutdown for every queue: two
 		// registrations would mean two `process.exit(0)` racing, and the second worker's containers would
@@ -2724,7 +2733,8 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 		} catch {
 			// A release that failed has already stopped mattering; the exit that follows is what a stop owes.
 		}
-	};
+	})();
+	failureShutdown = makeConsumerFailureShutdown({ stop, log: deps?.log });
 	// The signal path is `stop()` then exit, and the split is issue #299's: a boot that refuses AFTER the
 	// Worker exists must be able to undo what it built WITHOUT exiting, because the refusal's own error --
 	// not a 0 -- has to reach `cli.mjs`'s entryExitCode, and with every handle released above the process
@@ -2733,7 +2743,7 @@ export function createWorker({ connection, name, stopContainer, containerName, h
 	// Worker to observe them.
 	const shutdown = async () => {
 		await stop();
-		process.exit(0);
+		process.exit(fatalExit ? 1 : 0);
 	};
 	process.once("SIGTERM", shutdown);
 	process.once("SIGINT", shutdown);

@@ -230,7 +230,7 @@ export function makeAllocationAudit({ logsDir, fs = nodeFs }) {
  */
 export function makeAllocationLogReaper({ logsDir, retentionDays, fs = nodeFs, log = () => {}, now = () => Date.now() }) {
 	const dir = join(logsDir, "allocations");
-	return function reapAllocationLogs() {
+	return async function reapAllocationLogs({ stopped = () => false } = {}) {
 		if (retentionDays === 0) return;
 		let names;
 		try {
@@ -242,6 +242,8 @@ export function makeAllocationLogReaper({ logsDir, retentionDays, fs = nodeFs, l
 		}
 		const cutoff = now() - retentionDays * 86400000;
 		for (const name of names) {
+			await new Promise((resolve) => setImmediate(resolve));
+			if (stopped()) return;
 			if (!/^\d{4}-\d{2}\.jsonl$/.test(name)) continue;
 			try {
 				const st = fs.lstatSync(join(dir, name));

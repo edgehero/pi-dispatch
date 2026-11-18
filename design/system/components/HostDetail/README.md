@@ -1,4 +1,4 @@
-One host in full, opened from a host row on Fleet or Overview: is it alive, what it promised, what runs and waits on it, how busy it has been, and what doctor last said.
+One host in full, opened from a host row on Fleet or Overview: is it alive, whether its queue consumers respond, what it promised, what runs and waits on it, how busy it has been, and what doctor last said. A fresh heartbeat cannot override a stopped consumer; old or missing observations are unknown.
 
 **How a person uses it.**
 - **State first.** A stale host leads with a yellow card: no beat for 3 minutes, what that means for routing, and *Pause pi-jobs@build3* (danger). A healthy host shows no card here.
@@ -13,7 +13,7 @@ One host in full, opened from a host row on Fleet or Overview: is it alive, what
   - whether old containers were listed.
   The words a budget can show instead are listed.
 - **Last 7 days.** Busy, idle and no-history shares, average and peak slots, time full, and wait p50 and p95, then a 6-hour bar chart. Each bar has a tick at the most at once, a dashed slot line, and hatched no-history time, which counts as neither busy nor idle. It also shows promised and used shares, projects by run time, the "Jobs only" caveat and any truncation.
-- **Registry row.** Version, start, image and digest, pi, time zone, queues, venues and floor, the profiles that route jobs here, the fingerprints that match the fleet, and the last beat.
+- **Registry row.** Version, start, image and digest, pi, time zone, queues, venues and floor, the profiles that route jobs here, the fingerprints that match the fleet, and the last beat. Queue consumers show their state, last fetch and last job taken when published.
 - **Doctor.** The head line in the console's words, red when a check fails, then:
   - the stale warning;
   - 33 section chips (passing, failing, or not run);

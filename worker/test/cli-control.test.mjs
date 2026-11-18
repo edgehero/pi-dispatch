@@ -167,3 +167,27 @@ test("steer --withdraw fails fast (does not hang) when Valkey is unreachable", {
 	assert.equal(code, 1);
 	assert.ok(Date.now() - start < 15000, "must fail fast");
 });
+
+test("status reports a failed owned consumer beside a fresh heartbeat without changing queue state (#924)", async () => {
+	let output = "", ended = false;
+	const at = 1_800_000_000_000;
+	const rows = ["shared", "host", "sandbox"].map((role) => ({ role, state: "running", connection: role === "host" ? "ended" : "ready", active: 0, rateLimited: false, lastFetchAt: at, lastSuccessAt: at, lastTakenAt: null, fetchAgeMs: 0, successAgeMs: 0 }));
+	const code = await main(["status", "--valkey-url", "redis://127.0.0.1:6379"], {}, {
+		now: () => new Date(at), write: (text) => { output += text; }, valkeyRefusal: async () => null,
+		controlClients: {
+			makeRedisClient: () => ({
+				on() {}, disconnect() { ended = true; },
+				async smembers() { return ["build3"]; }, async scan() { return ["0", []]; }, async pttl() { return 90000; },
+				async hgetall() { return { name: "build3", routes: "true", startedAt: String(at), beatAt: String(at), consumers: JSON.stringify({ v: 1, startedAt: at, rows }) }; },
+				async eval() { assert.equal(ended, false, "demand is read before the probe closes"); return [0, 0]; },
+			}),
+			makeQueue: (_connection, { name }) => ({ name, client: { async zrange() { return []; } }, async isPaused() { return false; }, async getJobCounts() { return { waiting: 0, active: 0, paused: 0, delayed: 0, failed: 0 }; }, async close() {} }),
+		},
+	});
+	assert.equal(code, 0, "status reports facts; doctor owns the failing diagnostic exit");
+	const status = JSON.parse(output);
+	assert.equal(status.pausedState, false);
+	assert.equal(status.consumers[0].state, "failed");
+	assert.deepEqual(status.consumers[0].rows.map((c) => c.verdict), ["idle", "failed", "idle"]);
+	assert.ok(status.consumers[0].rows.every((c) => typeof c.queue === "string"));
+});

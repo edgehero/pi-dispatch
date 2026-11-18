@@ -8,7 +8,9 @@
  * something an operator chose (an image they picked, a file they edited, a path they set): a warning that cannot go
  * away, or that argues with a deliberate choice, is one nobody reads.
  *
- * No data store has an older shape yet. Every versioned file and record this build reads, it also still writes:
+ * The host registry now also has exact older 5.3.3 and 5.4.0 shapes without consumer observations (#924).
+ * `olderConsumerHealthFindings` reads already-bounded registry rows and retires on replacement or expiry.
+ * No versioned data file has an older shape yet. Every versioned file and record this build reads, it also still writes:
  * versions are stamped by need (DES-STORE-VERSION-WHEN-NEEDED), so a version 1 file or record is what this build writes
  * too while nothing in it needs more, and job data's version 2 and the scoped limits' 3 are stamped only where a field
  * needs them. The older LOCATIONS of issues #290 and #464 (the run history and the settings overlay under the OS temp
@@ -38,6 +40,15 @@ import { QUADLET_FILES, quadletDir } from "./podman-stack.mjs";
  * leaves is added here, in both spellings; a test holds `VALKEY_IMAGE` out of this list.
  */
 export const OLDER_VALKEY_IMAGES = Object.freeze(["valkey/valkey:8", "docker.io/valkey/valkey:8"]);
+
+/** Known published registry shapes. Absence alone is not evidence of an older writer. */
+export function olderConsumerHealthFindings(hosts = []) {
+	return hosts.filter((h) => ["5.3.3", "5.4.0"].includes(h.version) && !h.consumers).map((h) => ({
+		store: "host-registry",
+		label: `Host ${h.name} publishes the ${h.version} registry without queue consumer observations`,
+		fix: "upgrade and restart that worker; its next heartbeat replaces this older shape (docs/upgrading.md)",
+	}));
+}
 
 /** The container `up` starts Valkey as (`valkeyDockerRunArgs`), the one `valkeyContainer` gives the verdict on. */
 export const VALKEY_CONTAINER = "pi-dispatch-valkey";

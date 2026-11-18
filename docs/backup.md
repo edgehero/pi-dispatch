@@ -342,7 +342,8 @@ Two more lines speak about what this page covers:
 - **`state.older`** names a store still in a shape an older release left behind, with the step that moves it. Today
   that is the Valkey image, wherever it still says `valkey/valkey:8` rather than the pinned `valkey/valkey:8.1`: a
   compose file's `valkey` service, a Podman unit, or a `pi-dispatch-valkey` container this deployment's `up` started
-  and still runs itself ([upgrading.md](upgrading.md#valkey-and-bullmq)). Each such store gets a line of its own.
+  and still runs itself ([upgrading.md](upgrading.md#valkey-and-bullmq)). It also names an exact 5.3.3 host row
+  without consumer observations, which an upgraded worker replaces or expiry removes. Each such store gets a line of its own.
 - **`dollars.window-reset`** warns when a dollar window's counter in Valkey is missing, or below what this host's own
   run records settled into it, which is what a flushed, replaced or restored Valkey looks like
   ([When a counter resets](costs.md#when-a-counter-resets)).
@@ -352,3 +353,8 @@ The `history:request:` and `history:reply:` names are transient Valkey pub/sub c
 Random-pool runs (#922) add `dispatch:model-selection:v1:*`, within the `dispatch:*` family. Preserve it with BullMQ: a missing choice after possible execution refuses safely. Active/deferred state has no expiry; completed state uses the existing finished model-state retention. Parked random sessions add the host-written `model-selection` sidecar beside the canonical transcript, bound to its identity. Copy that entire session directory with the approval store, never just the transcript. There is no older format of either store.
 
 Random recovery also keeps `cp-N/model-selection.json` with each checkpoint snapshot. Its version-1 annotation binds the exact model and billing identity to the manifest hash. Copy the complete checkpoint directory; its manifest and pointer formats are unchanged.
+
+Session roots, their per-key `forks/` directories, and `.fork-sources` may hold
+`.retired-<pid>-<epoch-ms>-<sequence>` directories (#924). A sweep has already committed their deletion.
+Exclude these from a backup or leave them under their reserved names; never restore them as live sessions or
+fork sources. The next sweep retries removal. The sandbox's existing `.reap-*` names keep their pin-aware rules.

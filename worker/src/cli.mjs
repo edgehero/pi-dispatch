@@ -568,6 +568,7 @@ async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal
 		readLiveHosts(probe, { timeoutMs: FLEET_READ_TIMEOUT_MS }).catch((error) => ({ unreachable: error?.message ?? String(error) })),
 		discoverHostQueuesReporting(probe, { timeoutMs: FLEET_READ_TIMEOUT_MS }),
 	]);
+	const consumers = cmd === "status" ? await (await import("./consumer-status.mjs")).readConsumerStatus(probe, fleet?.hosts ?? [], { now: () => Number(now()) }) : null;
 	probe.disconnect?.();
 	const blind = fleet?.unreachable ?? null;
 	const names = unionQueueNames(fleetQueueNames(fleet?.hosts), existing.names);
@@ -612,7 +613,7 @@ async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal
 			const { readStatusWaiting } = await import("./status-waiting.mjs");
 			const waiting = await readStatusWaiting(queues, { now: () => Number(now()) });
 			if (blind || existing?.incomplete) { waiting.partial = true; waiting.discoveryIncomplete = true; }
-			const out = { ...(label ? { valkey: urlShown(url) } : {}), pausedState, ...(pausedPartial ? { pausedPartial, pausedQueues: names.filter((_, i) => states[i]) } : {}), ...counts, ...(blind ? { fleet: blind } : {}), waitingDetails: waiting };
+			const out = { ...(label ? { valkey: urlShown(url) } : {}), pausedState, ...(pausedPartial ? { pausedPartial, pausedQueues: names.filter((_, i) => states[i]) } : {}), ...counts, ...(blind ? { fleet: blind } : {}), waitingDetails: waiting, consumers };
 			write(`${JSON.stringify(out)}\n`);
 		}
 	} catch (error) {

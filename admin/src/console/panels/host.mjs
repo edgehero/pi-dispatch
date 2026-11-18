@@ -1,3 +1,4 @@
+import { consumerHealthText } from "@edgehero/pi-dispatch/consumer-health";
 import { sandboxLinks } from "../sandbox-links.mjs";
 import { sandboxHostEditor } from "../sandbox-host-editor.mjs";
 /** Host pages report published facts; runtime cleanup remains an explicit command on that host. */
@@ -117,7 +118,8 @@ export const hostState = (v) => {
     !h.noExpiry &&
     !h.jobsUnreadable &&
     !unread &&
-    skew === null
+    skew === null &&
+    h.consumerHealth?.state === "healthy"
   )
     return html``;
   const doctor = doctorHostsOf(v.data?.snapshot).find(
@@ -125,7 +127,7 @@ export const hostState = (v) => {
   );
   return ui.card({
     tint: "attention",
-    body: html`<div class="hd-state"><span class="tile tone-attention">${ui.icon("beat")}</span><div class="hd-state__t"><h2>${!h ? "Host has gone" : late ? `Stale: no beat for ${age === null ? "an unknown time" : ageText(age)}` : "Host needs attention"}</h2>${unread ? html`<p>${REGISTRY_UNREAD_TEXT}</p>` : null}${h ? html`${late ? html`<p>Heartbeat late: ${age === null ? "age not known" : ageText(age)} (expected within 1m). The worker beats every 15s; routing stops after three missed beats. Jobs already in its own queue wait for it.${doctor && doctorStale(doctor) ? ` Doctor on ${h.name} is also ${ageText(doctor.ageMs)} old.` : ""}</p>` : null}${h.noExpiry ? html`<p>${HOST_NO_EXPIRY_TEXT}</p>` : null}${skew === null ? null : html`<p>${skew}</p>`}${h.jobsUnreadable ? html`<p>${JOBS_UNREAD_TEXT}</p>` : null}<p>${h.routes === false || h.routes === "false" ? "This host has no routing queue; it still takes shared jobs." : "This host takes its own routed jobs and shared jobs."}</p>` : gone}</div>${h && late && canAct(v) && h.routes !== false && h.routes !== "false" ? html`<div class="hd-state__a">${ui.actForm({ action: "queue-pause", hidden: [["queue", hostQueueName(h.name)]], label: `Pause ${hostQueueName(h.name)}`, kind: ["danger", "sm"] })}</div>` : null}</div>`,
+    body: html`<div class="hd-state"><span class="tile tone-attention">${ui.icon("beat")}</span><div class="hd-state__t"><h2>${!h ? "Host has gone" : late ? `Stale: no beat for ${age === null ? "an unknown time" : ageText(age)}` : ["failed", "stalled"].includes(h.consumerHealth?.state) ? "Queue consumer needs attention" : "Host needs attention"}</h2><p>${consumerHealthText(h?.consumerHealth)}</p>${unread ? html`<p>${REGISTRY_UNREAD_TEXT}</p>` : null}${h ? html`${late ? html`<p>Heartbeat late: ${age === null ? "age not known" : ageText(age)} (expected within 1m). The worker beats every 15s; routing stops after three missed beats. Jobs already in its own queue wait for it.${doctor && doctorStale(doctor) ? ` Doctor on ${h.name} is also ${ageText(doctor.ageMs)} old.` : ""}</p>` : null}${h.noExpiry ? html`<p>${HOST_NO_EXPIRY_TEXT}</p>` : null}${skew === null ? null : html`<p>${skew}</p>`}${h.jobsUnreadable ? html`<p>${JOBS_UNREAD_TEXT}</p>` : null}<p>${h.routes === false || h.routes === "false" ? "This host has no routing queue; it still takes shared jobs." : "This host takes its own routed jobs and shared jobs."}</p>` : gone}</div>${h && late && canAct(v) && h.routes !== false && h.routes !== "false" ? html`<div class="hd-state__a">${ui.actForm({ action: "queue-pause", hidden: [["queue", hostQueueName(h.name)]], label: `Pause ${hostQueueName(h.name)}`, kind: ["danger", "sm"] })}</div>` : null}</div>`,
   });
 };
 
@@ -544,6 +546,7 @@ export const hostRow = card("Registry row", (h, v) =>
             "Image digest",
             html`<span class="code" title="${h.imageDigest ?? "not published"}">${typeof h.imageDigest === "string" && h.imageDigest.length > 32 ? `${h.imageDigest.slice(0, 19)}…${h.imageDigest.slice(-8)}` : (h.imageDigest ?? "not published")}</span>. ${!h.imageDigest || (v.data?.snapshot?.hostBudgets ?? []).some((peer) => !peer.imageDigest) ? "Image digest comparison is not known until every live host publishes one." : (v.data?.snapshot?.hostBudgets ?? []).every((peer) => peer.imageDigest === h.imageDigest) ? "Every live host has the same image digest." : "Live hosts have different image digests."}`,
           ],
+          ["Queue consumers", html`<p>${consumerHealthText(h.consumerHealth)}</p>${(h.consumerHealth?.rows ?? []).map((c) => html`<p>${c.role}: ${c.verdict}. Last fetch: ${c.lastFetchAt === null ? "not observed" : timeHtml(c.lastFetchAt)}. Last job taken: ${c.lastTakenAt === null ? "none observed" : timeHtml(c.lastTakenAt)}.</p>`)}`],
           ["pi version", h.piVersion],
           [
             "Time zone",

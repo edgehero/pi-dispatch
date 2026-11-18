@@ -533,6 +533,7 @@ def budget_bar(label, used, held, total, unit):
 HD_STATE = f"""<section class="card hd-state tone-attention card--tint" id="p-hoststate" data-panel aria-labelledby="hd-st-h">
   <span class="tile">{ic('beat')}</span>
   <div class="hd-state__t"><h2 id="hd-st-h">Stale: no beat for 3m</h2>
+    <p>Queue consumer health is unknown; a process heartbeat alone does not prove consumption.</p>
     <p>build3's worker beats every 15 seconds. Shared jobs stop going to a host after 3 missed beats; jobs on <span class="code">pi-jobs@build3</span> wait for it. Doctor on build3 is also 3 days old.</p></div>
   <div class="hd-state__a">{btn("Pause pi-jobs@build3", "danger", "pause")}</div>
 </section>"""
@@ -624,6 +625,7 @@ HD_ROW = card("Registry row", facts([
     ("Time zone", "UTC <span class='note'>the same on every host</span>"),
     ("Queues", "<span class='code'>pi-jobs@build3</span> and the shared <span class='code'>pi-jobs</span>"),
     ("Venues", "podman (default) <span class='note'>Floor <span class='code'>egress=enforced</span></span>"),
+    ("Queue consumers", "Queue consumer health is unknown; a process heartbeat alone does not prove consumption."),
     ("Profiles", "secret <span class='code'>prod</span>, wait <span class='code'>ci-green</span> <span class='note'>Jobs that need them are routed to this host.</span>"),
     ("Matches the fleet", f'<span class="hd-fp">{chip("all four match", "ok", "done")}<span class="muted">triggers, dollar caps, projects, envelope</span></span>'),
     ("Last beat", '<span class="tinted tone-attention"><b>3m ago</b></span> <span class="note">Every 15s. The row expires after 90s without one.</span>'),
@@ -737,7 +739,7 @@ def host_page():
 write("HostDetail", card_marker("Fleet", 1980, 1440, "One host in full: a stale beat, slots and budget with an orphaned hold and a waiter, its jobs, the last 7 days, its registry row and its doctor result"),
       "Host: build3", host_page(), HD_CSS)
 readme("HostDetail", """
-One host in full, opened from a host row on Fleet or Overview: is it alive, what it promised, what runs and waits on it, how busy it has been, and what doctor last said.
+One host in full, opened from a host row on Fleet or Overview: is it alive, whether its queue consumers respond, what it promised, what runs and waits on it, how busy it has been, and what doctor last said. A fresh heartbeat cannot override a stopped consumer; old or missing observations are unknown.
 
 **How a person uses it.**
 - **State first.** A stale host leads with a yellow card: no beat for 3 minutes, what that means for routing, and *Pause pi-jobs@build3* (danger). A healthy host shows no card here.
@@ -752,7 +754,7 @@ One host in full, opened from a host row on Fleet or Overview: is it alive, what
   - whether old containers were listed.
   The words a budget can show instead are listed.
 - **Last 7 days.** Busy, idle and no-history shares, average and peak slots, time full, and wait p50 and p95, then a 6-hour bar chart. Each bar has a tick at the most at once, a dashed slot line, and hatched no-history time, which counts as neither busy nor idle. It also shows promised and used shares, projects by run time, the "Jobs only" caveat and any truncation.
-- **Registry row.** Version, start, image and digest, pi, time zone, queues, venues and floor, the profiles that route jobs here, the fingerprints that match the fleet, and the last beat.
+- **Registry row.** Version, start, image and digest, pi, time zone, queues, venues and floor, the profiles that route jobs here, the fingerprints that match the fleet, and the last beat. Queue consumers show their state, last fetch and last job taken when published.
 - **Doctor.** The head line in the console's words, red when a check fails, then:
   - the stale warning;
   - 33 section chips (passing, failing, or not run);

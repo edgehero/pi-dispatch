@@ -2403,13 +2403,13 @@ test("the ready line points at the service when a credential is expected from an
 	const c = capture();
 	assert.equal(await runDoctor(noPat, seamDeps(c.out, { cwd: deployDir, home })), 0, c.text());
 	assert.ok(
-		c.text().endsWith(`\ndoctor: ready. Start the worker as the service: \`pi-dispatch service restart\` (the service installed for this folder, ${unit}). The service runs the env-setup script ${setup} first, which doctor expects to export GITHUB_PAT; a worker started by hand (\`pi-dispatch worker\`) runs no env-setup script, so it starts without that unless this shell exports it.\n`),
+		c.text().endsWith(`\ndoctor: configuration checked; queue consumer health is not confirmed. Start the worker as the service: \`pi-dispatch service restart\` (the service installed for this folder, ${unit}). The service runs the env-setup script ${setup} first, which doctor expects to export GITHUB_PAT; a worker started by hand (\`pi-dispatch worker\`) runs no env-setup script, so it starts without that unless this shell exports it.\n`),
 		c.text(),
 	);
 	// The same script, nothing expected from it: the advice is unchanged.
 	const plain = capture();
 	await runDoctor(seamEnv(), seamDeps(plain.out, { cwd: deployDir, home }));
-	assert.ok(plain.text().endsWith("\ndoctor: ready. Start the worker with `pi-dispatch worker`.\n"), plain.text());
+	assert.ok(plain.text().endsWith("\ndoctor: configuration checked; queue consumer health is not confirmed. Start the worker with `pi-dispatch worker`.\n"), plain.text());
 });
 
 test("startAdvice joins the .env reason and the env-setup reason, and names each expected credential (#481)", () => {
@@ -3448,7 +3448,7 @@ test("doctor --fix: the converge re-check reruns the probes once and reports gre
 	const tail = text().split("re-check after fixes")[1];
 	assert.equal((tail.match(/^⚠ /gm) ?? []).length, Number(recheck[2]), "the warning count is the ⚠ lines listed under it");
 	assert.ok(Number(recheck[2]) > 0, "the fixture carries warnings, so the count is not vacuous");
-	assert.match(text(), /\ndoctor: ready\. Start the worker with `pi-dispatch worker`\.\n/);
+	assert.match(text(), /\ndoctor: configuration checked; queue consumer health is not confirmed\. Start the worker with `pi-dispatch worker`\.\n/);
 	assert.equal(code, 0, "converge-to-green: the exit code judges the re-checked list by the same failed/ok logic");
 });
 
@@ -7943,6 +7943,10 @@ test("doctor: a daemon that never answers ends the run instead of holding it for
 			cwd,
 			spawn: fakeSpawn({ ...green, "docker info": "hang" }, calls),
 			probeValkey: async () => true,
+			// The deadline tests the stuck daemon; unrelated fleet/history reads must not consume it.
+			readHosts: async () => ({ hosts: [] }),
+			readAppliedSplit: async () => null,
+			readCapacity: async () => null,
 			nodeVersion: "22.19.0",
 			runTimeouts: FAST_TIMEOUTS,
 		}),
@@ -8915,7 +8919,7 @@ const MIXED_PIN = {
 test("a deployment that blesses local and podman prints exactly what it printed before issue #433 (#433)", async () => {
 	for (const [scenario, want] of Object.entries(MIXED_PIN)) {
 		const got = await mixedPinRun(scenario);
-		assert.equal(got.text, want.text, `${scenario}: the mixed deployment's output moved`);
+		assert.equal(withoutConsumerHealth(got.text), want.text, `${scenario}: the mixed deployment's output moved`);
 		assert.equal(got.code, want.code, `${scenario}: exit code`);
 		// Round 1 (D1): with local listed, a podman store without the image gets no `--fix` pull, even when every offer
 		// would be accepted; the output above already shows no offer, and nothing was run either.
@@ -9905,12 +9909,12 @@ test("doctor's ready line counts an empty .env key as the file deciding somethin
 	writeFileSync(join(cwd, ".env"), "PI_JOB_IMAGE=\nWEBHOOK_SECRET=\nPI_EGRESS_PROXY=\nDOCKER_HOST=\n");
 	const quiet = capture();
 	assert.equal(await runDoctor(podmanEnv(), podmanDeps(quiet.out, podmanPlan(), [], { cwd, platform: "linux" })), 0, quiet.text());
-	assert.ok(quiet.text().endsWith("\ndoctor: ready. Start the worker with `pi-dispatch worker`.\n"), quiet.text());
+	assert.ok(quiet.text().endsWith("\ndoctor: configuration checked; queue consumer health is not confirmed. Start the worker with `pi-dispatch worker`.\n"), quiet.text());
 	// GITLAB_URL= is a value to both processes (the API base becomes ""), so the file decided something.
 	writeFileSync(join(cwd, ".env"), "GITLAB_URL=\n");
 	const said = capture();
 	assert.equal(await runDoctor(podmanEnv(), podmanDeps(said.out, podmanPlan(), [], { cwd, platform: "linux" })), 0, said.text());
-	assert.match(said.text(), /doctor: ready\. Start the worker as the service/);
+	assert.match(said.text(), /doctor: configuration checked; queue consumer health is not confirmed\. Start the worker as the service/);
 });
 
 test("a shell/.env disagreement is a ✗ naming both values, a secret by name only, and doctor judges this shell's (#471)", async () => {
@@ -11235,7 +11239,7 @@ test("docker's egress canary prints and spawns exactly what it did before it was
 	for (const [scenario, want] of Object.entries(DOCKER_CANARY_PIN)) {
 		const got = await dockerCanaryPinRun(scenario, t);
 		assert.deepEqual(got.collection, want.collection, `${scenario}: the collection's spawns moved`);
-		assert.equal(got.text, want.text, `${scenario}: the output moved`);
+		assert.equal(withoutConsumerHealth(got.text), want.text, `${scenario}: the output moved`);
 		// #921 adds one final capability inspection; these older images declare no display, so no probe follows.
 		assert.deepEqual([got.code, got.total], [want.code, want.total + 1], `${scenario}: exit code and spawn count`);
 		// JSON has no `undefined`, so the capture wrote a signal-less kill as null.
@@ -12366,7 +12370,7 @@ test("doctor's ready line names a worker that reads the .env it judged, and keep
 	const { out, text } = capture();
 	assert.equal(await runDoctor(podmanEnv(), podmanDeps(out, podmanPlan(), [], { cwd, platform: "linux" })), 0, text());
 	assert.match(text(), /✓ service settings read from [^\n]*\.env[^\n]*: PI_JOB_IMAGE\n/);
-	assert.ok(text().endsWith(`\ndoctor: ready. Start the worker as the service, whose loader reads ${envPath} as doctor did: \`pi-dispatch service install\`. A worker started by hand (\`pi-dispatch worker\`) reads this shell's environment and not that file, so it runs without the settings doctor read from the file above unless this shell exports them.\n`), text());
+	assert.ok(text().endsWith(`\ndoctor: configuration checked; queue consumer health is not confirmed. Start the worker as the service, whose loader reads ${envPath} as doctor did: \`pi-dispatch service install\`. A worker started by hand (\`pi-dispatch worker\`) reads this shell's environment and not that file, so it runs without the settings doctor read from the file above unless this shell exports them.\n`), text());
 	assert.doesNotMatch(text(), /Start the worker with `pi-dispatch worker`/);
 	// A service installed for this folder: restart it, by the command that drives its scope (PR #478's gate: a system
 	// unit was told `pi-dispatch service restart`, which only drives `systemctl --user` and refuses `--system`).
@@ -12382,7 +12386,7 @@ test("doctor's ready line names a worker that reads the .env it judged, and keep
 		[join(PODMAN_HOME, ".config", "systemd", "user", "pi-dispatch-worker.service"), "pi-dispatch service restart"],
 	]) {
 		const text = await withUnit(unitPath);
-		assert.match(text, new RegExp(`\\ndoctor: ready\\. Start the worker as the service, whose loader reads [^\\n]* as doctor did: \`${esc(command)}\` \\(the service installed for this folder, ${esc(unitPath)}\\)\\. A worker started by hand`), unitPath);
+		assert.match(text, new RegExp(`\\ndoctor: configuration checked; queue consumer health is not confirmed\\. Start the worker as the service, whose loader reads [^\\n]* as doctor did: \`${esc(command)}\` \\(the service installed for this folder, ${esc(unitPath)}\\)\\. A worker started by hand`), unitPath);
 	}
 	// The same rule on the other two platforms, where doctor cannot be run green here: a LaunchDaemon is kickstarted
 	// in the system domain, a LaunchAgent restarts through the CLI, and on Windows the nssm service has no file to read.
@@ -12398,23 +12402,23 @@ test("doctor's ready line names a worker that reads the .env it judged, and keep
 	const keyed = capture();
 	assert.equal(await runDoctor(noKey, podmanDeps(keyed.out, podmanPlan(), [], { cwd, platform: "linux" })), 0, keyed.text());
 	assert.doesNotMatch(keyed.text(), /service settings read from/);
-	assert.match(keyed.text(), /\ndoctor: ready\. Start the worker as the service/);
+	assert.match(keyed.text(), /\ndoctor: configuration checked; queue consumer health is not confirmed\. Start the worker as the service/);
 	// This shell sets what the file does (it wins, so doctor judged the shell's): the worker started from it runs that.
 	writeFileSync(envPath, "PI_JOB_IMAGE=pi-job:latest\n");
 	const shellWins = capture();
 	assert.equal(await runDoctor(podmanEnv({ PI_JOB_IMAGE: "pi-job:latest" }), podmanDeps(shellWins.out, podmanPlan(), [], { cwd, platform: "linux" })), 0, shellWins.text());
-	assert.ok(shellWins.text().endsWith("\ndoctor: ready. Start the worker with `pi-dispatch worker`.\n"), shellWins.text());
+	assert.ok(shellWins.text().endsWith("\ndoctor: configuration checked; queue consumer health is not confirmed. Start the worker with `pi-dispatch worker`.\n"), shellWins.text());
 	// And with no .env at all.
 	const bare = capture();
 	assert.equal(await runDoctor(podmanEnv(), podmanDeps(bare.out, podmanPlan(), [], { cwd: scaffoldedCwd(), platform: "linux" })), 0, bare.text());
-	assert.ok(bare.text().endsWith("\ndoctor: ready. Start the worker with `pi-dispatch worker`.\n"), bare.text());
+	assert.ok(bare.text().endsWith("\ndoctor: configuration checked; queue consumer health is not confirmed. Start the worker with `pi-dispatch worker`.\n"), bare.text());
 	// The venue keys, which `deploymentVenueEnv` decides apart from the rest, count too.
 	writeFileSync(envPath, "PI_BACKENDS=podman\nPI_EGRESS=0\n");
 	const { PI_BACKENDS: _b, PI_EGRESS: _e, ...noVenue } = podmanEnv();
 	const venue = capture();
 	assert.equal(await runDoctor(noVenue, podmanDeps(venue.out, podmanPlan(), [], { cwd, platform: "linux" })), 0, venue.text());
 	assert.match(venue.text(), /✓ venue keys read from/);
-	assert.match(venue.text(), /\ndoctor: ready\. Start the worker as the service/);
+	assert.match(venue.text(), /\ndoctor: configuration checked; queue consumer health is not confirmed\. Start the worker as the service/);
 });
 
 test("doctor says a VALKEY_URL path that names no database as a ✗ and contacts no Valkey, never an unhandled rejection (#477 follow-up)", async () => {
@@ -13861,5 +13865,22 @@ test("doctor --live fails a declared display that cannot start, and plain doctor
 		assert.equal(code, live ? 1 : 0, text());
 		assert.equal(calls.some((c) => c.args.includes("pi-display-probe")), live);
 		if (live) assert.match(text(), /✗ display on local:.*display-start-failed/);
+	}
+});
+
+// Older venue output pins exclude only #924's separately tested health diagnosis and readiness qualification.
+function withoutConsumerHealth(text) {
+	return text.replace(/^[⚠✓✗] [^\n]*Queue consumer[^\n]*\n(?:    → check the worker service[^\n]*\n)?/gm, "")
+		.replace("doctor: configuration checked; queue consumer health is not confirmed.", "doctor: ready.");
+}
+
+test("consumer health fails doctor despite a fresh process row, and an older row cannot claim ready (#924)", async () => {
+	for (const [state, code, words] of [["failed", 1, "Queue consumer stopped"], ["stalled", 1, "Queue consumption stalled"], ["unknown", 0, "health is not confirmed"], ["healthy", 0, "doctor: ready"]]) {
+		const c = capture();
+		const health = { name: "build3", state, rows: [] };
+		const deps = seamDeps(c.out, { readHosts: async () => ({ hosts: [], consumerStatus: [health] }) });
+		assert.equal(await runDoctor({ ...seamEnv(), PI_WORKER_NAME: "build3" }, deps), code, c.text());
+		assert.ok(c.text().includes(words), c.text());
+		if (state !== "healthy") assert.doesNotMatch(c.text(), /doctor: ready/);
 	}
 });

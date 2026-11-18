@@ -201,7 +201,7 @@ test("an unset PI_SESSIONS_DIR yields no session rather than a temp-dir default"
 	assert.equal(store.resolveSession(ghIssue, { jobDir: "/tmp", piVersion: PI }), null);
 });
 
-test("the store never throws -- a disk fault must not fail the prepare that only asked", () => {
+test("the store never throws -- a disk fault must not fail the prepare that only asked", async () => {
 	const store = makeSessionStore({
 		sessionsDir: "/nonexistent-root/sessions",
 		ttlDays: 14,
@@ -214,7 +214,7 @@ test("the store never throws -- a disk fault must not fail the prepare that only
 	});
 	assert.doesNotThrow(() => store.resolveSession(ghIssue, { jobDir: "/tmp", piVersion: PI }));
 	assert.equal(store.resolveSession(ghIssue, { jobDir: "/tmp", piVersion: PI }), null);
-	assert.doesNotThrow(() => store.reapSessions());
+	await assert.doesNotReject(() => store.reapSessions());
 });
 
 test("a second writer on one key discards rather than clobbers", () => {
@@ -1560,7 +1560,7 @@ test("a fault while emptying a re-checked copy leaves nothing of it under the jo
 	assert.equal(existsSync(join(jobDir, "session", SESSION_FILE_NAME)), false, "the far transcript is not left behind");
 });
 
-test("the reaper's fallback keys on the directory's MTIME, not its birthtime or atime (#336)", () => {
+test("the reaper's fallback keys on the directory's MTIME, not its birthtime or atime (#336)", async () => {
 	// Both alternatives were mutations the suite accepted, and both are wrong in the same direction: a
 	// directory's birthtime never moves, so a key in active use would never age out of it, and an atime moves
 	// on a READ, so merely listing the store would keep a dead key alive (and `noatime` would stop it moving
@@ -1592,11 +1592,11 @@ test("the reaper's fallback keys on the directory's MTIME, not its birthtime or 
 	mkdirSync(dir, { recursive: true });
 	writeFileSync(join(dir, "lock"), "");
 
-	store.reapSessions();
+	await store.reapSessions();
 	assert.equal(existsSync(dir), false, "an old mtime is what makes a transcript-less key dead, whatever its birthtime or atime say");
 });
 
-test("a FRESH transcript in an ancient directory survives the reaper (#336)", () => {
+test("a FRESH transcript in an ancient directory survives the reaper (#336)", async () => {
 	// The guard on the fallback, and the mutation that matters most: making the directory-mtime rule
 	// unconditional instead of ENOENT-only would sweep an actively used key whose directory nobody has written
 	// to lately, which is an operator's conversations deleted. Only the transcript's own mtime can say a key is
@@ -1609,11 +1609,11 @@ test("a FRESH transcript in an ancient directory survives the reaper (#336)", ()
 	const ancient = (later - 90 * 86400000) / 1000;
 	utimesSync(join(sessionsDir, key), ancient, ancient);
 
-	store.reapSessions();
+	await store.reapSessions();
 	assert.equal(existsSync(file), true, "a key with a fresh transcript is alive, whatever its directory's mtime says");
 });
 
-test("a disk fault on the transcript is not evidence that a key is old (#336)", () => {
+test("a disk fault on the transcript is not evidence that a key is old (#336)", async () => {
 	// ENOENT-only, again from the other side. An EIO means the reaper could not ASK, and a reaper that treats
 	// "could not ask" as "old" deletes on a transient fault.
 	const later = Date.now() + 3 * 86400000;
@@ -1631,12 +1631,12 @@ test("a disk fault on the transcript is not evidence that a key is old (#336)", 
 	});
 	seed(sessionsDir, key, { venue: "local" });
 
-	store.reapSessions();
+	await store.reapSessions();
 	assert.equal(existsSync(join(sessionsDir, key)), true, "a key the reaper could not read is kept");
 	assert.ok(logs.some(([event, f]) => event === "session_reaper_skipped" && f.key === key), "and the fault is said");
 });
 
-test("the reaper removes neither a stray file nor an aged link out of the store (#336, #375)", () => {
+test("the reaper removes neither a stray file nor an aged link out of the store (#336, #375)", async () => {
 	// The outcome is the same as when this test was written for #336; the mechanism under it moved. Then, a
 	// stray file gave ENOTDIR on the inner lstat and a symlink gave ENOENT and reached a fallback guard. Since
 	// issue #375 the reaper lstats the ENTRY first, so neither reaches that fallback at all: both are named as
@@ -1660,13 +1660,13 @@ test("the reaper removes neither a stray file nor an aged link out of the store 
 	const aged = (later - 90 * 86400000) / 1000;
 	realFs.lutimesSync(linked, aged, aged);
 
-	store.reapSessions();
+	await store.reapSessions();
 	assert.equal(existsSync(stray), true, "a stray file is left alone");
 	assert.equal(realFs.lstatSync(linked).isSymbolicLink(), true, "and an aged symlink is not a key, so it is not swept");
 	assert.equal(existsSync(join(target, "precious.txt")), true, "and nothing behind it is touched");
 });
 
-test("the reaper judges only KEY-SHAPED names: `.checkpoints` and a stray directory survive however old (#645)", () => {
+test("the reaper judges only KEY-SHAPED names: `.checkpoints` and a stray directory survive however old (#645)", async () => {
 	// The checkpoint store's default home is `<PI_SESSIONS_DIR>/.checkpoints`. Before #645 every entry here was taken
 	// for a key and an aged non-key directory fell through to the directory-mtime fallback and was removed whole, so
 	// the session TTL would have deleted every workspace checkpoint. Real keys beside them are still swept, which is
@@ -1695,7 +1695,7 @@ test("the reaper judges only KEY-SHAPED names: `.checkpoints` and a stray direct
 	const file = seed(sessionsDir, expired, { venue: "local" });
 	utimesSync(file, aged, aged);
 
-	store.reapSessions();
+	await store.reapSessions();
 
 	assert.equal(existsSync(join(checkpoints, "some-job", "HEAD")), true, "the checkpoint store and its contents survive");
 	assert.equal(existsSync(join(notAKey, "keep.txt")), true, "a non-key directory survives");
@@ -1712,7 +1712,7 @@ test("the reaper judges only KEY-SHAPED names: `.checkpoints` and a stray direct
 	assert.equal(logs.some(([event]) => event === "session_reaper_skipped"), false, "and none of it is a fault (OQ-007)");
 });
 
-test("the reaper removes an expired key, keeps a fresh one, and SWEEPS a key with no transcript (#336)", () => {
+test("the reaper removes an expired key, keeps a fresh one, and SWEEPS a key with no transcript (#336)", async () => {
 	// The disk sweep keys on the TRANSCRIPT's mtime, and falls back to the key DIRECTORY's own mtime when there
 	// is no transcript to key on -- a first promotion that died before the swap. That key used to be skipped on
 	// every pass forever, so anything leaked in it outlived the store.
@@ -1727,7 +1727,7 @@ test("the reaper removes an expired key, keeps a fresh one, and SWEEPS a key wit
 	mkdirSync(join(sessionsDir, empty), { recursive: true });
 	writeFileSync(join(sessionsDir, empty, "lock"), "");
 
-	store.reapSessions();
+	await store.reapSessions();
 	assert.equal(existsSync(join(sessionsDir, expired)), false, "an expired transcript's key is swept whole, stamp and all");
 	assert.equal(existsSync(join(sessionsDir, fresh, SESSION_FILE_NAME)), true, "a fresh one is kept");
 	assert.equal(existsSync(join(sessionsDir, empty)), false, "a key with no transcript is swept on the directory's own mtime");
@@ -1739,7 +1739,7 @@ test("the reaper removes an expired key, keeps a fresh one, and SWEEPS a key wit
 	// wedged key recoverable there is the takeover rather than this.
 	const keep = fixture({ ttlDays: 0, now: () => later });
 	seed(keep.sessionsDir, expired);
-	keep.store.reapSessions();
+	await keep.store.reapSessions();
 	assert.equal(existsSync(join(keep.sessionsDir, expired, SESSION_FILE_NAME)), true);
 });
 
@@ -2028,7 +2028,7 @@ test("the STORE itself may be a symlink: only the key's own name is checked (#37
 	assert.equal(p.promoted, true, "and a promotion lands through it too");
 });
 
-test("the reaper judges NOTHING through a link, and says so as a verdict rather than a fault (#375)", () => {
+test("the reaper judges NOTHING through a link, and says so as a verdict rather than a fault (#375)", async () => {
 	const later = NOW + 40 * 86400000;
 	const aged = (NOW - 30 * 86400000) / 1000;
 	const { store, sessionsDir, root, logs } = fixture({ ttlDays: 14, now: () => later });
@@ -2044,7 +2044,7 @@ test("the reaper judges NOTHING through a link, and says so as a verdict rather 
 	// And a stray file, which reached the same skip through an ENOTDIR fault before.
 	writeFileSync(join(sessionsDir, "stray"), "not a key\n");
 
-	store.reapSessions();
+	await store.reapSessions();
 
 	assert.equal(existsSync(join(sessionsDir, linked)), true, "the link is left where it stands");
 	assert.equal(existsSync(join(outside, SESSION_FILE_NAME)), true, "and its target is untouched");

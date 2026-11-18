@@ -2155,7 +2155,7 @@ export function makeSettledRecord({ readRecord, readMirrored = null }) {
  * to a write that died (`RECORD_TMP_RE`).
  */
 export function makeLogReaper({ logsDir, retentionDays, fs = nodeFs, log = () => {}, now = () => Date.now() }) {
-	return function reapLogs() {
+	return async function reapLogs({ stopped = () => false } = {}) {
 		const keepForever = retentionDays === 0; // keep-forever sentinel: no record or log is swept
 		try {
 			const names = fs.readdirSync(logsDir);
@@ -2163,6 +2163,8 @@ export function makeLogReaper({ logsDir, retentionDays, fs = nodeFs, log = () =>
 			const cutoff = at - retentionDays * 86400000;
 			const tmpCutoff = at - RECORD_TMP_MAX_AGE_MS;
 			for (const name of names) {
+				await new Promise((resolve) => setImmediate(resolve));
+				if (stopped()) return;
 				const tmp = RECORD_TMP_RE.test(name);
 				if (!tmp && (keepForever || (!name.endsWith(".log") && !name.endsWith(".json")))) continue;
 				try {

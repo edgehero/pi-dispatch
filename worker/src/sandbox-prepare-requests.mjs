@@ -4,7 +4,7 @@ import { createHash } from "node:crypto";
 import { makeQueue } from "./queue.mjs";
 import { assertJudgedConnection, onValkeyError } from "./connection.mjs";
 import { TOKEN_NAME_RE } from "./console-tokens.mjs";
-import { WORKER_NAME_RE } from "./worker-name.mjs";
+import { WORKER_NAME_RE, sandboxPrepareQueueName } from "./worker-name.mjs";
 import { createSandboxPinHandler, newSandboxId, PREPARED_SANDBOX_ID_RE } from "./sandbox-prepare.mjs";
 import { RELEASE_IF_MINE } from "./fleet-lease.mjs";
 
@@ -16,10 +16,7 @@ const digest = (v) => createHash("sha256").update(JSON.stringify(v)).digest("hex
 const refused = (reason, message) => ({ refused: reason, message });
 const idOk = (id) => typeof id === "string" && /^[A-Za-z0-9._:-]{1,200}$/.test(id);
 
-export function sandboxPrepareQueueName(host) {
-	if (!WORKER_NAME_RE.test(host ?? "")) throw new Error("sandbox control queue requires a checked host");
-	return `pi-sandbox-prepare@${host}`;
-}
+export { sandboxPrepareQueueName } from "./worker-name.mjs";
 
 export const sandboxPrepareSlotKey = (host, slot) => `sandbox:prepare:pending:${host}:${slot}`;
 export function makeSandboxPrepareQueue(connection, { host } = {}) {
@@ -116,7 +113,7 @@ export async function listSandboxPreparations(queue, { limit = SANDBOX_PREPARE_P
 	} catch { return { unreachable: true, rows: [] }; }
 }
 
-export function startSandboxPrepareWorker({ connection, host, prepare, pin = null, config = null, now = Date.now, Worker: WorkerClass = Worker, workerOptions = {}, log = () => {} } = {}) {
+export function startSandboxPrepareWorker({ connection, host, prepare, pin = null, config = null, now = Date.now, Worker: WorkerClass = Worker, workerOptions = {}, log = () => {}, supervisor = null } = {}) {
 	assertJudgedConnection(connection);
 	if (typeof prepare !== "function") throw new Error("sandbox control worker needs a preparer");
 	const pinWorkspace = pin ?? (config ? createSandboxPinHandler({ config, now }) : null);
@@ -139,7 +136,8 @@ export function startSandboxPrepareWorker({ connection, host, prepare, pin = nul
 			log("sandbox_preparation_failed", { id: request.id, reason: "infrastructure" });
 			throw new Error("sandbox preparation infrastructure failed");
 		} finally { if (release) await releaseSlot(redis, job.data); }
-	}, { lockDuration: 30_000, ...workerOptions, connection, concurrency: 1, maxStalledCount: 1 });
+	}, { lockDuration: 30_000, ...workerOptions, ...(supervisor ? { autorun: false } : {}), connection, concurrency: 1, maxStalledCount: 1 });
 	onValkeyError(worker, "sandbox control worker");
+	supervisor?.attach(worker, "sandbox");
 	return worker;
 }

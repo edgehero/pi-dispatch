@@ -89,7 +89,7 @@ test("a linked fork parent is refused on both read and promotion without writing
 	assert.equal(existsSync(join(outside, forkId)), false);
 });
 
-test("retention expires forks independently and never deletes a live fork with its expired original", () => {
+test("retention expires forks independently and never deletes a live fork with its expired original", async () => {
 	const { root, store, body, originalDir, now } = fixture();
 	const old = new Date(now() - 20 * 86400000);
 	const recent = new Date(now() - 86400000);
@@ -100,11 +100,11 @@ test("retention expires forks independently and never deletes a live fork with i
 		writeFileSync(join(dir, "current.jsonl"), body(id));
 		utimesSync(join(dir, "current.jsonl"), date, date);
 	}
-	store.reapSessions();
+	await store.reapSessions();
 	assert.equal(existsSync(join(originalDir, "forks", forkId)), true);
 	assert.equal(existsSync(join(originalDir, "forks", "b".repeat(32))), false);
 	utimesSync(join(originalDir, "forks", forkId, "current.jsonl"), old, old);
-	store.reapSessions();
+	await store.reapSessions();
 	assert.equal(existsSync(originalDir), false);
 	assert.equal(existsSync(root), true);
 });

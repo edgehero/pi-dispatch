@@ -37,6 +37,7 @@ const draw = (fn, v) =>
   String(fn(v)).replace(/\s+/g, " ").replace(/> </g, "><");
 const text = (markup) => parseDocument(`<html><body>${markup}</body></html>`).body.textContent.replace(/\s+/g, " ").trim();
 const row = () => ({
+  consumerHealth: { state: "healthy", rows: [] },
   name: "build3",
   concurrency: "3",
   staleMs: 1000,
@@ -715,4 +716,14 @@ test("a fleet card with no snapshot says Valkey could not be read, and never pri
     assert.doesNotMatch(text, /=&gt;|=>/, `${name} prints a function`);
   }
   assert.match(String(fleet.fleetHeld({ data: {} })), /Valkey could not be read/);
+});
+
+
+test("a fresh heartbeat cannot hide a failed consumer, and older observations stay unknown (#924)", () => {
+  const s = base();
+  s.hostBudgets = [{ ...row(), consumerHealth: { state: "failed", rows: [] } }];
+  assert.match(draw(host.hostState, view(s)), /Queue consumer stopped/);
+  assert.match(draw(fleet.fleetHosts, view(s)), /Queue consumer stopped/);
+  delete s.hostBudgets[0].consumerHealth;
+  assert.match(draw(host.hostState, view(s)), /health is unknown/);
 });

@@ -1,3 +1,5 @@
+import { readConsumerStatus } from "@edgehero/pi-dispatch/consumer-status";
+import { consumerHealthOf } from "@edgehero/pi-dispatch/consumer-health";
 import { modelSelectionProblem } from "@edgehero/pi-dispatch/model-ref";
 import { makeHistoryReader, readHostHistory, historyRow } from "@edgehero/pi-dispatch/history-reader";
 import { readSubscriptionStatus } from "@edgehero/pi-dispatch/subscription-status";
@@ -4204,6 +4206,7 @@ function hostRowOf(h) {
   const more = parseJobsMore(h?.jobsMore);
   return {
     name: h?.name,
+    consumerHealth: h?.consumerHealth ?? consumerHealthOf(h),
     ...Object.fromEntries(["version", "startedAt", "pid", "image", "imageDigest", "piVersion", "tz", "fpCron", "fpUsd", "fpProjects", "fpEnvelope", "budgetSeed"].map((key) => [key, typeof h?.[key] === "string" || Number.isSafeInteger(h?.[key]) ? h[key] : null])),
     sandboxes: parseSandboxes(h?.sandboxes),
     sandboxesMore: parseJobsMore(h?.sandboxesMore),
@@ -4443,10 +4446,12 @@ export function createFleetReader(
     }));
     if (fleet?.unreachable || !Array.isArray(fleet?.hosts)) {
       fleetDegraded = fleet?.unreachable ?? "registry unreadable";
+      lastHosts = lastHosts.map((h) => ({ ...h, consumerHealth: { state: "unknown", rows: [] } }));
     } else {
       fleetDegraded = null;
       lastNames = fleetQueueNames(fleet.hosts);
-      lastHosts = fleet.hosts;
+      const health = await readConsumerStatus(redis, fleet.hosts, { now: nowFn });
+      lastHosts = fleet.hosts.map((h, i) => ({ ...h, consumerHealth: { state: health[i].state, rows: health[i].rows } }));
       lastHostsAt = nowFn();
     }
     // A host that left keeps its queue open until dispose. Closing it here would race a pause already in flight

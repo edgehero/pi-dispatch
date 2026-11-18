@@ -564,7 +564,7 @@ function* fileLines(fs, path, chunkBytes = 1 << 20) {
  */
 export function makeConsoleAuditReaper({ logsDir, retentionDays, fs = nodeFs, log = () => {}, now = () => Date.now() }) {
 	const dir = join(logsDir, CONSOLE_AUDIT_DIR);
-	return function reapConsoleAudit() {
+	return async function reapConsoleAudit({ stopped = () => false } = {}) {
 		if (retentionDays === 0) return;
 		let names;
 		try {
@@ -575,6 +575,8 @@ export function makeConsoleAuditReaper({ logsDir, retentionDays, fs = nodeFs, lo
 		}
 		const cutoff = now() - retentionDays * 86400000;
 		for (const name of names.slice(0, -1)) {
+			await new Promise((resolve) => setImmediate(resolve));
+			if (stopped()) return;
 			try {
 				const st = fs.lstatSync(join(dir, name));
 				if (st.isFile() && st.mtimeMs < cutoff) {

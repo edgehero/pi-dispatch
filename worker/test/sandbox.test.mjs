@@ -11,7 +11,10 @@ import { MINTED_TOKEN_VARS } from "../src/forges.mjs";
 import { SANDBOX_LAUNCHERS, SANDBOX_LAUNCH_WATCH_MS, SANDBOX_LAUNCH_WATCH_TRIES, SANDBOX_NAME_PREFIX, SANDBOX_NETWORK_SHAPE, SANDBOX_OPEN_GRACE_MS, buildSandboxRunArgs, combineSandboxNetworkSweepers, decideSandboxJobUser, launchSandbox, listRunningSandboxes, makeSandboxNetworkSweeper, makeSandboxRuntimeWatch, openSandbox, sandboxKeeperCheck, boundedRuntime, parsePublish, resolveSandbox, sandboxContainerName, sandboxEgress, stopSandbox, sandboxLauncher, sandboxVenuePolicy, sandboxVenueRefusal, sandboxVenues, sandboxSizeOf } from "../src/sandbox.mjs";
 import { DEFAULT_JOB_SIZE, jobSizeEnv } from "../src/job-size.mjs";
 import { networkNameFor } from "../src/egress.mjs";
-import { makeSandboxReaper, pinSandbox } from "../src/sandbox-store.mjs";
+import { makeSandboxReaper as realMakeSandboxReaper, pinSandbox } from "../src/sandbox-store.mjs";
+
+// Memory filesystems inject asynchronous removal too; production always uses node:fs/promises.
+const makeSandboxReaper = (options) => realMakeSandboxReaper({ ...options, ...(options.fs ? { remove: async (path, opts) => options.fs.rmSync(path, opts) } : {}) });
 
 const base = {
 	image: "pi-job:pinned",

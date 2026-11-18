@@ -13,6 +13,8 @@ import {
 	unlinkSync,
 	writeFileSync,
 } from "node:fs";
+import { rm } from "node:fs/promises";
+import { makeRetentionRemover } from "./retention-remove.mjs";
 import { randomBytes } from "node:crypto";
 import { join } from "node:path";
 import { scrubCredentials } from "./redact.mjs";
@@ -310,6 +312,7 @@ export function makeSessionStore({
 	maxAgeDays = 0,
 	maxResumeChain = 0,
 	maxContextPct = null,
+	remove = rm,
 	// The deployment's default venue, `PI_BACKENDS[0]`, for a job that names none (#277). `null` is a
 	// dependency-injection seam, and a job whose venue cannot be resolved never resumes.
 	defaultBackend = null,
@@ -317,6 +320,7 @@ export function makeSessionStore({
 	now = () => Date.now(),
 	fs = { copyFileSync, fstatSync, lstatSync, mkdirSync, openSync, closeSync, readSync, readFileSync, readdirSync, renameSync, rmSync, unlinkSync, writeFileSync },
 }) {
+	const retire = makeRetentionRemover({ fs, remove, now });
 	/**
 	 * Stage this job's /session directory and decide whether it resumes.
 	 *
@@ -1275,17 +1279,21 @@ export function makeSessionStore({
 	 * gate was also carrying the disk half alone, since a worker that never restarts never re-swept
 	 * (OQ-007, RESOLVED).
 	 */
-	function reapSessions() {
-		if (!sessionsDir || ttlDays === 0) return;
+	async function reapSessions({ stopped = () => false } = {}) {
+		if (!sessionsDir) return;
 		const cutoff = now() - ttlDays * 86400000;
 		let names;
 		try {
+			await retire.leftovers(sessionsDir, { stopped });
+			if (ttlDays === 0 || stopped()) return;
 			names = fs.readdirSync(sessionsDir);
 		} catch (err) {
 			log("session_reaper_skipped", { reason: scrubCredentials(err?.message) });
 			return;
 		}
 		for (const name of names) {
+			await new Promise((resolve) => setImmediate(resolve));
+			if (stopped()) return;
 			// ONLY A KEY-SHAPED NAME IS JUDGED (issue #645). Until then every entry of the store was taken for a key, so a
 			// directory that is not one -- the checkpoint store's default home, `<PI_SESSIONS_DIR>/.checkpoints`, or anything
 			// an operator parks here -- was removed whole once its own directory mtime aged past the TTL, by a pass that only
@@ -1318,7 +1326,8 @@ export function makeSessionStore({
 					log("session_not_reaped", { key: name, reason: "key-not-a-directory" });
 					continue;
 				}
-				const retainForks = reapForks(name, dir, cutoff);
+				const retainForks = await reapForks(name, dir, cutoff, stopped);
+				if (stopped()) return;
 				let mtimeMs;
 				try {
 					mtimeMs = fs.lstatSync(join(dir, SESSION_FILE_NAME)).mtimeMs;
@@ -1333,7 +1342,7 @@ export function makeSessionStore({
 					// on the transcript is a disk fault, and a disk fault is not evidence that a key is old. Those
 					// keep today's log-and-skip.
 					if (err?.code !== "ENOENT") throw err;
-					const dst = entry; // the entry's own stat, already taken and already proven a directory
+					const dst = fs.lstatSync(dir); // fork cleanup may have yielded beside a promotion
 					// The entry was already proven a real directory above (issue #375), so this arm is now only about
 					// a key that has no transcript yet, and `dst` is that same stat rather than a second one.
 					//
@@ -1346,15 +1355,7 @@ export function makeSessionStore({
 					mtimeMs = dst.mtimeMs;
 				}
 				if (mtimeMs < cutoff && !retainForks) {
-					// ONE recursive remove, on the transcript's age where there is one and the directory's own where
-					// there is not (above). Removing the
-					// transcript first (so an absent stamp, which reads as `local`, can never sit beside a readable
-					// transcript mid-sweep) was tried under #277 and withdrawn: a remove that then failed transiently
-					// left the directory with no transcript, which this loop never looks at again, so a leaked lock
-					// in it wedged the key for good. The race it closed needs a promotion landing on an EXPIRED key
-					// during its own sweep on a deployment with a second venue; INT-SESSION-STORE-CONTRACT names it.
-					fs.rmSync(dir, { recursive: true, force: true });
-					log("reaped_session", { key: name });
+					await retireSession(dir, name, cutoff, mtimeMs);
 				}
 			} catch (err) {
 				log("session_reaper_skipped", { key: name, reason: scrubCredentials(err?.message) });
@@ -1363,12 +1364,15 @@ export function makeSessionStore({
 	}
 
 	/** Forks have their own expiry clock; an old original must never recursively remove a newer fork. */
-	function reapForks(rootKey, rootDir, cutoff) {
+	async function reapForks(rootKey, rootDir, cutoff, stopped) {
 		const dir = join(rootDir, "forks");
 		let st;
 		try { st = fs.lstatSync(dir); } catch (error) { if (error.code === "ENOENT") return false; throw error; }
 		if (!st.isDirectory()) return true;
+		await retire.leftovers(dir, { stopped });
 		for (const id of fs.readdirSync(dir)) {
+			await new Promise((resolve) => setImmediate(resolve));
+			if (stopped()) return true;
 			if (!/^[0-9a-f]{32}$/.test(id)) continue;
 			const child = join(dir, id);
 			try {
@@ -1378,12 +1382,39 @@ export function makeSessionStore({
 				try { modified = fs.lstatSync(join(child, SESSION_FILE_NAME)).mtimeMs; }
 				catch (error) { if (error.code !== "ENOENT") throw error; modified = entry.mtimeMs; }
 				if (modified < cutoff) {
-					fs.rmSync(child, { recursive: true, force: true });
-					log("reaped_session", { key: `${rootKey}.${id}` });
+					await retireSession(child, `${rootKey}.${id}`, cutoff, modified);
 				}
 			} catch (error) { log("session_reaper_skipped", { key: `${rootKey}.${id}`, reason: scrubCredentials(error?.message) }); }
 		}
 		return fs.readdirSync(dir).length > 0;
+	}
+
+
+	/** The promotion lock protects the decision through detach; no await can admit a same-process writer there. */
+	async function retireSession(dir, key, cutoff, fallbackMtime) {
+		const taken = takeLock(dir, key);
+		if (taken.locked) { log("session_not_reaped", { key, reason: "locked" }); return; }
+		let tomb = null;
+		try {
+			if (!fs.lstatSync(dir).isDirectory()) return;
+			let modified = fallbackMtime;
+			try { modified = fs.lstatSync(join(dir, SESSION_FILE_NAME)).mtimeMs; }
+			catch (error) { if (error.code !== "ENOENT") throw error; }
+			if (modified >= cutoff) return;
+			// reapForks yielded. A fork can be published after its empty answer but before this root's decision.
+			if (SESSION_KEY_PATTERN.test(key)) {
+				try {
+					const forks = join(dir, "forks");
+					if (!fs.lstatSync(forks).isDirectory() || fs.readdirSync(forks).length > 0) return;
+				} catch (error) { if (error.code !== "ENOENT") throw error; }
+			}
+			tomb = retire.detach(dir);
+		} finally {
+			fs.closeSync(taken.fd);
+			// A new promotion may recreate the public name after detach. Never unlink its lock.
+			if (!tomb) fs.unlinkSync(join(dir, LOCK_FILE));
+		}
+		if (tomb) { await retire.remove(tomb); log("reaped_session", { key }); }
 	}
 
 	/**

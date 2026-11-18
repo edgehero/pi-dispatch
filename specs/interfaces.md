@@ -3757,7 +3757,8 @@ sibling rather than an extension of the GitHub one for the same reason.
     open, a pin or a read of the run finds nothing, which is the truth, rather than a directory a recursive delete
     is part way through: a 200k-file clone takes about 10 s to delete, and a pin landing inside that used to report
     `pinned: true` over a directory that was then gone. The worker's own `retainJobDir` cannot interleave, since it
-    runs in the same process and the stretch from rename to delete is synchronous. A rename that fails HOLDS the
+    runs in the same process and the stretch from the fresh read through rename and read-back is synchronous.
+    Recursive removal of the committed tombstone then yields (#924). A rename that fails HOLDS the
     directory under its own name (`rename-failed`, with the errno). **A tombstone whose delete fails stays a
     tombstone** (`tombstone-stuck`): the run is no longer re-openable, which is intended; every pass retries the
     delete, saying so when first seen and then once a day per tombstone; doctor counts tombstones apart from
@@ -10564,6 +10565,55 @@ recorded repair is re-running `/dispatch setup` (or editing the pointer by hand)
 
 ---
 
+## INT-HOST-CONSUMERS
+
+Optional `consumers` in each `host:h:<name>` is at most 4096 UTF-8 bytes of JSON:
+`{ v: 1, startedAt, rows }`. `startedAt` equals the registry's exact process generation; a preserved field
+from an older process is unknown even if its hash TTL is fresh. One to three unique rows are allowed.
+The shared and sandbox roles are required for a complete live worker; a routed worker also requires host.
+Unknown version, malformed/absent data, no expiry, or registry age over 60000 ms yields unknown.
+
+| Vocabulary | Members |
+|---|---|
+| role | `shared`, `host`, `sandbox` |
+| state | `starting`, `running`, `paused`, `closing`, `failed` |
+| connection | `starting`, `ready`, `reconnecting`, `ended` |
+| verdict | `unknown`, `starting`, `idle`, `busy`, `paused`, `rate-limited`, `reconnecting`, `failed`, `stalled`, `stopping` |
+
+Every row carries exactly the projected fields below. Unknown object properties are ignored by readers.
+
+| Field | Meaning |
+|---|---|
+| role | Which consumer; maps to the shared job queue, this host's job queue, or this host's sandbox-control queue |
+| state | Loop lifecycle, independent of the process heartbeat |
+| connection | Aggregate of ordinary and blocking clients; either terminal client is ended |
+| active | Nonnegative safe integer, processor calls including preflight, not just containers |
+| rateLimited | Boolean from the queue worker's live limiter state |
+| lastFetchAt | Last actual fetch attempt, epoch ms or null |
+| lastSuccessAt | Last successful queue operation, epoch ms or null |
+| lastTakenAt | Last processor entry, epoch ms or null; informational only |
+| fetchAgeMs | Producer-monotonic elapsed ms since last fetch, or null |
+| successAgeMs | Producer-monotonic elapsed ms since last successful operation, or null |
+
+Timestamp and age numbers are nonnegative safe integers. No job id, payload, error text, endpoint, path or
+credential appears in this field. The row inherits the registry's 15-second beat and 90-second TTL.
+`lastSuccessAt` advances on successful activation-script calls (including an empty answer), finite blocking
+read completion and processor entry. Fetch attempts alone do not prove consumption.
+
+Readers add TTL-derived registry age to `successAgeMs`, rather than subtracting clocks on different hosts.
+A running, ready, idle consumer with success older than 120000 ms (or unobserved success) is stalled only
+when its own queue is unpaused and its next candidate or delayed head is over 120000 ms overdue. Otherwise
+that stale progress is unknown. Failure takes precedence over busy or pause; an intentional closing state stays stopping when its
+connections end. Reconnecting and starting cannot report healthy merely because a processor is busy.
+Paused, busy and rate-limited are expected states when the connections are ready. Overall state is failed, stalled, unknown
+or healthy, in that order. Health is display-only; it changes no routing, admission, retry or queue data.
+
+`status` includes per-host `consumers` with overall `state` and projected rows plus `verdict` and queue name.
+The console's host projection adds `consumerHealth` with that state and rows. Doctor publishes
+`fleet.consumers` checks on single-host deployments too: failed/stalled fail doctor, unknown warns and
+qualifies its final readiness line. Old readers ignore the additive registry field; new readers show old
+workers as unknown. No run-record or job-data version changes.
+
 ## INT-HOST-REGISTRY-CONTRACT
 
 **AMENDED 2026-11-01 (#775, endpoint occupancy).** Optional `endpointsVersion: 1`, `endpointsStartedAt`, `endpoints` and
@@ -13294,7 +13344,7 @@ the worker's, exported from `@edgehero/pi-dispatch/doctor-results`, so the reade
   ```
 - **Ids** (`CHECK_ID_RE`, `<section>.<name>`): a NAMED id where the check carries one (`NAMED_CHECK_IDS`:
   `triggers.file`, `triggers.file-missing`, `settings.overlay`, `settings.overlay-dollars`, `settings.unknown-keys`,
-  `fleet.store-versions` (issue #761), `fleet.versions`, `dollars.window-reset` and `state.older` (AMENDED 2026-11-03,
+  `fleet.store-versions` (issue #761), `fleet.versions`, `fleet.consumers` (issue #924), `dollars.window-reset` and `state.older` (AMENDED 2026-11-03,
   #761, upgrade path), and for each boot file
   `<scaffold name>.file`, the service's verdict on the file it reads, and `<scaffold name>.file-shell`, this shell's);
   else `<section>.<n>`, the check's place in its section on that run (`DOCTOR_SECTIONS`, `--live` read-backs in
@@ -13334,7 +13384,9 @@ the worker's, exported from `@edgehero/pi-dispatch/doctor-results`, so the reade
   `state.older` (section `state`, after the three older-location hints, which keep their own words and places) is one
   warning per store an older release left in a shape this build no longer writes (`olderStateFindings`,
   `worker/src/older-state.mjs`, which never sets an id), so a run with two publishes `state.older` and
-  `state.older-2`, the repeat suffix; today each finding is the Valkey image (`DES-QUEUE-BULLMQ-OVER-CUSTOM`).
+  `state.older-2`, the repeat suffix; findings cover the older Valkey image (`DES-QUEUE-BULLMQ-OVER-CUSTOM`) and the exact 5.3.3
+  host-registry shape without consumer observations (#924). `fleet.consumers` reports the live diagnosis
+  separately (`INT-HOST-CONSUMERS`), including on a single host.
 - **Content rule** (`redactText`, applied by the writer), in this order: invisible characters (zero-width, joiners,
   marks, the soft hyphen, the byte-order mark) are deleted, and control, bidi, line and paragraph separator characters
   are spaces; every value of a secret-named variable in doctor's resolution (and the `.env` values
@@ -14956,3 +15008,4 @@ and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` are UNCHANGED, checked: no file shape, wr
 | 2026-11-16 (#918, part 3) | AMENDED `INT-LIVE-PROBE-CONTRACT`: `jobToJobIsolation` also tries the proxy at its address on peer2's network, failing `proxy-cross` when peer1 reaches it, since a private endpoint grant is named after that address. AMENDED `INT-EGRESS-POLICY-CONTRACT`, the names table: four private endpoint probes per declared endpoint on a granted canary network. AMENDED `INT-PRIVATE-ENDPOINTS-FILE-CONTRACT`: Status names part 3, and the OpenShell venues keep refusing a granted job in this release. `INT-DOCTOR-RESULTS-KEY` UNCHANGED, checked: the new lines take derived ids in the `egress` section; no named id is added. |
 | 2026-11-16 (#918, part 4) | `INT-HOST-REGISTRY-CONTRACT` UNCHANGED, checked: no heartbeat field is added for private endpoints; the registry admits no address, and the console shows this deployment folder's own declaration, saying that other hosts' copies are not published. `INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked: the run page reads `privateEndpoints` through the worker's own `recordedPrivateEndpoints`. |
 | 2026-11-17 (#921) | INT-CONTAINER-RUNTIME-CONTRACT AMENDED with the optional display image contract; INT-LIVE-PROBE-CONTRACT AMENDED with image-specific graphical probes and the display sweep namespace. INT-DOCTOR-RESULTS-KEY, INT-TRIGGERS-FILE-CONTRACT, INT-RUN-HISTORY-FILE-CONTRACT and INT-RUNNER-EXIT-CODE-PROTOCOL UNCHANGED, checked: ordinary live check records and the existing image selection suffice; no paid-job result or stored shape changes. The OpenShell lane asserts the measured identity-call refusal, not a graphical pass. |
+| 2026-11-18 | Issue #924. Adds `INT-HOST-CONSUMERS`, an additive generation-bound registry field and explicit unknown for older readers/writers; amends `INT-SANDBOX-CONTRACT` at the asynchronous deletion boundary. `INT-RUN-HISTORY-FILE-CONTRACT` and job-data shape UNCHANGED, checked. |

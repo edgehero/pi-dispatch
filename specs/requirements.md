@@ -44,6 +44,20 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 ---
 
+## REQ-CONSUMER-LIVENESS
+
+- **Requirement (#924):** a worker whose queue consumer has terminally stopped must fail the process
+  within a bounded shutdown, so the installed service can restart it. A live process heartbeat must not
+  cause doctor, status or the console to report that such a consumer is healthy.
+- **Acceptance:** exercise shared, host and sandbox-control consumers; distinguish terminal connection
+  end and unexpected loop completion from transient reconnect and deliberate shutdown/pause. Retention
+  of large directory trees must yield while deleting committed tombstones, preserve active/pinned runs
+  and session promotions, and resume abandoned deletions after restart. Health reports unknown for an
+  older or unreadable registry shape, and never diagnoses an idle empty, busy, paused or rate-limited
+  consumer as stalled solely because no job was taken recently. Overdue work is corroboration for an
+  operator diagnosis, not permission to restart or replay a paid job.
+- **Traces to:** `DES-CONSUMER-LIVENESS`, `DES-RETENTION-SWEEPS-ON-A-TIMER`, `INT-HOST-CONSUMERS`.
+
 ## REQ-QUEUE-BURST-NO-DROP
 
 - **Statement**: 50 deliveries arriving within 60 seconds shall produce 50 durably queued jobs. None
@@ -9657,3 +9671,4 @@ instead of drifting.
 | 2026-11-16 (#918, part 3) | `REQ-PRIVATE-ENDPOINTS` AMENDED: Acceptance gains doctor's lines, its canary's four probes and the cross-address read in `--live`; Scope says the OpenShell venues refuse a granted job in this release. |
 | 2026-11-16 (#918, part 4) | `REQ-OPERATOR-CONSOLE-SCREENS` AMENDED, (g6) Connections: the `p-private-endpoints` panel (this folder's declaration and the triggers granted each, "not declared here" for an id it lacks), a host whose private-endpoints file does not load among the problems, and the trigger page, trigger list, run preview and run page rows. `REQ-PRIVATE-ENDPOINTS` UNCHANGED, checked: the console reads and shows, and writes nothing. |
 | 2026-11-17 (#921) | NEW REQ-GRAPHICAL-JOB-CHECK (#921): headed Chromium recipe, image capability, deterministic screenshot checks, named display failures and venue-specific evidence. REQ-FRONTEND-VISUAL-VERIFY and REQ-DEPLOYMENT-BOOTSTRAP UNCHANGED, checked: application orchestration remains in flows, and the optional live check changes no setup permission or paid action. |
+| 2026-11-18 | Issue #924. Adds `REQ-CONSUMER-LIVENESS`. Queue durability and paid retry policy UNCHANGED, checked. |

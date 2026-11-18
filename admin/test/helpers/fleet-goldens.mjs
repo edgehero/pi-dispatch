@@ -61,6 +61,10 @@ const states = {
   "fleet-all-reasons.operator": () => draw("fleet", { snap: snapshot({ waiting: waiting(Object.entries(DEFER_WHYS).map(([why, spec], i) => wait({ jobId: `gh-wait-${i}`, why, bucket: spec.bucket, budgetWhy: "memory" }))) }) }),
   "fleet-no-progress.operator": () => draw("fleet", { snap: snapshot({ active: snapshot().active.map((j) => ({ ...j, progress: { absent: true } })) }) }),
   "host-fresh.operator": () => draw("host"),
+  "host-consumer-failed.operator": () => draw("host", { snap: snapshot({ hostBudgets: [host({ consumerHealth: { state: "failed", rows: [{ role: "host", verdict: "failed", lastFetchAt: NOW - MIN, lastTakenAt: NOW - HOUR }] } })] }) }),
+  "host-consumer-idle.viewer": () => draw("host", { role: "viewer", snap: snapshot({ hostBudgets: [host({ consumerHealth: { state: "healthy", rows: [{ role: "shared", verdict: "idle", lastFetchAt: NOW - 5000, lastTakenAt: null }] } })] }) }),
+  "fleet-consumer-failed.operator": () => draw("fleet", { snap: snapshot({ hostBudgets: [host({ consumerHealth: { state: "failed", rows: [] } })] }) }),
+
   "host-capacity-missing.operator": () => draw("host", { cap: { window: { fromMs: NOW - 7 * 24 * HOUR, toMs: NOW, bucketMs: HOUR }, hosts: [], coverage: [] } }),
   "host-capacity-truncated.operator": () => draw("host", { cap: { ...capacity(), truncated: true } }),
   "host-budget-off.operator": () => draw("host", { snap: snapshot({ hostBudgets: [host({ budgetMemMiB: "off", budgetCpuCenti: "off" })] }) }),

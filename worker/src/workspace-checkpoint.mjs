@@ -1725,7 +1725,7 @@ export function makeWorkspaceCheckpointer({
 	 * whatever its directory's mtime says), falling back to the directory's own. `active` names runs the
 	 * caller still holds; one yield between entries keeps a large store from monopolising the loop.
 	 */
-	async function sweep({ active = [] } = {}) {
+	async function sweep({ active = [], stopped = () => false } = {}) {
 		try {
 			const keep = new Set([...active].map((id) => checkpointKey(String(id))));
 			let names;
@@ -1739,6 +1739,7 @@ export function makeWorkspaceCheckpointer({
 			let kept = 0;
 			for (const name of names) {
 				await yieldTick();
+				if (stopped()) break;
 				if (!/^[0-9a-f]{32}$/.test(name)) continue;
 				const dir = join(storeDir, name);
 				const st = await lstatOrNull(dir).catch(() => null);
@@ -1757,6 +1758,7 @@ export function makeWorkspaceCheckpointer({
 					}
 				}
 				if (now() - newest > L.ttlMs) {
+					if (stopped()) break;
 					await fs.rm(dir, { recursive: true, force: true });
 					removed++;
 				} else {
