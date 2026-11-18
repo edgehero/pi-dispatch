@@ -47,6 +47,7 @@ const MAX_RUN = {
 	resume: false,
 	skillsDir: "/srv/skills",
 	secrets: { STRIPE_KEY: "op://ci/stripe/api-key" },
+	secretFiles: { DEVICE_KEY: "device/key" },
 	secretsProfile: "ci",
 	backend: "local",
 	excludeTools: ["bash"],
@@ -165,7 +166,7 @@ function drive(forge, route, triggers) {
 function load(forge, entry, variant) {
 	const raw = { on: entry.on, run: { kind: forge, ...MAX_RUN, ...variant, ...(entry.extra ?? {}) } };
 	// The maximal fixture declares the newest trigger field it uses (privateEndpoints, issue #918, at 7).
-	const json = JSON.stringify({ version: 7, triggers: [raw] });
+	const json = JSON.stringify({ version: 8, triggers: [raw] });
 	const [normalized] = parseTriggers(json, "/t.json");
 	const cfg = {};
 	const res = reloadTriggers({ PI_TRIGGERS_FILE: "/t.json" }, cfg, { fileExists: () => true, readFile: () => json });
@@ -233,8 +234,8 @@ for (const [forge, entries] of Object.entries(ENTRIES)) {
 			if (normalized.run.mayMerge === true) {
 				const digest = mergePolicyDigest(normalized);
 				for (const [stage, value] of [["group", rule], ["filter", r.job], ["queue", data]]) assert.equal(value.mayMergePolicy, digest, `${stage} lost the reviewed trigger reference`);
-				// Stamped with the newest field the job carries: privateEndpoints (issue #918), at 8, above mayMerge's 5.
-				assert.equal(data.dataVersion, 8);
+				// Stamped with the newest field the job carries: secretFiles (issue #919), at 9.
+				assert.equal(data.dataVersion, 9);
 				const check = makeCheckMergePolicy({ triggersPath: "/t.json", fs: { readFileSync: () => json } });
 				assert.deepEqual(check(data), { ok: true }, `${forge} ${entry.route}: the real pickup gate must accept the receiver's queued policy`);
 			}
@@ -270,7 +271,7 @@ test("each field ALONE reaches the job: one folded into a neighbour's conditiona
 		for (const [forge, entries] of Object.entries(ENTRIES)) {
 			for (const entry of entries) {
 				const raw = { on: entry.on, run: { kind: forge, flow: "work", ...(needs[field] ?? {}), [field]: value, ...(entry.extra ?? {}) } };
-				const json = JSON.stringify({ version: 7, triggers: [raw] });
+				const json = JSON.stringify({ version: 8, triggers: [raw] });
 				const [normalized] = parseTriggers(json, "/t.json");
 				const cfg = {};
 				assert.deepEqual(reloadTriggers({ PI_TRIGGERS_FILE: "/t.json" }, cfg, { fileExists: () => true, readFile: () => json }), { ok: true }, `${forge} ${entry.route}: ${field} alone must load`);

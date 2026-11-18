@@ -7,19 +7,22 @@ import { networkNameFor } from "../src/egress.mjs";
 
 const fns = () => ({ runContainer: async () => ({}), imagePreflight: async () => ({}), egressPreflight: async () => ({}), stopContainer: async () => {}, reap: async () => ({ reaped: true }) });
 
-test("container-spec.mjs is a LEAF -- it imports nothing but job-size.mjs, which imports nothing", () => {
+test("container-spec.mjs imports only the leaf size and layout modules", () => {
 	// Not in backends.test.mjs because it is a different module's property, and it is load-bearing from the
 	// moment `packages.mjs` started importing CONTAINER_GLOBAL_PI_DIR from here: that comment's whole claim
 	// is "this costs no cycle and no weight in the admin's bundle". docker-run.mjs, where the constant used
 	// to live, has now GAINED an import, which is exactly the drift this pins against next time.
 	// Issue #596 added ONE edge, to the job's size, and only because that module is a leaf too: the transitive set stays
-	// these two files.
+	// these two files. Issue #919 adds the equally import-free layout table, keeping file paths in one place.
 	const src = readFileSync(new URL("../src/container-spec.mjs", import.meta.url), "utf8");
-	assert.deepEqual(src.match(/^import\s.*$/gm), ['import { CGROUP_PARENT, DEFAULT_JOB_SIZE, PARENTLESS_SHARES_MAX, containerSizing } from "./job-size.mjs";'], "container-spec.mjs must import only job-size.mjs");
+	assert.deepEqual(src.match(/^import\s.*$/gm), ['import { LAYOUTS } from "./job-layout.mjs";', 'import { CGROUP_PARENT, DEFAULT_JOB_SIZE, PARENTLESS_SHARES_MAX, containerSizing } from "./job-size.mjs";'], "container-spec.mjs must import only size and layout leaves");
 	assert.equal(/require\(/.test(src), false);
 	const size = readFileSync(new URL("../src/job-size.mjs", import.meta.url), "utf8");
 	assert.equal(/^import\s/m.test(size), false, "job-size.mjs must import nothing");
 	assert.equal(/require\(/.test(size), false);
+	const layout = readFileSync(new URL("../src/job-layout.mjs", import.meta.url), "utf8");
+	assert.equal(/^import\s/m.test(layout), false, "job-layout.mjs must import nothing");
+	assert.equal(/require\(/.test(layout), false);
 });
 
 test("the namespace is one fact, and the producer builds names from it", () => {

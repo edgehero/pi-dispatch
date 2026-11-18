@@ -259,7 +259,7 @@ export function swallowedRunSentence(jobId, existing) {
 	return `an identical run was queued${hhmm} as ${jobId} (${existing?.state ?? "already queued or done"}); nothing new was queued.`;
 }
 
-async function addLocalJob(queue, { folder, flow, task, command, provider, model, maxTurns, models, fallbackModels, modelSelection, maxCostUsd, idleTimeoutMinutes, stallTimeoutMinutes, maxMinutes, packages, image, backend, excludeTools, excludeExtensions, excludeExtensionTools, mcp, skillsDir, secrets, secretsProfile, recover, steer, chainDepth, parentJobId, jobId, enqueueNonce, dataVersion, now = new Date() }, { dataVersions } = {}) {
+async function addLocalJob(queue, { folder, flow, task, command, provider, model, maxTurns, models, fallbackModels, modelSelection, maxCostUsd, idleTimeoutMinutes, stallTimeoutMinutes, maxMinutes, packages, image, backend, excludeTools, excludeExtensions, excludeExtensionTools, mcp, skillsDir, secrets, secretFiles, secretsProfile, recover, steer, chainDepth, parentJobId, jobId, enqueueNonce, dataVersion, now = new Date() }, { dataVersions } = {}) {
 	const minute = now.toISOString().slice(0, 16); // YYYY-MM-DDTHH:MM -- the dedup window
 	// A caller-supplied jobId (the outbox collector's retry-idempotent chainedJobId) wins; otherwise the
 	// minute-windowed localJobId is the dedup key. A command job (issue #189) fills the flow slot with
@@ -325,6 +325,7 @@ async function addLocalJob(queue, { folder, flow, task, command, provider, model
 		// start. A cron trigger may bind secrets (a nightly deploy is the obvious user), which is where
 		// this differs from `replicas` -- that one is refused on a local job and this one is not.
 		...(secrets !== undefined && { secrets }),
+		...(secretFiles !== undefined && { secretFiles }),
 		...(secretsProfile !== undefined && { secretsProfile }),
 		// Issue #645: durable runs, enqueueForgeJob's rule (only when armed, job level, never part of the id). No local
 		// producer passes it today, and no trigger can: the loader refuses run.recover on cron. It is accepted here so a
@@ -570,7 +571,7 @@ export async function enqueueLateForgeJob(queue, kind, fields, { dataVersions } 
  * semantic dedup id. Throws on a bad delivery id or console name, and on input a newer release stored with a
  * `dataVersion` above this build's (issue #761; every caller that rebuilds stored input answers with a reply then).
  */
-function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, models, fallbackModels, modelSelection, maxCostUsd, idleTimeoutMinutes, stallTimeoutMinutes, maxMinutes, packages, image, backend, excludeTools, excludeExtensions, excludeExtensionTools, mcp, privateEndpoints, skillsDir, instructions, mayMerge, mayMergePolicy, resume, awaitInput, gates, approvalRequestId, gateTimeout, gateBudgetRaiseUsd, progress, statusComment, recover, steer, fork, forkPolicy, forkReserveMicros, thinkingLevel, parkedReply, replyReceivedAt, console: consoleMeta, secrets, secretsProfile, waitFor, replica, replicas, dataVersion }, { dataVersions } = {}) {
+function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigger, provider, model, maxTurns, models, fallbackModels, modelSelection, maxCostUsd, idleTimeoutMinutes, stallTimeoutMinutes, maxMinutes, packages, image, backend, excludeTools, excludeExtensions, excludeExtensionTools, mcp, privateEndpoints, skillsDir, instructions, mayMerge, mayMergePolicy, resume, awaitInput, gates, approvalRequestId, gateTimeout, gateBudgetRaiseUsd, progress, statusComment, recover, steer, fork, forkPolicy, forkReserveMicros, thinkingLevel, parkedReply, replyReceivedAt, console: consoleMeta, secrets, secretFiles, secretsProfile, waitFor, replica, replicas, dataVersion }, { dataVersions } = {}) {
 	const jobId = forgeDeliveryJobId(kind, trigger?.deliveryId, replica);
 	if (mayMerge !== undefined && typeof mayMerge !== "boolean") throw new TypeError("merge-policy-invalid");
 	if (mayMerge === true && (command !== undefined || typeof mayMergePolicy !== "string" || !/^[a-f0-9]{64}$/.test(mayMergePolicy))) throw new TypeError("merge-policy-invalid");
@@ -684,6 +685,7 @@ function forgeJobOf(kind, { repo, projectId, azure, target, flow, command, trigg
 		// start, pre-spend. At JOB level rather than inside `trigger` for image/skillsDir's reason: `trigger`
 		// is copied verbatim into /job/event.json, which an agent reads.
 		...(secrets !== undefined && { secrets }),
+		...(secretFiles !== undefined && { secretFiles }),
 		...(secretsProfile !== undefined && { secretsProfile }),
 		// Issue #230. The conditions the worker holds this job on, carried so the PICKUP gate can read them:
 		// that gate runs above the per-job settings read and never re-parses the triggers file for its terms.

@@ -466,7 +466,7 @@ LABEL dev.pi-dispatch.forges="github,gitlab,forgejo"
 # floor, so the worker requires this separate declaration before handing a job a short lease.
 # `mergePolicy` (issue #908) proves that the runner selects its system rule from the worker-owned job marker.
 # Without it, an opted-in forge prompt would still lose to the old unconditional system rule.
-LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,modelRoles,modelFailover,exitAuth,mcp,forgeMcp,awaitInput,approvalGates,reportProgress,recover,steer,sandboxLayout,transcriptStderr,steerStdin,bundleEnvFile,observableRunner,fork,watch,questionGrouping,answerDraft,subscriptionAuth,loadExclusions,packageCanary,idleWatch,credentialRefresh,subscriptionLease,mergePolicy"
+LABEL dev.pi-dispatch.capabilities="replicas,commands,excludeTools,anyUid,costCap,modelPolicy,modelRoles,modelFailover,exitAuth,mcp,forgeMcp,awaitInput,approvalGates,reportProgress,recover,steer,sandboxLayout,transcriptStderr,steerStdin,bundleEnvFile,observableRunner,fork,watch,questionGrouping,answerDraft,subscriptionAuth,loadExclusions,packageCanary,idleWatch,credentialRefresh,subscriptionLease,mergePolicy,secretFiles"
 
 # The binaries in this image that may need the network, at their real paths (issue #683). A venue whose egress policy
 # names binaries rather than hosts alone (OpenShell decides every connection per executable) needs the paths before it

@@ -1754,6 +1754,11 @@ test("every RUNNER_POLICY_REASONS member is a literal the runner itself writes (
 	// The run.steer refusals (issue #646) are thrown where the inbox is checked (image/runner/src/inbox.mjs).
 	const steerSrc = readFileSync(new URL("../../image/runner/src/inbox.mjs", import.meta.url), "utf8");
 	for (const reason of RUNNER_POLICY_REASONS) {
+		if (reason === "secret-files-unusable") {
+			const src = readFileSync(new URL("../../image/runner/src/secret-files.mjs", import.meta.url), "utf8");
+			assert.match(src, /configError\(.*, "secret-files-unusable"\)/);
+			continue;
+		}
 		if (reason.startsWith("model-roles-")) {
 			const src = readFileSync(new URL(reason === "model-roles-invalid" ? "../../image/runner/src/model-roles.mjs" : "../../image/runner/run-job.mjs", import.meta.url), "utf8");
 			assert.ok(src.includes(`"${reason}"`));

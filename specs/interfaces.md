@@ -597,6 +597,10 @@ Evidence convention as in `constitution.md`.
 
 ## INT-RUNNER-EXIT-CODE-PROTOCOL
 
+- **File-secret refusal (#919)**: `secret-files-unusable` is a determinate exit-2 policy result when the
+  worker's file grant cannot be verified before pi discovery. No file name, path or content is emitted on the exit
+  line. Existing signing, metering, supervisor precedence and numeric exit meanings are unchanged.
+
 - **Question identity (#772)**: `await_human_input` accepts optional `questionCommentId` from the actual forge post. The trusted tool writes `/session/question-ref.json` as `{version:1,commentId}` and retains its SHA256 in private runner state. Only an authenticated exit-0 `awaiting-input` line may carry `questionRefDigest`; the host compares it with the safely read sidecar before scheduling. Missing legacy, unverified or tampered references pass as source-unavailable without a paid draft. The digest/reference never enters ordinary run records.
 
 - **Answer draft receipt (#772)**: A successful no-post answer job may additionally carry `answerDraftDigest`, a lowercase SHA256 hex of the exact structured result bytes, in its authenticated exit-0 line. The trusted submit tool alone creates the result and receipt. The host imports no draft without a verified, code-matched digest and independent schema/source checks. No question, draft, probabilities or source text rides an exit line or PII-free record. New policy reasons are `answer-draft-refused`, `answer-draft-config-changed`, `answer-draft-unavailable` and `job-image-answer-draft-unsupported`; only infrastructure failures throw for retry. Existing numeric exit meanings and MAC framing are UNCHANGED, checked.
@@ -1486,6 +1490,28 @@ refactor apart.
 
 ## INT-CONTAINER-JOB-INPUTS
 
+- **File secrets (#919)**: a granted attempt stages exact nonempty UTF-8 file contents outside the job directory,
+  in `<jobDir>.secret-files/secrets/`. Its parent also holds host-only `owner.json`, recording the worker process
+  identity and venue; it is never mounted or uploaded. Direct values and bundle-selected values share this path.
+  Each file is named by its validated portable environment name, at most 128 characters; no relative path or
+  case-folded collision is allowed. The directories are `0700`, files `0600`, owned by the mapped job user.
+  Binding venues mount only the child read-only at `/run/secrets`, with the same private SELinux relabel as other
+  per-attempt inputs. OpenShell copy mode uploads only that child to `/sandbox/secrets`, outside the downloaded
+  workspace, with its filesystem policy read-only; bind mode uses `/run/secrets`. File contents never enter the
+  environment, provider placeholders, command arguments, `/job`, a retained sandbox or a checkpoint. The named
+  environment variable holds the layout's absolute path. Direct bindings override a bundle's value and delivery
+  type; a name selected for file delivery cannot also have a bundle endpoint. A job without grants has no directory,
+  mount or file flag. For every job, even one with no file grant, the configured jobs directory must be disjoint
+  from operator-selected local workspaces, skill sources and the global overlay in both directions. A symlink or
+  directory-identity alias counts as overlap. This is checked before resolution or minting and again at preparation;
+  unsafe placement returns `secret-files-placement-unsafe`, an unreadable boundary retries as infrastructure.
+  Worker-created forge clones are allowed beneath their own job directory; the final staging check instead compares
+  the actual sibling secret root with the workspace and overlay before any secret is written.
+  Completion, refusal, failure, abort and retained-workspace paths remove the managed staging.
+  On restart an independent sweep removes a known-dead owner's directory only after that recorded venue was
+  successfully reaped. Live or uncertain ownership and failed venue reaping preserve it and emit a named log reason;
+  generic age and salvage cleanup must not override that decision. Recovery resolves again, never from old staging.
+
 - **Merge policy (#908)**: An authorized forge-flow job receives `/job/merge-policy.json` (or
   `/sandbox/job/merge-policy.json` on the copying layout), written by the worker into the existing input
   directory with mode 0444. Its exact UTF-8 bytes are `{"version":1,"mayMerge":true}` followed by one
@@ -1556,6 +1582,7 @@ refactor apart.
   | outbox (local jobs) | `/outbox` | `/sandbox/outbox` |
   | steer inbox | `/inbox` | none: `PI_STEER` is refused there (stdio steering is #686) |
   | operator overlay | `/opt/pi-global` | `/sandbox/pi-global` |
+  | secret files | `/run/secrets` | `/sandbox/secrets` |
 
   On `sandbox` the job inputs are read-only by the order of events, not by a bind: the worker uploads them, then
   starts the entrypoint through `/opt/pi-dispatch/pi-landlock --rw <path>... -- <entrypoint>`, which confines every
@@ -1917,6 +1944,16 @@ refactor apart.
 
 ## INT-CONTAINER-RUNTIME-CONTRACT
 
+- **File-secret capability (#919)**: `secretFiles` declares that the runner understands the reserved,
+  non-secret `PI_SECRET_FILES` comma-separated name list and verifies every granted file before pi discovery.
+  Missing capability is a pre-spend `job-image-secret-files-unsupported` policy refusal. The worker alone writes
+  the flag and every exact layout path; no flag is emitted without a grant. The runner consumes the flag, checks
+  the private directory's type, mode and job uid, then opens each file without following symlinks and checks
+  regular-file type, the job uid, `0600`, one hard link and 1 through 65,536 bytes. A bad path, name, owner, mode or
+  missing file exits 2 with `secret-files-unusable`, without content or path text. The image verification runs the
+  real entrypoint offline and verifies exact CRLF/LF bytes, path environment, owner, mode, failed write and early
+  refusal of a permissive file. The venue conformance lanes check the same delivery through their real adapters.
+
 - **Optional graphical image (#921)**: `display` in `dev.pi-dispatch.capabilities` declares executable
   `pi-display` and `pi-display-probe`, Xvfb, fonts and headed Chromium. `image/Dockerfile.display`, built by
   `image/build-display.mjs`, adds the helpers to the inspected shipped base and preserves every inherited
@@ -2222,7 +2259,7 @@ a sandbox not confirmed gone marks the run's result `lingering`, its exit code u
     `--memory-reservation`, `--memory-swap`, `--memory-swappiness`, `--kernel-memory`, `--blkio-weight*`,
     `--device-{read,write}-{bps,iops}`, `--oom-score-adj`, `--shm-size`, `--cpus`). Disk I/O, disk space and the
     network are NOT bounded per job.
-  - **Mounts**: `/job:ro`, `/workspace:rw`, `/outbox:rw` (local jobs only), `/opt/pi-global:ro` (when
+  - **Mounts**: `/run/secrets:ro` only for a file-secret grant (#919, the private child described above), `/job:ro`, `/workspace:rw`, `/outbox:rw` (local jobs only), `/opt/pi-global:ro` (when
     configured), and `/session:rw`: a resume job's staged transcript when a trigger armed `run.resume` and the
     worker resolved a key (`INT-SESSION-STORE-CONTRACT`), and since issue #643 every other job's empty live
     transcript file (`INT-CONTAINER-JOB-INPUTS`, `INT-LIVE-TRANSCRIPT-STREAM`). `/session` is a **per-job**
@@ -4692,7 +4729,8 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
                "resume": <optional boolean>,
                "image": "<optional: docker image ref; absent = PI_JOB_IMAGE>",
                "skillsDir": "<optional: absolute WORKER-HOST dir of <name>/SKILL.md skills>",
-               "secrets": <optional { "ENV_NAME": "<opaque reference for YOUR resolver>" }, max 16; ALL kinds>,
+               "secrets": <optional { "ENV_NAME": "<opaque reference for YOUR resolver>" }; together with secretFiles max 16>,
+               "secretFiles": <optional { "ENV_NAME": "<opaque reference for YOUR resolver>" }; path-valued env, ALL kinds>,
                "secretsProfile": "<optional: which declared resolver reads them; absent = the profile named `default`>",
                "secretBundle": <optional boolean; false keeps this trigger's jobs out of their project's bundle; ALL kinds>,
                "mcp": [<optional: 1 to 8 server names of the overlay's mcp.json (INT-OVERLAY-MCP-CONFIG); ALL kinds>],
@@ -4705,7 +4743,8 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
                "image": "<optional>", "skillsDir": "<optional>",
                "instructions": "<optional: operator standing text, <=2000 chars; NOT on cron, NOT beside command>",
                "replicas": <optional int 2..3; webhook kinds only>,
-               "secrets": <optional { "ENV_NAME": "<opaque reference for YOUR resolver>" }, max 16; ALL kinds>,
+               "secrets": <optional { "ENV_NAME": "<opaque reference for YOUR resolver>" }; together with secretFiles max 16>,
+               "secretFiles": <optional { "ENV_NAME": "<opaque reference for YOUR resolver>" }; path-valued env, ALL kinds>,
                "secretsProfile": "<optional: which declared resolver reads them; absent = the profile named `default`>",
                "secretBundle": <optional boolean; false keeps this trigger's jobs out of their project's bundle; ALL kinds>,
                "mcp": [<optional: 1 to 8 server names of the overlay's mcp.json (INT-OVERLAY-MCP-CONFIG); ALL kinds>] } },
@@ -4717,7 +4756,8 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
                "image": "<optional>", "skillsDir": "<optional>",
                "instructions": "<optional: operator standing text, <=2000 chars; NOT on cron, NOT beside command>",
                "replicas": <optional int 2..3; webhook kinds only>,
-               "secrets": <optional { "ENV_NAME": "<opaque reference for YOUR resolver>" }, max 16; ALL kinds>,
+               "secrets": <optional { "ENV_NAME": "<opaque reference for YOUR resolver>" }; together with secretFiles max 16>,
+               "secretFiles": <optional { "ENV_NAME": "<opaque reference for YOUR resolver>" }; path-valued env, ALL kinds>,
                "secretsProfile": "<optional: which declared resolver reads them; absent = the profile named `default`>",
                "secretBundle": <optional boolean; false keeps this trigger's jobs out of their project's bundle; ALL kinds>,
                "mcp": [<optional: 1 to 8 server names of the overlay's mcp.json (INT-OVERLAY-MCP-CONFIG); ALL kinds>] } },
@@ -4739,7 +4779,8 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
                "image": "<optional>", "skillsDir": "<optional>",
                "instructions": "<optional: operator standing text, <=2000 chars; NOT on cron, NOT beside command>",
                "replicas": <optional int 2..3; webhook kinds only; never beside once: true>,
-               "secrets": <optional { "ENV_NAME": "<opaque reference for YOUR resolver>" }, max 16; ALL kinds>,
+               "secrets": <optional { "ENV_NAME": "<opaque reference for YOUR resolver>" }; together with secretFiles max 16>,
+               "secretFiles": <optional { "ENV_NAME": "<opaque reference for YOUR resolver>" }; path-valued env, ALL kinds>,
                "secretsProfile": "<optional: which declared resolver reads them; absent = the profile named `default`>",
                "secretBundle": <optional boolean; false keeps this trigger's jobs out of their project's bundle; ALL kinds>,
                "mcp": [<optional: 1 to 8 server names of the overlay's mcp.json (INT-OVERLAY-MCP-CONFIG); ALL kinds>] } },
@@ -4755,6 +4796,7 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
                                "ref": "<opaque reference, run.secrets' rules>",
                                "project": "<a projects.json id; at most one bundle per project>",
                                "forkReviews": <optional boolean; true = a fork's pull request gets it too>,
+                               "files": <optional 1..64 portable ENV_NAME values; selects returned values for files>,
                                "endpoints": <optional { "ENV_NAME": { "host": "<host name>",
                                              "auth": "bearer"|"basic"|"header:<Name>" } }, max 64> } } }
   ```
@@ -4799,7 +4841,8 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   `run.excludeExtensions` and `run.excludeExtensionTools`; 3 since issue #888, for `run.idleTimeoutMinutes`,
   `run.stallTimeoutMinutes` and `run.maxMinutes`; 4 since #908 for `run.mayMerge`; 5 since #911 for
   local event `on.forge`, `on.debounceSeconds`, `on.reviewAuthors` and `run.worker`; 6 since #922 for
-  `run.modelSelection`; 7 since #918 for `run.privateEndpoints`) is the highest this build reads. The writer OWNS it: `writeTriggers` writes `triggersFileVersionFor` of the result, the version the entries' raw
+  `run.modelSelection`; 7 since #918 for `run.privateEndpoints`; 8 since #919 for
+  `run.secretFiles` and a `secretBundles` binding carrying `files`) is the highest this build reads. The writer OWNS it: `writeTriggers` writes `triggersFileVersionFor` of the result, the version the entries' raw
   `run` keys (`TRIGGER_RUN_FIELD_VERSIONS`), the top-level blocks (`TRIGGERS_BLOCK_VERSIONS`) and the VALUES of an
   entry's fields, of its `run` keys and of each block (`TRIGGER_VALUE_VERSIONS`, `TRIGGER_RUN_VALUE_VERSIONS`,
   `TRIGGERS_BLOCK_VALUE_VERSIONS`, `field -> (value) => version`, a block's rule handed the whole block) need, all five
@@ -4861,10 +4904,10 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   broken, not newer: JSON keeps the last value, so the file that was reviewed and the file that runs are not the same
   file"); a repeated key whose version does not read newer is shown as leniently as before. `dataVersion` is the same
   rule for a queued job's data (`worker/src/job-data-version.mjs`: `JOB_DATA_VERSION` 3 since #800, 4 since #888,
-  5 since #908, 6 since #911, 7 since #922 and 8 since #918; `JOB_DATA_FIELD_VERSIONS` names `packageCanary` at 2,
+  5 since #908, 6 since #911, 7 since #922, 8 since #918 and 9 since #919; `JOB_DATA_FIELD_VERSIONS` names `packageCanary` at 2,
   `excludeExtensions` and `excludeExtensionTools` at 3, `idleTimeoutMinutes`, `stallTimeoutMinutes` and
   `maxMinutes` at 4, `mayMerge` and `mayMergePolicy` at 5, `localEvent` and `worker` at 6, `modelSelection` and
-  `modelSelectionGeneration` at 7, and `privateEndpoints` at 8, and
+  `modelSelectionGeneration` at 7, `privateEndpoints` at 8 and `secretFiles` at 9, and
   `JOB_DATA_VALUE_VERSIONS`, the values of its top-level fields, frozen and empty). It is a JOB-level field, never
   inside `trigger`, so it never reaches `/job/event.json` or any other `/job` input (`INT-CONTAINER-JOB-INPUTS`), and
   every builder stamps it (`forgeJobOf`, `addLocalJob`, the cron template and the receiver's `fallbackJobOf`) only when
@@ -5633,6 +5676,32 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   no key at all**, so nothing about any existing job moves. `run.excludeExtensions` stops what a job loads on its own, `run.excludeExtensionTools` takes a tool and leaves its extension's code running, and neither
   stops what an agent that can write or edit files, or run commands, can reach (`DES-PER-TRIGGER-LOAD-EXCLUSIONS`, Residuals; `docs/exclude-tools.md`, "What exclusion does not stop").
 
+- **`run.secretFiles` (#919)**: an optional nonempty map from a portable environment variable name to
+  an opaque reference, using `run.secretsProfile` or `default`. Available wherever direct environment secrets are
+  accepted, including local event commands and watch investigations. It shares every reserved-name, reference,
+  profile and resume rule with `run.secrets`; references containing NUL refuse too. Keys match
+  `^[A-Za-z_][A-Za-z0-9_]{0,127}$`, excluding `__proto__` and case-insensitive Windows device basenames
+  (`CON`, `PRN`, `AUX`, `NUL`, `COM1` through `COM9`, `LPT1` through `LPT9`). File keys must be distinct ignoring
+  case. The two direct maps cannot name the same variable and together hold at most 16 references. Empty or
+  malformed maps, path-like names and near-miss/misplaced spellings refuse; errors never print a file reference.
+  `secretsProfile` may name a file-only grant and routes it by the same profile need. Watch `queryLogs.credentialEnv`
+  cannot name a file grant. A stdio MCP server may explicitly receive the path; an HTTP credential may not.
+
+  The normalized map travels through every forge route, cron template, local event, retry, recovery and fresh
+  trigger rerun. A manual request and a chained child grant none. No model-callable tool writes it, even nested or
+  under a near-miss spelling, and operator previews redact its references. Its `AUTHORED_NARROWING_FIELDS` row
+  catches a stale producer that dropped the grant before spend. File grants require triggers version 8 and job-data
+  version 9; old shapes keep their existing minimum version.
+
+  **Bundle selection**: `secretBundles.<id>.files` is an optional nonempty array of at most 64 names with the same
+  portable-name and case-insensitive uniqueness rules, disjoint from `endpoints` ignoring case. The block's value
+  version rule requires triggers version 8 if any binding owns `files`. Selection applies to the existing dotenv
+  or JSON parsed output; a selected name missing from that output refuses before spend. Explicit trigger grants
+  override a bundle's value and delivery type. Runtime checks the final file set for collisions and validates
+  nonempty UTF-8 text without NUL or unpaired surrogates, preserving all bytes including trailing newlines, with
+  the existing 64-KiB per-value and bundle output bounds. Container delivery, image capability and cleanup are
+  `INT-CONTAINER-RUNTIME-CONTRACT`; only delivered names may reach `INT-RUN-HISTORY-FILE-CONTRACT`.
+
 - **`run.secrets` (ALL FOUR trigger kinds, optional map of env-var name to opaque reference) and
   `run.secretsProfile` (optional name)**: the environment variables this trigger's jobs receive, and which
   operator-declared resolver reads them. **The reference grammar is the resolver's, never this project's**
@@ -6398,7 +6467,7 @@ validator rather than a second copy of it.
     "flow":    "<flow name>" | null,
     "startedAt": "<ISO-8601>", "endedAt": "<ISO-8601>",
     "outcome":   "completed" | "policy" | "failed",
-    "reason":    "<fixed enum: worker-abort|local-event-config-invalid|local-event-invalid|local-event-superseded|local-event-trigger-changed|local-event-unavailable|local-event-wrong-worker|local-folder-changed|merge-policy-invalid|merge-policy-unavailable|merge-policy-changed|job-image-merge-policy-unsupported|private-endpoint-withdrawn|private-endpoint-unknown|private-endpoint-proxy-outdated|private-endpoint-venue-unsupported|operator-cancel|agent-cancel|idle|stalled|max-minutes|credential-expired|package-canary-invalid|package-canary-packages-off|package-canary-excluded|exclude-tool-not-loaded|job-image-load-exclusions-unsupported|package-canary-resume|package-canary-not-staged|package-canary-adapter|package-canary-version-missing|package-canary-refused|job-image-package-canary-unsupported|answer-draft-refused|answer-draft-config-changed|answer-draft-unavailable|job-image-answer-draft-unsupported|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|portfolio-snapshot-oversize|local-folder-escaped|local-folder-holds-envelope|local-folder-holds-subscription-auth|local-folder-is-sandbox|local-folder-project-changed|unprotected-branch|branch-protection-unreadable|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|model-roles-invalid|model-roles-shadowed|model-role-unknown|model-role-provider-conflict|model-agents-invalid|job-image-model-roles-unsupported|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-model-failover-unsupported|job-image-cost-cap-unsupported|model-unknown|model-failover-no-candidate|model-selection-no-candidate|model-selection-state-unavailable|model-selection-policy-changed|model-selection-continuation-unavailable|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|secret-bundle-profile-unknown|secret-bundle-profile-ambiguous|secret-bundle-resume|secret-bundle-trigger-changed|openshell-bundle-endpoint-not-allowed|openshell-bundle-endpoint-shared|openshell-bundle-endpoint-unknown|openshell-bundle-name-taken|openshell-bundle-unpassable|openshell-bundle-image-too-old|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|oom-killed|job-size-exceeds-host|job-size-exceeds-share|job-image-mcp-unsupported|job-image-forge-mcp-unsupported|mcp-list-invalid|mcp-config-invalid|mcp-server-unknown|mcp-secret-unmapped|mcp-secret-reserved|mcp-excluded|mcp-egress-unreachable|mcp-package-runner|mcp-unavailable|mcp-config-mismatch|mcp-secret-missing|mcp-command-missing|mcp-shadowed|await-input-shadowed|await-input-without-session|job-image-await-input-unsupported|awaiting-input|not-parked|report-progress-shadowed|steer-inbox-missing|steer-no-exit-key|job-image-progress-unsupported|job-image-recover-unsupported|job-image-steer-unsupported|job-image-sandbox-layout-unsupported|job-image-observable-runner-unsupported|venue-local-folders-unsupported|openshell-gateway-not-local|openshell-global-policy|openshell-landlock-missing|openshell-recover-unsupported|openshell-credential-reads-value|openshell-gateway-untested|openshell-egress-untranslatable|openshell-bind-mounts-disabled|openshell-ptrace-scope-unprotected|openshell-ptrace-scope-too-strict|openshell-bind-sandbox-lingering|recover-store-unset|recovery-enqueued|recovery-host-lost|recovery-cap|recovery-checkpoint-absent|recovery-superseded|recovery-unsafe-extensions|recovery-failed|container-infra-exit|container-exit-unknown|worker-error|awaiting-approval|approval-config-invalid|approval-without-session|approval-shadowed|approval-decision-invalid|approval-author-missing|approval-expired|approval-expiry-invalid|approval-host-mismatch|approval-job-id-missing|approval-park-invalid|approval-pending|approval-policy-changed|approval-policy-unavailable|approval-request-conflict|approval-request-stale|approval-request-unbound|approval-state-conflict|approval-state-unavailable|approval-store-unavailable|approval-finish-unavailable|approval-session-not-saved|approval-session-unavailable|job-image-approval-gates-unsupported|job-image-approval-auth-unsupported|...|question-group-unavailable|question-group-config-changed|question-group-source-expired|question-group-source-unavailable|question-group-source-oversize|question-group-candidates-expired|question-group-limit|question-group-stale|question-group-refused|question-group-unanswered|question-group-output-invalid|job-image-question-grouping-unsupported|watch-unavailable|watch-query-credential-missing|watch-cooldown|watch-cap|watch-unmatched|watch-ignored|decide-refused|decide-unanswered|watch-reference-invalid|watch-config-changed|watch-window-pending|watch-threshold|watch-evidence-expired|watch-issue-target-missing|watch-trace-unavailable|watch-output-unavailable|watch-project-mismatch|watch-config-invalid|watch-issue-cap|watch-issue-uncertain|watch-issue-close-policy-changed|watch-issue-close-raced|watch-issue-close-uncertain|job-image-watch-unsupported|watch-board-invalid|watch-board-oversize|auth-policy-invalid|auth-adapter-unsupported|auth-adapter-unapproved|auth-owner-host|auth-adapter-unavailable|auth-adapter-conflicting|auth-capability-unsupported|auth-endpoint-unsupported|auth-reauth-required|auth-refresh-uncertain|auth-store-unavailable|auth-snapshot-too-short|auth-route-unbounded|auth-venue-unsupported|auth-adapter-disabled|auth-credit-cap-required|auth-binding-changed|auth-mixed-billing|subscription-extra-usage|auth-model-unverified|auth-usage-unavailable|job-image-subscription-auth-unsupported|subscription-quota|subscription-stale-binding|subscription-observation-required>" | null,
+    "reason":    "<fixed enum: worker-abort|local-event-config-invalid|local-event-invalid|local-event-superseded|local-event-trigger-changed|local-event-unavailable|local-event-wrong-worker|local-folder-changed|merge-policy-invalid|merge-policy-unavailable|merge-policy-changed|job-image-merge-policy-unsupported|private-endpoint-withdrawn|private-endpoint-unknown|private-endpoint-proxy-outdated|private-endpoint-venue-unsupported|operator-cancel|agent-cancel|idle|stalled|max-minutes|credential-expired|package-canary-invalid|package-canary-packages-off|package-canary-excluded|exclude-tool-not-loaded|job-image-load-exclusions-unsupported|package-canary-resume|package-canary-not-staged|package-canary-adapter|package-canary-version-missing|package-canary-refused|job-image-package-canary-unsupported|answer-draft-refused|answer-draft-config-changed|answer-draft-unavailable|job-image-answer-draft-unsupported|over-budget|dollar-cap|allocation-cap|envelope-mismatch|portfolio-no-envelope|portfolio-snapshot-oversize|local-folder-escaped|local-folder-holds-envelope|local-folder-holds-subscription-auth|local-folder-is-sandbox|local-folder-project-changed|unprotected-branch|branch-protection-unreadable|runner-policy|provider-auth-refused|cost-cap|model-not-allowed|cost-cap-unenforceable|model-policy-unenforceable|model-roles-invalid|model-roles-shadowed|model-role-unknown|model-role-provider-conflict|model-agents-invalid|job-image-model-roles-unsupported|container-never-started|container-detached|settings-overlay-invalid|job-image-missing|job-image-replicas-unsupported|job-image-forge-unsupported|job-image-commands-unsupported|job-image-exclude-tools-unsupported|job-image-model-policy-unsupported|job-image-model-failover-unsupported|job-image-cost-cap-unsupported|model-unknown|model-failover-no-candidate|model-selection-no-candidate|model-selection-state-unavailable|model-selection-policy-changed|model-selection-continuation-unavailable|trigger-skew|once-already-spent|scope-cap|project-cap|wait-skew|wait-unreadable|wait-profile-unknown|wait-superseded|wait-after-beyond-max|wait-refused|wait-unanswerable|wait-expired|daily-token-cap|soft-hold|sessions-dir-unset|job-image-secret-files-unsupported|secret-files-placement-unsafe|secret-file-name-invalid|secret-file-name-conflict|secret-file-endpoint-conflict|secret-files-unusable|secret-profile-unknown|secret-profile-ambiguous|secret-name-reserved|secret-unresolved|secret-resolver-unreachable|secret-bundle-profile-unknown|secret-bundle-profile-ambiguous|secret-bundle-resume|secret-bundle-trigger-changed|openshell-bundle-endpoint-not-allowed|openshell-bundle-endpoint-shared|openshell-bundle-endpoint-unknown|openshell-bundle-name-taken|openshell-bundle-unpassable|openshell-bundle-image-too-old|sha-gone|local-folder-not-a-repo|local-folder-no-commit|local-folder-unreadable-repo|pi-too-many-files|pi-file-too-large|pi-too-large|pi-path-collision|skills-dir-missing|skills-dir-empty|skills-dir-too-large|skills-dir-too-many-files|skills-dir-too-deep|skills-dir-unreadable|egress-proxy-missing|egress-proxy-stopped|netns-keeper-not-holding|provider-unconfigured|config-refused|backend-unblessed|backend-floor-unobserved|job-user-unmappable|job-image-any-uid-unsupported|podman-conf-widens-job|podman-service-restart-hold-expired|netns-keeper-crash-loop|oom-killed|job-size-exceeds-host|job-size-exceeds-share|job-image-mcp-unsupported|job-image-forge-mcp-unsupported|mcp-list-invalid|mcp-config-invalid|mcp-server-unknown|mcp-secret-unmapped|mcp-secret-reserved|mcp-excluded|mcp-egress-unreachable|mcp-package-runner|mcp-unavailable|mcp-config-mismatch|mcp-secret-missing|mcp-command-missing|mcp-shadowed|await-input-shadowed|await-input-without-session|job-image-await-input-unsupported|awaiting-input|not-parked|report-progress-shadowed|steer-inbox-missing|steer-no-exit-key|job-image-progress-unsupported|job-image-recover-unsupported|job-image-steer-unsupported|job-image-sandbox-layout-unsupported|job-image-observable-runner-unsupported|venue-local-folders-unsupported|openshell-gateway-not-local|openshell-global-policy|openshell-landlock-missing|openshell-recover-unsupported|openshell-credential-reads-value|openshell-gateway-untested|openshell-egress-untranslatable|openshell-bind-mounts-disabled|openshell-ptrace-scope-unprotected|openshell-ptrace-scope-too-strict|openshell-bind-sandbox-lingering|recover-store-unset|recovery-enqueued|recovery-host-lost|recovery-cap|recovery-checkpoint-absent|recovery-superseded|recovery-unsafe-extensions|recovery-failed|container-infra-exit|container-exit-unknown|worker-error|awaiting-approval|approval-config-invalid|approval-without-session|approval-shadowed|approval-decision-invalid|approval-author-missing|approval-expired|approval-expiry-invalid|approval-host-mismatch|approval-job-id-missing|approval-park-invalid|approval-pending|approval-policy-changed|approval-policy-unavailable|approval-request-conflict|approval-request-stale|approval-request-unbound|approval-state-conflict|approval-state-unavailable|approval-store-unavailable|approval-finish-unavailable|approval-session-not-saved|approval-session-unavailable|job-image-approval-gates-unsupported|job-image-approval-auth-unsupported|...|question-group-unavailable|question-group-config-changed|question-group-source-expired|question-group-source-unavailable|question-group-source-oversize|question-group-candidates-expired|question-group-limit|question-group-stale|question-group-refused|question-group-unanswered|question-group-output-invalid|job-image-question-grouping-unsupported|watch-unavailable|watch-query-credential-missing|watch-cooldown|watch-cap|watch-unmatched|watch-ignored|decide-refused|decide-unanswered|watch-reference-invalid|watch-config-changed|watch-window-pending|watch-threshold|watch-evidence-expired|watch-issue-target-missing|watch-trace-unavailable|watch-output-unavailable|watch-project-mismatch|watch-config-invalid|watch-issue-cap|watch-issue-uncertain|watch-issue-close-policy-changed|watch-issue-close-raced|watch-issue-close-uncertain|job-image-watch-unsupported|watch-board-invalid|watch-board-oversize|auth-policy-invalid|auth-adapter-unsupported|auth-adapter-unapproved|auth-owner-host|auth-adapter-unavailable|auth-adapter-conflicting|auth-capability-unsupported|auth-endpoint-unsupported|auth-reauth-required|auth-refresh-uncertain|auth-store-unavailable|auth-snapshot-too-short|auth-route-unbounded|auth-venue-unsupported|auth-adapter-disabled|auth-credit-cap-required|auth-binding-changed|auth-mixed-billing|subscription-extra-usage|auth-model-unverified|auth-usage-unavailable|job-image-subscription-auth-unsupported|subscription-quota|subscription-stale-binding|subscription-observation-required>" | null,
     "exitCode":  <int> | null,
     "turns":     <int> | null,
     "tokens":    { "input": <int>, "output": <int>, "total": <int>, "cost": <number>,          // per-job usage totals; null when the container died before the exit line
@@ -6486,6 +6555,7 @@ validator rather than a second copy of it.
     "liveSkipped"?: "venue-copies" | "no-capability" | "no-exit-key",                   // issue #712: CONDITIONAL, why no live transcript
     "openshell"?: { "mode": "copy" | "bind", "ruleHosts": ["<host>", ...],             // issue #712: CONDITIONAL, the two OpenShell
                     "ruleHostCount": <int>, "providers": <int>, "placeholders": <int> }, // venues only; operator-config names, counts
+    "secretFiles"?: ["<resolved file ENV_NAME>", ...],                              // issue #919: conditional, names only
     "secretsProfile"?: "<profile name>",                                               // issue #712: CONDITIONAL, run.secrets armed
     "loaded"?: { "v": 1, "runner": "reported" | "absent" | "invalid" | "cut", ... },   // issue #800: CONDITIONAL, what the run loaded; below
     "privateEndpoints"?: { "ids": ["<endpoint id>", ...],                              // issue #918: CONDITIONAL, the private endpoints
@@ -6782,6 +6852,21 @@ validator rather than a second copy of it.
   be staged, or this worker has no tail or relay wired, so nothing could read the acks; a worker with no Valkey client
   is the usual cause; on a copying venue also the stderr transcript not armed, issue #686), `no-inbox` (the inbox directory could not be made). The job still runs, as it would without
   `run.steer`. Integers and enum members only: no message text, id, sender or author reaches the record.
+  **`secretFiles` (issue #919)** is conditional on resolved grants selected for file delivery: at most 80 unique portable names, sorted and
+  rebuilt by `recordedSecretFiles`, with case-folded collisions or invalid names dropping the entire field.
+  These are worker-authored operator-config names, never a resolver reference, path or value. No-file jobs and old
+  records omit it; `v` stays 1 and tolerant readers need no migration. A model-callable run read projects only
+  a numeric `secretFiles` count; the operator record may retain the names. Resolution precedes later gates and startup, so this
+  field may accompany a later refusal or infrastructure failure; it proves neither container start nor file access.
+  The bundle's `variables` lists every resolved bundle name regardless of delivery type, including overridden names,
+  and `shadowed` includes both direct maps. File-only direct grants also carry
+  `secretsProfile`. The contents are registered for transcript/output redaction and checkpoint secret scanning;
+  a matching checkpoint is refused, not rewritten. Output redactors keep
+  separate stream tails so a literal split across chunks or interleaved stderr cannot leak. Raw authenticated
+  exit parsing precedes redaction, so its MAC remains verifiable. Literal, JSON and URL spellings, newline-trimmed
+  text and individual lines participate in redaction under the existing minimum length of eight. Other encodings/transforms and
+  shorter values remain the existing redaction residual. Managed staging removal cannot erase an agent's own copy.
+
   **`bundle` and `bundleSkipped` (issue #704, AMENDED 2026-10-19, `DES-PROJECT-SECRET-BUNDLES`)** are TAIL position after
   the steering keys and CONDITIONAL like them: present only for a job whose project has a secret bundle, so every other
   record is byte-identical to before. `bundle` is `{ id, variables, shadowed }`: the bundle's id and the variable
@@ -15009,3 +15094,5 @@ and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` are UNCHANGED, checked: no file shape, wr
 | 2026-11-16 (#918, part 4) | `INT-HOST-REGISTRY-CONTRACT` UNCHANGED, checked: no heartbeat field is added for private endpoints; the registry admits no address, and the console shows this deployment folder's own declaration, saying that other hosts' copies are not published. `INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked: the run page reads `privateEndpoints` through the worker's own `recordedPrivateEndpoints`. |
 | 2026-11-17 (#921) | INT-CONTAINER-RUNTIME-CONTRACT AMENDED with the optional display image contract; INT-LIVE-PROBE-CONTRACT AMENDED with image-specific graphical probes and the display sweep namespace. INT-DOCTOR-RESULTS-KEY, INT-TRIGGERS-FILE-CONTRACT, INT-RUN-HISTORY-FILE-CONTRACT and INT-RUNNER-EXIT-CODE-PROTOCOL UNCHANGED, checked: ordinary live check records and the existing image selection suffice; no paid-job result or stored shape changes. The OpenShell lane asserts the measured identity-call refusal, not a graphical pass. |
 | 2026-11-18 | Issue #924. Adds `INT-HOST-CONSUMERS`, an additive generation-bound registry field and explicit unknown for older readers/writers; amends `INT-SANDBOX-CONTRACT` at the asynchronous deletion boundary. `INT-RUN-HISTORY-FILE-CONTRACT` and job-data shape UNCHANGED, checked. |
+| 2026-11-18 (#919, trigger and queue contract) | `INT-TRIGGERS-FILE-CONTRACT` AMENDED: `run.secretFiles`, selected bundle `files`, portable case-insensitive file names, combined direct-reference bound, shared profile/resume rules, model-tool refusal and authored skew defense. Trigger file version 8 and queued job-data version 9 protect the new fields. UNCHANGED, checked: ordinary environment-secret delivery, resolver exit codes, manual/chained grant exclusions and existing field minimum versions; no new resolver format. `INT-OUTBOX-CONTRACT` UNCHANGED, checked: a chained child gains no secret grant. Container, lifecycle and run-history amendments are recorded separately. |
+| 2026-11-18 (#919, file custody) | AMENDED `INT-CONTAINER-JOB-INPUTS`, `INT-CONTAINER-RUNTIME-CONTRACT`, `INT-RUNNER-EXIT-CODE-PROTOCOL` and `INT-RUN-HISTORY-FILE-CONTRACT`: private sibling staging, disjoint operator-selected sources, job-owned read-only delivery, capability and early verification, owner-aware crash cleanup, conditional resolved grant names and stream-safe literal redaction. The name field is not proof of container start or file access. UNCHANGED, checked: exit numeric meanings and signatures, record `v`, resolver exit codes, retained workspace/checkpoint shape and existing mount permissions. New policy refusals return; staging and transport failures retry as infrastructure. |

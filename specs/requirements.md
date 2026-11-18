@@ -7950,6 +7950,38 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
   included), before the confirm and again at the write. A job on a fork's pull request gets none unless the bundle
   sets `forkReviews: true`. A trigger's own `run.secrets` win a name clash.
 
+- **AMENDED 2026-11-18 (#919), file delivery**: `run.secretFiles` is a second reference map using the
+  same `run.secretsProfile` and implicit `default`. The job receives a path in each named environment variable
+  and the resolved text in a separate read-only file. Managed delivery SHALL NOT place raw file contents in the
+  container environment, command arguments, job inputs, run records, checkpoints or retained workspaces. All existing secret
+  authority and profile gates apply. No manual request, chained child or model-callable writer grants file secrets.
+  Watch investigation rules may bind them, but `queryLogs.credentialEnv` must name an environment credential.
+  An HTTP MCP credential cannot consume a file path; an explicitly configured stdio MCP environment may.
+
+  The two direct maps SHALL be disjoint and together contain at most 16 references. File names match the ASCII
+  environment-name grammar, are at most 128 characters, exclude `__proto__` and Windows device names, and are unique
+  ignoring case. Malformed, empty, reserved, path-like and near-miss fields refuse at load; file references are
+  never printed in validation errors. File-only jobs require and route by their selected secret profile. The
+  existing resume prohibition applies equally to file grants. Runtime revalidation precedes resolution and spend.
+  File text is nonempty valid UTF-8 with no NUL or unpaired surrogate, at most 64 KiB per value, preserved exactly,
+  including final newlines. Existing environment-value normalization is unchanged.
+
+  A project's `secretBundles.<id>.files` selects 1 to 64 distinct returned names for file delivery from the existing
+  dotenv or JSON output; it introduces no new resolver format. Its names obey the same portable rules and cannot
+  collide with `endpoints`, ignoring case. A missing selected value refuses the entire job. Explicit direct grants
+  override a bundle's value AND delivery type. The final file set is checked for case-insensitive collisions.
+  An image must advertise `secretFiles` before the clone, token-cap read or budget reservation. The direct grant
+  is checked before resolution or token minting; a bundle needing fork eligibility is checked after that existing
+  forge head read and before its resolver, so a skipped bundle imposes no image requirement. The separate managed staging tree is removed on
+  completion, refusal, failure and shutdown; boot cleanup uses dead-owner identity and successful venue reaping,
+  independently of workspace age or checkpoint retention, preserving live or unknown owners conservatively.
+  Every job SHALL refuse operator-selected workspaces, skill sources or an overlay overlapping the jobs directory
+  in either direction, symlink and directory-identity aliases included. The free check runs before resolution or
+  minting and is repeated against preparation sources; fresh worker-created forge clones remain valid.
+  The run record may retain resolved file NAMES only, not proof that a container started; model-callable projections expose counts only.
+  Read access still lets an agent copy a granted value deliberately. Existing minimum-eight-character redaction
+  and transformed-value limits remain; staging cleanup does not claim to erase copies an agent made.
+
 - **Why**: **The reference grammar belongs to the resolver, and never to this project.** `op://vault/item`,
   `secret/data/ci#stripe` and a bare name are all correct inputs, because what parses them is a script the
   operator wrote. This is `DES-SERVICE-ENV-SETUP-SEAM`'s posture moved from boot time to job time, and the
@@ -9672,3 +9704,4 @@ instead of drifting.
 | 2026-11-16 (#918, part 4) | `REQ-OPERATOR-CONSOLE-SCREENS` AMENDED, (g6) Connections: the `p-private-endpoints` panel (this folder's declaration and the triggers granted each, "not declared here" for an id it lacks), a host whose private-endpoints file does not load among the problems, and the trigger page, trigger list, run preview and run page rows. `REQ-PRIVATE-ENDPOINTS` UNCHANGED, checked: the console reads and shows, and writes nothing. |
 | 2026-11-17 (#921) | NEW REQ-GRAPHICAL-JOB-CHECK (#921): headed Chromium recipe, image capability, deterministic screenshot checks, named display failures and venue-specific evidence. REQ-FRONTEND-VISUAL-VERIFY and REQ-DEPLOYMENT-BOOTSTRAP UNCHANGED, checked: application orchestration remains in flows, and the optional live check changes no setup permission or paid action. |
 | 2026-11-18 | Issue #924. Adds `REQ-CONSUMER-LIVENESS`. Queue durability and paid retry policy UNCHANGED, checked. |
+| 2026-11-18 (#919) | `REQ-TRIGGER-SECRETS` AMENDED: reviewed per-trigger and selected bundle file delivery, exact text, portable names, disjoint grants, image gate, no tool grant widening, independent staging cleanup and explicit copying/redaction residuals. UNCHANGED, checked: `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-TOKEN-SCOPED-PER-JOB`, `CONST-PI-VERSION-PINNED`; existing environment delivery and resolver exit meanings. The isolation amendment for the additional read-only mount is recorded in the constitution. |

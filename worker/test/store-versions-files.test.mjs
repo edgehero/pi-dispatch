@@ -190,7 +190,7 @@ const triggersPathWith = (doc) => {
 };
 
 test("triggers: the shipped tables hold the rule, against the run keys and blocks the loader reads", () => {
-	assert.equal(TRIGGERS_FILE_VERSION, 7, "issue #918: private endpoints at 7");
+	assert.equal(TRIGGERS_FILE_VERSION, 8, "issue #919: file secret bindings at 8");
 	// Every `run.<key>` any worker module reads: a lenient superset (comments add names), which is enough to refuse a
 	// table row naming a key nothing reads.
 	const runKeys = new Set();
@@ -211,7 +211,9 @@ test("triggers: the shipped tables hold the rule, against the run keys and block
 	assert.deepEqual(valueTableProblems(TRIGGER_RUN_VALUE_VERSIONS, { known: [...runKeys], version: TRIGGERS_FILE_VERSION }), []);
 	// A value rule can raise the version with no field-table row, which neither check can see. While there is none, the
 	// version is the field tables'; the first value rule must extend this assertion with the versions it answers.
-	assert.deepEqual([...Object.keys(TRIGGER_VALUE_VERSIONS), ...Object.keys(TRIGGER_RUN_VALUE_VERSIONS), ...Object.keys(TRIGGERS_BLOCK_VALUE_VERSIONS)], ["on"]);
+	assert.deepEqual([...Object.keys(TRIGGER_VALUE_VERSIONS), ...Object.keys(TRIGGER_RUN_VALUE_VERSIONS), ...Object.keys(TRIGGERS_BLOCK_VALUE_VERSIONS)], ["on", "secretBundles"]);
+	assert.equal(TRIGGERS_BLOCK_VALUE_VERSIONS.secretBundles({ lab: { files: ["DEVICE_KEY"] } }), 8);
+	assert.equal(TRIGGERS_BLOCK_VALUE_VERSIONS.secretBundles({ lab: { profile: "lab" } }), 1);
 	assert.equal(TRIGGER_VALUE_VERSIONS.on({ type: "pull_request", forge: "github" }), 5);
 	assert.equal(TRIGGER_VALUE_VERSIONS.on({ type: "pull_request", action: ["opened"] }), 1);
 });

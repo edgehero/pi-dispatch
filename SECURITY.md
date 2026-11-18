@@ -723,6 +723,28 @@ than instantaneous. The bootstrap verifier briefly traverses a URL fragment befo
 itself, but browser history/extensions may observe it during that interval. Enrollment explicitly accepts these
 residuals. The native opener, job isolation/credentials, paid admission and person-confirmed answer boundary remain.
 
+## File-secret custody (#919)
+
+A reviewed trigger may bind `run.secretFiles`, or a project bundle may select names with `files`. The job gets
+paths to readable files, not their contents in its environment. The worker stages a new owner-only sibling of the
+job directory, gives only its `secrets/` child to the container read-only, and verifies owner and `0600` mode before
+pi loads tools. The OpenShell copy venue uploads that child outside the returned workspace; its gateway handles
+file contents as job input, not credential-provider values or command arguments. Its endpoint placeholders remain
+a separate path. Only the paths and the closed name flag appear in exec arguments.
+
+Every job checks that operator-selected local workspaces, skill sources and the global overlay are disjoint from
+the jobs directory, including aliases. A job without file grants must not read another job's staging through
+a broad mount or skill copy. The check runs before resolving secrets or minting a token, repeats at preparation,
+and checks the actual staging boundary before writing.
+
+The staging is removed on success, refusal, failure and shutdown, even when a workspace or checkpoint survives.
+A restart removes a dead owner's files after its venue has been reaped, independently of workspace retention.
+Unknown/live owners and failed reaping preserve the files and name the reason in a log. These temporary directories
+must not be backed up. The job can copy any granted file: managed cleanup does not erase copies, and redaction
+cannot guarantee removal of encoded or otherwise transformed content. Literal forms, including multiline and
+newline-trimmed forms, enter the existing transcript, output and checkpoint guards, with their existing eight-character
+minimum. A shared host account or the venue runtime can read the staging, as it can read ordinary job credentials.
+
 ## What is NOT defended (v1)
 
 Stated openly rather than discovered later:

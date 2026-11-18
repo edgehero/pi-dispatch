@@ -512,6 +512,7 @@ function runFieldsOf(entry, flow) {
     ...(run.maxMinutes !== undefined ? { maxMinutes: run.maxMinutes } : {}),
     ...(run.skillsDir !== undefined ? { skillsDir: run.skillsDir } : {}),
     ...(run.secrets !== undefined ? { secrets: run.secrets } : {}),
+    ...(run.secretFiles !== undefined ? { secretFiles: run.secretFiles } : {}),
     ...(run.secretsProfile !== undefined ? { secretsProfile: run.secretsProfile } : {}),
     ...(run.waitFor !== undefined ? { waitFor: run.waitFor } : {}),
     ...(run.instructions !== undefined ? { instructions: run.instructions } : {}),

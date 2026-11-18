@@ -14,8 +14,8 @@ import { DEFAULT_LAYOUT, LAYOUT, LAYOUT_ENV, LAYOUTS, layoutName } from "../src/
 
 const BASE = { PI_PROVIDER: "anthropic", PI_MODEL: "m", PI_MAX_TURNS: "5" };
 
-test("the mounts layout is exactly the paths every runner before issue #683 used", () => {
-	assert.deepEqual(LAYOUTS.mounts, { job: "/job", workspace: "/workspace", session: "/session", outbox: "/outbox", inbox: "/inbox", global: "/opt/pi-global" });
+test("the mounts layout keeps the original paths and a separate secret-files root", () => {
+	assert.deepEqual(LAYOUTS.mounts, { job: "/job", workspace: "/workspace", session: "/session", outbox: "/outbox", inbox: "/inbox", global: "/opt/pi-global", secretFiles: "/run/secrets" });
 	assert.equal(DEFAULT_LAYOUT, "mounts");
 	// This test file runs with no PI_JOB_LAYOUT, so the process layout is the default one.
 	assert.equal(LAYOUT, LAYOUTS.mounts);
@@ -28,6 +28,9 @@ test("the sandbox layout puts every path under the image's WORKDIR, and has no i
 	}
 	// The session must never sit inside the worktree the agent commits from (parseSessionFile), on either layout.
 	for (const layout of Object.values(LAYOUTS)) assert.ok(!layout.session.startsWith(`${layout.workspace}/`));
+	for (const layout of Object.values(LAYOUTS)) {
+		for (const key of ["job", "workspace", "session", "outbox"]) assert.ok(!layout.secretFiles.startsWith(`${layout[key]}/`), `${key} never contains staged secrets`);
+	}
 });
 
 test("a layout name the table does not hold is refused, unset and empty are the default", () => {

@@ -1166,6 +1166,7 @@ export function makePodmanBackend(opts = {}) {
 	};
 
 	const runContainer = makeRunContainerFn({
+		secretFilesBackend: "podman",
 		image,
 		hostEnv,
 		egress,

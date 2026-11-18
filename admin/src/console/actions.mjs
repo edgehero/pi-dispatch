@@ -1990,8 +1990,8 @@ function triggerEditBack(out) {
  * copy of the file (issue #737), since "copy them from this preview" would copy the marker the diff shows.
  */
 function triggerDeleteBack(out) {
-  const secrets = listBefore(out, "triggers")[out.plan?.index]?.run?.secrets;
-  const named = secrets !== null && typeof secrets === "object" && Object.keys(secrets).length > 0;
+  const run = listBefore(out, "triggers")[out.plan?.index]?.run;
+  const named = [run?.secrets, run?.secretFiles].some((secrets) => secrets !== null && typeof secrets === "object" && Object.keys(secrets).length > 0);
   return named ? twice(UNDO_SENTENCES.deleteSecrets, UNDO_SENTENCES.deleteSecretsAfter) : DELETED;
 }
 

@@ -776,6 +776,50 @@ STPROBE
 				[ "$obs_core" = "core-limit runner=[0 0] supervisor=[0 0]" ] \
 					|| fail "the image declares 'observableRunner' but a readable key holder can be core-dumped: its RLIMIT_CORE is not 0/0, so a tool's SIGABRT could drop a core holding the exit key (${obs_core:-no probe line}); set ulimit -c 0 in the entrypoint"
 				;;
+			secretFiles)
+				# The real runner must verify ownership and modes before discovery; the extension sees only a
+				# path in its environment, and its file keeps every byte. No model request or network is needed.
+				sf_dir=$(mktemp -d)
+				mkdir -p "$sf_dir/job" "$sf_dir/ws/.pi/extensions" "$sf_dir/secrets"
+				printf 'Reply with ok.\n' >"$sf_dir/job/prompt.md"
+				printf 'fixture-secret-line-one\r\nfixture-secret-line-two\n' >"$sf_dir/secrets/VERIFY_FILE"
+				chmod 700 "$sf_dir/secrets"
+				chmod 600 "$sf_dir/secrets/VERIFY_FILE"
+				cat >"$sf_dir/ws/.pi/extensions/secret-file-probe.ts" <<'SFPROBE'
+import fs from "node:fs";
+export default function (pi) {
+	pi.on("agent_start", async () => {
+		const path = process.env.VERIFY_FILE;
+		const st = fs.statSync(path);
+		let readonly = false;
+		try { fs.writeFileSync(path, "changed"); } catch (error) { readonly = error.code === "EROFS"; }
+		const ok = path === "/run/secrets/VERIFY_FILE" && st.uid === process.geteuid() && (st.mode & 0o777) === 0o600
+			&& fs.readFileSync(path, "utf8") === "fixture-secret-line-one\r\nfixture-secret-line-two\n"
+			&& process.env.PI_SECRET_FILES === undefined && readonly;
+		console.log(`secret-file-probe ${ok ? "ok" : "failed"}`);
+	});
+}
+SFPROBE
+				chmod -R a+rX "$sf_dir/job"
+				chmod -R a+rwX "$sf_dir/ws"
+				sf_run() {
+					docker run --rm --init --network none --cap-drop=ALL --security-opt no-new-privileges \
+						--user "$(id -u):$(id -g)" -v "$sf_dir/job:/job:ro" -v "$sf_dir/ws:/workspace" \
+						-v "$sf_dir/secrets:/run/secrets:ro" --workdir /workspace \
+						-e PI_PROVIDER=anthropic -e PI_MODEL=claude-sonnet-4-5-20250929 -e PI_MAX_TURNS=1 \
+						-e ANTHROPIC_API_KEY=sk-ant-not-a-real-key -e PI_MAX_COST_MICROS=0 \
+						-e PI_SECRET_FILES=VERIFY_FILE -e VERIFY_FILE=/run/secrets/VERIFY_FILE "$IMAGE_REF" 2>&1
+				}
+				sf_out=$(sf_run) || true
+				chmod 644 "$sf_dir/secrets/VERIFY_FILE"
+				sf_bad=$(sf_run) && sf_code=0 || sf_code=$?
+				rm -rf "$sf_dir"
+				echo "$sf_out" | grep -q '^secret-file-probe ok$' \
+					|| fail "the image declares secretFiles but did not deliver the exact file bytes at a read-only path with the job user's owner and 0600 mode"
+				[ "$sf_code" = 2 ] && echo "$sf_bad" | grep -q '"reason":"secret-files-unusable"' \
+					&& ! echo "$sf_bad" | grep -q '^secret-file-probe' \
+					|| fail "the image declares secretFiles but an unsafe file mode did not refuse before tool discovery"
+				;;
 			bundleEnvFile)
 				# Issue #704 part 3. The runner reads a project secret bundle's plain variables from /job/bundle-env.json on
 				# PI_BUNDLE_ENV=1, into its own environment, which pi and its tools inherit. Proved by running it: the offline

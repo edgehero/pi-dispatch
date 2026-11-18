@@ -126,7 +126,7 @@ import { apiKeyVariable, nonApiKeyKind } from "./provider-key.mjs";
 import { WORKER_NAME_RE } from "./worker-name.mjs";
 import { parseTriggersDocument, sourceForgeOf, triggersFileVersionFor } from "./triggers.mjs";
 import { jobDataVersionFor } from "./job-data-version.mjs";
-import { secretBundleChecks } from "./doctor-bundles.mjs";
+import { secretBundleChecks, secretFileChecks } from "./doctor-bundles.mjs";
 import { doctorModelProposalChecks } from "./doctor-model-proposals.mjs";
 
 /**
@@ -280,11 +280,12 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 		// Issue #683: `--openshell`, the openshell venue's lines (doctor-openshell.mjs), strictly `=== true` as `live`.
 		// `openshellRun` is their spawn seam, for the tests.
 		openshell = false,
-		// Issue #704: `--secrets`, resolve each project secret bundle on this host and print its variable names and count,
+		// Issue #704: `--secrets`, resolve project bundles and declared file secrets on this host and print their names,
 		// never a value (doctor-bundles.mjs). Strictly `=== true`, as `live`: it spawns every bundle resolver, which reads
-		// the operator's manager. `bundleSpawn` is its spawn seam, for the tests.
+		// the operator's manager. `bundleSpawn` and `secretSpawn` are their spawn seams, for the tests.
 		secrets = false,
 		bundleSpawn,
+		secretSpawn,
 		// Issue #712: publish this run's results to Valkey for the console and the panel (`doctor-results.mjs`). Strictly
 		// `=== true`, as `live`: the CLI passes it unless `--no-publish`, and a caller that hands runDoctor an option bag
 		// (every test) publishes nothing unless it says so. `publishDoctor(url, name, record, loads)` is the write, a seam so a
@@ -463,7 +464,7 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 						return { ...(await valkeyAuthState(url, { context, withoutPassword })), passwordSet: Boolean(sent.password), from: sent.from };
 					}
 				: null;
-	const seams = { setupReadOnly: setupReadOnly === true, ...(subscriptionFactory ? { subscriptionFactory } : {}), ...(modelProposals ? { modelProposals } : {}), secrets: secrets === true, ...(bundleSpawn ? { bundleSpawn } : {}), openshell: openshell === true, ...(openshellRun ? { openshellRun } : {}), cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, ...(modelCatalog ? { modelCatalog } : {}), ...(piModelLoader ? { piModelLoader } : {}), ...(dollarKeysExist ? { dollarKeysExist } : {}), ...(readAppliedSplit ? { readAppliedSplit } : {}), ...(readCapacity ? { readCapacity } : {}), ...(readDollarRecords ? { readDollarRecords } : {}), ...(readDollarCounters ? { readDollarCounters } : {}), ...(olderStateFindings ? { olderStateFindings } : {}), ...(consoleProbe ? { consoleProbe } : {}), fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, flowFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, ...(readRunRecords ? { readRunRecords } : {}), venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(lstatOverlayFile ? { lstatOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), ...(envUntrusted ? { envUntrusted: true } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
+	const seams = { setupReadOnly: setupReadOnly === true, ...(subscriptionFactory ? { subscriptionFactory } : {}), ...(modelProposals ? { modelProposals } : {}), secrets: secrets === true, ...(bundleSpawn ? { bundleSpawn } : {}), ...(secretSpawn ? { secretSpawn } : {}), openshell: openshell === true, ...(openshellRun ? { openshellRun } : {}), cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, ...(modelCatalog ? { modelCatalog } : {}), ...(piModelLoader ? { piModelLoader } : {}), ...(dollarKeysExist ? { dollarKeysExist } : {}), ...(readAppliedSplit ? { readAppliedSplit } : {}), ...(readCapacity ? { readCapacity } : {}), ...(readDollarRecords ? { readDollarRecords } : {}), ...(readDollarCounters ? { readDollarCounters } : {}), ...(olderStateFindings ? { olderStateFindings } : {}), ...(consoleProbe ? { consoleProbe } : {}), fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, flowFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, ...(readRunRecords ? { readRunRecords } : {}), venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(lstatOverlayFile ? { lstatOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), ...(envUntrusted ? { envUntrusted: true } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
 	// Issue #471: every other service key, resolved ONCE for the whole run (the fix pass's re-collect and `--live` judge the
 	// same resolution). THE RULE (PR #474's round cap, after three rounds of trust patches): no program doctor starts is
 	// handed anything from `.env`. Every child gets this shell's own environment, the one it had before #471; a `.env`
@@ -2086,7 +2087,7 @@ export async function collectChecks(shellVars, seams) {
 	// runTable, blockTable }, jobData: { table } }`, each part the store module's own when absent. This seam is how a test
 	// drives a need above 1 through the real collection, for a store whose table has no row of its own and at a version no row holds yet.
 	const versionTables = seams.versionTables ?? {};
-	const { watchSources: triggerWatchSources, watchRules: triggerWatchRules, modelRoles: triggerModelRoles, secretBundles: triggerBundles, requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, recovering, replicating, instructing, commands, localEvents, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, excludedNames, costCaps, modelRuns, privateRuns, triggersVersionNeed, jobDataVersionNeed, parseError, parseNewer: triggersFileIsNewer, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTables);
+	const { watchSources: triggerWatchSources, watchRules: triggerWatchRules, modelRoles: triggerModelRoles, secretBundles: triggerBundles, requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, recovering, replicating, instructing, commands, localEvents, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, fileSecretRuns, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, excludedNames, costCaps, modelRuns, privateRuns, triggersVersionNeed, jobDataVersionNeed, parseError, parseNewer: triggersFileIsNewer, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTables);
 	const modelRoleProjects = readProjectFacts(bootEnv, fileExists).projects;
 	const scopedLimitFacts = readScopedLimitFacts(bootEnv, fileExists);
 	const pauseWindowFacts = readPauseWindowFacts(bootEnv, fileExists, versionTables.pauseWindows);
@@ -4280,6 +4281,21 @@ export async function collectChecks(shellVars, seams) {
 				label: `${localSecretFolders.length} local trigger(s) bind secrets and run IN the operator's own folder: ${localSecretFolders.join(", ")} -- a credential the agent writes to .env, .netrc or .git-credentials there lands in your real repository (and in a retained sandbox). Nothing scans for that: keep those folders out of anything you push`,
 			});
 		}
+	}
+
+	if (fileSecretRuns.length > 0) {
+		let resolveFiles = null;
+		if (seams.secrets === true) {
+			try {
+				const { makeSecretsResolver } = await import("./secrets.mjs");
+				const settings = fileExists(settingsFilePath(env, home)) ? readOverlay(settingsFilePath(env, home)) : { overlay: {} };
+				const resolver = makeSecretsResolver({ envProfiles: parseSecretProfilesSafe(env.PI_SECRET_PROFILES).profiles, roots: delimitedList(env.PI_SECRET_RESOLVER_ROOTS), forwardEnv: (env.PI_FORWARD_ENV ?? "").split(",").map((n) => n.trim()).filter(Boolean), hostEnv: spawnEnv, timeoutMs: Math.max(BUNDLE_DOCTOR_TIMEOUT_MS, Number(env.PI_SECRET_RESOLVE_TIMEOUT_MS) || 0), ...(seams.secretSpawn ? { spawnFn: seams.secretSpawn } : {}) });
+				resolveFiles = (run) => resolver({ provider: run.provider ?? provider, secretsProfile: run.secretsProfile, secretFiles: run.secretFiles }, { overlayProfiles: settings.invalid ? {} : settings.overlay?.secretProfiles ?? {} });
+			} catch {
+				checks.push({ ok: false, label: "--secrets could not load the file secret resolver (pi did not load; its own line above says why)" });
+			}
+		}
+		checks.push(...await secretFileChecks({ runs: fileSecretRuns, resolveFiles }));
 	}
 
 	// Issue #704: the project secret bundles (doctor-bundles.mjs says what each line is for). Silent on a deployment that
@@ -7027,7 +7043,7 @@ function triggerLabel(t, index) {
 }
 
 function readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTables = {}) {
-	const none = { privateRuns: [], watchSources: {}, watchRules: 0, modelRoles: {}, secretBundles: {}, requiring: 0, waiting: 0, listing: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, recovering: 0, replicating: 0, instructing: 0, commands: 0, localEvents: [], secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], folders: [], images: [], imageRoutes: [], namedBackends: [], skillsDirs: [], forges: [], repositories: [], flows: [], excludedNames: [], costCaps: [], modelRuns: [], triggersVersionNeed: 1, jobDataVersionNeed: 1, parseError: null, parseNewer: false, path: null };
+	const none = { privateRuns: [], watchSources: {}, watchRules: 0, modelRoles: {}, secretBundles: {}, requiring: 0, waiting: 0, listing: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, recovering: 0, replicating: 0, instructing: 0, commands: 0, localEvents: [], secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], fileSecretRuns: [], folders: [], images: [], imageRoutes: [], namedBackends: [], skillsDirs: [], forges: [], repositories: [], flows: [], excludedNames: [], costCaps: [], modelRuns: [], triggersVersionNeed: 1, jobDataVersionNeed: 1, parseError: null, parseNewer: false, path: null };
 	try {
 		// Unset falls back to ./triggers.json in cwd, MIRRORING the receiver's own default
 		// (receiver/src/config.mjs) -- the two must read the same file, or doctor preflights a deployment
@@ -7093,20 +7109,21 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTable
 			localEvents: triggers.filter((t) => t.run.kind === "local" && sourceForgeOf(t)).map((t) => ({ id: t.on.id, forge: sourceForgeOf(t), worker: t.run.worker, debounceSeconds: t.on.debounceSeconds, reviewAuthors: t.on.reviewAuthors?.length ?? 0 })),
 			// REQ-TRIGGER-SECRETS. Counted beside `instructing` for its reason: a per-trigger choice that
 			// changes what every job of it can reach, and one that lives only in triggers.json.
-			secreting: triggers.filter((t) => t.run.secrets !== undefined).length,
+			secreting: triggers.filter((t) => (t.run.secrets !== undefined || t.run.secretFiles !== undefined)).length,
 			// The distinct profile NAMES the file selects, deduped like `images`/`skillsDirs`: the checks below
 			// cost a stat each, and two triggers naming one profile are one question. `default` is substituted
 			// for an absent field so the table answers what the worker will actually look up.
-			secretProfiles: [...new Set(triggers.filter((t) => t.run.secrets !== undefined).map((t) => t.run.secretsProfile ?? "default"))].sort(),
+			secretProfiles: [...new Set(triggers.filter((t) => (t.run.secrets !== undefined || t.run.secretFiles !== undefined)).map((t) => t.run.secretsProfile ?? "default"))].sort(),
 			// LOCAL triggers that bind secrets, by folder. A local job's /workspace IS this folder, bind-mounted
 			// read-write with no clone, so a credential an agent writes into .env lands in the operator's real
 			// repository rather than a temp dir that gets swept. Deduped for skillsDirs' reason.
-			localSecretFolders: [...new Set(triggers.filter((t) => t.run.secrets !== undefined && t.run.kind === "local" && typeof t.run.folder === "string").map((t) => t.run.folder))].sort(),
+			localSecretFolders: [...new Set(triggers.filter((t) => (t.run.secrets !== undefined || t.run.secretFiles !== undefined) && t.run.kind === "local" && typeof t.run.folder === "string").map((t) => t.run.folder))].sort(),
 			// Issue #309. The distinct variable NAMES the file binds, deduped like the profiles above. The
 			// pre-spend gate refuses a name pi reads for the job's provider, and unlike the version that gate
 			// replaced, that question no longer needs host state to answer -- so doctor can answer it at setup
 			// rather than leaving the operator to meet it as a public refusal on a live job.
-			secretNames: [...new Set(triggers.filter((t) => t.run.secrets !== undefined).flatMap((t) => Object.keys(t.run.secrets)))].sort(),
+			secretNames: [...new Set(triggers.flatMap((t) => [...Object.keys(t.run.secrets ?? {}), ...Object.keys(t.run.secretFiles ?? {})]))].sort(),
+			fileSecretRuns: triggers.map((t, index) => ({ label: triggerLabel(t, index), provider: t.run.provider, secretsProfile: t.run.secretsProfile, secretFiles: t.run.secretFiles })).filter((run) => run.secretFiles !== undefined),
 			// Issue #242: every local run.folder, CANONICALIZED the way the scoped-limits matcher
 			// canonicalizes a job's folder (one derivation -- canonicalScope, never re-spelled here), so
 			// the unreferenced-scope advisory compares like with like across spelling variants.

@@ -24,7 +24,7 @@
  *   PI_JOB_IMAGE=pi-job:ci node <repo>/.github/scripts/openshell-bind-conformance.mjs [--default-config]
  */
 
-import { execFile } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import * as nodeFs from "node:fs";
 import { tmpdir } from "node:os";
@@ -41,6 +41,8 @@ const { networkPolicyFor } = await load("worker/src/openshell-policy.mjs");
 const { makeLiveTranscriptOpener } = await load("worker/src/live-transcript.mjs");
 const { KEYLESS_API_KEY } = await load("worker/src/model-endpoints.mjs");
 const { judgeKeyguard, judgeCoreguard, probeFields } = await import(pathToFileURL(join(root, ".github/scripts/openshell-keyguard-judge.mjs")).href);
+const { SECRET_FILE_FIXTURES, SECRET_FILES_PROBE_SOURCE, judgeSecretFilesProbe, secretFileStageRemoved } = await load(".github/scripts/secret-files-conformance.mjs");
+const { reaperExec } = await load("worker/src/backend-local.mjs");
 
 // Every owned sandbox the gateway still lists, polled until the listing is empty or 30 s have passed: a delete is
 // asynchronous (measured in #684), so a single read can see one on its way out.
@@ -104,6 +106,7 @@ nodeFs.writeFileSync(
 c=$(cat /job/prompt.md 2>/dev/null || cat /sandbox/job/prompt.md)
 case "$c" in
 	sleep) exec sleep 600 ;;
+	secret-files) exec node /opt/pi-dispatch-secret-files.mjs ;;
 	folder) echo in-place >> /workspace/notes.txt && exit 0; exit 9 ;;
 	background)
 		# Review round 1 (#714), M1: a writer the agent leaves behind, outside the exec's process group.
@@ -154,6 +157,8 @@ esac
 );
 nodeFs.writeFileSync(join(context, "Dockerfile"), `FROM ${image}\nUSER root\nCOPY entrypoint.sh /entrypoint.sh\nRUN chmod 0755 /entrypoint.sh\nUSER pi\n`);
 const probeImage = `pi-dispatch-openshell-bind-probe:${nonce}`;
+nodeFs.writeFileSync(join(context, "secret-files.mjs"), SECRET_FILES_PROBE_SOURCE, { mode: 0o644 });
+nodeFs.appendFileSync(join(context, "Dockerfile"), "COPY secret-files.mjs /opt/pi-dispatch-secret-files.mjs\n");
 const built = await run("docker", ["build", "--pull=false", "-q", "-t", probeImage, context]);
 if (built.code !== 0) refuse(`the probe image did not build: ${built.stderr.trim().split("\n").slice(-1)[0]}`);
 
@@ -273,10 +278,11 @@ if (!readings.readOnlyJobInputs?.ok) failed = true;
 	const real = bundleFor("bind", image, { openJobLog: makeLogSink({ logsDir: logs, enabled: false }), openLiveTranscript, log: (event, fields) => events.push([event, fields]) });
 	const dirs = jobDirFor("Reply with the single word ok.");
 	output.set("last", "");
-	const result = await real.runContainer({ job: { ...JOB, maxCostMicros: 0 }, prepared: dirs, name: `pi-job-bind-conformance-${nonce}-runner`, signal: new AbortController().signal, exitAuth: true, transcriptStderr: true, jobId: `bind-conformance-${nonce}`, size: { memMiB: 2048, cpuCenti: 200 } });
+	const result = await real.runContainer({ job: { ...JOB, maxCostMicros: 0 }, prepared: dirs, name: `pi-job-bind-conformance-${nonce}-runner`, signal: new AbortController().signal, exitAuth: true, transcriptStderr: true, jobId: `bind-conformance-${nonce}`, secretFiles: SECRET_FILE_FIXTURES, size: { memMiB: 2048, cpuCenti: 200 } });
 	const session = nodeFs.readFileSync(join(dirs.jobDir, "session", "current.jsonl"), "utf8");
-	const ok = result.code === 2 && result.exitReason === "cost-cap" && result.exitAuth === "verified" && session.length > 0;
-	console.log(`${ok ? "ok     " : "FAIL   "} the real runner: exit ${result.code}, reason ${result.exitReason}, exit line ${result.exitAuth}, session ${session.length} bytes written through the bind`);
+	const cleaned = secretFileStageRemoved(dirs.jobDir);
+	const ok = result.code === 2 && result.exitReason === "cost-cap" && result.exitAuth === "verified" && session.length > 0 && cleaned;
+	console.log(`${ok ? "ok     " : "FAIL   "} the real runner with file secrets: exit ${result.code}, reason ${result.exitReason}, exit line ${result.exitAuth}, session ${session.length} bytes written through the bind, secrets removed ${cleaned}`);
 	const kinds = xadds.map((fields) => fields[fields.indexOf("kind") + 1]);
 	const fromSession = kinds.filter((k) => k !== "end" && k !== "skipped").length;
 	const tailed = opened.length === 1 && opened[0].source === "file" && opened[0].file === join(dirs.jobDir, "session", "current.jsonl");
@@ -355,6 +361,30 @@ if (!readings.readOnlyJobInputs?.ok) failed = true;
 	const factsOk = facts !== null && facts.mode === "bind" && JSON.stringify(facts.ruleHosts) === JSON.stringify(wantHosts) && facts.ruleHostCount === wantHosts.length && facts.providers === 2 && facts.placeholders === 2 && !Object.values(values).some((v) => JSON.stringify(record).includes(v));
 	console.log(`${factsOk ? "ok     " : "FAIL   "} the bind run's record carries its openshell facts: ${JSON.stringify(facts)} (hosts wanted ${JSON.stringify(wantHosts)}, 2 providers, 2 placeholders)`);
 	if (!factsOk) failed = true;
+}
+
+// Issue #919: the same probe and strict verdict as copy mode, through the bind venue's own worker and policy.
+{
+	const commands = [];
+	const logsDir = join(scratch, "secret-file-logs");
+	const b = bundleFor("bind", probeImage, {
+		openJobLog: makeLogSink({ logsDir, enabled: true }),
+		spawnFn: (bin, args, opts) => { commands.push([bin, ...args]); return spawn(bin, args, opts); },
+		exec: reaperExec({ execFileFn: (bin, args, opts, callback) => { commands.push([bin, ...args]); return execFile(bin, args, opts, callback); } }),
+	});
+	const dirs = jobDirFor("secret-files");
+	const name = `pi-job-bind-conformance-${nonce}-secret-files`;
+	output.set("last", "");
+	const result = await b.runContainer({ job: JOB, prepared: dirs, name, signal: new AbortController().signal, secretFiles: SECRET_FILE_FIXTURES, jobId: "secret-files", size: { memMiB: 1024, cpuCenti: 100 } });
+	let gatewayLog = null;
+	let persistedLog = null;
+	// CI already writes this log on restart; an explicit path also supports running the harness by hand.
+	const gatewayLogPath = process.env.GATEWAY_LOG ?? (process.env.RUNNER_TEMP ? join(process.env.RUNNER_TEMP, "gateway-bind.log") : "");
+	try { gatewayLog = nodeFs.readFileSync(gatewayLogPath, "utf8"); } catch {}
+	try { persistedLog = nodeFs.readFileSync(join(logsDir, `${name}.log`), "utf8"); } catch {}
+	const answer = judgeSecretFilesProbe({ code: result.code, output: output.get("last"), jobDir: dirs.jobDir, commands, gatewayLog, persistedLog });
+	console.log(`${answer.ok ? "ok     " : "FAIL   "} file secrets in bind mode: ${answer.detail}`);
+	if (!answer.ok) failed = true;
 }
 
 // Review round 1 (#714): run_as_user other than the image's, exercised in CI. The job dir is handed to uid 2000 (sudo),

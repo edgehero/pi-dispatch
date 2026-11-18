@@ -183,6 +183,12 @@ These are all regenerated or bounded, and copying them buys nothing:
 - `.staging-*`, `.stage.lock` and `.retired.json` inside the overlay's `packages/`: a package stage that was running,
   and the stager's own bookkeeping. They come along when you copy `PI_GLOBAL_PI_DIR` whole, which is fine.
 
+- `<jobDir>.secret-files/`: temporary per-attempt secret material, never a backup source. Its `secrets/` child
+  holds the resolved files; `owner.json` records the staging process and venue. The worker removes it on every
+  settled attempt, including a kept workspace or checkpoint. After a crash the next startup removes it once
+  the owner is known dead and that venue has been reaped. A live or uncertain owner, or a venue whose reaping
+  failed, is preserved and logged. Do not copy this folder into a workspace, checkpoint or backup.
+
 ## Stop, copy, start
 
 Stop writers before you copy, outermost first. Each individual file is safe to copy on its own: `settings.json` and

@@ -148,6 +148,8 @@ export function makeImagePreflight({ image, spawnFn = spawn, bin = "docker", cop
  * A new image-gated feature (`costCap`, `modelPolicy`) is a row here, not another branch in two files. Order
  * is the order the branches had, so a job carrying several features is refused for the same one as before.
  */
+export const SECRET_FILES_CAPABILITY = "secretFiles";
+
 export const CAPABILITY_GATES = Object.freeze([	// REQ-REPLICA-RUNS: an image built before it bakes a HARD_RULES.md whose rule 3 hard-codes `pi/issue-<n>`
 	// as a SYSTEM rule, which the model treats as authoritative over the user prompt naming `pi/issue-<n>-r2`.
 	// Both replicas would push to one branch: the push race the feature exists to avoid, two runs billed.
@@ -340,6 +342,14 @@ export const CAPABILITY_GATES = Object.freeze([	// REQ-REPLICA-RUNS: an image bu
 	Object.freeze({ token: "packageCanary", needed: (job) => job?.packageCanary !== undefined, result: "packageCanaryUnsupported", reason: "job-image-package-canary-unsupported", event: "refused_image_package_canary_unsupported", comment: (image, declared) => `Refused: the job image "${image}" does not declare package canaries (\`dev.pi-dispatch.capabilities\` ${declared}), so it could not report whether the candidate loaded. Rebuild the image from a version that has this feature. Not run.` }),
 	// An old image would put its unconditional system rule above the opted-in user prompt.
 	Object.freeze({ token: "mergePolicy", needed: (job) => job?.mayMerge === true, result: "mergePolicyUnsupported", reason: "job-image-merge-policy-unsupported", event: "refused_image_merge_policy_unsupported", comment: (image, declared) => `Refused: the job image "${image}" does not declare per-job merge permission (\`dev.pi-dispatch.capabilities\` ${declared}), so its system rules would contradict \`run.mayMerge\`. Rebuild the image from a version that has this feature. Not run.` }),
+	Object.freeze({
+		token: SECRET_FILES_CAPABILITY,
+		needed: (job) => Object.keys(job?.secretFiles ?? {}).length > 0,
+		result: "secretFilesUnsupported",
+		reason: "job-image-secret-files-unsupported",
+		event: "refused_image_secret_files_unsupported",
+		comment: (image, declared) => `Refused: the job image "${image}" does not declare secret files (\`dev.pi-dispatch.capabilities\` ${declared}), so it cannot verify their owner, permissions and paths. Rebuild the image from a version that has this feature. Not run.`,
+	}),
 ]);
 
 /**

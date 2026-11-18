@@ -149,6 +149,7 @@ test("every subfolder the source makes in the run history or the session store i
 // path test above could find it by, as the page names it, pinned by where its name is made: a file and a literal
 // that must occur in its code. The page drops one, or its literal moves, and this fails.
 const FIXED_STORES = new Map([
+	[".secret-files", [["worker/src/secret-files.mjs", 'SECRET_FILES_DIR_SUFFIX = ".secret-files"']]],
 	["model-selection.json", [["worker/src/workspace-checkpoint.mjs", 'CHECKPOINT_MODEL_SELECTION_FILE = "model-selection.json"']]],
 	["model-selection", [["worker/src/session-store.mjs", 'MODEL_SELECTION_FILE = "model-selection"']]],
 	["./.env", [["worker/src/up.mjs", 'join(cwd, ".env")']]],

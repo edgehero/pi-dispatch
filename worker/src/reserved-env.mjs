@@ -117,6 +117,7 @@ export const CONTAINER_ENV_NAMES = new Set([
 	// Issue #704 part 3: tells the runner to read a project secret bundle's plain variables from the job directory's
 	// bundle-env.json. A trigger setting it would make a runner refuse on a file nobody wrote, or read one it should not.
 	"PI_BUNDLE_ENV",
+	"PI_SECRET_FILES",
 	"PI_OFFLINE",
 	// Issue #796: names a canary's candidate. A trigger setting it would make a run report on a path nobody installed.
 	"PI_PACKAGE_CANARY",

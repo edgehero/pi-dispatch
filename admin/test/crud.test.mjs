@@ -899,8 +899,9 @@ test("no registered tool's result carries a bundle variable name or an operator-
   const logsDir = process.env.PI_LOGS_DIR;
   const NAME = "ZQX_CANARY_BUNDLE_VAR";
   const SHADOW = "ZQX_CANARY_SHADOWED";
+  const FILE_NAME = "ZQX_CANARY_FILE_NAME";
   const PATH_CANARY = "/opt/zqx-canary-resolver.sh";
-  writeFileSync(join(logsDir, "gh-zqx-canary.json"), JSON.stringify({ jobId: "gh-zqx-canary", kind: "github", target: "acme/web#1", flow: "fix", outcome: "completed", startedAt: "2026-10-20T10:00:00Z", endedAt: "2026-10-20T10:05:00Z", bundle: { id: "shop", variables: [NAME, SHADOW], shadowed: [SHADOW], placeholders: 1, plain: 1 } }));
+  writeFileSync(join(logsDir, "gh-zqx-canary.json"), JSON.stringify({ jobId: "gh-zqx-canary", kind: "github", target: "acme/web#1", flow: "fix", outcome: "completed", startedAt: "2026-10-20T10:00:00Z", endedAt: "2026-10-20T10:05:00Z", secretFiles: [FILE_NAME], bundle: { id: "shop", variables: [NAME, SHADOW], shadowed: [SHADOW], placeholders: 1, plain: 1 } }));
   writeFileSync(join(dir, "settings.json"), JSON.stringify({ model: "m", secretProfiles: { prod: PATH_CANARY }, secretBundles: { "op-shop": { path: PATH_CANARY, format: "json" } } }));
   writeFileSync(join(dir, "triggers.json"), JSON.stringify({ triggers: [], secretBundles: { shop: { profile: "op-shop", ref: "zqx-ref-canary", project: "shop" } } }));
   Object.assign(process.env, { PI_SETTINGS_FILE: join(dir, "settings.json"), VALKEY_URL: "not-a-url", PI_TRIGGERS_FILE: join(dir, "triggers.json") }); // degrade synchronously, never a timeout burn
@@ -920,12 +921,13 @@ test("no registered tool's result carries a bundle variable name or an operator-
         }
         assert.notEqual(out, JSON.stringify("timeout"), `${tool.name} did not answer, so its result was never checked`);
         seen.push(tool.name);
-        for (const canary of [NAME, SHADOW, PATH_CANARY, "zqx-ref-canary"]) assert.ok(!out.includes(canary), `${tool.name} ${JSON.stringify(params)} returned ${canary}`);
+        for (const canary of [NAME, SHADOW, FILE_NAME, PATH_CANARY, "zqx-ref-canary"]) assert.ok(!out.includes(canary), `${tool.name} ${JSON.stringify(params)} returned ${canary}`);
       }
     }
     assert.ok(seen.includes("dispatch_runs") && seen.includes("dispatch_status") && seen.includes("dispatch_triggers"));
     // What the model does get: the counts.
     const one = textOf(await toolByName("dispatch_runs").execute("id", { jobId: "gh-zqx-canary" }, undefined, undefined, ctx));
+    assert.equal(one.secretFiles, 1);
     assert.deepEqual(one.bundle, { id: "shop", received: 2, shadowed: 1, placeholders: 1, plain: 1 });
     const status = textOf(await toolByName("dispatch_status").execute("id", {}, undefined, undefined, ctx));
     assert.deepEqual(status.settings.overlay, { model: "m" }, "dispatch_status leaves the operator-only keys out");

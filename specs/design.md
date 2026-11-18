@@ -1962,6 +1962,36 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   `default` from its overlay from one that does not serve it at all, so a gate could only drop the need until
   every row carries a version, which is the upgrade order stated above with more machinery).
 
+- **Placement (#919)**: the jobs directory is disjoint from every operator-selected workspace, skill source and
+  global overlay, in both directions and through filesystem aliases. Every attempt checks this before resolution
+  or minting, even without a file grant: a broad source could otherwise expose another active job's credentials.
+  Preparation repeats the check, and staging checks its exact sibling root against the actual mounts. Fresh forge
+  clones are worker-created children of the job directory, not operator sources, and remain supported.
+
+- **AMENDED 2026-11-18 (#919), files through the existing profile**: `run.secretFiles` names references just
+  as `run.secrets` does, with the same resolver, authority, pre-spend validation and retry decisions. Only delivery
+  changes: the worker stages exact valid UTF-8 text and passes a container path under the declared name. A separate
+  read-only mount keeps managed files outside workspace checkpoints, retained workspaces and job-input copying.
+  Raw file contents never enter the container environment or argv. The files are readable by the job user, with
+  restrictive file modes and no manager credential in the job. A file-capable image advertises `secretFiles`.
+  An environment map and a file map cannot name the same key; together they retain the 16-reference cost bound.
+  File names are portable single components of at most 128 characters, with case-insensitive collision checks,
+  because a Linux job may be staged on a case-insensitive host. Windows device names and `__proto__` refuse too.
+  Pickup rechecks those names even for queued data: `secret-file-name-invalid` refuses before resolution or spend.
+  A file-only job needs its explicit profile or `s:default`; the existing mixed-fleet upgrade order still applies.
+
+  Staging lives in a sibling `job-*.secret-files` root, not inside `job-*`; its `secrets` child alone is mounted and
+  its `owner.json` stays host-only. Normal finally cleanup is paired with an independent boot sweep: dead-owner
+  identity plus successful venue reaping permits removal, with no workspace-age or checkpoint-keep dependency.
+  Live or unknown ownership preserves the directory and reports why. This separation is what keeps recovery from
+  retaining old credentials; recovery resolves fresh values. Rejected: putting secret files inside `/job` or the
+  workspace, relying on checkpoint retention to clean them, treating a file path as HTTP authentication, or adding
+  another resolver protocol for a delivery choice. Stdio MCP servers may explicitly receive these paths.
+
+  A read-only mount prevents rewriting the staged file, not reading or copying it. The agent can deliberately put
+  a granted value in its own output or workspace; managed staging cleanup cannot erase such copies. Existing
+  redaction only covers known literal values of at least eight characters and cannot promise to catch transforms.
+
 - **Rejected**:
   - ***A trigger naming the resolver path directly*** — this is the thing `DES-SERVICE-ENV-SETUP-SEAM`
     refused, and no bound recovers it: `triggers.json` is operator-authored but the whole design of the
@@ -1999,13 +2029,24 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
 ## DES-PROJECT-SECRET-BUNDLES
 
 - **Decision** (issue #704, 2026-10-19): a project's whole environment can be granted ONCE, in the triggers file's
-  top-level `secretBundles` (`{ "<id>": { profile, ref, project, forkReviews?, endpoints? } }`,
+  top-level `secretBundles` (`{ "<id>": { profile, ref, project, forkReviews?, endpoints?, files? } }`,
   `INT-TRIGGERS-FILE-CONTRACT`). A bundle profile is a resolver the operator declares with its output format
   (`PI_SECRET_BUNDLES=name:/abs/path:dotenv|json`, or the overlay's operator-only `secretBundles` inside
   `PI_SECRET_RESOLVER_ROOTS`). The worker runs it ONCE per job start, host-side, with the bundle's `ref` as its one
   argument, parses its stdout strictly by the declared format, and injects every variable as `run.secrets` values
   are injected. The binding applies to every TRIGGER-MADE job whose pickup project (`projectOf`) is the bundle's
   `project`, cron and forge alike.
+
+- **AMENDED 2026-11-18 (#919), selected file values**: an optional binding `files: ["ENV_NAME"]` selects
+  returned values for the same file-delivery path. The existing dotenv and JSON formats, one-call rate, 64-variable
+  and 256-KiB output bounds remain. JSON carries multiline text; the file path preserves its decoded text exactly.
+  Selection is explicit and closed: a malformed name, duplicate ignoring case or overlap with an `endpoints` name
+  refuses at load; an absent selected value refuses before spend. An explicit trigger grant wins both value and
+  delivery type, so an explicit `run.secrets` can replace a bundle file and `run.secretFiles` can replace a bundle
+  environment value. The final combined file set is validated again for portable case-insensitive names.
+  Bundle file values are real mounted files on every supported layout, never OpenShell endpoint placeholders;
+  `files` and `endpoints` are mutually exclusive for each name. The OpenShell `/sandbox/secrets` layout requires
+  its venue conformance measurement before a support claim; implementation alone is not evidence.
 
 - **Why**: per-field, per-trigger grants (`DES-PER-TRIGGER-SECRET-PROFILE`) turn every new variable into an edit of
   every trigger that needs it, and the resolver runs once per reference, so a managed vault's reads scale with the
@@ -19124,3 +19165,4 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-11-16 (#918, part 4) | `DES-PRIVATE-ENDPOINT-GRANTS` AMENDED: Status names the console's view, and why it shows only this folder's declaration (no heartbeat field: the host registry admits no address). `DES-OPERATOR-CONSOLE` UNCHANGED, checked: a panel and rows within its existing rules, design first (`gen_config2.py`). |
 | 2026-11-17 (#921) | DES-PLAYWRIGHT-CLI-NOT-CHROME-DEVTOOLS AMENDED for the optional headed recipe, explicit display wrapper, pinned Electron example and deterministic rendering proof. DES-PER-TRIGGER-JOB-IMAGE, DES-HOST-BUDGET, DES-DOCTOR-RESULTS-PUBLISHED and DES-STORE-VERSION-WHEN-NEEDED UNCHANGED, checked: no new trigger setting, size rule, persisted field or migration. OpenShell 0.1.4 measured unsupported in both modes: identity-preserving setgid/setuid are refused by its child seccomp filter; CI pins that finding without relaxing the policy. |
 | 2026-11-18 | Issue #924. Adds `DES-CONSUMER-LIVENESS`, amends `DES-RETENTION-SWEEPS-ON-A-TIMER` for asynchronous committed deletion and names synchronous metadata residuals. Incident causality remains unproven; controlled 60-second pause recovered. |
+| 2026-11-18 (#919) | `DES-PER-TRIGGER-SECRET-PROFILE` and `DES-PROJECT-SECRET-BUNDLES` AMENDED: file delivery shares the existing resolver and authority, explicit trigger delivery wins bundle defaults, staging is separate with independent owner-aware cleanup, operator sources are disjoint from jobs, portable names and image capability are required, and copying/redaction limits are stated. UNCHANGED, checked: existing resolver protocol, bundle formats and fork/opt-out gates, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-PI-VERSION-PINNED`. |

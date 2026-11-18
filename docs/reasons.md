@@ -2014,3 +2014,41 @@ Review the pool and allowed models, then create a fresh run if the changed polic
 The original model cannot be bound to the saved continuation. Nothing was spent.
 
 Inspect the parked or approval request and its saved session; do not replace its model by retrying a different pool.
+
+## File secrets
+
+### job-image-secret-files-unsupported
+
+Refused: the job image does not declare secret files, so it cannot verify their owner, permissions and paths. Rebuild the image from a version that has this feature. Not run.
+
+Rebuild the job image from a release that declares the feature, or set the trigger's `run.image` to one that does.
+
+### secret-file-name-invalid
+
+Refused: a file secret has an unsafe or unsupported file name. Use a portable environment name of at most 128 characters, excluding reserved device names. Not run.
+
+Use a portable environment name of at most 128 characters, excluding reserved device names.
+
+### secret-file-name-conflict
+
+Refused: file secret names differ only by letter case, so they cannot be staged safely on every worker. Give them distinct names in the triggers file. Not run.
+
+Give each file secret a distinct name, ignoring case.
+
+### secret-file-endpoint-conflict
+
+Refused: a secret cannot be delivered both as a file and as a bundle endpoint credential. Give them separate variable names in the triggers file. Not run.
+
+Use distinct names for file secrets and endpoint credentials.
+
+### secret-files-unusable
+
+Stopped: the job could not verify its secret files, their ownership or their private permissions. Check the container mounts and rebuild the image. No agent call was made. Not retried.
+
+Check the job mounts, ownership and permissions, then rebuild the image if needed.
+
+### secret-files-placement-unsafe
+
+Refused: the jobs directory overlaps a local workspace, skills source or global pi overlay. Keep PI_JOBS_DIR disjoint from every job-visible source. Nothing was spent.
+
+Move PI_JOBS_DIR or narrow the local folder, skills source or global overlay; neither may contain the other, including through aliases.

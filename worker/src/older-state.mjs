@@ -15,6 +15,10 @@
  * too while nothing in it needs more, and job data's version 2 and the scoped limits' 3 are stamped only where a field
  * needs them. The older LOCATIONS of issues #290 and #464 (the run history and the settings overlay under the OS temp
  * dir, retained workspaces under the old shared jobs root) keep their own lines in doctor's `state` and `dirs` sections.
+ * Issue #919 adds optional file-secret grants and a names-only record field, with the same exception: this build still
+ * writes the older versions for environment-only jobs and omits secretFiles when none were delivered. Neither absence
+ * nor a lower minimum version identifies an older writer, so no detector can flag it without flagging current state.
+ * The sibling staging directory is a new temporary store with no older location; its owner-aware cleanup is separate.
  *
  * What is here: the Valkey image older releases shipped, the floating `valkey/valkey:8`, which this release pins as
  * `VALKEY_IMAGE` (valkey-auth.mjs says why). An upgrade rewrites none of the three places that keep it:

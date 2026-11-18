@@ -25,7 +25,7 @@
 import * as nodeFs from "node:fs";
 import { delimitedList } from "@edgehero/pi-dispatch/config";
 import { withinRoots } from "@edgehero/pi-dispatch/secret-profiles";
-import { ISSUE_ACTIONS, excludeExtensionToolsNearMiss, excludeExtensionsNearMiss, excludeToolsNearMiss, isModelRolesField, isMcpNearMiss, isPrivateEndpointsNearMiss, runModelFieldNearMiss, validateModelRef } from "@edgehero/pi-dispatch/triggers";
+import { ISSUE_ACTIONS, excludeExtensionToolsNearMiss, excludeExtensionsNearMiss, excludeToolsNearMiss, isModelRolesField, isMcpNearMiss, isPrivateEndpointsNearMiss, isSecretFilesNearMiss, runModelFieldNearMiss, validateModelRef } from "@edgehero/pi-dispatch/triggers";
 import { DOLLAR_SETTING_KEYS, formatMicros, parseUsdMicros } from "@edgehero/pi-dispatch/money";
 import { modelIdProblem, providerIdProblem } from "@edgehero/pi-dispatch/model-ref";
 import { SIZE_LIMIT_FIELDS, USD_LIMIT_FIELDS } from "@edgehero/pi-dispatch/scoped-limits";
@@ -367,6 +367,20 @@ export function wideningFieldRefusal(params, tool) {
   };
   const selection = selectionPath(params);
   if (selection !== null) return `${tool} cannot set run.modelSelection (sent as ${selection}): a random model pool is set by a person on that trigger's page or by hand in the triggers file, never by a tool.`;
+  // File references are operator-authored grants, including when nested in otherwise unknown tool data.
+  const fileSeen = new Set();
+  const filePath = (value, path = "") => {
+    if (!value || typeof value !== "object" || fileSeen.has(value)) return null;
+    fileSeen.add(value);
+    for (const [key, entry] of Object.entries(value)) {
+      if (isSecretFilesNearMiss(key)) return path + key;
+      const nested = filePath(entry, path + key + ".");
+      if (nested !== null) return nested;
+    }
+    return null;
+  };
+  const fileAt = filePath(params);
+  if (fileAt !== null) return `${tool} cannot set run.secretFiles (sent as ${fileAt}): file secret grants are set by hand in the triggers file, never by a tool.`;
   const bundle = secretBundleFieldRefusal(params, tool);
   if (bundle !== null) return bundle;
   const objects = [["", params], ["run.", params?.run], ["on.", params?.on]];

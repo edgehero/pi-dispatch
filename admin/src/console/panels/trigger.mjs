@@ -177,6 +177,7 @@ export const EDIT_FIELDS = Object.freeze([
 const ADD_FIELDS = Object.freeze(["flow", "backend", "provider", "model", "maxTurns", "progress", "statusComment", "steer", "recover"]);
 export const HAND_FIELDS = Object.freeze([
   "secrets",
+  "secretFiles",
   "secretBundle",
   "resume",
   "awaitInput",
@@ -223,7 +224,7 @@ export function triggerRun(v) {
         ).map((k) => fieldRow(v, t, k)),
       )}
       <h3>By hand</h3>
-      ${facts(HAND_FIELDS.filter((k) => (k !== "mayMerge" || t.mayMerge === true) && (k !== "worker" || t.worker) && (k !== "privateEndpoints" || Array.isArray(t.privateEndpoints))).map((k) => fieldRow(v, t, k)))}
+      ${facts(HAND_FIELDS.filter((k) => (k !== "secretFiles" || t.secretFiles > 0) && (k !== "mayMerge" || t.mayMerge === true) && (k !== "worker" || t.worker) && (k !== "privateEndpoints" || Array.isArray(t.privateEndpoints))).map((k) => fieldRow(v, t, k)))}
       <h3>Its runs' sandbox</h3>
       ${hostRows.length ? facts(hostRows.map((h) => [h.name, `${h.backend ?? "venue not published"}${h.deploymentDefault ? " (that host's deployment default)" : " (trigger override)"}; ${h.blessed === null ? "blessing not published" : h.blessed ? "blessed" : "not blessed"}${h.capabilityUnknown ? "; required profile capabilities not published" : ""}${h.backend && BACKENDS[h.backend] ? `; ${Object.entries(BACKENDS[h.backend].serves).map(([key, value]) => `${key}: ${value === "image" ? "with the image" : value}`).join(", ")}` : ""}`])) : html`<p>No live host blessing facts are available.</p>`}
       <p>These live host declarations show published venue choices; a host that does not bless the selected venue refuses it before spend. ${t.runKind === "local" ? "Only the worker named by run.worker may run this local command. Its source forge supplies a wake-up, not a cloned workspace." : t.type === "cron" ? "The schedule's owning host runs a cron trigger's local folder; the registry alone does not prove which host has that folder." : isAgent(v) ? null : "Hosts missing its required secret or wait profile are excluded where their capability list is published."}</p>

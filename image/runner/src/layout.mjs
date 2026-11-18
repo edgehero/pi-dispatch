@@ -25,8 +25,8 @@
 export const LAYOUT_ENV = "PI_JOB_LAYOUT";
 
 export const LAYOUTS = Object.freeze({
-	mounts: Object.freeze({ job: "/job", workspace: "/workspace", session: "/session", outbox: "/outbox", inbox: "/inbox", global: "/opt/pi-global" }),
-	sandbox: Object.freeze({ job: "/sandbox/job", workspace: "/sandbox/workspace", session: "/sandbox/session", outbox: "/sandbox/outbox", inbox: null, global: "/sandbox/pi-global" }),
+	mounts: Object.freeze({ job: "/job", workspace: "/workspace", session: "/session", outbox: "/outbox", inbox: "/inbox", global: "/opt/pi-global", secretFiles: "/run/secrets" }),
+	sandbox: Object.freeze({ job: "/sandbox/job", workspace: "/sandbox/workspace", session: "/sandbox/session", outbox: "/sandbox/outbox", inbox: null, global: "/sandbox/pi-global", secretFiles: "/sandbox/secrets" }),
 });
 
 export const DEFAULT_LAYOUT = "mounts";
