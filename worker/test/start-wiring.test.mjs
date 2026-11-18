@@ -7568,7 +7568,9 @@ test("a final forge record with artifacts posts one harness comment with the kep
 	const posted = [];
 	const host = fakeHost({ postStatusComment: async (job, target, text) => void posted.push({ target, text }) });
 	const { recordRun } = await runStartWithRecords({
-		env: { PI_LIVE_TRANSCRIPTS: "0", PI_ARTIFACTS_DIR: store, PI_CONSOLE_PUBLIC_URL: "https://console.example.org" },
+		// Retention 0 keeps the store's runs forever: the boot sweep runs on the real clock, and judged against it the
+		// manifest's fixed `createdAt` expires once the clock drifts past 14 days (issue #284's class).
+		env: { PI_LIVE_TRANSCRIPTS: "0", PI_ARTIFACTS_DIR: store, PI_ARTIFACTS_RETENTION_DAYS: "0", PI_CONSOLE_PUBLIC_URL: "https://console.example.org" },
 		makeAuth: async () => ({ mintToken: async () => "tok-1", selfId: 1, source: "gh" }),
 		makeHost: () => host,
 	});
