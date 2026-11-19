@@ -1,3 +1,4 @@
+import { COMMUNITY_AUTH_ADAPTERS } from "./community-auth-metadata.mjs";
 /** Host-approved community sources are rechecked inside the container before extension code is loaded. */
 import { verifyCommunityAuthAdapter } from "./community-auth-patches.mjs";
 export { verifyCommunityAuthAdapter as verifyRunnerCommunityAuthAdapter } from "./community-auth-patches.mjs";
@@ -21,7 +22,7 @@ export function verifySubscriptionAuthEntries(entries, { now = () => Date.now(),
 		if (!row || !["openai", "anthropic"].includes(row.provider) || providers.has(row.provider) || !Number.isSafeInteger(row.generation) || row.generation < 0 || typeof row.connectionId !== "string" || !/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(row.connectionId)) throw new Error("auth-snapshot-invalid");
 		providers.add(row.provider);
 		if (!validateSubscriptionRequest({ provider: row.provider, api: row.provider === "openai" ? "openai-responses" : "anthropic-messages", baseUrl: row.provider === "openai" ? "https://api.openai.com/v1" : "https://api.anthropic.com" }, entries, { now })) throw new Error("auth-snapshot-expired");
-		if (row.provider === "openai" ? row.adapter !== "openai-chatgpt" : !["pi-anthropic-oauth@0.3.6", "@gotgenes/pi-anthropic-auth@3.4.3"].includes(row.adapter)) throw new Error("auth-adapter-unsupported");
+		if (COMMUNITY_AUTH_ADAPTERS[row.adapter]?.provider !== row.provider) throw new Error("auth-adapter-unsupported");
 		if (row.provider === "anthropic") verify({ adapter: row.adapter, root: row.root, digest: row.digest });
 	}
 	return entries;

@@ -11,6 +11,7 @@
  * sees the old set or the new set and never half of either. An old tree is removed only after a delay longer than any job.
  */
 import { createHash, randomBytes } from "node:crypto";
+import { COMMUNITY_AUTH_ADAPTERS } from "./community-auth-metadata.mjs";
 import { join, relative } from "node:path";
 import { PACKAGES_SUBDIR, RESOURCE_DIRS, STAGE_MANIFEST, stagedDirName } from "./packages.mjs";
 
@@ -178,7 +179,10 @@ export async function preparePackage({ fs, exec, out = () => {}, entry, staging,
 	// --install-strategy=nested asks npm to keep every dependency inside the package dir; step 4 below
 	// ASSERTS the result rather than trusting the flag, whose name and default have moved across npm
 	// versions.
-	const flags = ["--omit=dev", "--omit=peer", "--omit=optional", "--ignore-scripts", "--install-strategy=nested", "--no-audit", "--no-fund", "--loglevel=error"];
+	// Reviewed adapters import their SDK, never its CLI. npm-created bin links would make the
+	// complete-tree verifier refuse an otherwise safe install; keep its no-symlink rule intact.
+	const reviewedAdapter = COMMUNITY_AUTH_ADAPTERS[`${entry.name}@${entry.version}`]?.community === true;
+	const flags = [...(reviewedAdapter ? ["--no-bin-links"] : []), "--omit=dev", "--omit=peer", "--omit=optional", "--ignore-scripts", "--install-strategy=nested", "--no-audit", "--no-fund", "--loglevel=error"];
 	const spec = `${entry.name}@${entry.version}`;
 	out(`  staging ${spec} -> packages/${entry.dir}\n`);
 	const options = npmExecOptions(platform, staging, { timeoutMs, env });
@@ -240,7 +244,7 @@ export async function preparePackage({ fs, exec, out = () => {}, entry, staging,
 		warnings.push({ dir: entry.dir, reason: `${entry.name} declares ${declares} -- staged with --ignore-scripts, so it is INCOMPLETE and may fail at run time` });
 	}
 
-	if (["pi-anthropic-oauth@0.3.6", "@gotgenes/pi-anthropic-auth@3.4.3"].includes(`${entry.name}@${entry.version}`)) {
+	if (reviewedAdapter) {
 		// Read-only host-pi consumers, including the scratch canary, have no lifecycle dependencies installed.
 		const { prepareCommunityAuthAdapter } = await import("./community-auth-patches.mjs");
 		const receipt = prepareCommunityAuthAdapter({ adapter: `${entry.name}@${entry.version}`, root: source, fs });

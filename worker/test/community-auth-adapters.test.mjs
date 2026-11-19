@@ -11,10 +11,13 @@ import { tempDir } from "./helpers/temp-dir.mjs";
 import { createDefaultAuthAdapters, prepareCommunityAuthAdapter, verifyCommunityAuthAdapter } from "../src/community-auth-adapters.mjs";
 import { loadCommunityAuthHelper } from "../src/community-auth-helper.mjs";
 import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
+import { preparePackage } from "../src/package-stage.mjs";
+import { communityAdapterRevision } from "../src/community-auth-patches.mjs";
 import { COMMUNITY_ADAPTED_SOURCE_PINS } from "../src/community-auth-output-pins.mjs";
 
 const require = createRequire(import.meta.url);
-const primary = "pi-anthropic-oauth@0.3.6";
+const primary = "pi-anthropic-oauth@0.3.11";
+const legacyPrimary = "pi-anthropic-oauth@0.3.6";
 const secondary = "@gotgenes/pi-anthropic-auth@3.4.3";
 const instant = 1_800_000_000_000;
 const now = () => instant;
@@ -39,9 +42,9 @@ function copyClosure(source, destination, stack = new Set()) {
 function fixture(adapter) {
 	const root = join(tempDir("auth-adapter-"), "package");
 	fs.mkdirSync(root);
-	const artifact = adapter === primary ? "pi-anthropic-oauth-0.3.6.tar.gz" : "gotgenes-pi-anthropic-auth-3.4.3.tar.gz";
+	const artifact = adapter.startsWith("pi-anthropic-oauth@") ? `pi-anthropic-oauth-${adapter.split("@")[1]}.tar.gz` : "gotgenes-pi-anthropic-auth-3.4.3.tar.gz";
 	execFileSync("tar", ["-xzf", new URL(`./fixtures/community-auth/${artifact}`, import.meta.url).pathname, "--strip-components=1", "-C", root]);
-	if (adapter === primary) copyClosure(packageRoot(require.resolve("primary-anthropic-sdk")), join(root, "node_modules/@anthropic-ai/sdk"));
+	if ([primary, legacyPrimary].includes(adapter)) copyClosure(packageRoot(require.resolve("primary-anthropic-sdk")), join(root, "node_modules/@anthropic-ai/sdk"));
 	return root;
 }
 const model = getBuiltinModels("anthropic").find((row) => row.type !== "classifier");
@@ -58,7 +61,7 @@ function response() {
 	return new Response(events.map((event) => `event: ${event.type}\ndata: ${JSON.stringify(event)}\n\n`).join(""), { headers: { "Content-Type": "text/event-stream", "request-id": "fixture" } });
 }
 
-test("real primary artifact + exact SDK0.124.0 preserve final hooks, guard refusals, usage and hard rules", async (t) => {
+for (const primary of [legacyPrimary, "pi-anthropic-oauth@0.3.11"]) test(`${primary} + exact SDK0.124.0 preserve final hooks, guard refusals, usage and hard rules`, async (t) => {
 	const root = fixture(primary);
 	assert.equal(JSON.parse(fs.readFileSync(join(root, "node_modules/@anthropic-ai/sdk/package.json"), "utf8")).version, "0.124.0");
 	const approved = prepareCommunityAuthAdapter({ adapter: primary, root });
@@ -107,10 +110,20 @@ test("real primary artifact + exact SDK0.124.0 preserve final hooks, guard refus
 	await t.test("429 is observed once with its reset evidence and SDK retries stay disabled", async () => {
 		let calls = 0;
 		let reset;
-		const result = await streamAnthropicOAuth(model, context(), { apiKey: "sk-ant-oat-fixture", fetch: async () => { calls++; const failure = Response.json({ type: "error", error: { type: "rate_limit_error", message: "limited" } }, { status: 429, headers: { "retry-after": "30" } }); reset = failure.headers.get("retry-after"); return failure; } }).result();
+		let observed = [];
+		const result = await streamAnthropicOAuth(model, context(), { apiKey: "sk-ant-oat-fixture", fetch: async () => { calls++; const failure = Response.json({ type: "error", error: { type: "rate_limit_error", message: "limited" } }, { status: 429, headers: { "retry-after": "30" } }); reset = failure.headers.get("retry-after"); return failure; }, onResponse(meta) { observed.push([meta.status, meta.headers["retry-after"]]); } }).result();
 		assert.equal(result.stopReason, "error");
 		assert.equal(reset, "30");
+		assert.deepEqual(observed, primary === legacyPrimary ? [] : [[429, "30"]]);
 		assert.equal(calls, 1);
+	});
+	if (primary !== legacyPrimary) await t.test("a failed-response guard refusal survives upstream error handling", async () => {
+		let calls = 0;
+		let observed = 0;
+		const result = await streamAnthropicOAuth(model, context(), { apiKey: "sk-ant-oat-fixture", fetch: async () => { calls++; return Response.json({ error: { type: "rate_limit_error", message: "limited" } }, { status: 429 }); }, onResponse() { observed++; throw new Error("response-guard-refused"); } }).result();
+		assert.equal(calls, 1);
+		assert.equal(observed, 1);
+		assert.match(result.errorMessage, /response-guard-refused/);
 	});
 	await t.test("ambiguous tool-name mappings refuse before network dispatch", async () => {
 		for (const names of [["foo.bar", "foo_bar"], ["read", "Read"]]) {
@@ -159,4 +172,35 @@ test("unadapted source or wrong SDK version cannot receive a staging approval", 
 	fs.appendFileSync(join(root, "src/auth.ts"), "\n// unexpected drift\n");
 	assert.throws(() => prepareCommunityAuthAdapter({ adapter: primary, root }), /auth-adapter-source-mismatch/);
 	assert.equal(fs.existsSync(join(root, ".dispatch-auth-adapter.json")), false);
+});
+
+test("adding a profile preserves existing approved receipts but gives the new bytes their own revision", () => {
+	const oldRevision = "4f67f4e8ea0c2aef6fe2804664c8ab5c38f7d8ac363f9a7f9feff8b115c0bfea";
+	for (const adapter of [legacyPrimary, secondary]) {
+		assert.equal(communityAdapterRevision(adapter), oldRevision);
+		const root = fixture(adapter);
+		const approved = prepareCommunityAuthAdapter({ adapter, root });
+		const receipt = JSON.parse(fs.readFileSync(join(root, ".dispatch-auth-adapter.json"), "utf8"));
+		assert.equal(receipt.adapterRevision, oldRevision);
+		assert.equal(verifyCommunityAuthAdapter({ adapter, root, digest: approved.digest }).compatibility, "verified");
+	}
+	assert.notEqual(communityAdapterRevision(primary), oldRevision);
+});
+
+for (const adapter of [legacyPrimary, primary]) test(`${adapter} stages without SDK CLI links and receives a verified receipt`, async () => {
+	const unpacked = fixture(adapter);
+	const staging = tempDir("auth-stage-");
+	const version = adapter.split("@")[1];
+	const root = await preparePackage({ fs, entry: { name: "pi-anthropic-oauth", version, dir: "claude-oauth" }, staging, npmBin: "npm", platform: "linux", exec: async (_bin, args) => {
+		assert.equal(args[0], "install");
+		assert.ok(args.includes("--no-bin-links"));
+		assert.ok(args.includes("--ignore-scripts"));
+		assert.equal(JSON.parse(fs.readFileSync(join(staging, "package.json"), "utf8")).overrides["@anthropic-ai/sdk"], "0.124.0");
+		fs.cpSync(unpacked, join(staging, "node_modules/pi-anthropic-oauth"), { recursive: true });
+		return { stdout: "" };
+	} });
+	const receipt = JSON.parse(fs.readFileSync(join(root, ".dispatch-auth-adapter.json"), "utf8"));
+	assert.equal(verifyCommunityAuthAdapter({ adapter, root, digest: receipt.digest }).compatibility, "verified");
+	fs.symlinkSync("../src/auth.ts", join(root, "unsafe-link"));
+	assert.throws(() => verifyCommunityAuthAdapter({ adapter, root, digest: receipt.digest }), /auth-adapter-unsafe-path/);
 });

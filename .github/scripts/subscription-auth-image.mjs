@@ -16,6 +16,7 @@ const stagedRoot = "/opt/pi-global/packages/auth";
 const profiles = [
 	{ provider: "openai", adapter: "openai-chatgpt", model: "gpt-4.1" },
 	{ provider: "anthropic", adapter: "pi-anthropic-oauth@0.3.6", model: "claude-sonnet-4-5-20250929", artifact: "pi-anthropic-oauth-0.3.6.tar.gz" },
+	{ provider: "anthropic", adapter: "pi-anthropic-oauth@0.3.11", model: "claude-sonnet-4-5-20250929", artifact: "pi-anthropic-oauth-0.3.11.tar.gz" },
 	{ provider: "anthropic", adapter: "@gotgenes/pi-anthropic-auth@3.4.3", model: "claude-sonnet-4-5-20250929", artifact: "gotgenes-pi-anthropic-auth-3.4.3.tar.gz" },
 ];
 
@@ -114,7 +115,7 @@ export function verifySubscriptionImage(image) {
 			if (profile.artifact) {
 				mkdirSync(root);
 				execFileSync("tar", ["-xzf", join(repository, "worker/test/fixtures/community-auth", profile.artifact), "--strip-components=1", "-C", root]);
-				if (profile.adapter === "pi-anthropic-oauth@0.3.6") copyClosure(packageRoot(require.resolve("primary-anthropic-sdk")), join(root, "node_modules/@anthropic-ai/sdk"));
+				if (profile.adapter.startsWith("pi-anthropic-oauth@")) copyClosure(packageRoot(require.resolve("primary-anthropic-sdk")), join(root, "node_modules/@anthropic-ai/sdk"));
 				prepared = prepareCommunityAuthAdapter({ adapter: profile.adapter, root });
 			}
 			readable(scratch);

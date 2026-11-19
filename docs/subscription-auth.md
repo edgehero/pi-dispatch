@@ -178,7 +178,7 @@ distinguish native Claude applications from third-party integrations. Review tho
 choosing a community adapter. The compatibility below records what the pinned packages implement; it is
 not a claim that vendor terms permit a particular deployment or that Anthropic endorses the integration.
 
-Supported profiles are `pi-anthropic-oauth@0.3.6` and `@gotgenes/pi-anthropic-auth@3.4.3`. These are
+Supported profiles are `pi-anthropic-oauth@0.3.11`, `pi-anthropic-oauth@0.3.6` and `@gotgenes/pi-anthropic-auth@3.4.3`. These are
 operator-selected community extensions, with tested compatibility at their pinned versions. This is not a
 claim of vendor endorsement, and trusted extension code still executes inside the existing process boundary.
 
@@ -189,7 +189,7 @@ Declare exactly one selected profile in `pi-packages.json`, for example:
 ```json
 {
   "packages": [
-    { "name": "pi-anthropic-oauth", "version": "0.3.6", "dir": "claude-oauth" }
+    { "name": "pi-anthropic-oauth", "version": "0.3.11", "dir": "claude-oauth" }
   ]
 }
 ```
@@ -198,10 +198,10 @@ Declare exactly one selected profile in `pi-packages.json`, for example:
 pi-dispatch import-pi --with-packages
 ```
 
-For either supported exact profile, staging verifies published source bytes, applies the declared compatibility
+For each supported exact profile, staging verifies published source bytes, applies the declared compatibility
 adaptations and prints `reviewed subscription adapter` followed by the adapter and tree digest. Copy that digest
-into the reviewed connection policy. The prepared root in this example is the absolute path to
-`pi-global/packages/claude-oauth`. Primary staging overrides its upstream SDK range to exactly
+into the reviewed connection policy. Use the active directory recorded for this package in `pi-global/packages/packages.json`,
+including its version and unique suffix. An older prepared directory can still exist without being active. Primary staging overrides its upstream SDK range to exactly
 `@anthropic-ai/sdk@0.124.0`. Every runtime dependency is included in the prepared-tree digest. Restaging or
 editing the package invalidates its prior digest and requires the policy to be checked again.
 
@@ -211,9 +211,9 @@ The Claude connection row can then be:
 {
   "id": "claude-main",
   "provider": "anthropic",
-  "adapter": "pi-anthropic-oauth@0.3.6",
+  "adapter": "pi-anthropic-oauth@0.3.11",
   "ownerHost": "worker-one",
-  "root": "/absolute/deployment/pi-global/packages/claude-oauth",
+  "root": "/absolute/deployment/pi-global/packages/claude-oauth--0.3.11--ACTUAL_SUFFIX",
   "digest": "replace-with-the-64-character-lowercase-digest-printed-by-staging",
   "quotaWindows": ["five-hour", "seven-day"]
 }
@@ -221,7 +221,7 @@ The Claude connection row can then be:
 
 Put the row in `connections`, bind `"anthropic": "claude-main"`, then run `pi-dispatch auth login claude-main`.
 The example digest is a placeholder; the policy accepts only the actual lowercase SHA-256 value. Avoid loading
-both Claude profiles or another extension that replaces the same provider.
+multiple Claude profiles or another extension that replaces the same provider.
 
 The host can identify competing reviewed Claude profiles from the staged manifest without executing them.
 It refuses that known conflict as `auth-adapter-conflicting` before quota claims, credential renewal, token mint
@@ -250,6 +250,12 @@ A measured Claude HTTP 429 requires a fresh bounded usage observation before ano
 worker first invalidates cached availability and paid-overage facts across this connection's models. It does
 not label an ordinary provider throttle as plan exhaustion. A failed usage read leaves the fresh observation
 required, and an older in-flight response cannot clear a newer invalidation.
+
+When upgrading an existing connection, upgrade both the worker and job image before selecting 0.3.11,
+then stage it and update the connection’s adapter, active root and digest together. The credential store
+matches the exact adapter identifier: changing the policy alone requires `pi-dispatch auth login claude-main`
+before jobs can use it. Existing 0.3.6 and secondary receipts remain valid; they do not require restaging
+merely because the worker now supports another profile.
 
 ## Quota admission
 

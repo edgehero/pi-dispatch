@@ -2,6 +2,7 @@
 export const SUBSCRIPTION_ADAPTERS = Object.freeze({
   "openai-chatgpt": Object.freeze({ provider: "openai", package: null, version: null, community: false }),
   "pi-anthropic-oauth@0.3.6": Object.freeze({ provider: "anthropic", package: "pi-anthropic-oauth", version: "0.3.6", community: true }),
+  "pi-anthropic-oauth@0.3.11": Object.freeze({ provider: "anthropic", package: "pi-anthropic-oauth", version: "0.3.11", community: true }),
   "@gotgenes/pi-anthropic-auth@3.4.3": Object.freeze({ provider: "anthropic", package: "@gotgenes/pi-anthropic-auth", version: "3.4.3", community: true }),
 });
 export const SUBSCRIPTION_VIEW_LIMITS = Object.freeze({ windows: 64, connections: 128, freshMs: 300_000, maxInstant: 253_402_300_799_999 });
