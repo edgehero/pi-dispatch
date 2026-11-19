@@ -190,7 +190,7 @@ const triggersPathWith = (doc) => {
 };
 
 test("triggers: the shipped tables hold the rule, against the run keys and blocks the loader reads", () => {
-	assert.equal(TRIGGERS_FILE_VERSION, 8, "issue #919: file secret bindings at 8");
+	assert.equal(TRIGGERS_FILE_VERSION, 9, "explicit auxiliary model grants at 9");
 	// Every `run.<key>` any worker module reads: a lenient superset (comments add names), which is enough to refuse a
 	// table row naming a key nothing reads.
 	const runKeys = new Set();
@@ -835,4 +835,21 @@ test("sandbox: the sweep is unchanged, so a newer manifest past its deadline is 
 	}
 	await makeSandboxReaper({ sandboxDir, retentionHours: 24, now: () => T0 })();
 	assert.deepEqual(readdirSync(sandboxDir), ["fresh"], "the deadline fields keep their meaning in every version");
+});
+
+test("auxiliary grants require trigger version 9 and old readers defer them; removing the grant restores the old shape", () => {
+	const auxiliaryModels = ["openrouter/google/gemini-4-neon"];
+	const entry = label();
+	entry.run = { ...entry.run, auxiliaryModels, models: auxiliaryModels, maxCostUsd: "1" };
+	const path = triggersPathWith({ triggers: [] });
+	assert.deepEqual(writeTriggers({ triggersPath: path, mutate: () => [entry] }), { ok: true });
+	const text = readFileSync(path, "utf8");
+	assert.equal(JSON.parse(text).version, 9);
+	assert.deepEqual(parseTriggers(text, path)[0].run.auxiliaryModels, auxiliaryModels);
+	assert.equal(triggersFileNewer(text, { supported: 8 }), true);
+	assert.throws(() => parseTriggers(text, path, { supported: 8 }), error => error.newer === true);
+	assert.throws(() => parseTriggers(JSON.stringify({ triggers: [entry] }), path), /auxiliaryModels needs triggers file version 9/);
+	const { auxiliaryModels: _removed, ...run } = entry.run;
+	assert.deepEqual(writeTriggers({ triggersPath: path, mutate: () => [{ ...entry, run }] }), { ok: true });
+	assert.equal(JSON.parse(readFileSync(path, "utf8")).version, undefined);
 });

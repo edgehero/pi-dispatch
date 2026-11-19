@@ -4675,6 +4675,17 @@ generation = { generation: <32 lowercase hex>, data: <local queue data>,
 
 ## INT-TRIGGERS-FILE-CONTRACT
 
+**Auxiliary routes.** `run.auxiliaryModels` is an optional hand-authored array of 1–16 distinct exact physical
+`provider/model` references (case-insensitive duplicate detection), without wildcards or roles. Every entry
+must be an exact member of explicit finite `run.models`; a positive explicit `run.maxCostUsd` is required.
+It raises the trigger file to version 9 and queue job data to version 11. Receivers, scheduler templates,
+manual runs, local jobs, outbox children and reruns preserve it. Authored-field skew refuses a producer that
+dropped it. Model-callable console tools cannot set the grant. Root selection and fallback use their own
+unchanged candidates; selected attempts expose their root plus auxiliary routes through existing
+`PI_ALLOWED_MODELS`, subscription snapshots and cost-cap inputs. All auxiliary credentials and quota must
+pass admission; separate root selection billing/binding never overrides an auxiliary provider's own binding.
+No new container capability or persisted authentication shape is added.
+
 **Random pool (#922).** `run.modelSelection` is exactly `{ strategy: "random", candidates: ["provider/model", ...] }`, with 1–16 physical references and no case-insensitive duplicates, roles, weights or unknown keys. Explicit `provider`, `model`, `fallbackModels` and command-only jobs conflict. The field requires trigger version 6 and job-data version 7. Producers carry the policy and add a host-owned UUIDv4 `modelSelectionGeneration`; it is not a trigger field. Deduplicated jobs retain existing data. A scheduler retains its template generation until recreated, while each occurrence's queue/id/timestamp participates in identity. Retry/defer retains generation; a fresh enqueue, including same-id same-time reuse, gets a new generation. Every supported forge, cron, manual run, fresh rerun and outbox child preserves the authored pool and ceiling. Unsupported canary/internal fixed-model work refuses a pool.
 
 - **What the writer cannot keep (AMENDED 2026-11-05)**: `writeTriggers` starts from an empty set only for a file that
@@ -15172,3 +15183,4 @@ and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` are UNCHANGED, checked: no file shape, wr
 | 2026-11-18 (#920, part 3) | **`INT-ARTIFACTS-STORE-CONTRACT` AMENDED** (Status): the worker's comment reads the manifest through `artifactsManifestOf`, as the console does. `INT-FORGE-STATUS-COMMENT-EDIT` UNCHANGED, checked: the artifacts comment is posted through the same adapter and never edited. `PI_CONSOLE_PUBLIC_URL` is a new worker setting (an origin, refused at boot otherwise), in both `.env.example` files. |
 | 2026-11-19 (Claude adapter 0.3.11) | **`INT-AUTH-CONNECTIONS-FILE-CONTRACT` EXTENDED**: add the exact 0.3.11 adapter identifier. Existing source/output profiles retain their receipt revision. UNCHANGED, checked: `INT-SUBSCRIPTION-CREDENTIAL-STORE`, policy version, credential shape, exact adapter matching and snapshot contract. |
 | 2026-11-19 (Opus scoped quota) | **`INT-SUBSCRIPTION-QUOTA-KEY` CORRECTED**: admission receives a physical model route and projects applicable evidence; the reviewed Fable scope does not block exact Opus 5.5. Parse fractional reset times through nine digits, rounded upward. UNCHANGED, checked: stored fields, opaque IDs, key identity, CAS and generation semantics, `INT-SUBSCRIPTION-CREDENTIAL-STORE`. |
+| 2026-11-20 (explicit auxiliary routes) | `INT-TRIGGERS-FILE-CONTRACT` AMENDED with the finite hand-authored auxiliary grant and trigger/job version 9/11 propagation. `INT-CONTAINER-JOB-INPUTS` uses its existing finite allowlist and shared cap for the admitted union. UNCHANGED, checked: subscription snapshot shape, runner wire capabilities, run-record shape and credential stores. |

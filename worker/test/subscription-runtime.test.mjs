@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { makeSubscriptionRuntime, subscriptionIdentity, subscriptionRoutes, subscriptionBindingDigest } from "../src/subscription-runtime.mjs";
 
+import { makeSubscriptionQuotaStore, normalizeSubscriptionQuotaError } from "../src/subscription-quota.mjs";
+
 const instant = 1_800_000_000_000;
 const connection = { id: "claude", connectionId: "claude", provider: "anthropic", ownerHost: "owner", adapter: "pi-anthropic-oauth@0.3.6", accountGroup: "opaque-group", generation: 2 };
 const job = { provider: "anthropic", model: "sonnet", models: ["anthropic/sonnet"], maxCostMicros: 500_000 };
@@ -154,4 +156,92 @@ test("each finite subscription route carries its exact physical model into quota
 	const models = ["anthropic/claude-opus-5-5", "anthropic/claude-fable-5-2"];
 	assert.equal((await runtime.check({ ...job, model: "claude-opus-5-5", models })).ok, true);
 	assert.deepEqual(calls.filter(call => call.policy).map(call => call.policy.modelRef), models);
+});
+
+test("explicit auxiliary routes admit paid panel models while root candidates retain their billing boundary", async () => {
+	const { runtime, calls } = fixture();
+	const panel = { ...job, models: [...job.models, "openrouter/frontier"], auxiliaryModels: ["openrouter/frontier"] };
+	assert.equal((await runtime.inspectPolicy(panel)).ok, true);
+	assert.deepEqual(calls, [], "policy inspection never reserves quota");
+	assert.equal((await runtime.check(panel)).ok, true);
+	assert.equal((await runtime.check(panel)).rootManaged, true);
+	assert.equal((await runtime.check({ ...panel, auxiliaryModels: undefined })).reason, "auth-mixed-billing");
+	assert.equal((await runtime.inspectPolicy({ ...panel, modelSelection: { strategy: "random", candidates: panel.models } })).reason, "auth-mixed-billing", "an auxiliary grant cannot authorize a paid root candidate");
+});
+
+test("auxiliary authority requires a finite exact allowlist and positive explicit cap before auth or quota", async () => {
+	const { runtime, auth, calls } = fixture();
+	auth.check = async () => assert.fail("invalid authority reaches no credential store");
+	for (const patch of [{ models: ["anthropic/*"] }, { auxiliaryModels: ["openrouter/unlisted"] }, { maxCostMicros: null }, { maxCostMicros: 0 }]) {
+		const panel = { ...job, models: [...job.models, "openrouter/frontier"], auxiliaryModels: ["openrouter/frontier"], ...patch };
+		assert.equal((await runtime.inspectPolicy(panel)).reason, "auth-route-unbounded");
+		assert.equal((await runtime.check(panel)).reason, "auth-route-unbounded");
+	}
+	assert.deepEqual(calls, []);
+});
+
+test("selected root identity does not reject a separately bound subscription auxiliary", async () => {
+	const { runtime, auth } = fixture();
+	const other = { ...connection, id: "gpt", connectionId: "gpt", provider: "openai", adapter: "openai-chatgpt", accountGroup: "other-account" };
+	auth.check = async (provider) => ({ ok: true, managed: true, ...(provider === "openai" ? other : connection) });
+	auth.prepareSnapshot = async (provider) => ({ ok: true, snapshot: provider === "openai" ? other : connection });
+	const panel = { ...job, models: [...job.models, "openai/gpt"], auxiliaryModels: ["anthropic/sonnet", "openai/gpt"], modelSelection: { strategy: "random", candidates: job.models }, modelSelectionBilling: "subscription", modelSelectionBinding: subscriptionBindingDigest(connection) };
+	const checked = await runtime.check(panel);
+	assert.equal(checked.ok, true);
+	assert.equal(checked.binding, subscriptionBindingDigest(connection));
+	assert.deepEqual((await runtime.prepare(panel)).snapshots.map(row => row.provider), ["anthropic", "openai"]);
+});
+
+test("API roots stay API when an auxiliary subscription is unavailable or exhausted", async () => {
+	const panel = { provider: "openrouter", model: "frontier", models: ["openrouter/frontier", "anthropic/sonnet"], auxiliaryModels: ["anthropic/sonnet"], maxCostMicros: 500_000, modelSelectionBilling: "api" };
+	for (const failure of [{ ok: false, managed: true, reason: "auth-reauth-required" }, { ok: false, managed: true, reason: "auth-owner-host" }]) {
+		const { runtime, auth } = fixture();
+		auth.check = async provider => provider === "openrouter" ? { ok: true, managed: false } : failure;
+		const result = await runtime.check(panel);
+		assert.equal(result.rootManaged, false);
+		assert.equal(result.ok, false);
+		assert.notEqual(result.reason, "auth-binding-changed");
+	}
+	const { runtime } = fixture({ quotaResult: { ok: false, reason: "subscription-quota", status: { state: "exhausted" } } });
+	const result = await runtime.check(panel);
+	assert.equal(result.rootManaged, false);
+	assert.equal(result.wait, "subscription-quota");
+	assert.equal(result.auxiliary, true);
+});
+
+
+test("two models on one subscription consume one trial for the same durable attempt", async () => {
+	const rows = new Map();
+	let writes = 0;
+	const redis = { get: async key => rows.get(key) ?? null, eval: async (_script, _count, key, before, after) => {
+		if ((rows.get(key) ?? "") !== before) return 0;
+		rows.set(key, after); writes++; return 1;
+	} };
+	const quota = makeSubscriptionQuotaStore({ redis, now: () => instant });
+	const native = { ...connection, provider: "openai", adapter: "openai-chatgpt", accountGroup: "12345678-1234-1234-1234-123456789abc" };
+	const identity = subscriptionIdentity(native);
+	await quota.record(identity, normalizeSubscriptionQuotaError({ provider: "openai", code: "usage_limit_reached", status: 429 }, { observedAt: instant }));
+	assert.equal((await quota.grantOneTrial(identity, { actorKind: "person", expectedVersion: 1 })).ok, true);
+	const runtime = makeSubscriptionRuntime({ now: () => instant, quota, auth: { check: async () => ({ ok: true, managed: true, ...native }), prepareSnapshot: async () => ({ ok: true, snapshot: native }) }, lookup: () => ({ api: "openai-responses", baseUrl: "https://api.openai.com/v1" }) });
+	const panel = { provider: "openai", model: "sol", models: ["openai/sol", "openai/astra"], auxiliaryModels: ["openai/astra"], maxCostMicros: 500_000 };
+	const before = writes;
+	const prepared = await runtime.prepare(panel, { attemptId: "durable-attempt" });
+	assert.equal(prepared.ok, true);
+	assert.equal(prepared.snapshots.length, 1);
+	assert.equal(writes - before, 1, "the shared subscription trial is consumed only once");
+	assert.equal((await runtime.check(panel, { attemptId: "another-attempt", consumeTrial: true })).wait, "subscription-quota");
+});
+
+
+test("auxiliary snapshots stay on the independently admitted binding across preparation races", async () => {
+	const { runtime, auth } = fixture();
+	const other = { ...connection, id: "gpt", connectionId: "gpt", provider: "openai", adapter: "openai-chatgpt", accountGroup: "other-account" };
+	auth.check = async provider => ({ ok: true, managed: true, ...(provider === "openai" ? other : connection) });
+	const panel = { ...job, models: [...job.models, "openai/gpt"], auxiliaryModels: ["openai/gpt"] };
+	for (const change of [{ connectionId: "new-connection" }, { accountGroup: "new-account" }, { adapter: "another-adapter" }, { bindingSignature: "changed-policy" }]) {
+		auth.prepareSnapshot = async provider => ({ ok: true, snapshot: provider === "openai" ? { ...other, ...change } : connection });
+		assert.equal((await runtime.prepare(panel)).reason, "auth-binding-changed");
+	}
+	auth.prepareSnapshot = async provider => ({ ok: true, snapshot: { ...(provider === "openai" ? other : connection), generation: 3 } });
+	assert.equal((await runtime.prepare(panel)).ok, true, "refreshing the same admitted connection remains valid");
 });

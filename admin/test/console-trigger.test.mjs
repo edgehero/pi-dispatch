@@ -84,3 +84,14 @@ test("merge permission is visible as a hand-written field and never as an input"
   delete base.data.triggerDetail.trigger.mayMerge;
   assert.doesNotMatch(String(triggerRun(base)), /run.mayMerge/);
 });
+
+test("auxiliary billing is visible only when authored and remains a hand-written grant", async () => {
+  const { triggerRun } = await import("../src/console/panels/trigger.mjs");
+  const base = { role: "operator", query: { index: 0 }, data: { triggerEditor: { defaults: { auxiliaryModels: "none" } }, triggerDetail: { trigger: { type: "label", forge: "github", flow: "fix", auxiliaryModels: ["openrouter/google/gemini-4-neon"] } } } };
+  const shown = String(triggerRun(base));
+  assert.match(shown, /run.auxiliaryModels/);
+  assert.match(shown, /openrouter\/google\/gemini-4-neon/);
+  assert.doesNotMatch(shown, /name="auxiliaryModels"/);
+  delete base.data.triggerDetail.trigger.auxiliaryModels;
+  assert.doesNotMatch(String(triggerRun(base)), /run.auxiliaryModels/);
+});

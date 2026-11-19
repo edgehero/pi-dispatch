@@ -24,7 +24,7 @@ import { earlierFrom, recordOfThisJob, recordReadable, targetFor } from "./run-h
 import { isPerMachineHost } from "./backends.mjs";
 import { hash16 } from "./fleet-lease.mjs";
 import { endpointsForModel } from "./model-endpoints.mjs";
-import { splitModelEntry } from "./model-ref.mjs";
+import { splitModelEntry, auxiliaryModelsProblem } from "./model-ref.mjs";
 import { effectiveCostCapMicros } from "./money.mjs";
 import { dollarWindowCaps, valkeyEndpointTag } from "./dollar-budget.mjs";
 import { concurrencyFor, dollarCapsFor, makeInFlight, modelDollarRows, projectDollarCapsFor, projectRowFor, rowScopeFor, scopedLedgers } from "./scoped-limits.mjs";
@@ -1190,6 +1190,12 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		const modelAttemptId = modelAttemptIdOf(job.queueName ?? QUEUE, job.id);
 		if (!settingsThrew && !settings?.invalid) {
 			try {
+				// Defaults may narrow an authored grant, but cannot create its required explicit ceiling or cap.
+				if (job.data.auxiliaryModels !== undefined && (auxiliaryModelsProblem(job.data.auxiliaryModels, job.data.models) !== null || !(effectiveCostCapMicros(job.data.maxCostUsd, null) > 0))) {
+					const error = new Error("the auxiliary model grant is unbounded");
+					error.modelSelectionReason = "auth-route-unbounded";
+					throw error;
+				}
 				if (job.data.modelSelection !== undefined && ["provider", "model", "fallbackModels"].some((key) => job.data[key] !== undefined)) {
 					const error = new Error("random model policy conflicts with fixed fields");
 					error.modelSelectionReason = "model-selection-policy-changed";
@@ -1321,7 +1327,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 							selectionWait = subscription;
 							if (randomSelection && subscription.wait === "subscription-quota") {
 								selectionWait = { ...subscription, until: Math.min(subscription.until, now() + 60_000), resetAt: subscription.status?.until ?? null };
-								if (!selectedEffective.modelSelectionContinuation && !selectedEffective.recoveryOf && subscription.status?.state === "exhausted" && subscription.status.bindingValid !== false) {
+								if (subscription.auxiliary !== true && !selectedEffective.modelSelectionContinuation && !selectedEffective.recoveryOf && subscription.status?.state === "exhausted" && subscription.status.bindingValid !== false) {
 									const allowed = await allowModelSelectionQuotaReselection(redis, randomSelectionId, randomSelection, { beforeStart: true, quotaConfirmed: true });
 									if (allowed.ok) { randomSelection = allowed.state; selectionWait.until = now() + 1_000; }
 								}
@@ -1917,7 +1923,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// the deployment's list. Only when the wiring supplies the check, so a bare processor keeps the default.
 				// The same for `maxCostUsd` (#501): `effectiveJobOf` keeps the arrived value under its own key and writes the
 				// resolved cap as `maxCostMicros`, but it is read off `job.data` here too, so no later fill can hide a drop.
-				...(deps?.checkWaitSkew ? { checkWaitSkew: (j, ...rest) => deps.checkWaitSkew({ ...j, models: job.data?.models, fallbackModels: job.data?.fallbackModels, modelSelection: job.data?.modelSelection, maxCostUsd: job.data?.maxCostUsd }, ...rest) } : {}),
+				...(deps?.checkWaitSkew ? { checkWaitSkew: (j, ...rest) => deps.checkWaitSkew({ ...j, models: job.data?.models, fallbackModels: job.data?.fallbackModels, auxiliaryModels: job.data?.auxiliaryModels, modelSelection: job.data?.modelSelection, maxCostUsd: job.data?.maxCostUsd }, ...rest) } : {}),
 				// #227. BOUNDED AFTER THE ABORT, and this is what makes `abortable` an honest declaration.
 				//
 				// `makeRunContainer`'s promise settles ONLY on the docker child's `close` or `error`. Nothing
@@ -2182,7 +2188,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 			if (error instanceof SubscriptionWait) {
 				let reconsider = false;
 				// This typed wait comes only from the processor's pre-spend subscription prepare.
-				if (error.wait === "subscription-quota" && error.quotaConfirmed === true && randomSelection && !selectedEffective?.modelSelectionContinuation && !selectedEffective?.recoveryOf) {
+				if (error.wait === "subscription-quota" && error.auxiliary !== true && error.quotaConfirmed === true && randomSelection && !selectedEffective?.modelSelectionContinuation && !selectedEffective?.recoveryOf) {
 					const allowed = await allowModelSelectionQuotaReselection(redis, randomSelectionId, randomSelection, { beforeStart: true, quotaConfirmed: true, now });
 					if (allowed.ok) { randomSelection = allowed.state; reconsider = true; }
 				}

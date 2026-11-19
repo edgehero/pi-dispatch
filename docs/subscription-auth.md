@@ -43,11 +43,25 @@ For OpenAI:
 supports the direct OpenAI Responses route at `https://api.openai.com/v1`, using the pinned pi 1.4.0
 authentication flow. It does not silently substitute legacy `openai-codex`, classifiers or a custom proxy.
 
-Version 1 refuses a job whose finite model routes mix subscription-bound and unbound API providers, including
-decision roles. A subscription primary also skips an unbound API fallback. Reviewed fallback between OpenAI
-and Claude subscription connections is supported when both providers are explicitly bound and every ordinary
-model, quota, spend and replay check passes. Each provider still has one active connection; this does not rotate
-accounts or change authentication during a running attempt. Use a separate job for unbound API billing.
+A job's ordinary model routes, including root selection, fallback and internal decision roles, cannot mix
+subscription-bound and unbound API providers. Reviewed fallback between OpenAI and Claude subscription
+connections is supported when both providers are explicitly bound and ordinary admission passes. Each
+provider keeps one active connection; an unavailable subscription never falls back to an API key.
+
+An ordinary flow can explicitly authorize additional panel calls with `run.auxiliaryModels`. This hand-authored
+list contains 1–16 exact `provider/model` references, each also present in the explicit finite `run.models`
+allowlist, and requires a positive explicit `run.maxCostUsd`. It permits a panel to use subscription models and
+paid API models together. Random selection and fallback keep their authored root candidates; the chosen
+attempt carries its root plus every auxiliary model into the existing model and cost guards. Extension calls
+must use the admitted pi runtime so that every call shares the job's cost cap. Separate CLI processes and
+unmetered HTTP requests do not gain subscription admission.
+
+Every declared auxiliary route must pass authentication, model, quota and spend admission before the job
+starts. An exhausted Claude auxiliary therefore holds an OpenAI-root job too; the dispatcher does not silently
+omit a panel member. API credentials come from the host's configured environment or pi API-key login, or a
+declared `run.secrets` value. A credential available only from a later project-bundle fetch is insufficient for
+this free preflight. The console preserves the field, but its model-callable tools cannot author this grant.
+Upgrade workers, receivers and consoles before adding it; see [upgrading](upgrading.md).
 
 Run management commands in a terminal on the owning host, with the same deployment environment as the worker:
 

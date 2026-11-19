@@ -376,7 +376,7 @@ function layoutEnv(layout) {
  * `allowGlobalExtensions` defaults to TRUE here, matching loadConfig's default (REQ-GLOBAL-PI-OVERLAY): a
  * caller that says nothing gets the operator's staged setup, and only an explicit `false` withholds it.
  */
-export function buildContainerEnv({ size = DEFAULT_JOB_SIZE, provider, secondaryProvider = null, model, maxTurns, maxTokens, maxCostMicros = null, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], packageCanaryPath = undefined, forwardEnv = [], secrets = {}, secretFilePaths = {}, sessionFile = null, flow = null, command = null, excludeTools = [], excludeExtensions = [], excludeExtensionTools = [], excludeToolsStrict = false, mcpServers = [], awaitInput = false, approvalGates = null, approvalDecision = null, reportProgress = false, recover = false, recovering = false, steer = false, layout = "mounts", allowedModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null, privateEndpoints = [], exitAuth = false, transcriptStderr = false, steerStdin = false, bundleEnvFile = false, observableRunner = false, fork = null, thinkingLevel = null, subscriptionAuth = [], idleMs = null, stallMs = null, credentialRefresh = false }) {
+export function buildContainerEnv({ size = DEFAULT_JOB_SIZE, provider, secondaryProvider = null, model, maxTurns, maxTokens, maxCostMicros = null, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], packageCanaryPath = undefined, forwardEnv = [], secrets = {}, secretFilePaths = {}, sessionFile = null, flow = null, command = null, excludeTools = [], excludeExtensions = [], excludeExtensionTools = [], excludeToolsStrict = false, mcpServers = [], awaitInput = false, approvalGates = null, approvalDecision = null, reportProgress = false, recover = false, recovering = false, steer = false, layout = "mounts", allowedModels = null, auxiliaryModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null, privateEndpoints = [], exitAuth = false, transcriptStderr = false, steerStdin = false, bundleEnvFile = false, observableRunner = false, fork = null, thinkingLevel = null, subscriptionAuth = [], idleMs = null, stallMs = null, credentialRefresh = false }) {
 	// The provider credential(s), by pi's expected variable name(s) -- from the worker env, or (when
 	// PI_AUTH_FROM_PI is set and the env has none) host-side from pi's auth.json. Throws (config) if
 	// neither source yields one, which the processor turns into a policy refusal that refunds any reserve
@@ -389,7 +389,13 @@ export function buildContainerEnv({ size = DEFAULT_JOB_SIZE, provider, secondary
 	const secondaryAuth = subscriptionAuth.find((entry) => entry.provider === secondaryProvider);
 	const secondaryCredEnv = secondaryAuth ? secondaryAuth.env : secondaryProvider && secondaryProvider !== provider ? resolveProviderCredential({ provider: secondaryProvider, hostEnv, authFromPi, agentDir, readFile, forwardEnv: [], modelEndpoints }) : {};
 
+	const auxiliaryCredEnv = {};
+	for (const other of new Set((auxiliaryModels ?? []).map(ref => ref.slice(0, ref.indexOf("/"))))) {
+		if (other === provider || other === secondaryProvider || subscriptionAuth.some(row => row.provider === other)) continue;
+		Object.assign(auxiliaryCredEnv, resolveProviderCredential({ provider: other, hostEnv: { ...hostEnv, ...secrets }, authFromPi, agentDir, readFile, forwardEnv, modelEndpoints }));
+	}
 	const env = {
+		...auxiliaryCredEnv,
 		PI_PROVIDER: provider,
 		PI_MODEL: model,
 		PI_FORK_ENTRY: recovering === true ? undefined : fork?.fromEntry,
@@ -589,7 +595,7 @@ export function buildContainerEnv({ size = DEFAULT_JOB_SIZE, provider, secondary
 	// Issue #503: PI_DISPATCH_KEYLESS is the credential gate's answer and nothing else's, so it is settled AFTER the
 	// PI_FORWARD_ENV and secrets loops, as HOME and the egress variables are: both lists refuse the name upstream, and
 	// this is the backstop that keeps a value from either one from replacing it, or from appearing on a keyed job.
-	if (credEnv[KEYLESS_ENV_NAME] === KEYLESS_VALUE) env[KEYLESS_ENV_NAME] = KEYLESS_VALUE;
+	if (credEnv[KEYLESS_ENV_NAME] === KEYLESS_VALUE || auxiliaryCredEnv[KEYLESS_ENV_NAME] === KEYLESS_VALUE) env[KEYLESS_ENV_NAME] = KEYLESS_VALUE;
 	else delete env[KEYLESS_ENV_NAME];
 
 	// env-internal PI_DISPATCH_ENDPOINT_<ID>_HOST, PI_DISPATCH_ENDPOINT_<ID>_PORT: issue #918, each granted private

@@ -3099,3 +3099,12 @@ test("normalizeTriggerForDisplay shows reviewed merge permission only for strict
   for (const mayMerge of [undefined, false, null, "true", 1]) assert.equal("mayMerge" in normalizeTriggerForDisplay({ ...base, run: { ...base.run, mayMerge } }), false);
   assert.equal(normalizeTriggerForDisplay({ ...base, run: { ...base.run, mayMerge: true } }).mayMerge, true);
 });
+
+test("trigger reads preserve the reviewed auxiliary grant through safe agent projection", async () => {
+  const { agentReadProjection } = await import("../src/agent-read.mjs");
+  const auxiliaryModels = ["openrouter/google/gemini-4-neon"];
+  const raw = { version: 9, triggers: [{ on: { type: "label", any: ["pi"] }, run: { kind: "github", flow: "fix", models: auxiliaryModels, auxiliaryModels, maxCostUsd: "1" } }] };
+  const read = readTriggers({ triggersPath: "/t.json", fs: { readFileSync: () => JSON.stringify(raw) } });
+  assert.deepEqual(read.triggers[0].auxiliaryModels, auxiliaryModels);
+  assert.deepEqual(agentReadProjection(read).triggers[0].auxiliaryModels, auxiliaryModels);
+});

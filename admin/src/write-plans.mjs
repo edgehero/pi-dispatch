@@ -353,20 +353,23 @@ export function wideningFieldRefusal(params, tool) {
     return Object.entries(value).some(([key, entry]) => isModelRolesField(key) || hasRoles(entry));
   };
   if (hasRoles(params)) return `${tool} cannot set modelRoles: the role map is a reviewed operator file edit, never a tool write`;
+  // Auxiliary grants are hand-authored, like file secret grants below; the environment card has no field for them.
   const policySeen = new Set();
   const selectionPath = (value, path = "") => {
     if (!value || typeof value !== "object" || policySeen.has(value)) return null;
     policySeen.add(value);
     for (const [key, entry] of Object.entries(value)) {
       const at = `${path}${key}`;
-      if (runModelFieldNearMiss(key) === "run.modelSelection") return at;
+      const field = runModelFieldNearMiss(key);
+      if (field === "run.modelSelection" || field === "run.auxiliaryModels") return { at, field };
       const nested = selectionPath(entry, `${at}.`);
       if (nested !== null) return nested;
     }
     return null;
   };
   const selection = selectionPath(params);
-  if (selection !== null) return `${tool} cannot set run.modelSelection (sent as ${selection}): a random model pool is set by a person on that trigger's page or by hand in the triggers file, never by a tool.`;
+  if (selection?.field === "run.auxiliaryModels") return `${tool} cannot set run.auxiliaryModels (sent as ${selection.at}): an auxiliary-model grant is set by hand in the triggers file, never by a tool.`;
+  if (selection !== null) return `${tool} cannot set run.modelSelection (sent as ${selection.at}): a random model pool is set by a person on that trigger's page or by hand in the triggers file, never by a tool.`;
   // File references are operator-authored grants, including when nested in otherwise unknown tool data.
   const fileSeen = new Set();
   const filePath = (value, path = "") => {

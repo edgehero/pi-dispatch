@@ -5,6 +5,7 @@ import { localJobId } from "../src/job-id.mjs";
 import { jobDataNewer, jobDataVersionFor } from "../src/job-data-version.mjs";
 import { enqueueForgeJob, enqueueLocalJobReporting, enqueueTriggerRunReporting } from "../src/queue.mjs";
 import { localRunData } from "../src/local-job.mjs";
+import { loadSchedules } from "../src/schedules.mjs";
 import { modelSelectionGenerationValid, withModelSelectionGeneration } from "../src/model-selection-generation.mjs";
 
 const POLICY = { strategy: "random", candidates: ["openai/gpt-5.4", "anthropic/claude-haiku-4-5"] };
@@ -105,4 +106,34 @@ test("cron keeps unchanged template generation on reload and recreates it after 
 	await reconcile(q, [schedule], { nonce });
 	assert.notEqual(resident.template.data.modelSelectionGeneration, first);
 	assert.equal(calls, 2);
+});
+
+test("auxiliary grants survive local, manual and every forge queue builder without joining the root pool", async () => {
+	const auxiliaryModels = ["openrouter/google/gemini-4-neon"];
+	const models = [...POLICY.candidates, ...auxiliaryModels];
+	const fields = { ...LOCAL, models, auxiliaryModels, maxCostUsd: "1" };
+	const q = queue();
+	const local = await enqueueLocalJobReporting(q, fields);
+	const check = (data) => {
+		assert.deepEqual(data.auxiliaryModels, auxiliaryModels);
+		assert.deepEqual(data.models, models);
+		assert.deepEqual(data.modelSelection.candidates, POLICY.candidates);
+		assert.equal(data.maxCostUsd, "1");
+		assert.equal(data.dataVersion, 11);
+		assert.deepEqual(jobDataNewer(data, { supported: 10 }), { version: 11 });
+	};
+	check(q.jobs.get(local.id).data);
+	for (const forge of ["github", "gitlab", "forgejo", "azure"]) {
+		const id = await enqueueForgeJob(q, forge, { ...fields, repo: "a/b", target: { type: "issue", number: 1 }, trigger: { deliveryId: `aux-${forge}` } });
+		check(q.jobs.get(id.jobId).data);
+	}
+	const [schedule] = loadSchedules({ triggersFile: "/triggers.json" }, { existsSync: () => true, readFileSync: () => JSON.stringify({ version: 9, triggers: [{ on: { type: "cron", id: "aux-nightly", pattern: "0 * * * *" }, run: { kind: "local", ...fields } }] }) });
+	const data = schedule.data;
+	const manual = await enqueueTriggerRunReporting(q, { schedulerId: "aux-nightly", name: "local", data, opts: {} }, { now: NOW });
+	check(q.jobs.get(manual.id).data);
+	let template;
+	await reconcile({ getJobSchedulers: async () => [], getJobScheduler: async () => null, upsertJobScheduler: async (_id, _repeat, next) => { template = next; } }, [{ schedulerId: "aux-nightly", name: "local", pattern: "0 * * * *", data, opts: {} }]);
+	check(template.data);
+	assert.notEqual(localJobId({ ...LOCAL, auxiliaryModels }), localJobId(LOCAL), "a changed grant is distinct work");
+	assert.notEqual(localJobId({ ...LOCAL, auxiliaryModels }), localJobId({ ...LOCAL, auxiliaryModels: [models[0]] }));
 });

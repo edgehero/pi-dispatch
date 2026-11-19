@@ -17,10 +17,10 @@ export function shuffledModels(candidates, randomInt = cryptoRandomInt) {
 	return order;
 }
 
-const managed = (result) => result?.managed === true || Array.isArray(result?.managed) && result.managed.length > 0;
+const managed = (result) => result?.rootManaged ?? (result?.managed === true || Array.isArray(result?.managed) && result.managed.length > 0);
 const candidateJob = (job, ref) => {
 	const { provider, model } = splitModelEntry(ref);
-	return { ...job, provider, model, models: [ref] };
+	return { ...job, provider, model, models: [...new Set([ref, ...(job.auxiliaryModels ?? [])])] };
 };
 
 /** Polling is bounded independently of reset evidence: an unknown provider reset must never become a fabricated time. */
@@ -50,7 +50,7 @@ export async function selectRandomModelJob(job, { redis, id, retry = false, retr
 	let billing = null;
 	let bindings = {};
 	if (subscriptionPolicyCheck) {
-		const policy = await subscriptionPolicyCheck({ ...job, provider: undefined, model: undefined, models: [...candidates] });
+		const policy = await subscriptionPolicyCheck({ ...job, provider: undefined, model: undefined, models: [...new Set([...candidates, ...(job.auxiliaryModels ?? [])])] });
 		if (policy.unavailable) throw new Error("subscription state unavailable");
 		if (!policy.ok) return { refused: policy.reason ?? "model-selection-no-candidate" };
 		if (Object.hasOwn(policy, "managed")) billing = managed(policy) ? "subscription" : "api";
@@ -108,7 +108,7 @@ export async function selectRandomModelJob(job, { redis, id, retry = false, retr
 						blockers.push({ wait: subscription.wait, resetAt: resetAt === null ? null : Math.max(resetAt, cooldown?.until ?? 0) });
 					}
 					log("model_candidate_skipped", { model: ref, reason: subscription.wait ?? subscription.reason ?? "auth-unavailable" });
-					if (!locked && state?.phase === "selected" && subscription.wait === "subscription-quota" && subscription.status?.state === "exhausted" && subscription.status?.bindingValid !== false) {
+					if (!locked && state?.phase === "selected" && subscription.wait === "subscription-quota" && subscription.auxiliary !== true && subscription.status?.state === "exhausted" && subscription.status?.bindingValid !== false) {
 						const allowed = await allowModelSelectionQuotaReselection(redis, id, state, { beforeStart: true, quotaConfirmed: true });
 						if (allowed.ok || allowed.conflict) { conflicted = true; break; }
 					}

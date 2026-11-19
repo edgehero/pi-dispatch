@@ -496,3 +496,13 @@ test("a GitLab note without the phrase resumes a parked issue, and not a merge r
 	assert.equal(go(mr).reason, "no-trigger-phrase");
 	assert.equal(run(parked).reason, "no-trigger-phrase", "a comment trigger without resume has nothing to continue");
 });
+
+test("GitLab webhook jobs preserve the explicit auxiliary grant", () => {
+	const grant = { auxiliaryModels: ["openrouter/google/gemini-4-neon"], models: ["openrouter/google/gemini-4-neon"], maxCostUsd: "1" };
+	const group = { label: triggers.label.map(rule => ({ ...rule, ...grant })), comment: { ...triggers.comment, ...grant }, pullRequest: triggers.pullRequest.map(rule => ({ ...rule, ...grant })), issue: [{ index: 9, actions: new Set(["close"]), flow: "fix", ...grant }], prClose: [{ index: 10, actions: new Set(["close"]), flow: "fix", ...grant }] };
+	for (const payload of [issuePayload(), notePayload(), mrPayload(), issuePayload({ object_attributes: { iid: 5, action: "close" }, changes: {} }), mrPayload({ object_attributes: { iid: 12, action: "close" } })]) {
+		const result = filterGitLab(parseGitLabSubset(payload), group, knownFlows, SELF_ID, true, "aux-grant");
+		assert.equal(result.enqueue, true, result.reason);
+		for (const key of Object.keys(grant)) assert.deepEqual(result.job[key], grant[key], key);
+	}
+});

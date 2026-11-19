@@ -374,3 +374,13 @@ test("an Azure work-item comment without the phrase resumes a work item tagged p
 	assert.equal(go(tagged("triaged")).reason, "no-trigger-phrase");
 	assert.equal(run(tagged("pi-awaiting-input")).reason, "no-trigger-phrase", "a comment trigger without resume has nothing to continue");
 });
+
+test("Azure webhook jobs preserve the explicit auxiliary grant", () => {
+	const grant = { auxiliaryModels: ["openrouter/google/gemini-4-neon"], models: ["openrouter/google/gemini-4-neon"], maxCostUsd: "1" };
+	const group = { label: triggers.label.map(rule => ({ ...rule, ...grant })), comment: { ...triggers.comment, ...grant }, pullRequest: triggers.pullRequest.map(rule => ({ ...rule, ...grant })) };
+	for (const payload of [workItem(), pullRequest()]) {
+		const result = filterAzure(parseAzureSubset(payload), group, knownFlows, SELF, true, "aux-grant");
+		assert.equal(result.enqueue, true, result.reason);
+		for (const key of Object.keys(grant)) assert.deepEqual(result.job[key], grant[key], key);
+	}
+});

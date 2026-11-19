@@ -29,7 +29,7 @@ import { baseHasExtensions as baseHasExtensionsDefault, resetTrustPaths as reset
 import { normalizeHost, removeCheckpointPointer as removePointerDefault } from "./run-checkpoint.mjs";
 import { DEFAULT_EGRESS_PROXY } from "./egress.mjs";
 import { CAPABILITY_GATES, CREDENTIAL_REFRESH_CAPABILITY, SUBSCRIPTION_LEASE_CAPABILITY, EXIT_AUTH_CAPABILITY, IDLE_WATCH_CAPABILITY, STEER_STDIN_CAPABILITY, TRANSCRIPT_STDERR_CAPABILITY } from "./image-preflight.mjs";
-import { modelListProblem, modelOnList, splitModelEntry } from "./model-ref.mjs";
+import { modelListProblem, modelOnList, splitModelEntry, auxiliaryModelsProblem } from "./model-ref.mjs";
 import { ALLOCATION_CAP_REASON, ENVELOPE_MISMATCH_REASON } from "./allocation.mjs";
 
 /** The refusal of a local job whose resolved folder belongs to another project than the one decided at pickup (issue #504 part B). */
@@ -910,6 +910,12 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 				log("refused_once_already_spent", { triggerIndex: job.trigger?.matched?.index ?? null });
 				return { outcome: "policy", reason: "once-already-spent", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false }; // return => not retried
 			}
+		}
+
+		// Raw queue producers need the same finite authority and explicit spend bound as the trigger loader.
+		if (job.auxiliaryModels !== undefined && (auxiliaryModelsProblem(job.auxiliaryModels, job.models) !== null || !Number.isSafeInteger(job.maxCostMicros) || job.maxCostMicros <= 0)) {
+			await comment(job, REFUSAL_COMMENTS["auth-route-unbounded"]);
+			return { outcome: "policy", reason: "auth-route-unbounded", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false };
 		}
 
 		// The queue's opt-in is only a claim about reviewed configuration. Revalidate it before every attempt,
@@ -2000,6 +2006,18 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 		}
 		// `let`: a project bundle's variables join it after the mint (below), under the trigger's own values.
 		let secrets = resolved.secrets ?? {};
+		// Auxiliary providers may use declared run secrets as well as host credentials. Probe after the free
+		// resolver and before any mint, clone or reservation, so missing panel credentials cannot burn a job.
+		for (const provider of new Set((job.auxiliaryModels ?? []).map((ref) => splitModelEntry(ref).provider))) {
+			if (provider === job.provider) continue;
+			const model = splitModelEntry(job.auxiliaryModels.find((ref) => splitModelEntry(ref).provider === provider)).model;
+			const credential = await checkProviderCredential({ ...job, provider, model }, { modelEndpoints, secrets });
+			if (credential.unavailable) throw new InfraRetry("auxiliary provider credentials could not be read", { reason: "container-never-started", provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false });
+			if (!credential.ok) {
+				await comment(job, `Refused: the auxiliary provider ${provider} has no usable credentials. Configure its host authentication or a declared run secret. Not run.`);
+				return { outcome: "policy", reason: "provider-unconfigured", exitCode: null, turns: null, tokens: null, provider: job.provider ?? null, model: job.model ?? null, budgetReserved: false };
+			}
+		}
 		let secretFiles = resolved.secretFiles ?? {};
 		if (Object.keys(secretFiles).length > 0) bundleFacts.secretFiles = Object.keys(secretFiles).sort();
 		// Issue #704 part 3: the bundle's `{ endpoints, plain }` split, for the venue (null: no bundle reached this job).

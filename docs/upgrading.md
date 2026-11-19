@@ -388,6 +388,14 @@ as `subscription_auth_hold`. See [subscription renewal](subscription-auth.md#adm
 
 Release numbers come from the git tags.
 
+### Unreleased: explicit auxiliary model routes
+
+| Stored state | What changes and how to move it |
+|---|---|
+| Trigger `run.auxiliaryModels`, trigger version 9 | Optional, hand-authored finite model grant requiring explicit `models` and positive `maxCostUsd`. Move all workers, receivers and consoles first, then author the grant. Older readers hold version 9 instead of silently dropping it. Files without the field retain their existing version. |
+| Queue job `auxiliaryModels`, job-data version 11 | Every supported producer and rerun preserves the grant. An old worker holds the new version; a new worker refuses a producer that dropped an authored grant. Existing jobs without it keep their behavior. No migration or older-state detector is needed: absence is still a current supported policy, not an obsolete representation. |
+| Container inputs and accounting | Existing `PI_ALLOWED_MODELS`, subscription snapshots and cost guards carry the selected root plus auxiliary routes. No new image wire contract, ledger, backup path or provider credential store is introduced. Images still need the ordinary model-policy, cost-cap and subscription-auth capabilities for the routes requested. |
+
 ### Unreleased: Claude adapter 0.3.11 and Opus quota admission
 
 Upgrade the worker and job image together before selecting `pi-anthropic-oauth@0.3.11`. Stage the exact

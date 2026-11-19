@@ -505,7 +505,7 @@ function runFieldsOf(entry, flow) {
     ...(run.maxTurns !== undefined ? { maxTurns: run.maxTurns } : {}),
     ...(run.models !== undefined ? { models: run.models } : {}),
     ...(run.fallbackModels !== undefined ? { fallbackModels: run.fallbackModels } : {}),
-    ...(run.modelSelection !== undefined ? { modelSelection: run.modelSelection } : {}),
+    ...(run.modelSelection !== undefined ? { modelSelection: run.modelSelection } : {}), ...(run.auxiliaryModels !== undefined ? { auxiliaryModels: run.auxiliaryModels } : {}),
     ...(run.maxCostUsd !== undefined ? { maxCostUsd: run.maxCostUsd } : {}),
     // Issue #888: the trigger's limits, by the cap's rule.
     ...(run.idleTimeoutMinutes !== undefined ? { idleTimeoutMinutes: run.idleTimeoutMinutes } : {}),
@@ -537,11 +537,11 @@ function runFieldsOf(entry, flow) {
  * default. NAMES ONLY: the secret profile's name, never a secret, and not even the `secrets` reference map (a
  * reference is a path into a vault, which an operator reading a preview does not need and a screenshot should not carry).
  */
-// An ad-hoc re-run normally uses deployment defaults. A reviewed random pool and its ceiling must
-// survive a fresh child re-run, while its old generation and physical selection cannot follow it.
+// An ad-hoc re-run normally uses deployment defaults. Reviewed random and auxiliary grants keep
+// their ceiling and cap; the old random generation and physical selection cannot follow them.
 function randomRerunFields(data) {
-  if (data.modelSelection === undefined) return {};
-  return { modelSelection: data.modelSelection, ...(data.models !== undefined ? { models: data.models } : {}), ...(data.maxCostUsd !== undefined ? { maxCostUsd: data.maxCostUsd } : {}) };
+  if (data.modelSelection === undefined && data.auxiliaryModels === undefined) return {};
+  return { ...(data.modelSelection !== undefined ? { modelSelection: data.modelSelection } : {}), ...(data.auxiliaryModels !== undefined ? { auxiliaryModels: data.auxiliaryModels } : {}), ...(data.models !== undefined ? { models: data.models } : {}), ...(data.maxCostUsd !== undefined ? { maxCostUsd: data.maxCostUsd } : {}) };
 }
 
 function runFieldsSummary(job) {
@@ -550,7 +550,7 @@ function runFieldsSummary(job) {
     model: job.model === undefined ? null : job.provider !== undefined ? `${job.provider}/${job.model}` : job.model,
     models: job.models ?? null,
     ...(job.fallbackModels !== undefined ? { fallbackModels: job.fallbackModels } : {}),
-    ...(job.modelSelection !== undefined ? { modelSelection: job.modelSelection } : {}),
+    ...(job.modelSelection !== undefined ? { modelSelection: job.modelSelection } : {}), ...(job.auxiliaryModels !== undefined ? { auxiliaryModels: job.auxiliaryModels } : {}),
     maxCostUsd: job.maxCostUsd ?? null,
     secretsProfile: job.secretsProfile ?? null,
     image: job.image ?? null,

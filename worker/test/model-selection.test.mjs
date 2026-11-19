@@ -194,3 +194,28 @@ test("store faults throw and release candidate holds; corrupt and future version
 		assert.deepEqual(await select(redis, { randomInt: () => assert.fail("no draw") }), expected);
 	}
 });
+
+test("random choice keeps only its selected root and the explicit auxiliary ceiling", async () => {
+	const auxiliaryModels = ["openrouter/frontier", pool[1]];
+	const seen = [];
+	const picked = await select(modelSelectionRedis(), {
+		subscriptionPolicyCheck: async candidate => { seen.push(candidate.models); return { ok: true, managed: true, bindings: Object.fromEntries(pool.map(ref => [ref, "a".repeat(64)])) }; },
+		subscriptionCheck: async candidate => { seen.push(candidate.models); return { ok: true, managed: [{ provider: "openai" }, { provider: "anthropic" }], rootManaged: true, binding: "a".repeat(64) }; },
+	}, { models: [...pool, auxiliaryModels[0]], auxiliaryModels });
+	assert.equal(picked.ref, pool[0]);
+	assert.deepEqual(seen[0], [...pool, auxiliaryModels[0]]);
+	assert.deepEqual(picked.job.models, [pool[0], ...auxiliaryModels]);
+	assert.deepEqual(picked.job.modelSelection.candidates, pool);
+});
+
+test("an exhausted auxiliary does not grant a selected root permission to change", async () => {
+	const redis = modelSelectionRedis();
+	const auxiliaryModels = ["anthropic/aux"];
+	const policy = async () => ({ ok: true, managed: false });
+	const override = { models: [...pool, ...auxiliaryModels], auxiliaryModels };
+	const first = await select(redis, { subscriptionPolicyCheck: policy, subscriptionCheck: async () => ({ ok: true, rootManaged: false, managed: [{ provider: "anthropic" }] }) }, override);
+	assert.equal(first.selection.billing, "api");
+	const waited = await select(redis, { subscriptionPolicyCheck: policy, subscriptionCheck: async () => ({ ...exhausted(NOW + 120_000), rootManaged: false, auxiliary: true }) }, override);
+	assert.equal(waited.wait, "subscription-quota");
+	assert.equal((await readModelSelection(redis, "job")).phase, "selected");
+});

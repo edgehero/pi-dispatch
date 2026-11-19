@@ -510,3 +510,16 @@ test("failoverListUsable: every fallback on the job's list, and no list leaves n
 	assert.equal(failoverListUsable({ fallbackModels: ["not a ref"], models: ["a/x"] }), false);
 	assert.equal(failoverListUsable({ fallbackModels: ["a/x"], models: [] }), false);
 });
+
+test("fallback attempts retain explicit auxiliaries without treating their subscription as root billing", async () => {
+	const auxiliaryModels = ["openrouter/frontier", "anthropic/panel"];
+	const candidates = [];
+	const result = await selectFailoverJob({ ...job(), models: [primary, fallback, ...auxiliaryModels], auxiliaryModels }, {
+		redis: fakeRedis(), id: "auxiliary-fallback", now: () => NOW,
+		subscriptionCheck: async candidate => { assert.deepEqual(candidate.models, [`${candidate.provider}/${candidate.model}`, ...auxiliaryModels]); return { ok: true, rootManaged: false, managed: [{ provider: "anthropic" }] }; },
+		checkCandidate: async candidate => { candidates.push(candidate.model); return candidate.model === "primary" ? "model-unpriced" : null; },
+	});
+	assert.equal(result.ref, fallback);
+	assert.deepEqual(candidates, ["primary", "fallback"]);
+	assert.deepEqual(result.job.models, [fallback, ...auxiliaryModels]);
+});

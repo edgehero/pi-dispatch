@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { getAllBuiltinModels, getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 import { readFileSync } from "node:fs";
 import { configError } from "../src/config.mjs";
-import { MAX_ALLOWED_MODELS, MODEL_REF_PATTERN, PROVIDER_REF_PATTERN, modelIdProblem, modelListProblem, modelSelectionProblem, modelOnList, providerIdProblem, splitModelEntry, validateModelRef } from "../src/model-ref.mjs";
+import { MAX_ALLOWED_MODELS, MODEL_REF_PATTERN, PROVIDER_REF_PATTERN, auxiliaryModelsProblem, modelIdProblem, modelListProblem, modelSelectionProblem, modelOnList, providerIdProblem, splitModelEntry, validateModelRef } from "../src/model-ref.mjs";
 import { parseExitUsage } from "../src/run-history.mjs";
 import { parseTriggers, validateModelRef as reexported } from "../src/triggers.mjs";
 
@@ -420,4 +420,31 @@ test("random near misses and producer generation are refused in authored trigger
 		assert.throws(() => parseTriggers(JSON.stringify({ triggers: [{ ...KINDS.cron, run: { ...KINDS.cron.run, [key]: RANDOM } }] }), PATH), /run.modelSelection/);
 	}
 	assert.throws(() => parseTriggers(JSON.stringify({ triggers: [{ ...KINDS.cron, on: { ...KINDS.cron.on, modelSelection: RANDOM } }] }), PATH), /run.modelSelection/);
+});
+
+test("auxiliaryModels requires exact physical grants, an explicit ceiling and a positive dollar cap on every trigger kind", () => {
+	const auxiliaryModels = ["anthropic/claude-opus-5-5", "openrouter/google/gemini-4-neon"];
+	const fields = { auxiliaryModels, models: [...auxiliaryModels, "openai-codex/gpt-6.2-astra"], maxCostUsd: "1" };
+	const load = (entry) => parseTriggers(JSON.stringify({ version: 9, triggers: [entry] }), PATH)[0];
+	for (const [name, template] of Object.entries(KINDS)) {
+		const parsed = load(withRun(template, fields));
+		assert.deepEqual(parsed.run.auxiliaryModels, auxiliaryModels, name);
+		assert.notEqual(parsed.run.auxiliaryModels, auxiliaryModels);
+		assert.equal(load(template).run.auxiliaryModels, undefined);
+		for (const bad of [null, [], ["openrouter/*"], ["openai/role:review"], ["openai/ROLE:review"], [auxiliaryModels[0], auxiliaryModels[0]], Array.from({ length: 17 }, (_, i) => `openai/m${i}`)]) {
+			assert.throws(() => load(withRun(template, { ...fields, auxiliaryModels: bad })), /run\.auxiliaryModels/, `${name}: ${JSON.stringify(bad)}`);
+		}
+		for (const models of [undefined, null, ["anthropic/CLAUDE-opus-5-5"], [auxiliaryModels[0]]]) assert.throws(() => load(withRun(template, { ...fields, models })), /run\.auxiliaryModels/);
+		for (const maxCostUsd of [undefined, null, 0, -1, "0", "bad"]) assert.throws(() => load(withRun(template, { ...fields, maxCostUsd })), /run\.(?:auxiliaryModels|maxCostUsd)/);
+		for (const key of ["AuxiliaryModels", "auxiliary_models", "auxiliaryModel", "auxiliaryModelIds", "auxiliaryM\u043Edels"]) {
+			assert.throws(() => load(withRun(template, { [key]: auxiliaryModels })), /did you mean run\.auxiliaryModels/);
+		}
+		assert.throws(() => load({ ...template, on: { ...template.on, auxiliaryModels } }), /did you mean run\.auxiliaryModels/);
+	}
+	assert.equal(auxiliaryModelsProblem(auxiliaryModels, fields.models), null);
+	assert.notEqual(auxiliaryModelsProblem(auxiliaryModels, null), null, "raw queue data cannot inherit an unrestricted ceiling");
+	const candidates = ["openai-codex/gpt-6.2-astra"];
+	const random = validateModelRef({ ...fields, modelSelection: { strategy: "random", candidates } }, "test", PATH);
+	assert.deepEqual(random.modelSelection.candidates, candidates, "auxiliary models do not enter the root draw");
+	assert.deepEqual(random.auxiliaryModels, auxiliaryModels);
 });

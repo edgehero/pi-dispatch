@@ -43,13 +43,14 @@ function fakeQueue(request = null) {
 const FORGE = { repo: "acme/web", target: { type: "issue", number: 7 }, flow: "fix", trigger: { deliveryId: "d-761", sender: { id: 1 } } };
 const LOCAL = { folder: "/srv/site", flow: "tidy", task: "t", now: new Date("2026-11-02T09:00:00Z") };
 
-test("the shipped table names what an older worker would misread, and this build reads version 10", () => {
+test("the shipped table names what an older worker would misread, and this build reads version 11", () => {
 	// Issue #796: an older worker would run a plain paid job in a canary's place. Issue #800: it would run the job with what its trigger takes away.
 	// Issue #888: it would run the job under its own fixed 30 minutes, past a ceiling the trigger set or short of a long run it allowed.
-	assert.deepEqual(JOB_DATA_FIELD_VERSIONS, { packageCanary: 2, excludeExtensions: 3, excludeExtensionTools: 3, idleTimeoutMinutes: 4, stallTimeoutMinutes: 4, maxMinutes: 4, mayMerge: 5, mayMergePolicy: 5, localEvent: 6, worker: 6, modelSelection: 7, modelSelectionGeneration: 7, privateEndpoints: 8, secretFiles: 9, duplicateOf: 10, windowEndsAt: 10 });
+	assert.deepEqual(JOB_DATA_FIELD_VERSIONS, { packageCanary: 2, excludeExtensions: 3, excludeExtensionTools: 3, idleTimeoutMinutes: 4, stallTimeoutMinutes: 4, maxMinutes: 4, mayMerge: 5, mayMergePolicy: 5, localEvent: 6, worker: 6, modelSelection: 7, modelSelectionGeneration: 7, privateEndpoints: 8, secretFiles: 9, duplicateOf: 10, windowEndsAt: 10, auxiliaryModels: 11 });
 	// Issue #932: it would read a notice that a request was dropped as a forge job and run its flow, the very request refused.
 	// Issue #918: it would start a paid job that cannot reach the device its trigger names.
-	assert.equal(JOB_DATA_VERSION, 10);
+	// Explicit auxiliary grants need 11: dropping one changes the models and billing routes a reviewed panel may use.
+	assert.equal(JOB_DATA_VERSION, 11);
 	assert.equal(JOB_DATA_VERSION_FIELD, "dataVersion");
 });
 

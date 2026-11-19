@@ -390,3 +390,13 @@ test("a Forgejo comment without the phrase resumes a parked issue", () => {
 	assert.equal(go(commentPayload({ comment: { body: "option B" } })).reason, "no-trigger-phrase");
 	assert.equal(run("issue_comment", parked).reason, "no-trigger-phrase", "a comment trigger without resume has nothing to continue");
 });
+
+test("Forgejo webhook jobs preserve the explicit auxiliary grant", () => {
+	const grant = { auxiliaryModels: ["openrouter/google/gemini-4-neon"], models: ["openrouter/google/gemini-4-neon"], maxCostUsd: "1" };
+	const group = { label: triggersRaw.label.map(rule => ({ ...rule, ...grant })), comment: { ...triggersRaw.comment, ...grant }, pullRequest: triggersRaw.pullRequest.map(rule => ({ ...rule, ...grant })), issue: [{ index: 9, actions: new Set(["closed"]), flow: "fix", ...grant }], prClose: [{ index: 10, actions: new Set(["closed"]), flow: "fix", ...grant }] };
+	for (const [event, payload] of [["issues", issuePayload()], ["issue_comment", commentPayload()], ["pull_request", prPayload()], ["issues", issuePayload({ action: "closed" })], ["pull_request", prPayload({ action: "closed" })]]) {
+		const result = filterForgejo(event, parseForgejoSubset(payload), group, knownFlows, SELF_ID, true, "aux-grant");
+		assert.equal(result.enqueue, true, result.reason);
+		for (const key of Object.keys(grant)) assert.deepEqual(result.job[key], grant[key], key);
+	}
+});

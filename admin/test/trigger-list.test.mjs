@@ -263,3 +263,10 @@ test("the trigger list retains a validated random pool as a policy without inven
   assert.equal(view.rows[0].trigger.provider, undefined);
   assert.equal(view.rows[0].trigger.model, undefined);
 });
+
+test("list facts keep auxiliary grants distinct from the allowed ceiling and copy their array", () => {
+  const auxiliaryModels = ["openrouter/google/gemini-4-neon"];
+  const got = build({ snapshot: snapshot([rule({ models: ["anthropic/claude-opus-5-5", ...auxiliaryModels], auxiliaryModels })]) });
+  assert.deepEqual(got.rows[0].trigger.auxiliaryModels, auxiliaryModels);
+  assert.notEqual(got.rows[0].trigger.auxiliaryModels, auxiliaryModels);
+});

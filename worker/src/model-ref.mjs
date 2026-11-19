@@ -146,6 +146,12 @@ export function validateModelRef(run, at, path) {
 			if (!modelOnList(out.models, ref.provider, ref.model)) throw configError(`${at}: run.models does not list a run.modelSelection candidate: ${path}`);
 		}
 	}
+	if (run?.auxiliaryModels !== undefined) {
+		const problem = auxiliaryModelsProblem(run.auxiliaryModels, out.models);
+		if (problem !== null) throw configError(`${at}: run.auxiliaryModels ${problem}: ${path}`);
+		if (run.maxCostUsd === undefined || run.maxCostUsd === null) throw configError(`${at}: run.auxiliaryModels requires an explicit positive run.maxCostUsd: ${path}`);
+		out.auxiliaryModels = [...run.auxiliaryModels];
+	}
 	return out;
 }
 
@@ -230,5 +236,18 @@ export function modelSelectionProblem(value) {
 	const problem = modelListProblem(value.candidates);
 	if (problem !== null) return `candidates ${problem}`;
 	if (value.candidates.some((entry) => splitModelEntry(entry).model.toLowerCase().startsWith("role:"))) return "candidates must name physical models, not roles";
+	return null;
+}
+
+/** Auxiliary calls need their own finite physical grant within the reviewed overall ceiling. */
+export function auxiliaryModelsProblem(value, models) {
+	const problem = modelListProblem(value);
+	if (problem !== null) return problem;
+	if (value.some((entry) => splitModelEntry(entry).model.toLowerCase().startsWith("role:"))) return "must name physical models, not roles";
+	if (modelListProblem(models) !== null) return "requires an explicit valid run.models ceiling";
+	if (value.some((entry) => {
+		const ref = splitModelEntry(entry);
+		return !modelOnList(models, ref.provider, ref.model);
+	})) return "has an entry absent from run.models";
 	return null;
 }

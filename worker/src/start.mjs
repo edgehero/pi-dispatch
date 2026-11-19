@@ -3316,10 +3316,10 @@ export async function startWorker(
 				for (const ref of subscriptionRoutes(job)) if ((await subscriptions.auth.check(ref.provider)).managed) return true;
 				return false;
 			},
-			checkProviderCredential: (job, { modelEndpoints = null } = {}) => {
+			checkProviderCredential: (job, { modelEndpoints = null, secrets = null } = {}) => {
 				const legacy = () => {
 					try {
-						resolveProviderCredential({ provider: job.provider, hostEnv: env, authFromPi: config.authFromPi, forwardEnv: job.answerDraft || job.watch || job.questionGrouping ? [] : config.forwardEnv, modelEndpoints });
+						resolveProviderCredential({ provider: job.provider, hostEnv: secrets === null ? env : { ...env, ...secrets }, authFromPi: config.authFromPi, forwardEnv: job.answerDraft || job.watch || job.questionGrouping ? [] : config.forwardEnv, modelEndpoints });
 						return { ok: true };
 					} catch (error) {
 						// Only OUR determinate refusal. Anything else (a bug here, an fs fault the module does not model)

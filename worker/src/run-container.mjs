@@ -523,6 +523,7 @@ export function makeRunContainer({
 			// Issue #502: the effective allowed-model list, off `job` like excludeTools. index.mjs `effectiveJobOf` folds
 			// the deployment's PI_ALLOWED_MODELS in under the trigger's own, so `job.models` is already the one list.
 			allowedModels: Array.isArray(job.models) && job.models.length > 0 ? job.models : null,
+			auxiliaryModels: job.auxiliaryModels ?? null,
 			subscriptionAuth,
 			// Issue #888: the activity watch's limits, only with a channel for its counters (above). Without one the runner is
 			// asked for nothing and the job keeps the wall clock, so a counter no one reads is never written.
