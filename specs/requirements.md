@@ -9181,7 +9181,7 @@ instead of drifting.
   connection. Unbound providers retain the existing environment/API-key behavior. A binding owns its provider
   even when disconnected, expired, exhausted or unavailable; it never silently falls back to an API key,
   another account, proxy or billing route. Supported profiles are pi 1.4.0's direct OpenAI ChatGPT Responses
-  route and the audited adaptations of `pi-anthropic-oauth@0.3.6` and
+  route and the audited adaptations of `pi-anthropic-oauth@0.3.6`, `pi-anthropic-oauth@0.3.11` and
   `@gotgenes/pi-anthropic-auth@3.4.3`. Community compatibility is explicit opt-in, not vendor endorsement.
 - **Host lifecycle**: login, logout and renewal run on the connection's declared host. Durable credentials are
   private, owned regular files outside every job/overlay/sandbox root. Renewal is serialized with a durable
@@ -9207,7 +9207,7 @@ instead of drifting.
   runner before provider dispatch. Final snapshot validation rechecks the stage root, digest and known conflicts.
 - **Quota**: observations belong to the stable connection, private account group and application bucket,
   independently of physical model cooldowns. Missing percentages/resets and incomplete or stale telemetry are
-  unknown, never zero or healthy. Known weekly exhaustion lasts to its full observed reset; an unknown reset
+  unknown, never zero or healthy. The reviewed Fable weekly scope does not block exact `anthropic/claude-opus-5-5` admission; every finite route is checked independently and unknown scopes remain conservative. Known weekly exhaustion lasts to its full observed reset; an unknown reset
   persists until newer authoritative evidence or a person's one-attempt trial. Monitoring preferences select
   the five-hour/seven-day display focus, but cannot hide or suppress any known applicable exhaustion. Scoped
   and other provider windows remain visible because they are not independently selectable. Candidate inspection
@@ -9785,3 +9785,5 @@ instead of drifting.
 | 2026-11-18 (#920, part 1) | **NEW `REQ-FORGE-JOB-ARTIFACTS`**: a forge job's `/artifacts` folder, kept after the job within the operator's limits and retention, judged by content, text cleaned of the job's secrets, a binary holding one dropped, every drop counted on the record and none able to refuse, retry or fail the job; binding venues only, off at `PI_ARTIFACTS_MAX_FILES=0`. The console's listing and the closing comment are parts 2 and 3. `REQ-RESURRECTABLE-SANDBOX` UNCHANGED, checked: the kept sandbox drops `artifacts/` like `session/`, so its contents and its day are as they were. `REQ-JOB-STATUS-COMMENTS` UNCHANGED, checked (part 3 amends it). |
 | 2026-11-18 (#920, part 2) | **`REQ-CONSOLE-SECURITY` AMENDED**: the files a forge job kept are served to a signed-in operator or viewer, never an agent token, only from this host's store and only a name its manifest lists, each under a sandboxed policy of its own, inline only for the four image types and plain text; the first agent-written bytes a viewer may open, bounded by what was kept. **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED** ((c)): the run page's Artifacts card and its five states. `REQ-FORGE-JOB-ARTIFACTS` UNCHANGED, checked: what is kept is as part 1 says. |
 | 2026-11-18 (#920, part 3) | **`REQ-JOB-STATUS-COMMENTS` AMENDED**: a forge run that kept or dropped files gets one worker comment once its outcome is final (never for an attempt the queue retries), naming each kept file and its size, each drop reason and the run page's link under `PI_CONSOLE_PUBLIC_URL`; the one worker comment carrying text a job chose, held to the artifacts charset, names left out when the text could spell the trigger's phrase. **`REQ-FORGE-JOB-ARTIFACTS` AMENDED**: its Statement says so. `REQ-RUN-PROGRESS` UNCHANGED, checked: the status comment is untouched and the artifacts comment is separate from it. |
+| 2026-11-19 (Claude adapter 0.3.11) | **`REQ-SUBSCRIPTION-AUTHENTICATION` EXTENDED**: admit the exact reviewed `pi-anthropic-oauth@0.3.11` profile alongside 0.3.6 and the secondary profile. UNCHANGED, checked: host-only credential ownership, free admission, quota, metering and provider registration guards. |
+| 2026-11-19 (Opus scoped quota) | **`REQ-SUBSCRIPTION-AUTHENTICATION` CORRECTED**: a reviewed Fable-only weekly limit no longer blocks exact Opus 5.5. Every finite route is checked separately. UNCHANGED, checked: account limits, unknown-scope refusal, paid-overage refusal and free admission. |

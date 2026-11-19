@@ -440,8 +440,9 @@ test("excluding a subscription connection's adapter refuses for free at the pick
 		assert.throws(() => parse([KINDS[1][1]({ excludeExtensions: [key] })]), /run\.excludeExtensions/, key);
 		assert.deepEqual(await runtime.check({ ...job, excludeExtensions: ["pi-lint", adapter.package] }), { ok: false, managed: true, reason: "auth-adapter-disabled" }, adapter.package);
 		await assert.rejects(runtime.check({ ...job, excludeExtensions: ["another"] }), /nothing past this refusal may run/, "another name is not this package");
-		for (const [otherKey, other] of community) {
-			if (otherKey !== key) await assert.rejects(runtime.check({ ...job, excludeExtensions: [other.package] }), /nothing past this refusal may run/, "another connection's adapter is not this connection's");
+		for (const [, other] of community) {
+			if (other.package !== adapter.package) await assert.rejects(runtime.check({ ...job, excludeExtensions: [other.package] }), /nothing past this refusal may run/, "a different package does not exclude this adapter");
+			else assert.deepEqual(await runtime.check({ ...job, excludeExtensions: [other.package] }), { ok: false, managed: true, reason: "auth-adapter-disabled" }, "excluding a package excludes every supported version of it");
 		}
 		await assert.rejects(runtime.check({ ...job, excludeExtensions: [] }), /nothing past this refusal may run/);
 		// The console's sentence on the same names, so the two cannot come apart: it says a job on that connection is refused, and this is the refusal.

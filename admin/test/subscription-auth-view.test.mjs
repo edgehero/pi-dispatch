@@ -42,7 +42,7 @@ test("access expiry retains refreshable credential state, and pin recognition ca
   assert.equal(unknown.connections[0].adapter, null); assert.equal(unknown.connections[0].compatibility, "unavailable");
   const wrongProvider = consoleSubscriptionFixture(NOW, v => { v.connections[0].provider = "openai"; });
   assert.equal(wrongProvider.connections[0].compatibility, "unavailable");
-  assert.deepEqual(Object.keys(SUBSCRIPTION_ADAPTERS), ["openai-chatgpt", "pi-anthropic-oauth@0.3.6", "@gotgenes/pi-anthropic-auth@3.4.3"]);
+  assert.deepEqual(Object.keys(SUBSCRIPTION_ADAPTERS), ["openai-chatgpt", "pi-anthropic-oauth@0.3.6", "pi-anthropic-oauth@0.3.11", "@gotgenes/pi-anthropic-auth@3.4.3"]);
 });
 
 test("published snapshot and optional reader seam are read-only, and unavailable reads retain unknown", async () => {

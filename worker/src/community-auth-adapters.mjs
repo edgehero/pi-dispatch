@@ -66,7 +66,7 @@ export function createDefaultAuthAdapters({ now = () => Date.now(), fetch = glob
 			async login({ connection, interaction, signal }) {
 				validate(connection);
 				try {
-					if (id === "pi-anthropic-oauth@0.3.6") { const helper = await loadHelper({ root: connection.root, fetch }); return validCommunityCredential(await helper.loginAnthropic(legacyAuthInteraction(interaction, signal), now)); }
+					if (pin.package === "pi-anthropic-oauth") { const helper = await loadHelper({ root: connection.root, fetch }); return validCommunityCredential(await helper.loginAnthropic(legacyAuthInteraction(interaction, signal), now)); }
 					return validCommunityCredential(await (await nativeAuth()).login({ ...interaction, signal }));
 				} catch (error) { if (error.code?.startsWith("auth-")) throw error; throw authError("auth-login-failed"); }
 			},
@@ -75,7 +75,7 @@ export function createDefaultAuthAdapters({ now = () => Date.now(), fetch = glob
 				try { validate(connection); }
 				catch (error) { error.beforeRefresh = true; throw error; }
 				try {
-					if (id === "pi-anthropic-oauth@0.3.6") { const helper = await loadHelper({ root: connection.root, fetch }); return validCommunityCredential(await helper.refreshAnthropicToken(credential, signal, now)); }
+					if (pin.package === "pi-anthropic-oauth") { const helper = await loadHelper({ root: connection.root, fetch }); return validCommunityCredential(await helper.refreshAnthropicToken(credential, signal, now)); }
 					return validCommunityCredential(await (await nativeAuth()).refresh(credential, signal));
 				} catch (error) { if (error.code?.startsWith("auth-")) throw error; throw authError("auth-refresh-uncertain", { uncertain: true }); }
 			},

@@ -7,14 +7,18 @@ import { AUTH_RENEWABLE_MARGIN_MS } from "../../../worker/src/auth-connections.m
 const instant = 1_800_000_000_000;
 const now = () => instant;
 const openai = () => ({ provider: "openai", adapter: "openai-chatgpt", connectionId: "chatgpt", generation: 1, expiresAt: instant + 3600_000, deadlineAt: instant + 30 * 60_000 });
-const anthropic = () => ({ ...openai(), provider: "anthropic", adapter: "pi-anthropic-oauth@0.3.6", root: "/opt/pi-package", digest: "a".repeat(64) });
+const anthropic = () => ({ ...openai(), provider: "anthropic", adapter: "pi-anthropic-oauth@0.3.11", root: "/opt/pi-package", digest: "a".repeat(64) });
 
 test("subscription metadata validates lifetime, provider ownership and exact adapter before extension loading", () => {
 	let verified = 0;
 	const entries = [openai(), anthropic()];
 	assert.equal(verifySubscriptionAuthEntries(entries, { now, verify(args) { verified++; assert.equal(args.root, "/opt/pi-package"); assert.equal(args.digest, "a".repeat(64)); } }), entries);
 	assert.equal(verified, 1);
-	for (const row of [{ ...openai(), expiresAt: instant }, { ...openai(), deadlineAt: instant }, { ...openai(), generation: -1 }, { ...openai(), expiresAt: Infinity }, { ...openai(), adapter: "unreviewed" }, { ...anthropic(), adapter: "openai-chatgpt" }]) assert.throws(() => verifySubscriptionAuthEntries([row], { now, verify() {} }), /auth-/);
+	for (const adapter of ["pi-anthropic-oauth@0.3.6", "pi-anthropic-oauth@0.3.11", "@gotgenes/pi-anthropic-auth@3.4.3"]) {
+		const rows = [{ ...anthropic(), adapter }];
+		assert.equal(verifySubscriptionAuthEntries(rows, { now, verify() {} }), rows);
+	}
+	for (const row of [{ ...openai(), expiresAt: instant }, { ...openai(), deadlineAt: instant }, { ...openai(), generation: -1 }, { ...openai(), expiresAt: Infinity }, { ...openai(), adapter: "unreviewed" }, { ...anthropic(), adapter: "openai-chatgpt" }, { ...anthropic(), adapter: "pi-anthropic-oauth@0.3.12" }]) assert.throws(() => verifySubscriptionAuthEntries([row], { now, verify() {} }), /auth-/);
 	assert.throws(() => verifySubscriptionAuthEntries([openai(), openai()], { now }), /auth-snapshot-invalid/);
 	assert.throws(() => verifySubscriptionAuthEntries([anthropic()], { now, verify() { throw new Error("auth-adapter-unpinned"); } }), /auth-adapter-unpinned/);
 });

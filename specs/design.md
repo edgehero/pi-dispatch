@@ -18201,8 +18201,12 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
   deadline-bound access snapshots and content-verified transport/profile metadata. A configured binding owns
   its provider on failure too. A freshly prepared snapshot is checked again before use.
 - **Community profiles**: exact published package sources are audited and adapted by declared transformations.
-  Primary 0.3.6 gains final payload/fetch observation, conservative cache accounting and bounded refresh behavior;
-  secondary 3.4.3 delegates pi's builtin OAuth while retaining its request shaping under final guards. Source,
+  Primary 0.3.6 and 0.3.11 gain final payload/fetch observation, conservative cache accounting and bounded refresh behavior;
+  0.3.11 also reports failed HTTP response headers through `onResponse`, with guard refusals preserved.
+  Staging disables npm CLI bin links for reviewed profiles; the verifier still refuses every symlink.
+  Receipt revisions identify one profile’s exact source and adapted-output hashes, so adding a profile does not
+  invalidate existing approved trees; the two original profiles retain their existing revision for their unchanged bytes.
+  Secondary 3.4.3 delegates pi's builtin OAuth while retaining its request shaping under final guards. Source,
   dependency and prepared-tree digests are evidence, not package-name allowlisting. Conflicting registrations,
   altered endpoints, arbitrary aliases, hidden account rotation and unverified transforms refuse. Trusted
   operator extension code remains inside the process trust boundary; capability metadata is not isolation.
@@ -18216,6 +18220,15 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
   cannot cancel and discard an already rotated refresh grant. An ambiguous result requires explicit recovery,
   not automatic fallback to another credential. An access token must outlive its authorization lease by the applicable safety margin;
   there is no refresh grant or host auth-file mount inside the container.
+- **Reviewed model scope (2026-11-19)**: the modern `weekly_scoped` / `weekly` tuple with exactly
+  `scope.model = { id: null, display_name: "Fable" }` and `scope.surface = null` is Fable-specific, as documented
+  in [Anthropic's plan guide](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan).
+  Its four JSON key-order fingerprints are recognized from the existing opaque IDs, without rewriting stored
+  evidence or persisting display text. Only the exact physical `anthropic/claude-opus-5-5` route is exempt from
+  this scope; no label substring, unknown model, surface or extra field grants an exception. Admission judges
+  every finite job route separately, including after an invalidation or generation-binding CAS. Connection-wide
+  status and the Fable refusal retain their evidence. Account limits, unknown scopes and paid-overage policy
+  still apply. Reset timestamps accept up to nine fractional digits and round upward to milliseconds.
 - **Quota**: the separate subscription store keeps closed, bounded observations and permanent unknown-reset
   exhaustion. Missing values stay null. A complete newer usage observation may retire generic error exhaustion;
   partial or older evidence cannot. CAS guards evidence, connection generation and one-person trial claims.
@@ -19274,3 +19287,5 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-11-18 (#920, part 1) | **NEW `DES-FORGE-JOB-ARTIFACTS`**: the per-job `/artifacts` mount, read once after the container exited on its own, typed by content, text cleaned with the job's own secret values, a binary holding one dropped, kept in `PI_ARTIFACTS_DIR` under its own retention, staged and collected in the processor's venue-blind wrapper, mounted only on a binding layout. REJECTED: reusing `/outbox`, typing by extension, renaming a bad name, Valkey, the sandbox store, a new `makeRunContainer` option, collecting after an abort, OpenShell's copy mode. `DES-JOB-OUTBOX-CHAINING` UNCHANGED, checked: no forge job gets `/outbox`. `DES-SANDBOX-IS-A-FRESH-CONTAINER` UNCHANGED, checked: a kept sandbox drops `artifacts/` before the rename, so what it reopens is as before. `DES-STORE-VERSION-WHEN-NEEDED` UNCHANGED, checked: the record's new field is conditional and additive, `v` stays 1, and the manifest is version 1 of a new store. **Code evidence**: worker/src/artifacts.mjs; worker/src/artifacts-record.mjs; worker/src/index.mjs -> runContainer wrapper; worker/src/run-container.mjs -> buildOpts; worker/src/container-spec.mjs; worker/src/start.mjs; image/runner/src/loader.mjs; guardrails/ARTIFACTS_PROTOCOL.md. |
 | 2026-11-18 (#920, part 2) | **`DES-OPERATOR-CONSOLE` AMENDED**: a run's artifacts, the card's read (the manifest only, through the worker's one validator), the file route (`/api/artifact`, the name from the manifest, the size held to it, `ARTIFACT_CSP` on every answer, inline only for images and text, an agent token refused), viewers included by the owner's decision, the picture drawn by attribute so the stylesheet is unchanged. REJECTED: operators only, any type inline, another host's store over the history channel, auditing reads. `DES-FORGE-JOB-ARTIFACTS` UNCHANGED, checked. The console's pasted tokens and stylesheet UNCHANGED, checked: no class was added. **Code evidence**: admin/src/console/artifact-api.mjs; admin/src/console/panels/run.mjs -> runArtifacts; admin/src/read-model.mjs -> artifacts, artifactFile; worker/src/artifacts-record.mjs -> artifactsManifestOf; design/tools/gen_runs.py -> ended_artifacts. |
 | 2026-11-18 (#920, part 3) | **`DES-FORGE-JOB-ARTIFACTS` AMENDED** by its comment: posted from `recordRun` after the record, only for a final outcome, read from the store's manifest (never from the job's result, which would put the names in the queue's return value), names in backticks or counts only when the text could spell the trigger's phrase, the link built from `PI_CONSOLE_PUBLIC_URL` alone. REJECTED: merging it into the agent's or the status comment (the first is the model's text, the second holds numbers and fixed words only); posting per attempt (a retry replaces the files). **Code evidence**: worker/src/artifacts-comment.mjs; worker/src/start.mjs -> recordRun; worker/src/config.mjs -> consolePublicUrlOf. |
+| 2026-11-19 (Claude adapter 0.3.11) | **`DES-HOST-OWNED-SUBSCRIPTION-AUTH` EXTENDED**: audit the 0.3.11 artifact with SDK 0.124.0; preserve failed-response guard refusals and give each exact source/output profile its own receipt revision while retaining the original revisions for unchanged profiles. UNCHANGED, checked: host-only refresh, final-request checks, hard-rule preservation and the container boundary. |
+| 2026-11-19 (Opus scoped quota) | **`DES-HOST-OWNED-SUBSCRIPTION-AUTH` CORRECTED**: review the exact modern Fable scope against the provider plan guide; map its existing opaque IDs to applicability for exact Opus 5.5, retaining conservative handling for every other shape. Accept microsecond/nanosecond reset timestamps with upward millisecond rounding. UNCHANGED, checked: credential ownership, raw-data privacy and unknown exhaustion persistence. |

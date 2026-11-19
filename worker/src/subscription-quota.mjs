@@ -27,8 +27,11 @@ function atOf(options) {
 	return options.observedAt;
 }
 function reset(value, at, seconds = false) {
-	const parsed = typeof value === "string" && /^\d{4}-\d\d-\d\dT\d\d:\d\d(?::\d\d(?:\.\d{1,3})?)?(?:Z|[+-]\d\d:\d\d)$/.test(value) ? Date.parse(value) : seconds && Number.isSafeInteger(value) ? value * 1000 : null;
-	return instant(parsed) && parsed <= at + SUBSCRIPTION_QUOTA_LIMITS.resetFutureMs ? parsed : null;
+	const timestamp = typeof value === "string" ? /^(?:\d{4}-\d\d-\d\dT\d\d:\d\d)(?::\d\d(?:\.(\d{1,9}))?)?(?:Z|[+-]\d\d:\d\d)$/.exec(value) : null;
+	const parsed = timestamp ? Date.parse(value) : seconds && Number.isSafeInteger(value) ? value * 1000 : null;
+	// Claude supplies microseconds. Date.parse truncates them; round UP so admission never precedes the reset.
+	const rounded = timestamp && /[1-9]/.test(timestamp[1]?.slice(3) ?? "") ? parsed + 1 : parsed;
+	return instant(rounded) && rounded <= at + SUBSCRIPTION_QUOTA_LIMITS.resetFutureMs ? rounded : null;
 }
 function row(id, window, scope, usedPercent, resetAt, exhausted = false) {
 	return { id, window, scope, usedPercent, resetAt, state: exhausted || usedPercent !== null && usedPercent >= 100 ? "exhausted" : usedPercent === null ? "unknown" : "available" };
@@ -156,6 +159,21 @@ function statusOf(state, identity, at) {
 	const blocked = windows.filter(value => value.state === "exhausted");
 	return { connectionId: identity.connectionId, accountDigest: identity.accountDigest, bucket: identity.bucket, generation: state.identity.generation, version: state.version, observedAt: state.observedAt, source: state.source, fresh: !state.probeRequired && state.observedAt !== null && at - state.observedAt <= SUBSCRIPTION_QUOTA_LIMITS.freshMs, bindingValid: bindingValid(state, identity), state: blocked.length ? "exhausted" : windows.length && windows.every(value => value.state === "available") ? "available" : "unknown", until: blocked.length && blocked.every(value => value.resetAt !== null) ? Math.max(...blocked.map(value => value.resetAt)) : null, blockedUnknownReset: blocked.some(value => value.resetAt === null), trialAvailable: state.trial !== null && state.trial.usedBy === null, probeRequired: state.probeRequired, invalidatedAt: state.invalidatedAt, windows, extraUsage: state.probeRequired ? emptyExtra() : state.extraUsage };
 }
+// Reviewed provider evidence: Fable has a separate weekly allowance; other models remain usable.
+// https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan
+// Only the measured, closed Fable scope and exact Opus 5.5 route are mapped. Preserve the existing
+// opaque IDs (including JSON key order), so previously stored exhaustion needs no rewrite. Unknown
+// labels, model IDs, surfaces, routes and extra scope fields still block conservatively.
+const FABLE_WEEKLY_IDS = new Set([
+	{ id: null, display_name: "Fable" }, { display_name: "Fable", id: null },
+].flatMap(model => [{ model, surface: null }, { surface: null, model }])
+	.map(scope => `seven-day:${hash(JSON.stringify(["weekly_scoped", "weekly", scope]))}`));
+function statusForModel(status, modelRef) {
+	if (modelRef !== "anthropic/claude-opus-5-5" || status.bucket !== "anthropic:subscription") return status;
+	const windows = status.windows.filter(row => !(row.window === "seven-day" && row.scope === "scoped" && FABLE_WEEKLY_IDS.has(row.id)));
+	const blocked = windows.filter(row => row.state === "exhausted");
+	return { ...status, windows, state: blocked.length ? "exhausted" : windows.length && windows.every(row => row.state === "available") ? "available" : "unknown", until: blocked.length && blocked.every(row => row.resetAt !== null) ? Math.max(...blocked.map(row => row.resetAt)) : null, blockedUnknownReset: blocked.some(row => row.resetAt === null) };
+}
 const CAS = `local old = redis.call('GET', KEYS[1]); if (old or '') ~= ARGV[1] then return 0 end; redis.call('SET', KEYS[1], ARGV[2]); return 1`;
 
 /** Bounded GET/CAS only. Exhaustion without a reset has no TTL and cannot disappear through expiry. */
@@ -225,9 +243,10 @@ export function makeSubscriptionQuotaStore({ redis, now = Date.now } = {}) {
 				return { ok: true, next: { ...state, source: incoming.source, observedAt: incoming.observedAt, windows: [...rows.values()], extraUsage: incoming.source === "provider-error" ? state.extraUsage : incoming.extraUsage, trial: null, ...(clearsProbe ? { probeRequired: false, invalidatedAt: null } : {}) } };
 			});
 		},
-		async admit(value, { windows = ["five-hour", "seven-day"], attemptId, consumeTrial = true, allowExtraUsage = false, maxCreditMicros = null, requireExtraUsageKnownDisabled = false } = {}) {
+		async admit(value, { modelRef = null, windows = ["five-hour", "seven-day"], attemptId, consumeTrial = true, allowExtraUsage = false, maxCreditMicros = null, requireExtraUsageKnownDisabled = false } = {}) {
 			if (!Array.isArray(windows) || windows.some(value => !["five-hour", "seven-day"].includes(value)) || new Set(windows).size !== windows.length || allowExtraUsage && (!Number.isSafeInteger(maxCreditMicros) || maxCreditMicros <= 0)) throw quotaError("subscription-invalid-policy");
-			return mutate(value, (state, status) => {
+			const result = await mutate(value, (state, fullStatus) => {
+				const status = statusForModel(fullStatus, modelRef);
 				if (state.probeRequired) {
 					if (status.state === "exhausted") return { ok: false, reason: "subscription-quota", until: status.until, status };
 					return { ok: consumeTrial === false, reason: "subscription-observation-required", requiresUsage: true, status };
@@ -246,6 +265,8 @@ export function makeSubscriptionQuotaStore({ redis, now = Date.now } = {}) {
 				}
 				return { ok: false, reason: "subscription-quota", until: blocked.every(row => row.resetAt !== null) ? Math.max(...blocked.map(row => row.resetAt)) : null, status };
 			}, { bind: consumeTrial !== false });
+			// A selected admission may publish a newer binding through CAS, which returns the full connection view.
+			return result.status ? { ...result, status: statusForModel(result.status, modelRef) } : result;
 		},
 		async grantOneTrial(value, { expectedVersion, actorKind } = {}) {
 			if (actorKind !== "person" || !Number.isSafeInteger(expectedVersion) || expectedVersion < 0) throw quotaError("subscription-trial-person-required");

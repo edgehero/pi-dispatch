@@ -14477,7 +14477,7 @@ Optional `quotaWindows` selects the displayed five-hour/seven-day account-window
 Known exhausted windows remain visible and mandatory outside that focus; scoped and other windows remain
 visible because they are not independently selectable. Optional positive safe-integer `extraUsageCreditMicros` authorizes a per-job conservative dollar
 ceiling, and requires the job's normal dollar cap to fit. It is not a vendor credit balance. Supported adapters
-are `openai-chatgpt`, `pi-anthropic-oauth@0.3.6` and `@gotgenes/pi-anthropic-auth@3.4.3`; source/dependency hashes and
+are `openai-chatgpt`, `pi-anthropic-oauth@0.3.6`, `pi-anthropic-oauth@0.3.11` and `@gotgenes/pi-anthropic-auth@3.4.3`; source/dependency hashes and
 audited transformations are held by `community-auth-pins.mjs` and `community-auth-patches.mjs`. Changing exact
 source, dependency tree, root, profile or binding invalidates the old capability rather than widening it.
 
@@ -14591,6 +14591,10 @@ separate connections is inferred. Physical model cooldown keys and their six-hou
   id, five-hour/seven-day/other kind, account/scoped scope, nullable measured percent and reset instant, and
   unknown/available/exhausted state. Community model display names are not silently mapped to physical models.
   Exhausted unmapped scoped limits conservatively block their application bucket. Null is unknown, never zero.
+  The reviewed Fable weekly tuple in `DES-HOST-OWNED-SUBSCRIPTION-AUTH` is inapplicable only to exact
+  `anthropic/claude-opus-5-5`. Admission receives each physical route and projects its applicable windows;
+  connection-wide reads retain all windows. Opaque IDs and stored fields remain byte-compatible.
+  Fractional reset seconds accept one to nine digits and round up to milliseconds.
 - Claude parses legacy five-hour/seven-day fields, modern `limits`, scoped legacy windows and `extra_usage`.
   OpenAI parses typed primary/secondary rate limits. Only closed authoritative transport codes establish an
   error observation; authentication, arbitrary error prose and overload do not. Percent and reset values are
@@ -15166,3 +15170,5 @@ and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` are UNCHANGED, checked: no file shape, wr
 | 2026-11-18 (#920, part 1) | **NEW `INT-ARTIFACTS-STORE-CONTRACT`**: `PI_ARTIFACTS_DIR`, one folder per run (`files/`, `manifest.json` version 1), the limits, the retention rule and the sweep. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**: the conditional `artifacts: { kept, bytes, dropped }`, numbers and reason tokens only, after `limits`; `v` stays 1. **`INT-CONTAINER-JOB-INPUTS` AMENDED**: the layout table gains `artifacts (forge jobs)`, `/artifacts` and `/sandbox/artifacts` (the second never mounted while the copying venue leaves the folder off). **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: both mount lists name `/artifacts:rw`. `INT-OUTBOX-CONTRACT` UNCHANGED, checked: a forge job still has no `/outbox`. `INT-LIVE-PROBE-CONTRACT` UNCHANGED, checked: the live probe's job carries no artifacts folder. |
 | 2026-11-18 (#920, part 2) | **`INT-ARTIFACTS-STORE-CONTRACT` AMENDED** (Status): the console's reader is built, and every manifest is read through `artifactsManifestOf`, which rebuilds the version 1 shape or answers null. `INT-CONSOLE-AUDIT-LOG` UNCHANGED, checked: opening a file writes no row, as reading a transcript writes none. `INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked. |
 | 2026-11-18 (#920, part 3) | **`INT-ARTIFACTS-STORE-CONTRACT` AMENDED** (Status): the worker's comment reads the manifest through `artifactsManifestOf`, as the console does. `INT-FORGE-STATUS-COMMENT-EDIT` UNCHANGED, checked: the artifacts comment is posted through the same adapter and never edited. `PI_CONSOLE_PUBLIC_URL` is a new worker setting (an origin, refused at boot otherwise), in both `.env.example` files. |
+| 2026-11-19 (Claude adapter 0.3.11) | **`INT-AUTH-CONNECTIONS-FILE-CONTRACT` EXTENDED**: add the exact 0.3.11 adapter identifier. Existing source/output profiles retain their receipt revision. UNCHANGED, checked: `INT-SUBSCRIPTION-CREDENTIAL-STORE`, policy version, credential shape, exact adapter matching and snapshot contract. |
+| 2026-11-19 (Opus scoped quota) | **`INT-SUBSCRIPTION-QUOTA-KEY` CORRECTED**: admission receives a physical model route and projects applicable evidence; the reviewed Fable scope does not block exact Opus 5.5. Parse fractional reset times through nine digits, rounded upward. UNCHANGED, checked: stored fields, opaque IDs, key identity, CAS and generation semantics, `INT-SUBSCRIPTION-CREDENTIAL-STORE`. |

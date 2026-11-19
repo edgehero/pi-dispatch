@@ -16,10 +16,10 @@ function replaceOnce(source, before, after) {
 
 export function adaptCommunitySource(adapter, path, input) {
 	let source = input;
-	if (adapter === "pi-anthropic-oauth@0.3.6") {
+	if (COMMUNITY_AUTH_ADAPTERS[adapter]?.package === "pi-anthropic-oauth") {
 		if (path === "src/index.ts") {
 			source = replaceOnce(source, 'name: "Claude Pro/Max",', 'name: "Claude Pro/Max",\n      isSubscription: true,');
-			source = replaceOnce(source, '  pi.registerProvider("anthropic", {', '  Object.defineProperty(streamAnthropicOAuth, Symbol.for("pi-dispatch.subscription-adapter"), { value: "pi-anthropic-oauth@0.3.6" });\n  pi.registerProvider("anthropic", {');
+			source = replaceOnce(source, '  pi.registerProvider("anthropic", {', `  Object.defineProperty(streamAnthropicOAuth, Symbol.for("pi-dispatch.subscription-adapter"), { value: ${JSON.stringify(adapter)} });\n  pi.registerProvider("anthropic", {`);
 		}
 		if (path === "src/auth.ts") {
 			source = replaceOnce(source, "callbacks: OAuthLoginCallbacks,\n):", "callbacks: OAuthLoginCallbacks,\n  now: () => number = Date.now,\n):");
@@ -48,6 +48,11 @@ export function adaptCommunitySource(adapter, path, input) {
 			source = replaceOnce(source, "      // Raw stream instead of the MessageStream helper:", "      const checkedParams = (await options?.onPayload?.(params, model)) ?? params;\n\n      // Raw stream instead of the MessageStream helper:");
 			source = replaceOnce(source, ".create(params, {", ".create(checkedParams as MessageCreateParamsStreaming, {");
 			source = replaceOnce(source, "        } catch {\n          // Response hooks are best-effort and should not break streaming.\n        }", "        } catch (error) { throw error; }");
+			if (adapter === "pi-anthropic-oauth@0.3.11") {
+				// A failed HTTP response still carries quota evidence. Keep a guard's rejection as the final
+				// error instead of swallowing it in upstream's best-effort failed-response hook.
+				source = replaceOnce(source, "        } catch {\n          // Best-effort, as above.\n        }", "        } catch (responseError) { error = responseError; }");
+			}
 			source = replaceOnce(source, "  cache_creation_input_tokens?: number | null;", "  cache_creation_input_tokens?: number | null;\n  cache_creation?: { ephemeral_1h_input_tokens?: number | null };");
 			source = replaceOnce(source, "    const thinkingTokens = usage.output_tokens_details?.thinking_tokens;", "    if (usage.cache_creation?.ephemeral_1h_input_tokens != null) output.usage.cacheWrite1h = usage.cache_creation.ephemeral_1h_input_tokens;\n    const thinkingTokens = usage.output_tokens_details?.thinking_tokens;");
 			source = replaceOnce(source, "            output.usage.totalTokens =", "            output.usage.cacheWrite1h = (event.message.usage as MessageDeltaUsage).cache_creation?.ephemeral_1h_input_tokens ?? 0;\n            output.usage.totalTokens =");
@@ -80,8 +85,17 @@ export function adaptCommunitySource(adapter, path, input) {
 	return source;
 }
 
-// A changed adaptation must be explicitly restaged even when the upstream package version stays the same.
-export const COMMUNITY_ADAPTER_REVISION = sha(JSON.stringify(COMMUNITY_SOURCE_PINS) + adaptCommunitySource.toString());
+// Revisions belong to one reviewed profile. Adding another profile must not invalidate existing
+// receipts. These two exact source/output fingerprints retain the original shared revision; changed
+// source or adapted bytes automatically produce a different revision and require restaging.
+const LEGACY_REVISIONS = Object.freeze({
+	"f019e1ac70de6c323a3481284624561c0ffdb5766f1219fa0ae0a2d68d69c451": "4f67f4e8ea0c2aef6fe2804664c8ab5c38f7d8ac363f9a7f9feff8b115c0bfea",
+	"ce715190bc838b418dcd1b67e270ad9c8e493fd019cb5697be747ffc674794d6": "4f67f4e8ea0c2aef6fe2804664c8ab5c38f7d8ac363f9a7f9feff8b115c0bfea"
+});
+export function communityAdapterRevision(adapter) {
+	const fingerprint = sha(JSON.stringify([COMMUNITY_SOURCE_PINS[adapter], COMMUNITY_ADAPTED_SOURCE_PINS[adapter]]));
+	return LEGACY_REVISIONS[fingerprint] ?? fingerprint;
+}
 
 function regularFile(fs, path) { const stat = fs.lstatSync(path); if (!stat.isFile() || stat.isSymbolicLink()) fail("auth-adapter-unsafe-path"); return stat; }
 export function communityPackageDigest(root, { fs = nodeFs } = {}) {
@@ -106,7 +120,7 @@ function packageCheck(adapter, root, fs) {
 	regularFile(fs, join(root, "package.json"));
 	const pkg = JSON.parse(fs.readFileSync(join(root, "package.json"), "utf8"));
 	if (pkg.name !== pin.package || pkg.version !== pin.version) fail("auth-adapter-version-mismatch");
-	if (adapter === "pi-anthropic-oauth@0.3.6") {
+	if (COMMUNITY_AUTH_ADAPTERS[adapter]?.package === "pi-anthropic-oauth") {
 		const path = join(root, "node_modules/@anthropic-ai/sdk/package.json");
 		regularFile(fs, path);
 		const sdk = JSON.parse(fs.readFileSync(path, "utf8"));
@@ -148,7 +162,7 @@ export function prepareCommunityAuthAdapter({ adapter, root, fs = nodeFs }) {
 	// Verify every source before changing one; partial staging never receives an approval receipt.
 	for (const [path, source] of Object.entries(outputs)) fs.writeFileSync(join(root, path), source);
 	const digest = communityPackageDigest(root, { fs });
-	const receipt = { version: 1, adapter, adapterRevision: COMMUNITY_ADAPTER_REVISION, package: pin.package, packageVersion: pin.version, digest, sources: Object.fromEntries(Object.entries(outputs).map(([path, source]) => [path, sha(source)])) };
+	const receipt = { version: 1, adapter, adapterRevision: communityAdapterRevision(adapter), package: pin.package, packageVersion: pin.version, digest, sources: Object.fromEntries(Object.entries(outputs).map(([path, source]) => [path, sha(source)])) };
 	fs.writeFileSync(join(root, ".dispatch-auth-adapter.json"), JSON.stringify(receipt));
 	return { adapter, package: pin.package, version: pin.version, digest };
 }
@@ -158,7 +172,7 @@ export function verifyCommunityAuthAdapter({ adapter, root, digest, fs = nodeFs 
 	const pin = packageCheck(adapter, root, fs);
 	regularFile(fs, join(root, ".dispatch-auth-adapter.json"));
 	const receipt = JSON.parse(fs.readFileSync(join(root, ".dispatch-auth-adapter.json"), "utf8"));
-	if (receipt.version !== 1 || receipt.adapter !== adapter || receipt.adapterRevision !== COMMUNITY_ADAPTER_REVISION || receipt.digest !== digest || communityPackageDigest(root, { fs }) !== digest) fail("auth-adapter-unpinned");
+	if (receipt.version !== 1 || receipt.adapter !== adapter || receipt.adapterRevision !== communityAdapterRevision(adapter) || receipt.digest !== digest || communityPackageDigest(root, { fs }) !== digest) fail("auth-adapter-unpinned");
 	for (const path of Object.keys(COMMUNITY_SOURCE_PINS[adapter])) {
 		regularFile(fs, join(root, path));
 		const actual = sha(fs.readFileSync(join(root, path)));

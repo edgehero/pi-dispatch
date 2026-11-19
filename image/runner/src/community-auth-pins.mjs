@@ -34,5 +34,17 @@ export const COMMUNITY_SOURCE_PINS = {
 		"src/system-prompt-sections.ts": "9d922f8d9feb7a4b6ef45e12b9b47db04052cdf8a096d4f7dac87d2f30aa9036",
 		"src/system-prompt-shaping.ts": "524d6e877eec2d58b9d0ba9539b89053f7a65bf34f55d33b11611909e517a138",
 		"src/version-rejection.ts": "aac221a3877251fe90d0afba6d9cba65eedd52d360d44e15a2bbe449b544eef1"
+	},
+	"pi-anthropic-oauth@0.3.11": {
+		"LICENSE": "e46cbd8e0af9d9642434b1f2c80e5de17253a6766f0e334e676b1486f470f6f3",
+		"README.md": "1b9e44e1c151d62739a1eba7bb9f07568c26ead26b1edb831f5b913c50463fc4",
+		"package.json": "10f655fbcccdc981d8ecbb286c5ba042f69e93d7b281490a5a9e9ae707efacf1",
+		"src/auth.ts": "31d1c7df052c5353b1c198fa52a2f0b1b416bc83f6496e3c502b738b3ca4b461",
+		"src/convert.ts": "5263f2f308b674cdde710c087c4d7d8ff8dd19cae965a06a02e4bfcb0c1940d0",
+		"src/index.ts": "32c73197d08cc87bd6e69caea7591cbe116a1630a4777135e330f8d4992078d4",
+		"src/prompt.ts": "e3c7c7d595a96be754cea87e9866ae58756e78e7a8112933c9dc85284fd74a1a",
+		"src/stream.ts": "bef6cc3c5fd6770e1008f76bbddc6413c1ef8a595262f1bcec1d0d584d5285ee",
+		"src/usage.ts": "a8c9054514d93fae5e689ddc647fb41d4c91f6a64ccab1c79e59efb2d027d0cb",
+		"src/version.ts": "f4adaee86e691321c517cff5360d050cfab1b0f4c9751f301cd161875c7b8b8d"
 	}
 };
