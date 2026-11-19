@@ -388,13 +388,19 @@ as `subscription_auth_hold`. See [subscription renewal](subscription-auth.md#adm
 
 Release numbers come from the git tags.
 
-### Unreleased: Claude adapter 0.3.11
+### Unreleased: Claude adapter 0.3.11 and Opus quota admission
 
 Upgrade the worker and job image together before selecting `pi-anthropic-oauth@0.3.11`. Stage the exact
 package, then update the connection’s adapter, active staged root and digest and authenticate it as described
 in [subscription authentication](subscription-auth.md#claude-community-compatibility). Old workers and images
 refuse the new adapter identifier. The existing 0.3.6 and secondary profiles retain their approved receipt
 revisions; no credential-store or run-record shape changes, state rewrite or older-state detector is needed.
+
+The reviewed modern Fable weekly limit no longer blocks exact `anthropic/claude-opus-5-5`; older workers
+remain conservative until upgraded. Existing opaque quota IDs and fields stay unchanged. Refresh usage with
+`pi-dispatch auth usage claude-main` to retain the provider's fractional-second reset timestamps, formerly
+shown as unknown. No quota deletion, store migration or older-state detector is needed: missing resets and
+unknown scopes remain valid states, while ordinary fresh observations replace the affected reset values.
 
 ### 5.4.1
 

@@ -244,7 +244,13 @@ also refuses. Loading a supported package does not authorize every independent e
 Claude quota/profile observations use the selected community route's bounded usage interface. Missing,
 incomplete or unavailable fields stay unknown. The worker does not scrape `/usage` command output or infer a
 physical model from a provider display name. An exhausted scoped window without a reviewed model mapping
-conservatively blocks the connection's application bucket.
+conservatively blocks the connection's application bucket. The reviewed exception is the exact
+modern Fable weekly scope (`weekly_scoped`, group `weekly`, model `{ id: null, display_name: "Fable" }`,
+`surface: null`): its exhaustion does not block `anthropic/claude-opus-5-5`. Anthropic documents that
+[the separate Fable limit allows switching to another Claude model](https://support.claude.com/en/articles/15424964-claude-fable-models-on-your-plan).
+Every model in the job's finite allowlist is checked separately. Unknown scopes, extra scope fields and other
+model routes keep the conservative behavior; the connection view still shows Fable exhaustion. Reset times
+with up to nine fractional-second digits are retained and rounded up to milliseconds, never released early.
 
 A measured Claude HTTP 429 requires a fresh bounded usage observation before another paid admission. The
 worker first invalidates cached availability and paid-overage facts across this connection's models. It does

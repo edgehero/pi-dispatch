@@ -372,3 +372,63 @@ test("real Valkey CAS prevents an in-flight usage response from clearing another
 		assert.equal((await stores[0].admit(bound)).ok, true);
 	} finally { await clients[0].del(subscriptionQuotaKey(bound)); }
 });
+
+test("Claude fractional-second resets are retained and rounded up to the next millisecond", () => {
+	for (const [fraction, millis] of [["161931", 162], ["161000", 161], ["123456789", 124], ["999999", 1000], ["1", 100]]) {
+		const resetAt = `2030-01-02T00:00:00.${fraction}+00:00`;
+		assert.equal(claude({ seven_day: { utilization: 61, resets_at: resetAt } }).windows[1].resetAt, NOW + DAY + millis);
+	}
+	for (const resetAt of ["2030-01-02T00:00:00.1234567890Z", "2030-01-02T00:00:00.123456", "invalid"]) assert.equal(claude({ seven_day: { utilization: 61, resets_at: resetAt } }).windows[1].resetAt, null);
+});
+
+const fableScope = () => ({ model: { id: null, display_name: "Fable" }, surface: null });
+const scopedLimit = (scope = fableScope()) => ({ kind: "weekly_scoped", group: "weekly", scope, percent: 100 });
+const opusPolicy = { modelRef: "anthropic/claude-opus-5-5", consumeTrial: false, requireExtraUsageKnownDisabled: true };
+
+test("the reviewed Fable weekly scope does not exhaust Opus 5.5 or rewrite old opaque evidence", async () => {
+	for (const model of [{ id: null, display_name: "Fable" }, { display_name: "Fable", id: null }]) for (const scope of [{ model, surface: null }, { surface: null, model }]) {
+		const { store, redis } = fixture();
+		await store.record(identity(), claude(known(61, { limits: [scopedLimit(scope)] })));
+		const before = await redis.get(subscriptionQuotaKey(identity()));
+		const eligible = await store.admit(identity(), opusPolicy);
+		assert.equal(eligible.ok, true);
+		assert.equal(eligible.status.state, "available");
+		assert.equal(eligible.status.windows.length, 2);
+		assert.equal(await redis.get(subscriptionQuotaKey(identity())), before, "eligibility does not rewrite or discard the scoped limit");
+		assert.equal((await store.read(identity())).state, "exhausted", "the connection view still records Fable exhaustion");
+		for (const modelRef of [undefined, "anthropic/claude-fable-5-2", "anthropic/claude-opus-5-4", "other/claude-opus-5-5"]) assert.equal((await store.admit(identity(), { ...opusPolicy, modelRef })).reason, "subscription-quota");
+	}
+});
+
+test("Opus still obeys account, unknown scope, provider-error and extra-usage refusals", async () => {
+	for (const raw of [
+		known(100, { limits: [scopedLimit()] }),
+		known(61, { limits: [scopedLimit(), scopedLimit({ model: { id: null, display_name: "Unknown" }, surface: null })] }),
+		known(61, { limits: [scopedLimit({ model: { id: "different", display_name: "Fable" }, surface: null })] }),
+		known(61, { limits: [scopedLimit({ ...fableScope(), surface: "code" })] }),
+		known(61, { limits: [scopedLimit({ ...fableScope(), extra: "unknown" })] }),
+		known(61, { limits: [{ ...scopedLimit(), group: "unknown" }] }),
+	]) {
+		const { store } = fixture();await store.record(identity(), claude(raw));
+		assert.equal((await store.admit(identity(), opusPolicy)).reason, "subscription-quota");
+	}
+	const { store, setTime } = fixture();
+	await store.record(identity(), claude(known(61, { limits: [scopedLimit()], extra_usage: { is_enabled: true } })));
+	assert.equal((await store.admit(identity(), opusPolicy)).reason, "subscription-extra-usage");
+	setTime(NOW + 1);await store.record(identity(), failure({}, NOW + 1));
+	assert.equal((await store.admit(identity(), { ...opusPolicy, requireExtraUsageKnownDisabled: false })).reason, "subscription-quota");
+	const other = fixture();const unrelated = identity({ bucket: "openai:subscription" });
+	await other.store.record(unrelated, claude(known(61, { limits: [scopedLimit()] })));
+	assert.equal((await other.store.admit(unrelated, opusPolicy)).reason, "subscription-quota");
+});
+
+test("Fable-only exhaustion cannot hide Opus's required refresh or contaminate a selected binding's result", async () => {
+	const { store, setTime } = fixture();
+	await store.record(identity(), claude(known(61, { limits: [scopedLimit()] })));
+	const selected = await store.admit(identity({ generation: 2 }), { ...opusPolicy, consumeTrial: true });
+	assert.equal(selected.ok, true);assert.equal(selected.status.state, "available");assert.equal(selected.status.generation, 2);
+	setTime(NOW + 1);await store.invalidate(identity({ generation: 2 }), { observedAt: NOW + 1 });
+	const stale = await store.admit(identity({ generation: 2 }), opusPolicy);
+	assert.equal(stale.requiresUsage, true);assert.equal(stale.status.state, "unknown");
+	assert.equal((await store.admit(identity({ generation: 2 }), { ...opusPolicy, consumeTrial: true })).ok, false);
+});

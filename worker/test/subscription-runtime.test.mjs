@@ -67,6 +67,7 @@ test("candidate preview never refreshes or consumes an operator trial; selected 
 	const { runtime, calls } = fixture();
 	assert.equal((await runtime.check(job)).ok, true);
 	assert.equal(calls[0].policy.consumeTrial, false);
+	assert.equal(calls[0].policy.modelRef, "anthropic/sonnet");
 	assert.equal(calls.includes("refresh"), false);
 	const prepared = await runtime.prepare(job, { deadlineAt: instant + 1_800_000, attemptId: "delivery-1" });
 	assert.equal(prepared.snapshots[0].env.ANTHROPIC_OAUTH_TOKEN, "private-access");
@@ -146,4 +147,11 @@ test("issue #888, part 3: a running job's snapshot is extended for the same conn
 	}
 	auth.prepareSnapshot = async () => ({ ok: false, reason: "auth-reauth-required" });
 	assert.equal(await runtime.extend(started, { deadlineAt: instant + 3_600_000 }), null);
+});
+
+test("each finite subscription route carries its exact physical model into quota admission", async () => {
+	const { runtime, calls } = fixture();
+	const models = ["anthropic/claude-opus-5-5", "anthropic/claude-fable-5-2"];
+	assert.equal((await runtime.check({ ...job, model: "claude-opus-5-5", models })).ok, true);
+	assert.deepEqual(calls.filter(call => call.policy).map(call => call.policy.modelRef), models);
 });
