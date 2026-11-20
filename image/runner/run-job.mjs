@@ -35,6 +35,7 @@ import {
 	parseRunnerEnv,
 	readPrompt,
 } from "./src/config.mjs";
+import { promptAdditionsOf } from "./src/prompt-additions.mjs";
 import { buildLoadedResourceLoader, GLOBAL_PI_DIR, JOB_PI_DIR, TRIGGER_SKILLS_DIR, WORKSPACE } from "./src/loader.mjs";
 import { readMergePolicy } from "./src/merge-policy.mjs";
 import {
@@ -522,6 +523,7 @@ async function main() {
 	const loadRoots = { packages: cfg.packages, jobPi: JOB_PI_DIR, triggerSkills: TRIGGER_SKILLS_DIR, overlay: GLOBAL_PI_DIR, workspace: WORKSPACE };
 	loaded.record("loader", () => ({
 		roots: loadRoots,
+		promptAdditions: promptAdditionsOf(resourceLoader),
 		flow: cfg.flow,
 		extensions: resourceLoader.getExtensions().extensions.map((extension) => extension.path),
 		skills,

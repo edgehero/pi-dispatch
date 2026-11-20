@@ -646,10 +646,11 @@ function maximal() {
 }
 
 /** Measured off `maximal` below, and said in INT-RUN-HISTORY-FILE-CONTRACT. A new cap moves this and the spec together. */
-const WORST_RECORD_BYTES = 21_145;
+const WORST_RECORD_BYTES = 21_322;
 
 test("the record stays under 24 KiB at every cap, and the worst case is measured and pinned", () => {
 	const { forged, known, img, baseSha } = maximal();
+	forged.promptAdditions = { overlay: "a".repeat(64), repository: "b".repeat(64) };
 	const built = rebuildLoaded(forged, known);
 	assert.equal(built.runner, "reported", "the premise: this worst line passes every check");
 	const kept = recordedLoaded(loadedWithBase(loadedWithImage(built, img), baseSha));
@@ -752,14 +753,14 @@ test("the record's key table names every key the field holds, a row of its own f
 		const [, head, body] = /^ {2}\| (.+?) \| (.*) \|$/.exec(text);
 		return { keys: [...head.matchAll(/`([A-Za-z]+)`/g)].map((match) => match[1]), body };
 	});
-	const loaded = recordedLoaded(loadedWithBase(loadedWithImage(rebuildLoaded(line(), KNOWN), { image: "pi-job:4.3.1", imageDigest: `sha256:${"a".repeat(64)}`, piVersion: "1.5.0", fromJob: true }), "a".repeat(40)));
+	const loaded = recordedLoaded(loadedWithBase(loadedWithImage(rebuildLoaded(line({ promptAdditions: { overlay: "a".repeat(64), repository: null } }), KNOWN), { image: "pi-job:4.3.1", imageDigest: `sha256:${"a".repeat(64)}`, piVersion: "1.5.0", fromJob: true }), "a".repeat(40)));
 	// Not `v`, the field's own version, which the JSON above the table shows.
 	assert.deepEqual(rows.flatMap((row) => row.keys).filter((key, i, all) => all.indexOf(key) === i).sort(), Object.keys(loaded).filter((key) => key !== "v").sort(), "every key of the field, and no other");
 	// `at`, `cut` and `pi` read in the runner's table (INT-RUNNER-EXIT-CODE-PROTOCOL) and the image's three in one row of their own, so they
 	// have no separate rows. Everything else is this contract's to explain, and the row that lists all the runner's part says only when
 	// each is null. So a row of its own, or deleting one would stay green on that list. A hand-kept list because the relation is a choice of how to
 	// write the table, which nothing derives.
-	const OWN_ROW = ["runner", "flow", "sources", "mcp", "tools", "problems", "imageFromJob", "baseSha", "leftOut"];
+	const OWN_ROW = ["runner", "flow", "sources", "mcp", "tools", "problems", "imageFromJob", "baseSha", "leftOut", "promptAdditions"];
 	const rowOf = (key) => rows.find((row) => row.keys.length === 1 && row.keys[0] === key);
 	for (const key of OWN_ROW) assert.ok(rowOf(key), `the table has no row of its own for \`${key}\``);
 	assert.deepEqual(rows.filter((row) => row.keys.length === 1).map((row) => row.keys[0]).sort(), [...OWN_ROW].sort());
@@ -789,7 +790,7 @@ test("docs/global-pi-overlay.md says what a record holds for each tier, and what
 	// `other` has no bullet, and that is no gap: it is a path no root holds, nothing an operator staged or can read a list of, and it
 	// is on a run's page as "elsewhere" by count. Every other tier has one, so a tier added to the record has to say here whether it does.
 	assert.deepEqual([...Object.keys(TIER_BULLETS), "other"].sort(), [...record.LOADED_TIERS].sort());
-	assert.deepEqual(heads, [...Object.values(TIER_BULLETS), "The flow", "What was left out on purpose"]);
+	assert.deepEqual(heads, [...Object.values(TIER_BULLETS), "Prompt additions", "The flow", "What was left out on purpose"]);
 	const bullet = (head) => section.slice(section.indexOf(`- **${head}:**`)).split(/\n- \*\*/)[0].replace(/\s+/g, " ");
 
 	// What each bullet says the record keeps, from the record.
@@ -802,7 +803,7 @@ test("docs/global-pi-overlay.md says what a record holds for each tier, and what
 	assert.deepEqual(Object.keys(source(loaded, "trigger")).sort(), countsOnly);
 	assert.match(bullet(TIER_BULLETS.trigger), /counts\./);
 	assert.deepEqual(Object.keys(source(loaded, "repository")).sort(), countsOnly);
-	assert.match(bullet(TIER_BULLETS.repository), /counts, and nothing else/);
+	assert.match(bullet(TIER_BULLETS.repository), /resource counts, without repository-chosen names/);
 	assert.match(bullet("The flow"), /the tier it was found in, or that none held it/);
 	assert.ok(record.LOADED_FLOW_WORDS.includes("none"));
 	// One clause per key `leftOut` has. They are the doc's words and not the keys', so the pairing is written out.
@@ -1329,4 +1330,25 @@ test("recordedLoaded keeps none of the source's lists: every list on the record 
 		assert.notEqual(list, lists(source)[at], `${at}`);
 		assert.deepEqual(list, lists(source)[at], `${at}`);
 	});
+});
+
+
+test("prompt addition hashes survive the line and record readers without accepting arbitrary text", () => {
+	const promptAdditions = { overlay: "a".repeat(64), repository: null };
+	const result = record.rebuildLoaded(line({ promptAdditions }), KNOWN);
+	assert.equal(result.runner, "reported");
+	assert.deepEqual(result.promptAdditions, promptAdditions);
+	assert.deepEqual(record.recordedLoaded(result).promptAdditions, promptAdditions);
+	for (const invalid of [{ overlay: "private prompt", repository: null }, { overlay: "a".repeat(64) }, { ...promptAdditions, text: "private" }]) {
+		assert.equal(record.rebuildLoaded({ ...line(), promptAdditions: invalid }, KNOWN).runner, "invalid");
+	}
+	const old = record.rebuildLoaded(line(), KNOWN);
+	assert.equal(Object.hasOwn(old, "promptAdditions"), false);
+	assert.equal(record.rebuildLoaded({ ...fitLoaded(line())[2], promptAdditions }, KNOWN).runner, "invalid");
+	for (const [index, form] of fitLoaded(line({ promptAdditions })).entries()) {
+		const read = record.rebuildLoaded(form, KNOWN);
+		assert.equal(read.runner, "reported");
+		assert.equal(Object.hasOwn(read, "promptAdditions"), index !== 2);
+		if (index === 2) assert.equal(record.recordedLoaded({ ...read, promptAdditions }), null);
+	}
 });

@@ -51,7 +51,11 @@ refines but never removes the one above:
 - **Persona**: the assembled prompt is `guardrails → outbox protocol → global persona → repo persona`. The
   floor is always first and cannot be removed; global is your baseline; the repo's `.pi/APPEND_SYSTEM.md` is
   most specific. The outbox tier is **local jobs only**: it is read only when the `/outbox` mount exists, so
-  a forge job's prompt never carries it.
+  a forge job's prompt never carries it. The runner reads both append files once when it constructs the loader
+  and reuses that text on reload; edit and re-import for a later session. Identical global and repository
+  append files contribute one block, while the record retains both source hashes. Watch and answer-draft sessions use
+  append text from the same configured overlay. External extensions and independent child processes must compose their own
+  prompts; this loader does not establish that their model calls inherit the additions.
 - **Models**: the overlay's `models.json` makes a **custom provider/model** resolvable. Definitions only —
   the credential still comes from the environment, never the overlay.
 - **The repo's own files load too** (tier 3b). A job's checkout is always the base repo at its
@@ -63,6 +67,11 @@ refines but never removes the one above:
   discovery: same files, read from the pinned SHA onto a read-only mount the agent cannot rewrite mid-run. See
   [`SECURITY.md`](../SECURITY.md) for what that posture costs and how to turn it off if you service repos you
   do not control.
+
+`pi-dispatch doctor` checks the staged global append file too: local output shows its SHA-256 when readable
+and nonblank, reports an absent file as unconfigured, warns for blank text and reports an unreadable file as
+an error. Links and special files are refused without opening them. It prints no persona text. The hash describes the staged text now; an earlier run keeps its own hash.
+Successful doctor hash labels are not retained in the ordinary published check record.
 
 ## What a run loaded, and where to read it
 
@@ -76,10 +85,14 @@ to do about it. The record holds, by tier:
 - **The overlay:** each extension by its first path segment, each that failed, and the tools each brought; its skills
   as a count.
 - **A trigger's `run.skillsDir`:** counts.
-- **The repository's `.pi/`:** counts, and nothing else. A repository picks its own names, so its skills and extensions
+- **The repository's `.pi/`:** resource counts, without repository-chosen names. A repository picks its own names, so its skills and extensions
   are numbers on the record, and you read them in the repository. On a run with a forge link, the page opens the base commit
   from a repository extension's problem and from its row of repository skills: the code that ran, which the repository may
   have moved on from. A record that names no commit (an older worker's) opens the repository and says so.
+- **Prompt additions:** the overlay and repository append-text SHA-256 values, or null for an absent or
+  zero-length source. These describe the text read at session start, not the complete role or provider prompt.
+  An omitted field, including older or cut records, means unknown. Same-process extensions can forge these
+  shaped values, so they are observations rather than independent proof of a model request.
 - **The flow:** the tier it was found in, or that none held it. It is still a report: a job with no flow runs and can exit 0,
   which is why the run's outcome says so.
 - **What was left out on purpose:** `run.excludeTools`, `run.excludeExtensionTools`, `run.excludeExtensions`, `"packages": false`, this job's overlay switch

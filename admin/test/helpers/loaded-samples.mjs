@@ -52,7 +52,7 @@ export const loadedRecord = (over = {}) => ({
 });
 
 export const LOADED_SAMPLES = Object.freeze({
-  everything: () => loadedRecord(),
+  everything: () => loadedRecord({ loaded: loadedField({ promptAdditions: { overlay: "a".repeat(64), repository: null } }) }),
   leftOut: () => loadedRecord({ jobId: "gh-8251-r2", target: "acme/web#408", flow: "frontend-fix", host: "mini2", triggerIndex: 1, triggerType: "label", loaded: loadedField({ flow: { tier: "trigger", package: null }, sources: [source("overlay"), source("repository", { skills: 1 }), source("trigger", { skills: 1 }), source("other")], tools: { active: 3, own: ["read", "edit", "write"], job: [] }, leftOut: { tools: ["bash"], packages: true, overlayExtensions: false, restricted: false } }) }),
   leftOutOverlay: () => loadedRecord({ jobId: "gl-af91", kind: "gitlab", target: "acme/billing-ui!403", project: "billing", flow: "review", host: "mini2", triggerIndex: 3, triggerType: "pull_request", loaded: loadedField({ leftOut: { tools: [], packages: false, overlayExtensions: true, restricted: false } }) }),
   mcpConnected: () => loadedRecord({ jobId: "gh-2f6a", target: "acme/api#131", project: "api", flow: "triage", reason: "awaiting-input", triggerIndex: 6, triggerType: "label", loaded: loadedField({ mcp: [{ name: "linear", state: "connected", tools: 12 }], tools: { active: 24, own: ["read", "bash", "edit", "write"], job: ["await_human_input", "codemode", "tool_search"] } }) }),

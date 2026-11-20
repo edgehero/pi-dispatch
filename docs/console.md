@@ -1600,7 +1600,8 @@ is what ran.
 
 - **A run's page**, in the **Loaded** card under the Run card. Its top line says whether everything the trigger asks for
   loaded, or names what did not, with a button to where that is fixed. Under it is one line per kind: pi and its image,
-  the model, extensions, skills, MCP servers and tools. A fold holds each item and where it came from, what was left out,
+  the model, extensions, skills, MCP servers and tools, plus **Prompt additions** when their source hashes were
+  recorded. A fold holds each item and where it came from, what was left out,
   and what no top line mentions: a skill a package had replaced, prompt templates and themes, and an extension the
   recursion guard dropped.
 - **The Runs list and the run's outcome banner.** A run that completed without its flow reads **Completed, without its
@@ -1615,6 +1616,13 @@ is what ran.
 
 A running job's card says it arrives when the run ends, because the record is written from the job's exit line. A run
 from an older release, or one that never reached its container, has no list, and the card says so rather than guess.
+
+**Prompt additions.** The row shows overlay and repository append-file SHA-256 values, with `none` for an
+absent or zero-length source. "SHA-256 of the append files loaded at session start. Role and provider prompts
+are separate." No row means the hashes were not recorded, not that no additions loaded. They describe UTF-8
+text read by the loader, not the complete request or an extension's child prompt. An extension in the reporting
+process can forge a shaped hash. The worker validates its shape and checks for known secret values, but has
+no independent copy to attest it. No prompt text appears here.
 
 **What it can name.** Names and versions only of what you staged and configured: a staged package, an overlay extension
 by its first path segment, a server the trigger names, pi's own tools, and the tools a package or an overlay extension

@@ -195,10 +195,11 @@ const emptyRow = () => LOADED_ROW.map(() => 0);
  * `flow` is absent when the job names none, and `none` when it names one that loaded in no tier. Those two read
  * differently because the second is the failure this field exists to surface.
  */
-export function buildLoaded({ at, pi, roots, flow = null, extensions = [], skills = [], prompts = [], themes = [], failures = [], drops = [], shadowed = [], tools = null, active = [], ownNames = [], mcp = null, unmatched = [] }) {
+export function buildLoaded({ at, pi, roots, promptAdditions, flow = null, extensions = [], skills = [], prompts = [], themes = [], failures = [], drops = [], shadowed = [], tools = null, active = [], ownNames = [], mcp = null, unmatched = [] }) {
 	const cut = { form: "full", packages: 0, servers: 0, names: 0, counts: 0 };
 	const out = { v: LOADED_VERSION, at, pi: typeof pi === "string" && pi !== PI_VERSION_UNKNOWN && pi.length <= PI_VERSION_MAX && PI_VERSION_RE.test(pi) ? pi : null };
 	if (roots === undefined) return { ...out, cut };
+	if (promptAdditions !== undefined) out.promptAdditions = promptAdditions;
 
 	const packages = roots.packages ?? [];
 	const tiers = Object.fromEntries(LOADED_TIERS.map((tier) => [tier, emptyRow()]));

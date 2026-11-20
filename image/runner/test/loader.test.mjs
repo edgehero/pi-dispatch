@@ -1784,6 +1784,7 @@ test("watch read-only loader never imports workspace, overlay, staged or ordinar
 	writeFileSync(join(f.workspace, ".pi", "extensions", "index.js"), malicious);
 	const overlay = join(root, "global");
 	mkdirSync(join(overlay, "extensions"), { recursive: true });
+	writeFileSync(join(overlay, "APPEND_SYSTEM.md"), "WATCH-PERSONA");
 	writeFileSync(join(overlay, "extensions", "index.js"), malicious);
 	const staged = join(root, "staged");
 	mkdirSync(staged);
@@ -1796,6 +1797,11 @@ test("watch read-only loader never imports workspace, overlay, staged or ordinar
 	assert.throws(() => readFileSync(sentinel), { code: "ENOENT" });
 	assert.equal(loader.getExtensions().extensions.length, 1);
 	assert.ok(loader.getAppendSystemPrompt().join("\n").includes(GUARDRAIL_SENTINEL));
+	assert.ok(loader.getAppendSystemPrompt().join("\n").includes("WATCH-PERSONA"));
+	writeFileSync(join(overlay, "APPEND_SYSTEM.md"), "CHANGED-PERSONA");
+	await loader.reload();
+	assert.ok(loader.getAppendSystemPrompt().join("\n").includes("WATCH-PERSONA"));
+	assert.ok(!loader.getAppendSystemPrompt().join("\n").includes("CHANGED-PERSONA"));
 	const agentDir = join(root, "agent"); mkdirSync(agentDir);
 	const modelRuntime = await createJobModelRuntime({ ModelRuntime: pi.ModelRuntime, agentDir, modelsPath: join(agentDir, "models.json") });
 	const { session } = await pi.createAgentSession({ cwd: f.workspace, agentDir, modelRuntime, settingsManager, resourceLoader: loader, ...watchToolOptions([], excludableToolNames(), watch.names) });

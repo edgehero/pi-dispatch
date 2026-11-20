@@ -57,7 +57,7 @@ export async function scriptedRuntime({ pi, piAi, createJobModelRuntime }, root,
 	modelRuntime.registerProvider(PROVIDER, {
 		api,
 		streamSimple(model, context, options) {
-			contexts.push({ model, messages: context.messages.slice(), reasoning: options?.reasoning });
+			contexts.push({ model, messages: context.messages.slice(), systemPrompt: context.systemPrompt, tools: context.tools?.slice(), reasoning: options?.reasoning });
 			onCall?.(contexts.length);
 			const content = script[Math.min(contexts.length - 1, script.length - 1)];
 			const message = { ...assistantMessage(content, { api: model.api }), provider: model.provider, model: model.id };
@@ -71,9 +71,9 @@ export async function scriptedRuntime({ pi, piAi, createJobModelRuntime }, root,
 }
 
 /** A real AgentSession over `sessionManager`, with the runner's loader and the given inline extension factories. */
-export async function scriptedSession(deps, f, { api, script, sessionManager, extensionFactories = [], excludeTools = [], onCall, reasoning = false, thinkingLevel }) {
+export async function scriptedSession(deps, f, { api, script, sessionManager, extensionFactories = [], excludeTools = [], onCall, reasoning = false, thinkingLevel, loaderOptions = {} }) {
 	const { pi, loaderModule } = deps;
-	const loader = await loaderModule.buildLoadedResourceLoader({ cwd: f.workspace, jobPiDir: f.jobPi, guardrailsPath: f.guardrailsPath, outboxProtocolPath: f.outboxProtocolPath, packagePaths: [], ...(extensionFactories.length > 0 && { extensionFactories }) });
+	const loader = await loaderModule.buildLoadedResourceLoader({ cwd: f.workspace, jobPiDir: f.jobPi, guardrailsPath: f.guardrailsPath, outboxProtocolPath: f.outboxProtocolPath, packagePaths: [], ...(extensionFactories.length > 0 && { extensionFactories }), ...loaderOptions });
 	const runtime = await scriptedRuntime(deps, f.root, api, script, { onCall, reasoning });
 	const { session } = await pi.createAgentSession({
 		cwd: f.workspace,

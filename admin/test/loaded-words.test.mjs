@@ -556,6 +556,7 @@ test("the card's rows: one line per kind, in the card's words", () => {
   assert.deepEqual(rows, {
     pi: ["pi 1.5.0 in pi-job:4.3.1", "image sha256:7c1e0b4…, as mini1 ran it"],
     Model: ["anthropic / claude-sonnet-5-5", "14 calls"],
+    "Prompt additions": [`Overlay: ${"a".repeat(64)}; repository: none`, "SHA-256 of the append files loaded at session start. Role and provider prompts are separate."],
     Extensions: ["pi-lint 1.4.2, pi-test-runner 0.9.0", "staged on mini1"],
     Skills: ["fix, the flow, from the repository", "and 3 more: 2 from the repository, 1 from pi-test-runner"],
     MCP: ["none", "trigger 3 names no server"],
@@ -1267,4 +1268,15 @@ test("what a trigger's page quotes: the newest run able to say what it loaded, a
   assert.deepEqual(Object.keys(triggerLastRun([S.mcpFailed()]).quoted.problems), ["MCP"]);
   assert.deepEqual(Object.keys(triggerLastRun([S.mcpTimeout()]).quoted.problems), ["MCP"]);
   assert.deepEqual(triggerLastRun([S.everything()]).quoted.problems, {});
+});
+
+
+test("prompt source hashes are shown only when reported, with absence distinct from older records", () => {
+  const record = onlyRecorded();
+  assert.ok(!loadedRows(record).some(row => row.label === "Prompt additions"));
+  record.loaded = { ...record.loaded, promptAdditions: { overlay: "a".repeat(64), repository: null } };
+  const row = loadedRows(record).find(row => row.label === "Prompt additions");
+  assert.ok(row);
+  assert.match(wordsText(row.value), /Overlay: a{64}; repository: none/);
+  assert.match(row.more, /Role and provider prompts are separate/);
 });

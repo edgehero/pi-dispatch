@@ -1331,6 +1331,10 @@ passing, on the record — issue #80.)
 
 - **Statement**: Static persona text lives in the system prompt (the cached prefix). Volatile per-job
   data lives in the user prompt. Persona shall never be injected per-message.
+  The runner snapshots the overlay and repository append text once when constructing its resource loader;
+  a reload reuses that text instead of reading an edit between turns. Optional source hashes identify those
+  additions only: they are not proof of the complete system prompt, a provider request or a child extension's
+  composition. No particular persona text, tag format or new authority is required by this constraint.
 - **Why**: pi's provider layer attaches `cache_control: {type:"ephemeral"}` to the system prompt by
   default. A multi-KB persona therefore costs ~1.25× once and ~0.1× per subsequent turn, and occupies
   the context window **once**. Rejected pattern — injecting a persistent user message on every prompt
@@ -1664,3 +1668,4 @@ passing, on the record — issue #80.)
 | 2026-11-19 (Claude adapter 0.3.11) | UNCHANGED, checked: `CONST-PI-VERSION-PINNED`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY` and the container boundary. Adding a reviewed community adapter profile changes no constitutional constraint; pi and the primary SDK remain exactly pinned. |
 | 2026-11-19 (Opus scoped quota) | UNCHANGED, checked: `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY` and `CONST-PI-VERSION-PINNED`. Reviewed Fable scope applicability to exact Opus 5.5 changes no budget, billing, model-authority or pin constraint. |
 | 2026-11-20 (explicit auxiliary routes) | UNCHANGED, checked: `CONST-BUDGET-BEFORE-TOKENS` holds every auxiliary credential/model/quota refusal before mint, clone and reservation; the explicit paid grant shares the existing finite model and hard cost guards. `CONST-RETRY-INFRA-ONLY`, `CONST-PI-VERSION-PINNED`, container isolation and host-only refresh custody remain unchanged. |
+| 2026-11-20 (append snapshots) | `CONST-PERSONA-IN-CACHED-PREFIX` AMENDED: overlay and repository append text is read once per loader and retained across reloads; source hashes attest neither a complete request nor arbitrary child inheritance. `CONST-NO-CONTEXT-FILES-MANDATORY`, `CONST-BUDGET-BEFORE-TOKENS` and `CONST-PI-VERSION-PINNED` UNCHANGED, checked: no new authority, paid gate or pin. |

@@ -728,7 +728,9 @@ export function loadedRows(record, { past = false } = {}) {
   const facts = factsOf(record);
   if (loaded.runner !== "reported" || !saysWhatLoaded(loaded)) return loaded.image !== null || loaded.pi !== null ? [piRow(loaded, facts)] : [];
   const ran = movedPastStage(record);
-  return [piRow(loaded, facts), modelRow(facts), extensionsRow(loaded, facts, past), skillsRow(loaded, facts, past), mcpRow(loaded, facts, ran, past), toolsRow(loaded, ran)];
+  const additions = loaded.promptAdditions;
+  const promptRows = additions ? [{ icon: "layers", label: "Prompt additions", value: ["Overlay: ", additions.overlay ? code(additions.overlay) : "none", "; repository: ", additions.repository ? code(additions.repository) : "none"], more: "SHA-256 of the append files loaded at session start. Role and provider prompts are separate." }] : [];
+  return [piRow(loaded, facts), modelRow(facts), ...promptRows, extensionsRow(loaded, facts, past), skillsRow(loaded, facts, past), mcpRow(loaded, facts, ran, past), toolsRow(loaded, ran)];
 }
 
 /** One tier's count as a row of the fold, by the words `from` gives it. */

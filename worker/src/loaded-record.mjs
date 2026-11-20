@@ -193,6 +193,18 @@ const refuse = (word) => {
 	throw new LineViolation(word);
 };
 
+/** Source hashes only, never prompt text. Missing means an older reader or a cut report. */
+function promptAdditionHashes(raw) {
+	if (!isObject(raw) || Object.keys(raw).length !== 2) return undefined;
+	const result = {};
+	for (const key of ["overlay", "repository"]) {
+		const value = raw[key];
+		if (value !== null && !(typeof value === "string" && /^[a-f0-9]{64}$/.test(value))) return undefined;
+		result[key] = value;
+	}
+	return result;
+}
+
 function readCut(raw) {
 	if (!isObject(raw) || !LOADED_FORMS.includes(raw.form)) refuse("cut");
 	for (const key of ["packages", "servers", "names", "counts"]) if (!isCount(raw[key])) refuse("cut");
@@ -340,13 +352,19 @@ function readLine(raw, known) {
 	const runner = { at: raw.at, cut: shownCut, pi: raw.pi, flow: null, sources: [], mcp: null, tools: null, problems: null };
 	if (early) {
 		// Those stages say the runner's version and no more: a count before anything loaded would be a claim.
-		if (raw.tiers !== undefined || raw.flow !== undefined) refuse("early-facts");
+		if (raw.tiers !== undefined || raw.flow !== undefined || raw.promptAdditions !== undefined) refuse("early-facts");
 		return runner;
 	}
 	// Every form keeps `cut`, and each of its two list counts agrees with the list the worker handed over.
 	if (cut.packages !== Math.max(0, packages.length - LOADED_MAX_PACKAGES)) refuse("packages-cut");
 	if (live && cut.servers !== Math.max(0, servers.length - LOADED_MAX_SERVERS)) refuse("servers-cut");
 	runner.flow = readFlow(raw, cut.form, packages);
+	if (raw.promptAdditions !== undefined) {
+		if (cut.form === "minimal") refuse("prompt-additions");
+		const hashes = promptAdditionHashes(raw.promptAdditions);
+		if (!hashes || Object.values(hashes).some((hash) => hash !== null && holdsSecret(hash, known?.redact))) refuse("prompt-additions");
+		runner.promptAdditions = hashes;
+	}
 
 	if (cut.form === "minimal") {
 		if (!isCount(raw.failed) || !isCount(raw.dropped)) refuse("minimal");
@@ -571,7 +589,9 @@ function recordedRunnerPart(value) {
 		if (!isObject(value.problems) || !isCount(value.problems.failed) || !isCount(value.problems.dropped) || !(value.problems.mcp === null || isCount(value.problems.mcp, LOADED_MAX_SERVERS))) return undefined;
 		problems = { failed: value.problems.failed, dropped: value.problems.dropped, mcp: value.problems.mcp };
 	}
-	return { at: value.at, cut, pi: value.pi, flow, sources, mcp, tools, problems };
+	const promptAdditions = value.promptAdditions === undefined ? undefined : promptAdditionHashes(value.promptAdditions);
+	if (value.promptAdditions !== undefined && (promptAdditions === undefined || value.at === "start" || value.at === "none" || cut?.form === "minimal")) return undefined;
+	return { at: value.at, cut, pi: value.pi, flow, sources, mcp, tools, problems, ...(promptAdditions ? { promptAdditions } : {}) };
 }
 
 /**
@@ -598,12 +618,13 @@ export function recordedLoaded(value) {
 		runnerPart = recordedRunnerPart(value);
 		if (runnerPart === undefined) return null;
 	}
-	const { at, cut, pi, flow, sources, mcp, tools, problems } = runnerPart;
-	const out = { v: LOADED_RECORD_VERSION, runner: value.runner, at, cut, image, imageDigest, imagePi, ...fromJob, pi, flow, sources, mcp, tools, problems, leftOut, ...base };
+	const { at, cut, pi, flow, sources, mcp, tools, problems, promptAdditions } = runnerPart;
+	const out = { v: LOADED_RECORD_VERSION, runner: value.runner, at, cut, image, imageDigest, imagePi, ...fromJob, pi, flow, sources, mcp, tools, problems, leftOut, ...base, ...(promptAdditions ? { promptAdditions } : {}) };
 	if (Buffer.byteLength(JSON.stringify(out), "utf8") <= LOADED_RECORD_MAX_BYTES) return out;
 	// No job's line gets here today (the tests measure the worst one); a cap that grows would. REJECTED: null, as this read before.
 	// The bound falls after the image's facts are added, so a line that had passed every check then
 	// left no key at all, and the run read like an older worker's. What is left always fits: the image's three facts, at
 	// most 32 left-out tools, at most 16 names of each exclusion and the base commit, under 8 KiB between them.
-	return { ...out, runner: "cut", at: null, cut: null, pi: null, flow: null, sources: [], mcp: null, tools: null, problems: null };
+	const { promptAdditions: _promptAdditions, ...withoutAdditions } = out;
+	return { ...withoutAdditions, runner: "cut", at: null, cut: null, pi: null, flow: null, sources: [], mcp: null, tools: null, problems: null };
 }
