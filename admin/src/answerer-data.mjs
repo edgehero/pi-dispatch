@@ -70,7 +70,8 @@ export function makeAnswererService({ paths, env = {}, fs = nodeFs, now = Date.n
         if (role !== "operator") return { state: snapshot.state, partial: Boolean(snapshot.partial), rows: rows.map(answererPublicRow).filter(Boolean) };
         let config;
         try { config = parseTriggersDocument(fs.readFileSync(paths.triggersPath, "utf8"), paths.triggersPath); }
-        catch { return { state: "configuration-unavailable", partial: true, rows, rules: [], standing: [], stats: answererStats(rows, now()) }; }
+        // No `standing` list where the file that holds them did not load (issue #844): an empty one would read as none adopted.
+        catch { return { state: "configuration-unavailable", partial: true, rows, rules: [], stats: answererStats(rows, now()) }; }
         const standing = (config.standingAnswers ?? []).map(answer => ({ ...answer, used: rows.filter(r => r.sources?.some(s => s.kind === "standing" && s.id === answerStandingSource(answer).id)).length }));
         const selected = RUN_RE.test(runId ?? "") ? await currentDraft(store, rows.find(row => row.draftRunId === runId)?.runId ?? runId, config) : null;
         return { state: snapshot.state, partial: Boolean(snapshot.partial), rows, rules: (config.answerRules ?? []).map(rule => ({ ...rule, stats: answererStats(rows.filter(row => row.ruleId === rule.id), now()) })), standing, stats: answererStats(rows, now()), ...(selected ? { privateDraft: selected.draft, privateDraftProblem: selected.problem } : {}) };

@@ -1444,6 +1444,12 @@ test("the rules read joins retained local history, mirrored records and verified
   assert.equal(read.snapshot, snapshot);
   await captured.pageDeps.triggerList(snapshot);
   assert.equal(scans.length, 1, "the retained local scan is cached on the injected clock");
+  // A snapshot of the files alone says the fleet's Valkey was not read: the zones are not asked of it a second time.
+  const zonesAsked = zoneReads.length;
+  const filesOnly = await captured.pageDeps.triggerList({ triggers: snapshot.triggers, schedulersUnread: true });
+  assert.equal(zoneReads.length, zonesAsked);
+  assert.deepEqual(filesOnly.scheduleZones, {});
+  assert.deepEqual(filesOnly.records, [local], "this host's own history is still read");
   const input = { forge: "github", comment: "not persisted" };
   assert.deepEqual(captured.pageDeps.triggerCheck(input), { matched: null });
   assert.equal(checks[0].input, input);

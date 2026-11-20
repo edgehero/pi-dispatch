@@ -48,7 +48,7 @@ import { triggerListOf, TRIGGER_LIST_KINDS } from "../trigger-list.mjs";
 import { loadWatchData, parseWatchQuery, watchPanel, watchBoardPanel } from "./watch.mjs";
 import { readForkPoints } from "../run-fork.mjs";
 import { readTriggerEditor, triggerDetailOf, TRANSCRIPT_ID_RE } from "../read-model.mjs";
-import { ageText, beatAgeOf } from "./panels/common.mjs";
+import { ageText, beatAgeOf, hostsUnread } from "./panels/common.mjs";
 import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
 import { BACKEND_NAMES, BACKENDS } from "@edgehero/pi-dispatch/backends";
 import { RECOVERY_CAP } from "@edgehero/pi-dispatch/recovery-queue";
@@ -221,6 +221,8 @@ const PAGE_PANELS = Object.freeze({
  */
 function hostHeadline(view) {
   const host = view.data?.host ?? view.data?.snapshot?.hostBudgets?.find((h) => h.name === view.query?.name);
+  // Issue #844: no row because nothing was read is not a host without one.
+  if (!host && hostsUnread(view.data?.snapshot)) return html`Not known: the hosts could not be read, so nothing here says whether ${view.query?.name ?? "this host"} is live.`;
   if (!host) return html`No live registry row for ${view.query?.name ?? "this host"}.`;
   const venues = host.backends?.blessed ?? [];
   const jobs = host.jobs;
@@ -829,6 +831,9 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
       data.snapshot = null;
       // Issue #737: the page's primary read failed, so the hub may keep the last good panels and say `stale`.
       data.readFailed = true;
+      // Issue #844: what the deployment's files hold needs no Valkey, so a page still draws it rather than an empty
+      // list. Absent where the reader has none or it throws: a panel then says the fact could not be read.
+      try { if (typeof deps.fleet?.fileViews === "function") data.files = deps.fleet.fileViews() ?? null; } catch { data.files = null; }
     }
   }
   if (reads.includes("setup")) {
@@ -871,8 +876,13 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     catch { data.projectView = { id: q.id, state: "unreadable" }; }
   }
   if (name === "triggers") {
-    try { data.triggerList = typeof deps.triggerList === "function" ? await deps.triggerList(data.snapshot) : triggerListOf({ snapshot: data.snapshot, now }); }
-    catch { data.triggerList = triggerListOf({ snapshot: null, now }); }
+    // Issue #844: with no snapshot the rules still come from the files; what only Valkey says of them is marked unread.
+    const listed = data.snapshot ?? (data.files ? { ...data.files, schedulersUnread: true } : null);
+    try { data.triggerList = typeof deps.triggerList === "function" ? await deps.triggerList(listed) : triggerListOf({ snapshot: listed, now }); }
+    catch {
+      // The same input again, without the reader; and should the file views themselves be what it cannot take, none.
+      try { data.triggerList = triggerListOf({ snapshot: listed, now }); } catch { data.triggerList = triggerListOf({ snapshot: null, now }); }
+    }
   }
   if (name === "trigger") {
     // What the card draws, read once with the digest of those same bytes (`readTriggerGetsEntry`), and the digest only where a person's

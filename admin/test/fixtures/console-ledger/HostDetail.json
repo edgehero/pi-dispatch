@@ -73,6 +73,9 @@
     {"el":"host-budget-unknown.operator","kind":"state","status":"new","panel":"p-hostbudget","source":"admin/src/console/panels/host.mjs#hostBudget","golden":["panels/host-budget-unknown.operator"],"shows":["Free slots are not known","budget not known yet or unreadable"]},
     {"el":"A six hour bar chart","kind":"readme","status":"illustrative","reason":"the page draws one hour buckets, because the report has them"},
     {"el":"host-consumer-failed.operator","kind":"state","status":"new","panel":"p-hoststate","source":"admin/src/console/panels/host.mjs#hostState","golden":["panels/host-consumer-failed.operator"],"shows":["Queue consumer needs attention","Queue consumer stopped"]},
-    {"el":"host-consumer-idle.viewer","kind":"state","status":"new","panel":"p-hostrow","source":"admin/src/console/panels/host.mjs#hostRow","golden":["panels/host-consumer-idle.viewer"],"shows":["Queue consumers are responding","Last fetch","Last job taken","none observed"]}
+    {"el":"host-consumer-idle.viewer","kind":"state","status":"new","panel":"p-hostrow","source":"admin/src/console/panels/host.mjs#hostRow","golden":["panels/host-consumer-idle.viewer"],"shows":["Queue consumers are responding","Last fetch","Last job taken","none observed"]},
+    {"el":"host-no-snapshot.operator","kind":"state","status":"new","panel":"p-hoststate","source":"admin/src/console/panels/host.mjs#hostState","golden":["panels/host-no-snapshot.operator"],"shows":["Host not known","nothing here says whether build3 is live, late or gone"]},
+    {"el":"host-registry-never-read.viewer","kind":"state","status":"new","panel":"p-hostrow","source":"admin/src/console/panels/host.mjs#hostRow","golden":["panels/host-registry-never-read.viewer"],"shows":["The hosts could not be read, so what they hold is not known"]},
+    {"el":"host-outage.viewer","kind":"state","status":"new","panel":"p-hostrow","source":"admin/src/console/panels/host.mjs#hostRow","golden":["panels/host-outage.viewer"],"shows":["This host's run records could not be read"]}
   ]
 }

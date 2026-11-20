@@ -47,6 +47,8 @@ export async function renderAnswererState(state = "populated", role = "operator"
   if (state === "empty") { model.rows = []; model.rules = []; model.standing = []; parked.length = 0; }
   if (state === "unavailable") { model.state = "unavailable"; model.partial = true; model.rows = []; }
   if (state === "partial") model.partial = true;
+  // Issue #844: the store did not answer and neither did the snapshot; the rules and standing answers are the file's.
+  if (state === "no-snapshot") { model.state = "unavailable"; model.partial = true; model.rows = []; }
   if (state === "shadow") { model.rules[0].mode = "classify"; model.rows[0].draftExists = false; model.rows[0].status = "passed"; model.rows[0].passReason = "classify-only"; }
   if (state === "pending") { model.rows[0].draftExists = false; model.rows[0].status = "pending"; }
   if (state === "refused") { model.rows[0].draftExists = false; model.rows[0].status = "failed"; model.rows[0].passReason = "cap-refused"; }
@@ -54,7 +56,7 @@ export async function renderAnswererState(state = "populated", role = "operator"
   if (state === "stale") { model.privateDraft = null; model.privateDraftProblem = "config-changed"; }
   if (state === "dropped") { model.privateDraft = null; model.rows[0].draftExists = false; model.rows[0].status = "dropped"; }
   if (state === "long-names") parked[1].jobId = answererLongNames(model);
-  const data = { now, env: {}, answerer: model, snapshot: { parked, queue: { counts: {} }, hostBudgets: [] }, parkedChecks: Object.fromEntries(parked.map(p => [p.jobId, { ok: true }])) };
+  const data = { now, env: {}, answerer: state === "no-snapshot" && role !== "operator" ? { state: model.state, partial: model.partial, rows: model.rows } : model, snapshot: state === "no-snapshot" ? null : { parked, queue: { counts: {} }, hostBudgets: [] }, parkedChecks: Object.fromEntries(parked.map(p => [p.jobId, { ok: true }])) };
   const query = page === "run" ? { id: model.rows[0].runId } : {};
   if (page === "run") Object.assign(data, { run: { record: { jobId: model.rows[0].runId, project: "web", host: "mini2", backend: "local", kind: "github", target: "acme/web#512", reason: "awaiting-input", outcome: "completed", startedAt: new Date(now - 600000).toISOString(), endedAt: new Date(now - 240000).toISOString() } }, chat: { state: "parked", mode: "reply", jobState: "completed" }, chatAnswer: { ok: true }, transcript: { exists: true, ended: true } });
   return String((await renderPage(page, { session: { name: role === "operator" ? "ops" : "watcher", role }, data, query, readOnly })).html);
@@ -62,7 +64,7 @@ export async function renderAnswererState(state = "populated", role = "operator"
 
 const states = ["populated", "rules", "run", "stale", "dropped", "empty", "unavailable", "partial", "shadow", "pending", "refused", "no-sources", "long-names"];
 const { NOW } = await import("../../../launch/fixture-deployment.mjs");
-export const ANSWERER_DRAW = Object.fromEntries([...states.map(state => [`answerer-${state}.operator`, () => renderAnswererState(state, "operator", { now: NOW })]), ["answerer-populated.viewer", () => renderAnswererState("populated", "viewer", { now: NOW })], ["answerer-readonly.operator", () => renderAnswererState("populated", "operator", { now: NOW, readOnly: true })]]);
+export const ANSWERER_DRAW = Object.fromEntries([...states.map(state => [`answerer-${state}.operator`, () => renderAnswererState(state, "operator", { now: NOW })]), ["answerer-populated.viewer", () => renderAnswererState("populated", "viewer", { now: NOW })], ["answerer-no-snapshot.operator", () => renderAnswererState("no-snapshot", "operator", { now: NOW })], ["answerer-no-snapshot.viewer", () => renderAnswererState("no-snapshot", "viewer", { now: NOW })], ["answerer-readonly.operator", () => renderAnswererState("populated", "operator", { now: NOW, readOnly: true })]]);
 export const ANSWERER_PANEL_STATES = Object.freeze(Object.keys(ANSWERER_DRAW));
 
 export const AGENT_OVERVIEW_DRAW = Object.fromEntries(["populated", "partial", "unavailable"].map(state => [`agent-writes-${state}.operator`, async () => {

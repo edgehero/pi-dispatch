@@ -231,6 +231,9 @@ function doctorSaid(hit, { ok, notOk }) {
   return ["Doctor on ", { b: hit.host }, ...(hit.label === null ? [` reports ${what}. `] : [` reports ${what}: `, labelOf(hit.label), ". "]), ...notOk];
 }
 
+/** The sentence when the doctor results could not be read: what doctor says is not known, never "no result yet". */
+const DOCTOR_UNREAD = (what) => [`The doctor results could not be read, so nothing here says ${what}.`];
+
 /** The sentence when no host has published a doctor result at all. */
 const NO_DOCTOR_YET = (what) => [`No doctor result yet. A worker runs doctor a minute after it starts, and doctor says ${what}.`];
 
@@ -264,25 +267,41 @@ export function beatAgeOf(h) {
  * for an operator alone and the trigger step's Add button only where the console takes changes. A doctor that wrote
  * the provider section but not its `provider.key` check (one older than the id) is said in that step's sentence.
  *
+ * A step whose facts could not be read (issue #844) is a `check` that carries `unread: true` and says "not known":
+ * the worker, egress and provider steps with no snapshot, the forge step with them where the file holds a forge
+ * trigger (optional where it holds none, not known where no file was read), and the doctor's where its results alone
+ * could not be read. `unknown` counts them, and while it is above zero `lead` and `sub` say that what stands before the first
+ * job is not known. With no snapshot the trigger step is judged from `files` (the reader's `fileViews`), which needs
+ * no Valkey; `applies` stays false.
+ *
  * The egress and provider steps take the WORST published level of their named check across every host's record
  * (`egress.proxy` with its repeats, one per venue that runs a proxy); the forge step is optional without a forge
  * trigger, and otherwise the worst of every check in the `github` and `forges` sections, since no one check holds a
  * forge's credentials (`INT-DOCTOR-RESULTS-KEY`).
  */
-export function firstRunState(snapshot, { session = null, deployment = null, freshMs = FIRST_RUN_FRESH_MS } = {}) {
+export function firstRunState(snapshot, { session = null, deployment = null, freshMs = FIRST_RUN_FRESH_MS, files = null } = {}) {
   const s = snapshot !== null && typeof snapshot === "object" ? snapshot : null;
   const hosts = Array.isArray(s?.hostBudgets) ? s.hostBudgets.filter((h) => h && typeof h.name === "string") : [];
-  const triggerList = Array.isArray(s?.triggers?.triggers) ? s.triggers.triggers : [];
+  // The triggers view: the snapshot's, or with no snapshot the files' own (`fileViews`), which needs no Valkey.
+  const triggersView = s !== null ? s.triggers : files !== null && typeof files === "object" ? files.triggers ?? null : null;
+  const triggersRead = s !== null || (triggersView !== null && typeof triggersView === "object");
+  const triggerList = Array.isArray(triggersView?.triggers) ? triggersView.triggers : [];
   const runsDay = s?.runsDay ?? null;
   const noRun = s !== null && Array.isArray(s.runs) && s.runs.length === 0 && runsDay !== null && Array.isArray(runsDay.runs) && runsDay.runs.length === 0 && runsDay.partial !== true;
   const noHost = hosts.length === 0 && !s?.queue?.fleetDegraded;
   const applies = s !== null && noRun && (noHost || triggerList.length === 0);
   const doctorRows = doctorHostsOf(s).filter((r) => !r.unreadable);
   const doctorRead = s !== null && s.doctor && !s.doctor.unreachable;
+  // The doctor results were asked for and not read: no snapshot, or a read of them that failed. A snapshot that holds
+  // no doctor field at all was not asked, and stays "no result yet".
+  const doctorUnread = s === null || Boolean(s.doctor?.unreachable);
   const role = session?.role === "operator" ? "operator" : session?.role === "viewer" ? "viewer" : session?.role === "agent" ? "agent" : null;
 
   // `host` (issue #849): the host whose doctor result judged the step, where one did, so a page sends a person to /setup only for its own host's problem.
   const step = (id, state, sentence, { commands = [], host = null } = {}) => ({ id, state, title: state === "ready" ? STEP_TITLES[id].done : STEP_TITLES[id].todo, sentence, commands, ...(host === null ? {} : { host }) });
+  // A step whose facts could not be read (issue #844): a check, marked `unread`, that says "not known". Never "not
+  // yet" or "to do": those say what a read showed, and send a person to start a worker that may be running.
+  const unread = (id, sentence, opts) => ({ ...step(id, "check", sentence, opts), unread: true });
 
   const steps = [];
   // 1. Where the console reads its files: the deployment folder, by its last folder.
@@ -299,7 +318,8 @@ export function firstRunState(snapshot, { session = null, deployment = null, fre
   const workerCommands = [FIRST_RUN_COMMANDS.service, FIRST_RUN_COMMANDS.worker];
   const connected = Number.isSafeInteger(s?.queue?.workers) && s.queue.workers > 0 ? s.queue.workers : 0;
   const fresh = hosts.filter((h) => { const age = beatAgeOf(h); return age !== null && age <= freshMs; });
-  if (s?.queue?.fleetDegraded) steps.push(step("worker", "check", ["The host registry could not be read, so whether a worker runs is not known."], { commands: workerCommands }));
+  if (s === null) steps.push(unread("worker", ["Valkey could not be read, so nothing here says whether a worker runs."], { commands: workerCommands }));
+  else if (s?.queue?.fleetDegraded) steps.push(step("worker", "check", ["The host registry could not be read, so whether a worker runs is not known."], { commands: workerCommands }));
   else if (fresh.length > 0) steps.push(step("worker", "ready", fresh.length === 1 ? [{ b: fresh[0].name }, " beats."] : [`${fresh.length} hosts beat, `, { b: fresh[0].name }, " among them."]));
   else if (hosts.length > 0) {
     const newest = hosts.reduce((a, h) => (beatAgeOf(h) !== null && (a === null || beatAgeOf(h) < beatAgeOf(a)) ? h : a), null);
@@ -313,7 +333,8 @@ export function firstRunState(snapshot, { session = null, deployment = null, fre
     steps.push(step("egress", stateOfLevel(egress.level), doctorSaid(egress, { ok: "found the egress proxy running", notOk: ["Every job is refused before it starts until the egress proxy runs."] }), { commands: egress.level === "ok" ? [] : [FIRST_RUN_COMMANDS.up] , host: egress.host }));
   } else if (newest !== null) {
     steps.push(step("egress", "check", ["Doctor on ", { b: newest.host }, " names no egress proxy: egress may be off there, or its doctor predates the check."], { commands: [FIRST_RUN_COMMANDS.doctor] , host: newest.host }));
-  } else steps.push(step("egress", "to-do", NO_DOCTOR_YET("whether the egress proxy runs"), { commands: [FIRST_RUN_COMMANDS.doctor] }));
+  } else if (doctorUnread) steps.push(unread("egress", DOCTOR_UNREAD("whether the egress proxy runs"), { commands: [FIRST_RUN_COMMANDS.doctor] }));
+  else steps.push(step("egress", "to-do", NO_DOCTOR_YET("whether the egress proxy runs"), { commands: [FIRST_RUN_COMMANDS.doctor] }));
   // 6. The provider key: present or not, never its value.
   const provider = doctorRead ? worstCheck(doctorRows, (id) => PROVIDER_ID_RE.test(id)) : null;
   if (provider !== null) {
@@ -321,17 +342,21 @@ export function firstRunState(snapshot, { session = null, deployment = null, fre
   } else if (newest !== null) {
     const predates = doctorRows.some((r) => (Array.isArray(r.checks) ? r.checks : []).some((c) => typeof c?.id === "string" && PROVIDER_DERIVED_RE.test(c.id)));
     steps.push(step("provider", "check", predates ? ["Doctor on ", { b: newest.host }, " checked the provider but not the key by name: its doctor predates the check."] : ["Doctor on ", { b: newest.host }, " did not judge the provider key."], { commands: [FIRST_RUN_COMMANDS.doctor] , host: newest.host }));
-  } else steps.push(step("provider", "to-do", NO_DOCTOR_YET("whether the provider key is found"), { commands: [FIRST_RUN_COMMANDS.doctor] }));
+  } else if (doctorUnread) steps.push(unread("provider", DOCTOR_UNREAD("whether the provider key is found"), { commands: [FIRST_RUN_COMMANDS.doctor] }));
+  else steps.push(step("provider", "to-do", NO_DOCTOR_YET("whether the provider key is found"), { commands: [FIRST_RUN_COMMANDS.doctor] }));
   // 7. A first trigger arms matching deliveries; a manual run can already be queued without one.
   if (triggerList.length > 0) steps.push(step("trigger", "ready", [`The triggers file holds ${triggerList.length} ${triggerList.length === 1 ? "trigger" : "triggers"}.`]));
-  else if (s?.triggers?.unreadable) steps.push(step("trigger", "not-yet", [`The triggers file could not be read here${typeof s.triggers.unreadable === "string" ? ` (${s.triggers.unreadable})` : ""}, so this cannot say which triggers it holds.`]));
-  else if (s?.triggers?.invalid) steps.push(step("trigger", "not-yet", ["The triggers file does not load, so no trigger can match."]));
+  else if (!triggersRead) steps.push(unread("trigger", ["The triggers file was not read, so this cannot say which triggers it holds."]));
+  else if (triggersView?.unreadable) steps.push(step("trigger", "not-yet", [`The triggers file could not be read here${typeof triggersView.unreadable === "string" ? ` (${triggersView.unreadable})` : ""}, so this cannot say which triggers it holds.`]));
+  else if (triggersView?.invalid) steps.push(step("trigger", "not-yet", ["The triggers file does not load, so no trigger can match."]));
   else steps.push(step("trigger", "to-do", ["A matching trigger starts a scheduled or forge job: a cron trigger for a folder, or a label, comment or pull request trigger for a repository. A manual run can be queued without a trigger."]));
   // 8. The forge credentials: only a forge's triggers need them.
   const forgeTrigger = triggerList.some((t) => t && t.type !== "cron");
   const forge = forgeTrigger && doctorRead ? worstCheck(doctorRows, (id) => FORGE_ID_RE.test(id)) : null;
-  if (!forgeTrigger) steps.push(step("forge", "optional", ["Only label, comment, issue and pull request triggers need them. Cron triggers on local folders run without."], { commands: [FIRST_RUN_COMMANDS.github] }));
+  if (!triggersRead) steps.push(unread("forge", ["The triggers file was not read, so nothing here says whether a trigger needs forge credentials."], { commands: [FIRST_RUN_COMMANDS.github] }));
+  else if (!forgeTrigger) steps.push(step("forge", "optional", ["Only label, comment, issue and pull request triggers need them. Cron triggers on local folders run without."], { commands: [FIRST_RUN_COMMANDS.github] }));
   else if (forge !== null) steps.push(step("forge", stateOfLevel(forge.level), doctorSaid(forge, { ok: "found the forge credentials", notOk: ["A forge trigger's jobs need them to read and answer on the forge."] }), { commands: forge.level === "ok" ? [] : [FIRST_RUN_COMMANDS.github] }));
+  else if (doctorUnread) steps.push(unread("forge", DOCTOR_UNREAD("whether the forge credentials work"), { commands: [FIRST_RUN_COMMANDS.github] }));
   else steps.push(step("forge", "to-do", newest === null ? NO_DOCTOR_YET("whether the forge credentials work") : ["Doctor on ", { b: newest.host }, " did not check the forge credentials."], { commands: [FIRST_RUN_COMMANDS.github] }));
 
   const ready = steps.filter((x) => x.state === "ready").length;
@@ -341,7 +366,13 @@ export function firstRunState(snapshot, { session = null, deployment = null, fre
   const needs = missing.map((x) => STEP_NEEDS[x.id]);
   const list = needs.length <= 1 ? needs.join("") : `${needs.slice(0, -1).join(", ")} and ${needs[needs.length - 1]}`;
   const sub = n === 0 ? "Nothing a job needs is missing. This page updates as each step is done." : `Jobs start once ${list}. This page updates as each step is done.`;
-  return { applies, ready, total: FIRST_RUN_STEPS.length, lead, sub, doctor: newest, steps };
+  // With a step that could not be read, neither line may say what stands before the first job, or that nothing does.
+  const unknown = steps.filter((x) => x.unread === true).length;
+  if (unknown > 0) {
+    const many = `${NUMBER_WORDS[unknown] ?? String(unknown)} ${unknown === 1 ? "step" : "steps"} could not be read`;
+    return { applies, ready, unknown, total: FIRST_RUN_STEPS.length, lead: `The console is up. ${many}, so what stands between this deployment and its first job is not known.`, sub: `${n === 0 ? `${many}, so whether anything a job needs is missing is not known.` : `A first job waits until ${list}; ${many.toLowerCase()}, so it may wait for more.`} This page updates as each step is read.`, doctor: newest, steps };
+  }
+  return { applies, ready, unknown, total: FIRST_RUN_STEPS.length, lead, sub, doctor: newest, steps };
 }
 
 /** A step's sentence as plain text (`firstRunState`'s parts joined; an age in the console's words). */

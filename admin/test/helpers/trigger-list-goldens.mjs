@@ -10,6 +10,7 @@ import { triggerListOf } from "../../src/trigger-list.mjs";
 import { checkTriggerEvent } from "../../src/trigger-check.mjs";
 import { loadPageData, renderPage } from "../../src/console/pages.mjs";
 import { renderTriggerCheckResult } from "../../src/console/panels/triggers.mjs";
+import { noSnapshotFleet } from "./no-snapshot.mjs";
 
 const entries = [
   { on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/srv/web", flow: "tidy", task: "PRIVATE TASK CANARY" } },
@@ -40,7 +41,8 @@ export async function triggerListGolden({ role = "operator", state = "history-cu
   const records = recordsOverride !== undefined ? recordsOverride : state === "history-unknown" ? null : [{ jobId: "gh-list", kind: "github", triggerIndex: 1, triggerType: "label", flow: "fix", outcome: "completed", startedAt: new Date(NOW - 120000).toISOString(), endedAt: new Date(NOW - 60000).toISOString(), tokens: { metered: true, cost: 0.01, calls: 1, input: 1, output: 1, total: 2 } }];
   const data = await loadPageData(name, name === "triggers" ? { kind } : {}, {
     now: () => NOW,
-    fleet: { snapshot: async () => snapshot, parkedCount: async () => 0 },
+    // `no-snapshot` (issue #844): Valkey does not answer, so the list is built over the reader's file views alone.
+    fleet: state === "no-snapshot" ? noSnapshotFleet() : { snapshot: async () => snapshot, parkedCount: async () => 0 },
     triggerList: snap => triggerListOf({ snapshot: snap, now: NOW, records, coverage: { complete }, scheduleZones: state === "zone-unknown" ? {} : { nightly: "UTC" } }),
   }, { role });
   const rendered = await renderPage(name, { query: name === "triggers" ? { kind } : {}, session: { name: role === "operator" ? "ops" : "watcher", role }, data, readOnly });
@@ -62,6 +64,7 @@ export const TRIGGER_LIST_DRAW = Object.freeze({
   "triggers-dense.operator": () => triggerListGolden({ state: "dense" }),
   "triggers-empty.viewer": () => triggerListGolden({ role: "viewer", state: "empty" }),
   "triggers-unreadable.viewer": () => triggerListGolden({ role: "viewer", state: "unreadable" }),
+  "triggers-no-snapshot.operator": () => triggerListGolden({ state: "no-snapshot" }),
   "triggers-history-cut.operator": () => triggerListGolden(),
   "triggers-history-unknown.viewer": () => triggerListGolden({ role: "viewer", state: "history-unknown" }),
   "triggers-zone-unknown.operator": () => triggerListGolden({ state: "zone-unknown" }),

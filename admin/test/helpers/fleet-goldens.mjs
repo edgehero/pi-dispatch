@@ -4,6 +4,7 @@ import { DEFER_BUCKETS, DEFER_WHYS } from "@edgehero/pi-dispatch/defer-reasons";
 import { parseHostBackends } from "@edgehero/pi-dispatch/backends";
 import { NOW } from "../../../launch/fixture-deployment.mjs";
 import { loadPageData, parsePageQuery, renderPage } from "../../src/console/pages.mjs";
+import { noSnapshotFleet, RUNS_PAGE_IN_OUTAGE } from "./no-snapshot.mjs";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -40,10 +41,10 @@ export const FLEET_CARD_SNAPSHOT = snapshot;
 
 const capacity = () => ({ window: { fromMs: NOW - 7 * 24 * HOUR, toMs: NOW, bucketMs: HOUR }, truncated: false, coverage: ["History from the fleet run mirror"], hosts: [{ name: "build3", slots: 3, fromMs: NOW - 6 * 24 * HOUR, truncated: false, facts: { busy: "64%", idle: "36%", missing: "14%", avg: "1.4", peak: 3, slots: 3, full: "21%", wait: "p50 9s, p95 1m (12 runs)", memory: "memory 60% of the 24 GiB budget", cpu: "CPU 58% of the 12 core budget", cpuUsed: "42% of the host's 13 CPUs", projects: ["web 32h", "billing 14h"] }, caveats: ["1 orphaned container counted as busy"], notes: "Jobs only, not a machine utilization measurement", buckets: Array.from({ length: 168 }, (_, i) => ({ fromMs: NOW - (168 - i) * HOUR, coveredMs: i < 24 ? 0 : HOUR, busyMs: i < 24 ? 0 : 35 * MIN, fullMs: i % 9 ? 0 : 10 * MIN, peak: i < 24 ? 0 : 1 + i % 3, avgMilli: i < 24 ? 0 : 500 + i % 4 * 500 })) }] });
 
-async function draw(page, { role = "operator", name = "build3", snap = snapshot(), plan = null, history = [], readOnly = false, cap = capacity() } = {}) {
+async function draw(page, { role = "operator", name = "build3", snap = snapshot(), plan = null, history = [], readOnly = false, cap = capacity(), fleet = null } = {}) {
   const parsed = parsePageQuery(page, page === "fleet" ? "" : new URLSearchParams({ name }));
   assert.ok(parsed.query, parsed.refusal);
-  const data = await loadPageData(page, parsed.query, { now: () => NOW, fleet: { snapshot: async () => snap, runsPage: async () => ({ runs: history, mirror: "ok", next: null }), parkedCount: async () => 0 }, killSwitchPlan: () => plan, hostCapacity: async () => cap });
+  const data = await loadPageData(page, parsed.query, { now: () => NOW, fleet: fleet ?? { snapshot: async () => snap, runsPage: async () => ({ runs: history, mirror: "ok", next: null }), parkedCount: async () => 0 }, killSwitchPlan: () => plan, hostCapacity: async () => cap });
   const result = await renderPage(page, { query: parsed.query, session: { name: role === "operator" ? "ops" : "watcher", role }, data, readOnly, theme: null, maxStreams: 4 });
   assert.equal(result.status, 200, `${page}/${name}`);
   return String(result.html);
@@ -73,6 +74,13 @@ const states = {
   "host-fresh.viewer": () => draw("host", { role: "viewer" }),
   "host-stale.operator": () => draw("host", { snap: snapshot({ hostBudgets: [host({ staleMs: 3 * MIN, ttlAgeMs: 3 * MIN, skewMs: 40_000, noExpiry: true })] }) }),
   "host-gone.operator": () => draw("host", { snap: snapshot({ hostBudgets: [] }), history: [{ jobId: "gh-last", host: "build3", endedAt: new Date(NOW - HOUR).toISOString(), outcome: "completed" }] }),
+  // Issue #844: nothing read about the hosts is not a host that has gone. No snapshot at all, then a snapshot whose
+  // registry was never read; `host-gone` and `host-unknown` above are reads that showed no row.
+  "host-no-snapshot.operator": () => draw("host", { fleet: noSnapshotFleet(), cap: null }),
+  // The outage as the real reader answers it: the snapshot rejects, the runs page answers no run and an unreached mirror.
+  "host-outage.viewer": () => draw("host", { role: "viewer", fleet: noSnapshotFleet({ runsPage: async () => ({ ...RUNS_PAGE_IN_OUTAGE }) }), cap: null }),
+  "host-registry-never-read.viewer": () => draw("host", { role: "viewer", snap: snapshot({ hostBudgets: [], queue: { ...snapshot().queue, fleetDegraded: "registry" }, hostsReadAt: null, doctor: { unreachable: "registry" } }) }),
+  "venue-no-snapshot.operator": () => draw("venue", { name: "openshell", fleet: noSnapshotFleet() }),
   "host-unknown.viewer": () => draw("host", { role: "viewer", name: "unknown", snap: snapshot({ hostBudgets: [], doctor: { hosts: [], more: 0 } }) }),
   "host-retention-off.operator": () => draw("host", { snap: snapshot({ hostBudgets: [host({ sandboxes: [], sandboxRetentionHours: 0 })] }) }),
   "host-sandboxes-unreadable.operator": () => draw("host", { snap: snapshot({ hostBudgets: [host({ sandboxes: null, sandboxesMore: null })] }) }),

@@ -515,6 +515,7 @@ export async function readFleetQueues({ url, redisFn = makeRedisClient, timeoutM
     redis = redisFn(url);
     redis.on?.("error", () => {}); // a down Valkey is one clean line, never nine ioredis stack traces
     const { names, blind, hosts, incomplete } = await fleetQueuesOn(redis, { timeoutMs });
+    // `incomplete` only where the keyspace scan said so: a caller that claims "no queue holds it" needs to know.
     return { names, blind, hosts, ...(incomplete ? { incomplete } : {}) };
   } catch (err) {
     return { names: [QUEUE], blind: err?.message ?? String(err), hosts: [] };
@@ -5336,6 +5337,27 @@ export function createFleetReader(
         ...(waitingJobs !== null ? { waiting: waitingJobs } : {}),
         // Issue #737: what a switch preview's `queueCounts` cover, only on a call that asked for the switch's queues.
         ...(preview !== null ? { switchTotal: preview.total, switchTruncated: preview.truncated, switchIncomplete: preview.incomplete } : {}),
+      };
+    },
+    /**
+     * What the snapshot holds of the deployment's FILES (issue #844), under the snapshot's own keys and in its shapes:
+     * the triggers view, the projects, the settings, the scoped limits, the pause windows, the staged packages, the
+     * overlay's MCP servers, the scheduler stall cap and whether an allocation envelope is named. No Valkey read, so a page whose snapshot failed can still say
+     * what the files hold rather than draw them as empty. Not the trigger instructions or tasks (an overlay's alone),
+     * and nothing a file cannot answer (the scoped counters, the event statuses, a secret profile's hosts). Each reader
+     * is the one `snapshot()` calls and never throws: a file it cannot read is its own `{ unreadable }` or `{ invalid }`.
+     */
+    fileViews() {
+      return {
+        triggers: readTriggersWithInstructions({ triggersPath: paths.triggersPath }).view,
+        projects: readProjects({ projectsPath: paths.projectsFile }),
+        settings: readSettingsView({ settingsFile: paths.settingsFile }),
+        scopedLimits: readScopedLimits({ scopedLimitsPath: paths.scopedLimitsPath }),
+        pauseWindows: readPauseWindows({ pauseWindowsPath: paths.pauseWindowsPath }),
+        stagedPackages: readStagedPackages({ globalPiDir: paths.globalPiDir }),
+        overlayMcp: readOverlayMcpView({ globalPiDir: paths.globalPiDir }),
+        schedulerStallMax: paths.schedulerStallMax,
+        envelopeSet: typeof paths.envelopeFile === "string" && paths.envelopeFile !== "",
       };
     },
     /**

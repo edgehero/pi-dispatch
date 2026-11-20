@@ -139,15 +139,33 @@ export const table = (label, heads, rows, empty) =>
       </div>`
     : html`<p class="muted">${empty}</p>`;
 export const facts = (pairs) => ui.facts(pairs);
-export const fromSnapshot = (title, render) => (view) =>
-  ui.card({
+/** Above a card drawn from the files alone (issue #844): what it shows, and why it offers no change. */
+export const FILES_ONLY_TEXT = "Valkey could not be read, so this shows what the file holds and offers no change. Reload to try again.";
+/**
+ * The snapshot a file-backed card draws from where the snapshot itself failed (issue #844): the reader's `fileViews`
+ * under the snapshot's own keys, or null where there is none (they are only read when the snapshot failed). Nothing
+ * in it came from Valkey.
+ */
+export const filesSnapshot = (view) =>
+  view.data?.files && typeof view.data.files === "object" ? view.data.files : null;
+/**
+ * A card drawn from the snapshot. `files: true` marks one whose facts are all the deployment's files': with no
+ * snapshot it is drawn from `filesSnapshot`, read-only (a change is previewed against the queue and the hosts, which
+ * were not read), under `FILES_ONLY_TEXT`. Any other card says the read failed, never an empty list.
+ */
+export const fromSnapshot = (title, render, { files = false } = {}) => (view) => {
+  const only = files ? filesSnapshot(view) : null;
+  return ui.card({
     title,
     body: view.data?.snapshot
       ? render(view.data.snapshot, view)
-      : html`<p class="muted">
+      : only
+        ? html`<p class="muted">${FILES_ONLY_TEXT}</p>${render(only, { ...view, readOnly: true })}`
+        : html`<p class="muted">
           The deployment's Valkey could not be read. Reload to try again.
         </p>`,
   });
+};
 export const rowDelete = (action, index) =>
   actForm(action, {
     hidden: [["index", index, "int"]],
