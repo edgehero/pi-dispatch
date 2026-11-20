@@ -274,5 +274,6 @@ test("the trigger field inventory is the loader's normalized run contract, inclu
   const actual = [...CARD_FIELDS, ...EDIT_FIELDS, ...HAND_FIELDS];
   assert.equal(new Set(actual).size, actual.length, "every run field belongs to exactly one group");
   assert.deepEqual([...actual].sort(), [...keys].sort());
+  assert.ok(HAND_FIELDS.includes("auxiliaryModels"), "auxiliary billing is hand-authored, never a root-model editor field");
   assert.ok(!actual.includes("modelRoles"), "modelRoles is a top-level file policy, never a run field");
 });

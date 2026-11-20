@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 /** Host-only orchestration. Private snapshots never become job data, run records or telemetry. */
 import { COMMUNITY_AUTH_ADAPTERS } from "./community-auth-metadata.mjs";
 import { builtinModel } from "./model-catalog.mjs";
-import { splitModelEntry } from "./model-ref.mjs";
+import { splitModelEntry, auxiliaryModelsProblem } from "./model-ref.mjs";
 import { normalizeClaudeQuota, normalizeOpenAIQuota, normalizeSubscriptionQuotaError } from "./subscription-quota.mjs";
 import { LOCAL_FOLDER_HOLDS_SUBSCRIPTION_AUTH } from "./private-store-boundary.mjs";
 
@@ -25,14 +25,24 @@ export function subscriptionRoutes(job) {
 	const refs = new Map();
 	const add = (provider, id) => { if (provider && id) refs.set(`${provider}/${id}`, { provider, id }); };
 	add(job.provider, job.model);
-	for (const entry of job.models ?? []) { const ref = splitModelEntry(entry); if (ref) add(ref.provider, ref.model); }
+	for (const entry of [...(job.models ?? []), ...(job.auxiliaryModels ?? [])]) { const ref = splitModelEntry(entry); if (ref) add(ref.provider, ref.model); }
 	for (const role of [job.watchDecisionModel, job.questionGroupModel, job.answerDecisionModel]) add(role?.provider, role?.id);
 	return [...refs.values()];
+}
+
+// Auxiliary authority never changes a root candidate's billing class, even when an operator also lists
+// that candidate as an auxiliary model. The latter is useful for panels that include the chosen root.
+function auxiliaryRoute(job, ref) {
+	const key = `${ref.provider}/${ref.id}`;
+	const roots = [`${job.provider}/${job.model}`, ...(job.fallbackModels ?? []), ...(job.modelSelection?.candidates ?? [])];
+	for (const role of [job.watchDecisionModel, job.questionGroupModel, job.answerDecisionModel]) if (role) roots.push(`${role.provider}/${role.id}`);
+	return Array.isArray(job.auxiliaryModels) && job.auxiliaryModels.includes(key) && !roots.includes(key);
 }
 
 export function makeSubscriptionRuntime({ auth, quota, now = Date.now, lookup = builtinModel, packageRootFor = () => null, defaultBackend = "local", isPrivateStoreExposed = () => false } = {}) {
 	/** Whole-pool billing classification cannot return early on a quota wait and hide a paid alternative. */
 	async function inspectPolicy(job) {
+		if (job.auxiliaryModels !== undefined && (auxiliaryModelsProblem(job.auxiliaryModels, job.models) !== null || !Number.isSafeInteger(job.maxCostMicros) || job.maxCostMicros <= 0)) return { ok: false, managed: true, reason: "auth-route-unbounded" };
 		try {
 			if (await isPrivateStoreExposed(job)) return { ok: false, managed: true, reason: LOCAL_FOLDER_HOLDS_SUBSCRIPTION_AUTH };
 		} catch (error) {
@@ -45,12 +55,13 @@ export function makeSubscriptionRuntime({ auth, quota, now = Date.now, lookup = 
 			const model = lookup(ref.provider, ref.id);
 			const row = await auth.check(ref.provider, { model: ref.id, api: model?.api, baseUrl: model?.baseUrl, readOnly: true });
 			if (row.unavailable) return recordRefusal(row);
-			if (row.managed) managed = true; else unmanaged = true;
+			if (!auxiliaryRoute(job, ref)) { if (row.managed) managed = true; else unmanaged = true; }
 			if (row.ok) bindings[`${ref.provider}/${ref.id}`] = row.managed ? subscriptionBindingDigest(row) : null;
 		}
 		return managed && unmanaged ? { ok: false, managed: true, reason: "auth-mixed-billing" } : { ok: true, managed, bindings };
 	}
 	async function check(job, { attemptId = null, consumeTrial = false } = {}) {
+		if (job.auxiliaryModels !== undefined && (auxiliaryModelsProblem(job.auxiliaryModels, job.models) !== null || !Number.isSafeInteger(job.maxCostMicros) || job.maxCostMicros <= 0)) return { ok: false, managed: true, reason: "auth-route-unbounded" };
 		try {
 			if (await isPrivateStoreExposed(job)) return { ok: false, managed: true, reason: LOCAL_FOLDER_HOLDS_SUBSCRIPTION_AUTH };
 		} catch (error) {
@@ -58,36 +69,42 @@ export function makeSubscriptionRuntime({ auth, quota, now = Date.now, lookup = 
 		}
 		const managed = [];
 		let unmanaged = false;
+		let rootManaged = false;
+		const withRoot = (result) => job.auxiliaryModels === undefined ? result : { ...result, rootManaged };
 		for (const ref of subscriptionRoutes(job)) {
 			const model = lookup(ref.provider, ref.id);
 			const row = await auth.check(ref.provider, { model: ref.id, api: model?.api, baseUrl: model?.baseUrl });
-			if (job.modelSelectionBilling === "subscription" && !row.managed || job.modelSelectionBilling === "api" && row.managed || job.modelSelectionBinding && row.ok && subscriptionBindingDigest(row) !== job.modelSelectionBinding) return { ok: false, managed: true, reason: "auth-binding-changed" };
-			if (!row.managed) { unmanaged = true; continue; }
-			if (!row.ok) return row.reason === "auth-owner-host" ? { ok: false, managed: true, wait: "subscription-owner", until: now() + 60_000 } : recordRefusal(row);
-			if (!model?.api || !model?.baseUrl) return { ok: false, managed: true, reason: "auth-model-unverified" };
+			const primary = ref.provider === job.provider && ref.id === job.model;
+			if (primary) rootManaged = row.managed === true;
+			if ((primary || job.auxiliaryModels === undefined) && (job.modelSelectionBilling === "subscription" && !row.managed || job.modelSelectionBilling === "api" && row.managed || job.modelSelectionBinding && row.ok && subscriptionBindingDigest(row) !== job.modelSelectionBinding)) return withRoot({ ok: false, managed: true, reason: "auth-binding-changed" });
+			if (!row.managed) { if (!auxiliaryRoute(job, ref)) unmanaged = true; continue; }
+			if (!row.ok) return withRoot(row.reason === "auth-owner-host" ? { ok: false, managed: true, wait: "subscription-owner", until: now() + 60_000 } : recordRefusal(row));
+			if (!model?.api || !model?.baseUrl) return withRoot({ ok: false, managed: true, reason: "auth-model-unverified" });
 			// A finite list fences tools, child sessions and compaction as well as the root call. An unrestricted
 			// subscription job could otherwise switch to an unadmitted provider after this free gate.
-			if (!Array.isArray(job.models) || job.models.length === 0) return { ok: false, managed: true, reason: "auth-route-unbounded" };
-			if (ref.provider === "openai" && (job.watchDecisionModel?.provider === "openai" || job.questionGroupModel?.provider === "openai" || job.answerDecisionModel?.provider === "openai")) return { ok: false, managed: true, reason: "auth-capability-unsupported" };
-			if (["openshell", "openshell-bind"].includes(job.backend ?? defaultBackend) || job.canary === true) return { ok: false, managed: true, reason: "auth-venue-unsupported" };
+			if (!Array.isArray(job.models) || job.models.length === 0) return withRoot({ ok: false, managed: true, reason: "auth-route-unbounded" });
+			if (ref.provider === "openai" && (job.watchDecisionModel?.provider === "openai" || job.questionGroupModel?.provider === "openai" || job.answerDecisionModel?.provider === "openai")) return withRoot({ ok: false, managed: true, reason: "auth-capability-unsupported" });
+			if (["openshell", "openshell-bind"].includes(job.backend ?? defaultBackend) || job.canary === true) return withRoot({ ok: false, managed: true, reason: "auth-venue-unsupported" });
 			if (ref.provider === "anthropic") {
 				// Excluded by name too (issue #800): the adapter is a staged package, and left out of PI_PACKAGES it would stop the job at its load, inside a started
 				// container with its budget held. `row.adapter` is the policy's key, `pi-anthropic-oauth@0.3.6`, which the loader refuses as an extension's name; a trigger
 				// names the package, as the worker omits it (run-container.mjs) and `isSubscriptionAdapter` reads it, so the key's `package` is what compares.
-				if (job.packages === false || (Array.isArray(job.excludeExtensions) && job.excludeExtensions.includes(COMMUNITY_AUTH_ADAPTERS[row.adapter]?.package))) return { ok: false, managed: true, reason: "auth-adapter-disabled" };
+				if (job.packages === false || (Array.isArray(job.excludeExtensions) && job.excludeExtensions.includes(COMMUNITY_AUTH_ADAPTERS[row.adapter]?.package))) return withRoot({ ok: false, managed: true, reason: "auth-adapter-disabled" });
 				const staged = packageRootFor(row.adapter);
-				if (!staged) return { ok: false, managed: true, reason: "auth-adapter-unavailable" };
-				if (staged.refused) return { ok: false, managed: true, reason: staged.refused };
+				if (!staged) return withRoot({ ok: false, managed: true, reason: "auth-adapter-unavailable" });
+				if (staged.refused) return withRoot({ ok: false, managed: true, reason: staged.refused });
 			}
 			const paid = Number.isSafeInteger(row.extraUsageCreditMicros) && row.extraUsageCreditMicros > 0;
-			if (paid && (!Number.isSafeInteger(job.maxCostMicros) || job.maxCostMicros > row.extraUsageCreditMicros)) return { ok: false, managed: true, reason: "auth-credit-cap-required" };
+			if (paid && (!Number.isSafeInteger(job.maxCostMicros) || job.maxCostMicros > row.extraUsageCreditMicros)) return withRoot({ ok: false, managed: true, reason: "auth-credit-cap-required" });
 			const available = await quota.admit(subscriptionIdentity(row), { modelRef: `${ref.provider}/${ref.id}`, attemptId, consumeTrial, windows: row.quotaWindows ?? ["five-hour", "seven-day"], allowExtraUsage: paid, maxCreditMicros: row.extraUsageCreditMicros, requireExtraUsageKnownDisabled: ref.provider === "anthropic" });
 			const needsUsage = ref.provider === "anthropic" && (available.requiresUsage === true || available.status?.fresh === false && available.status?.state !== "exhausted");
-			if (!available.ok && !(consumeTrial === false && needsUsage && available.reason === "subscription-extra-usage" && available.status?.extraUsage?.enabled === null)) return available.reason === "subscription-quota" ? { ...available, managed: true, wait: "subscription-quota", until: available.until ?? now() + 60_000 } : { ...available, managed: true };
+			if (!available.ok && !(consumeTrial === false && needsUsage && available.reason === "subscription-extra-usage" && available.status?.extraUsage?.enabled === null)) return withRoot(available.reason === "subscription-quota" ? { ...available, managed: true, ...(job.auxiliaryModels === undefined ? {} : { auxiliary: !primary }), wait: "subscription-quota", until: available.until ?? now() + 60_000 } : { ...available, managed: true });
 			if (!managed.some((entry) => entry.provider === row.provider)) managed.push({ ...row, needsUsage });
 		}
-		if (managed.length && unmanaged) return { ok: false, managed: true, reason: "auth-mixed-billing" };
-		return { ok: true, managed, ...(job.modelSelection ? { binding: managed.length === 1 ? subscriptionBindingDigest(managed[0]) : null } : {}) };
+		const rootSubscriptions = managed.filter(row => subscriptionRoutes(job).some(ref => ref.provider === row.provider && !auxiliaryRoute(job, ref)));
+		if (rootSubscriptions.length && unmanaged) return withRoot({ ok: false, managed: true, reason: "auth-mixed-billing" });
+		const rootConnection = job.auxiliaryModels === undefined ? (managed.length === 1 ? managed[0] : null) : managed.find(row => row.provider === job.provider);
+		return withRoot({ ok: true, managed, ...(job.modelSelection ? { binding: rootConnection ? subscriptionBindingDigest(rootConnection) : null } : {}) });
 	}
 	async function prepare(job, { deadlineAt, signal, attemptId, renewable = false } = {}) {
 		const preview = await check(job);
@@ -103,7 +120,10 @@ export function makeSubscriptionRuntime({ auth, quota, now = Date.now, lookup = 
 			const prepared = await auth.prepareSnapshot(row.provider, { deadlineAt, signal, renewable });
 			if (!prepared.ok) return recordRefusal(prepared);
 			if (!prepared.snapshot) return { ok: false, managed: true, reason: "auth-binding-changed" };
-			if (job.modelSelectionBinding && subscriptionBindingDigest({ ...prepared.snapshot, ownerHost: row.ownerHost }) !== job.modelSelectionBinding) return { ok: false, managed: true, reason: "auth-binding-changed" };
+			// A provider rebound between quota admission and snapshot preparation needs fresh admission. Ordinary
+			// access-token refresh may change generation, which the stable binding digest deliberately excludes.
+			if (job.auxiliaryModels !== undefined && (!subscriptionBindingDigest(row) || subscriptionBindingDigest({ ...prepared.snapshot, ownerHost: row.ownerHost }) !== subscriptionBindingDigest(row))) return { ok: false, managed: true, reason: "auth-binding-changed" };
+			if (job.modelSelectionBinding && (row.provider === job.provider || job.auxiliaryModels === undefined) && subscriptionBindingDigest({ ...prepared.snapshot, ownerHost: row.ownerHost }) !== job.modelSelectionBinding) return { ok: false, managed: true, reason: "auth-binding-changed" };
 			snapshots.push({ ...prepared.snapshot, ownerHost: row.ownerHost, ...packageRootFor(row.adapter) });
 		}
 		return { ok: true, snapshots };
@@ -122,20 +142,22 @@ export function makeSubscriptionRuntime({ auth, quota, now = Date.now, lookup = 
 		if (result?.exitAuth !== "verified" || result?.code !== 1 || result?.exitLineCode !== result?.code || result?.aborted === true) return;
 		const snapshot = snapshots.find((row) => row.provider === result.providerFailure?.subscriptionProvider);
 		if (!snapshot) return;
-		const model = lookup(snapshot.provider, job.model);
-		const bound = await auth.check(snapshot.provider, { model: job.model, api: model?.api, baseUrl: model?.baseUrl });
+		const route = job.auxiliaryModels === undefined ? { provider: snapshot.provider, id: job.model } : subscriptionRoutes(job).find((ref) => ref.provider === snapshot.provider);
+		if (!route) return;
+		const model = lookup(route.provider, route.id);
+		const bound = await auth.check(snapshot.provider, { model: route.id, api: model?.api, baseUrl: model?.baseUrl });
 		if (!bound.ok || !bound.managed || !sameBinding(bound, snapshot)) return;
 		if (snapshot?.provider === "anthropic" && ["quota-exhausted", "rate-limited"].includes(result.providerFailure?.kind)) {
 			await quota.invalidate(subscriptionIdentity(snapshot), { observedAt: now() });
 			const refreshed = await usage(snapshot.connectionId, { signal: AbortSignal.timeout(15_000), expectedBinding: snapshot });
 			if (refreshed.kind !== "observation") throw new Error("subscription usage unavailable after throttling");
-			return refreshed.quota?.state === "exhausted" && refreshed.quota?.bindingValid !== false ? { quotaExhausted: true } : undefined;
+			return refreshed.quota?.state === "exhausted" && refreshed.quota?.bindingValid !== false && (job.auxiliaryModels === undefined || snapshot.provider === job.provider) ? { quotaExhausted: true } : undefined;
 		}
 		if (!snapshot || result.providerFailure?.kind !== "quota-exhausted" || !result.providerFailure.subscriptionCode) return;
 		const observation = normalizeSubscriptionQuotaError({ provider: snapshot.provider, code: result.providerFailure.subscriptionCode, status: 429, resetAt: result.providerFailure.resetAt }, { observedAt: now() });
 		if (observation) {
 			const written = await quota.record(subscriptionIdentity(snapshot), observation);
-			if (written.ok && written.status?.state === "exhausted" && written.status?.bindingValid !== false) return { quotaExhausted: true };
+			if (written.ok && written.status?.state === "exhausted" && written.status?.bindingValid !== false && (job.auxiliaryModels === undefined || snapshot.provider === job.provider)) return { quotaExhausted: true };
 		}
 	}
 	function sameBinding(row, snapshot) {

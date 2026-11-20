@@ -3137,3 +3137,25 @@ test("short subscription leases require host-observed renewal support, never a q
 		assert.equal(mode, missing === null, String(missing));
 	}
 });
+
+test("auxiliary credentials are resolved from declared secrets before mint, clone or any budget hold", async () => {
+	for (const unavailable of [false, true]) {
+		const redis = fakeRedis();
+		let tokenReads = 0;
+		const secrets = { OPENROUTER_API_KEY: "declared-private-key" };
+		const probes = [];
+		const { deps: d, calls } = deps({ redis: { ...redis, get: async () => (tokenReads++, null) }, resolveSecrets: async () => ({ secrets }), checkProviderCredential: (candidate, options) => {
+			probes.push(candidate.provider);
+			if (candidate.provider !== "openrouter") return { ok: true };
+			assert.equal(options.secrets, secrets);
+			return unavailable ? { ok: false, unavailable: "EIO" } : { ok: false };
+		} });
+		const panel = { ...ghJob, secrets: { OPENROUTER_API_KEY: "env:OPENROUTER_API_KEY" }, models: ["anthropic/m", "openrouter/frontier"], auxiliaryModels: ["openrouter/frontier"], maxCostMicros: 1_000_000 };
+		if (unavailable) await assert.rejects(() => runJob(panel, d), error => error.name === "InfraRetry" && error.reason === "container-never-started");
+		else { const result = await runJob(panel, d); assert.equal(result.reason, "provider-unconfigured"); assert.equal(result.budgetReserved, false); }
+		assert.deepEqual(probes, ["anthropic", "openrouter"]);
+		assert.equal(tokenReads, 0);
+		assert.equal(redis.incrCalls, 0);
+		assert.ok(!calls.some(call => call.startsWith("mint:") || call === "prepare" || call === "run-container"));
+	}
+});

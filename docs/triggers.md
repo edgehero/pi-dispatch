@@ -1024,6 +1024,17 @@ names under `on` is refused when the file loads. A file that uses one is stamped
 refuses, so move every host first ([upgrading](upgrading.md)). Like `maxCostUsd`, a job that arrived without a limit its
 trigger sets is refused as `trigger-skew`, and no AI tool sets them: the console shows them under By hand.
 
+## Auxiliary models for panels
+
+`run.auxiliaryModels` is a hand-authored list of 1–16 exact physical `provider/model` references, without
+wildcards, roles or duplicates. Each must also appear in an explicit finite `run.models` allowlist, and the run
+must set a positive `maxCostUsd`. For example, an ordinary flow can keep two subscription root candidates in
+`modelSelection.candidates` and list its subscription and paid API panel members in `auxiliaryModels`.
+Selection retains the chosen root plus these members under the same model and cost guards; the auxiliary list
+does not add root candidates or paid fallback authority. All declared auxiliary authentication and quota routes
+must pass before any container starts. See [subscription authentication](subscription-auth.md) for credential
+sources and whole-panel admission, and [upgrading](upgrading.md) before enabling this field across a fleet.
+
 ## A dollar cap per job
 
 Any trigger type can set the most one of its jobs may spend, in US dollars:

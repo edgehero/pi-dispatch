@@ -190,6 +190,7 @@ export function makeCollectChain({ queue, enqueue = enqueueLocalJob, readFlowGat
 					models: job.data?.models,
 					fallbackModels: job.data?.fallbackModels,
 					...(job.data?.modelSelection !== undefined && { modelSelection: job.data.modelSelection }),
+					...(job.data?.auxiliaryModels !== undefined && { auxiliaryModels: job.data.auxiliaryModels }),
 					// Issue #501's per-job dollar cap, by the same narrowing rule: a child that dropped it would run
 					// uncapped. Passed through whenever the parent's data carries it; absent stays absent.
 					maxCostUsd: job.data?.maxCostUsd,

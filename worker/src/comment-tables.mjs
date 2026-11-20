@@ -185,6 +185,7 @@ export const BRANCH_PROTECTION_UNREADABLE = "branch-protection-unreadable";
  * and a fixed sentence keeps the catalog's copy identical to what the issue was told.
  */
 export const REFUSAL_COMMENTS = Object.freeze({
+	"auth-route-unbounded": "Refused: subscription routes require a finite model allowlist; auxiliary models also require an explicit positive cost cap and exact entries in that allowlist. No container was started and nothing was spent.",
 	"secret-files-placement-unsafe": "Refused: the jobs directory overlaps a local workspace, skills source or global pi overlay. Keep PI_JOBS_DIR disjoint from every job-visible source. Nothing was spent.",
 	"secret-file-name-invalid": "Refused: a file secret has an unsafe or unsupported file name. Use a portable environment name of at most 128 characters, excluding reserved device names. Not run.",
 	"secret-file-endpoint-conflict": "Refused: a secret cannot be delivered both as a file and as a bundle endpoint credential. Give them separate variable names in the triggers file. Not run.",

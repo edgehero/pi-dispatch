@@ -660,6 +660,7 @@ test("every refusal sentence in write-plans.mjs is asserted word for word, and a
       ["tool-proof model list", plans.wideningFieldRefusal({ run: { models: ["a/b"] } }, "dispatch_trigger_edit"), "dispatch_trigger_edit cannot set run.models (sent as run.models): a trigger's allowed-model list is set by a person on that trigger's page or by hand in the triggers file, never by a tool."],
       ["tool-proof mcp", plans.wideningFieldRefusal({ mcp: [] }, "dispatch_trigger_add"), "dispatch_trigger_add cannot set run.mcp (sent as mcp): a trigger's list of MCP servers is set by a person on that trigger's page or by hand in the triggers file, never by a tool."],
       ["tool-proof random selection", plans.wideningFieldRefusal({ modelSelection: { strategy: "random", candidates: ["a/b"] } }, "dispatch_trigger_edit"), "dispatch_trigger_edit cannot set run.modelSelection (sent as modelSelection): a random model pool is set by a person on that trigger's page or by hand in the triggers file, never by a tool."],
+      ["tool-proof auxiliary grant", plans.wideningFieldRefusal({ auxiliaryModels: ["a/b"] }, "dispatch_trigger_edit"), "dispatch_trigger_edit cannot set run.auxiliaryModels (sent as auxiliaryModels): an auxiliary-model grant is set by hand in the triggers file, never by a tool."],
       ["tool-proof fallback list", plans.wideningFieldRefusal({ fallbackModels: [] }, "dispatch_trigger_edit"), "dispatch_trigger_edit cannot set run.fallbackModels (sent as fallbackModels): a trigger's fallback-model list is set by a person on that trigger's page or by hand in the triggers file, never by a tool."],
       ["tool-proof exclusions", plans.wideningFieldRefusal({ excludeTools: ["bash"] }, "dispatch_trigger_edit"), "dispatch_trigger_edit cannot set run.excludeTools (sent as excludeTools): a trigger's list of removed tools is set by a person on that trigger's page or by hand in the triggers file, never by a tool."],
       ["tool-proof packages", plans.wideningFieldRefusal({ run: { packages: false } }, "dispatch_trigger_edit"), "dispatch_trigger_edit cannot set run.packages (sent as run.packages): a trigger's staged-package switch is set by a person on that trigger's page or by hand in the triggers file, never by a tool."],
@@ -957,4 +958,14 @@ test("job previews show enabled merge permission without exposing its reference"
   assert.match(runFieldsLines({ mayMerge: true, mayMergePolicy: "a".repeat(64) }, "It runs")[0], /may merge through the forge’s checks and approvals/);
   assert.doesNotMatch(runFieldsLines({ mayMerge: true, mayMergePolicy: "a".repeat(64) }, "It runs")[0], /a{64}/);
   for (const mayMerge of [undefined, false, "true"]) assert.doesNotMatch(runFieldsLines({ mayMerge }, "It runs")[0], /may merge/);
+});
+
+test("auxiliary billing grants and their near misses remain hand-authored, including nested tool data", () => {
+  for (const tool of ["dispatch_trigger_add", "dispatch_trigger_edit"]) {
+    for (const key of ["auxiliaryModels", "AuxiliaryModels", "auxiliary_models", "auxiliaryModel", "auxiliaryModelIds", "auxiliaryM\u043Edels"]) {
+      for (const value of [["openrouter/google/gemini-4-neon"], [], null, undefined]) {
+        for (const params of [{ [key]: value }, { run: { [key]: value } }, { on: { [key]: value } }, { unknown: { nested: { [key]: value } } }]) assert.match(plans.wideningFieldRefusal(params, tool), /cannot set run\.auxiliaryModels.*set by hand/);
+      }
+    }
+  }
 });

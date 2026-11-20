@@ -1473,3 +1473,21 @@ test("random Retry keeps the committed choice while a fresh local Re-run inherit
   assert.equal(stored.data.provider, undefined);
   assert.equal(stored.data.model, undefined);
 });
+
+test("fresh local reruns keep fixed or random auxiliary grants, their ceiling and dollar cap", async () => {
+  const at = Date.UTC(2026, 10, 20, 12);
+  const auxiliaryModels = ["openrouter/google/gemini-4-neon"];
+  const models = ["anthropic/claude-opus-5-5", ...auxiliaryModels];
+  for (const selection of [{}, { modelSelection: { strategy: "random", candidates: [models[0]] } }]) {
+    let stored;
+    const queue = { add: async (_name, data, opts) => { stored = { id: opts.jobId, data }; return stored; }, getJob: async () => stored, close: async () => {} };
+    const job = { kind: "local", folder: "/project", flow: "work", auxiliaryModels, models, maxCostUsd: "1", ...selection };
+    const result = await enqueueRerun({ kind: "local", jobId: "local-auxiliary", queue: "pi-jobs", job }, { url: "redis://unused", queueFn: () => queue, parseConnectionFn: () => ({}), localRepoProblemFn: () => null, gitDirtyFn: () => false, now: () => at });
+    assert.equal(result.ok, true);
+    assert.deepEqual(stored.data.auxiliaryModels, auxiliaryModels);
+    assert.deepEqual(stored.data.models, models);
+    assert.equal(stored.data.maxCostUsd, "1");
+    assert.deepEqual(stored.data.modelSelection, selection.modelSelection);
+    assert.equal(stored.data.dataVersion, 11);
+  }
+});

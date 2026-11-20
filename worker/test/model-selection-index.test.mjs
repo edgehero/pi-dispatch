@@ -59,6 +59,25 @@ test("quota exhausted between selector and immediate recheck also reconsiders be
 	assert.equal((await f.run()).model, "b");
 });
 
+for (const stage of ["immediate recheck", "subscription prepare"]) test(`auxiliary quota exhausted during ${stage} preserves the selected root`, async () => {
+	let reads = 0;
+	const auxiliaryModels = ["openrouter/frontier"];
+	const auxiliaryWait = () => ({ ...exhausted(), auxiliary: true });
+	const f = fixture({
+		data: { models: [...pool, ...auxiliaryModels], auxiliaryModels, maxCostUsd: "1" },
+		deps: { imagePreflight: async () => ({ ok: true, capabilities: ["exitAuth", "modelPolicy", "modelFailover", "costCap"] }) },
+		runtime: runtime({
+			check: async () => stage === "immediate recheck" && ++reads > 1 ? auxiliaryWait() : { ok: true, managed: true },
+			prepare: async () => stage === "subscription prepare" ? auxiliaryWait() : assert.fail("the immediate recheck must defer first"),
+		}),
+	});
+	await assert.rejects(f.run, { name: "DelayedError" });
+	assert.deepEqual(f.seen, [{ delayed: stage === "immediate recheck" ? NOW + 60_000 : NOW + 7 * 86_400_000 }]);
+	const selected = await readModelSelection(f.redis, f.id);
+	assert.equal(selected.phase, "selected", "an unrelated provider cannot grant root quota reselection");
+	assert.equal(selected.ref, pool[0]);
+});
+
 test("signed safe quota can reselect only after successful observation and the existing next queue attempt", async () => {
 	let blocked = false;
 	let executions = 0;
@@ -151,5 +170,23 @@ test("an explicitly marked human continuation cannot draw when its host binding 
 		assert.equal(result.reason, "model-selection-continuation-unavailable");
 		assert.equal(await readModelSelection(f.redis, f.id), null);
 		assert.deepEqual(f.seen, []);
+	}
+});
+
+
+test("raw auxiliary jobs cannot acquire their explicit ceiling or cap from deployment defaults", async () => {
+	const auxiliaryModels = ["openrouter/frontier"];
+	for (const omitted of ["models", "maxCostUsd"]) {
+		const f = fixture({
+			data: { models: [...pool, ...auxiliaryModels], auxiliaryModels, maxCostUsd: "1", [omitted]: undefined },
+			deps: { allowedModels: [...pool, ...auxiliaryModels] },
+			options: { getSettings: () => ({ provider: "openai", model: "default", maxTurns: 5, dailyCap: 10, concurrency: 3, maxCostUsd: "5", softHoldPct: null }) },
+			runtime: runtime({ inspectPolicy: async () => assert.fail("invalid queued authority reaches no auth inspection") }),
+		});
+		const result = await f.run();
+		assert.equal(result.reason, "auth-route-unbounded");
+		assert.equal(result.budgetReserved, false);
+		assert.deepEqual(f.seen, []);
+		assert.equal(await readModelSelection(f.redis, f.id), null);
 	}
 });

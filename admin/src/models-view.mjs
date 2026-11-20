@@ -41,7 +41,7 @@ export function collectModelPolicies({ entries = [], modelRoles = {}, projects =
     const run = entry?.run;
     if (!run || typeof run !== "object") return [];
     return [{ sourceIndex: index, index, label: `trigger ${index + 1}`, authoredProvider: run.provider,
-      ...fields(run, ["kind", "folder", "repository", "provider", "model", "models", "fallbackModels", "modelSelection", "maxCostUsd", "flow"]),
+      ...fields(run, ["kind", "folder", "repository", "provider", "model", "models", "fallbackModels", "auxiliaryModels", "modelSelection", "maxCostUsd", "flow"]),
     }];
   });
   const out = resolveConfiguredModelRuns({ runs, modelRoles, projects, deployment, envList, conservativeLocal: true, ...(resolveFolder ? { resolveFolder } : {}) });

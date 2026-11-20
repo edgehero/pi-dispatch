@@ -83,7 +83,7 @@ export async function modelWindowHasRoom(redis, ref, job, limits, at) {
 	return true;
 }
 
-/** Only opt-in jobs enter here. Every candidate has a singleton executable policy beneath the reviewed ceiling. */
+/** Only opt-in jobs enter here. Every candidate keeps its root and declared auxiliaries beneath the reviewed ceiling. */
 export async function selectFailoverJob(job, { redis, id, retry = false, recoveryModel = null, retryNeverStarted = false, models = null, limits = [], now = () => Date.now(), checkCandidate, subscriptionCheck = null, reservationFor = (candidate) => candidate.maxCostMicros, acquireEndpoints = async () => true, modelView = (ref) => failoverModelView(ref, { models }), log = () => {} } = {}) {
 	if (!failoverListUsable(job)) return { refused: "model-failover-no-candidate" };
 	const primary = `${job.provider}/${job.model}`;
@@ -94,19 +94,19 @@ export async function selectFailoverJob(job, { redis, id, retry = false, recover
 	const largerThan = needsLarger ? modelView(previous.ref)?.contextWindow : null;
 	let why = previous?.failure?.kind === "context-overflow" ? "fallback-context" : "fallback-unavailable";
 	let wait = null;
-	const primaryAuth = subscriptionCheck ? await subscriptionCheck({ ...job, models: [primary] }) : null;
+	const primaryAuth = subscriptionCheck ? await subscriptionCheck({ ...job, models: [...new Set([primary, ...(job.auxiliaryModels ?? [])])] }) : null;
 	// Changing models cannot make a local mount stop exposing the host's refresh store.
 	if (primaryAuth?.reason === LOCAL_FOLDER_HOLDS_SUBSCRIPTION_AUTH) return { refused: LOCAL_FOLDER_HOLDS_SUBSCRIPTION_AUTH };
-	let subscriptionPrimary = primaryAuth?.managed === true || Array.isArray(primaryAuth?.managed) && primaryAuth.managed.length > 0;
+	let subscriptionPrimary = primaryAuth?.rootManaged ?? (primaryAuth?.managed === true || Array.isArray(primaryAuth?.managed) && primaryAuth.managed.length > 0);
 	for (const ref of [...new Set(locked ? [locked] : [primary, ...job.fallbackModels])]) {
 		const split = splitModelEntry(ref);
 		if (!split || !modelOnList(job.models, split.provider, split.model)) { log("model_candidate_skipped", { model: split ? ref : null, reason: "model-not-allowed" }); continue; }
-		const candidate = { ...job, provider: split.provider, model: split.model, models: [ref] };
+		const candidate = { ...job, provider: split.provider, model: split.model, models: [...new Set([ref, ...(job.auxiliaryModels ?? [])])] };
 		if (subscriptionCheck) {
 			const subscription = await subscriptionCheck(candidate);
 			if (subscription.unavailable) throw new Error("subscription state unavailable");
-			if (ref === primary && (subscription.managed === true || Array.isArray(subscription.managed) && subscription.managed.length > 0)) subscriptionPrimary = true;
-			if (subscriptionPrimary && subscription.managed !== true && !(Array.isArray(subscription.managed) && subscription.managed.length > 0)) {
+			if (ref === primary && (subscription.rootManaged ?? (subscription.managed === true || Array.isArray(subscription.managed) && subscription.managed.length > 0))) subscriptionPrimary = true;
+			if (subscriptionPrimary && !(subscription.rootManaged ?? (subscription.managed === true || Array.isArray(subscription.managed) && subscription.managed.length > 0))) {
 				log("model_candidate_skipped", { model: ref, reason: "auth-mixed-billing" });
 				continue;
 			}

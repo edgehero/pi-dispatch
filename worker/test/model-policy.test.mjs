@@ -265,11 +265,11 @@ test("the pickup gate holds one slot per endpoint the list reaches, deduplicated
 // --- PR #536's review: version skew, the overlay as pi reads it, the wiring ---
 
 
-const skewFile = (run) => ({ readFileSync: () => JSON.stringify({ ...(run.modelSelection !== undefined ? { version: 6 } : {}), triggers: [{ on: { type: "label", any: ["pi:go"] }, run: { kind: "github", flow: "fix", ...run } }] }) });
+const skewFile = (run) => ({ readFileSync: () => JSON.stringify({ ...(run.auxiliaryModels !== undefined ? { version: 9 } : run.modelSelection !== undefined ? { version: 6 } : {}), triggers: [{ on: { type: "label", any: ["pi:go"] }, run: { kind: "github", flow: "fix", ...run } }] }) });
 const arrived = (extra = {}) => ({ trigger: { matched: { index: 0, type: "label" } }, kind: "github", flow: "fix", ...extra });
 
 test("the skew check refuses a job whose AUTHORED trigger lists models it arrived without, and reads one row per field", async () => {
-	assert.deepEqual(AUTHORED_NARROWING_FIELDS.map((row) => row.key), ["secretFiles", "mayMerge", "privateEndpoints", "models", "fallbackModels", "modelSelection", "maxCostUsd", "mcp", "awaitInput", "progress", "statusComment", "recover", "steer", "excludeExtensions", "excludeExtensionTools", "idleTimeoutMinutes", "stallTimeoutMinutes", "maxMinutes"], "a new narrowing field is one row here");
+	assert.deepEqual(AUTHORED_NARROWING_FIELDS.map((row) => row.key), ["secretFiles", "mayMerge", "privateEndpoints", "models", "fallbackModels", "auxiliaryModels", "modelSelection", "maxCostUsd", "mcp", "awaitInput", "progress", "statusComment", "recover", "steer", "excludeExtensions", "excludeExtensionTools", "idleTimeoutMinutes", "stallTimeoutMinutes", "maxMinutes"], "a new narrowing field is one row here");
 	const check = makeCheckWaitSkew({ triggersPath: "/t.json", fs: skewFile({ models: ["openai/gpt-x"] }) });
 	assert.deepEqual(await check(arrived()), { skewed: true, field: "models" }, "a stale receiver dropped the list");
 	assert.deepEqual(await check(arrived({ models: null })), { skewed: true, field: "models" }, "null is absent");
@@ -503,4 +503,13 @@ test("the skew check refuses a dropped reviewed random policy, including null fr
 	assert.deepEqual(await check(arrived()), { skewed: true, field: "modelSelection" });
 	assert.deepEqual(await check(arrived({ modelSelection: null })), { skewed: true, field: "modelSelection" });
 	assert.deepEqual(await check(arrived({ modelSelection })), { ok: true });
+});
+
+
+test("the skew check refuses a producer dropping an explicit auxiliary grant", async () => {
+	const auxiliaryModels = ["openrouter/google/gemini-4-neon"];
+	const fields = { auxiliaryModels, models: auxiliaryModels, maxCostUsd: "1" };
+	const check = makeCheckWaitSkew({ triggersPath: "/t.json", fs: skewFile(fields) });
+	for (const value of [undefined, null]) assert.deepEqual(await check(arrived({ ...fields, auxiliaryModels: value })), { skewed: true, field: "auxiliaryModels" });
+	assert.deepEqual(await check(arrived(fields)), { ok: true });
 });

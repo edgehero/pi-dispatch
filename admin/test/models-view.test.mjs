@@ -287,3 +287,11 @@ test("random pools show observed blockers without a default primary or predicted
   assert.equal(agent.randomPools[0].candidates.length, 2);
   assert.equal(agent.recentRandom[0].modelWhy, "random");
 });
+
+test("model policy facts preserve an auxiliary grant without turning it into root candidates", () => {
+  const auxiliaryModels = ["openrouter/google/gemini-4-neon"];
+  const modelSelection = { strategy: "random", candidates: ["anthropic/claude-opus-5-5"] };
+  const facts = collectModelPolicies({ entries: [entry({ model: undefined, modelSelection, auxiliaryModels, models: [...modelSelection.candidates, ...auxiliaryModels], maxCostUsd: "1" })], deployment });
+  assert.deepEqual(facts.runs[0].auxiliaryModels, auxiliaryModels);
+  assert.deepEqual(facts.runs[0].modelSelection.candidates, modelSelection.candidates);
+});

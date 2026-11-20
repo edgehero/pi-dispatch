@@ -1574,3 +1574,19 @@ test("selected subscription snapshot owns its provider despite API keys, forward
 	assert.equal(env.OPENAI_API_KEY, undefined);
 	assert.equal(env.AWS_SECRET_ACCESS_KEY, undefined);
 });
+
+test("explicit auxiliary providers receive only their resolved key alongside sealed subscription snapshots", { skip }, () => {
+	const env = buildContainerEnv({ provider: "anthropic", model: "m", maxTurns: 5, maxTokens: 1000, jobId: "panel", githubToken: "forge", forgeKind: "github", hostEnv: HOST, secrets: { OPENROUTER_API_KEY: "panel-key" }, auxiliaryModels: ["openrouter/frontier", "openai/gpt"], subscriptionAuth: [{ provider: "anthropic", env: { ANTHROPIC_OAUTH_TOKEN: "claude-subscription" } }, { provider: "openai", env: { OPENAI_API_KEY: "gpt-subscription" } }] });
+	assert.equal(env.OPENROUTER_API_KEY, "panel-key");
+	assert.equal(env.OPENAI_API_KEY, "gpt-subscription");
+	assert.equal(env.ANTHROPIC_OAUTH_TOKEN, "claude-subscription");
+	assert.equal(env.ANTHROPIC_API_KEY, undefined);
+	assert.equal(env.AWS_SECRET_ACCESS_KEY, undefined);
+});
+
+
+test("an admitted keyless auxiliary keeps its fixed credential slot beneath the final env backstop", { skip }, () => {
+	const env = buildContainerEnv({ provider: "anthropic", model: "m", maxTurns: 5, jobId: "panel", hostEnv: HOST, auxiliaryModels: ["local-ollama/qwen2.5:0.5b"], modelEndpoints: klSnapshot(), secrets: { PI_DISPATCH_KEYLESS: "forged" } });
+	assert.equal(env.PI_DISPATCH_KEYLESS, "keyless");
+	assert.equal(env.ANTHROPIC_API_KEY, HOST.ANTHROPIC_API_KEY);
+});
