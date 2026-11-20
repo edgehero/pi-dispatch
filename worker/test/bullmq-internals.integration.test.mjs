@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { terminalReceipt } from "../src/terminal-receipt.mjs";
 
 /**
  * Real-Valkey check of the BullMQ leaf (issue #761) against the pinned BullMQ: every key, field, flag, score and id the
@@ -92,6 +93,39 @@ async function world() {
 		},
 	};
 }
+
+test("terminal label receipt sees persisted completed state and finishedOn after an infrastructure retry", { skip }, async () => {
+	const w = await world();
+	try {
+		const q = w.queue();
+		let attempts = 0;
+		const receipts = [];
+		const failed = [];
+		let observed;
+		const done = new Promise((resolve, reject) => {
+			const worker = w.worker(q.name, async () => {
+				if (++attempts === 1) throw new Error("infrastructure failure");
+				return { outcome: "completed", exitCode: 0 };
+			});
+			worker.on("error", reject);
+			worker.on("failed", (job) => failed.push(terminalReceipt({ job, result: job.returnvalue })));
+			worker.on("completed", (job, result) => {
+				observed = { receipt: terminalReceipt({ job, result }), finishedOn: job.finishedOn };
+				void job.getState().then((state) => { receipts.push({ ...observed, state }); resolve(); }, reject);
+			});
+		});
+		await q.add("github", { kind: "github", repo: "o/r", target: { type: "pull_request", number: 12 }, trigger: { event: "pull_request", action: "labeled", deliveryId: "poll-e1234", matched: { type: "pull_request", action: "labeled" } } }, { jobId: "gh-poll-e1234", attempts: 2 });
+		await until(() => receipts.length === 1);
+		await done;
+		assert.equal(attempts, 2);
+		assert.deepEqual(failed, [null]);
+		assert.equal(receipts[0].state, "completed");
+		assert.ok(Number.isSafeInteger(receipts[0].finishedOn) && receipts[0].finishedOn > 0);
+		assert.match(receipts[0].receipt, /^<!-- pi-dispatch-terminal:v1 job=gh-poll-e1234 -->\n/);
+	} finally {
+		await w.teardown();
+	}
+});
 
 test("1, 2: a queue writes its meta key with the verified version, and every key the module names is the queue's own", { skip }, async () => {
 	const w = await world();

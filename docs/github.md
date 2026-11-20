@@ -113,6 +113,19 @@ credentials step:
    run under `GITHUB_AUTH_SOURCE=app` and let the App installation name them
    ([`docs/polling.md`](polling.md)).
 
+## Completion receipts for polled label jobs
+
+After the queue confirms that an original label job completed with exit 0, the worker posts a short fixed receipt
+on its issue or pull request. This also happens when the job produced no artifacts and `statusComment` is off.
+Its `pi-dispatch-terminal:v1` marker identifies the exact `gh-poll-e<ID>` job. The receipt confirms scheduling
+completion only: the work still needs its ordinary checks and independent review.
+
+Failed jobs, attempts awaiting retry, recoveries, replicas and runs parked for input or approval get no such receipt.
+A successful final retry of the original job remains eligible. Posting is
+best-effort; an unavailable forge or a process exit can lose it. Missing receipts, including those on older jobs,
+remain unknown. The worker neither reconstructs them from agent reports nor repeats a paid job to obtain one.
+See [the exact protocol](../specs/interfaces.md#int-forge-terminal-receipt) and [upgrade notes](upgrading.md#unreleased-completed-label-job-receipts).
+
 ## When a delivery fails
 
 GitHub sends each delivery once. It does not send it again on its own, whatever the receiver answered, and it marks a

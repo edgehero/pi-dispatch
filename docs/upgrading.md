@@ -388,6 +388,14 @@ as `subscription_auth_hold`. See [subscription renewal](subscription-auth.md#adm
 
 Release numbers come from the git tags.
 
+### Unreleased: completed label-job receipts
+
+Workers now post a fixed scheduling-only receipt after BullMQ confirms an original GitHub polling label job
+completed with exit 0, even with no artifacts. Upgrade the worker to produce these comments. Existing comments,
+run records, job data and queue keys are unchanged; no migration, backup path or older-state detector is needed.
+Older jobs without a receipt remain unknown and are not automatically backfilled. Consumers must continue to
+require independent task verification and existing authority. See [GitHub completion receipts](github.md#completion-receipts-for-polled-label-jobs).
+
 ### Unreleased: append-file source hashes
 
 | Stored state | What changes and how to move it |

@@ -700,6 +700,14 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 
 ## REQ-JOB-STATUS-COMMENTS
 
+- **Completed label-job receipt (#920 follow-up)**: an original, non-replica GitHub polling label job that returns
+  `completed`, exit 0, without a continuation reason shall get the fixed scheduling receipt in
+  `INT-FORGE-TERMINAL-RECEIPT` after the queue accepts completion, including when it kept no artifacts and did not
+  enable `statusComment`. It attests only that this job finished. It does not attest task acceptance, a commit,
+  checks or permission to land work. An attempt awaiting retry, recovery, failed job, parked job or unconfirmed
+  completion emits none. A successful final retry of the original job remains eligible.
+  Delivery is best-effort: a missing receipt remains unknown and never starts a paid retry.
+
 - **AMENDED 2026-10-31 (#772)**: Jobs with purpose `answer-draft` never post status, terminal, policy-refusal, failure, recovery, progress or chain comments. Their verdict/failure is reported on the console. This exception does not suppress the source workload’s own question or its later person-confirmed answer trail.
 
 - **Statement**: Each **forge-backed** job shall comment on its triggering issue, pull request or merge
@@ -715,8 +723,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
 - **Traces to**: `CONST-MERGE-NEVER-AUTOMATIC`, `CONST-PI-VERSION-PINNED`, and since #644 `REQ-RUN-PROGRESS` and
   `INT-FORGE-STATUS-COMMENT-EDIT`
 - **Who authors which comment** (issue #288, closing the acceptance's paid half): the AGENT authors the
-  exit-0 status comment (the prompt contract instructs it, including for "I looked and cannot fix
-  this"); the WORKER authors every other terminal comment -- each pre-spend refusal (the ladder; a `model-unknown`
+  exit-0 task report (the prompt contract instructs it, including for "I looked and cannot fix
+  this"); the WORKER additionally authors the scheduling-only label receipt above and every other terminal comment -- each pre-spend refusal (the ladder; a `model-unknown`
   refusal whose `why` starts `overlay-` posts its own sentence, "Refused before starting: the deployment's model
   settings file (models.json in the overlay) cannot be used for this job, so no container was started and nothing
   was spent. The operator needs to fix that file. Not run.", since the deployment's file is the problem and not the
@@ -9390,6 +9398,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-20 (#920 follow-up) | `REQ-JOB-STATUS-COMMENTS` adds a fixed worker-owned completion receipt for original GitHub polling label jobs, including zero-artifact jobs. UNCHANGED, checked: task reports, artifact collection, paid retry rules, recovery, failed-job actions and answer-draft comment suppression. |
 | 2026-11-20 (#957) | `REQ-SUBSCRIPTION-AUTHENTICATION` adds staggered active-job acceptance, prompt same-binding generation delivery and pinned offline Claude transport recovery. Model authorization, quota admission, configured budgets and terminal refusal of current credentials are UNCHANGED, checked. |
 | 2026-11-20 (#842) | **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, its Valkey-outage statement: on a Valkey that is connected and stopped answering, the kill switch (fleet pause, fleet resume, one queue), the previews of a failed job's and a steer's actions and a stop of the console end by bounds of their own; a pause, a resume, a steer, a withdrawal and a failed job's retry or removal that were sent and not answered say the change may or may not have been made, the kill switch naming the queues known switched and those not; a stopped console releases its lock. Their clause leaves the "Not so yet" sentence, whose one remaining clause, the six pages, stands. **`REQ-OPERATOR-JOB-CANCEL` UNCHANGED, checked**: the CLI's cancel and the console's `cancel-queued` keep their bounds and sentences; the close helper they share moved and changed in two ways, for the CLI's cancel too: the drop of a connection whose close was not answered is started and no longer waited for, and a close that throws is caught. **`REQ-STEER-RUNNING-JOB` UNCHANGED, checked**: the order of a steer's refusals and what a message's states mean stand; a preview that could not read still says nothing was sent. **`REQ-OPERATOR-CONSOLE-ACTIONS` UNCHANGED, checked**: a change that partly landed still shows "The change did not finish" with Look again and is audited `failed` with its sentence as the reason; a resume across two disagreeing Valkeys is still refused, and a pause still reaches both. **`REQ-ADMIN-VIA-PI-EXTENSION` UNCHANGED, checked**: the panel's pause and resume keep their keys and their audit rows; their note gains the queues not confirmed. **Code evidence**: worker/src/queue.mjs -> `consoleQueueConnection`, `closeWithin`; admin/src/read-model.mjs -> `switchStep`, `flipQueues`, `switchOutcome`, `setQueuePaused`, `setQueuePausedOne`, `killSwitchSet`, `createFleetReader` (`poolSet`, `pauseQueue`, `dispose`); admin/src/job-actions.mjs -> `failedBulk`, `planFailedBulk`, `planSteer`, `planSteerWithdraw`, `enqueueSteer`, `withdrawSteerMessage`; admin/src/console/actions.mjs -> `switchPartialWords`, `funnelResult`; admin/src/console/cli.mjs -> `STOP_DEADLINE_MS`; admin/src/console/writes-in-flight.mjs -> `makeWritesInFlight`; admin/src/dashboard.ts -> `switchUnconfirmed`, `switchCommandLost`. |
 | 2026-11-20 (#843) | **`REQ-OPERATOR-CONSOLE-SCREENS` AMENDED**, the Valkey outage bullet: `package-adopt`, `package-undo` and `sandbox-end` leave its "Not so yet" sentence. A write of theirs that reached a Valkey which then stopped answering, or whose connection died under it, says it may or may not have been made, in the confirm and the audit row; a sandbox End request that may stand is taken back; and "Someone changed this package" is said only of a desired row that was read, with an unread Valkey answered as that at the confirm and at both previews. The sentence's other two clauses (the kill switch, the two previews and a stop of the console; the pages that draw an unread value as empty) are UNCHANGED, checked, as is every other bullet of the entry. **Code evidence**: `worker/src/connection.mjs` -> `BoundedRedis`; `worker/src/updates.mjs` -> `setDesired`; `worker/src/sandbox-sessions.mjs` -> `requestSandboxEnd`, `sandboxBounded`; `admin/src/console/actions.mjs` -> `writeDesired`, `desiredRowNow`, `updatesUnread`, `adoptable`; `admin/src/sandbox-data.mjs` -> `SANDBOX_END_UNCONFIRMED`; `admin/src/read-model.mjs` -> `sandboxEnd`; `admin/src/console/cli.mjs` -> `actionDeps.updates`. |
