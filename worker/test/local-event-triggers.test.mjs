@@ -59,6 +59,30 @@ test("independent local comment listeners coexist with the existing single forge
 	assert.throws(() => parse([old, old, local]), /at most one github comment/);
 });
 
+test("exact close actors are an opt-in grant on GitHub local close listeners only", () => {
+	const input = base(); input.on.action = ["closed"]; input.on.closeActors = ["closer-app[bot]", "maintainer"];
+	for (const type of ["issue", "pull_request"]) {
+		input.on.type = type;
+		assert.deepEqual(parse([input])[0].on.closeActors, input.on.closeActors);
+	}
+	assert.equal(triggersFileVersionFor({ triggers: [input] }), 10);
+	assert.throws(() => parse([input], 9), /needs triggers file version 10/);
+	for (const value of [null, [], ["Somebody"], ["*"], ["same", "same"], [" bot"], ["bot[bot]-impostor"], [7], Array.from({ length: 33 }, (_, i) => `bot${i}`)]) {
+		assert.throws(() => parse([{ ...input, on: { ...input.on, closeActors: value } }]), /on.closeActors/);
+	}
+	for (const on of [
+		{ forge: "gitlab" }, { forge: "forgejo" }, { forge: "azure" },
+		{ type: "label", any: ["ready"] }, { type: "comment", phrase: "@sweep" },
+		{ action: ["opened"] }, { action: ["review_submitted"] }, { action: ["closed", "opened"] },
+	]) assert.throws(() => parse([{ ...input, on: { ...input.on, ...on } }]), /on.closeActors/);
+	assert.throws(() => parse([{ on: { type: "pull_request", action: ["closed"], closeActors: input.on.closeActors }, run: { kind: "github", flow: "fix" } }]), /on.closeActors.*only available/);
+	assert.throws(() => parse([{ on: { type: "cron", id: "fallback", pattern: "0 * * * *", closeActors: input.on.closeActors }, run: { kind: "local", folder: "/srv/maintenance", command: "sweep" } }]), /on.closeActors.*only available/);
+	input.on.once = true; input.on.number = 7; input.on.disarmed = { at: "2026-11-20T10:00:00Z", jobId: "local-event-test" };
+	assert.deepEqual(parse([input])[0], { on: { type: "disarmed" }, run: {} });
+	input.on.closeActors = ["*"];
+	assert.throws(() => parse([input]), /on.closeActors/, "disarmed definitions still validate the grant");
+});
+
 test("local close one-shots validate completely and collapse spent rules", () => {
 	const input = base(); input.on = { ...input.on, action: ["closed"], number: 7, once: true };
 	assert.equal(parse([input])[0].on.once, true);

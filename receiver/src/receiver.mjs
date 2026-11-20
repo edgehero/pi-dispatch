@@ -70,10 +70,10 @@ export function parseSubset(payload) {
 	return {
 		action: payload.action,
 		// `login` is CARRIED since issue #231, where this subset deliberately excluded it before. It is
-		// personal data, and it is here for exactly one consumer -- the CLOSER's collaborator-permission
-		// lookup, which is by username because that is the only key GitHub's endpoint takes. Same
-		// justification, and same obligation, as `sender.login` in the Forgejo subset: it exists to have
-		// been asked about, it is never logged (no-pii-in-logs covers everything the resolution path
+		// personal data, and it is here only for close authority: the CLOSER's collaborator-permission
+		// lookup (GitHub's endpoint takes only usernames), or the exact local `closeActors` grant (#951).
+		// As with `sender.login` in the Forgejo subset, it exists only to judge that authority and is
+		// never logged (no-pii-in-logs covers everything the resolution path
 		// writes down), and it is never enqueued -- the filter's job literal keeps `trigger.sender` at
 		// `{ id }` alone.
 		sender: { id: payload.sender?.id, login: payload.sender?.login },

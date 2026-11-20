@@ -6,7 +6,7 @@
 import { sourceForgeOf } from "@edgehero/pi-dispatch/triggers";
 import { makeLocalEventStore } from "@edgehero/pi-dispatch/local-event-store";
 import { groupTriggers } from "./trigger-groups.mjs";
-import { filter, hasCloseTriggers, wantsCloserAuthority } from "./filter.mjs";
+import { filter, hasCloseTriggers, localCloseActorAllowed, wantsCloserAuthority } from "./filter.mjs";
 import { filterGitLab } from "./filter-gitlab.mjs";
 import { filterForgejo } from "./filter-forgejo.mjs";
 import { filterAzure } from "./filter-azure.mjs";
@@ -20,7 +20,7 @@ export function localEventVerdicts({ kind, event, subset, triggers, selfId, auth
 	const verdicts = [];
 	for (const trigger of triggers?.[kind]?.localEvents ?? []) {
 		const groups = listenerGroup(trigger);
-		const options = { matchOnly: true, reviewAuthors: trigger.on.reviewAuthors };
+		const options = { matchOnly: true, reviewAuthors: trigger.on.reviewAuthors, closeActors: trigger.on.closeActors };
 		let verdict;
 		if (kind === "github") verdict = filter(event, subset, { triggers: groups }, selfId, deliveryId, authorized, options);
 		else if (kind === "gitlab") verdict = filterGitLab(subset, groups.gitlab, groups.knownFlows, selfId, authorized, deliveryId, options);
@@ -35,9 +35,9 @@ export function matchingLocalEvents(input) {
 	return localEventVerdicts(input).filter(verdict => verdict.enqueue).map(verdict => verdict.trigger);
 }
 
-/** Close authorization is shared with the ordinary route, including its self and item-number guards. */
+/** Ordinary close predicates, self and item-number guards still apply before an explicit local grant. */
 export function localEventsWantCloserAuthority(event, subset, group, selfId) {
-	return (group?.localEvents ?? []).some(trigger => wantsCloserAuthority(event, subset, listenerGroup(trigger).github, selfId));
+	return (group?.localEvents ?? []).some(trigger => wantsCloserAuthority(event, subset, listenerGroup(trigger).github, selfId) && !localCloseActorAllowed(subset, trigger.on.closeActors));
 }
 
 export function hasLocalCloseListeners(group) {

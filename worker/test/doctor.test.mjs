@@ -13818,6 +13818,19 @@ test("doctor describes an event command owner and bounded authority without prin
 	assert.doesNotMatch(text(), /Trigger flow/);
 });
 
+test("doctor names a local close grant by count without exposing its actor logins", async () => {
+	const path = join(tempDir("pi-close-event-doctor-"), "triggers.json");
+	writeFileSync(path, JSON.stringify({ version: TRIGGERS_FILE_VERSION, triggers: [{
+		on: { type: "pull_request", forge: "github", id: "after-close", action: ["closed"], closeActors: ["private-closer[bot]", "second-closer"] },
+		run: { kind: "local", worker: "build1", folder: "/srv/maintenance", command: "maintain-prs" },
+	}] }));
+	const { out, text } = capture();
+	await runDoctor(imgEnv({ PI_TRIGGERS_FILE: path, PI_WORKER_NAME: "build1" }), imgDeps(out, green));
+	assert.match(text(), /Local event command after-close:.*2 exact close-actor login\(s\) are explicitly admitted/);
+	assert.doesNotMatch(text(), /private-closer|second-closer/);
+	assert.doesNotMatch(text(), /exact review-author login/);
+});
+
 test("doctor: a declared private endpoint, the trigger granted it and its blast radius, read as the service reads them (#918)", async () => {
 	const dir = tempDir("pi-doctor-918-lines-");
 	writeFileSync(join(dir, "private-endpoints.json"), JSON.stringify({ version: 1, endpoints: [{ id: "bench-device", host: "10.0.5.20", port: 22, slots: 1 }] }));

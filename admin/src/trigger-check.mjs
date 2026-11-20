@@ -19,7 +19,7 @@ export const CHECK_REVIEW_STATES = Object.freeze([...REVIEW_STATES]);
 export const CHECK_PR_ACTIONS = Object.freeze(Object.fromEntries(Object.entries(PR_ACTIONS).map(([k, v]) => [k, Object.freeze([...v])])));
 const events = ["issue-labeled", "issue-opened", "issue-comment", "pull-request", "pull-request-comment", "issue-closed"];
 export const CHECK_EVENTS = Object.freeze(Object.fromEntries(FORGE_KINDS.map((f) => [f, Object.freeze(events.filter((e) => f !== "azure" || e !== "issue-closed"))])));
-export const CHECK_FIELDS = Object.freeze(["forge", "event", "repository", "actor", "action", "number", "labels", "previousLabels", "comment", "prAuthor", "reviewState", "reviewBody", "reviewAuthor"]);
+export const CHECK_FIELDS = Object.freeze(["forge", "event", "repository", "actor", "action", "number", "labels", "previousLabels", "comment", "prAuthor", "reviewState", "reviewBody", "reviewAuthor", "closeActor"]);
 export const CHECK_NOTICE = "Hypothetical matching only: the described identity and permissions are assumptions. No delivery was authenticated, sent or queued, and nothing was spent.";
 const refusal = (code, sentence) => ({ refusal: { code, sentence } });
 
@@ -58,6 +58,8 @@ export function parseTriggerCheckInput(input) {
   if (input.reviewBody !== undefined && (!review || !CHECK_REVIEW_BODIES.includes(input.reviewBody))) return refusal("input-invalid", "reviewBody must say present or empty on a submitted GitHub review.");
   if (input.reviewAuthor !== undefined && (!review || typeof input.reviewAuthor !== "string" || !REVIEW_AUTHOR_LOGIN_RE.test(input.reviewAuthor))) return refusal("input-invalid", "reviewAuthor must be an exact lowercase GitHub login on a submitted review.");
   if (!review && input.reviewState !== undefined) return refusal("input-invalid", "reviewState is only used by a submitted GitHub review.");
+  const close = input.forge === "github" && (input.event === "issue-closed" || input.event === "pull-request" && input.action === "closed");
+  if (input.closeActor !== undefined && (!close || typeof input.closeActor !== "string" || !REVIEW_AUTHOR_LOGIN_RE.test(input.closeActor))) return refusal("input-invalid", "closeActor must be an exact lowercase GitHub login on a closed issue or pull request.");
   return { input: { ...input, number: input.number ?? 1, labels: input.labels ?? [], ...(hasPrevious ? { previousLabels: input.previousLabels ?? [] } : {}) } };
 }
 
@@ -100,7 +102,7 @@ function triggerCheckFilterResult(input, groups) {
     const review = input.action === "review_submitted";
     const event = isComment ? "issue_comment" : review ? "pull_request_review" : isPr ? "pull_request" : "issues";
     const action = isComment ? "created" : review ? "submitted" : isPr ? input.action : input.event === "issue-opened" ? "opened" : input.event === "issue-closed" ? "closed" : input.forge === "forgejo" ? "label_updated" : "labeled";
-    const subset = { action, sender: { id }, repository: { full_name: input.repository }, issue: { ...target, ...(isPr && isComment ? { pull_request: true } : {}) }, isPull: isPr,
+    const subset = { action, sender: { id, ...(input.closeActor !== undefined ? { login: input.closeActor } : {}) }, repository: { full_name: input.repository }, issue: { ...target, ...(isPr && isComment ? { pull_request: true } : {}) }, isPull: isPr,
       comment: { body: input.comment, author_association: authorized ? "COLLABORATOR" : "NONE" },
       pull_request: isPr && !isComment ? { ...target, author_association: input.prAuthor === "write" ? "COLLABORATOR" : "NONE", head: {}, base: {} } : undefined,
       review: review ? { authorLogin: input.reviewAuthor, state: input.reviewState, body: input.reviewBody === "empty" ? "" : "described review", author_association: authorized ? "COLLABORATOR" : "NONE" } : undefined };
@@ -181,7 +183,9 @@ export function checkTriggerEvent({ input, triggersPath, fs = nodeFs } = {}) {
       const verdict = decision.localEvents.find((v) => v.trigger.on.id === raw.on.id && v.trigger.on.forge === sourceForgeOf(raw));
       if (verdict?.enqueue) return { ...base, status: "matched", reason: "matched", sentence: "This local command listener matches independently; the receiver coalesces its wake-up without passing event text." };
       const reason = Object.hasOwn(CHECK_REASON_SENTENCES, verdict?.reason) ? verdict.reason : "receiver-refused";
-      return { ...base, status: "not-matched", reason, sentence: CHECK_REASON_SENTENCES[reason] ?? "The receiver does not select this local command listener for the described event." };
+      const absentCloseActor = reason === "closer-not-allowed" && raw.on.closeActors?.length && event.closeActor === undefined;
+      const sentence = CHECK_REASON_SENTENCES[reason] ?? "The receiver does not select this local command listener for the described event.";
+      return { ...base, status: "not-matched", reason, sentence: absentCloseActor ? `${sentence} No exact closer login was supplied, so this check cannot test the local close-actor grant.` : sentence };
     }
     if (ordinaryMatched?.index === index) return { ...base, status: "matched", reason: "matched", sentence: matched.route === "start" ? "This is the first matching rule for the described event, subject to the delivery's real gates." : "This rule selects a continuation route; the receiver must check the live or parked run before deciding what happens." };
     const isolated = triggerCheckFilterResult(event, onlyRule(document.groups, index));

@@ -1,5 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tempDir } from "./helpers/temp-dir.mjs";
 import { normalizeTriggerForDisplay, readLocalEventStatuses, triggerDetailOf, joinRunsToTriggers, attributeRunsToTriggers } from "../src/read-model.mjs";
 import { parseRunFilter, runMatches, triggerValueOf } from "../src/run-filter.mjs";
 import { recordMatchesTrigger, triggerListOf } from "../src/trigger-list.mjs";
@@ -7,6 +10,9 @@ import { triggerGetsOf } from "../src/trigger-gets-view.mjs";
 import { agentReadProjection } from "../src/agent-read.mjs";
 import { triggerSandboxHosts } from "../src/console/trigger-sandbox.mjs";
 import { triggerOn, triggerRuns } from "../src/console/panels/trigger.mjs";
+import { triggerWhoMayFire } from "../src/trigger-policy.mjs";
+import { planTriggerEdit } from "../src/write-plans.mjs";
+import { writeTriggers } from "../src/read-model.mjs";
 import { parseTriggers, TRIGGERS_FILE_VERSION } from "@edgehero/pi-dispatch/triggers";
 import { buildLocalEventJob } from "@edgehero/pi-dispatch/local-event";
 
@@ -31,6 +37,41 @@ test("local event display keeps source and execution separate and hashes the act
   assert.equal(projected.reviewAuthors, undefined);
   assert.equal(projected.worker, "build1");
   assert.equal(projected.runKind, "local");
+});
+
+test("close actor grants remain visible to people and private to model-facing readers", () => {
+  const raw = entry();
+  raw.on = { type: "pull_request", forge: "github", id: "maintenance", action: ["closed"], closeActors: ["closer-app[bot]"] };
+  const t = { ...normalizeTriggerForDisplay(raw), index: 2 };
+  const snapshot = { triggers: { triggers: [t] }, runs: [] };
+  assert.deepEqual(t.closeActors, ["closer-app[bot]"]);
+  const listed = triggerListOf({ snapshot, records: [], now: NOW, coverage: { complete: true } }).rows[0].trigger;
+  assert.deepEqual(listed.closeActors, t.closeActors);
+  assert.equal(agentReadProjection(t).closeActors, undefined);
+  assert.equal(agentReadProjection(listed).closeActors, undefined);
+  const view = { role: "operator", query: { index: 2 }, data: { snapshot, triggerDetail: { trigger: t } } };
+  const on = String(triggerOn(view));
+  assert.match(on, /Extra close actors/);
+  assert.match(on, /closer-app\[bot\]/);
+  assert.match(on, /reviewed close-actor allowlist/);
+  assert.doesNotMatch(on, /Extra review authors/);
+  assert.doesNotMatch(String(triggerOn({ ...view, role: "agent", data: agentReadProjection(view.data) })), /closer-app/);
+  assert.match(triggerWhoMayFire(raw), /reviewed close-actor allowlist/);
+  assert.equal(triggerWhoMayFire({ ...raw, run: { kind: "github" } }), "The closer must have repository write access.", "displaying a grant cannot imply authority for a forge job");
+});
+
+test("an unrelated trigger edit preserves the complete close-actor authority and its version", () => {
+  const raw = entry();
+  raw.on = { type: "pull_request", forge: "github", id: "maintenance", action: ["closed"], closeActors: ["closer-app[bot]"] };
+  const triggersPath = join(tempDir("close-actor-edit-"), "triggers.json");
+  writeFileSync(triggersPath, JSON.stringify({ version: TRIGGERS_FILE_VERSION, triggers: [raw] }));
+  const preview = planTriggerEdit({ params: { index: 0, maxTurns: 42 }, paths: { triggersPath }, env: {} });
+  assert.ok(preview.plan, preview.refusal);
+  assert.equal(writeTriggers({ triggersPath, mutate: preview.plan.mutate }).ok, true);
+  const after = JSON.parse(readFileSync(triggersPath, "utf8"));
+  assert.deepEqual(after.triggers[0].on, raw.on);
+  assert.equal(after.triggers[0].run.maxTurns, 42);
+  assert.equal(after.version, 10);
 });
 
 test("event-local history follows id, source, type and definition, never a reused raw index or a cron command", () => {

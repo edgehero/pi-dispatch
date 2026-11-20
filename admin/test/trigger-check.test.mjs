@@ -218,6 +218,23 @@ test("the checker rejects non-regular sources without a blocking open and bounds
 });
 
 const localCommand = (id, on = {}) => ({ on: { type: "pull_request", forge: "github", id, action: ["review_submitted"], ...on }, run: { kind: "local", worker: "build1", folder: "/srv/maintenance", command: "maintain-prs" } });
+test("a hypothetical close actor grants only its local listener and a missing login is disclosed", () => {
+  for (const type of ["issue", "pull_request"]) {
+    const f = setup([type === "issue" ? close() : pr("github", ["closed"]), localCommand("after-close", { type, action: ["closed"], closeActors: ["closer-app[bot]"] })]);
+    const input = { forge: "github", repository: "acme/web", event: type === "issue" ? "issue-closed" : "pull-request", ...(type === "pull_request" ? { action: "closed" } : {}), actor: "read", closeActor: "closer-app[bot]" };
+    const checked = f.check(input);
+    assert.equal(checked.matched.index, 1);
+    assert.deepEqual(checked.localMatched.map((row) => row.index), [1]);
+    assert.equal(checked.rules[0].reason, "closer-not-allowed");
+    assert.doesNotMatch(JSON.stringify(checked), /closer-app/);
+    for (const over of [{ closeActor: "other-app[bot]" }, { actor: "self" }]) assert.equal(f.check({ ...input, ...over }).matched, null);
+    const missing = f.check({ ...input, closeActor: undefined });
+    assert.match(missing.rules[1].sentence, /No exact closer login was supplied/);
+    assert.equal(f.check({ ...input, closeActor: "Closer-App[bot]" }).refusal.code, "input-invalid");
+  }
+  for (const input of [{ ...base, closeActor: "closer-app[bot]" }, { ...base, forge: "forgejo", event: "issue-closed", closeActor: "closer-app[bot]" }, { ...base, event: "issue-closed", closeActor: "*" }]) assert.equal(parseTriggerCheckInput(input).refusal.code, "input-invalid");
+});
+
 test("local listeners match independently alongside the forge winner; exact review logins widen only their own rule", () => {
   const f = setup([pr("github", ["review_submitted"]), localCommand("one", { reviewAuthors: ["reviewer-app[bot]"] }), localCommand("two", { reviewAuthors: ["reviewer-app[bot]"] })]);
   const review = { forge: "github", event: "pull-request", action: "review_submitted", repository: "acme/web", actor: "read", prAuthor: "read", reviewState: "approved", reviewAuthor: "reviewer-app[bot]" };

@@ -483,6 +483,8 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   hard-coded in the filter, except that a reviewed local-command `review_submitted` listener may add
   exact `on.reviewAuthors` logins to the reviewer's association gate (`REQ-LOCAL-EVENT-COMMANDS`). This
   exception never changes an ordinary forge job's gate or the unconditional self-identity refusal.
+  A GitHub local `closed` listener may similarly add exact `on.closeActors` logins to its closer's
+  resolved-permission gate (#951); it reads `sender.login`, never the PR author's association.
   A comment carrying `issue.pull_request` is a PR-context
   comment and enqueues a pull_request target. On a comment rule that names `run.command` (issue #189), the
   `<phrase> <flow>` trailing-word flow override is **inert**: trailing text neither retargets nor
@@ -917,6 +919,11 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   reviewer still needs the ordinary collaborator association. Self events always refuse; review-state,
   label and empty-Commented-review predicates still apply. Polling uses the same transient reviewer login
   and match function. Its existing open-PR sweep and same-cycle reopen limitations remain.
+  GitHub local `issue` and `pull_request` rules with only `closed` may add `closeActors`: 1 to 32
+  distinct exact lowercase logins, compared without case against `sender.login`. A listed actor may
+  wake this listener despite collaborator permission none, without a permission lookup for this
+  listener. An unlisted actor retains the ordinary lookup. Self, malformed item and close-number
+  predicates still refuse. No other event, source forge or ordinary forge job can use this grant.
 - **No source payload**: The source selects whether to signal, never what to execute. Only reviewed
   trigger configuration and a transport delivery identity enter admission storage. No source title,
   body, comment, review, labels, actor, branch, repository or item number reaches the command's prompt
@@ -967,6 +974,10 @@ and nothing about the box itself (`INT-CONTAINER-RUNTIME-CONTRACT`).
   gates. Captured admission arguments, queue data, event files and logs contain no source text or actor.
   A paused or retrying generation is not replaced. A changed or absent current rule refuses before spend.
   A paired cron and event job never execute concurrently in the same canonical folder on their worker.
+  A listed App close wakes its local command through either authenticated webhooks or polling; an
+  unlisted actor with permission none does not. Exact login matching cannot be replaced by an item's
+  author, a display name, a wildcard or a merge flag. A coexisting ordinary close rule remains gated
+  by resolved write permission. Removing or changing `closeActors` invalidates a queued definition.
 
 ## REQ-LOCAL-JOB-VISIBILITY
 
@@ -9360,6 +9371,7 @@ instead of drifting.
 
 | Date | Change |
 |---|---|
+| 2026-11-20 (#951) | `REQ-TRIGGER-AUTHOR-GATE` and `REQ-LOCAL-EVENT-COMMANDS` AMENDED for a bounded exact GitHub local close-actor grant, transport parity, ordinary forge isolation and revocation tests. UNCHANGED, checked: authentication, self refusal, event predicates, source-payload exclusion, coalescing and current-authority admission, ordinary queue retry and budget checks. |
 | 2026-11-16 (#918, part 1) | **`REQ-DEPLOYMENT-BOOTSTRAP` AMENDED**, doctor's `.env` reading: `PI_PRIVATE_ENDPOINTS_FILE` is the sixth boot-file key ("five" corrected to six in the lead and the body), kept out of `BOOT_FACT_KEYS` by `PI_MODEL_ENDPOINTS_FILE`'s own shell-or-`.env` rule. Its BOOT_FILES line loads the file as the worker's boot does, the rule across it and `model-endpoints.json` included. Every other clause UNCHANGED, checked. `REQ-PRIVATE-ENDPOINTS` arrives with the binding in part 2. |
 | 2026-11-16 (#911) | Added `REQ-LOCAL-EVENT-COMMANDS`: authenticated independent local listeners, explicit worker ownership, exact review-author grants, no source payload, durable per-trigger bounded coalescing, atomic delivery receipts, retry ownership, recovery, current-definition checks and cron-folder serialization. `REQ-TRIGGER-AUTHOR-GATE` AMENDED for the narrowly scoped reviewer grant and the absence of source text from local commands. UNCHANGED, checked: ordinary forge first-match selection and deduplication, action vocabularies, self refusal, polling feed coverage, `REQ-LOCAL-JOB-VISIBILITY`, `REQ-CRON-SCHEDULED-JOBS` scheduler guarantees, isolation, spend checks and registered command execution. Final implementation also amends `REQ-OPERATOR-JOB-CANCEL`: unacknowledged local cancellations disclose possibly committed signal changes; unclaimed changed or cancelled generations can be superseded, active ownership stays, local authority refusals do not spend one-shots, and missing active queue jobs require paused, positively verified manual recovery. Final polling review corrects ETag commit ordering: validators persist only after durable admission and the feed cursor or PR snapshot, with all review validators after the shared sweep cursor, preventing a failed signal from being hidden behind 304. Existing key shapes and TTLs are UNCHANGED, checked. |
 | 2026-11-15 (#908) | Added `REQ-TRIGGER-MERGE-POLICY`: reviewed `run.mayMerge`, exact default prompt preservation, current-trigger digest authorization before each container, all-forge forwarding, versioned data and the image capability proof. `REQ-PER-TRIGGER-INSTRUCTION` now precedes the effective policy paragraph and names the forge trigger types. The wait gate's explanation now distinguishes starting work from granting merge permission. UNCHANGED, checked: `REQ-BRANCH-PROTECTION-PRECONDITION`, author admission, budget gates, ordinary retries, MCP withholding and all unflagged job behavior. |

@@ -103,6 +103,24 @@ test("a reviewed secret-bundle opt-out survives the job and remains part of runt
 	assert.equal(h.claims.length, 0);
 });
 
+test("changing or revoking a close-actor grant fences an already admitted local command", async () => {
+	for (const change of [
+		(h) => { delete h.raw.on.closeActors; },
+		(h) => { h.raw.on.closeActors = ["another-app[bot]"]; },
+		(h) => { h.raw.on.closeActors.push("another-app[bot]"); },
+	]) {
+		const h = fixture();
+		h.raw.on.closeActors = ["closer-app[bot]"];
+		const [trigger] = parseTriggers(JSON.stringify(h.document), "triggers.json");
+		h.job.data = JSON.parse(JSON.stringify(buildLocalEventJob(trigger, h.job.data.localEvent.generation)));
+		assert.deepEqual(await h.runtime.check(h.job), { ok: true, index: 0 });
+		assert.equal(JSON.stringify(h.job.data).includes("closer-app[bot]"), false, "actor is transient matching input, never a command input");
+		change(h);
+		assert.deepEqual(await h.runtime.claim(h.job, "attempt"), refusal("local-event-trigger-changed"));
+		assert.equal(h.claims.length, 0);
+	}
+});
+
 test("deletion, invalid configuration and a newer file are distinct free decisions", async () => {
 	for (const [prepare, expected] of [
 		[(h) => { h.document.triggers = []; }, refusal("local-event-trigger-changed")],

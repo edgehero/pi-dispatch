@@ -388,6 +388,16 @@ as `subscription_auth_hold`. See [subscription renewal](subscription-auth.md#adm
 
 Release numbers come from the git tags.
 
+### Unreleased: local close-actor grants
+
+| Stored state | What changes and how to move it |
+|---|---|
+| Trigger `on.closeActors`, trigger version 10 | Optional exact actor grant for GitHub local close commands. Upgrade every worker, receiver and console before adding it. Older readers hold version 10 instead of silently dropping the grant. Configurations without it retain their existing minimum version. Changing or removing it invalidates pending local-event work through the existing complete-definition digest. |
+| Local-event state and queued jobs | No shape, key, TTL, receipt or job-data version changes. No migration or older-state detector is needed: a listener without a grant remains a supported permission-based policy, not obsolete state. Before rollback, remove the grant with an upgraded writer and settle its pending work; restore a backup only if losing later edits is intended. |
+
+See [local event commands](triggers.md#a-forge-event-running-a-local-command). A grant admits the named actor
+only to its configured local close command; ordinary forge close jobs keep their existing permission gate.
+
 ### Unreleased: explicit auxiliary model routes
 
 | Stored state | What changes and how to move it |

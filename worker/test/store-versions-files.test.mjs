@@ -190,7 +190,7 @@ const triggersPathWith = (doc) => {
 };
 
 test("triggers: the shipped tables hold the rule, against the run keys and blocks the loader reads", () => {
-	assert.equal(TRIGGERS_FILE_VERSION, 9, "explicit auxiliary model grants at 9");
+	assert.equal(TRIGGERS_FILE_VERSION, 10, "explicit local close-actor grants at 10");
 	// Every `run.<key>` any worker module reads: a lenient superset (comments add names), which is enough to refuse a
 	// table row naming a key nothing reads.
 	const runKeys = new Set();
@@ -198,23 +198,24 @@ test("triggers: the shipped tables hold the rule, against the run keys and block
 		if (!name.endsWith(".mjs")) continue;
 		for (const m of src(name).matchAll(/\brun\??\.(\w+)/g)) runKeys.add(m[1]);
 	}
-	// The file's two tables of keys read as one: the version is the largest either holds, and a table with no row of its own is no problem.
+	// An on value can need a newer reader than any run field. Include its close grant's evaluated
+	// requirement when checking the largest version, without inventing a run field for that policy.
 	assert.ok(Object.isFrozen(TRIGGER_RUN_FIELD_VERSIONS) && Object.isFrozen(TRIGGERS_BLOCK_VERSIONS));
 	const blocks = [...new Set([...bodyOf(src("triggers.mjs"), "parseTriggersDocument").matchAll(/\bparsed\??\.(\w+)/g)].map((m) => m[1]))].filter((key) => key !== "version");
 	assert.ok(blocks.includes("secretBundles") && blocks.includes("triggers"), blocks.join(","));
-	assert.deepEqual(versionTableProblems(Object.freeze({ ...TRIGGER_RUN_FIELD_VERSIONS, ...TRIGGERS_BLOCK_VERSIONS }), { known: [...runKeys, ...blocks], version: TRIGGERS_FILE_VERSION }), []);
+	assert.deepEqual(versionTableProblems(Object.freeze({ ...TRIGGER_RUN_FIELD_VERSIONS, ...TRIGGERS_BLOCK_VERSIONS, on: TRIGGER_VALUE_VERSIONS.on({ closeActors: ["closer-app[bot]"] }) }), { known: [...runKeys, ...blocks, "on"], version: TRIGGERS_FILE_VERSION }), []);
 	assert.deepEqual(valueTableProblems(TRIGGERS_BLOCK_VALUE_VERSIONS, { known: blocks, version: TRIGGERS_FILE_VERSION }), []);
 	// The value tables: an entry's own fields (every `entry.<key>` the loader reads), and the same `run` keys as above.
 	const entryKeys = [...new Set([...src("triggers.mjs").matchAll(/\bentry\??\.(\w+)/g)].map((m) => m[1]))];
 	assert.ok(entryKeys.includes("on") && entryKeys.includes("run"), entryKeys.join(","));
 	assert.deepEqual(valueTableProblems(TRIGGER_VALUE_VERSIONS, { known: entryKeys, version: TRIGGERS_FILE_VERSION }), []);
 	assert.deepEqual(valueTableProblems(TRIGGER_RUN_VALUE_VERSIONS, { known: [...runKeys], version: TRIGGERS_FILE_VERSION }), []);
-	// A value rule can raise the version with no field-table row, which neither check can see. While there is none, the
-	// version is the field tables'; the first value rule must extend this assertion with the versions it answers.
+	// Every value rule is named and probed; the close-actor probe above also participates in the maximum.
 	assert.deepEqual([...Object.keys(TRIGGER_VALUE_VERSIONS), ...Object.keys(TRIGGER_RUN_VALUE_VERSIONS), ...Object.keys(TRIGGERS_BLOCK_VALUE_VERSIONS)], ["on", "secretBundles"]);
 	assert.equal(TRIGGERS_BLOCK_VALUE_VERSIONS.secretBundles({ lab: { files: ["DEVICE_KEY"] } }), 8);
 	assert.equal(TRIGGERS_BLOCK_VALUE_VERSIONS.secretBundles({ lab: { profile: "lab" } }), 1);
 	assert.equal(TRIGGER_VALUE_VERSIONS.on({ type: "pull_request", forge: "github" }), 5);
+	assert.equal(TRIGGER_VALUE_VERSIONS.on({ type: "pull_request", forge: "github", closeActors: ["closer-app[bot]"] }), 10);
 	assert.equal(TRIGGER_VALUE_VERSIONS.on({ type: "pull_request", action: ["opened"] }), 1);
 });
 
@@ -852,4 +853,18 @@ test("auxiliary grants require trigger version 9 and old readers defer them; rem
 	const { auxiliaryModels: _removed, ...run } = entry.run;
 	assert.deepEqual(writeTriggers({ triggersPath: path, mutate: () => [{ ...entry, run }] }), { ok: true });
 	assert.equal(JSON.parse(readFileSync(path, "utf8")).version, undefined);
+});
+
+test("local close grants stamp version 10 and older readers defer before interpreting the grant", () => {
+	const entry = { on: { type: "pull_request", action: ["closed"], forge: "github", id: "sweep", closeActors: ["closer-app[bot]"] }, run: { kind: "local", folder: "/srv/automation", command: "sweep", worker: "owner" } };
+	const path = triggersPathWith({ triggers: [] });
+	assert.deepEqual(writeTriggers({ triggersPath: path, mutate: () => [entry] }), { ok: true });
+	const text = readFileSync(path, "utf8");
+	assert.equal(JSON.parse(text).version, 10);
+	assert.deepEqual(parseTriggers(text, path)[0].on.closeActors, entry.on.closeActors);
+	assert.equal(triggersFileNewer(text, { supported: 9 }), true);
+	assert.throws(() => parseTriggers(text, path, { supported: 9 }), error => error.newer === true);
+	delete entry.on.closeActors;
+	assert.deepEqual(writeTriggers({ triggersPath: path, mutate: () => [entry] }), { ok: true });
+	assert.equal(JSON.parse(readFileSync(path, "utf8")).version, 5, "existing local listeners retain their original minimum version");
 });

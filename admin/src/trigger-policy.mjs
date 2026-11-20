@@ -11,7 +11,9 @@ export function triggerWhoMayFire(trigger) {
   if (kind === "comment") return "The commenter's GitHub association must be OWNER, MEMBER or COLLABORATOR; the service's own comments are refused.";
   const actions = Array.isArray(on.action) ? on.action : [];
   const gates = [];
-  if (kind === "issue" || actions.includes("closed")) gates.push("The closer must have repository write access");
+  if (kind === "issue" || actions.includes("closed")) gates.push((trigger.run?.kind === "local" || trigger.runKind === "local") && Array.isArray(on.closeActors) && on.closeActors.length > 0
+    ? "The closer must have repository write access, or their exact login must be in this local command's reviewed close-actor allowlist; the service's own identity stays refused"
+    : "The closer must have repository write access");
   if (actions.includes("labeled")) gates.push("A collaborator-applied matching label supplies approval");
   if (actions.includes("review_submitted")) gates.push(Array.isArray(on.reviewAuthors) && on.reviewAuthors.length > 0
     ? "The reviewer's association must be OWNER, MEMBER or COLLABORATOR, or their exact login must be in this local command's reviewed allowlist; the service's own identity stays refused"

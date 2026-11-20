@@ -354,7 +354,7 @@ function isNonEmptyString(value) {
  * `version`, absent meaning 1, which `writeTriggers` owns and writes only when the content needs more than 1, so every
  * file of today's fields stays byte-identical.
  */
-export const TRIGGERS_FILE_VERSION = 9;
+export const TRIGGERS_FILE_VERSION = 10;
 
 /**
  * Each `run` key whose ABSENCE an older build would misread, with the version that introduced it. The raw `run` keys
@@ -383,7 +383,7 @@ export const TRIGGERS_BLOCK_VERSIONS = Object.freeze({});
  * its next start fails) where a stamp makes it defer. Empty until a value needs one.
  */
 export const TRIGGER_VALUE_VERSIONS = Object.freeze({
-	on: (on) => on && ["forge", "debounceSeconds", "reviewAuthors"].some((key) => Object.hasOwn(on, key)) ? 5 : 1,
+	on: (on) => on && Object.hasOwn(on, "closeActors") ? 10 : on && ["forge", "debounceSeconds", "reviewAuthors"].some((key) => Object.hasOwn(on, key)) ? 5 : 1,
 });
 
 /**
@@ -598,7 +598,7 @@ function normalizeTrigger(entry, index, path, state) {
 	validateMayMerge(run, on.type, at, path);
 	const localEvent = run.kind === "local" && !["cron", "watch"].includes(on.type);
 	if (!localEvent) {
-		for (const key of ["forge", "debounceSeconds", "reviewAuthors"]) {
+		for (const key of ["forge", "debounceSeconds", "reviewAuthors", "closeActors"]) {
 			if (on[key] !== undefined) throw configError(`${at}: on.${key} is only available on a forge event starting a local command: ${path}`);
 		}
 		if (run.worker !== undefined && on.type !== "cron") throw configError(`${at}: run.worker is only available on local command events and cron triggers: ${path}`);
@@ -660,6 +660,12 @@ function normalizeLocalEvent(on, run, index, path, state) {
 		if (!Array.isArray(on.reviewAuthors) || on.reviewAuthors.length === 0 || on.reviewAuthors.length > REVIEW_AUTHORS_MAX || on.reviewAuthors.some((name) => typeof name !== "string" || !REVIEW_AUTHOR_LOGIN_RE.test(name)) || new Set(on.reviewAuthors).size !== on.reviewAuthors.length) throw configError(`${at}: on.reviewAuthors must contain 1 to ${REVIEW_AUTHORS_MAX} distinct exact lowercase GitHub logins (an App may end in [bot]): ${path}`);
 		reviewAuthors = [...on.reviewAuthors];
 	}
+	let closeActors;
+	if (on.closeActors !== undefined) {
+		if (on.forge !== "github" || !["issue", "pull_request"].includes(on.type) || !Array.isArray(on.action) || on.action.length !== 1 || on.action[0] !== "closed") throw configError(`${at}: on.closeActors requires a GitHub local command on closed: ${path}`);
+		if (!Array.isArray(on.closeActors) || on.closeActors.length === 0 || on.closeActors.length > REVIEW_AUTHORS_MAX || on.closeActors.some((name) => typeof name !== "string" || !REVIEW_AUTHOR_LOGIN_RE.test(name)) || new Set(on.closeActors).size !== on.closeActors.length) throw configError(`${at}: on.closeActors must contain 1 to ${REVIEW_AUTHORS_MAX} distinct exact lowercase GitHub logins (an App may end in [bot]): ${path}`);
+		closeActors = [...on.closeActors];
+	}
 	// Azure's source validators require a clone repository for work items. A local command clones none;
 	// this private placeholder satisfies only that execution check and is never returned or queued.
 	const sourceRun = { kind: on.forge, command: run.command, ...(on.forge === "azure" && ["label", "comment"].includes(on.type) ? { repository: "local-command" } : {}) };
@@ -670,7 +676,7 @@ function normalizeLocalEvent(on, run, index, path, state) {
 	else event = normalizePullRequest(on, sourceRun, index, path);
 	const local = normalizeCron({ type: "cron", id: on.id, pattern: "0 0 * * *" }, run, index, path, { seenCronIds: new Set() });
 	if (on.disarmed !== undefined) return { on: { type: DISARMED_TYPE }, run: {} };
-	return { on: { ...event.on, forge: on.forge, id: on.id, debounceSeconds, ...(reviewAuthors !== undefined ? { reviewAuthors } : {}) }, run: { ...local.run, worker } };
+	return { on: { ...event.on, forge: on.forge, id: on.id, debounceSeconds, ...(reviewAuthors !== undefined ? { reviewAuthors } : {}), ...(closeActors !== undefined ? { closeActors } : {}) }, run: { ...local.run, worker } };
 }
 
 function normalizeWatch(entry, index, path, state) {

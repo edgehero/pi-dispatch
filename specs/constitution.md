@@ -811,7 +811,7 @@ passing, on the record — issue #80.)
 
 - **Statement**: A job shall start from a webhook only on the say-so of an actor with **write access or
   above to the target repository**, established by whatever mechanism that forge offers, except for the
-  two explicitly reviewed grants below.
+  explicitly reviewed grants below.
   **Watch exception (#735):** a signed collector finding has no human author. An operator-reviewed source/rule pairing may start only a fresh read-only investigation or a bounded deterministic decision container; it may file or update an issue in the reviewed target. Every code-changing job still requires the existing forge author gate. Direct watch fixes and watch outbox chaining are refused. A signature authenticates the collector, never a log line's author.
   **Local-command review exception (#911):** an operator-reviewed GitHub `review_submitted` listener
   with `run.kind:"local"` may add exact `on.reviewAuthors` logins to the ordinary collaborator gate.
@@ -821,6 +821,15 @@ passing, on the record — issue #80.)
   reviewer login is transient matching input, compared without case; patterns and display names do not
   grant authority. The self-identity refusal and all other event predicates still apply. A local command
   is not intrinsically read-only: its existing writable folder and admitted credentials remain its powers.
+  **Local-command close exception (#951):** an operator-reviewed GitHub `closed` listener with
+  `run.kind:"local"` may add exact `on.closeActors` logins to the closer-permission gate. The login is
+  the authenticated delivery's `sender.login`, compared without case, never the item's author or a
+  claimed merge flag. This grant wakes only the fixed local command under the same payload isolation,
+  self refusal, predicates, current-definition checks and spend gates as the review exception. It
+  authorizes both plain closes and merge-closes of the configured issue or PR rule. It grants no
+  ordinary forge-job authority and no merge permission. An unlisted closer still needs resolved write
+  access. A listed actor needs no collaborator lookup for that listener; another matching listener or
+  ordinary close rule may still need one.
   **GitHub**: an allowlisted label, a comment from `author_association ∈ {OWNER, MEMBER, COLLABORATOR}`,
   or a `pull_request` event whose approval gate is satisfied. For a `pull_request`, three arms, and
   **which field each reads is part of the constraint, not an implementation detail**: **labeling**
@@ -836,7 +845,7 @@ passing, on the record — issue #80.)
   `GET /repos/{owner}/{repo}/collaborators/{username}/permission`, passing on `admin` or `write` (GitHub
   folds `maintain` into `write` and `triage` into `read` in that legacy field, so the two-member set is
   the complete honest mapping; `role_name` is deliberately not read) — and never by any payload
-  association field. A non-collaborator's normal answer is `200` with `permission: "none"`, a determinate
+  association field, except for the local-command close grant above. A non-collaborator's normal answer is `200` with `permission: "none"`, a determinate
   refusal; `404` covers an unknown user or repository, equally determinate; anything else is
   indeterminate and answers 503, the GitLab arm's posture. CORRECTED 2026-11-04 (#809), where this claimed a
   resend GitHub never makes: GitHub does not resend a failed delivery on its own, so the close waits for a hand
@@ -886,6 +895,12 @@ passing, on the record — issue #80.)
   would make a reviewed App listener impossible. Naming the reviewer is therefore a deliberate new grant
   to spend and execute, not a claim that App-authored text is trusted or that a command cannot change code.
   The operator chooses the command and credentials, and the container and budget gates remain mandatory.
+  **Why the close exception changes the constraint (#951):** GitHub's collaborator API can report
+  `permission:"none"` for an installed App that just completed a merge. That lookup cannot establish
+  the App's installation permissions. An explicit actor grant allows the reviewed reconciliation
+  command to wake without treating all Apps, all merged PRs or arbitrary authenticated events as
+  authorized. Like the review grant, this is authority to execute and spend under the chosen command,
+  not a claim that the actor has collaborator status or that its content is trusted.
   Withholding every source field prevents the grant from selecting arguments or injecting a prompt; it
   does not constrain the command's own API reads or behavior. Coalescing bounds bursts, not total spend
   from repeated events, so the existing count and dollar limits remain necessary.
@@ -1533,6 +1548,7 @@ passing, on the record — issue #80.)
 
 | Date | Change |
 |---|---|
+| 2026-11-20 (#951) | `CONST-TRIGGER-AUTHOR-GATE` AMENDED with an explicit exact-actor grant for GitHub local close commands: installed Apps can report collaborator permission none after a merge, so that lookup alone cannot wake a reviewed reconciliation command. The grant covers only its configured close rule, preserves self refusal and payload isolation, and does not authorize ordinary forge jobs. UNCHANGED, checked: `CONST-HMAC-OVER-RAW-BODY`, `CONST-ISSUE-TEXT-IS-DATA`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-TOKEN-SCOPED-PER-JOB`, `CONST-PI-VERSION-PINNED` and `CONST-MERGE-NEVER-AUTOMATIC`. |
 | 2026-11-16 (#911) | `CONST-TRIGGER-AUTHOR-GATE` AMENDED with the narrowly reviewed local-command GitHub review-author grant, including its justification: an App with association NONE may wake a fixed command by exact login, but gains no payload or argument channel and no forge-flow authority. A command remains capable of writes under its existing folder and credentials; no read-only or model-free promise is made. UNCHANGED, checked: `CONST-HMAC-OVER-RAW-BODY`, `CONST-ISSUE-TEXT-IS-DATA`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-TOKEN-SCOPED-PER-JOB`, `CONST-PI-VERSION-PINNED` and `CONST-MERGE-NEVER-AUTOMATIC`; local signals retain authentication, container isolation, current-authority checks and ordinary spend gates, and grant no merge policy. |
 | 2026-11-15 (#908) | AMENDED `CONST-MERGE-NEVER-AUTOMATIC`: the harness still calls no merge or approval API, but an explicitly reviewed forge-flow trigger may permit its job agent to land its own change through existing forge requirements; the justification names the lost mandatory-human-review assumption, editable tests and the operator-selected approval process. `CONST-TOKEN-SCOPED-PER-JOB` AMENDED only to qualify its no-practical-merge-capability clause as the default: the opt-in does not widen credential permissions. `CONST-ISSUE-TEXT-IS-DATA` clarifies that payloads never grant the permission and the envelope follows the admitted policy. UNCHANGED, checked: token scope, permission minting, custody and expiry, branch-protection admission, `CONST-TRIGGER-AUTHOR-GATE`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-PI-VERSION-PINNED` and the default-branch construction of `CONST-NO-CONTEXT-FILES-MANDATORY`. Revocation applies at the next container start, never retroactively to a running job or a forge operation. |
 | 2026-11-15 (#899) | All constraints UNCHANGED, checked. `CONST-RETRY-INFRA-ONLY`: terminal policy outcomes still return, and releasing a duplicate window never retries the cancelled or refused job; a new authenticated event passes ordinary admission. `CONST-BUDGET-BEFORE-TOKENS`, `CONST-TRIGGER-AUTHOR-GATE`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-TOKEN-SCOPED-PER-JOB` and `CONST-PI-VERSION-PINNED`: no free gate, spend, authority, container, credential or dependency pin changes. `CONST-MERGE-NEVER-AUTOMATIC` UNCHANGED, checked. |
