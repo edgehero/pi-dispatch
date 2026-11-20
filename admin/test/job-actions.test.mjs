@@ -32,7 +32,10 @@ import {
   publicInboxEntry,
   STEER_INBOX_ROWS_MAX,
   steerAuditTarget,
+  removeFailedJobs,
 } from "../src/read-model.mjs";
+import { CONFIRM_READ_TIMEOUT_MS, FAILED_PLAN_TIMEOUT_MS, STEER_PLAN_TIMEOUT_MS, failedActNotTried, failedActUnconfirmed, steerUnconfirmed } from "../src/job-actions.mjs";
+import { readJobsData } from "../src/console/job-data.mjs";
 import { mergePolicyDigest } from "@edgehero/pi-dispatch/merge-policy";
 import { parseTriggers } from "@edgehero/pi-dispatch/triggers";
 import { createHash } from "node:crypto";
@@ -203,7 +206,7 @@ test("the fleet reader's pause/resume go through the kill switch's decision: a d
     assert.deepEqual((await plain.resume()).results[0].res, { ok: true, paused: false, queues: ["pi-jobs"] });
     // A queue that throws part-way is a PARTIAL result naming what changed, never a throw the TUI swallows.
     const failing = createFleetReader({ valkeyUrl: "redis://reader" }, { ...seams, makeQueueFn: () => ({ name: "pi-jobs", pause: async () => { throw new Error("down"); }, close: async () => {} }) });
-    assert.deepEqual((await failing.pause()).results[0].res.partial, { done: [], failed: "pi-jobs", error: "down" });
+    assert.deepEqual((await failing.pause()).results[0].res.partial, { done: [], failed: "pi-jobs", error: "down", unconfirmed: [], refused: ["pi-jobs"], notTried: [] });
     for (const r of [refusing, both, plain, failing]) await r.dispose();
   } finally {
     await v.done();
@@ -1489,5 +1492,246 @@ test("fresh local reruns keep fixed or random auxiliary grants, their ceiling an
     assert.equal(stored.data.maxCostUsd, "1");
     assert.deepEqual(stored.data.modelSelection, selection.modelSelection);
     assert.equal(stored.data.dataVersion, 11);
+  }
+});
+
+// ---- issue #842: previews and confirms on a Valkey that is connected and stopped answering, on fakes -----------------
+
+const neverAnswers = () => new Promise(() => {});
+const lostAnswer = () => Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT", valkeyMayStillRun: true });
+/** `promise`'s answer and how long it took, or "hung" after `ms`. */
+const timed = async (promise, ms = 3000) => {
+  const t0 = Date.now();
+  let timer;
+  const res = await Promise.race([promise, new Promise((resolve) => (timer = setTimeout(resolve, ms, "hung")))]);
+  clearTimeout(timer);
+  return { res, ms: Date.now() - t0 };
+};
+/** A raw client whose fleet discovery finds an empty registry and no host queues; `over` adds or replaces reads. */
+const quietClient = (over = {}) => ({ on() {}, async smembers() { return []; }, async scan() { return ["0", []]; }, disconnect() {}, ...over });
+const MESSAGE = "0123456789abcdef0123456789abcdef";
+
+test("a failed-job preview and both steer previews answer within their bound when the queue never answers, and wait for no close (#842)", async () => {
+  const conns = [];
+  const closes = [];
+  const clients = [];
+  const parseConnectionFn = (_url, options) => (conns.push(options), {});
+  let dropped = 0;
+  const queueFn = (_c, { name }) => ({ name, getJob: neverAnswers, getFailed: neverAnswers, close: () => (closes.push(name), neverAnswers()), disconnect() { dropped += 1; } });
+  const redisFn = (_url, options) => (clients.push(options ?? null), quietClient());
+  const common = { url: "redis://x", redisFn, queueFn, parseConnectionFn, planTimeoutMs: 60 };
+  const failed = await timed(planFailedBulk(common));
+  assert.deepEqual(failed.res, { unreachable: "timed out reading the failed jobs" });
+  const steer = await timed(planSteer({ ...common, jobId: "gh-1", text: "look at the tests", by: "rob" }));
+  assert.deepEqual(steer.res, { refusal: "Nothing was sent: the job or its inbox did not answer within 0.06 seconds" });
+  const withdraw = await timed(planSteerWithdraw({ ...common, jobId: "gh-1", id: MESSAGE }));
+  assert.deepEqual(withdraw.res, { refusal: "the job or its inbox did not answer within 0.06 seconds; nothing was changed" });
+  for (const { ms } of [failed, steer, withdraw]) assert.ok(ms < 1500, `${ms} ms`);
+  assert.deepEqual(closes, ["pi-jobs", "pi-jobs", "pi-jobs"], "each queue's close was started, and none was waited for");
+  assert.deepEqual(conns, Array(3).fill({ failFast: true, commandTimeoutMs: 5000 }), "every queue is the console's bounded kind");
+  // A close that is never answered leaves its socket open, so each queue's connection is dropped a second later.
+  await new Promise((resolve) => setTimeout(resolve, 1200));
+  assert.equal(dropped, 3);
+  // The defaults: ten seconds for a list that may page thousands of jobs, the client's command bound for a steer's reads.
+  assert.deepEqual([FAILED_PLAN_TIMEOUT_MS, STEER_PLAN_TIMEOUT_MS], [10_000, 5_000]);
+});
+
+test("a steer preview whose inbox read never answers ends at its bound too, on a client with a command bound of its own (#842)", async () => {
+  const made = [];
+  let dropped = 0;
+  const job = (state) => ({ id: "gh-1", data: { steer: true }, getState: async () => state });
+  const queueFn = () => ({ name: "pi-jobs", getJob: async () => job("active"), close: async () => {} });
+  const redisFn = (_url, options) => {
+    made.push(options ?? null);
+    return quietClient({ exists: neverAnswers, hget: neverAnswers, disconnect() { dropped += 1; } });
+  };
+  const common = { url: "redis://x", redisFn, queueFn, parseConnectionFn: () => ({}), planTimeoutMs: 60 };
+  const steer = await timed(planSteer({ ...common, jobId: "gh-1", text: "look at the tests", by: "rob" }));
+  assert.deepEqual(steer.res, { refusal: "Nothing was sent: the job or its inbox did not answer within 0.06 seconds" });
+  const withdraw = await timed(planSteerWithdraw({ ...common, jobId: "gh-1", id: MESSAGE }));
+  assert.deepEqual(withdraw.res, { refusal: "the job or its inbox did not answer within 0.06 seconds; nothing was changed" });
+  // The fleet discovery's client first, then the inbox's: bounded, with its offline queue, dropped at once.
+  assert.deepEqual(made.filter((o) => o !== null), Array(2).fill({ commandTimeoutMs: 5000, disconnectTimeoutMs: 0 }));
+  assert.ok(dropped >= 2, "and the inbox client is dropped, never left to a read that does not answer");
+});
+
+test("a steer confirm that was sent and not answered says may or may not, and one that was never sent says unreachable (#842)", async () => {
+  const made = [];
+  const client = (error) => (_url, options) => (made.push(options), quietClient({ eval: () => Promise.reject(error) }));
+  const plan = { kind: "steer", jobId: "gh-1", queue: "pi-jobs", runId: "gh-1", id: MESSAGE, mode: "steer", source: "console", by: "rob", text: "look at the tests" };
+  const back = { kind: "steer-withdraw", jobId: "gh-1", runId: "gh-1", id: MESSAGE, prior: "queued" };
+  assert.deepEqual(steerUnconfirmed("sent", MESSAGE, "gh-1"), { invalid: `message ${MESSAGE} may or may not have been sent: Valkey took it and did not answer within the bound; the run's inbox shows it once Valkey answers (job gh-1)`, partial: true });
+  assert.deepEqual(await enqueueSteer(plan, { url: "redis://x", redisFn: client(lostAnswer()) }), steerUnconfirmed("sent", MESSAGE, "gh-1"));
+  assert.deepEqual(await withdrawSteerMessage(back, { url: "redis://x", redisFn: client(lostAnswer()) }), steerUnconfirmed("withdrawn", MESSAGE, "gh-1"));
+  // Timed out in the client's own queue before it was sent (no mark): nothing reached Valkey, and it will not later.
+  const unsent = Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT" });
+  assert.deepEqual(await enqueueSteer(plan, { url: "redis://x", redisFn: client(unsent) }), { unreachable: "Valkey said ETIMEDOUT" });
+  assert.deepEqual(await withdrawSteerMessage(back, { url: "redis://x", redisFn: client(unsent) }), { unreachable: "Valkey said ETIMEDOUT" });
+  assert.deepEqual(made, Array(4).fill({ commandTimeoutMs: 5000, disconnectTimeoutMs: 0 }), "each confirm's client bounds its commands");
+});
+
+test("a failed-job action whose answer is lost says which step lost it, stops there, and reports the rest not tried (#842)", async () => {
+  const asked = [];
+  const acted = [];
+  const failedJob = (id, act) => ({ id, attemptsMade: 1, finishedOn: 5, data: {}, getState: async () => "failed", retry: async () => (acted.push(`retry ${id}`), act()), remove: async () => (acted.push(`remove ${id}`), act()) });
+  const jobs = ["gh-a", "gh-b", "gh-c"].map((jobId) => ({ jobId, attemptsMade: 1, finishedOn: 5 }));
+  const queueFn = (getJob) => () => ({ name: "pi-jobs", getJob: async (id) => (asked.push(id), getJob(id)), close: neverAnswers, disconnect() {} });
+  const common = { url: "redis://x", redisFn: () => quietClient(), parseConnectionFn: () => ({}) };
+  // The WRITE of the second job was sent and not answered: may or may not, and the third is never looked up.
+  const lostWrite = queueFn((id) => failedJob(id, id === "gh-b" ? () => Promise.reject(lostAnswer()) : async () => {}));
+  for (const [fn, what] of [[retryFailedJobs, "retry"], [removeFailedJobs, "removal"]]) {
+    asked.length = 0;
+    acted.length = 0;
+    const got = await timed(fn({ ...common, jobs, queueFn: lostWrite }));
+    assert.notEqual(got.res, "hung", "it does not wait for a close that is never answered");
+    assert.deepEqual(got.res.results, [{ ok: true, jobId: "gh-a", queue: "pi-jobs" }, { jobId: "gh-b", ...failedActUnconfirmed(what, "gh-b") }, failedActNotTried("gh-c")]);
+    assert.deepEqual(asked, ["gh-a", "gh-b"]);
+    assert.deepEqual(acted, [`${what === "retry" ? "retry" : "remove"} gh-a`, `${what === "retry" ? "retry" : "remove"} gh-b`]);
+  }
+  assert.equal(failedActUnconfirmed("retry", "gh-b").invalid, "the retry may or may not have been made: Valkey took it and did not answer within the bound; look at the fleet once Valkey answers (job gh-b)");
+  assert.equal(failedActNotTried("gh-c").invalid, "not tried: Valkey stopped answering at an earlier job of this action, so this one was left alone; nothing was changed for it (job gh-c)");
+  // A READ before the write lost its answer (a read's error carries the client's mark too): nothing was changed for
+  // that job, so it is unreachable, never "may or may not", and the list stops all the same.
+  asked.length = 0;
+  acted.length = 0;
+  const lostRead = queueFn((id) => (id === "gh-a" ? Promise.reject(lostAnswer()) : failedJob(id, async () => {})));
+  const read = (await timed(retryFailedJobs({ ...common, jobs, queueFn: lostRead }))).res;
+  assert.deepEqual(read.results, [{ jobId: "gh-a", unreachable: "Command timed out" }, failedActNotTried("gh-b"), failedActNotTried("gh-c")]);
+  assert.deepEqual([asked, acted], [["gh-a"], []]);
+  // The single spelling: the one job's own answer.
+  const one = (await timed(retryFailedJob({ ...common, jobId: "gh-b", expect: { attemptsMade: 1, finishedOn: 5 }, queueFn: lostWrite }))).res;
+  assert.deepEqual(one, { jobId: "gh-b", ...failedActUnconfirmed("retry", "gh-b") });
+  // Either sign of a lost answer stops the list: the client's mark alone, and its timeout's code alone.
+  for (const lost of [Object.assign(new Error("Connection is closed."), { valkeyMayStillRun: true }), Object.assign(new Error("no answer"), { code: "ETIMEDOUT" })]) {
+    asked.length = 0;
+    const res = await retryFailedJobs({ ...common, jobs: [...jobs, { jobId: 7, attemptsMade: 1, finishedOn: 5 }], queueFn: queueFn((id) => (id === "gh-a" ? Promise.reject(lost) : failedJob(id, async () => {}))) });
+    assert.deepEqual(res.results, [{ jobId: "gh-a", unreachable: lost.message }, failedActNotTried("gh-b"), failedActNotTried("gh-c"), failedActNotTried(null)], lost.message);
+    assert.deepEqual(asked, ["gh-a"]);
+  }
+  assert.deepEqual(failedActNotTried(null).jobId, null, "a list entry with no usable id is still reported, with no id");
+  // The job's STATE read lost its answer: nothing is known about the job, so nothing false is said about it ("it is
+  // unknown now, not failed; it changed since the preview" was), it is not acted on, and the list stops.
+  asked.length = 0;
+  acted.length = 0;
+  const lostState = queueFn((id) => ({ ...failedJob(id, async () => {}), getState: () => Promise.reject(lostAnswer()) }));
+  const state = await retryFailedJobs({ ...common, jobs, queueFn: lostState });
+  assert.deepEqual(state.results, [{ jobId: "gh-a", unreachable: "Command timed out" }, failedActNotTried("gh-b"), failedActNotTried("gh-c")]);
+  assert.deepEqual([asked, acted], [["gh-a"], []]);
+  // The reads before the write have a bound of their own: a queue that is not connected answers nothing for over half a
+  // minute, nothing has been sent, so the confirm says so and stops. A read that answers after the bound acts on nothing.
+  asked.length = 0;
+  acted.length = 0;
+  const slow = queueFn((id) => new Promise((resolve) => setTimeout(() => resolve(failedJob(id, async () => {})), 150)));
+  for (const fn of [retryFailedJobs, removeFailedJobs]) {
+    const late = await timed(fn({ ...common, jobs, queueFn: slow, readTimeoutMs: 40 }));
+    assert.deepEqual(late.res.results, [{ jobId: "gh-a", unreachable: "the job did not answer within 0.04 seconds" }, failedActNotTried("gh-b"), failedActNotTried("gh-c")]);
+    assert.ok(late.ms < 1000, `${late.ms} ms: it waits for no close either`);
+  }
+  assert.deepEqual(await retryFailedJob({ ...common, jobId: "gh-a", expect: { attemptsMade: 1, finishedOn: 5 }, queueFn: slow, readTimeoutMs: 40 }), { jobId: "gh-a", unreachable: "the job did not answer within 0.04 seconds" });
+  assert.deepEqual(await removeFailedJob({ ...common, jobId: "gh-a", expect: { attemptsMade: 1, finishedOn: 5 }, queueFn: slow, readTimeoutMs: 40 }), { jobId: "gh-a", unreachable: "the job did not answer within 0.04 seconds" });
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.deepEqual(acted, [], "the job a late read then found was never retried or removed");
+  assert.equal(CONFIRM_READ_TIMEOUT_MS, 6_000, "past the client's 5 s, so a read that was sent ends by its own error");
+  // An error that is no lost answer (BullMQ's refusal of a job that moved) is still that job's result, and the list goes on.
+  const refusing = queueFn((id) => failedJob(id, id === "gh-a" ? () => Promise.reject(new Error("Job gh-a is not in the failed state")) : async () => {}));
+  assert.deepEqual((await retryFailedJobs({ ...common, jobs, queueFn: refusing })).results.map((r) => r.ok === true), [false, true, true]);
+});
+
+test("the retry preview's job data is read as one step: a hundred jobs on a queue that never answers cost one bound, not a hundred (#842)", async () => {
+  const closes = [];
+  let dropped = 0;
+  const conns = [];
+  const queueFn = (_c, { name }) => ({ name, getJob: (id) => (id === "gh-0" ? Promise.resolve({ data: { kind: "local" } }) : neverAnswers()), close: () => (closes.push(name), neverAnswers()), disconnect() { dropped += 1; } });
+  const jobs = Array.from({ length: 100 }, (_, i) => ({ jobId: `gh-${i}`, queue: i % 2 ? "pi-jobs@a" : "pi-jobs" }));
+  const got = await timed(readJobsData({ url: "redis://x", jobs, queueFn, parseConnectionFn: (_u, o) => (conns.push(o), {}), timeoutMs: 80 }));
+  assert.notEqual(got.res, "hung");
+  assert.ok(got.ms < 1500, `${got.ms} ms`);
+  assert.equal(got.res.size, 100);
+  assert.deepEqual(got.res.get("gh-0"), { kind: "local" }, "what answered in time is kept");
+  assert.equal([...got.res.values()].filter((d) => d === null).length, 99, "what did not is null, as a job that is gone is");
+  assert.deepEqual(closes.sort(), ["pi-jobs", "pi-jobs@a"], "each queue's close was started and not waited for");
+  assert.deepEqual(conns, Array(2).fill({ failFast: true, commandTimeoutMs: 5000 }));
+  await new Promise((resolve) => setTimeout(resolve, 1100));
+  assert.equal(dropped, 2, "and its connection dropped once the close had not been answered");
+});
+
+test("a preview whose read answers after its bound releases what that read then opened (#842)", async () => {
+  // The fleet discovery answers only after the preview's bound has fired; the queue is opened after that, by a read
+  // nobody waits for any more, and must still be closed.
+  const closes = [];
+  const dropped = { n: 0 };
+  const lateRegistry = () => quietClient({ smembers: () => new Promise((resolve) => setTimeout(() => resolve([]), 120)), exists: async () => 1, hget: async () => null, disconnect() { dropped.n += 1; } });
+  const job = { id: "gh-1", data: { steer: true }, getState: async () => "active" };
+  const queueFn = (_c, { name }) => ({ name, getJob: async () => job, getFailed: async () => [], getFailedCount: async () => 0, close: async () => closes.push(name) });
+  const common = { url: "redis://x", redisFn: lateRegistry, queueFn, parseConnectionFn: () => ({}), planTimeoutMs: 40 };
+  assert.deepEqual(await planFailedBulk(common), { unreachable: "timed out reading the failed jobs" });
+  assert.deepEqual(closes, [], "no queue was open yet when the bound fired: the discovery had not answered");
+  assert.equal((await planSteer({ ...common, jobId: "gh-1", text: "look at the tests", by: "rob" })).refusal, "Nothing was sent: the job or its inbox did not answer within 0.04 seconds");
+  assert.equal((await planSteerWithdraw({ ...common, jobId: "gh-1", id: MESSAGE })).refusal, "the job or its inbox did not answer within 0.04 seconds; nothing was changed");
+  await new Promise((resolve) => setTimeout(resolve, 400));
+  assert.deepEqual(closes, ["pi-jobs", "pi-jobs", "pi-jobs"], "each late read's queue was closed once it settled");
+  // Each steer preview's inbox client, made by the late read, is dropped too (the discovery clients drop themselves).
+  assert.ok(dropped.n >= 5, `${dropped.n} clients dropped`);
+});
+
+test("the retry preview's job data: a read that answers after the bound writes nothing into the answer already given (#842)", async () => {
+  const queueFn = (_c, { name }) => ({ name, getJob: () => new Promise((resolve) => setTimeout(() => resolve({ data: { kind: "local" } }), 120)), close: async () => {} });
+  const got = await readJobsData({ url: "redis://x", jobs: [{ jobId: "gh-1", queue: "pi-jobs" }], queueFn, parseConnectionFn: () => ({}), timeoutMs: 30 });
+  assert.equal(got.get("gh-1"), null);
+  await new Promise((resolve) => setTimeout(resolve, 250));
+  assert.equal(got.get("gh-1"), null, "the map the caller holds does not change under it");
+});
+
+test("a failed job not found in a fleet that could not be read whole is not said to have changed: unreachable, and the list stops (#842)", async () => {
+  // The job sits on a host queue; the registry (or the keyspace scan) could not be read, so only the shared queue is asked.
+  const asked = [];
+  const queueFn = (_c, { name }) => ({ name, getJob: async (id) => (asked.push(`${name} ${id}`), undefined), close: async () => {} });
+  const jobs = ["m-1", "m-2", "m-3"].map((jobId) => ({ jobId, attemptsMade: 1, finishedOn: 5 }));
+  const blindRegistry = () => quietClient({ smembers: async () => { throw new Error("registry down"); } });
+  const shortScan = () => quietClient({ scan: async () => { throw new Error("scan cut"); } });
+  for (const [what, redisFn] of [["a registry that could not be read", blindRegistry], ["a keyspace scan that did not finish", shortScan]]) {
+    asked.length = 0;
+    for (const fn of [retryFailedJobs, removeFailedJobs]) {
+      const res = await fn({ url: "redis://x", jobs, redisFn, queueFn, parseConnectionFn: () => ({}) });
+      assert.deepEqual(res.results, [{ jobId: "m-1", unreachable: "the deployment's queues could not all be read, so the job was not looked for in every queue" }, failedActNotTried("m-2"), failedActNotTried("m-3")], what);
+      assert.ok(!JSON.stringify(res).includes("changed since the preview"), "nothing was read of these jobs, so nothing is said of them");
+    }
+    assert.deepEqual(asked, ["pi-jobs m-1", "pi-jobs m-1"], `${what}: one lookup per action, then the list stops`);
+  }
+  // A fleet that was read whole still says a job no queue holds changed since the preview, as before.
+  const whole = await retryFailedJobs({ url: "redis://x", jobs, redisFn: () => quietClient(), queueFn, parseConnectionFn: () => ({}) });
+  assert.deepEqual(whole.results.map((r) => /changed since the preview/.test(r.invalid ?? "")), [true, true, true]);
+});
+
+test("a failed-job confirm's read that answers after its bound: what it then opens is closed, its rejection goes nowhere, and a lost answer before the write is never the write's (#842)", async () => {
+  const unhandled = [];
+  const note = (err) => unhandled.push(err);
+  process.on("unhandledRejection", note);
+  try {
+    // Two fleet queues. The first lookup answers "not here" after the bound, so the late read goes on to open the second.
+    const opened = [];
+    const closed = [];
+    const hostRegistry = () => quietClient({ smembers: async () => ["mini1"], hgetall: async () => ({ name: "mini1", beatAt: String(Date.now()), routes: "true" }), srem: async () => 0 });
+    const slowMiss = (_c, { name }) => (opened.push(name), { name, getJob: () => new Promise((resolve) => setTimeout(() => resolve(undefined), 120)), close: async () => closed.push(name) });
+    const jobs = [{ jobId: "gh-a", attemptsMade: 1, finishedOn: 5 }];
+    const late = await retryFailedJobs({ url: "redis://x", jobs, redisFn: hostRegistry, queueFn: slowMiss, parseConnectionFn: () => ({}), readTimeoutMs: 40 });
+    assert.deepEqual(late.results, [{ jobId: "gh-a", unreachable: "the job did not answer within 0.04 seconds" }]);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    assert.deepEqual(opened, ["pi-jobs", "pi-jobs@mini1"], "the late read opened the second queue after the answer");
+    assert.deepEqual(closed.sort(), ["pi-jobs", "pi-jobs@mini1"], "and both were closed");
+    // A late read that REJECTS is nobody's to handle.
+    const slowFail = () => ({ name: "pi-jobs", getJob: () => new Promise((_resolve, reject) => setTimeout(() => reject(new Error("Connection is closed.")), 100)), close: async () => {} });
+    await retryFailedJobs({ url: "redis://x", jobs, redisFn: () => quietClient(), queueFn: slowFail, parseConnectionFn: () => ({}), readTimeoutMs: 30 });
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    assert.deepEqual(unhandled, []);
+    // The touch store's own write before the retry lost its answer (its error carries the client's mark): the retry
+    // itself was never sent, so this is unreachable, never "the retry may or may not have been made".
+    let retried = 0;
+    const job = { id: "gh-a", attemptsMade: 1, finishedOn: 5, data: {}, getState: async () => "failed", retry: async () => (retried += 1) };
+    const touchStore = { begin: () => Promise.reject(lostAnswer()), write: async () => ({ ok: true }), abort: async () => {} };
+    const before = await retryFailedJob({ url: "redis://x", jobId: "gh-a", expect: { attemptsMade: 1, finishedOn: 5 }, redisFn: () => quietClient(), queueFn: () => ({ name: "pi-jobs", getJob: async () => job, close: async () => {} }), parseConnectionFn: () => ({}), touchStore });
+    assert.deepEqual([before, retried], [{ jobId: "gh-a", unreachable: "Command timed out" }, 0]);
+  } finally {
+    process.off("unhandledRejection", note);
   }
 });

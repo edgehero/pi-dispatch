@@ -28,6 +28,9 @@ import {
   readStagedPackages,
   listRunIds,
   setQueuePaused,
+  setQueuePausedOne,
+  queueSwitchUnconfirmed,
+  SWITCH_STEP_TIMEOUT_MS,
   killSwitchSet,
   panelValkeyContext,
   writeSettings,
@@ -2631,6 +2634,153 @@ test("a pause that fails PARTWAY names what it already stopped", async () => {
   assert.match(res.unreachable, /down/);
   assert.deepEqual(res.partial.done, ["pi-jobs", "pi-jobs@mini1"], "and says exactly which queues it did stop");
   assert.equal(res.partial.failed, "pi-jobs@mini2", "and which one it did not, so an operator can finish the job");
+});
+
+// Issue #842: the kill switch on a Valkey that is connected and stopped answering. Every queue is a bounded step, so
+// the answer comes within the bound and says which queues are known switched and which are not.
+const neverSettles = () => new Promise(() => {});
+const lostAnswer = () => Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT", valkeyMayStillRun: true });
+/** `promise`'s answer, or "hung" after `ms`: a test of a bound must not wait for the thing it bounds. */
+const orHung = (promise, ms = 2000) => {
+  let timer;
+  return Promise.race([promise, new Promise((resolve) => (timer = setTimeout(resolve, ms, "hung")))]).finally(() => clearTimeout(timer));
+};
+
+test("a pause goes to every queue at once and answers within its bound when queues never answer: known paused, not confirmed, refused (#842)", async () => {
+  const asked = [];
+  const closed = [];
+  const dropped = [];
+  const conns = [];
+  const makeQueueFn = (_c, opts) => ({
+    name: opts?.name ?? "pi-jobs",
+    pause() {
+      asked.push(this.name);
+      if (this.name === "pi-jobs@mini1") return neverSettles();
+      if (this.name === "pi-jobs@mini2") return Promise.reject(lostAnswer());
+      if (this.name === "pi-jobs@mini3") return Promise.reject(new Error("Stream isn't writeable and enableOfflineQueue options is false"));
+      return Promise.resolve();
+    },
+    close() {
+      closed.push(this.name);
+      return neverSettles();
+    },
+    disconnect() {
+      dropped.push(this.name);
+    },
+  });
+  const parseConnectionFn = (url, options) => {
+    conns.push(options);
+    return {};
+  };
+  const started = Date.now();
+  const res = await orHung(setQueuePaused({ url: "redis://x", paused: true, makeQueueFn, parseConnectionFn, redisFn: fakeFleetRedis(["mini1", "mini2", "mini3"]), stepTimeoutMs: 60, closeTimeoutMs: 30 }));
+  assert.notEqual(res, "hung", "the kill switch answered though one queue never did and no close was answered");
+  assert.ok(Date.now() - started < 1500, "within the step's bound, not once per queue");
+  assert.deepEqual(asked, ["pi-jobs", "pi-jobs@mini1", "pi-jobs@mini2", "pi-jobs@mini3"], "every queue was asked: one that does not answer holds no other");
+  assert.deepEqual(res.partial, {
+    done: ["pi-jobs"],
+    failed: "pi-jobs@mini1",
+    error: "no answer within 0.06 seconds",
+    unconfirmed: ["pi-jobs@mini1", "pi-jobs@mini2"],
+    refused: ["pi-jobs@mini3"],
+    notTried: [],
+  });
+  assert.equal(res.ok, undefined);
+  // Every queue is the console's bounded kind, so a pause that was sent ends at the client's bound with its mark.
+  assert.deepEqual(conns, Array(4).fill({ failFast: true, commandTimeoutMs: 5000 }));
+  // The closes were started and not waited for; one that is not answered has its connection dropped.
+  assert.deepEqual(closed.sort(), ["pi-jobs", "pi-jobs@mini1", "pi-jobs@mini2", "pi-jobs@mini3"]);
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.deepEqual(dropped.sort(), ["pi-jobs", "pi-jobs@mini1", "pi-jobs@mini2", "pi-jobs@mini3"]);
+});
+
+test("a resume goes one queue at a time and stops at the first that does not answer: the rest are not tried (#842)", async () => {
+  for (const lost of [neverSettles, () => Promise.reject(lostAnswer())]) {
+    const asked = [];
+    const makeQueueFn = (_c, opts) => ({
+      name: opts?.name ?? "pi-jobs",
+      async pause() {},
+      resume() {
+        asked.push(this.name);
+        return this.name === "pi-jobs@mini1" ? lost() : Promise.resolve();
+      },
+      async close() {},
+    });
+    const res = await orHung(setQueuePaused({ url: "redis://x", paused: false, makeQueueFn, parseConnectionFn: () => ({}), redisFn: fakeFleetRedis(["mini1", "mini2", "mini3"]), stepTimeoutMs: 60 }));
+    assert.notEqual(res, "hung");
+    assert.deepEqual(asked, ["pi-jobs", "pi-jobs@mini1"], "no resume is sent past the one that was lost: it would start spending unobserved when Valkey wakes");
+    assert.deepEqual({ ...res.partial, error: null }, { done: ["pi-jobs"], failed: "pi-jobs@mini1", error: null, unconfirmed: ["pi-jobs@mini1"], refused: [], notTried: ["pi-jobs@mini2", "pi-jobs@mini3"] });
+  }
+});
+
+test("one queue's pause that is sent and not answered says it may or may not have been made, never unreachable (#842)", async () => {
+  const closed = [];
+  const queueOf = (pause) => () => ({ pause, resume: pause, close: () => (closed.push(1), neverSettles()), disconnect() {} });
+  const args = { url: "redis://x", queue: "pi-jobs@mini1", makeQueueFn: undefined, parseConnectionFn: () => ({}), redisFn: fakeFleetRedis(["mini1"]), stepTimeoutMs: 60, closeTimeoutMs: 30 };
+  assert.equal(queueSwitchUnconfirmed("pi-jobs@mini1", true), "the pause of pi-jobs@mini1 may or may not have been made: Valkey did not answer it within the bound. Look at the fleet once Valkey answers");
+  for (const paused of [true, false]) {
+    for (const lost of [neverSettles, () => Promise.reject(lostAnswer())]) {
+      const res = await orHung(setQueuePausedOne({ ...args, paused, makeQueueFn: queueOf(lost) }));
+      assert.deepEqual(res, { invalid: queueSwitchUnconfirmed("pi-jobs@mini1", paused), partial: true });
+    }
+  }
+  assert.equal(closed.length, 4, "each one-shot queue's close was started, and none was waited for");
+  // Refused before it was sent, or answered with an error: the queue did not change, and it says so as before.
+  assert.deepEqual(await setQueuePausedOne({ ...args, paused: true, makeQueueFn: queueOf(() => Promise.reject(new Error("refused before send"))) }), { unreachable: "refused before send" });
+});
+
+test("the kill switch answers before any close is answered, and a queue that cannot be built is that queue's refusal, not the switch's (#842)", async () => {
+  const closes = [];
+  const makeQueueFn = (_c, opts) => {
+    const name = opts?.name ?? "pi-jobs";
+    if (name === "pi-jobs@mini2") throw new Error("a queue name BullMQ refuses");
+    return { name, async pause() {}, close: () => (closes.push(name), neverSettles()), disconnect() {} };
+  };
+  const started = Date.now();
+  // A close bound far past the test's patience: an answer that waited for a close would not come in time.
+  const res = await orHung(setQueuePaused({ url: "redis://x", paused: true, makeQueueFn, parseConnectionFn: () => ({}), redisFn: fakeFleetRedis(["mini1", "mini2"]), closeTimeoutMs: 60_000 }), 1500);
+  assert.notEqual(res, "hung", "the answer does not wait for a close");
+  assert.ok(Date.now() - started < 1000);
+  assert.deepEqual(res.partial, { done: ["pi-jobs", "pi-jobs@mini1"], failed: "pi-jobs@mini2", error: "a queue name BullMQ refuses", unconfirmed: [], refused: ["pi-jobs@mini2"], notTried: [] });
+  assert.deepEqual(closes.sort(), ["pi-jobs", "pi-jobs@mini1"], "and every queue that was built is asked to close");
+});
+
+test("a status read and a one-queue switch build bounded queues, and the status read's closes are started at once and end by their bound (#842)", { timeout: 15_000 }, async () => {
+  const { VALKEY_COMMAND_TIMEOUT_MS } = await import("@edgehero/pi-dispatch/connection");
+  // A step must outlast the client's own bound, or it would fire first and a sent pause would lose its mark.
+  assert.ok(SWITCH_STEP_TIMEOUT_MS > VALKEY_COMMAND_TIMEOUT_MS, `${SWITCH_STEP_TIMEOUT_MS} > ${VALKEY_COMMAND_TIMEOUT_MS}`);
+  const conns = [];
+  const closes = [];
+  const dropped = [];
+  const parseConnectionFn = (_url, options) => (conns.push(options), {});
+  const makeQueueFn = (_c, opts) => {
+    const name = opts?.name ?? "pi-jobs";
+    return { name, async isPaused() { return false; }, async getJobCounts() { return {}; }, async getWorkers() { return []; }, async pause() {}, close: () => (closes.push(name), neverSettles()), disconnect: () => dropped.push(name) };
+  };
+  const started = Date.now();
+  const state = await orHung(readQueueState({ url: "redis://x", makeQueueFn, parseConnectionFn, redisFn: fakeFleetRedis(["mini1", "mini2"]) }), 4000);
+  assert.notEqual(state, "hung", "a close that is never answered does not hold the status read");
+  assert.equal(state.pausedState, false);
+  assert.ok(Date.now() - started < 2500, "one close bound for all three queues, not one each");
+  assert.deepEqual([closes.sort(), dropped.sort()], [["pi-jobs", "pi-jobs@mini1", "pi-jobs@mini2"], ["pi-jobs", "pi-jobs@mini1", "pi-jobs@mini2"]]);
+  assert.deepEqual(await setQueuePausedOne({ url: "redis://x", queue: "pi-jobs@mini1", paused: true, makeQueueFn, parseConnectionFn, redisFn: fakeFleetRedis(["mini1"]), closeTimeoutMs: 20 }), { ok: true, paused: true, queue: "pi-jobs@mini1" });
+  assert.deepEqual(conns, Array(4).fill({ failFast: true, commandTimeoutMs: 5000 }));
+});
+
+test("the kill switch goes to both Valkeys at once: one that never answers does not hold the other's pause (#842)", async () => {
+  const started = [];
+  let releaseFirst;
+  const setFn = ({ url }) => {
+    started.push(url);
+    if (url === "redis://a/0") return new Promise((resolve) => (releaseFirst = () => resolve({ ok: true, paused: true, queues: ["pi-jobs"] })));
+    return Promise.resolve({ ok: true, paused: true, queues: ["pi-jobs"] });
+  };
+  const pending = killSwitchSet({ paused: true, plan: { urls: ["redis://a/0", "redis://b/0"], disagreement: "they disagree", context: null }, setFn });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(started, ["redis://a/0", "redis://b/0"], "the second Valkey was asked while the first had not answered");
+  releaseFirst();
+  const res = await pending;
+  assert.deepEqual(res.results.map((r) => r.url), ["redis://a/0", "redis://b/0"], "in the plan's order");
 });
 
 test("a ONE-host deployment shows a bare count, exactly as it always did", () => {

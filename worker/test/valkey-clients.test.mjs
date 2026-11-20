@@ -118,9 +118,10 @@ test("no file constructs a Valkey client except through connection.mjs' judged c
 });
 
 // Issue #867: a command bound on a BullMQ connection (`parseConnection`'s `commandTimeoutMs`) is for `cancel`'s one-shot
-// queues. A Worker's blocking reads wait longer than any bound by design and a long-lived reader rides an outage out, so
-// neither may get it by accident: `parseConnection` refuses it without `failFast` (connection.test.mjs), and no other file
-// passes it. A caller that should (the console's fleet reader, #842) adds its line here, with its reason.
+// queues and, since issue #842, for the operator console's queues behind the kill switch, the failed-job and steer
+// actions, its fleet reader and the status read, all through `consoleQueueConnection`. A Worker's blocking reads wait
+// longer than any bound by design, so it may not get one by accident: `parseConnection` refuses it without `failFast`
+// (connection.test.mjs), and no other file passes it. A caller that should adds its line here, with its reason.
 /**
  * Every `parseConnection(...)` call (or `parseConn`, `parseConnectionFn`) in `code` whose arguments name `commandTimeoutMs`,
  * found in the whole text, so a call split across lines or one with a call inside its arguments is found too: from each
@@ -145,12 +146,13 @@ function boundCalls(code) {
 	return out;
 }
 
-test("the command bound on a BullMQ connection is passed at one place, cancel's lookup, so no Worker or long-lived client gets it by accident (#867)", () => {
+test("the command bound on a BullMQ connection is passed at two places, cancel's lookup and the console's queue helper, so no Worker gets it by accident (#867, #842)", () => {
 	// Found in the whole text (comments stripped), so a call split across lines or with a call inside its arguments is
 	// found too; each exemption names the one line its call starts on, and must match exactly one call.
 	const EXEMPT = [
 		{ path: "worker/src/connection.mjs", line: /^export function parseConnection\(url, \{[^)]*commandTimeoutMs = null \} = \{\}\) \{$/, why: "the option's own definition" },
-		{ path: "worker/src/cancel-cli.mjs", line: /^\t\t\tconst q = mkQueue\(parseConn\(url, \{ failFast: true, commandTimeoutMs: bound \}\), \{ name \}\);$/, why: "cancel's lookup, the one caller" },
+		{ path: "worker/src/cancel-cli.mjs", line: /^\t\t\tconst q = mkQueue\(parseConn\(url, \{ failFast: true, commandTimeoutMs: bound \}\), \{ name \}\);$/, why: "cancel's lookup" },
+		{ path: "worker/src/queue.mjs", line: /^\treturn parseConnectionFn\(url, \{ failFast: true, commandTimeoutMs: VALKEY_COMMAND_TIMEOUT_MS \}\);$/, why: "consoleQueueConnection, the one place the console's queues get it" },
 	];
 	const hits = sources().flatMap((f) => {
 		const lines = f.code.split("\n");

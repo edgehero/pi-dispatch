@@ -684,8 +684,8 @@ test("a written command's lost answer is marked by both bounded clients and by n
 	const clients = {
 		"a plain client (a worker's, a receiver's)": () => makeRedisClient(url, { context: {}, judge: judgeHere }),
 		"a BoundedRedis (cancel's probe, the console's own)": () => makeRedisClient(url, { context: {}, judge: judgeHere, commandTimeoutMs: 60_000 }),
-		"a failFast queue client without the bound (the console's fleet reader)": () => new Redis(parseConnection(url, { context: {}, judge: judgeHere, failFast: true })),
-		"a failFast client with the bound": () => new Redis(parseConnection(url, { context: {}, judge: judgeHere, failFast: true, commandTimeoutMs: 60_000 })),
+		"a failFast queue client without the bound (a one-shot read's)": () => new Redis(parseConnection(url, { context: {}, judge: judgeHere, failFast: true })),
+		"a failFast client with the bound (cancel's lookup, the console's queues)": () => new Redis(parseConnection(url, { context: {}, judge: judgeHere, failFast: true, commandTimeoutMs: 60_000 })),
 	};
 	const marks = {};
 	try {
@@ -706,8 +706,8 @@ test("a written command's lost answer is marked by both bounded clients and by n
 	assert.deepEqual(marks, {
 		"a plain client (a worker's, a receiver's)": undefined,
 		"a BoundedRedis (cancel's probe, the console's own)": true,
-		"a failFast queue client without the bound (the console's fleet reader)": undefined,
-		"a failFast client with the bound": true,
+		"a failFast queue client without the bound (a one-shot read's)": undefined,
+		"a failFast client with the bound (cancel's lookup, the console's queues)": true,
 	});
 });
 

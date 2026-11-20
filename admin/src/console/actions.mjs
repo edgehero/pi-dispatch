@@ -97,6 +97,7 @@ import { MODEL_ROLE_EDIT_FIELDS } from "../model-role-plans.mjs";
 import { TRIGGER_ENVIRONMENT_EDIT_FIELDS } from "../trigger-edit-core.mjs";
 
 /** The diff moved to the confirm view with the rest of the bar's markup (issue #737); re-exported where it always was. */
+import { CONSOLE_STOPPING, STOPPED_UNCONFIRMED } from "./writes-in-flight.mjs";
 export { DIFF_LINES_MAX, diffHtmlOf, lineDiff, textHtml } from "./confirm-view.mjs";
 
 /** The most jobs a bulk action names (`job-actions.mjs`' `BULK_MAX`, pinned equal by a test). */
@@ -515,9 +516,12 @@ async function snapshotOf(ctx, opts = {}) {
 function funnelResult(res, okFields = {}) {
   if (res?.ok) return { ok: true, ...okFields, ...(res.touchWarning || res.warning ? { touchWarning: "touch-tracking-incomplete" } : {}) };
   // A refusal that came after the write was sent (`partial`) keeps that mark, so the confirm never says nothing changed.
-  if (typeof res?.invalid === "string") return res.partial === true ? { invalid: res.invalid, partial: true } : { invalid: res.invalid };
-  if (typeof res?.refusal === "string") return { invalid: res.refusal };
-  if (typeof res?.refused === "string") return { invalid: res.refused };
+  const marked = (invalid) => (res.partial === true ? { invalid, partial: true } : { invalid });
+  if (typeof res?.invalid === "string") return marked(res.invalid);
+  if (typeof res?.refusal === "string") return marked(res.refusal);
+  if (typeof res?.refused === "string") return marked(res.refused);
+  // A funnel whose write Valkey took and did not answer says so itself, as `{ invalid, partial }` (above): "unreachable"
+  // is only ever a write that was not sent.
   if (res?.unreachable !== undefined) return { unreachable: true };
   return { invalid: "the write was refused" };
 }
@@ -1711,20 +1715,51 @@ function fleetSwitch({ name, kind, paused }) {
       try {
         res = paused ? await ctx.a.fleet.pause() : await ctx.a.fleet.resume();
       } catch (e) {
-        // The switch walks the plan's Valkeys one after another (`killSwitchSet`), so a throw can come after one of them
-        // took it: what it reached is unknown, never "nothing".
+        // The switch goes to every Valkey of the plan (`killSwitchSet`), so a throw can come after one of them took it:
+        // what it reached is unknown, never "nothing".
         return { invalid: `the kill switch stopped with an error (${codeOf(e)}) before it said which queues it reached. Look at the fleet and try again`, partial: true };
       }
       if (res?.refused) return { invalid: String(res.refused) };
-      const results = (res?.results ?? []).map((r) => ({ valkey: String(r.shown ?? "-"), ok: r.res?.ok === true, ...(Array.isArray(r.res?.queues) ? { queues: r.res.queues.map(String) } : {}), ...(r.res?.partial ? { partial: { done: (r.res.partial.done ?? []).map(String), failed: String(r.res.partial.failed ?? "-") } } : {}) }));
+      const names = (list) => (Array.isArray(list) ? list.map(String) : []);
+      const results = (res?.results ?? []).map((r) => ({
+        valkey: String(r.shown ?? "-"),
+        ok: r.res?.ok === true,
+        ...(Array.isArray(r.res?.queues) ? { queues: names(r.res.queues) } : {}),
+        // Issue #842: which queues are KNOWN switched (`done`) and which are not: `unconfirmed` (sent and not
+        // answered), `refused` (did not change), `notTried` (a resume stops at the first lost answer). A result
+        // without those lists is a loop that stopped at `failed`, as before.
+        ...(r.res?.partial ? { partial: { done: names(r.res.partial.done), failed: String(r.res.partial.failed ?? "-"), ...(Array.isArray(r.res.partial.unconfirmed) ? { unconfirmed: names(r.res.partial.unconfirmed), refused: names(r.res.partial.refused), notTried: names(r.res.partial.notTried) } : {}) } } : {}),
+        // The set of queues itself may be short: the registry or the keyspace scan was not read whole.
+        ...(r.res?.blind || r.res?.incomplete ? { short: true } : {}),
+      }));
       if (results.length > 0 && results.every((r) => r.ok)) return { ok: true, results };
       // Issue #737: a Valkey that took the switch, or a loop that stopped part-way (the queue it failed at may have
       // flipped too: the error came back, not the state), means part of the fleet DID change, so the refusal is
       // `partial` and the slot never says "Nothing was changed" over it. Only when no Valkey's loop started did nothing.
-      const partial = results.some((r) => r.ok || r.partial);
-      return { invalid: `the kill switch did not reach every queue: ${results.map((r) => `${r.valkey} ${r.ok ? "done" : r.partial ? `stopped after ${r.partial.done.join(", ") || "none"}, failed at ${r.partial.failed}` : "unreachable"}`).join("; ") || "no Valkey answered"}. Look at the fleet and try again`, ...(partial ? { partial: true } : {}) };
+      // Issue #842: a queue whose pause was sent and not answered counts as that too, and a switch where every queue
+      // was refused before anything was sent does not.
+      const partial = results.some((r) => r.ok || (r.partial && (!r.partial.unconfirmed || r.partial.done.length + r.partial.unconfirmed.length > 0)));
+      return { invalid: `the kill switch did not reach every queue: ${results.map((r) => `${r.valkey} ${r.ok ? "done" : r.partial ? switchPartialWords(r.partial, paused) : "unreachable"}${!r.ok && r.short ? " (the list of queues may be short)" : ""}`).join("; ") || "no Valkey answered"}. Look at the fleet and try again`, ...(partial ? { partial: true } : {}) };
     },
   };
+}
+
+/**
+ * One Valkey's part-way kill switch in words (issue #842): the queues NOT known paused (or resumed) first, since they
+ * are what an operator must look at and an audit row keeps the start of a sentence, with what "not confirmed" means
+ * said once (the pause or resume was sent and may or may not have been made); then those that did not change, those a
+ * resume never tried, and those known switched. Queue names only, never a client's words. A result without the lists
+ * (a loop that stopped at one queue) keeps its sentence.
+ */
+export function switchPartialWords(partial, paused) {
+  if (!Array.isArray(partial.unconfirmed)) return `stopped after ${partial.done.join(", ") || "none"}, failed at ${partial.failed}`;
+  const verb = paused ? "paused" : "resumed";
+  return [
+    ...(partial.unconfirmed.length > 0 ? [`not confirmed for ${partial.unconfirmed.join(", ")} (the ${paused ? "pause" : "resume"} may or may not have been made)`] : []),
+    ...(partial.refused.length > 0 ? [`not ${verb}: ${partial.refused.join(", ")}`] : []),
+    ...(partial.notTried.length > 0 ? [`not tried: ${partial.notTried.join(", ")}`] : []),
+    `${verb}: ${partial.done.join(", ") || "none"}`,
+  ].join("; ");
 }
 
 /** One queue's pause or resume. */
@@ -2858,6 +2893,10 @@ export async function confirmAction(ctx, action) {
   ctx.agentAction = action.name;
   const actx = actionCtx(ctx);
   const actor = ctx.actor();
+  // A console that is stopping takes no new confirm (issue #842): refused here, before its ticket is spent, its `ok` row
+  // is written or anything is sent, so the stop can promise that what it waits for is all there is. One taken a few
+  // seconds into a stop was sent, cut at the stop's deadline, and landed when Valkey woke.
+  if (deps.writes?.stopping()) return refuse(ctx, "confirm", 503, CONSOLE_STOPPING, "setup");
   const ticket = typeof body.ticket === "string" ? body.ticket : "";
   const redeemed = ticket === "" ? { refusal: `no ticket was sent. ${PREVIEW_AGAIN}` } : deps.tickets.redeem({ sessionId: session.id, ticket, action: action.name });
   if (!redeemed.entry) {
@@ -2874,15 +2913,39 @@ export async function confirmAction(ctx, action) {
   }
   const tag = sha256(ticket).slice(0, 12);
   entry.ticketDigest = sha256(ticket);
+  // From here the confirm is a write in flight (issue #842): a stop of the console waits for it, and one still open at
+  // the stop's deadline gets its outcome row through `flight.abandon`. Nothing is awaited between the write's answer
+  // and the confirm's own, so a confirm whose write has answered is never one a stop still finds open.
+  const flight = { abandon: null };
+  const write = () => (action.bulk ? confirmBulk(ctx, action, entry, { actor, tag, actx, flight }) : confirmOne(ctx, action, entry, { actor, tag, actx, flight }));
+  return deps.writes ? deps.writes.run(() => flight.abandon?.(), write) : write();
+}
+
+/** One change's confirm, past its ticket: audit, write, answer (`confirmAction`). */
+async function confirmOne(ctx, action, entry, { actor, tag, actx, flight }) {
+  const { deps, session } = ctx;
   const log = (line) => deps.log(String(line).replace(/^panel: /, "console: "));
-  if (action.bulk) return confirmBulk(ctx, action, entry, { actor, tag, actx });
   const AUDIT = Symbol("audit");
   const audit = capturingAudit(deps.audit);
+  const row = { actor, action: "write", kind: action.kind, target: entry.target === null || entry.target === undefined ? null : String(entry.target), beforeDigest: entry.beforeDigest ?? null, afterDigest: entry.afterDigest ?? null, reserve: reserveMicros(entry.reserve), count: Number.isSafeInteger(entry.count) && entry.count >= 1 ? entry.count : null, ticket: tag };
+  // Only a write whose `ok` row was appended has an outcome to record: `auditedWrite` calls the write after that row.
+  let started = false;
+  flight.abandon = () => {
+    if (!started) return;
+    try {
+      deps.audit.append({ ...row, outcome: "failed", reason: session.role === "agent" ? "action-refused" : STOPPED_UNCONFIRMED });
+    } catch (e) {
+      deps.log(`console: audit append failed (${codeOf(e)}) for a ${action.kind} write the stop cut; the log's last row for ticket ${tag} says ok and may be wrong`);
+    }
+  };
   let result;
   try {
     result = await auditedWrite(
       { audit, actor, kind: action.kind, target: entry.target, beforeDigest: entry.beforeDigest ?? null, afterDigest: entry.afterDigest ?? null, reserve: reserveMicros(entry.reserve), count: Number.isSafeInteger(entry.count) && entry.count >= 1 ? entry.count : null, ticket: tag, failure: r => { const why = failureOf(r); return session.role === "agent" && why ? "action-refused" : why; }, refusal: () => ({ [AUDIT]: true }), log },
-      () => action.apply(entry, actx),
+      () => {
+        started = true;
+        return action.apply(entry, actx);
+      },
     );
   } catch (e) {
     deps.log(`console: the ${action.name} write threw (${codeOf(e)})`);
@@ -2914,7 +2977,7 @@ export async function confirmAction(ctx, action) {
  * An apply that THROWS has been acting job by job, so jobs before the throw may have been acted on: its refusal is
  * `partial` (the bar says some of it may have been done and offers Look again), never "nothing was changed".
  */
-async function confirmBulk(ctx, action, entry, { actor, tag, actx }) {
+async function confirmBulk(ctx, action, entry, { actor, tag, actx, flight = { abandon: null } }) {
   const { deps } = ctx;
   const audit = capturingAudit(deps.audit);
   const targets = Array.isArray(entry.targets) ? entry.targets : [];
@@ -2942,6 +3005,10 @@ async function confirmBulk(ctx, action, entry, { actor, tag, actx }) {
   // The rows this confirm wrote for its jobs, taken before any compensating row: the banner links exactly these.
   const auditSeq = audit.first();
   const auditLast = audit.last();
+  // A stop of the console that cuts the apply (issue #842): which jobs it had reached is not known, so each gets the row.
+  flight.abandon = () => {
+    for (const id of written) compensate(id, STOPPED_UNCONFIRMED);
+  };
   let result;
   try {
     result = await action.apply(entry, actx);

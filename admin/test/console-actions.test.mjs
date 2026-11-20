@@ -10,6 +10,8 @@ import { join } from "node:path";
 import { after, test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { freezingProxy } from "../../worker/test/helpers/freezing-proxy.mjs";
+import { CONSOLE_STOPPING, makeWritesInFlight, STOPPED_UNCONFIRMED } from "../src/console/writes-in-flight.mjs";
 import { makeConsoleAudit, verifyConsoleAudit } from "@edgehero/pi-dispatch/console-audit";
 import { makeRedisClient, parseConnection } from "@edgehero/pi-dispatch/connection";
 import { DEFER_BUCKET_WORDS, DEFER_TIME_MAX_MS, DEFER_WHYS } from "@edgehero/pi-dispatch/defer-reasons";
@@ -17,6 +19,7 @@ import { enqueueForgeJob, forgeDeliveryJobId, makeQueue } from "@edgehero/pi-dis
 import { buildRecord, makeRecordWriter, sanitizeJobId } from "@edgehero/pi-dispatch/run-history";
 import { closeInbox, markState, readInbox, registerLive } from "@edgehero/pi-dispatch/steer-inbox";
 import { PACKAGE_MOVED_SENTENCE, PACKAGE_NOT_TAKEN_SENTENCE, UPDATES_UNREAD_SENTENCE } from "../src/console/actions.mjs";
+import { switchPartialWords } from "../src/console/actions.mjs";
 import { ACTIONS, SUPERSEDED_UNREAD_SENTENCE, supersededLeftOut, CONFIG_FIX_ACTIONS, atIndex, AUDIT_FAILED, BULK_MAX, CANCEL_TIMEOUT_SENTENCE, capturingAudit, confirmAction, DIFF_LINES_MAX, diffHtmlOf, dryRunFs, lineDiff, PREVIEW_AGAIN, previewAction, reserveText, queueUnreadRefusal, RESUME_WAITING_UNKNOWN, resumeManyUndo, SNAPSHOT_TIMEOUT_MS, SNAPSHOT_TIMEOUT_SENTENCE, SNAPSHOT_UNREAD_SENTENCE, SWITCH_QUEUES_NAMED, SWITCH_SHORT_LINES, switchReadLine, textHtml, TRIGGER_FORM, UNDO_SENTENCES, VALKEY_UNREACHABLE, waitingLine } from "../src/console/actions.mjs";
 import { CONSOLE_SCRIPT } from "../src/console/script.mjs";
 import { makeConfirmTickets } from "../src/console/confirm.mjs";
@@ -192,7 +195,7 @@ after(async () => {
 });
 
 /** A running console over `paths` with the real tickets and audit log; `actionDeps` overrides go in `a`. */
-async function start({ paths, a = {}, readOnly = false, hub = null, realSessions = false, fs = nodeFs, devices = null } = {}) {
+async function start({ paths, a = {}, readOnly = false, hub = null, realSessions = false, fs = nodeFs, devices = null, writes = null } = {}) {
   const tokenFile = structuredClone(FILE);
   let t = T0;
   const now = () => t;
@@ -241,6 +244,7 @@ async function start({ paths, a = {}, readOnly = false, hub = null, realSessions
     pageDeps: { fleet: a.fleet ?? { snapshot: async () => ({}) } },
     hub,
     devices,
+    writes,
   });
   servers.push(server);
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
@@ -1344,6 +1348,208 @@ test("a refusal that can follow a write never says nothing was changed: the kill
   assert.equal(retry.status, 500);
   mayHave(retry.json().html);
   assert.equal(c.sessions.flashes.length + r.sessions.flashes.length, 0, "no banner over a write that did not finish");
+});
+
+// Issue #842: a write Valkey took and did not answer. The kill switch says which queues are known switched and which
+// are not; a one-queue switch, a steer and a failed-job action say "may or may not", never "nothing was changed".
+test("a confirm whose write was sent and not answered names what is known and what is not: the kill switch, one queue, a steer, a failed job (#842)", async () => {
+  const { paths } = deployment();
+  let answer = null;
+  let queueAnswer = null;
+  let steerAnswer = null;
+  let retryAnswer = null;
+  const id = "a".repeat(32);
+  const fleet = {
+    snapshot: async (opts) => ({ queueCounts: [{ queue: opts?.queue ?? "pi-jobs", paused: false, counts: {} }], held: { rows: [] } }),
+    pause: async () => answer,
+    resume: async () => answer,
+    pauseQueue: async () => queueAnswer,
+  };
+  const rm = {
+    ...RM,
+    planSteer: async ({ text }) => ({ plan: { jobId: "gh-s", id, mode: "steer", text, bytes: 1, digest: sha256(text) } }),
+    enqueueSteer: async () => steerAnswer,
+    planFailedBulk: async () => ({ jobs: [{ jobId: "gh-f", queue: "pi-jobs", attemptsMade: 1, finishedOn: 5 }], more: 0, examinedAll: true }),
+    retryFailedJob: async () => retryAnswer,
+  };
+  const c = await start({ paths, a: { fleet, rm, readJobsData: async () => new Map(), killSwitchPlanFn: () => ({ urls: ["redis://a/0"], disagreement: null }) } });
+  const mayHave = (res) => {
+    const bar = res.json().html;
+    assert.equal(res.status, 409, res.text);
+    assert.ok(!/nothing was changed/i.test(bar), `never "nothing was changed": ${bar}`);
+    assert.ok(bar.includes(` ${PARTIAL_NOTE}</p>`) && bar.includes('<p class="banner__t">The change did not finish</p>') && bar.includes("data-reload>Look again</button>"), bar);
+  };
+  // A pause: one queue answered, one was sent and not answered, one was refused before it was sent.
+  answer = { results: [{ shown: "redis://a/0", res: { unreachable: "Command timed out", partial: { done: ["pi-jobs"], failed: "pi-jobs@m1", error: "Command timed out", unconfirmed: ["pi-jobs@m1"], refused: ["pi-jobs@m2"], notTried: [] }, incomplete: "the scan for the deployment's queues did not finish" } }] };
+  const paused = (await c.both("fleet-pause", {})).confirm;
+  assert.equal(paused.json().error, "the kill switch did not reach every queue: redis://a/0 not confirmed for pi-jobs@m1 (the pause may or may not have been made); not paused: pi-jobs@m2; paused: pi-jobs (the list of queues may be short). Look at the fleet and try again");
+  mayHave(paused);
+  assert.ok(!paused.json().error.includes("Command timed out"), "queue names only, never a client's words");
+  // The audit row keeps the start of the sentence, which is why the queues not known come first.
+  const row = c.audit.rows.at(-1);
+  assert.deepEqual([row.outcome, paused.json().error.startsWith(row.reason), row.reason.includes("not confirmed for pi-jobs@m1 (the pause may or may not have been made)")], ["failed", true, true], row.reason);
+  // A resume stops at the first lost answer: nothing known resumed, one not known, the rest not tried.
+  answer = { results: [{ shown: "redis://a/0", res: { unreachable: "Command timed out", partial: { done: [], failed: "pi-jobs", error: "Command timed out", unconfirmed: ["pi-jobs"], refused: [], notTried: ["pi-jobs@m1", "pi-jobs@m2"] } } }] };
+  const resumed = (await c.both("fleet-resume", {})).confirm;
+  assert.equal(resumed.json().error, "the kill switch did not reach every queue: redis://a/0 not confirmed for pi-jobs (the resume may or may not have been made); not tried: pi-jobs@m1, pi-jobs@m2; resumed: none. Look at the fleet and try again");
+  mayHave(resumed);
+  // Every queue refused before anything was sent: nothing changed, and the bar says so.
+  answer = { results: [{ shown: "redis://a/0", res: { unreachable: "down", partial: { done: [], failed: "pi-jobs", error: "down", unconfirmed: [], refused: ["pi-jobs"], notTried: [] } } }] };
+  const untouched = (await c.both("fleet-pause", {})).confirm.json();
+  assert.equal(untouched.error, "the kill switch did not reach every queue: redis://a/0 not paused: pi-jobs; paused: none. Look at the fleet and try again");
+  assert.ok(untouched.html.includes("The change did not go through") && untouched.html.includes(" Nothing was changed.</p>"), untouched.html);
+  assert.equal(switchPartialWords({ done: ["q1"], failed: "q2" }, true), "stopped after q1, failed at q2", "a result without the lists keeps its sentence");
+  // One queue: the reader's own sentence, kept partial.
+  queueAnswer = { invalid: RM.queueSwitchUnconfirmed("pi-jobs@m1", true), partial: true };
+  const queue = (await c.both("queue-pause", { queue: "pi-jobs@m1" })).confirm;
+  assert.equal(queue.json().error, "the pause of pi-jobs@m1 may or may not have been made: Valkey did not answer it within the bound. Look at the fleet once Valkey answers");
+  mayHave(queue);
+  // One that never reached Valkey still says nothing was changed.
+  queueAnswer = { unreachable: "refused before send" };
+  assert.deepEqual([(await c.both("queue-pause", { queue: "pi-jobs@m1" })).confirm].map((r) => [r.status, r.json().error]), [[503, VALKEY_UNREACHABLE]]);
+  // A steer and a failed job's retry: the funnel's sentence, partial.
+  steerAnswer = { invalid: `message ${id} may or may not have been sent: Valkey took it and did not answer within the bound; the run's inbox shows it once Valkey answers (job gh-s)`, partial: true };
+  mayHave((await c.both("steer", { jobId: "gh-s", text: "x" })).confirm);
+  // A refusal a funnel marks partial keeps the mark, whichever of its three spellings carries it.
+  for (const spelled of ["refusal", "refused"]) {
+    steerAnswer = { [spelled]: "the message may have been sent before the run closed its inbox", partial: true };
+    mayHave((await c.both("steer", { jobId: "gh-s", text: "x" })).confirm);
+  }
+  retryAnswer = { jobId: "gh-f", invalid: "the retry may or may not have been made: Valkey took it and did not answer within the bound; look at the fleet once Valkey answers (job gh-f)", partial: true };
+  mayHave((await c.both("retry-failed", { jobId: "gh-f" })).confirm);
+  assert.equal(c.sessions.flashes.length, 0, "no banner over a write that is not known to have been made");
+});
+
+// Issue #842: a stop of the console waits for the confirms in flight, and one it has to cut gets its outcome row.
+test("a confirm is a write in flight until it has answered: a stop that cuts it appends its outcome row, one per job for a bulk action, and a confirm that answered leaves nothing (#842)", async () => {
+  const { paths } = deployment();
+  const writes = makeWritesInFlight();
+  let release = null;
+  const never = () => new Promise((resolve) => (release = resolve));
+  const jobs = ["gh-a", "gh-b"].map((jobId, i) => ({ jobId, queue: "pi-jobs", attemptsMade: 1, finishedOn: i + 1 }));
+  let pauseAnswer = never;
+  const fleet = { snapshot: async () => ({ queueCounts: [], held: { rows: [] } }), pause: () => pauseAnswer() };
+  const rm = { ...RM, planFailedBulk: async () => ({ jobs, more: 0, examinedAll: true }), removeFailedJobs: never };
+  const c = await start({ paths, writes, a: { fleet, rm, readJobsData: async () => new Map(), killSwitchPlanFn: () => ({ urls: ["redis://a/0"], disagreement: null }) } });
+  assert.equal(STOPPED_UNCONFIRMED, "the console stopped before this change answered, so it may or may not have been made; look at the fleet");
+  // One change, sent and never answered.
+  let ticket = (await c.act("fleet-pause", {})).json().ticket;
+  assert.equal(writes.size(), 0, "a preview is no write");
+  let pending = c.confirm("fleet-pause", ticket);
+  await until(async () => writes.size() === 1 && c.audit.rows.at(-1)?.kind === "fleet-pause");
+  const ok = c.audit.rows.at(-1);
+  assert.equal(ok.outcome, "ok");
+  assert.equal(writes.abandon(), 1);
+  const cut = c.audit.rows.at(-1);
+  assert.deepEqual([cut.kind, cut.outcome, cut.reason, cut.ticket, cut.target], ["fleet-pause", "failed", STOPPED_UNCONFIRMED, ok.ticket, ok.target], "the same ticket, so a reader takes this row as the write's outcome");
+  assert.equal(writes.abandon(), 0, "and it is cut once");
+  release({ results: [{ shown: "redis://a/0", res: { ok: true, queues: ["pi-jobs"] } }] });
+  await pending;
+  // A bulk action: which jobs it had reached is not known, so each job gets the row.
+  ticket = (await c.act("remove-all-failed", {})).json().ticket;
+  pending = c.confirm("remove-all-failed", ticket);
+  await until(async () => writes.size() === 1 && c.audit.rows.filter((r) => r.kind === "failed-remove-all").length === 2);
+  assert.equal(writes.abandon(), 1);
+  assert.deepEqual(c.audit.rows.filter((r) => r.kind === "failed-remove-all").map((r) => [r.target, r.outcome, r.reason ?? null]), [["gh-a", "ok", null], ["gh-b", "ok", null], ["gh-a", "failed", STOPPED_UNCONFIRMED], ["gh-b", "failed", STOPPED_UNCONFIRMED]]);
+  release({ results: [] });
+  await pending;
+  // A confirm that answers is no longer in flight, and a stop after it writes nothing.
+  pauseAnswer = async () => ({ results: [{ shown: "redis://a/0", res: { ok: true, queues: ["pi-jobs"] } }] });
+  const rows = c.audit.rows.length;
+  assert.equal((await c.both("fleet-pause", {})).confirm.status, 200);
+  assert.deepEqual([writes.size(), writes.abandon(), c.audit.rows.length], [0, 0, rows + 1]);
+  // A confirm refused before its `ok` row (a ticket nobody issued) has no outcome to record.
+  assert.equal((await c.confirm("fleet-pause", "no-such-ticket")).status, 409);
+  assert.equal(writes.size(), 0);
+  // `idle` resolves only once a confirm in flight has answered.
+  pauseAnswer = never;
+  ticket = (await c.act("fleet-pause", {})).json().ticket;
+  pending = c.confirm("fleet-pause", ticket);
+  await until(async () => writes.size() === 1);
+  let idle = false;
+  const waiting = writes.idle().then(() => (idle = true));
+  await sleep(50);
+  assert.equal(idle, false, "the stop is still waiting");
+  release({ results: [{ shown: "redis://a/0", res: { ok: true, queues: ["pi-jobs"] } }] });
+  await waiting;
+  assert.equal((await pending).status, 200);
+  // An agent session's cut row carries the fixed word every agent refusal does, never the operator's sentence.
+  const agent = await c.cookieFor(AGENT_TOKEN);
+  ticket = (await c.act("fleet-pause", {}, agent)).json().ticket;
+  assert.equal(typeof ticket, "string");
+  pending = c.confirm("fleet-pause", ticket, agent);
+  await until(async () => writes.size() === 1 && c.audit.rows.at(-1)?.actor?.role === "agent");
+  assert.equal(writes.abandon(), 1);
+  assert.deepEqual([c.audit.rows.at(-1).outcome, c.audit.rows.at(-1).reason], ["failed", "action-refused"]);
+  release({ results: [{ shown: "redis://a/0", res: { ok: true, queues: ["pi-jobs"] } }] });
+  await pending;
+  // A cut row the audit log cannot take is said in the console's log and stops nothing: the next confirm is still cut.
+  ticket = (await c.act("fleet-pause", {})).json().ticket;
+  pending = c.confirm("fleet-pause", ticket);
+  await until(async () => writes.size() === 1 && c.audit.rows.at(-1)?.outcome === "ok" && c.audit.rows.at(-1)?.actor?.role !== "agent");
+  const before = c.audit.rows.length;
+  c.audit.failNext = 1;
+  assert.equal(writes.abandon(), 1);
+  assert.equal(c.audit.rows.length, before, "no row could be written");
+  assert.ok(seen.logs.some((line) => /^console: audit append failed \(ENOSPC\) for a fleet-pause write the stop cut; the log's last row for ticket [0-9a-f]{12} says ok and may be wrong$/.test(line)), seen.logs.at(-1));
+  release({ results: [{ shown: "redis://a/0", res: { ok: true, queues: ["pi-jobs"] } }] });
+  await pending;
+});
+
+test("a console that is stopping takes no new confirm: refused before its ticket is spent, its row is written or anything is sent (#842)", async () => {
+  const { paths } = deployment();
+  const writes = makeWritesInFlight();
+  const sent = [];
+  const fleet = { snapshot: async () => ({ queueCounts: [{ queue: "pi-jobs", paused: true, counts: {} }], held: { rows: [] } }), resume: async () => (sent.push("resume"), { results: [{ shown: "redis://a/0", res: { ok: true, queues: ["pi-jobs"] } }] }) };
+  const jobs = [{ jobId: "gh-a", queue: "pi-jobs", attemptsMade: 1, finishedOn: 1 }];
+  const rm = { ...RM, planFailedBulk: async () => ({ jobs, more: 0, examinedAll: true }), removeFailedJobs: async () => (sent.push("remove"), { results: [{ jobId: "gh-a", ok: true }] }) };
+  const c = await start({ paths, writes, a: { fleet, rm, readJobsData: async () => new Map(), killSwitchPlanFn: () => ({ urls: ["redis://a/0"], disagreement: null }) } });
+  const one = (await c.act("fleet-resume", {})).json().ticket;
+  const bulk = (await c.act("remove-all-failed", {})).json().ticket;
+  const rows = c.audit.rows.length;
+  assert.equal(writes.stopping(), false);
+  writes.stop();
+  assert.equal(writes.stopping(), true);
+  for (const [name, ticket] of [["fleet-resume", one], ["remove-all-failed", bulk]]) {
+    const res = await c.confirm(name, ticket);
+    assert.deepEqual([res.status, res.json().error], [503, CONSOLE_STOPPING], name);
+    assert.ok(res.json().html.includes("This console cannot take this action") && !/may or may not/.test(res.json().html), res.json().html);
+  }
+  assert.equal(CONSOLE_STOPPING, "the console is stopping, so this change was not made; nothing was changed. Confirm it again once the console is back");
+  assert.deepEqual([sent, writes.size(), c.audit.rows.length], [[], 0, rows], "nothing was sent, nothing is in flight, and no row says a write was made");
+});
+
+test("the tracker of confirms in flight: idle waits for each however it ends and never rejects, and one outcome row that cannot be written does not cost the others theirs (#842)", async () => {
+  const writes = makeWritesInFlight();
+  const unhandled = [];
+  const note = (err) => unhandled.push(err);
+  process.on("unhandledRejection", note);
+  try {
+    let fail;
+    const rejecting = writes.run(() => {}, () => new Promise((_resolve, reject) => (fail = reject)));
+    rejecting.catch(() => {});
+    const throwing = writes.run(() => {}, () => { throw new Error("a confirm that throws at once"); });
+    throwing.catch(() => {});
+    let idle = "waiting";
+    const waited = writes.idle().then(() => (idle = "idle"), () => (idle = "rejected"));
+    await sleep(20);
+    assert.equal(idle, "waiting");
+    fail(new Error("the confirm failed"));
+    await waited;
+    assert.equal(idle, "idle", "a confirm that rejects still ends the wait, and the wait does not reject");
+    assert.equal(writes.size(), 0);
+    await assert.rejects(rejecting, /the confirm failed/);
+    await assert.rejects(throwing, /throws at once/);
+    // Three confirms cut at once, the first one's row writer throwing: the other two still get theirs.
+    const cut = [];
+    for (const name of ["a", "b", "c"]) void writes.run(() => { if (name === "a") throw new Error("no row"); cut.push(name); }, () => new Promise(() => {}));
+    assert.equal(writes.abandon(), 3);
+    assert.deepEqual(cut, ["b", "c"]);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off("unhandledRejection", note);
+  }
 });
 
 // Issue #737: a preview that reads the fleet snapshot answers within its bound whatever Valkey does, and says what happened.
@@ -2909,6 +3115,172 @@ test("fleet-resume on Valkey, through the real fleet reader: a paused queue whos
     assert.deepEqual([await beta.isPaused(), await zeta.isPaused()], [false, true], "the Undo paused zeta again, and beta stays running");
   } finally {
     await fleet.dispose();
+    await v.done();
+  }
+});
+
+// Issue #842: a Valkey that is connected and stops answering, as `kill -STOP` leaves it, through a proxy that holds the
+// bytes both ways and passes them on a thaw. The queues' command bound is shortened here (the console's is 5 s) and so
+// is a step's, which stays above it; everything else is the real reader, BullMQ and ioredis.
+const FROZEN_BOUND_MS = 500;
+const FROZEN_STEP_MS = 1_500;
+const boundedHere = (url, options = {}) => parseConnection(url, { ...options, ...(options.commandTimeoutMs ? { commandTimeoutMs: FROZEN_BOUND_MS } : {}) });
+/** A confirm's answer and how long it took. */
+const clocked = async (promise) => {
+  const t0 = Date.now();
+  const res = await promise;
+  return { res, ms: Date.now() - t0 };
+};
+
+test("the kill switch on a Valkey that stops answering: fleet-pause, fleet-resume and queue-pause answer within their bound, name what is not known, and what was sent lands at wake (#842)", live, async () => {
+  const v = await freshValkey();
+  const proxy = await freezingProxy(URL13);
+  const { paths } = deployment(proxy.url);
+  const fleet = RM.createFleetReader(paths, { readOnly: true, parseConnectionFn: boundedHere, switchStepTimeoutMs: FROZEN_STEP_MS, readLiveHostsFn: async () => ({ hosts: [{ name: "beta", routes: "true" }] }) });
+  try {
+    const shared = await v.q("pi-jobs");
+    const beta = await v.q("pi-jobs@beta");
+    const c = await start({ paths, a: { fleet, killSwitchPlanFn: () => ({ urls: [paths.valkeyUrl], disagreement: null, context: null }) } });
+    // On a Valkey that answers, the switch is what it was (and BullMQ's pause script is in Valkey's cache after it).
+    assert.equal((await c.both("fleet-pause", {})).confirm.status, 200);
+    assert.deepEqual([await shared.isPaused(), await beta.isPaused()], [true, true]);
+    assert.equal((await c.both("fleet-resume", {})).confirm.status, 200);
+    assert.deepEqual([await shared.isPaused(), await beta.isPaused()], [false, false]);
+
+    // PAUSE: sent to both queues at once and never answered.
+    let ticket = (await c.act("fleet-pause", {})).json().ticket;
+    proxy.freeze();
+    const paused = await clocked(c.confirm("fleet-pause", ticket));
+    assert.equal(paused.res.status, 409, paused.res.text);
+    assert.ok(paused.ms < FROZEN_STEP_MS + 2_000, `${paused.ms} ms: at the bound, not at wake`);
+    assert.equal(paused.res.json().error, `the kill switch did not reach every queue: ${paths.valkeyUrl} not confirmed for pi-jobs, pi-jobs@beta (the pause may or may not have been made); paused: none (the list of queues may be short). Look at the fleet and try again`);
+    assert.ok(paused.res.json().html.includes("The change did not finish") && !/nothing was changed/i.test(paused.res.json().html), paused.res.json().html);
+    assert.deepEqual([await shared.isPaused(), await beta.isPaused()], [false, false], "nothing has reached Valkey yet");
+    proxy.thaw();
+    await until(async () => (await shared.isPaused()) && (await beta.isPaused()));
+
+    // RESUME: one queue at a time, stopped at the first lost answer; the other is never sent.
+    await until(async () => (await c.act("fleet-resume", {})).status === 200);
+    ticket = (await c.act("fleet-resume", {})).json().ticket;
+    proxy.freeze();
+    const resumed = await clocked(c.confirm("fleet-resume", ticket));
+    assert.equal(resumed.res.status, 409, resumed.res.text);
+    assert.ok(resumed.ms < 2 * FROZEN_STEP_MS + 2_000, `${resumed.ms} ms`);
+    assert.equal(resumed.res.json().error, `the kill switch did not reach every queue: ${paths.valkeyUrl} not confirmed for pi-jobs (the resume may or may not have been made); not tried: pi-jobs@beta; resumed: none (the list of queues may be short). Look at the fleet and try again`);
+    assert.ok(!/nothing was changed/i.test(resumed.res.json().html));
+    proxy.thaw();
+    await until(async () => !(await shared.isPaused()));
+    await sleep(300);
+    assert.equal(await beta.isPaused(), true, "the queue that was not tried is still paused: no resume landed unobserved");
+
+    // ONE QUEUE, through the reader's held queue.
+    await until(async () => (await c.act("queue-pause", { queue: "pi-jobs" })).status === 200);
+    ticket = (await c.act("queue-pause", { queue: "pi-jobs" })).json().ticket;
+    proxy.freeze();
+    const one = await clocked(c.confirm("queue-pause", ticket));
+    assert.equal(one.res.status, 409, one.res.text);
+    assert.ok(one.ms < FROZEN_STEP_MS - 300, `${one.ms} ms: at the queue client's own bound, before the step's`);
+    assert.equal(one.res.json().error, RM.queueSwitchUnconfirmed("pi-jobs", true));
+    assert.ok(!/nothing was changed/i.test(one.res.json().html));
+    proxy.thaw();
+    await until(async () => await shared.isPaused());
+    assert.deepEqual(c.audit.rows.filter((r) => r.outcome === "failed").map((r) => r.kind), ["fleet-pause", "fleet-resume", "queue-pause"], "each is audited as a change that did not finish");
+  } finally {
+    proxy.thaw();
+    await Promise.race([fleet.dispose(), sleep(3_000)]);
+    proxy.close();
+    await v.done();
+  }
+});
+
+test("previews and a steer confirm on a Valkey that stops answering: a failed-job preview and a steer preview answer within their bound, and a message that was sent says may or may not and arrives at wake (#842)", live, async () => {
+  const v = await freshValkey();
+  const proxy = await freezingProxy(URL13);
+  const { Worker } = await import("bullmq");
+  let release;
+  const held = new Promise((r) => (release = r));
+  let worker = null;
+  const clients = [];
+  try {
+    const { paths } = deployment(proxy.url);
+    const shared = await makeFailed(v, "pi-jobs", [{ id: "gh-f1", data: { kind: "github", repo: "o/r" } }]);
+    await shared.add("github", { kind: "github", repo: "o/r", steer: true, target: { type: "issue", number: 4 } }, { jobId: "gh-st1" });
+    worker = new Worker("pi-jobs", () => held, { connection: parseConnection(URL13) });
+    await until(async () => (await (await shared.getJob("gh-st1"))?.getState()) === "active");
+    await registerLive({ redis: v.redis, runId: "gh-st1", host: "h1" });
+    // The confirm's client, connected before Valkey stops answering, as a console's is on a Valkey that then freezes.
+    const connected = async (url, options) => {
+      const client = makeRedisClient(url, { ...options, commandTimeoutMs: FROZEN_BOUND_MS });
+      client.on("error", () => {});
+      clients.push(client);
+      await client.ping();
+      return client;
+    };
+    let steerClient = null;
+    const rm = {
+      ...RM,
+      planFailedBulk: (args) => RM.planFailedBulk({ ...args, planTimeoutMs: FROZEN_STEP_MS }),
+      planSteer: (args) => RM.planSteer({ ...args, planTimeoutMs: FROZEN_STEP_MS }),
+      // Its socket is left open until the thaw: a stopped Valkey still holds what was written to a socket its client
+      // then closed, and reads it when it wakes, while this proxy drops what it held for one.
+      enqueueSteer: (plan, opts) => RM.enqueueSteer(plan, { ...opts, redisFn: () => ({ on() {}, eval: (...args) => steerClient.eval(...args), disconnect() {} }) }),
+    };
+    const c = await start({ paths, a: { rm } });
+    // On a Valkey that answers, both previews are what they were.
+    assert.equal((await c.act("retry-failed", { jobId: "gh-f1", queue: "pi-jobs" })).status, 200);
+    const steer = await c.act("steer", { jobId: "gh-st1", text: STEER_TEXT });
+    assert.equal(steer.status, 200, steer.text);
+    steerClient = await connected(paths.valkeyUrl, { disconnectTimeoutMs: 0 });
+
+    proxy.freeze();
+    const failed = await clocked(c.act("retry-failed", { jobId: "gh-f1", queue: "pi-jobs" }));
+    assert.deepEqual([failed.res.status, failed.res.json().error], [503, "the failed jobs could not be read (is Valkey reachable?); nothing was changed"]);
+    const preview = await clocked(c.act("steer", { jobId: "gh-st1", text: STEER_TEXT }));
+    assert.equal(preview.res.json().error, `Nothing was sent: the job or its inbox did not answer within ${FROZEN_STEP_MS / 1000} seconds`);
+    for (const { ms } of [failed, preview]) assert.ok(ms < FROZEN_STEP_MS + 2_000, `${ms} ms: at the bound, not at wake`);
+    // The confirm of the preview made before the freeze: its push reaches the socket and is not answered.
+    const sent = await clocked(c.confirm("steer", steer.json().ticket));
+    assert.equal(sent.res.status, 409, sent.res.text);
+    assert.ok(sent.ms < FROZEN_BOUND_MS + 2_000, `${sent.ms} ms`);
+    const id = steer.json().summary[0].match(/message ([0-9a-f]{32})/)[1];
+    assert.equal(sent.res.json().error, `message ${id} may or may not have been sent: Valkey took it and did not answer within the bound; the run's inbox shows it once Valkey answers (job gh-st1)`);
+    assert.ok(sent.res.json().html.includes("The change did not finish") && !/nothing was changed/i.test(sent.res.json().html));
+    assert.deepEqual((await readInbox({ redis: v.redis, runId: "gh-st1" })).entries, [], "nothing has reached Valkey yet");
+    proxy.thaw();
+    await until(async () => (await readInbox({ redis: v.redis, runId: "gh-st1" })).entries.length === 1);
+    assert.equal((await readInbox({ redis: v.redis, runId: "gh-st1" })).entries[0].id, id, "the message the console gave up on arrived: may or may not, never 'nothing was sent'");
+    assert.ok(!seen.audit.some((row) => row.includes("steer-canary")), "and its text is in no audit row");
+  } finally {
+    proxy.thaw();
+    release();
+    await worker?.close().catch(() => {});
+    for (const client of clients) client.disconnect();
+    proxy.close();
+    await v.done();
+  }
+});
+
+test("a stop during a bulk retry on a Valkey that answers cuts nothing: every job is retried and audited before the stop goes on (#842)", live, async () => {
+  const v = await freshValkey();
+  try {
+    const ids = Array.from({ length: 60 }, (_, i) => `gh-r${String(i).padStart(2, "0")}`);
+    const shared = await makeFailed(v, "pi-jobs", ids.map((id) => ({ id, data: { kind: "github", repo: "o/r" } })));
+    const { paths } = deployment(URL13);
+    const writes = makeWritesInFlight();
+    const c = await start({ paths, writes, a: { fleet: { supersededOf: async () => new Map() } } });
+    const p = (await c.act("retry-all-failed", {})).json();
+    assert.equal(p.targets.length, 60);
+    const pending = c.confirm("retry-all-failed", p.ticket);
+    // The stop arrives while the confirm is on its way through the list, and waits for it as `serve`'s stop does.
+    await until(async () => writes.size() === 1);
+    await writes.idle();
+    assert.equal(writes.abandon(), 0, "nothing was left to cut");
+    assert.deepEqual(await shared.getJobCounts("failed", "waiting"), { failed: 0, waiting: 60, paused: 0 }, "every job was retried by the time the stop went on");
+    const rows = c.audit.rows.filter((r) => r.kind === "failed-retry-all");
+    assert.deepEqual([rows.length, rows.filter((r) => r.outcome !== "ok").length], [60, 0], "one ok row per job and no other");
+    const res = await pending;
+    assert.deepEqual([res.status, res.json().done], [200, 60]);
+  } finally {
     await v.done();
   }
 });

@@ -12,32 +12,66 @@
  * forge job's data holds the issue's title and body).
  */
 import { parseConnection } from "@edgehero/pi-dispatch/connection";
-import { makeQueue } from "@edgehero/pi-dispatch/queue";
+import { closeWithin, consoleQueueConnection, makeQueue } from "@edgehero/pi-dispatch/queue";
+
+/** How long a queue's close may wait for its answer before its connection is dropped (`closeWithin`). */
+const CLOSE_TIMEOUT_MS = 1_000;
 
 /**
  * `jobs` is `[{ jobId, queue }]`; resolves a `Map` of job id to its `data`, or null when the job or its data cannot be
  * read (gone, Valkey down, a queue that does not answer). Never throws; every queue opened is closed.
+ *
+ * ONE step, `timeoutMs` for the whole list (issue #842), not for each job in turn: a retry preview names up to a hundred
+ * jobs, and on a Valkey that stopped answering a bound per job held the preview for a hundred of them. What was not
+ * read by then is null, as a job that is gone is. The queues' close is started and never awaited, since it waits for an answer
+ * too (`closeWithin` drops the connection past its own bound).
  */
 export async function readJobsData({ url, jobs, queueFn = makeQueue, parseConnectionFn = parseConnection, timeoutMs = 2500 }) {
   const out = new Map();
+  const wanted = (Array.isArray(jobs) ? jobs : []).filter((j) => typeof j?.jobId === "string" && typeof j?.queue === "string");
   const opened = new Map();
   const queueOf = (name) => {
-    if (!opened.has(name)) opened.set(name, queueFn(parseConnectionFn(url, { failFast: true }), { name }));
+    if (!opened.has(name)) opened.set(name, queueFn(consoleQueueConnection(url, parseConnectionFn), { name }));
     return opened.get(name);
   };
-  try {
-    for (const { jobId, queue } of Array.isArray(jobs) ? jobs : []) {
-      if (typeof jobId !== "string" || typeof queue !== "string") continue;
+  const release = () => {
+    const queues = [...opened.values()];
+    opened.clear();
+    for (const q of queues) void closeWithin(q, CLOSE_TIMEOUT_MS);
+  };
+  // Whether the bound fired: a read that answers after it writes nothing into a map the caller already holds.
+  let late = false;
+  // Every job asked at once: each is one small read on its queue's connection, so a hundred of them cost about one
+  // round trip, and the one bound is not spent a job at a time on a Valkey that is far away.
+  const work = Promise.all(
+    wanted.map(async ({ jobId, queue }) => {
+      let data = null;
       try {
-        const read = queueOf(queue).getJob(jobId);
-        const job = await Promise.race([read, new Promise((resolve) => setTimeout(() => resolve(null), timeoutMs).unref?.())]);
-        out.set(jobId, job?.data && typeof job.data === "object" ? job.data : null);
+        const job = await queueOf(queue).getJob(jobId);
+        data = job?.data && typeof job.data === "object" ? job.data : null;
       } catch {
-        out.set(jobId, null);
+        data = null;
       }
-    }
+      if (!late) out.set(jobId, data);
+    }),
+  );
+  let timer;
+  try {
+    await Promise.race([
+      work,
+      new Promise((resolve) => {
+        timer = setTimeout(resolve, timeoutMs);
+        timer.unref?.();
+      }),
+    ]);
+  } catch {
+    // every job not read is null below
   } finally {
-    for (const q of opened.values()) await q.close().catch(() => {});
+    clearTimeout(timer);
+    late = true;
+    for (const { jobId } of wanted) if (!out.has(jobId)) out.set(jobId, null);
+    release();
+    work.then(release, release);
   }
   return out;
 }

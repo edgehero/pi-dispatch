@@ -29,10 +29,10 @@ import { trackTouchAction } from "@edgehero/pi-dispatch/touch-outbox";
 
 import * as nodeFs from "node:fs";
 import { createHash, randomBytes } from "node:crypto";
-import { parseConnection, makeRedisClient } from "@edgehero/pi-dispatch/connection";
+import { parseConnection, makeRedisClient, VALKEY_COMMAND_TIMEOUT_MS } from "@edgehero/pi-dispatch/connection";
 import { makeAnswerDraftStore } from "@edgehero/pi-dispatch/answerer";
 import { makeApprovalStore } from "@edgehero/pi-dispatch/approval-state";
-import { QUEUE, makeQueue, enqueueForgeJob, enqueueLocalJobReporting, enqueueTriggerRunReporting, forgeDeliveryJobId, hostQueueName, swallowedRunSentence } from "@edgehero/pi-dispatch/queue";
+import { QUEUE, makeQueue, closeWithin, consoleQueueConnection, enqueueForgeJob, enqueueLocalJobReporting, enqueueTriggerRunReporting, forgeDeliveryJobId, hostQueueName, swallowedRunSentence } from "@edgehero/pi-dispatch/queue";
 import { jobNeeds, routeForgeJob } from "@edgehero/pi-dispatch/capabilities";
 import { loadSchedules } from "@edgehero/pi-dispatch/schedules";
 import { parseTriggers } from "@edgehero/pi-dispatch/triggers";
@@ -52,7 +52,7 @@ import { keepModelAttempt, modelAttemptIdOf } from "@edgehero/pi-dispatch/model-
 import { jobKey } from "@edgehero/pi-dispatch/wait-state";
 import { QUEUE_KEY, SCHEDULER_ID_RE, cronRunOf, isSchedulerNext, queueKeyOf } from "@edgehero/pi-dispatch/bullmq-internals";
 import { scrubControls } from "./panel.mjs";
-import { activeJobOfRun, makeLocalRunIndex, PENDING_SCAN_BUDGET, readFleetQueues, readPendingAnswer, readRunById, readWaitingRow, RUN_RECORD_UNREAD, targetKeyOf, WAITING_STATES } from "./read-model.mjs";
+import { activeJobOfRun, makeLocalRunIndex, PENDING_SCAN_BUDGET, QUEUE_CLOSE_TIMEOUT_MS, readFleetQueues, readPendingAnswer, readRunById, readWaitingRow, RUN_RECORD_UNREAD, targetKeyOf, WAITING_STATES } from "./read-model.mjs";
 import { RECORD_REASON_RE, recordReason } from "./words.mjs";
 import { fromNewerRelease, shownRecord } from "./newer-release.mjs";
 import { jobDataNewer } from "@edgehero/pi-dispatch/job-data-version";
@@ -64,6 +64,26 @@ export const BULK_MAX = 100;
 /** How many failed jobs a bulk plan examines per queue at most, so a deployment with a huge failed set stays bounded. */
 const FAILED_EXAMINE_MAX = 2000;
 const FAILED_PAGE = 200;
+
+/**
+ * How long a failed-job preview's reads may take in all (issue #842). Larger than a one-job plan's (`timeoutMs`): with a
+ * repository filter it may page `FAILED_EXAMINE_MAX` jobs out of every queue, which a healthy deployment takes seconds
+ * over. The same ten seconds the fleet snapshot's previews wait.
+ */
+export const FAILED_PLAN_TIMEOUT_MS = 10_000;
+
+/**
+ * How long a steer preview's reads (the job, its state, its inbox) may take in all (issue #842): each is one small
+ * read, so this is the command bound of the clients they go through.
+ */
+export const STEER_PLAN_TIMEOUT_MS = VALKEY_COMMAND_TIMEOUT_MS;
+
+/**
+ * How long a failed-job confirm's reads of one job (the lookup and its state) may take before its write (issue #842).
+ * Past the queue client's command bound on purpose: a read that was sent ends at that bound by itself, and this decides
+ * only a queue that is not connected yet.
+ */
+export const CONFIRM_READ_TIMEOUT_MS = VALKEY_COMMAND_TIMEOUT_MS + 1_000;
 
 /** The newest runs a parked-answer plan reads to judge "already answered": the fleet reader's wide window. */
 const ANSWERED_WINDOW = 1000;
@@ -101,19 +121,26 @@ function consoleDeliveryId(random = randomBytes) {
  * exist, the kill switch's set). `find(jobId)` asks each queue in turn, the first that knows the id owning it, as
  * `pi-dispatch cancel` does: ids are unique across queues by construction. `close()` closes every queue opened since the
  * last `close()`, all at once, and resolves once each has settled (never rejects). BullMQ's close QUITs each connection
- * and waits for the answer, which a Valkey that stopped answering on an open socket never sends, so a caller that owes
- * its answer within a bound starts the close and does not wait on it.
+ * and waits for the answer, which a Valkey that stopped answering on an open socket never sends, so each close has
+ * `QUEUE_CLOSE_TIMEOUT_MS` and its connection is dropped past it (`closeWithin`, issue #842); a caller that owes its
+ * answer within a bound starts the close and does not wait on it even so.
+ *
+ * Every queue is the console's bounded kind (`consoleQueueConnection`): a command a Valkey took and never answered ends
+ * at the bound, with `valkeyMayStillRun` on its error. A READ's error carries that mark as a write's does, so only the
+ * step that writes may read it as "may or may not have been made".
  */
 async function openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs }) {
-  const { names, blind, hosts } = await readFleetQueues({ url, redisFn, timeoutMs });
+  const { names, blind, hosts, incomplete } = await readFleetQueues({ url, redisFn, timeoutMs });
   const opened = new Map();
   const queueOf = (name) => {
-    if (!opened.has(name)) opened.set(name, queueFn(parseConnectionFn(url, { failFast: true }), { name }));
+    if (!opened.has(name)) opened.set(name, queueFn(consoleQueueConnection(url, parseConnectionFn), { name }));
     return opened.get(name);
   };
   return {
     names,
     blind,
+    // Whether the keyspace scan behind `names` did not finish (`readFleetQueues`): a host queue may be missing from them.
+    incomplete: incomplete ?? null,
     hosts,
     queueOf,
     // `getJob` by id, never a scan of a listing, so a job is found however far down its queue's failed set it sits (the
@@ -130,15 +157,7 @@ async function openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs }
     close() {
       const queues = [...opened.values()];
       opened.clear();
-      return Promise.all(
-        queues.map((q) => {
-          try {
-            return Promise.resolve(q.close()).catch(() => {});
-          } catch {
-            return undefined;
-          }
-        }),
-      );
+      return Promise.all(queues.map((q) => closeWithin(q, QUEUE_CLOSE_TIMEOUT_MS)));
     },
   };
 }
@@ -168,12 +187,13 @@ function targetOf(data) {
 
 /**
  * Re-check one failed job against its preview and act on it: the shared body of the single and bulk actions. `found` is
- * `fleet.find`'s answer. Refuses unless the job is still `failed` with the previewed `attemptsMade` and `finishedOn`
+ * `fleet.find`'s answer and `state` the job's state as `failedBulk` read it. A state that could not be read never gets
+ * here (issue #842): it used to read as "unknown", which answered "it is unknown now, not failed; it changed since the
+ * preview" of a job nothing was known about. Refuses unless the job is still `failed` with the previewed `attemptsMade` and `finishedOn`
  * ("it changed since the preview": retried, removed, or failed again since).
  */
-async function actOnFailed(found, jobId, expect, act) {
+async function actOnFailed(found, state, jobId, expect, act) {
   if (!found) return { invalid: `Nothing was done: it changed since the preview (it was removed or retried and finished); job ${jobId}` };
-  const state = await found.job.getState().catch(() => "unknown");
   if (state !== "failed") return { invalid: `Nothing was done: it is ${state} now, not failed; it changed since the preview; job ${jobId}` };
   const now = failedFingerprint(found.job);
   if (now.attemptsMade !== expect.attemptsMade || now.finishedOn !== expect.finishedOn) {
@@ -210,8 +230,8 @@ function expectProblem(expect) {
  *
  * The job's model attempt key (issue #812) keeps no expiry after the retry: `retryKeepingAttempt`.
  */
-export async function retryFailedJob({ url, jobId, expect, queue = null, redisFn = makeRedisClient, queueFn = makeQueue, parseConnectionFn = parseConnection, timeoutMs = 2500, touchStore = null, touchOutbox = null, now = Date.now } = {}) {
-  return (await failedBulk({ url, jobs: [{ jobId, ...(expect ?? {}), queue, expectGiven: expect }], redisFn, queueFn, parseConnectionFn, timeoutMs, touchStore, touchOutbox, now, touchCause: "rerun", act: (job, redis) => retryKeepingAttempt(job, redis, timeoutMs) })).single;
+export async function retryFailedJob({ url, jobId, expect, queue = null, redisFn = makeRedisClient, queueFn = makeQueue, parseConnectionFn = parseConnection, timeoutMs = 2500, readTimeoutMs = CONFIRM_READ_TIMEOUT_MS, touchStore = null, touchOutbox = null, now = Date.now } = {}) {
+  return (await failedBulk({ url, jobs: [{ jobId, ...(expect ?? {}), queue, expectGiven: expect }], redisFn, queueFn, parseConnectionFn, timeoutMs, readTimeoutMs, touchStore, touchOutbox, now, touchCause: "rerun", what: "retry", act: (job, redis) => retryKeepingAttempt(job, redis, timeoutMs) })).single;
 }
 
 /**
@@ -249,8 +269,8 @@ async function retryKeepingAttempt(job, redis, timeoutMs) {
  * between the re-check and the call would be removed as waiting. Two sessions acting on one job at once is the case,
  * and the audit log names both.
  */
-export async function removeFailedJob({ url, jobId, expect, queue = null, redisFn = makeRedisClient, queueFn = makeQueue, parseConnectionFn = parseConnection, timeoutMs = 2500, localEventStoreFn = makeLocalEventStore } = {}) {
-  return (await failedBulk({ url, jobs: [{ jobId, ...(expect ?? {}), queue, expectGiven: expect }], redisFn, queueFn, parseConnectionFn, timeoutMs, act: (job, redis) => removeFailedSettled(job, redis, timeoutMs, localEventStoreFn) })).single;
+export async function removeFailedJob({ url, jobId, expect, queue = null, redisFn = makeRedisClient, queueFn = makeQueue, parseConnectionFn = parseConnection, timeoutMs = 2500, readTimeoutMs = CONFIRM_READ_TIMEOUT_MS, localEventStoreFn = makeLocalEventStore } = {}) {
+  return (await failedBulk({ url, jobs: [{ jobId, ...(expect ?? {}), queue, expectGiven: expect }], redisFn, queueFn, parseConnectionFn, timeoutMs, readTimeoutMs, what: "removal", act: (job, redis) => removeFailedSettled(job, redis, timeoutMs, localEventStoreFn) })).single;
 }
 
 /** The reconciler needs the terminal queue entry until its generation is settled. Deleting first strands an active
@@ -283,13 +303,13 @@ async function removeFailedSettled(job, redis, timeoutMs, localEventStoreFn) {
  * still go: `{ results: [{ jobId, ok: true, queue } | { jobId, invalid }] }`, in the list's order, or `{ invalid }` for a
  * list that is not one, or `{ unreachable }` when the fleet could not be read at all.
  */
-export async function retryFailedJobs({ url, jobs, redisFn = makeRedisClient, queueFn = makeQueue, parseConnectionFn = parseConnection, timeoutMs = 2500, touchStore = null, touchOutbox = null, now = Date.now } = {}) {
-  return bulkOf(await failedBulk({ url, jobs: listOf(jobs), redisFn, queueFn, parseConnectionFn, timeoutMs, touchStore, touchOutbox, now, touchCause: "rerun", act: (job, redis) => retryKeepingAttempt(job, redis, timeoutMs) }));
+export async function retryFailedJobs({ url, jobs, redisFn = makeRedisClient, queueFn = makeQueue, parseConnectionFn = parseConnection, timeoutMs = 2500, readTimeoutMs = CONFIRM_READ_TIMEOUT_MS, touchStore = null, touchOutbox = null, now = Date.now } = {}) {
+  return bulkOf(await failedBulk({ url, jobs: listOf(jobs), redisFn, queueFn, parseConnectionFn, timeoutMs, readTimeoutMs, touchStore, touchOutbox, now, touchCause: "rerun", what: "retry", act: (job, redis) => retryKeepingAttempt(job, redis, timeoutMs) }));
 }
 
 /** Remove every job a bulk preview listed (issue #642), `retryFailedJobs`' shapes and per-job re-check. */
-export async function removeFailedJobs({ url, jobs, redisFn = makeRedisClient, queueFn = makeQueue, parseConnectionFn = parseConnection, timeoutMs = 2500, localEventStoreFn = makeLocalEventStore } = {}) {
-  return bulkOf(await failedBulk({ url, jobs: listOf(jobs), redisFn, queueFn, parseConnectionFn, timeoutMs, act: (job, redis) => removeFailedSettled(job, redis, timeoutMs, localEventStoreFn) }));
+export async function removeFailedJobs({ url, jobs, redisFn = makeRedisClient, queueFn = makeQueue, parseConnectionFn = parseConnection, timeoutMs = 2500, readTimeoutMs = CONFIRM_READ_TIMEOUT_MS, localEventStoreFn = makeLocalEventStore } = {}) {
+  return bulkOf(await failedBulk({ url, jobs: listOf(jobs), redisFn, queueFn, parseConnectionFn, timeoutMs, readTimeoutMs, what: "removal", act: (job, redis) => removeFailedSettled(job, redis, timeoutMs, localEventStoreFn) }));
 }
 
 /** A bulk list as `failedBulk` takes it, every entry's expect given; a non-array or an oversized one is refused there. */
@@ -304,18 +324,42 @@ function bulkOf(res) {
 }
 
 /**
+ * A failed job's retry or removal (`what`) that was sent and not answered within the queue client's bound (issue #842):
+ * Valkey may run it when it wakes, or ran it before its answer was lost, so `partial`, the outcome first and the id last,
+ * and never the client's own words.
+ */
+export const failedActUnconfirmed = (what, jobId) => ({ invalid: jobLast(`the ${what} may or may not have been made: Valkey took it and did not answer within the bound; look at the fleet once Valkey answers`, jobId), partial: true });
+
+/** A bulk list's job that was left alone because Valkey stopped answering at a job before it (issue #842). */
+export const failedActNotTried = (jobId) => ({ jobId, invalid: jobLast("not tried: Valkey stopped answering at an earlier job of this action, so this one was left alone; nothing was changed for it", jobId) });
+
+/** Whether `err` is an answer Valkey never gave: the bounded client's timeout, or a command lost on its connection. */
+const answerLost = (err) => err?.valkeyMayStillRun === true || err?.code === "ETIMEDOUT";
+
+/**
  * The one body behind the four failed-job actions: one fleet discovery, one re-check and one act per job, every queue
  * closed after. `single` is the first result for the single-job spellings. Retries and local event removals receive
  * the job's queue's client beside the job.
+ *
+ * No timer of its own around the write (issue #842): the queues' clients bound each command, and a timer that fired
+ * first could only say less. A job whose answer was lost says which step lost it: a read before the act changed
+ * nothing (`unreachable`), the act itself may or may not have been made (`failedActUnconfirmed`). Either way the list
+ * STOPS there and the rest is reported not tried: on a Valkey that stopped answering every further job would wait out
+ * the same bound, and each one sent is one more change that may land unobserved when it wakes.
  */
-async function failedBulk({ url, jobs, redisFn, queueFn, parseConnectionFn, timeoutMs, act, touchCause = null, touchStore = null, touchOutbox = null, now = Date.now }) {
+async function failedBulk({ url, jobs, redisFn, queueFn, parseConnectionFn, timeoutMs, readTimeoutMs = CONFIRM_READ_TIMEOUT_MS, act, what = "change", touchCause = null, touchStore = null, touchOutbox = null, now = Date.now }) {
   if (!Array.isArray(jobs)) return { invalid: "jobs must be the preview's list", single: { invalid: "jobs must be the preview's list" } };
   if (jobs.length > BULK_MAX) return { invalid: `at most ${BULK_MAX} jobs per action; this list has ${jobs.length}`, single: { invalid: "too many jobs" } };
   const results = [];
   let fleet = null;
+  let stopped = false;
   try {
     for (const entry of jobs) {
       const { jobId } = entry;
+      if (stopped) {
+        results.push(failedActNotTried(typeof jobId === "string" ? jobId : null));
+        continue;
+      }
       if (typeof jobId !== "string" || !JOB_ID_RE.test(jobId)) {
         results.push({ jobId: typeof jobId === "string" ? jobId : null, invalid: "a job id is letters, digits and . _ : -, at most 200 characters" });
         continue;
@@ -326,31 +370,62 @@ async function failedBulk({ url, jobs, redisFn, queueFn, parseConnectionFn, time
         continue;
       }
       fleet ??= await openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs });
+      // Whether this job's write was started: until then a lost answer was a read's, and nothing changed.
+      let sent = false;
+      const acting = (job, redis) => {
+        sent = true;
+        return act(job, redis);
+      };
       try {
-        const found = await fleet.find(jobId, entry.queue);
+        // The READS before the write, as one step with its own end (issue #842): nothing has been sent yet, so a bound
+        // here is safe and says nothing was changed. Without it a queue built while Valkey takes connections and
+        // answers none held the confirm until its connection gave up (36 to 39 s measured). The write below has no
+        // such timer. A read that answers after the bound is dropped: this job is never acted on from it.
+        const reading = (async () => {
+          const got = await fleet.find(jobId, entry.queue);
+          return { found: got, state: got ? await got.job.getState() : null };
+        })();
+        const read = await within(reading, readTimeoutMs, () => null);
+        if (read === null) {
+          // The list stops here, so the fleet is used no more: whatever the late read opens after the close below
+          // has started (the next queue of its lookup) is closed when it settles, and its rejection is nobody's.
+          const release = () => void fleet.close();
+          reading.then(release, release);
+          throw Object.assign(new Error(`the job did not answer within ${readTimeoutMs / 1000} seconds`), { code: "ETIMEDOUT" });
+        }
+        const { found, state } = read;
+        // Not found in a fleet that could not be read whole (the registry or the keyspace scan): the queue that holds
+        // the job may be one the discovery missed, so nothing is known of it. That is no "it changed since the
+        // preview", which a bulk action then wrote for every job on a host queue; the list stops, nothing changed.
+        if (!found && (fleet.blind || fleet.incomplete)) {
+          throw Object.assign(new Error("the deployment's queues could not all be read, so the job was not looked for in every queue"), { code: "ETIMEDOUT" });
+        }
         const trackedAct = async (job) => {
           const q = fleet.queueOf(found.queue);
           const redis = (touchCause || job.data?.localEvent !== undefined) && q.client ? await q.client : null;
-          if (!touchCause) return act(job, redis);
+          if (!touchCause) return acting(job, redis);
           const store = touchStore ?? (redis ? makeTouchStore({ redis, now }) : null);
-          return trackTouchAction({ store, outbox: touchOutbox, event: { runId: jobId, cause: touchCause, at: now(), endedAt: entry.finishedOn ?? undefined, scopeId: touchScopeOf(job.data), nonce: `retry:${jobId}:${entry.attemptsMade}:${entry.finishedOn}` }, act: async () => { await act(job, redis); return { ok: true }; } });
+          return trackTouchAction({ store, outbox: touchOutbox, event: { runId: jobId, cause: touchCause, at: now(), endedAt: entry.finishedOn ?? undefined, scopeId: touchScopeOf(job.data), nonce: `retry:${jobId}:${entry.attemptsMade}:${entry.finishedOn}` }, act: async () => { await acting(job, redis); return { ok: true }; } });
         };
         // Issue #796: a canary is third-party code a person chose to run once, after a preview that said so. A retry would install it again, its tree resolved again, behind a
         // dialog about retrying a job, and a model holds the retry tool. A person starts another from the Updates page.
         const canary = touchCause === "rerun" && found?.job?.data?.packageCanary !== undefined;
         const localEvent = touchCause === "rerun" && found?.job?.data?.localEvent !== undefined;
-        const res = localEvent ? { invalid: LOCAL_EVENT_RETRY_REFUSAL } : canary ? { invalid: "This job was a canary of an extension version. Start another from the Updates page rather than retrying it." } : found ? await actOnFailed(found, jobId, { attemptsMade: entry.attemptsMade, finishedOn: entry.finishedOn ?? null }, trackedAct) : { invalid: notInFleet(jobId, fleet, "Nothing was done; it changed since the preview") };
+        const res = localEvent ? { invalid: LOCAL_EVENT_RETRY_REFUSAL } : canary ? { invalid: "This job was a canary of an extension version. Start another from the Updates page rather than retrying it." } : found ? await actOnFailed(found, state, jobId, { attemptsMade: entry.attemptsMade, finishedOn: entry.finishedOn ?? null }, trackedAct) : { invalid: notInFleet(jobId, fleet, "Nothing was done; it changed since the preview") };
         results.push(res.ok ? res : { jobId, invalid: res.invalid, ...(res.partial === true ? { partial: true } : {}) });
       } catch (err) {
-        // One job's Valkey error is that job's result; a bulk action reports per job and goes on.
-        results.push({ jobId, unreachable: err?.message ?? String(err) });
+        // One job's Valkey error is that job's result; a bulk action reports per job and goes on, unless the answer
+        // was lost (above).
+        results.push(sent && err?.valkeyMayStillRun === true ? { jobId, ...failedActUnconfirmed(what, jobId) } : { jobId, unreachable: err?.message ?? String(err) });
+        stopped = answerLost(err);
       }
     }
     return { results, single: results[0] ?? { invalid: "a job id is required" } };
   } catch (err) {
     return { unreachable: err?.message ?? String(err), single: { unreachable: err?.message ?? String(err) } };
   } finally {
-    await fleet?.close();
+    // Started, never awaited: a queue that never connected does not settle its close within any bound of this answer.
+    void fleet?.close();
   }
 }
 
@@ -373,14 +448,18 @@ async function failedBulk({ url, jobs, redisFn, queueFn, parseConnectionFn, time
  * The list IS the ticket's content: the console binds every job's `attemptsMade` and `finishedOn`, and the apply refuses
  * a job that changed.
  */
-export async function planFailedBulk({ url, filter = {}, limit = BULK_MAX, redisFn = makeRedisClient, queueFn = makeQueue, parseConnectionFn = parseConnection, timeoutMs = 2500 } = {}) {
+export async function planFailedBulk({ url, filter = {}, limit = BULK_MAX, redisFn = makeRedisClient, queueFn = makeQueue, parseConnectionFn = parseConnection, timeoutMs = 2500, planTimeoutMs = FAILED_PLAN_TIMEOUT_MS } = {}) {
   const cap = Number.isSafeInteger(limit) ? Math.min(Math.max(limit, 1), BULK_MAX) : BULK_MAX;
   const onlyQueue = filter?.queue ?? null;
   const onlyRepo = filter?.repo ?? null;
   if (onlyQueue !== null && typeof onlyQueue !== "string") return { invalid: "filter.queue must be a queue name" };
   if (onlyRepo !== null && (typeof onlyRepo !== "string" || onlyRepo === "")) return { invalid: "filter.repo must be a repository" };
   let fleet = null;
-  try {
+  // ONE step with its own end (issue #842, `planCancelQueued`'s pattern): the reads below have a bound each, and a
+  // queue built while Valkey takes connections and answers none takes 36 to 39 s to give up (measured), so without this a
+  // preview stayed open for as long.
+  const release = releaseOf(() => fleet, () => null);
+  const work = (async () => {
     fleet = await openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs });
     if (onlyQueue !== null && !fleet.names.includes(onlyQueue)) return { invalid: `${JSON.stringify(onlyQueue)} is not a queue this deployment drains (${fleet.names.join(", ")})` };
     const candidates = [];
@@ -432,10 +511,15 @@ export async function planFailedBulk({ url, filter = {}, limit = BULK_MAX, redis
     candidates.sort((a, b) => (b.finishedOn ?? -Infinity) - (a.finishedOn ?? -Infinity) || (a.queue < b.queue ? -1 : a.queue > b.queue ? 1 : 0) || (a.jobId < b.jobId ? -1 : a.jobId > b.jobId ? 1 : 0));
     const jobs = candidates.slice(0, cap);
     return { jobs, more: candidates.length - jobs.length + leftover, examinedAll };
+  })();
+  try {
+    return await within(work, planTimeoutMs, () => ({ unreachable: "timed out reading the failed jobs" }));
   } catch (err) {
     return { unreachable: err?.message ?? String(err) };
   } finally {
-    await fleet?.close();
+    // Started, never awaited (`releaseOf`); a read still in flight when the bound fired is released when it settles.
+    release();
+    work.then(release, release);
   }
 }
 
@@ -1573,6 +1657,21 @@ const STEER_SOURCES_HERE = Object.freeze(["console", "panel"]);
 const sha256Hex = (text) => createHash("sha256").update(text).digest("hex");
 
 /**
+ * The raw client a steer plan or confirm reads and writes the inbox with (issue #842): each command bound, so one a
+ * Valkey took and never answered ends at the bound with `valkeyMayStillRun`, and one that timed out before it was sent
+ * is never sent later (`makeRedisClient`'s `commandTimeoutMs`). WITH its offline queue, the cancel probe's shape: a
+ * client without one refuses its first command before it has connected. Its socket is dropped at once on disconnect.
+ */
+function steerClient(redisFn, url) {
+  const redis = redisFn(url, { commandTimeoutMs: VALKEY_COMMAND_TIMEOUT_MS, disconnectTimeoutMs: 0 });
+  redis.on?.("error", () => {});
+  return redis;
+}
+
+/** A message's push or withdrawal that was sent and not answered (issue #842): `partial`, the outcome first. */
+export const steerUnconfirmed = (what, id, jobId) => ({ invalid: jobLast(`message ${id} may or may not have been ${what}: Valkey took it and did not answer within the bound; the run's inbox shows it once Valkey answers`, jobId), partial: true });
+
+/**
  * Find `jobId` across the fleet's queues and judge whether it can take a message now (free reads only, nothing written):
  * `{ job, queue, runId, redis, fleet }` or `{ refusal }`. Shared by the send plan; the withdraw plan needs the job but
  * not its being open (a run that just ended still holds its inbox, and the withdraw script answers for it).
@@ -1621,6 +1720,7 @@ export async function planSteer({
   random = randomBytes,
   now = () => Date.now(),
   timeoutMs = 2500,
+  planTimeoutMs = STEER_PLAN_TIMEOUT_MS,
 } = {}) {
   if (!STEER_SOURCES_HERE.includes(source)) return { refusal: `the source is not one of ${STEER_SOURCES_HERE.join(", ")}` };
   const who = consoleAnswerBy({ by });
@@ -1635,7 +1735,10 @@ export async function planSteer({
   if (norm.refusal) return { refusal: norm.refusal };
   let redis = null;
   const holder = { fleet: null };
-  try {
+  // ONE step with its own end (issue #842, `planCancelQueued`'s pattern), so a preview on a Valkey that stopped
+  // answering says so within the bound rather than staying open until it wakes.
+  const release = releaseOf(() => holder.fleet, () => redis);
+  const work = (async () => {
     let found = await findSteerJob({ url, jobId, redisFn, queueFn, parseConnectionFn, timeoutMs, fleetHolder: holder });
     if (found.refusal) return found;
     const state = await found.job.getState().catch(() => "unknown");
@@ -1646,8 +1749,7 @@ export async function planSteer({
     }
     const target = String(found.job.id);
     if (found.job.data?.steer !== true) return { refusal: `Nothing was sent: it is not steer-armed (its trigger does not set run.steer), so it takes no messages; job ${target}` };
-    redis = redisFn(url);
-    redis.on?.("error", () => {});
+    redis = steerClient(redisFn, url);
     const open = await steerInbox.isOpen({ redis, runId: found.runId });
     if (open !== true) {
       if (open === false) return { refusal: "Nothing was sent: the run is not accepting messages; it is not steer-armed, not running, or its venue cannot deliver" };
@@ -1655,33 +1757,36 @@ export async function planSteer({
     }
     const kept = norm.entry.text;
     return { plan: { kind: "steer", jobId: target, queue: found.queue, runId: String(found.runId), id, mode, source, by: who, text: kept, bytes: Buffer.byteLength(kept, "utf8"), digest: sha256Hex(kept) } };
+  })();
+  try {
+    return await within(work, planTimeoutMs, () => ({ refusal: `Nothing was sent: the job or its inbox did not answer within ${planTimeoutMs / 1000} seconds` }));
   } catch (err) {
     return { refusal: `Nothing was sent: could not read the job or its inbox (${boundedText(err?.message ?? String(err))})` };
   } finally {
-    await holder.fleet?.close();
-    try {
-      redis?.disconnect?.();
-    } catch {
-      // already closed
-    }
+    // Started, never awaited (`releaseOf`); a read still in flight when the bound fired is released when it settles.
+    release();
+    work.then(release, release);
   }
 }
 
 /**
  * Push a message `planSteer` planned (issue #646): the inbox's own script (`pushSteer`), so a run that closed or went
  * quiet since the preview refuses it (`closed`/`gone`) instead of swallowing it. Returns `{ ok: true, jobId, id, mode,
- * state: "queued" }`, `{ refusal }` with the CLI's sentence for `gone`, `closed`, `full` and `dup`, or `{ unreachable }`.
+ * state: "queued" }`, `{ refusal }` with the CLI's sentence for `gone`, `closed`, `full` and `dup`, `{ unreachable }`
+ * for a push that was never sent, or `{ invalid, partial: true }` for one that was sent and not answered within the
+ * client's bound (`steerUnconfirmed`, issue #842; no timer of its own, which could only say less).
  * It does not wait for the relay's write: the run page's inbox panel and `/api/state` show the message's state move.
  */
 export async function enqueueSteer(plan, { url, redisFn = makeRedisClient, now = () => Date.now() } = {}) {
   if (plan?.kind !== "steer" || typeof plan.runId !== "string" || typeof plan.id !== "string" || !STEER_SOURCES_HERE.includes(plan.source)) return { refusal: "not a steer plan" };
   let redis = null;
   try {
-    redis = redisFn(url);
-    redis.on?.("error", () => {});
+    redis = steerClient(redisFn, url);
     const entry = { v: 1, id: plan.id, mode: plan.mode, source: plan.source, author: { kind: "operator", by: plan.by }, text: plan.text, at: now() };
     const pushed = await steerInbox.pushSteer({ redis, runId: plan.runId, entry, now });
     if (pushed?.error === "refused") return { refusal: `${pushed.reason}` };
+    // Sent and not answered (issue #842): the run may get the message when Valkey wakes, so never "nothing was sent".
+    if (pushed?.error && pushed.mayStillRun === true) return steerUnconfirmed("sent", plan.id, plan.jobId);
     if (pushed?.error) return { unreachable: `Valkey said ${pushed.error}` };
     if (pushed === "ok") return { ok: true, jobId: plan.jobId, id: plan.id, mode: plan.mode, state: "queued" };
     if (pushed === "gone") return { refusal: "Nothing was sent: the run stopped accepting messages before this one arrived (it ended, or its worker stopped refreshing it)" };
@@ -1735,31 +1840,31 @@ function unwithdrawable(prior, id, jobId) {
  * "steer-withdraw", jobId, runId, id, prior }`, where `prior` is the state the preview saw; the confirm's answer names
  * the state the withdraw script actually met, which can have moved on.
  */
-export async function planSteerWithdraw({ url, jobId, id, redisFn = makeRedisClient, queueFn = makeQueue, parseConnectionFn = parseConnection, timeoutMs = 2500 } = {}) {
+export async function planSteerWithdraw({ url, jobId, id, redisFn = makeRedisClient, queueFn = makeQueue, parseConnectionFn = parseConnection, timeoutMs = 2500, planTimeoutMs = STEER_PLAN_TIMEOUT_MS } = {}) {
   if (typeof id !== "string" || !steerInbox.STEER_ID_RE.test(id)) return { refusal: "the message id is 32 lowercase hex characters, as the inbox lists it" };
   if (typeof jobId !== "string" || !JOB_ID_RE.test(jobId)) return { refusal: "a job id is letters, digits and . _ : -, at most 200 characters" };
   let redis = null;
   const holder = { fleet: null };
-  try {
+  // ONE step with its own end (issue #842), as `planSteer`.
+  const release = releaseOf(() => holder.fleet, () => redis);
+  const work = (async () => {
     const found = await findSteerJob({ url, jobId, redisFn, queueFn, parseConnectionFn, timeoutMs, fleetHolder: holder });
     if (found.refusal) return { refusal: found.refusal.replace(/^Nothing was sent:/, "Nothing was changed:") };
-    redis = redisFn(url);
-    redis.on?.("error", () => {});
+    redis = steerClient(redisFn, url);
     const prior = await steerInbox.messageState({ redis, runId: found.runId, id });
     if (prior !== null && typeof prior === "object") return { refusal: prior.error === "refused" ? String(prior.reason) : `the run's inbox could not be read (Valkey said ${String(prior.error)}); nothing was changed` };
     const no = unwithdrawable(prior, id, jobId);
     if (no) return { refusal: no };
     if (prior === "withdrawn") return { unchanged: steerWithdrawSentence(prior, id) };
     return { plan: { kind: "steer-withdraw", jobId, runId: String(found.runId), id, prior } };
+  })();
+  try {
+    return await within(work, planTimeoutMs, () => ({ refusal: `the job or its inbox did not answer within ${planTimeoutMs / 1000} seconds; nothing was changed` }));
   } catch (err) {
     return { refusal: `could not read the job or its inbox (${boundedText(err?.message ?? String(err))}); nothing was changed` };
   } finally {
-    await holder.fleet?.close();
-    try {
-      redis?.disconnect?.();
-    } catch {
-      // already closed
-    }
+    release();
+    work.then(release, release);
   }
 }
 
@@ -1767,16 +1872,18 @@ export async function planSteerWithdraw({ url, jobId, id, redisFn = makeRedisCli
  * Withdraw the message `planSteerWithdraw` planned: the inbox's `STEER_WITHDRAW` script, one compare and set. Returns
  * `{ ok: true, jobId, id, prior, guaranteed, said }` (`prior` the state the script met: `queued` is guaranteed,
  * `written` best effort, `withdrawn` a no-op someone else already made), `{ refusal }` for `delivered`, `late` or an id
- * the inbox does not hold, or `{ unreachable }`.
+ * the inbox does not hold, `{ unreachable }` for a withdrawal that was never sent, or `{ invalid, partial: true }` for
+ * one that was sent and not answered (`steerUnconfirmed`, issue #842).
  */
 export async function withdrawSteerMessage(plan, { url, redisFn = makeRedisClient } = {}) {
   if (plan?.kind !== "steer-withdraw" || typeof plan.runId !== "string" || typeof plan.id !== "string") return { refusal: "not a steer-withdraw plan" };
   let redis = null;
   try {
-    redis = redisFn(url);
-    redis.on?.("error", () => {});
+    redis = steerClient(redisFn, url);
     const res = await steerInbox.withdrawSteer({ redis, runId: plan.runId, id: plan.id });
     if (res?.error === "refused") return { refusal: String(res.reason) };
+    // Sent and not answered (issue #842): the message may be withdrawn when Valkey wakes.
+    if (res?.error && res.mayStillRun === true) return steerUnconfirmed("withdrawn", plan.id, plan.jobId);
     if (res?.error) return { unreachable: `Valkey said ${res.error}` };
     const no = unwithdrawable(res.prior, plan.id, plan.jobId);
     if (no) return { refusal: no };

@@ -170,6 +170,13 @@ test("a refused entry never reaches Valkey, and a Valkey fault is { error: code 
 	assert.deepEqual(await closeInbox({ redis: { eval: async () => [[], []] }, runId: "r" }), { error: "bad-reply" }, "a two-element close reply is the old script's, refused");
 	assert.deepEqual(await readFallbacks({ redis: down, runId: "r" }), { error: "valkey" });
 	assert.deepEqual(await pushSteer({ redis: { eval: async () => "maybe" }, runId: "r", entry: opEntry(), now: clock }), { error: "bad-reply" });
+	// Issue #842: a push or a withdrawal Valkey took and did not answer (the client's `valkeyMayStillRun`) keeps that
+	// mark, so its caller never says nothing was sent; a read keeps none, since nothing it lost can run later.
+	const lost = (name) => ({ [name]: async () => Promise.reject(Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT", valkeyMayStillRun: true })) });
+	assert.deepEqual(await pushSteer({ redis: lost("eval"), runId: "r", entry: opEntry(), now: clock }), { error: "ETIMEDOUT", mayStillRun: true });
+	assert.deepEqual(await withdrawSteer({ redis: lost("eval"), runId: "r", id: hexId() }), { error: "ETIMEDOUT", mayStillRun: true });
+	assert.deepEqual(await messageState({ redis: lost("hget"), runId: "r", id: hexId() }), { error: "ETIMEDOUT" });
+	assert.deepEqual(await isOpen({ redis: lost("exists"), runId: "r" }), { error: "ETIMEDOUT" });
 });
 
 test("argument refusals: ids, states, target keys and hosts are checked before any call", async () => {

@@ -1619,10 +1619,12 @@ export function createConsoleServer({
   devices = null,
   restartNotice = null,
   approvals = null,
+  // Issue #842: the confirms in flight (`makeWritesInFlight`), so `serve`'s stop waits for them. None: nothing is tracked.
+  writes = null,
 }) {
   const limits = { ...SERVER_LIMITS, streamsTotal: STREAMS_TOTAL_MAX, streamsOperatorReserve: STREAMS_OPERATOR_RESERVE, ...limitsOverride };
   const refusalRows = makeLoginLimiter({ now, perMinute: REFUSAL_ROWS_PER_MINUTE, burst: 2 * REFUSAL_ROWS_PER_MINUTE });
-  const deps = { devices, config, fs, now, random, audit, sessions, cookies, tickets, limiter, log, readTokens, findToken, keptTokens, consumeLoginCode, writePauseWindows, actionDeps, refusalRows, quieted: { count: 0 }, pages, pageDeps, hub, stateOf, errorPage, limits, streams: { open: 0 }, gateway, consoleOrigin, restartNotice, approvals };
+  const deps = { devices, config, fs, now, random, audit, sessions, cookies, tickets, limiter, log, readTokens, findToken, keptTokens, consumeLoginCode, writePauseWindows, actionDeps, refusalRows, quieted: { count: 0 }, pages, pageDeps, hub, stateOf, errorPage, limits, streams: { open: 0 }, gateway, consoleOrigin, restartNotice, approvals, writes };
   // `connectionsCheckingInterval` makes the two timeouts bite within a second of expiring rather than within node's
   // default 30: a client holding connections open without sending holds a slot of `maxConnections` only that long.
   const serverOptions = { headersTimeout: limits.headersTimeout, requestTimeout: limits.requestTimeout, connectionsCheckingInterval: limits.connectionsCheckingInterval };

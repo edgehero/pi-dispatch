@@ -306,10 +306,42 @@ function steerNote(res: any): string {
 export function switchFailure(res: any): string | null {
   if (typeof res?.refused === "string" && res.refused !== "") return res.refused;
   if (typeof res?.invalid === "string" && res.invalid !== "") return res.invalid;
-  const bad = (Array.isArray(res?.results) ? res.results : []).find((r: any) => r?.res?.unreachable);
-  if (!bad) return null;
-  const at = bad.shown ?? "the deployment's Valkey";
-  return bad.res.partial ? `FAILED at ${bad.res.partial.failed} on ${at}, so the deployment is half switched` : `could not reach the queue at ${at}`;
+  const bad = (Array.isArray(res?.results) ? res.results : []).filter((r: any) => r?.res?.unreachable);
+  if (bad.length === 0) return null;
+  // EVERY Valkey that failed is said (issue #842), a lost answer first: with the first failure alone, one Valkey that
+  // could not be reached hid a pause that was sent to the other and may have been made there.
+  const words = bad.map((r: any) => {
+    const at = r.shown ?? "the deployment's Valkey";
+    const lost = switchUnconfirmed(r.res.partial, Boolean(r.res.blind || r.res.incomplete));
+    if (lost !== null) return { lost: true, text: `${lost} on ${at}` };
+    return { lost: false, text: r.res.partial ? `FAILED at ${r.res.partial.failed} on ${at}, so the deployment is half switched` : `could not reach the queue at ${at}` };
+  });
+  return [...words.filter((w: any) => w.lost), ...words.filter((w: any) => !w.lost)].map((w: any) => w.text).join("; ");
+}
+
+/**
+ * A part-way switch with a queue whose pause or resume is not known to have been made (issue #842, the read model's
+ * `partial.unconfirmed`: sent and not answered, or its queue not connected within the step, which may still send it): the queues not known first, since that is what an operator must look at, then those that
+ * did not change, those a resume never tried and those known switched, the console confirm's four, and `short` (the
+ * registry or the scan was not read whole) says the list itself may be missing a queue. Null for a switch that lost
+ * no answer. Queue names only. The `/dispatch pause` and `resume` command says the same (`switchCommandLost`).
+ */
+export function switchUnconfirmed(partial: any, short = false): string | null {
+  const names = (list: any): string[] => (Array.isArray(list) ? list.map(String) : []);
+  const unconfirmed = names(partial?.unconfirmed);
+  if (unconfirmed.length === 0) return null;
+  const refused = names(partial?.refused);
+  const notTried = names(partial?.notTried);
+  return `NOT CONFIRMED for ${unconfirmed.join(", ")}: the switch may or may not have been made there${refused.length > 0 ? `; not switched: ${refused.join(", ")}` : ""}${notTried.length > 0 ? `; not tried: ${notTried.join(", ")}` : ""}; known switched: ${names(partial?.done).join(", ") || "none"}${short ? "; the list of queues may be short" : ""}`;
+}
+
+/**
+ * The `/dispatch pause` and `resume` command's line for one Valkey whose switch lost an answer (issue #842), or null
+ * for one that lost none: `at` is " at <url>" when the command names more than one Valkey, else empty.
+ */
+export function switchCommandLost(paused: boolean, at: string, res: any): string | null {
+  const lost = switchUnconfirmed(res?.partial, Boolean(res?.blind || res?.incomplete));
+  return lost === null ? null : `${paused ? "pause" : "resume"}${at}: ${lost}`;
 }
 
 /** A cancel result's failure: a refusal, or no worker acknowledging (nothing changed). */

@@ -591,7 +591,7 @@ The bar's other states:
   "This session ended before the change was sent, so nothing was changed. The console is asked where it went.", and
   the page goes to the sign-in page, which says why, as a live page does when its updates stop.
 - **Did not finish**, with Look again: the change stopped after doing part of its work. The kill switch can reach
-  some queues and not others (a Valkey that did not answer, a loop that stopped part-way) or fail before it says which,
+  some queues and not others (a Valkey that did not answer, a queue whose pause was sent and not answered) or fail before it says which,
   a bulk action can fail part-way through its jobs, and the cancel of a held or a queued job can be asked for and not
   finish (below). The bar never says nothing was changed here: it says some of it may have been done, and Look again
   reloads the page so you see what did. The audit log has no outcome for a change that partly landed, so such a
@@ -992,8 +992,11 @@ or no triggers file, nothing to answer. Trust them again once it answers.
 A change that timed out before it left the console is not made when Valkey returns. One that reached a Valkey which then
 stopped answering may or may not have been made, and the confirm and its audit row say so. Adopting or undoing a package and
 ending a sandbox shell say it too, and an End request that may still stand is taken back. With Valkey unreachable, Adopt and
-Undo say that, not that someone changed the package. On a Valkey that stopped answering, the kill switch and the previews of a failed job's and a steer's actions wait
-until it answers, and the console cannot stop until it does, so its service manager's limit ends it. While Valkey stays down,
+Undo say that, not that someone changed the package. On a Valkey that stopped answering, the kill switch answers within about 5 seconds for a pause and 10 for a
+resume: it names the queues it knows are paused (or resumed), those not confirmed, whose pause or resume was sent and may or may not have
+been made, and those it did not try, since a resume stops at the first queue that does not answer. The previews of a failed job's and a
+steer's actions say within 10 and 5 seconds that they could not read, and a stop of the console waits for the confirms it is still carrying out, takes no new one (it says it is stopping and nothing
+was changed), and ends within about a second of the last of them, never later than 10, with its lock released. While Valkey stays down,
 its log says each queue's error once a minute, and an outage after Valkey came back says it again at once.
 
 A Valkey password changed in the deployment's `.env` needs no restart: the console's clients read it again each time they

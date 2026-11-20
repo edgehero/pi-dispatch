@@ -519,6 +519,31 @@ function sitesIn(file) {
   });
 }
 
+// Issue #842: `/dispatch pause` on a Valkey that takes the connection and answers nothing. The command's line and its
+// audit row say the queue's pause is not confirmed, never that Valkey could not be reached (which reads as nothing sent).
+test("/dispatch pause on a Valkey that answers nothing says the pause is not confirmed, in its line and its audit row (#842)", { timeout: 40_000 }, async () => {
+  const { createServer } = await import("node:net");
+  const sockets = new Set();
+  const silent = createServer((socket) => {
+    sockets.add(socket);
+    socket.on("error", () => {});
+  });
+  await new Promise((resolve) => silent.listen(0, "127.0.0.1", resolve));
+  const fx = deployment({ valkey: `redis://127.0.0.1:${silent.address().port}` });
+  try {
+    const notes = await command("pause");
+    const said = "pause: NOT CONFIRMED for pi-jobs: the switch may or may not have been made there; known switched: none; the list of queues may be short";
+    assert.ok(notes.includes(said), JSON.stringify(notes));
+    const rows = rowsOf(fx.files.logs).filter((r) => r.kind === "fleet-pause");
+    assert.deepEqual(rows.map((r) => r.outcome), ["ok", "failed"]);
+    assert.match(rows[1].reason, /^NOT CONFIRMED for pi-jobs: the switch may or may not have been made there; known switched: none; the list of queues may be short on redis:\/\/127\.0\.0\.1:\d+$/);
+  } finally {
+    fx.restore();
+    for (const socket of sockets) socket.destroy();
+    silent.close();
+  }
+});
+
 test("the table has exactly one row per audited call site in index.ts, secrets-command.ts and dashboard.ts", () => {
   const sites = ["index.ts", "secrets-command.ts", "dashboard.ts"].flatMap(sitesIn).sort();
   const table = CASES.filter((c) => !c.name.startsWith("dispatch_")).map((c) => c.site).sort();
