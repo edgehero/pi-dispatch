@@ -122,7 +122,7 @@ export async function runCancel(jobId, url, { write = (chunk) => process.stdout.
 	const { parseConnection, makeRedisClient, VALKEY_COMMAND_TIMEOUT_MS, urlShown } = await import("./connection.mjs");
 	// The bound on each command and on the state reads: the console's, unless a test asks for another.
 	const bound = Number.isSafeInteger(commandTimeoutMs) && commandTimeoutMs > 0 ? commandTimeoutMs : VALKEY_COMMAND_TIMEOUT_MS;
-	const { fleetQueueNames, discoverHostQueues, unionQueueNames, makeQueue } = await import("./queue.mjs");
+	const { fleetQueueNames, discoverHostQueues, unionQueueNames, makeQueue, closeWithin } = await import("./queue.mjs");
 	const { readLiveHosts } = await import("./host-registry.mjs");
 	const parseConn = parseConnectionFn ?? parseConnection;
 	const mkRedis = redisFn ?? makeRedisClient;
@@ -351,16 +351,5 @@ export async function runCancel(jobId, url, { write = (chunk) => process.stdout.
  */
 function settleLater(jobId) {
 	return `Once Valkey answers, run \`pi-dispatch cancel ${jobId}\` again: it removes the job if it is still queued, and says so if it is gone`;
-}
-
-/** Close `queue`, or drop its connection when the close is not answered within `ms`. Never throws. */
-async function closeWithin(queue, ms) {
-	let timer;
-	const closed = await Promise.race([
-		Promise.resolve(queue.close()).then(() => true, () => true),
-		new Promise((resolve) => (timer = setTimeout(() => resolve(false), ms))),
-	]);
-	clearTimeout(timer);
-	if (!closed) await Promise.resolve(queue.disconnect?.()).catch(() => {});
 }
 

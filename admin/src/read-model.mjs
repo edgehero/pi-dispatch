@@ -88,7 +88,7 @@ import { resolveJobSize } from "@edgehero/pi-dispatch/job-size";
 import { projectBudgetRow, publishedBudget } from "@edgehero/pi-dispatch/host-budget";
 import { peakSeries, refusalWords, sizeRefusal, suggestSize, suggestionCall, suggestionEvidence } from "@edgehero/pi-dispatch/size-suggest";
 import { readSizingRecords } from "@edgehero/pi-dispatch/size-records";
-import { QUEUE, makeQueue, enqueueLocalJobReporting, swallowedRunSentence, fleetQueueNames, hostQueueName, discoverHostQueuesReporting, unionQueueNames } from "@edgehero/pi-dispatch/queue";
+import { QUEUE, makeQueue, enqueueLocalJobReporting, swallowedRunSentence, fleetQueueNames, hostQueueName, discoverHostQueuesReporting, unionQueueNames, consoleQueueConnection, closeWithin } from "@edgehero/pi-dispatch/queue";
 import { RUNS_INDEX, RUNS_INDEX_MAX, UNREAD_RECORD, hostsIn, mergeRuns, readMirroredPage, readMirroredRecord, readMirroredRuns } from "@edgehero/pi-dispatch/run-mirror";
 import { runMirrorMaxRunsOf } from "@edgehero/pi-dispatch/retention";
 import { stallKey } from "@edgehero/pi-dispatch/scheduler-stall-guard";
@@ -336,7 +336,7 @@ export async function readQueueState({ url, makeQueueFn = makeQueue, parseConnec
     // a paused flag, and a status read that cannot see it cannot tell an operator why work has stopped.
     const { names, hosts, blind } = await readFleetQueues({ url, redisFn, timeoutMs });
     const fleet = blind ? { unreachable: blind } : { hosts };
-    const queues = names.map((name) => makeQueueFn(parseConnectionFn(url, { failFast: true }), { name }));
+    const queues = names.map((name) => makeQueueFn(consoleQueueConnection(url, parseConnectionFn), { name }));
     queuesToClose.push(...queues);
     queue = queues[0];
     // Across every queue, because "is this deployment paused" is the question. `queues[0]` alone would
@@ -374,8 +374,115 @@ export async function readQueueState({ url, makeQueueFn = makeQueue, parseConnec
   } catch (err) {
     return { unreachable: err?.message ?? String(err) };
   } finally {
-    for (const q of queuesToClose) await q.close().catch(() => {});
+    // All at once and bounded (issue #842): a close waits for the answer to QUIT, which a Valkey that stopped answering
+    // never gives, and one queue after another made that wait once per queue.
+    await Promise.all(queuesToClose.map((q) => closeWithin(q, QUEUE_CLOSE_TIMEOUT_MS)));
   }
+}
+
+/**
+ * How long a one-shot or a disposed queue's close may wait for its answer before its connection is dropped
+ * (`closeWithin`, issue #842).
+ */
+export const QUEUE_CLOSE_TIMEOUT_MS = 1_000;
+
+/**
+ * How long ONE queue's pause or resume may take as a step (issue #842). Past the command bound of the console's queue
+ * clients (`consoleQueueConnection`, 5 s) on purpose: a pause that was SENT ends at that bound with the client's own
+ * error, which says whether it had reached Valkey (`valkeyMayStillRun`), and that is the better answer. This decides
+ * only a queue that is not connected yet: BullMQ connects inside the queue, and on a Valkey that takes the connection
+ * and never answers the handshake waits out its commands' bounds on each of the three connections `failFast` tries
+ * (36 to 39 s measured before such a queue gives up), with the pause sent whenever one of them comes up.
+ */
+export const SWITCH_STEP_TIMEOUT_MS = 6_000;
+
+const SWITCH_LATE = Symbol("late");
+
+/**
+ * One queue's pause or resume as a step with its own end (issue #842): `{ state, error?, late? }`.
+ *   "done"         Valkey answered: the queue is paused (or running).
+ *   "refused"      it failed before it was sent, or Valkey answered with an error: this queue did not change.
+ *   "unconfirmed"  it was sent and not answered (the client's `valkeyMayStillRun`), or the queue was not connected
+ *                  within `ms` (`late`: it may still be sent when the connection comes up). The queue may or may not
+ *                  have changed, now or when Valkey wakes.
+ * Never throws.
+ */
+async function switchStep(q, paused, ms) {
+  let timer;
+  const late = new Promise((resolve) => {
+    timer = setTimeout(resolve, ms, SWITCH_LATE);
+    timer.unref?.();
+  });
+  try {
+    const got = await Promise.race([
+      Promise.resolve()
+        .then(() => (paused ? q.pause() : q.resume()))
+        .then(() => null, (err) => ({ err })),
+      late,
+    ]);
+    if (got === null) return { state: "done" };
+    if (got === SWITCH_LATE) return { state: "unconfirmed", late: true, error: `no answer within ${ms / 1000} seconds` };
+    return { state: got.err?.valkeyMayStillRun === true ? "unconfirmed" : "refused", error: got.err?.message ?? String(got.err) };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+/**
+ * Flip `names` (issue #842), each through `queueOf(name)`, into `steps` (name to `switchStep`'s answer). A PAUSE goes
+ * to every queue at once: each queue has a connection of its own, and the kill switch must not wait for one queue's
+ * bound before it tries the next. A RESUME goes one queue after another and STOPS at the first that did not answer, the
+ * rest left out of `steps` (not tried): a resume that lands unobserved when Valkey wakes starts spending, so no more
+ * are sent than the one already lost. `late(q, name)` is told of a queue that was not connected within the step.
+ */
+async function flipQueues({ paused, names, queueOf, stepMs, steps = new Map(), late = () => {} }) {
+  const one = async (name) => {
+    let q;
+    try {
+      q = queueOf(name);
+    } catch (err) {
+      // `makeQueueFn` can throw on a malformed peer-written name: that queue's own refusal, never the whole switch's.
+      steps.set(name, { state: "refused", error: err?.message ?? String(err) });
+      return;
+    }
+    const step = await switchStep(q, paused, stepMs);
+    if (step.late) late(q, name);
+    steps.set(name, step);
+  };
+  if (paused) await Promise.all(names.map(one));
+  else {
+    for (const name of names) {
+      await one(name);
+      if (steps.get(name)?.state !== "done") break;
+    }
+  }
+  return steps;
+}
+
+/**
+ * A switch's answer from its steps (issue #842), `setQueuePaused`'s shape, which only ever grows: `{ ok: true, paused,
+ * queues }` when every queue answered, else `{ unreachable, partial: { done, failed, error, unconfirmed, refused,
+ * notTried } }`. `done` are the queues KNOWN switched and `failed` the first that is not, as before; `unconfirmed`
+ * those whose pause or resume may or may not have been made, `refused` those that did not change, `notTried` those a
+ * resume never reached. `blind` (the registry could not be read) and `incomplete` (the keyspace scan did not finish)
+ * ride both shapes: the set of queues itself may be short.
+ */
+function switchOutcome({ paused, names, steps, blind = null, incomplete = null }) {
+  const of = (state) => names.filter((n) => steps.get(n)?.state === state);
+  const done = of("done");
+  const short = { ...(blind ? { blind } : {}), ...(incomplete ? { incomplete } : {}) };
+  if (done.length === names.length) return { ok: true, paused, queues: done, ...short };
+  const failed = names.find((n) => steps.get(n)?.state !== "done");
+  const error = steps.get(failed)?.error ?? "not tried";
+  return { unreachable: error, partial: { done, failed, error, unconfirmed: of("unconfirmed"), refused: of("refused"), notTried: names.filter((n) => !steps.has(n)) }, ...short };
+}
+
+/**
+ * What a ONE-queue pause or resume says when it was sent and not answered (issue #842): the outcome first, never
+ * "nothing was changed", and no client's words (they can name a host).
+ */
+export function queueSwitchUnconfirmed(queue, paused) {
+  return `the ${paused ? "pause" : "resume"} of ${queue} may or may not have been made: Valkey did not answer it within the bound. Look at the fleet once Valkey answers`;
 }
 
 /**
@@ -407,8 +514,8 @@ export async function readFleetQueues({ url, redisFn = makeRedisClient, timeoutM
     // read's degraded answer, like a down Valkey, never a throw out of a function that fails open.
     redis = redisFn(url);
     redis.on?.("error", () => {}); // a down Valkey is one clean line, never nine ioredis stack traces
-    const { names, blind, hosts } = await fleetQueuesOn(redis, { timeoutMs });
-    return { names, blind, hosts };
+    const { names, blind, hosts, incomplete } = await fleetQueuesOn(redis, { timeoutMs });
+    return { names, blind, hosts, ...(incomplete ? { incomplete } : {}) };
   } catch (err) {
     return { names: [QUEUE], blind: err?.message ?? String(err), hosts: [] };
   } finally {
@@ -511,8 +618,9 @@ export async function killSwitchSet({ paused, env = process.env, setFn = setQueu
   const conn = context
     ? { parseConnectionFn: (u, o = {}) => parseConnection(u, { ...o, context }), redisFn: (u, o = {}) => makeRedisClient(u, { ...o, context }) }
     : {};
-  const results = [];
-  for (const url of picked.urls) results.push({ url, shown: urlShown(url), res: await setFn({ url, paused, ...conn }) });
+  // Every Valkey at once (issue #842; only a pause ever names two): one that stopped answering must not hold the pause
+  // of the other for its bound. The results keep the plan's order.
+  const results = await Promise.all(picked.urls.map(async (url) => ({ url, shown: urlShown(url), res: await setFn({ url, paused, ...conn }) })));
   return { results, disagreement: picked.urls.length > 1 ? picked.disagreement : null };
 }
 
@@ -549,7 +657,7 @@ export function killSwitchPlan({ paused, env = process.env, resolveFn = killSwit
  * whole deployment; a single queue named here is named on the Valkey the caller reads it from, where its paused flag
  * was seen.
  */
-export async function setQueuePausedOne({ url, queue, paused, makeQueueFn = makeQueue, parseConnectionFn = parseConnection, redisFn = makeRedisClient, timeoutMs = 2500 } = {}) {
+export async function setQueuePausedOne({ url, queue, paused, makeQueueFn = makeQueue, parseConnectionFn = parseConnection, redisFn = makeRedisClient, timeoutMs = 2500, stepTimeoutMs = SWITCH_STEP_TIMEOUT_MS, closeTimeoutMs = QUEUE_CLOSE_TIMEOUT_MS } = {}) {
   if (typeof queue !== "string" || queue === "") return { invalid: "a queue name is required" };
   if (typeof paused !== "boolean") return { invalid: "paused must be true or false" };
   let q = null;
@@ -559,18 +667,29 @@ export async function setQueuePausedOne({ url, queue, paused, makeQueueFn = make
       // The registry read's own error stays out of it: a client's words, which can name a host, and this is a page's.
       return { invalid: `${JSON.stringify(queue)} is not a queue this deployment drains (${names.join(", ")})${blind ? "; the host registry could not be read, so a host's queue may be missing from that list" : ""}. Nothing was changed` };
     }
-    q = makeQueueFn(parseConnectionFn(url, { failFast: true }), { name: queue });
-    if (paused) await q.pause();
-    else await q.resume();
-    return { ok: true, paused, queue };
+    q = makeQueueFn(consoleQueueConnection(url, parseConnectionFn), { name: queue });
+    // Issue #842: one bounded step. A pause that was sent and not answered may land when Valkey wakes, so it is never
+    // "unreachable", which every surface reads as nothing changed.
+    const step = await switchStep(q, paused, stepTimeoutMs);
+    if (step.state === "done") return { ok: true, paused, queue };
+    if (step.state === "unconfirmed") return { invalid: queueSwitchUnconfirmed(queue, paused), partial: true };
+    return { unreachable: step.error };
   } catch (err) {
     return { unreachable: err?.message ?? String(err) };
   } finally {
-    if (q) await q.close().catch(() => {});
+    // Started, never awaited: the answer does not wait for a QUIT. Closing a queue that never connected ends it, so
+    // a step that ran out of time is not sent later.
+    if (q) void closeWithin(q, closeTimeoutMs);
   }
 }
 
-export async function setQueuePaused({ url, paused, makeQueueFn = makeQueue, parseConnectionFn = parseConnection, redisFn = makeRedisClient, timeoutMs = 2500 } = {}) {
+/**
+ * Pause or resume EVERY queue of the fleet on one Valkey through one-shot queues: the kill switch of the tools, the
+ * `/dispatch` command and, for a second Valkey, the fleet reader. Returns `switchOutcome`'s shapes, or a bare
+ * `{ unreachable }` when nothing was sent at all. Each queue is one bounded step (`flipQueues`, issue #842): a pause
+ * to all at once, a resume in turn, stopping at the first lost answer.
+ */
+export async function setQueuePaused({ url, paused, makeQueueFn = makeQueue, parseConnectionFn = parseConnection, redisFn = makeRedisClient, timeoutMs = 2500, stepTimeoutMs = SWITCH_STEP_TIMEOUT_MS, closeTimeoutMs = QUEUE_CLOSE_TIMEOUT_MS } = {}) {
   const opened = [];
   try {
     // EVERY queue in the fleet (issue #57). This is the kill switch: pausing only `pi-jobs` would stop
@@ -582,30 +701,28 @@ export async function setQueuePaused({ url, paused, makeQueueFn = makeQueue, par
     // It matters which: an unreadable registry means we are acting on the shared queue alone, and the
     // caller has to be able to say so rather than print a success line identical to a single-host one.
     const { names, blind } = await readFleetQueues({ url, redisFn, timeoutMs });
-    // Track what actually landed. A loop that throws halfway leaves the deployment HALF paused, and
+    // Track what actually landed. A switch that fails halfway leaves the deployment HALF paused, and
     // returning a bare `{ unreachable }` for that would be the worst answer available: the operator would
     // read it as "nothing happened" and walk away from a fleet where one host is stopped and another is
-    // still spending. So the failure carries the names of the queues that did change.
-    const done = [];
-    for (const name of names) {
-      // Constructed one at a time INSIDE the try, and pushed BEFORE it is used: `makeQueueFn` can throw on
-      // a malformed peer-written name, and building the whole list first would leak every connection
-      // opened before the throw.
-      const q = makeQueueFn(parseConnectionFn(url, { failFast: true }), { name });
-      opened.push(q);
-      try {
-        if (paused) await q.pause();
-        else await q.resume();
-      } catch (err) {
-        return { unreachable: err?.message ?? String(err), partial: { done, failed: name, error: err?.message ?? String(err) }, blind };
-      }
-      done.push(name);
-    }
-    return { ok: true, paused, queues: done, ...(blind ? { blind } : {}) };
+    // still spending. So the failure carries the names of the queues that did change, and of those that may have.
+    const steps = await flipQueues({
+      paused,
+      names,
+      stepMs: stepTimeoutMs,
+      // Constructed one at a time, and pushed BEFORE it is used, so every connection opened is closed below.
+      queueOf: (name) => {
+        const q = makeQueueFn(consoleQueueConnection(url, parseConnectionFn), { name });
+        opened.push(q);
+        return q;
+      },
+    });
+    return switchOutcome({ paused, names, steps, blind });
   } catch (err) {
     return { unreachable: err?.message ?? String(err) };
   } finally {
-    for (const q of opened) await q.close().catch(() => {});
+    // Started, never awaited (issue #842): the kill switch's answer does not wait for N answers to QUIT. Closing a
+    // queue that never connected ends it, so a step that ran out of time is not sent later.
+    for (const q of opened) void closeWithin(q, closeTimeoutMs);
   }
 }
 
@@ -4381,12 +4498,17 @@ export function createFleetReader(
     makeSandboxPrepareQueueFn = null,
     enqueueSandboxPreparationFn = null,
     readSandboxPreparationFn = null,
+    // Issue #842: one queue's pause or resume as a step, and a queue's close, each with its own end. Seams, so a test
+    // with a queue that never answers does not wait out the real bounds.
+    switchStepTimeoutMs = SWITCH_STEP_TIMEOUT_MS,
+    closeTimeoutMs = QUEUE_CLOSE_TIMEOUT_MS,
   } = {},
 ) {
   const prune = readOnly !== true;
   const activePerQueue = Number.isSafeInteger(activeLimit) ? Math.min(Math.max(activeLimit, 1), ACTIVE_PER_QUEUE_MAX) : 1;
   // Every queue this reader holds is built `failFast`, so a read during an outage is refused rather than waiting in an
-  // offline queue. The price of that bound: a client whose retries ran out has ended, an ended client never reconnects,
+  // offline queue, and with a bound on each command (`consoleQueueConnection`, issue #842), so a read or a pause on a
+  // Valkey that is connected and stopped answering ends at the bound rather than when it wakes. The price of the first: a client whose retries ran out has ended, an ended client never reconnects,
   // and BullMQ's connection promise stays as it settled. Held for the reader's whole life, that left every page that reads a
   // queue saying the Valkey could not be read, answering in 5 ms with the Valkey long back, until the process was restarted. A persistent
   // client is not the way out: BullMQ's `client` stays pending for as long as nothing answers, so a queue built during an
@@ -4411,7 +4533,7 @@ export function createFleetReader(
     if (held) Promise.resolve().then(() => held.close()).catch(() => {});
     return watched(open());
   };
-  const queue = watched(makeQueueFn(parseConnectionFn(paths.valkeyUrl, { failFast: true })));
+  const queue = watched(makeQueueFn(consoleQueueConnection(paths.valkeyUrl, parseConnectionFn)));
   // Persistent, so it rides a restart out, which the queues above cannot. Bounded, or a read on it waits for as long as the
   // Valkey does not answer: one such read in a snapshot's `Promise.all` hung the page whole, and the watch pages read
   // nothing else. A command past the bound is gone unless it had reached the socket (`makeRedisClient`).
@@ -4425,7 +4547,7 @@ export function createFleetReader(
   const sandboxQueues = new Map();
   const sandboxQueue = (host) => {
     if (typeof host !== "string" || !WORKER_NAME_RE.test(host)) throw new Error("a sandbox request needs a worker name");
-    sandboxQueues.set(host, stillOpen(sandboxQueues.get(host), () => makeSandboxPrepareQueueFn(parseConnectionFn(paths.valkeyUrl, { failFast: true }), { host })));
+    sandboxQueues.set(host, stillOpen(sandboxQueues.get(host), () => makeSandboxPrepareQueueFn(consoleQueueConnection(paths.valkeyUrl, parseConnectionFn), { host })));
     return sandboxQueues.get(host);
   };
   const watchStore = makeWatchStore(redis, { now: nowFn });
@@ -4453,7 +4575,7 @@ export function createFleetReader(
   const pool = new Map([[queue.name, queue]]);
   // The pool's queue for `name`: the one held, or a new one where it has none or the held one's client ended.
   const queueNamed = (name) => {
-    pool.set(name, stillOpen(pool.get(name), () => makeQueueFn(parseConnectionFn(paths.valkeyUrl, { failFast: true }), { name })));
+    pool.set(name, stillOpen(pool.get(name), () => makeQueueFn(consoleQueueConnection(paths.valkeyUrl, parseConnectionFn), { name })));
     return pool.get(name);
   };
   // The last set we successfully resolved. On an unreachable registry the fleet does NOT shrink to the shared queue:
@@ -4553,23 +4675,47 @@ export function createFleetReader(
     return { queues: queuesNamed(read), total: names.length, truncated: read.length < names.length, incomplete };
   };
 
-  // Flip every kill-switch queue on THIS reader's Valkey through the held pool, `setQueuePaused`'s result shape.
+  // Flip every kill-switch queue on THIS reader's Valkey through the held pool, `setQueuePaused`'s result shape
+  // (`switchOutcome`). Bounded (issue #842): each queue is one step that ends by itself.
+  //
+  // A PAUSE goes at once to every queue this reader already holds, and discovery runs BESIDE it, never before it: on a
+  // Valkey that stopped answering the registry read and the scan each wait out their own bound, and the kill switch is
+  // the last thing that should wait for them. What discovery then names beyond the held queues is paused too.
+  // A RESUME discovers first and walks the queues in turn (`flipQueues`). A queue that was not connected within its
+  // step is closed on a resume, so its resume is not sent whenever the connection comes up; a pause is left to land.
   const poolSet = async (paused) => {
-    const done = [];
-    for (const q of await switchQueues()) {
-      try {
-        if (paused) await q.pause();
-        else await q.resume();
-      } catch (err) {
-        return { unreachable: err?.message ?? String(err), partial: { done, failed: q?.name ?? "-", error: err?.message ?? String(err) }, ...(fleetDegraded ? { blind: fleetDegraded } : {}) };
-      }
-      done.push(q?.name ?? "-");
+    const steps = new Map();
+    const lateResume = (q) => {
+      endedQueues.add(q);
+      void closeWithin(q, closeTimeoutMs);
+    };
+    const flip = (names) => flipQueues({ paused, names, queueOf: queueNamed, stepMs: switchStepTimeoutMs, steps, late: paused ? undefined : lateResume });
+    // A discovery that throws, or outlives the step's own bound (its reads have theirs, well inside it), is a set that
+    // may be short, never a switch that did nothing or one that waits.
+    const unread = () => ({ names: [...lastNames], incomplete: SWITCH_SCAN_INCOMPLETE });
+    const discover = () => withTimeout(switchQueueNames().catch(unread), switchStepTimeoutMs, null).then((found) => found ?? unread());
+    let names;
+    let incomplete;
+    if (paused) {
+      const held = [...new Set([...lastNames, ...pool.keys()])];
+      const first = flip(held);
+      const found = await discover();
+      await Promise.all([first, flip(found.names.filter((n) => !held.includes(n)))]);
+      names = [...found.names, ...held.filter((n) => !found.names.includes(n))];
+      incomplete = found.incomplete;
+    } else {
+      const found = await discover();
+      // A discovery that was short (the registry or the scan unread) is filled from the queues this reader holds,
+      // each named by an earlier discovery: they are resumed after the ones it did name, or named as not tried.
+      names = found.incomplete || fleetDegraded ? [...found.names, ...[...pool.keys()].filter((n) => !found.names.includes(n))] : found.names;
+      incomplete = found.incomplete;
+      await flip(names);
     }
-    return { ok: true, paused, queues: done, ...(fleetDegraded ? { blind: fleetDegraded } : {}) };
+    return switchOutcome({ paused, names, steps, blind: fleetDegraded, incomplete });
   };
   const killSwitch = async (paused) => {
     const plan = killSwitchPlanFn ? killSwitchPlanFn({ paused }) : { urls: [paths.valkeyUrl], disagreement: null, context: null };
-    return killSwitchSet({ paused, plan, setFn: (args) => (args.url === paths.valkeyUrl ? poolSet(paused) : setQueuePaused(args)) });
+    return killSwitchSet({ paused, plan, setFn: (args) => (args.url === paths.valkeyUrl ? poolSet(paused) : setQueuePaused({ ...args, stepTimeoutMs: switchStepTimeoutMs, closeTimeoutMs })) });
   };
 
   // The last records scan for the dollar windows, `{ at, sinceMs, records }`, reused for DOLLAR_RECORDS_TTL_MS.
@@ -5520,9 +5666,10 @@ export function createFleetReader(
     },
     // The kill switch (issue #642): ONE funnel with the tools' `killSwitchSet`, so a resume across two disagreeing
     // Valkeys is refused here too. Returns `killSwitchSet`'s shape: `{ refused }`, or `{ results: [{ url, shown, res }],
-    // disagreement }`, where `res` is `{ ok: true, paused, queues }`, or `{ unreachable, partial: { done, failed, error } }`
-    // for a loop that stopped part-way (it used to throw, which the TUI swallowed). This reader's own Valkey goes through
-    // its held pool (no second connection for a keypress); any other Valkey the plan names, through `setQueuePaused`.
+    // disagreement }`, where `res` is `{ ok: true, paused, queues }`, or `{ unreachable, partial: { done, failed, error,
+    // unconfirmed, refused, notTried } }` for a switch that did not reach every queue (`switchOutcome`; it used to throw,
+    // which the TUI swallowed). This reader's own Valkey goes through its held pool (no second connection for a
+    // keypress); any other Valkey the plan names, through `setQueuePaused`. Every queue is one bounded step (issue #842).
     async pause() {
       return killSwitch(true);
     },
@@ -5531,9 +5678,37 @@ export function createFleetReader(
       // was live, then resumed while that host is down, stays paused with nothing naming it.
       return killSwitch(false);
     },
-    /** One fleet queue (issue #642): `setQueuePausedOne` on this reader's Valkey. */
+    /**
+     * One fleet queue (issue #642), on this reader's Valkey and through its held pool (issue #842): `setQueuePausedOne`'s
+     * answers. Not a one-shot queue: one built while Valkey does not answer takes 36 to 39 s to give up, and could send
+     * its pause after this had answered. A queue the pool holds was named by a discovery already (the preview's read
+     * pools it), so it is flipped at once; any other name is checked against the kill switch's set first, so a mistyped
+     * one is refused rather than creating a paused queue nothing reads.
+     */
     async pauseQueue({ queue, paused }) {
-      return setQueuePausedOne({ url: paths.valkeyUrl, queue, paused, makeQueueFn, parseConnectionFn, redisFn });
+      if (typeof queue !== "string" || queue === "") return { invalid: "a queue name is required" };
+      if (typeof paused !== "boolean") return { invalid: "paused must be true or false" };
+      try {
+        if (!pool.has(queue)) {
+          const found = await withTimeout(switchQueueNames(), switchStepTimeoutMs, null);
+          if (found === null) return { unreachable: "the deployment's queues could not be read within the bound" };
+          const { names } = found;
+          // The registry read's own error stays out of it: a client's words, which can name a host, and this is a page's.
+          if (!names.includes(queue)) return { invalid: `${JSON.stringify(queue)} is not a queue this deployment drains (${names.join(", ")})${fleetDegraded ? "; the host registry could not be read, so a host's queue may be missing from that list" : ""}. Nothing was changed` };
+        }
+        const q = queueNamed(queue);
+        const step = await switchStep(q, paused, switchStepTimeoutMs);
+        if (step.state === "done") return { ok: true, paused, queue };
+        if (step.late && !paused) {
+          // Not connected within the step: closed, so the resume is not sent whenever the connection comes up.
+          endedQueues.add(q);
+          void closeWithin(q, closeTimeoutMs);
+        }
+        if (step.state === "unconfirmed") return { invalid: queueSwitchUnconfirmed(queue, paused), partial: true };
+        return { unreachable: step.error };
+      } catch (err) {
+        return { unreachable: err?.message ?? String(err) };
+      }
     },
     async cancelActive({ jobId, interventionOrigin = "human" }) {
       // The CLI's channel, byte for byte (issue #287, worker/src/cancel-state.mjs): a request key the owning worker
@@ -5576,22 +5751,25 @@ export function createFleetReader(
     passwordDeclined() {
       return passwordDeclinedOf(redis);
     },
+    /**
+     * Release everything this reader holds, on a deadline of its own (issue #842). Every queue is closed AT ONCE and
+     * each within `closeTimeoutMs`, then dropped (`closeWithin`): BullMQ's close waits for the answer to QUIT, which a
+     * Valkey that stopped answering never gives, so one queue after another held a stop of the console until Valkey
+     * woke or the service manager killed it. The raw client is dropped first, and needs no answer. Never throws.
+     */
     async dispose() {
       disposed = true;
-      await archive.close();
-      for (const q of sandboxQueues.values()) { try { await q.close(); } catch { /* best effort teardown */ } }
-      for (const q of pool.values()) {
-        try {
-          await q.close();
-        } catch {
-          // best-effort teardown
-        }
-      }
       try {
         redis.disconnect();
       } catch {
         // best-effort teardown
       }
+      await Promise.all([
+        Promise.resolve()
+          .then(() => archive.close())
+          .catch(() => {}),
+        ...[...sandboxQueues.values(), ...pool.values()].map((q) => closeWithin(q, closeTimeoutMs)),
+      ]);
     },
   };
 }

@@ -174,7 +174,7 @@ import { gateDialogs } from "./dialog-gate.mjs";
 import { grantsDirOf, openSandbox, sandboxEgress, sandboxVenuePolicy } from "@edgehero/pi-dispatch/sandbox";
 import { makeSandboxMonitor } from "@edgehero/pi-dispatch/sandbox-session-watch";
 import { sizeBits, renderStatus, renderRuns, renderBudget, renderScopedLimits, renderTriggers, renderSettingsView, renderAllocations } from "./render.mjs";
-import { makeDashboard, createDashboardDeps, switchFailure, withAuditedWrites } from "./dashboard.ts";
+import { makeDashboard, createDashboardDeps, switchCommandLost, switchFailure, withAuditedWrites } from "./dashboard.ts";
 // `/dispatch chat` (issue #647, part 2): pi-free, so its tests drive it with fakes; `chatIo` below wires it.
 import { CHAT_USAGE, dispatchChat } from "./dispatch-chat.mjs";
 // Only the nudge is loaded eagerly (it must register its session_start handler at factory time); the
@@ -1740,10 +1740,14 @@ async function dispatch(pi: ExtensionAPI, args: string, rawCtx: any): Promise<vo
           // A HALF switched deployment gets its own message. "Could not reach Valkey" reads as "nothing
           // happened", and walking away from a fleet with one host stopped and another spending is the one
           // outcome this switch exists to prevent.
+          // A pause or resume Valkey took and did not answer (issue #842) is neither: it may land when Valkey wakes.
+          const lost = switchCommandLost(paused, at, res);
           notify?.(
-            res.partial
-              ? `${paused ? "paused" : "resumed"} ${res.partial.done.join(", ")}${at} but FAILED at ${res.partial.failed}: the deployment is half ${paused ? "paused" : "resumed"}`
-              : `could not reach Valkey at ${shown}: ${valkeyDownHint(shown)}`,
+            lost !== null
+              ? lost
+              : res.partial
+                ? `${paused ? "paused" : "resumed"} ${res.partial.done.join(", ")}${at} but FAILED at ${res.partial.failed}: the deployment is half ${paused ? "paused" : "resumed"}`
+                : `could not reach Valkey at ${shown}: ${valkeyDownHint(shown)}`,
             "error",
           );
           continue;

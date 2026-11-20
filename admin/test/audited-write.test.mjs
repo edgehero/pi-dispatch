@@ -17,7 +17,7 @@ const piRequire = createRequire(import.meta.resolve("@earendil-works/pi-coding-a
 const { createJiti } = piRequire("jiti");
 const jiti = createJiti(import.meta.url);
 const indexMod = await jiti.import(fileURLToPath(new URL("../src/index.ts", import.meta.url)));
-const { makeDashboard, withAuditedWrites } = await jiti.import(fileURLToPath(new URL("../src/dashboard.ts", import.meta.url)));
+const { makeDashboard, withAuditedWrites, switchCommandLost, switchFailure, switchUnconfirmed } = await jiti.import(fileURLToPath(new URL("../src/dashboard.ts", import.meta.url)));
 
 const ACTOR = { name: "rob", role: "panel", session: null };
 /** Every row in `logsDir`'s audit chain, oldest first (the month follows the wall clock here, so every file is read). */
@@ -388,6 +388,38 @@ test("the TUI's switch note reads killSwitchSet's results shape: a half switch a
   };
   assert.match(await said("p"), /pause failed: FAILED at q2 on redis:\/\/a:6379, so the deployment is half switched/);
   assert.match(await said("r"), /resume failed: could not reach the queue at redis:\/\/b:6379/);
+  // Issue #842: a pause Valkey took and did not answer is neither of those. The note and the audit row name the queues
+  // not known first, then those known switched and those a resume never tried, and no client's words.
+  const lost = { unreachable: "Command timed out", partial: { done: ["q1"], failed: "q2", error: "Command timed out", unconfirmed: ["q2"], refused: [], notTried: ["q3"] } };
+  const words = "NOT CONFIRMED for q2: the switch may or may not have been made there; not tried: q3; known switched: q1";
+  assert.equal(switchUnconfirmed(lost.partial), words);
+  assert.equal(switchFailure({ results: [{ shown: "redis://a:6379", res: lost }] }), `${words} on redis://a:6379`);
+  // The console confirm's four, and whether the list itself may be short (the registry or the scan was not read whole).
+  const four = { done: ["q1"], failed: "q2", unconfirmed: ["q2"], refused: ["q4"], notTried: ["q3"] };
+  const fourWords = "NOT CONFIRMED for q2: the switch may or may not have been made there; not switched: q4; not tried: q3; known switched: q1";
+  assert.equal(switchUnconfirmed(four), fourWords);
+  for (const short of [{ blind: "registry down" }, { incomplete: "the scan did not finish" }]) {
+    assert.equal(switchFailure({ results: [{ shown: "redis://a:6379", res: { unreachable: "x", partial: four, ...short } }] }), `${fourWords}; the list of queues may be short on redis://a:6379`);
+  }
+  assert.equal(switchUnconfirmed({ done: [], failed: "q1", unconfirmed: ["q1"], refused: [], notTried: [] }), "NOT CONFIRMED for q1: the switch may or may not have been made there; known switched: none");
+  assert.equal(switchUnconfirmed(shapes.p.results[0].res.partial), null, "a switch that lost no answer keeps its own sentence");
+  assert.equal(switchUnconfirmed({ done: [], failed: "q1", unconfirmed: [], refused: ["q1"], notTried: [] }), null);
+  // Every Valkey that failed is said, a lost answer first: one that could not be reached must not hide a pause that
+  // was sent to the other and may have been made there.
+  const two = { results: [{ shown: "redis://a:6379", res: { unreachable: "ECONNREFUSED" } }, { shown: "redis://b:6379", res: lost }, { shown: "redis://c:6379", res: { ok: true, queues: ["q"] } }] };
+  assert.equal(switchFailure(two), `${words} on redis://b:6379; could not reach the queue at redis://a:6379`);
+  assert.equal(switchFailure({ results: [{ shown: "redis://a:6379", res: shapes.p.results[0].res }, { shown: "redis://b:6379", res: { unreachable: "x" } }] }), "FAILED at q2 on redis://a:6379, so the deployment is half switched; could not reach the queue at redis://b:6379");
+  // The words claim nothing about HOW the answer was lost: a queue that was not connected in time had sent nothing yet.
+  assert.doesNotMatch(words, /took it|did not answer/);
+  // The `/dispatch pause` and `resume` command's line: the same words behind the verb and the Valkey it names.
+  assert.equal(switchCommandLost(true, "", lost), `pause: ${words}`);
+  assert.equal(switchCommandLost(false, " at redis://b:6379", { partial: four, blind: "registry down" }), `resume at redis://b:6379: ${fourWords}; the list of queues may be short`);
+  assert.equal(switchCommandLost(true, "", shapes.p.results[0].res), null, "a half switch that lost no answer keeps the command's own line");
+  assert.equal(switchCommandLost(true, "", { unreachable: "ECONNREFUSED" }), null);
+  shapes.p = { results: [{ shown: "redis://a:6379", res: lost }] };
+  comp.handleInput("p");
+  await new Promise((r) => setTimeout(r, 20));
+  assert.ok(comp.render(400).map(stripAnsi).join("\n").includes(`pause failed: ${words} on redis://a:6379`));
   next = "both";
   assert.match(await said("p"), /VALKEY_URL differs from the deployment \.env: paused both/);
   await comp.dispose();

@@ -3,8 +3,9 @@ import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileS
 import { request } from "node:http";
 import { basename, join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { AUDIT_VERIFY_CACHE_MS, cachedFor, cachedPerWindow, deploymentOf, endpointSnapshotFn, INSIGHTS_CACHE_MS, loadModules, makeSetupExposureReader, readSideOf, RESERVE_ENV_KEYS, runCli, setupProviderOf, USAGE } from "../src/console/cli.mjs";
+import { AUDIT_VERIFY_CACHE_MS, cachedFor, cachedPerWindow, deploymentOf, endpointSnapshotFn, INSIGHTS_CACHE_MS, loadModules, makeSetupExposureReader, readSideOf, RESERVE_ENV_KEYS, runCli, setupProviderOf, STOP_DEADLINE_MS, USAGE } from "../src/console/cli.mjs";
 import * as live from "../src/console/live.mjs";
 import { acquireConsoleLock, consoleLockPath } from "../src/console/lock.mjs";
 import * as realPages from "../src/console/pages.mjs";
@@ -820,6 +821,175 @@ test("serve wires one fleet reader on the deployment, answers /api/state and a l
   assert.equal(await running, 0);
   assert.equal(modules.fleet.disposed, 1, "the reader is disposed on stop");
   assert.deepEqual(modules.calls.filter((c) => c[0] === "valkey-context").at(-1).slice(0, 2), ["valkey-context", "object"], "the context is put back");
+});
+
+// Issue #842: a stop of the console on a Valkey that stopped answering. The reader's dispose waits on Valkey, and one
+// that never resolves held the stop until the service manager killed the process, which left the lock behind.
+test("serve stops on its own deadline when the reader's dispose never resolves, says so, and releases the lock all the same (#842)", async () => {
+  const dep = deployment();
+  let stop;
+  const until = new Promise((resolve) => (stop = resolve));
+  let listening;
+  const up = new Promise((resolve) => (listening = resolve));
+  const modules = fakeModules();
+  modules.fleet.dispose = () => {
+    modules.fleet.disposed += 1;
+    return new Promise(() => {});
+  };
+  const err = [];
+  const running = runCli(["serve", "--deployment", dep.dir], { env: dep.env, modules, now: () => T0, uid: process.geteuid?.(), out: () => {}, err: (l) => err.push(l), until, onListening: listening, stopDeadlineMs: 150 });
+  const srv = await Promise.race([up, running.then((code) => assert.fail(`serve exited ${code} before listening: ${err.join(" ")}`))]);
+  const lockPath = consoleLockPath(join(dep.dir, "logs"));
+  assert.equal(existsSync(lockPath), true, "held while it serves");
+  const started = Date.now();
+  stop();
+  let timer;
+  const code = await Promise.race([running, new Promise((resolve) => (timer = setTimeout(resolve, 5000, "hung")))]);
+  clearTimeout(timer);
+  assert.equal(code, 0, "the stop ended though the dispose never did");
+  assert.ok(Date.now() - started < 2000, "at the deadline");
+  assert.equal(modules.fleet.disposed, 1, "the dispose was started");
+  assert.equal(srv.listening, false, "the listener was closed before the reader was asked");
+  assert.equal(existsSync(lockPath), false, "the lock is released, not left for the next start to take over");
+  assert.deepEqual(err.filter((l) => l.includes("the stop")), ["pi-dispatch-console: the stop did not finish within 0.15 seconds (something it closes did not answer); stopping anyway"]);
+  assert.deepEqual(modules.calls.filter((c) => c[0] === "valkey-context").at(-1).slice(0, 2), ["valkey-context", "object"], "and the context is put back");
+  assert.equal(STOP_DEADLINE_MS, 10_000, "inside every service manager's stop window (Windows 15 s, systemd and launchd 30 s)");
+  // A second console can start on that deployment at once.
+  const again = acquireConsoleLock({ logsDir: join(dep.dir, "logs") });
+  assert.equal(again.refusal, undefined);
+  again.release();
+});
+
+test("serve stops within the reader's own bound on a Valkey that stopped answering, through the real fleet reader and BullMQ (#842, VALKEY_TEST_URL)", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL", timeout: 60_000 }, async () => {
+  const { createFleetReader } = await import("../src/read-model.mjs");
+  const { freezingProxy } = await import("../../worker/test/helpers/freezing-proxy.mjs");
+  const { makeRedisClient } = await import("@edgehero/pi-dispatch/connection");
+  // A database of this test's own, and a host queue named for this run: only its own keys are deleted afterwards.
+  const target = new URL(process.env.VALKEY_TEST_URL);
+  target.pathname = "/7";
+  const host = `stop-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+  const proxy = await freezingProxy(target.toString());
+  const dep = deployment();
+  let stop;
+  const until = new Promise((resolve) => (stop = resolve));
+  let listening;
+  const up = new Promise((resolve) => (listening = resolve));
+  const modules = fakeModules();
+  let reader = null;
+  modules.readModel.createFleetReader = (paths) => {
+    assert.equal(paths.logsDir, join(dep.dir, "logs"), "this test's own folder");
+    reader = createFleetReader({ ...paths, valkeyUrl: proxy.url }, { readOnly: true, readLiveHostsFn: async () => ({ hosts: [{ name: host, routes: "true" }] }) });
+    return reader;
+  };
+  const err = [];
+  const running = runCli(["serve", "--deployment", dep.dir], { env: dep.env, modules, now: () => T0, uid: process.geteuid?.(), out: () => {}, err: (l) => err.push(l), until, onListening: listening });
+  try {
+    await Promise.race([up, running.then((code) => assert.fail(`serve exited ${code} before listening: ${err.join(" ")}`))]);
+    // Two queues, connected and read through the proxy, as a console that has served a page holds them.
+    const snap = await reader.snapshot();
+    assert.deepEqual(snap.queueCounts.map((q) => q.queue), ["pi-jobs", `pi-jobs@${host}`]);
+    proxy.freeze();
+    const started = Date.now();
+    stop();
+    let timer;
+    const code = await Promise.race([running, new Promise((resolve) => (timer = setTimeout(resolve, 8000, "hung")))]);
+    clearTimeout(timer);
+    assert.equal(code, 0, "the stop ended though Valkey answered no QUIT");
+    assert.ok(Date.now() - started < 4000, `${Date.now() - started} ms: each queue's close bound, all at once, not the stop's deadline`);
+    assert.deepEqual(err.filter((l) => l.includes("the stop")), [], "inside the deadline, so nothing to say");
+    assert.equal(existsSync(consoleLockPath(join(dep.dir, "logs"))), false, "the lock is released");
+  } finally {
+    stop();
+    proxy.thaw();
+    proxy.close();
+    const direct = makeRedisClient(target.toString());
+    direct.on("error", () => {});
+    // What the two queues wrote: the host queue's keys, and the shared queue's meta hash (BullMQ writes one per queue).
+    const keys = [...(await direct.keys(`bull:pi-jobs@${host}:*`)), "bull:pi-jobs:meta"];
+    await direct.del(...keys);
+    direct.disconnect();
+  }
+});
+
+/** `serve` on fake modules, with the tracker of confirms in flight it hands its server (issue #842). */
+async function servingWithWrites(io = {}, change = () => {}) {
+  const dep = deployment();
+  let stop;
+  const until = new Promise((resolve) => (stop = resolve));
+  let listening;
+  const up = new Promise((resolve) => (listening = resolve));
+  const modules = fakeModules();
+  let writes = null;
+  modules.server = { ...server, createConsoleServer: (opts) => ((writes = opts.writes), server.createConsoleServer(opts)) };
+  change(modules);
+  const err = [];
+  const running = runCli(["serve", "--deployment", dep.dir], { env: dep.env, modules, now: () => T0, uid: process.geteuid?.(), out: () => {}, err: (l) => err.push(l), until, onListening: listening, ...io });
+  const srv = await Promise.race([up, running.then((code) => assert.fail(`serve exited ${code} before listening: ${err.join(" ")}`))]);
+  return { dep, modules, writes, srv, stop, running, err, lockPath: consoleLockPath(join(dep.dir, "logs")) };
+}
+
+test("serve's stop waits for a confirm in flight, and one that never answers gets its outcome row at the deadline; the lock is released in both (#842)", async () => {
+  // A confirm that takes a while: the stop waits for it, and only then closes what it writes through.
+  const order = [];
+  const a = await servingWithWrites({}, (modules) => {
+    modules.fleet.dispose = async () => order.push("the reader is disposed");
+  });
+  assert.equal(typeof a.writes?.run, "function", "the server is handed the tracker");
+  assert.equal(a.writes.stopping(), false);
+  let abandoned = 0;
+  const write = a.writes.run(() => (abandoned += 1), () => new Promise((resolve) => setTimeout(() => resolve(order.push("the confirm answered")), 250)));
+  const started = Date.now();
+  a.stop();
+  assert.equal(await a.running, 0);
+  await write;
+  assert.ok(Date.now() - started >= 240, "the stop waited for it");
+  assert.deepEqual(order, ["the confirm answered", "the reader is disposed"], "nothing the confirm writes through was closed under it");
+  assert.equal(abandoned, 0, "a confirm that answered is not given a second outcome");
+  assert.equal(a.writes.stopping(), true, "and from the stop's first step no new confirm is taken, so the wait was for all there would be");
+  assert.deepEqual(a.err.filter((l) => l.includes("stop")), []);
+  assert.equal(existsSync(a.lockPath), false, "the lock is released");
+
+  // A confirm that never answers: at the deadline it gets its row, once, and the stop ends.
+  const b = await servingWithWrites({ stopDeadlineMs: 150 });
+  let cut = 0;
+  void b.writes.run(() => (cut += 1), () => new Promise(() => {}));
+  const at = Date.now();
+  b.stop();
+  let timer;
+  const code = await Promise.race([b.running, new Promise((resolve) => (timer = setTimeout(resolve, 5000, "hung")))]);
+  clearTimeout(timer);
+  assert.equal(code, 0, "the stop ended inside its deadline though the confirm never answered");
+  assert.ok(Date.now() - at < 2000);
+  assert.equal(cut, 1, "its outcome row was asked for, once");
+  assert.equal(b.modules.fleet.disposed, 0, "the reader was not closed under a write still open");
+  assert.deepEqual(b.err.filter((l) => l.includes("stop")), [
+    "pi-dispatch-console: the stop did not finish within 0.15 seconds (something it closes did not answer); stopping anyway",
+    "pi-dispatch-console: stopped with 1 change still unanswered; the audit log says each may or may not have been made",
+  ]);
+  assert.equal(existsSync(b.lockPath), false, "the lock is released all the same");
+  // The program exits at this point; a test's process does not, so what the cut stop left open is closed by hand.
+  await new Promise((resolve) => {
+    b.srv.close(() => resolve());
+    b.srv.closeAllConnections?.();
+  });
+});
+
+test("a step of the stop that throws is said, and the stop still ends with the lock released (#842)", async () => {
+  let hub = null;
+  const c = await servingWithWrites({}, (modules) => {
+    modules.live = { ...live, makeLiveHub: (opts) => ((hub = live.makeLiveHub(opts)), Object.assign(Object.create(hub), { close() { throw Object.assign(new Error("the hub would not close"), { code: "EHUB" }); } })) };
+  });
+  c.stop();
+  assert.equal(await c.running, 0);
+  assert.deepEqual(c.err.filter((l) => l.includes("stop")), ["pi-dispatch-console: the stop met an error (EHUB); stopping anyway"]);
+  assert.equal(existsSync(c.lockPath), false);
+  assert.deepEqual(c.modules.calls.filter((call) => call[0] === "valkey-context").at(-1).slice(0, 2), ["valkey-context", "object"], "and the context is put back");
+  // The program exits at this point; a test's process does not, so what the stop did not get to is closed by hand.
+  hub.close();
+  await new Promise((resolve) => {
+    c.srv.close(() => resolve());
+    c.srv.closeAllConnections?.();
+  });
 });
 
 test("serve wires the hub's endedReason to the store's pure verdict, and a unix socket's sign-in hint asks for the tunnel's port", { skip: process.platform === "win32" ? "unix sockets" : false }, async (t) => {

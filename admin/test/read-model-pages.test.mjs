@@ -6,6 +6,7 @@ import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import * as nodeFs from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { queueSwitchUnconfirmed } from "../src/read-model.mjs";
 import { LOOKUP_TOLD_MAX, REFUSALS_TOP, RUN_FILE_UNREADABLE, RUN_MIRROR_UNREAD, RUNS_WINDOW_PROJECTS_MAX, RUNS_WINDOW_VALUES_MAX, SWITCH_PREVIEW_QUEUES_MAX, SWITCH_SCAN_INCOMPLETE, WAITING_DISCOVERY_TTL_MS, WAITING_QUEUES_MAX, createFleetReader, forgeLinkOf, makeLocalRunIndex, readFolderSkills, readParkedRuns, readRunById, readRunsPage, refusalsIn, revParseHead, secretProfileNames } from "../src/read-model.mjs";
 import { spawnSync } from "node:child_process";
 import { parseRunFilter, runMatches, RUN_FILTER_FIELDS, RUN_OUTCOME_VALUES, runVenueOf, triggerValueOf } from "../src/run-filter.mjs";
@@ -2365,6 +2366,249 @@ test("createFleetReader: a queue only the keyspace names, as the kill switch rea
   await settle();
   assert.equal(built.filter((q) => q.name === "pi-jobs@stopped").length, 2);
   assert.equal(first.closed, 1);
+});
+
+// Issue #842: the reader's kill switch, its one-queue switch and its dispose on a Valkey that is connected and stopped
+// answering. A queue here never answers, and each of the three ends by its own bound.
+const never = () => new Promise(() => {});
+const orHung = (promise, ms = 2000) => {
+  let timer;
+  return Promise.race([promise, new Promise((resolve) => (timer = setTimeout(resolve, ms, "hung")))]).finally(() => clearTimeout(timer));
+};
+/** `endingQueues` whose queues take a pause and a resume: `asked` lists them, `answer(name, verb)` decides each. */
+function switchQueues(answer = () => Promise.resolve()) {
+  const { built, mk } = endingQueues();
+  const asked = [];
+  const make = (conn, opts) => {
+    const q = mk(conn, opts);
+    q.dropped = 0;
+    q.pause = () => (asked.push(`pause ${q.name}`), answer(q.name, "pause"));
+    q.resume = () => (asked.push(`resume ${q.name}`), answer(q.name, "resume"));
+    q.disconnect = () => { q.dropped += 1; };
+    return q;
+  };
+  return { built, asked, mk: make };
+}
+
+test("createFleetReader: a fleet pause reaches every held queue at once and answers while discovery and one queue never do (#842)", async () => {
+  let frozen = false;
+  const { built, asked, mk } = switchQueues((name) => (frozen && name === "pi-jobs@hostb" ? never() : Promise.resolve()));
+  const reader = endingReader(mk, [{ name: "hostb", routes: true }], {
+    readLiveHostsFn: () => (frozen ? never() : Promise.resolve({ hosts: [{ name: "hostb", routes: true }] })),
+    discoverHostQueuesFn: () => (frozen ? never() : Promise.resolve([])),
+    switchStepTimeoutMs: 80,
+    closeTimeoutMs: 30,
+  });
+  await reader.snapshot();
+  await settle();
+  frozen = true;
+  const pending = reader.pause();
+  await settle();
+  assert.deepEqual(asked, ["pause pi-jobs", "pause pi-jobs@hostb"], "both pauses were sent before the registry or the scan answered");
+  const res = await orHung(pending);
+  assert.notEqual(res, "hung", "the kill switch answered");
+  assert.deepEqual(res.results[0].res, {
+    unreachable: "no answer within 0.08 seconds",
+    partial: { done: ["pi-jobs"], failed: "pi-jobs@hostb", error: "no answer within 0.08 seconds", unconfirmed: ["pi-jobs@hostb"], refused: [], notTried: [] },
+    incomplete: SWITCH_SCAN_INCOMPLETE,
+  });
+  assert.equal(built.length, 2, "through the held pool: no queue was built for the pause");
+  assert.equal(built[1].closed, 0, "a pause that was not answered is left to land");
+  frozen = false;
+  await reader.dispose();
+});
+
+test("createFleetReader: a fleet pause also pauses what discovery names beyond the held queues, and a whole answer keeps its shape (#842)", async () => {
+  const { asked, mk } = switchQueues();
+  const reader = endingReader(mk, [], { discoverHostQueuesFn: async () => ["pi-jobs@stopped"] });
+  const res = await reader.pause();
+  assert.deepEqual(res.results[0].res, { ok: true, paused: true, queues: ["pi-jobs", "pi-jobs@stopped"] });
+  assert.deepEqual(asked, ["pause pi-jobs", "pause pi-jobs@stopped"]);
+  await reader.dispose();
+});
+
+test("createFleetReader: a fleet resume stops at the first queue that does not answer, names the rest not tried, and closes a queue that was not connected in time (#842)", async () => {
+  let frozen = false;
+  const { built, asked, mk } = switchQueues((name) => (frozen && name === "pi-jobs@hostb" ? never() : Promise.resolve()));
+  const reader = endingReader(mk, [{ name: "hostb", routes: true }], { discoverHostQueuesFn: async () => ["pi-jobs@stopped"], switchStepTimeoutMs: 80, closeTimeoutMs: 30 });
+  await reader.snapshot({ switchQueues: true });
+  await settle();
+  frozen = true;
+  const res = await orHung(reader.resume());
+  assert.notEqual(res, "hung");
+  assert.deepEqual(asked, ["resume pi-jobs", "resume pi-jobs@hostb"], "nothing is sent past the lost answer");
+  assert.deepEqual(res.results[0].res.partial, { done: ["pi-jobs"], failed: "pi-jobs@hostb", error: "no answer within 0.08 seconds", unconfirmed: ["pi-jobs@hostb"], refused: [], notTried: ["pi-jobs@stopped"] });
+  const hostb = built.find((q) => q.name === "pi-jobs@hostb");
+  assert.equal(hostb.closed, 1, "closed, so its resume is not sent whenever its connection comes up");
+  frozen = false;
+  await reader.snapshot();
+  await settle();
+  assert.equal(built.filter((q) => q.name === "pi-jobs@hostb").length, 2, "and replaced at the next read");
+  await reader.dispose();
+});
+
+test("createFleetReader: a fleet resume whose discovery does not answer names the queues it holds beyond the registry's as not tried (#842)", async () => {
+  let frozen = false;
+  const { asked, mk } = switchQueues(() => (frozen ? never() : Promise.resolve()));
+  const reader = endingReader(mk, [], {
+    readLiveHostsFn: () => (frozen ? never() : Promise.resolve({ hosts: [{ name: "hostb", routes: true }] })),
+    discoverHostQueuesFn: () => (frozen ? never() : Promise.resolve(["pi-jobs@stopped"])),
+    switchStepTimeoutMs: 80,
+    closeTimeoutMs: 30,
+  });
+  await reader.snapshot({ switchQueues: true });
+  await settle();
+  frozen = true;
+  const res = await orHung(reader.resume());
+  assert.notEqual(res, "hung", "neither the registry, the scan nor the queue answered, and the resume still did");
+  assert.deepEqual(asked, ["resume pi-jobs"]);
+  assert.deepEqual({ ...res.results[0].res, unreachable: null }, {
+    unreachable: null,
+    partial: { done: [], failed: "pi-jobs", error: "no answer within 0.08 seconds", unconfirmed: ["pi-jobs"], refused: [], notTried: ["pi-jobs@hostb", "pi-jobs@stopped"] },
+    incomplete: SWITCH_SCAN_INCOMPLETE,
+  });
+  frozen = false;
+  await reader.dispose();
+});
+
+test("createFleetReader: one queue's pause goes through the held pool, and a lost answer says may or may not (#842)", async () => {
+  let lost = null;
+  const { built, asked, mk } = switchQueues(() => (lost ? lost() : Promise.resolve()));
+  const reader = endingReader(mk, [{ name: "hostb", routes: true }], { discoverHostQueuesFn: async () => ["pi-jobs@stopped"], switchStepTimeoutMs: 80, closeTimeoutMs: 30 });
+  await reader.snapshot();
+  await settle();
+  assert.deepEqual(await reader.pauseQueue({ queue: "pi-jobs@hostb", paused: true }), { ok: true, paused: true, queue: "pi-jobs@hostb" });
+  assert.equal(built.length, 2, "the queue the reader holds, not a one-shot built for the click");
+  // A queue the pool does not hold yet is checked against the kill switch's set: a real one is flipped, a mistyped one refused.
+  assert.deepEqual(await reader.pauseQueue({ queue: "pi-jobs@stopped", paused: false }), { ok: true, paused: false, queue: "pi-jobs@stopped" });
+  const ghost = await reader.pauseQueue({ queue: "pi-jobs@ghost", paused: true });
+  assert.equal(ghost.invalid, '"pi-jobs@ghost" is not a queue this deployment drains (pi-jobs, pi-jobs@hostb, pi-jobs@stopped). Nothing was changed');
+  assert.ok(!built.some((q) => q.name === "pi-jobs@ghost"), "and no queue is built for it");
+  assert.deepEqual(asked, ["pause pi-jobs@hostb", "resume pi-jobs@stopped"]);
+  for (const answer of [never, () => Promise.reject(Object.assign(new Error("Command timed out"), { valkeyMayStillRun: true }))]) {
+    lost = answer;
+    const res = await orHung(reader.pauseQueue({ queue: "pi-jobs@hostb", paused: true }));
+    assert.deepEqual(res, { invalid: queueSwitchUnconfirmed("pi-jobs@hostb", true), partial: true });
+  }
+  lost = () => Promise.reject(new Error("refused before send"));
+  assert.deepEqual(await reader.pauseQueue({ queue: "pi-jobs@hostb", paused: true }), { unreachable: "refused before send" });
+  assert.deepEqual([await reader.pauseQueue({ queue: "", paused: true }), await reader.pauseQueue({ queue: "pi-jobs", paused: "yes" })], [{ invalid: "a queue name is required" }, { invalid: "paused must be true or false" }]);
+  lost = null;
+  await reader.dispose();
+});
+
+test("createFleetReader: a fleet pause names a held queue discovery no longer finds, and a resume whose registry read failed still reaches the queues it holds (#842)", async () => {
+  let registry = () => Promise.resolve({ hosts: [{ name: "hostb", routes: true }] });
+  let found = ["pi-jobs@stopped"];
+  const { asked, mk } = switchQueues();
+  const reader = endingReader(mk, [], { readLiveHostsFn: () => registry(), discoverHostQueuesFn: async () => found });
+  await reader.snapshot({ switchQueues: true });
+  await settle();
+  // Now neither the registry nor the scan names the two host queues the reader holds: a pause still pauses them, and says so.
+  registry = () => Promise.resolve({ hosts: [] });
+  found = [];
+  const paused = (await reader.pause()).results[0].res;
+  assert.deepEqual(paused, { ok: true, paused: true, queues: ["pi-jobs", "pi-jobs@hostb", "pi-jobs@stopped"] }, "every queue that was paused is named");
+  // A resume with the registry unreadable and a scan that names nothing: the held queues are resumed all the same.
+  asked.length = 0;
+  registry = () => Promise.resolve({ unreachable: "registry down" });
+  const resumed = (await reader.resume()).results[0].res;
+  assert.deepEqual(resumed, { ok: true, paused: false, queues: ["pi-jobs", "pi-jobs@hostb", "pi-jobs@stopped"], blind: "registry down" });
+  assert.deepEqual(asked, ["resume pi-jobs", "resume pi-jobs@hostb", "resume pi-jobs@stopped"]);
+  await reader.dispose();
+});
+
+test("createFleetReader: one queue's resume that was not connected in time closes that queue and replaces it; a name whose discovery does not answer is refused within the bound (#842)", async () => {
+  let frozen = false;
+  const { built, mk } = switchQueues(() => (frozen ? never() : Promise.resolve()));
+  const reader = endingReader(mk, [{ name: "hostb", routes: true }], { discoverHostQueuesFn: () => (frozen ? never() : Promise.resolve([])), switchStepTimeoutMs: 80, closeTimeoutMs: 30 });
+  await reader.snapshot();
+  await settle();
+  frozen = true;
+  const hostb = built.find((q) => q.name === "pi-jobs@hostb");
+  assert.deepEqual(await orHung(reader.pauseQueue({ queue: "pi-jobs@hostb", paused: false })), { invalid: queueSwitchUnconfirmed("pi-jobs@hostb", false), partial: true });
+  await settle();
+  assert.equal(hostb.closed, 1, "closed, so its resume is not sent whenever its connection comes up");
+  // A queue the reader does not hold needs a discovery, which does not answer: refused within the bound, nothing built.
+  const unread = await orHung(reader.pauseQueue({ queue: "pi-jobs@other", paused: true }));
+  assert.deepEqual(unread, { unreachable: "the deployment's queues could not be read within the bound" });
+  assert.ok(!built.some((q) => q.name === "pi-jobs@other"));
+  frozen = false;
+  await reader.snapshot();
+  await settle();
+  assert.equal(built.filter((q) => q.name === "pi-jobs@hostb").length, 2, "and the closed queue is replaced at the next read, not handed out again");
+  // A pause that was late is left to land: its queue stays.
+  frozen = true;
+  const again = built.filter((q) => q.name === "pi-jobs@hostb").at(-1);
+  assert.deepEqual(await orHung(reader.pauseQueue({ queue: "pi-jobs@hostb", paused: true })), { invalid: queueSwitchUnconfirmed("pi-jobs@hostb", true), partial: true });
+  assert.equal(again.closed, 0);
+  frozen = false;
+  await reader.dispose();
+});
+
+test("createFleetReader: a second Valkey of the kill switch's plan takes the reader's step bound too (#842)", { timeout: 20_000 }, async () => {
+  const { createServer } = await import("node:net");
+  // A server that takes connections and answers nothing, as a Valkey that stopped answering does.
+  const sockets = new Set();
+  const silent = createServer((socket) => {
+    sockets.add(socket);
+    socket.on("error", () => {});
+  });
+  await new Promise((resolve) => silent.listen(0, "127.0.0.1", resolve));
+  const other = `redis://127.0.0.1:${silent.address().port}`;
+  const { mk } = switchQueues();
+  const reader = endingReader(mk, [], { killSwitchPlanFn: () => ({ urls: ["redis://unused", other], disagreement: "they disagree", context: null }), switchStepTimeoutMs: 300, closeTimeoutMs: 50 });
+  try {
+    const started = Date.now();
+    const res = await orHung(reader.pause(), 8000);
+    assert.notEqual(res, "hung");
+    // The fleet read's 2.5 s, then one step of 0.3 s; with the default step it would be 6 s more.
+    assert.ok(Date.now() - started < 5000, `${Date.now() - started} ms`);
+    assert.equal(res.results[0].res.ok, true, "the reader's own Valkey was paused meanwhile");
+    assert.deepEqual(res.results[1].res.partial, { done: [], failed: "pi-jobs", error: "no answer within 0.3 seconds", unconfirmed: ["pi-jobs"], refused: [], notTried: [] });
+  } finally {
+    await reader.dispose();
+    for (const socket of sockets) socket.destroy();
+    silent.close();
+  }
+});
+
+test("createFleetReader builds every queue it holds on the console's bounded connection: the shared one, a host's, a sandbox request's (#842)", async () => {
+  const { mk } = switchQueues();
+  const conns = [];
+  const reader = endingReader(mk, [{ name: "hostb", routes: true }], {
+    parseConnectionFn: (url, options) => (conns.push([url, options]), {}),
+    makeSandboxPrepareQueueFn: (conn, opts) => mk(conn, { name: `sandbox@${opts.host}` }),
+    enqueueSandboxPreparationFn: async () => ({ ok: true }),
+  });
+  await reader.snapshot();
+  await reader.sandboxPrepare({ host: "hostb" });
+  assert.deepEqual(conns, Array(3).fill(["redis://unused", { failFast: true, commandTimeoutMs: 5000 }]));
+  // And no queue of the reader is built any other way: a second spelling would be a queue without the bound.
+  const source = readFileSync(fileURLToPath(new URL("../src/read-model.mjs", import.meta.url)), "utf8");
+  const body = source.slice(source.indexOf("export function createFleetReader("), source.indexOf("// The console's page readers (issue #641)"));
+  assert.ok(body.length > 10_000);
+  assert.equal(body.match(/consoleQueueConnection\(paths\.valkeyUrl, parseConnectionFn\)/g).length, 3);
+  assert.equal(/parseConnectionFn\(/.test(body.replaceAll("consoleQueueConnection(paths.valkeyUrl, parseConnectionFn)", "")), false);
+  await reader.dispose();
+});
+
+test("createFleetReader: dispose ends by its own bound when no queue's close is answered, every close started at once (#842)", async () => {
+  const { built, mk } = switchQueues();
+  let rawDropped = 0;
+  const reader = endingReader(mk, [{ name: "hostb", routes: true }, { name: "hostc", routes: true }], { closeTimeoutMs: 60, redisFn: () => ({ ...readyRedis(), disconnect() { rawDropped += 1; } }) });
+  await reader.snapshot();
+  await settle();
+  assert.equal(built.length, 3);
+  for (const q of built) q.close = () => (q.closed += 1, never());
+  const started = Date.now();
+  const pending = reader.dispose();
+  await settle();
+  assert.deepEqual(built.map((q) => q.closed), [1, 1, 1], "every close was started before any was answered");
+  assert.equal(rawDropped, 1, "and the raw client was dropped: its socket would otherwise hold the process past the stop");
+  assert.notEqual(await orHung(pending), "hung", "dispose resolved though no close ever did");
+  assert.ok(Date.now() - started < 1000, "at one close bound, not one per queue");
+  assert.deepEqual(built.map((q) => q.dropped), [1, 1, 1], "each connection was dropped once its close had not been answered");
 });
 
 test("createFleetReader: the raw client's error is one line a minute under its own name, and a client seam may be absent", () => {

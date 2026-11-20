@@ -63,6 +63,13 @@ const nowOf = (now) => (typeof now === "function" ? now() : now);
 const isMs = (n) => Number.isSafeInteger(n) && n >= 0;
 const validRunId = (runId) => (typeof runId === "string" && runId !== "") || (Number.isSafeInteger(runId) && runId >= 0);
 const codeOf = (error) => (typeof error?.code === "string" && error.code !== "" ? error.code : "valkey");
+
+/**
+ * A WRITE's failure (issue #842): `{ error }` as every function here answers one, with `mayStillRun: true` when the
+ * client says the script had reached a Valkey that then stopped answering (`valkeyMayStillRun`, connection.mjs). Valkey
+ * may run it when it wakes, or ran it before its answer was lost, so the caller must not say nothing was sent.
+ */
+const lostWrite = (error) => ({ error: codeOf(error), ...(error?.valkeyMayStillRun === true ? { mayStillRun: true } : {}) });
 const refused = (reason) => ({ error: "refused", reason });
 
 /** The target pointer key for one forge target, or null when any part is missing or not plain. */
@@ -305,7 +312,7 @@ export async function pushSteer({ redis, runId, entry, now = Date.now } = {}) {
 		const r = await redis.eval(PUSH_SCRIPT, 4, steerOpenKey(runId), k.closed, k.list, k.state, norm.entry.id, JSON.stringify(norm.entry), String(bytes), String(STEER_MAX_MESSAGES), String(STEER_TOTAL_MAX_BYTES), String(STEER_INBOX_TTL_MS), metaOf(norm.entry));
 		return ["ok", "dup", "closed", "gone", "full"].includes(r) ? r : { error: "bad-reply" };
 	} catch (error) {
-		return { error: codeOf(error) };
+		return lostWrite(error);
 	}
 }
 
@@ -390,7 +397,7 @@ export async function withdrawSteer({ redis, runId, id } = {}) {
 		if (r === null || r === undefined) return { prior: null };
 		return STEER_STATES.includes(r) ? { prior: r } : { error: "bad-reply" };
 	} catch (error) {
-		return { error: codeOf(error) };
+		return lostWrite(error);
 	}
 }
 

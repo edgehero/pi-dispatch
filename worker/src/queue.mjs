@@ -6,7 +6,7 @@ import { Queue } from "bullmq";
 import { metaKeyPattern, queueNameOfMetaKey, readSemanticWindowOwner, releaseCompletedSemanticWindow } from "./bullmq-internals.mjs";
 import { semanticWindowDisposition } from "./semantic-window-policy.mjs";
 import { DUPLICATE_NOTICE_SUFFIX, duplicateNoticeData } from "./duplicate-notice.mjs";
-import { assertJudgedConnection, givesUp, onValkeyError } from "./connection.mjs";
+import { VALKEY_COMMAND_TIMEOUT_MS, assertJudgedConnection, givesUp, onValkeyError, parseConnection } from "./connection.mjs";
 import { chainedJobId, localJobId, deliveryJobId, gitlabDeliveryJobId, forgeDeliveryJobId, manualCanaryJobId, manualTriggerJobId } from "./job-id.mjs";
 import { semanticItemOf } from "./forges.mjs";
 import { PR_CLOSE_ACTIONS } from "./triggers.mjs";
@@ -161,6 +161,46 @@ export function makeQueue(connection, { name = QUEUE } = {}) {
 	// A queue that gives up is the kind a long-lived reader replaces, so it is the kind that repeats the line per read.
 	onValkeyError(queue, `queue ${name}`, undefined, { quietly: givesUp(connection) });
 	return queue;
+}
+
+/**
+ * The connection of a queue the operator console builds (issue #842): `failFast`, and each command bound
+ * (`parseConnection`'s `commandTimeoutMs`, issue #867), so a pause, a preview's read or a page's count on a Valkey that
+ * is connected and stopped answering ends at the bound rather than when Valkey wakes. A command past it that had been
+ * sent carries `valkeyMayStillRun`, which is what lets the kill switch say a queue's pause "may or may not have been
+ * made" instead of waiting for it. The ONE place the console passes the bound, so the queues behind the kill switch,
+ * the failed-job and steer actions, the fleet reader and the status read have it by one spelling (a rerun's, a parked
+ * answer's, a trigger fire's and the zero touch and schedule pages' one-shot queues are not built through it yet); never for a Worker (`parseConnection` says why). `parseConnectionFn` is the
+ * caller's seam.
+ */
+export function consoleQueueConnection(url, parseConnectionFn = parseConnection) {
+	return parseConnectionFn(url, { failFast: true, commandTimeoutMs: VALKEY_COMMAND_TIMEOUT_MS });
+}
+
+/**
+ * Close `queue`, or drop its connection when the close is not answered within `ms`. Never throws. BullMQ's close sends
+ * QUIT and waits for the answer, which a Valkey that stopped answering on an open socket never gives, and a QUIT that
+ * timed out leaves that socket open: so the close first, then `disconnect()`. The drop is started and not waited for:
+ * BullMQ's `disconnect` awaits the queue's connection first, which on a queue built while Valkey takes connections and
+ * answers none is not settled for over half a minute. A caller that owes its answer within a bound starts this and
+ * does not wait on it either.
+ */
+export async function closeWithin(queue, ms) {
+	let timer;
+	const closed = await Promise.race([
+		Promise.resolve()
+			.then(() => queue.close())
+			.then(() => true, () => true),
+		new Promise((resolve) => (timer = setTimeout(() => resolve(false), ms))),
+	]);
+	clearTimeout(timer);
+	if (!closed) {
+		try {
+			Promise.resolve(queue.disconnect?.()).catch(() => {});
+		} catch {
+			// a drop that throws has nothing left to drop
+		}
+	}
 }
 
 /**

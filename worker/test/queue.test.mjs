@@ -1,6 +1,50 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { chainedJobId, deliveryJobId, localJobId } from "../src/job-id.mjs";
+import { VALKEY_COMMAND_TIMEOUT_MS, parseConnection } from "../src/connection.mjs";
+import { closeWithin, consoleQueueConnection } from "../src/queue.mjs";
+
+// Issue #842: the connection of every queue the operator console builds, and the close that does not wait for Valkey.
+test("consoleQueueConnection is a failFast connection with the command bound, through the caller's seam (#842)", () => {
+	const seen = [];
+	assert.equal(consoleQueueConnection("redis://h:1/2", (url, options) => (seen.push([url, options]), "conn")), "conn");
+	assert.deepEqual(seen, [["redis://h:1/2", { failFast: true, commandTimeoutMs: 5000 }]]);
+	assert.equal(VALKEY_COMMAND_TIMEOUT_MS, 5000);
+	// The real options: no offline queue, a bound on each command, nothing sent again on a later connection.
+	const real = consoleQueueConnection("redis://127.0.0.1:6390", (url, options) => parseConnection(url, { ...options, context: {} }));
+	assert.deepEqual([real.enableOfflineQueue, real.commandTimeout, real.autoResendUnfulfilledCommands], [false, 5000, false]);
+});
+
+test("closeWithin closes a queue, and drops the connection of one whose close is not answered within its bound; it never throws (#842)", async () => {
+	const calls = [];
+	await closeWithin({ close: async () => calls.push("close"), disconnect: () => calls.push("disconnect") }, 50);
+	assert.deepEqual(calls, ["close"], "a close that answers needs no drop");
+	const started = Date.now();
+	await closeWithin({ close: () => (calls.push("close"), new Promise(() => {})), disconnect: () => calls.push("disconnect") }, 40);
+	assert.deepEqual(calls, ["close", "close", "disconnect"], "a QUIT that is never answered leaves the socket open, so it is dropped");
+	assert.ok(Date.now() - started < 1000);
+	// A close that throws or rejects, a drop that throws, a queue with no drop at all: never a throw, never a wait.
+	await closeWithin({ close() { throw new Error("sync"); } }, 40);
+	await closeWithin({ close: async () => { throw new Error("async"); } }, 40);
+	await closeWithin({ close: () => new Promise(() => {}), disconnect() { throw new Error("drop"); } }, 20);
+	await closeWithin({ close: () => new Promise(() => {}) }, 20);
+	// The drop is started and not waited for: BullMQ's disconnect awaits a connection that may not settle for over half a minute.
+	let timer;
+	const waited = await Promise.race([closeWithin({ close: () => new Promise(() => {}), disconnect: () => new Promise(() => {}) }, 20).then(() => "returned"), new Promise((resolve) => (timer = setTimeout(resolve, 1000, "hung")))]);
+	clearTimeout(timer);
+	assert.equal(waited, "returned");
+	// A drop that rejects (BullMQ's disconnect awaits a connection that then gave up) is nobody's to handle.
+	const unhandled = [];
+	const note = (err) => unhandled.push(err);
+	process.on("unhandledRejection", note);
+	try {
+		await closeWithin({ close: () => new Promise(() => {}), disconnect: () => Promise.reject(new Error("Connection is closed.")) }, 20);
+		await new Promise((resolve) => setTimeout(resolve, 20));
+		assert.deepEqual(unhandled, []);
+	} finally {
+		process.off("unhandledRejection", note);
+	}
+});
 
 // localJobId is pure -- runs everywhere. It is the dedup key for local jobs (REQ-DEDUP equivalent).
 

@@ -39,6 +39,7 @@ import { CONSOLE_ENV_KEYS, consoleConfig, consoleEnv, deploymentDirOf } from "./
 import { makeLoginLimiter } from "./guards.mjs";
 import { CONSOLE_HOSTNAME, isLoopbackAddress, listenOn, listenUrl } from "./listen.mjs";
 import { acquireConsoleLock } from "./lock.mjs";
+import { makeWritesInFlight } from "./writes-in-flight.mjs";
 import { codePending, keptTokenLinkRefusal, operatorNames, showShortCode, soleOperatorName } from "./login-codes.mjs";
 import { enterReader, runOpenCommand } from "./open-command.mjs";
 import { openLinkViaFile } from "./open-link.mjs";
@@ -698,6 +699,8 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
   let lanBound = null;
   let announcer = null;
   let restart = null;
+  // Issue #842: the confirms in flight, which a stop waits for before it closes what they write through.
+  const writes = makeWritesInFlight();
   try {
     // Every Valkey client of this process (the audit copy's, the fleet reader's) takes its password and its facts
     // about the deployment's Valkey from THIS deployment's `.env`, through the panel's one reader, as the pi extension
@@ -982,6 +985,7 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
       setup,
     };
     server = m.server.createConsoleServer({
+      writes,
       config,
       fs,
       now,
@@ -1074,41 +1078,86 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
     }
     if (io.onListening) io.onListening(server);
     await (io.until ?? untilSignal());
+    servedUntilStopped = true;
     return 0;
   } finally {
     // The streams first, so closing the server is not held open by them; then the listener, the reader, the copy.
-    announcer?.stop();
-    if (lanServer?.listening) {
-      await new Promise((resolve) => {
-        lanServer.close(() => resolve());
-        lanServer.closeAllConnections?.();
-      });
-    }
-    restart?.close();
-    setup?.close();
-    setupBroker?.close();
-    await gateway?.close();
-    hub?.close();
-    if (server?.listening) {
-      await new Promise((resolve) => {
-        server.close(() => resolve());
-        server.closeAllConnections?.();
-      });
-    }
+    const stop = async () => {
+      // The confirms in flight FIRST, before anything they answer or write through is closed: on a Valkey that answers
+      // none of them is cut, and on one that does not each ends by its own bound. No confirm joins them while this
+      // waits or after it: one that arrives from here on is refused before it sends anything (`writes.stop`).
+      writes.stop();
+      await writes.idle();
+      announcer?.stop();
+      if (lanServer?.listening) {
+        await new Promise((resolve) => {
+          lanServer.close(() => resolve());
+          lanServer.closeAllConnections?.();
+        });
+      }
+      restart?.close();
+      setup?.close();
+      setupBroker?.close();
+      await gateway?.close();
+      hub?.close();
+      if (server?.listening) {
+        await new Promise((resolve) => {
+          server.close(() => resolve());
+          server.closeAllConnections?.();
+        });
+      }
+      try {
+        await fleet?.dispose();
+      } catch {
+        // best-effort teardown
+      }
+      try {
+        redis?.disconnect?.();
+      } catch {
+        // the copy is best effort, its client too
+      }
+    };
+    // ON A DEADLINE (issue #842), and the lock released whatever became of the rest. Two of these steps wait on Valkey
+    // (the gateway's revokes, the reader's queues), and on one that stopped answering the stop waited until it woke or
+    // the service manager killed the process, which left the lock behind: the next start takes over a lock whose pid
+    // is dead, and is refused when that pid has been reused since (lock.mjs). The reader's close has a bound of its
+    // own now; this one is over all the steps, the wait for the confirms in flight included, for one that has none or
+    // outlives its own. Shorter than every stop
+    // window the service managers give (Windows 15 s, systemd and launchd 30 s), so the lock is gone before any kills.
+    const deadlineMs = Number.isSafeInteger(io.stopDeadlineMs) && io.stopDeadlineMs > 0 ? io.stopDeadlineMs : STOP_DEADLINE_MS;
+    let timer;
     try {
-      await fleet?.dispose();
-    } catch {
-      // best-effort teardown
+      const finished = await Promise.race([
+        stop().then(() => true, (e) => {
+          io.err(`pi-dispatch-console: the stop met an error (${e?.code ?? e?.name ?? "error"}); stopping anyway`);
+          return true;
+        }),
+        new Promise((resolve) => {
+          timer = setTimeout(resolve, deadlineMs, false);
+        }),
+      ]);
+      if (!finished) io.err(`pi-dispatch-console: the stop did not finish within ${deadlineMs / 1000} seconds (something it closes did not answer); stopping anyway`);
+    } finally {
+      clearTimeout(timer);
+      // A confirm still open now is about to be cut: its audit row says so (a file append, which waits for nobody).
+      const cut = writes.abandon();
+      if (cut > 0) io.err(`pi-dispatch-console: stopped with ${cut} ${cut === 1 ? "change" : "changes"} still unanswered; the audit log says each may or may not have been made`);
+      m.connection?.useValkeyContext?.(null);
+      lock.release();
     }
-    try {
-      redis?.disconnect?.();
-    } catch {
-      // the copy is best effort, its client too
-    }
-    m.connection?.useValkeyContext?.(null);
-    lock.release();
   }
 }
+
+/**
+ * How long a stop of `serve` may take in all (issue #842) before the lock is released and the process is let go.
+ */
+export const STOP_DEADLINE_MS = 10_000;
+
+/**
+ * Whether `serve` ran until it was told to stop, for the program's last lines below: a module's own state, since the
+ * exit code alone does not say which command ran.
+ */
+let servedUntilStopped = false;
 
 /** True when this module is the program being run (directly, or through the npm bin symlink). */
 function isMain() {
@@ -1123,5 +1172,11 @@ function isMain() {
 if (isMain()) {
   runCli(process.argv.slice(2)).then((code) => {
     process.exitCode = code;
+    // A console that served and was stopped EXITS (issue #842), as the gateway and the receiver do: what may still be
+    // open by then is a page in flight's one-shot queue or a close Valkey never answered, and neither may hold the
+    // process past its stop until the service manager kills it. No confirm is cut by it: `serve` returns only once
+    // every confirm in flight has answered, or has its outcome row at the stop's deadline. Here and not in `runCli`, which tests call in their own
+    // process; and only after `serve`, since every other command ends by itself once its output is written.
+    if (servedUntilStopped) process.exit(code);
   });
 }
