@@ -80,6 +80,51 @@ test("all source forges use their existing identity, permission and label-change
 	}
 });
 
+test("an exact local close grant preserves identity, number, action and ordinary forge authority", () => {
+	for (const [type, event, target] of [["issue", "issues", "issue"], ["pull_request", "pull_request", "pull_request"]]) {
+		const granted = entry("app-close", { type, action: ["closed"], number: 8, closeActors: ["closer-app[bot]"] });
+		const triggers = groups([granted]);
+		const payload = { action: "closed", sender: { id: 7, login: "Closer-App[bot]" }, repository: { full_name: "o/r" }, [target]: { number: 8, title: "EVENT_TITLE", body: "EVENT_BODY", author_association: "NONE" } };
+		const match = (p, authorized) => matchingLocalEvents(issueInput(triggers, { event, subset: parseSubset(p), authorized }));
+		assert.equal(match(payload, false).length, 1, type);
+		assert.equal(localEventsWantCloserAuthority(event, parseSubset(payload), triggers.github, SELF), false, "the explicit grant needs no collaborator lookup");
+		for (const sender of [{ id: SELF, login: "closer-app[bot]" }, { login: "closer-app[bot]" }, { id: 7 }, { id: 7, login: "closer-app[bot]-impostor" }, { id: 7, login: "another-app[bot]" }]) assert.deepEqual(match({ ...payload, sender }, false), []);
+		for (const object of [{ number: 9 }, {}, null]) assert.deepEqual(match({ ...payload, [target]: object }, false), []);
+		assert.deepEqual(match({ ...payload, action: "opened" }, false), []);
+		const human = { ...payload, sender: { id: 8, login: "unlisted-maintainer" } };
+		assert.equal(localEventsWantCloserAuthority(event, parseSubset(human), triggers.github, SELF), true);
+		assert.equal(match(human, true).length, 1, "the grant adds to resolved write permission");
+		const mixed = groups([granted, entry("permission-close", { type, action: ["closed"], number: 8 })]);
+		assert.equal(localEventsWantCloserAuthority(event, parseSubset(payload), mixed.github, SELF), true, "another listener still needs its permission answer");
+		assert.deepEqual(matchingLocalEvents(issueInput(mixed, { event, subset: parseSubset(payload), authorized: false })).map(t => t.on.id), ["app-close"]);
+		const forge = groups([{ on: { type, action: ["closed"] }, run: { kind: "github", flow: "fix" } }]);
+		assert.equal(filter(event, parseSubset(payload), { triggers: forge }, SELF, "delivery-1", false, { closeActors: granted.on.closeActors }).reason, "closer-not-allowed", "the grant is ineffective outside local match-only routing");
+	}
+});
+
+test("a signed App close wakes only its reviewed local command without a permission lookup", async () => {
+	const cfg = { servesGithub: true, webhookSecret: SECRET, triggers: groups([entry("after-close", { type: "pull_request", action: ["closed"], closeActors: ["closer-app[bot]"] })]) };
+	const calls = [], logs = [];
+	const handler = makeReceiver({ cfg, selfId: SELF, queue: { add: () => assert.fail("no forge job is authorized") }, resolveAuthority: () => assert.fail("the reviewed App grant must not require collaborator permission"), log: line => logs.push(line), localEventStore: { signal: async input => { calls.push(input); return { accepted: true, coalesced: false }; } }, now: () => 1000 });
+	const payload = { action: "closed", sender: { id: 7, login: "closer-app[bot]" }, repository: { full_name: "o/r" }, pull_request: { number: 8, merged: true, title: "EVENT_TITLE", body: "EVENT_BODY" } };
+	assert.deepEqual(await deliver(handler, payload, { event: "pull_request" }), { status: 202, body: { status: "accepted", localEvents: { accepted: 1, coalesced: 0 } } });
+	assert.equal((await deliver(handler, payload, { event: "pull_request", signature: false })).status, 401);
+	assert.equal(calls.length, 1);
+	assert.deepEqual(Object.keys(calls[0]), ["trigger", "deliveryId"]);
+	assert.doesNotMatch(JSON.stringify(logs), /closer-app|EVENT_TITLE|EVENT_BODY/);
+	assert.doesNotMatch(JSON.stringify(calls), /EVENT_TITLE|EVENT_BODY/);
+});
+
+test("a local App grant cannot substitute for a mixed ordinary close rule's permission lookup", async () => {
+	const cfg = { servesGithub: true, webhookSecret: SECRET, triggers: groups([entry("after-close", { type: "pull_request", action: ["closed"], closeActors: ["closer-app[bot]"] }), { on: { type: "pull_request", action: ["closed"] }, run: { kind: "github", flow: "fix" } }]) };
+	const calls = [], lookups = [];
+	const handler = makeReceiver({ cfg, selfId: SELF, queue: { add: () => assert.fail("App grant must not authorize a forge job") }, resolveAuthority: async (...args) => { lookups.push(args); return { authorized: false }; }, localEventStore: { signal: async input => { calls.push(input); return { accepted: true, coalesced: false }; } }, now: () => 1000 });
+	const payload = { action: "closed", sender: { id: 7, login: "closer-app[bot]" }, repository: { full_name: "o/r" }, pull_request: { number: 8 } };
+	assert.equal((await deliver(handler, payload, { event: "pull_request" })).status, 202);
+	assert.deepEqual(lookups, [["o/r", "closer-app[bot]"]]);
+	assert.equal(calls.length, 1);
+});
+
 test("admission persists only normalized configuration and delivery identity, and never opens a client on a drop", async () => {
 	const triggers = groups([entry("sweep")]);
 	const calls = [];

@@ -2339,7 +2339,7 @@ export async function collectChecks(shellVars, seams) {
 		checks.push({ ok: true, label: `${commands} command trigger(s): a command is only verifiable in-container -- the runner refuses an unregistered one before the prompt is sent (command-unregistered)` });
 	}
 	for (const event of localEvents) {
-		checks.push({ ok: true, label: `Local event command ${event.id}: ${event.forge} events wake worker ${event.worker}, after ${event.debounceSeconds}s quiet; at most one pending follow-up; event text is not passed to the command${event.reviewAuthors ? `; ${event.reviewAuthors} exact review-author login(s) are explicitly admitted` : ""}` });
+		checks.push({ ok: true, label: `Local event command ${event.id}: ${event.forge} events wake worker ${event.worker}, after ${event.debounceSeconds}s quiet; at most one pending follow-up; event text is not passed to the command${event.reviewAuthors ? `; ${event.reviewAuthors} exact review-author login(s) are explicitly admitted` : ""}${event.closeActors ? `; ${event.closeActors} exact close-actor login(s) are explicitly admitted` : ""}` });
 	}
 
 	section("venues");
@@ -7106,7 +7106,7 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTable
 			// tuple list already filters to `typeof f.flow === "string"`, so a command trigger drops out
 			// of the flow-tier probes naturally -- no exclusion needed there.
 			commands: triggers.filter((t) => typeof t.run.command === "string").length,
-			localEvents: triggers.filter((t) => t.run.kind === "local" && sourceForgeOf(t)).map((t) => ({ id: t.on.id, forge: sourceForgeOf(t), worker: t.run.worker, debounceSeconds: t.on.debounceSeconds, reviewAuthors: t.on.reviewAuthors?.length ?? 0 })),
+			localEvents: triggers.filter((t) => t.run.kind === "local" && sourceForgeOf(t)).map((t) => ({ id: t.on.id, forge: sourceForgeOf(t), worker: t.run.worker, debounceSeconds: t.on.debounceSeconds, reviewAuthors: t.on.reviewAuthors?.length ?? 0, closeActors: t.on.closeActors?.length ?? 0 })),
 			// REQ-TRIGGER-SECRETS. Counted beside `instructing` for its reason: a per-trigger choice that
 			// changes what every job of it can reach, and one that lives only in triggers.json.
 			secreting: triggers.filter((t) => (t.run.secrets !== undefined || t.run.secretFiles !== undefined)).length,

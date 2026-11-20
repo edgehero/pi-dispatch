@@ -4317,7 +4317,8 @@ different shape rather than an extension of this one.)*
   - Body fields consumed: `action`, `issue.number`, `issue.title`, `issue.body`, `issue.labels[].name`,
     `issue.pull_request` (presence marker only — an `issue_comment` on a PR carries it), `comment.body`,
     `comment.author_association`, `sender.id`, **`sender.login`** (issue #231 — carried for EXACTLY ONE
-    consumer, the closer-permission lookup on close routes; never logged, never enqueued: the job's
+    purpose, closer authority on close routes: the permission lookup and, since #951, exact local
+    `closeActors` matching; never logged, never enqueued: the job's
     `trigger.sender` stays `{ id }`, the forgejo subset's own justification for its `login` applied
     here), `repository.full_name`, and for a `pull_request` event:
     `pull_request.number`, `pull_request.title`, `pull_request.body`, `pull_request.author_association`,
@@ -4857,7 +4858,8 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   `run.stallTimeoutMinutes` and `run.maxMinutes`; 4 since #908 for `run.mayMerge`; 5 since #911 for
   local event `on.forge`, `on.debounceSeconds`, `on.reviewAuthors` and `run.worker`; 6 since #922 for
   `run.modelSelection`; 7 since #918 for `run.privateEndpoints`; 8 since #919 for
-  `run.secretFiles` and a `secretBundles` binding carrying `files`) is the highest this build reads. The writer OWNS it: `writeTriggers` writes `triggersFileVersionFor` of the result, the version the entries' raw
+  `run.secretFiles` and a `secretBundles` binding carrying `files`; 9 since #949 for
+  `run.auxiliaryModels`; 10 since #951 for local `on.closeActors`) is the highest this build reads. The writer OWNS it: `writeTriggers` writes `triggersFileVersionFor` of the result, the version the entries' raw
   `run` keys (`TRIGGER_RUN_FIELD_VERSIONS`), the top-level blocks (`TRIGGERS_BLOCK_VERSIONS`) and the VALUES of an
   entry's fields, of its `run` keys and of each block (`TRIGGER_VALUE_VERSIONS`, `TRIGGER_RUN_VALUE_VERSIONS`,
   `TRIGGERS_BLOCK_VALUE_VERSIONS`, `field -> (value) => version`, a block's rule handed the whole block) need, all five
@@ -4984,7 +4986,13 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   GitHub local `pull_request` rule whose action list includes `review_submitted`, is a list of 1 through
   32 distinct exact lowercase logins matching `^[a-z0-9][a-z0-9-]{0,38}(?:\[bot\])?$`. Matching compares
   the reviewer's login without case and adds to the ordinary association grant. It does not override the
-  self guard or any other predicate. These three `on` fields are refused outside the local event shape.
+  self guard or any other predicate. `on.closeActors` (#951), only on a GitHub local `issue` or
+  `pull_request` rule whose sole action is `closed`, has the same 1 through 32 exact lowercase login
+  bounds. It compares `sender.login` without case and adds to the resolved closer-permission grant
+  only for that listener. Ordinary forge rules never receive this grant. These four `on` fields are
+  refused outside the local event shape. `closeActors` requires triggers version 10; absent grants
+  preserve the previous minimum. Changing it changes the existing local-event definition digest;
+  queue data, event files, run records and local-event state shapes remain unchanged.
   `run.command`, `run.folder` and `run.worker` are required; local command compatibility checks still
   apply, and `run.repository` and `run.portfolio` are refused. No source payload is stored with the job.
   Local listeners do not count against the one ordinary forge comment rule, and each matches independently.
@@ -14698,6 +14706,7 @@ and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` are UNCHANGED, checked: no file shape, wr
 
 | Date | Change |
 |---|---|
+| 2026-11-20 (#951) | `INT-TRIGGERS-FILE-CONTRACT` adds local GitHub `on.closeActors`, a bounded exact login list restricted to closed issue/PR listeners, requiring triggers version 10. `INT-WEBHOOK-PAYLOAD-SUBSET` reuses transient sender.login for this explicit authority grant; no new payload field is consumed. `INT-LOCAL-EVENT-STATE`, queue and job-data formats, run history, receipt identity and TTLs are UNCHANGED, checked. Existing complete-definition digests revoke pending work when the grant changes. |
 | 2026-11-16 (#918, part 1) | NEW `INT-PRIVATE-ENDPOINTS-FILE-CONTRACT`: `private-endpoints.json`, its parser, the ports 80 and 443 refusal, the rule across it and `model-endpoints.json`, the include and the shipped grant helper. `INT-EGRESS-POLICY-CONTRACT` AMENDED: the private include before the model include, the `pi_grant` external ACL keyed by the proxy's own address on a job's network, two read-only folder mounts on every way the proxy starts, the governing include-and-mount rule, the helper held to the package's copy and its mode (`up` puts it back; no mode judged on Windows), the render's readiness check and by-rename write at 0644, and the worker's boot refusal of a private folder that is a symlink or lies inside a job path. `INT-MODEL-ENDPOINTS-FILE-CONTRACT` AMENDED: an id or server also declared private is refused. No grant is written yet, so every private pair is refused to every job. Every other entry UNCHANGED, checked. |
 | 2026-11-16 (#911) | NEW `INT-LOCAL-EVENT-STATE`: versioned bounded local signals, atomic transport receipts, shared clock, named-worker idempotent publication, current-definition and generation ownership, cancellation, one-shot retirement and uncertain-execution recovery. `INT-TRIGGERS-FILE-CONTRACT` AMENDED for source/execution separation, exact review authors, debounce, required event worker and optional cron worker, triggers version 5 and job data version 6. `INT-WEBHOOK-PAYLOAD-SUBSET` reads reviewer login transiently without queuing it; `INT-CONTAINER-JOB-INPUTS` adds the source-data-free local forge event shape. `INT-RUN-HISTORY-FILE-CONTRACT` adds conditional configured localEvent identity and fixed refusal reasons; `INT-HOST-REGISTRY-CONTRACT` publishes the version floors; `INT-RECEIVER-STATUS-KEY` adds accepted and truthful mixed-admission counts; `INT-DEFER-REASON-KEY` adds debounce and surviving-workspace waits; `INT-CONSOLE-STATE-API` names the event trigger filter and current-definition detail attribution. UNCHANGED, checked: ordinary forge payloads and first-match selection, credential and mount boundaries, command dispatch, exit codes, retention policy and existing cron event files. Final implementation distinguishes unclaimed supersession from active successor ownership, excludes local authority-refusal records from one-shot disarm, and documents manual generation-checked recovery. `INT-CANCEL-CHANNEL-CONTRACT` AMENDED for the possibly committed local tombstone note preserved by every requester; receipt retention and ordinary cancel keys are UNCHANGED, checked. Final polling review corrects ETag commit ordering: validators persist only after durable admission and the feed cursor or PR snapshot, with all review validators after the shared sweep cursor, preventing a failed signal from being hidden behind 304. Existing key shapes and TTLs are UNCHANGED, checked. |
 | 2026-11-15 (#908) | AMENDED `INT-TRIGGERS-FILE-CONTRACT`: `run.mayMerge` at triggers version 4, `mayMerge` and `mayMergePolicy` at job data version 5, reviewed-only provenance and current-trigger validation. `INT-CONTAINER-JOB-INPUTS` gains the fixed versioned merge-policy selector in the existing read-only job directory; `INT-SDK-SESSION-OPTIONS` selects the fixed floor before project loading; `INT-CONTAINER-RUNTIME-CONTRACT` gains the `mergePolicy` capability and offline loader proof. `INT-RUN-HISTORY-FILE-CONTRACT` gains four refusal reason tokens, with its field shape UNCHANGED, checked. CI review preserves the existing mount-readability diagnostic by reading the optional marker after `assertJobInputsReadable`, still before project or extension loading. `INT-WEBHOOK-PAYLOAD-SUBSET`, token scope, mounts, exit codes and MCP withholding UNCHANGED, checked. |

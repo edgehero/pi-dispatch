@@ -39,8 +39,9 @@
  * "does the account that closed this item hold write access". It is a parameter because this module
  * is pure and that answer needs a network lookup the receiver performs (only when
  * `wantsCloserAuthority` below says a rule wants this close). Strict `=== true` -- anything else,
- * absence included, fails closed -- so every existing five-argument call site behaves byte-identically:
- * their routes never read the value.
+ * absence included, fails closed for ordinary forge jobs. A match-only local listener may instead
+ * grant its exact configured `closeActors` login (#951); self refusal and close predicates still apply.
+ * Existing five-argument call sites keep their behavior.
  *
  * `selfId` is the numeric id of whichever identity posts as the harness (the App's bot user, or the PAT
  * user); `deliveryId` is the `X-GitHub-Delivery` GUID, carried into the job for downstream dedup.
@@ -69,7 +70,7 @@ const REVIEW_EVENT_ACTION = "submitted";
 // raw payload action against it.
 const CLOSE_ACTION = "closed";
 
-export function filter(eventName, subset, cfg, selfId, deliveryId, closerAuthorized, { matchOnly = false, reviewAuthors } = {}) {
+export function filter(eventName, subset, cfg, selfId, deliveryId, closerAuthorized, { matchOnly = false, reviewAuthors, closeActors } = {}) {
 	// (0) Fail-closed on identity. MUST precede the self compare -- see header, ordering constraint.
 	if (typeof subset?.sender?.id !== "number") {
 		return { enqueue: false, reason: "missing-sender-id" };
@@ -108,13 +109,13 @@ export function filter(eventName, subset, cfg, selfId, deliveryId, closerAuthori
 	} else if (eventName === "issues" && action === CLOSE_ACTION) {
 		// The issue close-trigger route (issue #231). The closer-authority gate lives INSIDE the route,
 		// after the rule match -- see routeClose for why it cannot sit up here.
-		resolved = routeIssueClose(subset, triggers, closerAuthorized);
+		resolved = routeIssueClose(subset, triggers, closerAuthorized === true || (matchOnly && localCloseActorAllowed(subset, closeActors)));
 	} else if (eventName === "pull_request" && action === CLOSE_ACTION) {
 		// `closed` is deliberately NOT in PR_ACTIONS: a close rule gates on the CLOSER's resolved write
 		// access while every other PR rule gates on the author's association or a collaborator's label,
 		// and one route cannot gate on two different actors -- the same line config.mjs's prClose split
 		// draws, which is what makes `triggers.prClose` the only list this arm ever reads.
-		resolved = routePrClose(subset, triggers, closerAuthorized);
+		resolved = routePrClose(subset, triggers, closerAuthorized === true || (matchOnly && localCloseActorAllowed(subset, closeActors)));
 	} else {
 		return { enqueue: false, reason: "unhandled-event" };
 	}
@@ -646,4 +647,14 @@ export function wantsCloserAuthority(eventName, subset, group, selfId) {
 		return findCloseRule(group?.prClose, CLOSE_ACTION, subset.pull_request.number).rule !== undefined;
 	}
 	return false;
+}
+
+/**
+ * Issue #951: an installed App is not a collaborator. Only a reviewed local listener may add its
+ * exact closer login; the normal forge route still needs resolved write access. Shared with the
+ * local pre-lookup question so a granted listener never depends on a redundant permission read.
+ */
+export function localCloseActorAllowed(subset, closeActors) {
+	const login = typeof subset?.sender?.login === "string" ? subset.sender.login.toLowerCase() : null;
+	return login !== null && Array.isArray(closeActors) && closeActors.includes(login);
 }

@@ -67,6 +67,11 @@ Entered permissions are assumptions. The check verifies no delivery signature, m
 starts no job and reserves no money. It saves and logs no comment text. Normal receiver and worker gates
 remain authoritative when an event arrives.
 
+The JSON checker accepts `closeActor` for a GitHub closed issue or PR, using an exact lowercase login
+such as `reconciliation-app[bot]`, to test a local `on.closeActors` grant. The browser form does not
+supply that login; its result says when the grant could not be tested. Entered identity and permission
+remain hypothetical and cannot authorize a real job.
+
 ## Trigger types: what fires each one, and what it runs
 
 pi-dispatch is the trigger layer. Every entry is one `{ on, run }` pair: **`on` is what fires it**, and
@@ -217,6 +222,16 @@ name matches. A listed reviewer may wake this command even when their associatio
 collaborator gate still works, and the deployment's own identity is always refused. `reviewState`, label predicates
 and the empty Comment-review rule still apply. Other event types and forge jobs cannot use this exception.
 
+For a GitHub local command on `issue` or `pull_request` with `"action": ["closed"]`, `on.closeActors`
+adds the same bounded list of exact lowercase logins to the closer-permission gate. For example,
+`"closeActors": ["reconciliation-app[bot]"]` lets that App wake the command when it closes or merges an
+item, even if GitHub's collaborator API reports its permission as `none`. The authenticated sender's
+login is compared without case. Unlisted actors still need ordinary write permission; the self guard
+and any configured item number still apply. The grant cannot authorize a forge job, and a merged flag
+alone grants nothing. Only name actors whose close events should execute this reviewed command under
+its existing credentials and budget. Upgrade all workers, receivers and consoles before adding this
+version-10 field. Removing or changing the list invalidates its pending command definition.
+
 The receiver reports `accepted` once the signal is durable, with accepted and coalesced counts. It does not claim
 a container has started or a queue job already exists. A store failure returns 503; polling leaves its cursor before
 the failed signal. Duplicate deliveries do not reset the quiet interval, and restarts preserve pending work.
@@ -225,7 +240,7 @@ command or destination. A fresh matching delivery replaces an unclaimed generati
 changed, or whose cancellation was recorded. It gets a new generation; an old queue entry refuses before spend.
 An active generation keeps its ownership, with at most one successor. Production admission and state transitions
 use Valkey's clock, so different machine clocks do not reset the quiet interval. Upgrade every reader before using
-these version-5 fields; see [Upgrading](upgrading.md).
+the version-5 local event fields or version-10 `closeActors`; see [Upgrading](upgrading.md).
 
 Cancelling a local event generation clears the successor present when cancellation is accepted. A later new
 delivery remains eligible. If cancellation times out, the CLI, panel and console say that cancellation may have
@@ -377,6 +392,10 @@ issue's own
 author can close it with no access at all. On GitLab and Forgejo the existing member lookup already
 checks the sender, who is the closer.
 
+A GitHub local command can explicitly add named close actors as described under
+[local event commands](#a-forge-event-running-a-local-command). That exception does not apply to the
+ordinary forge jobs in these examples.
+
 Spending is written into the file itself. After the run record exists, the worker adds
 `"disarmed": { "at": ..., "jobId": ... }` to the entry's `on`. The entry is never deleted, because run
 history refers to triggers by their position in the file. A spent entry still shows in the panel with a
@@ -407,7 +426,9 @@ field, a top-level block or a value (a new `on.type`, a new `waitFor` condition,
 release would misread (a field whose absence would let a job run wider than the file says, or a value it would refuse
 as broken). `run.excludeExtensions` or `run.excludeExtensionTools` needs version 2; `idleTimeoutMinutes`,
 `stallTimeoutMinutes` or `maxMinutes` needs version 3; `mayMerge` needs version 4; local event commands and
-`run.worker` need version 5; `modelSelection` needs version 6; `privateEndpoints` needs version 7. A file without a field or value
+`run.worker` need version 5; `modelSelection` needs version 6; `privateEndpoints` needs version 7;
+`secretFiles` and file bundles need version 8; `auxiliaryModels` needs version 9; local `on.closeActors`
+needs version 10. A file without a field or value
 needing a newer version still needs only version 1. A
 file that uses such a field or value with a lower `version`, or with none, is refused like any malformed file.
 

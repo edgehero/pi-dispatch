@@ -155,7 +155,7 @@ test("no key the loader or a worker reads is a near miss of an exclusion's: ever
 });
 
 test("each field needs file version 2 by itself: an older loader would drop it, so one written by hand with no stamp refuses, and the writer stamps it", () => {
-	assert.equal(TRIGGERS_FILE_VERSION, 9, "explicit auxiliary model grants need 9; these two still need 2 by themselves");
+	assert.equal(TRIGGERS_FILE_VERSION, 10, "local close-actor grants need 10; these two still need 2 by themselves");
 	assert.deepEqual(TRIGGER_RUN_FIELD_VERSIONS, { excludeExtensions: 2, excludeExtensionTools: 2, idleTimeoutMinutes: 3, stallTimeoutMinutes: 3, maxMinutes: 3, mayMerge: 4, worker: 5, modelSelection: 6, privateEndpoints: 7, secretFiles: 8, auxiliaryModels: 9 });
 	for (const field of ["excludeExtensions", "excludeExtensionTools"]) {
 		const entry = KINDS[1][1]({ [field]: ["x"] });

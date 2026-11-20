@@ -394,6 +394,40 @@ test("local signal admission failure holds the polling cursor and retries the sa
 	assert.deepEqual(out.filter(line => line.event === "poll_repo_failed").map(line => line.reason), ["local-event-state-unavailable"]);
 });
 
+test("a polled App close uses its exact local grant and durably retries before advancing the event cursor", async () => {
+	const trigger = { on: { type: "pull_request", forge: "github", id: "app-close", action: ["closed"], closeActors: ["closer-app[bot]"] }, run: { kind: "local", folder: "/srv/automation", command: "sweep", worker: "runner-a" } };
+	const fsDeps = { fileExists: () => true, readFile: () => JSON.stringify({ version: TRIGGERS_FILE_VERSION, triggers: [trigger] }) };
+	const closed = { id: 201, event: "closed", actor: { id: 23, login: "closer-app[bot]" }, issue: ISSUE8 };
+	const calls = [], cursors = [];
+	const clock = { ms: NOW }, redis = fakeRedis({ clock });
+	const { queued, out, fetch } = await runPoller({
+		cycles: 4, fsDeps, clock, redis,
+		localEventStore: { signal: async input => {
+			calls.push(input);
+			if (calls.length === 1) throw new Error("transient-store-failure");
+			return { accepted: true, coalesced: false };
+		} },
+		nap: ms => { cursors.push(redis.kv.get("poll:o/r:cursor:events")); return ms; },
+		routes: [
+			{ path: "/repos/o/r/issues/events", replies: [ghResponse(200, [EV100]), ghResponse(200, [closed, EV100])] },
+			{ path: "/repos/o/r/issues/comments", replies: [ghResponse(200, [])] },
+			{ path: "/repos/o/r/pulls?state=open", replies: [ghResponse(200, [])] },
+			{ path: "/repos/o/r/pulls/8", replies: [ghResponse(200, { ...PR8, merged: true })] },
+		],
+	});
+	assert.deepEqual(queued, []);
+	assert.deepEqual(calls.map(c => c.deliveryId), ["poll-e201", "poll-e201"]);
+	assert.deepEqual(Object.keys(calls[1]), ["trigger", "deliveryId"]);
+	assert.equal(calls[1].trigger.on.id, "app-close");
+	assert.deepEqual(cursors, ["100", "100", "201", "201"]);
+	assertNoRepoFailure(out);
+	assert.deepEqual(out.filter(line => line.event === "poll_close_gate_retry").map(line => line.reason), ["local-event-state-unavailable"]);
+	assert.deepEqual(out.filter(line => line.event === "poll_cycle").map(line => line.localAccepted ?? 0), [0, 0, 1, 0]);
+	assert.equal(fetch.calls.some(call => call.url.includes("/collaborators/")), false, "the App's reviewed grant avoids the collaborator endpoint that reports none");
+	assert.equal(JSON.stringify(out).includes("closer-app[bot]"), false);
+	assert.equal(JSON.stringify(calls).includes(PR8.body), false);
+});
+
 test("review validators wait for the whole sweep: a later App review admission failure cannot hide behind 304", async () => {
 	const trigger = { on: { type: "pull_request", forge: "github", id: "reviews", action: ["review_submitted"], reviewAuthors: ["review-app[bot]"] }, run: { kind: "local", folder: "/srv/automation", command: "sweep", worker: "runner-a" } };
 	const fsDeps = { fileExists: () => true, readFile: () => JSON.stringify({ version: TRIGGERS_FILE_VERSION, triggers: [trigger] }) };

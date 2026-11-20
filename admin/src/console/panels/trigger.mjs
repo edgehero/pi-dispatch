@@ -96,7 +96,9 @@ export function triggerOn(v) {
       ...(t.runKind === "local" ? [
         ["Trigger ID", t.id],
         ["Debounce", `${t.debounceSeconds}s quiet; at most one pending follow-up`],
-        ["Extra review authors", isAgent(v) ? AGENT_UNREAD : t.reviewAuthors?.join(", ") ?? "none"],
+        ...(t.type === "issue" || t.action?.includes("closed")
+          ? [["Extra close actors", isAgent(v) ? AGENT_UNREAD : t.closeActors?.join(", ") ?? "none"]]
+          : [["Extra review authors", isAgent(v) ? AGENT_UNREAD : t.reviewAuthors?.join(", ") ?? "none"]]),
         ["Command input", "No event text is passed; the command reads the state it needs itself."],
       ] : []),
       [

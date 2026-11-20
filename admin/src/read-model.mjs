@@ -3279,6 +3279,7 @@ export function normalizeTriggerForDisplay(entry) {
       folder: typeof run.folder === "string" ? run.folder : null,
       debounceSeconds: Number.isInteger(on.debounceSeconds) ? on.debounceSeconds : LOCAL_EVENT_DEBOUNCE_DEFAULT,
       ...(Array.isArray(on.reviewAuthors) && { reviewAuthors: on.reviewAuthors.filter((name) => typeof name === "string") }),
+      ...(Array.isArray(on.closeActors) && { closeActors: on.closeActors.filter((name) => typeof name === "string") }),
     } : {}),
     // Prompt text stays in the separate operator read. Optional configuration stays absent when absent.
     ...(typeof run.task === "string" && run.task.trim() !== "" && { task: true }),
