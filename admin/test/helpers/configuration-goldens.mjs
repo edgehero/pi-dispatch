@@ -6,6 +6,7 @@ import { NOW } from "../../../launch/fixture-deployment.mjs";
 import { secretsView } from "../../src/secrets-view.mjs";
 import { readConnections } from "../../src/connections-view.mjs";
 import { loadPageData, parsePageQuery, renderPage } from "../../src/console/pages.mjs";
+import { noSnapshotFleet } from "./no-snapshot.mjs";
 import { consoleProjectFixture } from "./console-project-fixture.mjs";
 import { projectSizeAction } from "../../src/project-view.mjs";
 import { buildHookRun } from "@edgehero/pi-dispatch/hook-runs";
@@ -70,11 +71,11 @@ export async function consoleConnectionsFixture(now, { problem = null, unread = 
   return readConnections({ deploymentDir: "/srv/deployment", paths: {}, env: { RECEIVER_PORT: "4000" }, snapshot, now, redis: {}, reads });
 }
 
-async function draw(page, { role = "operator", readOnly = false, secrets = null, connections = undefined, project = null, status = 200 } = {}) {
+async function draw(page, { role = "operator", readOnly = false, secrets = null, connections = undefined, project = null, status = 200, fleet = null } = {}) {
   const parsed = parsePageQuery(page, page === "project" ? "id=billing" : "");
   assert.ok(!parsed.refusal, `${page}: fixture query is valid`);
   const data = await loadPageData(page, parsed.query, {
-    now: () => NOW, env: {}, fleet: { snapshot: async () => ({ parked: [] }), parkedCount: async () => 0 },
+    now: () => NOW, env: {}, fleet: fleet ?? { snapshot: async () => ({ parked: [] }), parkedCount: async () => 0 },
     secretsView: async () => secrets ?? consoleSecretsFixture(NOW),
     connections: async () => connections === undefined ? await consoleConnectionsFixture(NOW) : connections,
     setup: () => ({ enabled: true, actions: ["setup-provider-key", "setup-provider-key-replace"] }),
@@ -89,6 +90,10 @@ const connection = async (options, role = "operator", readOnly = false) => draw(
 const project = (change = () => {}, role = "operator", readOnly = false) => { const value = consoleProjectFixture(NOW); change(value); return draw("project", { project: value, role, readOnly }); };
 
 export const CONFIGURATION_DRAW = Object.freeze({
+  // Issue #844: /config over a Valkey that does not answer. The file-backed cards and their tab counts come from the
+  // files; the secret cards, whose facts are Valkey's too, say they could not be read.
+  "config-no-snapshot.operator": () => draw("config", { fleet: noSnapshotFleet() }),
+  "config-no-snapshot.viewer": () => draw("config", { role: "viewer", fleet: noSnapshotFleet() }),
   "secrets-populated.operator": () => secret({}),
   "secrets-populated.viewer": () => secret({}, "viewer"),
   "secrets-readonly.operator": () => secret({}, "operator", true),

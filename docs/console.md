@@ -873,7 +873,7 @@ returns the room within five seconds after its runtime reports the container gon
 
 Retained workspaces are the worker's cached inventory, read at most once a minute, newest 32 with any remainder
 counted. Their deadline and pin are published facts. The inventory does not say whether an interactive shell is
-open; run `pi-dispatch sandbox --list` on that host for that. Retention off is named; an inventory that was not published or could not be read is never shown as an empty list. Local and Podman runs offer a shell command; OpenShell venues explain why they have none.
+open; run `pi-dispatch sandbox --list` on that host for that. Retention off is named; an inventory that was not published or could not be read is never shown as an empty list. When the hosts themselves could not be read, the page says the host is not known, never that it has gone. Local and Podman runs offer a shell command; OpenShell venues explain why they have none.
 
 Open a venue for the full declaration table. A declaration is the build's table; host observations were read when
 that worker started. A conditional enforced word becomes asserted where its observation does not hold, which can
@@ -986,8 +986,10 @@ them." (which then stands in for "Nothing needs you."). On a deployment that has
 many steps stand before the first one ([First run](#first-run)), and when Valkey cannot be read, that it could not be
 and the next refresh tries again. The console keeps running while Valkey is down, restarts, stops answering or is refused,
 started that way or not, and within about 30 seconds of Valkey answering its pages read it again, with no restart of the
-console. While Valkey stays down, some pages draw what they could not read as empty or missing: a live host as gone, no triggers
-or no triggers file, nothing to answer. Trust them again once it answers.
+console. While Valkey stays down, a page says "not known" for what it could not read and still shows what the
+deployment's files hold: a host page says the hosts could not be read rather than that the host has gone, Set up counts
+the steps it could not judge as not known, Triggers lists the file's rules without their next fires, Configuration shows
+its files read-only, and Parked and Sandboxes show no count of what they did not read.
 
 A change that timed out before it left the console is not made when Valkey returns. One that reached a Valkey which then
 stopped answering may or may not have been made, and the confirm and its audit row say so. Adopting or undoing a package and
@@ -1377,7 +1379,10 @@ The steps keep this order:
    `pi-dispatch setup github --webhook-url '<receiver URL>'`, or `--no-webhook` for polling. Browser App creation
    remains open in `OQ-054`; the console's CSP is unchanged.
 
-Ready, Starting, Not yet, Check, To do and Optional are distinct. An accepted worker start stays Starting until
+Ready, Starting, Not yet, Check, To do and Optional are distinct. A step the console could not read says Not known
+instead, and the count names those apart ("3 of 8 ready · 4 not known"): with Valkey down that is the worker, egress
+and provider steps, and the forge step when the triggers file holds a forge trigger (it stays Optional when the file
+holds only cron triggers). The trigger step still reads the triggers file. An accepted worker start stays Starting until
 a fresh heartbeat arrives; a 90-second wait ends in a named timeout with recovery. Provider, egress and forge readiness separately use
 fresh doctor observations. Partial, stale
 or missing records cannot make a step Ready. Every role sees the safe live steps; viewer and agent pages have

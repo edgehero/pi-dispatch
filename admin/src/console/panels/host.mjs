@@ -25,6 +25,8 @@ import {
   beatAgeOf,
   canAct,
   doctorFromSetup,
+  HOSTS_UNREAD_TEXT,
+  hostsUnread,
   runLink as recordLink,
   timeHtml,
 } from "./common.mjs";
@@ -68,6 +70,15 @@ const card = (title, fn) => (v) =>
 const digestOrphanObservation = (job) =>
   html`Orphaned hold observed${job.s ? html` at ${timeHtml(job.s)}` : " at an unpublished time"}; its origin is not known from the published digest`;
 const gone = html`<p class="note"> This host has no live registry row. Its last run records, queued jobs and retained doctor result can still be shown. </p>`;
+// Issue #844: no row because nothing was read about the hosts is not a host that has gone, so no card says "gone",
+// "no record" or "no result" of it. Only a read that showed no row does.
+const unreadOf = (v) => hostsUnread(v.data?.snapshot);
+const notKnown = html`<p class="note">${HOSTS_UNREAD_TEXT}</p>`;
+const goneOf = (v) => (unreadOf(v) ? notKnown : gone);
+// A history that failed (null), or an empty one whose fleet mirror was not read: the reader does not throw in an
+// outage, it answers no runs and a mirror that is neither "ok" nor "off". Neither is a host no record names.
+const historyUnread = (history) =>
+  history === null || (history !== undefined && !history.records?.length && typeof history.mirror === "string" && !["ok", "off"].includes(history.mirror));
 
 /** A published id can be a digest; that never becomes a guessed container name. */
 export function orphanCommand(job) {
@@ -125,6 +136,11 @@ export const hostState = (v) => {
   const doctor = doctorHostsOf(v.data?.snapshot).find(
     (row) => row.name === label(v),
   );
+  if (!h && unreadOf(v))
+    return ui.card({
+      tint: "attention",
+      body: html`<div class="hd-state"><span class="tile tone-attention">${ui.icon("beat")}</span><div class="hd-state__t"><h2>Host not known</h2><p>The hosts could not be read, so nothing here says whether ${label(v)} is live, late or gone. The next refresh tries again.</p></div></div>`,
+    });
   return ui.card({
     tint: "attention",
     body: html`<div class="hd-state"><span class="tile tone-attention">${ui.icon("beat")}</span><div class="hd-state__t"><h2>${!h ? "Host has gone" : late ? `Stale: no beat for ${age === null ? "an unknown time" : ageText(age)}` : ["failed", "stalled"].includes(h.consumerHealth?.state) ? "Queue consumer needs attention" : "Host needs attention"}</h2><p>${consumerHealthText(h?.consumerHealth)}</p>${unread ? html`<p>${REGISTRY_UNREAD_TEXT}</p>` : null}${h ? html`${late ? html`<p>Heartbeat late: ${age === null ? "age not known" : ageText(age)} (expected within 1m). The worker beats every 15s; routing stops after three missed beats. Jobs already in its own queue wait for it.${doctor && doctorStale(doctor) ? ` Doctor on ${h.name} is also ${ageText(doctor.ageMs)} old.` : ""}</p>` : null}${h.noExpiry ? html`<p>${HOST_NO_EXPIRY_TEXT}</p>` : null}${skew === null ? null : html`<p>${skew}</p>`}${h.jobsUnreadable ? html`<p>${JOBS_UNREAD_TEXT}</p>` : null}<p>${h.routes === false || h.routes === "false" ? "This host has no routing queue; it still takes shared jobs." : "This host takes its own routed jobs and shared jobs."}</p>` : gone}</div>${h && late && canAct(v) && h.routes !== false && h.routes !== "false" ? html`<div class="hd-state__a">${ui.actForm({ action: "queue-pause", hidden: [["queue", hostQueueName(h.name)]], label: `Pause ${hostQueueName(h.name)}`, kind: ["danger", "sm"] })}</div>` : null}</div>`,
@@ -203,7 +219,7 @@ export const hostJobs = card("Jobs on the host", (h, v) => {
     stack: true,
     heads: ["Project and job", "Size", "How long", "State", "Action"],
     rows,
-    empty: "No running, orphaned or waiting job was read for this host.",
+    empty: v.data?.snapshot ? "No running, orphaned or waiting job was read for this host." : "Not known: the jobs on this host could not be read.",
   })}${
     h?.jobsUnreadable
       ? html`<p>The host's running-job list is unreadable.</p>`
@@ -213,7 +229,9 @@ export const hostJobs = card("Jobs on the host", (h, v) => {
       ? html`<p>${h.jobsMore} more running jobs were not listed.</p>`
       : null
   }${
-    !s.waiting || s.waiting.unreachable
+    !v.data?.snapshot
+      ? null
+      : !s.waiting || s.waiting.unreachable
       ? html`<p>Waiting jobs could not be read.</p>`
       : s.waiting.truncated
         ? html`<p>Not every waiting job was read.</p>`
@@ -222,7 +240,7 @@ export const hostJobs = card("Jobs on the host", (h, v) => {
 });
 
 export const hostSandboxes = card("Sandboxes left on the host", (h, v) => {
-  if (!h) return gone;
+  if (!h) return goneOf(v);
   const orphans = jobsOf(h).filter((j) => j.o);
   const sandboxes = Array.isArray(h.sandboxes) ? h.sandboxes : [];
   const sandboxesKnown = Array.isArray(h.sandboxes);
@@ -353,7 +371,7 @@ const seedText = (value) =>
       : "The old-container listing was not published.";
 
 export const hostBudget = card("Slots and budget", (h, v) => {
-  if (!h) return gone;
+  if (!h) return goneOf(v);
   const orphans = jobsOf(h).filter((j) => j.o).length;
   const running = jobsOf(h).length - orphans;
   const slots = num(h.concurrency);
@@ -600,7 +618,7 @@ export const hostRow = card("Registry row", (h, v) =>
           ? html`<p class="warn"> This row has no expiry and may outlive its host. </p>`
           : null
       }`
-    : html`${gone}${
+    : html`${goneOf(v)}${
         v.data?.hostHistory?.records?.length
           ? html`<p> Last seen ${(() => {
               const record = v.data.hostHistory.records[0];
@@ -609,7 +627,9 @@ export const hostRow = card("Registry row", (h, v) =>
                 ? timeHtml(at)
                 : "at an unrecorded time";
             })()} in ${v.data.hostHistory.records.length} retained run records. </p>`
-          : html`<p>No retained run record names this host.</p>`
+          : historyUnread(v.data?.hostHistory)
+            ? html`<p>This host's run records could not be read.</p>`
+            : html`<p>No retained run record names this host.</p>`
       }`,
 );
 
@@ -638,7 +658,11 @@ export const hostDoctor = (v) => {
   const problems = d ? doctorProblems(d) : [];
   const hidden =
     Math.max(0, problems.length - DOCTOR_CHECKS_SHOWN) + Number(d?.more ?? 0);
-  const state = !d
+  // A doctor read that failed, or no snapshot, is not a host that published no result.
+  const doctorUnread = !v.data?.snapshot || Boolean(s.doctor?.unreachable);
+  const state = !d && doctorUnread
+    ? html`<p>Not known: the doctor results could not be read. The next refresh tries again.</p>`
+    : !d
     ? html`<p>No doctor result published by this host. Run doctor on this host to publish its result.</p>`
     : d.unreadable
       ? html`<p>Its published result cannot be read (a worker of another version may have written it).</p>`

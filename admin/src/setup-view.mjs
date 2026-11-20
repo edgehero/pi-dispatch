@@ -47,9 +47,9 @@ export function setupFacts(raw, { role = "viewer" } = {}) {
 }
 
 /** A direct setup page survives the overview's first-run predicate and refuses to promote uncertain observations. */
-export function setupState(snapshot, { role = "viewer", deployment = null, facts = null, now = 0 } = {}) {
+export function setupState(snapshot, { role = "viewer", deployment = null, facts = null, now = 0, files = null } = {}) {
   const safe = setupFacts(facts, { role });
-  const state = firstRunState(snapshot, { session: { role }, deployment });
+  const state = firstRunState(snapshot, { session: { role }, deployment, files });
   const doctorRows = doctorHostsOf(snapshot);
   const incomplete = snapshot?.doctor?.unreachable || snapshot?.doctor?.partial || (snapshot?.doctor?.more ?? 0) > 0 || doctorRows.some(row => row.unreadable || doctorStale(row) || !Number.isSafeInteger(row.ageMs));
   const steps = state.steps.map(step => {
@@ -58,12 +58,13 @@ export function setupState(snapshot, { role = "viewer", deployment = null, facts
     const progress = safe.progress.filter(item => item.step === step.id).at(-1);
     if (progress && progress.state === "starting") {
       const timedOut = progress.atMs !== null && now - progress.atMs > 90_000;
-      next = { ...next, state: timedOut ? "check" : "starting", sentence: [timedOut ? "The readiness wait timed out. Inspect the service and run doctor; a successful start alone does not prove readiness." : SETUP_PROGRESS_STAGES[progress.stage] ?? "The host operation is starting. Waiting for published readiness evidence."] };
+      next = { ...next, unread: false, state: timedOut ? "check" : "starting", sentence: [timedOut ? "The readiness wait timed out. Inspect the service and run doctor; a successful start alone does not prove readiness." : SETUP_PROGRESS_STAGES[progress.stage] ?? "The host operation is starting. Waiting for published readiness evidence."] };
     }
-    if (progress?.state === "timeout") next = { ...next, state: "check", sentence: ["The readiness wait timed out. Inspect the host and run doctor before treating this step as ready."] };
+    if (progress?.state === "timeout") next = { ...next, unread: false, state: "check", sentence: ["The readiness wait timed out. Inspect the host and run doctor before treating this step as ready."] };
     return { ...next, progress };
   });
-  return { ...state, ready: steps.filter(step => step.state === "ready").length, steps, facts: safe };
+  // `unknown` (issue #844): the steps that could not be read, which a host operation's own words no longer are.
+  return { ...state, ready: steps.filter(step => step.state === "ready").length, unknown: steps.filter(step => step.unread === true).length, steps, facts: safe };
 }
 
 export const SETUP_STATES = Object.freeze({ ...FIRST_RUN_STATES, starting: Object.freeze({ word: "Starting", status: "running" }) });

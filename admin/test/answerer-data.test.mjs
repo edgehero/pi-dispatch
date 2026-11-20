@@ -206,3 +206,15 @@ test("retained answerer statistics distinguish human sends, edits, drops and pas
   assert.equal(stats.jobs, 3);
   assert.ok(Math.abs(stats.costUsd - 0.009) < 1e-9);
 });
+
+test("a triggers file that does not load gives an operator no standing list, where a loaded one with none gives an empty list", async () => {
+  const { paths, service } = setup();
+  assert.deepEqual((await service.read({ role: "operator" })).standing.map((answer) => answer.id), fixture.standing.map((answer) => answer.id));
+  writeFileSync(paths.triggersPath, JSON.stringify({ triggers: [] }));
+  assert.deepEqual((await service.read({ role: "operator" })).standing, [], "a file that loaded and holds none");
+  writeFileSync(paths.triggersPath, "{ not json");
+  const got = await service.read({ role: "operator" });
+  assert.equal(got.state, "configuration-unavailable");
+  assert.ok(!Object.hasOwn(got, "standing"), "no list, so the page cannot say none was adopted");
+  assert.deepEqual(got.rules, []);
+});

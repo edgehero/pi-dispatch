@@ -1,4 +1,5 @@
 import { SETUP_DRAW } from "./setup-goldens.mjs";
+import { noSnapshotFleet } from "./no-snapshot.mjs";
 import { MODELS_DRAW } from "./models-goldens.mjs";
 import { ANSWERER_DRAW, AGENT_OVERVIEW_DRAW } from "./answerer-goldens.mjs";
 import { SANDBOX_DRAW } from "./sandbox-goldens.mjs";
@@ -499,10 +500,11 @@ async function runsLive({ page = { runs: RUNS_PAGE_RUNS, mirror: "ok", next: nul
 const parkedRow = (over) => ({ jobId: "gh-2f6a", kind: "github", target: "acme/api#131", project: "api", parkedAt: NOW - 26 * MIN, ageMs: 26 * MIN, answered: false, chainCount: 1, pendingScan: { jobId: null }, ...over });
 
 /** The parked page with the stream open, over a snapshot whose `parked` list is `rows` and a planner check answering `check`. */
-async function parkedLive(rows, { check = { ok: true }, session = OPERATOR } = {}) {
+async function parkedLive(rows, { check = { ok: true }, session = OPERATOR, down = false } = {}) {
   const snapshot = { ...SNAPSHOT, parked: rows };
-  const fleet = { snapshot: async () => snapshot, parkedAnswerCheck: async () => check };
-  const data = await loadPageData("parked", {}, { fleet, now: () => NOW });
+  // `down` (issue #844): Valkey does not answer, so neither the snapshot nor the answer store is read.
+  const fleet = down ? noSnapshotFleet() : { snapshot: async () => snapshot, parkedAnswerCheck: async () => check };
+  const data = await loadPageData("parked", {}, { fleet, now: () => NOW, ...(down ? { answerer: { read: async () => { throw new Error("Valkey does not answer"); } } } : {}) }, down ? { role: session.role } : {});
   const ctx = { query: {}, session: { name: session.name, role: session.role }, data, readOnly: false, theme: null, flash: null, maxStreams: MAX_STREAMS };
   const out = await renderPage("parked", ctx);
   assert.equal(out.status, 200);
@@ -1153,6 +1155,8 @@ const DRAW = {
   "parked-being-answered.operator": async () => parkedLive([parkedRow({ pendingScan: { jobId: "gh-3c88" } })]),
   "parked-unknown.operator": async () => parkedLive([parkedRow({ pendingScan: { unknown: true } })]),
   "parked-empty.viewer": async () => parkedLive([], { session: VIEWER }),
+  "parked-no-snapshot.operator": async () => parkedLive([], { down: true }),
+  "parked-no-snapshot.viewer": async () => parkedLive([], { session: VIEWER, down: true }),
   // ErrorPage: a run id the console looked for everywhere and did not find, the search holding it.
   "run-not-found.operator": async () => runNotFoundPage(OPERATOR),
   "run-not-found.viewer": async () => runNotFoundPage(VIEWER),

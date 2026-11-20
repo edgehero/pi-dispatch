@@ -139,10 +139,17 @@ function statsOf(records, weekStart, now, incomplete, subscriptions, pricing) {
   return { runs30d: records.length, weekRuns: week.length, weekCostMicros: costs.reduce((sum, n) => sum + (n ?? 0), 0), weekCost: cost, incomplete, costIncomplete: costs.some((n) => n === null) };
 }
 
+/** Said once on the page where the fleet's Valkey was not read: the rules below are the files', the schedule facts unknown. */
+export const SCHEDULERS_UNREAD_TEXT = "Valkey could not be read: next fires, owning hosts and stall counts are not known. The rules shown are the triggers file's.";
+
 /**
  * Explicit schema shared with the page: rows/groups, unfiltered counts, next fire, typed weekly spend, rolling
  * seven-day lanes and quiet intervals. Records are a bounded retained view; only coverage.complete:true asserts
  * a full requested history. A missing read is null, never a fabricated empty history.
+ *
+ * `snapshot.schedulersUnread` (issue #844) marks a snapshot made of the files alone, the fleet's Valkey unread: the
+ * rules, quiet windows and staged packages are the files', and what only Valkey says of a schedule (its next fire,
+ * owning hosts, zone and stall count) is `unread`, never "not published". The result carries `schedulersUnread`.
  */
 export function triggerListOf({ snapshot = null, records = null, coverage = {}, now, subscriptions = [], pricing = PRICING, scheduleZones = {} } = {}) {
   if (!Number.isSafeInteger(now)) throw new TypeError("triggerListOf requires the caller's clock");
@@ -151,7 +158,9 @@ export function triggerListOf({ snapshot = null, records = null, coverage = {}, 
   const end = dayStart + 7 * DAY;
   const view = snapshot?.triggers;
   const problems = ["History uses saved row, type and forge, or a cron id. Editing or renumbering rules can associate runs from an older configuration; these are not stable rule identities."];
+  const schedulersUnread = snapshot?.schedulersUnread === true;
   if (!Array.isArray(view?.triggers)) problems.push("The triggers file is not available; rule facts are unknown.");
+  if (schedulersUnread) problems.push(SCHEDULERS_UNREAD_TEXT);
   const raw = (view?.triggers ?? []).filter((t) => TYPES.has(t?.type) && Number.isSafeInteger(t?.index) && t.index >= 0);
   const rules = raw.map(ruleOf);
   if (Number.isSafeInteger(view?.count) && view.count > (view?.triggers?.length ?? 0)) problems.push("Some file rows cannot be displayed; rule counts are incomplete.");
@@ -181,8 +190,8 @@ export function triggerListOf({ snapshot = null, records = null, coverage = {}, 
     const zone = typeof spec === "string" ? spec : typeof spec?.zone === "string" ? spec.zone : null;
     const hosts = Array.isArray(spec?.hosts) ? spec.hosts.filter(h => typeof h === "string" && /^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(h)).slice(0, 64) : [];
     return { trigger, index: trigger.index, group: trigger.type === "cron" ? "schedule" : trigger.forge ?? "unknown", stats: statsOf(own, weekStart, now, incomplete, subscriptions, pricing), lastRun: own?.[0] ? recordOf(own[0]) : null,
-      nextFire: trigger.type === "cron" ? { at, health: stalls !== null && stalls >= stallLimit ? "stalled" : at === null ? "unknown" : at < now ? "overdue" : "on-time", stalls, stallLimit, hosts: scheduleConflict || schedulers.length === 0 ? [] : hosts, zone: scheduleConflict || schedulers.length === 0 ? null : zone, problem: schedulerProblem } : null,
-      chips: chipsOf(trigger, (snapshot?.stagedPackages?.packages?.length ?? 0) > 0), unknown: [...(trigger.displayCut ? ["Some selector or option names are omitted from this bounded display."] : []), ...(own === null ? ["History unavailable"] : []), ...(trigger.type === "cron" && at === null ? [schedulerProblem ?? "Scheduler next fire unavailable"] : [])] };
+      nextFire: trigger.type === "cron" && schedulersUnread ? { at: null, health: "unknown", stalls: null, stallLimit, hosts: [], zone: null, problem: null, unread: true } : trigger.type === "cron" ? { at, health: stalls !== null && stalls >= stallLimit ? "stalled" : at === null ? "unknown" : at < now ? "overdue" : "on-time", stalls, stallLimit, hosts: scheduleConflict || schedulers.length === 0 ? [] : hosts, zone: scheduleConflict || schedulers.length === 0 ? null : zone, problem: schedulerProblem } : null,
+      chips: chipsOf(trigger, (snapshot?.stagedPackages?.packages?.length ?? 0) > 0), unknown: [...(trigger.displayCut ? ["Some selector or option names are omitted from this bounded display."] : []), ...(own === null ? ["History unavailable"] : []), ...(trigger.type === "cron" && at === null && !schedulersUnread ? [schedulerProblem ?? "Scheduler next fire unavailable"] : [])] };
   });
   const counts = { all: rows.length, schedule: rows.filter((r) => r.trigger.type === "cron").length, label: 0, comment: 0, pull_request: 0, issue: 0, watch: (view?.triggers ?? []).filter((t) => t.type === "watch").length, spent: rows.filter((r) => r.trigger.disarmed).length };
   for (const type of ["label", "comment", "pull_request", "issue"]) counts[type] = rows.filter((r) => r.trigger.type === type).length;
@@ -199,7 +208,8 @@ export function triggerListOf({ snapshot = null, records = null, coverage = {}, 
     const shownObserved = observed.slice(0, Math.floor(TRIGGER_LIST_LIMITS.occurrences / 2));
     const shownProjected = projected.occurrences.slice(0, TRIGGER_LIST_LIMITS.occurrences - shownObserved.length);
     const cut = observed.length > shownObserved.length || projected.occurrences.length > shownProjected.length;
-    return { index: r.index, id: r.trigger.id, zone: r.nextFire.zone, occurrences: [...shownObserved, ...shownProjected], incomplete: projected.incomplete || incomplete || cut, problem: projected.problem ?? (cut ? "Only a bounded selection of recorded runs and projected ticks is shown." : null) };
+    // An unread zone is not an unpublished one: the lane says why it projects nothing.
+    return { index: r.index, id: r.trigger.id, zone: r.nextFire.zone, occurrences: [...shownObserved, ...shownProjected], incomplete: projected.incomplete || incomplete || cut, problem: (r.nextFire.unread && r.nextFire.zone === null ? "The owning host's timezone could not be read; further schedule times are unknown." : projected.problem) ?? (cut ? "Only a bounded selection of recorded runs and projected ticks is shown." : null) };
   });
   const windows = Array.isArray(snapshot?.pauseWindows?.windows) ? snapshot.pauseWindows.windows : null;
   const formatters = new Map();
@@ -208,5 +218,5 @@ export function triggerListOf({ snapshot = null, records = null, coverage = {}, 
   if ((windows?.length ?? 0) > TRIGGER_LIST_LIMITS.quietWindows) problems.push("Only the first quiet windows are projected.");
   if (scheduled.length > TRIGGER_LIST_LIMITS.lanes) problems.push("Only the first schedule lanes are projected.");
   const attributed = Array.isArray(view?.triggers) ? kept?.filter((r) => rules.some((t) => recordMatchesTrigger(r, t))) ?? null : null;
-  return { now, rows, groups, counts, next, weekStart, stats: statsOf(attributed, weekStart, now, incomplete, subscriptions, pricing), week: { start: dayStart, end, zone: "UTC", label: "Next 7 days, UTC", lanes, quiet, quietUnknown: windows === null, quietCut: Math.max(0, (windows?.length ?? 0) - TRIGGER_LIST_LIMITS.quietWindows), lanesCut: Math.max(0, scheduled.length - TRIGGER_LIST_LIMITS.lanes) }, coverage: { complete: !incomplete, records: kept?.length ?? null }, problems };
+  return { now, rows, groups, counts, next, weekStart, stats: statsOf(attributed, weekStart, now, incomplete, subscriptions, pricing), week: { start: dayStart, end, zone: "UTC", label: "Next 7 days, UTC", lanes, quiet, quietUnknown: windows === null, quietCut: Math.max(0, (windows?.length ?? 0) - TRIGGER_LIST_LIMITS.quietWindows), lanesCut: Math.max(0, scheduled.length - TRIGGER_LIST_LIMITS.lanes) }, coverage: { complete: !incomplete, records: kept?.length ?? null }, problems, schedulersUnread };
 }

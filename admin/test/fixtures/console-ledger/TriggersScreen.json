@@ -51,6 +51,7 @@
     {"el":"Add a trigger opens the existing editor from the title bar","kind":"readme","status":"new","source":"admin/src/console/pages.mjs#renderPage","golden":["triggers.operator"],"shows":"Add a trigger"},
     {"el":"Filter pills with glyphs","kind":"readme","status":"illustrative","reason":"the page's pills carry words and counts"},
     {"el":"Schedule rows headed by a sentence","kind":"readme","status":"illustrative","reason":"the page shows the cron pattern with its next fires"},
-    {"el":"Local command listeners match independently and a hypothetical reviewer login checks explicit authority","kind":"readme","status":"new","source":"admin/src/trigger-check.mjs#checkTriggerEvent","reason":"Issue #911 uses the same pure receiver listener verdicts, with no delivery, queue or command execution.","golden":["panels/trigger-check-match.viewer"],"shows":["Reviewer login (optional)"]}
+    {"el":"Local command listeners match independently and a hypothetical reviewer login checks explicit authority","kind":"readme","status":"new","source":"admin/src/trigger-check.mjs#checkTriggerEvent","reason":"Issue #911 uses the same pure receiver listener verdicts, with no delivery, queue or command execution.","golden":["panels/trigger-check-match.viewer"],"shows":["Reviewer login (optional)"]},
+    {"el":"A Valkey that could not be read leaves the file's rules, with next fires, owning hosts and stall counts not known","kind":"state","status":"new","panel":"p-tr-count","source":"admin/src/console/panels/triggers.mjs#triggersCount","golden":["panels/triggers-no-snapshot.operator"],"shows":"Valkey could not be read: next fires, owning hosts and stall counts are not known"}
   ]
 }

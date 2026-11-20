@@ -870,7 +870,8 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
       triggerList: async (snapshot) => {
         const [history, zones] = await Promise.all([
           triggerHistory(),
-          m.scheduleZones.readTriggerScheduleZones({ url: side.paths.valkeyUrl, triggers: snapshot?.triggers?.triggers ?? [], now }),
+          // A snapshot of the files alone (issue #844) says the fleet's Valkey was not read: no second wait on it for zones.
+          snapshot?.schedulersUnread === true ? {} : m.scheduleZones.readTriggerScheduleZones({ url: side.paths.valkeyUrl, triggers: snapshot?.triggers?.triggers ?? [], now }),
         ]);
         const mirrored = snapshot?.recordDetails instanceof Map ? [...snapshot.recordDetails.values()] : Array.isArray(snapshot?.runs) ? snapshot.runs : null;
         const records = Array.isArray(history) ? [...history, ...(mirrored ?? [])] : mirrored;
