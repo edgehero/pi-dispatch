@@ -93,5 +93,21 @@ export function createAuthStore({ dir, fs = nodeFs, lock = null, uid = process.g
 			return await fn(read(id), async (row) => { if (compromised) throw authError("auth-store-lock-lost"); write(id, row); });
 		} finally { await release(); }
 	}
-	return { read, transaction };
+	// A directory watch survives the atomic rename of a connection file. It is only a wake-up:
+	// subscribers re-read under the ordinary transaction lock and never trust event contents.
+	function watch(id, changed) {
+		const filename = `${id}.json`;
+		pathFor(id);
+		let degraded = false;
+		const unavailable = () => { if (!degraded) { degraded = true; changed({ watchFailed: true }); } };
+		const watcher = fs.watch(dir, { persistent: false }, (_event, name) => {
+			// A nameless event may be our own lock directory. Treating it as a connection
+			// update can make read -> lock event -> read loop forever; periodic reads remain.
+			if (name === null || name === undefined) unavailable();
+			else if (String(name) === filename) changed();
+		});
+		watcher.on("error", unavailable);
+		return () => watcher.close();
+	}
+	return { read, transaction, watch };
 }

@@ -19,6 +19,22 @@ function fixture({ row = connection, quotaResult = { ok: true }, checkResult, st
 	const runtime = makeSubscriptionRuntime({ auth, quota, now: () => instant, lookup: (provider) => ({ api: provider === "openai" ? "openai-responses" : "anthropic-messages", baseUrl: provider === "openai" ? "https://api.openai.com/v1" : "https://api.anthropic.com" }), packageRootFor: () => stageResult ?? ({ root: "/opt/pi-global/packages/claude", digest: "a".repeat(64) }) });
 	return { runtime, calls, auth };
 }
+
+test("current generation copies only the same route with exactly the existing lease", async () => {
+	const { runtime, auth, calls } = fixture();
+	const snapshot = { ...connection, bindingSignature: "bound", deadlineAt: instant + 20 * 60_000, renewable: true };
+	let patch = { generation: 3 };
+	auth.readSnapshot = async (_provider, options) => {
+		assert.equal(options.deadlineAt, snapshot.deadlineAt);
+		return { ok: true, snapshot: { ...snapshot, ...patch } };
+	};
+	assert.equal((await runtime.current(snapshot)).generation, 3);
+	for (const bad of [{ generation: 2 }, { provider: "openai" }, { connectionId: "other" }, { bindingSignature: "other" }, { adapter: "other" }, { accountGroup: "other" }, { deadlineAt: snapshot.deadlineAt + 1 }, { deadlineAt: snapshot.deadlineAt - 1 }]) {
+		patch = { generation: 3, ...bad };
+		assert.equal(await runtime.current(snapshot), null, JSON.stringify(bad));
+	}
+	assert.deepEqual(calls, [], "neither quota admission nor refresh is invoked");
+});
 test("subscription routes include every finite model and decision role exactly once", () => {
 	assert.deepEqual(subscriptionRoutes({ ...job, models: [...job.models, "openai/gpt"], watchDecisionModel: { provider: "openai", id: "gpt" }, answerDecisionModel: { provider: "other", id: "small" } }), [{ provider: "anthropic", id: "sonnet" }, { provider: "openai", id: "gpt" }, { provider: "other", id: "small" }]);
 });

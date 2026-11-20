@@ -190,9 +190,17 @@ export function makeSubscriptionRuntime({ auth, quota, now = Date.now, lookup = 
 		const prepared = await auth.prepareSnapshot(snapshot.provider, { deadlineAt, signal, renewable: snapshot.renewable === true, extending: true });
 		if (!prepared?.ok || !prepared.snapshot) return prepared?.wait === "subscription-auth" ? { wait: true, until: prepared.until } : null;
 		const next = prepared.snapshot;
-		if (next.connectionId !== snapshot.connectionId || next.bindingSignature !== snapshot.bindingSignature || next.adapter !== snapshot.adapter || next.accountGroup !== snapshot.accountGroup) return null;
+		if (next.provider !== snapshot.provider || next.connectionId !== snapshot.connectionId || next.bindingSignature !== snapshot.bindingSignature || next.adapter !== snapshot.adapter || next.accountGroup !== snapshot.accountGroup) return null;
 		if (snapshot.renewable === true && next.deadlineAt === snapshot.deadlineAt && next.generation === snapshot.generation) return { wait: true, until: Math.max(now() + 60_000, next.refreshAt ?? 0) };
 		return { ...snapshot, ...next };
 	}
-	return { check, inspectPolicy, prepare, validate, observe, usage, status, extend };
+	async function current(snapshot, { signal } = {}) {
+		if (!snapshot || snapshot.deadlineAt <= now() || typeof auth.readSnapshot !== "function") return null;
+		const prepared = await auth.readSnapshot(snapshot.provider, { deadlineAt: snapshot.deadlineAt, signal, renewable: snapshot.renewable === true, extending: true });
+		const next = prepared?.snapshot;
+		if (!prepared?.ok || !next || next.generation <= snapshot.generation || next.deadlineAt !== snapshot.deadlineAt) return null;
+		if (next.provider !== snapshot.provider || next.connectionId !== snapshot.connectionId || next.bindingSignature !== snapshot.bindingSignature || next.adapter !== snapshot.adapter || next.accountGroup !== snapshot.accountGroup) return null;
+		return { ...snapshot, ...next };
+	}
+	return { check, inspectPolicy, prepare, validate, observe, usage, status, extend, current, watch: (snapshot, changed) => auth.watch?.(snapshot.connectionId, changed) };
 }

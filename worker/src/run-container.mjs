@@ -931,6 +931,8 @@ export function makeRunContainer({
 					forge: credentialRefresh.forge ?? null,
 					subscriptions: credentialRefresh.subscriptions ?? [],
 					extend: credentialRefresh.extend,
+					current: credentialRefresh.current,
+					watch: credentialRefresh.watch,
 					now: activityClock,
 					timers: activityTimers,
 					onCredentials: registerCredentials,

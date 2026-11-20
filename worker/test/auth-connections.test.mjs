@@ -18,6 +18,20 @@ function setup(override = {}) {
 	return { service, store, storeDir, adapter };
 }
 
+test("readSnapshot never rotates or writes a marker when the existing bearer cannot cover the requested lease", async () => {
+	let refreshes = 0;
+	const { service, store } = setup({ refresh: async () => { refreshes++; return fresh(); } });
+	await service.login("chatgpt");
+	const before = store.read("chatgpt");
+	const tooLong = await service.readSnapshot("openai", { deadlineAt: instant + 3600_000, renewable: true, extending: true });
+	assert.equal(tooLong.ok, false); assert.equal(refreshes, 0);
+	assert.deepEqual(store.read("chatgpt"), before);
+	const copy = await service.readSnapshot("openai", { deadlineAt: instant + 15 * 60_000, renewable: true, extending: true });
+	assert.equal(copy.snapshot.deadlineAt, instant + 15 * 60_000);
+	assert.equal(copy.snapshot.generation, before.generation);
+	assert.deepEqual(store.read("chatgpt"), before);
+});
+
 test("auth policy rejects unknown version, cross-provider binding, relative roots and unreviewed credit", () => {
 	for (const input of [{ ...policy, version: 2 }, { ...policy, bindings: { anthropic: "chatgpt" } }, { ...policy, connections: [{ ...policy.connections[0], extraUsageCreditMicros: -1 }] }, { ...policy, connections: [{ id: "claude", provider: "anthropic", adapter: "pi-anthropic-oauth@0.3.6", ownerHost: "host-a", root: "relative", digest: "a".repeat(64) }] }]) assert.throws(() => parseAuthConnections(input), /auth-/);
 	assert.equal(parseAuthConnections(policy).connections[0].adapter, "openai-chatgpt");

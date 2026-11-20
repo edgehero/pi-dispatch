@@ -93,7 +93,7 @@ export function writeCredentialDrop(dir, payload, { fs = nodeFs } = {}) {
  *     when a credential that could not be renewed is CREDENTIAL_STOP_BEFORE_MS from running out.
  * Logs `credential_renewed { forge, subscriptions, seq }` and `credential_renew_failed { kind }`, never a value.
  */
-export function makeCredentialRefresher({ dir, forge = null, subscriptions = [], extend = async () => null, now = () => Date.now(), timers = { setInterval, clearInterval }, onExpired = () => {}, onCredentials = () => {}, log = () => {}, renewalTimeout = () => AbortSignal.timeout(CREDENTIAL_RENEW_TIMEOUT_MS), write = (payload) => writeCredentialDrop(dir, payload), checkMs = CREDENTIAL_CHECK_MS }) {
+export function makeCredentialRefresher({ dir, forge = null, subscriptions = [], extend = async () => null, current = null, watch = null, now = () => Date.now(), timers = { setInterval, clearInterval }, onExpired = () => {}, onCredentials = () => {}, log = () => {}, renewalTimeout = () => AbortSignal.timeout(CREDENTIAL_RENEW_TIMEOUT_MS), write = (payload) => writeCredentialDrop(dir, payload), checkMs = CREDENTIAL_CHECK_MS }) {
 	const state = {
 		seq: 0,
 		forge: forge ? { expiresAt: forge.expiresAt, token: null } : null,
@@ -111,6 +111,8 @@ export function makeCredentialRefresher({ dir, forge = null, subscriptions = [],
 	const pending = new Set();
 	const controllers = new Set();
 	const nextChecks = subscriptions.map(() => 0);
+	const syncWanted = new Set();
+	const unwatch = [];
 	const say = (event, fields) => { try { log(event, fields); } catch {} };
 
 	const payload = () => ({
@@ -165,7 +167,7 @@ export function makeCredentialRefresher({ dir, forge = null, subscriptions = [],
 		let abort;
 		// A timed-out rotation may still need to persist its replacement. Keep this
 		// lane occupied until it settles, but neither wait on it nor accept its late result.
-		const work = Promise.resolve().then(() => call(signal)).finally(() => { pending.delete(key); controllers.delete(controller); });
+		const work = Promise.resolve().then(() => call(signal));
 		try {
 			const cancelled = new Promise((_, reject) => {
 				abort = () => reject(new Error("credential renewal ended"));
@@ -180,7 +182,28 @@ export function makeCredentialRefresher({ dir, forge = null, subscriptions = [],
 				publish();
 			}
 		} catch { if (!stopped && !state.expired) failed(kind, provider); }
-		finally { signal.removeEventListener("abort", abort); }
+		finally {
+			signal.removeEventListener("abort", abort);
+			// A timed-out rotation keeps the lane until its durable write settles. A watch arriving
+			// during it is replayed afterwards, never raced against an older extension result.
+			void work.catch(() => {}).finally(() => {
+				pending.delete(key); controllers.delete(controller);
+				for (const i of syncWanted) if (key === `subscription:${i}`) { syncWanted.delete(i); void synchronize(i); }
+			});
+		}
+	}
+	async function synchronize(i) {
+		if (!current || stopped || state.expired) return;
+		const key = `subscription:${i}`;
+		if (pending.has(key)) { syncWanted.add(i); return; }
+		const before = state.subscriptions[i];
+		await renew(key, (signal) => current(before, { signal }), (next) => {
+			if (!next) return false;
+			const present = state.subscriptions[i];
+			if (!subscriptionShaped(subscriptionRow(next)) || next.connectionId !== present.connectionId || next.provider !== present.provider || next.generation <= present.generation || next.deadlineAt !== present.deadlineAt || next.deadlineAt <= now() + CREDENTIAL_STOP_BEFORE_MS) return false;
+			state.subscriptions[i] = { ...present, ...next };
+			return true;
+		}, "subscription", before.provider);
 	}
 	async function check() {
 		checkExpiry();
@@ -197,7 +220,12 @@ export function makeCredentialRefresher({ dir, forge = null, subscriptions = [],
 		}
 		for (let i = 0; i < state.subscriptions.length; i++) {
 			const current = state.subscriptions[i];
-			if (at < current.deadlineAt - SUBSCRIPTION_RENEW_BEFORE_MS || at < nextChecks[i]) continue;
+			if (at < current.deadlineAt - SUBSCRIPTION_RENEW_BEFORE_MS || at < nextChecks[i]) {
+				// The watch is prompt; periodic reads cover missed events without holding up
+				// another provider or the forge's independent renewal lane.
+				work.push(synchronize(i));
+				continue;
+			}
 			work.push(renew(`subscription:${i}`, (signal) => extend(current, { deadlineAt: now() + SUBSCRIPTION_DEADLINE_AHEAD_MS, signal }), (next) => {
 				if (next?.wait === true && Number.isSafeInteger(next.until) && next.until > now()) { nextChecks[i] = next.until; return false; }
 				const usable = next && subscriptionShaped(subscriptionRow(next)) && next.connectionId === current.connectionId && next.provider === current.provider && next.generation >= current.generation && next.deadlineAt > current.deadlineAt && next.deadlineAt > now() + CREDENTIAL_STOP_BEFORE_MS;
@@ -216,11 +244,25 @@ export function makeCredentialRefresher({ dir, forge = null, subscriptions = [],
 		checkExpiry,
 		start() {
 			if (timer !== null || stopped) return;
+			for (let i = 0; i < state.subscriptions.length; i++) {
+				try {
+					const stop = watch?.(state.subscriptions[i], (event) => {
+						if (event?.watchFailed === true) say("credential_watch_unavailable", { kind: "subscription" });
+						void synchronize(i);
+					});
+					if (typeof stop === "function") unwatch.push(stop);
+					else if (current) say("credential_watch_unavailable", { kind: "subscription" });
+				} catch { say("credential_watch_unavailable", { kind: "subscription" }); }
+				// Subscribe before reading: a rotation between admission and start cannot be lost.
+				void synchronize(i);
+			}
 			timer = timers.setInterval(() => void check(), checkMs);
 			timer?.unref?.();
 		},
 		stop() {
 			stopped = true;
+			for (const stop of unwatch.splice(0)) { try { stop(); } catch {} }
+			syncWanted.clear();
 			for (const controller of controllers) controller.abort();
 			if (timer !== null) timers.clearInterval(timer);
 			timer = null;
