@@ -1,5 +1,6 @@
 import { canaryLoadOf } from "./src/package-canary.mjs";
 import { installSubscriptionCredentials } from "./src/subscription-credentials.mjs";
+import { subscriptionRefreshFetch } from "./src/subscription-refresh-fetch.mjs";
 // env-internal PI_SUBSCRIPTION_AUTH: host-approved access snapshot metadata, never an operator override.
 import { verifySubscriptionAuthEntries, installSubscriptionRegistrationGuard } from "./src/community-auth-adapter.mjs";
 import { readQuestionGrouping, executeQuestionGrouping } from "./src/question-grouping.mjs";
@@ -378,7 +379,7 @@ async function main() {
 	let childWatch = null;
 	const stopHandler = meterStopHandler({ onTokenAbort, abort: () => void session?.abort() });
 
-	const failureObserver = installProviderFailureObserver({ ModelRuntime, rootSessionId });
+	const failureObserver = installProviderFailureObserver({ ModelRuntime, rootSessionId, ...(subscriptionCredentials && credentialRefresher ? { fetch: subscriptionRefreshFetch({ credentials: subscriptionCredentials, refresh: () => credentialRefresher.apply() }) } : {}) });
 	const meter = createUsageMeter({
 		maxTokens: cfg.maxTokens,
 		maxCostMicros: cfg.maxCostMicros,
@@ -402,7 +403,7 @@ async function main() {
 	// Built before the guard, whose `external` is every child's spend and in-flight bound as of the last fold. From here
 	// on the exit line carries childTotal, childProcesses and unmeteredChildren, zeros with no children.
 	childWatch = createChildWatch({ dir: childLedger.dir ?? null, meter, guard: () => policyGuard, log });
-	const policyGuard = createPolicyGuard({ maxCostMicros: cfg.maxCostMicros, allowedModels: cfg.allowedModels, log, external: () => childWatch.external(), subscriptionAdmission: subscriptionRegistration ? (provider) => subscriptionRegistration.admitted(provider) : null, subscriptions: subscriptionEntries });
+	const policyGuard = createPolicyGuard({ maxCostMicros: cfg.maxCostMicros, allowedModels: cfg.allowedModels, log, external: () => childWatch.external(), subscriptionAdmission: subscriptionRegistration ? (provider) => subscriptionRegistration.admitted(provider) : null, subscriptions: subscriptionEntries, refreshCredentials: () => credentialRefresher?.apply() });
 	costRefusalWhy = () => policyGuard?.refusedWhy() ?? null;
 	const usageMeter = await installProcessUsageMeter({ ModelRuntime, runtime: modelRuntime, meter, log, guard: policyGuard, children: childWatch });
 	// The price table the meter pinned from this runtime, before any extension loads, handed to pi children (issue #587's

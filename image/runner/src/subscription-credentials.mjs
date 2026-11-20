@@ -14,6 +14,7 @@ const tokenShaped = (provider, token) => typeof token === "string" && token !== 
 
 export function installSubscriptionCredentials({ ModelRuntime, entries, env = process.env, now = Date.now }) {
 	const access = new Map(entries.map((row) => [row.provider, subscriptionAccess(row.provider, env)]));
+	const issued = new Map(entries.map((row) => [row.provider, new Map([[access.get(row.provider), { connectionId: row.connectionId, generation: row.generation, token: access.get(row.provider) }]])]));
 	for (const [provider, token] of access) {
 		if (!tokenShaped(provider, token)) throw new Error("auth-snapshot-invalid");
 	}
@@ -36,6 +37,12 @@ export function installSubscriptionCredentials({ ModelRuntime, entries, env = pr
 		ModelRuntime.prototype[name] = wrapper;
 	}
 	return {
+		issued: (provider, token) => issued.get(provider)?.get(token) ?? null,
+		current(provider) {
+			const entry = entries.find((row) => row.provider === provider);
+			if (!entry || !validateSubscriptionRequest({ provider, api: provider === "openai" ? "openai-responses" : "anthropic-messages", baseUrl: provider === "openai" ? "https://api.openai.com/v1" : "https://api.anthropic.com" }, entries, { now })) return null;
+			return issued.get(provider)?.get(access.get(provider)) ?? null;
+		},
 		uninstall() { for (const [name, { original, wrapper }] of methods) if (ModelRuntime.prototype[name] === wrapper) ModelRuntime.prototype[name] = original; },
 		/**
 		 * Issue #888, part 3: a renewed snapshot for a running job (credential-refresh.mjs). Taken only for the SAME
@@ -54,6 +61,7 @@ export function installSubscriptionCredentials({ ModelRuntime, entries, env = pr
 			entry.deadlineAt = row.deadlineAt;
 			entry.expiresAt = row.expiresAt;
 			access.set(row.provider, row.token);
+			issued.get(row.provider).set(row.token, { connectionId: row.connectionId, generation: row.generation, token: row.token });
 			return true;
 		},
 	};

@@ -2657,7 +2657,7 @@ export function parseDeploymentNameMap(value) {
 	return map;
 }
 
-export function createModelGuard({ allowedModels, log = () => {}, env = process.env, now = Date.now, subscriptionAdmission = null, subscriptions: givenSubscriptions = null }) {
+export function createModelGuard({ allowedModels, log = () => {}, env = process.env, now = Date.now, subscriptionAdmission = null, subscriptions: givenSubscriptions = null, refreshCredentials = () => {} }) {
 	if (!Array.isArray(allowedModels) || allowedModels.length === 0) throw new Error("invalid PI_ALLOWED_MODELS: want a non-empty list");
 	// The operator's own deployment map, read ONCE, now (issue #587's review): the environment the worker gave the job
 	// (PI_FORWARD_ENV, which env-allowlist.mjs tells an Azure operator to use for it). A map that arrives later (a stored
@@ -2712,6 +2712,9 @@ export function createModelGuard({ allowedModels, log = () => {}, env = process.
 	}
 
 	function admit({ method, model, args, legacy = false }) {
+		// Refresh before reading/injecting the authoritative key; doing this inside prepareRequest
+		// instead would make its override guard reject the old key just injected by this guard.
+		refreshCredentials();
 		if (legacy && model?.provider === "anthropic" && subscriptionKeys.has("anthropic")) return refuse(method, "subscription");
 		pending = null;
 		if (method === "classify" && model?.provider === "openai" && subscriptionKeys.has("openai")) return refuse(method, "subscription");
@@ -2802,8 +2805,8 @@ export function createModelGuard({ allowedModels, log = () => {}, env = process.
  * order, so with no list the exit line is byte-identical to before. `unjudged` reaches the cost guard only: it is
  * the cap's counter of displaced compat entries.
  */
-export function createPolicyGuard({ maxCostMicros = null, allowedModels = null, log = () => {}, env = process.env, external = null, now = Date.now, subscriptionAdmission = null, subscriptions = null }) {
-	const model = allowedModels === null ? null : createModelGuard({ allowedModels, log, env, now, subscriptionAdmission, subscriptions });
+export function createPolicyGuard({ maxCostMicros = null, allowedModels = null, log = () => {}, env = process.env, external = null, now = Date.now, subscriptionAdmission = null, subscriptions = null, refreshCredentials = () => {} }) {
+	const model = allowedModels === null ? null : createModelGuard({ allowedModels, log, env, now, subscriptionAdmission, subscriptions, refreshCredentials });
 	// `external` (issue #500) reaches the cost guard only: it is spend, which only a cap judges.
 	const cost = maxCostMicros === null ? null : createCostGuard({ capMicros: maxCostMicros, env, log, external });
 	const guards = [model, cost].filter((guard) => guard !== null);

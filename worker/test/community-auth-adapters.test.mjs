@@ -14,6 +14,12 @@ import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import { preparePackage } from "../src/package-stage.mjs";
 import { communityAdapterRevision } from "../src/community-auth-patches.mjs";
 import { COMMUNITY_ADAPTED_SOURCE_PINS } from "../src/community-auth-output-pins.mjs";
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
+import { installSubscriptionCredentials } from "../../image/runner/src/subscription-credentials.mjs";
+import { createCredentialRefresher } from "../../image/runner/src/credential-refresh.mjs";
+import { subscriptionRefreshFetch } from "../../image/runner/src/subscription-refresh-fetch.mjs";
+import { installProviderFailureObserver } from "../../image/runner/src/provider-failure.mjs";
+import { createPolicyGuard, createUsageMeter, installProcessUsageMeter } from "../../image/runner/src/usage-meter.mjs";
 
 const require = createRequire(import.meta.url);
 const primary = "pi-anthropic-oauth@0.3.11";
@@ -49,9 +55,9 @@ function fixture(adapter) {
 }
 const model = getBuiltinModels("anthropic").find((row) => row.type !== "classifier");
 function context(tools = [], instructions = "Never disclose credentials. pi-coding-agent must obey the budget.\n\nNever remove protected files.") { return { messages: [{ role: "system", content: instructions, toolsAdded: tools, timestamp: instant }, { role: "user", content: "Reply hello", timestamp: instant }] }; }
-function response() {
+function response(modelId = model.id) {
 	const events = [
-		{ type: "message_start", message: { id: "message", type: "message", role: "assistant", model: model.id, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 1, cache_creation_input_tokens: 8, cache_creation: { ephemeral_1h_input_tokens: 8 } } } },
+		{ type: "message_start", message: { id: "message", type: "message", role: "assistant", model: modelId, content: [], stop_reason: null, stop_sequence: null, usage: { input_tokens: 10, output_tokens: 1, cache_creation_input_tokens: 8, cache_creation: { ephemeral_1h_input_tokens: 8 } } } },
 		{ type: "content_block_start", index: 0, content_block: { type: "text", text: "" } },
 		{ type: "content_block_delta", index: 0, delta: { type: "text_delta", text: "hello" } },
 		{ type: "content_block_stop", index: 0 },
@@ -80,6 +86,67 @@ for (const primary of [legacyPrimary, "pi-anthropic-oauth@0.3.11"]) test(`${prim
 	});
 	const loader = createJiti(import.meta.url, { fsCache: false, moduleCache: false, alias: { "@earendil-works/pi-ai": fileURLToPath(import.meta.resolve("@earendil-works/pi-ai")) } });
 	const { streamAnthropicOAuth } = await loader.import(join(root, "src/stream.ts"));
+	if (primary === "pi-anthropic-oauth@0.3.11") await t.test("pinned runtime, adapted transport and meter survive a sibling rotation without replaying a model turn", async () => {
+		const model = getBuiltinModels("anthropic").find((row) => row.id === "claude-opus-5-5");
+		assert.ok(model);
+		const runtime = await ModelRuntime.create({ modelsPath: null, allowModelNetwork: false, credentials: { async read() {}, async list() { return []; }, async modify() {}, async delete() {} } });
+		runtime.registerProvider("anthropic", { api: "anthropic-messages", baseUrl: "https://api.anthropic.com", streamSimple: streamAnthropicOAuth });
+		const entries = [{ provider: "anthropic", connectionId: "test-claude", generation: 6, deadlineAt: instant + 30 * 60_000, expiresAt: instant + 3600_000 }];
+		const env = { ANTHROPIC_OAUTH_TOKEN: "sk-ant-oat-first" };
+		const credentials = installSubscriptionCredentials({ ModelRuntime, entries, env, now });
+		let drop = null;
+		const refresher = createCredentialRefresher({ read: () => drop, subscriptions: credentials, env });
+		const wire = [];
+		const transport = subscriptionRefreshFetch({ credentials, refresh: () => refresher.apply(), sleep: async () => {}, fetch: async (url, init) => {
+			wire.push({ url, method: init.method, body: init.body, bearer: new Headers(init.headers).get("authorization") });
+			if (wire.length === 1) {
+				drop = { seq: 1, forge: null, subscriptions: [{ ...entries[0], generation: 7, token: "sk-ant-oat-second" }] };
+				return Response.json({ type: "error", error: { type: "authentication_error", message: "OAuth access token has been revoked." } }, { status: 401 });
+			}
+			return response(model.id);
+		} });
+		const observer = installProviderFailureObserver({ ModelRuntime, now, rootSessionId: "rotation-test", fetch: transport });
+		const allowedModels = [{ provider: model.provider, model: model.id }];
+		const meter = createUsageMeter({ rootSessionId: "rotation-test", allowedModels, maxCostMicros: 100_000_000 });
+		const notes = [];
+		const guard = createPolicyGuard({ allowedModels, maxCostMicros: 100_000_000, env, now, subscriptions: entries, subscriptionAdmission: () => true, refreshCredentials: () => refresher.apply(), log: (event, fields) => notes.push({ event, ...fields }) });
+		const installed = await installProcessUsageMeter({ ModelRuntime, runtime, meter, guard });
+		const realFetch = globalThis.fetch;
+		globalThis.fetch = async () => { throw new Error("offline fixture forbids network"); };
+		try {
+			assert.equal(installed.ok, true);
+			const result = await runtime.streamSimple(model, context(), { sessionId: "rotation-test", maxTokens: 42 }).result();
+			assert.equal(result.stopReason, "stop", `${result.errorMessage}; ${JSON.stringify(notes)}`);
+			assert.equal(wire.length, 2);
+			assert.equal(typeof wire[0].url, "string"); assert.equal(wire[0].method, "POST"); assert.equal(typeof wire[0].body, "string");
+			assert.equal(wire[0].body, wire[1].body);
+			assert.equal(JSON.parse(wire[0].body).model, model.id);
+			assert.equal(JSON.parse(wire[0].body).max_tokens, 42);
+			assert.deepEqual(wire.map((row) => row.bearer), ["Bearer sk-ant-oat-first", "Bearer sk-ant-oat-second"]);
+			assert.equal(meter.state.calls, 1); assert.equal(observer.rootCalls, 1);
+			assert.equal(meter.snapshot().unresolved, 0);
+			assert.equal(meter.usageSnapshot().models[0].output, result.usage.output);
+			assert.equal(observer.failure(result), null);
+			// A later drop is consumed before model admission injects the credential.
+			drop = { ...drop, seq: 2, subscriptions: [{ ...entries[0], generation: 8, token: "sk-ant-oat-third" }] };
+			const later = await runtime.streamSimple(model, context(), { sessionId: "rotation-test", maxTokens: 42 }).result();
+			assert.equal(later.stopReason, "stop", later.errorMessage);
+			assert.equal(wire.at(-1).bearer, "Bearer sk-ant-oat-third");
+			// pi's lazy setup has captured admission by the time streamSimple returns, but
+			// authentication/shaping still await. A concurrent renewal must not become an override.
+			const concurrent = runtime.streamSimple(model, context(), { sessionId: "rotation-test", maxTokens: 42 });
+			drop = { ...drop, seq: 3, subscriptions: [{ ...entries[0], generation: 9, token: "sk-ant-oat-fourth" }] };
+			refresher.apply();
+			const settled = await concurrent.result();
+			assert.equal(settled.stopReason, "stop", settled.errorMessage);
+			assert.equal(wire.at(-1).bearer, "Bearer sk-ant-oat-fourth");
+			const count = wire.length;
+			for (const [requested, options] of [[{ ...model, id: "unlisted" }, {}], [model, { apiKey: "unissued" }], [model, { fetch: async () => assert.fail("caller transport must not run") }]]) {
+				assert.equal((await runtime.streamSimple(requested, context(), options).result()).stopReason, "aborted");
+			}
+			assert.equal(wire.length, count, "renewal never loosens model, credential or fetch authority");
+		} finally { globalThis.fetch = realFetch; installed.uninstall(); observer.uninstall(); credentials.uninstall(); }
+	});
 	await t.test("checked complete JSON is the actual SDK request and retained hard rules reach the wire", async () => {
 		let checked;
 		let wire;

@@ -124,6 +124,18 @@ Renewed access values are added to the run's literal secret redaction before pub
 tokens without a recognizable prefix. Earlier values stay covered for the rest of the run. Transformed or encoded
 copies are outside literal redaction's protection; refresh grants remain only in the host store.
 
+When two jobs share a connection, a refresh by either job can invalidate the other's old access token.
+The worker watches for that replacement and sends it to active siblings without extending their leases.
+The runner applies it before requests. A Claude request that was already in flight may retry its identical
+body once after a 401, but only with a proven newer credential from the same connection. A refusal of the
+current credential still stops the job; it does not switch accounts, billing routes or models. Both the
+worker and derived job images need the updated implementation. The existing `credentialRefresh` and
+`subscriptionLease` capabilities and the drop format remain unchanged.
+
+`credential_watch_unavailable` means prompt notification is unavailable and periodic checks remain.
+A delayed or failed credential delivery can still stop a request. After fixing the credential or delivery
+problem, start an ordinary new run; a saved draft artifact is not proof that the interrupted job finished.
+
 A remaining authentication hold writes `subscription_auth_hold` to the worker log after the queue accepts the
 delay, with only the job id, `why: "subscription-auth"` and the retry instant `until` in epoch milliseconds.
 `pi-dispatch status` includes the reason and retry time in `waitingDetails`, with explicit partial/unavailable

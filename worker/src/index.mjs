@@ -1917,6 +1917,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 					// Issue #888, part 3: a running job's snapshot renewed to a later deadline (subscription-runtime.mjs `extend`),
 					// bounded by the job's own signal, so a renewal in flight ends with the job.
 					...(typeof deps.subscriptionRuntime.extend === "function" ? { extendSubscriptionAuth: (snapshot, { deadlineAt, signal: renewalSignal }) => deps.subscriptionRuntime.extend(snapshot, { deadlineAt, signal: renewalSignal ? AbortSignal.any([signal, renewalSignal]) : signal }) } : {}),
+					...(typeof deps.subscriptionRuntime.current === "function" ? { currentSubscriptionAuth: (snapshot, { signal: syncSignal }) => deps.subscriptionRuntime.current(snapshot, { signal: syncSignal ? AbortSignal.any([signal, syncSignal]) : signal }), watchSubscriptionAuth: (snapshot, changed) => deps.subscriptionRuntime.watch?.(snapshot, changed) } : {}),
 				} : {}),
 				// Issue #502: the skew check must see `models` as the job ARRIVED, not as `effectiveJobOf` filled it from
 				// PI_ALLOWED_MODELS, or a trigger list a stale receiver dropped would read as present and the job would run on

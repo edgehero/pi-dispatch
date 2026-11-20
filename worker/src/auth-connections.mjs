@@ -82,7 +82,7 @@ export function createAuthService({ policy = null, readPolicy = () => policy, st
 			return safe(row, next, (await read()).bindings[row.provider] === id);
 		}, { signal });
 	}
-	async function prepareSnapshotWithPolicy(provider, { deadlineAt, signal, renewable = false, extending = false } = {}) {
+	async function prepareSnapshotWithPolicy(provider, { deadlineAt, signal, renewable = false, extending = false, refresh = true } = {}) {
 		if (!Number.isSafeInteger(deadlineAt) || deadlineAt <= now()) return { ok: false, reason: "auth-deadline-invalid" };
 		const checked = await check(provider);
 		if (!checked.ok || !checked.managed) return { ...checked, ...(!checked.managed ? { snapshot: null } : {}) };
@@ -99,6 +99,7 @@ export function createAuthService({ policy = null, readPolicy = () => policy, st
 			const tooEarly = Number.isSafeInteger(current.credential.earliestRefreshAt) && current.credential.earliestRefreshAt > now();
 			if (current.credential.expires <= neededUntil && tooEarly && (!renewable || leaseEnd(current.credential) <= now() + minimum)) return { ok: false, reason: "auth-refresh-too-early", wait: "subscription-auth", until: current.credential.earliestRefreshAt, unavailable: false };
 			if (current.credential.expires <= neededUntil && !tooEarly) {
+				if (!refresh) return { ok: false, reason: "auth-snapshot-too-short" };
 				await write({ ...current, state: "refresh-uncertain" });
 				try {
 					// Once renewal begins, caller cancellation cannot discard a rotated replacement.
@@ -157,5 +158,10 @@ export function createAuthService({ policy = null, readPolicy = () => policy, st
 		if (!adapter.usage) return { kind: "unavailable", reason: "auth-usage-unsupported" };
 		return { kind: "observation", observedAt: now(), connectionId: id, provider: row.provider, ownerHost: row.ownerHost, accountGroup: prepared.snapshot.accountGroup, generation: prepared.snapshot.generation, payload: await adapter.usage({ access: Object.values(prepared.snapshot.env)[0], signal }) };
 	}
-	return { status, check, login, logout, prepareSnapshot, validateSnapshot, usage };
+	return {
+		status, check, login, logout, prepareSnapshot, validateSnapshot, usage,
+		// Reading a sibling's committed replacement must never rotate a provider grant itself.
+		readSnapshot: (provider, options) => prepareSnapshot(provider, { ...options, refresh: false }),
+		watch: (id, changed) => store.watch?.(id, changed),
+	};
 }

@@ -2681,6 +2681,7 @@ async function runAttempt(job, deps, durable, bundleFacts = { bundle: null, bund
 					forge: forgeExpires ? { expiresAt: forgeExpiresAt, mint: () => deps.refreshForgeToken(job) } : null,
 					subscriptions: subscriptionAuth,
 					extend: (snapshot, options) => deps.extendSubscriptionAuth(snapshot, options),
+					...(typeof deps.currentSubscriptionAuth === "function" ? { current: deps.currentSubscriptionAuth, watch: deps.watchSubscriptionAuth } : {}),
 				};
 			}
 			// Said once per image per process: every job on it keeps the 30-minute limit until it is rebuilt, and a line per job
