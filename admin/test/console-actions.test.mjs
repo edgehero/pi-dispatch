@@ -1,5 +1,5 @@
 import { SETUP_ACTION_NAMES } from "../src/setup-actions.mjs";
-import { makeSandboxService } from "../src/sandbox-data.mjs";
+import { makeSandboxService, SANDBOX_END_TIMEOUT, SANDBOX_END_UNCONFIRMED } from "../src/sandbox-data.mjs";
 import { sandboxFixture } from "./helpers/sandbox-goldens.mjs";
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
@@ -16,6 +16,7 @@ import { DEFER_BUCKET_WORDS, DEFER_TIME_MAX_MS, DEFER_WHYS } from "@edgehero/pi-
 import { enqueueForgeJob, forgeDeliveryJobId, makeQueue } from "@edgehero/pi-dispatch/queue";
 import { buildRecord, makeRecordWriter, sanitizeJobId } from "@edgehero/pi-dispatch/run-history";
 import { closeInbox, markState, readInbox, registerLive } from "@edgehero/pi-dispatch/steer-inbox";
+import { PACKAGE_MOVED_SENTENCE, PACKAGE_NOT_TAKEN_SENTENCE, UPDATES_UNREAD_SENTENCE } from "../src/console/actions.mjs";
 import { ACTIONS, SUPERSEDED_UNREAD_SENTENCE, supersededLeftOut, CONFIG_FIX_ACTIONS, atIndex, AUDIT_FAILED, BULK_MAX, CANCEL_TIMEOUT_SENTENCE, capturingAudit, confirmAction, DIFF_LINES_MAX, diffHtmlOf, dryRunFs, lineDiff, PREVIEW_AGAIN, previewAction, reserveText, queueUnreadRefusal, RESUME_WAITING_UNKNOWN, resumeManyUndo, SNAPSHOT_TIMEOUT_MS, SNAPSHOT_TIMEOUT_SENTENCE, SNAPSHOT_UNREAD_SENTENCE, SWITCH_QUEUES_NAMED, SWITCH_SHORT_LINES, switchReadLine, textHtml, TRIGGER_FORM, UNDO_SENTENCES, VALKEY_UNREACHABLE, waitingLine } from "../src/console/actions.mjs";
 import { CONSOLE_SCRIPT } from "../src/console/script.mjs";
 import { makeConfirmTickets } from "../src/console/confirm.mjs";
@@ -3243,6 +3244,155 @@ test("Undo takes back the adoption it was shown, and only that one", async () =>
   assert.notEqual((await m.confirm("package-undo", q.json().ticket)).status, 200, "someone else moved it since the preview");
   assert.deepEqual(moved.asked, []);
   assert.match((await (await start({ paths, a: { updates: updatesDeps(updatesRow()).updates } })).act("package-undo", { name: "pi-lint" })).text, /no adoption/);
+});
+
+// Issue #843: what Adopt and Undo answer when Valkey fails, by what is known of the write.
+const lostWrite = () => Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT", valkeyMayStillRun: true });
+const adoptedRow = () => updatesRow({ version: "1.4.3", desired: { op: "adopt", generation: 5, version: "1.4.3", from: "1.4.2", name: "pi-lint" } });
+const PACKAGE_WRITES = [["package-adopt", { name: "pi-lint", version: "1.4.3" }, () => updatesRow()], ["package-undo", { name: "pi-lint" }, adoptedRow]];
+const lastTwo = (c) => c.audit.rows.slice(-2).map((r) => [r.action, r.outcome, r.reason ?? null]);
+
+test("Adopt and Undo say a write that reached a Valkey which stopped answering may or may not have been made, in the confirm and the audit row", async () => {
+  const { paths } = deployment();
+  for (const [name, input, row] of PACKAGE_WRITES) {
+    // ioredis' timeout, and its error for a connection that died under the command: the mark decides, not the words.
+    for (const [error, code] of [[lostWrite(), "ETIMEDOUT"], [Object.assign(new Error("Reached the max retries per request limit (which is 1). Refer to \"maxRetriesPerRequest\" option for details."), { name: "MaxRetriesPerRequestError", valkeyMayStillRun: true }), "error"]]) {
+      const u = updatesDeps(row());
+      u.updates.setDesired = async () => { throw error; };
+      const c = await start({ paths, a: { updates: u.updates } });
+      const out = await c.both(name, input);
+      assert.equal(out.confirm.status, 500, out.confirm.text);
+      assert.equal(out.confirm.json().error, `Valkey did not confirm the ${name} change, so it may or may not have been made. Look again once Valkey answers; the console's log has the reason`);
+      assert.doesNotMatch(out.confirm.json().html, /nothing was changed/i);
+      assert.match(out.confirm.json().html, /data-reload>Look again</);
+      assert.deepEqual(lastTwo(c), [["write", "ok", null], ["write", "failed", `the write threw (${code}); Valkey did not confirm it, so it may or may not have been made`]]);
+    }
+  }
+});
+
+test("Adopt and Undo say nothing was changed only of a write Valkey refused or never got, and that someone changed the package only when the write's compare said so", async () => {
+  const { paths } = deployment();
+  for (const [name, input, row] of PACKAGE_WRITES) {
+    for (const [setDesired, sentence] of [
+      [async () => { throw Object.assign(new Error("READONLY You can't write against a read only replica."), { name: "ReplyError" }); }, PACKAGE_NOT_TAKEN_SENTENCE],
+      [async () => { throw new Error("Stream isn't writeable and enableOfflineQueue options is false"); }, PACKAGE_NOT_TAKEN_SENTENCE],
+      [async () => { throw Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT" }); }, PACKAGE_NOT_TAKEN_SENTENCE],
+      [async () => 0, PACKAGE_MOVED_SENTENCE],
+    ]) {
+      const u = updatesDeps(row());
+      u.updates.setDesired = setDesired;
+      const c = await start({ paths, a: { updates: u.updates } });
+      const out = await c.both(name, input);
+      assert.equal(out.confirm.status, 409, out.confirm.text);
+      assert.equal(out.confirm.json().error, sentence);
+      assert.deepEqual(lastTwo(c), [["write", "ok", null], ["write", "failed", sentence]]);
+    }
+  }
+  assert.equal(PACKAGE_NOT_TAKEN_SENTENCE, "Valkey did not take the request. Nothing was changed; preview it again.");
+  assert.equal(PACKAGE_MOVED_SENTENCE, "Someone changed this package since the preview. Preview it again.");
+});
+
+test("a confirm of Adopt or Undo that cannot read what Valkey holds says Valkey could not be reached, never that someone changed the package", async () => {
+  const { paths } = deployment();
+  // What the facts look like when Valkey does not answer: every package row drawn without its desired row or its newest version.
+  const blind = (row, mark) => ({ packages: [{ ...row, desired: null, newest: null, canary: null }], ...mark });
+  for (const [name, input, row] of PACKAGE_WRITES) {
+    for (const mark of [{ desiredUnreadable: true }, { state: "unknown" }]) {
+      const u = updatesDeps(row());
+      const c = await start({ paths, a: { updates: u.updates } });
+      const p = await c.act(name, input);
+      assert.equal(p.status, 200, p.text);
+      u.updates.read = async () => blind(row(), mark);
+      const out = await c.confirm(name, p.json().ticket);
+      assert.equal(out.status, 503, `${name} ${JSON.stringify(mark)}: ${out.text}`);
+      assert.equal(out.json().error, VALKEY_UNREACHABLE);
+      assert.deepEqual(u.asked, [], "nothing is written on a guess");
+      assert.deepEqual(lastTwo(c), [["write", "ok", null], ["write", "failed", "Valkey could not be reached"]]);
+    }
+    // The console's own wiring: the desired rows alone are asked first, and an unread answer ends the confirm there.
+    const u = updatesDeps(row());
+    const c = await start({ paths, a: { updates: u.updates } });
+    const p = await c.act(name, input);
+    let facts = 0;
+    u.updates.read = async () => { facts += 1; return blind(row(), { desiredUnreadable: true }); };
+    u.updates.readDesired = async () => null;
+    const out = await c.confirm(name, p.json().ticket);
+    assert.equal(out.status, 503, out.text);
+    assert.equal(out.json().error, VALKEY_UNREACHABLE);
+    assert.equal(facts, 0, "one read under one bound, not every read the page makes");
+    assert.deepEqual(u.asked, []);
+  }
+});
+
+test("Undo's confirm reads the desired rows alone where they are wired, and says someone changed the package only of another generation it read", async () => {
+  const { paths } = deployment();
+  const held = (generation) => [{ v: 1, generation, name: "pi-lint", version: "1.4.3", op: "adopt", from: "1.4.2", by: "ops", at: 1 }];
+  const run = async (rows) => {
+    const u = updatesDeps(adoptedRow());
+    const c = await start({ paths, a: { updates: u.updates } });
+    const p = await c.act("package-undo", { name: "pi-lint" });
+    u.updates.read = async () => { throw new Error("the confirm reads the desired rows, not the page's facts"); };
+    u.updates.readDesired = async () => rows;
+    return { out: await c.confirm("package-undo", p.json().ticket), asked: u.asked };
+  };
+  const same = await run(held(5));
+  assert.equal(same.out.status, 200, same.out.text);
+  assert.equal(same.asked[0].expectGeneration, 5);
+  for (const rows of [held(6), []]) {
+    const moved = await run(rows);
+    assert.equal(moved.out.status, 409);
+    assert.equal(moved.out.json().error, PACKAGE_MOVED_SENTENCE);
+    assert.deepEqual(moved.asked, []);
+  }
+});
+
+test("the previews of Adopt and Undo say what Valkey holds could not be read, not that there is no adoption or no canary", async () => {
+  const { paths } = deployment();
+  for (const [name, input, row] of PACKAGE_WRITES) {
+    for (const mark of [{ desiredUnreadable: true }, { state: "unknown" }]) {
+      const u = updatesDeps(row());
+      u.updates.read = async () => ({ packages: [{ ...row(), desired: null, newest: null, canary: null }], ...mark });
+      const c = await start({ paths, a: { updates: u.updates } });
+      const p = await c.act(name, input);
+      assert.equal(p.status, 503, `${name} ${JSON.stringify(mark)}: ${p.text}`);
+      assert.equal(p.json().error, UPDATES_UNREAD_SENTENCE);
+      assert.doesNotMatch(p.text, /no adoption|Run a canary/);
+      assert.equal(p.json().ticket, undefined);
+    }
+  }
+});
+
+test("sandbox End says nothing was changed only of a request that was not written", async () => {
+  const { dir, paths } = deployment(); paths.projectsPath = paths.projectsFile;
+  const inv = sandboxFixture(T0), shell = inv.sessions[0];
+  const input = { host: shell.host, id: shell.id, nonce: shell.nonce, containerId: shell.containerId };
+  const ending = async (sandboxEnd) => {
+    const fleet = { sandboxInventory: async () => ({ hosts: inv.hosts }), sandboxSessions: async () => ({ sessions: inv.sessions }), sandboxEnd };
+    const c = await start({ paths, a: { sandboxes: makeSandboxService({ paths, deploymentDir: dir, fleet, now: () => T0 }) } });
+    const out = await c.both("sandbox-end", input);
+    return { status: out.confirm.status, said: out.confirm.json().error, bar: out.confirm.json().html, rows: lastTwo(c) };
+  };
+  // The request reached a Valkey that then stopped answering.
+  const lost = await ending(async () => { throw lostWrite(); });
+  assert.equal(lost.status, 500);
+  assert.equal(lost.said, "Valkey did not confirm the sandbox-end change, so it may or may not have been made. Look again once Valkey answers; the console's log has the reason");
+  assert.doesNotMatch(lost.bar, /nothing was changed/i);
+  assert.deepEqual(lost.rows, [["write", "ok", null], ["write", "failed", "the write threw (ETIMEDOUT); Valkey did not confirm it, so it may or may not have been made"]]);
+  // The read before the request, or a request that was never sent.
+  const unsent = await ending(async () => { throw Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT" }); });
+  assert.equal(unsent.status, 500);
+  assert.equal(unsent.said, "the sandbox-end change could not be made; nothing was changed, and the console's log has the reason");
+  assert.deepEqual(unsent.rows, [["write", "ok", null], ["write", "failed", "the write threw (ETIMEDOUT)"]]);
+  // Written, and then the terminal's answer could not be read, or did not come.
+  for (const [answer, sentence] of [[{ unconfirmed: true }, SANDBOX_END_UNCONFIRMED], [{ timeout: true }, SANDBOX_END_TIMEOUT]]) {
+    const partial = await ending(async () => answer);
+    assert.equal(partial.status, 409);
+    assert.equal(partial.said, sentence);
+    assert.match(sentence, /the request may still take effect/);
+    assert.doesNotMatch(partial.bar, /nothing was changed/i);
+    assert.match(partial.bar, /data-reload>Look again</);
+    assert.deepEqual(partial.rows, [["write", "ok", null], ["write", "failed", sentence]]);
+  }
 });
 
 test("an agent can do none of this, whatever grant it holds", async () => {

@@ -268,3 +268,44 @@ test("auth's line quotes no outage that ended before it: the client's error is f
 	assert.equal(await runAuth(["status"], options), 1);
 	assert.equal(output.join(""), `Subscription authentication: Valkey at redis://127.0.0.1:6379 did not answer (Command timed out). Run \`pi-dispatch auth status\` once it answers: ${down}\n`);
 });
+
+test("on a real client, a trial's compare-and-set whose connection drops under it may or may not have been made (issue #843)", { timeout: 15_000 }, async () => {
+	// The client is `makeRedisClient`'s bounded one, whose mark goes by what was written: the EVAL was on the socket when
+	// the connection went, so Valkey may have run it, and the line says so. The read before it was answered.
+	const { createServer } = await import("node:net");
+	const { makeRedisClient } = await import("../src/connection.mjs");
+	const sockets = new Set();
+	const heard = [];
+	const server = createServer((socket) => {
+		sockets.add(socket);
+		socket.on("error", () => {});
+		socket.on("data", (data) => {
+			const text = String(data);
+			heard.push(text);
+			if (/\r\neval\r\n/i.test(text)) return void socket.destroy();
+			socket.write("+OK\r\n".repeat(text.match(/(?:^|\r\n)\*\d+\r\n/g)?.length ?? 0));
+		});
+	});
+	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
+	const url = `redis://127.0.0.1:${server.address().port}`;
+	try {
+		const { output, options } = fixture();
+		options.configFn = () => ({ authConnectionsFile: "/policy.json", valkeyUrl: url, workerName: "host1" });
+		// runAuth's own bound, made short for the test.
+		options.redisFn = (to, opts) => makeRedisClient(to, { ...opts, commandTimeoutMs: 300, context: {}, judge: async () => ({ host: "127.0.0.1", servername: null, pinned: null }) });
+		const configure = options.configure;
+		options.configure = ({ redis, ...rest }) => {
+			const service = configure({ redis, ...rest });
+			service.quota.read = async () => (await redis.get("quota"), { version: 3 });
+			service.quota.grantOneTrial = async () => ((await redis.eval("cas", 1, "quota")), { ok: true });
+			return service;
+		};
+		assert.equal(await runAuth(["trial", "claude"], options), 1);
+		assert.equal(output.join(""), `Subscription authentication: Valkey at ${url} did not answer (Command timed out). The trial grant may or may not have been made. Run \`pi-dispatch auth status\` once it answers: ${down}\n`);
+		assert.equal(heard.join("").match(/\r\neval\r\n/gi).length, 1, "the compare-and-set was never sent a second time");
+	} finally {
+		for (const s of sockets) s.destroy();
+		server.close();
+	}
+});
+

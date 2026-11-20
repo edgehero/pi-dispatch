@@ -12,6 +12,9 @@ import { parseScopedLimits } from "@edgehero/pi-dispatch/scoped-limits";
 import { repoOfTarget } from "./costs.mjs";
 export const SANDBOX_READ_DEPS = Object.freeze({ makeSandboxPrepareQueueFn: makeSandboxPrepareQueue, enqueueSandboxPreparationFn: enqueueSandboxPreparation, readSandboxPreparationFn: readSandboxPreparation });
 const sha = (x) => createHash("sha256").update(typeof x === "string" ? x : JSON.stringify(x)).digest("hex");
+/** What a sandbox End says when nothing acknowledged it in time, and when the read of the acknowledgment failed after the request was written (issue #843): Valkey not answering, or answering that read with an error, so the sentence names neither. */
+export const SANDBOX_END_TIMEOUT = "The terminal did not acknowledge End. Reload before trying again; the request may still take effect.";
+export const SANDBOX_END_UNCONFIRMED = "The End request was written, but the terminal's answer could not be read from Valkey. Reload once Valkey answers before trying again; the request may still take effect.";
 const refusalOf = (out) => out?.refusal ?? out?.message ?? out?.refused ?? "The sandbox request was refused.";
 
 export function makeSandboxService({ paths, env = {}, deploymentDir, fleet, fs = nodeFs, now = Date.now, random = randomBytes, planFn = planSandboxPreparation } = {}) {
@@ -137,7 +140,12 @@ export function makeSandboxService({ paths, env = {}, deploymentDir, fleet, fs =
       }
       if (name === "sandbox-end") {
         const out = await fleet.sandboxEnd(p.params);
-        return out.ended ? { ok: true } : { ...(out.timeout ? { partial: true } : {}), invalid: out.timeout ? "The terminal did not acknowledge End. Reload before trying again; the request may still take effect." : refusalOf(out) };
+        if (out.ended) return { ok: true };
+        // Both came after the request was written, so neither may read as nothing changed (`partial`). `unconfirmed`: the
+        // request was written and a read of the terminal's answer then failed, which says nothing of the terminal.
+        if (out.unconfirmed) return { partial: true, invalid: SANDBOX_END_UNCONFIRMED };
+        if (out.timeout) return { partial: true, invalid: SANDBOX_END_TIMEOUT };
+        return { invalid: refusalOf(out) };
       }
       // Rebuild the preview over current publications/config before enqueue; the owning worker checks again.
       const current = await this.preview(name, p.params);

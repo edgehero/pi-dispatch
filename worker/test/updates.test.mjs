@@ -169,6 +169,20 @@ test("a desired row filed under another package's key is nobody's to act on", as
 	assert.equal((await readDesired({ hgetall: async () => ({ other: JSON.stringify(row1) }) })).length, 0);
 });
 
+test("setDesired's timeoutMs of null leaves the write to the client's own bound, so its error is the client's (issue #843)", async () => {
+	const wanted = { name: "@a/b", version: "1.1.0", op: "adopt", by: "ops", at: NOW };
+	// A script that reached a Valkey which then stopped answering: the client's bound rejects it, marked.
+	const lost = Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT", valkeyMayStillRun: true });
+	const slow = { eval: () => new Promise((_resolve, reject) => setTimeout(reject, 60, lost)) };
+	assert.equal(await setDesired(slow, wanted, { timeoutMs: null }).catch((e) => e), lost, "the caller can say it may or may not have been made");
+	// With a timer of this module's own that fires first, the error is this module's and says nothing of what was sent.
+	const early = await setDesired(slow, wanted, { timeoutMs: 10 }).catch((e) => e);
+	assert.equal(early.message, "valkey did not answer");
+	assert.equal(early.valkeyMayStillRun, undefined);
+	assert.equal(await setDesired({ eval: async () => 7 }, wanted, { timeoutMs: null }), 7);
+	assert.equal(await setDesired({ eval: async () => 7 }, wanted), 7, "and every other caller keeps the module's timer");
+});
+
 test("a look past the host bound says how many it did not read", async () => {
 	const names = Array.from({ length: 65 }, (_, i) => `host${String(i).padStart(2, "0")}`);
 	const redis = { smembers: async () => names, mget: async (...keys) => keys.map((key) => JSON.stringify({ v: 1, host: key.slice("updates:h:".length), at: NOW, everyHours: 24, pi: {}, hostPi: {}, packages: [] })) };

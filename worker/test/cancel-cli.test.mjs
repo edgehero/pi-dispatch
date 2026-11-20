@@ -753,3 +753,53 @@ test("on real clients, a closed port ends the lookup when the queue gives up, sa
 	assert.equal(rest, "");
 	assert.ok(took < 4000, `the failFast queue gave up before the bound (${Math.round(took)} ms)`);
 });
+
+/**
+ * A loopback Valkey that answers each command by its kind (a hash that is empty, a key that is not there, one key
+ * deleted, else OK) and, once, drops the connection under the first command that matches `drop`, unanswered.
+ */
+async function droppingServer(drop) {
+	const sockets = new Set();
+	const heard = [];
+	let dropped = false;
+	const server = createServer((socket) => {
+		sockets.add(socket);
+		socket.on("error", () => {});
+		socket.on("data", (data) => {
+			const text = String(data);
+			heard.push(text);
+			if (!dropped && drop.test(text)) {
+				dropped = true;
+				return void socket.destroy();
+			}
+			const names = [...text.matchAll(/(?:^|\r\n)\*\d+\r\n\$\d+\r\n([A-Za-z]+)\r\n/g)].map((m) => m[1].toLowerCase());
+			socket.write(names.map((name) => (name === "hgetall" ? "*0\r\n" : name === "get" ? "$-1\r\n" : name === "del" ? ":1\r\n" : "+OK\r\n")).join(""));
+		});
+	});
+	await new Promise((r) => server.listen(0, "127.0.0.1", r));
+	return {
+		url: `redis://127.0.0.1:${server.address().port}`,
+		heard: () => heard.join(""),
+		close: () => {
+			for (const s of sockets) s.destroy();
+			server.close();
+		},
+	};
+}
+
+test("on a real probe, a cancel request whose connection drops under it is a lost answer: it is withdrawn, and never said to have changed nothing outright (issue #843)", { skip: needsDeps, timeout: 15_000 }, async () => {
+	// The probe is `makeRedisClient`'s bounded client, the class the console's own clients are. Its rule for the mark is by
+	// what was written, so the request's SET, on the socket when the connection went, is one Valkey may have run.
+	const { makeRedisClient } = await import("../src/connection.mjs");
+	const srv = await droppingServer(/cancel:req:j9/);
+	try {
+		const { err, seams } = world({ hash: {}, state: "active" });
+		const code = await runCancel("j9", srv.url, { ...seams, commandTimeoutMs: 300, redisFn: (url, opts) => makeRedisClient(url, { ...opts, context: {}, judge: async () => ({ host: "127.0.0.1", servername: null, pinned: null }) }) });
+		assert.equal(code, 1);
+		assert.equal(err.join(""), `error: Valkey at ${srv.url} stopped answering (Command timed out) after the cancel request for j9 was written. The request was withdrawn again, so nothing was changed, unless its worker read it in that moment: run \`pi-dispatch status\` to see whether j9 still runs\n`);
+		assert.match(srv.heard(), /\r\ndel\r\n\$\d+\r\ncancel:req:j9\r\n/i, "the withdrawal went out on the next connection");
+		assert.equal(srv.heard().match(/\r\nset\r\n\$\d+\r\ncancel:req:j9\r\n/gi).length, 1, "and the request itself was never sent a second time");
+	} finally {
+		srv.close();
+	}
+});

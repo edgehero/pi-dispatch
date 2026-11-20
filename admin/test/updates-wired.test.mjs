@@ -10,7 +10,10 @@ import { makeRedisClient } from "@edgehero/pi-dispatch/connection";
 import { makeRunMirror } from "@edgehero/pi-dispatch/run-mirror";
 import { publishLook } from "@edgehero/pi-dispatch/updates";
 import { runCli } from "../src/console/cli.mjs";
+import { readConsoleAudit } from "@edgehero/pi-dispatch/console-audit";
+import { VALKEY_UNREACHABLE } from "../src/console/actions.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { trippingProxy } from "./helpers/tripping-proxy.mjs";
 
 const VALKEY = process.env.VALKEY_TEST_URL;
 // CI sets this, which turns a missing URL into a failure rather than a quiet skip.
@@ -145,5 +148,110 @@ test("a canary on another host opens Adopt on a real console, through the real r
     await running;
     await deleteOwnKeys(redis);
     redis.disconnect();
+  }
+});
+
+test("Adopt and Undo on a Valkey that stops answering at their write say it may or may not have been made, and it lands at the wake (issue #843)", { skip: VALKEY ? false : "needs VALKEY_TEST_URL (CI sets it)", timeout: 120_000 }, async () => {
+  const url = databaseUrl();
+  // Everything that holds a socket is opened inside the try, so a failure anywhere leaves none open and the file ends.
+  let redis = null, proxy = null, running = null;
+  let stop = () => {};
+  try {
+    redis = makeRedisClient(url, {});
+    await deleteOwnKeys(redis);
+    // The console reaches Valkey through a proxy that stops passing bytes at the write's own script: a `kill -STOP` as it leaves.
+    proxy = await trippingProxy(url);
+    const dep = deployment(proxy.url);
+    let clock = NOW;
+    const now = () => clock;
+    const err = [];
+    const io = { env: dep.env, now, uid: process.geteuid?.(), err: (line) => err.push(line) };
+    const printed = [];
+    assert.equal(await runCli(["token", "add", "--name", "ops", "--role", "operator", "--deployment", dep.dir], { ...io, out: (line) => printed.push(line) }), 0, err.join("\n"));
+    const token = printed.join("\n").match(/pdc_[A-Za-z0-9_-]+/)?.[0];
+    assert.ok(token, "the token is printed once");
+    const until = new Promise((resolve) => (stop = resolve));
+    let listening;
+    const up = new Promise((resolve) => (listening = resolve));
+    running = runCli(["serve", "--deployment", dep.dir], { ...io, out: () => {}, until, onListening: listening });
+    const call = httpTo((await up).address().port);
+    const login = await call("POST", "/login", { body: { token } });
+    assert.equal(login.status, 200, login.text.slice(0, 200));
+    const cookie = [].concat(login.headers["set-cookie"]).map((c) => c.split(";")[0]).join("; ");
+    const act = (name, step, body) => call("POST", `/api/act/${name}/${step}`, { cookie, body });
+    const lastRow = () => readConsoleAudit({ logsDir: dep.env.PI_LOGS_DIR, limit: 1 }).rows[0];
+    const desired = async () => JSON.parse(await redis.hget("updates:desired", "pi-lint"));
+    const landed = async (op) => {
+      const until = Date.now() + 5000;
+      while ((await desired())?.op !== op && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 50));
+      return await desired();
+    };
+    // The write's script, by the key only it names: no other script of the console matches.
+    const theWrite = /\r\n\$4\r\neval\r\n[\s\S]*updates:generation/i;
+    /** Preview while Valkey answers, then confirm with Valkey stopping at `pattern`, or already stopped when there is none. */
+    const confirmed = async (name, input, pattern) => {
+      // The console's client connects after the console listens, and until it has, its previews say Valkey could not be read.
+      let preview;
+      for (const until = Date.now() + 5000; ;) {
+        clock += CACHE_PASSED;
+        preview = await act(name, "preview", input);
+        if (preview.status !== 503 || Date.now() > until) break;
+        await new Promise((resolve) => setTimeout(resolve, 50));
+      }
+      assert.equal(preview.status, 200, preview.text.slice(0, 300));
+      const before = await desired();
+      const frozen = pattern ? proxy.freezeAt(pattern) : Promise.resolve(proxy.freeze());
+      const started = performance.now();
+      const confirm = await act(name, "confirm", { ticket: JSON.parse(preview.text).ticket });
+      const took = performance.now() - started;
+      // The confirm has answered, so the command it was to stop at has been sent, or never will be: no wait without an end.
+      assert.equal(await Promise.race([frozen.then(() => "stopped"), new Promise((resolve) => setTimeout(resolve, 1000, "never sent"))]), "stopped", "Valkey stopped answering at the named command");
+      assert.deepEqual(await desired(), before, "nothing reached Valkey while it did not answer");
+      return { status: confirm.status, said: JSON.parse(confirm.text).error, took, row: lastRow() };
+    };
+    const lost = (name) => `Valkey did not confirm the ${name} change, so it may or may not have been made. Look again once Valkey answers; the console's log has the reason`;
+    const LOST_ROW = "the write threw (ETIMEDOUT); Valkey did not confirm it, so it may or may not have been made";
+
+    // What opens Adopt: another host's look, and its canary's record through the mirror.
+    await publishLook(redis, { v: 1, host: "host-b", at: clock, everyHours: 24, pi: { pinned: "1.5.0", newest: "1.5.0", read: "ok", checks: null }, hostPi: { version: "1.5.0", tested: "1.5.0", state: "same", needles: "ok", extension: "ok" }, packages: [{ name: "pi-lint", version: "1.4.2", newest: "1.4.3", read: "ok" }] });
+    const jobId = "trigger-nightly-canary-843";
+    await makeRunMirror({ redis, retentionDays: 30, now }).mirror({ v: 1, jobId, host: "host-b", kind: "local", flow: "fix", outcome: "completed", startedAt: new Date(clock - 120_000).toISOString(), endedAt: new Date(clock - 60_000).toISOString(), tokens: { cost: 0.19 }, packageCanary: { name: "pi-lint", version: "1.4.3", load: "loaded" } }, jobId);
+
+    const adopt = await confirmed("package-adopt", { name: "pi-lint", version: "1.4.3" }, theWrite);
+    assert.equal(adopt.status, 500, adopt.said);
+    assert.equal(adopt.said, lost("package-adopt"));
+    assert.deepEqual([adopt.row.kind, adopt.row.outcome, adopt.row.reason], ["package-adopt", "failed", LOST_ROW]);
+    assert.ok(adopt.took > 4000 && adopt.took < 9000, `the client's bound decided, not a shorter timer (${Math.round(adopt.took)} ms)`);
+    proxy.thaw();
+    const adopted = await landed("adopt");
+    assert.deepEqual([adopted?.op, adopted?.version, adopted?.from], ["adopt", "1.4.3", "1.4.2"], "the row the confirm could not vouch for landed when Valkey woke");
+
+    // Valkey stopped before the confirm: its look at the desired rows is not answered. Nobody changed the package.
+    const blind = await confirmed("package-undo", { name: "pi-lint" }, null);
+    assert.equal(blind.status, 503, blind.said);
+    assert.equal(blind.said, VALKEY_UNREACHABLE);
+    assert.deepEqual([blind.row.kind, blind.row.outcome, blind.row.reason], ["package-undo", "failed", "Valkey could not be reached"]);
+    assert.ok(blind.took < 4500, `after one read's bound, not after every read the page's facts make (${Math.round(blind.took)} ms)`);
+    proxy.thaw();
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    assert.equal((await desired()).generation, adopted.generation, "and nothing was written");
+
+    const undo = await confirmed("package-undo", { name: "pi-lint" }, theWrite);
+    assert.equal(undo.status, 500, undo.said);
+    assert.equal(undo.said, lost("package-undo"));
+    assert.deepEqual([undo.row.kind, undo.row.outcome, undo.row.reason], ["package-undo", "failed", LOST_ROW]);
+    proxy.thaw();
+    const undone = await landed("undo");
+    assert.deepEqual([undone?.op, undone?.version, undone?.undoOf], ["undo", "1.4.2", adopted.generation]);
+    assert.deepEqual(err.filter((line) => /unexpected failure|TypeError/.test(line)), []);
+  } finally {
+    proxy?.thaw();
+    stop();
+    await running?.catch(() => {});
+    if (redis) {
+      await deleteOwnKeys(redis).catch(() => {});
+      redis.disconnect();
+    }
+    proxy?.close();
   }
 });

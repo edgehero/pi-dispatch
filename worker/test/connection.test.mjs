@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
-import { connect as netConnect, createServer } from "node:net";
+import { createServer } from "node:net";
 import { test } from "node:test";
 import { Command, Redis } from "ioredis";
+import { freezingProxy } from "./helpers/freezing-proxy.mjs";
 import { JudgedConnector, VALKEY_ERROR_QUIET_MS, givesUp, makeRedisClient, onValkeyError, parseConnection, passwordDeclinedOf, useValkeyContext } from "../src/connection.mjs";
 
 // Issue #464, gate round 1 (measured on Fedora 44): WHATWG URL keeps an IPv6 literal's brackets in `hostname`, and the
@@ -673,10 +674,11 @@ test("a bounded failFast client says a command that reached a silent Valkey may 
 	await answer;
 });
 
-test("the hook marks nothing on a client without the bound: a written command's lost answer on any other client carries no mark (#867)", { timeout: 15000 }, async () => {
+test("a written command's lost answer is marked by both bounded clients and by no other (#867, issue #843)", { timeout: 15000 }, async () => {
 	// The console branches on `valkeyMayStillRun` (a confirm's "may or may not", an audit row's reason, the panel's note),
-	// so a mark leaking onto its clients would change what it says. Each client below writes a command Valkey never
-	// answers and is then dropped, so the command fails with "Connection is closed.", a lost answer by the hook's rule.
+	// so a mark leaking onto a client without a bound would change what it says. Each client below writes a command Valkey
+	// never answers and is then dropped, so the command fails with "Connection is closed.": no timeout, and a lost answer
+	// all the same, which a `BoundedRedis` that went by the timeout's words alone left unmarked.
 	const valkey = await listeningValkey((text) => (/frozen-write/.test(text) ? "silent" : "answer"));
 	const url = `redis://127.0.0.1:${valkey.port}`;
 	const clients = {
@@ -703,49 +705,91 @@ test("the hook marks nothing on a client without the bound: a written command's 
 	}
 	assert.deepEqual(marks, {
 		"a plain client (a worker's, a receiver's)": undefined,
-		"a BoundedRedis (cancel's probe, the console's own)": undefined,
+		"a BoundedRedis (cancel's probe, the console's own)": true,
 		"a failFast queue client without the bound (the console's fleet reader)": undefined,
 		"a failFast client with the bound": true,
 	});
 });
 
-/**
- * A loopback proxy to the real Valkey that can stop passing bytes either way and later pass what it held, in order: a
- * `kill -STOP` and a `kill -CONT` of that Valkey as one client sees them, without a Valkey process of the test's own.
- */
-async function freezingProxy(target) {
-	const to = new URL(target);
-	let frozen = false;
-	const held = [];
-	const sockets = new Set();
-	const server = createServer((client) => {
-		const upstream = netConnect({ host: to.hostname.replace(/^\[(.*)\]$/, "$1"), port: Number(to.port || 6379) });
-		for (const s of [client, upstream]) {
-			sockets.add(s);
-			s.on("error", () => {});
-		}
-		client.on("data", (data) => (frozen ? held.push([upstream, data]) : upstream.write(data)));
-		upstream.on("data", (data) => (frozen ? held.push([client, data]) : client.write(data)));
-		client.on("close", () => upstream.destroy());
-		upstream.on("close", () => client.destroy());
+test("the console's client marks a write whose connection died under it, and not one it never sent (issue #843)", { timeout: 15000 }, async () => {
+	// The console's own client: bounded, no offline queue, one retry per request. A Valkey that drops the connection with a
+	// write on it and cannot be reached again fails that write with ioredis' MaxRetriesPerRequestError, not with a timeout.
+	let down = false;
+	const valkey = await listeningValkey((text, socket) => {
+		if (!/dropped-write/.test(text)) return "answer";
+		down = true;
+		socket.destroy();
+		return "silent";
 	});
-	await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
-	const via = new URL(target);
-	via.hostname = "127.0.0.1";
-	via.port = String(server.address().port);
-	return {
-		url: via.toString(),
-		freeze: () => (frozen = true),
-		thaw: () => {
-			frozen = false;
-			for (const [socket, data] of held.splice(0)) socket.write(data);
-		},
-		close: () => {
-			for (const s of sockets) s.destroy();
-			server.close();
-		},
-	};
-}
+	const client = makeRedisClient(`redis://127.0.0.1:${valkey.port}`, { context: {}, noOfflineQueue: true, commandTimeoutMs: 60_000, judge: async () => { if (down) throw new Error("down"); return { host: "127.0.0.1", servername: null, pinned: null }; } });
+	client.on("error", () => {});
+	try {
+		await within(new Promise((resolve) => client.once("ready", resolve)));
+		const lost = await within(client.set("dropped-write", "1"), 10_000).catch((err) => err);
+		assert.equal(lost.name, "MaxRetriesPerRequestError", lost.message);
+		assert.equal(lost.valkeyMayStillRun, true, "it was on the socket, so Valkey may have run it before the connection died");
+		// Refused at once while nothing is connected, and never written: nothing was changed.
+		const unsent = await within(client.set("never-sent", "1")).catch((err) => err);
+		assert.match(unsent.message, /Stream isn't writeable/);
+		assert.equal(unsent.valkeyMayStillRun, undefined);
+		assert.doesNotMatch(valkey.heard(), /never-sent/);
+	} finally {
+		client.disconnect();
+		valkey.close();
+	}
+});
+
+test("a refusal this project raised is no lost answer on a bounded client, though it rejects what the client had written (issue #843)", { timeout: 15000 }, async () => {
+	// A database the server does not have: the SELECT's refusal ends the client and rejects every command it holds with the
+	// one refusal, the handshake commands it had written beside the SELECT included. Marked for those, the same object
+	// would tell a caller whose command never left that its write may have been made.
+	const valkey = await listeningValkey((text, socket) => {
+		if (!/\r\nselect\r\n/i.test(text)) return "answer";
+		socket.write("-ERR DB index is out of range\r\n");
+		return "silent";
+	});
+	const client = makeRedisClient(`redis://127.0.0.1:${valkey.port}/5`, { context: {}, commandTimeoutMs: 60_000, judge: judgeHere });
+	const sent = [];
+	const sendCommand = client.sendCommand.bind(client);
+	client.sendCommand = (command, stream) => { const answer = sendCommand(command, stream); if (client.commandQueue.peekBack()?.command === command) sent.push(command.name); return answer; };
+	client.on("error", () => {});
+	try {
+		const refused = await within(client.set("never-sent", "1")).catch((err) => err);
+		assert.equal(refused.valkeyRefused, true, refused.message);
+		assert.ok(sent.some((name) => name !== "select"), `the client had written more than the SELECT when it was refused (${sent.join(", ")})`);
+		assert.equal(refused.valkeyMayStillRun, undefined);
+		assert.doesNotMatch(valkey.heard(), /never-sent/);
+	} finally {
+		client.disconnect();
+		valkey.close();
+	}
+});
+
+test("a command that waited in the offline queue is marked once it was sent, since written is recorded at the send (issue #843)", { timeout: 15000 }, async () => {
+	// ioredis sends what waited through `sendCommand` a second time when the client goes ready, and empties its queues
+	// before it rejects what was in them: a mark looked up at the failure, or recorded at the first call only, misses this.
+	const valkey = await listeningValkey((text) => (/waited-write/.test(text) ? "silent" : "answer"));
+	let down = true;
+	const client = makeRedisClient(`redis://127.0.0.1:${valkey.port}`, { context: {}, commandTimeoutMs: 60_000, judge: async () => { if (down) throw new Error("down"); return { host: "127.0.0.1", servername: null, pinned: null }; } });
+	client.on("error", () => {});
+	try {
+		const answer = client.set("waited-write", "1").catch((err) => err);
+		assert.equal(client.offlineQueue.length, 1, "it waits, unsent");
+		const ready = new Promise((resolve) => client.once("ready", resolve));
+		down = false;
+		await within(ready, 10_000);
+		const until = Date.now() + 3000;
+		while (!/waited-write/.test(valkey.heard()) && Date.now() < until) await new Promise((resolve) => setTimeout(resolve, 10));
+		assert.match(valkey.heard(), /waited-write/, "sent once Valkey was there");
+		client.disconnect();
+		const lost = await within(answer);
+		assert.equal(lost.message, "Connection is closed.");
+		assert.equal(lost.valkeyMayStillRun, true);
+	} finally {
+		client.disconnect();
+		valkey.close();
+	}
+});
 
 test("a BullMQ queue with the bound reads as before, and its remove on a Valkey that stops answering ends at the bound, marked, and lands when Valkey wakes (#867, VALKEY_TEST_URL)", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL", timeout: 20_000 }, async () => {
 	const { makeQueue } = await import("../src/queue.mjs");
