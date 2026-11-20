@@ -32,7 +32,9 @@ export function sandboxSessionAccount(name) {
 	return typeof name === "string" && /^[A-Za-z0-9._@-]{1,64}$/.test(name) ? name : "operator";
 }
 
+/** `promise` under a timer of this module's own, or under none when `ms` is `null`: the client's bound then decides alone (`requestSandboxEnd`). */
 export function sandboxBounded(promise, ms = 2_000) {
+	if (ms === null) return Promise.resolve(promise);
 	return new Promise((resolve, reject) => {
 		const timer = setTimeout(() => reject(new Error("sandbox control timed out")), ms);
 		Promise.resolve(promise).then((v) => { clearTimeout(timer); resolve(v); }, (e) => { clearTimeout(timer); reject(e); });
@@ -117,23 +119,72 @@ export async function readSandboxSessions(redis, { hosts = [], now = Date.now, t
 	} catch { return { sessions: [], unreachable: true }; }
 }
 
-/** End is an attended request for ONE immutable container, never a name that can be reused. */
+/**
+ * End is an attended request for ONE immutable container, never a name that can be reused.
+ *
+ * What it answers when Valkey fails goes by where it failed (issue #843), so that "nothing was changed" is said only of
+ * a request that was not written:
+ * - the read of the session, before anything was written: it throws without `valkeyMayStillRun`, whatever the client put
+ *   on a read that reached a socket. Nothing was changed.
+ * - the request's SET, rejected without the mark (it was never sent, or Valkey refused it): it throws as it is.
+ * - the SET, rejected with the mark (it reached a Valkey that then stopped answering): the request may stand when Valkey
+ *   wakes, so its removal is sent behind it, not waited for, and the error keeps its mark.
+ * - a read of the acknowledgment that throws, after a SET that was answered: the request stands, so it is removed the
+ *   same way and the answer is `{ unconfirmed: true }`, never a throw that would read as nothing written. That is so
+ *   whether Valkey did not answer the read or answered it with an error (LOADING, NOAUTH), so the answer names no cause.
+ * - no acknowledgment within `ackTimeoutMs`: the removal's own answer says which. 1 took the request back, though a
+ *   monitor that read it a moment earlier may still be stopping the container. 0 means it was gone, taken by the
+ *   monitor or expired, so the acknowledgment is read once more and an End that happened is reported as one.
+ *
+ * `timeoutMs` is this module's own timer on each command, and `null` is none: a caller whose client has a command bound
+ * passes `null`, since a timer that fires first rejects with an error that cannot say whether the SET was sent.
+ * The default keeps this module's timer, for a client with no bound of its own: a caller on a bounded client that leaves
+ * it gets the unmarked error back, and "nothing was changed" of a request that may have been written.
+ */
 export async function requestSandboxEnd({ redis, host, id, nonce, containerId, now = Date.now, ackTimeoutMs = 10_000, pollMs = 250, sleep = (ms) => new Promise((r) => setTimeout(r, ms)), timeoutMs = 2_000, random = () => randomBytes(16).toString("hex") }) {
 	if ([host, id, nonce, containerId].some((v) => typeof v !== "string") || !WORKER_NAME_RE.test(host) || !SANDBOX_SESSION_ID_RE.test(id) || !nonceRe.test(nonce) || !containerRe.test(containerId)) return { refused: "invalid-session", message: "The sandbox session is invalid; reload its current state." };
-	const current = parseSandboxSession(await sandboxBounded(redis.get(sandboxSessionKey(host, id)), timeoutMs));
+	let held;
+	try {
+		held = await sandboxBounded(redis.get(sandboxSessionKey(host, id)), timeoutMs);
+	} catch (err) {
+		if (err?.valkeyMayStillRun !== true) throw err;
+		// A new error, not the client's with its mark taken off: ioredis hands one error to every command it flushes, and
+		// another caller's write may be reading the mark on that one.
+		throw Object.assign(new Error(err.message, { cause: err }), typeof err.code === "string" ? { code: err.code } : {});
+	}
+	const current = parseSandboxSession(held);
 	if (!current || current.nonce !== nonce || current.containerId !== containerId) return { refused: "session-changed", message: "The sandbox session ended or changed; reload before asking to end it." };
 	const requestId = random();
 	if (!nonceRe.test(requestId)) throw new Error("invalid sandbox End request identity");
 	const value = JSON.stringify({ host, id, nonce, containerId, requestId });
-	await sandboxBounded(redis.set(sandboxEndKey(nonce), value, "PX", Math.max(ackTimeoutMs + 5_000, 15_000)), timeoutMs);
-	for (let elapsed = 0; ; elapsed += pollMs) {
-		const ack = await sandboxBounded(redis.get(sandboxEndAckKey(nonce, requestId)), timeoutMs);
-		if (ack === "ended") return { ended: true };
-		if (ack === "stop-failed") return { refused: "stop-failed", message: "The runtime did not confirm this sandbox stopped. Check its terminal and reload." };
-		if (elapsed + pollMs > ackTimeoutMs) break;
-		await sleep(pollMs);
+	// Compare and delete, so a later request for the same shell is never the one removed. Sent and not waited for where
+	// Valkey has just stopped answering: it lands behind the request when Valkey wakes, and the answer is not held for it.
+	const withdraw = () => sandboxBounded(redis.eval(REMOVE_REQUEST, 1, sandboxEndKey(nonce), value), timeoutMs);
+	const withdrawBehind = () => void Promise.resolve().then(withdraw).catch(() => {});
+	try {
+		await sandboxBounded(redis.set(sandboxEndKey(nonce), value, "PX", Math.max(ackTimeoutMs + 5_000, 15_000)), timeoutMs);
+	} catch (err) {
+		if (err?.valkeyMayStillRun === true) withdrawBehind();
+		throw err;
 	}
-	await sandboxBounded(redis.eval(REMOVE_REQUEST, 1, sandboxEndKey(nonce), value), timeoutMs).catch(() => {});
+	const answered = (ack) => (ack === "ended" ? { ended: true } : ack === "stop-failed" ? { refused: "stop-failed", message: "The runtime did not confirm this sandbox stopped. Check its terminal and reload." } : null);
+	const readAck = () => sandboxBounded(redis.get(sandboxEndAckKey(nonce, requestId)), timeoutMs);
+	try {
+		for (let elapsed = 0; ; elapsed += pollMs) {
+			const said = answered(await readAck());
+			if (said) return said;
+			if (elapsed + pollMs > ackTimeoutMs) break;
+			await sleep(pollMs);
+		}
+	} catch {
+		withdrawBehind();
+		return { unconfirmed: true };
+	}
+	const removed = await withdraw().catch(() => null);
+	if (removed === 0) {
+		const said = answered(await readAck().catch(() => null));
+		if (said) return said;
+	}
 	return { timeout: true };
 }
 

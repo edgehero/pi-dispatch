@@ -5557,7 +5557,10 @@ export function createFleetReader(
     },
     async sandboxPrepare(request) { if (!enqueueSandboxPreparationFn) return { refused: "sandbox-not-wired", message: "Sandbox requests are not wired in this console." }; return enqueueSandboxPreparationFn(sandboxQueue(request.host), request, { now: nowFn }); },
     async sandboxPreparationStatus(host, id) { return readSandboxPreparationFn ? readSandboxPreparationFn(sandboxQueue(host), id) : { id, host, state: "unknown" }; },
-    async sandboxEnd(request) { return requestSandboxEndFn({ redis, ...request, now: nowFn }); },
+    // `timeoutMs: null` (issue #843): this client's command bound decides alone. The module's own 2 s timer fired first and
+    // rejected with an error that could not say whether the request's SET had reached Valkey, so a request that landed
+    // when Valkey woke was answered "nothing was changed".
+    async sandboxEnd(request) { return requestSandboxEndFn({ redis, ...request, now: nowFn, timeoutMs: null }); },
     /**
      * Issue #845: the database this reader's held client was refused (`refusedDatabaseOf`: `{ db }`, or null when it holds
      * no refusal). The queues are rebuilt and try again; the held client never does, so its reads stay refused until the

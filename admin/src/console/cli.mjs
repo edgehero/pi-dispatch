@@ -951,7 +951,11 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
       readEndpoints: () => endpointSnapshotFn({ m, env: side.env, paths: side.paths, dir: config.dir, fs })?.()?.endpoints ?? [],
     });
     actionDeps = {
-      updates: { read: readUpdatesFacts, setDesired: (row) => m.updates.setDesired(redis, row) },
+      // `timeoutMs: null` (issue #843): the client's command bound decides alone, so a write that reached a Valkey which then
+      // stopped answering fails with that client's error and its `valkeyMayStillRun`, not with a shorter timer's error that
+      // read as "nothing was changed". `readDesired` is the confirm's own look, one command under one bound: the whole read
+      // behind `read` is many, and on a Valkey that stopped answering each of them waits out its own.
+      updates: { read: readUpdatesFacts, readDesired: () => m.updates.readDesired(redis), setDesired: (row) => m.updates.setDesired(redis, row, { timeoutMs: null }) },
       // Issue #849: "sign everyone out" stops every link not opened yet, host-minted and invitations alike.
       loginCodes: { clear: () => m.loginCodes.clearLoginCodes({ dir: codesDir, fs }) },
     modelRoles,

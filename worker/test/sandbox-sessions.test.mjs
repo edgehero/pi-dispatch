@@ -61,6 +61,94 @@ test("End records success only after an acknowledgement and removes its timed-ou
 	assert.equal(noAck.calls.at(-1)[0], "eval");
 });
 
+// Issue #843: what End answers when Valkey fails goes by where it failed.
+const lostAnswer = () => Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT", valkeyMayStillRun: true });
+const settled = () => new Promise((resolve) => setImmediate(resolve));
+const sessionRead = (ack) => async (key) => (key === sandboxSessionKey(session.host, session.id) ? JSON.stringify(session) : ack(key));
+
+test("End's read of the session fails without the mark, whatever the client put on it: nothing was written", async () => {
+	const shared = lostAnswer();
+	const redis = store({ get: async () => { throw shared; } });
+	const err = await requestSandboxEnd({ redis, ...session, now: () => at, timeoutMs: null }).catch((e) => e);
+	assert.equal(err.message, "Command timed out");
+	assert.equal(err.code, "ETIMEDOUT");
+	assert.equal(err.valkeyMayStillRun, undefined, "a read that reached a socket changed nothing");
+	assert.equal(shared.valkeyMayStillRun, true, "the client's own error keeps its mark: ioredis hands one error to every command it flushes");
+	assert.equal(err.cause, shared);
+	assert.equal(redis.calls.length, 0, "no request, and nothing to take back");
+	const plain = new Error("Stream isn't writeable and enableOfflineQueue options is false");
+	assert.equal(await requestSandboxEnd({ redis: store({ get: async () => { throw plain; } }), ...session, now: () => at, timeoutMs: null }).catch((e) => e), plain, "an unmarked error is thrown as it is");
+});
+
+test("End's request that was never sent, or that Valkey refused, changed nothing and takes nothing back", async () => {
+	for (const error of [Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT" }), Object.assign(new Error("READONLY You can't write against a read only replica."), { name: "ReplyError" })]) {
+		const redis = store({ get: sessionRead(() => null), set: async () => { throw error; } });
+		const err = await requestSandboxEnd({ redis, ...session, now: () => at, timeoutMs: null }).catch((e) => e);
+		await settled();
+		assert.equal(err, error);
+		assert.equal(err.valkeyMayStillRun, undefined);
+		assert.deepEqual(redis.calls, [], "no removal is sent for a request that is not there");
+	}
+});
+
+test("End's request that reached a Valkey which stopped answering keeps its mark and is taken back without waiting", async () => {
+	const error = lostAnswer();
+	let release;
+	const redis = store({ get: sessionRead(() => null), set: async () => { throw error; }, eval: (...v) => (redis.calls.push(["eval", ...v]), new Promise((resolve) => { release = resolve; })) });
+	const err = await requestSandboxEnd({ redis, ...session, now: () => at, timeoutMs: null, random: () => "e".repeat(32) }).catch((e) => e);
+	assert.equal(err, error);
+	assert.equal(err.valkeyMayStillRun, true, "the confirm and the audit row say it may or may not have been made");
+	await settled();
+	assert.equal(redis.calls.length, 1, "the answer did not wait for the removal, which is still unanswered here");
+	const [verb, script, keys, key, value] = redis.calls[0];
+	assert.deepEqual([verb, keys, key], ["eval", 1, sandboxEndKey(session.nonce)]);
+	assert.match(script, /redis\.call\('GET',KEYS\[1\]\)==ARGV\[1\]/, "compare and delete: a later request for this shell is never the one removed");
+	assert.deepEqual(JSON.parse(value), { host: session.host, id: session.id, nonce: session.nonce, containerId: session.containerId, requestId: "e".repeat(32) });
+	release(1);
+});
+
+test("a read of End's acknowledgment that throws, after the request was written, takes the request back and says so", async () => {
+	// Valkey not answering, a connection that went, and Valkey answering the read with an error of its own: the request stands in each.
+	for (const error of [lostAnswer(), new Error("Connection is closed."), Object.assign(new Error("LOADING Valkey is loading the dataset in memory"), { name: "ReplyError" })]) {
+		const redis = store({ get: sessionRead(() => { throw error; }), eval: (...v) => (redis.calls.push(["eval", ...v]), new Promise(() => {})) });
+		assert.deepEqual(await requestSandboxEnd({ redis, ...session, now: () => at, timeoutMs: null }), { unconfirmed: true }, "never a throw, which would read as nothing written");
+		await settled();
+		assert.deepEqual(redis.calls.map((c) => c[0]), ["set", "eval"]);
+		assert.equal(redis.calls[1][3], sandboxEndKey(session.nonce));
+		assert.equal(redis.calls[1][4], redis.calls[0][2], "its own request, by value");
+	}
+});
+
+test("End's own acknowledgment timeout reads what the removal answered: a request already gone is looked up once more", async () => {
+	const run = async ({ removed, late }) => {
+		let removedYet = false;
+		const redis = store({ get: sessionRead(() => { if (removedYet && late instanceof Error) throw late; return removedYet ? late : null; }), eval: async (...v) => { redis.calls.push(["eval", ...v]); removedYet = true; if (removed instanceof Error) throw removed; return removed; } });
+		return { out: await requestSandboxEnd({ redis, ...session, now: () => at, ackTimeoutMs: 0, timeoutMs: null }), calls: redis.calls.map((c) => c[0]) };
+	};
+	// The monitor took the request between the last poll and the removal, and has answered since.
+	assert.deepEqual(await run({ removed: 0, late: "ended" }), { out: { ended: true }, calls: ["set", "eval"] });
+	assert.equal((await run({ removed: 0, late: "stop-failed" })).out.refused, "stop-failed");
+	// Gone and not answered: it expired, or the monitor is still stopping the container.
+	assert.deepEqual((await run({ removed: 0, late: null })).out, { timeout: true });
+	// Gone, and the one more read of the acknowledgment fails: still the ambiguous answer, never a throw after the request was written.
+	assert.deepEqual((await run({ removed: 0, late: new Error("Command timed out") })).out, { timeout: true });
+	// Taken back by this caller. A monitor that read it a moment earlier may still stop the container, so an acknowledgment
+	// is not looked for again and the answer stays the ambiguous one.
+	assert.deepEqual((await run({ removed: 1, late: "ended" })).out, { timeout: true });
+	// A removal that was not answered says nothing either way.
+	assert.deepEqual((await run({ removed: new Error("Command timed out"), late: "ended" })).out, { timeout: true });
+});
+
+test("End's timeoutMs of null leaves each command to the client's own bound, and a number is this module's timer", async () => {
+	// Never answered: with a timer of its own End rejects with its own words, which cannot say whether the SET was sent.
+	const silent = store({ get: sessionRead(() => null), set: () => new Promise(() => {}) });
+	await assert.rejects(requestSandboxEnd({ redis: silent, ...session, now: () => at, timeoutMs: 20 }), /sandbox control timed out/);
+	// With none, the client's error is the one that arrives, mark and all, however long it took.
+	const error = lostAnswer();
+	const slow = store({ get: sessionRead(() => null), set: () => new Promise((_resolve, reject) => setTimeout(reject, 60, error)) });
+	assert.equal(await requestSandboxEnd({ redis: slow, ...session, now: () => at, timeoutMs: null }).catch((e) => e), error);
+});
+
 test("monitor End uses immutable ID and acknowledges only a confirmed disappearance", async () => {
 	const redis = store({ get: async () => JSON.stringify({ ...session, requestId: "c".repeat(32) }) });
 	let stopped = null;

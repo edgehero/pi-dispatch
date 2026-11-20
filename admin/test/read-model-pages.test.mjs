@@ -2278,6 +2278,21 @@ test("createFleetReader on a real raw client that cannot connect: a healthy queu
   }
 });
 
+test("createFleetReader's sandboxEnd leaves each command to its client's bound, with no shorter timer of its own (issue #843)", async () => {
+  const logsDir = tempDir("pd-sandbox-end-");
+  const asked = [];
+  const redis = { on() {}, disconnect() {} };
+  const reader = createFleetReader({ valkeyUrl: "redis://unused", logsDir, triggersPath: join(logsDir, "none.json") }, { makeQueueFn: () => ({ name: "pi-jobs", close: async () => {} }), parseConnectionFn: () => ({}), redisFn: () => redis, readOnly: true, requestSandboxEndFn: async (request) => { asked.push(request); return { ended: true }; } });
+  try {
+    assert.deepEqual(await reader.sandboxEnd({ host: "mini1", id: "gh-1", nonce: "a".repeat(32), containerId: "b".repeat(64) }), { ended: true });
+    assert.equal(asked.length, 1);
+    assert.equal(asked[0].redis, redis, "on the bounded client, whose error says whether a command was sent");
+    assert.equal(asked[0].timeoutMs, null, "a timer that fires first rejects with an error that cannot say");
+  } finally {
+    await reader.dispose();
+  }
+});
+
 test("createFleetReader's cancelActive takes back a request whose answer was lost, in order, and leaves an answered one alone", async () => {
   const cancelling = (set, get) => {
     const sent = [];

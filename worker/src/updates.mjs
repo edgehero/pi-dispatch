@@ -44,7 +44,9 @@ const instant = (value) => (Number.isSafeInteger(value) && value > 0 ? value : n
 const digest = (value) => (typeof value === "string" && /^[a-f0-9]{64}$/.test(value) ? value : null);
 const person = (value) => (typeof value === "string" && /^[A-Za-z0-9._@-]{1,64}$/.test(value) ? value : null);
 
+/** `promise` under a timer of this module's own, or under none when `timeoutMs` is `null`: the client's bound then decides alone (`setDesired`). */
 function bounded(promise, timeoutMs = OP_TIMEOUT_MS) {
+	if (timeoutMs === null) return Promise.resolve(promise);
 	return new Promise((resolve, reject) => {
 		const timer = setTimeout(() => reject(new Error("valkey did not answer")), timeoutMs);
 		timer.unref?.();
@@ -159,11 +161,21 @@ row.generation = g
 redis.call('HSET', KEYS[2], ARGV[1], cjson.encode(row))
 return g`;
 
-/** Record what a person asked for, and return its generation, or 0 when `expectGeneration` no longer holds. */
-export async function setDesired(redis, { name: pkg, version: at, op, by, at: when, undoOf = null, from = null, expectGeneration = null }) {
+/**
+ * Record what a person asked for, and return its generation, or 0 when `expectGeneration` no longer holds.
+ *
+ * `timeoutMs` is this module's own timer on the write, and `null` is none (issue #843). A timer that fires before the
+ * client's bound rejects with an error of its own, which cannot say whether the script reached Valkey, so its caller
+ * said "nothing was changed" of a row that landed when Valkey woke. A caller whose client has a command bound passes
+ * `null` and gets that client's error, which carries `valkeyMayStillRun` for a script that was sent. Two equal timers
+ * would race for which error it is, so it is one or the other, never both at one length.
+ * The default keeps this module's timer, for a client with no bound of its own: a caller on a bounded client that leaves
+ * it gets the unmarked error back, and "nothing was changed" of a row that may have been written.
+ */
+export async function setDesired(redis, { name: pkg, version: at, op, by, at: when, undoOf = null, from = null, expectGeneration = null }, { timeoutMs = OP_TIMEOUT_MS } = {}) {
 	const row = { v: 1, generation: 1, name: pkg, version: at, op, by, at: when, ...(undoOf === null ? {} : { undoOf }), ...(from === null ? {} : { from }), request: randomUUID() };
 	if (!parseDesired(row)) throw new Error("not a desired version");
-	return await bounded(redis.eval(SET_DESIRED, 2, UPDATES_GENERATION, UPDATES_DESIRED, pkg, JSON.stringify(row), expectGeneration === null ? "" : String(expectGeneration)));
+	return await bounded(redis.eval(SET_DESIRED, 2, UPDATES_GENERATION, UPDATES_DESIRED, pkg, JSON.stringify(row), expectGeneration === null ? "" : String(expectGeneration)), timeoutMs);
 }
 
 /** Every desired row, or `null` when Valkey could not answer. An unreadable row is one nobody can act on, so it is left out. */

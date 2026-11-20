@@ -93,6 +93,16 @@ test("End requires the exact registered shell and sends only its incarnation; ti
   const ambiguous = await s.service.apply("sandbox-end", preview, "ops");
   assert.equal(ambiguous.partial, true);
   assert.match(ambiguous.invalid, /may still take effect/);
+  // Issue #843: the request was written, and a read of the terminal's answer then failed, by Valkey's silence or by its own error.
+  s.fleet.sandboxEnd = async () => ({ unconfirmed: true });
+  const unconfirmed = await s.service.apply("sandbox-end", preview, "ops");
+  assert.equal(unconfirmed.partial, true, "after the request was written, so never nothing was changed");
+  assert.equal(unconfirmed.invalid, "The End request was written, but the terminal's answer could not be read from Valkey. Reload once Valkey answers before trying again; the request may still take effect.");
+  assert.doesNotMatch(unconfirmed.invalid, /stopped answering/, "true also when Valkey answered that read with an error");
+  assert.match(unconfirmed.invalid, /may still take effect/);
+  // A refusal before anything was written is not partial, and one the monitor answered is its own.
+  s.fleet.sandboxEnd = async () => ({ refused: "session-changed", message: "The sandbox session ended or changed; reload before asking to end it." });
+  assert.deepEqual(await s.service.apply("sandbox-end", preview, "ops"), { invalid: "The sandbox session ended or changed; reload before asking to end it." });
 });
 
 test("terminal-target previews are read-only; confirmation writes the checked credential-free mapping and rejects a stale file", async () => {

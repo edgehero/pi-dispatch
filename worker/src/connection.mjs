@@ -288,17 +288,38 @@ if (!Redis.prototype[COMMAND_BOUND_HOOK]) {
  * returns. A cancel the page said was not made then stopped the run hours later. One already on the socket of a Valkey
  * that stopped answering cannot be taken back, so its error says so (`valkeyMayStillRun`), and the caller can too.
  *
+ * The mark goes by what was WRITTEN, never by the error's words (issue #843): a command that reached a socket and was
+ * then rejected with anything but Valkey's own reply may have run, or may run when Valkey wakes. Besides "Command timed
+ * out" that is ioredis' MaxRetriesPerRequestError on a client without an offline queue whose connection died under the
+ * command (the console's own client), and "Connection is closed." on one that was told to stop. Going by the timeout's
+ * words alone, a write lost that way read as "nothing was changed". Written is recorded when the command is sent, as the
+ * hook above does (it is the newest entry of the command queue right after the send), and not looked up when it fails:
+ * ioredis empties its queues before it rejects what was in them. A command that waited in the offline queue comes
+ * through here a second time when it is sent, which is when it is recorded. ioredis rejects everything it flushes with
+ * ONE error, so a command that only waited can share a written command's mark: that errs towards "may or may not".
+ *
  * ioredis' timer is also ref'd, so a client told to stop with commands still waiting held its process for up to one more
- * bound. Reaches into two internals of the pinned ioredis, both held by
- * `worker/test/connection.test.mjs`. REJECTED: `enableOfflineQueue: false`, which refuses a client's first command too,
- * before it has had a chance to connect.
+ * bound. Reaches into three internals of the pinned ioredis (the timer, the offline queue, the command queue), each
+ * held by `worker/test/connection.test.mjs`. REJECTED: `enableOfflineQueue: false`, which refuses a client's first
+ * command too, before it has had a chance to connect.
  */
+const WRITTEN = new WeakSet();
 class BoundedRedis extends Redis {
 	sendCommand(command, stream) {
 		const answer = super.sendCommand(command, stream);
 		command._commandTimeoutTimer?.unref?.();
+		if (this.commandQueue?.peekBack?.()?.command === command) WRITTEN.add(command);
 		answer?.catch?.((err) => {
-			if (err?.message !== "Command timed out") return;
+			if (!err || typeof err !== "object") return;
+			const timedOut = err.message === "Command timed out";
+			if (WRITTEN.has(command)) {
+				// Valkey's own reply is an answer, and a refusal this project raised (`valkeyRefused`) is no lost one.
+				if (err.name === "ReplyError" || err.valkeyRefused) return;
+				if (timedOut) err.code ??= "ETIMEDOUT";
+				err.valkeyMayStillRun = true;
+				return;
+			}
+			if (!timedOut) return;
 			err.code ??= "ETIMEDOUT";
 			const queue = this.offlineQueue;
 			for (let i = 0; i < queue.length; i += 1) {
@@ -307,7 +328,6 @@ class BoundedRedis extends Redis {
 					return;
 				}
 			}
-			err.valkeyMayStillRun = true;
 		});
 		return answer;
 	}

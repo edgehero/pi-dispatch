@@ -990,8 +990,9 @@ console. While Valkey stays down, some pages draw what they could not read as em
 or no triggers file, nothing to answer. Trust them again once it answers.
 
 A change that timed out before it left the console is not made when Valkey returns. One that reached a Valkey which then
-stopped answering may or may not have been made, and the confirm says so (`package-adopt`, `package-undo` and `sandbox-end` still
-say nothing was changed). On a Valkey that stopped answering, the kill switch and the previews of a failed job's and a steer's actions wait
+stopped answering may or may not have been made, and the confirm and its audit row say so. Adopting or undoing a package and
+ending a sandbox shell say it too, and an End request that may still stand is taken back. With Valkey unreachable, Adopt and
+Undo say that, not that someone changed the package. On a Valkey that stopped answering, the kill switch and the previews of a failed job's and a steer's actions wait
 until it answers, and the console cannot stop until it does, so its service manager's limit ends it. While Valkey stays down,
 its log says each queue's error once a minute, and an outage after Valkey came back says it again at once.
 

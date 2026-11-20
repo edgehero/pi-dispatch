@@ -2471,22 +2471,21 @@ const packageActions = [
     },
     async apply(entry, ctx) {
       const { name, version, from } = entry.payload;
+      if (await desiredUnread(ctx)) return { unreachable: true };
       const checked = adoptable(await ctx.a.updates.read(), { name, version });
+      if (checked.unread) return { unreachable: true };
       if (checked.refusal) return { invalid: checked.refusal };
-      try {
-        const written = await ctx.a.updates.setDesired({ name, version, op: "adopt", from, by: ctx.session.name, at: ctx.now(), expectGeneration: checked.row.desired?.generation ?? 0 });
-        if (written === 0) return { invalid: "Someone changed this package since the preview. Preview it again." };
-      } catch {
-        return { invalid: "Valkey did not take the request. Nothing was changed; preview it again." };
-      }
-      return { ok: true };
+      const written = await writeDesired(ctx, { name, version, op: "adopt", from, by: ctx.session.name, at: ctx.now(), expectGeneration: checked.row.desired?.generation ?? 0 });
+      return written.invalid ? written : { ok: true };
     },
   },
   {
     name: "package-undo", kind: "package-undo", paid: false, bulk: false, needs: ["updates"],
     async preview(body, ctx) {
       const name = str(body, "name", { required: true, max: 214 });
-      const row = stagedRow(await ctx.a.updates.read(), name);
+      const facts = await ctx.a.updates.read();
+      if (updatesUnread(facts)) return { refusal: UPDATES_UNREAD_SENTENCE, status: 503 };
+      const row = stagedRow(facts, name);
       const desired = row?.desired;
       if (desired?.op !== "adopt" || !desired.from) return { refusal: `There is no adoption of ${name} to undo. Nothing was changed.` };
       return { target: `${name}@${desired.from}`, payload: { name, version: desired.from, undoOf: desired.generation, from: desired.version },
@@ -2494,21 +2493,65 @@ const packageActions = [
     },
     async apply(entry, ctx) {
       const { name, version, undoOf, from } = entry.payload;
-      const row = stagedRow(await ctx.a.updates.read(), name);
-      if (row?.desired?.generation !== undoOf) return { invalid: "Someone changed this package since the preview. Preview it again." };
-      try {
-        const written = await ctx.a.updates.setDesired({ name, version, op: "undo", undoOf, from, by: ctx.session.name, at: ctx.now(), expectGeneration: undoOf });
-        if (written === 0) return { invalid: "Someone changed this package since the preview. Preview it again." };
-      } catch {
-        return { invalid: "Valkey did not take the request. Nothing was changed; preview it again." };
-      }
-      return { ok: true };
+      const held = await desiredRowNow(ctx, name);
+      if (held.unread) return { unreachable: true };
+      if (held.row?.generation !== undoOf) return { invalid: PACKAGE_MOVED_SENTENCE };
+      const written = await writeDesired(ctx, { name, version, op: "undo", undoOf, from, by: ctx.session.name, at: ctx.now(), expectGeneration: undoOf });
+      return written.invalid ? written : { ok: true };
     },
   },
 ];
 
-/** Adopt's gate, asked at the preview and again at the confirm: a version a person has seen a canary finish. The run record says so, not the page. */
+/** What Adopt and Undo say when the desired row is no longer the one their preview was shown: said only when a read, or the write's own compare, showed another one. */
+export const PACKAGE_MOVED_SENTENCE = "Someone changed this package since the preview. Preview it again.";
+/** What they say of a write Valkey refused or that never reached it. */
+export const PACKAGE_NOT_TAKEN_SENTENCE = "Valkey did not take the request. Nothing was changed; preview it again.";
+/** What their previews say when what Valkey holds about the packages could not be read. */
+export const UPDATES_UNREAD_SENTENCE = "What Valkey holds about this package could not be read (is Valkey reachable?); nothing was changed";
+
+/**
+ * Whether the facts are missing what Valkey holds (issue #843): the desired rows (`desiredUnreadable`), or the hosts'
+ * looks (`state: "unknown"`), which is where a package's newest version comes from. A package row is then drawn with no
+ * desired row and no newest version, and a gate that read it as fact said "Someone changed this package", "There is no
+ * adoption to undo" or "Run a canary first" of a Valkey that only did not answer.
+ */
+const updatesUnread = (facts) => facts?.desiredUnreadable === true || facts?.state === "unknown";
+
+/** The confirm's first look, where the console wires one: the desired rows alone, one command under one bound, so an outage is answered at once and not after every read the facts make. */
+async function desiredUnread(ctx) {
+  return typeof ctx.a.updates.readDesired === "function" && (await ctx.a.updates.readDesired()) === null;
+}
+
+/** `{ row }`, the package's desired row as Valkey holds it now (null for none), or `{ unread }`. From the desired rows alone where the console wires that read, else from the facts. */
+async function desiredRowNow(ctx, name) {
+  if (typeof ctx.a.updates.readDesired === "function") {
+    const rows = await ctx.a.updates.readDesired();
+    return rows === null ? { unread: true } : { row: rows.find((row) => row?.name === name) ?? null };
+  }
+  const facts = await ctx.a.updates.read();
+  return updatesUnread(facts) ? { unread: true } : { row: stagedRow(facts, name)?.desired ?? null };
+}
+
+/**
+ * The one write of Adopt and Undo: `{}` when the row was written, else `{ invalid }`. An error that says the script
+ * reached a Valkey which then stopped answering (`valkeyMayStillRun`) is thrown on, so the confirm and the audit row say
+ * the change may or may not have been made (issue #843): caught here, it was answered "Nothing was changed", and the row
+ * landed when Valkey woke. Any other error was a refusal or was never sent, so nothing was changed.
+ */
+async function writeDesired(ctx, row) {
+  let written;
+  try {
+    written = await ctx.a.updates.setDesired(row);
+  } catch (e) {
+    if (e?.valkeyMayStillRun === true) throw e;
+    return { invalid: PACKAGE_NOT_TAKEN_SENTENCE };
+  }
+  return written === 0 ? { invalid: PACKAGE_MOVED_SENTENCE } : {};
+}
+
+/** Adopt's gate, asked at the preview and again at the confirm: a version a person has seen a canary finish. The run record says so, not the page. `{ unread }` when what it would judge by could not be read. */
 function adoptable(facts, { name, version }) {
+  if (updatesUnread(facts)) return { unread: true, refusal: UPDATES_UNREAD_SENTENCE, status: 503 };
   const row = stagedRow(facts, name);
   if (!row) return { refusal: `${name} is not staged on this host. Nothing was changed.` };
   if (row.adapter) return { refusal: `${name} is a reviewed subscription adapter, whose identity depends on its exact tree. It moves with a pi-dispatch release. Nothing was changed.` };
