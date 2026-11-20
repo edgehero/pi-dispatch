@@ -3594,6 +3594,7 @@ export async function collectChecks(shellVars, seams) {
 		const dirOk = fileExists(overlay);
 		checks.push({ ok: dirOk, label: `Global overlay dir exists (${envValueShown(overlay)})${fromFileNote(fileSays("PI_GLOBAL_PI_DIR"))}`, fix: "run `pi-dispatch import-pi`, or fix PI_GLOBAL_PI_DIR" });
 		if (dirOk) {
+			checks.push(overlayPersonaCheck(overlay, { readFile: seams.readOverlayFile ?? readFileSync, lstat: seams.lstatOverlayFile ?? lstatSync }));
 			const overlayAuth = join(overlay, "auth.json");
 			checks.push({
 				ok: !fileExists(overlayAuth),
@@ -12118,4 +12119,18 @@ export function watchDoctorChecks({ sources = {}, rules = 0, env = {} } = {}) {
 		}
 	}
 	return checks;
+}
+
+/** Prompt text never reaches doctor output or its published checks. */
+export function overlayPersonaCheck(overlay, { readFile = readFileSync, lstat = lstatSync } = {}) {
+	try {
+		const file = join(overlay, "APPEND_SYSTEM.md");
+		if (!lstat(file).isFile()) return { ok: false, label: "Global persona: APPEND_SYSTEM.md is not a regular file", fix: "stage the file itself, not a link, directory or special file" };
+		const text = readFile(file, "utf8");
+		if (!text.trim()) return { ok: false, warn: true, label: "Global persona: APPEND_SYSTEM.md is empty", fix: "stage the intended persona with import-pi, or remove the empty file" };
+		return { ok: true, label: `Global persona: SHA-256 ${createHash("sha256").update(text, "utf8").digest("hex")}` };
+	} catch (error) {
+		if (error?.code === "ENOENT") return { ok: true, label: "Global persona: no APPEND_SYSTEM.md configured" };
+		return { ok: false, label: "Global persona: APPEND_SYSTEM.md could not be read", fix: "restore the staged file and its read permissions before starting jobs" };
+	}
 }

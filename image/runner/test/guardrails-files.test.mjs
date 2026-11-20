@@ -34,7 +34,8 @@ test("the loader reads the protocols from the paths the Dockerfile copies them t
 	assert.match(loader, /export const PORTFOLIO_SNAPSHOT_PATH = `\$\{LAYOUT\.job\}\/portfolio\.json`;/);
 	assert.match(loader, /export const ARTIFACTS_PROTOCOL_PATH = "\/opt\/pi-dispatch\/ARTIFACTS_PROTOCOL\.md";/);
 	assert.match(loader, /export const ARTIFACTS_MOUNT = LAYOUT\.artifacts;/);
-	assert.match(loader, /\[guardrails, outboxProtocol, portfolioProtocol, artifactsProtocol, globalPersona, projectPersona\]/, "the order is the contract");
+	assert.match(loader, /\[guardrails, outboxProtocol, portfolioProtocol, artifactsProtocol, \.\.\.personas\]/, "the order is the contract");
+	assert.match(loader, /new Set\(\[additions\.overlay, additions\.repository\]/, "global instructions precede repository instructions even when identical files are deduplicated");
 });
 
 for (const file of ["PORTFOLIO_PROTOCOL.md", "ARTIFACTS_PROTOCOL.md"]) test(`${file} has no dashes as punctuation and names no tool of the operator`, () => {

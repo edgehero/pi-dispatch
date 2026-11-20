@@ -6828,6 +6828,16 @@ free local model, or using a few successful live probes as proof of every routin
 
 ## DES-OPERATOR-GLOBAL-OVERLAY
 
+- **Append snapshots (2026-11-20):** read overlay and repository `APPEND_SYSTEM.md` once per resource loader,
+  retaining the text across reloads. Identical global and repository text contributes one block, with both source
+  hashes retained. The watch and answer-draft loaders receive the same configured overlay
+  path as ordinary jobs. Missing or zero-length text has a null hash; other read errors are not silently treated
+  as absence. A WeakMap holds the two SHA-256 values for Loaded reporting, separately from the text passed
+  to `appendSystemPromptOverride`. These are hashes of the UTF-8 text the loader read, not a complete provider
+  request. An external extension or independent child must compose its own prompt explicitly; this loader
+  does not establish that every such call inherits the additions. REJECTED: rereading files on reload, which
+  changes a running session, and storing prompt text or treating hashes as independent attestation.
+
 - **Decision**: Reuse an operator's existing host `pi` setup across every job through a single **global
   overlay dir** (`PI_GLOBAL_PI_DIR`), bind-mounted `/opt/pi-global:ro` into each container and layered as a
   new trust **tier 2** between the baked floor and the per-repo `.pi/`. It supplies custom models
@@ -13369,6 +13379,11 @@ activate when registered. `image/runner/test/loader.test.mjs` verifies these cas
   - **A replaced queue does not grow the log.** A replaced queue is a new emitter, so while Valkey stays down each read repeats what the last one said, about fifty lines a read on a fleet of ten. `onValkeyError` says the same line for the same queue once a minute, across emitters, for a queue that gives up (`givesUp`) and for the reader's raw client. A line not said in that minute is said at once, two faults taking turns are each said once a minute, and the raw client going ready ends the quiet, so a second outage inside the minute is said too. REJECTED: the same quiet for every client, which took a worker's second outage out of its log when it came within the minute. The per-call clients of the zero touch and answerer pages carry a listener that says nothing, or ioredis prints a stack trace per reconnect attempt.
 
 - **What a run loaded (AMENDED 2026-11-03, #800, `REQ-OPERATOR-CONSOLE-SCREENS` (b1), (b5), (c), (g7)):**
+  - **Prompt additions (2026-11-20):** the Loaded card shows recorded overlay and repository append-source
+    hashes, or none for a null source. Its explanation is "SHA-256 of the append files loaded at session start.
+    Role and provider prompts are separate." Omission means unknown. No prompt text is shown; these shaped
+    runner reports do not attest a complete model request or arbitrary extension's child prompt. The
+    same-process forgery residual is explicit in `INT-RUN-HISTORY-FILE-CONTRACT`.
   - **The words live in one place.** A run page, a row of the Runs list, the problems filter, `/api/run`, the `/dispatch`
     panel, a sandbox and a project all read one record, so `admin/src/loaded-words.mjs` is the only place a surface gets
     what that record means, as `model-words.mjs` is for models: pure, with no I/O and no clock, and `panels/loaded-parts.mjs`
@@ -17355,6 +17370,11 @@ is introduced. The design generator owns the published card before the console u
 
 ## DES-DOCTOR-RESULTS-PUBLISHED
 
+- **Append observation (2026-11-20):** local doctor output shows a readable nonblank global append file's
+  SHA-256, reports absence as unconfigured, warns for blank text and fails on an unreadable file, without
+  printing its text. Existing publication rules apply: a generic successful hash label is not published.
+  This observes the staged file now, not a past run or complete provider request.
+
 - **Proposal detail exception (#773)**: explicitly typed model proposal checks may publish their bounded redacted labels even when successful, with allowlisted machine facts for Models and `dispatch_models`. This exception does not retain generic successful labels or trust a text prefix as authority. Existing detailed/check bounds, redaction, TTL, observation age and display-only behavior apply; old records lacking proposal evidence never establish that no proposals exist.
 
 - **Status**: issue #712, PR C (2026-10-21). New. The key's contract is `INT-DOCTOR-RESULTS-KEY`.
@@ -19310,3 +19330,4 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 | 2026-11-19 (Claude adapter 0.3.11) | **`DES-HOST-OWNED-SUBSCRIPTION-AUTH` EXTENDED**: audit the 0.3.11 artifact with SDK 0.124.0; preserve failed-response guard refusals and give each exact source/output profile its own receipt revision while retaining the original revisions for unchanged profiles. UNCHANGED, checked: host-only refresh, final-request checks, hard-rule preservation and the container boundary. |
 | 2026-11-19 (Opus scoped quota) | **`DES-HOST-OWNED-SUBSCRIPTION-AUTH` CORRECTED**: review the exact modern Fable scope against the provider plan guide; map its existing opaque IDs to applicability for exact Opus 5.5, retaining conservative handling for every other shape. Accept microsecond/nanosecond reset timestamps with upward millisecond rounding. UNCHANGED, checked: credential ownership, raw-data privacy and unknown exhaustion persistence. |
 | 2026-11-20 (explicit auxiliary routes) | `DES-HOST-OWNED-SUBSCRIPTION-AUTH` and `DES-MODEL-FAILOVER` AMENDED: hand-authored finite auxiliary grants survive root selection, receive independent auth/quota admission and share the existing meter and cost cap. Whole-panel admission is conservative. `DES-STORE-VERSION-WHEN-NEEDED` applied to trigger version 9 and job-data version 11. UNCHANGED, checked: root candidate billing, subscription identity custody, API fallback prohibition, request guards and accounting ledgers. |
+| 2026-11-20 (append snapshots) | `DES-OPERATOR-GLOBAL-OVERLAY`, `DES-OPERATOR-CONSOLE` and `DES-DOCTOR-RESULTS-PUBLISHED` AMENDED: immutable loader append snapshots, watch and answer-draft overlay wiring, shaped source hashes in Loaded and a content-free doctor check. Rejected rereads, prompt-text records and claims of complete wire-prompt proof. `DES-STORE-VERSION-WHEN-NEEDED` UNCHANGED, checked: optional metadata, legal absence, no new store or migration. |

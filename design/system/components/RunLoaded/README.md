@@ -6,6 +6,7 @@ A completed run's **Loaded** card: what the job had when it started, one line pe
 - **One line per kind:**
   - **pi:** the version and image the job ran, with the image id.
   - **Model:** the model and its calls.
+  - **Prompt additions:** overlay and repository append-file SHA-256 hashes when recorded; no prompt text.
   - **Extensions:** each staged package with its exact version, overlay extensions by name, and how many came from the repository.
   - **Skills:** the flow and where it was found (repository, the trigger's skills folder, the overlay or a staged package), and how many more loaded, by tier.
   - **MCP:** each server the trigger names, its state and how many tools it brought.

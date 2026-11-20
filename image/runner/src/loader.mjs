@@ -7,6 +7,7 @@ import { overlayEntryNamed } from "./loaded.mjs";
 import { extensionEntryName, isUnderAnyRoot, owningRoot, partitionAdminExtensions } from "./packages.mjs";
 import { guardrailsForMerge } from "./merge-policy.mjs";
 import { configError } from "./outcome.mjs";
+import { readPromptAdditions, rememberPromptAdditions } from "./prompt-additions.mjs";
 
 /** Where the image bakes the guardrails. Outside agentDir, on purpose -- see buildResourceLoader. */
 export const GUARDRAILS_PATH = "/opt/pi-dispatch/HARD_RULES.md";
@@ -580,9 +581,12 @@ export function buildResourceLoader({
 } = {}) {
 	if (watchReadOnly && mayMerge !== false) throw configError("a read-only job cannot carry merge permission");
 	const guardrails = guardrailsForMerge(readFileSync(guardrailsPath, "utf8"), mayMerge);
+	const additions = readPromptAdditions({ globalPiDir, jobPiDir });
+	// Identical global and repository files are one instruction block, with both origins still recorded.
+	const personas = [...new Set([additions.overlay, additions.repository].filter(Boolean))];
 	// Watch evidence has no author gate. Reject executable resources before their modules run;
 	// filtering a loaded extension afterward cannot undo module-level side effects.
-	if (watchReadOnly) return new DefaultResourceLoader({
+	if (watchReadOnly) return rememberPromptAdditions(new DefaultResourceLoader({
 		cwd,
 		agentDir: getAgentDir(),
 		settingsManager: SettingsManager.inMemory({ ...settingsManager?.getSettings?.(), packages: [], extensions: [] }),
@@ -594,13 +598,11 @@ export function buildResourceLoader({
 		additionalExtensionPaths: [],
 		extensionFactories: watchExtensionFactories,
 		additionalSkillPaths: [`${jobPiDir}/skills`, ...(existsSync(triggerSkillsDir) ? [triggerSkillsDir] : [])],
-		appendSystemPromptOverride: () => [guardrails, readIfExists(`${jobPiDir}/APPEND_SYSTEM.md`)].filter(Boolean),
-	});
-	const projectPersona = readIfExists(`${jobPiDir}/APPEND_SYSTEM.md`);
+		appendSystemPromptOverride: () => [guardrails, ...personas].filter(Boolean),
+	}), additions);
 	// The operator's global overlay (REQ-GLOBAL-PI-OVERLAY), present only when the /opt/pi-global mount
 	// exists. Persona layers BETWEEN the immutable floor and the repo persona; skills layer UNDER the
 	// repo's (repo path first => repo wins a name collision, since pi's loadSkills is first-path-wins).
-	const globalPersona = readIfExists(`${globalPiDir}/APPEND_SYSTEM.md`);
 	const globalSkills = `${globalPiDir}/skills`;
 	const globalExtensions = `${globalPiDir}/extensions`;
 	const globalPrompts = `${globalPiDir}/prompts`;
@@ -627,7 +629,7 @@ export function buildResourceLoader({
 	// Read ONCE, here, so the layout and withheld lines are written once per job (issue #544).
 	const overlay = allowGlobalExtensions ? withoutExcludedEntries(overlayExtensionEntries(globalExtensions, { log }), globalExtensions, excludeExtensions) : { entries: [], skipped: [] };
 
-	return new DefaultResourceLoader({
+	return rememberPromptAdditions(new DefaultResourceLoader({
 		cwd,
 		agentDir: getAgentDir(),
 		settingsManager,
@@ -727,8 +729,8 @@ export function buildResourceLoader({
 				packageRoots: packagePaths,
 				protectedPrompts,
 			}),
-		appendSystemPromptOverride: () => [guardrails, outboxProtocol, portfolioProtocol, artifactsProtocol, globalPersona, projectPersona].filter(Boolean),
-	});
+		appendSystemPromptOverride: () => [guardrails, outboxProtocol, portfolioProtocol, artifactsProtocol, ...personas].filter(Boolean),
+	}), additions);
 }
 
 /**

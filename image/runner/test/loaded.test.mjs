@@ -503,12 +503,12 @@ test("INT-RUNNER-EXIT-CODE-PROTOCOL's table says what this module holds: the clo
 	// The table's rows are the line's keys, both ways. Not `v`, the field's own version, which the JSON above the table shows, or
 	// `flowPackage`, which only ever rides beside `flow` and which `flow`'s row names.
 	const rows = section.split("\n").map((text) => /^\s*\| `([A-Za-z]+)` \|/.exec(text)?.[1]).filter(Boolean);
-	const line = maximalLoaded();
+	const line = { ...maximalLoaded(), promptAdditions: { overlay: "a".repeat(64), repository: null } };
 	assert.deepEqual([...rows].sort(), Object.keys(line).filter((key) => key !== "v" && key !== "flowPackage").sort(), "a row per key of the line");
 	assert.match(rowOf("flow"), /`flowPackage` is its row/);
 	assert.match(section, /"loaded":\{"v":1,/);
 	// What each row with keys inside it says it holds. `packages`, `tiers` and `mcp` are rows of counts, held above.
-	for (const key of ["overlay", "tools", "extTools", "cut"]) contains(rowOf(key), Object.keys(line[key]), key);
+	for (const key of ["overlay", "tools", "extTools", "cut", "promptAdditions"]) contains(rowOf(key), Object.keys(line[key]), key);
 
 	// `pi`'s row against what buildLoaded does with each case it names.
 	const piOf = (pi) => buildLoaded({ at: "start", pi }).pi;

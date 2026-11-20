@@ -271,7 +271,7 @@ test("What a job gets says what the console says: the words a row reads, and eve
   const words = section.replaceAll("**", "").replace(/\s+/g, " ");
   for (const record of [S.noFlow(), S.extensionFailed()]) assert.ok(words.includes(outcomeNote(record)), outcomeNote(record));
   // A plain name for each line a reader sees on the image below it. A line added to the card fails here until the list says it.
-  const named = { pi: "pi", Model: "the model", Extensions: "its extensions", Skills: "its skills", MCP: "the outside systems", Tools: "its tools" };
+  const named = { pi: "pi", Model: "the model", "Prompt additions": "its extra instructions", Extensions: "its extensions", Skills: "its skills", MCP: "the outside systems", Tools: "its tools" };
   assert.deepEqual(loadedRows(S.everything()).map((row) => row.label), Object.keys(named));
   for (const [label, plain] of Object.entries(named)) assert.ok(words.includes(plain), `${label} is said as ${plain}`);
   assert.ok(section.includes("console/console-run-loaded.png"), "the section shows the card it describes");

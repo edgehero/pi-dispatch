@@ -1,7 +1,7 @@
 {
   "card": "RunLoaded",
   "pr": 800,
-  "words": "9825a7c03a78098eace41d4cb1d1436641314ee6eef06360bf5e540e4b4f5e3b",
+  "words": "ae5e8b30cffd8c6f95d351fd2dd31ac010bd62c4623e2c2de6c14ac44d0ffa54",
   "elements": [
     {
       "el": "p-outcome",
@@ -105,6 +105,22 @@
       "shows": [
         "anthropic / claude-sonnet-5-5",
         "14 calls"
+      ]
+    },
+    {
+      "el": "Prompt additions: overlay and repository append-file SHA-256 hashes when recorded; no prompt text",
+      "kind": "readme",
+      "status": "new",
+      "panel": "p-loaded",
+      "source": "admin/src/loaded-words.mjs#loadedRows",
+      "golden": [
+        "panels/run-loaded.operator",
+        "panels/run-loaded.viewer"
+      ],
+      "shows": [
+        "Prompt additions",
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "repository: none"
       ]
     },
     {
@@ -299,6 +315,11 @@
       "status": "illustrative",
       "reason": "Sample values."
     },
-    {"el":"The title is RunEnded's: the id, and beside it the run's short link","kind":"readme","status":"new","source":"admin/src/console/run-path.mjs#runPathLink"}
+    {
+      "el": "The title is RunEnded's: the id, and beside it the run's short link",
+      "kind": "readme",
+      "status": "new",
+      "source": "admin/src/console/run-path.mjs#runPathLink"
+    }
   ]
 }

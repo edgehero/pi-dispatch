@@ -129,6 +129,7 @@ def loaded_panel():
     lines = "".join([
         row("box", "pi", f'pi 1.5.0 in {code("pi-job:4.3.1")}', f'image {code("sha256:7c1e0b4…")}, as mini1 ran it'),
         row("bolt", "Model", "anthropic / claude-sonnet-5-5", "14 calls"),
+        row("layers", "Prompt additions", f'Overlay: {code("a" * 64)}; repository: none', "SHA-256 of the append files loaded at session start. Role and provider prompts are separate."),
         row("layers", "Extensions", "pi-lint 1.4.2, pi-test-runner 0.9.0", "staged on mini1"),
         row("skill", "Skills", "<b>fix</b>, the flow, from the repository", "and 3 more: 2 from the repository, 1 from pi-test-runner"),
         row("plug", "MCP", "none", "trigger 3 names no server"),
@@ -387,6 +388,7 @@ A completed run's **Loaded** card: what the job had when it started, one line pe
 - **One line per kind:**
   - **pi:** the version and image the job ran, with the image id.
   - **Model:** the model and its calls.
+  - **Prompt additions:** overlay and repository append-file SHA-256 hashes when recorded; no prompt text.
   - **Extensions:** each staged package with its exact version, overlay extensions by name, and how many came from the repository.
   - **Skills:** the flow and where it was found (repository, the trigger's skills folder, the overlay or a staged package), and how many more loaded, by tier.
   - **MCP:** each server the trigger names, its state and how many tools it brought.

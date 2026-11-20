@@ -2745,7 +2745,8 @@ writes retain their existing interactive confirmation. This adds no unattended p
     by the RUN id and says when the attempt's run continues as a recovery (#662)"), `admin/test/console-server.test.mjs`.
     **The Loaded card** (issue #800, `p-loaded`, after `p-run` in the page's main column, for both roles; the RunLoaded and
     LoadedStates cards). Given a run with a record, `runLoaded` draws `loadedVerdict`'s top line, one line per kind
-    (`loadedRows`: pi and its image, the model, extensions, skills, MCP and tools) and, in a `<details>`, what no top line
+    (`loadedRows`: pi and its image, the model, extensions, skills, MCP and tools, plus prompt-addition source
+    hashes when recorded) and, in a `<details>`, what no top line
     mentions (`loadedFold`: the image's id, each extension and where it came from, the failed and dropped rows, the skill
     counts by tier, a skill a package had replaced, prompt templates and themes, each server, the tools by source and
     what was left out). Its state is one of `LOADED_STATES`, each a row of `docs/console.md`'s table, which a test holds
@@ -6184,6 +6185,14 @@ without suggesting an OpenAI compatibility-field fix. `DES-DOLLAR-RESERVE-AND-SE
 - **Traces to**: `CONST-PI-VERSION-PINNED`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-RETRY-INFRA-ONLY`, `DES-PACKAGE-UPDATES-PREPARED-NOT-APPLIED`, `INT-UPDATES-KEYS`
 
 ## REQ-GLOBAL-PI-OVERLAY
+
+- **Append snapshots (2026-11-20):** the runner shall read overlay and repository append text once per loader
+  and retain it through reloads, including watch and answer-draft sessions that use the overlay. Identical global
+  and repository append text shall contribute one block while retaining both source hashes. Loaded reporting
+  may carry only source hashes, never prompt text. Null means absent or zero-length text at that read; omission
+  means unknown. Doctor shall distinguish readable nonblank global text, absence, blank text and an unreadable
+  file without printing its content, refusing links and special files without opening them. No persona wording, tag grammar or additional authority is required, and
+  these observations do not attest complete model requests or external auxiliary-call composition.
 
 - **Statement**: An operator shall be able to reuse their existing host `pi` setup in every job. A single
   **global overlay dir** (`PI_GLOBAL_PI_DIR`, an absolute path: a relative value refuses the worker's boot,
@@ -9805,3 +9814,4 @@ instead of drifting.
 | 2026-11-19 (Claude adapter 0.3.11) | **`REQ-SUBSCRIPTION-AUTHENTICATION` EXTENDED**: admit the exact reviewed `pi-anthropic-oauth@0.3.11` profile alongside 0.3.6 and the secondary profile. UNCHANGED, checked: host-only credential ownership, free admission, quota, metering and provider registration guards. |
 | 2026-11-19 (Opus scoped quota) | **`REQ-SUBSCRIPTION-AUTHENTICATION` CORRECTED**: a reviewed Fable-only weekly limit no longer blocks exact Opus 5.5. Every finite route is checked separately. UNCHANGED, checked: account limits, unknown-scope refusal, paid-overage refusal and free admission. |
 | 2026-11-20 (explicit auxiliary routes) | `REQ-SUBSCRIPTION-AUTHENTICATION` and `REQ-MODEL-POLICY` AMENDED: ordinary flows can explicitly authorize finite auxiliary subscription/API calls with a positive shared cap; all declared routes must pass free admission. UNCHANGED, checked: automatic root billing fallback is forbidden, hard cost enforcement, host credential custody and internal classifier role restrictions. |
+| 2026-11-20 (append snapshots) | `REQ-GLOBAL-PI-OVERLAY` and `REQ-OPERATOR-CONSOLE-SCREENS` AMENDED: stable append text, optional source hashes with unknown distinct from absent, and doctor observations without prompt text. External auxiliary-call composition is not inferred. Budget, role, output and owner authority are UNCHANGED, checked. |

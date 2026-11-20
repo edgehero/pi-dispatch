@@ -388,6 +388,16 @@ as `subscription_auth_hold`. See [subscription renewal](subscription-auth.md#adm
 
 Release numbers come from the git tags.
 
+### Unreleased: append-file source hashes
+
+| Stored state | What changes and how to move it |
+|---|---|
+| Run record `loaded.promptAdditions` | Optional `{overlay, repository}` source hashes, each lowercase SHA-256 or null, on full and compact reports. Minimal and older reports may omit it; omission means unknown. No record version, migration or older-state detector is needed because absence remains valid. Upgrade the image, worker and console to produce, validate and show it. Existing records remain readable. |
+| Overlay and doctor | No new store, setting, key or backup path. Loader reloads retain their initial append text; restart the session to pick up a later staged edit. Doctor's append-file check uses its existing record and publication rules. Hashes identify loaded source text, not the complete provider prompt. |
+
+See [the global overlay](global-pi-overlay.md#what-a-run-loaded-and-where-to-read-it) and
+[the Loaded card](console.md#what-a-run-loaded).
+
 ### Unreleased: local close-actor grants
 
 | Stored state | What changes and how to move it |

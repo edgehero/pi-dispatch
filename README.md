@@ -460,7 +460,7 @@ A job starts with four things: your setup on the machine it runs on, what the re
 the box it runs in. Each changes on its own: one machine misses an update, or someone removes a skill from the repository. So
 two jobs of one trigger can start differently.
 
-**A job that starts keeps a list of what it had:** the version of pi, the model, its skills, its extensions, the outside systems
+**A job that starts keeps a list of what it had:** the version of pi, the model, its extra instructions, its skills, its extensions, the outside systems
 (MCP servers) it connected to, and its tools. The run's page shows that list and says plainly when something is missing, so you
 can check a job you did not watch before you accept its work.
 
