@@ -55,5 +55,6 @@ test("the helper fails loudly when a required fixture is missing, and the width 
 	assert.ok(results.every((r) => r.failures.length === 1 && r.failures[0].includes("fixture is absent")));
 	const source = readFileSync(new URL("../../.github/scripts/console-width-check.mjs", import.meta.url), "utf8");
 	assert.match(source, /import \{ checkZeroTouchBrowser \} from "\.\/console-zero-touch-browser\.mjs"/);
-	assert.match(source, /results\.push\(\.\.\.await checkZeroTouchBrowser\(\{ browser, docs, origin, openPage, clockMs, shots \}\)\)/);
+	assert.match(source, /results\.push\(\.\.\.await check\(\{ browser, docs, origin, openPage: open, clockMs, shots \}\)\)/, "each interactive check is called with the lane's browser, pages and page opener");
+	assert.match(source, /await extra\("zero-touch", "zero-touch", checkZeroTouchBrowser\);/, "and this one is among them, for the zero-touch golden");
 });

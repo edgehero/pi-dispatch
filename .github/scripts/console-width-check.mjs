@@ -103,11 +103,31 @@
  * #284's class): Chrome for Testing at the exact version `.github/chrome-for-testing.json` pins, the pin itself checked
  * before anything is downloaded (`--check-pin`, which prints the url derived from the pinned version) and the zip
  * against its sha256 before it is unzipped (`--verify-zip`); time zone UTC, locale en-US and the page's clock fixed one
- * minute after the fixture's instant, over the DevTools protocol; two isolated browser/server lanes, each with one tab
- * at a time (the held streams would otherwise run into Chrome's six connections per origin). Both lanes calibrate
- * against both negative controls. The complete page and shell run lists are partitioned, never shortened. A deadline
+ * minute after the fixture's instant, over the DevTools protocol; `BROWSER_LANES` isolated browser/server lanes (three),
+ * each with one tab at a time (the held streams would otherwise run into Chrome's six connections per origin). Every
+ * lane calibrates against both negative controls. The complete page and shell run lists are partitioned, never shortened. A deadline
  * per navigation and per run means a wait that never ends fails
  * the step instead of holding the job. No virtual time: pausing it while a stub holds a fetch open never resumes.
+ *
+ * WHEN A PAGE IS MEASURED (`settleSource`, issue #966): after its fonts and two frames, and then by the kind of page.
+ * One with no `data-live` on `<body>` at once. A `data-live` page one frame after its script first writes the live
+ * pill, which it does when its stream opens, whatever state the server drew the pill in: so a live golden is measured
+ * with its stream open, as Live, on every runner. A page with the timeline, a sign-in page and a sandbox gateway page
+ * after a fixed `SETTLE_WAIT_MS` more, since no event says their load-time work is done (a live one of them after its
+ * pill AND that wait); a live page with no pill after that wait alone. Never later than `SETTLE_CAP_MS`: such a run
+ * is measured as it stood, with a note, and the check prints one `::warning::` naming how many there were and the
+ * first of them. A page with no `data-live` that asks for `/api/events` fails its run, so the first rule cannot go
+ * stale in silence. A navigation whose load event never arrives within `NAV_MS` is tried once more in a fresh tab
+ * before its lane fails (a page that loaded and failed its measurements is never tried again).
+ *
+ * ITS TIME (issue #966), told through each lane's own log and never through the verdict's lines (`summarize`): a lane
+ * says where it is about once a minute (`PROGRESS_MS`) and closes with one line, what each part took and how many
+ * runs it made (Chrome's start, the controls, the golden runs, the shell runs, the run without scripts, each
+ * interactive check by name), its total, the runs whose page never settled and the navigations tried again
+ * (`laneTiming`); a lane that fails says at once which part and run it was in; the timeline check's
+ * time has a line of its own; a run that reached the browser prints one `::notice::` with its total against `RUN_MS`
+ * and a `::warning::` above `BUDGET_WARN` of it (`budgetLines`); and a run the deadline cuts first says each lane's
+ * part, count and run in hand.
  *
  * NO CHROME (none at `CHROME`, `google-chrome` or `chromium` on PATH, or the macOS app): exit 0 "skipped", or exit 1
  * with `--require`, which CI passes. `--shots <dir>` also writes a full-page PNG per golden run and a window-sized one
@@ -258,8 +278,16 @@ const STEP_MS = 20_000;
 /** The longest the whole run may take; the workflow step's own `timeout-minutes` is the backstop above this. */
 // Five Spend routes and their exceptional states expand both the CSP sweep and the shell matrix.
 export const RUN_MS = 20 * 60_000;
-/** Separate processes and origins let their frame waits overlap without sharing focus, streams or request ownership. */
-export const BROWSER_LANES = 2;
+/**
+ * Separate processes and origins let their frame waits overlap without sharing focus, streams or request ownership.
+ * Three since issue #966 (two before): the same runs, dealt over one more browser, inside the same deadline. Nothing
+ * below needs a particular number; the worker tests derive theirs from this one.
+ */
+export const BROWSER_LANES = 3;
+/** How often a lane says where it is, between runs: a slow runner's log then shows which part is slow while it runs. */
+export const PROGRESS_MS = 60_000;
+/** The share of `RUN_MS` above which a run that finished still warns: the next slow runner would not finish. */
+export const BUDGET_WARN = 0.7;
 
 const USAGE = `usage: node .github/scripts/console-width-check.mjs [--require] [--shots <dir>]
        node .github/scripts/console-width-check.mjs --verify-zip <file> [--platform ${CFT_PLATFORMS.join("|")}]
@@ -273,6 +301,8 @@ const USAGE = `usage: node .github/scripts/console-width-check.mjs [--require] [
 
 /** A failure the operator can act on (no browser, a dead browser, a wait that never ended): one line, exit 1. */
 export class Refusal extends Error {}
+/** A navigation whose load event did not arrive within `NAV_MS` (`openPage`): nothing was measured, so it may be tried again. */
+export class NoLoadEvent extends Refusal {}
 
 // ---- the pure parts (worker/test/console-width-check.test.mjs) ---------------------------------------------------
 
@@ -1061,6 +1091,12 @@ export function stackedLabelProblems(labels = []) {
 }
 
 /**
+ * The note on a run whose page was not ready at the cap (`settleSource`): its fonts or frames, or, on a live page, a
+ * stream that had not opened, so its pill still said what the server drew.
+ */
+export const UNSETTLED_NOTE = "the page did not settle within 1.5 s (its fonts, its frames or, on a live page, its event stream); measured as it stood";
+
+/**
  * One golden run's verdict over what the page reported: `csp` (the probe's violations, null when it never ran),
  * `errors` (uncaught page errors: notes, since the script ran into the stubs), `canvas` (the computed `--canvas`) against
  * `want` (the `expect` theme's), `measured` (the width collector's), `emulation` (the probe's: a golden's window is
@@ -1069,7 +1105,7 @@ export function stackedLabelProblems(labels = []) {
 export function runVerdict({ csp, errors = [], canvas, want, expect, measured, emulation, settled = true, width = VIEWPORT.width, mobile = width <= PHONE_MAX }) {
 	const failures = [...cspFailures(csp), ...updateActionProblems(measured.updateActions), ...emulationProblems(emulation, mobile), ...activeProgressProblems(measured.activeProgress), ...projectChartTextProblems(measured.projectCharts), ...projectKpiTextProblems(measured.projectKpis), ...stackedLabelProblems(measured.stackedLabels)];
 	const notes = [];
-	if (!settled) notes.push("the page did not settle within 1.5 s (fonts or frames); measured anyway");
+	if (!settled) notes.push(UNSETTLED_NOTE);
 	for (const e of errors) notes.push(`page error: ${e}`);
 	const got = String(canvas ?? "").trim().toLowerCase();
 	const wanted = String(want).toLowerCase();
@@ -1125,7 +1161,7 @@ export function readsNote(reads, all) {
 export function shellVerdict({ width, mobile = width <= VIEWPORT.width, csp, errors = [], measured, metrics, emulation, longest = false, readOnly = false, liveStates = [], settled = true }) {
 	const failures = [...cspFailures(csp), ...emulationProblems(emulation, mobile)];
 	const notes = [];
-	if (!settled) notes.push("the page did not settle within 1.5 s (fonts or frames); measured anyway");
+	if (!settled) notes.push(UNSETTLED_NOTE);
 	for (const e of errors) notes.push(`page error: ${e}`);
 	if (measured.clientWidth !== width) notes.push(`the layout viewport is ${measured.clientWidth} px, not ${width}`);
 	const w = widthVerdict(measured, width);
@@ -1516,13 +1552,76 @@ const PROBE = `(() => {
 	}, true);
 	window.addEventListener("error", (e) => { errors.push(String(e.message || e.type).slice(0, 200)); });
 	window.addEventListener("unhandledrejection", (e) => { errors.push("unhandled rejection: " + String(e.reason).slice(0, 200)); });
+	// The page script's first write of the live pill, for the settle (settleSource). The parser sets an element's
+	// attributes without a record, and a class set to the value it had still makes one, so the first record on
+	// #live-status is the script's own, whatever class the server drew and whichever state the script marks.
+	const live = { marked: false, wake: null };
+	Object.defineProperty(window, "__pdLive", { value: live });
+	const pillSeen = new MutationObserver((records) => {
+		if (!records.some((r) => r.target && r.target.id === "live-status")) return;
+		pillSeen.disconnect();
+		live.marked = true;
+		if (live.wake) live.wake();
+	});
+	pillSeen.observe(document, { subtree: true, attributes: true, attributeFilter: ["class"] });
 })();`;
 
-/** Fonts loaded, two frames drawn and the script's load-time work done; bounded, since a hidden tab may skip frames. */
-const SETTLE = `new Promise((resolve) => {
-	const cap = setTimeout(() => resolve(false), 1500);
-	document.fonts.ready.then(() => requestAnimationFrame(() => requestAnimationFrame(() => setTimeout(() => { clearTimeout(cap); resolve(true); }, 100))));
+/** The longest a page is waited for before it is measured as it stands, with a note (`settled: false`). */
+export const SETTLE_CAP_MS = 1500;
+/** The fixed wait of a page whose load-time work ends with no event the check can watch (`settleSource`). */
+export const SETTLE_WAIT_MS = 100;
+/** What marks a page that asks the console who is signed in as it loads, beside the sign-in pages (`settleSource`). */
+const WHOAMI_AT_LOAD = "[data-sandbox-gateway-mode]";
+
+/**
+ * The page's own promise that it is ready to measure: fonts loaded and two frames drawn, then what the script still
+ * does after that as the page loads, by the kind of page (issue #966: a fixed 100 ms on every load was about half of
+ * the check's time, and most loads, every configuration detail golden at every width among them, are of pages with no
+ * stream, which waited for nothing). `true`, or `false` at `SETTLE_CAP_MS`, since a hidden tab may skip frames and a
+ * stream may never open.
+ *   - No `data-live` on `<body>`: the script opens no stream, and its load-time code is listeners, attributes and one
+ *     ResizeObserver, whose first report is inside the two frames, so the page is ready at once. One thing does end
+ *     later: a Spend flows page that opens with a selection writes its view into the URL fragment 300 ms on, which
+ *     moves no box. `checkPageLane` holds the rule: a page with no `data-live` that asks for `/api/events` fails.
+ *   - `data-live`: the script opens the page's event stream, and on its `open` writes the live pill (its class, word
+ *     and title), which changes the pill's width and, on a phone, its glyph. Ready one frame after that first write,
+ *     which `PROBE` records (`__pdLive`) from before any page script ran: not after the pill has "another class than
+ *     the server's first", because the server draws many live goldens in another state already (Live, Reconnecting,
+ *     Signed out), and those would be measured in the drawn state or the opened one as the stream was slow or fast.
+ *     So every live page is measured with its stream open, in the state the script then shows.
+ *   - A fixed `SETTLE_WAIT_MS` more where no event marks the end: a page with `#p-timeline` (the overview loads the
+ *     timeline's stylesheet and script after its own and draws from them), a sign-in page (`SIGN_IN`: it asks
+ *     `/api/whoami` or posts its code as it loads) and a page marked `WHOAMI_AT_LOAD` (the sandbox gateway's, which
+ *     asks `/api/whoami` and writes what it learned). On a live page that wait starts after the pill's frame: the
+ *     overview is live AND has the timeline, and with the wait alone it was measured at Not live on a slow stream.
+ *     A live page with no pill, or loaded without the probe, has nothing to watch and gets the fixed wait alone.
+ */
+export function settleSource() {
+	return `new Promise((resolve) => {
+	const cap = setTimeout(() => resolve(false), ${SETTLE_CAP_MS});
+	const done = () => { clearTimeout(cap); resolve(true); };
+	document.fonts.ready.then(() => requestAnimationFrame(() => requestAnimationFrame(() => {
+		const body = document.body;
+		const seen = window.__pdLive;
+		const live = body.hasAttribute("data-live");
+		const watched = live && seen !== undefined && document.getElementById("live-status") !== null;
+		const fixed = document.getElementById("p-timeline") !== null
+			|| ${JSON.stringify(SIGN_IN.map(([page]) => page))}.includes(body.getAttribute("data-page"))
+			|| document.querySelector(${JSON.stringify(WHOAMI_AT_LOAD)}) !== null
+			|| (live && !watched);
+		const rest = fixed ? () => setTimeout(done, ${SETTLE_WAIT_MS}) : done;
+		if (!watched) return void rest();
+		const marked = () => requestAnimationFrame(rest);
+		if (seen.marked) return void marked();
+		seen.wake = marked;
+	})));
 })`;
+}
+
+/** Whether a doc's `<body>` carries `data-live`: the pages whose script opens the event stream (`settleSource`). */
+export function liveDoc(doc) {
+	return /<body\b[^>]*\sdata-live[\s=>]/.test(String(doc?.html ?? ""));
+}
 
 const CSP_READ = "JSON.stringify(window.__pdCsp === undefined ? null : window.__pdCsp)";
 const ERRORS_READ = "JSON.stringify(window.__pdErrors || [])";
@@ -1844,6 +1943,98 @@ export function chromeLaunchArgs({ sandbox = true } = {}) {
 	return ["--use-mock-keychain", ...(sandbox ? [] : ["--no-sandbox"])];
 }
 
+/**
+ * One lane's clock (issue #966): the parts it went through in order, each with its time and, where it is a list of
+ * runs, how many were made; the run in hand; and the runs whose page never settled. `begin(name, total)` opens a part
+ * (`total` null for one that is not a list of runs) and closes the one before, `run(key)` names the run in hand,
+ * `ran()` counts it and says where the lane is through `log` once `every` ms have passed since it last did,
+ * `settled(ok, key)` counts a page that did not settle (`unsettled()` names them), `retried()` a navigation tried
+ * again, `end()` closes the last part. `line()` is the lane's one closing line and `cut(how)` what it says when the
+ * run's deadline ends it ("cut off") or its own failure does ("failed"). Only ever printed through the lane's own log:
+ * `summarize`'s lines are the verdict's, and say nothing of time but the total.
+ */
+export function laneTiming({ now = Date.now, log = () => {}, every = PROGRESS_MS } = {}) {
+	const started = now();
+	const parts = [];
+	let part = null;
+	let current = null;
+	const unsettled = [];
+	let retries = 0;
+	let said = started;
+	const seconds = (ms) => (ms / 1000).toFixed(1);
+	const close = () => {
+		if (part) part.ms = now() - part.from;
+		part = null;
+		current = null;
+	};
+	const counts = () => `${unsettled.length} run${unsettled.length === 1 ? "" : "s"} not settled, ${retries} navigation${retries === 1 ? "" : "s"} retried`;
+	const where = () => {
+		if (!part) return parts.length === 0 ? "not started" : "finished";
+		return `${part.name}${part.total === null ? "" : ` ${part.done} of ${part.total}`}${current === null ? "" : `, at ${current}`}`;
+	};
+	return {
+		begin(name, total = null) {
+			close();
+			part = { name, total, done: 0, from: now(), ms: null };
+			parts.push(part);
+		},
+		run(key) {
+			current = key;
+		},
+		ran() {
+			if (part) part.done++;
+			current = null;
+			const at = now();
+			if (at - said < every) return;
+			said = at;
+			log(`progress: ${where()}, ${seconds(at - started)} s in`);
+		},
+		settled(ok, key = null) {
+			if (!ok) unsettled.push(key);
+		},
+		unsettled: () => [...unsettled],
+		retried() {
+			retries++;
+		},
+		end: close,
+		line() {
+			const told = parts.map((p) => `${p.name} ${p.total === null ? "" : `${p.done} in `}${seconds(p.ms ?? now() - p.from)} s`);
+			return `timing: ${[...told, `total ${seconds(now() - started)} s`, counts()].join(", ")}`;
+		},
+		cut(how = "cut off") {
+			return `${how} in ${where()}, ${seconds(now() - started)} s in, ${counts()}`;
+		},
+	};
+}
+
+/**
+ * What a finished run says of its time against `runMs` (the run's own deadline): one notice with the total, and a
+ * warning above `BUDGET_WARN` of it, so the check says it is running out of time before a slow runner fails it.
+ */
+export function budgetLines(ms, runMs = RUN_MS) {
+	const said = `the console width check took ${(ms / 1000).toFixed(1)} s of its ${runMs / 1000} s (${Math.round((ms / runMs) * 100)} %)`;
+	const lines = [`::notice::${said}`];
+	if (ms > runMs * BUDGET_WARN) lines.push(`::warning::${said}: above ${Math.round(BUDGET_WARN * 100)} %, so a slower runner would not finish; the lane timing lines above say where the time goes`);
+	return lines;
+}
+
+/** How many unsettled runs `unsettledLines` names before it counts the rest. */
+export const UNSETTLED_NAMED = 5;
+
+/**
+ * What the check says of the runs whose page was not ready at the cap (`keys`, every lane's): nothing for none, else
+ * one warning with the count and the first `UNSETTLED_NAMED` of them. A warning and not a failure: each such run was
+ * measured and judged as it stood and carries its own note, the check never failed on it before either, and a runner
+ * slow enough to hit the cap would turn its slowness into a red required check; but a live page measured before its
+ * stream opened was measured at the pill the server drew, and that must not pass unseen.
+ */
+export function unsettledLines(keys) {
+	if (keys.length === 0) return [];
+	const named = keys.slice(0, UNSETTLED_NAMED).join("; ");
+	const more = keys.length > UNSETTLED_NAMED ? ` and ${keys.length - UNSETTLED_NAMED} more` : "";
+	return [`::warning::${keys.length} run${keys.length === 1 ? "" : "s"} did not settle within ${SETTLE_CAP_MS / 1000} s and ${keys.length === 1 ? "was" : "were"} measured as ${keys.length === 1 ? "it" : "they"} stood, a live page with the pill the server drew: ${named}${more}`];
+}
+
 /** Partition the complete existing schedules, retaining their order and every run field inside each lane. */
 export function browserLanePlans(docs, sweep = []) {
 	const pages = planRuns(docs);
@@ -1857,7 +2048,7 @@ export function browserLanePlans(docs, sweep = []) {
 	}));
 }
 
-/** Each lane owns a complete server and browser. Await both cleanups even when one refuses before returning results. */
+/** Each lane owns a complete server and browser. Await every cleanup even when one refuses before returning results. */
 export async function checkPages(args, { checkLane = checkPageLane } = {}) {
 	const plans = browserLanePlans(args.docs, args.shellDocs);
 	const outcomes = await Promise.allSettled(plans.map(async (lanePlan) => {
@@ -1865,13 +2056,15 @@ export async function checkPages(args, { checkLane = checkPageLane } = {}) {
 		const shots = args.shots ? join(args.shots, `lane-${lanePlan.id}`) : null;
 		mkdirSync(work);
 		if (shots) mkdirSync(shots, { recursive: true });
-		return checkLane({ ...args, lanePlan, work, shots, log: (line) => args.log(`[lane ${lanePlan.id}] ${line}`) });
+		return checkLane({ ...args, lanePlan, work, shots, log: (line) => args.log(`[lane ${lanePlan.id}] ${line}`), onTiming: (timing) => args.onTiming?.(lanePlan.id, timing) });
 	}));
 	const failures = outcomes.flatMap((outcome, index) => outcome.status === "rejected"
 		? [new Refusal(`lane ${plans[index].id}: ${outcome.reason?.message ?? outcome.reason}`)] : []);
 	if (failures.length) throw new AggregateError(failures, failures.map((failure) => failure.message).join("; "));
 	const values = outcomes.map((outcome) => outcome.value);
 	if (values.some((value) => value.product !== values[0].product)) throw new Refusal("the console width lanes did not use the same Chrome build");
+	// Unprefixed, so GitHub reads the line as an annotation: one for the whole check, after every lane's own lines.
+	for (const line of unsettledLines(values.flatMap((value) => value.unsettled ?? []))) args.log(line);
 	return {
 		product: values[0].product,
 		results: values.flatMap((value) => value.results),
@@ -1884,9 +2077,26 @@ export async function checkPages(args, { checkLane = checkPageLane } = {}) {
  * Serve the full doc and asset maps with the console's security headers in one browser/server lane. Its controls run
  * first, then its assigned page/shell cases, followed by no-script and interactive checks when assigned. `onOpen`
  * hands each browser to the caller's exit cleanup. Interactive checks deliberately retain every route, including
- * those whose width cases belong to the other lane.
+ * those whose width cases belong to another lane. The lane keeps its own clock (`laneTiming`, handed to `onTiming`
+ * as it starts) and says through `log` where it is about once a minute and, as it ends, what each part took; a lane
+ * that fails says at once which part and run it was in, since its error is only printed when every lane has ended.
+ * A navigation with no load event is opened once more (`NoLoadEvent`), said and counted.
  */
-export async function checkPageLane({ chrome, docs, shellDocs: sweep = [], controls = [], heads, liveStates = [], css, script, applyHeaders, canvasOf, clockMs, shots, sandbox, work, children, log, onOpen, lanePlan }, { openBrowser = openChrome, makeServer = createServer } = {}) {
+export async function checkPageLane({ chrome, docs, shellDocs: sweep = [], controls = [], heads, liveStates = [], css, script, applyHeaders, canvasOf, clockMs, shots, sandbox, work, children, log, onOpen, onTiming, lanePlan }, { openBrowser = openChrome, makeServer = createServer, now = Date.now } = {}) {
+	const timing = laneTiming({ now, log });
+	onTiming?.(timing);
+	// Every page of a run opens through here, so a page that did not settle is counted whoever opened it, and a load
+	// that never arrived gets its one more try whichever run it was. Only that: a page that loaded is never opened again.
+	const open = async (args) => {
+		const opened = await openPage(args).catch((err) => {
+			if (!(err instanceof NoLoadEvent)) throw err;
+			timing.retried();
+			log(`retrying once in a fresh tab: ${err.message}`);
+			return openPage(args);
+		});
+		timing.settled(opened.settled, args.key);
+		return opened;
+	};
 	const byPath = new Map([...docs, ...sweep, ...controls].map((d) => [d.path, d]));
 	const assets = new Map(controls.flatMap((c) => [[`${c.path}.css`, ["text/css", c.css]], ...(c.js ? [[`${c.path}.js`, ["text/javascript", c.js]]] : [])]));
 	for (const theme of THEMES) {
@@ -1896,6 +2106,10 @@ export async function checkPageLane({ chrome, docs, shellDocs: sweep = [], contr
 	const held = new Set();
 	let current = null;
 	const strays = [];
+	// The page each lane's one tab is on, and each stream opened by a page with no `data-live`: `settleSource` calls
+	// such a page ready at once, so one that opens a stream after all was measured before its pill moved.
+	let served = null;
+	const unwatched = [];
 	const server = makeServer((req, res) => {
 		applyHeaders(res);
 		const path = new URL(req.url, "http://127.0.0.1").pathname;
@@ -1909,6 +2123,7 @@ export async function checkPageLane({ chrome, docs, shellDocs: sweep = [], contr
 			strays.push({ run: current, what: `${req.method} ${path}` });
 			res.writeHead(405).end();
 		} else if (doc) {
+			served = doc;
 			res.writeHead(200, { "content-type": "text/html; charset=utf-8" }).end(doc.html);
 		} else if (path === "/static/console.css") {
 			res.writeHead(200, { "content-type": "text/css; charset=utf-8" }).end(css);
@@ -1926,6 +2141,7 @@ export async function checkPageLane({ chrome, docs, shellDocs: sweep = [], contr
 			res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ items: [], next: null, partial: false, olderAt: null, unavailable: [] }));
 		} else if (path === "/api/events" || path === "/api/transcript") {
 			// Held open with nothing sent: the page shows its live state, and nothing it draws moves under the measure.
+			if (path === "/api/events" && served && !liveDoc(served)) unwatched.push({ run: current, doc: served });
 			res.writeHead(200, { "content-type": "text/event-stream; charset=utf-8" });
 			res.flushHeaders();
 			held.add(res);
@@ -1958,60 +2174,70 @@ export async function checkPageLane({ chrome, docs, shellDocs: sweep = [], contr
 		current = null;
 	};
 	try {
+		timing.begin("Chrome start");
 		browser = await openBrowser({ chrome, work, children, Refusal, stepMs: STEP_MS, env: { HOME: join(work, "home") }, extraArgs, captureStderr: true, resolverRules: "MAP * ~NOTFOUND, EXCLUDE 127.0.0.1" });
 		onOpen?.(browser);
 		const version = await browser.send("Browser.getVersion");
 		const product = String(version.product ?? "");
 		log(`Chrome ${product} (revision ${version.revision ?? "?"}) at ${chrome}${sandbox ? "" : ", --no-sandbox"}`);
+		// One run of a counted part: named to the server (a stray request is its run's) and to the clock, then counted.
+		const one = async (key, make) => {
+			current = key;
+			timing.run(key);
+			const made = await make();
+			after();
+			timing.ran();
+			return made;
+		};
+		timing.begin("controls", controls.length);
 		for (const control of controls) {
 			const run = { key: control.id, doc: control, width: control.width, mobile: control.mobile };
-			current = run.key;
-			controlResults.push(await checkShell({ browser, run, url: origin + control.path, clockMs, shots, liveStates }));
-			after();
+			controlResults.push(await one(run.key, () => checkShell({ browser, run, url: origin + control.path, clockMs, shots, liveStates, open })));
 		}
+		timing.begin("golden runs", lanePlan.pages.length);
 		for (const run of lanePlan.pages) {
-			current = run.key;
 			const path = run.forced ? forcedPath(run.doc, run.forced) : run.doc.path;
-			results.push(await checkOne({ browser, run, url: origin + goldenUrl(run.doc, path), canvasOf, clockMs, shots }));
-			after();
+			results.push(await one(run.key, () => checkOne({ browser, run, url: origin + goldenUrl(run.doc, path), canvasOf, clockMs, shots, open })));
 		}
+		timing.begin("shell runs", lanePlan.shell.length);
 		for (const run of lanePlan.shell) {
-			current = run.key;
-			shell.push(await checkShell({ browser, run, url: origin + run.doc.path, clockMs, shots, liveStates }));
-			after();
+			shell.push(await one(run.key, () => checkShell({ browser, run, url: origin + run.doc.path, clockMs, shots, liveStates, open })));
 		}
 		const run = lanePlan.noScript;
 		if (run) {
-			current = run.key;
-			shell.push(await checkNoScript({ browser, run, url: origin + run.doc.path, clockMs, shots }));
-			after();
+			timing.begin("no script", 1);
+			shell.push(await one(run.key, () => checkNoScript({ browser, run, url: origin + run.doc.path, clockMs, shots, open })));
 		}
-		if (lanePlan.extras && docs.some((d) => d.page === "insights-flows")) {
-			current = "spend-browser";
-			results.push(...await checkSpendBrowser({ browser, docs, origin, openPage, clockMs, shots }));
+		// The interactive checks, each a part of its own under its name: one call each, so timed but not counted.
+		const extra = async (name, page, check) => {
+			if (!lanePlan.extras || !docs.some((d) => d.page === page)) return;
+			timing.begin(name);
+			current = `${name}-browser`;
+			timing.run(current);
+			results.push(...await check({ browser, docs, origin, openPage: open, clockMs, shots }));
 			after();
-		}
-		if (lanePlan.extras && docs.some((d) => d.page === "trigger-add")) {
-			current = "config-browser";
-			results.push(...await checkConfigBrowser({ browser, docs, origin, openPage, clockMs, shots }));
-			after();
-		}
-		if (lanePlan.extras && docs.some((d) => d.page === "triggers")) {
-			current = "triggers-browser";
-			results.push(...await checkTriggersBrowser({ browser, docs, origin, openPage, clockMs, shots }));
-			after();
-		}
-		if (lanePlan.extras && docs.some((d) => d.page === "zero-touch")) {
-			current = "zero-touch-browser";
-			results.push(...await checkZeroTouchBrowser({ browser, docs, origin, openPage, clockMs, shots }));
-			after();
+		};
+		await extra("spend", "insights-flows", checkSpendBrowser);
+		await extra("config", "trigger-add", checkConfigBrowser);
+		await extra("triggers", "triggers", checkTriggersBrowser);
+		await extra("zero-touch", "zero-touch", checkZeroTouchBrowser);
+		timing.end();
+		log(timing.line());
+		for (const u of unwatched) {
+			const said = `asked for /api/events, but its page (${u.doc.id}) has no data-live on <body>: such a page counts as settled at once, so it was measured before its stream opened (give the page data-live, or teach settleSource what opens a stream there)`;
+			const r = [...results, ...shell, ...controlResults].find((x) => x.run.key === u.run);
+			if (!r) throw new Refusal(`${u.run ?? "a request outside any run"}: ${said}`);
+			r.failures.push(said);
 		}
 		for (const s of strays) {
 			const r = [...results, ...shell, ...controlResults].find((x) => x.run.key === s.run);
 			if (r) r.failures.push(`asked for ${s.what}, which this check does not serve (teach it the route, or the page is measured without it)`);
 			else log(`note: a request outside any run: ${s.what}`);
 		}
-		return { product, results, shell, controls: controlResults };
+		return { product, results, shell, controls: controlResults, unsettled: timing.unsettled() };
+	} catch (err) {
+		log(`${timing.cut("failed")}: ${err?.message ?? err}`);
+		throw err;
 	} finally {
 		try {
 			await browser?.close();
@@ -2035,7 +2261,8 @@ function forcedPath(doc, theme) {
  * A new tab on `url` with the run's emulation (`metrics` for `Emulation.setDeviceMetricsOverride`, `emulated` the
  * system theme), the frozen clock and the probe, loaded and settled: `{ t, evaluate, settled }`. With `noScript` the
  * page's scripts are off (`Emulation.setScriptExecutionDisabled`), which leaves DevTools' own evaluation working, and
- * it is settled by a wait instead (no frame callback of the page's runs). The caller closes `t`.
+ * it is settled by a wait instead (no frame callback of the page's runs). The caller closes `t`. A navigation whose
+ * load event never arrives throws `NoLoadEvent`, its tab closed: the one failure a caller may try again.
  */
 export async function openPage({ browser, key, url, metrics, emulated, clockMs, noScript = false }) {
 	const t = await browser.openTarget();
@@ -2061,12 +2288,15 @@ export async function openPage({ browser, key, url, metrics, emulated, clockMs, 
 		loaded.catch(() => {}); // awaited below; a navigation that fails first must not leave it unhandled
 		const nav = await t.send("Page.navigate", { url }, NAV_MS);
 		if (nav.errorText) throw new Refusal(`${key}: ${url} did not load (${nav.errorText})`);
-		await loaded;
+		// The browser's own sentence for a wait that ran out (`event` in chrome-pipe.mjs); a browser that died says another.
+		await loaded.catch((err) => {
+			throw /^Chrome sent no load event /.test(String(err?.message)) ? new NoLoadEvent(err.message) : err;
+		});
 		if (noScript) {
 			await new Promise((resolve) => setTimeout(resolve, 300));
 			return { t, evaluate, settled: true };
 		}
-		const settled = Boolean(await evaluate(SETTLE, true));
+		const settled = Boolean(await evaluate(settleSource(), true));
 		return { t, evaluate, settled };
 	} catch (err) {
 		await t.close().catch(() => {});
@@ -2074,11 +2304,11 @@ export async function openPage({ browser, key, url, metrics, emulated, clockMs, 
 	}
 }
 
-async function checkOne({ browser, run, url, canvasOf, clockMs, shots }) {
+async function checkOne({ browser, run, url, canvasOf, clockMs, shots, open = openPage }) {
 	const width = run.width ?? VIEWPORT.width;
 	const mobile = width <= PHONE_MAX;
 	const metrics = { width, height: mobile ? VIEWPORT.height : DESKTOP.height, deviceScaleFactor: mobile ? VIEWPORT.scale : DESKTOP.scale, mobile };
-	const { t, evaluate, settled } = await openPage({ browser, key: run.key, url, metrics, emulated: run.emulated, clockMs });
+	const { t, evaluate, settled } = await open({ browser, key: run.key, url, metrics, emulated: run.emulated, clockMs });
 	try {
 		const csp = JSON.parse(await evaluate(CSP_READ));
 		const errors = JSON.parse(await evaluate(ERRORS_READ));
@@ -2100,11 +2330,11 @@ async function checkOne({ browser, run, url, canvasOf, clockMs, shots }) {
 	}
 }
 
-async function checkShell({ browser, run, url, clockMs, shots, liveStates }) {
+async function checkShell({ browser, run, url, clockMs, shots, liveStates, open = openPage }) {
 	const metrics = run.mobile
 		? { width: run.width, height: VIEWPORT.height, deviceScaleFactor: VIEWPORT.scale, mobile: true }
 		: { width: run.width, height: DESKTOP.height, deviceScaleFactor: DESKTOP.scale, mobile: false };
-	const { t, evaluate, settled } = await openPage({ browser, key: run.key, url, metrics, emulated: "light", clockMs });
+	const { t, evaluate, settled } = await open({ browser, key: run.key, url, metrics, emulated: "light", clockMs });
 	try {
 		const csp = JSON.parse(await evaluate(CSP_READ));
 		const errors = JSON.parse(await evaluate(ERRORS_READ));
@@ -2127,9 +2357,9 @@ async function checkShell({ browser, run, url, clockMs, shots, liveStates }) {
  * never ran), then More opened by a real mouse click on its button's centre. `browser` is `openChrome`'s; exported for
  * the worker test, which drives it with a stubbed one.
  */
-export async function checkNoScript({ browser, run, url, clockMs, shots = null }) {
+export async function checkNoScript({ browser, run, url, clockMs, shots = null, open = openPage }) {
 	const metrics = { width: run.width, height: DESKTOP.height, deviceScaleFactor: DESKTOP.scale, mobile: false };
-	const { t, evaluate } = await openPage({ browser, key: run.key, url, metrics, emulated: "light", clockMs, noScript: true });
+	const { t, evaluate } = await open({ browser, key: run.key, url, metrics, emulated: "light", clockMs, noScript: true });
 	try {
 		const themeHidden = await evaluate(THEME_HIDDEN_READ);
 		const measured = await evaluate(measureSource(run.width, EDGE_SLACK));
@@ -2279,7 +2509,7 @@ export async function runCheck(opts, { find, modules, fixtures = FIXTURES, check
 		chrome: choice.path,
 	});
 	// Each control against its own run, by id: one that never ran is `got: null`, a problem of its own.
-	// The expected schedule is fixed here. Deriving it from returned controls would let a missing second lane pass.
+	// The expected schedule is fixed here. Deriving it from returned controls would let a missing lane pass.
 	const measuredControls = Array.from({ length: BROWSER_LANES }, (_, index) => index + 1).flatMap((lane) => controls.map((c) => {
 		const r = (outcome.controls ?? []).find((x) => x.lane === lane && x.run?.key === c.id);
 		return { name: lane === 1 ? c.name : `${c.name} (lane ${lane})`, what: c.what, width: c.width, want: c.expected, got: r ? r.failures : null, notes: r?.notes ?? [] };
@@ -2297,6 +2527,8 @@ async function main(opts) {
 	const children = new Set();
 	const browsers = new Set();
 	let deadline = null;
+	// Each lane's clock, by lane: what the deadline reads when it cuts the run.
+	const timings = new Map();
 	const cleanup = () => {
 		for (const child of children) {
 			try {
@@ -2327,16 +2559,23 @@ async function main(opts) {
 		// The run's own deadline. The per-call deadlines bound each wait; this bounds their sum, so a slow runner fails
 		// the step with a sentence instead of reaching the step's timeout-minutes with none.
 		deadline = setTimeout(() => {
+			for (const [lane, timing] of [...timings].sort((a, b) => a[0] - b[0])) console.log(`[lane ${lane}] ${timing.cut()}`);
 			console.error(`::error::the console width check did not finish within ${RUN_MS / 60_000} minutes`);
 			cleanup();
 			process.exit(1);
 		}, RUN_MS);
-		return checkPages({ ...args, shots: opts.shots, sandbox: !ci, work, children, log: (line) => console.log(line), onOpen: (browser) => browsers.add(browser) });
+		return checkPages({ ...args, shots: opts.shots, sandbox: !ci, work, children, log: (line) => console.log(line), onOpen: (browser) => browsers.add(browser), onTiming: (lane, timing) => timings.set(lane, timing) });
 	};
 	try {
 		const code = await runCheck(opts, { find: () => findChrome(), modules, check, ci, log: (line) => console.log(line), started });
 		const chrome = findChrome()?.path;
-		if (code === 0 && chrome) console.log("Timeline interaction check: " + JSON.stringify(await checkTimelineBrowser({ chrome, sandbox: !ci })));
+		if (code === 0 && chrome) {
+			const from = Date.now();
+			console.log("Timeline interaction check: " + JSON.stringify(await checkTimelineBrowser({ chrome, sandbox: !ci })));
+			console.log(`timing: timeline check ${((Date.now() - from) / 1000).toFixed(1)} s`);
+		}
+		// Only a run that reached the browser has a time worth holding against the deadline (a skip has none).
+		if (work) for (const line of budgetLines(Date.now() - started)) console.log(line);
 		return code;
 	} finally {
 		if (deadline) clearTimeout(deadline);
@@ -2358,7 +2597,9 @@ if (import.meta.url === pathToFileURL(process.argv[1] ?? "").href) {
 		else if (opts.checkPin) checkPinMain(opts);
 		process.exit(opts.verifyZip || opts.checkPin ? 0 : await main(opts));
 	} catch (err) {
-		console.error(`::error::console-width-check: ${err instanceof Refusal ? err.message : (err?.stack ?? err)}`);
+		// Lanes that refused arrive together (`checkPages`): their sentences are the message, and a stack adds nothing.
+		const refused = err instanceof Refusal || (err instanceof AggregateError && err.errors.every((e) => e instanceof Refusal));
+		console.error(`::error::console-width-check: ${refused ? err.message : (err?.stack ?? err)}`);
 		process.exit(1);
 	}
 }
