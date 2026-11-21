@@ -44,7 +44,17 @@ export const RUNS_HOST_UNREADABLE = "This host's run history could not be read."
 export const RUNS_MIRROR_OFF = "Showing this host's runs: the fleet's run mirror is off.";
 /** The mirror could not be read this time. */
 export const RUNS_MIRROR_DEGRADED = "Other hosts' runs could not be read; showing this host's.";
-/** No run passes the filter. */
+/**
+ * The same with no run to show (issue #962): this host holds none that passes the filter, and what the others hold was
+ * not read, so "No run matches." would state the unread half as fact.
+ */
+export const RUNS_MIRROR_DEGRADED_EMPTY = "Other hosts' runs could not be read, and this host holds no run that matches.";
+/**
+ * After `RUNS_HOST_UNREADABLE` on an empty page: the reader lists no run without this host's files and does not ask the
+ * mirror then (it answers `mirror: "off"` unasked), so the foot says nothing of the mirror, on or off.
+ */
+export const RUNS_NONE_WITHOUT_HOST = "No run is listed without it, another host's included.";
+/** No run passes the filter, said only where every side that was asked answered. */
 export const RUNS_EMPTY = "No run matches.";
 /** What the summary and the project chips count: the last 24 hours, while the list pages through the whole history. */
 export const RUNS_WINDOW_TEXT = "Counts are of the runs that ended in the last 24 hours.";
@@ -120,7 +130,8 @@ const listOf = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string" 
  * The filters (the RunsScreen card's bar, the RunsPhone card's fold), as the arguments the panel hands the kit: the
  * search pill's (`search`, `q`: a target, a repository or a job id); how many applied filters the Filters toggle folds
  * (`folded`, every one but the search); the project chips' (`projects`: All, then each project the window counts, the
- * most runs first, then the query's own project when the window does not name it, each keeping the rest of the filter);
+ * most runs first, then the query's own project when the window does not name it, each keeping the rest of the filter,
+ * each count marked a floor where the summary's are, `windowFloor`);
  * a closed list each for outcome, forge, reason, flow, trigger, host, venue and model (`selects`: "Any", then the values
  * offered, then the query's own value when they do not hold it); the repository as text (`repo`); the fields the form
  * carries hidden (`hidden`: the project and Only problems are links, not controls, so Apply keeps them); and the applied
@@ -139,12 +150,13 @@ export function runsFiltersModel(view) {
   };
   const outcomeLabel = (v) => (Object.hasOwn(OUTCOME_KEY_WORDS, v) ? OUTCOME_KEY_WORDS[v].word : v === "policy" ? "policy (the record's value)" : v);
   const listed = Array.isArray(w?.byProject) ? w.byProject.filter((p) => typeof p?.project === "string" && PROJECT_ID_RE.test(p.project)) : [];
+  const floor = windowFloor(w);
   return {
     search: { id: "q", name: "q", value: f.q ?? null },
     folded: set.filter((k) => k !== "q").length,
     projects: [
-      { label: "All", count: w ? windowTotal(w) : null, href: runsHref(without(f, "project")), on: f.project === undefined },
-      ...listed.map((p) => ({ label: ui.ptag(p.project), count: Number.isSafeInteger(p.count) ? p.count : null, href: runsHref({ ...f, project: p.project }), on: f.project === p.project })),
+      { label: "All", count: w ? windowTotal(w) : null, floor, href: runsHref(without(f, "project")), on: f.project === undefined },
+      ...listed.map((p) => ({ label: ui.ptag(p.project), count: Number.isSafeInteger(p.count) ? p.count : null, floor, href: runsHref({ ...f, project: p.project }), on: f.project === p.project })),
       ...(typeof f.project === "string" && !listed.some((p) => p.project === f.project) ? [{ label: f.project === "~" ? "No project recorded" : ui.ptag(f.project), count: null, href: runsHref(f), on: true }] : []),
     ],
     selects: [
@@ -182,6 +194,13 @@ export function runsFilters(view) {
 
 // ---- p-summary -------------------------------------------------------------------------------------------------------
 
+/**
+ * Whether the window's numbers are floors: it ended inside the day (`floor`), or a side of it, this host's files or the
+ * mirror, was not read (`partial`). One rule for the strip, the project chips and the settled spend (issue #962): a
+ * count said "at least" beside the same count said whole would be two answers to one question.
+ */
+const windowFloor = (w) => w?.floor === true || w?.partial === true;
+
 /** Every run the window counts: the five outcome keys and the outcomes this release does not know. */
 function windowTotal(w) {
   const by = w?.byOutcome ?? {};
@@ -207,14 +226,14 @@ function countsFor(w, project) {
  * The last 24 hours by outcome (the RunsScreen card's strip), as the arguments the panel hands the kit, or null when
  * the window could not be read: the five counts (`strip`), each a link to those runs (the chosen project kept), "at
  * least" where the window is a floor (it ended inside the day, or a side of it was not read), the runs of an outcome
- * this release does not know when there are any; then the settled spend and how many runs settled no amount (the
- * chosen project's, as the counts are), the Only problems switch (`show`), and what the counts count (`notes`). Pure.
+ * this release does not know when there are any; then the settled spend, a floor where the counts are (`spentFloor`),
+ * and how many runs settled no amount (the chosen project's, as the counts are), the Only problems switch (`show`), and what the counts count (`notes`). Pure.
  */
 export function runsSummaryModel(view) {
   const w = view.data?.runsWindow ?? null;
   const f = view.query?.filter ?? {};
   if (!w) return null;
-  const floor = w.floor === true || w.partial === true;
+  const floor = windowFloor(w);
   const { by, spentMicros, unpriced, every } = countsFor(w, f.project);
   const n = (k) => (Number.isSafeInteger(by[k]) && by[k] > 0 ? by[k] : 0);
   // A phone draws the four counts that need a look (the RunsPhone card's), leaving out the completed runs.
@@ -224,6 +243,7 @@ export function runsSummaryModel(view) {
   return {
     strip: { items, label: "Runs that ended in the last 24 hours, by outcome" },
     spentMicros: Number.isSafeInteger(spentMicros) ? spentMicros : null,
+    spentFloor: floor,
     unpriced: Number.isSafeInteger(unpriced) && unpriced > 0 ? unpriced : 0,
     show: [
       { label: "All outcomes", href: runsHref(without(f, "problems")), on: f.problems === undefined },
@@ -239,7 +259,7 @@ export function runsSummary(view) {
   const m = runsSummaryModel(view);
   if (m === null) return ui.card({ body: html`<p class="muted">${RUNS_WINDOW_UNREAD}</p>` });
   const unpriced = m.unpriced > 0 ? html`<span class="muted">, ${count(m.unpriced)} ${m.unpriced === 1 ? "run" : "runs"} with no settled amount</span>` : null;
-  const spend = html`<span><b>${moneyHtml(m.spentMicros)}</b> settled spend${unpriced}</span>`;
+  const spend = html`<span><b>${m.spentFloor && m.spentMicros !== null ? "at least " : null}${moneyHtml(m.spentMicros)}</b> settled spend${unpriced}</span>`;
   return ui.card({ body: html`${ui.sumStrip(m.strip.items, { label: m.strip.label })}<div class="runs-sum">${spend}${ui.seg(m.show, { label: "Show" })}</div><p class="card__sub">${m.notes}</p>` });
 }
 
@@ -347,7 +367,9 @@ function runCells(r, env, subscriptions) {
  * group row per UTC day, each run's when, id, target and project, flow, host, venue, outcome with its reason's sentence
  * (`outcomeCell`), model, tokens, cost and job cap (`table`, stacked on a phone with the host and the cost named, or
  * null with no run to show), the foot's sentences (`foot`: what the page shows and where it was read from, or why only
- * part of it, or why nothing), and Newest and Older (`pager`). Pure.
+ * part of it, or why nothing; "No run matches." only where this host's files answered and the mirror answered or is
+ * off, issue #962), and Newest and Older
+ * (`pager`). Pure.
  */
 export function runsTableModel(view) {
   const page = view.data?.runsPage ?? null;
@@ -359,14 +381,21 @@ export function runsTableModel(view) {
   const subs = Array.isArray(view.data?.subscriptions) ? view.data.subscriptions : [];
   const runs = Array.isArray(page.runs) ? page.runs : [];
   const foot = [];
-  if (runs.length === 0) foot.push(RUNS_EMPTY);
-  else {
+  // An empty page is "No run matches." only where every side answered: with the mirror or this host's files unread,
+  // the sentence for the unread side says what is known instead.
+  const mirrorUnread = typeof page.mirror === "string" && page.mirror !== "ok" && page.mirror !== "off";
+  // With this host's files unread the reader answers no run and a mirror it never asked: its `mirror` word is not a fact.
+  const hostOnly = runs.length === 0 && Boolean(page.unreachable);
+  if (runs.length === 0) {
+    if (!mirrorUnread && !page.unreachable) foot.push(RUNS_EMPTY);
+  } else {
     const source = runsSourceText(page);
     foot.push(`${count(runs.length)} ${runs.length === 1 ? "run" : "runs"}${source === null ? "" : `, ${source}`}.`);
   }
   if (page.unreachable) foot.push(RUNS_HOST_UNREADABLE);
-  if (page.mirror === "off") foot.push(RUNS_MIRROR_OFF);
-  else if (typeof page.mirror === "string" && page.mirror !== "ok") foot.push(RUNS_MIRROR_DEGRADED);
+  if (hostOnly) foot.push(RUNS_NONE_WITHOUT_HOST);
+  else if (page.mirror === "off") foot.push(RUNS_MIRROR_OFF);
+  else if (mirrorUnread) foot.push(runs.length === 0 ? RUNS_MIRROR_DEGRADED_EMPTY : RUNS_MIRROR_DEGRADED);
   if (page.truncated) foot.push(runsTruncatedText(page.examined));
   // A group row before each UTC day's first run: the history is newest first, so a day's runs stand together.
   const rows = [];

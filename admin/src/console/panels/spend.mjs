@@ -218,6 +218,15 @@ export function spendControls(v) {
     }
   </div>`;
 }
+/**
+ * The Today card's held row's label: for how many running jobs money is held, or, where the hosts could not be read
+ * (`heldJobs` null, issue #962), that the count is not known. Never "0 running jobs" for a registry nobody read.
+ */
+export function heldLabel(heldJobs) {
+  if (number(heldJobs) === null)
+    return "Held for running jobs (how many is not known)";
+  return `Held for ${heldJobs} running ${heldJobs === 1 ? "job" : "jobs"}`;
+}
 function kpi(title, amount, text) {
   return card(title, html`${ui.kpi(amount)}${note(text)}`);
 }
@@ -275,10 +284,7 @@ export function spendToday(v) {
     )}${progress(s?.usedMicros, s?.capMicros, "Today's spend and held against its daily dollar cap")}${factsOne(
       [
         ["Settled in today's records", settledMoney(s)],
-        [
-          `Held for ${s?.heldJobs ?? "unknown"} running ${s?.heldJobs === 1 ? "job" : "jobs"}`,
-          usd(s?.heldMicros),
-        ],
+        [heldLabel(s?.heldJobs), usd(s?.heldMicros)],
         ...(chargedDiffers
           ? [["Charged to dollar windows", usd(s.ledgerMicros)]]
           : []),
@@ -335,7 +341,7 @@ export function spendAverage(v) {
   const s = payload(v).spend;
   return card(
     "Average per metered run",
-    html`${ui.kpi(usd(s?.average?.costMicros), "last 24 hours")}${progress(s?.average?.costMicros, s?.jobCapMicros, "Average cost per metered run against the job cap")}<p class="sp-kf">${s?.average?.runs ?? 0} metered ${s?.average?.runs === 1 ? "run" : "runs"}. The job cap is <b>${usd(s?.jobCapMicros)}</b>; the largest run used <b>${usd(s?.average?.largestMicros)}</b>.</p>`,
+    html`${ui.kpi(usd(s?.average?.costMicros), "last 24 hours")}${progress(s?.average?.costMicros, s?.jobCapMicros, "Average cost per metered run against the job cap")}<p class="sp-kf">${payload(v).recent24h === null ? "Metered runs not known: the run records could not be read." : `${s?.average?.runs ?? 0} metered ${s?.average?.runs === 1 ? "run" : "runs"}.`} The job cap is <b>${usd(s?.jobCapMicros)}</b>; the largest run used <b>${usd(s?.average?.largestMicros)}</b>.</p>`,
     null,
     null,
     "sp-kpi",
@@ -697,6 +703,12 @@ function envelopeForm(p) {
       ),
   };
 }
+/**
+ * The Spend view's split card where the split's read did not answer (`kind: "unreachable"`, issue #962): a split may
+ * well be in force, so "No budget split is available." is not said.
+ */
+export const SPLIT_UNREAD_TEXT =
+  "The budget split could not be read: the queue is not answering. Whether a split is in force is not known.";
 function allocation(v) {
   return normAllocation(payload(v).allocation);
 }
@@ -732,15 +744,32 @@ export function spendSplit(v) {
                     : "The split's weights were not published; shares are unknown.",
                 )
           }${note(`Weights only: it never changes a cap. Written by ${p?.state?.triggerId ?? a.state?.writer ?? "not known"}, writer ${a.state?.writer ?? "unknown"}, on ${p?.state?.model ?? "a model not recorded"}.`)}${when(a.state?.appliedAt)}<div class="sp-rows">${a.rows.filter((r) => !v.query?.project || v.query.project === r.id).map((r) => capLine(`${r.id}, ${shares.get(r.id) === null || shares.get(r.id) === undefined ? weights.length && total === 0 ? "no proportional" : "unknown" : Math.round(shares.get(r.id)) + "%"} share`, r.spent, r.allocation))}</div>`
-        : note("No budget split is available.")
+        : note(
+            a?.kind === "unreachable"
+              ? SPLIT_UNREAD_TEXT
+              : "No budget split is available.",
+          )
     }<a class="btn btn--sm" href="${link(v, "/insights/budget-split")}">Open Budget split</a>`,
     null,
     a?.window ?? null,
   );
 }
 
+/**
+ * What the envelope FILE says where the split's read did not answer (`kind: "unreachable"`, issue #962): the assembly
+ * still carries the file's window, total, floors and delegation beside `unreachable`, and `normAllocation` keeps none
+ * of them for that kind. The KPI cards draw these from the file and say "not known" only of what Valkey holds, the
+ * published split. Null for every other kind.
+ */
+export function envelopeFileFacts(v) {
+  const p = payload(v).allocation;
+  if (allocation(v)?.kind !== "unreachable" || p === null || typeof p !== "object") return null;
+  const floors = Object.values(p.floors !== null && typeof p.floors === "object" ? p.floors : {}).filter((n) => number(n) !== null);
+  return { totalMicros: number(p.totalMicros), delegation: p.delegation === true, projects: floors.length, floorsMicros: floors.reduce((sum, n) => sum + n, 0) };
+}
 export function splitEnvelopeKpi(v) {
-  const a = allocation(v);
+  const file = envelopeFileFacts(v);
+  const a = file ? { ...allocation(v), ...file } : allocation(v);
   return kpi(
     "Envelope",
     usd(a?.totalMicros),
@@ -749,6 +778,13 @@ export function splitEnvelopeKpi(v) {
 }
 export function splitAllocatedKpi(v) {
   const a = allocation(v);
+  const file = envelopeFileFacts(v);
+  if (file)
+    return kpi(
+      "Allocated",
+      usd(null),
+      `${file.projects} projects in the envelope file; what the split allocates is not known. Floors total $${(file.floorsMicros / 1e6).toFixed(2)}; floors come first.`,
+    );
   return kpi(
     "Allocated",
     usd(a?.rows?.reduce((sum, r) => sum + (r.allocation ?? 0), 0)),
@@ -757,6 +793,12 @@ export function splitAllocatedKpi(v) {
 }
 export function splitSpentKpi(v) {
   const a = allocation(v);
+  const file = envelopeFileFacts(v);
+  if (file)
+    return card(
+      "Spent this envelope window",
+      html`${ui.kpi(usd(null), html`of ${usd(file.totalMicros)}`)}<p class="sx-k">Which projects are over allocation is not known: the split could not be read.</p>`,
+    );
   return card(
     "Spent this envelope window",
     html`${ui.kpi(usd(a?.deploymentSpent), html`of ${usd(a?.totalMicros)}`)}${progress(a?.deploymentSpent, a?.totalMicros, "Spent and held against the allocation envelope")}<p class="sx-k">${a?.rows?.filter(overAllocation).length ?? 0} projects over allocation. Includes held money.</p>`,
@@ -764,6 +806,11 @@ export function splitSpentKpi(v) {
 }
 export function splitPlanKpi(v) {
   const a = allocation(v);
+  if (a?.kind === "unreachable")
+    return card(
+      "Plan in force",
+      html`${ui.kpi("not known")}${note(SPLIT_UNREAD_TEXT)}`,
+    );
   const until = Date.parse(payload(v).allocation?.state?.validUntil ?? "");
   const hours =
     Number.isFinite(until) && Number.isFinite(v.now)
@@ -1491,11 +1538,17 @@ export const breakdownLegend = () =>
       "Metered: pi-ai list prices. Estimated (~): partial evidence. Plan: plan:<id>, with API equivalent shown separately. Zero-rated: no charge. Unknown: not priceable. Floor (≥): at least this much. Seeded: a wide range until a ledgered run exists.",
     ),
   );
+/**
+ * What the Breakdown view reads (issue #962): this host's own run records, where Runs reads the fleet's. A note of
+ * scope, the same whether Valkey answers or not.
+ */
+export const BREAKDOWN_SCOPE_TEXT =
+  "This view reads this host's run records only. Runs lists every host's.";
 export function breakdownProvenance(v) {
   const f = fold(v);
   return card(
     "Where these numbers come from",
-    html`${note(
+    html`${note(BREAKDOWN_SCOPE_TEXT)}${note(
       "Metered means pi-ai prices, not invoices. Money held for running jobs is not in run records yet; the Spend view shows it.",
     )}${
       f
@@ -1821,11 +1874,34 @@ export function flowsHonesty(v) {
     )}`,
   );
 }
+/**
+ * A Spend view whose payload could not be assembled (`data.insightsError`, issue #962): one card that says so, in the
+ * view's first panel, and no other panel. Every card reads the payload, so drawn over none each would state a zero,
+ * "No budget split is available." or "0 hosts" as if it had been read.
+ */
+export function spendUnread(v) {
+  return card(
+    "Not read",
+    ui.banner({
+      status: "failed",
+      title: "This view could not be read",
+      body: `${v.data.insightsError} Nothing is drawn, so nothing here reads as a zero. Reload to try again.`,
+    }),
+    null,
+    null,
+    "sp-unread",
+  );
+}
 // Empty optional fragments must not leave indentation-only lines in the checked-in page fixtures.
 const panels = (entries) =>
-  entries.map(([id, fn]) => [
+  entries.map(([id, fn], index) => [
     `p-${id}`,
-    (view) => raw(String(fn(view)).replace(/[ \t]+\n/g, "\n")),
+    (view) =>
+      typeof view?.data?.insightsError === "string"
+        ? index === 0
+          ? spendUnread(view)
+          : html``
+        : raw(String(fn(view)).replace(/[ \t]+\n/g, "\n")),
   ]);
 export const SPEND_PANELS = Object.freeze({
   insights: panels([

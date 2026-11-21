@@ -1001,6 +1001,18 @@ proposals are not known rather than that there are none. Meanwhile a live page's
 the console could not read all it needs for the page), also when only a part was not read (the host registry, the
 running jobs or the parked runs), and a page kept as last seen shows no Parked count until it is read again.
 
+The pages that read the run history follow the same rule. Runs marks its project counts and settled spend "at least"
+when part of the history could not be read, and says "No run matches." only when this host's run files were read and
+the other hosts' runs were read too, or the fleet has no run mirror. A run's page says its live transcript could not
+be read, not that it is no longer kept, and says the search for child runs was incomplete when it was, counting the
+runs it queued as "at least". A project's page marks its run counts and spend "at least", does not say the project
+has no retained run, and says its split is not known when the allocation could not be read. Budget split still shows
+what the envelope file says and says the published split is not known. Money held with the hosts unread names no
+number of jobs. Capacity counts the hosts the run records name and says so, shows a peak those records hold as theirs,
+and says not known where they hold none. A Spend view that could not be put together shows one card saying so and no
+figures; that takes a run record the console cannot fold, not an outage.
+Breakdown always reads this host's run records only, and says so; Runs lists every host's.
+
 A change that timed out before it left the console is not made when Valkey returns. One that reached a Valkey which then
 stopped answering may or may not have been made, and the confirm and its audit row say so. Adopting or undoing a package and
 ending a sandbox shell say it too, and an End request that may still stand is taken back. With Valkey unreachable, Adopt and

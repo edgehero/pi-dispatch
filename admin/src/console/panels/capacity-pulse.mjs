@@ -2,7 +2,7 @@
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
 import { normCapacity, layoutCapacityChart, INSIGHTS_CAPACITY_JOBS_ONLY } from "../../insights-html.mjs";
-import { timeHtml } from "./common.mjs";
+import { HOSTS_UNREAD, HOSTS_UNREAD_TEXT, timeHtml } from "./common.mjs";
 
 const payload = (v) => v.data?.insights?.capacity;
 const note = (body) => html`<p class="sp-note note">${body}</p>`;
@@ -13,13 +13,25 @@ const duration = (ms) => !valid(ms) ? "No run recorded one" : ms < 1000 ? `${Mat
 const number = (n) => Math.round(n * 100) / 100;
 const headline = (amount, suffix = null) => ui.kpi(amount, suffix);
 
+/**
+ * How many hosts the report weighs, as the Fleet busy card says it. With the registry unread (`venuesUnreadable`, issue
+ * #962) the report holds only the hosts its records name: none is "not known", never "0 hosts", and some is a count of
+ * the records' hosts, said so.
+ */
+export function capacityHostsText(c) {
+  if (c?.hostCount == null) return "";
+  if (c.venuesUnreadable !== true) return `, ${c.hostCount} hosts`;
+  return c.hostCount > 0 ? `, ${c.hostCount} ${c.hostCount === 1 ? "host" : "hosts"} named by the run records (the hosts themselves could not be read)` : `; how many hosts is ${HOSTS_UNREAD}`;
+}
 export function capacityBusy(v) {
   const c = payload(v), f = c?.fleet;
-  return card("Fleet busy", html`${headline(percent(f?.busyPerMille), "of slot time")}${note(`Weighted by slots${c?.hostCount == null ? "" : `, ${c.hostCount} hosts`}${c?.totalSlots == null ? "." : `, ${c.totalSlots} current slots in all.`}`)}${f?.incomplete ? note("Partial history: this is not a complete fleet total.") : null}`);
+  return card("Fleet busy", html`${headline(percent(f?.busyPerMille), "of slot time")}${note(`Weighted by slots${capacityHostsText(c)}${c?.totalSlots == null ? "." : `, ${c.totalSlots} current slots in all.`}`)}${f?.incomplete ? note("Partial history: this is not a complete fleet total.") : null}`);
 }
 export function capacityPeak(v) {
   const c = payload(v), f = c?.fleet;
-  return card("Fleet peak", html`${headline(f?.peak ?? "unknown", "jobs at once")}${note("Most jobs at once in one hour, all hosts added.")}${valid(c?.totalSlots) ? note(`${c.totalSlots} slots in the current fleet; past capacity may differ.`) : null}${timeHtml(f?.peakAtMs)}`);
+  // A peak of none over hosts nobody read is not a quiet fleet (issue #962): a peak the records do show is still theirs.
+  if (c?.venuesUnreadable === true && !(f?.peak > 0)) return card("Fleet peak", html`${headline("not known", null)}${note(HOSTS_UNREAD_TEXT)}`);
+  return card("Fleet peak", html`${headline(f?.peak ?? "unknown", "jobs at once")}${note(c?.venuesUnreadable === true ? "Most jobs at once in one hour, over the hosts the run records name: the hosts themselves could not be read, so the fleet's peak may be higher." : "Most jobs at once in one hour, all hosts added.")}${valid(c?.totalSlots) ? note(`${c.totalSlots} slots in the current fleet; past capacity may differ.`) : null}${timeHtml(f?.peakAtMs)}`);
 }
 export function capacityWait(v) {
   const w = payload(v)?.fleet?.waits;

@@ -100,6 +100,7 @@ export const LOADED_WORDS = Object.freeze({
   projectCompared: "A host’s pi, packages and overlay are from its newest run able to show each, so an update every host took is no difference.",
   projectNone: "Nothing to read: no run of this project recorded what it loaded in the last 7 days.",
   projectNoneWhy: "Either none ran, or an older release wrote their records.",
+  projectNoneUnread: "Not known: the run history could not be read completely, and no run of this project that was read recorded what it loaded in the last 7 days.",
 });
 
 /**
@@ -1135,6 +1136,8 @@ export function projectLoadsOf(records, { historyIncomplete = false } = {}) {
 
   if (read.length === 0) {
     const onlyOlder = total === 0 ? agentless === 0 : buckets.size === 1 && buckets.has("older");
+    // A history read short is not one that holds no such run (issue #962): "Nothing to read" and "none ran" are a whole read's words.
+    if (historyIncomplete) return { state: "none", tone: "idle", icon: "minus", total, read: 0, sub: `at least ${sub}`, top: LOADED_WORDS.projectNoneUnread, small: [...(unreadSentence !== null ? [unreadSentence] : []), ...leftOutLine], rows: [], hosts: [], links: [], foot: null };
     return { state: "none", tone: "idle", icon: "minus", total, read: 0, sub, top: LOADED_WORDS.projectNone, small: [...(onlyOlder ? [LOADED_WORDS.projectNoneWhy] : unreadSentence !== null ? [unreadSentence] : []), ...leftOutLine], rows: [], hosts: [], links: [], foot: null };
   }
 

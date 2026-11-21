@@ -9,6 +9,7 @@ import { loadPageData, parsePageQuery, renderPage } from "../../src/console/page
 import { noSnapshotFleet } from "./no-snapshot.mjs";
 import { consoleProjectFixture } from "./console-project-fixture.mjs";
 import { projectSizeAction } from "../../src/project-view.mjs";
+import { projectLoadsOf } from "../../src/loaded-words.mjs";
 import { buildHookRun } from "@edgehero/pi-dispatch/hook-runs";
 
 export function consoleSecretsFixture(now, { env: extra = {}, change = () => {} } = {}) {
@@ -169,6 +170,18 @@ export const CONFIGURATION_DRAW = Object.freeze({
   "project-members-editable.operator": () => project((p) => { p.bundle = null; p.editRefusal = null; }),
   "project-populated.operator": () => project(),
   "project-populated.viewer": () => project(() => {}, "viewer"),
+  // Issue #962: the project page over a history that was not read whole and hosts that were not read. Nothing was found
+  // in what was read, which is not "no retained run": the counts and the spend are floors, and the held money is unknown.
+  "project-history-unread.operator": () => project((p) => {
+    p.historyIncomplete = true;
+    p.runs24h = { total: 0, counts: { completed: 0, failed: 0, refused: 0, cancelled: 0, "awaiting-input": 0, "awaiting-approval": 0 }, inLine: null, inLineIncomplete: false, worst: null };
+    p.recent = []; p.totalRuns = 0; p.triggers = []; p.triggersKnown = true;
+    p.members = p.members.map((m) => ({ ...m, count: 0, last: null }));
+    p.spend = { window: "week", settledMicros: 0, heldMicros: null, heldKnownMicros: 0, heldIncomplete: true, heldUnread: true, usedMicros: null, shareMicros: null, envelope: false, floor: true };
+    p.allocation = { ...p.allocation, unset: true, shareMicros: null };
+    p.sizing = null; p.sizingUnreadable = true;
+    p.loads = projectLoadsOf([], { historyIncomplete: true });
+  }),
   "project-spend-unsplit.operator": () => project((p) => { p.spend.settledMicros = null; p.spend.heldMicros = null; p.spend.heldIncomplete = true; }),
   "project-readonly.operator": () => project(() => {}, "operator", true),
   "project-bundle-bound.operator": () => project((p) => { p.editRefusal = "Members cannot be edited while secret bundle billing names billing. Change the bundle in triggers.json first."; }),

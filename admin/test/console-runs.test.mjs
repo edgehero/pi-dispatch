@@ -9,6 +9,7 @@ import {
   RUNS_DAY_UNKNOWN,
   RUNS_EMPTY,
   RUNS_HOST_UNREADABLE,
+  RUNS_NONE_WITHOUT_HOST,
   RUNS_MIRROR_DEGRADED,
   RUNS_MIRROR_OFF,
   RUNS_UNREADABLE,
@@ -366,7 +367,7 @@ test("the table's foot says each sentence when its condition holds, and only the
   assert.deepEqual(foot({ runsPage: pageOf(two) }), ["2 runs, read from 2 hosts through the fleet's run mirror."]);
   assert.deepEqual(foot({ runsPage: pageOf(two, { mirror: "off" }) }), ["2 runs.", RUNS_MIRROR_OFF]);
   assert.deepEqual(foot({ runsPage: pageOf(two, { mirror: "unreachable: ECONNREFUSED" }) }), ["2 runs.", RUNS_MIRROR_DEGRADED]);
-  assert.deepEqual(foot({ runsPage: pageOf([], { mirror: "off", unreachable: "logs dir unreadable (EACCES)" }) }), [RUNS_EMPTY, RUNS_HOST_UNREADABLE, RUNS_MIRROR_OFF]);
+  assert.deepEqual(foot({ runsPage: pageOf([], { mirror: "off", unreachable: "logs dir unreadable (EACCES)" }) }), [RUNS_HOST_UNREADABLE, RUNS_NONE_WITHOUT_HOST], "files that could not be read hold no \"No run matches.\", and the mirror the reader did not ask is not called off");
   assert.deepEqual(foot({ runsPage: pageOf(two, { truncated: true, examined: 2000, next: 5 }) }), ["2 runs, read from 2 hosts through the fleet's run mirror.", runsTruncatedText(2000)]);
   assert.ok(!foot({ runsPage: pageOf(two) }).some((s) => s.includes("could not") || s.includes("Stopped")), "no warning a page did not earn");
   // The pager: Newest only below the top, Older where the page has a cursor, both keeping the filter.

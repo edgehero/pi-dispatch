@@ -15,6 +15,7 @@ const expected = {
   "spend-whatif-flow.viewer": ["Per run", "$0.20", "Runs in this window", "fixture"],
   "spend-populated.operator": ["Today", "$2.00", "Held for 1 running job"],
   "spend-populated.viewer": ["Full local paths are shown to operators only", "Metered and plan"],
+  "spend-insights-error.viewer": ["This view could not be read", "The spend history could not be assembled."],
   "spend-costs-unreadable.viewer": ["Costs could not be read. The other Spend views still work."],
   "spend-unknown-holds.operator": ["Holds not published by: old-worker", "Those jobs are not counted as zero"],
   "spend-midnight-run.operator": ["Settled in today's records", "$0.60", "Counter beyond recorded window charges and holds"],

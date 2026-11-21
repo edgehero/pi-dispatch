@@ -35,6 +35,15 @@ const runBadge = (r) => {
 };
 const kindText = (t) => `${String(t.type ?? "unknown").replaceAll("_", " ")}${isForgeKind(t.forge) ? ` on ${t.forge}` : ""}`;
 
+/**
+ * The recent runs' empty line where the history was not read whole (`historyIncomplete`, issue #962): none was found in
+ * what was read, which is not "no retained run", a whole read's sentence.
+ */
+export const PROJECT_RUNS_UNREAD = "Not known: the run history could not be read completely, and no run of this project is in what was read.";
+
+/** The spend card where the hosts were not read at all (`spend.heldUnread`): no amount is "known from the hosts that reported it". */
+export const PROJECT_HOLDS_UNREAD = "Held money is not known: the hosts could not be read.";
+
 export const projectTitle = (view) => view?.project?.name || view?.id || "Project";
 export const projectDescription = (view) => view?.state === "ready" ? `${view.members.length} member${view.members.length === 1 ? "" : "s"}; id ${view.id} in ${view.file}.` : "Project configuration could not be read.";
 
@@ -45,7 +54,7 @@ export function projectSpend(v) {
   const totalKnown = Number.isFinite(s.usedMicros);
   const headline = splitKnown ? s.settledMicros : totalKnown ? s.usedMicros : s.settledMicros;
   const pct = totalKnown && s.shareMicros > 0 ? (s.usedMicros / s.shareMicros) * 100 : null;
-  return card(`Spend this ${s.window}`, html`<div class="proj-kv"><b>${s.floor ? "at least " : ""}${money(headline)}</b><span>${splitKnown ? html`+ ${money(s.heldMicros)} held` : totalKnown ? "spent and held" : "spent; held amount unknown"}${s.envelope ? html`, of a ${money(s.shareMicros)} share` : "; no envelope, so no share"}</span></div>${pct === null ? null : html`${ui.meter({ value: s.usedMicros, max: s.shareMicros, label: "Spent and held against the project's allocation share" })}<p class="proj-meter-label">${money(s.usedMicros)} / ${money(s.shareMicros)}</p>`}${!splitKnown && totalKnown ? note("The split between spent and held is unknown.") : null}${s.heldIncomplete && !totalKnown ? note(html`Held money is incomplete; ${money(s.heldKnownMicros)} is known from the hosts that reported it.`) : null}${s.problem ? note(s.problem) : null}`);
+  return card(`Spend this ${s.window}`, html`<div class="proj-kv"><b>${s.floor ? "at least " : ""}${money(headline)}</b><span>${splitKnown ? html`+ ${money(s.heldMicros)} held` : totalKnown ? "spent and held" : "spent; held amount unknown"}${s.envelope ? html`, of a ${money(s.shareMicros)} share` : "; no envelope, so no share"}</span></div>${pct === null ? null : html`${ui.meter({ value: s.usedMicros, max: s.shareMicros, label: "Spent and held against the project's allocation share" })}<p class="proj-meter-label">${money(s.usedMicros)} / ${money(s.shareMicros)}</p>`}${!splitKnown && totalKnown ? note("The split between spent and held is unknown.") : null}${s.heldIncomplete && !totalKnown ? note(s.heldUnread ? PROJECT_HOLDS_UNREAD : html`Held money is incomplete; ${money(s.heldKnownMicros)} is known from the hosts that reported it.`) : null}${s.problem ? note(s.problem) : null}`);
 }
 
 export function projectRuns(v) {
@@ -59,7 +68,7 @@ export function projectRuns(v) {
   const cause = reason.known ? reason.sentence.match(/, and (.+?), so /)?.[1] : null;
   const brief = cause ? shortSentence(cause) : reason.short;
   const short = reason.known ? brief.charAt(0).toLowerCase() + brief.slice(1) : "no reason is published";
-  return card("Runs, last 24 hours", html`<div class="proj-kv"><b>${r.total}</b><span>${counts.length ? counts.join(", ") : "no retained runs"}; ${unknown(r.inLine)} in line${r.inLineIncomplete ? " (at least)" : ""}</span></div>${worst && worst.outcome !== "completed" ? html`<p class="proj-state tone-${ui.STATUS[word?.status ?? "attention"].tone}">${ui.icon(ui.STATUS[word?.status ?? "attention"].icon, { size: "sm" })}<span>${runLink(worst.jobId, { pulse: true })} ${word?.word ?? "ended"}${worst.host ? html` on ${worst.host}` : null}: ${short}${short.endsWith("…") ? "" : "."}</span></p>` : null}${p.historyIncomplete ? note("Run counts are a bounded view; the retained history or a fleet mirror could not be read completely.") : null}${newerSkippedSentence(p.newerSkipped) ? note(`${newerSkippedSentence(p.newerSkipped)}: counts and spend leave them out.`) : null}`);
+  return card("Runs, last 24 hours", html`<div class="proj-kv"><b>${p.historyIncomplete ? "at least " : ""}${r.total}</b><span>${counts.length ? counts.join(", ") : p.historyIncomplete ? "no run in what could be read" : "no retained runs"}; ${unknown(r.inLine)} in line${r.inLineIncomplete ? " (at least)" : ""}</span></div>${worst && worst.outcome !== "completed" ? html`<p class="proj-state tone-${ui.STATUS[word?.status ?? "attention"].tone}">${ui.icon(ui.STATUS[word?.status ?? "attention"].icon, { size: "sm" })}<span>${runLink(worst.jobId, { pulse: true })} ${word?.word ?? "ended"}${worst.host ? html` on ${worst.host}` : null}: ${short}${short.endsWith("…") ? "" : "."}</span></p>` : null}${p.historyIncomplete ? note("Run counts are a bounded view; the retained history or a fleet mirror could not be read completely.") : null}${newerSkippedSentence(p.newerSkipped) ? note(`${newerSkippedSentence(p.newerSkipped)}: counts and spend leave them out.`) : null}`);
 }
 
 export function projectSize(v) {
@@ -86,7 +95,7 @@ export function projectLoads(v) {
 export function projectMembers(v) {
   if (!ready(v)) return null;
   const p = data(v);
-  return card("Members", html`<ul class="rows proj-members">${p.members.map((m) => html`<li class="rowpill">${ui.icon(m.local ? "folder" : "git", { size: "sm" })}<b class="code">${m.label}</b><span>${m.local ? "folder" : "repository"}</span><span class="end">${unknown(m.count)} runs this week${m.last ? html` · last ${runLink(m.last.jobId, { pulse: true })} ${timeHtml(m.last.at)}` : m.caveat ? html` · ${m.caveat}` : " · no run in view"}</span></li>`)}</ul>${note(`Runs of these members record project ${p.id} when a worker picks them up; a record keeps the project it was written with.`)}${p.editRefusal ? html`<p class="proj-refusal">${ui.icon("attention", { size: "sm" })}<span>${p.editRefusal}</span></p>` : canAct(v) ? actForm("project-edit", { hidden: [["id", p.id]], fields: html`<div class="field"><label for="proj-members-input">Members</label>${ui.textarea({ id: "proj-members-input", name: "members", value: p.memberInput, rows: 3, maxlength: 16384, describedBy: "proj-members-hint" })}<p class="field__err" data-field-error="members" hidden></p></div><p class="proj-edit-hint" id="proj-members-hint">One repository with its forge, or absolute folder per line. Blank keeps the current members.</p>`, label: "Preview the edit" }) : null}`, `${p.members.length} members`);
+  return card("Members", html`<ul class="rows proj-members">${p.members.map((m) => html`<li class="rowpill">${ui.icon(m.local ? "folder" : "git", { size: "sm" })}<b class="code">${m.label}</b><span>${m.local ? "folder" : "repository"}</span><span class="end">${p.historyIncomplete && m.count !== null && m.count !== undefined ? "at least " : ""}${unknown(m.count)} runs this week${m.last ? html` · last ${runLink(m.last.jobId, { pulse: true })} ${timeHtml(m.last.at)}` : m.caveat ? html` · ${m.caveat}` : p.historyIncomplete ? " · no run in what could be read" : " · no run in view"}</span></li>`)}</ul>${note(`Runs of these members record project ${p.id} when a worker picks them up; a record keeps the project it was written with.`)}${p.editRefusal ? html`<p class="proj-refusal">${ui.icon("attention", { size: "sm" })}<span>${p.editRefusal}</span></p>` : canAct(v) ? actForm("project-edit", { hidden: [["id", p.id]], fields: html`<div class="field"><label for="proj-members-input">Members</label>${ui.textarea({ id: "proj-members-input", name: "members", value: p.memberInput, rows: 3, maxlength: 16384, describedBy: "proj-members-hint" })}<p class="field__err" data-field-error="members" hidden></p></div><p class="proj-edit-hint" id="proj-members-hint">One repository with its forge, or absolute folder per line. Blank keeps the current members.</p>`, label: "Preview the edit" }) : null}`, `${p.members.length} members`);
 }
 
 /** Geometry is exported so tests can verify actual plotted values and changing run sizes, beyond a golden's bytes. */
@@ -139,13 +148,16 @@ export function projectRecent(v) {
     { html: timeHtml(r.at), when: true },
     { html: html`${r.costFloor && r.micros !== null ? "at least " : null}${money(r.micros)}`, num: true },
   ]);
-  return card("Recent runs", html`${ui.tbl({ label: "Recent runs of this project", stack: true, heads: [{ label: "Run", l: "" }, { label: "Target", l: "" }, { label: "Outcome", l: "" }, "Ended", { label: "Cost", num: true }], rows, empty: "No retained run recorded this project." })}<p class="tbl-foot"><a class="link" href="${linkRuns(p.id)}">All ${p.totalRuns} in Runs, filtered to ${p.id}</a></p>${note("The last five runs recorded with this project, within the retained view (30 days or this month, whichever reaches further).")}`);
+  return card("Recent runs", html`${ui.tbl({ label: "Recent runs of this project", stack: true, heads: [{ label: "Run", l: "" }, { label: "Target", l: "" }, { label: "Outcome", l: "" }, "Ended", { label: "Cost", num: true }], rows, empty: p.historyIncomplete ? PROJECT_RUNS_UNREAD : "No retained run recorded this project." })}<p class="tbl-foot"><a class="link" href="${linkRuns(p.id)}">${p.historyIncomplete ? "At least" : "All"} ${p.totalRuns} in Runs, filtered to ${p.id}</a></p>${note("The last five runs recorded with this project, within the retained view (30 days or this month, whichever reaches further).")}`);
 }
 
 export function projectAllocation(v) {
   if (!ready(v)) return null;
   const a = data(v).allocation;
-  return card("Allocation", html`${a.unset ? note("No envelope is configured, so this project has no allocation share.") : html`${facts([["Weight", `${unknown(a.weight)} of ${unknown(a.totalWeight)}`], ["Floor", html`${money(a.floorMicros)} a ${a.window}`], ["Share", html`${money(a.shareMicros)} of the ${money(a.totalMicros)} ${a.window} envelope`], ["Split", a.split ? html`<span class="code">${a.split.id ?? "neutral"}</span> by ${a.split.writer ?? "unknown"}, applied ${timeHtml(at(a.split.appliedAt))}, until ${a.split.validUntil ? timeHtml(at(a.split.validUntil)) : "no expiry"}` : "No split has been published."], ["Refused by the split", `${a.refused} in this ${a.window}, among retained runs`]])}${a.problem ? note(a.problem) : null}`}<p><a class="link" href="/insights/budget-split">Open the budget split</a></p>`);
+  // No split read is not no split published (issue #962), and refusals counted over a history read short are a floor.
+  const noSplit = a.problem ? "not known: the allocation could not be read" : "No split has been published.";
+  const floor = data(v).historyIncomplete ? "at least " : "";
+  return card("Allocation", html`${a.unset ? note("No envelope is configured, so this project has no allocation share.") : html`${facts([["Weight", `${unknown(a.weight)} of ${unknown(a.totalWeight)}`], ["Floor", html`${money(a.floorMicros)} a ${a.window}`], ["Share", html`${money(a.shareMicros)} of the ${money(a.totalMicros)} ${a.window} envelope`], ["Split", a.split ? html`<span class="code">${a.split.id ?? "neutral"}</span> by ${a.split.writer ?? "unknown"}, applied ${timeHtml(at(a.split.appliedAt))}, until ${a.split.validUntil ? timeHtml(at(a.split.validUntil)) : "no expiry"}` : noSplit], ["Refused by the split", `${floor}${a.refused} in this ${a.window}, among retained runs`]])}${a.problem ? note(a.problem) : null}`}<p><a class="link" href="/insights/budget-split">Open the budget split</a></p>`);
 }
 
 export function projectLimits(v) {
@@ -177,7 +189,7 @@ export function projectTriggers(v) {
   if (!ready(v)) return null;
   const p = data(v);
   // `triggersKnown` is false of a file absent, broken or unreadable alike, so "could not be loaded", the bundle card's word beside it, is true of each.
-  return card("Triggers that ran here", html`${p.triggers.length ? html`<ul class="rows proj-triggers">${p.triggers.map((t) => html`<li class="rowpill"><a class="link" href="${`/config/trigger?index=${t.index}`}">Trigger ${t.index + 1}</a><span class="proj-trigger-desc">${kindText(t)}${t.id ? html` ${t.id}` : null}${t.flow ? html` → ${t.flow}` : null}</span><span class="end">${t.count} runs</span></li>`)}</ul>` : note(p.triggersKnown ? "No retained run here was attributed to a trigger in the last 24 hours." : "The triggers file could not be loaded, so which triggers ran here is unknown.")}${note("Forge triggers fire on any member that sends events. A cron trigger runs here when its folder is a member.")}`, "last 24 hours");
+  return card("Triggers that ran here", html`${p.triggers.length ? html`<ul class="rows proj-triggers">${p.triggers.map((t) => html`<li class="rowpill"><a class="link" href="${`/config/trigger?index=${t.index}`}">Trigger ${t.index + 1}</a><span class="proj-trigger-desc">${kindText(t)}${t.id ? html` ${t.id}` : null}${t.flow ? html` → ${t.flow}` : null}</span><span class="end">${t.count} runs</span></li>`)}</ul>` : note(p.triggersKnown ? p.historyIncomplete ? "No run that could be read was attributed to a trigger in the last 24 hours; the run history could not be read completely." : "No retained run here was attributed to a trigger in the last 24 hours." : "The triggers file could not be loaded, so which triggers ran here is unknown.")}${note("Forge triggers fire on any member that sends events. A cron trigger runs here when its folder is a member.")}`, "last 24 hours");
 }
 
 export function projectDelete(v) {

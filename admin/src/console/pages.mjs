@@ -715,28 +715,38 @@ async function parkedCountOf(deps) {
 /**
  * A run's children: runs whose `parentJobId` is its id, among the newest `CHILD_SEARCH.pages` pages of runs (a child
  * starts after its parent, so the search stops at the first page older than the parent's start). `{ children,
- * searched }`, `searched` the number of runs examined, which the page states rather than claiming none exist.
+ * searched, incomplete }`, `searched` the number of runs examined, which the page states rather than claiming none
+ * exist, and `incomplete` that a page could not be read (the read threw, or answered with no list) or was read without
+ * a side of the history (this host's files, or the other hosts' runs behind a mirror that did not answer): a child may
+ * be in what was not read, so the page says the search was incomplete, never "no child run" (issue #962). A mirror
+ * that is off is a whole answer: there are no other hosts to hold one.
  */
-async function childrenOf(fleet, record) {
+export async function childrenOf(fleet, record) {
   const startMs = Date.parse(record.startedAt ?? record.endedAt ?? "");
   const children = [];
   let searched = 0;
+  let incomplete = false;
   let before = null;
   for (let i = 0; i < CHILD_SEARCH.pages; i += 1) {
     let pageRead;
     try {
       pageRead = await fleet.runsPage({ before, limit: CHILD_SEARCH.pageSize });
     } catch {
+      incomplete = true;
       break;
     }
-    if (!Array.isArray(pageRead?.runs)) break;
+    if (!Array.isArray(pageRead?.runs)) {
+      incomplete = true;
+      break;
+    }
+    if (pageRead.unreachable || (typeof pageRead.mirror === "string" && pageRead.mirror !== "ok" && pageRead.mirror !== "off")) incomplete = true;
     searched += pageRead.runs.length;
     for (const r of pageRead.runs) if (r?.parentJobId === record.jobId) children.push({ jobId: r.jobId ?? null, outcome: r.outcome ?? null, reason: recordReason(r), startedAt: r.startedAt ?? null });
     if (pageRead.next === null || pageRead.next === undefined || (Number.isFinite(startMs) && pageRead.next <= startMs)) break;
     before = pageRead.next;
   }
   children.sort((a, b) => String(a.startedAt).localeCompare(String(b.startedAt)) || String(a.jobId).localeCompare(String(b.jobId)));
-  return { children, searched };
+  return { children, searched, incomplete };
 }
 
 /**
@@ -957,7 +967,7 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
       data.run = { unreadable: RUN_RECORD_UNREAD };
       data.readFailed = true;
     }
-    if (data.run?.record) Object.assign(data, await childrenOf(deps.fleet, data.run.record).then(({ children, searched }) => ({ children, childrenSearched: searched })));
+    if (data.run?.record) Object.assign(data, await childrenOf(deps.fleet, data.run.record).then(({ children, searched, incomplete }) => ({ children, childrenSearched: searched, childrenIncomplete: incomplete })));
   }
   // Issue #920: what a forge job's /artifacts folder left, from this host's store (the manifest only, never a file).
   if (reads.includes("artifacts") && typeof deps.fleet?.artifacts === "function") {
@@ -1087,7 +1097,9 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
       data.insights = await deps.insights(q.range ?? INSIGHTS_DEFAULT_RANGE, { fullPaths, project: q.project ?? null, role: who?.role ?? "viewer", view: name === "insights" ? "spend" : name.slice("insights-".length) });
     } catch {
       data.insights = null;
-      data.insightsError = "The spend history could not be assembled. The console's log has the reason.";
+      // Nothing here writes a log, so the sentence names none. What throws is a fold over a record it cannot read (a run
+      // record whose `usage.models` is not a list, say), not an outage: every outage read answers with its own unknowns.
+      data.insightsError = "The spend history could not be assembled.";
     }
     try {
       const models = typeof deps.pricedModels === "function" ? deps.pricedModels() : [];

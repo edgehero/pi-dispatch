@@ -175,7 +175,12 @@ export async function readProjectView({ id, paths = {}, env = {}, deploymentDir 
   const selected = recorded.filter((r) => instant(r) >= since);
   const hostRows = snapshot?.hostBudgets;
   // A failed registry tick retains its last rows. Those rows are useful context, not evidence of current holds or room.
-  const registryUnreadable = Boolean(snapshot?.queue?.fleetDegraded || snapshot?.fleetDegraded);
+  // No snapshot at all (issue #962) is the registry unread too: "no holds" would be a zero nobody read.
+  const registryUnreadable = !snapshot || Boolean(snapshot.queue?.fleetDegraded || snapshot.fleetDegraded);
+  // What the run counts, the recent list and the records' spend were folded from was not read whole (issue #962): the
+  // local scan, the fleet's bounded pages, the mirror behind them, or the snapshot's own newest runs. Each number over
+  // it is then a floor, and "no run" is not known.
+  const historyIncomplete = !historyReadable || fleetHistory?.incomplete !== false || !snapshot || typeof snapshot.runMirror === "string" && snapshot.runMirror.startsWith("unreachable") || newerSkipped > 0;
   const holds = projectHolds(hostRows, { id, window, now, unreadable: registryUnreadable });
   let historySpent = historyReadable ? 0 : null;
   let historyFloor = !historyReadable;
@@ -241,14 +246,14 @@ export async function readProjectView({ id, paths = {}, env = {}, deploymentDir 
   return {
     id, state: "ready", project: { id, name: current.name ?? null }, file: basename(paths.projectsFile ?? "projects.json"), now,
     members, memberInput: current.members.some((m) => /^(?:\/|[A-Za-z]:[\\/])/.test(m)) ? "" : current.members.join("\n"),
-    historyIncomplete: !historyReadable || fleetHistory?.incomplete !== false || typeof snapshot?.runMirror === "string" && snapshot.runMirror.startsWith("unreachable") || newerSkipped > 0,
+    historyIncomplete,
     ...(newerSkipped > 0 ? { newerSkipped } : {}),
     runs24h: { total: day.length, counts, inLine: snapshot?.waiting && !snapshot.waiting.unreachable ? queued.length : null, inLineIncomplete: snapshot?.waiting?.truncated === true, worst: worst ? runView(worst, subscriptions, pricing) : null },
     recent: recorded.slice(0, 5).map((r) => runView(r, subscriptions, pricing)), totalRuns: recorded.length,
-    spend: { window, since, envelope, usedMicros, settledMicros, heldMicros: holds.micros, heldKnownMicros: holds.knownMicros, heldIncomplete: holds.incomplete, floor: envelope ? false : historyFloor, shareMicros: amount(allocation?.state?.allocations?.[id]), problem: allocation?.problem ? "The allocation file could not be read. Run pi-dispatch doctor for the reason." : allocation?.unreachable ? "The allocation could not be read from Valkey." : null },
+    spend: { window, since, envelope, usedMicros, settledMicros, heldMicros: holds.micros, heldKnownMicros: holds.knownMicros, heldIncomplete: holds.incomplete, heldUnread: registryUnreadable, floor: envelope ? false : historyFloor || historyIncomplete, shareMicros: amount(allocation?.state?.allocations?.[id]), problem: allocation?.problem ? "The allocation file could not be read. Run pi-dispatch doctor for the reason." : allocation?.unreachable ? "The allocation could not be read from Valkey." : null },
     allocation: { window, shareMicros: amount(allocation?.state?.allocations?.[id]), totalMicros: amount(allocation?.totalMicros), floorMicros: amount(allocation?.floors?.[id]), weight: amount(weights[id]), totalWeight: amount(totalWeight), split: allocation?.state ? { id: allocation.state.planId ?? null, writer: allocation.state.writer ?? null, appliedAt: allocation.state.appliedAt ?? null, validUntil: allocation.state.validUntil ?? null } : null, refused: selected.filter((r) => recordReason(r) === "allocation-cap").length, unset: !envelope, problem: allocation?.problem || allocation?.unreachable ? "The allocation could not be read." : null },
     size, sizing: sizingView, sizingUnreadable: registryUnreadable || !sizing || Boolean(sizing.unreachable) || !sl || Boolean(sl.invalid || sl.unreadable), limits: limitRows, limitsUnreadable: !sl || Boolean(sl.invalid || sl.unreadable), bundle, bundleKnown,
-    loads: projectLoadsOf(recorded.filter((r) => instant(r) >= now - LOADS_WINDOW_MS), { historyIncomplete: !historyReadable || fleetHistory?.incomplete !== false || newerSkipped > 0 }),
+    loads: projectLoadsOf(recorded.filter((r) => instant(r) >= now - LOADS_WINDOW_MS), { historyIncomplete }),
     triggers: [...triggerCounts.values()].sort((a, b) => a.index - b.index), triggersKnown: Array.isArray(triggers?.triggers), editRefusal: projectRefusal(edit, id, "edit"), deleteRefusal: projectRefusal(deletion, id, "delete"),
   };
 }
