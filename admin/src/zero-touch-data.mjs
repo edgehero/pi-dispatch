@@ -92,7 +92,7 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
       const records = report.records.filter((r) => touched.has(r.jobId) && runMatches(r, runFilter) && (before === null || Date.parse(r.endedAt) < before)).sort((a, b) => Date.parse(b.endedAt) - Date.parse(a.endedAt) || a.jobId.localeCompare(b.jobId));
       let take = Math.min(limit, records.length);
       while (take < records.length && records[take].endedAt === records[take - 1].endedAt) take++;
-      return { runs: records.slice(0, take), next: take < records.length ? Date.parse(records[take - 1].endedAt) : null, mirror: report.recordMirror ?? "off", truncated: report.coverage.partial, examined: report.records.length, touchCoverage: report.coverage, touchTotal: report.state === "unavailable" ? null : report.totals.touched };
+      return { runs: records.slice(0, take), next: take < records.length ? Date.parse(records[take - 1].endedAt) : null, mirror: report.recordMirror ?? "off", truncated: report.coverage.partial, examined: report.records.length, touchCoverage: report.coverage, touchTotal: report.state !== "ready" ? null : report.totals.touched };
     },
     async preview(name, params) { return using((stores) => plan(name, params, stores)); },
     async withWriters(fn) { return using(({ touches, outbox }) => fn({ touchStore: touches, touchOutbox: outbox, now })); },

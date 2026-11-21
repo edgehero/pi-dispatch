@@ -272,7 +272,8 @@ export function beatAgeOf(h) {
  * trigger (optional where it holds none, not known where no file was read), and the doctor's where its results alone
  * could not be read. `unknown` counts them, and while it is above zero `lead` and `sub` say that what stands before the first
  * job is not known. With no snapshot the trigger step is judged from `files` (the reader's `fileViews`), which needs
- * no Valkey; `applies` stays false.
+ * no Valkey; `applies` stays false. A triggers file that is there and cannot be read (issue #962) is not read, with a
+ * snapshot or without: the trigger step, and the forge step with it, are marked the same way.
  *
  * The egress and provider steps take the WORST published level of their named check across every host's record
  * (`egress.proxy` with its repeats, one per venue that runs a proxy); the forge step is optional without a forge
@@ -284,7 +285,10 @@ export function firstRunState(snapshot, { session = null, deployment = null, fre
   const hosts = Array.isArray(s?.hostBudgets) ? s.hostBudgets.filter((h) => h && typeof h.name === "string") : [];
   // The triggers view: the snapshot's, or with no snapshot the files' own (`fileViews`), which needs no Valkey.
   const triggersView = s !== null ? s.triggers : files !== null && typeof files === "object" ? files.triggers ?? null : null;
-  const triggersRead = s !== null || (triggersView !== null && typeof triggersView === "object");
+  // Read: a view that says what the file holds, or that it is not there. A file that could not be read (issue #962)
+  // is not one, with a snapshot that loaded as much as without: what it holds is not known.
+  const triggersUnreadable = Boolean(triggersView?.unreadable);
+  const triggersRead = !triggersUnreadable && (s !== null || (triggersView !== null && typeof triggersView === "object"));
   const triggerList = Array.isArray(triggersView?.triggers) ? triggersView.triggers : [];
   const runsDay = s?.runsDay ?? null;
   const noRun = s !== null && Array.isArray(s.runs) && s.runs.length === 0 && runsDay !== null && Array.isArray(runsDay.runs) && runsDay.runs.length === 0 && runsDay.partial !== true;
@@ -346,8 +350,8 @@ export function firstRunState(snapshot, { session = null, deployment = null, fre
   else steps.push(step("provider", "to-do", NO_DOCTOR_YET("whether the provider key is found"), { commands: [FIRST_RUN_COMMANDS.doctor] }));
   // 7. A first trigger arms matching deliveries; a manual run can already be queued without one.
   if (triggerList.length > 0) steps.push(step("trigger", "ready", [`The triggers file holds ${triggerList.length} ${triggerList.length === 1 ? "trigger" : "triggers"}.`]));
+  else if (triggersUnreadable) steps.push(unread("trigger", [`The triggers file could not be read here${typeof triggersView.unreadable === "string" ? ` (${triggersView.unreadable})` : ""}, so this cannot say which triggers it holds.`]));
   else if (!triggersRead) steps.push(unread("trigger", ["The triggers file was not read, so this cannot say which triggers it holds."]));
-  else if (triggersView?.unreadable) steps.push(step("trigger", "not-yet", [`The triggers file could not be read here${typeof triggersView.unreadable === "string" ? ` (${triggersView.unreadable})` : ""}, so this cannot say which triggers it holds.`]));
   else if (triggersView?.invalid) steps.push(step("trigger", "not-yet", ["The triggers file does not load, so no trigger can match."]));
   else steps.push(step("trigger", "to-do", ["A matching trigger starts a scheduled or forge job: a cron trigger for a folder, or a label, comment or pull request trigger for a repository. A manual run can be queued without a trigger."]));
   // 8. The forge credentials: only a forge's triggers need them.

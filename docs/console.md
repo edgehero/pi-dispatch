@@ -989,7 +989,12 @@ started that way or not, and within about 30 seconds of Valkey answering its pag
 console. While Valkey stays down, a page says "not known" for what it could not read and still shows what the
 deployment's files hold: a host page says the hosts could not be read rather than that the host has gone, Set up counts
 the steps it could not judge as not known, Triggers lists the file's rules without their next fires, Configuration shows
-its files read-only, and Parked and Sandboxes show no count of what they did not read.
+its files read-only, and Parked and Sandboxes show no count of what they did not read. The same holds for one read
+that failed beside others that worked: a Configuration tab shows no count for a file it could not read, Set up says
+Not known for the trigger and forge steps when the triggers file cannot be read, and Sandboxes offers no New sandbox
+button when its report was not read. And "could not be read" is said only of a read that failed: a pause-windows file
+that does not exist means no quiet windows, a triggers file that does not exist means no rules, and a host's page says
+there is no capacity history for it only when the host registry and the run mirror both answered.
 
 A change that timed out before it left the console is not made when Valkey returns. One that reached a Valkey which then
 stopped answering may or may not have been made, and the confirm and its audit row say so. Adopting or undoing a package and
@@ -1382,7 +1387,8 @@ The steps keep this order:
 Ready, Starting, Not yet, Check, To do and Optional are distinct. A step the console could not read says Not known
 instead, and the count names those apart ("3 of 8 ready · 4 not known"): with Valkey down that is the worker, egress
 and provider steps, and the forge step when the triggers file holds a forge trigger (it stays Optional when the file
-holds only cron triggers). The trigger step still reads the triggers file. An accepted worker start stays Starting until
+holds only cron triggers). The trigger step still reads the triggers file; when that file is there and cannot be read,
+the trigger and forge steps say Not known, with Valkey up or down. An accepted worker start stays Starting until
 a fresh heartbeat arrives; a 90-second wait ends in a named timeout with recovery. Provider, egress and forge readiness separately use
 fresh doctor observations. Partial, stale
 or missing records cannot make a step Ready. Every role sees the safe live steps; viewer and agent pages have

@@ -442,10 +442,17 @@ export const hostBudget = card("Slots and budget", (h, v) => {
   )} <p class="note"> A host admits no job on a venue whose old containers it could not list. Project hostShare and minJobs rules still apply. ${rules.map((r) => `${r.id}: hostShare ${r.hostShare === null ? "unlimited" : `${r.hostShare}%`}, minJobs ${r.minJobs}`).join("; ") || "No project rules apply to the jobs read on this host."} </p>`;
 });
 
+/** The capacity card with no facts to draw: a read that showed no history for the host, or a read that failed. */
+export const HOST_CAPACITY_WORDS = Object.freeze({ none: "No capacity history here for this host.", unread: "The host's capacity history could not be read." });
+
 /** Capacity uses the same seven-day fold as Spend; only geometry is drawn here. */
 export const hostCapacity = card("Last 7 days", (_h, v) => {
   const cap = v.data?.hostCapacity;
   const host = cap?.hosts?.[0];
+  // A report that names no such host (issue #962) says the host has no history kept only where the registry and the
+  // fleet's mirror both answered (`sourcesRead`, the reader's own word). In an outage the report still arrives, built
+  // from this host's files alone, and names no other host either: that one could not be read.
+  const noHistory = cap !== null && typeof cap === "object" && !cap.unreachable && cap.sourcesRead === true && Array.isArray(cap.hosts) && cap.hosts.length === 0;
   const facts = host?.facts;
   const windowMs = Number(cap?.window?.toMs) - Number(cap?.window?.fromMs);
   const buckets = Array.isArray(host?.buckets) ? host.buckets : [];
@@ -493,7 +500,7 @@ export const hostCapacity = card("Last 7 days", (_h, v) => {
         ([value, title]) =>
           html`<div><b>${value}</b><span>${title}</span></div>`,
       )}</div>`
-    : html`<p>${host?.notShared ?? (host?.empty ? "No capacity history here for this host." : "The host's capacity history could not be read.")}</p>`;
+    : html`<p>${host?.notShared ?? (host?.empty || noHistory ? HOST_CAPACITY_WORDS.none : HOST_CAPACITY_WORDS.unread)}</p>`;
   let graph = null;
   if (validChart) {
     const max = Math.max(

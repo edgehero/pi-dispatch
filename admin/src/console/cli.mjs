@@ -892,12 +892,11 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
         builtinModel: m.modelCatalog?.builtinModel, fs, now,
       }),
       killSwitchPlan: killSwitchPlanFn,
-      hostCapacity: async (host) => {
-        const capacity = await m.insights.assembleCapacityView(side.paths, "7d", now(), { envFn: () => side.env });
-        return { ...capacity, hosts: (capacity?.hosts ?? []).filter((row) => row.name === host) };
-      },
+      hostCapacity: (host) => m.insights.assembleHostCapacity(side.paths, host, now(), { envFn: () => side.env }),
       watch: fleet.watch,
       zeroTouch: zeroTouch ? (query) => zeroTouch.read(query) : undefined,
+      // The page load's one log line (issue #962): a Zero touch read that threw, by its code, since the page says only that it failed.
+      log,
       zeroTouchRuns: zeroTouch ? (query) => zeroTouch.runs(query) : undefined,
       insights: cachedPerWindow((window, opts) => (m.insights.assembleInsightsView ?? m.insights.assembleInsights)(side.paths, window, { ...opts, pricing, nowMs: now(), envFn: () => side.env }), { now }),
       // The what-if (REQ-COST-ANALYTICS): one shared record scan at the scan's 92-day ceiling per 30 s, the answers

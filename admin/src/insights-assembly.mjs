@@ -406,7 +406,7 @@ export const INSIGHTS_CAPACITY_NAMES_SHOWN = 5;
  * is) and the page's instant, cut to `capacityViewOf`. `{ unreachable }` when it could not be read; nothing here is
  * ever drawn as idle for that. `env` is the deployment's environment, `envFn()` when not given (`processEnv`).
  */
-export async function assembleCapacityView(paths, window, nowMs, { readCapacityFn = readCapacity, envFn = processEnv, env = envFn(), consoleDetails = false } = {}) {
+export async function assembleCapacityView(paths, window, nowMs, { readCapacityFn = readCapacity, envFn = processEnv, env = envFn(), consoleDetails = false, sources = false } = {}) {
   const bucketMs = INSIGHTS_CAPACITY_BUCKET_MS[window] ?? INSIGHTS_CAPACITY_BUCKET_MS["30d"];
   // The month's very first millisecond: a window of no time, which has nothing to read and is not a failure to read.
   const sinceMs = costsSinceMs(window, nowMs);
@@ -416,10 +416,22 @@ export async function assembleCapacityView(paths, window, nowMs, { readCapacityF
     if (!res?.report) return { unreachable: String(res?.error ?? "no report") };
     // Inside the try: a report this cannot word (a host without its capacity, a coverage that is not an object) is this
     // section's own degraded state, never a failure of the whole page.
-    return capacityViewOf(res.report, { consoleDetails });
+    // `sources` (issue #962): whether the registry and the mirror both answered, for a caller that reads the absence
+    // of a host from this report. True only on the reader's own word; a reader that does not say is not taken as read.
+    return { ...capacityViewOf(res.report, { consoleDetails }), ...(sources ? { sourcesRead: Array.isArray(res.unread) && res.unread.length === 0 } : {}) };
   } catch (err) {
     return { unreachable: `the capacity report could not be read (${err?.message ?? err})` };
   }
+}
+
+/**
+ * One host's seven days for its page (issue #962): the capacity view cut to that host, with `sourcesRead`. A host the
+ * report does not name leaves `hosts` empty, which says the host has no history only where `sourcesRead` is true: in an
+ * outage the report is built from this host's files alone and names no other host either.
+ */
+export async function assembleHostCapacity(paths, host, nowMs, options = {}) {
+  const capacity = await assembleCapacityView(paths, "7d", nowMs, { ...options, sources: true });
+  return { ...capacity, hosts: (capacity?.hosts ?? []).filter((row) => row.name === host) };
 }
 
 /**

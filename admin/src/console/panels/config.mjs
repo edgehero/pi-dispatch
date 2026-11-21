@@ -530,7 +530,10 @@ export const configProjects = fromSnapshot("Projects", (s, view) => {
 }, { files: true });
 
 /** The detail pages own these panels and writes; Configuration keeps one useful line per source. */
-export const configMcp = fromSnapshot("MCP servers", (s) => html`<p>${s.overlayMcp?.servers?.length ?? "Unknown"} overlay ${s.overlayMcp?.servers?.length === 1 ? "server" : "servers"}. <a class="link" href="/config/connections#p-mcp">Open Connections</a></p>`, { files: true });
+// An overlay that cannot be read whole answers an empty list beside `unreadable` (`readOverlayMcpView`): that is not a
+// count of none, and the line says which it was: a file that does not load ("invalid") or one that could not be read.
+const mcpUnread = (u) => (u === "invalid" ? "the overlay's MCP file does not load" : `the overlay's MCP file cannot be read${typeof u === "string" && /^E[A-Z0-9]{1,20}$/.test(u) ? ` (${u})` : ""}`);
+export const configMcp = fromSnapshot("MCP servers", (s) => html`<p>${s.overlayMcp?.unreadable ? `Overlay servers not known: ${mcpUnread(s.overlayMcp.unreadable)}.` : `${s.overlayMcp?.servers?.length ?? "Unknown"} overlay ${s.overlayMcp?.servers?.length === 1 ? "server" : "servers"}.`} <a class="link" href="/config/connections#p-mcp">Open Connections</a></p>`, { files: true });
 export const configPackages = fromSnapshot("Staged pi packages", (s) => html`<p>${s.stagedPackages?.packages?.length ?? "Unknown"} packages staged. <a class="link" href="/config/connections#p-packages">Open Connections</a>. <a class="link" href="/config/updates">See what is newer</a></p>`, { files: true });
 export const configSecretProfiles = fromSnapshot("Secret profiles", (s) => html`<p>${s.secretProfiles?.profiles?.length ?? 0} profiles in view. <a class="link" href="/config/secrets#p-secret-profiles">Open Secrets</a></p>`);
 export const configSecretBundles = fromSnapshot("Secret bundles", (s) => html`<p>${s.secretBundles?.bundles?.length ?? 0} project bundles in view. <a class="link" href="/config/secrets#p-secret-bundles">Open Secrets</a></p>`);
@@ -544,32 +547,24 @@ export function configDescription(v) {
   return `Settings: ${settings}${outside ? " (outside the deployment folder)" : ""}. Triggers: ${locations.triggers ?? shortFile(s?.triggers?.path, "triggers file unavailable")}.`;
 }
 export function configNavigation(v) {
-  const s = v.data?.snapshot ?? {};
   // Issue #844: with no snapshot a count comes from the files, or is not drawn at all (`fpill` draws none for null):
-  // never a number above a card that says it could not be read. A file that did not load has no count either.
-  const only = filesSnapshot(v);
-  const fileCount = (list) => (Array.isArray(list) ? list.length : null);
-  const sections = v.data?.snapshot
-    ? [
-        ["settings", "Settings", Object.keys(s.settings?.overlay ?? {}).length],
-        ["triggers", "Triggers", s.triggers?.triggers?.length ?? 0],
-        ["pause-windows", "Pause windows", s.pauseWindows?.windows?.length ?? 0],
-        ["scoped-limits", "Scoped limits", s.scopedLimits?.limits?.length ?? 0],
-        ["projects", "Projects", s.projects?.projects?.length ?? 0],
-        ["files", "Files", 2],
-        ["unset", "Unset", 0],
-        ["mcp-servers", "MCP servers", s.overlayMcp?.servers?.length ?? 0],
-      ]
-    : [
-        ["settings", "Settings", only?.settings?.overlay && typeof only.settings.overlay === "object" ? Object.keys(only.settings.overlay).length : null],
-        ["triggers", "Triggers", fileCount(only?.triggers?.triggers)],
-        ["pause-windows", "Pause windows", fileCount(only?.pauseWindows?.windows)],
-        ["scoped-limits", "Scoped limits", fileCount(only?.scopedLimits?.limits)],
-        ["projects", "Projects", fileCount(only?.projects?.projects)],
-        ["files", "Files", only ? 2 : null],
-        ["unset", "Unset", only ? 0 : null],
-        ["mcp-servers", "MCP servers", fileCount(only?.overlayMcp?.servers)],
-      ];
+  // never a number above a card that says it could not be read.
+  // Issue #962: the same holds for one file under a snapshot that loaded. A file that cannot be read or does not load
+  // has no count, where a zero would say it holds nothing; a file that is not there, or not configured, holds none,
+  // and that zero is a read's own answer.
+  const s = v.data?.snapshot ?? filesSnapshot(v);
+  const fileCount = (view, list) => (Array.isArray(list) ? list.length : view?.missing === true || view?.unset === true ? 0 : null);
+  const overlay = s?.settings?.overlay;
+  const sections = [
+    ["settings", "Settings", overlay !== null && typeof overlay === "object" ? Object.keys(overlay).length : null],
+    ["triggers", "Triggers", fileCount(s?.triggers, s?.triggers?.triggers)],
+    ["pause-windows", "Pause windows", fileCount(s?.pauseWindows, s?.pauseWindows?.windows)],
+    ["scoped-limits", "Scoped limits", fileCount(s?.scopedLimits, s?.scopedLimits?.limits)],
+    ["projects", "Projects", fileCount(s?.projects, s?.projects?.projects)],
+    ["files", "Files", s ? 2 : null],
+    ["unset", "Unset", s ? 0 : null],
+    ["mcp-servers", "MCP servers", s?.overlayMcp?.unreadable ? null : fileCount(null, s?.overlayMcp?.servers)],
+  ];
   return html`<nav class="config-sections" aria-label="Configuration sections">
     ${sections.map(([id, label, count]) =>
       ui.fpill({ label, count, href: `#cf-${id}` }),

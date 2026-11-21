@@ -1,14 +1,17 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createFleetReader } from "../src/read-model.mjs";
+import { createFleetReader, readCapacity, readPauseWindows, readScopedLimits } from "../src/read-model.mjs";
+import { assembleCapacityView, assembleHostCapacity } from "../src/insights-assembly.mjs";
 import { loadPageData, parsePageQuery, renderPage } from "../src/console/pages.mjs";
-import { triggerListOf, SCHEDULERS_UNREAD_TEXT } from "../src/trigger-list.mjs";
+import { triggerListOf, SCHEDULERS_UNREAD_TEXT, SCHEDULERS_UNREAD_NO_RULES_TEXT, TRIGGERS_FILE_ABSENT_TEXT } from "../src/trigger-list.mjs";
 import { hostsUnread } from "../src/console/panels/common.mjs";
 import { OVERVIEW_UNREAD_TEXT } from "../src/console/panels/overview.mjs";
 import { SANDBOX_WORDS } from "../src/console/panels/sandboxes.mjs";
+import { HOST_CAPACITY_WORDS } from "../src/console/panels/host.mjs";
+import { fileTrouble } from "../src/console/panels/config.mjs";
 import { ANSWERER_STANDING_UNREAD } from "../src/console/panels/answerer.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { fileViewsFixture, noSnapshotFleet } from "./helpers/no-snapshot.mjs";
@@ -276,4 +279,193 @@ test("a host operation under way on a step that could not be read says its own w
   const timeout = state([{ step: "egress", state: "timeout", stage: "complete", atMs: SETUP_AT - 8000 }]);
   assert.deepEqual([timeout.steps.find((s) => s.id === "egress").state, timeout.steps.find((s) => s.id === "egress").unread], ["check", false]);
   assert.equal(timeout.unknown, 3);
+});
+
+/**
+ * Issue #962: the same rule where the snapshot loaded and one read beside it did not, and its reverse. What is simply
+ * absent (a file that does not exist, a host with no history kept) says so, and is never "could not be read".
+ */
+
+test("/config over a read snapshot: the tab of a file that cannot be read or does not load draws no count, and a file that is not there counts none", async () => {
+  const nav = async (over) => {
+    const snapshot = { queue: { counts: {} }, hostBudgets: [], ...fileViewsFixture(), ...over };
+    const page = String((await renderPage("config", { query: {}, session: { name: "ops", role: "operator" }, data: { now: NOW, snapshot }, theme: null })).html);
+    return wordsOf(page.slice(page.indexOf('aria-label="Configuration sections"'), page.indexOf('<span class="config-divider"'))).replace(/^.*?Settings/, "Settings").trim();
+  };
+  assert.equal(await nav({}), "Settings 2 Triggers 2 Pause windows 1 Scoped limits 1 Projects 1 Files 2 Unset 0 MCP servers 0", "the control: every file read");
+  const broken = await nav({ settings: { path: "/srv/deployment/settings.json", invalid: "not JSON" }, triggers: { unreadable: "EACCES" }, pauseWindows: { invalid: "bad zone" }, scopedLimits: { invalid: "newer", newer: true }, projects: { unreadable: true }, overlayMcp: { servers: [], refused: [], unreadable: "EACCES" } });
+  assert.equal(broken, "Settings Triggers Pause windows Scoped limits Projects Files 2 Unset 0 MCP servers");
+  // A read that showed there is no file, or none configured: none, said as the number it is.
+  const absent = await nav({ triggers: { missing: true }, pauseWindows: { missing: true }, scopedLimits: { missing: true }, projects: { unset: true }, settings: { path: "/srv/deployment/settings.json", overlay: {} } });
+  assert.equal(absent, "Settings 0 Triggers 0 Pause windows 0 Scoped limits 0 Projects 0 Files 2 Unset 0 MCP servers 0");
+  // The MCP card under its tab does not count an overlay it could not read either.
+  const card = async (overlayMcp) => wordsOf((await renderPage("config", { query: {}, session: { name: "ops", role: "operator" }, data: { now: NOW, snapshot: { queue: { counts: {} }, hostBudgets: [], ...fileViewsFixture(), overlayMcp } }, theme: null })).html);
+  assert.match(await card({ servers: [], refused: [], unreadable: "EACCES" }), /Overlay servers not known: the overlay's MCP file cannot be read \(EACCES\)\. Open Connections/);
+  assert.match(await card({ servers: [], refused: [], unreadable: "invalid" }), /Overlay servers not known: the overlay's MCP file does not load\. Open Connections/);
+  assert.match(await card({ servers: [], refused: [], unreadable: "unreadable" }), /Overlay servers not known: the overlay's MCP file cannot be read\. Open Connections/);
+  for (const u of ["EACCES", "invalid"]) assert.ok(!(await card({ servers: [], refused: [], unreadable: u })).includes("0 overlay servers"), u);
+  const mcpRead = await card({ servers: [], refused: [], unreadable: null });
+  assert.match(mcpRead, /0 overlay servers\. Open Connections/);
+  assert.ok(!mcpRead.includes("not known: the overlay"));
+  // The scoped-limits file through its own reader: only a file that is not there is missing, and the card says which.
+  const dir = tempDir("pd-962-limits-");
+  assert.ok(dir.startsWith(tmpdir()), "a temp folder, checked before anything is written");
+  assert.deepEqual(readScopedLimits({ scopedLimitsPath: join(dir, "none.json") }), { missing: true });
+  assert.deepEqual(readScopedLimits({ scopedLimitsPath: undefined }), { missing: true });
+  mkdirSync(join(dir, "folder.json"));
+  const unreadable = readScopedLimits({ scopedLimitsPath: join(dir, "folder.json") });
+  assert.deepEqual(unreadable, { unreadable: "EISDIR" });
+  assert.equal(await nav({ scopedLimits: unreadable }), "Settings 2 Triggers 2 Pause windows 1 Scoped limits Projects 1 Files 2 Unset 0 MCP servers 0");
+  const limitsCard = async (scopedLimits) => wordsOf((await renderPage("config", { query: {}, session: { name: "ops", role: "operator" }, data: { now: NOW, snapshot: { queue: { counts: {} }, hostBudgets: [], ...fileViewsFixture(), scopedLimits } }, theme: null })).html);
+  const unreadCard = await limitsCard(unreadable);
+  assert.ok(unreadCard.includes("The scoped-limits file cannot be read (EISDIR).") && !unreadCard.includes("The scoped-limits file does not exist."));
+  const absentCard = await limitsCard(readScopedLimits({ scopedLimitsPath: join(dir, "none.json") }));
+  assert.ok(absentCard.includes("The scoped-limits file does not exist.") && !absentCard.includes("The scoped-limits file cannot be read"));
+});
+
+test("/setup over a read snapshot: an unreadable triggers file makes the trigger and forge steps not known; a read file keeps to do and optional", async () => {
+  const draw = async (triggers) => {
+    const snapshot = { ...setupFixture(), triggers };
+    const data = await loadPageData("setup", {}, { now: () => SETUP_AT, deployment: { folder: "pi-dispatch" }, fleet: { snapshot: async () => snapshot }, setup: () => setupAvailable() }, { role: "viewer" });
+    return wordsOf((await renderPage("setup", { data, query: {}, session: { name: "watcher", role: "viewer" } })).html);
+  };
+  const unread = await draw({ unreadable: "EACCES" });
+  assert.match(unread, /Not known The triggers file could not be read here \(EACCES\), so this cannot say which triggers it holds\./);
+  assert.match(unread, /Not known The triggers file was not read, so nothing here says whether a trigger needs forge credentials\./);
+  assert.match(unread, /of 8 ready · 2 not known/);
+  for (const said of ["Not yet The triggers file", "Only label, comment, issue and pull request triggers need them"]) assert.ok(!unread.includes(said), said);
+  const none = await draw({ triggers: [] });
+  assert.match(none, /To do A matching trigger starts a scheduled or forge job/);
+  assert.match(none, /Optional Only label, comment, issue and pull request triggers need them/);
+  assert.ok(!none.includes("not known") && !none.includes("Not known"), "the control: a file that was read and holds none");
+});
+
+test("/triggers with neither a snapshot nor file views: the schedulers are unread, not unpublished", async () => {
+  const down = async () => { throw new Error("Valkey does not answer"); };
+  let got;
+  const data = await loadPageData("triggers", { kind: "all" }, { now: () => NOW, fleet: { snapshot: down }, triggerList: (snapshot) => { got = snapshot; return triggerListOf({ snapshot, now: NOW }); } });
+  assert.deepEqual(got, { schedulersUnread: true }, "the list reader is told, so it does not wait on Valkey a second time");
+  assert.equal(data.triggerList.schedulersUnread, true);
+  const words = wordsOf((await renderPage("triggers", { data, query: { kind: "all" }, session: { name: "ops", role: "operator" } })).html);
+  assert.ok(words.includes(SCHEDULERS_UNREAD_NO_RULES_TEXT));
+  assert.match(words, /Not known: Valkey could not be read, so no next fire can be shown\./);
+  assert.match(words, /Not known: the next fires could not be read\./);
+  assert.match(words, /The triggers file is not available; rule facts are unknown\./);
+  for (const said of ["No next fire is published", "The rules shown are the triggers file's"]) assert.ok(!words.includes(said), said);
+  // The same without a list reader, and with file views that throw.
+  for (const fleet of [{ snapshot: down }, { snapshot: down, fileViews: () => { throw new Error("EACCES"); } }]) assert.equal((await loadPageData("triggers", { kind: "all" }, { now: () => NOW, fleet })).triggerList.schedulersUnread, true);
+  // The control: a read snapshot that holds no scheduler says none is published.
+  const read = await loadPageData("triggers", { kind: "all" }, { now: () => NOW, fleet: { snapshot: async () => ({ ...fileViewsFixture(), schedulers: [] }) } });
+  assert.equal(read.triggerList.schedulersUnread, false);
+  const readWords = wordsOf((await renderPage("triggers", { data: read, query: { kind: "all" }, session: { name: "ops", role: "operator" } })).html);
+  assert.match(readWords, /No next fire is published\./);
+  assert.ok(!readWords.includes("Not known: Valkey could not be read"));
+});
+
+test("/triggers: a triggers file that does not exist holds no rules, counted 0; one that cannot be read or does not load is not available", async () => {
+  const NOT_AVAILABLE = "The triggers file is not available; rule facts are unknown.";
+  const list = (triggers) => triggerListOf({ snapshot: { ...fileViewsFixture(), schedulers: [], triggers }, now: NOW });
+  const page = async (triggers) => wordsOf((await renderPage("triggers", { data: { now: NOW, triggerList: list(triggers) }, query: { kind: "all" }, session: { name: "ops", role: "operator" } })).html);
+  const absent = list({ missing: true });
+  assert.deepEqual(absent.counts, { all: 0, schedule: 0, label: 0, comment: 0, pull_request: 0, issue: 0, watch: 0, spent: 0 });
+  assert.ok(absent.problems.includes(TRIGGERS_FILE_ABSENT_TEXT) && !absent.problems.includes(NOT_AVAILABLE));
+  assert.notEqual(absent.stats, null);
+  const absentWords = await page({ missing: true });
+  assert.ok(absentWords.includes(TRIGGERS_FILE_ABSENT_TEXT) && !absentWords.includes(NOT_AVAILABLE));
+  assert.match(absentWords, /All 0 /);
+  for (const unread of [{ unreadable: "EACCES" }, { unreadable: true }, { invalid: "not JSON" }, undefined, null]) {
+    const model = list(unread);
+    assert.ok(model.problems.includes(NOT_AVAILABLE) && !model.problems.includes(TRIGGERS_FILE_ABSENT_TEXT), JSON.stringify(unread));
+    assert.equal(model.counts.all, null, JSON.stringify(unread));
+    const words = await page(unread);
+    assert.ok(words.includes(NOT_AVAILABLE) && !words.includes(TRIGGERS_FILE_ABSENT_TEXT) && !/All 0 /.test(words), JSON.stringify(unread));
+  }
+  // A file that is there and holds none says neither.
+  const empty = list({ triggers: [] });
+  assert.ok(!empty.problems.includes(TRIGGERS_FILE_ABSENT_TEXT) && !empty.problems.includes(NOT_AVAILABLE));
+  assert.equal(empty.counts.all, 0);
+});
+
+test("quiet windows: a pause-windows file that does not exist holds none; one that cannot be read or does not load could not be read", async () => {
+  const dir = tempDir("pd-962-pause-");
+  assert.ok(dir.startsWith(tmpdir()), "a temp folder, checked before anything is written");
+  assert.deepEqual(readPauseWindows({ pauseWindowsPath: join(dir, "none.json") }), { missing: true });
+  for (const none of [undefined, null, ""]) assert.deepEqual(readPauseWindows({ pauseWindowsPath: none }), { missing: true }, "no path is no file, not a read that failed");
+  mkdirSync(join(dir, "folder.json"));
+  assert.deepEqual(readPauseWindows({ pauseWindowsPath: join(dir, "folder.json") }), { unreadable: "EISDIR" });
+  const denied = { readFileSync: () => { throw Object.assign(new Error("denied"), { code: "EACCES" }); } };
+  assert.deepEqual(readPauseWindows({ pauseWindowsPath: join(dir, "p.json"), fs: denied }), { unreadable: "EACCES" });
+  writeFileSync(join(dir, "bad.json"), "{");
+  assert.ok(typeof readPauseWindows({ pauseWindowsPath: join(dir, "bad.json") }).invalid === "string");
+  writeFileSync(join(dir, "ok.json"), JSON.stringify({ version: 1, windows: [] }));
+  assert.deepEqual(readPauseWindows({ pauseWindowsPath: join(dir, "ok.json") }), { windows: [] });
+  // The configuration card's sentence follows the same split.
+  assert.equal(fileTrouble({ missing: true }, "pause-windows file"), "The pause-windows file does not exist.");
+  assert.equal(fileTrouble({ unreadable: "EISDIR" }, "pause-windows file"), "The pause-windows file cannot be read (EISDIR).");
+
+  const SAID = "Quiet windows could not be read";
+  const list = (pauseWindows) => triggerListOf({ snapshot: { ...fileViewsFixture(), schedulers: [], pauseWindows }, now: NOW });
+  const page = async (pauseWindows) => wordsOf((await renderPage("triggers", { data: { now: NOW, triggerList: list(pauseWindows) }, query: { kind: "all" }, session: { name: "ops", role: "operator" } })).html);
+  for (const absent of [{ missing: true }, { windows: [] }]) {
+    const model = list(absent);
+    assert.deepEqual([model.week.quietUnknown, model.week.quiet, model.problems.some((p) => p.includes(SAID))], [false, [], false], JSON.stringify(absent));
+    assert.ok(!(await page(absent)).includes(SAID), JSON.stringify(absent));
+  }
+  for (const unread of [{ unreadable: "EACCES" }, { unreadable: true }, { invalid: "bad zone" }, undefined, null]) {
+    const model = list(unread);
+    assert.deepEqual([model.week.quietUnknown, model.problems.includes("Quiet windows could not be read; bands are unknown.")], [true, true], JSON.stringify(unread));
+    assert.ok((await page(unread)).includes("Quiet windows could not be read; no absence of bands proves they are off."), JSON.stringify(unread));
+  }
+});
+
+test("/fleet/host: no capacity history only where the registry and the mirror answered and name no such host; could not be read of every other report", async () => {
+  const snapshot = { queue: {}, hostBudgets: [], doctor: { hosts: [], more: 0 } };
+  const window = { fromMs: NOW - 7 * 24 * 3600_000, toMs: NOW, bucketMs: 3600_000 };
+  const draw = async (hostCapacity) => wordsOf((await renderPage("host", { query: { name: "build3" }, session: { name: "ops", role: "operator" }, data: { now: NOW, snapshot, hostCapacity }, theme: null })).html);
+  const none = await draw({ window, hosts: [], coverage: [], sourcesRead: true });
+  assert.ok(none.includes(HOST_CAPACITY_WORDS.none) && !none.includes(HOST_CAPACITY_WORDS.unread));
+  const golden = wordsOf(await FLEET_DRAW["host-capacity-missing.operator"]());
+  assert.ok(golden.includes(HOST_CAPACITY_WORDS.none) && !golden.includes(HOST_CAPACITY_WORDS.unread));
+  for (const unread of [null, undefined, { unreachable: "the capacity report could not be read (timeout)" }, { unreachable: "no report", hosts: [], sourcesRead: true }, { window, sourcesRead: true }, { window, hosts: [], coverage: [] }, { window, hosts: [], coverage: [], sourcesRead: false }, { window, hosts: { length: 0 }, sourcesRead: true }]) {
+    const words = await draw(unread);
+    assert.ok(words.includes(HOST_CAPACITY_WORDS.unread) && !words.includes(HOST_CAPACITY_WORDS.none), JSON.stringify(unread));
+  }
+  // Through the page's own load: a reader that throws is a report that was not read.
+  const load = async (hostCapacity) => { const data = await loadPageData("host", { name: "build3" }, { now: () => NOW, fleet: { snapshot: async () => snapshot }, hostCapacity }); return wordsOf((await renderPage("host", { query: { name: "build3" }, session: { name: "ops", role: "operator" }, data, theme: null })).html); };
+  assert.ok((await load(async () => { throw new Error("down"); })).includes(HOST_CAPACITY_WORDS.unread));
+  assert.ok((await load(async () => ({ window, hosts: [], coverage: [], sourcesRead: true }))).includes(HOST_CAPACITY_WORDS.none));
+});
+
+test("/fleet/host over the real capacity read: a Valkey that does not answer still gives a report, and that report is not a host with no history", async () => {
+  // The reader's own code over a client that never answers, as a frozen Valkey leaves it: it does not answer
+  // `{ unreachable }`, it builds the report from this host's files and names no host.
+  const logs = tempDir("pd-962-capacity-");
+  assert.ok(logs.startsWith(tmpdir()));
+  const client = (answer) => () => new Proxy({}, { get: (_, key) => (key === "on" || key === "disconnect" ? () => {} : key === "then" ? undefined : () => answer()) });
+  const host = (redisFn) => assembleHostCapacity({ valkeyUrl: "redis://127.0.0.1:1" }, "build3", NOW, { env: { PI_LOGS_DIR: logs }, readCapacityFn: (args) => readCapacity({ ...args, redisFn, timeoutMs: 60 }) });
+  const page = async (hostCapacity) => { const data = await loadPageData("host", { name: "build3" }, { now: () => NOW, fleet: { snapshot: async () => ({ queue: {}, hostBudgets: [], doctor: { hosts: [], more: 0 } }) }, hostCapacity: async () => hostCapacity }); return wordsOf((await renderPage("host", { query: { name: "build3" }, session: { name: "ops", role: "operator" }, data, theme: null })).html); };
+  const frozen = await host(client(() => new Promise(() => {})));
+  assert.deepEqual([frozen.unreachable, frozen.hosts, frozen.sourcesRead], [undefined, [], false], "a report, with no host, that says its sources were not read");
+  assert.ok(frozen.coverage.some((line) => /run mirror unreachable \(timeout\)/.test(line) && /host registry unreadable/.test(line)));
+  const frozenWords = await page(frozen);
+  assert.ok(frozenWords.includes(HOST_CAPACITY_WORDS.unread) && !frozenWords.includes(HOST_CAPACITY_WORDS.none));
+  // One of the two unread is enough: the registry answered an empty set, the mirror's index did not answer a list.
+  const half = await host(client(() => Promise.resolve(null)));
+  assert.equal(half.sourcesRead, false);
+  assert.ok((await page(half)).includes(HOST_CAPACITY_WORDS.unread));
+  // The control: a Valkey that answers, holding no host and no mirror. The host has no history here.
+  const read = await host(client(() => Promise.resolve([])));
+  assert.deepEqual([read.hosts, read.sourcesRead], [[], true]);
+  const readWords = await page(read);
+  assert.ok(readWords.includes(HOST_CAPACITY_WORDS.none) && !readWords.includes(HOST_CAPACITY_WORDS.unread));
+  // The reader names what it could not ask; the insights page's view does not carry the mark unless asked.
+  assert.deepEqual((await readCapacity({ url: "redis://127.0.0.1:1", env: { PI_LOGS_DIR: logs }, now: () => NOW, redisFn: client(() => new Promise(() => {})), timeoutMs: 60 })).unread, ["registry", "mirror"]);
+  assert.deepEqual((await readCapacity({ url: "not a url", env: { PI_LOGS_DIR: logs }, now: () => NOW })).unread, ["registry", "mirror"]);
+  assert.ok(!Object.hasOwn(await assembleCapacityView({ valkeyUrl: "redis://127.0.0.1:1" }, "7d", NOW, { env: { PI_LOGS_DIR: logs }, readCapacityFn: (args) => readCapacity({ ...args, redisFn: client(() => Promise.resolve([])), timeoutMs: 60 }) }), "sourcesRead"));
+});
+
+test("/runs/sandboxes: New sandbox is not offered where the sandbox report was not read, and is where it was", async () => {
+  const button = '<a class="btn" href="/runs/sandboxes#p-sb-new">New sandbox</a>';
+  for (const state of ["sandboxes-no-snapshot.operator", "sandboxes-unavailable.operator"]) assert.ok(!(await SANDBOX_DRAW[state]()).includes("New sandbox"), state);
+  for (const state of ["sandboxes-populated.operator", "sandboxes-empty.operator"]) assert.ok((await SANDBOX_DRAW[state]()).includes(button), `${state}: the control`);
 });

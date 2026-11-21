@@ -265,9 +265,22 @@ test("first run: eight steps in doctor's order, each state a status the kit draw
 test("first run says a triggers file it could not read, and no step reads that as a deployment with no trigger", () => {
   const step = (triggers) => firstRunState(firstRun({ triggers })).steps.find((s) => s.id === "trigger");
   const unread = step({ unreadable: "EACCES" });
-  assert.equal(unread.state, "not-yet");
+  // Not known, never "not yet": that would say a read showed no trigger (issue #962).
+  assert.deepEqual([unread.state, unread.unread], ["check", true]);
   assert.deepEqual(unread.sentence, ["The triggers file could not be read here (EACCES), so this cannot say which triggers it holds."]);
-  assert.equal(step({ triggers: [] }).state, "to-do", "the control: a file holding none");
+  // The forge step with it: whether a trigger needs forge credentials is not known either, never "optional".
+  const st = firstRunState(firstRun({ triggers: { unreadable: "EACCES" } }));
+  const forge = st.steps.find((s) => s.id === "forge");
+  assert.deepEqual([forge.state, forge.unread], ["check", true]);
+  assert.deepEqual(forge.sentence, ["The triggers file was not read, so nothing here says whether a trigger needs forge credentials."]);
+  assert.equal(st.unknown, 2);
+  // The controls: a file that was read keeps what the read showed.
+  const none = firstRunState(firstRun({ triggers: { triggers: [] } }));
+  assert.equal(none.steps.find((s) => s.id === "trigger").state, "to-do", "a file holding none");
+  assert.deepEqual([none.steps.find((s) => s.id === "forge").state, none.steps.find((s) => s.id === "forge").unread], ["optional", undefined]);
+  assert.equal(none.unknown, 0);
+  const missing = firstRunState(firstRun({ triggers: { missing: true } }));
+  assert.deepEqual(missing.steps.filter((s) => ["trigger", "forge"].includes(s.id)).map((s) => [s.state, s.unread]), [["to-do", undefined], ["optional", undefined]], "a file that is not there");
 });
 
 test("first run with no snapshot: what Valkey alone says is not known, the trigger step is the files', and it never applies", () => {
@@ -456,9 +469,9 @@ test("first run: a file that cannot be read says so to whoever reads it, with th
   const read = readTriggers({ triggersPath });
   const said = (triggers) => stepOf(firstRunState(firstRun({ triggers })), "trigger");
   assert.deepEqual(said(read).sentence, ["The triggers file could not be read here (EISDIR), so this cannot say which triggers it holds."]);
-  assert.equal(said(read).state, "not-yet");
+  assert.deepEqual([said(read).state, said(read).unread], ["check", true]);
   assert.deepEqual(said(agentReadProjection(read)).sentence, ["The triggers file could not be read here, so this cannot say which triggers it holds."]);
-  assert.equal(said(agentReadProjection(read)).state, "not-yet", "an agent's copy, which asked for a first trigger while the projection dropped the code");
+  assert.deepEqual([said(agentReadProjection(read)).state, said(agentReadProjection(read)).unread], ["check", true], "an agent's copy, which asked for a first trigger while the projection dropped the code");
 });
 
 test("first run: a trigger file that does not load is not yet; one trigger is ready", () => {

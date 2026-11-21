@@ -2748,6 +2748,8 @@ function targetColored(t: any, styler: any): string {
 function pauseLines(pauseWindows: any, inner: number, styler: any, fetchedAt?: number): { count: number; lines: string[] } {
   const lines: string[] = [];
   if (pauseWindows && pauseWindows.missing) { lines.push(styler.cell("(no pause windows · w to manage)", inner, { color: "dim" })); return { count: 0, lines }; }
+  // Issue #962: a file that is there and cannot be read is not one with no windows in it.
+  if (pauseWindows && pauseWindows.unreadable) { lines.push(styler.cell(`(pause-windows file cannot be read${typeof pauseWindows.unreadable === "string" ? `: ${pauseWindows.unreadable}` : ""})`, inner, { color: "error" })); return { count: 0, lines }; }
   if (pauseWindows && pauseWindows.invalid) { lines.push(styler.cell(`(pause-windows file invalid: ${pauseWindows.invalid})`, inner, { color: "error" })); return { count: 0, lines }; }
   const list = (pauseWindows && pauseWindows.windows) ?? [];
   if (list.length === 0) { lines.push(styler.cell("(no pause windows · w to manage)", inner, { color: "dim" })); return { count: 0, lines }; }
@@ -2775,6 +2777,7 @@ function pauseRow(w: any, now: number, inner: number, styler: any): string {
 function limitLines(scopedLimits: any, scopedBudget: any, inner: number, styler: any, projects: any = null, dollars: any = null): { count: number; lines: string[] } {
   const lines: string[] = [];
   if (scopedLimits && scopedLimits.missing) { lines.push(styler.cell("(no scoped limits · m to manage)", inner, { color: "dim" })); return { count: 0, lines }; }
+  if (scopedLimits && scopedLimits.unreadable) { lines.push(styler.cell(`(scoped-limits file cannot be read${typeof scopedLimits.unreadable === "string" ? `: ${scopedLimits.unreadable}` : ""})`, inner, { color: "error" })); return { count: 0, lines }; }
   if (scopedLimits && scopedLimits.invalid) { lines.push(styler.cell(`(scoped-limits file invalid: ${scopedLimits.invalid})`, inner, { color: "error" })); return { count: 0, lines }; }
   const list = (scopedLimits && scopedLimits.limits) ?? [];
   if (list.length === 0) { lines.push(styler.cell("(no scoped limits · m to manage)", inner, { color: "dim" })); return { count: 0, lines }; }

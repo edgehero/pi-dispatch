@@ -141,6 +141,10 @@ function statsOf(records, weekStart, now, incomplete, subscriptions, pricing) {
 
 /** Said once on the page where the fleet's Valkey was not read: the rules below are the files', the schedule facts unknown. */
 export const SCHEDULERS_UNREAD_TEXT = "Valkey could not be read: next fires, owning hosts and stall counts are not known. The rules shown are the triggers file's.";
+/** A triggers file that does not exist: read, and holding no rule. */
+export const TRIGGERS_FILE_ABSENT_TEXT = "The triggers file does not exist, so there are no rules.";
+/** The same where the file views are missing too (issue #962): there is no rule to call the file's. */
+export const SCHEDULERS_UNREAD_NO_RULES_TEXT = "Valkey could not be read: next fires, owning hosts and stall counts are not known.";
 
 /**
  * Explicit schema shared with the page: rows/groups, unfiltered counts, next fire, typed weekly spend, rolling
@@ -159,9 +163,13 @@ export function triggerListOf({ snapshot = null, records = null, coverage = {}, 
   const view = snapshot?.triggers;
   const problems = ["History uses saved row, type and forge, or a cron id. Editing or renumbering rules can associate runs from an older configuration; these are not stable rule identities."];
   const schedulersUnread = snapshot?.schedulersUnread === true;
-  if (!Array.isArray(view?.triggers)) problems.push("The triggers file is not available; rule facts are unknown.");
-  if (schedulersUnread) problems.push(SCHEDULERS_UNREAD_TEXT);
-  const raw = (view?.triggers ?? []).filter((t) => TYPES.has(t?.type) && Number.isSafeInteger(t?.index) && t.index >= 0);
+  // Issue #962: a triggers file that does not exist holds no rule. That is a read's answer, counted as 0 and said in
+  // its own sentence; "not available" stays for a file that was not read, cannot be read or does not load.
+  const fileRules = Array.isArray(view?.triggers) ? view.triggers : view?.missing === true ? [] : null;
+  if (fileRules === null) problems.push("The triggers file is not available; rule facts are unknown.");
+  else if (view?.missing === true) problems.push(TRIGGERS_FILE_ABSENT_TEXT);
+  if (schedulersUnread) problems.push(Array.isArray(view?.triggers) ? SCHEDULERS_UNREAD_TEXT : SCHEDULERS_UNREAD_NO_RULES_TEXT);
+  const raw = (fileRules ?? []).filter((t) => TYPES.has(t?.type) && Number.isSafeInteger(t?.index) && t.index >= 0);
   const rules = raw.map(ruleOf);
   if (Number.isSafeInteger(view?.count) && view.count > (view?.triggers?.length ?? 0)) problems.push("Some file rows cannot be displayed; rule counts are incomplete.");
   // A newer release's record is not counted (issue #761): which trigger it ran and what it cost are past its stable core.
@@ -193,9 +201,9 @@ export function triggerListOf({ snapshot = null, records = null, coverage = {}, 
       nextFire: trigger.type === "cron" && schedulersUnread ? { at: null, health: "unknown", stalls: null, stallLimit, hosts: [], zone: null, problem: null, unread: true } : trigger.type === "cron" ? { at, health: stalls !== null && stalls >= stallLimit ? "stalled" : at === null ? "unknown" : at < now ? "overdue" : "on-time", stalls, stallLimit, hosts: scheduleConflict || schedulers.length === 0 ? [] : hosts, zone: scheduleConflict || schedulers.length === 0 ? null : zone, problem: schedulerProblem } : null,
       chips: chipsOf(trigger, (snapshot?.stagedPackages?.packages?.length ?? 0) > 0), unknown: [...(trigger.displayCut ? ["Some selector or option names are omitted from this bounded display."] : []), ...(own === null ? ["History unavailable"] : []), ...(trigger.type === "cron" && at === null && !schedulersUnread ? [schedulerProblem ?? "Scheduler next fire unavailable"] : [])] };
   });
-  const counts = { all: rows.length, schedule: rows.filter((r) => r.trigger.type === "cron").length, label: 0, comment: 0, pull_request: 0, issue: 0, watch: (view?.triggers ?? []).filter((t) => t.type === "watch").length, spent: rows.filter((r) => r.trigger.disarmed).length };
+  const counts = { all: rows.length, schedule: rows.filter((r) => r.trigger.type === "cron").length, label: 0, comment: 0, pull_request: 0, issue: 0, watch: (fileRules ?? []).filter((t) => t.type === "watch").length, spent: rows.filter((r) => r.trigger.disarmed).length };
   for (const type of ["label", "comment", "pull_request", "issue"]) counts[type] = rows.filter((r) => r.trigger.type === type).length;
-  if (!Array.isArray(view?.triggers)) for (const key of Object.keys(counts)) counts[key] = null;
+  if (fileRules === null) for (const key of Object.keys(counts)) counts[key] = null;
   const groups = [...new Set(rows.map((r) => r.group))].sort((a, b) => a === "schedule" ? -1 : b === "schedule" ? 1 : a.localeCompare(b)).map((key) => ({ key, rows: rows.filter((r) => r.group === key) }));
   const future = rows.filter((r) => r.nextFire?.at !== null && r.nextFire?.at >= now).sort((a, b) => a.nextFire.at - b.nextFire.at);
   const next = future[0] ? { index: future[0].index, id: future[0].trigger.id, at: future[0].nextFire.at } : null;
@@ -211,12 +219,14 @@ export function triggerListOf({ snapshot = null, records = null, coverage = {}, 
     // An unread zone is not an unpublished one: the lane says why it projects nothing.
     return { index: r.index, id: r.trigger.id, zone: r.nextFire.zone, occurrences: [...shownObserved, ...shownProjected], incomplete: projected.incomplete || incomplete || cut, problem: (r.nextFire.unread && r.nextFire.zone === null ? "The owning host's timezone could not be read; further schedule times are unknown." : projected.problem) ?? (cut ? "Only a bounded selection of recorded runs and projected ticks is shown." : null) };
   });
-  const windows = Array.isArray(snapshot?.pauseWindows?.windows) ? snapshot.pauseWindows.windows : null;
+  // A pause-windows file that does not exist holds no window (issue #962): that is a read's answer, and "could not be
+  // read" is said only of a file that was not read, cannot be read or does not load.
+  const windows = Array.isArray(snapshot?.pauseWindows?.windows) ? snapshot.pauseWindows.windows : snapshot?.pauseWindows?.missing === true ? [] : null;
   const formatters = new Map();
   const quiet = (windows ?? []).slice(0, TRIGGER_LIST_LIMITS.quietWindows).map((window) => ({ scope: window.scope, affects: window.scope === "*" ? "all" : window.scope.startsWith("/") || /^[A-Za-z]:[\\/]/.test(window.scope) ? "local" : "forge", ...quietIntervals(window, { start: dayStart, end, formatters }) }));
   if (windows === null) problems.push("Quiet windows could not be read; bands are unknown.");
   if ((windows?.length ?? 0) > TRIGGER_LIST_LIMITS.quietWindows) problems.push("Only the first quiet windows are projected.");
   if (scheduled.length > TRIGGER_LIST_LIMITS.lanes) problems.push("Only the first schedule lanes are projected.");
-  const attributed = Array.isArray(view?.triggers) ? kept?.filter((r) => rules.some((t) => recordMatchesTrigger(r, t))) ?? null : null;
+  const attributed = fileRules !== null ? kept?.filter((r) => rules.some((t) => recordMatchesTrigger(r, t))) ?? null : null;
   return { now, rows, groups, counts, next, weekStart, stats: statsOf(attributed, weekStart, now, incomplete, subscriptions, pricing), week: { start: dayStart, end, zone: "UTC", label: "Next 7 days, UTC", lanes, quiet, quietUnknown: windows === null, quietCut: Math.max(0, (windows?.length ?? 0) - TRIGGER_LIST_LIMITS.quietWindows), lanesCut: Math.max(0, scheduled.length - TRIGGER_LIST_LIMITS.lanes) }, coverage: { complete: !incomplete, records: kept?.length ?? null }, problems, schedulersUnread };
 }

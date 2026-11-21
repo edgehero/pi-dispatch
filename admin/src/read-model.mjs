@@ -1094,16 +1094,16 @@ export { estimateReserve } from "@edgehero/pi-dispatch/reserve-estimate";
 
 /**
  * Read + validate the pause-windows file for display (REQ-SCOPED-PAUSE-WINDOWS). Returns `{ windows }` of
- * normalized entries (with `fromMin`/`toMin`), or `{ missing }` / `{ invalid }` so the viewer degrades rather
- * than throwing. Uses the SHARED `parsePauseWindows`, so the admin and the worker cannot drift on the schema.
+ * normalized entries (with `fromMin`/`toMin`), or `{ missing }` / `{ unreadable }` / `{ invalid }` so the viewer
+ * degrades rather than throwing. Uses the SHARED `parsePauseWindows`, so the admin and the worker cannot drift on the
+ * schema. Only ENOENT is missing (issue #962, `readProjects`' shape): a file that is there and cannot be read is
+ * `{ unreadable: <code> }`, so a page says "no quiet windows" only of a file that does not exist.
  */
 export function readPauseWindows({ pauseWindowsPath, fs = nodeFs }) {
-  let text;
-  try {
-    text = fs.readFileSync(pauseWindowsPath, "utf8");
-  } catch {
-    return { missing: true };
-  }
+  // No path is no file, as `readTriggers` reads it, not a read that failed.
+  const text = typeof pauseWindowsPath === "string" && pauseWindowsPath !== "" ? fileSnapshot(fs, pauseWindowsPath) : null;
+  if (text === null) return { missing: true };
+  if (isUnreadable(text)) return { unreadable: unreadableCode(text) };
   try {
     return { windows: parsePauseWindows(text, pauseWindowsPath) };
   } catch (e) {
@@ -1199,17 +1199,17 @@ export function writePauseWindows({ pauseWindowsPath, mutate, expect = null, fs 
 
 /**
  * Read + validate the scoped-limits file for display (INT-SCOPED-LIMITS-FILE-CONTRACT). Returns
- * `{ limits }` of normalized rows, or `{ missing }` / `{ invalid }` so the viewer degrades — the
+ * `{ limits }` of normalized rows, or `{ missing }` / `{ unreadable }` / `{ invalid }` so the viewer degrades: the
  * `{ invalid }` case includes a file written by a newer pi-dispatch (fail-loud, naming both versions).
  * Uses the SHARED `parseScopedLimits`, so the admin and the worker cannot drift on the schema.
  */
 export function readScopedLimits({ scopedLimitsPath, fs = nodeFs }) {
-  let text;
-  try {
-    text = fs.readFileSync(scopedLimitsPath, "utf8");
-  } catch {
-    return { missing: true };
-  }
+  // Only ENOENT is missing (issue #962, `readProjects`' shape): a file that is there and cannot be read is
+  // `{ unreadable: <code> }`, so a page neither counts it as holding no limit nor says it does not exist. No path is no
+  // file. A caller that reads `limits` alone gets none either way, as before.
+  const text = typeof scopedLimitsPath === "string" && scopedLimitsPath !== "" ? fileSnapshot(fs, scopedLimitsPath) : null;
+  if (text === null) return { missing: true };
+  if (isUnreadable(text)) return { unreadable: unreadableCode(text) };
   try {
     return { limits: parseScopedLimits(text, scopedLimitsPath) };
   } catch (e) {
@@ -2217,7 +2217,7 @@ const HELD_HYDRATE_MAX = 200;
  * The capacity report for `dispatch_capacity` (issue #599, phase 2, INT-CAPACITY-REPORT): the CLI's read and the CLI's
  * function (`readCapacityRecords`, `computeCapacity`, `onlyHost`, `capacityText`), so the tool, `pi-dispatch capacity`
  * and doctor cannot disagree. READ-ONLY: the registry is read with `prune: false` and the mirror reader prunes nothing.
- * `{ report, text }`, or `{ error }` for a window it does not offer, a host the report does not have, or a retention or a
+ * `{ report, text, unread }` (`unread` names what did not answer, of "registry" and "mirror"), or `{ error }` for a window it does not offer, a host the report does not have, or a retention or a
  * mirror cap the worker would refuse. An unreachable Valkey is not an error: the report reads this host's files and says
  * why.
  *
@@ -2256,7 +2256,11 @@ export async function readCapacity({ url, env = process.env, window = "7d", host
     const report = computeCapacity({ records: read.records, live: fleet.hosts ?? [], windowStartMs: sinceMs, nowMs, bucketMs, coverage });
     const shown = host === undefined || host === null ? { report } : onlyHost(report, host);
     if (shown.unknown) return { error: `no host named ${JSON.stringify(host)} in the last ${window}${shown.unknown.length > 0 ? ` (hosts: ${shown.unknown.join(", ")})` : ""}` };
-    return { report: shown.report, text: capacityText(shown.report, { since: window }) };
+    // What the report could not ask (issue #962), as names and not only as the sentences of `coverage.reason`: a caller
+    // that would say "no such host in this window" must know whether the registry and the fleet's mirror answered. A
+    // deployment with no mirror ("off") was read: it has none.
+    const unread = [...(!redis || fleet.unreachable || !Array.isArray(fleet.hosts) ? ["registry"] : []), ...(!redis || read.mirrorState.startsWith("unreachable") ? ["mirror"] : [])];
+    return { report: shown.report, text: capacityText(shown.report, { since: window }), unread };
   } finally {
     try {
       redis?.disconnect?.();

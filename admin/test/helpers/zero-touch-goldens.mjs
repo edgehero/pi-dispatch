@@ -40,6 +40,8 @@ export const ZERO_TOUCH_DRAW = Object.freeze({
   "zero-touch-empty.viewer": () => draw({ role: "viewer", change: (r) => { r.projects = []; r.groups = []; r.fixes = []; r.totals = { runs: 0, touched: 0, rate: null, waitingHours: 0 }; r.causes = cs([0, 0, 0, 0, 0, 0]); r.trend = []; } }),
   "zero-touch-no-drafts.viewer": () => draw({ role: "viewer", change: (r) => { r.totals.draftAnswers = 0; } }),
   "zero-touch-unavailable.operator": () => draw({ raw: null }),
+  // Issue #962: a read that worked and found tracking not started, as the worker's report says it. Its computed zeros are not drawn.
+  "zero-touch-not-started.operator": () => draw({ change: (r) => { r.state = "not-started"; r.coverage = { requestedFromMs: NOW - 30 * DAY, fromMs: NOW, partial: true, reasons: ["touch-tracking-not-started"] }; r.projects = []; r.groups = []; r.fixes = []; r.totals = { runs: 0, touched: 0, rate: null, stopped: 0, waitingHours: 0, pending: 0, draftAnswers: 0 }; r.causes = cs([0, 0, 0, 0, 0, 0]); r.trend = []; r.touchedRunIds = []; r.ungroupedRunIds = []; } }),
   "zero-touch-partial.operator": () => draw({ query: "days=90", change: (r) => { r.windowDays = 90; r.coverage = { fromMs: NOW - 20 * DAY, partial: true, reasons: ["touch-tracking-started"] }; r.totals.deltaPoints = null; r.trend = r.trend.map((v, i) => ({ ...v, partial: i < 5 })); } }),
   "zero-touch-observing.operator": () => draw({ change: (r) => { r.grouping = { enabled: true, state: "pending", pending: 1, unassigned: 2 }; r.groups[0].name = null; r.fixes[0].partial = true; r.fixes[0].subsequentRuns = 0; } }),
   "zero-touch-missing-sources.operator": () => draw({ change: (r) => { r.grouping.state = "unavailable"; r.fixesPartial = true; r.groups = []; r.fixes = []; } }),

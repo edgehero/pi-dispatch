@@ -220,7 +220,7 @@ export function readLocalWindow(logsDir, { sinceMs, fs = { readdirSync, readFile
 
 /**
  * The records of the window `[sinceMs, nowMs]` from both sources, merged, and what each covers: `{ records, mirrorState,
- * coverage }`,
+ * localAbsent, coverage }`,
  * `coverage` being `{ source, reason, localHost, localHosts, local: { fromMs } | null, mirror: { fromMs, truncated,
  * hosts } | null, skipped }` as `computeCapacity` reads it, plus `newerSkipped` when records from a newer pi-dispatch
  * were left out (the reason then names how many). `redis` may be null (no Valkey to ask); `noMirrorReason` then
@@ -254,6 +254,10 @@ export async function readCapacityRecords({ redis = null, logsDir, sinceMs, nowM
 		records: mergeRuns(local.records, mirror.records, { limit: Infinity }),
 		// "ok", "off" or "unreachable (<reason>)": a caller that named this Valkey fails on the last.
 		mirrorState: mirror.state,
+		// A logs directory that does not exist (ENOENT, and only that), with the window its files would have covered:
+		// `coverage.local` stays null for it, as the capacity report reads it, and a caller for whom an absent folder is
+		// a read that showed no run (the Zero touch report, issue #962) takes it from here. Null when the folder is there.
+		localAbsent: local.absent ? { fromMs: localFromMs } : null,
 		coverage: {
 			source: mirrored ? (localRead ? "mirror+local" : "mirror") : "local",
 			reason: reasons.length > 0 ? reasons.join("; ") : null,
