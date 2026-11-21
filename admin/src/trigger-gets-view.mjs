@@ -37,6 +37,8 @@ export const TRIGGER_GETS_WORDS = Object.freeze({
   repositoryPart: "The repository’s part is decided at its base commit.",
   noHost: "No live host says it can run this trigger’s jobs.",
   noLiveList: "No live host is listed just now, so these are the hosts that last published, running or not.",
+  liveListUnread: "The live hosts could not be read, so these are the hosts that last published, running or not.",
+  noHostLiveUnread: "The live hosts could not be read, and no host’s doctor run is published, so which hosts can run this trigger’s jobs is not known.",
   hostsUnread: "The hosts’ doctor runs could not be read, so each reads unknown, never the same.",
   repositoryExtensions: ".pi/extensions at the base commit, merge-gated. Changed in the repository, not here.",
   extensionSwitch: "Off leaves it out of these jobs by name: a staged package with its tools, skills, prompt templates and themes, an overlay extension before its code runs. A host without that name loads nothing for it.",
@@ -275,13 +277,13 @@ function hostPills(rows, trigger, liveList, fileVersion) {
 }
 
 /** How old each host's answer is, and why the rest have none. A sentence per kind, so a fleet's worth of hosts stays one line. */
-function hostsNote(rows, trigger, hostLoads, liveList, fileVersion) {
+function hostsNote(rows, trigger, hostLoads, liveList, fileVersion, liveHostsUnread = false) {
   if (hostLoads?.unreachable) return [TRIGGER_GETS_WORDS.hostsUnread];
   const by = (why) => rows.filter((row) => cannotSay(row, trigger, fileVersion) === why).map((row) => row.name);
   const known = rows.filter((row) => cannotSay(row, trigger, fileVersion) === null);
   const parts = known.length > 0 ? ["What each host’s last doctor run published: ", ...known.flatMap((row, at) => [...(at > 0 ? [", "] : []), `${row.name} at `, time(row.at)]), ". "] : [];
   const sentences = [
-    liveList ? null : TRIGGER_GETS_WORDS.noLiveList,
+    liveList ? null : liveHostsUnread ? TRIGGER_GETS_WORDS.liveListUnread : TRIGGER_GETS_WORDS.noLiveList,
     by("holds").length > 0 ? `${listed(by("holds"))} ${by("holds").length === 1 ? "reads this file only below version" : "read this file only below version"} ${fileVersion}, so ${by("holds").length === 1 ? "it holds this file’s jobs until it is upgraded" : "they hold this file’s jobs until they are upgraded"}.` : null,
     by("noVersion").length > 0 ? `Unknown, because nothing says which version of this file ${by("noVersion").length === 1 ? "it reads" : "they read"}: ${listed(by("noVersion"))}.` : null,
     by("absent").length > 0 ? `${listed(by("absent"))} ${by("absent").length === 1 ? "has" : "have"} published none, so ${by("absent").length === 1 ? "it reads" : "they read"} unknown, never the same.` : null,
@@ -599,10 +601,10 @@ function imageRow({ trigger, rows }) {
 
 /**
  * Everything the card says, for one trigger. `liveHosts`: the names of the live hosts able to run it, or null where no live host is
- * known, and then what the hosts last published says who they are. `records`: this trigger's runs, newest first; `historyUnread` says the
+ * known, and then what the hosts last published says who they are; `liveHostsUnread` says that is because the live hosts could not be read (issue #962), which is not "none is listed". `records`: this trigger's runs, newest first; `historyUnread` says the
  * read failed, which is not a trigger with no runs. `fileRefused`: the worker's own parser refuses the file these rows are read from. `fileVersion`: the version that file says it is.
  */
-export function triggerGetsOf({ trigger, records = [], historyUnread = false, hostLoads = null, liveHosts = null, defaults = {}, editor = null, modelChoices = [], overlayServers = [], fileRefused = false, fileVersion = 1 }) {
+export function triggerGetsOf({ trigger, records = [], historyUnread = false, hostLoads = null, liveHosts = null, liveHostsUnread = false, defaults = {}, editor = null, modelChoices = [], overlayServers = [], fileRefused = false, fileVersion = 1 }) {
   // A watch rule's job loads nothing a host publishes (`watch-runtime.mjs`'s `packages: false`, `run-container.mjs`'s closed overlay, the runner's `watchReadOnly` loader): no pill and no doctor's answer can say what it gets.
   const watch = trigger.type === "watch";
   const liveList = liveHosts !== null;
@@ -624,7 +626,7 @@ export function triggerGetsOf({ trigger, records = [], historyUnread = false, ho
     fileRefused,
     // Of a file the worker refuses, a comparison of what its jobs get compares nothing a job gets: the file may be fixed any way, and a service may be running its last good one.
     pills: fileRefused ? rows.map((row) => ({ name: row.name, tone: "unknown", icon: "minus", word: "unknown" })) : hostPills(rows, trigger, liveList, fileVersion),
-    hostsNote: rows.length === 0 ? (hostLoads?.unreachable ? [TRIGGER_GETS_WORDS.hostsUnread] : [TRIGGER_GETS_WORDS.noHost]) : hostsNote(rows, trigger, hostLoads, liveList, fileVersion),
+    hostsNote: rows.length === 0 ? (hostLoads?.unreachable ? [TRIGGER_GETS_WORDS.hostsUnread] : !liveList && liveHostsUnread ? [TRIGGER_GETS_WORDS.noHostLiveUnread] : [TRIGGER_GETS_WORDS.noHost]) : hostsNote(rows, trigger, hostLoads, liveList, fileVersion, liveHostsUnread),
     quote,
     problems: quoted?.problems ?? {},
     record: quoted?.record ?? null,

@@ -4,6 +4,8 @@ import { triggerRefusalExamples } from "../../src/console/panels/trigger.mjs";
 import { html } from "../../src/console/html.mjs";
 import { NOW } from "../../../launch/fixture-deployment.mjs";
 import { loadPageData, renderPage } from "../../src/console/pages.mjs";
+import { normalizeTriggerForDisplay } from "../../src/read-model.mjs";
+import { noSnapshotFleet } from "./no-snapshot.mjs";
 const cron = {
   type: "cron",
   index: 0,
@@ -70,7 +72,30 @@ export async function triggerGolden({
     await renderPage(name, { query, session: { name: "ops", role }, data })
   ).html;
 }
+/**
+ * Issue #962: a trigger's page over a Valkey that does not answer, the snapshot and the hosts' doctor runs alike. The
+ * row and its bundle come from the files; what only Valkey holds is said as not read, never as none.
+ */
+async function triggerNoSnapshot() {
+  const entry = { on: { type: "cron", id: "nightly", pattern: "0 3 * * *" }, run: { kind: "local", folder: "/srv/shop", flow: "tidy", task: "tidy up" } };
+  const text = `${JSON.stringify({ triggers: [entry], secretBundles: { shop: { profile: "shop", ref: "shop/env", project: "shop" } } }, null, 2)}\n`;
+  const down = async () => { throw new Error("Valkey does not answer"); };
+  const fileViews = () => ({
+    triggers: { path: "/deployment/triggers.json", count: 1, triggers: [{ ...normalizeTriggerForDisplay(entry), index: 0 }], secretBundles: [{ id: "shop", profile: "shop", project: "shop", forkReviews: false, endpoints: [] }] },
+    projects: { projects: [{ id: "shop", members: ["/srv/shop"] }] },
+    settings: { path: "/deployment/settings.json", overlay: {} },
+    schedulerStallMax: 2,
+  });
+  const query = { index: 0 };
+  const data = await loadPageData("trigger", query, {
+    now: () => NOW, env: {}, fleet: noSnapshotFleet({ fileViews }), hostLoads: down,
+    paths: { triggersPath: "/deployment/triggers.json" }, fs: { readFileSync: () => text },
+    triggerEditor: () => ({ backends: [{ name: "local", serves: { liveTranscript: "yes", steering: "yes", recovery: "yes", sandboxShell: "yes" } }], forges: ["github"], flows: [{ name: "tidy", tier: "repository" }], defaults: { backend: "local", maxTurns: 30 } }),
+  }, { role: "operator" });
+  return (await renderPage("trigger", { query, session: { name: "ops", role: "operator" }, data })).html;
+}
 export const TRIGGER_DRAW = {
+  "trigger-no-snapshot.operator": () => triggerNoSnapshot(),
   "trigger-editor-no-webhook.operator": () => triggerGolden({ editor: true, forges: [] }),
   // Issue #879: the first GitHub trigger of a receiver that started without a GitHub route.
   "trigger-editor-github-restart.operator": () => triggerGolden({ editor: true, forges: ["github", "gitlab"], githubRestart: true }),

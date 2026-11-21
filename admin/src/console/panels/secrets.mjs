@@ -10,6 +10,24 @@ const cell = (body) => html`<span class="secret-cell">${body}</span>`;
 const code = (v) => html`<span class="code">${v}</span>`;
 const state = (text, failed = false, ok = false) => html`<span class="secret-state ${failed ? "tone-failed" : ok ? "tone-ok" : "tone-idle"}">${ui.icon(failed ? "failed" : ok ? "done" : "info", { size: "sm" })}<span>${text}</span></span>`;
 const unread = () => html`<p class="muted">The deployment could not be read. Reload to try again; secret declarations and their state are unknown.</p>`;
+/**
+ * Over a view drawn from the files and the `.env` alone (issue #962): the declarations are there, and what only Valkey
+ * holds is said as not known. No change is offered, as on every card drawn from the files (`FILES_ONLY_TEXT`).
+ */
+export const SECRETS_FILES_ONLY_TITLE = "What runs received and which hosts serve a profile are not known";
+export const SECRETS_FILES_ONLY_TEXT = "Valkey could not be read, so this shows what the settings overlay, the triggers file and the .env declare, and offers no change. Reload to try again.";
+/** In a row's place for a run fact where no run was read: never "no run in view". */
+export const SECRETS_RUN_UNREAD = "not known: the runs could not be read";
+/** Where a source of the list could not be read, so its count is not one: never "0". */
+export const SECRETS_COUNT_UNREAD = "not known";
+/** The profiles table with no row where a source was not read: `trouble` is `secretCountTrouble`'s phrase. */
+export const secretsProfilesUnreadText = (trouble) => `Not known: ${trouble}, so no profile in view is not none declared.`;
+/** In a row's Triggers or Projects cell where the file that says it was not read: never "none". */
+export const SECRETS_CELL_UNREAD = "not known";
+const filesOnly = (v) => v?.filesKnown === true && v.fleetKnown !== true;
+/** The view for a card's controls: none over the files alone. */
+const acting = (ctx, v) => (filesOnly(v) ? { ...ctx, readOnly: true } : ctx);
+const lastRun = (v) => html`<span class="muted">${v.fleetKnown === true ? "no run in view" : SECRETS_RUN_UNREAD}</span>`;
 const triggerLinks = (list, more = 0) => list.length ? html`${list.map((i, n) => html`${n ? ", " : ""}<a class="link" href="${`/config/trigger?index=${i}`}">${i + 1}</a>`)}${more ? ` and ${more} more` : null}` : "none";
 const remove = (kind, name, ctx, label = "Remove") => canAct(ctx) ? actForm(`secret-${kind}-remove`, { hidden: [["name", name]], label: html`${label}<span class="sr"> ${kind === "profile" ? "profile" : "bundle resolver"} ${name}</span>`, danger: true }) : null;
 
@@ -27,37 +45,43 @@ export function secretsHeadline(ctx) {
     ["unserved-", "profile no live host serves", "profiles no live host serves"],
   ];
   const summary = categories.map(([prefix, one, many]) => { const count = (v?.problems ?? []).filter((p) => p.key.startsWith(prefix)).length; return count ? `${count} ${count === 1 ? one : many}` : null; }).filter(Boolean).join(", ");
-  return html`Names and states only. ${!v?.available ? "Declarations and their state could not be read." : v.problems.length ? `${v.problems.length} ${v.problems.length === 1 ? "problem" : "problems"}: ${summary}.` : "No problem found in the facts this console can read."}`;
+  return html`Names and states only. ${!v?.filesKnown ? "Declarations and their state could not be read." : filesOnly(v) ? "Run and host facts could not be read. " : null}${!v?.filesKnown ? null : v.problems.length ? `${v.problems.length} ${v.problems.length === 1 ? "problem" : "problems"}: ${summary}.` : "No problem found in the facts this console can read."}`;
 }
 
 export function secretsProblems(ctx) {
   const v = viewOf(ctx);
-  if (!v?.available) return ui.banner({ status: "attention", title: "Secret declarations are unknown", body: unread(), block: true });
+  if (!v?.filesKnown) return ui.banner({ status: "attention", title: "Secret declarations are unknown", body: unread(), block: true });
+  const only = filesOnly(v) ? ui.banner({ status: "attention", title: SECRETS_FILES_ONLY_TITLE, body: SECRETS_FILES_ONLY_TEXT, block: true }) : null;
   const p = v.problems[0];
-  if (!p) return html``;
-  return ui.banner({ status: "failed", title: p.title, body: `${p.sentence} ${p.fix}`, actions: p.action ? remove(p.action.action === "secret-profile-remove" ? "profile" : "bundle", p.action.name, ctx, "Remove from the overlay") : null });
+  if (!p) return html`${only}`;
+  ctx = acting(ctx, v);
+  return html`${only}${ui.banner({ status: "failed", title: p.title, body: `${p.sentence} ${p.fix}`, actions: p.action ? remove(p.action.action === "secret-profile-remove" ? "profile" : "bundle", p.action.name, ctx, "Remove from the overlay") : null })}`;
 }
 
 export function secretsProfiles(ctx) {
   const v = viewOf(ctx);
-  if (!v?.available) return ui.card({ title: "Secret profiles", body: unread() });
+  if (!v?.filesKnown) return ui.card({ title: "Secret profiles", body: unread() });
+  ctx = acting(ctx, v);
+  // The list is the names of three sources: with one of them unread, what is drawn is a floor and none drawn is not none.
+  const trouble = v.countTrouble?.profiles ?? (v.settingsKnown && v.triggersKnown ? null : "a source could not be read");
   const rows = v.profiles.map((p) => ({ mark: p.refused ? "failed" : null, cells: [
     { html: code(p.name), id: true },
     { html: cell(html`${state(PROFILE_SOURCE_TEXT[p.source] ?? "Source unknown", p.source === "ambiguous")}${p.refused && !["ambiguous", "undeclared"].includes(p.source) && !["outside", "empty"].includes(p.roots) ? html`<small>Every secrets job is refused while a declaration does not parse or a name is declared twice.</small>` : null}`), wide: true },
     { html: state(p.roots === null ? p.source === "undeclared" ? "no declared resolver in view" : "not bounded (an env resolver)" : PROFILE_ROOTS_TEXT[p.roots] ?? "Roots judgement unknown", ["outside", "empty"].includes(p.roots), p.roots === "inside"), wide: true },
-    triggerLinks(p.triggers, p.triggersMore),
-    cell(html`${p.projects.map((id, n) => html`${n ? ", " : ""}<a class="link" href="${`/config/project?id=${encodeURIComponent(id)}`}">${id}</a>`)}${p.projectsMore ? ` and ${p.projectsMore} more` : null}${p.anyRepo ? html`<small>any (a webhook trigger)</small>` : p.projects.length ? null : "none in view"}`),
-    { html: cell(html`${p.last ? html`${state(p.last.outcome === "refused" ? `refused (${p.last.reason ?? "reason unknown"}${p.last.bundled ? "; profile or bundle" : ""})` : p.last.outcome === "resolved" ? "resolved" : "not reached, the run ended before a container", p.last.outcome === "refused", p.last.outcome === "resolved")}<small>${runLink(p.last.jobId, { pulse: true })} · ${timeHtml(Date.parse(p.last.at ?? ""))}</small>` : html`<span class="muted">no run in view</span>`}${p.refused ? p.cron.map((c) => html`<small class="secret-refusal">Trigger ${c.index + 1}${c.id ? ` (${c.id})` : ""}: ${c.at === null ? "next fire unknown" : html`next ${timeHtml(c.at)}`}; its run will be refused.</small>`) : null}`), wide: true },
+    p.triggers.length === 0 && !v.triggersKnown ? SECRETS_CELL_UNREAD : triggerLinks(p.triggers, p.triggersMore),
+    cell(html`${p.projects.map((id, n) => html`${n ? ", " : ""}<a class="link" href="${`/config/project?id=${encodeURIComponent(id)}`}">${id}</a>`)}${p.projectsMore ? ` and ${p.projectsMore} more` : null}${p.anyRepo ? html`<small>any (a webhook trigger)</small>` : p.projects.length ? null : !v.triggersKnown ? SECRETS_CELL_UNREAD : v.projectsKnown === false ? `not known: projects.json ${v.unread?.projects ?? "could not be read"}` : "none in view"}`),
+    { html: cell(html`${p.last ? html`${state(p.last.outcome === "refused" ? `refused (${p.last.reason ?? "reason unknown"}${p.last.bundled ? "; profile or bundle" : ""})` : p.last.outcome === "resolved" ? "resolved" : "not reached, the run ended before a container", p.last.outcome === "refused", p.last.outcome === "resolved")}<small>${runLink(p.last.jobId, { pulse: true })} · ${timeHtml(Date.parse(p.last.at ?? ""))}</small>` : lastRun(v)}${p.refused ? p.cron.map((c) => html`<small class="secret-refusal">Trigger ${c.index + 1}${c.id ? ` (${c.id})` : ""}: ${c.at === null ? "next fire unknown" : html`next ${timeHtml(c.at)}`}; its run will be refused.</small>`) : null}`), wide: true },
     { html: cell(profileHostsText(p, v.profileState).replace(/^served by: /, "")), wide: true },
     { html: p.inOverlay ? remove("profile", p.name, ctx) : html`<span class="faint">${p.source === "env" ? "in the .env" : p.source === "undeclared" ? "no declaration in view" : "source unknown"}</span>`, act: true },
   ] }));
-  const table = ui.tbl({ caption: "Secret profiles", heads: ["Profile", "Source", "Resolver roots", "Triggers", "Projects", "Last resolve", "Served by", { label: "Actions", l: null }], rows, stack: true, empty: "No secret profiles are declared or named by the triggers in view." });
-  return ui.card({ title: "Secret profiles", sub: `${rows.length} in view · names only`, end: "Resolver paths and references stay in their source files", flush: true, body: html`${!v.settingsKnown ? html`<p class="secret-note">The settings overlay could not be read; its profile declarations are unknown.</p>` : null}${v.profileState.envSeen === false ? html`<p class="secret-note">PI_SECRET_PROFILES is not visible here; the worker's environment declarations are unknown.</p>` : null}${!v.triggersKnown ? html`<p class="secret-note">The triggers file could not be read; profile usage is unknown.</p>` : null}${table}` });
+  const table = ui.tbl({ caption: "Secret profiles", heads: ["Profile", "Source", "Resolver roots", "Triggers", "Projects", "Last resolve", "Served by", { label: "Actions", l: null }], rows, stack: true, empty: trouble === null ? "No secret profiles are declared or named by the triggers in view." : secretsProfilesUnreadText(trouble) });
+  return ui.card({ title: "Secret profiles", sub: `${trouble === null ? `${rows.length} in view` : rows.length ? `at least ${rows.length} in view` : `${SECRETS_COUNT_UNREAD}: ${trouble}`} · names only`, end: "Resolver paths and references stay in their source files", flush: true, body: html`${!v.settingsKnown ? html`<p class="secret-note">The settings overlay ${v.unread?.settings ?? "could not be read"}; its profile declarations are unknown.</p>` : null}${v.profileState.envSeen === false ? html`<p class="secret-note">PI_SECRET_PROFILES is not visible here; the worker's environment declarations are unknown.</p>` : null}${!v.triggersKnown ? html`<p class="secret-note">The triggers file ${v.unread?.triggers ?? "could not be read"}; profile usage is unknown.</p>` : null}${table}` });
 }
 
 export function secretsBundles(ctx) {
   const v = viewOf(ctx);
-  if (!v?.available) return ui.card({ title: "Secret bundles", body: unread() });
+  if (!v?.filesKnown) return ui.card({ title: "Secret bundles", body: unread() });
+  ctx = acting(ctx, v);
   const resolvers = v.bundleResolvers.length ? html`<ul class="secret-resolvers">${v.bundleResolvers.map((r) => html`<li>${code(r.name)} <span class="muted">(${r.format ?? "format unknown"}, ${r.source === "env" ? "PI_SECRET_BUNDLES" : r.source === "ambiguous" ? "both sources, ambiguous" : "settings overlay"})</span>${r.roots ? html`<small>${PROFILE_ROOTS_TEXT[r.roots]}</small>` : null}${r.inOverlay ? remove("bundle", r.name, ctx) : html`<span class="faint">in the .env</span>`}</li>`)}</ul>` : html`<p class="secret-note">No bundle resolver is declared in the sources this console can read.</p>`;
   const rows = v.bundles.map((b) => ({ mark: b.refused ? "failed" : b.projectKnown === false ? "attention" : null, cells: [
     { html: code(b.id), id: true },
@@ -66,14 +90,14 @@ export function secretsBundles(ctx) {
     b.forkReviews ? "yes" : "no",
     { html: bundleEndpointsText(b) || "none", wide: true },
     triggerLinks(b.optedOut),
-    { html: cell(b.last ? html`<span class="secret-names">${b.last.variables.length ? b.last.variables.map(code) : "no variables"}</span><small>${runLink(b.last.jobId, { pulse: true })} · ${timeHtml(Date.parse(b.last.at ?? ""))}</small>` : html`<span class="muted">no run in view</span>`), wide: true },
+    { html: cell(b.last ? html`<span class="secret-names">${b.last.variables.length ? b.last.variables.map(code) : "no variables"}</span><small>${runLink(b.last.jobId, { pulse: true })} · ${timeHtml(Date.parse(b.last.at ?? ""))}</small>` : lastRun(v)), wide: true },
   ] }));
-  return ui.card({ title: "Secret bundles", sub: `${rows.length} bound in the triggers file`, end: "Variable names only, from the newest run", flush: true, body: html`<p class="secret-note">Bundle resolvers, from both declaration sources:</p>${resolvers}${!v.triggersKnown ? html`<p class="secret-note">The triggers file could not be read; bundle bindings are unknown.</p>` : ui.tbl({ caption: "Secret bundles", heads: ["Bundle", "Project", "Resolver", "Fork reviews", "Endpoints", "Opted out", "Last received"], rows, stack: true, empty: "The triggers file binds no project secret bundle." })}<p class="secret-note">Binding a bundle to a project stays an edit of secretBundles in the triggers file.</p>` });
+  return ui.card({ title: "Secret bundles", sub: v.triggersKnown ? `${rows.length} bound in the triggers file` : `${SECRETS_COUNT_UNREAD}: the triggers file ${v.unread?.triggers ?? "could not be read"}`, end: "Variable names only, from the newest run", flush: true, body: html`<p class="secret-note">Bundle resolvers, from both declaration sources:</p>${resolvers}${!v.triggersKnown ? html`<p class="secret-note">The triggers file ${v.unread?.triggers ?? "could not be read"}; bundle bindings are unknown.</p>` : ui.tbl({ caption: "Secret bundles", heads: ["Bundle", "Project", "Resolver", "Fork reviews", "Endpoints", "Opted out", "Last received"], rows, stack: true, empty: "The triggers file binds no project secret bundle." })}<p class="secret-note">Binding a bundle to a project stays an edit of secretBundles in the triggers file.</p>` });
 }
 
 export function secretsAdd(ctx) {
-  if (!canAct(ctx)) return html``;
   const v = viewOf(ctx);
+  if (!canAct(acting(ctx, v))) return html``;
   const hint = v?.roots.seen ? `${v.roots.count} ${v.roots.count === 1 ? "root" : "roots"} on this host${v.roots.empty ? "; set and empty, so overlay resolvers are refused" : ""}` : "roots are not visible on this host; only the worker can judge them";
   return ui.card({ title: "Declare a resolver", sub: "writes the settings overlay", body: actForm("secret-profile-add", { structured: "resolver", label: "Preview the profile", fields: html`${field("kind", "What to declare", { options: [{ value: "profile", label: "Profile" }, { value: "bundle", label: "Bundle resolver" }], value: "profile" })}${field("name", "Name", { required: true, max: 64 })}${field("path", "Resolver (absolute path)", { required: true, max: 4096, hint: `Must sit inside PI_SECRET_RESOLVER_ROOTS (${hint}).` })}<div data-resolver-format hidden>${field("format", "Output format", { options: ["dotenv", "json"] })}</div><p class="field__hint" data-resolver-frequency>The worker runs this script as the account it runs as, once per reference before the container starts. Only declare a resolver you trust.</p>` }) });
 }

@@ -47,7 +47,7 @@ import { triggersNavigation, triggersViewer, triggersCount, triggersNext, trigge
 import { triggerListOf, TRIGGER_LIST_KINDS } from "../trigger-list.mjs";
 import { loadWatchData, parseWatchQuery, watchPanel, watchBoardPanel } from "./watch.mjs";
 import { readForkPoints } from "../run-fork.mjs";
-import { readTriggerEditor, triggerDetailOf, TRANSCRIPT_ID_RE } from "../read-model.mjs";
+import { readTriggerEditor, secretBundlesView, triggerDetailOf, TRANSCRIPT_ID_RE } from "../read-model.mjs";
 import { ageText, beatAgeOf, hostsUnread } from "./panels/common.mjs";
 import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
 import { BACKEND_NAMES, BACKENDS } from "@edgehero/pi-dispatch/backends";
@@ -834,7 +834,9 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   }
   // What the hosts published (issue #800). A missing or failed read is unknown, never an error page and never "the same".
   if (reads.includes("hostLoads")) {
-    try { data.hostLoads = typeof deps.hostLoads === "function" ? await deps.hostLoads() : null; } catch { data.hostLoads = null; }
+    // A read that threw is marked (issue #962): null alone is also a console that wires no such read, and the trigger
+    // page's card must say the hosts could not be read, never that no live host can run the trigger's jobs.
+    try { data.hostLoads = typeof deps.hostLoads === "function" ? await deps.hostLoads() : null; } catch { data.hostLoads = null; data.hostLoadsUnread = true; }
   }
   if (name === "zero-touch") {
     // A read that threw (issue #962) is caught, as before, and says so: `failure` is what the panel words, and the
@@ -874,7 +876,8 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     catch { data.models = null; }
   }
   if (reads.includes("secrets")) {
-    try { data.secrets = typeof deps.secretsView === "function" ? await deps.secretsView(data.snapshot) : secretsView({ snapshot: data.snapshot, env: deps.env ?? {} }); }
+    // Issue #962: with no snapshot the declarations still come from the files (`data.files`, set where the snapshot failed).
+    try { data.secrets = typeof deps.secretsView === "function" ? await deps.secretsView(data.snapshot, data.files ?? null) : secretsView({ snapshot: data.snapshot, files: data.files ?? null, env: deps.env ?? {} }); }
     catch { data.secrets = null; }
   }
   if (reads.includes("connections")) {
@@ -929,6 +932,11 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
       try { data.snapshot = { ...data.snapshot, triggerSkew: { [q.index]: await deps.fleet.triggerSkew(q.index, data.snapshot.waiting) } }; } catch { /* An unreadable skew check remains unknown. */ }
     }
     data.triggerDetail = triggerDetailOf(data.snapshot, q.index, { now });
+    // Issue #962: which bundle a trigger's project binds is the triggers file's and the projects file's to say, so with
+    // no snapshot it is read from the file views. No run is asked for: the card names the bundle, not what a run received.
+    if (data.snapshot === null && Array.isArray(data.files?.triggers?.triggers)) {
+      try { data.fileBundles = secretBundlesView({ triggers: data.files.triggers, settings: data.files.settings, env: deps.env ?? {}, projects: data.files.projects }) ?? { bundles: [], byIndex: {} }; } catch { /* left unset: the card says the bundles are not known */ }
+    }
     if (fireCheck !== null) data.triggerFireCheck = await fireCheck;
   }
   if (name === "trigger" || name === "trigger-add") {

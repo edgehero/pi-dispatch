@@ -1000,6 +1000,13 @@ that nothing is running; a schedule's stalls it did not read are "not known". Mo
 proposals are not known rather than that there are none. Meanwhile a live page's pill says Not live (its tooltip says
 the console could not read all it needs for the page), also when only a part was not read (the host registry, the
 running jobs or the parked runs), and a page kept as last seen shows no Parked count until it is read again.
+Since 2026-11-21 (#962) the configuration pages follow it too: Secrets still lists the profiles and bundles the
+settings overlay, the triggers file and the `.env` declare, read-only, and says what runs received and which hosts serve
+a profile are not known; a trigger's page names its bundle from the files; Updates says a host Valkey did not answer for
+is not known rather than pending or late, that the audit log (or a part of it) could not be read rather than that it
+holds nothing, and that a canary's trigger is not known when the triggers file could not be read; and a count is "not
+known", never 0, for a settings overlay, a triggers file or a staged-packages manifest that is there and could not be
+read or does not load. Add a trigger says "No forge is configured here." when the `.env` configures none.
 
 The pages that read the run history follow the same rule. Runs marks its project counts and settled spend "at least"
 when part of the history could not be read, and says "No run matches." only when this host's run files were read and

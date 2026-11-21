@@ -21,7 +21,7 @@ import { forgeBaseLinkOf } from "../../read-model.mjs";
 import { TRIGGER_GETS_WORDS as W, triggerGetsOf } from "../../trigger-gets-view.mjs";
 import { triggerSandboxHosts } from "../trigger-sandbox.mjs";
 import { listed } from "../../words.mjs";
-import { canAct, shownPath } from "./common.mjs";
+import { canAct, hostsUnread, shownPath } from "./common.mjs";
 import { fixButton, stateLine, wordsHtml } from "./loaded-parts.mjs";
 
 const detail = (v) => v.data?.triggerDetail ?? {};
@@ -51,9 +51,12 @@ function getsOf(v) {
     trigger,
     records: detail(v).history ?? [],
     historyUnread: !Array.isArray(detail(v).history),
-    hostLoads: v.data?.hostLoads ?? null,
+    // A read that threw is the reader's own unreachable answer (issue #962): the note then says the hosts could not be read.
+    hostLoads: v.data?.hostLoads ?? (v.data?.hostLoadsUnread === true ? { unreachable: true, hosts: [] } : null),
     // A host that does not bless the venue refuses the job before it spends, so it is no host these jobs run on.
     liveHosts: budgets ? triggerSandboxHosts(trigger, snapshot).filter((host) => host.blessed !== false).map((host) => host.name) : null,
+    // No snapshot, or a registry never read (`hostsUnread`): the live list was not read, which is not a list with no host.
+    liveHostsUnread: !budgets && hostsUnread(v.data?.snapshot ?? null),
     defaults: v.data?.triggerEditor?.defaults ?? {},
     editor: v.data?.triggerEditor ?? null,
     modelChoices: v.data?.modelChoices ?? [],

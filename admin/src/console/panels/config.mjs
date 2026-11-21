@@ -3,6 +3,7 @@
  * exports. The rules every panel keeps (one pure, deterministic renderer per region, every value through `html`, the
  * role and run-text rule, the action controls and the PATHS rule) are stated once, in `../panels.mjs`'s header.
  */
+import { secretCountTrouble } from "../../secrets-view.mjs";
 import { triggerBundleOf } from "../../read-model.mjs";
 import { VENUE_LABEL } from "../../words.mjs";
 import { html as escapedHtml } from "../html.mjs";
@@ -534,9 +535,20 @@ export const configProjects = fromSnapshot("Projects", (s, view) => {
 // count of none, and the line says which it was: a file that does not load ("invalid") or one that could not be read.
 const mcpUnread = (u) => (u === "invalid" ? "the overlay's MCP file does not load" : `the overlay's MCP file cannot be read${typeof u === "string" && /^E[A-Z0-9]{1,20}$/.test(u) ? ` (${u})` : ""}`);
 export const configMcp = fromSnapshot("MCP servers", (s) => html`<p>${s.overlayMcp?.unreadable ? `Overlay servers not known: ${mcpUnread(s.overlayMcp.unreadable)}.` : `${s.overlayMcp?.servers?.length ?? "Unknown"} overlay ${s.overlayMcp?.servers?.length === 1 ? "server" : "servers"}.`} <a class="link" href="/config/connections#p-mcp">Open Connections</a></p>`, { files: true });
-export const configPackages = fromSnapshot("Staged pi packages", (s) => html`<p>${s.stagedPackages?.packages?.length ?? "Unknown"} packages staged. <a class="link" href="/config/connections#p-packages">Open Connections</a>. <a class="link" href="/config/updates">See what is newer</a></p>`, { files: true });
-export const configSecretProfiles = fromSnapshot("Secret profiles", (s) => html`<p>${s.secretProfiles?.profiles?.length ?? 0} profiles in view. <a class="link" href="/config/secrets#p-secret-profiles">Open Secrets</a></p>`);
-export const configSecretBundles = fromSnapshot("Secret bundles", (s) => html`<p>${s.secretBundles?.bundles?.length ?? 0} project bundles in view. <a class="link" href="/config/secrets#p-secret-bundles">Open Secrets</a></p>`);
+/** The staged-packages card over a manifest that is there and could not be read (issue #962): never "0 packages staged". */
+export const PACKAGES_UNREAD_TEXT = "Staged packages not known: the manifest could not be read.";
+/** The same over a manifest that was read and holds no list this console can use, in the Triggers card's word for it. */
+export const PACKAGES_MALFORMED_TEXT = "Staged packages not known: the manifest does not load.";
+export const configPackages = fromSnapshot("Staged pi packages", (s) => html`<p>${s.stagedPackages?.unreadable ? (s.stagedPackages.malformed === true ? PACKAGES_MALFORMED_TEXT : PACKAGES_UNREAD_TEXT) : `${s.stagedPackages?.packages?.length ?? "Unknown"} packages staged.`} <a class="link" href="/config/connections#p-packages">Open Connections</a>. <a class="link" href="/config/updates">See what is newer</a></p>`, { files: true });
+/**
+ * The two secret cards' counts (issue #962), by the Secrets page's own rule (`secretCountTrouble`): the profiles are
+ * named by the settings overlay and the triggers file, the bundles bound by the triggers file, and a source that could
+ * not be read or does not load leaves its list short. The count is then not known, or a floor, never a zero, and the
+ * line says which source and which of the two it was. A file that is not there names and binds nothing: its zero stands.
+ */
+const secretCount = (trouble, n, noun) => (trouble ? (n > 0 ? `At least ${n} ${noun} in view; the rest is not known: ${trouble}.` : `${noun[0].toUpperCase()}${noun.slice(1)} not known: ${trouble}.`) : `${n} ${noun} in view.`);
+export const configSecretProfiles = fromSnapshot("Secret profiles", (s) => html`<p>${secretCount(secretCountTrouble(s).profiles, s.secretProfiles?.profiles?.length ?? 0, "profiles")} <a class="link" href="/config/secrets#p-secret-profiles">Open Secrets</a></p>`);
+export const configSecretBundles = fromSnapshot("Secret bundles", (s) => html`<p>${secretCount(secretCountTrouble(s).bundles, s.secretBundles?.bundles?.length ?? 0, "project bundles")} <a class="link" href="/config/secrets#p-secret-bundles">Open Secrets</a></p>`);
 
 const shortFile = (path, fallback) => typeof path === "string" && path ? `…/${path.split(/[\\/]/).filter(Boolean).slice(-2).join("/")}` : fallback;
 export function configDescription(v) {

@@ -1726,6 +1726,8 @@ test("serve's package facts read has one end for its Valkey reads, falls back to
     if (hang > 0) return (hang -= 1), new Promise(() => {});
     return Promise.resolve({ read: asked.length });
   } };
+  // An audit log that was read and holds no row: one that could not be read is handed on as null (the next test).
+  modules.audit = { ...modules.audit, readConsoleAudit: () => ({ rows: [], next: null }) };
   // A history that throws: no records is then partial, never "no canary ran".
   modules.readModel = { ...modules.readModel, scanFleetRunRecords: async () => { throw new Error("Command timed out"); } };
   let stop;
@@ -1749,4 +1751,51 @@ test("serve's package facts read has one end for its Valkey reads, falls back to
   assert.deepEqual(facts.late, { read: 3 }, "past the bound the answer is the second read's");
   assert.ok(facts.ms < 2000, `${facts.ms} ms`);
   assert.deepEqual(asked.at(-1), { valkey: false, recordsPartial: true, records: [], audit: true }, "which is asked without a Valkey, with the run records and the audit rows it already has");
+});
+
+test("serve's package facts read hands on an audit log it could not read as null, never as an empty list; a log that was read and holds no row is that list (#962)", async () => {
+  const handed = async (readConsoleAudit) => {
+    const dep = deployment();
+    const modules = fakeModules();
+    let captured;
+    modules.server = { ...server, createConsoleServer: (opts) => { captured = opts; return server.createConsoleServer(opts); } };
+    modules.audit = { ...modules.audit, readConsoleAudit };
+    let audit;
+    modules.updatesView = { readDeploymentUpdates: (args) => { audit = args.audit; return Promise.resolve({}); } };
+    let stop;
+    const until = new Promise((resolve) => { stop = resolve; });
+    const errors = [];
+    const code = await runCli(["serve", "--deployment", dep.dir], { env: dep.env, modules, now: () => T0, uid: process.geteuid?.(), out: () => {}, err: (line) => errors.push(line), until, onListening: async () => {
+      try { await captured.actionDeps.updates.read(); } finally { stop(); }
+    } });
+    assert.equal(code, 0, errors.join("\n"));
+    return audit;
+  };
+  assert.equal(await handed(() => ({ rows: [], next: null, unreadable: "the audit directory cannot be read (EACCES)" })), null, "the reader's own word for a log it could not read");
+  assert.equal(await handed(() => { throw new Error("EIO"); }), null, "a read that threw");
+  assert.deepEqual(await handed(() => ({ rows: [], next: null })), [], "read, and empty");
+  assert.deepEqual(await handed(() => ({ rows: [{ seq: 1 }], next: null })), [{ seq: 1 }]);
+});
+
+test("serve hands the Secrets page's read the file views beside the snapshot, with the deployment's env (#962)", async () => {
+  const dep = deployment();
+  const modules = fakeModules();
+  let captured;
+  modules.server = { ...server, createConsoleServer: (opts) => { captured = opts; return server.createConsoleServer(opts); } };
+  const asked = [];
+  modules.secretsView = { secretsView: (args) => (asked.push(args), { filesKnown: true }) };
+  let stop;
+  const until = new Promise((resolve) => { stop = resolve; });
+  const errors = [];
+  const files = { triggers: { triggers: [] } };
+  let view;
+  const code = await runCli(["serve", "--deployment", dep.dir], { env: dep.env, modules, now: () => T0, uid: process.geteuid?.(), out: () => {}, err: (line) => errors.push(line), until, onListening: async () => {
+    try { view = await captured.pageDeps.secretsView(null, files); await captured.pageDeps.secretsView({ settings: {} }); } finally { stop(); }
+  } });
+  assert.equal(code, 0, errors.join("\n"));
+  assert.deepEqual(view, { filesKnown: true });
+  assert.equal(asked[0].snapshot, null);
+  assert.equal(asked[0].files, files, "the file views reach the view where the snapshot failed");
+  assert.equal(typeof asked[0].env, "object");
+  assert.deepEqual([asked[1].snapshot, asked[1].files], [{ settings: {} }, null], "and none is invented beside a snapshot");
 });

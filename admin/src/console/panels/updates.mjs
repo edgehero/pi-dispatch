@@ -54,7 +54,7 @@ function canaryCost(row, view) {
 
 function canaryForm(row, view, label = "Run a canary") {
 	const triggers = canaryTriggersFor(data(view).triggers, row.name);
-	if (triggers.length === 0) return html`<p class="muted">No cron trigger that loads this package can run a canary here.</p>`;
+	if (triggers.length === 0) return html`<p class="muted">${data(view).triggersTrouble ? `Which trigger can run a canary is ${CANARY_TRIGGERS_UNREAD[data(view).triggersTrouble]}.` : "No cron trigger that loads this package can run a canary here."}</p>`;
 	const hidden = [["name", row.name], ["version", row.newest]];
 	const choose = triggers.length === 1
 		? null
@@ -62,10 +62,22 @@ function canaryForm(row, view, label = "Run a canary") {
 	return actForm("package-canary", { hidden: triggers.length === 1 ? [...hidden, ["index", triggers[0].index, "int"]] : hidden, fields: choose, label, icon: "rerun" });
 }
 
+/** "A canary runs as" where the triggers file gave no trigger because it was not read or does not load (issue #962): never "no cron trigger can". */
+export const CANARY_TRIGGERS_UNREAD = Object.freeze({ unreadable: "not known: the triggers file could not be read", invalid: "not known: the triggers file does not load" });
+/** Under Recently adopted where the audit reader marked what it could not hand over: a month it could not read, or a line that is no row. */
+export const RECENT_GAPS_TEXT = Object.freeze({
+	unread: "Part of the audit log could not be read, so an adoption may be missing here.",
+	damaged: "A line of the audit log is not a row, so an adoption may be missing here.",
+});
+/** A host whose applied rows could not be read (issue #962): it may have adopted, refused or not moved, so it is neither pending nor late. */
+export const HOST_UNREAD_WORDS = "not known: Valkey did not answer for its state";
+/** The Recently adopted card over an audit log that could not be read: never that its window holds nothing. */
+export const RECENT_UNREAD_TEXT = "The audit log could not be read, so what was adopted recently is not known. Reload to try again.";
+
 function standingsList(row) {
 	const shown = row.standings.filter((s) => !["adopted", "undone", "no-change"].includes(s.state));
 	if (shown.length === 0) return null;
-	const sentence = (s) => (s.state === "cannot-adopt" ? `${s.host} cannot ${row.desired.op === "undo" ? "go back" : "adopt"}: ${CANNOT_ADOPT_WORDS[s.reason] ?? "no reason was recorded"}` : s.state === "overdue" ? `${s.host} has not answered in a day. It catches up when it returns` : `${s.host} is pending`);
+	const sentence = (s) => (s.state === "unread" ? `${s.host} is ${HOST_UNREAD_WORDS}` : s.state === "cannot-adopt" ? `${s.host} cannot ${row.desired.op === "undo" ? "go back" : "adopt"}: ${CANNOT_ADOPT_WORDS[s.reason] ?? "no reason was recorded"}` : s.state === "overdue" ? `${s.host} has not answered in a day. It catches up when it returns` : `${s.host} is pending`);
 	return html`<ul class="up-hosts">${shown.map((s) => html`<li>${sentence(s)}.</li>`)}</ul>`;
 }
 
@@ -188,7 +200,7 @@ export function updatesHow(view) {
 	const looks = v.state === "not-looking" ? "off, until PI_UPDATES_LOOK=1 is set" : v.state === "unknown" ? "unknown" : v.state === "stale" ? `late: the last was ${ageText(nowOf(view) - v.at)} ago` : "daily";
 	const first = v.triggers[0];
 	// This row is of the page and not of a package, and a trigger that leaves a package out is no choice for that one (`canaryTriggersFor`), so it says that, and each package's row says which.
-	const runs = first ? `trigger ${first.index + 1}${first.id ? `, ${first.id}` : ""}${first.capUsd !== null ? `, up to its $${first.capUsd.toFixed(2)} cap` : ", up to its cap"}${v.triggers.length > 1 ? `, or ${v.triggers.length - 1} more` : ""}${v.triggers.some((trigger) => trigger.excludes) ? ", unless it leaves that package out" : ""}` : "no cron trigger can";
+	const runs = first ? `trigger ${first.index + 1}${first.id ? `, ${first.id}` : ""}${first.capUsd !== null ? `, up to its $${first.capUsd.toFixed(2)} cap` : ", up to its cap"}${v.triggers.length > 1 ? `, or ${v.triggers.length - 1} more` : ""}${v.triggers.some((trigger) => trigger.excludes) ? ", unless it leaves that package out" : ""}` : v.triggersTrouble ? CANARY_TRIGGERS_UNREAD[v.triggersTrouble] : "no cron trigger can";
 	return ui.card({ title: "How it keeps up", body: ui.facts([["Looks for updates", looks], ["Last look", Number.isFinite(v.at) ? timeHtml(v.at) : v.state === "unknown" ? "unknown" : "never"], ["A canary runs as", runs], ["Adopting", "always a person, with a preview and Undo"]], { cols: 1 }) });
 }
 
@@ -197,5 +209,7 @@ export function updatesRecent(view) {
 	if (!v) return ui.card({ title: "Recently adopted", body: unreadable() });
 	const said = (r) => (r.kind === "package-undo" ? `went back to ${r.version}` : `adopted ${r.version}`);
 	const rows = v.recent.map((r) => ui.rowPill({ icon: r.kind === "package-undo" ? "rerun" : "done", items: [html`<span class="up-recent"><span><b class="code">${r.name}</b> ${said(r)}</span><small>${r.by ?? "unknown"}${r.at ? `, ${r.at.slice(0, 10)}` : ""}</small></span>`] }));
-	return ui.card({ title: "Recently adopted", body: rows.length ? html`<ul class="rows">${rows}</ul>` : html`<p class="note">Nothing in the audit log's window.</p>` });
+	// A gap in what was read stands under the rows that were, and in place of the empty sentence: "nothing" is said only of a window that was read whole.
+	const gaps = RECENT_GAPS_TEXT[v.recentGaps] ? html`<p class="note">${RECENT_GAPS_TEXT[v.recentGaps]}</p>` : null;
+	return ui.card({ title: "Recently adopted", body: rows.length ? html`<ul class="rows">${rows}</ul>${gaps}` : v.recentUnread === true ? html`<p class="note">${RECENT_UNREAD_TEXT}</p>` : gaps ?? html`<p class="note">Nothing in the audit log's window.</p>` });
 }

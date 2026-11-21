@@ -103,7 +103,7 @@ test("every state has its words, each held to the list it comes from, both ways"
 	assert.deepEqual(Object.keys(CANNOT_ADOPT_WORDS).sort(), [...CANNOT_ADOPT_REASONS].sort());
 	assert.deepEqual([...PI_STATES_DRAWN].sort(), [...PI_ROW_STATES].sort());
 	assert.deepEqual([...HOST_STATES_DRAWN].sort(), [...HOST_PI_STATES].sort());
-	assert.deepEqual([...HOST_ADOPT_STATES].sort(), ["adopted", "cannot-adopt", "no-change", "overdue", "pending", "undone"]);
+	assert.deepEqual([...HOST_ADOPT_STATES].sort(), ["adopted", "cannot-adopt", "no-change", "overdue", "pending", "undone", "unread"]);
 });
 
 test("the look's copy of the admin extension's API list is that list", () => {
