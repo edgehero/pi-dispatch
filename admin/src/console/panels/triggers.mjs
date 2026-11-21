@@ -145,7 +145,11 @@ export function triggersNext(v) {
             ${timeHtml(n.at)} ·
             <a href="${ruleHref(v, n.index)}">row ${n.index + 1}</a>
           </p>`
-      : html`<p class="tr-empty">
+      : m?.schedulersUnread
+        ? html`<p class="tr-empty">
+            Not known: Valkey could not be read, so no next fire can be shown.
+          </p>`
+        : html`<p class="tr-empty">
           No next fire is published. Check the schedule's owning worker and its
           doctor result.
         </p>`,
@@ -255,7 +259,9 @@ function ruleRow(v, r) {
                 >;
                 ${hostNames.length
                   ? html`on ${hostNames.join(", ")}`
-                  : "owning host not published"}${next?.zone
+                  : next?.unread
+                    ? "owning host not known"
+                    : "owning host not published"}${next?.zone
                   ? html`; schedule zone ${next.zone}`
                   : null}`
             : html`${triggerWhoMayFire(t)}
@@ -313,12 +319,16 @@ function ruleRow(v, r) {
         : html`<p class="tr-sub">
             ${r.stats.runs30d == null
               ? "Last run unavailable"
-              : "No run in retained history"}
+              : modelOf(v)?.schedulersUnread
+                ? "Last run not known: the fleet's run records could not be read."
+                : "No run in retained history"}
           </p>`}${next
         ? html`<p class="tr-next">
-              Next: ${next.at === null ? "unknown" : timeHtml(next.at)} ·
+              ${next.unread
+                ? "Next fire and stall count not known: Valkey could not be read."
+                : html`Next: ${next.at === null ? "unknown" : timeHtml(next.at)} ·
               ${next.health === "on-time" ? "on time" : next.health} · stalls
-              ${next.stalls ?? "unknown"} of ${next.stallLimit}
+              ${next.stalls ?? "unknown"} of ${next.stallLimit}`}
             </p>
             ${next.problem
               ? html`<p class="tr-problem">${next.problem}</p>`
@@ -566,7 +576,7 @@ export function triggersWeek(v) {
           )}
         </ul>
         ${!future.length
-          ? html`<p>No next fire is published.</p>`
+          ? html`<p>${m.schedulersUnread ? "Not known: the next fires could not be read." : "No next fire is published."}</p>`
           : null}${w.quiet.map(
           (q) =>
             html`<p>

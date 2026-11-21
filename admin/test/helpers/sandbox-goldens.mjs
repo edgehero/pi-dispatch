@@ -25,11 +25,13 @@ export function sandboxFixture(now = NOW) {
     plan: { host: "mini1", repo: "acme/web", ref: "HEAD", triggerIndex: 2, image: "pi-job:4.3.1", backend: "local", size: { memMiB: 2048, cpuCenti: 100, source: "default" }, egress: { armed: true, proxy: "pi-dispatch-egress-proxy" }, retentionHours: 24, pin: false, pinDays: 7, project: "web" },
   };
 }
-async function draw({ role = "operator", readOnly = false, change = () => {}, unavailable = false, browser = false, query = "id=gh-9575&host=mini1" } = {}) {
+async function draw({ role = "operator", readOnly = false, change = () => {}, unavailable = false, down = false, browser = false, query = "id=gh-9575&host=mini1" } = {}) {
   const parsed = parsePageQuery("sandboxes", query);
   if (parsed.refusal) throw new Error(parsed.refusal);
   const report = sandboxFixture(); change(report);
-  const deps = { now: () => NOW, fleet: { parkedCount: async () => 1 }, sandboxes: { hosts: () => ({ config: SANDBOX_HOSTS_FIXTURE }), read: async () => unavailable ? null : report } };
+  const deps = { now: () => NOW, fleet: { parkedCount: async () => 1 }, sandboxes: { hosts: () => ({ config: SANDBOX_HOSTS_FIXTURE }), read: async () => { if (down) throw new Error("Valkey does not answer"); return unavailable ? null : report; } } };
+  // A Valkey that does not answer: the inventory read rejects, and so does the gateway's.
+  if (down) deps.gatewayView = async () => { throw new Error("Valkey does not answer"); };
   if (browser) deps.gatewayView = async () => browser === "unavailable" ? { enabledHosts: [], sessions: [], problem: "Browser-terminal information could not be read. Use the native terminal route." } : { enabledHosts: ["mini1"], sessions: report.sessions };
   const data = await loadPageData("sandboxes", parsed.query, deps, { role, readOnly });
   return String((await renderPage("sandboxes", { data, query: parsed.query, session: { role, name: role === "operator" ? "ops" : "watcher" }, readOnly })).html);
@@ -43,6 +45,7 @@ export const SANDBOX_DRAW = Object.freeze({
   "sandboxes-readonly.operator": () => draw({ readOnly: true }),
   "sandboxes-empty.operator": () => draw({ change: (r) => { r.hosts = []; r.sessions = []; r.plan = null; } }),
   "sandboxes-unavailable.operator": () => draw({ unavailable: true }),
+  "sandboxes-no-snapshot.operator": () => draw({ down: true }),
   "sandboxes-stale.operator": () => draw({ change: (r) => { r.hosts[1].stale = true; r.hosts[1].more = 128; r.hosts[0].unreadable = true; r.sessionsUnavailable = true; } }),
   "sandboxes-cleanup-notices.operator": () => draw({ change: (r) => { r.notices = ["network-kept", "network-cleanup-failed", "runtime-unreadable"].map((reason, i) => ({ host: "mini1", id: `gh-cleanup-${i}`, at: NOW, reason })); r.noticesUnavailable = true; r.sessionsMore = 12; r.sessionsUnreadable = 2; r.more = 3; } }),
   "sandboxes-unsupported.operator": () => draw({ change: (r) => { r.hosts[0].rows[0].v = "openshell-bind"; r.hosts[0].rows[0].canOpen = false; r.plan = null; r.refusal = "The trigger's venue has no sandbox shell. Choose a local or podman trigger."; } }),

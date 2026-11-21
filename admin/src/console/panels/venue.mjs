@@ -9,15 +9,16 @@ import {
 import { VENUE_LABEL } from "../../words.mjs";
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
+import { HOSTS_UNREAD, hostsUnread } from "./common.mjs";
 
 const model = (view) => venuesView(view.data?.snapshot?.hostBudgets ?? []);
 const selected = (view) =>
   model(view).venues.find((v) => v.name === view.query?.name);
 const holderOf = (venue) =>
   venue.custody === "layer" ? "the venue's egress layer" : "the container";
-// With no snapshot nothing was read about the hosts, which is not the same as there being none.
-const HOSTS_UNREAD = "not known: the hosts could not be read";
-const read = (view) => Boolean(view.data?.snapshot);
+// With no snapshot, or one whose registry was never read, nothing was read about the hosts, which is not the same as
+// there being none.
+const read = (view) => !hostsUnread(view.data?.snapshot);
 const names = (rows, view) => (rows.length ? rows.join(", ") : read(view) ? "no live host" : HOSTS_UNREAD);
 const word = (p) =>
   html`<span class="chip vw vw--${p.word}${p.word === "enforced" ? " tone-ok" : ""}">${ui.icon(p.word === "enforced" ? "shield" : p.word === "asserted" ? "done" : "minus")}${p.word}</span>`;

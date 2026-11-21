@@ -162,3 +162,73 @@ test("the service's client carries an error listener, so an outage outlasting a 
   const seam = makeZeroTouchService({ paths: { valkeyUrl: "redis://example.invalid", logsDir: dir, triggersPath: join(dir, "triggers.json") }, redisFn: () => ({ disconnect() {} }) });
   assert.equal(await seam.withWriters(async () => "ran"), "ran");
 });
+
+test("a source lookup that could not ask every queue says it could not be checked, never that the queue no longer holds the run", async () => {
+  const { paths } = fixture();
+  const data = { kind: "github", flow: "fix", target: { type: "issue", number: 1 }, trigger: { matched: { index: 0, type: "label", label: "fix" } } };
+  const base = { url: "redis://unused", jobId: "source", index: 0, triggersPath: paths.triggersPath, parseConnectionFn: () => ({}), timeoutMs: 40 };
+  const queueOf = (getJob) => (_connection, { name }) => ({ name, getJob, close: async () => {} });
+  // Longer than the bound, and a real timer: the bound's own is unref'd, so a promise that never settles would end the test's loop.
+  const late = () => new Promise((resolve) => setTimeout(resolve, 400, null));
+  const answers = { on() {}, smembers: async () => [], scan: async () => ["0", []], disconnect() {} };
+  const UNCHECKED = /could not be checked\. Reload and try again; nothing was changed\.$/;
+  // The control: every queue asked and none holds it.
+  assert.match((await checkTriggerFixSource({ ...base, redisFn: () => answers, queueFn: queueOf(async () => null) })).refusal, /no longer holds/);
+  // The registry unread (the client refused): the one queue asked proves nothing about the others.
+  const blind = () => { throw new Error("no client"); };
+  assert.match((await checkTriggerFixSource({ ...base, redisFn: blind, queueFn: queueOf(async () => null) })).refusal, UNCHECKED);
+  // The keyspace scan unread: a host out of the registry may still hold it.
+  const noScan = { ...answers, scan: async () => { throw new Error("scan failed"); } };
+  assert.match((await checkTriggerFixSource({ ...base, redisFn: () => noScan, queueFn: queueOf(async () => null) })).refusal, UNCHECKED);
+  // A job found is found, however the list was read.
+  assert.equal((await checkTriggerFixSource({ ...base, redisFn: blind, queueFn: queueOf(async () => ({ data })) })).ok, true);
+  // The bound: a queue that does not answer in time.
+  assert.match((await checkTriggerFixSource({ ...base, redisFn: () => answers, queueFn: queueOf(late) })).refusal, UNCHECKED);
+  assert.match((await checkTriggerFixSource({ ...base, readRetainedJob: late })).refusal, UNCHECKED);
+});
+
+test("a source lookup that outlives its bound still closes every queue it opens afterwards", async () => {
+  const { paths } = fixture();
+  const made = [];
+  // The first queue answers after the bound (a real timer: the bound's own is unref'd).
+  const held = new Promise((resolve) => setTimeout(resolve, 150, null));
+  const queueFn = (_connection, { name }) => {
+    const queue = { name, closed: false, getJob: () => (made.length === 1 ? held : Promise.resolve(null)), close: async () => { queue.closed = true; } };
+    made.push(queue);
+    return queue;
+  };
+  // Three queues exist; the first does not answer until after the bound, and the lookup then walks on to the other two.
+  const redisFn = () => ({ on() {}, smembers: async () => [], scan: async () => ["0", ["bull:pi-jobs@a:meta", "bull:pi-jobs@b:meta"]], disconnect() {} });
+  const got = await checkTriggerFixSource({ url: "redis://unused", jobId: "source", index: 0, triggersPath: paths.triggersPath, redisFn, queueFn, parseConnectionFn: () => ({}), timeoutMs: 40 });
+  assert.match(got.refusal, /could not be checked/);
+  assert.equal(made.length, 1);
+  await held;
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.deepEqual(made.map((q) => q.name), ["pi-jobs", "pi-jobs@a", "pi-jobs@b"]);
+  assert.deepEqual(made.map((q) => q.closed), [true, true, true]);
+});
+
+test("an instruction preview over a run record or a group list that could not be read says so, not that the run names another trigger", async () => {
+  const { paths, binding } = fixture();
+  const logsDir = tempDir("zt-unread-logs-");
+  const AT = Date.UTC(2026, 9, 8, 15, 0, 0);
+  const params = { runId: "source", groupId, index: 0, sentence: "Use pnpm." };
+  const down = new Proxy({}, { get: (_, key) => (key === "on" || key === "disconnect" ? () => {} : key === "then" ? undefined : async () => { throw new Error("Valkey does not answer"); }) });
+  const service = (redis) => makeZeroTouchService({ paths: { ...paths, valkeyUrl: "redis://unused", logsDir }, redisFn: () => redis, triggerBindingFn: async () => binding, now: () => AT });
+  // No local record and a mirror that does not answer: the record was not read.
+  const unread = await service(down).preview("zero-touch-instruction", params);
+  assert.equal(unread.refusal, "The source trigger identity could not be checked. Reload and try again; nothing was changed.");
+  // The group list read (and empty), the record still unread: not "the source run does not identify that trigger".
+  const groupsOnly = new Proxy({}, { get: (_, key) => (key === "on" || key === "disconnect" ? () => {} : key === "then" ? undefined : key === "zrevrangebyscore" ? async () => [] : async () => { throw new Error("Valkey does not answer"); }) });
+  const noRecord = await service(groupsOnly).preview("zero-touch-instruction", params);
+  assert.equal(noRecord.refusal, "The source trigger identity could not be checked. Reload and try again; nothing was changed.");
+  // A file here that is not a record will not read on a reload: said as that, with no "try again".
+  writeFileSync(join(logsDir, "source.json"), "{ not a record");
+  const corrupt = await service(groupsOnly).preview("zero-touch-instruction", params);
+  assert.equal(corrupt.refusal, "This host's record of the source run cannot be read as a record, so its trigger cannot be checked. Nothing was changed.");
+  // The record read from this host's file, the group list not: the group is not "no longer retained".
+  const { sourceRecord } = fixture();
+  writeFileSync(join(logsDir, "source.json"), JSON.stringify({ ...sourceRecord, startedAt: new Date(AT - 120_000).toISOString(), endedAt: new Date(AT - 60_000).toISOString() }));
+  const noGroups = await service(down).preview("zero-touch-instruction", params);
+  assert.equal(noGroups.refusal, "The source trigger identity could not be checked. Reload and try again; nothing was changed.");
+});

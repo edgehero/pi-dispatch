@@ -11,8 +11,8 @@ import { makeTouchStore } from "@edgehero/pi-dispatch/touch-state";
 import { makeTouchOutbox } from "@edgehero/pi-dispatch/touch-outbox";
 import { readZeroTouch, ZERO_TOUCH_NO_PROJECT, zeroTouchProjectMatches } from "@edgehero/pi-dispatch/zero-touch";
 import { runMirrorMaxRunsOf } from "@edgehero/pi-dispatch/retention";
-import { readRunById } from "./read-model.mjs";
-import { checkTriggerFixSource } from "./job-actions.mjs";
+import { readRunById, RUN_MIRROR_UNREAD } from "./read-model.mjs";
+import { checkTriggerFixSource, TRIGGER_FIX_UNCHECKED } from "./job-actions.mjs";
 import { runMatches } from "./run-filter.mjs";
 import { planZeroTouchGroup, planZeroTouchName, planZeroTouchInstruction, planZeroTouchInstructionUndo, applyZeroTouchFilePlan } from "./zero-touch-actions.mjs";
 const hash = (text) => createHash("sha256").update(text).digest("hex");
@@ -44,9 +44,15 @@ export function makeZeroTouchService({ paths, env = {}, fs = nodeFs, now = Date.
     }
     if (name === "zero-touch-instruction") {
       const source = await readRunById(stores.redis, { logsDir: paths.logsDir, jobId: params.runId, fs });
+      // A run record that could not be read is not one that names another trigger (issue #844): only `missing` says both
+      // places were read. A mirror that did not answer may answer on a reload; a file here that is not a record will not.
+      if (source.unreadable === RUN_MIRROR_UNREAD) return { refusal: TRIGGER_FIX_UNCHECKED };
+      if (!source.record && !source.missing) return { refusal: "This host's record of the source run cannot be read as a record, so its trigger cannot be checked. Nothing was changed." };
       const snapshot = await stores.groups.publicSnapshot();
       const binding = await triggerBindingFn({ url: paths.valkeyUrl, jobId: params.runId, index: params.index, triggersPath: paths.triggersPath, fs, redisFn, queueFn });
       if (!binding.ok) return { refusal: binding.refusal };
+      // Nor is a group the store could not list one that is gone.
+      if (snapshot.state !== "ok" && typeof params.groupId === "string" && !snapshot.groups.some((g) => g.id === params.groupId)) return { refusal: TRIGGER_FIX_UNCHECKED };
       return planZeroTouchInstruction({ params, paths, sourceRecord: source.record, group: snapshot.groups.find((g) => g.id === params.groupId), binding, fs, surface: "console" });
     }
     if (name === "zero-touch-undo") return planZeroTouchInstructionUndo({ params, paths, fix: await stores.fixes.read(params.fixId, { includeUndo: true }), fs, surface: "console" });

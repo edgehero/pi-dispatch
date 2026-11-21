@@ -18,6 +18,7 @@ import {
   table,
   facts,
   fromSnapshot,
+  filesSnapshot,
   rowDelete,
 } from "./config-ui.mjs";
 import * as ui from "../kit.mjs";
@@ -202,7 +203,7 @@ export const configTriggers = fromSnapshot("Triggers", (s, view) => {
     }),
     "The triggers file declares no trigger.",
   )}${triggersEditor(view)}`;
-});
+}, { files: true });
 
 /** Settings shown with their value; every other key the overlay sets is listed by name only. */
 const SETTINGS_SHOWN = Object.freeze([
@@ -264,7 +265,7 @@ export const configSettings = fromSnapshot("Settings overlay", (s, view) => {
       )}${others.length > 0
     ? html`<p class="note">Also set: ${others.join(", ")}</p>`
     : null}${settingsEditor(view)}`;
-});
+}, { files: true });
 
 /** A pause window's fields, as the add and edit tools take them (an edit leaves a blank field as it was). */
 function pauseFieldsHtml(required, w = {}) {
@@ -357,7 +358,7 @@ export const configPauseWindows = fromSnapshot("Pause windows", (s, view) => {
     ),
     "No pause window is set.",
   )}${pauseEditor(view)}`;
-});
+}, { files: true });
 
 /** The scoped-limit fields a row may set, in the file's order, with how each reads. */
 const LIMIT_FIELDS = Object.freeze([
@@ -445,7 +446,7 @@ export const configScopedLimits = fromSnapshot("Scoped limits", (s, view) => {
     ),
     "No scoped limit is set.",
   )}${limitsEditor(view)}`;
-});
+}, { files: true });
 
 /** The projects, envelope, priorities and revert editors. */
 function projectsEditor(view) {
@@ -526,17 +527,17 @@ export const configProjects = fromSnapshot("Projects", (s, view) => {
   )}${facts([
     ["Allocation envelope", s.envelopeSet ? "set" : "not set"],
   ])}${projectsEditor(view)}`;
-});
+}, { files: true });
 
 /** The detail pages own these panels and writes; Configuration keeps one useful line per source. */
-export const configMcp = fromSnapshot("MCP servers", (s) => html`<p>${s.overlayMcp?.servers?.length ?? "Unknown"} overlay ${s.overlayMcp?.servers?.length === 1 ? "server" : "servers"}. <a class="link" href="/config/connections#p-mcp">Open Connections</a></p>`);
-export const configPackages = fromSnapshot("Staged pi packages", (s) => html`<p>${s.stagedPackages?.packages?.length ?? "Unknown"} packages staged. <a class="link" href="/config/connections#p-packages">Open Connections</a>. <a class="link" href="/config/updates">See what is newer</a></p>`);
+export const configMcp = fromSnapshot("MCP servers", (s) => html`<p>${s.overlayMcp?.servers?.length ?? "Unknown"} overlay ${s.overlayMcp?.servers?.length === 1 ? "server" : "servers"}. <a class="link" href="/config/connections#p-mcp">Open Connections</a></p>`, { files: true });
+export const configPackages = fromSnapshot("Staged pi packages", (s) => html`<p>${s.stagedPackages?.packages?.length ?? "Unknown"} packages staged. <a class="link" href="/config/connections#p-packages">Open Connections</a>. <a class="link" href="/config/updates">See what is newer</a></p>`, { files: true });
 export const configSecretProfiles = fromSnapshot("Secret profiles", (s) => html`<p>${s.secretProfiles?.profiles?.length ?? 0} profiles in view. <a class="link" href="/config/secrets#p-secret-profiles">Open Secrets</a></p>`);
 export const configSecretBundles = fromSnapshot("Secret bundles", (s) => html`<p>${s.secretBundles?.bundles?.length ?? 0} project bundles in view. <a class="link" href="/config/secrets#p-secret-bundles">Open Secrets</a></p>`);
 
 const shortFile = (path, fallback) => typeof path === "string" && path ? `…/${path.split(/[\\/]/).filter(Boolean).slice(-2).join("/")}` : fallback;
 export function configDescription(v) {
-  const s = v.data?.snapshot;
+  const s = v.data?.snapshot ?? filesSnapshot(v);
   const locations = v.data?.configLocations ?? {};
   const settings = locations.settings ?? (s?.settings?.path?.endsWith("/.pi-dispatch/settings.json") ? "~/.pi-dispatch/settings.json" : shortFile(s?.settings?.path, "settings overlay unavailable"));
   const outside = locations.settingsOutsideDeployment === true || settings === "~/.pi-dispatch/settings.json";
@@ -544,16 +545,31 @@ export function configDescription(v) {
 }
 export function configNavigation(v) {
   const s = v.data?.snapshot ?? {};
-  const sections = [
-    ["settings", "Settings", Object.keys(s.settings?.overlay ?? {}).length],
-    ["triggers", "Triggers", s.triggers?.triggers?.length ?? 0],
-    ["pause-windows", "Pause windows", s.pauseWindows?.windows?.length ?? 0],
-    ["scoped-limits", "Scoped limits", s.scopedLimits?.limits?.length ?? 0],
-    ["projects", "Projects", s.projects?.projects?.length ?? 0],
-    ["files", "Files", 2],
-    ["unset", "Unset", 0],
-    ["mcp-servers", "MCP servers", s.overlayMcp?.servers?.length ?? 0],
-  ];
+  // Issue #844: with no snapshot a count comes from the files, or is not drawn at all (`fpill` draws none for null):
+  // never a number above a card that says it could not be read. A file that did not load has no count either.
+  const only = filesSnapshot(v);
+  const fileCount = (list) => (Array.isArray(list) ? list.length : null);
+  const sections = v.data?.snapshot
+    ? [
+        ["settings", "Settings", Object.keys(s.settings?.overlay ?? {}).length],
+        ["triggers", "Triggers", s.triggers?.triggers?.length ?? 0],
+        ["pause-windows", "Pause windows", s.pauseWindows?.windows?.length ?? 0],
+        ["scoped-limits", "Scoped limits", s.scopedLimits?.limits?.length ?? 0],
+        ["projects", "Projects", s.projects?.projects?.length ?? 0],
+        ["files", "Files", 2],
+        ["unset", "Unset", 0],
+        ["mcp-servers", "MCP servers", s.overlayMcp?.servers?.length ?? 0],
+      ]
+    : [
+        ["settings", "Settings", only?.settings?.overlay && typeof only.settings.overlay === "object" ? Object.keys(only.settings.overlay).length : null],
+        ["triggers", "Triggers", fileCount(only?.triggers?.triggers)],
+        ["pause-windows", "Pause windows", fileCount(only?.pauseWindows?.windows)],
+        ["scoped-limits", "Scoped limits", fileCount(only?.scopedLimits?.limits)],
+        ["projects", "Projects", fileCount(only?.projects?.projects)],
+        ["files", "Files", only ? 2 : null],
+        ["unset", "Unset", only ? 0 : null],
+        ["mcp-servers", "MCP servers", fileCount(only?.overlayMcp?.servers)],
+      ];
   return html`<nav class="config-sections" aria-label="Configuration sections">
     ${sections.map(([id, label, count]) =>
       ui.fpill({ label, count, href: `#cf-${id}` }),
@@ -575,6 +591,7 @@ export function configNavigation(v) {
 export const configFiles = fromSnapshot(
   "Files",
   (s, v) => html`<p>${configDescription(v)}</p>`,
+  { files: true },
 );
 export const configUnset = fromSnapshot("Unset a setting", (s, v) =>
   canAct(v)
@@ -583,4 +600,5 @@ export const configUnset = fromSnapshot("Unset a setting", (s, v) =>
         label: "Preview the unset",
       })
     : html`<p>Unset keys fall back to the deployment defaults.</p>`,
+  { files: true },
 );

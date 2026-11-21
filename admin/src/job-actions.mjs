@@ -691,7 +691,17 @@ function currentTriggerFor(entries, kind, data) {
   return { run, entry };
 }
 
-/** A fix must retain the source trigger's identity, not merely reuse its array position and forge kind. */
+/** What a fix's source check answers when it could not look: nothing was read, so nothing is said to be gone or changed. */
+export const TRIGGER_FIX_UNCHECKED = "The source trigger identity could not be checked. Reload and try again; nothing was changed.";
+
+/**
+ * A fix must retain the source trigger's identity, not merely reuse its array position and forge kind.
+ *
+ * "The queue no longer holds" is a claim that every queue was asked and none had the job (issue #844). A lookup that
+ * ran out of time, or found nothing over a queue list the registry or the keyspace scan could not vouch for (`blind`,
+ * `incomplete`), did not ask them all, and answers `TRIGGER_FIX_UNCHECKED`. A lookup that outlives the bound still
+ * closes the queues it opened, when it settles.
+ */
 export async function checkTriggerFixSource({ url, jobId, index, triggersPath, fs = nodeFs, redisFn = makeRedisClient, queueFn = makeQueue, parseConnectionFn = parseConnection, timeoutMs = 2500, readRetainedJob = null } = {}) {
   if (!JOB_ID_RE.test(jobId ?? "") || !Number.isSafeInteger(index) || index < 0) return { refusal: "The source run and trigger index are not valid." };
   let fleet;
@@ -699,17 +709,23 @@ export async function checkTriggerFixSource({ url, jobId, index, triggersPath, f
     const text = fs.readFileSync(triggersPath, "utf8");
     const entries = parseTriggers(text, triggersPath);
     const raw = JSON.parse(text);
-    const found = await within((async () => {
+    const unchecked = Symbol("not checked");
+    const lookup = (async () => {
       if (readRetainedJob) return readRetainedJob(jobId);
       fleet = await openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs });
-      return (await fleet.find(jobId))?.job?.data ?? null;
-    })(), timeoutMs, () => null);
+      const data = (await fleet.find(jobId))?.job?.data ?? null;
+      return data === null && (fleet.blind || fleet.incomplete) ? unchecked : data;
+    })();
+    // The bound below may answer first: the queues the lookup opens after that are closed here, once it settles.
+    void lookup.catch(() => {}).finally(() => { if (fleet) void fleet.close(); });
+    const found = await within(lookup, timeoutMs, () => unchecked);
+    if (found === unchecked) return { refusal: TRIGGER_FIX_UNCHECKED };
     if (!found) return { refusal: "The queue no longer holds the source run's trigger identity. Open the current trigger configuration instead." };
     const current = found.trigger?.matched?.index === index ? currentTriggerFor(entries, found.kind, found) : null;
     if (current?.reason === "phrase") return { refusal: "The comment trigger phrase changed. Review the current trigger before adding instructions." };
     if (current === null || current.refusal || !raw.triggers?.[index]) return { refusal: "The trigger that started this run changed or moved. Review the current trigger before adding instructions." };
     return { ok: true, runId: jobId, index, triggerDigest: createHash("sha256").update(JSON.stringify(raw.triggers[index])).digest("hex") };
-  } catch { return { refusal: "The source trigger identity could not be checked. Reload and try again; nothing was changed." }; }
+  } catch { return { refusal: TRIGGER_FIX_UNCHECKED }; }
   finally { if (fleet) void fleet.close(); }
 }
 

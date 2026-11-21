@@ -270,6 +270,39 @@ test("first run says a triggers file it could not read, and no step reads that a
   assert.equal(step({ triggers: [] }).state, "to-do", "the control: a file holding none");
 });
 
+test("first run with no snapshot: what Valkey alone says is not known, the trigger step is the files', and it never applies", () => {
+  const files = { triggers: { triggers: [{ type: "cron", id: "nightly" }, { type: "label", forge: "github" }] } };
+  const st = firstRunState(null, { session: { role: "operator" }, deployment: { folder: "pi-dispatch" }, files });
+  assert.equal(st.applies, false);
+  assert.deepEqual(st.steps.map((s) => [s.id, s.state, s.unread === true]), [["deployment", "ready", false], ["queue", "not-yet", false], ["token", "ready", false], ["worker", "check", true], ["egress", "check", true], ["provider", "check", true], ["trigger", "ready", false], ["forge", "check", true]]);
+  assert.equal(st.ready, 3);
+  assert.equal(st.unknown, 4);
+  assert.deepEqual(stepOf(st, "trigger").sentence, ["The triggers file holds 2 triggers."]);
+  assert.equal(stepSentenceText(stepOf(st, "worker").sentence), "Valkey could not be read, so nothing here says whether a worker runs.");
+  assert.equal(st.lead, "The console is up. Four steps could not be read, so what stands between this deployment and its first job is not known.");
+  assert.equal(st.sub, "A first job waits until Valkey answers; four steps could not be read, so it may wait for more. This page updates as each step is read.");
+  // Cron triggers alone need no forge, whatever was read: that step stays optional.
+  assert.equal(stepOf(firstRunState(null, { files: { triggers: { triggers: [{ type: "cron", id: "nightly" }] } } }), "forge").state, "optional");
+  // A file the reader could not load says so in its own sentence; no file views at all is not known, never "to do".
+  assert.equal(stepOf(firstRunState(null, { files: { triggers: { invalid: true } } }), "trigger").state, "not-yet");
+  const bare = stepOf(firstRunState(null), "trigger");
+  assert.deepEqual([bare.state, bare.unread], ["check", true]);
+  // Nor is the forge step optional there: whether a trigger needs a forge is the unread file's to say.
+  const bareForge = stepOf(firstRunState(null), "forge");
+  assert.deepEqual([bareForge.state, bareForge.unread], ["check", true]);
+  assert.equal(stepSentenceText(bareForge.sentence), "The triggers file was not read, so nothing here says whether a trigger needs forge credentials.");
+  assert.equal(firstRunState(null).unknown, 5);
+  // A read snapshot is judged from itself alone, and counts nothing as unknown.
+  const read = firstRunState(firstRun(), { files });
+  assert.equal(read.unknown, 0);
+  assert.equal(stepOf(read, "trigger").state, "to-do");
+  assert.equal(read.sub, "Jobs start once a worker runs and its egress proxy is up. This page updates as each step is done.");
+  // The doctor results alone unread, on a read snapshot: its three steps, and the lines stop saying what jobs wait for.
+  const blind = firstRunState(firstRun({ doctor: { unreachable: "timeout" }, triggers: { triggers: [{ type: "label", forge: "github" }] } }));
+  assert.deepEqual(blind.steps.filter((s) => s.unread).map((s) => s.id), ["egress", "provider", "forge"]);
+  assert.equal(blind.sub, "A first job waits until a worker runs; three steps could not be read, so it may wait for more. This page updates as each step is read.");
+});
+
 test("first run applies only on a read snapshot with no run on record and no host row or no trigger", () => {
   const applies = (snap) => firstRunState(snap).applies;
   assert.equal(applies(firstRun()), true);
@@ -344,7 +377,12 @@ test("first run: egress and provider take the worst any host published, repeats 
   assert.equal(absent.state, "check");
   assert.match(stepSentenceText(absent.sentence), /egress may be off there, or its doctor predates the check/);
   assert.equal(egressOf({ hosts: [], more: 0 }).state, "to-do");
-  assert.equal(egressOf({ unreachable: "build3.lan" }).state, "to-do", "an unread doctor is no verdict");
+  // An unread doctor is no verdict, and not "no result yet" either (issue #844): a check, marked unread, that says not known.
+  const unreadEgress = egressOf({ unreachable: "build3.lan" });
+  assert.equal(unreadEgress.state, "check");
+  assert.equal(unreadEgress.unread, true);
+  assert.equal(stepSentenceText(unreadEgress.sentence), "The doctor results could not be read, so nothing here says whether the egress proxy runs.");
+  assert.equal(egressOf({ hosts: [], more: 0 }).unread, undefined, "a read that held no result is not unread");
   assert.ok(!JSON.stringify(firstRunState(firstRun({ doctor: { unreachable: "build3.lan" } }))).includes("build3.lan"));
   const providerOf = (doctor) => stepOf(firstRunState(firstRun({ doctor })), "provider");
   assert.equal(providerOf(rows(["a", M, [{ id: "provider.key", level: "ok" }]])).state, "ready");

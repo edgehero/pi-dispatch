@@ -129,6 +129,21 @@ function targetLink(record, env) {
 /** A panel's heading plus body. */
 const titled = (title, body) => html`<h2>${title}</h2>${body}`;
 
+// ---- unread is not empty (issue #844) --------------------------------------------------------------------------------
+
+/** In place of a host fact where nothing was read about the hosts: never "none", "gone" or a zero. */
+export const HOSTS_UNREAD = "not known: the hosts could not be read";
+
+/** The same as a sentence of its own. */
+export const HOSTS_UNREAD_TEXT = "The hosts could not be read, so what they hold is not known. The next refresh tries again.";
+
+/**
+ * Whether NOTHING was read about the hosts: no snapshot at all, or one whose registry read failed before any had
+ * succeeded (`queue.fleetDegraded` with `hostsReadAt` null). A degraded read after a good one still shows the rows as
+ * they were last seen, which the panels say in their own sentence, so that is not this.
+ */
+export const hostsUnread = (snapshot) => !snapshot || (Boolean(snapshot.queue?.fleetDegraded) && snapshot.hostsReadAt === null);
+
 // ---- action forms (issue #642) ---------------------------------------------------------------------------------------
 
 /** Whether this view draws write controls: an operator, on a console that is not read-only. */

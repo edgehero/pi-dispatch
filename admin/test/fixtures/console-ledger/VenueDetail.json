@@ -619,6 +619,19 @@
       "shows": [
         "Not published by build3"
       ]
+    },
+    {
+      "el": "venue-no-snapshot.operator",
+      "kind": "state",
+      "status": "new",
+      "source": "admin/src/console/panels/venue.mjs#venueSummary",
+      "golden": [
+        "panels/venue-no-snapshot.operator"
+      ],
+      "panel": "p-venue",
+      "shows": [
+        "not known: the hosts could not be read"
+      ]
     }
   ]
 }
