@@ -698,8 +698,8 @@ under one cap, and the Models page shows the comparison. A person adopts it, and
 
 ## Triggers
 
-**A trigger is what starts a job.** All standing triggers live in one `triggers.json`, which the worker and the receiver read
-live, and which the console and the panel can edit, or you by hand. Each entry is an `{ on, run }` pair: **`on` says what fires it**, and
+**A trigger is what starts a job.** All standing triggers live in one `triggers.json`, which the worker, the receiver and the
+poller read live, and which the console and the panel can edit, or you by hand. Each entry is an `{ on, run }` pair: **`on` says what fires it**, and
 **`run` says what it runs**.
 
 ```jsonc

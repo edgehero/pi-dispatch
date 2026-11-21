@@ -108,6 +108,25 @@
  * DISCOVERY_EVERY cycles so an operator who installs the App on a new repo gets polling without a
  * restart. Zero repos from either mechanism fails loud at boot.
  *
+ * THE TRIGGERS FILE IS FOLLOWED, NOT WATCHED (issue #947). The poller used to read triggers.json once, at start, while
+ * the worker and `serve` follow it live: a label trigger added later had its events dropped for good (the cursor moves
+ * past them), and an edited one was queued from the old copy and refused at pickup, until a restart. Now the file is
+ * read again at the top of each cycle, before each entry of the events feed (whose close guard reads the rules), and at
+ * the top of `gate`, which every source reaches, and regrouped only when what was read changed (`makeTriggersFollower`,
+ * config.mjs). A bad edit keeps the last good copy and says so once (`triggers_reload_invalid` with `kept: true`, as
+ * `serve` says it); a fresh start on a bad file still exits 2. There is deliberately no `fs.watch`. A
+ * watch needs a debounce timer, while no timer the poller armed may outlive `done` and this file may not unref one (the
+ * inter-cycle sleep's contract, pinned in its tests). `fs.watch` reports a change differently per platform (issue #295:
+ * Linux names the file, macOS its directory, when the directory goes), which once hid a defect on
+ * macOS. A watch still judges every event inside its debounce window on the old copy. And it
+ * would buy nothing: the poller judges events only inside its cycles, so a read at each judgement is as fresh as any
+ * watch could be, for a stat and a small read at each follow point (a label event passes two: before the close guard
+ * and at the top of `gate`) and no timer at all. What a read cannot see is stated, not closed: a write made in place
+ * and read half done is refused once and taken at the next read, and an event judged in between is judged on the last
+ * good copy, so a label event whose rule only the new text holds is dropped as `no-allowlisted-label` and, its cursor
+ * moved past it, never judged again; and a container that bind-mounts the single file keeps the inode it started
+ * with, as `serve`'s watch does.
+ *
  * POLITENESS: per-endpoint-per-repo ETags make the idle steady state nearly free (304s do not count
  * against the rate limit, per GitHub's docs); `x-poll-interval` is honored as the MINIMUM cycle
  * delay when present; an exhausted rate limit (403/429 with x-ratelimit-remaining: 0) sleeps until
@@ -123,6 +142,7 @@
  */
 
 import { createSign } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { readFile as fsReadFile } from "node:fs/promises";
 import { configError } from "@edgehero/pi-dispatch/config";
 import { judgeValkeyAtStart, makeRedisClient, parseConnection, valkeyClientContext } from "@edgehero/pi-dispatch/connection";
@@ -134,7 +154,8 @@ import { holdAfterDedup, holdBeforeLabel } from "./held.mjs";
 import { filter, hasCloseTriggers, wantsCloserAuthority } from "./filter.mjs";
 import { makeResolveGitHubAuthority } from "./github-members.mjs";
 import { parseSubset } from "./receiver.mjs";
-import { loadPollerConfig } from "./poller-config.mjs";
+import { loadPollerConfig, pollerLoaderEnv } from "./poller-config.mjs";
+import { makeTriggersFollower, triggersFilePath } from "./config.mjs";
 import { retryIdentity } from "./boot-retry.mjs";
 import { hasLocalCloseListeners, localEventsWantCloserAuthority, makeLocalEventAdmission } from "./local-event-listeners.mjs";
 
@@ -218,7 +239,23 @@ export async function startPoller(env = process.env, deps = {}) {
 		judgeValkey = (url, opts) => judgeValkeyAtStart(url, valkeyClientContext({ env: opts.env }), { now: opts.now, ...(opts.sleep ? { sleep: opts.sleep } : {}) }),
 	} = deps;
 
-	const cfg = loadPollerConfig(env, fsDeps);
+	// THE BOOT LOAD'S OWN READ is the follower's baseline (issue #947, through the read seam as serve records its own for
+	// issue #386): the window an edit hides in runs from this read to the first follow, across the identity gate below,
+	// which retries for up to RECEIVER_IDENTITY_RETRY_SECONDS. An edit made there differs from this text and is taken at
+	// the first cycle; a quiet boot reads the same text and follows with no reload and no line.
+	const triggersPath = triggersFilePath(env);
+	const bootRead = fsDeps.readFile ?? readFileSync;
+	let triggersAtBoot = null;
+	const cfg = loadPollerConfig(env, {
+		...fsDeps,
+		readFile: (file, enc) => {
+			const text = bootRead(file, enc);
+			if (file === triggersPath) triggersAtBoot = text;
+			return text;
+		},
+	});
+	// Judged under the boot load's own environment (`pollerLoaderEnv` says why), so a file the boot took is taken again.
+	const triggersFollower = makeTriggersFollower(pollerLoaderEnv(env), cfg, { readFile: fsDeps.readFile, fileExists: fsDeps.fileExists, baseline: triggersAtBoot, log: out, now });
 
 	// HARD-FAIL identity resolution, exactly start.mjs's boot gate and for the same reason: selfId is
 	// the bot-loop guard's sole input, and a poller running without it would read the harness's own
@@ -291,7 +328,7 @@ export async function startPoller(env = process.env, deps = {}) {
 	};
 
 	const admitLocal = makeLocalEventAdmission({ client: () => redisClient, store: localEventStore, log: out });
-	const ctx = { cfg, selfId, fetchFn, redis: redisClient, enqueue, admitLocal, out, now, random, resolveCloserAuthority };
+	const ctx = { cfg, selfId, fetchFn, redis: redisClient, enqueue, admitLocal, out, now, random, resolveCloserAuthority, followTriggers: triggersFollower.follow };
 
 	// The repo set: explicit POLL_REPOS, or the App installation's list (cfg.repos === null only when
 	// the source is app -- poller-config enforces it). An empty discovery is a config error, not an
@@ -362,6 +399,9 @@ export async function startPoller(env = process.env, deps = {}) {
 	const done = (async () => {
 		let cycleNo = 0;
 		while (!stopped) {
+			// Each cycle starts on the file as it is (issue #947), so an edit is taken, or refused and said once, within a
+			// cycle even when no event arrives to be judged.
+			ctx.followTriggers();
 			const stats = emptyStats();
 			const startedAt = now();
 			let rateResetMs = null;
@@ -746,6 +786,9 @@ async function pollLabelEvents(ctx, api, repo, stats) {
 		.filter((e) => typeof e?.id === "number" && e.id > cursor)
 		.sort((a, b) => a.id - b.id); // oldest first: process in the order the webhooks would have fired
 	for (const ev of fresh) {
+		// Before the close guard reads the rules (issue #947): a cycle can start before an edit while its fetch returns an
+		// event made after it, so a close rule added meanwhile must decide whether this `closed` entry is consumed.
+		ctx.followTriggers();
 		if (ev.event === "labeled" && ev.issue) {
 			await handleLabeledEvent(ctx, api, repo, ev, stats);
 		} else if (ev.event === "closed" && ev.issue && (hasCloseTriggers(ctx.cfg?.triggers?.github) || hasLocalCloseListeners(ctx.cfg?.triggers?.github))) {
@@ -1121,6 +1164,10 @@ async function pollReviews(ctx, api, repo, open, stats) {
  * delivery id for good.
  */
 async function gate(ctx, eventName, payload, deliveryId, stats) {
+	// Every source reaches this line, so every event is judged on the file as it is now (issue #947). One follow, before
+	// the first read of the rules: nothing else follows while this judgement awaits (the loop is one chain of awaits), so
+	// the authority test, the local admission and the filter below all read one version of the file.
+	ctx.followTriggers();
 	const subset = parseSubset(payload);
 
 	let closerAuthorized;

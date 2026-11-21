@@ -413,7 +413,8 @@ incident cause remains unproven. See `DES-CONSUMER-LIVENESS` and its recorded ex
 
 ## OQ-008 — Runtime trigger editing: RESOLVED (the file is the write target, applied live)
 
-- **Status**: **RESOLVED** — the admin extension edits `triggers.json`, and both services reload it live.
+- **Status**: **RESOLVED**: the admin extension edits `triggers.json`, and both services reload it live, the
+  receiver's poller included since issue #947 (see the correction below).
 - **Question**: Should the admin extension edit triggers — add / edit-flow / delete a cron, label, comment,
   or pull_request trigger — and via what mechanism that survives a worker or receiver restart?
 - **Why it mattered**: A Redis-side scheduler toggle is overwritten by the worker's boot reconcile
@@ -443,6 +444,18 @@ incident cause remains unproven. See `DES-CONSUMER-LIVENESS` and its recorded ex
   ARMING — survives intact: no machine path can arm anything, and the machine's one verb makes a trigger
   fire less, never more. Both authors serialize through the one shared, locked writer
   (`DES-ONE-SHOT-DISARM-IN-THE-FILE`), moved into the worker package for the purpose.
+- **Corrected 2026-11-21 (issue #947).** "Both services reload it live" was false for a deployment that takes GitHub
+  by polling: `pi-dispatch-receiver poll` loaded the file once at start, so an edit reached the worker and not the
+  poller. A label trigger added afterwards had its events dropped, an edited trigger was queued from the old copy and
+  refused at pickup, and only a restart applied the file, which on an invalid edit exited 2 and left polling down
+  (#970). That is the failure this entry exists to refuse, two sources of truth, with a process's memory as the second
+  one. The poller now reads the file again at the top of each cycle and before it judges each event, swaps its rules
+  in place when the text changed, and keeps the running rules on a bad edit with one `triggers_reload_invalid` line
+  (`DES-GH-POLLING-TRANSPORT`), so the resolution holds for every reader of the file. It follows by reading, not by a
+  watch, so what this entry says of the watches (a tmp+rename is never seen half written) is the writers' guarantee
+  here; a write made in place and read half done is refused once and taken at the next read, and an event judged in
+  between is judged on the last good copy, so a label event whose rule only the new text holds is dropped as
+  `no-allowlisted-label` and not judged again.
 - **Blocks**: Nothing. Shipped.
 
 ## OQ-009 — Chaining from a GitHub-job parent (and cross-folder chaining) is deferred
@@ -2854,3 +2867,4 @@ adversarial passes did.
 | 2026-11-03 | Issue #800. **`OQ-003` AMENDED, status unchanged**: "well under a pipe's atomic-write size" is refuted for a line that can now take 7,680 bytes. Over `PIPE_BUF` it can interleave with another writer, fail its MAC and settle at the floor, which fails closed. And the residual for code inside the runner process now names what is on the line: it can be any string, measured, so the worker's rebuild of `loaded` is the boundary there. |
 | 2026-11-17 (#921) | OQ-012 AMENDED (#921): optional display images now have an actual rendering measurement, but a trusted image can fabricate it and OpenShell is not credited by a Docker probe. The accepted image trust residual remains. |
 | 2026-11-18 | Issue #924. `OQ-007` amended for asynchronous recursive deletion and the measured limits of the consumer-liveness incident evidence. |
+| 2026-11-21 (#947) | **`OQ-008` CORRECTED**: its resolution said both services reload `triggers.json` live, and the receiver's poller read the file once at start, so on a polling deployment an edit reached the worker and not the GitHub triggers, and only a restart applied it, which exits 2 on an invalid file (#970). The poller now follows the file at each cycle and each judgement and keeps its running rules on a bad edit, so the resolution holds; the status line names the poller and a dated paragraph records the correction. The entry's status stays RESOLVED and no question is added: following without a watch is a decision recorded in `DES-GH-POLLING-TRANSPORT` with its residuals, not a choice left open. **`OQ-009` UNCHANGED, checked**: no chaining surface moves. **Code evidence**: receiver/src/config.mjs -> makeTriggersFollower; receiver/src/poller.mjs -> startPoller, pollLabelEvents, gate; receiver/src/poller-config.mjs -> pollerLoaderEnv. |

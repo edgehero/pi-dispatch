@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { loadReceiverConfig, reloadTriggers, triggersFilePath } from "../src/config.mjs";
+import { loadReceiverConfig, makeTriggersFollower, reloadTriggers, triggersFilePath } from "../src/config.mjs";
 import { filter } from "../src/filter.mjs";
 import { FORGE_KINDS } from "@edgehero/pi-dispatch/triggers";
 
@@ -481,6 +481,166 @@ test("reloadTriggers keeps the running triggers when the file goes missing", () 
 	const res = reloadTriggers({}, cfg, { fileExists: () => false, readFile: () => "" });
 	assert.ok(res.invalid);
 	assert.equal(cfg.triggers, original);
+});
+
+// -- following the file without a watch (issue #947: the poller's live triggers) -------------------
+
+const FOLLOW_A = JSON.stringify({ triggers: [{ on: { type: "label", any: ["pi:a"] }, run: { kind: "github", flow: "a" } }] });
+const FOLLOW_B = JSON.stringify({ triggers: [{ on: { type: "label", any: ["pi:b"] }, run: { kind: "github", flow: "b" } }] });
+
+/** A follower over a file the test rewrites: a read returns `file.text`, null is no file, an Error is thrown. */
+function followerOver(baseline, { now = () => 1_000, recorded = true } = {}) {
+	const file = { text: baseline, reads: 0 };
+	const logged = [];
+	const cfg = loadReceiverConfig({ WEBHOOK_SECRET: "shh" }, { fileExists: () => true, readFile: () => baseline });
+	const follower = makeTriggersFollower({}, cfg, {
+		fileExists: () => file.text !== null,
+		readFile: () => {
+			file.reads += 1;
+			if (file.text instanceof Error) throw file.text;
+			return file.text;
+		},
+		...(recorded ? { baseline } : {}),
+		log: (line) => logged.push(line),
+		now,
+	});
+	return { file, logged, cfg, ...follower };
+}
+
+test("following an unchanged file reads it and does nothing else: the same cfg.triggers object, no line (issue #947)", () => {
+	const f = followerOver(FOLLOW_A);
+	const boot = f.cfg.triggers;
+	assert.equal(f.follow(), null);
+	assert.equal(f.follow(), null);
+	assert.equal(f.file.reads, 2, "each follow really reads the file");
+	assert.equal(f.cfg.triggers, boot, "never regrouped while the text is the boot load's");
+	assert.deepEqual(f.logged, []);
+	assert.deepEqual(f.state, { triggers: "current", runningText: FOLLOW_A, refusal: null, rejectedText: null, rejectedAt: null });
+
+	f.file.text = FOLLOW_B;
+	assert.deepEqual(f.follow(), { ok: true });
+	const edited = f.cfg.triggers;
+	assert.notEqual(edited, boot);
+	assert.equal(edited.github.label[0].flow, "b");
+	f.follow();
+	assert.equal(f.cfg.triggers, edited, "the new copy stays as long as its text does");
+	assert.deepEqual(f.logged, [{ event: "triggers_reloaded" }]);
+	assert.equal(f.state.runningText, FOLLOW_B);
+});
+
+test("a bad text is said once however often it is read, a different one again, and the running text back says reloaded (issue #947)", () => {
+	let at = 5_000;
+	const f = followerOver(FOLLOW_A, { now: () => at });
+	const kept = f.cfg.triggers;
+	f.file.text = "{ not json";
+	f.follow();
+	f.follow();
+	assert.equal(f.logged.length, 1);
+	assert.equal(f.logged[0].event, "triggers_reload_invalid");
+	assert.equal(f.logged[0].kept, true);
+	assert.equal(typeof f.logged[0].reason, "string");
+	assert.equal(f.cfg.triggers, kept, "the running rules are kept");
+	assert.deepEqual(f.state, { triggers: "kept", runningText: FOLLOW_A, refusal: "refused", rejectedText: "{ not json", rejectedAt: 5_000 });
+
+	at = 6_000;
+	const cronWithoutFlow = JSON.stringify({ triggers: [{ on: { type: "cron", id: "probe", pattern: "0 4 3 1 *" }, run: { kind: "local", folder: "/srv/probe", task: "t" } }] });
+	f.file.text = cronWithoutFlow;
+	f.follow();
+	assert.equal(f.logged.length, 2, "a different refusal is a new line");
+	assert.match(f.logged[1].reason, /run\.flow/);
+	assert.equal(f.state.rejectedText, cronWithoutFlow);
+	assert.equal(f.state.rejectedAt, 6_000);
+
+	f.file.text = FOLLOW_A;
+	f.follow();
+	assert.deepEqual(f.logged.at(-1), { event: "triggers_reloaded" }, "going back is a change too, and says so");
+	assert.deepEqual(f.state, { triggers: "current", runningText: FOLLOW_A, refusal: null, rejectedText: null, rejectedAt: null });
+});
+
+test("a missing or unreadable file keeps the running rules with one line each, and a file holding such a word is a file (issue #947)", () => {
+	const f = followerOver(FOLLOW_A);
+	const kept = f.cfg.triggers;
+	f.file.text = null;
+	f.follow();
+	f.follow();
+	assert.equal(f.logged.length, 1);
+	assert.match(f.logged[0].reason, /triggers file not found/);
+	assert.equal(f.state.refusal, "missing");
+	assert.equal(f.state.rejectedText, null, "nothing was read, so nothing is recorded as rejected");
+
+	f.file.text = Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+	f.follow();
+	f.follow();
+	assert.equal(f.logged.length, 2);
+	assert.match(f.logged[1].reason, /EACCES/);
+	assert.equal(f.state.refusal, "unreadable");
+
+	// Each kind of read is its own key, so a file whose text is a sentinel's word is judged as text.
+	for (const word of ["missing", "error:EACCES"]) {
+		f.file.text = word;
+		f.follow();
+		assert.equal(f.state.refusal, "refused");
+		assert.equal(f.state.rejectedText, word);
+	}
+	assert.equal(f.logged.length, 4);
+	assert.equal(f.cfg.triggers, kept);
+
+	f.file.text = FOLLOW_A;
+	f.follow();
+	assert.deepEqual(f.logged.at(-1), { event: "triggers_reloaded" });
+	assert.equal(f.state.triggers, "current");
+});
+
+test("a follow loads the very text it compared, from one read: a write that lands after that read is never the one judged (issue #947)", () => {
+	// The first read returns the new file, any later read a half-written copy of it. A follow that read the file again
+	// to load it would refuse the torn copy, and once the file settled at the new text it would match the last key and
+	// never be loaded at all.
+	let reads = 0;
+	const logged = [];
+	const cfg = loadReceiverConfig({ WEBHOOK_SECRET: "shh" }, { fileExists: () => true, readFile: () => FOLLOW_A });
+	const follower = makeTriggersFollower({}, cfg, {
+		fileExists: () => true,
+		readFile: () => (reads++ === 0 ? FOLLOW_B : FOLLOW_B.slice(0, 20)),
+		baseline: FOLLOW_A,
+		log: (line) => logged.push(line),
+	});
+	assert.deepEqual(follower.follow(), { ok: true });
+	assert.equal(reads, 1, "one read per follow that changed something");
+	assert.equal(cfg.triggers.github.label[0].flow, "b", "the rules running are the text compared");
+	assert.equal(follower.state.triggers, "current");
+	assert.equal(follower.state.runningText, FOLLOW_B);
+	assert.deepEqual(logged, [{ event: "triggers_reloaded" }]);
+});
+
+test("a file gone between the stat and the read is missing, not unreadable, and the stat that then says so adds no line (issue #947)", () => {
+	const logged = [];
+	let exists = true;
+	const cfg = loadReceiverConfig({ WEBHOOK_SECRET: "shh" }, { fileExists: () => true, readFile: () => FOLLOW_A });
+	const follower = makeTriggersFollower({}, cfg, {
+		fileExists: () => exists,
+		readFile: () => {
+			throw Object.assign(new Error("ENOENT: no such file or directory, open './triggers.json'"), { code: "ENOENT" });
+		},
+		baseline: FOLLOW_A,
+		log: (line) => logged.push(line),
+	});
+	follower.follow();
+	assert.equal(logged.length, 1);
+	assert.match(logged[0].reason, /triggers file not found/, "the loader's missing-file refusal, not the read error's words");
+	assert.equal(follower.state.refusal, "missing");
+	exists = false;
+	follower.follow();
+	assert.equal(logged.length, 1, "the same absence, seen by the stat now, is not a second refusal");
+});
+
+test("with no boot read to compare against, the first follow loads the file and says so (issue #947)", () => {
+	const f = followerOver(FOLLOW_A, { recorded: false });
+	assert.equal(f.state.runningText, null);
+	f.follow();
+	assert.deepEqual(f.logged, [{ event: "triggers_reloaded" }], "a follower that cannot know what runs reloads once rather than trust it");
+	assert.equal(f.state.runningText, FOLLOW_A);
+	f.follow();
+	assert.equal(f.logged.length, 1);
 });
 
 // --- per-forge rule grouping (issue #42) ---
