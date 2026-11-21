@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
 import { entryExitCode, main } from "../src/cli.mjs";
 import { POLLER_GRACE_MS, parsePollerStatus, pollerKey, triggersDigest } from "../src/poller-status.mjs";
+import { readPollerFacts } from "../src/poller-facts.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 
 // pause/resume/status dynamic-import bullmq/ioredis only when they reach the queue. The USAGE,
@@ -279,6 +280,105 @@ test("status names each poller when more than one publishes, and says of one who
 	assert.deepEqual(status.pollers.hosts.map((h) => [h.name, h.unreadable === true]), [["mini1", false], ["mini2", true]]);
 	assert.equal(status.pollers.complete, false, "a record it cannot read is a record it does not know");
 	assert.match(status.pollers.note, /^poller on mini1: running on the previous triggers\.json, the current file is invalid: cron trigger "probe": run\.flow must be .*; poller on mini2: its heartbeat cannot be read \(written by another release, or damaged\)$/);
+});
+
+test("status asks the shared rule: POLL_REPOS without GITHUB_INGEST expects a poller, an App taking webhooks does not (issue #970)", async () => {
+	// #970's case for a poller set up by hand without GITHUB_INGEST: no heartbeat, an invalid file.
+	const listed = await pollerStatus(deployment("POLL_REPOS=acme/web\n", PROBE_FILE));
+	assert.equal(listed.code, 0);
+	assert.equal(listed.status.pollers.expected, true);
+	assert.match(listed.status.pollers.note, /^poller: no poller has published a heartbeat \(a poller older than this release publishes none\); the current triggers\.json is invalid, so a poller started on it refuses to start \(exit 2\): cron trigger "probe"/);
+	// What `pi-dispatch setup github` writes with a webhook: nothing says a poller runs, and status says nothing of one.
+	const app = await pollerStatus(deployment("GITHUB_AUTH_SOURCE=app\nWEBHOOK_SECRET=w\n", PROBE_FILE));
+	assert.deepEqual(app.status.pollers, { expected: null, hosts: [], complete: true });
+	// POLL_REPOS is asked for whether it names repositories, never which: two different lists agree, and neither is
+	// printed; this shell naming none where the .env names some is a disagreement, said without a value.
+	const lists = await pollerStatus(deployment("POLL_REPOS=acme/web\n", GOOD_FILE), { env: { POLL_REPOS: "acme/api,acme/x" } });
+	assert.equal(lists.status.pollers.expected, true);
+	assert.equal(lists.status.pollers.local, undefined);
+	const split = await pollerStatus(deployment("POLL_REPOS=acme/web\n", GOOD_FILE), { env: { POLL_REPOS: " " } });
+	assert.equal(split.status.pollers.expected, null);
+	assert.match(split.status.pollers.local, /^POLL_REPOS is blank in this shell and names repositories in .*\.env \(neither value is shown\), so whether this deployment polls cannot be told/);
+	for (const r of [lists, split]) assert.doesNotMatch(JSON.stringify(r.status), /acme\/(api|web|x)/);
+});
+
+test("a kept poller over this host's file that this shell cannot judge says it refused this host's file, and why it is not judged (issue #970)", async () => {
+	// A deployment whose watch secret is missing from the .env, so the poller kept its older copy, and a shell that
+	// exports the secret, which the check refuses to judge with.
+	const watched = JSON.stringify({ watchSources: { prod: { verify: "hmac-sha256", secretEnv: "WATCH_PROD_SECRET", maxPerDay: 10 } }, triggers: [{ on: { type: "watch", id: "w1", source: "prod", fingerprint: ["service"], window: "10m", cooldown: "1h", maxPerDay: 2 }, run: { kind: "local", mode: "issue", issue: { kind: "github", repo: "acme/shop" } } }] });
+	const kept = pollerRecord({ triggers: "kept", refusal: "refused", rejected: triggersDigest(watched), rejectedAt: POLL_AT - 30_000 });
+	const cwd = deployment("GITHUB_INGEST=poll\n", watched);
+	const secret = await pollerStatus(cwd, { records: { mini1: kept }, env: { WATCH_PROD_SECRET: "private-shell-value" } });
+	assert.equal(secret.code, 0);
+	assert.match(secret.status.pollers.note, /^poller: running on the previous triggers\.json, it refused this host's file, which cannot be judged from this shell: WATCH_PROD_SECRET is set in this shell and not in .*\.env \(no value is shown\)/);
+	assert.match(secret.status.pollers.local, /^WATCH_PROD_SECRET is set in this shell and not in /);
+	assert.doesNotMatch(JSON.stringify(secret.status), /private-shell-value|another host/);
+	// A setting only this shell has is the same: the file is still this host's.
+	const setting = await pollerStatus(deployment("POLL_REPOS=o/r\n", PROBE_FILE), { records: { mini1: pollerRecord({ triggers: "kept", refusal: "refused", rejected: triggersDigest(PROBE_FILE), rejectedAt: POLL_AT - 30_000 }) }, env: { GITHUB_INGEST: "poll" } });
+	assert.match(setting.status.pollers.note, /^poller: running on the previous triggers\.json, it refused this host's file, which cannot be judged from this shell: GITHUB_INGEST is set in this shell and not in /);
+});
+
+test("POLL_REPOS this shell alone names, a .env line for it the loader may read otherwise, or a .env that cannot be read: not known, said, never a poller expected (issue #970)", async () => {
+	const shellOnly = await pollerStatus(deployment("WEBHOOK_SECRET=w\n", GOOD_FILE), { env: { POLL_REPOS: "o/r" } });
+	assert.equal(shellOnly.status.pollers.expected, null);
+	assert.match(shellOnly.status.pollers.local, /^POLL_REPOS names repositories in this shell and has no line in .*\.env \(neither value is shown\)/);
+	const unread = await pollerStatus(deployment('POLL_REPOS="$REPOS"\n', GOOD_FILE));
+	assert.equal(unread.status.pollers.expected, null);
+	assert.match(unread.status.pollers.local, /has a line for POLL_REPOS that the service's loader may read differently/);
+	// An empty GITHUB_INGEST in this shell is unset and answers for itself, so POLL_REPOS is asked of a .env that is a folder.
+	const folder = tempDir("pd-970-status-");
+	mkdirSync(join(folder, ".env"));
+	const blocked = await pollerStatus(folder, { env: { GITHUB_INGEST: "" } });
+	assert.equal(blocked.status.pollers.expected, null);
+	assert.match(blocked.status.pollers.local, /could not be read \(EISDIR\), so whether POLL_REPOS is set cannot be told$/);
+	for (const r of [shellOnly, unread, blocked]) assert.equal(r.code, 0);
+});
+
+test("a kept poller over a file not read here is never said to run on another host's copy (issue #970)", async () => {
+	const kept = pollerRecord({ triggers: "kept", refusal: "refused", rejected: triggersDigest(PROBE_FILE), rejectedAt: POLL_AT - 30_000 });
+	const redis = { async sscan() { return ["0", ["mini1"]]; }, async mget() { return [kept]; }, async pttl() { return 40_000 + POLLER_GRACE_MS; } };
+	// A file that would not open.
+	const cwd = deployment("GITHUB_INGEST=poll\n", PROBE_FILE);
+	const denied = (p) => {
+		if (p.endsWith("triggers.json")) throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+		return readFileSync(p, "utf8");
+	};
+	const closed = await readPollerFacts(redis, { env: {}, cwd, now: () => POLL_AT, readText: denied });
+	assert.match(closed.note, /^poller: running on the previous triggers\.json; this host's file was not read here \(see local\), so whether the copy it refused is this one is not known/);
+	assert.match(closed.local, /triggers\.json could not be read \(EACCES\)$/);
+	// A setting this shell and the .env disagree on comes before the file is read.
+	const split = await pollerStatus(deployment("GITHUB_INGEST=poll\nPI_WORKER_NAME=rvK\n", PROBE_FILE), { records: { mini1: kept }, env: { PI_WORKER_NAME: "mini9" } });
+	assert.match(split.status.pollers.note, /^poller: running on the previous triggers\.json; this host's file was not read here/);
+	for (const note of [closed.note, split.status.pollers.note]) assert.doesNotMatch(note, /another host/);
+});
+
+test("status hashes the file the services read, not one a PI_TRIGGERS_FILE of this shell alone names (issue #970)", async () => {
+	const cwd = deployment("GITHUB_INGEST=poll\n", PROBE_FILE);
+	writeFileSync(join(cwd, "other.json"), GOOD_FILE);
+	const kept = pollerRecord({ triggers: "kept", refusal: "refused", rejected: triggersDigest(PROBE_FILE), rejectedAt: POLL_AT - 30_000 });
+	const { status } = await pollerStatus(cwd, { records: { mini1: kept }, env: { PI_TRIGGERS_FILE: join(cwd, "other.json") } });
+	assert.match(status.pollers.note, /^poller: running on the previous triggers\.json, it refused this host's file, which cannot be judged from this shell: PI_TRIGGERS_FILE is set in this shell and not in /);
+});
+
+test("a heartbeat is read and judged where the settings say nothing of a poller: an App taking webhooks with a kept poller (issue #970)", async () => {
+	const kept = pollerRecord({ triggers: "kept", refusal: "refused", rejected: triggersDigest(PROBE_FILE), rejectedAt: POLL_AT - 30_000 });
+	const { code, status } = await pollerStatus(deployment("GITHUB_AUTH_SOURCE=app\nWEBHOOK_SECRET=w\n", PROBE_FILE), { records: { mini1: kept } });
+	assert.equal(code, 0);
+	assert.equal(status.pollers.expected, null);
+	assert.deepEqual(status.pollers.hosts.map((h) => [h.name, h.triggers]), [["mini1", "kept"]]);
+	assert.match(status.pollers.note, /^poller: running on the previous triggers\.json, the current file is invalid: cron trigger "probe": run\.flow must be/);
+});
+
+test("GITHUB_INGEST decides where it is set: a POLL_REPOS this shell and the .env disagree on changes nothing and is never printed (issue #970)", async () => {
+	const cwd = deployment("GITHUB_INGEST=poll\nPOLL_REPOS=o/r\n", PROBE_FILE);
+	for (const shell of [{ POLL_REPOS: "o/r,o/x" }, { POLL_REPOS: "" }]) {
+		const { code, status } = await pollerStatus(cwd, { env: shell });
+		assert.equal(code, 0);
+		assert.equal(status.pollers.expected, true, JSON.stringify(shell));
+		assert.equal(status.pollers.local, undefined);
+		assert.match(status.pollers.note, /^poller: no poller has published a heartbeat/);
+		assert.doesNotMatch(JSON.stringify(status), /o\/r|o\/x/);
+	}
 });
 
 test("status says no poller has published where the deployment polls, with why a poller would refuse this host's file, and exits 0 (issue #970)", async () => {

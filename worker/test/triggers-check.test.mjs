@@ -185,7 +185,9 @@ test("the first GitHub rule makes serve need WEBHOOK_SECRET where nothing else s
 	assert.equal(r.code, 1);
 	assert.match(r.err, /^error: the receiver and the watch collector refuse it: this file holds a GitHub rule, and with GITHUB_INGEST and GITHUB_AUTH_SOURCE unset that makes serve serve GitHub, which needs WEBHOOK_SECRET, unset or blank here: set it, or set GITHUB_INGEST=poll where the poller brings GitHub's events\n/);
 	assert.match(r.err, /\nA receiver or watch collector started on /);
-	assert.equal((await check(cwd, ["after.json"], { WEBHOOK_SECRET: "w" })).code, 0, "with the secret");
+	assert.equal((await check(cwd, ["after.json"], { WEBHOOK_SECRET: "w" })).code, 1, "a secret this shell alone sets is no secret the services have");
+	writeFileSync(join(cwd, ".env"), `POLL_REPOS=o/r\nWATCH_SIGNING=${SECRET}\nWEBHOOK_SECRET=w\n`);
+	assert.equal((await check(cwd, ["after.json"])).code, 0, "with the secret in the .env the services read");
 	// What says GitHub may be the .env alone: the secret is then asked for by the settings the deployment resolves, never
 	// by this shell's, which here would see no GitHub at all and leave WEBHOOK_SECRET unread.
 	const fromFile = deployment({ "triggers.json": { triggers: [NOT_GITHUB.gitlab] }, ".env": "GITHUB_INGEST=both\nWEBHOOK_SECRET=w\nPOLL_REPOS=o/r\n" });
@@ -229,9 +231,21 @@ test("a watch source's secret: missing or blank refuses, set in the deployment .
 	assert.equal(inEnvFile.code, 0, inEnvFile.err);
 	assert.match(inEnvFile.out, /: 2 triggers \(0 cron, 1 forge, 1 watch\)\. The receiver, the poller and the watch collector take it/);
 
-	const blank = await check(deployment({ "triggers.json": doc, ".env": POLL }), [], { WATCH_SIGNING: "   " });
-	assert.equal(blank.code, 1);
-	assert.match(blank.err, /WATCH_SIGNING, which is unset or blank here/);
+	const blank = judge(doc, { GITHUB_INGEST: "poll", WATCH_SIGNING: "   " });
+	assert.deepEqual(blank.refusals.map((x) => x.reason), ['watch source "prod" needs its signing secret WATCH_SIGNING, which is unset or blank here']);
+
+	// Set in this shell and absent from the .env (issue #970): the services read the .env, where the real poller loader
+	// refuses the file, so the check refuses to judge it rather than pass it on this shell's value.
+	const shellOnlyCwd = deployment({ "triggers.json": doc, ".env": POLL });
+	const shellOnly = await check(shellOnlyCwd, [], { WATCH_SIGNING: SECRET });
+	assert.deepEqual([shellOnly.code, shellOnly.out], [1, ""]);
+	assert.equal(shellOnly.err, `error: WATCH_SIGNING is set in this shell and not in ${join(shellOnlyCwd, ".env")} (no value is shown), and the services read the .env, so whether it is set for them cannot be told: add it to the .env, or unset it in this shell\n`);
+	assert.throws(() => loadPollerConfig({ GITHUB_INGEST: "poll", POLL_REPOS: "o/r", GITHUB_AUTH_SOURCE: "pat", GITHUB_PAT: "t" }, { readFile: () => JSON.stringify(doc), fileExists: () => true }), /watch: a configured source secret is missing/, "the poller on the .env alone refuses the file");
+	assert.equal((await check(shellOnlyCwd, [], { WATCH_SIGNING: "   " })).code, 1, "blank here and absent there is refused the same way");
+	// Empty in this shell and absent from the .env: unset to every reader, judged so.
+	const emptyHere = await check(shellOnlyCwd, [], { WATCH_SIGNING: "" });
+	assert.equal(emptyHere.code, 1);
+	assert.match(emptyHere.err, /^error: the receiver, the poller and the watch collector refuse it: watch source "prod" needs its signing secret WATCH_SIGNING, which is unset or blank here\n/);
 
 	// Set in one place and blank or empty in the other: which one a service runs on is not this command's to guess.
 	for (const [shell, file, words] of [[" ", SECRET, "blank in this shell and set"], [SECRET, "", "set in this shell and empty"]]) {
@@ -245,7 +259,7 @@ test("a watch source's secret: missing or blank refuses, set in the deployment .
 	assert.equal(both.code, 0, both.err);
 	assert.doesNotMatch(both.out, /note:/);
 
-	for (const r of [missing, inEnvFile, blank, both]) assert.doesNotMatch(r.out + r.err, /private-signing-value|another-private-value/);
+	for (const r of [missing, inEnvFile, shellOnly, both]) assert.doesNotMatch(r.out + r.err, /private-signing-value|another-private-value/);
 	// A source with no pull block: the watch collector has nothing to load it for, so it is not named.
 	const pushOnly = judge({ watchSources: { prod: source("WATCH_SIGNING", false) }, triggers: [WATCH_RULE] }, {});
 	assert.deepEqual(pushOnly.refusals.map((x) => x.readers), [["receiver", "poller"]]);
@@ -275,9 +289,41 @@ test("a .env the secrets cannot be read from is refused, naming the variable, an
 	assert.deepEqual([named.code, named.err], [1, "error: PI_TRIGGERS_FILE is set to an empty value, so there is no file to judge, and every reader refuses to start on it: set it to the file, or delete the line\n"]);
 });
 
+test("a setting this shell sets and the .env has no line for is refused, naming it and no value; with no .env, this shell's settings are the deployment's (issue #970)", async () => {
+	const cwd = deployment({ "triggers.json": { triggers: [LABEL] }, ".env": "POLL_REPOS=o/r\n" });
+	const fileAlone = await check(cwd);
+	assert.equal(fileAlone.code, 1);
+	assert.match(fileAlone.err, /^error: the receiver refuses it: this file holds a GitHub rule, and with GITHUB_INGEST and GITHUB_AUTH_SOURCE unset that makes serve serve GitHub, which needs WEBHOOK_SECRET/);
+	// GITHUB_INGEST=poll in this shell alone would excuse the secret, for a service that does not have it.
+	const shellOnly = await check(cwd, [], { GITHUB_INGEST: "poll" });
+	assert.deepEqual([shellOnly.code, shellOnly.out], [1, ""]);
+	assert.equal(shellOnly.err, `error: GITHUB_INGEST is set in this shell and not in ${join(cwd, ".env")} (no value is shown), and the services read the .env, so the file cannot be judged as they load it: add it to the .env, or unset it in this shell\n`);
+	const two = await check(cwd, [], { GITHUB_INGEST: "poll", GITHUB_AUTH_SOURCE: "pat" });
+	assert.match(two.err, /^error: GITHUB_INGEST and GITHUB_AUTH_SOURCE are set in this shell and not in .* add them to the \.env, or unset them in this shell\n$/);
+	assert.doesNotMatch(shellOnly.err + two.err, /=poll|=pat|"poll"|"pat"/);
+	// The same setting in the .env is the deployment's, and the file is taken.
+	writeFileSync(join(cwd, ".env"), "POLL_REPOS=o/r\nGITHUB_INGEST=poll\n");
+	assert.equal((await check(cwd, [], { GITHUB_INGEST: "poll" })).code, 0);
+	// A file missing where the services look, under a PI_TRIGGERS_FILE of this shell alone: the setting is the news.
+	const elsewhere = deployment({ "elsewhere.json": { triggers: [LABEL] }, ".env": "POLL_REPOS=o/r\n" });
+	const missing = await check(elsewhere, [], { PI_TRIGGERS_FILE: join(elsewhere, "elsewhere.json") });
+	assert.equal(missing.err, `error: PI_TRIGGERS_FILE is set in this shell and not in ${join(elsewhere, ".env")} (no value is shown), and the services read the .env, so the file cannot be judged as they load it: add it to the .env, or unset it in this shell\n`);
+	// Empty in this shell and absent from the .env is unset, as the services have it: not refused, and never judged as
+	// empty (an empty PI_TRIGGERS_FILE would refuse every reader where the services read ./triggers.json).
+	const polled = deployment({ "triggers.json": { triggers: [LABEL] }, ".env": "GITHUB_INGEST=poll\nPOLL_REPOS=o/r\n" });
+	for (const shell of [{ PI_TRIGGERS_FILE: "" }, { PI_WORKER_NAME: "" }, { PI_TRIGGERS_FILE: "", GITHUB_AUTH_SOURCE: "" }]) {
+		const r = await check(polled, [], shell);
+		assert.equal(r.code, 0, `${JSON.stringify(shell)}: ${r.err}`);
+	}
+	// No .env at all: nothing to differ from, as before.
+	const noEnv = deployment({ "triggers.json": { triggers: [LABEL] } });
+	const bare = await check(noEnv, [], { GITHUB_INGEST: "poll", POLL_REPOS: "o/r" });
+	assert.equal(bare.code, 0, bare.err);
+});
+
 test("what reaches the check is the judged settings and a mark per secret, never a secret's value", async () => {
 	const doc = { watchSources: { prod: source("WATCH_SIGNING") }, triggers: [WATCH_RULE, LABEL] };
-	const cwd = deployment({ "triggers.json": doc, ".env": `WATCH_SIGNING=${SECRET}\nPOLL_REPOS=o/r\n` });
+	const cwd = deployment({ "triggers.json": doc, ".env": `WATCH_SIGNING=${SECRET}\nWEBHOOK_SECRET=${SECRET}\nPOLL_REPOS=o/r\n` });
 	let seen = null;
 	const code = await runTriggers(["check"], { env: { WEBHOOK_SECRET: "another-private-value", GITHUB_PAT: "a-token-value", HOME: "/home/x" }, cwd, now, out: () => {}, err: () => {}, check: (text, path, opts) => ((seen = opts.env), { ok: true, counts: { triggers: 2, cron: 0, forge: 1, watch: 1 }, readers: [], notes: [] }) });
 	assert.equal(code, 0);

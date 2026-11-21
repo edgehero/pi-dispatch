@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
 import * as panels from "../src/console/panels/connections.mjs";
 import { modelConnections } from "../src/connections-view.mjs";
 import { cardDocument, cardText } from "./helpers/card-structure.mjs";
 import { consoleConnectionsFixture } from "./helpers/configuration-goldens.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
+import { readPollerFacts } from "../../worker/src/poller-facts.mjs";
 
 // Issue #970: the pollers' heartbeats on Connections, a second line under GitHub's polling, in words rather than a golden.
 const AT = Date.UTC(2026, 10, 21, 12);
@@ -16,6 +20,12 @@ const words = (markup) => cardText(markup).replace(/ ([,:;.])/g, "$1");
 
 /** The Connections facts with `pollers` as the heartbeats' source, and any other change to the fixture's reads. */
 const facts = (pollers, change = () => {}, options = {}) => consoleConnectionsFixture(AT, { ...options, change: (snapshot, reads) => { reads.pollers = pollers; change(snapshot, reads); } });
+
+/** The fixture's deployment file with `extra` settings over it (an App deployment, no POLL_REPOS, by default). */
+const withEnv = (extra) => (_, reads) => {
+  const original = reads.environment;
+  reads.environment = (o) => ({ env: { ...original(o).env, ...extra } });
+};
 
 /** GitHub's Polling cell, as drawn for `role` (an operator who may act unless `readOnly`). */
 function pollingCell(value, options = {}) {
@@ -75,12 +85,13 @@ test("the older file is a problem after every other, so each banner keeps its pl
   }
 });
 
-test("with none reporting and polling on, a complete read says no poller reported and an incomplete one poller not known", async () => {
-  const none = pollingCell(await facts(async () => ({ hosts: [], complete: true, more: 0 })));
+test("with none reporting where the deployment polls, a complete read says no poller reported and an incomplete one poller not known", async () => {
+  const polls = withEnv({ GITHUB_INGEST: "both" });
+  const none = pollingCell(await facts(async () => ({ hosts: [], complete: true, more: 0 }), polls));
   marked(none, "no poller reported", "info", "attention");
   assert.match(cardText(none), /App installation repositories no poller reported$/);
   for (const source of [async () => ({ hosts: [], complete: false, more: 0 }), async () => { throw new Error("PRIVATE_DETAIL"); }]) {
-    const unknown = pollingCell(await facts(source));
+    const unknown = pollingCell(await facts(source, polls));
     marked(unknown, "poller not known", "info", "attention");
     assert.doesNotMatch(unknown, /PRIVATE_DETAIL|no poller reported/);
   }
@@ -100,4 +111,48 @@ test("a view read without heartbeats draws the polling cell as before, and the a
   const model = modelConnections(value);
   assert.equal(Object.hasOwn(model, "pollers"), false);
   assert.doesNotMatch(JSON.stringify(model), new RegExp(`${RUNNING}|fedcba9876543210|older triggers`));
+});
+
+/** `pi-dispatch status`'s pollers for a deployment folder with this `.env` and triggers file, over a complete empty read. */
+async function statusPollers(envText, triggers) {
+  const cwd = tempDir("pd-970-agree-");
+  writeFileSync(join(cwd, ".env"), envText);
+  writeFileSync(join(cwd, "triggers.json"), triggers);
+  return readPollerFacts({ async sscan() { return ["0", []]; } }, { env: {}, cwd, now: () => AT });
+}
+
+test("status and Connections say a poller is missing in the same deployments: an App taking webhooks in neither, POLL_REPOS without GITHUB_INGEST in both", async () => {
+  const invalid = JSON.stringify({ triggers: [{ on: { type: "cron", id: "probe", pattern: "0 4 3 1 *" }, run: { kind: "local", folder: "/srv/probe", task: "probe" } }] });
+  const none = async () => ({ hosts: [], complete: true, more: 0 });
+  // What `pi-dispatch setup github` writes with a webhook: GITHUB_AUTH_SOURCE=app and no GITHUB_INGEST or POLL_REPOS.
+  const app = { GITHUB_AUTH_SOURCE: "app", WEBHOOK_SECRET: "fixture-only" };
+  const appCell = pollingCell(await facts(none, (_, reads) => { reads.environment = () => ({ env: app }); }));
+  assert.equal(words(appCell), "on · 60 s App installation repositories", "the polling the settings allow, and no alarm");
+  const appStatus = await statusPollers("GITHUB_AUTH_SOURCE=app\nWEBHOOK_SECRET=fixture-only\n", invalid);
+  assert.deepEqual(appStatus, { expected: null, hosts: [], complete: true });
+  // A hand-made poller's deployment: POLL_REPOS set, GITHUB_INGEST unset, an invalid file and no poller (#970's case).
+  const listed = { POLL_REPOS: "acme/web", WEBHOOK_SECRET: "fixture-only" };
+  const listedCell = pollingCell(await facts(none, (_, reads) => { reads.environment = () => ({ env: listed }); }));
+  marked(listedCell, "no poller reported", "info", "attention");
+  const listedStatus = await statusPollers("POLL_REPOS=acme/web\nWEBHOOK_SECRET=fixture-only\n", invalid);
+  assert.equal(listedStatus.expected, true);
+  assert.match(listedStatus.note, /^poller: no poller has published a heartbeat \(a poller older than this release publishes none\); the current triggers\.json is invalid, so a poller started on it refuses to start \(exit 2\): cron trigger "probe": run\.flow must be/);
+  // A heartbeat is drawn whatever the settings say.
+  assert.match(words(pollingCell(await facts(async () => ({ hosts: [poller()], complete: true, more: 0 }), (_, reads) => { reads.environment = () => ({ env: app }); }))), /poller running on mini2, beat 12s ago$/);
+});
+
+test("settings the console cannot read, or a GITHUB_INGEST every receiver command refuses, leave whether a poller runs unknown and draw no alarm", async () => {
+  const none = async () => ({ hosts: [], complete: true, more: 0 });
+  // An unread line makes the whole environment unknown, even where the file it did read says poll.
+  const unread = await facts(none, (_, reads) => {
+    const original = reads.environment;
+    reads.environment = (o) => ({ env: { ...original(o).env, GITHUB_INGEST: "poll" }, unread: [{ key: "PI_EGRESS", line: 3 }] });
+  });
+  assert.equal(unread.pollers.expected, null);
+  assert.doesNotMatch(words(pollingCell(unread)), /no poller reported|poller not known/);
+  // The rule throws on a GITHUB_INGEST no receiver command takes; the page is still drawn, and says nothing of a poller.
+  const refused = await facts(none, withEnv({ GITHUB_INGEST: "pull" }));
+  assert.equal(refused.pollers.expected, null);
+  assert.ok(refused.problems.some((p) => p.title === "GITHUB_INGEST is not webhook, poll or both"), "the refused setting is the page's problem instead");
+  assert.doesNotMatch(words(pollingCell(refused)), /no poller reported|poller not known/);
 });

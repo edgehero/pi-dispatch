@@ -2,7 +2,7 @@ import { readEndpointStatus, ENDPOINT_STATUS_HOSTS_MAX } from "@edgehero/pi-disp
 import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
 import { readProviderInventory, providerInventoryView } from "./provider-inventory.mjs";
 import { readReceiverStatus, parseReceiverStatus, receiverForgeFacts, RECEIVER_FORGES, RECEIVER_OUTCOMES } from "@edgehero/pi-dispatch/receiver-status";
-import { readPollerStatus } from "@edgehero/pi-dispatch/poller-status";
+import { pollerExpected, readPollerStatus } from "@edgehero/pi-dispatch/poller-status";
 import { readSubscriptionAuthView, subscriptionAuthForAgent } from "./subscription-auth-view.mjs";
 /** Display-only deployment facts (#751). Raw environment values never leave this reader. */
 import * as nodeFs from "node:fs";
@@ -178,6 +178,11 @@ export function connectionsProblems(hosts, runs = [], forges = [], pollers = nul
   return problems;
 }
 
+/** `pollerExpected` over the deployment file's settings, null where it refuses them. */
+function pollerExpectedOf(env) {
+  try { return pollerExpected(env); } catch { return null; }
+}
+
 /** Injected sources make every exceptional state independent; no metadata read changes a capability or worker env. */
 export async function readConnections({ deploymentDir, env = {}, paths = {}, snapshot = null, fs = nodeFs, now = Date.now(), redis = null, redisFn = makeRedisClient, reads = {}, publications = true, platform = process.platform, uid = process.geteuid?.() } = {}) {
   let file = {};
@@ -312,7 +317,9 @@ export async function readConnections({ deploymentDir, env = {}, paths = {}, sna
     now, environmentUnknown, environment, subscriptionAuth,
     providerKeys: readProviderInventory({ deploymentDir, env, paths, snapshot, fs, platform, uid, reads: reads.providerInventory ?? { environment: reads.environment } }),
     receiver: { port: positive(file.RECEIVER_PORT, 3000), unknown: environmentUnknown, ...receivers },
-    ...(pollers ? { pollers } : {}),
+    // `expected` is the rule `pi-dispatch status` asks (issue #970), so the two say a poller is missing in the same
+    // deployments; unknown settings, or a GITHUB_INGEST every receiver command refuses, leave it null.
+    ...(pollers ? { pollers: { ...pollers, expected: environmentUnknown ? null : pollerExpectedOf(file) } } : {}),
     forges,
     egress: { on: egressOn, problem: egressProblem, allowlist: Array.isArray(allowlist) ? allowlist.slice(0, 8) : null, more: Array.isArray(allowlist) ? Math.max(0, allowlist.length - 8) : 0, hosts },
     endpointFleetDeclared, endpointStatus, endpointsMore,

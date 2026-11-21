@@ -6269,8 +6269,12 @@ and selects the `on.type` it owns (worker: `cron`; receiver: `label`, `comment`,
   `GITHUB_INGEST` and `GITHUB_AUTH_SOURCE` unset is this file's GitHub rules: refused by the receiver and the
   collector, and by the poller only for a secret of spaces, since it puts its placeholder in for an unset or empty
   one). It reads those settings from the deployment (this shell, else its `.env`, a disagreement refused, a secret for
-  its presence only). Exit 0 when every reader that loads the file there takes it, 1 when one refuses or the file
-  cannot be judged; it writes nothing, and a running service reloads the file itself.
+  its presence only, refused where this shell and the `.env` disagree on whether it is set; a setting or a secret this
+  shell sets and a `.env` that is there has no line for is refused, naming it and no value, since the services read the
+  `.env` (empty in this shell is unset, as the services have it), while with no `.env` this shell's settings are the
+  deployment's; AMENDED 2026-11-21, #970). Exit 0 when
+  every reader that loads the file there takes it, 1 when one refuses or the file cannot be judged; it writes nothing,
+  and a running service reloads the file itself.
 
 - **Why**: The operator's trigger set is one host file — diffable, reviewable, git-trackable — rather than
   two files in two shapes across two services. The schema unifies the *view*; evaluation still splits by
@@ -12170,9 +12174,15 @@ or fields that disagree is unreadable, and a field it does not know is dropped:
 
 The beats are the poll loop's own, and it arms no timer for them (the loop's `done` contract, `DES-GH-POLLING-TRANSPORT`):
 one after `poller_started` and one at the top of each cycle after the triggers follow, each with `ttlMs`
-`POLLER_GRACE_MS` (5 minutes) and `nextAt` null; and one before each wait, after the cursor renewal, with `ttlMs` the
-wait plus the grace (at most the bound) and `nextAt` the wait's end, so a rate-limit sleep of up to an hour reads as a
-poller that runs. A beat SETs with PX, SADDs, and checks and prunes one page of the index with the receiver's script
+`POLLER_GRACE_MS` (5 minutes) and `nextAt` null; one inside a cycle (before each repository's poll, before each GitHub
+request the cycle makes, and before each family's renewal) once `POLLER_CYCLE_BEAT_MS` (a minute, by the poller's
+injected clock) has passed since the last beat, with the same TTL, so a cycle longer than the grace, of many
+repositories or of one repository's many requests, keeps its record while each request answers within the grace less
+one beat interval, since a beat can fall up to a minute before a request starts (a request that takes longer than
+four minutes can let it expire); and one before each wait, after the cursor renewal, with `ttlMs` the wait plus the
+grace (at most the bound) and `nextAt` the wait's end, so a rate-limit sleep of up to an
+hour reads as a poller that runs. A beat SETs with PX, SADDs, and checks and prunes one page of the index with the
+receiver's script
 (`pruneLiveIndex`). A stop deletes the record and its index entry (DEL, SREM) before the poller's connections close.
 Each write is awaited like the loop's own cursor writes, so it adds no wait theirs do not have; a failure logs one
 `poller_status_unavailable` with a fixed reason (`record`, `write`, `index`, `remove`) per failure streak, never an
@@ -12187,30 +12197,41 @@ incomplete read.
 
 The readers:
 - `pi-dispatch status` adds `pollers: { expected, hosts, complete, note?, local? }` beside `consumers`
-  (`readPollerFacts`). `expected` is `GITHUB_INGEST` read as `run --trigger` reads its settings (this shell, else
-  `./.env`, refused where they disagree): true for `poll` and `both`, false for `webhook`, null when unset; a poller on
-  any host satisfies it. `hosts` and `complete` are the read. `note` holds the sentences: a poller that keeps an older
+  (`readPollerFacts`). `expected` is `pollerExpected` (`worker/src/poller-status.mjs`, the one rule Connections asks
+  too). `GITHUB_INGEST` is read as `run --trigger` reads its settings (this shell, else `./.env`, refused where they
+  disagree) and decides alone where it is set: true for `poll` and `both`, false for `webhook`. Only where it is unset
+  is `POLL_REPOS` asked, and by presence alone: true where it names repositories (blank is unset, as the poller reads
+  it), since only the poller reads it, and null otherwise, a deployment with `GITHUB_AUTH_SOURCE=app` and neither
+  possibly taking webhooks and running no poller. This shell and the `.env` disagreeing on whether `POLL_REPOS` names
+  repositories is a `local` problem naming no list; two different lists are no disagreement. A `GITHUB_INGEST` no
+  receiver command takes is a `local` problem too. A poller on any host satisfies it. `hosts` and `complete` are the read. `note` holds the sentences: a poller that keeps an older
   copy because it refused a text whose digest is this host's file's says "poller: running on the previous triggers.json,
   the current file is invalid: <reason>", the reason being `pi-dispatch triggers check`'s judgement of this host's file
-  (`judgeDeploymentTriggers`); another digest says the refused copy is not this host's file; a missing or unreadable
-  file says so; a current poller whose digest is not this host's file's says when it reads its file again; and a
+  (`judgeDeploymentTriggers`); the same digest over a file this shell cannot judge (a setting or secret it sets and the
+  `.env` lacks) says the poller refused this host's file and why it is not judged; another digest says the refused copy
+  is not this host's file, and a file not read here (a setting this shell and the `.env` disagree on comes first, or it
+  would not open) compares nothing; a missing or unreadable file says so; a current poller whose digest is not this host's file's says when it reads its file again; and a
   deployment that polls, with no heartbeat over a complete read, says no poller has published one (a poller older than
   this release publishes none), with the reason a poller would refuse this host's file at its start when one does.
   `local` names what of this host's half could not be judged, never a value. The file is judged only where a poller is
   expected or seen. `status` still exits 0.
 - Connections reads the records within its publication guard and draws a second line under GitHub's polling: each
   poller's host and beat age; "on an older triggers file" in the attention tone, with the command for an operator who
-  may act and a sentence for anyone else; "no poller reported" over a complete read and "poller not known" over an
-  incomplete one, both only while polling is on. A kept file adds the page's last problem, "The poller runs on an older
+  may act and a sentence for anyone else; and, with no poller reporting, "no poller reported" over a complete read and
+  "poller not known" over an incomplete one, both only where `pollerExpected` over the deployment file's settings is
+  true (the view's `pollers.expected`, null where the settings could not be read), so the two readers say a poller is
+  missing in the same deployments. A heartbeat that exists is drawn whatever the settings say. A kept file adds the page's last problem, "The poller runs on an older
   triggers file". A view read without the records draws none of it, and `dispatch_connections` carries none of it.
 
 **Acceptance**: worker/test/poller-status.test.mjs (the rebuild, hostile and disagreeing fields, the TTL bound, the
 reader's age and unknowns, a timeout on an injected clock, the writer's failure streak, removal and identity, the writer
 and the reader against a real Valkey); receiver/test/poller.test.mjs (the beats and their TTLs, the record gone after a stop, an invalid edit
 to kept and back, a rate-limited wait covered, a failing write said once per streak while the cycles go on, a refused
-name); worker/test/cli-control.test.mjs (the kept sentence with this host's reason, the other copies, no poller published
-with the local refusal, an incomplete read, a disagreeing setting, exit 0); admin/test/connections-poller.test.mjs and
-connections-publications.test.mjs; worker/test/backup-doc.test.mjs (`poller:*`).
+name, a cycle past the grace beating between repositories once a minute); worker/test/cli-control.test.mjs (the kept
+sentence with this host's reason, the other copies, no poller published with the local refusal, an incomplete read, a
+disagreeing setting, `POLL_REPOS` without `GITHUB_INGEST` and an App taking webhooks, exit 0); `pollerExpected`'s table
+in worker/test/poller-status.test.mjs; admin/test/connections-poller.test.mjs (status and Connections agreeing on both
+deployments) and connections-publications.test.mjs; worker/test/backup-doc.test.mjs (`poller:*`).
 
 ## INT-HOOK-RUNS-KEY
 
@@ -14957,6 +14978,7 @@ and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` are UNCHANGED, checked: no file shape, wr
 
 | Date | Change |
 |---|---|
+| 2026-11-21 (#970) | **`INT-POLLER-STATUS-KEY` AMENDED**: a beat inside a cycle (before each repository's poll, each GitHub request and each family's renewal) once `POLLER_CYCLE_BEAT_MS`, a minute by the injected clock, has passed since the last beat, with the grace as its TTL, so a cycle longer than the grace keeps its record, of many repositories or of one repository's many requests, while each request answers within the grace; and `expected` is one exported rule, `pollerExpected`, for `status` and for Connections, whose "no poller reported" and "poller not known" now follow it rather than the polling cell's own "on": true for `GITHUB_INGEST` `poll` or `both`, false for `webhook`, and only with it unset true where `POLL_REPOS` names repositories, asked by presence so two different lists are no disagreement and none is printed. A heartbeat that exists is drawn in every case, and a kept poller over this host's file that this shell cannot judge is said to have refused this host's file. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**, the check's environment: a setting or secret this shell sets and a `.env` that is there has no line for is refused, naming it and no value, as a disagreement on whether a secret is set already was, since the services read the `.env`; one the `.env` sets and this shell does not is the `.env`'s, and with no `.env` this shell's settings are the deployment's. **Code evidence**: worker/src/poller-status.mjs -> POLLER_CYCLE_BEAT_MS, pollerExpected; worker/src/poller-facts.mjs -> readPollerFacts, pollReposOf, hostNote; worker/src/triggers-cli.mjs -> secretMarks, judgeDeploymentTriggers; receiver/src/poller.mjs -> startPoller (beatWithin), makeApi; admin/src/connections-view.mjs -> readConnections, pollerExpectedOf; admin/src/console/panels/connections.mjs -> pollerLine. |
 | 2026-11-21 (#968) | **`INT-AUTH-CONNECTIONS-FILE-CONTRACT` CORRECTED**, the random pool sentence on paid extra usage: a row whose `extraUsageCreditMicros` is below the job cap does not refuse a mixed pool's jobs; the draw passes over that row's candidates (`auth-credit-cap-required` is the skip reason), so the pool runs on its API-key candidates, and doctor warns of it. The file's shape and version UNCHANGED, checked. **Code evidence**: worker/src/subscription-runtime.mjs -> check; worker/src/model-selection.mjs -> model_candidate_skipped; worker/src/doctor.mjs -> mixedBillingPoolChecks |
 | 2026-11-21 (#970) | **NEW `INT-POLLER-STATUS-KEY`**, after `INT-RECEIVER-STATUS-KEY`: the poller's heartbeat, `poller:live` and `poller:h:<name>`, a display that `pi-dispatch status` and Connections read and that admits, routes, authenticates and doctors nothing, so deleting `poller:*` changes no polling. A version 1 JSON record of names, integers, 16-hex digests and closed words, rebuilt by field name with a 4 KiB bound: the receiver package's version, start and beat instants, the TTL it was set with, the next cycle's start, the interval, a repository count, the follower's `current` or `kept` with `refused`, `missing` or `unreadable`, and the digests of the running and the refused text, never the refusal reason (it names the file's path). Written at the poll loop's own points, with no timer of its own: after its start line and at each cycle's top with a five-minute TTL, and before each wait with the wait plus that grace, so a rate-limit sleep reads as a poller that runs; deleted at a stop; a failed write said once per streak. Read by the receiver's bounded indexed read, aged by Valkey's own count (`ttlMs` minus PTTL). `status` gains `pollers` with `expected` from `GITHUB_INGEST`, and says "poller: running on the previous triggers.json, the current file is invalid: <reason>" when the refused digest is this host's file's, with the reason from `pi-dispatch triggers check`'s judgement of it, and that no poller has published one where the deployment polls, with the reason a poller would refuse this host's file at its start; Connections draws a line under GitHub's polling and a last problem for a kept file. Rejected and recorded in `DES-GH-POLLING-TRANSPORT`: the receiver's keys, a timer, a fixed TTL and the reason in Valkey. **`INT-RECEIVER-STATUS-KEY` AMENDED**: "Polling publishes none" points to the new entry and says why it has keys of its own; the check-and-prune and the bounded read are exported (`pruneLiveIndex`, `readIndexedRecords`) and shared with the heartbeat, with their bounds, version, fields and every reader's result unchanged. **`INT-HOST-REGISTRY-CONTRACT` UNCHANGED, checked**: its content rule is the one the new record follows; no row, field or TTL moved. **`INT-TRIGGERS-FILE-CONTRACT` UNCHANGED, checked**: nothing is added to the file or to its loader; the record reports the follower's state as #947 made it. **Code evidence**: worker/src/poller-status.mjs -> POLLER_LIVE, pollerKey, POLLER_GRACE_MS, POLLER_TTL_MAX_MS, parsePollerStatus, makePollerBeat, readPollerStatus, triggersDigest; worker/src/receiver-status.mjs -> pruneLiveIndex, readIndexedRecords, readReceiverStatus; worker/src/poller-facts.mjs -> readPollerFacts; worker/src/triggers-cli.mjs -> judgeDeploymentTriggers; worker/src/cli.mjs (status); receiver/src/poller.mjs -> startPoller, followerFacts; receiver/src/version.mjs -> RECEIVER_VERSION; admin/src/connections-view.mjs -> readConnections, connectionsProblems; admin/src/console/panels/connections.mjs -> pollerLine, polling. |
 | 2026-11-21 (#968) | **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**, its random pool paragraph: a pool may mix billing classes; the loader accepts it as before, and the worker judges a mixed pool's trigger cap at pickup (`auth-route-unbounded`). **`INT-MODEL-SELECTION-STATE` AMENDED**: `billing` is the drawn candidate's own class; an `api` choice is never made `quota-reselectable`, and a reselection commits only within the stored class. Its key, fields and version 1 UNCHANGED, checked. **`INT-AUTH-CONNECTIONS-FILE-CONTRACT` AMENDED**: the mixed-route refusal is one attempt's; a random pool is classified per candidate, a broken binding included, and a row's `extraUsageCreditMicros` below a mixed pool's cap refuses that row's draws. The file's shape UNCHANGED, checked. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: the record carries no billing field and its reason enum gains no token. The trigger file and job-data versions UNCHANGED, checked: no field or value is added. **Code evidence**: worker/src/model-selection.mjs -> selectRandomModelJob; worker/src/subscription-runtime.mjs -> inspectPolicy, auxiliaryRoute; worker/src/model-selection-state.mjs -> allowModelSelectionQuotaReselection; worker/src/doctor.mjs -> mixedBillingPoolChecks. |

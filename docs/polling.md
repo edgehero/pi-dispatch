@@ -188,10 +188,13 @@ parse. A running poller never exits for a bad `triggers.json`: it keeps the last
 
 A running poller publishes a heartbeat in Valkey, `poller:h:<name>` under the name a worker on its host takes
 (`PI_WORKER_NAME`, else the host name), and `pi-dispatch status` and the console's Connections page read it. It beats at
-the start of each cycle and again before each wait, and the beat before a wait lasts for that wait plus five minutes, so
-a poller sleeping out an hour-long rate limit still reads as running. A stopped poller deletes it; one that died stops
-renewing it and it expires. It holds counts, times and digests, never a repository name, a path or the reason a file was
-refused. Deleting it changes nothing about polling: the next beat writes it again.
+the start of each cycle, between repositories and between its requests to GitHub once a minute has passed since the last
+beat, and before each wait. A beat in a cycle lasts five minutes, so a long cycle (many repositories, or one with many
+open pull requests, on a slow API) still reads as running while each request answers within four minutes (a beat can
+come up to a minute before a request starts), and the beat before a wait lasts for that wait plus five minutes, so a
+poller sleeping out an hour-long rate limit does too. A stopped poller deletes it; one that died stops renewing it and
+it expires. It holds counts, times and digests, never a repository name, a path or the reason a file was refused.
+Deleting it changes nothing about polling: the next beat writes it again.
 
 `pi-dispatch status`, run in the deployment folder, prints a `pollers` object beside `consumers`:
 
@@ -201,22 +204,27 @@ refused. Deleting it changes nothing about polling: the next beat writes it agai
   "note": "poller: running on the previous triggers.json, the current file is invalid: cron trigger \"probe\": run.flow must be a non-empty string (or use run.command): /srv/pi-dispatch/triggers.json" }
 ```
 
-- `expected` is whether this deployment polls: `true` for `GITHUB_INGEST=poll` or `both`, `false` for `webhook`, `null`
-  when it is unset. A poller on any host counts.
+- `expected` is whether this deployment runs a poller: `true` for `GITHUB_INGEST=poll` or `both`, `false` for
+  `webhook`. With `GITHUB_INGEST` unset it is `true` when `POLL_REPOS` names repositories, since only the poller reads
+  that setting, and `null` otherwise: a GitHub App deployment (`GITHUB_AUTH_SOURCE=app`) may take webhooks and run no
+  poller, which is what `pi-dispatch setup github` sets up with a webhook. A poller on any host counts.
 - `hosts` has one heartbeat per running poller: `triggers` is `current`, or `kept` when it refused the file and runs on
   the last copy that loaded, `nextAt` when its next cycle starts, and `ageMs` how long ago it beat.
 - `note` says what needs saying. The poller keeps the previous file because the current one is invalid: the reason is
   the one `pi-dispatch triggers check` gives for the file in this folder, when that is the file the poller refused (the
   heartbeat carries the file's digest, not its reason). The file it refused is another copy: run the check where the
-  poller runs. Polling is on and no poller has published a heartbeat: none runs, or it is older than this release,
-  which publishes none; when this folder's file is invalid, the note adds the reason a poller would refuse to start on it.
+  poller runs. `expected` is `true` and no poller has published a heartbeat: none runs, or it is older than this
+  release, which publishes none; when this folder's file is invalid, the note adds the reason a poller would refuse to start on it.
 - `complete: false` means the heartbeats could not all be read, and an empty `hosts` then proves nothing. `local` says
   what of this folder could not be read (a setting this shell and `.env` disagree on, a missing file). `status` exits 0
   either way.
 
 Connections shows the same under GitHub's polling: the host of each poller and when it beat, "on an older triggers file"
-when it keeps one, "no poller reported" when polling is on and none publishes, and "poller not known" when the
-heartbeats could not be read.
+when it keeps one, and, where `expected` would be `true`, "no poller reported" when none publishes and "poller not
+known" when the heartbeats could not be read. Both apply the same rule, Connections to the deployment's `.env` and
+`status` to this shell and the `.env` as `run --trigger` reads them, so an App deployment that takes webhooks gets
+neither alarm, and a heartbeat that exists is shown whatever the settings say. A `POLL_REPOS` left in the `.env` after
+the poller is gone, with `GITHUB_INGEST` unset, keeps that alarm in both: remove it, or set `GITHUB_INGEST=webhook`.
 
 ## The traps
 

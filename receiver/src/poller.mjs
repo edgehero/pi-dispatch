@@ -133,8 +133,9 @@
  * Connections page read: when it beat, when it next polls, and whether it runs on the current triggers file or keeps an
  * older one, by the follower's `state` and digests, never the reason (which names the file's path). It beats at its
  * own points and arms no timer of its own, so the `done` contract above holds as it was: after `poller_started`, at the
- * top of each cycle after the follow, with a TTL of `POLLER_GRACE_MS`, and before each wait with a TTL of that wait
- * plus the grace, so a rate-limit sleep of up to an hour still reads as a poller that runs. A stop removes the record
+ * top of each cycle after the follow, and between repositories and before each GitHub request once a minute has passed
+ * since the last beat, with a TTL of `POLLER_GRACE_MS`, and before each wait with a TTL of that wait plus the grace, so a long cycle and a rate-limit
+ * sleep of up to an hour still read as a poller that runs. A stop removes the record
  * before the connections close. Each write is awaited like the loop's own cursor writes, so it adds no wait those do not
  * already have, and a failed one is one `poller_status_unavailable` line per failure streak that changes nothing else.
  *
@@ -160,7 +161,7 @@ import { judgeValkeyAtStart, makeRedisClient, parseConnection, valkeyClientConte
 import { makeGitHubAuth } from "@edgehero/pi-dispatch/get-token";
 import { enqueueGitHubJob, makeQueue } from "@edgehero/pi-dispatch/queue";
 import { FORGE_JOB_RETENTION_S } from "@edgehero/pi-dispatch/retention";
-import { POLLER_GRACE_MS, POLLER_TTL_MAX_MS, makePollerBeat, triggersDigest } from "@edgehero/pi-dispatch/poller-status";
+import { POLLER_CYCLE_BEAT_MS, POLLER_GRACE_MS, POLLER_TTL_MAX_MS, makePollerBeat, triggersDigest } from "@edgehero/pi-dispatch/poller-status";
 import { trySteer } from "./steer.mjs";
 import { holdAfterDedup, holdBeforeLabel } from "./held.mjs";
 import { filter, hasCloseTriggers, wantsCloserAuthority } from "./filter.mjs";
@@ -378,7 +379,18 @@ export async function startPoller(env = process.env, deps = {}) {
 	out({ event: "poller_started", repos: repos.length, intervalSeconds: cfg.intervalSeconds, valkey: cfg.valkeyUrl, discovery: cfg.repos === null });
 	// One beat (issue #970): `ttlMs` is how long the record outlives it, `nextAt` when the next cycle starts (null inside a
 	// cycle). The rest is read at each beat: the repo count and what the follower runs on, as digests.
-	const beat = (ttlMs, nextAt) => pollerStatus.beat({ ttlMs, nextAt, intervalSeconds: cfg.intervalSeconds, repos: repos.length, ...followerFacts(triggersFollower.state) });
+	let beatAt = now();
+	const beat = (ttlMs, nextAt) => {
+		beatAt = now();
+		return pollerStatus.beat({ ttlMs, nextAt, intervalSeconds: cfg.intervalSeconds, repos: repos.length, ...followerFacts(triggersFollower.state) });
+	};
+	// Inside a cycle, once POLLER_CYCLE_BEAT_MS has passed since the last beat by the injected clock: between two
+	// repositories and before each GitHub request (`makeApi`'s `get`, through `ctx`), so neither a cycle of many repositories
+	// on a slow API (130 at a second a request took six and a half minutes) nor one repository's long request loop (50 open
+	// pull requests' reviews at six seconds each took five) outlives the grace of the last beat and reads as no poller
+	// while it polls. Gated by the clock, so a fast cycle writes nothing more, and still no timer.
+	const beatWithin = () => (now() - beatAt >= POLLER_CYCLE_BEAT_MS ? beat(POLLER_GRACE_MS, null) : undefined);
+	ctx.beatWithin = beatWithin;
 	await beat(POLLER_GRACE_MS, null);
 
 	// The catch-up horizon (issue #880; the header's "A POLLER STARTED AGAIN"). Every repo starts in `unchecked` and
@@ -407,6 +419,7 @@ export async function startPoller(env = process.env, deps = {}) {
 	const renewFamilies = async (list, delayMs) => {
 		const ttl = CURSOR_TTL_SECONDS + Math.ceil(delayMs / 1000);
 		for (const repo of list) {
+			await beatWithin();
 			try {
 				await touchRepo(ctx, repo, ttl);
 			} catch (err) {
@@ -473,6 +486,7 @@ export async function startPoller(env = process.env, deps = {}) {
 				if (rateResetMs === null) {
 					for (const repo of repos) {
 						if (stopped) break; // graceful: finish the in-flight repo, not the whole roster
+						await beatWithin();
 						// Still undated: its line is written and its cursors stay untouched until a check succeeds.
 						if (unchecked.has(repo) && !(await checkBeforePoll(repo))) continue;
 						try {
@@ -726,6 +740,8 @@ function isoSeconds(ms) {
 function makeApi(ctx, token, stats) {
 	return {
 		async get(path, etagKey = null, revalidate = true) {
+			// The heartbeat's in-cycle beat (issue #970), clock-gated to once a minute; absent while the boot discovers repos.
+			await ctx.beatWithin?.();
 			const headers = {
 				accept: "application/vnd.github+json",
 				"user-agent": "pi-dispatch-poller",

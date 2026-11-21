@@ -11,13 +11,18 @@
  * WHICH ENVIRONMENT, from one read of `./.env`, in two halves read two ways:
  *  - The keys the check judges by (`TRIGGERS_CHECK_ENV_KEYS`) through `cliDeploymentEnv`, as `run --trigger` reads its
  *    own: this shell's value, else the `.env`'s here, and a disagreement or a line the service's loader may read
- *    otherwise is refused, since the file would then be judged for a service that is not the one that runs.
+ *    otherwise is refused, since the file would then be judged for a service that is not the one that runs. So is a key
+ *    this shell sets and a `.env` that is there has no line for (issue #970), since the services read the `.env`; with no
+ *    `.env` at all, this shell's settings are the deployment's.
  *  - The secrets the check asks about (`triggersCheckSecrets`: each watch source's variable, and `WEBHOOK_SECRET` where
  *    `serve` serves GitHub), for their PRESENCE only, through `resolveServiceEnv` over the same two places, never
  *    through `cliDeploymentEnv`, whose disagreement message prints both values (service-env.mjs). The same rule: a
  *    variable set in one place and unset or blank in the other cannot be judged and is refused, naming no value (doctor
- *    judges this shell's then and says the two disagree; a verdict for one of two services would be a guess). What
- *    reaches the check is a mark per variable (unset, empty, blank or set) and the judged keys, never a value.
+ *    judges this shell's then and says the two disagree; a verdict for one of two services would be a guess). That
+ *    includes a variable this shell sets and the `.env` does not have at all (issue #970): the services read the
+ *    `.env`, so taking this shell's value passed a file their loader refuses. One the `.env` sets and this shell does not
+ *    is the `.env`'s, which is what the services read. What reaches the check is a mark per variable (unset, empty,
+ *    blank or set) and the judged keys, never a value.
  *
  * EXIT: 0 when every reader that would load the file here takes it; 1 when one refuses (one `error:` line per refusal,
  * naming its readers, then what a start on it would do) or when the file cannot be judged at all (no file, an unreadable
@@ -69,6 +74,11 @@ function secretMarks(names, { env, envPath, file }) {
 	const read = resolveServiceEnv({ env, file: file instanceof Error ? null : file, keys: names });
 	const unread = [...read.unread.map((u) => u.key), ...read.hazardSkipped];
 	if (unread.length > 0) return { problem: `${envPath} has a line for ${listed(unread)} that the service's loader may read differently, so whether ${unread.length === 1 ? "it is" : "they are"} set cannot be told (pi-dispatch doctor names the line)` };
+	// Set in this shell and absent from the .env (issue #970): a service reading the .env runs without it, so judging this
+	// shell's value would pass a file the poller and the receiver refuse at their start. Empty here and absent there are
+	// both unset to every reader, and are judged so.
+	const shellOnly = read.shellOnly.filter((k) => presenceMark(env[k]) !== "");
+	if (shellOnly.length > 0) return { problem: `${listed(shellOnly)} ${shellOnly.length === 1 ? "is" : "are"} set in this shell and not in ${envPath} (no value is shown), and the services read the .env, so whether ${shellOnly.length === 1 ? "it is" : "they are"} set for them cannot be told: add ${shellOnly.length === 1 ? "it" : "them"} to the .env, or unset ${shellOnly.length === 1 ? "it" : "them"} in this shell` };
 	// Two values that are both set are no business of this command's: presence is all it judges.
 	const split = read.disagreements.filter((d) => presenceMark(d.shell) !== presenceMark(d.file));
 	if (split.length > 0) return { problem: `${split.map((d) => `${d.key} is ${MARK_WORDS[presenceMark(d.shell)]} in this shell and ${MARK_WORDS[presenceMark(d.file)]} in ${envPath}`).join("; ")} (neither value is shown), so whether ${split.length === 1 ? "it is" : "they are"} set cannot be told: make them agree (the service runs the file's)` };
@@ -85,8 +95,10 @@ function countsText({ triggers, cron, forge, watch }) {
 /**
  * The deployment's environment read, the file read and the check run, as `triggers check` does them: `file` (resolved
  * against `cwd`) when given, else the deployment's own triggers file. Returns `{ path, text, result }` (`result` is
- * `checkTriggersText`'s) or `{ problem }`, a sentence saying why the file could not be judged, never a value. Shared with
- * `pi-dispatch status` (issue #970), which judges the deployment's file this way to say why a poller keeps an older copy.
+ * `checkTriggersText`'s) or `{ problem }`, a sentence saying why the file could not be judged, never a value; with
+ * `path` and `text` beside it where the file was read and only judging it failed. Shared with `pi-dispatch status`
+ * (issue #970), which judges the deployment's file this way to say why a poller keeps an older copy, and compares the
+ * text's digest with the copy the poller refused even where this shell cannot judge it.
  */
 export async function judgeDeploymentTriggers({ file = undefined, env = process.env, cwd = process.cwd(), platform = process.platform, readEnv = (p) => readFileSync(p), readText = (p) => readFileSync(p, "utf8"), existsSync = fsExistsSync, now = Date.now, check = checkTriggersText } = {}) {
 	// One read of the deployment `.env` for both halves, so the two cannot be judged from two different files.
@@ -102,25 +114,6 @@ export async function judgeDeploymentTriggers({ file = undefined, env = process.
 		return envRead;
 	} });
 	if (deployment.problem) return { problem: `${deployment.problem}, so the file cannot be judged as this deployment's services load it` };
-	const { triggersPath } = await import("./doctor.mjs");
-	const deployed = triggersPath(deployment.env, cwd);
-	const path = file !== undefined ? resolve(cwd, file) : deployed;
-	if (path === "") return { problem: "PI_TRIGGERS_FILE is set to an empty value, so there is no file to judge, and every reader refuses to start on it: set it to the file, or delete the line" };
-	let text;
-	try {
-		text = readText(path);
-	} catch (error) {
-		return { problem: error?.code === "ENOENT" ? `no triggers file at ${path}` : `${path} could not be read (${error?.code ?? "error"})` };
-	}
-	// Whether a watch collector runs here, from the file it runs on now; nothing when that is this very file, or unread.
-	let currentCollects = false;
-	if (deployed !== "" && deployed !== path) {
-		try {
-			currentCollects = Object.values(parseTriggersDocument(readText(deployed), deployed).watchSources ?? {}).some((s) => s.pull);
-		} catch {}
-	}
-
-	const judged = Object.fromEntries(TRIGGERS_CHECK_ENV_KEYS.filter((k) => typeof deployment.env[k] === "string").map((k) => [k, deployment.env[k]]));
 	let envFile = envRead;
 	if (!(envRead instanceof Error)) {
 		try {
@@ -129,8 +122,41 @@ export async function judgeDeploymentTriggers({ file = undefined, env = process.
 			envFile = error instanceof Error ? error : new Error(String(error));
 		}
 	}
+	// A setting this shell sets and the .env has no line for (issue #970): the services read the .env, so judging with this
+	// shell's value would pass a file they refuse, or refuse one they take. Refused like a secret, once the file is read.
+	// With no .env at all there is nothing to differ from, and this shell's settings are the deployment's as before.
+	const shellOnly = envFile instanceof Error ? [] : resolveServiceEnv({ env, file: envFile, keys: TRIGGERS_CHECK_ENV_KEYS }).shellOnly;
+	// Empty in this shell and absent from the .env is unset, as for a secret: the services run without it. Dropped, never
+	// judged as empty, since an empty setting can mean something an absent one does not (an empty PI_TRIGGERS_FILE is a
+	// refusal to every reader, an absent one is ./triggers.json).
+	const settingsHere = shellOnly.filter((key) => env[key] !== "");
+	const serviceEnv = shellOnly.length === 0 ? deployment.env : Object.fromEntries(Object.entries(deployment.env).filter(([key]) => !shellOnly.includes(key)));
+	const { triggersPath } = await import("./doctor.mjs");
+	const deployed = triggersPath(serviceEnv, cwd);
+	const path = file !== undefined ? resolve(cwd, file) : deployed;
+	const one = settingsHere.length === 1;
+	const settingsProblem = `${listed(settingsHere)} ${one ? "is" : "are"} set in this shell and not in ${envPath} (no value is shown), and the services read the .env, so the file cannot be judged as they load it: add ${one ? "it" : "them"} to the .env, or unset ${one ? "it" : "them"} in this shell`;
+	if (path === "") return { problem: "PI_TRIGGERS_FILE is set to an empty value, so there is no file to judge, and every reader refuses to start on it: set it to the file, or delete the line" };
+	let text;
+	try {
+		text = readText(path);
+	} catch (error) {
+		// The settings first: a file missing where the services look may be one this shell's PI_TRIGGERS_FILE points past.
+		if (settingsHere.length > 0) return { problem: settingsProblem };
+		return { problem: error?.code === "ENOENT" ? `no triggers file at ${path}` : `${path} could not be read (${error?.code ?? "error"})` };
+	}
+	if (settingsHere.length > 0) return { path, text, problem: settingsProblem };
+	// Whether a watch collector runs here, from the file it runs on now; nothing when that is this very file, or unread.
+	let currentCollects = false;
+	if (deployed !== "" && deployed !== path) {
+		try {
+			currentCollects = Object.values(parseTriggersDocument(readText(deployed), deployed).watchSources ?? {}).some((s) => s.pull);
+		} catch {}
+	}
+
+	const judged = Object.fromEntries(TRIGGERS_CHECK_ENV_KEYS.filter((k) => typeof serviceEnv[k] === "string").map((k) => [k, serviceEnv[k]]));
 	const secrets = secretMarks(triggersCheckSecrets(text, path, judged), { env, envPath, file: envFile });
-	if (secrets.problem) return { problem: secrets.problem };
+	if (secrets.problem) return { path, text, problem: secrets.problem };
 	return { path, text, result: check(text, path, { env: { ...judged, ...secrets.env }, existsSync, cwd, now, currentCollects }) };
 }
 

@@ -31,6 +31,7 @@
  * reason, never an error's text.
  */
 import { createHash } from "node:crypto";
+import { githubIngestFrom } from "./config.mjs";
 import { DEFER_TIME_MAX_MS } from "./defer-reasons.mjs";
 import { pruneLiveIndex, readIndexedRecords } from "./receiver-status.mjs";
 import { WORKER_NAME_RE } from "./worker-name.mjs";
@@ -40,6 +41,9 @@ export const pollerKey = (name) => `poller:h:${name}`;
 /** What a beat's TTL adds to the wait it plans, and the whole TTL of a beat inside a cycle: a cycle that has not beaten
  * again within five minutes is no longer polling. */
 export const POLLER_GRACE_MS = 5 * 60_000;
+/** How long a cycle goes before it beats again between two repositories, by the poller's clock: a cycle of many
+ * repositories on a slow API runs past the grace, and must still read as a poller that runs. */
+export const POLLER_CYCLE_BEAT_MS = 60_000;
 /** The longest TTL a record may carry: a rate-limit sleep (up to an hour) plus the grace fits many times over. A wait
  * longer than this (a POLL_INTERVAL_SECONDS of more than a week) lets the record expire during it, read as no poller. */
 export const POLLER_TTL_MAX_MS = 7 * 24 * 3_600_000;
@@ -55,6 +59,21 @@ const nameOk = (s) => typeof s === "string" && WORKER_NAME_RE.test(s);
 const digestOk = (s) => typeof s === "string" && DIGEST_RE.test(s);
 const plainObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
 const safeLog = (log, reason) => { try { log("poller_status_unavailable", { reason }); } catch {} };
+
+/**
+ * Whether this deployment runs a poller, by its settings (`env`, the deployment's as resolved for the reader), the one
+ * rule `pi-dispatch status` and Connections ask (issue #970), so a missing heartbeat is said by both or by neither:
+ * true for `GITHUB_INGEST=poll` or `both`, false for `webhook` (under which a poller refuses to start). With it unset,
+ * true where `POLL_REPOS` names repositories (blank is unset, as the poller reads it), since the poller alone reads
+ * that setting, and null otherwise: an App deployment (`GITHUB_AUTH_SOURCE=app`) may poll its installation's
+ * repositories or take webhooks and run no poller at all, and its settings cannot tell which. Throws `githubIngestFrom`'s
+ * refusal for a `GITHUB_INGEST` no receiver command takes.
+ */
+export function pollerExpected(env) {
+	const ingest = githubIngestFrom(env);
+	if (ingest !== null) return ingest !== "webhook";
+	return typeof env.POLL_REPOS === "string" && env.POLL_REPOS.trim() !== "" ? true : null;
+}
 
 /** The digest a record carries of a triggers file's text, and the one `pi-dispatch status` compares with its own copy. */
 export function triggersDigest(text) {

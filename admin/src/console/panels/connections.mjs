@@ -21,21 +21,23 @@ const detailTable = (label, heads, rows, empty) => ui.tbl({ label, heads, rows, 
 
 /**
  * The pollers' line under GitHub's polling (issue #970), from their heartbeats, or null when the view carries none (it
- * was read without them). A reporting poller names its host and beat age; one that keeps an older triggers file says so
- * in the attention tone, with the command for an operator who may act and a sentence for anyone else. With none
- * reporting and polling on, a complete read says "no poller reported" and an incomplete one "poller not known".
+ * was read without them). A reporting poller names its host and beat age, whatever the deployment says; one that keeps
+ * an older triggers file says so in the attention tone, with the command for an operator who may act and a sentence for
+ * anyone else. With none reporting, a complete read says "no poller reported" and an incomplete one "poller not known",
+ * only where the deployment runs a poller by `pollerExpected` (the view's `expected`, the rule `pi-dispatch status`
+ * asks): an App deployment that takes webhooks shows its installation's repositories as polling on and runs no poller.
  */
-function pollerLine(poll, pollers, canAct) {
+function pollerLine(pollers, canAct) {
   if (!pollers || typeof pollers !== "object") return null;
   const hosts = Array.isArray(pollers.hosts) ? pollers.hosts : [];
   if (hosts.length) return html`${hosts.map((h, n) => html`${n ? "; " : null}${h.unreadable ? html`poller on ${hostLink(h.name)}: ${state("heartbeat unreadable", "attention", "info")}` : h.triggers === "kept" ? html`poller on ${hostLink(h.name)}, beat ${ageText(h.ageMs)} ago: ${state("on an older triggers file", "attention")} ${canAct ? html`Run <span class="code">pi-dispatch triggers check</span> on that host.` : "An operator can check the triggers file on that host."}` : html`poller running on ${hostLink(h.name)}, beat ${ageText(h.ageMs)} ago`}`)}`;
-  if (poll.state !== "on") return null;
+  if (pollers.expected !== true) return null;
   return pollers.complete === true ? state("no poller reported", "attention", "info") : state("poller not known", "attention", "info");
 }
 
 function polling(poll, pollers = null, canAct = false) {
   if (!poll) return state("not offered");
-  const line = pollerLine(poll, pollers, canAct);
+  const line = pollerLine(pollers, canAct);
   if (poll.state === "off") return line === null ? state("off") : cell(state("off"), line);
   if (poll.state !== "on") return line === null ? state("unknown", "attention", "info") : cell(state("unknown", "attention", "info"), line);
   const first = html`${state("on", "ok")} · ${poll.seconds} s`;
