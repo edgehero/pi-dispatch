@@ -6962,7 +6962,7 @@ export function triggerSecretProviderChecks(subjects, { candidatesOf, declaredOf
 		checks.push({
 			ok: false,
 			label: `${clashes.length} trigger secret(s) bind a variable pi reads for the provider an attempt runs on, or for a watch rule's decide model: ${clashes.join("; ")}`,
-			fix: "rename them in the triggers file, or bind only the provider's own API-key variable (in run.secrets, not run.secretFiles, not named in PI_FORWARD_ENV, not on a watch rule, on a provider not bound to a subscription here) to make it the job's credential: until then each job, draw or failover attempt named refuses pre-spend as secret-name-reserved",
+			fix: "rename them in the triggers file, or bind only the provider's own API-key variable (in run.secrets, not run.secretFiles, not named in PI_FORWARD_ENV, not on a watch rule, on a provider not bound to a subscription here) to make it the job's credential: until then each job, draw or failover attempt named refuses pre-spend as secret-name-reserved (as provider-unconfigured on a host with no credential of its own for that provider)",
 		});
 	}
 	if (declared.length > 0) {
@@ -7082,7 +7082,7 @@ export function mixedBillingPoolChecks(subjects, { verdictOf = () => undefined }
 			checks.push({
 				ok: false,
 				warn: true,
-				label: `${trigger}: the subscription connection for ${printable(connectionProvider)} allows paid extra usage up to $${formatMicros(credit)} a job, below this pool's ${cap} cap, so the worker refuses every ${printable(connectionProvider)} draw on this host as auth-credit-cap-required`,
+				label: `${trigger}: the subscription connection for ${printable(connectionProvider)} allows paid extra usage up to $${formatMicros(credit)} a job, below this pool's ${cap} cap, so on this host every draw passes over its ${printable(connectionProvider)} candidates as auth-credit-cap-required and the pool runs only on its API-key models`,
 				fix: `lower the trigger's run.maxCostUsd to at most ${formatMicros(credit)}, or raise the connection's extraUsageCreditMicros in the auth connections file`,
 			});
 		}
