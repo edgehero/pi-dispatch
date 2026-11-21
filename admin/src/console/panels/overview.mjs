@@ -55,7 +55,7 @@ import { NO_EXPLANATION, docsHref } from "../../words.mjs";
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
 import { TIMELINE_DEFAULTS, TIMELINE_ROWS, TIMELINE_WAIT_WORDS, TIMELINE_ZOOMS, timelineHtml, timelineLegend, timelineModel } from "../timeline.mjs";
-import { BEAT_FRESH_MS, RUN_ID_RE, ageText, beatAgeOf, beatFresh, canAct, count, moneyHtml, shownPath, timeHtml, usdText, workersOnline } from "./common.mjs";
+import { BEAT_FRESH_MS, HOSTS_UNREAD_TEXT, RUN_ID_RE, ageText, beatAgeOf, beatFresh, canAct, count, hostsUnread, moneyHtml, shownPath, timeHtml, usdText, workersOnline } from "./common.mjs";
 
 // ---- the sentences -----------------------------------------------------------------------------------------------------
 
@@ -117,6 +117,9 @@ export const NEEDS_EMPTY = Object.freeze({ title: "nothing needs you", body: "No
 export const WAITING_EMPTY = Object.freeze({ title: "nothing is waiting", body: "No job is waiting to start." });
 export const RUNNING_EMPTY = Object.freeze({ title: "nothing is running", body: "No job is running on any host." });
 export const SPEND_EMPTY = Object.freeze({ title: "no runs in the spend window", body: "No run has settled any spend today." });
+/** Running's words where the active jobs could not be read and none is listed (issue #962). */
+export const RUNNING_UNREAD_TITLE = "running jobs are not known";
+
 export const HOSTS_EMPTY = Object.freeze({ title: "no host is registered yet", body: "No host is registered. A worker registers when it starts." });
 
 /** Waitlists' line when nothing waits on a slot, another run or a check (a retry or a pause may still wait). */
@@ -174,6 +177,9 @@ const UNREAD = Object.freeze({
   registryNoWorker: "The host registry could not be read and the queue sees no worker connected, so failing doctors are not counted and whether a worker is online is not known.",
   day: "The run history could not be read, so the day's failures are not counted.",
   waiting: "The waiting jobs could not be read.",
+  active: "The running jobs could not be read, so what runs is not known.",
+  activePartial: "Not every queue's running jobs could be read, so more may be running.",
+  activeTimeline: "The running jobs could not be read, so runs under way may be missing.",
   waitingCut: WAITING_CUT_TEXT,
   settings: "The settings overlay could not be read, so its caps are not drawn.",
   dollars: "The dollar counters could not be read.",
@@ -356,9 +362,16 @@ function needsOf(s) {
   return { questions, answering, failedRows, failedJobs, superseded, failingHosts, fix, unread, questionsKnown: parkedRead, fixKnown: failedRead && doctorRead && registryRead, read, day, noWorker, workerKnown: workers.online !== null || workers.connected > 0, clear };
 }
 
-/** How many jobs run, as the headline says it. */
+/** Whether a queue's active list could not be read (the snapshot's `activeUnreachable`, issue #962). */
+const activeUnread = (s) => s?.activeUnreachable === true;
+
+/**
+ * How many jobs run, as the headline says it. Over an active list that could not be read the count is a floor, and a
+ * floor of none is "not known", never "nothing is running".
+ */
 function runningText(s) {
   const n = Array.isArray(s?.active) ? s.active.length : 0;
+  if (activeUnread(s)) return n === 0 ? RUNNING_UNREAD_TITLE : `at least ${plural(n, "job")} running`;
   return n === 0 ? "nothing is running" : `${plural(n, "job")} running`;
 }
 
@@ -616,9 +629,13 @@ export const overviewActive = overviewPanel("Running", (s) => {
   );
   const live = n > 0 ? ui.chip("live", { status: "running", icon: "running" }) : null;
   // A registry that could not be read says so, under the rows last seen or in their place, never that no host is
-  // registered.
-  const note = lastSeen ? REGISTRY_UNREAD_TEXT : rows.length === 0 ? HOSTS_EMPTY.body : null;
-  return ui.card({ title: "Running", end: live, body: html`${ui.kpi(count(n), runningLabel(n, slots))}${rows.length > 0 ? html`<ul class="rows">${rows}</ul>` : null}${note === null ? null : html`<p class="card__sub">${note}</p>`}` });
+  // registered; one never read says that nothing is known of the hosts, since there is no "last seen" to show.
+  const note = hostsUnread(s) ? HOSTS_UNREAD_TEXT : lastSeen ? REGISTRY_UNREAD_TEXT : rows.length === 0 ? HOSTS_EMPTY.body : null;
+  // An active list that could not be read (issue #962): no 0 and no "nothing is running"; what the queues that
+  // answered hold is a floor.
+  const unread = activeUnread(s);
+  const kpi = unread ? (n === 0 ? ui.kpi("-", "not known") : ui.kpi(count(n), "or more running")) : ui.kpi(count(n), runningLabel(n, slots));
+  return ui.card({ title: "Running", end: live, body: html`${kpi}${unread ? html`<p class="card__sub">${n === 0 ? UNREAD.active : UNREAD.activePartial}</p>` : null}${rows.length > 0 ? html`<ul class="rows">${rows}</ul>` : null}${note === null ? null : html`<p class="card__sub">${note}</p>`}` });
 });
 
 // ---- Spend today -----------------------------------------------------------------------------------------------------------
@@ -728,9 +745,10 @@ export const overviewTimeline = overviewPanel("Runs by project", (s, view) => {
   const notes = [
     runsRead ? null : UNREAD.runs,
     w === null ? UNREAD.waiting : w.truncated === true ? UNREAD.waitingCut : null,
+    activeUnread(s) ? UNREAD.activeTimeline : null,
     runsRead && s.runsDay.partial === true ? UNREAD.runsPartial : null,
     runsRead && s.runsDay.floor ? "Only the newest runs are read, so older runs in this window may be missing." : null,
-    q.anchor === null && model.empty && runsWhole && w !== null && w.truncated !== true ? "No run in this window, and nothing in line." : null,
+    q.anchor === null && model.empty && runsWhole && w !== null && w.truncated !== true && !activeUnread(s) ? "No run in this window, and nothing in line." : null,
   ].filter(Boolean);
   const seed = { now: view.now, start: model.start, end: model.end, project: q.project, rows: model.by, notes, items: timelineSeed({ now: view.now, start: model.start, runs: s.runsDay ?? [], active: s.active ?? [], hostJobs: hostsOf(s), waiting: s.waiting, parked }) };
   if (seed.items.length === 2000) seed.notes = [...notes, "The live snapshot reached its 2,000-run limit. Retained history loads separately."];
@@ -1154,7 +1172,8 @@ export const overviewHosts = overviewPanel("Hosts", (s, view) => {
     : w.staleBeats
       ? ui.banner({ status: "attention", icon: "beat", sm: true, title: STALE_BEATS_TEXT })
       : null;
-  const degraded = q.fleetDegraded ? ui.banner({ status: "attention", icon: "fleet", sm: true, title: REGISTRY_UNREAD_TEXT }) : null;
+  // A registry never read has no rows "as last seen": it says the hosts are not known (issue #962).
+  const degraded = q.fleetDegraded ? ui.banner({ status: "attention", icon: "fleet", sm: true, title: hostsUnread(s) ? HOSTS_UNREAD_TEXT : REGISTRY_UNREAD_TEXT }) : null;
   const lastSeen = Boolean(q.fleetDegraded);
   const rows = hosts.map((h) => {
     const stale = !beatFresh(h);
@@ -1270,6 +1289,6 @@ export function overviewSetupEmpty(view) {
   return ui.card({
     title: "The Overview, once it runs",
     sub: "each panel says what it is waiting for",
-    body: html`<div class="stack su-empties">${line("parked", "Needs you", NEEDS_EMPTY.title)}${line("queue", "In line", waiting)}${line("running", "Running", active === 0 ? RUNNING_EMPTY.title : `${plural(active, "job")} running`)}${line("spend", "Spend today", SPEND_EMPTY.title)}${line("fleet", "Hosts", hosts === 0 ? HOSTS_EMPTY.title : `${plural(hosts, "host")} registered`)}</div>`,
+    body: html`<div class="stack su-empties">${line("parked", "Needs you", NEEDS_EMPTY.title)}${line("queue", "In line", waiting)}${line("running", "Running", activeUnread(s) && active === 0 ? "could not be read" : active === 0 ? RUNNING_EMPTY.title : `${activeUnread(s) ? "at least " : ""}${plural(active, "job")} running`)}${line("spend", "Spend today", SPEND_EMPTY.title)}${line("fleet", "Hosts", hosts === 0 ? HOSTS_EMPTY.title : `${plural(hosts, "host")} registered`)}</div>`,
   });
 }

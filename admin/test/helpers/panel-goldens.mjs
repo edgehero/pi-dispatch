@@ -319,11 +319,14 @@ function openSlotAfter(page, id, { inner = null, label = null }) {
 
 /** The live pill in `state` (`LIVE_STATES`), as `script.mjs` `mark` sets it: its classes, its word and its title. */
 function markLive(page, state) {
-  const st = LIVE_STATES[state];
-  assert.ok(st && state !== "start", `a live state the script sets: ${state}`);
-  const tag = /<span id="live-status" class="[^"]*" role="status" aria-live="polite"(?: title="[^"]*")?>/.exec(page)?.[0];
+  const tag = /<span id="live-status" class="[^"]*" role="status" aria-live="polite"(?: title="[^"]*")?( data-unread)?>/.exec(page);
   assert.ok(tag, "the page draws the live pill");
-  let out = once(page, tag, String(html`<span id="live-status" class="${st.cls}" role="status" aria-live="polite"${st.title ? html` title="${st.title}"` : null}>`), "the live pill");
+  // A page the server drew over a failed read (`data-unread`) is never marked Live by the script: an open stream there
+  // is `held` (issue #962).
+  const unread = tag[1] !== undefined;
+  const st = LIVE_STATES[unread && state === "on" ? "held" : state];
+  assert.ok(st && state !== "start", `a live state the script sets: ${state}`);
+  let out = once(page, tag[0], String(html`<span id="live-status" class="${st.cls}" role="status" aria-live="polite"${st.title ? html` title="${st.title}"` : null}${unread ? html` data-unread` : null}>`), "the live pill");
   out = once(out, `<span data-live-word>${LIVE_STATES.start.word}</span>`, String(html`<span data-live-word>${st.word}</span>`), "the live word");
   return out;
 }
@@ -725,6 +728,9 @@ const CALM = Object.freeze({
  * A deployment before its first job (the SetupScreen card): read, with no run on record and no trigger. `doctor` is the
  * hosts' published doctor runs (none: nothing has run doctor yet).
  */
+/** The overview's snapshot and its calm day, for a test that draws the overview's panels over a changed read. */
+export { overviewSnapshot, CALM as OVERVIEW_CALM };
+
 export const firstRun = (doctor = []) => overviewSnapshot({
   queue: { pausedState: false, pausedPartial: false, counts: {}, workers: 0, queues: 1, fleetDegraded: null },
   queueCounts: [{ queue: "pi-jobs", paused: false, counts: { waiting: 0, active: 0, delayed: 0, paused: 0, failed: 0 } }],
@@ -1138,6 +1144,9 @@ const DRAW = {
   // trigger's, in the Hosts card, the Waitlists' sentences, the Queues line and Scheduled, with a long doctor label: the
   // page holds them at 375 px and in the side column, so the width check covers them.
   "overview-host-long-names.operator": async () => overviewLive(longNamesSnapshot()),
+  // Issue #962: the active jobs could not be read. Running, the headline and the timeline say so; no 0, no "nothing is
+  // running".
+  "overview-running-unread.operator": async () => overviewLive(overviewSnapshot({ active: [], activeUnreachable: true })),
   // RunsScreen's footer, one state each: the fleet's run mirror off or partly read, the history read cut, the history
   // not read at all, nothing matching, and a reason token this console has no words for.
   "runs-mirror-off.operator": async () => runsLive({ page: { runs: RUNS_PAGE_RUNS, mirror: "off", next: null } }),

@@ -431,9 +431,9 @@ test("the live pill: only Live pulses; above a phone the dot and the word (Signe
   assert.deepEqual(SHELL.top[".live--out>.live__out"], { display: "block" });
   // The mark each state shows, read from the rules: above a phone the dot but for Signed out; on a phone a shape each.
   const desktop = Object.fromEntries(Object.keys(LIVE_STATES).map((s) => [s, marksShown(s, null)]));
-  assert.deepEqual(desktop, { start: ["dot"], on: ["dot"], retry: ["dot"], off: ["dot"], out: ["out"] });
+  assert.deepEqual(desktop, { start: ["dot"], on: ["dot"], retry: ["dot"], off: ["dot"], held: ["dot"], out: ["out"] });
   const phone = Object.fromEntries(Object.keys(LIVE_STATES).map((s) => [s, marksShown(s, PHONE)]));
-  assert.deepEqual(phone, { start: ["off"], on: ["dot"], retry: ["retry"], off: ["off"], out: ["out"] }, "Not live (the server's first state too) the stop square, Reconnecting the retry arrow, Signed out the sign-out arrow");
+  assert.deepEqual(phone, { start: ["off"], on: ["dot"], retry: ["retry"], off: ["off"], held: ["off"], out: ["out"] }, "Not live (the server's first state too, and a page whose data could not be read) the stop square, Reconnecting the retry arrow, Signed out the sign-out arrow");
   assert.deepEqual(LIVE_GLYPHS, { retry: "rerun", off: "cancel", out: "logout" });
   assert.equal(new Set(Object.values(LIVE_GLYPHS)).size, 3, "three shapes, and the dot a fourth");
   // On a phone bundle.css hides the pill and its status region; the shell keeps it as one 16px slot on the canvas.

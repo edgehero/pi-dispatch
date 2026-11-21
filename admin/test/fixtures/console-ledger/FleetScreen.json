@@ -40,6 +40,8 @@
     {"el":"mini2 blessing openshell-bind beside openshell, where RunSandboxed's run is;","kind":"sample","status":"illustrative","reason":"A sample value in the design card, replaced by actual bounded production data and deterministic test fixtures."},
     {"el":"the `pi-dispatch doctor` command.","kind":"sample","status":"illustrative","reason":"A sample value in the design card, replaced by actual bounded production data and deterministic test fixtures."},
     {"el":"Why it failed in the Failed table","kind":"readme","status":"illustrative","reason":"the reason is an operator's detail, one fold under the table (REQ-CONSOLE-SECURITY (l))"},
-    {"el":"fleet-consumer-failed.operator","kind":"state","status":"new","panel":"p-hosts","source":"admin/src/console/panels/fleet.mjs#fleetHosts","golden":["panels/fleet-consumer-failed.operator"],"shows":["Queue consumer stopped","dot tone-failed"]}
+    {"el":"fleet-consumer-failed.operator","kind":"state","status":"new","panel":"p-hosts","source":"admin/src/console/panels/fleet.mjs#fleetHosts","golden":["panels/fleet-consumer-failed.operator"],"shows":["Queue consumer stopped","dot tone-failed"]},
+    {"el":"fleet-registry-never-read.operator","kind":"state","status":"new","panel":"p-hosts","source":"admin/src/console/panels/fleet.mjs#fleetHosts","golden":["panels/fleet-registry-never-read.operator"],"shows":["The hosts could not be read, so what they hold is not known"]},
+    {"el":"fleet-no-snapshot.viewer","kind":"state","status":"new","panel":"p-hosts","source":"admin/src/console/panels/fleet.mjs#fleetHosts","golden":["panels/fleet-no-snapshot.viewer"],"shows":["Valkey could not be read. The next refresh tries again."]}
   ]
 }

@@ -1335,6 +1335,79 @@ test("a console back from a restart that cannot read this browser's remembered s
   assert.deepEqual(notes(other), ["retry"]);
 });
 
+stateTest(T.unread, async () => {
+  const held = { cls: LIVE_STATES.held.cls, word: "Not live", title: LIVE_STATES.held.title };
+  const live = { cls: LIVE_STATES.on.cls, word: "Live", title: null };
+  const pillOf = (w) => ({ ...pill(w), title: w.document.getElementById("live-status").getAttribute("title") });
+  const count = (w) => w.document.getElementById("p-nav-parked");
+  // Stale: the hub could not read the page's data and the browser keeps its panels.
+  const w = boot(fleetPage());
+  const es = w.streams[0];
+  es.emit("open");
+  assert.deepEqual([pillOf(w), count(w).hidden, text(count(w))], [live, false, "33 unanswered"], "a page read whole: Live, its Parked count shown");
+  es.emit("stale", { since: NOW - 90_000, what: "data" });
+  assert.deepEqual(pillOf(w), held, "stale gives Not live, with the sentence that says why");
+  assert.equal(count(w).hidden, true, "the Parked count last seen is not shown as the count now");
+  // A panel that arrives meanwhile, and a stream that drops and opens again, say nothing about the data.
+  es.emit("panel", { id: "p-fleet-state", html: "<p>as last seen</p>" });
+  assert.deepEqual(pillOf(w), held, "a panel while stale stays Not live");
+  es.readyState = 0;
+  es.emit("error");
+  assert.equal(pill(w).word, "Reconnecting");
+  es.emit("open");
+  assert.deepEqual([pillOf(w), count(w).hidden], [held, true], "a reconnect while stale stays Not live");
+  // Fresh, and nothing else, gives Live; the count the page holds is shown again, as the hub last drew it.
+  es.emit("panel", { id: "p-nav-parked", html: '<b class="count">5</b>' });
+  assert.equal(count(w).hidden, true, "its panel is swapped, still hidden");
+  es.emit("fresh", {});
+  assert.deepEqual([pillOf(w), count(w).hidden, text(count(w))], [live, false, "5"], "fresh gives Live");
+  es.emit("panel", { id: "p-fleet-state", html: "<p>now</p>" });
+  assert.deepEqual(pillOf(w), live);
+  // The tokens file and a held device are a page that is not being read either.
+  es.emit("stale", { since: null, what: "tokens" });
+  assert.deepEqual(pillOf(w), held);
+  es.emit("fresh", {});
+  // Unread: the hub drew this stream the panels of a failed read. No dimming, no note, the pill alone.
+  const u = boot(fleetPage());
+  u.streams[0].emit("open");
+  u.streams[0].emit("unread", {});
+  assert.deepEqual([pillOf(u), u.document.getElementById("main").classList.contains("stale"), notes(u), count(u).hidden], [held, false, [], false], "no dimming, no note, and the count is this read's own");
+  // Unread after a stale (the read came back with a part missing): the panels are drawn now, so the dimming and its
+  // note go and the count shows again, while the pill stays Not live.
+  u.streams[0].emit("stale", { since: NOW - 1000, what: "data" });
+  assert.deepEqual([u.document.getElementById("main").classList.contains("stale"), notes(u), count(u).hidden], [true, ["stale"], true]);
+  u.streams[0].emit("unread", {});
+  assert.deepEqual([pillOf(u), u.document.getElementById("main").classList.contains("stale"), notes(u), count(u).hidden], [held, false, [], false]);
+  u.streams[0].emit("panel", { id: "p-fleet-state", html: "<p>could not be read</p>" });
+  assert.deepEqual(pillOf(u), held, "its degraded panels arrive under Not live");
+  u.streams[0].emit("fresh", {});
+  assert.deepEqual([pillOf(u), count(u).hidden], [live, false]);
+  // A page the server drew over a failed read says so on its pill, so the stream opening is never Live for the seconds
+  // the hub's first load takes on a Valkey that does not answer.
+  const ctx = { session: OPERATOR, readOnly: false, data: { snapshot: null, readFailed: true, now: NOW }, query: {}, theme: null, maxStreams: 4 };
+  const drawn = String(page({ title: "pi-dispatch console: Fleet", name: "fleet", body: shellHtml("fleet", ctx, html`<section id="p-fleet-state" data-panel><p>could not be read</p></section>`), live: "fleet", query: "" }));
+  assert.match(drawn, /<span id="live-status" [^>]* data-unread>/);
+  assert.doesNotMatch(fleetPage(), /data-unread/, "only on a failed read");
+  // A snapshot that was read with a part missing is drawn so too, each part alone; a snapshot read whole is not.
+  const pillAttr = (snapshot) => / data-unread>/.test(String(shellHtml("fleet", { ...ctx, data: { snapshot, now: NOW } }, html``)));
+  assert.deepEqual([{ activeUnreachable: true }, { parkedUnreachable: "timeout" }, { queue: { fleetDegraded: "registry" }, hostsReadAt: NOW - 1000 }, { queue: { fleetDegraded: "registry" }, hostsReadAt: null }].map(pillAttr), [true, true, true, true]);
+  assert.deepEqual([{}, { activeUnreachable: false, parkedUnreachable: null, parked: [], active: [], queue: { fleetDegraded: null } }].map(pillAttr), [false, false]);
+  const d = boot(drawn);
+  assert.equal(pill(d).word, "Not live", "as the server drew it");
+  d.streams[0].emit("open");
+  assert.deepEqual(pillOf(d), held, "open is not Live on a page drawn unread");
+  d.streams[0].emit("fresh", {});
+  assert.deepEqual(pillOf(d), live);
+  // A closed stream's own states still win: the limit's Not live keeps its own sentence.
+  const lim = boot(fleetPage());
+  lim.streams[0].emit("open");
+  lim.streams[0].emit("stale", { since: null });
+  lim.streams[0].readyState = 2;
+  lim.streams[0].emit("error");
+  await lim.fetch.open("/api/whoami").answer(200, { name: "ops", role: "operator", readOnly: false });
+  assert.equal(lim.document.getElementById("live-status").getAttribute("title"), LIVE_STATES.off.title);
+});
+
 stateTest(T.stale, async () => {
   const w = boot(fleetPage());
   const es = w.streams[0];
@@ -1361,7 +1434,7 @@ stateTest(T.stale, async () => {
   es.readyState = 0;
   es.emit("error");
   es.emit("open");
-  assert.deepEqual([main.classList.contains("stale"), notes(w), pill(w).word], [true, ["stale"], "Live"], "open again, still dimmed under its note");
+  assert.deepEqual([main.classList.contains("stale"), notes(w), pill(w).word], [true, ["stale"], "Not live"], "open again, still dimmed under its note, and not Live over it (issue #962)");
   // The lone tab's reconnect: the hub let the view go, so its stale has no time; the page keeps the one it was told.
   es.emit("stale", { since: null, what: "data" });
   assert.deepEqual([at.getAttribute("datetime"), main.classList.contains("stale")], ["2026-10-24T11:59:00.000Z", true], "the time the panels it holds were last seen");

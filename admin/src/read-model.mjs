@@ -5052,7 +5052,9 @@ export function createFleetReader(
         // queue's is caught: one unreachable host degrades one host's triggers, never the view.
         Promise.all(queues.map((q, i) => (i === 0 ? q.getJobSchedulers(0, -1, true) : q.getJobSchedulers(0, -1, true).catch(() => [])))),
         // The active jobs, `activePerQueue` per queue (issue #641): one for the TUI, the console's bound for the console.
-        Promise.all(queues.map((q) => q.getActive(0, activePerQueue - 1).catch(() => []))),
+        // A queue whose read failed answers null, never `[]` (issue #962): an empty list there would say that queue runs
+        // nothing, which nobody read. The snapshot says so in `activeUnreachable`.
+        Promise.all(queues.map((q) => q.getActive(0, activePerQueue - 1).catch(() => null))),
         // Per-scheduler stall counts (money backstop) for the cron drill-in; reuses the held client like the budget
         // GETs. ONE MGET for every declared cron id, so this stays one round trip however many schedulers exist. An
         // absent key reads as an honest 0 -- a scheduler that has never stalled -- which is the same posture
@@ -5325,6 +5327,12 @@ export function createFleetReader(
         // ONLY the id off the first active Job, for the TUI's ACTIVE row; `active` below is the whole list.
         activeJobId: active[0]?.jobId ?? null,
         active,
+        // Issue #962: true when the active list is not whole, so `active` holds only the rows that were read and an
+        // empty `active` is "not known", never "nothing is running" (as `parkedUnreachable` says of `parked`): a queue's
+        // read failed, or the registry was never read, since the hosts' own queues are named by it and until it is read
+        // once only the shared queue is asked. A registry read before and not now still names the queues last seen, which
+        // are asked, and the surfaces say that fleet is as last seen. False on a read that every queue answered.
+        activeUnreachable: activeLists.some((list) => !Array.isArray(list)) || (fleetDegraded !== null && lastHostsAt === null),
         parked: fold.parked,
         parkedUnreachable: fold.parkedUnreachable,
         failures24h: fold.failures24h,

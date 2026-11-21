@@ -44,6 +44,9 @@ export async function toolActionRequest(name, params = {}, { fleet } = {}) {
       const snapshot = await fleet.snapshot({ waiting: true });
       if ((snapshot.active ?? []).some((r) => r.jobId === params.jobId)) action = "cancel-active";
       else if ((snapshot.held?.rows ?? []).some((r) => r.jobId === params.jobId)) action = "cancel-held";
+      // An active list that is not whole cannot say this job is not running, and a cancel planned for a queued job
+      // would be the wrong one for a running job (issue #962).
+      else if (snapshot.activeUnreachable === true) throw publicToolRefusal("the running jobs could not be read, so whether this job is running is not known; nothing was changed, try again");
       else action = "cancel-queued";
     }
   }

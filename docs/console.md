@@ -994,7 +994,12 @@ that failed beside others that worked: a Configuration tab shows no count for a 
 Not known for the trigger and forge steps when the triggers file cannot be read, and Sandboxes offers no New sandbox
 button when its report was not read. And "could not be read" is said only of a read that failed: a pause-windows file
 that does not exist means no quiet windows, a triggers file that does not exist means no rules, and a host's page says
-there is no capacity history for it only when the host registry and the run mirror both answered.
+there is no capacity history for it only when the host registry and the run mirror both answered. Fleet says the hosts could not
+be read rather than that none is registered, and with the overview it says the running jobs are not known rather than
+that nothing is running; a schedule's stalls it did not read are "not known". Models says the waiting jobs and doctor's
+proposals are not known rather than that there are none. Meanwhile a live page's pill says Not live (its tooltip says
+the console could not read all it needs for the page), also when only a part was not read (the host registry, the
+running jobs or the parked runs), and a page kept as last seen shows no Parked count until it is read again.
 
 A change that timed out before it left the console is not made when Valkey returns. One that reached a Valkey which then
 stopped answering may or may not have been made, and the confirm and its audit row say so. Adopting or undoing a package and
@@ -1095,7 +1100,9 @@ Four cards come first, in a row:
   count says "slots not published". With no host in the registry, jobs that run say so ("4 jobs running, slots not
   published": a worker from before the registry). When the registry could not be read the card says so ("The host
   registry could not be read; this shows the fleet as it was last seen."), under the hosts as last seen or in their
-  place, never that no host is registered. A host whose slots are not known has no dots and no slot shown free or
+  place, never that no host is registered; a registry that was never read has nothing last seen, so the card says
+  the hosts could not be read. When the running jobs themselves could not be read, the number is a dash beside "not
+  known", or the jobs that were read beside "or more running", never a 0. A host whose slots are not known has no dots and no slot shown free or
   held: every host while the registry could not be read ("as last seen": its row is as the last read left it, so a
   slot shown free there is one nobody knows is free), a host that has not checked in within the last minute ("not
   beating", since a host that does not check in takes no job), and one whose list of running jobs could not be read
@@ -2303,7 +2310,8 @@ says:
   sign-in page, which says so; signed out, to the sign-in page, which says why).
 - **Not live** until the page's script has connected (so a page without JavaScript always says so), and when the
   console refused the stream because the page was past a stream limit (below); a note then says how many live tabs
-  one token may hold, with Reload.
+  one token may hold, with Reload. It also says Not live while the console cannot read all the page shows: the page then
+  shows what it last read, or says what is not known, and goes back to Live by itself once it is read again.
 - **Signed out** when your session ends: a note says so and the page goes to the sign-in page, which says why
   ([Sessions](#sessions)). A console that was restarted, whether stopped or killed, no longer knows your session, so
   once it answers again an open page goes to the sign-in page too, which says the console may have restarted (a
@@ -2417,7 +2425,7 @@ fields are only ever added. Each running job in `active` carries a `progress` ob
 tool's name (never a phase name or note), or null when it has none, and `steer` (whether its trigger arms steering)
 with `inbox`, that job's messages as `{id, mode, source, state, at, bytes}` and never their text (null when the job is
 not steer-armed or its inbox could not be read). A part the console could not read is marked with a boolean (`fleetDegraded`,
-`parkedUnknown`, `unreachable`), never with the error, and when Valkey cannot be read at all the answer is `503` with
+`parkedUnknown`, `activeUnknown`, `unreachable`), never with the error, and when Valkey cannot be read at all the answer is `503` with
 a short `error` sentence.
 
 Sign in once with a token and keep the session in a cookie file. Never put the token on a command line, where the

@@ -783,7 +783,9 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
     if (redis) gateway = makeGatewayBroker({ redis, sessions, readTokens, findToken: m.tokens.findToken, readRegistry: gatewayRegistry, audit, readOnly: () => config.readOnly, now, ...(random ? { random } : {}), readSessions: () => fleet.sandboxSessions(), readRun: (id) => fleet.runById(id) });
     const answerer = makeAnswererService({ paths: side.paths, env: side.env, fs, now });
     const pricing = pricingOf(m.pricing);
-    const modelsView = m.modelsView ? (snapshot = null) => m.modelsView.readModelsView({ paths: side.paths, env: side.env, deploymentDir: config.dir, now: now(), snapshot, fleet, fs, redis }) : null;
+    // The page's snapshot passes through as it is: null (the page could not read it) is not read a second time, and a
+    // caller with none (undefined) has the view read its own (issue #962).
+    const modelsView = m.modelsView ? (snapshot) => m.modelsView.readModelsView({ paths: side.paths, env: side.env, deploymentDir: config.dir, now: now(), snapshot, fleet, fs, redis }) : null;
     const modelRoles = m.modelRolePlans?.createModelRoleActions({
       paths: side.paths, env: side.env, fs, now,
       checkModelsKnown: m.modelCatalog?.checkModelsKnown,

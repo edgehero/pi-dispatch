@@ -61,8 +61,10 @@
  * that reconnects is told null: the page keeps the time it was told before); `what` is `tokens` (the console's tokens
  * file, which judges nobody) or `data` (the page's load or render), so the page never blames the deployment's data
  * for a tokens file. Each is said once, and again only when it changes (`sub.said`), so a page stream's first message is
- * its state (a degraded draw, which says what the page already says, is the one draw with none), and the page takes its
- * dimming back on `fresh` alone. A reconnect is a new stream: one that comes back while its page still fails is told
+ * its state, and the page takes its dimming back on `fresh`, or on `unread`. `event: unread` (issue #962) is said before
+ * panels that say themselves what could not be read: a degraded draw's, and a good render's over a snapshot with a part
+ * missing (`dataUnread`: the registry, the active jobs or the parked runs unread). The page dims nothing then, but its
+ * live pill must not say Live over them, and `fresh` is said only once nothing is missing. A reconnect is a new stream: one that comes back while its page still fails is told
  * `stale` before anything else, and one that comes back after it recovered is told `fresh`. At subscribe only the page's
  * data and render are judged: the stream's own request has just read the tokens file, so a tokens failure the last tick
  * saw is the next tick's to say again, if it still holds. Transcript streams never get either: their entries are a log,
@@ -97,6 +99,7 @@ import { STEER_ID_RE, STEER_MODES, STEER_SOURCES, STEER_STATES } from "@edgehero
 import { compareTranscriptIds, TRANSCRIPT_ID_RE, TRANSCRIPT_PAGE_MAX } from "../read-model.mjs";
 import { outcomeWord, recordReason } from "../words.mjs";
 import { RUN_ID_RE } from "./panels.mjs";
+import { dataUnread } from "./panels/common.mjs";
 import { STREAM_SHUTDOWN, streamEndOf } from "./session-ends.mjs";
 import { transcriptEntryHtml, transcriptEntryJson } from "./transcript.mjs";
 import { agentReadProjection, agentReasonToken } from "../agent-read.mjs";
@@ -338,6 +341,17 @@ export function makeLiveHub({
     send(sub, "event: fresh\ndata: {}\n\n");
   }
 
+  /**
+   * `unread` to a page stream not told it already (issue #962): what it is sent next says itself what could not be read
+   * (the degraded panels of a failed load, or a good render over a snapshot with a part missing), so its page dims
+   * nothing and only stops saying Live.
+   */
+  function markUnread(sub) {
+    if (!isPage(sub) || sub.said === "unread" || !subs.has(sub)) return;
+    sub.said = "unread";
+    send(sub, "event: unread\ndata: {}\n\n");
+  }
+
   const panelEvent = (seq, id, html) => `${seq === null ? "" : `id: ${seq}\n`}event: panel\ndata: ${JSON.stringify({ id, html })}\n\n`;
 
   function sendFull(sub, view) {
@@ -352,6 +366,10 @@ export function makeLiveHub({
    * that changed, not the whole page every tick.
    */
   function drawDegraded(sub, rendered) {
+    // The state before the panels, here too (issue #962): `unread`, once, so the page's pill does not say Live over
+    // panels that say they could not be read. Not `stale`: nothing older is kept, so there is nothing to dim or date.
+    markUnread(sub);
+    if (!subs.has(sub)) return;
     const was = sub.degraded ?? new Map();
     const drawn = new Map();
     let seq = null;
@@ -513,12 +531,16 @@ export function makeLiveHub({
         }
         if (changed.length > 0 || view.seq === null) view.seq = nextSeq();
         view.at = t;
+        // Whether this good render stands on a snapshot with a part missing (`dataUnread`): its streams are then told
+        // `unread`, never `fresh`, for as long as that holds, so a lasting partial failure says one thing every tick.
+        view.unread = dataUnread(data);
         // A stream may have left during the awaits above; only a view someone still shows is kept.
         if (!live.some((s) => subs.has(s))) continue;
         views.set(vk, view);
         for (const sub of live) {
           // The state before the panels (see the header).
-          markFresh(sub);
+          if (view.unread) markUnread(sub);
+          else markFresh(sub);
           if (!subs.has(sub)) continue;
           if (sub.needsFull) sendFull(sub, view);
           else for (const id of changed) if (!send(sub, panelEvent(sub.page === "run" ? null : view.seq, id, view.panels.get(id).html))) break;
@@ -655,6 +677,7 @@ export function makeLiveHub({
         // A view is a good render (see the header): the newest this browser can be given, so it is sent, after the state
         // that says whether it is current (the data's and the render's to say, not the tokens file's: see the header).
         if (failingNow(sub)) markStale(sub, view.at, "data");
+        else if (view.unread) markUnread(sub);
         else markFresh(sub);
         if (page !== "run" && typeof lastEventId === "string" && lastEventId === view.seq) sub.needsFull = false;
         else sendFull(sub, view);
@@ -870,6 +893,9 @@ export function stateOf(snapshot, role, { now = Date.now() } = {}) {
     // one), each listed reason held to the record's token charset; null where `failures24h` is (the runs unread).
     refusals24h: refusalsOf(s.refusals24h),
     failures24hFloor: Boolean(s.failures24hFloor),
+    // True when a queue's active list could not be read (issue #962): `active` then holds what the other queues
+    // answered, and an empty `active` means "unknown", never "nothing is running".
+    activeUnknown: Boolean(s.activeUnreachable),
     active: (Array.isArray(s.active) ? s.active : []).map((a) => ({ jobId: str(a?.jobId), queue: str(a?.queue), startedAt: num(a?.startedAt), host: str(a?.host), progress: progressOf(a?.progress), steer: a?.steer === true, inbox: inboxOf(a) })),
     schedulers: (Array.isArray(s.schedulers) ? s.schedulers : []).map((x) => {
       // The trigger's id, the scheduler's key; BullMQ's `name` is the job's ("local"), never a stand-in for a refused key.
@@ -879,7 +905,9 @@ export function stateOf(snapshot, role, { now = Date.now() } = {}) {
         next: num(x?.next),
         overdue: num(x?.overdueMs) !== null && x.overdueMs > 0,
         overdueMs: num(x?.overdueMs),
-        stalls: name === null ? null : num(Number(s.schedulerStalls?.[name] ?? 0)) ?? 0,
+        // Null for a counter that could not be read (the reader keeps null for it, issue #962), never 0; a schedule with
+        // no counter has never stalled, which is 0.
+        stalls: name === null || s.schedulerStalls?.[name] === null ? null : num(Number(s.schedulerStalls?.[name] ?? 0)) ?? 0,
       };
     }),
     schedulerStallMax: num(s.schedulerStallMax),

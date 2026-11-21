@@ -21,9 +21,9 @@ export function consoleModelsFixture(now) {
     coverage: { complete: false, partial: true, records: 24, days: 30, notes: [] },
   };
 }
-async function draw({ change = () => {}, role = "operator", readOnly = false } = {}) {
+async function draw({ change = () => {}, role = "operator", readOnly = false, data = {} } = {}) {
   const m = consoleModelsFixture(NOW); change(m);
-  return (await renderPage("models", { session: { name: role === "operator" ? "ops" : "watcher", role }, data: { now: NOW, models: m }, query: {}, readOnly })).html;
+  return (await renderPage("models", { session: { name: role === "operator" ? "ops" : "watcher", role }, data: { now: NOW, models: m, ...data }, query: {}, readOnly })).html;
 }
 export const MODELS_DRAW = Object.freeze({
   "models-subscription.operator": () => draw({ change: m => { m.subscriptionAuth = consoleSubscriptionFixture(NOW); } }),
@@ -43,6 +43,9 @@ export const MODELS_DRAW = Object.freeze({
   "models-partial-canary.operator": () => draw({ change: (m) => { const c = m.canaries[0]; c.partial = true; c.rows[1].source = null; c.sourceStats = { runs: 1, completed: 1, costPerRun: null, averageTurns: null, averageTokens: null, knownCosts: 0, knownTurns: 0, knownTokens: 0 }; } }),
   "models-empty.viewer": () => draw({ role: "viewer", change: (m) => { for (const k of ["roles", "models", "cooldowns", "proposals", "canaries", "waiting", "recentFallbacks"]) m[k] = []; m.coverage.records = 0; } }),
   "models-unreadable.viewer": () => draw({ role: "viewer", change: (m) => { m.state = "unreadable"; m.partial = true; for (const k of ["roles", "models", "cooldowns", "proposals", "canaries", "waiting", "recentFallbacks"]) m[k] = []; } }),
+  // Issue #962: the page's snapshot could not be read. The roles and models are the files'; the waiting jobs and the
+  // doctor proposals are not known, and no list says "none". One role: a models golden is read at every width.
+  "models-no-snapshot.viewer": () => draw({ role: "viewer", data: { snapshot: null, readFailed: true }, change: (m) => { m.waiting = []; m.proposals = []; m.cooldowns = []; m.waitingUnread = true; m.proposalsUnread = true; m.cooldownsUnread = true; for (const r of m.roles) if (r.next.kind !== "direct") r.next = { kind: "unknown", model: null, reason: "cooldowns-unavailable" }; for (const row of m.models) row.state = "unknown"; m.banners = [{ kind: "cooldowns-unavailable", reason: "model-cooldown", label: "Model cooldowns could not be read. Current failover routing is unknown.", fix: "Check Valkey and reload; no model was selected." }]; m.coverage.notes = ["Waiting jobs could not be read; an empty list is not proof that none wait.", "No published doctor proposal evidence is available. Reload after doctor publishes on a host."]; } }),
   "models-long-names.operator": () => draw({ change: (m) => { m.roles[0].role = "a".repeat(32); m.roles[0].model = `${"p".repeat(64)}/${"m".repeat(64)}`; m.roles[0].fallbackModels[0].ref = `${"f".repeat(64)}/${"n".repeat(64)}`; } }),
 });
 export const MODELS_PANEL_STATES = Object.freeze(Object.keys(MODELS_DRAW));

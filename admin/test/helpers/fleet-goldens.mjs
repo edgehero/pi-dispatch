@@ -58,6 +58,12 @@ const states = {
   "fleet-two-valkeys.operator": () => draw("fleet", { plan: { disagreement: "Two Valkeys disagree: a pause reaches both; resume reaches neither until they agree.", refused: "Nothing was changed. One queue can still be resumed on the Valkey this console read it from.", resumeCommand: "pi-dispatch resume --valkey-url 'redis://deployment:6379'", resumeArgv: ["pi-dispatch", "resume", "--valkey-url", "redis://deployment:6379"] } }),
   "fleet-empty.viewer": () => draw("fleet", { role: "viewer", snap: snapshot({ hostBudgets: [], active: [], held: { rows: [], more: 0 }, failed: { rows: [], more: 0 }, schedulers: [], waiting: waiting([]), doctor: { hosts: [], more: 0 }, queue: { ...snapshot().queue, counts: { waiting: 0, active: 0, delayed: 0, failed: 0 } } }) }),
   "fleet-registry-unreadable.operator": () => draw("fleet", { snap: snapshot({ queue: { ...snapshot().queue, fleetDegraded: "registry" }, hostsReadAt: NOW - HOUR }) }),
+  // Issue #962: a registry that was never read, as the reader answers it (`read-model-progress.test.mjs` holds the
+  // shape): no host row, the shared queue alone asked and counted, so the active list is not whole
+  // (`activeUnreachable`), no doctor result for no named host; and the stall counters unread. Not a fleet with no host,
+  // not "Nothing is running.", not 0 stalls. Then no snapshot at all.
+  "fleet-registry-never-read.operator": () => draw("fleet", { snap: snapshot({ hostBudgets: [], queue: { ...snapshot().queue, counts: { ...snapshot().queueCounts[0].counts }, queues: 1, fleetDegraded: "registry" }, queueCounts: [snapshot().queueCounts[0]], hostsReadAt: null, doctor: { hosts: [], more: 0 }, active: [], activeUnreachable: true, waiting: waiting([], { byQueue: [{ queue: "pi-jobs", inLine: 0, scheduled: 0, truncated: false }] }), schedulerStalls: { "nightly-tidy": null, "pm-weekly": null } }) }),
+  "fleet-no-snapshot.viewer": () => draw("fleet", { role: "viewer", fleet: noSnapshotFleet() }),
   "fleet-truncated.operator": () => draw("fleet", { snap: snapshot({ waiting: waiting([wait()], { truncated: true }), held: { ...snapshot().held, more: 14 }, failed: { ...snapshot().failed, more: 8 } }) }),
   "fleet-all-reasons.operator": () => draw("fleet", { snap: snapshot({ waiting: waiting(Object.entries(DEFER_WHYS).map(([why, spec], i) => wait({ jobId: `gh-wait-${i}`, why, bucket: spec.bucket, budgetWhy: "memory" }))) }) }),
   "fleet-no-progress.operator": () => draw("fleet", { snap: snapshot({ active: snapshot().active.map((j) => ({ ...j, progress: { absent: true } })) }) }),

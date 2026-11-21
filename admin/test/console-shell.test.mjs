@@ -179,7 +179,10 @@ test("the headline: a panel span in the title bar's sub line, drawn for a page t
 });
 
 test("the live pill: drawn not live until the script connects, its states the LiveStates card's words, every state's mark drawn once", async () => {
-  assert.deepEqual(Object.fromEntries(Object.entries(LIVE_STATES).map(([k, v]) => [k, v.word])), { start: "Not live", on: "Live", retry: "Reconnecting", off: "Not live", out: "Signed out" });
+  assert.deepEqual(Object.fromEntries(Object.entries(LIVE_STATES).map(([k, v]) => [k, v.word])), { start: "Not live", on: "Live", retry: "Reconnecting", off: "Not live", held: "Not live", out: "Signed out" });
+  // A page whose data could not be read (issue #962) is Not live in Not live's own classes and word, so the bar is drawn
+  // in no new way; only its sentence differs.
+  assert.deepEqual([LIVE_STATES.held.cls, LIVE_STATES.held.word, LIVE_STATES.held.title === LIVE_STATES.off.title], [LIVE_STATES.off.cls, LIVE_STATES.off.word, false]);
   for (const s of Object.values(LIVE_STATES)) assert.match(s.cls, /^live(?: live--(?:retry|off))?(?: live--out)?$/);
   // Signed out is Not live's colours with the sign-out glyph for the dot: the pill holds both, the stylesheet shows one.
   assert.equal(LIVE_STATES.out.cls, "live live--off live--out");
@@ -196,10 +199,10 @@ test("the live pill: drawn not live until the script connects, its states the Li
     const { html } = await draw(name);
     assert.equal(count(html, pill), PAGES[name].live ? 1 : 0, `${name}: the pill, once, on a live page`);
   }
-  // The script switches between the other four, written in from the same table.
+  // The script switches between the others, written in from the same table.
   const { start: _first, ...switched } = LIVE_STATES;
   assert.ok(CONSOLE_SCRIPT.includes(`var LIVE = ${JSON.stringify(switched)};`));
-  for (const state of ["on", "retry", "off", "out"]) assert.ok(CONSOLE_SCRIPT.includes(`mark("${state}")`), `the script marks ${state}`);
+  for (const state of ["on", "retry", "off", "held", "out"]) assert.ok(CONSOLE_SCRIPT.includes(`mark("${state}")`), `the script marks ${state}`);
 });
 
 test("the theme button: hidden until the script shows it, named for the choice the page was drawn in", async () => {

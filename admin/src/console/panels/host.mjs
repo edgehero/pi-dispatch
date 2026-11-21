@@ -151,6 +151,8 @@ const sizeText = (size) =>
   size && Number.isFinite(size.memMiB) && Number.isFinite(size.cpuCenti)
     ? `${size.memMiB / 1024} GiB and ${size.cpuCenti / 100} cores`
     : "size not published";
+/** Jobs on the host: the line for an active list that could not be read whole (issue #962), beside what was read. */
+export const HOST_ACTIVE_UNREAD_TEXT = "The running jobs could not be read, so a job running on this host may be missing here.";
 export const hostJobs = card("Jobs on the host", (h, v) => {
   const s = v.data?.snapshot ?? {};
   const active = (s.active ?? []).filter((j) => j.host === label(v));
@@ -221,6 +223,10 @@ export const hostJobs = card("Jobs on the host", (h, v) => {
     rows,
     empty: v.data?.snapshot ? "No running, orphaned or waiting job was read for this host." : "Not known: the jobs on this host could not be read.",
   })}${
+    v.data?.snapshot?.activeUnreachable === true
+      ? html`<p>${HOST_ACTIVE_UNREAD_TEXT}</p>`
+      : null
+  }${
     h?.jobsUnreadable
       ? html`<p>The host's running-job list is unreadable.</p>`
       : null
