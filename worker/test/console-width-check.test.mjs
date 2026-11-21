@@ -7,6 +7,7 @@ import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
 import { frozenDateSource } from "../../launch/chrome-pipe.mjs";
 import {
+	BROWSER_LANES,
 	CFT_PLATFORMS,
 	CONTROL_PATH,
 	CONTROL_WIDTH,
@@ -317,7 +318,7 @@ test("one golden run: a CSP violation, a probe that never ran and the wrong --ca
 	assert.deepEqual(runVerdict({ ...base, canvas: "" }).failures, ["--canvas is unset, not the light theme's #edeeec"]);
 	const noisy = runVerdict({ ...base, errors: ["boom"], settled: false, measured: { ...measured, clientWidth: 980 } });
 	assert.deepEqual(noisy.failures, []);
-	assert.deepEqual(noisy.notes, ["the page did not settle within 1.5 s (fonts or frames); measured anyway", "page error: boom", "the layout viewport is 980 px, not 375"]);
+	assert.deepEqual(noisy.notes, ["the page did not settle within 1.5 s (its fonts, its frames or, on a live page, its event stream); measured as it stood", "page error: boom", "the layout viewport is 980 px, not 375"]);
 	assert.equal(runVerdict({ ...base, measured: { ...measured, scrollWidth: 400 } }).width.ok, false);
 	assert.deepEqual(runVerdict({ ...base, emulation: desk(375) }).failures, emulationProblems(desk(375), true), "a golden is always a phone's window");
 });
@@ -1494,10 +1495,10 @@ const repoModules = () => (loaded ??= loadModules());
 /**
  * `runCheck` with the browser faked: every golden and shell run passes (the run without scripts too, planned by
  * `noScriptRun` as `checkPages` plans it) and each control fails exactly as built, unless `controlFailures` (by control
- * id) says what it failed with, or null for one that never ran, and `noScript` says what the run without scripts
+ * id, in lane 1; `laneControlFailures` the same for each later lane, by lane) says what it failed with, or null for one that never ran, and `noScript` says what the run without scripts
  * failed with (null: it never ran), so what fails is the glue's own.
  */
-async function fakeRun({ require = true, find = () => ({ path: "/opt/chrome" }), fixtures = FIXTURES, product = null, ci = true, controlFailures = {}, secondLaneControlFailures = {}, noScript = [], edit = (m) => m } = {}) {
+async function fakeRun({ require = true, find = () => ({ path: "/opt/chrome" }), fixtures = FIXTURES, product = null, ci = true, controlFailures = {}, laneControlFailures = {}, noScript = [], edit = (m) => m } = {}) {
 	const modules = edit(await repoModules());
 	product ??= `HeadlessChrome/${modules.pin.version}`;
 	const lines = [];
@@ -1508,9 +1509,10 @@ async function fakeRun({ require = true, find = () => ({ path: "/opt/chrome" }),
 		const shell = planShellRuns(args.shellDocs).map((run) => ({ run, failures: [], notes: [] }));
 		const bare = noScriptRun(args.shellDocs);
 		if (bare && noScript !== null) shell.push({ run: bare, failures: noScript, notes: [] });
-		const controls = [controlFailures, secondLaneControlFailures].flatMap((overrides, index) => args.controls.flatMap((c) => {
+		const controls = Array.from({ length: BROWSER_LANES }, (_, index) => index + 1).flatMap((lane) => args.controls.flatMap((c) => {
+			const overrides = lane === 1 ? controlFailures : laneControlFailures[lane] ?? {};
 			const failures = overrides[c.id] === undefined ? c.expected : overrides[c.id];
-			return failures === null ? [] : [{ lane: index + 1, run: { key: c.id }, failures, notes: [] }];
+			return failures === null ? [] : [{ lane, run: { key: c.id }, failures, notes: [] }];
 		}));
 		return { product, results, shell, controls };
 	};
@@ -1592,14 +1594,21 @@ test("the glue: a negative control not failed exactly as it was built, or not ru
 	assert.ok(phoneNever.lines.includes(`::error::the phone's negative control (${phone.what}) never ran, so a measure blind to what it breaks would pass every page`));
 });
 
-test("the glue: passing first-lane controls cannot excuse missing or blind second-lane controls", async () => {
-	const never = await fakeRun({ secondLaneControlFailures: { control: null, "control-phone": null } });
-	assert.equal(never.code, 1);
-	assert.ok(never.lines.some((line) => line.startsWith("::error::the negative control (lane 2)") && line.includes("never ran")));
-	assert.ok(never.lines.some((line) => line.startsWith("::error::the phone's negative control (lane 2)") && line.includes("never ran")));
-	const blind = await fakeRun({ secondLaneControlFailures: { control: [] } });
-	assert.equal(blind.code, 1);
-	assert.ok(blind.lines.some((line) => line.startsWith("::error::the negative control (lane 2) was not failed with:")));
+test("the glue: passing controls in the other lanes cannot excuse one lane's missing or blind controls", async () => {
+	assert.ok(BROWSER_LANES >= 2);
+	const clean = await fakeRun();
+	assert.equal(clean.lines.filter((line) => / failed as it was built to /.test(line)).length, BROWSER_LANES * 2, "each lane's two controls are told");
+	for (let lane = 2; lane <= BROWSER_LANES; lane++) {
+		const never = await fakeRun({ laneControlFailures: { [lane]: { control: null, "control-phone": null } } });
+		assert.equal(never.code, 1, `lane ${lane}`);
+		assert.ok(never.lines.some((line) => line.startsWith(`::error::the negative control (lane ${lane})`) && line.includes("never ran")));
+		assert.ok(never.lines.some((line) => line.startsWith(`::error::the phone's negative control (lane ${lane})`) && line.includes("never ran")));
+		assert.equal(never.lines.filter((line) => line.includes("never ran")).length, 2, "and no other lane is blamed");
+		const blind = await fakeRun({ laneControlFailures: { [lane]: { control: [] } } });
+		assert.equal(blind.code, 1, `lane ${lane}`);
+		assert.ok(blind.lines.some((line) => line.startsWith(`::error::the negative control (lane ${lane}) was not failed with:`)));
+	}
+	assert.equal(BROWSER_LANES, 3, "issue #966: three lanes, inside the same deadline");
 });
 
 test("the glue: the run without page scripts never made, or made with its scripts on, fails a run whose every page passed", async () => {
