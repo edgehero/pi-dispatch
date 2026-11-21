@@ -797,6 +797,12 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   // Issue #737: the deployment the console serves, by its folder's last part (`cli.mjs`'s `pageDeps.deployment`), for
   // the first run's checklist; null where the caller passes none.
   const data = { page: name, now, env: forgeEnvOf(deps.env), deployment: deps.deployment ?? null };
+  // The trigger page's Fire now check is started here and awaited where the page reads it (issue #961): it has a bound
+  // of its own, and beside the snapshot's read rather than after it a Valkey that stopped answering holds the page for
+  // the longer of the two, not their sum.
+  const fireCheck = name === "trigger" && formsDrawn(who)
+    ? Promise.resolve().then(() => (typeof deps.triggerFireCheck === "function" ? deps.triggerFireCheck(q.index) : { refusal: "Fire now is not available in this deployment." })).catch(() => ({ refusal: "The console could not check whether this schedule can fire here." }))
+    : null;
   if (name === "watch" || name === "watch-board") data.watch = await loadWatchData(deps.watch, q, { board: name === "watch-board", privateRead: who?.role === "operator" && who?.live !== true });
   const reads = PAGE_READS[name];
   if (["parked", "answer-rules", "run"].includes(name) && deps.answerer) {
@@ -923,9 +929,7 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
       try { data.snapshot = { ...data.snapshot, triggerSkew: { [q.index]: await deps.fleet.triggerSkew(q.index, data.snapshot.waiting) } }; } catch { /* An unreadable skew check remains unknown. */ }
     }
     data.triggerDetail = triggerDetailOf(data.snapshot, q.index, { now });
-    if (formsDrawn(who)) {
-      try { data.triggerFireCheck = typeof deps.triggerFireCheck === "function" ? await deps.triggerFireCheck(q.index) : { refusal: "Fire now is not available in this deployment." }; } catch { data.triggerFireCheck = { refusal: "The console could not check whether this schedule can fire here." }; }
-    }
+    if (fireCheck !== null) data.triggerFireCheck = await fireCheck;
   }
   if (name === "trigger" || name === "trigger-add") {
     try { data.triggerEditor = typeof deps.triggerEditor === "function" ? await deps.triggerEditor() : readTriggerEditor({ paths: deps.paths ?? {}, env: deps.env ?? {} }); } catch { data.triggerEditor = {}; }

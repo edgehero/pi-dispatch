@@ -30,7 +30,9 @@ export function makeTouchOutbox({ dir, store, fs = nodeFs, log = () => {} } = {}
 			if (!result.ok) log("touch_record_pending", {});
 			return result.ok ? result : { error: result.error, durable };
 		},
-		async abort(intent) { if (!intent?.event) return; await store.abort(intent.event); drop(intent.event); },
+		// The file goes whatever the store answers (issue #961): an abort whose answer was lost left it behind as pending, and
+		// `repair()` then began that action again on every read of the page.
+		async abort(intent) { if (!intent?.event) return; try { await store.abort(intent.event); } finally { drop(intent.event); } },
 		async repair() {
 			const result = { repaired: 0, pending: 0, invalid: 0 };
 			let names; try { names = fs.readdirSync(dir); } catch { return result; }

@@ -94,6 +94,7 @@ import {
   readProjects,
   writeProjects,
   enqueueDispatchRun,
+  LOOK_FIRST,
   planTriggerFire,
   enqueueTriggerFire,
   KNOWN_KEYS,
@@ -1416,7 +1417,8 @@ async function prioritiesCommand(pi: ExtensionAPI, tokens: string[], notify: Not
       const res = await setPriorities(given);
       notify?.(prioritiesOutcome(res), res.outcome === "applied" || res.outcome === "duplicate" ? "info" : "warning");
     } catch (err: any) {
-      notify?.(`priorities: ${scrubControls(String(err?.message ?? err))}`, "error");
+      // A write Valkey took and did not answer (issue #961) is not one that failed: the plan may have applied.
+      notify?.(`priorities: ${scrubControls(String(err?.message ?? err))}${err?.valkeyMayStillRun === true ? "; Valkey did not confirm the plan, so it may or may not have been applied. Look at /dispatch priorities once Valkey answers" : ""}`, "error");
     }
     return;
   }
@@ -1700,6 +1702,12 @@ async function dispatch(pi: ExtensionAPI, args: string, rawCtx: any): Promise<vo
       }
       if (res.unreachable) {
         notify?.(`could not reach the queue: ${res.unreachable}`, "error");
+        return;
+      }
+      // Sent and not confirmed, or its read back lost (issue #961): the funnel's own sentence, never "queued".
+      if (typeof res.invalid === "string") {
+        // The command has no preview to look again with: its line names the status instead.
+        notify?.(scrubControls(res.invalid.replace(LOOK_FIRST, "Look at /dispatch status before running it again")), "error");
         return;
       }
       if (res.deduplicated) {
@@ -2635,6 +2643,7 @@ function auditDir(): string {
 function enqueueFailure(res: any): string | null {
   if (typeof res?.refused === "string" && res.refused !== "") return res.refused;
   if (res?.unreachable) return "could not reach the queue";
+  if (typeof res?.invalid === "string" && res.invalid !== "") return res.invalid;
   if (res?.deduplicated) return "a duplicate: nothing new was queued";
   return null;
 }

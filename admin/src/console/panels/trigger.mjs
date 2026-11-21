@@ -382,7 +382,7 @@ export function triggerKinds(v) {
                       hidden: [["index", v.query.index, "int"]],
                       label: "Fire now",
                     })}`
-                : html`<p>Fire now cannot be checked here.</p>`
+                : html`<p>${v.data?.triggerFireCheck?.unreachable ? "Fire now could not be checked: the deployment's queue did not answer. Reload the page to check again." : "Fire now cannot be checked here."}</p>`
             : null}`
       : html`<p>
           ${t.once

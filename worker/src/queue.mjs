@@ -169,8 +169,10 @@ export function makeQueue(connection, { name = QUEUE } = {}) {
  * is connected and stopped answering ends at the bound rather than when Valkey wakes. A command past it that had been
  * sent carries `valkeyMayStillRun`, which is what lets the kill switch say a queue's pause "may or may not have been
  * made" instead of waiting for it. The ONE place the console passes the bound, so the queues behind the kill switch,
- * the failed-job and steer actions, the fleet reader and the status read have it by one spelling (a rerun's, a parked
- * answer's, a trigger fire's and the zero touch and schedule pages' one-shot queues are not built through it yet); never for a Worker (`parseConnection` says why). `parseConnectionFn` is the
+ * the failed-job and steer actions, the fleet reader and the status read have it by one spelling, and since issue #961
+ * so do the one-shot queues of a rerun, a parked answer, a `dispatch_run`, a trigger fire, the zero touch grouping job
+ * and the schedule page (not yet: a held job's cancel, `cancelHeldJob`, and the panel's scheduler list, `readSchedulers`,
+ * each under a timer of its own); never for a Worker (`parseConnection` says why). `parseConnectionFn` is the
  * caller's seam.
  */
 export function consoleQueueConnection(url, parseConnectionFn = parseConnection) {

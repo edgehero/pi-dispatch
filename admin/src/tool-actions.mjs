@@ -151,7 +151,8 @@ export async function executeToolAction(name, params, rawCtx, { paths, env, gran
     // Human/agent origin comes from the UI outcome, never a model argument.
     ctx.interventionOrigin = interactive ? "human" : "agent";
     ctx.a.interventionOrigin = ctx.interventionOrigin;
-    const failure = (r) => r?.unreachable ? "action-unavailable" : r?.ok === true ? null : "action-refused";
+    // `action-unconfirmed` (issue #961): a write that was sent and not confirmed is not one that was refused.
+    const failure = (r) => r?.unreachable ? "action-unavailable" : r?.ok === true ? null : r?.partial === true ? "action-unconfirmed" : "action-refused";
     let bulkWarning = false;
     if (action.bulk) {
       const one = (method, args) => {

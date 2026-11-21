@@ -166,36 +166,71 @@ export async function readDeploymentUpdates({ redis = null, paths = {}, records 
 	return await readUpdates({ redis, records, recordsPartial, audit, pinned, now, staged: readStaged({ globalPiDir: paths.globalPiDir, fs }), triggersDocument: readTriggersDocument({ triggersPath: paths.triggersPath, fs }) });
 }
 
+/** How long the doctor index's host list may take: the bound the other reads here have inside `updates.mjs`. */
+const HOSTS_READ_TIMEOUT_MS = 3_000;
+
+/** `promise` within `ms`, or a rejection: a read with no bound of its own (the doctor index's SMEMBERS). */
+function inTime(promise, ms) {
+	return new Promise((resolve, reject) => {
+		const timer = setTimeout(() => reject(new Error("valkey did not answer")), ms);
+		timer.unref?.();
+		Promise.resolve(promise).then((value) => { clearTimeout(timer); resolve(value); }, (error) => { clearTimeout(timer); reject(error); });
+	});
+}
+
 /**
  * Everything the page draws, from injected sources so that each state is a fixture. `null` when even the stage manifest could not be asked: the page then says so rather than drawing nothing.
+ *
+ * Valkey is read in three waves, the reads of a wave at once (issue #961). One after another, each read waited out its own bound on a Valkey that stopped answering, thirteen seconds where one bound says as much.
+ * When neither read of the first wave was answered, the rest is not asked: the rows are drawn from the stage manifest alone, as a console without a Valkey draws them. `factsUnread` says a host's applied rows or a
+ * canary's published facts were asked for and not answered: an Adopt judges by them, so its gate must read that as "not known", never as "none".
  */
-export async function readUpdates({ redis = null, staged, records = [], recordsPartial = false, audit = [], pinned = null, triggersDocument = null, now = Date.now() } = {}) {
-	const looks = redis ? await readLooks(redis, { now: () => now }) : { unreachable: true };
-	const desired = redis ? await readDesired(redis) : null;
+export async function readUpdates({ redis = null, staged, records = [], recordsPartial = false, audit = [], pinned = null, triggersDocument = null, now = Date.now(), hostsTimeoutMs = HOSTS_READ_TIMEOUT_MS } = {}) {
+	const [looks, desired] = redis ? await Promise.all([readLooks(redis, { now: () => now }), readDesired(redis)]) : [{ unreachable: true }, null];
+	// Whether Valkey answered anything: where it did not, nothing more is asked of it.
+	const answering = redis !== null && !(looks.unreachable && desired === null);
 	let known = looks.unreachable ? [] : looks.hosts.map((h) => h.record.host);
-	if (redis) {
-		// Offline hosts stay on the page: doctor's index remembers a host for a week after its last publish, which the live set does not.
-		try { known = [...known, ...(await redis.smembers(DOCTOR_HOSTS) ?? [])]; } catch { /* the live set below, or nothing */ }
-		try {
-			const live = await readLiveHosts(redis, { prune: false });
-			if (Array.isArray(live?.hosts)) known = [...known, ...live.hosts.map((h) => h?.name ?? h)];
-			else if (Array.isArray(live)) known = [...known, ...live.map((h) => h?.name ?? h)];
-		} catch { /* a host that cannot be listed is not asserted either way */ }
+	if (answering) {
+		const [indexed, live] = await Promise.all([
+			// Offline hosts stay on the page: doctor's index remembers a host for a week after its last publish, which the live set does not.
+			inTime(redis.smembers(DOCTOR_HOSTS), hostsTimeoutMs).catch(() => null /* the live set, or nothing */),
+			Promise.resolve().then(() => readLiveHosts(redis, { prune: false })).catch(() => null /* a host that cannot be listed is not asserted either way */),
+		]);
+		if (Array.isArray(indexed)) known = [...known, ...indexed];
+		if (Array.isArray(live?.hosts)) known = [...known, ...live.hosts.map((h) => h?.name ?? h)];
+		else if (Array.isArray(live)) known = [...known, ...live.map((h) => h?.name ?? h)];
 	}
 	const hostNames = [...new Set(known.filter((n) => typeof n === "string" && n !== ""))].sort();
-	const applied = {};
-	for (const host of hostNames) applied[host] = redis ? (await readApplied(redis, host)) ?? {} : {};
-	const packages = [];
-	for (const pkg of staged?.packages ?? []) {
+	// What each staged package's row is about, decided before the third wave so that its reads can go out together.
+	const rows = (staged?.packages ?? []).map((pkg) => {
 		const row = (desired ?? []).find((d) => d.name === pkg.name) ?? null;
 		const look = lookOf(pkg.name, looks);
 		// What this row is about: the newest once it passes what was adopted, else what was adopted. Adopt's gate reads `canary` for the version it is asked about, so this must never be another version's.
 		const adoptedVersion = row?.op === "adopt" ? row.version : null;
 		const target = adoptedVersion && !(look.newest && compareVersions(look.newest, adoptedVersion) > 0) ? adoptedVersion : look.newest;
-		const canary = target ? canaryResultOf(records, pkg.name, target) : null;
-		const facts = target && redis ? await readCanaryFacts(redis, pkg.name, target) : null;
-		packages.push(packageRow({ pkg, look, desired: row, standings: row ? hostStandings({ desired: row, applied, hosts: hostNames, now }) : [], canary, facts }));
-	}
+		return { pkg, row, look, target };
+	});
+	let factsUnread = false;
+	const [appliedRows, factRows] = await Promise.all([
+		Promise.all(hostNames.map(async (host) => {
+			if (!answering) return {};
+			const read = await readApplied(redis, host);
+			if (read === null) factsUnread = true;
+			return read ?? {};
+		})),
+		Promise.all(rows.map(async ({ pkg, target }) => {
+			if (!target || !answering) return null;
+			try {
+				return await readCanaryFacts(redis, pkg.name, target, { strict: true });
+			} catch {
+				factsUnread = true;
+				return null;
+			}
+		})),
+	]);
+	const applied = Object.fromEntries(hostNames.map((host, i) => [host, appliedRows[i]]));
+	// In the stage manifest's order, whatever order the reads were answered in.
+	const packages = rows.map(({ pkg, row, look, target }, i) => packageRow({ pkg, look, desired: row, standings: row ? hostStandings({ desired: row, applied, hosts: hostNames, now }) : [], canary: target ? canaryResultOf(records, pkg.name, target) : null, facts: factRows[i] }));
 	const hosts = looks.unreachable ? [] : looks.hosts.map(({ record, stale }) => ({ name: record.host, at: record.at, stale, ...record.hostPi }));
 	const newestLook = looks.unreachable || looks.hosts.length === 0 ? null : Math.max(...looks.hosts.map((h) => h.record.at));
 	return {
@@ -206,6 +241,7 @@ export async function readUpdates({ redis = null, staged, records = [], recordsP
 		packages,
 		stagedUnreadable: staged === null || staged === undefined || staged.unreadable === true,
 		recordsPartial: recordsPartial === true,
+		factsUnread,
 		moreHosts: looks.unreachable ? 0 : looks.more ?? 0,
 		hosts,
 		triggers: canaryTriggers(triggersDocument),

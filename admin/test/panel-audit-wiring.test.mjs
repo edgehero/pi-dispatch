@@ -560,3 +560,22 @@ test("the table has exactly one row per audited call site in index.ts, secrets-c
   // The dashboard.ts sites are the five writes withAuditedWrites wraps, and nothing else there calls `write({`.
   assert.deepEqual(sitesIn("dashboard.ts").sort(), ["dashboard.ts:cancel-active", "dashboard.ts:cancel-held", "dashboard.ts:fleet-pause", "dashboard.ts:fleet-resume", "dashboard.ts:steer"]);
 });
+
+test("a tool's paid start that was sent and not confirmed is audited as action-unconfirmed and thrown to the model in the funnel's own sentence (#961)", async () => {
+  const fx = deployment();
+  try {
+    const sentence = "Fire now did not receive a queue acknowledgement. A run may have been queued; check In line and Running on the overview before trying again next minute.";
+    const before = rowsOf(fx.files.logs).length;
+    await assert.rejects(
+      executeToolAction("dispatch_trigger_fire", { index: 0 }, { hasUI: true, ui: { confirm: async () => true } }, { paths: resolvedPaths(), env: {}, grantsEnv: { PI_DISPATCH_RUN_ROOTS: "/test-root", PI_DISPATCH_RUN_PER_HOUR: "3" }, readModel: { ...readModel,
+        planTriggerFire: async () => ({ plan: { title: "Fire cron trigger now", message: "Fire daily now", schedulerId: "daily", fileDigest: "a".repeat(64), reserve: { dollarsMicros: 2_000_000 } } }),
+        enqueueTriggerFire: async () => ({ invalid: sentence, partial: true }),
+      } }),
+      (error) => error.message === sentence,
+    );
+    const rows = rowsOf(fx.files.logs).slice(before);
+    assert.deepEqual(rows.map((r) => [r.kind, r.outcome, r.reason ?? null]), [["trigger-fire", "ok", null], ["trigger-fire", "failed", "action-unconfirmed"]]);
+  } finally {
+    fx.restore();
+  }
+});

@@ -23,7 +23,7 @@ function fixture() {
   writeFileSync(paths.triggersPath, JSON.stringify({ triggers: [{ on: { type: "cron", id: "daily", pattern: "0 6 * * *" }, run: { kind: "local", folder, flow: "fix", task: "PRIVATE_OPERATOR_TASK" } }] }));
   const rows = [], queued = [], calls = [];
   let count = 0;
-  const redisFn = () => ({ get: async () => count, incr: async () => ++count, expire: async () => {}, disconnect() {} });
+  const redisFn = () => ({ get: async () => count, eval: async () => ++count, disconnect() {} });
   const admissionFn = (args) => { calls.push(args.consumeRate); return rm.checkDispatchRun({ ...args, redisFn }); };
   const jobs = new Map();
   const queueFn = () => ({ getJobScheduler: async () => ({ key: "daily" }), close: async () => {}, add: async (_name, data, opts) => { queued.push(data); jobs.set(opts.jobId, { data, timestamp: NOW, getState: async () => "waiting" }); }, getJob: async (id) => jobs.get(id) });

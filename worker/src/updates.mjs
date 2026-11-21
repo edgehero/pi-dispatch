@@ -254,11 +254,16 @@ export async function publishCanaryFacts(redis, { name: pkg, version: at, host, 
 	await bounded(redis.set(updatesCanaryKey(pkg, at), JSON.stringify(facts), "PX", UPDATES_CANARY_TTL_MS));
 }
 
-export async function readCanaryFacts(redis, pkg, at) {
+/**
+ * A canary's published facts, or `null` for none. A read Valkey did not answer is `null` too, unless `strict` (issue #961):
+ * then it throws, for a caller that must tell "no canary published this" from "not read" (the console's Adopt gate).
+ */
+export async function readCanaryFacts(redis, pkg, at, { strict = false } = {}) {
 	try {
 		const value = await bounded(redis.get(updatesCanaryKey(pkg, at)));
 		return typeof value === "string" ? parseCanaryFacts(value) : null;
-	} catch {
+	} catch (error) {
+		if (strict) throw error;
 		return null;
 	}
 }

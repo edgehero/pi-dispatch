@@ -571,6 +571,12 @@ test("dispatchChat never throws: a planner that throws, no dialogs, a reader or 
   };
   await dispatchChat("j1", writeThrows.io);
   assert.deepEqual(writeThrows.notes.at(-1), ["chat: could not reach the queue: EACCES", "error"]);
+  // Issue #961: an answer that was sent and not confirmed is said in the funnel's own words, never as queued or as out of reach.
+  const sentence = "the answer to j1 may or may not have been queued: the queue was sent it and did not confirm it. Look at In line and Running on the overview before trying again";
+  const unconfirmed = harness({ doc: doc("reply"), writeResult: { invalid: sentence, partial: true } });
+  await dispatchChat("j1", unconfirmed.io);
+  assert.deepEqual(unconfirmed.notes.at(-1), [`chat: ${sentence}`, "error"]);
+  assert.equal(answerFailure({ invalid: sentence, partial: true }), sentence, "and its audit row says so");
 
   const dash = harness({ doc: doc("live") });
   dash.io.openDashboard = async () => {

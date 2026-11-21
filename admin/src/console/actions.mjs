@@ -466,6 +466,14 @@ function planned(result) {
  */
 export const SNAPSHOT_TIMEOUT_MS = 10_000;
 
+/**
+ * How long the PAUSE preview waits for that snapshot (issue #961). A pause is previewed without it (its lines then say
+ * the counts could not be read, and the switch still reaches every queue), so on a Valkey that stopped answering the
+ * kill switch must not wait the full ten seconds for numbers before it can be confirmed. A resume keeps the ten: its
+ * Undo and its count of what starts spending are read from the snapshot.
+ */
+export const PAUSE_SNAPSHOT_TIMEOUT_MS = 6_000;
+
 /** The refusal when the snapshot did not answer within `SNAPSHOT_TIMEOUT_MS`: what happened, nothing more. */
 export const SNAPSHOT_TIMEOUT_SENTENCE = "the fleet did not answer within 10 seconds, so this could not be previewed; nothing was changed";
 
@@ -493,11 +501,11 @@ const SNAPSHOT_LATE = Symbol("snapshot-late");
  * the state (`REFUSAL_STATES.timeout`, "The fleet did not answer in time"), where a bare 503 is titled for Valkey. The
  * bound is a sentinel of its own, so a reader that answers null is a read that failed, never a timeout.
  */
-async function snapshotOf(ctx, opts = {}) {
+async function snapshotOf(ctx, opts = {}, timeoutMs = SNAPSHOT_TIMEOUT_MS) {
   let timer;
   try {
     const late = new Promise((resolve) => {
-      timer = setTimeout(resolve, SNAPSHOT_TIMEOUT_MS, SNAPSHOT_LATE);
+      timer = setTimeout(resolve, timeoutMs, SNAPSHOT_LATE);
       timer.unref?.();
     });
     // A snapshot that settles after the bound settles into the race, which has handled it: never an unhandled rejection.
@@ -511,6 +519,15 @@ async function snapshotOf(ctx, opts = {}) {
   }
   return { refusal: SNAPSHOT_UNREAD_SENTENCE, status: 503 };
 }
+
+/**
+ * The line a paid preview adds when a run like its own is already queued or running, or could not be looked for
+ * (issue #961, the read model's `alreadyQueuedLine`): a warning in the preview's own text, never a refusal.
+ */
+const alreadyLine = (ctx, what, already, counts = false) => (typeof ctx.a.rm?.alreadyQueuedLine === "function" ? ctx.a.rm.alreadyQueuedLine(what, already, { counts }) : null);
+
+/** What a paid start that queued nothing adds once its count against the hour was made: nothing is given back. */
+export const START_USED = "One start of this hour's dispatch_run allowance was used.";
 
 /** A funnel's answer in the pipeline's three shapes. */
 function funnelResult(res, okFields = {}) {
@@ -906,7 +923,8 @@ const configActions = [
     },
     async apply(entry, ctx) {
       const res = await ctx.a.rm.writeEnvelope({ ...entry.payload.files, change: entry.payload.change, expect: entry.expect, url: ctx.a.paths.valkeyUrl, fs: ctx.fs });
-      if (res?.invalid) return { invalid: String(res.invalid) };
+      // `partial` (issue #961): the digest's record was sent and not answered, so the bar never says nothing changed.
+      if (res?.invalid) return { invalid: String(res.invalid), ...(res.partial === true ? { partial: true } : {}) };
       return { ok: true };
     },
   },
@@ -1238,12 +1256,14 @@ const jobActions = [
       const result = await ctx.a.rm.checkDispatchRun({ folder, flow, env, aiInvoked: true, consumeRate: false, now: ctx.now });
       if (result.refused || result.unreachable) return { refusal: result.refused ?? "The paid-start allowance could not be read." };
       const job = { folder, flow, task };
-      return { target: folder, payload: { job }, afterDigest: sha256(JSON.stringify(job)), reserve: ctx.a.rm.estimateReserve?.(job, reserveInputs(ctx)) ?? null, summary: [`Start local flow ${flow}`, "The folder, committed flow permission, clean tree and hourly limit are checked again before enqueue."] };
+      const already = typeof ctx.a.rm.dispatchRunAlready === "function" && typeof ctx.a.paths?.valkeyUrl === "string" ? alreadyLine(ctx, `a run of flow ${flow} for this folder`, await ctx.a.rm.dispatchRunAlready({ url: ctx.a.paths.valkeyUrl, folder, flow, env }), true) : null;
+      return { target: folder, payload: { job }, afterDigest: sha256(JSON.stringify(job)), reserve: ctx.a.rm.estimateReserve?.(job, reserveInputs(ctx)) ?? null, summary: [`Start local flow ${flow}`, "The folder, committed flow permission, clean tree and hourly limit are checked again before enqueue.", ...(already ? [already] : [])] };
     },
     async apply(entry, ctx) {
       const env = { ...ctx.a.env, PI_DISPATCH_RUN_ROOTS: ctx.a.grantsEnv?.PI_DISPATCH_RUN_ROOTS ?? "", PI_DISPATCH_RUN_PER_HOUR: ctx.a.grantsEnv?.PI_DISPATCH_RUN_PER_HOUR ?? "3" };
       const res = await ctx.a.rm.enqueueDispatchRun({ ...entry.payload.job, aiInvoked: true, env, now: ctx.now });
-      if (res?.deduplicated) return { invalid: "An equivalent run is already queued; nothing new was queued." };
+      // The count against the hour was made before the queue took this as a duplicate (issue #961): said, not left out.
+      if (res?.deduplicated) return { invalid: `An equivalent run is already queued; nothing new was queued. ${START_USED}` };
       return funnelResult(res, { jobId: res?.jobId ?? null, queue: res?.queue ?? (env.PI_WORKER_NAME ? hostQueueName(env.PI_WORKER_NAME) : "pi-jobs") });
     },
   },
@@ -1392,12 +1412,13 @@ const jobActions = [
         const grants = paidStartEnvironment(ctx.a.env, ctx.a.grantsEnv);
         if (grants.refusal) return grants;
       }
-      const result = await ctx.a.rm.planTriggerFire({ index: index(body), triggersPath: ctx.a.paths.triggersPath, url: ctx.a.paths.valkeyUrl, ...reserveInputs(ctx), grantsEnv: ctx.a.grantsEnv ?? process.env, fs: ctx.fs, now: ctx.now });
+      const result = await ctx.a.rm.planTriggerFire({ index: index(body), triggersPath: ctx.a.paths.triggersPath, url: ctx.a.paths.valkeyUrl, ...reserveInputs(ctx), grantsEnv: ctx.a.grantsEnv ?? process.env, fs: ctx.fs, now: ctx.now, lookAlready: true });
       if (result.unreachable) return { refusal: "The deployment's queue could not be read, so Fire now could not be previewed. Nothing was changed." };
       const got = planned(result);
       if (!got.plan) return got;
       const p = got.plan;
-      return { target: p.schedulerId, payload: { plan: p }, reserve: p.reserve, beforeDigest: p.fileDigest, summary: p.summary };
+      const already = alreadyLine(ctx, "a hand-fired run of this cron trigger", result.already, true);
+      return { target: p.schedulerId, payload: { plan: p }, reserve: p.reserve, beforeDigest: p.fileDigest, summary: [...(Array.isArray(p.summary) ? p.summary : []), ...(already ? [already] : [])] };
     },
     async apply(entry, ctx) {
       if (ctx.session?.role === "agent" || ctx.surface === "tool") {
@@ -1417,9 +1438,12 @@ const jobActions = [
     async preview(body, ctx) {
       const jobId = jobIdOf(body);
       const { rm, paths } = ctx.a;
-      const got = planned(await rm.planRerun({ url: paths.valkeyUrl, logsDir: paths.logsDir, jobId, triggersPath: paths.triggersPath ?? null, ...reserveInputs(ctx), fs: ctx.fs, now: ctx.now }));
+      const read = await rm.planRerun({ url: paths.valkeyUrl, logsDir: paths.logsDir, jobId, triggersPath: paths.triggersPath ?? null, ...reserveInputs(ctx), fs: ctx.fs, now: ctx.now });
+      const got = planned(read);
       if (!got.plan) return got;
       const p = got.plan;
+      // Issue #961: a run like this one that is already queued or running is said, never refused.
+      const already = alreadyLine(ctx, p.kind === "cron" ? "a hand-fired run of this cron trigger" : p.kind === "forge" ? `a run of flow ${String(p.job?.flow)} on this item` : `a run of flow ${String(p.job?.flow)} for this folder`, read?.already, ctx.session?.role === "agent" || ctx.surface === "tool");
       if (ctx.session?.role === "agent" || ctx.surface === "tool") {
         const checked = await checkAgentRerun(p, { rm, env: ctx.a.env, grantsEnv: ctx.a.grantsEnv, now: ctx.now });
         if (checked.refusal) return checked;
@@ -1431,7 +1455,7 @@ const jobActions = [
         expect: { rerunAuthority: rerunAuthorityDigest(p) },
         payload: { plan: p },
         reserve: p.reserve ?? null,
-        summary: [`Re-run ${jobId}: a ${what}`, `On queue ${p.queue}${typeof p.job?.flow === "string" ? `, flow ${p.job.flow}` : ""}`, ...runFieldsLines(p.runFields, "It runs as its trigger says now")],
+        summary: [`Re-run ${jobId}: a ${what}`, `On queue ${p.queue}${typeof p.job?.flow === "string" ? `, flow ${p.job.flow}` : ""}`, ...runFieldsLines(p.runFields, "It runs as its trigger says now"), ...(already ? [already] : [])],
       };
     },
     async apply(entry, ctx) {
@@ -1444,14 +1468,22 @@ const jobActions = [
         // read compare the same route; actual host/queue or execution changes must still refuse.
         replay = { random: n => { if (n !== 8) throw new Error("unexpected re-run identity size"); return Buffer.from(id[1], "hex"); } };
       }
-      const fresh = await rm.planRerun({ url: paths.valkeyUrl, logsDir: paths.logsDir, jobId: entry.target, triggersPath: paths.triggersPath ?? null, ...reserveInputs(ctx), ...replay, fs: ctx.fs, now: ctx.now });
+      const fresh = await rm.planRerun({ url: paths.valkeyUrl, logsDir: paths.logsDir, jobId: entry.target, triggersPath: paths.triggersPath ?? null, ...reserveInputs(ctx), ...replay, fs: ctx.fs, now: ctx.now, lookAlready: false });
+      // A re-plan whose reads went unanswered (issue #961) showed no change: nothing was sent, and Valkey is why.
+      if (fresh?.unread === true) return { unreachable: true };
       if (!fresh?.plan || rerunAuthorityDigest(fresh.plan) !== entry.expect?.rerunAuthority) return { invalid: "The re-run source or current trigger changed; preview the run again before enqueueing." };
+      let counted = false;
       if (ctx.session?.role === "agent" || ctx.surface === "tool") {
+        counted = true;
         const checked = await checkAgentRerun(fresh.plan, { rm: ctx.a.rm, env: ctx.a.env, grantsEnv: ctx.a.grantsEnv, now: ctx.now, consumeRate: true });
-        if (checked.refusal) return { invalid: checked.refusal };
+        if (checked.refusal) return { invalid: checked.refusal, ...(checked.partial === true ? { partial: true } : {}) };
       }
       const res = await ctx.a.rm.enqueueRerun(entry.payload.plan, { url: ctx.a.paths.valkeyUrl, now: ctx.now });
-      return funnelResult(res, { jobId: res?.jobId ?? null, queue: res?.queue ?? null });
+      const out = funnelResult(res, { jobId: res?.jobId ?? null, queue: res?.queue ?? null });
+      // An agent's re-run was counted against the hour before this: an answer that queued nothing says the start is gone.
+      if (counted && typeof out.invalid === "string" && out.partial !== true) return { ...out, invalid: `${out.invalid}${/[.!?]$/.test(out.invalid) ? "" : "."} ${START_USED}` };
+      if (counted && out.unreachable) return { invalid: `Nothing was queued and one start of this hour's dispatch_run allowance was used: the queue could not be reached`, partial: true };
+      return out;
     },
   },
   {
@@ -1484,7 +1516,13 @@ const jobActions = [
     async apply(entry, ctx) {
       const source = entry.payload.plan.job?.console;
       if (source?.draftRunId) {
-        const current = await ctx.a.answerer?.privateDraft(entry.payload.plan.jobId);
+        // A draft that could not be read is nothing sent (issue #961): the answer is Valkey's, never a thrown read's.
+        let current;
+        try {
+          current = await ctx.a.answerer?.privateDraft(entry.payload.plan.jobId);
+        } catch {
+          return { unreachable: true };
+        }
         if (!current || current.digest !== source.draftDigest || current.meta?.draftRunId !== source.draftRunId) return { invalid: "The draft changed or expired; reload the run and preview the answer again." };
       }
       const res = await ctx.a.rm.enqueueParkedAnswer(entry.payload.plan, { url: ctx.a.paths.valkeyUrl });
@@ -1680,7 +1718,7 @@ function fleetSwitch({ name, kind, paused }) {
       let shortLines = [];
       let pauseLines = [];
       if (paused) {
-        const s = await snapshotOf(ctx, SWITCH_READ);
+        const s = await snapshotOf(ctx, SWITCH_READ, ctx.a.pauseSnapshotTimeoutMs ?? PAUSE_SNAPSHOT_TIMEOUT_MS);
         if (s.snapshot) {
           const all = Array.isArray(s.snapshot.queueCounts) ? s.snapshot.queueCounts : [];
           short = switchShortOf(s.snapshot);
@@ -2473,11 +2511,15 @@ const packageActions = [
     async preview(body, ctx) {
       const at = index(body);
       const canary = packageOf(body);
+      // The facts and the plan are asked at once (issue #961): one after the other, a Valkey that stopped answering
+      // held this preview for the bound of each.
+      const planning = Promise.resolve().then(() => ctx.a.rm.planTriggerFire({ index: at, triggersPath: ctx.a.paths.triggersPath, url: ctx.a.paths.valkeyUrl, ...reserveInputs(ctx), grantsEnv: ctx.a.grantsEnv ?? process.env, fs: ctx.fs, now: ctx.now, lookAlready: true }));
+      planning.catch(() => {});
       const row = stagedRow(await ctx.a.updates.read(), canary.name);
       if (!row) return { refusal: `${canary.name} is not staged on this host, so there is nothing for a candidate to replace. Nothing was queued.` };
       if (row.adapter) return { refusal: `${canary.name} is a reviewed subscription adapter, whose identity depends on its exact tree. It moves with a pi-dispatch release. Nothing was queued.` };
       if (row.version === canary.version) return { refusal: `${canary.version} is the version already staged, so a canary would try nothing new. Nothing was queued.` };
-      const result = await ctx.a.rm.planTriggerFire({ index: at, triggersPath: ctx.a.paths.triggersPath, url: ctx.a.paths.valkeyUrl, ...reserveInputs(ctx), grantsEnv: ctx.a.grantsEnv ?? process.env, fs: ctx.fs, now: ctx.now });
+      const result = await planning;
       if (result.unreachable) return { refusal: "The deployment's queue could not be read, so the canary could not be previewed. Nothing was changed." };
       const got = planned(result);
       if (!got.plan) return got;
@@ -2486,7 +2528,7 @@ const packageActions = [
       if (p.schedule.data?.excludeExtensions?.includes(canary.name)) return { refusal: `This trigger leaves ${canary.name} out in run.excludeExtensions, so a run of it would say nothing about the jobs this package goes into. Choose a trigger that loads it. Nothing was queued.` };
       if (p.schedule.data?.resume === true) return { refusal: "This trigger resumes its transcript, so its next run would continue the candidate's work, and a canary is for one job. Choose a trigger that does not resume. Nothing was queued." };
       return { target: `${canary.name}@${canary.version}`, payload: { plan: p, canary }, reserve: p.reserve, beforeDigest: p.fileDigest,
-        summary: [`Runs one paid job of cron trigger ${p.schedulerId} with ${canary.name} ${canary.version} in place of ${row.version}, for that job only`, "No other job loads it, and nothing stays staged", "This is third-party code in a job that holds that trigger's credentials, and what it does to that trigger's own folder or repository stays done", "Its result reads completed or failed. A job that completed does not prove the extension is good: read the run"] };
+        summary: [`Runs one paid job of cron trigger ${p.schedulerId} with ${canary.name} ${canary.version} in place of ${row.version}, for that job only`, "No other job loads it, and nothing stays staged", "This is third-party code in a job that holds that trigger's credentials, and what it does to that trigger's own folder or repository stays done", "Its result reads completed or failed. A job that completed does not prove the extension is good: read the run", ...(alreadyLine(ctx, "a hand-fired run of this cron trigger", result.already, true) ? [alreadyLine(ctx, "a hand-fired run of this cron trigger", result.already, true)] : [])] };
     },
     async apply(entry, ctx) {
       const res = await ctx.a.rm.enqueueTriggerFire(entry.payload.plan, { triggersPath: ctx.a.paths.triggersPath, url: ctx.a.paths.valkeyUrl, ...reserveInputs(ctx), grantsEnv: ctx.a.grantsEnv ?? process.env, fs: ctx.fs, now: ctx.now, packageCanary: entry.payload.canary });
@@ -2548,7 +2590,9 @@ export const UPDATES_UNREAD_SENTENCE = "What Valkey holds about this package cou
  * Whether the facts are missing what Valkey holds (issue #843): the desired rows (`desiredUnreadable`), or the hosts'
  * looks (`state: "unknown"`), which is where a package's newest version comes from. A package row is then drawn with no
  * desired row and no newest version, and a gate that read it as fact said "Someone changed this package", "There is no
- * adoption to undo" or "Run a canary first" of a Valkey that only did not answer.
+ * adoption to undo" or "Run a canary first" of a Valkey that only did not answer. Adopt's gate (`adoptable`) also reads
+ * `factsUnread` so (issue #961): a host's applied rows or a canary's published facts that were asked for and not
+ * answered, reads only Adopt judges by. Undo reads the desired rows alone and depends on nothing else.
  */
 const updatesUnread = (facts) => facts?.desiredUnreadable === true || facts?.state === "unknown";
 
@@ -2586,12 +2630,15 @@ async function writeDesired(ctx, row) {
 
 /** Adopt's gate, asked at the preview and again at the confirm: a version a person has seen a canary finish. The run record says so, not the page. `{ unread }` when what it would judge by could not be read. */
 function adoptable(facts, { name, version }) {
-  if (updatesUnread(facts)) return { unread: true, refusal: UPDATES_UNREAD_SENTENCE, status: 503 };
+  // A confirm does not write after one of its own reads went unanswered (issue #961).
+  if (updatesUnread(facts) || facts?.factsUnread === true) return { unread: true, refusal: UPDATES_UNREAD_SENTENCE, status: 503 };
   const row = stagedRow(facts, name);
   if (!row) return { refusal: `${name} is not staged on this host. Nothing was changed.` };
   if (row.adapter) return { refusal: `${name} is a reviewed subscription adapter, whose identity depends on its exact tree. It moves with a pi-dispatch release. Nothing was changed.` };
   if (row.desired?.op === "adopt" && row.desired.version === version) return { refusal: `${name} ${version} is already adopted. Each host's state is on the page. Nothing was changed.` };
   if (row.version === version) return { refusal: `${version} is the version already staged. Nothing was changed.` };
+  // No completed canary among records that could not all be read is "not known", never "none ran" (issue #961).
+  if (row.newest === version && row.canary?.state !== "completed" && facts?.recordsPartial === true) return { refusal: `Some recent runs could not be read, so whether a canary of ${name} ${version} completed is not known. Reload and try again. Nothing was changed.` };
   if (row.newest !== version || row.canary?.state !== "completed") return { refusal: `Run a canary of ${name} ${version} first: adopting needs one that completed, on a retained run. Nothing was changed.` };
   return { row };
 }
@@ -2612,6 +2659,16 @@ function actionCtx(ctx) {
   const d = ctx.deps;
   return { deps: d, a: d.actionDeps ?? {}, session: ctx.session, now: d.now, fs: d.fs, config: d.config ?? {}, log: d.log };
 }
+
+/**
+ * The closed words an agent's failed write is recorded and answered with, where a person's row carries the sentence:
+ * `action-refused` for a write that was refused before it was sent, and `action-unconfirmed` (issue #961) for one that
+ * was sent and not confirmed (a `partial` answer, or a write the console's stop cut): "refused" was not true of a run
+ * that may be queued.
+ */
+export const AGENT_REFUSED = "action-refused";
+export const AGENT_UNCONFIRMED = "action-unconfirmed";
+export const agentFailure = (result) => (result?.partial === true ? AGENT_UNCONFIRMED : AGENT_REFUSED);
 
 /** A funnel result's failure for its audit row: the refusal, a fixed word for Valkey, or null when it landed. */
 function failureOf(result) {
@@ -2933,7 +2990,7 @@ async function confirmOne(ctx, action, entry, { actor, tag, actx, flight }) {
   flight.abandon = () => {
     if (!started) return;
     try {
-      deps.audit.append({ ...row, outcome: "failed", reason: session.role === "agent" ? "action-refused" : STOPPED_UNCONFIRMED });
+      deps.audit.append({ ...row, outcome: "failed", reason: session.role === "agent" ? AGENT_UNCONFIRMED : STOPPED_UNCONFIRMED });
     } catch (e) {
       deps.log(`console: audit append failed (${codeOf(e)}) for a ${action.kind} write the stop cut; the log's last row for ticket ${tag} says ok and may be wrong`);
     }
@@ -2941,7 +2998,7 @@ async function confirmOne(ctx, action, entry, { actor, tag, actx, flight }) {
   let result;
   try {
     result = await auditedWrite(
-      { audit, actor, kind: action.kind, target: entry.target, beforeDigest: entry.beforeDigest ?? null, afterDigest: entry.afterDigest ?? null, reserve: reserveMicros(entry.reserve), count: Number.isSafeInteger(entry.count) && entry.count >= 1 ? entry.count : null, ticket: tag, failure: r => { const why = failureOf(r); return session.role === "agent" && why ? "action-refused" : why; }, refusal: () => ({ [AUDIT]: true }), log },
+      { audit, actor, kind: action.kind, target: entry.target, beforeDigest: entry.beforeDigest ?? null, afterDigest: entry.afterDigest ?? null, reserve: reserveMicros(entry.reserve), count: Number.isSafeInteger(entry.count) && entry.count >= 1 ? entry.count : null, ticket: tag, failure: r => { const why = failureOf(r); return session.role === "agent" && why ? agentFailure(r) : why; }, refusal: () => ({ [AUDIT]: true }), log },
       () => {
         started = true;
         return action.apply(entry, actx);
@@ -2984,9 +3041,9 @@ async function confirmBulk(ctx, action, entry, { actor, tag, actx, flight = { ab
   const count = targets.length;
   const reserveBy = new Map(targets.map((t) => [t.jobId, reserveMicros(t.reserve)]));
   const rowOf = (jobId) => ({ actor, action: "write", kind: action.kind, target: jobId, count, reserve: reserveBy.get(jobId) ?? null, ticket: tag });
-  const compensate = (jobId, reason) => {
+  const compensate = (jobId, reason, unconfirmed = false) => {
     try {
-      audit.append({ ...rowOf(jobId), outcome: "failed", reason: actor.role === "agent" ? "action-refused" : String(reason) });
+      audit.append({ ...rowOf(jobId), outcome: "failed", reason: actor.role === "agent" ? (unconfirmed ? AGENT_UNCONFIRMED : AGENT_REFUSED) : String(reason) });
     } catch (e) {
       deps.log(`console: audit append failed (${codeOf(e)}) after a ${action.kind} job did not land; the log's last row for ticket ${tag} says ok and is wrong`);
     }
@@ -3007,13 +3064,13 @@ async function confirmBulk(ctx, action, entry, { actor, tag, actx, flight = { ab
   const auditLast = audit.last();
   // A stop of the console that cuts the apply (issue #842): which jobs it had reached is not known, so each gets the row.
   flight.abandon = () => {
-    for (const id of written) compensate(id, STOPPED_UNCONFIRMED);
+    for (const id of written) compensate(id, STOPPED_UNCONFIRMED, true);
   };
   let result;
   try {
     result = await action.apply(entry, actx);
   } catch (e) {
-    for (const id of written) compensate(id, `the write threw (${codeOf(e)})`);
+    for (const id of written) compensate(id, `the write threw (${codeOf(e)})`, true);
     deps.log(`console: the ${action.name} write threw (${codeOf(e)})`);
     return refuse(ctx, "confirm", 500, `the ${action.name} change failed before it finished; the console's log has the reason`, "partial");
   }
@@ -3024,7 +3081,7 @@ async function confirmBulk(ctx, action, entry, { actor, tag, actx, flight = { ab
     return result?.unreachable ? refuse(ctx, "confirm", 503, VALKEY_UNREACHABLE, "valkey") : refuse(ctx, "confirm", 409, why, "changed");
   }
   const results = Array.isArray(result.results) ? result.results : [];
-  for (const r of results) if (!r.ok) compensate(r.jobId ?? "-", r.reason ?? "refused");
+  for (const r of results) if (!r.ok) compensate(r.jobId ?? "-", r.reason ?? "refused", r.partial === true);
   let trackingIncomplete = false;
   if (actor.role === "agent") for (const r of results) if (r.ok) {
     try {
@@ -3040,7 +3097,7 @@ async function confirmBulk(ctx, action, entry, { actor, tag, actx, flight = { ab
     change = changeOf(ctx, entry, action, { auditSeq, auditLast, count, done, summary: String(action.done(entry, null, { done, count })) });
     tickHub(deps);
   }
-  const shown = actor.role === "agent" ? results.map(r => ({ jobId: r.jobId, ok: r.ok, ...(r.queue ? { queue: r.queue } : {}), ...(r.partial ? { partial: true } : {}), ...(!r.ok ? { reason: "action-refused" } : {}) })) : results;
+  const shown = actor.role === "agent" ? results.map(r => ({ jobId: r.jobId, ok: r.ok, ...(r.queue ? { queue: r.queue } : {}), ...(r.partial ? { partial: true } : {}), ...(!r.ok ? { reason: agentFailure(r) } : {}) })) : results;
   return ctx.json(200, { ok: true, action: action.name, kind: action.kind, count, done, results: shown, change, ...(trackingIncomplete ? { warning: "tracking-incomplete" } : {}), html: String(bulkResultsHtml({ kind: action.kind, results: shown, count, done, auditSeq })) });
 }
 
