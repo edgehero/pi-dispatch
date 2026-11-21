@@ -75,7 +75,7 @@ pi install npm:@edgehero/pi-dispatch-admin
 
 ```bash
 mkdir my-dispatch && cd my-dispatch
-npx --yes --ignore-scripts @edgehero/pi-dispatch@5.4.1 up --console
+npx --yes --ignore-scripts @edgehero/pi-dispatch@5.4.2 up --console
 ```
 
 It checks the folder first, then lists what it will do and asks before it starts anything. It installs into that folder and
@@ -85,7 +85,7 @@ opens your browser on the checklist, already signed in.
 
 ```bash
 mkdir my-dispatch && cd my-dispatch && npm init -y
-npm install --save-exact @edgehero/pi-dispatch@5.4.1 @edgehero/pi-dispatch-admin@5.4.1 @earendil-works/pi-coding-agent@1.5.2 --omit=dev --omit=optional --ignore-scripts --no-audit --no-fund
+npm install --save-exact @edgehero/pi-dispatch@5.4.2 @edgehero/pi-dispatch-admin@5.4.2 @earendil-works/pi-coding-agent@1.5.2 --omit=dev --omit=optional --ignore-scripts --no-audit --no-fund
 ./node_modules/.bin/pi-dispatch up --console
 ```
 

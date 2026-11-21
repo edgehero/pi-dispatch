@@ -440,7 +440,7 @@ The shipped job image has neither `ssh` nor `nc`. Add them, and the device's hos
 ([job-image.md](job-image.md)):
 
 ```dockerfile
-FROM ghcr.io/edgehero/pi-job:5.4.1
+FROM ghcr.io/edgehero/pi-job:5.4.2
 USER root
 RUN apt-get update && apt-get install -y --no-install-recommends openssh-client netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
