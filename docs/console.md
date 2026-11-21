@@ -1342,7 +1342,7 @@ The same thing by hand, for a folder you want to control yourself:
 
 ```bash
 npm init -y
-npm install --save-exact @edgehero/pi-dispatch@5.4.1 @edgehero/pi-dispatch-admin@5.4.1 @earendil-works/pi-coding-agent@1.5.2 --omit=dev --omit=optional --ignore-scripts --no-audit --no-fund
+npm install --save-exact @edgehero/pi-dispatch@5.4.1 @edgehero/pi-dispatch-admin@5.4.1 @earendil-works/pi-coding-agent@1.6.0 --omit=dev --omit=optional --ignore-scripts --no-audit --no-fund
 ./node_modules/.bin/pi-dispatch up --console
 ```
 
