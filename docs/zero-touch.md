@@ -27,6 +27,11 @@ read cannot cover the request. A partial window names its start. Older unknown r
 missing evidence never becomes a zero rate. A window without ended workload runs has no percentage. Weekly points
 and changes against the preceding interval are absent when their comparison is not covered.
 
+Until a worker has started touch tracking, the page says once that tracking has not started and shows no rate, count
+or streak: there is no interval to measure yet, and nothing failed. "Zero touch could not be read" is kept for
+evidence that was lost or could not be read. When the page's own read fails, it says so and the console's log has a
+line with the error's code.
+
 Tracking begins with this release. Upgrade every worker, receiver, CLI and admin process participating in the fleet
 before relying on its coverage ([the order](upgrading.md#the-order)). Older clients cannot publish interventions they
 were never written to record.

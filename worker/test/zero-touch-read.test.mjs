@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { buildRecord, makeRecordWriter } from "../src/run-history.mjs";
 import { TOUCH_SCRIPTS } from "../src/touch-state.mjs";
-import { readZeroTouch } from "../src/zero-touch.mjs";
+import { readZeroTouch, TOUCH_NOT_STARTED, TOUCH_UNREAD_REASONS } from "../src/zero-touch.mjs";
 import { READ_SCRIPT } from "../src/run-mirror.mjs";
 
 const DAY = 86400_000;
@@ -41,9 +41,38 @@ test("a shorter actually observed interval still reports useful partial counts",
 test("an intact local record source with tracking not started has no observed interval yet", async () => {
 	const redis = { async eval(script) { return script === TOUCH_SCRIPTS.READ ? [[], [], 0, 0] : [0]; } };
 	const report = await readZeroTouch({ redis, logsDir: localRecord(), now: () => NOW, retentionDays: 90 });
-	assert.equal(report.state, "unavailable");
+	// Read, and not started: no failure to report, and still no interval (issue #962).
+	assert.equal(report.state, "not-started");
 	assert.ok(report.coverage.reasons.includes("touch-tracking-not-started"));
 	assert.equal(report.coverage.fromMs, NOW);
+});
+
+test("not started is said only of a touch index that was read and holds no loss beside it", async () => {
+	const state = async (read, logsDir = localRecord()) => (await readZeroTouch({ redis: { async eval(script) { if (script !== TOUCH_SCRIPTS.READ) return [0]; return read(); } }, logsDir, now: () => NOW, retentionDays: 90 })).state;
+	assert.equal(await state(() => [[], [], 0, 0]), "not-started");
+	// An action still unresolved beside it resets the window too, and is evidence not read: unavailable.
+	assert.equal(await state(() => [[], [], 1, 0]), "unavailable");
+	// A surviving epoch whose index was lost, an unresolved action after a start, a read that threw, an answer that is no answer.
+	assert.equal(await state(() => [["since", String(NOW - 10 * DAY), "indexed", "1"], [], 0, 0]), "unavailable");
+	assert.equal(await state(() => [["since", String(NOW - 10 * DAY)], [], 1, 0]), "unavailable");
+	assert.equal(await state(() => { throw new Error("down"); }), "unavailable");
+	assert.equal(await state(() => null), "unavailable");
+	// A logs folder that does not exist is a read that showed no run, not a failed read (issue #962): a deployment that
+	// has run nothing and tracks nothing has not started, and with a started index it is ready and holds no run.
+	const absent = "/nonexistent/zero-touch-read";
+	assert.equal(await state(() => [[], [], 0, 0], absent), "not-started");
+	const started = await readZeroTouch({ redis: { async eval(script) { return script === TOUCH_SCRIPTS.READ ? [["since", String(NOW - 10 * DAY)], [], 0, 0] : [0]; } }, logsDir: absent, now: () => NOW, retentionDays: 90 });
+	assert.deepEqual([started.state, started.totals.runs, started.coverage.fromMs], ["ready", 0, NOW - 10 * DAY]);
+	// A folder that is there and cannot be read is run records nobody read: unavailable, whatever the index says.
+	const denied = { readdirSync() { throw Object.assign(new Error("denied"), { code: "EACCES" }); }, statSync() { throw new Error("unused"); }, readFileSync() { throw new Error("unused"); } };
+	const unread = await readZeroTouch({ redis: { async eval(script) { return script === TOUCH_SCRIPTS.READ ? [[], [], 0, 0] : [0]; } }, logsDir: absent, fs: denied, now: () => NOW, retentionDays: 90 });
+	assert.equal(unread.state, "unavailable");
+	// An absent folder beside a mirror that did not answer: nothing was read of any run.
+	const mirrorDown = await readZeroTouch({ redis: { async eval(script) { if (script === TOUCH_SCRIPTS.READ) return [[], [], 0, 0]; throw new Error("timeout"); } }, logsDir: absent, now: () => NOW, retentionDays: 90 });
+	assert.equal(mirrorDown.state, "unavailable");
+	// The control: a started index over a covered interval is ready.
+	assert.equal(await state(() => [["since", String(NOW - 10 * DAY)], [], 0, 0]), "ready");
+	assert.deepEqual([TOUCH_NOT_STARTED, [...TOUCH_UNREAD_REASONS]], ["touch-tracking-not-started", ["touch-index-unavailable", "touch-index-lost", "touch-actions-unresolved", "touch-events-missing"]]);
 });
 
 test("the real retained-record reader separates ancient-wait uncertainty from a measurable current rate", async () => {

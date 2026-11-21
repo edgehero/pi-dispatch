@@ -275,7 +275,12 @@ const PAGE_LAYOUT = Object.freeze({
 /** The panel ids a layout places, in the order it draws them. */
 const layoutIds = (items) => items.flatMap((it) => (typeof it === "string" ? [it] : layoutIds(it.items)));
 
-function zeroTouchLayout(role) {
+/** The state the Zero touch cards draw, judged as each of them judges it (`zeroTouchView`, which reads its own result unchanged). */
+const zeroTouchStateOf = (view) => zeroTouchView(view?.data?.zeroTouch, { role: view?.role, windowDays: view?.query?.days ?? 30, nowMs: view?.now ?? 0 }).state;
+function zeroTouchLayout(role, state) {
+  // Tracking that has not started (issue #962) is said once, by the rate card alone: seven more cards would have
+  // nothing to hold but the same sentence, or a zero nobody counted.
+  if (state === "not-started") return [{ cls: "stack", items: ["p-zt-rate"] }];
   if (role === "operator") return PAGE_LAYOUT["zero-touch"];
   return [PAGE_LAYOUT["zero-touch"][0], { cls: "cols zt-layout", items: [{ cls: "stack zt-main", items: ["p-zt-projects", "p-zt-questions", "p-zt-fixes"] }, { cls: "stack zt-side", items: ["p-zt-causes"] }] }];
 }
@@ -816,7 +821,15 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
     try { data.hostLoads = typeof deps.hostLoads === "function" ? await deps.hostLoads() : null; } catch { data.hostLoads = null; }
   }
   if (name === "zero-touch") {
-    try { data.zeroTouch = typeof deps.zeroTouch === "function" ? await deps.zeroTouch({ windowDays: q.days, project: q.project, scopeId: q.scope, role: who?.role }) : null; } catch { data.zeroTouch = null; }
+    // A read that threw (issue #962) is caught, as before, and says so: `failure` is what the panel words, and the
+    // console's log gets the error's code or kind. Never the error's own text on the page or in the log: it may name a
+    // path or a host.
+    try { data.zeroTouch = typeof deps.zeroTouch === "function" ? await deps.zeroTouch({ windowDays: q.days, project: q.project, scopeId: q.scope, role: who?.role }) : null; }
+    catch (err) {
+      data.zeroTouch = { state: "unavailable", failure: "read-failed" };
+      const kind = [err?.code, err?.name].find((v) => typeof v === "string" && /^[A-Za-z0-9_]{1,40}$/.test(v)) ?? "error";
+      try { deps.log?.(`console: the Zero touch read failed (${kind})`); } catch { /* a log that cannot be written fails no page */ }
+    }
     // Role projection happens before page data can be inspected or reused, not just while rendering a group panel.
     data.zeroTouch = zeroTouchView(data.zeroTouch, { role: who?.role, windowDays: q.days, nowMs: now });
   }
@@ -877,7 +890,9 @@ export async function loadPageData(name, query, deps = {}, who = {}) {
   }
   if (name === "triggers") {
     // Issue #844: with no snapshot the rules still come from the files; what only Valkey says of them is marked unread.
-    const listed = data.snapshot ?? (data.files ? { ...data.files, schedulersUnread: true } : null);
+    // Issue #962: with no file views either, the schedulers are as unread as with them. A list that only lacks its
+    // rules would say "No next fire is published" of a Valkey nobody read.
+    const listed = data.snapshot ?? (data.files ? { ...data.files, schedulersUnread: true } : data.snapshot === null ? { schedulersUnread: true } : null);
     try { data.triggerList = typeof deps.triggerList === "function" ? await deps.triggerList(listed) : triggerListOf({ snapshot: listed, now }); }
     catch {
       // The same input again, without the reader; and should the file views themselves be what it cannot take, none.
@@ -1224,11 +1239,11 @@ export async function renderPage(name, ctx) {
   const extra = name === "run" && !ctx?.data?.run?.invalid && !fromNewerRelease(ctx?.data?.run?.record) ? html`<div id="transcript" class="run-transcript">${runTranscriptSection(viewOf(name, ctx))}</div>` : null;
   const sections = new Map(panels.map(({ id, fragment }) => [id, html`<section id="${id}" data-panel>${fragment}</section>`]));
   if (name === "run" && extra !== null) sections.set("p-transcript", html`${sections.get("p-transcript")}${extra}`);
-  const inner = Object.hasOwn(PAGE_LAYOUT, name) ? layoutHtml(name === "run" ? runLayoutOf(ctx?.data) : name === "zero-touch" ? zeroTouchLayout(role) : PAGE_LAYOUT[name], sections) : html`${[...sections.values()]}`;
+  const inner = Object.hasOwn(PAGE_LAYOUT, name) ? layoutHtml(name === "run" ? runLayoutOf(ctx?.data) : name === "zero-touch" ? zeroTouchLayout(role, zeroTouchStateOf(viewOf(name, ctx))) : PAGE_LAYOUT[name], sections) : html`${[...sections.values()]}`;
   const headline = headlineOf(name, ctx);
   const triggerListOptions = name === "triggers" ? { description: triggersDescription(viewOf(name, ctx)), end: role === "operator" && !ctx?.readOnly ? html`<a class="btn btn--primary" href="${PAGES["trigger-add"].path}">Add a trigger</a>` : null } : name === "trigger-check" ? { description: "Describe a hypothetical event. Nothing is sent or spent.", end: html`<a class="btn" href="${PAGES.triggers.path}">Back to Triggers</a>` } : null;
   const configOptions = name === "connections" ? { description: connectionsDescription() } : name === "updates" ? { description: updatesDescription() } : name === "devices" ? { description: DEVICES_WORDS.description } : name === "project" ? { title: projectTitle(ctx?.data?.projectView), description: projectDescription(ctx?.data?.projectView), end: html`<a class="btn" href="${`/runs?project=${encodeURIComponent(ctx?.query?.id ?? "")}`}">Open in Runs</a>` } : null;
-  const titleOptions = configOptions ?? triggerListOptions ?? (name === "setup" ? { description: SETUP_DESCRIPTION } : name === "models" ? { description: "Which model each role runs, its fallbacks and cooldowns. Every role change is reviewed; this page starts no run." } : name === "sandboxes" ? { description: ctx?.query?.gatewaySelect ? "Choose an already-open shell on the workspace host. No sandbox starts here." : "A kept workspace or a fresh clone, in your own terminal. A job’s isolation, no credentials and no agent.", end: ctx?.query?.gatewaySelect ? null : html`<a class="btn" href="/runs/sandboxes#p-sb-new">New sandbox</a>` } : name === "config" ? { description: configDescription(viewOf(name, ctx)) } : name === "trigger" ? { title: triggerTitle(viewOf(name, ctx)), end: ctx?.data?.triggerDetail?.trigger?.runKind === "local" && localEventFilterValue(ctx.data.triggerDetail.trigger) === null ? null : html`<a class="btn" href="${`/runs?trigger=${encodeURIComponent(String(ctx?.data?.triggerDetail?.trigger?.runKind === "local" ? localEventFilterValue(ctx.data.triggerDetail.trigger) : ctx?.data?.triggerDetail?.trigger?.type === "cron" ? ctx.data.triggerDetail.trigger.id : ctx?.query?.index))}`}">Open in Runs</a>` } : name === "venue" ? { description: BACKENDS[ctx?.query?.name]?.describe ?? null, end: seg(BACKEND_NAMES.map((venue) => ({ label: venue, href: `/fleet/venue?${new URLSearchParams({ name: venue })}`, on: venue === ctx?.query?.name })), { label: "Venues" }) } : name === "fleet" ? { description: "Queues, hosts and their health. Every pause, cancel and removal previews first." } : {});
+  const titleOptions = configOptions ?? triggerListOptions ?? (name === "setup" ? { description: SETUP_DESCRIPTION } : name === "models" ? { description: "Which model each role runs, its fallbacks and cooldowns. Every role change is reviewed; this page starts no run." } : name === "sandboxes" ? { description: ctx?.query?.gatewaySelect ? "Choose an already-open shell on the workspace host. No sandbox starts here." : "A kept workspace or a fresh clone, in your own terminal. A job’s isolation, no credentials and no agent.", end: ctx?.query?.gatewaySelect || !ctx?.data?.sandboxes ? null : html`<a class="btn" href="/runs/sandboxes#p-sb-new">New sandbox</a>` } : name === "config" ? { description: configDescription(viewOf(name, ctx)) } : name === "trigger" ? { title: triggerTitle(viewOf(name, ctx)), end: ctx?.data?.triggerDetail?.trigger?.runKind === "local" && localEventFilterValue(ctx.data.triggerDetail.trigger) === null ? null : html`<a class="btn" href="${`/runs?trigger=${encodeURIComponent(String(ctx?.data?.triggerDetail?.trigger?.runKind === "local" ? localEventFilterValue(ctx.data.triggerDetail.trigger) : ctx?.data?.triggerDetail?.trigger?.type === "cron" ? ctx.data.triggerDetail.trigger.id : ctx?.query?.index))}`}">Open in Runs</a>` } : name === "venue" ? { description: BACKENDS[ctx?.query?.name]?.describe ?? null, end: seg(BACKEND_NAMES.map((venue) => ({ label: venue, href: `/fleet/venue?${new URLSearchParams({ name: venue })}`, on: venue === ctx?.query?.name })), { label: "Venues" }) } : name === "fleet" ? { description: "Queues, hosts and their health. Every pause, cancel and removal previews first." } : {});
   // Issue #882: the run's short link beside its id, from its record or, for a running job, its live facts; none for a
   // record a newer release wrote, whose page shows its stable core alone.
   const beside = name === "run" && !fromNewerRelease(ctx?.data?.run?.record) ? runPathLink(ctx?.data?.run?.record ?? ctx?.data?.activeRun ?? null) : null;

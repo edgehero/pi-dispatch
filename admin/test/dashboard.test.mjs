@@ -116,6 +116,37 @@ test("the LIST shows a PAUSE WINDOWS section and marks an active window with a r
   assert.match(out, /resumes in/, "an all-day window is active now -> resume countdown");
 });
 
+test("the LIST says a pause-windows file it cannot read, and says none only of a file that is not there or holds none", async () => {
+  const draw = async (pauseWindows) => {
+    const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, pauseWindows }) }) });
+    await flush();
+    const out = stripAnsi(comp.render(100).join("\n"));
+    await comp.dispose();
+    return out;
+  };
+  const unread = await draw({ unreadable: "EACCES" });
+  assert.match(unread, /\(pause-windows file cannot be read: EACCES\)/);
+  // The scoped-limits section follows the same rule.
+  const limits = async (scopedLimits) => {
+    const comp = makeDashboard({ paths: {}, done() {}, tui: fakeTui(), intervalMs: 100000, deps: cannedDeps({ fetchSnapshot: async () => ({ ...SNAPSHOT, scopedLimits }) }) });
+    await flush();
+    const out = stripAnsi(comp.render(100).join("\n"));
+    await comp.dispose();
+    return out;
+  };
+  const unreadLimits = await limits({ unreadable: "EACCES" });
+  assert.match(unreadLimits, /\(scoped-limits file cannot be read: EACCES\)/);
+  assert.ok(!unreadLimits.includes("(no scoped limits"));
+  const noLimits = await limits({ missing: true });
+  assert.ok(noLimits.includes("(no scoped limits") && !noLimits.includes("scoped-limits file cannot be read"));
+  assert.ok(!unread.includes("(no pause windows"));
+  for (const none of [{ missing: true }, { windows: [] }]) {
+    const out = await draw(none);
+    assert.match(out, /\(no pause windows/, JSON.stringify(none));
+    assert.ok(!out.includes("cannot be read"), JSON.stringify(none));
+  }
+});
+
 test("with a theme, the framed LIST is colored (ANSI present) but every line still fits the width", async () => {
   // A theme whose fg/bold emit real SGR, so the overlay is colored and the width stays ANSI-aware.
   const theme = { fg: (_c, t) => `\x1b[38;5;42m${t}\x1b[39m`, bold: (t) => `\x1b[1m${t}\x1b[22m`, bg: (_c, t) => t };

@@ -66,7 +66,7 @@ const states = {
   "host-consumer-idle.viewer": () => draw("host", { role: "viewer", snap: snapshot({ hostBudgets: [host({ consumerHealth: { state: "healthy", rows: [{ role: "shared", verdict: "idle", lastFetchAt: NOW - 5000, lastTakenAt: null }] } })] }) }),
   "fleet-consumer-failed.operator": () => draw("fleet", { snap: snapshot({ hostBudgets: [host({ consumerHealth: { state: "failed", rows: [] } })] }) }),
 
-  "host-capacity-missing.operator": () => draw("host", { cap: { window: { fromMs: NOW - 7 * 24 * HOUR, toMs: NOW, bucketMs: HOUR }, hosts: [], coverage: [] } }),
+  "host-capacity-missing.operator": () => draw("host", { cap: { window: { fromMs: NOW - 7 * 24 * HOUR, toMs: NOW, bucketMs: HOUR }, hosts: [], coverage: [], sourcesRead: true } }),
   "host-capacity-truncated.operator": () => draw("host", { cap: { ...capacity(), truncated: true } }),
   "host-budget-off.operator": () => draw("host", { snap: snapshot({ hostBudgets: [host({ budgetMemMiB: "off", budgetCpuCenti: "off" })] }) }),
   "host-budget-unknown.operator": () => draw("host", { snap: snapshot({ hostBudgets: [host({ budgetMemMiB: "", budgetCpuCenti: "", budgetFrom: null, jobsUnreadable: true, jobs: null })] }) }),

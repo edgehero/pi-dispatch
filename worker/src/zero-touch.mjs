@@ -194,6 +194,14 @@ export function computeZeroTouch({ records = [], events = [], stops = [], fixes 
 		trend, projects, causes: current.causes, fixes: fixed, groups, touchedRunIds: current.touchedRunIds };
 }
 
+/** The touch store's reason for an index no worker has started yet (`makeTouchStore().read`): read, and empty of any interval. */
+export const TOUCH_NOT_STARTED = "touch-tracking-not-started";
+/**
+ * The touch store's reasons that reset its coverage to now because evidence could not be read or was lost. Any of them
+ * beside `TOUCH_NOT_STARTED` keeps the report `unavailable`: a lost index is not one that has not started.
+ */
+export const TOUCH_UNREAD_REASONS = Object.freeze(["touch-index-unavailable", "touch-index-lost", "touch-actions-unresolved", "touch-events-missing"]);
+
 /**
  * The expensive scan is on demand, never the short dashboard snapshot or a mutating mirror reader. `indexMax` is the
  * deployment's run index cap (`PI_RUN_MIRROR_MAX_RUNS`, issue #761), handed to the run records read so an index of a
@@ -210,16 +218,24 @@ export async function readZeroTouch({ redis = null, logsDir, retentionDays = 30,
 		makeTouchStore({ redis, retentionDays, now, ...(timeoutMs ? { timeoutMs } : {}) }).read(),
 	]);
 	const boundaries = [touches.coverage.fromMs];
-	if (runs.coverage.local) boundaries.push(runs.coverage.local.fromMs);
+	// Issue #962: a logs folder that does not exist is a read that showed no run here, not a failed one: covered and
+	// empty, so a deployment that has run nothing is not "could not be read". A folder that is there and cannot be read
+	// stays unread, and so does an absent one beside a mirror that did not answer, where nothing was read of any run.
+	const local = runs.coverage.local ?? (runs.mirrorState.startsWith("unreachable") ? null : runs.localAbsent ?? null);
+	if (local) boundaries.push(local.fromMs);
 	if (runs.coverage.mirror) boundaries.push(runs.coverage.mirror.fromMs);
 	const reasons = [...touches.coverage.reasons];
 	if (runs.coverage.reason) reasons.push(runs.coverage.reason);
-	const unavailable = !runs.coverage.local && !runs.coverage.mirror;
+	const unavailable = !local && !runs.coverage.mirror;
 	const report = computeZeroTouch({ records: runs.records, events: touches.events, fixes, groups, nowMs, windowDays, project, scopeId,
 		coverage: { fromMs: unavailable ? nowMs : Math.max(...boundaries), partial: touches.coverage.partial || unavailable || runs.coverage.skipped > 0 || runs.mirrorState.startsWith("unreachable"), reasons } });
 	// Local records cannot establish the absence of fleet interventions when their index is unreadable. A collapsed
 	// coverage window likewise contains no observed interval, unlike a useful shorter retained window.
-	report.state = unavailable || reasons.includes("touch-index-unavailable") || report.coverage.partial && report.coverage.fromMs >= nowMs ? "unavailable" : "ready";
+	// Issue #962: a window that collapsed only because tracking has not started was read, and says so: `not-started`.
+	// Nothing failed there, so "could not be read" would be untrue; its totals still cover no interval and are not shown.
+	const collapsed = report.coverage.partial && report.coverage.fromMs >= nowMs;
+	const notStarted = collapsed && reasons.includes(TOUCH_NOT_STARTED) && !reasons.some((r) => TOUCH_UNREAD_REASONS.includes(r));
+	report.state = unavailable || reasons.includes("touch-index-unavailable") ? "unavailable" : notStarted ? "not-started" : collapsed ? "unavailable" : "ready";
 	if (includeRecords) Object.defineProperties(report, { records: { value: runs.records }, recordMirror: { value: runs.mirrorState } });
 	return report;
 }

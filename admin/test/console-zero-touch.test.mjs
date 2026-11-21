@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { zeroTouchView } from "../src/zero-touch-view.mjs";
+import { zeroTouchView, ZERO_TOUCH_NOT_STARTED, ZERO_TOUCH_UNREAD_REASONS } from "../src/zero-touch-view.mjs";
 import { loadPageData, parsePageQuery, pageQueryString, renderPage, panelIds } from "../src/console/pages.mjs";
-import { ZERO_TOUCH_CAUSES, ZERO_TOUCH_WORDS, zeroTouchHandled } from "../src/console/panels/zero-touch.mjs";
+import { ZERO_TOUCH_CAUSES, ZERO_TOUCH_PANELS, ZERO_TOUCH_WORDS, zeroTouchHandled, zeroTouchStreak } from "../src/console/panels/zero-touch.mjs";
 import { zeroTouchFixture, ZERO_TOUCH_DRAW } from "./helpers/zero-touch-goldens.mjs";
 import { assertClean } from "./helpers/console-pages-harness.mjs";
-import { computeZeroTouch } from "@edgehero/pi-dispatch/zero-touch";
+import { makeZeroTouchService } from "../src/zero-touch-data.mjs";
+import { computeZeroTouch, TOUCH_NOT_STARTED, TOUCH_UNREAD_REASONS } from "@edgehero/pi-dispatch/zero-touch";
 const NOW = 1800000000000;
+/** The words of a page, tags and the scripts' own text dropped. */
+const wordsOf = (page) => String(page).replace(/<(script|style|template)\b[^]*?<\/\1>/g, " ").replace(/<[^>]+>/g, " ").replace(/&#39;/g, "'").replace(/\s+/g, " ");
 
 test("desktop and phone render the same actual draft-answer recount for every reading role and selected interval", async () => {
   const day = 86400000, scope = "a".repeat(64), other = "b".repeat(64);
@@ -167,17 +170,19 @@ test("missing and partial history cannot render a reassuring zero-rate or succes
 });
 
 test("unreadable touch coverage and a collapsed observed window never render known zero counts", async () => {
-  for (const reasons of [["touch-index-unavailable"], ["touch-index-lost"], ["touch-actions-unresolved"], ["touch-tracking-not-started"]]) {
+  // Tracking that has not started beside evidence that was lost or not read is still unread: the last three.
+  for (const reasons of [["touch-index-unavailable"], ["touch-index-lost"], ["touch-actions-unresolved"], ["touch-events-missing"], ["touch-tracking-not-started", "touch-index-lost"], ["touch-tracking-not-started", "touch-actions-unresolved"], ["touch-tracking-not-started", "touch-index-unavailable"]]) {
     const raw = zeroTouchFixture(NOW);
     raw.coverage = { requestedFromMs: NOW - 30 * 86400_000, fromMs: reasons[0] === "touch-index-unavailable" ? NOW - 10 * 86400_000 : NOW, partial: true, reasons };
     raw.totals = { runs: 0, touched: 0, rate: null };
     const shown = zeroTouchView(raw, { role: "operator", nowMs: NOW });
-    assert.equal(shown.state, "unavailable", reasons[0]);
-    assert.deepEqual(shown.totals, {}, reasons[0]);
-    assert.deepEqual(shown.projects, [], reasons[0]);
+    assert.equal(shown.state, "unavailable", reasons.join());
+    assert.deepEqual(shown.totals, {}, reasons.join());
+    assert.deepEqual(shown.projects, [], reasons.join());
     const page = String((await renderPage("zero-touch", { session: { name: "ops", role: "operator" }, data: { now: NOW, zeroTouch: raw }, query: { days: 30 } })).html);
     assert.ok(page.includes(ZERO_TOUCH_WORDS.unavailable));
-    for (const claim of ["0 of 0", "No runs", "No touches", "Runs that needed a person</b>"]) assert.ok(!page.includes(claim), `${reasons[0]}: ${claim}`);
+    assert.ok(!page.includes(ZERO_TOUCH_WORDS.notStarted), reasons.join());
+    for (const claim of ["0 of 0", "No runs", "No touches", "Runs that needed a person</b>"]) assert.ok(!page.includes(claim), `${reasons.join()}: ${claim}`);
   }
   const partial = zeroTouchFixture(NOW);
   partial.coverage = { requestedFromMs: NOW - 90 * 86400_000, fromMs: NOW - 10 * 86400_000, partial: true, reasons: ["retained-window"] };
@@ -185,6 +190,113 @@ test("unreadable touch coverage and a collapsed observed window never render kno
   assert.equal(shown.state, "ready", "a shorter observed interval remains useful");
   assert.equal(shown.totals.touched, 38);
   assert.equal(shown.totals.runs, 214);
+});
+
+test("tracking that has not started says so once, with no totals and no zeros, and is not a failed read", async () => {
+  const notStarted = (over = {}) => { const raw = zeroTouchFixture(NOW); raw.coverage = { requestedFromMs: NOW - 30 * 86400_000, fromMs: NOW, partial: true, reasons: ["touch-tracking-not-started"] }; raw.totals = { runs: 0, touched: 0, rate: null, draftAnswers: 0, pending: 0, waitingHours: 0, stopped: 0 }; return Object.assign(raw, over); };
+  // By its reasons alone, and by the state the worker's report carries.
+  for (const raw of [notStarted(), notStarted({ state: "not-started" })]) {
+    for (const role of ["operator", "viewer"]) {
+      const shown = zeroTouchView(raw, { role, nowMs: NOW });
+      assert.equal(shown.state, "not-started");
+      assert.deepEqual([shown.totals, shown.projects, shown.groups, shown.fixes, shown.trend], [{}, [], [], [], []]);
+      assert.deepEqual(zeroTouchView(shown, { role, nowMs: NOW }), shown, "the page's projection is read again by each panel");
+      const page = String((await renderPage("zero-touch", { session: { name: role, role }, data: { now: NOW, zeroTouch: raw }, query: { days: 30 } })).html);
+      const words = wordsOf(page);
+      assert.equal(words.split(ZERO_TOUCH_WORDS.notStarted).length - 1, 1, "said once");
+      assert.ok(!words.includes("could not be read"), "nothing failed");
+      for (const claim of ["0 of 0", "No runs", "No touches", "Not enough history", " 0 runs", " 0h", "0 waiting now", "0 fixes recorded", " 0% ", ZERO_TOUCH_WORDS.empty, ZERO_TOUCH_WORDS.noFixes, ZERO_TOUCH_WORDS.noGroups, "undefined", "NaN"]) assert.ok(!words.includes(claim), `${role}: ${claim}`);
+      assert.ok(!page.includes("<b>0</b>") && !page.includes("<b>0%"));
+      assert.deepEqual([...page.matchAll(/<section id="(p-zt-[a-z]+)"/g)].map((m) => m[1]), ["p-zt-rate"], "the rate card alone");
+      assert.ok(page.includes("/runs/zero-touch?days=7"), "the window can still be chosen");
+      // The card keeps the window that was asked for, the report's own or the page's.
+      for (const days of [7, 90]) {
+        assert.equal(zeroTouchView({ ...raw, windowDays: days }, { role, nowMs: NOW }).windowDays, days);
+        assert.equal(zeroTouchView({ ...raw, windowDays: undefined }, { role, nowMs: NOW, windowDays: days }).windowDays, days);
+        const asked = wordsOf((await renderPage("zero-touch", { session: { name: role, role }, data: { now: NOW, zeroTouch: { ...raw, windowDays: days } }, query: { days } })).html);
+        assert.ok(asked.includes(`Touch rate, ${days} days`), `${role}: ${days} days`);
+      }
+    }
+  }
+  // Each card on its own, as a reader of one panel gets it: a title, and no count.
+  const view = { role: "operator", now: NOW, query: { days: 30 }, data: { zeroTouch: zeroTouchView(notStarted(), { role: "operator", nowMs: NOW }) } };
+  for (const [id, panel] of ZERO_TOUCH_PANELS) {
+    const words = String(panel(view)).replace(/<[^>]+>/g, " ");
+    assert.ok(!/\d/.test(words.replace("Touch rate, 30 days", "")), `${id}: ${words}`);
+    assert.equal(words.includes(ZERO_TOUCH_WORDS.notStarted), id === "p-zt-rate", id);
+    if (id !== "p-zt-rate") assert.ok(!String(panel(view)).includes("<p"), `${id}: a title and nothing under it`);
+  }
+  // The golden is that state, drawn through the page's own load.
+  const golden = wordsOf(await ZERO_TOUCH_DRAW["zero-touch-not-started.operator"]());
+  assert.equal(golden.split(ZERO_TOUCH_WORDS.notStarted).length - 1, 1);
+  assert.ok(!golden.includes("could not be read"));
+  // The control: a read that showed an interval with no runs in it keeps its own empty words and its zeros.
+  const empty = await ZERO_TOUCH_DRAW["zero-touch-empty.viewer"]();
+  assert.ok(empty.includes("No runs") && empty.includes("0 of 0 runs needed a person") && !empty.includes(ZERO_TOUCH_WORDS.notStarted) && !empty.includes(ZERO_TOUCH_WORDS.unavailable));
+  // A report the worker called unavailable stays so, whatever its reasons hold.
+  assert.equal(zeroTouchView(notStarted({ state: "unavailable" }), { role: "viewer", nowMs: NOW }).state, "unavailable");
+  // A started index over a short interval is ready, as before.
+  const started = notStarted({ coverage: { requestedFromMs: NOW - 30 * 86400_000, fromMs: NOW - 3600_000, partial: true, reasons: [] } });
+  assert.equal(zeroTouchView(started, { role: "viewer", nowMs: NOW }).state, "ready");
+});
+
+test("the view's reason lists are the worker's own", () => {
+  assert.equal(ZERO_TOUCH_NOT_STARTED, TOUCH_NOT_STARTED);
+  assert.deepEqual([...ZERO_TOUCH_UNREAD_REASONS], [...TOUCH_UNREAD_REASONS]);
+});
+
+test("a read that throws is caught and says what failed; a read that answered nothing says only that it could not be read", async () => {
+  const load = (zeroTouch) => loadPageData("zero-touch", { days: 30 }, { now: () => NOW, zeroTouch, fleet: { parkedCount: async () => 0 } }, { role: "operator" });
+  const page = async (data) => wordsOf((await renderPage("zero-touch", { session: { name: "ops", role: "operator" }, data, query: { days: 30 } })).html);
+  const thrown = await load(async () => { throw new Error("ECONNREFUSED 10.0.0.7:6379 /srv/secret/path"); });
+  assert.deepEqual([thrown.zeroTouch.state, thrown.zeroTouch.failure], ["unavailable", "read-failed"]);
+  const said = await page(thrown);
+  assert.equal(said.split(ZERO_TOUCH_WORDS.readFailed).length - 1, 1, "the reason, once");
+  assert.equal(ZERO_TOUCH_WORDS.readFailed, "The read itself failed on this console. Its log has the reason.", "only what is known: no cause is guessed");
+  // The log the sentence points at: one line, the error's code or kind, never its text. A log that throws fails no page.
+  const lines = [];
+  const logged = (zeroTouch, log = (line) => lines.push(line)) => loadPageData("zero-touch", { days: 30 }, { now: () => NOW, zeroTouch, log, fleet: { parkedCount: async () => 0 } }, { role: "operator" });
+  await logged(async () => { throw Object.assign(new Error("connect ECONNREFUSED 10.0.0.7:6379"), { code: "ECONNREFUSED" }); });
+  await logged(async () => { throw new TypeError("/srv/secret/path is not a record"); });
+  await logged(async () => { throw Object.assign(new Error("x"), { code: "bad code\n/srv/secret", name: "also bad/name" }); });
+  await logged(async () => zeroTouchFixture(NOW));
+  await logged(async () => null);
+  assert.deepEqual(lines, ["console: the Zero touch read failed (ECONNREFUSED)", "console: the Zero touch read failed (TypeError)", "console: the Zero touch read failed (error)"]);
+  assert.equal((await logged(async () => { throw new Error("down"); }, () => { throw new Error("log is gone"); })).zeroTouch.failure, "read-failed");
+  assert.ok(said.includes(ZERO_TOUCH_WORDS.unavailable));
+  assert.ok(!said.includes("ECONNREFUSED") && !said.includes("/srv/secret"), "never the error's own text");
+  assert.ok(!said.includes(ZERO_TOUCH_WORDS.notStarted));
+  // A failure the panel has no sentence for is not carried.
+  assert.ok(!Object.hasOwn(zeroTouchView({ state: "unavailable", failure: "<b>anything</b>" }, { role: "operator", nowMs: NOW }), "failure"));
+  // The controls: a read that answered null, and one that answered, say no such reason.
+  const none = await load(async () => null);
+  assert.ok(!Object.hasOwn(none.zeroTouch, "failure"));
+  const plain = await page(none);
+  assert.ok(plain.includes(ZERO_TOUCH_WORDS.unavailable) && !plain.includes(ZERO_TOUCH_WORDS.readFailed));
+  const read = await page(await load(async () => zeroTouchFixture(NOW)));
+  assert.ok(!read.includes(ZERO_TOUCH_WORDS.readFailed) && !read.includes(ZERO_TOUCH_WORDS.unavailable));
+});
+
+test("the streak card says could not be read alone under a read that failed, and its own words only of a read that answered", async () => {
+  const card = (zeroTouch) => String(zeroTouchStreak({ role: "operator", now: NOW, query: { days: 30 }, data: { zeroTouch } })).replace(/<[^>]+>/g, " ").replace(/\s+/g, " ").trim();
+  for (const unread of [null, { state: "unavailable" }, { state: "unavailable", failure: "read-failed" }]) {
+    assert.equal(card(unread), `Zero-touch streak ${ZERO_TOUCH_WORDS.unavailable}`, JSON.stringify(unread));
+  }
+  const page = wordsOf(await ZERO_TOUCH_DRAW["zero-touch-unavailable.operator"]());
+  for (const said of ["Not enough history", "30 days of observed activity establish a zero-touch project"]) assert.ok(!page.includes(said), said);
+  // The control: a read that answered with no streak yet keeps "Not enough history".
+  const raw = zeroTouchFixture(NOW);
+  raw.projects = [];
+  const read = card(raw);
+  assert.ok(read.includes("Not enough history") && read.includes("30 days of observed activity establish a zero-touch project") && !read.includes(ZERO_TOUCH_WORDS.unavailable));
+});
+
+test("the touched-runs count is known only from a ready report", async () => {
+  const service = makeZeroTouchService({ paths: { valkeyUrl: "redis://unused", logsDir: "/nonexistent/zero-touch-runs", triggersPath: "/nonexistent/zero-touch-runs/triggers.json" } });
+  const total = async (state) => (await service.runs.call({ read: async () => ({ state, records: [], touchedRunIds: [], coverage: { partial: state !== "ready" }, totals: { touched: 0 } }) }, {})).touchTotal;
+  assert.equal(await total("ready"), 0);
+  assert.equal(await total("unavailable"), null);
+  assert.equal(await total("not-started"), null, "a window that covers no interval counted nothing: not a known 0");
 });
 
 test("waiting links, previous-rate words, human name bounds and private-context failures match the cards", async () => {

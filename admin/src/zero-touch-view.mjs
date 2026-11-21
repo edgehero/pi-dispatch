@@ -12,10 +12,27 @@ function breakdown(row, repository = false) {
   if (!repository) out.repositories = Array.isArray(row?.repositories) ? row.repositories.map((r) => breakdown(r, true)) : [];
   return out;
 }
+/** The touch store's reason for an index no worker has started yet; the worker's `TOUCH_NOT_STARTED`, held equal by a test. */
+export const ZERO_TOUCH_NOT_STARTED = "touch-tracking-not-started";
+/** The reasons that say touch evidence could not be read or was lost; the worker's `TOUCH_UNREAD_REASONS`, held equal by a test. */
+export const ZERO_TOUCH_UNREAD_REASONS = Object.freeze(["touch-index-unavailable", "touch-index-lost", "touch-actions-unresolved", "touch-events-missing"]);
+/** What the page's own read can say of a failure: the closed set a panel has a sentence for. */
+export const ZERO_TOUCH_FAILURES = Object.freeze(["read-failed"]);
+/** A view with nothing counted: no totals, so a panel has no zero to draw. */
+const nothing = (state, { nowMs, windowDays, failure = null }) => ({ state, ...(failure === null ? {} : { failure }), nowMs, windowDays, coverage: { partial: true, reasons: [] }, totals: {}, projects: [], causes: causes([]), trend: [], groups: [], fixes: [], fixesPartial: true, touchedRunIds: [], waitingRuns: [], ungroupedRunIds: [], grouping: { enabled: false, pending: 0, unassigned: 0, state: "disabled", sources: [] } });
+/**
+ * Three states. `ready` holds counts. `unavailable` is a read that failed or evidence that was lost: "could not be
+ * read", with `failure` where the page's own read threw. `not-started` (issue #962) is a read that worked and found
+ * that no worker has started touch tracking: nothing failed, and there is no interval to count in, so it holds no
+ * totals either. A window that collapsed for any other reason, or with one beside it, stays `unavailable`.
+ */
 export function zeroTouchView(raw, { role = "viewer", windowDays = 30, nowMs = 0 } = {}) {
   const observed = raw?.coverage ?? raw?.window;
-  const unobserved = Array.isArray(observed?.reasons) && observed.reasons.includes("touch-index-unavailable") || observed?.partial === true && number(observed.fromMs) !== null && observed.fromMs >= (number(raw?.nowMs) ?? nowMs);
-  if (!raw || typeof raw !== "object" || raw.state === "unavailable" || unobserved) return { state: "unavailable", nowMs, windowDays, coverage: { partial: true, reasons: [] }, totals: {}, projects: [], causes: causes([]), trend: [], groups: [], fixes: [], fixesPartial: true, touchedRunIds: [], waitingRuns: [], ungroupedRunIds: [], grouping: { enabled: false, pending: 0, unassigned: 0, state: "disabled", sources: [] } };
+  const reasons = Array.isArray(observed?.reasons) ? observed.reasons : [];
+  const collapsed = observed?.partial === true && number(observed.fromMs) !== null && observed.fromMs >= (number(raw?.nowMs) ?? nowMs);
+  const notStarted = raw?.state === "not-started" || collapsed && reasons.includes(ZERO_TOUCH_NOT_STARTED) && !reasons.some((r) => ZERO_TOUCH_UNREAD_REASONS.includes(r));
+  if (!raw || typeof raw !== "object" || raw.state === "unavailable" || reasons.includes("touch-index-unavailable") || collapsed && !notStarted) return nothing("unavailable", { nowMs, windowDays, failure: ZERO_TOUCH_FAILURES.includes(raw?.failure) ? raw.failure : null });
+  if (notStarted) return nothing("not-started", { nowMs, windowDays: [7, 30, 90].includes(raw.windowDays ?? raw.days) ? raw.windowDays ?? raw.days : windowDays });
   const totals = raw.totals ?? raw.summary ?? {};
   const coverage = raw.coverage ?? raw.window ?? {};
   const out = { state: "ready", nowMs: number(raw.nowMs) ?? nowMs, windowDays: [7, 30, 90].includes(raw.windowDays ?? raw.days) ? raw.windowDays ?? raw.days : windowDays,
