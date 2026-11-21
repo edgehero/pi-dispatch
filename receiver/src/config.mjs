@@ -66,13 +66,24 @@ export function identityRetryWindowMs(env = process.env) {
 /**
  * Parse the receiver's config from `env` (default process.env). Filesystem access is injected
  * (`readFile`, `fileExists`) so the loader is hermetically testable and never touches disk in tests.
+ *
+ * `verifiesWatchPushes` is set by `serve` alone (issue #994), the one command that answers `POST /watch/<source>` and
+ * verifies each push with its source's `secretEnv`: with it, a watch source whose secret is unset or blank refuses the
+ * file. `poll` and `watch` load through this loader without it and never judge that secret, since neither reads it
+ * (the poller has no watch route, and the collector pulls). It used to be judged for all three, so a deployment that
+ * added a watch source and forgot its secret lost GitHub polling at its next restart, exit 2 and not restarted, over a
+ * setting the poller never uses. Off by default because the cost of forgetting it is bounded: the push handler answers
+ * a source whose secret is missing by the same predicate (unset, or blank after trimming) with 503 and verifies nothing
+ * (receiver/src/watch.mjs), so a caller that left it out would refuse each push instead of its start, and never accept
+ * one signed with a blank key. It is kept on the returned config, so `reloadTriggers` judges a live edit for `serve`
+ * exactly as its start did, from one decision.
  */
-export function loadReceiverConfig(env = process.env, { readFile = readFileSync, fileExists = existsSync } = {}) {
+export function loadReceiverConfig(env = process.env, { readFile = readFileSync, fileExists = existsSync, verifiesWatchPushes = false } = {}) {
 	// Triggers and the GitHub auth block are parsed FIRST, before the secret check, because the secret is
 	// now conditional on what they say. Their own fail-loud errors therefore surface first -- a garbled
 	// GITHUB_AUTH_SOURCE is reported as a garbled GITHUB_AUTH_SOURCE, never laundered into a confusing
 	// complaint about WEBHOOK_SECRET.
-	const triggers = loadTriggers(env, readFile, fileExists);
+	const triggers = loadTriggers(env, readFile, fileExists, verifiesWatchPushes === true);
 	const github = loadGitHubAuth(env, fileExists);
 	// Before the secret check for the same reason as the two above: a typo'd GITHUB_INGEST is reported as itself,
 	// never as a WEBHOOK_SECRET the deployment may not need (issue #879).
@@ -96,6 +107,8 @@ export function loadReceiverConfig(env = process.env, { readFile = readFileSync,
 		// What the operator said about the transport (`null`: unset, so `servesGithub` was inferred). Carried so the boot
 		// line that skips the GitHub arm can name which rule decided, and so `poll` can refuse under `webhook`.
 		githubIngest,
+		// Whether this config judges watch source secrets (issue #994): `serve`'s, which `reloadTriggers` reads back.
+		verifiesWatchPushes: verifiesWatchPushes === true,
 		valkeyUrl: env.VALKEY_URL ?? "redis://127.0.0.1:6379", // mirrors worker config: producer and consumer share one queue
 		port: positiveInt(env, "RECEIVER_PORT", 3000),
 		bind: env.RECEIVER_BIND ?? "0.0.0.0",
@@ -343,7 +356,7 @@ function loadAzureConfig(env) {
  * counted. The raw file index is the rule's identity -- the filter reports it on the job as
  * `trigger.matched.index`, so a run is explainable back to the exact triggers.json entry that fired it.
  */
-function loadTriggers(env, readFile, fileExists) {
+function loadTriggers(env, readFile, fileExists, verifiesWatchPushes) {
 	const path = env.PI_TRIGGERS_FILE ?? DEFAULT_TRIGGERS_PATH;
 
 	if (!fileExists(path)) {
@@ -353,9 +366,10 @@ function loadTriggers(env, readFile, fileExists) {
 	const document = parseTriggersDocument(readFile(path, "utf8"), path);
 	const parsed = document.triggers;
 	const watchSources = document.watchSources ?? {};
-	// The predicate is the worker's (`watchSecretsMissing`, issue #970), shared with doctor and `pi-dispatch triggers
-	// check`, so none of them can call a secret present that this refuses.
-	if (watchSecretsMissing(watchSources, env).length > 0) throw configError("watch: a configured source secret is missing");
+	// Judged for `serve` alone (`verifiesWatchPushes`, issue #994), by the worker's predicate (`watchSecretsMissing`,
+	// issue #970), shared with doctor and `pi-dispatch triggers check`, so none of them can call a secret present that
+	// this refuses.
+	if (verifiesWatchPushes && watchSecretsMissing(watchSources, env).length > 0) throw configError("watch: a configured source secret is missing");
 
 	return groupTriggers(parsed, { watchSources });
 }
@@ -393,10 +407,15 @@ export function triggersFilePath(env = process.env) {
  * to be absent. Arming `/` here instead was rejected: it needs the GitHub identity resolved (a call that may retry for
  * minutes or fail outright, and a reload cannot refuse to boot) and a handler built into a server already listening,
  * the boot-only coupling DES-TRIGGER-OUTSIDE-PI exists to keep.
+ *
+ * Watch source secrets are judged as the start judged them, by `cfg.verifiesWatchPushes` (issue #994): `serve`'s
+ * config keeps a new source without its secret out and runs on, while the poller's (which carries no such field) and
+ * the watch collector's take it. Read from `cfg` rather than passed by each caller, so `serve` cannot start strict and
+ * reload lax.
  */
 export function reloadTriggers(env, cfg, { readFile = readFileSync, fileExists = existsSync } = {}) {
 	try {
-		cfg.triggers = loadTriggers(env, readFile, fileExists);
+		cfg.triggers = loadTriggers(env, readFile, fileExists, cfg.verifiesWatchPushes === true);
 		if (cfg.servesGithub === false && cfg.githubIngest !== "poll" && hasGithubRules(cfg.triggers.github)) return { ok: true, githubUnserved: githubRuleCount(cfg.triggers.github) };
 		return { ok: true };
 	} catch (e) {

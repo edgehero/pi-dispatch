@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
 import { main } from "../src/cli.mjs";
 import { WATCH_PULL_CURSOR_TTL_MS, pollWatchSources, startWatchPuller } from "../src/watch-puller.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
 const NOW = Date.parse("2026-01-01T00:00:00Z"); const now = () => NOW;
 const finding = { fields: { service: "checkout" }, severity: "error", count: 1, firstSeen: "2026-01-01T00:00:00Z", lastSeen: "2026-01-01T00:00:00Z", samples: ["private source text"] };
 function setup() {
@@ -40,3 +43,17 @@ test("puller stops promptly and removes its timer without owning injected client
 	const puller = await startWatchPuller({}, { ...deps, loadConfig: () => deps.cfg, reload: () => ({ ok: true }), signals: false, out: () => {} });
 	puller.stop(); await puller.done; assert.equal(disconnected, false);
 });
+test("the collector starts on its real loader where a source's push secret is unset, and its reload takes the file too (issue #994)", { timeout: 10_000 }, async () => {
+	// It pulls and reads no push secret, so nothing it loads judges one: only `serve`, which verifies pushes, refuses it.
+	const dir = tempDir("watch-puller-secret-");
+	const path = join(dir, "triggers.json");
+	writeFileSync(path, JSON.stringify({ watchSources: { prod: { verify: "hmac-sha256", secretEnv: "WATCH_SIGNING", maxPerDay: 10, pull: { kind: "file", path: "/var/log/shop.log", fields: { service: "checkout" }, intervalSeconds: 30 } } }, triggers: [] }));
+	const deps = setup(); const lines = []; let cycled; const cycle = new Promise(resolve => { cycled = resolve; });
+	const adapterFactory = () => ({ async poll() { return { findings: [], deliveries: [], cursor: {} }; } });
+	const out = value => { lines.push(value); if (value.event === "watch_pull_cycle") cycled(); };
+	const puller = await startWatchPuller({ PI_TRIGGERS_FILE: path }, { redis: deps.redis, store: deps.store, enqueue: deps.enqueue, adapterFactory, now, signals: false, out });
+	await cycle; puller.stop(); await puller.done;
+	assert.deepEqual(lines.filter(line => line.event !== "watch_pull_cycle"), [], "no refusal and no kept-config line");
+	assert.deepEqual(lines.map(line => [line.event, line.source]), [["watch_pull_cycle", "prod"]]);
+});
+

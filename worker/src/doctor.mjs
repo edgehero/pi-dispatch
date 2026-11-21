@@ -118,7 +118,7 @@ import { JOBS_ONLY, durationText, milliText, notSharedWhy, percentText, shareTex
 import { CGROUP_PARENT, cgroupParentFor, guardHelperRun, helperName as cpuReserveHelperName, operatorQuotaCommand, readQuota, reservePlan, userQuotaCommand } from "./cpu-reserve.mjs";
 import { HOST_BUDGET_KEYS, computeHostBudget, hostBudgetSettings, largestFit, neverFits, projectBudgetRow, publishedBudget, readUserServiceLimits } from "./host-budget.mjs";
 import { makeImagePreflight, normalizeImageId } from "./image-preflight.mjs";
-import { watchSecretRefusers } from "./triggers-check.mjs";
+import { webhookSecretRefusers } from "./triggers-check.mjs";
 import { watchSecretsMissing } from "./watch-contract.mjs";
 import { BOOT_REFUSING_JOB_USER_CAUSES, DAEMON_FACTS_TIMEOUT_MS, JOB_USER_FIX, makeDaemonFactsReader, makeJobUserResolver, relabelsPrivateMounts, resolveImageUser } from "./job-user.mjs";
 import { mergeSecretProfiles, parseSecretProfiles, servableSecretProfiles } from "./secret-profiles.mjs";
@@ -2106,6 +2106,9 @@ export async function collectChecks(shellVars, seams) {
 	// so a secret only the `.env` set was called missing. The lines judge its presence only.
 	const watchSecretFile = service.extra(Object.values(triggerWatchSources ?? {}).map((source) => source.secretEnv)).fromFile;
 	checks.push(...watchDoctorChecks({ sources: triggerWatchSources, rules: triggerWatchRules, env: { ...env, ...watchSecretFile } }));
+	// Whether a watch collector runs on this file (issue #1001): one with no pull source refuses every file and runs
+	// nowhere, so the lines below that name who refuses a setting name it only here, as `pi-dispatch triggers check` does.
+	const collectsHere = Object.values(triggerWatchSources ?? {}).some((source) => source.pull);
 	// FIRST, and fail rather than warn: every check below this line reads counts that a parse failure
 	// zeroed, so a green run here would be reporting on a file nobody could read. The receiver loads this
 	// file unconditionally and refuses to start without it, which is the consequence worth naming.
@@ -2714,7 +2717,8 @@ export async function collectChecks(shellVars, seams) {
 					checks.push({
 						ok: false,
 						warn: true,
-						label: `${githubServe.why} but WEBHOOK_SECRET is unset -- the receiver will refuse to start`,
+						// Issue #1001: every reader the loader's refusal reaches, `pi-dispatch triggers check`'s list for it.
+						label: `${githubServe.why} but WEBHOOK_SECRET is unset -- ${readersNamed(webhookSecretRefusers(env, { collects: collectsHere }))} will refuse to start`,
 						// The way out an inferred answer leaves (issue #879): a deployment whose GitHub events come from the poller
 						// needs no secret, and said here because this is the line such an operator meets. An operator who set
 						// GITHUB_INGEST to webhook or both chose the webhook, so the fix is the secret alone. Where only a
@@ -2742,7 +2746,8 @@ export async function collectChecks(shellVars, seams) {
 				checks.push({
 					ok: false,
 					warn: true,
-					label: `RECEIVER_PORT is ${JSON.stringify(port)}, which is not a positive integer -- the receiver will refuse to start`,
+					// Issue #1001: `poll` and `watch` parse it too, through the same loader, though neither binds a port.
+					label: `RECEIVER_PORT is ${JSON.stringify(port)}, which is not a positive integer -- ${readersNamed(["receiver", "poller", ...(collectsHere ? ["watch collector"] : [])])} will refuse to start`,
 					fix: "set RECEIVER_PORT to a TCP port number, or drop it for the default (3000)",
 				});
 			}
@@ -2902,16 +2907,22 @@ export async function collectChecks(shellVars, seams) {
 	// Only the keys that decide a line: the App keys matter only while app is the source.
 	const ghRead = GITHUB_SERVICE_KEYS.filter((k) => settingsRead(service.fromFile).includes(k) && (k === "GITHUB_AUTH_SOURCE" || ghSource === "app"));
 	if (ghRead.length > 0) checks.push({ ok: true, label: `GitHub auth settings read from ${serviceEnvFile.path}, as the service reads them (this shell does not set them): ${ghRead.join(", ")}` });
+	// Issue #1001: who refuses a setting `loadGitHubAuth` refuses, said once for every line below that names one. Every
+	// reader loads the block at its start, whatever the triggers file holds: the worker through `loadConfig`, and the
+	// receiver's three commands through `loadReceiverConfig` (`serve`, and `poll` and `watch`, which load with it). The
+	// lines named the worker and the receiver, or the worker alone, so a polling deployment was not told its poller would
+	// not start, the service issue #970 is about.
+	const githubAuthRefusers = readersNamed(["worker", "receiver", "poller", ...(collectsHere ? ["watch collector"] : [])]);
 	// Issue #481: a source `loadGitHubAuth` refuses, the EMPTY one included, and both the worker and the receiver load it
 	// at start. It was said nowhere: every branch below asks for gh, pat or app, so `GITHUB_AUTH_SOURCE=` passed doctor on
 	// a deployment that exits 2 at boot. The value is shown only where it is short and plain (PR #485 review round 1): a
 	// token pasted into the wrong line is a token, and this line would have printed it in full.
 	if (ghSource !== "gh" && ghSource !== "pat" && ghSource !== "app") {
 		const sourceShown = /^[A-Za-z0-9_-]{0,12}$/.test(ghSource) ? quotedShown(ghSource) : `an unrecognised value (${ghSource.length} characters, not shown)`;
-		checks.push({ ok: false, label: `GITHUB_AUTH_SOURCE is ${sourceShown}, which is none of pat, gh or app: the worker and the receiver refuse to start on it (exit 2)${fromFileNote(fileSays("GITHUB_AUTH_SOURCE"))}`, fix: "set GITHUB_AUTH_SOURCE to pat, gh or app, or delete the line for the default (gh)" });
+		checks.push({ ok: false, label: `GITHUB_AUTH_SOURCE is ${sourceShown}, which is none of pat, gh or app: ${githubAuthRefusers} refuse to start on it (exit 2)${fromFileNote(fileSays("GITHUB_AUTH_SOURCE"))}`, fix: "set GITHUB_AUTH_SOURCE to pat, gh or app, or delete the line for the default (gh)" });
 	}
 	// Issue #481 (PR #485 review round 1): the PAT source's own refusal, `GITHUB_AUTH_SOURCE=pat requires a non-empty
-	// <var>`, which both processes make at start (the PAT is trimmed there, so blank is missing too). GITHUB_PAT_VAR set
+	// <var>`, which every reader makes at start (the PAT is trimmed there, so blank is missing too). GITHUB_PAT_VAR set
 	// to "" names no variable at all. Before this doctor said only that the in-image probe was not run. The PAT is
 	// resolved by the service's rule like every other key, by name, and never shown.
 	if (ghSource === "pat") {
@@ -2923,7 +2934,7 @@ export async function collectChecks(shellVars, seams) {
 			const patCheck = credentialAbsent({
 				subject: `GITHUB_AUTH_SOURCE=pat but ${what}`,
 				names: patVar === "" ? "GITHUB_PAT_VAR and the PAT it names" : patVar,
-				refusal: "the worker and the receiver refuse to start (exit 2)",
+				refusal: `${githubAuthRefusers} refuse to start (exit 2)`,
 				sep: ": ",
 				fix: patVar === "" ? "delete the GITHUB_PAT_VAR line to use GITHUB_PAT, or name the variable that holds the PAT" : `set ${patVar} to a fine-grained PAT in .env, or switch GITHUB_AUTH_SOURCE`,
 			});
@@ -2976,7 +2987,7 @@ export async function collectChecks(shellVars, seams) {
 			// Unset and empty alike (`loadGitHubAuth`'s `!appId`), so the words say both (PR #485 review round 2); and a
 			// missing id is one an env-setup script may export (`credentialAbsent`).
 			if (!ids[name]) {
-				checks.push(credentialAbsent({ subject: `GITHUB_AUTH_SOURCE=app but ${name} is unset or empty`, names: name, refusal: "the worker will refuse to boot", fix: setupFix }));
+				checks.push(credentialAbsent({ subject: `GITHUB_AUTH_SOURCE=app but ${name} is unset or empty`, names: name, refusal: `${githubAuthRefusers} refuse to start (exit 2)`, fix: setupFix }));
 				continue;
 			}
 			checks.push({
@@ -3001,7 +3012,7 @@ export async function collectChecks(shellVars, seams) {
 		if (inlineKey !== "" && keyPathSet) {
 			checks.push({
 				ok: false,
-				label: "GITHUB_APP_PRIVATE_KEY and GITHUB_APP_PRIVATE_KEY_PATH are both set -- the worker will refuse to boot",
+				label: `GITHUB_APP_PRIVATE_KEY and GITHUB_APP_PRIVATE_KEY_PATH are both set -- ${githubAuthRefusers} refuse to start (exit 2)`,
 				fix: "unset one of them: the inline value for a deployment fed by a secrets manager, the path for a key on disk (docs/secrets.md)",
 			});
 		} else if (inlineKey !== "") {
@@ -3013,14 +3024,14 @@ export async function collectChecks(shellVars, seams) {
 				checks.push({
 					ok: false,
 					warn: true,
-					label: `GITHUB_APP_PRIVATE_KEY does not look like a PEM (does not begin "-----BEGIN ...") -- the worker will refuse to boot; contents not shown`,
+					label: `GITHUB_APP_PRIVATE_KEY does not look like a PEM (does not begin "-----BEGIN ...") -- ${githubAuthRefusers} refuse to start (exit 2); contents not shown`,
 					fix: "check for a truncated paste, or point GITHUB_APP_PRIVATE_KEY_PATH at the key file instead (docs/secrets.md)",
 				});
 			}
 		} else if (!keyPathSet) {
-			checks.push(credentialAbsent({ subject: "GITHUB_AUTH_SOURCE=app but neither GITHUB_APP_PRIVATE_KEY_PATH nor GITHUB_APP_PRIVATE_KEY is set", names: "GITHUB_APP_PRIVATE_KEY_PATH or GITHUB_APP_PRIVATE_KEY", refusal: "the worker will refuse to boot", fix: setupFix }));
+			checks.push(credentialAbsent({ subject: "GITHUB_AUTH_SOURCE=app but neither GITHUB_APP_PRIVATE_KEY_PATH nor GITHUB_APP_PRIVATE_KEY is set", names: "GITHUB_APP_PRIVATE_KEY_PATH or GITHUB_APP_PRIVATE_KEY", refusal: `${githubAuthRefusers} refuse to start (exit 2)`, fix: setupFix }));
 		} else if (!fileExists(keyPath)) {
-			checks.push({ ok: false, label: `GITHUB_APP_PRIVATE_KEY_PATH does not exist (${keyPath}) -- the worker will refuse to boot`, fix: setupFix });
+			checks.push({ ok: false, label: `GITHUB_APP_PRIVATE_KEY_PATH does not exist (${keyPath}) -- ${githubAuthRefusers} refuse to start (exit 2)`, fix: setupFix });
 		} else {
 			checks.push({ ok: true, label: `GitHub App private key present (${keyPath})` });
 			// POSIX mode only -- on win32 stat modes are synthetic (0666-ish for everything), so a warn
@@ -12289,26 +12300,30 @@ export function liveRunVia(spawn, { bin = "docker", maxOutputBytes = Infinity } 
 		});
 }
 
+/** `the a`, `the a and the b`, `the a, the b and the c`: who refuses, in the words doctor's lines name the readers in. */
+function readersNamed(readers) {
+	const named = readers.map((r) => `the ${r}`);
+	return named.length <= 1 ? named.join("") : `${named.slice(0, -1).join(", ")} and ${named.at(-1)}`;
+}
+
 /**
  * Diagnose reviewed source bindings without resolving or printing credential values.
  *
  * A source's signing secret is judged by the receiver loader's own predicate (`watchSecretsMissing`, issue #970), which
- * refuses the whole file: `serve`, `poll` and `watch` refuse to start on it, and a running one keeps its last copy. This
- * said "push requests return 503", and tested presence without the loader's trim, so a blank secret passed here. It stays
- * a warning: doctor may run on a host that runs none of the three.
+ * refuses the whole file for `serve` alone: it answers the source's pushes and verifies them with the secret, while
+ * `poll` and `watch` read no push and do not judge it (issue #994). `serve` refuses to start on such a file, and a
+ * running one keeps its last copy. This said "push requests return 503", and tested presence without the loader's trim,
+ * so a blank secret passed here. It stays a warning: doctor may run on a host that runs no `serve`.
  */
 export function watchDoctorChecks({ sources = {}, rules = 0, env = {} } = {}) {
 	const entries = Object.entries(sources ?? {});
 	if (!entries.length) return [];
 	const checks = [{ id: "watch.sources", ok: true, label: `${entries.length} watch source(s), ${rules} watch rule(s); daily caps are required at load` }];
 	const missing = new Set(watchSecretsMissing(sources, env).map((m) => m.source));
-	const collects = entries.some(([, declaration]) => declaration.pull);
 	for (const [source, declaration] of entries) {
 		const identity = createHash("sha256").update(source).digest("hex").slice(0, 16);
 		const present = !missing.has(source);
-		const refusing = present ? [] : watchSecretRefusers(declaration, env, { collects }).map((r) => `the ${r}`);
-		const who = refusing.length <= 1 ? refusing.join("") : `${refusing.slice(0, -1).join(", ")} and ${refusing.at(-1)}`;
-		checks.push({ id: `watch.secret-${identity}`, ok: present, ...(!present ? { warn: true } : {}), label: present ? `watch source ${source}: signing secret is available` : `watch source ${source}: signing secret ${declaration.secretEnv} is unset or blank, so ${who} ${refusing.length === 1 ? "refuses" : "refuse"} to start on this triggers file (exit 2), and one already running keeps the last copy that loaded`, ...(!present ? { fix: `Set ${declaration.secretEnv} to a non-blank value wherever the receiver, the poller or the watch collector runs, or remove the source from the triggers file.` } : {}) });
+		checks.push({ id: `watch.secret-${identity}`, ok: present, ...(!present ? { warn: true } : {}), label: present ? `watch source ${source}: signing secret is available` : `watch source ${source}: signing secret ${declaration.secretEnv} is unset or blank, so the receiver (\`pi-dispatch-receiver serve\`) refuses to start on this triggers file (exit 2), and one already running keeps the last copy that loaded; the poller and the watch collector do not read it`, ...(!present ? { fix: `Set ${declaration.secretEnv} to a non-blank value wherever \`pi-dispatch-receiver serve\` runs, or remove the source from the triggers file.` } : {}) });
 		if (declaration.pull?.secretEnv) {
 			const name = declaration.pull.secretEnv; const available = typeof env[name] === "string" && env[name].length > 0;
 			checks.push({ id: `watch.pull-${identity}`, ok: available, ...(!available ? { warn: true } : {}), label: available ? `watch source ${source}: pull credential is available` : `watch source ${source}: pull credential ${name} is missing`, ...(!available ? { fix: `Set ${name} on the watch collector host.` } : {}) });

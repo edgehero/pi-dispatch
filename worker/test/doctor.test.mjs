@@ -1312,9 +1312,9 @@ test("doctor: app source with the whole triple unset FAILS on the two ids, point
 	const code = await runDoctor(appEnv(), appDeps(out));
 	// PR #466 gate round 1: unset ids refuse the worker's boot (`loadGitHubAuth`), so they are ✗, not the ⚠ they were.
 	assert.equal(code, 1, "a chosen app source without its ids is a deployment that cannot start");
-	assert.match(text(), /✗ GITHUB_AUTH_SOURCE=app but GITHUB_APP_ID is unset or empty -- the worker will refuse to boot\n {4}→ run `pi-dispatch setup github`/);
-	assert.match(text(), /✗ GITHUB_AUTH_SOURCE=app but GITHUB_APP_INSTALLATION_ID is unset or empty -- the worker will refuse to boot\n {4}→ run `pi-dispatch setup github`/);
-	assert.match(text(), /✗ GITHUB_AUTH_SOURCE=app but neither GITHUB_APP_PRIVATE_KEY_PATH nor GITHUB_APP_PRIVATE_KEY is set -- the worker will refuse to boot\n {4}→ run `pi-dispatch setup github`/);
+	assert.match(text(), /✗ GITHUB_AUTH_SOURCE=app but GITHUB_APP_ID is unset or empty -- the worker, the receiver and the poller refuse to start \(exit 2\)\n {4}→ run `pi-dispatch setup github`/);
+	assert.match(text(), /✗ GITHUB_AUTH_SOURCE=app but GITHUB_APP_INSTALLATION_ID is unset or empty -- the worker, the receiver and the poller refuse to start \(exit 2\)\n {4}→ run `pi-dispatch setup github`/);
+	assert.match(text(), /✗ GITHUB_AUTH_SOURCE=app but neither GITHUB_APP_PRIVATE_KEY_PATH nor GITHUB_APP_PRIVATE_KEY is set -- the worker, the receiver and the poller refuse to start \(exit 2\)\n {4}→ run `pi-dispatch setup github`/);
 	assert.match(text(), /run `pi-dispatch setup github`/, "the fix is the wizard that mints all three");
 });
 
@@ -1331,7 +1331,7 @@ test("doctor: a key path that points at nothing FAILS with the path, since the w
 	const missing = join(tmpdir(), "no-such-github-app.pem");
 	const code = await runDoctor(appEnv({ GITHUB_APP_ID: "4242", GITHUB_APP_INSTALLATION_ID: "987654", GITHUB_APP_PRIVATE_KEY_PATH: missing }), appDeps(out));
 	assert.equal(code, 1, "`loadGitHubAuth` refuses the boot on it (PR #466 gate round 1)");
-	assert.match(text(), new RegExp(`✗ GITHUB_APP_PRIVATE_KEY_PATH does not exist \\(${missing.replace(/[.\\/]/g, "\\$&")}\\) -- the worker will refuse to boot\\n {4}→ run \`pi-dispatch setup github\``));
+	assert.match(text(), new RegExp(`✗ GITHUB_APP_PRIVATE_KEY_PATH does not exist \\(${missing.replace(/[.\\/]/g, "\\$&")}\\) -- the worker, the receiver and the poller refuse to start \\(exit 2\\)\\n {4}→ run \`pi-dispatch setup github\``));
 });
 
 test("doctor: a group/world-readable PEM warns with the chmod fix", { skip: process.platform === "win32" ? "POSIX modes are synthetic on win32 (the check skips itself there)" : false }, async () => {
@@ -1373,14 +1373,15 @@ test("doctor: both key sources set FAILS, since the worker will refuse to boot",
 	const env = appEnv({ GITHUB_APP_ID: "4242", GITHUB_APP_INSTALLATION_ID: "987654", GITHUB_APP_PRIVATE_KEY: "-----BEGIN PRIVATE KEY-----x-----END PRIVATE KEY-----", GITHUB_APP_PRIVATE_KEY_PATH: appKeyFile() });
 	const code = await runDoctor(env, appDeps(out));
 	assert.equal(code, 1, "`loadGitHubAuth` refuses the boot on it, so doctor says ✗ (PR #466 gate round 1)");
-	assert.match(text(), /✗ GITHUB_APP_PRIVATE_KEY and GITHUB_APP_PRIVATE_KEY_PATH are both set -- the worker will refuse to boot\n {4}→ unset one of them/);
+	assert.match(text(), /✗ GITHUB_APP_PRIVATE_KEY and GITHUB_APP_PRIVATE_KEY_PATH are both set -- the worker, the receiver and the poller refuse to start \(exit 2\)\n {4}→ unset one of them/);
 });
 
 test("doctor: an inline value that is not a PEM warns, and its contents are never echoed", async () => {
 	const { out, text } = capture();
 	const code = await runDoctor(appEnv({ GITHUB_APP_ID: "4242", GITHUB_APP_INSTALLATION_ID: "987654", GITHUB_APP_PRIVATE_KEY: `junk ${KEY_BODY}` }), appDeps(out));
 	assert.equal(code, 0);
-	assert.match(text(), /⚠ GITHUB_APP_PRIVATE_KEY does not look like a PEM/);
+	// The whole line (issue #1001): every reader's loader refuses a key that is not a PEM, not the worker's alone.
+	assert.ok(text().includes('⚠ GITHUB_APP_PRIVATE_KEY does not look like a PEM (does not begin "-----BEGIN ...") -- the worker, the receiver and the poller refuse to start (exit 2); contents not shown\n'), text());
 	assert.doesNotMatch(text(), new RegExp(KEY_BODY), "not even a malformed key's bytes may reach output");
 });
 
@@ -1447,7 +1448,7 @@ test("doctor judges app auth on the service's .env where this shell sets none, n
 	writeFileSync(join(cwd, ".env"), "GITHUB_AUTH_SOURCE=app\nGITHUB_APP_ID=4242\n");
 	const bad = capture();
 	assert.equal(await runDoctor(imgEnv(), { ...scaffoldDeps(bad.out, cwd), readEnvFile }), 1);
-	assert.match(bad.text(), /✗ GITHUB_AUTH_SOURCE=app but GITHUB_APP_INSTALLATION_ID is unset or empty -- the worker will refuse to boot\n/);
+	assert.match(bad.text(), /✗ GITHUB_AUTH_SOURCE=app but GITHUB_APP_INSTALLATION_ID is unset or empty -- the worker, the receiver and the poller refuse to start \(exit 2\)\n/);
 	// This shell wins where it sets a key, and then the file's value is not read for it.
 	const own = capture();
 	await runDoctor(imgEnv({ GITHUB_AUTH_SOURCE: "pat", GITHUB_PAT: "ghp_fixture" }), { ...scaffoldDeps(own.out, cwd), readEnvFile });
@@ -1473,13 +1474,13 @@ test("the GitHub auth settings line hides only a proven-unset empty key, and an 
 	const idless = capture();
 	assert.equal(await runDoctor(imgEnv(), { ...scaffoldDeps(idless.out, cwd), readEnvFile }), 1);
 	assert.match(idless.text(), /: GITHUB_AUTH_SOURCE, GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID, GITHUB_APP_PRIVATE_KEY_PATH\n/);
-	assert.match(idless.text(), /✗ GITHUB_AUTH_SOURCE=app but GITHUB_APP_ID is unset or empty -- the worker will refuse to boot\n/);
+	assert.match(idless.text(), /✗ GITHUB_AUTH_SOURCE=app but GITHUB_APP_ID is unset or empty -- the worker, the receiver and the poller refuse to start \(exit 2\)\n/);
 	const note = `GITHUB_AUTH_SOURCE read from ${envPath}, as the service reads it; this shell does not set it`;
 	for (const [value, shown] of [["", '""'], ["bogus", '"bogus"'], [`ghp_${"x".repeat(36)}`, "an unrecognised value (40 characters, not shown)"]]) {
 		writeFileSync(envPath, `GITHUB_AUTH_SOURCE=${value}\n`);
 		const bad = capture();
 		assert.equal(await runDoctor(imgEnv(), { ...scaffoldDeps(bad.out, cwd), readEnvFile }), 1, `${shown}: both processes exit 2 on it`);
-		const want = `✗ GITHUB_AUTH_SOURCE is ${shown}, which is none of pat, gh or app: the worker and the receiver refuse to start on it (exit 2) -- ${note}`;
+		const want = `✗ GITHUB_AUTH_SOURCE is ${shown}, which is none of pat, gh or app: the worker, the receiver and the poller refuse to start on it (exit 2) -- ${note}`;
 		const lines = bad.text().split("\n");
 		const at = lines.indexOf(want);
 		assert.ok(at > 0, bad.text());
@@ -1492,7 +1493,7 @@ test("the GitHub auth settings line hides only a proven-unset empty key, and an 
 	writeFileSync(envPath, "");
 	const shell = capture();
 	assert.equal(await runDoctor(imgEnv({ GITHUB_AUTH_SOURCE: "token" }), scaffoldDeps(shell.out, cwd)), 1);
-	assert.match(shell.text(), /✗ GITHUB_AUTH_SOURCE is "token", which is none of pat, gh or app: the worker and the receiver refuse to start on it \(exit 2\)\n/);
+	assert.match(shell.text(), /✗ GITHUB_AUTH_SOURCE is "token", which is none of pat, gh or app: the worker, the receiver and the poller refuse to start on it \(exit 2\)\n/);
 });
 
 // Issue #481 (PR #485 review round 1): the PAT source's refusal, `requires a non-empty <var>`, which both processes make
@@ -1508,7 +1509,7 @@ test("GITHUB_AUTH_SOURCE=pat with no PAT, an empty or blank one, or an empty GIT
 		return { code, text: c.text() };
 	};
 	const fromFile = (key) => ` -- ${key} read from ${envPath}, as the service reads it; this shell does not set it`;
-	const refusal = "the worker and the receiver refuse to start (exit 2)";
+	const refusal = "the worker, the receiver and the poller refuse to start (exit 2)";
 	const unset = await run("GITHUB_AUTH_SOURCE=pat\n");
 	assert.equal(unset.code, 1);
 	assert.ok(unset.text.includes(`✗ GITHUB_AUTH_SOURCE=pat but GITHUB_PAT is unset: ${refusal}\n`), unset.text);
@@ -1570,7 +1571,7 @@ test("doctor trims GITHUB_APP_PRIVATE_KEY_PATH as loadGitHubAuth does: blank bes
 	assert.match(beside.text(), /✓ GitHub App private key supplied inline/);
 	const alone = capture();
 	assert.equal(await runDoctor(appEnv({ GITHUB_APP_ID: "4242", GITHUB_APP_INSTALLATION_ID: "987654", GITHUB_APP_PRIVATE_KEY_PATH: "   " }), appDeps(alone.out)), 1);
-	assert.match(alone.text(), /✗ GITHUB_AUTH_SOURCE=app but neither GITHUB_APP_PRIVATE_KEY_PATH nor GITHUB_APP_PRIVATE_KEY is set -- the worker will refuse to boot\n/);
+	assert.match(alone.text(), /✗ GITHUB_AUTH_SOURCE=app but neither GITHUB_APP_PRIVATE_KEY_PATH nor GITHUB_APP_PRIVATE_KEY is set -- the worker, the receiver and the poller refuse to start \(exit 2\)\n/);
 });
 
 test("doctor: the app-auth block only fires for source app", async () => {
@@ -1730,7 +1731,7 @@ test("a credential missing from shell and .env is a ⚠ naming the env-setup scr
 	const { GITHUB_PAT: _p, ...noPat } = seamEnv();
 	const pat = await run(noPat);
 	assert.equal(pat.code, 0, pat.text);
-	assert.ok(pat.text.includes(`⚠ GITHUB_AUTH_SOURCE=pat but GITHUB_PAT is unset: ${seen}\n    → if that script does not export GITHUB_PAT, the worker and the receiver refuse to start (exit 2): set GITHUB_PAT`), pat.text);
+	assert.ok(pat.text.includes(`⚠ GITHUB_AUTH_SOURCE=pat but GITHUB_PAT is unset: ${seen}\n    → if that script does not export GITHUB_PAT, the worker, the receiver and the poller refuse to start (exit 2): set GITHUB_PAT`), pat.text);
 	const app = await run(seamEnv({ GITHUB_AUTH_SOURCE: "app" }));
 	assert.equal(app.code, 0, app.text);
 	for (const subject of ["GITHUB_APP_ID is unset or empty", "GITHUB_APP_INSTALLATION_ID is unset or empty", "neither GITHUB_APP_PRIVATE_KEY_PATH nor GITHUB_APP_PRIVATE_KEY is set"]) {
@@ -1745,11 +1746,11 @@ test("a credential missing from shell and .env is a ⚠ naming the env-setup scr
 	const lost = installUnit({ platform: "linux", deployDir: gone, setup: join(gone, "nope.sh") });
 	const c = capture();
 	assert.equal(await runDoctor(noPat, seamDeps(c.out, { cwd: gone, home: lost.home })), 1);
-	assert.match(c.text(), /✗ GITHUB_AUTH_SOURCE=pat but GITHUB_PAT is unset: the worker and the receiver refuse to start \(exit 2\)\n/);
+	assert.match(c.text(), /✗ GITHUB_AUTH_SOURCE=pat but GITHUB_PAT is unset: the worker, the receiver and the poller refuse to start \(exit 2\)\n/);
 	// No script at all: the ✗ stands, and its fix line says an env-setup deployment may ignore it.
 	const none = capture();
 	assert.equal(await runDoctor(noPat, seamDeps(none.out)), 1);
-	assert.ok(none.text().includes("✗ GITHUB_AUTH_SOURCE=pat but GITHUB_PAT is unset: the worker and the receiver refuse to start (exit 2)\n    → set GITHUB_PAT to a fine-grained PAT in .env, or switch GITHUB_AUTH_SOURCE. A deployment whose service gets GITHUB_PAT from an --env-setup script (docs/secrets.md) can ignore this line; doctor found no service installed for this folder to read\n"), none.text());
+	assert.ok(none.text().includes("✗ GITHUB_AUTH_SOURCE=pat but GITHUB_PAT is unset: the worker, the receiver and the poller refuse to start (exit 2)\n    → set GITHUB_PAT to a fine-grained PAT in .env, or switch GITHUB_AUTH_SOURCE. A deployment whose service gets GITHUB_PAT from an --env-setup script (docs/secrets.md) can ignore this line; doctor found no service installed for this folder to read\n"), none.text());
 	const noKeyNone = capture();
 	assert.equal(await runDoctor(noKey, seamDeps(noKeyNone.out)), 1);
 	assert.match(noKeyNone.text(), /✗ Provider key set \(anthropic: [^\n]*\n {4}→ [^\n]*\. A deployment whose service gets one of [A-Za-z_ ]+ from an --env-setup script \(docs\/secrets\.md\) can ignore this line; doctor found no service installed for this folder to read\n/);
@@ -1764,7 +1765,7 @@ test("a credential ✗ is softened only by a usable script every installed servi
 	const { GITHUB_PAT: _p, ...noPat } = seamEnv();
 	const { ANTHROPIC_API_KEY: _k, ...noKey } = seamEnv({ PI_AUTH_FROM_PI: "0" });
 	const soft = /⚠ GITHUB_AUTH_SOURCE=pat but GITHUB_PAT is unset: not visible to doctor/;
-	const hard = /✗ GITHUB_AUTH_SOURCE=pat but GITHUB_PAT is unset: the worker and the receiver refuse to start \(exit 2\)\n/;
+	const hard = /✗ GITHUB_AUTH_SOURCE=pat but GITHUB_PAT is unset: the worker, the receiver and the poller refuse to start \(exit 2\)\n/;
 	const run = async (env, { platform = "linux", units = [], spawn } = {}) => {
 		const deployDir = tempDir("pi-deploy-");
 		const home = tempDir("pi-unit-home-");
@@ -3020,7 +3021,7 @@ test("doctor: a malformed RECEIVER_PORT is echoed by value and warned about; a s
 	// The port is not a secret, so echoing the malformed shape is what makes the warn actionable.
 	const { out, text } = capture();
 	await runDoctor(imgEnv({ PI_TRIGGERS_FILE: forgeTriggersFile("github"), RECEIVER_PORT: "http" }), imgDeps(out, green));
-	assert.match(text(), /⚠ RECEIVER_PORT is "http", which is not a positive integer -- the receiver will refuse to start/);
+	assert.match(text(), /⚠ RECEIVER_PORT is "http", which is not a positive integer -- the receiver and the poller will refuse to start/);
 
 	const { out: o2, text: t2 } = capture();
 	await runDoctor(imgEnv({ PI_TRIGGERS_FILE: forgeTriggersFile("github"), RECEIVER_PORT: "0" }), imgDeps(o2, green));
@@ -9923,9 +9924,8 @@ test("doctor.mjs reads no service key from this shell outside the resolver: ever
 		endpointsDeclaredIn: async (e) => (await import("../src/egress-cli.mjs")).endpointsDeclaredIn({ env: e, cwd: "/nonexistent-503", fs: { readFileSync: enoent, existsSync: () => false }, platform: "linux" }),
 		// Issue #918: the private endpoints' boot-file line reads the model endpoints' file as the service does.
 		endpointsFileSetting: async (e) => (await import("../src/egress-cli.mjs")).endpointsFileSetting({ env: e, cwd: "/nonexistent-918", readEnv: enoent, exists: () => false }),
-		// Issue #970: who refuses to start on a watch source's missing secret reads one key, WEBHOOK_SECRET, for the poller's
-		// stand-in. The source's own variable is the file's, resolved by name through `service.extra` before the line.
-		watchSecretRefusers: async (e) => (await import("../src/triggers-check.mjs")).watchSecretRefusers({ secretEnv: "WEBHOOK_SECRET" }, e, { collects: true }),
+		// Issue #1001: who refuses to start where serve needs WEBHOOK_SECRET reads that one key, for the poller's stand-in.
+		webhookSecretRefusers: async (e) => (await import("../src/triggers-check.mjs")).webhookSecretRefusers(e, { collects: true }),
 	};
 	assert.deepEqual([...handedEnv].filter((n) => !Object.hasOwn(probes, n)).sort(), [], "every imported helper doctor hands env to is probed here");
 	const probedReads = {};

@@ -45,6 +45,8 @@ export async function pollWatchSources({ cfg, redis, store, enqueue, adapterFact
 
 export async function startWatchPuller(env = process.env, deps = {}) {
 	const { now = () => Date.now(), signals = true, out = value => process.stdout.write(`${JSON.stringify(value)}\n`), loadConfig = loadReceiverConfig, reload = reloadTriggers, adapterFactory = makeWatchPullAdapter } = deps;
+	// Loaded without `verifiesWatchPushes` (issue #994): the collector pulls and reads no source's push secret, so an unset
+	// one refuses neither this start nor a reload below; `serve`, which verifies pushes with it, refuses it.
 	const cfg = loadConfig(env);
 	if (!Object.values(cfg.triggers?.watchSources ?? {}).some(source => source.pull)) throw configError("watch: no pull sources configured");
 	const ownedRedis = !deps.redis; const ownedQueue = !deps.enqueue;

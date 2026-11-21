@@ -127,13 +127,14 @@ Add a `pull` block to a source. These are three alternative blocks:
 ```
 
 Fields and matching are operator-authored. The interval is 5 to 3600 seconds. Loki requires HTTPS, refuses redirects,
-and keeps its optional read credential on the collector host. The source still declares `verify` and `secretEnv`, and
-that signing secret must be set where the pull command runs too: `pi-dispatch-receiver serve`, `poll` and `watch` all
-load the file the same way and refuse to start while a declared source's secret is unset or blank, and a live edit that
-adds such a source leaves them on the rules they run. `pi-dispatch triggers check` says so before you swap the file in
-([triggers.md](triggers.md#check-a-file-before-you-swap-it-in)). Doctor warns when a declared signing secret is unset or
-blank, naming which of them refuse to start, or a Loki credential is absent, and prints key names only. All samples
-are replaced with `[redacted]` by default on the host, for push and pull, before private evidence is persisted.
+and keeps its optional read credential on the collector host. The source still declares `verify` and `secretEnv`, but
+the pull command never reads that signing secret, and neither does `poll`: only `pi-dispatch-receiver serve`, which
+verifies pushes with it, refuses to start while a declared source's secret is unset or blank, and a live edit that adds
+such a source leaves `serve` on the rules it runs. `watch` and `poll` start and take the file either way. `pi-dispatch
+triggers check` says so before you swap the file in ([triggers.md](triggers.md#check-a-file-before-you-swap-it-in)).
+Doctor warns when a declared signing secret is unset or blank, naming `serve` as the one that refuses to start, or a
+Loki credential is absent, and prints key names only. All samples are replaced with `[redacted]` by default on the
+host, for push and pull, before private evidence is persisted.
 
 A file source requires an absolute regular-file path, refuses symlinks, and reads complete lines with an inode/offset
 cursor. Journald uses the named unit and a journal cursor, starting one minute before the initial poll. Loki uses a

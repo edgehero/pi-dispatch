@@ -75,8 +75,8 @@ function secretMarks(names, { env, envPath, file }) {
 	const unread = [...read.unread.map((u) => u.key), ...read.hazardSkipped];
 	if (unread.length > 0) return { problem: `${envPath} has a line for ${listed(unread)} that the service's loader may read differently, so whether ${unread.length === 1 ? "it is" : "they are"} set cannot be told (pi-dispatch doctor names the line)` };
 	// Set in this shell and absent from the .env (issue #970): a service reading the .env runs without it, so judging this
-	// shell's value would pass a file the poller and the receiver refuse at their start. Empty here and absent there are
-	// both unset to every reader, and are judged so.
+	// shell's value would pass a file the services refuse at their start. Empty here and absent there are both unset to
+	// every reader, and are judged so.
 	const shellOnly = read.shellOnly.filter((k) => presenceMark(env[k]) !== "");
 	if (shellOnly.length > 0) return { problem: `${listed(shellOnly)} ${shellOnly.length === 1 ? "is" : "are"} set in this shell and not in ${envPath} (no value is shown), and the services read the .env, so whether ${shellOnly.length === 1 ? "it is" : "they are"} set for them cannot be told: add ${shellOnly.length === 1 ? "it" : "them"} to the .env, or unset ${shellOnly.length === 1 ? "it" : "them"} in this shell` };
 	// Two values that are both set are no business of this command's: presence is all it judges.
@@ -99,8 +99,13 @@ function countsText({ triggers, cron, forge, watch }) {
  * `path` and `text` beside it where the file was read and only judging it failed. Shared with `pi-dispatch status`
  * (issue #970), which judges the deployment's file this way to say why a poller keeps an older copy, and compares the
  * text's digest with the copy the poller refused even where this shell cannot judge it.
+ *
+ * `secrets`, when given, limits the secrets resolved from this shell and the `.env` to those names; any other the check
+ * asks about is judged unset and never resolved, so a disagreement on it cannot leave the file unjudged. `triggers
+ * check` resolves every one. `status` passes the only one a poller's start judges (issue #994: a watch source's secret
+ * is `serve`'s alone), and keeps only refusals that name the poller, so an unset one adds nothing it reads.
  */
-export async function judgeDeploymentTriggers({ file = undefined, env = process.env, cwd = process.cwd(), platform = process.platform, readEnv = (p) => readFileSync(p), readText = (p) => readFileSync(p, "utf8"), existsSync = fsExistsSync, now = Date.now, check = checkTriggersText } = {}) {
+export async function judgeDeploymentTriggers({ file = undefined, env = process.env, cwd = process.cwd(), platform = process.platform, readEnv = (p) => readFileSync(p), readText = (p) => readFileSync(p, "utf8"), existsSync = fsExistsSync, now = Date.now, check = checkTriggersText, secrets: only = null } = {}) {
 	// One read of the deployment `.env` for both halves, so the two cannot be judged from two different files.
 	const envPath = join(cwd, ".env");
 	let envRead;
@@ -155,7 +160,8 @@ export async function judgeDeploymentTriggers({ file = undefined, env = process.
 	}
 
 	const judged = Object.fromEntries(TRIGGERS_CHECK_ENV_KEYS.filter((k) => typeof serviceEnv[k] === "string").map((k) => [k, serviceEnv[k]]));
-	const secrets = secretMarks(triggersCheckSecrets(text, path, judged), { env, envPath, file: envFile });
+	const asked = triggersCheckSecrets(text, path, judged);
+	const secrets = secretMarks(only === null ? asked : asked.filter((name) => only.includes(name)), { env, envPath, file: envFile });
 	if (secrets.problem) return { path, text, problem: secrets.problem };
 	return { path, text, result: check(text, path, { env: { ...judged, ...secrets.env }, existsSync, cwd, now, currentCollects }) };
 }

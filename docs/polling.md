@@ -211,8 +211,9 @@ Deleting it changes nothing about polling: the next beat writes it again.
 - `hosts` has one heartbeat per running poller: `triggers` is `current`, or `kept` when it refused the file and runs on
   the last copy that loaded, `nextAt` when its next cycle starts, and `ageMs` how long ago it beat.
 - `note` says what needs saying. The poller keeps the previous file because the current one is invalid: the reason is
-  the one `pi-dispatch triggers check` gives for the file in this folder, when that is the file the poller refused (the
-  heartbeat carries the file's digest, not its reason). The file it refused is another copy: run the check where the
+  the one `pi-dispatch triggers check` gives the poller for the file in this folder, when that is the file the poller
+  refused (the heartbeat carries the file's digest, not its reason). A watch source's secret is not asked for it, since
+  only `serve` reads one. The file it refused is another copy: run the check where the
   poller runs. `expected` is `true` and no poller has published a heartbeat: none runs, or it is older than this
   release, which publishes none; when this folder's file is invalid, the note adds the reason a poller would refuse to start on it.
 - `complete: false` means the heartbeats could not all be read, and an empty `hosts` then proves nothing. `local` says
@@ -269,7 +270,9 @@ nothing but the poller's own log says polling stopped. `pi-dispatch service` ins
 service is one you set up yourself, and its restart after an upgrade or a reboot is when this happens. Check each edit
 before you move it into place ([Check a file before you swap it in](triggers.md#check-a-file-before-you-swap-it-in)):
 `pi-dispatch triggers check` names the poller when it would refuse the file. Afterwards `pi-dispatch status` says when
-no poller has published a heartbeat, and why a poller would refuse the file ([Is it running](#is-it-running)).
+no poller has published a heartbeat, and why a poller would refuse the file ([Is it running](#is-it-running)). A watch
+source whose push secret (its `secretEnv`) is unset is not such an edit: only `serve`, which verifies pushes with it,
+refuses it, and the poller starts on the file and takes it live (earlier releases refused it at the poller's start).
 
 ## Moving to webhooks later
 
@@ -313,6 +316,7 @@ whose webhook job was queued more than ten minutes before, or whose run has park
 `WEBHOOK_SECRET`, `RECEIVER_PORT` and `RECEIVER_BIND` are `serve` concerns and `poll` uses none of
 them, but it does load them, because it reuses the receiver's loader rather than forking it. A
 malformed `WEBHOOK_SECRET` (unless `GITHUB_INGEST=poll`) or `RECEIVER_PORT` therefore refuses a `poll` boot with
-that loader's own message. `RECEIVER_BIND` is taken verbatim and validated by nothing, so there is no malformed value of
-it to refuse. Everything in [`docs/secrets.md`](secrets.md) about the receiver applies here unchanged:
-the poller holds the same forge credential and the same queue URL.
+that loader's own message. A watch source's push secret is a `serve` concern the loader does not judge for `poll` at
+all, so an unset one never refuses it. `RECEIVER_BIND` is taken verbatim and validated by nothing, so there is no
+malformed value of it to refuse. Everything in [`docs/secrets.md`](secrets.md) about the receiver applies here
+unchanged: the poller holds the same forge credential and the same queue URL.
