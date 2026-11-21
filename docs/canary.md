@@ -51,7 +51,11 @@ Deployments with an allocation envelope, scoped limits, scoped pause windows, ho
 refused before spending, because this command does not implement their admission rules. A paused
 deployment refuses new experiments; a pause noticed during a replay stops its container. Each replay
 also has a thirty-minute timeout. Failed cleanup names the remaining Docker resources and fails the
-command so the operator can remove them before another experiment.
+command so the operator can remove them before another experiment. The proxy carries the label
+`pi.dispatch.helper=canary-proxy` and is removed whenever the command tried to start it, including a start the
+daemon did not answer in time, since a slow daemon can still create it afterwards. If the daemon creates it only after
+that removal, nothing removes it later: `docker ps -a --filter label=pi.dispatch.helper=canary-proxy` lists it, and
+`docker rm -f` removes it.
 
 The command takes a renewable deployment lease before checking that every shared and host queue has
 zero active jobs. Ordinary workers defer new starts while this lease is held, so the experiment cannot

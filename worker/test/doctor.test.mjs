@@ -18,7 +18,7 @@ import { VALKEY_SHARED_KEY as VALKEY_SHARED_NAME } from "../src/podman-stack.mjs
 import { EMPTY_PAUSE_WINDOWS, EMPTY_SCOPED_LIMITS, runInit } from "../src/init.mjs";
 import { ignoredOutputCapModels } from "../src/output-cap.mjs";
 import { EMPTY_MODEL_ENDPOINTS, MODEL_ENDPOINT_ID_RE, loadModelEndpoints, parseModelEndpoints, renderEndpointsInclude, unreportedUsageModels } from "../src/model-endpoints.mjs";
-import { EGRESS_CANARY_NET_PREFIX, egressCanaryProbe, egressEndpointProbe } from "../src/egress.mjs";
+import { EGRESS_CANARY_NET_PREFIX, EGRESS_CANARY_PROBE_PREFIX, egressCanaryProbe, egressEndpointProbe } from "../src/egress.mjs";
 import { LIVE_PREFIX, egressVerdict } from "../src/live-probes.mjs";
 import { JOB_USER_FIX, parseDaemonFacts } from "../src/job-user.mjs";
 import { OBSERVATION_FIX } from "../src/backends.mjs";
@@ -187,6 +187,9 @@ const EGRESS_OK = {
 	// because plans that build on EGRESS_OK without `green` would otherwise read an unresolved endpoint.
 	"docker context inspect": { code: 0, output: '"desktop-linux"|"unix:///Users/x/.docker/run/docker.sock"\n' },
 	[PROXY_KEY]: proxyAnswer("healthy", "running"),
+	// Issue #978: the leftover sweep's probe listing and the gh probe step's, answered as a host with no leftover answers.
+	"docker ps -a --filter name=pi-dispatch-egress-probe-": { code: 0, output: "" },
+	"docker ps -a --filter name=pi-dispatch-gh-probe-": { code: 0, output: "" },
 	"docker network": 0,
 	"docker run --rm --name pi-dispatch-egress-probe-provider": 0,
 	"docker run --rm --name pi-dispatch-egress-probe-unlisted": 3,
@@ -1196,7 +1199,8 @@ test("doctor: the in-image probe passes the token on stdin, never in argv or any
 	// Exact (issue #433 review round 1): the podman venue's pins ride only the podman probe; docker's CLI has no
 	// containers.conf defaults to pin, and a podman-only flag here would make docker refuse the probe.
 	const script = run.args[run.args.indexOf("-c") + 1];
-	assert.deepEqual(run.args, ["run", "--rm", "-i", "--pull=never", "--entrypoint", "sh", "pi-job:latest", "-c", script, "sh", "gh", "auth", "status"]);
+	// Issue #978: named for this doctor's pid and labelled, so a probe that did not finish can be removed by name.
+	assert.deepEqual(run.args, ["run", "--rm", "-i", "--name", `pi-dispatch-gh-probe-${process.pid}`, "--label", "pi.dispatch.helper=gh-probe", "--pull=never", "--entrypoint", "sh", "pi-job:latest", "-c", script, "sh", "gh", "auth", "status"]);
 	// Issue #521: no `-e` and no `--env-file` at all. Either one puts the value in the container create request, which
 	// Docker Desktop's backend log writes to disk in plain text (measured: two copies per doctor run with `-e`).
 	assert.ok(!run.args.some((a) => a === "-e" || a === "--env" || a.startsWith("--env=") || a.startsWith("--env-file")), "no environment flag");
@@ -1210,6 +1214,90 @@ test("doctor: the in-image probe passes the token on stdin, never in argv or any
 	assert.equal(run.opts.env.GITHUB_TOKEN, undefined);
 	assert.match(text(), /✓ gh authenticates inside the job image \(pi-job:latest\)/);
 	assert.doesNotMatch(text(), /gho_fake_mint_123/, "the token never reaches output");
+});
+
+// Issue #978: `--rm` acts only when a container exits, so a probe whose CLI the bound killed between create and start
+// stayed `created` for good. A probe that did not finish is removed by its name, once, bounded, through the probe's own
+// CLI and environment, so the rm reaches the daemon the probe went to.
+test("doctor: an in-image probe that did not finish is removed by name, once, and one that will not go is said (#978)", async () => {
+	const name = "pi-dispatch-gh-probe-4321";
+	const answers = (probe, removal) => ({ ...green, "gh auth status": { code: 0, output: ghStatusOutput }, "gh auth token": { code: 0, output: "gho_x\n" }, "docker run --rm -i": probe, "docker rm -f pi-dispatch-gh-probe-": removal });
+	const calls = [];
+	const cut = capture();
+	await runDoctor(ghEnv(), ghDeps(cut.out, answers({ code: null, output: "" }, 0), calls, { pid: 4321 }));
+	const probe = calls.find((c) => c.cmd === "docker" && c.args[0] === "run" && c.args.includes("gh"));
+	assert.equal(probe.args[probe.args.indexOf("--name") + 1], name, "named for this doctor's pid");
+	const removals = calls.filter((c) => c.args[0] === "rm");
+	assert.deepEqual(removals.map((c) => [c.cmd, ...c.args].join(" ")), [`docker rm -f ${name}`], "one rm, by name");
+	assert.equal(removals[0].opts.env, probe.opts.env, "through the probe's own CLI environment");
+	assert.equal(calls.indexOf(removals[0]), calls.indexOf(probe) + 1, "right after the probe, before anything else");
+	assert.doesNotMatch(cut.text(), /did not finish and could not be removed/);
+	// One that will not go is a warning naming the command, beside the probe's own line.
+	const stuck = capture();
+	await runDoctor(ghEnv(), ghDeps(stuck.out, answers({ code: null, output: "" }, 1), [], { pid: 4321 }));
+	assert.match(stuck.text(), new RegExp(`⚠ gh cannot authenticate inside the job image \\(pi-job:latest\\)\n.*\n⚠ in-image gh auth: the probe ${name} did not finish and could not be removed: docker rm -f ${name}\n {4}→ run that command once the daemon answers again\n`));
+	// A probe that answered, whatever it answered, was removed by `--rm`: nothing to remove.
+	for (const answered of [0, 1, 127]) {
+		const seen = [];
+		await runDoctor(ghEnv(), ghDeps(() => {}, answers(answered, 0), seen, { pid: 4321 }));
+		assert.deepEqual(seen.filter((c) => c.args[0] === "rm"), [], `exit ${answered}`);
+	}
+});
+
+// Issue #978: the module that makes an object sweeps it. The gh probe's leftovers are swept by its own step, right before
+// it probes, wherever the probe itself may run: with the egress policy off, on the podman venue without `--live` (the
+// worker's own doctor runs never pass it), after a canary network listing that failed, and with no token to probe with.
+test("doctor: the gh probe's step sweeps its own dead or reused-pid leftovers before it probes, egress or not, podman or not (#978)", async () => {
+	const GH_LIST = "docker ps -a --filter name=pi-dispatch-gh-probe-";
+	const left = (names) => ({ code: 0, output: names.map((n) => `${n}\tcreated\n`).join("") });
+	const line = (who) => `✓ in-image gh auth: removed ${who}, left by an EARLIER doctor run`;
+	// The policy off, a dead doctor's probe and one an earlier process under OUR pid left (a reused number): both go, and
+	// before this run's own probe, whose `run --name` that leftover would otherwise fail with exit 125.
+	const off = [];
+	const offOut = capture();
+	// And a live doctor's (pid 5555, alive by the seam): the liveness doctor was handed decides, so it stays.
+	await runDoctor(ghEnv({ PI_EGRESS: "0" }), ghDeps(offOut.out, { ...green, [GH_LIST]: left(["pi-dispatch-gh-probe-4242", "pi-dispatch-gh-probe-5555", "pi-dispatch-gh-probe-7"]), "docker rm pi-dispatch-gh-probe-": 0, "gh auth status": { code: 0, output: ghStatusOutput }, "gh auth token": { code: 0, output: "gho_x\n" }, "docker run --rm -i": 0 }, off, { pid: 7, isAlive: (p) => p === 7 || p === 5555 }));
+	const offLines = off.map((c) => [c.cmd, ...c.args].join(" "));
+	assert.ok(!offLines.some((l) => l.includes("rm") && l.includes("pi-dispatch-gh-probe-5555")), "a live doctor's probe is not ours to remove");
+	assert.ok(!offLines.some((l) => l.includes("pi-dispatch-egress-")), "with the policy off no canary object is touched");
+	const removedAt = offLines.indexOf("docker rm pi-dispatch-gh-probe-7");
+	assert.ok(offLines.includes("docker rm pi-dispatch-gh-probe-4242"), offLines.join("\n"));
+	assert.ok(removedAt >= 0 && removedAt < offLines.findIndex((l) => l.startsWith("docker run --rm -i --name pi-dispatch-gh-probe-7 ")), "the reused name is gone before the probe asks for it");
+	assert.equal(off.find((c) => c.args.join(" ").startsWith("ps -a --filter name=pi-dispatch-gh-probe-")).opts.env.PI_EGRESS, "0", "through the probe's own CLI environment");
+	assert.match(offOut.text(), new RegExp(line("pi-dispatch-gh-probe-4242, pi-dispatch-gh-probe-7")));
+	// No token at all (a PAT source with no PAT in this shell): the probe does not run, its leftovers still go.
+	const none = [];
+	const noneOut = capture();
+	await runDoctor(ghEnv({ PI_EGRESS: "0", GITHUB_AUTH_SOURCE: "pat" }), ghDeps(noneOut.out, { ...green, [GH_LIST]: left(["pi-dispatch-gh-probe-4242"]), "docker rm pi-dispatch-gh-probe-": 0 }, none, { pid: 7, isAlive: () => false }));
+	assert.ok(none.some((c) => c.args.join(" ") === "rm pi-dispatch-gh-probe-4242"));
+	assert.ok(!none.some((c) => c.args[0] === "run"), "no probe without a token");
+	assert.match(noneOut.text(), new RegExp(line("pi-dispatch-gh-probe-4242")));
+	// The canary's network listing failed (a slow daemon): its sweep stops there, the gh probe's step does not.
+	const slow = [];
+	const slowOut = capture();
+	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(slowOut.out, { "docker network ls --filter name=pi-dispatch-egress-doctor-": { code: null, output: "" }, ...green, [GH_LIST]: left(["pi-dispatch-gh-probe-4242"]), "docker rm pi-dispatch-gh-probe-": 0, "gh auth status": { code: 0, output: ghStatusOutput } }, slow, { pid: 7, isAlive: () => false }));
+	assert.match(slowOut.text(), /⚠ Egress canary: leftovers from an EARLIER doctor run could not be listed/);
+	assert.ok(slow.some((c) => c.args.join(" ") === "rm pi-dispatch-gh-probe-4242"));
+	assert.match(slowOut.text(), new RegExp(line("pi-dispatch-gh-probe-4242")));
+	// Our own name held by a leftover that would not go: the probe is not run (its exit 125 would read as an auth failure),
+	// and that is said, with the command, instead of "gh cannot authenticate".
+	const held = [];
+	const heldOut = capture();
+	await runDoctor(ghEnv({ PI_EGRESS: "0" }), ghDeps(heldOut.out, { ...green, [GH_LIST]: left(["pi-dispatch-gh-probe-7"]), "docker rm pi-dispatch-gh-probe-7": { code: 1, output: "", stderr: "Error response from daemon: removal of container pi-dispatch-gh-probe-7 is already in progress" }, "gh auth status": { code: 0, output: ghStatusOutput }, "gh auth token": { code: 0, output: "gho_x\n" }, "docker run --rm -i": 125 }, held, { pid: 7, isAlive: (p) => p === 7 }));
+	assert.ok(!held.some((c) => c.args[0] === "run"), "no probe under a name that is held");
+	assert.match(heldOut.text(), /⚠ in-image gh auth: not checked, because pi-dispatch-gh-probe-7, the name this run's probe needs, is still there and could not be removed\n {4}→ remove it \(`docker rm -f pi-dispatch-gh-probe-7`\), then re-run doctor to check gh inside the job image\n/);
+	assert.doesNotMatch(heldOut.text(), /gh cannot authenticate|check network egress/);
+	// A docker CLI not observed on this host: nothing is listed there, as the probe is not run there.
+	const remote = [];
+	await runDoctor(ghEnv({ PI_EGRESS: "0" }), ghDeps(() => {}, { ...green, "docker context inspect": { code: 0, output: '"remote"|"tcp://build.example.invalid:2376"\n' }, [GH_LIST]: left(["pi-dispatch-gh-probe-4242"]), "gh auth status": { code: 0, output: ghStatusOutput } }, remote, { pid: 7, isAlive: () => false }));
+	assert.ok(!remote.some((c) => c.args[0] === "ps" || c.args[0] === "rm"), remote.map((c) => c.args.join(" ")).join("\n"));
+	// The podman venue on a plain run (no --live), where the canary and its sweep never run.
+	const { docker: _d, ...podmanOnly } = podmanPlan();
+	const pod = [];
+	const podOut = capture();
+	await runDoctor(podmanEnv({ GITHUB_AUTH_SOURCE: "gh" }), podmanDeps(podOut.out, { ...podmanOnly, ...green, "podman ps -a --filter name=pi-dispatch-gh-probe-": left(["pi-dispatch-gh-probe-4242"]), "podman rm pi-dispatch-gh-probe-": 0, "gh auth status": { code: 0, output: ghStatusOutput }, "gh auth token": { code: 0, output: "gho_x\n" }, "podman run": 0 }, pod, { pid: 7, isAlive: () => false }));
+	assert.ok(pod.some((c) => c.cmd === "podman" && c.args.join(" ") === "rm pi-dispatch-gh-probe-4242"), pod.map((c) => [c.cmd, ...c.args].join(" ")).join("\n"));
+	assert.match(podOut.text(), /✓ podman: in-image gh auth: removed pi-dispatch-gh-probe-4242, left by an EARLIER doctor run/);
 });
 
 // The probe's script, run by a real `sh` (issue #521). Not docker: the question is what the script does with one line of
@@ -7515,6 +7603,7 @@ const canaryPlan = (extra, seams = {}) => [
 ];
 const NET = "pi-dispatch-egress-doctor-4242";
 const LS = "docker network ls --filter name=pi-dispatch-egress-doctor-";
+const PS = "docker ps -a --filter name=pi-dispatch-egress-probe-";
 // The measured answer of the real docker CLI on a rootless Podman 4.9.3 API socket (round 446): Docker's shape, Podman's
 // licence, `name=rootless`.
 const PODMAN49_COMPAT_INFO = JSON.stringify({ ServerVersion: "4.9.3", ProductLicense: "Apache-2.0", OperatingSystem: "ubuntu", SecurityOptions: ["name=apparmor", "name=seccomp,profile=default", "name=rootless"] });
@@ -7568,6 +7657,12 @@ const CANARY_PLANS = [
 	// foreign: a leftover on a daemon this shell cannot show is on this host. The endpoint comes from the
 	// plan, because that is where doctor reads it from -- a seam would be a different code path.
 	() => canaryPlan({ [LS]: { code: 0, output: `${NET}\n` }, "docker context inspect": { code: 0, output: '"remote"|"tcp://build.example.invalid:2376"\n' } }),
+	// Issue #978, probesUnlisted: the probe listing itself fails.
+	() => canaryPlan({ [PS]: { code: 1, output: "", stderr: "Cannot connect to the Docker daemon" } }),
+	// probesRemoved: a dead run's probe left `created` with no network, as a slow daemon leaves one, removed by name.
+	() => canaryPlan({ [PS]: { code: 0, output: "pi-dispatch-egress-probe-provider-4242\tcreated\n" }, "docker rm pi-dispatch-egress-probe-provider-4242": { code: 0, output: "pi-dispatch-egress-probe-provider-4242\n" } }),
+	// probesStuck: a dead run's stopped probe that will not go.
+	() => canaryPlan({ [PS]: { code: 0, output: "pi-dispatch-egress-probe-unlisted-4242\texited\n" }, "docker rm pi-dispatch-egress-probe-unlisted-4242": { code: 1, output: "", stderr: "Error response from daemon: removal of container pi-dispatch-egress-probe-unlisted-4242 is already in progress" } }),
 ];
 
 // THE PAGE IS GENERATED FROM THE TABLE, and the sweep is driven to prove the table is what it prints.
@@ -7648,6 +7743,9 @@ test("docs/egress.md's canary rows ARE the table, generated (#379)", () => {
 		gone: { name: "<net>", did: "removed <probes> and detached <endpoints>" },
 		notRemoved: { name: "<net>", command: null },
 		held: { name: "<net>", because: "<why>" },
+		probesUnlisted: { prefixes: [EGRESS_CANARY_PROBE_PREFIX] },
+		probesRemoved: { names: ["<probes>"] },
+		probesStuck: { names: ["<probe>"] },
 	};
 	assert.deepEqual(Object.keys(placeholders), Object.keys(CANARY_LINES), "a shape with no placeholder row is a shape the page cannot describe");
 	const expected = Object.entries(CANARY_LINES).map(([shape, spec]) => {
@@ -7868,7 +7966,7 @@ test("the canary teardown NAMES a probe it could not remove, in the same run (#3
 	// a run where nothing was ever stuck.
 	const { out, text } = capture();
 	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, canaryFixture({ "docker run --rm --name pi-dispatch-egress-probe-provider": { code: null, output: "" }, "docker rm -f": 1 }), []));
-	assert.match(text(), /Egress canary: .* is kept, because the probe pi-dispatch-egress-probe-provider-\d+ could not be removed/, "the probe that would not go is named now, not next run");
+	assert.match(text(), /Egress canary: .* is kept, because the probe pi-dispatch-egress-probe-provider-\d+ on it could not be removed/, "the probe that would not go is named now, not next run");
 });
 
 test("doctor: a canary network that was never CREATED gets no teardown line (#350)", async () => {
@@ -7977,9 +8075,9 @@ test("doctor: a probe the sweep could NOT remove is never reported as removed (#
 	};
 	await runDoctor(ghEnv({ PI_EGRESS: "1" }), ghDeps(out, plan, calls, { isAlive: () => false, pid: 1 }));
 	assert.doesNotMatch(text(), /after removing pi-dispatch-egress-probe-unlisted-4242/, "it did not go, so it is not claimed");
-	assert.match(text(), /⚠ Egress canary: pi-dispatch-egress-doctor-4242 is kept, because the probe pi-dispatch-egress-probe-unlisted-4242 could not be removed and the network is the only way left to find it: docker rm -f pi-dispatch-egress-probe-unlisted-4242/);
-	// The network is the ONLY handle: nothing in this project enumerates probe containers, so removing it
-	// would orphan a running container permanently, and detaching it first is no better.
+	assert.match(text(), /⚠ Egress canary: pi-dispatch-egress-doctor-4242 is kept, because the probe pi-dispatch-egress-probe-unlisted-4242 on it could not be removed: docker rm -f pi-dispatch-egress-probe-unlisted-4242/);
+	// A running probe on the network holds it on both runtimes, so removing it would only fail beside the probe, and
+	// detaching it first would leave a running container on nothing. The next doctor finds the probe by name (issue #978).
 	assert.ok(!calls.some((c) => c.args.slice(0, 2).join(" ") === "network rm" && c.args.at(-1) === "pi-dispatch-egress-doctor-4242"), "the network is not removed");
 	assert.ok(!calls.some((c) => c.args.slice(0, 2).join(" ") === "network disconnect" && c.args.at(-1) === "pi-dispatch-egress-probe-unlisted-4242"), "nor is the probe cut loose from it");
 });
@@ -8733,7 +8831,9 @@ test("doctor's two docker runners spawn the bin they are given, and docker when 
 	// literal matcher above cannot see it; it is pinned by its own shape, exactly once.
 	assert.equal([...doctorSource.matchAll(/runCmd(?:Capture)?\(\w*[sS]pawn, "podman", \["inspect", NETNS_KEEPER_FORMAT, NETNS_KEEPER\]/g)].length, 1);
 	const chosen = [...doctorSource.matchAll(/runCmd(?:Capture)?\(\w*[sS]pawn, ([a-z]\w*Bin)\b/g)].map((m) => m[1]);
-	assert.deepEqual(chosen, ["ghProbeBin"]);
+	// Issue #978: the listing of the probe's own leftovers, the probe, and its one bounded removal by name when it did not
+	// finish, all on the same runtime.
+	assert.deepEqual(chosen, ["ghProbeBin", "ghProbeBin", "ghProbeBin"]);
 });
 
 // --- issue #354 part 2: the podman venue ------------------------------------------------------------------------------
@@ -8764,6 +8864,8 @@ const KEEPER_STARTED = 1_000_000;
 const PROXY_STARTED = 2_000_000;
 const podmanPlan = ({ info = PODMAN_INFO(), capabilities = "anyUid", image = true, proxy = "running", keeper = "running", proxyStarted = PROXY_STARTED, keeperNet = "true false" } = {}) => ({
 	"podman info": { code: 0, output: `${info}\n` },
+	// Issue #978: the gh probe step's listing of its own leftovers, answered as a host with none answers it.
+	"podman ps -a --filter name=pi-dispatch-gh-probe-": { code: 0, output: "" },
 	"podman image inspect --format={{.Id}}": image ? { code: 0, output: `abc|0.80.7||${capabilities}\n` } : { code: 125, output: "" },
 	// Issue #458: the rootless network keeper's state, network mode, networks and start, read beside the proxy's whenever
 	// egress is armed. BEFORE the proxy's key: its format begins with the proxy's `--format={{.State.Status}}`, and the fake
@@ -9615,7 +9717,7 @@ test("a podman-only deployment on a host that also has docker: docker is not ask
 	assert.equal(probes.length, 1, "one probe");
 	// Review round 1: with the podman venue's pins, written out rather than imported, so a probe that drops one fails here.
 	// Without `--env-host=false` an account's `env_host = true` would copy doctor's whole environment into the container.
-	assert.deepEqual(probes[0].args, ["run", "--rm", "-i", "--pull=never", "--pid=private", "--ipc=private", "--uts=private", "--cgroupns=private", "--env-host=false", "--http-proxy=false", "--entrypoint", "sh", "pi-job:latest", "-c", probes[0].args[probes[0].args.indexOf("-c") + 1], "sh", "gh", "auth", "status"]);
+	assert.deepEqual(probes[0].args, ["run", "--rm", "-i", "--name", `pi-dispatch-gh-probe-${process.pid}`, "--label", "pi.dispatch.helper=gh-probe", "--pull=never", "--pid=private", "--ipc=private", "--uts=private", "--cgroupns=private", "--env-host=false", "--http-proxy=false", "--entrypoint", "sh", "pi-job:latest", "-c", probes[0].args[probes[0].args.indexOf("-c") + 1], "sh", "gh", "auth", "status"]);
 	// Issue #521: on stdin here too, and in no environment (the pins keep doctor's own out; the token is not in it).
 	assert.equal(probes[0].stdin, "gho_x\n");
 	assert.equal(probes[0].opts?.env?.GH_TOKEN, undefined);
@@ -9853,7 +9955,11 @@ test("doctor.mjs reads no service key from this shell outside the resolver: ever
 		/^const spawnEnv = seams\.spawnEnv \?\? shellVars;$/,
 		/^const shellValue = \(name\) => \(Object\.hasOwn\(spawnEnv, name\) \? spawnEnv\[name\] : undefined\);$/,
 		/^const \{ cwd, spawn, probeValkey, readHosts = defaultReadHosts, fileExists, nodeVersion, platform, agentDir = agentDirFrom\(spawnEnv\), readHostPiFn = readHostPi, /,
-		/^const probe = await runCmdCapture\(spawn, ghProbeBin, ghProbeArgs\(jobImage, ghProbeBin\), \{ env: spawnEnv, input: `\$\{token\}\\n` \}\);$/,
+		// Issue #978: the gh probe step's listing of its own leftovers, through the probe's CLI environment.
+		/^const answer = await runCmdCapture\(spawn, ghProbeBin, args, \{ env: spawnEnv, stdoutOnly: true, timeoutMs: CANARY_STEP_TIMEOUT_MS \}\);$/,
+		/^const probe = await runCmdCapture\(spawn, ghProbeBin, ghProbeArgs\(jobImage, ghProbeBin, ghProbeName\), \{ env: spawnEnv, input: `\$\{token\}\\n` \}\);$/,
+		// Issue #978: the probe's one removal by name when it did not finish, through the same CLI environment.
+		/^const removal = probe\.code === null \? await runCmdCapture\(spawn, ghProbeBin, canaryProbeRemoval\(ghProbeBin, ghProbeName\), \{ env: spawnEnv, timeoutMs: CANARY_STEP_TIMEOUT_MS \}\) : null;$/,
 		/^const res = await runCmdCapture\(spawn, process\.execPath, \[cli, "import-pi", "--with-packages", "--no-host-packages", "--to", overlay\], \{ env: spawnEnv, cwd, timeoutMs: 600000 \}\);$/,
 		/^const res = await runCmdCapture\(spawn, file, args, \{ env: spawnEnv, cwd, timeoutMs: 15000 \}\);$/,
 		// Issue #919: file secret resolution follows the same child-environment rule as bundles.
@@ -10325,7 +10431,8 @@ const podmanEgressSeams = (canary = {}, calls = [], plan = {}) => ({
 	// `canary` FIRST, for its keys' place in the prefix match, and LAST, for their values: a spread keeps the first place a
 	// key had and the last value it was given, so spreading it once would lose an override of a key the rest also carry.
 	// The plain HTTP probe (issue #508) refused by default, as a current proxy does; a test that reads it names it.
-	spawn: fakeSpawn({ [`${PODMAN_PROBE}plainhttp`]: 3, ...canary, ...toPodman(liveOk({ uid: "1234" })), ...toPodman(livePeersOk(plan)), ...podmanPlan(), "podman network": 0, ...canary }, calls),
+	// Issue #978: the leftover sweep's probe listing, answered as a host with no leftover probe answers it.
+	spawn: fakeSpawn({ "podman ps -a --filter name=pi-dispatch-egress-probe-": { code: 0, output: "" }, [`${PODMAN_PROBE}plainhttp`]: 3, ...canary, ...toPodman(liveOk({ uid: "1234" })), ...toPodman(livePeersOk(plan)), ...podmanPlan(), "podman network": 0, ...canary }, calls),
 	liveFs: liveFsAs(1234),
 	isAlive: () => false,
 	pid: 1,
@@ -10376,6 +10483,8 @@ const podmanProbeArgv = (slug, url, script = egressCanaryScript(url)) => [
 	"-e",
 	"NODE_USE_ENV_PROXY=1",
 	"--workdir=/workspace",
+	// Issue #978: what the container is, right before the image (the builder's spec carries the size labels only).
+	"--label=pi.dispatch.helper=egress-probe",
 	"pi-job:latest",
 	"-e",
 	script,
@@ -10391,6 +10500,7 @@ test("doctor --live on podman reads egress back through a canary under podman, b
 	const canarySteps = calls.filter((c) => c.args.some((a) => /pi-dispatch-egress-(doctor|probe)-/.test(String(a)))).map((c) => c.args.slice(0, 3).join(" "));
 	assert.deepEqual(canarySteps, [
 		"network ls --filter",
+		"ps -a --filter",
 		"network create --internal",
 		"network connect pi-dispatch-egress-doctor-1",
 		"run --name=pi-dispatch-egress-probe-provider-1 --pull=never",
@@ -10470,7 +10580,7 @@ test("the podman canary is stopped by the venue's refusals, a service no longer 
 	for (const facts of [podmanEgressFacts({ proxyRunning: false }), podmanEgressFacts({}, { imagePresent: false })]) {
 		const calls = [];
 		await podmanLiveChecks(env, podmanEgressSeams({}, calls), facts);
-		assert.deepEqual(canaryObjects(calls).map((c) => c.args.slice(0, 2).join(" ")), ["network ls"], "swept, and nothing created");
+		assert.deepEqual(canaryObjects(calls).map((c) => c.args.slice(0, 2).join(" ")), ["network ls", "ps -a"], "swept, and nothing created");
 	}
 });
 
@@ -10504,7 +10614,7 @@ test("the stale canary sweep works on podman: a dead run's leftover in this acco
 	assert.ok(unlisted.some((c) => c.warn && c.label === `podman: Egress canary: leftovers from an EARLIER doctor run could not be listed: podman network ls --filter name=${EGRESS_CANARY_NET_PREFIX}`), unlisted.map((c) => c.label).join("\n"));
 	const kept = await podmanLiveChecks(env, podmanEgressSeams({ ...sweep, "podman rm -f --time=0 pi-dispatch-egress-probe-unlisted-4242": 1 }), podmanEgressFacts({ proxyRunning: false }));
 	const keptLine = kept.find((c) => c.canary?.shape === "kept");
-	assert.equal(keptLine.label, `podman: Egress canary: ${leftover} is kept, because the probe pi-dispatch-egress-probe-unlisted-4242 could not be removed and the network is the only way left to find it: podman rm -f pi-dispatch-egress-probe-unlisted-4242`);
+	assert.equal(keptLine.label, `podman: Egress canary: ${leftover} is kept, because the probe pi-dispatch-egress-probe-unlisted-4242 on it could not be removed: podman rm -f pi-dispatch-egress-probe-unlisted-4242`);
 	const unproved = await podmanLiveChecks(env, podmanEgressSeams({ "podman network create": 1 }), podmanEgressFacts());
 	assert.match(unproved.find((c) => /could not be created/.test(c.label)).fix, /`podman network ls --filter name=pi-dispatch-egress-doctor-`/);
 	assert.doesNotMatch(unproved.find((c) => /could not be created/.test(c.label)).fix, /\bdocker\b/);
@@ -10512,18 +10622,34 @@ test("the stale canary sweep works on podman: a dead run's leftover in this acco
 
 // --- issue #452: the canary sweep on Podman 4.9, which renders no `.Containers` --------------------------------------
 
-/** A Podman answering the canary sweep: `network ls`, the member `ps -a` rows per network, `network exists`, removals. */
-function podmanCanaryDaemon({ nets = {}, exists = () => 0, rm = () => 0, version = "5.8.1", keeper = { code: 125, stdout: "", stderr: "no such container" } } = {}) {
+/**
+ * A Podman answering the canary sweep: `network ls`, the member `ps -a` rows per network, `network exists`, removals.
+ * Issue #978: and the probe listing by name, which answers as Podman does, every container in every state whose name
+ * CONTAINS a filter's value (the filter is a substring match, one key given twice is OR), on a network or `loose` on
+ * none; a removal that exits 0 takes the container off every listing after it, as the daemon's own would.
+ */
+function podmanCanaryDaemon({ nets = {}, loose = [], exists = () => 0, rm = () => 0, version = "5.8.1", keeper = { code: 125, stdout: "", stderr: "no such container" } } = {}) {
 	const calls = [];
+	const gone = new Set();
+	const rows = (list) => list.filter(([n]) => !gone.has(n)).map(([n, st]) => `${n}\t${st}`).join("\n");
 	const run = async (args) => {
 		calls.push(args.join(" "));
 		if (args[0] === "network" && args[1] === "ls") return { code: 0, stdout: Object.keys(nets).join("\n"), stderr: "" };
 		if (args[0] === "ps") {
-			const net = args[args.indexOf("--filter") + 1].slice("network=".length);
-			return { code: 0, stdout: (nets[net] ?? []).map(([n, st]) => `${n}\t${st}`).join("\n"), stderr: "" };
+			const filters = args.flatMap((a, i) => (args[i - 1] === "--filter" ? [a] : []));
+			if (filters.every((f) => f.startsWith("name="))) {
+				const names = filters.map((f) => f.slice("name=".length));
+				return { code: 0, stdout: rows([...Object.values(nets).flat(), ...loose].filter(([n]) => names.some((v) => n.includes(v)))), stderr: "" };
+			}
+			const net = filters[0].slice("network=".length);
+			return { code: 0, stdout: rows(nets[net] ?? []), stderr: "" };
 		}
 		if (args[0] === "network" && args[1] === "exists") return { code: exists(args.at(-1)), stdout: "", stderr: "" };
-		if (args[0] === "rm") return { code: rm(args.at(-1)), stdout: "", stderr: "" };
+		if (args[0] === "rm") {
+			const code = rm(args.at(-1));
+			if (code === 0) gone.add(args.at(-1));
+			return { code, stdout: "", stderr: "" };
+		}
 		if (args[0] === "network" && (args[1] === "disconnect" || args[1] === "rm")) return { code: 0, stdout: "", stderr: "" };
 		// The detach gate's one runtime read (issue #452, gate round 3): Podman 5.8.1 unless a test says otherwise.
 		if (args[0] === "info") return { code: 0, stdout: JSON.stringify({ host: { security: { rootless: true } }, version: { Version: version } }), stderr: "" };
@@ -10542,10 +10668,13 @@ test("on podman the canary sweep removes a dead run's probes in EVERY state and 
 	const checks = await sweepStaleCanaryNetworks({ run: d.run, pid: 1, isAlive: () => false, endpoint: { local: true }, bin: "podman" });
 	assert.deepEqual(d.calls, [
 		"network ls --filter name=pi-dispatch-egress-doctor- --format {{.Name}}",
+		// Issue #978: the probes by name first, each by its state's removal: a running one `rm -f --time=0`, a stopped one
+		// a plain `rm`. So the member read after them finds only what is not this run's.
+		"ps -a --filter name=pi-dispatch-egress-probe- --format {{.Names}}\t{{.State}}",
+		"rm -f --time=0 pi-dispatch-egress-probe-provider-4242",
+		"rm pi-dispatch-egress-probe-unlisted-4242",
 		`ps -a --filter network=${net} --format {{.Names}}\t{{.State}}`,
 		`network exists ${net}`,
-		"rm -f --time=0 pi-dispatch-egress-probe-provider-4242",
-		"rm -f --time=0 pi-dispatch-egress-probe-unlisted-4242",
 		// The detach gate's one runtime read (issue #452, gate round 3): 5.8.1, so no keeper read.
 		"info --format json",
 		`network disconnect -f ${net} pi-dispatch-egress-proxy`,
@@ -10557,8 +10686,10 @@ test("on podman the canary sweep removes a dead run's probes in EVERY state and 
 	const old = podmanCanaryDaemon({ version: "4.9.3", nets: { [net]: [["pi-dispatch-egress-proxy", "running"], ["pi-dispatch-egress-probe-provider-4242", "running"]] } });
 	const held = await sweepStaleCanaryNetworks({ run: old.run, pid: 1, isAlive: () => false, endpoint: { local: true }, bin: "podman" });
 	assert.ok(!old.calls.some((c) => c.startsWith("network disconnect") || c.startsWith("network rm")), old.calls.join(" | "));
-	assert.deepEqual(held.map((c) => c.canary?.shape), ["held"]);
+	// Issue #978: the probe the name pass removed is said on a line of its own, since the `held` line names no removal.
+	assert.deepEqual(held.map((c) => c.canary?.shape), ["held", "probesRemoved"]);
 	assert.equal(held[0].label, `podman: Egress canary: ${CANARY_LINES.held.label(held[0].canary.params)}`);
+	assert.equal(held[1].label, "podman: Egress canary: removed pi-dispatch-egress-probe-provider-4242, left by an EARLIER doctor run");
 	assert.match(held[0].label, /is kept with what is running on it, because the rootless network keeper pi-dispatch-netns-keeper does not hold under the rootless Podman 4\.x this shell's podman CLI reaches/);
 	assert.deepEqual(checks.map((c) => c.label), [`podman: Egress canary: removed ${net} (after removing pi-dispatch-egress-probe-provider-4242, pi-dispatch-egress-probe-unlisted-4242 and detaching pi-dispatch-egress-proxy, someone-else), left by an EARLIER doctor run`]);
 	assert.equal(checks[0].label, `podman: Egress canary: ${CANARY_LINES[checks[0].canary.shape].label(checks[0].canary.params)}`);
@@ -10926,6 +11057,9 @@ test("the pinning and ephemeral read-backs on podman name podman in what they co
 // Issue #508 added, by hand and nothing else: the third probe's spawn after the unlisted one (its argv the unlisted one's
 // but for name and script), its ✓ line, one more spawn in each total but the stale runner's (which stops at the first
 // probe), and the read-back's wording for three probes.
+// Issue #978 added, by hand and nothing else: the leftover sweep's probe listing right after its network listing, the
+// `--label pi.dispatch.helper=egress-probe` after each probe's name, the gh probe step's listing of its own leftovers
+// after `gh auth status`, and two more spawns in each total.
 const dockerCanaryPinRun = async (scenario, t = null) => {
 	const env = liveEnv({ PI_EGRESS: "1" });
 	const cwd = tempDir("pi-canary-pin-cwd-");
@@ -10983,12 +11117,13 @@ const dockerCanaryPinRun = async (scenario, t = null) => {
 const DOCKER_CANARY_PIN = {
 	green: {
 		code: 0,
-		total: 53, // issue #596, phase 2: +1, the probe's cgroup parent inspect; issue #918: +1, the proxy's networks for the cross-address target
+		total: 55, // issue #596, phase 2: +1, the probe's cgroup parent inspect; issue #918: +1, the proxy's networks for the cross-address target; issue #978: +2, the leftover sweep's probe listing and the gh probe step's
 		collection: [
 			"docker info",
 			"docker context inspect --format={{json .Name}}|{{json .Endpoints.docker.Host}}",
 			"docker image inspect pi-job:latest",
 			"docker network ls --filter name=pi-dispatch-egress-doctor- --format {{.Name}}",
+			"docker ps -a --filter name=pi-dispatch-egress-probe- --format {{.Names}}\t{{.State}}",
 			"docker network inspect --format {{json .Containers}} pi-dispatch-egress-doctor-4242",
 			"docker rm -f pi-dispatch-egress-probe-unlisted-4242",
 			"docker info --format={{json .}}",
@@ -10997,12 +11132,13 @@ const DOCKER_CANARY_PIN = {
 			'docker inspect --format={"status":{{json .State.Status}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}"none"{{end}},"image":{{json .Config.Image}},"entrypoint":{{json .Config.Entrypoint}},"cmd":{{json .Config.Cmd}},"mounts":{{json .Mounts}},"networks":{{json .NetworkSettings.Networks}}} pi-dispatch-egress-proxy',
 			"docker network create --internal pi-dispatch-egress-doctor-7",
 			"docker network connect pi-dispatch-egress-doctor-7 pi-dispatch-egress-proxy",
-			"docker run --rm --name pi-dispatch-egress-probe-provider-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(provider)>",
-			"docker run --rm --name pi-dispatch-egress-probe-unlisted-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(unlisted)>",
-			"docker run --rm --name pi-dispatch-egress-probe-plainhttp-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryPlainScript(plainhttp)>",
+			"docker run --rm --name pi-dispatch-egress-probe-provider-7 --label pi.dispatch.helper=egress-probe --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(provider)>",
+			"docker run --rm --name pi-dispatch-egress-probe-unlisted-7 --label pi.dispatch.helper=egress-probe --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(unlisted)>",
+			"docker run --rm --name pi-dispatch-egress-probe-plainhttp-7 --label pi.dispatch.helper=egress-probe --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryPlainScript(plainhttp)>",
 			"docker network disconnect -f pi-dispatch-egress-doctor-7 pi-dispatch-egress-proxy",
 			"docker network rm pi-dispatch-egress-doctor-7",
 			"gh auth status",
+			"docker ps -a --filter name=pi-dispatch-gh-probe- --format {{.Names}}\t{{.State}}",
 			"gh auth token",
 			"docker context inspect --format={{json .Name}}|{{json .Endpoints.docker.Host}}",
 		],
@@ -11069,12 +11205,13 @@ const DOCKER_CANARY_PIN = {
 	},
 	stale: {
 		code: 0,
-		total: 51, // issue #596, phase 2: +1, the probe's cgroup parent inspect; issue #918: +1, the proxy's networks for the cross-address target
+		total: 53, // issue #596, phase 2: +1, the probe's cgroup parent inspect; issue #918: +1, the proxy's networks for the cross-address target; issue #978: +2, the leftover sweep's probe listing and the gh probe step's
 		collection: [
 			"docker info",
 			"docker context inspect --format={{json .Name}}|{{json .Endpoints.docker.Host}}",
 			"docker image inspect pi-job:latest",
 			"docker network ls --filter name=pi-dispatch-egress-doctor- --format {{.Name}}",
+			"docker ps -a --filter name=pi-dispatch-egress-probe- --format {{.Names}}\t{{.State}}",
 			"docker network inspect --format {{json .Containers}} pi-dispatch-egress-doctor-4242",
 			"docker rm -f pi-dispatch-egress-probe-unlisted-4242",
 			"docker info --format={{json .}}",
@@ -11083,10 +11220,11 @@ const DOCKER_CANARY_PIN = {
 			'docker inspect --format={"status":{{json .State.Status}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}"none"{{end}},"image":{{json .Config.Image}},"entrypoint":{{json .Config.Entrypoint}},"cmd":{{json .Config.Cmd}},"mounts":{{json .Mounts}},"networks":{{json .NetworkSettings.Networks}}} pi-dispatch-egress-proxy',
 			"docker network create --internal pi-dispatch-egress-doctor-7",
 			"docker network connect pi-dispatch-egress-doctor-7 pi-dispatch-egress-proxy",
-			"docker run --rm --name pi-dispatch-egress-probe-provider-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(provider)>",
+			"docker run --rm --name pi-dispatch-egress-probe-provider-7 --label pi.dispatch.helper=egress-probe --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(provider)>",
 			"docker network disconnect -f pi-dispatch-egress-doctor-7 pi-dispatch-egress-proxy",
 			"docker network rm pi-dispatch-egress-doctor-7",
 			"gh auth status",
+			"docker ps -a --filter name=pi-dispatch-gh-probe- --format {{.Names}}\t{{.State}}",
 			"gh auth token",
 			"docker context inspect --format={{json .Name}}|{{json .Endpoints.docker.Host}}",
 		],
@@ -11153,12 +11291,13 @@ const DOCKER_CANARY_PIN = {
 	},
 	unfinished: {
 		code: 0,
-		total: 54, // issue #596, phase 2: +1, the probe's cgroup parent inspect; issue #918: +1, the proxy's networks for the cross-address target
+		total: 56, // issue #596, phase 2: +1, the probe's cgroup parent inspect; issue #918: +1, the proxy's networks for the cross-address target; issue #978: +2, the leftover sweep's probe listing and the gh probe step's
 		collection: [
 			"docker info",
 			"docker context inspect --format={{json .Name}}|{{json .Endpoints.docker.Host}}",
 			"docker image inspect pi-job:latest",
 			"docker network ls --filter name=pi-dispatch-egress-doctor- --format {{.Name}}",
+			"docker ps -a --filter name=pi-dispatch-egress-probe- --format {{.Names}}\t{{.State}}",
 			"docker network inspect --format {{json .Containers}} pi-dispatch-egress-doctor-4242",
 			"docker rm -f pi-dispatch-egress-probe-unlisted-4242",
 			"docker info --format={{json .}}",
@@ -11167,13 +11306,14 @@ const DOCKER_CANARY_PIN = {
 			'docker inspect --format={"status":{{json .State.Status}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}"none"{{end}},"image":{{json .Config.Image}},"entrypoint":{{json .Config.Entrypoint}},"cmd":{{json .Config.Cmd}},"mounts":{{json .Mounts}},"networks":{{json .NetworkSettings.Networks}}} pi-dispatch-egress-proxy',
 			"docker network create --internal pi-dispatch-egress-doctor-7",
 			"docker network connect pi-dispatch-egress-doctor-7 pi-dispatch-egress-proxy",
-			"docker run --rm --name pi-dispatch-egress-probe-provider-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(provider)>",
-			"docker run --rm --name pi-dispatch-egress-probe-unlisted-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(unlisted)>",
-			"docker run --rm --name pi-dispatch-egress-probe-plainhttp-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryPlainScript(plainhttp)>",
+			"docker run --rm --name pi-dispatch-egress-probe-provider-7 --label pi.dispatch.helper=egress-probe --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(provider)>",
+			"docker run --rm --name pi-dispatch-egress-probe-unlisted-7 --label pi.dispatch.helper=egress-probe --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(unlisted)>",
+			"docker run --rm --name pi-dispatch-egress-probe-plainhttp-7 --label pi.dispatch.helper=egress-probe --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryPlainScript(plainhttp)>",
 			"docker rm -f pi-dispatch-egress-probe-provider-7",
 			"docker network disconnect -f pi-dispatch-egress-doctor-7 pi-dispatch-egress-proxy",
 			"docker network rm pi-dispatch-egress-doctor-7",
 			"gh auth status",
+			"docker ps -a --filter name=pi-dispatch-gh-probe- --format {{.Names}}\t{{.State}}",
 			"gh auth token",
 			"docker context inspect --format={{json .Name}}|{{json .Endpoints.docker.Host}}",
 		],
@@ -11242,7 +11382,7 @@ const DOCKER_CANARY_PIN = {
 	},
 	hung: {
 		code: 0,
-		total: 54, // issue #596, phase 2: +1, the probe's cgroup parent inspect; issue #918: +1, the proxy's networks for the cross-address target
+		total: 56, // issue #596, phase 2: +1, the probe's cgroup parent inspect; issue #918: +1, the proxy's networks for the cross-address target; issue #978: +2, the leftover sweep's probe listing and the gh probe step's
 		// The kills the provider probe got: none before its 30 s bound, then ONE, with no signal named (so the
 		// default SIGTERM), which is `runCmdCapture`'s. The step runner would send SIGKILL.
 		killsBeforeBound: [],
@@ -11252,6 +11392,7 @@ const DOCKER_CANARY_PIN = {
 			"docker context inspect --format={{json .Name}}|{{json .Endpoints.docker.Host}}",
 			"docker image inspect pi-job:latest",
 			"docker network ls --filter name=pi-dispatch-egress-doctor- --format {{.Name}}",
+			"docker ps -a --filter name=pi-dispatch-egress-probe- --format {{.Names}}\t{{.State}}",
 			"docker network inspect --format {{json .Containers}} pi-dispatch-egress-doctor-4242",
 			"docker rm -f pi-dispatch-egress-probe-unlisted-4242",
 			"docker info --format={{json .}}",
@@ -11260,13 +11401,14 @@ const DOCKER_CANARY_PIN = {
 			'docker inspect --format={"status":{{json .State.Status}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}"none"{{end}},"image":{{json .Config.Image}},"entrypoint":{{json .Config.Entrypoint}},"cmd":{{json .Config.Cmd}},"mounts":{{json .Mounts}},"networks":{{json .NetworkSettings.Networks}}} pi-dispatch-egress-proxy',
 			"docker network create --internal pi-dispatch-egress-doctor-7",
 			"docker network connect pi-dispatch-egress-doctor-7 pi-dispatch-egress-proxy",
-			"docker run --rm --name pi-dispatch-egress-probe-provider-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(provider)>",
-			"docker run --rm --name pi-dispatch-egress-probe-unlisted-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(unlisted)>",
-			"docker run --rm --name pi-dispatch-egress-probe-plainhttp-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryPlainScript(plainhttp)>",
+			"docker run --rm --name pi-dispatch-egress-probe-provider-7 --label pi.dispatch.helper=egress-probe --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(provider)>",
+			"docker run --rm --name pi-dispatch-egress-probe-unlisted-7 --label pi.dispatch.helper=egress-probe --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(unlisted)>",
+			"docker run --rm --name pi-dispatch-egress-probe-plainhttp-7 --label pi.dispatch.helper=egress-probe --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryPlainScript(plainhttp)>",
 			"docker rm -f pi-dispatch-egress-probe-provider-7",
 			"docker network disconnect -f pi-dispatch-egress-doctor-7 pi-dispatch-egress-proxy",
 			"docker network rm pi-dispatch-egress-doctor-7",
 			"gh auth status",
+			"docker ps -a --filter name=pi-dispatch-gh-probe- --format {{.Names}}\t{{.State}}",
 			"gh auth token",
 			"docker context inspect --format={{json .Name}}|{{json .Endpoints.docker.Host}}",
 		],
@@ -11335,7 +11477,7 @@ const DOCKER_CANARY_PIN = {
 	},
 	enoent: {
 		code: 0,
-		total: 54, // issue #596, phase 2: +1, the probe's cgroup parent inspect; issue #918: +1, the proxy's networks for the cross-address target
+		total: 56, // issue #596, phase 2: +1, the probe's cgroup parent inspect; issue #918: +1, the proxy's networks for the cross-address target; issue #978: +2, the leftover sweep's probe listing and the gh probe step's
 		// The kills the provider probe got: none before its 30 s bound, then ONE, with no signal named (so the
 		// A probe that never launched is never killed.
 		killsBeforeBound: null,
@@ -11345,6 +11487,7 @@ const DOCKER_CANARY_PIN = {
 			"docker context inspect --format={{json .Name}}|{{json .Endpoints.docker.Host}}",
 			"docker image inspect pi-job:latest",
 			"docker network ls --filter name=pi-dispatch-egress-doctor- --format {{.Name}}",
+			"docker ps -a --filter name=pi-dispatch-egress-probe- --format {{.Names}}\t{{.State}}",
 			"docker network inspect --format {{json .Containers}} pi-dispatch-egress-doctor-4242",
 			"docker rm -f pi-dispatch-egress-probe-unlisted-4242",
 			"docker info --format={{json .}}",
@@ -11353,13 +11496,14 @@ const DOCKER_CANARY_PIN = {
 			'docker inspect --format={"status":{{json .State.Status}},"health":{{if .State.Health}}{{json .State.Health.Status}}{{else}}"none"{{end}},"image":{{json .Config.Image}},"entrypoint":{{json .Config.Entrypoint}},"cmd":{{json .Config.Cmd}},"mounts":{{json .Mounts}},"networks":{{json .NetworkSettings.Networks}}} pi-dispatch-egress-proxy',
 			"docker network create --internal pi-dispatch-egress-doctor-7",
 			"docker network connect pi-dispatch-egress-doctor-7 pi-dispatch-egress-proxy",
-			"docker run --rm --name pi-dispatch-egress-probe-provider-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(provider)>",
-			"docker run --rm --name pi-dispatch-egress-probe-unlisted-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(unlisted)>",
-			"docker run --rm --name pi-dispatch-egress-probe-plainhttp-7 --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryPlainScript(plainhttp)>",
+			"docker run --rm --name pi-dispatch-egress-probe-provider-7 --label pi.dispatch.helper=egress-probe --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(provider)>",
+			"docker run --rm --name pi-dispatch-egress-probe-unlisted-7 --label pi.dispatch.helper=egress-probe --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryScript(unlisted)>",
+			"docker run --rm --name pi-dispatch-egress-probe-plainhttp-7 --label pi.dispatch.helper=egress-probe --pull=never --network=pi-dispatch-egress-doctor-7 -e HTTPS_PROXY=http://pi-dispatch-egress-proxy:3128 -e NODE_USE_ENV_PROXY=1 --entrypoint node pi-job:latest -e <egressCanaryPlainScript(plainhttp)>",
 			"docker rm -f pi-dispatch-egress-probe-provider-7",
 			"docker network disconnect -f pi-dispatch-egress-doctor-7 pi-dispatch-egress-proxy",
 			"docker network rm pi-dispatch-egress-doctor-7",
 			"gh auth status",
+			"docker ps -a --filter name=pi-dispatch-gh-probe- --format {{.Names}}\t{{.State}}",
 			"gh auth token",
 			"docker context inspect --format={{json .Name}}|{{json .Endpoints.docker.Host}}",
 		],

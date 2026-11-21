@@ -115,7 +115,7 @@ import { SUGGEST_WINDOW_DAYS, cpusText, hostCap, refusalWords, sizeRefusal, sugg
 import { SIZING_RECORD_MAX_BYTES, readSizingRecords } from "./size-records.mjs";
 import { CAPACITY_WINDOWS, computeCapacity } from "./capacity.mjs";
 import { JOBS_ONLY, durationText, milliText, notSharedWhy, percentText, shareText } from "./capacity-cli.mjs";
-import { CGROUP_PARENT, cgroupParentFor, guardHelperRun, helperName as cpuReserveHelperName, operatorQuotaCommand, readQuota, reservePlan, userQuotaCommand } from "./cpu-reserve.mjs";
+import { CGROUP_PARENT, HELPER_LABEL_KEY, cgroupParentFor, guardHelperRun, helperName as cpuReserveHelperName, operatorQuotaCommand, readQuota, reservePlan, userQuotaCommand } from "./cpu-reserve.mjs";
 import { HOST_BUDGET_KEYS, computeHostBudget, hostBudgetSettings, largestFit, neverFits, projectBudgetRow, publishedBudget, readUserServiceLimits } from "./host-budget.mjs";
 import { makeImagePreflight, normalizeImageId } from "./image-preflight.mjs";
 import { webhookSecretRefusers } from "./triggers-check.mjs";
@@ -205,8 +205,24 @@ const TRIGGER_IMAGE_ENTRYPOINT_FIX = "build your job image FROM this repo's imag
 // carries `PODMAN_PINNED_FLAGS` whole, the same array every podman job carries: `--env-host=false` and
 // `--http-proxy=false` for that, and the private namespaces so the probe is no less contained than a job. docker has no
 // such defaults to pin (its CLI forwards only what `-e` names, and the probe names nothing), so its argv carries no pins.
+//
+// NAMED AND LABELLED (issue #978), on both bins: `--rm` is the daemon's AutoRemove, which acts only when a container
+// exits, so a CLI killed between create and start (a slow VM-backed daemon, or the worker's doctor child killed at its
+// bound) left an anonymous `created` container nothing could tell from any other. Now the name carries this doctor's
+// pid (`ghProbeContainer`), so a run whose probe did not finish removes it by name, and the next doctor's gh step removes
+// one whose pid is dead, right before its own probe (`sweepStaleGhProbes`); the label `pi.dispatch.helper=gh-probe` says
+// what it is to anyone reading `docker ps -a`. The pid keeps two doctors at once from colliding on the name. The token
+// stays on stdin, so a name adds nothing secret to argv.
 const GH_PROBE_SCRIPT = 'read -r t; export GH_TOKEN="$t" GITHUB_TOKEN="$t"; exec "$@"';
-const ghProbeArgs = (image, bin) => ["run", "--rm", "-i", "--pull=never", ...(bin === "podman" ? PODMAN_PINNED_FLAGS : []), "--entrypoint", "sh", image, "-c", GH_PROBE_SCRIPT, "sh", "gh", "auth", "status"];
+const ghProbeArgs = (image, bin, name) => ["run", "--rm", "-i", "--name", name, "--label", `${HELPER_LABEL_KEY}=gh-probe`, "--pull=never", ...(bin === "podman" ? PODMAN_PINNED_FLAGS : []), "--entrypoint", "sh", image, "-c", GH_PROBE_SCRIPT, "sh", "gh", "auth", "status"];
+
+/** The in-image gh probe's name prefix (issue #978): outside `pi-job-` and `pi-sandbox-`, which other sweeps claim. */
+export const GH_PROBE_PREFIX = "pi-dispatch-gh-probe-";
+
+/** The in-image gh probe's container, one per doctor process (issue #978). */
+export function ghProbeContainer(pid) {
+	return `${GH_PROBE_PREFIX}${pid}`;
+}
 
 
 // Issue #471: `shellVars` is THIS shell's environment and is read in exactly the places a test pins (the venue and
@@ -3116,6 +3132,25 @@ export async function collectChecks(shellVars, seams) {
 		: podman?.forLive?.run === true && podman.forLive.imagePresent === true && podman.forLive.info?.serviceIsRemote === false
 			? "podman"
 			: null;
+	// Issue #978: the probe's own leftovers first, whatever the source and whether or not a token is found below (a source
+	// changed since, or a token that went away, leaves them as well), and only where the probe itself may run: docker's
+	// on a daemon observed on this host (`endpoint.local`, the probe's own test below), podman's once the section saw the
+	// service as this host's own (in `ghProbeBin`). The same CLI and environment as the probe, so the listing asks the
+	// daemon the probe would go to;
+	// stdout only, since podman-docker prints its banner on stderr.
+	const ghPid = seams.pid ?? process.pid;
+	// Whether this run's own probe name is still held by a leftover the sweep could not remove: the probe's `run --name`
+	// would then fail with exit 125 (measured on Docker 28.0.4) and read as an auth failure, so it is not run.
+	let ghNameHeld = false;
+	if (ghProbeBin !== null && (ghProbeBin === "podman" || endpoint?.local === true)) {
+		const ghRun = async (args) => {
+			const answer = await runCmdCapture(spawn, ghProbeBin, args, { env: spawnEnv, stdoutOnly: true, timeoutMs: CANARY_STEP_TIMEOUT_MS });
+			return { code: answer.code, stdout: answer.output };
+		};
+		const swept = await sweepStaleGhProbes({ run: ghRun, bin: ghProbeBin, pid: ghPid, isAlive: seams.isAlive ?? defaultIsAlive, where: ghProbeBin === "podman" ? "podman: " : "" });
+		checks.push(...swept.checks);
+		ghNameHeld = swept.stuck.includes(ghProbeContainer(ghPid));
+	}
 	if (ghProbeBin !== null) {
 		if (ghSource === "app") {
 			checks.push({ ok: true, label: "in-image gh auth: skipped (GITHUB_AUTH_SOURCE=app mints per-job)" });
@@ -3153,6 +3188,11 @@ export async function collectChecks(shellVars, seams) {
 					label: `in-image gh auth: not checked, because this shell's docker CLI ${endpoint.local === false ? `resolves ${endpointShown(endpoint)}, which is not shown to be on this host` : `did not say which daemon it uses (${endpoint.reason})`}, and the probe would send your gh token there`,
 					fix: "point the docker CLI at this host and re-run doctor to check it",
 				});
+			} else if (token && ghNameHeld) {
+				// Issue #978: an earlier process under this pid left the name and it would not go (the sweep above said so).
+				// Not run: its exit 125 would print "gh cannot authenticate" and send the operator to check egress for nothing.
+				const held = ghProbeContainer(ghPid);
+				checks.push({ ok: false, warn: true, label: `${ghProbeBin === "podman" ? "podman: " : ""}in-image gh auth: not checked, because ${held}, the name this run's probe needs, is still there and could not be removed`, fix: `remove it (\`${ghProbeBin} rm -f ${held}\`), then re-run doctor to check gh inside the job image` });
 			} else if (token) {
 				// On stdin (issue #521, `ghProbeArgs`): the token never enters argv (visible in `ps`), the container
 				// create request (which Docker Desktop logs) or doctor's output, and doctor adds no copy of it to the
@@ -3166,8 +3206,17 @@ export async function collectChecks(shellVars, seams) {
 				// variables) is what decides WHICH Podman and which store answer. The podman section read that service
 				// with this same environment, so a trimmed one could send the token to a service nothing here checked.
 				// An allowlist of what Podman needs was rejected for that reason: it is a list nothing derives.
-				const probe = await runCmdCapture(spawn, ghProbeBin, ghProbeArgs(jobImage, ghProbeBin), { env: spawnEnv, input: `${token}\n` });
+				const ghProbeName = ghProbeContainer(ghPid);
+				const probe = await runCmdCapture(spawn, ghProbeBin, ghProbeArgs(jobImage, ghProbeBin, ghProbeName), { env: spawnEnv, input: `${token}\n` });
 				const where = ghProbeBin === "podman" ? "podman: " : "";
+				// Issue #978: a probe that did not finish (`code: null`, the bound killed the CLI) may have left its container
+				// behind the CLI, `created` on a slow daemon, so it gets ONE bounded `rm -f` by name, through the same CLI and
+				// environment so it reaches the same daemon. A name that is not there exits 0 (measured on Docker 28.0.4), so a
+				// CLI that never launched costs one more spawn and nothing else. One that will not go is said below, the way
+				// the canary's teardown says a stuck probe. RESIDUAL: a create the daemon lands AFTER this rm (which then
+				// exited 0 for a name not yet there) is not seen by this run; the next doctor's gh step removes it once this
+				// pid is dead.
+				const removal = probe.code === null ? await runCmdCapture(spawn, ghProbeBin, canaryProbeRemoval(ghProbeBin, ghProbeName), { env: spawnEnv, timeoutMs: CANARY_STEP_TIMEOUT_MS }) : null;
 				// 126 and 127 are the runtime's and the shell's "could not run that program" (measured on docker 27.4: a
 				// missing entrypoint and a missing exec target both exit 127, a non-executable one 126); `gh auth status`
 				// itself exits 0, 1, 2, 4 or 8. Since the probe's entrypoint became `sh` (#521), an image without one
@@ -3186,6 +3235,7 @@ export async function collectChecks(shellVars, seams) {
 						? "rebuild or pull the job image: every image built FROM this repo's image/Dockerfile has both -- jobs that use gh will fail mid-run"
 						: "check network egress from containers or rebuild/pull the job image -- jobs that use gh will fail mid-run",
 				});
+				if (removal !== null && removal.code !== 0) checks.push({ ok: false, warn: true, label: `${where}in-image gh auth: the probe ${ghProbeName} did not finish and could not be removed: ${ghProbeBin} rm -f ${ghProbeName}`, fix: "run that command once the daemon answers again" });
 			} else if (patFromFile) {
 				// The service's PAT is in `.env`, which hands no program anything (PR #474's round cap): named, not run.
 				checks.push({
@@ -7481,7 +7531,9 @@ export const CANARY_LINES = Object.freeze({
 	kept: {
 		tier: "warn",
 		fix: () => CANARY_LEFTOVER_FIX,
-		label: ({ name, stuck, bin = "docker" }) => `${name} is kept, because the probe ${stuck.join(", ")} could not be removed and the network is the only way left to find it: ${bin} rm -f ${stuck.join(" ")}`,
+		// Issue #978: it used to add "and the network is the only way left to find it", which stopped being true once the
+		// sweep lists probes by name in every state. The network is still kept: a probe on it holds it on both runtimes.
+		label: ({ name, stuck, bin = "docker" }) => `${name} is kept, because the probe ${stuck.join(", ")} on it could not be removed: ${bin} rm -f ${stuck.join(" ")}`,
 	},
 	removed: {
 		tier: "ok",
@@ -7505,7 +7557,30 @@ export const CANARY_LINES = Object.freeze({
 		fix: () => CANARY_HELD_FIX,
 		label: ({ name, because }) => `${name} is kept with what is running on it, because ${because}`,
 	},
+	// Issue #978: the probe containers' own listing (`probeListArgs`), which the sweep asks on a daemon this host owns.
+	probesUnlisted: {
+		tier: "warn",
+		fix: () => CANARY_PROBES_UNLISTED_FIX,
+		label: ({ prefixes, bin = "docker" }) => `probe containers from an EARLIER doctor run could not be listed: ${bin} ps -a ${prefixes.map((p) => `--filter name=${p}`).join(" ")}`,
+	},
+	// Probes the listing found and removed that no network line names: their network is gone, unreadable, held or kept.
+	probesRemoved: {
+		tier: "ok",
+		fix: () => null,
+		label: ({ names }) => `removed ${names.join(", ")}, left by an EARLIER doctor run`,
+	},
+	probesStuck: {
+		tier: "warn",
+		fix: () => CANARY_PROBES_STUCK_FIX,
+		label: ({ names, bin = "docker" }) => `${names.join(", ")}, left by an EARLIER doctor run, could not be removed: ${bin} rm -f ${names.join(" ")}`,
+	},
 });
+
+/** What to do when the probe listing failed: the same advice as the network listing's row in docs/egress.md. */
+const CANARY_PROBES_UNLISTED_FIX = "run the command yourself; a daemon that cannot list is usually the real problem, and the next doctor lists them again";
+
+/** What to do about a leftover probe that would not go (issue #978): it is found by its name, so nothing else needs to stay. */
+const CANARY_PROBES_STUCK_FIX = "run the command once the daemon answers; the next pi-dispatch doctor on this host tries again";
 
 /** What to do about a `held` leftover: the keeper first, then doctor again, which removes it. */
 const CANARY_HELD_FIX = "start the rootless network keeper as docs/podman.md step 6 shows (pi-dispatch service install or pi-dispatch up installs it), then re-run doctor, which removes the network once the keeper holds";
@@ -7579,6 +7654,12 @@ function forRuntime(text, bin) {
  * Anchored on the name, and only for a dead pid: a network this doctor made is its own business, and one whose
  * pid is still alive belongs to a doctor that is still running.
  *
+ * AND THE PROBE CONTAINERS BY NAME (issue #978), in every state, before any network: a probe left `created` is on no
+ * network read docker gives, and its network may be gone. The same name and pid rules decide, and what is removed is
+ * named on its network's line or on a line of its own (`sweepStaleProbeContainers`). The listing runs only on a daemon
+ * this host owns, so a remote one is left exactly as it was: its networks named, nothing listed or removed. The in-image
+ * gh probe is swept by its own step instead (`sweepStaleGhProbes`).
+ *
  * EXPORTED for `.github/scripts/podman-conformance.mjs` (issue #452), which leaves a canary network behind on a real
  * rootless Podman and runs THIS sweep over it, so the member read it depends on is exercised on the Podman the
  * required CI job runs rather than only on the lab's. `bin` names the runtime for a caller outside this file, which
@@ -7627,6 +7708,14 @@ export async function sweepStaleCanaryNetworks({ run, pid, isAlive, endpoint, bi
 	// this file builds, and the class cannot drift from what the parser accepts.
 	const probeOf = (owner) => new RegExp(`^(?:${EGRESS_CANARY_PROBE_PREFIX}(?:${CANARY_PROBE_SLUGS.join("|")})|${EGRESS_ENDPOINT_PROBE_PREFIX}(?:${[...ENDPOINT_PROBE_SLUGS, ...PRIVATE_PROBE_SLUGS].join("|")})-${ENDPOINT_ID_CLASS})-${owner.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`);
 	const checks = [];
+	// Issue #978: the probe containers THEMSELVES, by name and in every state, before any network is touched, and only on
+	// a daemon this host owns (the pid test below is about this process table). What one removes here is named on its
+	// network's line when that line is printed, and on a line of its own otherwise (`said`, after the loop).
+	// The in-image gh probe is NOT listed here: the module that makes an object sweeps it, and the gh probe's step does,
+	// right before its own probe, where a deployment with the policy off or a podman venue without `--live` reaches too.
+	const probes = owned ? await sweepStaleProbeContainers({ run, bin: venue.bin, pid, isAlive, prefixes: CANARY_PROBE_LIST_PREFIXES, ours: (n, owner) => probeOf(owner).test(n) }) : null;
+	if (probes?.unlisted) checks.push(canaryCheck("probesUnlisted", { prefixes: CANARY_PROBE_LIST_PREFIXES }, venue));
+	const said = new Set();
 	for (const name of String(listed.stdout ?? "").split("\n").map((n) => n.trim()).filter(Boolean)) {
 		const m = shape.exec(name);
 		if (!m) continue;
@@ -7665,10 +7754,11 @@ export async function sweepStaleCanaryNetworks({ run, pid, isAlive, endpoint, bi
 		}
 		// The dead run's own probes are REMOVED, everything else is merely detached -- the proxy is shared and
 		// long-lived, and a stranger on a network in this namespace is not ours to delete.
-		// RESIDUAL ON DOCKER, same as `live-probes.mjs`'s and measured under #337: `names` holds RUNNING endpoints,
-		// so a probe in `created` state is missing from it and the removal below would succeed and strand it. Not
-		// guarded, and the reason is the line above: only a DEAD pid's network is touched here, and a dead
-		// process is not mid-launch.
+		// CLOSED ON DOCKER since issue #978: `names` holds RUNNING endpoints, so a probe in `created` state is missing
+		// from it (measured under #337), and the network's removal below used to succeed around it and strand it for
+		// good, in `created`, where a slow daemon leaves every probe whose CLI the bound killed. The container pass
+		// above has removed such a probe by name before this read, whatever its state, and whether or not its network
+		// is still there.
 		//
 		// CLOSED ON PODMAN (issue #452): its read also returns `parked`, the members in every other state, and they
 		// are handled exactly as the running ones are -- a parked probe of this run removed, anything else parked
@@ -7680,19 +7770,27 @@ export async function sweepStaleCanaryNetworks({ run, pid, isAlive, endpoint, bi
 		// Recorded only when it TOOK, the same rule `removeNetworkOrSay` applies to `detached` -- a ✓ claiming a
 		// probe was removed while it is still running is worse than no line. One that did NOT go stays in the
 		// detach list, so it is at least taken off the network rather than falling between the two.
-		const removed = [];
+		// Issue #978: what the container pass already removed for this pid is this network's to name, and a member it
+		// already tried and could not remove is not tried a second time in one pass (on a slow daemon each try can be the
+		// whole 10 s bound). A member it never saw (its listing failed, or the probe came up after it) is tried here.
+		const removed = (probes?.removed.get(ownerText) ?? []).filter((n) => probeOf(ownerText).test(n));
+		const triedBefore = probes?.stuck.get(ownerText) ?? [];
 		const stuck = [];
 		for (const endpoint of members.filter((n) => probeOf(ownerText).test(n))) {
-			if ((await run(canaryProbeRemoval(venue.bin, endpoint)))?.code === 0) removed.push(endpoint);
+			if (removed.includes(endpoint)) continue;
+			if (triedBefore.includes(endpoint)) stuck.push(endpoint);
+			else if ((await run(canaryProbeRemoval(venue.bin, endpoint)))?.code === 0) removed.push(endpoint);
 			else stuck.push(endpoint);
 		}
-		// THE NETWORK IS THE ONLY HANDLE. Nothing in this project ever enumerates `pi-dispatch-egress-probe-`
-		// containers -- the name exists to be built and matched, not searched for -- so removing the network
-		// out from under a probe we could not kill orphans that container permanently, and an earlier draft
-		// did exactly that behind a ✓. Detaching it first is no better: it is still running, and now nothing
-		// points at it. So the network stays, and the line names the container to remove by hand.
+		// A PROBE THAT WILL NOT GO KEEPS ITS NETWORK, and the line names the container to remove by hand. Not because
+		// the network is the only handle any more: since issue #978 the pass above finds a probe by its name in every
+		// state, so a later doctor finds it with or without the network. But a probe still ON the network is a member
+		// either runtime's `network rm` refuses over (docker for a running one, Podman for any), so removing the
+		// network would only fail beside it, and detaching it first would leave a running container on nothing. The
+		// network goes on the run that removes the probe.
 		if (stuck.length > 0) {
 			checks.push(canaryCheck("kept", { name, stuck }, venue));
+			for (const n of stuck) said.add(n);
 			continue;
 		}
 		// Through the ONE detach helper (issue #452, gate round 3), with `names` as the running members: a refusal leaves
@@ -7720,7 +7818,10 @@ export async function sweepStaleCanaryNetworks({ run, pid, isAlive, endpoint, bi
 		// teardown `network rm` fails, and says so in a warning of its own, and issue #360 item 5 records a
 		// second producer (a `network create` killed by a signal after the daemon had already made it). The
 		// only thing the sweep knows is that the pid in the name is not alive now.
-		if (outcome.removed && !outcome.absent) checks.push(canaryCheck("removed", { name, after }, venue));
+		if (outcome.removed && !outcome.absent) {
+			checks.push(canaryCheck("removed", { name, after }, venue));
+			for (const n of removed) said.add(n);
+		}
 		// THE NETWORK WENT BETWEEN OUR OWN COMMANDS, and the silence that covers is only a silence about the
 		// NETWORK: one the daemon says is not there is not worth a line, which is the rule this sweep shares
 		// with the boot reaper. What this pass DID is a different fact. It existed, we did it, and saying
@@ -7741,9 +7842,109 @@ export async function sweepStaleCanaryNetworks({ run, pid, isAlive, endpoint, bi
 			// between them gave `removed a, b, detached c, d` with nothing marking where one list ended.
 			const did = [removed.length > 0 ? `removed ${removed.join(", ")}` : null, outcome.detached.length > 0 ? `detached ${outcome.detached.join(", ")}` : null].filter(Boolean).join(" and ");
 			if (did) checks.push(canaryCheck("gone", { name, did }, venue));
+			for (const n of removed) said.add(n);
 		} else checks.push(canaryCheck("notRemoved", { name, command: outcome.command }, venue));
 	}
+	// Issue #978: what the container pass did that no network line named, per pid: a probe whose network is already gone
+	// (the residual this pass closes), or one whose network could not be read, was held or would not go. Removed is a ✓,
+	// as a removed network is; one that would not go is a ⚠ with the command, and it is found by name next time.
+	for (const owner of new Set([...(probes?.removed.keys() ?? []), ...(probes?.stuck.keys() ?? [])])) {
+		const gone = (probes.removed.get(owner) ?? []).filter((n) => !said.has(n));
+		if (gone.length > 0) checks.push(canaryCheck("probesRemoved", { names: gone }, venue));
+		const left = (probes.stuck.get(owner) ?? []).filter((n) => !said.has(n));
+		if (left.length > 0) checks.push(canaryCheck("probesStuck", { names: left }, venue));
+	}
 	return checks;
+}
+
+/** What the canary's probe listing asks for by name (issue #978): its probes, the endpoint probes being under the same prefix. */
+export const CANARY_PROBE_LIST_PREFIXES = Object.freeze([EGRESS_CANARY_PROBE_PREFIX]);
+
+/** What the gh probe's step lists by name (issue #978). */
+export const GH_PROBE_LIST_PREFIXES = Object.freeze([GH_PROBE_PREFIX]);
+
+/**
+ * A probe listing's argv: every state (`-a`), each container's name and state, one `--filter name=` per prefix (more than
+ * one is joined with OR, as one key given twice, measured on Docker 28.0.4). `ps --format` fields Docker documents
+ * (`{{.Names}}`, `{{.State}}`, measured on Docker 28.0.4) and the same two Podman's member read already parses
+ * (`podmanNetworkMembers`, measured on 4.9.3 and 5.8.1). NOT an inspect template: the docker CLI refuses a dotted path
+ * to a key the daemon omits (exit 1, no output, measured on 28.0.4).
+ */
+export function probeListArgs(prefixes) {
+	return ["ps", "-a", ...prefixes.flatMap((p) => ["--filter", `name=${p}`]), "--format", "{{.Names}}\t{{.State}}"];
+}
+
+/**
+ * The states whose probe is removed with a plain `rm` (issue #978): it never started (`created`, and libpod's
+ * `initialized`, made in its runtime and not started; libpod prints its earlier `configured` state as `created`, in
+ * `define/containerstate.go` at 4.9.3 and on main) or has stopped (`exited`, and libpod's `stopped`, exited and not yet
+ * cleaned up, which its `checkReadyForRemoval` lets a plain `rm` take). Plain, never `-f`, so one that started between
+ * the listing and the removal is refused and named rather than killed under whatever reads it. Every other state
+ * (running, paused, restarting, libpod's `stopping`) takes the canary's own `rm -f` (`canaryProbeRemoval`), the removal
+ * the network pass always used.
+ */
+const PROBE_PLAIN_RM_STATES = new Set(["created", "initialized", "exited", "stopped"]);
+
+/**
+ * The probe containers an EARLIER doctor run left (issue #978), by NAME and in every state: the half of the leftover
+ * sweep a network cannot show. A probe whose CLI the bound killed between create and start sits in `created`, where
+ * `--rm` never acts, docker's network read does not list it, and its network's removal succeeds around it; a killed
+ * doctor's network may also be gone already. That is the shape issue #978 reports from a slow VM-backed daemon, where
+ * the worker's doctor child is killed at 120 s: its probes stayed behind, and the next doctor removed only networks.
+ *
+ * A listed name is ours only when `ours(name, pidText)` says it is EXACTLY one the caller builds for the pid it ends in
+ * (the canary: `probeOf`, its and the endpoint probes' closed slug sets; the gh probe's step: `ghProbeContainer`), and
+ * that pid is written as doctor writes `process.pid`, with no leading zero. The listing's `--filter name=` is a
+ * substring match on both runtimes and returns anything that merely contains a prefix, which is why it only narrows and
+ * never decides. The pid rule is the network pass's: dead, or ours, since each caller lists before its own run makes
+ * anything under the prefix (the canary sweep before the canary, the gh probe's step right before its probe).
+ *
+ * Returns `{ unlisted, removed, stuck }`, the last two keyed by the pid's text in the name, in listing order. A line
+ * that is not a name, a tab and one lowercase state word is skipped: whatever it is, it is not a name this file built.
+ */
+async function sweepStaleProbeContainers({ run, bin, pid, isAlive, prefixes, ours }) {
+	const removed = new Map();
+	const stuck = new Map();
+	const listed = await run(probeListArgs(prefixes));
+	if (listed?.code !== 0) return { unlisted: true, removed, stuck };
+	for (const raw of String(listed.stdout ?? "").split("\n")) {
+		const fields = raw.trim().split("\t").map((f) => f.trim());
+		if (fields.length !== 2) continue;
+		const [name, state] = fields;
+		const ownerText = /-(\d+)$/.exec(name)?.[1];
+		if (ownerText === undefined || String(Number(ownerText)) !== ownerText || !/^[a-z]+$/.test(state)) continue;
+		if (!ours(name, ownerText)) continue;
+		const owner = Number(ownerText);
+		if (!Number.isSafeInteger(owner) || (owner !== pid && isAlive(owner))) continue;
+		const answer = await run(PROBE_PLAIN_RM_STATES.has(state) ? ["rm", name] : canaryProbeRemoval(bin, name));
+		const into = answer?.code === 0 ? removed : stuck;
+		into.set(ownerText, [...(into.get(ownerText) ?? []), name]);
+	}
+	return { unlisted: false, removed, stuck };
+}
+
+/**
+ * The in-image gh probes an EARLIER doctor run left (issue #978), swept by the step that makes them, right before its
+ * own probe, on the runtime it runs on (`run` is that runtime's bounded runner, `bin` its CLI, `where` its line prefix).
+ * Here and not in the canary's sweep, because the module that makes an object sweeps it, and the canary's sweep never
+ * runs where the gh probe does: with the egress policy off, on the podman venue outside `doctor --live` (the worker's
+ * own doctor runs never pass it), or once its network listing failed. With `PI_EGRESS=0` a killed doctor's
+ * `pi-dispatch-gh-probe-<pid>` stayed `created` for good (the doctor CLI run twice), and a name still taken fails
+ * `run --name` with exit 125 (measured on Docker 28.0.4), so under a reused pid the next probe read as "gh cannot
+ * authenticate". Our own pid's leftover is therefore removed too: nothing of this run exists under the prefix yet.
+ * Lines prefixed `in-image gh auth:`, as the probe's own. Returns `{ checks, stuck }`, `stuck` the names that would not
+ * go, so the step can tell when its own probe's name is one of them.
+ */
+export async function sweepStaleGhProbes({ run, bin = "docker", pid, isAlive, where = "" }) {
+	const probes = await sweepStaleProbeContainers({ run, bin, pid, isAlive, prefixes: GH_PROBE_LIST_PREFIXES, ours: (n, owner) => n === ghProbeContainer(owner) });
+	if (probes.unlisted) return { checks: [{ ok: false, warn: true, label: `${where}in-image gh auth: probes from an EARLIER doctor run could not be listed: ${bin} ${probeListArgs(GH_PROBE_LIST_PREFIXES).slice(0, -2).join(" ")}`, fix: CANARY_PROBES_UNLISTED_FIX }], stuck: [] };
+	const removed = [...probes.removed.values()].flat();
+	const stuck = [...probes.stuck.values()].flat();
+	const checks = [
+		...(removed.length > 0 ? [{ ok: true, label: `${where}in-image gh auth: removed ${removed.join(", ")}, left by an EARLIER doctor run` }] : []),
+		...(stuck.length > 0 ? [{ ok: false, warn: true, label: `${where}in-image gh auth: ${stuck.join(", ")}, left by an EARLIER doctor run, could not be removed: ${bin} rm -f ${stuck.join(" ")}`, fix: CANARY_PROBES_STUCK_FIX }] : []),
+	];
+	return { checks, stuck };
 }
 
 /**
@@ -7968,7 +8169,7 @@ const CANARY_STEP_TIMEOUT_MS = 10_000;
 const CANARY_FOREIGN_FIX = "check whether that process is still running on the host that daemon belongs to, and remove the network there once it is not: `docker network rm <name>`";
 
 /** One fixed text for a canary that could not start. The policy may be fine; what is missing is the PROOF. */
-const CANARY_UNPROVED_FIX = "re-run doctor; the policy itself may be fine, but nothing here has shown that it is. `docker network ls --filter name=pi-dispatch-egress-doctor-` lists any leftover blocking it";
+const CANARY_UNPROVED_FIX = "re-run doctor; the policy itself may be fine, but nothing here has shown that it is. `docker network ls --filter name=pi-dispatch-egress-doctor-` lists any leftover blocking it, and `docker ps -a --filter name=pi-dispatch-egress-probe-` any leftover probe";
 
 /** One fixed text for a canary leftover, because the COMMAND is in the label and only the advice belongs here. */
 const CANARY_LEFTOVER_FIX = "remove whatever is still on it first (a probe container under `pi-dispatch-egress-probe-`), then the network. A later `pi-dispatch doctor` on this host clears a leftover whose process has exited, but not one a container is still holding: that one waits for you";
@@ -8333,7 +8534,8 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
  * The canary's probe containers' argv after the runtime's name (issue #431), per direction.
  *
  * docker's is what it always was: a plain `docker run` on the canary network with the two proxy variables, which is
- * pinned byte for byte and not widened here, because moving it is its own change with its own review.
+ * pinned byte for byte and not widened here, because moving it is its own change with its own review. Both carry the
+ * label `pi.dispatch.helper=egress-probe` since issue #978, which says what a probe is and moves no boundary.
  *
  * `script` is what the container runs, the runner's route (`egressCanaryScript`) unless a probe says otherwise: the
  * plain HTTP probe (issue #508) passes `egressCanaryPlainScript`, and its argv differs from the others in nothing else.
@@ -8355,7 +8557,7 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
  * then replaced by none; `CANARY_NO_WORKSPACE` is a path nothing creates, so if a later edit ever kept the mount, the
  * run would fail on a missing source rather than bind a real directory.
  */
-export function egressCanaryProbeArgs({ bin = "docker", slug, pid, network, proxy, image, url, user = null, script = egressCanaryScript(url), name = egressCanaryProbe(slug, pid), httpProxy = false, size = DEFAULT_JOB_SIZE, hostCpus = null }) {
+export function egressCanaryProbeArgs({ bin = "docker", slug, pid, network, proxy, image, url, user = null, script = egressCanaryScript(url), name = egressCanaryProbe(slug, pid), httpProxy = false, size = DEFAULT_JOB_SIZE, hostCpus = null, podmanArgs = podmanArgsFromSpec }) {
 	if (bin !== "podman") {
 		return [
 			"run",
@@ -8366,6 +8568,10 @@ export function egressCanaryProbeArgs({ bin = "docker", slug, pid, network, prox
 			"--name",
 			// The PID too, so two doctor runs at once do not collide on a name and read the loser's exit 125 as a deny.
 			name,
+			// Issue #978: what it is, for anyone reading `docker ps -a` (`HELPER_LABEL_KEY`, the CPU reserve's helper's key).
+			// The leftover sweep finds a probe by its NAME, never by this label: a probe an older doctor left carries none.
+			"--label",
+			`${HELPER_LABEL_KEY}=egress-probe`,
 			"--pull=never",
 			`--network=${network}`,
 			"-e",
@@ -8388,7 +8594,14 @@ export function egressCanaryProbeArgs({ bin = "docker", slug, pid, network, prox
 	// Issue #596: at a job's size (the deployment's default, which doctor reads from the same settings the worker does) and
 	// under the same `--cpus` ceiling, so the canary's container is a job's in its bounds as well as its flags.
 	const { mounts: _placeholder, ...spec } = containerSpec({ image, name, env: { HOME: CONTAINER_HOME, ...egressEnv({ proxy, armed: true }) }, workspace: CANARY_NO_WORKSPACE, network, user, userns: "keep-id", extraFlags: ["--entrypoint", "node"], size, hostCpus });
-	return [...podmanArgsFromSpec({ ...spec, mounts: [] }), "-e", script];
+	const args = podmanArgs({ ...spec, mounts: [] });
+	// Issue #978: the helper label as docker's probe carries it, spliced in right before the image, the builder's last
+	// token. Not through the spec: a spec's labels are exactly the two size labels (`labelsOk`), and `--label` is refused
+	// in `dockerExtra`, both so that nothing can make a container read as another size. Checked rather than assumed, so a
+	// builder that ever ends on anything else fails here instead of passing the label to the program as an argument
+	// (`podmanArgs` is the builder, a seam so a test can hand in one that does).
+	if (args.at(-1) !== image) throw new Error("egress canary: the podman builder's argv does not end with the image");
+	return [...args.slice(0, -1), `--label=${HELPER_LABEL_KEY}=egress-probe`, image, "-e", script];
 }
 
 /** The workspace `containerSpec` requires and the canary never mounts (see `egressCanaryProbeArgs`). */
@@ -8620,10 +8833,10 @@ export async function runEgressCanary({ run, bin = "docker", proxy, image, pid =
 			}
 		}
 		// AND THE NETWORK IS THEN KEPT, because that is what the line says. Reusing the sweep's wording while
-		// removing the network anyway printed "the network is the only way left to find it" and then removed
-		// it in the same run -- both halves of the sentence false, and the page's own row for this shape says
-		// removing it would orphan that container permanently. The sweep `continue`s here for exactly this
-		// reason; the teardown now does the same.
+		// removing the network anyway printed "the network is the only way left to find it" (its wording until
+		// issue #978) and then removed it in the same run -- both halves of the sentence false. The sweep
+		// `continue`s here for exactly this reason; the teardown does the same, and the next doctor's sweep removes
+		// the probe by name and then the network.
 		if (stuck.length > 0) {
 			checks.push(canaryCheck("kept", { name: net, stuck }, venue));
 		} else if (created) {

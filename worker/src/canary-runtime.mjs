@@ -22,6 +22,7 @@ import { MODEL_ROLE_RE } from "./model-roles.mjs";
 import { parseTriggersDocument } from "./triggers.mjs";
 import { CONTAINER_HOME } from "./container-spec.mjs";
 import { readAuthPolicy } from "./subscription-config.mjs";
+import { HELPER_LABEL_KEY } from "./cpu-reserve.mjs";
 
 // env-internal PATH: host git executable lookup in a clean subprocess environment.
 const exec = promisify(execFile);
@@ -123,7 +124,7 @@ export async function createCanaryRuntime({ env, options, now = Date.now, execCo
 		try { return await execCommand("docker", args, { timeout: 30_000, maxBuffer: 1024 * 1024 }); }
 		catch { fail("canary Docker operation failed; check the local daemon and pinned images"); }
 	};
-	let redis, queues = [], proxyMade = false, outMade = false, lease = null, renewTimer = null, leaseLost = false, interrupted = false;
+	let redis, queues = [], proxyMade = false, proxyTried = false, outMade = false, lease = null, renewTimer = null, leaseLost = false, interrupted = false;
 	const active = new Set();
 	const stops = new Set();
 	const removeContainer = async (container) => {
@@ -138,7 +139,11 @@ export async function createCanaryRuntime({ env, options, now = Date.now, execCo
 		if (renewTimer) clearInterval(renewTimer);
 		const leftovers = [];
 		for (const container of active) await removeContainer(container).catch(() => leftovers.push(container));
-		if (proxyMade) await removeContainer(proxy).catch(() => leftovers.push(proxy));
+		// Issue #978: whenever its `run` was ATTEMPTED, not only after it answered. A `run -d` the 30 s bound killed may
+		// still have made the container (a slow VM-backed daemon can create it after the CLI is gone), and `proxyMade` is set
+		// only on success, so that proxy was never removed. `rm -f` of a name that is not there exits 0 (measured on Docker
+		// 28.0.4), and a failed rm is proved absent by `removeContainer`'s listing or named as a leftover.
+		if (proxyTried) await removeContainer(proxy).catch(() => leftovers.push(proxy));
 		if (outMade) await run(["network", "rm", outNetwork]).catch(() => leftovers.push(outNetwork));
 		for (const queue of queues) await queue.close().catch(() => {});
 		if (lease && !leftovers.length) await lease.release().catch(() => leftovers.push("canary lease (expires in 60 seconds)"));
@@ -174,7 +179,9 @@ export async function createCanaryRuntime({ env, options, now = Date.now, execCo
 			if (proxyMade) return;
 			fs.writeFileSync(join(root, "squid.conf"), policy, { mode: 0o644 });
 			await run(["network", "create", outNetwork]); outMade = true;
-			await run(["run", "--pull=never", "--rm", "-d", "--name", proxy, "--network", outNetwork, "--user", "proxy", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--entrypoint", "/usr/sbin/squid", "--mount", `type=bind,source=${join(root, "squid.conf")},target=/etc/squid/squid.conf,readonly`, CANARY_PROXY_IMAGE, "-f", "/etc/squid/squid.conf", "-NYC"]); proxyMade = true;
+			// Before the `run`, so `close()` removes it however the run ends; labelled as doctor's short-lived helpers are.
+			proxyTried = true;
+			await run(["run", "--pull=never", "--rm", "-d", "--name", proxy, "--label", `${HELPER_LABEL_KEY}=canary-proxy`, "--network", outNetwork, "--user", "proxy", "--cap-drop=ALL", "--security-opt=no-new-privileges", "--entrypoint", "/usr/sbin/squid", "--mount", `type=bind,source=${join(root, "squid.conf")},target=/etc/squid/squid.conf,readonly`, CANARY_PROXY_IMAGE, "-f", "/etc/squid/squid.conf", "-NYC"]); proxyMade = true;
 			await run(["exec", proxy, "squid", "-k", "parse"]);
 		};
 		const prepareSource = async (source) => {
