@@ -32,15 +32,29 @@ export function subscriptionRoutes(job) {
 
 // Auxiliary authority never changes a root candidate's billing class, even when an operator also lists
 // that candidate as an auxiliary model. The latter is useful for panels that include the chosen root.
+// Issue #968: once a random pool has drawn (the job carries the drawn provider and model), the drawn ref is its only
+// root. A candidate it did not draw is not a route of the attempt at all unless it is also listed as an auxiliary model,
+// and then it is admitted as an auxiliary is: it can neither refuse the attempt for its other class nor become a root.
+// Before the draw (no provider yet) every candidate is a root, which is how the whole pool gets classified.
 function auxiliaryRoute(job, ref) {
 	const key = `${ref.provider}/${ref.id}`;
-	const roots = [`${job.provider}/${job.model}`, ...(job.fallbackModels ?? []), ...(job.modelSelection?.candidates ?? [])];
+	const drawn = job.modelSelection !== undefined && job.modelSelection !== null && typeof job.provider === "string" && job.provider !== "" && typeof job.model === "string" && job.model !== "";
+	const roots = [`${job.provider}/${job.model}`, ...(job.fallbackModels ?? []), ...(drawn ? [] : job.modelSelection?.candidates ?? [])];
 	for (const role of [job.watchDecisionModel, job.questionGroupModel, job.answerDecisionModel]) if (role) roots.push(`${role.provider}/${role.id}`);
 	return Array.isArray(job.auxiliaryModels) && job.auxiliaryModels.includes(key) && !roots.includes(key);
 }
 
 export function makeSubscriptionRuntime({ auth, quota, now = Date.now, lookup = builtinModel, packageRootFor = () => null, defaultBackend = "local", isPrivateStoreExposed = () => false } = {}) {
-	/** Whole-pool billing classification cannot return early on a quota wait and hide a paid alternative. */
+	/**
+	 * Whole-pool billing classification cannot return early on a quota wait and hide a paid alternative.
+	 *
+	 * Issue #968: `classes` names every root route's own class, "subscription" for a provider bound to a connection
+	 * (also one that cannot authorize now: `auth.check` answers `managed: true` for a broken binding, so a failing
+	 * subscription never reads as an API-key route) and "api" otherwise. A random pool may hold both, each draw then
+	 * billing its own candidate's class under the trigger's cap (model-selection.mjs); every other route set refuses a
+	 * mix as before. The whole-pool gates above stay whole-pool: an unbounded auxiliary grant, an exposed private store
+	 * and an unavailable row refuse or retry whatever the draw would have been.
+	 */
 	async function inspectPolicy(job) {
 		if (job.auxiliaryModels !== undefined && (auxiliaryModelsProblem(job.auxiliaryModels, job.models) !== null || !Number.isSafeInteger(job.maxCostMicros) || job.maxCostMicros <= 0)) return { ok: false, managed: true, reason: "auth-route-unbounded" };
 		try {
@@ -51,14 +65,18 @@ export function makeSubscriptionRuntime({ auth, quota, now = Date.now, lookup = 
 		let managed = false;
 		let unmanaged = false;
 		const bindings = {};
+		const classes = {};
 		for (const ref of subscriptionRoutes(job)) {
 			const model = lookup(ref.provider, ref.id);
 			const row = await auth.check(ref.provider, { model: ref.id, api: model?.api, baseUrl: model?.baseUrl, readOnly: true });
 			if (row.unavailable) return recordRefusal(row);
-			if (!auxiliaryRoute(job, ref)) { if (row.managed) managed = true; else unmanaged = true; }
+			if (!auxiliaryRoute(job, ref)) {
+				classes[`${ref.provider}/${ref.id}`] = row.managed ? "subscription" : "api";
+				if (row.managed) managed = true; else unmanaged = true;
+			}
 			if (row.ok) bindings[`${ref.provider}/${ref.id}`] = row.managed ? subscriptionBindingDigest(row) : null;
 		}
-		return managed && unmanaged ? { ok: false, managed: true, reason: "auth-mixed-billing" } : { ok: true, managed, bindings };
+		return managed && unmanaged && !job.modelSelection ? { ok: false, managed: true, reason: "auth-mixed-billing" } : { ok: true, managed, bindings, classes };
 	}
 	async function check(job, { attemptId = null, consumeTrial = false } = {}) {
 		if (job.auxiliaryModels !== undefined && (auxiliaryModelsProblem(job.auxiliaryModels, job.models) !== null || !Number.isSafeInteger(job.maxCostMicros) || job.maxCostMicros <= 0)) return { ok: false, managed: true, reason: "auth-route-unbounded" };

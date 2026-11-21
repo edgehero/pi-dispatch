@@ -190,3 +190,66 @@ test("raw auxiliary jobs cannot acquire their explicit ceiling or cap from deplo
 		assert.equal(await readModelSelection(f.redis, f.id), null);
 	}
 });
+
+// Issue #968: a pool mixing billing classes on this host, openai/a an API key and anthropic/b a subscription.
+const BINDING = "d".repeat(64);
+const mixedCheck = (job) => job.provider === "anthropic" ? { ok: true, managed: [{ provider: "anthropic" }], rootManaged: true, binding: BINDING } : { ok: true, managed: [], binding: null };
+const mixedPolicy = (classes) => async () => ({ ok: true, managed: true, classes, bindings: Object.fromEntries(Object.entries(classes).map(([ref, billing]) => [ref, billing === "subscription" ? BINDING : null])) });
+const capped = { imagePreflight: async () => ({ ok: true, capabilities: ["exitAuth", "modelPolicy", "modelFailover", "costCap"] }) };
+
+test("a pool mixing billing classes with no cap of its trigger's own is refused before anything is reserved or stored (issue #968)", async () => {
+	const f = fixture({
+		runtime: runtime({ inspectPolicy: mixedPolicy({ [pool[0]]: "api", [pool[1]]: "subscription" }), check: async () => assert.fail("no candidate auth read") }),
+		deps: { randomInt: () => assert.fail("no draw") },
+		// The deployment's cap gives the job a cap to run under, and still does not stand in for the trigger's.
+		options: { getSettings: () => ({ provider: "openai", model: "default", maxTurns: 5, dailyCap: 10, concurrency: 3, maxCostUsd: "5", softHoldPct: null }) },
+	});
+	const result = await f.run();
+	assert.equal(result.reason, "auth-route-unbounded");
+	assert.equal(result.budgetReserved, false);
+	assert.deepEqual(f.seen, []);
+	assert.equal(await readModelSelection(f.redis, f.id), null);
+});
+
+test("with the trigger's cap, an API-key draw from a mixed pool reaches the subscription check, preparation and the container as api (issue #968)", async () => {
+	const stages = [];
+	const f = fixture({
+		data: { maxCostUsd: "1" },
+		deps: capped,
+		runtime: runtime({
+			inspectPolicy: mixedPolicy({ [pool[0]]: "api", [pool[1]]: "subscription" }),
+			check: async (job) => { stages.push(["check", job.provider, job.modelSelectionBilling]); return mixedCheck(job); },
+			prepare: async (job) => { stages.push(["prepare", job.provider, job.modelSelectionBilling]); return { ok: true, snapshots: [] }; },
+		}),
+	});
+	const result = await f.run();
+	assert.equal(result.outcome, "completed");
+	assert.equal(result.model, "a");
+	const state = await readModelSelection(f.redis, f.id);
+	assert.equal(state.billing, "api");
+	assert.equal(state.binding, null);
+	assert.ok(stages.some(([stage]) => stage === "check") && stages.some(([stage]) => stage === "prepare"), JSON.stringify(stages));
+	assert.ok(stages.every(([, provider, billing]) => provider === "openai" && billing === "api"), JSON.stringify(stages));
+	assert.equal(f.seen.find((value) => value?.model).modelSelectionBilling, "api");
+});
+
+test("a pre-start quota reselection in a mixed pool stays in the subscription class it drew (issue #968)", async () => {
+	const three = ["anthropic/b", "openai/a", "anthropic/c"];
+	const asked = [];
+	let reads = 0;
+	const f = fixture({
+		data: { models: three, modelSelection: { strategy: "random", candidates: three }, maxCostUsd: "1" },
+		deps: capped,
+		runtime: runtime({
+			inspectPolicy: mixedPolicy({ [three[0]]: "subscription", [three[1]]: "api", [three[2]]: "subscription" }),
+			check: async (job) => { asked.push(`${job.provider}/${job.model}`); return job.model === "b" && ++reads > 1 ? exhausted() : mixedCheck(job); },
+		}),
+	});
+	await assert.rejects(f.run, { name: "DelayedError" });
+	assert.equal((await readModelSelection(f.redis, f.id)).phase, "quota-reselectable");
+	const result = await f.run();
+	assert.equal(result.model, "c");
+	assert.equal(f.records.at(-1).result.modelWhy, "random-subscription-limit");
+	assert.equal((await readModelSelection(f.redis, f.id)).billing, "subscription");
+	assert.equal(asked.includes(three[1]), false, "the API-key candidate is never asked about");
+});

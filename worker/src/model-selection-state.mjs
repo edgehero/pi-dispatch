@@ -78,9 +78,16 @@ export async function reuseModelSelection(redis, id, state, { attempt = state?.a
 	return replace(redis, id, state, next);
 }
 
-/** Signed terminal proof AND a successfully persisted authoritative quota observation are required after spawn. */
+/**
+ * Signed terminal proof AND a successfully persisted authoritative quota observation are required after spawn.
+ *
+ * Issue #968: only a subscription choice has an allowance to run out, so a choice committed as "api" (a random pool may
+ * draw an API-key candidate beside subscription ones) is never made reselectable, whatever proof arrives. Every caller
+ * already asks only on a subscription's quota, so this holds the rule where the state lives: an API draw keeps its class
+ * and its candidate for the whole run.
+ */
 export async function allowModelSelectionQuotaReselection(redis, id, state, { beforeStart = false, result = null, quotaConfirmed = false } = {}) {
-	if (!state || quotaConfirmed !== true) return { ok: false };
+	if (!state || quotaConfirmed !== true || state.billing === "api") return { ok: false };
 	const terminal = result?.code === 1 && result.exitLineCode === result.code && result.exitAuth === "verified" && result.aborted !== true && result.lingering !== true && result.toolsStarted === false && result.replaySafe === true && ["quota-exhausted", "rate-limited"].includes(result.providerFailure?.kind) && result.providerFailure?.subscriptionProvider === splitModelEntry(state.ref)?.provider;
 	if (!(beforeStart === true && state.phase === "selected") && !(beforeStart !== true && state.phase === "execution-possible" && terminal)) return { ok: false };
 	return replace(redis, id, state, { ...state, revision: state.revision + 1, phase: "quota-reselectable" });

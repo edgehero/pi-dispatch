@@ -98,3 +98,15 @@ test("malformed or mismatched state refuses, newer state holds, and infrastructu
 	assert.deepEqual(await readModelSelection(redis, id), { newer: true });
 	await assert.rejects(readModelSelection({ get: async () => { throw new Error("unavailable"); } }, id), /unavailable/);
 });
+
+test("a choice committed as api is never made quota-reselectable, before start or after signed proof (issue #968)", async () => {
+	const redis = modelSelectionRedis();
+	let state = (await commitModelSelection(redis, id, { ref: pool[0], candidates: pool, billing: "api", binding: null, now: () => NOW })).state;
+	assert.equal((await allowModelSelectionQuotaReselection(redis, id, state, { beforeStart: true, quotaConfirmed: true })).ok, false);
+	state = (await armModelSelection(redis, id, state)).state;
+	assert.equal((await allowModelSelectionQuotaReselection(redis, id, state, { result: proof, quotaConfirmed: true })).ok, false, "proof naming the ref's own provider does not move an API-key choice");
+	assert.equal((await readModelSelection(redis, id)).phase, "execution-possible");
+	const subscribed = modelSelectionRedis();
+	const twin = (await commitModelSelection(subscribed, id, { ref: pool[0], candidates: pool, billing: "subscription", binding: "a".repeat(64), now: () => NOW })).state;
+	assert.equal((await allowModelSelectionQuotaReselection(subscribed, id, twin, { beforeStart: true, quotaConfirmed: true })).ok, true, "its subscription twin still may");
+});
