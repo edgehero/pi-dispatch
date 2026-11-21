@@ -746,7 +746,10 @@ pi-dispatch triggers check triggers.json.new && mv triggers.json.new triggers.js
   `./triggers.json` there). It reads the settings it judges by from your shell, else from the `.env` there, as
   `run --trigger` does: `PI_TRIGGERS_FILE`, `PI_WORKER_NAME`, `PI_MAX_COST_USD`, `PI_DISPATCH_RUN_ROOTS`,
   `PI_GLOBAL_PI_DIR`, `PI_ENVELOPE_FILE`, `GITHUB_INGEST` and `GITHUB_AUTH_SOURCE`. It refuses when your shell and the
-  `.env` disagree on one of them, and when a secret it asks about is set in one and unset or blank in the other.
+  `.env` disagree on one of them, when a secret it asks about is set in one and empty or blank in the other, and when your
+  shell sets one of these settings or secrets and the `.env` has no line for it: the services read the `.env`, so what
+  only your shell has, they do not (an empty value in your shell counts as unset, as it is for them). It names the variable and never shows its value. With no `.env` in the folder, your
+  shell's settings are the deployment's.
 - A refused file gets one `error:` line per refusal, naming who refuses it and why, then what a start on it would do,
   and exit 1. A refusal your deployment's settings cause whatever the file holds says so. A file every one of them
   takes gets one line with its counts and who takes it, and exit 0. A `note:` line says what refuses nothing: a cron

@@ -632,8 +632,9 @@ A running GitHub poller publishes a heartbeat under the same name a worker on it
 by `poller:live`. Not under `receiver:*`: under `GITHUB_INGEST=both` the receiver and the poller run side by side with one
 name. It holds the poller's version, its last beat, when its next cycle starts, how many repositories it polls, and
 whether it runs on the current triggers file or keeps the last one that loaded, with digests of both texts and never the
-reason or a path. It lasts five minutes past each beat inside a cycle, and the wait plus five minutes past the beat
-before a wait. `pi-dispatch status` and Connections read it; any host's poller satisfies a deployment that polls.
+reason or a path. A poller beats at the top of each cycle, between repositories and between its requests to GitHub once
+a minute has passed since the last beat, and before each wait; the record lasts five minutes past a beat inside a cycle, and the wait plus five minutes
+past the beat before a wait. `pi-dispatch status` and Connections read it; any host's poller satisfies a deployment that polls.
 Deleting `poller:*` changes no polling. A poller older than this release publishes none, which `status` reads as no
 poller ([is it running](polling.md#is-it-running)).
 

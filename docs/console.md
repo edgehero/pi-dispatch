@@ -2921,8 +2921,10 @@ these extra file/lease reads.
   polling a second line comes from the pollers' heartbeats: the host of each running poller and when it beat; "on an
   older triggers file" when one refused the current file and runs on the last copy that loaded, with
   `pi-dispatch triggers check` to run on that host for an operator and a sentence for viewers, and a problem at the top
-  after any other; "no poller reported" when polling is on and no poller publishes one (a poller older than this release
-  publishes none); and "poller not known" when the heartbeats could not be read
+  after any other; and, where the deployment runs a poller by the rule `pi-dispatch status` uses (`GITHUB_INGEST=poll`
+  or `both`, or with it unset a `POLL_REPOS` that names repositories), "no poller reported" when no poller publishes one
+  (a poller older than this release publishes none) and "poller not known" when the heartbeats could not be read. A
+  GitHub App deployment that takes webhooks shows its installation's repositories as polling on and gets neither
   ([is it running](polling.md#is-it-running)). Unknown or
   incomplete reads never mean zero or healthy. The window is the current UTC hour plus the
   preceding 23; last-event times are kept independently. Queued, deduplicated, held, steered and accepted count as taken;

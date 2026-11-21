@@ -82,10 +82,10 @@ replace or reduce the queue counts.
 
 `consumers` reports each worker's queue consumers ([queue consumer health](multi-host.md#queue-consumer-health)), and
 `pollers` the GitHub poller, from the heartbeat a running poller publishes in Valkey: `expected` (whether this
-deployment's `GITHUB_INGEST` says it polls), `hosts` (each poller's heartbeat: `triggers` is `kept` when it runs on the
+deployment runs a poller: `GITHUB_INGEST=poll` or `both`, or with it unset a `POLL_REPOS` that names repositories), `hosts` (each poller's heartbeat: `triggers` is `kept` when it runs on the
 last triggers file that loaded because it refused the current one), `complete`, and a `note` where something needs
 saying, such as "poller: running on the previous triggers.json, the current file is invalid: <reason>", with the reason
 `pi-dispatch triggers check` gives for this folder's file, or that no poller has published a heartbeat while the
-deployment polls. Run it in the deployment folder: `GITHUB_INGEST` and the triggers file are read from this shell, else
-its `.env`, and what cannot be read is named in `local`. The exit code does not change
+deployment polls. Run it in the deployment folder: `GITHUB_INGEST`, `POLL_REPOS` and the triggers file are read from
+this shell, else its `.env`, and what cannot be read is named in `local`. The exit code does not change
 ([is it running](polling.md#is-it-running)).

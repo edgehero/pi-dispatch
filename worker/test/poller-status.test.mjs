@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
-import { POLLER_GRACE_MS, POLLER_LIVE, POLLER_MAX_BYTES, POLLER_TTL_MAX_MS, makePollerBeat, parsePollerStatus, pollerKey, readPollerStatus, triggersDigest } from "../src/poller-status.mjs";
+import { POLLER_GRACE_MS, POLLER_LIVE, POLLER_MAX_BYTES, POLLER_TTL_MAX_MS, makePollerBeat, parsePollerStatus, pollerExpected, pollerKey, readPollerStatus, triggersDigest } from "../src/poller-status.mjs";
 
 // Issue #970: the poller's heartbeat. Every TTL and age here is on an injected clock or Valkey's own count.
 const AT = Date.UTC(2026, 10, 21, 12);
@@ -200,4 +200,24 @@ test("real Valkey: a beat's record expires by its own TTL, reads back with its a
 	await beat.remove();
 	assert.equal(await redis.exists(pollerKey(name)), 0);
 	assert.equal(await redis.sismember(POLLER_LIVE, name), 0);
+});
+
+test("whether a deployment runs a poller is one rule, for status and Connections alike: GITHUB_INGEST, else POLL_REPOS, else not known", () => {
+	const table = [
+		[{ GITHUB_INGEST: "poll" }, true],
+		[{ GITHUB_INGEST: "both" }, true],
+		[{ GITHUB_INGEST: "webhook" }, false],
+		[{ GITHUB_INGEST: "webhook", POLL_REPOS: "acme/web" }, false, "webhook refuses a poller whatever else is set"],
+		[{}, null],
+		[{ GITHUB_INGEST: "" }, null, "empty is unset, as the receiver reads it"],
+		[{ POLL_REPOS: "acme/web" }, true, "only the poller reads POLL_REPOS"],
+		[{ GITHUB_INGEST: "", POLL_REPOS: "acme/web,acme/api" }, true],
+		[{ POLL_REPOS: "   " }, null, "blank is unset, as the poller reads it"],
+		[{ POLL_REPOS: "" }, null],
+		[{ GITHUB_AUTH_SOURCE: "app" }, null, "what setup github writes with a webhook: it may run no poller"],
+		[{ GITHUB_AUTH_SOURCE: "app", WEBHOOK_SECRET: "w" }, null],
+		[{ GITHUB_AUTH_SOURCE: "app", POLL_REPOS: "acme/web" }, true],
+	];
+	for (const [env, want, why = JSON.stringify(env)] of table) assert.equal(pollerExpected(env), want, why);
+	assert.throws(() => pollerExpected({ GITHUB_INGEST: "pull" }), /GITHUB_INGEST must be webhook, poll or both/);
 });

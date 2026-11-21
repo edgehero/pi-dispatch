@@ -10,7 +10,7 @@ import { FORGE_JOB_RETENTION_S } from "@edgehero/pi-dispatch/retention";
 import { TRIGGERS_FILE_VERSION, parseTriggers } from "@edgehero/pi-dispatch/triggers";
 import { makeCheckMergePolicy, mergePolicyDigest } from "@edgehero/pi-dispatch/merge-policy";
 import { enqueueGitHubJob } from "@edgehero/pi-dispatch/queue";
-import { POLLER_GRACE_MS, POLLER_LIVE, parsePollerStatus, pollerKey, triggersDigest } from "@edgehero/pi-dispatch/poller-status";
+import { POLLER_CYCLE_BEAT_MS, POLLER_GRACE_MS, POLLER_LIVE, parsePollerStatus, pollerKey, triggersDigest } from "@edgehero/pi-dispatch/poller-status";
 import { RECEIVER_VERSION } from "../src/version.mjs";
 
 // Issue #464 (gate round 3): never this host's Valkey. Every start here is judged as answering, unless a test judges it.
@@ -2476,4 +2476,79 @@ test("a PI_WORKER_NAME a worker would refuse publishes no heartbeat, says so onc
 	assert.deepEqual(lines(out, "poller_status_unavailable"), [{ event: "poller_status_unavailable", reason: "identity" }]);
 	assert.equal(queued.length, 6);
 	assert.equal(redis.sets.has(POLLER_LIVE), false);
+});
+
+test("a cycle longer than the grace beats between repositories once a minute, so its record never expires while it polls (issue #970)", async () => {
+	const clock = { ms: NOW };
+	const redis = fakeRedis({ clock });
+	const beats = recordingStatus(redis);
+	// Twelve repositories, two requests each in the cycle that arms them, every request 15 s: a six-minute cycle, past the
+	// five-minute grace.
+	const slow = () => {
+		clock.ms += 15_000;
+		return ghResponse(200, []);
+	};
+	const repos = Array.from({ length: 12 }, (_, i) => `o/r${i + 1}`).join(",");
+	const { out, sleeps } = await runPoller({
+		env: { POLL_REPOS: repos, PI_WORKER_NAME: "mini1" },
+		clock,
+		redis,
+		routes: [
+			{ path: "/issues/events", replies: [slow] },
+			{ path: "/issues/comments", replies: [slow] },
+			{ path: "/pulls?state=open", replies: [slow] },
+		],
+	});
+	assertNoRepoFailure(out);
+	assert.equal(lines(out, "poller_status_unavailable").length, 0);
+	const cycle = lines(out, "poll_cycle")[0];
+	assert.ok(cycle.ms > POLLER_GRACE_MS, `the cycle took ${cycle.ms} ms, longer than the grace`);
+	assert.equal(cycle.ms, 360_000);
+	// The start's and the top's beats at NOW, one before every repository a minute or more after the last (every second
+	// repository from the third, and the renewal's first), then the beat before the wait.
+	const at = beats.map((b) => [b.record.at - NOW, b.record.ttlMs, b.record.nextAt]);
+	assert.deepEqual(at, [
+		[0, POLLER_GRACE_MS, null],
+		[0, POLLER_GRACE_MS, null],
+		...[60_000, 120_000, 180_000, 240_000, 300_000, 360_000].map((ms) => [ms, POLLER_GRACE_MS, null]),
+		[360_000, sleeps[0] + POLLER_GRACE_MS, NOW + 360_000 + sleeps[0]],
+	]);
+	for (let i = 1; i < beats.length; i++) {
+		const gap = beats[i].record.at - beats[i - 1].record.at;
+		assert.ok(gap < beats[i - 1].record.ttlMs, `beat ${i} lands before the one before it expires`);
+		if (i > 1 && beats[i].record.nextAt === null) assert.ok(gap >= POLLER_CYCLE_BEAT_MS, `beat ${i}: at most once a minute`);
+	}
+});
+
+test("one repository's long request loop beats once a minute too: 24 open pull requests' reviews on a slow API keep the record alive (issue #970)", async () => {
+	const clock = { ms: NOW };
+	const redis = fakeRedis({ clock });
+	const beats = recordingStatus(redis);
+	const slow = (body) => () => {
+		clock.ms += 15_000;
+		return ghResponse(200, body);
+	};
+	const open = Array.from({ length: 24 }, (_, i) => ({ ...prNine("c".repeat(40)), number: 100 + i }));
+	const { out, sleeps } = await runPoller({
+		env: STATUS_ENV,
+		clock,
+		redis,
+		routes: [
+			{ path: "/issues/events", replies: [slow([])] },
+			{ path: "/issues/comments", replies: [slow([])] },
+			{ path: "/pulls?state=open", replies: [slow(open)] },
+			{ path: "/reviews", replies: [slow([])] },
+		],
+	});
+	assertNoRepoFailure(out);
+	const cycle = lines(out, "poll_cycle")[0];
+	assert.ok(cycle.ms > POLLER_GRACE_MS, `one repository took ${cycle.ms} ms, longer than the grace`);
+	const inCycle = beats.slice(2, -1);
+	assert.ok(inCycle.length >= 5, `${inCycle.length} beats inside the one repository's poll`);
+	for (let i = 1; i < beats.length; i++) {
+		const gap = beats[i].record.at - beats[i - 1].record.at;
+		assert.ok(gap < beats[i - 1].record.ttlMs, `beat ${i} lands before the one before it expires (gap ${gap} ms)`);
+		if (i > 1 && beats[i].record.nextAt === null) assert.ok(gap >= POLLER_CYCLE_BEAT_MS, `beat ${i}: at most once a minute`);
+	}
+	assert.equal(beats.at(-1).record.nextAt, NOW + cycle.ms + sleeps[0]);
 });
