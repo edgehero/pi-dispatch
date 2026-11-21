@@ -7,6 +7,7 @@ import { writeFileSync, existsSync } from "node:fs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { collectChecks, runDoctor } from "./helpers/doctor.mjs";
 import { doctorSubscriptionCredentials, subscriptionCredentialCheck, listedProviderCredentialChecks, WORKER_SERVICE_KEYS } from "../src/doctor.mjs";
+import { TRIGGERS_FILE_VERSION } from "../src/triggers.mjs";
 
 const instant = 1_800_000_000_000;
 const now = () => instant;
@@ -96,4 +97,51 @@ test("doctor entry reads subscription paths from the deployment service env with
 	assert.equal(captured.authStoreDir, join(root, "private"));
 	assert.match(text, /Subscription credential selected/);
 	assert.doesNotMatch(text, /set OPENAI_API_KEY in \.env|never-print/);
+});
+
+// Issue #968: a random pool whose candidates fall in both billing classes on this host. anthropic is bound to a connection
+// here and openrouter is not, so the pool holds one subscription candidate and one API-key candidate.
+const claude = { ok: true, managed: true, provider: "anthropic", id: "claude", connectionId: "claude", ownerHost: "owner-a", extraUsageCreditMicros: null };
+const mixedPool = ["anthropic/claude-sonnet-4-5", "openrouter/deepseek/deepseek-chat"];
+const MIXED = /random pool mixes billing classes on this host/;
+async function poolChecks(run, { row = claude, shell = {}, candidates = mixedPool } = {}) {
+	const root = tempDir("doctor-mixed-pool-");
+	const path = join(root, "triggers.json");
+	writeFileSync(path, JSON.stringify({ version: TRIGGERS_FILE_VERSION, triggers: [{ on: { type: "label", any: ["pi:mixed"] }, run: { kind: "github", flow: "deploy", models: candidates, modelSelection: { strategy: "random", candidates }, ...run } }] }));
+	// No model catalog: these lines need no pi, so they are said when pi-ai does not load too.
+	return collectChecks({ ...env, PI_TRIGGERS_FILE: path, ...shell }, { cwd: root, home: root, out() {}, spawn: missingBinary, fileExists: (p) => p === path, probeValkey: async () => false, nodeVersion: "22.19.0", platform: "linux", agentDir: join(root, "agent"), wallClock: now, modelCatalog: async () => null, subscriptionFactory: () => ({ auth: { async check(provider) { return provider === "anthropic" ? row : { ok: true, managed: false }; } } }) });
+}
+
+test("doctor fails a random pool mixing billing classes on this host without a cap of its trigger's own, naming the trigger and both classes (issue #968)", async () => {
+	// A deployment cap alone does not count, and a connection that cannot authorize now still makes its provider a subscription.
+	for (const [shell, row] of [[{}, claude], [{ PI_MAX_COST_USD: "5" }, claude], [{}, { ok: false, managed: true, reason: "auth-reauth-required", provider: "anthropic" }]]) {
+		const lines = (await poolChecks({}, { shell, row })).filter((c) => MIXED.test(c.label));
+		assert.equal(lines.length, 1, JSON.stringify({ shell, row: row.reason ?? "ready" }));
+		assert.equal(lines[0].ok, false);
+		assert.notEqual(lines[0].warn, true, "a failure, not a warning: every job of the trigger is refused");
+		assert.match(lines[0].label, /^label trigger #0: .*\(subscription: anthropic\/claude-sonnet-4-5; API key: openrouter\/deepseek\/deepseek-chat\) and the trigger sets no positive run\.maxCostUsd$/);
+		assert.match(lines[0].fix, /^set a positive run\.maxCostUsd, or keep the pool in one billing class/);
+		assert.match(lines[0].fix, /auth-route-unbounded/);
+	}
+});
+
+test("doctor says a capped mixed pool's draws each bill their own class under the cap, and warns when a connection's paid usage is below it (issue #968)", async () => {
+	const capped = await poolChecks({ maxCostUsd: "2" });
+	const fact = capped.find((c) => MIXED.test(c.label));
+	assert.equal(fact.ok, true);
+	assert.match(fact.label, /each draw bills its own candidate's class, and every draw runs under the job's \$2\.00 cap, a subscription draw too/);
+	assert.equal(capped.some((c) => /auth-credit-cap-required/.test(c.label)), false, "no paid usage on the connection, no warning");
+	const credit = await poolChecks({ maxCostUsd: "2" }, { row: { ...claude, extraUsageCreditMicros: 1_000_000 } });
+	const warning = credit.find((c) => /auth-credit-cap-required/.test(c.label));
+	assert.equal(warning.ok, false);
+	assert.equal(warning.warn, true);
+	assert.match(warning.label, /^label trigger #0: the subscription connection for anthropic allows paid extra usage up to \$1\.00 a job, below this pool's \$2\.00 cap/);
+	assert.match(warning.fix, /at most 1\.00/);
+	const fits = await poolChecks({ maxCostUsd: "1" }, { row: { ...claude, extraUsageCreditMicros: 1_000_000 } });
+	assert.equal(fits.some((c) => /auth-credit-cap-required/.test(c.label)), false, "a cap at the connection's ceiling is admitted");
+});
+
+test("doctor says nothing of a random pool in one billing class on this host, capped or not (issue #968)", async () => {
+	assert.equal((await poolChecks({}, { row: { ok: true, managed: false } })).some((c) => MIXED.test(c.label)), false, "nothing bound here: all API keys");
+	assert.equal((await poolChecks({}, { candidates: ["anthropic/claude-sonnet-4-5", "anthropic/claude-haiku-4-5"] })).some((c) => MIXED.test(c.label)), false, "all subscription");
 });

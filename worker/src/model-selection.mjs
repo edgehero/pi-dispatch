@@ -4,6 +4,7 @@ import { modelWindowHasRoom } from "./model-failover.mjs";
 import { modelDollarRows } from "./scoped-limits.mjs";
 import { MODEL_RECHECK_MS, readModelCooldown } from "./model-cooldowns.mjs";
 import { LOCAL_FOLDER_HOLDS_SUBSCRIPTION_AUTH } from "./private-store-boundary.mjs";
+import { effectiveCostCapMicros } from "./money.mjs";
 import { readModelSelection, commitModelSelection, reuseModelSelection, allowModelSelectionQuotaReselection, modelSelectionPolicyDigest } from "./model-selection-state.mjs";
 
 /** An unbiased permutation makes the first eligible entry uniform without giving authored order a priority. */
@@ -22,6 +23,17 @@ const candidateJob = (job, ref) => {
 	const { provider, model } = splitModelEntry(ref);
 	return { ...job, provider, model, models: [...new Set([ref, ...(job.auxiliaryModels ?? [])])] };
 };
+
+/**
+ * Issue #968: the trigger's OWN positive cap, the one a pool mixing billing classes needs. The deployment's cap alone
+ * does not count: it is not a decision about this pool, and a trigger that drew API candidates under a deployment
+ * default only would spend an API key nobody chose a bound for. `maxCostUsd` is the trigger's value as queued (a
+ * malformed one reads as 0, `effectiveCostCapMicros`, so it fails closed), and `maxCostMicros` the cap the job runs
+ * under, which must be a positive integer too.
+ */
+function triggerCapped(job) {
+	return effectiveCostCapMicros(job.maxCostUsd, null) > 0 && Number.isSafeInteger(job.maxCostMicros) && job.maxCostMicros > 0;
+}
 
 /** Polling is bounded independently of reset evidence: an unknown provider reset must never become a fabricated time. */
 function waiting(blockers, at) {
@@ -47,31 +59,38 @@ export async function selectRandomModelJob(job, { redis, id, retry = false, retr
 	}
 	if (locked && !candidates.includes(locked)) return { refused: "model-selection-policy-changed" };
 	const subscriptions = new Map();
-	let billing = null;
+	// Issue #968: the billing class is each candidate's own (`classes[ref]`, "subscription" or "api"), decided by the
+	// draw, never one class for the whole pool. A candidate bound to a connection that cannot authorize right now
+	// (signed out, exhausted, unreadable) still classifies "subscription", so a failing subscription never reads as an
+	// API-key route. No entry means an unwired seam, which pins nothing, as an unwired pool's null billing did.
+	let classes = {};
 	let bindings = {};
 	if (subscriptionPolicyCheck) {
 		const policy = await subscriptionPolicyCheck({ ...job, provider: undefined, model: undefined, models: [...new Set([...candidates, ...(job.auxiliaryModels ?? [])])] });
 		if (policy.unavailable) throw new Error("subscription state unavailable");
 		if (!policy.ok) return { refused: policy.reason ?? "model-selection-no-candidate" };
-		if (Object.hasOwn(policy, "managed")) billing = managed(policy) ? "subscription" : "api";
+		classes = policy.classes ?? {};
 		bindings = policy.bindings ?? {};
 	} else if (subscriptionCheck) {
 		// The fallback seam is useful for embedders/tests, and still inspects every route before choosing an order.
-		let subscription = false;
-		let direct = false;
 		for (const ref of candidates) {
 			const checked = await subscriptionCheck(candidateJob(job, ref));
 			if (checked.unavailable) throw new Error("subscription state unavailable");
 			if (checked.reason === LOCAL_FOLDER_HOLDS_SUBSCRIPTION_AUTH || checked.reason === "auth-mixed-billing") return { refused: checked.reason };
-			if (managed(checked)) subscription = true; else direct = true;
+			classes[ref] = managed(checked) ? "subscription" : "api";
 			subscriptions.set(ref, checked);
 			bindings[ref] = checked.binding ?? null;
 		}
-		if (subscription && direct) return { refused: "auth-mixed-billing" };
-		billing = subscription ? "subscription" : "api";
 	}
+	// Issue #968: a pool whose candidates fall in BOTH classes on this host may draw an API-key candidate, so it needs the
+	// trigger's own positive cap, decided here, before continuity, the state, the shuffle, a lease or a commit, so it
+	// costs nothing and refuses the same whatever a draw would have been. The loader cannot decide it: a candidate's
+	// class depends on this host's connections, and the receiver and the poller load the same file without them. A
+	// continuation and a recovery are refused alike, since their pool is the same pool. A pool of one class, API keys
+	// alone included, needs no cap, as before.
+	if (new Set(candidates.map((ref) => classes[ref]).filter((value) => value !== undefined)).size > 1 && !triggerCapped(job)) return { refused: "auth-route-unbounded" };
 	if (continuity) {
-		if (continuity.ref !== locked || ![null, "api", "subscription"].includes(continuity.billing) || continuity.billing !== billing || !(continuity.billing === "subscription" ? typeof continuity.binding === "string" && /^[a-f0-9]{64}$/.test(continuity.binding) : continuity.binding === null)) return { refused: "model-selection-continuation-unavailable" };
+		if (continuity.ref !== locked || ![null, "api", "subscription"].includes(continuity.billing) || continuity.billing !== (classes[locked] ?? null) || !(continuity.billing === "subscription" ? typeof continuity.binding === "string" && /^[a-f0-9]{64}$/.test(continuity.binding) : continuity.binding === null)) return { refused: "model-selection-continuation-unavailable" };
 		if (Object.hasOwn(bindings, locked) && bindings[locked] !== continuity.binding) return { refused: "auth-binding-changed" };
 	}
 	for (let pass = 0; pass < 4; pass++) {
@@ -79,7 +98,9 @@ export async function selectRandomModelJob(job, { redis, id, retry = false, retr
 		if (state?.newer) return { newer: true };
 		if (state?.invalid || !state && retry && !retryNeverStarted && !locked) return { refused: "model-selection-state-unavailable" };
 		if (state && (state.policyDigest !== modelSelectionPolicyDigest(candidates) || !candidates.includes(state.ref) || locked && state.ref !== locked)) return { refused: "model-selection-policy-changed" };
-		if (state && (state.billing !== null && billing !== state.billing || state.binding && Object.hasOwn(bindings, state.ref) && bindings[state.ref] !== state.binding)) return { refused: "auth-binding-changed" };
+		// The committed ref's CURRENT class against the one it was drawn under: a class change of a candidate the run never
+		// drew is nothing to this run, and does not refuse it.
+		if (state && (state.billing !== null && (classes[state.ref] ?? null) !== state.billing || state.binding && Object.hasOwn(bindings, state.ref) && bindings[state.ref] !== state.binding)) return { refused: "auth-binding-changed" };
 		if (state && continuity && (state.billing !== continuity.billing || state.binding !== continuity.binding)) return { refused: "model-selection-continuation-unavailable" };
 		if (state) {
 			const reused = await reuseModelSelection(redis, id, state, { attempt, locked: !!locked });
@@ -93,13 +114,23 @@ export async function selectRandomModelJob(job, { redis, id, retry = false, retr
 		const blockers = [];
 		let conflicted = false;
 		for (const ref of order) {
-			const candidate = { ...candidateJob(job, ref), modelSelectionBilling: billing, modelSelectionBinding: bindings[ref] ?? null };
-			if (continuity) { candidate.modelSelectionBilling = continuity.billing; candidate.modelSelectionBinding = continuity.binding; }
-			if (state && !reselect) { candidate.modelSelectionBilling = state.billing; candidate.modelSelectionBinding = state.binding; }
+			// Issue #968: a quota reselection stays in the class the first draw billed. A candidate of the other class is
+			// passed over before any auth read of it, keeping the permutation (and so the number of random draws) as it
+			// was; when every same-class candidate is blocked the job waits, and never crosses to the other class.
+			if (reselect && state.billing !== null && classes[ref] !== state.billing) { log("model_candidate_skipped", { model: ref, reason: "auth-mixed-billing" }); continue; }
+			// The class this attempt is pinned to: a continuation's, the committed choice's, or (a first draw or a
+			// reselection) the candidate's own. `pinned` falls back to the candidate's class only for a choice an unwired
+			// pickup committed with no class, as the whole pool's class did before.
+			const expected = continuity ? continuity.billing : state && !reselect ? state.billing : classes[ref] ?? null;
+			const pinned = expected ?? classes[ref] ?? null;
+			const candidate = { ...candidateJob(job, ref), modelSelectionBilling: expected, modelSelectionBinding: bindings[ref] ?? null };
+			if (continuity) candidate.modelSelectionBinding = continuity.binding;
+			if (state && !reselect) candidate.modelSelectionBinding = state.binding;
 			if (subscriptionCheck) {
 				const subscription = subscriptions.get(ref) ?? await subscriptionCheck(candidate);
 				if (subscription.unavailable) throw new Error("subscription state unavailable");
-				if (billing !== null && (managed(subscription) ? "subscription" : "api") !== billing || candidate.modelSelectionBinding && subscription.ok && subscription.binding !== undefined && subscription.binding !== candidate.modelSelectionBinding) return { refused: "auth-binding-changed" };
+				// A live class other than the pinned one is a race with a binding change since the inspection, never a skip.
+				if (pinned !== null && (managed(subscription) ? "subscription" : "api") !== pinned || candidate.modelSelectionBinding && subscription.ok && subscription.binding !== undefined && subscription.binding !== candidate.modelSelectionBinding) return { refused: "auth-binding-changed" };
 				if ([LOCAL_FOLDER_HOLDS_SUBSCRIPTION_AUTH, "auth-mixed-billing", "auth-binding-changed"].includes(subscription.reason)) return { refused: subscription.reason };
 				if (!subscription.ok) {
 					if (subscription.wait) {
@@ -118,7 +149,7 @@ export async function selectRandomModelJob(job, { redis, id, retry = false, retr
 				// Once that candidate is ready, persist its authoritative identity with the first choice.
 				if ((!state || reselect) && candidate.modelSelectionBinding === null && typeof subscription.binding === "string") candidate.modelSelectionBinding = subscription.binding;
 			}
-			if (billing === "subscription" && !(typeof candidate.modelSelectionBinding === "string" && /^[a-f0-9]{64}$/.test(candidate.modelSelectionBinding))) return { refused: "auth-binding-changed" };
+			if (pinned === "subscription" && !(typeof candidate.modelSelectionBinding === "string" && /^[a-f0-9]{64}$/.test(candidate.modelSelectionBinding))) return { refused: "auth-binding-changed" };
 			const bad = await checkCandidate(candidate);
 			if (bad) { log("model_candidate_skipped", { model: ref, reason: bad }); continue; }
 			const cooldown = await readModelCooldown(redis, ref, { now });
@@ -131,7 +162,7 @@ export async function selectRandomModelJob(job, { redis, id, retry = false, retr
 				acquired = await acquireEndpoints(candidate);
 				if (!acquired) { await releaseEndpoints(candidate); blockers.push({ wait: "endpoint", resetAt: null }); log("model_candidate_skipped", { model: ref, reason: "endpoint-busy" }); continue; }
 				if (!state || reselect) {
-					const committed = await commitModelSelection(redis, id, { expected: state, ref, candidates, modelWhy: reselect ? "random-subscription-limit" : "random", previous: reselect ? state.ref : null, attempt, billing, binding: candidate.modelSelectionBinding, now });
+					const committed = await commitModelSelection(redis, id, { expected: state, ref, candidates, modelWhy: reselect ? "random-subscription-limit" : "random", previous: reselect ? state.ref : null, attempt, billing: candidate.modelSelectionBilling, binding: candidate.modelSelectionBinding, now });
 					if (!committed.ok) { await releaseEndpoints(candidate); acquired = false; conflicted = true; break; }
 					state = committed.state;
 				}

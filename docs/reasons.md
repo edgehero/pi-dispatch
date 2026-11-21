@@ -1903,9 +1903,9 @@ What to do: Run `pi-dispatch auth status` on the connection owner host, check it
 
 ### auth-route-unbounded
 
-Stopped before starting: the configured subscription connection cannot authorize this job (auth-route-unbounded). No container was started and nothing was spent.
+Stopped before starting: a route this job may take has no bound. A subscription route needs a finite model allowlist; explicit `run.auxiliaryModels` also need exact entries in it and a positive `run.maxCostUsd`; and a random pool whose candidates mix subscription and API-key billing on the worker's host needs a positive `run.maxCostUsd` on its own trigger, since its draw may spend an API key. No container was started and nothing was spent.
 
-What to do: Run `pi-dispatch auth status` on the connection owner host, check its adapter, quota and finite model policy, then reconnect or authorize one ordinary trial when appropriate.
+What to do: For a random pool, set a positive `run.maxCostUsd` on the trigger (the deployment's `maxCostUsd` alone does not count), or keep the pool in one billing class; `pi-dispatch doctor` on the worker names the trigger. See [random pools](triggers.md#choosing-randomly-from-a-reviewed-pool). Otherwise run `pi-dispatch auth status` on the connection owner host and check its adapter, quota and finite model policy.
 
 ### auth-venue-unsupported
 
@@ -1977,7 +1977,7 @@ What to do: Refresh usage on the connection's owning host before retrying. A pro
 
 Stopped before starting: this job's finite model routes mix a bound subscription connection with an unbound API billing route. No container was started and nothing was spent.
 
-What to do: Use only reviewed subscription-bound routes for this job, or use a separate job with only unbound API routes. A subscription fallback cannot spend an API key.
+What to do: Keep a fixed model, its fallback routes and its decision roles within one billing class, or use a separate job with only unbound API routes. A subscription fallback cannot spend an API key. A random pool may mix the two classes under a positive `run.maxCostUsd` on its trigger, each draw billing its own candidate's class ([random pools](triggers.md#choosing-randomly-from-a-reviewed-pool)); a worker from before that refuses such a pool with this reason, so upgrade it.
 
 ### auth-adapter-conflicting
 

@@ -4119,6 +4119,18 @@ export async function collectChecks(shellVars, seams) {
 		try { roleEnvList = allowedModelsFrom(env); } catch {}
 		// Role refusals are determinate without pi; a missing catalog must not hide invalid reviewed policy.
 		checks.push(...resolveDoctorModelRuns({ runs: parseError ? [] : modelRuns, deployment: deploymentSettingsOf(env, settingsFilePath(env, home), fileExists), envList: roleEnvList, modelRoles: triggerModelRoles, projects: modelRoleProjects }).checks);
+		// The subjects and each provider's subscription verdict need no pi (issue #968): a random pool's billing classes are
+		// a fact about this host's connections, and the worker refuses a mixed pool with no cap of its own whatever pi-ai
+		// does, so those lines are said before the catalog loads and also when it does not. A malformed PI_ALLOWED_MODELS is
+		// its own line above (the worker refuses to boot on it), so `roleEnvList` is null then.
+		const subjects = modelSubjects({ runs: parseError ? [] : modelRuns, deployment: deploymentSettingsOf(env, settingsFilePath(env, home), fileExists), envList: roleEnvList, modelRoles: triggerModelRoles, projects: modelRoleProjects });
+		const subscriptionChecks = new Map();
+		for (const subjectProvider of new Set(subjects.flatMap((subject) => [subject.main.provider, ...subject.list.map((ref) => ref.provider)]))) {
+			const result = await subscriptionCredentials.check(subjectProvider);
+			subscriptionChecks.set(subjectProvider, result);
+			if (subjectProvider !== provider && result.managed) checks.push(subscriptionCredentialCheck(subjectProvider, result));
+		}
+		checks.push(...mixedBillingPoolChecks(subjects, { verdictOf: (subjectProvider) => subscriptionChecks.get(subjectProvider) }));
 		const catalog = await (seams.modelCatalog ?? defaultModelCatalog)();
 		if (catalog) {
 			const overlayDir = typeof env.PI_GLOBAL_PI_DIR === "string" && env.PI_GLOBAL_PI_DIR !== "" ? resolve(cwd, env.PI_GLOBAL_PI_DIR) : null;
@@ -4128,19 +4140,6 @@ export async function collectChecks(shellVars, seams) {
 				overlayDoc = readOverlayDoc();
 			} catch {
 				// Unreadable or refused: the overlay lines say which. The checks below then judge builtin models only.
-			}
-			let envList = null;
-			try {
-				envList = allowedModelsFrom(env);
-			} catch {
-				// A malformed PI_ALLOWED_MODELS is its own line above (the worker refuses to boot on it).
-			}
-			const subjects = modelSubjects({ runs: parseError ? [] : modelRuns, deployment: deploymentSettingsOf(env, settingsFilePath(env, home), fileExists), envList, modelRoles: triggerModelRoles, projects: modelRoleProjects });
-			const subscriptionChecks = new Map();
-			for (const subjectProvider of new Set(subjects.flatMap((subject) => [subject.main.provider, ...subject.list.map((ref) => ref.provider)]))) {
-				const result = await subscriptionCredentials.check(subjectProvider);
-				subscriptionChecks.set(subjectProvider, result);
-				if (subjectProvider !== provider && result.managed) checks.push(subscriptionCredentialCheck(subjectProvider, result));
 			}
 
 			// The deployment default's catalog row prints PI_PROVIDER/PI_MODEL: not for a malformed one, whose shape row is
@@ -6656,6 +6655,10 @@ export { resolveConfiguredModelRuns as resolveDoctorModelRuns } from "./model-ob
  * `fallback: true` with the trigger's `primaryProvider`, when the job's list admits the whole failover list (as the
  * worker's walk requires): a failover attempt runs on that ref as its main model, so its provider's credential rules
  * are that attempt's. Off by default, because the other lines judge a fallback through the list already.
+ *
+ * A random candidate's subject (`random: true`) also carries its `trigger` (the trigger's label, shared by every
+ * candidate of one pool) and `triggerCap`, the trigger's OWN cap in micro-dollars or null (issue #968): a pool mixing
+ * billing classes needs that one positive, and the deployment's cap, which `cap` folds in, does not stand in for it.
  */
 export function modelSubjects({ runs = [], deployment, envList = null, modelRoles = {}, projects = [], fallbacks = false }) {
 	const listOf = (list) => (Array.isArray(list) ? list.map(splitModelEntry).filter((ref) => ref !== null).map((ref) => ({ provider: ref.provider, id: ref.model })) : []);
@@ -6666,12 +6669,14 @@ export function modelSubjects({ runs = [], deployment, envList = null, modelRole
 			return null; // a deployment cap that does not parse is `dollarChecks`' line
 		}
 	};
+	// The worker's own reading (model-selection.mjs `triggerCapped`): a malformed value reads as 0, never as no cap.
+	const triggerCapOf = (triggerValue) => effectiveCostCapMicros(triggerValue, null);
 	const subjects = [{ label: "the deployment default", main: { provider: deployment.provider, id: deployment.model }, list: listOf(envList), cap: capOf(undefined), secretNames: [], secretFileNames: [], decisionJob: false, decisionModel: null, named: false, deployment: true }];
 	for (const run of resolveDoctorModelRuns({ runs, deployment, envList, modelRoles, projects }).runs) {
 		if (run.modelSelection) {
 			// Authorization was checked separately by resolveDoctorModelRuns. Each possible execution is a
 			// singleton: unrelated allowed providers need no forwarded credential and cannot widen its cost bound.
-			for (const ref of listOf(run.modelSelection.candidates)) subjects.push({ label: `${run.label} (random candidate ${ref.provider}/${ref.id})`, main: ref, list: [ref], cap: capOf(run.maxCostUsd), secretNames: run.secretNames ?? [], secretFileNames: run.secretFileNames ?? [], decisionJob: run.decisionJob === true, decisionModel: run.decisionModel ?? null, named: true, random: true });
+			for (const ref of listOf(run.modelSelection.candidates)) subjects.push({ label: `${run.label} (random candidate ${ref.provider}/${ref.id})`, main: ref, list: [ref], cap: capOf(run.maxCostUsd), secretNames: run.secretNames ?? [], secretFileNames: run.secretFileNames ?? [], decisionJob: run.decisionJob === true, decisionModel: run.decisionModel ?? null, named: true, random: true, trigger: run.label, triggerCap: triggerCapOf(run.maxCostUsd) });
 			continue;
 		}
 		const main = { provider: run.provider ?? deployment.provider, id: run.model ?? deployment.model };
@@ -7025,6 +7030,64 @@ export function subscriptionCredentialCheck(provider, row) {
 		"auth-policy-invalid": "has an unavailable or invalid connection policy",
 	};
 	return { ok: false, ...(row.reason === "auth-owner-host" ? { warn: true } : {}), label: `Subscription credential selected (${name}) ${words[row.reason] ?? "has unavailable credential metadata"}`, fix: row.reason === "auth-reauth-required" || row.reason === "auth-refresh-uncertain" ? `run \`pi-dispatch auth login${id}\` on the connection owner host` : "run `pi-dispatch auth status` on the connection owner host and correct its reviewed policy, adapter or private store" };
+}
+
+/**
+ * Issue #968: each random pool's billing classes on THIS host, from the per-provider subscription verdicts the lines above
+ * read. A candidate is "subscription" when its provider is bound to a connection here, one that cannot authorize right
+ * now included (the worker classifies it so, subscription-runtime.mjs `inspectPolicy`), and "API key" otherwise. A pool
+ * of one class says nothing. A pool holding both:
+ *   - fails without a positive `run.maxCostUsd` of the trigger's own: the worker refuses every job of it as
+ *     auth-route-unbounded before its draw (model-selection.mjs `triggerCapped`), and the deployment's cap alone does
+ *     not count;
+ *   - with one, gets a fact line: each draw bills its own candidate's class, and the cap bounds a subscription draw too,
+ *     since the runner's cost guard prices every call from the table it pinned before any extension loaded (pi's catalog
+ *     and the overlay models.json) whatever credential carries it; a model priced at zero there is bounded by nothing;
+ *   - and warns for a bound connection whose `extraUsageCreditMicros` is below the job's cap: the worker refuses each
+ *     draw on it as auth-credit-cap-required (subscription-runtime.mjs `check`), so the pool only ever runs API keys.
+ * Classes depend on the host's own connections file, so another host may judge the same pool otherwise; every line
+ * says "on this host". `subjects` are `modelSubjects`' (a random candidate carries `trigger` and `triggerCap`);
+ * `verdictOf(provider)` is the subscription verdict, `{ managed }` and the connection's public fields, or undefined.
+ */
+export function mixedBillingPoolChecks(subjects, { verdictOf = () => undefined } = {}) {
+	const pools = new Map();
+	for (const subject of subjects) {
+		if (subject.random !== true || typeof subject.trigger !== "string") continue;
+		const pool = pools.get(subject.trigger) ?? { cap: subject.cap, triggerCap: subject.triggerCap, subscription: [], api: [], connections: new Map() };
+		const verdict = verdictOf(subject.main.provider);
+		const ref = `${subject.main.provider}/${subject.main.id}`;
+		if (verdict?.managed === true) {
+			pool.subscription.push(ref);
+			pool.connections.set(subject.main.provider, verdict);
+		} else pool.api.push(ref);
+		pools.set(subject.trigger, pool);
+	}
+	const checks = [];
+	for (const [trigger, pool] of pools) {
+		if (pool.subscription.length === 0 || pool.api.length === 0) continue;
+		const classes = `subscription: ${pool.subscription.join(", ")}; API key: ${pool.api.join(", ")}`;
+		if (!(Number.isSafeInteger(pool.triggerCap) && pool.triggerCap > 0)) {
+			checks.push({
+				ok: false,
+				label: `${trigger}: its random pool mixes billing classes on this host (${classes}) and the trigger sets no positive run.maxCostUsd`,
+				fix: "set a positive run.maxCostUsd, or keep the pool in one billing class -- until then the worker refuses every job of this trigger as auth-route-unbounded before its draw, with nothing spent (a deployment cap alone does not count)",
+			});
+			continue;
+		}
+		const cap = Number.isSafeInteger(pool.cap) ? `$${formatMicros(pool.cap)}` : "per-job";
+		checks.push({ ok: true, label: `${trigger}: its random pool mixes billing classes on this host (${classes}); each draw bills its own candidate's class, and every draw runs under the job's ${cap} cap, a subscription draw too: the runner prices its calls from pi's model catalog and the overlay models.json, so a long subscription run can stop at the cap (a model priced at zero there is not bounded by it)` });
+		for (const [connectionProvider, verdict] of pool.connections) {
+			const credit = verdict.extraUsageCreditMicros;
+			if (!Number.isSafeInteger(credit) || credit <= 0 || (Number.isSafeInteger(pool.cap) && pool.cap <= credit)) continue;
+			checks.push({
+				ok: false,
+				warn: true,
+				label: `${trigger}: the subscription connection for ${printable(connectionProvider)} allows paid extra usage up to $${formatMicros(credit)} a job, below this pool's ${cap} cap, so the worker refuses every ${printable(connectionProvider)} draw on this host as auth-credit-cap-required`,
+				fix: `lower the trigger's run.maxCostUsd to at most ${formatMicros(credit)}, or raise the connection's extraUsageCreditMicros in the auth connections file`,
+			});
+		}
+	}
+	return checks;
 }
 
 /** The worker's model catalog (model-catalog.mjs), imported lazily for `defaultProviderOracle`'s reason, or null. */

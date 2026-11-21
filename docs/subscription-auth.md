@@ -43,16 +43,29 @@ For OpenAI:
 supports the direct OpenAI Responses route at `https://api.openai.com/v1`, using the pinned pi 1.4.0
 authentication flow. It does not silently substitute legacy `openai-codex`, classifiers or a custom proxy.
 
-A job's ordinary model routes, including root selection, fallback and internal decision roles, cannot mix
-subscription-bound and unbound API providers. Reviewed fallback between OpenAI and Claude subscription
-connections is supported when both providers are explicitly bound and ordinary admission passes. Each
+One attempt's ordinary model routes, including its root, fallback and internal decision roles, cannot mix
+subscription-bound and unbound API providers (`auth-mixed-billing`). Reviewed fallback between OpenAI and Claude
+subscription connections is supported when both providers are explicitly bound and ordinary admission passes. Each
 provider keeps one active connection; an unavailable subscription never falls back to an API key.
+
+A random pool's candidates may hold both classes. Each draw is one attempt in its own candidate's class: a bound
+provider's model, also one whose connection cannot sign in now, is a subscription candidate, and any other model an
+API-key one. The first draw may pass over an exhausted subscription and land on an API-key candidate the trigger
+listed; once drawn, the class never changes, and a replacement after a subscription limit stays among the
+subscription candidates. A pool that mixes the classes on this host needs a positive `run.maxCostUsd` on its
+trigger and is otherwise refused as `auth-route-unbounded` before its draw. That cap bounds a subscription draw
+too, since the runner prices every call from pi's model catalog and the overlay `models.json` as they were at the
+job's start, whatever credential carries it (a model priced at zero there is not bounded). A connection whose
+`extraUsageCreditMicros` is below the job's cap refuses its own draws as `auth-credit-cap-required`, and doctor
+warns when a mixed pool's cap is above it. See [random pools](triggers.md#choosing-randomly-from-a-reviewed-pool).
 
 An ordinary flow can explicitly authorize additional panel calls with `run.auxiliaryModels`. This hand-authored
 list contains 1–16 exact `provider/model` references, each also present in the explicit finite `run.models`
 allowlist, and requires a positive explicit `run.maxCostUsd`. It permits a panel to use subscription models and
 paid API models together. Random selection and fallback keep their authored root candidates; the chosen
-attempt carries its root plus every auxiliary model into the existing model and cost guards. Extension calls
+attempt carries its root plus every auxiliary model into the existing model and cost guards. After a random draw the
+drawn candidate is the attempt's only root, so another candidate of the pool that is also listed in
+`run.auxiliaryModels` runs as an auxiliary model of that attempt and never decides its billing class. Extension calls
 must use the admitted pi runtime so that every call shares the job's cost cap. Separate CLI processes and
 unmetered HTTP requests do not gain subscription admission.
 

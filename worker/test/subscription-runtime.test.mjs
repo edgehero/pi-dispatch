@@ -50,6 +50,22 @@ test("whole-pool policy inspection classifies exhausted and unavailable routes w
 	assert.deepEqual(calls, []);
 });
 
+test("a random pool's inspection names each root candidate's own class, and a broken binding stays subscription (issue #968)", async () => {
+	const models = ["anthropic/sonnet", "openai/gpt"];
+	const pool = { models, modelSelection: { strategy: "random", candidates: models } };
+	const { runtime, calls } = fixture({ quotaResult: { ok: false, reason: "subscription-quota", until: instant + 100_000 } });
+	const inspected = await runtime.inspectPolicy(pool);
+	assert.equal(inspected.ok, true, "a pool may mix classes: each draw bills its own, under the trigger's cap (model-selection.mjs)");
+	assert.deepEqual(inspected.classes, { "anthropic/sonnet": "subscription", "openai/gpt": "api" });
+	assert.equal(inspected.bindings["anthropic/sonnet"], subscriptionBindingDigest(connection));
+	assert.deepEqual(calls, [], "classification reserves no quota");
+	for (const failure of [{ ok: false, managed: true, reason: "auth-reauth-required" }, { ok: false, managed: true, reason: "auth-owner-host" }]) {
+		const broken = fixture();
+		broken.auth.check = async (provider) => provider === "anthropic" ? failure : { ok: true, managed: false };
+		assert.deepEqual((await broken.runtime.inspectPolicy(pool)).classes, { "anthropic/sonnet": "subscription", "openai/gpt": "api" }, `${failure.reason} never reads as an API-key route`);
+	}
+});
+
 test("random selected billing/account binding survives preparation while ordinary credential refresh remains valid", async () => {
 	const { runtime, auth, calls } = fixture();
 	const binding = subscriptionBindingDigest(connection);
@@ -182,7 +198,30 @@ test("explicit auxiliary routes admit paid panel models while root candidates re
 	assert.equal((await runtime.check(panel)).ok, true);
 	assert.equal((await runtime.check(panel)).rootManaged, true);
 	assert.equal((await runtime.check({ ...panel, auxiliaryModels: undefined })).reason, "auth-mixed-billing");
-	assert.equal((await runtime.inspectPolicy({ ...panel, modelSelection: { strategy: "random", candidates: panel.models } })).reason, "auth-mixed-billing", "an auxiliary grant cannot authorize a paid root candidate");
+	// Issue #968: a random pool may mix classes, and an auxiliary listing does not hide a root candidate's own class. The
+	// pool is inspected before its draw, with no provider or model yet, as the selection asks.
+	const pooled = await runtime.inspectPolicy({ ...panel, provider: undefined, model: undefined, modelSelection: { strategy: "random", candidates: panel.models } });
+	assert.equal(pooled.ok, true);
+	assert.equal(pooled.classes["openrouter/frontier"], "api", "an auxiliary grant cannot make a paid root candidate a subscription route");
+	assert.equal(pooled.classes["anthropic/sonnet"], "subscription");
+});
+
+test("after a random draw only the drawn ref is a root: an undrawn candidate listed as auxiliary neither mixes nor pins the attempt (issue #968)", async () => {
+	const candidates = ["anthropic/sonnet", "openrouter/frontier"];
+	const base = { models: candidates, auxiliaryModels: candidates, modelSelection: { strategy: "random", candidates }, maxCostMicros: 500_000 };
+	const binding = subscriptionBindingDigest(connection);
+	const drawnSubscription = await fixture().runtime.check({ ...base, provider: "anthropic", model: "sonnet", modelSelectionBilling: "subscription", modelSelectionBinding: binding });
+	assert.equal(drawnSubscription.ok, true, "the undrawn API-key candidate is an auxiliary route of this attempt");
+	assert.equal(drawnSubscription.rootManaged, true);
+	assert.equal(drawnSubscription.binding, binding);
+	const drawnApi = await fixture().runtime.check({ ...base, provider: "openrouter", model: "frontier", modelSelectionBilling: "api", modelSelectionBinding: null });
+	assert.equal(drawnApi.ok, true, "the undrawn subscription candidate is an auxiliary route of this attempt");
+	assert.equal(drawnApi.rootManaged, false);
+	assert.equal(drawnApi.binding, null);
+	// The drawn root's own class is still pinned: an API-key draw whose provider was bound since refuses.
+	const rebound = fixture({ row: { ...connection, provider: "openai", adapter: "openai-chatgpt" } });
+	const gpt = ["openai/gpt", "anthropic/sonnet"];
+	assert.equal((await rebound.runtime.check({ models: gpt, auxiliaryModels: ["anthropic/sonnet"], modelSelection: { strategy: "random", candidates: gpt }, maxCostMicros: 500_000, provider: "openai", model: "gpt", modelSelectionBilling: "api", modelSelectionBinding: null })).reason, "auth-binding-changed");
 });
 
 test("auxiliary authority requires a finite exact allowlist and positive explicit cap before auth or quota", async () => {

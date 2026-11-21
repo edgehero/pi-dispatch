@@ -583,6 +583,11 @@ In detail:
 - **The same holds for a model the job may switch to.** A random `modelSelection` candidate or a fallback on
   that provider is eligible with the key only in `run.secrets`, and an auxiliary model on it already took its key
   from there.
+- **A run secret reaches every job of the trigger, whatever model it runs on.** In a random pool that also holds a
+  subscription model ([random pools](triggers.md#choosing-randomly-from-a-reviewed-pool)), a draw that lands on the
+  subscription still gets the key, as a plain variable: pi does not spend it there, but any tool or script the job
+  runs can read it and spend it, outside the cost meter. A key kept in the worker's own environment instead reaches
+  such a draw only when the trigger's `run.auxiliaryModels` name its provider, and pi then spends it under the cap.
 - **Only the API-key variable counts**, and only when all of these hold:
   - it is in `run.secrets`, not `run.secretFiles` (a file secret's variable is a path, never the key);
   - it is not on `PI_FORWARD_ENV`;
