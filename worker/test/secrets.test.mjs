@@ -388,6 +388,49 @@ test("a job with no provider reserves the PI_FORWARD_ENV half and refuses nothin
 	assert.equal((await fn(job({ MY_CUSTOM_KEY: "op://ci/c/key" }, { provider: undefined }))).reserved, "MY_CUSTOM_KEY");
 });
 
+test("issue #967: the declared main credential is resolved when the processor names it, and only that name is lifted", async () => {
+	// The processor admitted the binding at the pickup's credential gate and names it; the resolver asks the same rule
+	// again (`declaredProviderKey`), so a caller cannot widen the reserved set by naming something else.
+	const restore = withoutEnv(PROVIDER_VARS);
+	try {
+		const { fn, calls } = resolver({}, { hostEnv: {} });
+		const declared = job({ OPENROUTER_API_KEY: "op://ci/or/key", STRIPE_KEY: "op://ci/stripe" }, { provider: "openrouter" });
+		const r = await fn(declared, { mainCredential: "OPENROUTER_API_KEY" });
+		assert.equal(r.ok, true);
+		assert.equal(r.secrets.OPENROUTER_API_KEY, "value-for-op://ci/or/key");
+		assert.equal(calls.length, 2);
+		// No option keeps today's behaviour exactly: the provider's own variable is reserved.
+		assert.equal((await fn(declared)).reserved, "OPENROUTER_API_KEY");
+		assert.equal((await fn(declared, { mainCredential: null })).reserved, "OPENROUTER_API_KEY");
+		// The OAuth and bearer variables stay reserved beside a declared API key, and a named one is never lifted.
+		const anthropic = (secrets) => job({ ANTHROPIC_API_KEY: "op://ci/a/key", ...secrets }, { provider: "anthropic" });
+		assert.equal((await fn(anthropic({ ANTHROPIC_OAUTH_TOKEN: "op://ci/a/oauth" }), { mainCredential: "ANTHROPIC_API_KEY" })).reserved, "ANTHROPIC_OAUTH_TOKEN");
+		assert.equal((await fn(job({ ANTHROPIC_AUTH_TOKEN: "op://ci/a/bearer" }, { provider: "anthropic" }), { mainCredential: "ANTHROPIC_AUTH_TOKEN" })).reserved, "ANTHROPIC_AUTH_TOKEN");
+	} finally {
+		restore();
+	}
+});
+
+test("issue #967: the exemption refuses another provider's name, a PI_FORWARD_ENV name, a file secret and a decision job", async () => {
+	const restore = withoutEnv(PROVIDER_VARS);
+	try {
+		const spawnFn = () => assert.fail("a reserved name must refuse before any resolver runs");
+		// The name must be THIS provider's API-key variable.
+		const { fn } = resolver({}, { hostEnv: {}, spawnFn });
+		assert.equal((await fn(job({ OPENROUTER_API_KEY: "op://ci/or/key" }, { provider: "openrouter" }), { mainCredential: "ANTHROPIC_API_KEY" })).reserved, "OPENROUTER_API_KEY");
+		// A PI_FORWARD_ENV name is the operator's own host value.
+		const forwarded = resolver({}, { hostEnv: {}, spawnFn, forwardEnv: ["OPENROUTER_API_KEY"] }).fn;
+		assert.equal((await forwarded(job({ OPENROUTER_API_KEY: "op://ci/or/key" }, { provider: "openrouter" }), { mainCredential: "OPENROUTER_API_KEY" })).reserved, "OPENROUTER_API_KEY");
+		// A file secret of the same name keeps it reserved, in either map.
+		assert.equal((await fn(job({ OPENROUTER_API_KEY: "op://ci/or/key" }, { provider: "openrouter", secretFiles: { OPENROUTER_API_KEY: "op://ci/or/file" } }), { mainCredential: "OPENROUTER_API_KEY" })).reserved, "OPENROUTER_API_KEY");
+		assert.equal((await fn(job({}, { provider: "openrouter", secretFiles: { OPENROUTER_API_KEY: "op://ci/or/file" } }), { mainCredential: "OPENROUTER_API_KEY" })).reserved, "OPENROUTER_API_KEY");
+		// A decision job keeps the host's credential, so its provider's variable stays reserved however it is named.
+		assert.equal((await fn(job({ OPENROUTER_API_KEY: "op://ci/or/key" }, { provider: "openrouter", watch: { findingId: "f" } }), { mainCredential: "OPENROUTER_API_KEY" })).reserved, "OPENROUTER_API_KEY");
+	} finally {
+		restore();
+	}
+});
+
 // --- what a host advertises (issue #704) ---
 
 test("servableSecretProfiles: env as declared, overlay only inside the roots, ambiguity advertises nothing", () => {

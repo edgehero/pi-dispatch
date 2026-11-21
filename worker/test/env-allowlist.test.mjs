@@ -1590,3 +1590,53 @@ test("an admitted keyless auxiliary keeps its fixed credential slot beneath the 
 	assert.equal(env.PI_DISPATCH_KEYLESS, "keyless");
 	assert.equal(env.ANTHROPIC_API_KEY, HOST.ANTHROPIC_API_KEY);
 });
+
+// --- issue #967: a declared run secret is the main provider's credential ---
+
+test("declaredProviderKey: the provider's own API-key variable in run.secrets, and nothing else, is a declared credential", { skip }, () => {
+	const { declaredProviderKey } = mod;
+	const job = (over) => ({ kind: "github", provider: "openrouter", secrets: { OPENROUTER_API_KEY: "op://ci/or/key" }, ...over });
+	assert.equal(declaredProviderKey(job({})), "OPENROUTER_API_KEY");
+	assert.equal(declaredProviderKey(job({ provider: "anthropic", secrets: { ANTHROPIC_API_KEY: "ref" } })), "ANTHROPIC_API_KEY");
+	// pi reads the bearer and the OAuth variable before the API key and sends them as other credentials: never declared.
+	for (const name of ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN"]) assert.equal(declaredProviderKey(job({ provider: "anthropic", secrets: { [name]: "ref" } })), null, name);
+	assert.equal(declaredProviderKey(job({ provider: "anthropic" })), null, "another provider's variable is no credential of this one");
+	assert.equal(declaredProviderKey(job({ secretFiles: { OPENROUTER_API_KEY: "ref" } })), null, "a file secret of the same name keeps it reserved");
+	assert.equal(declaredProviderKey(job({ secrets: undefined, secretFiles: { OPENROUTER_API_KEY: "ref" } })), null, "a file alone is a path, never the key");
+	assert.equal(declaredProviderKey(job({}), { forwardEnv: ["OPENROUTER_API_KEY"] }), null, "a PI_FORWARD_ENV name is the operator's host value");
+	for (const field of ["watch", "answerDraft", "questionGrouping"]) assert.equal(declaredProviderKey(job({ [field]: { runId: "r" } })), null, `a ${field} job keeps the host's credential`);
+	assert.equal(declaredProviderKey(job({ provider: "github-copilot", secrets: { COPILOT_GITHUB_TOKEN: "ref" } })), null, "a provider that needs host authentication is never declared");
+	assert.equal(declaredProviderKey(job({ provider: "local-ollama", secrets: { OPENROUTER_API_KEY: "ref" } })), null, "a provider pi reads no key variable for has none to declare");
+	assert.equal(declaredProviderKey(job({ secrets: Object.create({ OPENROUTER_API_KEY: "inherited" }) })), null, "own keys only");
+	assert.equal(declaredProviderKey(job({ provider: undefined })), null);
+});
+
+test("a declared main credential is the job's credential: its value is written, the host's is not, and auth.json is never read", { skip }, () => {
+	const options = { provider: "anthropic", model: "m", maxTurns: 5, jobId: "job-1", forgeKind: "github", authFromPi: true, readFile: () => assert.fail("auth.json must not be read for a declared credential"), secrets: { ANTHROPIC_API_KEY: "declared-key" }, mainCredential: "ANTHROPIC_API_KEY" };
+	const bare = buildContainerEnv({ ...options, hostEnv: {} });
+	assert.equal(bare.ANTHROPIC_API_KEY, "declared-key", "no host key needed at all");
+	// A host bearer or OAuth variable reaches the env only through PI_FORWARD_ENV, and pi would take either first.
+	const host = { ANTHROPIC_API_KEY: "host-key", ANTHROPIC_AUTH_TOKEN: "host-bearer", ANTHROPIC_OAUTH_TOKEN: "host-oauth" };
+	const env = buildContainerEnv({ ...options, hostEnv: host, forwardEnv: ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN"] });
+	assert.equal(env.ANTHROPIC_API_KEY, "declared-key");
+	assert.equal("ANTHROPIC_AUTH_TOKEN" in env, false, "a forwarded bearer token cannot outrank the declared key");
+	assert.equal("ANTHROPIC_OAUTH_TOKEN" in env, false, "nor a forwarded OAuth token");
+	assert.equal(JSON.stringify(env).includes("host-key"), false, "the host's key is not read for this provider");
+	// Without the argument the same inputs are the host's credential, as before.
+	assert.equal(buildContainerEnv({ ...options, mainCredential: null, readFile: undefined, authFromPi: false, hostEnv: host, forwardEnv: ["ANTHROPIC_AUTH_TOKEN"] }).ANTHROPIC_AUTH_TOKEN, "host-bearer");
+});
+
+test("a declared main credential refuses a wrong name, an empty value and a subscription snapshot, and never names the value", { skip }, () => {
+	const options = { provider: "openrouter", model: "m", maxTurns: 5, jobId: "job-1", hostEnv: { OPENROUTER_API_KEY: "host-key" }, secrets: { OPENROUTER_API_KEY: "declared-private" }, mainCredential: "OPENROUTER_API_KEY" };
+	assert.equal(buildContainerEnv(options).OPENROUTER_API_KEY, "declared-private");
+	const refused = (over) => assert.throws(() => buildContainerEnv({ ...options, ...over }), (error) => error.piDispatchConfig === true && !error.message.includes("declared-private") && !error.message.includes("host-key"), JSON.stringify(over));
+	refused({ mainCredential: "ANTHROPIC_API_KEY" });
+	refused({ provider: "anthropic", mainCredential: "ANTHROPIC_AUTH_TOKEN", secrets: { ANTHROPIC_AUTH_TOKEN: "declared-private" } });
+	// No fallback: an empty or missing value is refused, never replaced by the host's key.
+	refused({ secrets: { OPENROUTER_API_KEY: "" } });
+	refused({ secrets: {} });
+	refused({ subscriptionAuth: [{ provider: "openrouter", env: { OPENROUTER_API_KEY: "subscription" } }] });
+	// A subscription token in Anthropic's API-key variable: pi would send it as a subscription login (`isOAuthTokenValue`).
+	refused({ provider: "anthropic", mainCredential: "ANTHROPIC_API_KEY", secrets: { ANTHROPIC_API_KEY: "sk-ant-oat01-declared-private" } });
+	assert.equal(buildContainerEnv({ ...options, provider: "anthropic", mainCredential: "ANTHROPIC_API_KEY", secrets: { ANTHROPIC_API_KEY: "sk-ant-api03-declared" } }).ANTHROPIC_API_KEY, "sk-ant-api03-declared");
+});

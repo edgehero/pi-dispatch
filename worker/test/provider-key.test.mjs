@@ -2,7 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 // Static, unlike env-allowlist below: provider-key.mjs imports nothing at all, so its own rules are
 // testable on a box where pi-ai will not load and the oracle round-trips skip.
-import { BEARER_KEY_RE, HOST_AUTH_PROVIDERS, OAUTH_KEY_RE, apiKeyVariable, needsHostAuthentication, nonApiKeyKind } from "../src/provider-key.mjs";
+import { readFileSync } from "node:fs";
+import { BEARER_KEY_RE, HOST_AUTH_PROVIDERS, OAUTH_KEY_RE, apiKeyVariable, isOAuthTokenValue, needsHostAuthentication, nonApiKeyKind } from "../src/provider-key.mjs";
 
 // env-allowlist imports @earendil-works/pi-ai (for findEnvKeys). That needs node >=22.19.0 and installed
 // deps, so the round-trips skip on a below-floor dev box and run in CI, where
@@ -111,4 +112,17 @@ test("the browser's host-auth guidance policy names actual pinned providers with
 	assert.equal(apiKeyVariable(providerKeyCandidates("github-copilot")), "COPILOT_GITHUB_TOKEN");
 	assert.equal(apiKeyVariable(providerKeyCandidates("huggingface")), "HF_TOKEN");
 	assert.equal(needsHostAuthentication("huggingface"), false);
+});
+
+// Issue #967: the worker refuses a run secret declared as Anthropic's key when pi would send it as a subscription login,
+// so the restated test must be pi's own, a substring test anywhere in the value, never a prefix test of ours. Pinned
+// against the pinned artifact's text, read from the installed package (no pi code runs), and by behaviour.
+test("isOAuthTokenValue is pi's own isOAuthToken: the marker anywhere in an Anthropic value, and only for anthropic", () => {
+	const source = readFileSync(new URL("../../node_modules/@earendil-works/pi-ai/dist/api/anthropic-messages.js", import.meta.url), "utf8");
+	assert.match(source, /function isOAuthToken\(apiKey\) \{\s*return apiKey\.includes\("sk-ant-oat"\);\s*\}/, "pi's test at the pin is a substring test of this marker");
+	assert.equal(isOAuthTokenValue("anthropic", "sk-ant-oat01-abc"), true);
+	assert.equal(isOAuthTokenValue("anthropic", "Bearer sk-ant-oat01-abc"), true, "not only at the start, as pi reads it");
+	assert.equal(isOAuthTokenValue("anthropic", "sk-ant-api03-abc"), false);
+	assert.equal(isOAuthTokenValue("openrouter", "sk-ant-oat01-abc"), false, "another provider's credential is not judged by Anthropic's rule");
+	assert.equal(isOAuthTokenValue("anthropic", undefined), false);
 });

@@ -59,6 +59,18 @@ export function nonApiKeyKind(name) {
 }
 
 /**
+ * pi's own test for a subscription token in an API-key slot, restated: `isOAuthToken` in
+ * pi-ai/dist/api/anthropic-messages.js is `apiKey.includes("sk-ant-oat")`, applied to the value whatever
+ * variable carried it, so such a token in ANTHROPIC_API_KEY is sent as a subscription login. Restricted to
+ * `anthropic`, the provider whose credential this is; the value itself is never printed. Here rather than in
+ * doctor (issue #967) because the worker asks it too, of a run secret declared as the job's credential, and the
+ * two must not drift into two spellings of one test.
+ */
+export function isOAuthTokenValue(provider, value) {
+	return provider === "anthropic" && typeof value === "string" && value.includes("sk-ant-oat");
+}
+
+/**
  * The api-key variable to write and to name, given pi's candidate list for a provider in pi's own
  * precedence order. Never the OAuth token and never the bearer token, whatever that precedence says: pi
  * returns ANTHROPIC_AUTH_TOKEN then ANTHROPIC_OAUTH_TOKEN before ANTHROPIC_API_KEY, "set your subscription

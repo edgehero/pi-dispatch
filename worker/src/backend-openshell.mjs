@@ -18,6 +18,7 @@ import { bindProbeArgs, driverConfigFor, judgeBindAnswer, judgeGatewayStatus, ju
 export { judgePtraceScope, PTRACE_SCOPE_PATH };
 import { DEFAULT_JOB_SIZE } from "./job-size.mjs";
 import { makeRunContainer } from "./run-container.mjs";
+import { declaredProviderKey } from "./env-allowlist.mjs";
 import { OPENSHELL_REFUSALS } from "./comment-tables.mjs";
 
 /**
@@ -1319,7 +1320,12 @@ export function makeOpenshellBackend(opts = {}) {
 		// A `kind: local` job runs unarmed on every venue (`recoverSkipped: "local"`), so it is not refused here either.
 		// Issue #686 part 3: bind mode serves it (the host workspace is salvaged and snapshotted at exit, as on `local`).
 		if (!binding && job?.recover === true && job?.kind !== "local") return { venueRefused: { reason: "openshell-recover-unsupported", comment: OPENSHELL_REFUSALS["openshell-recover-unsupported"] } };
-		if (credentialReadsValue(job?.provider, hostEnv)) {
+		// Issue #967: a job whose trigger declares its provider's API key as a run secret runs on that value alone, which
+		// buildContainerEnv writes in place of the host's credential and the processor has judged (a subscription token is
+		// refused there, `isOAuthTokenValue`). The worker's own environment is then not the job's credential, so its
+		// value is not asked here: a host OAuth token must not refuse a job that will never carry it. The value-reading
+		// providers by name are all host-authenticated, so none of them can be declared.
+		if (declaredProviderKey(job, { forwardEnv }) === null && credentialReadsValue(job?.provider, hostEnv)) {
 			log("openshell_credential_reads_value", { provider: typeof job?.provider === "string" ? job.provider : null });
 			return { venueRefused: { reason: "openshell-credential-reads-value", comment: OPENSHELL_REFUSALS["openshell-credential-reads-value"] } };
 		}

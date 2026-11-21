@@ -1513,6 +1513,72 @@ test("the free credential gate resolves against the SAME inputs buildContainerEn
 	assert.deepEqual(gate({ provider: "local-ollama" }, { modelEndpoints: { ...snapshot, models: null, modelsUnreadable: { code: "EIO" } } }), { ok: false, unavailable: "EIO" });
 });
 
+test("issue #967: a run secret declaring the main provider's key is the credential at both wired gates, and the host is not asked", { skip }, async () => {
+	// Driven through the wired gates rather than the helper: a deployment that keeps every provider key in its secret
+	// store has no OPENROUTER_API_KEY in the worker env and no auth.json login (PI_AUTH_FROM_PI=0), and an openrouter job
+	// whose trigger declares the key must pass the pickup gate and the candidate gate on the declaration alone.
+	const makeAuth = async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" });
+	const { deps } = await runStart({ env: { PI_AUTH_FROM_PI: "0", PI_EGRESS: "0", PI_FORWARD_ENV: "MY_CUSTOM_KEY" }, makeAuth, makeHost: () => fakeHost() });
+	const gate = deps.checkProviderCredential;
+	const declared = { kind: "local", provider: "openrouter", model: "deepseek/deepseek-chat", secrets: { OPENROUTER_API_KEY: "op://ci/or/key" } };
+	assert.deepEqual(await gate(declared), { ok: true, declared: "OPENROUTER_API_KEY" }, "before the resolver the declared name is the answer");
+	assert.deepEqual(await gate(declared, { secrets: { OPENROUTER_API_KEY: "sk-or-declared" } }), { ok: true, declared: "OPENROUTER_API_KEY" });
+	assert.equal((await gate({ ...declared, secrets: undefined })).ok, false, "without the binding the host is asked, and has no key");
+	assert.equal((await gate({ ...declared, secrets: {}, secretFiles: { OPENROUTER_API_KEY: "op://ci/or/key" } })).ok, false, "a file secret is no credential");
+	assert.equal((await gate({ ...declared, provider: "anthropic", model: "m", secrets: { ANTHROPIC_OAUTH_TOKEN: "op://ci/a/oauth" } })).ok, false, "nor the OAuth variable");
+	assert.equal((await gate({ ...declared, watch: { findingId: "f" } })).ok, false, "a decision job keeps the host's credential");
+	// The candidate gate of a random pool or a fallback: the candidate carries the job's secrets.
+	const candidate = { ...declared, models: ["openrouter/deepseek/deepseek-chat"] };
+	assert.equal(await deps.checkFailoverCandidate(candidate, { models: null, endpoints: [] }), null, "the declared key makes the candidate eligible");
+	assert.equal(await deps.checkFailoverCandidate({ ...candidate, secrets: undefined }, { models: null, endpoints: [] }), "provider-unconfigured");
+
+	// A subscription token in the API-key variable is refused after the resolver: pi would send it as a subscription
+	// login. The same gate judges an auxiliary provider's declared key, so the job is refused for it there too.
+	const anthropic = { ...declared, provider: "anthropic", model: "claude-sonnet-4-5", secrets: { ANTHROPIC_API_KEY: "op://ci/a/key" } };
+	assert.deepEqual(await gate(anthropic), { ok: true, declared: "ANTHROPIC_API_KEY" });
+	const token = await gate(anthropic, { secrets: { ANTHROPIC_API_KEY: "sk-ant-oat01-subscription-private" } });
+	assert.equal(token.ok, false);
+	assert.match(token.message, /ANTHROPIC_API_KEY holds a subscription token/);
+	assert.equal(token.message.includes("sk-ant-oat01"), false, "the variable is named, never the value");
+	assert.deepEqual(await gate(anthropic, { secrets: { ANTHROPIC_API_KEY: "sk-ant-api03-key" } }), { ok: true, declared: "ANTHROPIC_API_KEY" });
+
+	// A PI_FORWARD_ENV name is the operator's host value: no declaration, so the gate reads the host as before, and a
+	// candidate on that provider is not eligible on the binding either.
+	const forwarded = await runStart({ env: { PI_AUTH_FROM_PI: "0", PI_EGRESS: "0", PI_FORWARD_ENV: "OPENROUTER_API_KEY" }, makeAuth, makeHost: () => fakeHost() });
+	assert.equal((await forwarded.deps.checkProviderCredential(declared)).ok, false);
+	assert.equal((await forwarded.deps.checkProviderCredential(declared)).declared, undefined);
+	assert.equal(await forwarded.deps.checkFailoverCandidate(candidate, { models: null, endpoints: [] }), "provider-unconfigured");
+
+	// Exclusive, with no fallback: after the resolver an empty value refuses even with the key in the host env.
+	const hostKeyed = await runStart({ env: { PI_AUTH_FROM_PI: "0", OPENROUTER_API_KEY: "sk-or-host" }, makeAuth, makeHost: () => fakeHost() });
+	const empty = await hostKeyed.deps.checkProviderCredential(declared, { secrets: { OPENROUTER_API_KEY: "" } });
+	assert.equal(empty.ok, false);
+	assert.equal(empty.declared, undefined);
+	assert.equal(JSON.stringify(empty).includes("sk-or-host"), false);
+	assert.equal((await hostKeyed.deps.checkProviderCredential(declared, { secrets: {} })).ok, false, "nor a missing one");
+});
+
+test("issue #967: a provider bound to a subscription answers with the subscription's row, never a declared key", { skip }, async () => {
+	const deployment = tempDir("pi-declared-managed-");
+	const storeDir = join(deployment, "private-auth");
+	mkdirSync(storeDir, { recursive: true, mode: 0o700 });
+	const policyFile = join(deployment, "connections.json");
+	writeFileSync(policyFile, JSON.stringify({ version: 1, connections: [{ id: "chatgpt", provider: "openai", adapter: "openai-chatgpt", ownerHost: "declared-worker" }], bindings: { openai: "chatgpt" } }), { mode: 0o600 });
+	const { deps } = await runStart({
+		env: { PI_AUTH_FROM_PI: "0", PI_EGRESS: "0", PI_WORKER_NAME: "declared-worker", PI_AUTH_CONNECTIONS_FILE: policyFile, PI_AUTH_STORE_DIR: storeDir, PI_SETTINGS_FILE: join(deployment, "settings.json"), PI_JOBS_DIR: join(deployment, "jobs"), PI_SWEEP_INTERVAL_HOURS: "0" },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 5, source: "gh" }), makeHost: () => fakeHost(),
+	});
+	const job = { kind: "local", provider: "openai", model: "gpt-5", secrets: { OPENAI_API_KEY: "op://ci/openai/key" } };
+	for (const options of [undefined, { secrets: { OPENAI_API_KEY: "sk-declared" } }]) {
+		const verdict = await deps.checkProviderCredential(job, options);
+		assert.equal(verdict.managed, true, "the managed branch runs first");
+		assert.equal(verdict.declared, undefined);
+	}
+	// The candidate gate asks the subscription first too: this connection has no login yet, so its verdict refuses the
+	// candidate, and the run secret beside it does not make it eligible.
+	assert.equal(await deps.checkFailoverCandidate({ ...job, models: ["openai/gpt-5"] }, { models: null, endpoints: [] }), "provider-unconfigured");
+});
+
 test("the MCP check is wired into the processor, reads the boot's overlay per job, and keeps the provider's key from a server (REQ-MCP-OPERATOR-SERVERS)", { skip }, async () => {
 	// Driven rather than read: the processor's own default refuses every job that names a server, so a wiring that
 	// dropped this dep (or put it on a backend bundle the processor never sees) would refuse each run.mcp job as

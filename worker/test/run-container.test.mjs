@@ -49,6 +49,20 @@ test("a grouping container receives its two provider credentials but no forwarde
 	assert.ok(recorder.args.includes("/host/folder:/workspace:ro"), "the grouping workspace is bound read-only by the worker");
 });
 
+test("issue #967: the declared main credential's name reaches the env builder, so the job runs on the trigger's key with none on the host", { skip }, async () => {
+	// The host holds no openrouter key and reads no auth.json: without the name passed on, the builder asks the host and
+	// refuses, which is the provider-unconfigured class the gate already admitted this job past.
+	const job = { kind: "local", provider: "openrouter", model: "deepseek/deepseek-chat", maxTurns: 5 };
+	const hostEnv = { PATH: "/usr/bin" };
+	const recorder = {};
+	const run = mod.makeRunContainer({ image: "pi-job:x", hostEnv, authFromPi: false, spawnFn: fakeSpawn(recorder) });
+	await run({ job, prepared: { ...PREPARED }, secrets: { OPENROUTER_API_KEY: "sk-or-declared" }, mainCredential: "OPENROUTER_API_KEY", name: "declared-env", signal: new AbortController().signal });
+	assert.ok(recorder.args.includes("OPENROUTER_API_KEY=sk-or-declared"), "the declared value is the credential");
+	await assert.rejects(() => run({ job, prepared: { ...PREPARED }, secrets: { OPENROUTER_API_KEY: "sk-or-declared" }, name: "host-env", signal: new AbortController().signal }), (error) => error.piDispatchConfig === true, "without it the host is asked, as before");
+	// Never off the job: a queued field of that name chooses nothing.
+	await assert.rejects(() => run({ job: { ...job, mainCredential: "OPENROUTER_API_KEY" }, prepared: { ...PREPARED }, secrets: { OPENROUTER_API_KEY: "sk-or-declared" }, name: "job-field", signal: new AbortController().signal }), (error) => error.piDispatchConfig === true);
+});
+
 /** A fake `docker` child: records argv, lets the test drive its exit. */
 function fakeSpawn(recorder, exitCode = 0) {
 	return (cmd, args) => {

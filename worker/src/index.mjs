@@ -257,6 +257,15 @@ export function effectiveJobOf(data, settings, allowedModels = null, log = () =>
 }
 
 /**
+ * The secrets resolver bound to one job start (REQ-TRIGGER-SECRETS): its abort `signal` and this job-start's overlay
+ * profile table, which only this scope owns. Issue #967: the processor's own options (the declared main credential's
+ * name) pass through UNDER the two bound here, spread first, so nothing the processor hands down can replace either.
+ */
+export function boundSecretsResolver(resolve, { signal, overlayProfiles }) {
+	return (job, options = {}) => resolve(job, { ...options, signal, overlayProfiles });
+}
+
+/**
  * The jobs this host runs right now (issue #599, phase 2): one entry per PICKUP that holds a slot, `{ id, project, memMiB,
  * cpuCenti, at }`, `at` its admission instant in millis (the record's `startedAt`). The registry beat publishes it
  * (`jobs`, live-jobs.mjs), and the capacity report counts each as busy until its record exists.
@@ -2027,7 +2036,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				// `secretProfiles` is the OVERLAY half of the resolver table, read this job-start with the ten
 				// tunables above. It is bound here rather than at construction for the reason the overlay exists:
 				// an operator who declares a profile in the panel must not have to restart the worker.
-				...(deps.resolveSecrets ? { resolveSecrets: (j) => deps.resolveSecrets(j, { signal, overlayProfiles: settings.secretProfiles ?? {} }) } : {}),
+				...(deps.resolveSecrets ? { resolveSecrets: boundSecretsResolver(deps.resolveSecrets, { signal, overlayProfiles: settings.secretProfiles ?? {} }) } : {}),
 				// Issue #704: the bundle seam, bound the same way and for the same two reasons: the read runs inside the kill
 				// timer, so it takes the signal, and the overlay half of the bundle profiles is this job-start's settings read.
 				...(deps.secretBundles ? { secretBundles: { lookup: (profile) => deps.secretBundles.lookup(profile, { overlayBundles: settings.secretBundles ?? {} }), resolve: (j, binding) => deps.secretBundles.resolve(j, binding, { signal, overlayBundles: settings.secretBundles ?? {} }) } } : {}),

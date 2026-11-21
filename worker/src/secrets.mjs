@@ -26,7 +26,7 @@
 import { spawn } from "node:child_process";
 import { isUtf8 } from "node:buffer";
 import { realpathSync, statSync } from "node:fs";
-import { providerKeyCandidates } from "./env-allowlist.mjs";
+import { declaredProviderKey, providerKeyCandidates } from "./env-allowlist.mjs";
 import { EXIT_POLICY } from "./exit-code.mjs";
 import { mergeSecretProfiles, withinRoots } from "./secret-profiles.mjs";
 
@@ -218,7 +218,7 @@ export function realExecutable(p) {
 /**
  * Build the pre-spend resolver the processor injects.
  *
- * `(job) => { ok, secrets } | { profileUnknown } | { ambiguous } | { unresolved, ... } | { unreachable, ... }`
+ * `(job, { signal, overlayProfiles, mainCredential }) => { ok, secrets } | { profileUnknown } | { ambiguous } | { reserved } | { unresolved, ... } | { unreachable, ... }`
  *
  * `envProfiles` is parsed at BOOT by `config.mjs`; `overlayProfiles` arrives per job, because the settings
  * overlay is read at each job start (INT-CONFIG-OVERLAY-CONTRACT) and an operator who declares a profile in
@@ -257,7 +257,7 @@ export function makeSecretsResolver({
 	realExecutablePath = realExecutable,
 	log = () => {},
 } = {}) {
-	return async function resolveSecrets(job, { signal, overlayProfiles = {} } = {}) {
+	return async function resolveSecrets(job, { signal, overlayProfiles = {}, mainCredential = null } = {}) {
 		const merged = mergeSecretProfiles(envProfiles, overlayProfiles);
 		if (merged.ambiguous) return { ambiguous: merged.ambiguous };
 
@@ -325,6 +325,17 @@ export function makeSecretsResolver({
 		// anthropic job binding OPENAI_API_KEY for a flow that talks to OpenAI itself is still allowed. That
 		// is deliberate, and tested; refusing it would be this project inventing a namespace it does not own.
 		const reserved = new Set([...providerKeyCandidates(job?.provider), ...forwardEnv]);
+		// Issue #967: the ONE exception. A trigger that binds the variable the worker itself writes for this job's provider
+		// declares that value as the job's credential, and the processor, having admitted it at the pickup's credential
+		// gate, says so by name. It is lifted from the set only when the name it gives is exactly what the shared rule
+		// (`declaredProviderKey`, the same function the gate asked) derives from this job and this deployment's
+		// PI_FORWARD_ENV: the API-key variable of THIS provider, an own key of `run.secrets` and of no `run.secretFiles`,
+		// on no forwarded name, no decision job and no host-authenticated provider. Any other name stays reserved, so a
+		// caller cannot widen the set by naming something, and without the option the set is exactly what it was. The
+		// issue #309 hazard does not return: the replacement is no longer silent, because the processor hands the name to the container as THE credential and
+		// the host's key for the provider is then not read at all; the OAuth and bearer variables pi reads first stay
+		// reserved here and are removed from the env there.
+		if (typeof mainCredential === "string" && mainCredential === declaredProviderKey(job, { forwardEnv })) reserved.delete(mainCredential);
 		for (const name of [...Object.keys(references), ...Object.keys(fileReferences)]) {
 			if (reserved.has(name)) return { reserved: name };
 		}

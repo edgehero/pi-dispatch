@@ -5005,6 +5005,11 @@ test("doctor: a trigger binding a variable pi reads for the provider FAILS at se
 	// gate stopped depending on host state: the presence-filtered version's answer changed with whichever
 	// machine doctor happened to run on.
 	//
+	// Issue #967 changed what this binding means: HF_TOKEN alone in run.secrets is now the trigger's declared
+	// credential for huggingface, which the worker admits. It still fails here for a reason the worker still
+	// refuses: the same name is in PI_FORWARD_ENV, where the operator's host value claims it. The declared
+	// case is pinned right below.
+	//
 	// The fixture uses HF_TOKEN rather than GEMINI_API_KEY since issue #314, and the reason is worth
 	// keeping: a name in PROVIDER_STEERING_VARS refuses at LOAD and never reaches this check at all.
 	// An early draft of #314 had GEMINI_API_KEY in that set; the set as landed subtracts every key
@@ -5016,6 +5021,7 @@ test("doctor: a trigger binding a variable pi reads for the provider FAILS at se
 	const env = {
 		PI_PROVIDER: "huggingface",
 		HF_TOKEN: "hf-x",
+		PI_FORWARD_ENV: "HF_TOKEN",
 		PI_TRIGGERS_FILE: secretsTriggersFile({ profile: "prod", names: ["HF_TOKEN"] }),
 		PI_SECRET_PROFILES: "prod:/opt/pi/resolve.sh",
 	};
@@ -5024,7 +5030,110 @@ test("doctor: a trigger binding a variable pi reads for the provider FAILS at se
 	assert.ok(hit, "the finding must exist at all");
 	assert.equal(hit.ok, false);
 	assert.match(hit.label, /HF_TOKEN/, "it names the variable the operator has to rename");
+	assert.match(hit.label, /huggingface/, "and the provider it was judged against");
 	assert.match(hit.fix, /secret-name-reserved/, "and the refusal they would otherwise have met");
+});
+
+// Issue #967: a trigger's run secret named like its OWN main provider's API-key variable is the job's credential, which
+// the worker admits, so doctor says it as a fact line naming the trigger and the variable, never as a failure.
+test("doctor: the main provider's own API-key variable in run.secrets is a declared credential, a fact line naming the trigger", { skip: skipNoPi }, async () => {
+	const env = { PI_PROVIDER: "huggingface", PI_TRIGGERS_FILE: secretsTriggersFile({ profile: "prod", names: ["HF_TOKEN"] }), PI_SECRET_PROFILES: "prod:/opt/pi/resolve.sh" };
+	const checks = await collectChecks(env, secretsSeams());
+	assert.equal(checks.some((c) => !c.ok && /variable pi reads for/.test(c.label)), false, "no failure");
+	const line = checks.find((c) => /replaces this host's credential/.test(c.label));
+	assert.ok(line, "the fact line exists");
+	assert.equal(line.ok, true);
+	assert.match(line.label, /label trigger #0: HF_TOKEN \(huggingface, on every job of its trigger\)/);
+});
+
+/** A triggers file of label triggers, each `run` merged over a github flow trigger. */
+function providerSecretsFile(runs) {
+	const path = join(tempDir("pi-triggers-provider-secrets-"), "triggers.json");
+	writeFileSync(path, JSON.stringify({ version: TRIGGERS_FILE_VERSION, triggers: runs.map((run, i) => ({ on: { type: "label", any: [`pi:t${i}`] }, run: { kind: "github", flow: "deploy", secretsProfile: "prod", ...run } })) }));
+	return path;
+}
+
+test("doctor: the clash line asks each trigger's OWN provider, and each random candidate's, not PI_PROVIDER (#967)", { skip: skipNoPi }, async () => {
+	const base = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_SECRET_PROFILES: "prod:/opt/pi/resolve.sh" };
+	// A trigger on openai binding ANTHROPIC_API_KEY binds another provider's variable: the worker runs it, and so does doctor.
+	const other = await collectChecks({ ...base, PI_TRIGGERS_FILE: providerSecretsFile([{ provider: "openai", model: "gpt-5", secrets: { ANTHROPIC_API_KEY: "op://ci/a" } }]) }, secretsSeams());
+	assert.equal(other.find((c) => /variable pi reads for/.test(c.label))?.label, "No trigger binds a variable pi reads for openai");
+	// Each refused shape, against the trigger's own provider: a file secret and the OAuth variable.
+	const refused = await collectChecks({ ...base, PI_TRIGGERS_FILE: providerSecretsFile([
+		{ provider: "openrouter", model: "deepseek/deepseek-chat", secretFiles: { OPENROUTER_API_KEY: "op://ci/or" } },
+		{ secrets: { ANTHROPIC_OAUTH_TOKEN: "op://ci/oauth" } },
+	]) }, secretsSeams());
+	const clash = refused.find((c) => !c.ok && /variable pi reads for/.test(c.label));
+	assert.ok(clash, "the clash line fails");
+	assert.match(clash.label, /label trigger #0: OPENROUTER_API_KEY \(openrouter; refused on every job of its trigger\)/);
+	assert.match(clash.label, /label trigger #1: ANTHROPIC_OAUTH_TOKEN \(anthropic; refused on every job of its trigger\)/);
+	// A watch trigger's jobs are watch jobs, which keep the host's credential: its provider's key stays reserved.
+	const watchPath = join(tempDir("pi-triggers-watch-secrets-"), "triggers.json");
+	writeFileSync(watchPath, JSON.stringify({ version: TRIGGERS_FILE_VERSION, watchSources: { prod: { verify: "hmac-sha256", secretEnv: "WATCH_SECRET" } }, triggers: [{ on: { type: "watch", id: "errors", source: "prod", fingerprint: ["service"], window: "10m", cooldown: "6h", maxPerDay: 4 }, run: { kind: "local", mode: "investigate", folder: "/srv/app", flow: "triage", task: "t", maxCostUsd: "1", provider: "openrouter", model: "deepseek/deepseek-chat", secrets: { OPENROUTER_API_KEY: "op://ci/or" } } }] }));
+	const watched = await collectChecks({ ...base, PI_TRIGGERS_FILE: watchPath }, secretsSeams());
+	assert.match(watched.find((c) => !c.ok && /variable pi reads for/.test(c.label))?.label ?? "", /OPENROUTER_API_KEY \(openrouter; refused on every job of its trigger\)/);
+	assert.equal(watched.some((c) => /replaces this host's credential/.test(c.label)), false);
+	// A random pool is judged per candidate: the openrouter draw's declared key is a fact line, the anthropic draw has no clash.
+	const pool = ["anthropic/claude-sonnet-4-5", "openrouter/deepseek/deepseek-chat"];
+	const random = await collectChecks({ ...base, PI_TRIGGERS_FILE: providerSecretsFile([{ models: pool, modelSelection: { strategy: "random", candidates: pool }, secrets: { OPENROUTER_API_KEY: "op://ci/or" } }]) }, secretsSeams());
+	assert.equal(random.some((c) => !c.ok && /variable pi reads for/.test(c.label)), false);
+	assert.match(random.find((c) => /replaces this host's credential/.test(c.label))?.label ?? "", /random candidate openrouter\/deepseek\/deepseek-chat\): OPENROUTER_API_KEY \(openrouter, on its draws\)/);
+});
+
+test("doctor: each fallback is judged against its own provider, as the failover attempt that runs on it is (#967)", { skip: skipNoPi }, async () => {
+	// The worker runs a failover attempt as a job whose main model is the fallback, so its provider's variables are that
+	// attempt's: the OAuth variable is refused there, and the API-key variable is the attempt's credential.
+	const base = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_SECRET_PROFILES: "prod:/opt/pi/resolve.sh" };
+	const failover = (secrets) => providerSecretsFile([{ provider: "openrouter", model: "deepseek/deepseek-chat", fallbackModels: ["anthropic/claude-sonnet-4-5"], models: ["openrouter/deepseek/deepseek-chat", "anthropic/claude-sonnet-4-5"], secrets }]);
+	const refused = await collectChecks({ ...base, PI_TRIGGERS_FILE: failover({ OPENROUTER_API_KEY: "op://ci/or", ANTHROPIC_OAUTH_TOKEN: "op://ci/oauth" }) }, secretsSeams());
+	assert.match(refused.find((c) => !c.ok && /variable pi reads for/.test(c.label))?.label ?? "", /label trigger #0 \(fallback anthropic\/claude-sonnet-4-5\): ANTHROPIC_OAUTH_TOKEN \(anthropic; refused on its failover attempts\)/);
+	const declared = await collectChecks({ ...base, PI_TRIGGERS_FILE: failover({ ANTHROPIC_API_KEY: "op://ci/a" }) }, secretsSeams());
+	assert.equal(declared.some((c) => !c.ok && /variable pi reads for/.test(c.label)), false);
+	assert.match(declared.find((c) => /replaces this host's credential/.test(c.label))?.label ?? "", /label trigger #0 \(fallback anthropic\/claude-sonnet-4-5\): ANTHROPIC_API_KEY \(anthropic, on its failover attempts\)/);
+});
+
+test("doctor: a fallback is judged only where the worker's walk tries it: the whole list admitted, once per ref, and not behind a subscription fence (#967)", { skip: skipNoPi }, async () => {
+	const base = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_SECRET_PROFILES: "prod:/opt/pi/resolve.sh" };
+	const clashOf = (checks) => checks.find((c) => !c.ok && /variable pi reads for/.test(c.label))?.label ?? "";
+	const oauth = { provider: "openrouter", model: "deepseek/deepseek-chat", fallbackModels: ["anthropic/claude-sonnet-4-5"], secrets: { ANTHROPIC_OAUTH_TOKEN: "op://ci/oauth" } };
+	// No allowed-model list at all: `failoverListUsable` refuses every job as model-failover-no-candidate, so no attempt
+	// runs on the fallback and nothing is said of it.
+	const unlisted = await collectChecks({ ...base, PI_TRIGGERS_FILE: providerSecretsFile([oauth]) }, secretsSeams());
+	assert.equal(clashOf(unlisted), "");
+	// The deployment's list admitting it (no run.models) is the job's list, so the fallback is judged; one that does not
+	// admit it refuses every job the same way.
+	assert.match(clashOf(await collectChecks({ ...base, PI_ALLOWED_MODELS: "openrouter/deepseek/deepseek-chat,anthropic/claude-sonnet-4-5", PI_TRIGGERS_FILE: providerSecretsFile([oauth]) }, secretsSeams())), /\(fallback anthropic\/claude-sonnet-4-5\): ANTHROPIC_OAUTH_TOKEN/);
+	assert.equal(clashOf(await collectChecks({ ...base, PI_ALLOWED_MODELS: "openrouter/deepseek/deepseek-chat", PI_TRIGGERS_FILE: providerSecretsFile([oauth]) }, secretsSeams())), "");
+	// A fallback equal to the primary is the primary: the walk's set holds it once, so the trigger is named once.
+	const same = await collectChecks({ ...base, PI_TRIGGERS_FILE: providerSecretsFile([{ provider: "openrouter", model: "deepseek/deepseek-chat", models: ["openrouter/deepseek/deepseek-chat"], fallbackModels: ["openrouter/deepseek/deepseek-chat"], secrets: { OPENROUTER_API_KEY: "op://ci/or" } }]) }, secretsSeams());
+	assert.match(same.find((c) => /replaces this host's credential/.test(c.label))?.label ?? "", /^1 trigger secret\(s\) /);
+	// Behind a primary bound to a subscription the walk skips a fallback that is not (auth-mixed-billing): neither its
+	// file secret nor its declared key is said to matter, since no attempt runs on it.
+	const fenced = (secrets) => providerSecretsFile([{ provider: "openai", model: "gpt-5", models: ["openai/gpt-5", "openrouter/deepseek/deepseek-chat"], fallbackModels: ["openrouter/deepseek/deepseek-chat"], maxCostUsd: "1", ...secrets }]);
+	const subscriptionFactory = () => ({ auth: { async check(provider) { return provider === "openai" ? { ok: true, managed: true, provider: "openai", connectionId: "chatgpt" } : { ok: true, managed: false }; } } });
+	for (const secrets of [{ secretFiles: { OPENROUTER_API_KEY: "op://ci/or" } }, { secrets: { OPENROUTER_API_KEY: "op://ci/or" } }]) {
+		const checks = await collectChecks({ ...base, PI_AUTH_CONNECTIONS_FILE: "/srv/pi/connections.json", PI_TRIGGERS_FILE: fenced(secrets) }, { ...secretsSeams(), subscriptionFactory });
+		assert.equal(clashOf(checks), "", JSON.stringify(Object.keys(secrets)));
+		assert.equal(checks.some((c) => /replaces this host's credential/.test(c.label)), false);
+	}
+});
+
+test("doctor: a watch rule's decide model keeps every variable of its provider reserved, as the worker does (#967)", { skip: skipNoPi }, async () => {
+	const path = join(tempDir("pi-triggers-watch-decide-"), "triggers.json");
+	const decide = { model: "openrouter/typesafe/jev-1.13", maxCostUsd: "0.001", fields: ["service"], questions: { act: { type: "choice", criteria: { investigate: "failure", ignore: "noise", file_issue: "ask person" } } }, act: { investigate: 0.7, ignore: 0.9, otherwise: "file_issue" } };
+	writeFileSync(path, JSON.stringify({ version: TRIGGERS_FILE_VERSION, watchSources: { prod: { verify: "hmac-sha256", secretEnv: "WATCH_SECRET" } }, triggers: [{ on: { type: "watch", id: "errors", source: "prod", fingerprint: ["service"], window: "10m", cooldown: "6h", maxPerDay: 4 }, run: { kind: "local", mode: "investigate", folder: "/srv/app", flow: "triage", task: "t", maxCostUsd: "1", issue: { kind: "github", repo: "acme/shop" }, secrets: { OPENROUTER_API_KEY: "op://ci/or" } }, decide }] }));
+	const checks = await collectChecks({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_SECRET_PROFILES: "default:/opt/pi/resolve.sh", PI_TRIGGERS_FILE: path }, secretsSeams());
+	assert.match(checks.find((c) => !c.ok && /variable pi reads for/.test(c.label))?.label ?? "", /OPENROUTER_API_KEY \(openrouter, the watch rule's decide model; refused on every job of its trigger\)/);
+});
+
+test("doctor: a provider bound to a subscription here keeps its API-key variable reserved, as the worker's gate does (#967)", { skip: skipNoPi }, async () => {
+	const env = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_SECRET_PROFILES: "prod:/opt/pi/resolve.sh", PI_AUTH_CONNECTIONS_FILE: "/srv/pi/connections.json", PI_TRIGGERS_FILE: providerSecretsFile([{ provider: "openai", model: "gpt-5", secrets: { OPENAI_API_KEY: "op://ci/openai" } }]) };
+	const subscriptionFactory = () => ({ auth: { async check(provider) { return provider === "openai" ? { ok: true, managed: true, provider: "openai", connectionId: "chatgpt" } : { ok: true, managed: false }; } } });
+	const checks = await collectChecks(env, { ...secretsSeams(), subscriptionFactory });
+	const clash = checks.find((c) => !c.ok && /variable pi reads for/.test(c.label));
+	assert.ok(clash, "refused, not declared");
+	assert.match(clash.label, /OPENAI_API_KEY \(openai; refused on every job of its trigger\)/);
+	assert.equal(checks.some((c) => /replaces this host's credential/.test(c.label)), false);
 });
 
 test("doctor: the provider clash check follows the PROVIDER, so another provider's variable passes", { skip: skipNoPi }, async () => {
