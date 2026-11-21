@@ -408,8 +408,11 @@ export function loadEnvelopeChecked(config, { projects = [], limits = [], maxCos
 	const envelope = loadEnvelope(config, { projects, limits, maxCostMicros }, io);
 	if (envelope === null) return null;
 	const inside = envelopeInsideJobPaths(config.envelopeFile, jobPaths, containment);
-	if (inside) {
-		throw configError(`the envelope file ${JSON.stringify(String(config.envelopeFile))} lies inside a job path (${inside.kind} ${JSON.stringify(inside.path)}) that a job container can see, so a job could write its own bounds; move the envelope outside every cron run.folder, PI_DISPATCH_RUN_ROOTS root, run.skillsDir and PI_GLOBAL_PI_DIR`);
-	}
+	if (inside) throw configError(envelopeInsideJobPathSentence(config.envelopeFile, inside));
 	return envelope;
+}
+
+/** The boot's refusal for `envelopeInsideJobPaths`' answer, shared with `pi-dispatch triggers check` (issue #970). */
+export function envelopeInsideJobPathSentence(envelopeFile, inside) {
+	return `the envelope file ${JSON.stringify(String(envelopeFile))} lies inside a job path (${inside.kind} ${JSON.stringify(inside.path)}) that a job container can see, so a job could write its own bounds; move the envelope outside every cron run.folder, PI_DISPATCH_RUN_ROOTS root, run.skillsDir and PI_GLOBAL_PI_DIR`;
 }

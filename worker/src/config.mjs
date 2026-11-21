@@ -745,6 +745,49 @@ function usdSetting(env, name) {
 	return raw;
 }
 
+/**
+ * The env keys the worker's trigger loader (`loadSchedules`) judges a file by: the file, the host (`fleet` and an
+ * owner's match come from a declared worker name) and the deployment's per-job cost cap (a trigger's `run.maxCostUsd`
+ * above it refuses the file). `run --trigger` and `triggers check` resolve these from the deployment, and
+ * `triggerLoaderConfig` reads exactly these: the list is held to `loadSchedules`' own reads by worker/test/cli.test.mjs,
+ * and `triggerLoaderConfig`'s reads to the list by worker/test/triggers-check.test.mjs.
+ */
+export const TRIGGER_LOADER_ENV_KEYS = Object.freeze(["PI_TRIGGERS_FILE", "PI_WORKER_NAME", "PI_MAX_COST_USD"]);
+
+/**
+ * The config fields `loadSchedules` reads, built from `env` by `loadConfig`'s own helpers and nothing else (issue #970),
+ * for a caller that judges a triggers file as the worker would without being a worker: `pi-dispatch triggers check`.
+ * Not `loadConfig` itself, which refuses a whole deployment for any key it reads, so an unrelated typo (a bad
+ * `PI_JOB_MEMORY`, say) would refuse a good triggers file. Throws the same configError `loadConfig` throws for a bad
+ * `PI_MAX_COST_USD` or `PI_WORKER_NAME`. worker/test/triggers-check.test.mjs holds every field to `loadConfig`'s.
+ */
+export function triggerLoaderConfig(env = process.env) {
+	return {
+		triggersFile: env.PI_TRIGGERS_FILE ?? null,
+		maxCostUsd: usdSetting(env, "PI_MAX_COST_USD"),
+		workerName: workerName(env),
+		workerNameDeclared: Boolean(env.PI_WORKER_NAME),
+	};
+}
+
+/** The env keys `triggerJobPathConfig` reads: the job paths a triggers file does not name, and the envelope's file. */
+export const TRIGGER_JOB_PATH_ENV_KEYS = Object.freeze(["PI_DISPATCH_RUN_ROOTS", "PI_GLOBAL_PI_DIR", "PI_ENVELOPE_FILE"]);
+
+/**
+ * The config fields the worker's boot judges a triggers file's job paths with (issue #970), `loadConfig`'s own reads:
+ * `envelopeJobPaths` adds the run roots and the overlay to the file's cron folders and skills directories, and the boot
+ * refuses to start when one of them holds the envelope file or the deployment's private endpoint folders. Throws the
+ * same configError `loadConfig` throws for a relative or missing `PI_GLOBAL_PI_DIR`. Held to `loadConfig` by
+ * worker/test/triggers-check.test.mjs, as `triggerLoaderConfig` is.
+ */
+export function triggerJobPathConfig(env = process.env, { fileExists = existsSync } = {}) {
+	return {
+		dispatchRunRoots: delimitedList(env.PI_DISPATCH_RUN_ROOTS),
+		globalPiDir: resolveGlobalPiDir(env, fileExists),
+		envelopeFile: envelopeFilePath(env),
+	};
+}
+
 // The env half of the dollar rule (issue #501). The overlay half runs on MERGED values per job (start.mjs);
 // this one runs on env alone at boot, where an operator is present to read the refusal: a window without a
 // per-job cap (`checkDollarInvariant`), because a window reserves each job's per-job cap and without one there

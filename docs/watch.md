@@ -69,7 +69,7 @@ Sign the exact bytes `v1.<timestamp>.<delivery>.` followed by the body. Use the 
 
 Use at most eight samples of 2048 UTF-8 bytes each. The source body cap cannot exceed 65536 bytes. Redact at the collector and keep host-side redaction enabled; retention and restricted access do not make arbitrary personal data safe to submit.
 
-HTTP 202 reports admission, usually `held` while the digest window is open. It can also report `suppressed`, `capped` or `unmatched`. It does not mean an agent has started. An unknown source returns 404, bad authentication 401, bad finding 400, oversized body 413 and an unavailable secret or store 503. Reuse the original delivery id when retrying a failed delivery.
+HTTP 202 reports admission, usually `held` while the digest window is open. It can also report `suppressed`, `capped` or `unmatched`. It does not mean an agent has started. An unknown source returns 404, bad authentication 401, bad finding 400, oversized body 413 and an unavailable store 503. A source whose secret is unset or blank never gets that far: the receiver does not start on such a file (see [Pull from files, journald or Loki](#pull-from-files-journald-or-loki)). Reuse the original delivery id when retrying a failed delivery.
 
 The first admitted fingerprint starts a digest window. Subsequent events contribute bounded count/samples; after the window, the minimum count controls whether work proceeds. Cooldown suppresses later occurrences. Structured fingerprint values can still be chosen by attackers, so source daily limits, rule daily limits and active-fingerprint caps are essential alongside dollar windows.
 
@@ -127,10 +127,13 @@ Add a `pull` block to a source. These are three alternative blocks:
 ```
 
 Fields and matching are operator-authored. The interval is 5 to 3600 seconds. Loki requires HTTPS, refuses redirects,
-and keeps its optional read credential on the collector host. The source still declares `verify` and `secretEnv` for
-its push endpoint; the pull command does not read that signing secret. Doctor warns when a declared push secret or a
-Loki credential is absent and prints key names only. All samples are replaced with `[redacted]` by default on the host,
-for push and pull, before private evidence is persisted.
+and keeps its optional read credential on the collector host. The source still declares `verify` and `secretEnv`, and
+that signing secret must be set where the pull command runs too: `pi-dispatch-receiver serve`, `poll` and `watch` all
+load the file the same way and refuse to start while a declared source's secret is unset or blank, and a live edit that
+adds such a source leaves them on the rules they run. `pi-dispatch triggers check` says so before you swap the file in
+([triggers.md](triggers.md#check-a-file-before-you-swap-it-in)). Doctor warns when a declared signing secret is unset or
+blank, naming which of them refuse to start, or a Loki credential is absent, and prints key names only. All samples
+are replaced with `[redacted]` by default on the host, for push and pull, before private evidence is persisted.
 
 A file source requires an absolute regular-file path, refuses symlinks, and reads complete lines with an inode/offset
 cursor. Journald uses the named unit and a journal cursor, starting one minute before the initial poll. Loki uses a

@@ -50,6 +50,9 @@ From any terminal:
   between you and the stop ([held jobs and retries](wait-for.md)).
 - `pi-dispatch run --trigger <id>` runs one cron trigger from the triggers file now, once, as its schedule would
   ([firing a cron trigger by hand](triggers.md#firing-a-cron-trigger-by-hand)).
+- `pi-dispatch triggers check [file]` judges a triggers file before you move it over the one the services run, and names the worker,
+  receiver, poller or watch collector that would refuse to start on it, and why. It changes nothing
+  ([check a file before you swap it in](triggers.md#check-a-file-before-you-swap-it-in)).
 - `pi-dispatch capacity` says how busy each host was over the last day, week or thirty days: busy and idle time, jobs at once, memory and CPU
   promised and used, waits and projects, read from the run records. It never loads the full config: it reads only `VALKEY_URL` (or
   `--valkey-url`), `PI_LOGS_DIR`, `PI_LOG_RETENTION_DAYS` and `PI_WORKER_NAME`, from the shell or the `.env` of the folder you run it in (the

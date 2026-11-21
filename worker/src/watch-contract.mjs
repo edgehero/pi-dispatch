@@ -30,6 +30,24 @@ export function normalizeWatchSources(value = {}) {
 	}
 	return sources;
 }
+/**
+ * The declared watch sources whose signing secret this environment lacks, as `[{ source, secretEnv }]` in declaration
+ * order (issue #970). Unset, not a string, empty or only whitespace is missing: a blank secret would verify nothing.
+ *
+ * ONE predicate for every reader of it. The receiver's triggers loader refuses the whole file on any entry here
+ * (receiver/src/config.mjs), so `serve`, `poll` and `watch` refuse to start and a live reload keeps the running rules;
+ * doctor warns with it, and `pi-dispatch triggers check` judges a candidate file with it. Doctor used to test presence
+ * with `length > 0` while the loader trimmed, so a secret of spaces passed doctor and refused the receiver. Names only:
+ * a value never leaves this function.
+ */
+export function watchSecretsMissing(watchSources, env) {
+	const missing = [];
+	for (const [source, declared] of Object.entries(watchSources ?? {})) {
+		const value = env[declared.secretEnv];
+		if (typeof value !== "string" || !value.trim()) missing.push({ source, secretEnv: declared.secretEnv });
+	}
+	return missing;
+}
 export function normalizeWatchOn(on, sources) {
 	object(on, "on"); keys(on, ["type", "id", "source", "match", "fingerprint", "minCount", "window", "cooldown", "maxPerDay", "maxFingerprints"], "on");
 	if (on.type !== "watch") fail("on.type must be watch");

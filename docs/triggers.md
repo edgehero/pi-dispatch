@@ -725,6 +725,66 @@ which never carries the flag.
 - On a fleet it queues on this host's own queue, because the trigger's folder is here. If the folder is on
   another machine, it refuses and tells you to run it there.
 
+## Check a file before you swap it in
+
+The worker, the receiver, the poller and the watch collector each keep the last copy of `triggers.json` that loaded
+when an edit breaks it, and each logs that it kept the last good copy. But each refuses to start on a file it cannot load (exit 2, and its service
+manager does not restart it). So a bad edit costs nothing until a restart, and then takes that one process down while
+the others go on with their old copies. That is how one invalid entry left polling down for good while the worker
+looked healthy.
+
+`pi-dispatch triggers check` judges a file by the rules each of them loads it by, before any of them sees it. Write the
+change to a copy next to the file, check the copy, then move it over the file:
+
+```sh
+cp triggers.json triggers.json.new
+$EDITOR triggers.json.new
+pi-dispatch triggers check triggers.json.new && mv triggers.json.new triggers.json
+```
+
+- Run it from the deployment folder. With no file named it checks the deployment's own (`PI_TRIGGERS_FILE`, else
+  `./triggers.json` there). It reads the settings it judges by from your shell, else from the `.env` there, as
+  `run --trigger` does: `PI_TRIGGERS_FILE`, `PI_WORKER_NAME`, `PI_MAX_COST_USD`, `PI_DISPATCH_RUN_ROOTS`,
+  `PI_GLOBAL_PI_DIR`, `PI_ENVELOPE_FILE`, `GITHUB_INGEST` and `GITHUB_AUTH_SOURCE`. It refuses when your shell and the
+  `.env` disagree on one of them, and when a secret it asks about is set in one and unset or blank in the other.
+- A refused file gets one `error:` line per refusal, naming who refuses it and why, then what a start on it would do,
+  and exit 1. A refusal your deployment's settings cause whatever the file holds says so. A file every one of them
+  takes gets one line with its counts and who takes it, and exit 0. A `note:` line says what refuses nothing: a cron
+  trigger another host schedules, a cron pattern with no next run (an existing schedule of that id then keeps its old
+  pattern, and a new one is never made), and a job path the worker cannot read when it looks for its private endpoint
+  folders, which it logs and starts anyway. The check writes nothing and tells no service anything: a running one
+  reloads the file itself once you move it in. `pi-dispatch triggers` with no `check` prints its usage and exits 1, so
+  a script that forgot the word moves nothing.
+- The worker is judged only where `PI_TRIGGERS_FILE` is set: without it the worker reads no triggers file and schedules
+  no cron. It refuses what its start refuses: a `run.maxCostUsd` above `PI_MAX_COST_USD`; a cron trigger's folder or
+  `skillsDir` missing from this machine; a cron pattern BullMQ will not schedule (`0 99 * * *`, `0 0 31 2 *`: the file
+  only checks that it has five or six fields); a job path that holds the envelope file (`PI_ENVELOPE_FILE`) or the
+  deployment folder's `egress-private/` or `egress-grants/`; and, with an envelope set, any job path or envelope path
+  its check cannot judge (one it cannot read, a link, a relative path). A job path from `PI_DISPATCH_RUN_ROOTS` or
+  `PI_GLOBAL_PI_DIR` is the deployment's, and its refusal says so. On a fleet (`PI_WORKER_NAME` set) a cron trigger
+  whose folder is not here is another host's, and the check says so in a note.
+- A watch source whose signing secret (its `secretEnv`) is unset or blank refuses the receiver, the poller and the
+  watch collector. The secret is read for whether it is set, never for its value, which is not printed. One exception:
+  a source whose `secretEnv` is `WEBHOOK_SECRET`, on a deployment that sets none, is taken by the poller and refused by
+  `serve`.
+- With `GITHUB_INGEST` and `GITHUB_AUTH_SOURCE` unset, the file decides whether `serve` takes GitHub webhooks: one
+  GitHub rule is enough, and then `serve` needs `WEBHOOK_SECRET`. So adding the first GitHub rule to a deployment with
+  no `WEBHOOK_SECRET` is refused for the receiver and the watch collector. The poller does not need it while it is
+  unset or empty, but a `WEBHOOK_SECRET` of spaces refuses the poller too. Set `GITHUB_INGEST=poll` if the poller
+  brings GitHub's events. Where `GITHUB_INGEST` or `GITHUB_AUTH_SOURCE` already says GitHub, the same refusal is named
+  as the deployment's.
+- The watch collector is named only where a pull source is known: in the file, or, for a file that does not parse, in
+  the deployment's current file. A file that removes the last pull source gets a note: a watch collector started on it
+  refuses to start.
+- It does not judge the rest of the environment (a forge's own settings, `POLL_REPOS`, `GITHUB_INGEST=webhook` against a
+  poller, Valkey), the other files a service loads at start (the envelope's own content, the pause windows, the scoped
+  limits, the projects, the model endpoints), nor what only a live fleet can say (whether the hosts agree on the cron
+  set). `pi-dispatch doctor` does. Nor does it know which of the services run on this host: it answers for each one
+  that would load the file here.
+- Move the copy in one step, with `mv` in the same folder. A file written in place can be read half written, and the
+  poller then refuses that read once and goes on with its last good copy. A single-file bind mount (compose's
+  `triggers.json:ro`) keeps the file it started with, whatever you move over it, until the container restarts.
+
 ## Local folders behind a link
 
 A local job's folder is resolved when the job is prepared, and the container mounts the resolved folder, not the
@@ -1009,7 +1069,8 @@ receiver logs `github_rules_unserved` on each such reload, and the console's tri
 add one. Under `GITHUB_INGEST=poll` the poller takes the new trigger at its next cycle or event and no restart is
 needed: it reads the file again at the start of each cycle and before it judges each event. A bad edit leaves each of
 them on the last copy that loaded, and each logs why (`schedules_reload_invalid` from the worker,
-`triggers_reload_invalid` from the receiver and the poller).
+`triggers_reload_invalid` from the receiver and the poller). A restart on that file fails, so check an edit before you
+move it in ([Check a file before you swap it in](#check-a-file-before-you-swap-it-in)).
 
 `dispatch_trigger_add` takes only the fields its trigger type uses. A field the type does not take is refused before
 the operator is asked to confirm, by its name and with the list the type does take, for example: "dispatch_trigger_add

@@ -1536,7 +1536,7 @@ test("a set PI_TRIGGERS_FILE that names no file, or is empty, is a ✗; unset ke
 	const cwd = scaffoldedCwd();
 	const readEnvFile = (path) => readFileSync(path, "utf8");
 	const envPath = join(cwd, ".env");
-	const refusal = "the worker and the receiver refuse to start on it (exit 2)";
+	const refusal = "the worker, the receiver and the poller refuse to start on it (exit 2)";
 	const run = async (text, shell = {}) => {
 		writeFileSync(envPath, text);
 		const c = capture();
@@ -1546,10 +1546,12 @@ test("a set PI_TRIGGERS_FILE that names no file, or is empty, is a ✗; unset ke
 	const empty = await run("PI_TRIGGERS_FILE=\n");
 	assert.equal(empty.code, 1);
 	const note = ` -- PI_TRIGGERS_FILE read from ${envPath}, as the service reads it; this shell does not set it`;
-	assert.ok(empty.text.includes(`✗ PI_TRIGGERS_FILE is set to an empty value, which neither process reads as unset: ${refusal}${note}\n`), empty.text);
+	assert.ok(empty.text.includes(`✗ PI_TRIGGERS_FILE is set to an empty value, which no reader takes as unset: ${refusal}${note}\n`), empty.text);
 	const missing = await run("", { PI_TRIGGERS_FILE: "/nonexistent/t.json" });
 	assert.equal(missing.code, 1);
 	assert.ok(missing.text.includes(`✗ PI_TRIGGERS_FILE names "/nonexistent/t.json", which does not exist: ${refusal}\n`), missing.text);
+	// Issue #970: unset, the poller reads ./triggers.json as the receiver does, and the fix says so.
+	assert.ok(missing.text.includes("or delete the line (the worker then schedules no cron, and the receiver and the poller read ./triggers.json)"), missing.text);
 	const relative = await run("PI_TRIGGERS_FILE=gone.json\n");
 	assert.ok(relative.text.includes(`✗ PI_TRIGGERS_FILE names "${join(cwd, "gone.json")}", which does not exist: ${refusal}${note}\n`), relative.text);
 	// Unset with no ./triggers.json: the worker schedules no cron, so there is nothing of this to say.
@@ -4883,7 +4885,7 @@ test("doctor: no egress probing at all on top of a down daemon", async () => {
 	assert.ok(!calls.some((c) => c.args[0] === "network"), "no network is created against a daemon that is not answering");
 });
 
-test("doctor: a triggers file the loader refuses FAILS, names the reason, and says the receiver will not start", async () => {
+test("doctor: a triggers file the loader refuses FAILS, names the reason, and says who will not start on it", async () => {
 	// This used to be swallowed to zeroes, justified by "a malformed triggers file already fails LOUD at
 	// worker boot". False for the deployment that needs doctor most: the worker reads the file only when
 	// PI_TRIGGERS_FILE is set, so a receiver-only host got no loud failure anywhere -- while the zeroes
@@ -4896,7 +4898,9 @@ test("doctor: a triggers file the loader refuses FAILS, names the reason, and sa
 
 	assert.equal(code, 1, "a file neither service can load is a failure, not a warning");
 	assert.match(text(), /triggers file is refused at load/);
-	assert.match(text(), /the receiver will refuse to start/, "the consequence, not just the symptom");
+	// Issue #970: every reader that refuses to start on it, the worker too since PI_TRIGGERS_FILE is set, and what one that
+	// is already running does.
+	assert.match(text(), /a worker, receiver or poller started on it refuses to start \(exit 2, not restarted\), and one already running keeps the last copy that loaded/, "the consequence, not just the symptom");
 	assert.match(text(), /run\.replicas must be an integer between 2 and 3/, "the loader's own message travels");
 	assert.ok(text().includes(path), "and the path to fix");
 });
@@ -9810,6 +9814,9 @@ test("doctor.mjs reads no service key from this shell outside the resolver: ever
 		endpointsDeclaredIn: async (e) => (await import("../src/egress-cli.mjs")).endpointsDeclaredIn({ env: e, cwd: "/nonexistent-503", fs: { readFileSync: enoent, existsSync: () => false }, platform: "linux" }),
 		// Issue #918: the private endpoints' boot-file line reads the model endpoints' file as the service does.
 		endpointsFileSetting: async (e) => (await import("../src/egress-cli.mjs")).endpointsFileSetting({ env: e, cwd: "/nonexistent-918", readEnv: enoent, exists: () => false }),
+		// Issue #970: who refuses to start on a watch source's missing secret reads one key, WEBHOOK_SECRET, for the poller's
+		// stand-in. The source's own variable is the file's, resolved by name through `service.extra` before the line.
+		watchSecretRefusers: async (e) => (await import("../src/triggers-check.mjs")).watchSecretRefusers({ secretEnv: "WEBHOOK_SECRET" }, e, { collects: true }),
 	};
 	assert.deepEqual([...handedEnv].filter((n) => !Object.hasOwn(probes, n)).sort(), [], "every imported helper doctor hands env to is probed here");
 	const probedReads = {};

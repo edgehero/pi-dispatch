@@ -118,6 +118,8 @@ import { JOBS_ONLY, durationText, milliText, notSharedWhy, percentText, shareTex
 import { CGROUP_PARENT, cgroupParentFor, guardHelperRun, helperName as cpuReserveHelperName, operatorQuotaCommand, readQuota, reservePlan, userQuotaCommand } from "./cpu-reserve.mjs";
 import { HOST_BUDGET_KEYS, computeHostBudget, hostBudgetSettings, largestFit, neverFits, projectBudgetRow, publishedBudget, readUserServiceLimits } from "./host-budget.mjs";
 import { makeImagePreflight, normalizeImageId } from "./image-preflight.mjs";
+import { watchSecretRefusers } from "./triggers-check.mjs";
+import { watchSecretsMissing } from "./watch-contract.mjs";
 import { BOOT_REFUSING_JOB_USER_CAUSES, DAEMON_FACTS_TIMEOUT_MS, JOB_USER_FIX, makeDaemonFactsReader, makeJobUserResolver, relabelsPrivateMounts, resolveImageUser } from "./job-user.mjs";
 import { mergeSecretProfiles, parseSecretProfiles, servableSecretProfiles } from "./secret-profiles.mjs";
 // The OAuth-suffix rule and the variable it selects live in their own import-free module so the worker
@@ -2099,13 +2101,19 @@ export async function collectChecks(shellVars, seams) {
 	if (unreadBoot.length > 0 && envFile.unreadable !== true) {
 		checks.push({ ok: false, warn: true, label: `not judged here, since doctor could not read what the deployment .env sets for ${unreadBoot.join(", ")}: the checks that read ${unreadBoot.length === 1 ? "that file" : "those files"} (a project's model roles, size and bundles, the scoped limits and budgets, the pause windows, the envelope)`, fix: "fix what the boot-file line above names, then re-run doctor" });
 	}
-	checks.push(...watchDoctorChecks({ sources: triggerWatchSources, rules: triggerWatchRules, env }));
+	// Issue #970: each source's secret as the service reads it, this shell's else the deployment `.env`'s (`extra`, which
+	// says a disagreement without either value). A name outside doctor's own keys was read from this shell alone before,
+	// so a secret only the `.env` set was called missing. The lines judge its presence only.
+	const watchSecretFile = service.extra(Object.values(triggerWatchSources ?? {}).map((source) => source.secretEnv)).fromFile;
+	checks.push(...watchDoctorChecks({ sources: triggerWatchSources, rules: triggerWatchRules, env: { ...env, ...watchSecretFile } }));
 	// FIRST, and fail rather than warn: every check below this line reads counts that a parse failure
 	// zeroed, so a green run here would be reporting on a file nobody could read. The receiver loads this
 	// file unconditionally and refuses to start without it, which is the consequence worth naming.
 	// Issue #481 (PR #485 review round 1): a PI_TRIGGERS_FILE that is SET and names no file, the empty value included.
-	// Both processes refuse to start on it (exit 2): the worker's `loadSchedules` takes any set value as the file to load
-	// (only an unset one turns cron off), and the receiver's `loadTriggers` as the file it serves from. Doctor's own read
+	// Every reader refuses to start on it (exit 2): the worker's `loadSchedules` takes any set value as the file to load
+	// (only an unset one turns cron off), and the receiver's `loadTriggers` as the file it serves from, for `serve`, the
+	// poller and the watch collector alike (issue #970 names the poller; the collector is named only where a pull source
+	// is known, and a file that is not there shows none). Doctor's own read
 	// takes a missing file as "no triggers", which is right only for the UNSET default, whose missing ./triggers.json the
 	// worker never reads; so a set one is judged here, before that read's silence can pass it.
 	const triggersSet = env.PI_TRIGGERS_FILE;
@@ -2115,9 +2123,9 @@ export async function collectChecks(shellVars, seams) {
 			id: "triggers.file-missing",
 			ok: false,
 			label: triggersSet === ""
-				? `PI_TRIGGERS_FILE is set to an empty value, which neither process reads as unset: the worker and the receiver refuse to start on it (exit 2)${note}`
-				: `PI_TRIGGERS_FILE names ${quotedShown(triggersPath(env, cwd))}, which does not exist: the worker and the receiver refuse to start on it (exit 2)${note}`,
-			fix: "run `pi-dispatch init` in this folder to scaffold triggers.json, point PI_TRIGGERS_FILE at yours, or delete the line (the worker then schedules no cron, and the receiver reads ./triggers.json)",
+				? `PI_TRIGGERS_FILE is set to an empty value, which no reader takes as unset: the worker, the receiver and the poller refuse to start on it (exit 2)${note}`
+				: `PI_TRIGGERS_FILE names ${quotedShown(triggersPath(env, cwd))}, which does not exist: the worker, the receiver and the poller refuse to start on it (exit 2)${note}`,
+			fix: "run `pi-dispatch init` in this folder to scaffold triggers.json, point PI_TRIGGERS_FILE at yours, or delete the line (the worker then schedules no cron, and the receiver and the poller read ./triggers.json)",
 		});
 	}
 	if (parseError) {
@@ -2129,11 +2137,13 @@ export async function collectChecks(shellVars, seams) {
 			// only a syntax error: a duplicate key parses perfectly and is refused anyway. The loader's own
 			// message says which, and the old wording sent an operator hunting for a syntax error that was
 			// not there. It still covers the JSON case, whose message begins "is not valid JSON".
-			label: `triggers file is refused at load -- the receiver will refuse to start: ${parseError}`,
+			// Issue #970: who refuses to START on it, and that a running one does not stop. The worker reads the file only
+			// where PI_TRIGGERS_FILE is set (unset, it schedules no cron); the poller has followed the file since issue #947.
+			label: `triggers file is refused at load -- a ${triggersSet !== undefined ? "worker, receiver or poller" : "receiver or poller"} started on it refuses to start (exit 2, not restarted), and one already running keeps the last copy that loaded: ${parseError}`,
 			// Issue #761: a file a newer pi-dispatch wrote is no broken file, and editing it would lose what that release wrote.
 			fix: triggersFileIsNewer
-				? `${newerFileFix("this host's worker and receiver")} -- every trigger-derived check below is skipped until this host reads it`
-				: `fix ${triggersFilePath} so it loads (the message above names the entry and the reason), then re-run doctor -- every trigger-derived check below is skipped until it loads`,
+				? `${newerFileFix("this host's worker, receiver and poller")} -- every trigger-derived check below is skipped until this host reads it`
+				: `fix ${triggersFilePath} so it loads (the message above names the entry and the reason), checking the fixed copy with \`pi-dispatch triggers check <copy>\` before you move it over the file, then re-run doctor -- every trigger-derived check below is skipped until it loads`,
 		});
 	}
 	section("dollars");
@@ -12120,15 +12130,26 @@ export function liveRunVia(spawn, { bin = "docker", maxOutputBytes = Infinity } 
 		});
 }
 
-/** Diagnose reviewed source bindings without resolving or printing credential values. */
+/**
+ * Diagnose reviewed source bindings without resolving or printing credential values.
+ *
+ * A source's signing secret is judged by the receiver loader's own predicate (`watchSecretsMissing`, issue #970), which
+ * refuses the whole file: `serve`, `poll` and `watch` refuse to start on it, and a running one keeps its last copy. This
+ * said "push requests return 503", and tested presence without the loader's trim, so a blank secret passed here. It stays
+ * a warning: doctor may run on a host that runs none of the three.
+ */
 export function watchDoctorChecks({ sources = {}, rules = 0, env = {} } = {}) {
-	const entries = Object.entries(sources);
+	const entries = Object.entries(sources ?? {});
 	if (!entries.length) return [];
 	const checks = [{ id: "watch.sources", ok: true, label: `${entries.length} watch source(s), ${rules} watch rule(s); daily caps are required at load` }];
+	const missing = new Set(watchSecretsMissing(sources, env).map((m) => m.source));
+	const collects = entries.some(([, declaration]) => declaration.pull);
 	for (const [source, declaration] of entries) {
 		const identity = createHash("sha256").update(source).digest("hex").slice(0, 16);
-		const present = typeof env[declaration.secretEnv] === "string" && env[declaration.secretEnv].length > 0;
-		checks.push({ id: `watch.secret-${identity}`, ok: present, ...(!present ? { warn: true } : {}), label: present ? `watch source ${source}: signing secret is available` : `watch source ${source}: signing secret ${declaration.secretEnv} is missing; push requests return 503`, ...(!present ? { fix: `Set ${declaration.secretEnv} on the receiver host, or use the configured pull source without serving push requests.` } : {}) });
+		const present = !missing.has(source);
+		const refusing = present ? [] : watchSecretRefusers(declaration, env, { collects }).map((r) => `the ${r}`);
+		const who = refusing.length <= 1 ? refusing.join("") : `${refusing.slice(0, -1).join(", ")} and ${refusing.at(-1)}`;
+		checks.push({ id: `watch.secret-${identity}`, ok: present, ...(!present ? { warn: true } : {}), label: present ? `watch source ${source}: signing secret is available` : `watch source ${source}: signing secret ${declaration.secretEnv} is unset or blank, so ${who} ${refusing.length === 1 ? "refuses" : "refuse"} to start on this triggers file (exit 2), and one already running keeps the last copy that loaded`, ...(!present ? { fix: `Set ${declaration.secretEnv} to a non-blank value wherever the receiver, the poller or the watch collector runs, or remove the source from the triggers file.` } : {}) });
 		if (declaration.pull?.secretEnv) {
 			const name = declaration.pull.secretEnv; const available = typeof env[name] === "string" && env[name].length > 0;
 			checks.push({ id: `watch.pull-${identity}`, ok: available, ...(!available ? { warn: true } : {}), label: available ? `watch source ${source}: pull credential is available` : `watch source ${source}: pull credential ${name} is missing`, ...(!available ? { fix: `Set ${name} on the watch collector host.` } : {}) });

@@ -61,6 +61,7 @@ with at least one commit, and `run` refuses any other folder before it queues an
 | `import-pi` | stage your own pi setup (models, skills, persona) for every job, without credentials |
 | `chat <jobId \| url \| key>` | follow and steer a running job, answer a parked one, or fork a finished one into your own pi (`--fork-as-job` to run it as a job), through the operator console |
 | `sandbox <jobId>` | reopen a finished run's workspace in a fresh container with no credentials; `--list`, `--attach` and `--new` to see, return to or prepare one |
+| `triggers check [file]` | judge a triggers file before you move it over the one the services run: the worker, the receiver, the poller and the watch collector each say whether they would load it, and why not |
 | `egress render` | write `model-endpoints.conf` from `model-endpoints.json` and `egress-private/private-endpoints.conf` from `private-endpoints.json`, then print the command that reloads the egress proxy |
 
 Before you rely on it, read [`SECURITY.md`](https://github.com/edgehero/pi-dispatch/blob/main/SECURITY.md).
