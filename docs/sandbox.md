@@ -329,7 +329,8 @@ at another daemon is invisible to it, and only the rules above protect it.
   only reports a loss when you exit. That check runs beside the shell, not ahead of it, so in that case the shell
   may already have printed its prompt. It runs at
   every worker boot and then every `PI_SWEEP_INTERVAL_HOURS` while the worker is up (24 by default; set
-  `0` for the boot-only behaviour, where a worker that never restarts never sweeps). Three things follow.
+  `0` for the boot-only behaviour, where a worker that never restarts never sweeps again once its boot sweep is
+  done). Three things follow.
   The window is a **floor** rather than a ceiling: a directory dies on the first sweep after its window
   closes, so at both defaults a retained workspace can live up to 48 hours. A restart after you lower
   the retention setting still sweeps what the old one kept. And since issue #337 that reaper also removes
@@ -340,6 +341,21 @@ at another daemon is invisible to it, and only the rules above protect it.
   container from the moment docker creates it, and by the endpoint list once it is up;
   a network the sweep looked at and would not take is named in the worker log with the reason, while one
   it skipped because the run is still retained or still running is passed over in silence.
+  **A large backlog is swept in passes** (issue #978), for example after a long time between restarts. One pass
+  stops after about 20 seconds (plus the run it was on and that run's rest) or after 50 removals, and rests after
+  each expired run for as long as checking it with the container runtime and deleting it took (at least 0.1 and at
+  most 10 seconds). A pass that stopped early is followed a minute after it ends by one that goes on where it
+  stopped, in name order, until a pass reaches the end of the folder; a fault that ends a pass (the folder or the
+  runtime could not be read) makes the next sweep start from the top. So a backlog takes at least one pass per 50
+  runs. Measured on a GitHub runner's Docker: 1000 runs took 20 passes, the first 6.0 seconds; with a minute between
+  passes that comes to about twenty minutes (computed from the passes, not measured). A runtime that answers slowly
+  gets through fewer runs a pass (about seven at 1.5 seconds an answer). The worker takes its first job after the
+  first pass rather than after the whole backlog, and the passes after it run beside your jobs, resting between
+  runs. A run that is held (one with a shell open on it, or whose runtime did not answer in time) is passed and
+  kept; it is looked at again by the next sweep, at the next boot or `PI_SWEEP_INTERVAL_HOURS` later, not by the
+  passes that follow this one. Each pass that did something writes one `sandbox_reaper_pass` line to the worker log:
+  how many runs it removed and kept, whether it stopped before the end, how long it took, how much of that was rest,
+  and the slowest answer the runtime gave about one run.
 - **The retention window is bounded but not quota'd.** At the default daily cap that is roughly 25
   directories at a time. There is no byte ceiling; `doctor` reports the count.
 - **One worker per retention directory.** `PI_SANDBOX_DIR` belongs to one worker, as a Docker daemon does

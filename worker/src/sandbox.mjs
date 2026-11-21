@@ -281,6 +281,9 @@ export function makeSandboxRuntimeWatch({ sandboxDir, blessed = [], fs = { lstat
 	const allBins = [...new Set(Object.values(SANDBOX_LAUNCHERS).map((l) => l.bin))];
 	const present = new Set(blessedBins);
 	const sweepers = new Map();
+	// Which runtime the network lap stopped in, and in which lap, across passes (issue #978,
+	// `combineSandboxNetworkSweepers`).
+	const networkLap = { runtime: null, id: undefined };
 	async function listRunning(pass = {}) {
 		// The reaper's ONE read per directory (`pass.reads`, review round 3): the watch places each run by exactly the
 		// read expiry will decide on. Standing alone (no pass handed in) it lists and reads for itself, the same way.
@@ -370,7 +373,8 @@ export function makeSandboxRuntimeWatch({ sandboxDir, blessed = [], fs = { lstat
 		const bins = allBins.filter((bin) => present.has(bin));
 		if (bins.length === 0) return { swept: [], notes: [] };
 		for (const bin of bins) if (!sweepers.has(bin)) sweepers.set(bin, makeSweeper({ bin, proxy }));
-		return combineSandboxNetworkSweepers(bins.map((bin) => ({ runtime: bin, sweep: sweepers.get(bin) })))(args);
+		const entries = bins.map((bin) => ({ runtime: bin, sweep: sweepers.get(bin) }));
+		return combineSandboxNetworkSweepers(entries, networkLap)(args);
 	}
 	return { listRunning, sweepNetworks, isOpen };
 }
@@ -497,6 +501,17 @@ function missingRetained() {
  *
  * Returns `{ swept, notes }` rather than logging, so the reaper owns the log vocabulary and this stays a
  * pure-ish function over its runner.
+ *
+ * PACED, IN LAPS (issue #978): `pace` is called after each network this asked the daemon about, and the reaper's
+ * rests as long as that network took and answers whether the pass may go on. It is never called inside one network's
+ * stretch, so nothing ever waits between the last `stillClear` look and the `rm` it guards (both inside
+ * `removeNetworkOrSay`). On false the sweep stops, adds `more: true` when a candidate is left, and keeps that
+ * candidate's name: the next call visits the listing in name order from there, so a network whose `rm` fails on
+ * every pass is passed once a lap and never starves the ones after it. A call that reaches the end of the listing, a
+ * listing that fails, and a call in another lap than the place's (`lapId`, the reaper's) all start from the top.
+ * When the pace says stop
+ * with no candidate left, the result says `stop: true`, so the combined sweep does not go on to the next runtime past
+ * a spent budget. The default `pace` only yields a turn, which is what this loop did between networks before.
  */
 export function makeSandboxNetworkSweeper({ bin = "docker", run = boundedRuntime(bin), proxy = DEFAULT_EGRESS_PROXY } = {}) {
 	// `bin` (issue #429) is the one runtime this sweeper lists, inspects and removes in: a sweep that listed under one
@@ -506,7 +521,13 @@ export function makeSandboxNetworkSweeper({ bin = "docker", run = boundedRuntime
 	// members exactly as docker's are, so every guard below reads the same on both. A stopped member on Podman is not in
 	// `names` and still makes the `rm` fail, which the failed-`rm` branch below handles for this run's own container and
 	// reports for anything else. Its state WORDS are this file's stated residual, below.
-	return async function sweepSandboxNetworks({ running = new Set(), keep = new Set(), retained = missingRetained, blocked = new Set() } = {}) {
+	// This runtime's place in the lap (issue #978): the first candidate a pass stopped before, or null for the top, and
+	// the lap it belongs to (undefined from a caller that numbers none, which keeps the place from call to call).
+	let resume = null;
+	let resumeLap;
+	return async function sweepSandboxNetworks({ running = new Set(), keep = new Set(), retained = missingRetained, blocked = new Set(), pace = yieldTurn, lapId } = {}) {
+		if (lapId !== resumeLap) resume = null;
+		resumeLap = lapId;
 		// ONE detach gate per pass (issue #452, gate round 3): its runtime read is made once, however many networks.
 		const gate = makeDetachGate(run, { bin });
 		// CANDIDATES FIRST, then every piece of evidence that protects one. The order is the point, not an
@@ -519,7 +540,11 @@ export function makeSandboxNetworkSweeper({ bin = "docker", run = boundedRuntime
 		// different names on `OQ-007`'s property: the reaper turns `failed` into its family's
 		// `sandbox_reaper_skipped` line, while `notes` are per-network outcomes of a pass that ran. Reporting
 		// this as a note would say "one network was not reaped" about a look that saw none.
-		if (listed?.code !== 0) return { swept: [], notes: [], failed: "network-list-failed" };
+		if (listed?.code !== 0) {
+			// Nothing was visited, so nothing of the place is known to hold: the next call starts from the top (issue #978).
+			resume = null;
+			return { swept: [], notes: [], failed: "network-list-failed" };
+		}
 
 		// The retained directories as they are NOW, unioned by the caller with the listing its pass began
 		// with. Each half covers what the other cannot, and this is the half that has to be read here rather
@@ -530,7 +555,20 @@ export function makeSandboxNetworkSweeper({ bin = "docker", run = boundedRuntime
 
 		const swept = [];
 		const notes = [];
-		for (const name of String(listed.stdout ?? "").split("\n").map((n) => n.trim()).filter(Boolean)) {
+		// The id a listed name is a candidate for, or null: ours by its whole shape, and neither running nor retained.
+		const candidate = (name) => {
+			const id = SANDBOX_NETWORK_SHAPE.exec(name)?.[1];
+			return id === undefined || running.has(id) || keep.has(id) ? null : id;
+		};
+		// In name order, from where the last stopped call left off (issue #978).
+		const listing = String(listed.stdout ?? "")
+			.split("\n")
+			.map((n) => n.trim())
+			.filter(Boolean)
+			.sort()
+			.filter((name) => resume === null || name >= resume);
+		for (let i = 0; i < listing.length; i++) {
+			const name = listing[i];
 			const m = SANDBOX_NETWORK_SHAPE.exec(name);
 			if (!m) continue; // the filter is not the namespace
 			const id = m[1];
@@ -545,16 +583,29 @@ export function makeSandboxNetworkSweeper({ bin = "docker", run = boundedRuntime
 				if (blocked.has(id)) notes.push({ network: name, reason: "directory-not-removed" });
 				continue;
 			}
+			await visit(name, id);
+			// Between networks, never inside one (issue #978): this network's every read and act is done.
+			if (!(await pace())) {
+				const next = listing.slice(i + 1).find((later) => candidate(later) !== null);
+				resume = next ?? null;
+				return next === undefined ? { swept, notes, stop: true } : { swept, notes, more: true };
+			}
+		}
+		resume = null;
+		return { swept, notes };
+
+		/** One candidate network: looked at, guarded, and removed or noted. Every daemon call here is one `pace` covers. */
+		async function visit(name, id) {
 			const { ok, names, absent, parked = [] } = await networkEndpoints(run, name, { bin });
-			if (absent) continue;
+			if (absent) return;
 			if (!ok) {
 				notes.push({ network: name, reason: "unreadable" });
-				continue;
+				return;
 			}
 			// One guard gates the DETACH: a session container attached means an operator may be inside it.
 			if (names.some((n) => n.startsWith(SANDBOX_NAME_PREFIX))) {
 				notes.push({ network: name, reason: "sandbox-attached" });
-				continue;
+				return;
 			}
 			// ONE guard, asked LATE and asked TWICE (issue #363). It answers the question the two above cannot:
 			// is there a container of ours for this id in a state that is not finished? Measured on docker
@@ -613,7 +664,7 @@ export function makeSandboxNetworkSweeper({ bin = "docker", run = boundedRuntime
 			const outcome = await removeNetworkOrSay(run, { network: name, detach, running: names, stillClear, bin, gate });
 			if (outcome.blocked) {
 				notes.push({ network: name, reason: outcome.blocked });
-				continue;
+				return;
 			}
 			if (outcome.aborted) {
 				// `restored`/`lost` rather than `detached`: an endpoint put back was not removed by this pass,
@@ -625,9 +676,9 @@ export function makeSandboxNetworkSweeper({ bin = "docker", run = boundedRuntime
 					...(outcome.restored?.length > 0 ? { restored: outcome.restored } : {}),
 					...(outcome.lost?.length > 0 ? { lost: outcome.lost } : {}),
 				});
-				continue;
+				return;
 			}
-			if (outcome.absent) continue;
+			if (outcome.absent) return;
 			if (outcome.removed) swept.push({ network: name, detached: outcome.detached });
 			else {
 				// Podman keeps an EXITED container attached to its network (measured on 5.8.1: `network rm` then fails every
@@ -657,12 +708,18 @@ export function makeSandboxNetworkSweeper({ bin = "docker", run = boundedRuntime
 					});
 				}
 			}
-			// Between networks, for `retention-sweep.mjs`'s reason: this loop runs on a timer beside draining
-			// jobs, and `index.mjs` runs with `maxStalledCount: 0` against BullMQ's 30s lock.
-			await new Promise((resolve) => setImmediate(resolve));
 		}
-		return { swept, notes };
 	};
+}
+
+/**
+ * The network sweep's default `pace` (issue #978): one turn between networks and always go on, for
+ * `retention-sweep.mjs`'s reason: this loop runs on a timer beside draining jobs, and `index.mjs` runs with
+ * `maxStalledCount: 0` against BullMQ's 30s lock. The reaper hands its own, which rests and keeps the budget.
+ */
+async function yieldTurn() {
+	await new Promise((resolve) => setImmediate(resolve));
+	return true;
 }
 
 /**
@@ -676,19 +733,45 @@ export function makeSandboxNetworkSweeper({ bin = "docker", run = boundedRuntime
  * is filled by each sweeper's own fresh read, which only ever adds. One runtime's failed listing does not stop the
  * other's pass: nothing it would remove depends on the failed runtime, whose own networks are simply not candidates
  * this pass.
+ *
+ * `more` PASSES THROUGH, IN LAPS (issue #978): every sweeper gets the same `pace`, and one that stopped on the pass's
+ * budget (`more: true`) ends the combined sweep there, since asking the next runtime would spend past a budget the pace
+ * has just called gone. `lap` (the runtime watch keeps one across passes) remembers that runtime, and the next call
+ * starts at it, its sweeper resuming at its own place, and goes on to the runtimes after it: so a runtime whose
+ * networks take a whole pass cannot keep the next one from ever being swept. A sweeper whose pace said stop after its
+ * last network (`stop: true`) ends the call too, with `more` and the lap at the next runtime when there is one. A call
+ * that gets through the last runtime ends the lap, and a call in another lap (`lapId`) drops the runtime it kept: the
+ * next starts from the first.
  */
-export function combineSandboxNetworkSweepers(entries) {
+export function combineSandboxNetworkSweepers(entries, lap = { runtime: null }) {
 	return async function sweepSandboxNetworks(args) {
 		const swept = [];
 		const notes = [];
 		const failures = [];
-		for (const { runtime, sweep } of entries) {
+		let more = false;
+		if (args?.lapId !== lap.id) lap.runtime = null;
+		lap.id = args?.lapId;
+		const from = Math.max(0, entries.findIndex((entry) => entry.runtime === lap.runtime));
+		const order = entries.slice(from);
+		for (const [k, { runtime, sweep }] of order.entries()) {
 			const outcome = await sweep(args);
 			swept.push(...(outcome?.swept ?? []));
 			notes.push(...(outcome?.notes ?? []));
 			if (outcome?.failed) failures.push({ reason: outcome.failed, runtime });
+			if (outcome?.more === true) {
+				more = true;
+				lap.runtime = runtime;
+				break;
+			}
+			// Its pace said stop after its last network: this runtime's lap is done, the next runtime is the next pass's.
+			if (outcome?.stop === true) {
+				more = k + 1 < order.length;
+				if (more) lap.runtime = order[k + 1].runtime;
+				break;
+			}
 		}
-		return failures.length > 0 ? { swept, notes, failed: failures[0].reason, failures } : { swept, notes };
+		if (!more) lap.runtime = null;
+		return { swept, notes, ...(failures.length > 0 ? { failed: failures[0].reason, failures } : {}), ...(more ? { more: true } : {}) };
 	};
 }
 

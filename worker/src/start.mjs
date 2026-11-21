@@ -86,7 +86,7 @@ import { checkSandboxWorkspace } from "./sandbox-workspace-guard.mjs";
 import { checkSecretFilesPlacement } from "./secret-files-placement.mjs";
 import { startSandboxPrepareWorker } from "./sandbox-prepare-requests.mjs";
 import { makeSandboxInventory } from "./sandbox-inventory.mjs";
-import { makeRetentionSweep } from "./retention-sweep.mjs";
+import { makeRetentionSweep, makeSweepFollowUps } from "./retention-sweep.mjs";
 import { FORGE_JOB_RETENTION_S } from "./retention.mjs";
 import { makeDoctorSpawner } from "./doctor-spawner.mjs";
 import { hostHasPending, publishCanaryFacts, UPDATES_LOOK_EVERY_HOURS } from "./updates.mjs";
@@ -969,6 +969,8 @@ export async function startWorker(
 		// sandbox reaper against a real retention root without spawning docker or podman.
 		listRunningSandboxes: listRunningSandboxesFn = listRunningSandboxes,
 		makeRetentionSweep: makeRetentionSweepFn = makeRetentionSweep,
+		// Issue #978: the sandbox sweep's follow-up passes, a seam so a wiring test drives their timer.
+		makeSweepFollowUps: makeSweepFollowUpsFn = makeSweepFollowUps,
 		makeTouchStore: makeTouchStoreFn = makeTouchStore,
 		makeTouchOutbox: makeTouchOutboxFn = makeTouchOutbox,
 		makeQuestionGroupStore: makeQuestionGroupStoreFn = makeQuestionGroupStore,
@@ -1726,6 +1728,8 @@ export async function startWorker(
 	// re-issues `listRunning` every call, so a docker outage costs one interval of retention overshoot
 	// rather than latching the sweep off until the next boot.
 	let reapSandboxes = async () => {};
+	// Issue #978: the boot pass's result, handed to the follow-up passes once the worker takes jobs.
+	let firstSandboxPass = null;
 	try {
 		// Issue #429, as corrected by its review: which sandboxes are open is asked PER RETAINED RUN, of the runtime that
 		// run's manifest records, never of the runtimes this worker blesses. The opener's blessing is the OPENER's
@@ -1755,10 +1759,16 @@ export async function startWorker(
 			isOpen: watch.isOpen,
 			log,
 		});
-		await reapSandboxes();
+		// AWAITED, as it always was: the boot order (retained runs swept before the worker takes a job) is a guarantee a
+		// background boot sweep would lose. What bounds the delay now is the pass itself (issue #978): it stops at its budget
+		// and says what it left, for the follow-ups below.
+		firstSandboxPass = await reapSandboxes();
 	} catch (err) {
 		log("sandbox_reaper_skipped", { reason: scrubCredentials(err?.message) });
 	}
+	// Issue #978 (`DES-RETENTION-SWEEPS-ON-A-TIMER`): the passes that finish what a pass left, one a minute while a pass
+	// says `more`. Built here, beside the closure they re-run, and inert until the end of boot hands them the first pass.
+	const sandboxFollowUps = makeSweepFollowUpsFn({ reap: reapSandboxes, log });
 	// Issue #920: the artifacts store's sweep, at boot and on the retention timer. It never throws (artifacts.mjs).
 	const reapArtifacts = makeArtifactsReaper({ storeDir: config.artifactsDir, retentionDays: config.artifactsRetentionDays, now, log });
 	await reapArtifacts();
@@ -3990,7 +4000,8 @@ export async function startWorker(
 		//
 		// NOT CONSTRUCTED AT ALL when the knob is 0. That is how "0 is byte-identical to before" is a fact
 		// rather than a claim: with no object there is no timer, no closer and no reachable second call to any
-		// reaper. It is registered in `extraClosers` for issue #295's finding that UNREF'D IS NOT CLEANED UP --
+		// reaper (the sandbox follow-ups below excepted, which finish the BOOT sweep, issue #978). It is registered in
+		// `extraClosers` for issue #295's finding that UNREF'D IS NOT CLEANED UP --
 		// this handle holds an `rmSync`, and a tick landing mid-drain could delete a retained workspace behind a
 		// worker that already reported a clean shutdown.
 		// Issue #645: the two durable-run sweeps, run once here at boot and then on every tick. The host-lost sweep on every
@@ -4012,6 +4023,12 @@ export async function startWorker(
 				.then(reap)
 				.catch((err) => log(`${name}_reaper_skipped`, { reason: scrubCredentials(err?.message) }));
 		}
+		// Issue #978: the boot pass stops at its budget, so a backlog bigger than one pass is finished by follow-up passes,
+		// armed HERE, after the worker takes jobs, so the boot delay before pickup is one pass whatever the backlog. At every
+		// PI_SWEEP_INTERVAL_HOURS, 0 included: they are the boot sweep finishing, not a second sweep. Closed with the worker,
+		// for the periodic sweep's own reason below: they hold deletion work.
+		extraClosers.push(sandboxFollowUps);
+		sandboxFollowUps.after(firstSandboxPass);
 		if (config.sweepIntervalHours > 0) {
 			const sweep = makeRetentionSweepFn({
 				reapers: [
@@ -4020,7 +4037,8 @@ export async function startWorker(
 					{ name: "allocation_log", reap: reapAllocationLogs },
 					{ name: "console_audit", reap: reapConsoleAudit },
 					{ name: "touch_outbox", reap: () => touchOutbox.repair() },
-					{ name: "sandbox", reap: reapSandboxes },
+					// Its result goes to the follow-ups (issue #978), which run outside this sweep's in-flight guard.
+					{ name: "sandbox", reap: async (options) => sandboxFollowUps.after(await reapSandboxes(options)) },
 					// Issue #920: the artifacts store, its own retention, beside the sandbox store it is kept apart from.
 					{ name: "artifacts", reap: (options) => reapArtifacts(options) },
 					{ name: "session", reap: (options) => sessionStore.reapSessions(options) },
@@ -4088,7 +4106,7 @@ export async function startWorker(
 			host: config.workerName, // issue #57; `log` stamps it on every line, and the boot line names it where an operator looks first
 			imageDigest: bootImage.imageDigest ?? null, // two hosts on two builds of one tag used to emit byte-identical boot lines
 			concurrency: bootConcurrency, // the slot count the Worker is actually constructed with (overlay may raise/lower it)
-			sweepIntervalHours: config.sweepIntervalHours, // 0 = boot-only sweeps, this version's pre-#292 behaviour
+			sweepIntervalHours: config.sweepIntervalHours, // 0 = boot-only sweeps, the pre-#292 behaviour (in passes, #978)
 			doctorIntervalHours: config.doctorIntervalHours, // issue #712: 0 = the worker runs no doctor of its own
 			dailyCap: config.dailyCap,
 			weeklyCap: config.weeklyCap, // null when the weekly window is disabled

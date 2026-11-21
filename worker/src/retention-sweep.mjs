@@ -170,3 +170,104 @@ export function makeRetentionSweep({ reapers, intervalMs, log = () => {}, now = 
 		},
 	};
 }
+
+/**
+ * How long after a sandbox pass that left its lap unfinished the next follow-up starts (issue #978): the timer is armed
+ * when that pass ends and fires a minute later. A daily tick can land inside that minute and run a pass of the same lap
+ * (one at a time, by the reaper's single flight), so the minute spaces the follow-ups, not every two passes. A pass
+ * stops at its first loop boundary past 20 s (`SANDBOX_PASS_BUDGET_MS` in `sandbox-store.mjs`), so it lasts 20 s plus
+ * the entry it was on and that entry's rest (at most 10 s more); an entry's rest is as long as the entry took up to
+ * that cap, and the runtime listing at the start of a pass has no rest after it. Each pass removes at most fifty runs:
+ * a thousand runs take at least twenty passes, about twenty minutes at this delay on a runtime that answers at once
+ * (computed from 20 measured passes of about 6 s), and longer on one that does not, which is the point.
+ */
+export const SANDBOX_FOLLOWUP_DELAY_MS = 60_000;
+
+/**
+ * The sandbox sweep's FOLLOW-UP passes (issue #978). The sandbox reaper's pass stops at its budget and says `more`
+ * while its LAP (the leftover tombstones, the runs, then the networks, in name order) is unfinished; `after(result)`
+ * arms ONE `.unref()`'d timer for that, and each follow-up pass hands its own result back, so passes repeat a delay
+ * apart while one says `more` and stop at the first that does not. Each pass resumes where the last stopped and
+ * cannot stop before it has visited one entry, so the lap always ends and a chain of follow-ups is at most one lap,
+ * whatever it removed (a pass that ends the lap, a daily tick's too, clears a follow-up already armed): what is still
+ * held at the end waits for the next boot or periodic sweep. Anything else is ignored: no
+ * result, and `{ busy: true }` from a call that met a pass in flight, whose own result arrives through its caller.
+ *
+ * APART FROM `makeRetentionSweep`, on purpose: a follow-up runs OUTSIDE that sweep's `inFlight`, so a daily tick never
+ * skips the log and session reapers because a follow-up pass was running. The reaper's own single flight is what keeps
+ * two sandbox passes from overlapping. And it runs at every `PI_SWEEP_INTERVAL_HOURS`, `0` included, where the periodic
+ * sweep is still never constructed: these passes are the boot sweep finishing in bounded steps, not a second sweep.
+ *
+ * `close()` stops the timer and waits for a pass in flight up to `SWEEP_DRAIN_TIMEOUT_MS`, the periodic sweep's posture
+ * and for its reason; the pass is asked to stop (`stopped`), and its rests wake within a quarter second. A reap that
+ * throws is one `sandbox_reaper_skipped` line, scrubbed, never a rejection out of a timer callback.
+ */
+export function makeSweepFollowUps({ reap, delayMs = SANDBOX_FOLLOWUP_DELAY_MS, log = () => {}, setTimeoutFn = setTimeout, clearTimeoutFn = clearTimeout }) {
+	let timer = null;
+	let closed = false;
+	let inFlight = null;
+
+	async function runOnce() {
+		if (closed) return;
+		inFlight = (async () => {
+			try {
+				return await reap({ stopped: () => closed });
+			} catch (err) {
+				log("sandbox_reaper_skipped", { reason: scrubCredentials(err?.message) });
+				return null;
+			}
+		})();
+		let result = null;
+		try {
+			result = await inFlight;
+		} finally {
+			inFlight = null;
+		}
+		after(result);
+	}
+
+	/**
+	 * Arm the next pass when `result` says the lap is unfinished; a no-op otherwise, after `close()`, and while armed.
+	 * A pass that says `more: false` ended the lap, so a follow-up already armed is cleared: a daily tick that lands
+	 * between two follow-ups and finishes the lap must not leave one behind to start the next lap from the top.
+	 */
+	function after(result) {
+		if (closed) return;
+		if (result?.more === false && timer) {
+			clearTimeoutFn(timer);
+			timer = null;
+			return;
+		}
+		if (timer || inFlight || result?.more !== true) return;
+		timer = setTimeoutFn(() => {
+			timer = null;
+			void runOnce();
+		}, delayMs);
+		timer?.unref?.();
+	}
+
+	return {
+		after,
+
+		/**
+		 * `closed` FIRST, as in `makeRetentionSweep.close`: a pass already started is told to stop, and no timer re-arms
+		 * from its result. The drain bound's own timer is NOT unref'd, for the reason `SWEEP_DRAIN_TIMEOUT_MS` gives.
+		 */
+		async close() {
+			closed = true;
+			if (timer) clearTimeoutFn(timer);
+			timer = null;
+			if (!inFlight) return;
+			await new Promise((resolve) => {
+				const t = setTimeoutFn(() => {
+					log("sandbox_followup_drain_timeout", { ms: SWEEP_DRAIN_TIMEOUT_MS });
+					resolve();
+				}, SWEEP_DRAIN_TIMEOUT_MS);
+				inFlight.catch(() => {}).then(() => {
+					clearTimeoutFn(t);
+					resolve();
+				});
+			});
+		},
+	};
+}

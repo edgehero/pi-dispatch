@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { SWEEP_INTERVAL_HOURS, SWEEP_INTERVAL_MAX_HOURS, makeRetentionSweep } from "../src/retention-sweep.mjs";
+import { SANDBOX_FOLLOWUP_DELAY_MS, SWEEP_INTERVAL_HOURS, SWEEP_INTERVAL_MAX_HOURS, makeRetentionSweep, makeSweepFollowUps } from "../src/retention-sweep.mjs";
 
 /**
  * A recording timer pair. No production caller passes these; they exist because this repo has no
@@ -270,4 +270,134 @@ test("a reaper that throws on a TICK has its message scrubbed too (#339)", async
 	assert.match(line[1].reason, /ssh:\/\/\[redacted\]@remote/, "the host survives");
 	assert.match(line[1].reason, /Is the docker daemon running\?/, "and so does the daemon's own sentence");
 	for (const needle of ["bob", "hunter2"]) assert.ok(!line[1].reason.includes(needle), needle);
+});
+
+// ── issue #978: the sandbox sweep's follow-up passes ────────────────────────────────────────────────
+
+/**
+ * A recording one-shot timer pair for the follow-ups: `fire(ms)` runs and forgets every armed callback of that delay, the
+ * way the event loop would, then drains a fixed number of turns (no wall clock, the reason `timers()` above gives).
+ */
+function oneShots() {
+	const armed = [];
+	const cleared = [];
+	let handles = 0;
+	return {
+		armed,
+		cleared,
+		setTimeoutFn: (fn, ms) => {
+			const handle = { id: ++handles, ms, unrefs: 0, unref() { this.unrefs += 1; } };
+			armed.push({ fn, ms, handle });
+			return handle;
+		},
+		clearTimeoutFn: (handle) => cleared.push(handle),
+		pending: (ms) => armed.filter((a) => a.ms === ms && !cleared.includes(a.handle)),
+		fire: async (ms) => {
+			const due = armed.filter((a) => a.ms === ms && !cleared.includes(a.handle));
+			for (const a of due) armed.splice(armed.indexOf(a), 1);
+			for (const a of due) a.fn();
+			for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve));
+		},
+	};
+}
+
+test("follow-ups arm one unref'd timer only for a pass that left work, and the constant is the literal (issue #978)", () => {
+	assert.equal(SANDBOX_FOLLOWUP_DELAY_MS, 60_000);
+	const t = oneShots();
+	const f = makeSweepFollowUps({ reap: async () => ({ more: false }), ...t });
+	for (const result of [undefined, null, { more: false }, { busy: true }, { more: "yes" }, { held: 3, more: false }]) f.after(result);
+	assert.equal(t.armed.length, 0, "no result, a finished pass, a busy answer and held entries arm nothing");
+	f.after({ more: true });
+	f.after({ more: true });
+	assert.equal(t.armed.length, 1, "one timer, however often it is asked");
+	assert.equal(t.armed[0].ms, SANDBOX_FOLLOWUP_DELAY_MS);
+	assert.equal(t.armed[0].handle.unrefs, 1, "unref'd, so it never holds the worker open");
+});
+
+test("follow-ups repeat while a pass says more and stop at the first that does not, each told how to stop (issue #978)", async () => {
+	const t = oneShots();
+	const results = [{ more: true }, { more: true }, { more: false }];
+	const calls = [];
+	const f = makeSweepFollowUps({ reap: async (options) => (calls.push(options), results.shift()), ...t });
+	f.after({ more: true });
+	for (let i = 0; i < 3; i++) await t.fire(SANDBOX_FOLLOWUP_DELAY_MS);
+	assert.equal(calls.length, 3);
+	assert.equal(calls[0].stopped(), false, "each pass is handed the follow-ups' own stop");
+	assert.equal(t.pending(SANDBOX_FOLLOWUP_DELAY_MS).length, 0, "the pass that left nothing arms nothing");
+	await f.close();
+	assert.equal(calls[0].stopped(), true, "and close turns it");
+});
+
+test("a pass that ends the lap, a daily tick's too, clears a follow-up already armed (issue #978)", async () => {
+	const t = oneShots();
+	let calls = 0;
+	const f = makeSweepFollowUps({ reap: async () => (calls++, { more: true }), ...t });
+	f.after({ more: true });
+	f.after({ busy: true });
+	assert.equal(t.cleared.length, 0, "a busy answer says nothing about the lap");
+	f.after({ more: false, reaped: 3 });
+	assert.deepEqual(t.cleared.map((h) => h.ms), [SANDBOX_FOLLOWUP_DELAY_MS], "the lap ended, so the armed follow-up goes");
+	assert.equal(t.pending(SANDBOX_FOLLOWUP_DELAY_MS).length, 0);
+	assert.equal(calls, 0, "and no pass of a new lap starts from it");
+	f.after({ more: true });
+	assert.equal(t.pending(SANDBOX_FOLLOWUP_DELAY_MS).length, 1, "a later pass that says more arms again");
+	await f.close();
+});
+
+test("close clears an armed follow-up, and nothing arms after it (issue #978)", async () => {
+	const t = oneShots();
+	let calls = 0;
+	const f = makeSweepFollowUps({ reap: async () => (calls++, { more: true }), ...t });
+	f.after({ more: true });
+	await f.close();
+	assert.deepEqual(t.cleared.map((h) => h.ms), [SANDBOX_FOLLOWUP_DELAY_MS]);
+	f.after({ more: true });
+	assert.equal(t.pending(SANDBOX_FOLLOWUP_DELAY_MS).length, 0);
+	assert.equal(calls, 0);
+});
+
+test("close waits for a follow-up pass in flight, BOUNDED, and says when it gave up (issue #978)", async () => {
+	// Settles: close returns when the pass does, and the bound's timer is cleared.
+	const t = oneShots();
+	let finish;
+	const f = makeSweepFollowUps({ reap: () => new Promise((resolve) => (finish = resolve)), ...t });
+	f.after({ more: true });
+	await t.fire(SANDBOX_FOLLOWUP_DELAY_MS);
+	let closed = false;
+	const closing = f.close().then(() => (closed = true));
+	await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(closed, false, "a pass in flight is waited for");
+	assert.equal(t.pending(10_000).length, 1, "under a ten-second bound");
+	finish({ more: true });
+	await closing;
+	assert.equal(t.pending(10_000).length, 0, "the bound is cleared once the pass is done");
+	assert.equal(t.pending(SANDBOX_FOLLOWUP_DELAY_MS).length, 0, "and a closed follow-up does not re-arm from the pass's more");
+	// Never settles: the bound ends the wait, with one line.
+	const u = oneShots();
+	const lines = [];
+	const stuck = makeSweepFollowUps({ reap: () => new Promise(() => {}), log: (event, fields) => lines.push([event, fields]), ...u });
+	stuck.after({ more: true });
+	await u.fire(SANDBOX_FOLLOWUP_DELAY_MS);
+	const waiting = stuck.close();
+	await u.fire(10_000);
+	await waiting;
+	assert.deepEqual(lines, [["sandbox_followup_drain_timeout", { ms: 10_000 }]]);
+});
+
+test("a follow-up reap that throws is one scrubbed log line, never a rejection, and arms nothing (issue #978)", async () => {
+	const t = oneShots();
+	const lines = [];
+	const f = makeSweepFollowUps({
+		reap: async () => {
+			throw new Error("Cannot connect to the Docker daemon at ssh://bob:hunter2@remote");
+		},
+		log: (event, fields) => lines.push([event, fields]),
+		...t,
+	});
+	f.after({ more: true });
+	await t.fire(SANDBOX_FOLLOWUP_DELAY_MS);
+	assert.equal(lines.length, 1);
+	assert.equal(lines[0][0], "sandbox_reaper_skipped", "the family's fault name, OQ-007's one grep");
+	assert.ok(!lines[0][1].reason.includes("hunter2"));
+	assert.equal(t.pending(SANDBOX_FOLLOWUP_DELAY_MS).length, 0);
 });

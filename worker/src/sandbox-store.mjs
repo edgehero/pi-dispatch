@@ -119,6 +119,36 @@ export const SANDBOX_TOMBSTONE_STUCK_MS = 10 * 60 * 1000;
  */
 export const SANDBOX_TOMBSTONE_RELOG_MS = DAY_MS;
 
+/**
+ * The bound on ONE pass of the retention sweep (issue #978): wall time from the pass's start, its rests included. A
+ * boot after a long gap used to sweep its whole backlog in one go before the worker took a job (959 `reaped_sandbox`
+ * lines back to back on one host), one runtime ask and one recursive delete per run with nothing between them, which
+ * on a VM-backed daemon was minutes of pickup delay. A pass now stops at its first loop boundary past this, and what it
+ * left is the next pass's (`makeSweepFollowUps`). So this bounds the boot delay before pickup and each burst after it.
+ */
+export const SANDBOX_PASS_BUDGET_MS = 20_000;
+
+/**
+ * The other bound on one pass (issue #978): the removals it made. The time budget cannot see what a removal costs
+ * after it returns (APFS, and a VM's disk, finish the work later), so a pass of fast removals stops here as well. A
+ * removal that FAILED does not count (its walk's time still counts toward the time budget): counted, fifty tombstones
+ * the worker cannot delete (the #363 shape, root-owned files) ended every pass before it reached a single run.
+ */
+export const SANDBOX_PASS_MAX_REAPS = 50;
+
+/**
+ * How long a pass rests after each entry that asked a runtime or deleted something (issue #978): as long as that entry
+ * took, clamped to these two. PROPORTIONAL, not fixed: the entry's time includes the runtime's own `ps` round trip, the
+ * one measure here that also sees a loaded VM, so a daemon that answers slowly is given proportionally more room and
+ * one that answers at once costs the pass 100 ms an entry. A fixed rest is either too long for a healthy daemon or too
+ * short for a slow one, and cannot tell which it is talking to.
+ */
+export const SANDBOX_REST_MIN_MS = 100;
+export const SANDBOX_REST_MAX_MS = 10_000;
+
+/** How often a rest looks at whether its pass was told to stop, so a shutdown never waits out a whole rest. */
+export const SANDBOX_REST_POLL_MS = 250;
+
 /** `kill(pid, 0)`: true unless the process is gone (ESRCH). EPERM means alive under another account. */
 export function defaultPidAlive(pid) {
 	try {
@@ -420,6 +450,24 @@ export function pinSandbox({ sandboxDir, jobId, pinDays, fs = defaultFs, now = (
  * know nothing about how a container is named and the two files stay acyclic. It defaults to none, so an
  * unwired reaper still sweeps; start.mjs injects `makeSandboxRuntimeWatch`'s, which answers the ids to HOLD this
  * pass: those each retained run's own runtime reports open, and those whose runtime could not answer (issue #429).
+ *
+ * BOUNDED PASSES, IN LAPS (issue #978). A pass stops at `SANDBOX_PASS_BUDGET_MS` of wall time or
+ * `SANDBOX_PASS_MAX_REAPS` removals, and rests after each entry that asked a runtime or deleted something for as long
+ * as that entry took (`SANDBOX_REST_MIN_MS` to `SANDBOX_REST_MAX_MS`). The budget is looked at ONLY at a loop boundary:
+ * before each leftover tombstone, before a stray non-directory's unlink, and after an expired run's verdict and before
+ * its runtime is asked. Never between that ask, the fresh read, the rename, the read through the tombstone and the
+ * delete, so every guard in that stretch is exactly what it was, and a budget spent during a delete lets it finish.
+ *
+ * A LAP walks the leftover tombstones, then the runs, then each runtime's networks, each in name order, and a pass
+ * the budget stops leaves its place (`lap`) for the next pass to resume from, so entries the pass HELD (a run its
+ * runtime reports open, one whose runtime timed out, a tombstone that will not delete) are passed, never visited again
+ * in the same lap, and cannot starve the entries after them. Every pass visits at least one entry before the budget
+ * can stop it, so a lap always ends, and the pass that ends it says `more: false`, removed anything or not. That is
+ * the whole bound on the follow-up passes: a chain of them is at most ONE lap of the listing, and the next lap is the
+ * next boot or periodic sweep. `reapSandboxes` resolves `{ more, reaped, held, ms, restedMs, slowestCheckMs }` (and
+ * `stopped: true` for a pass told to stop), says the same in one `sandbox_reaper_pass` line when the pass did anything,
+ * and `more` means only that the lap is not over. A pass that resumes past the tombstones or the runs still lists the
+ * root and asks which sandboxes run, since the network sweep keys on both.
  */
 export function makeSandboxReaper({
 	sandboxDir,
@@ -444,6 +492,13 @@ export function makeSandboxReaper({
 	// the run is renamed aside. `true` holds it, and so does a throw. Defaults to "no", so an unwired reaper sweeps as
 	// it did; start.mjs injects the runtime watch's `isOpen`.
 	isOpen = async () => false,
+	// Issue #978: the pass's own clock, for its budget, its rests and its timings. MONOTONIC and apart from `now`, which
+	// dates the runs and names the tombstones: a wall clock stepped back an hour must neither end a pass early nor stretch
+	// it. Seamed with `sleep` so a test drives both, and so does a script measuring a real daemon.
+	clock = () => performance.now(),
+	// Issue #978: the one wait a rest is made of, asked in slices of at most `SANDBOX_REST_POLL_MS`. NOT unref'd: the
+	// boot pass rests before anything else holds the event loop, and an unref'd timer there lets the process exit.
+	sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
 }) {
 	// Across passes, never reset: two tombstones of one pass share `pid` and `at`, and a pass on the same millisecond as
 	// the last must not reuse a name either.
@@ -451,8 +506,31 @@ export function makeSandboxReaper({
 	// The stuck tombstones already said, and when (`SANDBOX_TOMBSTONE_RELOG_MS`). Only rate-limits a log line; losing it
 	// on a restart costs one repeated line.
 	const stuckSaid = new Map();
+	// The pass in progress (issue #978): its start, its stop and its counts, null between passes. ONE PASS AT A TIME, and
+	// that is a correctness rule here, not tidiness: the leftover sweep below clears every tombstone this pid named on
+	// the promise that passes never overlap. Boot, the daily tick and the follow-up passes all call this one closure, so
+	// a call while a pass runs answers `{ busy: true }` and touches nothing; the pass in flight covers what it would have.
+	let tally = null;
+	// WHERE THE LAP STANDS (issue #978), carried from pass to pass: the loop the next pass starts in, and the first name
+	// in it this lap has not visited (null: its start). A pass the budget stops records the entry it stopped at; a loop
+	// that reaches its end hands the lap to the next loop, and the network sweep's end closes the lap. In memory only: a
+	// restart starts a new lap, which is a boot sweep's job anyway.
+	// `id` numbers the laps, so the network sweepers can tell a new lap from the one their own place belongs to.
+	const lap = { phase: "tombstones", at: null, id: 1 };
 	return async function reapSandboxes({ stopped = () => false } = {}) {
-		if (!sandboxDir) return;
+		if (tally) return { busy: true };
+		tally = { started: clock(), reaped: 0, held: new Set(), removals: 0, visited: 0, rests: 0, restedMs: 0 };
+		tally.slowestCheckMs = 0;
+		try {
+			return await sweep(stopped);
+		} finally {
+			tally = null;
+		}
+	};
+
+	/** One pass, under `reapSandboxes`'s single flight. Never throws, and resolves the pass's result (`finish`). */
+	async function sweep(stopped) {
+		if (!sandboxDir) return finish(false);
 		let names;
 		try {
 			names = fs.readdirSync(sandboxDir);
@@ -469,7 +547,7 @@ export function makeSandboxReaper({
 			// failed and still skips the pass.
 			if (err?.code !== "ENOENT") {
 				log("sandbox_reaper_skipped", { reason: scrubCredentials(err?.message) });
-				return;
+				return finish(false);
 			}
 			names = [];
 		}
@@ -483,18 +561,19 @@ export function makeSandboxReaper({
 		// one worker per daemon). Still, a tombstone ANOTHER process named is left alone while it is younger than
 		// `SANDBOX_TOMBSTONE_STUCK_MS`: that process may be between its rename and its read-back, about to put a pinned run
 		// back, and deleting it there would lose the run. The name carries the pid, so this costs one comparison. A
-		// tombstone this process named is always from an earlier pass (passes never overlap), and one another process left
+		// tombstone this process named is always from an earlier pass (passes never overlap: `reapSandboxes` answers a call
+		// made during one `{ busy: true }`, issue #978), and one another process left
 		// behind is cleared once it is old enough that no pass could still hold it.
-		const runs = [];
+		// SORTED (issue #978), so the lap's place is a name that means the same on the next pass whatever order the
+		// filesystem lists in.
+		names.sort();
+		const runs = names.filter((name) => !isSandboxTombstone(name));
 		const pass = now();
 		// The pinned tombstones this pass could not put back, for ONE retry after the main loop (PR #457's final check).
 		const heldPinned = [];
-		for (const name of names) {
-			if (stopped()) return;
-			if (!isSandboxTombstone(name)) {
-				runs.push(name);
-				continue;
-			}
+		for (const name of lap.phase === "tombstones" ? names : []) {
+			if (stopped()) return finish(false, true);
+			if (!isSandboxTombstone(name) || passed(name)) continue;
 			const owner = sandboxTombstonePid(name);
 			const age = sandboxTombstoneAge(name, pass);
 			// Only while that process is ALIVE (gate round 1): a worker that crashed between its rename and its delete
@@ -502,11 +581,18 @@ export function makeSandboxReaper({
 			// NEGATIVE age (a name stamped by a clock that ran ahead) is not young, it is unknowable, and is treated as
 			// old (gate round 2): otherwise a reused pid would hold it forever. The skip is said once a period.
 			if (owner !== null && owner !== pid && age !== null && age >= 0 && age < SANDBOX_TOMBSTONE_STUCK_MS && pidAlive(owner)) {
+				tally.held.add(name);
 				sayOnce(name, pass, { reason: "tombstone-foreign" });
 				continue;
 			}
-			if ((await clearTombstone(name, pass)) === "pinned-held") heldPinned.push(name);
+			// THE BUDGET, at this loop's one boundary (issue #978). Spent here, the pass returns AT ONCE rather than read and
+			// place runs it could not finish, and the next pass resumes at this tombstone: one left for later has nothing to
+			// undo, and `clearTombstone` never deletes a live pin, so stopping loses none.
+			if (budgetSpent()) return stopAt(name);
+			tally.visited += 1;
+			if ((await clearTombstone(name, pass, stopped)) === "pinned-held") heldPinned.push(name);
 		}
+		if (lap.phase === "tombstones") enter("runs");
 		names = runs;
 
 		// ONE READ DECIDES (issue #429, review round 3). Every retained directory's manifest is read ONCE per pass, here,
@@ -517,7 +603,7 @@ export function makeSandboxReaper({
 
 		const reads = new Map();
 		for (const name of names) {
-			if (stopped()) return;
+			if (stopped()) return finish(false, true);
 			reads.set(name, readRetained(fs, join(sandboxDir, name)));
 			await new Promise((resolve) => setImmediate(resolve));
 		}
@@ -529,7 +615,7 @@ export function makeSandboxReaper({
 			// Could not ask docker. Sweeping blind risks pulling a mount out from under a live shell, so
 			// skip this sweep entirely: a directory kept one boot too long is the cheaper mistake.
 			log("sandbox_reaper_skipped", { reason: scrubCredentials(err?.message ?? "running-lookup-failed") });
-			return;
+			return finish(false);
 		}
 
 		const at = now();
@@ -549,8 +635,11 @@ export function makeSandboxReaper({
 		// `keep` from the next pass (so its network is swept), the run can no longer be opened, which is intended, and
 		// each pass retries the delete (`clearTombstone`) while doctor names it.
 		const blocked = new Set();
-		for (const name of names) {
-			if (stopped()) return;
+		// Whether the budget stopped this loop with an expired run (or a stray entry) still to visit (issue #978).
+		let more = false;
+		for (const name of lap.phase === "runs" ? names : []) {
+			if (stopped()) return finish(false, true);
+			if (passed(name)) continue;
 			const dir = join(sandboxDir, name);
 			// Set ONLY around a removal, so `blocked` means what its name says. The first version added every
 			// throw in this loop, which is a different set: a directory that VANISHED between the listing and
@@ -558,26 +647,56 @@ export function makeSandboxReaper({
 			// opposite of what had happened -- that the directory stays on disk, so its id stays in `keep` and
 			// its network is never a candidate again. It does not stay, and it is.
 			let removing = false;
+			// When this entry began asking a runtime or deleting, for the rest after it (issue #978); null for an entry
+			// that did neither, which costs the daemon nothing and so rests for nothing.
+			let began = null;
 			try {
 				// lstat: a symlink here resolves on the host, and this tree is agent-written.
 				if (!fs.lstatSync(dir).isDirectory()) {
+					// The budget before this removal as before every other (issue #978). Synchronous, so nothing runs
+					// between the lstat above and the unlink below.
+					if (budgetSpent()) {
+						more = true;
+						lap.at = name;
+						break;
+					}
+					tally.visited += 1;
 					removing = true;
+					began = clock();
 					// A non-directory unlink is bounded and must not yield before acting on the lstat above.
 					fs.rmSync(dir, { force: true });
+					tally.removals += 1;
+					tally.reaped += 1;
 					log("reaped_sandbox", { entry: name, reason: "not-a-directory" });
 					continue;
 				}
-				if (running.has(name)) continue; // an operator is inside it
+				// An operator is inside it. Counted among the held (issue #978), so the pass line says how many are open.
+				if (running.has(name)) {
+					tally.held.add(name);
+					continue;
+				}
 				// A manifest that could not be read FOR A MOMENT (`TRANSIENT_READ_ERRORS`: EMFILE, EIO and the rest) is
 				// HELD this pass, full stop: no runtime answer can release it, because nothing about the run is known,
 				// not even which runtime to ask. The next pass reads it again. Said once per directory per pass.
 				const read = reads.get(name);
 				if (read?.transient) {
+					tally.held.add(name);
 					log("sandbox_reaper_skipped", { entry: name, reason: "manifest-unread" });
 					continue;
 				}
 				const verdict = expiry(read, at, retentionHours);
 				if (!verdict.expired) continue;
+				// THE BUDGET (issue #978), HERE AND NOWHERE FURTHER DOWN: after the verdict, so a run inside its window
+				// never ends a pass, and before the runtime is asked, so the stretch from that ask through the fresh read,
+				// the rename, the read through the tombstone and the delete runs whole once begun. A check inside it would
+				// put a gap between a guard and the act it guards; a budget spent in it lets this run finish instead.
+				if (budgetSpent()) {
+					more = true;
+					lap.at = name;
+					break;
+				}
+				tally.visited += 1;
+				began = clock();
 				// AND AGAIN AT THE POINT OF DELETION (final review of round 3, reproduced): the pass's read is taken BEFORE
 				// the runtimes are asked, which can take seconds per runtime, so a pin landing meanwhile, or a BullMQ retry
 				// replacing the directory with a fresh run, was deleted on the stale read. The one read still PLACES the
@@ -597,13 +716,18 @@ export function makeSandboxReaper({
 				} catch {
 					hold = "runtime-unanswered";
 				}
+				// The runtime's own round trip, the one measure here that sees a loaded VM (issue #978): the slowest of
+				// the pass goes in its summary line. A reading, not a decision.
+				tally.slowestCheckMs = Math.max(tally.slowestCheckMs, clock() - began);
 				if (hold) {
+					tally.held.add(name);
 					log("sandbox_reaper_skipped", { entry: name, reason: hold });
 					continue;
 				}
 				const fresh = readRetained(fs, dir);
-				if (stopped()) return;
+				if (stopped()) return finish(false, true);
 				if (fresh.transient || !sameRead(read, fresh)) {
+					tally.held.add(name);
 					log("sandbox_reaper_skipped", { entry: name, reason: fresh.transient ? "manifest-unread" : "manifest-changed" });
 					continue;
 				}
@@ -620,6 +744,7 @@ export function makeSandboxReaper({
 					fs.renameSync(dir, tomb);
 				} catch (err) {
 					blocked.add(name);
+					tally.held.add(name);
 					log("sandbox_reaper_skipped", { entry: name, reason: "rename-failed", code: err?.code ?? null });
 					continue;
 				}
@@ -632,6 +757,7 @@ export function makeSandboxReaper({
 				const moved = readRetained(fs, tomb);
 				if (moved.transient || !sameRead(read, moved)) {
 					const restored = restoreTombstone(tomb, dir);
+					tally.held.add(name);
 					log("sandbox_reaper_skipped", { entry: name, reason: "manifest-changed", ...(restored ? {} : { restored: false }) });
 					continue;
 				}
@@ -640,17 +766,24 @@ export function makeSandboxReaper({
 				} catch (err) {
 					// A tombstone that would not go STAYS one: the run is already unopenable, and the next pass retries.
 					stuckSaid.set(tombName, at);
+					tally.held.add(name);
 					log("sandbox_reaper_skipped", { entry: name, reason: "tombstone-stuck", tombstone: tombName, code: err?.code ?? null });
-					await new Promise((resolve) => setImmediate(resolve));
 					continue;
 				}
+				// Counted toward the cap only once it is done: a removal that failed costs the walk's time, never the cap.
+				tally.removals += 1;
+				tally.reaped += 1;
 				log("reaped_sandbox", { entry: name, reason: verdict.reason });
-				// Also yield with injected removers that finish immediately. The recursive removal itself now
-				// yields too: a single large clone used to exceed the paid job's lock-renewal window (#924).
-				await new Promise((resolve) => setImmediate(resolve));
 			} catch (err) {
 				if (removing) blocked.add(name);
+				tally.held.add(name);
 				log("sandbox_reaper_skipped", { entry: name, reason: scrubCredentials(err?.message) });
+			} finally {
+				// THE REST (issue #978), after an entry that asked a runtime or deleted, however it ended: held, kept or
+				// reaped. It replaces the bare turn this loop yielded per tree (#924), which a removal that finishes at
+				// once still needs and a slow daemon needed far more of. Never between the ask and the delete, since it
+				// runs only once the entry is done.
+				if (began !== null) await rest(clock() - began, stopped);
 			}
 		}
 
@@ -660,10 +793,15 @@ export function makeSandboxReaper({
 		// listing then sees the run back), through the same `clearTombstone`: its reads, its restore that displaces only an
 		// empty directory, its rule that never deletes a live pin, and its once-per-period line when the name is still taken.
 		for (const name of heldPinned) {
-			if (stopped()) return;
-			await clearTombstone(name, pass);
+			if (stopped()) return finish(false, true);
+			await clearTombstone(name, pass, stopped);
 		}
-		if (stopped()) return;
+		if (stopped()) return finish(false, true);
+		// A PASS THE BUDGET STOPPED ENDS HERE (issue #978), after the retry above, which only ever puts a pinned run back,
+		// and the next pass resumes at the run it stopped at. The networks wait for the pass that finishes the runs: keyed
+		// on THAT pass's listing, as they always were, so nothing about which network is kept changes.
+		if (more) return finish(true);
+		if (lap.phase === "runs") enter("networks");
 
 		// The session networks, after the directories. Reached only when `listRunning` ANSWERED and the
 		// directory listing was read, which is the same precondition the directory pass has: without either,
@@ -695,17 +833,115 @@ export function makeSandboxReaper({
 					throw err;
 				}
 			};
-			const { swept, notes, failed, failures } = await sweepNetworks({ running, keep, retained, blocked });
+			// PACED like the directories (issue #978): the sweeper calls this after each network it asked the daemon about,
+			// never between its last look and the `rm` (`sandbox.mjs`), and it rests as long as that network took and then
+			// answers whether the pass may go on. False once the budget is spent: the sweeper stops there and says `more`.
+			let mark = clock();
+			const pace = async () => {
+				await rest(clock() - mark, stopped);
+				mark = clock();
+				return !spent() && !stopped();
+			};
+			// Each runtime's sweeper keeps ITS place in the lap (`sandbox.mjs`), so a pass that resumes here goes on where
+			// the last network pass stopped, runtime and network. `lapId` is how they know a place belongs to THIS lap: one
+			// an earlier lap left (a lap a failed pass cut short) is dropped, and that runtime starts from its top.
+			const outcome = await sweepNetworks({ running, keep, retained, blocked, pace, lapId: lap.id });
+			const { swept, notes, failed, failures, more: left } = outcome;
 			for (const s of swept) log("reaped_sandbox_network", s);
 			for (const n of notes) log("sandbox_network_not_reaped", n);
 			// One line per runtime whose listing failed, naming it (issue #429), where a sweeper that knows its runtime
 			// says so; a bare `failed` from a single sweeper keeps the line it always had.
 			if (Array.isArray(failures) && failures.length > 0) for (const f of failures) log("sandbox_reaper_skipped", { reason: f.reason, runtime: f.runtime });
 			else if (failed) log("sandbox_reaper_skipped", { reason: failed });
+			if (left === true) more = true;
 		} catch (err) {
 			log("sandbox_reaper_skipped", { reason: scrubCredentials(err?.message ?? "network-sweep-failed") });
 		}
-	};
+		if (stopped()) return finish(false, true);
+		// The lap is over when the networks are (or their sweep failed, which is said above): `finish` starts a new one.
+		return finish(more);
+	}
+
+	/** Whether `name` comes before the lap's place in its loop, so this lap already visited it (issue #978). */
+	function passed(name) {
+		return lap.at !== null && name < lap.at;
+	}
+
+	/** Hand the lap to the next loop, from its start (issue #978). */
+	function enter(phase) {
+		lap.phase = phase;
+		lap.at = null;
+	}
+
+	/** End this pass at `name`, its loop's first entry not visited, where the next pass resumes (issue #978). */
+	function stopAt(name) {
+		lap.at = name;
+		return finish(true);
+	}
+
+	/**
+	 * `spent()` once this pass has visited an entry, and never before (issue #978): every pass visits at least one, so
+	 * the lap moves on every pass, even one whose runtime listing alone took the whole budget, and always ends.
+	 */
+	function budgetSpent() {
+		return tally.visited > 0 && spent();
+	}
+
+	/**
+	 * Whether this pass has spent its budget (issue #978): `SANDBOX_PASS_BUDGET_MS` of its own clock since it started,
+	 * rests included, or `SANDBOX_PASS_MAX_REAPS` removals made. Asked only at the loop boundaries named in the header,
+	 * never inside one entry's stretch, and through `budgetSpent` there.
+	 */
+	function spent() {
+		return clock() - tally.started >= SANDBOX_PASS_BUDGET_MS || tally.removals >= SANDBOX_PASS_MAX_REAPS;
+	}
+
+	/**
+	 * Rest after an entry that took `took` ms (issue #978): that long, clamped to `SANDBOX_REST_MIN_MS` and
+	 * `SANDBOX_REST_MAX_MS`, in slices of `SANDBOX_REST_POLL_MS` with `stopped` asked before each, so a pass told to stop
+	 * wakes within one slice. It ends by the slices it asked for, never by the clock, so a sleep that returns early ends
+	 * too; the time it actually took is what the summary counts.
+	 */
+	async function rest(took, stopped) {
+		let left = Math.min(SANDBOX_REST_MAX_MS, Math.max(SANDBOX_REST_MIN_MS, Number.isFinite(took) ? took : 0));
+		const from = clock();
+		tally.rests += 1;
+		while (left > 0 && !stopped()) {
+			const slice = Math.min(left, SANDBOX_REST_POLL_MS);
+			await sleep(slice);
+			left -= slice;
+		}
+		tally.restedMs += clock() - from;
+	}
+
+	/**
+	 * The pass's result (issue #978), `{ more, reaped, held, ms, restedMs, slowestCheckMs }` plus `stopped: true` for a
+	 * pass told to stop, which never asks for more (it is the worker shutting down). `held` counts the runs and tombstones
+	 * it kept for a reason, a run with a sandbox open among them. Said once as `sandbox_reaper_pass` when the pass did
+	 * anything (removed or held an entry, rested after one, or left the lap unfinished), so a quiet pass on a tidy
+	 * host says nothing and the line a slow daemon produces carries the reading that would tell the cause: how long the
+	 * pass took, how much of that was rest, and the slowest runtime answer.
+	 */
+	function finish(more, wasStopped = false) {
+		const summary = {
+			more: more === true && !wasStopped,
+			reaped: tally.reaped,
+			held: tally.held.size,
+			ms: Math.round(clock() - tally.started),
+			restedMs: Math.round(tally.restedMs),
+			slowestCheckMs: Math.round(tally.slowestCheckMs),
+			...(wasStopped ? { stopped: true } : {}),
+		};
+		if (summary.more || summary.reaped > 0 || summary.held > 0 || tally.rests > 0) log("sandbox_reaper_pass", summary);
+		// A pass that ends without `more` for any reason but a stop ends the LAP (issue #978): at its end, or cut short by a
+		// listing or runtime fault. Resuming one a fault cut short would leave a tombstone or a run that appeared meanwhile
+		// before its place for yet another sweep, where the next lap clears tombstones first, as its contract says.
+		if (!summary.more && !wasStopped) {
+			lap.id += 1;
+			enter("tombstones");
+		}
+		return summary;
+	}
 
 	/**
 	 * The name a pinned tombstone goes back under, or null to HOLD it: only ever one of the two names its own `jobId`
@@ -745,34 +981,47 @@ export function makeSandboxReaper({
 	 * Resolves `"pinned-held"` for a pinned one whose run's name was taken, which the pass retries once after its main
 	 * loop; null otherwise.
 	 */
-	async function clearTombstone(name, at) {
+	async function clearTombstone(name, at, stopped) {
 		const path = join(sandboxDir, name);
 		const read = readRetained(fs, path);
 		const keepUntil = Date.parse(read.manifest?.keepUntil ?? "");
 		let held = false;
+		// When its removal began, for the pass's rest after it (issue #978); null when nothing was deleted.
+		let began = null;
 		if (read.transient) {
+			tally.held.add(name);
 			sayOnce(name, at, { reason: "manifest-unread" });
 		} else if (Number.isFinite(keepUntil) && keepUntil > at) {
 			const target = restoreName(read.manifest);
 			const restored = target !== null && restoreTombstone(path, join(sandboxDir, target));
 			if (restored) {
 				stuckSaid.delete(name);
+				tally.held.delete(name);
 				log("sandbox_reaper_skipped", { entry: name, reason: "tombstone-pinned", restored: true });
 			} else {
 				held = target !== null;
+				tally.held.add(name);
 				sayOnce(name, at, { reason: "tombstone-pinned", restored: false });
 			}
 		} else {
+			began = clock();
 			try {
 				await remove(path, { recursive: true, force: true });
 				stuckSaid.delete(name);
+				tally.held.delete(name);
+				// Toward the cap only once done, as in the main loop: a failed removal costs time, never the cap.
+				tally.removals += 1;
+				tally.reaped += 1;
 				log("reaped_sandbox", { entry: name, reason: "tombstone" });
 			} catch (err) {
+				tally.held.add(name);
 				sayOnce(name, at, { reason: "tombstone-stuck", code: err?.code ?? null });
 			}
 		}
-		// The per-tree yield of the main loop, for its reason: this runs on the timer beside draining jobs.
-		await new Promise((resolve) => setImmediate(resolve));
+		// After a removal, the pass's rest, for the main loop's reason (issue #978); otherwise the per-tree yield this has
+		// always had, since this runs on the timer beside draining jobs and a pass of held tombstones must still yield.
+		if (began !== null) await rest(clock() - began, stopped);
+		else await new Promise((resolve) => setImmediate(resolve));
 		return held ? "pinned-held" : null;
 	}
 

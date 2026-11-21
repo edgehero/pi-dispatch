@@ -2764,7 +2764,10 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   - **`0` is byte-identical to the pre-#292 behaviour, and that is enforced structurally**: at `0` the
     sweep object is not CONSTRUCTED, so there is no timer, no closer and no reachable second call to any
     reaper. The test asserts zero constructions rather than counting effects, because "nothing happened"
-    is a much weaker claim than "the thing does not exist".
+    is a much weaker claim than "the thing does not exist". **One stated exception since issue #978**: the
+    sandbox reaper's follow-up passes run at `0` too, because they are the BOOT sweep finishing in bounded
+    steps, not a second sweep (below). The periodic sweep is still never constructed at `0`, and its test
+    still asserts zero constructions; the follow-ups add one closer, which that test counts.
   - **Registered in `extraClosers`, not resting on its unref.** `DES-WATCHERS-CLOSE-WITH-THE-WORKER`
     established that unref'd is not cleaned up, and this handle owns deletion work: a tick landing during
     drain could delete a retained workspace behind a worker that already reported a clean shutdown.
@@ -2775,7 +2778,36 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     exactly. `start()` does not sweep immediately, because boot just did and an immediate second sweep
     would double the boot work and land inside the call-order pins. And `sweepOnce` carries an overlap
     guard the registry's `beat` deliberately lacks: a beat is three bounded Redis writes that would write
-    the same values twice, while a sweep is unbounded filesystem I/O with deletes in it.
+    the same values twice, while a sweep is unbounded filesystem I/O with deletes in it. Since issue #978
+    the sandbox reaper also holds ITSELF to one pass at a time (a call during a pass answers `{ busy: true }`
+    and touches nothing), because boot, the tick and the follow-ups below all call that one closure, and its
+    leftover-tombstone rule clears this pid's own tombstones on the promise that passes never overlap.
+  - **The sandbox sweep runs in bounded passes, one lap per sweep, and follow-ups finish the lap** (issue #978).
+    A boot after a long gap swept its whole backlog before the worker took a job (959 runs back to back on one
+    host, each a runtime ask and a recursive delete with nothing between), which on a VM-backed daemon was minutes
+    of pickup delay against the very daemon the jobs need. A pass now stops at 20 s of wall time or 50 removals
+    made (a failed one does not count, or fifty undeletable tombstones would end every pass before any run), and
+    rests after each entry that asked the runtime or deleted for as long as that entry took (100 ms to 10 s). A
+    sweep is one LAP over the leftover tombstones, the runs and each runtime's networks, in name order: a pass the
+    budget stopped keeps its place and the next resumes there, the budget never stops a pass before it has visited
+    one entry, so a held entry (open, unanswered, undeletable) is visited once a lap and cannot starve the ones
+    after it, and the lap always ends. The pass that ends it says `more: false`, removed anything or not.
+    `makeSweepFollowUps` (in this same leaf module) arms one `.unref()`'d timer a minute after a pass that says
+    `more`, and each follow-up hands its own result back (a pass that ends the lap, a daily tick's too, clears one
+    already armed), so a chain of follow-ups is AT MOST ONE LAP and never repeats on what it could not remove:
+    that waits for the next boot or periodic sweep. The boot pass is still AWAITED before `createWorkerFn`
+    and its follow-ups start after it, so the boot delay before pickup is one pass whatever the backlog; the
+    tick's sandbox entry hands its result to the same follow-ups. They run OUTSIDE `sweepOnce`'s in-flight guard,
+    so a daily tick never skips the log and session reapers because a follow-up was running; they are an
+    `extraClosers` entry for this entry's own reason, and their `close()` waits for a pass in flight up to the same
+    ten-second bound while the pass's rests wake on the stop within a quarter second. Each pass that did anything
+    says one `sandbox_reaper_pass` line with what it removed and held and how long the slowest runtime answer took,
+    the evidence that tells a slow daemon from a slow disk next time. Measured on a GitHub runner's Docker 28.0.4
+    over 1000 expired runs through the real runtime watch: all reaped in 20 passes, the first 6.0 s for 50 runs;
+    with the daemon held to 1% of a CPU, a first pass of 10.7 s for 50 runs (slowest runtime answer 675 ms) where
+    the old single pass took 16.9 s for 150. A pass that ends without `more` for any reason but a stop, a fault
+    included, ends the lap, so a fault never leaves the next sweep resuming a stale place. The log and session
+    reapers are UNCHANGED: they touch only the filesystem, never a container runtime.
 - **What it costs, stated rather than glossed**: the retention window becomes a **floor**, not a ceiling.
   A file dies on the first sweep after its window closes, so the effective ceiling is
   `window + PI_SWEEP_INTERVAL_HOURS`, up to 48 hours for a sandbox at both defaults. Today's worst case is
@@ -2789,7 +2821,17 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
   `worker/test/start-wiring.test.mjs` skips its whole file without `VALKEY_TEST_URL`, so an inline timer
   would be exercised only in CI, and the sharp edges here are exactly the ones that want a laptop test.
   *Quota'ing the stores by bytes*: a different mechanism with a different failure mode (what do you delete
-  when you are over?), and not what `OQ-007` asked.
+  when you are over?), and not what `OQ-007` asked. Issue #978: *a fixed rest between sandbox entries*: it
+  cannot see a loaded VM, so it is too long for a healthy daemon or too short for a slow one, where a rest as
+  long as the entry took grows with the runtime's own round trip. *An unawaited boot sweep*: the worker would
+  take jobs at once, but the boot order (retained runs swept before a job starts) would stop being a
+  guarantee, and the burst would land beside the first jobs instead of before them; a bounded first pass keeps
+  both. *Settings for the budget, the cap, the rests or the delay*: none is the operator's to tune, since the
+  rests already follow the daemon, and each would be one more setting to document and test. *Starting every pass at
+  the top of the listing*: held entries sorted first (runs a slow runtime cannot answer for, tombstones that will not
+  delete, networks whose `rm` fails) took every pass's budget and the runs after them were never reached, with the
+  follow-ups re-armed forever. *Ending a chain after N passes that removed nothing*: no N fits every listing, where a
+  lap is exactly the walk that visits everything once.
 - **Traces to**: `DES-RUN-HISTORY-FLAT-FILES-NO-DB`, `DES-WATCHERS-CLOSE-WITH-THE-WORKER`,
   `DES-HOST-REGISTRY`, `REQ-RESURRECTABLE-SANDBOX`, `REQ-RESUMABLE-SESSION`,
   `INT-SANDBOX-CONTRACT`, `OQ-007`
@@ -2806,6 +2848,8 @@ non-overlapping and check stop between entries/stores; close retains its existin
 Already-issued filesystem removal cannot be cancelled. Short metadata operations, directory listing,
 manifest reads and atomic renames remain synchronous and have no hard latency bound on a failing disk.
 The hourly/daily cadence, retention windows, pin/open holds and one-worker-per-root rule are unchanged.
+Since #978 the sandbox reaper's per-tree turn is a rest as long as the entry took (100 ms to 10 s) and its
+passes are bounded (the bullet above); the session and fork-source turns are as this paragraph says.
 
 ## DES-GH-APP-MANIFEST-SETUP
 
@@ -19065,6 +19109,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-11-21 (#978) | **`DES-RETENTION-SWEEPS-ON-A-TIMER` AMENDED**, five places. The structural `0`: one stated exception, the sandbox reaper's follow-up passes, which finish the BOOT sweep and run at `0` too, while the periodic sweep is still never constructed there. Non-overlap: the sandbox reaper holds itself to one pass at a time (`{ busy: true }`), since boot, the tick and the follow-ups share its closure. NEW bullet: the sandbox sweep runs in bounded passes (20 s or 50 removals made, a failed removal not counted, a rest as long as each entry took, 100 ms to 10 s), one LAP per sweep over the leftover tombstones, the runs and each runtime's networks in name order, each pass resuming where the last stopped and visiting at least one entry, so a held entry cannot starve the rest and the lap always ends, and a pass ending without `more` for any reason but a stop, a fault included, ending the lap; measured on a GitHub runner's Docker 28.0.4 (1000 runs in 20 passes, the first 6.0 s for 50; at 1% of a CPU 10.7 s for 50 against 16.9 s for the old single pass over 150); the boot pass still awaited before `createWorkerFn` and its follow-ups (`makeSweepFollowUps`, a minute after a pass that says `more`) started after it, so a chain of them is at most one lap, outside `sweepOnce`'s in-flight guard, closed with the worker under the same ten-second bound, and one `sandbox_reaper_pass` line per pass that did anything; the log and session reapers unchanged. The #924 amendment: the sandbox reaper's per-tree turn is now that rest. Rejected gains five: a fixed rest (it cannot see a loaded VM), an unawaited boot sweep (it loses the boot-order guarantee and lands the burst beside the first jobs), settings for the budget, the cap, the rests or the delay, starting every pass at the top of the listing (held entries first starved the rest), and ending a chain after N passes that removed nothing. **`DES-CONCURRENCY-3` UNCHANGED, checked**: still one worker per daemon and per retention root. **`DES-WATCHERS-CLOSE-WITH-THE-WORKER` UNCHANGED, checked**: the follow-ups are one more closer by its rule. **Code evidence**: worker/src/retention-sweep.mjs -> makeSweepFollowUps, SANDBOX_FOLLOWUP_DELAY_MS; worker/src/sandbox-store.mjs -> makeSandboxReaper; worker/src/sandbox.mjs -> makeSandboxNetworkSweeper, combineSandboxNetworkSweepers; worker/src/start.mjs -> startWorker. |
 | 2026-11-21 (#994) | **`DES-GH-POLLING-TRANSPORT` AMENDED**, the follow bullet: the poller judges every later read under the boot load's environment (`pollerLoaderEnv`) still, and the reason given for it, that a watch source naming `WEBHOOK_SECRET` passed only on the boot's placeholder, is history: the poller judges no watch source's secret, which only `serve` verifies pushes with, so a source without its secret neither refuses the poller's start nor an edit it follows. **`DES-TRIGGER-OUTSIDE-PI` UNCHANGED, checked**: `pi-dispatch triggers check` still asks the receiver's loader its watch secret question with the shared predicate, and its parity test still holds the verdicts to the real `loadReceiverConfig` (with `serve`'s rule), `loadPollerConfig` and `startWatchPuller`. **`DES-WATCH-DETERMINISTIC-PRODUCER` UNCHANGED, checked**: the collector's admission, cursor and lease are untouched; it loads without the push secret rule. **Code evidence**: receiver/src/config.mjs -> loadReceiverConfig, reloadTriggers; receiver/src/start.mjs -> startReceiver; receiver/src/poller-config.mjs -> pollerLoaderEnv; receiver/test/poller.test.mjs. |
 | 2026-11-21 (#970) | **`DES-GH-POLLING-TRANSPORT` AMENDED**, the heartbeat bullet: a beat between repositories and before each GitHub request once a minute has passed since the last, by the injected clock and with the cycle-top TTL, since a cycle of 130 repositories at a second a request ran six and a half minutes, and one repository's 50 open pull requests five, and each read as no poller while it polled; and the one rule for whether a deployment runs a poller (`pollerExpected`: `GITHUB_INGEST`, else a `POLL_REPOS` that names repositories), which `status` and Connections both ask, so an App deployment taking webhooks gets no alarm from either and a hand-made poller's deployment without `GITHUB_INGEST` gets the same one from both. **`DES-TRIGGER-OUTSIDE-PI` UNCHANGED, checked**: `triggers check` judges with each reader's code as before; a setting or secret this shell sets and the `.env` lacks is now refused as the entry's environment rule already said for a disagreement (`INT-TRIGGERS-FILE-CONTRACT`). Its rejection of reading polling intent off `POLL_REPOS` decides whether `serve` mounts GitHub's route and still stands: `pollerExpected` reads `POLL_REPOS` for a display only, never a route, and only where `GITHUB_INGEST` is unset. The residual: a `POLL_REPOS` left in the `.env` after the poller is gone, with `GITHUB_INGEST` unset, reads as a missing poller in both `status` and Connections until it is removed or `GITHUB_INGEST=webhook` is set. **Code evidence**: receiver/src/poller.mjs -> startPoller (beatWithin); worker/src/poller-status.mjs -> POLLER_CYCLE_BEAT_MS, pollerExpected; worker/src/poller-facts.mjs -> readPollerFacts; admin/src/console/panels/connections.mjs -> pollerLine; receiver/test/poller.test.mjs. |
 | 2026-11-21 (#968) | **`DES-HOST-OWNED-SUBSCRIPTION-AUTH` CORRECTED**, the random pool sentence on doctor's credit warning: a bound connection's `extraUsageCreditMicros` below the job's cap makes every draw pass over that connection's candidates (`auth-credit-cap-required` is the skip reason), not refuse its draws. **Code evidence**: worker/src/subscription-runtime.mjs -> check; worker/src/model-selection.mjs -> model_candidate_skipped; worker/src/doctor.mjs -> mixedBillingPoolChecks |
