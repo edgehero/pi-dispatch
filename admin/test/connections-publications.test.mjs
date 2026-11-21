@@ -18,6 +18,8 @@ function fixture() {
     endpointStatus: { state: "reported", partial: false, more: 0, rawAddress: "SECRET_SENTINEL", hosts: [{ name: "mini1", state: "reported", at: AT, ageMs: 5000, endpointsMore: 0, rawAddress: "SECRET_SENTINEL", endpoints: [{ id: "shared-model", slots: 4, used: 1, fleet: 1, rawAddress: "SECRET_SENTINEL" }, { id: "local-model", slots: 2, used: 2, fleet: 0, rawAddress: "SECRET_SENTINEL" }] }] },
     slots: [2],
     receivers: { complete: true, more: 0, hosts: [receiver] },
+    // Issue #970: the pollers' heartbeats, read on the same client and left out of the agent's model.
+    pollers: { complete: true, more: 0, hosts: [{ v: 1, name: "mini1", version: "5.4.2", startedAt: AT - 60_000, at: AT, ttlMs: 360_000, nextAt: AT + 60_000, intervalSeconds: 60, repos: 1, triggers: "current", refusal: null, running: "0123456789abcdef", rejected: null, rejectedAt: null, ageMs: 0, rawPath: "SECRET_SENTINEL" }] },
     hookRuns: { partial: false, more: 0, hosts: [{ name: "mini1", runs: [{ ...buildHookRun({ jobId: "gh-union", outcome: "failed", reason: "infra", detail: "exit", code: 3 }, AT), rawOutput: "SECRET_SENTINEL" }] }] },
   };
   const read = (key) => async (redis, options) => {
@@ -37,7 +39,7 @@ function fixture() {
       reads: {
         environment: () => ({ env: { PI_WORKER_NAME: "mini1", GITHUB_AUTH_SOURCE: "gh", WEBHOOK_SECRET: "SECRET_SENTINEL" } }),
         allowlist: () => [], endpoints: () => [endpoint],
-        endpointStatus: read("endpointStatus"), slots: read("slots"), receivers: read("receivers"), hookRuns: read("hookRuns"),
+        endpointStatus: read("endpointStatus"), slots: read("slots"), receivers: read("receivers"), pollers: read("pollers"), hookRuns: read("hookRuns"),
       },
     },
   };
@@ -68,10 +70,11 @@ function assertOtherPublications(model, failed = null) {
     assert.equal(model.hookRuns.hosts[0].runs[0].code, 3);
     assert.deepEqual(model.hookRuns.hosts[0].counts, { exit: 1 });
   } else assert.deepEqual(model.hookRuns.hosts, []);
+  assert.equal(Object.hasOwn(model, "pollers"), false, "the agent's model carries no poller heartbeat");
   assert.doesNotMatch(JSON.stringify(model), /SECRET_SENTINEL/);
 }
 
-test("endpoint, lease, receiver and hook reads share one owned client through the last asynchronous read", async () => {
+test("endpoint, lease, receiver, poller and hook reads share one owned client through the last asynchronous read", async () => {
   const f = fixture();
   let release, started;
   const gate = new Promise((resolve) => { release = resolve; });
@@ -92,12 +95,12 @@ test("endpoint, lease, receiver and hook reads share one owned client through th
     assert.equal(f.closed(), false);
   } finally { release(); }
   assertOtherPublications(modelConnections(await reading));
-  assert.deepEqual([...f.calls].sort(), ["connect", "endpointStatus", "slots", "receivers", "hooks-start", "hooks-end", "disconnect"].sort());
+  assert.deepEqual([...f.calls].sort(), ["connect", "endpointStatus", "slots", "receivers", "pollers", "hooks-start", "hooks-end", "disconnect"].sort());
   assert.equal(f.calls[0], "connect"); assert.equal(f.calls.at(-1), "disconnect");
 });
 
 test("a borrowed client is never constructed or disconnected, including after a failed source", async () => {
-  for (const failed of [null, "endpointStatus", "slots", "receivers", "hookRuns"]) {
+  for (const failed of [null, "endpointStatus", "slots", "receivers", "pollers", "hookRuns"]) {
     const f = fixture();
     let factoryCalls = 0;
     f.options.redis = f.client;
@@ -105,20 +108,20 @@ test("a borrowed client is never constructed or disconnected, including after a 
     if (failed) f.options.reads[failed] = () => { f.calls.push(failed); throw Error("SECRET_SENTINEL"); };
     assertOtherPublications(modelConnections(await readConnections(f.options)), failed);
     assert.equal(factoryCalls, 0);
-    assert.deepEqual([...f.calls].sort(), ["endpointStatus", "slots", "receivers", "hookRuns"].sort());
+    assert.deepEqual([...f.calls].sort(), ["endpointStatus", "slots", "receivers", "pollers", "hookRuns"].sort());
     assert.equal(f.closed(), false);
   }
 });
 
 test("each failed publication source preserves the other slices and still releases the one owned client", async () => {
-  for (const failed of ["endpointStatus", "slots", "receivers", "hookRuns"]) {
+  for (const failed of ["endpointStatus", "slots", "receivers", "pollers", "hookRuns"]) {
     const f = fixture();
     f.options.reads[failed] = (redis) => {
       assert.equal(redis, f.client); assert.equal(f.closed(), false);
       f.calls.push(failed); throw Error("SECRET_SENTINEL");
     };
     assertOtherPublications(modelConnections(await readConnections(f.options)), failed);
-    assert.deepEqual([...f.calls].sort(), ["connect", "endpointStatus", "slots", "receivers", "hookRuns", "disconnect"].sort());
+    assert.deepEqual([...f.calls].sort(), ["connect", "endpointStatus", "slots", "receivers", "pollers", "hookRuns", "disconnect"].sort());
     assert.equal(f.calls[0], "connect"); assert.equal(f.calls.at(-1), "disconnect");
     assert.equal(f.closed(), true);
   }
@@ -139,13 +142,13 @@ test("fully injected publication readers without a URL run without constructing 
   let factoryCalls = 0;
   f.options.paths = {};
   f.options.redisFn = () => { factoryCalls++; throw Error("injected readers without a URL must not construct a real client"); };
-  for (const key of ["endpointStatus", "slots", "receivers", "hookRuns"]) f.options.reads[key] = async (redis) => {
+  for (const key of ["endpointStatus", "slots", "receivers", "pollers", "hookRuns"]) f.options.reads[key] = async (redis) => {
     assert.equal(redis, null);
     f.calls.push(key);
     return f.publications[key];
   };
   assertOtherPublications(modelConnections(await readConnections(f.options)));
   assert.equal(factoryCalls, 0);
-  assert.deepEqual([...f.calls].sort(), ["endpointStatus", "slots", "receivers", "hookRuns"].sort());
+  assert.deepEqual([...f.calls].sort(), ["endpointStatus", "slots", "receivers", "pollers", "hookRuns"].sort());
   assert.equal(f.closed(), false);
 });

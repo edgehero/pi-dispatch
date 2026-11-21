@@ -184,6 +184,40 @@ repository. Configuration errors at start exit 2, so a supervisor does not resta
 parse. A running poller never exits for a bad `triggers.json`: it keeps the last copy that loaded (see
 [Enable it](#enable-it)). `SIGTERM` finishes the repository in flight, prints the cycle summary, and closes cleanly.
 
+## Is it running
+
+A running poller publishes a heartbeat in Valkey, `poller:h:<name>` under the name a worker on its host takes
+(`PI_WORKER_NAME`, else the host name), and `pi-dispatch status` and the console's Connections page read it. It beats at
+the start of each cycle and again before each wait, and the beat before a wait lasts for that wait plus five minutes, so
+a poller sleeping out an hour-long rate limit still reads as running. A stopped poller deletes it; one that died stops
+renewing it and it expires. It holds counts, times and digests, never a repository name, a path or the reason a file was
+refused. Deleting it changes nothing about polling: the next beat writes it again.
+
+`pi-dispatch status`, run in the deployment folder, prints a `pollers` object beside `consumers`:
+
+```
+"pollers": { "expected": true, "hosts": [ { "name": "mini1", "triggers": "kept", "ageMs": 20000, ... } ],
+  "complete": true,
+  "note": "poller: running on the previous triggers.json, the current file is invalid: cron trigger \"probe\": run.flow must be a non-empty string (or use run.command): /srv/pi-dispatch/triggers.json" }
+```
+
+- `expected` is whether this deployment polls: `true` for `GITHUB_INGEST=poll` or `both`, `false` for `webhook`, `null`
+  when it is unset. A poller on any host counts.
+- `hosts` has one heartbeat per running poller: `triggers` is `current`, or `kept` when it refused the file and runs on
+  the last copy that loaded, `nextAt` when its next cycle starts, and `ageMs` how long ago it beat.
+- `note` says what needs saying. The poller keeps the previous file because the current one is invalid: the reason is
+  the one `pi-dispatch triggers check` gives for the file in this folder, when that is the file the poller refused (the
+  heartbeat carries the file's digest, not its reason). The file it refused is another copy: run the check where the
+  poller runs. Polling is on and no poller has published a heartbeat: none runs, or it is older than this release,
+  which publishes none; when this folder's file is invalid, the note adds the reason a poller would refuse to start on it.
+- `complete: false` means the heartbeats could not all be read, and an empty `hosts` then proves nothing. `local` says
+  what of this folder could not be read (a setting this shell and `.env` disagree on, a missing file). `status` exits 0
+  either way.
+
+Connections shows the same under GitHub's polling: the host of each poller and when it beat, "on an older triggers file"
+when it keeps one, "no poller reported" when polling is on and none publishes, and "poller not known" when the
+heartbeats could not be read.
+
 ## The traps
 
 ### 1. It is a producer, not a worker
@@ -226,7 +260,8 @@ on an invalid file exits 2 and its service manager leaves it down, while the wor
 nothing but the poller's own log says polling stopped. `pi-dispatch service` installs no poller unit, so a poller
 service is one you set up yourself, and its restart after an upgrade or a reboot is when this happens. Check each edit
 before you move it into place ([Check a file before you swap it in](triggers.md#check-a-file-before-you-swap-it-in)):
-`pi-dispatch triggers check` names the poller when it would refuse the file.
+`pi-dispatch triggers check` names the poller when it would refuse the file. Afterwards `pi-dispatch status` says when
+no poller has published a heartbeat, and why a poller would refuse the file ([Is it running](#is-it-running)).
 
 ## Moving to webhooks later
 

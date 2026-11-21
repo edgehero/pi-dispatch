@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { makeReceiverObservations, makeReceiverPublisher, parseReceiverStatus, readReceiverStatus, receiverBind, receiverForgeFacts, receiverKey, receiverOutcome, RECEIVER_FORGES, RECEIVER_FORGES_MAX, RECEIVER_MAX_BYTES, RECEIVER_OUTCOMES, RECEIVER_LIVE, RECEIVER_TTL_MS } from "../src/receiver-status.mjs";
+import { makeReceiverObservations, makeReceiverPublisher, parseReceiverStatus, pruneLiveIndex, readIndexedRecords, readReceiverStatus, receiverBind, receiverForgeFacts, receiverKey, receiverOutcome, RECEIVER_FORGES, RECEIVER_FORGES_MAX, RECEIVER_MAX_BYTES, RECEIVER_OUTCOMES, RECEIVER_LIVE, RECEIVER_TTL_MS } from "../src/receiver-status.mjs";
 import { FORGE_KINDS } from "../src/forges.mjs";
 import { DEFER_TIME_MAX_MS } from "../src/defer-reasons.mjs";
 
@@ -258,4 +258,53 @@ test("an index member republished while a prune starts cannot lose its fresh mem
 	const publisher = makeReceiverPublisher({ client: () => redis, ...record(), observations: makeReceiverObservations({ now: () => AT }), now: () => AT });
 	publisher.beat(); await tick(); publisher.close();
 	assert.equal(redis.members.has("restarted"), true); assert.equal(redis.calls.some((c) => c[0] === "eval"), true);
+});
+
+// The index prune and the bounded read are shared by two writers and readers since issue #970 (the receiver's and the
+// poller's heartbeat), so each rule they hold is pinned here directly.
+function pruneFake({ members, cursor = "0", live = new Set() }) {
+	const calls = [];
+	return { calls,
+		async sscan(_, at) { calls.push(["sscan", at]); return [cursor, [...members]]; },
+		async eval(_script, n, index, ...args) { calls.push(["eval", n, index, ...args]); let removed = 0; for (let i = 0; i < n - 1; i++) if (!live.has(args[i]) && members.delete(args[n - 1 + i])) removed++; return removed; },
+	};
+}
+
+test("the shared prune sends no script once its writer has closed, and leaves the index as it was", async () => {
+	const members = new Set(["mini1", "gone"]);
+	const redis = pruneFake({ members });
+	await pruneLiveIndex(redis, { live: RECEIVER_LIVE, keyOf: receiverKey, self: "mini1", cursor: { at: "0" }, closed: () => true });
+	assert.deepEqual(redis.calls, [["sscan", "0"]], "the page is read, the prune is not sent");
+	assert.deepEqual([...members].sort(), ["gone", "mini1"]);
+});
+
+test("the shared prune never names its own writer, whose record may be between two writes, and removes only absent peers", async () => {
+	const members = new Set(["mini1", "gone", "alive"]);
+	const redis = pruneFake({ members, live: new Set([receiverKey("alive")]) });
+	await pruneLiveIndex(redis, { live: RECEIVER_LIVE, keyOf: receiverKey, self: "mini1", cursor: { at: "0" } });
+	const call = redis.calls.find((c) => c[0] === "eval");
+	assert.deepEqual(call, ["eval", 3, RECEIVER_LIVE, receiverKey("gone"), receiverKey("alive"), "gone", "alive"], "the keys and members the script checks, the writer's own name in neither");
+	assert.deepEqual([...members].sort(), ["alive", "mini1"]);
+});
+
+test("the shared prune moves its cursor to the one the page answered, so the next beat reads the next page", async () => {
+	const redis = pruneFake({ members: new Set(["gone"]), cursor: "17" });
+	const cursor = { at: "0" };
+	await pruneLiveIndex(redis, { live: RECEIVER_LIVE, keyOf: receiverKey, self: "mini1", cursor });
+	assert.equal(cursor.at, "17");
+	await pruneLiveIndex(redis, { live: RECEIVER_LIVE, keyOf: receiverKey, self: "mini1", cursor });
+	assert.deepEqual(redis.calls.filter((c) => c[0] === "sscan").map((c) => c[1]), ["0", "17"]);
+});
+
+test("the shared read reads at most hostsMax records from a finished discovery and says the rest were not read", async () => {
+	const redis = redisFake();
+	for (const name of ["a1", "a2", "a3"]) { redis.members.add(name); redis.values.set(receiverKey(name), JSON.stringify(record(name))); }
+	const read = await readIndexedRecords(redis, { live: RECEIVER_LIVE, keyOf: receiverKey, hostsMax: 2, timeoutMs: 1000, clock: () => 0 });
+	assert.deepEqual(read.wanted, ["a1", "a2"]);
+	assert.equal(read.rows.length, 2);
+	assert.equal(read.more, 1);
+	assert.equal(read.moreUnknown, false, "the discovery itself finished");
+	assert.equal(read.complete, false, "a name past the bound is a record not read");
+	const all = await readIndexedRecords(redis, { live: RECEIVER_LIVE, keyOf: receiverKey, hostsMax: 3, timeoutMs: 1000, clock: () => 0 });
+	assert.deepEqual({ more: all.more, complete: all.complete }, { more: 0, complete: true });
 });

@@ -19,25 +19,42 @@ const cell = (first, second = null) => html`<span class="cn-cell"><span>${first}
 const docs = (path, label) => ui.outLink({ href: docsHref(path), label });
 const detailTable = (label, heads, rows, empty) => ui.tbl({ label, heads, rows, empty, stack: true });
 
-function polling(poll) {
-  if (!poll) return state("not offered");
-  if (poll.state === "off") return state("off");
-  if (poll.state !== "on") return state("unknown", "attention", "info");
-  return cell(html`${state("on", "ok")} · ${poll.seconds} s`, html`${poll.source === "app-installation" ? "App installation repositories" : "POLL_REPOS"}${poll.repos.length ? html` · ${poll.repos.join(", ")}` : null}`);
+/**
+ * The pollers' line under GitHub's polling (issue #970), from their heartbeats, or null when the view carries none (it
+ * was read without them). A reporting poller names its host and beat age; one that keeps an older triggers file says so
+ * in the attention tone, with the command for an operator who may act and a sentence for anyone else. With none
+ * reporting and polling on, a complete read says "no poller reported" and an incomplete one "poller not known".
+ */
+function pollerLine(poll, pollers, canAct) {
+  if (!pollers || typeof pollers !== "object") return null;
+  const hosts = Array.isArray(pollers.hosts) ? pollers.hosts : [];
+  if (hosts.length) return html`${hosts.map((h, n) => html`${n ? "; " : null}${h.unreadable ? html`poller on ${hostLink(h.name)}: ${state("heartbeat unreadable", "attention", "info")}` : h.triggers === "kept" ? html`poller on ${hostLink(h.name)}, beat ${ageText(h.ageMs)} ago: ${state("on an older triggers file", "attention")} ${canAct ? html`Run <span class="code">pi-dispatch triggers check</span> on that host.` : "An operator can check the triggers file on that host."}` : html`poller running on ${hostLink(h.name)}, beat ${ageText(h.ageMs)} ago`}`)}`;
+  if (poll.state !== "on") return null;
+  return pollers.complete === true ? state("no poller reported", "attention", "info") : state("poller not known", "attention", "info");
 }
 
-function forgeRow(f) {
+function polling(poll, pollers = null, canAct = false) {
+  if (!poll) return state("not offered");
+  const line = pollerLine(poll, pollers, canAct);
+  if (poll.state === "off") return line === null ? state("off") : cell(state("off"), line);
+  if (poll.state !== "on") return line === null ? state("unknown", "attention", "info") : cell(state("unknown", "attention", "info"), line);
+  const first = html`${state("on", "ok")} · ${poll.seconds} s`;
+  const repos = html`${poll.source === "app-installation" ? "App installation repositories" : "POLL_REPOS"}${poll.repos.length ? html` · ${poll.repos.join(", ")}` : null}`;
+  return line === null ? cell(first, repos) : html`<span class="cn-cell"><span>${first}</span><small>${repos}</small><small>${line}</small></span>`;
+}
+
+function forgeRow(f, pollers = null, canAct = false) {
   // Issue #879: GitHub polled on purpose is not an unconfigured forge. Its auth, polling and who may fire still apply
   // (the poller runs the same gate), so the row keeps them and says only that the webhook route is not served.
   if (f.enabled === false && f.name === "github" && f.ingest === "poll") {
     const auth = f.auth.split("; ");
-    return { cells: [html`<b>${f.name}</b>`, cell(state("polled", f.polling?.state === "on" ? "ok" : "attention"), html`<span class="code">GITHUB_INGEST=poll</span>`), { html: cell(auth[0], auth.length > 1 ? auth.slice(1).join("; ") : null), wide: true }, { html: html`<span class="muted">No webhook: <span class="code">serve</span> mounts no GitHub route, so path <span class="code">${f.path}</span> answers 404</span>`, wide: true }, { html: polling(f.polling), wide: true }, { html: f.access, wide: true }] };
+    return { cells: [html`<b>${f.name}</b>`, cell(state("polled", f.polling?.state === "on" ? "ok" : "attention"), html`<span class="code">GITHUB_INGEST=poll</span>`), { html: cell(auth[0], auth.length > 1 ? auth.slice(1).join("; ") : null), wide: true }, { html: html`<span class="muted">No webhook: <span class="code">serve</span> mounts no GitHub route, so path <span class="code">${f.path}</span> answers 404</span>`, wide: true }, { html: polling(f.polling, pollers, canAct), wide: true }, { html: f.access, wide: true }] };
   }
   if (f.enabled === false) return { cells: [html`<b>${f.name}</b>`, state("not configured"), { html: html`<span class="muted">No activation setting${f.name === "github" ? " or active GitHub trigger" : ""} names it.</span>`, wide: true }, { html: html`<span class="muted">path <span class="code">${f.path}</span> answers 404</span>`, wide: true }, { html: null, hidePhone: true }, { html: null, hidePhone: true }] };
   const auth = f.auth.split("; ");
   const enabled = f.enabled === null ? state("configuration unknown", "attention", "info") : state(html`armed by ${f.triggers.length ? html`${f.triggers.length === 1 ? "trigger" : "triggers"} ${f.triggers.map((index, n) => html`${n ? ", " : null}<a href="${`/config/trigger?index=${index}`}" aria-label="${`Trigger ${index + 1}`}">${index + 1}</a>`)}` : "settings"}`, "ok");
   const secret = f.secret.set === null ? state("unknown", "attention", "info") : f.secret.set ? state("set", "ok") : state("not set", "attention", "failed");
-  return { cells: [html`<b>${f.name}</b>`, cell(enabled, f.triggers.length || !f.activationKeys.length ? null : html`<span class="code">${f.activationKeys.join(", ")}</span>`), { html: cell(auth[0], auth.length > 1 ? auth.slice(1).join("; ") : null), wide: true }, { html: cell(html`${f.verification}, <span class="code">${f.secret.key}</span> ${secret}`, html`path <span class="code">${f.path}</span> · duplicates by <span class="code">${f.deliveryId.replace(/ GUID$/, "")}</span>`), wide: true }, { html: polling(f.polling), wide: true }, { html: f.access, wide: true }] };
+  return { cells: [html`<b>${f.name}</b>`, cell(enabled, f.triggers.length || !f.activationKeys.length ? null : html`<span class="code">${f.activationKeys.join(", ")}</span>`), { html: cell(auth[0], auth.length > 1 ? auth.slice(1).join("; ") : null), wide: true }, { html: cell(html`${f.verification}, <span class="code">${f.secret.key}</span> ${secret}`, html`path <span class="code">${f.path}</span> · duplicates by <span class="code">${f.deliveryId.replace(/ GUID$/, "")}</span>`), wide: true }, { html: polling(f.polling, pollers, canAct), wide: true }, { html: f.access, wide: true }] };
 }
 
 function proxyState(host) {
@@ -146,7 +163,7 @@ export function connectionsForges(view) {
       const facts = receiverForgeFacts(host, forge, v.now);
       // Last-event times outlive the count window, including for a route this process never served.
       return host.forges.includes(forge) || facts.lastTaken !== null || facts.lastRefused !== null || Object.values(facts.counts).some((n) => n > 0);
-    }).map((forge) => receiverDeliveries(host, forge, v.now))}</section>`)}</div>${read?.complete !== true ? html`<p>${state("Receiver observations could not be read completely", "attention", "info")}. Counts and receiver absence are unknown.${read?.more ? html` ${read.moreUnknown ? "At least " : null}${read.more} more hosts were not read.` : read?.moreUnknown ? " Other indexed hosts may not have been read." : null}</p>` : hosts.length === 0 ? html`<p>No live receiver reported.</p>` : null}<p class="muted">Configured receiver port: ${read?.unknown ? "unknown" : read?.port ?? "unknown"}; live ports are shown above.</p><div class="cn-forge-config">${detailTable("Forge connections", ["Forge", "State", "Auth", "Webhook", "Polling", "Who may fire"], v.forges.map(forgeRow), "No forge facts available.")}</div><p class="cn-note">${ui.icon("info", { size: "sm" })}<span>Counts cover the current UTC hour and the preceding 23. Last-event times are retained separately. Taken means queued, deduplicated, held or steered; filter drops are separate. Refused includes malformed requests, authentication, configuration, lookup, enqueue and internal errors. The forge's delivery history remains available for individual deliveries.</span></p>`;
+    }).map((forge) => receiverDeliveries(host, forge, v.now))}</section>`)}</div>${read?.complete !== true ? html`<p>${state("Receiver observations could not be read completely", "attention", "info")}. Counts and receiver absence are unknown.${read?.more ? html` ${read.moreUnknown ? "At least " : null}${read.more} more hosts were not read.` : read?.moreUnknown ? " Other indexed hosts may not have been read." : null}</p>` : hosts.length === 0 ? html`<p>No live receiver reported.</p>` : null}<p class="muted">Configured receiver port: ${read?.unknown ? "unknown" : read?.port ?? "unknown"}; live ports are shown above.</p><div class="cn-forge-config">${detailTable("Forge connections", ["Forge", "State", "Auth", "Webhook", "Polling", "Who may fire"], v.forges.map((f) => forgeRow(f, v.pollers, operator(view))), "No forge facts available.")}</div><p class="cn-note">${ui.icon("info", { size: "sm" })}<span>Counts cover the current UTC hour and the preceding 23. Last-event times are retained separately. Taken means queued, deduplicated, held or steered; filter drops are separate. Refused includes malformed requests, authentication, configuration, lookup, enqueue and internal errors. The forge's delivery history remains available for individual deliveries.</span></p>`;
   }, "where jobs come from");
 }
 

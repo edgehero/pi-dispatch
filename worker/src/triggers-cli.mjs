@@ -82,6 +82,58 @@ function countsText({ triggers, cron, forge, watch }) {
 	return `${triggers} trigger${triggers === 1 ? "" : "s"} (${parts.join(", ")})`;
 }
 
+/**
+ * The deployment's environment read, the file read and the check run, as `triggers check` does them: `file` (resolved
+ * against `cwd`) when given, else the deployment's own triggers file. Returns `{ path, text, result }` (`result` is
+ * `checkTriggersText`'s) or `{ problem }`, a sentence saying why the file could not be judged, never a value. Shared with
+ * `pi-dispatch status` (issue #970), which judges the deployment's file this way to say why a poller keeps an older copy.
+ */
+export async function judgeDeploymentTriggers({ file = undefined, env = process.env, cwd = process.cwd(), platform = process.platform, readEnv = (p) => readFileSync(p), readText = (p) => readFileSync(p, "utf8"), existsSync = fsExistsSync, now = Date.now, check = checkTriggersText } = {}) {
+	// One read of the deployment `.env` for both halves, so the two cannot be judged from two different files.
+	const envPath = join(cwd, ".env");
+	let envRead;
+	try {
+		envRead = readEnv(envPath);
+	} catch (error) {
+		envRead = error instanceof Error ? error : new Error(String(error));
+	}
+	const deployment = cliDeploymentEnv(env, TRIGGERS_CHECK_ENV_KEYS, { cwd, platform, readFile: () => {
+		if (envRead instanceof Error) throw envRead;
+		return envRead;
+	} });
+	if (deployment.problem) return { problem: `${deployment.problem}, so the file cannot be judged as this deployment's services load it` };
+	const { triggersPath } = await import("./doctor.mjs");
+	const deployed = triggersPath(deployment.env, cwd);
+	const path = file !== undefined ? resolve(cwd, file) : deployed;
+	if (path === "") return { problem: "PI_TRIGGERS_FILE is set to an empty value, so there is no file to judge, and every reader refuses to start on it: set it to the file, or delete the line" };
+	let text;
+	try {
+		text = readText(path);
+	} catch (error) {
+		return { problem: error?.code === "ENOENT" ? `no triggers file at ${path}` : `${path} could not be read (${error?.code ?? "error"})` };
+	}
+	// Whether a watch collector runs here, from the file it runs on now; nothing when that is this very file, or unread.
+	let currentCollects = false;
+	if (deployed !== "" && deployed !== path) {
+		try {
+			currentCollects = Object.values(parseTriggersDocument(readText(deployed), deployed).watchSources ?? {}).some((s) => s.pull);
+		} catch {}
+	}
+
+	const judged = Object.fromEntries(TRIGGERS_CHECK_ENV_KEYS.filter((k) => typeof deployment.env[k] === "string").map((k) => [k, deployment.env[k]]));
+	let envFile = envRead;
+	if (!(envRead instanceof Error)) {
+		try {
+			envFile = serviceEnvFileOf(envRead, envPath, serviceEnvLoader(platform));
+		} catch (error) {
+			envFile = error instanceof Error ? error : new Error(String(error));
+		}
+	}
+	const secrets = secretMarks(triggersCheckSecrets(text, path, judged), { env, envPath, file: envFile });
+	if (secrets.problem) return { problem: secrets.problem };
+	return { path, text, result: check(text, path, { env: { ...judged, ...secrets.env }, existsSync, cwd, now, currentCollects }) };
+}
+
 export async function runTriggers(argv = [], deps = {}) {
 	const {
 		env = process.env,
@@ -120,59 +172,12 @@ export async function runTriggers(argv = [], deps = {}) {
 		return 1;
 	}
 
-	// One read of the deployment `.env` for both halves, so the two cannot be judged from two different files.
-	const envPath = join(cwd, ".env");
-	let envRead;
-	try {
-		envRead = readEnv(envPath);
-	} catch (error) {
-		envRead = error instanceof Error ? error : new Error(String(error));
-	}
-	const deployment = cliDeploymentEnv(env, TRIGGERS_CHECK_ENV_KEYS, { cwd, platform, readFile: () => {
-		if (envRead instanceof Error) throw envRead;
-		return envRead;
-	} });
-	if (deployment.problem) {
-		err(`error: ${deployment.problem}, so the file cannot be judged as this deployment's services load it\n`);
+	const judged = await judgeDeploymentTriggers({ file: args[0], env, cwd, platform, readEnv, readText, existsSync, now, check });
+	if (judged.problem) {
+		err(`error: ${judged.problem}\n`);
 		return 1;
 	}
-	const { triggersPath } = await import("./doctor.mjs");
-	const deployed = triggersPath(deployment.env, cwd);
-	const path = args.length === 1 ? resolve(cwd, args[0]) : deployed;
-	if (path === "") {
-		err("error: PI_TRIGGERS_FILE is set to an empty value, so there is no file to judge, and every reader refuses to start on it: set it to the file, or delete the line\n");
-		return 1;
-	}
-	let text;
-	try {
-		text = readText(path);
-	} catch (error) {
-		err(error?.code === "ENOENT" ? `error: no triggers file at ${path}\n` : `error: ${path} could not be read (${error?.code ?? "error"})\n`);
-		return 1;
-	}
-	// Whether a watch collector runs here, from the file it runs on now; nothing when that is this very file, or unread.
-	let currentCollects = false;
-	if (deployed !== "" && deployed !== path) {
-		try {
-			currentCollects = Object.values(parseTriggersDocument(readText(deployed), deployed).watchSources ?? {}).some((s) => s.pull);
-		} catch {}
-	}
-
-	const judged = Object.fromEntries(TRIGGERS_CHECK_ENV_KEYS.filter((k) => typeof deployment.env[k] === "string").map((k) => [k, deployment.env[k]]));
-	let file = envRead;
-	if (!(envRead instanceof Error)) {
-		try {
-			file = serviceEnvFileOf(envRead, envPath, serviceEnvLoader(platform));
-		} catch (error) {
-			file = error instanceof Error ? error : new Error(String(error));
-		}
-	}
-	const secrets = secretMarks(triggersCheckSecrets(text, path, judged), { env, envPath, file });
-	if (secrets.problem) {
-		err(`error: ${secrets.problem}\n`);
-		return 1;
-	}
-	const result = check(text, path, { env: { ...judged, ...secrets.env }, existsSync, cwd, now, currentCollects });
+	const { path, result } = judged;
 	if (result.ok) {
 		const who = result.readers.map((r) => `the ${r}`);
 		out(`${path}: ${countsText(result.counts)}. ${listed(who).replace(/^t/, "T")} ${who.length === 1 ? "takes" : "take"} it, and running ones reload it themselves.\n`);

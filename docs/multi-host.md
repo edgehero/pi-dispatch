@@ -619,11 +619,23 @@ bind category: all interfaces, loopback or a specific address. The address itsel
 Each receiver publishes one display record every 15 seconds with a 90-second expiry. It holds only counts, times,
 closed outcomes and the host/version/socket facts, never delivery identifiers or payload values. Counts cover the
 current UTC hour and the preceding 23. Last taken/refused times remain separate. A request updates memory only;
-Valkey outages can remove this display but cannot change an answer or delay enqueueing. Polling publishes none.
-Deleting `receiver:*` changes no routing, authentication or queue behavior. An absent observation is not proof that
+Valkey outages can remove this display but cannot change an answer or delay enqueueing. A poller publishes no receiver
+record: its heartbeat has keys of its own (below). Deleting `receiver:*` changes no routing, authentication or queue
+behavior. An absent observation is not proof that
 a receiver stopped; the page says what was reported and preserves unknown reads. A console still reads the record of
 a receiver of another release when one of them knows a forge the other does not: it shows the forges it knows, and a
 forge the receiver's release does not know reads as no deliveries.
+
+## Poller heartbeat
+
+A running GitHub poller publishes a heartbeat under the same name a worker on its host takes, `poller:h:<name>`, indexed
+by `poller:live`. Not under `receiver:*`: under `GITHUB_INGEST=both` the receiver and the poller run side by side with one
+name. It holds the poller's version, its last beat, when its next cycle starts, how many repositories it polls, and
+whether it runs on the current triggers file or keeps the last one that loaded, with digests of both texts and never the
+reason or a path. It lasts five minutes past each beat inside a cycle, and the wait plus five minutes past the beat
+before a wait. `pi-dispatch status` and Connections read it; any host's poller satisfies a deployment that polls.
+Deleting `poller:*` changes no polling. A poller older than this release publishes none, which `status` reads as no
+poller ([is it running](polling.md#is-it-running)).
 
 ## Failure hook history
 

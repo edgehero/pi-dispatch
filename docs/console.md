@@ -2917,7 +2917,13 @@ these extra file/lease reads.
   in the window (a lookup or an enqueue it could not finish): the count, that the forge does not send those
   deliveries again (Azure DevOps does, for about 3 minutes, then retries one still failing on probation for about 36
   hours while it sends no new events), and where to redeliver them, linked to that forge's page. It counts answers,
-  so it reads "at least" after an incomplete read and a later redelivery that succeeds does not lower it. Unknown or
+  so it reads "at least" after an incomplete read and a later redelivery that succeeds does not lower it. Under GitHub's
+  polling a second line comes from the pollers' heartbeats: the host of each running poller and when it beat; "on an
+  older triggers file" when one refused the current file and runs on the last copy that loaded, with
+  `pi-dispatch triggers check` to run on that host for an operator and a sentence for viewers, and a problem at the top
+  after any other; "no poller reported" when polling is on and no poller publishes one (a poller older than this release
+  publishes none); and "poller not known" when the heartbeats could not be read
+  ([is it running](polling.md#is-it-running)). Unknown or
   incomplete reads never mean zero or healthy. The window is the current UTC hour plus the
   preceding 23; last-event times are kept independently. Queued, deduplicated, held, steered and accepted count as taken;
   accepted means a local event signal is durable, before a job is necessarily published or started;
