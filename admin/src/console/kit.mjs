@@ -888,13 +888,14 @@ export function filterToggle({ count = null, label = "Filters" } = {}) {
 
 /**
  * A filter pill (the RunsScreen card's project chips): a link drawn as a pill, its `label` (text, or a fragment such as a
- * project's `ptag`), then its `count` in bold where one is given. `on` marks the filter in force (`fpill--on`, the
+ * project's `ptag`), then its `count` in bold where one is given, "at least" before it where the count is a lower bound
+ * (`floor`, as `sumStrip` says it). `on` marks the filter in force (`fpill--on`, the
  * primary fill) and says so with `aria-current="page"`, since the link leads to the page shown, so the state is never
  * the colour alone.
  */
-export function fpill({ label, count = null, href, on = false }) {
+export function fpill({ label, count = null, floor = false, href, on = false }) {
   const n = count === null ? null : grouped(count, "fpill");
-  return html`<a class="${classes("fpill", on && "fpill--on")}" href="${hrefOf(href, "fpill")}"${on ? html` aria-current="page"` : null}>${label}${n === null ? null : html` <b>${n}</b>`}</a>`;
+  return html`<a class="${classes("fpill", on && "fpill--on")}" href="${hrefOf(href, "fpill")}"${on ? html` aria-current="page"` : null}>${label}${n === null ? null : html` <b>${floor ? "at least " : null}${n}</b>`}</a>`;
 }
 
 /**

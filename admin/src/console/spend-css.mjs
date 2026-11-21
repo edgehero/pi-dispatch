@@ -1270,6 +1270,7 @@ const adapters = `
 .spend-tabs a[aria-current="page"], .spend-controls .seg a[aria-current="page"] { background: var(--primary); color: var(--on-primary); }
 .spend-tabs { display: flex; flex-wrap: nowrap; gap: 6px; }
 .spend-tabs > a { flex: none; }
+main > div > section:has(.sp-unread) { grid-column: 1 / -1; }
 .sp-kpi { gap: 8px; }
 .sp-kpi .kpi { margin-bottom: 2px; }
 .sp-kpi .facts { gap: 0; }

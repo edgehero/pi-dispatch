@@ -38,7 +38,7 @@ import { ARTIFACT_DROP_REASONS, ARTIFACT_DROP_TEXT, artifactSizeText } from "@ed
 import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
 import { STEER_MAX_MESSAGES, STEER_TOTAL_MAX_BYTES } from "@edgehero/pi-dispatch/steer-inbox";
-import { SEC, MIN, cell, ageText, timeHtml, msOf, usdText, count, RUN_ID_RE, runLink, targetLink, canAct, actForm, area, table, runCost, costText, capMicrosOf, staleText, outcomeText, bannerCut, parkedAnswerForm } from "./common.mjs";
+import { SEC, MIN, cell, ageText, timeHtml, msOf, usdText, count, RUN_ID_RE, runLink, targetLink, canAct, actForm, area, table, runCost, costText, capMicrosOf, staleText, outcomeText, bannerCut, parkedAnswerForm, HOSTS_UNREAD, hostsUnread } from "./common.mjs";
 
 const titled = (title, body) => ui.card({ title, body });
 const facts = (pairs) => ui.facts(pairs.filter(([, value]) => value !== null && value !== undefined));
@@ -122,6 +122,11 @@ const NO_REASON_TEXT = Object.freeze({
  * request's park, a forge with no reply route) or when the run is no longer waiting for one. Fixed text, as the
  * catalog's is, and the same for both roles (an operator's Chat panel says why; a viewer's shows no chat).
  */
+/**
+ * A live transcript whose read failed (`data.transcript.unreachable`), said the same at every place the page mentions
+ * the transcript (issue #962): never "no longer kept" or a reason the run has none, which only a read can say.
+ */
+export const TRANSCRIPT_UNREAD_TEXT = "The live transcript could not be read; the next update tries again.";
 const AWAITING_INPUT_ELSEWHERE = "If no reply was taken yet, answer the question: reply on the issue or pull request (on a pull request, start the reply with this repository's pi-dispatch comment phrase). This console cannot take the answer for this run.";
 
 /**
@@ -231,7 +236,18 @@ export function runOutcome(view) {
   const here = typeof view.data?.selfHost === "string" && view.data.selfHost !== "" && r.host === view.data.selfHost;
   const reasonFix = token && here && canAct(view) && Object.hasOwn(REASON_FIXES, token) ? REASON_FIXES[token] : null;
   const actions = view.role !== "operator" ? null : recovering ? recoveryActions : html`${lacked ? lacked.fixes.map((fix) => fixButton(fix, { repositoryHref: forgeBaseLinkOf(r, view.env) })) : null}${reasonFix ? ui.btn({ href: reasonFix.href, label: reasonFix.label, kind: "sm", icon: reasonFix.icon }) : null}${refusedBeforeStart(r) ? ui.btn({ href: "/fleet", label: "Open Fleet", kind: "primary", icon: "fleet" }) : href ? ui.outLink({ href, label: "Open target on the forge", btn: "primary" }) : null}${r.outcome === "completed" && !["awaiting-input", "awaiting-approval"].includes(token) ? ui.btn({ href: "#p-workspace", label: "Try it in its workspace", kind: "sm", icon: "terminal" }) : null}${rerunLine(r, view)}${fixLink}`;
-  return ui.banner({ block: true, status: recovering ? "running" : note !== null ? "attention" : w.status, title: `${word}${refusedBeforeStart(r) ? "" : duration}`, body: html`${lacked === null || token ? html`<p>${reason}</p>` : null}${lacked === null ? null : lacked.sentences.map((sentence) => html`<p>${sentence}</p>`)}${next}${(view.data?.children?.length ?? 0) > 0 || r.chainRefused > 0 ? html`<p>It queued ${view.data?.children?.length ?? 0} runs from /outbox${r.chainRefused > 0 ? `, and ${r.chainRefused} more requests were refused: a job may queue at most ${view.data?.chainMaxPerJob ?? CHAIN_MAX_PER_JOB_DEFAULT}` : ""}. ${view.data?.children?.map((child) => runLink(child.jobId))}</p>` : null}${refusedBeforeStart(r) ? html`<p>Nothing was spent.</p>` : href ? html`<p>Merges are never automatic: a person merges the pull request on the forge.</p>` : null}`, actions });
+  return ui.banner({ block: true, status: recovering ? "running" : note !== null ? "attention" : w.status, title: `${word}${refusedBeforeStart(r) ? "" : duration}`, body: html`${lacked === null || token ? html`<p>${reason}</p>` : null}${lacked === null ? null : lacked.sentences.map((sentence) => html`<p>${sentence}</p>`)}${next}${(view.data?.children?.length ?? 0) > 0 || r.chainRefused > 0 ? html`<p>${queuedText(view.data)}${r.chainRefused > 0 ? `, and ${r.chainRefused} more requests were refused: a job may queue at most ${view.data?.chainMaxPerJob ?? CHAIN_MAX_PER_JOB_DEFAULT}` : ""}. ${view.data?.children?.map((child) => runLink(child.jobId))}</p>` : null}${refusedBeforeStart(r) ? html`<p>Nothing was spent.</p>` : href ? html`<p>Merges are never automatic: a person merges the pull request on the forge.</p>` : null}`, actions });
+}
+
+/**
+ * How many runs the banner says a run queued from /outbox: the children the search found, "at least" that many where
+ * the search was incomplete (`childrenIncomplete`, issue #962), and with none found then, that the number is not known,
+ * never "0 runs" over pages nobody read.
+ */
+export function queuedText(data) {
+  const n = Array.isArray(data?.children) ? data.children.length : 0;
+  if (!data?.childrenIncomplete) return `It queued ${n} runs from /outbox`;
+  return n > 0 ? `It queued at least ${n} runs from /outbox (the search for them was incomplete)` : "How many runs it queued from /outbox is not known (the search for them was incomplete)";
 }
 
 /**
@@ -546,7 +562,8 @@ export function runChat(view) {
     const refusal = typeof check?.refusal === "string" ? check.refusal : null;
     const why = check?.unreachable ? html`<p class="warn">Whether it can be answered from here could not be read; the preview checks again.</p>` : null;
     const keptTranscript = view.data?.transcript?.exists === true;
-    const question = keptTranscript ? html`<div data-run-question></div><p class="card__sub">The question is the last assistant entry of the transcript <a href="#transcript">below</a>.</p>` : html`<p>Read the question on the forge thread: ${link}. The live transcript is no longer kept.</p>`;
+    // A transcript that could not be read is not one that expired (issue #962): the forge thread still holds the question.
+    const question = keptTranscript ? html`<div data-run-question></div><p class="card__sub">The question is the last assistant entry of the transcript <a href="#transcript">below</a>.</p>` : html`<p>Read the question on the forge thread: ${link}. ${view.data?.transcript?.unreachable ? TRANSCRIPT_UNREAD_TEXT : "The live transcript is no longer kept."}</p>`;
     const answer = refusal !== null ? ui.banner({ status: "attention", sm: true, title: PARKED_ELSEWHERE_TITLE, body: refusal, actions: forgeLinkOf(record, view.env) ? ui.outLink({ href: forgeLinkOf(record, view.env), label: "Answer on the forge", btn: "primary" }) : null }) : canAct(view) ? record?.reason === "awaiting-approval" ? ui.approvalForms({ jobId, id: "run-approval" }) : ui.answerForm({ jobId, id: "run-answer", hint: "Preview the answer before posting it and resuming the run.", guarded: Boolean(view.data?.answerer?.rules?.length), value: offered?.draft ?? "", draft: offered ? { draftRunId: offered.meta.draftRunId, digest: offered.digest } : null, keepStanding: Boolean(view.data?.answerer?.rules?.length && record?.project) }) : readOnly;
     const gate = record?.reason === "awaiting-approval" ? html`<p>Awaiting approval for <span class="code">${record.approval?.action ?? "unknown action"}</span>.</p><p>${record.approval?.action === "budget-raise" ? "Worker-enforced: the declared cap remains subject to deployment and scoped budgets." : "Advisory: the worker does not enforce this external action."}</p>` : null;
     return ui.questionCard({ jobId, waited: Number.isFinite(msOf(record?.endedAt)) ? ageText(view.now - msOf(record.endedAt)) : null, project: record?.project, target: link, body: html`${gate}${question}${why}`, answer: html`${answer}${view.data?.answerer?.rules?.length && record?.project && canAct(view) && record?.reason !== "awaiting-approval" ? standingAnswerEditor({ id: "standing-from-answer", projects: [record.project], runId: jobId, repo: `${record.kind}:${String(record.target ?? "").split("#")[0]}` }) : null}` });
@@ -684,13 +701,14 @@ function rerunLine(r, view) {
 /**
  * The run summary's skip rows (issue #712): "Steering" (why a steer-armed run took no message, the record's
  * `steerSkipped`) and "Live transcript" (why it had none, `liveSkipped`), each the closed enum and its sentence; no row
- * for a record that carries neither, so every other run renders byte-identical.
+ * for a record that carries neither, so every other run renders byte-identical. A transcript whose read failed is "could
+ * not be read" (issue #962), never one of the reasons a run has none.
  */
 function skipRows(r, view) {
   const { liveSkipped, steerSkipped } = recordSkips(r);
   return [
     ["Steering", steerSkipped !== null ? `skipped: ${STEER_SKIPPED_TEXT[steerSkipped]}` : r.steered ? `armed: ${r.steered.delivered} delivered, ${r.steered.late} late, ${r.steered.withdrawn} withdrawn` : "not armed: its trigger sets no run.steer"],
-    ["Live transcript", liveSkipped !== null ? `none: ${LIVE_SKIPPED_TEXT[liveSkipped]}` : view?.data?.transcript?.exists ? "streamed, kept 24 hours after the end" : transcriptAbsentText(r)],
+    ["Live transcript", liveSkipped !== null ? `none: ${LIVE_SKIPPED_TEXT[liveSkipped]}` : view?.data?.transcript?.exists ? "streamed, kept 24 hours after the end" : view?.data?.transcript?.unreachable ? TRANSCRIPT_UNREAD_TEXT : transcriptAbsentText(r)],
   ];
 }
 
@@ -891,14 +909,26 @@ export const runSession = withRun("Session and plan", (r) => {
   ]);
 });
 
+/**
+ * What the search for a run's children found when it lists none: "No child run among the N newest runs." for a search
+ * that read every page it asked for, and for one that did not (`childrenIncomplete`, issue #962: a page that could not
+ * be read, or one read without the other hosts' runs) that it was incomplete, never a count of the runs it did not read.
+ */
+export function childSearchText(data, { found = 0 } = {}) {
+  const searched = count(data?.childrenSearched ?? 0);
+  if (data?.childrenIncomplete) return found > 0 ? `The search for child runs was incomplete: part of the run history could not be read, so there may be more than these. ${searched} runs were searched.` : `The search for child runs was incomplete: part of the run history could not be read, so whether this run has child runs is not known. ${searched} runs were searched.`;
+  return found > 0 ? null : `No child run among the ${searched} newest runs.`;
+}
+
 export const runChain = withRun("Chain", (r, view) => {
   const kids = Array.isArray(view.data?.children) ? view.data.children : [];
-  if (!r.parentJobId && kids.length === 0 && !(r.chainRefused > 0)) return ui.collapsed({ icon: "chain", title: "No parent or child runs", body: `No child run among the ${count(view.data?.childrenSearched ?? 0)} newest runs.` });
+  const searchText = childSearchText(view.data, { found: kids.length });
+  if (!r.parentJobId && kids.length === 0 && !(r.chainRefused > 0)) return ui.collapsed({ icon: "chain", title: view.data?.childrenIncomplete ? "No parent run; child runs not known" : "No parent or child runs", body: searchText });
   return html`${facts([
     ["Parent", r.parentJobId ? runLink(r.parentJobId) : "none"],
     ["Depth", cell(r.chainDepth)],
     ["Refused chain requests", `${cell(r.chainRefused)}; a job may queue at most ${view.data?.chainMaxPerJob ?? CHAIN_MAX_PER_JOB_DEFAULT} (PI_CHAIN_MAX_PER_JOB)`],
-  ])}<h3>Children</h3>${kids.length === 0 ? html`<p class="note">No child run among the ${count(view.data?.childrenSearched ?? 0)} newest runs.</p>` : html`<ul class="plain">${kids.map((k) => html`<li>${runLink(k.jobId)} ${outcomeText(k)}</li>`)}</ul>`}`;
+  ])}<h3>Children</h3>${kids.length === 0 ? null : html`<ul class="plain">${kids.map((k) => html`<li>${runLink(k.jobId)} ${outcomeText(k)}</li>`)}</ul>`}${searchText === null ? null : html`<p class="note">${searchText}</p>`}`;
 });
 
 /** The elapsed run time, with fixed-width components so updates do not move the card. */
@@ -969,7 +999,7 @@ export function runTranscriptState(view) {
   if (refusedBeforeStart(recordOf(view))) return html``;
   const meta = view.data?.transcript;
   const r = recordOf(view);
-  const state = meta?.exists ? meta.ended ? `Ended (${outcomeWord(r?.outcome ?? meta.outcome, recordReason(r)).word ?? r?.outcome ?? meta.outcome ?? "unknown"}); kept 24 hours after the end.` : `Streamed from ${r?.host ?? view.data?.activeRun?.host ?? "the worker"} as it happens.` : meta?.unreachable ? "The live transcript could not be read; the next update tries again." : r ? transcriptAbsentText(r) : "Waiting for the run's live transcript. It attaches here when it starts.";
+  const state = meta?.exists ? meta.ended ? `Ended (${outcomeWord(r?.outcome ?? meta.outcome, recordReason(r)).word ?? r?.outcome ?? meta.outcome ?? "unknown"}); kept 24 hours after the end.` : `Streamed from ${r?.host ?? view.data?.activeRun?.host ?? "the worker"} as it happens.` : meta?.unreachable ? TRANSCRIPT_UNREAD_TEXT : r ? transcriptAbsentText(r) : "Waiting for the run's live transcript. It attaches here when it starts.";
   return titled("Live transcript", html`<p data-transcript-status role="status" aria-live="polite">${state}</p>`);
 }
 
@@ -1044,6 +1074,7 @@ export function runRecovery(view) {
   return titled(`Recovery${Number.isInteger(r.triggerIndex) ? `: run.recover is armed on trigger row ${r.triggerIndex + 1}` : ""}`, html`${continuation || rec?.checkpoints ? recoveryTrack(r, continuation, view) : null}${facts(recoveryRows(r))}${!rec && !continuation ? html`<p>None needed: this run finished on its first attempt.</p>` : null}${continuation ? html`<p>${ui.badge(view.data.chat.activeJobId === continuation ? "running" : "idle", view.data.chat.activeJobId === continuation ? "Recovery running" : "Recovery queued")} ${runLink(continuation)}.</p>` : null}${recovered ? facts([["Restored from", `${recovered.from} checkpoint ${recovered.checkpointSeq ?? "(sequence not recorded)"}`], ["Recovery", `${recovered.n} of at most ${RECOVERY_CAP}`], ["Calls replayed", recovered.replayed], ["Calls interrupted (may or may not have happened)", recovered.interrupted], ["Calls not started", recovered.notStarted]]) : null}${recovered?.checkpointSeq ? html`<p>The agent was told it restarts from checkpoint ${recovered.checkpointSeq}. Its workspace was restored, with .pi/, .agents/ and the root context files reset to the base commit. It checks before repeating anything with outside effects.</p>` : null}${Number.isFinite(queuedAt) ? html`<p>Wait for a slot: ${ageText((Number.isFinite(startedAt) ? startedAt : view.now) - queuedAt)} on ${view.data.recoveryLive.host ?? r.host}.</p>` : null}${earlier.map((a) => html`<p>Retried: an earlier attempt ran on ${a.host}, ${timeHtml(msOf(a.startedAt))} to ${timeHtml(msOf(a.endedAt))}.</p>`)}${r.stalledRepick ? html`<p>Re-picked: its worker stopped answering and this pickup ran it again.</p>` : null}${view.role === "operator" ? html`<div data-recovery-tools></div>` : null}<p class="card__sub">Recovery queued waits for the checkpoint's host: ${RECOVERY_TTL_MS / 3_600_000} hours, longer while that host is alive, at most ${RECOVERY_MAX_WAIT_MS / 86_400_000} days.</p>`);
 }
 
+/** The run's host row and its newest doctor result, from the snapshot the refused run's page reads; both null where nothing was read. */
 function hostFacts(view, name) {
   const s = view.data?.snapshot;
   return { host: (Array.isArray(s?.hostBudgets) ? s.hostBudgets : []).find((h) => h.name === name) ?? null,
@@ -1058,7 +1089,7 @@ export function runWhy(view) {
   const floor = host?.backends?.floor;
   const properties = floor && typeof floor === "object" ? Object.entries(floor) : [];
   const said = token ? explainReason(token, { why: r.why }) : null;
-  return titled("Why it was refused", html`${facts([["Rule", said?.known ? ui.withCode(said.sentence) : "No explanation is recorded for this rule yet."], ["Venue floor (PI_BACKEND_FLOOR)", properties.length ? properties.map(([name, want]) => html`<span>${PROPERTY_LABEL[name] ?? name}: ${want}; ${r.backend ?? UNATTRIBUTED_BACKEND} declares ${DECLARATION_TEXT[declarationOf(r.backend ?? UNATTRIBUTED_BACKEND, name)?.word] ?? "unknown"}. </span>`) : "This host has not published a floor."], ["Same reason in the last 24 hours", Number.isFinite(n) ? html`<a href="/runs?reason=${encodeURIComponent(token)}">${count(n)}</a>` : "could not be read"], ["Newest doctor result", doctor && !doctor.unreadable ? `${doctorCountsText(doctor)}, ${ageText(doctor.ageMs)} ago` : "not published or could not be read"]])}${said?.known && docsHref(said.anchor) ? ui.outLink({ href: docsHref(said.anchor), label: "Read the rule in the reasons docs" }) : null}${view.role === "operator" ? ui.cmd(["pi-dispatch", "doctor"], { host: `Run it on ${r.host ?? "the worker host"}; the console runs nothing on a host.` }) : html`<p>Ask an operator to run the host's doctor checks.</p>`}`);
+  return titled("Why it was refused", html`${facts([["Rule", said?.known ? ui.withCode(said.sentence) : "No explanation is recorded for this rule yet."], ["Venue floor (PI_BACKEND_FLOOR)", properties.length ? properties.map(([name, want]) => html`<span>${PROPERTY_LABEL[name] ?? name}: ${want}; ${r.backend ?? UNATTRIBUTED_BACKEND} declares ${DECLARATION_TEXT[declarationOf(r.backend ?? UNATTRIBUTED_BACKEND, name)?.word] ?? "unknown"}. </span>`) : hostsUnread(view.data?.snapshot) ? HOSTS_UNREAD : "This host has not published a floor."], ["Same reason in the last 24 hours", Number.isFinite(n) ? html`<a href="/runs?reason=${encodeURIComponent(token)}">${count(n)}</a>` : "could not be read"], ["Newest doctor result", doctor && !doctor.unreadable ? `${doctorCountsText(doctor)}, ${ageText(doctor.ageMs)} ago` : "not published or could not be read"]])}${said?.known && docsHref(said.anchor) ? ui.outLink({ href: docsHref(said.anchor), label: "Read the rule in the reasons docs" }) : null}${view.role === "operator" ? ui.cmd(["pi-dispatch", "doctor"], { host: `Run it on ${r.host ?? "the worker host"}; the console runs nothing on a host.` }) : html`<p>Ask an operator to run the host's doctor checks.</p>`}`);
 }
 
 export function runHost(view) {

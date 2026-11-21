@@ -45,13 +45,15 @@ export function spendFixture() {
 export async function drawSpend(page = "insights", { role = "operator", query = "range=7d", payload = spendFixture(), whatIf = null } = {}) {
   const parsed = parsePageQuery(page, query);
   assert.ok(parsed.query, parsed.refusal);
-  const data = await loadPageData(page, parsed.query, { now: () => NOW, insights: async () => payload, pricedModels: () => ["acme/model-1", "acme/model-2"], whatIf: async () => whatIf, fleet: { parkedCount: async () => 0 } }, { role });
+  const data = await loadPageData(page, parsed.query, { now: () => NOW, insights: async () => { if (payload instanceof Error) throw payload; return payload; }, pricedModels: () => ["acme/model-1", "acme/model-2"], whatIf: async () => whatIf, fleet: { parkedCount: async () => 0 } }, { role });
   const ctx = { query: parsed.query, session: { name: role === "operator" ? "ops" : "watcher", role }, data, readOnly: false, theme: null, maxStreams: 4 };
   const out = await renderPage(page, ctx);
   assert.equal(out.status, 200);
   for (const { id, html } of await pagePanels(page, ctx)) assert.ok(String(out.html).includes(`id="${id}" data-panel>${html}</`), `${page}: panel ${id} matches its renderer`);
   return String(out.html);
 }
+// As `assembleAllocationView` answers a split it could not read: the envelope file's facts and `unreachable`, no split.
+export const allocationUnread = () => { const p = spendFixture(); const { window, totalMicros, floors, delegation, digest, envelope, hosts } = p.allocation; return { ...p, allocation: { window, totalMicros, floors, delegation, digest, envelope, hosts, unreachable: "unavailable" } }; };
 const allocationState = (over) => { const p = spendFixture(); return { ...p, allocation: { ...p.allocation, ...over } }; };
 function recordMoneyState(kind) {
   const p = spendFixture();
@@ -87,6 +89,8 @@ const states = {
   "spend-whatif-flow.viewer": () => drawSpend("insights-breakdown", { role: "viewer", query: "range=7d&whatif=acme/model-2&flow=fix", whatIf: { result: { class: "estimated", usd: .4, perRun: .2, windowRuns: 2, coverage: 1, excluded: 0, ratesVersion: "fixture" } } }),
   "spend-populated.operator": () => drawSpend(),
   "spend-populated.viewer": () => drawSpend("insights", { role: "viewer", query: "range=7d&paths=full" }),
+  // Issue #962: the Spend view whose payload could not be assembled. One card says so; no card draws a zero over nothing.
+  "spend-insights-error.viewer": () => drawSpend("insights", { role: "viewer", payload: new Error("assembly failed") }),
   "spend-costs-unreadable.viewer": () => drawSpend("insights", { role: "viewer", payload: { ...spendFixture(), fold: null, spend: { ...spendFixture().spend, daily: null } } }),
   "spend-unknown-holds.operator": () => { const p = spendFixture(); p.spend.today.unknownHosts = ["old-worker"]; return drawSpend("insights", { payload: p }); },
   "spend-midnight-run.operator": () => drawSpend("insights", { payload: midnightRunState() }),
@@ -97,7 +101,7 @@ const states = {
   "spend-split-invalid.operator": () => drawSpend("insights-budget-split", { payload: allocationState({ problem: "invalid envelope fields" }) }),
   "spend-split-no-plan.viewer": () => drawSpend("insights-budget-split", { role: "viewer", payload: allocationState({ state: null }) }),
   "spend-split-mismatch.operator": () => drawSpend("insights-budget-split", { payload: allocationState({ mismatch: true }) }),
-  "spend-split-unreachable.viewer": () => drawSpend("insights-budget-split", { role: "viewer", payload: allocationState({ unreachable: "unavailable" }) }),
+  "spend-split-unreachable.viewer": () => drawSpend("insights-budget-split", { role: "viewer", payload: allocationUnread() }),
   "spend-split-newer.viewer": () => drawSpend("insights-budget-split", { role: "viewer", payload: allocationState({ stateProblem: "newer" }) }),
   "spend-split-outside-edit.operator": () => drawSpend("insights-budget-split", { payload: allocationState({ outsideEdit: { at: "10-08 15:00", digest: "01234567", split: "89abcdef" } }) }),
   "spend-capacity.viewer": () => drawSpend("insights-capacity", { role: "viewer", query: "range=24h" }),

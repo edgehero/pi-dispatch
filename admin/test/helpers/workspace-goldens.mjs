@@ -12,7 +12,7 @@ export function workspaceFixture({ state = "open", role = "operator", readOnly =
   if (state === "unsupported") { record.backend = "openshell"; data.workspace = { retained: false, why: "venue" }; }
   if (state === "running" || state === "recovery") { data.chat = { state: "active", jobState: "active", mode: "live" }; if (state === "recovery") { record.reason = "recovery-enqueued"; data.chat.activeJobId = "gh-9575.r1"; } }
   if (state === "never-started") { record.outcome = "failed"; record.reason = "container-never-started"; }
-  if (state === "refused") { record.outcome = "policy"; record.reason = "over-budget"; record.budgetReserved = false; }
+  if (state === "refused") { record.outcome = "policy"; record.reason = "over-budget"; record.budgetReserved = false; data.snapshot = { queue: {}, hostsReadAt: NOW, hostBudgets: [{ name: "mini1" }] }; }
   if (state === "expired") data.workspace = { retained: true, until: NOW - 1 };
   if (state === "swept") data.sandboxCheck = { retained: false, why: "swept" };
   if (state === "retention-off") data.workspace = { retained: false, why: "retention-off" };

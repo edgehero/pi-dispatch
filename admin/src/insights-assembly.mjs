@@ -777,6 +777,8 @@ export async function assembleInsightsView(paths, window, { view = "spend", proj
   if (newerSkipped > 0) out.spend.newerSkipped = newerSkipped;
   if (hosts?.unreachable) {
     out.spend.today.heldMicros = null;
+    // The count of jobs money is held for is read off the same rows (issue #962): 0 would say no job holds any.
+    out.spend.today.heldJobs = null;
     out.spend.today.unattributedMicros = null;
     out.spend.today.reconciliationMismatch = false;
     out.spend.today.hostsUnreadable = true;

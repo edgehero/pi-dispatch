@@ -1,5 +1,5 @@
 import { SETUP_DRAW } from "./setup-goldens.mjs";
-import { noSnapshotFleet } from "./no-snapshot.mjs";
+import { noSnapshotFleet, RUNS_PAGE_IN_OUTAGE } from "./no-snapshot.mjs";
 import { MODELS_DRAW } from "./models-goldens.mjs";
 import { ANSWERER_DRAW, AGENT_OVERVIEW_DRAW } from "./answerer-goldens.mjs";
 import { SANDBOX_DRAW } from "./sandbox-goldens.mjs";
@@ -934,8 +934,13 @@ const RUN_CARD_STATES = {
   "run-chat-expired.operator": () => runCard({ rec: record({ jobId: "gh-pulse", reason: "awaiting-input" }), chat: { state: "parked", mode: "reply", jobState: "completed" } }),
   "run-chat-fork.operator": () => runCard({ rec: record({ jobId: "gh-pulse", session: { resumed: false, reason: "absent", bytes: 4096 } }), forkPoints: { ok: true, entries: [{ id: "1a2b3c4d", parentId: null, type: "message", role: "user", positions: ["before"] }, { id: "2b3c4d5e", parentId: "1a2b3c4d", type: "message", role: "assistant", positions: ["at"] }] } }),
   "run-chat-none.operator": () => runCard({ chat: { state: "finished", mode: "none", says: "This run's trigger keeps no session (no run.resume), so there is no transcript to fork." } }),
-  "run-refused.operator": () => runCard({ rec: record({ jobId: "gh-pulse", outcome: "policy", reason: "job-image-missing", tokens: null, dollars: null, budgetReserved: false, exitCode: null }) }),
-  "run-cancelled-before-start.operator": () => runCard({ rec: record({ jobId: "gh-pulse", outcome: "policy", reason: "operator-cancel", tokens: null, dollars: null, budgetReserved: false, exitCode: null }) }),
+  // Issue #962: a parked run read through a Valkey outage. Its live transcript could not be read, and the search for its
+  // children read no page, so neither "no longer kept" nor "No child run" is said.
+  "run-history-unread.operator": () => runCard({ rec: record({ jobId: "gh-pulse", reason: "awaiting-input", session: { resumed: false, reason: "absent", bytes: 4096 } }), chat: { state: "parked", mode: "reply", jobState: "completed" }, transcript: { unreachable: true, exists: false }, childrenSearched: 0, childrenIncomplete: true }),
+  // A refused run's page reads the hosts (its floor line and host card): these two draw over a registry that was read,
+  // so "This host has not published a floor." is a read's own sentence. The unread one is the word test's.
+  "run-refused.operator": () => runCard({ rec: record({ jobId: "gh-pulse", outcome: "policy", reason: "job-image-missing", tokens: null, dollars: null, budgetReserved: false, exitCode: null }), snapshot: { queue: {}, hostsReadAt: NOW, hostBudgets: [{ name: "mini1" }] } }),
+  "run-cancelled-before-start.operator": () => runCard({ rec: record({ jobId: "gh-pulse", outcome: "policy", reason: "operator-cancel", tokens: null, dollars: null, budgetReserved: false, exitCode: null }), snapshot: { queue: {}, hostsReadAt: NOW, hostBudgets: [{ name: "mini1" }] } }),
   "run-recovering.operator": () => runCard({ rec: record({ jobId: "gh-pulse", outcome: "failed", reason: "recovery-enqueued", checkpoints: { written: 4, failed: 1, skipped: 2 }, recovered: { from: "gh-before", n: 1, fromAttempt: 1, checkpointSeq: 4, replayed: 2, interrupted: 1, notStarted: 1 } }), chat: { state: "active", mode: "live", activeJobId: "gh-pulse.r1", jobState: "failed" } }),
   "run-sandbox-openshell.operator": () => runCard({ rec: record({ jobId: "gh-pulse", backend: "openshell", openshell: { mode: "copy", providers: 2, placeholders: 2, ruleHosts: ["api.example.com"], ruleHostCount: 1 }, secretsProfile: "forge", bundle: { id: "web-ci", variables: ["API_TOKEN", "CONFIG"], shadowed: [], placeholders: 1, plain: 1, placeholderNames: ["API_TOKEN"] } }) }),
   "run-sandbox-openshell-bind.operator": () => runCard({ rec: record({ jobId: "gh-pulse", backend: "openshell-bind" }) }),
@@ -1155,6 +1160,10 @@ const DRAW = {
   "runs-unreadable.viewer": async () => runsLive({ page: new Error("ECONNREFUSED"), window: null, session: VIEWER }),
   "runs-empty.viewer": async () => runsLive({ page: { runs: [], mirror: "ok", next: null }, session: VIEWER, query: "outcome=cancelled" }),
   "runs-unknown-reason.viewer": async () => runsLive({ page: { runs: [record({ jobId: "gh-77aa", outcome: "failed", reason: "hold-tight" })], mirror: "ok", next: null }, session: VIEWER }),
+  // Issue #962: the runs page as the real reader answers it in an outage. This host holds no run that matches and the
+  // mirror did not answer, over a window read from this host's files alone: every count and the spend are floors. Filtered
+  // to an outcome the window counts none of, so the list and the counts above it agree.
+  "runs-outage.viewer": async () => runsLive({ page: { ...RUNS_PAGE_IN_OUTAGE }, window: { ...RUNS_WINDOW, partial: true }, session: VIEWER, query: "outcome=cancelled" }),
   // ParkedPhone: a question answerable here, one the planner refuses here, one a run is answering, one whose answer
   // scan could not tell, and nothing parked.
   "parked-approval.operator": async () => parkedLive([parkedRow({ reason: "awaiting-approval", approval: { requestId: "a".repeat(64), action: "budget-raise" } })]),
@@ -1212,6 +1221,9 @@ const DRAW = {
 
 /** The panel goldens' names, `<state>.<role>`, in order: the files `panels/` holds, and no other. */
 export const PANEL_STATES = Object.freeze(Object.keys(DRAW));
+
+/** One panel golden's page, for a test of its words that needs no other state drawn. */
+export const drawPanelState = async (state) => String(await DRAW[state]());
 
 /** Every panel golden's page, `{ [state]: html }`. */
 export async function renderPanelStates() {
