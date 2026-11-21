@@ -124,12 +124,86 @@ function bounded(p, timeoutMs, onTimeout = () => {}) {
 	});
 }
 
+/**
+ * One page of a display index checked and pruned by its writer: the receiver's and, since issue #970, the poller's
+ * (poller-status.mjs), shared so the two cannot prune by different rules. `cursor` is `{ at }`, the rotating SSCAN
+ * cursor the caller keeps between beats, moved on as soon as the page is read. At most 256 members of the page are
+ * looked at, the writer's own name never. A member goes only while its record key is absent, checked and removed in one
+ * script: a separate GET and SREM can erase a peer that republished between them. Throws "index" on an answer of the
+ * wrong shape; `closed()` true skips the prune.
+ */
+export async function pruneLiveIndex(redis, { live, keyOf, self, cursor, closed = () => false }) {
+	const indexed = await redis.sscan(live, cursor.at, "COUNT", 64);
+	if (!Array.isArray(indexed) || typeof indexed[0] !== "string" || !/^\d{1,20}$/.test(indexed[0]) || !Array.isArray(indexed[1])) throw new Error("index");
+	cursor.at = indexed[0];
+	const look = indexed[1].slice(0, 256).filter((n) => nameOk(n) && n !== self);
+	if (look.length && !closed()) {
+		const removed = await redis.eval("local n = 0; for i = 2, #KEYS do if redis.call('EXISTS', KEYS[i]) == 0 then n = n + redis.call('SREM', KEYS[1], ARGV[i - 1]) end end; return n", look.length + 1, live, ...look.map(keyOf), ...look);
+		if (!integer(removed)) throw new Error("index");
+	}
+}
+
+/**
+ * The bounded read under a display index, shared by the receiver's reader and, since issue #970, the poller's: read
+ * only, live names first. Discovery takes at most four SSCAN pages and 256 names; `names` (already known live hosts) go
+ * first, then the rest, sorted, and at most `hostsMax` records are read. One deadline bounds the whole read, discovery
+ * and the record commands together. Each record comes with its PTTL, which the caller judges against its own TTL.
+ *
+ * Returns `{ wanted, rows, complete, more, moreUnknown }`: `rows` is `[{ name, value, ttl }]` in `wanted`'s order, or
+ * null when the record commands failed or ran out of time (every wanted name is then unknown). `complete` is false for a
+ * discovery that did not finish, an index member that is no name, or names past `hostsMax` (`more` counts those, a
+ * floor where `moreUnknown`).
+ */
+export async function readIndexedRecords(redis, { live, keyOf, names = [], hostsMax, timeoutMs, clock }) {
+	const deadline = clock() + timeoutMs;
+	// Spent for good once a bound fires. `left <= 0` alone is not enough: the bound's timer and this clock are different
+	// clocks, and a timer can fire a fraction of a millisecond before the deadline it was set from, so the next check would
+	// still see time left and start the row reads this deadline already ruled out.
+	let spent = false;
+	const within = (fn) => {
+		const left = deadline - clock();
+		if (spent || left <= 0) return Promise.reject(new Error("timeout"));
+		try { return bounded(fn(), Math.max(1, Math.ceil(left)), () => { spent = true; }); } catch { return Promise.reject(new Error("unavailable")); }
+	};
+	let complete = true;
+	const indexed = [];
+	try {
+		let cursor = "0";
+		for (let page = 0; page < 4; page++) {
+			const answer = await within(() => redis.sscan(live, cursor, "COUNT", 64));
+			if (!Array.isArray(answer) || typeof answer[0] !== "string" || !/^\d{1,20}$/.test(answer[0]) || !Array.isArray(answer[1])) throw new Error("index");
+			cursor = answer[0];
+			const room = 256 - indexed.length;
+			indexed.push(...answer[1].slice(0, room));
+			if (answer[1].length > room) complete = false;
+			if (cursor === "0") break;
+			if (page === 3 || indexed.length >= 256) { complete = false; break; }
+		}
+	} catch { complete = false; }
+	const known = [...new Set(names.filter(nameOk))].sort();
+	const rest = [...new Set(indexed.filter(nameOk))].filter((n) => !known.includes(n)).sort();
+	if (indexed.some((n) => !nameOk(n))) complete = false;
+	const all = [...known, ...rest];
+	const wanted = all.slice(0, hostsMax);
+	const more = Math.max(0, all.length - wanted.length);
+	const moreUnknown = !complete;
+	if (more) complete = false;
+	if (!wanted.length) return { wanted, rows: [], complete, more, moreUnknown };
+	let values;
+	let ttls;
+	try {
+		[values, ttls] = await within(() => Promise.all([redis.mget(...wanted.map(keyOf)), Promise.all(wanted.map((name) => Promise.resolve().then(() => redis.pttl(keyOf(name))).catch(() => null)))]));
+		if (!Array.isArray(values) || values.length !== wanted.length) throw new Error("records");
+	} catch { return { wanted, rows: null, complete: false, more, moreUnknown }; }
+	return { wanted, rows: wanted.map((name, i) => ({ name, value: values[i], ttl: ttls[i] })), complete, more, moreUnknown };
+}
+
 /** A timeout diagnoses the write but never frees its flight: ioredis may still have it queued offline. */
 export function makeReceiverPublisher({ client, name, version, port, bind, forges, observations, now = Date.now, log = () => {}, timeoutMs = 2000, intervalMs = RECEIVER_BEAT_MS, setIntervalFn = setInterval, clearIntervalFn = clearInterval }) {
 	let closed = false;
 	let busy = false;
 	let timer = null;
-	let pruneCursor = "0";
+	const prune = { at: "0" };
 	const startedAt = now();
 	const valid = nameOk(name) && Number.isInteger(port) && port > 0 && port <= 65535 && ["all", "loopback", "address"].includes(bind);
 	if (!valid) safeLog(log, "identity-or-socket");
@@ -149,15 +223,7 @@ export function makeReceiverPublisher({ client, name, version, port, bind, forge
 			if (closed) return;
 			if (!integer(await redis.sadd(RECEIVER_LIVE, name))) throw new Error("index");
 			if (closed) return;
-			const indexed = await redis.sscan(RECEIVER_LIVE, pruneCursor, "COUNT", 64);
-			if (!Array.isArray(indexed) || typeof indexed[0] !== "string" || !/^\d{1,20}$/.test(indexed[0]) || !Array.isArray(indexed[1])) throw new Error("index");
-			pruneCursor = indexed[0];
-			const look = indexed[1].slice(0, 256).filter((n) => nameOk(n) && n !== name);
-			if (look.length && !closed) {
-				// A separate GET/SREM can erase a peer that republished between them. Check and prune atomically.
-				const removed = await redis.eval("local n = 0; for i = 2, #KEYS do if redis.call('EXISTS', KEYS[i]) == 0 then n = n + redis.call('SREM', KEYS[1], ARGV[i - 1]) end end; return n", look.length + 1, RECEIVER_LIVE, ...look.map(receiverKey), ...look);
-				if (!integer(removed)) throw new Error("index");
-			}
+			await pruneLiveIndex(redis, { live: RECEIVER_LIVE, keyOf: receiverKey, self: name, cursor: prune, closed: () => closed });
 		};
 		Promise.resolve().then(work).catch(() => fail("write")).finally(() => { clearTimeout(timeout); busy = false; });
 	};
@@ -170,53 +236,16 @@ export function makeReceiverPublisher({ client, name, version, port, bind, forge
 
 /** Read-only, live names first. Incomplete reads cannot prove no receiver or a zero delivery count. */
 export async function readReceiverStatus(redis, { names = [], now = Date.now, timeoutMs = 2000, clock = () => performance.now() } = {}) {
-	const deadline = clock() + timeoutMs;
-	// Spent for good once a bound fires. `left <= 0` alone is not enough: the bound's timer and this clock are different
-	// clocks, and a timer can fire a fraction of a millisecond before the deadline it was set from, so the next check would
-	// still see time left and start the row reads this deadline already ruled out.
-	let spent = false;
-	const within = (fn) => {
-		const left = deadline - clock();
-		if (spent || left <= 0) return Promise.reject(new Error("timeout"));
-		try { return bounded(fn(), Math.max(1, Math.ceil(left)), () => { spent = true; }); } catch { return Promise.reject(new Error("unavailable")); }
-	};
-	let indexed;
-	let complete = true;
-	indexed = [];
-	try {
-		let cursor = "0";
-		for (let page = 0; page < 4; page++) {
-			const answer = await within(() => redis.sscan(RECEIVER_LIVE, cursor, "COUNT", 64));
-			if (!Array.isArray(answer) || typeof answer[0] !== "string" || !/^\d{1,20}$/.test(answer[0]) || !Array.isArray(answer[1])) throw new Error("index");
-			cursor = answer[0];
-			const room = 256 - indexed.length;
-			indexed.push(...answer[1].slice(0, room));
-			if (answer[1].length > room) complete = false;
-			if (cursor === "0") break;
-			if (page === 3 || indexed.length >= 256) { complete = false; break; }
-		}
-	} catch { complete = false; }
-	const live = [...new Set(names.filter(nameOk))].sort();
-	const rest = [...new Set(indexed.filter(nameOk))].filter((n) => !live.includes(n)).sort();
-	if (indexed.some((n) => !nameOk(n))) complete = false;
-	const all = [...live, ...rest];
-	const wanted = all.slice(0, RECEIVER_HOSTS_MAX);
-	const more = Math.max(0, all.length - wanted.length);
-	const moreUnknown = !complete;
-	if (more) complete = false;
-	if (!wanted.length) return { hosts: [], complete, more, moreUnknown };
-	let values;
-	let ttls;
-	try {
-		[values, ttls] = await within(() => Promise.all([redis.mget(...wanted.map(receiverKey)), Promise.all(wanted.map((name) => Promise.resolve().then(() => redis.pttl(receiverKey(name))).catch(() => null)))]));
-		if (!Array.isArray(values) || values.length !== wanted.length) throw new Error("records");
-	} catch { return { hosts: wanted.map((name) => ({ name, unreadable: true })), complete: false, more, moreUnknown }; }
+	const read = await readIndexedRecords(redis, { live: RECEIVER_LIVE, keyOf: receiverKey, names, hostsMax: RECEIVER_HOSTS_MAX, timeoutMs, clock });
+	const { more, moreUnknown } = read;
+	if (read.rows === null) return { hosts: read.wanted.map((name) => ({ name, unreadable: true })), complete: false, more, moreUnknown };
+	let { complete } = read;
 	const hosts = [];
-	for (const [i, name] of wanted.entries()) {
-		if (values[i] === null || ttls[i] === -2) continue;
-		const record = parseReceiverStatus(values[i]);
-		if (!record || record.name !== name || !Number.isInteger(ttls[i]) || ttls[i] < 0 || ttls[i] > RECEIVER_TTL_MS) { hosts.push({ name, unreadable: true }); complete = false; continue; }
-		hosts.push({ ...record, ageMs: RECEIVER_TTL_MS - ttls[i] });
+	for (const { name, value, ttl } of read.rows) {
+		if (value === null || ttl === -2) continue;
+		const record = parseReceiverStatus(value);
+		if (!record || record.name !== name || !Number.isInteger(ttl) || ttl < 0 || ttl > RECEIVER_TTL_MS) { hosts.push({ name, unreadable: true }); complete = false; continue; }
+		hosts.push({ ...record, ageMs: RECEIVER_TTL_MS - ttl });
 	}
 	return { hosts, complete, more, moreUnknown };
 }

@@ -2,6 +2,7 @@ import { readEndpointStatus, ENDPOINT_STATUS_HOSTS_MAX } from "@edgehero/pi-disp
 import { WORKER_NAME_RE } from "@edgehero/pi-dispatch/config";
 import { readProviderInventory, providerInventoryView } from "./provider-inventory.mjs";
 import { readReceiverStatus, parseReceiverStatus, receiverForgeFacts, RECEIVER_FORGES, RECEIVER_OUTCOMES } from "@edgehero/pi-dispatch/receiver-status";
+import { readPollerStatus } from "@edgehero/pi-dispatch/poller-status";
 import { readSubscriptionAuthView, subscriptionAuthForAgent } from "./subscription-auth-view.mjs";
 /** Display-only deployment facts (#751). Raw environment values never leave this reader. */
 import * as nodeFs from "node:fs";
@@ -150,7 +151,7 @@ function doctorFacts(snapshot) {
   });
 }
 
-export function connectionsProblems(hosts, runs = [], forges = []) {
+export function connectionsProblems(hosts, runs = [], forges = [], pollers = null) {
   const problems = [];
   for (const host of hosts) {
     if (host.proxy?.level === "fail") {
@@ -166,7 +167,15 @@ export function connectionsProblems(hosts, runs = [], forges = []) {
   // WEBHOOK_SECRET; a secret problem beside it would send the operator to the wrong line.
   if (forges.some((forge) => forge.name === "github" && forge.ingest === "invalid")) problems.push({ kind: "receiver", host: null, title: "GITHUB_INGEST is not webhook, poll or both", text: "The deployment's .env sets GITHUB_INGEST to a value every pi-dispatch-receiver command refuses to start on.", fix: "Set GITHUB_INGEST to webhook, poll or both, or delete the line to let the receiver infer it, then restart the receiver's services.", run: null });
   else if (forges.some((forge) => forge.name === "github" && forge.enabled === true && forge.secret?.set === false)) problems.push({ kind: "receiver", host: null, title: "GitHub receiver needs WEBHOOK_SECRET", text: "WEBHOOK_SECRET is not set in the deployment's .env. The receiver refuses to start unless its service environment sets it.", fix: "Set WEBHOOK_SECRET for the receiver, then restart it.", run: null });
-  return problems.sort((a, b) => ["proxy", "receiver", "forge", "endpoints"].indexOf(a.kind) - ["proxy", "receiver", "forge", "endpoints"].indexOf(b.kind));
+  problems.sort((a, b) => ["proxy", "receiver", "forge", "endpoints"].indexOf(a.kind) - ["proxy", "receiver", "forge", "endpoints"].indexOf(b.kind));
+  // Issue #970: a poller that refused the current triggers file and polls on the last copy that loaded, by its heartbeat.
+  // After every other problem, so each keeps its place; the heartbeat carries no reason, which the host's check gives.
+  for (const host of Array.isArray(pollers?.hosts) ? pollers.hosts : []) {
+    if (host?.unreadable || host?.triggers !== "kept" || typeof host.name !== "string" || !WORKER_NAME_RE.test(host.name)) continue;
+    const what = host.refusal === "missing" ? "found no triggers.json" : host.refusal === "unreadable" ? "could not read triggers.json" : "refused the current triggers.json";
+    problems.push({ kind: "poller", host: host.name, title: "The poller runs on an older triggers file", text: `The poller on ${host.name} ${what} and polls with the last copy that loaded, so a trigger added or changed since does not apply to the events it polls.`, fix: "Run pi-dispatch triggers check on that host and correct the file; the poller takes it at its next cycle.", run: null });
+  }
+  return problems;
 }
 
 /** Injected sources make every exceptional state independent; no metadata read changes a capability or worker env. */
@@ -234,6 +243,9 @@ export async function readConnections({ deploymentDir, env = {}, paths = {}, sna
   let endpointsMore = 0;
   const slots = new Map();
   let receivers = { hosts: [], complete: false, more: 0 };
+  // Issue #970: the pollers' heartbeats. Left out of the view when not read (Setup, no Valkey, or a source that answers
+  // nothing), so a page drawn from such a view says nothing of a poller rather than "not known".
+  let pollers;
   let hookHistory = hookRunsView(null);
   try {
     if (publications && (redis || typeof paths.valkeyUrl === "string" || reads.endpointStatus)) {
@@ -268,6 +280,12 @@ export async function readConnections({ deploymentDir, env = {}, paths = {}, sna
         receivers = await (reads.receivers ?? readReceiverStatus)(publicationClient(reads.receivers), { names: (snapshot?.hostBudgets ?? []).map((h) => h.name), now: () => now });
       } catch { /* Unknown is not an empty, healthy receiver population. */ }
     }
+    if (publications && (redis || owned || typeof paths.valkeyUrl === "string" || reads.pollers)) {
+      try {
+        const read = await (reads.pollers ?? readPollerStatus)(publicationClient(reads.pollers), { now: () => now });
+        if (read && typeof read === "object") pollers = read;
+      } catch { pollers = { hosts: [], complete: false, more: 0 }; }
+    }
     if (publications && (redis || owned || typeof paths.valkeyUrl === "string" || reads.hookRuns)) {
       try {
         const names = (snapshot?.hostBudgets ?? []).map((host) => host.name);
@@ -294,6 +312,7 @@ export async function readConnections({ deploymentDir, env = {}, paths = {}, sna
     now, environmentUnknown, environment, subscriptionAuth,
     providerKeys: readProviderInventory({ deploymentDir, env, paths, snapshot, fs, platform, uid, reads: reads.providerInventory ?? { environment: reads.environment } }),
     receiver: { port: positive(file.RECEIVER_PORT, 3000), unknown: environmentUnknown, ...receivers },
+    ...(pollers ? { pollers } : {}),
     forges,
     egress: { on: egressOn, problem: egressProblem, allowlist: Array.isArray(allowlist) ? allowlist.slice(0, 8) : null, more: Array.isArray(allowlist) ? Math.max(0, allowlist.length - 8) : 0, hosts },
     endpointFleetDeclared, endpointStatus, endpointsMore,
@@ -309,7 +328,7 @@ export async function readConnections({ deploymentDir, env = {}, paths = {}, sna
     }),
     notify: { hook: nonblank(file, "PI_ON_FAILURE") ? basename(file.PI_ON_FAILURE) : null, timeoutMs: positive(file.PI_ON_FAILURE_TIMEOUT_MS, 10_000), triggers: (triggers ?? []).filter((t) => t.statusComment === true).map((t) => t.index).filter(Number.isInteger), unknown: environmentUnknown, history: hookHistory, ...(!Array.isArray(triggers) && snapshot?.triggers?.missing !== true ? { triggersUnread: true } : {}) },
     mcp, packages, packageOptOuts: Array.isArray(triggers) ? triggers.filter((t) => t.packages === false).length : null,
-    problems: connectionsProblems(hosts, snapshot?.runs ?? [], forges), snapshotUnreadable: snapshot === null,
+    problems: connectionsProblems(hosts, snapshot?.runs ?? [], forges, pollers), snapshotUnreadable: snapshot === null,
   };
 }
 

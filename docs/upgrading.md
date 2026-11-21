@@ -416,6 +416,15 @@ as `subscription_auth_hold`. See [subscription renewal](subscription-auth.md#adm
 
 Release numbers come from the git tags.
 
+### Unreleased: poller heartbeat (#970)
+
+| Stored state | What changes and how to move it |
+|---|---|
+| Valkey `poller:live`, `poller:h:<name>` | New, a display: a running `pi-dispatch-receiver poll` publishes its heartbeat, which `pi-dispatch status` and Connections read. It expires on its own (five minutes past a beat in a cycle, the wait plus five minutes past the beat before a wait) and a stopped poller deletes it, so nothing needs moving, backing up or cleaning, and no older-state detector applies. Deleting it changes no polling. |
+| Mixed versions | A poller older than this release publishes none, so a newer `status` says no poller has published and Connections says "no poller reported" while it runs: upgrade the receiver package where the poller runs. An older `status` or console reads none of it, and an older reader of the receiver records never sees it, since it has keys of its own. |
+
+See [is it running](polling.md#is-it-running).
+
 ### 5.4.2
 
 #### Completed label-job receipts (#920)

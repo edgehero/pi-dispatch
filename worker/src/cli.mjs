@@ -361,7 +361,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 			const label = picked.urls.length > 1 ? `[${urlShown(url)}] ` : "";
 			code = Math.max(code, item !== null
 				? await targetStatus(item, url, { env, write, label, urlShown, valkeyRefusal, now, controlClients })
-				: await killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal, now, controlClients }));
+				: await killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal, now, controlClients, cwd }));
 		}
 		return code;
 	}
@@ -609,7 +609,7 @@ async function deploymentQueueNames(url, controlClients) {
 	return { names: unionQueueNames(fleetQueueNames(fleet?.hosts), existing.names), blind: fleet?.unreachable ?? null, incomplete: Boolean(existing?.incomplete), existing };
 }
 
-async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal, now, controlClients }) {
+async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal, now, controlClients, cwd = process.cwd() }) {
 	// Its own discovery, not `deploymentQueueNames`: `status` also reads consumer health (issue #924) through the same
 	// probe before it is closed, so this keeps the probe open across both reads.
 	const { parseConnection, makeRedisClient } = await import("./connection.mjs");
@@ -642,6 +642,9 @@ async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal
 		discoverHostQueuesReporting(probe, { timeoutMs: FLEET_READ_TIMEOUT_MS }),
 	]);
 	const consumers = cmd === "status" ? await (await import("./consumer-status.mjs")).readConsumerStatus(probe, fleet?.hosts ?? [], { now: () => Number(now()) }) : null;
+	// The pollers' heartbeats (issue #970), read on the same probe before it closes, beside this deployment's GITHUB_INGEST
+	// and its own triggers file. Never a reason for status to fail: what cannot be read is said in `pollers` itself.
+	const pollers = cmd === "status" ? await (await import("./poller-facts.mjs")).readPollerFacts(probe, { env, cwd, now: () => Number(now()) }).catch(() => ({ expected: null, hosts: [], complete: false })) : null;
 	probe.disconnect?.();
 	const blind = fleet?.unreachable ?? null;
 	const names = unionQueueNames(fleetQueueNames(fleet?.hosts), existing.names);
@@ -686,7 +689,7 @@ async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal
 			const { readStatusWaiting } = await import("./status-waiting.mjs");
 			const waiting = await readStatusWaiting(queues, { now: () => Number(now()) });
 			if (blind || existing?.incomplete) { waiting.partial = true; waiting.discoveryIncomplete = true; }
-			const out = { ...(label ? { valkey: urlShown(url) } : {}), pausedState, ...(pausedPartial ? { pausedPartial, pausedQueues: names.filter((_, i) => states[i]) } : {}), ...counts, ...(blind ? { fleet: blind } : {}), waitingDetails: waiting, consumers };
+			const out = { ...(label ? { valkey: urlShown(url) } : {}), pausedState, ...(pausedPartial ? { pausedPartial, pausedQueues: names.filter((_, i) => states[i]) } : {}), ...counts, ...(blind ? { fleet: blind } : {}), waitingDetails: waiting, consumers, pollers };
 			write(`${JSON.stringify(out)}\n`);
 		}
 	} catch (error) {

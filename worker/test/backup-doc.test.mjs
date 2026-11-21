@@ -204,6 +204,7 @@ const KEY_FAMILIES = new Map([
 	["dispatch:*", [["worker/src/model-selection-state.mjs", '"dispatch:model-selection:v1:"'], ["worker/src/model-attempts.mjs", "`dispatch:model-attempt:"], ["worker/src/model-cooldowns.mjs", "`dispatch:model-cooldown:"], ["worker/src/subscription-status.mjs", "`dispatch:subscription-status:"], ["worker/src/subscription-quota.mjs", "`dispatch:subscription-quota:"], ["worker/src/canary-lock.mjs", '"dispatch:canary:exclusive"']]],
 	["host:*", [["worker/src/host-registry.mjs", '"host:live"']]],
 	["receiver:*", [["worker/src/receiver-status.mjs", '"receiver:live"']]],
+	["poller:*", [["worker/src/poller-status.mjs", '"poller:live"']]],
 	["doctor:*", [["worker/src/doctor-results.mjs", '"doctor:hosts"']]],
 	["hook:*", [["worker/src/hook-runs.mjs", 'HOOK_HOSTS = "hook:hosts"'], ["worker/src/hook-runs.mjs", "`hook:h:"]]],
 	["runs:*", [["worker/src/run-mirror.mjs", '"runs:index"']]],

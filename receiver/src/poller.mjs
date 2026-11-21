@@ -127,6 +127,17 @@
  * moved past it, never judged again; and a container that bind-mounts the single file keeps the inode it started
  * with, as `serve`'s watch does.
  *
+ * THE HEARTBEAT (issue #970). A poller that exited 2 on an invalid file used to leave nothing behind but its own error
+ * log, while the worker kept its old schedules and `pi-dispatch status` looked healthy. Now the loop publishes a display
+ * record (`makePollerBeat`, worker/src/poller-status.mjs, under `poller:h:<workerName>`) that `status` and the console's
+ * Connections page read: when it beat, when it next polls, and whether it runs on the current triggers file or keeps an
+ * older one, by the follower's `state` and digests, never the reason (which names the file's path). It beats at its
+ * own points and arms no timer of its own, so the `done` contract above holds as it was: after `poller_started`, at the
+ * top of each cycle after the follow, with a TTL of `POLLER_GRACE_MS`, and before each wait with a TTL of that wait
+ * plus the grace, so a rate-limit sleep of up to an hour still reads as a poller that runs. A stop removes the record
+ * before the connections close. Each write is awaited like the loop's own cursor writes, so it adds no wait those do not
+ * already have, and a failed one is one `poller_status_unavailable` line per failure streak that changes nothing else.
+ *
  * POLITENESS: per-endpoint-per-repo ETags make the idle steady state nearly free (304s do not count
  * against the rate limit, per GitHub's docs); `x-poll-interval` is honored as the MINIMUM cycle
  * delay when present; an exhausted rate limit (403/429 with x-ratelimit-remaining: 0) sleeps until
@@ -144,11 +155,12 @@
 import { createSign } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { readFile as fsReadFile } from "node:fs/promises";
-import { configError } from "@edgehero/pi-dispatch/config";
+import { configError, workerName } from "@edgehero/pi-dispatch/config";
 import { judgeValkeyAtStart, makeRedisClient, parseConnection, valkeyClientContext } from "@edgehero/pi-dispatch/connection";
 import { makeGitHubAuth } from "@edgehero/pi-dispatch/get-token";
 import { enqueueGitHubJob, makeQueue } from "@edgehero/pi-dispatch/queue";
 import { FORGE_JOB_RETENTION_S } from "@edgehero/pi-dispatch/retention";
+import { POLLER_GRACE_MS, POLLER_TTL_MAX_MS, makePollerBeat, triggersDigest } from "@edgehero/pi-dispatch/poller-status";
 import { trySteer } from "./steer.mjs";
 import { holdAfterDedup, holdBeforeLabel } from "./held.mjs";
 import { filter, hasCloseTriggers, wantsCloserAuthority } from "./filter.mjs";
@@ -158,6 +170,7 @@ import { loadPollerConfig, pollerLoaderEnv } from "./poller-config.mjs";
 import { makeTriggersFollower, triggersFilePath } from "./config.mjs";
 import { retryIdentity } from "./boot-retry.mjs";
 import { hasLocalCloseListeners, localEventsWantCloserAuthority, makeLocalEventAdmission } from "./local-event-listeners.mjs";
+import { RECEIVER_VERSION } from "./version.mjs";
 
 const API_URL = "https://api.github.com";
 // In SECONDS (`EX`): strictly outlives the gh-* job retention (`FORGE_JOB_RETENTION_S`) by four days, derived so that
@@ -237,6 +250,8 @@ export async function startPoller(env = process.env, deps = {}) {
 		makeResolveGitHubAuthority: makeResolveGitHubAuthorityFn = makeResolveGitHubAuthority,
 		// Issue #464 (gate round 3): the start-time judgement of VALKEY_URL, as the receiver's (start.mjs).
 		judgeValkey = (url, opts) => judgeValkeyAtStart(url, valkeyClientContext({ env: opts.env }), { now: opts.now, ...(opts.sleep ? { sleep: opts.sleep } : {}) }),
+		// Issue #970: the heartbeat's writer, `{ beat(fields), remove() }`, injected as start.mjs injects the receiver's publisher.
+		makePollerStatusFn = makePollerBeat,
 	} = deps;
 
 	// THE BOOT LOAD'S OWN READ is the follower's baseline (issue #947, through the read seam as serve records its own for
@@ -327,6 +342,16 @@ export async function startPoller(env = process.env, deps = {}) {
 		if (ownRedis) await redisClient.quit();
 	};
 
+	// The heartbeat's writer (issue #970), on the poller's own client, under the name a worker on this host takes. A name
+	// the worker would refuse publishes nothing and says so once: it never stops the poller, which needs no name to poll.
+	let pollerName = null;
+	try {
+		pollerName = workerName(env);
+	} catch {
+		// makePollerBeat logs poller_status_unavailable for the missing name.
+	}
+	const pollerStatus = makePollerStatusFn({ client: redisClient, name: pollerName, version: RECEIVER_VERSION, now, log: (event, fields) => out({ event, ...fields }) });
+
 	const admitLocal = makeLocalEventAdmission({ client: () => redisClient, store: localEventStore, log: out });
 	const ctx = { cfg, selfId, fetchFn, redis: redisClient, enqueue, admitLocal, out, now, random, resolveCloserAuthority, followTriggers: triggersFollower.follow };
 
@@ -351,6 +376,10 @@ export async function startPoller(env = process.env, deps = {}) {
 	}
 
 	out({ event: "poller_started", repos: repos.length, intervalSeconds: cfg.intervalSeconds, valkey: cfg.valkeyUrl, discovery: cfg.repos === null });
+	// One beat (issue #970): `ttlMs` is how long the record outlives it, `nextAt` when the next cycle starts (null inside a
+	// cycle). The rest is read at each beat: the repo count and what the follower runs on, as digests.
+	const beat = (ttlMs, nextAt) => pollerStatus.beat({ ttlMs, nextAt, intervalSeconds: cfg.intervalSeconds, repos: repos.length, ...followerFacts(triggersFollower.state) });
+	await beat(POLLER_GRACE_MS, null);
 
 	// The catch-up horizon (issue #880; the header's "A POLLER STARTED AGAIN"). Every repo starts in `unchecked` and
 	// is checked JUST BEFORE this process first polls it, not at boot: a first cycle whose token mint fails for hours,
@@ -402,6 +431,8 @@ export async function startPoller(env = process.env, deps = {}) {
 			// Each cycle starts on the file as it is (issue #947), so an edit is taken, or refused and said once, within a
 			// cycle even when no event arrives to be judged.
 			ctx.followTriggers();
+			// And says so (issue #970): a cycle that has not beaten again within the grace is no longer polling.
+			await beat(POLLER_GRACE_MS, null);
 			const stats = emptyStats();
 			const startedAt = now();
 			let rateResetMs = null;
@@ -487,6 +518,9 @@ export async function startPoller(env = process.env, deps = {}) {
 			// is next due. A failed repo is left to age from its last full poll, and an unchecked one keeps the age of
 			// the stop it has not been checked for. A cycle whose token mint failed polled nothing and renews nothing.
 			await renewFamilies(rateResetMs === null ? polled : repos.filter((r) => !failed.has(r) && !unchecked.has(r)), delayMs);
+			// Issue #970: the beat before the wait outlives the wait, whatever decided it, so a rate-limit sleep of up to an
+			// hour is a poller that runs and says when it polls next, never one that went quiet.
+			await beat(Math.min(Math.ceil(delayMs) + POLLER_GRACE_MS, POLLER_TTL_MAX_MS), Math.ceil(now() + delayMs));
 			// Hold the sleep so the LOSER can be cleared: when stop() wins this race, an uncancelled
 			// default timer stays armed for up to a full poll interval after `done` resolves (issue
 			// #325) -- masked in production by the signal handler's process.exit(0) below, and real for
@@ -511,6 +545,9 @@ export async function startPoller(env = process.env, deps = {}) {
 				for (const repo of repos) unchecked.add(repo);
 			}
 		}
+		// Both ways out of the loop (a stop during a cycle, or during the wait) pass here: the record goes before the
+		// connection it is deleted on closes (issue #970), so a stopped poller reads as none at once, not after its TTL.
+		await pollerStatus.remove();
 		await closeOwned();
 	})();
 
@@ -530,6 +567,23 @@ export async function startPoller(env = process.env, deps = {}) {
 	}
 
 	return { stop, done };
+}
+
+/**
+ * What the heartbeat says of the triggers file (issue #970), from the follower's `state`: current or kept, why it was
+ * not taken, and the 16-hex digests of the text the poller runs on and of the text it refused (null when nothing could
+ * be read). Never the texts and never the reason, which names the file's path: `pi-dispatch status` judges its own copy
+ * and compares digests. A poller with no recorded running text (none: the boot load's read is its baseline) carries a
+ * null digest, which the record refuses, so that beat is not written rather than written with a digest of nothing.
+ */
+function followerFacts(state) {
+	return {
+		triggers: state.triggers,
+		refusal: state.refusal,
+		running: typeof state.runningText === "string" ? triggersDigest(state.runningText) : null,
+		rejected: typeof state.rejectedText === "string" ? triggersDigest(state.rejectedText) : null,
+		rejectedAt: state.triggers === "kept" ? state.rejectedAt : null,
+	};
 }
 
 function emptyStats() {

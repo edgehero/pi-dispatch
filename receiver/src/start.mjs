@@ -53,11 +53,7 @@ import { judgeValkeyAtStart, parseConnection, valkeyClientContext } from "@edgeh
 import { WATCH_DEBOUNCE_MS, changedWhileArming, makeWatchCloser, readBeforeArming } from "@edgehero/pi-dispatch/watch-closer";
 import { githubFailureFields } from "@edgehero/pi-dispatch/octokit-log";
 import { retryIdentity } from "./boot-retry.mjs";
-
-const RECEIVER_VERSION = (() => {
-	try { return JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")).version ?? ""; }
-	catch { return ""; }
-})();
+import { RECEIVER_VERSION } from "./version.mjs";
 
 /**
  * Boot the receiver. Collaborators are injected (defaulting to the real ones) so the whole wiring is

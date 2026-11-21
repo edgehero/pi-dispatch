@@ -12020,7 +12020,9 @@ receiver:h:<name>   STRING, one JSON record SET whole with PX 90000, refreshed e
 The name is the worker's `workerName`: declared `PI_WORKER_NAME`, else the sanitized hostname. Invalid publication
 identity logs a fixed diagnostic and suppresses observations, without introducing a receiver startup refusal.
 Publication starts only after the listening callback: the socket supplies the actual port and address. Only the
-closed bind word `all`, `loopback` or `address` survives; no address, path or URL is retained. Polling publishes none.
+closed bind word `all`, `loopback` or `address` survives; no address, path or URL is retained. Polling publishes none
+here: the poller's heartbeat has keys of its own (`INT-POLLER-STATUS-KEY`, #970), since under `GITHUB_INGEST=both` the
+two share this name.
 The unref'd timer joins `closers`, and its close runs before the shared queue client closes. A late write never
 reindexes after close; its already-issued SET may finish and expires naturally.
 
@@ -12105,6 +12107,8 @@ Each beat is best effort, never awaited by an answer. One actual flight remains 
 operations settle, even after a two-second diagnostic timeout: ioredis's offline queue must not accumulate one write
 per beat. A failure logs one fixed `receiver_status_unavailable` event/reason, never an exception message or value.
 The writer atomically checks/prunes at most 256 members from one rotating SSCAN page per beat, so it cannot erase a peer that just republished; the console never prunes.
+The check-and-prune (`pruneLiveIndex`) and the bounded read below (`readIndexedRecords`) are exported and shared with the
+poller's heartbeat since #970, one implementation for both indexes; their bounds are unchanged.
 
 `readReceiverStatus` discovers at most four SSCAN pages and 256 names, prioritizes already-known live host names,
 reads at most 64 records, and bounds the entire read (discovery and row commands together) to two seconds. An incomplete discovery, malformed index/record,
@@ -12121,6 +12125,92 @@ held/steered-response regressions in receiver/test/held.test.mjs and steer.test.
 admin/test/connections-receiver.test.mjs; actual-CSP browser lane.
 The outcome table is pinned to the exported vocabulary. `CONST-HMAC-OVER-RAW-BODY` and existing routing are
 **UNCHANGED, checked**.
+
+## INT-POLLER-STATUS-KEY
+
+**Poller → Valkey → `pi-dispatch status` and Connections only (#970).** A display, never an admission, routing, doctor or
+authentication input. Deleting `poller:*` while a poller runs changes no polling: its next beat writes the record again.
+The shared writer and reader are `worker/src/poller-status.mjs`, exported as `@edgehero/pi-dispatch/poller-status`;
+`pi-dispatch-receiver poll` writes, and `pi-dispatch status` (`worker/src/poller-facts.mjs`) and the console's Connections
+reader read.
+
+```
+poller:live         SET of poller host names; an index its writers prune, never the liveness claim
+poller:h:<name>     STRING, one JSON record SET whole with PX <ttlMs>, written at the poll loop's own beats
+```
+
+The name is the worker's `workerName`, as for the receiver's record. A name the worker would refuse logs
+`poller_status_unavailable` (`identity`) once and publishes nothing; it never stops the poller. Not `receiver:h:<name>`:
+under `GITHUB_INGEST=both` `serve` and `poll` share the name and would overwrite each other, and every reader of a
+receiver record requires a listening `port` (`INT-RECEIVER-STATUS-KEY`), so a console of an earlier release would show
+the poller as an unreadable receiver.
+
+Version 1 is rebuilt by field name; another version, a value over 4 KiB (`POLLER_MAX_BYTES`), a field of the wrong shape
+or fields that disagree is unreadable, and a field it does not know is dropped:
+
+```
+{ v: 1, name, version, startedAt, at, ttlMs, nextAt: <epoch ms>|null, intervalSeconds, repos,
+  triggers: "current"|"kept", refusal: null|"refused"|"missing"|"unreadable",
+  running: <16 hex>, rejected: <16 hex>|null, rejectedAt: <epoch ms>|null }
+```
+
+- `version` is the receiver package's (`receiver/src/version.mjs`, which the receiver's record reads too), `startedAt`
+  when the poller's writer was made, `at` the beat's instant, `ttlMs` the TTL it was SET with (1 ms to
+  `POLLER_TTL_MAX_MS`, 7 days), `nextAt` when the next cycle starts (null for a beat inside a cycle),
+  `intervalSeconds` the configured interval and `repos` how many repositories it polls, a count and never a name.
+- `triggers` is the poller's triggers follower's state (`makeTriggersFollower`, `receiver/src/config.mjs`): `current`
+  when the running rules are the file's, `kept` when the file was refused and the last good copy runs. `refusal` says
+  why (`refused` by the loader, `missing`, `unreadable`) and `rejectedAt` when the poller saw it. `running` is the first
+  16 hex of the SHA-256 of the text the running rules came from (`triggersDigest`), `rejected` of the refused text, null
+  when nothing could be read. A current file with a refusal, a refused digest or a refusal time, a kept one without its
+  time, a refused text without its digest and a missing or unreadable file with one are unreadable.
+- The content rule is the host registry's (`INT-HOST-REGISTRY-CONTRACT`): names, integers, digests and closed words. The
+  loader's refusal reason names the file's path, so it never enters the record; a reader that needs it judges its own
+  copy of the file and compares digests.
+
+The beats are the poll loop's own, and it arms no timer for them (the loop's `done` contract, `DES-GH-POLLING-TRANSPORT`):
+one after `poller_started` and one at the top of each cycle after the triggers follow, each with `ttlMs`
+`POLLER_GRACE_MS` (5 minutes) and `nextAt` null; and one before each wait, after the cursor renewal, with `ttlMs` the
+wait plus the grace (at most the bound) and `nextAt` the wait's end, so a rate-limit sleep of up to an hour reads as a
+poller that runs. A beat SETs with PX, SADDs, and checks and prunes one page of the index with the receiver's script
+(`pruneLiveIndex`). A stop deletes the record and its index entry (DEL, SREM) before the poller's connections close.
+Each write is awaited like the loop's own cursor writes, so it adds no wait theirs do not have; a failure logs one
+`poller_status_unavailable` with a fixed reason (`record`, `write`, `index`, `remove`) per failure streak, never an
+error's text, and changes nothing else. A poller of an earlier release publishes none.
+
+`readPollerStatus` is the receiver's bounded indexed read (`readIndexedRecords`): at most four SSCAN pages and 256
+names, 64 records, two seconds for the discovery and the record commands together. A record's age is its `ttlMs` minus
+its PTTL, Valkey's own count, so no two clocks are compared. A record that is not version 1, names another host, has no
+expiry or a PTTL above its own `ttlMs` is unreadable; that, an unfinished discovery and a failed or late record read make
+`complete` false. A key that expired between the reads is absent. No reader invents a poller, or its absence, from an
+incomplete read.
+
+The readers:
+- `pi-dispatch status` adds `pollers: { expected, hosts, complete, note?, local? }` beside `consumers`
+  (`readPollerFacts`). `expected` is `GITHUB_INGEST` read as `run --trigger` reads its settings (this shell, else
+  `./.env`, refused where they disagree): true for `poll` and `both`, false for `webhook`, null when unset; a poller on
+  any host satisfies it. `hosts` and `complete` are the read. `note` holds the sentences: a poller that keeps an older
+  copy because it refused a text whose digest is this host's file's says "poller: running on the previous triggers.json,
+  the current file is invalid: <reason>", the reason being `pi-dispatch triggers check`'s judgement of this host's file
+  (`judgeDeploymentTriggers`); another digest says the refused copy is not this host's file; a missing or unreadable
+  file says so; a current poller whose digest is not this host's file's says when it reads its file again; and a
+  deployment that polls, with no heartbeat over a complete read, says no poller has published one (a poller older than
+  this release publishes none), with the reason a poller would refuse this host's file at its start when one does.
+  `local` names what of this host's half could not be judged, never a value. The file is judged only where a poller is
+  expected or seen. `status` still exits 0.
+- Connections reads the records within its publication guard and draws a second line under GitHub's polling: each
+  poller's host and beat age; "on an older triggers file" in the attention tone, with the command for an operator who
+  may act and a sentence for anyone else; "no poller reported" over a complete read and "poller not known" over an
+  incomplete one, both only while polling is on. A kept file adds the page's last problem, "The poller runs on an older
+  triggers file". A view read without the records draws none of it, and `dispatch_connections` carries none of it.
+
+**Acceptance**: worker/test/poller-status.test.mjs (the rebuild, hostile and disagreeing fields, the TTL bound, the
+reader's age and unknowns, a timeout on an injected clock, the writer's failure streak, removal and identity, the writer
+and the reader against a real Valkey); receiver/test/poller.test.mjs (the beats and their TTLs, the record gone after a stop, an invalid edit
+to kept and back, a rate-limited wait covered, a failing write said once per streak while the cycles go on, a refused
+name); worker/test/cli-control.test.mjs (the kept sentence with this host's reason, the other copies, no poller published
+with the local refusal, an incomplete read, a disagreeing setting, exit 0); admin/test/connections-poller.test.mjs and
+connections-publications.test.mjs; worker/test/backup-doc.test.mjs (`poller:*`).
 
 ## INT-HOOK-RUNS-KEY
 
@@ -14866,6 +14956,7 @@ and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` are UNCHANGED, checked: no file shape, wr
 
 | Date | Change |
 |---|---|
+| 2026-11-21 (#970) | **NEW `INT-POLLER-STATUS-KEY`**, after `INT-RECEIVER-STATUS-KEY`: the poller's heartbeat, `poller:live` and `poller:h:<name>`, a display that `pi-dispatch status` and Connections read and that admits, routes, authenticates and doctors nothing, so deleting `poller:*` changes no polling. A version 1 JSON record of names, integers, 16-hex digests and closed words, rebuilt by field name with a 4 KiB bound: the receiver package's version, start and beat instants, the TTL it was set with, the next cycle's start, the interval, a repository count, the follower's `current` or `kept` with `refused`, `missing` or `unreadable`, and the digests of the running and the refused text, never the refusal reason (it names the file's path). Written at the poll loop's own points, with no timer of its own: after its start line and at each cycle's top with a five-minute TTL, and before each wait with the wait plus that grace, so a rate-limit sleep reads as a poller that runs; deleted at a stop; a failed write said once per streak. Read by the receiver's bounded indexed read, aged by Valkey's own count (`ttlMs` minus PTTL). `status` gains `pollers` with `expected` from `GITHUB_INGEST`, and says "poller: running on the previous triggers.json, the current file is invalid: <reason>" when the refused digest is this host's file's, with the reason from `pi-dispatch triggers check`'s judgement of it, and that no poller has published one where the deployment polls, with the reason a poller would refuse this host's file at its start; Connections draws a line under GitHub's polling and a last problem for a kept file. Rejected and recorded in `DES-GH-POLLING-TRANSPORT`: the receiver's keys, a timer, a fixed TTL and the reason in Valkey. **`INT-RECEIVER-STATUS-KEY` AMENDED**: "Polling publishes none" points to the new entry and says why it has keys of its own; the check-and-prune and the bounded read are exported (`pruneLiveIndex`, `readIndexedRecords`) and shared with the heartbeat, with their bounds, version, fields and every reader's result unchanged. **`INT-HOST-REGISTRY-CONTRACT` UNCHANGED, checked**: its content rule is the one the new record follows; no row, field or TTL moved. **`INT-TRIGGERS-FILE-CONTRACT` UNCHANGED, checked**: nothing is added to the file or to its loader; the record reports the follower's state as #947 made it. **Code evidence**: worker/src/poller-status.mjs -> POLLER_LIVE, pollerKey, POLLER_GRACE_MS, POLLER_TTL_MAX_MS, parsePollerStatus, makePollerBeat, readPollerStatus, triggersDigest; worker/src/receiver-status.mjs -> pruneLiveIndex, readIndexedRecords, readReceiverStatus; worker/src/poller-facts.mjs -> readPollerFacts; worker/src/triggers-cli.mjs -> judgeDeploymentTriggers; worker/src/cli.mjs (status); receiver/src/poller.mjs -> startPoller, followerFacts; receiver/src/version.mjs -> RECEIVER_VERSION; admin/src/connections-view.mjs -> readConnections, connectionsProblems; admin/src/console/panels/connections.mjs -> pollerLine, polling. |
 | 2026-11-21 (#968) | **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**, its random pool paragraph: a pool may mix billing classes; the loader accepts it as before, and the worker judges a mixed pool's trigger cap at pickup (`auth-route-unbounded`). **`INT-MODEL-SELECTION-STATE` AMENDED**: `billing` is the drawn candidate's own class; an `api` choice is never made `quota-reselectable`, and a reselection commits only within the stored class. Its key, fields and version 1 UNCHANGED, checked. **`INT-AUTH-CONNECTIONS-FILE-CONTRACT` AMENDED**: the mixed-route refusal is one attempt's; a random pool is classified per candidate, a broken binding included, and a row's `extraUsageCreditMicros` below a mixed pool's cap refuses that row's draws. The file's shape UNCHANGED, checked. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: the record carries no billing field and its reason enum gains no token. The trigger file and job-data versions UNCHANGED, checked: no field or value is added. **Code evidence**: worker/src/model-selection.mjs -> selectRandomModelJob; worker/src/subscription-runtime.mjs -> inspectPolicy, auxiliaryRoute; worker/src/model-selection-state.mjs -> allowModelSelectionQuotaReselection; worker/src/doctor.mjs -> mixedBillingPoolChecks. |
 | 2026-11-21 (#967) | **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**, the pre-spend `secret-name-reserved` clause: the provider's own API-key variable in `run.secrets` is the job's declared credential rather than a reserved name, under the conditions `declaredProviderKey` holds (not a `run.secretFiles` key, not a `PI_FORWARD_ENV` name, no decision job, no host-authenticated provider, no subscription binding here), with the pickup gate, the candidate gate, the resolver's lifted name and the re-check after the resolver (a non-empty value that is not a subscription token, by pi's own `isOAuthTokenValue`), and why this is not issue #309's silent replacement. **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**: a third credential source, the declared run secret, handed to `buildContainerEnv` as `mainCredential`; it replaces the environment and `auth.json` for its provider, every other variable pi reads for the provider is deleted after both loops, and a wrong name, an empty value, a subscription token or a subscription snapshot refuses. UNCHANGED, checked: `INT-RUN-HISTORY-FILE-CONTRACT` (no field and no reason token added; the record still carries `outcome: "policy"` with `provider-unconfigured` or `secret-name-reserved`), the job data and the triggers file versions (no field added: `mainCredential` is a host-decided argument, never queue data), `INT-SANDBOX-CONTRACT` (a sandbox carries no secret), the bundle reserved set (`secret-bundles.mjs` unchanged). **Code evidence**: worker/src/env-allowlist.mjs -> declaredProviderKey, buildContainerEnv; worker/src/start.mjs -> checkProviderCredential, checkFailoverCandidate; worker/src/processor.mjs -> mainDeclared; worker/src/secrets.mjs -> makeSecretsResolver; worker/src/index.mjs -> boundSecretsResolver; worker/src/run-container.mjs; worker/src/provider-key.mjs -> isOAuthTokenValue. |
 | 2026-11-21 (#970) | **`INT-WATCH-EVENT-CONTRACT` AMENDED and CORRECTED**: a source secret that is unset, empty or only whitespace is judged by one predicate, `watchSecretsMissing`, which the receiver's triggers loader (refusing the whole file, so `serve`, `poll` and `watch` refuse to start and a live reload keeps the running rules), doctor's watch line and `pi-dispatch triggers check` all call; the poller's stand-in for an unset `WEBHOOK_SECRET` is named, as the one case where `serve` and `poll` differ; and the sentence that gave such a secret a 503 is CORRECTED: the handler's 503 is a backstop no started receiver reaches, and only an unavailable store answers 503. Doctor tested presence with `length > 0`, so a blank secret passed it and refused the receiver, read a secret whose name is not one of doctor's own settings from this shell alone, and said push requests answered 503; it now uses the predicate on the secret as the service reads it, and stays a warning. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**, three places: the write protocol bullet says a hand edit is judged before the swap by `pi-dispatch triggers check [file]` with the readers' own code in their order (the shared validator for every reader; where `PI_TRIGGERS_FILE` is set, the worker's start as far as the file reaches it: `loadSchedules` under `triggerLoaderConfig`, each served cron pattern through BullMQ's `defaultRepeatStrategy`, and the file's job paths against the envelope and the private endpoint folders; the receiver's loader: `watchSecretsMissing`, and `WEBHOOK_SECRET` wherever `githubServedByServe` says `serve` serves GitHub, which with `GITHUB_INGEST` and `GITHUB_AUTH_SOURCE` unset is the file's GitHub rules), where its settings come from and its exit codes; doctor's fix for a broken file names that command; and a newer file's fix names the poller with the worker and the receiver. No stored state changes: no file shape, key or job data. **Code evidence**: worker/src/watch-contract.mjs -> watchSecretsMissing; receiver/src/config.mjs -> loadTriggers; worker/src/triggers-check.mjs -> checkTriggersText, triggersCheckSecrets, watchSecretRefusers, TRIGGERS_CHECK_ENV_KEYS; worker/src/triggers-cli.mjs -> runTriggers; worker/src/config.mjs -> triggerLoaderConfig, triggerJobPathConfig, TRIGGER_LOADER_ENV_KEYS, TRIGGER_JOB_PATH_ENV_KEYS; worker/src/envelope.mjs -> envelopeInsideJobPathSentence; worker/src/doctor.mjs -> watchDoctorChecks, the `triggers.file` and `triggers.file-missing` checks; worker/test/triggers-check.test.mjs; worker/test/doctor-watch.test.mjs; worker/test/doctor-store-versions.test.mjs; worker/test/doctor.test.mjs. |

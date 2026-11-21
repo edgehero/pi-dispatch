@@ -61,6 +61,9 @@ export async function consoleConnectionsFixture(now, { problem = null, unread = 
       { name: "build3", at: now - 2000, ageMs: 2000, state: "reported", endpointsMore: 0, endpoints: [{ id: "vllm-build3", slots: 4, used: 0, fleet: 1 }] },
     ] }),
     receivers: async () => ({ hosts: [receiverFixture(now)], complete: true, more: 0 }),
+    // No poller heartbeat read (issue #970): a source that answers nothing leaves the view without one, so the goldens draw
+    // GitHub's polling cell as before. admin/test/connections-poller.test.mjs holds the poller's words in each state.
+    pollers: async () => undefined,
     hookRuns: async () => ({ partial: false, more: 0, hosts: [] }),
   };
   reads.providerInventory = {

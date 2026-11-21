@@ -10,6 +10,8 @@ import { FORGE_JOB_RETENTION_S } from "@edgehero/pi-dispatch/retention";
 import { TRIGGERS_FILE_VERSION, parseTriggers } from "@edgehero/pi-dispatch/triggers";
 import { makeCheckMergePolicy, mergePolicyDigest } from "@edgehero/pi-dispatch/merge-policy";
 import { enqueueGitHubJob } from "@edgehero/pi-dispatch/queue";
+import { POLLER_GRACE_MS, POLLER_LIVE, parsePollerStatus, pollerKey, triggersDigest } from "@edgehero/pi-dispatch/poller-status";
+import { RECEIVER_VERSION } from "../src/version.mjs";
 
 // Issue #464 (gate round 3): never this host's Valkey. Every start here is judged as answering, unless a test judges it.
 const startPoller = (env, deps = {}) => startPollerReal(env, { judgeValkey: async () => {}, ...deps });
@@ -120,12 +122,18 @@ function fakeFetch(routes) {
  * a TTL counts down as the poller sleeps, the way Valkey's does (issue #880's check reads that remainder). `setTtl`
  * and `clearTtl` seed and remove one, and a plain SET clears it, as in Valkey. Keys are not evicted when their TTL
  * runs out: no test here waits 35 days. `ttlFailures` makes the first n TTL reads answer a Valkey error reply.
+ *
+ * The heartbeat (issue #970) needs a SET with PX (`ttls` then holds seconds, as for EX), a SET answering "OK" as
+ * Valkey's does, the index's SADD, SREM and SSCAN (`sets`), and the one script it runs, the index prune, which removes
+ * a member whose record key is absent. `dels` holds the cursor family's DELs only (issue #880's "one DEL, of the whole
+ * family"); the heartbeat's own go to `statusDels`.
  */
 function fakeRedis({ ttlFailures = 0, clock = { ms: NOW } } = {}) {
 	const kv = new Map();
 	const hashes = new Map();
 	const ttls = new Map();
 	const expiresAt = new Map();
+	const sets = new Map();
 	let failuresLeft = ttlFailures;
 	const setTtl = (key, ttl) => {
 		ttls.set(key, ttl);
@@ -139,8 +147,10 @@ function fakeRedis({ ttlFailures = 0, clock = { ms: NOW } } = {}) {
 		kv,
 		hashes,
 		ttls,
+		sets,
 		ttlReads: [],
 		dels: [],
+		statusDels: [],
 		setTtl,
 		clearTtl,
 		async get(key) {
@@ -149,7 +159,35 @@ function fakeRedis({ ttlFailures = 0, clock = { ms: NOW } } = {}) {
 		async set(key, value, ex, ttl) {
 			kv.set(key, String(value));
 			if (ex === "EX") setTtl(key, ttl);
+			else if (ex === "PX") setTtl(key, ttl / 1000);
 			else clearTtl(key);
+			return "OK";
+		},
+		async sadd(key, ...members) {
+			if (!sets.has(key)) sets.set(key, new Set());
+			let added = 0;
+			for (const m of members) if (!sets.get(key).has(String(m))) (sets.get(key).add(String(m)), added++);
+			return added;
+		},
+		async srem(key, ...members) {
+			let removed = 0;
+			for (const m of members) if (sets.get(key)?.delete(String(m))) removed++;
+			return removed;
+		},
+		// One page holds the whole set: the cursor always comes back "0".
+		async sscan(key) {
+			return ["0", [...(sets.get(key) ?? [])]];
+		},
+		// The index prune's script (receiver-status.mjs, pruneLiveIndex): KEYS[1] the index, KEYS[2..] the members' record
+		// keys, ARGV the members; a member whose record key is absent leaves the index.
+		async eval(_script, numKeys, ...args) {
+			const [index, ...recordKeys] = args.slice(0, numKeys);
+			const members = args.slice(numKeys);
+			let removed = 0;
+			recordKeys.forEach((k, i) => {
+				if (!kv.has(k) && !hashes.has(k) && sets.get(index)?.delete(String(members[i]))) removed++;
+			});
+			return removed;
 		},
 		async hgetall(key) {
 			return Object.fromEntries(hashes.get(key) ?? []);
@@ -179,7 +217,7 @@ function fakeRedis({ ttlFailures = 0, clock = { ms: NOW } } = {}) {
 		},
 		// Valkey's DEL: any number of keys, answering how many existed.
 		async del(...keys) {
-			this.dels.push(keys);
+			(keys.every((key) => String(key).startsWith("poller:")) ? this.statusDels : this.dels).push(keys);
 			let removed = 0;
 			for (const key of keys) {
 				const existed = kv.has(key) || hashes.has(key);
@@ -2310,4 +2348,132 @@ test("the poller judges VALKEY_URL before building its own Valkey clients, and a
 	poller.stop();
 	await poller.done.catch(() => {});
 	assert.equal(judged, 0);
+});
+
+// ---------------------------------------------------------------------------------------------------
+// The heartbeat (issue #970): what `pi-dispatch status` and Connections read of a running poller
+// ---------------------------------------------------------------------------------------------------
+
+const STATUS_ENV = { POLL_REPOS: "o/r", PI_WORKER_NAME: "mini1" };
+
+/** Each heartbeat SET as it lands, with the mode and TTL it was given and the record parsed as a reader parses it. */
+function recordingStatus(redis) {
+	const beats = [];
+	const set = redis.set.bind(redis);
+	redis.set = async (key, value, mode, ttl) => {
+		if (String(key).startsWith("poller:h:")) beats.push({ key, raw: value, record: parsePollerStatus(value), mode, ttl });
+		return set(key, value, mode, ttl);
+	};
+	return beats;
+}
+
+test("the poller beats after its start, at each cycle's top and before each wait, and its record goes when it stops (issue #970)", async () => {
+	const clock = { ms: NOW };
+	const redis = fakeRedis({ clock });
+	const beats = recordingStatus(redis);
+	const { out, sleeps } = await runPoller({ env: STATUS_ENV, cycles: 2, clock, redis, routes: EMPTY_POLL_ROUTES() });
+	assertNoRepoFailure(out);
+	assert.deepEqual(lines(out, "poller_status_unavailable"), [], "every beat landed");
+	assert.deepEqual(sleeps, [60_000, 60_000]);
+	assert.ok(beats.every((b) => b.key === pollerKey("mini1") && b.record !== null), "one record, under the poller's own name, and readable");
+	// The start's beat and each cycle's top carry the grace; the beat before each wait carries the wait plus the grace,
+	// and says when the next cycle starts.
+	assert.deepEqual(beats.map((b) => [b.mode, b.ttl, b.record.ttlMs, b.record.nextAt]), [
+		["PX", POLLER_GRACE_MS, POLLER_GRACE_MS, null],
+		["PX", POLLER_GRACE_MS, POLLER_GRACE_MS, null],
+		["PX", 60_000 + POLLER_GRACE_MS, 60_000 + POLLER_GRACE_MS, NOW + 60_000],
+		["PX", POLLER_GRACE_MS, POLLER_GRACE_MS, null],
+		["PX", 60_000 + POLLER_GRACE_MS, 60_000 + POLLER_GRACE_MS, NOW + 120_000],
+	]);
+	assert.deepEqual(beats[2].record, { v: 1, name: "mini1", version: RECEIVER_VERSION, startedAt: NOW, at: NOW, ttlMs: 60_000 + POLLER_GRACE_MS, nextAt: NOW + 60_000, intervalSeconds: 60, repos: 1, triggers: "current", refusal: null, running: triggersDigest(TRIGGERS_JSON), rejected: null, rejectedAt: null });
+	assert.equal(lines(out, "poller_started").length, 1);
+	// Stopped: the record and its index entry are gone at once, not after the TTL.
+	assert.equal(redis.kv.has(pollerKey("mini1")), false);
+	assert.equal(redis.sets.get(POLLER_LIVE)?.has("mini1"), false);
+	assert.deepEqual(redis.statusDels, [[pollerKey("mini1")]]);
+});
+
+test("an invalid edit makes the record say kept, with the refused text's digest and never its reason, and the file back says current (issue #970)", async () => {
+	const good = followText();
+	const bad = followText(PROBE_CRON);
+	const file = liveFile(good);
+	const clock = { ms: NOW };
+	const redis = fakeRedis({ clock });
+	const beats = recordingStatus(redis);
+	const { out } = await runPoller({
+		env: STATUS_ENV,
+		cycles: 4,
+		clock,
+		redis,
+		fsDeps: file.deps,
+		routes: labelRoutes(ghResponse(200, [EV100])),
+		nap: (ms, n) => {
+			if (n === 1) file.text = bad;
+			if (n === 2) file.text = null;
+			if (n === 3) file.text = good;
+			return ms;
+		},
+	});
+	assertNoRepoFailure(out);
+	assert.equal(lines(out, "triggers_reload_invalid").length, 2, "the refused text and the missing file, each said once");
+	// Each cycle's top: the beat right after the follow.
+	const tops = beats.filter((b) => b.record.nextAt === null).slice(1);
+	assert.deepEqual(tops.map(({ record: r }) => [r.triggers, r.refusal, r.running, r.rejected, r.rejectedAt]), [
+		["current", null, triggersDigest(good), null, null],
+		["kept", "refused", triggersDigest(good), triggersDigest(bad), NOW + 60_000],
+		["kept", "missing", triggersDigest(good), null, NOW + 120_000],
+		["current", null, triggersDigest(good), null, null],
+	]);
+	for (const { raw } of beats) assert.doesNotMatch(raw, /run\.flow|probe|triggers\.json|srv/, "no reason, path or trigger text enters Valkey");
+});
+
+test("a rate-limited cycle's beat outlives its hour of sleep and says when it polls next, where a fixed TTL would read as no poller (issue #970)", async () => {
+	const reset = NOW / 1000 + 3600;
+	const clock = { ms: NOW };
+	const redis = fakeRedis({ clock });
+	const beats = recordingStatus(redis);
+	const { out, sleeps } = await runPoller({
+		env: STATUS_ENV,
+		clock,
+		redis,
+		routes: [{ path: "/repos/o/r/issues/events", replies: [ghResponse(403, { message: "rate limited" }, { "x-ratelimit-remaining": "0", "x-ratelimit-reset": String(reset) })] }],
+	});
+	assert.equal(lines(out, "poll_rate_limited").length, 1);
+	const [wait] = sleeps;
+	assert.equal(wait, 3_600_000 + 15_500, "an hour to the reset, and the jitter");
+	const before = beats.at(-1).record;
+	assert.equal(before.nextAt, NOW + wait);
+	assert.equal(before.ttlMs, wait + POLLER_GRACE_MS, "the record outlives the whole sleep by the grace");
+	assert.ok(beats[0].record.ttlMs < wait, "the grace alone would have expired during it");
+});
+
+test("a heartbeat write that fails is said once per failure streak, without its error, while the cycles go on as before (issue #970)", async () => {
+	const clock = { ms: NOW };
+	const redis = fakeRedis({ clock });
+	const set = redis.set.bind(redis);
+	let writes = 0;
+	redis.set = async (key, ...rest) => {
+		// Every heartbeat write fails but the sixth (the third cycle's top): two streaks, the second one write long.
+		if (String(key).startsWith("poller:h:") && ++writes !== 6) throw new Error("READONLY You can't write against a read only replica PRIVATE_DETAIL");
+		return set(key, ...rest);
+	};
+	const { out, queued } = await runPoller({ env: STATUS_ENV, cycles: 3, clock, redis, routes: scenarioRoutes() });
+	assertNoRepoFailure(out);
+	assert.equal(writes, 7, "the start's beat, and three cycles of two");
+	assert.deepEqual(lines(out, "poller_status_unavailable"), [{ event: "poller_status_unavailable", reason: "write" }, { event: "poller_status_unavailable", reason: "write" }], "one line per streak, a fixed reason");
+	assert.doesNotMatch(JSON.stringify(out), /PRIVATE_DETAIL|READONLY/);
+	assert.equal(lines(out, "poll_cycle").length, 3);
+	assert.equal(queued.length, 6, "the scenario's six jobs, as with no heartbeat at all");
+});
+
+test("a PI_WORKER_NAME a worker would refuse publishes no heartbeat, says so once, and polls (issue #970)", async () => {
+	const clock = { ms: NOW };
+	const redis = fakeRedis({ clock });
+	const beats = recordingStatus(redis);
+	const { out, queued } = await runPoller({ env: { POLL_REPOS: "o/r", PI_WORKER_NAME: "no spaces allowed" }, cycles: 3, clock, redis, routes: scenarioRoutes() });
+	assertNoRepoFailure(out);
+	assert.deepEqual(beats, []);
+	assert.deepEqual(lines(out, "poller_status_unavailable"), [{ event: "poller_status_unavailable", reason: "identity" }]);
+	assert.equal(queued.length, 6);
+	assert.equal(redis.sets.has(POLLER_LIVE), false);
 });
