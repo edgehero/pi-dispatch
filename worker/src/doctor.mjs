@@ -70,7 +70,7 @@ import { EMPTY_PROJECTS_FINGERPRINT, escapeControls, loadProjects, projectOf, pr
 import { parseModelsJson, stripBom, stripJsonComments } from "./models-json.mjs";
 import { FIRST_CALL_MIN_CONTEXT_BYTES, FIRST_CALL_OVERHEAD_TOKENS, boundModelOf, firstCallFloorMicros, isTransientOverlayRead, overlayProviderProblem, serviceTierMultiplier } from "./model-catalog.mjs";
 import { EMPTY_USD_FINGERPRINT, usdFingerprint } from "./dollar-fingerprint.mjs";
-import { splitModelEntry } from "./model-ref.mjs";
+import { failoverListUsable, providerIdProblem, splitModelEntry } from "./model-ref.mjs";
 import { resolveConfiguredModelRuns as resolveDoctorModelRuns, cooldownModelRefs, RADIUS_COST_CAP_LABEL, RADIUS_COST_CAP_FIX } from "./model-observation.mjs";
 import { ignoredOutputCapModels, outputCapView, outputUnboundable } from "./output-cap.mjs";
 import { GRANT_HELPER_TARGET, PRIVATE_DIR_TARGET, PRIVATE_ENDPOINTS_FILE_NAME, PRIVATE_INCLUDE_TARGET, endpointsOverlap, loadPrivateEndpoints, privateFolderInsideJobPathSentence, privateFoldersInsideJobPaths, renderPrivateInclude } from "./private-endpoints.mjs";
@@ -124,7 +124,7 @@ import { BOOT_REFUSING_JOB_USER_CAUSES, DAEMON_FACTS_TIMEOUT_MS, JOB_USER_FIX, m
 import { mergeSecretProfiles, parseSecretProfiles, servableSecretProfiles } from "./secret-profiles.mjs";
 // The OAuth-suffix rule and the variable it selects live in their own import-free module so the worker
 // can share them: doctor NAMES a variable and env-allowlist WRITES one, and they must never differ.
-import { apiKeyVariable, nonApiKeyKind } from "./provider-key.mjs";
+import { apiKeyVariable, isOAuthTokenValue, nonApiKeyKind } from "./provider-key.mjs";
 import { WORKER_NAME_RE } from "./worker-name.mjs";
 import { parseTriggersDocument, sourceForgeOf, triggersFileVersionFor } from "./triggers.mjs";
 import { jobDataVersionFor } from "./job-data-version.mjs";
@@ -4259,31 +4259,45 @@ export async function collectChecks(shellVars, seams) {
 		// The local-workspace disclosure. Not a failure: a nightly deploy binding a secret is exactly what
 		// this feature is for. But a local job's /workspace IS the folder, read-write and un-cloned, so an
 		// agent that persists a credential to make its next command simpler writes it into a real repository.
-		// Issue #309: a trigger binding a variable pi reads for this deployment's provider. The worker refuses
-		// that pre-spend, and this is the same question asked at setup, which is `REQ-DEPLOYMENT-BOOTSTRAP`'s
-		// own rule applied one field over: the operator should not learn it from a public refusal on a live
-		// delivery. Answerable here only BECAUSE the gate stopped depending on host state -- the presence
-		// filtered version's answer would have changed with the machine doctor happened to run on.
+		// Issue #309: a trigger binding a variable pi reads for its job's provider. The worker refuses that pre-spend,
+		// and this is the same question asked at setup, which is `REQ-DEPLOYMENT-BOOTSTRAP`'s own rule applied one field
+		// over: the operator should not learn it from a public refusal on a live delivery. Answerable here only BECAUSE
+		// the gate stopped depending on host state -- the presence filtered version's answer would have changed with
+		// the machine doctor happened to run on.
 		//
-		// The provider is read the same way the provider-key check reads it, and the candidate list comes from
-		// the same oracle the gate uses, through the same dynamic import: one derivation, or this becomes the
-		// hand-copied table issue #286 was about.
-		// Guarded on the FUNCTION, the way providerKeyCheck guards, not on an `ok` flag: the oracle returns
-		// `{ piProviders, providerKeyCandidates }` or `{ loadError }` and never an `ok`, so a truthiness test on
-		// one would be permanently false and this check would silently never run. It is skipped rather than
-		// failed when pi did not load, because providerKeyCheck above has already reported that as its own ✗
-		// and one root cause should print one line.
-		if (secretNames.length > 0 && oracle?.providerKeyCandidates && envShapeProblem.PI_PROVIDER === null) {
-			const candidates = oracle.providerKeyCandidates(provider);
-			const clashing = secretNames.filter((n) => candidates.includes(n));
-			checks.push({
-				ok: clashing.length === 0,
-				label:
-					clashing.length === 0
-						? `No trigger binds a variable pi reads for ${provider}`
-						: `${clashing.length} trigger secret(s) bind a variable pi reads for ${provider}: ${clashing.join(", ")}`,
-				fix: "rename them in the triggers file: the worker writes this deployment's own credential into those variables, so every job of those triggers refuses pre-spend as secret-name-reserved",
-			});
+		// Issue #967: asked of each provider a trigger's attempts run on as their main one, through `modelSubjects`: its own,
+		// each random candidate's and each fallback's, and of a watch rule's `decide` model's provider, whose variables the
+		// worker keeps reserved for every job of the rule. It used to be asked of PI_PROVIDER alone: a trigger on `openai`
+		// binding ANTHROPIC_API_KEY failed here though the worker runs it, and one on `openrouter` binding OPENROUTER_API_KEY
+		// passed though the worker refused it. The one name the worker now admits, the provider's own API-key variable as the
+		// trigger's declared credential, is judged by the worker's own rule (`declaredProviderKey`) and the subscription
+		// verdict its gate asks first, and is said as a fact line rather than a failure.
+		//
+		// The candidate list comes from the same oracle the gate uses, through the same dynamic import: one derivation,
+		// or this becomes the hand-copied table issue #286 was about. Guarded on the FUNCTIONS, the way providerKeyCheck
+		// guards, not on an `ok` flag: the oracle returns its functions or `{ loadError }` and never an `ok`, so a
+		// truthiness test on one would be permanently false and this check would silently never run. It is skipped
+		// rather than failed when pi did not load, because providerKeyCheck above has already reported that as its own
+		// ✗ and one root cause should print one line. A subject whose provider is a malformed PI_PROVIDER is skipped for
+		// the same reason (issue #673): its shape row is the one line.
+		if (secretNames.length > 0 && typeof oracle?.providerKeyCandidates === "function" && typeof oracle?.declaredProviderKey === "function") {
+			let secretEnvList = null;
+			try { secretEnvList = allowedModelsFrom(env); } catch {}
+			const secretSubjects = modelSubjects({ runs: parseError ? [] : modelRuns, deployment: deploymentSettingsOf(env, settingsFilePath(env, home), fileExists), envList: secretEnvList, modelRoles: triggerModelRoles, projects: modelRoleProjects, fallbacks: true });
+			const managed = new Map();
+			for (const subject of secretSubjects) {
+				if (subject.deployment === true || subject.secretNames.length + subject.secretFileNames.length === 0) continue;
+				for (const subjectProvider of [subject.main.provider, subject.primaryProvider]) {
+					if (typeof subjectProvider !== "string" || managed.has(subjectProvider) || providerIdProblem(subjectProvider) !== null) continue;
+					managed.set(subjectProvider, (await subscriptionCredentials.check(subjectProvider)).managed === true);
+				}
+			}
+			checks.push(...triggerSecretProviderChecks(secretSubjects, {
+				candidatesOf: oracle.providerKeyCandidates,
+				declaredOf: oracle.declaredProviderKey,
+				forwarded: (env.PI_FORWARD_ENV ?? "").split(",").map((name) => name.trim()).filter((name) => name !== ""),
+				managed: (subjectProvider) => managed.get(subjectProvider) === true,
+			}));
 		}
 		// Issue #462: a FACT LINE, not a warning. It is the feature working as chosen and nothing clears it but unbinding the
 		// secrets, so what the operator must know lives in the label: an `ok: true` check never prints a fix line.
@@ -5350,8 +5364,8 @@ function nonNegativeEnvInt(raw, fallback) {
  */
 async function defaultProviderOracle() {
 	try {
-		const { piProviders, providerKeyCandidates } = await import("./env-allowlist.mjs");
-		return { piProviders, providerKeyCandidates };
+		const { declaredProviderKey, piProviders, providerKeyCandidates } = await import("./env-allowlist.mjs");
+		return { declaredProviderKey, piProviders, providerKeyCandidates };
 	} catch (error) {
 		// The error is CARRIED, never swallowed. A missing dependency is the case this seam exists for; a
 		// SyntaxError or a broken export in our OWN module is a defect wearing a missing-dependency costume,
@@ -5534,16 +5548,6 @@ function providerKeyCheck({ provider, env, agentDir, oracle, nodeOk, keyless = n
 		// Issue #481: the names no environment doctor can see supplies, for the caller's env-setup rule; never printed.
 		absent: candidates,
 	};
-}
-
-/**
- * pi's own test for a subscription token in an API-key slot, restated: `isOAuthToken` in
- * pi-ai/dist/api/anthropic-messages.js is `apiKey.includes("sk-ant-oat")`, applied to the value whatever
- * variable carried it. Restricted to `anthropic`, the provider whose credential this is; the value itself is
- * never printed.
- */
-function isOAuthTokenValue(provider, value) {
-	return provider === "anthropic" && typeof value === "string" && value.includes("sk-ant-oat");
 }
 
 /**
@@ -6641,12 +6645,19 @@ export { resolveConfiguredModelRuns as resolveDoctorModelRuns } from "./model-ob
  * Who runs on which models under which cap (issues #501 and #502), as the worker resolves a job: the deployment's own
  * default, then every trigger. `deployment` is `{ provider, model, maxCostUsd }` (overlay over env,
  * `deploymentSettingsOf`); `runs` the trigger facts; `envList` the parsed `PI_ALLOWED_MODELS`, or null. Each subject
- * is `{ label, main, list, cap, secretNames, named }`: `main` and `list` are `{ provider, id }`, `list` is the
- * trigger's `run.models` or else the env list, `cap` the effective per-job cap in micro-dollars (the smaller of the
- * trigger's and the deployment's, `effectiveCostCapMicros`) or null, and `named` says the trigger names a provider, a
- * model or a list of its own.
+ * is `{ label, main, list, cap, secretNames, secretFileNames, decisionJob, named }`: `main` and `list` are
+ * `{ provider, id }`, `list` is the trigger's `run.models` or else the env list, `cap` the effective per-job cap in
+ * micro-dollars (the smaller of the trigger's and the deployment's, `effectiveCostCapMicros`) or null, `secretNames` and
+ * `secretFileNames` the names `run.secrets` and `run.secretFiles` bind, `decisionJob` whether the trigger's jobs are
+ * watch jobs (and `decisionModel` a watch rule's `decide` model, or null), and `named` says the trigger names a
+ * provider, a model or a list of its own.
+ *
+ * `fallbacks` (issue #967) adds one subject per distinct `run.fallbackModels` ref, after its trigger's own, marked
+ * `fallback: true` with the trigger's `primaryProvider`, when the job's list admits the whole failover list (as the
+ * worker's walk requires): a failover attempt runs on that ref as its main model, so its provider's credential rules
+ * are that attempt's. Off by default, because the other lines judge a fallback through the list already.
  */
-export function modelSubjects({ runs = [], deployment, envList = null, modelRoles = {}, projects = [] }) {
+export function modelSubjects({ runs = [], deployment, envList = null, modelRoles = {}, projects = [], fallbacks = false }) {
 	const listOf = (list) => (Array.isArray(list) ? list.map(splitModelEntry).filter((ref) => ref !== null).map((ref) => ({ provider: ref.provider, id: ref.model })) : []);
 	const capOf = (triggerValue) => {
 		try {
@@ -6655,22 +6666,37 @@ export function modelSubjects({ runs = [], deployment, envList = null, modelRole
 			return null; // a deployment cap that does not parse is `dollarChecks`' line
 		}
 	};
-	const subjects = [{ label: "the deployment default", main: { provider: deployment.provider, id: deployment.model }, list: listOf(envList), cap: capOf(undefined), secretNames: [], named: false, deployment: true }];
+	const subjects = [{ label: "the deployment default", main: { provider: deployment.provider, id: deployment.model }, list: listOf(envList), cap: capOf(undefined), secretNames: [], secretFileNames: [], decisionJob: false, decisionModel: null, named: false, deployment: true }];
 	for (const run of resolveDoctorModelRuns({ runs, deployment, envList, modelRoles, projects }).runs) {
 		if (run.modelSelection) {
 			// Authorization was checked separately by resolveDoctorModelRuns. Each possible execution is a
 			// singleton: unrelated allowed providers need no forwarded credential and cannot widen its cost bound.
-			for (const ref of listOf(run.modelSelection.candidates)) subjects.push({ label: `${run.label} (random candidate ${ref.provider}/${ref.id})`, main: ref, list: [ref], cap: capOf(run.maxCostUsd), secretNames: run.secretNames ?? [], named: true, random: true });
+			for (const ref of listOf(run.modelSelection.candidates)) subjects.push({ label: `${run.label} (random candidate ${ref.provider}/${ref.id})`, main: ref, list: [ref], cap: capOf(run.maxCostUsd), secretNames: run.secretNames ?? [], secretFileNames: run.secretFileNames ?? [], decisionJob: run.decisionJob === true, decisionModel: run.decisionModel ?? null, named: true, random: true });
 			continue;
 		}
+		const main = { provider: run.provider ?? deployment.provider, id: run.model ?? deployment.model };
+		const shared = { cap: capOf(run.maxCostUsd), secretNames: run.secretNames ?? [], secretFileNames: run.secretFileNames ?? [], decisionJob: run.decisionJob === true, decisionModel: run.decisionModel ?? null };
 		subjects.push({
 			label: run.label,
-			main: { provider: run.provider ?? deployment.provider, id: run.model ?? deployment.model },
+			main,
 			list: listOf(run.models ?? envList),
-			cap: capOf(run.maxCostUsd),
-			secretNames: run.secretNames ?? [],
+			...shared,
 			named: run.provider !== undefined || run.model !== undefined || run.models !== undefined,
 		});
+		if (!fallbacks || run.fallbackModels === undefined) continue;
+		// The worker's own walk (model-failover.mjs `selectFailoverJob`). Its first step is `failoverListUsable`
+		// (model-ref.mjs): a failover list the job's allowed-model list does not wholly admit, or one with no list at all,
+		// refuses every job as model-failover-no-candidate before any attempt, so it adds no subject. Otherwise each
+		// distinct ref after the main one (the walk's `new Set([primary, ...fallbackModels])`) runs as a job whose main
+		// model it is. `primaryProvider` is for the walk's one-way billing fence, which the caller applies.
+		if (!failoverListUsable({ fallbackModels: run.fallbackModels, models: run.models ?? envList })) continue;
+		const seen = new Set([`${main.provider}/${main.id}`]);
+		for (const ref of listOf(run.fallbackModels)) {
+			const key = `${ref.provider}/${ref.id}`;
+			if (seen.has(key)) continue;
+			seen.add(key);
+			subjects.push({ label: `${run.label} (fallback ${key})`, main: ref, list: [ref], ...shared, named: true, fallback: true, primaryProvider: main.provider });
+		}
 	}
 	return subjects;
 }
@@ -6874,6 +6900,71 @@ export function listedProviderCredentialChecks(subjects, { candidatesOf, forward
 			fix: "only the main provider's key is resolved for a job. Bind another provider's key with run.secrets on the trigger, or name it in PI_FORWARD_ENV and set it in .env; or take the provider off the list",
 		},
 	];
+}
+
+/**
+ * The trigger-secret clash lines (issues #309 and #967), one subject at a time: each trigger's job, each random
+ * candidate of its pool and each fallback (`modelSubjects` with `fallbacks`), judged against its OWN main provider. A
+ * name pi reads for that provider (`candidatesOf`, the provider oracle) is a clash the worker refuses pre-spend as
+ * `secret-name-reserved`, unless the worker's own rule admits it as the job's declared credential: `declaredOf` is
+ * `declaredProviderKey`, asked with the subject's names and the deployment's PI_FORWARD_ENV (`forwarded`), and
+ * `managed(provider)` is the subscription verdict the worker's gate asks before it. Every variable of a watch rule's
+ * `decide` model's provider is a clash too. An admitted name is a fact line, since the trigger's own key then replaces
+ * this host's credential for that provider where the subject runs: every job of the trigger, a candidate's draws or a
+ * fallback's failover attempts.
+ *
+ * Subjects with no secret are not judged, nor one whose provider is not a provider id (a malformed PI_PROVIDER the
+ * trigger inherits, whose shape row is the one line), nor a fallback the worker never tries (behind a primary bound to
+ * a subscription, one whose provider is not). Nothing is said when nothing is judged.
+ */
+export function triggerSecretProviderChecks(subjects, { candidatesOf, declaredOf, forwarded = [], managed = () => false }) {
+	const providers = new Set();
+	const clashes = [];
+	const declared = [];
+	for (const s of subjects) {
+		if (s.deployment === true) continue;
+		const secretNames = s.secretNames ?? [];
+		const fileNames = s.secretFileNames ?? [];
+		if (secretNames.length === 0 && fileNames.length === 0) continue;
+		const provider = s.main?.provider;
+		if (typeof provider !== "string" || providerIdProblem(provider) !== null) continue;
+		// The walk's one-way fence (model-failover.mjs `selectFailoverJob`): behind a primary bound to a subscription it
+		// skips every fallback that is not (`auth-mixed-billing`), so no attempt ever runs on it.
+		if (s.fallback === true && managed(s.primaryProvider) && !managed(provider)) continue;
+		providers.add(provider);
+		const candidates = candidatesOf(provider) ?? [];
+		// A watch rule's `decide` model: the worker refuses every variable of its provider in the rule's jobs
+		// (`secondaryCredentialNames`, processor.mjs), whichever provider the investigation runs on.
+		const roleProvider = typeof s.decisionModel === "string" ? splitModelEntry(s.decisionModel)?.provider ?? null : null;
+		const roleNames = roleProvider !== null && providerIdProblem(roleProvider) === null ? candidatesOf(roleProvider) ?? [] : [];
+		if (roleNames.length > 0) providers.add(roleProvider);
+		// The job the worker would judge, with the names only: the rule reads which names are bound where, never a value.
+		const asJob = { provider, secrets: Object.fromEntries(secretNames.map((name) => [name, ""])), secretFiles: Object.fromEntries(fileNames.map((name) => [name, ""])), ...(s.decisionJob === true ? { watch: true } : {}) };
+		const admitted = managed(provider) ? null : declaredOf(asJob, { forwardEnv: forwarded });
+		// Where an admitted key is spent, or a refused one refuses: every job of the trigger, or only the attempts that run
+		// on this subject.
+		const where = s.random === true ? "on its draws" : s.fallback === true ? "on its failover attempts" : "on every job of its trigger";
+		for (const name of [...new Set([...secretNames, ...fileNames])]) {
+			if (roleNames.includes(name)) clashes.push(`${s.label}: ${name} (${printable(roleProvider)}, the watch rule's decide model; refused ${where})`);
+			else if (!candidates.includes(name)) continue;
+			else if (name === admitted) declared.push(`${s.label}: ${name} (${printable(provider)}, ${where})`);
+			else clashes.push(`${s.label}: ${name} (${printable(provider)}; refused ${where})`);
+		}
+	}
+	if (providers.size === 0) return [];
+	const checks = [];
+	if (clashes.length > 0) {
+		checks.push({
+			ok: false,
+			label: `${clashes.length} trigger secret(s) bind a variable pi reads for the provider an attempt runs on, or for a watch rule's decide model: ${clashes.join("; ")}`,
+			fix: "rename them in the triggers file, or bind only the provider's own API-key variable (in run.secrets, not run.secretFiles, not named in PI_FORWARD_ENV, not on a watch rule, on a provider not bound to a subscription here) to make it the job's credential: until then each job, draw or failover attempt named refuses pre-spend as secret-name-reserved",
+		});
+	}
+	if (declared.length > 0) {
+		checks.push({ ok: true, label: `${declared.length} trigger secret(s) are the main provider's own API key, so each replaces this host's credential for that provider: ${declared.join("; ")}` });
+	}
+	if (checks.length === 0) checks.push({ ok: true, label: `No trigger binds a variable pi reads for ${[...providers].sort().map(printable).join(", ")}` });
+	return checks;
 }
 
 /**
@@ -7213,6 +7304,11 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTable
 				...(t.run.modelSelection ? { modelSelection: t.run.modelSelection } : {}),
 				maxCostUsd: t.run.maxCostUsd ?? undefined,
 				secretNames: t.run.secrets !== undefined && t.run.secrets !== null ? Object.keys(t.run.secrets) : [],
+				// Issue #967: the file secret names too, whether the trigger's jobs are watch jobs (an internal decision job,
+				// whose provider key is never a declared credential), and a watch rule's `decide` model, whose provider's
+				// variables every job of the rule keeps reserved, for the trigger-secret clash line.
+				secretFileNames: t.run.secretFiles !== undefined && t.run.secretFiles !== null ? Object.keys(t.run.secretFiles) : [],
+				...(t.on.type === "watch" ? { decisionJob: true, ...(typeof t.decide?.model === "string" ? { decisionModel: t.decide.model } : {}) } : {}),
 			})),
 			// Explicit on the success path too (issue #242): the dead-scope advisory distinguishes
 			// "facts read clean" (path set, no error) from the zeroed `none` -- an implicit undefined

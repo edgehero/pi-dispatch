@@ -33,7 +33,7 @@ import { getBuiltinProviders } from "@earendil-works/pi-ai/providers/all";
 import { codemodeWorkersOf, DEFAULT_JOB_SIZE, jobSizeEnv } from "./job-size.mjs";
 import { egressEnv } from "./egress.mjs";
 import { RECEIVER_ONLY_VARS, forgeSpec } from "./forges.mjs";
-import { apiKeyVariable } from "./provider-key.mjs";
+import { apiKeyVariable, isOAuthTokenValue, needsHostAuthentication, nonApiKeyKind } from "./provider-key.mjs";
 import { isDeterminateFsCode } from "./transient.mjs";
 import { KEYLESS_HOW, keylessVerdict, providerRenameHint, readOverlayModels, RENAMED_PROVIDERS } from "./model-endpoints.mjs";
 import { KEYLESS_ENV_NAME, isPrivateEndpointEnvName, privateEndpointEnvNames } from "./reserved-env.mjs";
@@ -194,6 +194,47 @@ export function resolveProviderCredential({ provider, hostEnv, authFromPi = fals
 		return { [name]: value };
 	}
 	throw configError(`provider ${provider} has no configured credential in the worker environment. Set its key there, or, ${KEYLESS_HOW}.`);
+}
+
+/**
+ * The run secret this job declares as its MAIN provider's credential (issue #967), as a variable name, or null.
+ *
+ * A trigger that binds the variable the worker itself would write for the job's provider (`OPENROUTER_API_KEY` for an
+ * `openrouter` job) asks for that value to BE the job's credential. It wins over the host's key for that provider and
+ * is exclusive: the host is not read, and an empty value refuses rather than falling back. Every gate asks this one
+ * function, so the pickup's credential gate, the candidate gate of a random pool or a fallback, the secret resolver's
+ * reserved set, the container env and doctor cannot disagree about which names count.
+ *
+ * Counted only when every one of these holds, and each refusal keeps today's `secret-name-reserved`:
+ *   - the name is `apiKeyVariable` of the provider's candidates, the one variable the worker writes an API key under.
+ *     Never the OAuth or the bearer variable (`ANTHROPIC_OAUTH_TOKEN`, `ANTHROPIC_AUTH_TOKEN`): pi reads both before
+ *     the API key and sends them as other credentials, so a trigger binding one is still the issue #309 hazard;
+ *   - it is an own key of `run.secrets` and NOT a key of `run.secretFiles` (a file is a path, never the key itself);
+ *   - it is not in PI_FORWARD_ENV, where the operator's own host value claims the same name;
+ *   - the job is not an internal decision job (a watch, an answer draft, a question grouping), whose reviewed fixed
+ *     routes take their credentials from the host alone;
+ *   - the provider is not one that needs host authentication (`HOST_AUTH_PROVIDERS`).
+ * The last condition, that the provider is not bound to a subscription on this host, is the CALLER's: every caller
+ * asks the subscription service first and never reaches this for a managed provider, and the processor asks again
+ * after the resolver. A project secret bundle never counts (secret-bundles.mjs keeps every provider variable
+ * reserved): its names are known only once it is read, and one bundle serves every trigger of a project.
+ *
+ * Pure, and the names come from pi through `providerKeyCandidates`, so no table of providers is kept here.
+ */
+export function declaredProviderKey(job, { forwardEnv = [] } = {}) {
+	if (job?.answerDraft || job?.watch || job?.questionGrouping) return null;
+	const provider = job?.provider;
+	if (typeof provider !== "string" || provider === "" || needsHostAuthentication(provider)) return null;
+	const name = apiKeyVariable(providerKeyCandidates(provider));
+	// `apiKeyVariable` falls back to a provider's first candidate when none is an API key: no provider has that shape
+	// at the pin, and if one appears its token must not become a declared credential by that fallback.
+	if (name === null || nonApiKeyKind(name) !== null) return null;
+	const secrets = job?.secrets;
+	if (secrets === null || typeof secrets !== "object" || !Object.hasOwn(secrets, name)) return null;
+	const files = job?.secretFiles;
+	if (files !== null && typeof files === "object" && Object.hasOwn(files, name)) return null;
+	if (Array.isArray(forwardEnv) && forwardEnv.includes(name)) return null;
+	return name;
 }
 
 /** The value of `PI_DISPATCH_KEYLESS`: fixed and non-secret, since the model server takes no key. */
@@ -375,8 +416,12 @@ function layoutEnv(layout) {
  *
  * `allowGlobalExtensions` defaults to TRUE here, matching loadConfig's default (REQ-GLOBAL-PI-OVERLAY): a
  * caller that says nothing gets the operator's staged setup, and only an explicit `false` withholds it.
+ *
+ * `mainCredential` (issue #967) is the variable name of the run secret the processor admitted as this job's main
+ * credential (`declaredProviderKey`), handed down by run-container as an argument of its own and never read off the job,
+ * so nothing queued can set it. Null keeps the host's credential, as before.
  */
-export function buildContainerEnv({ size = DEFAULT_JOB_SIZE, provider, secondaryProvider = null, model, maxTurns, maxTokens, maxCostMicros = null, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], packageCanaryPath = undefined, forwardEnv = [], secrets = {}, secretFilePaths = {}, sessionFile = null, flow = null, command = null, excludeTools = [], excludeExtensions = [], excludeExtensionTools = [], excludeToolsStrict = false, mcpServers = [], awaitInput = false, approvalGates = null, approvalDecision = null, reportProgress = false, recover = false, recovering = false, steer = false, layout = "mounts", allowedModels = null, auxiliaryModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null, privateEndpoints = [], exitAuth = false, transcriptStderr = false, steerStdin = false, bundleEnvFile = false, observableRunner = false, fork = null, thinkingLevel = null, subscriptionAuth = [], idleMs = null, stallMs = null, credentialRefresh = false }) {
+export function buildContainerEnv({ mainCredential = null, size = DEFAULT_JOB_SIZE, provider, secondaryProvider = null, model, maxTurns, maxTokens, maxCostMicros = null, jobId, githubToken, forgeKind, forgeHosts = {}, hostEnv, allowGlobalExtensions = true, packagePaths = [], packageCanaryPath = undefined, forwardEnv = [], secrets = {}, secretFilePaths = {}, sessionFile = null, flow = null, command = null, excludeTools = [], excludeExtensions = [], excludeExtensionTools = [], excludeToolsStrict = false, mcpServers = [], awaitInput = false, approvalGates = null, approvalDecision = null, reportProgress = false, recover = false, recovering = false, steer = false, layout = "mounts", allowedModels = null, auxiliaryModels = null, authFromPi = false, egress = false, egressProxy, agentDir, home = null, readFile = readFileSync, modelEndpoints = null, privateEndpoints = [], exitAuth = false, transcriptStderr = false, steerStdin = false, bundleEnvFile = false, observableRunner = false, fork = null, thinkingLevel = null, subscriptionAuth = [], idleMs = null, stallMs = null, credentialRefresh = false }) {
 	// The provider credential(s), by pi's expected variable name(s) -- from the worker env, or (when
 	// PI_AUTH_FROM_PI is set and the env has none) host-side from pi's auth.json. Throws (config) if
 	// neither source yields one, which the processor turns into a policy refusal that refunds any reserve
@@ -384,7 +429,20 @@ export function buildContainerEnv({ size = DEFAULT_JOB_SIZE, provider, secondary
 	// `modelEndpoints` is the pickup's snapshot (issue #503): the keyless branch answers `PI_DISPATCH_KEYLESS` in this
 	// map, so the variable is set exactly when the gate passed keyless and is absent on every other job.
 	const selectedAuth = subscriptionAuth.find((entry) => entry.provider === provider);
-	const credEnv = selectedAuth ? selectedAuth.env : resolveProviderCredential({ provider, hostEnv, authFromPi, agentDir, readFile, forwardEnv, modelEndpoints });
+	// Issue #967: a declared run secret IS the credential, exclusively. The host's environment and auth.json are not read
+	// for this provider at all, so a host key can neither stand in for an empty secret nor ride beside it. Asked before
+	// the snapshot so the backstop below is live: the processor never admits a declared key for a provider bound to a
+	// subscription, and a snapshot here would mean two credentials for one provider, which is refused rather than
+	// resolved by whichever this function happened to read first. Every refusal names the variable, never the value.
+	const declaredCredential = () => {
+		if (typeof mainCredential !== "string" || mainCredential !== apiKeyVariable(providerKeyCandidates(provider))) throw configError(`buildContainerEnv: ${JSON.stringify(mainCredential)} is not the variable the worker writes for provider ${provider}`);
+		if (selectedAuth) throw configError(`buildContainerEnv: provider ${provider} is bound to a subscription, so its declared run secret ${mainCredential} cannot be its credential`);
+		const value = secrets !== null && typeof secrets === "object" && Object.hasOwn(secrets, mainCredential) ? secrets[mainCredential] : undefined;
+		if (typeof value !== "string" || value === "") throw configError(`buildContainerEnv: the declared run secret ${mainCredential} has no value, and the host's credential does not stand in for it`);
+		if (isOAuthTokenValue(provider, value)) throw configError(`buildContainerEnv: the declared run secret ${mainCredential} holds a subscription token, not an API key`);
+		return { [mainCredential]: value };
+	};
+	const credEnv = mainCredential !== null ? declaredCredential() : selectedAuth ? selectedAuth.env : resolveProviderCredential({ provider, hostEnv, authFromPi, agentDir, readFile, forwardEnv, modelEndpoints });
 	// A reviewed watch classifier may use another provider. Resolve only that provider, never a blanket key copy.
 	const secondaryAuth = subscriptionAuth.find((entry) => entry.provider === secondaryProvider);
 	const secondaryCredEnv = secondaryAuth ? secondaryAuth.env : secondaryProvider && secondaryProvider !== provider ? resolveProviderCredential({ provider: secondaryProvider, hostEnv, authFromPi, agentDir, readFile, forwardEnv: [], modelEndpoints }) : {};
@@ -559,6 +617,16 @@ export function buildContainerEnv({ size = DEFAULT_JOB_SIZE, provider, secondary
 	for (const [name, value] of Object.entries(secrets ?? {})) {
 		if (secondaryProvider && providerKeyCandidates(secondaryProvider).includes(name)) throw configError(`watch classifier credential variable ${name} is reserved`);
 		if (typeof value === "string" && value !== "") env[name] = value;
+	}
+
+	// Issue #967: the declared credential is the ONLY variable pi reads for this provider. pi takes the bearer and the
+	// OAuth variable before the API key (ANTHROPIC_AUTH_TOKEN, then ANTHROPIC_OAUTH_TOKEN, then ANTHROPIC_API_KEY), so one
+	// forwarded from the host by PI_FORWARD_ENV would silently win over the key the trigger declared. Every other
+	// candidate is removed after both loops, the way the subscription branch below clears its provider, and the declared
+	// value is written last so nothing above can have replaced it.
+	if (mainCredential !== null) {
+		for (const name of providerKeyCandidates(provider)) if (name !== mainCredential) delete env[name];
+		Object.assign(env, credEnv);
 	}
 
 	// An explicit subscription binding is authoritative, including against host API keys and trigger secrets.

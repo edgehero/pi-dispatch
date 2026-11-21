@@ -627,6 +627,18 @@ test("the boot's release judgement: the tested CLI and gateway pass, another rel
 	assert.ok(calls.every((a) => a[0] === "--gateway" && a[1] === "lab"));
 });
 
+test("issue #967: a declared API key is the job's only credential, so the worker's own token does not refuse it on this venue", { skip }, async () => {
+	// The job runs on the trigger's value, which buildContainerEnv writes in place of the host's and the processor judged
+	// (a subscription token is refused there): the host's OAuth token, or a token in its key, is not this job's credential.
+	const declared = { ...JOB, secrets: { ANTHROPIC_API_KEY: "op://ci/a/key" } };
+	for (const hostEnv of [{ ANTHROPIC_OAUTH_TOKEN: "t" }, { ANTHROPIC_API_KEY: "sk-ant-oat01-x" }]) {
+		assert.notEqual((await bundle(fakeOpenshell(), { hostEnv }).observationPreflight(declared)).venueRefused?.reason, "openshell-credential-reads-value", JSON.stringify(Object.keys(hostEnv)));
+		// Without a declaration (here: the name is on PI_FORWARD_ENV, so the host's value claims it) the host is the credential.
+		assert.equal((await bundle(fakeOpenshell(), { hostEnv, forwardEnv: ["ANTHROPIC_API_KEY"] }).observationPreflight(declared)).venueRefused?.reason, "openshell-credential-reads-value");
+		assert.equal((await bundle(fakeOpenshell(), { hostEnv }).observationPreflight(JOB)).venueRefused?.reason, "openshell-credential-reads-value");
+	}
+});
+
 test("a provider that reads its key's value is refused before spend; recover is refused unless the job is local; an untested gateway is refused per job (#684 review)", { skip }, async () => {
 	for (const provider of mod.VALUE_READING_PROVIDERS) {
 		const r = await bundle(fakeOpenshell()).observationPreflight({ ...JOB, provider });

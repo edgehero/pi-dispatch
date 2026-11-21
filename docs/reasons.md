@@ -406,10 +406,14 @@ What to do: check the trigger's model and provider names, or fix the overlay fil
 
 ### provider-unconfigured
 
-The deployment has no usable credential for the job's AI provider. Nothing was spent.
+The deployment has no usable credential for the job's AI provider. Nothing was spent. When the trigger names the
+provider's API-key variable in `run.secrets`, that value is the job's credential and the host's key is not used in
+its place, so this reason then means the value was still missing after the secret resolver ran, or was a
+subscription token (`sk-ant-oat`) in `ANTHROPIC_API_KEY`, which pi would send as a subscription login.
 
-What to do: run `pi-dispatch doctor` on the worker. It names the variable to set. See
-[global-pi-overlay.md](global-pi-overlay.md).
+What to do: run `pi-dispatch doctor` on the worker. It names the variable to set. For a key in `run.secrets`, run the
+resolver by hand against its reference. See [global-pi-overlay.md](global-pi-overlay.md) and
+[secrets.md](secrets.md#the-provider-key-as-a-run-secret).
 
 ### model-failover-no-candidate
 
@@ -1024,8 +1028,16 @@ A secret the job would receive uses a name the deployment already uses for the j
 so one of the two values would be silently lost. The secret comes from the trigger's `run.secrets` or from the
 project's bundle.
 
+One name is allowed: the API-key variable of the job's own provider, in `run.secrets`, which becomes the job's key in
+place of the host's. It is still refused here when it is bound in `run.secretFiles` instead, when it is on
+`PI_FORWARD_ENV`, on a watch rule, from a project's bundle, on a provider that needs host authentication
+(`amazon-bedrock`, `github-copilot`, `google-vertex`, `openai-codex`), or when the provider is bound to a subscription
+on this host (also one bound after the job was picked up). The provider's other variables, such as
+`ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_OAUTH_TOKEN`, are always refused, and so is every variable of a watch rule's
+`decide` model's provider.
+
 What to do: rename the variable in the triggers file, or in the secrets manager. The worker log names it. See
-[secrets.md](secrets.md).
+[secrets.md](secrets.md#the-provider-key-as-a-run-secret).
 
 ### secret-unresolved
 

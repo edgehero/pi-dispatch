@@ -126,7 +126,8 @@ import { PODMAN_BOOT_REFUSING_CAUSES, PODMAN_INFO_TIMEOUT_MS, cachedPodmanInfo, 
 import { makePodmanServiceReader, onceFs, makeRootfulMemory, observeHost, observeRootfulConf, readRootfulService, rootfulConfRefusal, rootfulConfRetries, rootfulUnreadList, runtimeObservationKey } from "./runtime-observations.mjs";
 
 import { makeRunContainer } from "./run-container.mjs";
-import { piProviders, providerKeyCandidates, resolveProviderCredential } from "./env-allowlist.mjs";
+import { declaredProviderKey, piProviders, providerKeyCandidates, resolveProviderCredential } from "./env-allowlist.mjs";
+import { isOAuthTokenValue } from "./provider-key.mjs";
 import { parseAllowlist } from "./egress-allowlist.mjs";
 import { makeMcpCheck, reservedJobNames } from "./mcp-preflight.mjs";
 import { makeSecretsResolver, realExecutable } from "./secrets.mjs";
@@ -3334,7 +3335,26 @@ export async function startWorker(
 						return { ok: false, message: error.message };
 					}
 				};
-				return subscriptions ? subscriptions.auth.check(job.provider).then((checked) => checked.managed ? checked : legacy()) : legacy();
+				// Issue #967: a run secret declaring the main provider's own key is the credential, and the host is not asked.
+				// Before the resolver (`secrets === null`) the declared NAME is the answer, since no value exists yet and the
+				// resolver refuses an empty one on its own (`secret-unresolved`). After it, only a non-empty value passes, and
+				// an empty one refuses: the host's key never stands in for a secret the trigger declared. `declared` rides the
+				// verdict so the processor can hand the name on to the resolver and the container, the only two places that
+				// act on it. Below the managed branch, so a provider bound to a subscription is never declared.
+				// A subscription token in the API-key variable is refused as well, by pi's own value test (`isOAuthTokenValue`):
+				// pi would send it as a subscription login, which the worker refuses from auth.json and at setup and never
+				// spends for an unattended job. The same gate judges an auxiliary provider's declared API-key variable, so a token
+				// there is refused too; an auxiliary provider's OAuth or bearer variable is not this gate's to judge.
+				const unmanaged = () => {
+					const declared = declaredProviderKey(job, { forwardEnv: config.forwardEnv });
+					if (declared === null) return legacy();
+					if (secrets === null) return { ok: true, declared };
+					const value = Object.hasOwn(secrets, declared) ? secrets[declared] : undefined;
+					if (typeof value !== "string" || value === "") return { ok: false, message: `the declared run secret ${declared} has no value for provider ${job.provider}` };
+					if (isOAuthTokenValue(job.provider, value)) return { ok: false, message: `the declared run secret ${declared} holds a subscription token, not an API key, for provider ${job.provider}` };
+					return { ok: true, declared };
+				};
+				return subscriptions ? subscriptions.auth.check(job.provider).then((checked) => checked.managed ? checked : unmanaged()) : unmanaged();
 			},
 			// Issue #502. The model-exists gate: pi's builtin catalog, then the overlay models.json, read at most once per
 			// job and only when a model is not builtin, so the operator's edits apply without a restart. The SAME file
@@ -3349,6 +3369,10 @@ export async function startWorker(
 							const checked = await subscriptions.auth.check(candidate.provider);
 							if (checked.managed) return checked;
 						}
+						// Issue #967: a candidate whose provider key the trigger declares as a run secret is eligible on that
+						// declaration, as the pickup's own gate admits it: the candidate job carries the job's `secrets`, so
+						// a random-pool draw or a fallback on that provider needs no key in the worker's environment.
+						if (declaredProviderKey(candidate, { forwardEnv: config.forwardEnv }) !== null) return { ok: true };
 						try {
 							resolveProviderCredential({ provider: candidate.provider, hostEnv: env, authFromPi: config.authFromPi, forwardEnv: config.forwardEnv, modelEndpoints });
 							return { ok: true };

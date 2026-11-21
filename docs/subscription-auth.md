@@ -60,8 +60,12 @@ Every declared auxiliary route must pass authentication, model, quota and spend 
 starts. An exhausted Claude auxiliary therefore holds an OpenAI-root job too; the dispatcher does not silently
 omit a panel member. API credentials come from the host's configured environment or pi API-key login, or a
 declared `run.secrets` value. A credential available only from a later project-bundle fetch is insufficient for
-this free preflight. The console preserves the field, but its model-callable tools cannot author this grant.
-Upgrade workers, receivers and consoles before adding it; see [upgrading](upgrading.md).
+this free preflight. The same `run.secrets` value can be the main model's credential when the job's own provider
+is an API-key provider ([the provider key as a run secret](secrets.md#the-provider-key-as-a-run-secret)); a
+provider bound to a connection here never takes one, and a trigger that binds a bound provider's API-key variable
+is refused as `secret-name-reserved`. A subscription token in a declared `ANTHROPIC_API_KEY`, for the main model or
+an auxiliary one, is refused as `provider-unconfigured`. The console preserves the field, but its model-callable
+tools cannot author this grant. Upgrade workers, receivers and consoles before adding it; see [upgrading](upgrading.md).
 
 Run management commands in a terminal on the owning host, with the same deployment environment as the worker:
 

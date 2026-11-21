@@ -487,17 +487,17 @@ A worker detects a producer that dropped `run.secretFiles` as `trigger-skew` whe
    An agent handed a credential often persists it to make its next command simpler, and on a local job that
    `.env` lands in your real repository. Nothing scans for it. `pi-dispatch doctor` warns when a local
    trigger binds secrets; keep those folders out of anything you push.
-4. **You cannot bind your provider's own credential variable.** The worker writes the provider key into
-   the container before it writes your secrets, so a trigger naming
-   `ANTHROPIC_API_KEY` (or `GEMINI_API_KEY` for `google`, or whichever variable pi reads for the provider
-   the job runs on) would replace the operator's credential with the trigger's, on every job of that
-   trigger. It is refused before anything spends, as `secret-name-reserved`, and the refusal names the
-   variable. This covers every variable pi reads for that provider whether or not it is set on the host. For
-   `anthropic`, the only provider at the pinned pi with more than one, that includes
-   `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_OAUTH_TOKEN`, which pi reads before the API key. The names on your
-   `PI_FORWARD_ENV` list are
-   reserved the same way, for the same reason. Another provider's *key* variable is fine: an `anthropic` job
-   may bind `OPENAI_API_KEY` for a flow that talks to OpenAI itself.
+4. **Your provider's own variables are reserved, with one exception.** A trigger naming a variable pi reads
+   for the provider the job runs on would put a second credential beside the one the worker writes, so it is
+   refused before anything spends, as `secret-name-reserved`, and the refusal names the variable. This covers
+   every variable pi reads for that provider whether or not it is set on the host. For `anthropic`, the only
+   provider at the pinned pi with more than one, that includes `ANTHROPIC_AUTH_TOKEN` and
+   `ANTHROPIC_OAUTH_TOKEN`, which pi reads before the API key. The names on your `PI_FORWARD_ENV` list are
+   reserved the same way, for the same reason. The exception is the provider's API-key variable itself
+   (`ANTHROPIC_API_KEY`, `OPENROUTER_API_KEY`, `GEMINI_API_KEY` for `google`): bound in `run.secrets`, it is
+   the job's credential, in place of this host's ([below](#the-provider-key-as-a-run-secret)). Another
+   provider's *key* variable is fine: an `anthropic` job may bind `OPENAI_API_KEY` for a flow that talks to
+   OpenAI itself.
 5. **You cannot bind a variable that steers a provider either, whichever provider it belongs to.** The
    refusal above is about whose key pays; this one is about where the request goes. A trigger binding
    `AZURE_OPENAI_BASE_URL` sends the job's provider request to a host of its choosing **with your
@@ -549,6 +549,62 @@ A worker detects a producer that dropped `run.secretFiles` as `trigger-skew` whe
    feature is built to refuse. A stale admin fails the other way, visibly, refusing every trigger write
    while the file holds a `run.secrets` entry. Upgrade the receiver in the same `npm install` as the
    worker, before you bind the first secret ([the order](upgrading.md#the-order)).
+
+### The provider key as a run secret
+
+A deployment that keeps every provider key in its secret store, and none in the worker's environment, can still
+run jobs on an API-key provider: the trigger binds the provider's API-key variable in `run.secrets`, and that
+value is the job's credential.
+
+```json
+{
+  "on": { "type": "cron", "id": "nightly-review", "pattern": "0 3 * * *" },
+  "run": {
+    "kind": "local", "folder": "/srv/site", "task": "Review yesterday's changes.",
+    "provider": "openrouter", "model": "deepseek/deepseek-chat",
+    "models": ["openrouter/deepseek/deepseek-chat"],
+    "secretsProfile": "prod",
+    "secrets": { "OPENROUTER_API_KEY": "op://ci/openrouter/key" }
+  }
+}
+```
+
+In detail:
+
+- **The trigger's key wins, and it is the only one.** For that provider the worker reads no key from its own
+  environment and none from pi's `auth.json`. The container gets the trigger's value and no other variable pi
+  reads for the provider: a forwarded `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_OAUTH_TOKEN`, which pi would take
+  first, is removed.
+- **No fallback.** A resolver that prints nothing refuses the job as `secret-unresolved`, and a value that is
+  still missing after the resolver refuses it as `provider-unconfigured`. A key on the host never stands in.
+- **An API key, never a subscription token.** A Claude subscription token (it starts `sk-ant-oat`) in
+  `ANTHROPIC_API_KEY` is refused as `provider-unconfigured`, for the main model and for an auxiliary one: pi would send
+  it as a subscription login, and an unattended job is never given one.
+- **The same holds for a model the job may switch to.** A random `modelSelection` candidate or a fallback on
+  that provider is eligible with the key only in `run.secrets`, and an auxiliary model on it already took its key
+  from there.
+- **Only the API-key variable counts**, and only when all of these hold:
+  - it is in `run.secrets`, not `run.secretFiles` (a file secret's variable is a path, never the key);
+  - it is not on `PI_FORWARD_ENV`;
+  - the trigger is not a watch rule (watch jobs, answer drafts and question groupings keep this host's
+    credential, and a watch rule's `decide` model keeps every variable of its provider reserved);
+  - the provider is not one that needs host authentication (`amazon-bedrock`, `github-copilot`, `google-vertex`,
+    `openai-codex`);
+  - the provider is not bound to a subscription on this host ([subscription-auth.md](subscription-auth.md)).
+
+  Anything else stays `secret-name-reserved`. So does a provider bound to a subscription between the job's pickup
+  and its secret resolve, before anything spends.
+- **A project bundle never sets it.** A bundle carrying a provider variable of the job is refused as before: its
+  names exist only once it is read, and one bundle serves every trigger of a project.
+- **The worker says so.** The log line `provider_credential_declared` names the provider and the variable (never
+  the value), and `pi-dispatch doctor` prints a line naming each trigger whose key replaces this host's credential,
+  and where: on every job of the trigger, on a random candidate's draws, or on a fallback's failover attempts. Doctor
+  checks each trigger, each random candidate and each fallback the worker would try against that one's own
+  provider, so a trigger on `openai` binding `ANTHROPIC_API_KEY` is not a clash, and one on `openrouter` with
+  an `anthropic` fallback its allowed-model list admits, binding `ANTHROPIC_OAUTH_TOKEN`, is.
+- **Upgrade the workers first.** A worker from before this change refuses such a trigger before it spends
+  (`provider-unconfigured`, or `secret-name-reserved` where it holds a key of its own) ([mixed
+  versions](upgrading.md#mixed-versions-what-is-safe)).
 
 ### From the panel
 

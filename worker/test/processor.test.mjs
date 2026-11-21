@@ -3138,6 +3138,122 @@ test("short subscription leases require host-observed renewal support, never a q
 	}
 });
 
+// --- Issue #967: a declared run secret is the main provider's credential ---
+
+const declaredJob = { kind: "github", repo: "org/repo", provider: "openrouter", model: "deepseek/deepseek-chat", maxTurns: 20, secrets: { OPENROUTER_API_KEY: "op://ci/or/key" } };
+/** The wired gate's answers (start.mjs): the declared name before the resolver, the value's verdict after it. */
+const declaringGate = (seen = []) => (job, options = {}) => {
+	seen.push({ provider: job.provider, secrets: options.secrets ?? null });
+	if (job.provider !== "openrouter") return { ok: true };
+	if (options.secrets === undefined || options.secrets === null) return { ok: true, declared: "OPENROUTER_API_KEY" };
+	return typeof options.secrets.OPENROUTER_API_KEY === "string" && options.secrets.OPENROUTER_API_KEY !== "" ? { ok: true, declared: "OPENROUTER_API_KEY" } : { ok: false, message: "the declared run secret OPENROUTER_API_KEY has no value" };
+};
+
+test("issue #967: the declared main credential's name reaches the resolver, the re-check and runContainer, and nothing else", async () => {
+	const seen = [];
+	const resolverSaw = [];
+	const containerSaw = [];
+	const logs = [];
+	const secrets = { OPENROUTER_API_KEY: "sk-or-declared-private" };
+	const { deps: d } = deps({
+		checkProviderCredential: declaringGate(seen),
+		resolveSecrets: async (_job, options) => (resolverSaw.push(options), { ok: true, secrets }),
+		runContainer: async (ctx) => (containerSaw.push(ctx), { code: 0, aborted: false }),
+		log: (event, fields) => logs.push({ event, fields }),
+	});
+	const result = await runJob(declaredJob, d);
+	assert.equal(result.outcome, "completed");
+	assert.deepEqual(resolverSaw, [{ mainCredential: "OPENROUTER_API_KEY" }]);
+	assert.deepEqual(seen.map((row) => row.secrets), [null, secrets], "asked again with the resolved values, before anything spent");
+	assert.equal(containerSaw[0].mainCredential, "OPENROUTER_API_KEY", "an argument of its own");
+	assert.equal(containerSaw[0].job.mainCredential, undefined, "never a job field");
+	assert.deepEqual(logs.find((row) => row.event === "provider_credential_declared")?.fields, { provider: "openrouter", name: "OPENROUTER_API_KEY" });
+	assert.equal(JSON.stringify(logs).includes("sk-or-declared-private"), false, "names only, never the value");
+	assert.equal(JSON.stringify(logs).includes("op://ci/or/key"), false, "nor the reference");
+
+	// A job that declares nothing resolves and runs exactly as before: no option, no argument, no second ask.
+	const plainSeen = [];
+	const plainResolver = [];
+	const plainContainer = [];
+	const { deps: e } = deps({
+		checkProviderCredential: declaringGate(plainSeen),
+		resolveSecrets: async (_job, options) => (plainResolver.push(options), { ok: true, secrets: { STRIPE_KEY: "x" } }),
+		runContainer: async (ctx) => (plainContainer.push(ctx), { code: 0, aborted: false }),
+	});
+	assert.equal((await runJob({ ...ghJob, secrets: { STRIPE_KEY: "op://ci/stripe" } }, e)).outcome, "completed");
+	assert.deepEqual(plainResolver, [{}]);
+	assert.equal(plainSeen.length, 1);
+	assert.equal("mainCredential" in plainContainer[0], false);
+});
+
+test("issue #967: a role provider's declared verdict is not the main job's credential", async () => {
+	// The watch classifier's provider keeps the host's credential: its verdict, declared or not, never names the main one.
+	const resolverSaw = [];
+	const { deps: d } = deps({
+		checkProviderCredential: (job) => (job.provider === "openrouter" ? { ok: true, declared: "OPENROUTER_API_KEY" } : { ok: true }),
+		resolveSecrets: async (_job, options) => (resolverSaw.push(options), { profileUnknown: "default" }),
+	});
+	const result = await runJob({ kind: "local", folder: "/srv/shop", provider: "anthropic", model: "m", maxTurns: 5, watch: {}, watchDecisionModel: { provider: "openrouter", id: "typesafe/jev-1.13" }, secrets: { STRIPE_KEY: "op://ci/stripe" } }, d);
+	assert.equal(result.reason, "secret-profile-unknown");
+	assert.deepEqual(resolverSaw, [{}]);
+});
+
+test("issue #967: a declared credential the resolved values do not carry refuses as provider-unconfigured, before mint, clone or any reserve", async () => {
+	for (const resolvedSecrets of [{}, { OPENROUTER_API_KEY: "" }]) {
+		const redis = fakeRedis();
+		let tokenReads = 0;
+		const posted = [];
+		const { deps: d, calls } = deps({
+			redis: { ...redis, get: async () => (tokenReads++, null) },
+			checkProviderCredential: declaringGate(),
+			resolveSecrets: async () => ({ ok: true, secrets: resolvedSecrets }),
+			comment: async (_job, text) => posted.push(text),
+		});
+		const result = await runJob(declaredJob, d);
+		assert.deepEqual([result.outcome, result.reason, result.budgetReserved], ["policy", "provider-unconfigured", false]);
+		assert.equal(tokenReads, 0);
+		assert.equal(redis.incrCalls, 0);
+		assert.ok(!calls.some((call) => call.startsWith("mint:") || call === "prepare" || call === "run-container"));
+		assert.match(posted[0], /no usable credential for the "openrouter" provider/);
+	}
+});
+
+test("issue #967: a re-check that no longer declares the same name refuses as provider-unconfigured, never trusting the pickup's answer", async () => {
+	// A backstop the wired gate does not reach (it derives the name from the same job both times), held at the seam.
+	for (const after of [{ ok: true }, { ok: true, declared: "OTHER_API_KEY" }]) {
+		const redis = fakeRedis();
+		const { deps: d, calls } = deps({ redis, checkProviderCredential: (_job, options = {}) => (options.secrets ? after : { ok: true, declared: "OPENROUTER_API_KEY" }), resolveSecrets: async () => ({ ok: true, secrets: { OPENROUTER_API_KEY: "sk-or-declared" } }) });
+		const result = await runJob(declaredJob, d);
+		assert.deepEqual([result.reason, result.budgetReserved], ["provider-unconfigured", false], JSON.stringify(after));
+		assert.equal(redis.incrCalls, 0);
+		assert.ok(!calls.some((call) => call.startsWith("mint:") || call === "run-container"));
+	}
+});
+
+test("issue #967: a provider bound to a subscription after the pickup refuses the declared binding as secret-name-reserved; an unread verdict retries", async () => {
+	const managedAfter = (verdict) => (job, options = {}) => (options.secrets ? verdict : { ok: true, declared: "OPENROUTER_API_KEY" });
+	for (const [over, expected] of [
+		[{ checkProviderCredential: managedAfter({ ok: false, managed: true, reason: "auth-reauth-required", unavailable: false }) }, "secret-name-reserved"],
+		[{ checkProviderCredential: managedAfter({ ok: true, managed: true }) }, "secret-name-reserved"],
+		// The access snapshot taken between the two asks covers the provider, though the gate still says declared.
+		[{ checkProviderCredential: declaringGate(), prepareSubscriptionAuth: async () => ({ ok: true, snapshots: [{ provider: "openrouter", env: { OPENROUTER_API_KEY: "subscription" } }] }) }, "secret-name-reserved"],
+		[{ checkProviderCredential: managedAfter({ ok: false, managed: true, reason: "auth-store-unavailable", unavailable: true }) }, "retry"],
+	]) {
+		const redis = fakeRedis();
+		const posted = [];
+		const { deps: d, calls } = deps({ redis, resolveSecrets: async () => ({ ok: true, secrets: { OPENROUTER_API_KEY: "sk-or-declared" } }), comment: async (_job, text) => posted.push(text), ...over });
+		if (expected === "retry") await assert.rejects(() => runJob(declaredJob, d), (error) => error.name === "InfraRetry" && error.reason === "container-never-started");
+		else {
+			const result = await runJob(declaredJob, d);
+			assert.deepEqual([result.reason, result.budgetReserved], [expected, false]);
+			assert.match(posted[0], /`OPENROUTER_API_KEY`/);
+			assert.equal(posted[0].includes("sk-or-declared"), false);
+		}
+		assert.equal(redis.incrCalls, 0);
+		assert.ok(!calls.some((call) => call.startsWith("mint:") || call === "prepare" || call === "run-container"));
+	}
+});
+
 test("auxiliary credentials are resolved from declared secrets before mint, clone or any budget hold", async () => {
 	for (const unavailable of [false, true]) {
 		const redis = fakeRedis();
