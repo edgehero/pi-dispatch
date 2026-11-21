@@ -144,6 +144,21 @@ export const HOSTS_UNREAD_TEXT = "The hosts could not be read, so what they hold
  */
 export const hostsUnread = (snapshot) => !snapshot || (Boolean(snapshot.queue?.fleetDegraded) && snapshot.hostsReadAt === null);
 
+/**
+ * Whether a page's data holds something the console could not read (issue #962), the one rule of the live pill's Not
+ * live for the page the server draws (`shell.mjs`) and for the hub's streams (`live.mjs`): the page's primary read
+ * failed (`readFailed`), or its snapshot was read with a part missing that its panels then word as "could not be read":
+ * the host registry this time (`queue.fleetDegraded`, whether it shows nothing or the rows as last seen, which are not
+ * current either), the active jobs (`activeUnreachable`) or the parked runs (`parkedUnreachable`). A declaration, so
+ * the modules that import each other in a circle can call it.
+ */
+export function dataUnread(data) {
+  if (data?.readFailed === true) return true;
+  const s = data?.snapshot;
+  if (s === null || typeof s !== "object") return false;
+  return Boolean(s.queue?.fleetDegraded) || s.activeUnreachable === true || Boolean(s.parkedUnreachable);
+}
+
 // ---- action forms (issue #642) ---------------------------------------------------------------------------------------
 
 /** Whether this view draws write controls: an operator, on a console that is not read-only. */

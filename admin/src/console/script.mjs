@@ -121,7 +121,12 @@ import { historyBrowser, timelineLocalTime } from "./history-browser.mjs";
  *     the panels as they were) dims `<main>` (`main.stale`) under the stale note with the time last seen (`<time
  *     data-since>`, local as below; a stale with no time, as a lone tab's reconnect gets, keeps the time an earlier
  *     stale gave), its sentence the server's or, for the tokens file, `STALE_TOKENS_BODY`; `event: fresh` undoes both,
- *     and nothing else does: the hub tells every page stream its state first (`live.mjs`), so a stream that opens again
+ *     `event: unread` (issue #962: the panels the hub sends next say themselves what could not be read, a failed
+ *     load's or a snapshot's with a part missing) dims nothing, shows no note and takes a stale's dimming back, since
+ *     those panels are drawn now. While either holds, and from the first byte on a page the server drew so (the pill's
+ *     `data-unread`), an open stream marks the pill `held` (Not live, with its own sentence) where it would mark Live;
+ *     `fresh` takes that back. While a stale holds, the navigation's Parked count is hidden too.
+ *     Nothing else undoes a stale: the hub tells every page stream its state first (`live.mjs`), so a stream that opens again
  *     says whether its page is current before it sends a panel, and opening is no sign either way (issue #737). The
  *     script only takes back what it showed, so a state the server drew (a panel golden's) stays as drawn.
  *   - the SPEND SCREEN (`insights`): what the offline insights page's own script did, under this CSP. The insights
@@ -201,7 +206,7 @@ import { APPROVAL_WAIT_MS } from "./approve-dialog.mjs";
 import { RUN_PATH_LINK_RE } from "./run-path.mjs";
 import { ENDED_REASONS, NOTICE_OF_STATUS, PERSON_HEADER, PERSON_PARAM, STREAM_ENDS, STREAM_SHUTDOWN } from "./session-ends.mjs";
 import { SEARCH_ID } from "./kit.mjs";
-import { LIVE_NOTES, LIVE_STATES, SEARCH_HREF } from "./shell.mjs";
+import { LIVE_NOTES, LIVE_STATES, LIVE_UNREAD_ATTR, NAV_PARKED_ID, SEARCH_HREF } from "./shell.mjs";
 import { SYSTEM_SCHEME, THEME_COOKIE, THEME_COOKIE_MAX_AGE_SEC, THEME_COOKIE_SAME_SITE, THEME_LABELS, THEMES } from "./theme.mjs";
 import { GATEWAY_CONSOLE_SCRIPT } from "./gateway-console-script.mjs";
 import { SAYS_NOTHING_CHANGED } from "../words.mjs";
@@ -2375,6 +2380,24 @@ ${FIT_JS}
       else status.removeAttribute("title");
     }
   }
+  // Whether the console could not read all this page shows (issue #962): the server drew the page so (the pill's
+  // ${LIVE_UNREAD_ATTR}), or the hub said so on the stream (event: stale, event: unread). An open stream then says Not
+  // live (held), never Live, until the hub says fresh. The navigation's Parked count is outside <main>, so the stale
+  // dimming never reached it and a count last seen before the outage stood there as current: it is hidden while a
+  // stale holds, as a page loaded in the outage draws none.
+  var unread = !!(status && typeof status.hasAttribute === "function" && status.hasAttribute(${JSON.stringify(LIVE_UNREAD_ATTR)}));
+  var navParked = document.getElementById(${JSON.stringify(NAV_PARKED_ID)});
+  function connected() {
+    if (unread) mark("held");
+    else mark("on");
+  }
+  // Called inside outside(): hiding the count can move the bar. kept is whether the page holds panels from before (a
+  // stale): only then is the count it shows an old one. After event: unread, and on a page drawn unread, the count is
+  // the hub's or the server's own for that read (none where the parked runs were not read).
+  function setUnread(on, kept) {
+    unread = on;
+    if (navParked) navParked.hidden = on && kept;
+  }
   // One of the server's live notes at a time (#live-note), or none. noteShown is the one THIS script showed: it only
   // ever takes back its own, so a note the server drew (a panel golden's) stays as drawn.
   var liveNote = document.getElementById("live-note");
@@ -2598,7 +2621,7 @@ ${FIT_JS}
     var query = document.body.getAttribute("data-query") || "";
     es = new EventSource("/api/events?page=" + encodeURIComponent(live) + (query ? "&" + query : "") + personQuery);
     es.addEventListener("open", function () {
-      mark("on");
+      connected();
       unnote("retry");
       // Not the dimming: a stream that opens again says nothing yet about the page's data. The hub's first message on it
       // is its state, fresh or stale (live.mjs), and fresh alone takes the dimming back (issue #737: a tab that
@@ -2616,7 +2639,7 @@ ${FIT_JS}
       if (!msg || typeof msg.id !== "string" || typeof msg.html !== "string") return;
       var el = document.getElementById(msg.id);
       if (!el || !el.hasAttribute("data-panel")) return;
-      mark("on");
+      connected();
       unnote("retry");
       if (msg.id === "p-timeline" && historyUi && historyUi.updateMarkup) { historyUi.updateMarkup(msg.html); return; }
       // Waits without the held note: inserting it would move the very thing being pressed.
@@ -2635,6 +2658,8 @@ ${FIT_JS}
       // A stale with no time while this page is already dimmed (a lone tab's reconnect: the hub let the view go with its
       // last stream) keeps the time it was told: the panels it holds are still the ones last seen then.
       outside(function () {
+        setUnread(true, true);
+        connected();
         if (at !== null || !staleShown) since(at);
         staleShown = true;
         if (mainEl && mainEl.classList) mainEl.classList.add("stale");
@@ -2642,8 +2667,24 @@ ${FIT_JS}
         note("stale");
       });
     });
+    // The hub drew this stream the panels of a load whose read failed (live.mjs drawDegraded): they say what could
+    // not be read themselves, so there is no dimming and no note, only the pill.
+    es.addEventListener("unread", function () {
+      outside(function () {
+        // The panels that follow are drawn now, so nothing is as last seen any more.
+        if (staleShown) unstale();
+        setUnread(true, false);
+        connected();
+      });
+    });
     es.addEventListener("fresh", function () {
-      if (staleShown) unstale();
+      outside(function () {
+        if (staleShown) unstale();
+        if (unread) {
+          setUnread(false, false);
+          connected();
+        }
+      });
     });
     es.addEventListener("end", streamEnded);
   }

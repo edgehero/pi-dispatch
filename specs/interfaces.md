@@ -12807,12 +12807,17 @@ script reads the console without scraping a page (issue #641, `DES-OPERATOR-CONS
     "parkedUnknown": false,
     "failures24h": 0, "failures24hFloor": false,
     "refusals24h": { "count": 3, "top": [ { "reason": "scope-cap", "count": 2 }, { "reason": "over-budget", "count": 1 } ] },
+    "activeUnknown": false,
     "active": [ { "jobId": "gh-...", "queue": "pi-jobs", "startedAt": 1760432400000, "host": "mac" } ],
     "schedulers": [ { "name": "nightly", "next": 1760432400000, "overdue": false, "overdueMs": 0, "stalls": 0 } ],
     "schedulerStallMax": 3,
     "failed": { "unreachable": false, "rows": [ { "jobId": "...", "queue": "pi-jobs", "attemptsMade": 3, "endedAt": 1760432400000, "supersededBy": null, "failedReason": "..." } ], "more": 0 } }
   ```
-  `parkedUnknown` true means the parked list could not be read, so an empty `parked` is not "nobody waiting". A
+  `parkedUnknown` true means the parked list could not be read, so an empty `parked` is not "nobody waiting".
+  `activeUnknown` (since 2026-11-21, #962; an added key within `version: 1`) true means the active list is not whole
+  (a queue's read failed, or the host registry was never read, so the hosts' own queues were not asked): `active` then
+  holds what was read, and an empty `active` is not "nothing is running". A scheduler's `stalls` is null where its
+  counter could not be read (CORRECTED 2026-11-21, #962: it was 0), and 0 for a schedule that never stalled. A
   folder-scoped dollar window's `scope` is null rather than a host path. **Since issue #644 each `active` row gains
   `progress`** (`INT-RUN-PROGRESS-KEY`), integers and the running call's checked tool name only, never a phase name or
   a note, and null when the job has no readable progress key; within `version: 1`, an added key (`STATE_VERSION`
@@ -13022,6 +13027,9 @@ script is its only intended client; it is documented so that what a stream may c
   event: fresh
   data: {}
 
+  event: unread
+  data: {}
+
   event: end
   data: {"ended":"revoked"}
   ```
@@ -13087,7 +13095,13 @@ script is its only intended client; it is documented so that what a stream may c
     browser holds panels once a good render was sent to its stream, when its stream came with a `Last-Event-ID` (a
     reconnect holds the panels it was drawn with), and once its stream was told `stale`: a read-failed load sends such
     a stream `stale` and no panel, while a first stream that holds none is sent the degraded panels the load makes,
-    with no state before them (they say what the page already says). What a stream is sent after a failure is always
+    after `unread` (CORRECTED 2026-11-21, #962: they were sent with no state before them).
+  - `unread` (since 2026-11-21, #962; data `{}`): a page stream's state in place of `fresh`, before panels that say
+    themselves what could not be read: the degraded panels of a load whose primary read failed, and every good
+    render over a snapshot read without the host registry, the active jobs or the parked runs. Sent once and again
+    only after another state was said, so a lasting partial failure never alternates it with `fresh`, which is sent
+    once nothing is missing. A client dims nothing and dates nothing (and takes a `stale`'s dimming back, since the
+    panels are drawn now); it only stops saying the page is live, until `fresh`. A client that does not know the event ignores it, as `EventSource` does any unnamed listener. What a stream is sent after a failure is always
     measured against the last good render: a degraded draw is never kept as what another stream of the same view
     holds, so the next good render sends each stream that holds panels every panel that changed, and a reconnect with
     a `Last-Event-ID` during the failure is sent the last good render. A reconnect is a new stream: told `stale` first while its page still fails,
@@ -14766,6 +14780,7 @@ and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` are UNCHANGED, checked: no file shape, wr
 
 | Date | Change |
 |---|---|
+| 2026-11-21 (#962) | **`INT-CONSOLE-STATE-API` AMENDED**: `activeUnknown`, a boolean beside `parkedUnknown`, true when the active list is not whole; an added key within `version: 1`. CORRECTED: a scheduler's `stalls` is null, not 0, where its counter could not be read. **`INT-CONSOLE-EVENT-STREAM` AMENDED**: NEW `event: unread` (data `{}`), a page stream's state in place of `fresh` before panels that say what could not be read (a degraded draw, a good render over a snapshot with a part missing); CORRECTED: those panels were described as sent with no state before them. UNCHANGED, checked: `STATE_VERSION`, `event: stale` and its data, `event: fresh`, the `p-nav-parked` panel (its html is as before; hiding it while a page is unread is the page script's). **Code evidence**: `admin/src/console/live.mjs` -> `stateOf`, `drawDegraded`; `admin/src/read-model.mjs` -> `activeUnreachable`. |
 | 2026-11-20 (#920 follow-up) | Added `INT-FORGE-TERMINAL-RECEIPT`, a bounded fixed two-line scheduling-only comment bound to an original GitHub poll label job. UNCHANGED, checked: `INT-FORGE-STATUS-COMMENT-EDIT`, `INT-RUN-HISTORY-FILE-CONTRACT`, job-data and queue contracts; no new store, migration or permission. Missing receipts remain unknown. |
 | 2026-11-20 (#957) | `INT-CREDENTIAL-DROP` adds watched read-only generation synchronization with equal-deadline delivery and bounded transport recovery. `INT-SUBSCRIPTION-CREDENTIAL-STORE`, drop version/fields, `INT-RUN-HISTORY-FILE-CONTRACT`, persisted state, retention, image capability vocabulary and `INT-RUNNER-EXIT-CODE-PROTOCOL` are UNCHANGED, checked. No state migration or new backup surface. |
 | 2026-11-20 (#842) | **`INT-STEER-INBOX-CONTRACT` AMENDED**, "Never throws": `pushSteer` and `withdrawSteer` answer `{ error, mayStillRun: true }` for a script that reached a Valkey which then did not answer, so the console's steer and withdraw confirms say the message may or may not have been sent or withdrawn; every other answer, the scripts, the keys and the TTLs are as they were, and the worker's and the receiver's callers, whose clients have no command bound, never see the mark. **`INT-CANCEL-CHANNEL-CONTRACT` CORRECTED**: its measured-times paragraph said the console's fleet reader keeps unbounded queue clients, which #842 ends. **`INT-CONSOLE-AUDIT-LOG` UNCHANGED, checked**: no row's shape changes; a kill switch, a queue switch, a steer or a failed-job action that was sent and not answered is a `failed` row whose reason is its sentence, and so is a confirm the console's stop cut at its deadline ("the console stopped before this change answered, so it may or may not have been made; look at the fleet"), cut at 200 characters as every reason is, which is why the queues not confirmed come first in it. **`INT-CONSOLE-STATE-API` UNCHANGED, checked**: `/api/state` and the action routes keep their shapes and status codes (409 for a change that did not finish; a preview that could not read answers 503 for a failed job's and 400 for a steer's and a steer withdrawal's, as each did for a read that failed). **No stored-state change**: no key, file or job-data field is added or changed. **Code evidence**: worker/src/steer-inbox.mjs -> `lostWrite`, `pushSteer`, `withdrawSteer`; admin/src/job-actions.mjs -> `steerUnconfirmed`, `enqueueSteer`, `withdrawSteerMessage`; admin/src/console/actions.mjs -> `funnelResult`, `switchPartialWords`. |

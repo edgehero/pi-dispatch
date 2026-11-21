@@ -81,6 +81,9 @@ function eventsIn(text, name) {
 }
 
 /** The names of the events in a chunk of stream text, in order (a ping is `ping`). */
+/** What a canned snapshot's one panel says. */
+const dataWords = (s) => (s?.activeUnreachable || s?.parkedUnreachable || s?.queue?.fleetDegraded ? "could not be read" : "read");
+
 function namesIn(text) {
   return [...text.matchAll(/(?:^|\n\n)(?:id: [^\n]*\n)?(?:event: (\w+)|: (ping))/g)].map(([, name, ping]) => name ?? ping);
 }
@@ -864,7 +867,7 @@ test("a load whose read failed draws its degraded panels until the key has a goo
   h.hub.subscribe({ res, sessionId: "s1", session: OP, page: "overview", query: {} });
   await h.hub.tick();
   await h.hub.tick();
-  assert.deepEqual(namesIn(res.take()), ["panel"], "no prior good render: the degraded panel is drawn once, no stale, not again at a tick that draws the same");
+  assert.deepEqual(namesIn(res.take()), ["unread", "panel"], "no prior good render: told unread once, then the degraded panel once, no stale, neither again at a tick that draws the same");
   const unread = "console: live data for page overview could not be read; its streams keep their last panels";
   assert.deepEqual(h.logs, [unread], "a failed load is logged, once, whoever it draws");
   readFailed = false;
@@ -1039,14 +1042,14 @@ test("one tab's reconnect while its read still fails (no throw: readFailed) is t
   fresh.hub.subscribe({ res: newTab, sessionId: "s1", session: OP, page: "fleet", query: {} });
   await fresh.hub.tick();
   await fresh.hub.tick();
-  assert.deepEqual(namesIn(newTab.text()), ["panel"]);
+  assert.deepEqual(namesIn(newTab.text()), ["unread", "panel"]);
   // And the same key read-failing for a tab that holds panels and one that holds none: each gets its own.
   const holder = fakeRes();
   fresh.hub.subscribe({ res: holder, sessionId: "s2", session: OP, page: "fleet", query: {}, lastEventId: "cafebabe-1" });
   const beside = fakeRes();
   fresh.hub.subscribe({ res: beside, sessionId: "s3", session: VIEW, page: "fleet", query: {} });
   await fresh.hub.tick();
-  assert.deepEqual([namesIn(holder.text()), namesIn(beside.text())], [["stale"], ["panel"]]);
+  assert.deepEqual([namesIn(holder.text()), namesIn(beside.text())], [["stale"], ["unread", "panel"]]);
 });
 
 test("at subscribe only the data and the render are judged; a tokens file the last tick could not read is the next tick's to say", async () => {
@@ -1196,7 +1199,7 @@ test("no recovery is logged while the read still fails: a failed load that draws
   failing = false;
   await h.hub.tick();
   assert.deepEqual(h.logs, [unread, "console: live data for page fleet is read again"], "said when it does");
-  assert.deepEqual(namesIn(bob.text()), ["panel", "fresh", "panel"]);
+  assert.deepEqual(namesIn(bob.text()), ["unread", "panel", "fresh", "panel"]);
 });
 
 test("the REAL loadPageData: a snapshot, a runs page or a run that cannot be read marks readFailed; a good read leaves no readFailed at all", async () => {
@@ -1255,6 +1258,71 @@ test("stateOf: an unreadable parked list is parkedUnknown, so an empty list is n
   assert.deepEqual(lost.parked, []);
 });
 
+test("stateOf: an active list a queue did not answer for is activeUnknown, so an empty list is never read as nothing running", () => {
+  assert.equal(stateOf(SNAPSHOT, "viewer", { now: T0 }).activeUnknown, false, "a snapshot from before the flag, or a read every queue answered");
+  assert.equal(stateOf({ ...SNAPSHOT, active: [], activeUnreachable: false }, "viewer", { now: T0 }).activeUnknown, false, "read, and empty");
+  const lost = stateOf({ ...SNAPSHOT, active: [], activeUnreachable: true }, "viewer", { now: T0 });
+  assert.deepEqual([lost.activeUnknown, lost.active], [true, []]);
+});
+
+test("a degraded first draw is told unread before its panels, once; a good render then says fresh, and a later failure stale", async () => {
+  let readFailed = true;
+  const h = hubOn({ load: async () => ({ readFailed }), pagePanels: async (pageName, ctx) => [{ id: "p-a", html: ctx.data.readFailed ? "could not be read" : "good" }, { id: "p-b", html: ctx.data.readFailed ? `not known ${ctx.data.n ?? ""}` : "good" }] });
+  const res = fakeRes();
+  h.hub.subscribe({ res, sessionId: "s1", session: OP, page: "overview", query: {} });
+  await h.hub.tick();
+  const first = res.take();
+  assert.deepEqual(namesIn(first), ["unread", "panel", "panel"], "the state first, then the panels that say what was not read");
+  assert.ok(first.startsWith("event: unread\ndata: {}\n\n"), "an event with data, so a browser does not drop it");
+  await h.hub.tick();
+  assert.deepEqual(namesIn(res.take()), [], "said once: a lasting outage does not repeat it");
+  readFailed = false;
+  await h.hub.tick();
+  assert.deepEqual(namesIn(res.take()), ["fresh", "panel", "panel"], "the good render: fresh takes the unread back");
+  readFailed = true;
+  await h.hub.tick();
+  assert.deepEqual(namesIn(res.take()), ["stale"], "it holds good panels now: stale, and nothing drawn over them");
+  // A transcript stream, and a page stream that already holds panels, are never told unread.
+  const holder = fakeRes();
+  h.hub.subscribe({ res: holder, sessionId: "s1", session: OP, page: "fleet", query: {}, lastEventId: "cafebabe-1" });
+  await h.hub.tick();
+  assert.deepEqual(namesIn(holder.text()), ["stale"]);
+});
+
+test("a good render over a snapshot with a part missing is told unread, never fresh, the same every tick; fresh only once nothing is missing; a new tab is told the same", async () => {
+  let snapshot = { active: [], activeUnreachable: true };
+  const h = hubOn({ load: async () => ({ snapshot }), pagePanels: async (pageName, ctx) => [{ id: "p-a", html: dataWords(ctx.data.snapshot) }] });
+  const res = fakeRes();
+  h.hub.subscribe({ res, sessionId: "s1", session: OP, page: "fleet", query: {} });
+  await h.hub.tick();
+  assert.deepEqual(namesIn(res.take()), ["unread", "panel"], "the panel says it could not read: not Live over it");
+  for (let i = 0; i < 3; i++) await h.hub.tick();
+  assert.deepEqual(namesIn(res.take()), [], "a lasting partial failure: the state said once, no fresh between");
+  // A second tab on the held view is told the same before the view's panels.
+  const tab = fakeRes();
+  h.hub.subscribe({ res: tab, sessionId: "s1", session: OP, page: "fleet", query: {} });
+  assert.deepEqual(namesIn(tab.take()), ["unread", "panel"]);
+  // Each part alone holds it: the registry (as last seen too) and the parked runs.
+  for (const part of [{ queue: { fleetDegraded: "registry" }, hostsReadAt: T0 }, { parkedUnreachable: "timeout" }]) {
+    snapshot = part;
+    await h.hub.tick();
+    assert.deepEqual(namesIn(res.take()), [], JSON.stringify(part));
+  }
+  snapshot = { active: [], activeUnreachable: false, parkedUnreachable: null, queue: { fleetDegraded: null } };
+  await h.hub.tick();
+  assert.deepEqual(namesIn(res.take()), ["fresh", "panel"], "read whole: fresh");
+  snapshot = { activeUnreachable: true };
+  await h.hub.tick();
+  assert.deepEqual(namesIn(res.take()), ["unread", "panel"], "and unread again when a part goes missing");
+  assert.deepEqual(h.logs, [], "a part missing is not a failed load: nothing is logged, and the view is kept");
+});
+
+test("stateOf: a schedule's stall counter that could not be read is null, never 0; no counter at all is 0", () => {
+  const schedulers = [{ key: "nightly", next: T0 + 1000, overdueMs: 0 }, { key: "weekly", next: T0 + 2000, overdueMs: 0 }, { key: "hourly", next: T0 + 3000, overdueMs: 0 }];
+  const got = stateOf({ ...SNAPSHOT, schedulers, schedulerStalls: { nightly: null, weekly: 2 } }, "viewer", { now: T0 }).schedulers;
+  assert.deepEqual(got.map((x) => [x.name, x.stalls]), [["nightly", null], ["weekly", 2], ["hourly", 0]]);
+});
+
 test("stateOf: a steer-armed active job carries its inbox, each entry rebuilt by name and never its text; unread is null, never []", () => {
   const id = "0123456789abcdef0123456789abcdef";
   const snap = {
@@ -1286,7 +1354,7 @@ test("stateOf: the day's refusals beside its failures, each listed reason held t
 test("stateOf: the named fields only, numbers as numbers, no error text, no host path, and failedReason for an operator alone", () => {
   const op = stateOf(SNAPSHOT, "operator", { now: T0 });
   const viewer = stateOf(SNAPSHOT, "viewer", { now: T0 });
-  assert.deepEqual(Object.keys(op).sort(), ["active", "at", "budget", "counts", "dollars", "failed", "failures24h", "failures24hFloor", "fleetDegraded", "hosts", "parked", "parkedUnknown", "paused", "queues", "refusals24h", "role", "schedulerStallMax", "schedulers", "version", "workers"]);
+  assert.deepEqual(Object.keys(op).sort(), ["active", "activeUnknown", "at", "budget", "counts", "dollars", "failed", "failures24h", "failures24hFloor", "fleetDegraded", "hosts", "parked", "parkedUnknown", "paused", "queues", "refusals24h", "role", "schedulerStallMax", "schedulers", "version", "workers"]);
   assert.equal(op.version, 1, "the scripts' interface carries its version");
   assert.deepEqual(op.paused, { state: false, partial: true });
   assert.deepEqual(op.counts, { waiting: 3, active: 1, paused: 0, delayed: 2, failed: 4 });

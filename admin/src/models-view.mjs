@@ -124,7 +124,7 @@ function authoredRefs(entry, deployment, envList) {
 }
 
 /** Caller-supplied clock and I/O facts. No policy oracle here can authorize a run. */
-export function modelsViewOf({ entries = [], modelRoles = {}, projects = [], deployment = {}, envList = null, overlay = null, overlayUnknown = false, configUnknown = false, cooldowns = [], records = [], sourceRecords = [], snapshot = null, windows = [], coverage = {}, now, status: statusFn = failoverModelStatus, resolveFolder } = {}) {
+export function modelsViewOf({ entries = [], modelRoles = {}, projects = [], deployment = {}, envList = null, overlay = null, overlayUnknown = false, configUnknown = false, cooldowns = [], records = [], sourceRecords = [], snapshot, windows = [], coverage = {}, now, status: statusFn = failoverModelStatus, resolveFolder } = {}) {
   if (!Number.isSafeInteger(now) || now < 0) throw new TypeError("modelsViewOf requires the caller's clock");
   const statuses = new Map();
   const status = ref => {
@@ -198,7 +198,12 @@ export function modelsViewOf({ entries = [], modelRoles = {}, projects = [], dep
   if (newerSkipped > 0) notes.push(`${newerSkippedSentence(newerSkipped)}: comparisons and fallback history leave them out.`);
   if (!snapshot?.waiting || snapshot.waiting.unreachable) notes.push("Waiting jobs could not be read; an empty list is not proof that none wait.");
   if (!snapshot?.doctor || snapshot.doctor.unreachable || !hostRows.length) notes.push("No published doctor proposal evidence is available. Reload after doctor publishes on a host.");
-  return { now, scopes: [...new Set(["default", ...projects.map(project => project.id), ...scopes])], state: configUnknown ? "unreadable" : "ready", partial: true, banners, roles, randomPools, recentRandom, cooldowns: observedCooldowns, models, proposals,
+  // Issue #962: which of the three lists a failed read left empty, so the page never draws "none" for it. Set only for a
+  // snapshot the caller says could not be read (null) or whose own read of that list failed; a caller that gives no
+  // snapshot at all (undefined: a comparison over records alone) asked for neither list.
+  const waitingUnread = snapshot !== undefined && (snapshot === null || !snapshot.waiting || Boolean(snapshot.waiting.unreachable));
+  const proposalsUnread = snapshot !== undefined && (snapshot === null || !snapshot.doctor || Boolean(snapshot.doctor.unreachable));
+  return { now, scopes: [...new Set(["default", ...projects.map(project => project.id), ...scopes])], state: configUnknown ? "unreadable" : "ready", partial: true, banners, roles, randomPools, recentRandom, cooldowns: observedCooldowns, cooldownsUnread: cooldowns === null, waitingUnread, proposalsUnread, models, proposals,
     canaries: canariesOf(retained, roles, deployment, now, sourceRecords), waiting, recentFallbacks,
     coverage: { complete: false, partial: true, records: retained.length, days: MODELS_LIMITS.days, truncated: dedup.size > MODELS_LIMITS.records || coverage.truncated === true, notes } };
 }
@@ -249,8 +254,13 @@ export async function readModelsHistory({ fleet, now, seed = null } = {}) {
   return { records, sourceRecords, partial, truncated, sourcesUnknown };
 }
 
-/** Dedicated page/tool reads. Reuses the caller's snapshot; no read is added to unrelated pages. */
-export async function readModelsView({ paths = {}, env = {}, deploymentDir = null, now = Date.now(), snapshot = null, fleet = null, fs = nodeFs, redis = null, reads = {} } = {}) {
+/**
+ * Dedicated page/tool reads. Reuses the caller's snapshot; no read is added to unrelated pages. `snapshot` is the
+ * caller's: an object, null for one the caller tried and could not read (issue #962: it is NOT read again here, since a
+ * second read of a Valkey that does not answer only stacks a second timeout on the page; the view then says the waiting
+ * jobs and the doctor proposals are not known), or undefined for a caller that has none, which is read here.
+ */
+export async function readModelsView({ paths = {}, env = {}, deploymentDir = null, now = Date.now(), snapshot, fleet = null, fs = nodeFs, redis = null, reads = {} } = {}) {
   now = typeof now === "function" ? now() : now;
   let configUnknown = false, overlayUnknown = false, entries = [], modelRoles = {}, projects = [], limits = [], overlay = null, envList = null;
   let settings = snapshot?.settings?.overlay ?? {};
@@ -271,7 +281,7 @@ export async function readModelsView({ paths = {}, env = {}, deploymentDir = nul
   catch { overlayUnknown = true; }
   const deployment = { provider: settings.provider ?? env.PI_PROVIDER ?? DEFAULT_PROVIDER, model: settings.model ?? env.PI_MODEL ?? DEFAULT_MODEL, maxCostUsd: settings.maxCostUsd ?? env.PI_MAX_COST_USD ?? null };
   if (providerIdProblem(deployment.provider) !== null || modelIdProblem(deployment.model) !== null) configUnknown = true;
-  if (!snapshot && fleet) { try { snapshot = await fleet.snapshot({ waiting: true }); } catch { snapshot = null; } }
+  if (snapshot === undefined && fleet) { try { snapshot = await fleet.snapshot({ waiting: true }); } catch { snapshot = null; } }
   const source = snapshot?.recordDetails instanceof Map ? [...snapshot.recordDetails.values()] : Array.isArray(snapshot?.runs) ? snapshot.runs : null;
   let records, sourceRecords = [], historyCoverage = { partial: true };
   try {

@@ -231,6 +231,75 @@ test("the fleet snapshot's active rows carry integers and a tool name only, a re
   }
 });
 
+test("the fleet snapshot says when a queue's active list could not be read: activeUnreachable, never an empty list alone (issue #962)", live, async () => {
+  const redis = await fresh();
+  const logsDir = tempDir("pd-962-active-");
+  // What each queue's getActive does this read: a list it answers, or a throw.
+  let answers = {};
+  const mk = (_c, opts) => {
+    const name = opts?.name ?? "pi-jobs";
+    return { name, isPaused: async () => false, getJobCounts: async () => ({ waiting: 0, active: 0, paused: 0, delayed: 0, failed: 0 }), getWorkers: async () => [], getJobSchedulers: async () => [], getActive: async () => { const got = answers[name]; if (got instanceof Error) throw got; return got ?? []; }, getFailed: async () => [], close: async () => {} };
+  };
+  const reader = createFleetReader(
+    { valkeyUrl: URL11, logsDir, triggersPath: join(logsDir, "none.json") },
+    { makeQueueFn: mk, parseConnectionFn: () => ({}), redisFn: () => redis.duplicate(), readLiveHostsFn: async () => ({ hosts: [{ name: "hostb", routes: true }] }), discoverHostQueuesFn: async () => ["pi-jobs@hostb"], nowFn: () => AT, activeLimit: 10 },
+  );
+  try {
+    // A read every queue answered, and empty: the true empty state.
+    const empty = await reader.snapshot();
+    assert.deepEqual([empty.active, empty.activeUnreachable, empty.activeJobId], [[], false, null]);
+    assert.equal(stateOf(empty, "viewer", { now: AT }).activeUnknown, false);
+    // Every queue's read fails: an empty list that says nothing.
+    answers = { "pi-jobs": new Error("timeout"), "pi-jobs@hostb": new Error("timeout") };
+    const lost = await reader.snapshot();
+    assert.deepEqual([lost.active, lost.activeUnreachable], [[], true]);
+    assert.deepEqual([stateOf(lost, "viewer", { now: AT }).activeUnknown, stateOf(lost, "viewer", { now: AT }).active], [true, []]);
+    // One queue fails: the rows of the one that answered, and the list is still not whole.
+    answers = { "pi-jobs": new Error("timeout"), "pi-jobs@hostb": [{ id: "gh-remote", processedOn: AT - 1000 }] };
+    const part = await reader.snapshot();
+    assert.deepEqual([part.active.map((a) => a.jobId), part.activeUnreachable, part.activeJobId], [["gh-remote"], true, "gh-remote"]);
+    // And read again whole, with a job running.
+    answers = { "pi-jobs@hostb": [{ id: "gh-remote", processedOn: AT - 1000 }] };
+    const whole = await reader.snapshot();
+    assert.deepEqual([whole.active.map((a) => a.jobId), whole.activeUnreachable], [["gh-remote"], false]);
+  } finally {
+    await reader.dispose();
+  }
+});
+
+test("a registry that was never read leaves the hosts' queues unasked, so the active list is not whole; read once, the queues last seen are asked (issue #962)", live, async () => {
+  const redis = await fresh();
+  const logsDir = tempDir("pd-962-registry-");
+  const asked = [];
+  const mk = (_c, opts) => {
+    const name = opts?.name ?? "pi-jobs";
+    return { name, isPaused: async () => false, getJobCounts: async () => ({ waiting: 0, active: name === "pi-jobs" ? 0 : 1, paused: 0, delayed: 0, failed: 0 }), getWorkers: async () => [], getJobSchedulers: async () => [], getActive: async () => { asked.push(name); return name === "pi-jobs" ? [] : [{ id: "gh-remote", processedOn: AT - 1000 }]; }, getFailed: async () => [], close: async () => {} };
+  };
+  let registry = async () => { throw new Error("WRONGTYPE"); };
+  const reader = createFleetReader(
+    { valkeyUrl: URL11, logsDir, triggersPath: join(logsDir, "none.json") },
+    { makeQueueFn: mk, parseConnectionFn: () => ({}), redisFn: () => redis.duplicate(), readLiveHostsFn: () => registry(), discoverHostQueuesFn: async () => ["pi-jobs@hostb"], nowFn: () => AT, activeLimit: 10 },
+  );
+  try {
+    // Never read: only the shared queue is known, and a job running in a host's own queue is not seen.
+    const never = await reader.snapshot();
+    assert.deepEqual(asked, ["pi-jobs"]);
+    assert.deepEqual([never.active, never.activeUnreachable, never.hostsReadAt, Boolean(never.queue.fleetDegraded), never.hostBudgets], [[], true, null, true, []]);
+    assert.deepEqual([never.queueCounts.map((q) => q.queue), never.queue.queues, never.queue.counts.active, never.doctor], [["pi-jobs"], 1, 0, { hosts: [], more: 0 }], "the state the Fleet golden of a registry never read is drawn from");
+    assert.equal(stateOf(never, "viewer", { now: AT }).activeUnknown, true);
+    // Read: the host's queue is asked, and the list is whole.
+    registry = async () => ({ hosts: [{ name: "hostb", routes: true }] });
+    const read = await reader.snapshot();
+    assert.deepEqual([read.active.map((a) => a.jobId), read.activeUnreachable], [["gh-remote"], false]);
+    // Read before and not now: the queues last seen are still asked, so the list is the fleet's as last seen.
+    registry = async () => { throw new Error("timeout"); };
+    const seen = await reader.snapshot();
+    assert.deepEqual([seen.active.map((a) => a.jobId), seen.activeUnreachable, Boolean(seen.queue.fleetDegraded), seen.hostsReadAt], [["gh-remote"], false, true, AT]);
+  } finally {
+    await reader.dispose();
+  }
+});
+
 test("parseProgress reads a recovered run's replayed count, optional and a whole number (#645)", () => {
   const good = JSON.parse(serializeProgress(workerSnapshot()));
   assert.equal(parseProgress(JSON.stringify({ ...good, replayed: 2 })).replayed, 2);

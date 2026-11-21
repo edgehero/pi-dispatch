@@ -98,12 +98,13 @@ function liveDom({ copyOk = true } = {}) {
 /** The pill as a reader and assistive technology meet it: its classes, its word, its tooltip. */
 const pill = (d) => ({ cls: d.status.className, word: d.word.textContent, title: d.status.getAttribute("title") });
 
-test("the live pill's four states are the LiveStates card's: their classes, words and tooltips, pinned", () => {
+test("the live pill's states are the LiveStates card's: their classes, words and tooltips, pinned; held is Not live with its own sentence", () => {
   assert.deepEqual(LIVE_STATES, {
     start: { cls: "live live--off", word: "Not live", title: "Not live until this page's script connects to the console's stream." },
     on: { cls: "live", word: "Live", title: null },
     retry: { cls: "live live--retry", word: "Reconnecting", title: "The page stays as it is and tries again every 2 seconds." },
     off: { cls: "live live--off", word: "Not live", title: "Not live: reload after closing another console tab." },
+    held: { cls: "live live--off", word: "Not live", title: "Not live: the console could not read all it needs for this page, so the page shows what it last read or says what is not known. It tries again by itself." },
     out: { cls: "live live--off live--out", word: "Signed out", title: null },
   });
 });

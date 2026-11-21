@@ -51,6 +51,7 @@ import * as ui from "./kit.mjs";
 // A cycle by design: `pages.mjs` draws through `shellHtml`, and this module reads the page table. Neither touches the
 // other's exports while it loads, only when a page is drawn, which ES modules allow.
 import { PAGES, pageQueryString } from "./pages.mjs";
+import { dataUnread } from "./panels/common.mjs";
 import { restartBody } from "./restart-notice.mjs";
 import { ICON_NAMES, SPRITE } from "./pulse-icons.mjs";
 import { linkContent, signInContent } from "./signin.mjs";
@@ -68,6 +69,13 @@ export const NAV_MORE = Object.freeze(["models", "audit"]);
 /** The Parked count's panel id (see the header). */
 export const NAV_PARKED_ID = "p-nav-parked";
 
+/**
+ * The live pill's attribute on a page the server drew over data it could not read (`dataUnread`, issue #962): the
+ * script starts from it, so the pill never says Live between the stream opening and the hub's first word on it.
+ */
+export const LIVE_UNREAD_ATTR = "data-unread";
+if (LIVE_UNREAD_ATTR !== "data-unread") throw new Error("shell: the live pill's unread attribute is written out in shellHtml");
+
 /** The headline's panel id (see the header): the line under a page's title that says what needs the person. */
 export const HEADLINE_ID = "p-headline";
 
@@ -80,7 +88,11 @@ export const SHELL_PANEL_IDS = Object.freeze([NAV_PARKED_ID, HEADLINE_ID]);
 /**
  * The live pill's states (the LiveStates card): its classes, its word, and the sentence in its tooltip. `start` is the
  * server's first draw, before the script has opened the stream (and what stays without a script); the script switches
- * between the other four, written from this table so its words are these. Signed out is drawn in the muted colours of
+ * between the other five, written from this table so its words are these. `held` (issue #962) is a stream that is open
+ * over a page the console could not read whole (its data, a part of it, or for `event: stale` the tokens file or a
+ * device record, so its sentence names none of them): the page then shows what it last read, or says what is not known,
+ * and a pill that said Live there would vouch for it. It is Not live's class and word with a sentence of its own, so the
+ * bar is drawn in no way it was not before. Signed out is drawn in the muted colours of
  * Not live with the sign-out glyph in place of the dot (`live--out`; the pill holds both, `SHELL_CSS` shows one), so a
  * stopped stream and an ended session do not look alike. The classes are the whole state: what the pill shows (the
  * dot, a glyph, the word) is the stylesheet's choice from them, so the script, and anything else that sets a state,
@@ -91,6 +103,7 @@ export const LIVE_STATES = Object.freeze({
   on: Object.freeze({ cls: "live", word: "Live", title: null }),
   retry: Object.freeze({ cls: "live live--retry", word: "Reconnecting", title: "The page stays as it is and tries again every 2 seconds." }),
   off: Object.freeze({ cls: "live live--off", word: "Not live", title: "Not live: reload after closing another console tab." }),
+  held: Object.freeze({ cls: "live live--off", word: "Not live", title: "Not live: the console could not read all it needs for this page, so the page shows what it last read or says what is not known. It tries again by itself." }),
   out: Object.freeze({ cls: "live live--off live--out", word: "Signed out", title: null }),
 });
 
@@ -340,7 +353,7 @@ export function shellHtml(name, ctx, inner, { headline = null, description = nul
   const parked = meta.live || String(count) !== "" ? html`<span id="${NAV_PARKED_ID}" data-panel>${count}</span>` : null;
   const start = LIVE_STATES.start;
   const glyphs = Object.entries(LIVE_GLYPHS).map(([state, glyph]) => liveGlyph(state, glyph));
-  const liveHtml = meta.live ? html`<span id="live-status" class="${start.cls}" role="status" aria-live="polite" title="${start.title}"><span class="dot"></span>${glyphs}<span data-live-word>${start.word}</span></span>` : null;
+  const liveHtml = meta.live ? html`<span id="live-status" class="${start.cls}" role="status" aria-live="polite" title="${start.title}"${dataUnread(ctx?.data) ? html` data-unread` : null}><span class="dot"></span>${glyphs}<span data-live-word>${start.word}</span></span>` : null;
   const back = ["secrets", "connections", "updates", "devices", "project"].includes(name) ? html`<a class="back" href="${PAGES.config.path}">${ui.icon("chev-l", { size: "sm" })}Configuration</a>` : name === "run" ? html`<a class="back" href="${PAGES.runs.path}">${ui.icon("chev-l", { size: "sm" })}${PAGES.runs.nav}</a>` : ["host", "venue"].includes(name) ? html`<a class="back" href="${PAGES.fleet.path}">${ui.icon("chev-l", { size: "sm" })}Fleet</a>` : null;
   const heading = title ?? (name === "run" && typeof ctx?.query?.id === "string" && ctx.query.id !== "" ? html`${ctx.query.id}` : ["host", "venue"].includes(name) && typeof ctx?.query?.name === "string" ? html`${ctx.query.name}` : meta.title);
   const reload = mayOpen(name, role) ? selfHref(name, ctx?.query) : null;

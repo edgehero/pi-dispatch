@@ -26,7 +26,8 @@ import {
   RUN_ID_RE,
   beatAgeOf,
   progressText,
-  workersOnline, plural } from "./common.mjs";
+  workersOnline, plural,
+  hostsUnread, HOSTS_UNREAD, HOSTS_UNREAD_TEXT } from "./common.mjs";
 import {
   waitingSentence,
   WAITING_CUT_TEXT,
@@ -36,6 +37,29 @@ import {
 } from "./overview.mjs";
 
 const runLink = (id) => recordLink(id, { pulse: true });
+
+// ---- unread is not empty (issue #962) ---------------------------------------------------------------------------------
+
+/** Active jobs' sentence when no queue's active list was read and none is listed: never "Nothing is running." */
+export const ACTIVE_UNREAD_TEXT = "The running jobs could not be read, so what runs is not known. The next refresh tries again.";
+
+/** The same under rows: some queues answered, so the list is a floor. */
+export const ACTIVE_PARTIAL_TEXT = "Not every queue's running jobs could be read, so more may be running.";
+
+/** Hosts' sentence under a registry whose last read showed no host and which could not be read this time. */
+export const HOSTS_LAST_EMPTY_TEXT = "No host was registered when the registry was last read.";
+
+/** Queues' note where the registry was never read: the hosts' own queues are named by it, so none of them is listed. */
+export const QUEUES_UNREAD_TEXT = "The hosts could not be read, so their own queues are not listed and what they hold is not counted.";
+
+/** Doctor's note where the registry was never read and no result is listed: the results are read for the hosts it names. */
+export const DOCTOR_HOSTS_UNREAD_TEXT = "The hosts could not be read, so which of them published doctor results is not known.";
+
+/** A schedule's stalls where the stall counters could not be read: never "0 of" the cap. */
+export const STALLS_UNREAD = "not known";
+
+/** Whether a queue's active list could not be read (the snapshot's `activeUnreachable`). */
+const activeUnread = (s) => s?.activeUnreachable === true;
 
 const list = (x) => (Array.isArray(x) ? x : []);
 const hostHref = (name) => `/fleet/host?${new URLSearchParams({ name })}`;
@@ -119,12 +143,15 @@ export const fleetBar = (v) => {
   const allPaused = queues.length > 0 && paused.length === queues.length;
   const online = workersOnline(s);
   const mismatch = v.data?.killSwitch;
-  const count = (key) =>
+  const sum = (key) =>
     Number.isFinite(s.queue?.counts?.[key])
       ? s.queue.counts[key]
       : queues.length && queues.every((q) => Number.isFinite(q.counts?.[key]))
         ? queues.reduce((n, q) => n + q.counts[key], 0)
         : "not read";
+  // With the registry never read only the shared queue was counted (the hosts' own queues are named by the registry),
+  // so each number is a floor (issue #962).
+  const count = (key) => (hostsUnread(s) && Number.isFinite(sum(key)) ? `at least ${sum(key)}` : sum(key));
   const title = !queues.length
     ? "Queue state not read"
     : partial
@@ -154,15 +181,15 @@ export const fleetBar = (v) => {
             "attention",
           )
         : null
-    }${statistic(count("active"), "active")}${statistic(count("delayed"), "delayed")}${statistic(held, "held")}${statistic(count("failed"), "awaiting retry", "failed")}</div><div class="fl-bar__btns">${partial ? act(v, "fleet-resume", "Resume the fleet", [], { small: false }) : null}${running.length || !queues.length ? act(v, "fleet-pause", "Pause the fleet", [], { small: false }) : null}${allPaused ? act(v, "fleet-resume", "Resume the fleet", [], { small: false }) : null}</div></div>${s.queue?.fleetDegraded ? ui.banner({ status: "attention", title: "Registry not read", body: html`${REGISTRY_UNREAD_TEXT} Registry rows last read ${s.hostsReadAt ? timeHtml(s.hostsReadAt) : "at an unknown time"}.`, sm: true }) : null}${!paused.length && online.none ? ui.banner({ status: "attention", title: NO_WORKER_TEXT, sm: true }) : online.staleBeats ? html`<p class="muted">${STALE_BEATS_TEXT}</p>` : null}${mismatch?.disagreement ? ui.banner({ status: "attention", title: "Two Valkeys: this console and the service disagree",
-          block: true, body: html`<p>${mismatch.disagreement}</p><p>A pause reaches both; a resume neither until they agree.</p>`, sm: true }) : null}${mismatch?.refused ? html`<div class="pp-refusal tone-refused" role="region" aria-label="Resume refused"><p class="pp-refusal__h">${ui.icon("refused")}Refused: Resume the fleet</p><p>${mismatch.refused}</p>${v.role === "operator" && Array.isArray(mismatch.resumeArgv) ? ui.cmd(mismatch.resumeArgv) : null}<p><b>Nothing was changed.</b> One queue can still be resumed on the Valkey this console read it from.</p></div>` : mismatch?.disagreement && v.role === "operator" && Array.isArray(mismatch.resumeArgv) ? ui.cmd(mismatch.resumeArgv) : null}<p class="pp-src">${ui.icon("beat", { size: "sm" })}<span>Read ${ageText(Math.max(0, v.now - Number(s.at ?? s.readAt ?? v.now)))} ago from ${v.role === "operator" ? html`<span class="code">${s.valkey ?? "the deployment's Valkey"}</span>` : "the deployment's Valkey"} and ${list(s.hostBudgets).length} hosts' registry rows. Live: this panel redraws when the fleet changes.</span></p></div>`,
+    }${statistic(count("active"), "active")}${statistic(count("delayed"), "delayed")}${statistic(held, "held")}${statistic(count("failed"), "awaiting retry", "failed")}</div><div class="fl-bar__btns">${partial ? act(v, "fleet-resume", "Resume the fleet", [], { small: false }) : null}${running.length || !queues.length ? act(v, "fleet-pause", "Pause the fleet", [], { small: false }) : null}${allPaused ? act(v, "fleet-resume", "Resume the fleet", [], { small: false }) : null}</div></div>${s.queue?.fleetDegraded ? ui.banner({ status: "attention", title: "Registry not read", body: hostsUnread(s) ? HOSTS_UNREAD_TEXT : html`${REGISTRY_UNREAD_TEXT} Registry rows last read ${s.hostsReadAt ? timeHtml(s.hostsReadAt) : "at an unknown time"}.`, sm: true }) : null}${!paused.length && online.none ? ui.banner({ status: "attention", title: NO_WORKER_TEXT, sm: true }) : online.staleBeats ? html`<p class="muted">${STALE_BEATS_TEXT}</p>` : null}${mismatch?.disagreement ? ui.banner({ status: "attention", title: "Two Valkeys: this console and the service disagree",
+          block: true, body: html`<p>${mismatch.disagreement}</p><p>A pause reaches both; a resume neither until they agree.</p>`, sm: true }) : null}${mismatch?.refused ? html`<div class="pp-refusal tone-refused" role="region" aria-label="Resume refused"><p class="pp-refusal__h">${ui.icon("refused")}Refused: Resume the fleet</p><p>${mismatch.refused}</p>${v.role === "operator" && Array.isArray(mismatch.resumeArgv) ? ui.cmd(mismatch.resumeArgv) : null}<p><b>Nothing was changed.</b> One queue can still be resumed on the Valkey this console read it from.</p></div>` : mismatch?.disagreement && v.role === "operator" && Array.isArray(mismatch.resumeArgv) ? ui.cmd(mismatch.resumeArgv) : null}<p class="pp-src">${ui.icon("beat", { size: "sm" })}<span>Read ${ageText(Math.max(0, v.now - Number(s.at ?? s.readAt ?? v.now)))} ago from ${v.role === "operator" ? html`<span class="code">${s.valkey ?? "the deployment's Valkey"}</span>` : "the deployment's Valkey"} and ${hostsUnread(s) ? html`no host's registry row: the hosts could not be read` : html`${list(s.hostBudgets).length} hosts' registry rows`}. Live: this panel redraws when the fleet changes.</span></p></div>`,
   });
 };
 
 export const fleetQueues = wrap(
   "Queues",
   (s, v) =>
-    ui.tbl({
+    html`${ui.tbl({
       label: "Queues",
       stack: true,
       heads: [
@@ -176,7 +203,7 @@ export const fleetQueues = wrap(
       rows: list(s.queueCounts).map((q) => ({
         mark: q.paused ? "attention" : null,
         cells: [
-          html`<span class="code"><b>${q.queue}</b></span><span class="reason">${q.queue === "pi-jobs" ? `shared by ${list(s.hostBudgets).length} hosts` : q.paused ? "Its host still takes shared jobs." : "its host's own queue"}</span>`,
+          html`<span class="code"><b>${q.queue}</b></span><span class="reason">${q.queue === "pi-jobs" ? (hostsUnread(s) ? `shared; its hosts are ${HOSTS_UNREAD}` : `shared by ${list(s.hostBudgets).length} hosts`) : q.paused ? "Its host still takes shared jobs." : "its host's own queue"}</span>`,
           ui.chip(q.paused ? "Paused" : "Running", {
             status: q.paused ? "attention" : "ok",
             icon: q.paused ? "pause" : "play",
@@ -197,7 +224,7 @@ export const fleetQueues = wrap(
         ],
       })),
       empty: "No queue was read.",
-    }),
+    })}${hostsUnread(s) ? html`<p class="note pp-pad">${QUEUES_UNREAD_TEXT}</p>` : null}`,
   { flush: true, sub: "Pause stops new starts; running jobs finish" },
 );
 
@@ -242,7 +269,10 @@ export const fleetActive = wrap(
           : []),
       ],
     }));
-    return ui.tbl({
+    // A list no queue answered for is not an empty list: the empty sentence stands only on a read that showed none.
+    const unread = activeUnread(s);
+    const all = [...rows, ...orphan];
+    return html`${ui.tbl({
       label: "Active jobs",
       stack: true,
       heads: [
@@ -255,15 +285,15 @@ export const fleetActive = wrap(
         "Progress",
         ...(canAct(v) ? [{ label: "Action", l: "" }] : []),
       ],
-      rows: [...rows, ...orphan],
-      empty: "Nothing is running.",
-    });
+      rows: all,
+      empty: unread ? ACTIVE_UNREAD_TEXT : "Nothing is running.",
+    })}${unread && all.length ? html`<p class="note pp-pad">${ACTIVE_PARTIAL_TEXT}</p>` : null}`;
   },
   {
     flush: true,
     sub: (s) =>
       s
-        ? `${list(s.active).length} running, ${plural(orphanRows(s).length, "slot")} held by orphans`
+        ? `${activeUnread(s) ? (list(s.active).length ? `at least ${list(s.active).length} running` : "running jobs not known") : `${list(s.active).length} running`}, ${plural(orphanRows(s).length, "slot")} held by orphans`
         : null,
   },
 );
@@ -385,7 +415,10 @@ export const fleetHosts = wrap(
   "Hosts",
   (s, v) => {
     const hosts = list(s.hostBudgets);
-    return html`${s.queue?.fleetDegraded ? html`<p class="note">${REGISTRY_UNREAD_TEXT}</p>` : null}<ul class="hosts">${hosts.map(
+    // Nothing read about the hosts is its own sentence: no "as it was last seen" over rows nobody ever saw, and no
+    // "No host is registered." (issue #962). A registry read before and not now keeps its last rows and says so.
+    const unread = hostsUnread(s);
+    return html`${unread ? html`<p class="note">${HOSTS_UNREAD_TEXT}</p>` : s.queue?.fleetDegraded ? html`<p class="note">${REGISTRY_UNREAD_TEXT}</p>` : null}<ul class="hosts">${hosts.map(
       (h) => {
         const jobs = list(h.jobs);
         const orphans = jobs.filter((j) => j.o).length;
@@ -404,11 +437,12 @@ export const fleetHosts = wrap(
             .join(", ") || "venues not published"
         }</span></span>${known ? ui.slots({ run: jobs.length - orphans, hold: orphans, free: Math.max(0, Number(h.concurrency ?? 0) - jobs.length) }) : html`<span class="faint">Free slots not known</span>`}<span class="hostrow__beat${age === null || age > 60000 ? " tone-attention" : ""}">${ui.icon("beat", { size: "sm" })}${ageText(age)}</span><span class="hostrow__p">${queue ? act(v, queue.paused ? "queue-resume" : "queue-pause", queue.paused ? "Resume" : "Pause", [["queue", queue.queue]]) : null}</span><span class="hostrow__x"><span class="${consumerFailed ? "tone-failed" : "faint"}">${consumerHealthText(h.consumerHealth)}</span>${resourceLine(h, "budgetMemMiB", "usedMemMiB", "Memory", 1024, "GiB")}${resourceLine(h, "budgetCpuCenti", "usedCpuCenti", "CPU", 100, "cores")}${!(Number(h.budgetMemMiB) > 0) && !(Number(h.budgetCpuCenti) > 0) ? html`<span class="faint">This host reports no memory or CPU figures</span>` : null}${h.budgetCpuCenti && h.budgetCpuCenti !== "off" && !Number.isFinite(Number(h.budgetCpuCenti)) ? html`<span class="faint">CPU budget unreadable.</span>` : null}<span>Running ${jobs.length ? jobs.map((j, i) => html`${i ? ", " : null}${runLink(j.id)}${j.o ? " (orphaned hold)" : ""}${j.at ? ` ${ageText(v.now - j.at)}` : ""}`) : h.jobsUnreadable || !Array.isArray(h.jobs) ? "job list unreadable" : "none listed"}${h.jobsMore ? `; ${h.jobsMore} more not listed` : ""}</span><span>Routes: ${h.routes === false || h.routes === "false" ? "Shared jobs only" : "Routed and shared jobs"}</span>${age !== null && age > 60000 ? html`<span class="tinted tone-attention">${ui.icon("attention", { size: "sm" })}Heartbeat late: ${ageText(age)} (expected within 1m)</span>` : null}</span></li>`;
       },
-    )}</ul>${!hosts.length ? html`<p>No host is registered.</p>` : null}`;
+    )}</ul>${hosts.length || unread ? null : html`<p>${s.queue?.fleetDegraded ? HOSTS_LAST_EMPTY_TEXT : "No host is registered."}</p>`}`;
   },
   {
     sub: (s) => {
       if (!s) return null;
+      if (hostsUnread(s)) return HOSTS_UNREAD;
       const hosts = list(s.hostBudgets);
       const busy = hosts.reduce((n, h) => n + list(h.jobs).length, 0);
       const complete =
@@ -444,7 +478,7 @@ export const fleetDoctor = wrap(
         Math.max(0, problems.length - DOCTOR_CHECKS_SHOWN) +
         Number(r.more ?? 0);
       return html`<div class="fl-doc"><div class="fl-doc__h"><b>${linkHost(r.name)}</b>${r.unreadable ? html`<span class="faint">Result unreadable</span>` : doctorCounts(r)}</div>${r.unreadable ? html`<p class="muted fl-doc__p">Its published result cannot be read (a worker of another version may have written it).</p>` : html`<p class="muted fl-doc__p">Doctor ran ${ageText(r.ageMs)} ago, ${doctorByText(r)}: ${doctorCountsText(r)}. Worker ${r.version ?? "version not published"}. ${r.openshell ? "The openshell venue was judged." : null}</p>${doctorStale(r) ? ui.banner({ status: "attention", title: `Stale: this result is ${ageText(r.ageMs)} old`, body: html`Older than two of this host's doctor runs (every ${r.every}h), so it may no longer describe the host. Version ${r.version ?? "not published"}, ${doctorByText(r)}.`, sm: true, icon: "clock" }) : null}${r.workerRun && !r.by?.worker ? html`<p class="muted fl-doc__p">It replaced the worker's own run${r.workerRun.uid !== undefined ? ` (uid ${r.workerRun.uid})` : ""}, so it shows another account's view of the host.</p>` : null}${problems.length ? html`<ul class="fl-chks">${problems.slice(0, DOCTOR_CHECKS_SHOWN).map((c) => html`<li class="fl-chk">${ui.chip(c.level === "fail" ? "Failing" : "Warning", { status: c.level === "fail" ? "failed" : "attention", icon: c.level === "fail" ? "failed" : "attention" })}<span class="code">${c.id}</span><span class="fl-chk__said">${c.label}</span>${c.fix ? html`<span class="fl-chk__fix"><b>Fix:</b> ${c.fix}</span>` : null}</li>`)}</ul>` : html`<p class="muted fl-doc__p">Every check passed.</p>`}${hidden ? html`<p class="muted fl-doc__p">${hidden} more not shown here; doctor on that host prints them all.</p>` : null}`}${v.role === "operator" ? html`${doctorFromSetup(v, r.name)}${ui.cmd(["pi-dispatch", "doctor"], { host: r.name })}` : html`<p class="muted fl-doc__p">Run doctor on this host to inspect these checks.</p>`}</div>`;
-    })}${silent.map((h) => html`<div class="fl-doc"><div class="fl-doc__h"><b>${linkHost(h.name)}</b><span class="faint">No doctor result published</span></div><p class="muted fl-doc__p">Run doctor on ${h.name} so this page can describe it.</p>${v.role === "operator" ? html`${doctorFromSetup(v, h.name)}${ui.cmd(["pi-dispatch", "doctor"], { host: h.name })}` : null}</div>`)}${silent.length ? html`<p class="note">No doctor result published by: ${silent.map((h) => h.name).join(", ")}.</p>` : null}${!rows.length ? html`<p class="note">No host has published doctor results yet. Each worker runs doctor a minute after it starts and then every PI_DOCTOR_INTERVAL_HOURS (24 by default).</p>` : null}${s.doctor.more ? html`<p>${s.doctor.more} more hosts published results; not every one is read.</p>` : null}`;
+    })}${silent.map((h) => html`<div class="fl-doc"><div class="fl-doc__h"><b>${linkHost(h.name)}</b><span class="faint">No doctor result published</span></div><p class="muted fl-doc__p">Run doctor on ${h.name} so this page can describe it.</p>${v.role === "operator" ? html`${doctorFromSetup(v, h.name)}${ui.cmd(["pi-dispatch", "doctor"], { host: h.name })}` : null}</div>`)}${silent.length ? html`<p class="note">No doctor result published by: ${silent.map((h) => h.name).join(", ")}.</p>` : null}${!rows.length && hostsUnread(s) ? html`<p class="note">${DOCTOR_HOSTS_UNREAD_TEXT}</p>` : !rows.length ? html`<p class="note">No host has published doctor results yet. Each worker runs doctor a minute after it starts and then every PI_DOCTOR_INTERVAL_HOURS (24 by default).</p>` : null}${s.doctor.more ? html`<p>${s.doctor.more} more hosts published results; not every one is read.</p>` : null}`;
   },
   { sub: "each host's latest health check" },
 );
@@ -457,17 +491,20 @@ export const fleetVenues = wrap(
   "Venues",
   (s) => {
     const m = venuesView(list(s.hostBudgets));
+    // With nothing read about the hosts, which host blesses a venue is not known: never "no live host".
+    const unread = hostsUnread(s);
+    const none = unread ? "not known" : "no live host";
     const property = (venue, key) =>
       venue.properties.find((p) => p.property === key);
     const feature = (venue, key) => venue.serves.find((s) => s.key === key);
-    return html`${ui.tbl({ label: "Venue properties and what each venue serves", heads: [VENUE_LABEL, "Blessed on", "Default on", "Egress", "Local folders", "Steering", "Live transcript", "Recovery", "Sandbox shell", "Credentials held by"], rows: m.venues.map((x) => [html`<b>${runVenueLink(x.name)}</b><span class="reason">${x.describe}</span>`, x.blessedOn.join(", ") || "no live host", x.defaultOn.join(", ") || "no live host", declarationChip(property(x, "egress")), declarationChip(property(x, "localFolders")), servesChip(feature(x, "steering")), servesChip(feature(x, "liveTranscript")), servesChip(feature(x, "recovery")), servesChip(feature(x, "sandboxShell")), x.custody === "layer" ? "the venue's egress layer" : "the container"]), empty: "No venue in this build." })}<div class="fl-vfoot"><span>${ui.icon("shield", { size: "sm" })}Enforced: the worker builds and verifies the boundary.</span><span>Asserted: relies on a named assertion.</span><span>Absent: promises nothing.</span>${m.floors.map(
+    return html`${ui.tbl({ label: "Venue properties and what each venue serves", heads: [VENUE_LABEL, "Blessed on", "Default on", "Egress", "Local folders", "Steering", "Live transcript", "Recovery", "Sandbox shell", "Credentials held by"], rows: m.venues.map((x) => [html`<b>${runVenueLink(x.name)}</b><span class="reason">${x.describe}</span>`, x.blessedOn.join(", ") || none, x.defaultOn.join(", ") || none, declarationChip(property(x, "egress")), declarationChip(property(x, "localFolders")), servesChip(feature(x, "steering")), servesChip(feature(x, "liveTranscript")), servesChip(feature(x, "recovery")), servesChip(feature(x, "sandboxShell")), x.custody === "layer" ? "the venue's egress layer" : "the container"]), empty: "No venue in this build." })}<div class="fl-vfoot"><span>${ui.icon("shield", { size: "sm" })}Enforced: the worker builds and verifies the boundary.</span><span>Asserted: relies on a named assertion.</span><span>Absent: promises nothing.</span>${m.floors.map(
       (f) =>
         html`<span class="fl-floor">Floor on ${f.host}: <span class="code">${Object.entries(
           f.floor,
         )
           .map(([key, word]) => `${key}=${word}`)
           .join(", ")}</span></span>`,
-    )}<a class="link" href="${venueHref("local")}#p-venue-compare">All 14 properties</a></div>${m.unpublished.length ? html`<p class="note">Not published by ${m.unpublished.join(", ")}.</p>` : null}<details class="pp-pad"><summary>OpenShell setup published by the hosts</summary>${m.venues.flatMap((x) => list(x.openshell).map((o) => html`<p class="note">${x.name} on ${o.host}: ${o.unpublished ? "not published" : (GATEWAY_TEXT[o.gateway] ?? GATEWAY_TEXT.unknown)}.</p>`))}</details>`;
+    )}<a class="link" href="${venueHref("local")}#p-venue-compare">All 14 properties</a></div>${unread ? html`<p class="note">${HOSTS_UNREAD_TEXT}</p>` : null}${m.unpublished.length ? html`<p class="note">Not published by ${m.unpublished.join(", ")}.</p>` : null}<details class="pp-pad"><summary>OpenShell setup published by the hosts</summary>${m.venues.flatMap((x) => list(x.openshell).map((o) => html`<p class="note">${x.name} on ${o.host}: ${o.unpublished ? "not published" : (GATEWAY_TEXT[o.gateway] ?? GATEWAY_TEXT.unknown)}.</p>`))}</details>`;
   },
   {
     flush: true,
@@ -492,8 +529,11 @@ export const fleetSchedulers = wrap(
         { label: "Stalls", num: true },
       ],
       rows: list(s.schedulers).map((x) => {
-        const n =
-          typeof x.key === "string" ? (s.schedulerStalls?.[x.key] ?? 0) : null;
+        // The reader keeps null for a stall counter it could not read and has no entry for a schedule that never
+        // stalled: only the second is 0.
+        const stall = typeof x.key === "string" ? s.schedulerStalls?.[x.key] : null;
+        const unread = typeof x.key === "string" && stall === null;
+        const n = typeof x.key === "string" && !unread ? (stall ?? 0) : null;
         return [
           html`<span class="code"><b>${x.key ?? "not recorded"}</b></span>`,
           project(x.project),
@@ -502,9 +542,11 @@ export const fleetSchedulers = wrap(
             ? html`${timeHtml(x.next)}<span class="reason">${x.next > v.now ? "in " : "overdue by "}${ageText(Math.abs(x.next - v.now))}</span>`
             : "not recorded",
           x.overdueMs ? ageText(x.overdueMs) : "no",
-          n === null
-            ? "unknown"
-            : `${n} of ${s.schedulerStallMax ?? "unknown"}`,
+          unread
+            ? STALLS_UNREAD
+            : n === null
+              ? "unknown"
+              : `${n} of ${s.schedulerStallMax ?? "unknown"}`,
         ];
       }),
       empty: "No schedule is registered.",

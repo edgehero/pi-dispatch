@@ -36,6 +36,7 @@ export const T = Object.freeze({
   ended: "a session that ended: Signed out, the out note and sign-in with its reason; elsewhere asks first, after a wait, reloads only into the same person and goes to sign-in as switched for anyone else; a closed transcript stream is asked about the same way, and so is a write's 401, which first says in the slot that nothing was changed; the tab signing out ignores its own end, and a sign-out not confirmed (or not answered within 10 s) keeps the page and says so once, whichever press it was",
   bothClosed: "one question at a time answers every caller: a run page's shared stream says what the answer means, and a write's 401 while a stream's question is out says so in the slot and leaves with that answer",
   stale: "stale: the page dims under the time it was last seen, says whether the tokens file or the data failed, keeps its time through a reconnect, and fresh alone takes it back",
+  unread: "a page whose data could not be read is Not live while its stream is open: on stale, on unread, on a panel and a reconnect meanwhile, and from its first byte where the server drew it so; fresh alone gives Live, and the Parked count is hidden until then",
   signIn: "sign-in: what needs the script is revealed, a refusal shows its one notice, the ended notice gives way, an older attempt's answer does nothing, and a post that reaches nothing keeps the page and retries every 2 s",
   linkEnds: "the link page: an expired code says so, and a browser already in is told that rather than sent for a new link (#849)",
   arrival: "sign-in: a browser that arrives from elsewhere and is signed in goes on, one that is not keeps the form, and the page asked for is where a token returns to (#849)",
@@ -76,6 +77,7 @@ export const CLIENT_STATES = Object.freeze([
   // States the script switches that the LiveStates ledger files as readme rows: listed so the table is whole.
   row("LiveStates", "\"Newer data is waiting\"", T.held),
   row("LiveStates", "Older data dimmed under its time", T.stale),
+  row("LiveStates", "Not live over data that could not be read", T.unread),
   row("LiveStates", "The console stopping (shutdown)", T.shutdown),
   row("LiveStates", "One token may hold 4 live tabs, a run with its transcript counts as two; past that the tab stays still and says why", T.bothClosed),
   // SignIn
