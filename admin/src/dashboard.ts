@@ -996,7 +996,7 @@ export function makeDashboard({
                 const res = typeof deps?.revertAllocation === "function" ? await deps.revertAllocation({ target }) : { outcome: "refused", reason: "no revert wired" };
                 allocNote = revertNote(res);
               } catch (err: any) {
-                allocNote = `revert failed: ${cellOf(err?.message ?? String(err))}`;
+                allocNote = err?.valkeyMayStillRun === true ? "revert not confirmed: Valkey took it and did not answer, so it may or may not have been made" : `revert failed: ${cellOf(err?.message ?? String(err))}`;
               }
               await loadAllocation();
             })();

@@ -1251,7 +1251,7 @@ test("a client's or a registry's error reaches no refusal unbounded: the planner
   };
   const fakes = { url: "redis://x", parseConnectionFn: () => ({}), timeoutMs: 200 };
   const logsDir = tempDir("pd-737-bounded-words-");
-  assert.deepEqual(await planRerun({ ...fakes, logsDir, jobId: "gh-1", redisFn: boom, queueFn: boom }), { refusal: `could not read the run or its job (${bounded}); nothing was queued` });
+  assert.deepEqual(await planRerun({ ...fakes, logsDir, jobId: "gh-1", redisFn: boom, queueFn: boom }), { refusal: `could not read the run or its job (${bounded}); nothing was queued`, unread: true });
   assert.deepEqual(await planParkedAnswer({ ...fakes, logsDir, jobId: "gh-1", text: "yes", by: "alice", triggersPath: join(logsDir, "triggers.json"), redisFn: boom, queueFn: boom }), { refusal: `could not read the parked run or its job (${bounded}); nothing was queued` });
   assert.deepEqual(await planSteer({ ...fakes, jobId: "gh-1", text: "x", by: "alice", redisFn: boom, queueFn: boom }), { refusal: `Nothing was sent: could not read the job or its inbox (${bounded})` });
   assert.deepEqual(await planSteerWithdraw({ ...fakes, jobId: "gh-1", id: "a".repeat(32), redisFn: boom, queueFn: boom }), { refusal: `could not read the job or its inbox (${bounded}); nothing was changed` });

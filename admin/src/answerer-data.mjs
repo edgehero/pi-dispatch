@@ -8,6 +8,10 @@ import { parseProjects, projectOf } from "@edgehero/pi-dispatch/projects";
 import { parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
 import { makeAnswerDraftStore, answerStandingSource, answerRuleConfigDigest, answerApiRoot } from "@edgehero/pi-dispatch/answerer";
 import { planStandingAnswerAdd, applyStandingAnswerAdd, planAnswerDraftDrop } from "./answerer-actions.mjs";
+import { boundedClient, CONFIRM_READ_TIMEOUT_MS, within } from "./job-actions.mjs";
+
+/** What a read that ran out of time answers inside the service, told apart from every value a store returns. */
+const READ_LATE = Symbol("read-late");
 
 const hash = text => createHash("sha256").update(text).digest("hex");
 const RUN_RE = /^[A-Za-z0-9._:-]{1,200}$/;
@@ -25,14 +29,36 @@ export function answererStats(rows, now) {
   return { sent: total(r => r.disposition === "as-drafted"), edited: total(r => r.disposition === "edited"), dropped: total(r => r.status === "dropped"), passed: total(r => r.status === "passed" || r.status === "classified"), jobs: kept.length, costUsd: costs.reduce((n, r) => n + r.costUsd, 0), costPartial: costs.length !== kept.length };
 }
 
-export function makeAnswererService({ paths, env = {}, fs = nodeFs, now = Date.now, redisFn = makeRedisClient, storeFn = makeAnswerDraftStore } = {}) {
-  const using = async fn => {
-    const redis = redisFn(paths.valkeyUrl);
-    // Without a listener ioredis prints a stack trace per reconnect attempt, for as long as an outage outlasts this call.
-    redis.on?.("error", () => {});
-    try { return await fn(storeFn({ redis, now, retentionDays: Number(env.PI_LOG_RETENTION_DAYS ?? 30) })); }
-    finally { redis.disconnect?.(); }
+export function makeAnswererService({ paths, env = {}, fs = nodeFs, now = Date.now, redisFn = makeRedisClient, storeFn = makeAnswerDraftStore, readTimeoutMs = CONFIRM_READ_TIMEOUT_MS } = {}) {
+  // Every path on the console's bounded client (issue #961). `timed` is for a path that only READS (the page's rows, a
+  // draft, a preview): it ends at `readTimeoutMs` whatever is still waiting, its client dropped, and what it throws
+  // carries no `valkeyMayStillRun` (a read's error has that mark as a write's does, and a confirm that read it there
+  // said a change may have been made where none was sent). NEVER for a path that carries a write (`apply`, `sent`):
+  // those time their own reads (`readInTime`) and leave the write to the client's bound.
+  const using = async (fn, { timed = false } = {}) => {
+    const redis = boundedClient(redisFn, paths.valkeyUrl);
+    const release = () => {
+      try { redis.disconnect?.(); } catch { /* already closed */ }
+    };
+    const work = Promise.resolve().then(() => fn(storeFn({ redis, now, retentionDays: Number(env.PI_LOG_RETENTION_DAYS ?? 30) })));
+    if (!timed) {
+      try { return await work; }
+      finally { release(); }
+    }
+    let got;
+    try {
+      got = await within(work, readTimeoutMs, () => READ_LATE);
+    } catch (err) {
+      throw new Error(err?.message ?? String(err));
+    } finally {
+      release();
+      work.catch(() => {});
+    }
+    if (got === READ_LATE) throw new Error(`Valkey did not answer within ${readTimeoutMs / 1000} seconds`);
+    return got;
   };
+  /** A read inside a path that also writes: its answer, or `READ_LATE` (also for a read that failed: nothing was sent). */
+  const readInTime = (reading) => within(Promise.resolve(reading).catch(() => READ_LATE), readTimeoutMs, () => READ_LATE);
   // The parsed forge configs under the keys the worker's config holds them by, for the forge table's `forgeApiRoot`.
   // Getters, so only the asked forge's loader runs, inside the catch below: a broken GitLab block in the env refuses
   // a GitLab draft and no other.
@@ -75,12 +101,12 @@ export function makeAnswererService({ paths, env = {}, fs = nodeFs, now = Date.n
         const standing = (config.standingAnswers ?? []).map(answer => ({ ...answer, used: rows.filter(r => r.sources?.some(s => s.kind === "standing" && s.id === answerStandingSource(answer).id)).length }));
         const selected = RUN_RE.test(runId ?? "") ? await currentDraft(store, rows.find(row => row.draftRunId === runId)?.runId ?? runId, config) : null;
         return { state: snapshot.state, partial: Boolean(snapshot.partial), rows, rules: (config.answerRules ?? []).map(rule => ({ ...rule, stats: answererStats(rows.filter(row => row.ruleId === rule.id), now()) })), standing, stats: answererStats(rows, now()), ...(selected ? { privateDraft: selected.draft, privateDraftProblem: selected.problem } : {}) };
-      });
+      }, { timed: true });
     },
-    async privateDraft(runId) { return RUN_RE.test(runId ?? "") ? using(async store => (await currentDraft(store, runId)).draft) : null; },
+    async privateDraft(runId) { return RUN_RE.test(runId ?? "") ? using(async store => (await currentDraft(store, runId)).draft, { timed: true }) : null; },
     async preview(name, params) {
       if (name === "standing-answer-add") return planStandingAnswerAdd({ params, paths, fs, now });
-      if (name === "answer-draft-drop") return using(async store => planAnswerDraftDrop({ params, draft: (await currentDraft(store, params.runId)).draft }));
+      if (name === "answer-draft-drop") return using(async store => planAnswerDraftDrop({ params, draft: (await currentDraft(store, params.runId)).draft }), { timed: true });
       return { refusal: "This answerer action is not available." };
     },
     async apply(name, entry) {
@@ -91,7 +117,10 @@ export function makeAnswererService({ paths, env = {}, fs = nodeFs, now = Date.n
         return applyStandingAnswerAdd({ plan: got.plan, paths, fs });
       }
       if (name === "answer-draft-drop") return using(async store => {
-        const got = planAnswerDraftDrop({ params, draft: (await currentDraft(store, params.runId)).draft });
+        // The read has an end of its own; the drop below has none but its client's, whose error says whether it was sent.
+        const read = await readInTime(currentDraft(store, params.runId));
+        if (read === READ_LATE) return { unreachable: true };
+        const got = planAnswerDraftDrop({ params, draft: read.draft });
         if (!got.plan) return { invalid: got.refusal };
         return await store.drop(params.runId, { draftRunId: params.draftRunId, draftDigest: params.digest }) ? { ok: true } : { invalid: "The draft changed before it could be dropped. Reload its run page." };
       });
@@ -99,7 +128,8 @@ export function makeAnswererService({ paths, env = {}, fs = nodeFs, now = Date.n
     },
     async sent({ runId, draftRunId, digest, text, by }) {
       return using(async store => {
-        const draft = (await currentDraft(store, runId)).draft;
+        const read = await readInTime(currentDraft(store, runId));
+        const draft = read === READ_LATE ? null : read.draft;
         if (!draft || draft.meta.draftRunId !== draftRunId || draft.digest !== digest) return false;
         return store.markSent(runId, { by, at: now(), draftRunId, draftDigest: draft.digest, disposition: hash(text) === hash(draft.draft) ? "as-drafted" : "edited" });
       });

@@ -2675,3 +2675,22 @@ test("createFleetReader on real BullMQ and ioredis: a refused judge fails the re
     await reader.dispose();
   }
 });
+
+test("a switch preview's snapshot starts the run records' read before it waits for the queue discovery, so it pays one bound and not two (#961)", async () => {
+  const { mk } = switchQueues();
+  const order = [];
+  // The run records' read is the mirror's index, the only sorted set this snapshot asks for.
+  const redisFn = () => new Proxy(readyRedis(), { get: (target, key) => (typeof key === "string" && key.startsWith("z") ? async () => (order.push("runs asked"), []) : target[key]) });
+  const reader = endingReader(mk, [], { redisFn, discoverHostQueuesFn: async () => {
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    order.push("queues discovered");
+    return [];
+  } });
+  try {
+    const s = await reader.snapshot({ switchQueues: true });
+    assert.ok(Array.isArray(s.queueCounts));
+    assert.deepEqual(order.slice(0, 2), ["runs asked", "queues discovered"], "one after the other, a Valkey that stopped answering held the preview for both bounds");
+  } finally {
+    await reader.dispose();
+  }
+});

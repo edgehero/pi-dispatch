@@ -45,6 +45,7 @@ import {
   readSubscriptions,
   writeSubscriptions,
   enqueueDispatchRun,
+  DISPATCH_RUN_COUNT_SCRIPT,
   revParseHead,
   GRAPH_LIMITS,
   cronRunStats,
@@ -1261,6 +1262,10 @@ function dispatchFakes(overrides = {}) {
         added.push({ name, data, opts });
         return {};
       },
+      // The read back after the add (`enqueueLocalJobReporting`): none stored reads as created.
+      async getJob() {
+        return undefined;
+      },
       async close() {},
     }),
     parseConnectionFn: () => ({}),
@@ -1275,12 +1280,9 @@ function dispatchFakes(overrides = {}) {
       return { gate: "allow" };
     },
     redisFn: () => ({
-      async incr(k) {
-        redisCmds.push(["incr", k]);
+      async eval(_script, _keys, k, ttl) {
+        redisCmds.push(["eval", k, ttl]);
         return 1;
-      },
-      async expire(k, s) {
-        redisCmds.push(["expire", k, s]);
       },
       disconnect() {
         redisCmds.push(["disconnect"]);
@@ -1347,8 +1349,8 @@ test("enqueueDispatchRun (aiInvoked) enqueues on the happy path: in-roots, clean
   assert.equal(gateCalls.length, 1, "flow gate consulted at the resolved sha");
   assert.equal(gateCalls[0].sha, "deadbeef", "gate uses the pre-agent HEAD sha, not a pinned one");
   assert.ok(
-    redisCmds.some((c) => c[0] === "incr"),
-    "rate limit ran its INCR",
+    redisCmds.some((c) => c[0] === "eval"),
+    "rate limit ran its count",
   );
 });
 
@@ -1434,7 +1436,7 @@ test("enqueueDispatchRun says a swallowed duplicate queued nothing, with the sha
 test("index.ts never says queued for a swallowed duplicate, on the tool or the command (#524)", () => {
   const src = readFileSync(new URL("../src/index.ts", import.meta.url), "utf8");
   const actions = readFileSync(new URL("../src/console/actions.mjs", import.meta.url), "utf8");
-  assert.match(actions, /if \(res\?\.deduplicated\) return \{ invalid: "An equivalent run is already queued; nothing new was queued\." \};/);
+  assert.match(actions, /if \(res\?\.deduplicated\) return \{ invalid: `An equivalent run is already queued; nothing new was queued\. \$\{START_USED\}` \};/);
   const adapter = readFileSync(new URL("../src/tool-actions.mjs", import.meta.url), "utf8");
   assert.match(adapter, /if \(!result\?\.ok[^]*?throw new Error\(result\?\.invalid/);
   assert.match(src, /if \(res\.deduplicated\) \{\n\s*notify\?\.\(res\.said, "info"\);\n\s*return;\n\s*\}\n\s*notify\?\.\(`queued \$\{res\.jobId\}/);
@@ -1473,12 +1475,9 @@ test("enqueueDispatchRun (aiInvoked) refuses over the per-hour rate limit; INCR-
   const env = { VALKEY_URL: "redis://x", PI_DISPATCH_RUN_ROOTS: root, PI_DISPATCH_RUN_PER_HOUR: "2" };
   const cmds = [];
   const redisFn = () => ({
-    async incr(k) {
+    async eval(_script, _keys, k) {
       cmds.push(["incr", k]);
       return 3; // already over the cap of 2
-    },
-    async expire(k, s) {
-      cmds.push(["expire", k, s]);
     },
     disconnect() {
       cmds.push(["disconnect"]);
@@ -1493,29 +1492,36 @@ test("enqueueDispatchRun (aiInvoked) refuses over the per-hour rate limit; INCR-
   assert.ok(cmds.some((c) => c[0] === "disconnect"), "redis client closed in finally");
 });
 
-test("enqueueDispatchRun rate limit sets EXPIRE only when the hour bucket is first created (count===1)", async () => {
+test("enqueueDispatchRun counts a start and sets its hour's expiry in one script on a bounded client, never as two commands (#961)", async () => {
   const { root, folder } = tempRootAndFolder("dr-expire-");
   const env = { VALKEY_URL: "redis://x", PI_DISPATCH_RUN_ROOTS: root, PI_DISPATCH_RUN_PER_HOUR: "5" };
   const cmds = [];
-  const redisFn = () => ({
-    async incr(k) {
-      cmds.push(["incr", k]);
-      return 1;
-    },
-    async expire(k, s) {
-      cmds.push(["expire", k, s]);
-    },
-    disconnect() {
-      cmds.push(["disconnect"]);
-    },
-  });
+  const made = [];
+  const redisFn = (_url, options) => {
+    made.push(options);
+    return {
+      async eval(...args) {
+        cmds.push(["eval", ...args]);
+        return 1;
+      },
+      async incr() {
+        cmds.push(["incr"]);
+        return 1;
+      },
+      async expire() {
+        cmds.push(["expire"]);
+      },
+      disconnect() {},
+    };
+  };
   const { fakes } = dispatchFakes({ env, redisFn });
   await enqueueDispatchRun({ folder, flow: "fix", task: "t", aiInvoked: true, ...fakes });
-  const key = cmds.find((c) => c[0] === "incr")[1];
-  assert.ok(
-    cmds.some((c) => c[0] === "expire" && c[1] === key),
-    "EXPIRE set on the first INCR",
-  );
+  assert.equal(cmds.length, 1, "one command: an EXPIRE of its own could be lost and leave the hour's key without an end");
+  const [name, script, keys, key, ttl] = cmds[0];
+  assert.deepEqual([name, script, keys, ttl], ["eval", DISPATCH_RUN_COUNT_SCRIPT, 1, 7200]);
+  assert.match(key, /^dispatch-run:\d{4}-\d{2}-\d{2}-\d{2}$/);
+  assert.match(DISPATCH_RUN_COUNT_SCRIPT, /INCR[\s\S]*EXPIRE/);
+  assert.deepEqual(made, [{ commandTimeoutMs: 5000, disconnectTimeoutMs: 0 }], "the console's bounded client");
 });
 
 test("enqueueDispatchRun (aiInvoked) refuses entirely when the per-hour cap is 0, without touching redis", async () => {
@@ -1534,24 +1540,39 @@ test("enqueueDispatchRun (aiInvoked) refuses entirely when the per-hour cap is 0
   assert.equal(redisTouched, false, "a disabled tool refuses without opening a redis connection");
 });
 
-test("enqueueDispatchRun returns { unreachable } and closes the queue when the enqueue fails", async () => {
+test("enqueueDispatchRun says a run may or may not have been queued when its add was started and threw, and nothing was queued only of Valkey's own refusal (#961)", async () => {
   const { root, folder } = tempRootAndFolder("dr-unreach-");
   const env = { VALKEY_URL: "redis://x", PI_DISPATCH_RUN_ROOTS: root, PI_DISPATCH_RUN_PER_HOUR: "3" };
-  let closed = false;
-  const { fakes } = dispatchFakes({
-    env,
-    makeQueueFn: () => ({
-      async add() {
-        throw new Error("connection down");
-      },
-      async close() {
-        closed = true;
-      },
-    }),
-  });
-  const res = await enqueueDispatchRun({ folder, flow: "fix", task: "t", aiInvoked: true, ...fakes });
-  assert.match(res.unreachable, /connection down/);
-  assert.equal(closed, true, "queue closed in finally even on error");
+  const failing = (error) => {
+    const seen = { closed: false };
+    const { fakes } = dispatchFakes({
+      env,
+      makeQueueFn: () => ({
+        async add() {
+          throw error;
+        },
+        async close() {
+          seen.closed = true;
+        },
+      }),
+    });
+    return { fakes, seen };
+  };
+  // Whatever an add throws once it was started, but Valkey's own answer: the run may be queued, so never "unreachable",
+  // which every surface words as nothing changed.
+  for (const error of [new Error("connection down"), Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT", valkeyMayStillRun: true })]) {
+    const { fakes, seen } = failing(error);
+    const res = await enqueueDispatchRun({ folder, flow: "fix", task: "t", aiInvoked: true, ...fakes });
+    assert.deepEqual(res, { invalid: "the run may or may not have been queued: the queue did not confirm it. Preview it again first: the preview says when one is already queued or running", partial: true });
+    assert.equal(seen.closed, true, "queue closed in finally even on error");
+  }
+  const { fakes, seen } = failing(Object.assign(new Error("READONLY You can't write against a read only replica."), { name: "ReplyError" }));
+  const refused = await enqueueDispatchRun({ folder, flow: "fix", task: "t", aiInvoked: true, ...fakes });
+  assert.deepEqual(refused, { invalid: "Nothing was queued and one start of this hour's dispatch_run allowance was used: READONLY You can't write against a read only replica", partial: true });
+  // The operator's own run counts nothing against the hour, so its refusal stays the plain one.
+  const plain = failing(Object.assign(new Error("READONLY"), { name: "ReplyError" }));
+  assert.deepEqual(await enqueueDispatchRun({ folder, flow: "fix", task: "t", aiInvoked: false, ...plain.fakes }), { unreachable: "READONLY; nothing was queued" });
+  assert.equal(seen.closed, true);
 });
 
 test("enqueueDispatchRun (operator, aiInvoked:false) skips allowlist/gate/rate-limit but STILL refuses a dirty tree", async () => {
@@ -3061,7 +3082,7 @@ test("enqueueDispatchRun routes onto this host's queue by the worker name the re
     env: { VALKEY_URL: "redis://x", PI_DISPATCH_RUN_PER_HOUR: "3", PI_DISPATCH_RUN_ROOTS: root, PI_WORKER_NAME: "mini1" },
     makeQueueFn: (_conn, opts) => {
       names.push(opts?.name ?? null);
-      return { async add() { return {}; }, async close() {} };
+      return { async add() { return {}; }, async getJob() { return undefined; }, async close() {} };
     },
   });
   const res = await enqueueDispatchRun({ folder, flow: "review", task: "t", aiInvoked: false, ...fakes });

@@ -2,7 +2,7 @@
  * neither a console's local timezone nor an arbitrary live host is evidence of the scheduler's owning clock. */
 import { makeRedisClient, parseConnection } from "@edgehero/pi-dispatch/connection";
 import { HOST_SET, HOST_TTL_MS, HOST_BEAT_MS, HOST_SKEW_CLAIM_MS, hostKey } from "@edgehero/pi-dispatch/host-registry";
-import { QUEUE, fleetQueueNames, hostQueueName, makeQueue } from "@edgehero/pi-dispatch/queue";
+import { QUEUE, consoleQueueConnection, fleetQueueNames, hostQueueName, makeQueue } from "@edgehero/pi-dispatch/queue";
 
 export const SCHEDULE_ZONE_LIMITS = Object.freeze({ queues: 64, schedulers: 1024 });
 const unknown = "The scheduler's owning timezone could not be verified.";
@@ -88,7 +88,11 @@ export async function readScheduleHosts({ url, now = () => Date.now(), timeoutMs
   finally { redis?.disconnect?.(); }
 }
 
-/** Every queue client, scheduler read and close has a bound, including BullMQ's separate scheduler connection. */
+/**
+ * Every queue client, scheduler read and close has a bound, including BullMQ's separate scheduler connection. The queues
+ * are the console's bounded kind (`consoleQueueConnection`, issue #961), so a read a Valkey took and never answered
+ * ends at its client too and is not left waiting behind this function's own timer.
+ */
 export async function readTriggerScheduleZones({ url, triggers = [], now = () => Date.now(), timeoutMs = 2000, readHostsFn = readScheduleHosts, makeQueueFn = makeQueue, parseConnectionFn = parseConnection } = {}) {
   let hosts;
   const opened = [];
@@ -99,7 +103,7 @@ export async function readTriggerScheduleZones({ url, triggers = [], now = () =>
     const names = fleetQueueNames(hosts);
     const queues = await Promise.all(names.slice(0, SCHEDULE_ZONE_LIMITS.queues).map(async (name) => {
       try {
-        const q = makeQueueFn(parseConnectionFn(url, { failFast: true }), { name });
+        const q = makeQueueFn(consoleQueueConnection(url, parseConnectionFn), { name });
         opened.push(q);
         const schedulers = await bounded(async () => { await q.client; return q.getJobSchedulers(0, SCHEDULE_ZONE_LIMITS.schedulers, true); }, timeoutMs, null);
         return { name, schedulers };

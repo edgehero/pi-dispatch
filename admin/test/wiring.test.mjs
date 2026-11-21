@@ -1660,6 +1660,18 @@ test("index.ts resolves paths and the worker name only through deploymentEnv (#4
   assert.match(adapter, /killSwitchPlan\(\{ paused, env \}\)/);
   assert.doesNotMatch(src, /process\.env\.PI_WORKER_NAME/);
   assert.match(src, /enqueueDispatchRun\(\{ folder, flow, task, aiInvoked: false, env: deploymentEnv\(\) \}\)/);
+  // Issue #961: a run that was sent and not confirmed (`{ invalid, partial }`) is said in the funnel's words BEFORE the
+  // line that prints "queued <id>", which it has no id for, and its audit row is a failed one.
+  const runCase = src.slice(src.indexOf('case "run": {'), src.indexOf('case "logs":'));
+  assert.ok(runCase.indexOf('typeof res.invalid === "string"') > 0 && runCase.indexOf('typeof res.invalid === "string"') < runCase.indexOf("queued ${res.jobId}"), "the partial answer has its own branch, ahead of queued");
+  assert.match(runCase, /res\.invalid\.replace\(LOOK_FIRST, "Look at \/dispatch status before running it again"\)/, "the command has no preview, so its line does not send a person to one");
+  assert.match(src, /function enqueueFailure\(res: any\): string \| null \{[\s\S]{0,400}typeof res\?\.invalid === "string" && res\.invalid !== ""\) return res\.invalid;/);
+  // A budget write Valkey took and did not answer is said as may or may not, in the command's line and the panel's note.
+  assert.match(src, /priorities: \$\{scrubControls\(String\(err\?\.message \?\? err\)\)\}\$\{err\?\.valkeyMayStillRun === true \? "; Valkey did not confirm the plan, so it may or may not have been applied\. Look at \/dispatch priorities once Valkey answers" : ""\}/);
+  const dashboard = readFileSync(new URL("../src/dashboard.ts", import.meta.url), "utf8");
+  assert.match(dashboard, /allocNote = err\?\.valkeyMayStillRun === true \? "revert not confirmed: Valkey took it and did not answer, so it may or may not have been made" : `revert failed: /);
+  const tools = readFileSync(new URL("../src/tool-actions.mjs", import.meta.url), "utf8");
+  assert.match(tools, /r\?\.ok === true \? null : r\?\.partial === true \? "action-unconfirmed" : "action-refused"/, "a tool's audit row does not call a write that may have landed refused");
   const actions = readFileSync(new URL("../src/console/actions.mjs", import.meta.url), "utf8");
   assert.match(actions, /checkDispatchRun\(\{ folder, flow, env, aiInvoked: true,/);
   assert.match(src, /executeToolAction\(definition.name, params, ctx, \{ paths, env, grantsEnv, granted, deploymentDir: pointerState\(\)\.deploymentDir/);

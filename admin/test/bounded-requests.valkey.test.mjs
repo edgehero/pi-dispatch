@@ -1,0 +1,494 @@
+// Issue #961 against a LIVE Valkey (VALKEY_TEST_URL, required in CI) that stops answering, as `kill -STOP` leaves it:
+// through a proxy that holds the bytes both ways and passes them on a thaw. Each paid enqueue is stopped at its add and
+// before its connect, the allowance at its count, Fire now at its latch, the package facts at a canary's read, and the
+// budget writes at their own command. After the thaw the number of jobs is what the sentence allowed: none where it
+// said nothing was queued, none or one where it said may or may not.
+import test from "node:test";
+import assert from "node:assert/strict";
+import { createHash, randomBytes } from "node:crypto";
+import { mkdirSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { makeRedisClient, parseConnection } from "@edgehero/pi-dispatch/connection";
+import { makeQueue } from "@edgehero/pi-dispatch/queue";
+import { publishLook, updatesCanaryKey } from "@edgehero/pi-dispatch/updates";
+import { makeQuestionGroupStore } from "@edgehero/pi-dispatch/question-groups";
+import { freezingProxy } from "../../worker/test/helpers/freezing-proxy.mjs";
+import { commandOn, trippingProxy } from "./helpers/tripping-proxy.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
+import { DISPATCH_RUN_COUNT_SCRIPT, applyPriorities, checkDispatchRun, enqueueDispatchRun, enqueueParkedAnswer, enqueueRerun, envelopeDigestUnconfirmed, planEnvelopeWrite, planParkedAnswer, planRerun, readEnvelope, revertAllocation, writeEnvelope } from "../src/read-model.mjs";
+import { dispatchRunAlready, enqueueUnconfirmed } from "../src/job-actions.mjs";
+import { enqueueTriggerFire, FIRE_UNCONFIRMED, planTriggerFire } from "../src/trigger-fire.mjs";
+import { readUpdates } from "../src/updates-view.mjs";
+import { GROUP_STATUS_UNANSWERED, GROUP_UNCONFIRMED, makeZeroTouchService } from "../src/zero-touch-data.mjs";
+
+const VALKEY = process.env.VALKEY_TEST_URL;
+// CI sets this, which turns a missing URL into a failure rather than a quiet skip.
+if (!VALKEY && process.env.PI_DISPATCH_REQUIRE_WORKER_TESTS) throw new Error("bounded-requests.valkey.test REQUIRES VALKEY_TEST_URL when PI_DISPATCH_REQUIRE_WORKER_TESTS is set");
+const live = { skip: VALKEY ? false : "needs VALKEY_TEST_URL (CI sets it)", timeout: 120_000 };
+
+// Database 3, shared with the receiver's steer test: every queue, key and run id here carries a tag of its own, and
+// each test deletes what it wrote and never flushes.
+const databaseUrl = () => {
+  const url = new URL(VALKEY);
+  url.pathname = "/3";
+  return url.href;
+};
+
+// The clients' command bound is shortened here (the console's is 5 s), and so is a connect's; everything else is the
+// real functions, BullMQ and ioredis.
+const BOUND = 400;
+const CONNECT = 600;
+const boundedHere = (url, options = {}) => parseConnection(url, { ...options, ...(options.commandTimeoutMs ? { commandTimeoutMs: BOUND } : {}) });
+const clientHere = (url, options = {}) => makeRedisClient(url, { ...options, ...(options.commandTimeoutMs ? { commandTimeoutMs: BOUND } : {}) });
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+/** An answer and how long it took; a throw is its answer too. */
+const clocked = async (promise) => {
+  const t0 = Date.now();
+  const res = await promise.then((value) => value, (error) => ({ thrown: error }));
+  return { res, ms: Date.now() - t0 };
+};
+const stoppedAt = (frozen) => Promise.race([frozen.then(() => "stopped"), sleep(1000).then(() => "never sent")]);
+
+/** One test's own corner of the database: a tag, a direct client, direct queues, and the deletion of what it wrote. */
+async function scene() {
+  const url = databaseUrl();
+  const tag = `t961-${randomBytes(5).toString("hex")}`;
+  const redis = makeRedisClient(url, {});
+  const closers = [];
+  const patterns = [`bull:pi-jobs@${tag}:*`, `*${tag}*`];
+  return {
+    url, tag, redis,
+    queueName: `pi-jobs@${tag}`,
+    queue(name = `pi-jobs@${tag}`) {
+      const q = makeQueue(parseConnection(url, { failFast: true }), { name });
+      closers.push(() => q.close().catch(() => {}));
+      return q;
+    },
+    /** How many jobs `name` holds in any state, read on a connection the proxy is not on. */
+    async jobs(name = `pi-jobs@${tag}`) {
+      const counts = await this.queue(name).getJobCounts();
+      return Object.values(counts).reduce((n, c) => n + c, 0);
+    },
+    own(...more) {
+      patterns.push(...more);
+    },
+    onDone(fn) {
+      closers.push(fn);
+    },
+    async done() {
+      // Until none is left: a closer may open a queue of its own to remove a job.
+      while (closers.length > 0) for (const close of closers.splice(0).reverse()) await Promise.resolve().then(close).catch(() => {});
+      for (const pattern of patterns) {
+        const keys = await redis.keys(pattern);
+        if (keys.length > 0) await redis.del(...keys);
+      }
+      redis.disconnect();
+    },
+  };
+}
+
+// BullMQ's add as it leaves: an EVAL of its add script, whose text fills the first chunks (the job's own arguments come
+// in a later one), so the stop is at the script's first bytes and the whole command is held.
+const THE_ADD = /\r\n\$4\r\neval\r\n\$\d+\r\n--\[\[\s+Adds a (?:\w+ )?job/i;
+
+/** The three paid enqueues that take a plan or fields: each as `(scene, url) => answer`, its add's own bytes, and its name. */
+const ENQUEUES = [
+  {
+    name: "a re-run", what: (s) => `the re-run of local-${s.tag}`,
+    run: (s, url, extra = {}) => enqueueRerun({ kind: "local", jobId: `local-${s.tag}`, queue: s.queueName, job: { folder: `/srv/${s.tag}`, flow: "fix", task: "t" } }, { url, parseConnectionFn: boundedHere, localRepoProblemFn: () => null, gitDirtyFn: () => false, ...extra }),
+  },
+  {
+    name: "a parked answer", what: (s) => `the answer to gh-${s.tag}`,
+    run: (s, url, extra = {}) => enqueueParkedAnswer({
+      kind: "parked-answer", jobId: `gh-${s.tag}`, forge: "github", queue: s.queueName,
+      job: { repo: `acme/${s.tag}`, target: { type: "issue", number: 7, title: "t", body: "b" }, flow: "fix", resume: true, parkedReply: true, console: { by: "ops" }, trigger: { event: "issue_comment", action: "created", deliveryId: "console-0123456789abcdef", sender: { id: null }, matched: { index: 0, type: "comment", phrase: "/pi" }, comment: { body: "yes" } } },
+    }, { url, parseConnectionFn: boundedHere, ...extra }),
+  },
+  {
+    name: "a dispatch run", what: () => "the run",
+    run: (s, url, extra = {}) => enqueueDispatchRun({ folder: `/srv/${s.tag}`, flow: "fix", task: "t", aiInvoked: false, env: { VALKEY_URL: url, PI_WORKER_NAME: s.tag }, parseConnectionFn: boundedHere, gitDirtyFn: () => false, localRepoProblemFn: () => null, ...extra }),
+  },
+];
+
+for (const enqueue of ENQUEUES) {
+  test(`${enqueue.name} on a Valkey that stops answering at its add says may or may not, within the client's bound, and at most one job is there after the wake (#961)`, live, async () => {
+    const s = await scene();
+    const proxy = await trippingProxy(s.url);
+    try {
+      const frozen = proxy.freezeAt(THE_ADD);
+      const got = await clocked(enqueue.run(s, proxy.url));
+      assert.equal(await stoppedAt(frozen), "stopped", "Valkey stopped answering at the add");
+      assert.deepEqual(got.res, enqueueUnconfirmed(enqueue.what(s)), JSON.stringify(got.res?.thrown?.message ?? got.res));
+      assert.ok(got.ms < BOUND + 2500, `the client's bound decided, not a wait for Valkey (${got.ms} ms)`);
+      assert.equal(await s.jobs(), 0, "nothing reached Valkey while it did not answer");
+      proxy.thaw();
+      await sleep(700);
+      const after = await s.jobs();
+      assert.ok(after === 0 || after === 1, `none or one after the wake, never two (${after})`);
+    } finally {
+      proxy.close();
+      await s.done();
+    }
+  });
+
+  test(`${enqueue.name} on a Valkey that answers no connection says nothing was queued within the connect bound, and nothing is queued after the wake (#961)`, live, async () => {
+    const s = await scene();
+    const proxy = await freezingProxy(s.url);
+    try {
+      proxy.freeze();
+      const got = await clocked(enqueue.run(s, proxy.url, { connectTimeoutMs: CONNECT }));
+      assert.deepEqual(got.res, { unreachable: `the queue did not connect within ${CONNECT / 1000} seconds; nothing was queued` }, JSON.stringify(got.res?.thrown?.message ?? got.res));
+      assert.ok(got.ms < CONNECT + 2000, `${got.ms} ms`);
+      proxy.thaw();
+      await sleep(1500);
+      assert.equal(await s.jobs(), 0, "nothing was sent, and nothing is sent when the connection comes up");
+    } finally {
+      proxy.close();
+      await s.done();
+    }
+  });
+}
+
+test("a re-run's add that Valkey took before it stopped answering is a job after the wake: may or may not was the true sentence (#961)", live, async () => {
+  const s = await scene();
+  const proxy = await trippingProxy(s.url);
+  try {
+    // What the next preview looks for: a run of this flow in this folder on this host's queue. None yet.
+    const look = () => dispatchRunAlready({ url: s.url, folder: `/srv/${s.tag}`, flow: "fix", env: { PI_WORKER_NAME: s.tag }, parseConnectionFn: boundedHere });
+    // A cron trigger on this folder and flow: its next tick waits in the queue for its time, and is no run "already queued".
+    await s.queue().upsertJobScheduler(`tick-${s.tag}`, { pattern: "0 6 * * *" }, { name: "local", data: { kind: "local", folder: `/srv/${s.tag}`, flow: "fix" } });
+    assert.equal(await s.jobs(), 1, "the tick is there");
+    assert.equal(await look(), null, "nothing but the tick is queued, so a preview says nothing");
+    const frozen = proxy.freezeAt(THE_ADD);
+    const got = await clocked(ENQUEUES[0].run(s, proxy.url));
+    assert.equal(await stoppedAt(frozen), "stopped");
+    assert.equal(got.res.partial, true, JSON.stringify(got.res));
+    // The wake comes before the queue's connection is dropped (its close has a second), so the bytes Valkey had been
+    // sent are run, as on a `kill -CONT`.
+    proxy.thaw();
+    let jobs = 0;
+    for (const until = Date.now() + 3000; Date.now() < until && jobs < 2; await sleep(50)) jobs = await s.jobs();
+    assert.equal(jobs, 2, "the run the answer could not confirm was queued, beside the tick");
+    // A minute later its id would be another, and a second confirm a second paid run: the preview says one is there.
+    const already = await look();
+    assert.match(already?.jobId ?? "", /^local-[a-f0-9]{16}$/, JSON.stringify(already));
+    assert.ok(Number.isFinite(already.queuedAt));
+  } finally {
+    proxy.close();
+    await s.done();
+  }
+});
+
+test("the hour's count is one script: its expiry is set with the first count and on a key found without one, and a count Valkey took and did not answer says a start may be used (#961)", live, async () => {
+  const s = await scene();
+  const proxy = await trippingProxy(s.url);
+  const root = realpathSync(tempDir("pd-961-count-"));
+  const folder = join(root, "repo");
+  mkdirSync(folder);
+  // An hour of this test's own, far from any other test's clock.
+  const at = Date.UTC(2040 + Math.floor(Math.random() * 40), Math.floor(Math.random() * 12), 1 + Math.floor(Math.random() * 27), Math.floor(Math.random() * 24));
+  const key = `dispatch-run:${new Date(at).toISOString().slice(0, 13).replace("T", "-")}`;
+  s.own(key);
+  const deps = (url) => ({ folder, flow: "fix", env: { VALKEY_URL: url, PI_DISPATCH_RUN_ROOTS: root, PI_DISPATCH_RUN_PER_HOUR: "9" }, gitDirtyFn: () => false, localRepoProblemFn: () => null, revParseHeadFn: () => "deadbeef", readFlowGateFn: async () => ({ gate: "allow" }), now: () => at, redisFn: clientHere });
+  try {
+    assert.deepEqual(await checkDispatchRun(deps(s.url)), {});
+    assert.equal(await s.redis.get(key), "1");
+    const ttl = await s.redis.ttl(key);
+    assert.ok(ttl > 0 && ttl <= 7200, `the first count sets the hour's end (${ttl})`);
+    // A key left without an end (the two-command form lost its EXPIRE) is given one by the next count.
+    await s.redis.persist(key);
+    assert.equal(await s.redis.ttl(key), -1);
+    assert.equal(Number(await s.redis.eval(DISPATCH_RUN_COUNT_SCRIPT, 1, key, 7200)), 2);
+    assert.ok((await s.redis.ttl(key)) > 0);
+    // A preview reads and counts nothing.
+    assert.deepEqual(await checkDispatchRun({ ...deps(s.url), consumeRate: false }), {});
+    assert.equal(await s.redis.get(key), "2");
+    const frozen = proxy.freezeAt(/\r\n\$4\r\neval\r\n[\s\S]*INCR/i);
+    const got = await clocked(checkDispatchRun(deps(proxy.url)));
+    assert.equal(await stoppedAt(frozen), "stopped", "Valkey stopped answering at the count");
+    assert.deepEqual(got.res, { unreachable: "Command timed out", allowanceMayBeUsed: true });
+    assert.ok(got.ms < BOUND + 2000, `${got.ms} ms`);
+    assert.equal(await s.redis.get(key), "2", "nothing reached Valkey while it did not answer");
+    proxy.thaw();
+    await sleep(400);
+    assert.ok(["2", "3"].includes(await s.redis.get(key)), "used or not, never twice");
+    // A Valkey that answers no connection: the count was never sent, so nothing can have been used.
+    proxy.freeze();
+    const unsent = await clocked(checkDispatchRun(deps(proxy.url)));
+    assert.deepEqual(unsent.res, { unreachable: "Command timed out" });
+    assert.ok(unsent.ms < BOUND + 2000, `${unsent.ms} ms`);
+  } finally {
+    proxy.close();
+    await s.done();
+  }
+});
+
+test("Fire now on a Valkey that stops answering at its latch or its add queues at most one run and says which may have happened (#961)", live, async () => {
+  const s = await scene();
+  const proxy = await trippingProxy(s.url);
+  const dir = tempDir("pd-961-fire-");
+  const folder = join(dir, "repo");
+  mkdirSync(folder);
+  const triggersPath = join(dir, "triggers.json");
+  writeFileSync(triggersPath, JSON.stringify({ triggers: [{ on: { type: "cron", id: `daily-${s.tag}`, pattern: "0 6 * * *" }, run: { kind: "local", folder, flow: "fix", task: "t", maxCostUsd: "1" } }] }));
+  let instant = Date.UTC(2026, 9, 20, 12, 0, 10);
+  const admissions = [];
+  const options = (url) => ({ index: 0, url, triggersPath, env: { PI_WORKER_NAME: s.tag, PI_MAX_COST_USD: "2" }, grantsEnv: {}, now: () => instant, parseConnectionFn: boundedHere, redisFn: clientHere, admissionFn: async (args) => (admissions.push(args.consumeRate), {}) });
+  try {
+    await s.queue().upsertJobScheduler(`daily-${s.tag}`, { pattern: "0 6 * * *" }, { name: "local", data: { kind: "local", folder, flow: "fix" } });
+    const base = await s.jobs();
+    const { plan, already: before } = await planTriggerFire({ ...options(s.url), lookAlready: true });
+    assert.ok(plan, "the plan reads the real scheduler");
+    assert.equal(before, null, "the scheduler's own next tick waits in the queue and is no hand fire");
+    // The latch: nothing was queued, and the minute may be taken.
+    const latch = proxy.freezeAt(commandOn("set", `trigger-fire:${s.queueName}:`));
+    const lost = await clocked(enqueueTriggerFire(plan, options(proxy.url)));
+    assert.equal(await stoppedAt(latch), "stopped", "Valkey stopped answering at the latch");
+    assert.deepEqual(lost.res, { invalid: "Nothing was queued, one start of this hour was used, and this minute's Fire now may be taken: its latch was sent and did not answer. Try again next minute.", partial: true });
+    assert.ok(lost.ms < BOUND + 2500, `${lost.ms} ms`);
+    proxy.thaw();
+    await sleep(500);
+    assert.equal(await s.jobs(), base, "no run was queued");
+    // The add, in a minute of its own: a run may have been queued, and at most one is.
+    instant += 120_000;
+    const add = proxy.freezeAt(THE_ADD);
+    const unconfirmed = await clocked(enqueueTriggerFire(plan, options(proxy.url)));
+    assert.equal(await stoppedAt(add), "stopped", "Valkey stopped answering at the add");
+    assert.deepEqual(unconfirmed.res, { invalid: FIRE_UNCONFIRMED, partial: true });
+    assert.ok(unconfirmed.ms < BOUND + 2500, `${unconfirmed.ms} ms`);
+    assert.equal(await s.jobs(), base, "nothing reached Valkey while it did not answer");
+    proxy.thaw();
+    let after = 0;
+    for (const until = Date.now() + 3000; Date.now() < until && after === 0; await sleep(50)) after = (await s.jobs()) - base;
+    assert.equal(after, 1, "the add Valkey had been sent ran at the wake");
+    // The next preview says a hand fire is already queued, by its id.
+    const second = await planTriggerFire({ ...options(s.url), lookAlready: true });
+    assert.match(second.already?.jobId ?? "", new RegExp(`^manual:daily-${s.tag}:\\d+$`), JSON.stringify(second.already));
+    // The same minute again: its latch is held, so a second try cannot queue a second run.
+    const again = await enqueueTriggerFire(plan, options(s.url));
+    assert.equal(again.deduplicated, true, JSON.stringify(again));
+    assert.equal((await s.jobs()) - base, after);
+    // A Valkey that answers no connection: the preview ends at its bound, and a fire uses neither count nor latch.
+    instant += 120_000;
+    proxy.freeze();
+    const preview = await clocked(planTriggerFire({ ...options(proxy.url), planTimeoutMs: CONNECT }));
+    assert.deepEqual(preview.res, { unreachable: "The deployment's queue could not be read. Nothing was queued." });
+    assert.ok(preview.ms < CONNECT + 2000, `${preview.ms} ms`);
+    const counted = admissions.filter((consume) => consume === true).length;
+    const fire = await clocked(enqueueTriggerFire(plan, { ...options(proxy.url), planTimeoutMs: CONNECT, connectTimeoutMs: CONNECT }));
+    assert.deepEqual(fire.res, { unreachable: "The deployment's queue could not be read. Nothing was queued." });
+    assert.equal(admissions.filter((consume) => consume === true).length, counted, "the hour's allowance was not counted");
+    proxy.thaw();
+    await sleep(600);
+    assert.equal((await s.jobs()) - base, after);
+  } finally {
+    proxy.close();
+    await s.done();
+  }
+});
+
+test("the previews of a re-run and a parked answer end at their bound on a Valkey that answers no connection (#961)", live, async () => {
+  const s = await scene();
+  const proxy = await freezingProxy(s.url);
+  const logsDir = tempDir("pd-961-plan-logs-");
+  const triggersPath = join(tempDir("pd-961-plan-triggers-"), "triggers.json");
+  writeFileSync(triggersPath, JSON.stringify({ triggers: [] }));
+  try {
+    proxy.freeze();
+    const common = { url: proxy.url, logsDir, parseConnectionFn: boundedHere, redisFn: clientHere, planTimeoutMs: CONNECT };
+    const rerun = await clocked(planRerun({ ...common, jobId: `gh-${s.tag}` }));
+    const parked = await clocked(planParkedAnswer({ ...common, jobId: `gh-${s.tag}`, text: "yes", by: "ops", triggersPath }));
+    for (const got of [rerun, parked]) {
+      assert.match(String(got.res.refusal), /nothing was queued$|could not be read|not read/, JSON.stringify(got.res));
+      assert.ok(got.ms < CONNECT + 2000, `${got.ms} ms`);
+    }
+  } finally {
+    proxy.close();
+    await s.done();
+  }
+});
+
+test("readUpdates on a Valkey that stops answering at a canary's facts says those facts were not read, in one bound, with every package in order (#961)", live, async () => {
+  const s = await scene();
+  const proxy = await trippingProxy(s.url);
+  s.own("updates:*");
+  const names = [`pi-a-${s.tag}`, `pi-b-${s.tag}`];
+  const at = Date.now();
+  const through = clientHere(proxy.url, {});
+  s.onDone(() => through.disconnect());
+  try {
+    await publishLook(s.redis, { v: 1, host: `host-${s.tag}`, at, everyHours: 24, pi: { pinned: "1.5.0", newest: "1.5.0", read: "ok", checks: null }, hostPi: { version: "1.5.0", tested: "1.5.0", state: "same", needles: "ok", extension: "ok" }, packages: names.map((name) => ({ name, version: "1.0.0", newest: "1.1.0", read: "ok" })) });
+    const staged = { packages: names.map((name) => ({ name, version: "1.0.0", dir: `${name}--1.0.0--aaaaaaaa`, from: "pi-packages" })) };
+    const whole = await readUpdates({ redis: through, staged, now: at });
+    assert.deepEqual([whole.state, whole.factsUnread, whole.packages.map((p) => p.name)], ["looking", false, names]);
+    const frozen = proxy.freezeAt(commandOn("get", updatesCanaryKey(names[0], "1.1.0").slice(0, 15)));
+    const got = await clocked(readUpdates({ redis: through, staged, now: at }));
+    assert.equal(await stoppedAt(frozen), "stopped", "Valkey stopped answering at a canary's facts");
+    assert.equal(got.res.factsUnread, true, "asked for and not answered is not the same as none published");
+    assert.deepEqual(got.res.packages.map((p) => p.name), names);
+    assert.ok(got.ms < 4500, `one bound, not one per read (${got.ms} ms)`);
+  } finally {
+    proxy.thaw();
+    proxy.close();
+    await s.done();
+  }
+});
+
+test("the budget writes on a Valkey that stops answering: an envelope's digest, a priorities plan and a revert say may or may not, and none of them waits for the wake (#961)", live, async () => {
+  const s = await scene();
+  const proxy = await trippingProxy(s.url);
+  const prefix = `alloc-${s.tag}`;
+  const dir = tempDir("pd-961-budget-");
+  const files = { projects: join(dir, "projects.json"), envelope: join(dir, "envelope.json"), logs: join(dir, "logs") };
+  writeFileSync(files.projects, JSON.stringify({ version: 1, projects: [{ id: "shop", members: ["github:acme/web"] }, { id: "platform", members: ["github:acme/infra"] }] }));
+  writeFileSync(files.envelope, JSON.stringify({ version: 1, window: "week", totalUsd: "100", floorsUsd: { shop: "10", platform: "10", _other: "0" }, defaultWeights: { shop: 1, platform: 1, _other: 0 }, delegation: { enabled: true, writers: ["operator-session"], maxStepPct: 25, minIntervalHours: 24, maxPlanDays: 14 } }));
+  const before = readFileSync(files.envelope, "utf8");
+  const r = readEnvelope({ envelopeFile: files.envelope, projectsPath: files.projects, maxCostMicros: 2_000_000 });
+  const NOW = Date.parse("2026-10-05T12:00:00Z");
+  const alloc = (url) => ({ url, envelope: r.envelope, digest: r.digest, projects: r.projects, host: "live", logsDir: files.logs, now: new Date(NOW), prefix, redisFn: clientHere, connectTimeoutMs: CONNECT });
+  const envelope = (url) => ({ envelopeFile: files.envelope, projectsPath: files.projects, maxCostMicros: 2_000_000, change: { totalUsd: "90" }, url, prefix, redisFn: clientHere, connectTimeoutMs: CONNECT });
+  const anyWrite = new RegExp(`\\r\\n\\$\\d+\\r\\n(?:set|eval|evalsha)\\r\\n[\\s\\S]*${prefix}`, "i");
+  try {
+    const plan = planEnvelopeWrite(envelope(s.url));
+    // The envelope: stopped at the digest's SET.
+    let frozen = proxy.freezeAt(commandOn("set", `${prefix}:envelope:expected`));
+    const lost = await clocked(writeEnvelope(envelope(proxy.url)));
+    assert.equal(await stoppedAt(frozen), "stopped", "Valkey stopped answering at the digest");
+    assert.deepEqual(lost.res, { invalid: envelopeDigestUnconfirmed(`${prefix}:envelope:expected`, plan.digest), partial: true });
+    assert.ok(lost.ms < BOUND + 2000, `${lost.ms} ms`);
+    assert.equal(readFileSync(files.envelope, "utf8"), before, "the file was not written");
+    proxy.thaw();
+    await sleep(300);
+    assert.ok([null, plan.digest].includes(await s.redis.get(`${prefix}:envelope:expected`)));
+    await s.redis.del(`${prefix}:envelope:expected`);
+    // A plan and a revert: stopped at their first write, the client's own error is thrown on with its mark.
+    const writes = [
+      ["a priorities plan", () => applyPriorities({ ...alloc(proxy.url), now: new Date(NOW), plan: { projects: [{ id: "shop", weight: 3 }, { id: "platform", weight: 1 }] }, keepOther: true })],
+      ["a revert", () => revertAllocation({ ...alloc(proxy.url), now: new Date(NOW), target: { at: new Date(NOW).toISOString(), outcome: "neutral", planId: null, weights: { shop: 1, platform: 1, _other: 0 } } })],
+    ];
+    for (const [name, write] of writes) {
+      frozen = proxy.freezeAt(anyWrite);
+      const got = await clocked(write());
+      assert.equal(await stoppedAt(frozen), "stopped", `${name}: Valkey stopped answering at a write`);
+      assert.equal(got.res.thrown?.valkeyMayStillRun, true, `${name}: ${JSON.stringify(got.res.thrown?.message ?? got.res)}`);
+      assert.ok(got.ms < BOUND + 2000, `${name}: ${got.ms} ms`);
+      proxy.thaw();
+      await sleep(300);
+    }
+    // A Valkey that answers no connection: nothing was sent, said within the connect bound, with no mark.
+    proxy.freeze();
+    for (const [name, write] of writes) {
+      const got = await clocked(write());
+      assert.equal(got.res.thrown?.message, `Valkey did not connect within ${CONNECT / 1000} seconds`, name);
+      assert.equal(got.res.thrown?.valkeyMayStillRun, undefined, name);
+      assert.ok(got.ms < CONNECT + 2000, `${name}: ${got.ms} ms`);
+    }
+    const unsent = await clocked(writeEnvelope(envelope(proxy.url)));
+    assert.match(unsent.res.invalid, /^could not reach Valkey to record the new envelope's digest/);
+    assert.equal(unsent.res.partial, undefined);
+    assert.equal(readFileSync(files.envelope, "utf8"), before);
+  } finally {
+    proxy.thaw();
+    proxy.close();
+    await s.done();
+  }
+});
+
+test("the zero touch grouping job is one job per confirm, says may or may not when its add is not answered, and nothing was queued when its queue never connects (#961)", live, async () => {
+  const s = await scene();
+  const proxy = await trippingProxy(s.url);
+  const dir = tempDir("pd-961-group-");
+  const paths = { valkeyUrl: proxy.url, triggersPath: join(dir, "triggers.json"), logsDir: join(dir, "logs") };
+  mkdirSync(paths.logsDir, { recursive: true });
+  writeFileSync(paths.triggersPath, `${JSON.stringify({ triggers: [], zeroTouch: { capture: true, model: "classifier/small", maxCostUsd: "0.01", names: {} } }, null, 2)}\n`);
+  const T0 = Date.now();
+  const now = () => T0;
+  const runId = `gh-${s.tag}`;
+  const ticket = (n) => createHash("sha256").update(`${s.tag}:${n}`).digest("hex");
+  const jobOf = (digest) => s.queue("pi-jobs").getJob(`question-group-${digest}`);
+  // The question store's keys are digests and the grouping job goes to the shared queue: both are this test's alone in
+  // this database.
+  s.own("zero-touch:*", "bull:pi-jobs:*");
+  s.onDone(async () => {
+    for (const n of [1, 2, 3, 4, 9]) await (await jobOf(ticket(n)))?.remove().catch(() => {});
+  });
+  try {
+    const captured = await makeQuestionGroupStore({ redis: s.redis, now }).capture({ runId, scopeId: "a".repeat(64), project: "web", repo: "acme/web", at: T0 - 1000, text: "a private question", redact: (text) => text, triggerIndex: 0 });
+    assert.equal(captured.ok, true, JSON.stringify(captured));
+    const service = makeZeroTouchService({ paths, now, redisFn: clientHere, parseConnectionFn: boundedHere, stepTimeoutMs: CONNECT });
+    const PENDING_LINE = /A previous grouping is pending or its result could not be confirmed\. Confirming this request can pay for another classification\./;
+    const warned = async (id = runId) => PENDING_LINE.test((await service.preview("zero-touch-group", { runId: id })).plan.summary.join("\n"));
+    assert.equal(await warned(), false, "nothing was asked for yet");
+    // A second question, for the add Valkey refuses: its status is put back, so its preview warns of nothing.
+    const refusedRun = `gh-${s.tag}-refused`;
+    assert.equal((await makeQuestionGroupStore({ redis: s.redis, now }).capture({ runId: refusedRun, scopeId: "a".repeat(64), project: "web", repo: "acme/web", at: T0 - 900, text: "another private question", redact: (text) => text, triggerIndex: 0 })).ok, true);
+    const refusing = makeZeroTouchService({ paths, now, redisFn: clientHere, parseConnectionFn: boundedHere, stepTimeoutMs: CONNECT, queueFn: () => ({ add: () => Promise.reject(Object.assign(new Error("READONLY"), { name: "ReplyError" })), close: async () => {}, disconnect() {} }) });
+    const refusedPlan = (await refusing.preview("zero-touch-group", { runId: refusedRun })).plan;
+    assert.deepEqual(await refusing.apply("zero-touch-group", { payload: { params: { runId: refusedRun }, configDigest: refusedPlan.configDigest, digest: refusedPlan.digest }, ticketDigest: ticket(9) }), { unreachable: true });
+    assert.equal(await warned(refusedRun), false, "an add Valkey refused queued nothing, so the status went back");
+    const entry = async (n) => {
+      const { plan } = await service.preview("zero-touch-group", { runId });
+      assert.ok(plan, "the grouping plan");
+      return { payload: { params: { runId }, configDigest: plan.configDigest, digest: plan.digest }, ticketDigest: ticket(n) };
+    };
+    // One confirm is one job, however often its add is sent.
+    const first = await entry(1);
+    const queued = await service.apply("zero-touch-group", first);
+    assert.deepEqual(queued, { ok: true, jobId: `question-group-${ticket(1)}` });
+    const twice = await service.apply("zero-touch-group", first);
+    assert.equal(twice.jobId, queued.jobId);
+    const before = await s.jobs("pi-jobs");
+    assert.ok(await jobOf(ticket(1)));
+    // Stopped at the add.
+    // A question nobody asked to group yet, so its status is its own: the lost add below is what makes it pending.
+    const lostRun = `gh-${s.tag}-lost`;
+    assert.equal((await makeQuestionGroupStore({ redis: s.redis, now }).capture({ runId: lostRun, scopeId: "a".repeat(64), project: "web", repo: "acme/web", at: T0 - 800, text: "a third private question", redact: (text) => text, triggerIndex: 0 })).ok, true);
+    assert.equal(await warned(lostRun), false);
+    const lostPlan = (await service.preview("zero-touch-group", { runId: lostRun })).plan;
+    const second = { payload: { params: { runId: lostRun }, configDigest: lostPlan.configDigest, digest: lostPlan.digest }, ticketDigest: ticket(2) };
+    const frozen = proxy.freezeAt(THE_ADD);
+    const lost = await clocked(service.apply("zero-touch-group", second));
+    assert.equal(await stoppedAt(frozen), "stopped", "Valkey stopped answering at the add");
+    assert.deepEqual(lost.res, { invalid: GROUP_UNCONFIRMED, partial: true });
+    assert.ok(lost.ms < BOUND + 2500, `${lost.ms} ms`);
+    proxy.thaw();
+    await sleep(700);
+    // Whether or not it landed, the next preview says so: the status was written before the add and left there.
+    assert.equal(await warned(lostRun), true);
+    const after = (await s.jobs("pi-jobs")) - before;
+    assert.ok(after === 0 || after === 1, `none or one after the wake (${after})`);
+    // Stopped at the STATUS write, before any add: the store's own two second timer ends it with an error that
+    // cannot say whether it was sent. Nothing was queued, and the question may read as pending: said, never 503.
+    const statusRun = `gh-${s.tag}-status`;
+    assert.equal((await makeQuestionGroupStore({ redis: s.redis, now }).capture({ runId: statusRun, scopeId: "a".repeat(64), project: "web", repo: "acme/web", at: T0 - 700, text: "a fourth private question", redact: (text) => text, triggerIndex: 0 })).ok, true);
+    const statusPlan = (await service.preview("zero-touch-group", { runId: statusRun })).plan;
+    const beforeStatus = await s.jobs("pi-jobs");
+    const atStatus = proxy.freezeAt(/\r\n\$4\r\neval\r\n[\s\S]*local raw=redis\.call\("GET"/i);
+    const unanswered = await clocked(service.apply("zero-touch-group", { payload: { params: { runId: statusRun }, configDigest: statusPlan.configDigest, digest: statusPlan.digest }, ticketDigest: ticket(4) }));
+    assert.equal(await stoppedAt(atStatus), "stopped", "Valkey stopped answering at the status write");
+    assert.deepEqual(unanswered.res, { invalid: GROUP_STATUS_UNANSWERED, partial: true });
+    assert.equal(GROUP_STATUS_UNANSWERED, "Nothing was queued: the question's grouping status write was not answered, so it may read as pending.");
+    assert.ok(unanswered.ms < 4000, `${unanswered.ms} ms`);
+    proxy.thaw();
+    await sleep(400);
+    assert.equal(await s.jobs("pi-jobs"), beforeStatus, "no job was queued");
+    // A queue that never connects, on a Valkey whose stores answered: nothing was queued.
+    const third = await entry(3);
+    const unconnected = makeZeroTouchService({ paths, now, redisFn: clientHere, parseConnectionFn: boundedHere, stepTimeoutMs: 80, queueFn: () => ({ client: new Promise(() => {}), add: async () => assert.fail("no add on a queue that never connected"), close: async () => {}, disconnect() {} }) });
+    const none = await clocked(unconnected.apply("zero-touch-group", third));
+    assert.deepEqual(none.res, { unreachable: "the queue did not connect within 0.08 seconds; nothing was queued" });
+    assert.equal(await jobOf(ticket(3)), undefined);
+    // The page's read and a preview end at their bound on a Valkey that answers nothing, on a client that is dropped.
+    proxy.freeze();
+    const short = makeZeroTouchService({ paths, now, redisFn: clientHere, parseConnectionFn: boundedHere, readTimeoutMs: CONNECT, stepTimeoutMs: CONNECT });
+    for (const reading of [() => short.read({}), () => short.preview("zero-touch-group", { runId })]) {
+      const got = await clocked(reading());
+      assert.ok(got.res.thrown instanceof Error, JSON.stringify(got.res));
+      assert.ok(got.ms < CONNECT + 2000, `${got.ms} ms`);
+    }
+  } finally {
+    proxy.thaw();
+    proxy.close();
+    await s.done();
+  }
+});

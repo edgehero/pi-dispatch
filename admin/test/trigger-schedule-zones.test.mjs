@@ -48,10 +48,10 @@ test("duplicate scheduler ids, an unread queue and a bounded read cannot prove a
 });
 
 test("the real read asks the registry's actual queue names, awaits clients and closes every queue", async () => {
-  const asked = [], closed = [];
+  const asked = [], closed = [], conns = [];
   const result = await readTriggerScheduleZones({
     url: "redis://unused", triggers: [trigger], now,
-    readHostsFn: async () => ({ hosts: [host] }), parseConnectionFn: () => ({}),
+    readHostsFn: async () => ({ hosts: [host] }), parseConnectionFn: (_url, options) => (conns.push(options), {}),
     makeQueueFn: (_connection, { name }) => ({
       client: Promise.resolve(),
       getJobSchedulers(start, end) { asked.push({ name, start, end }); return name === queue.name ? [row] : []; },
@@ -63,6 +63,8 @@ test("the real read asks the registry's actual queue names, awaits clients and c
   assert.deepEqual(asked.map((x) => x.name), [QUEUE, queue.name]);
   assert.ok(asked.every((x) => x.start === 0 && x.end === 1024));
   assert.deepEqual(closed.sort(), [QUEUE, queue.name].sort());
+  // Issue #961: each queue is the console's bounded kind, so a read Valkey took and never answered ends at its client too.
+  assert.deepEqual(conns, Array(2).fill({ failFast: true, commandTimeoutMs: 5000 }));
 });
 
 test("a hanging registry/client/close degrades to unknown and releases resources, without a scheduler call before ready", async () => {

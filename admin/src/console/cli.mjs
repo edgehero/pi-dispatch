@@ -124,6 +124,12 @@ export async function loadModules() {
 /** How long one insights assembly is reused per window: it walks every run record, far too much for each request. */
 export const INSIGHTS_CACHE_MS = 30_000;
 
+/** How long the trigger page's Fire now check may take on a page load (issue #961): a page's read, the funnels' 2.5 s. */
+export const TRIGGER_FIRE_CHECK_TIMEOUT_MS = 2_500;
+
+/** How long the Valkey reads behind the Updates page's and the package actions' facts may take in all (issue #961): two of their waves. */
+export const UPDATES_FACTS_TIMEOUT_MS = 6_000;
+
 /** How long one command of the console's own Valkey client may wait for its answer, as the fleet reader's raw client does. */
 const READS_COMMAND_TIMEOUT_MS = 5_000;
 
@@ -821,13 +827,33 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
     // The fleet's records and not this host's: a canary runs on whichever host took the job, and Adopt's gate reads its record.
     const updatesHistory = cachedFor(() => m.readModel.scanFleetRunRecords({ redis, logsDir: side.paths.logsDir, sinceMs: now() - 30 * 86400_000, nowMs: now(), fs }), { now, ttlMs: INSIGHTS_CACHE_MS });
     // The page's and the actions' one read, so an Adopt's gate reads what the page drew.
+    // One end for the Valkey part of the read (issue #961): its reads go out in waves of one bound each, and past
+    // `UPDATES_FACTS_TIMEOUT_MS` the facts are the files' and the run records' alone, as a console without a Valkey
+    // reads them, every gate then saying what Valkey holds could not be read. The run history is read before the
+    // timer starts: a slow scan of this host's records is no Valkey that did not answer. One that could not be read
+    // at all is partial, so a gate says a canary's result is not known rather than that none ran.
     const readUpdatesFacts = async () => {
       const history = await updatesHistory().catch(() => ({ records: [], partial: true }));
-      return await m.updatesView.readDeploymentUpdates({
+      const audit = await Promise.resolve().then(() => m.audit.readConsoleAudit({ logsDir: config.logsDir, fs, limit: 200 })).then((read) => read?.rows ?? []).catch(() => []);
+      const LATE = Symbol("late");
+      let timer;
+      const late = new Promise((resolve) => {
+        timer = setTimeout(resolve, io.updatesFactsTimeoutMs ?? UPDATES_FACTS_TIMEOUT_MS, LATE);
+        timer.unref?.();
+      });
+      const reading = m.updatesView.readDeploymentUpdates({
         redis, now: now(), pinned: m.pricing.piAiVersion?.() ?? null, paths: side.paths, fs,
         records: history.records, recordsPartial: history.partial,
-        audit: await Promise.resolve().then(() => m.audit.readConsoleAudit({ logsDir: config.logsDir, fs, limit: 200 })).then((read) => read?.rows ?? []).catch(() => []),
+        audit,
       });
+      try {
+        const got = await Promise.race([reading, late]);
+        if (got !== LATE) return got;
+        Promise.resolve(reading).catch(() => {});
+        return await m.updatesView.readDeploymentUpdates({ redis: null, now: now(), pinned: m.pricing.piAiVersion?.() ?? null, paths: side.paths, fs, records: history.records, recordsPartial: history.partial, audit });
+      } finally {
+        clearTimeout(timer);
+      }
     };
     const pageDeps = {
       fleet,
@@ -892,6 +918,8 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
         overlay: m.readModel.readSettingsView({ settingsFile: side.paths.settingsFile, fs }).overlay ?? {},
         modelEndpoints: endpointSnapshotFn({ m, env: side.env, paths: side.paths, dir: config.dir, fs })?.(),
         builtinModel: m.modelCatalog?.builtinModel, fs, now,
+        // A page load, not a preview (issue #961): past this the panel says Fire now could not be checked and draws no form.
+        planTimeoutMs: TRIGGER_FIRE_CHECK_TIMEOUT_MS,
       }),
       killSwitchPlan: killSwitchPlanFn,
       hostCapacity: (host) => m.insights.assembleHostCapacity(side.paths, host, now(), { envFn: () => side.env }),

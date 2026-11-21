@@ -5,7 +5,7 @@ import { basename, join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { AUDIT_VERIFY_CACHE_MS, cachedFor, cachedPerWindow, deploymentOf, endpointSnapshotFn, INSIGHTS_CACHE_MS, loadModules, makeSetupExposureReader, readSideOf, RESERVE_ENV_KEYS, runCli, setupProviderOf, STOP_DEADLINE_MS, USAGE } from "../src/console/cli.mjs";
+import { AUDIT_VERIFY_CACHE_MS, cachedFor, cachedPerWindow, deploymentOf, endpointSnapshotFn, INSIGHTS_CACHE_MS, loadModules, makeSetupExposureReader, readSideOf, RESERVE_ENV_KEYS, runCli, TRIGGER_FIRE_CHECK_TIMEOUT_MS, setupProviderOf, STOP_DEADLINE_MS, USAGE } from "../src/console/cli.mjs";
 import * as live from "../src/console/live.mjs";
 import { acquireConsoleLock, consoleLockPath } from "../src/console/lock.mjs";
 import * as realPages from "../src/console/pages.mjs";
@@ -1320,6 +1320,12 @@ test("serve gives Fire now the process environment separately from deployment de
   assert.equal(captured.actionDeps.grantsEnv.PI_DISPATCH_RUN_ROOTS, dep.dir);
   assert.equal(captured.actionDeps.grantsEnv.PI_DISPATCH_RUN_PER_HOUR, "2");
   assert.equal(typeof captured.pageDeps.triggerFireCheck, "function");
+  // Issue #961: the page's check is a page read with a bound of its own, not a preview's six seconds.
+  let asked = null;
+  modules.readModel.planTriggerFire = async (args) => ((asked = args), { refusal: "no" });
+  modules.readModel.readSettingsView ??= () => ({ overlay: {} });
+  await captured.pageDeps.triggerFireCheck(0);
+  assert.deepEqual([asked.index, asked.planTimeoutMs, TRIGGER_FIRE_CHECK_TIMEOUT_MS], [0, 2500, 2500]);
 });
 
 test("serve's sandbox service reads the hosts file a PI_SANDBOX_HOSTS_FILE set only in the deployment .env names", { skip: process.platform === "win32" ? "posix modes" : false }, async () => {
@@ -1705,4 +1711,42 @@ test("audit verify: an intact chain with rows a newer console wrote is 0, and th
   assert.deepEqual([one.code, one.out], [0, ["the console audit log holds 12 rows and its chain is intact, and 1 of them names an action or outcome this pi-dispatch-console does not know (a newer release writes such rows)"]]);
   const plain = await cli(["audit", "verify"], { modules: fakeModules({ verify: { ok: true, rows: 12, startsAt: null } }) });
   assert.deepEqual(plain.out, ["the console audit log holds 12 rows and its chain is intact"]);
+});
+
+test("serve's package facts read has one end for its Valkey reads, falls back to the files and the run records past it, and hands on a history it could not read as partial (#961)", async () => {
+  const dep = deployment();
+  const modules = fakeModules();
+  let captured;
+  modules.server = { ...server, createConsoleServer: (opts) => { captured = opts; return server.createConsoleServer(opts); } };
+  const asked = [];
+  let hang = 0;
+  modules.updatesView = { readDeploymentUpdates: (args) => {
+    asked.push({ valkey: args.redis !== null, recordsPartial: args.recordsPartial, records: args.records, audit: Array.isArray(args.audit) });
+    // The read that is told to hang is the one over a Valkey that does not answer; the next is the fallback.
+    if (hang > 0) return (hang -= 1), new Promise(() => {});
+    return Promise.resolve({ read: asked.length });
+  } };
+  // A history that throws: no records is then partial, never "no canary ran".
+  modules.readModel = { ...modules.readModel, scanFleetRunRecords: async () => { throw new Error("Command timed out"); } };
+  let stop;
+  const until = new Promise((resolve) => { stop = resolve; });
+  const errors = [];
+  let facts = null;
+  const code = await runCli(["serve", "--deployment", dep.dir], { env: dep.env, modules, now: () => T0, uid: process.geteuid?.(), out: () => {}, err: (line) => errors.push(line), until, updatesFactsTimeoutMs: 80, onListening: async () => {
+    try {
+      const whole = await captured.actionDeps.updates.read();
+      hang = 1;
+      const started = Date.now();
+      const late = await captured.actionDeps.updates.read();
+      facts = { whole, late, ms: Date.now() - started };
+    } finally {
+      stop();
+    }
+  } });
+  assert.equal(code, 0, errors.join("\n"));
+  assert.deepEqual(facts.whole, { read: 1 });
+  assert.deepEqual([asked[0].recordsPartial, asked[0].records, asked[0].audit], [true, [], true], "a history that threw is handed on as partial");
+  assert.deepEqual(facts.late, { read: 3 }, "past the bound the answer is the second read's");
+  assert.ok(facts.ms < 2000, `${facts.ms} ms`);
+  assert.deepEqual(asked.at(-1), { valkey: false, recordsPartial: true, records: [], audit: true }, "which is asked without a Valkey, with the run records and the audit rows it already has");
 });

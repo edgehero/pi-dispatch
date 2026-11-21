@@ -77,7 +77,7 @@ import { JOB_FIELD, META_FIELD, QUEUE_KEY, SCHEDULER_ID_MAX, SCHEDULER_ID_RE, SC
 // The subscriptions validator is shared for the same anti-drift reason: the admin prices finished runs
 // against the exact schema the file declares, and re-deriving it here is how the two would disagree.
 import { parseSubscriptions, SUBSCRIPTIONS_VERSION } from "@edgehero/pi-dispatch/subscriptions";
-import { parseConnection, makeRedisClient, onValkeyError, killSwitchValkeyUrls, passwordDeclinedOf, refusedDatabaseOf, urlShown, useValkeyContext, valkeyContextFromKeys, VALKEY_CONTEXT_KEYS } from "@edgehero/pi-dispatch/connection";
+import { parseConnection, makeRedisClient, onValkeyError, killSwitchValkeyUrls, passwordDeclinedOf, refusedDatabaseOf, urlShown, useValkeyContext, valkeyContextFromKeys, VALKEY_COMMAND_TIMEOUT_MS, VALKEY_CONTEXT_KEYS } from "@edgehero/pi-dispatch/connection";
 import { pointerState } from "./deployment-pointer.mjs";
 import { readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
 import { readDoctorResults } from "@edgehero/pi-dispatch/doctor-results";
@@ -757,6 +757,18 @@ export function revParseHead(folder, { exec = execFileSync } = {}) {
 }
 
 /**
+ * One paid start counted against its hour (issue #961): KEYS[1] the hour's key, ARGV[1] its lifetime in seconds. The
+ * count and the expiry in one step: as two commands, an EXPIRE whose answer was lost left the hour's key with no end,
+ * and the allowance closed for good. A key found without an expiry is given one. Returns the count.
+ */
+export const DISPATCH_RUN_COUNT_SCRIPT = `local n = redis.call('INCR', KEYS[1])
+if n == 1 or redis.call('TTL', KEYS[1]) < 0 then redis.call('EXPIRE', KEYS[1], ARGV[1]) end
+return n`;
+
+/** What a paid start says when its count against the hour was sent and not answered: nothing is given back. */
+export const DISPATCH_RUN_ALLOWANCE_LOST = "Nothing was queued. The dispatch_run hourly allowance was sent this start and did not answer, so one start of this hour may have been used";
+
+/**
  * The paid-start bounds shared by dispatch_run and Fire now (#750). A preview performs the determinate
  * checks without consuming the hourly allowance; the executor repeats them at HEAD and consumes it immediately
  * before enqueue. Neither a preview nor a page load may spend that allowance.
@@ -818,20 +830,26 @@ export async function checkDispatchRun({
 
   // 5. aiInvoked ONLY -- per-hour rate limit. INCR-then-compare like reserveBudget: a refused attempt still
   // counts (no give-back), so a burst cannot probe the cap for free. A per-hour cap of 0 disables the tool.
+  // Issue #961: on the console's bounded client, so a Valkey that stopped answering ends this at the command bound, and
+  // the count and its expiry in ONE script (`DISPATCH_RUN_COUNT_SCRIPT`). A count that was sent and not answered is
+  // `allowanceMayBeUsed`: nothing is given back, so the caller says one start of this hour may be gone.
   if (aiInvoked) {
     if (dispatchRunPerHour === 0) return { refused: "dispatch_run hourly limit (0) reached" };
     let redis;
+    let sent = false;
     try {
-      redis = redisFn(valkeyUrl);
-      redis.on?.("error", () => {}); // Issue #846: a down Valkey is this call's answer; without a listener ioredis also prints a stack trace per reconnect attempt.
+      redis = boundedClient(redisFn, valkeyUrl);
       const key = hourKey(now());
-      const count = Number(consumeRate ? await redis.incr(key) : (await redis.get(key) ?? 0));
-      if (consumeRate && count === 1) await redis.expire(key, DISPATCH_RUN_TTL_SECONDS);
+      let count;
+      if (consumeRate) {
+        sent = true;
+        count = Number(await redis.eval(DISPATCH_RUN_COUNT_SCRIPT, 1, key, DISPATCH_RUN_TTL_SECONDS));
+      } else count = Number((await redis.get(key)) ?? 0);
       if (consumeRate ? count > dispatchRunPerHour : count >= dispatchRunPerHour) {
         return { refused: `dispatch_run hourly limit (${dispatchRunPerHour}) reached` };
       }
     } catch (err) {
-      return { unreachable: err?.message ?? String(err) };
+      return { unreachable: err?.message ?? String(err), ...(sent && err?.valkeyMayStillRun === true ? { allowanceMayBeUsed: true } : {}) };
     } finally {
       if (redis) {
         try {
@@ -850,8 +868,11 @@ export async function checkDispatchRun({
  * Enqueue a PAID local run -- the extension's one model-callable WRITE. Producer-side only: it spends
  * nothing here, so every bound refuses BEFORE any container starts; the daily cap stays the worker
  * processor's job (CONST-BUDGET-BEFORE-TOKENS). Returns a discriminated
- * `{ ok, jobId } | { refused } | { unreachable }` (mirrors setQueuePaused's failFast open/close-in-finally).
+ * `{ ok, jobId } | { refused } | { unreachable } | { invalid, partial: true, jobId? }`.
  * An `ok` the one-minute dedup swallowed also carries `deduplicated: true`, `existing` and `said` (issue #524).
+ * `unreachable` is only ever a run that was NOT sent (issue #961): one that was sent and not confirmed, or whose
+ * read back was lost, or whose count against the hour was lost, is `{ invalid, partial: true }`, the sentence saying
+ * which and to preview again before trying again (a second try in a later minute is a second paid run).
  *
  * `aiInvoked` selects the bound set from the six-control analysis (DES-ADMIN-VIA-PI-EXTENSION):
  *   - `true`  (the `dispatch_run` tool): folder allowlist + committed flow gate + per-hour rate limit,
@@ -876,34 +897,49 @@ export async function enqueueDispatchRun({
   revParseHeadFn = revParseHead,
   redisFn = makeRedisClient,
   now = () => Date.now(),
+  connectTimeoutMs = CONFIRM_READ_TIMEOUT_MS,
 }) {
   const admission = await checkDispatchRun({ folder, flow, aiInvoked, env, readFlowGateFn, gitDirtyFn, localRepoProblemFn, revParseHeadFn, redisFn, now });
+  if (admission.allowanceMayBeUsed) return { invalid: DISPATCH_RUN_ALLOWANCE_LOST, partial: true };
   if (admission.refused || admission.unreachable) return admission;
   const { valkeyUrl } = resolvePaths(env);
+  // The allowance is counted by now and never given back, so an answer that queued nothing says so where one was used:
+  // as `{ invalid, partial }`, since "unreachable" is worded as nothing changed on every surface, and the count did.
+  const unqueued = (why) => (aiInvoked ? { invalid: `Nothing was queued and one start of this hour's dispatch_run allowance was used: ${String(why).replace(/\.$/, "")}`, partial: true } : { unreachable: `${why}; nothing was queued` });
 
   // 6. enqueue. A root run: no chainDepth/parentJobId, and provider/model/maxTurns stay absent so they
   // resolve worker-side against the overlay/env (INT-CONFIG-OVERLAY-CONTRACT).
-  let queue;
+  // Onto THIS host's queue when the deployment declares a worker name (issue #57). The folder was
+  // resolved against PI_DISPATCH_RUN_ROOTS, which is this machine's allowlist, so this machine is the
+  // only one that can run it. Read straight from the environment rather than through the deployment
+  // pointer, deliberately: the pointer carries PATHS and refuses capability grants, and a value that
+  // decides WHICH HOST runs a job is closer to the second than the first.
+  // Issue #471: from the environment the caller resolved (`panelEnv`), which takes the deployment `.env`'s name where
+  // pi's environment has none, as the service's worker does: without it a folder only this machine holds went onto the
+  // shared queue, where any host could pop it. Never from the pointer, whose allowlist does not carry it.
+  const workerName = env.PI_WORKER_NAME;
+  // Issue #961, two phases. A CONNECTED queue first, under a bound: past it nothing was sent and nothing is sent later
+  // (`connectedQueue`). Then the add with no timer of its own: the queue's client bounds each command, and an add that
+  // was started and threw anything but Valkey's own refusal may or may not have queued the run.
+  const connected = await connectedQueue({ url: valkeyUrl, options: { ...(workerName ? { name: hostQueueName(workerName) } : {}) }, queueFn: makeQueueFn, parseConnectionFn, connectTimeoutMs });
+  if (!connected.queue) return unqueued(connected.unreachable.replace(/; nothing was queued$/, ""));
+  const { queue } = connected;
+  let sent = false;
   try {
-    // Onto THIS host's queue when the deployment declares a worker name (issue #57). The folder was
-    // resolved against PI_DISPATCH_RUN_ROOTS, which is this machine's allowlist, so this machine is the
-    // only one that can run it. Read straight from the environment rather than through the deployment
-    // pointer, deliberately: the pointer carries PATHS and refuses capability grants, and a value that
-    // decides WHICH HOST runs a job is closer to the second than the first.
-    // Issue #471: from the environment the caller resolved (`panelEnv`), which takes the deployment `.env`'s name where
-    // pi's environment has none, as the service's worker does: without it a folder only this machine holds went onto the
-    // shared queue, where any host could pop it. Never from the pointer, whose allowlist does not carry it.
-    const workerName = env.PI_WORKER_NAME;
-    queue = makeQueueFn(parseConnectionFn(valkeyUrl, { failFast: true }), { ...(workerName ? { name: hostQueueName(workerName) } : {}) });
+    sent = true;
     // Reporting (issue #524): the one-minute dedup can swallow this enqueue, and then nothing new is queued. The
     // caller must not say "queued" for that, so it gets `existing` and the shared sentence to say instead.
     const { id: jobId, existing } = await enqueueLocalJobReporting(queue, { folder, flow, task });
+    // The add was answered and its read back was not: a job with this id is there, whose it is is not known.
+    if (existing === undefined) return enqueueUnread("the run", jobId);
     if (existing) return { ok: true, jobId, deduplicated: true, existing, said: swallowedRunSentence(jobId, existing) };
     return { ok: true, jobId };
   } catch (err) {
-    return { unreachable: err?.message ?? String(err) };
+    if (!sent || refusedByValkey(err)) return unqueued(boundedText(err?.message ?? String(err)));
+    return enqueueUnconfirmed("the run");
   } finally {
-    if (queue) await queue.close().catch(() => {});
+    // Started, never awaited: the answer does not wait for a QUIT.
+    void closeWithin(queue, QUEUE_CLOSE_TIMEOUT_MS);
   }
 }
 
@@ -1087,9 +1123,9 @@ export { writeTriggers } from "@edgehero/pi-dispatch/triggers-file";
  * size alone and are re-exported here, so every caller still reaches the queue through this one funnel. And the
  * worker's reserve rule, for the reserve a paid action shows before confirm.
  */
-import { boundedText, heldClearedAnswer, heldRefused, heldRemovalUnanswered, parkedAnswerRefusalOf, rerunRefusalOf, RERUN_BAD_ID } from "./job-actions.mjs";
+import { boundedClient, boundedText, connectedQueue, CONFIRM_READ_TIMEOUT_MS, enqueueUnconfirmed, enqueueUnread, heldClearedAnswer, heldRefused, heldRemovalUnanswered, parkedAnswerRefusalOf, refusedByValkey, rerunRefusalOf, RERUN_BAD_ID, within } from "./job-actions.mjs";
 export { planTriggerFire, enqueueTriggerFire } from "./trigger-fire.mjs";
-export { BULK_MAX, cancelQueuedJob, cancelQueuedRefusal, enqueueParkedAnswer, enqueueRerun, enqueueSteer, parkedAnswerRefusalOf, planCancelQueued, planFailedBulk, planParkedAnswer, planRerun, rerunRefusalOf, planSteer, planSteerWithdraw, removeFailedJob, removeFailedJobs, retryFailedJob, retryFailedJobs, steerAuditTarget, steerWithdrawSentence, withdrawSteerMessage } from "./job-actions.mjs";
+export { alreadyQueuedLine, dispatchRunAlready, LOOK_FIRST, BULK_MAX, cancelQueuedJob, cancelQueuedRefusal, enqueueParkedAnswer, enqueueRerun, enqueueSteer, parkedAnswerRefusalOf, planCancelQueued, planFailedBulk, planParkedAnswer, planRerun, rerunRefusalOf, planSteer, planSteerWithdraw, removeFailedJob, removeFailedJobs, retryFailedJob, retryFailedJobs, steerAuditTarget, steerWithdrawSentence, withdrawSteerMessage } from "./job-actions.mjs";
 export { estimateReserve } from "@edgehero/pi-dispatch/reserve-estimate";
 
 /**
@@ -1847,7 +1883,7 @@ export function planEnvelopeWrite({ envelopeFile, projectsPath = null, scopedLim
  * A Valkey that cannot be reached refuses before the file is touched: an envelope the fleet would refuse is worse than
  * no change. Returns `{ ok, digest, previousDigest, unchanged? }` or `{ invalid }`.
  */
-export async function writeEnvelope({ envelopeFile, projectsPath = null, scopedLimitsPath = null, maxCostMicros = null, change = {}, expect = null, url, redisFn = makeRedisClient, prefix = null, fs = nodeFs, afterExpected = null }) {
+export async function writeEnvelope({ envelopeFile, projectsPath = null, scopedLimitsPath = null, maxCostMicros = null, change = {}, expect = null, url, redisFn = makeRedisClient, prefix = null, fs = nodeFs, afterExpected = null, connectTimeoutMs = CONFIRM_READ_TIMEOUT_MS }) {
   const plan = planEnvelopeWrite({ envelopeFile, projectsPath, scopedLimitsPath, maxCostMicros, change, fs });
   if (plan.invalid) return plan;
   if (plan.digest === plan.beforeDigest) return { ok: true, unchanged: true, digest: plan.digest, previousDigest: plan.beforeDigest };
@@ -1855,7 +1891,7 @@ export async function writeEnvelope({ envelopeFile, projectsPath = null, scopedL
   const key = keys.expected;
   let redis;
   try {
-    redis = await writeClient(url, redisFn);
+    redis = await writeClient(url, redisFn, connectTimeoutMs);
   } catch (err) {
     return { invalid: `could not reach Valkey to record the new envelope's digest in ${key} (${boundedText(err?.message ?? String(err))}), so the file was not written: the fleet would read it as a hand edit and refuse its jobs` };
   }
@@ -1866,6 +1902,9 @@ export async function writeEnvelope({ envelopeFile, projectsPath = null, scopedL
     try {
       previous = await redis.set(key, plan.digest, "GET");
     } catch (err) {
+      // Sent and not answered (issue #961): the key may hold the new digest, now or when Valkey wakes, so this is
+      // never "nothing was changed".
+      if (err?.valkeyMayStillRun === true) return { invalid: envelopeDigestUnconfirmed(key, plan.digest), partial: true };
       // A SET that failed on the client side may still have been applied by the server (a timeout after the write).
       return { invalid: `could not record the new envelope's digest in ${key} (${boundedText(err?.message ?? String(err))}), so the file was not written; ${key} may already hold the new digest ${plan.digest}, in which case set it back to the envelope digest the hosts run (doctor prints it) by hand (docs/allocation.md)` };
     }
@@ -1884,7 +1923,7 @@ export async function writeEnvelope({ envelopeFile, projectsPath = null, scopedL
       try {
         restored = Number(await redis.eval(RESTORE_EXPECTED_SCRIPT, 1, key, plan.digest, previous ?? ""));
       } catch (err) {
-        return { invalid: `${replaced.invalid}; and ${key} could not be put back to ${previous ?? "absent"} (${boundedText(err?.message ?? String(err))}): it may hold ${plan.digest}, a digest no file has; set it by hand (docs/allocation.md)` };
+        return { invalid: `${replaced.invalid}; and ${key} could not be put back to ${previous ?? "absent"} (${boundedText(err?.message ?? String(err))}): it may hold ${plan.digest}, a digest no file has; set it by hand (docs/allocation.md)`, partial: true };
       }
       return restored === 1 ? replaced : { invalid: `${replaced.invalid}; ${key} was not put back, because another write changed it meanwhile` };
     }
@@ -1913,13 +1952,44 @@ return 1`;
  * queue, so a command sent before its socket is up fails with "Stream isn't writeable" (measured in the lab against a
  * live Valkey, where every write refused that way while the fake answered).
  */
-async function writeClient(url, redisFn) {
+async function writeClient(url, redisFn, connectTimeoutMs = CONFIRM_READ_TIMEOUT_MS) {
   parseConnection(url, { failFast: true });
-  const redis = redisFn(url, { failFast: true, lazyConnect: true });
+  // Each command bound (issue #961), so a write a Valkey took and never answered ends at the bound with
+  // `valkeyMayStillRun`, which is what lets its confirm say the change may or may not have been made. The connect has
+  // an end of its own: nothing has been sent by then, so past it nothing was changed, and the client is dropped.
+  const redis = redisFn(url, { failFast: true, lazyConnect: true, commandTimeoutMs: VALKEY_COMMAND_TIMEOUT_MS, disconnectTimeoutMs: 0 });
   redis.on?.("error", () => {});
-  if (typeof redis.connect === "function" && redis.status === "wait") await redis.connect();
+  if (typeof redis.connect === "function" && redis.status === "wait") {
+    const LATE = Symbol("late");
+    let got;
+    try {
+      got = await within(redis.connect(), connectTimeoutMs, () => LATE);
+    } catch (err) {
+      try {
+        redis.disconnect();
+      } catch {
+        // already closed
+      }
+      // A connect that failed sent nothing: never the mark of a command that may still run.
+      throw new Error(err?.message ?? String(err));
+    }
+    if (got === LATE) {
+      try {
+        redis.disconnect();
+      } catch {
+        // already closed
+      }
+      throw new Error(`Valkey did not connect within ${connectTimeoutMs / 1000} seconds`);
+    }
+  }
   return redis;
 }
+
+/**
+ * What an envelope write says when the digest's SET was sent and not answered (issue #961): the file was not written,
+ * and the key may hold the new digest now or when Valkey wakes.
+ */
+export const envelopeDigestUnconfirmed = (key, digest) => `the record of the new envelope's digest in ${key} may or may not have been made: Valkey took it and did not answer within the bound. The envelope file was not written. If ${key} holds ${digest} once Valkey answers, set it back to the envelope digest the hosts run (doctor prints it) by hand (docs/allocation.md), or the hosts refuse governed jobs as envelope-mismatch`;
 
 /** The fields of an applied state a reader may see. An ALLOWLIST, so a field added later is not shown by accident. */
 const STATE_FIELDS = Object.freeze(["planId", "basis", "writer", "jobId", "triggerId", "appliedAt", "lastPlanAt", "validUntil", "envelopeDigest", "weights", "repoWeights", "allocations", "unallocated", "repos", "clamped"]);
@@ -2029,8 +2099,8 @@ function amountsShown(state) {
  * micro-dollars before and after, never a reason text. Throws on infrastructure (Valkey, the audit file), as the
  * worker does: such a plan has not applied.
  */
-export async function applyPriorities({ url, envelope, digest = envelopeDigest(envelope), projects = [], plan, keepOther = false, host, logsDir, now = new Date(), writer = { kind: "operator-session" }, redisFn = makeRedisClient, prefix = null, fs = nodeFs }) {
-  const redis = await writeClient(url, redisFn);
+export async function applyPriorities({ url, envelope, digest = envelopeDigest(envelope), projects = [], plan, keepOther = false, host, logsDir, now = new Date(), writer = { kind: "operator-session" }, redisFn = makeRedisClient, prefix = null, fs = nodeFs, connectTimeoutMs = CONFIRM_READ_TIMEOUT_MS }) {
+  const redis = await writeClient(url, redisFn, connectTimeoutMs);
   try {
     const state = makeAllocationState({ redis, host, audit: makeAllocationAudit({ logsDir, fs }), prefix });
     const seen = await state.reconcile({ envelope, digest, now });
@@ -2059,8 +2129,8 @@ export async function applyPriorities({ url, envelope, digest = envelopeDigest(e
  * `operator-revert`, which skips the interval and the step rules but is still a compare-and-set and still refused while
  * delegation is off, the envelope differs or another apply holds the lock. Returns its `{ outcome, reason, planId? }`.
  */
-export async function revertAllocation({ url, envelope, digest = envelopeDigest(envelope), target, host, logsDir, now = new Date(), redisFn = makeRedisClient, prefix = null, fs = nodeFs }) {
-  const redis = await writeClient(url, redisFn);
+export async function revertAllocation({ url, envelope, digest = envelopeDigest(envelope), target, host, logsDir, now = new Date(), redisFn = makeRedisClient, prefix = null, fs = nodeFs, connectTimeoutMs = CONFIRM_READ_TIMEOUT_MS }) {
+  const redis = await writeClient(url, redisFn, connectTimeoutMs);
   try {
     const state = makeAllocationState({ redis, host, audit: makeAllocationAudit({ logsDir, fs }), prefix });
     return await state.revert({ envelope, digest, target, now });
@@ -5016,11 +5086,12 @@ export function createFleetReader(
     },
     async snapshot(opts = {}) {
       const waiting = opts?.waiting === true;
+      // Started BEFORE the queue discovery is waited for (issue #961), and awaited after it: on a Valkey that stopped
+      // answering each waits out a bound of its own, and one after the other a kill switch preview paid for both.
+      const mergedRead = mergedRunsOn(redis, { logsDir: paths.logsDir, limit: RUNS_ON_DASHBOARD, prune }).catch(() => ({ runs: [], hosts: [], mirror: "off" }));
       const preview = opts?.switchQueues === true ? await switchPreviewQueues(opts?.queue) : null;
       const queues = preview !== null ? preview.queues : await fleetQueues();
-      // Awaited alongside the queue reads rather than before them: it is two Valkey round trips and the panel already
-      // pays for several, so it costs no extra tick.
-      const merged = await mergedRunsOn(redis, { logsDir: paths.logsDir, limit: RUNS_ON_DASHBOARD, prune }).catch(() => ({ runs: [], hosts: [], mirror: "off" }));
+      const merged = await mergedRead;
       // The cron ids this deployment declares, read from the triggers file the same tick already reads SYNCHRONOUSLY.
       // Since issue #267 each scheduler's stall count is its own key, so the reader has to name them -- and naming them
       // from config is the repo's own doctrine for exactly this shape (`scoped-limits.json` enumerates every scope that

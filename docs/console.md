@@ -1023,6 +1023,23 @@ steer's actions say within 10 and 5 seconds that they could not read, and a stop
 was changed), and ends within about a second of the last of them, never later than 10, with its lock released. While Valkey stays down,
 its log says each queue's error once a minute, and an outage after Valkey came back says it again at once.
 
+A re-run, an answer to a parked run, a started run, Fire now and a zero touch grouping job do not wait on such a Valkey
+either (2026-11-21, #961). Each connects its queue first, within 6 seconds, and says nothing was queued when it could not.
+Once the job was sent, an answer that did not come back says the run "may or may not have been queued" (Fire now and a
+canary: "A run may have been queued and one start of this hour was used") and to preview it again first. No page lists
+every waiting job: Runs lists a run only once it has ended, the overview names the first few waiting jobs of each reason
+and Fleet counts them. So the next preview looks for a run like it and says when one is already queued or running, with
+the job's id and when it was queued. Confirming then asks for another: the queue refuses it while it takes it as a
+duplicate (a refused start or Fire now still uses a start of the hour), and queues a second run after that. A cron
+trigger's next scheduled run is not counted as one. A grouping job's preview says a grouping is pending or could not be
+confirmed. A start or a
+Fire now whose count against the hour was sent and not answered says one start of the hour may have been used, and a
+Fire now whose latch was lost says the minute may be taken. The trigger page checks Fire now when it loads, within 2.5
+seconds, and says so when it could not. Adopt refuses when a host's applied state or a canary's facts could not be read,
+and says a canary's result is not known when the recent runs could not be, instead of asking for a canary that may have
+run. An envelope, a priorities plan or an allocation revert whose write was sent and not answered says it may or may not
+have been made.
+
 A Valkey password changed in the deployment's `.env` needs no restart: the console's clients read it again each time they
 connect, so after a rotation they read Valkey again at their next try, and so does a password a bad line kept from being
 read at start, once the line is fixed. A password written into `VALKEY_URL` itself is part of that address. While the

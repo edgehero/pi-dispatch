@@ -50,7 +50,7 @@ import { removeQueuedJob } from "@edgehero/pi-dispatch/cancel-state";
 import { identityForModelSelection, keepModelSelection } from "@edgehero/pi-dispatch/model-selection-state";
 import { keepModelAttempt, modelAttemptIdOf } from "@edgehero/pi-dispatch/model-attempts";
 import { jobKey } from "@edgehero/pi-dispatch/wait-state";
-import { QUEUE_KEY, SCHEDULER_ID_RE, cronRunOf, isSchedulerNext, queueKeyOf } from "@edgehero/pi-dispatch/bullmq-internals";
+import { MANUAL_JOB_PREFIX, QUEUE_KEY, SCHEDULER_ID_RE, SCHEDULER_JOB_PREFIX, cronRunOf, isSchedulerNext, queueKeyOf } from "@edgehero/pi-dispatch/bullmq-internals";
 import { scrubControls } from "./panel.mjs";
 import { activeJobOfRun, makeLocalRunIndex, PENDING_SCAN_BUDGET, QUEUE_CLOSE_TIMEOUT_MS, readFleetQueues, readPendingAnswer, readRunById, readWaitingRow, RUN_RECORD_UNREAD, targetKeyOf, WAITING_STATES } from "./read-model.mjs";
 import { RECORD_REASON_RE, recordReason } from "./words.mjs";
@@ -84,6 +84,13 @@ export const STEER_PLAN_TIMEOUT_MS = VALKEY_COMMAND_TIMEOUT_MS;
  * only a queue that is not connected yet.
  */
 export const CONFIRM_READ_TIMEOUT_MS = VALKEY_COMMAND_TIMEOUT_MS + 1_000;
+
+/**
+ * How long the preview of a paid start (a re-run, a parked answer, Fire now) may take in all (issue #961): its reads
+ * have a bound each, and a queue built while Valkey takes connections and answers none takes over half a minute to give
+ * up, so the preview is one step with this end (`planCancelQueued`'s pattern).
+ */
+export const PAID_PLAN_TIMEOUT_MS = CONFIRM_READ_TIMEOUT_MS;
 
 /** The newest runs a parked-answer plan reads to judge "already answered": the fleet reader's wide window. */
 const ANSWERED_WINDOW = 1000;
@@ -837,7 +844,7 @@ async function neverStartedRefusal(job, jobId, { redis, q }) {
 }
 
 /** `promise` within `ms`, else `fallback()`'s answer; a late rejection is the race's, never unhandled. */
-function within(promise, ms, fallback) {
+export function within(promise, ms, fallback) {
   let timer;
   const timeout = new Promise((resolve) => {
     timer = setTimeout(() => resolve(fallback()), ms);
@@ -860,6 +867,165 @@ function releaseOf(fleetOf, redisOf) {
     }
     void fleetOf()?.close();
   };
+}
+
+/**
+ * A raw client the console reads or writes with on a person's request (issues #842, #961): each command bound, so one a
+ * Valkey took and never answered ends at the bound with `valkeyMayStillRun`, and one that timed out before it was sent
+ * is never sent later (`makeRedisClient`'s `commandTimeoutMs`). WITH its offline queue, the cancel probe's shape: a
+ * client without one refuses its first command before it has connected. Its socket is dropped at once on disconnect.
+ */
+export function boundedClient(redisFn, url) {
+  const redis = redisFn(url, { commandTimeoutMs: VALKEY_COMMAND_TIMEOUT_MS, disconnectTimeoutMs: 0 });
+  redis.on?.("error", () => {});
+  return redis;
+}
+
+/** Whether `err` is Valkey's own answer (a reply that is an error, or a refusal this project raised): nothing ran. */
+export const refusedByValkey = (err) => err?.name === "ReplyError" || err?.valkeyRefused === true;
+
+const CONNECT_LATE = Symbol("connect-late");
+
+/**
+ * The first phase of a paid enqueue (issue #961): one queue of the console's bounded kind (`consoleQueueConnection`),
+ * CONNECTED, or `{ unreachable }`. BullMQ connects inside the queue, and on a Valkey that takes the connection and
+ * answers nothing that takes over half a minute to give up (`SWITCH_STEP_TIMEOUT_MS` says how it was measured), with
+ * whatever was asked of the queue meanwhile sent when a connection comes up. So the connection is awaited here, under
+ * `connectTimeoutMs`, BEFORE anything is asked of the queue: past it nothing was sent, the queue is closed so nothing
+ * is sent later, and "nothing was queued" is true. The add that follows then needs no timer of its own, and must not
+ * have one: it goes out on a connected client at once, and that client's command bound says whether it was answered.
+ *
+ * Returns `{ queue, client }` (`client` null for a queue that has none to wait for, a test's) or `{ unreachable }`.
+ * `options` is the queue's own (`{ name }`).
+ */
+export async function connectedQueue({ url, options = {}, queueFn = makeQueue, parseConnectionFn = parseConnection, connectTimeoutMs = CONFIRM_READ_TIMEOUT_MS, closeTimeoutMs = QUEUE_CLOSE_TIMEOUT_MS } = {}) {
+  let queue = null;
+  try {
+    queue = queueFn(consoleQueueConnection(url, parseConnectionFn), options);
+    if (queue.client === undefined) return { queue, client: null };
+    const client = await within(Promise.resolve(queue.client), connectTimeoutMs, () => CONNECT_LATE);
+    if (client !== CONNECT_LATE) return { queue, client };
+    void closeWithin(queue, closeTimeoutMs);
+    return { unreachable: `the queue did not connect within ${connectTimeoutMs / 1000} seconds; nothing was queued` };
+  } catch (err) {
+    if (queue) void closeWithin(queue, closeTimeoutMs);
+    return { unreachable: `${boundedText(err?.message ?? String(err))}; nothing was queued` };
+  }
+}
+
+/**
+ * A paid enqueue that was sent and not confirmed (issue #961): `partial`, never "nothing was queued". It says to look
+ * first because a second try is only taken as a duplicate for a while (a local or cron run and a `dispatch_run` within
+ * the same minute, a forge run within the semantic window), so a retry after that can pay for the same run twice.
+ */
+export const enqueueUnconfirmed = (what) => ({ invalid: `${what} may or may not have been queued: the queue did not confirm it. ${LOOK_FIRST}`, partial: true });
+
+/**
+ * A local or cron enqueue whose add was answered and whose read back was not (`enqueueLocalJobReporting`'s
+ * `existing: undefined`, issue #961): a job with this id is there, and whether this request made it or met an identical
+ * one from the same minute is not known. Never `ok`, which says this request queued it.
+ */
+export const enqueueUnread = (what, jobId) => ({ invalid: `${what} was taken as ${jobId}; whether it is new or an identical one from this minute was not read back. ${LOOK_FIRST}`, partial: true, jobId });
+
+/**
+ * What a person does before a second try: preview again. No page lists every waiting job (the overview names the
+ * first five of each reason, oldest first, and Fleet counts them), so a job that was just lost is found by the look
+ * the preview itself makes (`queuedAlready`), which says when a run like it is already queued or running.
+ */
+export const LOOK_FIRST = "Preview it again first: the preview says when one is already queued or running";
+
+/** The states of a job that has not ended, and the most of each one queue is asked for in a preview's look. */
+const ALREADY_STATES = Object.freeze(["active", "waiting", "prioritized", "delayed", "paused"]);
+export const ALREADY_PER_STATE = 200;
+
+/** What a preview's look answers when it could not tell, and why: a queue it could not read, or a state with more jobs than it asks for. */
+export const ALREADY_UNCHECKED = Object.freeze({ unchecked: true, why: "unread" });
+export const ALREADY_CUT = Object.freeze({ unchecked: true, why: "cut" });
+
+/**
+ * Whether a run like the one a paid preview is about is already queued or running on `queues` (issue #961): the newest
+ * job `match(job, state)` accepts as `{ jobId, queuedAt }`, null for none, `ALREADY_UNCHECKED` when a queue could not
+ * be read, or `ALREADY_CUT` when no match was read and one state of a queue holds more than `ALREADY_PER_STATE` jobs.
+ * Each state is asked for by itself, one more than the bound, so "more than were read" is said of a state that has
+ * more and never of a queue whose states only add up to it. A paid start whose answer was lost says to preview again,
+ * and a second try after the dedup window queues a second run with nothing to say so: this is what the preview says
+ * instead. Never a refusal: a person may want a second run. Never throws; its caller's one-step timer is its bound.
+ */
+export async function queuedAlready(queues, match) {
+  try {
+    let cut = false;
+    const hits = [];
+    for (const q of queues) {
+      if (typeof q?.getJobs !== "function") return ALREADY_UNCHECKED;
+      const lists = await Promise.all(ALREADY_STATES.map((state) => q.getJobs([state], 0, ALREADY_PER_STATE)));
+      lists.forEach((list, i) => {
+        const jobs = (Array.isArray(list) ? list : []).filter(Boolean);
+        if (jobs.length > ALREADY_PER_STATE) cut = true;
+        for (const job of jobs.slice(0, ALREADY_PER_STATE)) if (match(job, ALREADY_STATES[i])) hits.push(job);
+      });
+    }
+    hits.sort((x, y) => (Number(y.timestamp) || 0) - (Number(x.timestamp) || 0));
+    if (hits.length > 0) return { jobId: String(hits[0].id), queuedAt: Number.isFinite(hits[0].timestamp) ? hits[0].timestamp : null };
+    return cut ? ALREADY_CUT : null;
+  } catch {
+    return ALREADY_UNCHECKED;
+  }
+}
+
+/** The matches a preview looks for, each by what the job's own data or id says (never by a job id's digest, which carries the minute). */
+export const ALREADY_MATCH = Object.freeze({
+  /**
+   * A local run (a `dispatch_run`, a re-run of one, a cron trigger's run) of this flow in this folder, whatever its
+   * task. Never a scheduler's run that is still delayed: a cron trigger always has its next tick waiting for its time,
+   * so counting it made the warning permanent for every folder and flow a cron trigger names. A tick whose time has
+   * come is waiting or active, and is a run like any other.
+   */
+  local: ({ folder, flow }) => (job, state) => job?.data?.kind === "local" && job.data.folder === folder && job.data.flow === flow && !(state === "delayed" && cronRunOf(job.id)?.kind === SCHEDULER_JOB_PREFIX),
+  /** A hand-fired run of this cron trigger (Fire now, a canary, `pi-dispatch run --trigger`): never its scheduler's next tick, which always waits. */
+  manual: (triggerId) => (job) => typeof job?.id === "string" && job.id.startsWith(`${MANUAL_JOB_PREFIX}:${triggerId}:`),
+  /** A forge run of this flow on this item. */
+  forge: ({ kind, repo, target, flow }) => (job) => job?.data?.kind === kind && job.data.repo === repo && job.data.flow === flow && job.data.target?.type === target?.type && job.data.target?.number === target?.number,
+});
+
+/**
+ * The line a preview adds for `queuedAlready`'s answer about `what` ("a run of flow fix for this folder"), or null for
+ * none. `counts`: whether a confirm of this action counts against the hour's allowance, which a refused duplicate
+ * still does.
+ */
+export function alreadyQueuedLine(what, already, { counts = false } = {}) {
+  if (!already) return null;
+  if (already.unchecked === true) {
+    return already.why === "cut"
+      ? `Whether ${what} is already queued or running could not be checked: its queue holds more than ${ALREADY_PER_STATE} jobs of one state, and none of those read was one.`
+      : `Whether ${what} is already queued or running could not be checked: its queue could not be read. Preview again before confirming.`;
+  }
+  const at = Number.isFinite(already.queuedAt) ? new Date(already.queuedAt) : null;
+  const hhmm = at ? `, queued at ${String(at.getHours()).padStart(2, "0")}:${String(at.getMinutes()).padStart(2, "0")}` : "";
+  return `${what.charAt(0).toUpperCase()}${what.slice(1)} is already queued or running (${already.jobId}${hhmm}). Confirming asks for another: the queue refuses it while it takes it as a duplicate, and queues a second run after that.${counts ? " A refused one still uses a start of this hour." : ""}`;
+}
+
+/**
+ * `queuedAlready` for a `dispatch_run`'s preview, which opens no queue of its own: this host's queue, the console's
+ * bounded kind, one step under `timeoutMs`, its close started and never waited for.
+ */
+export async function dispatchRunAlready({ url, folder, flow, env = {}, queueFn = makeQueue, parseConnectionFn = parseConnection, timeoutMs = PAID_PLAN_TIMEOUT_MS } = {}) {
+  let queue = null;
+  const release = () => {
+    if (queue) void closeWithin(queue, QUEUE_CLOSE_TIMEOUT_MS);
+    queue = null;
+  };
+  const work = (async () => {
+    queue = queueFn(consoleQueueConnection(url, parseConnectionFn), { name: localQueueName(env) });
+    return queuedAlready([queue], ALREADY_MATCH.local({ folder, flow }));
+  })();
+  try {
+    return await within(work, timeoutMs, () => ALREADY_UNCHECKED);
+  } catch {
+    return ALREADY_UNCHECKED;
+  } finally {
+    release();
+    work.then(release, release);
+  }
 }
 
 /**
@@ -1285,20 +1451,31 @@ export async function planRerun({
   random = randomBytes,
   fs = nodeFs,
   timeoutMs = 2500,
+  planTimeoutMs = PAID_PLAN_TIMEOUT_MS,
+  lookAlready = true,
   now = Date.now,
 } = {}) {
   if (typeof jobId !== "string" || !JOB_ID_RE.test(jobId)) return { refusal: RERUN_BAD_ID };
+  // The look for a run like this one is the preview's (`lookAlready`): a confirm's re-plan has no use for it, and on a
+  // Valkey that stopped answering it added its list reads' bound to the confirm's.
+  const look = (queue, match) => (lookAlready ? queuedAlready([queue], match) : null);
   let redis = null;
   let fleet = null;
-  try {
-    redis = redisFn(url);
-    redis.on?.("error", () => {});
+  const release = releaseOf(() => fleet, () => redis);
+  // ONE step with its own end (issue #961, `planCancelQueued`'s pattern): each read below has a bound, and a queue that
+  // never connects has none, so without this the preview stayed open for as long as that queue took to give up.
+  const work = (async () => {
+    redis = boundedClient(redisFn, url);
     const read = await readRunById(redis, { logsDir, jobId, fs, timeoutMs });
-    if (!read.record) return { refusal: recordReadRefusal(read, jobId, "re-run") };
+    // `unread` (issue #961): the record was not read, which is no fact about the run. A confirm that re-plans says
+    // Valkey could not be reached for it, never that the run changed.
+    if (!read.record) return { refusal: recordReadRefusal(read, jobId, "re-run"), ...(read.missing !== true && typeof read.invalid !== "string" ? { unread: true } : {}) };
     const record = read.record;
     const touchSource = ["policy", "failed"].includes(record.outcome) ? { runId: jobId, cause: "rerun", ...(Number.isSafeInteger(Date.parse(record.endedAt)) ? { endedAt: Date.parse(record.endedAt) } : {}), scopeId: record.touchScopeId ?? touchScopeOf(record, record.host), ...(record.project ? { project: record.project } : {}) } : null;
     fleet = await openFleet({ url, redisFn, queueFn, parseConnectionFn, timeoutMs });
     const found = await fleet.find(jobId);
+    // Not found among queues that could not all be asked is not "its data expired".
+    if (!found && (fleet.blind || fleet.incomplete)) return { refusal: `the deployment's queues could not all be read, so ${jobId}'s job was not looked for in every queue; nothing was queued, try again`, unread: true };
     const data = found?.job?.data ?? null;
     const kind = typeof data?.kind === "string" ? data.kind : record.kind;
     const reserveOf = (jobData) => estimateReserve(jobData, { overlay, env, modelEndpoints, builtinModel });
@@ -1322,7 +1499,8 @@ export async function planRerun({
       if (schedule.data?.command !== undefined) return { refusal: `cron trigger "${triggerId}" runs the command /${schedule.data.command}, and a /command run is not re-run from the console; it runs from its reviewed trigger` };
       const folder = folderRefusal(schedule.data.folder, { localRepoProblemFn, gitDirtyFn, cron: true });
       if (folder) return { refusal: `cron trigger "${triggerId}": ${folder}` };
-      return { plan: { kind: "cron", jobId, ...(touchSource ? { touchSource } : {}), queue: localQueueName(env), schedule, job: schedule.data, reserve: reserveOf(schedule.data) } };
+      const queue = localQueueName(env);
+      return { plan: { kind: "cron", jobId, ...(touchSource ? { touchSource } : {}), queue, schedule, job: schedule.data, reserve: reserveOf(schedule.data) }, already: await look(fleet.queueOf(queue), ALREADY_MATCH.manual(triggerId)) };
     }
 
     if (kind === "local") {
@@ -1331,7 +1509,8 @@ export async function planRerun({
       const folder = folderRefusal(data.folder, { localRepoProblemFn, gitDirtyFn });
       if (folder) return { refusal: folder };
       const job = { folder: data.folder, flow: data.flow, task: data.task, ...randomRerunFields(data) };
-      return { plan: { kind: "local", jobId, ...(touchSource ? { touchSource } : {}), queue: localQueueName(env), job, reserve: reserveOf(job) } };
+      const queue = localQueueName(env);
+      return { plan: { kind: "local", jobId, ...(touchSource ? { touchSource } : {}), queue, job, reserve: reserveOf(job) }, already: await look(fleet.queueOf(queue), ALREADY_MATCH.local(job)) };
     }
 
     if (isForgeKind(kind)) {
@@ -1360,20 +1539,21 @@ export async function planRerun({
         ...(data.replica !== undefined ? { replica: data.replica } : {}),
         trigger: { ...(data.trigger ?? {}), deliveryId },
       };
-      return { plan: { kind: "forge", forge: kind, jobId, ...(touchSource ? { touchSource } : {}), deliveryId, queue: forgeQueueName(kind, job, fleet.hosts), job, runFields: runFieldsSummary(job), reserve: reserveOf(job) } };
+      const forgePlan = { kind: "forge", forge: kind, jobId, ...(touchSource ? { touchSource } : {}), deliveryId, queue: forgeQueueName(kind, job, fleet.hosts), job, runFields: runFieldsSummary(job), reserve: reserveOf(job) };
+      return { plan: forgePlan, already: await look(fleet.queueOf(forgePlan.queue), ALREADY_MATCH.forge({ kind, repo: job.repo, target: job.target, flow: job.flow })) };
     }
     // Unreachable: `rerunRefusalOf` refused every kind that is neither local nor a forge's. Kept so a kind added to one
     // and not the other still refuses rather than returning nothing.
     return { refusal: `${jobId} is a ${String(kind)} run, which the console cannot re-run` };
+  })();
+  try {
+    return await within(work, planTimeoutMs, () => ({ refusal: `could not read the run or its job (no answer within ${planTimeoutMs / 1000} seconds); nothing was queued`, unread: true }));
   } catch (err) {
-    return { refusal: `could not read the run or its job (${boundedText(err?.message ?? String(err))}); nothing was queued` };
+    return { refusal: `could not read the run or its job (${boundedText(err?.message ?? String(err))}); nothing was queued`, unread: true };
   } finally {
-    await fleet?.close();
-    try {
-      redis?.disconnect?.();
-    } catch {
-      // already closed
-    }
+    // Started, never awaited (`releaseOf`); a read still in flight when the bound fired is released when it settles.
+    release();
+    work.then(release, release);
   }
 }
 
@@ -1384,7 +1564,7 @@ export async function planRerun({
  * minute's, or a forge job's 10-minute semantic window (the same target and flow ran or is running). `{ refusal }` for a
  * plan that is not one, `{ unreachable }` for Valkey.
  */
-export async function enqueueRerun(plan, { url, queueFn = makeQueue, parseConnectionFn = parseConnection, localRepoProblemFn = localRepoProblem, gitDirtyFn = gitDirty, now = () => Date.now(), touchStore = null, touchOutbox = null, interventionOrigin = "human" } = {}) {
+export async function enqueueRerun(plan, { url, queueFn = makeQueue, parseConnectionFn = parseConnection, localRepoProblemFn = localRepoProblem, gitDirtyFn = gitDirty, now = () => Date.now(), touchStore = null, touchOutbox = null, interventionOrigin = "human", connectTimeoutMs = CONFIRM_READ_TIMEOUT_MS } = {}) {
   const kind = plan?.kind;
   if (kind !== "local" && kind !== "cron" && kind !== "forge") return { refusal: "not a re-run plan" };
   if (typeof plan.queue !== "string" || !(plan.queue === QUEUE || plan.queue.startsWith(`${QUEUE}@`))) return { refusal: "the plan names no queue" };
@@ -1392,29 +1572,46 @@ export async function enqueueRerun(plan, { url, queueFn = makeQueue, parseConnec
     const folder = folderRefusal(plan.job?.folder, { localRepoProblemFn, gitDirtyFn });
     if (folder) return { refusal: `${folder} (it changed since the preview). Nothing was queued` };
   }
-  let queue = null;
+  const what = `the re-run of ${String(plan.jobId)}`;
+  // Phase one, timed: a connected queue, or nothing was sent (`connectedQueue`).
+  const connected = await connectedQueue({ url, options: { name: plan.queue }, queueFn, parseConnectionFn, connectTimeoutMs });
+  if (!connected.queue) return { unreachable: connected.unreachable };
+  const { queue, client } = connected;
   let intent = null;
   let tracker = null;
+  // Whether the add was started, and whether an answer was lost: after the first no error says "nothing was queued"
+  // but Valkey's own, and after the second no further command is waited for.
+  let sent = false;
+  let lost = false;
   const done = async (result) => {
     if (!intent) return result;
-    const tracked = await tracker.applied(intent);
+    const pending = intent;
     intent = null;
+    let tracked = null;
+    try {
+      tracked = await tracker.applied(pending);
+    } catch {
+      // the run is queued; only its accounting is not
+    }
     return tracked?.ok ? result : { ...result, touchWarning: "touch-tracking-incomplete" };
   };
   try {
-    queue = queueFn(parseConnectionFn(url, { failFast: true }), { name: plan.queue });
-    const store = touchStore ?? (queue.client ? makeTouchStore({ redis: await queue.client, now }) : null);
+    const store = touchStore ?? (client ? makeTouchStore({ redis: client, now }) : null);
     if (interventionOrigin !== "agent" && plan.touchSource && (store || touchOutbox)) {
       tracker = touchOutbox ?? { begin: (event) => store.begin(event), applied: (pending) => store.write(pending.event), abort: (pending) => store.abort(pending.event) };
       intent = await tracker.begin({ ...plan.touchSource, at: now(), nonce: `rerun:${plan.jobId}:${plan.deliveryId ?? now()}` });
     }
-    if (kind === "local") {
-      const { id, existing } = await enqueueLocalJobReporting(queue, { folder: plan.job.folder, flow: plan.job.flow, task: plan.job.task, ...randomRerunFields(plan.job), now: new Date(now()) });
-      if (existing) return { refusal: swallowedRunSentence(id, existing), deduplicated: true, jobId: id };
-      return await done({ ok: true, jobId: id, queue: plan.queue });
-    }
-    if (kind === "cron") {
-      const { id, existing } = await enqueueTriggerRunReporting(queue, plan.schedule, { now: new Date(now()) });
+    // Phase two, NOT timed (issue #961): the queue's client bounds each command, and a timer that fired first could
+    // only say less than its error does.
+    sent = true;
+    if (kind === "local" || kind === "cron") {
+      const { id, existing } = kind === "local"
+        ? await enqueueLocalJobReporting(queue, { folder: plan.job.folder, flow: plan.job.flow, task: plan.job.task, ...randomRerunFields(plan.job), now: new Date(now()) })
+        : await enqueueTriggerRunReporting(queue, plan.schedule, { now: new Date(now()) });
+      if (existing === undefined) {
+        lost = true;
+        return enqueueUnread(what, id);
+      }
       if (existing) return { refusal: swallowedRunSentence(id, existing), deduplicated: true, jobId: id };
       return await done({ ok: true, jobId: id, queue: plan.queue });
     }
@@ -1422,10 +1619,21 @@ export async function enqueueRerun(plan, { url, queueFn = makeQueue, parseConnec
     if (res.deduplicated) return { refusal: `the same target and flow ran or is running within the last 10 minutes (job ${res.survivingJobId}), so the queue's semantic window took this re-run as a duplicate and nothing was queued. Try again once that window has passed`, deduplicated: true, jobId: res.jobId, survivingJobId: res.survivingJobId };
     return await done({ ok: true, jobId: res.jobId, queue: plan.queue });
   } catch (err) {
-    return { unreachable: err?.message ?? String(err) };
+    if (!sent || refusedByValkey(err)) {
+      lost = !refusedByValkey(err);
+      return { unreachable: `${boundedText(err?.message ?? String(err))}; nothing was queued` };
+    }
+    lost = true;
+    return enqueueUnconfirmed(what);
   } finally {
-    if (intent) await tracker.abort(intent);
-    if (queue) await queue.close().catch(() => {});
+    // The intent of a run that was not queued is taken back. After a lost answer that is started and not waited for:
+    // its command would wait out the same bound on the Valkey that just did not answer.
+    if (intent) {
+      const aborting = Promise.resolve().then(() => tracker.abort(intent)).catch(() => {});
+      if (!lost) await aborting;
+    }
+    // Started, never awaited: the answer does not wait for a QUIT.
+    void closeWithin(queue, QUEUE_CLOSE_TIMEOUT_MS);
   }
 }
 
@@ -1537,6 +1745,7 @@ export async function planParkedAnswer({
   fs = nodeFs,
   now = () => Date.now(),
   timeoutMs = 2500,
+  planTimeoutMs = PAID_PLAN_TIMEOUT_MS,
   pendingBudget = PENDING_SCAN_BUDGET,
 } = {}) {
   const who = from === "panel" ? PANEL_ANSWER_BY : consoleAnswerBy({ by });
@@ -1548,9 +1757,10 @@ export async function planParkedAnswer({
   if (typeof triggersPath !== "string" || triggersPath === "") return { refusal: "the triggers file is not known here (PI_TRIGGERS_FILE), so the reply cannot be built as the receiver builds it" };
   let redis = null;
   let fleet = null;
-  try {
-    redis = redisFn(url);
-    redis.on?.("error", () => {});
+  const release = releaseOf(() => fleet, () => redis);
+  // ONE step with its own end (issue #961), as `planRerun` is.
+  const work = (async () => {
+    redis = boundedClient(redisFn, url);
     const read = await readRunById(redis, { logsDir, jobId, fs, timeoutMs });
     if (!read.record) return { refusal: recordReadRefusal(read, jobId, "answered") };
     const record = read.record;
@@ -1622,15 +1832,14 @@ export async function planParkedAnswer({
       },
     };
     return { plan: { kind: "parked-answer", jobId, forge: kind, deliveryId, queue: approvalQueue ?? forgeQueueName(kind, job, fleet.hosts), job, runFields: runFieldsSummary(job), ...(approval ? { approval: { requestId: record.approval.requestId, action: record.approval.action, cap: rule.run.gateBudgetRaiseUsd ?? null } } : {}), reserve: estimateReserve(approval && record.approval.action === "budget-raise" && bounded.text.trim() === "/approve" ? { ...job, maxCostUsd: rule.run.gateBudgetRaiseUsd } : job, { overlay, env, modelEndpoints, builtinModel }) } };
+  })();
+  try {
+    return await within(work, planTimeoutMs, () => ({ refusal: `could not read the parked run or its job (no answer within ${planTimeoutMs / 1000} seconds); nothing was queued` }));
   } catch (err) {
     return { refusal: `could not read the parked run or its job (${boundedText(err?.message ?? String(err))}); nothing was queued` };
   } finally {
-    await fleet?.close();
-    try {
-      redis?.disconnect?.();
-    } catch {
-      // already closed
-    }
+    release();
+    work.then(release, release);
   }
 }
 
@@ -1649,19 +1858,24 @@ async function answeredWindow(redis, { logsDir, fs, now, timeoutMs }) {
  * deduplicated: true, jobId, survivingJobId }` when the 10-minute semantic window took it (an answer to this issue is
  * already queued or running), `{ refusal }` for a plan that is not one, `{ unreachable }`.
  */
-export async function enqueueParkedAnswer(plan, { url, queueFn = makeQueue, parseConnectionFn = parseConnection } = {}) {
+export async function enqueueParkedAnswer(plan, { url, queueFn = makeQueue, parseConnectionFn = parseConnection, connectTimeoutMs = CONFIRM_READ_TIMEOUT_MS } = {}) {
   if (plan?.kind !== "parked-answer" || !(plan.job?.parkedReply === true || /^[a-f0-9]{64}$/.test(plan.job?.approvalRequestId ?? "")) || !COMMENT_DELIVERY[plan.forge]) return { refusal: "not a parked-answer plan" };
   if (typeof plan.queue !== "string" || !(plan.queue === QUEUE || plan.queue.startsWith(`${QUEUE}@`))) return { refusal: "the plan names no queue" };
-  let queue = null;
+  // Two phases, as `enqueueRerun`: a connected queue under a bound, then the add under the client's bound alone.
+  const connected = await connectedQueue({ url, options: { name: plan.queue }, queueFn, parseConnectionFn, connectTimeoutMs });
+  if (!connected.queue) return { unreachable: connected.unreachable };
+  const { queue } = connected;
+  let sent = false;
   try {
-    queue = queueFn(parseConnectionFn(url, { failFast: true }), { name: plan.queue });
+    sent = true;
     const res = await enqueueForgeJob(queue, plan.forge, plan.job);
     if (res.deduplicated) return { refusal: `an answer to this issue is already queued or running (job ${res.survivingJobId}), so the queue's semantic window took this one as a duplicate and nothing was queued`, deduplicated: true, jobId: res.jobId, survivingJobId: res.survivingJobId };
     return { ok: true, jobIds: [res.jobId], queue: res.queue ?? plan.queue };
   } catch (err) {
-    return { unreachable: err?.message ?? String(err) };
+    if (!sent || refusedByValkey(err)) return { unreachable: `${boundedText(err?.message ?? String(err))}; nothing was queued` };
+    return enqueueUnconfirmed(`the answer to ${String(plan.jobId)}`);
   } finally {
-    if (queue) await queue.close().catch(() => {});
+    void closeWithin(queue, QUEUE_CLOSE_TIMEOUT_MS);
   }
 }
 
@@ -1673,15 +1887,10 @@ const STEER_SOURCES_HERE = Object.freeze(["console", "panel"]);
 const sha256Hex = (text) => createHash("sha256").update(text).digest("hex");
 
 /**
- * The raw client a steer plan or confirm reads and writes the inbox with (issue #842): each command bound, so one a
- * Valkey took and never answered ends at the bound with `valkeyMayStillRun`, and one that timed out before it was sent
- * is never sent later (`makeRedisClient`'s `commandTimeoutMs`). WITH its offline queue, the cancel probe's shape: a
- * client without one refuses its first command before it has connected. Its socket is dropped at once on disconnect.
+ * The raw client a steer plan or confirm reads and writes the inbox with (issue #842): the console's bounded one.
  */
 function steerClient(redisFn, url) {
-  const redis = redisFn(url, { commandTimeoutMs: VALKEY_COMMAND_TIMEOUT_MS, disconnectTimeoutMs: 0 });
-  redis.on?.("error", () => {});
-  return redis;
+  return boundedClient(redisFn, url);
 }
 
 /** A message's push or withdrawal that was sent and not answered (issue #842): `partial`, the outcome first. */

@@ -4,7 +4,7 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { planTriggerFire, enqueueTriggerFire } from "../src/trigger-fire.mjs";
-import { checkDispatchRun } from "../src/read-model.mjs";
+import { checkDispatchRun, DISPATCH_RUN_COUNT_SCRIPT } from "../src/read-model.mjs";
 
 const NOW = Date.UTC(2026, 0, 2, 12, 0, 10);
 function fixture() {
@@ -147,7 +147,7 @@ test("dispatch_run shared admission reads HEAD anew, keeps the dirty-tree gate, 
   let dirty = false, head = "a", gate = "allow", count = 0;
   const deps = { folder: f.folder, flow: "fix", env: f.options.grantsEnv, now: f.options.now, localRepoProblemFn: () => null, gitDirtyFn: () => dirty, revParseHeadFn: () => head,
     readFlowGateFn: async (p) => { seen.push(p.sha); return { gate }; },
-    redisFn: () => ({ async get() { return count; }, async incr(key) { rates.push(key); return ++count; }, async expire(_key, ttl) { assert.equal(ttl, 7200); }, disconnect() {} }) };
+    redisFn: () => ({ async get() { return count; }, async eval(script, keys, key, ttl) { assert.deepEqual([script, keys, ttl], [DISPATCH_RUN_COUNT_SCRIPT, 1, 7200]); rates.push(key); return ++count; }, disconnect() {} }) };
   assert.deepEqual(await checkDispatchRun({ ...deps, consumeRate: false }), {});
   assert.equal(rates.length, 0);
   head = "b";
@@ -191,4 +191,74 @@ test("a random trigger refuses an extension canary before consuming the hourly a
   assert.match(res.refusal, /fixed model trigger/);
   assert.equal(f.adds.length, 0);
   assert.ok(f.admissions.every((a) => a.consumeRate === false));
+});
+
+// ---- issue #961: Fire now on a Valkey that is connected and stopped answering ------------------------------------------
+
+const lostAnswer = () => Object.assign(new Error("Command timed out"), { code: "ETIMEDOUT", valkeyMayStillRun: true });
+/** `promise`'s answer, or "hung" after `ms` (which also holds the event loop: a bound's own timer does not). */
+const settled = async (promise, ms = 3000) => {
+  let timer;
+  const res = await Promise.race([promise, new Promise((resolve) => (timer = setTimeout(resolve, ms, "hung")))]);
+  clearTimeout(timer);
+  return res;
+};
+
+test("Fire now connects its queue before it uses the hour's allowance or the minute's latch, and a queue that never connects costs neither (#961)", async () => {
+  const f = fixture();
+  const { plan } = await planTriggerFire(f.options);
+  const conns = [];
+  let built = 0;
+  let closed = 0;
+  // The plan's own queue answers; the queue the fire would add to never connects.
+  const queueFn = (c, opts) => {
+    built += 1;
+    const queue = f.options.queueFn(c, opts);
+    return built === 1 ? queue : { ...queue, client: new Promise(() => {}), close: async () => { closed += 1; } };
+  };
+  let latched = 0;
+  const redisFn = () => ({ async set() { latched += 1; return "OK"; }, disconnect() {} });
+  const before = f.admissions.length;
+  const res = await settled(enqueueTriggerFire(plan, { ...f.options, queueFn, redisFn, parseConnectionFn: (_url, options) => (conns.push(options), {}), connectTimeoutMs: 60 }));
+  assert.deepEqual(res, { unreachable: "The deployment's queue could not be reached. Nothing was queued." });
+  assert.deepEqual(f.admissions.slice(before).map((a) => a.consumeRate), [false], "the allowance was read for the plan and never counted");
+  assert.equal(latched, 0, "the minute is not taken");
+  assert.equal(f.adds.length, 0);
+  assert.deepEqual(conns, Array(2).fill({ failFast: true, commandTimeoutMs: 5000 }), "both queues are the console's bounded kind");
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(closed, 1, "and the queue is closed, so nothing is sent later");
+  // The same minute is still free.
+  assert.equal((await enqueueTriggerFire(plan, f.options)).ok, true);
+});
+
+test("Fire now whose count or latch was sent and not answered queues nothing and says what may have been used (#961)", async () => {
+  const f = fixture();
+  const { plan } = await planTriggerFire(f.options);
+  // The hour's count, sent and not answered (`checkDispatchRun`'s `allowanceMayBeUsed`).
+  const counted = await enqueueTriggerFire(plan, { ...f.options, admissionFn: async ({ consumeRate }) => (consumeRate ? { unreachable: "Command timed out", allowanceMayBeUsed: true } : {}) });
+  assert.deepEqual(counted, { invalid: "Nothing was queued and one start of this hour may have been used: the dispatch_run hourly allowance was sent this fire and did not answer.", partial: true });
+  // The allowance not read at all: nothing was used.
+  const unread = await enqueueTriggerFire(plan, { ...f.options, admissionFn: async ({ consumeRate }) => (consumeRate ? { unreachable: "Command timed out" } : {}) });
+  assert.deepEqual(unread, { unreachable: "The dispatch_run hourly allowance could not be read. Nothing was queued." });
+  // The latch, on the console's bounded client: sent and not answered, the minute may be taken.
+  const made = [];
+  const latch = (error) => (_url, options) => (made.push(options), { on() {}, set: () => Promise.reject(error), disconnect() {} });
+  const lost = await enqueueTriggerFire(plan, { ...f.options, redisFn: latch(lostAnswer()) });
+  assert.deepEqual(lost, { invalid: "Nothing was queued, one start of this hour was used, and this minute's Fire now may be taken: its latch was sent and did not answer. Try again next minute.", partial: true });
+  assert.deepEqual(made, [{ commandTimeoutMs: 5000, disconnectTimeoutMs: 0 }]);
+  // Not sent: the minute is free, and the hour's count is still gone, so this is never "nothing was changed".
+  const unsent = await enqueueTriggerFire(plan, { ...f.options, redisFn: latch(new Error("Connection is closed.")) });
+  assert.deepEqual(unsent, { invalid: "Nothing was queued and one start of this hour was used: Fire now's latch for this minute could not be set.", partial: true });
+  assert.equal(f.adds.length, 0);
+});
+
+test("a Fire now preview whose scheduler read never answers ends at its bound and waits for no close (#961)", async () => {
+  const f = fixture();
+  let closes = 0;
+  const queueFn = () => ({ getJobScheduler: () => new Promise(() => {}), close: () => { closes += 1; return new Promise(() => {}); }, disconnect() {} });
+  const res = await settled(planTriggerFire({ ...f.options, queueFn, planTimeoutMs: 60 }));
+  assert.deepEqual(res, { unreachable: "The deployment's queue could not be read. Nothing was queued." });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(closes, 1);
+  assert.equal(f.admissions.length, 0, "the allowance is not asked of a Valkey that did not answer the queue");
 });

@@ -19,7 +19,7 @@ import { enqueueForgeJob, forgeDeliveryJobId, makeQueue } from "@edgehero/pi-dis
 import { buildRecord, makeRecordWriter, sanitizeJobId } from "@edgehero/pi-dispatch/run-history";
 import { closeInbox, markState, readInbox, registerLive } from "@edgehero/pi-dispatch/steer-inbox";
 import { PACKAGE_MOVED_SENTENCE, PACKAGE_NOT_TAKEN_SENTENCE, UPDATES_UNREAD_SENTENCE } from "../src/console/actions.mjs";
-import { switchPartialWords } from "../src/console/actions.mjs";
+import { switchPartialWords, actionNamed, agentFailure, AGENT_REFUSED, AGENT_UNCONFIRMED, PAUSE_SNAPSHOT_TIMEOUT_MS, START_USED } from "../src/console/actions.mjs";
 import { ACTIONS, SUPERSEDED_UNREAD_SENTENCE, supersededLeftOut, CONFIG_FIX_ACTIONS, atIndex, AUDIT_FAILED, BULK_MAX, CANCEL_TIMEOUT_SENTENCE, capturingAudit, confirmAction, DIFF_LINES_MAX, diffHtmlOf, dryRunFs, lineDiff, PREVIEW_AGAIN, previewAction, reserveText, queueUnreadRefusal, RESUME_WAITING_UNKNOWN, resumeManyUndo, SNAPSHOT_TIMEOUT_MS, SNAPSHOT_TIMEOUT_SENTENCE, SNAPSHOT_UNREAD_SENTENCE, SWITCH_QUEUES_NAMED, SWITCH_SHORT_LINES, switchReadLine, textHtml, TRIGGER_FORM, UNDO_SENTENCES, VALKEY_UNREACHABLE, waitingLine } from "../src/console/actions.mjs";
 import { CONSOLE_SCRIPT } from "../src/console/script.mjs";
 import { makeConfirmTickets } from "../src/console/confirm.mjs";
@@ -1479,10 +1479,14 @@ test("a confirm is a write in flight until it has answered: a stop that cuts it 
   assert.equal(typeof ticket, "string");
   pending = c.confirm("fleet-pause", ticket, agent);
   await until(async () => writes.size() === 1 && c.audit.rows.at(-1)?.actor?.role === "agent");
-  assert.equal(writes.abandon(), 1);
-  assert.deepEqual([c.audit.rows.at(-1).outcome, c.audit.rows.at(-1).reason], ["failed", "action-refused"]);
+  const abandoned = writes.abandon();
+  const cutRow = [c.audit.rows.at(-1).outcome, c.audit.rows.at(-1).reason];
+  // The confirm is let go before anything is asserted of it, so a wrong row fails here and holds nothing open.
   release({ results: [{ shown: "redis://a/0", res: { ok: true, queues: ["pi-jobs"] } }] });
   await pending;
+  assert.equal(abandoned, 1);
+  // Issue #961: a write the stop cut was sent and is not known, which "refused" did not say.
+  assert.deepEqual(cutRow, ["failed", "action-unconfirmed"]);
   // A cut row the audit log cannot take is said in the console's log and stops nothing: the next confirm is still cut.
   ticket = (await c.act("fleet-pause", {})).json().ticket;
   pending = c.confirm("fleet-pause", ticket);
@@ -4393,4 +4397,246 @@ test("structured allocation fields pack the existing action schemas, including f
   assert.deepEqual({ ...got.envelope.floorsUsd }, { web: 10 });
   assert.deepEqual({ ...got.envelope.defaultWeights }, { web: 3 });
   for (const bad of ["-1", "1001", "1.5", "Infinity"]) assert.throws(() => bodyOf(form("priorities", [field("weight:web", bad), field("validDays", "3")])), /Weights/);
+});
+
+// ---- issue #961: what a confirm says of a paid enqueue, a budget write and an Adopt on a Valkey that stopped answering ----
+
+test("a paid enqueue that was sent and not confirmed is a partial 409 with its own sentence and Look again, and unreachable is only ever one that was not sent (#961)", async () => {
+  const { paths } = deployment();
+  const reserve = { slots: 1, dollarsMicros: 2_000_000, capMicros: 2_000_000, zeroRated: false };
+  const firePlan = { index: 0, schedulerId: "daily", queue: "pi-jobs", fileDigest: "a".repeat(64), reserve, summary: ["Fire cron trigger row 1 (daily) now, once"] };
+  const rerunPlan = { kind: "local", jobId: "local-r", queue: "pi-jobs", job: { folder: "/srv/repos/example", flow: "fix", task: "t" }, reserve };
+  const parkedPlan = { kind: "parked-answer", forge: "github", jobId: "gh-p", queue: "pi-jobs", job: { flow: "fix", trigger: { comment: { body: "hi" } } }, runFields: { flow: "fix" }, reserve };
+  const CASES = [
+    ["run-enqueue", { folder: "/srv/repos/example", flow: "triage", task: "review tests" }, "enqueueDispatchRun", "the run may or may not have been queued: the queue was sent it and did not confirm it. Look at In line and Running on the overview before trying again"],
+    ["trigger-fire", { index: 0 }, "enqueueTriggerFire", "Fire now did not receive a queue acknowledgement. A run may have been queued; check In line and Running on the overview before trying again next minute."],
+    ["rerun", { jobId: "local-r" }, "enqueueRerun", "the re-run of local-r may or may not have been queued: the queue was sent it and did not confirm it. Look at In line and Running on the overview before trying again"],
+    ["parked-answer", { jobId: "gh-p", text: "hi" }, "enqueueParkedAnswer", "the answer to gh-p may or may not have been queued: the queue was sent it and did not confirm it. Look at In line and Running on the overview before trying again"],
+  ];
+  for (const [name, input, funnel, sentence] of CASES) {
+    const planned = { checkDispatchRun: async () => ({}), planTriggerFire: async () => ({ plan: firePlan }), planRerun: async () => ({ plan: rerunPlan }), planParkedAnswer: async () => ({ plan: parkedPlan }) };
+    const partial = await start({ paths, a: { rm: { ...RM, ...planned, [funnel]: async () => ({ invalid: sentence, partial: true }) } } });
+    const out = await partial.both(name, input);
+    assert.equal(out.confirm.status, 409, `${name}: ${out.confirm.text}`);
+    assert.equal(out.confirm.json().error, sentence);
+    assert.doesNotMatch(out.confirm.json().html, /nothing was changed/i, name);
+    assert.match(out.confirm.json().html, /data-reload>Look again</, name);
+    assert.deepEqual(lastTwo(partial), [["write", "ok", null], ["write", "failed", sentence]], name);
+    const unsent = await start({ paths, a: { rm: { ...RM, ...planned, [funnel]: async () => ({ unreachable: "the queue did not connect within 6 seconds; nothing was queued" }) } } });
+    const none = await unsent.both(name, input);
+    assert.equal(none.confirm.status, 503, `${name}: ${none.confirm.text}`);
+    assert.equal(none.confirm.json().error, VALKEY_UNREACHABLE);
+  }
+});
+
+test("a parked answer whose draft cannot be read at the confirm says Valkey could not be reached and queues nothing (#961)", async () => {
+  const { paths } = deployment();
+  const plan = { kind: "parked-answer", forge: "github", jobId: "gh-p", queue: "pi-jobs", job: { flow: "fix", console: { by: "ops", draftRunId: "answer-draft-" + "a".repeat(40), draftDigest: "d".repeat(64) }, trigger: { comment: { body: "hi" } } }, runFields: { flow: "fix" }, reserve: null };
+  let queued = 0;
+  const rm = { ...RM, planParkedAnswer: async () => ({ plan }), enqueueParkedAnswer: async () => ((queued += 1), { ok: true, jobIds: ["gh-x"], queue: "pi-jobs" }) };
+  // A read's error carries the mark of a command Valkey took, as a write's does: thrown on, the confirm said the answer may have been queued.
+  const answerer = { privateDraft: async () => { throw lostWrite(); } };
+  const c = await start({ paths, a: { rm, answerer } });
+  const out = await c.both("parked-answer", { jobId: "gh-p", text: "hi", draftRunId: plan.job.console.draftRunId, draftDigest: plan.job.console.draftDigest });
+  assert.equal(out.confirm.status, 503, out.confirm.text);
+  assert.equal(out.confirm.json().error, VALKEY_UNREACHABLE);
+  assert.equal(queued, 0);
+});
+
+test("Adopt does not write after one of its own reads went unanswered, and Undo depends only on the desired rows it reads (#961)", async () => {
+  const { paths } = deployment();
+  const input = { name: "pi-lint", version: "1.4.3" };
+  // The row is complete, canary and all: only the mark says a read behind it was not answered.
+  for (const mark of [{ factsUnread: true }]) {
+    const u = updatesDeps();
+    const c = await start({ paths, a: { updates: u.updates } });
+    const p = await c.act("package-adopt", input);
+    assert.equal(p.status, 200, p.text);
+    u.updates.read = async () => ({ packages: [updatesRow()], ...mark });
+    const out = await c.confirm("package-adopt", p.json().ticket);
+    assert.equal(out.status, 503, `${JSON.stringify(mark)}: ${out.text}`);
+    assert.equal(out.json().error, VALKEY_UNREACHABLE);
+    assert.deepEqual(u.asked, [], "no setDesired is sent");
+    assert.deepEqual(lastTwo(c), [["write", "ok", null], ["write", "failed", "Valkey could not be reached"]]);
+    // And its preview refuses with the Valkey sentence, a 503.
+    const blind = await start({ paths, a: { updates: { read: async () => ({ packages: [updatesRow()], ...mark }), setDesired: async () => assert.fail("no write") } } });
+    const refused = await blind.act("package-adopt", input);
+    assert.equal(refused.status, 503, refused.text);
+    assert.equal(refused.json().error, UPDATES_UNREAD_SENTENCE);
+  }
+  // Undo reads neither a host's applied rows nor a canary's facts: their being unread refuses nothing of it.
+  const adopted = updatesRow({ version: "1.4.3", desired: { op: "adopt", generation: 5, version: "1.4.3", from: "1.4.2", name: "pi-lint" } });
+  const undo = updatesDeps(adopted);
+  undo.updates.read = async () => ({ packages: [adopted], factsUnread: true, recordsPartial: true });
+  const undone = await (await start({ paths, a: { updates: undo.updates } })).both("package-undo", { name: "pi-lint" });
+  assert.equal(undone.confirm.status, 200, undone.confirm.text);
+  assert.equal(undo.asked.length, 1);
+  // A history that was only partly read, or not at all, and no canary in what was: not known, never "Run a canary first".
+  const partial = await start({ paths, a: { updates: { read: async () => ({ packages: [updatesRow({ canary: null })], recordsPartial: true }), setDesired: async () => assert.fail("no write") } } });
+  const said = await partial.act("package-adopt", input);
+  assert.equal(said.json().error, "Some recent runs could not be read, so whether a canary of pi-lint 1.4.3 completed is not known. Reload and try again. Nothing was changed.");
+  // A canary that IS in a partly read history is evidence enough.
+  const found = await start({ paths, a: { updates: { read: async () => ({ packages: [updatesRow()], recordsPartial: true }), setDesired: async () => {} } } });
+  assert.equal((await found.act("package-adopt", input)).status, 200);
+});
+
+test("a budget write that was sent and not answered says may or may not have been made, and nothing was changed only where nothing was sent (#961)", async () => {
+  const { paths } = deployment();
+  const log = [{ at: "2026-10-15T00:00:00Z", outcome: "applied", planId: "p1", weights: { web: 2 } }];
+  for (const [name, input, funnel] of [["priorities-set", { projects: [{ id: "web", weight: 3 }] }, "applyPriorities"], ["allocation-revert", { index: 0 }, "revertAllocation"]]) {
+    const lost = allocationRm({ log });
+    lost.rm[funnel] = async () => { throw lostWrite(); };
+    const c = await start({ paths, a: { rm: lost.rm } });
+    const out = await c.both(name, input);
+    assert.equal(out.confirm.status, 500, out.confirm.text);
+    assert.equal(out.confirm.json().error, `Valkey did not confirm the ${name} change, so it may or may not have been made. Look again once Valkey answers; the console's log has the reason`);
+    assert.doesNotMatch(out.confirm.json().html, /nothing was changed/i);
+    assert.deepEqual(lastTwo(c), [["write", "ok", null], ["write", "failed", "the write threw (ETIMEDOUT); Valkey did not confirm it, so it may or may not have been made"]]);
+    // A client that never connected sent nothing (`writeClient` throws no mark for it).
+    const unsent = allocationRm({ log });
+    unsent.rm[funnel] = async () => { throw new Error("Valkey did not connect within 6 seconds"); };
+    const u = await start({ paths, a: { rm: unsent.rm } });
+    const none = await u.both(name, input);
+    assert.equal(none.confirm.json().error, `the ${name} change could not be made; nothing was changed, and the console's log has the reason`);
+  }
+  // The envelope's digest, sent and not answered: the funnel's own sentence, kept partial through the action.
+  const sentence = "the record of the new envelope's digest in alloc:envelope:expected may or may not have been made";
+  const ctx = (answer) => ({ a: { rm: { writeEnvelope: async () => answer }, paths: {} }, session: { role: "operator", name: "ops" }, fs: {} });
+  const entry = { payload: { files: {}, change: {} }, expect: null };
+  assert.deepEqual(await actionNamed("envelope-set").apply(entry, ctx({ invalid: sentence, partial: true })), { invalid: sentence, partial: true });
+  assert.deepEqual(await actionNamed("envelope-set").apply(entry, ctx({ invalid: "the file was not written" })), { invalid: "the file was not written" });
+});
+
+test("the pause preview waits six seconds for its snapshot, the resume ten (#961)", async () => {
+  assert.deepEqual([PAUSE_SNAPSHOT_TIMEOUT_MS, SNAPSHOT_TIMEOUT_MS], [6_000, 10_000]);
+  const { paths } = deployment();
+  // A snapshot that never answers: the pause is previewed without it, at the bound this console was given.
+  const fleet = { snapshot: () => new Promise(() => {}) };
+  const c = await start({ paths, a: { fleet, pauseSnapshotTimeoutMs: 80 } });
+  const t0 = Date.now();
+  const p = await c.act("fleet-pause", {});
+  assert.equal(p.status, 200, p.text);
+  assert.ok(Date.now() - t0 < 3000, `${Date.now() - t0} ms`);
+  assert.match(p.json().html, /The queues and running, delayed and held counts could not be read; a pause still reaches every queue the kill switch discovers/);
+});
+
+test("a paid preview says in its own text that a run like it is already queued or running, or that it could not look, and nothing when none is (#961)", async () => {
+  const { paths } = deployment();
+  const reserve = { slots: 1, dollarsMicros: 2_000_000, capMicros: 2_000_000, zeroRated: false };
+  const firePlan = { index: 0, schedulerId: "daily", queue: "pi-jobs", fileDigest: "a".repeat(64), reserve, schedule: { data: {} }, summary: ["Fire cron trigger row 1 (daily) now, once"] };
+  const rerunPlan = { kind: "local", jobId: "local-r", queue: "pi-jobs", job: { folder: "/srv/repos/example", flow: "fix", task: "t" }, reserve };
+  const QUEUED_AT = Date.UTC(2026, 9, 15, 10, 5);
+  const at = `${String(new Date(QUEUED_AT).getHours()).padStart(2, "0")}:${String(new Date(QUEUED_AT).getMinutes()).padStart(2, "0")}`;
+  const CASES = [
+    ["run-enqueue", { folder: "/srv/repos/example", flow: "triage", task: "review tests" }, "A run of flow triage for this folder", "a run of flow triage for this folder", (already) => ({ checkDispatchRun: async () => ({}), dispatchRunAlready: async () => already })],
+    ["rerun", { jobId: "local-r" }, "A run of flow fix for this folder", "a run of flow fix for this folder", (already) => ({ planRerun: async () => ({ plan: rerunPlan, already }) })],
+    ["trigger-fire", { index: 0 }, "A hand-fired run of this cron trigger", "a hand-fired run of this cron trigger", (already) => ({ planTriggerFire: async () => ({ plan: firePlan, already }) })],
+    ["package-canary", { index: 0, name: "pi-lint", version: "1.4.3" }, "A hand-fired run of this cron trigger", "a hand-fired run of this cron trigger", (already) => ({ planTriggerFire: async () => ({ plan: firePlan, already }) })],
+  ];
+  for (const [name, input, What, what, rm] of CASES) {
+    const preview = async (already) => (await (await start({ paths, a: { rm: { ...RM, ...rm(already) }, updates: updatesDeps(updatesRow({ canary: null })).updates } })).act(name, input));
+    const warned = await preview({ jobId: "local-9f", queuedAt: QUEUED_AT });
+    assert.equal(warned.status, 200, `${name}: ${warned.text}`);
+    // True inside the dedup window too, where a confirm is refused as a duplicate and still counts against the hour.
+    const line = `${What} is already queued or running (local-9f, queued at ${at}). Confirming asks for another: the queue refuses it while it takes it as a duplicate, and queues a second run after that.${name === "rerun" ? "" : " A refused one still uses a start of this hour."}`;
+    assert.equal(warned.json().summary.at(-1), line, name);
+    assert.ok(warned.json().html.includes(line), `${name}: in the preview's own text`);
+    assert.equal(typeof warned.json().ticket, "string", `${name}: a warning, never a refusal`);
+    const unchecked = await preview({ unchecked: true });
+    assert.equal(unchecked.json().summary.at(-1), `Whether ${what} is already queued or running could not be checked: its queue could not be read. Preview again before confirming.`, name);
+    const cut = await preview({ unchecked: true, why: "cut" });
+    assert.equal(cut.json().summary.at(-1), `Whether ${what} is already queued or running could not be checked: its queue holds more than 200 jobs of one state, and none of those read was one.`, name);
+    const none = await preview(null);
+    assert.equal(none.status, 200, none.text);
+    assert.doesNotMatch(none.json().html, /already queued or running/, `${name}: nothing queued, nothing said`);
+  }
+});
+
+test("a re-run confirm whose re-plan went unanswered says Valkey could not be reached, and changed only when a read showed a change (#961)", async () => {
+  const { paths } = deployment();
+  const plan = { kind: "local", jobId: "local-r", queue: "pi-jobs", job: { folder: "/srv/repos/example", flow: "fix", task: "t" }, reserve: null };
+  const second = (answer) => {
+    let calls = 0, queued = 0;
+    const looks = [];
+    const rm = { ...RM, planRerun: async (args) => (looks.push(args.lookAlready), (calls += 1) === 1 ? { plan } : answer), enqueueRerun: async () => ((queued += 1), { ok: true, jobId: "local-x", queue: "pi-jobs" }) };
+    return { rm, queued: () => queued, looks };
+  };
+  const unread = second({ refusal: "could not read the run or its job (no answer within 6 seconds); nothing was queued", unread: true });
+  const c = await start({ paths, a: { rm: unread.rm } });
+  const out = await c.both("rerun", { jobId: "local-r" });
+  assert.equal(out.confirm.status, 503, out.confirm.text);
+  assert.equal(out.confirm.json().error, VALKEY_UNREACHABLE);
+  assert.deepEqual(lastTwo(c), [["write", "ok", null], ["write", "failed", "Valkey could not be reached"]]);
+  assert.equal(unread.queued(), 0);
+  assert.deepEqual(unread.looks, [undefined, false], "the preview looks for a run like it; the confirm's re-plan does not");
+  // A read that answered, with another plan or with a refusal of its own: that is a change.
+  for (const answer of [{ plan: { ...plan, job: { ...plan.job, flow: "other" } } }, { refusal: "the queue no longer holds local-r's data" }]) {
+    const moved = second(answer);
+    const m = await (await start({ paths, a: { rm: moved.rm } })).both("rerun", { jobId: "local-r" });
+    assert.equal(m.confirm.status, 409, m.confirm.text);
+    assert.equal(m.confirm.json().error, "The re-run source or current trigger changed; preview the run again before enqueueing.");
+    assert.equal(moved.queued(), 0);
+  }
+});
+
+test("an agent's write that was sent and not confirmed is recorded and answered as action-unconfirmed, a refused one as action-refused (#961)", async () => {
+  const { paths } = deployment();
+  const grants = { grantsEnv: { PI_DISPATCH_RUN_ROOTS: "/srv/repos", PI_DISPATCH_RUN_PER_HOUR: "3" } };
+  const input = { folder: "/srv/repos/example", flow: "triage", task: "review tests" };
+  for (const [answer, reason] of [[{ invalid: "the run may or may not have been queued", partial: true }, "action-unconfirmed"], [{ refused: "uncommitted changes" }, "action-refused"]]) {
+    const c = await start({ paths, a: { ...grants, rm: { ...RM, checkDispatchRun: async () => ({}), dispatchRunAlready: async () => null, enqueueDispatchRun: async () => answer } } });
+    const agent = await c.cookieFor(AGENT_TOKEN);
+    const p = await c.act("run-enqueue", input, agent);
+    assert.equal(p.status, 200, p.text);
+    const done = await c.confirm("run-enqueue", p.json().ticket, agent);
+    assert.equal(done.status, 409, done.text);
+    assert.deepEqual([c.audit.rows.at(-1).outcome, c.audit.rows.at(-1).reason], ["failed", reason]);
+  }
+  assert.deepEqual([AGENT_REFUSED, AGENT_UNCONFIRMED, agentFailure({ partial: true }), agentFailure({ invalid: "x" })], ["action-refused", "action-unconfirmed", "action-unconfirmed", "action-refused"]);
+  // An agent's re-run whose count against the hour was lost keeps its partial mark through the confirm.
+  const plan = { kind: "local", jobId: "local-r", queue: "pi-jobs", job: { folder: "/srv/repos/example", flow: "fix", task: "t" }, reserve: null };
+  const rm = { ...RM, planRerun: async () => ({ plan }), checkDispatchRun: async ({ consumeRate }) => (consumeRate ? { unreachable: "Command timed out", allowanceMayBeUsed: true } : {}), enqueueRerun: async () => assert.fail("nothing is queued after a lost count") };
+  const r = await start({ paths, a: { ...grants, rm } });
+  const agent = await r.cookieFor(AGENT_TOKEN);
+  const p = await r.act("rerun", { jobId: "local-r" }, agent);
+  assert.equal(p.status, 200, p.text);
+  const lost = await r.confirm("rerun", p.json().ticket, agent);
+  assert.equal(lost.status, 409, lost.text);
+  assert.deepEqual([r.audit.rows.at(-1).outcome, r.audit.rows.at(-1).reason], ["failed", "action-unconfirmed"]);
+});
+
+test("a canary's preview asks its plan beside the package facts, not after them (#961)", async () => {
+  const { paths } = deployment();
+  const order = [];
+  const u = updatesDeps(updatesRow({ canary: null }));
+  const read = u.updates.read;
+  u.updates.read = async () => {
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    order.push("facts read");
+    return read();
+  };
+  const rm = { ...RM, planTriggerFire: async ({ index }) => (order.push("plan asked"), { plan: { index, schedulerId: "daily", queue: "pi-jobs", fileDigest: "a".repeat(64), schedule: { data: {} }, reserve: null } }) };
+  const c = await start({ paths, a: { rm, updates: u.updates } });
+  assert.equal((await c.act("package-canary", { index: 0, name: "pi-lint", version: "1.4.3" })).status, 200);
+  assert.deepEqual(order, ["plan asked", "facts read"], "one after the other, a Valkey that stopped answering held the preview for both bounds");
+});
+
+test("a dispatch run the queue took as a duplicate says the start it used, and an agent's bulk rows carry the closed word for each job (#961)", async () => {
+  const { paths } = deployment();
+  const c = await start({ paths, a: { rm: { ...RM, checkDispatchRun: async () => ({}), dispatchRunAlready: async () => null, enqueueDispatchRun: async () => ({ ok: true, jobId: "local-1", deduplicated: true, said: "an identical run was queued" }) } } });
+  const dup = await c.both("run-enqueue", { folder: "/srv/repos/example", flow: "triage", task: "review tests" });
+  assert.equal(dup.confirm.status, 409, dup.confirm.text);
+  assert.equal(dup.confirm.json().error, "An equivalent run is already queued; nothing new was queued. One start of this hour's dispatch_run allowance was used.");
+  assert.equal(START_USED, "One start of this hour's dispatch_run allowance was used.");
+  // A bulk action by an agent: one job done, one sent and not confirmed, one refused.
+  const jobs = ["gh-a", "gh-b", "gh-c"].map((jobId, i) => ({ jobId, queue: "pi-jobs", attemptsMade: 1, finishedOn: i + 1 }));
+  const results = [{ jobId: "gh-a", ok: true }, { jobId: "gh-b", invalid: "the removal may or may not have been made", partial: true }, { jobId: "gh-c", invalid: "it changed since the preview" }];
+  const b = await start({ paths, a: { rm: { ...RM, planFailedBulk: async () => ({ jobs, more: 0 }), removeFailedJobs: async () => ({ results }) } } });
+  const agent = await b.cookieFor(AGENT_TOKEN);
+  const p = await b.act("remove-all-failed", {}, agent);
+  assert.equal(p.status, 200, p.text);
+  const done = await b.confirm("remove-all-failed", p.json().ticket, agent);
+  assert.equal(done.status, 200, done.text);
+  assert.deepEqual(done.json().results.map((r) => [r.jobId, r.ok, r.reason ?? null]), [["gh-a", true, null], ["gh-b", false, "action-unconfirmed"], ["gh-c", false, "action-refused"]]);
+  assert.deepEqual(b.audit.rows.filter((r) => r.outcome === "failed").map((r) => [r.target, r.reason]), [["gh-b", "action-unconfirmed"], ["gh-c", "action-refused"]]);
 });

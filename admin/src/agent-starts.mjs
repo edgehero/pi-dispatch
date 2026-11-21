@@ -13,6 +13,8 @@ export async function checkAgentRerun(plan, { rm, env, grantsEnv, now, consumeRa
   const granted = paidStartEnvironment(env, grantsEnv);
   if (granted.refusal) return granted;
   const result = await rm.checkDispatchRun({ folder: job.folder, flow: job.flow, aiInvoked: true, consumeRate, env: granted.env, now });
+  // The count against the hour was sent and not answered (issue #961): nothing was queued, and nothing is given back.
+  if (result.allowanceMayBeUsed) return { refusal: "Nothing was queued. The paid-start allowance was sent this start and did not answer, so one start of this hour may have been used.", partial: true };
   if (result.refused || result.unreachable) return { refusal: result.refused ?? "The paid-start admission could not read its shared allowance." };
   return { ok: true };
 }
