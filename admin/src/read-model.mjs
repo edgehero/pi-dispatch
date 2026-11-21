@@ -106,7 +106,7 @@ import { LIVE_KINDS, LIVE_OUTCOMES, LIVE_TOOL_RE, liveKeyFor } from "@edgehero/p
 import { COMMENT_ID_RE, PROGRESS_COUNT_MAX, PROGRESS_MAX_BYTES, PROGRESS_NOTE_MAX, PROGRESS_PHASE_MAX, PROGRESS_PHASES_MAX, PROGRESS_RECENT_MAX, PROGRESS_RUNNING_MAX, progressKeyFor } from "@edgehero/pi-dispatch/run-progress";
 import { readFlowGate, aiTriggerAllows, SKILL_NAME_RE } from "@edgehero/pi-dispatch/flow-gate";
 import { gitDirty, localRepoProblem } from "@edgehero/pi-dispatch/git-dirty";
-import { readStageManifest, readStagedSkills } from "@edgehero/pi-dispatch/packages";
+import { PACKAGES_SUBDIR, STAGE_MANIFEST, readStageManifest, readStagedSkills } from "@edgehero/pi-dispatch/packages";
 // The skill enumeration reuses the worker's OWN listing parsers (issue #54), the same anti-drift rule
 // as parseTriggers/readOverlay above: selectEntries keeps only regular blobs at allowed paths, and
 // keepOnlyDeclaredSkills drops a subtree that declares no SKILL.md -- re-deriving either here is how
@@ -3632,13 +3632,23 @@ function normalizeSelector(value) {
  * Uses the worker's OWN `readStageManifest`, so the admin and the job path cannot drift on the manifest's
  * location, shape, or re-validation -- the same rule as `parseTriggers` / `readOverlay` above. Degrades in
  * every absent case to the SAME safe empty shape `{ stagedAt: null, packages: [] }` -- no overlay
- * configured, no manifest on disk, or a malformed one -- so the caller never has to discriminate. That
+ * configured, no manifest on disk, or a malformed one -- so a caller that only lists never has to discriminate; a
+ * manifest that is on disk and gave no list also carries `unreadable: true`, for a caller that counts. That
  * reader never throws by contract; the try/catch additionally covers the injected `fs` callbacks, so a
  * viewer degrades rather than killing the panel.
  */
 export function readStagedPackages({ globalPiDir, fs = nodeFs, readManifest = readStageManifest } = {}) {
   const empty = { stagedAt: null, packages: [] };
   if (typeof globalPiDir !== "string" || globalPiDir === "") return empty;
+  // Issue #962: the worker's reader answers null for a manifest that is absent, malformed or unreadable alike, which is
+  // right for a job (none of them stages anything) and wrong for a page: "0 packages staged" of a manifest nobody could
+  // read. So the console asks the one thing the reader does not say, whether the file is there: a manifest that is
+  // there and gave no list is `unreadable`, and one that is not there stays the true empty shape.
+  // Which of the two it is takes one guarded read of the same file: bytes that came back and gave no list are
+  // `malformed` too ("does not load"), and a read that threw is not ("could not be read").
+  const manifestPath = join(globalPiDir, PACKAGES_SUBDIR, STAGE_MANIFEST);
+  const there = () => { try { return fs.existsSync(manifestPath) === true; } catch { return false; } };
+  const unread = () => { try { fs.readFileSync(manifestPath, "utf8"); return { ...empty, unreadable: true, malformed: true }; } catch { return { ...empty, unreadable: true }; } };
   let manifest;
   try {
     manifest = readManifest({
@@ -3647,8 +3657,9 @@ export function readStagedPackages({ globalPiDir, fs = nodeFs, readManifest = re
       fileExists: (path) => fs.existsSync(path),
     });
   } catch {
-    return empty;
+    return there() ? unread() : empty;
   }
+  if (manifest === null || manifest === undefined) return there() ? unread() : empty;
   const entries = Array.isArray(manifest?.packages) ? manifest.packages : [];
   return {
     stagedAt: typeof manifest?.stagedAt === "string" ? manifest.stagedAt : null,

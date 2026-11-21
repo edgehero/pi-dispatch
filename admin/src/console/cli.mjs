@@ -831,10 +831,11 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
     // `UPDATES_FACTS_TIMEOUT_MS` the facts are the files' and the run records' alone, as a console without a Valkey
     // reads them, every gate then saying what Valkey holds could not be read. The run history is read before the
     // timer starts: a slow scan of this host's records is no Valkey that did not answer. One that could not be read
-    // at all is partial, so a gate says a canary's result is not known rather than that none ran.
+    // at all is partial, so a gate says a canary's result is not known rather than that none ran. An audit log that could
+    // not be read is null and not an empty list (issue #962): the page says so, where no row is a log with none.
     const readUpdatesFacts = async () => {
       const history = await updatesHistory().catch(() => ({ records: [], partial: true }));
-      const audit = await Promise.resolve().then(() => m.audit.readConsoleAudit({ logsDir: config.logsDir, fs, limit: 200 })).then((read) => read?.rows ?? []).catch(() => []);
+      const audit = await Promise.resolve().then(() => m.audit.readConsoleAudit({ logsDir: config.logsDir, fs, limit: 200 })).then((read) => (read?.unreadable ? null : read?.rows ?? [])).catch(() => null);
       const LATE = Symbol("late");
       let timer;
       const late = new Promise((resolve) => {
@@ -888,7 +889,7 @@ async function serve({ io, m, config, layered, audit, fs, now, uid, random }) {
       agentWrites: () => readAgentWritesToday({ read: (opts) => m.audit.readConsoleAudit({ logsDir: config.logsDir, ...opts, positions: true, fs }), verify: () => m.audit.verifyConsoleAudit({ logsDir: config.logsDir, fs, withLast: true }), now, host: side.env.PI_WORKER_NAME ?? "console" }),
       paths: side.paths,
       configLocations: () => m.readModel.configLocationsOf({ paths: side.paths, deploymentDir: config.dir }),
-      secretsView: (snapshot) => m.secretsView.secretsView({ snapshot, env: side.env, fs }),
+      secretsView: (snapshot, files = null) => m.secretsView.secretsView({ snapshot, files, env: side.env, fs }),
       updates: () => readUpdatesFacts(),
       // Issue #849: the remembered browsers, for their page. The listing carries each record's hash for the actions; the page needs none of them.
       devices: devices ? () => { const listed = devices.list(); return listed.problem ? listed : { ...listed, devices: listed.devices.map(({ hash, ...rest }) => rest) }; } : null,

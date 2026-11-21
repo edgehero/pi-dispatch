@@ -436,7 +436,7 @@ async function renderInChild() {
     const deps = {
       // Issue #849: the remembered browsers as `serve` lists them for the page (no hashes), from the DevicesScreen card's fixture.
       devices: () => ({ devices: DEVICES_FIXTURE, unreadable: 0, unreadableIds: [] }),
-      secretsView: (snapshot) => secretsView({ snapshot, env }),
+      secretsView: (snapshot, files = null) => secretsView({ snapshot, files, env }),
       connections: (snapshot) => readConnections({ snapshot, env, deploymentDir: deployment, paths: fleetPaths, now: NOW, redis: admin }),
       updates: async () => readUpdates({ redis: admin, staged: readStaged({ globalPiDir: fleetPaths.globalPiDir }), triggersDocument: readTriggersDocument({ triggersPath: fleetPaths.triggersPath }), records: [], audit: [], pinned: pricing.piAiVersion(), now: NOW }),
       projectView: (id, snapshot) => readProjectView({ id, snapshot, env, paths: fleetPaths, now: NOW, fleet: reader, pricing }),

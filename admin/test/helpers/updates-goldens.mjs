@@ -20,7 +20,7 @@ const applied = (fields = {}) => JSON.stringify({ v: 1, generation: 5, state: "a
 const FACTS = JSON.stringify({ v: 1, host: "mini1", at: NOW - 2 * HOUR, digest: "a".repeat(64), excerpt: "## 1.4.3\n\nFixes the <b>path</b> rule on Windows." });
 
 /** A Valkey that answers from these keys. Everything else about the page goes through the real read. */
-function valkey({ looks = [look("mini1"), look("mini2"), look("build3", { hostPi: hostPi({ version: null, state: "absent" }) })], desiredRows = {}, appliedRows = {}, facts = {}, down = false, doctorHosts = [] } = {}) {
+function valkey({ looks = [look("mini1"), look("mini2"), look("build3", { hostPi: hostPi({ version: null, state: "absent" }) })], desiredRows = {}, appliedRows = {}, appliedUnread = [], facts = {}, down = false, doctorHosts = [] } = {}) {
 	const strings = new Map([...looks.map((l) => [`updates:h:${l.host}`, JSON.stringify(l)]), ...Object.entries(facts)]);
 	const refuse = async () => { throw new Error("down"); };
 	if (down) return { smembers: refuse, mget: refuse, hgetall: refuse, get: refuse };
@@ -28,14 +28,20 @@ function valkey({ looks = [look("mini1"), look("mini2"), look("build3", { hostPi
 		smembers: async (key) => (key === "updates:hosts" ? looks.map((l) => l.host) : key === "doctor:hosts" ? doctorHosts : []),
 		mget: async (...keys) => keys.map((key) => strings.get(key) ?? null),
 		get: async (key) => strings.get(key) ?? null,
-		hgetall: async (key) => (key === "updates:desired" ? desiredRows : appliedRows[key.slice("updates:applied:".length)] ?? {}),
+		// `appliedUnread`: the hosts whose applied rows Valkey does not answer for, while it answers everything else.
+		hgetall: async (key) => {
+			if (key === "updates:desired") return desiredRows;
+			const host = key.slice("updates:applied:".length);
+			if (appliedUnread.includes(host)) throw new Error("Valkey does not answer");
+			return appliedRows[host] ?? {};
+		},
 		hmget: async () => [],
 		pipeline: () => { throw new Error("not used here"); },
 	};
 }
 
-export async function updatesFacts({ redis = {}, records = [], recordsPartial = false, audit = [], staged = STAGED, now = NOW, triggersDocument = TRIGGERS } = {}) {
-	return await readUpdates({ redis: valkey(redis), staged, records, recordsPartial, audit, pinned: PINNED, triggersDocument, now });
+export async function updatesFacts({ redis = {}, records = [], recordsPartial = false, audit = [], staged = STAGED, now = NOW, triggersDocument = TRIGGERS, triggersTrouble = null } = {}) {
+	return await readUpdates({ redis: valkey(redis), staged, records, recordsPartial, audit, pinned: PINNED, triggersDocument, triggersTrouble, now });
 }
 
 async function draw({ role = "operator", readOnly = false, facts = {}, unavailable = false } = {}) {
@@ -86,6 +92,8 @@ export const UPDATES_DRAW = Object.freeze({
 	"updates-newer-after-adopt.operator": () => draw({ facts: { staged: { packages: [{ name: "pi-lint", version: "1.4.3", dir: "pi-lint--1.4.3--cccccccc", from: "pi-packages" }] }, records: [canaryRecord({ packageCanary: { name: "pi-lint", version: "1.4.4", load: "loaded" } })], redis: { looks: [look("mini1", { packages: [row("pi-lint", "1.4.3", "1.4.4")] })], desiredRows: { "pi-lint": desired() }, appliedRows: { mini1: { "pi-lint": applied() } } } } }),
 	"updates-staged-unreadable.operator": () => draw({ facts: { staged: { packages: [], unreadable: true } } }),
 	"updates-records-partial.operator": () => draw({ facts: { recordsPartial: true } }),
+	// Issue #962: an Adopt under way where one host's applied rows were not answered and the audit log could not be read. That host is not known, never pending or late, and the card says the log could not be read.
+	"updates-host-unread.operator": () => draw({ facts: { audit: null, records: [canaryRecord()], redis: { desiredRows: { "pi-lint": desired() }, appliedRows: { mini1: { "pi-lint": applied() } }, appliedUnread: ["mini2"] } } }),
 });
 /** Every golden of this page, the two previews included: `panel-goldens.mjs` draws those, through the real action and the real confirm. */
 export const UPDATES_PANEL_STATES = Object.freeze([...Object.keys(UPDATES_DRAW)]);

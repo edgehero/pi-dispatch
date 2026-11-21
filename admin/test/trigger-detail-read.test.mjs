@@ -200,7 +200,9 @@ test("the editor offers GitHub where a GitHub trigger written now would reach a 
   assert.throws(() => githubTriggerTransports({ GITHUB_INGEST: "pol" }), /GITHUB_INGEST must be/);
   // The field's words say a forge is offered where its events arrive, which the old "configured webhooks" no longer was.
   assert.match(FORGE_OFFER_HINT, /by a configured webhook, or GitHub by polling/);
-  assert.match(FORGE_NONE_HINT, /No forge's events reach this deployment/);
+  // What it knows is the .env's keys, so it speaks of configuration and never of deliveries (issue #962).
+  assert.match(FORGE_NONE_HINT, /^No forge is configured here\./);
+  assert.doesNotMatch(FORGE_NONE_HINT, /events reach/);
 });
 
 test("a GitHub trigger that would arm the receiver's GitHub route says to restart the receiver, by the receiver's own rule (#879)", () => {

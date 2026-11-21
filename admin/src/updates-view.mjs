@@ -18,7 +18,7 @@ export const UPDATE_ROW_STATES = Object.freeze(["current", "newer", "canary-comp
 /** Every state pi's own row can be in. */
 export const PI_ROW_STATES = Object.freeze(["current", "checks-passing", "checks-failing", "checks-pending", "checks-unknown", "not-looking", "stale", "unknown"]);
 /** Each host's standing against what a person asked for. */
-export const HOST_ADOPT_STATES = Object.freeze(["adopted", "undone", "no-change", "cannot-adopt", "pending", "overdue"]);
+export const HOST_ADOPT_STATES = Object.freeze(["adopted", "undone", "no-change", "cannot-adopt", "pending", "overdue", "unread"]);
 
 /** What "Recently adopted" lists. A canary is not an adoption: its result is on the package's own row. */
 const AUDIT_KINDS = Object.freeze(["package-adopt", "package-undo"]);
@@ -48,9 +48,14 @@ export function canaryResultOf(records, name, version) {
 	};
 }
 
-/** Each known host's standing on one desired row. A host with no row at this generation is pending, and past the limit overdue, never lost. */
+/**
+ * Each known host's standing on one desired row. A host with no row at this generation is pending, and past the limit overdue, never lost.
+ * A host whose applied rows could not be read (`applied[host]` null, `readApplied`'s own word for it) is `unread` (issue #962): it may have adopted, refused or done nothing,
+ * so it is neither pending nor overdue, and it is not counted as done.
+ */
 export function hostStandings({ desired, applied, hosts, now }) {
 	return hosts.map((host) => {
+		if (applied[host] === null) return { host, state: "unread", reason: null, version: null, digest: null };
 		const row = applied[host]?.[desired.name];
 		if (row && row.generation >= desired.generation) return { host, state: row.state, reason: row.reason, version: row.version, digest: row.digest };
 		return { host, state: now - desired.at > UPDATES_OVERDUE_MS ? "overdue" : "pending", reason: null, version: row?.version ?? null, digest: null };
@@ -61,7 +66,8 @@ export function hostStandings({ desired, applied, hosts, now }) {
 export function packageRow({ pkg, look, desired, standings, canary, facts }) {
 	const base = { name: pkg.name, version: pkg.version, from: pkg.from ?? null, adapter: isSubscriptionAdapter(pkg.name), newest: look.newest, canary, facts, desired, standings };
 	if (desired) {
-		const waiting = standings.some((s) => s.state === "pending" || s.state === "overdue");
+		// A host that could not be read may still be moving: the row stays in progress, never adopted everywhere.
+		const waiting = standings.some((s) => s.state === "pending" || s.state === "overdue" || s.state === "unread");
 		const refused = standings.some((s) => s.state === "cannot-adopt");
 		if (desired.op === "adopt" && (refused || waiting)) return { ...base, state: refused ? "partial" : "adopting", differs: false };
 		if (desired.op === "undo" && (refused || waiting)) return { ...base, state: refused ? "partial" : "undoing", differs: false };
@@ -138,14 +144,30 @@ export function readStaged({ globalPiDir, fs = nodeFs } = {}) {
 
 /** The triggers file as written, or nothing when it cannot be read: the page then offers no canary, and the preview would say why. */
 export function readTriggersDocument({ triggersPath, fs = nodeFs } = {}) {
+	return readTriggersFile({ triggersPath, fs }).document;
+}
+
+/**
+ * The same read with why it gave nothing (issue #962): `trouble` is null for a file that was read and for one that is not there, where "no cron trigger can run a canary" is true;
+ * `unreadable` for a file that is there and could not be read, and `invalid` for one that is no JSON or holds no `triggers` list. Of those two the page says which trigger a canary would
+ * run as is not known, never that none can.
+ */
+export function readTriggersFile({ triggersPath, fs = nodeFs } = {}) {
+	let text;
 	try {
-		return JSON.parse(fs.readFileSync(triggersPath, "utf8"));
+		text = fs.readFileSync(triggersPath, "utf8");
+	} catch (error) {
+		return { document: null, trouble: error?.code === "ENOENT" ? null : "unreadable" };
+	}
+	try {
+		const document = JSON.parse(text);
+		return { document, trouble: Array.isArray(document?.triggers) ? null : "invalid" };
 	} catch {
-		return null;
+		return { document: null, trouble: "invalid" };
 	}
 }
 
-/** The newest of what people did here, from the audit log. Names and versions only, which is all those rows carry. */
+/** The newest of what people did here, from the audit log. Names and versions only, which is all those rows carry. A log that could not be read (null) lists nothing, and `recentUnread` says why. */
 function recentOf(rows) {
 	const kept = [];
 	for (const row of Array.isArray(rows) ? rows : []) {
@@ -158,12 +180,20 @@ function recentOf(rows) {
 	return kept.sort((a, b) => String(b.at).localeCompare(String(a.at))).slice(0, RECENT_MAX);
 }
 
+/** What the audit reader marked instead of handing over, in the rows it read: null for none. A `broken` row with line 0 is a file whose read failed (`readConsoleAudit`), any other a line that is not a row. */
+function recentGapsOf(rows) {
+	const broken = (Array.isArray(rows) ? rows : []).filter((row) => row?.broken === true);
+	if (broken.length === 0) return null;
+	return broken.some((row) => row.line === 0) ? "unread" : "damaged";
+}
+
 /**
  * What a deployment holds, read from where it really lives: its stage manifest and its triggers file. The console calls this, so that the shapes it hands `readUpdates` are the ones the
  * actions look rows up by. The read model's own `readStagedPackages` and the snapshot's trigger rows are for display, and they carry neither the fields nor the shapes this needs.
  */
 export async function readDeploymentUpdates({ redis = null, paths = {}, records = [], recordsPartial = false, audit = [], pinned = null, now = Date.now(), fs = nodeFs } = {}) {
-	return await readUpdates({ redis, records, recordsPartial, audit, pinned, now, staged: readStaged({ globalPiDir: paths.globalPiDir, fs }), triggersDocument: readTriggersDocument({ triggersPath: paths.triggersPath, fs }) });
+	const triggers = readTriggersFile({ triggersPath: paths.triggersPath, fs });
+	return await readUpdates({ redis, records, recordsPartial, audit, pinned, now, staged: readStaged({ globalPiDir: paths.globalPiDir, fs }), triggersDocument: triggers.document, triggersTrouble: triggers.trouble });
 }
 
 /** How long the doctor index's host list may take: the bound the other reads here have inside `updates.mjs`. */
@@ -183,9 +213,10 @@ function inTime(promise, ms) {
  *
  * Valkey is read in three waves, the reads of a wave at once (issue #961). One after another, each read waited out its own bound on a Valkey that stopped answering, thirteen seconds where one bound says as much.
  * When neither read of the first wave was answered, the rest is not asked: the rows are drawn from the stage manifest alone, as a console without a Valkey draws them. `factsUnread` says a host's applied rows or a
- * canary's published facts were asked for and not answered: an Adopt judges by them, so its gate must read that as "not known", never as "none".
+ * canary's published facts were asked for and not answered: an Adopt judges by them, so its gate must read that as "not known", never as "none". A host whose rows were not answered
+ * has the standing `unread` on every desired row, from the same null that sets `factsUnread`, so the page and the gate cannot disagree. `audit` null is an audit log that could not be read.
  */
-export async function readUpdates({ redis = null, staged, records = [], recordsPartial = false, audit = [], pinned = null, triggersDocument = null, now = Date.now(), hostsTimeoutMs = HOSTS_READ_TIMEOUT_MS } = {}) {
+export async function readUpdates({ redis = null, staged, records = [], recordsPartial = false, audit = [], pinned = null, triggersDocument = null, triggersTrouble = null, now = Date.now(), hostsTimeoutMs = HOSTS_READ_TIMEOUT_MS } = {}) {
 	const [looks, desired] = redis ? await Promise.all([readLooks(redis, { now: () => now }), readDesired(redis)]) : [{ unreachable: true }, null];
 	// Whether Valkey answered anything: where it did not, nothing more is asked of it.
 	const answering = redis !== null && !(looks.unreachable && desired === null);
@@ -215,8 +246,9 @@ export async function readUpdates({ redis = null, staged, records = [], recordsP
 		Promise.all(hostNames.map(async (host) => {
 			if (!answering) return {};
 			const read = await readApplied(redis, host);
+			// Kept null (issue #962): `hostStandings` says such a host is not known, where `{}` read as a host that has not answered.
 			if (read === null) factsUnread = true;
-			return read ?? {};
+			return read;
 		})),
 		Promise.all(rows.map(async ({ pkg, target }) => {
 			if (!target || !answering) return null;
@@ -246,6 +278,13 @@ export async function readUpdates({ redis = null, staged, records = [], recordsP
 		hosts,
 		triggers: canaryTriggers(triggersDocument),
 		recent: recentOf(audit),
+		// The audit log was asked for and could not be read (issue #962): the card says so, never that its window holds nothing.
+		recentUnread: audit === null,
+		// Rows the audit reader could not hand over, among those it did: `unread` where a month's file could not be read (its row has no line), else `damaged` where a line is no row.
+		// Either way an adoption may be missing from the list, and an empty list is not "nothing was adopted".
+		recentGaps: recentGapsOf(audit),
+		// Why the triggers file gave no canary trigger, where it is not simply that it holds none (`readTriggersFile`).
+		triggersTrouble: triggersTrouble === "unreadable" || triggersTrouble === "invalid" ? triggersTrouble : null,
 		desiredUnreadable: redis ? desired === null : true,
 	};
 }

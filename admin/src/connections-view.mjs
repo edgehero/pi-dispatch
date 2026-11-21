@@ -298,7 +298,8 @@ export async function readConnections({ deploymentDir, env = {}, paths = {}, sna
     egress: { on: egressOn, problem: egressProblem, allowlist: Array.isArray(allowlist) ? allowlist.slice(0, 8) : null, more: Array.isArray(allowlist) ? Math.max(0, allowlist.length - 8) : 0, hosts },
     endpointFleetDeclared, endpointStatus, endpointsMore,
     endpoints: Array.isArray(endpoints) || shownEndpoints.length ? shownEndpoints.map((ep) => ({ ...ep, used: slots.get(ep.id) ?? null })) : null,
-    privateEndpoints: privateEndpointsView(privateDeclared, triggers),
+    // A triggers file that is not there grants nothing; one that was not read (or no snapshot at all) leaves the grants unknown.
+    privateEndpoints: privateEndpointsView(privateDeclared, triggers, { triggersUnread: !Array.isArray(triggers) && snapshot?.triggers?.missing !== true }),
     providers: providerNames.map((name) => {
       const variables = providerKeyCandidates(name);
       // The worker forwards every truthy candidate in pi's pinned precedence order; no value leaves this reader.
@@ -306,7 +307,7 @@ export async function readConnections({ deploymentDir, env = {}, paths = {}, sna
       const selectedVariable = providerUnknown ? null : fromEnv[0] ?? null;
       return { name, unknown: providerUnknown, variables, fromEnv, selectedVariable, credentialSource: selectedVariable ? "deployment-env" : providerUnknown || loginFallback === null ? "unknown" : loginFallback ? "pi-login" : "worker-env", loginFallback, fallback: environmentUnknown ? "the deployment’s provider credential fallback is unknown" : loginFallback ? "pi login on each host is the configured fallback; actual credentials are not published here" : "pi login disabled by PI_AUTH_FROM_PI=0; each worker needs its environment key" };
     }),
-    notify: { hook: nonblank(file, "PI_ON_FAILURE") ? basename(file.PI_ON_FAILURE) : null, timeoutMs: positive(file.PI_ON_FAILURE_TIMEOUT_MS, 10_000), triggers: (triggers ?? []).filter((t) => t.statusComment === true).map((t) => t.index).filter(Number.isInteger), unknown: environmentUnknown, history: hookHistory },
+    notify: { hook: nonblank(file, "PI_ON_FAILURE") ? basename(file.PI_ON_FAILURE) : null, timeoutMs: positive(file.PI_ON_FAILURE_TIMEOUT_MS, 10_000), triggers: (triggers ?? []).filter((t) => t.statusComment === true).map((t) => t.index).filter(Number.isInteger), unknown: environmentUnknown, history: hookHistory, ...(!Array.isArray(triggers) && snapshot?.triggers?.missing !== true ? { triggersUnread: true } : {}) },
     mcp, packages, packageOptOuts: Array.isArray(triggers) ? triggers.filter((t) => t.packages === false).length : null,
     problems: connectionsProblems(hosts, snapshot?.runs ?? [], forges), snapshotUnreadable: snapshot === null,
   };
@@ -315,9 +316,10 @@ export async function readConnections({ deploymentDir, env = {}, paths = {}, sna
 /**
  * Issue #918: the private endpoints Connections shows, `{ unread, rows }`: each declared one (id, host, port, slots) and
  * the trigger positions that name it, then each id a trigger names that this folder does not declare (`host: null`).
- * `declared` null is a file that did not load. Ids and positions only: no trigger text.
+ * `declared` null is a file that did not load. Ids and positions only: no trigger text. `triggersUnread` (issue #962)
+ * says the triggers were not read, so a row's empty `triggers` is not "granted to no trigger"; a key only then.
  */
-export function privateEndpointsView(declared, triggers) {
+export function privateEndpointsView(declared, triggers, { triggersUnread = false } = {}) {
   const named = (id) => (Array.isArray(triggers) ? triggers : []).filter((t) => Array.isArray(t?.privateEndpoints) && t.privateEndpoints.includes(id) && Number.isInteger(t.index)).map((t) => t.index);
   const rows = (Array.isArray(declared) ? declared : []).filter((e) => typeof e?.id === "string" && MODEL_ENDPOINT_ID_RE.test(e.id)).sort((a, b) => (a.id < b.id ? -1 : 1)).map((e) => ({ id: e.id, host: e.host, port: e.port, slots: Number.isInteger(e.slots) ? e.slots : null, triggers: named(e.id) }));
   const ids = new Set(rows.map((r) => r.id));
@@ -328,7 +330,7 @@ export function privateEndpointsView(declared, triggers) {
       rows.push({ id, host: null, port: null, slots: null, triggers: named(id) });
     }
   }
-  return { unread: declared === null, rows: rows.slice(0, 64), more: Math.max(0, rows.length - 64) };
+  return { unread: declared === null, ...(triggersUnread === true ? { triggersUnread: true } : {}), rows: rows.slice(0, 64), more: Math.max(0, rows.length - 64) };
 }
 
 /** Model context gets source key NAMES and counts, never manager variable names, paths, free doctor text or refs. */

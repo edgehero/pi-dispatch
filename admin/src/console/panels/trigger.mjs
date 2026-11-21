@@ -49,7 +49,27 @@ const AGENT_UNREAD = "not in an agent’s read";
 // The forge field's two hints (issue #879): a forge is offered where its events reach this deployment, which for GitHub
 // is a webhook or the poller (`githubTriggerTransports`), so "configured webhooks" alone was no longer true.
 export const FORGE_OFFER_HINT = "Only forges whose events reach this deployment are offered: by a configured webhook, or GitHub by polling.";
-export const FORGE_NONE_HINT = "No forge's events reach this deployment yet. Configure a forge connection, or choose cron.";
+// Issue #962: what this says comes from the keys in the deployment's `.env` (`readTriggerEditor`), not from what a
+// receiver observed, so it says that. REJECTED: "No forge's events reach this deployment yet", a statement about
+// deliveries, which Connections may be unable to read at the same moment.
+export const FORGE_NONE_HINT = "No forge is configured here. Configure a forge connection, or choose cron.";
+/** Where the editor's own read failed, so which forges are configured is not known: never "none". */
+export const FORGE_UNREAD_HINT = "Which forges are configured here could not be read. Reload to try again, or choose cron.";
+/** A schedule's health and stall cap with no snapshot (issue #962): what the queue publishes was not read, which is not "not published". */
+export const SCHEDULE_UNREAD = "not known (the schedule could not be read)";
+/** The stall cap where neither a snapshot nor the file views hold it. */
+export const STALL_CAP_UNREAD = "a cap that could not be read";
+/**
+ * A schedule's stall cap: the detail's own, else from whichever of the snapshot and the file views was read (it is a
+ * deployment setting, `schedulerStallMax`, which the Triggers page counts the same way), else not read.
+ */
+const stallCapOf = (v, d) => {
+  if (Number.isFinite(d.cron?.stallLimit)) return d.cron.stallLimit;
+  const held = v.data?.snapshot ?? v.data?.files ?? null;
+  return held === null ? STALL_CAP_UNREAD : (Number.isSafeInteger(held.schedulerStallMax) ? held.schedulerStallMax : 2) + 1;
+};
+/** The trigger's bundle where neither the snapshot nor the files could say: never "no declared project bundle". */
+export const BUNDLE_UNREAD = "not known: the project bundles could not be read";
 // Issue #879: said beside the offer where a GitHub trigger added now would be the one that makes the receiver serve
 // GitHub, which it does only from its next start (`githubRestart`, read-model.mjs).
 export const FORGE_RESTART_NOTE = "A first GitHub trigger takes GitHub webhooks only after a restart: restart the receiver once it is added, since the receiver arms GitHub when it starts.";
@@ -216,8 +236,11 @@ export function triggerRun(v) {
   const backend = t.backend ?? defaults(v).backend ?? "local";
   const venue = BACKENDS[backend];
   const hostRows = triggerSandboxHosts(t, v.data?.snapshot ?? {});
-  const bundle = triggerBundleOf(t, v.data?.snapshot?.secretBundles);
-  const bundleNames = (v.data?.snapshot?.secretBundles?.bundles ?? []).map(b=>`${b.project ?? "project"}: ${b.id}`).join(", ");
+  // The snapshot's bundles, or with no snapshot the files' own (issue #962). Neither read is not "none declared".
+  const bundlesUnread = !v.data?.snapshot && !v.data?.fileBundles;
+  const bundles = v.data?.snapshot ? v.data.snapshot.secretBundles : v.data?.fileBundles;
+  const bundle = triggerBundleOf(t, bundles);
+  const bundleNames = (bundles?.bundles ?? []).map(b=>`${b.project ?? "project"}: ${b.id}`).join(", ");
   return card(
     "What it runs",
     // Each key has one editor, and a view with no card has none of these in a form: so their rows go where the card's would have been, read-only.
@@ -268,7 +291,7 @@ export function triggerRun(v) {
         ${isAgent(v) ? null : html`Secret profile: ${t.secretsProfile ?? "none"}. Bundle:
         ${t.secretBundle === false
           ? "opted out"
-          : (bundle?.id ?? (bundleNames ? `By event project: ${bundleNames}` : "no declared project bundle"))}.`}
+          : bundlesUnread ? BUNDLE_UNREAD : (bundle?.id ?? (bundleNames ? `By event project: ${bundleNames}` : "no declared project bundle"))}.`}
       </p>`,
   );
 }
@@ -367,8 +390,8 @@ export function triggerKinds(v) {
     html`${t.type === "cron"
       ? html`<p>
             Next fire: ${timeHtml(d.cron?.next ?? t.next)}. Health:
-            ${d.cron?.next == null ? "not known (schedule not published)" : d.cron.overdueMs > 0 ? "overdue" : "on time"}; stalls
-            ${t.stalls ?? d.cron?.stalls ?? "not known"} of ${d.cron?.stallLimit ?? "not published"}.
+            ${d.cron?.next == null ? (v.data?.snapshot ? "not known (schedule not published)" : SCHEDULE_UNREAD) : d.cron.overdueMs > 0 ? "overdue" : "on time"}; stalls
+            ${t.stalls ?? d.cron?.stalls ?? "not known"} of ${stallCapOf(v, d)}.
           </p>
           ${canAct(v)
             ? v.data?.triggerFireCheck?.refusal
@@ -448,7 +471,7 @@ export function triggerAdd(v) {
               "Task", { required: prefill.kind === "cron", hint: null },
             )}`
           : html`${field("forge", "Forge", {
-              options: missingForge ? [{ value: "", label: "Choose a configured forge" }, ...forges] : forges, value: missingForge ? "" : prefill.forge ?? "", required: true, hint: opts(v).forgeProblem ?? (opts(v).forges?.length ? `${FORGE_OFFER_HINT}${opts(v).githubRestart === true ? ` ${FORGE_RESTART_NOTE}` : ""}` : FORGE_NONE_HINT),
+              options: missingForge ? [{ value: "", label: "Choose a configured forge" }, ...forges] : forges, value: missingForge ? "" : prefill.forge ?? "", required: true, hint: opts(v).forgeProblem ?? (opts(v).forges?.length ? `${FORGE_OFFER_HINT}${opts(v).githubRestart === true ? ` ${FORGE_RESTART_NOTE}` : ""}` : Array.isArray(opts(v).forges) ? FORGE_NONE_HINT : FORGE_UNREAD_HINT),
             })}${["label", "comment"].includes(kind)
               ? field("repository", "Repository (optional)")
               : null}${kind === "comment"

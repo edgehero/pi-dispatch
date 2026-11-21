@@ -72,12 +72,22 @@ export async function consoleConnectionsFixture(now, { problem = null, unread = 
   return readConnections({ deploymentDir: "/srv/deployment", paths: {}, env: { RECEIVER_PORT: "4000" }, snapshot, now, redis: {}, reads });
 }
 
-async function draw(page, { role = "operator", readOnly = false, secrets = null, connections = undefined, project = null, status = 200, fleet = null } = {}) {
+/** What the deployment's files and its .env declare of secrets, as the reader's `fileViews` holds them (issue #962): no run and no host among them. */
+export function secretFilesFixture() {
+  return {
+    settings: { overlay: { secretProfiles: { prod: "/srv/resolvers/read-prod" }, secretBundles: { shop: { path: "/srv/resolvers/read-shop", format: "json" } } } },
+    triggers: { triggers: [{ index: 0, id: "nightly", type: "cron", pattern: "0 3 * * *", folder: "/srv/shop", secrets: 1, secretsProfile: "prod" }, { index: 1, type: "comment", secrets: 1, secretsProfile: "default", secretBundle: false }], secretBundles: [{ id: "shop", profile: "shop", project: "shop", forkReviews: false, endpoints: [{ name: "API_TOKEN", host: "api.example.com" }] }] },
+    projects: { projects: [{ id: "shop", members: ["/srv/shop"] }] },
+  };
+}
+export const SECRET_FILES_ENV = Object.freeze({ PI_SECRET_PROFILES: "default:/opt/default", PI_SECRET_BUNDLES: "env-bundle:/opt/env-bundle:dotenv", PI_SECRET_RESOLVER_ROOTS: "/srv/resolvers" });
+
+async function draw(page, { role = "operator", readOnly = false, secrets = null, connections = undefined, project = null, status = 200, fleet = null, secretsFromFiles = false } = {}) {
   const parsed = parsePageQuery(page, page === "project" ? "id=billing" : "");
   assert.ok(!parsed.refusal, `${page}: fixture query is valid`);
   const data = await loadPageData(page, parsed.query, {
     now: () => NOW, env: {}, fleet: fleet ?? { snapshot: async () => ({ parked: [] }), parkedCount: async () => 0 },
-    secretsView: async () => secrets ?? consoleSecretsFixture(NOW),
+    secretsView: async (snapshot, files) => secretsFromFiles ? secretsView({ snapshot, files, env: SECRET_FILES_ENV, fs: { realpathSync: (path) => path } }) : secrets ?? consoleSecretsFixture(NOW),
     connections: async () => connections === undefined ? await consoleConnectionsFixture(NOW) : connections,
     setup: () => ({ enabled: true, actions: ["setup-provider-key", "setup-provider-key-replace"] }),
     projectView: async () => project ?? consoleProjectFixture(NOW),
@@ -95,6 +105,9 @@ export const CONFIGURATION_DRAW = Object.freeze({
   // files; the secret cards, whose facts are Valkey's too, say they could not be read.
   "config-no-snapshot.operator": () => draw("config", { fleet: noSnapshotFleet() }),
   "config-no-snapshot.viewer": () => draw("config", { role: "viewer", fleet: noSnapshotFleet() }),
+  // Issue #962: /config/secrets over a Valkey that does not answer. The declarations come from the files and the .env,
+  // read-only; what a run last received and which hosts serve a profile are not known.
+  "secrets-no-snapshot.operator": () => draw("secrets", { fleet: noSnapshotFleet({ fileViews: secretFilesFixture }), secretsFromFiles: true }),
   "secrets-populated.operator": () => secret({}),
   "secrets-populated.viewer": () => secret({}, "viewer"),
   "secrets-readonly.operator": () => secret({}, "operator", true),
