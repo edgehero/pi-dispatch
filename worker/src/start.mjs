@@ -99,6 +99,7 @@ import { fileURLToPath } from "node:url";
 import { listSandboxes, sandboxDeadline, makeSandboxReaper } from "./sandbox-store.mjs";
 import { artifactLimitsOf, makeArtifactsReaper, makeArtifactsRuntime } from "./artifacts.mjs";
 import { artifactsComment } from "./artifacts-comment.mjs";
+import { terminalReceipt } from "./terminal-receipt.mjs";
 import { makeSessionStore } from "./session-store.mjs";
 import { scrubCredentials } from "./redact.mjs";
 import { makeCheckOnceSpent, makeCheckPortfolioFlag, makeCheckPrivateEndpoints, makeCheckWaitSkew, makeDisarmOnce, makeFindSecretBundle } from "./triggers-file.mjs";
@@ -3661,6 +3662,10 @@ export async function startWorker(
 		for (const w of allWorkers) w.on("completed", (job, result) => {
 			finishAttempt(w, job);
 			log("job_completed", { jobId: job?.id, outcome: result?.outcome, ...(result?.reason ? { reason: result.reason } : {}) });
+			// A zero-artifact run needs the same scheduling evidence as one that kept files. Only this event proves the
+			// queue accepted completion; recordRun is earlier and cannot attest it. Posting is best-effort, never retried.
+			const receipt = terminalReceipt({ job, result });
+			if (receipt !== null) void comment(job.data, receipt);
 			// The hook's POLICY half (issue #288): worker-abort, runner-policy and provider-auth-refused RETURN, so they land here
 			// and never in the failed listener -- a failed-only mount would miss exactly the paid terminals
 			// the feature exists for. Folded into the existing listener body, never a second w.on: the

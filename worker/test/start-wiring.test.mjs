@@ -7560,6 +7560,46 @@ test("each runtime's container start gets its own grant folder, and the boot swe
 });
 
 // Issue #920, part 3: the artifacts comment, posted by recordRun once a forge run's outcome is final.
+test("zero-artifact label receipts wait for queue completion, not the record write or a retried/recovered attempt", { skip }, async () => {
+	const { InfraRetry } = await import("../src/processor.mjs");
+	const posted = [];
+	const { recordRun, handlers, records } = await runStartWithRecords({
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost({ postStatusComment: async (_job, target, text) => { posted.push({ target, text }); } }),
+	});
+	const job = { id: "gh-poll-e1234", name: "github", attemptsMade: 0, opts: { attempts: 2 }, data: { kind: "github", repo: "o/r", flow: "fix", target: { type: "pull_request", number: 12 }, trigger: { event: "pull_request", action: "labeled", deliveryId: "poll-e1234", matched: { type: "pull_request", action: "labeled" } } } };
+	const result = { outcome: "completed", exitCode: 0 };
+	const settle = async () => { for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve)); };
+	recordRun({ job, error: new InfraRetry("container-infra-exit", { reason: "container-infra-exit" }), startedAt: "a", endedAt: "b" });
+	handlers.failed(job, new Error("retryable"));
+	recordRun({ job, result: { outcome: "failed", reason: "recovery-enqueued" }, startedAt: "a", endedAt: "b" });
+	recordRun({ job, result, startedAt: "a", endedAt: "b" });
+	await settle();
+	assert.equal(records.length, 3);
+	assert.deepEqual(posted, [], "neither the record nor an infrastructure retry proves queue completion");
+	handlers.completed({ ...job, finishedOn: 123, data: { ...job.data, recoveryOf: job.id, recovery: 1 } }, result);
+	handlers.completed(job, result);
+	await settle();
+	assert.deepEqual(posted, [], "recovery and a missing queue completion timestamp are refused");
+	handlers.completed({ ...job, finishedOn: 123 }, result);
+	await settle();
+	assert.deepEqual(posted, [{ target: job.data.target, text: "<!-- pi-dispatch-terminal:v1 job=gh-poll-e1234 -->\npi-dispatch finished this job. This receipt records scheduling completion only; it does not verify the work." }]);
+});
+
+test("a refused terminal-receipt POST never retries or changes the completed job", { skip }, async () => {
+	let calls = 0;
+	const { handlers, logsNow } = await runStart({
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost({ postStatusComment: async () => { calls++; throw new Error("unavailable"); } }),
+	});
+	const result = Object.freeze({ outcome: "completed", exitCode: 0 });
+	handlers.completed({ id: "gh-poll-e1234", finishedOn: 123, data: { kind: "github", repo: "o/r", target: { type: "issue", number: 12 }, trigger: { event: "issues", action: "labeled", deliveryId: "poll-e1234", matched: { type: "label" } } } }, result);
+	for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve));
+	assert.equal(calls, 1);
+	assert.ok(logsNow().some((line) => line.event === "comment_failed"));
+	assert.deepEqual(result, { outcome: "completed", exitCode: 0 });
+});
+
 test("a final forge record with artifacts posts one harness comment with the kept names and the run page's link (#920)", { skip }, async () => {
 	const { InfraRetry } = await import("../src/processor.mjs");
 	const store = tempDir("pi-artifacts-wiring-");

@@ -145,7 +145,11 @@ test("the forge trigger identity has one owner: no other source file spells a pa
 	const files = scanSources();
 	for (const tree of SCAN_TREES) assert.ok(files.some((f) => f.path.startsWith(`${tree}/`)), `the scan reaches ${tree}`);
 	const hits = identityHits(files);
-	assert.deepEqual(hits.filter((h) => h.path !== MODULE_PATH).map((h) => `${h.path}:${h.line}: ${h.what}: ${h.text}`), [],
+	// This receipt checks a stored GitHub delivery against its target, not a triggers.json entry or the GitLab
+	// label-on-merge-request widening. Pin the one false positive exactly; every other spelling remains refused.
+	const receiptRoute = (h) => h.path === "worker/src/terminal-receipt.mjs" && h.what === "the label-on-merge-request widening" && h.text === 'const issue = trigger.event === "issues" && trigger.matched?.type === "label" && data.target?.type === "issue";';
+	assert.equal(hits.filter(receiptRoute).length, 1, "the receipt exception must match exactly its one source line");
+	assert.deepEqual(hits.filter((h) => h.path !== MODULE_PATH && !receiptRoute(h)).map((h) => `${h.path}:${h.line}: ${h.what}: ${h.text}`), [],
 		`ask ${MODULE_PATH} (isForgeTriggerOf, forgeTriggerMismatch, routableFlows) instead of reading the entry again`);
 	const own = new Set(hits.filter((h) => h.path === MODULE_PATH).map((h) => h.what));
 	for (const what of Object.keys(IDENTITY_PATTERNS)) {

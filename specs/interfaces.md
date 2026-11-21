@@ -13366,6 +13366,39 @@ constants are the worker's, exported from `@edgehero/pi-dispatch/run-progress` (
   operator's surface alone (the run page, the panel's ACTIVE row).
 - **Acceptance**: `REQ-RUN-PROGRESS` (a) to (c) and (g).
 
+## INT-FORGE-TERMINAL-RECEIPT
+
+**worker → GitHub issue or pull-request comment.** The entire version-1 body, with no trailing newline, is:
+
+```text
+<!-- pi-dispatch-terminal:v1 job=gh-poll-e<ID> -->
+pi-dispatch finished this job. This receipt records scheduling completion only; it does not verify the work.
+```
+
+`<ID>` is the canonical positive decimal label-event id (no leading zero, at most 16 digits, a JavaScript safe
+integer). The body is under 200 ASCII bytes and contains no input text, commit, token, host, queue, path or outcome
+field. `worker/src/terminal-receipt.mjs` renders it only when all of these hold:
+
+- The callback is BullMQ's **completed event**, after its successful transition; `finishedOn` is a positive safe
+  integer and the returned result says `outcome: "completed"`, `exitCode: 0`, with no non-null reason or true
+  `aborted`, `detached` or `lingering` flag. Record writing alone is insufficient and no durable-record claim is made.
+- The queue job's `id` equals `forgeDeliveryJobId("github", trigger.deliveryId)`, with delivery `poll-e<ID>`.
+  No `recoveryOf`, `recovery`, `replica` or `replicas` field is present. Answer drafts remain excluded.
+- `trigger.action` is `labeled`. An issue has `trigger.event: "issues"`, `matched.type: "label"` and issue target;
+  a PR has `trigger.event: "pull_request"`, `matched.type: "pull_request"`, `matched.action: "labeled"` and PR target.
+  The target number is a positive safe integer. Opened, synchronized, closed, review and comment deliveries do not
+  qualify merely because their job id resembles a poll event.
+- The full text does not contain the source trigger's phrase, case-insensitively, preserving the existing comment
+  collision guard. A label route normally has no phrase; the forge's own bot-loop guard remains necessary.
+
+The existing authenticated comment adapter posts once, best-effort, independently of artifacts and `statusComment`.
+No new credential, permission, queue field, run-record field or store is introduced. A missing receipt is unknown;
+it is not retrospectively inferred from a task report, artifact count or status text. Consumers must verify the
+configured worker identity, exact target and request identity, chronology and unchanged comment before using it
+as scheduling evidence. It is never task acceptance or an authority grant. Older jobs remain without this receipt.
+The existing job and worker share a forge App identity: the marker is not cryptographic proof against a job that
+deliberately posts the same body. Its consumers retain their independent verification and authority checks.
+
 ## INT-FORGE-STATUS-COMMENT-EDIT
 
 **worker → forge.** The one forge comment the worker posts and then EDITS (issue #644, `REQ-RUN-PROGRESS`,
@@ -14733,6 +14766,7 @@ and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` are UNCHANGED, checked: no file shape, wr
 
 | Date | Change |
 |---|---|
+| 2026-11-20 (#920 follow-up) | Added `INT-FORGE-TERMINAL-RECEIPT`, a bounded fixed two-line scheduling-only comment bound to an original GitHub poll label job. UNCHANGED, checked: `INT-FORGE-STATUS-COMMENT-EDIT`, `INT-RUN-HISTORY-FILE-CONTRACT`, job-data and queue contracts; no new store, migration or permission. Missing receipts remain unknown. |
 | 2026-11-20 (#957) | `INT-CREDENTIAL-DROP` adds watched read-only generation synchronization with equal-deadline delivery and bounded transport recovery. `INT-SUBSCRIPTION-CREDENTIAL-STORE`, drop version/fields, `INT-RUN-HISTORY-FILE-CONTRACT`, persisted state, retention, image capability vocabulary and `INT-RUNNER-EXIT-CODE-PROTOCOL` are UNCHANGED, checked. No state migration or new backup surface. |
 | 2026-11-20 (#842) | **`INT-STEER-INBOX-CONTRACT` AMENDED**, "Never throws": `pushSteer` and `withdrawSteer` answer `{ error, mayStillRun: true }` for a script that reached a Valkey which then did not answer, so the console's steer and withdraw confirms say the message may or may not have been sent or withdrawn; every other answer, the scripts, the keys and the TTLs are as they were, and the worker's and the receiver's callers, whose clients have no command bound, never see the mark. **`INT-CANCEL-CHANNEL-CONTRACT` CORRECTED**: its measured-times paragraph said the console's fleet reader keeps unbounded queue clients, which #842 ends. **`INT-CONSOLE-AUDIT-LOG` UNCHANGED, checked**: no row's shape changes; a kill switch, a queue switch, a steer or a failed-job action that was sent and not answered is a `failed` row whose reason is its sentence, and so is a confirm the console's stop cut at its deadline ("the console stopped before this change answered, so it may or may not have been made; look at the fleet"), cut at 200 characters as every reason is, which is why the queues not confirmed come first in it. **`INT-CONSOLE-STATE-API` UNCHANGED, checked**: `/api/state` and the action routes keep their shapes and status codes (409 for a change that did not finish; a preview that could not read answers 503 for a failed job's and 400 for a steer's and a steer withdrawal's, as each did for a read that failed). **No stored-state change**: no key, file or job-data field is added or changed. **Code evidence**: worker/src/steer-inbox.mjs -> `lostWrite`, `pushSteer`, `withdrawSteer`; admin/src/job-actions.mjs -> `steerUnconfirmed`, `enqueueSteer`, `withdrawSteerMessage`; admin/src/console/actions.mjs -> `funnelResult`, `switchPartialWords`. |
 | 2026-11-20 (#843) | **`INT-SANDBOX-SESSIONS-CONTRACT` AMENDED**, the requester of an End: what it answers by where Valkey failed (the session read, the request's `SET` with and without `valkeyMayStillRun`, a read of the acknowledgment, the acknowledgment timeout read through the removal's answer), the new `{ unconfirmed: true }` answer, and `timeoutMs: null` for a caller whose client has a command bound. Keys, values, TTLs and the monitor's side UNCHANGED, checked. **`INT-UPDATES-KEYS` AMENDED**: `setDesired`'s `{ timeoutMs }`, what a lost answer to the write says, and the confirm's own read of `updates:desired`. The keys and every row's shape UNCHANGED, checked. **`INT-CANCEL-CHANNEL-CONTRACT` CORRECTED** in its #867 sentence: the CLI's own client marks a lost answer by what was written, not by the timeout's words; the key pair, the verb's lines and its exit codes are UNCHANGED, checked (`worker/test/cancel-cli.test.mjs`, `worker/test/auth-cli.test.mjs`: a request and a compare-and-set whose connection drops under them). `INT-CONSOLE-AUDIT-LOG` UNCHANGED, checked: the failed row's reason is the sentence it already wrote for `cancel-active`. **Code evidence**: `worker/src/sandbox-sessions.mjs` -> `requestSandboxEnd`, `sandboxBounded`, `REMOVE_REQUEST`; `worker/src/updates.mjs` -> `setDesired`, `readDesired`; `worker/src/connection.mjs` -> `BoundedRedis`; `admin/src/sandbox-data.mjs` -> `SANDBOX_END_UNCONFIRMED`, `SANDBOX_END_TIMEOUT`; `admin/src/console/actions.mjs` -> `writeDesired`, `desiredRowNow`. |
