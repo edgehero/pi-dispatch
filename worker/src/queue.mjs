@@ -3,6 +3,9 @@ import { validateFork } from "./fork-job.mjs";
 import { withModelSelectionGeneration } from "./model-selection-generation.mjs";
 import { randomUUID } from "node:crypto";
 import { Queue } from "bullmq";
+// The cron pattern judge the boot reconcile's upsertJobScheduler runs, passed on so `pi-dispatch triggers check` asks
+// BullMQ the very question the boot asks without a second module importing the library.
+export { defaultRepeatStrategy } from "bullmq";
 import { metaKeyPattern, queueNameOfMetaKey, readSemanticWindowOwner, releaseCompletedSemanticWindow } from "./bullmq-internals.mjs";
 import { semanticWindowDisposition } from "./semantic-window-policy.mjs";
 import { DUPLICATE_NOTICE_SUFFIX, duplicateNoticeData } from "./duplicate-notice.mjs";

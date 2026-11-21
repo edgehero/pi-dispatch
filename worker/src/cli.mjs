@@ -2,7 +2,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { loadConfig } from "./config.mjs";
+import { TRIGGER_LOADER_ENV_KEYS, loadConfig } from "./config.mjs";
 import { EXIT_POLICY, installRejectionPrinter, installStdoutPipeGuard } from "./exit-code.mjs";
 import { isEntryModule } from "./entry.mjs";
 import { gitDirty, localRepoProblem } from "./git-dirty.mjs";
@@ -73,6 +73,10 @@ const USAGE = `pi-dispatch — run pi coding-agent flows on your own folders
   pi-dispatch egress render
                            write model-endpoints.conf here from model-endpoints.json (in place), then print
                            the command that reloads the egress proxy; it never reloads the proxy itself
+  pi-dispatch triggers check [file]
+                           judge a triggers file before you move it over the one the services run, by the rules
+                           the worker, the receiver, the poller and the watch collector load it by ([file], else
+                           PI_TRIGGERS_FILE, else ./triggers.json here); exit 1 names each that refuses and why
   pi-dispatch pause        stop taking new jobs (durable; survives worker restart)
   pi-dispatch resume       resume taking jobs
   pi-dispatch status       show paused state + job counts
@@ -108,8 +112,10 @@ with a consent per action:  pi install npm:@edgehero/pi-dispatch-admin`;
 	// Where this command's output goes. Defaults to the real stdout, so the CLI is byte-identical; a test
 	// injects a collector instead of reassigning `process.stdout.write`. That matters because `node --test`
 	// runs each file in a child process that serialises its own results over that same stdout, so a test
-	// holding a replacement across an `await` swallows the runner's result frames (issue #266).
-export async function main(argv = process.argv.slice(2), env = process.env, { write = (chunk) => process.stdout.write(chunk), writeErr = (chunk) => process.stderr.write(chunk), valkeyRefusal = valkeyRefusalAtStart, now = () => new Date(), controlClients = {} } = {}) {
+	// holding a replacement across an `await` swallows the runner's result frames (issue #266). `cwd` is the folder a
+	// command takes for the deployment's (its `./.env` and `./triggers.json`); only `triggers` reads it so far (issue
+	// #970), and a test passes one rather than moving the whole process with `process.chdir`.
+export async function main(argv = process.argv.slice(2), env = process.env, { write = (chunk) => process.stdout.write(chunk), writeErr = (chunk) => process.stderr.write(chunk), valkeyRefusal = valkeyRefusalAtStart, now = () => new Date(), controlClients = {}, cwd = process.cwd() } = {}) {
 	const cmd = argv[0];
 	if (cmd === "auth") {
 		const { runAuth } = await import("./auth-cli.mjs");
@@ -220,6 +226,12 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 	if (cmd === "egress") {
 		const { runEgress } = await import("./egress-cli.mjs");
 		return runEgress(argv.slice(1), { env, out: write });
+	}
+
+	if (cmd === "triggers") {
+		// Issue #970: `check` alone. It judges a file and changes nothing, so it reads no Valkey.
+		const { runTriggers } = await import("./triggers-cli.mjs");
+		return runTriggers(argv.slice(1), { env, cwd, out: write, err: writeErr, now: () => Number(now()) });
 	}
 
 	if (cmd === "run") {
@@ -501,8 +513,9 @@ async function runTrigger(values, positionals, env, { write, valkeyRefusal, now 
 /**
  * The env keys `run --trigger` resolves from the deployment: the file, the host, and every config value the worker's
  * trigger loader (`loadSchedules`: `triggersFile`, `maxCostUsd`, and `fleet` from a declared worker name) judges a file by.
+ * Kept in config.mjs beside `triggerLoaderConfig`, which reads exactly these (issue #970), and re-exported here.
  */
-export const TRIGGER_LOADER_ENV_KEYS = Object.freeze(["PI_TRIGGERS_FILE", "PI_WORKER_NAME", "PI_MAX_COST_USD"]);
+export { TRIGGER_LOADER_ENV_KEYS };
 
 /** `workerHint`'s line when the queue cannot say, true whether or not a worker runs. */
 export const WORKER_HINT_UNKNOWN = "a worker picks it up; start one with `pi-dispatch worker` if none is running.";

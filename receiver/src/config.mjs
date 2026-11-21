@@ -34,6 +34,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { groupTriggers } from "./trigger-groups.mjs";
 import { configError, githubIngestFrom, githubServedByServe, loadGitHubAuth, positiveInt } from "@edgehero/pi-dispatch/config";
 import { FORGE_KINDS, parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
+import { watchSecretsMissing } from "@edgehero/pi-dispatch/watch-contract";
 
 // Cwd-relative, matching what `pi-dispatch init` scaffolds (and the admin's default): the receiver's
 // default must be the file init just told the operator it created, not a demo buried in the repo.
@@ -352,8 +353,9 @@ function loadTriggers(env, readFile, fileExists) {
 	const document = parseTriggersDocument(readFile(path, "utf8"), path);
 	const parsed = document.triggers;
 	const watchSources = document.watchSources ?? {};
-	for (const source of Object.values(watchSources)) if (typeof env[source.secretEnv] !== "string" || !env[source.secretEnv].trim()) throw configError("watch: a configured source secret is missing");
-	void 0;
+	// The predicate is the worker's (`watchSecretsMissing`, issue #970), shared with doctor and `pi-dispatch triggers
+	// check`, so none of them can call a secret present that this refuses.
+	if (watchSecretsMissing(watchSources, env).length > 0) throw configError("watch: a configured source secret is missing");
 
 	return groupTriggers(parsed, { watchSources });
 }

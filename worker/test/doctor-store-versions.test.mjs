@@ -109,7 +109,7 @@ function planSpawn(plan) {
  * a pause windows file and a triggers file holding these documents; `versionTables` is the collection's seam for the
  * stores' version tables (absent: this build's own, all empty).
  */
-function doctorWith(settingsText, { hosts = [], pauseWindows = null, triggers = null, versionTables, pauseWindowsInEnvFile = false } = {}) {
+function doctorWith(settingsText, { hosts = [], pauseWindows = null, triggers = null, versionTables, pauseWindowsInEnvFile = false, triggersNamed = true } = {}) {
 	const dir = tempDir("pi-761-doctor-");
 	const settingsFile = join(dir, "settings.json");
 	if (settingsText !== null) writeFileSync(settingsFile, settingsText);
@@ -124,7 +124,9 @@ function doctorWith(settingsText, { hosts = [], pauseWindows = null, triggers = 
 		else env.PI_PAUSE_WINDOWS_FILE = pauseWindowsFile;
 	}
 	const triggersFile = join(dir, "triggers.json");
-	if (triggers !== null) writeFileSync((env.PI_TRIGGERS_FILE = triggersFile), text(triggers));
+	// `triggersNamed: false` leaves PI_TRIGGERS_FILE unset, so the file is the deployment folder's ./triggers.json, which
+	// the receiver and the poller read and the worker does not.
+	if (triggers !== null) writeFileSync(triggersNamed ? (env.PI_TRIGGERS_FILE = triggersFile) : triggersFile, text(triggers));
 	const tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
 	return collectChecks(env, { cwd: dir, home: tempDir("pi-761-doctor-home-"), out: () => {}, spawn: planSpawn({ "docker info": 0, "docker image": 0 }), probeValkey: async () => true, readHosts: async () => ({ hosts: hosts.map((h) => ({ tz, ...h })) }), dollarKeysExist: async () => false, fileExists: existsSync, readEnvFile: (path) => readFileSync(path), nodeVersion: "22.19.0", ...(versionTables ? { versionTables } : {}) }).then((checks) => ({ checks, settingsFile, pauseWindowsFile, triggersFile }));
 }
@@ -301,9 +303,17 @@ test("a triggers file a newer pi-dispatch wrote gets the upgrade as its fix; a b
 	const newer = await doctorWith("{}", { triggers: { version: TRIGGERS_FILE_VERSION + 1, triggers: [] } });
 	const line = newer.checks.find((c) => c.id === "triggers.file");
 	assert.ok(line.label.includes(`triggers file written by a newer pi-dispatch (version ${TRIGGERS_FILE_VERSION + 1}; this build understands ${TRIGGERS_FILE_VERSION})`));
-	assert.equal(line.fix, "upgrade this host's worker and receiver, and every panel and console that writes this file, to the release that wrote it; do not edit or delete the file, which would lose what that release wrote, unless you added `version` to it yourself: then remove that key -- every trigger-derived check below is skipped until this host reads it");
+	assert.equal(line.fix, "upgrade this host's worker, receiver and poller, and every panel and console that writes this file, to the release that wrote it; do not edit or delete the file, which would lose what that release wrote, unless you added `version` to it yourself: then remove that key -- every trigger-derived check below is skipped until this host reads it");
 	for (const broken of [{ version: "2", triggers: [] }, { triggers: "reshaped" }, "{ nope"]) {
 		const bad = await doctorWith("{}", { triggers: broken });
-		assert.equal(bad.checks.find((c) => c.id === "triggers.file").fix, `fix ${bad.triggersFile} so it loads (the message above names the entry and the reason), then re-run doctor -- every trigger-derived check below is skipped until it loads`, JSON.stringify(broken));
+		assert.equal(bad.checks.find((c) => c.id === "triggers.file").fix, `fix ${bad.triggersFile} so it loads (the message above names the entry and the reason), checking the fixed copy with \`pi-dispatch triggers check <copy>\` before you move it over the file, then re-run doctor -- every trigger-derived check below is skipped until it loads`, JSON.stringify(broken));
 	}
+});
+
+test("a triggers file that does not load names who refuses to start on it, the worker only where PI_TRIGGERS_FILE is set (issue #970)", async () => {
+	const named = (await doctorWith("{}", { triggers: "{ nope" })).checks.find((c) => c.id === "triggers.file");
+	assert.match(named.label, /^triggers file is refused at load -- a worker, receiver or poller started on it refuses to start \(exit 2, not restarted\), and one already running keeps the last copy that loaded: triggers file is not valid JSON/);
+	const unnamed = (await doctorWith("{}", { triggers: "{ nope", triggersNamed: false })).checks.find((c) => c.id === "triggers.file");
+	assert.match(unnamed.label, /^triggers file is refused at load -- a receiver or poller started on it refuses to start \(exit 2, not restarted\), and one already running keeps the last copy that loaded: /);
+	assert.doesNotMatch(unnamed.label, /worker/);
 });

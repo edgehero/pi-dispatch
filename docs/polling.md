@@ -219,6 +219,15 @@ The events endpoint has no `since`, so the poller reads at most five pages of it
 cycle. A backlog deeper than that is skipped with an explicit log line rather than stalling the cycle.
 Comments self heal, because their cursor advances and the next cycle collects the rest.
 
+### 6. A bad edit stops a poller that starts on it
+
+A running poller keeps the last `triggers.json` that loaded and logs `triggers_reload_invalid`. A poller that starts
+on an invalid file exits 2 and its service manager leaves it down, while the worker goes on with its old schedules, so
+nothing but the poller's own log says polling stopped. `pi-dispatch service` installs no poller unit, so a poller
+service is one you set up yourself, and its restart after an upgrade or a reboot is when this happens. Check each edit
+before you move it into place ([Check a file before you swap it in](triggers.md#check-a-file-before-you-swap-it-in)):
+`pi-dispatch triggers check` names the poller when it would refuse the file.
+
 ## Moving to webhooks later
 
 An App made with `--no-webhook` can take webhooks once you have a public URL for the receiver. In this order:
