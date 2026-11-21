@@ -385,6 +385,20 @@ incident cause remains unproven. See `DES-CONSUMER-LIVENESS` and its recorded ex
   process, left for it, said once a day), `opened-during-pass` and `runtime-unanswered` (the run's runtime, asked again right before
   the rename, reports its sandbox open or does not answer). Boot and every tick share all of them, because the
   leftover sweep runs at the start of the same closure.
+- **AMENDED (issue #978, 2026-11-21), the naming rule applied to a sweep that is NOT a fourth store.** The worker
+  now removes the CPU-reserve helper containers an older worker left in `created` (`DES-HOST-BUDGET`), after a read
+  that holds and again after each later one until a pass finishes. Its outcome is `cpu_reserve_leftovers_removed
+  { venue, removed, failed, complete }`, a verdict said once when a pass finishes having matched something; a
+  container the plain `rm` refused is a count in that verdict (`failed`), not a fault line, by the same distinction as
+  `sandbox_network_not_reaped`. A pass cut short (a listing that failed, a step that timed out, an inspect that printed
+  no row) is said on the same line, at most once per process, with `complete: false` and a `reason` token
+  (`<list, inspect, image or rm>-<failure>`), because it is not the reserve's fault: the quota held, and only the
+  leftovers wait. The reserve's own fault keeps its name, `cpu_reserve_fail_open`, with one new token,
+  `cleanup-timeout` (the `rm -f` of the helper's fixed name timed out, so no helper ran). It takes no seat on this
+  row's timer, checked against the reopen clause rather than assumed: it removes runtime objects, not a host-side
+  store; it runs after a read that holds until one pass finishes, then never again in that process, not on a cadence;
+  and nothing new can pile up behind it, because a fixed name bounds the helpers a slow daemon leaves at one per
+  name.
 - **What the cadence costs, stated rather than glossed**: the window becomes a **floor**, not a ceiling.
   A file is deleted on the first sweep AFTER its window closes, so the effective ceiling is
   `window + PI_SWEEP_INTERVAL_HOURS` — up to 48 hours for a sandbox at both defaults. That is a bound
@@ -2868,3 +2882,4 @@ adversarial passes did.
 | 2026-11-17 (#921) | OQ-012 AMENDED (#921): optional display images now have an actual rendering measurement, but a trusted image can fabricate it and OpenShell is not credited by a Docker probe. The accepted image trust residual remains. |
 | 2026-11-18 | Issue #924. `OQ-007` amended for asynchronous recursive deletion and the measured limits of the consumer-liveness incident evidence. |
 | 2026-11-21 (#947) | **`OQ-008` CORRECTED**: its resolution said both services reload `triggers.json` live, and the receiver's poller read the file once at start, so on a polling deployment an edit reached the worker and not the GitHub triggers, and only a restart applied it, which exits 2 on an invalid file (#970). The poller now follows the file at each cycle and each judgement and keeps its running rules on a bad edit, so the resolution holds; the status line names the poller and a dated paragraph records the correction. The entry's status stays RESOLVED and no question is added: following without a watch is a decision recorded in `DES-GH-POLLING-TRANSPORT` with its residuals, not a choice left open. **`OQ-009` UNCHANGED, checked**: no chaining surface moves. **Code evidence**: receiver/src/config.mjs -> makeTriggersFollower; receiver/src/poller.mjs -> startPoller, pollLabelEvents, gate; receiver/src/poller-config.mjs -> pollerLoaderEnv. |
+| 2026-11-21 (#978) | **`OQ-007` AMENDED**, one bullet: the CPU-reserve helper leftovers an older worker left are removed until one pass finishes, logged as the verdict `cpu_reserve_leftovers_removed { venue, removed, failed, complete }`, a pass cut short said at most once on the same line with `complete: false` and a `reason` token, and the reserve's fault line `cpu_reserve_fail_open` gains the token `cleanup-timeout`, each placed by the row's naming rule; the removal takes no seat on the sweep timer, checked against the reopen clause (runtime objects, not a host-side store; until one pass finishes, not a cadence; a fixed name bounds new leftovers). `OQ-002`, `OQ-008` UNCHANGED, checked: no concurrency axis, no state in Valkey. **Code evidence**: worker/src/cpu-reserve.mjs -> removeLegacyHelpers, makeCpuReserve, guardHelperRun. |

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { cpuReserveChecks, doctorCpuReserve } from "../src/doctor.mjs";
 import { cgroupParentVerdict } from "../src/live-probes.mjs";
-import { helperArgs } from "../src/cpu-reserve.mjs";
+import { helperArgs, helperName } from "../src/cpu-reserve.mjs";
 
 // Issue #596, phase 2: doctor's lines for the aggregate CPU reserve, and `--live`'s read-back of where a job sits.
 
@@ -75,7 +75,9 @@ test("doctorCpuReserve: reads (never writes) per answered venue, through the wor
 	const podman = { answered: true, info: { rootless: true, cgroupManager: "systemd", cgroupVersion: "v2", serviceIsRemote: false } };
 	const reads = await doctorCpuReserve({ daemon: docker, podman, run, image: "pi-job:pinned", imagePresent: true, platform: "darwin" });
 	assert.deepEqual(reads.map((r) => [r.plan.venue, r.plan.method, r.read]), [["local", "helper", { ok: true, cpuCenti: 1300 }], ["podman", "user-systemd", { ok: true, cpuCenti: 300 }]]);
-	assert.deepEqual(calls, [["docker", ...helperArgs({ image: "pi-job:pinned", read: true })], ["systemctl", "--user", "show", "-P", "CPUQuotaPerSecUSec", "pidispatch.slice"]]);
+	// Issue #978: doctor's own helper name (no worker name declared here), removed before its read.
+	const name = "pi-dispatch-cpu-reserve-doctor-e3b0c442";
+	assert.deepEqual(calls, [["docker", "rm", "-f", name], ["docker", ...helperArgs({ image: "pi-job:pinned", name, read: true })], ["systemctl", "--user", "show", "-P", "CPUQuotaPerSecUSec", "pidispatch.slice"]]);
 	assert.ok(calls.every((c) => !c.includes("set-property") && !c.some((a) => String(a).includes("> /p/cpu.max"))), "doctor never writes");
 	calls.length = 0;
 	const absent = await doctorCpuReserve({ daemon: docker, run, image: "pi-job:pinned", imagePresent: false });
@@ -86,6 +88,37 @@ test("doctorCpuReserve: reads (never writes) per answered venue, through the wor
 	const unmanaged = await doctorCpuReserve({ daemon: { answered: true, facts: { cgroupDriver: "systemd", cgroupVersion: "v2" } }, endpointLocal: false, run, platform: "linux" });
 	assert.deepEqual(unmanaged.map((r) => [r.plan.why, r.read]), [["remote-daemon", null]]);
 	assert.equal(calls.length, 0);
+});
+
+test("issue #978: doctor's helper runs under doctor's own name for the declared worker, is removed before its read and again after a timeout, and a 125 names another doctor as a cause", async () => {
+	const name = helperName("box-1", { doctor: true });
+	assert.equal(name, "pi-dispatch-cpu-reserve-doctor-96fb257c");
+	assert.notEqual(name, helperName("box-1"), "never the worker's, so a doctor never removes the worker's helper mid-step");
+	const docker = { answered: true, facts: { cgroupDriver: "cgroupfs", cgroupVersion: "v2", rootless: false } };
+	const calls = [];
+	const run = async (bin, args, { timeoutMs }) => {
+		calls.push([bin, ...args.slice(0, 4), timeoutMs]);
+		return args[0] === "run" ? { code: null, stdout: "", error: { timedOut: true } } : { code: 0, stdout: "" };
+	};
+	const [timedOut] = await doctorCpuReserve({ daemon: docker, run, image: "pi-job:pinned", imagePresent: true, platform: "darwin", workerName: "box-1" });
+	assert.deepEqual(timedOut.read, { ok: false, reason: "timeout" });
+	assert.deepEqual(calls, [
+		["docker", "rm", "-f", name, 15_000],
+		["docker", "run", "--rm", "--name", name, 15_000],
+		["docker", "rm", "-f", name, 15_000],
+	]);
+	// 125 after doctor's own rm: any refusal by the runtime (stderr is never read), one of which is another doctor of this
+	// deployment reading under the same name at that moment. Named as a cause, not as the cause.
+	const taken = async (bin, args) => (args[0] === "run" ? { code: 125, stdout: "" } : { code: 0, stdout: "" });
+	const [busy] = await doctorCpuReserve({ daemon: docker, run: taken, image: "pi-job:pinned", imagePresent: true, platform: "darwin", workerName: "box-1" });
+	assert.deepEqual(busy.read, { ok: false, reason: "exit-125" });
+	const [said] = line([busy], 1300);
+	assert.equal(said.warn, true);
+	assert.equal(said.label, "local: no host CPU reserve across jobs could be confirmed: the quota of pidispatch.slice was not readable (exit-125: the runtime refused the helper, which another doctor reading the quota at the same moment causes)");
+	assert.equal(said.fix, "if another doctor was running, run doctor again once it has finished; otherwise the worker writes it when it starts and re-checks it every ten minutes; start or restart the worker");
+	// A systemctl read that exits 125 is no helper's name, and keeps the plain line.
+	const [plain] = line([{ plan: plan("local", "system-systemd"), read: { ok: false, reason: "exit-125" } }], 300);
+	assert.match(plain.label, /was not readable \(exit-125\)$/);
 });
 
 // ---------------------------------------------------------------------------------------------------------------------
