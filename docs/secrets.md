@@ -560,7 +560,7 @@ value is the job's credential.
 {
   "on": { "type": "cron", "id": "nightly-review", "pattern": "0 3 * * *" },
   "run": {
-    "kind": "local", "folder": "/srv/site", "task": "Review yesterday's changes.",
+    "kind": "local", "folder": "/srv/site", "flow": "review", "task": "Review yesterday's changes.",
     "provider": "openrouter", "model": "deepseek/deepseek-chat",
     "models": ["openrouter/deepseek/deepseek-chat"],
     "secretsProfile": "prod",

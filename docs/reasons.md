@@ -1034,7 +1034,8 @@ place of the host's. It is still refused here when it is bound in `run.secretFil
 (`amazon-bedrock`, `github-copilot`, `google-vertex`, `openai-codex`), or when the provider is bound to a subscription
 on this host (also one bound after the job was picked up). The provider's other variables, such as
 `ANTHROPIC_AUTH_TOKEN` and `ANTHROPIC_OAUTH_TOKEN`, are always refused, and so is every variable of a watch rule's
-`decide` model's provider.
+`decide` model's provider. On a host with no credential of its own for that provider, the worker refuses
+such a job earlier, as [`provider-unconfigured`](#provider-unconfigured); both refuse before anything is spent.
 
 What to do: rename the variable in the triggers file, or in the secrets manager. The worker log names it. See
 [secrets.md](secrets.md#the-provider-key-as-a-run-secret).
