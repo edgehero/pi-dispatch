@@ -1001,12 +1001,15 @@ changed after the job was queued. Re-run those jobs too. Upgrade the worker and 
 ([the order](upgrading.md#the-order)), and restart the receiver after editing the file.
 
 Everything else is editable from the panel (`a` adds kind-first, `e` edits the flow, `x` deletes) or via
-the confirm-gated AI tools. Every write is validated. Both services reload it live, with one exception: the receiver
-arms GitHub's webhook route only when it starts. A GitHub trigger added where it started without one (no GitHub rule,
-`GITHUB_AUTH_SOURCE` or `GITHUB_INGEST` said GitHub then, as on a new deployment) is reloaded, but its deliveries are
-answered 404 until the receiver restarts, and GitHub does not resend them. The receiver logs `github_rules_unserved` on
-each such reload, and the console's trigger form says to restart before you add one. Under `GITHUB_INGEST=poll` the
-poller takes the new trigger at once and no restart is needed.
+the confirm-gated AI tools. Every write is validated. The worker, the receiver and the poller reload it live, with one
+exception: the receiver arms GitHub's webhook route only when it starts. A GitHub trigger added where it started
+without one (no GitHub rule, `GITHUB_AUTH_SOURCE` or `GITHUB_INGEST` said GitHub then, as on a new deployment) is
+reloaded, but its deliveries are answered 404 until the receiver restarts, and GitHub does not resend them. The
+receiver logs `github_rules_unserved` on each such reload, and the console's trigger form says to restart before you
+add one. Under `GITHUB_INGEST=poll` the poller takes the new trigger at its next cycle or event and no restart is
+needed: it reads the file again at the start of each cycle and before it judges each event. A bad edit leaves each of
+them on the last copy that loaded, and each logs why (`schedules_reload_invalid` from the worker,
+`triggers_reload_invalid` from the receiver and the poller).
 
 `dispatch_trigger_add` takes only the fields its trigger type uses. A field the type does not take is refused before
 the operator is asked to confirm, by its name and with the list the type does take, for example: "dispatch_trigger_add

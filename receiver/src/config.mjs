@@ -401,3 +401,76 @@ export function reloadTriggers(env, cfg, { readFile = readFileSync, fileExists =
 		return { invalid: e?.message ?? String(e) };
 	}
 }
+
+/**
+ * Follow the triggers file from a loop that arms no watch (issue #947): the poller, which used to read the file once at
+ * start and judge every later event on that copy, so a label trigger added afterwards dropped its events for good and
+ * an edited one was queued from the old copy and refused at pickup. `follow()` reads the file and, ONLY when what it
+ * read differs from the last read, hands it to `reloadTriggers` unchanged: one loader, so the poller can never accept a
+ * file `serve` refuses or the reverse, and `cfg.triggers` is swapped in place on a good file and kept on a bad one.
+ *
+ * The gate is what was read, not a modification time: the text itself, or "missing", or the read error's code (each
+ * kind prefixed, so no file's text can equal a sentinel). An unchanged file therefore costs one stat and one small read
+ * and says nothing, which is what lets the caller follow before every judgement, and a bad edit is judged and logged
+ * once however many times it is read again. The lines are `serve`'s (start.mjs's watcher): `triggers_reloaded`, and
+ * `triggers_reload_invalid` with the reason and `kept: true`. Going back to a good text, the running one included, is a
+ * change and says `triggers_reloaded`.
+ *
+ * `baseline` is the text the BOOT load parsed, recorded through its read seam (receiver/src/start.mjs's issue #386
+ * idiom). Taken from that read rather than from one here, because the window an edit hides in is between the boot load
+ * and the first follow, which holds identity resolution that retries for up to RECEIVER_IDENTITY_RETRY_SECONDS: a read
+ * here would take such an edit as the baseline and never load it. Without one the first follow reloads, which says so.
+ *
+ * `state` is what the follower knows, for a status reader and never for a judgement: `triggers` is "current" when the
+ * running rules are the file's, "kept" when the file was refused and the last good copy runs; `runningText` is the text
+ * the running rules came from; `refusal` names why the file was not taken ("refused" by the loader, "missing",
+ * "unreadable"); `rejectedText` is the refused text (null when nothing could be read) and `rejectedAt` when the
+ * follower saw it, by the injected `now`. Never throws: every read is caught, and `reloadTriggers` returns.
+ *
+ * `follow()` returns null when nothing changed, else `reloadTriggers`' own result. Its `githubUnserved` is not logged
+ * here: it cannot arise on the poller's cfg, which carries no `servesGithub`, and a caller holding `serve`'s cfg would
+ * log it from that result as start.mjs's watcher does.
+ */
+export function makeTriggersFollower(env, cfg, { readFile = readFileSync, fileExists = existsSync, baseline = null, log = () => {}, now = Date.now } = {}) {
+	const path = triggersFilePath(env);
+	const recorded = typeof baseline === "string";
+	const state = { triggers: "current", runningText: recorded ? baseline : null, refusal: null, rejectedText: null, rejectedAt: null };
+	let lastKey = recorded ? `text:${baseline}` : null;
+	const follow = () => {
+		let text = null;
+		let readError = null;
+		let key;
+		try {
+			if (fileExists(path)) {
+				text = readFile(path, "utf8");
+				key = `text:${text}`;
+			} else key = "missing";
+		} catch (err) {
+			// A file removed between the stat and the read is missing, not unreadable: the same refusal either way.
+			if (err?.code === "ENOENT") key = "missing";
+			else {
+				readError = err;
+				key = `error:${err?.code ?? "unknown"}`;
+			}
+		}
+		if (key === lastKey) return null;
+		lastKey = key;
+		const res = reloadTriggers(env, cfg, {
+			fileExists: () => key !== "missing",
+			readFile: () => {
+				if (readError !== null) throw readError;
+				return text;
+			},
+		});
+		if (res.ok) {
+			Object.assign(state, { triggers: "current", runningText: text, refusal: null, rejectedText: null, rejectedAt: null });
+			log({ event: "triggers_reloaded" });
+			return res;
+		}
+		const refusal = key === "missing" ? "missing" : readError !== null ? "unreadable" : "refused";
+		Object.assign(state, { triggers: "kept", refusal, rejectedText: text, rejectedAt: now() });
+		log({ event: "triggers_reload_invalid", reason: res.invalid, kept: true });
+		return res;
+	};
+	return { follow, state };
+}
