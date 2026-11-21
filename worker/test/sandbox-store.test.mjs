@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdirSync, writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { test } from "node:test";
-import { isSandboxTombstone, listSandboxes, makeSandboxReaper as realMakeSandboxReaper, pinSandbox, readManifest, retainJobDir, sandboxDeadline, sandboxEntryName, sandboxExpiry, sandboxTombstoneAge, SANDBOX_MANIFEST, SANDBOX_TOMBSTONE_PREFIX, SANDBOX_TOMBSTONE_RELOG_MS, SANDBOX_TOMBSTONE_STUCK_MS } from "../src/sandbox-store.mjs";
-const makeSandboxReaper = (options) => realMakeSandboxReaper({ ...options, ...(options.fs && !options.remove ? { remove: async (path, opts) => options.fs.rmSync(path, opts) } : {}) });
+import { makeSweepFollowUps } from "../src/retention-sweep.mjs";
+import { tempDir } from "./helpers/temp-dir.mjs";
+import { isSandboxTombstone, listSandboxes, makeSandboxReaper as realMakeSandboxReaper, pinSandbox, readManifest, retainJobDir, sandboxDeadline, sandboxEntryName, sandboxExpiry, sandboxTombstoneAge, SANDBOX_MANIFEST, SANDBOX_PASS_BUDGET_MS, SANDBOX_PASS_MAX_REAPS, SANDBOX_REST_MAX_MS, SANDBOX_REST_MIN_MS, SANDBOX_REST_POLL_MS, SANDBOX_TOMBSTONE_PREFIX, SANDBOX_TOMBSTONE_RELOG_MS, SANDBOX_TOMBSTONE_STUCK_MS } from "../src/sandbox-store.mjs";
+// Issue #978: these tests pin each entry's own outcome and lines. The pass's rests get a sleep that returns at once,
+// and its one summary line (`sandbox_reaper_pass`, pinned by its own tests below) is left out of what they read.
+const withoutPassLine = (log) => (log ? (event, fields) => event === "sandbox_reaper_pass" || log(event, fields) : log);
+const makeSandboxReaper = (options) => realMakeSandboxReaper({ ...options, sleep: options.sleep ?? (async () => {}), log: withoutPassLine(options.log), ...(options.fs && !options.remove ? { remove: async (path, opts) => options.fs.rmSync(path, opts) } : {}) });
 
 
 const HOUR = 3600000;
@@ -1187,4 +1195,461 @@ test("the pre-escape name is also tried when the escaped name holds ANOTHER id's
 	// No pre-escape match: the escaped read stands, for `resolveSandbox` to refuse by name.
 	delete fs.files["/sbx/_x/manifest.json"];
 	assert.equal(readManifest({ sandboxDir: "/sbx", jobId: "_x", fs })?.jobId, "__x");
+});
+
+// ── issue #978: bounded, paced passes ───────────────────────────────────────────────────────────────
+
+/**
+ * A fake pass clock and the sleep that moves it, both recording into `events` in order: `isOpen:<name>`, `rename:<name>`,
+ * `remove:<name>` (the run's own name, through its tombstone) and one `sleep:<ms>` per slice. Nothing here waits on the
+ * wall clock, and the run's dates come from `now: () => AT` as everywhere in this file.
+ */
+function paced(entries, { askMs = () => 0, removeMs = () => 0, open = () => false } = {}) {
+	const fs = sandboxDirWith(entries);
+	const events = [];
+	const logs = [];
+	let t = 0;
+	const origin = (p) => new Map(fs.calls.renamed.map(([from, to]) => [to, from])).get(p) ?? p;
+	const rename = fs.renameSync;
+	fs.renameSync = (from, to) => {
+		events.push(`rename:${from.slice("/sbx/".length)}`);
+		rename(from, to);
+	};
+	const options = {
+		sandboxDir: "/sbx",
+		retentionHours: 24,
+		fs,
+		now: () => AT,
+		clock: () => t,
+		sleep: async (ms) => {
+			events.push(`sleep:${ms}`);
+			t += ms;
+		},
+		isOpen: async ({ name }) => {
+			events.push(`isOpen:${name}`);
+			t += askMs(name);
+			return open(name);
+		},
+		remove: async (path, opts) => {
+			const name = origin(path).slice("/sbx/".length);
+			events.push(`remove:${name}`);
+			t += removeMs(name);
+			fs.rmSync(path, opts);
+		},
+		log: (event, fields) => logs.push([event, fields]),
+	};
+	return { fs, events, logs, options, advance: (ms) => (t += ms) };
+}
+
+/** Each rest a pass took, in order: the sum of each run of consecutive sleep slices. */
+function restsOf(events) {
+	const rests = [];
+	let open = false;
+	for (const e of events) {
+		if (!e.startsWith("sleep:")) {
+			open = false;
+			continue;
+		}
+		if (!open) rests.push(0);
+		rests[rests.length - 1] += Number(e.slice("sleep:".length));
+		open = true;
+	}
+	return rests;
+}
+
+const expiredRuns = (n) => Object.fromEntries(Array.from({ length: n }, (_, i) => [`r${String(i).padStart(3, "0")}`, { createdAt: hoursAgo(50) }]));
+
+test("the pass constants are pinned by literal (issue #978)", () => {
+	assert.equal(SANDBOX_PASS_BUDGET_MS, 20_000);
+	assert.equal(SANDBOX_PASS_MAX_REAPS, 50);
+	assert.equal(SANDBOX_REST_MIN_MS, 100);
+	assert.equal(SANDBOX_REST_MAX_MS, 10_000);
+	assert.equal(SANDBOX_REST_POLL_MS, 250);
+});
+
+test("a pass stops at SANDBOX_PASS_MAX_REAPS removals, says more, skips the networks, and the next pass finishes them (issue #978)", async () => {
+	const p = paced(expiredRuns(60));
+	let networks = 0;
+	const reap = realMakeSandboxReaper({ ...p.options, sweepNetworks: async () => (networks++, { swept: [], notes: [] }) });
+	const first = await reap();
+	assert.equal(first.reaped, 50);
+	assert.equal(first.more, true, "work was left, so a follow-up is asked for");
+	assert.equal(p.events.filter((e) => e.startsWith("isOpen:")).length, 50, "the 51st run is not even asked about");
+	assert.equal(networks, 0, "a partial pass leaves the networks to the pass that finishes the directories");
+	assert.equal(Object.keys(p.fs.files).filter((k) => /^\/sbx\/r\d+$/.test(k)).length, 10);
+	const second = await reap();
+	assert.deepEqual([second.reaped, second.more, networks], [10, false, 1], "the second pass finishes them, networks included");
+	const passes = p.logs.filter(([e]) => e === "sandbox_reaper_pass").map(([, f]) => f);
+	assert.deepEqual(passes.map(({ more, reaped, held }) => ({ more, reaped, held })), [{ more: true, reaped: 50, held: 0 }, { more: false, reaped: 10, held: 0 }], "one summary line per pass");
+	assert.deepEqual(Object.keys(passes[0]).sort(), ["held", "more", "ms", "reaped", "restedMs", "slowestCheckMs"]);
+	// A pass with nothing to do says nothing at all.
+	p.logs.length = 0;
+	assert.deepEqual(await reap(), { more: false, reaped: 0, held: 0, ms: 0, restedMs: 0, slowestCheckMs: 0 });
+	assert.deepEqual(p.logs, [], "a quiet pass on a tidy host logs no line");
+});
+
+test("a pass stops at SANDBOX_PASS_BUDGET_MS of its own clock, rests included, and reports where the time went (issue #978)", async () => {
+	// Each runtime ask takes 3 s, so each run costs 6 s with its rest: runs start at 0, 6, 12 and 18 s, and at 24 s the
+	// budget is spent at the next run's boundary.
+	const p = paced(expiredRuns(10), { askMs: () => 3000 });
+	const out = await realMakeSandboxReaper(p.options)();
+	assert.deepEqual(out, { more: true, reaped: 4, held: 0, ms: 24_000, restedMs: 12_000, slowestCheckMs: 3000 });
+	assert.equal(p.events.filter((e) => e.startsWith("isOpen:")).length, 4);
+});
+
+test("a pass the budget stops in the leftover tombstones returns at once, before any run is read or asked about (issue #978)", async () => {
+	const entries = expiredRuns(1);
+	const p = paced(entries);
+	for (let i = 0; i < 60; i++) {
+		p.fs.files[`/sbx/.reap-4242-1-${i}`] = "<dir>";
+		p.fs.files[`/sbx/.reap-4242-1-${i}/${SANDBOX_MANIFEST}`] = JSON.stringify({ jobId: `t${i}`, createdAt: hoursAgo(50) });
+	}
+	let listed = 0;
+	const out = await realMakeSandboxReaper({ ...p.options, pid: 4242, listRunning: async () => (listed++, []) })();
+	assert.deepEqual([out.reaped, out.more], [50, true]);
+	assert.equal(Object.keys(p.fs.files).filter((k) => /^\/sbx\/\.reap-[^/]+$/.test(k)).length, 10, "ten tombstones are the next pass's");
+	assert.equal(listed, 0, "no runtime was asked which sandboxes are open");
+	assert.ok(!p.events.some((e) => e.startsWith("isOpen:")), "and no run was asked about");
+	assert.ok("/sbx/r000" in p.fs.files, "the expired run waits for the next pass");
+});
+
+test("each entry that asked a runtime rests as long as it took, never under the floor nor over the cap, in stop-aware slices (issue #978)", async () => {
+	const took = { a: 0, b: 2000, c: 30_000 };
+	const p = paced({ a: { createdAt: hoursAgo(50) }, b: { createdAt: hoursAgo(50) }, c: { createdAt: hoursAgo(50) } }, { askMs: (name) => took[name] });
+	const out = await realMakeSandboxReaper(p.options)();
+	assert.equal(out.reaped, 3);
+	assert.deepEqual(restsOf(p.events), [SANDBOX_REST_MIN_MS, 2000, SANDBOX_REST_MAX_MS], "the floor, the entry's own time, the cap");
+	assert.ok(p.events.filter((e) => e.startsWith("sleep:")).every((e) => Number(e.slice(6)) <= SANDBOX_REST_POLL_MS), "no slice is longer than the stop poll");
+	// A HELD run asked the runtime too, and rests like any other; a run inside its window asks nothing and does not.
+	const held = paced({ a: { createdAt: hoursAgo(50) }, young: { createdAt: hoursAgo(1) } }, { askMs: () => 700, open: () => true });
+	const heldOut = await realMakeSandboxReaper(held.options)();
+	assert.deepEqual(restsOf(held.events), [700]);
+	assert.deepEqual([heldOut.reaped, heldOut.held], [0, 1]);
+	// A leftover tombstone's removal rests the same way, for as long as it took.
+	const tomb = paced({}, { removeMs: () => 2000 });
+	tomb.fs.files["/sbx/.reap-4242-1-0"] = "<dir>";
+	await realMakeSandboxReaper({ ...tomb.options, pid: 4242 })();
+	assert.deepEqual(restsOf(tomb.events), [2000], "a tombstone's removal is rested after, not merely yielded");
+});
+
+test("nothing rests and no budget is asked between a run's runtime ask and its delete, and a budget spent inside lets the delete finish (issue #978)", async () => {
+	// The budget is spent DURING the ask: the run is still renamed and deleted, then rests, and the next run is never asked.
+	const during = paced({ a: { createdAt: hoursAgo(50) }, b: { createdAt: hoursAgo(50) } }, { askMs: (name) => (name === "a" ? 25_000 : 0) });
+	const asked = await realMakeSandboxReaper(during.options)();
+	assert.deepEqual(during.events.filter((e) => !e.startsWith("sleep:")), ["isOpen:a", "rename:a", "remove:a"]);
+	assert.equal(during.events.indexOf("sleep:250"), 3, "the first rest slice comes after the delete, never before it");
+	assert.deepEqual(restsOf(during.events), [SANDBOX_REST_MAX_MS]);
+	assert.deepEqual([asked.reaped, asked.more], [1, true]);
+	assert.deepEqual(swept(during.fs), ["/sbx/a"]);
+	// The budget is spent DURING the delete: it finishes and is said, and the next run waits.
+	const removing = paced({ a: { createdAt: hoursAgo(50) }, b: { createdAt: hoursAgo(50) } }, { removeMs: (name) => (name === "a" ? 25_000 : 0) });
+	const out = await realMakeSandboxReaper(removing.options)();
+	assert.deepEqual(removing.events.filter((e) => !e.startsWith("sleep:")), ["isOpen:a", "rename:a", "remove:a"]);
+	assert.ok(removing.logs.some(([e, f]) => e === "reaped_sandbox" && f.entry === "a"), "the delete that outlived the budget is said like any other");
+	assert.deepEqual([out.reaped, out.more], [1, true]);
+	assert.ok("/sbx/b" in removing.fs.files);
+});
+
+test("more is false once the lap is over, held runs left or not, so follow-ups do not repeat on them (issue #978)", async () => {
+	const p = paced({ a: { createdAt: hoursAgo(50) }, b: { createdAt: hoursAgo(50) }, c: { createdAt: hoursAgo(50) } }, { open: () => true });
+	let networks = 0;
+	const out = await realMakeSandboxReaper({ ...p.options, sweepNetworks: async () => (networks++, { swept: [], notes: [] }) })();
+	assert.deepEqual([out.more, out.reaped, out.held], [false, 0, 3]);
+	assert.equal(networks, 1, "a pass that visited everything sweeps the networks");
+	assert.ok(p.logs.some(([e, f]) => e === "sandbox_reaper_pass" && f.held === 3 && f.more === false), "the holds are in the summary");
+});
+
+test("the network sweep is paced by the same budget, and the networks it left are the pass's more (issue #978)", async () => {
+	const p = paced({});
+	const visited = [];
+	const sweepNetworks = async ({ pace }) => {
+		for (const name of ["n1", "n2", "n3"]) {
+			visited.push(name);
+			p.events.push(`network:${name}`);
+			p.advance(9000);
+			if (!(await pace())) return { swept: [], notes: [], more: true };
+		}
+		return { swept: [], notes: [] };
+	};
+	const out = await realMakeSandboxReaper({ ...p.options, sweepNetworks })();
+	// n1 takes 9 s and rests 9 s (18 s, under the budget); n2 brings it to 36 s, and the pace says stop.
+	assert.deepEqual(visited, ["n1", "n2"]);
+	assert.deepEqual(restsOf(p.events), [9000, 9000]);
+	assert.equal(out.more, true);
+});
+
+test("one pass at a time: a call during a pass answers busy and touches nothing, so this pid's in-flight tombstone is left alone (issue #978)", async () => {
+	const p = paced({ a: { createdAt: hoursAgo(50) } });
+	let entered;
+	const inRemove = new Promise((resolve) => (entered = resolve));
+	let release;
+	const gate = new Promise((resolve) => (release = resolve));
+	const removed = [];
+	const readdir = p.fs.readdirSync;
+	let listings = 0;
+	p.fs.readdirSync = (path) => (listings++, readdir(path));
+	const reap = realMakeSandboxReaper({
+		...p.options,
+		pid: 4242,
+		remove: async (path, opts) => {
+			removed.push(path);
+			entered(path);
+			await gate;
+			p.fs.rmSync(path, opts);
+		},
+	});
+	const first = reap();
+	const tomb = await inRemove;
+	assert.match(tomb, /^\/sbx\/\.reap-4242-/);
+	const before = listings;
+	let second = "still running";
+	try {
+		reap().then((result) => (second = result));
+		for (let i = 0; i < 20; i++) await new Promise((resolve) => setImmediate(resolve));
+		assert.deepEqual(second, { busy: true }, "answered at once, while the first pass is still deleting");
+		assert.equal(listings, before, "the second call did not even list the root");
+		assert.deepEqual(removed, [tomb], "and never took the first pass's tombstone for a leftover");
+	} finally {
+		release();
+	}
+	assert.equal((await first).reaped, 1);
+	assert.equal((await reap()).busy, undefined, "once the pass is over, the next call runs");
+});
+
+test("a pass told to stop during a rest wakes within one slice and leaves the rest alone (issue #978)", async () => {
+	let stop = false;
+	const p = paced({ a: { createdAt: hoursAgo(50) }, b: { createdAt: hoursAgo(50) } }, { askMs: (name) => (name === "a" ? 30_000 : 0) });
+	const sleep = p.options.sleep;
+	const out = await realMakeSandboxReaper({
+		...p.options,
+		sleep: async (ms) => {
+			await sleep(ms);
+			stop = true;
+		},
+	})({ stopped: () => stop });
+	assert.deepEqual(restsOf(p.events), [SANDBOX_REST_POLL_MS], "one slice of a ten-second rest");
+	assert.deepEqual(p.events.filter((e) => e.startsWith("isOpen:")), ["isOpen:a"]);
+	assert.equal(out.stopped, true);
+	assert.equal(out.more, false, "a pass stopped for a shutdown never asks for a follow-up");
+	assert.ok("/sbx/b" in p.fs.files);
+});
+
+/**
+ * Drive one reaper as start.mjs does: a first pass, then the REAL follow-ups on a timer this fires, until none is armed
+ * (or `max` passes, the guard against a chain that never ends). Resolves every pass's result and what is still armed.
+ */
+async function chain(reap, { max = 40 } = {}) {
+	const armed = [];
+	const results = [];
+	const followUps = makeSweepFollowUps({
+		reap: async (options) => {
+			const result = await reap(options);
+			results.push(result);
+			return result;
+		},
+		setTimeoutFn: (fn) => (armed.push(fn), { unref() {} }),
+		clearTimeoutFn: () => {},
+	});
+	const first = await reap();
+	results.push(first);
+	followUps.after(first);
+	while (armed.length > 0 && results.length < max) {
+		const passes = results.length;
+		armed.shift()();
+		while (results.length === passes) await new Promise((resolve) => setImmediate(resolve));
+		for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
+	}
+	await followUps.close();
+	return { results, armed };
+}
+
+const runsLeft = (fs, prefix) => Object.keys(fs.files).filter((k) => new RegExp(`^/sbx/${prefix}[^/]*$`).test(k));
+
+test("a removal that FAILS does not count toward SANDBOX_PASS_MAX_REAPS: 55 undeletable tombstones and runs still go in one pass (issue #978)", async () => {
+	// The #363 shape, root-owned files a non-root worker cannot delete: every pass retries them. Counted toward the cap,
+	// fifty of them ended every pass before a single run, and the follow-ups re-armed forever.
+	const p = paced(expiredRuns(10));
+	for (let i = 0; i < 55; i++) p.fs.files[`/sbx/.reap-4242-1-${String(i).padStart(2, "0")}`] = "<dir>";
+	const remove = p.options.remove;
+	const reap = realMakeSandboxReaper({
+		...p.options,
+		pid: 4242,
+		remove: async (path, opts) => {
+			if (path.startsWith("/sbx/.reap-4242-1-")) throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+			return remove(path, opts);
+		},
+	});
+	const { results, armed } = await chain(reap);
+	assert.equal(results.length, 1, "one pass, as before the passes were bounded");
+	assert.deepEqual([results[0].reaped, results[0].held, results[0].more], [10, 55, false]);
+	assert.deepEqual(runsLeft(p.fs, "r"), [], "every run is gone");
+	assert.equal(armed.length, 0, "and no follow-up is armed");
+	// The same for runs whose own tombstone will not delete: they do not use up the cap either.
+	const q = paced(expiredRuns(65));
+	const qRemove = q.options.remove;
+	const stuckRuns = realMakeSandboxReaper({ ...q.options, remove: async (path, opts) => (Number(q.fs.calls.renamed.find(([, to]) => to === path)?.[0].slice(6)) < 55 ? Promise.reject(Object.assign(new Error("EACCES"), { code: "EACCES" })) : qRemove(path, opts)) });
+	const out = await stuckRuns();
+	assert.deepEqual([out.reaped, out.held, out.more], [10, 55, false], "ten removed, fifty-five held, the lap over in one pass");
+});
+
+test("undeletable tombstones that take the whole budget are passed once a lap, and the runs after them are still reached (issue #978)", async () => {
+	// Each failing walk takes 2 s and rests 2 s, so a pass gets through five: the lap carries the place from pass to pass.
+	const p = paced(expiredRuns(10));
+	for (let i = 0; i < 55; i++) p.fs.files[`/sbx/.reap-4242-1-${String(i).padStart(2, "0")}`] = "<dir>";
+	const tried = new Map();
+	const reap = realMakeSandboxReaper({
+		...p.options,
+		pid: 4242,
+		remove: async (path, opts) => {
+			if (!path.startsWith("/sbx/.reap-4242-1-")) return p.options.remove(path, opts);
+			tried.set(path, (tried.get(path) ?? 0) + 1);
+			p.advance(2000);
+			throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+		},
+	});
+	const { results, armed } = await chain(reap);
+	assert.deepEqual(runsLeft(p.fs, "r"), [], "every run is gone");
+	assert.equal(results.at(-1).more, false, "the lap ended");
+	assert.equal(armed.length, 0, "and the follow-ups with it");
+	assert.ok(results.length <= 12, `55 tombstones at five a pass, then the runs: ${results.length} passes`);
+	assert.deepEqual([...new Set(tried.values())], [1], "each undeletable tombstone tried exactly once in the lap");
+});
+
+test("runs HELD at the top of the listing cannot starve the expired runs after them, and the follow-ups stop after one lap (issue #978)", async () => {
+	// Ten runs whose runtime reports them open sort first, fifteen expired after them, every ask 1.5 s.
+	const entries = {};
+	for (let i = 0; i < 10; i++) entries[`a-held-${i}`] = { createdAt: hoursAgo(50) };
+	for (let i = 0; i < 15; i++) entries[`b-run-${String(i).padStart(2, "0")}`] = { createdAt: hoursAgo(50) };
+	const p = paced(entries, { askMs: () => 1500, open: (name) => name.startsWith("a-held-") });
+	const reap = realMakeSandboxReaper(p.options);
+	const { results, armed } = await chain(reap);
+	assert.deepEqual(runsLeft(p.fs, "b-run-"), [], "every expired run is reaped");
+	assert.equal(runsLeft(p.fs, "a-held-").length, 10, "and every held one kept");
+	assert.equal(results.at(-1).more, false);
+	assert.equal(armed.length, 0, "the chain ended with the lap");
+	const asks = p.events.filter((e) => e.startsWith("isOpen:a-held-"));
+	assert.equal(asks.length, 10, "each held run asked once in the lap, never again in the same chain");
+	// A later sweep is a new lap: it starts from the top and asks the held runs again.
+	p.events.length = 0;
+	await reap();
+	assert.equal(p.events.find((e) => e.startsWith("isOpen:")), "isOpen:a-held-0");
+});
+
+test("every pass visits at least one entry, so a runtime listing that takes the whole budget cannot stall the lap (issue #978)", async () => {
+	const p = paced(expiredRuns(3));
+	const { results, armed } = await chain(realMakeSandboxReaper({ ...p.options, listRunning: async () => (p.advance(25_000), []) }));
+	assert.deepEqual(results.map((r) => [r.reaped, r.more]), [[1, true], [1, true], [1, false]], "one run a pass, and the lap ends");
+	assert.equal(armed.length, 0);
+});
+
+test("the budget is asked before a stray entry's unlink too, and the next pass resumes at it (issue #978)", async () => {
+	const p = paced({ a: { createdAt: hoursAgo(50) } }, { askMs: () => 25_000 });
+	p.fs.files["/sbx/b-stray"] = "a file, not a run";
+	const reap = realMakeSandboxReaper(p.options);
+	const first = await reap();
+	assert.deepEqual([first.reaped, first.more], [1, true]);
+	assert.ok("/sbx/b-stray" in p.fs.files, "the budget spent on a, the stray entry waits");
+	const second = await reap();
+	assert.deepEqual([second.reaped, second.more], [1, false]);
+	assert.ok(!("/sbx/b-stray" in p.fs.files));
+});
+
+test("a pass that resumes in the networks does not visit the runs again, and the pass after the lap starts over (issue #978)", async () => {
+	const p = paced({ a: { createdAt: hoursAgo(50) } }, { open: () => true });
+	p.fs.files["/sbx/.reap-4242-1-0"] = "<dir>";
+	let tombTries = 0;
+	let sweeps = 0;
+	const lapIds = [];
+	const reap = realMakeSandboxReaper({
+		...p.options,
+		pid: 4242,
+		remove: async () => {
+			tombTries += 1;
+			throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+		},
+		listRunning: async () => ["open-shell"],
+		sweepNetworks: async ({ pace, lapId }) => {
+			lapIds.push(lapId);
+			sweeps += 1;
+			if (sweeps > 1) return { swept: [], notes: [] };
+			await pace();
+			return { swept: [], notes: [], more: true };
+		},
+	});
+	p.fs.files["/sbx/open-shell"] = "<dir>";
+	p.fs.files[`/sbx/open-shell/${SANDBOX_MANIFEST}`] = JSON.stringify({ jobId: "open-shell", createdAt: hoursAgo(50) });
+	const first = await reap();
+	assert.deepEqual([first.more, first.held], [true, 3], "the tombstone, a held by its runtime, and open-shell because a sandbox runs on it");
+	const second = await reap();
+	assert.deepEqual([second.more, sweeps], [false, 2]);
+	assert.equal(p.events.filter((e) => e === "isOpen:a").length, 1, "the resumed pass went straight to the networks");
+	assert.equal(tombTries, 1, "past the tombstones too");
+	await reap();
+	assert.equal(p.events.filter((e) => e === "isOpen:a").length, 2, "and the next lap asks again");
+	assert.equal(tombTries, 2);
+	assert.equal(lapIds[0], lapIds[1], "the resumed network pass is in the same lap, so each runtime keeps its place");
+	assert.notEqual(lapIds[2], lapIds[1], "and the next lap is told it is a new one");
+});
+
+test("a pass that resumes in the runs does not walk the leftover tombstones again: they are once a lap (issue #978)", async () => {
+	const p = paced(expiredRuns(60));
+	p.fs.files["/sbx/.reap-4242-1-0"] = "<dir>";
+	let tried = 0;
+	const remove = p.options.remove;
+	const reap = realMakeSandboxReaper({
+		...p.options,
+		pid: 4242,
+		remove: async (path, opts) => {
+			if (path !== "/sbx/.reap-4242-1-0") return remove(path, opts);
+			tried += 1;
+			throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" });
+		},
+	});
+	const { results } = await chain(reap);
+	assert.deepEqual(results.map((r) => [r.reaped, r.more]), [[50, true], [10, false]]);
+	assert.equal(tried, 1, "the second pass went on in the runs, past the tombstone this lap already tried");
+});
+
+test("a pass a fault ends mid-lap starts the next sweep on a new lap, so what appeared meanwhile is not left for another (issue #978)", async () => {
+	const p = paced(expiredRuns(60));
+	let fail = false;
+	const reap = realMakeSandboxReaper({ ...p.options, pid: 4242, listRunning: async () => { if (fail) throw new Error("runtime did not answer"); return []; } });
+	assert.deepEqual([(await reap()).more, runsLeft(p.fs, "r").length], [true, 10], "the lap stopped at r050");
+	fail = true;
+	assert.equal((await reap()).more, false, "the fault ends the pass");
+	fail = false;
+	// Meanwhile a crashed process leaves a tombstone, and a run sorting before the old place expires.
+	p.fs.files["/sbx/.reap-4242-1-0"] = "<dir>";
+	p.fs.files["/sbx/a-late"] = "<dir>";
+	p.fs.files[`/sbx/a-late/${SANDBOX_MANIFEST}`] = JSON.stringify({ jobId: "a-late", createdAt: hoursAgo(50) });
+	const next = await reap();
+	assert.deepEqual([next.reaped, next.more], [12, false], "a new lap: the tombstone first, a-late, and the ten left");
+	assert.deepEqual(Object.keys(p.fs.files), ["/sbx"]);
+});
+
+test("the lap follows NAME order whatever order the filesystem lists in (issue #978)", async () => {
+	const p = paced(expiredRuns(60));
+	const readdir = p.fs.readdirSync;
+	p.fs.readdirSync = (path) => readdir(path).reverse();
+	const reap = realMakeSandboxReaper(p.options);
+	assert.deepEqual(swept(p.fs).length, 0);
+	const first = await reap();
+	assert.deepEqual([first.reaped, first.more], [50, true]);
+	assert.deepEqual(swept(p.fs).slice(0, 2), ["/sbx/r000", "/sbx/r001"], "the first pass starts at the first name");
+	const second = await reap();
+	assert.deepEqual([second.reaped, second.more], [10, false], "and the second resumes at the right place, missing none");
+	assert.deepEqual(runsLeft(p.fs, "r"), []);
+});
+
+test("the default rest holds the event loop, so a boot pass with nothing else running finishes (issue #978)", () => {
+	// The boot pass runs before anything else holds the loop. An unref'd rest there lets the process exit mid-pass.
+	const root = tempDir("sbx-alone-");
+	for (const id of ["a", "b"]) {
+		mkdirSync(join(root, id));
+		writeFileSync(join(root, id, SANDBOX_MANIFEST), JSON.stringify({ jobId: id, createdAt: new Date(Date.now() - 3 * DAY).toISOString() }));
+	}
+	const script = `const { makeSandboxReaper } = await import(${JSON.stringify(new URL("../src/sandbox-store.mjs", import.meta.url).href)}); process.stdout.write(JSON.stringify(await makeSandboxReaper({ sandboxDir: process.argv[1], retentionHours: 1 })()));`;
+	const child = spawnSync(process.execPath, ["--input-type=module", "-e", script, root], { encoding: "utf8", timeout: 30_000 });
+	assert.equal(child.status, 0, `the process ran the pass to its end (stderr: ${child.stderr})`);
+	assert.equal(JSON.parse(child.stdout).reaped, 2);
 });

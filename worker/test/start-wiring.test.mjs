@@ -11,6 +11,7 @@ import { makeOpenshellBackend as realOpenshellBackend } from "../src/backend-ope
 import { RUNNER_POLICY_REASONS, sanitizeJobId } from "../src/run-history.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { makeSandboxReaper as realSandboxReaper } from "../src/sandbox-store.mjs";
+import { makeSweepFollowUps as realSweepFollowUps } from "../src/retention-sweep.mjs";
 import { sandboxInventoryKey, SANDBOX_INVENTORY_HOSTS } from "../src/sandbox-inventory.mjs";
 import { hookRunsKey, HOOK_HOSTS } from "../src/hook-runs.mjs";
 import { makeTouchStore } from "../src/touch-state.mjs";
@@ -140,7 +141,7 @@ const IDLE_PODMAN_SERVICE = async () => ({ read: true, loaded: true, running: fa
 /** A running service's answer for the default test socket, started at `startedAtMs`. */
 const RUNNING_PODMAN_SERVICE = (startedAtMs) => async () => ({ read: true, loaded: true, running: true, startedAtMs, environment: {}, environmentFiles: [], unitPaths: [], modules: [], manager: { read: true, environment: {}, modules: [] }, listen: ["/test.sock"] });
 
-async function runStart({ env = {}, whileRunning, makeUpdatesRunner, makeDoctorSpawner, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, readOpenshellVersions, makeOpenshellReaper, makeOpenshellBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchFs, watchScopedLimits, watchProjects, readMirroredRecord, readCgroupFile, readProgressKey, makeCpuReserve, listJobContainers, workerHostBudget, workerRunningJobs, makePrepareWorkspace, makeLiveTranscriptOpener, makeStatusCommenter, makeRunMirror, makePortfolioSnapshot, finishModelAttempt, durable = {} } = {}) {
+async function runStart({ env = {}, whileRunning, makeUpdatesRunner, makeDoctorSpawner, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeSweepFollowUps, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, readOpenshellVersions, makeOpenshellReaper, makeOpenshellBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchFs, watchScopedLimits, watchProjects, readMirroredRecord, readCgroupFile, readProgressKey, makeCpuReserve, listJobContainers, workerHostBudget, workerRunningJobs, makePrepareWorkspace, makeLiveTranscriptOpener, makeStatusCommenter, makeRunMirror, makePortfolioSnapshot, finishModelAttempt, durable = {} } = {}) {
 	// Every real socket in this helper must use the injected test service, including callers that only override other settings.
 	env = { VALKEY_URL, ...env };
 	const secretsResolverCalls = [];
@@ -355,6 +356,7 @@ async function runStart({ env = {}, whileRunning, makeUpdatesRunner, makeDoctorS
 			...(extraBackends ? { extraBackends } : {}),
 			...(loadConfig ? { loadConfig } : {}),
 			...(makeRetentionSweep ? { makeRetentionSweep } : {}),
+			...(makeSweepFollowUps ? { makeSweepFollowUps } : {}),
 			// Issue #712: never a real doctor child under test. A spawner that starts nothing unless a test hands its own.
 			makeUpdatesRunner: makeUpdatesRunner ?? (() => ({ start() {}, runOnce: async () => {}, close: async () => {} })),
 			makeDoctorSpawner: makeDoctorSpawner ?? (() => ({ start() {}, runOnce: async () => {}, close: async () => {} })),
@@ -2579,8 +2581,9 @@ test("the live-edit watchers are CLOSED with the worker that armed them", { skip
 		// wrong. It became 6 with issue #292's periodic sweep, registered on #295's own finding that
 		// UNREF'D IS NOT CLEANED UP: that handle holds an `rmSync`, and the shut-down canary below waits
 		// 600ms, so a leaked DAILY timer would be invisible here and real in production.
-		// 7 since issue #499's projects watch, registered by the same rule; 8 since issue #712's doctor runs.
-		assert.equal(captured.extraClosers.length, 12 + await sandboxControlClosers(captured), "runtimeQueue + registry + history reader + watch recovery drainer + answer draft drainer + the updates reconcile + one closer per armed watch + the retention sweep + the doctor runs");
+		// 7 since issue #499's projects watch, registered by the same rule; 8 since issue #712's doctor runs; one more since
+		// issue #978's sandbox follow-up passes, which hold deletion work too.
+		assert.equal(captured.extraClosers.length, 13 + await sandboxControlClosers(captured), "runtimeQueue + registry + history reader + watch recovery drainer + answer draft drainer + the updates reconcile + one closer per armed watch + the sandbox follow-ups + the retention sweep + the doctor runs");
 
 		// `runStart` has already drained every closer. An operator edit now reaches a worker that is gone.
 		const before = bootLines.length;
@@ -3008,7 +3011,7 @@ test("PI_SWEEP_INTERVAL_HOURS=0 does not CONSTRUCT the sweep, so nothing it coul
 	assert.equal(constructions.length, 0, "the factory is never called at all");
 	// No watch files in this env, so the list is just the runtime queue and the registry. The point is
 	// the DELTA against the twin test below: the sweep contributes exactly one closer, or none at 0.
-	assert.equal(captured.extraClosers.length, 7 + await sandboxControlClosers(captured), "runtimeQueue + registry + history reader + watch recovery drainer + answer draft drainer + the updates reconcile + the doctor runs (issue #712), and nothing from the sweep");
+	assert.equal(captured.extraClosers.length, 8 + await sandboxControlClosers(captured), "runtimeQueue + registry + history reader + watch recovery drainer + answer draft drainer + the updates reconcile + the doctor runs (issue #712) + the sandbox follow-ups (issue #978, the boot sweep finishing), and nothing from the sweep");
 	assert.equal(logs.filter((l) => l.event === "retention_sweep").length, 0);
 	const started = logs.find((l) => l.event === "worker_started");
 	assert.equal(started.sweepIntervalHours, 0, "the boot line still SAYS the sweep is off, which is the one visible difference");
@@ -3032,8 +3035,111 @@ test("the default arms one daily sweep and registers it as a closer", { skip }, 
 	// same closure in the same place.
 	// Issue #645: the host-lost sweep on every host, last; the checkpoint store's retention only where there is a store.
 	assert.deepEqual(constructions[0].reapers.map((r) => r.name), ["log", "allocation_log", "console_audit", "touch_outbox", "sandbox", "artifacts", "session", "recovery_host_lost"], "boot's own order (issue #920: the artifacts store beside the sandbox store)");
-	assert.equal(captured.extraClosers.length, 8 + await sandboxControlClosers(captured), "runtimeQueue + registry + history reader + watch recovery drainer + answer draft drainer + the updates reconcile + the sweep + the doctor runs (no watch files in this env)");
+	assert.equal(captured.extraClosers.length, 9 + await sandboxControlClosers(captured), "runtimeQueue + registry + history reader + watch recovery drainer + answer draft drainer + the updates reconcile + the sandbox follow-ups + the sweep + the doctor runs (no watch files in this env)");
 	assert.equal(logs.find((l) => l.event === "worker_started").sweepIntervalHours, 24);
+});
+
+// ── issue #978: the boot sweep in bounded passes ────────────────────────────────────────────────────
+
+/** The follow-ups' one-shot timer, recorded for the test to fire; never the event loop's. */
+const followUpTimers = (timers) => ({ setTimeoutFn: (fn, ms) => (timers.push({ fn, ms }), { unref() {} }), clearTimeoutFn: () => {} });
+
+test("a boot with more than one pass of backlog takes jobs after the FIRST pass, and the follow-ups finish the rest (issue #978)", { skip }, async () => {
+	// The REAL reaper on a real retention root of 55 expired runs, more than one pass holds (SANDBOX_PASS_MAX_REAPS is 50).
+	// Its rests get a sleep that returns at once and the follow-ups a timer this test fires; everything else is the wiring.
+	const root = tempDir("backlog-sbx-");
+	const ids = Array.from({ length: 55 }, (_, i) => `run-${i}`);
+	// Three days before whatever the clock says, against a one-hour window: true at any date, so no fuse.
+	const createdAt = new Date(Date.now() - 3 * 86400000).toISOString();
+	for (const id of ids) {
+		mkdirSync(join(root, id));
+		writeFileSync(join(root, id, "manifest.json"), JSON.stringify({ jobId: id, kind: "github", image: "pi-job:x", backend: "local", workspace: join(root, id), createdAt, keepUntil: null }));
+	}
+	const order = [];
+	const passes = [];
+	const timers = [];
+	let secondPass;
+	const second = new Promise((resolve) => (secondPass = resolve));
+	await runStart({
+		env: { PI_SANDBOX_DIR: root, PI_SANDBOX_RETENTION_HOURS: "1" },
+		order,
+		listRunningSandboxes: async () => [],
+		makeSandboxNetworkSweeper: () => async () => ({ swept: [], notes: [] }),
+		makeSandboxReaper: (args) => {
+			const reap = realSandboxReaper({ ...args, sleep: async () => {} });
+			return async (options) => {
+				order.push("reapSandboxes");
+				const result = await reap(options);
+				// The boot pass ends a second late, so a boot that did not wait for it would be past the next step by then.
+				if (passes.length === 0) await new Promise((resolve) => setTimeout(resolve, 1000));
+				order.push("pass done");
+				passes.push(result);
+				if (passes.length === 2) secondPass();
+				return result;
+			};
+		},
+		makeSweepFollowUps: (args) => realSweepFollowUps({ ...args, ...followUpTimers(timers) }),
+		// The boot's next step after the sandbox sweep, recorded: it must come after the pass is DONE, not after it began.
+		durable: { makeTouchStore: (options) => (order.push("touch store"), makeTouchStore(options)) },
+		whileRunning: async () => {
+			assert.deepEqual(order, ["reapSandboxes", "pass done", "touch store", "createWorker"], "the boot waits for ONE pass, and the worker takes jobs after it");
+			assert.deepEqual([passes[0].reaped, passes[0].more], [50, true]);
+			assert.deepEqual(timers.map((t) => t.ms), [60_000], "one follow-up armed by the end of boot, a minute out");
+			timers.shift().fn();
+			await second;
+			for (let i = 0; i < 5; i++) await new Promise((resolve) => setImmediate(resolve));
+			assert.deepEqual([passes[1].reaped, passes[1].more], [5, false]);
+			assert.deepEqual(timers, [], "the pass that finished arms nothing");
+		},
+	});
+	assert.deepEqual(order, ["reapSandboxes", "pass done", "touch store", "createWorker", "reapSandboxes", "pass done"]);
+	assert.deepEqual(readdirSync(root), [], "the whole backlog is gone");
+});
+
+test("PI_SWEEP_INTERVAL_HOURS=0 still finishes the boot sweep in follow-up passes, and still constructs no periodic sweep (issue #978)", { skip }, async () => {
+	const constructions = [];
+	const timers = [];
+	const results = [{ more: true, reaped: 50, held: 0 }, { more: false, reaped: 3, held: 0 }];
+	const handed = [];
+	let followed;
+	const done = new Promise((resolve) => (followed = resolve));
+	await runStart({
+		env: { PI_SWEEP_INTERVAL_HOURS: "0" },
+		makeSandboxReaper: () => async (options) => {
+			handed.push(options);
+			const result = results.shift();
+			if (handed.length === 2) followed();
+			return result;
+		},
+		makeRetentionSweep: (args) => (constructions.push(args), { start() {}, sweepOnce: async () => {}, close: async () => {} }),
+		makeSweepFollowUps: (args) => realSweepFollowUps({ ...args, ...followUpTimers(timers) }),
+		whileRunning: async () => {
+			assert.equal(handed.length, 1, "boot ran one pass");
+			assert.equal(timers.length, 1, "and armed a follow-up for what it left");
+			timers.shift().fn();
+			await done;
+			assert.equal(typeof handed[1]?.stopped, "function", "the follow-up pass can be told to stop");
+		},
+	});
+	assert.equal(constructions.length, 0, "the periodic sweep is still never constructed at 0");
+	assert.equal(handed.length, 2);
+	assert.deepEqual(timers, [], "and nothing re-arms after a pass that left nothing");
+});
+
+test("the daily tick's sandbox entry hands its pass's result to the same follow-ups (issue #978)", { skip }, async () => {
+	const results = [{ more: false, reaped: 0, held: 0 }, { more: true, reaped: 50, held: 0 }];
+	const timers = [];
+	let handed;
+	await runStart({
+		makeSandboxReaper: () => async () => results.shift(),
+		makeRetentionSweep: (args) => ((handed = args), { start() {}, sweepOnce: async () => {}, close: async () => {} }),
+		makeSweepFollowUps: (args) => realSweepFollowUps({ ...args, ...followUpTimers(timers) }),
+		whileRunning: async () => {
+			assert.deepEqual(timers, [], "a boot pass that left nothing arms nothing");
+			await handed.reapers.find((r) => r.name === "sandbox").reap({ stopped: () => false });
+			assert.deepEqual(timers.map((t) => t.ms), [60_000], "a tick's pass that left work arms the follow-up");
+		},
+	});
 });
 
 // ── issue #712: the worker's own doctor runs ─────────────────────────────────────────────────────────
@@ -3090,7 +3196,7 @@ test("the default arms the doctor runs daily on the worker's own CLI and registe
 	const off = [];
 	const second = await runStart({ env: { PI_DOCTOR_INTERVAL_HOURS: "0" }, makeDoctorSpawner: (args) => (off.push(args), { start() {}, close: async () => {} }) });
 	assert.equal(off.length, 0, "at 0 the factory is never called: no timer, no closer, no child");
-	assert.equal(second.captured.extraClosers.length, 7 + await sandboxControlClosers(second.captured), "runtimeQueue + registry + history reader + watch recovery drainer + answer draft drainer + the updates reconcile + the sweep");
+	assert.equal(second.captured.extraClosers.length, 8 + await sandboxControlClosers(second.captured), "runtimeQueue + registry + history reader + watch recovery drainer + answer draft drainer + the updates reconcile + the sandbox follow-ups + the sweep");
 	assert.equal(second.logs.find((l) => l.event === "worker_started").doctorIntervalHours, 0);
 });
 

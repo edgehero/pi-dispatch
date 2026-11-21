@@ -14,7 +14,10 @@ import { networkNameFor } from "../src/egress.mjs";
 import { makeSandboxReaper as realMakeSandboxReaper, pinSandbox } from "../src/sandbox-store.mjs";
 
 // Memory filesystems inject asynchronous removal too; production always uses node:fs/promises.
-const makeSandboxReaper = (options) => realMakeSandboxReaper({ ...options, ...(options.fs ? { remove: async (path, opts) => options.fs.rmSync(path, opts) } : {}) });
+// Issue #978: these tests pin each entry's own outcome and lines. The pass's rests get a sleep that returns at once,
+// and its one summary line (`sandbox_reaper_pass`, pinned in sandbox-store.test.mjs) is left out of what they read.
+const withoutPassLine = (log) => (log ? (event, fields) => event === "sandbox_reaper_pass" || log(event, fields) : log);
+const makeSandboxReaper = (options) => realMakeSandboxReaper({ ...options, sleep: options.sleep ?? (async () => {}), log: withoutPassLine(options.log), ...(options.fs ? { remove: async (path, opts) => options.fs.rmSync(path, opts) } : {}) });
 
 const base = {
 	image: "pi-job:pinned",
@@ -1061,11 +1064,12 @@ test("a sandbox being LAUNCHED keeps its network, which no other guard here can 
 	});
 	const out = await makeSandboxNetworkSweeper({ run: d.run })({ running: new Set(), keep: new Set(), retained: () => [] });
 	assert.deepEqual(out.notes, [{ network: "pi-sandbox-opening-net", reason: "sandbox-present" }], "a launch in flight is not a leftover, and unlike a retained run it is SAID");
+	// In name order since issue #978, which is how a pass's place in the network lap is kept.
 	assert.deepEqual(
 		out.swept,
 		[
-			{ network: "pi-sandbox-ox-notes-net", detached: ["pi-dispatch-egress-proxy"] },
 			{ network: "pi-sandbox-a-net", detached: ["pi-dispatch-egress-proxy"] },
+			{ network: "pi-sandbox-ox-notes-net", detached: ["pi-dispatch-egress-proxy"] },
 		],
 		"and neither a foreign container name nor another run's longer id shields a network",
 	);
@@ -1076,7 +1080,7 @@ test("a sandbox being LAUNCHED keeps its network, which no other guard here can 
 	// its network before its container.
 	const forNotes = d.calls.indexOf("ps -a --filter name=pi-sandbox-ox-notes --format {{.Names}}\t{{.State}}");
 	assert.ok(forNotes > d.calls.indexOf("network inspect --format {{json .Containers}} pi-sandbox-ox-notes-net"), "after the endpoint read");
-	assert.ok(forNotes < d.calls.findIndex((c) => c.startsWith("network disconnect")), "and before anything is detached");
+	assert.ok(forNotes < d.calls.findIndex((c) => c.startsWith("network disconnect") && c.includes("pi-sandbox-ox-notes-net")), "and before anything is detached from it");
 });
 
 test("only a FINISHED container frees a session network, and an unknown state never does (#337)", async () => {
@@ -1153,6 +1157,114 @@ test("the sweep yields between networks, so it is never one uninterruptible bloc
 	setImmediate(() => order.push("<loop got a turn>"));
 	await sweeping;
 	assert.deepEqual(order, ["pi-sandbox-a-net", "<loop got a turn>", "pi-sandbox-b-net"], "the event loop runs between networks, not only after all of them");
+});
+
+test("a pace that says stop leaves the next network alone, and more is said only for a candidate left (issue #978)", async () => {
+	// The reaper's pace rests and keeps its budget; called after each network the sweep asked the daemon about, never
+	// inside one. On false the sweep stops where it is: the next network is not even inspected.
+	const d = fakeNetDaemon({ nets: { "pi-sandbox-a-net": [], "pi-sandbox-b-net": [], "pi-sandbox-kept-net": [] } });
+	const paced = [];
+	const out = await makeSandboxNetworkSweeper({ run: d.run })({
+		keep: new Set(["kept"]),
+		retained: () => [],
+		pace: async () => {
+			paced.push(d.calls.length);
+			return false;
+		},
+	});
+	assert.deepEqual(out, { swept: [{ network: "pi-sandbox-a-net", detached: [] }], notes: [], more: true });
+	assert.ok(!d.calls.some((c) => c.includes("pi-sandbox-b-net")), "b is left for the next pass, unlooked at");
+	assert.equal(paced.length, 1);
+	assert.ok(d.calls.slice(0, paced[0]).includes("network rm pi-sandbox-a-net"), "the pace came after a's removal, never before it");
+	// Stopping after the LAST candidate leaves nothing, so no `more`: a kept network is no candidate. The stop is said.
+	const last = fakeNetDaemon({ nets: { "pi-sandbox-a-net": [], "pi-sandbox-kept-net": [] } });
+	assert.deepEqual(await makeSandboxNetworkSweeper({ run: last.run })({ keep: new Set(["kept"]), retained: () => [], pace: async () => false }), { swept: [{ network: "pi-sandbox-a-net", detached: [] }], notes: [], stop: true });
+	// And the combined sweep stops with it: the runtime after one that said more is not asked this pass.
+	const docker = fakeNetDaemon({ nets: { "pi-sandbox-d1-net": [], "pi-sandbox-d2-net": [] } });
+	const podman = fakeNetDaemon({ nets: { "pi-sandbox-p-net": [] } });
+	const both = await combineSandboxNetworkSweepers([{ runtime: "docker", sweep: makeSandboxNetworkSweeper({ run: docker.run }) }, { runtime: "podman", sweep: makeSandboxNetworkSweeper({ bin: "podman", run: podman.run }) }])({ retained: () => [], pace: async () => false });
+	assert.deepEqual(both, { swept: [{ network: "pi-sandbox-d1-net", detached: [] }], notes: [], more: true });
+	assert.deepEqual(podman.calls, [], "podman is the next pass's");
+});
+
+test("the network sweep resumes where the last pass stopped, per runtime, so networks that never go cannot starve the rest or podman (issue #978)", async () => {
+	// Docker: three networks whose rm fails on every pass sort first, then two that go. Podman holds three that go. A
+	// budget of two networks a pass.
+	const failing = new Set(["pi-sandbox-a1-net", "pi-sandbox-a2-net", "pi-sandbox-a3-net"]);
+	const docker = fakeNetDaemon({ nets: Object.fromEntries(["a1", "a2", "a3", "b1", "b2"].map((id) => [`pi-sandbox-${id}-net`, []])) });
+	const tried = [];
+	const dockerRun = async (args) => {
+		if (args[0] !== "network" || args[1] !== "rm" || !failing.has(args.at(-1))) return docker.run(args);
+		tried.push(args.at(-1));
+		return { code: 1, stdout: "", stderr: "Error response from daemon: has active endpoints" };
+	};
+	const podman = fakeNetDaemon({ nets: Object.fromEntries(["p1", "p2", "p3"].map((id) => [`pi-sandbox-${id}-net`, []])) });
+	const lap = { runtime: null };
+	const combined = combineSandboxNetworkSweepers([{ runtime: "docker", sweep: makeSandboxNetworkSweeper({ run: dockerRun }) }, { runtime: "podman", sweep: makeSandboxNetworkSweeper({ bin: "podman", run: podman.run }) }], lap);
+	const pass = () => {
+		let visits = 0;
+		return combined({ retained: () => [], pace: async () => ++visits < 2 });
+	};
+	const outs = [];
+	for (let i = 0; i < 8; i++) {
+		outs.push(await pass());
+		if (!outs.at(-1).more) break;
+	}
+	assert.deepEqual(outs.map((o) => o.more === true), [true, true, true, false], "four passes, and the lap ends");
+	assert.deepEqual([...docker.state.keys()].sort(), ["pi-sandbox-a1-net", "pi-sandbox-a2-net", "pi-sandbox-a3-net"], "docker's removable networks are gone");
+	assert.deepEqual([...podman.state.keys()], [], "and podman was reached, all of it");
+	const rms = (net) => tried.filter((t) => t === net).length;
+	assert.deepEqual([...failing].map(rms), [1, 1, 1], "each network that will not go was tried once in the lap");
+	assert.equal(lap.runtime, null);
+	// The next call is a new lap, from docker's first network.
+	await pass();
+	assert.equal(rms("pi-sandbox-a1-net"), 2);
+});
+
+test("a pace that says stop after a runtime's LAST network keeps the next runtime for the next pass (issue #978)", async () => {
+	const docker = fakeNetDaemon({ nets: { "pi-sandbox-d1-net": [] } });
+	const podman = fakeNetDaemon({ nets: { "pi-sandbox-p1-net": [], "pi-sandbox-p2-net": [] } });
+	const lap = { runtime: null };
+	const combined = combineSandboxNetworkSweepers([{ runtime: "docker", sweep: makeSandboxNetworkSweeper({ run: docker.run }) }, { runtime: "podman", sweep: makeSandboxNetworkSweeper({ bin: "podman", run: podman.run }) }], lap);
+	const out = await combined({ retained: () => [], pace: async () => false });
+	assert.deepEqual(out, { swept: [{ network: "pi-sandbox-d1-net", detached: [] }], notes: [], more: true });
+	assert.deepEqual(podman.calls, [], "podman is not asked anything past the stop");
+	assert.equal(lap.runtime, "podman", "and is where the next pass starts");
+	await combined({ retained: () => [], pace: async () => true });
+	assert.deepEqual([...podman.state.keys()], [], "which sweeps it");
+	// A stop after the last runtime's last network ends the lap.
+	const alone = fakeNetDaemon({ nets: { "pi-sandbox-x-net": [] } });
+	const solo = await combineSandboxNetworkSweepers([{ runtime: "docker", sweep: makeSandboxNetworkSweeper({ run: alone.run }) }])({ retained: () => [], pace: async () => false });
+	assert.equal(solo.more, undefined);
+});
+
+test("a runtime's place in the network lap is dropped by a failed listing and by a new lap (issue #978)", async () => {
+	const docker = fakeNetDaemon({ nets: { "pi-sandbox-a-net": [], "pi-sandbox-b-net": [], "pi-sandbox-c-net": [] } });
+	let failLs = false;
+	const run = async (args) => (failLs && args[0] === "network" && args[1] === "ls" ? { code: 1, stdout: "", stderr: "daemon timeout" } : docker.run(args));
+	const sweep = makeSandboxNetworkSweeper({ run });
+	const inspected = (from) => docker.calls.slice(from).filter((c) => c.startsWith("network inspect")).map((c) => c.split(" ").at(-1));
+	// Stopped after a: the place is b.
+	assert.equal((await sweep({ retained: () => [], pace: async () => false, lapId: 1 })).more, true);
+	// The listing fails on the next call: the place is dropped, so a network that appears before it is visited next.
+	failLs = true;
+	assert.equal((await sweep({ retained: () => [], pace: async () => true, lapId: 1 })).failed, "network-list-failed");
+	failLs = false;
+	docker.state.set("pi-sandbox-0new-net", []);
+	let from = docker.calls.length;
+	await sweep({ retained: () => [], pace: async () => false, lapId: 1 });
+	assert.deepEqual(inspected(from), ["pi-sandbox-0new-net"], "from the top after a failed listing");
+	// The place is b again; a call in a NEW lap starts from the top all the same.
+	docker.state.set("pi-sandbox-00-net", []);
+	from = docker.calls.length;
+	await sweep({ retained: () => [], pace: async () => false, lapId: 2 });
+	assert.deepEqual(inspected(from), ["pi-sandbox-00-net"], "a new lap starts from the top");
+	// And the combined sweep drops the runtime it kept when the lap changes.
+	const lap = { runtime: "podman", id: 3 };
+	const asked = [];
+	const combined = combineSandboxNetworkSweepers([{ runtime: "docker", sweep: async () => (asked.push("docker"), { swept: [], notes: [] }) }, { runtime: "podman", sweep: async () => (asked.push("podman"), { swept: [], notes: [] }) }], lap);
+	await combined({ lapId: 4 });
+	assert.deepEqual(asked, ["docker", "podman"], "a new lap starts at the first runtime");
 });
 
 test("a shell that is OPEN keeps its network even with no retained directory left (#337)", async () => {
@@ -1491,6 +1603,16 @@ describe("makeSandboxRuntimeWatch: the retention reaper asks the runtime EACH RU
 		await podman.listRunning();
 		assert.deepEqual((await podman.sweepNetworks({})).swept.map((x) => x.network), ["pi-sandbox-docker-net", "pi-sandbox-podman-net"]);
 		assert.deepEqual(made, ["podman", "docker"], "each sweeper built once");
+	});
+
+	test("the watch keeps the network lap across passes, so a pass that stopped in podman resumes there (issue #978)", async () => {
+		const calls = [];
+		const replies = { docker: [{ swept: [], notes: [] }, { swept: [], notes: [] }], podman: [{ swept: [], notes: [], more: true }, { swept: [], notes: [] }] };
+		const makeSweeper = ({ bin }) => async () => (calls.push(bin), replies[bin].shift());
+		const watch = makeSandboxRuntimeWatch({ sandboxDir: "/sbx", blessed: ["local", "podman"], fs: retainedFs({}), list: answering({}), makeSweeper });
+		assert.equal((await watch.sweepNetworks({})).more, true);
+		assert.equal((await watch.sweepNetworks({})).more, undefined);
+		assert.deepEqual(calls, ["docker", "podman", "podman"], "the second pass went on in podman, not back to docker");
 	});
 });
 

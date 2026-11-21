@@ -3752,7 +3752,9 @@ sibling rather than an extension of the GitHub one for the same reason.
   - **Retention**: ONE rule, `sandboxDeadline`, read by the sweep, the CLI (the open and `--list`) and the
     panel alike (issue #446): `keepUntil` while pinned, whatever else the manifest says; otherwise the EARLIER of
     the manifest's `retainUntil` and `createdAt + PI_SANDBOX_RETENTION_HOURS` as the reader has it NOW. Swept at
-    worker boot and every `PI_SWEEP_INTERVAL_HOURS` thereafter (default 24; `0` = boot-only). The window is
+    worker boot and every `PI_SWEEP_INTERVAL_HOURS` thereafter (default 24; `0` = boot-only), each sweep one lap of
+    bounded passes (issue #978, **Bounded passes, in laps** below), so at `0` the boot sweep still finishes its lap in
+    follow-up passes. The window is
     therefore a FLOOR: a directory dies on the first sweep AFTER it closes, so the effective ceiling is
     the window plus the interval. **Shortening applies** (decided under #446): `0` = OFF, nothing new is retained
     and the next pass clears every unpinned run an earlier setting kept, and a LOWERED window applies to runs
@@ -3867,7 +3869,7 @@ sibling rather than an extension of the GitHub one for the same reason.
     one "the sweep could not remove; if the worker is running it retries each pass", named for removal by its own
     path, never a `.reap-*` glob. Doctor never classifies by the pid in the name (gate round 3): after any worker
     restart that pid is dead whether or not a delete failed, and a pid means nothing across pid namespaces. Leftover tombstones (a crash between the rename and the
-    delete, or a stuck one) are removed at the START of every pass, boot and timer alike (`reaped_sandbox` with
+    delete, or a stuck one) are removed at the START of every lap, boot and timer alike (`reaped_sandbox` with
     reason `tombstone`), before any run is read or asked about; their own manifest is read to find a live pin. **`.reap-` is a reserved prefix**: the sweep's own
     listing, `listSandboxes`, the runtime watch, the network sweep's keep set and doctor's count all skip it, and
     `retainJobDir` cannot produce it. Every hold and fault here stays in the `sandbox_reaper_skipped` family with a
@@ -3875,6 +3877,48 @@ sibling rather than an extension of the GitHub one for the same reason.
     temp file created `wx`, given the manifest's own owner, group and mode, and renamed over it), so no reader
     sees a truncated one and a pin under `sudo` does not hand the worker's manifest to root; a pin that cannot
     keep the owner is refused.
+  - **Bounded passes, in laps** (issue #978). One pass stops at `SANDBOX_PASS_BUDGET_MS` (20 s of wall time from its
+    start, its rests included) or `SANDBOX_PASS_MAX_REAPS` (50 removals made; a removal that FAILED does not count,
+    though its time does), whichever comes first, and rests after each entry that asked a runtime or deleted something
+    for as long as that entry took, clamped to `SANDBOX_REST_MIN_MS` (100 ms) and `SANDBOX_REST_MAX_MS` (10 s), in
+    slices of `SANDBOX_REST_POLL_MS` (250 ms) that wake when the pass is told to stop. A held run that asked its
+    runtime rests too; a run inside its window asks nothing and does not. The budget is looked at ONLY at a loop
+    boundary: before each leftover tombstone, before a stray non-directory's unlink, and after an expired run's
+    verdict and before its runtime is asked. Never between that ask, the fresh read, the rename, the read through the
+    tombstone and the delete, so every race guard above is exactly what it was, and a budget spent during a delete
+    lets that delete finish. Every pass visits at least one entry before the budget may stop it.
+    **A LAP** walks the leftover tombstones, then the runs, then each runtime's networks, each in name order. A pass
+    the budget stops keeps its place (the entry it stopped at, in the reaper; the next candidate network, in each
+    runtime's sweeper; the runtime, in the watch's `combineSandboxNetworkSweepers` lap), and the next pass resumes
+    there and skips the loops this lap has finished. So an entry the pass HELD (a run its runtime reports open or
+    did not answer for, a tombstone or network that will not go) is visited once a lap and cannot starve the entries
+    after it, and since every pass moves the lap on, a lap always ends. A pass that ends without `more` for any
+    reason but a stop (the lap's end, or a fault: the root or the runtimes could not be read) starts a NEW lap at
+    the next pass, so no fault leaves a stale place to resume and what appeared meanwhile is reached by that next
+    sweep. Each lap is numbered (`lapId`, handed to the network sweep): a runtime's place from another lap, or after
+    its own failed `network ls`, is dropped and that runtime starts from its top; and a sweeper whose pace says stop
+    after its last candidate says `stop: true`, so the combined sweep stops there with its lap at the next runtime.
+    Spent in the leftover tombstones, the pass returns at once (`clearTombstone` never deletes a live pin); spent in
+    the runs, the held pinned tombstones are still retried, and the network sweep waits until the runs are finished,
+    keyed on that pass's own listing. A pass that resumes past the runs still lists the root and asks which
+    sandboxes run, because the network sweep keys on both.
+    `reapSandboxes` resolves `{ more, reaped, held, ms, restedMs, slowestCheckMs }` (`stopped: true` added for a pass
+    told to stop, which never sets `more`): `reaped` counts the `reaped_sandbox` lines, `held` the runs and tombstones
+    it kept for a reason (a run with a sandbox open on it among them), `slowestCheckMs` the slowest re-ask of a run's
+    runtime before its rename (the one reading that sees a loaded VM), and `more` is true ONLY while the lap is
+    unfinished. **ONE PASS AT A TIME**: boot, the timer and the follow-ups share one closure, and a call while a pass
+    runs answers `{ busy: true }` and touches nothing, which the leftover sweep's rule for this pid's own tombstones
+    relies on. **Follow-up passes** (`makeSweepFollowUps`): a pass whose result says `more` arms one `.unref()`'d
+    timer, `SANDBOX_FOLLOWUP_DELAY_MS` (60 s from when that result is handed over: the end of the pass, or for the
+    boot pass once the worker takes jobs), and each follow-up hands its own result back, so passes repeat until the
+    one that ends the lap; a pass that ends it, a daily tick's too, clears a follow-up already armed. **A chain of
+    follow-ups is therefore at most one lap**, removing anything or not; what is still held at its end waits for the
+    next lap, at the next boot or periodic sweep. The boot pass is awaited before the worker takes a job and its
+    follow-ups start once it does; the daily tick's sandbox entry hands its result to the same follow-ups, which run
+    outside the periodic sweep's in-flight guard; they run at `PI_SWEEP_INTERVAL_HOURS=0` too, and are closed with
+    the worker (a pass in flight waited for up to 10 s). **One summary line per pass that did anything**,
+    `sandbox_reaper_pass { reaped, held, more, ms, restedMs, slowestCheckMs }`, never on a quiet pass; it is the
+    pass's evidence, not a fault, so it does not wear `sandbox_reaper_skipped` (`OQ-007`).
   - **Opening a run at the end of its window** (issue #446). The sweep holds a run whose sandbox a runtime
     reports open, and an open is in no `ps` until its container starts, so the opener is where the rest of the
     race is closed, in three steps, all in `openSandbox` and so the same for the CLI and the panel.
@@ -3920,9 +3964,10 @@ sibling rather than an extension of the GitHub one for the same reason.
     shell never waits out the ask's 5 s timeout. This look is also what catches the accepted residual under
     Retention above.
   - **The same sweep reclaims the session NETWORK, on the directory's clock** (issue #337). After the
-    directory pass, `reapSandboxes` hands an injected `sweepNetworks` the ids it must keep and a closure that
-    re-reads the retained directories; one sweeper per runtime PRESENT since the worker started (one a blessed
-    venue names, or one any pass found a retained run of; cumulative, so the last run's network is still visited
+    directory pass (one that finished the lap's runs, since issue #978), `reapSandboxes` hands an injected
+    `sweepNetworks` the ids it must keep and a closure that re-reads the retained directories; one sweeper per
+    runtime PRESENT since the worker started (one a blessed venue names, or one any pass found a retained run of;
+    cumulative, so the last run's network is still visited
     after its directory is gone), each listing, inspecting and removing in its own runtime; one failing does not
     stop the other, and each failure is logged with its runtime (`combineSandboxNetworkSweepers`, issue #429). On
     a failed `network rm` only, this run's OWN container in a finished state is removed and the `rm` tried once
@@ -3961,7 +4006,12 @@ sibling rather than an extension of the GitHub one for the same reason.
     can never run. Only `exited` and `dead` free a network; every other state, and anything a future daemon
     adds, is hands off and is SAID, because a container stuck in `created` is invisible to every other
     listing here and to `pi-dispatch sandbox --list`, so without a line nothing on the host would name it.
-    The docker calls are bounded and the loop yields between networks, on
+    The docker calls are bounded and the loop is PACED between networks (issue #978): in name order, after each
+    network it asked the daemon about, and never between the last `stillClear` look and the `rm`, it calls the
+    reaper's `pace`, which rests as long as that network took and answers false once the pass's budget is spent; the
+    sweep then stops with `more: true` when a candidate is left and resumes at that candidate on its next call, and
+    `combineSandboxNetworkSweepers` stops at a runtime that said it and resumes at that runtime (the lap above). With
+    no `pace` the loop yields a turn between networks as it always did, on
     `DES-RETENTION-SWEEPS-ON-A-TIMER`'s finding that this loop runs against BullMQ's 30 s lock. The sweep's
     own failure is one `sandbox_reaper_skipped` line and never aborts the directory pass, which has already
     finished by then, and a `network ls` that does not answer is that same line (`network-list-failed`)
@@ -14980,6 +15030,7 @@ and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` are UNCHANGED, checked: no file shape, wr
 
 | Date | Change |
 |---|---|
+| 2026-11-21 (#978) | **`INT-SANDBOX-CONTRACT` AMENDED**, four places. Retention: each sweep is one lap of bounded passes, so at `PI_SWEEP_INTERVAL_HOURS=0` the boot sweep still finishes its lap in follow-up passes. The leftover tombstones are removed at the start of every lap. NEW sub-bullet **Bounded passes, in laps**: a pass stops at `SANDBOX_PASS_BUDGET_MS` (20 s of wall time, rests included) or `SANDBOX_PASS_MAX_REAPS` (50 removals made, a failed one not counted) and rests after each entry that asked a runtime or deleted for as long as it took (`SANDBOX_REST_MIN_MS` 100 ms to `SANDBOX_REST_MAX_MS` 10 s, in stop-aware `SANDBOX_REST_POLL_MS` slices); the budget is looked at only before a leftover tombstone, before a stray non-directory's unlink, and after an expired run's verdict and before its runtime ask, never inside the stretch from that ask to the delete, and never before a pass has visited one entry; a sweep is one LAP over the leftover tombstones, the runs and each runtime's networks in name order, a stopped pass keeping its place for the next, so a held entry is visited once a lap and cannot starve the rest, and a pass ending without `more` for any reason but a stop (a fault included) starting a new lap, numbered (`lapId`) so a runtime's network place from another lap or after a failed `network ls` is dropped; the result `{ more, reaped, held, ms, restedMs, slowestCheckMs }` with `more` meaning only that the lap is unfinished and `held` counting runs with a sandbox open; one pass at a time (`{ busy: true }`); follow-up passes a minute after a pass that says `more` (`makeSweepFollowUps`, `SANDBOX_FOLLOWUP_DELAY_MS`), so a chain of them is at most one lap, the boot pass still awaited before pickup and its follow-ups started after it; and one `sandbox_reaper_pass` line per pass that did anything. The network sweep: it runs after the lap's runs, in name order, paced between networks by the reaper's `pace` (never between the last `stillClear` look and the `rm`), resuming at its next candidate per runtime, a sweeper whose pace said stop after its last candidate saying `stop: true`, and `combineSandboxNetworkSweepers` takes a lap that resumes at the runtime that stopped (the next one after a `stop`), kept across passes by the runtime watch. Every hold, its token, the keep set, the tombstone and every race guard are UNCHANGED, checked. **`INT-EGRESS-POLICY-CONTRACT` UNCHANGED, checked**: the session network sweep's tokens and removal rules are untouched; only when it runs and how it waits between networks moved. **Code evidence**: worker/src/sandbox-store.mjs -> makeSandboxReaper, SANDBOX_PASS_BUDGET_MS, SANDBOX_PASS_MAX_REAPS, SANDBOX_REST_MIN_MS, SANDBOX_REST_MAX_MS, SANDBOX_REST_POLL_MS; worker/src/sandbox.mjs -> makeSandboxNetworkSweeper, combineSandboxNetworkSweepers, makeSandboxRuntimeWatch; worker/src/retention-sweep.mjs -> makeSweepFollowUps, SANDBOX_FOLLOWUP_DELAY_MS; worker/src/start.mjs -> startWorker. |
 | 2026-11-21 (#994) | **`INT-WATCH-EVENT-CONTRACT` AMENDED**: a watch source whose secret is unset or blank refuses the whole triggers file for `serve` alone, the one command that answers `POST /watch/<source>` and verifies each push with that secret. `serve` asks the receiver's loader for the rule (`verifiesWatchPushes`), which is kept on its config so `reloadTriggers` judges a live edit as its start did: it refuses to start on such a file (exit 2) and keeps its running rules on a reload that adds such a source. `poll` and `watch` load the same file without the rule and judge no source's secret, which neither reads: they start, and take such a source live. All three refused before, so a deployment that added a watch source and forgot its secret lost GitHub polling at the next restart, exit 2 and not restarted. The poller's stand-in for an unset `WEBHOOK_SECRET` no longer decides anything about a watch source, and its sentence goes. Doctor's line names `serve` alone and stays a warning. The push handler's 503 judges by the same predicate: it tested only for an unset or empty value, so a handler built without the start's check took a secret of spaces as a key and answered a push signed with it. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**, the write protocol bullet: `pi-dispatch triggers check` refuses such a source for the receiver alone. **`INT-POLLER-STATUS-KEY` AMENDED**, the `note` sentence: `pi-dispatch status` judges this host's file for the poller resolving `WEBHOOK_SECRET` alone (`judgeDeploymentTriggers`' new `secrets` option), so a watch source's secret that this shell sets and the `.env` lacks no longer leaves the file unjudged; `triggers check` still resolves every secret it asks about. No stored state changes: no file shape, key or job data. **Code evidence**: receiver/src/config.mjs -> loadReceiverConfig, loadTriggers, reloadTriggers; receiver/src/start.mjs -> startReceiver; receiver/src/watch-puller.mjs -> startWatchPuller; receiver/src/watch.mjs -> makeWatchHandler; receiver/src/poller-config.mjs -> pollerLoaderEnv; worker/src/triggers-check.mjs -> checkTriggersText, webhookSecretRefusers; worker/src/triggers-cli.mjs -> judgeDeploymentTriggers; worker/src/poller-facts.mjs -> readPollerFacts; worker/src/doctor.mjs -> watchDoctorChecks; receiver/test/start.test.mjs; receiver/test/poller.test.mjs; receiver/test/watch-puller.test.mjs; receiver/test/watch.test.mjs; worker/test/triggers-check.test.mjs; worker/test/doctor-watch.test.mjs; worker/test/cli-control.test.mjs. |
 | 2026-11-21 (#970) | **`INT-POLLER-STATUS-KEY` AMENDED**: a beat inside a cycle (before each repository's poll, each GitHub request and each family's renewal) once `POLLER_CYCLE_BEAT_MS`, a minute by the injected clock, has passed since the last beat, with the grace as its TTL, so a cycle longer than the grace keeps its record, of many repositories or of one repository's many requests, while each request answers within the grace; and `expected` is one exported rule, `pollerExpected`, for `status` and for Connections, whose "no poller reported" and "poller not known" now follow it rather than the polling cell's own "on": true for `GITHUB_INGEST` `poll` or `both`, false for `webhook`, and only with it unset true where `POLL_REPOS` names repositories, asked by presence so two different lists are no disagreement and none is printed. A heartbeat that exists is drawn in every case, and a kept poller over this host's file that this shell cannot judge is said to have refused this host's file. **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**, the check's environment: a setting or secret this shell sets and a `.env` that is there has no line for is refused, naming it and no value, as a disagreement on whether a secret is set already was, since the services read the `.env`; one the `.env` sets and this shell does not is the `.env`'s, and with no `.env` this shell's settings are the deployment's. **Code evidence**: worker/src/poller-status.mjs -> POLLER_CYCLE_BEAT_MS, pollerExpected; worker/src/poller-facts.mjs -> readPollerFacts, pollReposOf, hostNote; worker/src/triggers-cli.mjs -> secretMarks, judgeDeploymentTriggers; receiver/src/poller.mjs -> startPoller (beatWithin), makeApi; admin/src/connections-view.mjs -> readConnections, pollerExpectedOf; admin/src/console/panels/connections.mjs -> pollerLine. |
 | 2026-11-21 (#968) | **`INT-AUTH-CONNECTIONS-FILE-CONTRACT` CORRECTED**, the random pool sentence on paid extra usage: a row whose `extraUsageCreditMicros` is below the job cap does not refuse a mixed pool's jobs; the draw passes over that row's candidates (`auth-credit-cap-required` is the skip reason), so the pool runs on its API-key candidates, and doctor warns of it. The file's shape and version UNCHANGED, checked. **Code evidence**: worker/src/subscription-runtime.mjs -> check; worker/src/model-selection.mjs -> model_candidate_skipped; worker/src/doctor.mjs -> mixedBillingPoolChecks |
