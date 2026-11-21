@@ -52,6 +52,20 @@ export function pulse({ target = "containerd", stopMs = 10_000, contMs = 3_000 }
 	};
 }
 
+/**
+ * Make the whole daemon slow without stopping it, like a saturated VM: dockerd and containerd each held to a few percent
+ * of one CPU through systemd. Calls still answer, late, and a client that gives up mid-call is seen by a live daemon.
+ */
+export async function throttle({ units = ["docker.service", "containerd.service"], quota = "2%" } = {}) {
+	for (const u of units) await sh("sudo", ["systemctl", "set-property", "--runtime", u, `CPUQuota=${quota}`]);
+	return {
+		isStopped: () => false,
+		async end() {
+			for (const u of units) await sh("sudo", ["systemctl", "set-property", "--runtime", u, "CPUQuota="]);
+		},
+	};
+}
+
 export async function containers(filters = []) {
 	const args = ["ps", "-a", "--no-trunc", "--format", "{{.ID}}\t{{.State}}\t{{.Names}}\t{{.Labels}}\t{{.Command}}"];
 	for (const f of filters) args.push("--filter", f);

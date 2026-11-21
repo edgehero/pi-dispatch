@@ -9786,10 +9786,11 @@ export function cpuReserveChecks(reads, cpuCenti) {
 				: plan.method === "user-systemd"
 					? `the worker sets it when it starts; start or restart it, or run as the worker's account: \`${userQuotaCommand(target)}\``
 					: "the worker writes it when it starts and re-checks it every ten minutes; start or restart the worker";
-		// Issue #978: after doctor removed its own helper's name, a create refused with 125 most likely met another doctor's
-		// helper reading the quota at this moment under the same name (two doctors of one deployment share it).
+		// Issue #978: exit 125 is any refusal by the runtime, and stderr is never read, so the cause is not known here. After
+		// doctor removed its own helper's name, one cause is another doctor of this deployment reading the quota under the
+		// same name at that moment, which is the one an operator can act on; the line names it as a cause, not the cause.
 		if (!read?.ok && plan.method === "helper" && read?.reason === "exit-125") {
-			checks.push({ ok: false, warn: true, label: `${v}: no host CPU reserve across jobs could be confirmed: the quota of ${CGROUP_PARENT} was not readable (exit-125: the helper's name was taken, most likely by another doctor reading the quota at the same time)`, fix: "run doctor again once the other doctor has finished" });
+			checks.push({ ok: false, warn: true, label: `${v}: no host CPU reserve across jobs could be confirmed: the quota of ${CGROUP_PARENT} was not readable (exit-125: the runtime refused the helper, which another doctor reading the quota at the same moment causes)`, fix: `if another doctor was running, run doctor again once it has finished; otherwise ${fixFor(want)}` });
 			continue;
 		}
 		if (!read?.ok) {

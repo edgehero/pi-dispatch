@@ -298,10 +298,12 @@ stayed in `created` for good, so a slow daemon collected them (issue #978). The 
 (`pi-dispatch-cpu-reserve-<8 hex digits>`, labelled `pi.dispatch.helper=cpu-reserve`), so at most one is ever left and
 it is removed before the next try, and the worker waits longer between tries while the daemon stays slow.
 
-Its worker also removes the older helpers itself, once after it starts, the first time it reads the quota back as
-set: only containers that never started, are at least ten minutes old and match the old helper exactly (its command, its one
-mount of `pidispatch.slice`, its flags, and no label beyond its image's), with a plain `docker rm`, which never removes
-a running container. It logs `cpu_reserve_leftovers_removed` with how many it removed.
+Its worker also removes the older helpers itself, after it reads the quota back as set, and again after each later
+read until one pass gets through them all (a pass a slow daemon cuts short is tried again ten minutes later). It takes
+only containers that never started, are at least ten minutes old and match the old helper exactly (its command, its
+one mount of `pidispatch.slice`, its flags, and no label beyond its image's), with a plain `docker rm`, which never
+removes a running container. It logs `cpu_reserve_leftovers_removed` with how many it removed (and once, with
+`complete: false`, if a pass was cut short).
 
 On a host that stays on 5.4.x for now, list them:
 

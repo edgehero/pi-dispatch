@@ -50,7 +50,7 @@
  * helper also runs on a remote cgroupfs daemon); `--cidfile` (blind to the same late create, plus a temp file);
  * `docker create` then `start -a` (twice the calls, on the daemon that is already slow). A timed-out step also
  * ends its attempt, and the next one waits longer (`makeCpuReserve`). The unnamed helpers an older worker left are
- * removed once, by exact fingerprint (`removeLegacyHelpers`).
+ * removed by exact fingerprint (`removeLegacyHelpers`), until one pass over them finishes.
  *
  * NO AGGREGATE `memory.max`. Measured: a parent memory limit makes the KERNEL choose the victim by size, and it killed
  * the innocent 300 MiB job while the one that grew lived (Q6). Admission by the ledger stays the memory bound; an
@@ -340,24 +340,38 @@ const LEGACY_OUTPUT_MAX_BYTES = 4 * 1024 * 1024;
  */
 export const LEGACY_LIST_ARGS = Object.freeze(["ps", "-a", "--filter", "status=created", "--no-trunc", "--format", `{{.ID}}\t{{.Label "${HELPER_LABEL_KEY}"}}\t{{.Command}}`]);
 
-/** One JSON object per container, holding only what the fingerprint reads. */
-const LEGACY_INSPECT_FORMAT = '{"id":{{json .Id}},"image":{{json .Image}},"created":{{json .Created}},"state":{{json .State.Status}},"entrypoint":{{json .Config.Entrypoint}},"cmd":{{json .Config.Cmd}},"user":{{json .Config.User}},"labels":{{json .Config.Labels}},"parent":{{json .HostConfig.CgroupParent}},"binds":{{json .HostConfig.Binds}},"mounts":{{json .HostConfig.Mounts}},"autoRemove":{{json .HostConfig.AutoRemove}},"network":{{json .HostConfig.NetworkMode}},"readOnly":{{json .HostConfig.ReadonlyRootfs}}}';
+/**
+ * One JSON object per container, holding only what the fingerprint reads. Every value goes through `index`, never a
+ * dotted path: the CLI evaluates a template that names a field its typed struct lacks (`.Id`) against the raw JSON with
+ * missing keys as errors, and the daemon omits a key it has nothing for (`HostConfig.Mounts` without a `--mount`), so
+ * `{{json .HostConfig.Mounts}}` refused every container (Docker 28.0.4, measured: exit 1, no output). `index` answers
+ * an absent key with null. `mounts` is the top-level list, always there; `hostMounts` the `--mount` list, absent here.
+ */
+export const LEGACY_INSPECT_FORMAT = '{"id":{{json (index . "Id")}},"image":{{json (index . "Image")}},"created":{{json (index . "Created")}},"state":{{json (index . "State" "Status")}},"entrypoint":{{json (index . "Config" "Entrypoint")}},"cmd":{{json (index . "Config" "Cmd")}},"user":{{json (index . "Config" "User")}},"labels":{{json (index . "Config" "Labels")}},"parent":{{json (index . "HostConfig" "CgroupParent")}},"binds":{{json (index . "HostConfig" "Binds")}},"hostMounts":{{json (index . "HostConfig" "Mounts")}},"autoRemove":{{json (index . "HostConfig" "AutoRemove")}},"network":{{json (index . "HostConfig" "NetworkMode")}},"readOnly":{{json (index . "HostConfig" "ReadonlyRootfs")}},"mounts":{{json (index . "Mounts")}}}';
+
+/** An image's own labels, null when it has none (an image config may omit the key), the same way. */
+export const LEGACY_IMAGE_LABELS_FORMAT = '{{json (index . "Config" "Labels")}}';
 
 const LEGACY_WRITE_RE = /^echo "(?:max|\d+) 100000" > \/p\/cpu\.max$/;
-const LEGACY_BIND_RE = new RegExp(`^${HELPER_PARENT_PATH.replace(/\./g, "\\.")}:/p(?::ro)?$`);
+// The read mounted the parent read-only and the write read-write, and nothing else: each role's one bind, exactly.
+const LEGACY_BINDS = Object.freeze({ read: `${HELPER_PARENT_PATH}:/p:ro`, write: `${HELPER_PARENT_PATH}:/p` });
 
 /**
- * Whether one inspected container is a helper an older worker left (PURE): EXACTLY what `helperArgs` made before it had
- * a name. `cat` of `/p/cpu.max`, or `sh -c` echoing a quota line into it; under the parent with that one bind and no
- * other mount; uid 0, auto-removed, no network, a read-only root; never started; no label beyond what its image gave it
- * (`imageLabels`, the image's own, `undefined` when unread, which matches nothing); and at least
- * `LEGACY_HELPER_MIN_AGE_MS` old by `nowMs`, so a helper an older worker on the same daemon is starting now is left.
+ * Whether one inspected container (a `LEGACY_INSPECT_FORMAT` row) is a helper an older worker left (PURE): EXACTLY what
+ * `helperArgs` made before it had a name. `cat` of `/p/cpu.max` with the parent bound read-only, or `sh -c` echoing a
+ * quota line into it with the parent bound read-write; that one bind and no other mount (the top-level list holds it
+ * alone, as a bind of the parent at `/p` with the role's RW); under the parent; uid 0, auto-removed, no network, a
+ * read-only root; never started; no label beyond what its image gave it (`imageLabels`, the image's own, `undefined`
+ * when unread, which matches nothing); and at least `LEGACY_HELPER_MIN_AGE_MS` old by `nowMs`, so a helper an older
+ * worker on the same daemon is starting now is left.
  */
 export function isLegacyHelper(c, { imageLabels, nowMs }) {
 	const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
 	const reads = same(c?.entrypoint, ["cat"]) && same(c?.cmd, ["/p/cpu.max"]);
 	const writes = same(c?.entrypoint, ["sh"]) && Array.isArray(c?.cmd) && c.cmd.length === 2 && c.cmd[0] === "-c" && LEGACY_WRITE_RE.test(String(c.cmd[1]));
-	const bind = Array.isArray(c?.binds) && c.binds.length === 1 && LEGACY_BIND_RE.test(String(c.binds[0])) && (c.mounts === null || c.mounts === undefined || (Array.isArray(c.mounts) && c.mounts.length === 0));
+	const mount = Array.isArray(c?.mounts) && c.mounts.length === 1 ? c.mounts[0] : null;
+	const noMountFlag = c?.hostMounts === null || c?.hostMounts === undefined || (Array.isArray(c.hostMounts) && c.hostMounts.length === 0);
+	const bind = same(c?.binds, [writes ? LEGACY_BINDS.write : LEGACY_BINDS.read]) && noMountFlag && mount?.Type === "bind" && mount.Source === HELPER_PARENT_PATH && mount.Destination === "/p" && mount.RW === writes;
 	const labels = (a, b) => {
 		const x = a ?? {};
 		const y = b ?? {};
@@ -370,22 +384,28 @@ export function isLegacyHelper(c, { imageLabels, nowMs }) {
 }
 
 /**
- * Remove the unnamed helpers a worker before issue #978 left in `created` (a CLI killed between create and start; the
- * header), once per process per helper venue, after a read that held (a daemon that answers). The listing keeps the
- * unlabelled `created` containers whose command names `/p/cpu.max`; each chunk of `LEGACY_HELPER_CHUNK` is inspected,
- * every image met is inspected once for its own labels, and only an exact fingerprint (`isLegacyHelper`) is removed,
- * with a plain `rm`: never `-f`, so one that started meanwhile is refused. Every call is bounded, and a timeout ends the
- * pass. `--filter volume=` is not used to narrow the listing: how it matches a bind mount was never measured.
- * Answers `{ listed, removed, failed }`: `listed` false when the listing did not answer, `failed` the fingerprints
- * still there. `run` is `execDockerBounded`'s shape, and is passed `maxBuffer` for the two long outputs.
+ * One pass over the unnamed helpers a worker before issue #978 left in `created` (a CLI killed between create and
+ * start; the header), run after a read that held (a daemon that answers). The listing keeps the unlabelled `created`
+ * containers whose command names `/p/cpu.max`; each chunk of `LEGACY_HELPER_CHUNK` is inspected, every image met is
+ * inspected once for its own labels, and only an exact fingerprint (`isLegacyHelper`) is removed, with a plain `rm`:
+ * never `-f`, so one that started meanwhile is refused. Every call is bounded. `--filter volume=` is not used to narrow
+ * the listing: how it matches a bind mount was never measured.
+ * Answers `{ complete, reason, removed, failed }`. A pass is cut short, `complete: false` with `reason`
+ * `<list|inspect|image|rm>-<failure>`, by a listing that failed, any step that timed out, or an inspect that answered
+ * without one row of its chunk (`inspect-no-rows` when it exited 0): it established nothing about what is left, so the
+ * caller tries again. `failed` counts fingerprints the `rm` left. `run` is `execDockerBounded`'s shape, and is passed
+ * `maxBuffer` for the two long outputs.
  */
 export async function removeLegacyHelpers({ run, bin = "docker", now = () => Date.now(), timeoutMs = RESERVE_STEP_TIMEOUT_MS }) {
 	const call = (args, extra = {}) =>
 		Promise.resolve()
 			.then(() => run(bin, args, { timeoutMs, ...extra }))
 			.catch((error) => ({ code: null, stdout: "", error }));
+	let removed = 0;
+	let failed = 0;
+	const cut = (step, result) => ({ complete: false, reason: `${step}-${stepFailure(result, bin) ?? "no-rows"}`, removed, failed });
 	const listing = await call(LEGACY_LIST_ARGS, { maxBuffer: LEGACY_OUTPUT_MAX_BYTES });
-	if (stepFailure(listing, bin)) return { listed: false, removed: 0, failed: 0 };
+	if (stepFailure(listing, bin)) return cut("list", listing);
 	const candidates = [];
 	for (const line of String(listing.stdout ?? "").split("\n")) {
 		const [id, label, ...command] = line.split("\t");
@@ -393,13 +413,11 @@ export async function removeLegacyHelpers({ run, bin = "docker", now = () => Dat
 		if (/^[0-9a-f]{64}$/.test(id) && label === "" && command.join("\t").includes("/p/cpu.max")) candidates.push(id);
 	}
 	const imageLabels = new Map();
-	let removed = 0;
-	let failed = 0;
 	for (let i = 0; i < candidates.length; i += LEGACY_HELPER_CHUNK) {
 		const chunk = candidates.slice(i, i + LEGACY_HELPER_CHUNK);
 		// Exit 1 still prints the ones found when another went away meanwhile, so the lines are read whatever the code.
 		const inspected = await call(["container", "inspect", "--format", LEGACY_INSPECT_FORMAT, ...chunk], { maxBuffer: LEGACY_OUTPUT_MAX_BYTES });
-		if (stepFailure(inspected, bin) === "timeout") break;
+		if (stepFailure(inspected, bin) === "timeout") return cut("inspect", inspected);
 		const rows = [];
 		for (const line of String(inspected.stdout ?? "").split("\n")) {
 			try {
@@ -409,10 +427,12 @@ export async function removeLegacyHelpers({ run, bin = "docker", now = () => Dat
 				// not a row
 			}
 		}
+		// No row at all is a refusal (a template the CLI would not run, a daemon error), not a chunk with nothing in it.
+		if (rows.length === 0) return cut("inspect", inspected);
 		for (const image of new Set(rows.map((r) => r.image))) {
 			if (imageLabels.has(image) || typeof image !== "string" || !/^sha256:[0-9a-f]{64}$/.test(image)) continue;
-			const read = await call(["image", "inspect", "--format", "{{json .Config.Labels}}", image]);
-			if (stepFailure(read, bin) === "timeout") return { listed: true, removed, failed };
+			const read = await call(["image", "inspect", "--format", LEGACY_IMAGE_LABELS_FORMAT, image]);
+			if (stepFailure(read, bin) === "timeout") return cut("image", read);
 			let labels;
 			try {
 				labels = read.code === 0 ? JSON.parse(String(read.stdout).trim()) : undefined;
@@ -429,9 +449,9 @@ export async function removeLegacyHelpers({ run, bin = "docker", now = () => Dat
 		const n = rm.code === 0 ? doomed.length : doomed.filter((id) => gone.has(id)).length;
 		removed += n;
 		failed += doomed.length - n;
-		if (stepFailure(rm, bin) === "timeout") break;
+		if (stepFailure(rm, bin) === "timeout") return cut("rm", rm);
 	}
-	return { listed: true, removed, failed };
+	return { complete: true, reason: null, removed, failed };
 }
 
 /**
@@ -450,8 +470,8 @@ export async function removeLegacyHelpers({ run, bin = "docker", now = () => Dat
  * starts with a read, which finds it. And the next attempt waits longer: a minute after the first timeout, doubling to
  * `RESERVE_RECHECK_MS` (60, 120, 240, 480, then 600 s), until a read holds. Only a timeout backs off: any other failure
  * keeps `RESERVE_RETRY_MS`, because the runtime answered and an operator's fix is then seen within a minute. A helper
- * venue's steps run through `guardHelperRun` under `name`, and after its first read that holds this process removes
- * what an older worker left there, once (`removeLegacyHelpers`, logged `cpu_reserve_leftovers_removed`).
+ * venue's steps run through `guardHelperRun` under `name`, and after a read that holds this process removes what an
+ * older worker left there (`removeLegacyHelpers`, logged `cpu_reserve_leftovers_removed`), until one pass finishes.
  *
  * States (`status`): `held` (the quota read back is the one wanted), `unset` / `differs` (read back, not as wanted:
  * on `system-systemd` the operator's command is the fix), `unreadable`, `unmanaged` (no method here, `why`),
@@ -477,9 +497,12 @@ export function failOpenSaid(state) {
 export function makeCpuReserve({ run, image, name, now = () => Date.now(), log = () => {} }) {
 	const states = new Map();
 	const said = new Map();
-	// Per helper venue: its guarded runner (the name starts dirty) and whether its older leftovers were listed yet.
+	// Per helper venue: its guarded runner (the name starts dirty), and the older leftovers: whether a pass over them
+	// finished, how many this process removed, and whether a pass cut short was said.
 	const helperRuns = new Map();
-	const leftoversListed = new Set();
+	const leftoversDone = new Set();
+	const leftoversRemoved = new Map();
+	const leftoversCutSaid = new Set();
 	let running = false;
 
 	const record = (venue, state) => {
@@ -497,12 +520,21 @@ export function makeCpuReserve({ run, image, name, now = () => Date.now(), log =
 		return helperRuns.get(venue);
 	};
 
+	// Until one pass finishes, then never again in this process. A pass cut short is said once, and the next read that
+	// holds starts another; `removed` is this process's total, `failed` what the last pass left.
 	const leftovers = async (plan) => {
-		if (plan.method !== "helper" || leftoversListed.has(plan.venue)) return;
-		const swept = await removeLegacyHelpers({ run, bin: plan.venue === "podman" ? "podman" : "docker", now });
-		// Once per process, counted from a listing that answered: a slow moment does not spend it.
-		if (swept.listed) leftoversListed.add(plan.venue);
-		if (swept.removed + swept.failed > 0) log("cpu_reserve_leftovers_removed", { venue: plan.venue, removed: swept.removed, failed: swept.failed });
+		const { venue } = plan;
+		if (plan.method !== "helper" || leftoversDone.has(venue)) return;
+		const pass = await removeLegacyHelpers({ run, bin: venue === "podman" ? "podman" : "docker", now });
+		const removed = (leftoversRemoved.get(venue) ?? 0) + pass.removed;
+		leftoversRemoved.set(venue, removed);
+		if (pass.complete) {
+			leftoversDone.add(venue);
+			if (removed + pass.failed > 0) log("cpu_reserve_leftovers_removed", { venue, removed, failed: pass.failed, complete: true });
+		} else if (!leftoversCutSaid.has(venue)) {
+			leftoversCutSaid.add(venue);
+			log("cpu_reserve_leftovers_removed", { venue, removed, failed: pass.failed, complete: false, reason: pass.reason });
+		}
 	};
 
 	const one = async (plan, cpuCenti) => {

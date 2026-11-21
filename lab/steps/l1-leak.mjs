@@ -3,7 +3,7 @@
 import { existsSync, readFileSync } from "node:fs";
 import { execDockerBounded } from "../../worker/src/backend-local.mjs";
 import { helperName, makeCpuReserve, reservePlan } from "../../worker/src/cpu-reserve.mjs";
-import { IMAGE, containers, pulse, sh, sleep, write } from "../lib.mjs";
+import { IMAGE, containers, pulse, sh, sleep, throttle, write } from "../lib.mjs";
 
 // 5.4.2's helperArgs, verbatim in effect.
 export function oldHelperArgs(image, { write: w = false, line = "" } = {}) {
@@ -47,6 +47,8 @@ function sampler() {
 	};
 }
 
+const slow = (target) => (target === "throttle" ? throttle() : pulse({ target, stopMs: 10_000, contMs: 3_000 }));
+
 async function phase(target) {
 	// --- fixed: the real makeCpuReserve, the real execDockerBounded with its bound cut to STEP_MS.
 	const events = [];
@@ -56,7 +58,7 @@ async function phase(target) {
 	const plan = reservePlan({ venue: "local", facts: { cgroupDriver: "cgroupfs", cgroupVersion: "v2" }, endpointLocal: true, platform: "linux" });
 
 	const s1 = sampler();
-	const p1 = pulse({ target, stopMs: 10_000, contMs: 3_000 });
+	const p1 = await slow(target);
 	const t1 = Date.now();
 	let attempts = 0;
 	while (Date.now() - t1 < PHASE_MS) {
@@ -93,7 +95,7 @@ async function phase(target) {
 
 	// --- baseline: 5.4.2's read, write, read back, anonymous, killed at the same bound.
 	const before = (await containers(["status=created"])).filter(isHelperCmd).length;
-	const p2 = pulse({ target, stopMs: 10_000, contMs: 3_000 });
+	const p2 = await slow(target);
 	const t2 = Date.now();
 	const base = { runs: 0, timeouts: 0, ok: 0, other: {} };
 	while (Date.now() - t2 < PHASE_MS) {
@@ -115,12 +117,12 @@ async function phase(target) {
 }
 
 const modes = {};
-for (const target of ["dockerd", "containerd"]) modes[target] = await phase(target);
+for (const target of ["throttle", "dockerd", "containerd"]) modes[target] = await phase(target);
 const ok = (m) => m.fixed.maxNamedAtOnce <= 1 && m.fixed.anonCreatedByFixed === 0 && m.fixed.namedAfterHealthy === 0 && m.fixed.healthyStatus.includes("held");
 
 write("l1-leak", {
 	summary: {
-		pass: ok(modes.dockerd) && ok(modes.containerd) && modes.dockerd.baseline.createdLeftovers > 0,
+		pass: Object.values(modes).every(ok) && Object.values(modes).some((m) => m.baseline.createdLeftovers > 0),
 		...Object.fromEntries(Object.entries(modes).map(([k, m]) => [k, { fixedMaxNamedAtOnce: m.fixed.maxNamedAtOnce, fixedAnon: m.fixed.anonCreatedByFixed, fixedNamedAfterHealthy: m.fixed.namedAfterHealthy, fixedReasons: m.fixed.reasons, retryMsSeen: m.fixed.retryMsSeen, baselineRuns: m.baseline.runs, baselineTimeouts: m.baseline.timeouts, baselineLeftovers: m.baseline.createdLeftovers }])),
 	},
 	parent,

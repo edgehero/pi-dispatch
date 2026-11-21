@@ -4,6 +4,7 @@ import { mkdtempSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execDockerBounded } from "../../worker/src/backend-local.mjs";
+import * as reserveModule from "../../worker/src/cpu-reserve.mjs";
 import { LEGACY_LIST_ARGS, helperName, isLegacyHelper, makeCpuReserve, removeLegacyHelpers, reservePlan } from "../../worker/src/cpu-reserve.mjs";
 import { IMAGE, containers, sh, write } from "../lib.mjs";
 
@@ -59,7 +60,7 @@ const decoyIds = new Set(decoys.map((d) => d.id));
 const l1Leftovers = l1.filter((c) => !decoyIds.has(c.id) && !fingerprints.some((f) => f.id === c.id)).map((c) => c.id);
 
 // Field by field: what the listing and inspect print for each fingerprint, and which part of the match fails.
-const FORMAT = '{"id":{{json .Id}},"image":{{json .Image}},"created":{{json .Created}},"state":{{json .State.Status}},"entrypoint":{{json .Config.Entrypoint}},"cmd":{{json .Config.Cmd}},"user":{{json .Config.User}},"labels":{{json .Config.Labels}},"parent":{{json .HostConfig.CgroupParent}},"binds":{{json .HostConfig.Binds}},"mounts":{{json .HostConfig.Mounts}},"autoRemove":{{json .HostConfig.AutoRemove}},"network":{{json .HostConfig.NetworkMode}},"readOnly":{{json .HostConfig.ReadonlyRootfs}}}';
+const FORMAT = reserveModule.LEGACY_INSPECT_FORMAT ?? '{"id":{{json .Id}},"image":{{json .Image}},"created":{{json .Created}},"state":{{json .State.Status}},"entrypoint":{{json .Config.Entrypoint}},"cmd":{{json .Config.Cmd}},"user":{{json .Config.User}},"labels":{{json .Config.Labels}},"parent":{{json .HostConfig.CgroupParent}},"binds":{{json .HostConfig.Binds}},"mounts":{{json .HostConfig.Mounts}},"autoRemove":{{json .HostConfig.AutoRemove}},"network":{{json .HostConfig.NetworkMode}},"readOnly":{{json .HostConfig.ReadonlyRootfs}}}';
 const listing = await sh("docker", LEGACY_LIST_ARGS);
 const diag = { listCode: listing.code, listStderr: listing.stderr.trim().slice(0, 300), listLines: listing.stdout.split("\n").filter((l) => l.includes("/p/cpu.max")).map((l) => JSON.stringify(l)), rows: [] };
 for (const f of fingerprints) {

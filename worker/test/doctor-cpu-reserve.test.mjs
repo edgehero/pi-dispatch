@@ -90,7 +90,7 @@ test("doctorCpuReserve: reads (never writes) per answered venue, through the wor
 	assert.equal(calls.length, 0);
 });
 
-test("issue #978: doctor's helper runs under doctor's own name for the declared worker, is removed before its read and again after a timeout, and a 125 says another doctor is reading", async () => {
+test("issue #978: doctor's helper runs under doctor's own name for the declared worker, is removed before its read and again after a timeout, and a 125 names another doctor as a cause", async () => {
 	const name = helperName("box-1", { doctor: true });
 	assert.equal(name, "pi-dispatch-cpu-reserve-doctor-96fb257c");
 	assert.notEqual(name, helperName("box-1"), "never the worker's, so a doctor never removes the worker's helper mid-step");
@@ -107,14 +107,15 @@ test("issue #978: doctor's helper runs under doctor's own name for the declared 
 		["docker", "run", "--rm", "--name", name, 15_000],
 		["docker", "rm", "-f", name, 15_000],
 	]);
-	// The name was taken after doctor's own rm: another doctor of this deployment is reading under it right now.
+	// 125 after doctor's own rm: any refusal by the runtime (stderr is never read), one of which is another doctor of this
+	// deployment reading under the same name at that moment. Named as a cause, not as the cause.
 	const taken = async (bin, args) => (args[0] === "run" ? { code: 125, stdout: "" } : { code: 0, stdout: "" });
 	const [busy] = await doctorCpuReserve({ daemon: docker, run: taken, image: "pi-job:pinned", imagePresent: true, platform: "darwin", workerName: "box-1" });
 	assert.deepEqual(busy.read, { ok: false, reason: "exit-125" });
 	const [said] = line([busy], 1300);
 	assert.equal(said.warn, true);
-	assert.equal(said.label, "local: no host CPU reserve across jobs could be confirmed: the quota of pidispatch.slice was not readable (exit-125: the helper's name was taken, most likely by another doctor reading the quota at the same time)");
-	assert.equal(said.fix, "run doctor again once the other doctor has finished");
+	assert.equal(said.label, "local: no host CPU reserve across jobs could be confirmed: the quota of pidispatch.slice was not readable (exit-125: the runtime refused the helper, which another doctor reading the quota at the same moment causes)");
+	assert.equal(said.fix, "if another doctor was running, run doctor again once it has finished; otherwise the worker writes it when it starts and re-checks it every ten minutes; start or restart the worker");
 	// A systemctl read that exits 125 is no helper's name, and keeps the plain line.
 	const [plain] = line([{ plan: plan("local", "system-systemd"), read: { ok: false, reason: "exit-125" } }], 300);
 	assert.match(plain.label, /was not readable \(exit-125\)$/);
