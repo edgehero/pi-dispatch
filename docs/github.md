@@ -124,7 +124,7 @@ Failed jobs, attempts awaiting retry, recoveries, replicas and runs parked for i
 A successful final retry of the original job remains eligible. Posting is
 best-effort; an unavailable forge or a process exit can lose it. Missing receipts, including those on older jobs,
 remain unknown. The worker neither reconstructs them from agent reports nor repeats a paid job to obtain one.
-See [the exact protocol](../specs/interfaces.md#int-forge-terminal-receipt) and [upgrade notes](upgrading.md#unreleased-completed-label-job-receipts).
+See [the exact protocol](../specs/interfaces.md#int-forge-terminal-receipt) and [upgrade notes](upgrading.md#completed-label-job-receipts-920).
 
 ## When a delivery fails
 

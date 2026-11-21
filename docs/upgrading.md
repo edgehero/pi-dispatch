@@ -388,15 +388,17 @@ as `subscription_auth_hold`. See [subscription renewal](subscription-auth.md#adm
 
 Release numbers come from the git tags.
 
-### Unreleased: completed label-job receipts
+### 5.4.2
+
+#### Completed label-job receipts (#920)
 
 Workers now post a fixed scheduling-only receipt after BullMQ confirms an original GitHub polling label job
-completed with exit 0, even with no artifacts. Upgrade the worker to produce these comments. Existing comments,
+completed with exit 0, even with no artifacts. Upgrade the worker to 5.4.2 to produce these comments. Existing comments,
 run records, job data and queue keys are unchanged; no migration, backup path or older-state detector is needed.
 Older jobs without a receipt remain unknown and are not automatically backfilled. Consumers must continue to
 require independent task verification and existing authority. See [GitHub completion receipts](github.md#completion-receipts-for-polled-label-jobs).
 
-### Unreleased: append-file source hashes
+#### Append-file source hashes (#954)
 
 | Stored state | What changes and how to move it |
 |---|---|
@@ -406,27 +408,27 @@ require independent task verification and existing authority. See [GitHub comple
 See [the global overlay](global-pi-overlay.md#what-a-run-loaded-and-where-to-read-it) and
 [the Loaded card](console.md#what-a-run-loaded).
 
-### Unreleased: local close-actor grants
+#### Local close-actor grants (#951)
 
 | Stored state | What changes and how to move it |
 |---|---|
-| Trigger `on.closeActors`, trigger version 10 | Optional exact actor grant for GitHub local close commands. Upgrade every worker, receiver and console before adding it. Older readers hold version 10 instead of silently dropping the grant. Configurations without it retain their existing minimum version. Changing or removing it invalidates pending local-event work through the existing complete-definition digest. |
+| Trigger `on.closeActors`, trigger version 10 | Optional exact actor grant for GitHub local close commands. Upgrade every worker, receiver and console to 5.4.2 before adding it. Older readers hold version 10 instead of silently dropping the grant. Configurations without it retain their existing minimum version. Changing or removing it invalidates pending local-event work through the existing complete-definition digest. |
 | Local-event state and queued jobs | No shape, key, TTL, receipt or job-data version changes. No migration or older-state detector is needed: a listener without a grant remains a supported permission-based policy, not obsolete state. Before rollback, remove the grant with an upgraded writer and settle its pending work; restore a backup only if losing later edits is intended. |
 
 See [local event commands](triggers.md#a-forge-event-running-a-local-command). A grant admits the named actor
 only to its configured local close command; ordinary forge close jobs keep their existing permission gate.
 
-### Unreleased: explicit auxiliary model routes
+#### Explicit auxiliary model routes (#949)
 
 | Stored state | What changes and how to move it |
 |---|---|
-| Trigger `run.auxiliaryModels`, trigger version 9 | Optional, hand-authored finite model grant requiring explicit `models` and positive `maxCostUsd`. Move all workers, receivers and consoles first, then author the grant. Older readers hold version 9 instead of silently dropping it. Files without the field retain their existing version. |
+| Trigger `run.auxiliaryModels`, trigger version 9 | Optional, hand-authored finite model grant requiring explicit `models` and positive `maxCostUsd`. Move all workers, receivers and consoles to 5.4.2 first, then author the grant. Older readers hold version 9 instead of silently dropping it. Files without the field retain their existing version. |
 | Queue job `auxiliaryModels`, job-data version 11 | Every supported producer and rerun preserves the grant. An old worker holds the new version; a new worker refuses a producer that dropped an authored grant. Existing jobs without it keep their behavior. No migration or older-state detector is needed: absence is still a current supported policy, not an obsolete representation. |
 | Container inputs and accounting | Existing `PI_ALLOWED_MODELS`, subscription snapshots and cost guards carry the selected root plus auxiliary routes. No new image wire contract, ledger, backup path or provider credential store is introduced. Images still need the ordinary model-policy, cost-cap and subscription-auth capabilities for the routes requested. |
 
-### Unreleased: Claude adapter 0.3.11 and Opus quota admission
+#### Claude adapter 0.3.11 and Opus quota admission (#948)
 
-Upgrade the worker and job image together before selecting `pi-anthropic-oauth@0.3.11`. Stage the exact
+Upgrade the worker and job image together to 5.4.2 before selecting `pi-anthropic-oauth@0.3.11`. Stage the exact
 package, then update the connection’s adapter, active staged root and digest and authenticate it as described
 in [subscription authentication](subscription-auth.md#claude-community-compatibility). Old workers and images
 refuse the new adapter identifier. The existing 0.3.6 and secondary profiles retain their approved receipt
