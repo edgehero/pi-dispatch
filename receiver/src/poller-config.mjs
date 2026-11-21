@@ -69,12 +69,7 @@ const POLL_CATCHUP_DEFAULT_MINUTES = 60;
  * the auth source is `app`.
  */
 export function loadPollerConfig(env = process.env, { readFile = readFileSync, fileExists = existsSync } = {}) {
-	// A present WEBHOOK_SECRET is passed through untouched (a deployment may run serve AND poll from
-	// one env file); only its ABSENCE is papered over, and only for the duration of this call.
-	const base = loadReceiverConfig(
-		env.WEBHOOK_SECRET ? env : { ...env, WEBHOOK_SECRET: PLACEHOLDER_SECRET },
-		{ readFile, fileExists },
-	);
+	const base = loadReceiverConfig(pollerLoaderEnv(env), { readFile, fileExists });
 
 	// Issue #879: an operator who wrote GITHUB_INGEST=webhook said the webhook alone carries GitHub here, so a poller
 	// started anyway (an old unit, a copied command) would enqueue every event a second time under its own ids, and
@@ -106,6 +101,21 @@ export function loadPollerConfig(env = process.env, { readFile = readFileSync, f
 		// same window -- a pure-polling deployment loses deliveries to a stopped process just as surely.
 		identityRetryWindowMs: base.identityRetryWindowMs,
 	};
+}
+
+/**
+ * The environment the poller's triggers file is judged under. A present WEBHOOK_SECRET is passed through untouched (a
+ * deployment may run serve AND poll from one env file); only its ABSENCE is papered over, for the loader's call alone.
+ *
+ * Exported for the poller's live follow of the file (issue #947), which must judge every later text under exactly the
+ * environment the boot load judged the first: the triggers loader reads the environment for one thing besides the
+ * file's path, a watch source's `secretEnv`, and a source naming WEBHOOK_SECRET there is satisfied by the placeholder
+ * at boot. Judged under the bare environment instead, every edit to such a file would be refused ("a configured source
+ * secret is missing") and the poller would run its boot copy forever while saying the file is invalid. The placeholder
+ * still goes nowhere else: the follow hands this environment only to the triggers loader.
+ */
+export function pollerLoaderEnv(env) {
+	return env.WEBHOOK_SECRET ? env : { ...env, WEBHOOK_SECRET: PLACEHOLDER_SECRET };
 }
 
 /**

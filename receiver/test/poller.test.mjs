@@ -7,7 +7,9 @@ import { loadReceiverConfig } from "../src/config.mjs";
 import { loadPollerConfig } from "../src/poller-config.mjs";
 import { CATCH_UP_CAP_MINUTES, CURSOR_TTL_SECONDS, cancellableSleep, startPoller as startPollerReal } from "../src/poller.mjs";
 import { FORGE_JOB_RETENTION_S } from "@edgehero/pi-dispatch/retention";
-import { TRIGGERS_FILE_VERSION } from "@edgehero/pi-dispatch/triggers";
+import { TRIGGERS_FILE_VERSION, parseTriggers } from "@edgehero/pi-dispatch/triggers";
+import { makeCheckMergePolicy, mergePolicyDigest } from "@edgehero/pi-dispatch/merge-policy";
+import { enqueueGitHubJob } from "@edgehero/pi-dispatch/queue";
 
 // Issue #464 (gate round 3): never this host's Valkey. Every start here is judged as answering, unless a test judges it.
 const startPoller = (env, deps = {}) => startPollerReal(env, { judgeValkey: async () => {}, ...deps });
@@ -205,9 +207,9 @@ function fakeRedis({ ttlFailures = 0, clock = { ms: NOW } } = {}) {
  * with the fake Redis so its TTLs count down with the sleeps (issue #880), and with a second runPoller to
  * play a restart. `nap(ms, n)` says how far the clock moves in cycle n's wait: by default the whole wait,
  * a part of it to stop the poller in the middle of it, more than it for a host that slept. `tokenFn`
- * overrides the mint.
+ * overrides the mint, and `selfIdFn` the boot's identity lookup (issue #947 edits the file while it runs).
  */
-async function runPoller({ env = { POLL_REPOS: "o/r" }, cycles = 1, routes = [], clock = { ms: NOW }, redis = fakeRedis({ clock }), selfId = SELF, fsDeps = FS, queueFn: queueFnOver, localEventStore, nap = (ms) => ms, tokenFn = async () => "poll-token" } = {}) {
+async function runPoller({ env = { POLL_REPOS: "o/r" }, cycles = 1, routes = [], clock = { ms: NOW }, redis = fakeRedis({ clock }), selfId = SELF, selfIdFn = async () => selfId, fsDeps = FS, queueFn: queueFnOver, localEventStore, nap = (ms) => ms, tokenFn = async () => "poll-token" } = {}) {
 	const queued = [];
 	const out = [];
 	const sleeps = [];
@@ -227,7 +229,7 @@ async function runPoller({ env = { POLL_REPOS: "o/r" }, cycles = 1, routes = [],
 		out: (obj) => out.push(obj),
 		now: () => clock.ms,
 		random: () => 0.5,
-		selfIdFn: async () => selfId,
+		selfIdFn,
 		tokenFn,
 		fsDeps,
 		localEventStore,
@@ -1894,6 +1896,292 @@ test("poller: a swallow's line says whether its owner ended and names the notice
 		{ survivor: "ended", notice: undefined, noticeFailed: true },
 		{ survivor: undefined, notice: undefined, noticeFailed: undefined },
 	], "only the shapes the queue answers are logged");
+});
+
+// ---------------------------------------------------------------------------------------------------
+// The triggers file, followed while the poller runs (issue #947)
+// ---------------------------------------------------------------------------------------------------
+
+// The file every scenario boots on, and the rules its edits add. Indices are raw-file positions, so an appended rule
+// leaves the label rule at 0 and the comment rule at 1.
+const FOLLOW_RULES = [
+	{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix" } },
+	{ on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "triage" } },
+];
+const followText = (...extra) => JSON.stringify({ triggers: [...FOLLOW_RULES, ...extra] });
+const BENCH_RULE = { on: { type: "label", any: ["pi:bench"] }, run: { kind: "github", flow: "bench" } };
+const ISSUE11 = { number: 11, title: "T11", body: "B11", labels: [{ name: "pi:bench" }] };
+const EV210 = { id: 210, event: "labeled", actor: { id: 5 }, label: { name: "pi:bench" }, issue: ISSUE11 };
+const EV203 = { ...EV201, id: 203 };
+// Issue #970's entry: a cron trigger with neither run.flow nor run.command, which every reader of the file refuses.
+const PROBE_CRON = { on: { type: "cron", id: "probe", pattern: "0 4 3 1 *" }, run: { kind: "local", folder: "/srv/probe", task: "probe" } };
+
+/** A triggers file the test edits while the poller runs: every read answers `file.text`, and `null` is no file. */
+function liveFile(text) {
+	const file = { text };
+	file.deps = {
+		fileExists: () => file.text !== null,
+		readFile: () => {
+			if (file.text === null) throw Object.assign(new Error("ENOENT: no such file"), { code: "ENOENT" });
+			return file.text;
+		},
+	};
+	return file;
+}
+
+/** A label feed: the arming cycle sees EV100 alone, each later cycle the next reply (the last repeats). */
+function labelRoutes(...later) {
+	return [
+		{ path: "/repos/o/r/issues/events", replies: [ghResponse(200, [EV100]), ...later] },
+		{ path: "/repos/o/r/issues/comments", replies: [ghResponse(200, [])] },
+		{ path: "/repos/o/r/pulls?state=open", replies: [ghResponse(200, [])] },
+	];
+}
+
+const jobsOf = (queued) => queued.map((j) => [j.trigger.deliveryId, j.flow]);
+
+test("a label trigger added while the poller runs is queued at its next cycle, with one triggers_reloaded (issue #947)", async () => {
+	const file = liveFile(followText());
+	const { queued, out } = await runPoller({
+		cycles: 2,
+		fsDeps: file.deps,
+		routes: labelRoutes(ghResponse(200, [EV210, EV100])),
+		nap: (ms, n) => {
+			if (n === 1) file.text = followText(BENCH_RULE);
+			return ms;
+		},
+	});
+	assertNoRepoFailure(out);
+	assert.deepEqual(jobsOf(queued), [["poll-e210", "bench"]], "the rule added after the start fires, where the boot copy dropped it as no-allowlisted-label");
+	assert.deepEqual(lines(out, "dropped"), []);
+	assert.equal(lines(out, "triggers_reloaded").length, 1, "one line for the one edit");
+	assert.ok(out.findIndex((o) => o.event === "triggers_reloaded") > out.findIndex((o) => o.event === "poll_cycle"), "and it is the edit's: a quiet boot reloads nothing");
+});
+
+test("an edit made while the boot resolves its identity (a gate that may retry for minutes) is taken at the first cycle (issue #947)", async () => {
+	const file = liveFile(followText());
+	const { queued, out } = await runPoller({
+		cycles: 2,
+		fsDeps: file.deps,
+		routes: labelRoutes(ghResponse(200, [EV210, EV100])),
+		selfIdFn: async () => {
+			file.text = followText(BENCH_RULE);
+			return SELF;
+		},
+	});
+	assertNoRepoFailure(out);
+	assert.equal(lines(out, "triggers_reloaded").length, 1, "the boot copy is not taken for the file");
+	assert.ok(out.findIndex((o) => o.event === "triggers_reloaded") < out.findIndex((o) => o.event === "poll_cycle"), "taken before the first cycle judges anything");
+	assert.deepEqual(jobsOf(queued), [["poll-e210", "bench"]]);
+});
+
+test("the follower's baseline is the boot load's own read: a file that differs from it afterwards is served in the first cycle (issue #947)", async () => {
+	// The boot load is the first read; every later read is the edited file. A baseline read anywhere after the boot load
+	// would already hold the edit, so the first cycle would judge on the boot copy and say nothing.
+	let reads = 0;
+	const fsDeps = { fileExists: () => true, readFile: () => (reads++ === 0 ? followText() : followText(BENCH_RULE)) };
+	const redis = fakeRedis();
+	seedFamily(redis, 60);
+	const { queued, out } = await runPoller({ redis, fsDeps, routes: eventRoutes([EV210, EV100]) });
+	assertNoRepoFailure(out);
+	assert.equal(lines(out, "poll_resumed").length, 1, "the premise: a resumed family, so the one cycle judges events");
+	assert.deepEqual(jobsOf(queued), [["poll-e210", "bench"]], "the edit is served in the first cycle");
+	assert.equal(lines(out, "triggers_reloaded").length, 1);
+});
+
+test("an edit landing between a cycle's fetch and its judgement is judged on the edit, for a label event and a comment (issue #947)", async () => {
+	// The events reply carries the edit, after the cycle's own read: the event is fetched on one file, judged on the next.
+	const labelFile = liveFile(followText());
+	const label = await runPoller({
+		cycles: 2,
+		fsDeps: labelFile.deps,
+		routes: labelRoutes(() => {
+			labelFile.text = followText(BENCH_RULE);
+			return ghResponse(200, [EV210, EV100]);
+		}),
+	});
+	assertNoRepoFailure(label.out);
+	assert.deepEqual(jobsOf(label.queued), [["poll-e210", "bench"]]);
+
+	// A comment's issue is fetched after the comment feed, so the edit lands where only `gate`'s own read can see it.
+	const commentFile = liveFile(followText());
+	const retargeted = JSON.stringify({ triggers: [FOLLOW_RULES[0], { on: { type: "comment", phrase: "@pi" }, run: { kind: "github", flow: "bench" } }] });
+	const comment = await runPoller({
+		cycles: 2,
+		fsDeps: commentFile.deps,
+		routes: [
+			{ path: "/repos/o/r/issues/events", replies: [ghResponse(200, [EV100])] },
+			{ path: "/repos/o/r/issues/comments", replies: [ghResponse(200, [C301])] },
+			{ path: "/repos/o/r/pulls?state=open", replies: [ghResponse(200, [])] },
+			{
+				path: "/repos/o/r/issues/7",
+				replies: [
+					() => {
+						commentFile.text = retargeted;
+						return ghResponse(200, ISSUE7);
+					},
+				],
+			},
+		],
+	});
+	assertNoRepoFailure(comment.out);
+	assert.deepEqual(jobsOf(comment.queued), [["poll-c301", "bench"]], "the comment runs the flow the file names when it is judged");
+});
+
+test("issue #970's edit, a cron trigger without run.flow, keeps the running rules with one line, and putting the file back says reloaded (issue #947)", async () => {
+	const good = followText();
+	const file = liveFile(good);
+	const { queued, out } = await runPoller({
+		cycles: 4,
+		fsDeps: file.deps,
+		routes: labelRoutes(ghResponse(200, [EV201, EV100])),
+		nap: (ms, n) => {
+			if (n === 1) file.text = followText(PROBE_CRON);
+			if (n === 3) file.text = good;
+			return ms;
+		},
+	});
+	assertNoRepoFailure(out);
+	assert.deepEqual(jobsOf(queued), [["poll-e201", "fix"]], "the label the running rules hold still fires while the file is refused");
+	const invalid = lines(out, "triggers_reload_invalid");
+	assert.equal(invalid.length, 1, "said once over the two cycles that read the refused text");
+	assert.equal(invalid[0].kept, true);
+	assert.match(invalid[0].reason, /run\.flow/, "the loader's own reason, naming the field");
+	assert.equal(lines(out, "triggers_reloaded").length, 1);
+	const at = (event) => out.flatMap((o, i) => (o.event === event ? [i] : []));
+	const [reloaded] = at("triggers_reloaded");
+	const cycleEnds = at("poll_cycle");
+	assert.ok(at("triggers_reload_invalid")[0] < cycleEnds[1], "the refusal is said in the first cycle that reads it");
+	assert.ok(reloaded > cycleEnds[2] && reloaded < cycleEnds[3], "and the good file back is a change, said in the cycle that reads it");
+});
+
+test("an edited mayMerge trigger queues the edit's digest, which the pickup check accepts, and withdrawing mayMerge withdraws it from the job (issue #947)", async () => {
+	const doc = (run) => JSON.stringify({ version: TRIGGERS_FILE_VERSION, triggers: [{ on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix", ...run } }] });
+	const edited = doc({ mayMerge: true, instructions: "Second." });
+	const withdrawn = doc({ instructions: "Second." });
+	const file = liveFile(doc({ mayMerge: true, instructions: "First." }));
+	// Through the poller's own enqueue, so what is judged below is the job data a worker picks up.
+	const stored = [];
+	const queue = { add: async (_name, data, opts) => (stored.push(JSON.parse(JSON.stringify(data))), { id: opts.jobId }) };
+	const { out } = await runPoller({
+		cycles: 3,
+		fsDeps: file.deps,
+		queueFn: (job) => enqueueGitHubJob(queue, job),
+		routes: labelRoutes(ghResponse(200, [EV201, EV100]), ghResponse(200, [EV203, EV201, EV100])),
+		nap: (ms, n) => {
+			if (n === 1) file.text = edited;
+			if (n === 2) file.text = withdrawn;
+			return ms;
+		},
+	});
+	assertNoRepoFailure(out);
+	assert.deepEqual(jobsOf(stored), [["poll-e201", "fix"], ["poll-e203", "fix"]]);
+	const [mayMergeJob, plainJob] = stored;
+	assert.equal(mayMergeJob.mayMergePolicy, mergePolicyDigest(parseTriggers(edited, "/t.json")[0]), "the merge policy digest is the edited entry's, not the boot copy's");
+	const check = makeCheckMergePolicy({ triggersPath: "/t.json", fs: { readFileSync: () => edited } });
+	assert.deepEqual(check(mayMergeJob), { ok: true }, "so the worker's pickup check over the current file takes it (#947's merge-policy-changed refusal)");
+	assert.equal("mayMerge" in plainJob, false, "a withdrawn permission is not carried by a later job");
+	assert.equal("mayMergePolicy" in plainJob, false);
+});
+
+test("a close rule added mid-fetch decides whether that cycle's close is consumed, and reaches the resolver and the gate (issue #947)", async () => {
+	const withClose = followText({ on: { type: "issue", action: ["closed"] }, run: { kind: "github", flow: "post-close" } });
+	const file = liveFile(followText());
+	const { queued, out, fetch } = await runPoller({
+		cycles: 2,
+		fsDeps: file.deps,
+		routes: closeRoutes({
+			events: [
+				ghResponse(200, [EV698]),
+				() => {
+					file.text = withClose;
+					return ghResponse(200, [EV700, EV698]);
+				},
+			],
+		}),
+	});
+	assertNoRepoFailure(out);
+	assert.deepEqual(jobsOf(queued), [["poll-e700", "post-close"]], "the close guard read the rule the edit added, so the close was not passed over");
+	assert.equal(collaboratorCalls(fetch).length, 1, "the closer was looked up once, as an armed close rule asks");
+});
+
+test("one judgement reads one version: an edit landing during the closer's permission lookup waits for the next follow (issue #947)", async () => {
+	// The lookup is the await between the authority test and the filter. The edit retargets the close rule's flow, so a
+	// follow anywhere after the authority test would queue the job with a flow its authority was never asked for.
+	const closeRule = (flow) => ({ on: { type: "issue", action: ["closed"] }, run: { kind: "github", flow } });
+	const file = liveFile(followText(closeRule("post-close")));
+	const { queued, out, fetch } = await runPoller({
+		cycles: 3,
+		fsDeps: file.deps,
+		routes: closeRoutes({
+			events: [ghResponse(200, [EV698]), ghResponse(200, [EV700, EV698])],
+			permission: [
+				() => {
+					file.text = followText(closeRule("post-close-edited"));
+					return ghResponse(200, { permission: "admin" });
+				},
+			],
+		}),
+	});
+	assertNoRepoFailure(out);
+	assert.equal(collaboratorCalls(fetch).length, 1, "the premise: the authority was asked, under the rule read before the lookup");
+	assert.deepEqual(jobsOf(queued), [["poll-e700", "post-close"]], "the filter judged on the same version the authority test read");
+	const at = (event) => out.findIndex((o) => o.event === event);
+	assert.equal(lines(out, "triggers_reloaded").length, 1, "the edit is taken at the next follow");
+	assert.ok(at("triggers_reloaded") > at("enqueued"), "after this judgement, not inside it");
+});
+
+test("a triggers file that goes missing keeps the running rules with one line, and its return says reloaded (issue #947)", async () => {
+	const good = followText();
+	const file = liveFile(good);
+	const { queued, out } = await runPoller({
+		cycles: 4,
+		fsDeps: file.deps,
+		routes: labelRoutes(ghResponse(200, [EV201, EV100])),
+		nap: (ms, n) => {
+			if (n === 1) file.text = null;
+			if (n === 3) file.text = good;
+			return ms;
+		},
+	});
+	assertNoRepoFailure(out);
+	assert.deepEqual(jobsOf(queued), [["poll-e201", "fix"]], "the rules the poller runs on outlive the file");
+	const invalid = lines(out, "triggers_reload_invalid");
+	assert.equal(invalid.length, 1);
+	assert.equal(invalid[0].kept, true);
+	assert.match(invalid[0].reason, /triggers file not found/);
+	assert.equal(lines(out, "triggers_reloaded").length, 1);
+	assert.ok(out.findIndex((o) => o.event === "triggers_reloaded") > out.indexOf(invalid[0]));
+});
+
+test("a file whose watch source names WEBHOOK_SECRET is followed as it booted, on the boot's environment (issue #947)", async () => {
+	// The boot load satisfies that name with the placeholder; judged on the bare environment, every edit would be refused
+	// ("a configured source secret is missing") and the poller would keep its boot copy while calling the file bad.
+	const doc = (...extra) => JSON.stringify({ watchSources: { prod: { verify: "hmac-sha256", secretEnv: "WEBHOOK_SECRET" } }, triggers: [...FOLLOW_RULES, ...extra] });
+	const file = liveFile(doc());
+	const { queued, out } = await runPoller({
+		cycles: 2,
+		fsDeps: file.deps,
+		routes: labelRoutes(ghResponse(200, [EV210, EV100])),
+		nap: (ms, n) => {
+			if (n === 1) file.text = doc(BENCH_RULE);
+			return ms;
+		},
+	});
+	assertNoRepoFailure(out);
+	assert.deepEqual(lines(out, "triggers_reload_invalid"), []);
+	assert.deepEqual(jobsOf(queued), [["poll-e210", "bench"]]);
+});
+
+test("the poller follows the file by reading it, never through a watch (issue #947, source pin)", () => {
+	// A watch needs a debounce timer, and no timer the poller arms may outlive `done` (the async_hooks test above) nor be
+	// unref'd (the pin above); the header says why a read at each judgement is as fresh for a loop that judges only inside
+	// its cycles. This keeps the reason in the loop's header.
+	const src = readFileSync(new URL("../src/poller.mjs", import.meta.url), "utf8");
+	assert.ok(!/\bwatch(File)?\s*\(/.test(src), "no fs.watch or fs.watchFile call");
+	assert.ok(!/import\s*\{[^}]*\bwatch(File)?\b[^}]*\}\s*from\s*"node:fs/.test(src), "and no watch imported");
+	assert.match(src, /THE TRIGGERS FILE IS FOLLOWED, NOT WATCHED \(issue #947\)/, "the header paragraph that says why");
+	assert.match(src, /makeTriggersFollower\(/, "the follow is config.mjs's, the loader serve's watch reloads through");
 });
 
 const semanticValkeyUrl = process.env.VALKEY_TEST_URL;
