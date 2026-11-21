@@ -289,6 +289,30 @@ pause flag, the delayed score, the run ids of a cron trigger) is in one module, 
 checked against that version by its tests. Never roll back across a release that moved the BullMQ pin while jobs are
 queued: an older BullMQ need not read what a newer one wrote. The release notes name such a bump.
 
+## CPU-reserve helpers left by 5.4.2 and earlier
+
+On Docker's `cgroupfs` driver (Docker Desktop, OrbStack), the worker keeps the
+[CPU reserve](multi-host.md#the-cpu-reserve-across-all-jobs) through short helper containers. Up to 5.4.2 they had no
+name, and when the daemon was too slow to start one within 15 seconds the worker gave up on it and the container
+stayed in `created` for good, so a slow daemon collected them (issue #978). The next release names every helper
+(`pi-dispatch-cpu-reserve-<8 hex digits>`, labelled `pi.dispatch.helper=cpu-reserve`), so at most one is ever left and
+it is removed before the next try, and the worker waits longer between tries while the daemon stays slow.
+
+Its worker also removes the older helpers itself, once after it starts, the first time it reads the quota back as
+set: only containers that never started, are at least ten minutes old and match the old helper exactly (its command, its one
+mount of `pidispatch.slice`, its flags, and no label beyond its image's), with a plain `docker rm`, which never removes
+a running container. It logs `cpu_reserve_leftovers_removed` with how many it removed.
+
+On a host that stays on 5.4.x for now, list them:
+
+```sh
+docker ps -a --filter status=created --no-trunc --format '{{.ID}} {{.CreatedAt}} {{.Command}}' | grep '/p/cpu.max'
+```
+
+Then remove the ones older than a few minutes whose command is `cat /p/cpu.max` or
+`sh -c 'echo "<number> 100000" > /p/cpu.max'` with `docker rm <ID> ...`. They never ran, so removing them changes
+nothing.
+
 ## 5.4.0: private endpoints
 
 Issue #918 adds private endpoints: a host and one TCP port on your network that only the jobs of the triggers naming

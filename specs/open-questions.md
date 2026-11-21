@@ -385,6 +385,16 @@ incident cause remains unproven. See `DES-CONSUMER-LIVENESS` and its recorded ex
   process, left for it, said once a day), `opened-during-pass` and `runtime-unanswered` (the run's runtime, asked again right before
   the rename, reports its sandbox open or does not answer). Boot and every tick share all of them, because the
   leftover sweep runs at the start of the same closure.
+- **AMENDED (issue #978, 2026-11-21), the naming rule applied to a sweep that is NOT a fourth store.** The worker
+  now removes, once per process, the CPU-reserve helper containers an older worker left in `created`
+  (`DES-HOST-BUDGET`). Its outcome is `cpu_reserve_leftovers_removed { venue, removed, failed }`, a verdict from a
+  listing that answered, said once and only when it matched something; a container the plain `rm` refused is a count
+  in that verdict (`failed`), not a fault line, by the same distinction as `sandbox_network_not_reaped`. The reserve's
+  own fault keeps its name, `cpu_reserve_fail_open`, with one new token, `cleanup-timeout` (the `rm -f` of the helper's
+  fixed name timed out, so no helper ran). It takes no seat on this row's timer, checked against the reopen clause
+  rather than assumed: it removes runtime objects, not a host-side store; it runs once per process after a read that
+  holds, not on a cadence; and nothing new can pile up behind it, because a fixed name bounds the helpers a slow
+  daemon leaves at one per name.
 - **What the cadence costs, stated rather than glossed**: the window becomes a **floor**, not a ceiling.
   A file is deleted on the first sweep AFTER its window closes, so the effective ceiling is
   `window + PI_SWEEP_INTERVAL_HOURS` — up to 48 hours for a sandbox at both defaults. That is a bound
@@ -2854,3 +2864,4 @@ adversarial passes did.
 | 2026-11-03 | Issue #800. **`OQ-003` AMENDED, status unchanged**: "well under a pipe's atomic-write size" is refuted for a line that can now take 7,680 bytes. Over `PIPE_BUF` it can interleave with another writer, fail its MAC and settle at the floor, which fails closed. And the residual for code inside the runner process now names what is on the line: it can be any string, measured, so the worker's rebuild of `loaded` is the boundary there. |
 | 2026-11-17 (#921) | OQ-012 AMENDED (#921): optional display images now have an actual rendering measurement, but a trusted image can fabricate it and OpenShell is not credited by a Docker probe. The accepted image trust residual remains. |
 | 2026-11-18 | Issue #924. `OQ-007` amended for asynchronous recursive deletion and the measured limits of the consumer-liveness incident evidence. |
+| 2026-11-21 (#978) | **`OQ-007` AMENDED**, one bullet: the CPU-reserve helper leftovers an older worker left are removed once per process, logged as the verdict `cpu_reserve_leftovers_removed { venue, removed, failed }`, and the reserve's fault line `cpu_reserve_fail_open` gains the token `cleanup-timeout`, each placed by the row's naming rule; the removal takes no seat on the sweep timer, checked against the reopen clause (runtime objects, not a host-side store; once per process, not a cadence; a fixed name bounds new leftovers). `OQ-002`, `OQ-008` UNCHANGED, checked: no concurrency axis, no state in Valkey. **Code evidence**: worker/src/cpu-reserve.mjs -> removeLegacyHelpers, makeCpuReserve, guardHelperRun. |

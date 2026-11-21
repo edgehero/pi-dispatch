@@ -755,6 +755,17 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     doctor warns "no host CPU reserve across jobs" with the fix. Where Podman's cgroup manager is not systemd no parent
     is passed (libpod would build the path from the hierarchy's root, which a rootless account cannot create; source)
     and every job's shares are capped at 1024: a fair share for the proxy and Valkey, not a reserve.
+    **AMENDED (issue #978, 2026-11-21)**: `--rm` acts only when a container exits, so a helper CLI killed at its bound
+    between create and start (a slow VM-backed daemon) left a `created` container per timed-out step, 168 on one host.
+    The helper now runs under one fixed name per role, `pi-dispatch-cpu-reserve-<hex8>` from the declared worker name
+    (doctor's `pi-dispatch-cpu-reserve-doctor-<hex8>`), labelled `pi.dispatch.helper=cpu-reserve`: a step that did
+    not end cleanly marks the name dirty, a timeout removes it at once, and while it is dirty `rm -f` runs before the
+    next helper (none runs when that rm times out, `cleanup-timeout`), so the daemon itself refuses a second container
+    of that name (exit 125, nothing made) and at most one is ever left. An attempt stops at its first timed-out step (a
+    write that timed out may still apply, so it is unreadable, never `differs`), and only timeouts back off, from 60 s
+    doubling to the ten-minute re-check until a read holds: a slow daemon is asked less often, while a failure the
+    runtime answered keeps the minute, so an operator's fix shows within it. The unnamed helpers older workers left
+    are removed once per process, after a read that holds, by an exact fingerprint and a plain `rm`.
   - **Fleet and doctor**: the registry row publishes the budget, what runs, what the holds keep and whether the boot
     listing is read; no job decision reads it. Doctor shows the budget and which of it and `PI_CONCURRENCY` binds
     first, says that a job's `cpus` count as reserved CPU, warns for project sizes and minimums a host cannot hold,
@@ -814,6 +825,14 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     kernel kills the largest job"), never set by the worker.
   - *Raising the parent's weight to 10000*: jobs would then take the whole budget even against busy host services;
     the reserve core is kept either way, so the default 100 (host services first) is the safer default.
+  - *Random helper names plus a sweep of old labelled helpers* (issue #978): an age needs a clock shared with the
+    daemon, and the helper also runs on a remote cgroupfs daemon whose clock nothing here reads. *`--cidfile`*: blind
+    to the same create that lands after the CLI was killed, plus a temp file. *`docker create` then `start -a`*: twice
+    the calls, on the daemon that is already slow. A fixed name makes the daemon enforce the bound.
+  - *Backing off after every failure* (issue #978): a runtime that answered is not slow, and an operator who just fixed
+    a systemd host's quota would wait up to ten minutes to see it. *Going on after a timed-out step* (a write after a
+    timed-out read, a read back after a timed-out write): on a daemon that just timed out the next step most likely
+    times out too, one more container started, and the next attempt's read finds an applied write all the same.
 - **Residuals**: the budget bounds SIZES, not use: a job may still use idle CPU beyond its weight up to the ceiling,
   and memory inside its own `--memory`. On a systemd host the reserve across jobs holds only once the operator ran
   the one `set-property` (doctor says so until then), and on Docker Desktop it is missing between a Docker Desktop
@@ -18832,6 +18851,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-11-21 (#978) | **`DES-HOST-BUDGET` AMENDED**, the aggregate CPU reserve: why a fixed helper name per role bounds what a slow daemon leaves at one container per name, the step abort, the backoff after timeouts only, and the once-per-process removal of what older workers left. Rejected: random names plus an age-guarded sweep, `--cidfile`, `docker create` then `start -a`, backing off after every failure, going on after a timed-out step. UNCHANGED, checked: the ledger, the parent and its weight, the methods per venue, the residuals. **Code evidence**: worker/src/cpu-reserve.mjs -> guardHelperRun, makeCpuReserve, removeLegacyHelpers; worker/src/doctor.mjs -> doctorCpuReserve. |
 | 2026-11-21 (#962) | **`DES-OPERATOR-CONSOLE` AMENDED**, by a dated bullet beside "Unread is not empty": one tab-count function keyed on the file view's shape, an unreadable triggers view as not read on a loaded snapshot, the trigger list marked `schedulersUnread` with no file views, `readPauseWindows` telling missing from unreadable, `readScopedLimits` the same, an absent triggers file as an empty rule set, the capacity card deciding on `sourcesRead` (the reader's own word that the registry and the mirror answered), the New sandbox button on the sandbox report. **`DES-TOUCH-RATE-FROM-RECORDS-AND-AUDIT` AMENDED** (Presentation): the `not-started` state, where it is decided and why its totals are not drawn, and the page read's `failure`. UNCHANGED, checked: "Unread is not empty" as #844 wrote it, "A Valkey outage", `INT-TOUCH-INDEX` (the store's reasons and its read are as they were; the state is the reader's), `INT-CAPACITY-REPORT` (the report object is as it was; `unread` is returned beside it, and `dispatch_capacity` prints the report and its text alone), `INT-SCOPED-LIMITS-FILE-CONTRACT` (the file and the worker's loader are as they were), the pause-windows file contract (no key, no version). **Code evidence**: `admin/src/console/panels/config.mjs` -> `configNavigation`; `admin/src/doctor-view.mjs` -> `firstRunState`; `admin/src/console/pages.mjs` -> `loadPageData`, `zeroTouchLayout`; `admin/src/trigger-list.mjs` -> `triggerListOf`; `admin/src/read-model.mjs` -> `readPauseWindows`, `readScopedLimits`, `readCapacity`; `admin/src/insights-assembly.mjs` -> `assembleCapacityView`, `assembleHostCapacity`; `admin/src/console/panels/host.mjs` -> `hostCapacity`; `worker/src/zero-touch.mjs` -> `readZeroTouch`; `worker/src/capacity-records.mjs` -> `readCapacityRecords`; `admin/src/zero-touch-view.mjs` -> `zeroTouchView`, `ZERO_TOUCH_UNREAD_REASONS`; `admin/src/console/panels/zero-touch.mjs` -> `zeroTouchRate`. |
 | 2026-11-20 (#920 follow-up) | `DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` adds completed-event receipt placement and records why record writing, artifact comments and failed outcomes are insufficient proof. Pinned BullMQ and isolated queue tests verify the transition boundary. UNCHANGED, checked: failure hooks, retry/recovery policy, artifact comments, forge credentials and stored-state shapes. |
 | 2026-11-20 (#844) | **`DES-OPERATOR-CONSOLE` AMENDED**, "Unread is not empty": the reader's `fileViews` keeps the file facts when the snapshot fails, panels decide unread on the missing snapshot (`hostsUnread` for the hosts), an unread first-run step is a marked check and not a new state, the trigger list takes the files as a snapshot marked `schedulersUnread`, file-backed configuration cards are read-only from the files, and the zero touch source check answers a sentinel for a lookup it could not finish. Rejected: the last good snapshot, a split `snapshot()`, a sixth first-run state. UNCHANGED, checked: "What timed out is not sent later", "How long a page can still say it could not read", the reader's bounded raw client, the hub's `stale` rule. **Code evidence**: `admin/src/read-model.mjs` -> `fileViews`; `admin/src/console/pages.mjs` -> `loadPageData`; `admin/src/console/panels/common.mjs` -> `hostsUnread`; `admin/src/doctor-view.mjs` -> `firstRunState`; `admin/src/trigger-list.mjs` -> `triggerListOf`; `admin/src/console/panels/config-ui.mjs` -> `fromSnapshot`, `filesSnapshot`; `admin/src/job-actions.mjs` -> `checkTriggerFixSource`. |

@@ -69,7 +69,7 @@ import { endpointStatusFields, ENDPOINT_STATUS_VERSION } from "./endpoint-status
 import { liveJobsFields, liveJobsOf } from "./live-jobs.mjs";
 import { makeSandboxTelemetry, parseBudgetFrom, parseCpuReserve } from "./host-telemetry.mjs";
 import { budgetField, readUserServiceLimits } from "./host-budget.mjs";
-import { makeCpuReserve, reservePlan } from "./cpu-reserve.mjs";
+import { helperName as cpuReserveHelperName, makeCpuReserve, reservePlan } from "./cpu-reserve.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
 import { createWorker, JOB_TIMEOUT_MS, STALLED_FAILED_REASON } from "./index.mjs";
 import { BACKSTOP_GRACE_MS } from "./job-limits.mjs";
@@ -1415,8 +1415,10 @@ export async function startWorker(
 		return { memTotalMiB: least("memTotalMiB"), hostCpus: least("hostCpus"), ...user, reserveVenues };
 	};
 	// Issue #596, phase 2: the aggregate CPU reserve. One per worker; the helper container (Docker's cgroupfs driver) runs
-	// the job image this worker already pins, with `--pull=never`, never an image fetched for it.
-	const cpuReserve = makeCpuReserveFn({ run: (bin, args, { timeoutMs }) => execDockerBounded(args, { bin, timeoutMs }), image: config.jobImage, now, log });
+	// the job image this worker already pins, with `--pull=never`, never an image fetched for it. Issue #978: under one
+	// fixed name from the DECLARED worker name, so a restart finds what the last process left even where an undeclared
+	// name (the hostname) has changed meanwhile. `maxBuffer` reaches the runner for the leftover pass's long outputs alone.
+	const cpuReserve = makeCpuReserveFn({ run: (bin, args, { timeoutMs, maxBuffer }) => execDockerBounded(args, { bin, timeoutMs, maxBuffer }), image: config.jobImage, name: cpuReserveHelperName(config.workerNameDeclared ? config.workerName : ""), now, log });
 	const syncCpuReserve = (budget, facts) => cpuReserve.sync({ cpuCenti: budget.cpuCenti, plans: (facts?.reserveVenues ?? []).map((v) => reservePlan({ ...v, platform: jobUserIdentity.platform })) });
 	const bootPodmanRead = podmanInfo
 		? await settleWithin(

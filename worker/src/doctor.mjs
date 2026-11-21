@@ -115,7 +115,7 @@ import { SUGGEST_WINDOW_DAYS, cpusText, hostCap, refusalWords, sizeRefusal, sugg
 import { SIZING_RECORD_MAX_BYTES, readSizingRecords } from "./size-records.mjs";
 import { CAPACITY_WINDOWS, computeCapacity } from "./capacity.mjs";
 import { JOBS_ONLY, durationText, milliText, notSharedWhy, percentText, shareText } from "./capacity-cli.mjs";
-import { CGROUP_PARENT, cgroupParentFor, operatorQuotaCommand, readQuota, reservePlan, userQuotaCommand } from "./cpu-reserve.mjs";
+import { CGROUP_PARENT, cgroupParentFor, guardHelperRun, helperName as cpuReserveHelperName, operatorQuotaCommand, readQuota, reservePlan, userQuotaCommand } from "./cpu-reserve.mjs";
 import { HOST_BUDGET_KEYS, computeHostBudget, hostBudgetSettings, largestFit, neverFits, projectBudgetRow, publishedBudget, readUserServiceLimits } from "./host-budget.mjs";
 import { makeImagePreflight, normalizeImageId } from "./image-preflight.mjs";
 import { BOOT_REFUSING_JOB_USER_CAUSES, DAEMON_FACTS_TIMEOUT_MS, JOB_USER_FIX, makeDaemonFactsReader, makeJobUserResolver, relabelsPrivateMounts, resolveImageUser } from "./job-user.mjs";
@@ -2606,6 +2606,7 @@ export async function collectChecks(shellVars, seams) {
 			run: (bin, args, { timeoutMs }) => dockerRunVia(spawn, timeoutMs, { bin })(args),
 			image: jobImage,
 			imagePresent: imageCode === 0,
+			workerName: declaredWorkerName ?? "",
 		});
 		checks.push(...cpuReserveChecks(reserveReads, budgetView.cpuCenti));
 	}
@@ -9708,8 +9709,13 @@ export function doctorHostBudget(env, { daemon = undefined, podman = undefined, 
  * (`readQuota`: `systemctl show`, or on Docker's cgroupfs driver a read-only one-shot helper of the job image, run only
  * when that image is present). Doctor never WRITES a quota; the worker does at boot where it may.
  * `run(bin, args, { timeoutMs })` resolves `{ code, stdout, error }`.
+ *
+ * Issue #978: the helper runs under doctor's own fixed name (`helperName(workerName, { doctor: true })`, never the
+ * worker's, so a doctor never removes the worker's helper mid-step), with `rm -f` of that name before the read and again
+ * after a timeout (`guardHelperRun`). A doctor killed mid-read (the worker's own doctor child is killed at its bound)
+ * leaves at most that one container, which the next doctor removes first.
  */
-export async function doctorCpuReserve({ daemon = undefined, podman = undefined, endpointLocal = false, platform = process.platform, run, image, imagePresent = false }) {
+export async function doctorCpuReserve({ daemon = undefined, podman = undefined, endpointLocal = false, platform = process.platform, run, image, imagePresent = false, workerName = "" }) {
 	const venues = [];
 	if (daemon !== undefined && daemon?.answered === true) venues.push({ venue: "local", facts: daemon.facts, endpointLocal });
 	if (podman !== undefined && podman?.answered === true) venues.push({ venue: "podman", facts: podman.info, endpointLocal: podman.info?.serviceIsRemote === false });
@@ -9718,7 +9724,10 @@ export async function doctorCpuReserve({ daemon = undefined, podman = undefined,
 		const plan = reservePlan({ ...v, platform });
 		let read = null;
 		if (plan.parent && plan.method === "helper" && !imagePresent) read = { ok: false, reason: "job-image-absent" };
-		else if (plan.parent && plan.method) read = await readQuota(plan, { run, image });
+		else if (plan.parent && plan.method === "helper") {
+			const name = cpuReserveHelperName(workerName, { doctor: true });
+			read = await readQuota(plan, { run: guardHelperRun({ run, name }), image, name });
+		} else if (plan.parent && plan.method) read = await readQuota(plan, { run, image });
 		out.push({ plan, read, cgroupManager: v.facts?.cgroupDriver ?? v.facts?.cgroupManager ?? null });
 	}
 	return out;
@@ -9777,6 +9786,12 @@ export function cpuReserveChecks(reads, cpuCenti) {
 				: plan.method === "user-systemd"
 					? `the worker sets it when it starts; start or restart it, or run as the worker's account: \`${userQuotaCommand(target)}\``
 					: "the worker writes it when it starts and re-checks it every ten minutes; start or restart the worker";
+		// Issue #978: after doctor removed its own helper's name, a create refused with 125 most likely met another doctor's
+		// helper reading the quota at this moment under the same name (two doctors of one deployment share it).
+		if (!read?.ok && plan.method === "helper" && read?.reason === "exit-125") {
+			checks.push({ ok: false, warn: true, label: `${v}: no host CPU reserve across jobs could be confirmed: the quota of ${CGROUP_PARENT} was not readable (exit-125: the helper's name was taken, most likely by another doctor reading the quota at the same time)`, fix: "run doctor again once the other doctor has finished" });
+			continue;
+		}
 		if (!read?.ok) {
 			checks.push({ ok: false, warn: true, label: `${v}: no host CPU reserve across jobs could be confirmed: the quota of ${CGROUP_PARENT} was not readable (${read?.reason ?? "not read"})`, fix: fixFor(want) });
 			continue;

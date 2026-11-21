@@ -1,0 +1,46 @@
+name: lab 978
+
+# Throwaway measurement on a real Docker daemon. Lives only on the lab/978 branch, never merged.
+on:
+  push:
+    branches: [lab/978]
+
+permissions:
+  contents: read
+
+jobs:
+  lab:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: ".nvmrc"
+      - name: install
+        run: npm ci --no-audit --no-fund
+      - name: dockerd on the cgroupfs driver (Docker Desktop and OrbStack use it)
+        run: |
+          echo '{"exec-opts":["native.cgroupdriver=cgroupfs"],"features":{"containerd-snapshotter":false}}' | sudo tee /etc/docker/daemon.json
+          sudo systemctl restart docker
+          docker info --format '{{.CgroupDriver}} {{.CgroupVersion}} {{.ServerVersion}} {{.Driver}}'
+          docker pull -q alpine:3.20
+      - name: steps
+        env:
+          LAB_IMAGE: alpine:3.20
+          LAB_OUT: lab-out
+        run: |
+          mkdir -p lab-out
+          for s in lab/steps/*.mjs; do
+            echo "::group::$s"
+            node "$s" || echo "$s failed: $?" | tee -a lab-out/failures.txt
+            echo "::endgroup::"
+          done
+      - name: leftovers
+        if: always()
+        run: docker ps -a --format '{{.ID}} {{.State}} {{.Names}} {{.Labels}} {{.Command}}' | tee lab-out/ps-final.txt
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: lab-978
+          path: lab-out
