@@ -120,7 +120,9 @@ export function networkNameFor(containerName) {
  * `pi-dispatch doctor`'s canary objects: one throwaway network per doctor PROCESS, and one probe container per
  * direction on it. NAMED HERE rather than spelled inline in `doctor.mjs`, because after issue #350 the name has
  * three consumers in that module -- the create, the teardown, and the anchored regex of the dead-pid sweep --
- * and one outside it, `INT-EGRESS-POLICY-CONTRACT`'s object table.
+ * and one outside it, `INT-EGRESS-POLICY-CONTRACT`'s object table. Issue #978 added a fourth in that module: the
+ * sweep's listing of probe containers by name, in every state, which narrows with the probe prefix and then decides
+ * with the same anchored regex.
  *
  * Both stay OUTSIDE `pi-job-` and `pi-sandbox-`, for the reason `NETWORK_SUFFIX` above already gives: those
  * sweeps claim a PREFIX (the boot reaper's is `isJobNamespace`), and their `--filter` is wider still, so a

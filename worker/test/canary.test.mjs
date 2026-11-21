@@ -213,3 +213,35 @@ test("queue discovery bounds empty SCAN pages as well as matching metadata", asy
 	await assert.rejects(canaryQueueNames({ scan: async () => { pages++; return ["1", []]; } }), /exceeded its bound/);
 	assert.equal(pages, 512);
 });
+
+// Issue #978: the proxy's `docker run -d` the 30 s bound killed may still have made the container, and `close()` removed
+// the proxy only after a run that answered. It removes it whenever the run was attempted; a name the run never made
+// costs one `rm -f`, which exits 0 for a missing name.
+test("a canary proxy whose run timed out is removed by name in close(), and it carries the helper label", async () => {
+	const root = tempDir("canary-proxy-timeout-"), logs = join(root, "logs"), jobs = join(root, "jobs");
+	mkdirSync(logs);
+	const model = builtinChatModels("anthropic").find((m) => new URL(m.baseUrl).hostname === "api.anthropic.com").id;
+	const candidate = `anthropic/${model}`;
+	writeFileSync(join(root, "triggers.json"), JSON.stringify({ triggers: [], modelRoles: { default: { editor: candidate } } }));
+	const counters = new Map(), dockerCalls = [];
+	const redis = { on() {}, async ping() {}, disconnect() {}, async scan() { return ["0", []]; }, async set(k, v) { if (counters.has(k)) return null; counters.set(k, v); return "OK"; }, async eval(script, _n, key, token) { if (counters.get(key) !== token) return 0; if (script.includes("DEL")) counters.delete(key); return 1; }, async get(k) { return counters.get(k) ?? null; }, async expire() {} };
+	// execFile's answer to a child its `timeout` killed: a rejection, the child gone, whatever the daemon went on to do.
+	const execCommand = async (_bin, args) => {
+		dockerCalls.push(args);
+		if (args[0] === "run") throw Object.assign(new Error("Command failed: docker run"), { killed: true, signal: "SIGTERM", code: null });
+		return { stdout: "", stderr: "" };
+	};
+	const runtime = await createCanaryRuntime({ env: { PI_LOGS_DIR: logs, PI_JOBS_DIR: jobs, PI_SANDBOX_DIR: join(root, "sandboxes"), PI_TRIGGERS_FILE: join(root, "triggers.json"), PI_SETTINGS_FILE: join(root, "settings.json"), PI_MAX_COST_USD: "1", ANTHROPIC_API_KEY: "provider-only", PI_AUTH_FROM_PI: "0" }, options: { ...options, model: candidate }, now, execCommand, redisFactory: () => redis, queueFactory: () => ({ async getJobCounts() { return { active: 0 }; }, async isPaused() { return false; }, async close() {} }), imagePreflightFactory: () => async () => ({ ok: true, capabilities: ["costCap", "modelPolicy", "modelRoles", "exitAuth", "anyUid"] }), containerFactory: () => async () => { throw new Error("no container may start"); } });
+	try {
+		await assert.rejects(runtime.execute({ source: {}, original: original("one"), jobId: "canary-one", maxCostMicros: 1 }), /canary Docker operation failed/);
+	} finally {
+		// In a finally: the runtime holds a renew timer, and an assertion that failed above must not leave it running.
+		await runtime.close();
+	}
+	const proxyRun = dockerCalls.find((args) => args[0] === "run");
+	const proxy = proxyRun[proxyRun.indexOf("--name") + 1];
+	assert.match(proxy, /^pi-dispatch-canary-[0-9a-f-]{36}-proxy$/);
+	assert.equal(proxyRun[proxyRun.indexOf("--label") + 1], "pi.dispatch.helper=canary-proxy");
+	assert.deepEqual(dockerCalls.filter((args) => args[0] === "rm"), [["rm", "-f", proxy]], "the proxy the timed-out run may have made, by name");
+	assert.ok(dockerCalls.some((args) => args.join(" ") === `network rm ${proxy.replace(/-proxy$/, "-out")}`), "and its network after it");
+});

@@ -35,6 +35,18 @@ export const DOCTOR_INTERVAL_MAX_HOURS = 168;
  * How long one doctor run may take before the child is killed. A plain run on a healthy host takes seconds; its
  * slowest steps are bounded by doctor itself (30 s per runtime command, 5 s per Valkey connect, the egress canary's own
  * step bounds), so two minutes is a run that is wedged, not a run that is slow.
+ *
+ * THE KILL IS SIGKILL TO THE WHOLE GROUP, so doctor's own `finally` cleanups never run, and that is a documented
+ * residual (issue #978), not an oversight. A slow VM-backed daemon right after a restart is exactly when a run reaches
+ * the bound, and what such a run leaves is bounded and named: at most its fixed-name CPU-reserve read helper
+ * (`pi-dispatch-cpu-reserve-doctor-<hex8>`, which the next doctor removes before its own read); its pid-named egress
+ * canary network and probes, which the next doctor's canary sweep removes by name once that pid is dead (with the
+ * egress policy armed, on a daemon this host owns; this child never passes `--live`, so on the podman venue it starts
+ * no canary at all); and its in-image gh probe, which the next doctor's gh probe step removes right before its own
+ * probe, wherever that probe may run (the policy off and the podman venue included). REJECTED: a SIGTERM grace before the kill, which needs a signal handler in a twelve thousand line
+ * CLI that knows, at whichever step the signal lands, what that run has made and removes it (on the same slow daemon
+ * that caused the kill); and skipping the first run after boot while the daemon is busy, which would delay the first
+ * published result by a whole interval.
  */
 export const DOCTOR_RUN_TIMEOUT_MS = 120_000;
 
