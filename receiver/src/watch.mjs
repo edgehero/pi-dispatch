@@ -1,5 +1,5 @@
 import { makeWatchVerifiedHandler } from "./verify-watch.mjs";
-import { parseWatchFinding, matchesWatchFinding, watchFingerprint } from "@edgehero/pi-dispatch/watch-contract";
+import { parseWatchFinding, matchesWatchFinding, watchFingerprint, watchSecretsMissing } from "@edgehero/pi-dispatch/watch-contract";
 import { respond } from "@edgehero/pi-dispatch/http-body";
 import { createHash } from "node:crypto";
 
@@ -45,7 +45,9 @@ export function makeWatchHandler({ cfg, store, enqueue, env = process.env, now =
 		const sources = cfg.watchSources ?? cfg.triggers?.watchSources ?? {};
 		if (!source || !Object.hasOwn(sources, source)) return respond(res, 404, { error: "watch source not configured" });
 		const declared = sources[source]; const secret = env[declared.secretEnv];
-		if (typeof secret !== "string" || !secret) return respond(res, 503, { error: "watch source secret unavailable" });
+		// The loader's own predicate (issue #994), so a blank secret is missing here as it is to `serve`'s start: a secret of
+		// spaces is a key anyone can sign with, and only a caller that loads without `verifiesWatchPushes` reaches this.
+		if (watchSecretsMissing({ [source]: declared }, env).length > 0) return respond(res, 503, { error: "watch source secret unavailable" });
 		const verified = makeWatchVerifiedHandler({ secret, bodyLimit: declared.maxBodyBytes, now, log: (_event, fields) => log("watch_signature", { source, ...fields }) }, async ({ rawBody, delivery }, reply) => {
 			let finding;
 			try { finding = parseWatchFinding(JSON.parse(rawBody)); } catch { return respond(reply, 400, { error: "invalid watch finding" }); }

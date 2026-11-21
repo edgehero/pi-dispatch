@@ -10,6 +10,9 @@
  * nothing for a webhook secret to verify and demanding one would block exactly the deployment this
  * mode exists for (no public URL, no DNS, no tunnel).
  *
+ * A watch source's push secret (its `secretEnv`) is the same kind of setting and is not judged here at all (issue
+ * #994): the loader judges it only for `serve` (`verifiesWatchPushes`), which this loader does not ask for.
+ *
  * REUSE, NEVER RE-DERIVE: this loader does not fork `loadTriggers`/`loadGitHubAuth`. It calls the
  * receiver's own `loadReceiverConfig` -- the single place the trigger file is grouped for the filter
  * and the auth block is validated -- satisfying its WEBHOOK_SECRET precondition with an inert
@@ -107,12 +110,12 @@ export function loadPollerConfig(env = process.env, { readFile = readFileSync, f
  * The environment the poller's triggers file is judged under. A present WEBHOOK_SECRET is passed through untouched (a
  * deployment may run serve AND poll from one env file); only its ABSENCE is papered over, for the loader's call alone.
  *
- * Exported for the poller's live follow of the file (issue #947), which must judge every later text under exactly the
- * environment the boot load judged the first: the triggers loader reads the environment for one thing besides the
- * file's path, a watch source's `secretEnv`, and a source naming WEBHOOK_SECRET there is satisfied by the placeholder
- * at boot. Judged under the bare environment instead, every edit to such a file would be refused ("a configured source
- * secret is missing") and the poller would run its boot copy forever while saying the file is invalid. The placeholder
- * still goes nowhere else: the follow hands this environment only to the triggers loader.
+ * Exported for the poller's live follow of the file (issue #947), which judges every later text under exactly the
+ * environment the boot load judged the first, so the two judgements cannot differ on anything the loader reads. It was
+ * load-bearing while the poller judged watch source secrets: a source naming WEBHOOK_SECRET was satisfied by the
+ * placeholder at boot and would have been refused by every later read under the bare environment. Since issue #994 the
+ * poller judges no watch secret, and the loader reads only the file's path from it here. The placeholder still goes
+ * nowhere else: the follow hands this environment only to the triggers loader.
  */
 export function pollerLoaderEnv(env) {
 	return env.WEBHOOK_SECRET ? env : { ...env, WEBHOOK_SECRET: PLACEHOLDER_SECRET };

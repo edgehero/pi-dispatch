@@ -8,14 +8,14 @@ const NOW = Date.parse("2026-01-01T00:00:00Z");
 const now = () => NOW;
 const finding = { fields: { service: "checkout" }, severity: "error", count: 1, firstSeen: "2026-01-01T00:00:00Z", lastSeen: "2026-01-01T00:00:00Z", samples: ["private attacker text"] };
 const config = () => ({ watchSources: { prod: { secretEnv: "WATCH_SECRET", maxBodyBytes: 65536, maxPerDay: 1000 } }, watchTriggers: [{ index: 0, on: { type: "watch", id: "errors", source: "prod", fingerprint: ["service"], match: { severity: ["error"] } }, run: { flow: "triage", folder: "/reviewed" } }] });
-async function deliver({ cfg = config(), url = "/watch/prod", raw = JSON.stringify(finding), secret = "secret", mutate, ingest, enqueue, log } = {}) {
+async function deliver({ cfg = config(), url = "/watch/prod", raw = JSON.stringify(finding), secret = "secret", env = { WATCH_SECRET: "secret" }, mutate, ingest, enqueue, log } = {}) {
 	const req = Readable.from([Buffer.from(raw)]); req.method = "POST"; req.url = url;
 	const timestamp = String(NOW / 1000); const delivery = "delivery-1";
 	req.headers = { "content-type": "application/json", "x-watch-id": delivery, "x-watch-timestamp": timestamp, "x-watch-signature": "v1=" + createHmac("sha256", secret).update(watchSigningMessage(timestamp, delivery, raw)).digest("hex") };
 	if (mutate) mutate(req);
 	const res = { headersSent: false, writeHead(status) { this.statusCode = status; this.headersSent = true; }, end(body) { this.body = body; } };
 	const enqueued = []; const ingested = [];
-	await makeWatchHandler({ cfg, now, env: { WATCH_SECRET: "secret" }, store: { ingest: async value => { ingested.push(value); return ingest ? ingest(value) : { status: "held", id: "finding-1", fingerprint: "abcdef", dueAt: NOW + 1000 }; } }, enqueue: enqueue ?? (async value => { enqueued.push(value); }), log })(req, res);
+	await makeWatchHandler({ cfg, now, env, store: { ingest: async value => { ingested.push(value); return ingest ? ingest(value) : { status: "held", id: "finding-1", fingerprint: "abcdef", dueAt: NOW + 1000 }; } }, enqueue: enqueue ?? (async value => { enqueued.push(value); }), log })(req, res);
 	return { res, enqueued, ingested };
 }
 test("watch signed finding queues only an evidence reference with reviewed trigger identity", async () => {
@@ -27,6 +27,16 @@ test("watch signed finding queues only an evidence reference with reviewed trigg
 test("unknown source, invalid signature, malformed payload and source mismatch never ingest", async () => {
 	for (const [options, status] of [[{ url: "/watch/unknown" }, 404], [{ secret: "wrong" }, 401], [{ raw: "{bad" }, 400], [{ raw: JSON.stringify({ ...finding, flow: "evil" }) }, 400], [{ raw: JSON.stringify({ ...finding, source: "other" }) }, 400]]) {
 		const result = await deliver(options); assert.equal(result.res.statusCode, status); assert.equal(result.ingested.length, 0); assert.equal(result.enqueued.length, 0);
+	}
+});
+test("a source secret that is unset, empty or blank answers 503 to every push, signed with it or not, by the loader's predicate (issue #994)", async () => {
+	// A secret of spaces is a key anyone can sign with: the handler takes it as missing, as `watchSecretsMissing` does.
+	for (const env of [{}, { WATCH_SECRET: "" }, { WATCH_SECRET: "   " }, { WATCH_SECRET: "\t" }]) {
+		for (const secret of ["   ", "secret", "\t"]) {
+			const result = await deliver({ env, secret });
+			assert.equal(result.res.statusCode, 503, `${JSON.stringify(env)} signed ${JSON.stringify(secret)}`);
+			assert.deepEqual([result.ingested.length, result.enqueued.length], [0, 0]);
+		}
 	}
 });
 test("unmatched, capped and suppressed findings never enqueue", async () => {

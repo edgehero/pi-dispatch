@@ -942,6 +942,49 @@ test("a GitHub rule reloaded into a receiver that started without `/` is said lo
 	}
 });
 
+test("serve refuses a watch source whose secret is unset at its start, and keeps one added live out of the rules it runs (issue #994)", async () => {
+	// `serve` answers POST /watch/<source> and verifies each push with the source's secret, so it alone judges the
+	// secret (`verifiesWatchPushes`); the poller and the watch collector load the same file without that rule.
+	const dir = tempDir("receiver-watch-secret-");
+	const triggersPath = join(dir, "triggers.json");
+	const gitlabRule = { on: { type: "label", any: ["pi:frontend"] }, run: { kind: "gitlab", flow: "gl-fix" } };
+	const sources = (...names) => Object.fromEntries(names.map(([name, secretEnv]) => [name, { verify: "hmac-sha256", secretEnv, maxPerDay: 10 }]));
+	writeFileSync(triggersPath, JSON.stringify({ watchSources: sources(["prod", "WATCH_PROD"]), triggers: [gitlabRule] }));
+	const env = gitlabOnlyEnv({ PI_TRIGGERS_FILE: triggersPath });
+	let served = false;
+	await assert.rejects(
+		startReceiver(env, { makeQueueFn: stubQueue, createServer: () => ((served = true), capturingServer().createServer()), ...gitlabFakes, write: () => true }),
+		(e) => e.piDispatchConfig === true && e.message === "watch: a configured source secret is missing",
+	);
+	assert.equal(served, false, "refused before any server exists");
+
+	// Set, it starts; a source added while it resolves its identity, whose secret is unset, is refused by the reload and
+	// the running rules are kept, so the new source answers 404 rather than a push nobody can verify.
+	const chunks = [];
+	const { captured, createServer } = capturingServer();
+	const closers = [];
+	await startReceiver(
+		{ ...env, WATCH_PROD: "prod-secret" },
+		{
+			write: (chunk) => (chunks.push(String(chunk)), true), makeQueueFn: stubQueue, createServer, closers, ...gitlabFakes,
+			resolveGitLabSelfId: async () => {
+				writeFileSync(triggersPath, JSON.stringify({ watchSources: sources(["prod", "WATCH_PROD"], ["alt", "WATCH_ALT"]), triggers: [gitlabRule] }));
+				return 4242;
+			},
+		},
+	);
+	for (const c of closers) c.close?.();
+	const seen = chunks.join("").split("\n").filter((l) => l.startsWith("{")).map((l) => JSON.parse(l));
+	const refused = seen.filter((l) => l.event === "triggers_reload_invalid");
+	assert.deepEqual(refused.map((l) => [l.reason, l.kept]), [["watch: a configured source secret is missing", true]], JSON.stringify(seen));
+	assert.ok(!seen.some((l) => l.event === "triggers_reloaded"), "the edit was not taken");
+	const req = mockReq({ headers: { "content-type": "application/json" } });
+	req.url = "/watch/alt";
+	const res = mockRes();
+	await drive(captured.handler, req, res, "{}");
+	assert.equal(res.statusCode, 404, "the running rules have no source alt");
+});
+
 test("an edit that lands DURING THE BOOT is picked up, not left for the next one (issue #386)", async () => {
 	// THE REAL WINDOW, and the correction of a first attempt that measured the wrong one. This service loads
 	// its triggers at the top of `startReceiver` and arms the watch LAST, behind identity resolution that

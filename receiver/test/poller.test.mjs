@@ -2192,23 +2192,28 @@ test("a triggers file that goes missing keeps the running rules with one line, a
 	assert.ok(out.findIndex((o) => o.event === "triggers_reloaded") > out.indexOf(invalid[0]));
 });
 
-test("a file whose watch source names WEBHOOK_SECRET is followed as it booted, on the boot's environment (issue #947)", async () => {
-	// The boot load satisfies that name with the placeholder; judged on the bare environment, every edit would be refused
-	// ("a configured source secret is missing") and the poller would keep its boot copy while calling the file bad.
-	const doc = (...extra) => JSON.stringify({ watchSources: { prod: { verify: "hmac-sha256", secretEnv: "WEBHOOK_SECRET" } }, triggers: [...FOLLOW_RULES, ...extra] });
-	const file = liveFile(doc());
-	const { queued, out } = await runPoller({
-		cycles: 2,
-		fsDeps: file.deps,
-		routes: labelRoutes(ghResponse(200, [EV210, EV100])),
-		nap: (ms, n) => {
-			if (n === 1) file.text = doc(BENCH_RULE);
-			return ms;
-		},
-	});
-	assertNoRepoFailure(out);
-	assert.deepEqual(lines(out, "triggers_reload_invalid"), []);
-	assert.deepEqual(jobsOf(queued), [["poll-e210", "bench"]]);
+test("the poller starts on a file whose watch source's secret is unset and follows an edit that adds another, judging no watch secret (issues #947, #994)", async () => {
+	// Only `serve` verifies watch pushes with a source's secret, so only it refuses one that is unset. The poller used to
+	// refuse the file at its start (exit 2, not restarted) over a setting it never reads, and a source naming
+	// WEBHOOK_SECRET passed only on the boot's placeholder, so its follow had to judge on the boot's environment.
+	for (const secretEnv of ["WATCH_SIGNING", "WEBHOOK_SECRET"]) {
+		const source = (name) => ({ [name]: { verify: "hmac-sha256", secretEnv, maxPerDay: 10 } });
+		const doc = (sources, ...extra) => JSON.stringify({ watchSources: sources, triggers: [...FOLLOW_RULES, ...extra] });
+		const file = liveFile(doc(source("prod")));
+		const { queued, out } = await runPoller({
+			cycles: 2,
+			fsDeps: file.deps,
+			routes: labelRoutes(ghResponse(200, [EV210, EV100])),
+			nap: (ms, n) => {
+				if (n === 1) file.text = doc({ ...source("prod"), ...source("alt") }, BENCH_RULE);
+				return ms;
+			},
+		});
+		assertNoRepoFailure(out);
+		assert.deepEqual(lines(out, "triggers_reload_invalid"), [], secretEnv);
+		assert.equal(lines(out, "triggers_reloaded").length, 1, secretEnv);
+		assert.deepEqual(jobsOf(queued), [["poll-e210", "bench"]], `${secretEnv}: the edit was taken`);
+	}
 });
 
 test("the poller follows the file by reading it, never through a watch (issue #947, source pin)", () => {

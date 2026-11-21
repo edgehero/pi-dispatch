@@ -114,6 +114,10 @@ export async function startReceiver(
 			if (file === triggersPath) triggersAtBoot = text;
 			return text;
 		},
+		// This process answers `POST /watch/<source>` and verifies each push with its source's secret, so a source whose
+		// secret is unset or blank refuses the start and is kept out of a live reload (issue #994). `poll` and `watch`
+		// read no push and leave it off.
+		verifiesWatchPushes: true,
 	});
 
 	// One options bag for the four identity arms below (issue #318): the SAME window, clock and sleep for

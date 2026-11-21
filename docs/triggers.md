@@ -766,10 +766,9 @@ pi-dispatch triggers check triggers.json.new && mv triggers.json.new triggers.js
   its check cannot judge (one it cannot read, a link, a relative path). A job path from `PI_DISPATCH_RUN_ROOTS` or
   `PI_GLOBAL_PI_DIR` is the deployment's, and its refusal says so. On a fleet (`PI_WORKER_NAME` set) a cron trigger
   whose folder is not here is another host's, and the check says so in a note.
-- A watch source whose signing secret (its `secretEnv`) is unset or blank refuses the receiver, the poller and the
-  watch collector. The secret is read for whether it is set, never for its value, which is not printed. One exception:
-  a source whose `secretEnv` is `WEBHOOK_SECRET`, on a deployment that sets none, is taken by the poller and refused by
-  `serve`.
+- A watch source whose signing secret (its `secretEnv`) is unset or blank refuses the receiver (`serve`), which
+  verifies the source's pushes with it. The poller and the watch collector never read it, and take the file. The secret
+  is read for whether it is set, never for its value, which is not printed.
 - With `GITHUB_INGEST` and `GITHUB_AUTH_SOURCE` unset, the file decides whether `serve` takes GitHub webhooks: one
   GitHub rule is enough, and then `serve` needs `WEBHOOK_SECRET`. So adding the first GitHub rule to a deployment with
   no `WEBHOOK_SECRET` is refused for the receiver and the watch collector. The poller does not need it while it is
