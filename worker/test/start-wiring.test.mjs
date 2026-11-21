@@ -5968,6 +5968,8 @@ test("issue #596, phase 2: every budget refresh keeps the jobs' parent cgroup's 
 	assert.equal(made.length, 1, "one reserve per worker");
 	assert.equal(made[0].image, "pi-job:ci");
 	assert.equal(typeof made[0].run, "function");
+	// Issue #978: the helper's one fixed name, from the DECLARED worker name, empty here (sha256("") begins e3b0c442).
+	assert.equal(made[0].name, "pi-dispatch-cpu-reserve-e3b0c442");
 	await captured.hostBudget.onRefresh({ memMiB: 14746, cpuCenti: 300 }, await captured.hostBudget.readFacts());
 	assert.equal(syncs.length, 1);
 	assert.equal(syncs[0].cpuCenti, 300);
@@ -5975,6 +5977,35 @@ test("issue #596, phase 2: every budget refresh keeps the jobs' parent cgroup's 
 	// No facts (the runtime did not answer): no venue, nothing to keep.
 	await captured.hostBudget.onRefresh({ memMiB: null, cpuCenti: null }, {});
 	assert.deepEqual(syncs[1], { cpuCenti: null, plans: [] });
+});
+
+test("issue #978: a named worker's CPU reserve helper is named from PI_WORKER_NAME, and its runner passes the leftover listing's output bound on", { skip }, async () => {
+	const made = [];
+	await runStart({
+		env: { PI_BACKENDS: "podman", PI_JOB_IMAGE: "pi-job:ci", PI_WORKER_NAME: "cpu-reserve-978" },
+		makeAuth: async () => ({ mintToken: async () => "tok", selfId: 1, source: "gh" }),
+		makeHost: () => fakeHost(),
+		jobUserIdentity: PODMAN_ID,
+		observationFs: PODMAN_FILES,
+		makePodmanReaper: () => async () => ({ reaped: true }),
+		bootImage: { ok: true, image: "pi-job:ci", imageDigest: "sha256:pod", piVersion: "0.80.7", capabilities: ["anyUid"] },
+		readPodmanInfo: PODMAN_INFO({ hostCpus: 4, memTotalMiB: 16384 }),
+		readCgroupFile: () => {
+			throw Object.assign(new Error("absent"), { code: "ENOENT" });
+		},
+		makeCpuReserve: (args) => {
+			made.push(args);
+			return { sync: async () => true, states: () => [] };
+		},
+	});
+	// sha256("cpu-reserve-978") begins c3ad5e1e: stable across restarts, distinct from any other named worker's.
+	assert.equal(made[0].name, "pi-dispatch-cpu-reserve-c3ad5e1e");
+	// The runner hands the caller's output bound on: 100 KiB of output is past the default 64 KiB, and arrives whole.
+	const emit = ["-e", "process.stdout.write('x'.repeat(100 * 1024))"];
+	const roomy = await made[0].run(process.execPath, emit, { timeoutMs: 30_000, maxBuffer: 4 * 1024 * 1024 });
+	assert.deepEqual([roomy.code, roomy.stdout.length], [0, 100 * 1024]);
+	const bounded = await made[0].run(process.execPath, emit, { timeoutMs: 30_000 });
+	assert.equal(bounded.code, null, "without one, the default bound still applies");
 });
 
 // Issue #643: the off switch reaches BOTH venues and the preparer. With PI_LIVE_TRANSCRIPTS=0 neither venue's runContainer

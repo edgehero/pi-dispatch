@@ -2,7 +2,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
 	CGROUP_PARENT,
+	HELPER_LABEL_KEY,
 	HELPER_PARENT_PATH,
+	LEGACY_HELPER_CHUNK,
+	LEGACY_HELPER_MIN_AGE_MS,
+	LEGACY_INSPECT_FORMAT,
+	LEGACY_LIST_ARGS,
 	PARENTLESS_SHARES_MAX,
 	QUOTA_PERIOD_US,
 	RESERVE_RECHECK_MS,
@@ -11,12 +16,16 @@ import {
 	cgroupParentFor,
 	cpuMaxLine,
 	cpuQuotaProperty,
+	guardHelperRun,
 	helperArgs,
+	helperName,
+	isLegacyHelper,
 	makeCpuReserve,
 	operatorQuotaCommand,
 	parseCpuMaxRead,
 	parseQuotaPerSec,
 	readQuota,
+	removeLegacyHelpers,
 	reservePlan,
 	showQuotaArgs,
 	stepFailure,
@@ -40,6 +49,21 @@ test("the parent is pidispatch.slice (no dash: a dash nests), the parentless cap
 	// Re-checked on the cadence the runtime's facts are re-read at, so a Docker Desktop restart is found on one clock.
 	assert.equal(RESERVE_RECHECK_MS, 600_000);
 	assert.equal(RESERVE_RECHECK_MS, JOB_USER_FACTS_MAX_AGE_MS);
+	// Issue #978: the helper's label, and how old and how many leftovers an older worker's are taken.
+	assert.equal(HELPER_LABEL_KEY, "pi.dispatch.helper");
+	assert.equal(LEGACY_HELPER_MIN_AGE_MS, 600_000);
+	assert.equal(LEGACY_HELPER_CHUNK, 20);
+});
+
+test("issue #978: one fixed helper name per role, from the sha256 of the declared worker name, within Docker's name rule", () => {
+	// sha256("") begins e3b0c442, sha256("box-1") begins 96fb257c: literals, so a change in the hash or its cut shows.
+	assert.equal(helperName(), "pi-dispatch-cpu-reserve-e3b0c442");
+	assert.equal(helperName(""), "pi-dispatch-cpu-reserve-e3b0c442");
+	assert.equal(helperName("", { doctor: true }), "pi-dispatch-cpu-reserve-doctor-e3b0c442");
+	assert.equal(helperName("box-1"), "pi-dispatch-cpu-reserve-96fb257c");
+	assert.equal(helperName("box-1", { doctor: true }), "pi-dispatch-cpu-reserve-doctor-96fb257c");
+	assert.notEqual(helperName("box-2"), helperName("box-1"), "two named workers on one daemon never share it");
+	for (const name of ["", "box-1", "a".repeat(64)]) for (const doctor of [false, true]) assert.match(helperName(name, { doctor }), /^[a-zA-Z0-9][a-zA-Z0-9_.-]+$/);
 });
 
 test("the quota math: the budget's hundredths ARE systemd's percentage, and cpu.max is hundredths x 1000 per 100000", () => {
@@ -66,9 +90,14 @@ test("the systemctl argv and the two operator commands, literally", () => {
 });
 
 test("the helper's argv, literally: uid 0, every capability dropped, no network, read-only, the pinned image never pulled, ONLY the parent's own directory mounted", () => {
-	assert.deepEqual(helperArgs({ image: "pi-job:pinned", cpuCenti: 1300 }), [
+	const name = "pi-dispatch-cpu-reserve-e3b0c442";
+	assert.deepEqual(helperArgs({ image: "pi-job:pinned", name, cpuCenti: 1300 }), [
 		"run",
 		"--rm",
+		"--name",
+		"pi-dispatch-cpu-reserve-e3b0c442",
+		"--label",
+		"pi.dispatch.helper=cpu-reserve",
 		"--pull=never",
 		"--user=0:0",
 		"--cap-drop=ALL",
@@ -86,17 +115,20 @@ test("the helper's argv, literally: uid 0, every capability dropped, no network,
 		'echo "1300000 100000" > /p/cpu.max',
 	]);
 	// null writes no quota (the budget is off).
-	assert.deepEqual(helperArgs({ image: "pi-job:pinned", cpuCenti: null }).slice(-2), ["-c", 'echo "max 100000" > /p/cpu.max']);
-	// The read mounts read-only and runs `cat`, no shell.
-	const read = helperArgs({ image: "pi-job:pinned", read: true });
-	assert.deepEqual(read.slice(10), ["-v", "/sys/fs/cgroup/pidispatch.slice:/p:ro", "--entrypoint", "cat", "pi-job:pinned", "/p/cpu.max"]);
-	for (const args of [helperArgs({ image: "i", cpuCenti: 5 }), read]) {
+	assert.deepEqual(helperArgs({ image: "pi-job:pinned", name, cpuCenti: null }).slice(-2), ["-c", 'echo "max 100000" > /p/cpu.max']);
+	// The read mounts read-only and runs `cat`, no shell, under the same name and label.
+	const read = helperArgs({ image: "pi-job:pinned", name, read: true });
+	assert.deepEqual(read.slice(0, 6), ["run", "--rm", "--name", "pi-dispatch-cpu-reserve-e3b0c442", "--label", "pi.dispatch.helper=cpu-reserve"]);
+	assert.deepEqual(read.slice(14), ["-v", "/sys/fs/cgroup/pidispatch.slice:/p:ro", "--entrypoint", "cat", "pi-job:pinned", "/p/cpu.max"]);
+	for (const args of [helperArgs({ image: "i", name, cpuCenti: 5 }), read]) {
 		const mounts = args.filter((_, i) => args[i - 1] === "-v");
 		assert.equal(mounts.length, 1);
 		assert.ok(mounts[0].startsWith("/sys/fs/cgroup/pidispatch.slice:"), mounts[0]);
 	}
-	for (const image of ["", "-v", "--privileged", null, 1]) assert.throws(() => helperArgs({ image, cpuCenti: 300 }), /refusing a helper image/, String(image));
-	for (const cpuCenti of [0, -1, 1.5, "300", undefined, Infinity]) assert.throws(() => helperArgs({ image: "i", cpuCenti }), /refusing a quota/, String(cpuCenti));
+	for (const image of ["", "-v", "--privileged", null, 1]) assert.throws(() => helperArgs({ image, name, cpuCenti: 300 }), /refusing a helper image/, String(image));
+	for (const cpuCenti of [0, -1, 1.5, "300", undefined, Infinity]) assert.throws(() => helperArgs({ image: "i", name, cpuCenti }), /refusing a quota/, String(cpuCenti));
+	// A helper never runs unnamed (an unnamed one is what piled up, issue #978), nor under a name Docker would refuse.
+	for (const bad of [undefined, "", "-rm", "a b", "/x", "x"]) assert.throws(() => helperArgs({ image: "i", name: bad, read: true }), /refusing a helper name/, String(bad));
 });
 
 test("parseQuotaPerSec reads systemd's timespan in both fractional spellings, infinity as no quota, and nothing else", () => {
@@ -176,6 +208,7 @@ test("stepFailure names every way a command fails, from both runner shapes, and 
 const USER = { venue: "podman", parent: true, method: "user-systemd", why: null };
 const HELPER = { venue: "local", parent: true, method: "helper", why: null };
 const SYSTEM = { venue: "local", parent: true, method: "system-systemd", why: null };
+const NAME = "pi-dispatch-cpu-reserve-e3b0c442";
 
 /** A runner that answers from a queue of results and records every call. */
 function fakeRun(answers) {
@@ -197,10 +230,10 @@ test("readQuota asks the user manager, the system manager or the helper, bounded
 	assert.deepEqual(await readQuota(SYSTEM, { run: f.run, image: "i" }), { ok: true, cpuCenti: null });
 	assert.deepEqual(f.calls[0].args, ["show", "-P", "CPUQuotaPerSecUSec", "pidispatch.slice"]);
 	f = fakeRun([{ code: 0, stdout: "1300000 100000\n" }]);
-	assert.deepEqual(await readQuota(HELPER, { run: f.run, image: "pi-job:pinned" }), { ok: true, cpuCenti: 1300 });
-	assert.deepEqual(f.calls, [{ bin: "docker", args: helperArgs({ image: "pi-job:pinned", read: true }), timeoutMs: 15_000 }]);
+	assert.deepEqual(await readQuota(HELPER, { run: f.run, image: "pi-job:pinned", name: NAME }), { ok: true, cpuCenti: 1300 });
+	assert.deepEqual(f.calls, [{ bin: "docker", args: helperArgs({ image: "pi-job:pinned", name: NAME, read: true }), timeoutMs: 15_000 }]);
 	f = fakeRun([{ code: null, error: { timedOut: true } }]);
-	assert.deepEqual(await readQuota(HELPER, { run: f.run, image: "i" }), { ok: false, reason: "timeout" });
+	assert.deepEqual(await readQuota(HELPER, { run: f.run, image: "i", name: NAME }), { ok: false, reason: "timeout" });
 	f = fakeRun([{ code: 0, stdout: "what" }]);
 	assert.deepEqual(await readQuota(USER, { run: f.run, image: "i" }), { ok: false, reason: "unparseable" });
 	f = fakeRun([() => Promise.reject(Object.assign(new Error("x"), { code: "ENOENT" }))]);
@@ -215,8 +248,8 @@ test("writeQuota sets the user manager's property or runs the helper, and never 
 	assert.deepEqual(await writeQuota(USER, 300, { run: f.run, image: "i" }), { ok: true });
 	assert.deepEqual(f.calls, [{ bin: "systemctl", args: ["--user", "set-property", "pidispatch.slice", "CPUQuota=300%"], timeoutMs: 15_000 }]);
 	f = fakeRun([{ code: 0 }]);
-	assert.deepEqual(await writeQuota(HELPER, 1300, { run: f.run, image: "pi-job:pinned" }), { ok: true });
-	assert.deepEqual(f.calls, [{ bin: "docker", args: helperArgs({ image: "pi-job:pinned", cpuCenti: 1300 }), timeoutMs: 15_000 }]);
+	assert.deepEqual(await writeQuota(HELPER, 1300, { run: f.run, image: "pi-job:pinned", name: NAME }), { ok: true });
+	assert.deepEqual(f.calls, [{ bin: "docker", args: helperArgs({ image: "pi-job:pinned", name: NAME, cpuCenti: 1300 }), timeoutMs: 15_000 }]);
 	f = fakeRun([{ code: 1 }]);
 	assert.deepEqual(await writeQuota(USER, 300, { run: f.run, image: "i" }), { ok: false, reason: "exit-1" });
 	f = fakeRun([]);
@@ -273,15 +306,17 @@ test("sync: a changed budget is re-applied at once, whatever the clock", async (
 
 test("sync on Docker Desktop: the helper writes cpu.max and reads it back; a restart that dropped it is found on the re-check and written again", async () => {
 	const c = clock();
-	const f = fakeRun([{ code: 0, stdout: "max 100000" }, { code: 0 }, { code: 0, stdout: "1300000 100000" }, { code: 0, stdout: "max 100000" }, { code: 0 }, { code: 0, stdout: "1300000 100000" }]);
-	const reserve = makeCpuReserve({ run: f.run, image: "pi-job:pinned", now: c.now });
+	// The first helper in a process removes its name first (what the last process may have left), and the first read that
+	// holds lists an older worker's leftovers once (issue #978); the re-check does neither.
+	const f = fakeRun([{ code: 0 }, { code: 0, stdout: "max 100000" }, { code: 0 }, { code: 0, stdout: "1300000 100000" }, { code: 0, stdout: "" }, { code: 0, stdout: "max 100000" }, { code: 0 }, { code: 0, stdout: "1300000 100000" }]);
+	const reserve = makeCpuReserve({ run: f.run, image: "pi-job:pinned", name: NAME, now: c.now });
 	await reserve.sync({ cpuCenti: 1300, plans: [HELPER] });
-	assert.deepEqual(f.calls.map((x) => x.args), [helperArgs({ image: "pi-job:pinned", read: true }), helperArgs({ image: "pi-job:pinned", cpuCenti: 1300 }), helperArgs({ image: "pi-job:pinned", read: true })]);
+	assert.deepEqual(f.calls.map((x) => x.args), [["rm", "-f", NAME], helperArgs({ image: "pi-job:pinned", name: NAME, read: true }), helperArgs({ image: "pi-job:pinned", name: NAME, cpuCenti: 1300 }), helperArgs({ image: "pi-job:pinned", name: NAME, read: true }), [...LEGACY_LIST_ARGS]]);
 	assert.equal(reserve.states()[0].status, "held");
 	c.advance(RESERVE_RECHECK_MS);
 	await reserve.sync({ cpuCenti: 1300, plans: [HELPER] });
-	assert.equal(f.calls.length, 6);
-	assert.deepEqual(f.calls[4].args, helperArgs({ image: "pi-job:pinned", cpuCenti: 1300 }));
+	assert.equal(f.calls.length, 8);
+	assert.deepEqual(f.calls[6].args, helperArgs({ image: "pi-job:pinned", name: NAME, cpuCenti: 1300 }));
 	assert.equal(reserve.states()[0].status, "held");
 });
 
@@ -354,10 +389,10 @@ test("sync with the budget off clears a quota the worker set, so an old drop-in 
 	assert.equal(reserve.states()[0].status, "held");
 	assert.equal(reserve.states()[0].wantCenti, null);
 	// Already none: nothing written.
-	const g = fakeRun([{ code: 0, stdout: "max 100000" }]);
-	const other = makeCpuReserve({ run: g.run, image: "i", now: () => 0 });
+	const g = fakeRun([{ code: 0 }, { code: 0, stdout: "max 100000" }, { code: 0, stdout: "" }]);
+	const other = makeCpuReserve({ run: g.run, image: "i", name: NAME, now: () => 0 });
 	await other.sync({ cpuCenti: Infinity, plans: [HELPER] });
-	assert.equal(g.calls.length, 1);
+	assert.deepEqual(g.calls.map((x) => x.args[0]), ["rm", "run", "ps"], "the name cleared, one read, the leftover listing: no write");
 	assert.equal(other.states()[0].status, "held");
 });
 
@@ -399,4 +434,486 @@ test("sync: one at a time (a sync asked for while one runs is dropped), and a ru
 	// A synchronous throw out of `run` happens before the promise exists, so it reaches the per-plan catch.
 	assert.equal(thrower.states()[0].status, "unreadable");
 	assert.equal(thrower.states()[0].reason, "threw-emfile");
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Issue #978: a daemon too slow to start the helper. Each helper is a `docker run --rm`, whose AutoRemove fires only on
+// exit, so a CLI killed between create and start leaves a `created` container behind.
+
+/**
+ * A fake Docker daemon for the helper: containers by name, where `run --name` of a taken name fails at once with 125
+ * and makes nothing, and `rm -f` deletes. `slow(args)` says how a call ends: `ok`; `timeout` (the CLI killed at its
+ * bound after the create, the container left in `created`, and a write that still applies); `late` (killed before its
+ * create landed, which lands right after the next `rm -f`); `fail` (exit 1, nothing made). The quota is the VM's.
+ */
+function fakeDaemon({ clock: c, quota = "max 100000", slow = () => "ok" } = {}) {
+	const containers = new Map();
+	const calls = [];
+	const state = { quota, most: 0, late: null, anonymous: 0 };
+	const counted = () => (state.most = Math.max(state.most, containers.size));
+	const killed = () => {
+		c.advance(RESERVE_STEP_TIMEOUT_MS);
+		return { code: null, stdout: "", error: { timedOut: true } };
+	};
+	const run = async (bin, args) => {
+		calls.push({ at: c.now(), args: [...args] });
+		const how = slow(args);
+		if (args[0] === "rm" && args[1] === "-f") {
+			if (how === "timeout") return killed();
+			containers.delete(args[2]);
+			if (state.late) containers.set(state.late, "created"), counted(), (state.late = null);
+			return { code: 0, stdout: `${args[2]}\n` };
+		}
+		if (args[0] !== "run") return { code: 0, stdout: "" };
+		const at = args.indexOf("--name");
+		const name = at === -1 ? `anonymous-${state.anonymous++}` : args[at + 1];
+		if (containers.has(name)) return { code: 125, stdout: "" };
+		if (how === "fail") return { code: 1, stdout: "" };
+		if (how === "late") return (state.late = name), killed();
+		containers.set(name, "created");
+		counted();
+		const write = /^echo "(.*)" > \/p\/cpu\.max$/.exec(args.at(-1));
+		if (write) state.quota = write[1];
+		if (how === "timeout") return killed();
+		containers.delete(name);
+		return { code: 0, stdout: write ? "" : `${state.quota}\n` };
+	};
+	return { run, calls, containers, state };
+}
+
+const kinds = (calls) => calls.map((x) => (x.args[0] === "run" ? (x.args.includes("cat") ? "read" : "write") : x.args.slice(0, 2).join(" ")));
+
+test("issue #978: across hours of timed-out helper steps the daemon never holds more than one helper container, and the reserve holds once it answers again", async () => {
+	for (const shape of ["timeout", "late"]) {
+		const c = clock();
+		let slow = true;
+		let n = 0;
+		// Every helper is killed at its bound; in the second shape every other create lands after the rm that followed it.
+		const d = fakeDaemon({ clock: c, slow: (args) => (slow && args[0] === "run" ? (shape === "late" && n++ % 2 ? "late" : "timeout") : "ok") });
+		const name = helperName("box-1");
+		const reserve = makeCpuReserve({ run: d.run, image: "pi-job:pinned", name, now: c.now });
+		const end = c.now() + 6 * 3_600_000;
+		while (c.now() < end) {
+			await reserve.sync({ cpuCenti: 1300, plans: [HELPER] });
+			assert.ok(d.containers.size <= 1, `${shape}: ${d.containers.size} helper containers at ${c.now()}`);
+			c.advance(1_000);
+		}
+		const helpers = d.calls.filter((x) => x.args[0] === "run");
+		assert.ok(helpers.length > 30, `${shape}: ${helpers.length} helpers in six hours`);
+		assert.ok(helpers.every((x) => x.args[x.args.indexOf("--name") + 1] === name), `${shape}: every helper under the one name`);
+		assert.equal(d.state.most, 1, `${shape}: never more than one container at once`);
+		// The daemon answers again: the next attempt clears the name, reads, writes, reads back, and nothing is left.
+		slow = false;
+		c.advance(RESERVE_RECHECK_MS);
+		await reserve.sync({ cpuCenti: 1300, plans: [HELPER] });
+		assert.equal(reserve.states()[0].status, "held", shape);
+		assert.equal(d.containers.size, 0, shape);
+	}
+});
+
+test("issue #978: the first helper in a process removes its name first, a step that did not end cleanly makes the next one do so again, and a clean run does no rm", async () => {
+	const f = fakeRun([{ code: 0 }, { code: 1, stdout: "" }, { code: 0 }, { code: 0 }, { code: 0, stdout: "1300000 100000" }, { code: 0, stdout: "" }, { code: 0, stdout: "1300000 100000" }]);
+	const c = clock();
+	const reserve = makeCpuReserve({ run: f.run, image: "i", name: NAME, now: c.now });
+	await reserve.sync({ cpuCenti: 1300, plans: [HELPER] });
+	// The read exits 1 (it ran, or its create was refused): the write is preceded by an rm; the clean write is not.
+	assert.deepEqual(kinds(f.calls), ["rm -f", "read", "rm -f", "write", "read", "ps -a"]);
+	assert.ok(f.calls.filter((x) => x.args[0] === "rm").every((x) => x.args[2] === NAME && x.timeoutMs === 15_000), "the name, bounded like a step");
+	assert.equal(reserve.states()[0].status, "held");
+	c.advance(RESERVE_RECHECK_MS);
+	await reserve.sync({ cpuCenti: 1300, plans: [HELPER] });
+	assert.deepEqual(kinds(f.calls).slice(6), ["read"], "after clean steps the re-check runs the helper alone");
+	// An rm that fails without timing out does not hold the helper back: a name still taken fails the create at once.
+	const g = fakeRun([{ code: 1 }, { code: 0, stdout: "1300000 100000" }, { code: 0, stdout: "" }]);
+	const other = makeCpuReserve({ run: g.run, image: "i", name: NAME, now: c.now });
+	await other.sync({ cpuCenti: 1300, plans: [HELPER] });
+	assert.deepEqual(kinds(g.calls), ["rm -f", "read", "ps -a"]);
+	assert.equal(other.states()[0].status, "held");
+});
+
+test("issue #978: an rm before a helper that times out runs no helper: unreadable, cleanup-timeout, and the venue backs off", async () => {
+	const c = clock();
+	const logs = [];
+	const d = fakeDaemon({ clock: c, slow: (args) => (args[0] === "rm" ? "timeout" : "ok") });
+	const reserve = makeCpuReserve({ run: d.run, image: "i", name: NAME, now: c.now, log: (e, x) => logs.push([e, x]) });
+	await reserve.sync({ cpuCenti: 1300, plans: [HELPER] });
+	assert.deepEqual(kinds(d.calls), ["rm -f"]);
+	assert.deepEqual([reserve.states()[0].status, reserve.states()[0].reason, reserve.states()[0].retryMs], ["unreadable", "cleanup-timeout", 60_000]);
+	assert.deepEqual(logs.at(-1), ["cpu_reserve_fail_open", { venue: "local", method: "helper", status: "unreadable", wantCenti: 1300, quotaCenti: "unread", reason: "cleanup-timeout", retryMs: 60_000, failOpen: "jobs run under the parent with no quota held across them: the proxy and Valkey are not starved, the host's CPU reserve is not kept" }]);
+	c.advance(60_000);
+	await reserve.sync({ cpuCenti: 1300, plans: [HELPER] });
+	assert.deepEqual(kinds(d.calls), ["rm -f", "rm -f"]);
+	assert.equal(reserve.states()[0].retryMs, 120_000);
+});
+
+test("issue #978: an attempt stops at its first timeout: no write after a timed-out read, no read back after a timed-out write, and a timed-out write is never differs", async () => {
+	const c = clock();
+	// A read that times out: the name removed at once, nothing written.
+	let d = fakeDaemon({ clock: c, slow: (args) => (args[0] === "run" ? "timeout" : "ok") });
+	let reserve = makeCpuReserve({ run: d.run, image: "i", name: NAME, now: c.now });
+	await reserve.sync({ cpuCenti: 1300, plans: [HELPER] });
+	assert.deepEqual(kinds(d.calls), ["rm -f", "read", "rm -f"]);
+	assert.deepEqual([reserve.states()[0].status, reserve.states()[0].reason], ["unreadable", "read-timeout"]);
+	// A write that times out AND applies (the issue's alternation): no read back, unreadable with write-timeout.
+	d = fakeDaemon({ clock: c, slow: (args) => (args[0] === "run" && args.includes("sh") ? "timeout" : "ok") });
+	reserve = makeCpuReserve({ run: d.run, image: "i", name: NAME, now: c.now });
+	await reserve.sync({ cpuCenti: 1300, plans: [HELPER] });
+	assert.deepEqual(kinds(d.calls), ["rm -f", "read", "write", "rm -f"]);
+	assert.equal(d.state.quota, "1300000 100000", "the write applied");
+	const s = reserve.states()[0];
+	assert.deepEqual([s.status, s.reason, s.quotaCenti], ["unreadable", "write-timeout", undefined]);
+	assert.notEqual(s.status, "differs");
+	// The next attempt starts with a read, which finds the write that applied.
+	c.advance(60_000);
+	await reserve.sync({ cpuCenti: 1300, plans: [HELPER] });
+	assert.deepEqual(kinds(d.calls).slice(4), ["rm -f", "read", "ps -a"]);
+	assert.equal(reserve.states()[0].status, "held");
+	// A write refused at once (its name still taken) whose read back shows the wanted quota: held, never differs at the
+	// very quota wanted.
+	const g = fakeRun([{ code: 0 }, { code: 0, stdout: "max 100000" }, { code: 125 }, { code: 0 }, { code: 0, stdout: "1300000 100000" }, { code: 0, stdout: "" }]);
+	const refused = makeCpuReserve({ run: g.run, image: "i", name: NAME, now: c.now });
+	await refused.sync({ cpuCenti: 1300, plans: [HELPER] });
+	assert.deepEqual(kinds(g.calls), ["rm -f", "read", "write", "rm -f", "read", "ps -a"]);
+	assert.deepEqual([refused.states()[0].status, refused.states()[0].quotaCenti], ["held", 1300]);
+	// The same on a systemctl venue: a write that timed out is not read back.
+	const f = fakeRun([{ code: 0, stdout: "infinity" }, { code: null, error: { timedOut: true } }]);
+	const user = makeCpuReserve({ run: f.run, image: "i", name: NAME, now: c.now });
+	await user.sync({ cpuCenti: 300, plans: [USER] });
+	assert.deepEqual(f.calls.map((x) => x.args[1]), ["show", "set-property"]);
+	assert.deepEqual([user.states()[0].status, user.states()[0].reason], ["unreadable", "write-timeout"]);
+});
+
+test("issue #978: only timeouts back off, 60, 120, 240, 480, then 600 s, logged; a held read resets it, and any other failure keeps the minute", async () => {
+	const c = clock();
+	const logs = [];
+	let mode = "timeout";
+	const d = fakeDaemon({ clock: c, slow: (args) => (args[0] === "run" ? mode : "ok") });
+	const reserve = makeCpuReserve({ run: d.run, image: "i", name: NAME, now: c.now, log: (e, x) => logs.push([e, x]) });
+	const tick = async (ms) => {
+		for (const end = c.now() + ms; c.now() < end; c.advance(1_000)) await reserve.sync({ cpuCenti: 1300, plans: [HELPER] });
+	};
+	const reads = () => d.calls.filter((x) => kinds([x])[0] === "read").map((x) => x.at);
+	const gaps = (at) => at.slice(1).map((t, i) => (t - at[i]) / 1_000);
+	await tick(50 * 60_000);
+	// Read to read: the step's own 15 s, then the wait.
+	assert.deepEqual(gaps(reads()).slice(0, 6), [75, 135, 255, 495, 615, 615]);
+	assert.deepEqual(logs.filter(([e]) => e === "cpu_reserve_fail_open").map(([, x]) => x.retryMs), [60_000, 120_000, 240_000, 480_000, 600_000], "a line per step of the schedule, then quiet at the cap");
+	// The daemon answers: the next attempt holds and clears the backoff; a later timeout starts again at a minute.
+	mode = "ok";
+	await tick(11 * 60_000);
+	assert.equal(reserve.states()[0].status, "held");
+	assert.equal(reserve.states()[0].retryMs, undefined);
+	mode = "timeout";
+	while (reserve.states()[0].status === "held") await tick(1_000);
+	assert.deepEqual([reserve.states()[0].reason, reserve.states()[0].retryMs], ["read-timeout", 60_000]);
+	// Failures that answer (exit 1) are retried every minute, however many there are.
+	const e = fakeDaemon({ clock: c, slow: (args) => (args[0] === "run" ? "fail" : "ok") });
+	const answering = makeCpuReserve({ run: e.run, image: "i", name: NAME, now: c.now });
+	const starts = [];
+	for (const end = c.now() + 4 * 60_000; c.now() <= end; c.advance(1_000)) {
+		const before = e.calls.length;
+		await answering.sync({ cpuCenti: 1300, plans: [HELPER] });
+		if (e.calls.length > before) starts.push(c.now());
+	}
+	assert.deepEqual(gaps(starts), [60, 60, 60, 60]);
+	assert.deepEqual([answering.states()[0].status, answering.states()[0].reason, answering.states()[0].retryMs], ["unreadable", "write-exit-1", undefined]);
+});
+
+test("issue #978: a read back that times out after a write that worked is unreadable with read-timeout and backs off", async () => {
+	const c = clock();
+	const timedOut = { code: null, error: { timedOut: true } };
+	const f = fakeRun([{ code: 0 }, { code: 0, stdout: "max 100000" }, { code: 0 }, timedOut, { code: 0 }, { code: 0 }, { code: 0, stdout: "max 100000" }, { code: 0 }, timedOut, { code: 0 }]);
+	const reserve = makeCpuReserve({ run: f.run, image: "i", name: NAME, now: c.now });
+	await reserve.sync({ cpuCenti: 1300, plans: [HELPER] });
+	assert.deepEqual(kinds(f.calls), ["rm -f", "read", "write", "read", "rm -f"]);
+	assert.deepEqual([reserve.states()[0].status, reserve.states()[0].reason, reserve.states()[0].retryMs], ["unreadable", "read-timeout", 60_000]);
+	c.advance(60_000);
+	await reserve.sync({ cpuCenti: 1300, plans: [HELPER] });
+	assert.equal(reserve.states()[0].retryMs, 120_000);
+});
+
+test("issue #978: a timed-out read where only root may set the quota backs off too", async () => {
+	const c = clock();
+	const timedOut = { code: null, error: { timedOut: true } };
+	const f = fakeRun([timedOut, timedOut]);
+	const reserve = makeCpuReserve({ run: f.run, image: "i", name: NAME, now: c.now });
+	await reserve.sync({ cpuCenti: 300, plans: [SYSTEM] });
+	assert.deepEqual([reserve.states()[0].status, reserve.states()[0].reason, reserve.states()[0].retryMs], ["unreadable", "timeout", 60_000]);
+	c.advance(60_000);
+	await reserve.sync({ cpuCenti: 300, plans: [SYSTEM] });
+	assert.equal(f.calls.length, 2);
+	assert.equal(reserve.states()[0].retryMs, 120_000);
+});
+
+test("issue #978: when the rm before the read back times out, no read back runs: cleanup-timeout, and the venue backs off", async () => {
+	const c = clock();
+	// The write exits 1 (dirty), so the read back must clear the name first, and that rm times out.
+	const f = fakeRun([{ code: 0 }, { code: 0, stdout: "max 100000" }, { code: 1 }, { code: null, error: { timedOut: true } }]);
+	const reserve = makeCpuReserve({ run: f.run, image: "i", name: NAME, now: c.now });
+	await reserve.sync({ cpuCenti: 1300, plans: [HELPER] });
+	assert.deepEqual(kinds(f.calls), ["rm -f", "read", "write", "rm -f"]);
+	assert.deepEqual([reserve.states()[0].status, reserve.states()[0].reason, reserve.states()[0].retryMs], ["unreadable", "cleanup-timeout", 60_000]);
+});
+
+test("guardHelperRun: a helper that throws marks the name dirty and is answered, never thrown", async () => {
+	const calls = [];
+	const run = async (bin, args) => {
+		calls.push(args.slice(0, 2).join(" "));
+		if (args[0] === "run") throw Object.assign(new Error("x"), { code: "EMFILE" });
+		return { code: 0, stdout: "" };
+	};
+	const guarded = guardHelperRun({ run, name: NAME });
+	const first = await guarded("docker", ["run", "--rm"], { timeoutMs: 1 });
+	assert.equal(stepFailure(first, "docker"), "spawn-emfile");
+	await guarded("docker", ["run", "--rm"], { timeoutMs: 1 });
+	assert.deepEqual(calls, ["rm -f", "run --rm", "rm -f", "run --rm"]);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Issue #978: the unnamed helpers an older worker left, removed by exact fingerprint until one pass finishes.
+
+const NOW = 1_800_000_000_000;
+const PARENT = "/sys/fs/cgroup/pidispatch.slice";
+// Two images as Docker 28.0.4 printed them: one with no labels (its config has no `Labels` key, and its containers `{}`),
+// one with labels, which its containers inherit into `.Config.Labels`.
+const BARE_IMAGE = "sha256:bf8527eb54c3680e728d5b4b383a8ba730d72dae7236fbc8dff97ed6b224a731";
+const LABELLED_IMAGE = "sha256:cfbf02b8c072ade254641df8612e717166c87d56425d0959d7f197752bcf44ce";
+const LAB_LABELS = { "dev.pi-dispatch.lab": "1", "org.opencontainers.image.title": "lab" };
+const IMAGES = { [BARE_IMAGE]: { Id: BARE_IMAGE, Config: {} }, [LABELLED_IMAGE]: { Id: LABELLED_IMAGE, Config: { Labels: LAB_LABELS } } };
+const id = (n) => n.toString(16).padStart(64, "0");
+// Docker prints nanoseconds (`2026-11-21T11:08:39.557881254Z`); these carry nine digits too, exact to the millisecond.
+const createdAgo = (ms) => `${new Date(NOW - ms).toISOString().slice(0, 23)}000000Z`;
+const plain = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+const merged = (base, over) => Object.fromEntries([...new Set([...Object.keys(base), ...Object.keys(over)])].map((k) => [k, plain(base[k]) && plain(over[k]) ? merged(base[k], over[k]) : Object.hasOwn(over, k) ? over[k] : base[k]]));
+
+/**
+ * An older worker's read helper as `docker container inspect` printed it (Docker 28.0.4, made with 5.4.2's argv;
+ * only the keys the format reads). `HostConfig` has no `Mounts` key: the daemon omits it without a `--mount`.
+ */
+function readHelper(n, over = {}) {
+	const doc = {
+		Id: id(n),
+		Created: createdAgo(2 * 3_600_000),
+		State: { Status: "created" },
+		Image: BARE_IMAGE,
+		Config: { User: "0:0", Entrypoint: ["cat"], Cmd: ["/p/cpu.max"], Labels: {} },
+		HostConfig: { Binds: [`${PARENT}:/p:ro`], CgroupParent: "pidispatch.slice", AutoRemove: true, NetworkMode: "none", ReadonlyRootfs: true },
+		Mounts: [{ Type: "bind", Source: PARENT, Destination: "/p", Mode: "ro", RW: false, Propagation: "rprivate" }],
+	};
+	return merged(doc, over);
+}
+
+/** Its write helper, the same: `sh -c`, and the parent bound read-write. */
+function writeHelper(n, line = "150000 100000", over = {}) {
+	return merged(readHelper(n, { Config: { Entrypoint: ["sh"], Cmd: ["-c", `echo "${line}" > /p/cpu.max`] }, HostConfig: { Binds: [`${PARENT}:/p`] }, Mounts: [{ Type: "bind", Source: PARENT, Destination: "/p", Mode: "", RW: true, Propagation: "rprivate" }] }), over);
+}
+
+/**
+ * The docker CLI's inspect `--format`, as far as these formats use it: `{{json (index . "K" ...)}}`, whose absent last
+ * key answers null, and a dotted `{{json .K.L}}`, whose absent key refuses the template, as the CLI does when it falls
+ * back to the raw JSON with missing keys as errors (Docker 28.0.4 on `.HostConfig.Mounts`: exit 1, no output). Null
+ * when refused.
+ */
+function render(format, doc) {
+	let refused = false;
+	const out = format.replace(/\{\{json (?:\(index \. ((?:"[^"]+" ?)+)\)|((?:\.[A-Za-z]+)+))\}\}/g, (_, keys, dotted) => {
+		const path = keys ? [...keys.matchAll(/"([^"]+)"/g)].map((m) => m[1]) : dotted.split(".").slice(1);
+		let v = doc;
+		for (const [i, k] of path.entries()) {
+			if (!plain(v)) return (refused = true), "";
+			if (!Object.hasOwn(v, k)) return keys && i === path.length - 1 ? "null" : ((refused = true), "");
+			v = v[k];
+		}
+		return JSON.stringify(v ?? null);
+	});
+	return refused || out.includes("{{") ? null : out;
+}
+const rowOf = (doc) => JSON.parse(render(LEGACY_INSPECT_FORMAT, doc));
+
+/**
+ * A fake daemon holding real-shaped containers: `ps` lists the `created` ones as the CLI prints them (full id, the helper
+ * label, the quoted command), `container inspect` renders the given format per container (exit 1 when one is refused or
+ * gone), `image inspect` the same over the image, a plain `rm` removes what has not started (`startsAt`: one that
+ * started between the inspect and the rm) and prints its id. `slow(args, n)` makes the n-th call `timeout` or `refuse`.
+ */
+function fakeLeftovers(docs, { images = IMAGES, slow = () => "ok", quota = "1300000 100000" } = {}) {
+	const live = new Map(docs.map((d) => [d.Id, d]));
+	const calls = [];
+	const run = async (bin, args, opts) => {
+		calls.push({ args: [...args], opts });
+		const how = slow(args, calls.length - 1);
+		if (how === "timeout") return { code: null, stdout: "", error: { timedOut: true } };
+		if (how === "refuse") return { code: 1, stdout: "" };
+		if (args[0] === "ps") {
+			const command = (d) => JSON.stringify([d.Config.Entrypoint[0], ...[...d.Config.Entrypoint.slice(1), ...d.Config.Cmd].map((a) => (a.includes(" ") ? `'${a}'` : a))].join(" "));
+			return { code: 0, stdout: [...live.values()].filter((d) => d.State.Status === "created" || d.listedCreated).map((d) => `${d.Id}\t${d.Config.Labels?.["pi.dispatch.helper"] ?? ""}\t${command(d)}`).join("\n") };
+		}
+		if (args[0] === "container" && args[1] === "inspect") {
+			const out = args.slice(4).map((x) => (live.has(x) ? render(args[3], live.get(x)) : null));
+			return { code: out.every((o) => o !== null) ? 0 : 1, stdout: out.filter((o) => o !== null).join("\n") };
+		}
+		if (args[0] === "image" && args[1] === "inspect") {
+			const out = Object.hasOwn(images, args[4]) ? render(args[3], images[args[4]]) : null;
+			return out === null ? { code: 1, stdout: "" } : { code: 0, stdout: `${out}\n` };
+		}
+		if (args[0] === "rm" && args[1] !== "-f") {
+			const gone = args.slice(1).filter((x) => live.has(x) && !live.get(x).startsAt);
+			for (const x of gone) live.delete(x);
+			return { code: gone.length === args.length - 1 ? 0 : 1, stdout: gone.map((x) => `${x}\n`).join("") };
+		}
+		if (args[0] === "rm") return { code: 0, stdout: "" };
+		if (args[0] === "run") return quota === null ? { code: 1, stdout: "" } : { code: 0, stdout: `${quota}\n` };
+		return { code: 0, stdout: "" };
+	};
+	return { run, calls, live };
+}
+
+test("isLegacyHelper on what the format prints from Docker's own JSON: exactly an older worker's read or write helper, never started, ten minutes old, no label beyond its image's", () => {
+	const at = (doc) => ({ imageLabels: IMAGES[doc.Image]?.Config.Labels ?? null, nowMs: NOW });
+	const is = (doc, opts = at(doc)) => isLegacyHelper(rowOf(doc), opts);
+	// The format reads every container, the one with no `HostConfig.Mounts` included; a dotted path to it would not.
+	assert.equal(rowOf(readHelper(1)).hostMounts, null);
+	assert.equal(render('{{json .HostConfig.Mounts}}', readHelper(1)), null, "the dotted form the CLI refused");
+	assert.equal(is(readHelper(1)), true, "the read helper");
+	assert.equal(is(writeHelper(2)), true, "the write helper");
+	assert.equal(is(writeHelper(3, "max 100000")), true, "the write that clears it");
+	assert.equal(is(readHelper(4, { Image: LABELLED_IMAGE, Config: { Labels: LAB_LABELS } })), true, "a read on an image with labels");
+	assert.equal(is(writeHelper(5, "250000 100000", { Image: LABELLED_IMAGE, Config: { Labels: LAB_LABELS } })), true, "a write on an image with labels");
+	assert.equal(is(readHelper(6, { Created: createdAgo(LEGACY_HELPER_MIN_AGE_MS) })), true, "ten minutes old exactly");
+	const decoys = {
+		"labelled helper": readHelper(9, { Config: { Labels: { "pi.dispatch.helper": "cpu-reserve" } } }),
+		"a label of its own": readHelper(9, { Config: { Labels: { own: "1" } } }),
+		"a label of its own on a labelled image": readHelper(9, { Image: LABELLED_IMAGE, Config: { Labels: { ...LAB_LABELS, own: "1" } } }),
+		"an image label changed": readHelper(9, { Image: LABELLED_IMAGE, Config: { Labels: { ...LAB_LABELS, "dev.pi-dispatch.lab": "2" } } }),
+		"another file": readHelper(9, { Config: { Cmd: ["/p/other"] } }),
+		"two files": readHelper(9, { Config: { Cmd: ["/p/cpu.max", "/etc/hostname"] } }),
+		"another entrypoint": readHelper(9, { Config: { Entrypoint: ["/bin/cat"] } }),
+		"a longer shell": writeHelper(9, "1 100000", { Config: { Cmd: ["-c", 'echo "1 100000" > /p/cpu.max; true'] } }),
+		"another mount": readHelper(9, { HostConfig: { Binds: ["/sys/fs/cgroup/other.slice:/p:ro"] }, Mounts: [{ Type: "bind", Source: "/sys/fs/cgroup/other.slice", Destination: "/p", Mode: "ro", RW: false }] }),
+		"a second bind": readHelper(9, { HostConfig: { Binds: [`${PARENT}:/p:ro`, "/tmp:/t"] }, Mounts: [{ Type: "bind", Source: PARENT, Destination: "/p", Mode: "ro", RW: false }, { Type: "bind", Source: "/tmp", Destination: "/t", Mode: "", RW: true }] }),
+		"a --mount": readHelper(9, { HostConfig: { Mounts: [{ Type: "bind", Source: "/tmp", Target: "/t" }] } }),
+		"a read bound read-write": readHelper(9, { HostConfig: { Binds: [`${PARENT}:/p`] }, Mounts: [{ Type: "bind", Source: PARENT, Destination: "/p", Mode: "", RW: true }] }),
+		"a write bound read-only": writeHelper(9, "150000 100000", { HostConfig: { Binds: [`${PARENT}:/p:ro`] }, Mounts: [{ Type: "bind", Source: PARENT, Destination: "/p", Mode: "ro", RW: false }] }),
+		"a read whose mount is writable": readHelper(9, { Mounts: [{ Type: "bind", Source: PARENT, Destination: "/p", Mode: "", RW: true }] }),
+		"a volume at /p": readHelper(9, { Mounts: [{ Type: "volume", Name: "v", Source: PARENT, Destination: "/p", RW: false }] }),
+		running: readHelper(9, { State: { Status: "running" } }),
+		exited: readHelper(9, { State: { Status: "exited" } }),
+		young: readHelper(9, { Created: createdAgo(LEGACY_HELPER_MIN_AGE_MS - 1_000) }),
+		"unparseable created": readHelper(9, { Created: "soon" }),
+		"another parent": readHelper(9, { HostConfig: { CgroupParent: "user.slice" } }),
+		"another user": readHelper(9, { Config: { User: "1000:1000" } }),
+		"not auto-removed": readHelper(9, { HostConfig: { AutoRemove: false } }),
+		"a network": readHelper(9, { HostConfig: { NetworkMode: "bridge" } }),
+		"a writable root": readHelper(9, { HostConfig: { ReadonlyRootfs: false } }),
+	};
+	for (const [what, doc] of Object.entries(decoys)) assert.equal(is(doc), false, what);
+	assert.equal(is(readHelper(9), { imageLabels: undefined, nowMs: NOW }), false, "an image whose labels were not read");
+});
+
+test("removeLegacyHelpers: removes exactly the fingerprints, with a plain rm in chunks of 20, every call bounded, and leaves the decoys", async () => {
+	const helpers = Array.from({ length: 43 }, (_, i) => {
+		const image = i % 3 === 0 ? { Image: LABELLED_IMAGE, Config: { Labels: LAB_LABELS } } : {};
+		return i % 2 ? writeHelper(100 + i, `${1700000 + i} 100000`, image) : readHelper(100 + i, image);
+	});
+	const decoys = [
+		readHelper(1, { Config: { Labels: { "pi.dispatch.helper": "cpu-reserve" } } }),
+		readHelper(2, { Config: { Cmd: ["/p/cpu.max", "/etc/hostname"] } }),
+		readHelper(3, { HostConfig: { Binds: ["/sys/fs/cgroup/other.slice:/p:ro"] }, Mounts: [{ Type: "bind", Source: "/sys/fs/cgroup/other.slice", Destination: "/p", RW: false }] }),
+		readHelper(4, { State: { Status: "running" }, listedCreated: true }),
+		readHelper(5, { Created: createdAgo(60_000) }),
+		readHelper(6, { Image: `sha256:${"b".repeat(64)}` }),
+		readHelper(7, { Config: { Entrypoint: ["valkey-server"], Cmd: [] } }),
+		readHelper(8, { HostConfig: { Binds: [`${PARENT}:/p`] }, Mounts: [{ Type: "bind", Source: PARENT, Destination: "/p", RW: true }] }),
+	];
+	const d = fakeLeftovers([...helpers, ...decoys]);
+	const out = await removeLegacyHelpers({ run: d.run, now: () => NOW });
+	assert.deepEqual(out, { complete: true, reason: null, removed: 43, failed: 0 });
+	assert.deepEqual([...d.live.keys()].sort(), decoys.map((r) => r.Id).sort());
+	assert.deepEqual(d.calls[0].args, ["ps", "-a", "--filter", "status=created", "--no-trunc", "--format", '{{.ID}}\t{{.Label "pi.dispatch.helper"}}\t{{.Command}}']);
+	const rms = d.calls.filter((x) => x.args[0] === "rm");
+	assert.deepEqual(rms.map((x) => x.args.length - 1), [20, 20, 3]);
+	assert.ok(rms.every((x) => !x.args.includes("-f") && !x.args.includes("--force")), "never a forced rm");
+	assert.ok(d.calls.every((x) => x.opts.timeoutMs === 15_000), "every call bounded");
+	assert.ok(d.calls.filter((x) => x.args[0] === "ps" || (x.args[1] === "inspect" && x.args[0] === "container")).every((x) => x.opts.maxBuffer >= 1024 * 1024), "the long outputs get room");
+	assert.deepEqual(d.calls.filter((x) => x.args[0] === "image").map((x) => x.args.at(-1)).sort(), [BARE_IMAGE, LABELLED_IMAGE, `sha256:${"b".repeat(64)}`].sort(), "each image inspected once");
+	assert.ok(!d.calls.some((x) => x.args.some((a) => String(a).startsWith("volume="))), "no volume filter");
+	// One that starts between the inspect and the rm is refused by the plain rm and counted, never forced.
+	const e = fakeLeftovers([readHelper(1), readHelper(2, { startsAt: true })]);
+	assert.deepEqual(await removeLegacyHelpers({ run: e.run, now: () => NOW }), { complete: true, reason: null, removed: 1, failed: 1 });
+	assert.deepEqual([...e.live.keys()], [id(2)]);
+	// Nothing listed is a pass that finished.
+	assert.deepEqual(await removeLegacyHelpers({ run: fakeLeftovers([]).run, now: () => NOW }), { complete: true, reason: null, removed: 0, failed: 0 });
+});
+
+test("removeLegacyHelpers: a timeout at any step, a listing that failed, or an inspect that answered without rows cuts the pass short, and nothing runs after it", async () => {
+	// 25 leftovers: two chunks, so a pass that went on after the cut would show a later call.
+	const docs = Array.from({ length: 25 }, (_, i) => readHelper(200 + i, i < 20 ? {} : { Image: LABELLED_IMAGE, Config: { Labels: LAB_LABELS } }));
+	const cases = [
+		["timeout", (a) => a[0] === "ps", "list-timeout"],
+		["refuse", (a) => a[0] === "ps", "list-exit-1"],
+		["timeout", (a) => a[0] === "container", "inspect-timeout"],
+		["refuse", (a) => a[0] === "container", "inspect-exit-1"],
+		["timeout", (a) => a[0] === "image", "image-timeout"],
+		["timeout", (a) => a[0] === "rm", "rm-timeout"],
+	];
+	for (const [how, at, reason] of cases) {
+		let fired = -1;
+		const d = fakeLeftovers(docs, { slow: (args, n) => (fired === -1 && at(args) ? ((fired = n), how) : "ok") });
+		const out = await removeLegacyHelpers({ run: d.run, now: () => NOW });
+		assert.deepEqual([out.complete, out.reason], [false, reason], reason);
+		assert.equal(d.calls.length, fired + 1, `${reason}: no call after the cut`);
+		assert.deepEqual([out.removed, out.failed], reason === "rm-timeout" ? [0, 20] : [0, 0], reason);
+	}
+	// An inspect that exits 0 and prints no row of its chunk established nothing either.
+	const e = fakeLeftovers(docs, { slow: () => "ok" });
+	const silent = async (bin, args, opts) => (args[0] === "container" ? { code: 0, stdout: "" } : e.run(bin, args, opts));
+	assert.deepEqual(await removeLegacyHelpers({ run: silent, now: () => NOW }), { complete: false, reason: "inspect-no-rows", removed: 0, failed: 0 });
+});
+
+test("issue #978: the leftover pass runs only after a read that holds, again after each until one finishes, then never; a pass cut short is said once", async () => {
+	const c = clock(NOW);
+	const logs = [];
+	const said = () => logs.filter(([e]) => e === "cpu_reserve_leftovers_removed").map(([, x]) => x);
+	// A read that does not hold lists nothing.
+	const d = fakeLeftovers([readHelper(1), readHelper(2)], { quota: null });
+	const reserve = makeCpuReserve({ run: d.run, image: "i", name: NAME, now: c.now, log: (e, x) => logs.push([e, x]) });
+	await reserve.sync({ cpuCenti: 1300, plans: [HELPER] });
+	assert.equal(reserve.states()[0].status, "unreadable");
+	assert.equal(d.calls.filter((x) => x.args[0] === "ps").length, 0, "not on a daemon whose read did not hold");
+	assert.equal(d.live.size, 2);
+	// 25 leftovers. The first pass removes the first chunk and its second inspect times out; the second pass's listing
+	// times out; the third finishes. Cut short is said once, with what was removed so far; the end once, with the total.
+	let inspects = 0;
+	let lists = 0;
+	const docs = Array.from({ length: 25 }, (_, i) => readHelper(300 + i));
+	const e = fakeLeftovers(docs, { slow: (args) => (args[0] === "container" && ++inspects === 2 ? "timeout" : args[0] === "ps" && ++lists === 2 ? "timeout" : "ok") });
+	const healthy = makeCpuReserve({ run: e.run, image: "i", name: NAME, now: c.now, log: (ev, x) => logs.push([ev, x]) });
+	const pass = async () => {
+		c.advance(RESERVE_RECHECK_MS);
+		await healthy.sync({ cpuCenti: 1300, plans: [HELPER] });
+		assert.equal(healthy.states()[0].status, "held");
+	};
+	await pass();
+	assert.equal(e.live.size, 5);
+	assert.deepEqual(said(), [{ venue: "local", removed: 20, failed: 0, complete: false, reason: "inspect-timeout" }]);
+	await pass();
+	assert.equal(said().length, 1, "a second pass cut short is not said again");
+	await pass();
+	assert.equal(e.live.size, 0);
+	assert.deepEqual(said().at(-1), { venue: "local", removed: 25, failed: 0, complete: true });
+	await pass();
+	assert.equal(e.calls.filter((x) => x.args[0] === "ps").length, 3, "after one pass finished, never again");
+	assert.equal(said().length, 2);
+	// A pass that finds nothing finishes quietly.
+	const f = fakeLeftovers([]);
+	const quiet = makeCpuReserve({ run: f.run, image: "i", name: NAME, now: c.now, log: (ev, x) => logs.push([ev, x]) });
+	await quiet.sync({ cpuCenti: 1300, plans: [HELPER] });
+	c.advance(RESERVE_RECHECK_MS);
+	await quiet.sync({ cpuCenti: 1300, plans: [HELPER] });
+	assert.equal(f.calls.filter((x) => x.args[0] === "ps").length, 1);
+	assert.equal(said().length, 2);
+	// A systemctl venue has no helper and lists nothing.
+	const g = fakeRun([{ code: 0, stdout: "3s" }]);
+	await makeCpuReserve({ run: g.run, image: "i", name: NAME, now: c.now }).sync({ cpuCenti: 300, plans: [USER] });
+	assert.equal(g.calls.length, 1);
 });

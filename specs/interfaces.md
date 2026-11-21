@@ -2254,19 +2254,47 @@ a sandbox not confirmed gone marks the run's result `lingering`, its exit code u
       rootless Podman: the worker runs `systemctl --user set-property pidispatch.slice CPUQuota=<budget x 100>%`
       (persistent, the user manager delegates `cpu`) and reads it back with `systemctl --user show -P
       CPUQuotaPerSecUSec pidispatch.slice`; Docker with the cgroupfs driver (Docker Desktop): the ONE-SHOT HELPER
-      `docker run --rm --pull=never --user=0:0 --cap-drop=ALL --security-opt no-new-privileges --network=none
-      --read-only --cgroup-parent=pidispatch.slice -v /sys/fs/cgroup/pidispatch.slice:/p --entrypoint sh <job image>
-      -c 'echo "<budget x 1000> 100000" > /p/cpu.max'` and a read-only `cat` of the same file through `:ro` to verify;
+      `docker run --rm --name pi-dispatch-cpu-reserve-<hex8> --label pi.dispatch.helper=cpu-reserve --pull=never
+      --user=0:0 --cap-drop=ALL --security-opt no-new-privileges --network=none --read-only
+      --cgroup-parent=pidispatch.slice -v /sys/fs/cgroup/pidispatch.slice:/p --entrypoint sh <job image> -c 'echo
+      "<budget x 1000> 100000" > /p/cpu.max'` and a read-only `cat` of the same file through `:ro` to verify;
       it mounts no other `/sys/fs/cgroup` path (a missing bind source there becomes a stray cgroup), runs the job image
       the worker already pins, and is not persistent, so it is read again every ten minutes (the facts' own cadence)
-      and written again when a Docker Desktop restart dropped it; Docker with the systemd driver and rootful Podman:
+      and written again when a Docker Desktop restart dropped it. ONE NAME PER ROLE (issue #978): `<hex8>` is the
+      first eight hex digits of the sha256 of `PI_WORKER_NAME` (empty when it is not declared), and doctor's read runs
+      as `pi-dispatch-cpu-reserve-doctor-<hex8>`. `--rm` acts only when a container exits, so a CLI killed at its bound
+      between create and start used to leave a `created` container for good. Now a step that did not end cleanly marks
+      the name dirty, a timeout removes it at once (`rm -f <name>`, bounded at 15 s; a missing name exits 0, measured
+      on Docker 28.0.4), and while it is dirty `rm -f` runs before the next helper; an rm that times out runs no helper
+      (`unreadable`, reason `cleanup-timeout`), and a name still taken fails the next create at once with exit 125
+      ("Conflict", measured) and makes nothing, so a daemon holds at most one helper container per name. Residual: two
+      workers on one daemon without `PI_WORKER_NAME` share one name, so one's `rm -f` can remove the other's helper
+      mid-step; that costs spurious step failures, never a second container. An attempt stops at its first timed-out
+      step: no write after it, and no read back after a timed-out write, which is `unreadable` with `write-timeout` (it
+      may still apply; the next read finds it). Only a timeout backs the venue off, 60, 120, 240, 480, then 600 s,
+      until a read holds; any other failure is retried after 60 s. After a read that holds, the worker removes what an
+      older worker left unnamed, and again after each later one until a pass finishes, then never in that process: a
+      container listed `created` whose entrypoint and command are `cat /p/cpu.max` with the bind
+      `/sys/fs/cgroup/pidispatch.slice:/p:ro`, or `sh -c 'echo "<n or max> 100000" > /p/cpu.max'` with
+      `/sys/fs/cgroup/pidispatch.slice:/p`, that bind its only mount (read-only for the read, read-write for the write),
+      under `pidispatch.slice`, user `0:0`, AutoRemove, network `none`, a read-only root, no label beyond its image's
+      own (a container inherits its image's labels, measured), and at least ten minutes old by the worker's clock,
+      with a plain `docker rm` (never `-f`, so one that started meanwhile is refused) in chunks of 20, every call
+      bounded. The inspect reads every value through `index`: the CLI refuses a dotted path to a key the daemon omits
+      (`HostConfig.Mounts` without a `--mount`, exit 1 with no output, measured). A pass cut short (a failed listing,
+      any step that timed out, an inspect that printed no row) establishes nothing and is tried again after the next
+      read that holds. Logged as `cpu_reserve_leftovers_removed { venue, removed, failed, complete }`: once when a pass
+      finishes having removed or failed something (`removed` the process's total, `failed` what that pass left), and
+      at most once for a pass cut short, with `complete: false` and `reason` `<list, inspect, image or rm>-<failure>`;
+      Docker with the systemd driver and rootful Podman:
       only root may set it, so the worker only READS `systemctl show -P CPUQuotaPerSecUSec pidispatch.slice`
       (`infinity` when unset, and only where the daemon is observed on this host) and doctor prints `sudo systemctl
       set-property pidispatch.slice CPUQuota=<budget x 100>%`. With `PI_HOST_CPU_BUDGET=off` the wanted quota is
       none, and the worker clears what it set. A quota not held fails OPEN: the worker logs `cpu_reserve_fail_open {
-      venue, method, status, wantCenti, quotaCenti, reason, failOpen }` (and `cpu_reserve` once held), jobs still run
-      under the parent, and doctor warns "no host CPU reserve across jobs" with the fix. Where Podman reports a cgroup
-      manager other than systemd the parent is NOT passed (libpod would put a rootless container at `/<parent>/...` from
+      venue, method, status, wantCenti, quotaCenti, reason, failOpen }`, with `retryMs` while timeouts back the venue
+      off (one line per step of that schedule), and `cpu_reserve` once held; jobs still run under the parent, and
+      doctor warns "no host CPU reserve across jobs" with the fix. Where Podman reports a cgroup manager other than
+      systemd the parent is NOT passed (libpod would put a rootless container at `/<parent>/...` from
       the hierarchy's root, which the account cannot create; source, not measured) and the job's shares are capped at
       1024 instead. `--cgroup-parent` is refused in `dockerExtra` in both spellings. No aggregate `memory.max` is set:
       a parent memory limit makes the kernel kill the LARGEST job in the parent, not the one that grew (measured), so
@@ -14784,6 +14812,7 @@ and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` are UNCHANGED, checked: no file shape, wr
 
 | Date | Change |
 |---|---|
+| 2026-11-21 (#978) | **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**, the CPU reserve's helper: the quoted argv gains `--name pi-dispatch-cpu-reserve-<hex8>` (sha256 of `PI_WORKER_NAME`, doctor's `pi-dispatch-cpu-reserve-doctor-<hex8>`) and `--label pi.dispatch.helper=cpu-reserve`; the one-per-name rule (a dirty name, `rm -f` before the next helper and at once after a timeout, `cleanup-timeout` when that rm times out, exit 125 for a name still taken); an attempt stops at its first timed-out step and a timed-out write is `unreadable` with `write-timeout`, never `differs`; only timeouts back off (60, 120, 240, 480, then 600 s, with `retryMs` on `cpu_reserve_fail_open`); the removal of an older worker's unnamed helpers by exact fingerprint (each role's own bind and mount, labels exactly the image's, since a container inherits them) with a plain `rm`, tried after each read that holds until a pass finishes, through an inspect format that reads every value with `index` because the CLI refuses a dotted path to a key the daemon omits (measured on Docker 28.0.4), logged `cpu_reserve_leftovers_removed` with `complete` and, for a pass cut short, `reason`; the residual of two undeclared workers on one daemon sharing one name. UNCHANGED, checked: the job argv, `--cgroup-parent` on every job container, the reserve's methods per venue and the registry's `cpuReserve` statuses (`held`, `unset`, `differs`, `unreadable`, `unmanaged`, `no-parent`, `budget-unknown`). **Code evidence**: worker/src/cpu-reserve.mjs -> helperName, helperArgs, guardHelperRun, makeCpuReserve, removeLegacyHelpers, isLegacyHelper; worker/src/start.mjs -> startWorker; worker/src/doctor.mjs -> doctorCpuReserve, cpuReserveChecks. |
 | 2026-11-21 (#961) | **`INT-UPDATES-KEYS` AMENDED**: `readCanaryFacts`' `{ strict }`, and what the console's facts read says of a canary's facts or a host's applied rows it could not read (`factsUnread`). The keys, every row's shape and the `null` answers of `readDesired`, `readApplied` and `readLooks` UNCHANGED, checked (`worker/src/updates-reconcile.mjs` reads them). **`INT-QUESTION-GROUPS` AMENDED**: the console's grouping job takes its id from the confirm's ticket. The job's data and its one attempt UNCHANGED, checked. **`INT-CONSOLE-AUDIT-LOG` AMENDED**: an agent's failed row carries a closed word, and a write that was sent and not confirmed is `action-unconfirmed`, no longer `action-refused`. A person's failed row is UNCHANGED, checked: the sentence the confirm said. The row's fields and the chain are unchanged. **Code evidence**: `worker/src/updates.mjs` -> `readCanaryFacts`; `admin/src/updates-view.mjs` -> `readUpdates`; `admin/src/zero-touch-data.mjs` -> `makeZeroTouchService` (`apply`); `worker/src/queue.mjs` -> `enqueueQuestionGroupJob`; `admin/src/console/actions.mjs` -> `agentFailure`, `AGENT_REFUSED`, `AGENT_UNCONFIRMED`; `admin/src/tool-actions.mjs` -> `executeToolAction`. |
 | 2026-11-21 (#962) | **`INT-CONSOLE-STATE-API` AMENDED**: `activeUnknown`, a boolean beside `parkedUnknown`, true when the active list is not whole; an added key within `version: 1`. CORRECTED: a scheduler's `stalls` is null, not 0, where its counter could not be read. **`INT-CONSOLE-EVENT-STREAM` AMENDED**: NEW `event: unread` (data `{}`), a page stream's state in place of `fresh` before panels that say what could not be read (a degraded draw, a good render over a snapshot with a part missing); CORRECTED: those panels were described as sent with no state before them. UNCHANGED, checked: `STATE_VERSION`, `event: stale` and its data, `event: fresh`, the `p-nav-parked` panel (its html is as before; hiding it while a page is unread is the page script's). **Code evidence**: `admin/src/console/live.mjs` -> `stateOf`, `drawDegraded`; `admin/src/read-model.mjs` -> `activeUnreachable`. |
 | 2026-11-20 (#920 follow-up) | Added `INT-FORGE-TERMINAL-RECEIPT`, a bounded fixed two-line scheduling-only comment bound to an original GitHub poll label job. UNCHANGED, checked: `INT-FORGE-STATUS-COMMENT-EDIT`, `INT-RUN-HISTORY-FILE-CONTRACT`, job-data and queue contracts; no new store, migration or permission. Missing receipts remain unknown. |
