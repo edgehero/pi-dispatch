@@ -40,21 +40,27 @@ test("watch CLI awaits puller's done and passes the supplied environment", async
 });
 test("puller stops promptly and removes its timer without owning injected clients", async () => {
 	const deps = setup(); let disconnected = false; deps.redis.disconnect = () => { disconnected = true; };
-	const puller = await startWatchPuller({}, { ...deps, loadConfig: () => deps.cfg, reload: () => ({ ok: true }), signals: false, out: () => {} });
+	const puller = await startWatchPuller({}, { ...deps, loadConfig: () => deps.cfg, fsDeps: { fileExists: () => false, readFile: () => "" }, signals: false, out: () => {} });
 	puller.stop(); await puller.done; assert.equal(disconnected, false);
 });
 test("the collector starts on its real loader where a source's push secret is unset, and its reload takes the file too (issue #994)", { timeout: 10_000 }, async () => {
 	// It pulls and reads no push secret, so nothing it loads judges one: only `serve`, which verifies pushes, refuses it.
+	// The edit after the first pass adds a second source whose secret is unset, which its follower takes for `watch`.
 	const dir = tempDir("watch-puller-secret-");
 	const path = join(dir, "triggers.json");
-	writeFileSync(path, JSON.stringify({ watchSources: { prod: { verify: "hmac-sha256", secretEnv: "WATCH_SIGNING", maxPerDay: 10, pull: { kind: "file", path: "/var/log/shop.log", fields: { service: "checkout" }, intervalSeconds: 30 } } }, triggers: [] }));
-	const deps = setup(); const lines = []; let cycled; const cycle = new Promise(resolve => { cycled = resolve; });
+	const pull = (file) => ({ verify: "hmac-sha256", secretEnv: "WATCH_SIGNING", maxPerDay: 10, pull: { kind: "file", path: file, fields: { service: "checkout" }, intervalSeconds: 30 } });
+	writeFileSync(path, JSON.stringify({ watchSources: { prod: pull("/var/log/shop.log") }, triggers: [] }));
+	const deps = setup(); const lines = []; const clock = { ms: NOW }; let passes = 0; let puller;
 	const adapterFactory = () => ({ async poll() { return { findings: [], deliveries: [], cursor: {} }; } });
-	const out = value => { lines.push(value); if (value.event === "watch_pull_cycle") cycled(); };
-	const puller = await startWatchPuller({ PI_TRIGGERS_FILE: path }, { redis: deps.redis, store: deps.store, enqueue: deps.enqueue, adapterFactory, now, signals: false, out });
-	await cycle; puller.stop(); await puller.done;
-	assert.deepEqual(lines.filter(line => line.event !== "watch_pull_cycle"), [], "no refusal and no kept-config line");
-	assert.deepEqual(lines.map(line => [line.event, line.source]), [["watch_pull_cycle", "prod"]]);
+	const sleep = async () => {
+		passes++;
+		if (passes === 1) writeFileSync(path, JSON.stringify({ watchSources: { prod: pull("/var/log/shop.log"), alt: pull("/var/log/alt.log") }, triggers: [] }));
+		clock.ms += 31_000;
+		if (passes >= 2) puller.stop();
+	};
+	puller = await startWatchPuller({ PI_TRIGGERS_FILE: path }, { redis: deps.redis, store: deps.store, enqueue: deps.enqueue, adapterFactory, now: () => clock.ms, signals: false, out: value => lines.push(value), sleep });
+	await puller.done;
+	assert.deepEqual(lines.map(line => [line.event, line.source]), [["watch_pull_cycle", "prod"], ["triggers_reloaded", undefined], ["watch_pull_cycle", "prod"], ["watch_pull_cycle", "alt"]], "no refusal at start or on the reload");
 });
 test("the collector starts whatever the settings it never reads say: serve's, and the GitHub auth and identity retry the poller reads (issue #1006)", { timeout: 10_000 }, async () => {
 	// It pulls, listens on nothing, resolves no identity and calls no forge, so its own loader judges none of them; each
@@ -73,5 +79,69 @@ test("the collector starts whatever the settings it never reads say: serve's, an
 	}
 	// GITHUB_INGEST is the one setting it does not read and still judges, a stated residual (receiver/src/config.mjs).
 	await assert.rejects(startWatchPuller({ PI_TRIGGERS_FILE: path, GITHUB_INGEST: "sometimes" }, { ...setup(), signals: false, out: () => {} }), (e) => e.piDispatchConfig === true && /^GITHUB_INGEST must be/.test(e.message));
+});
+test("the collector follows triggers.json by its text: one line each time the invalid text changes, one triggers_reloaded on recovery, none for a file that did not change (issue #995)", { timeout: 10_000 }, async () => {
+	// It reloaded the file on every pass and logged watch_pull_config_invalid each time it was invalid, about a line a
+	// second. Each pass here is the loop's own: its sleep seam edits the file between passes and advances the clock past
+	// every source's interval, so each pass polls each source.
+	const dir = tempDir("watch-puller-follow-");
+	const path = join(dir, "triggers.json");
+	const pull = (file) => ({ verify: "hmac-sha256", secretEnv: "WATCH_SIGNING", maxPerDay: 10, pull: { kind: "file", path: file, fields: { service: "checkout" }, intervalSeconds: 30 } });
+	const good = (sources) => JSON.stringify({ watchSources: sources, triggers: [] });
+	writeFileSync(path, good({ prod: pull("/var/log/shop.log") }));
+	// Written after the numbered pass, read at the top of the next. A source whose push secret is unset is the collector's
+	// to take, as it is the poller's: its follower judges for `watch`, never for `serve`.
+	const edits = { 1: "{ not json", 3: "{ also not json", 4: good({ prod: pull("/var/log/shop.log"), alt: pull("/var/log/alt.log") }) };
+	const deps = setup(); const lines = []; const clock = { ms: NOW }; let passes = 0; let puller;
+	const adapterFactory = () => ({ async poll() { return { findings: [], deliveries: [], cursor: {} }; } });
+	const sleep = async () => { passes++; if (edits[passes] !== undefined) writeFileSync(path, edits[passes]); clock.ms += 31_000; if (passes >= 6) puller.stop(); };
+	puller = await startWatchPuller({ PI_TRIGGERS_FILE: path }, { redis: deps.redis, store: deps.store, enqueue: deps.enqueue, adapterFactory, now: () => clock.ms, signals: false, out: value => lines.push(value), sleep });
+	await puller.done;
+	// Pass by pass: the cycles mark each pass's end, and the triggers lines fall between them.
+	const said = lines.map(line => line.event === "watch_pull_cycle" ? `cycle ${line.source}` : line.event === "triggers_reload_invalid" ? `invalid kept=${line.kept}` : line.event);
+	assert.deepEqual(said, [
+		"cycle prod",
+		"invalid kept=true", "cycle prod",
+		"cycle prod",
+		"invalid kept=true", "cycle prod",
+		"triggers_reloaded", "cycle prod", "cycle alt",
+		"cycle prod", "cycle alt",
+	]);
+	assert.ok(lines.filter(line => line.event === "triggers_reload_invalid").every(line => /not valid JSON/.test(line.reason)), JSON.stringify(lines));
+	assert.ok(!lines.some(line => line.event === "watch_pull_config_invalid"), "the old line is gone");
+});
+test("stop() while the collector waits between passes wakes it at once and leaves no timer behind (issue #995)", { timeout: 5_000 }, async () => {
+	// Parked on the default wait, a REAL one second timer: stop() must clear it and wake the loop, or `done` waits out
+	// the second (a stop that only cleared the timer would never settle at all). async_hooks counts the timers, the
+	// poller's pattern: a cleared timer's destroy fires a macrotask later, hence the two setImmediates before counting.
+	const { createHook } = await import("node:async_hooks");
+	const live = new Set();
+	const hook = createHook({ init(id, type) { if (type === "Timeout") live.add(id); }, destroy(id) { live.delete(id); } });
+	const dir = tempDir("watch-puller-stop-");
+	const path = join(dir, "triggers.json");
+	writeFileSync(path, JSON.stringify({ watchSources: { prod: { verify: "hmac-sha256", secretEnv: "WATCH_SIGNING", maxPerDay: 10, pull: { kind: "file", path: "/var/log/shop.log", fields: { service: "checkout" }, intervalSeconds: 30 } } }, triggers: [] }));
+	const deps = setup(); let cycled; const cycle = new Promise(resolve => { cycled = resolve; });
+	const adapterFactory = () => ({ async poll() { return { findings: [], deliveries: [], cursor: {} }; } });
+	hook.enable();
+	let puller;
+	try {
+		const before = new Set(live);
+		const liveDelta = () => [...live].filter(id => !before.has(id));
+		puller = await startWatchPuller({ PI_TRIGGERS_FILE: path }, { redis: deps.redis, store: deps.store, enqueue: deps.enqueue, adapterFactory, now, signals: false, out: value => { if (value.event === "watch_pull_cycle") cycled(); } });
+		await cycle;
+		await new Promise(resolve => setImmediate(resolve));
+		await new Promise(resolve => setImmediate(resolve));
+		assert.equal(liveDelta().length, 1, "the loop is parked on its one armed wait");
+		const stoppedAt = performance.now();
+		puller.stop();
+		await puller.done;
+		assert.ok(performance.now() - stoppedAt < 250, `done settled ${Math.round(performance.now() - stoppedAt)} ms after stop()`);
+		await new Promise(resolve => setImmediate(resolve));
+		await new Promise(resolve => setImmediate(resolve));
+		assert.deepEqual(liveDelta(), [], "the wait's timer is destroyed, not left to fire");
+	} finally {
+		puller?.stop();
+		hook.disable();
+	}
 });
 

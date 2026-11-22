@@ -1,5 +1,6 @@
 import { createHash, randomUUID } from "node:crypto";
-import { loadReceiverConfig, reloadTriggers } from "./config.mjs";
+import { existsSync, readFileSync } from "node:fs";
+import { loadReceiverConfig, makeTriggersFollower, triggersFilePath } from "./config.mjs";
 import { makeWatchPullAdapter } from "./watch-pull.mjs";
 import { ingestWatchFinding } from "./watch.mjs";
 import { makeWatchStore } from "@edgehero/pi-dispatch/watch-store";
@@ -43,12 +44,36 @@ export async function pollWatchSources({ cfg, redis, store, enqueue, adapterFact
 	if (failures) throw new Error("watch pull sources unavailable");
 }
 
+/**
+ * Run the pull collector until `stop()`. Seams: `now`, `signals`, `out` (one object per log line), `loadConfig(env, fs)`,
+ * `fsDeps` (`{ readFile, fileExists }`, the triggers file's reads), `sleep(ms)` (the wait between passes, a timer by
+ * default), `adapterFactory`, and `redis`, `store`, `enqueue`, `judgeValkey`, `makeQueueFn` for its Valkey.
+ *
+ * THE TRIGGERS FILE IS FOLLOWED BY ITS TEXT (issue #995), with the poller's follower (`makeTriggersFollower`,
+ * config.mjs): read at the top of every pass and regrouped only when what was read changed, so a bad edit is said once
+ * each time the invalid text changes (`triggers_reload_invalid` with `kept: true`, the poller's and `serve`'s words) and the last good
+ * copy goes on collecting, and a good text after it says `triggers_reloaded` once. The loop reloaded the file on every
+ * pass and logged `watch_pull_config_invalid` each time it was invalid, one identical line a second until someone fixed
+ * it. The baseline is the boot load's own read (issue #386's idiom), so a quiet start says nothing. The follower judges
+ * the file as the boot did, for this config's command (`watch`), so it refuses no text over a setting the collector does
+ * not read: a watch source without its push secret is taken here, as the poller takes it.
+ */
 export async function startWatchPuller(env = process.env, deps = {}) {
-	const { now = () => Date.now(), signals = true, out = value => process.stdout.write(`${JSON.stringify(value)}\n`), loadConfig = (e) => loadReceiverConfig(e, { command: "watch" }), reload = reloadTriggers, adapterFactory = makeWatchPullAdapter } = deps;
+	const { now = () => Date.now(), signals = true, out = value => process.stdout.write(`${JSON.stringify(value)}\n`), loadConfig = (e, fs) => loadReceiverConfig(e, { ...fs, command: "watch" }), fsDeps = {}, sleep = null, adapterFactory = makeWatchPullAdapter } = deps;
 	// Loaded as the collector (issues #994, #1006): it pulls, resolves no identity and calls no forge, so a source's push
 	// secret, the forge webhook blocks, WEBHOOK_SECRET, RECEIVER_PORT, the GitHub auth block and the identity retry
 	// window refuse neither this start nor a reload below; `serve` and `poll`, which read some of them, refuse them.
-	const cfg = loadConfig(env);
+	const triggersPath = triggersFilePath(env);
+	const bootRead = fsDeps.readFile ?? readFileSync;
+	let triggersAtBoot = null;
+	const cfg = loadConfig(env, {
+		fileExists: fsDeps.fileExists ?? existsSync,
+		readFile: (file, enc) => {
+			const text = bootRead(file, enc);
+			if (file === triggersPath) triggersAtBoot = text;
+			return text;
+		},
+	});
 	if (!Object.values(cfg.triggers?.watchSources ?? {}).some(source => source.pull)) throw configError("watch: no pull sources configured");
 	const ownedRedis = !deps.redis; const ownedQueue = !deps.enqueue;
 	if (ownedRedis || ownedQueue) await (deps.judgeValkey ?? judgeValkeyAtStart)(cfg.valkeyUrl, valkeyClientContext({ env }), { now });
@@ -56,9 +81,10 @@ export async function startWatchPuller(env = process.env, deps = {}) {
 	const queue = ownedQueue ? (deps.makeQueueFn ?? makeQueue)(parseConnection(cfg.valkeyUrl)) : null;
 	const enqueue = deps.enqueue ?? (fields => enqueueWatchJob(queue, fields, { now }));
 	const store = deps.store ?? makeWatchStore(redis, { now }); const due = new Map();
+	const triggersFollower = makeTriggersFollower(env, cfg, { readFile: fsDeps.readFile, fileExists: fsDeps.fileExists, baseline: triggersAtBoot, log: out, now });
 	let stopped = false; let wake; let timer;
 	const log = (event, fields) => out({ event, ...fields });
-	const wait = () => new Promise(resolve => { wake = resolve; timer = setTimeout(resolve, 1000); });
+	const wait = () => (sleep ? sleep(1000) : new Promise(resolve => { wake = resolve; timer = setTimeout(resolve, 1000); }));
 	const stop = () => {
 		stopped = true; clearTimeout(timer); wake?.();
 		// Disconnect our clients to release an in-flight reconnect wait. No cursor is advanced until
@@ -71,8 +97,7 @@ export async function startWatchPuller(env = process.env, deps = {}) {
 	const done = (async () => {
 		try {
 			while (!stopped) {
-				const reloaded = reload(env, cfg);
-				if (reloaded.invalid) log("watch_pull_config_invalid", { reason: "invalid-config-kept-last-good" });
+				triggersFollower.follow();
 				try { await pollWatchSources({ cfg, redis, store, enqueue, adapterFactory, env, now, log, due }); } catch { if (!stopped) log("watch_pull_failed", { reason: "source-unavailable-cursor-retained" }); }
 				if (!stopped) await wait(); clearTimeout(timer);
 			}
