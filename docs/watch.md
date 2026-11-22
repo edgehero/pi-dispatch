@@ -108,9 +108,13 @@ and never blindly create a second issue.
 ## Pull from files, journald or Loki
 
 Run `pi-dispatch-receiver watch` on the collector host. It reads the same reviewed `PI_TRIGGERS_FILE` and `VALKEY_URL`
-as the push receiver, uses the same matching, digest, cooldown and caps, and calls no model. The command reloads valid
-configuration and retains the last valid configuration with a warning if an edit fails validation. SIGTERM and SIGINT
-stop the loop and release its owned connections. Start `serve` separately if push webhooks are also needed.
+as the push receiver, uses the same matching, digest, cooldown and caps, and calls no model. It reads the triggers file
+again at the start of every pass, about once a second, and takes it only when its text changed. An edit that fails
+validation leaves it collecting with the last copy that loaded and logs `triggers_reload_invalid` once for that text,
+with the reason and `"kept": true`; a good file back logs `triggers_reloaded`, the same lines the poller and `serve`
+write. Earlier releases logged `watch_pull_config_invalid` on every pass while the file was invalid; that line is gone,
+so a log alert on it should look for `triggers_reload_invalid` instead. SIGTERM and SIGINT stop the loop and release its
+owned connections. Start `serve` separately if push webhooks are also needed.
 
 Add a `pull` block to a source. These are three alternative blocks:
 
