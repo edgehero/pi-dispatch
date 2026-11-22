@@ -6643,15 +6643,15 @@ const LINUX_1001 = { platform: "linux", release: "6.8.0-test", euid: 1001, egid:
 const liveFsAs = (uid) => ({ ...liveFs, statSync: (p) => Object.assign(statSync(p), { uid }) });
 const liveEnv = (extra = {}) => ({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_EGRESS: "0", PI_JOBS_DIR: tempDir("pi-live-doctor-"), ...extra });
 
-test("issue #978: doctor reads the CPU reserve as doctor's own helper name of the declared PI_WORKER_NAME, removed before the read", async () => {
+test("issue #978: doctor reads the CPU reserve as doctor's own helper name of the declared PI_WORKER_NAME, removed before the read with a plain rm (issue #1021)", async () => {
 	const calls = [];
 	const facts = { ...JSON.parse(ROOTFUL_INFO), NCPU: 4, MemTotal: 8_323_072_000, CgroupDriver: "cgroupfs", CgroupVersion: "2" };
 	// Listed before `green`, whose broad "docker info" key would otherwise answer the facts read with no CPU count.
-	const plan = { ...infoPlan(JSON.stringify(facts)), "docker rm -f pi-dispatch-cpu-reserve-doctor-": 0, "docker run --rm --name pi-dispatch-cpu-reserve-doctor-": { code: 0, output: "300000 100000\n" }, ...green };
+	const plan = { ...infoPlan(JSON.stringify(facts)), "docker rm pi-dispatch-cpu-reserve-doctor-": 0, "docker run --rm --name pi-dispatch-cpu-reserve-doctor-": { code: 0, output: "300000 100000\n" }, ...green };
 	const checks = await collectChecks(imgEnv({ PI_WORKER_NAME: "box-1" }), collectSeams(plan, { spawn: fakeSpawn(plan, calls) }));
 	// sha256("box-1") begins 96fb257c: the name the worker's own doctor child, with the same .env, also uses.
 	const helper = calls.filter((x) => x.cmd === "docker" && x.args.some((a) => String(a).startsWith("pi-dispatch-cpu-reserve-")));
-	assert.deepEqual(helper.map((x) => x.args.slice(0, 4).join(" ")), ["rm -f pi-dispatch-cpu-reserve-doctor-96fb257c", "run --rm --name pi-dispatch-cpu-reserve-doctor-96fb257c"]);
+	assert.deepEqual(helper.map((x) => x.args.slice(0, 4).join(" ")), ["rm pi-dispatch-cpu-reserve-doctor-96fb257c", "run --rm --name pi-dispatch-cpu-reserve-doctor-96fb257c"]);
 	assert.ok(checks.some((c) => c.ok === true && /^local: every job runs under pidispatch\.slice, whose quota is 3 CPUs/.test(c.label ?? "")), "the read reached the reserve line");
 });
 

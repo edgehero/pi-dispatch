@@ -75,9 +75,10 @@ test("doctorCpuReserve: reads (never writes) per answered venue, through the wor
 	const podman = { answered: true, info: { rootless: true, cgroupManager: "systemd", cgroupVersion: "v2", serviceIsRemote: false } };
 	const reads = await doctorCpuReserve({ daemon: docker, podman, run, image: "pi-job:pinned", imagePresent: true, platform: "darwin" });
 	assert.deepEqual(reads.map((r) => [r.plan.venue, r.plan.method, r.read]), [["local", "helper", { ok: true, cpuCenti: 1300 }], ["podman", "user-systemd", { ok: true, cpuCenti: 300 }]]);
-	// Issue #978: doctor's own helper name (no worker name declared here), removed before its read.
+	// Issue #978: doctor's own helper name (no worker name declared here), removed before its read (issue #1021: with a
+	// plain rm, which leaves another doctor's running read alone).
 	const name = "pi-dispatch-cpu-reserve-doctor-e3b0c442";
-	assert.deepEqual(calls, [["docker", "rm", "-f", name], ["docker", ...helperArgs({ image: "pi-job:pinned", name, read: true })], ["systemctl", "--user", "show", "-P", "CPUQuotaPerSecUSec", "pidispatch.slice"]]);
+	assert.deepEqual(calls, [["docker", "rm", name], ["docker", ...helperArgs({ image: "pi-job:pinned", name, read: true })], ["systemctl", "--user", "show", "-P", "CPUQuotaPerSecUSec", "pidispatch.slice"]]);
 	assert.ok(calls.every((c) => !c.includes("set-property") && !c.some((a) => String(a).includes("> /p/cpu.max"))), "doctor never writes");
 	calls.length = 0;
 	const absent = await doctorCpuReserve({ daemon: docker, run, image: "pi-job:pinned", imagePresent: false });
@@ -90,7 +91,7 @@ test("doctorCpuReserve: reads (never writes) per answered venue, through the wor
 	assert.equal(calls.length, 0);
 });
 
-test("issue #978: doctor's helper runs under doctor's own name for the declared worker, is removed before its read and again after a timeout, and a 125 names another doctor as a cause", async () => {
+test("issue #978: doctor's helper runs under doctor's own name for the declared worker, is removed before its read (a plain rm) and again after a timeout (forced), and a 125 names another doctor as a cause", async () => {
 	const name = helperName("box-1", { doctor: true });
 	assert.equal(name, "pi-dispatch-cpu-reserve-doctor-96fb257c");
 	assert.notEqual(name, helperName("box-1"), "never the worker's, so a doctor never removes the worker's helper mid-step");
@@ -103,7 +104,7 @@ test("issue #978: doctor's helper runs under doctor's own name for the declared 
 	const [timedOut] = await doctorCpuReserve({ daemon: docker, run, image: "pi-job:pinned", imagePresent: true, platform: "darwin", workerName: "box-1" });
 	assert.deepEqual(timedOut.read, { ok: false, reason: "timeout" });
 	assert.deepEqual(calls, [
-		["docker", "rm", "-f", name, 15_000],
+		["docker", "rm", name, 15_000],
 		["docker", "run", "--rm", "--name", name, 15_000],
 		["docker", "rm", "-f", name, 15_000],
 	]);
@@ -119,6 +120,37 @@ test("issue #978: doctor's helper runs under doctor's own name for the declared 
 	// A systemctl read that exits 125 is no helper's name, and keeps the plain line.
 	const [plain] = line([{ plan: plan("local", "system-systemd"), read: { ok: false, reason: "exit-125" } }], 300);
 	assert.match(plain.label, /was not readable \(exit-125\)$/);
+});
+
+test("issue #1021: a doctor started while another doctor's read runs leaves that read alone and names it; a killed doctor's created leftover is still removed", async () => {
+	const name = helperName("box-1", { doctor: true });
+	const docker = { answered: true, facts: { cgroupDriver: "cgroupfs", cgroupVersion: "v2", rootless: false } };
+	// The daemon, by name: a plain rm refuses a running container (exit 1) and removes any other, `rm -f` removes any,
+	// and a create under a name still taken is refused at once with 125.
+	const daemon = (held) => {
+		const containers = new Map(held);
+		const run = async (bin, args) => {
+			if (args[0] === "rm") {
+				const target = args.at(-1);
+				if (!containers.has(target)) return { code: args[1] === "-f" ? 0 : 1, stdout: "" };
+				if (args[1] !== "-f" && containers.get(target) === "running") return { code: 1, stdout: "" };
+				containers.delete(target);
+				return { code: 0, stdout: `${target}\n` };
+			}
+			if (args[0] === "run") return containers.has(name) ? { code: 125, stdout: "" } : { code: 0, stdout: "1300000 100000\n" };
+			return { code: 0, stdout: "" };
+		};
+		return { containers, run };
+	};
+	const reading = daemon([[name, "running"]]);
+	const [busy] = await doctorCpuReserve({ daemon: docker, run: reading.run, image: "pi-job:pinned", imagePresent: true, platform: "darwin", workerName: "box-1" });
+	assert.equal(reading.containers.get(name), "running", "the other doctor's read is not killed");
+	assert.deepEqual(busy.read, { ok: false, reason: "exit-125" });
+	assert.match(line([busy], 1300)[0].label, /another doctor reading the quota at the same moment causes/);
+	const leftover = daemon([[name, "created"]]);
+	const [read] = await doctorCpuReserve({ daemon: docker, run: leftover.run, image: "pi-job:pinned", imagePresent: true, platform: "darwin", workerName: "box-1" });
+	assert.equal(leftover.containers.size, 0);
+	assert.deepEqual(read.read, { ok: true, cpuCenti: 1300 });
 });
 
 // ---------------------------------------------------------------------------------------------------------------------

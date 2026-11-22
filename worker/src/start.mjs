@@ -1421,7 +1421,9 @@ export async function startWorker(
 	// the job image this worker already pins, with `--pull=never`, never an image fetched for it. Issue #978: under one
 	// fixed name from the DECLARED worker name, so a restart finds what the last process left even where an undeclared
 	// name (the hostname) has changed meanwhile. `maxBuffer` reaches the runner for the leftover pass's long outputs alone.
-	const cpuReserve = makeCpuReserveFn({ run: (bin, args, { timeoutMs, maxBuffer }) => execDockerBounded(args, { bin, timeoutMs, maxBuffer }), image: config.jobImage, name: cpuReserveHelperName(config.workerNameDeclared ? config.workerName : ""), now, log });
+	// Issue #1021: `withStderr`, so the helper's guard can tell a create refused for its name (the daemon's "already in
+	// use") from any other exit 125; stderr is matched there and never logged nor put in a reason.
+	const cpuReserve = makeCpuReserveFn({ run: (bin, args, { timeoutMs, maxBuffer }) => execDockerBounded(args, { bin, timeoutMs, maxBuffer, withStderr: true }), image: config.jobImage, name: cpuReserveHelperName(config.workerNameDeclared ? config.workerName : ""), now, log });
 	const syncCpuReserve = (budget, facts) => cpuReserve.sync({ cpuCenti: budget.cpuCenti, plans: (facts?.reserveVenues ?? []).map((v) => reservePlan({ ...v, platform: jobUserIdentity.platform })) });
 	const bootPodmanRead = podmanInfo
 		? await settleWithin(
