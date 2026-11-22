@@ -1467,6 +1467,15 @@ used, the default and referenced providers. Select a provider explicitly, then *
 **Replace key** to overwrite its existing deployment key through a separate danger confirmation. Shared slots name
 every affected provider. Saving preserves the default provider, models, roles, routing and egress. Presence means
 the slot is set, not that the key works or a running worker has loaded it. Incomplete sources remain unknown.
+A row also names the triggers that bring their own key for its slot: those whose `run.secrets` binds the provider's
+API-key variable for the model their jobs run on (a model role in the project the job lands in, as doctor resolves
+it), a random candidate or a fallback the trigger may switch to, a cron trigger by its id and any other by its row,
+with the variable's name and never a value ([the provider key as a run secret](secrets.md#the-provider-key-as-a-run-secret)).
+Their jobs on that provider spend that key instead of this host's credential, so a slot can read Not set while they
+spend. Where this host refuses those jobs before they spend, because the row is a managed subscription or this host's
+`PI_FORWARD_ENV` names the variable, the line says that instead. A line under the list says once that another host
+refuses them where its own forward list or bindings do, which no host publishes to the console, and, when it applies,
+that the projects file or a `PI_MODEL` line could not be read, which widens or leaves out what the lines say.
 
 The field is write-only and limited to 4 KiB. Shadowed credentials, managed-subscription bindings, unsafe files and
 changed inputs refuse. Preview clears the browser field; changing provider or mode, Cancel, expiry, session end

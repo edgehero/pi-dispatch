@@ -8,6 +8,13 @@ or unknown source facts. A configured key has not been validated by this page. T
 deployment default, providers in validated trigger/model/fallback/role routes, explicit managed bindings and
 known slots that are configured but currently unused. Providers sharing one slot appear together.
 
+A row's status is this host's sources alone. A trigger may bring its own key instead: its `run.secrets` binds the
+provider's API-key variable, and its jobs on that provider then spend that key and never read the host's
+([the provider key as a run secret](secrets.md#the-provider-key-as-a-run-secret)). The row names those triggers (a
+cron trigger by its id, any other by its row) and the variable name, never a value. Where this host refuses those jobs
+(a managed subscription row, or this host's `PI_FORWARD_ENV` naming the variable) the row says so; another host decides
+that for itself, which the card says once. Saving a key in the slot does not change what they spend.
+
 Choose another reviewed provider in the **Provider** selector. Saving its credential does not change the default
 provider, model, roles, routing, budgets or egress. Authentication that requires cloud credentials or a
 subscription login cannot be enabled through this generic key field.
