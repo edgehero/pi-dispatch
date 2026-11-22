@@ -550,8 +550,9 @@ so a scheduler's fires all land on one machine and its own files are the complet
 The panel's status line names the workers when it can. `RUN_DETAIL` names the host that ran a job.
 
 A deployment where some queues are paused and some are not reads as `PART PAUSED` rather than being
-rounded to one side, and `pi-dispatch status` names the paused queues. A pause or resume that fails partway
-says which queues it changed and which one it failed at, because "could not reach Valkey" reads as
+rounded to one side, and `pi-dispatch status` names the paused queues. A pause or resume that does not confirm
+every queue says of each one whether it switched, was sent and not confirmed, was refused or answered with an error,
+or was not sent ([control the worker](service.md#control-the-worker)), because "could not reach Valkey" reads as
 "nothing happened" and that is the one thing it must not be mistaken for.
 
 An image digest that differs is **suspicious, not wrong**: two independent local builds of one Dockerfile
