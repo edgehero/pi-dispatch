@@ -15,7 +15,7 @@ export async function verifySubscriptionCapability(root) {
 	assert.throws(() => verifySubscriptionAuthEntries([{ ...entry, provider: "anthropic", adapter: "@gotgenes/pi-anthropic-auth@3.4.3", root, digest: "a".repeat(64) }], { now }), /auth-adapter-unpinned/);
 	let wireCalls = 0;
 	for (const oversized of [false, true]) {
-		const guard = createCostGuard({ capMicros: 2000, env: {}, bound: (_method, _model, context) => context.finalPayload ? Buffer.byteLength(JSON.stringify(context.finalPayload)) : 10 });
+		const guard = createCostGuard({ capMicros: 2000, env: {}, bound: (_method, _model, _context, _options, _env, body) => body !== undefined ? Buffer.byteLength(JSON.stringify(body)) : 10 });
 		const model = { provider: "anthropic", id: "proof", api: "anthropic-messages" };
 		const args = [{ messages: [] }, { onPayload: payload => ({ ...payload, system: "x".repeat(oversized ? 20_000 : 100) }) }];
 		assert.equal(guard.admit({ method: "streamSimple", model, args }), null);

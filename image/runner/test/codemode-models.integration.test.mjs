@@ -35,8 +35,8 @@ const CLASSIFIER = { provider: "openrouter", id: "typesafe/jev-1.13" };
 const PAINTER = { provider: "openrouter", id: "google/gemini-2.5-flash-image" };
 const PNG = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==";
 
-/** A stub of both wire formats (pi-ai typesafe-system-one and openrouter-images), counting what reached it. */
-async function stubServer() {
+/** A stub of both wire formats (pi-ai typesafe-system-one and openrouter-images), counting what reached it; `onClassify()` runs as each classify arrives. */
+async function stubServer({ onClassify = () => {} } = {}) {
 	const seen = { classify: 0, images: 0 };
 	const server = createServer((req, res) => {
 		let body = "";
@@ -45,6 +45,7 @@ async function stubServer() {
 			const reply = (value) => res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(value));
 			if (req.url.endsWith("/systemone")) {
 				seen.classify++;
+				onClassify();
 				const { questions } = JSON.parse(body);
 				const answers = Object.fromEntries(Object.entries(questions).map(([id, question]) => [id, question.type === "choice" ? { type: "choice", choice: "ignore", probabilities: { investigate: 0.02, ignore: 0.95, file_issue: 0.03 }, confidence: 0.9 } : { type: "noul", noul: 0.9 }]));
 				return reply({ answers, usage: { input_tokens: 1200, output_tokens: 0 } });
@@ -160,14 +161,25 @@ test("under a cap too small for its bound, classify is refused before it reaches
 	}
 });
 
-test("concurrent classify calls are each judged against the bounds already in flight: past the cap, the rest are refused unsent", { skip }, async () => {
-	const stub = await stubServer();
-	// One bound is a few hundred micro-dollars; a cap of 1000 admits two or three at once, never all eight.
-	const j = await job({ base: stub.base, maxCostMicros: 1000 });
+test("concurrent classify calls are each judged against the bounds already in flight: past the cap, the rest wait for room and are sent as it appears (issue #985)", { skip }, async () => {
+	// One bound is a few hundred micro-dollars; a cap of 1000 admits two or three at once, never all eight. Before issue
+	// #985 the rest were refused and the job stopped; each call settles far below its bound, so now they wait for the
+	// calls in flight and all eight are answered. At every request that reaches the provider, the guard's settled spend
+	// plus what it holds in flight is within the cap.
+	const over = [];
+	let j;
+	const stub = await stubServer({ onClassify: () => {
+		const { spent, inflight } = j.guard.cost.state;
+		if (spent + inflight > 1000) over.push({ spent, inflight });
+	} });
+	j = await job({ base: stub.base, maxCostMicros: 1000 });
 	try {
 		const out = j.text(await j.run(classify(8)));
-		assert.ok(stub.seen.classify >= 1 && stub.seen.classify < 8, `${stub.seen.classify} reached the provider: ${out}`);
-		assert.match(out, /aborted:pi-dispatch: cost cap reached/);
+		assert.equal(stub.seen.classify, 8, `${stub.seen.classify} reached the provider: ${out}`);
+		assert.ok(out.endsWith(`\n${Array(8).fill("stop:").join(",")}`), out);
+		assert.deepEqual(over, [], "the cap held at every request");
+		assert.ok(j.guard.cost.state.waited > 0, "some waited for the calls in flight");
+		assert.deepEqual([j.guard.cost.state.refused, j.stops], [0, []]);
 		assert.ok(j.meter.state.cost * 1e6 <= 1000, `the metered total ${j.meter.state.cost} passed the cap`);
 	} finally {
 		j.close();

@@ -162,7 +162,9 @@ labeled `unmeasured (OQ-002)`.
 
 For supported subscription transports, the guard checks the final shaped request before dispatch as well as
 its original call. Added messages, system or tool data may enlarge the existing reservation ticket within
-the job's remaining cap; a final request that cannot fit or be bounded refuses as `cost-cap` with
+the job's remaining cap. The check measures the larger of the original request and the final one, never the
+two added together. A final request that fits only once other calls finish waits for them
+([Parallel calls](#parallel-calls)); one that cannot fit or be bounded refuses as `cost-cap` with
 `why: "final-payload"`. It sends no provider request. Authentication shaping never grants extra tokens,
 unlisted models or a different account.
 
@@ -249,12 +251,45 @@ bounded here."
    refusal is `allocation-cap` ([allocation](allocation.md)). A job whose every
    allowed model is a declared local endpoint priced at zero reserves nothing (`basis: unreserved`).
 2. **Run.** The runner checks the per-job cap before every model call, against the most that call could cost.
-   The call is refused (`cost-cap`) when it could pass the cap. So the reservation bounds what the runner
+   The call is refused (`cost-cap`) when it could pass the cap. When only other calls still running stand in its
+   way, it waits for them first ([Parallel calls](#parallel-calls)). So the reservation bounds what the runner
    meters, except for the gaps listed under "What the caps do not cover".
 3. **Settle.** After the run, each window is charged what the job really cost, and the rest of the hold is given
    back. A model window is charged that model's own share, from the run's per-model usage.
 4. **Record.** The run record says how it settled, under `dollars`
    ([run record](../specs/interfaces.md#int-run-history-file-contract)).
+
+### Parallel calls
+
+A job that runs subagents makes several model calls at once. Each call holds the most it could cost against the cap
+until it finishes, and then only what it really cost stays counted. The most a call could cost is far above what it
+usually costs: it counts every byte of the request at the dearest input price and the model's whole output limit. So
+six or seven calls at once can hold most of the cap while the job has spent a fifth of it.
+
+A call that would pass the cap only because of what other calls still hold does not stop the job. It waits until
+those calls finish, and runs when the cap has room for it. The cap is never passed while it waits: the call holds
+nothing, and it is sent only when what the job spent, plus what the calls in flight hold, plus its own most, fits the
+cap. Calls wait in the order they came, so a large call is not overtaken by small ones.
+
+A call is still refused, and the job stops with `cost-cap` and `why: "over-cap"`, when waiting cannot help:
+
+- nothing else is running, so no room will appear;
+- what the job already spent, plus this call's most, is over the cap whatever the other calls cost;
+- it waited 15 minutes with no call finishing (the job's idle limit, also 15 minutes by default, usually ends such a
+  job first, as `idle`).
+
+Two kinds of call never wait, and are refused as before when they do not fit: a call made inside another call that is
+already running (a provider that forwards to another model, or a call from a request hook), because the call it runs
+inside may be waiting for it, and every call of a pi child process, such as a role's task. Spend in other processes
+counts as already spent, so parallel role children are still refused when their calls fill the cap.
+
+The final request is measured as the larger of the original request and the request as built for the provider. When
+that is more than the call held, and only other calls stand in its way, the call gives back what it held, waits ahead
+of every other waiting call, and takes the larger amount when room appears. Nothing is sent before then.
+
+A call that waits leaves two lines in the job log, `cost_wait` when it starts waiting and `cost_waited` with
+`waitedMs` when it runs. A refusal after a wait carries `waited` on its `cost_refused` line. All three hold numbers
+only.
 
 ### How a run settles
 
