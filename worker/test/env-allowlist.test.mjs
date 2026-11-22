@@ -4,7 +4,7 @@ import { CONTAINER_ENV_NAMES } from "../src/reserved-env.mjs";
 // Static, unlike env-allowlist itself below: forges.mjs imports nothing, so it is available even on a
 // box where pi-ai will not load and the rest of this file skips.
 import { FORGES, FORGE_KINDS } from "../src/forges.mjs";
-import { apiKeyVariable } from "../src/provider-key.mjs";
+import { HOST_AUTH_PROVIDERS, apiKeyVariable } from "../src/provider-key.mjs";
 
 // env-allowlist imports @earendil-works/pi-ai (for findEnvKeys). That needs node >=22.19.0 and
 // installed deps, so it skips on a below-floor dev box and runs in CI, where
@@ -1639,4 +1639,78 @@ test("a declared main credential refuses a wrong name, an empty value and a subs
 	// A subscription token in Anthropic's API-key variable: pi would send it as a subscription login (`isOAuthTokenValue`).
 	refused({ provider: "anthropic", mainCredential: "ANTHROPIC_API_KEY", secrets: { ANTHROPIC_API_KEY: "sk-ant-oat01-declared-private" } });
 	assert.equal(buildContainerEnv({ ...options, provider: "anthropic", mainCredential: "ANTHROPIC_API_KEY", secrets: { ANTHROPIC_API_KEY: "sk-ant-api03-declared" } }).ANTHROPIC_API_KEY, "sk-ant-api03-declared");
+});
+
+// --- issue #999: an auxiliary provider's credential variables other than its API key are reserved ---
+
+test("reservedAuxiliaryNames: an auxiliary model's provider is judged by the main rule, so only an admitted API key stays bindable", { skip }, () => {
+	const { reservedAuxiliaryNames, auxiliaryCredentialNames } = mod;
+	const panel = (over = {}) => ({ provider: "openrouter", auxiliaryModels: ["anthropic/claude-sonnet-4-5"], secrets: { ANTHROPIC_API_KEY: "ref" }, ...over });
+	assert.deepEqual(reservedAuxiliaryNames(panel()).sort(), ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN"]);
+	assert.deepEqual(reservedAuxiliaryNames({ provider: "anthropic", auxiliaryModels: ["openrouter/x"], secrets: { OPENROUTER_API_KEY: "ref" } }), []);
+	assert.deepEqual(reservedAuxiliaryNames({ provider: "openrouter", secrets: {} }), [], "no auxiliary models, nothing");
+	// Where the main rule admits no key, the API-key variable stays reserved too: a file secret, a PI_FORWARD_ENV name,
+	// a decision job.
+	assert.ok(reservedAuxiliaryNames(panel({ secrets: {}, secretFiles: { ANTHROPIC_API_KEY: "ref" } })).includes("ANTHROPIC_API_KEY"));
+	assert.ok(reservedAuxiliaryNames(panel(), { forwardEnv: ["ANTHROPIC_API_KEY"] }).includes("ANTHROPIC_API_KEY"));
+	assert.ok(reservedAuxiliaryNames(panel({ watch: { findingId: "f" } })).includes("ANTHROPIC_API_KEY"));
+	// A provider that needs host authentication keeps every variable reserved, bound or not, as a job on it does.
+	assert.ok(HOST_AUTH_PROVIDERS.some((provider) => providerKeyCandidates(provider).length > 0), "the loop below judges a variable");
+	for (const provider of HOST_AUTH_PROVIDERS) {
+		const names = providerKeyCandidates(provider);
+		assert.deepEqual(reservedAuxiliaryNames({ provider: "openrouter", auxiliaryModels: [`${provider}/m`], secrets: Object.fromEntries(names.map((name) => [name, "ref"])) }), names, provider);
+	}
+	// A project bundle never declares a key: every variable of every auxiliary provider, the API keys included.
+	assert.deepEqual(auxiliaryCredentialNames({ auxiliaryModels: ["anthropic/x", "openrouter/y"] }).sort(), ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN", "OPENROUTER_API_KEY"]);
+});
+
+test("an auxiliary provider's OAuth or bearer variable in the secrets, or a subscription token in its API-key variable, refuses the container env and never names the value", { skip }, () => {
+	const options = { provider: "openrouter", model: "deepseek/deepseek-chat", maxTurns: 5, jobId: "panel", hostEnv: { OPENROUTER_API_KEY: "host-key" }, auxiliaryModels: ["anthropic/claude-sonnet-4-5"] };
+	const refused = (secrets) => assert.throws(() => buildContainerEnv({ ...options, secrets }), (error) => error.piDispatchConfig === true && error.message.includes(Object.keys(secrets)[0]) && !error.message.includes("private"), JSON.stringify(Object.keys(secrets)));
+	refused({ ANTHROPIC_OAUTH_TOKEN: "oauth-private" });
+	refused({ ANTHROPIC_AUTH_TOKEN: "bearer-private" });
+	refused({ ANTHROPIC_API_KEY: "sk-ant-oat01-private" });
+	// A host-authenticated provider's token, as for a job on that provider, and the API key as a file secret.
+	assert.throws(() => buildContainerEnv({ ...options, auxiliaryModels: ["github-copilot/gpt-4o"], secrets: { COPILOT_GITHUB_TOKEN: "copilot-private" } }), (error) => error.piDispatchConfig === true && error.message.includes("COPILOT_GITHUB_TOKEN") && !error.message.includes("private"));
+	assert.throws(() => buildContainerEnv({ ...options, secretFilePaths: { ANTHROPIC_API_KEY: "/run/pi/secret-files/ANTHROPIC_API_KEY" } }), (error) => error.piDispatchConfig === true && error.message.includes("ANTHROPIC_API_KEY"));
+	// The API key itself is the auxiliary model's declared credential, as before.
+	assert.equal(buildContainerEnv({ ...options, secrets: { ANTHROPIC_API_KEY: "sk-ant-api03-declared" } }).ANTHROPIC_API_KEY, "sk-ant-api03-declared");
+});
+
+test("issue #999: a declared auxiliary key is that model's only credential, so a host bearer or OAuth token neither rides along nor outranks it", { skip }, () => {
+	const options = { provider: "openrouter", model: "deepseek/deepseek-chat", maxTurns: 5, jobId: "panel", auxiliaryModels: ["anthropic/claude-sonnet-4-5"], secrets: { ANTHROPIC_API_KEY: "sk-ant-api03-declared" } };
+	for (const token of ["ANTHROPIC_OAUTH_TOKEN", "ANTHROPIC_AUTH_TOKEN"]) {
+		const hostEnv = { OPENROUTER_API_KEY: "host-or", ANTHROPIC_API_KEY: "host-key", [token]: "host-token" };
+		// Read from the host as a held candidate, or forwarded by PI_FORWARD_ENV: pi would take either before the API key.
+		for (const forwardEnv of [[], [token]]) {
+			const env = buildContainerEnv({ ...options, hostEnv, forwardEnv });
+			assert.equal(env.ANTHROPIC_API_KEY, "sk-ant-api03-declared", `${token} ${forwardEnv}`);
+			assert.equal(token in env, false, `${token} ${forwardEnv}`);
+		}
+		// Without a declared key the host's credential is resolved as before, its token included.
+		assert.equal(buildContainerEnv({ ...options, secrets: {}, hostEnv })[token], "host-token");
+	}
+	// No fallback for an empty value, and a provider bound to a subscription takes no declared key.
+	const refused = (over) => assert.throws(() => buildContainerEnv({ ...options, hostEnv: { OPENROUTER_API_KEY: "host-or", ANTHROPIC_API_KEY: "host-key" }, ...over }), (error) => error.piDispatchConfig === true && error.message.includes("ANTHROPIC_API_KEY") && !error.message.includes("declared"), JSON.stringify(over));
+	refused({ secrets: { ANTHROPIC_API_KEY: "" } });
+	refused({ subscriptionAuth: [{ provider: "anthropic", env: { ANTHROPIC_OAUTH_TOKEN: "subscription" } }] });
+});
+
+// --- issue #1002: a random pool's draw holds no other candidate's API key from the run secrets ---
+
+test("withheldPoolKeys: a pool candidate's API key that neither the drawn nor an auxiliary model's provider reads", { skip }, () => {
+	const { withheldPoolKeys } = mod;
+	const pool = { modelSelection: { strategy: "random", candidates: ["anthropic/claude-sonnet-4-5", "openrouter/deepseek/deepseek-chat"] } };
+	const secrets = { OPENROUTER_API_KEY: "or", OPENAI_API_KEY: "openai", STRIPE_KEY: "stripe" };
+	assert.deepEqual(withheldPoolKeys({ ...pool, provider: "anthropic", model: "claude-sonnet-4-5" }, secrets), ["OPENROUTER_API_KEY"], "the subscription draw; a key no candidate uses stays");
+	assert.deepEqual(withheldPoolKeys({ ...pool, provider: "openrouter", model: "deepseek/deepseek-chat" }, secrets), [], "the draw that uses it keeps it");
+	assert.deepEqual(withheldPoolKeys({ ...pool, provider: "anthropic", auxiliaryModels: ["openrouter/deepseek/deepseek-chat"] }, secrets), [], "and so does a draw whose auxiliary model uses it");
+	assert.deepEqual(withheldPoolKeys({ provider: "anthropic", models: pool.modelSelection.candidates }, secrets), [], "no random pool, nothing withheld");
+	// pi shares OPENCODE_API_KEY between `opencode` and `opencode-go`: the draw on either reads it.
+	const shared = { modelSelection: { strategy: "random", candidates: ["opencode/a", "opencode-go/b"] }, provider: "opencode-go" };
+	assert.deepEqual(withheldPoolKeys(shared, { OPENCODE_API_KEY: "oc" }), []);
+	// An auxiliary provider that is no candidate but shares the variable reads it too (MOONSHOT_API_KEY serves both).
+	const kimi = { modelSelection: { strategy: "random", candidates: ["anthropic/claude-sonnet-4-5", "moonshotai/kimi-k2"] }, provider: "anthropic", auxiliaryModels: ["moonshotai-cn/kimi-k2"] };
+	assert.deepEqual(withheldPoolKeys(kimi, { MOONSHOT_API_KEY: "kimi" }), []);
+	assert.deepEqual(withheldPoolKeys({ ...kimi, auxiliaryModels: undefined }, { MOONSHOT_API_KEY: "kimi" }), ["MOONSHOT_API_KEY"]);
 });

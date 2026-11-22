@@ -4297,7 +4297,7 @@ export async function collectChecks(shellVars, seams) {
 			const managed = new Map();
 			for (const subject of secretSubjects) {
 				if (subject.deployment === true || subject.secretNames.length + subject.secretFileNames.length === 0) continue;
-				for (const subjectProvider of [subject.main.provider, subject.primaryProvider]) {
+				for (const subjectProvider of [subject.main.provider, subject.primaryProvider, ...(subject.auxiliaryModels ?? []).map((ref) => splitModelEntry(ref).provider)]) {
 					if (typeof subjectProvider !== "string" || managed.has(subjectProvider) || providerIdProblem(subjectProvider) !== null) continue;
 					managed.set(subjectProvider, (await subscriptionCredentials.check(subjectProvider)).managed === true);
 				}
@@ -4305,6 +4305,7 @@ export async function collectChecks(shellVars, seams) {
 			checks.push(...triggerSecretProviderChecks(secretSubjects, {
 				candidatesOf: oracle.providerKeyCandidates,
 				declaredOf: oracle.declaredProviderKey,
+				auxiliaryOf: oracle.reservedAuxiliaryNames,
 				forwarded: (env.PI_FORWARD_ENV ?? "").split(",").map((name) => name.trim()).filter((name) => name !== ""),
 				managed: (subjectProvider) => managed.get(subjectProvider) === true,
 			}));
@@ -5374,8 +5375,8 @@ function nonNegativeEnvInt(raw, fallback) {
  */
 async function defaultProviderOracle() {
 	try {
-		const { declaredProviderKey, piProviders, providerKeyCandidates } = await import("./env-allowlist.mjs");
-		return { declaredProviderKey, piProviders, providerKeyCandidates };
+		const { declaredProviderKey, piProviders, providerKeyCandidates, reservedAuxiliaryNames } = await import("./env-allowlist.mjs");
+		return { declaredProviderKey, piProviders, providerKeyCandidates, reservedAuxiliaryNames };
 	} catch (error) {
 		// The error is CARRIED, never swallowed. A missing dependency is the case this seam exists for; a
 		// SyntaxError or a broken export in our OWN module is a defect wearing a missing-dependency costume,
@@ -6658,7 +6659,8 @@ export { resolveConfiguredModelRuns as resolveDoctorModelRuns } from "./model-ob
  * is `{ label, main, list, cap, secretNames, secretFileNames, decisionJob, named }`: `main` and `list` are
  * `{ provider, id }`, `list` is the trigger's `run.models` or else the env list, `cap` the effective per-job cap in
  * micro-dollars (the smaller of the trigger's and the deployment's, `effectiveCostCapMicros`) or null, `secretNames` and
- * `secretFileNames` the names `run.secrets` and `run.secretFiles` bind, `decisionJob` whether the trigger's jobs are
+ * `secretFileNames` the names `run.secrets` and `run.secretFiles` bind, `auxiliaryModels` the trigger's
+ * `run.auxiliaryModels` (issue #999, empty when it lists none), `decisionJob` whether the trigger's jobs are
  * watch jobs (and `decisionModel` a watch rule's `decide` model, or null), and `named` says the trigger names a
  * provider, a model or a list of its own.
  *
@@ -6687,11 +6689,11 @@ export function modelSubjects({ runs = [], deployment, envList = null, modelRole
 		if (run.modelSelection) {
 			// Authorization was checked separately by resolveDoctorModelRuns. Each possible execution is a
 			// singleton: unrelated allowed providers need no forwarded credential and cannot widen its cost bound.
-			for (const ref of listOf(run.modelSelection.candidates)) subjects.push({ label: `${run.label} (random candidate ${ref.provider}/${ref.id})`, main: ref, list: [ref], cap: capOf(run.maxCostUsd), secretNames: run.secretNames ?? [], secretFileNames: run.secretFileNames ?? [], decisionJob: run.decisionJob === true, decisionModel: run.decisionModel ?? null, named: true, random: true, trigger: run.label, triggerCap: triggerCapOf(run.maxCostUsd) });
+			for (const ref of listOf(run.modelSelection.candidates)) subjects.push({ label: `${run.label} (random candidate ${ref.provider}/${ref.id})`, main: ref, list: [ref], cap: capOf(run.maxCostUsd), secretNames: run.secretNames ?? [], secretFileNames: run.secretFileNames ?? [], auxiliaryModels: run.auxiliaryModels ?? [], decisionJob: run.decisionJob === true, decisionModel: run.decisionModel ?? null, named: true, random: true, trigger: run.label, triggerCap: triggerCapOf(run.maxCostUsd) });
 			continue;
 		}
 		const main = { provider: run.provider ?? deployment.provider, id: run.model ?? deployment.model };
-		const shared = { cap: capOf(run.maxCostUsd), secretNames: run.secretNames ?? [], secretFileNames: run.secretFileNames ?? [], decisionJob: run.decisionJob === true, decisionModel: run.decisionModel ?? null };
+		const shared = { cap: capOf(run.maxCostUsd), secretNames: run.secretNames ?? [], secretFileNames: run.secretFileNames ?? [], auxiliaryModels: run.auxiliaryModels ?? [], decisionJob: run.decisionJob === true, decisionModel: run.decisionModel ?? null };
 		subjects.push({
 			label: run.label,
 			main,
@@ -6925,15 +6927,18 @@ export function listedProviderCredentialChecks(subjects, { candidatesOf, forward
  * `secret-name-reserved`, unless the worker's own rule admits it as the job's declared credential: `declaredOf` is
  * `declaredProviderKey`, asked with the subject's names and the deployment's PI_FORWARD_ENV (`forwarded`), and
  * `managed(provider)` is the subscription verdict the worker's gate asks before it. Every variable of a watch rule's
- * `decide` model's provider is a clash too. An admitted name is a fact line, since the trigger's own key then replaces
- * this host's credential for that provider where the subject runs: every job of the trigger, a candidate's draws or a
- * fallback's failover attempts.
+ * `decide` model's provider is a clash too, and so (issue #999) is every variable of an auxiliary model's provider but
+ * the API key the main rule would admit: `auxiliaryOf` is `reservedAuxiliaryNames`, the set the worker's resolver
+ * refuses, asked one auxiliary model at a time so the line can name the provider, and a provider `managed` here admits
+ * none, as the processor refuses that key too. An admitted name is a fact line, since the trigger's own
+ * key then replaces this host's credential for that provider where the subject runs: every job of the trigger, a
+ * candidate's draws or a fallback's failover attempts.
  *
  * Subjects with no secret are not judged, nor one whose provider is not a provider id (a malformed PI_PROVIDER the
  * trigger inherits, whose shape row is the one line), nor a fallback the worker never tries (behind a primary bound to
  * a subscription, one whose provider is not). Nothing is said when nothing is judged.
  */
-export function triggerSecretProviderChecks(subjects, { candidatesOf, declaredOf, forwarded = [], managed = () => false }) {
+export function triggerSecretProviderChecks(subjects, { candidatesOf, declaredOf, auxiliaryOf = () => [], forwarded = [], managed = () => false }) {
 	const providers = new Set();
 	const clashes = [];
 	const declared = [];
@@ -6956,15 +6961,24 @@ export function triggerSecretProviderChecks(subjects, { candidatesOf, declaredOf
 		if (roleNames.length > 0) providers.add(roleProvider);
 		// The job the worker would judge, with the names only: the rule reads which names are bound where, never a value.
 		const asJob = { provider, secrets: Object.fromEntries(secretNames.map((name) => [name, ""])), secretFiles: Object.fromEntries(fileNames.map((name) => [name, ""])), ...(s.decisionJob === true ? { watch: true } : {}) };
+		// Each auxiliary model's reserved names, asked of the same job with that one model, so the line can name its
+		// provider; every variable of a provider bound to a subscription here, as for the main one. A name the main
+		// provider also reads is judged as the main provider's below, first.
+		const auxiliary = new Map();
+		for (const ref of s.auxiliaryModels ?? []) {
+			const auxProvider = splitModelEntry(ref).provider;
+			for (const name of managed(auxProvider) ? candidatesOf(auxProvider) ?? [] : auxiliaryOf({ ...asJob, auxiliaryModels: [ref] }, { forwardEnv: forwarded })) auxiliary.set(name, auxProvider);
+		}
 		const admitted = managed(provider) ? null : declaredOf(asJob, { forwardEnv: forwarded });
 		// Where an admitted key is spent, or a refused one refuses: every job of the trigger, or only the attempts that run
 		// on this subject.
 		const where = s.random === true ? "on its draws" : s.fallback === true ? "on its failover attempts" : "on every job of its trigger";
 		for (const name of [...new Set([...secretNames, ...fileNames])]) {
 			if (roleNames.includes(name)) clashes.push(`${s.label}: ${name} (${printable(roleProvider)}, the watch rule's decide model; refused ${where})`);
-			else if (!candidates.includes(name)) continue;
-			else if (name === admitted) declared.push(`${s.label}: ${name} (${printable(provider)}, ${where})`);
-			else clashes.push(`${s.label}: ${name} (${printable(provider)}; refused ${where})`);
+			else if (candidates.includes(name)) {
+				if (name === admitted) declared.push(`${s.label}: ${name} (${printable(provider)}, ${where})`);
+				else clashes.push(`${s.label}: ${name} (${printable(provider)}; refused ${where})`);
+			} else if (auxiliary.has(name)) clashes.push(`${s.label}: ${name} (${printable(auxiliary.get(name))}, an auxiliary model's provider; refused ${where})`);
 		}
 	}
 	if (providers.size === 0) return [];
@@ -6972,8 +6986,8 @@ export function triggerSecretProviderChecks(subjects, { candidatesOf, declaredOf
 	if (clashes.length > 0) {
 		checks.push({
 			ok: false,
-			label: `${clashes.length} trigger secret(s) bind a variable pi reads for the provider an attempt runs on, or for a watch rule's decide model: ${clashes.join("; ")}`,
-			fix: "rename them in the triggers file, or bind only the provider's own API-key variable (in run.secrets, not run.secretFiles, not named in PI_FORWARD_ENV, not on a watch rule, on a provider not bound to a subscription here) to make it the job's credential: until then each job, draw or failover attempt named refuses pre-spend as secret-name-reserved (as provider-unconfigured on a host with no credential of its own for that provider)",
+			label: `${clashes.length} trigger secret(s) bind a variable pi reads for the provider an attempt runs on, for a watch rule's decide model, or for an auxiliary model's provider: ${clashes.join("; ")}`,
+			fix: "rename them in the triggers file, or bind only the provider's own API-key variable (in run.secrets, not run.secretFiles, not named in PI_FORWARD_ENV, not on a watch rule, on a provider that needs no host authentication) to make it the credential of the job, or of the auxiliary model, on that provider, and never for a provider, main or auxiliary, bound to a subscription here: until then each job, draw or failover attempt named refuses pre-spend as secret-name-reserved (as provider-unconfigured on a host with no credential of its own for that provider)",
 		});
 	}
 	if (declared.length > 0) {
@@ -7376,6 +7390,8 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTable
 				models: Array.isArray(t.run.models) ? t.run.models : undefined,
 				fallbackModels: Array.isArray(t.run.fallbackModels) ? t.run.fallbackModels : undefined,
 				...(t.run.modelSelection ? { modelSelection: t.run.modelSelection } : {}),
+				// Issue #999: an auxiliary model's provider keeps its variables other than its API key reserved in run.secrets.
+				...(Array.isArray(t.run.auxiliaryModels) ? { auxiliaryModels: t.run.auxiliaryModels } : {}),
 				maxCostUsd: t.run.maxCostUsd ?? undefined,
 				secretNames: t.run.secrets !== undefined && t.run.secrets !== null ? Object.keys(t.run.secrets) : [],
 				// Issue #967: the file secret names too, whether the trigger's jobs are watch jobs (an internal decision job,

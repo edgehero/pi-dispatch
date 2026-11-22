@@ -5137,6 +5137,41 @@ test("doctor: a provider bound to a subscription here keeps its API-key variable
 	assert.equal(checks.some((c) => /replaces this host's credential/.test(c.label)), false);
 });
 
+test("doctor: an auxiliary model's OAuth variable is a clash on every job of its trigger, and its API-key variable is not (#999)", { skip: skipNoPi }, async () => {
+	const base = { PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_SECRET_PROFILES: "prod:/opt/pi/resolve.sh" };
+	const panel = (secrets) => providerSecretsFile([{ provider: "openrouter", model: "deepseek/deepseek-chat", models: ["openrouter/deepseek/deepseek-chat", "anthropic/claude-sonnet-4-5"], auxiliaryModels: ["anthropic/claude-sonnet-4-5"], maxCostUsd: "1", secrets }]);
+	const refused = await collectChecks({ ...base, PI_TRIGGERS_FILE: panel({ ANTHROPIC_OAUTH_TOKEN: "op://ci/oauth" }) }, secretsSeams());
+	const clash = refused.find((c) => !c.ok && /variable pi reads for/.test(c.label));
+	assert.ok(clash, "the clash line fails");
+	assert.match(clash.label, /label trigger #0: ANTHROPIC_OAUTH_TOKEN \(anthropic, an auxiliary model's provider; refused on every job of its trigger\)/);
+	const keyed = await collectChecks({ ...base, PI_TRIGGERS_FILE: panel({ ANTHROPIC_API_KEY: "op://ci/a" }) }, secretsSeams());
+	assert.equal(keyed.some((c) => !c.ok && /variable pi reads for/.test(c.label)), false, "the auxiliary model's declared key");
+	// A random pool's draws carry the auxiliary models too; an auxiliary model on the main provider is that provider's.
+	const pool = ["openrouter/deepseek/deepseek-chat", "openai/gpt-5"];
+	const shapes = await collectChecks({ ...base, PI_TRIGGERS_FILE: providerSecretsFile([
+		{ models: [...pool, "anthropic/claude-sonnet-4-5"], modelSelection: { strategy: "random", candidates: pool }, auxiliaryModels: ["anthropic/claude-sonnet-4-5"], maxCostUsd: "1", secrets: { ANTHROPIC_OAUTH_TOKEN: "op://ci/oauth" } },
+		{ provider: "anthropic", model: "claude-sonnet-4-5", models: ["anthropic/claude-sonnet-4-5", "anthropic/claude-opus-4-1"], auxiliaryModels: ["anthropic/claude-opus-4-1"], maxCostUsd: "1", secrets: { ANTHROPIC_OAUTH_TOKEN: "op://ci/oauth" } },
+	]) }, secretsSeams());
+	const label = shapes.find((c) => !c.ok && /variable pi reads for/.test(c.label))?.label ?? "";
+	assert.match(label, /label trigger #0 \(random candidate openai\/gpt-5\): ANTHROPIC_OAUTH_TOKEN \(anthropic, an auxiliary model's provider; refused on its draws\)/);
+	assert.match(label, /label trigger #1: ANTHROPIC_OAUTH_TOKEN \(anthropic; refused on every job of its trigger\)/);
+	// A provider that needs host authentication declares no key, for an auxiliary model as for a job on it.
+	const hostAuth = await collectChecks({ ...base, PI_TRIGGERS_FILE: providerSecretsFile([
+		{ provider: "openrouter", model: "deepseek/deepseek-chat", models: ["openrouter/deepseek/deepseek-chat", "github-copilot/gpt-4o"], auxiliaryModels: ["github-copilot/gpt-4o"], maxCostUsd: "1", secrets: { COPILOT_GITHUB_TOKEN: "op://ci/gh" } },
+		{ provider: "openrouter", model: "deepseek/deepseek-chat", models: ["openrouter/deepseek/deepseek-chat", "google-vertex/gemini-2.5-pro"], auxiliaryModels: ["google-vertex/gemini-2.5-pro"], maxCostUsd: "1", secrets: { GOOGLE_CLOUD_API_KEY: "op://ci/gcp" } },
+	]) }, secretsSeams());
+	const hostAuthLabel = hostAuth.find((c) => !c.ok && /variable pi reads for/.test(c.label))?.label ?? "";
+	assert.match(hostAuthLabel, /label trigger #0: COPILOT_GITHUB_TOKEN \(github-copilot, an auxiliary model's provider; refused on every job of its trigger\)/);
+	assert.match(hostAuthLabel, /label trigger #1: GOOGLE_CLOUD_API_KEY \(google-vertex, an auxiliary model's provider; refused on every job of its trigger\)/);
+	// The auxiliary model's API key named in PI_FORWARD_ENV, or on a provider bound to a subscription here, is no
+	// declared key either: the resolver and the processor refuse it.
+	const keyedClash = (checks) => checks.find((c) => !c.ok && /variable pi reads for/.test(c.label))?.label ?? "";
+	const auxKey = /label trigger #0: ANTHROPIC_API_KEY \(anthropic, an auxiliary model's provider; refused on every job of its trigger\)/;
+	assert.match(keyedClash(await collectChecks({ ...base, PI_FORWARD_ENV: "ANTHROPIC_API_KEY", PI_TRIGGERS_FILE: panel({ ANTHROPIC_API_KEY: "op://ci/a" }) }, secretsSeams())), auxKey);
+	const subscriptionFactory = () => ({ auth: { async check(provider) { return provider === "anthropic" ? { ok: true, managed: true, provider: "anthropic", connectionId: "claude" } : { ok: true, managed: false }; } } });
+	assert.match(keyedClash(await collectChecks({ ...base, PI_AUTH_CONNECTIONS_FILE: "/srv/pi/connections.json", PI_TRIGGERS_FILE: panel({ ANTHROPIC_API_KEY: "op://ci/a" }) }, { ...secretsSeams(), subscriptionFactory })), auxKey);
+});
+
 test("doctor: the provider clash check follows the PROVIDER, so another provider's variable passes", { skip: skipNoPi }, async () => {
 	// The same bound the gate keeps: an anthropic deployment may bind another provider's key for a flow
 	// that talks to that provider itself. A check that refused it would be doctor inventing a namespace the

@@ -74,8 +74,8 @@ unmetered HTTP requests do not gain subscription admission.
 Every declared auxiliary route must pass authentication, model, quota and spend admission before the job
 starts. An exhausted Claude auxiliary therefore holds an OpenAI-root job too; the dispatcher does not silently
 omit a panel member. API credentials come from the host's configured environment or pi API-key login, or a
-declared `run.secrets` value. A credential available only from a later project-bundle fetch is insufficient for
-this free preflight. The same `run.secrets` value can be the main model's credential when the job's own provider
+declared `run.secrets` value. A project bundle may carry no variable of an auxiliary model's provider, its API key
+included: the job is refused as `secret-name-reserved`. The same `run.secrets` value can be the main model's credential when the job's own provider
 is an API-key provider ([the provider key as a run secret](secrets.md#the-provider-key-as-a-run-secret)); a
 provider bound to a connection here never takes one, and a trigger that binds a bound provider's API-key variable
 is refused as `secret-name-reserved`. A subscription token in a declared `ANTHROPIC_API_KEY`, for the main model or

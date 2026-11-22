@@ -583,11 +583,27 @@ In detail:
 - **The same holds for a model the job may switch to.** A random `modelSelection` candidate or a fallback on
   that provider is eligible with the key only in `run.secrets`, and an auxiliary model on it already took its key
   from there.
-- **A run secret reaches every job of the trigger, whatever model it runs on.** In a random pool that also holds a
-  subscription model ([random pools](triggers.md#choosing-randomly-from-a-reviewed-pool)), a draw that lands on the
-  subscription still gets the key, as a plain variable: pi does not spend it there, but any tool or script the job
-  runs can read it and spend it, outside the cost meter. A key kept in the worker's own environment instead reaches
-  such a draw only when the trigger's `run.auxiliaryModels` name its provider, and pi then spends it under the cap.
+- **An auxiliary model's provider follows the same rule.** For the provider of a model in `run.auxiliaryModels`,
+  only its API-key variable may be bound, in `run.secrets` (not `run.secretFiles`), not on `PI_FORWARD_ENV`, never for
+  a provider that needs host authentication (`github-copilot`, `google-vertex`) and never for one bound to a
+  subscription on this host. That value is then the model's only credential, as for the main model: the host's key for
+  that provider is not read, and a forwarded `ANTHROPIC_AUTH_TOKEN` or `ANTHROPIC_OAUTH_TOKEN` is removed. Every other
+  variable pi reads for it (`ANTHROPIC_OAUTH_TOKEN`, and `ANTHROPIC_AUTH_TOKEN`, which the triggers file refuses
+  already) is refused as `secret-name-reserved`, as for the job's own provider: bound, it would have become that
+  model's credential, a subscription token taken from a run secret. A project's bundle may carry none of that
+  provider's variables, its API key included; a key a tool in the job reads under its usual name (`OPENAI_API_KEY`
+  beside an `openai` auxiliary model) goes in the trigger's own `run.secrets` instead, where it is that model's key and
+  tools still see it. `pi-dispatch doctor` names such a binding in `run.secrets` or `run.secretFiles` at setup.
+- **In a random pool the key reaches only the draws that use it.** A `run.secrets` binding of the API-key variable
+  of a candidate's provider reaches a job only when the drawn model's provider, or the provider of a model in
+  `run.auxiliaryModels`, reads it. A draw that lands on another candidate, a subscription model in a pool that mixes
+  the two ([random pools](triggers.md#choosing-randomly-from-a-reviewed-pool)) included, does not get it: there it
+  would be a plain variable pi does not spend but any tool or script the job runs could spend, outside the cost meter.
+  A project bundle's variable of such a name is kept out of that draw the same way. The worker logs
+  `run_secret_withheld` with the variable names (and the bundle, for a bundle's), never a value. The secret is still resolved for
+  every draw, so a reference that does not resolve refuses them all alike. Every other run secret reaches every job,
+  whatever model it runs on: a job may call an API from a tool on purpose. A fallback list is not a pool: a
+  fallback's key in `run.secrets` reaches every attempt, the primary's included, a subscription primary too.
 - **Only the API-key variable counts**, and only when all of these hold:
   - it is in `run.secrets`, not `run.secretFiles` (a file secret's variable is a path, never the key);
   - it is not on `PI_FORWARD_ENV`;
@@ -599,8 +615,9 @@ In detail:
 
   Anything else stays `secret-name-reserved`. So does a provider bound to a subscription between the job's pickup
   and its secret resolve, before anything spends.
-- **A project bundle never sets it.** A bundle carrying a provider variable of the job is refused as before: its
-  names exist only once it is read, and one bundle serves every trigger of a project.
+- **A project bundle never sets it.** A bundle carrying a provider variable of the job, or of the provider of a
+  model in its `run.auxiliaryModels`, is refused as `secret-name-reserved`: its names exist only once it is read, after
+  the credential gates, and one bundle serves every trigger of a project.
 - **The worker says so.** The log line `provider_credential_declared` names the provider and the variable (never
   the value), and `pi-dispatch doctor` prints a line naming each trigger whose key replaces this host's credential,
   and where: on every job of the trigger, on a random candidate's draws, or on a fallback's failover attempts. Doctor

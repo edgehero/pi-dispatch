@@ -3354,7 +3354,8 @@ export async function startWorker(
 				// A subscription token in the API-key variable is refused as well, by pi's own value test (`isOAuthTokenValue`):
 				// pi would send it as a subscription login, which the worker refuses from auth.json and at setup and never
 				// spends for an unattended job. The same gate judges an auxiliary provider's declared API-key variable, so a token
-				// there is refused too; an auxiliary provider's OAuth or bearer variable is not this gate's to judge.
+				// there is refused too; an auxiliary provider's OAuth or bearer variable is not this gate's to judge: the secret
+				// resolver refuses it by name first (issue #999, `reservedAuxiliaryNames`).
 				const unmanaged = () => {
 					const declared = declaredProviderKey(job, { forwardEnv: config.forwardEnv });
 					if (declared === null) return legacy();

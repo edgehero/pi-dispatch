@@ -29,7 +29,7 @@
 
 import { isPrivateEndpointEnvName } from "./reserved-env.mjs";
 import { spawn } from "node:child_process";
-import { providerKeyCandidates } from "./env-allowlist.mjs";
+import { auxiliaryCredentialNames, providerKeyCandidates } from "./env-allowlist.mjs";
 import { findDuplicateKey } from "./json-duplicates.mjs";
 import { mergeSecretProfiles, withinRoots } from "./secret-profiles.mjs";
 import { MAX_SECRET_BYTES, realExecutable, runResolver } from "./secrets.mjs";
@@ -212,13 +212,16 @@ export function makeBundleResolver({ envBundles = {}, roots = [], forwardEnv = [
 			log("secret_bundle_resolve_failed", { bundle: binding.id ?? null, failure: "policy", detail: parsed.failure, name: parsed.name ?? null, line: parsed.line ?? null });
 			return { unresolved: true, failure: parsed.failure, name: parsed.name ?? null, line: parsed.line ?? null, code: 0, stderrBytes: outcome.stderrBytes };
 		}
-		// The reserved names, all three sets `run.secrets` is held to, asked of the WHOLE bundle: the statically
-		// knowable set the triggers file refuses at load (it cannot see a bundle's names, which exist only once read),
-		// this job's provider credential variables, and PI_FORWARD_ENV. A REFUSAL naming the first one in the
-		// resolver's order, never a drop (see the header), and never resolved by ordering: buildContainerEnv writes
-		// the provider credential BEFORE the secrets loop, so a bundle carrying ANTHROPIC_API_KEY would silently
-		// replace the key every job of the project spends (secrets.mjs records the class).
-		const reserved = new Set([...RESERVED_ENV_NAMES, ...providerKeyCandidates(job?.provider), ...forwardEnv]);
+		// The reserved names, every set `run.secrets` is held to, asked of the WHOLE bundle: the statically knowable
+		// set the triggers file refuses at load (it cannot see a bundle's names, which exist only once read), this
+		// job's provider credential variables, every variable of its auxiliary models' providers (issue #999,
+		// `auxiliaryCredentialNames`, the API keys included, since a bundle never declares a credential), and
+		// PI_FORWARD_ENV. A REFUSAL naming the first one in the resolver's order, never a drop (see the header), and
+		// never resolved by ordering: buildContainerEnv writes the provider credential BEFORE the secrets loop, so a
+		// bundle carrying ANTHROPIC_API_KEY would silently replace the key every job of the project spends (secrets.mjs
+		// records the class), and an auxiliary provider reads the secrets over the host's key, after the gate that
+		// judges a declared one.
+		const reserved = new Set([...RESERVED_ENV_NAMES, ...providerKeyCandidates(job?.provider), ...auxiliaryCredentialNames(job), ...forwardEnv]);
 		const clash = Object.keys(parsed.vars).find((name) => reserved.has(name) || isPrivateEndpointEnvName(name) || bundleLoaderName(name));
 		if (clash !== undefined) return { reserved: clash };
 		for (const name of binding.files ?? []) {

@@ -3275,3 +3275,58 @@ test("auxiliary credentials are resolved from declared secrets before mint, clon
 		assert.ok(!calls.some(call => call.startsWith("mint:") || call === "prepare" || call === "run-container"));
 	}
 });
+
+test("issue #999: a declared key for an auxiliary provider bound to a subscription is refused as secret-name-reserved before the mint, as the main one is", async () => {
+	const panel = { ...ghJob, provider: "openrouter", model: "deepseek/deepseek-chat", models: ["openrouter/deepseek/deepseek-chat", "anthropic/claude-sonnet-4-5"], auxiliaryModels: ["anthropic/claude-sonnet-4-5"], maxCostMicros: 1_000_000, secrets: { ANTHROPIC_API_KEY: "op://ci/a/key" } };
+	const run = async (job, over) => {
+		const posted = [];
+		const { deps: d, calls } = deps({ resolveSecrets: async () => ({ ok: true, secrets: Object.fromEntries(Object.keys(job.secrets).map((name) => [name, "sk-ant-api03-private"])) }), comment: async (_job, text) => posted.push(text), ...over });
+		return { result: await runJob(job, d), calls, posted };
+	};
+	// Bound when the gate asks after the resolver, or by the access snapshot taken since the pickup.
+	const managed = { checkProviderCredential: (job) => (job.provider === "anthropic" ? { ok: true, managed: true } : { ok: true }) };
+	const snapshot = { checkProviderCredential: () => ({ ok: true }), prepareSubscriptionAuth: async () => ({ ok: true, snapshots: [{ provider: "anthropic", env: { ANTHROPIC_OAUTH_TOKEN: "subscription" } }] }) };
+	for (const over of [managed, snapshot]) {
+		const { result, calls, posted } = await run(panel, over);
+		assert.deepEqual([result.reason, result.budgetReserved], ["secret-name-reserved", false]);
+		assert.match(posted.at(-1), /`ANTHROPIC_API_KEY`/);
+		assert.equal(posted.join("").includes("sk-ant-api03-private"), false);
+		assert.ok(!calls.some((call) => call.startsWith("mint:") || call === "prepare" || call === "run-container"));
+	}
+	// Without the binding the bound auxiliary provider runs on its subscription, as before.
+	const plain = await run({ ...panel, secrets: { STRIPE_KEY: "op://ci/stripe" } }, managed);
+	assert.equal(plain.result.outcome, "completed", JSON.stringify(plain.result));
+});
+
+// --- Issue #1002: a random pool's run secret that is another candidate's API key stays out of this draw ---
+
+test("issue #1002: a subscription draw's container gets no other candidate's API key from the run secrets, the name is logged and the value never is", async () => {
+	const pool = { strategy: "random", candidates: ["anthropic/claude-sonnet-4-5", "openrouter/deepseek/deepseek-chat"] };
+	const resolved = { OPENROUTER_API_KEY: "sk-or-pool-private", STRIPE_KEY: "stripe-private" };
+	const draw = (provider, model, over = {}) => ({ ...ghJob, provider, model, models: [`${provider}/${model}`], modelSelection: pool, secrets: { OPENROUTER_API_KEY: "op://ci/or/key", STRIPE_KEY: "op://ci/stripe" }, ...over });
+	const run = async (job) => {
+		const containerSaw = [];
+		const logs = [];
+		const { deps: d } = deps({
+			imagePreflight: async () => ({ ok: true, image: "job:current", capabilities: ["exitAuth"] }),
+			checkProviderCredential: () => ({ ok: true }),
+			resolveSecrets: async () => ({ ok: true, secrets: { ...resolved } }),
+			runContainer: async (ctx) => (containerSaw.push(ctx), { code: 0, aborted: false }),
+			log: (event, fields) => logs.push({ event, fields }),
+		});
+		await runJob(job, d);
+		assert.equal(containerSaw.length, 1, JSON.stringify(logs.map((row) => row.event)));
+		return { secrets: containerSaw[0].secrets, withheld: logs.filter((row) => row.event === "run_secret_withheld"), logs };
+	};
+	const subscription = await run(draw("anthropic", "claude-sonnet-4-5"));
+	assert.deepEqual(subscription.secrets, { STRIPE_KEY: "stripe-private" }, "a key no candidate uses still reaches the job");
+	assert.deepEqual(subscription.withheld.map((row) => row.fields), [{ provider: "anthropic", names: ["OPENROUTER_API_KEY"] }]);
+	assert.equal(JSON.stringify(subscription.logs).includes("sk-or-pool-private"), false, "names only, never the value");
+	// The draw on the key's own provider keeps it, and so does a draw whose auxiliary model uses that provider.
+	const own = await run(draw("openrouter", "deepseek/deepseek-chat"));
+	assert.deepEqual(own.secrets, resolved);
+	assert.deepEqual(own.withheld, []);
+	const panel = await run(draw("anthropic", "claude-sonnet-4-5", { models: pool.candidates, auxiliaryModels: ["openrouter/deepseek/deepseek-chat"], maxCostMicros: 1_000_000 }));
+	assert.deepEqual(panel.secrets, resolved);
+	assert.deepEqual(panel.withheld, []);
+});

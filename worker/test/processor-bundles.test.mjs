@@ -184,6 +184,30 @@ test("the trigger's own run.secrets shadow a bundle variable, and the record nam
 	assert.deepEqual(record(job, r).bundle, { id: "shop", variables: ["DB_URL", "STRIPE_KEY"], shadowed: ["STRIPE_KEY"] });
 });
 
+test("issue #1002: a random pool's draw gets no other candidate's API key from the project bundle either, and an unrelated bundle variable still arrives", async () => {
+	const pool = { strategy: "random", candidates: ["anthropic/claude-sonnet-4-5", "openrouter/deepseek/deepseek-chat"] };
+	const draw = (provider, model, over = {}) => ({ ...cronJob, provider, model, models: [`${provider}/${model}`], modelSelection: pool, ...over });
+	const exitAuth = { imagePreflight: async () => ({ ok: true, image: "job:current", capabilities: ["exitAuth"] }) };
+	const bundle = "STRIPE_KEY=sk_live_value\nOPENROUTER_API_KEY=sk-or-bundle\n";
+	// The trigger's own key, withheld on the subscription draw, no longer shadows the bundle's; and a bundle alone.
+	const declared = deployment({ bundle, over: { ...exitAuth, resolveSecrets: async () => ({ ok: true, secrets: { OPENROUTER_API_KEY: "sk-or-trigger" } }) } });
+	await runJob(draw("anthropic", "claude-sonnet-4-5", { secrets: { OPENROUTER_API_KEY: "op://ci/or" } }), declared.deps);
+	const alone = deployment({ bundle, over: exitAuth });
+	await runJob(draw("anthropic", "claude-sonnet-4-5"), alone.deps);
+	for (const d of [declared, alone]) {
+		assert.equal(d.ran.length, 1);
+		assert.equal("OPENROUTER_API_KEY" in d.ran[0], false);
+		assert.equal(d.ran[0].STRIPE_KEY, "sk_live_value");
+		assert.deepEqual(d.logs.find((l) => l.event === "run_secret_withheld" && l.fields.bundle === "shop")?.fields, { provider: "anthropic", names: ["OPENROUTER_API_KEY"], bundle: "shop" });
+		assert.equal(JSON.stringify(d.logs).includes("sk-or-"), false, "names only, never a value");
+	}
+	// On the candidate's own draw the bundle's key is that provider's variable, refused before spend as before.
+	const own = deployment({ bundle, over: exitAuth });
+	const r = await runJob(draw("openrouter", "deepseek/deepseek-chat"), own.deps);
+	assert.deepEqual([r.reason, r.budgetReserved], ["secret-name-reserved", false]);
+	assert.equal(own.ran.length, 0);
+});
+
 test("no bundle value reaches the record, a log line or a comment, on success or on refusal", async () => {
 	const values = ["sk_live_value", "postgres://u:pw@db/shop"];
 	const ok = deployment();

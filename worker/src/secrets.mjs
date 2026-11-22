@@ -26,7 +26,7 @@
 import { spawn } from "node:child_process";
 import { isUtf8 } from "node:buffer";
 import { realpathSync, statSync } from "node:fs";
-import { declaredProviderKey, providerKeyCandidates } from "./env-allowlist.mjs";
+import { declaredProviderKey, providerKeyCandidates, reservedAuxiliaryNames } from "./env-allowlist.mjs";
 import { EXIT_POLICY } from "./exit-code.mjs";
 import { mergeSecretProfiles, withinRoots } from "./secret-profiles.mjs";
 
@@ -324,7 +324,14 @@ export function makeSecretsResolver({
 		// The widening is bounded: it reserves the variables of THIS JOB'S provider and nothing else, so an
 		// anthropic job binding OPENAI_API_KEY for a flow that talks to OpenAI itself is still allowed. That
 		// is deliberate, and tested; refusing it would be this project inventing a namespace it does not own.
-		const reserved = new Set([...providerKeyCandidates(job?.provider), ...forwardEnv]);
+		//
+		// Issue #999 widens it by exactly one family, the auxiliary models' (`reservedAuxiliaryNames`): an auxiliary
+		// provider takes its credential from the host with the run secrets laid over it, so its OAuth variable bound here
+		// became that model's credential, a subscription token from a run secret (its bearer variable is refused at load
+		// already, and reserved here as well, as the main provider's is). Each auxiliary provider is judged by the main
+		// rule, so only the API-key variable `declaredProviderKey` would admit stays bindable, as the declared key that
+		// model spends; the credential gate judges its value.
+		const reserved = new Set([...providerKeyCandidates(job?.provider), ...reservedAuxiliaryNames(job, { forwardEnv }), ...forwardEnv]);
 		// Issue #967: the ONE exception. A trigger that binds the variable the worker itself writes for this job's provider
 		// declares that value as the job's credential, and the processor, having admitted it at the pickup's credential
 		// gate, says so by name. It is lifted from the set only when the name it gives is exactly what the shared rule
