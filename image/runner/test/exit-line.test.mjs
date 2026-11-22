@@ -314,7 +314,8 @@ function worstFields(message = `403 ${"\u0001".repeat(16000)}`) {
 		turns: 4096,
 		retryTurns: 4096,
 		modelRoles: { refusals: Array.from({ length: 8 }, () => ({ agentHash: "a".repeat(64), reason: "invalid-arguments" })) },
-		tokens: Object.fromEntries(TOKEN_KEYS.map((key) => [key, key === "metered" ? true : key === "cost" ? 99_999.99 : N])),
+		// `costNotional` (issue #1008) as wide as a float sum of dollars prints: 17 characters, as a real one measured.
+		tokens: Object.fromEntries(TOKEN_KEYS.map((key) => [key, key === "metered" ? true : key === "cost" ? 99_999.99 : key === "costNotional" ? 99_382.71604992478 : N])),
 		usage: { v: 1, piAi: "88.88.88", truncated: 1, models: [...Array.from({ length: 8 }, (_, i) => row(wide("provider", i), wide("model", i))), row("other", "other")] },
 		context: { tokens: N, window: N },
 		session: { resumed: false, reason: "resume-chain-too-long" },
@@ -405,9 +406,9 @@ test("the numbers INT-RUNNER-EXIT-CODE-PROTOCOL states are measured here: every 
 	// new field moves these, and the spec's sentence with them.
 	const fields = { ...worstFields(), reason: "error" };
 	const line = `\n${signExitLine(JSON.stringify({ event: "exit", jobId: JOB_ID, ...fields, resources: LONGEST_RESOURCES }), KEY)}\n`;
-	assert.equal(line.length, 8105);
+	assert.equal(line.length, 8138);
 	const withSupervisor = line.length + SUPERVISOR_LINE_BYTES + JOB_ID.length;
-	assert.equal(withSupervisor, 8598);
+	assert.equal(withSupervisor, 8631);
 	assert.ok(withSupervisor > EXIT_TAIL_BYTES);
 	const spec = readFileSync(new URL("../../../specs/interfaces.md", import.meta.url), "utf8");
 	const section = spec.slice(spec.indexOf("**The whole line has a limit of its own (issue #800)"), spec.indexOf("**The job user cannot read its own inputs (issue #341)**"));
@@ -437,8 +438,8 @@ test("a maximal line stays at or under 7,680 bytes and verifies, with the code, 
 	assert.match(parsed.message, /^403 [\s\S]*\.\.\. \[truncated \d+ chars\]$/);
 	assert.ok(exitLineJson(parsed.message).length - 2 <= EXIT_MESSAGE_FLOOR_BYTES);
 	assert.ok(exitLineJson(parsed.message).length - 2 > EXIT_MESSAGE_FLOOR_BYTES - 6, "the floor, spent");
-	assert.equal(Buffer.byteLength(line), 6655);
-	assert.equal(Buffer.byteLength(line) + SUPERVISOR_LINE_BYTES + JOB_ID.length, 7148, "inside the tail with the supervisor's line, 1 KiB to spare");
+	assert.equal(Buffer.byteLength(line), 6688);
+	assert.equal(Buffer.byteLength(line) + SUPERVISOR_LINE_BYTES + JOB_ID.length, 7181, "inside the tail with the supervisor's line, 1 KiB to spare");
 });
 
 test("issue #985: the message's room is the line's own, a 256-byte head while the line stays under 7 KiB, and past that the marker alone, never an empty message while the marker fits", () => {

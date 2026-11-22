@@ -760,12 +760,15 @@ export function buildContainerEnv({ mainCredential = null, secondaryCredential =
 
 	// An explicit subscription binding is authoritative, including against host API keys and trigger secrets.
 	// Only access snapshots cross this boundary; the runner receives closed metadata to check before loading code.
+	// `notional: true` (issue #1008) only when the worker marked the snapshot (a connection with no paid extra usage), so
+	// the runner admits its calls without charging the cost cap; strictly `=== true`, and absent otherwise, so an entry
+	// is byte-identical to one built before the key existed. An older runner ignores it (it accepts extra keys).
 	if (subscriptionAuth.length > 0) {
 		for (const snapshot of subscriptionAuth) {
 			for (const name of providerKeyCandidates(snapshot.provider)) delete env[name];
 			Object.assign(env, snapshot.env);
 		}
-		env.PI_SUBSCRIPTION_AUTH = JSON.stringify(subscriptionAuth.map(({ provider, connectionId, adapter, generation, expiresAt, deadlineAt, root, digest }) => ({ provider, connectionId, adapter, generation, expiresAt, deadlineAt, ...(root ? { root, digest } : {}) })));
+		env.PI_SUBSCRIPTION_AUTH = JSON.stringify(subscriptionAuth.map(({ provider, connectionId, adapter, generation, expiresAt, deadlineAt, root, digest, notional }) => ({ provider, connectionId, adapter, generation, expiresAt, deadlineAt, ...(root ? { root, digest } : {}), ...(notional === true ? { notional: true } : {}) })));
 	}
 
 	// The shipped egress policy's variables (REQ-EGRESS-ALLOWLIST), AFTER the PI_FORWARD_ENV loop so a

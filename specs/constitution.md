@@ -1098,8 +1098,15 @@ passing, on the record — issue #80.)
   reservation. Renewal is bounded network work on the owning host, not a paid model call. Only an access
   snapshot valid past its admitted authorization lease and safety margin reaches the container (the full job
   deadline on a nonrenewable image, a bounded renewable lease on a compatible image, issue #895); refresh credentials
-  never do. A renewal or persistence fault cannot silently select an environment API key. Ordinary count,
-  token, dollar and per-call worst-cost guards apply to subscription requests too.
+  never do. A renewal or persistence fault cannot silently select an environment API key. Ordinary count and
+  token guards apply to subscription requests too. **Dollar guards apply to calls that can be billed** (AMENDED
+  2026-11-22, issue #1008): the per-call worst-cost bound of the per-job cap and every dollar window count an
+  API-key call and every call on a subscription connection with paid extra usage, since any of those may be billed
+  and nothing tells which. A call on a subscription connection with no paid extra usage bills nothing: its list price
+  is notional, it is metered and recorded at that price, and it is bounded by the account's quota, admitted before
+  any spend, and by the job's turn and time limits instead of by dollars. Any doubt counts a call (a child process,
+  an unmarked entry, an older worker or image). The ordering is unchanged: every free refusal still comes before
+  spend, and the cap is still checked before every call that can be billed.
   **Dollars join the ordering, not replace it** (issue #501). Both ledgers may span several windows
   (day/week/month, `REQ-SPEND-CAPS-MULTI-WINDOW`), and the job-count ledger alone carries a soft-hold band. The
   dollar reserve runs after both job-count reserves and before the container, so every free gate and every
@@ -1108,7 +1115,9 @@ passing, on the record — issue #80.)
   be. A refused dollar reservation is given back at once, the one departure from the job-count ledger's "a
   refused slot still counts": a refusal there costs one slot, here it would cost a whole per-job cap of a
   window that ran nothing. A job that cannot spend (every model it may call local and zero-rated) reserves
-  nothing and runs under a per-job cap of 0, so the ordering still holds: the cap is checked before each call.
+  nothing and runs under a per-job cap of 0, so the ordering still holds: the cap is checked before each call. A job
+  that can reach no billed route (every route a notional subscription or zero-rated, issue #1008) reserves nothing
+  too, and keeps its cap, under which a job image from before that change still counts those calls.
   **A durable run multiplies holds, never the cap behind each one** (issue #645, `REQ-RUN-RECOVERY`). A run armed
   with `run.recover` records every dollar hold in a per-run ledger before its container starts
   (`DES-RUN-BUDGET-LEDGER`), each container reserves its own hold at the same place in the order as any job's, and a
@@ -1424,8 +1433,11 @@ passing, on the record — issue #80.)
   This local lease is NOT a provider revocation: an exfiltrated bearer remains usable until its actual provider
   expiry, potentially longer than 30 minutes after the job. The refresh grant still never leaves the host. The host private store is outside every overlay, workspace and sandbox; no auth file is
   mounted. An access token is still readable by trusted in-process extensions and, on container-custody
-  venues, the job's tools. Job count, token and conservative dollar bounds remain mandatory where configured;
-  account quota observations supplement them and cannot promise a provider-side monetary cap. Paid extra
+  venues, the job's tools. Job count and token bounds remain mandatory where configured, and conservative dollar
+  bounds remain mandatory for every call that can be billed (AMENDED 2026-11-22, issue #1008): an API-key call and a
+  call on a connection with paid extra usage. A call on a subscription connection with no paid extra usage bills
+  nothing, so its list price is notional and no dollar bound applies to it; account quota observations and the
+  job's turn and time limits bound it, and they cannot promise a provider-side monetary cap. Paid extra
   usage requires an explicit positive credit ceiling and a compatible per-job dollar cap. Supported community
   compatibility profiles describe tested exact code, not vendor endorsement or a sandbox around that code.
   **A workspace checkpoint is a durable medium this project writes on purpose** (issue #645,
@@ -1552,6 +1564,7 @@ passing, on the record — issue #80.)
 
 | Date | Change |
 |---|---|
+| 2026-11-22 (#1008) | AMENDED: `CONST-BUDGET-BEFORE-TOKENS`, its Why: the sentence that applied "dollar and per-call worst-cost guards" to subscription requests now says dollar guards apply to calls that can be billed (an API-key call, and every call on a subscription connection with paid extra usage, since nothing tells which of those were billed); a call on a subscription with no paid extra usage is notional, metered and recorded at list price, and bounded by the account's quota at admission and the job's turn and time limits; any doubt counts a call; and a job whose every route is notional or zero-rated reserves nothing and keeps its cap. The ordering of the gates is UNCHANGED, checked: every free refusal still precedes spend, and the cap is still checked before every billable call. AMENDED: `CONST-TOKEN-SCOPED-PER-JOB`, the subscription paragraph: "conservative dollar bounds remain mandatory" now holds for every call that can be billed, and a notional call is bounded by quota and the job's turn and time limits instead. The constraint changed, not only the code: the owner's decision on issue #1008 (a subscription call's list price is not money). UNCHANGED, checked: `CONST-RETRY-INFRA-ONLY`, `CONST-ISOLATION-CONTAINER-PER-JOB`, `CONST-PI-VERSION-PINNED`, `CONST-MERGE-NEVER-AUTOMATIC`. **Code evidence**: image/runner/src/usage-meter.mjs -> notionalProviders, createCostGuard, createUsageMeter; worker/src/reserve-estimate.mjs -> notionalConnection, reserveVerdict; worker/src/dollar-budget.mjs -> notionalMicros, dollarSettlement. |
 | 2026-11-22 (#985) | Issue #985, part 2. UNCHANGED, checked: `CONST-BUDGET-BEFORE-TOKENS`. A pi child's call (a role's task) refused only by holds in other processes now waits for them as a parent's call waits for its own process's holds (`DES-DOLLAR-RESERVE-AND-SETTLE`), holding nothing, and every process still admits a call only when its own spend and holds, plus the rest of the job's spend and holds as of the last count, plus the call's bound, fit the cap; the in-flight part of the outside spend only decides whether a call waits or is refused. While any process of the job has a waiter, every admission in every process takes its turn, one process per SPENT generation, a turn won on an older SPENT is lost, and a call that may not wait and has no turn is refused under its own rule (`why` `turn`); the overshoot left across processes is the pre-existing one-tick residual between fresh calls in different processes, including the tick in which a wait begins and before it is published; waiting itself adds no overshoot (`DES-USAGE-METER-VIA-API-PROVIDER-REGISTRY`). No ordering, ledger format or reservation changes. |
 | 2026-11-22 (#985) | UNCHANGED, checked: `CONST-BUDGET-BEFORE-TOKENS`. The per-job cost cap is still enforced inside the container before each provider call against each call's worst-cost bound: a call refused only by other calls' in-flight holds now waits for them (`DES-DOLLAR-RESERVE-AND-SETTLE`), holding nothing, and is sent only when `spent + in-flight bounds + the children's spend + its bound` fits the cap, so what a job can spend stays bounded before it runs. The final payload's bound is now the larger of the context's and the body's measure, still an upper bound (the residuals stay named in `DES-DOLLAR-RESERVE-AND-SETTLE`). No ordering, ledger or reservation changes. |
 | 2026-11-20 (#920 follow-up) | UNCHANGED, checked: `CONST-RETRY-INFRA-ONLY`, `CONST-BUDGET-BEFORE-TOKENS`, `CONST-TOKEN-SCOPED-PER-JOB`, `CONST-ISSUE-TEXT-IS-DATA`, `CONST-PI-VERSION-PINNED` and `CONST-MERGE-NEVER-AUTOMATIC`. The worker adds bounded scheduling evidence only after confirmed queue completion; it neither judges work nor grants authority or retries a missing comment. |

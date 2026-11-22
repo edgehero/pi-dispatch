@@ -86,8 +86,10 @@ silently short. Upgrade the console to count them.
 ## Declaring subscriptions
 
 Explicit [subscription authentication](subscription-auth.md) is configured separately. Its connection policy
-and quota observations do not change this accounting file or its hypothetical plans. Subscription requests
-retain conservative model-cost reservations and normal dollar caps. A vendor quota percentage or prepaid plan
+and quota observations do not change this accounting file or its hypothetical plans. A call on a connection
+without paid extra usage bills nothing, so the dollar caps and windows do not count it, while the run still records
+its API-equivalent cost ([what the cap counts](#what-the-cap-counts)); a connection with paid extra usage keeps
+conservative model-cost reservations and normal dollar caps. A vendor quota percentage or prepaid plan
 is not an exact per-request cash charge, and missing provider credit units are not assumed USD.
 
 The rate tables pi ships never state a subscription plan's price. Some subscription providers ship
@@ -160,8 +162,9 @@ labeled `unmeasured (OQ-002)`.
 
 ## Dollar caps
 
-For supported subscription transports, the guard checks the final shaped request before dispatch as well as
-its original call. Added messages, system or tool data may enlarge the existing reservation ticket within
+For supported subscription transports, the guard checks a counted call's final shaped request before dispatch as
+well as its original call (a call on a connection without paid extra usage is not counted, so not checked:
+[what the cap counts](#what-the-cap-counts)). Added messages, system or tool data may enlarge the existing reservation ticket within
 the job's remaining cap. The check measures the larger of the original request and the final one, never the
 two added together. A final request that fits only once other calls finish waits for them
 ([Parallel calls](#parallel-calls)); one that cannot fit or be bounded refuses as `cost-cap` with
@@ -249,15 +252,36 @@ bounded here."
    the job is refused `dollar-cap`, everything it added is given back, and no container starts. Under an
    allocation envelope the window may be the project's share of the split or the envelope total, and then the
    refusal is `allocation-cap` ([allocation](allocation.md)). A job whose every
-   allowed model is a declared local endpoint priced at zero reserves nothing (`basis: unreserved`).
+   allowed model is a declared local endpoint priced at zero reserves nothing (`basis: unreserved`), and so does
+   a job whose every model is on a subscription without paid extra usage or priced at zero, which keeps its cap.
 2. **Run.** The runner checks the per-job cap before every model call, against the most that call could cost.
    The call is refused (`cost-cap`) when it could pass the cap. When only other calls still running stand in its
    way, it waits for them first ([Parallel calls](#parallel-calls)). So the reservation bounds what the runner
    meters, except for the gaps listed under "What the caps do not cover".
-3. **Settle.** After the run, each window is charged what the job really cost, and the rest of the hold is given
-   back. A model window is charged that model's own share, from the run's per-model usage.
+3. **Settle.** After the run, each window is charged what the job's billed calls really cost, and the rest of the
+   hold is given back. A model window is charged that model's own share, from the run's per-model usage.
 4. **Record.** The run record says how it settled, under `dollars`
    ([run record](../specs/interfaces.md#int-run-history-file-contract)).
+
+### What the cap counts
+
+The cap and the dollar windows count the calls that can be billed (issue #1008): every call on an API key, and every
+call on a [subscription connection](subscription-auth.md#the-cost-cap-and-the-dollar-windows) that allows paid
+extra usage (`extraUsageCreditMicros`), since any of those may be billed and nothing tells which. A call on a
+subscription connection without paid extra usage bills nothing per call: the runner lets it through with no bound and
+no charge, the run record still prices it at list price in `tokens.cost`, and `tokens.costNotional` is that part.
+The windows are charged `tokens.cost` less `tokens.costNotional`, and `notionalProviders` on the record names the
+providers whose calls were notional.
+
+So a subscription job's limits are the account's quota (checked before it starts) and its turn and time limits. A
+job that mixes them, a subscription model with an API-key `run.auxiliaryModels` entry for example, reserves its cap
+and settles only what its API-key calls cost. A job whose every model is notional reserves nothing, and
+`pi-dispatch doctor` warns when a trigger's own `run.maxCostUsd` then bounds nothing on that host.
+
+The job image and the worker both have to know this. An image from before this release counts every subscription
+call against the cap, as before (the safe side); with a worker from before it, the connection is never marked, so
+every call counts. A worker of this release with an older image settles the whole cost of a mixed attempt, since the
+image writes no `costNotional`. See [the upgrade guide](upgrading.md).
 
 ### Parallel calls
 
@@ -355,7 +379,9 @@ Before this, the numbers were only on the job log's `cost_refused` line.
 
 `dollars.basis` is one of four words:
 
-- `metered`: the cost was fully known, so the windows were charged exactly that, rounded up to the micro-dollar.
+- `metered`: the cost was fully known, so the windows were charged exactly its billed part, rounded up to the
+  micro-dollar (the metered cost less `tokens.costNotional`, rounded down, [what the cap counts](#what-the-cap-counts)).
+  A `costNotional` that is not a number at or above 0, or is above the cost, settles at the floor.
   All of these must hold:
   - a **trusted exit line**: the container ended on its own (no timeout, cancel, shutdown or detach) and the
     exit line's own `code` matches the container's real exit code. On an image that declares `exitAuth` the line
@@ -368,7 +394,9 @@ Before this, the numbers were only on the job log's `cost_refused` line.
 - `floor`: the cost was not fully known. The windows keep at least the whole hold, and more when the measured
   part already costs more.
 - `refunded`: no container ran (it never started, or the job was refused), so the hold was given back.
-- `unreserved`: the job could not spend, so nothing was held.
+- `unreserved`: the job could not spend, so nothing was held: every model it may call is a local endpoint priced at
+  zero (it ran under a cap of 0), or a subscription without paid extra usage or priced at zero (it ran under its
+  own cap).
 
 Some cases worth knowing:
 
@@ -442,7 +470,9 @@ worker. An older worker with a new image drops the key, so ship them together, i
 Prepaid coding plans that pi prices (`kimi-coding`, `zai`, `zai-coding-cn`) meter their API-equivalent price,
 though the plan does not charge per token. A dollar cap or window on these providers caps that implied price,
 not your bill. Declaring the plan in `subscriptions.json` changes how this page shows those runs; it does not
-change what the windows are charged.
+change what the windows are charged. These are API keys on a prepaid plan, not
+[subscription connections](subscription-auth.md): only a call on a subscription connection without paid extra usage
+leaves the cap ([what the cap counts](#what-the-cap-counts)).
 
 ### Where to look
 
@@ -598,6 +628,10 @@ is an open issue.
   the ceiling.
 - **A crash holds the reservation until the key expires.** A worker that dies between reserve and settle leaves
   the hold in every window it touched: 2 days for a day key, 9 for a week, 40 for a month.
+- **A subscription connection without paid extra usage is bounded by its quota, not by dollars** (issue #1008):
+  its calls leave the cap and every window. Only the account's quota and the job's turn and time limits bound such
+  a job. In a job that mixes it with API-key calls, a notional call whose answer reported no usage (or no price)
+  still floors the settlement, the safe side.
 - **Contention near a cap.** Each job holds its whole per-job cap while it runs. A window with $1 left refuses a
   $2-capped job that would have spent $0.30. The refusal is final for that delivery.
 - **Hosts may disagree on caps.** The counters are shared, but each host judges them against its own cap values.
@@ -782,7 +816,8 @@ image with `"cacheWarming": "off"` in that file, or a spawning package that sets
 Compaction and branch summaries now use the model's own maximum output limit. `reserveTokens` controls
 when compaction starts or how much input fits; it does not reduce the summary's output bound. A main
 turn may fit your dollar cap while the next summary does not. The runner refuses that summary before
-calling the provider and ends the job with `cost-cap` / `over-cap`. Allow enough remaining budget for
+calling the provider and ends the job with `cost-cap` / `over-cap` (not on a subscription without paid extra usage,
+whose calls the cap does not count). Allow enough remaining budget for
 the full summary bound, or select a model with a smaller output limit or lower verified rates.
 
 **Radius is refused under a local dollar cap.** Its `pi-messages` protocol reports server-calculated cost

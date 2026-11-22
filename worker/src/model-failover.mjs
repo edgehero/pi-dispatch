@@ -106,8 +106,11 @@ export async function selectFailoverJob(job, { redis, id, retry = false, recover
 		const split = splitModelEntry(ref);
 		if (!split || !modelOnList(job.models, split.provider, split.model)) { log("model_candidate_skipped", { model: split ? ref : null, reason: "model-not-allowed" }); continue; }
 		const candidate = { ...job, provider: split.provider, model: split.model, models: [...new Set([ref, ...(job.auxiliaryModels ?? [])])] };
+		// The candidate's own subscription check, handed to `reservationFor` (issue #1008): null without one.
+		let checked = null;
 		if (subscriptionCheck) {
 			const subscription = await subscriptionCheck(candidate);
+			checked = subscription;
 			if (subscription.unavailable) throw new Error("subscription state unavailable");
 			if (ref === primary && (subscription.rootManaged ?? (subscription.managed === true || Array.isArray(subscription.managed) && subscription.managed.length > 0))) subscriptionPrimary = true;
 			if (subscriptionPrimary && !(subscription.rootManaged ?? (subscription.managed === true || Array.isArray(subscription.managed) && subscription.managed.length > 0))) {
@@ -130,7 +133,7 @@ export async function selectFailoverJob(job, { redis, id, retry = false, recover
 			const failedHere = previous?.safe === true && previous.ref === ref && previous.failure?.kind !== "context-overflow";
 			if (cooldown || failedHere) { if (ref === primary) why = "fallback-cooldown"; if (!failedHere) wait ??= "model-cooldown"; log("model_candidate_skipped", { model: ref, reason: failedHere ? "previous-attempt" : "cooldown" }); continue; }
 		}
-		const reservationJob = { ...candidate, maxCostMicros: reservationFor(candidate) };
+		const reservationJob = { ...candidate, maxCostMicros: reservationFor(candidate, checked) };
 		if (modelDollarRows(limits, [ref]).length > 0 && !Number.isSafeInteger(reservationJob.maxCostMicros)) { log("model_candidate_skipped", { model: ref, reason: "model-cost-cap-missing" }); continue; }
 		if (!(await modelWindowHasRoom(redis, ref, reservationJob, limits, now()))) { if (ref === primary) why = "fallback-window"; wait ??= "model-window"; log("model_candidate_skipped", { model: ref, reason: "model-window" }); continue; }
 		if (!(await acquireEndpoints(candidate))) { wait ??= "endpoint"; log("model_candidate_skipped", { model: ref, reason: "endpoint-busy" }); continue; }

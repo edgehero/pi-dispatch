@@ -261,8 +261,15 @@ function foldRow(into, row) {
  * snapshot's totals include the children, `rootTotal`, `otherTotal` and `looseTotal` stay the parent's own,
  * and the new `childTotal` closes the partition: root + other + loose + child === total. The token cap is
  * checked against parent plus children, on every record and on every fold.
+ *
+ * `notionalProviders` (issue #1008) is the job's set of NOTIONAL providers (notionalProviders below: subscription calls
+ * with no paid extra usage), or null when the job holds no subscription entry. Each priced call on one of them still
+ * lands in `cost` and on its row at list price, and is also summed into `costNotional`, so the worker can settle the
+ * dollar windows to the billed part, `cost - costNotional`. The snapshot carries `costNotional` only when the set is
+ * given, so every other exit line is byte-identical. It is the very set the cost guard admits without a charge, never a
+ * second reading of the entries: a call counted here and charged there would be subtracted from a cost the cap bounded.
  */
-export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModels = null, rootSessionId, onStop, onChange = null } = {}) {
+export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModels = null, rootSessionId, onStop, onChange = null, notionalProviders = null } = {}) {
 	if (maxTokens !== null && maxTokens !== undefined && (!Number.isInteger(maxTokens) || maxTokens < 1)) {
 		throw new Error(`invalid PI_MAX_TOKENS: ${maxTokens}`);
 	}
@@ -272,6 +279,7 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 	if (allowedModels !== null && (!Array.isArray(allowedModels) || allowedModels.length === 0)) {
 		throw new Error("invalid PI_ALLOWED_MODELS: want a non-empty list or null");
 	}
+	if (notionalProviders !== null && !(notionalProviders instanceof Set)) throw new Error("createUsageMeter: notionalProviders must be a Set or null");
 	const cap = maxTokens ?? null;
 	const costCap = maxCostMicros;
 	const allowed = allowedModels === null ? null : Object.freeze(allowedModels.map((entry) => Object.freeze({ ...entry })));
@@ -305,6 +313,9 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 		// Calls on a priced model whose answer carried broken usage (issue #571, unreportedUsage): pi recorded them as
 		// zeros or a partial count, so `cost` is short. Counted on every run, capped or not; a forward's outer call is not.
 		unreported: 0,
+		// The part of `cost` priced on notional providers (issue #1008, notionalProviders in the header). Part of `cost`,
+		// never beside it: the totals and the rows stay a partition of every call.
+		costNotional: 0,
 		// The first stop's reason (a STOP_MESSAGES key), or null. Set once by stop(), never overwritten.
 		stopReason: null,
 		// The pre-#501 flag, kept as a read-only view: true exactly when the stop was the token cap.
@@ -387,6 +398,8 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 		const price = priced ? Math.max(0, given) : 0;
 		if (priced) state.cost += price;
 		else state.unpriced += 1;
+		// Issue #1008: added in the same order as `cost`, so with every price at or above 0 the sum can never exceed it.
+		if (priced && notionalProviders !== null && notionalProviders.has(ctx.provider)) state.costNotional += price;
 
 		const id = typeof ctx.sessionId === "string" ? ctx.sessionId : "";
 		if (id.length > 0) state.sessionIds.add(id);
@@ -576,6 +589,9 @@ export function createUsageMeter({ maxTokens, maxCostMicros = null, allowedModel
 			...(children === null ? {} : { childTotal: children.total, childProcesses: children.processes, unmeteredChildren: children.unmetered }),
 			// Issue #571: on every metered line, the children's included (their ledgers carry it).
 			costUnreported: state.unreported + (children?.unreported ?? 0),
+			// Issue #1008: only for a job with subscription entries. A child never makes a notional call (it has no
+			// subscription admission), so the children's cost is all in `cost` and none of it here.
+			...(notionalProviders === null ? {} : { costNotional: state.costNotional }),
 		};
 	}
 
@@ -2519,6 +2535,15 @@ export function unreportedUsage(message, api) {
  * `tokens.cost` could be a quarter of what the cap had charged with nothing saying why. So the guard keeps what it
  * charged (charges(): its spent, the part of it above pi's own price, `lifted`, and the calls that waited) and the first
  * refusal's numbers (refusal()), both read for the exit line and neither in snapshot().
+ *
+ * NOTIONAL calls (issue #1008). A call on a provider in `notional` (notionalProviders: a subscription with no paid extra
+ * usage) is billed to nobody, so the cap does not count it: once its model passes the pinned-price checks it is admitted
+ * at once, with no bound, no hold, no wait and no charge, and none of it reaches spend(), the number a child judges the
+ * rest of the job by. It is admitted before the turn is read, so it never takes a turn, never waits behind a waiter and
+ * never claims one (it takes no room), and it adds nothing to charges() (`costChargedMicros`, `costLiftedMicros`,
+ * `costWaited`) or to a refusal's numbers. The meter still prices it into `tokens.cost` and `costNotional`. The checks stay because the price
+ * a notional call is metered at must be the pinned one too. `notional` is null in a child process (it has no
+ * subscription admission), so a child's calls always count.
  */
 /** Whether the call's model carries the pinned entry's api, cost (tiers included) and compat (fallbacks, maxTokensField). */
 function pricedAsPinned(model, pinned) {
@@ -2533,13 +2558,14 @@ export const COST_WAIT_IDLE_MS = 15 * 60 * 1000;
 /** The drain timer's period while anyone waits (issue #985): the child-fold and re-arm tick's. */
 export const COST_WAIT_TICK_MS = 1000;
 
-export function createCostGuard({ capMicros, env = process.env, log = () => {}, bound = callCostBound, external = null, externalInflight = null, claim = null, outsideWaiting = null, onQueue = null, now = Date.now, setTimer = setInterval, clearTimer = clearInterval }) {
+export function createCostGuard({ capMicros, env = process.env, log = () => {}, bound = callCostBound, external = null, externalInflight = null, claim = null, outsideWaiting = null, onQueue = null, now = Date.now, setTimer = setInterval, clearTimer = clearInterval, notional = null }) {
 	if (!Number.isSafeInteger(capMicros) || capMicros < 0) throw new Error(`invalid PI_MAX_COST_MICROS: ${capMicros}`);
 	if (external !== null && typeof external !== "function") throw new Error("createCostGuard: external must be a function");
 	if (externalInflight !== null && (typeof externalInflight !== "function" || external === null)) throw new Error("createCostGuard: externalInflight must be a function, beside external");
 	if (claim !== null && typeof claim !== "function") throw new Error("createCostGuard: claim must be a function");
 	if (outsideWaiting !== null && typeof outsideWaiting !== "function") throw new Error("createCostGuard: outsideWaiting must be a function");
 	if (onQueue !== null && typeof onQueue !== "function") throw new Error("createCostGuard: onQueue must be a function");
+	if (notional !== null && !(notional instanceof Set)) throw new Error("createCostGuard: notional must be a Set or null");
 	// Issue #985, none of them in snapshot() (charges() and refusal() read them): `waited` counts the calls that waited,
 	// each once (at admission, at its final payload, or both); `lifted` what settles charged above pi's own price (settle);
 	// `refusal` the first refusal's numbers (refuse).
@@ -2886,6 +2912,9 @@ export function createCostGuard({ capMicros, env = process.env, log = () => {}, 
 		const [context, options] = args ?? [];
 		// A copy that held something other than plain data (snapshotModel): what pi would read is not what was judged.
 		if (isUnreadable(model) || isUnreadable(options)) return refuseCall(waiter, { why: "unboundable" });
+		// A notional call (issue #1008, NOTIONAL in the header): no bound, no hold, no charge. It takes no `pending`
+		// slot, so prepare() and bind() leave it alone, and it never queues, since it takes no room.
+		if (notional !== null && notional.has(model?.provider)) return null;
 		const b = method === "generateImages" || method === "streamDeferred" ? Infinity : bound(method, model, context, options, env);
 		if (!Number.isFinite(b)) return refuseCall(waiter, { why: "unboundable" });
 		const reading = outsideNow();
@@ -3538,6 +3567,27 @@ export function createModelGuard({ allowedModels, log = () => {}, env = process.
 }
 
 /**
+ * The providers whose calls are NOTIONAL in this runner (issue #1008): a subscription with no paid extra usage bills
+ * nothing per call, so its list price is not money and leaves the cost cap and the dollar windows. A new Set, EMPTY
+ * unless all of these hold, so any doubt counts the call against the cap:
+ *   - `subscriptions` is the runner's own VERIFIED entry list (run-job.mjs, verifySubscriptionAuthEntries), never a copy
+ *     a child process parses from its environment;
+ *   - `subscriptionAdmission` is a function: the parent wired the adapter's registration check, without which no call
+ *     on that provider is a subscription call (a child has none, and its model guard refuses every subscription call);
+ *   - a model list is set, so the model guard exists: it refuses a subscription provider's call on another api or base
+ *     URL (validateSubscriptionRequest) and injects the subscription's own key (createModelGuard `prepare`), so a call's
+ *     provider says which credential carried it;
+ *   - the provider's entry says `notional: true`, which the worker writes only for a connection with no paid extra
+ *     usage (`extraUsageCreditMicros`): such a connection may bill any call and nothing tells which, so its calls count.
+ *     An older worker never writes the key, so under it every call counts, as before.
+ * run-job hands the one set to both the meter (`costNotional`) and the cost guard, so they cannot disagree.
+ */
+export function notionalProviders({ subscriptions = null, subscriptionAdmission = null, allowedModels = null } = {}) {
+	if (!Array.isArray(subscriptions) || typeof subscriptionAdmission !== "function" || !Array.isArray(allowedModels) || allowedModels.length === 0) return new Set();
+	return new Set(subscriptions.filter((row) => row?.notional === true && typeof row.provider === "string").map((row) => row.provider));
+}
+
+/**
  * The one guard the runner hands both meter halves (issues #501, #502): the model guard and the cost guard, in
  * THAT order, or null when neither policy is set (and then every call goes through exactly as before).
  *
@@ -3551,12 +3601,15 @@ export function createModelGuard({ allowedModels, log = () => {}, env = process.
  * `snapshot()` is the cost fields (only with a cap) then `modelRefused` (only with a list), the worker's TOKEN_KEYS
  * order, so with no list the exit line is byte-identical to before. `unjudged` reaches the cost guard only: it is
  * the cap's counter of displaced compat entries.
+ *
+ * `notional` (issue #1008) is notionalProviders' set, which reaches the cost guard only while this guard has its model
+ * half and a subscription admission: without them a call's provider does not prove which credential carried it.
  */
-export function createPolicyGuard({ maxCostMicros = null, allowedModels = null, log = () => {}, env = process.env, external = null, externalInflight = null, claim = null, outsideWaiting = null, onQueue = null, now = Date.now, setTimer = setInterval, clearTimer = clearInterval, subscriptionAdmission = null, subscriptions = null, refreshCredentials = () => {} }) {
+export function createPolicyGuard({ maxCostMicros = null, allowedModels = null, log = () => {}, env = process.env, external = null, externalInflight = null, claim = null, outsideWaiting = null, onQueue = null, now = Date.now, setTimer = setInterval, clearTimer = clearInterval, subscriptionAdmission = null, subscriptions = null, refreshCredentials = () => {}, notional = null }) {
 	const model = allowedModels === null ? null : createModelGuard({ allowedModels, log, env, now, subscriptionAdmission, subscriptions, refreshCredentials });
 	// `external` (issue #500), its in-flight part and the turn's readers (issue #985) reach the cost guard only: they are
 	// spend, which only a cap judges. The clock and the timer are its waiters' (issue #985), injected by tests.
-	const cost = maxCostMicros === null ? null : createCostGuard({ capMicros: maxCostMicros, env, log, external, externalInflight, claim, outsideWaiting, onQueue, now, setTimer, clearTimer });
+	const cost = maxCostMicros === null ? null : createCostGuard({ capMicros: maxCostMicros, env, log, external, externalInflight, claim, outsideWaiting, onQueue, now, setTimer, clearTimer, notional: model !== null && typeof subscriptionAdmission === "function" ? notional : null });
 	const guards = [model, cost].filter((guard) => guard !== null);
 	if (guards.length === 0) return null;
 	return {
