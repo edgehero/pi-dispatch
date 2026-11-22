@@ -72,6 +72,21 @@ From any terminal:
 `paused`, `delayed` and `failed` fields are queue counts; `pausedState` says whether every queue is paused, with
 `pausedPartial` and `pausedQueues` when only some are.
 
+`status` waits about five seconds on a Valkey, its first check of that Valkey included, so a Valkey that takes the
+connection and answers nothing (a frozen server, a stopped container behind a live port) no longer holds the command
+open. Every read ends by then; a port that takes no connection at all can hold the command up to a second and a half
+longer while the connection's own reachability check ends. A queue whose paused state or counts did not answer in time
+is named in `unavailableQueues`, with `partial: true`. Counts that did not answer are left out of the sums, never read as zero (with no
+queue answering there are no count fields at all), and `pausedState` is `null` when the queues that answered are all
+paused, since the one that did not may be running. The line is still printed, then an `error:` line naming what it
+leaves out of each such queue (its paused state, its counts, or both), with the connection's own error where one was
+seen, such as "nothing answers VALKEY_URL (127.0.0.1:6379)", and "is it running?" only when nothing answered at all.
+The exit code is then 1, as for a Valkey that refuses the connection. The other parts say what they could not read in
+their own words: `fleet` for the registry, `waitingDetails.partial`, `pollers.complete: false`, and a consumer whose
+queue's demand did not answer is never called stalled. With two Valkeys (this shell's and the `.env`'s disagree), each
+gets its own five seconds. `status --target` waits the same way; a queue that did not answer is in its own
+`unavailableQueues` with `complete: false`, and its exit code stays 0.
+
 `waitingDetails.rows` explains a bounded sample of delayed entries. A row contains `jobId`, `queue`, `dueAt`,
 `bucket`, `why` and `until`; the two times are epoch milliseconds, and absent reason fields are `null`. For example,
 `why: "subscription-auth"` and `until` identify a remaining [authentication hold](subscription-auth.md#admission-and-renewal).

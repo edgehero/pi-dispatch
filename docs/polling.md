@@ -216,8 +216,9 @@ Deleting it changes nothing about polling: the next beat writes it again.
   runs. `expected` is `true` and no poller has published a heartbeat: none runs, or it is older than this
   release, which publishes none; when this folder's file is invalid, the note adds the reason a poller would refuse to start on it.
 - `complete: false` means the heartbeats could not all be read, and an empty `hosts` then proves nothing. `local` says
-  what of this folder could not be read (a setting this shell and `.env` disagree on, a missing file). `status` exits 0
-  either way.
+  what of this folder could not be read (a setting this shell and `.env` disagree on, a missing file). What `pollers`
+  says never changes `status`'s exit code; a queue that did not answer in time does
+  ([status output](service.md#status-output)).
 
 Connections shows the same under GitHub's polling: the host of each poller and when it beat, "on an older triggers file"
 when it keeps one, and, where `expected` would be `true`, "no poller reported" when none publishes and "poller not

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -486,4 +487,241 @@ test("status says no poller has published where the deployment polls, with why a
 	assert.equal(split.code, 0);
 	assert.equal(split.status.pollers.expected, null);
 	assert.match(split.status.pollers.local, /^GITHUB_INGEST is "webhook" in this shell and "poll" in .*\.env: make them agree/);
+});
+
+// Issue #1003: a Valkey that takes the connection and answers nothing held `status` open with nothing printed.
+/** A promise that never settles: every read of a Valkey that answers nothing. */
+const never = () => new Promise(() => {});
+
+/**
+ * `status` (or `argv`, `status --target <item>`) under a short deadline, with stderr collected. `queues` maps a queue
+ * name to its paused state: null, no answer; "running, uncounted", it says it runs and never gives its counts;
+ * "counted, state unknown", the reverse. `probe` stands in for the probe when given, and `probeError` is an error the
+ * probe reports as it connects.
+ */
+async function silentStatus({ argv = ["status"], queues = { "pi-jobs": null }, deadlineMs = 300, probeAnswers = false, probe = null, probeError = null } = {}) {
+	let output = "";
+	const asked = [], closed = [], dropAfter = [];
+	const errs = [];
+	const origErr = process.stderr.write.bind(process.stderr);
+	const started = performance.now();
+	process.stderr.write = (chunk) => (errs.push(String(chunk)), true);
+	let code;
+	try {
+		// The shell names the same URL, so the only stderr is status's own.
+		code = await main([...argv, "--valkey-url", "redis://127.0.0.1:6379"], { VALKEY_URL: "redis://127.0.0.1:6379" }, {
+			now: () => new Date(1_800_000_000_000), statusDeadlineMs: deadlineMs, write: (text) => { output += text; },
+			valkeyRefusal: async (url, env, opts) => (asked.push({ ...opts, calledAt: performance.now() }), null),
+			controlClients: {
+				// The probe takes every command and answers none, unless `probeAnswers`: then it names the host queues.
+				makeRedisClient: (_url, options) => (dropAfter.push(options?.disconnectTimeoutMs), probe ?? (probeAnswers ? {
+					on() {}, disconnect() {}, async smembers() { return []; },
+					async scan() { return ["0", Object.keys(queues).filter((n) => n !== "pi-jobs").map((n) => `bull:${n}:meta`)]; },
+				} : {
+					on(event, listener) { if (event === "error" && probeError !== null) listener(new Error(probeError)); },
+					disconnect() {}, smembers: never, scan: never, sscan: never, mget: never, pttl: never, hgetall: never, eval: never,
+				})),
+				makeQueue: (connection, { name }) => {
+					const kind = queues[name];
+					const paused = kind === "running, uncounted" ? false : kind === "counted, state unknown" ? null : kind;
+					const counted = kind === "counted, state unknown" || (paused !== null && kind !== "running, uncounted");
+					dropAfter.push(connection.disconnectTimeout);
+					return {
+						name, client: paused === null ? never() : { async zrange() { return []; } },
+						isPaused: () => (paused === null ? never() : Promise.resolve(paused)),
+						getJobCounts: () => (counted ? Promise.resolve({ waiting: 2, active: 1, paused: paused ? 3 : 0, delayed: 0, failed: 0 }) : never()),
+						async close() { closed.push(name); },
+					};
+				},
+			},
+		});
+	} finally {
+		process.stderr.write = origErr;
+	}
+	return { code, status: JSON.parse(output), err: errs.join(""), ms: performance.now() - started, asked, closed, dropAfter };
+}
+
+test("status against a Valkey that takes the connection and answers nothing prints what it could not read and ends at its deadline (issue #1003)", { timeout: 15_000 }, async () => {
+	const { code, status, err, ms, asked, closed } = await silentStatus();
+	assert.ok(ms < 1500, `ended at its 300 ms deadline, not at a read's own bound or never (took ${Math.round(ms)} ms)`);
+	assert.equal(asked.length, 1);
+	const left = asked[0]?.deadlineAt - asked[0]?.calledAt;
+	assert.ok(left > 0 && left <= 300, "the refusal check's PING is held to the same deadline");
+	assert.equal(code, 1, "status could not say whether the queue is paused or what it holds");
+	assert.equal(status.pausedState, null, "unknown, never false (running) for a queue nobody read");
+	assert.equal(status.partial, true);
+	assert.deepEqual(status.unavailableQueues, ["pi-jobs"]);
+	for (const count of ["waiting", "active", "paused", "delayed", "failed"]) assert.ok(!Object.hasOwn(status, count), `${count}: a count nobody read is not a zero`);
+	assert.equal(status.fleet, "registry timeout");
+	assert.equal(status.waitingDetails.partial, true);
+	assert.deepEqual(status.waitingDetails.unavailableQueues, ["pi-jobs"]);
+	assert.equal(status.pollers.complete, false);
+	assert.deepEqual(status.consumers, []);
+	assert.match(err, /^error: Valkey at redis:\/\/127\.0\.0\.1:6379 did not answer within 0\.3 seconds: is it running\? .*\n {2}the line above leaves out the paused state and counts of pi-jobs\n$/);
+	assert.deepEqual(closed, [], "the deadline was spent before the queues: none was built, so none is left half open");
+	// A connection that never came up is said in the connection's own words, as before the deadline.
+	const unreached = await silentStatus({ probeError: "nothing answers VALKEY_URL (127.0.0.1:6379), so whose Valkey it is cannot be judged yet" });
+	assert.equal(unreached.code, 1);
+	assert.match(unreached.err, /^error: could not reach Valkey at redis:\/\/127\.0\.0\.1:6379: is it running\? .*\n {2}nothing answers VALKEY_URL \(127\.0\.0\.1:6379\), so whose Valkey it is cannot be judged yet\n {2}the line above leaves out the paused state and counts of pi-jobs\n$/);
+});
+
+test("status counts the queues that answered by its deadline and names the one that did not, and pausedState is decided only by what answered (issue #1003)", { timeout: 15_000 }, async () => {
+	// One queue running is enough to say not every queue is paused.
+	const running = await silentStatus({ probeAnswers: true, queues: { "pi-jobs": false, "pi-jobs@mini2": null } });
+	assert.equal(running.code, 1);
+	assert.ok(running.ms < 1500, `took ${Math.round(running.ms)} ms`);
+	assert.equal(running.status.pausedState, false);
+	assert.equal(running.status.pausedPartial, undefined);
+	assert.deepEqual([running.status.waiting, running.status.active], [2, 1], "the queue that answered, alone");
+	assert.deepEqual(running.status.unavailableQueues, ["pi-jobs@mini2"]);
+	assert.deepEqual(running.status.waitingDetails.unavailableQueues, ["pi-jobs@mini2"]);
+	assert.deepEqual(running.closed, ["pi-jobs", "pi-jobs@mini2"], "every queue built is closed");
+	// ioredis' own disconnect timer (two seconds, ref'd) would hold the process past the line on a Valkey that never
+	// closes the socket: the probe and every queue drop theirs at once.
+	assert.deepEqual(running.dropAfter, [0, 0, 0]);
+	assert.equal(running.err, "error: Valkey at redis://127.0.0.1:6379 did not answer every read within 0.3 seconds\n  the line above leaves out the paused state and counts of pi-jobs@mini2\n", "Valkey answered, so no \"is it running?\"");
+	// Every queue that answered is paused, and one did not answer: it may be running.
+	const unknown = await silentStatus({ probeAnswers: true, queues: { "pi-jobs": true, "pi-jobs@mini2": null } });
+	assert.equal(unknown.status.pausedState, null);
+	assert.equal(unknown.status.pausedPartial, undefined);
+	assert.equal(unknown.status.paused, 3);
+	// Paused and running both answered: partly paused, whatever the third says.
+	const partly = await silentStatus({ probeAnswers: true, queues: { "pi-jobs": true, "pi-jobs@mini2": false, "pi-jobs@mini3": null } });
+	assert.equal(partly.status.pausedState, false);
+	assert.equal(partly.status.pausedPartial, true);
+	assert.deepEqual(partly.status.pausedQueues, ["pi-jobs"]);
+	assert.deepEqual(partly.status.unavailableQueues, ["pi-jobs@mini3"]);
+	// A queue that gave one of the two is named too, and the sentence says which of the two each queue lacks.
+	const halves = await silentStatus({ probeAnswers: true, queues: { "pi-jobs": true, "pi-jobs@mini2": "running, uncounted", "pi-jobs@mini3": "counted, state unknown", "pi-jobs@mini4": null } });
+	assert.equal(halves.code, 1);
+	assert.equal(halves.status.pausedState, false, "mini2 answered that it runs");
+	assert.equal(halves.status.pausedPartial, true);
+	assert.deepEqual(halves.status.pausedQueues, ["pi-jobs"]);
+	assert.equal(halves.status.active, 2, "the counted queues' alone: pi-jobs and mini3");
+	assert.deepEqual(halves.status.unavailableQueues, ["pi-jobs@mini2", "pi-jobs@mini3", "pi-jobs@mini4"]);
+	assert.match(halves.err, /\n {2}the line above leaves out the paused state and counts of pi-jobs@mini4; the paused state of pi-jobs@mini3; the counts of pi-jobs@mini2\n$/);
+	// Every queue answered: the line and the exit code as before.
+	const whole = await silentStatus({ probeAnswers: true, queues: { "pi-jobs": true, "pi-jobs@mini2": true } });
+	assert.equal(whole.code, 0);
+	assert.equal(whole.status.pausedState, true);
+	assert.ok(!Object.hasOwn(whole.status, "partial") && !Object.hasOwn(whole.status, "unavailableQueues"));
+	assert.equal(whole.err, "");
+	// A consumer's demand that does not answer ends at the deadline too, and reads as unknown, as it did at its own bound;
+	// the queues answered, so the exit code is as before.
+	const at = 1_800_000_000_000;
+	const rows = ["shared", "host", "sandbox"].map((role) => ({ role, state: "running", connection: "ready", active: 0, rateLimited: false, lastFetchAt: at, lastSuccessAt: null, lastTakenAt: null, fetchAgeMs: 0, successAgeMs: null }));
+	const demand = await silentStatus({
+		queues: { "pi-jobs": false },
+		probe: {
+			on() {}, disconnect() {}, async smembers() { return ["build3"]; }, async scan() { return ["0", []]; }, async pttl() { return 90000; },
+			async hgetall() { return { name: "build3", routes: "false", startedAt: String(at), beatAt: String(at), consumers: JSON.stringify({ v: 1, startedAt: at, rows: rows.filter((c) => c.role !== "host") }) }; },
+			eval: never,
+		},
+	});
+	assert.ok(demand.ms < 1500, `took ${Math.round(demand.ms)} ms`);
+	assert.equal(demand.code, 0);
+	assert.equal(demand.status.consumers[0].state, "unknown", "an unanswered demand corroborates no stall");
+	assert.equal(demand.status.partial, undefined);
+});
+
+test("status run as its own process through a real Valkey's frozen proxy ends at its deadline and exits at its last line, the refusal check included (issue #1003, VALKEY_TEST_URL)", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL", timeout: 30_000 }, async () => {
+	const { freezingProxy } = await import("./helpers/freezing-proxy.mjs");
+	const proxy = await freezingProxy(process.env.VALKEY_TEST_URL);
+	proxy.freeze();
+	// The real CLI's `main`, its real clients and its real refusal check, in a process of its own, which says how long
+	// `main` took and how long the process outlived it: a client's disconnect timer outlives a socket nobody closes.
+	const child = `
+		const { main } = await import(${JSON.stringify(new URL("../src/cli.mjs", import.meta.url).href)});
+		const started = performance.now();
+		const code = await main(["status", "--valkey-url", process.env.VALKEY_URL], process.env, { statusDeadlineMs: 400 });
+		const returned = performance.now();
+		process.exitCode = code;
+		process.on("exit", () => process.stderr.write("TIMES " + JSON.stringify({ main: returned - started, after: performance.now() - returned }) + "\\n"));
+	`;
+	let result;
+	try {
+		result = await new Promise((resolve) => {
+			execFile(process.execPath, ["--input-type=module", "-e", child], { cwd: tempDir("pd-1003-status-"), env: { ...process.env, VALKEY_URL: proxy.url }, timeout: 20_000 }, (error, stdout, stderr) => resolve({ code: error?.code ?? 0, stdout, stderr }));
+		});
+	} finally {
+		proxy.close();
+	}
+	const times = JSON.parse(/^TIMES (.*)$/m.exec(result.stderr)?.[1] ?? "null");
+	assert.ok(times, result.stderr);
+	assert.ok(times.main < 3000, `main ended at its 400 ms deadline, before any read's own two seconds (took ${Math.round(times.main)} ms)`);
+	assert.ok(times.after < 1000, `the process ended with its last line, not two seconds later (it lingered ${Math.round(times.after)} ms)`);
+	assert.equal(result.code, 1);
+	const status = JSON.parse(result.stdout);
+	assert.equal(status.pausedState, null);
+	assert.deepEqual(status.unavailableQueues, ["pi-jobs"]);
+	assert.equal(status.pollers.complete, false);
+	assert.match(result.stderr, /did not answer within 0\.4 seconds/);
+	assert.doesNotMatch(result.stderr, /Unhandled error event/, "no queue was left to fail its ready check after it closed");
+});
+
+/** `argv` through a real Valkey's proxy that freezes once a queue's connection is ready: its reads go unanswered and BullMQ's close sends QUIT. */
+async function frozenAfterReady(argv, deadlineMs) {
+	const { makeQueue } = await import("../src/queue.mjs");
+	const { freezingProxy } = await import("./helpers/freezing-proxy.mjs");
+	const proxy = await freezingProxy(process.env.VALKEY_TEST_URL);
+	let output = "";
+	const origErr = process.stderr.write.bind(process.stderr);
+	process.stderr.write = () => true;
+	const started = performance.now();
+	let code;
+	try {
+		code = await main([...argv, "--valkey-url", proxy.url], { VALKEY_URL: proxy.url }, {
+			statusDeadlineMs: deadlineMs, cwd: tempDir("pd-1003-status-"), valkeyRefusal: async () => null, write: (text) => { output += text; },
+			controlClients: {
+				makeQueue: (connection, opts) => {
+					const queue = makeQueue(connection, opts);
+					const ready = queue.client.then(() => proxy.freeze());
+					return {
+						name: queue.name, client: ready.then(() => queue.client),
+						isPaused: () => ready.then(() => queue.isPaused()),
+						getJobCounts: (...states) => ready.then(() => queue.getJobCounts(...states)),
+						close: () => queue.close(), disconnect: () => queue.disconnect(),
+					};
+				},
+			},
+		});
+	} finally {
+		process.stderr.write = origErr;
+		proxy.close();
+	}
+	return { code, line: JSON.parse(output), ms: performance.now() - started };
+}
+
+test("status drops a queue whose Valkey stops answering after it is ready instead of waiting on its QUIT (issue #1003, VALKEY_TEST_URL)", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL", timeout: 20_000 }, async () => {
+	const { code, line, ms } = await frozenAfterReady(["status"], 800);
+	assert.ok(ms < 1500, `ended at its 800 ms deadline, the close included (took ${Math.round(ms)} ms)`);
+	assert.equal(code, 1);
+	assert.ok(line.unavailableQueues.includes("pi-jobs"));
+});
+
+test("status --target against a Valkey that answers nothing ends at the same deadline, builds no queue once it is spent, and exits 0 with complete false (issue #1003)", { timeout: 15_000 }, async () => {
+	const silent = await silentStatus({ argv: ["status", "--target", "owner/repo#12"] });
+	assert.ok(silent.ms < 1500, `took ${Math.round(silent.ms)} ms`);
+	const left = silent.asked[0]?.deadlineAt - silent.asked[0]?.calledAt;
+	assert.ok(left > 0 && left <= 300, "the refusal check's PING is held to the deadline");
+	assert.equal(silent.code, 0, "complete false already says the list may be short");
+	assert.deepEqual(silent.status, { item: "owner/repo#12", jobs: [], windows: [], complete: false, unavailableQueues: ["pi-jobs"], discoveryIncomplete: true, fleet: "registry timeout" });
+	assert.deepEqual(silent.closed, []);
+	// The discovery answers and the queue does not: the read ends at the deadline, and the probe and the queue drop
+	// their sockets at once.
+	const quiet = await silentStatus({ argv: ["status", "--target", "owner/repo#12"], probeAnswers: true });
+	assert.ok(quiet.ms < 1500, `took ${Math.round(quiet.ms)} ms`);
+	assert.equal(quiet.code, 0);
+	assert.equal(quiet.status.complete, false);
+	assert.deepEqual(quiet.status.unavailableQueues, ["pi-jobs"]);
+	assert.deepEqual(quiet.closed, ["pi-jobs"]);
+	assert.deepEqual(quiet.dropAfter, [0, 0]);
+});
+
+test("status --target drops a queue whose Valkey stops answering after it is ready instead of waiting on its QUIT (issue #1003, VALKEY_TEST_URL)", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL", timeout: 20_000 }, async () => {
+	const { code, line, ms } = await frozenAfterReady(["status", "--target", "owner/repo#12"], 800);
+	assert.ok(ms < 1500, `ended at its 800 ms deadline, the close included (took ${Math.round(ms)} ms)`);
+	assert.equal(code, 0);
+	assert.equal(line.complete, false);
+	assert.ok(line.unavailableQueues.includes("pi-jobs"));
 });
