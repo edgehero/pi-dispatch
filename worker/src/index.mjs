@@ -2227,6 +2227,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				if (error.wait === "subscription-auth") await deferTo(job, token, error.until, "subscription-auth", { project });
 				if (error.wait === "subscription-quota") await deferTo(job, token, reconsider ? now() + 1_000 : error.until, "subscription-quota", { project, resetAt: error.resetAt });
 				if (error.wait === "subscription-owner") await deferTo(job, token, error.until, "subscription-owner", { project });
+				// Issue #1008: a reading prepare took just now put the account at or above the quota reserve. Never a
+				// reselection: the reserve is not exhaustion, and a committed draw waits on it.
+				if (error.wait === "subscription-reserve") await deferTo(job, token, error.until, "subscription-reserve", { project, resetAt: error.resetAt });
 			}
 			if (error?.holdUntilRestart === true) {
 				const heldAt = now();

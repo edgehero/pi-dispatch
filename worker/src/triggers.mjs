@@ -596,6 +596,7 @@ function normalizeTrigger(entry, index, path, state) {
 	}
 
 	validateMayMerge(run, on.type, at, path);
+	validateQuotaReserve(run, on.type, at, path);
 	const localEvent = run.kind === "local" && !["cron", "watch"].includes(on.type);
 	if (!localEvent) {
 		for (const key of ["forge", "debounceSeconds", "reviewAuthors", "closeActors"]) {
@@ -1174,6 +1175,24 @@ function validateMayMerge(run, onType, at, path) {
 	if (!isForgeKind(run.kind) || onType === "cron" || onType === "watch" || run.command !== undefined) {
 		throw configError(`${at}: run.mayMerge is accepted only on a forge flow trigger, not local, watch or command jobs: ${path}`);
 	}
+}
+
+/**
+ * `run.quotaReserve` (issue #1008, optional boolean): `true` lets this trigger's jobs start while their Claude subscription
+ * account stands at or above the deployment's quota reserve (`PI_QUOTA_RESERVE_PERCENT`, subscription-runtime.mjs), where
+ * every other job waits. Strictly boolean, `run.github`'s rule, so a truthy `"false"` cannot spend the reserve.
+ *
+ * NOT CARRIED, AND NOT NORMALIZED: the owner host's worker reads it from its own triggers file when the reserve would hold
+ * a job (triggers-file.mjs `makeCheckQuotaReserve`), so no receiver, poller or job builder needs it and none can drop
+ * it. No version row (`TRIGGER_RUN_FIELD_VERSIONS`): every older loader DROPS an unknown `run` key on these kinds
+ * (measured at 5.4.2), and an older worker has no reserve to hold a job with, so the absence it reads is the truth for
+ * it. A watch rule refuses it: `normalizeWatch` takes a closed set of `run` keys, as every older loader does, so the
+ * field there would make an older loader refuse the whole file. A watch rule's jobs wait above the reserve.
+ */
+function validateQuotaReserve(run, onType, at, path) {
+	if (run.quotaReserve === undefined) return;
+	if (typeof run.quotaReserve !== "boolean") throw configError(`${at}: run.quotaReserve must be true or false: ${path}`);
+	if (onType === "watch") throw configError(`${at}: run.quotaReserve is not available on a watch rule: ${path}`);
 }
 
 /**

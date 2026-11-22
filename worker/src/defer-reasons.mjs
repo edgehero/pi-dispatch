@@ -70,6 +70,8 @@ export const DEFER_WHYS = Object.freeze({
 	"subscription-quota": Object.freeze({ bucket: "check", sentence: "The subscription account is exhausted; waits for newer evidence, a known reset, an operator trial or, for a refusal that named no reset, the automatic retest six hours on. Asks again at {until}" }),
 	"subscription-owner": Object.freeze({ bucket: "ready", sentence: "Waits for the host that owns its subscription connection" }),
 	"subscription-auth": Object.freeze({ bucket: "check", sentence: "Waits until the subscription credential can be renewed at {until}" }),
+	// Issue #1008: the deployment's quota reserve, which only triggers marked run.quotaReserve may use.
+	"subscription-reserve": Object.freeze({ bucket: "check", sentence: "The subscription account is at or above its quota reserve, which only triggers marked run.quotaReserve may use. Asks again at {until}" }),
 	"model-cooldown": Object.freeze({ bucket: "check", sentence: "No reviewed model is available; a model is cooling down. Asks again at {until}" }),
 	"model-window": Object.freeze({ bucket: "check", sentence: "No reviewed model is available; a model's dollar window is full. Asks again at {until}" }),
 	"model-selection": Object.freeze({ bucket: "check", sentence: "Another pickup is committing this run's model choice. Asks again at {until}" }),

@@ -284,6 +284,9 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 		// which read the deployment's real files, Valkey and Docker.
 		readDollarRecords,
 		readDollarCounters,
+		// Issue #1008: the quota reserve's read of one connection's quota (`defaultReadSubscriptionQuota`). Undefined means
+		// the default, which reads the deployment's real Valkey.
+		readSubscriptionQuota,
 		olderStateFindings,
 		// Issue #708: whether the operator console answers (`probeConsole`, console-probe.mjs). Undefined means the default,
 		// which sends one GET /healthz to a loopback address or the socket, so a test passes its own.
@@ -481,7 +484,7 @@ export async function runDoctor(shellVars = process.env, deps = {}) {
 						return { ...(await valkeyAuthState(url, { context, withoutPassword })), passwordSet: Boolean(sent.password), from: sent.from };
 					}
 				: null;
-	const seams = { setupReadOnly: setupReadOnly === true, ...(subscriptionFactory ? { subscriptionFactory } : {}), ...(modelProposals ? { modelProposals } : {}), secrets: secrets === true, ...(bundleSpawn ? { bundleSpawn } : {}), ...(secretSpawn ? { secretSpawn } : {}), openshell: openshell === true, ...(openshellRun ? { openshellRun } : {}), cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, ...(modelCatalog ? { modelCatalog } : {}), ...(piModelLoader ? { piModelLoader } : {}), ...(dollarKeysExist ? { dollarKeysExist } : {}), ...(readAppliedSplit ? { readAppliedSplit } : {}), ...(readCapacity ? { readCapacity } : {}), ...(readDollarRecords ? { readDollarRecords } : {}), ...(readDollarCounters ? { readDollarCounters } : {}), ...(olderStateFindings ? { olderStateFindings } : {}), ...(consoleProbe ? { consoleProbe } : {}), fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, flowFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, ...(readRunRecords ? { readRunRecords } : {}), venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(lstatOverlayFile ? { lstatOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), ...(envUntrusted ? { envUntrusted: true } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
+	const seams = { setupReadOnly: setupReadOnly === true, ...(subscriptionFactory ? { subscriptionFactory } : {}), ...(modelProposals ? { modelProposals } : {}), secrets: secrets === true, ...(bundleSpawn ? { bundleSpawn } : {}), ...(secretSpawn ? { secretSpawn } : {}), openshell: openshell === true, ...(openshellRun ? { openshellRun } : {}), cwd, out, spawn, probeValkey, valkeyAuth: valkeyAuthSeam, readHosts, ...(modelCatalog ? { modelCatalog } : {}), ...(piModelLoader ? { piModelLoader } : {}), ...(dollarKeysExist ? { dollarKeysExist } : {}), ...(readAppliedSplit ? { readAppliedSplit } : {}), ...(readCapacity ? { readCapacity } : {}), ...(readDollarRecords ? { readDollarRecords } : {}), ...(readDollarCounters ? { readDollarCounters } : {}), ...(readSubscriptionQuota ? { readSubscriptionQuota } : {}), ...(olderStateFindings ? { olderStateFindings } : {}), ...(consoleProbe ? { consoleProbe } : {}), fileExists, nodeVersion, mkdir, chmod, rm, agentDir, platform, home, providerOracle, facts, jobUserIdentity, stat, passwd, readUnit, readEnvFile: readEnvFileShared, observationFs, flowFs, jobsDirFs, jobsDirUid, valkeyOwner: valkeyOwnerSeam, isAlive, pid, runTimeouts, live: live === true, wallClock, ...(readRunRecords ? { readRunRecords } : {}), venueChecks, userName, proxyFilesExist, proxyFileIsDirectory, ...(includeNeeds ? { includeNeeds } : {}), ...(declaredEndpoints ? { declaredEndpoints } : {}), ...(readOverlayFile ? { readOverlayFile } : {}), ...(lstatOverlayFile ? { lstatOverlayFile } : {}), ...(hostAddresses ? { hostAddresses } : {}), ...(readProxyConf ? { readProxyConf } : {}), ...(readPackagedConf ? { readPackagedProxyConf: readPackagedConf } : {}), ...(readPodmanService ? { readPodmanService } : {}), ...(envUntrusted ? { envUntrusted: true } : {}), serviceEnvFile: envValues === null ? null : serviceEnvFileOf(envValues, envPath, serviceEnvLoader(platform)) };
 	// Issue #471: every other service key, resolved ONCE for the whole run (the fix pass's re-collect and `--live` judge the
 	// same resolution). THE RULE (PR #474's round cap, after three rounds of trust patches): no program doctor starts is
 	// handed anything from `.env`. Every child gets this shell's own environment, the one it had before #471; a `.env`
@@ -831,7 +834,7 @@ export const GITHUB_SERVICE_KEYS = Object.freeze(["GITHUB_AUTH_SOURCE", "GITHUB_
  *  `.env`. TEMP is TMPDIR's twin in the worker's temp root; PI_CODING_AGENT_DIR is where the worker reads auth.json.
  *  Issue #761: PI_CONSOLE_AUDIT_RETENTION_DAYS is here and not in `CONSOLE_ENV_KEYS` although it is named for the
  *  console: the worker reads it (it runs the audit reaper), and a console key set alone makes doctor judge a console. */
-export const WORKER_SERVICE_KEYS = Object.freeze(["PI_JOB_IMAGE", "PI_JOB_MEMORY", "PI_JOB_CPUS", "PI_CONCURRENCY", ...Object.values(HOST_BUDGET_KEYS), "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_LOG_RETENTION_DAYS", "PI_CONSOLE_AUDIT_RETENTION_DAYS", "PI_RUN_MIRROR_MAX_RUNS", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_CHECKPOINTS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_AUTH_CONNECTIONS_FILE", "PI_AUTH_STORE_DIR", "PI_CODING_AGENT_DIR", "PI_BACKEND_FLOOR", "PI_OPENSHELL_ENGINE", "PI_OPENSHELL_GATEWAY", "PI_SECRET_PROFILES", "PI_SECRET_BUNDLES", "PI_SECRET_RESOLVER_ROOTS", "PI_SECRET_RESOLVE_TIMEOUT_MS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "PI_DOCTOR_INTERVAL_HOURS", "PI_ALLOWED_MODELS", "PI_DISPATCH_RUN_ROOTS", "GITHUB_PAT_VAR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
+export const WORKER_SERVICE_KEYS = Object.freeze(["PI_JOB_IMAGE", "PI_JOB_MEMORY", "PI_JOB_CPUS", "PI_CONCURRENCY", ...Object.values(HOST_BUDGET_KEYS), "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_LOG_RETENTION_DAYS", "PI_CONSOLE_AUDIT_RETENTION_DAYS", "PI_RUN_MIRROR_MAX_RUNS", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_CHECKPOINTS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_AUTH_CONNECTIONS_FILE", "PI_AUTH_STORE_DIR", "PI_QUOTA_RESERVE_PERCENT", "PI_CODING_AGENT_DIR", "PI_BACKEND_FLOOR", "PI_OPENSHELL_ENGINE", "PI_OPENSHELL_GATEWAY", "PI_SECRET_PROFILES", "PI_SECRET_BUNDLES", "PI_SECRET_RESOLVER_ROOTS", "PI_SECRET_RESOLVE_TIMEOUT_MS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "PI_DOCTOR_INTERVAL_HOURS", "PI_ALLOWED_MODELS", "PI_DISPATCH_RUN_ROOTS", "GITHUB_PAT_VAR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
 /** Issue #471: the receiver's keys doctor judges its boot by (the receiver's unit reads the same `.env`). */
 export const RECEIVER_SERVICE_KEYS = Object.freeze(["WEBHOOK_SECRET", "GITHUB_INGEST", "POLL_REPOS", "RECEIVER_PORT", "RECEIVER_IDENTITY_RETRY_SECONDS", "GITLAB_TOKEN", "GITLAB_URL", "GITLAB_WEBHOOK_MODE", "GITLAB_WEBHOOK_SECRET", "FORGEJO_URL", "FORGEJO_TOKEN", "FORGEJO_PERMISSION_TOKEN", "FORGEJO_WEBHOOK_SECRET", "AZURE_ORG_URL", "AZURE_TOKEN", "AZURE_WEBHOOK_MODE", "AZURE_WEBHOOK_SECRET", "AZURE_WEBHOOK_HEADER"]);
 /**
@@ -2137,7 +2140,7 @@ export async function collectChecks(shellVars, seams) {
 	// runTable, blockTable }, jobData: { table } }`, each part the store module's own when absent. This seam is how a test
 	// drives a need above 1 through the real collection, for a store whose table has no row of its own and at a version no row holds yet.
 	const versionTables = seams.versionTables ?? {};
-	const { watchSources: triggerWatchSources, watchRules: triggerWatchRules, modelRoles: triggerModelRoles, secretBundles: triggerBundles, requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, recovering, replicating, instructing, commands, localEvents, secreting, onceArmed, onceSpent, secretProfiles, localSecretFolders, secretNames, fileSecretRuns, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, excludedNames, costCaps, modelRuns, privateRuns, triggersVersionNeed, jobDataVersionNeed, parseError, parseNewer: triggersFileIsNewer, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTables);
+	const { watchSources: triggerWatchSources, watchRules: triggerWatchRules, modelRoles: triggerModelRoles, secretBundles: triggerBundles, requiring, waiting, listing, waitProfiles, waitAfters, optingOut, resuming, recovering, replicating, instructing, commands, localEvents, secreting, onceArmed, onceSpent, quotaReserves, secretProfiles, localSecretFolders, secretNames, fileSecretRuns, folders, images, imageRoutes, namedBackends, skillsDirs, forges, repositories, flows, excludedNames, costCaps, modelRuns, privateRuns, triggersVersionNeed, jobDataVersionNeed, parseError, parseNewer: triggersFileIsNewer, path: triggersFilePath } = readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTables);
 	const modelRoleProjects = readProjectFacts(bootEnv, fileExists).projects;
 	const scopedLimitFacts = readScopedLimitFacts(bootEnv, fileExists);
 	const pauseWindowFacts = readPauseWindowFacts(bootEnv, fileExists, versionTables.pauseWindows);
@@ -3681,6 +3684,11 @@ export async function collectChecks(shellVars, seams) {
 	// Not for a malformed PI_PROVIDER: its shape row below is the one line (issue #673, review round 1).
 	// Issue #737: the console reads whether the key is found by this id (`NAMED_CHECK_IDS`).
 	if (envShapeProblem.PI_PROVIDER === null) checks.push({ ...keyLine, id: "provider.key", label: `${keyLine.label}${fromFileNote([...fileSays("PI_PROVIDER"), ...keyNamed, ...(keyAgentDir !== agentDir ? ["PI_CODING_AGENT_DIR"] : [])])}` });
+	// Issue #1008: the quota reserve against each connection this host owns, read by the worker's own quota reader.
+	// The triggers file the worker reads the flag from: the path its one-shot checks read (`triggersPath`, PI_TRIGGERS_FILE
+	// else ./triggers.json), and what the shared loader made of it above.
+	const reserveTriggers = { path: triggersPath(env, cwd), state: parseError !== null ? (triggersFileIsNewer ? "newer" : "refused") : triggersFilePath === null ? "absent" : "read", marked: quotaReserves };
+	checks.push(...(await quotaReserveChecks(env, { triggers: reserveTriggers, connections: () => subscriptionCredentials.status?.() ?? null, readQuota: (row) => (seams.readSubscriptionQuota ?? defaultReadSubscriptionQuota)(valkeyUsable ? valkeyTalkUrl : null, row, { now: seams.wallClock ?? Date.now }), now: seams.wallClock ?? Date.now })));
 
 
 	section("overlay");
@@ -5995,6 +6003,8 @@ export function consoleListenOf(value, platform = process.platform) {
 export const WORKER_INT_SETTINGS = Object.freeze({
 	PI_CONSOLE_AUDIT_RETENTION_DAYS: Object.freeze({ min: 0, max: undefined, want: "a non-negative integer", fix: "set it to a whole number of days (0 keeps the console audit trail forever), or delete the line so the trail is kept as long as PI_LOG_RETENTION_DAYS keeps run history" }),
 	PI_RUN_MIRROR_MAX_RUNS: Object.freeze({ min: RUN_MIRROR_MAX_RUNS_MIN, max: RUN_MIRROR_MAX_RUNS_MAX, want: `an integer ${RUN_MIRROR_MAX_RUNS_MIN}-${RUN_MIRROR_MAX_RUNS_MAX}`, fix: `set it to a whole number from ${RUN_MIRROR_MAX_RUNS_MIN} to ${RUN_MIRROR_MAX_RUNS_MAX}, or delete the line for the default (${RUN_MIRROR_MAX_RUNS_DEFAULT})` }),
+	// Issue #1008: optional, so unset or empty is off rather than a default (`optionalBoundedInt`), which this rule takes too.
+	PI_QUOTA_RESERVE_PERCENT: Object.freeze({ min: 1, max: 99, want: "an integer 1-99", fix: "set it to a whole percent from 1 to 99, or delete the line to turn the quota reserve off" }),
 });
 
 /** Whether `raw` is a value `config.mjs`'s `boundedInt` takes for `rule` (see `WORKER_INT_SETTINGS`). */
@@ -7142,10 +7152,107 @@ export async function doctorSubscriptionCredentials(env, { cwd = process.cwd(), 
 		if (typeof auth?.check !== "function") throw new Error();
 	} catch { return { check: async () => ({ ok: false, managed: true, reason: "auth-policy-invalid" }) }; }
 	const cache = new Map();
+	let rows = null;
 	return { check(provider) {
 		if (!cache.has(provider)) cache.set(provider, Promise.resolve().then(() => auth.check(provider, { readOnly: true })).catch(() => ({ ok: false, managed: true, reason: "auth-state-unavailable" })));
 		return cache.get(provider);
+	},
+	// Issue #1008: the connections' public rows (`auth.status`, read-only, no renewal), for the quota reserve's lines; null
+	// when they cannot be read.
+	status() {
+		rows ??= Promise.resolve().then(() => typeof auth.status === "function" ? auth.status() : null).catch(() => null);
+		return rows;
 	} };
+}
+
+/**
+ * Issue #1008: one line per connection this host owns when `PI_QUOTA_RESERVE_PERCENT` is set (a value the worker refuses
+ * is `workerIntSettingChecks`' failure, and nothing is said here). A Claude connection's windows, read from the quota
+ * store by the worker's own reader (`readQuota(row)`, null when it could not be read), are compared with the reserve by
+ * the rule admission applies (`quotaReserveBlock`), across the whole connection: admission narrows each route to the
+ * windows that count for it (the reviewed Fable scope does not hold Opus 5.5), so a window named here may hold some
+ * models' jobs and not others. A ChatGPT connection publishes no percentages, so the reserve does not apply to it.
+ *
+ * Facts, not warnings, whatever the usage: holding unmarked jobs back is what the reserve was set to do. A reading that
+ * could not be read is a warning, `modelCooldownChecks`' rule, and is never said as room. Names a connection by a
+ * shaped id only, and a window by its kind, never by provider text.
+ *
+ * And once, on a host that owns a Claude connection, the triggers file the worker reads `run.quotaReserve` from
+ * (`triggers`: its `path`, its `state` as the shared loader left it, `"read"`, `"absent"`, `"refused"` or `"newer"`, and
+ * the `marked` entries). A file the worker cannot use is a WARNING: no trigger can then use the reserve, so every job
+ * on those connections waits while a window stands at or above it, whatever the file says.
+ */
+export async function quotaReserveChecks(env, { connections, readQuota, triggers = null, now = Date.now } = {}) {
+	const raw = env.PI_QUOTA_RESERVE_PERCENT;
+	if (raw === undefined || raw === "" || !workerIntAccepted(raw, WORKER_INT_SETTINGS.PI_QUOTA_RESERVE_PERCENT) || typeof env.PI_AUTH_CONNECTIONS_FILE !== "string" || env.PI_AUTH_CONNECTIONS_FILE === "") return [];
+	const percent = Number.parseInt(raw, 10);
+	const rows = await connections?.();
+	if (!Array.isArray(rows)) return [{ ok: false, warn: true, label: `Quota reserve ${percent}%: the subscription connections could not be read, so nothing is said of their usage`, fix: "run `pi-dispatch auth status` on this host and correct its connection policy or private store" }];
+	const { quotaReserveBlock } = await import("./subscription-runtime.mjs");
+	const checks = [];
+	const windowName = (row) => `${row.window === "five-hour" || row.window === "seven-day" ? row.window : "other"}${row.scope === "scoped" ? " scoped" : ""} window`;
+	const at = now();
+	const atPercent = (row) => `${windowName(row)} at ${Math.round(row.usedPercent * 10) / 10}%${!Number.isSafeInteger(row.resetAt) ? "" : row.resetAt > at ? ` (resets ${new Date(row.resetAt).toISOString()})` : " (its reset has passed)"}`;
+	if (triggers !== null && rows.some((row) => row?.provider === "anthropic" && row.state !== "other-host")) {
+		const file = printable(String(triggers.path ?? ""));
+		const marked = Number.isSafeInteger(triggers.marked) ? triggers.marked : 0;
+		const unusable = { absent: "does not exist here", refused: "does not load", newer: "was written by a newer pi-dispatch" }[triggers.state];
+		const fix = { absent: "put the deployment's triggers file at that path on this host, or point PI_TRIGGERS_FILE at it", refused: "fix the triggers file so it loads (its own line names why)", newer: "upgrade pi-dispatch on this host" }[triggers.state];
+		if (unusable) checks.push({ ok: false, warn: true, label: `Quota reserve ${percent}%: this host's worker reads run.quotaReserve from ${file}, which ${unusable}, so no trigger can use the reserve and every job on its Claude connections waits while a window stands at or above it`, fix });
+		else checks.push({ ok: true, label: `Quota reserve ${percent}%: this host's worker reads run.quotaReserve from ${file}, where ${marked === 0 ? "no trigger sets it, so every job on its Claude connections waits while a window stands at or above the reserve" : `${marked} trigger${marked === 1 ? " sets" : "s set"} it`}` });
+	}
+	for (const row of rows) {
+		if (row?.state === "other-host" || !["anthropic", "openai"].includes(row?.provider)) continue;
+		const id = typeof row.id === "string" && WORKER_NAME_RE.test(row.id) ? row.id : "CONNECTION";
+		const subject = `Quota reserve ${percent}% (${row.provider} ${id})`;
+		if (row.provider === "openai") {
+			checks.push({ ok: true, label: `${subject}: does not apply, since a ChatGPT connection publishes no usage percentages, so its jobs are never held by it` });
+			continue;
+		}
+		if (!row.accountGroup) {
+			checks.push({ ok: true, label: `${subject}: no usage observed yet, so it holds nothing until a reading shows a window at or above it` });
+			continue;
+		}
+		const status = await readQuota(row);
+		if (status === null || !Array.isArray(status?.windows)) {
+			checks.push({ ok: false, warn: true, label: `${subject}: its quota could not be read, so nothing is said of its usage`, fix: "check Valkey and re-run doctor; the worker reads the quota again at every pickup" });
+			continue;
+		}
+		const held = quotaReserveBlock(status, percent, at);
+		if (held !== null) {
+			// A scoped window counts only for the routes it covers (`statusForModel`), so it holds only those models' jobs.
+			const one = held.windows.length === 1;
+			const scoped = held.windows.filter((w) => w.scope === "scoped").length;
+			const whose = scoped === held.windows.length ? `jobs of triggers without run.quotaReserve on the models ${one ? "it covers" : "they cover"}` : "jobs of triggers without run.quotaReserve";
+			checks.push({ ok: true, label: `${subject}: the ${held.windows.map(atPercent).join(", ")} ${one ? "is" : "are"} at or above it, so ${whose} wait until ${one ? "it drops" : "they drop"} below it or ${one ? "resets" : "reset"}${scoped > 0 && scoped < held.windows.length ? " (a scoped window holds only the jobs of the models it covers)" : ""}` });
+			continue;
+		}
+		const measured = status.windows.filter((w) => typeof w?.usedPercent === "number");
+		const unknown = status.windows.length - measured.length;
+		checks.push({ ok: true, label: `${subject}: no window holds jobs back${measured.length ? ` (${measured.map(atPercent).join(", ")})` : ""}${unknown ? `; ${unknown} window${unknown === 1 ? "" : "s"} without a reading, which never holds` : ""}${measured.some((w) => !Number.isSafeInteger(w.resetAt) && w.fresh !== true && w.usedPercent >= percent) ? "; a stale reading at or above it with no reset is read again before the next job starts" : ""}` });
+	}
+	return checks;
+}
+
+/** Set by the test helper (test/helpers/doctor.mjs), `forbidDefaultCapacityRead`'s twin for the quota reserve's read. */
+let defaultSubscriptionQuotaReadForbidden = false;
+export function forbidDefaultSubscriptionQuotaRead() {
+	defaultSubscriptionQuotaReadForbidden = true;
+}
+
+/**
+ * The quota reserve's default read (issue #1008): one connection's quota status through the worker's own store reader,
+ * on a fail-fast client bounded like every doctor read, or null when it could not be read (no Valkey to read included).
+ */
+export async function defaultReadSubscriptionQuota(url, row, { now = Date.now } = {}) {
+	if (defaultSubscriptionQuotaReadForbidden) throw Object.assign(new Error("doctor reached its real subscription quota read in a test: pass readSubscriptionQuota"), { [FORBIDDEN_READ]: true });
+	if (!url) return null;
+	try {
+		const [{ makeSubscriptionQuotaStore }, { subscriptionIdentity }] = await Promise.all([import("./subscription-quota.mjs"), import("./subscription-runtime.mjs")]);
+		return await withDoctorClient(url, (client) => boundedOp(makeSubscriptionQuotaStore({ redis: client, now }).read(subscriptionIdentity(row)), DOCTOR_VALKEY_OP_TIMEOUT_MS));
+	} catch {
+		return null;
+	}
 }
 
 export function subscriptionCredentialCheck(provider, row) {
@@ -7345,7 +7452,7 @@ function triggerLabel(t, index) {
 }
 
 function readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTables = {}) {
-	const none = { privateRuns: [], watchSources: {}, watchRules: 0, modelRoles: {}, secretBundles: {}, requiring: 0, waiting: 0, listing: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, recovering: 0, replicating: 0, instructing: 0, commands: 0, localEvents: [], secreting: 0, onceArmed: 0, onceSpent: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], fileSecretRuns: [], folders: [], images: [], imageRoutes: [], namedBackends: [], skillsDirs: [], forges: [], repositories: [], flows: [], excludedNames: [], costCaps: [], modelRuns: [], triggersVersionNeed: 1, jobDataVersionNeed: 1, parseError: null, parseNewer: false, path: null };
+	const none = { privateRuns: [], watchSources: {}, watchRules: 0, modelRoles: {}, secretBundles: {}, requiring: 0, waiting: 0, listing: 0, waitProfiles: [], waitAfters: [], optingOut: 0, resuming: 0, recovering: 0, replicating: 0, instructing: 0, commands: 0, localEvents: [], secreting: 0, onceArmed: 0, onceSpent: 0, quotaReserves: 0, secretProfiles: [], localSecretFolders: [], secretNames: [], fileSecretRuns: [], folders: [], images: [], imageRoutes: [], namedBackends: [], skillsDirs: [], forges: [], repositories: [], flows: [], excludedNames: [], costCaps: [], modelRuns: [], triggersVersionNeed: 1, jobDataVersionNeed: 1, parseError: null, parseNewer: false, path: null };
 	try {
 		// Unset falls back to ./triggers.json in cwd, MIRRORING the receiver's own default
 		// (receiver/src/config.mjs) -- the two must read the same file, or doctor preflights a deployment
@@ -7394,6 +7501,9 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTable
 			modelRoles,
 			onceArmed: rawEntries.filter((t) => t?.on?.once === true && t.on.disarmed === undefined).length,
 			onceSpent: rawEntries.filter((t) => t?.on?.disarmed !== undefined).length,
+			// Issue #1008: the entries the owner host's worker would let start above the quota reserve, counted RAW, as that
+			// worker reads them (triggers-file.mjs `makeCheckQuotaReserve`), so a spent one-shot's own retry counts too.
+			quotaReserves: rawEntries.filter((t) => t?.run?.quotaReserve === true).length,
 			requiring: triggers.filter((t) => t.run.packages === true).length,
 			resuming: triggers.filter((t) => t.run.resume === true).length,
 			// Issue #645: durable runs. Counted for the fleet line: a recovery is routed to the host holding its checkpoint.

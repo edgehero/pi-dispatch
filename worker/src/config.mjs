@@ -560,6 +560,10 @@ export function loadConfig(env = process.env, { fileExists = existsSync } = {}) 
 		authFromPi: env.PI_AUTH_FROM_PI !== "0", // ON by default: use the key in ~/.pi/agent/auth.json when the env has none (api-key only). PI_AUTH_FROM_PI=0 forces env-only.
 		authConnectionsFile: env.PI_AUTH_CONNECTIONS_FILE ? resolve(env.PI_AUTH_CONNECTIONS_FILE) : null,
 		authStoreDir: env.PI_AUTH_STORE_DIR ? resolve(env.PI_AUTH_STORE_DIR) : null,
+		// Issue #1008: the quota reserve, a whole percent 1-99 of a Claude subscription window. At or above it only jobs of
+		// triggers with run.quotaReserve start on a connection this host owns; the rest wait (subscription-runtime.mjs).
+		// Unset or empty is off. ENV ONLY, read on the owner host, like the connection policy it narrows.
+		quotaReservePercent: optionalBoundedInt(env, "PI_QUOTA_RESERVE_PERCENT", 1, 99),
 		jobsDir: jobsDirPath(env),
 		// REQ-RESURRECTABLE-SANDBOX. `||` (not `??`) so an empty string falls back, matching logsDir.
 		sandboxDir: env.PI_SANDBOX_DIR || defaultSandboxDir(env),

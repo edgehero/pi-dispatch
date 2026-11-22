@@ -103,7 +103,7 @@ import { artifactsComment } from "./artifacts-comment.mjs";
 import { terminalReceipt } from "./terminal-receipt.mjs";
 import { makeSessionStore } from "./session-store.mjs";
 import { scrubCredentials } from "./redact.mjs";
-import { makeCheckOnceSpent, makeCheckPortfolioFlag, makeCheckPrivateEndpoints, makeCheckWaitSkew, makeDisarmOnce, makeFindSecretBundle } from "./triggers-file.mjs";
+import { makeCheckOnceSpent, makeCheckPortfolioFlag, makeCheckPrivateEndpoints, makeCheckQuotaReserve, makeCheckWaitSkew, makeDisarmOnce, makeFindSecretBundle } from "./triggers-file.mjs";
 import { makeBundleResolver } from "./secret-bundles.mjs";
 import { WATCH_DEBOUNCE_MS, changedWhileArming, makeWatchCloser, readBeforeArming } from "./watch-closer.mjs";
 import { loadPauseWindows, PAUSE_WINDOWS_VERSION, pauseUntilMs } from "./pause-windows.mjs";
@@ -1791,7 +1791,14 @@ export async function startWorker(
 	// One raw Redis client, shared by the budget (via the worker) and the scheduler stall guard, so it is
 	// hoisted out of the createWorkerFn arg object.
 	const redis = makeRedisClient(valkey.url, { servername: valkey.servername, context: valkeyContext });
-	const subscriptions = configuredSubscriptions({ config, redis, now: () => Number(now()) });
+	// The one-shot file path (issue #231): PI_TRIGGERS_FILE, else ./triggers.json against this process's
+	// cwd -- doctor's own fallback, chosen for doctor's own reason ("the two must read the same file"),
+	// and deliberately NOT config.triggersFile, whose null means "cron disabled" and must keep meaning
+	// that: under that knob the DEFAULT single-host deployment would have a firing receiver and a worker
+	// that can neither disarm nor pre-spend-check.
+	const onceTriggersFile = env.PI_TRIGGERS_FILE ?? join(process.cwd(), "triggers.json");
+	// Issue #1008: the quota reserve's trigger flag is read from that same file, by the owner host that holds the job.
+	const subscriptions = configuredSubscriptions({ config, redis, now: () => Number(now()), reserveGranted: makeCheckQuotaReserve({ triggersPath: onceTriggersFile }) });
 	// Its errors as one message-only line (PR #475's review, round 2), like every Queue and Worker's: without a listener
 	// ioredis printed a stack per reconnect attempt.
 	onValkeyError(redis, "shared client");
@@ -1996,12 +2003,6 @@ export async function startWorker(
 	} catch (err) {
 		log("session_reaper_skipped", { reason: scrubCredentials(err?.message) });
 	}
-	// The one-shot file path (issue #231): PI_TRIGGERS_FILE, else ./triggers.json against this process's
-	// cwd -- doctor's own fallback, chosen for doctor's own reason ("the two must read the same file"),
-	// and deliberately NOT config.triggersFile, whose null means "cron disabled" and must keep meaning
-	// that: under that knob the DEFAULT single-host deployment would have a firing receiver and a worker
-	// that can neither disarm nor pre-spend-check.
-	const onceTriggersFile = env.PI_TRIGGERS_FILE ?? join(process.cwd(), "triggers.json");
 	const disarmOnce = makeDisarmOnce({ triggersPath: onceTriggersFile, log });
 	// The fleet-visible copy of the run history (issue #57, Gap 3). Armed only on a deployment that declared
 	// a worker name: an unnamed one is a single host, its own files ARE the whole history, and a mirror

@@ -947,6 +947,63 @@ export function makeFindSecretBundle({ triggersPath, fs = nodeFs, log = () => {}
 	};
 }
 
+/**
+ * Issue #1008: `(job) => boolean`, whether the trigger that queued `job` sets `run.quotaReserve: true` in the LIVE triggers
+ * file, the one flag that lets a job start while its Claude subscription account stands at or above the deployment's quota
+ * reserve (`PI_QUOTA_RESERVE_PERCENT`, subscription-runtime.mjs). Asked only for a job the reserve would hold.
+ *
+ * READ HERE, NEVER CARRIED ON THE JOB. The flag is quota authority, so it is read from the reviewed file at pickup, the
+ * rule `run.portfolio` (`makeCheckPortfolioFlag`) and `run.privateEndpoints` (`makeCheckPrivateEndpoints`) keep for the
+ * authority each grants: taking the flag off holds a job already queued. And no receiver, poller, outbox or console copy
+ * carries it, so none can drop it, and every later attempt of the job (a retry, a parked reply, a recovery) finds it by
+ * the trigger the job came from.
+ *
+ * That trigger is found by the identity the secret bundle lookup uses (`makeFindSecretBundle`), on the RAW entries, so a
+ * disarmed one-shot's own retry still finds its entry: a local event job by its `on.id`, `on.forge`, folder, command
+ * and worker; a forge job by its matched index through `isForgeTriggerOf` (issue #933); a cron or manual job by its cron
+ * id, folder, flow, command and task.
+ *
+ * Every doubt answers false: no path, no file, a file the shared validator refuses or a newer pi-dispatch wrote, a job
+ * with no trigger, no entry that is the job's. The job then waits for its window to drop below the reserve or reset,
+ * the direction that spends nothing. Never throws. Cached by mtime and size, `makeCheckWaitSkew`'s rule, since a held
+ * job asks again every few minutes.
+ */
+export function makeCheckQuotaReserve({ triggersPath, fs = nodeFs } = {}) {
+	let cache = null; // { mtimeMs, size, entries }
+	const entriesOf = () => {
+		if (typeof triggersPath !== "string" || triggersPath === "") return null;
+		try {
+			const st = fs.statSync?.(triggersPath) ?? null;
+			if (cache && st && cache.mtimeMs === st.mtimeMs && cache.size === st.size) return cache.entries;
+			const text = fs.readFileSync(triggersPath, "utf8");
+			parseTriggersDocument(text, triggersPath);
+			const raw = JSON.parse(text).triggers;
+			const entries = Array.isArray(raw) ? raw : null;
+			cache = st ? { mtimeMs: st.mtimeMs, size: st.size, entries } : null;
+			return entries;
+		} catch {
+			cache = null;
+			return null;
+		}
+	};
+	return function checkQuotaReserve(job) {
+		const trigger = job?.trigger;
+		if (trigger === null || typeof trigger !== "object") return false;
+		const entries = entriesOf();
+		if (entries === null) return false;
+		let entry;
+		if (job.kind === "local" && validLocalEvent(job.localEvent)) {
+			entry = entries.find((t) => t?.run?.kind === "local" && t?.on?.id === job.localEvent.id && t.on.forge === job.localEvent.forge && ["folder", "command", "worker"].every((key) => t.run?.[key] === job[key]));
+		} else if (job.kind !== "local" && Number.isSafeInteger(trigger.matched?.index) && trigger.matched.index >= 0) {
+			const candidate = entries[trigger.matched.index];
+			if (isForgeTriggerOf(entries, candidate, job)) entry = candidate;
+		} else if (job.kind === "local" && typeof trigger.id === "string") {
+			entry = entries.find((t) => t?.on?.type === "cron" && t.on.id === trigger.id && ["folder", "flow", "command", "task"].every((key) => t.run?.[key] === job[key]));
+		}
+		return entry?.run?.quotaReserve === true;
+	};
+}
+
 export function readDisarmState({ triggersPath, index, number, flow, command, fs = nodeFs }) {
 	let raw;
 	let text;

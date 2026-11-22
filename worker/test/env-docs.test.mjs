@@ -607,7 +607,8 @@ test("no assignment in .env.example carries an inline comment, live or commented
 	// PI_PRIVATE_ENDPOINTS_FILE adds the declared private endpoints (#918).
 	// PI_ARTIFACTS_DIR, _MAX_FILES, _MAX_FILE_MB, _MAX_RUN_MB and _RETENTION_DAYS add a forge job's kept artifacts (#920).
 	// PI_CONSOLE_PUBLIC_URL adds the console's address for the artifacts comment's link (#920, part 3).
-	assert.equal(scanned, 150, "the scan must actually reach every assignment in the file");
+	// PI_QUOTA_RESERVE_PERCENT adds the Claude subscription quota reserve (#1008).
+	assert.equal(scanned, 151, "the scan must actually reach every assignment in the file");
 	assert.match("  PI_X=1 # c", /^\s*(# )?([A-Z_][A-Z0-9_]*)=(.*)$/, "and the shape it scans for is the shape the file uses, indented or not");
 
 	// systemd drops an `export` line entirely (measured: "Ignoring invalid environment assignment"), and a BOM

@@ -2025,7 +2025,7 @@ test("a waiting job's line is the worker's own sentence filled from its row: tim
     const [text, bar] = said({ ...full, why, bucket });
     assert.ok(!/[{}]/.test(text) && !/[{}]/.test(bar), `${why}: ${text}`);
     assert.notEqual(text, DEFER_BUCKET_WORDS[bucket].title, `${why}: its own sentence`);
-    assert.equal(text.split(/build3|gh-parent|local-gpu|2026-10-15 12:12 UTC|\b[23]\b/).join("{}"), sentence.replace(/\{[a-z]+\}/g, "{}") + (why === "subscription-quota" ? ". Reset time unknown." : ""), `${why}: the worker's words plus the explicitly separate reset evidence`);
+    assert.equal(text.split(/build3|gh-parent|local-gpu|2026-10-15 12:12 UTC|\b[23]\b/).join("{}"), sentence.replace(/\{[a-z]+\}/g, "{}") + (why === "subscription-quota" || why === "subscription-reserve" ? ". Reset time unknown." : ""), `${why}: the worker's words plus the explicitly separate reset evidence`);
   }
 });
 

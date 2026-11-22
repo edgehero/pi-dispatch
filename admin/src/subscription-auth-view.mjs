@@ -65,6 +65,9 @@ export function subscriptionAuthView(value, { now = Date.now() } = {}) {
       extraUsageCreditMicros: Number.isSafeInteger(row.extraUsageCreditMicros) && row.extraUsageCreditMicros >= 0 ? row.extraUsageCreditMicros : null,
       extraUsage: ["enabled", "disabled"].includes(row.extraUsage) ? row.extraUsage : "unknown",
       quotaWindows, quota: quotaOf(row.quota, now),
+      // Issue #1008: the owner host's quota reserve, a whole percent 1-99, published on a Claude connection it owns; null
+      // when it publishes none (no reserve set, or a host older than the reserve, which holds nothing either way).
+      reservePercent: Number.isInteger(row.reservePercent) && row.reservePercent >= 1 && row.reservePercent <= 99 ? row.reservePercent : null,
     }];
   });
   return { now, state: value && (Array.isArray(value) || value.state === "ready") ? "ready" : "unknown", partial: value?.partial !== false || truncated || connections.length < Math.min(rows.length, SUBSCRIPTION_VIEW_LIMITS.connections), truncated: value?.truncated === true || truncated, connections };

@@ -4,8 +4,35 @@ import { createHash } from "node:crypto";
 import { COMMUNITY_AUTH_ADAPTERS } from "./community-auth-metadata.mjs";
 import { builtinModel } from "./model-catalog.mjs";
 import { splitModelEntry, auxiliaryModelsProblem } from "./model-ref.mjs";
-import { normalizeClaudeQuota, normalizeOpenAIQuota, normalizeSubscriptionQuotaError } from "./subscription-quota.mjs";
+import { normalizeClaudeQuota, normalizeOpenAIQuota, normalizeSubscriptionQuotaError, SUBSCRIPTION_QUOTA_LIMITS } from "./subscription-quota.mjs";
 import { LOCAL_FOLDER_HOLDS_SUBSCRIPTION_AUTH } from "./private-store-boundary.mjs";
+
+/**
+ * Issue #1008: how soon a job the quota reserve holds asks again. A reading's freshness bound, so a fresh reading over
+ * the reserve with no reset is asked about again as it goes stale (a stale one with no reset no longer holds, and
+ * `prepare` reads usage before it admits), and a trigger marked `run.quotaReserve` meanwhile starts its waiting jobs
+ * within it. A known reset sooner than this ends the wait instead.
+ */
+export const QUOTA_RESERVE_RECHECK_MS = SUBSCRIPTION_QUOTA_LIMITS.freshMs;
+
+/**
+ * Issue #1008, the deployment quota reserve: the windows of a quota `status` that stand at or above `percent`, with the
+ * latest reset among them (null when one has none), or null when no window does. `status` is the one admission judged,
+ * already narrowed to the windows that count for the route (`statusForModel`), so the reserve counts exactly the windows
+ * admission counts, monitoring preferences aside as they are there.
+ *
+ * Only a measured percent counts: unknown usage is not usage, and the reserve holds work back on evidence, never on a
+ * guess. Usage only grows inside a window until it resets, so a reading over the reserve stays true until its reset: a
+ * stale one with its reset still ahead counts. A window with no reset counts only on a fresh reading, since nothing
+ * says when a stale one stopped being true; such a reading passes here and `prepare` reads usage again before it
+ * admits (`needsUsage`). A reset already passed opens a new window and counts nothing.
+ */
+export function quotaReserveBlock(status, percent, at) {
+	if (!Number.isInteger(percent) || percent < 1 || percent > 99 || !Array.isArray(status?.windows)) return null;
+	const over = status.windows.filter((row) => typeof row?.usedPercent === "number" && row.usedPercent >= percent && (Number.isSafeInteger(row.resetAt) ? row.resetAt > at : row.fresh === true));
+	if (over.length === 0) return null;
+	return { windows: over, resetAt: over.every((row) => Number.isSafeInteger(row.resetAt)) ? Math.max(...over.map((row) => row.resetAt)) : null };
+}
 
 // Lifecycle errors remain precise on the host terminal; run records use the closed operator catalog.
 function recordRefusal(value) {
@@ -44,7 +71,13 @@ function auxiliaryRoute(job, ref) {
 	return Array.isArray(job.auxiliaryModels) && job.auxiliaryModels.includes(key) && !roots.includes(key);
 }
 
-export function makeSubscriptionRuntime({ auth, quota, now = Date.now, lookup = builtinModel, packageRootFor = () => null, defaultBackend = "local", isPrivateStoreExposed = () => false } = {}) {
+/**
+ * `quotaReservePercent` is this host's `PI_QUOTA_RESERVE_PERCENT` (issue #1008), null for none; `reserveGranted(job)`
+ * answers whether the job's trigger sets `run.quotaReserve: true` (triggers-file.mjs `makeCheckQuotaReserve`, a read of
+ * the reviewed file), asked only for a job the reserve would hold. Its default grants nothing, so an unwired caller
+ * holds every job above the reserve, the direction that spends nothing.
+ */
+export function makeSubscriptionRuntime({ auth, quota, now = Date.now, lookup = builtinModel, packageRootFor = () => null, defaultBackend = "local", isPrivateStoreExposed = () => false, quotaReservePercent = null, reserveGranted = () => false } = {}) {
 	/**
 	 * Whole-pool billing classification cannot return early on a quota wait and hide a paid alternative.
 	 *
@@ -117,6 +150,16 @@ export function makeSubscriptionRuntime({ auth, quota, now = Date.now, lookup = 
 			const available = await quota.admit(subscriptionIdentity(row), { modelRef: `${ref.provider}/${ref.id}`, attemptId, consumeTrial, windows: row.quotaWindows ?? ["five-hour", "seven-day"], allowExtraUsage: paid, maxCreditMicros: row.extraUsageCreditMicros, requireExtraUsageKnownDisabled: ref.provider === "anthropic" });
 			const needsUsage = ref.provider === "anthropic" && (available.requiresUsage === true || available.status?.fresh === false && available.status?.state !== "exhausted");
 			if (!available.ok && !(consumeTrial === false && needsUsage && available.reason === "subscription-extra-usage" && available.status?.extraUsage?.enabled === null)) return withRoot(available.reason === "subscription-quota" ? { ...available, managed: true, ...(job.auxiliaryModels === undefined ? {} : { auxiliary: !primary }), wait: "subscription-quota", until: available.until ?? now() + 60_000 } : { ...available, managed: true });
+			// Issue #1008, the deployment quota reserve: AFTER admission, so an exhausted window keeps its own wait and its
+			// reselection rule, and only on Claude, whose windows carry percentages (a ChatGPT reading has none to judge).
+			// A WAIT, never a refusal: the window drops at its reset, and holding a job costs nothing, where refusing it
+			// would lose a delivery the owner wants run later. Its auxiliary attribution is the quota wait's, so a panel
+			// member held here never grants the selected root a fresh random draw.
+			if (ref.provider === "anthropic" && quotaReservePercent !== null) {
+				const at = now();
+				const held = quotaReserveBlock(available.status, quotaReservePercent, at);
+				if (held !== null && (await reserveGranted(job)) !== true) return withRoot({ ok: false, managed: true, ...(job.auxiliaryModels === undefined ? {} : { auxiliary: !primary }), wait: "subscription-reserve", until: held.resetAt === null ? at + QUOTA_RESERVE_RECHECK_MS : Math.min(held.resetAt, at + QUOTA_RESERVE_RECHECK_MS), resetAt: held.resetAt, status: available.status });
+			}
 			if (!managed.some((entry) => entry.provider === row.provider)) managed.push({ ...row, needsUsage });
 		}
 		const rootSubscriptions = managed.filter(row => subscriptionRoutes(job).some(ref => ref.provider === row.provider && !auxiliaryRoute(job, ref)));
@@ -234,7 +277,10 @@ export function makeSubscriptionRuntime({ auth, quota, now = Date.now, lookup = 
 	}
 	async function status() {
 		const rows = await auth.status();
-		return { state: "ready", partial: false, connections: await Promise.all(rows.map(async (row) => ({ ...row, ...(row.accountGroup ? { quota: await quota.read(subscriptionIdentity(row)) } : {}) }))) };
+		// Issue #1008: the reserve on each Claude connection this host owns, the one host whose reserve holds its jobs.
+		// A connection another host owns is held by that host's reserve, which that host publishes.
+		const reserved = (row) => quotaReservePercent !== null && row.provider === "anthropic" && row.state !== "other-host";
+		return { state: "ready", partial: false, connections: await Promise.all(rows.map(async (row) => ({ ...row, ...(row.accountGroup ? { quota: await quota.read(subscriptionIdentity(row)) } : {}), ...(reserved(row) ? { reservePercent: quotaReservePercent } : {}) }))) };
 	}
 	/**
 	 * Issue #888, part 3: a running job's snapshot renewed, its deadline moved to `deadlineAt` (the credential refreshed
