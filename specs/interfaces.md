@@ -609,7 +609,29 @@ Evidence convention as in `constitution.md`.
 
 - **Roles (#717)**: invalid/missing role inputs and a shadowed role subagent tool are terminal exit 2 reasons `model-roles-invalid` and `model-roles-shadowed`. A local subagent refusal instead returns tool error output and bounded authenticated `modelRoles` telemetry, leaving the parent running.
 
-- **Signed failover evidence (#716)**: the runner's authenticated exit line may carry `providerFailure: { kind, resetAt?, subscriptionCode?, subscriptionProvider? }`, with closed `kind` (`rate-limited`, `quota-exhausted`, `overloaded`, `context-overflow`) and optional nonnegative safe-integer epoch milliseconds `resetAt` no later than 253402300799999 (the last four-digit year); no body, header text or arbitrary error message crosses this channel. Optional `subscriptionCode` is one closed authoritative transport code (`usage_limit_reached`, `usage_not_included`, `rate_limit_exceeded`, `quota_exhausted`), never inferred from provider prose; it requires `subscriptionProvider` from the observed request, exactly `openai` or `anthropic`, so another listed provider cannot poison the main connection. Its validated reset can cover a full observed subscription week, with a 32-day observation bound. The separate physical model cooldown still caps its own TTL to six hours. `toolsStarted` is the run-wide monotonic root-tool latch; `replaySafe` additionally requires a metered, observed root-only call history with no child/secondary uncertainty. The worker requires verified metadata matching exit 1, `toolsStarted: false` and `replaySafe: true` before permitting a cross-model retry. Missing fields are unsafe, not false. A measured Claude 429 may carry only `subscriptionProvider`; that attribution requires a fresh typed usage read and is not itself a plan-exhaustion claim. Existing exit codes and supervisor precedence are unchanged. Provider errors are read from SDK terminal events even when `session.prompt()` resolves; the runner does not infer success from CLI JSON exit status.
+- **Signed failover evidence (#716)**: the runner's authenticated exit line may carry `providerFailure: { kind, resetAt?, subscriptionCode?, subscriptionProvider? }`, with closed `kind` (`rate-limited`, `quota-exhausted`, `overloaded`, `context-overflow`) and optional nonnegative safe-integer epoch milliseconds `resetAt` no later than 253402300799999 (the last four-digit year); no body, header text or arbitrary error message crosses this channel. Optional `subscriptionCode` is one closed authoritative transport code (`usage_limit_reached`, `usage_not_included`, `rate_limit_exceeded`, `quota_exhausted`, and since #960 `subscription_sharing_usage_limit_exceeded` and `subscription_sharing_workplace_individual_usage_limit_exceeded`), never inferred from provider prose; it requires `subscriptionProvider` from the observed request, exactly `openai` or `anthropic`, so another listed provider cannot poison the main connection. Its validated reset can cover a full observed subscription week, with a 32-day observation bound. The separate physical model cooldown still caps its own TTL to six hours. `toolsStarted` is the run-wide monotonic root-tool latch; `replaySafe` additionally requires a metered, observed root-only call history with no child/secondary uncertainty. The worker requires verified metadata matching exit 1, `toolsStarted: false` and `replaySafe: true` before permitting a cross-model retry. Missing fields are unsafe, not false. A measured Claude 429 may carry only `subscriptionProvider`; that attribution requires a fresh typed usage read and is not itself a plan-exhaustion claim. Existing exit codes and supervisor precedence are unchanged. Provider errors are read from SDK terminal events even when `session.prompt()` resolves; the runner does not infer success from CLI JSON exit status.
+
+- **A refusal inside a 200 stream (#960)**: a ChatGPT subscription past its usage limit answers HTTP 200
+  `text/event-stream` and refuses in an event; pi's terminal message keeps only the provider's sentence, so the code
+  never reached the runner and the exit was a plain `container-infra-exit`. For provider `openai` on `openai-responses`,
+  the observer's per-call fetch now hands pi a 2xx event stream through a pass-through reader
+  (`image/runner/src/provider-failure.mjs`): each chunk is read and passed on unchanged, a cancel by pi reaches the
+  provider's body, and a tee is never used (it buffers for the branch nobody reads). The code comes from a structured
+  field of the first event that fails the call, read as the pinned stack reads it: `event: error` (the SDK's
+  `data.error ?? data`), ANY other event not named `thread.*`, or one with no `event:` line, whose data holds a top-level
+  `error` (the SDK throws `data.error` for each), then pi-ai's `type: "error"` and `response.failed` (`response.error`);
+  `code ?? type` must be one of the closed codes (`SUBSCRIPTION_QUOTA_CODES`, pinned equal to the worker's list), and
+  `resets_at` or `reset_at`, when present, is the reset under the 429 body's rules. An event's data is held up to 65536
+  characters (`SSE_FRAME_CAP`; one past it, over one data line or several, is skipped unread) and parsed as the SDK
+  parses it, every event's; `thread.*` events are dropped unread as they pass; on the events it reads, reading stops
+  where the SDK stops: at the first failing event, at `[DONE]`, at data that is not JSON and at a named event with no
+  data (the SDK parses the empty data and throws); any fault stops it and leaves the bytes untouched. Lines are
+  scanned once, so a long line in small chunks costs linear time. The code is still never inferred from provider
+  prose: a message that holds the sentence, or even the code, is no evidence. pi-ai's two retryable ChatGPT outages,
+  `subscription_sharing_usage_unavailable` and `subscription_sharing_user_unavailable`, are not quota codes. The
+  longest code makes the worst-case line 8,004 characters (the issue #800 paragraph below). The test fixtures are
+  synthetic shapes verified against the pinned pi 1.5.2 (`image/runner/test/fixtures/chatgpt-usage-limit.mjs`). Exit
+  codes, signing and supervisor precedence are UNCHANGED, checked.
 
 **Extension (#649):** typed approval gates follow `REQ-APPROVAL-GATES` and `INT-APPROVAL-STATE-CONTRACT`; the existing untyped path remains unchanged.
 
@@ -811,7 +833,7 @@ refactor apart.
 
   **The whole line has a limit of its own (issue #800): `EXIT_LINE_MAX_BYTES`, 7680 bytes for the whole write**, its
   two newlines and its signature included. Every field above can ride one line, and measured at the pin that line is
-  7,961 characters; a supervisor's line after it (493 at a 44-character job id) makes 8,454, past the 8,192-character tail, so
+  8,004 characters; a supervisor's line after it (493 at a 44-character job id) makes 8,497, past the 8,192-character tail, so
   the MAC of a genuine line could already be lost and with it every field, the dollars settling at the floor. 7680
   is 8192 less those 493 less 19 to spare. A job id past 63 characters takes its excess off the limit
   (`exitLineMaxBytes`), because a cron trigger's id can make `PI_JOB_ID` 207 characters and the supervisor's line grows with it. The
@@ -7568,7 +7590,10 @@ validator rather than a second copy of it.
   `isNeverStartedRetry` and the refund reading `container-never-started` alone; an armed run with a checkpoint still
   records `recovery-enqueued`). No comment table is keyed by the three tokens, so a final failure with one posts the
   generic failure comment as before (`FAILED_COMMENT_BY_REASON` has no row for them,
-  `DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` UNCHANGED, checked). The failure hook gets the two exit tokens where it got
+  `DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` UNCHANGED, checked). AMENDED 2026-11-21 (#960): a final
+  `container-infra-exit` whose error carries a signed `providerFailure` (validated again by `providerFailureOf`) posts
+  that kind's row of `FAILED_COMMENT_BY_PROVIDER_FAILURE` instead, keyed by the closed kind and never by a reason; only
+  `quota-exhausted` has a row, and a reason's own row still wins. The failure hook gets the two exit tokens where it got
   `infra` (`INT-ON-FAILURE-HOOK-CONTRACT`); a forge host's untagged throw and a throw that is not an `InfraRetry` still
   reach the hook as `infra`, while their record says `worker-error`. Readers hold a record's reason to the same charset
   (`admin/src/words.mjs` re-exports it, and `recordReason` applies it), and every admin reader that hands a record's
@@ -8126,22 +8151,25 @@ validator rather than a second copy of it.
   imports its tables from the leaf and re-exports them under the names they always had. The MCP pickup refusals are the
   one template read: `mcpRefusalComment(reason, null)` in `mcp-preflight.mjs`, the processor's own comment without a
   server name. The catalog writes a general sentence for a reason whose comment carries runtime values (a wait profile,
-  an image ref, a cap's numbers), for one that posts no comment, and for the eight a record cannot tell apart, each
+  an image ref, a cap's numbers), for one that posts no comment, and for the nine a record cannot tell apart, each
   posted by two or more paths with different comments and no `why` saying which: `model-not-allowed` (the pickup and
   the runner), `mcp-config-invalid` (the pickup and the runner), `secret-name-reserved` (`run.secrets` and a bundle),
   `operator-cancel` (a cancel while running, and one before the start, which posts `CANCELLED_BEFORE_START_COMMENT`),
   `awaiting-input` (an issue's park, a pull request's, whose reply starts with the comment phrase, and a held reply
   already taken), `job-user-unmappable` (`JOB_USER_COMMENTS`, keyed by a cause the record does not carry),
   `envelope-mismatch` (`ENVELOPE_MISMATCH_COMMENTS`, keyed by its cause: no envelope, or a different one) and
-  `podman-conf-widens-job` (`PODMAN_CONF_COMMENTS`, keyed by the source and the finding). A table keyed by a cause is
-  classified by the reason it serves, and that reason is one of these eight, its general sentence none of the table's
+  `podman-conf-widens-job` (`PODMAN_CONF_COMMENTS`, keyed by the source and the finding) and, since #960,
+  `container-infra-exit` (`FAILED_COMMENT` or a row of `FAILED_COMMENT_BY_PROVIDER_FAILURE`, keyed by the signed
+  provider failure's kind, which no `why` carries). A table keyed by a cause is
+  classified by the reason it serves, and that reason is one of these nine, its general sentence none of the table's
   rows but a row a `why` picks (`MODEL_NOT_ALLOWED_COMMENTS`' `fallback-unlisted`).
   `next` is always the catalog's own. A token twice in any of the catalog's tables is an error when the module loads,
   never a silent override.
   **Three written rows (ADDED 2026-10-26, #737, PR 4a)**, in the venue and host group after `container-detached`:
   `container-infra-exit`, `container-exit-unknown` and `worker-error`, the record's reasons for an infrastructure exit,
   an unknown exit and a failure the worker has no token for (`INT-RUN-HISTORY-FILE-CONTRACT`). No comment table is keyed
-  by them, since a final failure with one posts the generic failure comment (`FAILED_COMMENT`), so each sentence is
+  by them, since a final failure with one posts the generic failure comment (`FAILED_COMMENT`; since #960 a
+  `container-infra-exit` may post its provider failure's row instead), so each sentence is
   written here, starts "Failed: ", and is never that comment, which says less than the record knows; `docs/reasons.md`
   gains their three headings and one paragraph without a heading on what an older record that names no reason, or keeps
   an error's own words, reads as. Test: `worker/test/reason-catalog.test.mjs` ("the reasons for infrastructure exits are
@@ -14236,7 +14264,7 @@ reader cannot drift on the key, a field, a reason or a bucket. The writer is `wo
   | `model-selection` | check | another pickup is committing this run's model choice; asks again at `until` |
   | `model-window` | check | no candidate is available and the first transient blocker is a full model window; asks again at `until` |
   | `local-event-debounce` | check | a local event generation is collecting matching events until its current due instant |
-  | `subscription-quota` | check | a connection/application bucket is exhausted; waits for newer evidence, an observed reset or one person's trial, with `until` only a recheck time when reset is unknown |
+  | `subscription-quota` | check | a connection/application bucket is exhausted; waits for newer evidence, an observed reset, one person's trial or, for a provider's refusal with no reset, its automatic retest (`INT-SUBSCRIPTION-QUOTA-KEY`, #960), with `until` only a recheck time when reset is unknown |
   | `subscription-owner` | ready | this host does not own the selected connection; waits for its owning host |
   | `subscription-auth` | check | the credential cannot be renewed yet; waits until its measured earliest refresh instant without consuming an attempt |
   | `host-budget` | slot | the host budget; `budgetWhy` is its verdict |
@@ -15107,13 +15135,47 @@ separate connections is inferred. Physical model cooldown keys and their six-hou
   Fractional reset seconds accept one to nine digits and round up to milliseconds.
 - Claude parses legacy five-hour/seven-day fields, modern `limits`, scoped legacy windows and `extra_usage`.
   OpenAI parses typed primary/secondary rate limits. Only closed authoritative transport codes establish an
-  error observation; authentication, arbitrary error prose and overload do not. Percent and reset values are
+  error observation (`SUBSCRIPTION_QUOTA_CODES`, one list with the signed wire's validator in
+  `model-failover-protocol.mjs`, which gained ChatGPT's two usage-limit codes in #960); authentication, arbitrary error prose and overload do not. Percent and reset values are
   validated; resets beyond the 32-day evidence bound become unknown rather than an invented shorter reset.
 - A payload/state is bounded to 65536 bytes, a community limits array to 32 and retained normalized windows to
   64. Reads use named keys, never keyspace scans. Observation freshness is five minutes; stale availability is
   unknown. Exhaustion remains authoritative through its full known reset, including a week. Without a reset it
-  has no TTL and persists until newer sufficient evidence or a person's explicit trial. Missing/partial evidence
-  does not erase it. A complete newer snapshot may clear generic unknown-reset error exhaustion.
+  has no TTL and persists until newer sufficient evidence, a person's explicit trial, or (AMENDED 2026-11-21, #960)
+  the automatic retest below. Missing/partial evidence does not erase it. A complete newer snapshot may clear generic
+  unknown-reset error exhaustion.
+- **Automatic retest (#960).** When every exhausted window is a provider refusal's row (`provider-error`, the id an
+  observation with no window gets) with no reset, no probe is required and no person's trial waits unused, the status
+  carries `retestAt`: the newest such row's observation or the last trial's `claimedAt`, whichever is later, plus
+  `SUBSCRIPTION_RETEST_MS`, six hours, equal to the model cooldown's ceiling (`MODEL_COOLDOWN_MAX_MS`). At or after it,
+  selected admission claims an automatic trial `{ id, usedBy, auto: true, claimedAt }` for the hash of the durable
+  attempt id inside the same exact-byte CAS, with the existing reason `subscription-trial`; of two hosts racing, one
+  writes and the other re-reads the claim and is refused. A candidate preview says `subscription-trial` and writes
+  nothing; one millisecond before `retestAt` admits nothing. A retest that meets the limit again re-latches through
+  `record` (newer observation, trial dropped), so the next retest is six hours after that refusal; one that ended
+  otherwise leaves its trial used and the next retest is six hours after its claim. Usage-read rows, Claude's
+  (`claude-community`) included, and rows with a reset never retest. A preview while another attempt holds a trial is
+  refused like any block, where it threw `subscription-invalid-trial`. `auth status` and the console show `retestAt`,
+  the connection's, and `trialClaimedAt` (the console says a claimed retest is running until `retestAt`).
+- **A settled trial (#960).** After a verified, code-matched, unaborted exit 0, 1 or 2 of the attempt holding the
+  trial, and after the code-1 branch's `observe` (`subscription-runtime.mjs` `settleTrial`): a signed `quota-exhausted`
+  or `rate-limited` failure, on any provider, settles nothing: a coded `quota-exhausted` on that connection's provider
+  re-latches through `observe`, which drops the trial, while a rate limit, a quota read from prose or another
+  provider's failure leaves the trial used until its next retest; otherwise a metered call in a ledger row named for
+  that provider with output tokens calls `clearTrialEvidence(identity, { attemptId, observedAt })`, which deletes the
+  `provider-error` rows with no reset (a usage read's rows stay) and drops the trial, since the provider answered
+  (an overload or a policy stop after it is no quota evidence; an `other/other` row is never that provider's answer); a
+  run that provably never called that provider, under the dollar settlement's rule (`modelDollarSettlement`: no ledger
+  on a line that counted no calls, or a ledger whose `truncated` is exactly 0 with no `other/other` row that made calls
+  and no call in a row of that provider), calls `releaseTrial(identity, { attemptId })`, which drops
+  an automatic trial, so the retest is due again at once, and makes a person's trial unused again, so the next pickup
+  takes it; anything else leaves the trial used. Both act under CAS only when the trial's `usedBy` is that attempt's
+  hash, it has a `claimedAt`, no such row is newer than the claim and no probe is required, and the clear's
+  `observedAt` lies between the claim and now. A selected admission now stamps `claimedAt` on a person's trial too; a
+  used trial with no `claimedAt` (claimed by an older build) is never settled, since nothing says its rows predate the
+  run. A settlement that fails is logged `subscription_trial_settle_failed` and never fails the run. A trial whose
+  container never started is not given back (residual: the next retest comes six hours after its claim). Stored
+  trials of both shapes parse; an older build reads the new one as `{ id, usedBy }`.
 - A measured Claude HTTP 429 invalidates cached availability and paid-overage facts before a bounded usage
   refresh; it does not alone prove plan exhaustion. The persistent probe-required flag permits read-only
   candidate inspection but refuses selected paid admission until new usage is recorded. The fetch binds its
@@ -15197,6 +15259,7 @@ and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` are UNCHANGED, checked: no file shape, wr
 
 | Date | Change |
 |---|---|
+| 2026-11-21 (#960) | **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: `subscriptionCode` gains ChatGPT's two non-retryable usage limits, `subscription_sharing_usage_limit_exceeded` and `subscription_sharing_workplace_individual_usage_limit_exceeded` (pi-ai `utils/retry.js`), and for `openai` on `openai-responses` the code is read from a structured field of the first event that fails the call in a 2xx event stream, as the pinned stack reads it (`event: error`; a top-level `error` on any event not named `thread.*` or on one with no name; `type: "error"`; `response.failed`), by a pass-through reader with a 65536-character cap per event that parses every event's data as the SDK does and stops where it stops (the first failing event, `[DONE]`, malformed data, a named event with no data), since a subscription past its limit answers HTTP 200 and pi's message keeps only the prose; still never inferred from prose, and the two retryable `_unavailable` outages are not quota codes. The worst-case line is 8,004 characters with the longest code, 8,497 with a supervisor's line (was 7,961 and 8,454). **`INT-SUBSCRIPTION-QUOTA-KEY` AMENDED**: one code list with the wire's validator; an unknown-reset exhaustion made only of provider refusal rows is retried by one automatic trial (`auto`, `claimedAt`) six hours after its newest refusal or last claim, shown as the connection's `retestAt` beside `trialClaimedAt`; the attempt holding a trial settles it after a verified exit 0, 1 or 2: cleared (`clearTrialEvidence`) when that provider returned output, given back (`releaseTrial`) when it provably was never called (the dollar settlement's rule: `truncated` exactly 0, no `other/other` call), left used otherwise, nothing on a signed quota or rate-limit failure, all guarded by `usedBy` and `claimedAt`; a preview beside a held trial is refused rather than throwing; a never-started trial is a named residual. **`INT-DEFER-REASON-KEY` AMENDED**, the `subscription-quota` row's gate cell names the automatic retest, and so does its queue wait sentence (`defer-reasons.mjs`); the reason, bucket and fields UNCHANGED, checked. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**, the record-reason paragraph's comment clause only: a final `container-infra-exit` with a signed `quota-exhausted` posts `FAILED_COMMENT_BY_PROVIDER_FAILURE`'s row. **`INT-REASON-CATALOG` AMENDED**: `container-infra-exit` is the ninth ambiguous reason. UNCHANGED, checked: exit codes, signing, the record's reason (`container-infra-exit`, retried), model cooldown keys and TTL, the record shape. **Code evidence**: image/runner/src/provider-failure.mjs -> SUBSCRIPTION_QUOTA_CODES, SSE_FRAME_CAP, eventError, sseErrorReader, installProviderFailureObserver; worker/src/model-failover-protocol.mjs -> SUBSCRIPTION_QUOTA_CODES; worker/src/subscription-quota.mjs -> SUBSCRIPTION_RETEST_MS, retestAtOf, heldTrialRefusal, admit, clearTrialEvidence, releaseTrial; worker/src/subscription-runtime.mjs -> settleTrial; worker/src/index.mjs -> subscriptionAttemptId; worker/src/comment-tables.mjs -> FAILED_COMMENT_BY_PROVIDER_FAILURE; worker/src/start.mjs -> failedComment; admin/src/subscription-auth-view.mjs -> quotaOf; worker/src/defer-reasons.mjs -> DEFER_WHYS. |
 | 2026-11-21 (#1003) | **`INT-DEFER-REASON-KEY` AMENDED**, a paragraph after its CLI reader's: `pi-dispatch status` ends every read of one Valkey within about five seconds, the waiting details' budget cut short when less is left; a queue whose paused state or counts did not answer adds `partial: true` and `unavailableQueues` at the top level, its counts are left out of the sums (no count field when no queue answered), `pausedState` is `null` when every queue that answered is paused and one did not answer, the line is printed with an `error:` line after it naming what each queue lacks, and the exit code is 1. A Valkey that answers every read prints what it did before, exit code 0. `--target` reads under the same deadline, its own budget cut short, with `complete: false` and exit code 0. **`INT-POLLER-STATUS-KEY` AMENDED**, one sentence: "`status` still exits 0" becomes that what `pollers` says never changes `status`'s exit code (the exit code 1 comes from the queue reads alone); the heartbeat read ends at status's deadline when that is sooner, and its fields and sentences are as they were. No key, field or TTL changes. **Code evidence**: worker/src/cli.mjs -> killSwitch, targetStatus, statusShortfall, answeredWithin; worker/src/poller-facts.mjs -> readPollerFacts; worker/test/cli-control.test.mjs |
 | 2026-11-22 (#1021) | **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**, a NEW sub-bullet after the cidfile's (issue #345): two start numbers from one instant before the spawn, on a run whose argv carries the cidfile. `container_created { container, ms }`, the create: the file polled every 250 ms (`CREATED_POLL_MS`) from the spawn and looked at once more when the CLI exits, `ms` to its own mtime (docker writes the ID after the daemon accepted the create and before it attaches and starts, Podman deletes the file with the container), the start not in it. `container_first_output { container, ms }`, an upper bound on the whole start: to the first stdout chunk (the CLIs' own messages are on stderr), which the runner writes before its first model call on a job whose idle watch is armed and earlier with staged packages, and which can be the exit line without such a line. Each said once when it happens, neither without a create or a stdout chunk, nor on a venue whose argv carries no cidfile (`openshell`, `openshell-bind`); durations, not wall times, `container_created` up to one poll step after `container_first_output` for a very fast create; evidence that nothing decides by. **`INT-RUNNER-EXIT-CODE-PROTOCOL` UNCHANGED, checked**: the image writes nothing new, and only the arrival of the first stdout chunk is read, never its bytes. **`INT-RUN-HISTORY-FILE-CONTRACT` UNCHANGED, checked**: the record gains no field; the number is a log line. **Code evidence**: worker/src/run-container.mjs -> watchCreated, CREATED_POLL_MS, makeRunContainer. |
 | 2026-11-22 (#1021) | **`INT-DOCTOR-RESULTS-KEY` AMENDED**, "When it is written": the worker's runs include the one 15 minutes after a run it killed at its bound, doubled per killed run in a row and capped at the interval; a killed run writes nothing. **`INT-EGRESS-POLICY-CONTRACT` AMENDED**: the canary's leftover sweep runs with `PI_EGRESS=0` too, on docker's venue where `docker info` answered on a daemon this host owns, never from setup's read-only run, with the same detach gate and grant removal and no canary, printing only what it removed or could not remove (`unlisted`, `probesUnlisted` and `foreign` dropped, a clean host byte for byte as before); on a remote or unresolved endpoint the probe listing runs too and its names ride their pid's `foreign` line after the network, or a `foreign` line of their own, nothing judged or removed (it used to list nothing there); the "what removes it" sentence says the canary's sweep runs on every doctor on a daemon this host owns, armed or off. UNCHANGED, checked: `INT-LIVE-PROBE-CONTRACT` (`--live`'s own sweeps untouched), the gh probe row (its own step still sweeps it, policy off included). **Code evidence**: worker/src/doctor.mjs -> egressChecks, CANARY_ASKING_SHAPES, sweepStaleCanaryNetworks, sweepStaleProbeContainers (owned, found), CANARY_LINES.foreign; worker/src/doctor-spawner.mjs -> makeDoctorSpawner (retryAfterKillMs), DOCTOR_RETRY_AFTER_KILL_MS. |

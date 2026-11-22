@@ -38,7 +38,7 @@ function quotaOf(value, now) {
   return {
     observedAt, fresh, state: ["available", "exhausted"].includes(value?.state) ? value.state : "unknown",
     until: instant(value?.until), blockedUnknownReset: value?.blockedUnknownReset === true,
-    trialAvailable: value?.trialAvailable === true, windows, extraUsage: extraUsage(value?.extraUsage),
+    trialAvailable: value?.trialAvailable === true, retestAt: instant(value?.retestAt), trialClaimedAt: instant(value?.trialClaimedAt), windows, extraUsage: extraUsage(value?.extraUsage),
   };
 }
 

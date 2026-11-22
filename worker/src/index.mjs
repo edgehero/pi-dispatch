@@ -1200,6 +1200,9 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 		let priorRecordNewer = false;
 		let newerModelState = "the previous attempt's run record";
 		const modelAttemptId = modelAttemptIdOf(job.queueName ?? QUEUE, job.id);
+		// The attempt a subscription trial is claimed for at its admission and cleared for after a clean exit (issue #960):
+		// one value, so the two can never name different attempts.
+		const subscriptionAttemptId = `${modelAttemptId}:${job.attemptsMade ?? 0}:${job.stalledCounter ?? 0}`;
 		if (!settingsThrew && !settings?.invalid) {
 			try {
 				// Defaults may narrow an authored grant, but cannot create its required explicit ceiling or cap.
@@ -1928,7 +1931,7 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 				} } : {}),
 				...(deps?.subscriptionRuntime ? {
 					prepareSubscriptionAuth: async (j, { renewable = false } = {}) => {
-						try { return await deps.subscriptionRuntime.prepare(j, { deadlineAt: subscriptionDeadlineAt, signal, renewable, attemptId: `${modelAttemptId}:${job.attemptsMade ?? 0}:${job.stalledCounter ?? 0}` }); }
+						try { return await deps.subscriptionRuntime.prepare(j, { deadlineAt: subscriptionDeadlineAt, signal, renewable, attemptId: subscriptionAttemptId }); }
 						catch (cause) { throw new InfraRetry("subscription authentication could not be prepared", { cause, reason: "container-never-started", budgetReserved: false }); }
 					},
 					validateSubscriptionAuth: (snapshots) => deps.subscriptionRuntime.validate(snapshots),
@@ -2016,6 +2019,15 @@ export function makeProcessor({ cancelJob, stopContainer, containerName = (job) 
 								// Issue #800: a verified line was read, and the processor never sees this result, so the throw carries what it said.
 								throw new InfraRetry("the provider failure could not be recorded", { cause, reason: "container-infra-exit", exitCode: r.code, turns: r.turns, tokens: r.tokens, usage: r.usage, provider: effectiveJob.provider, model: effectiveJob.model, loaded: r.loaded });
 							}
+						}
+						// Issue #960: the attempt holding a subscription trial settles it (subscription-runtime.mjs `settleTrial`):
+						// cleared when the provider answered, given back when it was never asked, under the same verified,
+						// code-matched, unaborted line as the code-1 branch above, and after it, so a refusal that branch recorded
+						// has already dropped the trial. Never a throw: a run that ended on its own would be paid for twice by a
+						// retry; a failed settlement leaves the trial to its next retest, and the line says so.
+						if (r?.exitAuth === "verified" && r?.exitLineCode === r?.code && [0, 1, 2].includes(r?.code) && r?.aborted !== true && typeof deps?.subscriptionRuntime?.settleTrial === "function" && (ctx.subscriptionAuth ?? []).length > 0) {
+							try { await deps.subscriptionRuntime.settleTrial(effectiveJob, r, ctx.subscriptionAuth, { attemptId: subscriptionAttemptId }); }
+							catch (cause) { deps.log?.("subscription_trial_settle_failed", { jobId: job.id, reason: typeof cause?.code === "string" ? cause.code : "error" }); }
 						}
 						// Issue #646: what this attempt said about steering, for the record's `steerSkipped` (settleSteer above).
 						steerRan = r && typeof r === "object" ? { steerSkipped: r.steerSkipped ?? null } : null;

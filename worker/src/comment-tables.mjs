@@ -306,6 +306,18 @@ export const FAILED_COMMENT_BY_REASON = Object.freeze({
 	[PODMAN_RESTART_HOLD_EXPIRED]: "Failed before it started: rootful Podman's service on this worker kept running with a containers.conf older than its files (or a file's change time stayed ahead of the host's clock) for an hour, so the job was held and never run. Nothing was spent. Ask the operator to restart it while no local job runs (`sudo systemctl restart podman.service`), then run the job again.",
 });
 
+/**
+ * Issue #960: a terminal `container-infra-exit` whose attempt the runner signed as a provider failure says which, so the
+ * issue tells a used-up quota from a broken image. Keyed by the signed `providerFailure.kind` (a closed word the worker
+ * validated, never the provider's text), so the record's reason stays `container-infra-exit`, the retryable exit 1 it is
+ * (CONST-RETRY-INFRA-ONLY): failover rides that retry. Only `quota-exhausted` has a sentence of its own; every other kind
+ * keeps FAILED_COMMENT, since an overload or a rate limit that outlasted the retries says nothing an operator acts on
+ * differently from the log.
+ */
+export const FAILED_COMMENT_BY_PROVIDER_FAILURE = Object.freeze({
+	"quota-exhausted": "Failed: the AI provider refused this job's model because the account's usage limit or quota is used up (for a subscription, its plan's usage limit), so the job stopped and will not be retried further. Partial work may exist. Ask the operator to wait for the limit to reset or add credit, or list a fallback model for the trigger.",
+});
+
 // Issue #645: a recovery that waited past its deadline for the host holding its run's checkpoint, taken back off the
 // queue by the host-lost sweep. Fixed text, like every failure sentence here. It says what happened and what is lost
 // (the work since the run's start is on that host, not gone), and sends the operator to the host, the one fix.

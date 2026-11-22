@@ -43,3 +43,16 @@ test("image conformance requires exact bounded retry, auth, endpoint, model and 
 		{ toolsStarted: true }, { replaySafe: false },
 	]) assert.ok(check({ ...providerExit, ...patch }, { mode: "provider", rows }).length > 0);
 });
+
+test("the usage-limit stream mode requires the signed ChatGPT code, one request and no retry (issue #960)", () => {
+	const streamExit = { ...providerExit, tokens: { ...providerExit.tokens, calls: 1 }, providerFailure: { kind: "quota-exhausted", subscriptionProvider: "openai", subscriptionCode: "subscription_sharing_usage_limit_exceeded" } };
+	assert.deepEqual(check(streamExit, { mode: "stream", rows: [request(1)] }), []);
+	for (const rows of [[], [request(1), retry, request(2)], [request(1), retry], [{ ...request(1), authOk: false }]]) assert.ok(check(streamExit, { mode: "stream", rows }).length > 0, JSON.stringify(rows));
+	for (const patch of [
+		{ providerFailure: { kind: "quota-exhausted" } },
+		{ providerFailure: { ...streamExit.providerFailure, subscriptionCode: "usage_limit_reached" } },
+		{ providerFailure: { ...streamExit.providerFailure, subscriptionProvider: "anthropic" } },
+		{ providerFailure: { kind: "rate-limited", subscriptionProvider: "openai" } },
+		{ tokens: { ...streamExit.tokens, calls: 2 } }, { replaySafe: false }, { code: 2, reason: "cost-cap" },
+	]) assert.ok(check({ ...streamExit, ...patch }, { mode: "stream", rows: [request(1)] }).length > 0, JSON.stringify(patch));
+});

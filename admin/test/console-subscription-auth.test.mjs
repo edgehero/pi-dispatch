@@ -42,6 +42,20 @@ test("Models shows observed percentages and resets, preserves exhaustion on stal
   const trial = draw("models", consoleSubscriptionFixture(NOW, v => { Object.assign(v.connections[0].quota, { blockedUnknownReset: true, until: null, trialAvailable: false }); }));
   assert.match(trial, /Exhausted; reset unknown/); assert.match(text(trial), /pi-dispatch auth trial claude-work/);
   assert.match(trial, /does not clear account exhaustion or start a job here/);
+  assert.match(text(trial), /A fresh observation or explicit host trial is needed/, "no retest published: the words of before issue #960");
+  const retest = draw("models", consoleSubscriptionFixture(NOW, v => { Object.assign(v.connections[0].quota, { blockedUnknownReset: true, until: null, trialAvailable: false, retestAt: NOW + 6 * 3_600_000, trialClaimedAt: null }); }));
+  assert.match(text(retest), /One job retests the connection from 2026-10-31 18:00:00 UTC; a retest the provider answers clears it; an explicit host trial can come sooner\./);
+  // A refusal the provider wrote is cleared by a trial job it answers, so the trial note says so; usage-read windows keep the old words.
+  assert.match(text(retest), /Trial authorizes one fresh, normally budgeted pickup check\. It starts no job here; a trial job the provider answers clears the refusal\./);
+  assert.doesNotMatch(retest, /does not clear account exhaustion/);
+  // A claimed retest not yet settled says so, rather than its claim plus six hours as the next time.
+  const running = draw("models", consoleSubscriptionFixture(NOW, v => { Object.assign(v.connections[0].quota, { blockedUnknownReset: true, until: null, trialAvailable: false, trialClaimedAt: NOW - 60_000, retestAt: NOW - 60_000 + 6 * 3_600_000 }); }));
+  assert.match(text(running), /One job is retesting the connection since 2026-10-31 11:59:00 UTC; a retest the provider answers clears it\./);
+  assert.doesNotMatch(text(running), /retests the connection from/);
+  // Six hours on, a claimed trial that never settled has its retest due again.
+  const due = draw("models", consoleSubscriptionFixture(NOW, v => { Object.assign(v.connections[0].quota, { blockedUnknownReset: true, until: null, trialAvailable: false, trialClaimedAt: NOW - 7 * 3_600_000, retestAt: NOW - 3_600_000 }); }));
+  assert.match(text(due), /One job retests the connection from 2026-10-31 11:00:00 UTC/);
+  for (const bad of ["soon", -1, 1e20]) assert.match(text(draw("models", consoleSubscriptionFixture(NOW, v => { Object.assign(v.connections[0].quota, { blockedUnknownReset: true, trialAvailable: false, retestAt: bad }); }))), /explicit host trial is needed/, String(bad));
 });
 
 test("viewer, agent and read-only operators read safe facts but receive no commands or authentication controls", () => {

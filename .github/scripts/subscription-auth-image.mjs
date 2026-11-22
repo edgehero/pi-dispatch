@@ -9,6 +9,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { getBuiltinModels } from "@earendil-works/pi-ai/providers/all";
 import { prepareCommunityAuthAdapter } from "../../worker/src/community-auth-patches.mjs";
+import { SHAPES as USAGE_LIMIT_SHAPES, USAGE_LIMIT } from "../../image/runner/test/fixtures/chatgpt-usage-limit.mjs";
 
 const repository = fileURLToPath(new URL("../../", import.meta.url));
 const require = createRequire(import.meta.url);
@@ -51,6 +52,8 @@ function readable(path) {
 	if (stat.isDirectory()) for (const name of readdirSync(path)) readable(join(path, name));
 }
 
+// Issue #960: in "stream" mode the OpenAI binding is refused the way a ChatGPT subscription past its usage limit refuses,
+// HTTP 200 with the refusal as an event, from the one fixture the runner's own tests read.
 const offlineFetch = `
 // This replaces every fetch before application imports. Even a malformed route never reaches the network.
 let calls = 0;
@@ -66,6 +69,7 @@ globalThis.fetch = async (input, init) => {
   let modelOk = false;
   try { modelOk = JSON.parse(await request.text()).model === process.env.PI_MODEL; } catch {}
   console.log(JSON.stringify({event:"subscription_smoke_fetch",calls,provider,authOk,urlOk,modelOk}));
+  if (process.env.PI_AUTH_SMOKE_MODE === "stream") return new Response(${JSON.stringify(USAGE_LIMIT_SHAPES.EVENT())}, {status:200,headers:{"content-type":"text/event-stream"}});
   if (process.env.PI_AUTH_SMOKE_MODE !== "provider") throw new Error("subscription smoke unexpected dispatch");
   return new Response(JSON.stringify({error:provider === "openai" ? {code:"usage_limit_reached",type:"usage_limit_reached",message:"synthetic quota refusal"} : {type:"rate_limit_error",message:"synthetic throttle"}}), {status:429,headers:{"content-type":"application/json","retry-after":"600"}});
 };
@@ -87,6 +91,11 @@ export function subscriptionSmokeProblems({ output, status, key, provider, mode 
 	if (mode === "cost") {
 		if (status !== 2 || exit.code !== 2 || exit.reason !== "cost-cap" || exit.tokens?.costRefused !== 1) problems.push("normal runner did not refuse its first call at the initial cost bound");
 		if (requests.length !== 0) problems.push("a cost-refused job attempted dispatch");
+	} else if (mode === "stream") {
+		// One request: pi does not retry a usage limit, and the code is read off the 200 stream, never off pi's message.
+		if (status !== 1 || exit.code !== 1 || exit.providerFailure?.kind !== "quota-exhausted" || exit.providerFailure?.subscriptionProvider !== "openai" || exit.providerFailure?.subscriptionCode !== USAGE_LIMIT) problems.push("the usage-limit event did not become typed subscription evidence");
+		if (exit.tokens?.costRefused !== 0 || exit.tokens?.calls !== 1 || exit.tokens?.metered !== true || exit.toolsStarted !== false || exit.replaySafe !== true) problems.push("provider observation bypassed ordinary metering or replay evidence");
+		if (requests.length !== 1 || requests.some(row => row.calls !== 1 || row.provider !== provider || !row.authOk || !row.urlOk || !row.modelOk) || events.some(row => row.event === "pi_auto_retry")) problems.push("expected one correctly authenticated and shaped request and no retry");
 	} else {
 		if (status !== 1 || exit.code !== 1 || !["quota-exhausted", "rate-limited"].includes(exit.providerFailure?.kind) || exit.providerFailure?.subscriptionProvider !== provider) problems.push("synthetic throttle did not retain typed subscription evidence");
 		if (provider === "openai" && exit.providerFailure?.subscriptionCode !== "usage_limit_reached") problems.push("OpenAI typed quota code was lost");
@@ -119,7 +128,7 @@ export function verifySubscriptionImage(image) {
 				prepared = prepareCommunityAuthAdapter({ adapter: profile.adapter, root });
 			}
 			readable(scratch);
-			for (const mode of ["cost", "provider"]) {
+			for (const mode of ["cost", "provider", ...(profile.provider === "openai" ? ["stream"] : [])]) {
 				const name = `pi-subscription-smoke-${process.pid}-${index}-${mode}`;
 				containers.add(name);
 				const key = randomBytes(32).toString("hex");
