@@ -2,10 +2,13 @@
 import * as nodeFs from "node:fs";
 import { resolve, dirname } from "node:path";
 import { deploymentServiceEnv } from "@edgehero/pi-dispatch/service-env";
-import { providerFrom, settingsFilePath, allowedModelsFrom } from "@edgehero/pi-dispatch/config";
+import { DEFAULT_MODEL, providerFrom, settingsFilePath, allowedModelsFrom } from "@edgehero/pi-dispatch/config";
 import { readOverlay } from "@edgehero/pi-dispatch/runtime-settings";
-import { parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
-import { splitModelEntry, providerIdProblem } from "@edgehero/pi-dispatch/model-ref";
+import { CRON_ID_MAX, parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
+import { failoverListUsable, splitModelEntry, providerIdProblem } from "@edgehero/pi-dispatch/model-ref";
+import { resolveModelRoles } from "@edgehero/pi-dispatch/model-roles";
+import { resolveConfiguredModelRuns } from "@edgehero/pi-dispatch/model-observation";
+import { parseProjects } from "@edgehero/pi-dispatch/projects";
 import { parseAuthConnections } from "@edgehero/pi-dispatch/auth-policy";
 import { apiKeyVariable, nonApiKeyKind, needsHostAuthentication } from "@edgehero/pi-dispatch/provider-key";
 import { PROVIDER_KEY_NAMES } from "./provider-key-names.mjs";
@@ -31,6 +34,14 @@ export function providerCanonicalKey(provider) {
   return key && nonApiKeyKind(key) === null ? key : null;
 }
 export const PROVIDER_SLOT_ALIASES = Object.freeze(Object.fromEntries([...new Set(Object.keys(PROVIDER_KEY_NAMES).map(providerCanonicalKey).filter(Boolean))].sort().map(key => [key, Object.freeze(Object.keys(PROVIDER_KEY_NAMES).filter(provider => providerCanonicalKey(provider) === key).sort())])));
+/** Issue #1000: the trigger positions one slot's own-key line names; the rest are counted, never dropped silently. */
+export const DECLARED_KEY_TRIGGERS_MAX = 16;
+/** Issue #1000: where the own-key lines are incomplete or wider than the workers' answer, each said once on the card. */
+export const DECLARED_KEY_NOTES = Object.freeze({
+  "projects-unread": "The projects file could not be read, so a model role is resolved in every project the triggers file names, and a trigger may be listed under a provider its jobs never run on.",
+  "default-model-unread": "PI_MODEL could not be read from the deployment's .env, so a trigger that names no model of its own is not listed while the triggers file declares model roles.",
+  "forward-unread": "PI_FORWARD_ENV could not be read from the deployment's .env, so whether this host names a trigger's own key there, and refuses those jobs, is not known.",
+});
 const present = (env, key) => typeof env?.[key] === "string" && env[key] !== "";
 const definedCredential = (env, key) => typeof env?.[key] === "string" && env[key] !== "";
 const unknownRead = value => !value || Boolean(value.unreadable || value.untrusted || value.hazard || value.unread?.length || value.hazardSkipped?.length);
@@ -59,6 +70,144 @@ function metadataBytes(path, fs, uid, max = 1_048_576) {
   finally { if (fd !== undefined) fs.closeSync(fd); }
 }
 
+/**
+ * Issue #1000: the triggers that bring their own key, from the triggers file: `{ slots, notes }`, `slots` a
+ * `Map<slot, [{ index, cron }]>` (a cron trigger's id, the name doctor gives it, else null) and `notes` the
+ * `DECLARED_KEY_NOTES` that say where the answer is incomplete or wider than the workers'. Since issue #967 a trigger
+ * whose `run.secrets` binds the API-key variable of the provider a job runs on makes that value the job's credential,
+ * and the host's key for that provider is not read, so a slot read from this host's sources alone could say "Not set"
+ * while such triggers spend on it, or name the deployment key while some of them use another.
+ *
+ * This is the half of the worker's rule (`declaredProviderKey`, env-allowlist.mjs) the file decides, asked of the
+ * attempts doctor's line asks it of (`modelSubjects` with fallbacks), through the same resolver
+ * (`resolveConfiguredModelRuns` over the runs doctor builds, with the projects file): the provider a trigger's jobs run
+ * on (its own, the deployment default it inherits, or its model role's in the project the job lands in), each random
+ * candidate's, and each fallback the walk would try (`failoverListUsable`). The name must be the provider's slot
+ * (`providerCanonicalKey`, never an OAuth or bearer variable), a key of `run.secrets` and not of `run.secretFiles`; a
+ * watch rule's jobs and a provider that needs host authentication never count. The rest is each host's own, its
+ * PI_FORWARD_ENV and its subscription bindings, which the caller and the card say, but for the one fence doctor applies
+ * too: `managed(provider)` is this host's subscription binding, and behind a primary bound to a subscription the walk
+ * skips every fallback that is not (`auth-mixed-billing`, model-failover.mjs `selectFailoverJob`), so such a fallback
+ * runs no attempt here and brings no key.
+ *
+ * Two inputs may be unknown. `projects` null is a projects file that could not be read: a role then resolves in every
+ * scope the triggers file names, which can list a trigger under a provider its jobs never run on, and says so, rather
+ * than hiding a key the file binds. `defaultModel` null is a PI_MODEL line that could not be read with no model in the
+ * overlay: with model roles declared, the default may itself be a role, so a trigger naming no model is not judged.
+ */
+export function declaredKeyTriggers(triggers, { defaultProvider = null, defaultModel = null, envList = null, modelRoles = {}, projects = [], resolveFolder, managed = () => false } = {}) {
+  const roles = modelRoles !== null && typeof modelRoles === "object" ? modelRoles : {};
+  const withRoles = Object.keys(roles).length > 0;
+  const list = Array.isArray(triggers) ? triggers : [];
+  const notes = new Set();
+  const runs = [];
+  list.forEach((row, index) => {
+    const run = row?.run;
+    if (row?.on?.type === "watch" || run?.secrets === null || typeof run?.secrets !== "object") return;
+    if (withRoles && defaultModel === null && run.modelSelection === undefined && run.model === undefined) { notes.add("default-model-unread"); return; }
+    // doctor's `modelRuns` fields (readTriggerFacts), so the resolver reaches each trigger's project as doctor's does.
+    runs.push({ sourceIndex: index, label: `trigger ${index + 1}`, kind: run.kind, folder: run.folder, repository: run.repository, provider: typeof run.provider === "string" ? run.provider : undefined, model: typeof run.model === "string" ? run.model : undefined, models: Array.isArray(run.models) ? run.models : undefined, fallbackModels: Array.isArray(run.fallbackModels) ? run.fallbackModels : undefined, ...(run.modelSelection ? { modelSelection: run.modelSelection } : {}) });
+  });
+  const deployment = { provider: defaultProvider, model: defaultModel };
+  let resolved;
+  if (projects !== null || !withRoles) {
+    // Doctor's call, without Models' `conservativeLocal`: a folder this host cannot resolve keeps its spelling and lands
+    // in the project that names it, as doctor and the worker's rule place it. Judging it in every project with a folder
+    // member, as Models does, named such a trigger under a provider its jobs never run on.
+    resolved = resolveConfiguredModelRuns({ runs, deployment, envList, modelRoles: roles, projects: projects ?? [], ...(resolveFolder ? { resolveFolder } : {}) }).runs;
+  } else {
+    notes.add("projects-unread");
+    const scopes = [null, ...Object.keys(roles).filter(scope => scope !== "default")];
+    resolved = runs.flatMap(run => {
+      if (run.modelSelection) return [run];
+      const models = run.models ?? envList;
+      const job = { ...run, provider: run.provider ?? deployment.provider, model: run.model ?? deployment.model, ...(models ? { models } : {}) };
+      // A scope whose roles refuse this job is one where it never runs: the worker refuses it there before any attempt.
+      return scopes.flatMap(scope => { try { return [resolveModelRoles(job, roles, scope, { authoredProvider: run.provider })]; } catch { return []; } });
+    });
+  }
+  const slots = new Map();
+  for (const run of resolved) {
+    const trigger = list[run.sourceIndex];
+    const providers = new Set();
+    const add = entry => { const ref = splitModelEntry(entry); if (ref) providers.add(ref.provider); };
+    // A pool is physical and reviewed: each candidate is the main model of the draws that land on it, and the default it
+    // would otherwise inherit is never one of them (model-observation.mjs).
+    if (run.modelSelection) for (const entry of run.modelSelection.candidates ?? []) add(entry);
+    else {
+      const primary = run.provider ?? deployment.provider;
+      providers.add(primary);
+      if (run.fallbackModels !== undefined && failoverListUsable({ fallbackModels: run.fallbackModels, models: run.models ?? envList })) {
+        for (const entry of run.fallbackModels) {
+          const ref = splitModelEntry(entry);
+          // Doctor's fence, by its primary: the walk never leaves a subscription for an API-key fallback.
+          if (ref && !(managed(primary) && !managed(ref.provider))) providers.add(ref.provider);
+        }
+      }
+    }
+    const secrets = trigger.run.secrets;
+    const files = trigger.run.secretFiles;
+    for (const provider of providers) {
+      if (typeof provider !== "string" || needsHostAuthentication(provider)) continue;
+      const key = providerCanonicalKey(provider);
+      if (!key || !Object.hasOwn(secrets, key)) continue;
+      if (files !== null && typeof files === "object" && Object.hasOwn(files, key)) continue;
+      if (!slots.has(key)) slots.set(key, []);
+      if (!slots.get(key).some(t => t.index === run.sourceIndex)) slots.get(key).push({ index: run.sourceIndex, cron: trigger.on?.type === "cron" && cronId(trigger.on.id) ? trigger.on.id : null });
+    }
+  }
+  for (const rows of slots.values()) rows.sort((a, b) => a.index - b.index);
+  return { slots, notes: [...notes] };
+}
+
+/** A cron trigger's `on.id` as the loader admits it, the name doctor gives the trigger, or null. */
+const cronId = value => typeof value === "string" && value.length <= CRON_ID_MAX && /^[A-Za-z0-9._-]+$/.test(value) ? value : null;
+
+/**
+ * The own-key facts the Connections card draws (issue #1000), rebuilt from any DTO: `{ slots, notes }`, each slot a
+ * provider slot with trigger positions and cron ids only, at most `DECLARED_KEY_TRIGGERS_MAX` of them (the rest counted),
+ * and whether this host's PI_FORWARD_ENV names the variable (`forwarded`, null when it could not be read).
+ */
+export function declaredKeysView(raw) {
+  const slots = new Map();
+  for (const row of (Array.isArray(raw?.declaredKeys) ? raw.declaredKeys : []).slice(0, Object.keys(PROVIDER_SLOT_ALIASES).length)) {
+    if (typeof row?.key !== "string" || !Object.hasOwn(PROVIDER_SLOT_ALIASES, row.key) || slots.has(row.key)) continue;
+    const seen = new Set();
+    const triggers = (Array.isArray(row.triggers) ? row.triggers : []).filter(t => Number.isSafeInteger(t?.index) && t.index >= 0 && !seen.has(t.index) && seen.add(t.index)).map(t => ({ index: t.index, cron: cronId(t.cron) })).sort((a, b) => a.index - b.index);
+    if (triggers.length === 0) continue;
+    const more = Number.isSafeInteger(row.more) && row.more >= 0 ? row.more : 0;
+    slots.set(row.key, { triggers: triggers.slice(0, DECLARED_KEY_TRIGGERS_MAX), more: more + Math.max(0, triggers.length - DECLARED_KEY_TRIGGERS_MAX), forwarded: typeof row.forwarded === "boolean" ? row.forwarded : null });
+  }
+  const notes = [...new Set((Array.isArray(raw?.declaredNotes) ? raw.declaredNotes : []).filter(note => typeof note === "string" && Object.hasOwn(DECLARED_KEY_NOTES, note)))];
+  return { slots, notes };
+}
+
+const OWN_KEY_KEYS = Object.freeze(["PI_MODEL", "PI_PROJECTS_FILE", "PI_FORWARD_ENV"]);
+
+/** `{ unread, value }` over OWN_KEY_KEYS, the file's value over the console's own as the inventory's other keys are. */
+function ownKeyEnvironment({ root, env, fs, platform, uid, reads }) {
+  try {
+    const got = (reads.environment ?? deploymentServiceEnv)({ env: {}, dir: root, keys: [...OWN_KEY_KEYS], fs, platform, uid });
+    const whole = !got || got.unreadable || got.untrusted || got.hazard;
+    const unread = new Set(whole ? OWN_KEY_KEYS : [...(got.unread ?? []).map(row => row.key), ...(got.hazardSkipped ?? [])]);
+    return { unread, value: key => typeof got.env?.[key] === "string" ? got.env[key] : typeof env[key] === "string" ? env[key] : undefined };
+  } catch { return { unread: new Set(OWN_KEY_KEYS), value: () => undefined }; }
+}
+
+/** The projects the workers load (`loadProjects`): [] when PI_PROJECTS_FILE is unset, null when it cannot be read. */
+function ownKeyProjects(ownKeyEnv, { root, fs, uid, reads }) {
+  if (!ownKeyEnv || ownKeyEnv.unread.has("PI_PROJECTS_FILE")) return null;
+  const named = ownKeyEnv.value("PI_PROJECTS_FILE");
+  if (named === undefined) return [];
+  // An empty value is a file the worker refuses to start on, as is a missing one: neither is "no projects".
+  if (named === "") return null;
+  try {
+    const path = resolve(root, named);
+    const raw = reads.projects ? reads.projects(path) : metadataBytes(path, fs, uid);
+    return raw === null ? null : parseProjects(raw, path);
+  } catch { return null; }
+}
+
 export function readProviderInventory({ deploymentDir, env = {}, fs = nodeFs, platform = process.platform, uid = process.geteuid?.(), reads = {} } = {}) {
   // The host planner starts from the canonical deployment too. Platform aliases such
   // as macOS /var must not be mistaken for a source-file parent redirection.
@@ -69,13 +218,16 @@ export function readProviderInventory({ deploymentDir, env = {}, fs = nodeFs, pl
   const model = (entry, why) => { const ref = splitModelEntry(entry); if (!ref) throw Error("invalid model reference"); use(ref.provider, why); };
   const keys = ["PI_PROVIDER", "PI_SETTINGS_FILE", "PI_ALLOWED_MODELS", "PI_TRIGGERS_FILE", "PI_AUTH_CONNECTIONS_FILE", "PI_AUTH_FROM_PI"];
   const allVariables = [...new Set(Object.values(PROVIDER_KEY_NAMES).flat())];
-  let configured = {}, file = {}, environmentUnknown = false, referencesUnknown = false, policyUnknown = false, configurationUnknown = false, defaultProvider = null;
+  let configured = {}, file = {}, environmentUnknown = false, referencesUnknown = false, policyUnknown = false, configurationUnknown = false, defaultProvider = null, defaultModel = null, envList = null, declared = { slots: new Map(), notes: [] }, declaredInput = null;
   try {
     const got = (reads.environment ?? deploymentServiceEnv)({ env: {}, dir: root, keys: [...keys, ...allVariables], fs, platform, uid });
     if (unknownRead(got)) throw Error("unknown environment");
     file = got.env ?? {};
     configured = { ...Object.fromEntries(keys.filter(key => typeof env[key] === "string").map(key => [key, env[key]])), ...Object.fromEntries(keys.filter(key => typeof file[key] === "string").map(key => [key, file[key]])) };
   } catch { environmentUnknown = true; }
+  // Issue #1000: the keys only the own-key lines need, read on their own: a line of one the loaders may read apart from
+  // this reader makes that key unknown, never the whole environment the inventory's sources come from.
+  const ownKeyEnv = environmentUnknown ? null : ownKeyEnvironment({ root, env, fs, platform, uid, reads });
   try {
     if (environmentUnknown) throw Error();
     const path = resolve(root, settingsFilePath(configured));
@@ -83,9 +235,16 @@ export function readProviderInventory({ deploymentDir, env = {}, fs = nodeFs, pl
     if (overlay?.invalid) throw Error();
     defaultProvider = overlay?.overlay?.provider ?? providerFrom(configured);
     if (!id(defaultProvider)) throw Error();
+    // The worker's own default (overlay over .env), which a job of a trigger naming no model runs on; null when the overlay
+    // names none and the .env's line cannot be read.
+    defaultModel = overlay?.overlay?.model ?? (ownKeyEnv?.unread.has("PI_MODEL") === false ? ownKeyEnv.value("PI_MODEL") ?? DEFAULT_MODEL : null);
     use(defaultProvider, "default");
   } catch { configurationUnknown = true; defaultProvider = null; }
-  try { for (const entry of allowedModelsFrom(configured) ?? []) model(entry, "allowed-model"); } catch { referencesUnknown = true; }
+  try {
+    const list = allowedModelsFrom(configured) ?? null;
+    for (const entry of list ?? []) model(entry, "allowed-model");
+    envList = list;
+  } catch { referencesUnknown = true; }
   try {
     // Paths captured at console startup can name an obsolete file after a host edit.
     // Match the worker/receiver rule: unset defaults here, explicit empty remains invalid.
@@ -103,6 +262,9 @@ export function readProviderInventory({ deploymentDir, env = {}, fs = nodeFs, pl
       model(typeof role === "string" ? role : role.model, "role");
       if (typeof role !== "string") for (const entry of role.fallbackModels ?? []) model(entry, "fallback");
     }
+    // Issue #1000: only from the file the deployment names. With its .env unread, PI_TRIGGERS_FILE is not known, and the
+    // default file read above may not be the one the workers run, so no trigger is said to bring a key from it.
+    if (!environmentUnknown) declaredInput = doc;
   } catch { referencesUnknown = true; }
   let bindings = {};
   if (configured.PI_AUTH_CONNECTIONS_FILE) {
@@ -114,6 +276,10 @@ export function readProviderInventory({ deploymentDir, env = {}, fs = nodeFs, pl
       for (const provider of Object.keys(bindings)) use(provider, "binding");
     } catch { policyUnknown = true; }
   }
+  // After the bindings, for doctor's fallback fence; an unread policy fences nothing, and every row reads unknown then.
+  try {
+    if (declaredInput) declared = declaredKeyTriggers(declaredInput.triggers, { defaultProvider, defaultModel, envList, modelRoles: declaredInput.modelRoles, projects: Object.keys(declaredInput.modelRoles).length > 0 ? ownKeyProjects(ownKeyEnv, { root, fs, uid, reads }) : [], managed: provider => Object.hasOwn(bindings, provider) });
+  } catch { referencesUnknown = true; }
   for (const [provider, candidates] of Object.entries(PROVIDER_KEY_NAMES)) if (candidates.some(key => present(file, key) || definedCredential(env, key))) use(provider, "configured");
   const grouped = new Map();
   for (const [provider, usage] of references) {
@@ -136,7 +302,16 @@ export function readProviderInventory({ deploymentDir, env = {}, fs = nodeFs, pl
     return { ...row, usage: USAGE.filter(why => row.usage.has(why)), present: hasKey, source, status, mode: ["configured", "missing"].includes(status) ? hasKey ? "replace" : "add" : null, reason };
   }).sort((a, b) => (b.usage.includes("default") - a.usage.includes("default")) || a.provider.localeCompare(b.provider));
   const choices = Object.keys(PROVIDER_KEY_NAMES).map(provider => ({ provider, key: providerCanonicalKey(provider), providers: providerCanonicalKey(provider) ? [...PROVIDER_SLOT_ALIASES[providerCanonicalKey(provider)]] : [provider], mode: "add", supported: Boolean(providerCanonicalKey(provider)) && !needsHostAuthentication(provider) }));
-  return providerInventoryView({ state: environmentUnknown || policyUnknown || configurationUnknown ? "unknown" : referencesUnknown ? "partial" : "ready", defaultProvider, rows, choices });
+  const inventory = providerInventoryView({ state: environmentUnknown || policyUnknown || configurationUnknown ? "unknown" : referencesUnknown ? "partial" : "ready", defaultProvider, rows, choices });
+  // Beside the projected inventory, never inside it: `providerInventoryView` also feeds Setup and the agent's
+  // `dispatch_connections`, which keep what they carried, and the trigger positions are Connections' alone (issue #1000).
+  // `forwarded` is this host's PI_FORWARD_ENV naming the slot's variable, which makes this host refuse those jobs; null
+  // when its line cannot be read.
+  const forward = ownKeyEnv && !ownKeyEnv.unread.has("PI_FORWARD_ENV") ? (ownKeyEnv.value("PI_FORWARD_ENV") ?? "").split(",").map(name => name.trim()).filter(Boolean) : null;
+  const declaredKeys = [...declared.slots].sort(([a], [b]) => a.localeCompare(b)).map(([key, triggers]) => ({ key, triggers, forwarded: forward === null ? null : forward.includes(key) }));
+  // An unread forward list is said once, so no line reads as spent where this host may refuse it.
+  const view = declaredKeysView({ declaredKeys, declaredNotes: [...declared.notes, ...(forward === null && declaredKeys.length > 0 ? ["forward-unread"] : [])] });
+  return { ...inventory, declaredKeys: [...view.slots].map(([key, row]) => ({ key, ...row })), declaredNotes: view.notes };
 }
 
 /** Rebuild every field before page/role caches; injected DTOs cannot smuggle a key or help URL. */

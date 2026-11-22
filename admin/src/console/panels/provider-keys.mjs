@@ -3,7 +3,7 @@ import { html } from "../html.mjs";
 import * as ui from "../kit.mjs";
 import { field } from "./config-ui.mjs";
 import { providerHelp, PRIMARY_PROVIDER_HELP } from "../../provider-help.mjs";
-import { providerInventoryView, PROVIDER_KEY_REASONS } from "../../provider-inventory.mjs";
+import { DECLARED_KEY_NOTES, declaredKeysView, providerInventoryView, PROVIDER_KEY_REASONS } from "../../provider-inventory.mjs";
 import { setupFacts } from "../../setup-view.mjs";
 
 const GUIDED = PRIMARY_PROVIDER_HELP;
@@ -13,15 +13,46 @@ const name = provider => providerHelp(provider).label === "Custom provider" ? pr
 const can = (view, action) => view.role === "operator" && !view.readOnly && setupFacts(view.data?.setup, { role: view.role }).actions.includes(action);
 const actionFor = mode => mode === "replace" ? "setup-provider-key-replace" : "setup-provider-key";
 const guideId = provider => `provider-help-${provider}`;
+// A cron trigger by its id, the name doctor gives it; any other by its row. The id may be long and unbroken, so it
+// wraps as the slot's own key does (`pk-key`).
+const triggerLink = t => html`<a class="link" href="${`/config/trigger?index=${t.index}`}">${t.cron ? html`cron <span class="code pk-key">${t.cron}</span>` : `trigger ${t.index + 1}`}</a>`;
+
+/**
+ * Issue #1000: the triggers that bring their own key for this slot (`declaredKeysView`), by name and the variable,
+ * never a value. The row's badge and source sentence are this host's sources alone, so without this a slot can read
+ * Not set while triggers spend on it with their own key, or name the deployment key while some of them use another.
+ * Where this host is known to refuse those jobs, the line says so instead: a row this console shows as managed (its
+ * subscription check comes first, so the declared name stays reserved) and a variable this host's PI_FORWARD_ENV names
+ * (the operator's host value claims it); an unread forward list leaves that open, and the line says on what. Other
+ * hosts decide that for themselves, which the card says once.
+ */
+function declaredLine(item, own) {
+  if (!own) return null;
+  const one = own.triggers.length + own.more === 1;
+  const who = html`${own.triggers.map((t, n) => html`${n ? ", " : null}${triggerLink(t)}`)}${own.more ? ` and ${own.more} more` : null} ${one ? "binds" : "bind"} <span class="code pk-key">${item.key}</span> in run.secrets`;
+  const theirs = one ? "its" : "their";
+  if (item.status === "managed") return html`<p class="pk-note" data-provider-declared="refused">${who}, but this host binds the provider to a subscription, so it refuses ${theirs} jobs before they spend.</p>`;
+  if (own.forwarded === true) return html`<p class="pk-note" data-provider-declared="refused">${who}, but this host's PI_FORWARD_ENV names it too, so it refuses ${theirs} jobs before they spend.</p>`;
+  // This host's forward list unread: the key is spent unless this host refuses, which the card's note says is not known.
+  if (own.forwarded === null) return html`<p class="pk-note" data-provider-declared="unknown">${who}, so ${theirs} jobs on this provider spend that key, not this host's credential, unless this host's PI_FORWARD_ENV names it.</p>`;
+  return html`<p class="pk-note" data-provider-declared="spent">${who}, so ${theirs} jobs on this provider spend that key, not this host's credential.</p>`;
+}
+
+/** Once per card: what a spent line cannot know, and why a line may be missing or too wide (`DECLARED_KEY_NOTES`). */
+function declaredNotes(inventory, declared) {
+  const spent = inventory.rows.some(item => item.key && declared.slots.has(item.key) && item.status !== "managed" && declared.slots.get(item.key).forwarded !== true);
+  const notes = [...(spent ? ["A trigger's own key is the triggers file's answer: another worker host refuses those jobs before they spend where its own PI_FORWARD_ENV names the variable or it binds the provider to a subscription. This page reads only this host's."] : []), ...declared.notes.map(note => DECLARED_KEY_NOTES[note])];
+  return notes.map(text => html`<p class="pk-note" data-provider-declared-note>${text}</p>`);
+}
 
 function guide(provider) {
   const help = providerHelp(provider);
   return html`<details class="pk-guide" id="${guideId(provider)}" data-provider-help="${provider}"><summary>${help.kind === "api-key" ? "Find or create an API key for" : "Set up"} ${name(provider)}</summary><div class="pk-links">${help.url ? ui.outLink({ href: help.url, label: help.kind === "api-key" ? `Get API key at ${help.label}` : `Open ${help.label} setup`, btn: "sm" }) : null}${ui.outLink({ href: help.docsUrl, label: GUIDED.includes(provider) ? "Official guide" : "Setup guide" })}</div><ol>${help.steps.map(step => html`<li>${step}</li>`)}</ol>${help.notice ? html`<p class="pk-note pk-notice">${help.notice}</p>` : null}</details>`;
 }
 
-function row(view, item) {
+function row(view, item, declared) {
   const shortcut = item.mode && can(view, actionFor(item.mode));
-  return html`<li class="pk-row" data-provider="${item.provider}"><div class="pk-row__title">${ui.icon("key", { size: "sm" })}<b>${name(item.provider)}</b>${item.usage.includes("default") ? ui.chip("Default") : null}${ui.badge(...STATUS[item.status])}</div>${item.key ? html`<span class="code pk-key">${item.key}</span>` : null}<p class="pk-note">${SOURCE[item.source]}${item.providers.length > 1 ? ` Shared by ${item.providers.join(", ")}; a change affects all of them.` : null}</p>${item.reason && PROVIDER_KEY_REASONS[item.reason] ? html`<p class="pk-note">${PROVIDER_KEY_REASONS[item.reason]}</p>` : null}${shortcut ? html`<fieldset data-config-controls disabled><button class="btn btn--ghost btn--sm" type="button" data-provider-pick="${item.provider}" data-provider-mode="${item.mode}" aria-label="${`${item.mode === "replace" ? "Replace" : "Add"} key for ${name(item.provider)}`}">${item.mode === "replace" ? "Replace key" : "Add key"}</button></fieldset>` : null}</li>`;
+  return html`<li class="pk-row" data-provider="${item.provider}"><div class="pk-row__title">${ui.icon("key", { size: "sm" })}<b>${name(item.provider)}</b>${item.usage.includes("default") ? ui.chip("Default") : null}${ui.badge(...STATUS[item.status])}</div>${item.key ? html`<span class="code pk-key">${item.key}</span>` : null}<p class="pk-note">${SOURCE[item.source]}${item.providers.length > 1 ? ` Shared by ${item.providers.join(", ")}; a change affects all of them.` : null}</p>${declaredLine(item, item.key ? declared.slots.get(item.key) : undefined)}${item.reason && PROVIDER_KEY_REASONS[item.reason] ? html`<p class="pk-note">${PROVIDER_KEY_REASONS[item.reason]}</p>` : null}${shortcut ? html`<fieldset data-config-controls disabled><button class="btn btn--ghost btn--sm" type="button" data-provider-pick="${item.provider}" data-provider-mode="${item.mode}" aria-label="${`${item.mode === "replace" ? "Replace" : "Add"} key for ${name(item.provider)}`}">${item.mode === "replace" ? "Replace key" : "Add key"}</button></fieldset>` : null}</li>`;
 }
 
 function editor(view, inventory) {
@@ -37,9 +68,10 @@ function editor(view, inventory) {
 
 export function connectionsProviderKeys(view) {
   const inventory = providerInventoryView(view.data?.connections?.providerKeys);
+  const declared = declaredKeysView(view.data?.connections?.providerKeys);
   const withheld = view.role === "agent" && !view.data?.connections;
   const other = [...new Set([...inventory.choices.map(choice => choice.provider), ...inventory.rows.map(item => item.provider)])].filter(provider => !GUIDED.includes(provider));
-  return ui.card({ title: "Provider API keys", sub: "separate credentials, unchanged default", body: html`<p class="pk-intro">Store keys for several providers. Credentials are write-only; status describes local declarations, not a successful paid request.</p><p class="pk-default"><b>Default provider: ${inventory.defaultProvider ?? "not published"}</b><a class="link" href="/config#cf-settings">Change it separately in Configuration</a></p>${withheld ? html`<p class="pk-note">Provider key inventory is not published in this agent view. An operator can inspect the deployment's key sources on Connections.</p>` : inventory.state !== "ready" ? ui.banner({ status: "attention", title: inventory.state === "unknown" ? "Provider key sources unavailable" : "Partial provider key sources", body: "Missing or unreadable declarations stay unknown. Check the deployment on its host before changing credentials.", sm: true }) : null}<ul class="pk-list">${inventory.rows.map(item => row(view, item))}</ul>${inventory.rows.length || withheld ? null : html`<p class="pk-note">No provider key declaration is published.</p>`}${editor(view, inventory)}<div class="pk-help"><h3>Find or create a key at the provider</h3>${GUIDED.map(guide)}${other.length ? html`<details class="pk-guide"><summary>Other provider setup guides</summary><div class="pk-help">${other.map(guide)}</div></details>` : null}</div><p class="pk-note pk-notice">Using a subscription? <a class="link" href="#p-subscription-auth">Review Subscription authentication</a>. Its host sign-in is separate from API keys.</p>` });
+  return ui.card({ title: "Provider API keys", sub: "separate credentials, unchanged default", body: html`<p class="pk-intro">Store keys for several providers. Credentials are write-only; status describes local declarations, not a successful paid request.</p><p class="pk-default"><b>Default provider: ${inventory.defaultProvider ?? "not published"}</b><a class="link" href="/config#cf-settings">Change it separately in Configuration</a></p>${withheld ? html`<p class="pk-note">Provider key inventory is not published in this agent view. An operator can inspect the deployment's key sources on Connections.</p>` : inventory.state !== "ready" ? ui.banner({ status: "attention", title: inventory.state === "unknown" ? "Provider key sources unavailable" : "Partial provider key sources", body: "Missing or unreadable declarations stay unknown. Check the deployment on its host before changing credentials.", sm: true }) : null}<ul class="pk-list">${inventory.rows.map(item => row(view, item, declared))}</ul>${declaredNotes(inventory, declared)}${inventory.rows.length || withheld ? null : html`<p class="pk-note">No provider key declaration is published.</p>`}${editor(view, inventory)}<div class="pk-help"><h3>Find or create a key at the provider</h3>${GUIDED.map(guide)}${other.length ? html`<details class="pk-guide"><summary>Other provider setup guides</summary><div class="pk-help">${other.map(guide)}</div></details>` : null}</div><p class="pk-note pk-notice">Using a subscription? <a class="link" href="#p-subscription-auth">Review Subscription authentication</a>. Its host sign-in is separate from API keys.</p>` });
 }
 
 export function setupProviderKeys(view) {

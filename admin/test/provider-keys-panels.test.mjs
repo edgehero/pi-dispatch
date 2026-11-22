@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { connectionsProviderKeys } from "../src/console/panels/provider-keys.mjs";
+import { modelConnections } from "../src/connections-view.mjs";
+import { DECLARED_KEY_NOTES } from "../src/provider-inventory.mjs";
 import { connectionsSubscriptionAuth } from "../src/console/panels/subscription-auth.mjs";
 import { setupStart } from "../src/console/panels/setup.mjs";
 import { PROVIDER_KEYS_CSS } from "../src/console/provider-keys-css.mjs";
@@ -107,6 +109,48 @@ test("the management destination survives an entirely Ready setup and subscripti
     assert.equal(guide.querySelector(".cmd"), null, "a viewer reads help without host command controls");
   }
   assert.doesNotMatch(subscription, /type="password"|<input|data-action=/);
+});
+
+test("a slot names the triggers that bring their own key, by name and variable, and says where this host refuses them", () => {
+  const t = (index, cron = null) => ({ index, cron });
+  const value = { ...inventory(), declaredKeys: [
+    { key: "GEMINI_API_KEY", triggers: [t(4), t(1, "nightly")], more: 0, forwarded: false },
+    { key: "OPENAI_API_KEY", triggers: [t(0)], more: 2, forwarded: true },
+    { key: "CLOUDFLARE_API_KEY", triggers: [t(6)], more: 0, forwarded: null },
+    { key: "PATH", triggers: [t(3)] }, { key: "ANTHROPIC_API_KEY", triggers: [{ index: "7" }] },
+  ], declaredNotes: ["projects-unread", "forward-unread"] };
+  for (const role of ["operator", "viewer"]) {
+    const doc = draw({ role, data: { setup: null, connections: { providerKeys: value } } });
+    const line = provider => doc.querySelector(`[data-provider="${provider}"] [data-provider-declared]`);
+    const text = node => node.textContent.replace(/\s+/g, " ");
+    // A missing slot is exactly where a host-only reading misled: "Not set" while two triggers spend their own key.
+    const google = line("google");
+    assert.equal(google.getAttribute("data-provider-declared"), "spent");
+    assert.equal(text(google), "cron nightly, trigger 5 bind GEMINI_API_KEY in run.secrets, so their jobs on this provider spend that key, not this host's credential.");
+    assert.deepEqual(google.querySelectorAll("a").map(a => a.getAttribute("href")), ["/config/trigger?index=1", "/config/trigger?index=4"]);
+    assert.equal(google.querySelector("a .pk-key").textContent, "nightly", "a long cron id wraps as the slot's key does");
+    // This host's PI_FORWARD_ENV names the variable: this host refuses, and the line does not say the key is spent.
+    assert.equal(text(line("openai")), "trigger 1 and 2 more bind OPENAI_API_KEY in run.secrets, but this host's PI_FORWARD_ENV names it too, so it refuses their jobs before they spend.");
+    // This host's forward list unread: the line does not say the key is spent where this host may refuse it.
+    assert.equal(line("cloudflare-ai-gateway").getAttribute("data-provider-declared"), "unknown");
+    assert.equal(text(line("cloudflare-ai-gateway")), "trigger 7 binds CLOUDFLARE_API_KEY in run.secrets, so its jobs on this provider spend that key, not this host's credential, unless this host's PI_FORWARD_ENV names it.");
+    assert.equal(line("anthropic"), null, "a position that is not an integer is dropped, and with it the line");
+    assert.equal(doc.querySelectorAll("[data-provider-declared]").length, 3);
+    // What no line can know is said once on the card, not on every row, with the reason a line may be too wide.
+    const notes = doc.querySelectorAll("[data-provider-declared-note]").map(text);
+    assert.equal(notes.length, 3);
+    assert.match(notes[0], /^A trigger's own key is the triggers file's answer: another worker host refuses those jobs before they spend where its own PI_FORWARD_ENV names the variable or it binds the provider to a subscription\. This page reads only this host's\.$/);
+    assert.equal(notes[1], DECLARED_KEY_NOTES["projects-unread"]);
+    assert.equal(notes[2], DECLARED_KEY_NOTES["forward-unread"]);
+  }
+  const managed = inventory();
+  Object.assign(managed.rows[2], { source: "managed", status: "managed", mode: null });
+  const bound = draw({ data: { setup: null, connections: { providerKeys: { ...managed, declaredKeys: [{ key: "GEMINI_API_KEY", triggers: [t(0)], forwarded: false }] } } } });
+  assert.equal(bound.querySelector("[data-provider-declared]").textContent.replace(/\s+/g, " "), "trigger 1 binds GEMINI_API_KEY in run.secrets, but this host binds the provider to a subscription, so it refuses its jobs before they spend.");
+  assert.equal(bound.querySelector("[data-provider-declared-note]"), null, "no spent line, no caveat about other hosts");
+  assert.equal(draw({ role: "agent", data: { connections: null, setup: null } }).querySelector("[data-provider-declared], [data-provider-declared-note]"), null, "the agent view is withheld as before");
+  assert.equal(draw().querySelector("[data-provider-declared], [data-provider-declared-note]"), null, "an inventory without the facts draws the card as before");
+  assert.equal(JSON.stringify(modelConnections({ providerKeys: value })).includes("declared"), false, "dispatch_connections keeps what it carried");
 });
 
 test("provider-key layout is the exact CSS built into the reference card", () => {

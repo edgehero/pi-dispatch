@@ -620,7 +620,10 @@ In detail:
   the credential gates, and one bundle serves every trigger of a project.
 - **The worker says so.** The log line `provider_credential_declared` names the provider and the variable (never
   the value), and `pi-dispatch doctor` prints a line naming each trigger whose key replaces this host's credential,
-  and where: on every job of the trigger, on a random candidate's draws, or on a fallback's failover attempts. Doctor
+  and where: on every job of the trigger, on a random candidate's draws, or on a fallback's failover attempts. The
+  console's Provider API keys card (Connections) names the same triggers under the provider's slot, resolving model
+  roles as doctor does, and says where this host refuses them (a managed row, or this host's `PI_FORWARD_ENV`) and that
+  another host's forward list or bindings can. Doctor
   checks each trigger, each random candidate and each fallback the worker would try against that one's own
   provider, so a trigger on `openai` binding `ANTHROPIC_API_KEY` is not a clash, and one on `openrouter` with
   an `anthropic` fallback its allowed-model list admits, binding `ANTHROPIC_OAUTH_TOKEN`, is.
