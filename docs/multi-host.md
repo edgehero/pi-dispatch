@@ -322,9 +322,12 @@ Who sets the quota depends on the container runtime:
 - **Docker Desktop** (Docker's cgroupfs driver): the worker, when it starts, through a short helper container of the
   job image (no network, no capabilities, only the parent's own cgroup directory mounted) that writes the quota into
   the Docker Desktop VM. A Docker Desktop restart drops it; the worker checks it every ten minutes and writes it again.
-  The helper has one fixed name, `pi-dispatch-cpu-reserve-<8 hex digits>` (doctor's has `-doctor-` before the digits),
-  and the label `pi.dispatch.helper=cpu-reserve`. When the daemon is too slow to start it, the worker removes it before
-  the next try and waits longer between tries, up to ten minutes, so a slow daemon never collects them.
+  The helper has one fixed name, `pi-dispatch-cpu-reserve-<8 hex digits>` (each doctor's has `-doctor-` before the
+  digits and its process id after them), and the label `pi.dispatch.helper=cpu-reserve`. When the daemon is too slow to
+  start it, the worker removes it before the next try and waits longer between tries, up to ten minutes, so a slow
+  daemon never collects them. A doctor the worker stops at its two-minute limit leaves its one helper, and the worker
+  removes it right away; one a doctor stopped some other way left, the next `pi-dispatch doctor` on this host removes
+  once that process is gone, and says so.
 - **Docker on a Linux host with systemd, and rootful Podman**: only root can set it. Run this once, as root, with your
   budget in place of 3 CPUs (it survives reboots); `pi-dispatch doctor` prints the exact command with your budget:
 

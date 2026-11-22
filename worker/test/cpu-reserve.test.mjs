@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
 	CGROUP_PARENT,
+	DOCTOR_HELPER_NAME_RE,
+	DOCTOR_HELPER_PREFIX,
 	HELPER_LABEL_KEY,
 	HELPER_NAME_RE,
 	HELPER_PARENT_PATH,
@@ -61,11 +63,34 @@ test("issue #978: one fixed helper name per role, from the sha256 of the declare
 	// sha256("") begins e3b0c442, sha256("box-1") begins 96fb257c: literals, so a change in the hash or its cut shows.
 	assert.equal(helperName(), "pi-dispatch-cpu-reserve-e3b0c442");
 	assert.equal(helperName(""), "pi-dispatch-cpu-reserve-e3b0c442");
-	assert.equal(helperName("", { doctor: true }), "pi-dispatch-cpu-reserve-doctor-e3b0c442");
+	assert.equal(helperName("", { doctor: true, pid: 7 }), "pi-dispatch-cpu-reserve-doctor-e3b0c442-7");
 	assert.equal(helperName("box-1"), "pi-dispatch-cpu-reserve-96fb257c");
-	assert.equal(helperName("box-1", { doctor: true }), "pi-dispatch-cpu-reserve-doctor-96fb257c");
+	assert.equal(helperName("box-1", { doctor: true, pid: 4242 }), "pi-dispatch-cpu-reserve-doctor-96fb257c-4242");
 	assert.notEqual(helperName("box-2"), helperName("box-1"), "two named workers on one daemon never share it");
-	for (const name of ["", "box-1", "a".repeat(64)]) for (const doctor of [false, true]) assert.match(helperName(name, { doctor }), /^[a-zA-Z0-9][a-zA-Z0-9_.-]+$/);
+	for (const name of ["", "box-1", "a".repeat(64)]) for (const doctor of [false, true]) assert.match(helperName(name, { doctor, pid: Number.MAX_SAFE_INTEGER }), /^[a-zA-Z0-9][a-zA-Z0-9_.-]+$/);
+});
+
+test("issue #1040: each doctor process reads under its own name, its pid in decimal with no leading zero, and a doctor name without a pid is refused", () => {
+	assert.equal(helperName("box-1", { doctor: true, pid: 4242 }), "pi-dispatch-cpu-reserve-doctor-96fb257c-4242");
+	assert.notEqual(helperName("box-1", { doctor: true, pid: 4243 }), helperName("box-1", { doctor: true, pid: 4242 }), "two doctors never share a name");
+	assert.equal(helperName("box-1", { doctor: true, pid: 1 }), "pi-dispatch-cpu-reserve-doctor-96fb257c-1");
+	for (const pid of [undefined, null, 0, -1, 1.5, "4242", "0042", Number.MAX_SAFE_INTEGER + 1]) assert.throws(() => helperName("box-1", { doctor: true, pid }), /without a process id/, String(pid));
+	// The worker's name takes no pid: it stays the one name across restarts.
+	assert.equal(helperName("box-1", { pid: 4242 }), "pi-dispatch-cpu-reserve-96fb257c");
+	for (const pid of [1, 4242, 4194304, Number.MAX_SAFE_INTEGER]) {
+		const name = helperName("box-1", { doctor: true, pid });
+		assert.match(name, HELPER_NAME_RE, name);
+		assert.equal(DOCTOR_HELPER_NAME_RE.exec(name)?.[1], String(pid), name);
+		assert.ok(name.startsWith(DOCTOR_HELPER_PREFIX), name);
+	}
+	// Doctor's one shared name before issue #1040 is still a helper name (the worker's pass takes its leftovers), never a
+	// pid-named one; a leading zero, a worker name with a pid, or a name that runs on are neither.
+	assert.match("pi-dispatch-cpu-reserve-doctor-96fb257c", HELPER_NAME_RE);
+	assert.doesNotMatch("pi-dispatch-cpu-reserve-doctor-96fb257c", DOCTOR_HELPER_NAME_RE);
+	for (const bad of ["pi-dispatch-cpu-reserve-doctor-96fb257c-0042", "pi-dispatch-cpu-reserve-doctor-96fb257c-0", "pi-dispatch-cpu-reserve-96fb257c-4242", "pi-dispatch-cpu-reserve-doctor-96fb257c-4242x", "pi-dispatch-cpu-reserve-doctor-96fb257c-42-42", "pi-dispatch-cpu-reserve-doctor-96FB257C-4242", "pi-dispatch-cpu-reserve-doctor-96fb257c-12345678901234567"]) {
+		assert.doesNotMatch(bad, HELPER_NAME_RE, bad);
+		assert.doesNotMatch(bad, DOCTOR_HELPER_NAME_RE, bad);
+	}
 });
 
 test("the quota math: the budget's hundredths ARE systemd's percentage, and cpu.max is hundredths x 1000 per 100000", () => {
@@ -829,7 +854,9 @@ test("removeLegacyHelpers: removes exactly the fingerprints, with a plain rm in 
 		readHelper(7, { Config: { Entrypoint: ["valkey-server"], Cmd: [] } }),
 		readHelper(8, { HostConfig: { Binds: [`${PARENT}:/p`] }, Mounts: [{ Type: "bind", Source: PARENT, Destination: "/p", RW: true }] }),
 	];
-	const d = fakeLeftovers([...helpers, ...decoys]);
+	// Decoy 6's image has a label its container lacks, so it is read and is no fingerprint (an image that could not be
+	// read cuts the pass instead, issue #1040, below).
+	const d = fakeLeftovers([...helpers, ...decoys], { images: { ...IMAGES, [`sha256:${"b".repeat(64)}`]: { Id: `sha256:${"b".repeat(64)}`, Config: { Labels: { "org.example.other": "1" } } } } });
 	const out = await removeLegacyHelpers({ run: d.run, now: () => NOW });
 	// Listed: the 43, and every decoy but the labelled one under no helper name and the one whose command is another's;
 	// the 60 s old one is young, the rest kept.
@@ -1017,10 +1044,10 @@ test("issue #1021: a pass that listed only containers that are no fingerprint is
 
 test("issue #1021: a stuck helper labelled under another helper name is removed with a plain rm; this worker's own name never; a young, running or extra-labelled one is kept", async () => {
 	assert.match(helperName("old-name"), HELPER_NAME_RE);
-	assert.match(helperName("", { doctor: true }), HELPER_NAME_RE);
+	assert.match("pi-dispatch-cpu-reserve-doctor-e3b0c442", HELPER_NAME_RE);
 	for (const bad of ["pi-dispatch-cpu-reserve-E3B0C442", "pi-dispatch-cpu-reserve-e3b0c44", "x-pi-dispatch-cpu-reserve-e3b0c442", "pi-dispatch-cpu-reserve-e3b0c442,other", "pi-dispatch-cpu-reserve-other-e3b0c442"]) assert.doesNotMatch(bad, HELPER_NAME_RE, bad);
 	const renamed = namedHelper(1, helperName("old-name"));
-	const doctorStuck = writeHelper(2, "150000 100000", { Name: `/${helperName("", { doctor: true })}`, Config: { Labels: { [HELPER_LABEL_KEY]: "cpu-reserve" } } });
+	const doctorStuck = writeHelper(2, "150000 100000", { Name: "/pi-dispatch-cpu-reserve-doctor-e3b0c442", Config: { Labels: { [HELPER_LABEL_KEY]: "cpu-reserve" } } });
 	const onLabelledImage = namedHelper(3, helperName("older"), { Image: LABELLED_IMAGE, Config: { Labels: { ...LAB_LABELS, [HELPER_LABEL_KEY]: "cpu-reserve" } } });
 	const own = namedHelper(4, NAME);
 	const youngOne = namedHelper(5, helperName("young"), { Created: createdAgo(60_000) });
@@ -1117,18 +1144,102 @@ test("issue #1021: a create refused for its name after a clean step gets one rm 
 	assert.ok(![...words, JSON.stringify(twice.states())].some((w) => /already in use|Conflict/.test(w)), "stderr is matched, never said");
 });
 
-test("issue #1021: the rm before a helper is plain with forceBefore false (doctor's), forced by default (the worker's); after a timeout it is always forced", async () => {
-	const seen = (forceBefore) => {
+test("issue #1040: the rm before a helper and the one after its timeout are both `rm -f` of its own name, and no option makes either plain", async () => {
+	for (const extra of [{}, { forceBefore: false }]) {
 		const calls = [];
 		const run = async (bin, args) => {
 			calls.push(args.slice(0, 3));
 			return args[0] === "run" ? { code: null, stdout: "", error: { timedOut: true } } : { code: 0, stdout: "" };
 		};
-		return { calls, guarded: guardHelperRun({ run, name: NAME, ...(forceBefore === undefined ? {} : { forceBefore }) }) };
-	};
-	for (const [forceBefore, before] of [[undefined, ["rm", "-f", NAME]], [true, ["rm", "-f", NAME]], [false, ["rm", NAME]]]) {
-		const { calls, guarded } = seen(forceBefore);
-		await guarded("docker", ["run", "--rm", "x"], { timeoutMs: 1 });
-		assert.deepEqual(calls, [before, ["run", "--rm", "x"], ["rm", "-f", NAME]], String(forceBefore));
+		await guardHelperRun({ run, name: NAME, ...extra })("docker", ["run", "--rm", "x"], { timeoutMs: 1 });
+		assert.deepEqual(calls, [["rm", "-f", NAME], ["run", "--rm", "x"], ["rm", "-f", NAME]], JSON.stringify(extra));
 	}
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Issue #1040: an image whose labels could not be read cuts the pass, and the worker's pass takes a killed doctor's
+// pid-named helper.
+
+test("issue #1040: an image inspect that fails without a timeout, or answers no label map, cuts the pass short with its reason; the rows on it are judged by no one, the rows on a read image as before, and each image is asked once", async () => {
+	const OTHER = `sha256:${"c".repeat(64)}`;
+	const images = { ...IMAGES, [OTHER]: { Id: OTHER, Config: {} } };
+	// 25 leftovers over three images, so the second chunk meets an image the first chunk already failed to read.
+	const docs = Array.from({ length: 25 }, (_, i) => readHelper(600 + i, i % 5 === 0 ? { Image: LABELLED_IMAGE, Config: { Labels: LAB_LABELS } } : i % 5 === 1 ? { Image: OTHER } : {}));
+	const onOther = docs.filter((x) => x.Image === OTHER).map((x) => x.Id);
+	const answers = {
+		"image-exit-1": { code: 1, stdout: "" },
+		"image-exit-125": { code: 125, stdout: "" },
+		"image-spawn-emfile": { code: null, stdout: "", error: { code: "EMFILE" } },
+		"image-unreadable": { code: 0, stdout: "not json\n" },
+	};
+	for (const [reason, answer] of [...Object.entries(answers), ...["[]", '"x"', "42", "true", ""].map((out) => ["image-unreadable", { code: 0, stdout: `${out}\n` }])]) {
+		const d = fakeLeftovers(docs, { images });
+		const run = async (bin, args, opts) => (args[0] === "image" && args.at(-1) === OTHER ? (d.calls.push({ args: [...args], opts }), answer) : d.run(bin, args, opts));
+		const out = await removeLegacyHelpers({ run, now: () => NOW });
+		assert.deepEqual(out, { complete: false, reason, listed: 25, removed: 20, failed: 0, young: 0, kept: 0 }, `${reason} ${JSON.stringify(answer)}`);
+		assert.deepEqual([...d.live.keys()].sort(), [...onOther].sort(), "the rows on the unread image are left, the others removed");
+		assert.ok(!d.calls.some((x) => x.args[0] === "rm" && onOther.some((i) => x.args.includes(i))), "never an rm of a row on an image not read");
+		assert.equal(d.calls.filter((x) => x.args[0] === "image" && x.args.at(-1) === OTHER).length, 1, "asked once in a pass, not again in the second chunk");
+	}
+	// An image with no labels at all (null) is read, as before: its rows are judged and removed.
+	const bare = fakeLeftovers([readHelper(1)]);
+	assert.deepEqual(await removeLegacyHelpers({ run: bare.run, now: () => NOW }), { complete: true, reason: null, listed: 1, removed: 1, failed: 0, young: 0, kept: 0 });
+	// The first reason met is the pass's, and a timeout after it still stops the pass at once with its own.
+	const two = fakeLeftovers([readHelper(1, { Image: OTHER }), readHelper(2, { Image: LABELLED_IMAGE, Config: { Labels: LAB_LABELS } })], { images, slow: (args) => (args[0] === "image" ? (args.at(-1) === OTHER ? "refuse" : "timeout") : "ok") });
+	assert.deepEqual(await removeLegacyHelpers({ run: two.run, now: () => NOW }), { complete: false, reason: "image-timeout", listed: 2, removed: 0, failed: 0, young: 0, kept: 0 });
+	// Two unread images in one pass: the first met names the pass, whatever the second answered, in either order.
+	const THIRD = `sha256:${"d".repeat(64)}`;
+	for (const [order, reason] of [[[OTHER, THIRD], "image-exit-1"], [[THIRD, OTHER], "image-unreadable"]]) {
+		const pair = fakeLeftovers([readHelper(1, { Image: order[0] }), readHelper(2, { Image: order[1] }), readHelper(3)], { images });
+		const run = async (bin, args, opts) => (args[0] === "image" && args.at(-1) === OTHER ? { code: 1, stdout: "" } : args[0] === "image" && args.at(-1) === THIRD ? { code: 0, stdout: "not json\n" } : pair.run(bin, args, opts));
+		assert.deepEqual(await removeLegacyHelpers({ run, now: () => NOW }), { complete: false, reason, listed: 3, removed: 1, failed: 0, young: 0, kept: 0 }, reason);
+	}
+	// A row whose image is no image id is never asked about: unread, the pass cut short, the row in no count and left.
+	for (const image of ["pi-job:pinned", "--format=x", null]) {
+		const noId = fakeLeftovers([readHelper(1, { Image: image }), readHelper(2)]);
+		assert.deepEqual(await removeLegacyHelpers({ run: noId.run, now: () => NOW }), { complete: false, reason: "image-unreadable", listed: 2, removed: 1, failed: 0, young: 0, kept: 0 }, String(image));
+		assert.deepEqual([...noId.live.keys()], [id(1)], String(image));
+		assert.ok(!noId.calls.some((x) => x.args[0] === "image" && x.args.at(-1) !== BARE_IMAGE), "no image argv but an image id");
+	}
+});
+
+test("issue #1040: a first image inspect that exits 1, or answers what is not a label map, leaves the venue not done, says it once, and a later held read removes the leftover", async () => {
+	for (const [first, reason] of [[{ code: 1, stdout: "" }, "image-exit-1"], [{ code: 0, stdout: "<no value>\n" }, "image-unreadable"]]) {
+		const c = clock(NOW);
+		const logs = [];
+		const said = () => logs.filter(([e]) => e === "cpu_reserve_leftovers_removed").map(([, x]) => x);
+		const d = fakeLeftovers([readHelper(1)]);
+		let images = 0;
+		const run = async (bin, args, opts) => (args[0] === "image" && ++images === 1 ? first : d.run(bin, args, opts));
+		const reserve = makeCpuReserve({ run, image: "i", name: NAME, now: c.now, log: (e, x) => logs.push([e, x]) });
+		// The issue's reproduction: three reads that held. The first pass is cut, and every later held read runs another.
+		await reserve.sync({ cpuCenti: 1300, plans: [HELPER] });
+		assert.equal(reserve.states()[0].status, "held");
+		assert.equal(d.live.size, 1, reason);
+		assert.deepEqual(said(), [{ venue: "local", listed: 1, removed: 0, failed: 0, young: 0, kept: 0, complete: false, reason }], "never `kept`, never complete");
+		c.advance(RESERVE_RECHECK_MS);
+		await reserve.sync({ cpuCenti: 1300, plans: [HELPER] });
+		assert.equal(d.live.size, 0, `${reason}: the next held read's pass reads the image and removes the leftover`);
+		assert.deepEqual(said().at(-1), { venue: "local", listed: 1, removed: 1, failed: 0, young: 0, kept: 0, complete: true });
+		assert.equal(said().length, 2, "the cut pass is said once, the pass that removed once");
+		c.advance(RESERVE_RECHECK_MS);
+		await reserve.sync({ cpuCenti: 1300, plans: [HELPER] });
+		assert.equal(d.calls.filter((x) => x.args[0] === "ps").length, 2, "done once nothing is left to come back for");
+	}
+});
+
+test("issue #1040: the worker's pass takes a killed doctor's pid-named helper ten minutes old with a plain rm, keeps a young one, and lists no look-alike", async () => {
+	const doctorOf = (pid) => helperName("box-1", { doctor: true, pid });
+	const old = writeHelper(1, "150000 100000", { Name: `/${doctorOf(4242)}`, Config: { Labels: { [HELPER_LABEL_KEY]: "cpu-reserve" } } });
+	const read = namedHelper(2, doctorOf(77));
+	const young = namedHelper(3, doctorOf(4243), { Created: createdAgo(LEGACY_HELPER_MIN_AGE_MS - 1_000) });
+	const leadingZero = namedHelper(4, "pi-dispatch-cpu-reserve-doctor-96fb257c-04242");
+	const notAPid = namedHelper(5, "pi-dispatch-cpu-reserve-doctor-96fb257c-42x");
+	const sharedOld = namedHelper(6, "pi-dispatch-cpu-reserve-doctor-96fb257c");
+	const d = fakeLeftovers([old, read, young, leadingZero, notAPid, sharedOld]);
+	const out = await removeLegacyHelpers({ run: d.run, now: () => NOW, ownName: NAME });
+	assert.deepEqual(out, { complete: true, reason: null, listed: 4, removed: 3, failed: 0, young: 1, kept: 0 });
+	assert.deepEqual([...d.live.keys()].sort(), [young, leadingZero, notAPid].map((x) => x.Id).sort());
+	assert.ok(!d.calls.some((x) => x.args.includes(leadingZero.Id) || x.args.includes(notAPid.Id)), "a look-alike is never inspected nor removed");
+	assert.ok(d.calls.filter((x) => x.args[0] === "rm").every((x) => !x.args.includes("-f")), "never a forced rm");
 });

@@ -39,18 +39,22 @@ export const DOCTOR_INTERVAL_MAX_HOURS = 168;
  *
  * THE KILL IS SIGKILL TO THE WHOLE GROUP, so doctor's own `finally` cleanups never run, and that is a documented
  * residual (issue #978), not an oversight. A slow VM-backed daemon right after a restart is exactly when a run reaches
- * the bound, and what such a run leaves is bounded and named: at most its fixed-name CPU-reserve read helper
- * (`pi-dispatch-cpu-reserve-doctor-<hex8>`, which the next doctor removes before its own read); its pid-named egress
- * canary network and probes, which the next doctor's canary sweep removes by name once that pid is dead, on a daemon
- * this host owns, whether the egress policy is armed or not (issue #1021: an operator who turns it off after a killed
- * run still has them removed, and the sweep prints only what it removed or could not remove; this child never passes
- * `--live`, so on the podman venue it starts no canary at all); and its in-image gh probe, which the next doctor's gh
- * probe step removes right before its own probe, wherever that probe may run (the policy off and the podman venue
- * included). The next doctor is the retry this spawner starts `DOCTOR_RETRY_AFTER_KILL_MS` later (issue #1021), not a
- * whole interval later. REJECTED: a SIGTERM grace before the kill, which needs a signal handler in a twelve thousand
- * line CLI that knows, at whichever step the signal lands, what that run has made and removes it (on the same slow
- * daemon that caused the kill); and skipping the first run after boot while the daemon is busy, which would delay the
- * first published result by a whole interval.
+ * the bound, and what such a run leaves is bounded and named: at most its CPU-reserve read helper, named after its pid
+ * since issue #1040 (`pi-dispatch-cpu-reserve-doctor-<hex8>-<pid>`), which `afterKill` hands to the worker right after
+ * the kill, for one bounded `rm -f` of that name on any daemon (the worker's doctor passes it; not called for a run
+ * `close()` killed); what that misses (a create the daemon lands after it) the next doctor's CPU-reserve step removes
+ * once that pid is dead, on a daemon this host owns, and the worker's leftover pass on any daemon once it has sat
+ * `created` for ten minutes, while that pass still runs after a start, or else after the next start (no other doctor's
+ * read can remove it, nor it another doctor's); its pid-named egress canary network and probes, which the next doctor's
+ * canary sweep removes by name once that pid is dead, on a daemon this host owns, whether the egress policy is armed or
+ * not (issue #1021: an operator who turns it off after a killed run still has them removed, and the sweep prints only
+ * what it removed or could not remove; this child never passes `--live`, so on the podman venue it starts no canary at
+ * all); and its in-image gh probe, which the next doctor's gh probe step removes right before its own probe, wherever
+ * that probe may run (the policy off and the podman venue included). The next doctor is the retry this spawner starts
+ * `DOCTOR_RETRY_AFTER_KILL_MS` later (issue #1021), not a whole interval later. REJECTED: a SIGTERM grace before the
+ * kill, which needs a signal handler in a twelve thousand line CLI that knows, at whichever step the signal lands, what
+ * that run has made and removes it (on the same slow daemon that caused the kill); and skipping the first run after
+ * boot while the daemon is busy, which would delay the first published result by a whole interval.
  */
 export const DOCTOR_RUN_TIMEOUT_MS = 120_000;
 
@@ -117,6 +121,11 @@ export function makeDoctorSpawner({
 	// killed `updates look` leaves no runtime object and writes its record only at its end, and the reconcile already runs
 	// every two minutes.
 	retryAfterKillMs = null,
+	// Issue #1040: called as `afterKill(pid, say)` once a run killed at its bound has ended, with that child's pid, so the
+	// caller can remove what that process left under its pid; `say(event, data)` is this spawner's log, silent after
+	// `close()`. Opt-in: the worker's doctor passes it (its CPU-reserve helper), the issue #796 children start no runtime
+	// object. Not called for a run `close()` killed: the worker is stopping, and must not wait on a daemon for it.
+	afterKill = null,
 }) {
 	// The interval in whole hours, handed to the child so its record carries the cadence it really runs at.
 	const everyHours = Math.round(intervalMs / 3_600_000);
@@ -217,6 +226,17 @@ export function makeDoctorSpawner({
 			child.on?.("close", (code, signal) => {
 				const ms = now() - startedAt;
 				if (timedOut) {
+					// Issue #1040: the process group is dead now, so nothing of that run creates anything more but a request the
+					// daemon already holds. Not awaited: a slow daemon must not hold this run's end, its log line or the next run.
+					if (typeof afterKill === "function" && !closed && Number.isSafeInteger(child.pid) && child.pid > 0) {
+						const say = (event, data) => {
+							if (!closed) log(event, data);
+						};
+						// The hook says its own failures through `say`; the worker's settles every runner answer and never throws.
+						Promise.resolve()
+							.then(() => afterKill(child.pid, say))
+							.catch(() => {});
+					}
 					// Issue #1021: the line says when the retry is due (`retryMs`), and names none where none was armed.
 					const retryMs = armRetry();
 					return settle({ event: events.spawnFailed, data: { reason: "timeout", ms, ...(retryMs === null ? {} : { retryMs }) } });

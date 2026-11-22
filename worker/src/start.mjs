@@ -70,7 +70,7 @@ import { endpointStatusFields, ENDPOINT_STATUS_VERSION } from "./endpoint-status
 import { liveJobsFields, liveJobsOf } from "./live-jobs.mjs";
 import { makeSandboxTelemetry, parseBudgetFrom, parseCpuReserve } from "./host-telemetry.mjs";
 import { budgetField, readUserServiceLimits } from "./host-budget.mjs";
-import { helperName as cpuReserveHelperName, makeCpuReserve, reservePlan } from "./cpu-reserve.mjs";
+import { helperName as cpuReserveHelperName, makeCpuReserve, removeKilledDoctorHelper, reservePlan } from "./cpu-reserve.mjs";
 import { makeImagePreflight } from "./image-preflight.mjs";
 import { createWorker, JOB_TIMEOUT_MS, STALLED_FAILED_REASON } from "./index.mjs";
 import { BACKSTOP_GRACE_MS } from "./job-limits.mjs";
@@ -978,6 +978,9 @@ export async function startWorker(
 		makeQuestionGroupRuntime: makeQuestionGroupRuntimeFn = makeQuestionGroupRuntime,
 		// Issue #712: the worker's own doctor runs, a seam so a wiring test sees the interval and never spawns a doctor.
 		makeDoctorSpawner: makeDoctorSpawnerFn = makeDoctorSpawner,
+		// Issue #1040: the bounded runtime runner the CPU reserve's helper steps and the rm after a killed doctor go through,
+		// a seam so a wiring test sees that rm's argv and bound without a daemon.
+		execDockerBounded: execDockerBoundedFn = execDockerBounded,
 		makeUpdatesRunner: makeUpdatesRunnerFn = makeDoctorSpawner,
 		makeRunContainer: makeRunContainerFn = makeRunContainer,
 		// Issue #643: the preparer factory, a seam so a test can see what the wiring hands it (`stageLive`).
@@ -1424,7 +1427,8 @@ export async function startWorker(
 	// name (the hostname) has changed meanwhile. `maxBuffer` reaches the runner for the leftover pass's long outputs alone.
 	// Issue #1021: `withStderr`, so the helper's guard can tell a create refused for its name (the daemon's "already in
 	// use") from any other exit 125; stderr is matched there and never logged nor put in a reason.
-	const cpuReserve = makeCpuReserveFn({ run: (bin, args, { timeoutMs, maxBuffer }) => execDockerBounded(args, { bin, timeoutMs, maxBuffer, withStderr: true }), image: config.jobImage, name: cpuReserveHelperName(config.workerNameDeclared ? config.workerName : ""), now, log });
+	const reserveRun = (bin, args, { timeoutMs, maxBuffer }) => execDockerBoundedFn(args, { bin, timeoutMs, maxBuffer, withStderr: true });
+	const cpuReserve = makeCpuReserveFn({ run: reserveRun, image: config.jobImage, name: cpuReserveHelperName(config.workerNameDeclared ? config.workerName : ""), now, log });
 	const syncCpuReserve = (budget, facts) => cpuReserve.sync({ cpuCenti: budget.cpuCenti, plans: (facts?.reserveVenues ?? []).map((v) => reservePlan({ ...v, platform: jobUserIdentity.platform })) });
 	const bootPodmanRead = podmanInfo
 		? await settleWithin(
@@ -4076,6 +4080,18 @@ export async function startWorker(
 				cliPath: fileURLToPath(new URL("./cli.mjs", import.meta.url)),
 				intervalMs: config.doctorIntervalHours * 3600000,
 				retryAfterKillMs: DOCTOR_RETRY_AFTER_KILL_MS,
+				// Issue #1040: a run killed at its bound leaves at most its CPU-reserve helper, named after the child's pid. On a
+				// daemon of another machine no later doctor removes it, and the leftover pass runs only after a start, so one
+				// would pile up per killed run until the next start: one bounded `rm -f` of that name, through the reserve's own
+				// runner, on whichever daemon it reaches. Only where this worker keeps a helper venue (the doctor child reads the
+				// same facts, so it runs a helper exactly there); elsewhere no helper was made, and a docker CLI that is not
+				// there would only make a failure to say. Said only when the rm failed (`doctor_helper_not_removed`): a name not
+				// there exits 0.
+				afterKill: async (pid, say) => {
+					if (!cpuReserve.states().some((s) => s.method === "helper")) return;
+					const failed = await removeKilledDoctorHelper({ run: reserveRun, workerName: config.workerNameDeclared ? config.workerName : "", pid });
+					if (failed) say("doctor_helper_not_removed", { pid, reason: failed });
+				},
 				log,
 			});
 			doctorRuns.start();

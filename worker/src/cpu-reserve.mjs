@@ -41,11 +41,12 @@
  * --rm`, and `--rm` is the daemon's AutoRemove, which fires only when the container exits: a CLI killed at its bound
  * between create and start (a slow VM-backed daemon) left a `created` container behind for good, one per timed-out
  * step, 168 of them on one host. Every helper now runs under one name (`helperName`: the worker's
- * `pi-dispatch-cpu-reserve-<hex8>`, doctor's `pi-dispatch-cpu-reserve-doctor-<hex8>`) with the label
- * `pi.dispatch.helper=cpu-reserve`. A step that did not end cleanly marks the name dirty, a timeout removes it at once
- * (`rm -f`, bounded), and while it is dirty `rm -f` runs before the next helper (`guardHelperRun`). A create that lands
- * after that rm holds the name, and the next helper's create then fails at once (exit 125, no container) until an rm
- * gets through: at most one leftover per name, across restarts, on a remote daemon, whatever either clock says.
+ * `pi-dispatch-cpu-reserve-<hex8>`, and each doctor process its own `pi-dispatch-cpu-reserve-doctor-<hex8>-<pid>`,
+ * issue #1040) with the label `pi.dispatch.helper=cpu-reserve`. A step that did not end cleanly marks the name dirty, a
+ * timeout removes it at once (`rm -f`, bounded), and while it is dirty `rm -f` runs before the next helper
+ * (`guardHelperRun`). A create that lands after that rm holds the name, and the next helper's create then fails at once
+ * (exit 125, no container) until an rm gets through: at most one leftover per name, across restarts, on a remote
+ * daemon, whatever either clock says.
  * Rejected: random names plus a sweep of old labelled helpers (an age needs a clock shared with the daemon, and the
  * helper also runs on a remote cgroupfs daemon); `--cidfile` (blind to the same late create, plus a temp file);
  * `docker create` then `start -a` (twice the calls, on the daemon that is already slow). A timed-out step also
@@ -124,18 +125,38 @@ const CONTAINER_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9_.-]+$/;
 
 /**
  * The helper's one fixed name (PURE): `pi-dispatch-cpu-reserve-<hex8>` for the worker and
- * `pi-dispatch-cpu-reserve-doctor-<hex8>` for doctor, hex8 the first eight hex digits of the sha256 of the declared
- * worker name (empty when none). Stable across restarts, so a process removes what the last one left; distinct per
- * named worker, so two workers on one daemon never share it; doctor's own, so a doctor never removes the worker's
- * helper mid-step. Hashed because a worker name may run to 64 characters and here it is only an identity.
+ * `pi-dispatch-cpu-reserve-doctor-<hex8>-<pid>` for doctor, hex8 the first eight hex digits of the sha256 of the
+ * declared worker name (empty when none), pid doctor's own process id in decimal. The worker's is stable across
+ * restarts, so a process removes what the last one left; distinct per named worker, so two workers on one daemon never
+ * share it; doctor's is never the worker's, so a doctor never removes the worker's helper mid-step. Hashed because a
+ * worker name may run to 64 characters and here it is only an identity.
+ *
+ * DOCTOR'S CARRIES ITS PID (issue #1040). Every doctor of a deployment used to read under one name: a doctor whose
+ * create landed after its own bound held the name while another doctor read, and its `rm -f` then removed that other
+ * doctor's helper; and a plain `rm` before the read spared another doctor's helper only once it ran, never while it was
+ * `created`, which on a slow daemon is most of the step. Under its own pid no doctor's rm can reach another doctor's
+ * helper. What a killed doctor leaves is removed by a later doctor once that pid is dead, on a daemon this host owns
+ * (`doctorCpuReserve`), and on any daemon by the worker's leftover pass (`HELPER_NAME_RE`).
  */
-export function helperName(workerName = "", { doctor = false } = {}) {
+export function helperName(workerName = "", { doctor = false, pid = undefined } = {}) {
 	const hex8 = createHash("sha256").update(String(workerName ?? "")).digest("hex").slice(0, 8);
-	return `pi-dispatch-cpu-reserve-${doctor ? "doctor-" : ""}${hex8}`;
+	if (!doctor) return `pi-dispatch-cpu-reserve-${hex8}`;
+	if (!Number.isSafeInteger(pid) || pid <= 0) throw new Error(`cpu reserve: refusing a doctor helper name without a process id: ${JSON.stringify(pid)}`);
+	return `${DOCTOR_HELPER_PREFIX}${hex8}-${pid}`;
 }
 
-/** Every name `helperName` can answer, the worker's and doctor's, whatever the worker name (issue #1021). */
-export const HELPER_NAME_RE = /^pi-dispatch-cpu-reserve-(?:doctor-)?[0-9a-f]{8}$/;
+/** What every doctor helper name begins with: a doctor's listing of them asks for it (`doctorCpuReserve`). */
+export const DOCTOR_HELPER_PREFIX = "pi-dispatch-cpu-reserve-doctor-";
+
+/** A doctor helper name as `helperName` makes it (issue #1040): any hex8, the pid captured, never a leading zero. */
+export const DOCTOR_HELPER_NAME_RE = /^pi-dispatch-cpu-reserve-doctor-[0-9a-f]{8}-([1-9][0-9]{0,15})$/;
+
+/**
+ * Every name `helperName` can answer, the worker's and doctor's, whatever the worker name (issue #1021), plus doctor's
+ * one shared name before issue #1040 (`pi-dispatch-cpu-reserve-doctor-<hex8>`, in builds of main since issue #978, no
+ * release), which no doctor removes any more: what one of those left goes with the worker's leftover pass.
+ */
+export const HELPER_NAME_RE = /^pi-dispatch-cpu-reserve-(?:[0-9a-f]{8}|doctor-[0-9a-f]{8}(?:-[1-9][0-9]{0,15})?)$/;
 
 /**
  * The one-shot helper's `docker run` argv (no leading binary): with `cpuCenti` it WRITES the quota (`null` writes `max`,
@@ -313,11 +334,10 @@ export async function writeQuota(plan, cpuCenti, { run, image, name, bin = plan.
  * because a name still taken fails the create at once with exit 125 and makes no container. Every rm is bounded like a
  * step.
  *
- * The rm before a helper is `rm -f`, or with `forceBefore: false` a plain `rm` (issue #1021), which refuses a running
- * container: every doctor of a deployment reads under one name, so a doctor started while another doctor's read runs
- * leaves that read alone (its own create then fails with 125), and a killed doctor's `created` leftover is still
- * removed. The worker keeps `-f`: one worker per name, so whatever holds it is its own. The rm after a timeout is always
- * `-f`, since what holds the name then is this process's own helper.
+ * Every rm is `rm -f`: one process per name (one worker per declared worker name, one doctor per pid since issue
+ * #1040), so whatever holds the name before a step is this process's own helper or one a dead process left under it.
+ * Doctor's rm before its read was a plain `rm` for a while (issue #1021), to spare another doctor's read under the one
+ * name every doctor then shared; it spared that read only once it ran, never while it was still `created`.
  *
  * A NAME STILL HELD AFTER A CLEAN STEP (issue #1021). On a slow daemon a helper's clean exit does not always free the
  * name at once (measured once under a throttled dockerd: the next step's create was refused with exit 125, a
@@ -333,15 +353,14 @@ export async function writeQuota(plan, cpuCenti, { run, image, name, bin = plan.
  * (removal already in progress) and the second create can meet 125 again; that attempt then fails open
  * (`write-exit-125`, or the read's) and the next attempt, a minute later, recovers. No worse than without the retry.
  */
-export function guardHelperRun({ run, name, state = { dirty: true }, timeoutMs = RESERVE_STEP_TIMEOUT_MS, forceBefore = true }) {
+export function guardHelperRun({ run, name, state = { dirty: true }, timeoutMs = RESERVE_STEP_TIMEOUT_MS }) {
 	const settle = (bin, args, opts) =>
 		Promise.resolve()
 			.then(() => run(bin, args, opts))
 			.catch((error) => ({ code: null, stdout: "", error }));
-	const before = forceBefore ? ["rm", "-f", name] : ["rm", name];
 	const once = async (bin, args, opts) => {
 		if (state.dirty) {
-			if (stepFailure(await settle(bin, before, { timeoutMs }), bin) === "timeout") return { code: null, stdout: "", error: { cleanupTimedOut: true } };
+			if (stepFailure(await settle(bin, ["rm", "-f", name], { timeoutMs }), bin) === "timeout") return { code: null, stdout: "", error: { cleanupTimedOut: true } };
 			state.dirty = false;
 		}
 		const result = await settle(bin, args, opts);
@@ -400,7 +419,10 @@ const LEGACY_BINDS = Object.freeze({ read: `${HELPER_PARENT_PATH}:/p:ro`, write:
  * `labelled` (a named helper's, issue #1021) the same, except that its labels are its image's plus exactly
  * `pi.dispatch.helper=cpu-reserve`. `young` is that fingerprint, younger, so a helper a worker on the same daemon is
  * starting now is left (and looked at again on a later pass); `kept` is anything else, a `Created` that does not parse
- * included, since no later pass could ever take it.
+ * included. An unread image would be `kept` here too, and a later pass that reads it could take the row, so
+ * `removeLegacyHelpers` never asks about a row on an image it did not read, or on no image id (issue #1040): it leaves
+ * that row and cuts the pass short. What it judges `kept` is therefore what no later pass takes either: a fingerprint
+ * that misses.
  */
 export function legacyHelperVerdict(c, { imageLabels, nowMs, labelled = false }) {
 	const same = (a, b) => JSON.stringify(a) === JSON.stringify(b);
@@ -434,8 +456,9 @@ export function isLegacyHelper(c, opts) {
  * since renamed (issue #1021), whose old name no guard owns any more. The listing keeps the `created` containers whose
  * command names `/p/cpu.max` and that are either unlabelled, or labelled `pi.dispatch.helper=cpu-reserve` under a
  * helper name (`HELPER_NAME_RE`) other than `ownName`, this worker's own, which its guard owns (`guardHelperRun`). That
- * takes a doctor helper stuck in `created` for ten minutes too, which is harmless: doctor's own bound is 15 s. Each
- * chunk of `LEGACY_HELPER_CHUNK` is inspected, every image met is inspected once for its own labels, and only an exact
+ * takes a doctor helper stuck in `created` for ten minutes too (a killed doctor's, under its pid since issue #1040, or
+ * under doctor's one shared name before it), which is harmless: doctor's own bound is 15 s. Each chunk of
+ * `LEGACY_HELPER_CHUNK` is inspected, every image met is inspected once for its own labels, and only an exact
  * fingerprint (`legacyHelperVerdict`) old enough is removed, with a plain `rm`: never `-f`, so one that started
  * meanwhile is refused. Every call is bounded. `--filter volume=` is not used to narrow the listing: how it matches a
  * bind mount was never measured.
@@ -443,8 +466,13 @@ export function isLegacyHelper(c, opts) {
  * `young` the fingerprints left only for their age, `kept` the inspected ones that are no fingerprint, `failed` the
  * fingerprints the `rm` left. A pass is cut short, `complete: false` with `reason` `<list|inspect|image|rm>-<failure>`,
  * by a listing that failed, any step that timed out, or an inspect that answered without one row of its chunk
- * (`inspect-no-rows` when it exited 0): it established nothing about what is left, so the caller tries again. `run` is
- * `execDockerBounded`'s shape, and is passed `maxBuffer` for the two long outputs.
+ * (`inspect-no-rows` when it exited 0): it established nothing about what is left, so the caller tries again. An image
+ * whose labels could not be read (an inspect that failed, `image-<failure>`, or answered no label map, or a row whose
+ * image is no image id, `image-unreadable`) cuts the pass short too (issue #1040), with the first such reason: the rows
+ * on it are left unjudged, in no count. It used to read every such row as `kept`, and a pass that kept is done, so one
+ * image inspect that exited 1 ended the removal for the life of the process with every leftover in place. Unlike a
+ * timeout it does not stop the pass: the daemon answered, so the rows on the images it did read are judged as before.
+ * `run` is `execDockerBounded`'s shape, and is passed `maxBuffer` for the two long outputs.
  */
 export async function removeLegacyHelpers({ run, bin = "docker", now = () => Date.now(), timeoutMs = RESERVE_STEP_TIMEOUT_MS, ownName = "" }) {
 	const call = (args, extra = {}) =>
@@ -467,6 +495,9 @@ export async function removeLegacyHelpers({ run, bin = "docker", now = () => Dat
 	}
 	const candidates = [...listed.keys()];
 	const imageLabels = new Map();
+	// Issue #1040: the images whose labels could not be read, never asked about twice in a pass, and the first reason.
+	const unread = new Set();
+	let unreadReason = null;
 	for (let i = 0; i < candidates.length; i += LEGACY_HELPER_CHUNK) {
 		const chunk = candidates.slice(i, i + LEGACY_HELPER_CHUNK);
 		// Exit 1 still prints the ones found when another went away meanwhile, so the lines are read whatever the code.
@@ -484,20 +515,34 @@ export async function removeLegacyHelpers({ run, bin = "docker", now = () => Dat
 		// No row at all is a refusal (a template the CLI would not run, a daemon error), not a chunk with nothing in it.
 		if (rows.length === 0) return cut("inspect", inspected);
 		for (const image of new Set(rows.map((r) => r.image))) {
-			if (imageLabels.has(image) || typeof image !== "string" || !/^sha256:[0-9a-f]{64}$/.test(image)) continue;
+			if (imageLabels.has(image) || unread.has(image)) continue;
+			// An image id only reaches an argv, so nothing a row printed can be read as a flag. A row with no such id has an
+			// image no pass asks about: unread, as one whose inspect failed, never `kept`.
+			if (typeof image !== "string" || !/^sha256:[0-9a-f]{64}$/.test(image)) {
+				unread.add(image);
+				unreadReason ??= "image-unreadable";
+				continue;
+			}
 			const read = await call(["image", "inspect", "--format", LEGACY_IMAGE_LABELS_FORMAT, image]);
-			if (stepFailure(read, bin) === "timeout") return cut("image", read);
+			const failed = stepFailure(read, bin);
+			if (failed === "timeout") return cut("image", read);
+			// A label map, or null for an image that has none; anything else is no answer about its labels.
 			let labels;
 			try {
-				labels = read.code === 0 ? JSON.parse(String(read.stdout).trim()) : undefined;
+				labels = failed ? undefined : JSON.parse(String(read.stdout ?? "").trim());
 			} catch {
 				labels = undefined;
 			}
-			imageLabels.set(image, labels);
+			if (labels === null || (typeof labels === "object" && !Array.isArray(labels))) imageLabels.set(image, labels);
+			else {
+				unread.add(image);
+				unreadReason ??= failed ? `image-${failed}` : "image-unreadable";
+			}
 		}
 		const nowMs = now();
 		const doomed = [];
 		for (const r of rows) {
+			if (unread.has(r.image)) continue;
 			const verdict = legacyHelperVerdict(r, { imageLabels: imageLabels.get(r.image), nowMs, labelled: listed.get(r.id) });
 			if (verdict === "remove") doomed.push(r.id);
 			else counts[verdict] += 1;
@@ -510,7 +555,27 @@ export async function removeLegacyHelpers({ run, bin = "docker", now = () => Dat
 		counts.failed += doomed.length - n;
 		if (stepFailure(rm, bin) === "timeout") return cut("rm", rm);
 	}
-	return { complete: true, reason: null, ...tally() };
+	return { complete: unreadReason === null, reason: unreadReason, ...tally() };
+}
+
+/**
+ * After the worker killed its doctor child at the bound (issue #1040): one bounded `rm -f` of the one helper name that
+ * child could have read under, `helperName(workerName, { doctor: true, pid })` with the child's own pid, on whichever
+ * daemon `run` reaches. A killed doctor leaves at most that container, and a later doctor removes it only on a daemon
+ * this host owns; on any other it would wait for the worker's leftover pass, which runs only after a start until it has
+ * left nothing to come back for, so one per killed run would pile up until the next start. The worker knows the pid and
+ * that the process is dead, which no later reader can know on a daemon of another machine. `-f`, because that process
+ * is gone and so is any read it had in flight; a name that is not there exits 0 (Docker 28.0.4, measured) and is no
+ * failure. Answers null, or the failure's token (`stepFailure`), never stderr. Residual: a create the daemon lands
+ * after this rm (the CLI was killed between the two) stays for the next doctor or the next start's pass, as the
+ * guard's own late create does.
+ */
+export async function removeKilledDoctorHelper({ run, workerName = "", pid, bin = "docker", timeoutMs = RESERVE_STEP_TIMEOUT_MS }) {
+	const name = helperName(workerName, { doctor: true, pid });
+	const result = await Promise.resolve()
+		.then(() => run(bin, ["rm", "-f", name], { timeoutMs }))
+		.catch((error) => ({ code: null, stdout: "", error }));
+	return stepFailure(result, bin);
 }
 
 /**
@@ -592,7 +657,9 @@ export function makeCpuReserve({ run, image, name, now = () => Date.now(), log =
 	// The line carries the pass's own counts. A pass that removed something is always said (it changed the daemon); a
 	// pass that had its rm refused, was cut short, or left something young or no fingerprint (a fingerprint that misses
 	// on a venue nobody measured, which would otherwise leave every leftover in place without a word) is said the first
-	// time that condition is met, by whichever line first carries it, so none repeats every recheck.
+	// time that condition is met, by whichever line first carries it, so none repeats every recheck. Issue #1040: an
+	// image whose labels could not be read cuts the pass instead of counting its rows `kept`, so the venue is not done
+	// and `kept` is only ever judged against labels that were read.
 	const leftovers = async (plan) => {
 		const { venue } = plan;
 		if (plan.method !== "helper" || leftoversDone.has(venue)) return;

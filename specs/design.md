@@ -789,16 +789,17 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     **AMENDED (issue #978, 2026-11-21)**: `--rm` acts only when a container exits, so a helper CLI killed at its bound
     between create and start (a slow VM-backed daemon) left a `created` container per timed-out step, 168 on one host.
     The helper now runs under one fixed name per role, `pi-dispatch-cpu-reserve-<hex8>` from the declared worker name
-    (doctor's `pi-dispatch-cpu-reserve-doctor-<hex8>`), labelled `pi.dispatch.helper=cpu-reserve`: a step that did
-    not end cleanly marks the name dirty, a timeout removes it at once, and while it is dirty `rm -f` runs before the
-    next helper (none runs when that rm times out, `cleanup-timeout`), so the daemon itself refuses a second container
-    of that name (exit 125, nothing made) and at most one is ever left per name (the worker's and doctor's). An
-    attempt stops at its first timed-out step (a write that timed out may still apply, so it is unreadable, never
-    `differs`), and only timeouts back off: the wait doubles after each attempt that timed out, from 60 s to the
-    ten-minute re-check, so a slow daemon is asked less often, while an attempt that fails without a timeout goes back
-    to the minute, so an operator's fix shows within it, and a read that holds goes to the re-check. The unnamed
-    helpers older workers left are removed after a read that holds, by an exact fingerprint and a plain `rm`: a pass
-    a slow daemon cuts short establishes nothing, so the next read that holds starts another.
+    (doctor's `pi-dispatch-cpu-reserve-doctor-<hex8>`, with `-<pid>` after it since issue #1040, below), labelled
+    `pi.dispatch.helper=cpu-reserve`: a step that did not end cleanly marks the name dirty, a timeout removes it at
+    once, and while it is dirty `rm -f` runs before the next helper (none runs when that rm times out,
+    `cleanup-timeout`), so the daemon itself refuses a second container of that name (exit 125, nothing made) and at
+    most one is ever left per name (the worker's and doctor's). An attempt stops at its first timed-out step (a write
+    that timed out may still apply, so it is unreadable, never `differs`), and only timeouts back off: the wait doubles
+    after each attempt that timed out, from 60 s to the ten-minute re-check, so a slow daemon is asked less often, while
+    an attempt that fails without a timeout goes back to the minute, so an operator's fix shows within it, and a read
+    that holds goes to the re-check. The unnamed helpers older workers left are removed after a read that holds, by an
+    exact fingerprint and a plain `rm`: a pass a slow daemon cuts short establishes nothing, so the next read that holds
+    starts another.
     **AMENDED (issue #1021, 2026-11-22)**: CORRECTED, this entry said "at most one is ever left", which is one per
     name, and that the retry doubled "until a read holds", where an attempt that fails without a timeout goes back to
     the minute (both now said above). The leftover pass marked itself finished after any complete pass, so the
@@ -825,12 +826,47 @@ money with no upstream turn limit (`REQ-RUNNER-TURN-BUDGET`).
     doctor's `rm -f` before its read killed another doctor's read in flight, which then reported the quota unreadable:
     doctor's rm before its read is a plain `rm`, which refuses a running container (the other read survives, and this
     doctor is answered 125, the cause its line names), while a killed doctor's `created` leftover is still removed;
-    after doctor's own timeout it stays `rm -f`. Residual: the pass's age guard compares this host's clock with the
+    after doctor's own timeout it stays `rm -f` (SUPERSEDED by issue #1040, below: each doctor reads under a name of
+    its own, and both rms are `-f` again). Residual: the pass's age guard compares this host's clock with the
     daemon's `Created`, so on a remote cgroupfs daemon whose clock is behind a helper looks older than it is (a plain
     `rm` of one still being started costs its worker that step), and ahead, younger (it waits for a later pass).
     Rejected: retrying on exit 125 alone (Podman exits 125 on its own errors too, and an image or a flag refused would
     cost an rm and a step that fails the same way), and a line for every pass (a host with an older worker beside it
     would say the same thing every ten minutes).
+    **AMENDED (issue #1040, 2026-11-22)**: an image inspect that failed without a timeout, or answered no label map,
+    left that image's labels unread, and every leftover on it then counted as `kept`, which does not keep a venue's
+    passes going: one such error ended the removal for the life of the process with every leftover in place (reproduced
+    with a first `image inspect` that exits 1: one listing, the leftover left, one complete line). Now such an image
+    cuts the pass short (`image-<failure>`, or `image-unreadable`, which also covers a row with no image id, never put
+    on an argv), the rows on it are judged by no one, and the pass goes on with the images it did read, since the daemon
+    answered (only a timeout still stops it at once); `kept` is then always a fingerprint that misses. And doctor's
+    helper name carries its process id, `pi-dispatch-cpu-reserve-doctor-<hex8>-<pid>` (decimal, no leading zero): under
+    one shared name, the plain `rm` before a read spared another doctor's helper only once it ran, never while it was
+    `created` (most of a 15 s step on a slow daemon), and a doctor whose create landed after its own bound held the name
+    another doctor read under, so its `rm -f` removed that doctor's helper. Under its own pid no doctor's rm reaches
+    another's, so both rms are `rm -f` of its own name again, and an exit 125 there no longer means another doctor is
+    reading: it is a name the rm did not clear or the helper itself refused, which a second run (a new name) tells
+    apart. What a killed doctor leaves is its one helper under its pid: on a daemon this host owns, the next doctor's
+    CPU-reserve step removes the helpers of dead pids (any hex8, and its own pid's, which only a dead process can have
+    left, as this doctor has made none yet) before its read, through the canary probes' sweep (its listing, its owner
+    parsing that refuses a leading zero or anything but digits, and its plain `rm` for a container that never ran or has
+    stopped, `rm -f` otherwise), and says what it removed or could not remove; on any daemon the worker's leftover pass
+    takes it once it has sat `created` ten minutes, as it takes doctor's one shared name, which no release carried. On a
+    daemon this host does not own nothing is listed (the pid test is about this process table), and the worker's pass
+    runs only until a venue is done, so one helper per killed run would pile up there until the worker's next start: the
+    worker, which knows its doctor child's pid and that the child is dead, runs one bounded `rm -f` of that child's name
+    after killing it at the 120 s bound, on any daemon, wherever it keeps a helper venue itself, and logs
+    `doctor_helper_not_removed` only when that rm failed. Not after a child its shutdown killed: the worker must not
+    wait on a daemon while it stops, and the next start's pass takes that helper once it is ten minutes old. Residual:
+    what the worker's rm does not take on a daemon this host does not own (a create landing after it, a doctor killed
+    outside the worker or by its shutdown) goes with the leftover pass while it runs, or waits for the next start, at
+    most one per such run. Residual: the canary sweep's PID-namespace caveat holds for this sweep too: a doctor in a
+    container with the daemon's socket mounted reads the daemon as owned while it sees another process table, so it can
+    remove a live host doctor's helper, whose read is then unreadable for that run, never a false verdict. Browser
+    setup's read-only doctor runs neither the sweep nor the helper (issue #774) and says the quota was not read there.
+    Residual: two hosts' doctors with one pid and one worker name on one shared daemon would share a name, as every
+    doctor did. Rejected: keeping the plain `rm` (it still removes another doctor's `created` helper), and a random
+    suffix (no later doctor could tell a dead doctor's helper from a live one's, where a pid can be asked).
   - **Fleet and doctor**: the registry row publishes the budget, what runs, what the holds keep and whether the boot
     listing is read; no job decision reads it. Doctor shows the budget and which of it and `PI_CONCURRENCY` binds
     first, says that a job's `cpus` count as reserved CPU, warns for project sizes and minimums a host cannot hold,
@@ -9721,11 +9757,13 @@ free local model, or using a few successful live probes as proof of every routin
     doctor starts, and `doctor --live`'s containers and its display probe are outside the rule: they carry no helper
     label, and `live-probes.mjs` sweeps them by the pid in their names (`sweepStaleContainers`, `sweepStaleNetworks`),
     the module that makes an object sweeping it. The CPU-reserve read helper got its fixed name in the same issue
-    (`DES-HOST-BUDGET`); the canary's probes and the in-image gh probe are pid-named. The canary's sweep lists its
-    probes with `ps -a` by name before it touches any network, and the gh probe's own step lists its leftovers right
-    before it probes, wherever that probe may run (the module that makes an object sweeps it: the canary's sweep does
-    not run on the podman venue without `--live`, or past a network listing that failed; it did not run with the
-    policy off either until issue #1021, below). Both
+    (`DES-HOST-BUDGET`); the canary's probes and the in-image gh probe are pid-named. AMENDED 2026-11-22 (#1040): the
+    CPU-reserve read helper is pid-named too (`pi-dispatch-cpu-reserve-doctor-<hex8>-<pid>`), and its own step removes a
+    dead pid's with the canary's probe sweep right before its read, on a daemon this host owns (`DES-HOST-BUDGET`). The
+    canary's sweep lists its probes with `ps -a` by name before it touches any network, and the gh probe's own step
+    lists its leftovers right before it probes, wherever that probe may run (the module that makes an object sweeps it:
+    the canary's sweep does not run on the podman venue without `--live`, or past a network listing that failed; it did
+    not run with the policy off either until issue #1021, below). Both
     remove the exact names of a dead pid (or their own, before their run makes anything) with a plain `rm` where the
     container never ran or has stopped and the canary's `rm -f` otherwise. A
     killed doctor's probes sat in `created`, where `--rm` never acts and docker's member map does not list them, so
@@ -18117,8 +18155,13 @@ file is the last problem, after every one the card orders. No golden draws it: t
     stdout is discarded and the TAIL of stderr read for the one "not published" prefix only; a run is killed after
     120 s, as a whole process group on POSIX (the child is spawned detached, so the kill reaches the `docker` calls and
     the canary probe it started; on Windows the plain kill. AMENDED 2026-11-21 (#978): a documented RESIDUAL, since
-    the kill is SIGKILL and doctor's own cleanups never run. A killed run leaves at most its fixed-name CPU-reserve
-    read helper, which the next doctor removes before its own read; its pid-named canary network and probes, which the
+    the kill is SIGKILL and doctor's own cleanups never run. A killed run leaves at most its CPU-reserve read helper,
+    named after its pid (AMENDED 2026-11-22, #1040: it shared one name with every doctor, which the next doctor removed
+    before its own read), which the worker removes itself right after the kill with one bounded `rm -f` of that name
+    (`afterKill`, on any daemon where it keeps a helper venue, not after a shutdown kill), and otherwise the next
+    doctor's CPU-reserve step once that pid is dead, on a daemon this host owns, or the worker's leftover pass on any
+    daemon once it has sat `created` ten minutes, while that pass still runs (`DES-HOST-BUDGET`); its pid-named canary
+    network and probes, which the
     next doctor's canary sweep removes by name once that pid is dead (on a daemon this host owns, with the egress policy
     armed and, since issue #1021, off; the podman venue's canary runs only under `--live`, which the worker never
     passes); and its in-image gh
@@ -18142,7 +18185,8 @@ file is the last problem, after every one the card orders. No golden draws it: t
     is in flight starts none; the timers are unref'd and the spawner is an `extraClosers` entry, which kills a run in
     flight on shutdown. It logs `doctor_published` (`code`, `signal`, `ms`, `published`) or `doctor_spawn_failed`
     (`reason`, and for a run killed at its bound `ms` and, where a retry was armed, `retryMs`, its delay), integers and
-    names only.
+    names only, and after a run killed at its bound `doctor_helper_not_removed` (`pid`, `reason`) when the rm of that
+    run's CPU-reserve helper failed (AMENDED 2026-11-22, #1040).
 - **Why**: "run pi-dispatch doctor for the reason" sent an operator from the console to a shell on a host they may not
   have open, for a reason doctor already knew. A host nobody runs doctor on is exactly the one whose problems nobody
   has seen, so a publish only on the operator's runs would leave it empty; hence the worker's own run. Seven days is a
@@ -19591,6 +19635,7 @@ Code evidence: `worker/src/watch-decision.mjs`, `watch-board.mjs`, `watch-store.
 
 | Date | Change |
 |---|---|
+| 2026-11-22 (#1040) | **`DES-HOST-BUDGET` AMENDED**, a dated paragraph in the aggregate CPU reserve's bullet: an image whose labels could not be read cuts the leftover pass short (its rows judged by no one, the pass going on with the images it read, only a timeout still stopping it at once), so `kept` is always a fingerprint that misses; each doctor's helper name carries its pid, both its rms are `rm -f` of its own name, an exit 125 there no longer names another doctor, and a later doctor removes dead pids' helpers before its read on a daemon this host owns through the canary probes' sweep, with that sweep's PID-namespace caveat, and not from browser setup's read-only run, which runs no helper either; the worker removes its killed doctor child's helper itself with one bounded `rm -f` after a kill at the bound (not after a shutdown kill), and its pass takes the rest on any daemon; an image cut covers a row with no image id too; three residuals (what the worker's rm misses on a daemon not owned once the pass has ended, the PID namespace, two hosts' doctors with one pid and one worker name on a shared daemon) and two rejected alternatives (keeping the plain `rm`, a random suffix); the issue #978 paragraph's doctor name AMENDED in place and the issue #1021 paragraph's plain-rm sentence marked SUPERSEDED. **`DES-DOCTOR-RESULTS-PUBLISHED` AMENDED**, the worker's run residual: a killed run's CPU-reserve helper is named after its pid, removed by the worker right after a kill at the bound (`afterKill`), and otherwise by the next doctor's CPU-reserve step once that pid is dead on a daemon this host owns, or by the worker's leftover pass on any daemon while that pass runs; NEW log line `doctor_helper_not_removed` (`pid`, `reason`) when that rm failed. **`DES-EGRESS-DENY-ON-A-DEDICATED-NETWORK` AMENDED**, the doctor sub-bullet: the CPU-reserve read helper is pid-named too, and its own step removes a dead pid's with the probes' sweep right before its read, on a daemon this host owns. UNCHANGED, checked: `DES-CONCURRENCY-3` (one worker per daemon, the worker's helper name and its guard), `DES-RETENTION-SWEEPS-ON-A-TIMER` (the leftover pass still has no timer of its own). **Code evidence**: worker/src/cpu-reserve.mjs -> helperName, HELPER_NAME_RE, DOCTOR_HELPER_NAME_RE, guardHelperRun, removeLegacyHelpers, legacyHelperVerdict, removeKilledDoctorHelper; worker/src/doctor.mjs -> doctorCpuReserve (readOnly), sweepStaleDoctorHelpers, doctorHelperSweepChecks, cpuReserveChecks, sweepStaleProbeContainers; worker/src/doctor-spawner.mjs -> makeDoctorSpawner (afterKill), DOCTOR_RUN_TIMEOUT_MS; worker/src/start.mjs -> startWorker (the doctor spawner's afterKill). |
 | 2026-11-22 (#965) | **`DES-CANCEL-VIA-REDIS-REQUEST-KEY` CORRECTED**, two clauses of its rejected alternatives: a queue built while Valkey takes the connection and answers nothing took 36 to 39 s at the 5 s bound when measured under #842 (it said about 30 s, from the 1 s measurement scaled up), and the console's queues behind the kill switch, the failed-job and steer actions, the fleet reader and the status read take the command bound since #842 and the one-shot queues of a rerun, a parked answer, a `dispatch_run`, a manual trigger fire and the zero touch and schedule pages since #961, not `cancelHeldJob`'s queues or `readSchedulers`' (plain `parseConnection(url, { failFast: true })` under timers of their own), a raw client only where its caller passes `commandTimeoutMs`, and `enqueueForgeJob`'s routed queue the connection of its caller's queue (it said the console's queues). **`DES-OPERATOR-CONSOLE` CORRECTED and AMENDED**: the #961 residual's routed approval queue was not measured (it said it threw after about 30 s, measured), with the 36 to 39 s measured under #842 named instead; the #842 previews clause says a failed job's, a steer's and a withdrawal's preview whose read threw or ran past its end answer 503 with Try again, since `planned()` now passes a planner's status, the run's own refusals staying 400; the #961 agent word clause adds a single write that threw (`action-unconfirmed` for a `valkeyMayStillRun` error and a host setup step, for a `valkeyNotSent` one the caller's own word for an unreachable answer, `action-unavailable` from the tools, `action-refused` from the console, else `action-refused`); the budget writes clause names `valkeyNotSent`, set where the code knows a Valkey read or connect got no answer before anything was sent (`writeClient`'s two throws, a refused connect among them since ioredis reports it as "Connection is closed."; the sandbox End's read of its session, never one Valkey answered with its own error reply), which the confirm answers 503 with `VALKEY_UNREACHABLE`, and `writeEnvelope` now throws such a connect on as the other two budget writes do; the module list drops `setQueuePausedOne`, whose removal and the action table's Fleet line saying so came with #1014. "What timed out is not sent later" UNCHANGED, checked. **Code evidence**: admin/src/console/actions.mjs -> planned, confirmOne, AGENT_REFUSED, AGENT_UNCONFIRMED; admin/src/audited-write.mjs -> auditedWrite, thrownAgentWord, thrownSentence, AGENT_REFUSED, AGENT_UNCONFIRMED, AGENT_UNAVAILABLE; admin/src/job-actions.mjs -> planSteer, planSteerWithdraw; admin/src/read-model.mjs -> writeClient, writeEnvelope, cancelHeldJob, readSchedulers, createFleetReader (pauseQueue); worker/src/sandbox-sessions.mjs -> requestSandboxEnd; worker/src/queue.mjs -> consoleQueueConnection, enqueueForgeJob. |
 | 2026-11-21 (#960) | **`DES-MODEL-FAILOVER` AMENDED**, a dated bullet: a ChatGPT usage-limit refusal arrives in a 200 stream, the runner reads its closed code from the failing event's structured fields as the pinned SDK and pi-ai read them, through a pass-through reader, and the existing road (safe attempt, six-hour cooldown, quota window, fallback on another subscription, random pool reselection, API-key fallback skipped) does the rest; rejected: matching pi's message, `tee()`, parsing only some events. **`DES-HOST-OWNED-SUBSCRIPTION-AUTH` AMENDED**, a dated bullet: an unknown-reset provider refusal is retested by one automatic trial after `SUBSCRIPTION_RETEST_MS` (the model cooldown's ceiling, due as that cooldown ends); the attempt holding a trial clears the refusal rows on any verified exit 0, 1 or 2 after that provider returned output, gives the trial back when it provably never called that provider (the dollar settlement's rule), and leaves a signed quota or rate-limit failure to re-latch; rejected: a TTL on the row, clearing on any success, refusing to clear on exit 1, a retest per host; residual: a never-started trial is not given back. **`DES-TERMINAL-COMMENTS-AND-FAILURE-HOOK` AMENDED**, a dated bullet: a final `container-infra-exit` with a signed `quota-exhausted` posts `FAILED_COMMENT_BY_PROVIDER_FAILURE`'s fixed sentence; rejected: a new record reason, rows for other kinds. **Code evidence**: image/runner/src/provider-failure.mjs -> eventError, sseErrorReader, installProviderFailureObserver; worker/src/subscription-quota.mjs -> retestAtOf, admit, clearTrialEvidence, releaseTrial; worker/src/subscription-runtime.mjs -> settleTrial; worker/src/index.mjs -> subscriptionAttemptId; worker/src/comment-tables.mjs -> FAILED_COMMENT_BY_PROVIDER_FAILURE; worker/src/start.mjs -> failedComment; admin/src/console/panels/subscription-auth.mjs -> modelsSubscriptionQuota. |
 | 2026-11-22 (#1027) | **`DES-WATCH-DETERMINISTIC-PRODUCER` AMENDED**, a paragraph: a pull source that fails at any stage after its lease is held (`cursor`, `poll`, `batch`, `ingest`, `checkpoint`, a lost lease included) is next due one `intervalSeconds` later with its cursor kept, as after a checkpoint, where it stayed due and was asked once a second; `watch_pull_source_failed` names the stage and is said once per change, again only for another stage or after a checkpoint, with the next `watch_pull_cycle` as the recovery's line; a source's failure no longer throws the pass, so `watch_pull_failed` is said only for a lease request or release that Valkey answers with an error, once per streak, and a Valkey that stops answering holds the pass silently until it answers (named residual, as for every long-running client of the receiver); due times and said stages are keyed by the source's identity, so an edited source is due at once and a removed one leaves nothing. A lease held by another collector is UNCHANGED, checked: no failure, the source stays due. Rejected: a backoff past the interval, a recovery line of its own. **Code evidence**: receiver/src/watch-puller.mjs -> pollWatchSources, startWatchPuller; receiver/test/watch-puller.test.mjs. |

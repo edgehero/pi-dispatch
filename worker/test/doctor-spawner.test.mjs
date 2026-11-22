@@ -348,3 +348,64 @@ test("a run killed at its bound whose end lands after close arms no retry (issue
 	assert.deepEqual(timers.timeouts.map((t) => t.ms), [DOCTOR_RUN_TIMEOUT_MS], "no retry armed after close");
 	assert.deepEqual(logs, []);
 });
+
+test("issue #1040: after a run killed at its bound has ended, afterKill gets that child's pid and a log that is silent after close; never for a run that finished, one close() killed, or without the option", async () => {
+	const calls = [];
+	const afterKill = (pid, say) => {
+		calls.push(pid);
+		say("doctor_helper_not_removed", { pid, reason: "timeout" });
+	};
+	const { spawner, timers, children, logs, groupKills } = build({ afterKill });
+	const run = spawner.runOnce();
+	fire(killTimerOf(timers));
+	await run;
+	await flush();
+	assert.deepEqual(groupKills, [[children[0].pid, "SIGKILL"]]);
+	assert.deepEqual(calls, [children[0].pid], "the killed child's own pid, the one its doctor named its helper after");
+	assert.deepEqual(logs.map((l) => l[0]), ["doctor_spawn_failed", "doctor_helper_not_removed"], "what the hook says goes through the spawner's log");
+	// A run that finishes calls nothing.
+	const finished = spawner.runOnce();
+	children[1].emit("close", 0, null);
+	await finished;
+	await flush();
+	assert.deepEqual(calls, [children[0].pid]);
+	// A run close() killed calls nothing: the worker is stopping.
+	void spawner.runOnce();
+	await spawner.close();
+	await flush();
+	assert.deepEqual(calls, [children[0].pid], "not after a shutdown kill");
+	// A run killed at its bound whose end lands after close: nothing either.
+	const late = build({ afterKill: (pid) => calls.push(pid), killGroup: () => {} });
+	void late.spawner.runOnce();
+	fire(killTimerOf(late.timers));
+	const closing = late.spawner.close();
+	late.children[0].emit("close", null, "SIGKILL");
+	await closing;
+	await flush();
+	assert.deepEqual(calls, [children[0].pid]);
+	// A hook that answers after close says nothing, and one that throws is not thrown out of the spawner.
+	let release;
+	const slow = build({ afterKill: (pid, say) => new Promise((resolve) => (release = () => resolve(say("doctor_helper_not_removed", { pid, reason: "timeout" })))) });
+	const slowRun = slow.spawner.runOnce();
+	fire(killTimerOf(slow.timers));
+	await slowRun;
+	await flush();
+	await slow.spawner.close();
+	release();
+	await flush();
+	assert.deepEqual(slow.logs.map((l) => l[0]), ["doctor_spawn_failed"], "silent after close");
+	const throwing = build({ afterKill: () => {
+		throw new Error("x");
+	} });
+	const thrown = throwing.spawner.runOnce();
+	fire(killTimerOf(throwing.timers));
+	await thrown;
+	await flush();
+	assert.deepEqual(throwing.logs.map((l) => l[0]), ["doctor_spawn_failed"]);
+	// Without the option a kill at the bound is what it was.
+	const plain = build();
+	const plainRun = plain.spawner.runOnce();
+	fire(killTimerOf(plain.timers));
+	await plainRun;
+	assert.deepEqual(plain.logs, [["doctor_spawn_failed", { reason: "timeout", ms: 0 }]]);
+});
