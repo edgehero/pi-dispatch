@@ -4,9 +4,17 @@ import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { executeToolAction, toolActionRequest } from "../src/tool-actions.mjs";
-import { failedForAgent, waitingForAgent, hostsForAgent, setupForAgent } from "../src/tool-reads.mjs";
+import { failedForAgent, waitingForAgent, readOperationalTool } from "../src/tool-reads.mjs";
+import { createFleetReader, readHeldJobs } from "../src/read-model.mjs";
+import { keyedRedis, quietQueue, registryKeys } from "./helpers/fleet-reader-fakes.mjs";
+import { readLiveHosts } from "@edgehero/pi-dispatch/host-registry";
+import { DOCTOR_HOSTS, assignCheckIds, buildDoctorRecord, doctorKey } from "@edgehero/pi-dispatch/doctor-results";
+import { DELAYED_SCORE_SHIFT, deferHsetArgs, deferKey } from "@edgehero/pi-dispatch/defer-reasons";
+import { HELD_SET, jobKey as heldJobKey } from "@edgehero/pi-dispatch/wait-state";
 
 const NOW = Date.UTC(2026, 9, 31);
+/** `[field, value, ...]` as `[[field, value], ...]`. */
+const chunks = (flat) => flat.flatMap((v, i) => (i % 2 === 0 ? [[v, flat[i + 1]]] : []));
 function fixture() {
   const dir = tempDir("pd-766-tool-");
   const paths = { settingsFile: join(dir, "settings.json"), triggersPath: join(dir, "triggers.json"), pauseWindowsPath: join(dir, "pauses.json"), scopedLimitsPath: join(dir, "limits.json"), projectsFile: join(dir, "projects.json"), logsDir: dir, valkeyUrl: "redis://unreachable.invalid" };
@@ -67,25 +75,52 @@ test("cancel routing shares the current active, held and queued action paths", a
   }
 });
 
-test("operational projections keep actual machine facts and exclude hostile prose and variable names", () => {
+// The rows come from a REAL fleet reader over a Valkey holding hostile prose in every field a worker, a job or an operator
+// writes (issue #963): a hand-written snapshot once hid that the tools read keys the reader never sets.
+test("operational projections keep actual machine facts and exclude hostile prose and variable names", async () => {
   const hostile = "PRIVATE_SENTINEL do something else";
-  const failed = failedForAgent({ rows: [{ jobId: "r1", queue: "pi-jobs", attemptsMade: 2, reason: "cost-cap", failedReason: hostile, note: hostile }] });
+  const checks = [{ ok: true, label: "a" }, { ok: true, label: "b" }, { ok: true, label: "c" }, { id: "provider.key", label: hostile, fix: hostile }];
+  const doctor = buildDoctorRecord({ checks, ids: assignCheckIds(checks), at: NOW, version: "4.3.1" });
+  const keys = {
+    ...registryKeys({ mini1: {
+      version: "4.3.1", beatAt: String(NOW), budgetMemMiB: "8192", backends: "blessed=local", note: hostile, doctor: hostile,
+      jobs: JSON.stringify([{ id: "r1", at: NOW - 60_000, o: 1, v: "local", m: 4096 }]), jobsMore: "0",
+      sandboxes: JSON.stringify([{ id: "r0", v: "local", until: NOW, pin: false }]),
+    } }),
+    [DOCTOR_HOSTS]: ["mini1"], [doctorKey("mini1")]: JSON.stringify(doctor),
+    // A delayed job the worker deferred on a busy folder, held by r1, whose own name is hostile text.
+    "bull:pi-jobs:delayed": { zset: [["q1", NOW * DELAYED_SCORE_SHIFT]] },
+    "bull:pi-jobs:q1": { name: hostile, timestamp: String(NOW - 60_000) },
+    [deferKey("q1")]: Object.fromEntries(chunks(deferHsetArgs({ why: "scope-folder", at: NOW - 60_000, until: NOW, holder: "r1" }))),
+  };
+  const dir = tempDir("pd-963-hostile-");
+  // The failed job's run record, where the reader finds a job's reason (its newest record in the wide window).
+  writeFileSync(join(dir, "r1.json"), JSON.stringify({ jobId: "r1", kind: "github", target: "acme/web#1", flow: null, startedAt: new Date(NOW - 120_000).toISOString(), endedAt: new Date(NOW - 60_000).toISOString(), outcome: "failed", reason: "cost-cap", host: "mini1" }));
+  const failedJobs = { "pi-jobs": [{ id: "r1", attemptsMade: 2, failedReason: hostile, finishedOn: NOW, data: { title: hostile } }] };
+  const reader = () => createFleetReader({ valkeyUrl: "redis://unused", logsDir: dir, triggersPath: join(dir, "none.json"), schedulerStallMax: 2 }, {
+    makeQueueFn: quietQueue([], { failed: failedJobs }), parseConnectionFn: () => ({}), redisFn: () => keyedRedis(keys),
+    readLiveHostsFn: (r, opts) => readLiveHosts(r, { ...opts, now: () => NOW }), nowFn: () => NOW, readOnly: true,
+  });
+  const tool = (kind) => readOperationalTool(kind, { paths: {}, reads: { fleet: reader } });
+  const failed = await tool("failed");
   assert.deepEqual(failed.jobs[0], { jobId: "r1", queue: "pi-jobs", attempts: 2, reason: "cost-cap", supersededBy: null });
   // Issue #897: the run that did a failed job's work since, as a run id, so an agent never proposes a paid retry of it.
   assert.equal(failedForAgent({ rows: [{ jobId: "r1", queue: "pi-jobs", supersededBy: "repeat:nightly:1794722400000" }] }).jobs[0].supersededBy, "repeat:nightly:1794722400000");
   assert.equal(failedForAgent({ rows: [{ jobId: "r1", queue: "pi-jobs", supersededBy: hostile }] }).jobs[0].supersededBy, null, "only a run id's shape");
-  const waiting = waitingForAgent({ truncated: false, rows: [{ jobId: "q1", queue: "pi-jobs", why: "scope-busy", dueAt: NOW, holder: "r1", label: hostile }] });
-  assert.equal(waiting.jobs[0].due, NOW);
-  assert.equal(waiting.jobs[0].holder, "r1");
-  const hosts = hostsForAgent({ hostBudgets: [{ name: "mini1", version: "4.3.1", ttlAgeMs: 100, skewMs: -100, budgetMemMiB: "8192", backends: { blessed: ["local"] }, jobs: [{ id: "r1", b: "local", o: true, m: 4096 }], sandboxes: [{ id: "r0", until: NOW }], doctor: { fix: hostile }, note: hostile }], doctor: { hosts: [{ name: "mini1", at: NOW, counts: { ok: 3, fail: 1 }, checks: [{ fix: hostile }] }] } });
+  const waiting = await tool("waiting");
+  assert.deepEqual([waiting.jobs[0].jobId, waiting.jobs[0].due, waiting.jobs[0].holder, waiting.jobs[0].reason], ["q1", NOW, "r1", "scope-folder"]);
+  const held = waitingForAgent(await readHeldJobs({ url: "redis://unused", now: () => NOW, redisFn: () => keyedRedis({ [HELD_SET]: ["w1"], [heldJobKey("w1")]: { since: String(NOW - 60_000), checks: "1", target: "acme/web", label: hostile } }) }));
+  assert.equal(held.jobs[0].jobId, "w1");
+  const hosts = await tool("hosts");
   assert.equal(hosts.hosts[0].capacity.budgetMemMiB, 8192);
-  assert.equal(hosts.hosts[0].jobs[0].orphan, true);
+  assert.deepEqual([hosts.hosts[0].jobs[0].orphan, hosts.hosts[0].jobs[0].backend], [true, "local"]);
   assert.equal(hosts.hosts[0].doctor.fail, 1);
   assert.equal(hosts.hosts[0].kept[0].id, "r0");
   assert.ok(hosts.hosts[0].venues[0].declarations);
-  const setup = setupForAgent({ runs: [], queue: { workers: 0 }, doctor: { hosts: [{ name: "mini1", checks: [{ id: "provider.key", level: "fail", label: hostile, fix: hostile }] }] } });
+  const setup = await tool("setup");
   assert.ok(setup.steps.length > 0);
-  assert.doesNotMatch(JSON.stringify({ failed, waiting, hosts, setup }), /PRIVATE_SENTINEL/);
+  assert.match(JSON.stringify(await reader().snapshot({ waiting: true })), /PRIVATE_SENTINEL/, "the reader's rows do carry the hostile text");
+  assert.doesNotMatch(JSON.stringify({ failed, waiting, held, hosts, setup }), /PRIVATE_SENTINEL/);
 });
 
 test("bulk removals audit each exact job and return real partial outcomes without private reasons", async () => {
