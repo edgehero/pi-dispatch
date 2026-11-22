@@ -458,6 +458,13 @@ test("the TUI's switch note reads killSwitchSet's results shape: a half switch a
   assert.equal(switchUnconfirmed({ done: [], failed: "q1", unconfirmed: ["q1"], refused: [], notTried: [] }), "NOT CONFIRMED for q1: the switch may or may not have been made there; known switched: none");
   assert.equal(switchUnconfirmed(shapes.p.results[0].res.partial), null, "a switch that lost no answer keeps its own sentence");
   assert.equal(switchUnconfirmed({ done: [], failed: "q1", unconfirmed: [], refused: ["q1"], notTried: [] }), null);
+  // Issue #1014: a queue Valkey answered with an error after its script may have run is not "not switched": it is said
+  // as it reads now, read back, and the TUI's note never calls the deployment half switched at it. An entry that is not
+  // a queue name and one of the two words is left out, so no client's words reach the note.
+  const errored = { done: ["q1"], failed: "q2", unconfirmed: [], refused: [], notTried: ["q3"], errored: [{ queue: "q2", reads: "running" }, { queue: "q4", reads: "WRONGTYPE script: x" }] };
+  assert.equal(switchUnconfirmed(errored), "ANSWERED WITH AN ERROR for q2 (reads running now); not tried: q3; known switched: q1");
+  assert.equal(switchFailure({ results: [{ shown: "redis://a:6379", res: { unreachable: "WRONGTYPE", partial: errored } }] }), "ANSWERED WITH AN ERROR for q2 (reads running now); not tried: q3; known switched: q1 on redis://a:6379");
+  assert.equal(switchUnconfirmed({ ...errored, unconfirmed: ["q5"] }), "NOT CONFIRMED for q5: the switch may or may not have been made there; ANSWERED WITH AN ERROR for q2 (reads running now); not tried: q3; known switched: q1");
   // Every Valkey that failed is said, a lost answer first: one that could not be reached must not hide a pause that
   // was sent to the other and may have been made there.
   const two = { results: [{ shown: "redis://a:6379", res: { unreachable: "ECONNREFUSED" } }, { shown: "redis://b:6379", res: lost }, { shown: "redis://c:6379", res: { ok: true, queues: ["q"] } }] };

@@ -111,6 +111,10 @@ test("the installed BullMQ's text says what the module says (a bump that moves o
 	assert.ok(target.includes('local queueAttributes = rcall("HMGET", queueMetaKey, "paused",') && target.includes("if queueAttributes[1] then"), "getTargetQueueList.lua: any value is paused");
 	const pause = bullmqFile("commands/pause-7.lua");
 	assert.ok(pause.includes('rcall("HSET", KEYS[3], "paused", 1)') && pause.includes('rcall("HDEL", KEYS[3], "paused")'), "pause-7.lua writes 1 and deletes the field");
+	// `refusedBeforeScript` (issues #1007, #1014): the switch is made before the event is added, so an error at the XADD
+	// follows a switch that already happened, and only a refusal before the script runs leaves the queue as it was.
+	const xadd = pause.indexOf('rcall("XADD", KEYS[5]');
+	assert.ok(xadd > pause.indexOf('rcall("RENAME", KEYS[1], KEYS[2])') && xadd > pause.indexOf('rcall("HSET", KEYS[3], "paused", 1)') && xadd > pause.indexOf('rcall("HDEL", KEYS[3], "paused")') && pause.indexOf('rcall("RENAME"') > 0, "pause-7.lua moves the jobs and flips the flag before its XADD");
 	assert.equal(META_FIELD.paused, "paused");
 	assert.equal(QUEUE_KEY.meta, "meta");
 });

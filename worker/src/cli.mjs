@@ -9,6 +9,7 @@ import { isEntryModule } from "./entry.mjs";
 import { gitDirty, localRepoProblem } from "./git-dirty.mjs";
 import { imageRefProblem } from "./image-ref.mjs";
 import { modelIdProblem, providerIdProblem } from "./model-ref.mjs";
+import { refusedBeforeScript } from "./bullmq-internals.mjs";
 import { cliDeploymentEnv, deploymentServiceEnv } from "./service-env.mjs";
 
 // Issue #804: `cliDeploymentEnv` lives in service-env.mjs, where `service restart --drain` reads it too (service.mjs
@@ -879,21 +880,6 @@ function statusShortfall({ shown, seconds, hint, connectionError = null, answere
 
 /** What `switchQueue` reads a step that ran out of time as. */
 const NO_ANSWER = Symbol("no answer");
-
-/**
- * Whether Valkey refused a queue's pause or resume before its script ran (issue #1007), so the queue did not change:
- * an ACL that denies EVAL or EVALSHA, a read-only replica, a Valkey still loading, one busy with another script, a
- * replica whose master is down, or a script it does not hold (ioredis sends EVAL on that one itself). Only these
- * codes, and only with no sign of the script in the message: a Lua script is not rolled back when it errors, and an
- * error raised inside one names it ("... script: <sha>, on @user_script:57."). BullMQ's pause script moves the jobs and
- * flips the meta flag before its XADD to the events stream, so a WRONGTYPE there follows a switch that already
- * happened (measured: an events key holding a string, the queue paused, the reply an error), and an ACL failure inside
- * a script comes after the writes before it.
- */
-export function refusedBeforeScript(error) {
-	const message = String(error?.message ?? "");
-	return error?.name === "ReplyError" && /^(NOPERM|READONLY|LOADING|BUSY|MASTERDOWN|NOSCRIPT)\b/.test(message) && !/user_script/.test(message);
-}
 
 /**
  * One queue's pause or resume under the kill switch's deadline (issue #1007): `{ state, why? }`, never thrown.

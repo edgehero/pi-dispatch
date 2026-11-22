@@ -481,7 +481,7 @@ export const SNAPSHOT_TIMEOUT_SENTENCE = "the fleet did not answer within 10 sec
  * The snapshot a fleet or queue switch previews from (issue #737): its per-queue rows (`queueCounts`) over the queues the
  * kill switch flips, the registry's and every queue that exists (the reader's `switchQueues`), not the registry's alone.
  * Resume fleet resumes a stopped host's queue too, so a preview over the registry's queues hid that queue's jobs, and
- * its Undo left it running when it had been paused; and `setQueuePausedOne` takes any queue of that union, so a queue
+ * its Undo left it running when it had been paused; and the reader's `pauseQueue` takes any queue of that union, so a queue
  * preview over the registry's alone refused, as "not a queue this deployment drains", the one-queue Undo of a resume.
  */
 const SWITCH_READ = Object.freeze({ switchQueues: true });
@@ -1798,8 +1798,9 @@ function fleetSwitch({ name, kind, paused }) {
         ...(Array.isArray(r.res?.queues) ? { queues: names(r.res.queues) } : {}),
         // Issue #842: which queues are KNOWN switched (`done`) and which are not: `unconfirmed` (sent and not
         // answered), `refused` (did not change), `notTried` (a resume stops at the first lost answer). A result
-        // without those lists is a loop that stopped at `failed`, as before.
-        ...(r.res?.partial ? { partial: { done: names(r.res.partial.done), failed: String(r.res.partial.failed ?? "-"), ...(Array.isArray(r.res.partial.unconfirmed) ? { unconfirmed: names(r.res.partial.unconfirmed), refused: names(r.res.partial.refused), notTried: names(r.res.partial.notTried) } : {}) } } : {}),
+        // without those lists is a loop that stopped at `failed`, as before. Issue #1014: `errored`, each queue Valkey
+        // answered with an error after its script may have run, with what it reads now ("paused" or "running").
+        ...(r.res?.partial ? { partial: { done: names(r.res.partial.done), failed: String(r.res.partial.failed ?? "-"), ...(Array.isArray(r.res.partial.unconfirmed) ? { unconfirmed: names(r.res.partial.unconfirmed), refused: names(r.res.partial.refused), notTried: names(r.res.partial.notTried), errored: erroredOf(r.res.partial.errored) } : {}) } } : {}),
         // The set of queues itself may be short: the registry or the keyspace scan was not read whole.
         ...(r.res?.blind || r.res?.incomplete ? { short: true } : {}),
       }));
@@ -1813,18 +1814,23 @@ function fleetSwitch({ name, kind, paused }) {
       // flipped too: the error came back, not the state), means part of the fleet DID change, so the refusal is
       // `partial` and the slot never says "Nothing was changed" over it. Only when no Valkey's loop started did nothing.
       // Issue #842: a queue whose pause was sent and not answered counts as that too, and a switch where every queue
-      // was refused before anything was sent does not.
-      const partial = results.some((r) => r.ok || (r.partial && (!r.partial.unconfirmed || r.partial.done.length + r.partial.unconfirmed.length > 0)));
+      // was refused before anything was sent does not. Issue #1014: a queue Valkey answered with an error after its script
+      // may have run counts too, since that error can follow a switch that happened.
+      const partial = results.some((r) => r.ok || (r.partial && (!r.partial.unconfirmed || r.partial.done.length + r.partial.unconfirmed.length + r.partial.errored.length > 0)));
       // Issue #964: a set that may be short is said FIRST, beside a switch that was sent and may or may not have been made,
       // where it was a parenthesis at the end that a long Valkey address or list of queues pushed out of the audit row's
       // 200 code points and a person read past: "pi-jobs" alone, with two more queues that were never sent a pause. Both
       // clauses lead, so the row keeps both however long the Valkey's address or the list of queues; what to do closes the
-      // sentence. One that is not short keeps its sentence.
+      // sentence. One that is not short keeps its sentence. A queue Valkey answered with an error (issue #1014, which the
+      // per-Valkey words name with what it reads now) leads beside them for the same reason, and leads a sentence that is
+      // not short too, before the Valkey's address, which the row's cut would otherwise take it with.
       const sent = results.some((r) => Array.isArray(r.partial?.unconfirmed) && r.partial.unconfirmed.length > 0);
+      const errored = results.some((r) => Array.isArray(r.partial?.errored) && r.partial.errored.length > 0);
       const verb = paused ? "paused" : "resumed";
-      const lead = !short ? "the kill switch did not reach every queue" : `the kill switch did not reach every queue, ${sent ? `a ${paused ? "pause" : "resume"} was sent that may or may not have been made, ` : ""}and the list of queues may be short`;
-      const then = short ? `Other queues may exist and were not ${verb}: ${paused ? "pause" : "resume"} the fleet again once Valkey answers` : "Look at the fleet and try again";
-      return { invalid: `${lead}: ${results.map((r) => `${r.valkey} ${r.ok ? "done" : r.partial ? switchPartialWords(r.partial, paused) : "unreachable"}`).join("; ") || "no Valkey answered"}. ${then}`, ...(partial ? { partial: true } : {}), ...(short ? { queuesMayBeShort: true } : {}), ...(sent ? { sentUnconfirmed: true } : {}) };
+      const noun = paused ? "pause" : "resume";
+      const lead = !short ? `the kill switch did not reach every queue${errored ? `, Valkey answered a ${noun} with an error` : ""}` : `the kill switch did not reach every queue, ${sent ? `a ${noun} was sent that may or may not have been made, ` : ""}${errored ? `Valkey answered a ${noun} with an error, ` : ""}and the list of queues may be short`;
+      const then = short ? `Other queues may exist and were not ${verb}: ${noun} the fleet again once Valkey answers` : "Look at the fleet and try again";
+      return { invalid: `${lead}: ${results.map((r) => `${r.valkey} ${r.ok ? "done" : r.partial ? switchPartialWords(r.partial, paused) : "unreachable"}`).join("; ") || "no Valkey answered"}. ${then}`, ...(partial ? { partial: true } : {}), ...(short ? { queuesMayBeShort: true } : {}), ...(sent ? { sentUnconfirmed: true } : {}), ...(errored ? { answeredWithError: true } : {}) };
     },
   };
 }
@@ -1832,19 +1838,31 @@ function fleetSwitch({ name, kind, paused }) {
 /**
  * One Valkey's part-way kill switch in words (issue #842): the queues NOT known paused (or resumed) first, since they
  * are what an operator must look at and an audit row keeps the start of a sentence, with what "not confirmed" means
- * said once (the pause or resume was sent and may or may not have been made); then those that did not change, those a
- * resume never tried, and those known switched. Queue names only, never a client's words. A result without the lists
- * (a loop that stopped at one queue) keeps its sentence.
+ * said once (the pause or resume was sent and may or may not have been made); then those Valkey answered with an
+ * error after the script may have run, with what each reads now (issue #1014); then those that did not change, those a
+ * resume never tried, and those known switched. Queue names and closed words only, never a client's words. A result
+ * without the lists (a loop that stopped at one queue) keeps its sentence.
  */
 export function switchPartialWords(partial, paused) {
   if (!Array.isArray(partial.unconfirmed)) return `stopped after ${partial.done.join(", ") || "none"}, failed at ${partial.failed}`;
   const verb = paused ? "paused" : "resumed";
+  const errored = Array.isArray(partial.errored) ? partial.errored : [];
   return [
     ...(partial.unconfirmed.length > 0 ? [`not confirmed for ${partial.unconfirmed.join(", ")} (the ${paused ? "pause" : "resume"} may or may not have been made)`] : []),
+    ...(errored.length > 0 ? [`answered with an error for ${errored.map((e) => `${e.queue} (reads ${e.reads} now)`).join(", ")}`] : []),
     ...(partial.refused.length > 0 ? [`not ${verb}: ${partial.refused.join(", ")}`] : []),
     ...(partial.notTried.length > 0 ? [`not tried: ${partial.notTried.join(", ")}`] : []),
-    `${verb}: ${partial.done.join(", ") || "none"}`,
+    // Beside a queue answered with an error, which may read paused too, the queues known switched are said as confirmed.
+    `${errored.length > 0 ? `confirmed ${verb}` : verb}: ${partial.done.join(", ") || "none"}`,
   ].join("; ");
+}
+
+/**
+ * A part-way switch's `errored` list (issue #1014) as the console keeps it: `{ queue, reads }` with a queue name and
+ * "paused" or "running", anything else left out, so no client's words reach a page or the audit.
+ */
+function erroredOf(list) {
+  return (Array.isArray(list) ? list : []).filter((e) => typeof e?.queue === "string" && (e.reads === "paused" || e.reads === "running")).map((e) => ({ queue: e.queue, reads: e.reads }));
 }
 
 /**

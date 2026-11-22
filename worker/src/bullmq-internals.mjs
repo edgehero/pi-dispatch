@@ -173,6 +173,22 @@ export function isPausedFlag(cmd, value) {
 }
 
 /**
+ * Whether Valkey refused a queue's pause or resume before its script ran (issues #1007 and #1014), so the queue did not
+ * change: an ACL that denies EVAL or EVALSHA, a read-only replica, a Valkey still loading, one busy with another script,
+ * a replica whose master is down, or a script it does not hold (ioredis sends EVAL on that one itself). Only these
+ * codes, and only with no sign of the script in the message: a Lua script is not rolled back when it errors, and an
+ * error raised inside one names it ("... script: <sha>, on @user_script:57."). pause-7.lua moves the jobs (RENAME) and
+ * sets or deletes the meta `paused` field before its XADD to the events stream, so a WRONGTYPE there follows a switch
+ * that already happened (measured: an events key holding a string, the queue paused, the reply an error), and an ACL
+ * failure inside a script comes after the writes before it. The CLI's `pause` and `resume` and the console's switch
+ * both judge by this one rule.
+ */
+export function refusedBeforeScript(error) {
+	const message = String(error?.message ?? "");
+	return error?.name === "ReplyError" && /^(NOPERM|READONLY|LOADING|BUSY|MASTERDOWN|NOSCRIPT)\b/.test(message) && !/user_script/.test(message);
+}
+
+/**
  * The version in a meta hash's `version` field (`libName:version`, queue.js `metaValues`), or null. NOT a fleet fact:
  * every process that constructs a Queue writes it, so in a fleet of mixed versions it holds whichever wrote last. Only
  * the integration test reads it, to prove the library it ran against is the verified one.

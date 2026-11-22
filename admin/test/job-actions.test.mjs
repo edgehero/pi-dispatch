@@ -26,7 +26,6 @@ import {
   removeFailedJob,
   retryFailedJob,
   retryFailedJobs,
-  setQueuePausedOne,
   withdrawSteerMessage,
   readJobInbox,
   publicInboxEntry,
@@ -146,27 +145,6 @@ test("cancelHeldJob finds a held job on a HOST queue, which the shared-queue-onl
     assert.deepEqual(res, { ok: true, jobId: "gh-held-1", attemptsMade: 0 });
     assert.equal(await host.getJob("gh-held-1"), undefined, "removed from the host queue it was on");
     assert.equal(await v.redis.exists("wait:job:gh-held-1"), 0, "its hold went with it");
-  } finally {
-    await v.done();
-  }
-});
-
-// ---- single-queue pause ----
-
-test("setQueuePausedOne pauses exactly one fleet queue and refuses a name the fleet does not drain", live, async () => {
-  const v = await freshValkey();
-  try {
-    const shared = await v.q("pi-jobs");
-    const host = await v.q("pi-jobs@mini1");
-    assert.deepEqual(await setQueuePausedOne({ url: URL12, queue: "pi-jobs@mini1", paused: true }), { ok: true, paused: true, queue: "pi-jobs@mini1" });
-    assert.equal(await host.isPaused(), true);
-    assert.equal(await shared.isPaused(), false, "the rest of the fleet keeps running");
-    const ghost = await setQueuePausedOne({ url: URL12, queue: "pi-jobs@ghost", paused: true });
-    assert.match(ghost.invalid, /"pi-jobs@ghost" is not a queue this deployment drains \(pi-jobs, pi-jobs@mini1\)\. Nothing was changed/);
-    assert.equal(await v.redis.exists("bull:pi-jobs@ghost:meta"), 0, "no phantom queue was created by the refusal");
-    assert.deepEqual(await setQueuePausedOne({ url: URL12, queue: "pi-jobs@mini1", paused: false }), { ok: true, paused: false, queue: "pi-jobs@mini1" });
-    assert.equal(await host.isPaused(), false);
-    assert.match((await setQueuePausedOne({ url: URL12, queue: "pi-jobs", paused: "yes" })).invalid, /true or false/);
   } finally {
     await v.done();
   }
@@ -1259,7 +1237,6 @@ test("a client's or a registry's error reaches no refusal unbounded: the planner
   const blind = () => ({ on() {}, smembers: async () => { throw new Error(words); }, scan: async () => ["0", []], disconnect() {} });
   const empty = (_c, { name }) => ({ name, getJob: async () => undefined, close: async () => {} });
   assert.deepEqual(await planCancelQueued({ ...fakes, jobId: "gh-1", redisFn: blind, queueFn: empty }), { refusal: "no job gh-1 in 1 queue (the host registry could not be read; a host that is not registered may still hold it); nothing was changed", status: 404 });
-  assert.deepEqual(await setQueuePausedOne({ url: "redis://x", queue: "pi-jobs@gone", paused: true, redisFn: blind, makeQueueFn: empty, parseConnectionFn: () => ({}) }), { invalid: "\"pi-jobs@gone\" is not a queue this deployment drains (pi-jobs); the host registry could not be read, so a host's queue may be missing from that list. Nothing was changed" });
 });
 
 test("a re-run or an answer over a record that could not be read says which read failed and that nothing was queued, never that the run has no record", async () => {

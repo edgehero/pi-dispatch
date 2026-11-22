@@ -1404,6 +1404,19 @@ test("a confirm whose write was sent and not answered names what is known and wh
   const untouched = (await c.both("fleet-pause", {})).confirm.json();
   assert.equal(untouched.error, "the kill switch did not reach every queue: redis://a/0 not paused: pi-jobs; paused: none. Look at the fleet and try again");
   assert.ok(untouched.html.includes("The change did not go through") && untouched.html.includes(" Nothing was changed.</p>"), untouched.html);
+  // Issue #1014: a queue Valkey answered with an error after the script may have run is said as it reads now, never
+  // as not paused, and the bar says part of the fleet may have changed. An entry that is not a queue name and one of
+  // the two words is left out, so a client's words never reach the sentence or the audit row.
+  answer = { results: [{ shown: "redis://a/0", res: { unreachable: "WRONGTYPE Operation against a key holding the wrong kind of value script: b4514f4b39660691beec2ab3023b9b46b093b439, on @user_script:57.", partial: { done: [], failed: "pi-jobs", error: "WRONGTYPE", unconfirmed: [], refused: [], notTried: [], errored: [{ queue: "pi-jobs", reads: "paused" }, { queue: "pi-jobs@m1", reads: "WRONGTYPE script" }] } } }] };
+  const answered = (await c.both("fleet-pause", {})).confirm;
+  assert.equal(answered.json().error, "the kill switch did not reach every queue, Valkey answered a pause with an error: redis://a/0 answered with an error for pi-jobs (reads paused now); confirmed paused: none. Look at the fleet and try again", "beside a queue that reads paused, the known ones are said as confirmed");
+  mayHave(answered);
+  assert.ok(c.audit.rows.at(-1).reason.startsWith("the kill switch did not reach every queue, Valkey answered a pause with an error: redis://a/0 answered with an error for pi-jobs (reads paused now)"), c.audit.rows.at(-1).reason);
+  // One queue: the reader's own sentence, kept partial.
+  queueAnswer = { invalid: RM.queueSwitchErrored("pi-jobs@m1", true, "paused"), partial: true };
+  const one = (await c.both("queue-pause", { queue: "pi-jobs@m1" })).confirm;
+  assert.equal(one.json().error, "Valkey answered the pause of pi-jobs@m1 with an error; it reads paused now. Look at the fleet");
+  mayHave(one);
   assert.equal(switchPartialWords({ done: ["q1"], failed: "q2" }, true), "stopped after q1, failed at q2", "a result without the lists keeps its sentence");
   // One queue: the reader's own sentence, kept partial.
   queueAnswer = { invalid: RM.queueSwitchUnconfirmed("pi-jobs@m1", true), partial: true };
@@ -2438,7 +2451,7 @@ test("a fleet or queue switch previews over the queues the switch flips: a stopp
   assert.equal(two.preview.count, 2, "zeta's jobs are counted: the resume lets them start");
   assert.match(two.preview.html, /2 jobs wait to start in the paused queues \(pi-jobs@beta, pi-jobs@zeta\)/, "the preview names what it resumes");
   assert.deepEqual([two.confirm.json().change.inverse, two.confirm.json().change.undo], [null, "Pause queues pi-jobs@beta, pi-jobs@zeta again by hand, one at a time: no single write pauses only those."]);
-  // Zeta alone: its queue's pause is the Undo, and that queue's own preview takes it (the write does: setQueuePausedOne).
+  // Zeta alone: its queue's pause is the Undo, and that queue's own preview takes it (the write does: the reader's pauseQueue).
   pausedNow = new Set(["pi-jobs@zeta"]);
   const one = await c.both("fleet-resume", {});
   const change = one.confirm.json().change;
@@ -3313,6 +3326,86 @@ test("a part-way fleet pause over a set that may be short keeps both leading cla
       const row = c.audit.rows.at(-1);
       assert.deepEqual([row.outcome, row.reason], ["failed", [...said].slice(0, 200).join("")]);
       assert.ok(row.reason.includes("may or may not") && row.reason.includes("may be short"), row.reason);
+    } finally {
+      await fleet.dispose();
+    }
+  }
+});
+
+// Issues #964 and #1014 together: a part-way pause over a set that may be short where Valkey also answered a queue's pause
+// with an error after its script paused it. Each fact leads, so the row keeps them all whatever the Valkey's address.
+test("a part-way fleet pause over a set that may be short with a queue Valkey answered with an error keeps every leading clause in its audit row and on its bar, with a realistic or a long Valkey address (#964, #1014)", async () => {
+  const inScript = () => Object.assign(new Error("WRONGTYPE Operation against a key holding the wrong kind of value script: b4514f4b39660691beec2ab3023b9b46b093b439, on @user_script:57."), { name: "ReplyError" });
+  for (const url of ["redis://127.0.0.1:6483/8", `redis://${"valkey-".repeat(12)}primary.example.internal:6379/0`]) {
+    const { paths } = deployment(url);
+    // The real reader over fakes that dial nothing: the registry's SMEMBERS rejects; the shared queue's pause is sent and
+    // never answered, this host's own is answered with an error after its script paused it (it reads paused), and the
+    // queue the scan names takes its pause.
+    const make = quietQueue();
+    const fleet = RM.createFleetReader(paths, {
+      makeQueueFn: (conn, opts) => {
+        const q = make(conn, opts);
+        if (opts?.name === "pi-jobs@hosta") return { ...q, pause: async () => { throw inScript(); }, isPaused: async () => true };
+        if (opts?.name === "pi-jobs@hostb") return { ...q, pause: async () => {} };
+        return { ...q, pause: () => new Promise(() => {}), resume: () => new Promise(() => {}) };
+      },
+      parseConnectionFn: () => ({}),
+      redisFn: () => keyedRedis({}, { registryDown: () => true }),
+      discoverHostQueuesFn: async () => ["pi-jobs@hostb"],
+      ownQueueNamesFn: () => ["pi-jobs@hosta"],
+      readOnly: true,
+      switchStepTimeoutMs: 80,
+      closeTimeoutMs: 30,
+    });
+    try {
+      const c = await start({ paths, a: { fleet, pauseSnapshotTimeoutMs: 300, killSwitchPlanFn: () => ({ urls: [paths.valkeyUrl], disagreement: null, context: null }) } });
+      const res = (await c.both("fleet-pause", {})).confirm;
+      assert.equal(res.status, 409, res.text);
+      const said = res.json().error;
+      assert.equal(said, `the kill switch did not reach every queue, a pause was sent that may or may not have been made, Valkey answered a pause with an error, and the list of queues may be short: ${url} not confirmed for pi-jobs (the pause may or may not have been made); answered with an error for pi-jobs@hosta (reads paused now); confirmed paused: pi-jobs@hostb. Other queues may exist and were not paused: pause the fleet again once Valkey answers`);
+      // The bar shows the whole sentence, and offers Look again over a switch that may have changed part of the fleet.
+      assert.ok(res.json().html.includes("Valkey answered a pause with an error") && res.json().html.includes("may be short"), res.json().html);
+      assert.ok([...said].length > 200, "the sentence is longer than the row keeps");
+      const row = c.audit.rows.at(-1);
+      assert.deepEqual([row.outcome, row.reason], ["failed", [...said].slice(0, 200).join("")]);
+      assert.ok(row.reason.includes("may or may not") && row.reason.includes("answered a pause with an error") && row.reason.includes("may be short"), row.reason);
+    } finally {
+      await fleet.dispose();
+    }
+  }
+});
+
+// Issue #1014, a list that is not short: the error clause leads the sentence, before the Valkey's address, so a long one
+// does not push it out of the row the log cuts at 200 code points.
+test("a part-way fleet pause with a queue Valkey answered with an error, over a whole list, says so first, so its audit row keeps it with a realistic or a long Valkey address (#1014)", async () => {
+  const inScript = () => Object.assign(new Error("WRONGTYPE Operation against a key holding the wrong kind of value script: b4514f4b39660691beec2ab3023b9b46b093b439, on @user_script:57."), { name: "ReplyError" });
+  for (const url of ["redis://127.0.0.1:6483/8", `redis://${"valkey-".repeat(12)}primary.example.internal:6379/0`]) {
+    const { paths } = deployment(url);
+    // The real reader over fakes that dial nothing, the registry and the scan read whole: the shared queue takes its
+    // pause, and the host queue the scan names is answered with an error after its script paused it.
+    const make = quietQueue();
+    const fleet = RM.createFleetReader(paths, {
+      makeQueueFn: (conn, opts) => {
+        const q = make(conn, opts);
+        return opts?.name === "pi-jobs@hostb" ? { ...q, pause: async () => { throw inScript(); }, isPaused: async () => true } : { ...q, pause: async () => {} };
+      },
+      parseConnectionFn: () => ({}),
+      redisFn: () => keyedRedis({}),
+      discoverHostQueuesFn: async () => ["pi-jobs@hostb"],
+      readOnly: true,
+      switchStepTimeoutMs: 80,
+      closeTimeoutMs: 30,
+    });
+    try {
+      const c = await start({ paths, a: { fleet, pauseSnapshotTimeoutMs: 300, killSwitchPlanFn: () => ({ urls: [paths.valkeyUrl], disagreement: null, context: null }) } });
+      const res = (await c.both("fleet-pause", {})).confirm;
+      assert.equal(res.status, 409, res.text);
+      const said = res.json().error;
+      assert.equal(said, `the kill switch did not reach every queue, Valkey answered a pause with an error: ${url} answered with an error for pi-jobs@hostb (reads paused now); confirmed paused: pi-jobs. Look at the fleet and try again`);
+      const row = c.audit.rows.at(-1);
+      assert.deepEqual([row.outcome, row.reason], ["failed", [...said].slice(0, 200).join("")]);
+      assert.ok(row.reason.includes("answered a pause with an error"), row.reason);
+      if (url.length > 100) assert.ok([...said].length > 200 && !row.reason.includes("answered with an error for"), "the long address takes the queue's own words out of the row, and the lead keeps the fact");
     } finally {
       await fleet.dispose();
     }

@@ -28,12 +28,12 @@ import {
   readStagedPackages,
   listRunIds,
   setQueuePaused,
-  setQueuePausedOne,
   ownQueueNamesOf,
   deploymentOwnQueues,
   deploymentOwnQueue,
   killSwitchPlan,
   queueSwitchUnconfirmed,
+  queueSwitchErrored,
   SWITCH_STEP_TIMEOUT_MS,
   killSwitchSet,
   panelValkeyContext,
@@ -2738,20 +2738,91 @@ test("a resume goes one queue at a time and stops at the first that does not ans
   }
 });
 
-test("one queue's pause that is sent and not answered says it may or may not have been made, never unreachable (#842)", async () => {
-  const closed = [];
-  const queueOf = (pause) => () => ({ pause, resume: pause, close: () => (closed.push(1), neverSettles()), disconnect() {} });
-  const args = { url: "redis://x", queue: "pi-jobs@mini1", makeQueueFn: undefined, parseConnectionFn: () => ({}), redisFn: fakeFleetRedis(["mini1"]), stepTimeoutMs: 60, closeTimeoutMs: 30 };
-  assert.equal(queueSwitchUnconfirmed("pi-jobs@mini1", true), "the pause of pi-jobs@mini1 may or may not have been made: Valkey did not answer it within the bound. Look at the fleet once Valkey answers");
-  for (const paused of [true, false]) {
-    for (const lost of [neverSettles, () => Promise.reject(lostAnswer())]) {
-      const res = await orHung(setQueuePausedOne({ ...args, paused, makeQueueFn: queueOf(lost) }));
-      assert.deepEqual(res, { invalid: queueSwitchUnconfirmed("pi-jobs@mini1", paused), partial: true });
-    }
+// Issue #1014: an error reply can follow a switch the script already made (a Lua script is not rolled back, and
+// BullMQ's XADD to the events stream comes last), so only a refusal before the script runs is "unchanged"; any other
+// error reply is read back. Valkey's own words, measured.
+const NOPERM_EVALSHA = "NOPERM User op has no permissions to run the 'evalsha' command";
+const WRONGTYPE_IN_SCRIPT = "WRONGTYPE Operation against a key holding the wrong kind of value script: b4514f4b39660691beec2ab3023b9b46b093b439, on @user_script:57.";
+// A write inside the script on a read-only replica: a refusal's code, raised after the writes before it.
+const READONLY_IN_SCRIPT = "READONLY You can't write against a read only replica. script: b4514f4b39660691beec2ab3023b9b46b093b439, on @user_script:30.";
+const replyError = (message) => Object.assign(new Error(message), { name: "ReplyError" });
+
+test("a pause or resume Valkey answers with an error after its script may have run is read back and said as it reads, never as unchanged (#1014)", async () => {
+  // name -> [what the write does, what a read back answers (undefined: never)]
+  const plan = {
+    "pi-jobs": [() => Promise.resolve(), undefined],
+    "pi-jobs@mini1": [() => Promise.reject(replyError(WRONGTYPE_IN_SCRIPT)), true],
+    "pi-jobs@mini2": [() => Promise.reject(replyError(NOPERM_EVALSHA)), undefined],
+    "pi-jobs@mini3": [() => Promise.reject(replyError(WRONGTYPE_IN_SCRIPT)), undefined],
+    "pi-jobs@mini4": [() => Promise.reject(replyError(READONLY_IN_SCRIPT)), false],
+  };
+  const read = [];
+  const makeQueueFn = (_c, opts) => {
+    const name = opts?.name ?? "pi-jobs";
+    const [act, reads] = plan[name];
+    return { name, pause: act, resume: act, isPaused: () => (read.push(name), reads === undefined ? neverSettles() : Promise.resolve(reads)), async close() {}, disconnect() {} };
+  };
+  const res = await orHung(setQueuePaused({ url: "redis://x", paused: true, makeQueueFn, parseConnectionFn: () => ({}), redisFn: fakeFleetRedis(["mini1", "mini2", "mini3", "mini4"]), stepTimeoutMs: 80 }));
+  assert.notEqual(res, "hung");
+  assert.deepEqual(res.partial, {
+    done: ["pi-jobs"],
+    failed: "pi-jobs@mini1",
+    error: WRONGTYPE_IN_SCRIPT,
+    unconfirmed: ["pi-jobs@mini3"],
+    refused: ["pi-jobs@mini2"],
+    notTried: [],
+    errored: [{ queue: "pi-jobs@mini1", reads: "paused" }, { queue: "pi-jobs@mini4", reads: "running" }],
+  });
+  assert.deepEqual(read.sort(), ["pi-jobs@mini1", "pi-jobs@mini3", "pi-jobs@mini4"], "only an error reply that may follow the script is read back; a refusal before it is not, and a refusal's code raised inside the script is");
+  // A resume stops at a queue answered with an error too: it may already be running again.
+  plan["pi-jobs"] = [() => Promise.reject(replyError(WRONGTYPE_IN_SCRIPT)), false];
+  const resumed = await orHung(setQueuePaused({ url: "redis://x", paused: false, makeQueueFn, parseConnectionFn: () => ({}), redisFn: fakeFleetRedis(["mini1", "mini2"]), stepTimeoutMs: 80 }));
+  assert.deepEqual({ ...resumed.partial, error: null }, { done: [], failed: "pi-jobs", error: null, unconfirmed: [], refused: [], notTried: ["pi-jobs@mini1", "pi-jobs@mini2"], errored: [{ queue: "pi-jobs", reads: "running" }] });
+});
+
+test("the console's own switch, through a real Valkey whose pause and resume scripts fail after they switched the queue, says the queue as Valkey holds it (#1014, VALKEY_TEST_URL)", { skip: process.env.VALKEY_TEST_URL ? false : "needs VALKEY_TEST_URL", timeout: 30_000 }, async () => {
+  const { makeQueue } = await import("@edgehero/pi-dispatch/queue");
+  const { makeRedisClient } = await import("@edgehero/pi-dispatch/connection");
+  const url = process.env.VALKEY_TEST_URL;
+  // Every queue the switch names is one of this test's own (its name prefixed), so no other test's queue is paused.
+  const prefix = `pd1014-${process.pid}-${Date.now()}-`;
+  const direct = makeRedisClient(url);
+  direct.on("error", () => {});
+  const logsDir = tempDir("pd-1014-switch-");
+  const triggersPath = join(logsDir, "triggers.json");
+  writeFileSync(triggersPath, '{ "triggers": [] }\n');
+  // The real queue, under the name the switch asked for: the reader keys its pool by a queue's name.
+  const asked = (connection, opts) => {
+    const name = opts?.name ?? "pi-jobs";
+    const queue = makeQueue(connection, { name: `${prefix}${name}` });
+    return new Proxy(queue, { get: (target, key) => (key === "name" ? name : typeof target[key] === "function" ? target[key].bind(target) : target[key]) });
+  };
+  const reader = createFleetReader({ valkeyUrl: url, logsDir, triggersPath }, {
+    makeQueueFn: asked,
+    readLiveHostsFn: async () => ({ hosts: [] }), discoverHostQueuesFn: async () => ({ names: [] }), readOnly: true,
+  });
+  const meta = `bull:${prefix}pi-jobs:meta`;
+  try {
+    // pause-7.lua moves the jobs and flips the flag, then XADDs to the events stream: a string there fails it after.
+    await direct.set(`bull:${prefix}pi-jobs:events`, "not a stream");
+    const paused = (await reader.pause()).results[0].res;
+    assert.deepEqual(paused.partial.errored, [{ queue: "pi-jobs", reads: "paused" }], JSON.stringify(paused));
+    assert.deepEqual(paused.partial.refused, [], "never unchanged");
+    assert.equal(await direct.hexists(meta, "paused"), 1, "paused, as said");
+    const resumed = (await reader.resume()).results[0].res;
+    assert.deepEqual(resumed.partial.errored, [{ queue: "pi-jobs", reads: "running" }], JSON.stringify(resumed));
+    assert.deepEqual(resumed.partial.refused, []);
+    assert.equal(await direct.hexists(meta, "paused"), 0, "running again, as said: the dangerous direction");
+  } finally {
+    await reader.dispose();
+    let cursor = "0";
+    do {
+      const [next, keys] = await direct.scan(cursor, "MATCH", `bull:${prefix}*`, "COUNT", 500);
+      cursor = String(next);
+      if (keys.length > 0) await direct.del(...keys);
+    } while (cursor !== "0");
+    direct.disconnect();
   }
-  assert.equal(closed.length, 4, "each one-shot queue's close was started, and none was waited for");
-  // Refused before it was sent, or answered with an error: the queue did not change, and it says so as before.
-  assert.deepEqual(await setQueuePausedOne({ ...args, paused: true, makeQueueFn: queueOf(() => Promise.reject(new Error("refused before send"))) }), { unreachable: "refused before send" });
 });
 
 test("the kill switch answers before any close is answered, and a queue that cannot be built is that queue's refusal, not the switch's (#842)", async () => {
@@ -2770,7 +2841,7 @@ test("the kill switch answers before any close is answered, and a queue that can
   assert.deepEqual(closes.sort(), ["pi-jobs", "pi-jobs@mini1"], "and every queue that was built is asked to close");
 });
 
-test("a status read and a one-queue switch build bounded queues, and the status read's closes are started at once and end by their bound (#842)", { timeout: 15_000 }, async () => {
+test("a status read builds bounded queues, and its closes are started at once and end by their bound (#842)", { timeout: 15_000 }, async () => {
   const { VALKEY_COMMAND_TIMEOUT_MS } = await import("@edgehero/pi-dispatch/connection");
   // A step must outlast the client's own bound, or it would fire first and a sent pause would lose its mark.
   assert.ok(SWITCH_STEP_TIMEOUT_MS > VALKEY_COMMAND_TIMEOUT_MS, `${SWITCH_STEP_TIMEOUT_MS} > ${VALKEY_COMMAND_TIMEOUT_MS}`);
@@ -2788,8 +2859,7 @@ test("a status read and a one-queue switch build bounded queues, and the status 
   assert.equal(state.pausedState, false);
   assert.ok(Date.now() - started < 2500, "one close bound for all three queues, not one each");
   assert.deepEqual([closes.sort(), dropped.sort()], [["pi-jobs", "pi-jobs@mini1", "pi-jobs@mini2"], ["pi-jobs", "pi-jobs@mini1", "pi-jobs@mini2"]]);
-  assert.deepEqual(await setQueuePausedOne({ url: "redis://x", queue: "pi-jobs@mini1", paused: true, makeQueueFn, parseConnectionFn, redisFn: fakeFleetRedis(["mini1"]), closeTimeoutMs: 20 }), { ok: true, paused: true, queue: "pi-jobs@mini1" });
-  assert.deepEqual(conns, Array(4).fill({ failFast: true, commandTimeoutMs: 5000 }));
+  assert.deepEqual(conns, Array(3).fill({ failFast: true, commandTimeoutMs: 5000 }));
 });
 
 test("the kill switch goes to both Valkeys at once: one that never answers does not hold the other's pause (#842)", async () => {

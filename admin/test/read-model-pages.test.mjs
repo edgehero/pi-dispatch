@@ -7,7 +7,7 @@ import * as nodeFs from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
 import { emptyRedis, quietQueue } from "./helpers/fleet-reader-fakes.mjs";
-import { queueSwitchUnconfirmed } from "../src/read-model.mjs";
+import { queueSwitchErrored, queueSwitchUnconfirmed } from "../src/read-model.mjs";
 import { LOOKUP_TOLD_MAX, REFUSALS_TOP, RUN_FILE_UNREADABLE, RUN_MIRROR_UNREAD, RUNS_WINDOW_PROJECTS_MAX, RUNS_WINDOW_VALUES_MAX, SWITCH_PREVIEW_QUEUES_MAX, SWITCH_SCAN_INCOMPLETE, WAITING_DISCOVERY_TTL_MS, WAITING_QUEUES_MAX, createFleetReader, forgeLinkOf, makeLocalRunIndex, readFolderSkills, readParkedRuns, readRunById, readRunsPage, refusalsIn, revParseHead, secretProfileNames } from "../src/read-model.mjs";
 import { spawnSync } from "node:child_process";
 import { parseRunFilter, runMatches, RUN_FILTER_FIELDS, RUN_OUTCOME_VALUES, runVenueOf, triggerValueOf } from "../src/run-filter.mjs";
@@ -2537,6 +2537,87 @@ test("createFleetReader: one queue's pause goes through the held pool, and a los
   assert.deepEqual([await reader.pauseQueue({ queue: "", paused: true }), await reader.pauseQueue({ queue: "pi-jobs", paused: "yes" })], [{ invalid: "a queue name is required" }, { invalid: "paused must be true or false" }]);
   lost = null;
   await reader.dispose();
+});
+
+test("createFleetReader: one queue's pause or resume Valkey answers with an error after its script may have run says what the queue reads now, never that nothing changed (#1014)", async () => {
+  // A Lua script is not rolled back, and BullMQ's XADD to the events stream comes after the switch, so an error reply
+  // there follows a switch that happened. Valkey's own words, measured; `reads` is what a read back of the queue answers.
+  const inScript = "WRONGTYPE Operation against a key holding the wrong kind of value script: b4514f4b39660691beec2ab3023b9b46b093b439, on @user_script:57.";
+  const reply = (message) => Object.assign(new Error(message), { name: "ReplyError" });
+  let error = inScript;
+  let reads = true;
+  const conns = [];
+  const { built, mk } = switchQueues(() => Promise.reject(reply(error)));
+  const make = (conn, opts) => Object.assign(mk(conn, opts), { isPaused: async () => reads });
+  const reader = endingReader(make, [{ name: "hostb", routes: true }], { switchStepTimeoutMs: 80, closeTimeoutMs: 30, parseConnectionFn: (_url, options) => (conns.push(options), {}) });
+  await reader.snapshot();
+  await settle();
+  assert.deepEqual(await orHung(reader.pauseQueue({ queue: "pi-jobs@hostb", paused: true })), { invalid: queueSwitchErrored("pi-jobs@hostb", true, "paused"), partial: true });
+  assert.equal(queueSwitchErrored("pi-jobs@hostb", true, "paused"), "Valkey answered the pause of pi-jobs@hostb with an error; it reads paused now. Look at the fleet");
+  // The dangerous direction: a resume answered with an error that left the queue running.
+  reads = false;
+  assert.deepEqual(await orHung(reader.pauseQueue({ queue: "pi-jobs@hostb", paused: false })), { invalid: queueSwitchErrored("pi-jobs@hostb", false, "running"), partial: true });
+  assert.equal(queueSwitchErrored("pi-jobs@hostb", true, "running"), "Valkey answered the pause of pi-jobs@hostb with an error; it reads running now, and part of the pause may have applied. Look at the fleet");
+  // Refused before the script ran: the queue did not change, and the answer is the unreachable it always was.
+  error = "NOPERM User op has no permissions to run the 'evalsha' command";
+  assert.deepEqual(await orHung(reader.pauseQueue({ queue: "pi-jobs@hostb", paused: true })), { unreachable: error });
+  assert.ok(built.length >= 2 && conns.length === built.length && conns.every((c) => c.failFast === true && c.commandTimeoutMs === 5000), "the reader's queues are the console's bounded kind");
+  assert.equal(queueSwitchUnconfirmed("pi-jobs@hostb", true), "the pause of pi-jobs@hostb may or may not have been made: Valkey did not answer it within the bound. Look at the fleet once Valkey answers");
+  await reader.dispose();
+});
+
+test("createFleetReader: one queue's switch over a registry it could not read refuses a name it does not find, saying the list may be short", async () => {
+  const { built, mk } = switchQueues();
+  const reader = endingReader(mk, [], { readLiveHostsFn: async () => ({ unreachable: "registry down" }) });
+  await reader.snapshot();
+  await settle();
+  assert.deepEqual(await reader.pauseQueue({ queue: "pi-jobs@gone", paused: true }), { invalid: "\"pi-jobs@gone\" is not a queue this deployment drains (pi-jobs); the host registry could not be read, so a host's queue may be missing from that list. Nothing was changed" });
+  assert.ok(!built.some((q) => q.name === "pi-jobs@gone"), "and no queue is built for it");
+  await reader.dispose();
+});
+
+test("createFleetReader on a real Valkey: one queue is paused and resumed alone, a name it does not drain is refused with no queue made, and a script that fails after the switch is said as Valkey holds it (#1014, VALKEY_TEST_URL)", { skip: live, timeout: 30_000 }, async () => {
+  const { makeQueue } = await import("@edgehero/pi-dispatch/queue");
+  const { makeRedisClient } = await import("@edgehero/pi-dispatch/connection");
+  // Every queue the reader names is one of this test's own (its name prefixed), so no other test's queue is paused.
+  const prefix = `pd1014q-${process.pid}-${Date.now()}-`;
+  const direct = makeRedisClient(URL_);
+  direct.on("error", () => {});
+  const logsDir = tempDir("pd-1014-queue-");
+  writeFileSync(join(logsDir, "triggers.json"), '{ "triggers": [] }\n');
+  const asked = (connection, opts) => {
+    const name = opts?.name ?? "pi-jobs";
+    const queue = makeQueue(connection, { name: `${prefix}${name}` });
+    return new Proxy(queue, { get: (target, key) => (key === "name" ? name : typeof target[key] === "function" ? target[key].bind(target) : target[key]) });
+  };
+  const reader = createFleetReader({ valkeyUrl: URL_, logsDir, triggersPath: join(logsDir, "triggers.json") }, {
+    makeQueueFn: asked, readLiveHostsFn: async () => ({ hosts: [] }), discoverHostQueuesFn: async () => ({ names: ["pi-jobs@mini1", "pi-jobs@mini2"] }), readOnly: true,
+  });
+  const paused = (name) => direct.hexists(`bull:${prefix}${name}:meta`, "paused");
+  try {
+    assert.deepEqual(await reader.pauseQueue({ queue: "pi-jobs@mini1", paused: true }), { ok: true, paused: true, queue: "pi-jobs@mini1" });
+    assert.deepEqual([await paused("pi-jobs@mini1"), await paused("pi-jobs")], [1, 0], "that queue alone");
+    const ghost = await reader.pauseQueue({ queue: "pi-jobs@ghost", paused: true });
+    assert.match(ghost.invalid, /"pi-jobs@ghost" is not a queue this deployment drains \(pi-jobs, pi-jobs@mini1, pi-jobs@mini2\)\. Nothing was changed/);
+    assert.equal(await direct.exists(`bull:${prefix}pi-jobs@ghost:meta`), 0, "no phantom queue was made by the refusal");
+    assert.deepEqual(await reader.pauseQueue({ queue: "pi-jobs@mini1", paused: false }), { ok: true, paused: false, queue: "pi-jobs@mini1" });
+    assert.equal(await paused("pi-jobs@mini1"), 0);
+    // pause-7.lua moves the jobs and flips the flag, then XADDs to the events stream: a string there fails it after.
+    await direct.set(`bull:${prefix}pi-jobs@mini2:events`, "not a stream");
+    assert.deepEqual(await reader.pauseQueue({ queue: "pi-jobs@mini2", paused: true }), { invalid: queueSwitchErrored("pi-jobs@mini2", true, "paused"), partial: true });
+    assert.equal(await paused("pi-jobs@mini2"), 1, "paused, as said");
+    assert.deepEqual(await reader.pauseQueue({ queue: "pi-jobs@mini2", paused: false }), { invalid: queueSwitchErrored("pi-jobs@mini2", false, "running"), partial: true });
+    assert.equal(await paused("pi-jobs@mini2"), 0, "running again, as said: the dangerous direction");
+  } finally {
+    await reader.dispose();
+    let cursor = "0";
+    do {
+      const [next, keys] = await direct.scan(cursor, "MATCH", `bull:${prefix}*`, "COUNT", 500);
+      cursor = String(next);
+      if (keys.length > 0) await direct.del(...keys);
+    } while (cursor !== "0");
+    direct.disconnect();
+  }
 });
 
 test("createFleetReader: a fleet pause names a held queue discovery no longer finds, and a resume whose registry read failed still reaches the queues it holds (#842)", async () => {

@@ -1026,10 +1026,14 @@ ending a sandbox shell say it too, and an End request that may still stand is ta
 Undo say that, not that someone changed the package. On a Valkey that stopped answering, the kill switch answers within about 6 seconds for a pause and 12 for a
 resume (9 measured), and its preview waits at most 6 seconds for the fleet's counts before a pause and 10 before a resume. It names the
 queues it knows are paused (or resumed), those not confirmed, whose pause or resume was sent and may or may not have been made, and those it
-did not try, since a resume stops at the first queue that does not answer. When the host registry or the look for queues could not be
-read, the list of queues it switched may be short. The answer then starts by saying so, beside a pause that was sent and may or may not
-have been made, so the audit row keeps both, and ends with what to do: other queues may exist and were not paused, so pause the fleet
-again once Valkey answers. It says so even when every queue it found was paused, then in the banner after "Paused the fleet", and the
+did not try, since a resume stops at the first queue that does not answer. A queue whose pause or resume Valkey answered with an
+error is read back and named with what it reads now ("answered with an error for pi-jobs (reads paused now)"): the error can come
+after the queue already switched, so only a refusal made before the switch ran (an ACL that denies it, a read-only replica, a Valkey
+still loading or busy) is called not paused. The answer then starts by saying Valkey answered with an error, so the audit row keeps
+that whatever the Valkey's address. When the host registry or the look for queues could not be read, the list of queues it
+switched may be short. The answer then starts by saying so, beside a pause that was sent and may or may not have been made and a pause
+Valkey answered with an error, so the audit row keeps each of them, and ends with what to do: other queues may exist and were not
+paused, so pause the fleet again once Valkey answers. It says so even when every queue it found was paused, then in the banner after "Paused the fleet", and the
 audit log keeps it in a second row on the same ticket; the `/dispatch` panel and command, the agent tools and `pi-dispatch pause` say it
 too. A console started while Valkey does not answer knows only `pi-jobs`, so a pause also goes to this host's own queue,
 `pi-jobs@<name>`, when the deployment's `.env` sets `PI_WORKER_NAME`, the name the worker service runs. None is added when the `.env`
