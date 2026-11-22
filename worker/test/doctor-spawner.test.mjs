@@ -244,3 +244,107 @@ test("the not-published line is found at the END of a long stderr, which a kept 
 	assert.equal(logs[0][1].published, false);
 	await spawner.close();
 });
+
+// Issue #1021: a run killed at its bound leaves what its cleanups would have removed, and the host publishes no result
+// until the next run, so one extra run follows it: doubling per killed run in a row, capped at the interval, reset by a
+// run that finishes.
+const RETRY = 15 * 60_000;
+const fire = (t) => {
+	t.fired = true;
+	t.fn();
+};
+const killTimerOf = (timers) => timers.timeouts.filter((t) => t.ms === DOCTOR_RUN_TIMEOUT_MS && !t.cleared && !t.fired).at(-1);
+const retriesOf = (timers) => timers.timeouts.filter((t) => t.ms !== DOCTOR_RUN_TIMEOUT_MS && t.ms !== DOCTOR_BOOT_DELAY_MS);
+
+test("a run killed at its bound is retried after retryAfterKillMs, doubling per killed run up to the interval, reset by a run that finishes (issue #1021)", async () => {
+	const { spawner, timers, children, logs } = build({ retryAfterKillMs: RETRY, intervalMs: 100 * 60_000 });
+	void spawner.runOnce();
+	const delays = [];
+	for (let i = 0; i < 4; i++) {
+		fire(killTimerOf(timers));
+		await flush();
+		const retry = retriesOf(timers).at(-1);
+		assert.equal(retry.unrefd, true, "the retry never holds the worker open");
+		delays.push(retry.ms);
+		assert.deepEqual(logs.at(-1), ["doctor_spawn_failed", { reason: "timeout", ms: 0, retryMs: retry.ms }], "the line says when the retry is due");
+		fire(retry);
+		assert.equal(children.length, i + 2, "the retry starts a run");
+	}
+	assert.deepEqual(delays, [RETRY, 2 * RETRY, 4 * RETRY, 100 * 60_000], "15, 30, 60 minutes, then the interval caps it");
+	// The run the last retry started finishes; the next killed run starts again from the first delay.
+	children.at(-1).emit("close", 0, null);
+	await flush();
+	assert.deepEqual(logs.at(-1)[0], "doctor_published");
+	void spawner.runOnce();
+	fire(killTimerOf(timers));
+	await flush();
+	assert.equal(logs.at(-1)[1].retryMs, RETRY, "a finished run resets the doubling");
+	await spawner.close();
+});
+
+test("a pending retry is cleared by the run that starts before it and by close, never overlaps a run, and only a kill at the bound arms one (issue #1021)", async () => {
+	const { spawner, timers, children, logs } = build({ retryAfterKillMs: RETRY });
+	spawner.start();
+	void spawner.runOnce();
+	fire(killTimerOf(timers));
+	await flush();
+	const [retry] = retriesOf(timers);
+	assert.equal(retry.ms, RETRY);
+	// The interval's own tick comes first: its run supersedes the retry, which then cannot start a second one beside it.
+	timers.intervals[0].fn();
+	assert.equal(children.length, 2);
+	assert.equal(retry.cleared, true, "the run that started is the retry");
+	children[1].emit("close", 0, null);
+	await flush();
+	// A run that finishes, even with doctor's own exit 1, arms nothing.
+	void spawner.runOnce();
+	children[2].emit("close", 1, null);
+	await flush();
+	assert.equal(retriesOf(timers).length, 1, "only the first kill armed a retry");
+	assert.equal(logs.filter((l) => l[0] === "doctor_overlapped").length, 0, "and nothing ever overlapped");
+	// Killed again, then the worker stops: close clears the pending retry, and one that fires anyway starts nothing.
+	void spawner.runOnce();
+	fire(killTimerOf(timers));
+	await flush();
+	const pending = retriesOf(timers).at(-1);
+	assert.notEqual(pending, retry);
+	assert.equal(pending.cleared, false);
+	await spawner.close();
+	assert.equal(pending.cleared, true, "close clears it");
+	pending.fn();
+	assert.equal(children.length, 4, "nothing starts after close");
+});
+
+test("no retry without the option, at a non-positive interval, or for a run the shutdown killed (issue #1021)", async () => {
+	const armed = build({ retryAfterKillMs: RETRY });
+	void armed.spawner.runOnce();
+	fire(killTimerOf(armed.timers));
+	await flush();
+	assert.deepEqual(armed.timers.timeouts.map((t) => t.ms), [DOCTOR_RUN_TIMEOUT_MS, RETRY], "with the option and an interval, a kill arms one");
+	await armed.spawner.close();
+	for (const extra of [{}, { retryAfterKillMs: RETRY, intervalMs: 0 }, { args: ["updates", "look"], events: { overlapped: "updates_look_overlapped", spawnFailed: "updates_look_failed", finished: "updates_look_finished" } }]) {
+		const { spawner, timers, logs } = build(extra);
+		void spawner.runOnce();
+		fire(killTimerOf(timers));
+		await flush();
+		assert.deepEqual(timers.timeouts.map((t) => t.ms), [DOCTOR_RUN_TIMEOUT_MS], JSON.stringify(extra));
+		assert.deepEqual(logs, [[extra.events?.spawnFailed ?? "doctor_spawn_failed", { reason: "timeout", ms: 0 }]], "and the line names no retry");
+		await spawner.close();
+	}
+	const { spawner, timers } = build({ retryAfterKillMs: RETRY });
+	void spawner.runOnce();
+	await spawner.close();
+	assert.deepEqual(timers.timeouts.map((t) => t.ms), [DOCTOR_RUN_TIMEOUT_MS], "a run the shutdown killed is not retried");
+});
+
+test("a run killed at its bound whose end lands after close arms no retry (issue #1021)", async () => {
+	// The child's own close event arrives after the worker said it stopped: nothing may be armed past the closer.
+	const { spawner, timers, children, logs } = build({ retryAfterKillMs: RETRY, killGroup: () => {} });
+	void spawner.runOnce();
+	fire(killTimerOf(timers));
+	const closing = spawner.close();
+	children[0].emit("close", null, "SIGKILL");
+	await closing;
+	assert.deepEqual(timers.timeouts.map((t) => t.ms), [DOCTOR_RUN_TIMEOUT_MS], "no retry armed after close");
+	assert.deepEqual(logs, []);
+});

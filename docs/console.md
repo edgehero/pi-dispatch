@@ -1743,11 +1743,13 @@ A smaller line under any of these says what a record left out, and when that was
 ### Doctor results
 
 Every `pi-dispatch doctor` run publishes what it found to the deployment's Valkey, one result per host, and each
-worker runs doctor itself a minute after it starts and then every `PI_DOCTOR_INTERVAL_HOURS` (24 by default; `0`
-turns the worker's own runs off). The fleet page's **Doctor** panel shows each host's last result: how long ago it
-ran, how many checks failed, warned and passed, and every failing and warning check with its fix, failing first. A
-result older than two of that host's doctor intervals is marked stale. A live host that has published nothing is
-named, so a host nobody checked never looks healthy.
+worker runs doctor itself a minute after it starts and then every `PI_DOCTOR_INTERVAL_HOURS` (24 by default; `0` turns
+the worker's own runs off). A run the worker kills at its two-minute bound is followed by one more 15 minutes later,
+twice as long after each run in a row that is killed too and never longer than the interval, so a slow daemon right
+after a restart does not leave the host without a result for a day. The fleet page's **Doctor** panel shows each
+host's last result: how long ago it ran, how many checks failed, warned and passed, and every failing and warning
+check with its fix, failing first. A result older than two of that host's doctor intervals is marked stale. A live
+host that has published nothing is named, so a host nobody checked never looks healthy.
 
 What a result holds is doctor's own sentences with the private parts cut out before they leave the host: a path
 becomes `<path>`, a URL keeps only its scheme and host, the value of every variable named like a secret (a token, a

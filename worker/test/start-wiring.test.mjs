@@ -1,6 +1,7 @@
 import { parseTriggers, TRIGGERS_FILE_VERSION } from "../src/triggers.mjs";
 import { mergePolicyDigest } from "../src/merge-policy.mjs";
 import { setDesired } from "../src/updates.mjs";
+import { DOCTOR_RETRY_AFTER_KILL_MS } from "../src/doctor-spawner.mjs";
 import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { basename, join } from "node:path";
@@ -3171,6 +3172,7 @@ test("the look stays off until PI_UPDATES_LOOK=1, and the reconcile asks a free 
 	seen.length = 0;
 	const on = await runStart({ env: { PI_UPDATES_LOOK: "1" }, makeUpdatesRunner: runner });
 	assert.deepEqual(seen.map((h) => h.args.args), [["updates", "look"], ["updates", "reconcile"]]);
+	assert.deepEqual(seen.map((h) => h.args.retryAfterKillMs), [undefined, undefined], "issue #1021: the retry after a kill is doctor's alone");
 	assert.equal(seen[0].args.intervalMs, 24 * 3600000, "once a day");
 	assert.equal(seen[0].args.shouldRun, undefined);
 	assert.ok(on.captured.extraClosers.includes(seen[0]));
@@ -3190,6 +3192,7 @@ test("the default arms the doctor runs daily on the worker's own CLI and registe
 	assert.equal(constructions.length, 1);
 	assert.equal(starts.length, 1, "constructed AND started");
 	assert.equal(constructions[0].intervalMs, 24 * 3600000);
+	assert.equal(constructions[0].retryAfterKillMs, DOCTOR_RETRY_AFTER_KILL_MS, "issue #1021: a killed run is retried soon, not a whole interval later");
 	assert.match(constructions[0].cliPath, /[\\/]worker[\\/]src[\\/]cli\.mjs$/, "the same entry an operator types");
 	assert.equal(typeof constructions[0].log, "function");
 	assert.ok(captured.extraClosers.includes(handles[0]), "the spawner itself is the closer, so a shutdown kills a run in flight");

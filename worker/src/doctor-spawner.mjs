@@ -19,9 +19,10 @@
  * `pi-dispatch doctor` already does; nothing the worker runs here costs a provider call.
  *
  * The interval idiom is `retention-sweep.mjs`'s, down to the injected timer seams and the posture of `close()`:
- * unref'd so it never holds the process open, closed through `extraClosers` so a clean shutdown clears it. Two
- * divergences, marked at their sites: the first run is DELAYED rather than immediate, and a run in flight is KILLED on
- * close rather than drained.
+ * unref'd so it never holds the process open, closed through `extraClosers` so a clean shutdown clears it. Three
+ * divergences, marked at their sites: the first run is DELAYED rather than immediate, a run in flight is KILLED on
+ * close rather than drained, and a run killed at its bound is followed by one extra run (`retryAfterKillMs`, issue
+ * #1021) rather than left to the next interval.
  */
 import { spawn as nodeSpawn } from "node:child_process";
 
@@ -40,15 +41,28 @@ export const DOCTOR_INTERVAL_MAX_HOURS = 168;
  * residual (issue #978), not an oversight. A slow VM-backed daemon right after a restart is exactly when a run reaches
  * the bound, and what such a run leaves is bounded and named: at most its fixed-name CPU-reserve read helper
  * (`pi-dispatch-cpu-reserve-doctor-<hex8>`, which the next doctor removes before its own read); its pid-named egress
- * canary network and probes, which the next doctor's canary sweep removes by name once that pid is dead (with the
- * egress policy armed, on a daemon this host owns; this child never passes `--live`, so on the podman venue it starts
- * no canary at all); and its in-image gh probe, which the next doctor's gh probe step removes right before its own
- * probe, wherever that probe may run (the policy off and the podman venue included). REJECTED: a SIGTERM grace before the kill, which needs a signal handler in a twelve thousand line
- * CLI that knows, at whichever step the signal lands, what that run has made and removes it (on the same slow daemon
- * that caused the kill); and skipping the first run after boot while the daemon is busy, which would delay the first
- * published result by a whole interval.
+ * canary network and probes, which the next doctor's canary sweep removes by name once that pid is dead, on a daemon
+ * this host owns, whether the egress policy is armed or not (issue #1021: an operator who turns it off after a killed
+ * run still has them removed, and the sweep prints only what it removed or could not remove; this child never passes
+ * `--live`, so on the podman venue it starts no canary at all); and its in-image gh probe, which the next doctor's gh
+ * probe step removes right before its own probe, wherever that probe may run (the policy off and the podman venue
+ * included). The next doctor is the retry this spawner starts `DOCTOR_RETRY_AFTER_KILL_MS` later (issue #1021), not a
+ * whole interval later. REJECTED: a SIGTERM grace before the kill, which needs a signal handler in a twelve thousand
+ * line CLI that knows, at whichever step the signal lands, what that run has made and removes it (on the same slow
+ * daemon that caused the kill); and skipping the first run after boot while the daemon is busy, which would delay the
+ * first published result by a whole interval.
  */
 export const DOCTOR_RUN_TIMEOUT_MS = 120_000;
+
+/**
+ * How long after a run killed at its bound the worker's doctor runs again (issue #1021), doubled for each killed run in
+ * a row and capped at the interval; a run that finishes resets it. Without it a killed run's leftovers waited a whole
+ * interval (24 h by default) for the next doctor to remove them, and the host published no doctor result in between.
+ * Fifteen minutes, because the slow window issue #978 measured after a restart lasted about that long: a retry much
+ * sooner lands in the same window and is killed again. The doubling is for a daemon that stays slow: each retry is one
+ * more doctor's worth of runtime commands against it.
+ */
+export const DOCTOR_RETRY_AFTER_KILL_MS = 15 * 60_000;
 
 /**
  * How long after boot the first run starts. DIVERGENCE from `host-registry.start`, which beats at once, and from the
@@ -98,6 +112,11 @@ export function makeDoctorSpawner({
 	args = null,
 	events = { overlapped: "doctor_overlapped", spawnFailed: "doctor_spawn_failed", finished: "doctor_published" },
 	shouldRun = null,
+	// Issue #1021: after a run killed at its bound, one extra run this many ms later (doubled per killed run in a row, capped
+	// at the interval). Opt-in: the worker's doctor passes `DOCTOR_RETRY_AFTER_KILL_MS`. The issue #796 children do not: a
+	// killed `updates look` leaves no runtime object and writes its record only at its end, and the reconcile already runs
+	// every two minutes.
+	retryAfterKillMs = null,
 }) {
 	// The interval in whole hours, handed to the child so its record carries the cadence it really runs at.
 	const everyHours = Math.round(intervalMs / 3_600_000);
@@ -121,6 +140,28 @@ export function makeDoctorSpawner({
 	let closed = false;
 	// The run in flight, `{ child, done }`, or null.
 	let running = null;
+	// Issue #1021: the pending retry after a killed run, and how many runs in a row were killed at the bound.
+	let retryTimer = null;
+	let killedInARow = 0;
+	const clearRetry = () => {
+		if (retryTimer) clearTimeoutFn(retryTimer);
+		retryTimer = null;
+	};
+	// Arms the one retry after a run killed at its bound and returns its delay, or null where none is armed: no option, a
+	// non-positive interval (the knob at 0 is "never"), or a spawner already closed. Unref'd, like the interval: a pending
+	// retry must not hold a stopping worker open. It goes through `runOnce`, so the overlap rule holds for it too.
+	const armRetry = () => {
+		killedInARow += 1;
+		if (closed || !(retryAfterKillMs > 0) || !(intervalMs > 0)) return null;
+		const delay = Math.min(retryAfterKillMs * 2 ** (killedInARow - 1), intervalMs);
+		clearRetry();
+		retryTimer = setTimeoutFn(() => {
+			retryTimer = null;
+			void runOnce();
+		}, delay);
+		retryTimer?.unref?.();
+		return delay;
+	};
 
 	async function runOnce() {
 		if (closed) return;
@@ -144,6 +185,9 @@ export function makeDoctorSpawner({
 			log(events.spawnFailed, { reason: err?.code ?? "spawn threw" });
 			return;
 		}
+		// Issue #1021: a run that starts, from the interval or by hand, supersedes a pending retry; a retry left armed would
+		// start a second doctor right after this one finished.
+		clearRetry();
 		let stderr = "";
 		let timedOut = false;
 		let settled = false;
@@ -172,7 +216,12 @@ export function makeDoctorSpawner({
 			child.on?.("error", (err) => settle({ event: events.spawnFailed, data: { reason: err?.code ?? "spawn failed" } }));
 			child.on?.("close", (code, signal) => {
 				const ms = now() - startedAt;
-				if (timedOut) return settle({ event: events.spawnFailed, data: { reason: "timeout", ms } });
+				if (timedOut) {
+					// Issue #1021: the line says when the retry is due (`retryMs`), and names none where none was armed.
+					const retryMs = armRetry();
+					return settle({ event: events.spawnFailed, data: { reason: "timeout", ms, ...(retryMs === null ? {} : { retryMs }) } });
+				}
+				killedInARow = 0;
 				// `code` is doctor's own verdict (0 ready, 1 a check failed) and is reported as it is; whether the run reached
 				// Valkey is the one stderr line doctor writes when it did not. No label, no path: names and integers only.
 				settle({ event: events.finished, data: { code: code ?? null, signal: signal ?? null, ms, published: !stderr.includes(DOCTOR_PUBLISH_SKIPPED_PREFIX) } });
@@ -212,6 +261,7 @@ export function makeDoctorSpawner({
 			if (bootTimer) clearTimeoutFn(bootTimer);
 			timer = null;
 			bootTimer = null;
+			clearRetry();
 			const inFlight = running;
 			if (!inFlight) return;
 			kill(inFlight.child);
