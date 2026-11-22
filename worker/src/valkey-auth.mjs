@@ -339,6 +339,16 @@ function ownerShown(info) {
 }
 
 /**
+ * The `unknown` of a read the caller killed at its bound (issue #1021: `up` bounds every ownership read, and its
+ * `query` then answers `{ timedOut: true, timeoutMs }`): the daemon not answering, said with the command, never as an
+ * exit code it never gave.
+ */
+function notAnswered(command, res) {
+	const within = Number.isFinite(res?.timeoutMs) ? ` within ${Math.round(res.timeoutMs / 1000)} s` : "";
+	return `docker did not answer \`${command}\`${within}`;
+}
+
+/**
  * One container by name: `{ absent }`, `{ ours, owner, image? }`, or `{ unknown }` when docker did not answer (which is
  * never taken as ours). `query(cmd, args)` resolves `{ code, stdout, stderr }`. `image` is the record's `Config.Image`,
  * the reference the container was created from as given (measured on docker 27.4: `valkey/valkey:8` and
@@ -346,6 +356,7 @@ function ownerShown(info) {
  */
 export async function valkeyContainerOwner(name, { dirs, port, query }) {
 	const res = await query("docker", ["container", "inspect", name]);
+	if (res?.timedOut === true) return { unknown: notAnswered(`docker container inspect ${name}`, res) };
 	if (res.code !== 0) return /no such (container|object)/i.test(String(res.stderr ?? "")) ? { absent: true } : { unknown: `docker container inspect ${name} exited ${res.code}` };
 	let info;
 	try {
@@ -366,6 +377,7 @@ export async function valkeyContainerOwner(name, { dirs, port, query }) {
  */
 export async function foreignVolumeUsers({ dirs, port, query }) {
 	const ps = await query("docker", ["ps", "-a", "--filter", `volume=${VALKEY_VOLUME}`, "--format", "{{.Names}}"]);
+	if (ps?.timedOut === true) return { unknown: notAnswered(`docker ps -a --filter volume=${VALKEY_VOLUME}`, ps) };
 	if (ps.code !== 0) return { unknown: `docker ps -a --filter volume=${VALKEY_VOLUME} exited ${ps.code}` };
 	const foreign = [];
 	for (const name of String(ps.stdout ?? "").split("\n").map((l) => l.trim()).filter(Boolean)) {
@@ -460,6 +472,7 @@ export function valkeyVolumeCreateArgs(deployment) {
  */
 export async function valkeyVolumeOwner({ dirs, query }) {
 	const res = await query("docker", ["volume", "inspect", VALKEY_VOLUME]);
+	if (res?.timedOut === true) return { unknown: notAnswered(`docker volume inspect ${VALKEY_VOLUME}`, res) };
 	if (res.code !== 0) return /no such volume|not found/i.test(String(res.stderr ?? "")) ? { absent: true } : { unknown: `docker volume inspect ${VALKEY_VOLUME} exited ${res.code}` };
 	let info;
 	try {

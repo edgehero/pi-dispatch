@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { mkdirSync, readdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { DOCKER_NEVER_STARTED_EXITS } from "./backends.mjs";
 import { CONTAINER_GLOBAL_PI_DIR, CONTAINER_HOME, memoryBytesOfArgs } from "./container-spec.mjs";
@@ -82,8 +82,10 @@ export function makeRunContainer({
 	// Issue #345: the exits this runtime spells "never started", after which the cidfile says whether a container was
 	// created anyway; and the host fs the cidfile is read and removed through. Seams for the tests.
 	neverStartedExits = DOCKER_NEVER_STARTED_EXITS,
-	fs = { readFileSync, rmSync },
+	// Issue #1021: `statSync` too, the create's time read off the same file (`watchCreated`).
+	fs = { readFileSync, rmSync, statSync },
 	detachedCheck = {}, // the clock and bounds `stopDetached` takes, a seam so a test does not wait out a real 10 s
+	createdCheck = {}, // issue #1021: the clock, timers and step `watchCreated` takes (the clock times the first output too)
 	// Issue #354: the runtime's CLI and its argv builder, a PAIR. Every spawn below names `bin` -- the run, the job
 	// network's create and teardown, the detached check -- so a podman venue cannot run its container under one binary
 	// and look for it (or remove its network) under another. The defaults are the local venue's, byte-identical.
@@ -994,8 +996,29 @@ export function makeRunContainer({
 			return demux.end();
 		};
 
+		// Issue #1021: how long this container took to start, as two numbers from one instant taken just before the spawn, on
+		// a run whose argv carries the cidfile (a binding venue's run, which creates and starts in the one call). An exec into
+		// a sandbox made at create (openshell) carries none and times nothing: its spawn starts no container, so a number
+		// from it would mean something else under the same name. `container_created` is the create (`watchCreated`).
+		// `container_first_output` is the first stdout bytes the child hands over: an UPPER bound on the whole start (the
+		// create, the start, node's boot, the runner's imports and its session setup), because nothing reaches the CLI's
+		// stdout but the container's own: the docker and Podman CLIs print their warnings and errors on stderr (the
+		// `cpuRangeRefusal` read of stderr relies on it), and the image's supervisor and entrypoint print nothing there
+		// before the runner does. The runner's first line comes before its first model call on every job whose idle watch
+		// is armed (`activity_watch`: an image that honours `idleWatch`, and the idle limit is never off), earlier with
+		// staged packages (`packages_loaded`). Without such a line the bound is whatever writes first, a job's own tool or
+		// at the latest the exit line, so it can be the whole run: an upper bound, never the start itself. Two events, each
+		// said when it happens, rather than one field: during a slow start a create line with no first output after it is
+		// the evidence, and a container that never writes still has its create. Nothing is said for one that writes no
+		// stdout.
+		let stopCreated = () => {};
 		const run = new Promise((resolve, reject) => {
+			const timed = args.includes(`--cidfile=${cidFile}`);
+			const startClock = createdCheck.now ?? (() => Date.now());
+			const spawnedAt = startClock();
+			if (timed) stopCreated = watchCreated({ cidFile, fs, onCreated: (ms) => log("container_created", { container: name, ms }), ...createdCheck, since: spawnedAt });
 			const child = spawnFn(bin, args, { stdio: [exitKey !== null ? "pipe" : "ignore", "pipe", "pipe"] });
+			if (timed) child.stdout?.once?.("data", () => log("container_first_output", { container: name, ms: Math.max(0, Math.round(startClock() - spawnedAt)) }));
 			// Issue #888: the container exists from here, so the backstop's clocks start now.
 			armActivity();
 			// Issue #686: a stdin-steered attempt's key is frame 1, written at the spawn, and the pipe is NOT closed: it is
@@ -1312,6 +1335,9 @@ export function makeRunContainer({
 			if (typeof collectRun === "function") return await collectRun(result, { opts: buildOpts });
 			return result;
 		} finally {
+			// Issue #1021: the poll ends here, on every path, after one last look while docker's cidfile is still there (it
+			// is removed below), so a container shorter than one poll step is still timed.
+			stopCreated();
 			await teardown();
 			dropGrant();
 			if (network) {
@@ -1351,6 +1377,64 @@ export function liveOutcomeOf(code, aborted, neverStartedExits = []) {
 	if (code === 1) return "failed";
 	if (Array.isArray(neverStartedExits) && neverStartedExits.includes(code)) return "failed";
 	return "unknown";
+}
+
+/** Issue #1021: how often a running attempt's cidfile is looked at, until the runtime has written the container's ID in it. */
+export const CREATED_POLL_MS = 250;
+
+/**
+ * How long the runtime took to CREATE this attempt's container (issue #1021): from the spawn of the run to the moment the
+ * CLI wrote the container's ID into the run's cidfile, handed to `onCreated(ms)` once. Logged as `container_created`.
+ * `since` is the caller's instant from just before the spawn, the one `container_first_output` is timed from too.
+ *
+ * The create, because the start cannot be seen from here. A binding venue's run is ONE attached call that creates the
+ * container, attaches to it, starts it and waits, and the image writes nothing when it begins, so no moment on this side
+ * marks the start. The cidfile marks the create: the docker CLI opens it empty before its create call and writes the ID
+ * right after the daemon accepted the create, then attaches and starts (the write `stopDetached` reads); Podman writes it
+ * whole at the same point and deletes it when `--rm` removes the container. The time is the file's own mtime, set by the
+ * CLI on this host, so both ends are this host's clock and the poll's step is not in the number. The start call that
+ * follows is not in it either: a daemon slow to start what it created reads fast here.
+ * REJECTED: `docker inspect` for `State.StartedAt` while the container runs. Nothing says when the start has happened, so
+ * it would be asked again until it had: daemon calls for every job, the load a slow daemon is least able to take. And a
+ * line the runner writes when it begins: an image change, read off a stdout the job's own tools write to as well.
+ *
+ * Polled rather than read once at the end, because Podman's file is gone by the time its CLI exits. Returns `stop()`, which
+ * looks once more (docker's file stays until the run removes it, after its CLI closed, so a container shorter than one
+ * step is still timed) and ends the poll; idempotent. A host fs without `statSync` (a test's) times nothing.
+ */
+export function watchCreated({ cidFile, fs, onCreated, now = () => Date.now(), since = now(), pollMs = CREATED_POLL_MS, timers = { setInterval, clearInterval } }) {
+	if (typeof fs?.statSync !== "function") return () => {};
+	let done = false;
+	let timer = null;
+	const end = () => {
+		done = true;
+		if (timer !== null) timers.clearInterval(timer);
+		timer = null;
+	};
+	const look = () => {
+		if (done) return;
+		let stat;
+		try {
+			stat = fs.statSync(cidFile);
+		} catch {
+			return; // not written yet, or Podman's, removed with its container
+		}
+		// Shorter than an ID: docker's file before its create returned.
+		if (!(stat?.size >= 64) || !Number.isFinite(stat.mtimeMs)) return;
+		end();
+		try {
+			// A filesystem with a coarse mtime can put the write a little before the spawn.
+			onCreated(Math.max(0, Math.round(stat.mtimeMs - since)));
+		} catch {
+			// a logging fault must not reach the run
+		}
+	};
+	timer = timers.setInterval(look, pollMs);
+	timer?.unref?.();
+	return () => {
+		look();
+		end();
+	};
 }
 
 /** The detached check's whole bound, retries included, so a daemon that stopped answering cannot hold the slot for long. */

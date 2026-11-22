@@ -366,6 +366,21 @@ runtime can exit one of those codes while the container it created runs on (a lo
 Podman), stop that container and add `detached: true` to the result: the processor then retries the job as
 `container-detached` and keeps the slot (issue #345).
 
+Each container's start is timed too (issue #1021), as two lines in the worker log, each said once per container and
+timed from just before the spawn of the run. `container_created { container, ms }` runs to the moment the CLI wrote the
+container's ID into the cidfile (the file's own time), which docker and Podman both do right after the daemon accepted
+the create and before they start the container: the create alone. `container_first_output { container, ms }` runs to
+the first chunk on the CLI's stdout, which carries only the container's own output (both CLIs print their own
+messages on stderr): an upper bound on the whole start, create, start and the runner's boot included. The runner
+writes a line before its first model call on every job whose idle watch is armed, earlier with staged packages; a job
+without one has its exit line as the first output at the latest, so the bound can be the whole run. A slow create
+shows in both lines, a slow start as a small first number and a large second one. A container that writes no stdout
+logs no first output. Both carry durations, not wall times: on a host whose log has no timestamps of its own (the
+macOS launchd service's), read them by their order, after `worker_started` and beside `sandbox_reaper_pass`, and
+expect `container_created` up to one poll step (250 ms) after `container_first_output` when the create was very fast.
+A backend whose argv carries no `--cidfile` logs neither, and one whose CLI writes the file at another moment, or
+prints on stdout itself, would make a line mean something else.
+
 ## Reaching a model server on the host
 
 A job with egress on reaches the network only through the egress proxy (issue #503). So a model server on

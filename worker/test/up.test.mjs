@@ -2563,6 +2563,110 @@ test("up adopting an unlabelled volume reads its owner marker with an unpublishe
 	assert.match(dark.text(), /whose queue pi-dispatch-valkey-data holds could not be read before starting/);
 });
 
+// Issue #1021: a slow daemon held `up` at the owner check's `docker run`, which had no bound (nor did its exec, stop or
+// rm). Each step is killed at its bound now, and an answer counts only once the check's own container is confirmed gone.
+test("up's Valkey owner check is bounded at every docker step, and publishes nothing unless its container is confirmed gone (#1021)", async () => {
+	const files = { "/deploy/.env": `VALKEY_URL=redis://127.0.0.1:16496\nVALKEY_PASSWORD=${PASSWORD}\n` };
+	const base = { "docker version": 0, "docker image inspect": 0, "docker run": 0, "docker stop": 0, "docker rm": 0, "docker volume inspect": volumeRecord(null) };
+	const isCheck = (c) => c.cmd === "docker" && c.args.includes("pi-dispatch-valkey-ownercheck");
+	// `hangs(c)` picks the docker steps that never finish: each is a child that never closes, killed at its bound.
+	const drive = async ({ plan = {}, hangs = () => false, extra = {} } = {}) => {
+		const h = harness({ plan: { ...base, ...plan }, listening: false, argv: ["--yes"], answers: ["y"], files, extra });
+		const real = h.deps.spawn;
+		const killed = [];
+		const spawn = (cmd, args, opts) => {
+			if (!hangs({ cmd, args })) return real(cmd, args, opts);
+			h.calls.push({ cmd, args, opts });
+			return { stdout: { on() {} }, stderr: { on() {} }, on() { return this; }, kill: (sig) => killed.push(`${args[0]} ${sig}`) };
+		};
+		const code = await runUp(["--yes"], { ...h.deps, spawn, ownerCheckRunTimeoutMs: 5, dockerStepTimeoutMs: 5 });
+		const steps = h.calls.filter(isCheck).map((c) => (c.args[0] === "rm" && c.args[1] === "-f" ? "rm -f" : c.args[0]));
+		return { code, killed, steps, published: h.calls.some((c) => c.cmd === "docker" && c.args[0] === "run" && c.args.includes("-p")), text: h.text() };
+	};
+	const step = (verb) => ({ cmd, args }) => isCheck({ cmd, args }) && args[0] === verb && args[1] !== "-f";
+	// The run never finishes: killed, then ONE bounded `rm -f` of what the daemon may have made, and the command named.
+	const run = await drive({ hangs: step("run") });
+	assert.equal(run.code, 1);
+	assert.deepEqual(run.killed, ["run SIGKILL"]);
+	assert.deepEqual(run.steps, ["run", "rm -f"], "no exec, stop or plain rm after a run that did not finish");
+	assert.equal(run.published, false);
+	assert.match(run.text, /whose queue pi-dispatch-valkey-data holds could not be read before starting \(its docker run did not finish within 0 s; up ran `docker rm -f pi-dispatch-valkey-ownercheck` after it, and once docker answers, run that again if `docker ps -a` still lists pi-dispatch-valkey-ownercheck; on a host without /);
+	// The bound holds a pull of the Valkey image where the host lacks it: the refusal names the pull that takes it out.
+	const pullHint = `on a host without ${VALKEY_IMAGE}, \`docker pull ${VALKEY_IMAGE}\` first takes its pull out of that bound), so no Valkey is started on it`;
+	assert.ok(run.text.includes(pullHint), "the pull, by the image constant");
+	// ...and when that `rm -f` does not finish either, it is killed too, and said.
+	const both = await drive({ hangs: (c) => isCheck(c) && c.args[0] === "rm" ? true : step("run")(c) });
+	assert.deepEqual(both.killed, ["run SIGKILL", "rm SIGKILL"]);
+	assert.match(both.text, /its docker run did not finish within 0 s, and the `docker rm -f pi-dispatch-valkey-ownercheck` up ran after it did not succeed: run it once docker answers; on a host without /);
+	assert.ok(both.text.includes(pullHint));
+	// An exec that never finishes: killed, the check fails, and its container is still stopped and removed.
+	const exec = await drive({ hangs: step("exec") });
+	assert.equal(exec.code, 1);
+	assert.deepEqual(exec.killed, ["exec SIGKILL"]);
+	assert.deepEqual(exec.steps, ["run", "exec", "stop", "rm"]);
+	assert.equal(exec.published, false);
+	assert.match(exec.text, /\(its docker exec did not finish within 0 s\), so no Valkey is started on it/);
+	// A stop that never finishes leaves the Valkey running, which a plain `rm` refuses: not confirmed gone, nothing published.
+	const stop = await drive({ hangs: step("stop"), plan: { "docker rm": { code: 1, stderr: "Error response from daemon: cannot remove container: container is running\n" } } });
+	assert.equal(stop.code, 1);
+	assert.deepEqual(stop.killed, ["stop SIGKILL"]);
+	assert.deepEqual(stop.steps, ["run", "exec", "stop", "rm"]);
+	assert.equal(stop.published, false, "the marker was this folder's, and still nothing is started beside the check's Valkey");
+	assert.match(stop.text, /\(pi-dispatch-valkey-ownercheck was not confirmed removed afterwards \(its docker stop did not finish within 0 s\), so nothing is started beside it on the volume; `docker rm -f pi-dispatch-valkey-ownercheck` removes it\)/);
+	// The rm itself never finishing, or failing, says which.
+	assert.match((await drive({ hangs: step("rm") })).text, /not confirmed removed afterwards \(its docker rm did not finish within 0 s\)/);
+	const failed = await drive({ plan: { "docker rm": 1 } });
+	assert.equal(failed.published, false);
+	assert.match(failed.text, /not confirmed removed afterwards \(its docker rm exited 1\)/);
+	// A stop that overran but whose container the rm then removed: confirmed gone, so the answer stands.
+	const late = await drive({ hangs: step("stop") });
+	assert.equal(late.code, 0);
+	assert.equal(late.published, true);
+	// The marker's wait is 20 s of the clock, not 40 tries whatever each exec took.
+	let clock = 0;
+	const loading = await drive({ plan: { "docker exec": () => ((clock += 3_000), { code: 1, output: "(error) LOADING Valkey is loading the dataset in memory\n" }) }, extra: { now: () => clock, sleep: async () => {} } });
+	assert.equal(loading.published, false);
+	assert.ok(loading.steps.filter((s) => s === "exec").length <= 8, "about 20 s of 3 s execs");
+	assert.deepEqual(loading.steps.slice(-2), ["stop", "rm"]);
+	assert.match(loading.text, /\(its Valkey did not answer within 20 s\), so no Valkey is started on it/);
+});
+
+// Issue #1021: the daemon reads before the owner check had no bound either, so a daemon that stopped answering held `up`
+// there and the bounded check was never reached. Each is killed at the step bound and said as docker not answering.
+test("up's docker reads before a Valkey starts are bounded: `docker version` and the three ownership reads, each said as docker not answering with its command (#1021)", async () => {
+	const files = { "/deploy/.env": `VALKEY_URL=redis://127.0.0.1:16496\nVALKEY_PASSWORD=${PASSWORD}\n` };
+	const base = { "docker version": 0, "docker image inspect": 0, "docker run": 0, "docker stop": 0, "docker rm": 0, "docker volume inspect": volumeRecord(null) };
+	const drive = async (hangs) => {
+		const h = harness({ plan: base, listening: false, argv: ["--yes"], answers: ["y"], files });
+		const real = h.deps.spawn;
+		const killed = [];
+		const spawn = (cmd, args, opts) => {
+			if (!(cmd === "docker" && hangs(args.join(" ")))) return real(cmd, args, opts);
+			h.calls.push({ cmd, args, opts });
+			return { stdout: { on() {} }, stderr: { on() {} }, on() { return this; }, kill: (sig) => killed.push(`${args.slice(0, 2).join(" ")} ${sig}`) };
+		};
+		const code = await runUp(["--yes"], { ...h.deps, spawn, dockerStepTimeoutMs: 5 });
+		const started = h.calls.some((c) => c.cmd === "docker" && (c.args[0] === "run" || (c.args[0] === "volume" && c.args[1] === "create")));
+		return { code, killed, started, text: h.text() };
+	};
+	const version = await drive((line) => line === "version");
+	assert.equal(version.code, 1);
+	assert.deepEqual(version.killed, ["version SIGKILL"]);
+	assert.match(version.text, /✗ Docker daemon not answering\n {4}→ `docker version` did not finish within 0 s: check that the daemon answers, then re-run\n/);
+	assert.equal(version.started, false);
+	for (const [line, said] of [
+		["container inspect pi-dispatch-valkey", /✗ whether pi-dispatch-valkey is this deployment's could not be read \(docker did not answer `docker container inspect pi-dispatch-valkey` within 0 s\)/],
+		["ps -a --filter volume=pi-dispatch-valkey-data --format {{.Names}}", /whether another Valkey mounts pi-dispatch-valkey-data could not be read \(docker did not answer `docker ps -a --filter volume=pi-dispatch-valkey-data` within 0 s\), so no Valkey is started on it/],
+		["volume inspect pi-dispatch-valkey-data", /whose pi-dispatch-valkey-data is could not be read \(docker did not answer `docker volume inspect pi-dispatch-valkey-data` within 0 s\), so no Valkey is started on it/],
+	]) {
+		const r = await drive((l) => l === line);
+		assert.equal(r.code, 1, line);
+		assert.deepEqual(r.killed, [`${line.split(" ").slice(0, 2).join(" ")} SIGKILL`], line);
+		assert.match(r.text, said, line);
+		assert.equal(r.started, false, `${line}: no Valkey, no volume, no owner check`);
+	}
+});
+
 test("up records an adopted volume by its CreatedAt, and that very volume is this deployment's without asking; a different one is asked about again (#475 round-cap re-review)", async () => {
 	const files = { "/deploy/.env": `VALKEY_URL=redis://127.0.0.1:16496\nVALKEY_PASSWORD=${PASSWORD}\n` };
 	const base = { "docker version": 0, "docker image inspect": 0, "docker run": 0, "docker stop": 0, "docker rm": 0, "docker volume inspect": volumeRecord(null, "2026-09-01T10:00:00Z") };
