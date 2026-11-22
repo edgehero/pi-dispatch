@@ -663,13 +663,19 @@ and its three probe containers, plus three more per declared model endpoint. The
 `pi.dispatch.helper=egress-probe`, so `docker ps -a` says what they are. The rule is simple enough to rely on: **every one of them is removed at the end
 of the run that made it, or reported in that same run** -- so what a later run finds is what a run that was
 KILLED left behind, and doctor does not have to guess which. The worker's own doctor run is one such: it is killed
-after two minutes, which a slow daemon right after a restart can reach. What doctor knows is that the process in the
-name is no longer alive. The next run sweeps whatever belongs to a process that is no longer alive
-**on this host**, and only when your docker CLI resolves a daemon on this host: a leftover on a shared or
-remote daemon belongs to the doctor that made it, and a pid that is dead here may well be alive there. It finds the
-probe containers by name, in every state, before it touches a network: one that never started (a slow daemon leaves
-them `created`) or has stopped is removed with a plain `docker rm`, a running one with `docker rm -f`, whether or not
-its network is still there. Doctor's in-image `gh` check clears its own container, `pi-dispatch-gh-probe-<pid>`
+after two minutes, which a slow daemon right after a restart can reach, and the worker then runs doctor again 15
+minutes later (twice as long after each run in a row that is killed too, never longer than
+`PI_DOCTOR_INTERVAL_HOURS`), so what it left does not wait a day. What doctor knows is that the process in the name is
+no longer alive. The next run sweeps whatever belongs to a process that is no longer alive **on this host**, and only
+when your docker CLI resolves a daemon on this host: a leftover on a shared or remote daemon belongs to the doctor
+that made it, and a pid that is dead here may well be alive there, so there (with the policy armed) doctor lists the
+networks and the probe containers it finds and names them, and removes nothing. It finds the probe containers by name,
+in every state, before it touches a network: one that never started (a slow daemon leaves them `created`) or has
+stopped is removed with a plain `docker rm`, a running one with `docker rm -f`, whether or not its network is still
+there. The sweep runs with `PI_EGRESS=0` too, on a daemon this host owns, so turning the policy off after a killed run
+does not strand what that run left; with the policy off it prints a line only when it removed something or found
+something it could not remove, so a host with nothing left reads exactly as it did.
+Doctor's in-image `gh` check clears its own container, `pi-dispatch-gh-probe-<pid>`
 (labelled `pi.dispatch.helper=gh-probe`), the same way, right before it runs, whether the policy is on or off, and on
 every doctor run where the check itself could run (docker answering on this host and the job image present, or the
 podman equivalent), even when it then does not (`GITHUB_AUTH_SOURCE=app`, or no token), so a leftover from before you
@@ -689,7 +695,7 @@ generator.
 | Line | What it means | What to do |
 |---|---|---|
 | `⚠ Egress canary: leftovers from an EARLIER doctor run could not be listed: docker network ls --filter name=pi-dispatch-egress-doctor-` | the listing itself failed, so doctor does not know whether there are any leftovers. The only line here that names no network, because none was ever read | run the command yourself; a daemon that cannot list is usually the real problem |
-| `⚠ Egress canary: <net> may be left over from an EARLIER doctor run, and is not swept because this shell's docker CLI <what it resolved>, so a pid that is dead here may be alive there` | there IS a leftover on a daemon this shell cannot show is on this host. It is not swept, because the pid in the name is this host's process table and that is not the one that matters there. The rest of the line says whether your CLI resolved somewhere else or answered nothing at all | check on the host that daemon belongs to, then `docker network rm <net>` there |
+| `⚠ Egress canary: <net>, <probes> may be left over from an EARLIER doctor run, and are not swept because this shell's docker CLI <what it resolved>, so a pid that is dead here may be alive there` | there IS a leftover on a daemon this shell cannot show is on this host: a canary network, and the probe containers listed under the same pid. It is not swept, because the pid in the name is this host's process table and that is not the one that matters there. The rest of the line says whether your CLI resolved somewhere else or answered nothing at all. Either half may be absent: a network with no probe left reads `<net> may be left over ...`, and probes whose network is gone get a line of their own | check on the host that daemon belongs to, then `docker rm -f <probe>` and `docker network rm <net>` there |
 | `⚠ Egress canary: the network <net> could not be read: docker network inspect <net>` | the network is still there and `docker network inspect` would not say what is on it | run the inspect yourself. Do not skip to `network rm`: what is attached is exactly what is unknown |
 | `⚠ Egress canary: <net> is kept, because the probe <probe> on it could not be removed: docker rm -f <probe>` | a probe container on the network would not go, so the network is kept with it: removing it would only fail beside the probe, and detaching the probe first would leave it running on nothing. The next doctor finds the probe by its name, with or without the network | `docker rm -f <probe>`, then re-run doctor, which removes the network |
 | `✓ Egress canary: removed <net> (after removing <probes> and detaching <endpoints>), left by an EARLIER doctor run` | the ordinary sweep. The probes named were removed, anything else attached was detached and named, and the network is gone | nothing |

@@ -88,7 +88,7 @@ import { startSandboxPrepareWorker } from "./sandbox-prepare-requests.mjs";
 import { makeSandboxInventory } from "./sandbox-inventory.mjs";
 import { makeRetentionSweep, makeSweepFollowUps } from "./retention-sweep.mjs";
 import { FORGE_JOB_RETENTION_S } from "./retention.mjs";
-import { makeDoctorSpawner } from "./doctor-spawner.mjs";
+import { DOCTOR_RETRY_AFTER_KILL_MS, makeDoctorSpawner } from "./doctor-spawner.mjs";
 import { hostHasPending, publishCanaryFacts, UPDATES_LOOK_EVERY_HOURS } from "./updates.mjs";
 import { makePackageCanaryRuntime } from "./package-canary.mjs";
 
@@ -4060,10 +4060,13 @@ export async function startWorker(
 		// PI_DOCTOR_INTERVAL_HOURS, so every host publishes its checks whether or not anyone runs doctor there. After the
 		// registry has started (above), so the first run's fleet lines see this host's own row. At 0 nothing is constructed,
 		// the sweep's posture: no timer, no closer, no child is reachable.
+		// Issue #1021: a run killed at its bound is followed by one more, 15 minutes later and doubling, rather than a whole
+		// interval later, so what it left is removed and the host publishes a result on the same day.
 		if (config.doctorIntervalHours > 0) {
 			const doctorRuns = makeDoctorSpawnerFn({
 				cliPath: fileURLToPath(new URL("./cli.mjs", import.meta.url)),
 				intervalMs: config.doctorIntervalHours * 3600000,
+				retryAfterKillMs: DOCTOR_RETRY_AFTER_KILL_MS,
 				log,
 			});
 			doctorRuns.start();

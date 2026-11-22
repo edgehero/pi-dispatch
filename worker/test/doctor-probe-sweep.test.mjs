@@ -168,18 +168,39 @@ test("a listing line that is not a name, a tab and one lowercase state word is l
 	assert.deepEqual(gh.calls.filter((c) => c.startsWith("rm")), []);
 });
 
-test("a remote endpoint lists no probe and removes nothing: its networks are named, as before (#978)", async () => {
-	const d = daemon({ networks: [NET], containers: [{ name: "pi-dispatch-egress-probe-provider-4242", state: "created", networks: [NET] }, { name: "pi-dispatch-egress-probe-unlisted-4242", state: "exited" }] });
+test("a daemon this host does not own has its probes listed and named beside its networks, and nothing is removed (#1021)", async () => {
+	const kept = [
+		{ name: "pi-dispatch-egress-probe-provider-4242", state: "created", networks: [NET] },
+		{ name: "pi-dispatch-egress-probe-unlisted-4242", state: "exited" },
+		{ name: "pi-dispatch-egress-probe-provider-5151", state: "running" }, // its network is gone
+		{ name: "pi-dispatch-egress-probe-bogus-4242", state: "created" }, // a slug outside the closed set
+		{ name: "pi-dispatch-egress-probe-provider-04242", state: "created" }, // a pid doctor never writes
+		{ name: "pi-dispatch-gh-probe-4242", state: "created" }, // the gh probe step's
+	];
+	const d = daemon({ networks: [NET], containers: kept });
 	const endpoint = { local: false, endpoint: "tcp://build.example.invalid:2376", display: "tcp://build.example.invalid:2376" };
-	const checks = await sweepStaleCanaryNetworks({ run: d.run, pid: 1, isAlive: () => false, endpoint });
-	assert.deepEqual(d.calls, ["network ls --filter name=pi-dispatch-egress-doctor- --format {{.Name}}"], "the network listing only");
-	assert.equal(d.has("pi-dispatch-egress-probe-provider-4242"), true);
-	assert.equal(d.has("pi-dispatch-egress-probe-unlisted-4242"), true);
-	assert.deepEqual(checks.map((c) => c.canary.shape), ["foreign"]);
-	// An endpoint nothing resolved is not shown local either.
+	// `isAlive` reads THIS process table, which says nothing about that daemon's, so it is never asked there.
+	const isAlive = () => assert.fail("a pid on a daemon this host does not own is never judged");
+	const checks = await sweepStaleCanaryNetworks({ run: d.run, pid: 1, isAlive, endpoint });
+	assert.deepEqual(d.calls, ["network ls --filter name=pi-dispatch-egress-doctor- --format {{.Name}}", "ps -a --filter name=pi-dispatch-egress-probe- --format {{.Names}}\t{{.State}}"], "the two listings, and nothing removed, inspected or detached");
+	for (const { name } of kept) assert.equal(d.has(name), true, name);
+	assert.equal(d.hasNetwork(NET), true);
+	const there = "this shell's docker CLI resolves tcp://build.example.invalid:2376, which is not shown to be on this host, so a pid that is dead here may be alive there";
+	assert.deepEqual(checks.map((c) => [c.ok, c.warn, c.canary.shape, c.label]), [
+		[false, true, "foreign", `Egress canary: ${NET}, pi-dispatch-egress-probe-provider-4242, pi-dispatch-egress-probe-unlisted-4242 may be left over from an EARLIER doctor run, and are not swept because ${there}`],
+		[false, true, "foreign", `Egress canary: pi-dispatch-egress-probe-provider-5151 may be left over from an EARLIER doctor run, and is not swept because ${there}`],
+	]);
+	for (const c of checks) assert.equal(c.label, tableLine(c), "built from the table");
+	// A network with no probe left is named exactly as before.
+	const bare = daemon({ networks: [NET] });
+	assert.deepEqual((await sweepStaleCanaryNetworks({ run: bare.run, pid: 1, isAlive, endpoint })).map((c) => c.label), [`Egress canary: ${NET} may be left over from an EARLIER doctor run, and is not swept because ${there}`]);
+	// An endpoint nothing resolved is not shown local either: the same branch, in its own words.
 	const unknown = daemon({ containers: [{ name: "pi-dispatch-egress-probe-unlisted-4242", state: "exited" }] });
-	assert.deepEqual(await sweepStaleCanaryNetworks({ run: unknown.run, pid: 1, isAlive: () => false, endpoint: { local: null, reason: "not resolved" } }), []);
-	assert.deepEqual(unknown.calls, ["network ls --filter name=pi-dispatch-egress-doctor- --format {{.Name}}"]);
+	assert.deepEqual((await sweepStaleCanaryNetworks({ run: unknown.run, pid: 1, isAlive, endpoint: { local: null, reason: "not resolved" } })).map((c) => c.label), ["Egress canary: pi-dispatch-egress-probe-unlisted-4242 may be left over from an EARLIER doctor run, and is not swept because this shell's docker CLI did not say which daemon it uses (not resolved), so a pid that is dead here may be alive there"]);
+	assert.equal(unknown.has("pi-dispatch-egress-probe-unlisted-4242"), true);
+	// A probe listing that fails there is said as it is on a daemon this host owns.
+	const failing = async (args) => (args[0] === "ps" ? { code: 1, stdout: "", stderr: "", ended: "close" } : bare.run(args));
+	assert.deepEqual((await sweepStaleCanaryNetworks({ run: failing, pid: 1, isAlive, endpoint })).map((c) => c.canary.shape), ["probesUnlisted", "foreign"]);
 });
 
 test("a running probe takes rm -f, a stopped one a plain rm, and one that started after the listing is refused and keeps its network (#978)", async () => {

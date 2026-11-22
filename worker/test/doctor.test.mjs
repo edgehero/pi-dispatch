@@ -25,6 +25,7 @@ import { OBSERVATION_FIX } from "../src/backends.mjs";
 import { PODMAN_JOB_USER_FIX } from "../src/backend-podman.mjs";
 import { loadConfig, underOsTempDir } from "../src/config.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { grantText, grantsDirOf } from "../src/endpoint-grants.mjs";
 import { flowBasisOf } from "../src/host-loads.mjs";
 import { usdFingerprint } from "../src/dollar-fingerprint.mjs";
 import { projectsFingerprint } from "../src/projects.mjs";
@@ -215,6 +216,27 @@ test("browser setup doctor publishes inspected facts without a probe container o
 	assert.match(text(), /Egress proxy running/);
 	assert.match(text(), /Egress canary: not run by browser setup/);
 	assert.equal(calls.some(({ cmd, args }) => ["docker", "podman"].includes(cmd) && (["run", "create", "rm"].includes(args[0]) || args[0] === "network" && ["create", "connect", "disconnect", "rm"].includes(args[1]))), false);
+});
+
+// Issue #1021: with the policy off doctor sweeps the canary's leftovers too, and browser setup's read-only run still
+// lists and removes nothing, whatever a dead doctor left.
+test("browser setup doctor with the egress policy off lists and removes no canary leftover (#774, #1021)", async () => {
+	const calls = [];
+	const { out, text } = capture();
+	const { "docker ps -a --filter name=pi-dispatch-egress-probe-": _none, ...rest } = green;
+	const plan = {
+		"docker network ls --filter name=pi-dispatch-egress-doctor-": { code: 0, output: "pi-dispatch-egress-doctor-4242\n" },
+		"docker ps -a --filter name=pi-dispatch-egress-probe-": { code: 0, output: "pi-dispatch-egress-probe-provider-4242\tcreated\n" },
+		...rest,
+		"gh auth status": 0,
+		"docker run": 0,
+	};
+	await runDoctor({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-example", GITHUB_AUTH_SOURCE: "pat", GITHUB_PAT: "private-pat", PI_EGRESS: "0" }, {
+		out, setupReadOnly: true, spawn: fakeSpawn(plan, calls), probeValkey: async () => true, fileExists: () => true, nodeVersion: "22.19.0", isAlive: () => false, pid: 1,
+	});
+	const lines = calls.map(({ cmd, args }) => [cmd, ...args].join(" "));
+	assert.deepEqual(lines.filter((l) => /^docker (network ls|ps -a|rm|network rm|network disconnect)/.test(l)), [], "nothing listed, removed or detached");
+	assert.doesNotMatch(text(), /Egress canary:/);
 });
 
 test("doctor: all prerequisites present passes and exits 0", async () => {
@@ -1259,7 +1281,8 @@ test("doctor: the gh probe's step sweeps its own dead or reused-pid leftovers be
 	await runDoctor(ghEnv({ PI_EGRESS: "0" }), ghDeps(offOut.out, { ...green, [GH_LIST]: left(["pi-dispatch-gh-probe-4242", "pi-dispatch-gh-probe-5555", "pi-dispatch-gh-probe-7"]), "docker rm pi-dispatch-gh-probe-": 0, "gh auth status": { code: 0, output: ghStatusOutput }, "gh auth token": { code: 0, output: "gho_x\n" }, "docker run --rm -i": 0 }, off, { pid: 7, isAlive: (p) => p === 7 || p === 5555 }));
 	const offLines = off.map((c) => [c.cmd, ...c.args].join(" "));
 	assert.ok(!offLines.some((l) => l.includes("rm") && l.includes("pi-dispatch-gh-probe-5555")), "a live doctor's probe is not ours to remove");
-	assert.ok(!offLines.some((l) => l.includes("pi-dispatch-egress-")), "with the policy off no canary object is touched");
+	// Issue #1021: with the policy off the canary's leftover sweep still lists, and this host has none; no canary runs.
+	assert.ok(!offLines.some((l) => l.includes("pi-dispatch-egress-") && !l.startsWith("docker network ls ") && !l.startsWith("docker ps -a ")), "with the policy off no canary object is made or removed");
 	const removedAt = offLines.indexOf("docker rm pi-dispatch-gh-probe-7");
 	assert.ok(offLines.includes("docker rm pi-dispatch-gh-probe-4242"), offLines.join("\n"));
 	assert.ok(removedAt >= 0 && removedAt < offLines.findIndex((l) => l.startsWith("docker run --rm -i --name pi-dispatch-gh-probe-7 ")), "the reused name is gone before the probe asks for it");
@@ -7691,7 +7714,8 @@ const CANARY_PLANS = [
 	() => canaryPlan({ [`docker network rm pi-dispatch-egress-doctor-1`]: { code: 1, output: "Error response from daemon: has active endpoints" } }, { pid: 1, isAlive: () => true }),
 	// foreign: a leftover on a daemon this shell cannot show is on this host. The endpoint comes from the
 	// plan, because that is where doctor reads it from -- a seam would be a different code path.
-	() => canaryPlan({ [LS]: { code: 0, output: `${NET}\n` }, "docker context inspect": { code: 0, output: '"remote"|"tcp://build.example.invalid:2376"\n' } }),
+	// Issue #1021: with a probe of the same pid listed there, named on the same line.
+	() => canaryPlan({ [LS]: { code: 0, output: `${NET}\n` }, [PS]: { code: 0, output: "pi-dispatch-egress-probe-provider-4242\tcreated\n" }, "docker context inspect": { code: 0, output: '"remote"|"tcp://build.example.invalid:2376"\n' } }),
 	// Issue #978, probesUnlisted: the probe listing itself fails.
 	() => canaryPlan({ [PS]: { code: 1, output: "", stderr: "Cannot connect to the Docker daemon" } }),
 	// probesRemoved: a dead run's probe left `created` with no network, as a slow daemon leaves one, removed by name.
@@ -7771,7 +7795,7 @@ test("docs/egress.md's canary rows ARE the table, generated (#379)", () => {
 	// because it is the one placeholder that is itself a command the code composes.
 	const placeholders = {
 		unlisted: { prefix: EGRESS_CANARY_NET_PREFIX },
-		foreign: { name: "<net>", cliSays: "<what it resolved>" },
+		foreign: { name: "<net>", probes: ["<probes>"], cliSays: "<what it resolved>" },
 		unreadable: { name: "<net>" },
 		kept: { name: "<net>", stuck: ["<probe>"] },
 		removed: { name: "<net>", after: "after removing <probes> and detaching <endpoints>" },
@@ -8094,6 +8118,89 @@ test("doctor: a password in DOCKER_HOST never reaches the canary's leftover line
 	assert.match(printed, /⚠ Egress canary: pi-dispatch-egress-doctor-4242 may be left over/, "the line still fires");
 	assert.match(printed, /resolves ssh:\/\/remote\.example\.invalid:22/, "the host survives, which is what an operator needs");
 	for (const needle of ["bob", "hunter2"]) assert.ok(!printed.includes(needle), `the credential must not: ${needle}`);
+});
+
+// Issue #1021: with the egress policy off the leftover sweep still runs, on a daemon this host owns, for a doctor killed
+// during its canary before the policy was turned off (the worker's own run is killed at 120 s), and it prints only what
+// it removed or could not remove, so a host with nothing left prints what it printed before the sweep ran there.
+const OFF_PROBE = "pi-dispatch-egress-probe-provider-4242";
+const offPlan = (extra) => canaryFixture(extra);
+const runOff = async (plan, { cwd = tempDir("pi-egress-off-"), env = {} } = {}) => {
+	const calls = [];
+	const { out, text } = capture();
+	await runDoctor(ghEnv({ PI_EGRESS: "0", ...env }), ghDeps(out, plan, calls, { cwd, isAlive: () => false, pid: 1 }));
+	return { text: text(), calls: calls.map((c) => [c.cmd, ...c.args].join(" ")) };
+};
+const canaryLines = (text) => text.split("\n").filter((l) => l.includes("Egress canary:"));
+const sweepAsked = (calls) => [LS, PS].map((key) => calls.some((c) => c.startsWith(key)));
+const canaryRan = (calls) => calls.some((c) => c.startsWith("docker network create") || c.startsWith("docker run --rm --name pi-dispatch-egress-probe-"));
+
+test("egress off: a dead doctor's probe and network are still removed, in one line, and the canary itself does not run (#1021)", async () => {
+	const { text, calls } = await runOff(offPlan({
+		[LS]: { code: 0, output: `${NET}\n` },
+		[PS]: { code: 0, output: `${OFF_PROBE}\tcreated\n` },
+		[`docker rm ${OFF_PROBE}`]: { code: 0, output: `${OFF_PROBE}\n` },
+		// The proxy may still run with the policy off, and is only detached.
+		[`docker network inspect --format {{json .Containers}} ${NET}`]: { code: 0, output: JSON.stringify({ b: { Name: "pi-dispatch-egress-proxy" } }) },
+	}));
+	assert.deepEqual(canaryLines(text), [`✓ Egress canary: removed ${NET} (after removing ${OFF_PROBE} and detaching pi-dispatch-egress-proxy), left by an EARLIER doctor run`]);
+	assert.ok(calls.includes(`docker rm ${OFF_PROBE}`), "the probe that never started, by name, with a plain rm");
+	assert.ok(calls.includes(`docker network disconnect -f ${NET} pi-dispatch-egress-proxy`), "the proxy detached, through the detach gate");
+	assert.ok(calls.includes(`docker network rm ${NET}`), "and then the network");
+	assert.equal(canaryRan(calls), false, "the policy is off: no canary of its own");
+	// One that would not go is said too, with its command.
+	const stuck = await runOff(offPlan({
+		[PS]: { code: 0, output: `${OFF_PROBE}\texited\n` },
+		[`docker rm ${OFF_PROBE}`]: { code: 1, output: "", stderr: `Error response from daemon: removal of container ${OFF_PROBE} is already in progress` },
+	}));
+	assert.deepEqual(canaryLines(stuck.text), [`⚠ Egress canary: ${OFF_PROBE}, left by an EARLIER doctor run, could not be removed: docker rm -f ${OFF_PROBE}`]);
+});
+
+test("the leftover sweep removes a dead doctor's canary grant before its network, with the policy off and armed (#1021)", async () => {
+	for (const PI_EGRESS of ["0", "1"]) {
+		const cwd = tempDir("pi-egress-grant-");
+		const dir = grantsDirOf(cwd, "docker");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, "172.18.0.3"), grantText(NET, ["bench"]));
+		// Another network's grant, a job's in flight, is not the sweep's.
+		writeFileSync(join(dir, "172.19.0.3"), grantText("pi-job-x-net", ["bench"]));
+		const { calls } = await runOff(offPlan({
+			[LS]: { code: 0, output: `${NET}\n` },
+			[`docker network inspect --format {{json .Containers}} ${NET}`]: { code: 0, output: "{}" },
+		}), { cwd, env: { PI_EGRESS } });
+		assert.ok(calls.includes(`docker network rm ${NET}`), `PI_EGRESS=${PI_EGRESS}: the network goes`);
+		assert.equal(existsSync(join(dir, "172.18.0.3")), false, `PI_EGRESS=${PI_EGRESS}: and its grant before it`);
+		assert.equal(existsSync(join(dir, "172.19.0.3")), true, `PI_EGRESS=${PI_EGRESS}: another network's stays`);
+	}
+});
+
+test("egress off: a clean host prints exactly what it printed before, and so does one whose leftover listings fail (#1021)", async () => {
+	const cwd = tempDir("pi-egress-off-clean-");
+	const clean = await runOff(offPlan({}), { cwd });
+	assert.deepEqual(sweepAsked(clean.calls), [true, true], "the sweep asks, with the policy off");
+	assert.deepEqual(canaryLines(clean.text), [], "and finds nothing, so says nothing");
+	// A listing that fails is not a leftover: armed, it is a warning, and with the policy off it is not said at all.
+	const unlisted = await runOff(offPlan({ [LS]: { code: 1, output: "", stderr: "Cannot connect to the Docker daemon" }, [PS]: { code: 1, output: "", stderr: "Cannot connect to the Docker daemon" } }), { cwd });
+	assert.deepEqual(sweepAsked(unlisted.calls), [true, false], "a failed network listing ends the sweep, as it does armed");
+	const probesUnlisted = await runOff(offPlan({ [PS]: { code: 1, output: "", stderr: "Cannot connect to the Docker daemon" } }), { cwd });
+	assert.equal(unlisted.text, clean.text, "byte for byte");
+	assert.equal(probesUnlisted.text, clean.text, "byte for byte");
+});
+
+test("egress off: a daemon this host does not own, or one that does not answer, is not asked at all (#1021)", async () => {
+	const leftovers = { [LS]: { code: 0, output: `${NET}\n` }, [PS]: { code: 0, output: `${OFF_PROBE}\tcreated\n` }, "docker rm": 0 };
+	const owned = await runOff(offPlan(leftovers));
+	assert.deepEqual(sweepAsked(owned.calls), [true, true], "this host's daemon is swept");
+	for (const [what, extra] of [
+		["remote", { "docker context inspect": { code: 0, output: '"remote"|"tcp://build.example.invalid:2376"\n' } }],
+		["unknown", { "docker context inspect": { code: 0, output: "" } }],
+		["down", { "docker info": 1 }],
+	]) {
+		const { text, calls } = await runOff(offPlan({ ...leftovers, ...extra }));
+		assert.deepEqual(sweepAsked(calls), [false, false], `${what}: nothing listed`);
+		assert.ok(!calls.some((c) => c.startsWith("docker rm") || c.startsWith("docker network rm") || c.startsWith("docker network disconnect")), `${what}: nothing removed`);
+		assert.deepEqual(canaryLines(text), [], `${what}: nothing said`);
+	}
 });
 
 test("doctor: a probe the sweep could NOT remove is never reported as removed (#350)", async () => {

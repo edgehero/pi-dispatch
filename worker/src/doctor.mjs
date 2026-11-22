@@ -2469,9 +2469,9 @@ export async function collectChecks(shellVars, seams) {
 	}
 
 	section("egress");
-	// REQ-EGRESS-ALLOWLIST (issue #202). [] when PI_EGRESS=0, so a deployment that declined it gets
-	// byte-identical output. Gated on docker and the image, because two of these checks run a container and
-	// the rest are noise on top of a down daemon.
+	// REQ-EGRESS-ALLOWLIST (issue #202). With PI_EGRESS=0 only what the canary's leftover sweep removed or could not
+	// remove (issue #1021), so a deployment that declined it and has nothing left gets byte-identical output. Gated on
+	// docker and the image, because two of these checks run a container and the rest are noise on top of a down daemon.
 	// Issue #354: NOT RUN when no job runs on docker. The proxy it reads is docker's, which no job of this deployment is
 	// wired to (a podman job's network is joined to a proxy under the same rootless Podman, read in the podman section
 	// below), and its canary starts containers on a daemon nothing else here uses. Said there, not silently dropped.
@@ -7507,10 +7507,15 @@ export const CANARY_LINES = Object.freeze({
 		fix: () => CANARY_LEFTOVER_FIX,
 		label: ({ prefix, bin = "docker" }) => `leftovers from an EARLIER doctor run could not be listed: ${bin} network ls --filter name=${prefix}`,
 	},
+	// Issue #1021: and the probe containers listed under the same pid after it (`probes`), or alone where that pid has no
+	// network left (no `name`). One object keeps the words it always had.
 	foreign: {
 		tier: "warn",
 		fix: () => CANARY_FOREIGN_FIX,
-		label: ({ name, cliSays, bin = "docker" }) => `${name} may be left over from an EARLIER doctor run, and is not swept because this shell's ${bin} CLI ${cliSays}, so a pid that is dead here may be alive there`,
+		label: ({ name = null, probes = [], cliSays, bin = "docker" }) => {
+			const left = [...(name === null ? [] : [name]), ...probes];
+			return `${left.join(", ")} may be left over from an EARLIER doctor run, and ${left.length === 1 ? "is" : "are"} not swept because this shell's ${bin} CLI ${cliSays}, so a pid that is dead here may be alive there`;
+		},
 	},
 	unreadable: {
 		tier: "warn",
@@ -7647,9 +7652,10 @@ function forRuntime(text, bin) {
  *
  * AND THE PROBE CONTAINERS BY NAME (issue #978), in every state, before any network: a probe left `created` is on no
  * network read docker gives, and its network may be gone. The same name and pid rules decide, and what is removed is
- * named on its network's line or on a line of its own (`sweepStaleProbeContainers`). The listing runs only on a daemon
- * this host owns, so a remote one is left exactly as it was: its networks named, nothing listed or removed. The in-image
- * gh probe is swept by its own step instead (`sweepStaleGhProbes`).
+ * named on its network's line or on a line of its own (`sweepStaleProbeContainers`). On a daemon this host does not own
+ * the same listing runs (issue #1021) and nothing is judged or removed: each pid's probes are named on its network's
+ * line, or on a line of their own where the network is gone, as its networks always were. The in-image gh probe is
+ * swept by its own step instead (`sweepStaleGhProbes`).
  *
  * EXPORTED for `.github/scripts/podman-conformance.mjs` (issue #452), which leaves a canary network behind on a real
  * rootless Podman and runs THIS sweep over it, so the member read it depends on is exercised on the Podman the
@@ -7699,13 +7705,15 @@ export async function sweepStaleCanaryNetworks({ run, pid, isAlive, endpoint, bi
 	// this file builds, and the class cannot drift from what the parser accepts.
 	const probeOf = (owner) => new RegExp(`^(?:${EGRESS_CANARY_PROBE_PREFIX}(?:${CANARY_PROBE_SLUGS.join("|")})|${EGRESS_ENDPOINT_PROBE_PREFIX}(?:${[...ENDPOINT_PROBE_SLUGS, ...PRIVATE_PROBE_SLUGS].join("|")})-${ENDPOINT_ID_CLASS})-${owner.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}$`);
 	const checks = [];
-	// Issue #978: the probe containers THEMSELVES, by name and in every state, before any network is touched, and only on
-	// a daemon this host owns (the pid test below is about this process table). What one removes here is named on its
+	// Issue #978: the probe containers THEMSELVES, by name and in every state, before any network is touched, removed only
+	// on a daemon this host owns (the pid test is about this process table). What one removes here is named on its
 	// network's line when that line is printed, and on a line of its own otherwise (`said`, after the loop).
+	// Issue #1021: listed on any other daemon too, on the network listing's own reasoning, and only NAMED there (`found`):
+	// a probe a killed doctor left on a remote daemon used to go unmentioned while its network was named.
 	// The in-image gh probe is NOT listed here: the module that makes an object sweeps it, and the gh probe's step does,
-	// right before its own probe, where a deployment with the policy off or a podman venue without `--live` reaches too.
-	const probes = owned ? await sweepStaleProbeContainers({ run, bin: venue.bin, pid, isAlive, prefixes: CANARY_PROBE_LIST_PREFIXES, ours: (n, owner) => probeOf(owner).test(n) }) : null;
-	if (probes?.unlisted) checks.push(canaryCheck("probesUnlisted", { prefixes: CANARY_PROBE_LIST_PREFIXES }, venue));
+	// right before its own probe, where a podman venue without `--live` reaches too.
+	const probes = await sweepStaleProbeContainers({ run, bin: venue.bin, pid, isAlive, prefixes: CANARY_PROBE_LIST_PREFIXES, ours: (n, owner) => probeOf(owner).test(n), owned });
+	if (probes.unlisted) checks.push(canaryCheck("probesUnlisted", { prefixes: CANARY_PROBE_LIST_PREFIXES }, venue));
 	const said = new Set();
 	for (const name of String(listed.stdout ?? "").split("\n").map((n) => n.trim()).filter(Boolean)) {
 		const m = shape.exec(name);
@@ -7721,7 +7729,10 @@ export async function sweepStaleCanaryNetworks({ run, pid, isAlive, endpoint, bi
 			// MAY be left over, not IS: the clause four words later already says the pid may be alive there, so
 			// the sentence used to assert a thing and then walk it back inside itself. This is a network whose
 			// owner this shell cannot ask about at all, which is exactly the case where doctor states less.
-			checks.push(canaryCheck("foreign", { name, cliSays }, venue));
+			// Issue #1021: the probes listed under the same pid ride the same line.
+			const beside = (probes.found.get(ownerText) ?? []).filter((n) => !said.has(n));
+			checks.push(canaryCheck("foreign", { name, ...(beside.length > 0 ? { probes: beside } : {}), cliSays }, venue));
+			for (const n of beside) said.add(n);
 			continue;
 		}
 		// pid 0 is the process GROUP to `kill(0)`, so it always reads alive; such a network is left, not taken.
@@ -7764,8 +7775,8 @@ export async function sweepStaleCanaryNetworks({ run, pid, isAlive, endpoint, bi
 		// Issue #978: what the container pass already removed for this pid is this network's to name, and a member it
 		// already tried and could not remove is not tried a second time in one pass (on a slow daemon each try can be the
 		// whole 10 s bound). A member it never saw (its listing failed, or the probe came up after it) is tried here.
-		const removed = (probes?.removed.get(ownerText) ?? []).filter((n) => probeOf(ownerText).test(n));
-		const triedBefore = probes?.stuck.get(ownerText) ?? [];
+		const removed = (probes.removed.get(ownerText) ?? []).filter((n) => probeOf(ownerText).test(n));
+		const triedBefore = probes.stuck.get(ownerText) ?? [];
 		const stuck = [];
 		for (const endpoint of members.filter((n) => probeOf(ownerText).test(n))) {
 			if (removed.includes(endpoint)) continue;
@@ -7839,11 +7850,17 @@ export async function sweepStaleCanaryNetworks({ run, pid, isAlive, endpoint, bi
 	// Issue #978: what the container pass did that no network line named, per pid: a probe whose network is already gone
 	// (the residual this pass closes), or one whose network could not be read, was held or would not go. Removed is a ✓,
 	// as a removed network is; one that would not go is a ⚠ with the command, and it is found by name next time.
-	for (const owner of new Set([...(probes?.removed.keys() ?? []), ...(probes?.stuck.keys() ?? [])])) {
+	for (const owner of new Set([...probes.removed.keys(), ...probes.stuck.keys()])) {
 		const gone = (probes.removed.get(owner) ?? []).filter((n) => !said.has(n));
 		if (gone.length > 0) checks.push(canaryCheck("probesRemoved", { names: gone }, venue));
 		const left = (probes.stuck.get(owner) ?? []).filter((n) => !said.has(n));
 		if (left.length > 0) checks.push(canaryCheck("probesStuck", { names: left }, venue));
+	}
+	// Issue #1021: on a daemon this host does not own, a pid's probes that no network line named (their network is gone),
+	// on a line of their own, in the same words.
+	for (const names of probes.found.values()) {
+		const left = names.filter((n) => !said.has(n));
+		if (left.length > 0) checks.push(canaryCheck("foreign", { probes: left, cliSays }, venue));
 	}
 	return checks;
 }
@@ -7890,14 +7907,19 @@ const PROBE_PLAIN_RM_STATES = new Set(["created", "initialized", "exited", "stop
  * never decides. The pid rule is the network pass's: dead, or ours, since each caller lists before its own run makes
  * anything under the prefix (the canary sweep before the canary, the gh probe's step right before its probe).
  *
- * Returns `{ unlisted, removed, stuck }`, the last two keyed by the pid's text in the name, in listing order. A line
- * that is not a name, a tab and one lowercase state word is skipped: whatever it is, it is not a name this file built.
+ * `owned: false` (issue #1021) is a daemon this host does not own: the names that pass are collected in `found`, and
+ * nothing is judged or removed, since `isAlive` would answer about the wrong process table.
+ *
+ * Returns `{ unlisted, removed, stuck, found }`, the last three keyed by the pid's text in the name, in listing order. A
+ * line that is not a name, a tab and one lowercase state word is skipped: whatever it is, it is not a name this file
+ * built.
  */
-async function sweepStaleProbeContainers({ run, bin, pid, isAlive, prefixes, ours }) {
+async function sweepStaleProbeContainers({ run, bin, pid, isAlive, prefixes, ours, owned = true }) {
 	const removed = new Map();
 	const stuck = new Map();
+	const found = new Map();
 	const listed = await run(probeListArgs(prefixes));
-	if (listed?.code !== 0) return { unlisted: true, removed, stuck };
+	if (listed?.code !== 0) return { unlisted: true, removed, stuck, found };
 	for (const raw of String(listed.stdout ?? "").split("\n")) {
 		const fields = raw.trim().split("\t").map((f) => f.trim());
 		if (fields.length !== 2) continue;
@@ -7906,25 +7928,30 @@ async function sweepStaleProbeContainers({ run, bin, pid, isAlive, prefixes, our
 		if (ownerText === undefined || String(Number(ownerText)) !== ownerText || !/^[a-z]+$/.test(state)) continue;
 		if (!ours(name, ownerText)) continue;
 		const owner = Number(ownerText);
-		if (!Number.isSafeInteger(owner) || (owner !== pid && isAlive(owner))) continue;
+		if (!Number.isSafeInteger(owner)) continue;
+		if (!owned) {
+			found.set(ownerText, [...(found.get(ownerText) ?? []), name]);
+			continue;
+		}
+		if (owner !== pid && isAlive(owner)) continue;
 		const answer = await run(PROBE_PLAIN_RM_STATES.has(state) ? ["rm", name] : canaryProbeRemoval(bin, name));
 		const into = answer?.code === 0 ? removed : stuck;
 		into.set(ownerText, [...(into.get(ownerText) ?? []), name]);
 	}
-	return { unlisted: false, removed, stuck };
+	return { unlisted: false, removed, stuck, found };
 }
 
 /**
  * The in-image gh probes an EARLIER doctor run left (issue #978), swept by the step that makes them, right before its
  * own probe, on the runtime it runs on (`run` is that runtime's bounded runner, `bin` its CLI, `where` its line prefix).
- * Here and not in the canary's sweep, because the module that makes an object sweeps it, and the canary's sweep never
- * runs where the gh probe does: with the egress policy off, on the podman venue outside `doctor --live` (the worker's
- * own doctor runs never pass it), or once its network listing failed. With `PI_EGRESS=0` a killed doctor's
- * `pi-dispatch-gh-probe-<pid>` stayed `created` for good (the doctor CLI run twice), and a name still taken fails
- * `run --name` with exit 125 (measured on Docker 28.0.4), so under a reused pid the next probe read as "gh cannot
- * authenticate". Our own pid's leftover is therefore removed too: nothing of this run exists under the prefix yet.
- * Lines prefixed `in-image gh auth:`, as the probe's own. Returns `{ checks, stuck }`, `stuck` the names that would not
- * go, so the step can tell when its own probe's name is one of them.
+ * Here and not in the canary's sweep, because the module that makes an object sweeps it, and the canary's sweep does
+ * not run everywhere the gh probe does: on the podman venue outside `doctor --live` (the worker's own doctor runs never
+ * pass it), or once its network listing failed. With `PI_EGRESS=0`, where the canary's sweep did not run before issue
+ * #1021, a killed doctor's `pi-dispatch-gh-probe-<pid>` stayed `created` for good (the doctor CLI run twice), and a
+ * name still taken fails `run --name` with exit 125 (measured on Docker 28.0.4), so under a reused pid the next probe
+ * read as "gh cannot authenticate". Our own pid's leftover is therefore removed too: nothing of this run exists under
+ * the prefix yet. Lines prefixed `in-image gh auth:`, as the probe's own. Returns `{ checks, stuck }`, `stuck` the names
+ * that would not go, so the step can tell when its own probe's name is one of them.
  */
 export async function sweepStaleGhProbes({ run, bin = "docker", pid, isAlive, where = "" }) {
 	const probes = await sweepStaleProbeContainers({ run, bin, pid, isAlive, prefixes: GH_PROBE_LIST_PREFIXES, ours: (n, owner) => n === ghProbeContainer(owner) });
@@ -8157,7 +8184,15 @@ export function egressCanaryPlainScript(url, { proxyUrl, timeoutMs = 15_000 } = 
 const CANARY_STEP_TIMEOUT_MS = 10_000;
 
 /** A leftover on a daemon this host cannot show it owns: the operator decides, because only they know the estate. */
-const CANARY_FOREIGN_FIX = "check whether that process is still running on the host that daemon belongs to, and remove the network there once it is not: `docker network rm <name>`";
+const CANARY_FOREIGN_FIX = "check whether that process is still running on the host that daemon belongs to, and remove what the line names there once it is not: a probe container first (`docker rm -f <probe>`), then the network (`docker network rm <name>`)";
+
+/**
+ * The leftover lines that say what the sweep could not ASK rather than what it found (issue #1021): a listing that
+ * failed, and a daemon whose leftovers are not this host's to judge. With the egress policy off the sweep still runs and
+ * these are not printed: a listing that failed is not a leftover, and saying so on every run of a host with nothing left
+ * would be a warning about a feature the deployment declined.
+ */
+const CANARY_ASKING_SHAPES = new Set(["unlisted", "probesUnlisted", "foreign"]);
 
 /** One fixed text for a canary that could not start. The policy may be fine; what is missing is the PROOF. */
 const CANARY_UNPROVED_FIX = "re-run doctor; the policy itself may be fine, but nothing here has shown that it is. `docker network ls --filter name=pi-dispatch-egress-doctor-` lists any leftover blocking it, and `docker ps -a --filter name=pi-dispatch-egress-probe-` any leftover probe";
@@ -8208,9 +8243,9 @@ function proxyConfCopyCheck({ path, name, seams, skip = () => false, refresh }) 
  * REQ-EGRESS-ALLOWLIST. What the shipped egress policy actually is on this host, read back from docker
  * rather than assumed from the compose file that was supposed to create it.
  *
- * Returns [] when `PI_EGRESS=0`, so a deployment that declined the policy gets byte-identical output --
- * the same convention envSetupChecks follows one feature over. Armed is the DEFAULT, so most deployments
- * see these lines.
+ * With `PI_EGRESS=0` it returns only what the leftover sweep removed or could not remove (issue #1021), so a
+ * deployment that declined the policy and has nothing left gets byte-identical output, the same convention
+ * envSetupChecks follows one feature over. Armed is the DEFAULT, so most deployments see these lines.
  *
  * TIERING, and it is the whole editorial judgement here. The proxy's PRESENCE is a hard failure when the
  * policy is armed: the worker refuses every job pre-spend without it, so a ✓ would be a lie and a ⚠ would
@@ -8249,8 +8284,24 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 	} catch {
 		armed = true;
 	}
-	if (!armed) return [];
 	const proxy = egressProxyName(env);
+	// The canary's runner: each step bounded by `CANARY_STEP_TIMEOUT_MS`, so a wedged daemon costs a bound per step.
+	const canaryDocker = (args, opts) => liveRunVia(spawn)(args, { timeoutMs: opts?.timeoutMs ?? CANARY_STEP_TIMEOUT_MS });
+	// ONE detach gate for this doctor run (issue #452, gate round 3), shared by the sweep and the canary: `local` can be a
+	// rootless Podman 4.x reached as `docker`, where both of them detach the running proxy.
+	const gate = makeDetachGate(canaryDocker, { bin: "docker", ...(seams.readFactsOnce ? { readRuntime: async () => runtimeFromFacts(await seams.readFactsOnce()) } : {}) });
+	const sweepLeftovers = () => sweepStaleCanaryNetworks({ run: canaryDocker, pid, isAlive, endpoint, gate, grants: seams.cwd ? canaryGrants({ bin: "docker", proxy, dir: grantsDirOf(seams.cwd, "docker"), spawn }) : null });
+	// Issue #1021: THE POLICY OFF STILL SWEEPS. A doctor killed during its canary (the worker's own run is killed at 120 s,
+	// which a slow daemon reaches) leaves its probes and network, and an operator who then sets PI_EGRESS=0 used to keep
+	// them for good, since only the armed path below swept. The same sweep, the same detach gate (the proxy may still run
+	// with the policy off) and the same grant removal, on the same terms: docker answering, on a daemon this host owns,
+	// never from setup's read-only run. What it prints is only what it REMOVED or could NOT remove: the lines that say what
+	// the sweep could not ask (`CANARY_ASKING_SHAPES`) belong to a deployment whose canary depends on the answer, and
+	// here a host with nothing left prints exactly what it printed before this sweep ran on it.
+	if (!armed) {
+		if (seams.setupReadOnly || dockerCode !== 0 || endpoint?.local !== true) return [];
+		return (await sweepLeftovers()).filter((c) => !CANARY_ASKING_SHAPES.has(c.canary?.shape));
+	}
 	const checks = [];
 	// Issue #484: this folder's copy of the proxy's rules against the installed package's, before the daemon is asked,
 	// since it is a file compare and holds whatever docker answers. Only for the shipped proxy, which is the one that
@@ -8283,8 +8334,9 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 	// THE CANARY OWNS THIS, not `doctor --live`. The module that makes an object sweeps it, which is
 	// `live-probes.mjs`'s own arrangement rather than "--live sweeps everything"; and this runs on EVERY doctor
 	// on an armed deployment, where `--live` is opt-in by typing a flag, so putting it there would let the
-	// operators who never ask for a container read-back accumulate networks forever. The accepted cost, stated:
-	// a deployment that turns egress OFF returns above and never sweeps its old canary networks.
+	// operators who never ask for a container read-back accumulate networks forever. A deployment that turns egress
+	// OFF is swept too, above, and hears only about what was removed or would not go (issue #1021); this used to be its
+	// accepted cost, that it never swept its old canary networks again.
 	// ONLY ON A DAEMON THIS HOST OWNS. `isAlive` reads THIS process table while the name came from the
 	// DAEMON, so on a redirected DOCKER_HOST or a shared daemon another doctor's live pid reads as dead here
 	// and its probe and network would be taken out from under it. The in-image `gh` probe already refuses on
@@ -8299,11 +8351,7 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 	// loss: the objects are doctor's own ephemera and the victim degrades to a `probe did not run` with
 	// `reached: null`, never a false verdict. Stated in `INT-EGRESS-POLICY-CONTRACT` beside the sibling's,
 	// rather than guarded, because nothing this shell can ask distinguishes the two containers.
-	const canaryDocker = (args, opts) => liveRunVia(spawn)(args, { timeoutMs: opts?.timeoutMs ?? CANARY_STEP_TIMEOUT_MS });
-	// ONE detach gate for this doctor run (issue #452, gate round 3), shared by the sweep and the canary: `local` can be a
-	// rootless Podman 4.x reached as `docker`, where both of them detach the running proxy.
-	const gate = makeDetachGate(canaryDocker, { bin: "docker", ...(seams.readFactsOnce ? { readRuntime: async () => runtimeFromFacts(await seams.readFactsOnce()) } : {}) });
-	if (!seams.setupReadOnly) checks.push(...(await sweepStaleCanaryNetworks({ run: canaryDocker, pid, isAlive, endpoint, gate, grants: seams.cwd ? canaryGrants({ bin: "docker", proxy, dir: grantsDirOf(seams.cwd, "docker"), spawn }) : null })));
+	if (!seams.setupReadOnly) checks.push(...(await sweepLeftovers()));
 
 	// `docker inspect` on the container, not `ps`: it answers present-vs-absent and running-vs-stopped in
 	// one call, and those are two different fixes. The FIELD_SEP habit is image-preflight.mjs's -- neither

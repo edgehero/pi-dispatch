@@ -3119,8 +3119,9 @@ contract governs the argv of one container, this governs the estate that argv jo
 
     **What is left behind, and what removes it** (issues #357, #350). Every network here is removed by the
     code that made it, in a `finally`. What that cannot cover is a process that DIED, and all four namespaces
-    now have a sweep for it: a per-job network by the boot reaper, a canary network by the canary itself on its
-    next run on the same runtime (for the `podman` venue's, the next `doctor --live` with the policy armed, since
+    now have a sweep for it: a per-job network by the boot reaper, a canary network by the canary's sweep on the
+    next doctor on the same runtime (docker's on every doctor on a daemon this host owns, with the policy armed or,
+    since issue #1021, off; for the `podman` venue's, the next `doctor --live` with the policy armed, since
     that is the only thing that makes one; issue #431), a peer network by `doctor --live` (`INT-LIVE-PROBE-CONTRACT`), and a **session** network by the
     sandbox retention reaper (issue #337), which is a change from what this bullet said when it was written:
     a session network used to have no sweep at all.
@@ -3185,11 +3186,24 @@ contract governs the argv of one container, this governs the estate that argv jo
     otherwise on a line of its own (`probesRemoved`); one that will not go is `kept` with its network when it is a
     member (either runtime's `network rm` refuses over it), and `probesStuck` otherwise; a listing that fails is
     `probesUnlisted`, and the network pass then runs as before. A member already tried in that pass is not tried
-    again. On a remote or unresolved endpoint nothing is listed. The in-image gh probe is not listed here: its own
-    step sweeps it (the row above), since the canary's sweep never runs with the policy off, on the podman venue
-    without `--live`, or past a network listing that failed. Measured on Docker 28.0.4 (a GitHub runner): the real
-    sweep removed a dead pid's network after its three probes, an exited probe and a running one, and left a live
-    pid's probe and network and three look-alikes.
+    again. On a remote or unresolved endpoint (AMENDED 2026-11-22, #1021) the same listing runs and nothing is judged
+    or removed: each name that passes the same exact-name test is named on its pid's `foreign` line after the network
+    (`<net>, <probes> may be left over ...`), or on a `foreign` line of its own where that pid has no network listed,
+    and a listing that fails is `probesUnlisted` as on a daemon this host owns; it used to list nothing there, so a
+    killed doctor's probe on a remote daemon went unmentioned beside its named network. The in-image gh probe is not
+    listed here: its own step sweeps it (the row above), since the canary's sweep does not run on the podman venue
+    without `--live` or past a network listing that failed (nor, before issue #1021, with the policy off). Measured on
+    Docker 28.0.4 (a GitHub runner): the real sweep removed a dead pid's network after its three probes, an exited
+    probe and a running one, and left a live pid's probe and network and three look-alikes.
+
+    **THE POLICY OFF STILL SWEEPS** (issue #1021). With `PI_EGRESS=0` doctor's docker egress section runs this same
+    sweep (`egressChecks`), with the same detach gate and grant removal, where `docker info` answered, on a daemon this
+    host owns (`local === true`), and never from setup's read-only run; no canary runs. It prints only what it removed or
+    could not remove (`removed`, `gone`, `probesRemoved`, `kept`, `held`, `notRemoved`, `unreadable`, `probesStuck`):
+    `unlisted`, `probesUnlisted` and `foreign` (`CANARY_ASKING_SHAPES`) are dropped, so a host with nothing left prints
+    byte for byte what it printed before. A remote, unresolved or unanswering daemon is not asked at all with the
+    policy off. Before this, a doctor killed during its canary followed by `PI_EGRESS=0` left its probes and network
+    for good.
 
     **WHAT COUNTS AS ATTACHED IS TWO QUESTIONS, and the boot reaper now asks both** (issue #379, item 1).
     `docker network inspect`'s `.Containers` lists RUNNING endpoints, which is exactly what the daemon
@@ -13989,7 +14003,9 @@ the worker's, exported from `@edgehero/pi-dispatch/doctor-results`, so the reade
   entries, of which at most `DOCTOR_DETAILED_MAX` (80) carry words.
 - **When it is written**: at the end of every `pi-dispatch doctor` run unless `--no-publish` (after `--fix`'s re-check
   and `--live`'s read-backs, before the closing line), every `pi-dispatch up`, and every run the worker starts (a minute
-  after boot, then every `PI_DOCTOR_INTERVAL_HOURS`). Only to the Valkey doctor talked to on that run, at the address
+  after boot, then every `PI_DOCTOR_INTERVAL_HOURS`; AMENDED 2026-11-22, #1021: and 15 minutes after a run it killed at
+  its bound, doubled per killed run in a row and capped at the interval, `DES-DOCTOR-RESULTS-PUBLISHED`; a killed run
+  itself writes nothing). Only to the Valkey doctor talked to on that run, at the address
   the worker pins (`judgeValkeyListeners`); a run that talked to none writes nothing.
 - **TTL**: 7 days (`DOCTOR_RESULTS_TTL_MS`), set afresh by every publish: a record's expiry IS "no result in a week".
   The index has none; a reader that may write removes a member whose record is gone.
@@ -15143,6 +15159,7 @@ and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` are UNCHANGED, checked: no file shape, wr
 
 | Date | Change |
 |---|---|
+| 2026-11-22 (#1021) | **`INT-DOCTOR-RESULTS-KEY` AMENDED**, "When it is written": the worker's runs include the one 15 minutes after a run it killed at its bound, doubled per killed run in a row and capped at the interval; a killed run writes nothing. **`INT-EGRESS-POLICY-CONTRACT` AMENDED**: the canary's leftover sweep runs with `PI_EGRESS=0` too, on docker's venue where `docker info` answered on a daemon this host owns, never from setup's read-only run, with the same detach gate and grant removal and no canary, printing only what it removed or could not remove (`unlisted`, `probesUnlisted` and `foreign` dropped, a clean host byte for byte as before); on a remote or unresolved endpoint the probe listing runs too and its names ride their pid's `foreign` line after the network, or a `foreign` line of their own, nothing judged or removed (it used to list nothing there); the "what removes it" sentence says the canary's sweep runs on every doctor on a daemon this host owns, armed or off. UNCHANGED, checked: `INT-LIVE-PROBE-CONTRACT` (`--live`'s own sweeps untouched), the gh probe row (its own step still sweeps it, policy off included). **Code evidence**: worker/src/doctor.mjs -> egressChecks, CANARY_ASKING_SHAPES, sweepStaleCanaryNetworks, sweepStaleProbeContainers (owned, found), CANARY_LINES.foreign; worker/src/doctor-spawner.mjs -> makeDoctorSpawner (retryAfterKillMs), DOCTOR_RETRY_AFTER_KILL_MS. |
 | 2026-11-22 (#1021) | **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**, the CPU reserve's helper: doctor's rm before its read is a plain `rm <name>` (another doctor's running read survives and this doctor is answered 125; a killed doctor's `created` leftover is still removed; `rm -f` after its own timeout); a step refused for its name (exit 125 with `already in use` on stderr, which the worker's runner now hands back, matched and never logged) when it did not just run the rm gets one rm and one more try, any other 125 answered at once, with the residual of an AutoRemove still under way; the backoff sentence CORRECTED (the wait doubles after each attempt that timed out, an attempt that fails without a timeout goes back to 60 s, one whose read holds to the 600 s re-check; it said "until a read holds"); the leftover pass runs until one is complete with nothing young and nothing refused, lists names, and also takes a `created` helper labelled `pi.dispatch.helper=cpu-reserve` under a helper name other than this worker's own, by the same fingerprint plus exactly that label; the clock residual of its age guard on a remote daemon; `cpu_reserve_leftovers_removed` gains `listed`, `young` and `kept`, every count that pass's, said for every pass that removed something and once per process for each of a pass cut short, a refusal and a pass that left something young or kept. UNCHANGED, checked: the helper's argv and name, the one-per-name rule, the job argv, the registry's `cpuReserve` statuses. **Code evidence**: worker/src/cpu-reserve.mjs -> guardHelperRun, removeLegacyHelpers, legacyHelperVerdict, isLegacyHelper, LEGACY_LIST_ARGS, HELPER_NAME_RE, makeCpuReserve; worker/src/start.mjs -> startWorker (the reserve's runner, `withStderr`); worker/src/doctor.mjs -> doctorCpuReserve. |
 | 2026-11-22 (#1029, #1030) | **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**, the #999/#1002 bullet's last sentence: a fallback's run-secret API key is no longer passed to every attempt; for a job with `fallbackModels` the run secrets exclude a fallback provider's API-key variable that neither the attempt's provider nor an auxiliary model's provider reads (`withheldPoolKeys`), the attempt on that fallback keeping it, and the walk's primary's from a fallback's attempt (the pickup names the primary to the processor as the `failoverPrimary` dep), with the same removal point, log line and bundle rule as a random pool's draw (#1030). **`INT-TRIGGERS-FILE-CONTRACT` AMENDED**, a dated clause after #997's: an auxiliary model's declared key is logged `provider_credential_declared` and named on doctor's fact line, and doctor's clash fix no longer excludes a watch rule (#1029). UNCHANGED, checked: `buildContainerEnv`'s arguments and refusals (no new argument), the reserved sets (`reservedAuxiliaryNames`, `auxiliaryCredentialNames`, `secondaryCredentialNames`). **Code evidence**: worker/src/env-allowlist.mjs -> withheldPoolKeys; worker/src/index.mjs -> failoverPrimary; worker/src/processor.mjs -> withheld, provider_credential_declared; worker/src/doctor.mjs -> triggerSecretProviderChecks; worker/test/processor.test.mjs; worker/test/processor-bundles.test.mjs; worker/test/model-failover.test.mjs; worker/test/env-allowlist.test.mjs. |
 | 2026-11-22 (#964) | **`INT-CONSOLE-AUDIT-LOG` AMENDED**: a write that landed with something still to say gets a second `ok` row with a `reason` on its ticket, before an agent's receipt; today a fleet pause or resume over a set of queues that may be short, the banner's sentence for a person and `queues-may-be-short` for an agent. The row's fields, the outcomes, the chain and the agent's failed words UNCHANGED, checked. **`INT-CONSOLE-STATE-API` UNCHANGED, checked**: the confirm's 200 and 409 shapes stay; a short success's `change.summary` gains the sentence and its result `queuesMayBeShort: true` (and, for a person, `note`), a short part-way refusal's `error` leads with it. **Code evidence**: admin/src/audited-write.mjs -> auditedWrite (`note`); admin/src/console/actions.mjs -> AGENT_QUEUES_SHORT, auditNoteOf, confirmOne, changeOf, fleetSwitch; admin/src/tool-actions.mjs -> executeToolAction; admin/src/dashboard.ts -> switchShortRow, withAuditedWrites; admin/src/index.ts -> the `/dispatch pause` and `resume` command; admin/test/audited-write.test.mjs, admin/test/console-actions.test.mjs, admin/test/tool-actions.test.mjs. |

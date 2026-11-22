@@ -481,10 +481,12 @@ after the attempt). It folds in the egress canary and removes every container it
 started by ID, the peer networks after their peers (issue #344). The canary's own probes and network are not on
 that list: they are removed by the canary itself, which probes when the policy is armed, the daemon answers, the
 proxy is up and the job image is present. Clearing what a KILLED run left behind is deliberately not gated on
-those last two, since a host whose proxy has since stopped still has leftovers to clear; it needs only an armed
-policy and a daemon that answers. It does need your docker CLI to say the daemon is on this host before it
+those last two, since a host whose proxy has since stopped still has leftovers to clear; it needs only a daemon that
+answers, and since issue #1021 not even an armed policy: with `PI_EGRESS=0` it still runs, and says only what it
+removed or could not remove. It does need your docker CLI to say the daemon is on this host before it
 REMOVES anything, so that a pid that is dead here is not assumed dead there. Where it cannot say, doctor names
-each leftover it found rather than sweeping blind, and says nothing at all when there are none (issue #350). It runs as the job user a local job on this host gets
+each leftover it found, networks and probe containers, rather than sweeping blind (with the policy armed), and says
+nothing at all when there are none (issue #350). It runs as the job user a local job on this host gets
 (issue #341), in a job's own folder modes, and checks that what it wrote is owned by you on the host; where a local job
 would be refused, or the job user cannot be decided, it runs nothing and says so. It runs only when the docker CLI
 is observed pointing at this host. Its verdicts are about that fixture and `PI_JOB_IMAGE`, not about your own
