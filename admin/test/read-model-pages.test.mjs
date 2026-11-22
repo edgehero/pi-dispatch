@@ -6,6 +6,7 @@ import { mkdirSync, readFileSync, symlinkSync, writeFileSync } from "node:fs";
 import * as nodeFs from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
+import { emptyRedis, quietQueue } from "./helpers/fleet-reader-fakes.mjs";
 import { queueSwitchUnconfirmed } from "../src/read-model.mjs";
 import { LOOKUP_TOLD_MAX, REFUSALS_TOP, RUN_FILE_UNREADABLE, RUN_MIRROR_UNREAD, RUNS_WINDOW_PROJECTS_MAX, RUNS_WINDOW_VALUES_MAX, SWITCH_PREVIEW_QUEUES_MAX, SWITCH_SCAN_INCOMPLETE, WAITING_DISCOVERY_TTL_MS, WAITING_QUEUES_MAX, createFleetReader, forgeLinkOf, makeLocalRunIndex, readFolderSkills, readParkedRuns, readRunById, readRunsPage, refusalsIn, revParseHead, secretProfileNames } from "../src/read-model.mjs";
 import { spawnSync } from "node:child_process";
@@ -735,41 +736,6 @@ test("createFleetReader: a logs dir it cannot read makes the parked list unknown
 });
 
 // --- the fleet reader: what it costs and what it writes ---------------------------------------------------------------
-
-/** A queue that answers every read the snapshot makes with nothing, recording what `getActive` was asked. */
-const quietQueue = (asked = []) => (_c, opts) => {
-  const name = opts?.name ?? "pi-jobs";
-  return {
-    name,
-    async isPaused() { return false; },
-    async getJobCounts() { return { waiting: 0, active: 0, paused: 0, delayed: 0, failed: 0 }; },
-    async getWorkers() { return []; },
-    async getJobSchedulers() { return []; },
-    async getActive(a, b) { asked.push([a, b]); return []; },
-    async getFailed() { return []; },
-    async close() {},
-  };
-};
-
-/** A Valkey that holds nothing, recording each range read on the run index; `mirrorDown` makes those reads throw. */
-function emptyRedis({ mirrorDown = false } = {}) {
-  const ranges = [];
-  return {
-    ranges,
-    on() {},
-    async smembers() { return []; },
-    async hgetall() { return {}; },
-    async get() { return null; },
-    async mget(...keys) { return keys.map(() => null); },
-    async zrevrangebyscore(...args) {
-      ranges.push(args);
-      if (mirrorDown) throw new Error("ECONNREFUSED");
-      return [];
-    },
-    async exists() { return 0; },
-    disconnect() {},
-  };
-}
 
 const fleetOf = (logsDir, redis, extra = {}) =>
   createFleetReader(

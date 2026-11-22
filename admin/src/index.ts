@@ -1297,8 +1297,14 @@ function registerTools(pi: ExtensionAPI): void {
     }),
   });
 
+  // Issue #963: what a read that failed looks like, so a model never takes it for an empty fleet.
+  const unreadWords: Record<string, string> = {
+    failed: " `jobs` is null when the failed jobs could not be read; `complete` is true only when every queue was read and no failed job is past the list.",
+    waiting: " `jobs` is null when the waiting jobs could not be read; `complete` is true only when every queue was read and none was cut.",
+    hosts: " `hosts` is null and `unavailable` true when the host registry could not be read; `readAt` is when the rows were read.",
+  };
   for (const [name, kind] of [["dispatch_failed", "failed"], ["dispatch_waiting", "waiting"], ["dispatch_setup", "setup"], ["dispatch_hosts", "hosts"]]) {
-    registerTool({ name, label: `pi-dispatch ${kind}`, description: "Read-only machine facts. Never raw failure, operator or job text.", parameters: Type.Object({}),
+    registerTool({ name, label: `pi-dispatch ${kind}`, description: `Read-only machine facts. Never raw failure, operator or job text.${unreadWords[kind] ?? ""}`, parameters: Type.Object({}),
       async execute() { const env = deploymentEnv(); return toolText(JSON.stringify(await readOperationalTool(kind, { paths: resolvePaths(env), env }))); },
     });
   }

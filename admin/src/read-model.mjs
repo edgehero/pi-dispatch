@@ -4751,11 +4751,16 @@ export function createFleetReader(
   // the bound, WHICH queues are read goes by what they are: the shared queue and the registry's (live hosts, this
   // read's `lastNames`) first, then the queues only the keyspace scan names, in name order, so a fleet's live queues
   // are never the ones a planted `bull:pi-jobs@<name>:meta` key per name pushes out. They are drawn in the switch's
-  // order either way.
-  const switchPreviewQueues = async (queue) => {
+  // order either way. `lookupBound` (issue #963), for a read of these queues that previews no switch (the agent's failed
+  // jobs, on every call): the by-id lookup's bound instead (`lookupSetOf`), the registry's queues never cut and at most
+  // as many others as fit beside them in `WAITING_QUEUES_MAX`, since each queue read is a client of its own and a SCAN
+  // finds any meta key a writer plants. The kill switch's previews keep `SWITCH_PREVIEW_QUEUES_MAX`.
+  const switchPreviewQueues = async (queue, { lookupBound = false } = {}) => {
     const { names, incomplete } = await switchQueueNames();
     const flipped = new Set(names);
-    const chosen = new Set([...new Set([...lastNames, ...names])].filter((n) => flipped.has(n)).slice(0, SWITCH_PREVIEW_QUEUES_MAX));
+    const ordered = [...new Set([...lastNames, ...names])].filter((n) => flipped.has(n));
+    const bound = lookupBound ? Math.max(new Set(lastNames).size, WAITING_QUEUES_MAX) : SWITCH_PREVIEW_QUEUES_MAX;
+    const chosen = new Set(ordered.slice(0, bound));
     if (typeof queue === "string" && flipped.has(queue)) chosen.add(queue);
     const read = names.filter((n) => chosen.has(n));
     return { queues: queuesNamed(read), total: names.length, truncated: read.length < names.length, incomplete };
@@ -5050,19 +5055,27 @@ export function createFleetReader(
   // snapshot that starts while a read is in flight shares it, and an unreachable answer is kept for the window like any
   // other: a Valkey that times out is sent the whole pipeline once per WAITING_TTL_MS, never on every snapshot. Its
   // `unreachable` is a boolean: no client's words reach a snapshot.
+  // `queuesShort: true` beside the read (issue #963) when the queues it read may not be every queue that exists: the
+  // registry was not read this call (`fleetDegraded`) or the keyspace discovery behind the set was not whole. Judged per
+  // call over a copy, never on the kept read, since two calls inside one window can see the registry differently.
   let waitingCache = null;
   const waitingOf = async (queues, projects, triggers, fresh = false) => {
     const registry = [...new Set(queues.map((q) => q?.name).filter((n) => typeof n === "string"))];
-    const found = (await existingQueueNames()).names;
+    // Read before the discovery is waited for: the caller's registry read is the one just before this call.
+    const registryUnread = fleetDegraded !== null;
+    const discovery = await existingQueueNames();
+    const found = discovery.names;
+    const short = registryUnread || discovery.whole !== true;
     const names = [...registry, ...[...new Set(found)].filter((n) => typeof n === "string" && !registry.includes(n)).sort()];
     const at = nowFn();
     const key = names.join("\n");
-    if (!fresh && waitingCache && waitingCache.key === key && at >= waitingCache.at && at - waitingCache.at < WAITING_TTL_MS) return waitingCache.got;
+    const withShort = async (got) => (short ? { ...(await got), queuesShort: true } : got);
+    if (!fresh && waitingCache && waitingCache.key === key && at >= waitingCache.at && at - waitingCache.at < WAITING_TTL_MS) return withShort(waitingCache.got);
     const entry = { at, key, got: null };
     const list = names.map((name) => pool.get(name) ?? { name });
     entry.got = readWaiting(redis, { queues: list, now: nowFn, timeoutMs: FLEET_READ_TIMEOUT_MS, projects, triggers }).catch(() => ({ unreachable: true }));
     waitingCache = entry;
-    return entry.got;
+    return withShort(entry.got);
   };
 
   return {
@@ -5076,7 +5089,8 @@ export function createFleetReader(
     // registry's queues, the set every surface draws. Such a snapshot reads at most `SWITCH_PREVIEW_QUEUES_MAX` of them
     // (and `opts.queue`, a one-queue preview's, wherever it stands), and says so beside them: `switchTotal`, how many the
     // switch flips; `switchTruncated`, true when `queueCounts` holds fewer; `switchIncomplete`, `SWITCH_SCAN_INCOMPLETE`
-    // when the keyspace scan behind the set did not finish, else null.
+    // when the keyspace scan behind the set did not finish, else null. `switchLookupBound` (issue #963): true reads at most
+    // the by-id lookup's set of them instead (`switchPreviewQueues`' `lookupBound`), for a caller that previews no switch.
     // The waiting jobs and nothing else (issue #800), for a preview that names the ones a change would refuse. `snapshot` reads every
     // queue's counts, the run history and the schedulers besides, and a timeout around it stops the wait for them and not the reads,
     // so each preview of a slow Valkey left one running. This shares the snapshot's window and its one read (`waitingOf`), and a read
@@ -5100,7 +5114,7 @@ export function createFleetReader(
       // Started BEFORE the queue discovery is waited for (issue #961), and awaited after it: on a Valkey that stopped
       // answering each waits out a bound of its own, and one after the other a kill switch preview paid for both.
       const mergedRead = mergedRunsOn(redis, { logsDir: paths.logsDir, limit: RUNS_ON_DASHBOARD, prune }).catch(() => ({ runs: [], hosts: [], mirror: "off" }));
-      const preview = opts?.switchQueues === true ? await switchPreviewQueues(opts?.queue) : null;
+      const preview = opts?.switchQueues === true ? await switchPreviewQueues(opts?.queue, { lookupBound: opts?.switchLookupBound === true }) : null;
       const queues = preview !== null ? preview.queues : await fleetQueues();
       const merged = await mergedRead;
       // The cron ids this deployment declares, read from the triggers file the same tick already reads SYNCHRONOUSLY.
@@ -5427,7 +5441,8 @@ export function createFleetReader(
         softHoldToday: fold.softHoldToday,
         // Issue #737: when the registry rows in `hostBudgets` were read (the reader's clock), null before any read.
         hostsReadAt: lastHostsAt,
-        // Issue #737: the waiting jobs (`readWaiting`'s shape, or `{ unreachable: true }`), only on a call that asked.
+        // Issue #737: the waiting jobs (`readWaiting`'s shape, or `{ unreachable: true }`), only on a call that asked; with
+        // `queuesShort: true` when the queues read may not be all of them (`waitingOf`, issue #963).
         ...(waitingJobs !== null ? { waiting: waitingJobs } : {}),
         // Issue #737: what a switch preview's `queueCounts` cover, only on a call that asked for the switch's queues.
         ...(preview !== null ? { switchTotal: preview.total, switchTruncated: preview.truncated, switchIncomplete: preview.incomplete } : {}),
