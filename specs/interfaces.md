@@ -2310,22 +2310,39 @@ a sandbox not confirmed gone marks the run's result `lingering`, its exit code u
       it mounts no other `/sys/fs/cgroup` path (a missing bind source there becomes a stray cgroup), runs the job image
       the worker already pins, and is not persistent, so it is read again every ten minutes (the facts' own cadence)
       and written again when a Docker Desktop restart dropped it. ONE NAME PER ROLE (issue #978): `<hex8>` is the
-      first eight hex digits of the sha256 of `PI_WORKER_NAME` (empty when it is not declared), and doctor's read runs
-      as `pi-dispatch-cpu-reserve-doctor-<hex8>`. `--rm` acts only when a container exits, so a CLI killed at its bound
-      between create and start used to leave a `created` container for good. Now a step that did not end cleanly marks
-      the name dirty, a timeout removes it at once (`rm -f <name>`, bounded at 15 s; a missing name exits 0, measured
-      on Docker 28.0.4), and while it is dirty `rm -f` runs before the next helper (doctor's is a plain `rm <name>`,
-      issue #1021: it refuses a running container, so a doctor started while another doctor's read runs under the
-      same name leaves that read alone and is answered 125, while a killed doctor's `created` leftover is still
-      removed; after doctor's own timeout it is `rm -f`); an rm that times out runs no helper (`unreadable`, reason
-      `cleanup-timeout`), and a name still taken fails the next create at once with exit 125 ("Conflict", measured)
-      and makes nothing, so a daemon holds at most one helper container per name. A step refused for its name when
-      it did not just run the rm (a clean helper exit that had not yet freed the name, measured once under a
-      throttled dockerd) gets one rm and one more try, and a second refusal is answered (issue #1021). Refused for its
-      name is exit 125 with `already in use` on stderr (Docker's "Conflict. ... is already in use", Podman's "that
-      name is already in use"); the worker's runner hands stderr back for this match (`withStderr`), which is matched
-      and never logged nor put in a reason, and any other 125 (an image or a flag refused, Podman's own errors) is
-      answered at once. Doctor's runner hands no stderr back and need not: its guard starts dirty and runs one step.
+      first eight hex digits of the sha256 of `PI_WORKER_NAME` (empty when it is not declared), and each doctor's read
+      runs as `pi-dispatch-cpu-reserve-doctor-<hex8>-<pid>`, its own process id in decimal with no leading zero (issue
+      #1040). `--rm` acts only when a container exits, so a CLI killed at its bound between create and start used to
+      leave a `created` container for good. Now a step that did not end cleanly marks the name dirty, a timeout
+      removes it at once (`rm -f <name>`, bounded at 15 s; a missing name exits 0, measured on Docker 28.0.4), and
+      while it is dirty `rm -f` runs before the next helper (doctor's too, issue #1040: a container under its name can
+      only be one a dead doctor with its pid left; it was a plain `rm <name>` under issue #1021, while every doctor
+      shared one name, which spared another doctor's read only once it ran, never while it was `created`); an rm that
+      times out runs no helper (`unreadable`, reason `cleanup-timeout`), and a name still taken fails the next create
+      at once with exit 125 ("Conflict", measured) and makes nothing, so a daemon holds at most one helper container
+      per name. A step refused for its name when it did not just run the rm (a clean helper exit that had not yet
+      freed the name, measured once under a throttled dockerd) gets one rm and one more try, and a second refusal is
+      answered (issue #1021). Refused for its name is exit 125 with `already in use` on stderr (Docker's "Conflict.
+      ... is already in use", Podman's "that name is already in use"); the worker's runner hands stderr back for this
+      match (`withStderr`), which is matched and never logged nor put in a reason, and any other 125 (an image or a
+      flag refused, Podman's own errors) is answered at once. Doctor's runner hands no stderr back and need not: its
+      guard starts dirty and runs one step. Before that step, on a daemon this host owns, doctor removes what killed
+      doctors left (issue #1040):
+      `ps -a --filter name=pi-dispatch-cpu-reserve-doctor- --format '{{.Names}}\t{{.State}}'`, and each listed name
+      that is exactly `pi-dispatch-cpu-reserve-doctor-<any hex8>-<pid>` (no leading zero, digits only) whose pid is
+      not alive or is its own goes with a plain `rm` where it never ran or has stopped and `rm -f` otherwise (the
+      canary probes' sweep, its listing and owner rules), every call bounded at 15 s, before the job image check; a
+      removal is a ✓ line, one that would not go or a listing that failed a ⚠ with the command, a clean daemon
+      nothing. On a daemon it does not own nothing is listed. Doctor's shared name before issue #1040 has no pid and
+      is not taken there. Residual, the canary sweep's PID-namespace caveat (`INT-EGRESS-POLICY-CONTRACT`): a doctor
+      in a container with the daemon's socket mounted counts the daemon as owned while it sees another process table,
+      so it can read a live host doctor's pid as dead and remove that doctor's helper, `created` or running; the
+      victim reads its quota as unreadable on that run, never a false verdict. Browser setup's read-only doctor (issue
+      #774) neither sweeps nor runs the helper: its line says the quota was not read by browser setup. When the worker
+      kills its doctor child at the 120 s bound it runs one `rm -f pi-dispatch-cpu-reserve-doctor-<hex8>-<child pid>`
+      through the reserve's runner, bounded at 15 s, on any daemon, where it keeps a helper venue itself, and logs
+      `doctor_helper_not_removed { pid, reason }` only when that rm failed (a missing name exits 0); not after a child
+      its shutdown killed.
       The retry's residual: when the daemon's own AutoRemove of the last helper is still under way, the retry's `rm -f` answers at
       once and the second create can meet 125 again; that attempt fails open as `write-exit-125` (or the read's) and
       the next attempt, a minute later, recovers. Residual: two workers on one daemon without `PI_WORKER_NAME` share one
@@ -2344,21 +2361,31 @@ a sandbox not confirmed gone marks the run's result `lingering`, its exit code u
       own (a container inherits its image's labels, measured), and at least ten minutes old by the worker's clock,
       with a plain `docker rm` (never `-f`, so one that started meanwhile is refused) in chunks of 20, every call
       bounded. The same pass takes a `created` container labelled `pi.dispatch.helper=cpu-reserve` whose name is a
-      helper name (`pi-dispatch-cpu-reserve-<hex8>` or `pi-dispatch-cpu-reserve-doctor-<hex8>`) other than this
-      worker's own, by the same fingerprint except that its labels are its image's plus exactly that one (issue
-      #1021: a worker since renamed left its last helper under the old name, which no guard owns; a doctor helper
-      stuck ten minutes goes too, harmless against doctor's 15 s bound). Residual: the age guard compares the worker's
-      clock with the daemon's `Created`, so on a remote cgroupfs daemon whose clock is behind a helper looks older than
-      it is (a plain `rm` of one still being started costs its worker that step), and ahead, younger (it waits for a
-      later pass). The inspect reads every value through `index`: the CLI refuses a dotted path to a key the daemon
-      omits (`HostConfig.Mounts` without a `--mount`, exit 1 with no output, measured). A pass cut short (a failed
-      listing, any step that timed out, an inspect that printed no row) establishes nothing and is tried again after
-      the next read that holds. Logged as `cpu_reserve_leftovers_removed { venue, listed, removed, failed, young, kept,
-      complete }`, every count that pass's (`listed` the candidates, `young` the fingerprints left only for their age,
-      `kept` the inspected ones that are no fingerprint, `failed` the fingerprints the `rm` left): for every pass that
-      removed something, and once per process for each of a pass cut short (with `complete: false` and `reason`
-      `<list, inspect, image or rm>-<failure>`), a pass whose `rm` was refused and a pass that left something young or
-      kept, so no line repeats every re-check;
+      helper name (`pi-dispatch-cpu-reserve-<hex8>`, `pi-dispatch-cpu-reserve-doctor-<hex8>-<pid>`, or doctor's one
+      shared name before issue #1040, `pi-dispatch-cpu-reserve-doctor-<hex8>`) other than this worker's own, by the
+      same fingerprint except that its labels are its image's plus exactly that one (issue #1021: a worker since
+      renamed left its last helper under the old name, which no guard owns; a doctor helper stuck ten minutes goes
+      too, harmless against doctor's 15 s bound). Residual: on a daemon this host does not own, a doctor helper the
+      worker's own rm after a kill did not take (a create landing after that rm, a doctor killed outside the worker or
+      by its shutdown) goes with this pass, and one left after the pass has ended waits for the worker's next start,
+      and is taken once it is ten minutes old; at most one per such doctor run. Residual: on a daemon two hosts share,
+      two doctors with one pid and one worker name share a name, as every doctor did. Residual: the age guard compares
+      the worker's clock with the daemon's `Created`, so on a remote cgroupfs daemon whose clock is behind a helper
+      looks older than it is (a plain `rm` of one still being started costs its worker that step), and ahead, younger
+      (it waits for a later pass). The inspect reads every value through `index`: the CLI refuses a dotted path to a
+      key the daemon omits (`HostConfig.Mounts` without a `--mount`, exit 1 with no output, measured). A pass cut
+      short (a failed listing, any step that timed out, an inspect that printed no row) establishes nothing and is
+      tried again after the next read that holds. So does an image whose labels could not be read (issue #1040:
+      `image-<failure>` for an `image inspect` that failed, `image-unreadable` for one that answered no label map, or
+      for a row with no image id, which is never put on an argv): the rows on it are judged by no one and counted
+      nowhere, the pass goes on with the images it read, and ends cut short with the first such reason, where it used
+      to count those rows `kept` and end the removal for good. Logged as
+      `cpu_reserve_leftovers_removed { venue, listed, removed, failed, young, kept, complete }`, every count that
+      pass's (`listed` the candidates, `young` the fingerprints left only for their age, `kept` the inspected ones
+      that are no fingerprint, judged only against labels that were read, `failed` the fingerprints the `rm` left):
+      for every pass that removed something, and once per process for each of a pass cut short (with `complete: false`
+      and `reason` `<list, inspect, image or rm>-<failure>` or `image-unreadable`), a pass whose `rm` was refused and
+      a pass that left something young or kept, so no line repeats every re-check;
       Docker with the systemd driver and rootful Podman:
       only root may set it, so the worker only READS `systemctl show -P CPUQuotaPerSecUSec pidispatch.slice`
       (`infinity` when unset, and only where the daemon is observed on this host) and doctor prints `sudo systemctl
@@ -15267,6 +15294,7 @@ and `DES-RUN-HISTORY-FLAT-FILES-NO-DB` are UNCHANGED, checked: no file shape, wr
 
 | Date | Change |
 |---|---|
+| 2026-11-22 (#1040) | **`INT-CONTAINER-RUNTIME-CONTRACT` AMENDED**, the CPU reserve's helper: each doctor's read runs as `pi-dispatch-cpu-reserve-doctor-<hex8>-<pid>` (its own process id, decimal, no leading zero), and its rm before the read is `rm -f` of that name again (the plain `rm` of issue #1021 spared another doctor's read only once it ran, never while `created`); NEW, on a daemon this host owns doctor first lists `ps -a --filter name=pi-dispatch-cpu-reserve-doctor-` and removes each exact doctor helper name of a dead pid or its own (any hex8) through the canary probes' sweep, a plain `rm` where it never ran or has stopped and `rm -f` otherwise, every call bounded at 15 s, before the job image check, a ✓ for a removal, a ⚠ for one that would not go or a listing that failed, nothing on a clean daemon, nothing listed on a daemon it does not own, with the canary sweep's PID-namespace caveat (a containerised doctor with the socket mounted can remove a live host doctor's helper); browser setup's read-only doctor neither sweeps nor runs the helper and says so; NEW, after killing its doctor child at the 120 s bound the worker runs one `rm -f` of that child's helper name through the reserve's runner, bounded at 15 s, on any daemon where it keeps a helper venue, logging `doctor_helper_not_removed { pid, reason }` only when it failed, never after a shutdown kill; the worker's leftover pass also takes the new doctor name and doctor's shared one before issue #1040, with two residuals (a doctor helper the worker's rm did not take on a daemon not owned, left after the pass has ended, waits for the worker's next start, at most one per such run; two hosts' doctors with one pid and one worker name on a shared daemon share a name); an image whose labels could not be read, or a row with no image id, cuts the pass short (`image-<failure>`, NEW token `image-unreadable`), its rows judged by no one and counted nowhere while the pass goes on with the images it read, where they were counted `kept` and ended the removal for good; `kept` is judged only against labels that were read. UNCHANGED, checked: the helper's argv, the worker's helper name, the one-per-name rule, the 125 retry, `cpu_reserve_leftovers_removed`'s fields, the job argv, the registry's `cpuReserve` statuses; `INT-DOCTOR-RESULTS-KEY` (the sweep's lines are ordinary checks of the sizing section). **Code evidence**: worker/src/cpu-reserve.mjs -> helperName, HELPER_NAME_RE, DOCTOR_HELPER_NAME_RE, DOCTOR_HELPER_PREFIX, guardHelperRun, removeLegacyHelpers, legacyHelperVerdict, makeCpuReserve, removeKilledDoctorHelper; worker/src/doctor.mjs -> doctorCpuReserve (readOnly), sweepStaleDoctorHelpers, doctorHelperSweepChecks, cpuReserveChecks, sweepStaleProbeContainers, collectChecks; worker/src/doctor-spawner.mjs -> makeDoctorSpawner (afterKill); worker/src/start.mjs -> startWorker (the doctor spawner's afterKill, the reserve's runner). |
 | 2026-11-22 (#965) | **`INT-CANCEL-CHANNEL-CONTRACT` CORRECTED**, one sentence: the console's queues behind the kill switch, the failed-job and steer actions, the fleet reader and the status read have the command bound since #842 and the one-shot queues of a rerun, a parked answer, a `dispatch_run`, a manual trigger fire and the zero touch and schedule pages since #961, not `cancelHeldJob`'s queues or `readSchedulers`', a raw client only where its caller passes `commandTimeoutMs`, and `enqueueForgeJob`'s routed queue the connection of its caller's queue (it said the console's queue clients); the CLI's bounds UNCHANGED, checked. **`INT-CONSOLE-AUDIT-LOG` AMENDED**, the agent's failed row: a single write that threw is `action-unconfirmed` (a `valkeyMayStillRun` error, a `setup-*` step), for a `valkeyNotSent` one the surface's word for Valkey out of reach (`action-unavailable` from the tools, `action-refused` from the console), or `action-refused`, where it carried a sentence; a person's row for a throw marked `valkeyNotSent` adds "; Valkey could not be reached, so nothing was changed". The row's fields, outcomes and chain UNCHANGED, checked. **`INT-CONSOLE-STATE-API` AMENDED**, superseding the #842 row's "400 for a steer's and a steer withdrawal's": a steer's and a withdrawal's preview whose Valkey read threw or did not answer within its bound answers 503, as a failed job's does, their ordinary refusals 400; a confirm whose write threw after a Valkey read or connect that got no answer before anything was sent answers 503 `VALKEY_UNREACHABLE` where it answered 500, and an envelope write's connect, which answered 409 with its own sentence, answers the same. `/api/state` and every other shape UNCHANGED, checked. **`INT-SANDBOX-SESSIONS-CONTRACT` AMENDED**: End's read of the session that got no answer throws a new error marked `valkeyNotSent`, Valkey's own error reply as it is; keys, values, TTLs and the monitor UNCHANGED, checked. **Code evidence**: admin/src/audited-write.mjs -> auditedWrite (thrownAgentWord, thrownSentence), AGENT_UNAVAILABLE; admin/src/console/actions.mjs -> planned, confirmOne; admin/src/job-actions.mjs -> planSteer, planSteerWithdraw; admin/src/read-model.mjs -> writeClient, writeEnvelope; worker/src/sandbox-sessions.mjs -> requestSandboxEnd. |
 | 2026-11-21 (#960) | **`INT-RUNNER-EXIT-CODE-PROTOCOL` AMENDED**: `subscriptionCode` gains ChatGPT's two non-retryable usage limits, `subscription_sharing_usage_limit_exceeded` and `subscription_sharing_workplace_individual_usage_limit_exceeded` (pi-ai `utils/retry.js`), and for `openai` on `openai-responses` the code is read from a structured field of the first event that fails the call in a 2xx event stream, as the pinned stack reads it (`event: error`; a top-level `error` on any event not named `thread.*` or on one with no name; `type: "error"`; `response.failed`), by a pass-through reader with a 65536-character cap per event that parses every event's data as the SDK does and stops where it stops (the first failing event, `[DONE]`, malformed data, a named event with no data), since a subscription past its limit answers HTTP 200 and pi's message keeps only the prose; still never inferred from prose, and the two retryable `_unavailable` outages are not quota codes. The worst-case line is 8,004 characters with the longest code, 8,497 with a supervisor's line (was 7,961 and 8,454). **`INT-SUBSCRIPTION-QUOTA-KEY` AMENDED**: one code list with the wire's validator; an unknown-reset exhaustion made only of provider refusal rows is retried by one automatic trial (`auto`, `claimedAt`) six hours after its newest refusal or last claim, shown as the connection's `retestAt` beside `trialClaimedAt`; the attempt holding a trial settles it after a verified exit 0, 1 or 2: cleared (`clearTrialEvidence`) when that provider returned output, given back (`releaseTrial`) when it provably was never called (the dollar settlement's rule: `truncated` exactly 0, no `other/other` call), left used otherwise, nothing on a signed quota or rate-limit failure, all guarded by `usedBy` and `claimedAt`; a preview beside a held trial is refused rather than throwing; a never-started trial is a named residual. **`INT-DEFER-REASON-KEY` AMENDED**, the `subscription-quota` row's gate cell names the automatic retest, and so does its queue wait sentence (`defer-reasons.mjs`); the reason, bucket and fields UNCHANGED, checked. **`INT-RUN-HISTORY-FILE-CONTRACT` AMENDED**, the record-reason paragraph's comment clause only: a final `container-infra-exit` with a signed `quota-exhausted` posts `FAILED_COMMENT_BY_PROVIDER_FAILURE`'s row. **`INT-REASON-CATALOG` AMENDED**: `container-infra-exit` is the ninth ambiguous reason. UNCHANGED, checked: exit codes, signing, the record's reason (`container-infra-exit`, retried), model cooldown keys and TTL, the record shape. **Code evidence**: image/runner/src/provider-failure.mjs -> SUBSCRIPTION_QUOTA_CODES, SSE_FRAME_CAP, eventError, sseErrorReader, installProviderFailureObserver; worker/src/model-failover-protocol.mjs -> SUBSCRIPTION_QUOTA_CODES; worker/src/subscription-quota.mjs -> SUBSCRIPTION_RETEST_MS, retestAtOf, heldTrialRefusal, admit, clearTrialEvidence, releaseTrial; worker/src/subscription-runtime.mjs -> settleTrial; worker/src/index.mjs -> subscriptionAttemptId; worker/src/comment-tables.mjs -> FAILED_COMMENT_BY_PROVIDER_FAILURE; worker/src/start.mjs -> failedComment; admin/src/subscription-auth-view.mjs -> quotaOf; worker/src/defer-reasons.mjs -> DEFER_WHYS. |
 | 2026-11-21 (#1003) | **`INT-DEFER-REASON-KEY` AMENDED**, a paragraph after its CLI reader's: `pi-dispatch status` ends every read of one Valkey within about five seconds, the waiting details' budget cut short when less is left; a queue whose paused state or counts did not answer adds `partial: true` and `unavailableQueues` at the top level, its counts are left out of the sums (no count field when no queue answered), `pausedState` is `null` when every queue that answered is paused and one did not answer, the line is printed with an `error:` line after it naming what each queue lacks, and the exit code is 1. A Valkey that answers every read prints what it did before, exit code 0. `--target` reads under the same deadline, its own budget cut short, with `complete: false` and exit code 0. **`INT-POLLER-STATUS-KEY` AMENDED**, one sentence: "`status` still exits 0" becomes that what `pollers` says never changes `status`'s exit code (the exit code 1 comes from the queue reads alone); the heartbeat read ends at status's deadline when that is sooner, and its fields and sentences are as they were. No key, field or TTL changes. **Code evidence**: worker/src/cli.mjs -> killSwitch, targetStatus, statusShortfall, answeredWithin; worker/src/poller-facts.mjs -> readPollerFacts; worker/test/cli-control.test.mjs |

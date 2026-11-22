@@ -115,7 +115,7 @@ import { SUGGEST_WINDOW_DAYS, cpusText, hostCap, refusalWords, sizeRefusal, sugg
 import { SIZING_RECORD_MAX_BYTES, readSizingRecords } from "./size-records.mjs";
 import { CAPACITY_WINDOWS, computeCapacity } from "./capacity.mjs";
 import { JOBS_ONLY, durationText, milliText, notSharedWhy, percentText, shareText } from "./capacity-cli.mjs";
-import { CGROUP_PARENT, HELPER_LABEL_KEY, cgroupParentFor, guardHelperRun, helperName as cpuReserveHelperName, operatorQuotaCommand, readQuota, reservePlan, userQuotaCommand } from "./cpu-reserve.mjs";
+import { CGROUP_PARENT, DOCTOR_HELPER_NAME_RE, DOCTOR_HELPER_PREFIX, HELPER_LABEL_KEY, RESERVE_STEP_TIMEOUT_MS, cgroupParentFor, guardHelperRun, helperName as cpuReserveHelperName, operatorQuotaCommand, readQuota, reservePlan, userQuotaCommand } from "./cpu-reserve.mjs";
 import { HOST_BUDGET_KEYS, computeHostBudget, hostBudgetSettings, largestFit, neverFits, projectBudgetRow, publishedBudget, readUserServiceLimits } from "./host-budget.mjs";
 import { makeImagePreflight, normalizeImageId } from "./image-preflight.mjs";
 import { watchSecretsMissing } from "./watch-contract.mjs";
@@ -2665,6 +2665,9 @@ export async function collectChecks(shellVars, seams) {
 			image: jobImage,
 			imagePresent: imageCode === 0,
 			workerName: declaredWorkerName ?? "",
+			pid: seams.pid ?? process.pid,
+			isAlive: seams.isAlive ?? defaultIsAlive,
+			readOnly: seams.setupReadOnly === true,
 		});
 		checks.push(...cpuReserveChecks(reserveReads, budgetView.cpuCenti));
 	}
@@ -7620,7 +7623,8 @@ export const CANARY_LINES = Object.freeze({
 		fix: () => CANARY_HELD_FIX,
 		label: ({ name, because }) => `${name} is kept with what is running on it, because ${because}`,
 	},
-	// Issue #978: the probe containers' own listing (`probeListArgs`), which the sweep asks on a daemon this host owns.
+	// Issue #978: the probe containers' own listing (`probeListArgs`) failed. Since issue #1021 the sweep asks it on any
+	// daemon, and judges what it lists only on one this host owns.
 	probesUnlisted: {
 		tier: "warn",
 		fix: () => CANARY_PROBES_UNLISTED_FIX,
@@ -7968,11 +7972,12 @@ const PROBE_PLAIN_RM_STATES = new Set(["created", "initialized", "exited", "stop
  * the worker's doctor child is killed at 120 s: its probes stayed behind, and the next doctor removed only networks.
  *
  * A listed name is ours only when `ours(name, pidText)` says it is EXACTLY one the caller builds for the pid it ends in
- * (the canary: `probeOf`, its and the endpoint probes' closed slug sets; the gh probe's step: `ghProbeContainer`), and
- * that pid is written as doctor writes `process.pid`, with no leading zero. The listing's `--filter name=` is a
- * substring match on both runtimes and returns anything that merely contains a prefix, which is why it only narrows and
- * never decides. The pid rule is the network pass's: dead, or ours, since each caller lists before its own run makes
- * anything under the prefix (the canary sweep before the canary, the gh probe's step right before its probe).
+ * (the canary: `probeOf`, its and the endpoint probes' closed slug sets; the gh probe's step: `ghProbeContainer`; the
+ * CPU-reserve step, issue #1040: `DOCTOR_HELPER_NAME_RE`), and that pid is written as doctor writes `process.pid`, with
+ * no leading zero. The listing's `--filter name=` is a substring match on both runtimes and returns anything that
+ * merely contains a prefix, which is why it only narrows and never decides. The pid rule is the network pass's: dead,
+ * or ours, since each caller lists before its own run makes anything under the prefix (the canary sweep before the
+ * canary, the gh probe's step right before its probe, the CPU-reserve step before its helper).
  *
  * `owned: false` (issue #1021) is a daemon this host does not own: the names that pass are collected in `found`, and
  * nothing is judged or removed, since `isAlive` would answer about the wrong process table.
@@ -8417,7 +8422,9 @@ async function egressChecks(env, seams, { dockerCode, imageCode, jobImage, endpo
 	// owned, and if they collide on a pid each can `rm -f` the other's probe and remove its network. Not data
 	// loss: the objects are doctor's own ephemera and the victim degrades to a `probe did not run` with
 	// `reached: null`, never a false verdict. Stated in `INT-EGRESS-POLICY-CONTRACT` beside the sibling's,
-	// rather than guarded, because nothing this shell can ask distinguishes the two containers.
+	// rather than guarded, because nothing this shell can ask distinguishes the two containers. The CPU-reserve
+	// step's sweep of earlier doctors' helpers (issue #1040, `sweepStaleDoctorHelpers`) rests on the same test and
+	// carries the same caveat, stated in `INT-CONTAINER-RUNTIME-CONTRACT`.
 	if (!seams.setupReadOnly) checks.push(...(await sweepLeftovers()));
 
 	// `docker inspect` on the container, not `ps`: it answers present-vs-absent and running-vs-stopped in
@@ -10225,31 +10232,81 @@ export function doctorHostBudget(env, { daemon = undefined, podman = undefined, 
  * when that image is present). Doctor never WRITES a quota; the worker does at boot where it may.
  * `run(bin, args, { timeoutMs })` resolves `{ code, stdout, error }`.
  *
- * Issue #978: the helper runs under doctor's own fixed name (`helperName(workerName, { doctor: true })`, never the
- * worker's, so a doctor never removes the worker's helper mid-step), removed before the read and again after a timeout
- * (`guardHelperRun`). A doctor killed mid-read (the worker's own doctor child is killed at its bound) leaves at most
- * that one container, which the next doctor removes first. Issue #1021: the rm before the read is a plain `rm`
- * (`forceBefore: false`), which refuses a running container, because every doctor of this deployment reads under that
- * one name: a doctor started while another doctor's read runs leaves it alone (and is answered 125, the cause its line
- * names), where `rm -f` killed it and that doctor reported the quota unreadable. A killed doctor's leftover is `created`,
- * which the plain `rm` still removes. After doctor's OWN timeout the rm stays `-f`: what holds the name is its own.
+ * Issue #978: the helper runs under a doctor name (never the worker's, so a doctor never removes the worker's helper
+ * mid-step), removed before the read and again after a timeout (`guardHelperRun`, `rm -f` both). Issue #1040: the name
+ * carries this process's pid (`helperName(workerName, { doctor: true, pid })`), so no doctor's rm reaches another
+ * doctor's helper, `created` or running; a container already under it can only be one a dead doctor with this pid left.
+ * Every doctor of a deployment used to read under one name, and neither rm could tell its own helper from another's:
+ * `rm -f` killed another doctor's read in flight, and the plain `rm` put there instead (issue #1021) still removed one
+ * not yet started, which on a slow daemon is most of the step.
+ *
+ * A doctor killed mid-read (the worker's own doctor child is killed at its bound) leaves at most its one helper, under
+ * its pid. The worker removes it at once, with one `rm -f` of that name on any daemon (`removeKilledDoctorHelper`). On a
+ * daemon this host owns, the step also first removes those of dead pids (`sweepStaleDoctorHelpers`), which takes what a
+ * doctor run by hand, or a create landing after the worker's rm, left; on any other, `isAlive` would answer about the
+ * wrong process table, so nothing is listed, and the worker's leftover pass takes such a one (a `created` helper ten
+ * minutes old, by fingerprint, `HELPER_NAME_RE`, while that pass still runs after the worker's start).
+ *
+ * `readOnly` is browser setup's run (issue #774), which publishes what it inspected and starts or sweeps no container:
+ * neither the sweep nor the helper read runs there, and the helper venue's read answers `setup-read-only`; a `systemctl`
+ * read still runs, since it starts nothing. Returns per venue `{ plan, read, cgroupManager }`, plus `swept` where the
+ * sweep ran.
  */
-export async function doctorCpuReserve({ daemon = undefined, podman = undefined, endpointLocal = false, platform = process.platform, run, image, imagePresent = false, workerName = "" }) {
+export async function doctorCpuReserve({ daemon = undefined, podman = undefined, endpointLocal = false, platform = process.platform, run, image, imagePresent = false, workerName = "", pid = process.pid, isAlive = defaultIsAlive, readOnly = false }) {
 	const venues = [];
 	if (daemon !== undefined && daemon?.answered === true) venues.push({ venue: "local", facts: daemon.facts, endpointLocal });
 	if (podman !== undefined && podman?.answered === true) venues.push({ venue: "podman", facts: podman.info, endpointLocal: podman.info?.serviceIsRemote === false });
 	const out = [];
 	for (const v of venues) {
 		const plan = reservePlan({ ...v, platform });
+		const bin = plan.venue === "podman" ? "podman" : "docker";
 		let read = null;
-		if (plan.parent && plan.method === "helper" && !imagePresent) read = { ok: false, reason: "job-image-absent" };
+		// Before the image check: a killed doctor's helper is left whether or not the job image is still here.
+		const swept = plan.parent && plan.method === "helper" && v.endpointLocal === true && !readOnly ? await sweepStaleDoctorHelpers({ run: (args) => run(bin, args, { timeoutMs: RESERVE_STEP_TIMEOUT_MS }), bin, pid, isAlive }) : null;
+		if (plan.parent && plan.method === "helper" && readOnly) read = { ok: false, reason: "setup-read-only" };
+		else if (plan.parent && plan.method === "helper" && !imagePresent) read = { ok: false, reason: "job-image-absent" };
 		else if (plan.parent && plan.method === "helper") {
-			const name = cpuReserveHelperName(workerName, { doctor: true });
-			read = await readQuota(plan, { run: guardHelperRun({ run, name, forceBefore: false }), image, name });
+			const name = cpuReserveHelperName(workerName, { doctor: true, pid });
+			read = await readQuota(plan, { run: guardHelperRun({ run, name }), image, name });
 		} else if (plan.parent && plan.method) read = await readQuota(plan, { run, image });
-		out.push({ plan, read, cgroupManager: v.facts?.cgroupDriver ?? v.facts?.cgroupManager ?? null });
+		out.push({ plan, read, cgroupManager: v.facts?.cgroupDriver ?? v.facts?.cgroupManager ?? null, ...(swept === null ? {} : { swept }) });
 	}
 	return out;
+}
+
+/**
+ * The CPU-reserve read helpers EARLIER doctor runs left (issue #1040), by name and in every state, through the probes'
+ * own sweep (`sweepStaleProbeContainers`): its listing, its owner parsing (a pid with no leading zero, digits only) and
+ * its pid rule (dead, or this process's own, since this runs before this doctor's helper exists). A name is one only
+ * when it is EXACTLY a doctor helper name for the pid it ends in (`DOCTOR_HELPER_NAME_RE`), whatever its hex8: a
+ * doctor of another worker name on this daemon is judged by its pid the same way. Doctor's one shared name before
+ * issue #1040 has no pid and is never taken here. `run(args)` is the venue's bounded runner, and the caller asks only
+ * on a daemon this host owns. Returns `{ unlisted, removed, stuck }`, the last two flat lists of names.
+ *
+ * THE CANARY SWEEP'S PID-NAMESPACE CAVEAT HOLDS HERE TOO (`INT-EGRESS-POLICY-CONTRACT`): a doctor IN A CONTAINER with the
+ * daemon's socket mounted reads the daemon as owned (a `unix:` endpoint is on this machine) while it sees another
+ * process table, so it can read a live host doctor's pid as dead and remove that doctor's helper, `created` or running.
+ * The victim reads its quota as unreadable on that one run, never a false verdict; nothing this shell can ask tells the
+ * two process tables apart, so it is stated, not guarded.
+ */
+async function sweepStaleDoctorHelpers({ run, bin, pid, isAlive }) {
+	const swept = await sweepStaleProbeContainers({ run, bin, pid, isAlive, prefixes: [DOCTOR_HELPER_PREFIX], ours: (n, owner) => DOCTOR_HELPER_NAME_RE.exec(n)?.[1] === owner });
+	return { unlisted: swept.unlisted, removed: [...swept.removed.values()].flat(), stuck: [...swept.stuck.values()].flat() };
+}
+
+/**
+ * What the sweep of earlier doctors' helpers did on one venue, said before its reserve line (issue #1040), in the gh
+ * probe sweep's words: a removal is a ✓, a helper that would not go a ⚠ with the command, a listing that failed a ⚠
+ * with the listing. A sweep that found nothing says nothing, so a clean host prints what it did before.
+ */
+function doctorHelperSweepChecks(v, swept, bin) {
+	if (!swept) return [];
+	if (swept.unlisted) return [{ ok: false, warn: true, label: `${v}: CPU-reserve helpers from an EARLIER doctor run could not be listed: ${bin} ${probeListArgs([DOCTOR_HELPER_PREFIX]).slice(0, -2).join(" ")}`, fix: CANARY_PROBES_UNLISTED_FIX }];
+	const helpers = (names) => `the CPU-reserve helper${names.length === 1 ? "" : "s"} ${names.join(", ")}`;
+	return [
+		...(swept.removed.length > 0 ? [{ ok: true, label: `${v}: removed ${helpers(swept.removed)}, left by an EARLIER doctor run` }] : []),
+		...(swept.stuck.length > 0 ? [{ ok: false, warn: true, label: `${v}: ${helpers(swept.stuck)}, left by an EARLIER doctor run, could not be removed: ${bin} rm -f ${swept.stuck.join(" ")}`, fix: CANARY_PROBES_STUCK_FIX }] : []),
+	];
 }
 
 /** What each method means for an operator, said once per held line. */
@@ -10281,8 +10338,9 @@ function reserveUnmanaged(why, want) {
  */
 export function cpuReserveChecks(reads, cpuCenti) {
 	const checks = [];
-	for (const { plan, read, cgroupManager } of reads) {
+	for (const { plan, read, cgroupManager, swept } of reads) {
 		const v = plan.venue;
+		checks.push(...doctorHelperSweepChecks(v, swept, v === "podman" ? "podman" : "docker"));
 		if (!plan.parent) {
 			checks.push({ ok: false, warn: true, label: `${v}: jobs run without the ${CGROUP_PARENT} parent cgroup (Podman uses the ${cgroupManager ?? "unknown"} cgroup manager here), so each job's CPU weight is capped at 1024: the egress proxy and Valkey get a fair share of the CPU, not a reserve`, fix: "run the worker as a systemd user service with linger on, so Podman uses the systemd cgroup manager, then re-run doctor" });
 			continue;
@@ -10305,12 +10363,18 @@ export function cpuReserveChecks(reads, cpuCenti) {
 				: plan.method === "user-systemd"
 					? `the worker sets it when it starts; start or restart it, or run as the worker's account: \`${userQuotaCommand(target)}\``
 					: "the worker writes it when it starts and re-checks it every ten minutes; start or restart the worker";
-		// Issue #978: exit 125 is any refusal by the runtime, and stderr is never read, so the cause is not known here. After
-		// doctor's rm of its own helper's name (a plain `rm`, which leaves a running one alone, issue #1021), one cause is
-		// another doctor of this deployment reading the quota under the same name at that moment, which is the one an
-		// operator can act on; the line names it as a cause, not the cause.
+		// Issue #1040: browser setup starts no container (issue #774), so the helper venue's quota is not read there.
+		if (!read?.ok && plan.method === "helper" && read?.reason === "setup-read-only") {
+			checks.push({ ok: false, warn: true, label: `${v}: the quota of ${CGROUP_PARENT} was not read by browser setup, which starts no helper container`, fix: "run pi-dispatch doctor in the deployment terminal to read it" });
+			continue;
+		}
+		// Issue #978: exit 125 is any refusal by the runtime, and stderr is never read, so the cause is not known here.
+		// Issue #1040: it is no longer another doctor reading at that moment, since each doctor's helper is named after its
+		// own pid. What is left is a name the `rm -f` before the read did not clear (a dead doctor's helper under this pid,
+		// still being removed), or the helper itself refused (its image, a flag, its mount). The next doctor's helper has a
+		// name of its own, so running doctor again tells the two apart.
 		if (!read?.ok && plan.method === "helper" && read?.reason === "exit-125") {
-			checks.push({ ok: false, warn: true, label: `${v}: no host CPU reserve across jobs could be confirmed: the quota of ${CGROUP_PARENT} was not readable (exit-125: the runtime refused the helper, which another doctor reading the quota at the same moment causes)`, fix: `if another doctor was running, run doctor again once it has finished; otherwise ${fixFor(want)}` });
+			checks.push({ ok: false, warn: true, label: `${v}: no host CPU reserve across jobs could be confirmed: the quota of ${CGROUP_PARENT} was not readable (exit-125: the runtime refused the helper, under a name only this doctor run uses, so it refused the helper itself or kept a name the rm before it did not clear)`, fix: `run doctor again, whose helper gets a name of its own; if it is refused again, the runtime refuses the helper itself: ${fixFor(want)}` });
 			continue;
 		}
 		if (!read?.ok) {

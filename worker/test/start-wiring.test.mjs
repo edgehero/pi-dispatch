@@ -142,7 +142,7 @@ const IDLE_PODMAN_SERVICE = async () => ({ read: true, loaded: true, running: fa
 /** A running service's answer for the default test socket, started at `startedAtMs`. */
 const RUNNING_PODMAN_SERVICE = (startedAtMs) => async () => ({ read: true, loaded: true, running: true, startedAtMs, environment: {}, environmentFiles: [], unitPaths: [], modules: [], manager: { read: true, environment: {}, modules: [] }, listen: ["/test.sock"] });
 
-async function runStart({ env = {}, whileRunning, makeUpdatesRunner, makeDoctorSpawner, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeSweepFollowUps, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, readOpenshellVersions, makeOpenshellReaper, makeOpenshellBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchFs, watchScopedLimits, watchProjects, readMirroredRecord, readCgroupFile, readProgressKey, makeCpuReserve, listJobContainers, workerHostBudget, workerRunningJobs, makePrepareWorkspace, makeLiveTranscriptOpener, makeStatusCommenter, makeRunMirror, makePortfolioSnapshot, finishModelAttempt, durable = {} } = {}) {
+async function runStart({ env = {}, whileRunning, makeUpdatesRunner, makeDoctorSpawner, makeAuth, makeHost, makeGitLabAuth, makeGitLabHost, makeReaper, makeLogSink, makeRecordWriter, makeLogReaper, makeSandboxReaper, makeSandboxNetworkSweeper, makeRetentionSweep, makeSweepFollowUps, makeRunContainer, makeHostRegistry, makeScopeClaimSweeper, makeClaimSweeper, makeBackendRegistry, extraBackends, order, stops, now, authResolveTimeoutMs, resolveDockerEndpoint, readDaemonFacts, jobUserIdentity, bootImage, observationFs, loadConfig, readPodmanInfo, makePodmanReaper, makePodmanBackend, readOpenshellVersions, makeOpenshellReaper, makeOpenshellBackend, listRunningSandboxes, ensureJobsDir, ensureUnderAccountRoot, ensureSandboxDir, judgeValkey, readPodmanService, sleep, watchFs, watchScopedLimits, watchProjects, readMirroredRecord, readCgroupFile, readProgressKey, makeCpuReserve, execDockerBounded, listJobContainers, workerHostBudget, workerRunningJobs, makePrepareWorkspace, makeLiveTranscriptOpener, makeStatusCommenter, makeRunMirror, makePortfolioSnapshot, finishModelAttempt, durable = {} } = {}) {
 	// Every real socket in this helper must use the injected test service, including callers that only override other settings.
 	env = { VALKEY_URL, ...env };
 	const secretsResolverCalls = [];
@@ -290,6 +290,7 @@ async function runStart({ env = {}, whileRunning, makeUpdatesRunner, makeDoctorS
 			makeHost,
 			createWorkerFn,
 			...(makeCpuReserve ? { makeCpuReserve } : {}),
+			...(execDockerBounded ? { execDockerBounded } : {}),
 			makeReaper: reaper,
 			makeLogSink: logSink,
 			makeRecordWriter: recordWriter,
@@ -3202,6 +3203,44 @@ test("the default arms the doctor runs daily on the worker's own CLI and registe
 	assert.equal(off.length, 0, "at 0 the factory is never called: no timer, no closer, no child");
 	assert.equal(second.captured.extraClosers.length, 8 + await sandboxControlClosers(second.captured), "runtimeQueue + registry + history reader + watch recovery drainer + answer draft drainer + the updates reconcile + the sandbox follow-ups + the sweep");
 	assert.equal(second.logs.find((l) => l.event === "worker_started").doctorIntervalHours, 0);
+});
+
+test("issue #1040: the doctor runs' afterKill removes the killed child's CPU-reserve helper with one bounded rm -f through the reserve's runner, only where this worker keeps a helper venue; the updates children get none", { skip }, async () => {
+	const constructions = [];
+	const runners = [];
+	const docker = [];
+	let states = [{ venue: "local", method: "helper", status: "held" }];
+	let answer = { code: 0, stdout: "" };
+	const reserveArgs = [];
+	await runStart({
+		env: { PI_WORKER_NAME: "box-1", PI_UPDATES_LOOK: "1" },
+		makeDoctorSpawner: (args) => (constructions.push(args), { start() {}, runOnce: async () => {}, close: async () => {} }),
+		makeUpdatesRunner: (args) => (runners.push(args), { start() {}, runOnce: async () => {}, close: async () => {} }),
+		makeCpuReserve: (args) => (reserveArgs.push(args), { sync: async () => true, states: () => states }),
+		execDockerBounded: async (args, opts) => (docker.push({ args, opts }), answer),
+	});
+	assert.equal(typeof constructions[0].afterKill, "function");
+	assert.deepEqual(runners.map((r) => r.afterKill), [undefined, undefined], "the updates children start no runtime object");
+	const said = [];
+	const say = (event, data) => said.push([event, data]);
+	// sha256("box-1") begins 96fb257c; the pid is the killed child's.
+	await constructions[0].afterKill(4242, say);
+	assert.deepEqual(docker.map((d) => d.args), [["rm", "-f", "pi-dispatch-cpu-reserve-doctor-96fb257c-4242"]]);
+	assert.deepEqual([docker[0].opts.bin, docker[0].opts.timeoutMs], ["docker", 15_000], "bounded like every reserve step");
+	assert.deepEqual(said, [], "a name removed, or not there (exit 0), is nothing to say");
+	// The same runner the reserve's helper steps go through.
+	await reserveArgs[0].run("docker", ["ps"], { timeoutMs: 1 });
+	assert.deepEqual(docker.at(-1).opts.withStderr, true);
+	docker.length = 0;
+	// An rm that failed is said, by its token and the pid, never stderr.
+	answer = { code: null, stdout: "", stderr: "secret words", error: { timedOut: true } };
+	await constructions[0].afterKill(4243, say);
+	assert.deepEqual(said, [["doctor_helper_not_removed", { pid: 4243, reason: "timeout" }]]);
+	// No helper venue here: no helper was made, so nothing is asked.
+	docker.length = 0;
+	states = [{ venue: "podman", method: "user-systemd", status: "held" }];
+	await constructions[0].afterKill(4244, say);
+	assert.deepEqual(docker, []);
 });
 
 test("the sweep re-runs the SAME closures boot already built, so one config read serves both", { skip }, async () => {

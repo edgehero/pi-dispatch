@@ -300,21 +300,26 @@ On Docker's `cgroupfs` driver (Docker Desktop, OrbStack), the worker keeps the
 name, and when the daemon was too slow to start one within 15 seconds the worker gave up on it and the container
 stayed in `created` for good, so a slow daemon collected them (issue #978). The next release names every helper
 (`pi-dispatch-cpu-reserve-<8 hex digits>`, labelled `pi.dispatch.helper=cpu-reserve`; doctor's has `-doctor-` before
-the digits), so at most one is ever left per name, the worker's and doctor's, and it is removed before the next try,
-and the worker waits longer between tries while the daemon stays slow. The digits come from `PI_WORKER_NAME`, so two
-workers on one daemon (which is [not supported](multi-host.md#7-one-worker-per-docker-daemon-still-holds)) must declare
+the digits and its own process id after them, so no two doctors share one), so at most one is ever left per name, and
+it is removed before the next try, and the worker waits longer between tries while the daemon stays slow. A doctor the
+worker kills at its two-minute limit leaves at most its one helper, under its process id, and the worker removes it
+right away. One left some other way (a doctor you stopped, or one stopped with the worker) is removed by the next
+doctor once that process is gone, where the daemon runs on this host; on a daemon on another machine the worker's pass
+below removes it, at the latest after the worker's next start. The digits come from `PI_WORKER_NAME`, so two workers
+on one daemon (which is [not supported](multi-host.md#7-one-worker-per-docker-daemon-still-holds)) must declare
 distinct names; otherwise they share one helper name, and each can remove the other's helper while it runs.
 
 Its worker also removes the older helpers itself, after it reads the quota back as set, and again after each later
-read (every ten minutes) until a pass has seen them all and left nothing behind: a pass a slow daemon cut short, a
-leftover younger than ten minutes and one the `rm` refused all wait for a later read. It takes only containers that
-never started, are at least ten minutes old and match the old helper exactly (its command, its one mount of
-`pidispatch.slice`, its flags, and no label beyond its image's), with a plain `docker rm`, which never removes a
-running container. The same pass removes the last helper a worker left under its old name after you changed its
-`PI_WORKER_NAME` (the same match, plus exactly the helper label), never the running worker's own. It logs
-`cpu_reserve_leftovers_removed` with what that pass listed, removed, could not remove, left for being too young and
-kept for not matching: for every pass that removed something, and once each for a pass that was cut short, could not
-remove one, or kept some.
+read (every ten minutes) until a pass has read every leftover it listed and left none it could still remove: a pass a
+slow daemon cut short or that could not read a leftover's image, a leftover younger than ten minutes and one the `rm`
+refused all wait for a later read. Containers that do not match the old helper stay, and a pass that kept only those
+ends the passes too. It takes only containers that never started, are at least ten minutes old and match the old
+helper exactly (its command, its one mount of `pidispatch.slice`, its flags, and no label beyond its image's), with a
+plain `docker rm`, which never removes a running container. The same pass removes the last helper a worker left under
+its old name after you changed its `PI_WORKER_NAME`, and a killed doctor's (the same match, plus exactly the helper
+label), never the running worker's own. It logs `cpu_reserve_leftovers_removed` with what that pass listed, removed,
+could not remove, left for being too young and kept for not matching: for every pass that removed something, and once
+each for a pass that was cut short, could not remove one, or kept some.
 
 On a host that stays on 5.4.x for now, list them:
 

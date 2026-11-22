@@ -6775,16 +6775,44 @@ const LINUX_1001 = { platform: "linux", release: "6.8.0-test", euid: 1001, egid:
 const liveFsAs = (uid) => ({ ...liveFs, statSync: (p) => Object.assign(statSync(p), { uid }) });
 const liveEnv = (extra = {}) => ({ PI_PROVIDER: "anthropic", ANTHROPIC_API_KEY: "sk-x", PI_EGRESS: "0", PI_JOBS_DIR: tempDir("pi-live-doctor-"), ...extra });
 
-test("issue #978: doctor reads the CPU reserve as doctor's own helper name of the declared PI_WORKER_NAME, removed before the read with a plain rm (issue #1021)", async () => {
-	const calls = [];
+test("issue #978: doctor reads the CPU reserve under doctor's own helper name of the declared PI_WORKER_NAME and its pid, removed before the read with `rm -f` (issue #1040)", async () => {
 	const facts = { ...JSON.parse(ROOTFUL_INFO), NCPU: 4, MemTotal: 8_323_072_000, CgroupDriver: "cgroupfs", CgroupVersion: "2" };
+	// Issue #1040: a live doctor's helper (pid 300) and a dead one's (pid 301), as the listing prints them.
+	const listing = "pi-dispatch-cpu-reserve-doctor-96fb257c-300\tcreated\npi-dispatch-cpu-reserve-doctor-96fb257c-301\tcreated\n";
 	// Listed before `green`, whose broad "docker info" key would otherwise answer the facts read with no CPU count.
-	const plan = { ...infoPlan(JSON.stringify(facts)), "docker rm pi-dispatch-cpu-reserve-doctor-": 0, "docker run --rm --name pi-dispatch-cpu-reserve-doctor-": { code: 0, output: "300000 100000\n" }, ...green };
-	const checks = await collectChecks(imgEnv({ PI_WORKER_NAME: "box-1" }), collectSeams(plan, { spawn: fakeSpawn(plan, calls) }));
-	// sha256("box-1") begins 96fb257c: the name the worker's own doctor child, with the same .env, also uses.
-	const helper = calls.filter((x) => x.cmd === "docker" && x.args.some((a) => String(a).startsWith("pi-dispatch-cpu-reserve-")));
-	assert.deepEqual(helper.map((x) => x.args.slice(0, 4).join(" ")), ["rm pi-dispatch-cpu-reserve-doctor-96fb257c", "run --rm --name pi-dispatch-cpu-reserve-doctor-96fb257c"]);
-	assert.ok(checks.some((c) => c.ok === true && /^local: every job runs under pidispatch\.slice, whose quota is 3 CPUs/.test(c.label ?? "")), "the read reached the reserve line");
+	// `extra` last, so its value replaces `green`'s answer for the same key.
+	const planFor = (extra = {}) => ({ ...infoPlan(JSON.stringify(facts)), "docker ps -a --filter name=pi-dispatch-cpu-reserve-doctor-": { code: 0, output: listing }, "docker rm": 0, "docker run --rm --name pi-dispatch-cpu-reserve-doctor-": { code: 0, output: "300000 100000\n" }, ...green, ...extra });
+	const collect = async (plan) => {
+		const calls = [];
+		const checks = await collectChecks(imgEnv({ PI_WORKER_NAME: "box-1" }), collectSeams(plan, { spawn: fakeSpawn(plan, calls), pid: 4242, isAlive: (p) => p === 300 || p === 4242 }));
+		return { checks, calls: calls.filter((x) => x.cmd === "docker").map((x) => x.args.join(" ")) };
+	};
+	// sha256("box-1") begins 96fb257c, and the pid is this doctor's own: no other doctor, the worker's child included,
+	// reads under it. On this host's daemon the dead pid's helper goes first, the live one's stays.
+	const owned = await collect(planFor());
+	assert.deepEqual(owned.calls.filter((c) => /pi-dispatch-cpu-reserve-doctor-/.test(c)).map((c) => (c.startsWith("run ") ? c.split(" ").slice(0, 4).join(" ") : c)), [
+		"ps -a --filter name=pi-dispatch-cpu-reserve-doctor- --format {{.Names}}\t{{.State}}",
+		"rm pi-dispatch-cpu-reserve-doctor-96fb257c-301",
+		"rm -f pi-dispatch-cpu-reserve-doctor-96fb257c-4242",
+		"run --rm --name pi-dispatch-cpu-reserve-doctor-96fb257c-4242",
+	]);
+	assert.ok(owned.checks.some((c) => c.ok === true && /^local: every job runs under pidispatch\.slice, whose quota is 3 CPUs/.test(c.label ?? "")), "the read reached the reserve line");
+	assert.ok(owned.checks.some((c) => c.ok === true && c.label === "local: removed the CPU-reserve helper pi-dispatch-cpu-reserve-doctor-96fb257c-301, left by an EARLIER doctor run"));
+	// A daemon not shown to be on this host (a tcp endpoint): nothing listed or removed but this doctor's own name.
+	const remote = await collect(planFor({ "docker context inspect": { code: 0, output: '"remote"|"tcp://10.1.2.3:2375"\n' } }));
+	assert.deepEqual(remote.calls.filter((c) => /^(ps|rm)\b/.test(c) && /pi-dispatch-cpu-reserve-doctor-/.test(c)), ["rm -f pi-dispatch-cpu-reserve-doctor-96fb257c-4242"]);
+	assert.ok(!remote.checks.some((c) => /CPU-reserve helper/.test(c.label ?? "")));
+});
+
+test("issue #1040: browser setup's read-only doctor on Docker's cgroupfs driver lists, removes and starts no CPU-reserve helper, and says the quota was not read (#774)", async () => {
+	const facts = { ...JSON.parse(ROOTFUL_INFO), NCPU: 4, MemTotal: 8_323_072_000, CgroupDriver: "cgroupfs", CgroupVersion: "2" };
+	const plan = { ...infoPlan(JSON.stringify(facts)), "docker ps -a --filter name=pi-dispatch-cpu-reserve-doctor-": { code: 0, output: "pi-dispatch-cpu-reserve-doctor-96fb257c-301\tcreated\n" }, "docker rm": 0, "docker run --rm --name pi-dispatch-cpu-reserve-doctor-": { code: 0, output: "300000 100000\n" }, ...green };
+	const calls = [];
+	const checks = await collectChecks(imgEnv({ PI_WORKER_NAME: "box-1" }), collectSeams(plan, { spawn: fakeSpawn(plan, calls), pid: 4242, isAlive: () => false, setupReadOnly: true }));
+	const lines = calls.filter((x) => x.cmd === "docker").map((x) => x.args.join(" "));
+	assert.deepEqual(lines.filter((l) => l.includes("pi-dispatch-cpu-reserve-doctor-")), [], "no listing, no rm, no helper");
+	assert.ok(!lines.some((l) => /^(rm|run|create)\b/.test(l)), "no container started or removed at all");
+	assert.ok(checks.some((c) => c.warn === true && c.label === "local: the quota of pidispatch.slice was not read by browser setup, which starts no helper container" && c.fix === "run pi-dispatch doctor in the deployment terminal to read it"));
 });
 
 test("doctor without --live is byte-identical and spawns no probe; a truthy non-boolean `live` runs nothing either", async () => {
