@@ -88,14 +88,16 @@ export function toolWriteResult(result, { action, out } = {}) {
 
 /**
  * A fleet pause or resume that reached part of the fleet (issue #964), in words a model may be handed: that part of the
- * fleet may have changed, so it never reads as "nothing happened", and that the list of queues may be short when it
- * may. "Once Valkey answers" only where a switch was sent and not answered (`sent`): a queue a Valkey that answers
- * refused is a matter of looking at the fleet. Never the console's own sentence, which names queues and a Valkey's address.
+ * fleet may have changed, so it never reads as "nothing happened", that Valkey answered a queue's switch with an error
+ * that can follow a switch the script already made (`errored`, issue #1014), and that the list of queues may be short
+ * when it may. "Once Valkey answers" only where a switch was sent and not answered (`sent`): a queue a Valkey that
+ * answers refused, or answered with an error, is a matter of looking at the fleet. Never the console's own sentence,
+ * which names queues and a Valkey's address.
  */
-export function switchPartialRefusal(paused, short, sent) {
+export function switchPartialRefusal(paused, short, sent, errored = false) {
   const verb = paused ? "paused" : "resumed";
   const noun = paused ? "pause" : "resume";
-  return `The fleet ${noun} did not reach every queue, so some queues may be ${verb} and others not${short ? `, and the list of queues may be short, so other queues may exist and were not ${verb}` : ""}. ${sent ? `An operator can look at the fleet in the console and ${noun} it again once Valkey answers.` : `An operator can look at the fleet in the console before trying the ${noun} again.`}`;
+  return `The fleet ${noun} did not reach every queue, so some queues may be ${verb} and others not${errored ? `, and Valkey answered a ${noun} with an error, which can come after the queue was ${verb}` : ""}${short ? `, and the list of queues may be short, so other queues may exist and were not ${verb}` : ""}. ${sent ? `An operator can look at the fleet in the console and ${noun} it again once Valkey answers.` : `An operator can look at the fleet in the console before trying the ${noun} again.`}`;
 }
 
 /** The grant is captured at extension registration, never reconstructed from deployment configuration. */
@@ -197,7 +199,7 @@ export async function executeToolAction(name, params, rawCtx, { paths, env, gran
     const result = action.bulk ? await action.apply(out, ctx) : await auditedWrite({ audit, actor, kind: action.kind, target: fresh.target, beforeDigest: fresh.beforeDigest, afterDigest: fresh.afterDigest, reserve: fresh.reserve?.dollarsMicros ?? null, failure, note }, () => action.apply(out, ctx));
     if (bulkWarning) result.warning = "tracking-incomplete";
     if (result?.invalid === AUDIT_REFUSAL) throw publicToolRefusal(AUDIT_REFUSAL);
-    if (result?.partial === true && (action.name === "fleet-pause" || action.name === "fleet-resume")) throw publicToolRefusal(switchPartialRefusal(action.name === "fleet-pause", result.queuesMayBeShort === true, result.sentUnconfirmed === true));
+    if (result?.partial === true && (action.name === "fleet-pause" || action.name === "fleet-resume")) throw publicToolRefusal(switchPartialRefusal(action.name === "fleet-pause", result.queuesMayBeShort === true, result.sentUnconfirmed === true, result.answeredWithError === true));
     if (!result?.ok && !(action.name === "priorities-set" && result?.outcome === "refused")) throw new Error(result?.invalid ?? result?.refused ?? "the action could not be applied");
     return toolWriteResult(result, { action: action.name, out: fresh });
   } finally {

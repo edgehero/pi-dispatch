@@ -669,19 +669,20 @@ test("on a VALKEY_URL disagreement the /dispatch command, the tools and the pane
   }
 });
 
-// Issue #964: a part-way switch with no lost answer (a queue Valkey refused) over a set that may be short, through the
-// command: its line leads with that. The registry key and this host's queue's meta key hold strings, so Valkey answers the
-// registry read and the queue's pause with WRONGTYPE.
-test("/dispatch pause refused part-way over an unreadable registry says first that the list of queues may be short (#964)", { timeout: 30_000, skip: LIVE ? false : "needs VALKEY_TEST_URL" }, async () => {
+// Issue #964: a part-way switch over a set that may be short, through the command: its line leads with that. The registry
+// key and this host's queue's events key hold strings, so Valkey answers the registry read with WRONGTYPE, and the queue's
+// pause too, after its script paused the queue: read back (issue #1014), it is said as what it reads, never as refused.
+test("/dispatch pause answered part-way with an error over an unreadable registry says first that the list of queues may be short (#964, #1014)", { timeout: 30_000, skip: LIVE ? false : "needs VALKEY_TEST_URL" }, async () => {
   const fx = deployment({ valkey: LIVE });
   const { default: IORedis } = await import("ioredis");
   const r = new IORedis(LIVE, { maxRetriesPerRequest: 1 });
   try {
     writeFileSync(ENV_FILE, "PI_WORKER_NAME=mini1\n");
     await r.set(HOST_SET, "not a set");
-    await r.set("bull:pi-jobs@mini1:meta", "not a hash");
+    await r.set("bull:pi-jobs@mini1:events", "not a stream");
     const notes = await command("pause");
-    assert.ok(notes.includes("the list of queues may be short, so other queues may exist and were not switched; paused pi-jobs but FAILED at pi-jobs@mini1: the deployment is half paused"), JSON.stringify(notes));
+    assert.ok(notes.includes("pause: the list of queues may be short, so other queues may exist and were not switched; ANSWERED WITH AN ERROR for pi-jobs@mini1 (reads paused now); known switched: pi-jobs"), JSON.stringify(notes));
+    assert.equal(await r.hexists("bull:pi-jobs@mini1:meta", "paused"), 1, "paused, as said");
   } finally {
     await r.del(HOST_SET, "bull:pi-jobs@mini1:meta", "bull:pi-jobs@mini1:events").catch(() => {});
     await r.hdel("bull:pi-jobs:meta", "paused").catch(() => {});

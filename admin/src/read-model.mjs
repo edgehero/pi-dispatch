@@ -73,7 +73,7 @@ import { HELD_SET, jobKey, WAIT_ANSWER_PREFIX, WAIT_ANSWERS, WAIT_PROFILE_FIELD_
 // from the leaf the worker writes with, so the reader and the writer cannot drift on the key, a field or a bucket.
 import { DEFER_BUCKETS, DEFER_FIELDS, DEFER_HOST_RE, DEFER_PROJECT_RE, DEFER_TIME_MAX_MS, WAITING_DUE_GRACE_MS, deferKey, parseDefer, recordMatchesDue } from "@edgehero/pi-dispatch/defer-reasons";
 export { WAITING_DUE_GRACE_MS };
-import { JOB_FIELD, META_FIELD, QUEUE_KEY, SCHEDULER_ID_MAX, SCHEDULER_ID_RE, SCHEDULER_JOB_PREFIX, cronRunOf, dueOfScore, isPausedFlag, isSchedulerNext, jobKeyOf, queueKeyOf } from "@edgehero/pi-dispatch/bullmq-internals";
+import { JOB_FIELD, META_FIELD, QUEUE_KEY, SCHEDULER_ID_MAX, SCHEDULER_ID_RE, SCHEDULER_JOB_PREFIX, cronRunOf, dueOfScore, isPausedFlag, isSchedulerNext, jobKeyOf, queueKeyOf, refusedBeforeScript } from "@edgehero/pi-dispatch/bullmq-internals";
 // The subscriptions validator is shared for the same anti-drift reason: the admin prices finished runs
 // against the exact schema the file declares, and re-deriving it here is how the two would disagree.
 import { parseSubscriptions, SUBSCRIPTIONS_VERSION } from "@edgehero/pi-dispatch/subscriptions";
@@ -399,9 +399,14 @@ export const SWITCH_STEP_TIMEOUT_MS = 6_000;
 const SWITCH_LATE = Symbol("late");
 
 /**
- * One queue's pause or resume as a step with its own end (issue #842): `{ state, error?, late? }`.
+ * One queue's pause or resume as a step with its own end (issue #842): `{ state, error?, late?, reads? }`.
  *   "done"         Valkey answered: the queue is paused (or running).
- *   "refused"      it failed before it was sent, or Valkey answered with an error: this queue did not change.
+ *   "refused"      it failed before it was sent, or Valkey refused it before the script ran (`refusedBeforeScript`, the
+ *                  CLI's rule, issue #1014): this queue did not change.
+ *   "errored"      Valkey answered with any other error, which can come after the script already switched the queue
+ *                  (a Lua script is not rolled back; BullMQ's XADD to the events stream comes last), so the queue's
+ *                  paused state is read back within what is left of `ms`: `reads` is "paused" or "running". A read
+ *                  back that does not answer makes the step "unconfirmed" instead: it may or may not have been made.
  *   "unconfirmed"  it was sent and not answered (the client's `valkeyMayStillRun`), or the queue was not connected
  *                  within `ms` (`late`: it may still be sent when the connection comes up). The queue may or may not
  *                  have changed, now or when Valkey wakes.
@@ -422,7 +427,17 @@ async function switchStep(q, paused, ms) {
     ]);
     if (got === null) return { state: "done" };
     if (got === SWITCH_LATE) return { state: "unconfirmed", late: true, error: `no answer within ${ms / 1000} seconds` };
-    return { state: got.err?.valkeyMayStillRun === true ? "unconfirmed" : "refused", error: got.err?.message ?? String(got.err) };
+    const error = got.err?.message ?? String(got.err);
+    if (got.err?.valkeyMayStillRun === true) return { state: "unconfirmed", error };
+    if (got.err?.name !== "ReplyError" || refusedBeforeScript(got.err)) return { state: "refused", error };
+    const reads = await Promise.race([
+      Promise.resolve()
+        .then(() => q.isPaused())
+        .then((p) => (typeof p === "boolean" ? p : null), () => null),
+      late,
+    ]);
+    if (typeof reads !== "boolean") return { state: "unconfirmed", error };
+    return { state: "errored", error, reads: reads ? "paused" : "running" };
   } finally {
     clearTimeout(timer);
   }
@@ -453,6 +468,7 @@ async function flipQueues({ paused, names, queueOf, stepMs, steps = new Map(), l
   else {
     for (const name of names) {
       await one(name);
+      // An error reply stops a resume too (issue #1014): the queue may already be running again.
       if (steps.get(name)?.state !== "done") break;
     }
   }
@@ -462,10 +478,12 @@ async function flipQueues({ paused, names, queueOf, stepMs, steps = new Map(), l
 /**
  * A switch's answer from its steps (issue #842), `setQueuePaused`'s shape, which only ever grows: `{ ok: true, paused,
  * queues }` when every queue answered, else `{ unreachable, partial: { done, failed, error, unconfirmed, refused,
- * notTried } }`. `done` are the queues KNOWN switched and `failed` the first that is not, as before; `unconfirmed`
- * those whose pause or resume may or may not have been made, `refused` those that did not change, `notTried` those a
- * resume never reached. `blind` (the registry could not be read) and `incomplete` (the keyspace scan did not finish)
- * ride both shapes: the set of queues itself may be short.
+ * notTried, errored? } }`. `done` are the queues KNOWN switched and `failed` the first that is not, as before;
+ * `unconfirmed` those whose pause or resume may or may not have been made, `refused` those that did not change,
+ * `notTried` those a resume never reached, and `errored` (issue #1014, present only when not empty) each queue whose
+ * pause or resume Valkey answered with an error after its script may have run, `{ queue, reads }` with `reads`
+ * "paused" or "running" as read back: such a queue may be switched, or partly. `blind` (the registry could not be read)
+ * and `incomplete` (the keyspace scan did not finish) ride both shapes: the set of queues itself may be short.
  */
 function switchOutcome({ paused, names, steps, blind = null, incomplete = null }) {
   const of = (state) => names.filter((n) => steps.get(n)?.state === state);
@@ -474,7 +492,8 @@ function switchOutcome({ paused, names, steps, blind = null, incomplete = null }
   if (done.length === names.length) return { ok: true, paused, queues: done, ...short };
   const failed = names.find((n) => steps.get(n)?.state !== "done");
   const error = steps.get(failed)?.error ?? "not tried";
-  return { unreachable: error, partial: { done, failed, error, unconfirmed: of("unconfirmed"), refused: of("refused"), notTried: names.filter((n) => !steps.has(n)) }, ...short };
+  const errored = names.filter((n) => steps.get(n)?.state === "errored").map((queue) => ({ queue, reads: steps.get(queue).reads }));
+  return { unreachable: error, partial: { done, failed, error, unconfirmed: of("unconfirmed"), refused: of("refused"), notTried: names.filter((n) => !steps.has(n)), ...(errored.length > 0 ? { errored } : {}) }, ...short };
 }
 
 /**
@@ -532,6 +551,14 @@ export function deploymentOwnQueue({ env = {}, dir = null, owned = [], fs = node
  */
 export function queueSwitchUnconfirmed(queue, paused) {
   return `the ${paused ? "pause" : "resume"} of ${queue} may or may not have been made: Valkey did not answer it within the bound. Look at the fleet once Valkey answers`;
+}
+
+/**
+ * What a ONE-queue pause or resume says when Valkey answered it with an error after its script may have run (issue
+ * #1014): what the queue reads now, read back, never "nothing was changed", and no client's words.
+ */
+export function queueSwitchErrored(queue, paused, reads) {
+  return `Valkey answered the ${paused ? "pause" : "resume"} of ${queue} with an error; it reads ${reads} now${(reads === "paused") === paused ? "" : `, and part of the ${paused ? "pause" : "resume"} may have applied`}. Look at the fleet`;
 }
 
 /**
@@ -701,43 +728,6 @@ export function killSwitchPlan({ paused, env = process.env, resolveFn = killSwit
     return { disagreement: picked.disagreement, resumeCommand, resumeArgv, refused: `${picked.disagreement}: resume would start jobs on one of them, so it resumes neither. Make them agree (the .env is what the service reads), or run: ${resumeCommand}` };
   }
   return { urls: picked.urls, deploymentUrl, disagreement: picked.urls.length > 1 ? picked.disagreement : null, context, resumeCommand, resumeArgv };
-}
-
-/**
- * Pause or resume ONE fleet queue (issue #642): the console's per-queue control. `queue` must be a queue this
- * deployment drains, by the kill switch's own discovery (`readFleetQueues`: the live registry unioned with the queues
- * that exist), so a mistyped name is refused rather than creating a paused queue nothing reads (the silent no-op
- * `cli.mjs` warns about). Returns `{ ok: true, paused, queue }`, `{ invalid }` for a name that is not a fleet queue, or
- * `{ unreachable }`.
- *
- * One Valkey, the caller's `url`. The fleet-wide two-Valkey rule (`killSwitchPlan`) is about stopping or starting a
- * whole deployment; a single queue named here is named on the Valkey the caller reads it from, where its paused flag
- * was seen.
- */
-export async function setQueuePausedOne({ url, queue, paused, makeQueueFn = makeQueue, parseConnectionFn = parseConnection, redisFn = makeRedisClient, timeoutMs = 2500, stepTimeoutMs = SWITCH_STEP_TIMEOUT_MS, closeTimeoutMs = QUEUE_CLOSE_TIMEOUT_MS } = {}) {
-  if (typeof queue !== "string" || queue === "") return { invalid: "a queue name is required" };
-  if (typeof paused !== "boolean") return { invalid: "paused must be true or false" };
-  let q = null;
-  try {
-    const { names, blind } = await readFleetQueues({ url, redisFn, timeoutMs });
-    if (!names.includes(queue)) {
-      // The registry read's own error stays out of it: a client's words, which can name a host, and this is a page's.
-      return { invalid: `${JSON.stringify(queue)} is not a queue this deployment drains (${names.join(", ")})${blind ? "; the host registry could not be read, so a host's queue may be missing from that list" : ""}. Nothing was changed` };
-    }
-    q = makeQueueFn(consoleQueueConnection(url, parseConnectionFn), { name: queue });
-    // Issue #842: one bounded step. A pause that was sent and not answered may land when Valkey wakes, so it is never
-    // "unreachable", which every surface reads as nothing changed.
-    const step = await switchStep(q, paused, stepTimeoutMs);
-    if (step.state === "done") return { ok: true, paused, queue };
-    if (step.state === "unconfirmed") return { invalid: queueSwitchUnconfirmed(queue, paused), partial: true };
-    return { unreachable: step.error };
-  } catch (err) {
-    return { unreachable: err?.message ?? String(err) };
-  } finally {
-    // Started, never awaited: the answer does not wait for a QUIT. Closing a queue that never connected ends it, so
-    // a step that ran out of time is not sent later.
-    if (q) void closeWithin(q, closeTimeoutMs);
-  }
 }
 
 /**
@@ -5920,8 +5910,11 @@ export function createFleetReader(
       return killSwitch(false);
     },
     /**
-     * One fleet queue (issue #642), on this reader's Valkey and through its held pool (issue #842): `setQueuePausedOne`'s
-     * answers. Not a one-shot queue: one built while Valkey does not answer takes 36 to 39 s to give up, and could send
+     * One fleet queue (issue #642), the console's per-queue control, on this reader's Valkey and through its held pool
+     * (issue #842): `{ ok: true, paused, queue }`, `{ invalid }` for a name that is not a fleet queue, `{ invalid,
+     * partial: true }` for a pause or resume that may or may not have been made (`queueSwitchUnconfirmed`) or that Valkey
+     * answered with an error after its script may have run (`queueSwitchErrored`, issue #1014: read back, never "nothing
+     * was changed"), or `{ unreachable }` for one that did not change. Not a one-shot queue: one built while Valkey does not answer takes 36 to 39 s to give up, and could send
      * its pause after this had answered. A queue the pool holds was named by a discovery already (the preview's read
      * pools it), so it is flipped at once; any other name is checked against the kill switch's set first, so a mistyped
      * one is refused rather than creating a paused queue nothing reads.
@@ -5946,6 +5939,7 @@ export function createFleetReader(
           void closeWithin(q, closeTimeoutMs);
         }
         if (step.state === "unconfirmed") return { invalid: queueSwitchUnconfirmed(queue, paused), partial: true };
+        if (step.state === "errored") return { invalid: queueSwitchErrored(queue, paused, step.reads), partial: true };
         return { unreachable: step.error };
       } catch (err) {
         return { unreachable: err?.message ?? String(err) };

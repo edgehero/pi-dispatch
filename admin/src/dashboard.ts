@@ -346,17 +346,26 @@ const SWITCH_SHORT_LEAD = "the list of queues may be short, so other queues may 
  * A part-way switch with a queue whose pause or resume is not known to have been made (issue #842, the read model's
  * `partial.unconfirmed`: sent and not answered, or its queue not connected within the step, which may still send it):
  * `short` (the registry or the scan was not read whole, issue #964) first, saying the list itself may be missing a
- * queue, then the queues not known, since that is what an operator must look at, then those that did not change, those
- * a resume never tried and those known switched, the console confirm's four. Null for a switch that lost no answer.
- * Queue names only. The `/dispatch pause` and `resume` command says the same (`switchCommandLost`).
+ * queue, then the queues not known, since that is what an operator must look at, then those Valkey answered with an
+ * error after the script may have run, with what each reads now (`partial.errored`, issue #1014), then those that did
+ * not change, those a resume never tried and those known switched, the console confirm's. Null for a switch that lost
+ * no answer and had no such error. Queue names only. The `/dispatch pause` and `resume` command says the same
+ * (`switchCommandLost`).
  */
 export function switchUnconfirmed(partial: any, short = false): string | null {
   const names = (list: any): string[] => (Array.isArray(list) ? list.map(String) : []);
   const unconfirmed = names(partial?.unconfirmed);
-  if (unconfirmed.length === 0) return null;
+  // Issue #1014: a queue Valkey answered with an error after its script may have run is not known either way, so it is
+  // said as what it reads now, read back, never as not switched.
+  const errored = (Array.isArray(partial?.errored) ? partial.errored : []).filter((e: any) => typeof e?.queue === "string" && (e.reads === "paused" || e.reads === "running"));
+  if (unconfirmed.length === 0 && errored.length === 0) return null;
   const refused = names(partial?.refused);
   const notTried = names(partial?.notTried);
-  return `${short ? SWITCH_SHORT_LEAD : ""}NOT CONFIRMED for ${unconfirmed.join(", ")}: the switch may or may not have been made there${refused.length > 0 ? `; not switched: ${refused.join(", ")}` : ""}${notTried.length > 0 ? `; not tried: ${notTried.join(", ")}` : ""}; known switched: ${names(partial?.done).join(", ") || "none"}`;
+  const heads = [
+    ...(unconfirmed.length > 0 ? [`NOT CONFIRMED for ${unconfirmed.join(", ")}: the switch may or may not have been made there`] : []),
+    ...(errored.length > 0 ? [`ANSWERED WITH AN ERROR for ${errored.map((e: any) => `${e.queue} (reads ${e.reads} now)`).join(", ")}`] : []),
+  ];
+  return `${short ? SWITCH_SHORT_LEAD : ""}${heads.join("; ")}${refused.length > 0 ? `; not switched: ${refused.join(", ")}` : ""}${notTried.length > 0 ? `; not tried: ${notTried.join(", ")}` : ""}; known switched: ${names(partial?.done).join(", ") || "none"}`;
 }
 
 /**

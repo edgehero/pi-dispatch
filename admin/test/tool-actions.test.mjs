@@ -200,6 +200,26 @@ test("dispatch_pause refused by a Valkey that answers, over a whole set, points 
   }
 });
 
+// Issues #964 and #1014 together, over a REAL fleet reader: the registry does not answer and Valkey answers a queue's pause
+// with an error after its script paused it. The model is told both, in fixed words that name no queue.
+test("dispatch_pause answered with an error over a set that may be short tells a model both, naming no queue (#964, #1014)", async () => {
+  const f = fixture();
+  const make = quietQueue();
+  const inScript = () => Object.assign(new Error("WRONGTYPE Operation against a key holding the wrong kind of value script: b4514f4b39660691beec2ab3023b9b46b093b439, on @user_script:57."), { name: "ReplyError" });
+  const reader = createFleetReader(f.paths, { makeQueueFn: (c, o) => ({ ...make(c, o), pause: async () => { throw inScript(); }, isPaused: async () => true }), parseConnectionFn: () => ({}), redisFn: () => keyedRedis({}, { registryDown: () => true }), readOnly: true, switchStepTimeoutMs: 80, closeTimeoutMs: 30 });
+  const rm = await import("../src/read-model.mjs");
+  const options = { ...f.options, fleet: reader, readModel: { ...rm, killSwitchPlan: () => ({ urls: [f.paths.valkeyUrl], disagreement: null, context: null }) } };
+  try {
+    const sentence = "The fleet pause did not reach every queue, so some queues may be paused and others not, and Valkey answered a pause with an error, which can come after the queue was paused, and the list of queues may be short, so other queues may exist and were not paused. An operator can look at the fleet in the console before trying the pause again.";
+    await assert.rejects(executeToolAction("dispatch_pause", {}, { hasUI: false }, options), (e) => modelToolRefusal(e) === sentence);
+    assert.equal(switchPartialRefusal(true, true, false, true), sentence);
+    assert.equal(switchPartialRefusal(false, false, true, true), "The fleet resume did not reach every queue, so some queues may be resumed and others not, and Valkey answered a resume with an error, which can come after the queue was resumed. An operator can look at the fleet in the console and resume it again once Valkey answers.");
+    assert.deepEqual(f.rows.slice(-2).map((r) => [r.action, r.outcome, r.reason ?? null]), [["write", "ok", null], ["write", "failed", "action-unconfirmed"]]);
+  } finally {
+    await reader.dispose();
+  }
+});
+
 test("bulk and cancellation selectors refuse ambiguous or ignored arguments", async () => {
   for (const [name, params] of [["dispatch_cancel", { allHeld: true, jobId: "j1" }], ["dispatch_cancel", {}], ["dispatch_remove_failed", { all: true, jobId: "j1" }], ["dispatch_retry_failed", { jobId: "j1", repo: "acme/web" }]]) {
     await assert.rejects(toolActionRequest(name, params), /send either/);
