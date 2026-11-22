@@ -3187,7 +3187,8 @@ test("issue #967: the declared main credential's name reaches the resolver, the 
 });
 
 test("issue #967: a role provider's declared verdict is not the main job's credential", async () => {
-	// The watch classifier's provider keeps the host's credential: its verdict, declared or not, never names the main one.
+	// The watch classifier's verdict, declared or not, never names the main one: since issue #997 a declared role key
+	// reaches the container as an argument of its own (`secondaryCredential`), pinned below.
 	const resolverSaw = [];
 	const { deps: d } = deps({
 		checkProviderCredential: (job) => (job.provider === "openrouter" ? { ok: true, declared: "OPENROUTER_API_KEY" } : { ok: true }),
@@ -3296,6 +3297,54 @@ test("issue #999: a declared key for an auxiliary provider bound to a subscripti
 	// Without the binding the bound auxiliary provider runs on its subscription, as before.
 	const plain = await run({ ...panel, secrets: { STRIPE_KEY: "op://ci/stripe" } }, managed);
 	assert.equal(plain.result.outcome, "completed", JSON.stringify(plain.result));
+});
+
+// --- Issue #997: a watch rule's decide model takes a declared key on the main provider's rule ---
+
+test("issue #997: a watch classifier's declared key passes the gate, the reserved names and the re-check, and reaches the container as its own argument", async () => {
+	const watchJob = { kind: "local", folder: "/srv/shop", provider: "anthropic", model: "m", maxTurns: 5, watch: { findingId: "a".repeat(64) }, watchDecisionModel: { provider: "openrouter", id: "typesafe/jev-1.13" }, secrets: { OPENROUTER_API_KEY: "op://ci/or", STRIPE_KEY: "op://ci/stripe" } };
+	const gate = (job, options = {}) => {
+		if (job.provider !== "openrouter") return { ok: true };
+		if (!options.secrets) return { ok: true, declared: "OPENROUTER_API_KEY" };
+		return typeof options.secrets.OPENROUTER_API_KEY === "string" && options.secrets.OPENROUTER_API_KEY !== "" ? { ok: true, declared: "OPENROUTER_API_KEY" } : { ok: false };
+	};
+	const run = async (over, resolved = { OPENROUTER_API_KEY: "sk-or-role-private", STRIPE_KEY: "stripe" }) => {
+		const containerSaw = [];
+		const logs = [];
+		const { deps: d, calls } = deps({ checkProviderCredential: gate, resolveSecrets: async () => ({ ok: true, secrets: { ...resolved } }), runContainer: async (ctx) => (containerSaw.push(ctx), { code: 0, aborted: false }), log: (event, fields) => logs.push({ event, fields }), ...over });
+		return { result: await runJob(watchJob, d), containerSaw, logs, calls };
+	};
+	const ran = await run({});
+	assert.equal(ran.containerSaw.length, 1, JSON.stringify(ran.result));
+	assert.equal(ran.containerSaw[0].secondaryCredential, "OPENROUTER_API_KEY");
+	assert.equal("mainCredential" in ran.containerSaw[0], false, "the investigation's provider keeps the host's credential");
+	assert.equal(ran.containerSaw[0].secrets.OPENROUTER_API_KEY, "sk-or-role-private");
+	assert.deepEqual(ran.logs.find((row) => row.event === "provider_credential_declared")?.fields, { provider: "openrouter", name: "OPENROUTER_API_KEY" });
+	assert.equal(JSON.stringify(ran.logs).includes("sk-or-role-private"), false);
+	// The value is judged after the resolver: an empty one refuses, and a provider bound since the pickup owns its credentials.
+	const empty = await run({}, { OPENROUTER_API_KEY: "", STRIPE_KEY: "stripe" });
+	assert.deepEqual([empty.result.reason, empty.result.budgetReserved], ["provider-unconfigured", false]);
+	const bound = await run({ checkProviderCredential: (job, options = {}) => (job.provider === "openrouter" && options.secrets ? { ok: true, managed: true } : gate(job, options)) });
+	assert.deepEqual([bound.result.reason, bound.result.budgetReserved], ["secret-name-reserved", false]);
+	// An access snapshot taken since the pickup covers the classifier's provider while the service answers unmanaged.
+	const snapshot = await run({ prepareSubscriptionAuth: async () => ({ ok: true, snapshots: [{ provider: "openrouter", env: { OPENROUTER_API_KEY: "subscription" } }] }) });
+	assert.deepEqual([snapshot.result.reason, snapshot.result.budgetReserved], ["secret-name-reserved", false]);
+	for (const refused of [empty, bound, snapshot]) assert.ok(!refused.calls.some((call) => call.startsWith("mint:") || call === "prepare" || call === "run-container"));
+});
+
+test("issue #997: a watch classifier on the investigation's provider shares the main declared key", async () => {
+	const containerSaw = [];
+	const resolverSaw = [];
+	const { deps: d } = deps({
+		checkProviderCredential: (job) => (job.provider === "openrouter" ? { ok: true, declared: "OPENROUTER_API_KEY" } : { ok: true }),
+		resolveSecrets: async (_job, options) => (resolverSaw.push(options), { ok: true, secrets: { OPENROUTER_API_KEY: "sk-or-shared" } }),
+		runContainer: async (ctx) => (containerSaw.push(ctx), { code: 0, aborted: false }),
+	});
+	const result = await runJob({ kind: "local", folder: "/srv/shop", provider: "openrouter", model: "deepseek/deepseek-chat", maxTurns: 5, watch: { findingId: "b".repeat(64) }, watchDecisionModel: { provider: "openrouter", id: "typesafe/jev-1.13" }, secrets: { OPENROUTER_API_KEY: "op://ci/or" } }, d);
+	assert.equal(result.outcome, "completed", JSON.stringify(result));
+	assert.deepEqual(resolverSaw, [{ mainCredential: "OPENROUTER_API_KEY" }]);
+	assert.equal(containerSaw[0].mainCredential, "OPENROUTER_API_KEY");
+	assert.equal("secondaryCredential" in containerSaw[0], false);
 });
 
 // --- Issue #1002: a random pool's run secret that is another candidate's API key stays out of this draw ---

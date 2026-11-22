@@ -63,6 +63,17 @@ test("issue #967: the declared main credential's name reaches the env builder, s
 	await assert.rejects(() => run({ job: { ...job, mainCredential: "OPENROUTER_API_KEY" }, prepared: { ...PREPARED }, secrets: { OPENROUTER_API_KEY: "sk-or-declared" }, name: "job-field", signal: new AbortController().signal }), (error) => error.piDispatchConfig === true);
 });
 
+test("issue #997: the declared role credential's name reaches the env builder, so a watch classifier runs on the trigger's key with none on the host", { skip }, async () => {
+	const job = { kind: "local", provider: "anthropic", model: "m", maxTurns: 5, watch: { findingId: "a".repeat(64) }, watchDecisionModel: { provider: "openrouter", id: "typesafe/jev-1.13" } };
+	const hostEnv = { PATH: "/usr/bin", ANTHROPIC_API_KEY: "sk-ant-host" };
+	const recorder = {};
+	const run = mod.makeRunContainer({ image: "pi-job:x", hostEnv, authFromPi: false, spawnFn: fakeSpawn(recorder) });
+	await run({ job, prepared: { ...PREPARED }, secrets: { OPENROUTER_API_KEY: "sk-or-role" }, secondaryCredential: "OPENROUTER_API_KEY", name: "role-env", signal: new AbortController().signal });
+	assert.ok(recorder.args.includes("OPENROUTER_API_KEY=sk-or-role"), "the declared value is the classifier's credential");
+	// Without it the secret is the reserved classifier variable, and never off the job.
+	for (const call of [{ job }, { job: { ...job, secondaryCredential: "OPENROUTER_API_KEY" } }]) await assert.rejects(() => run({ ...call, prepared: { ...PREPARED }, secrets: { OPENROUTER_API_KEY: "sk-or-role" }, name: "host-env", signal: new AbortController().signal }), (error) => error.piDispatchConfig === true);
+});
+
 /** A fake `docker` child: records argv, lets the test drive its exit. */
 function fakeSpawn(recorder, exitCode = 0) {
 	return (cmd, args) => {

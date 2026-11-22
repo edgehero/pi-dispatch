@@ -424,8 +424,10 @@ test("issue #967: the exemption refuses another provider's name, a PI_FORWARD_EN
 		// A file secret of the same name keeps it reserved, in either map.
 		assert.equal((await fn(job({ OPENROUTER_API_KEY: "op://ci/or/key" }, { provider: "openrouter", secretFiles: { OPENROUTER_API_KEY: "op://ci/or/file" } }), { mainCredential: "OPENROUTER_API_KEY" })).reserved, "OPENROUTER_API_KEY");
 		assert.equal((await fn(job({}, { provider: "openrouter", secretFiles: { OPENROUTER_API_KEY: "op://ci/or/file" } }), { mainCredential: "OPENROUTER_API_KEY" })).reserved, "OPENROUTER_API_KEY");
-		// A decision job keeps the host's credential, so its provider's variable stays reserved however it is named.
-		assert.equal((await fn(job({ OPENROUTER_API_KEY: "op://ci/or/key" }, { provider: "openrouter", watch: { findingId: "f" } }), { mainCredential: "OPENROUTER_API_KEY" })).reserved, "OPENROUTER_API_KEY");
+		// An answer draft keeps the host's credential, so its provider's variable stays reserved however it is named.
+		assert.equal((await fn(job({ OPENROUTER_API_KEY: "op://ci/or/key" }, { provider: "openrouter", answerDraft: { runId: "r" } }), { mainCredential: "OPENROUTER_API_KEY" })).reserved, "OPENROUTER_API_KEY");
+		// Issue #997: a watch job declares a key like any trigger's job.
+		assert.equal((await resolver({}, { hostEnv: {} }).fn(job({ OPENROUTER_API_KEY: "op://ci/or/key" }, { provider: "openrouter", watch: { findingId: "f" } }), { mainCredential: "OPENROUTER_API_KEY" })).ok, true);
 	} finally {
 		restore();
 	}

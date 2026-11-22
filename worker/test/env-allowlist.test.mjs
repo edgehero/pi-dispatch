@@ -1604,7 +1604,9 @@ test("declaredProviderKey: the provider's own API-key variable in run.secrets, a
 	assert.equal(declaredProviderKey(job({ secretFiles: { OPENROUTER_API_KEY: "ref" } })), null, "a file secret of the same name keeps it reserved");
 	assert.equal(declaredProviderKey(job({ secrets: undefined, secretFiles: { OPENROUTER_API_KEY: "ref" } })), null, "a file alone is a path, never the key");
 	assert.equal(declaredProviderKey(job({}), { forwardEnv: ["OPENROUTER_API_KEY"] }), null, "a PI_FORWARD_ENV name is the operator's host value");
-	for (const field of ["watch", "answerDraft", "questionGrouping"]) assert.equal(declaredProviderKey(job({ [field]: { runId: "r" } })), null, `a ${field} job keeps the host's credential`);
+	for (const field of ["answerDraft", "questionGrouping"]) assert.equal(declaredProviderKey(job({ [field]: { runId: "r" } })), null, `a ${field} job keeps the host's credential`);
+	// Issue #997: a watch job carries its rule's run.secrets like any trigger's job, so it declares a key the same way.
+	assert.equal(declaredProviderKey(job({ watch: { findingId: "f" } })), "OPENROUTER_API_KEY");
 	assert.equal(declaredProviderKey(job({ provider: "github-copilot", secrets: { COPILOT_GITHUB_TOKEN: "ref" } })), null, "a provider that needs host authentication is never declared");
 	assert.equal(declaredProviderKey(job({ provider: "local-ollama", secrets: { OPENROUTER_API_KEY: "ref" } })), null, "a provider pi reads no key variable for has none to declare");
 	assert.equal(declaredProviderKey(job({ secrets: Object.create({ OPENROUTER_API_KEY: "inherited" }) })), null, "own keys only");
@@ -1653,7 +1655,7 @@ test("reservedAuxiliaryNames: an auxiliary model's provider is judged by the mai
 	// a decision job.
 	assert.ok(reservedAuxiliaryNames(panel({ secrets: {}, secretFiles: { ANTHROPIC_API_KEY: "ref" } })).includes("ANTHROPIC_API_KEY"));
 	assert.ok(reservedAuxiliaryNames(panel(), { forwardEnv: ["ANTHROPIC_API_KEY"] }).includes("ANTHROPIC_API_KEY"));
-	assert.ok(reservedAuxiliaryNames(panel({ watch: { findingId: "f" } })).includes("ANTHROPIC_API_KEY"));
+	assert.ok(reservedAuxiliaryNames(panel({ answerDraft: { runId: "r" } })).includes("ANTHROPIC_API_KEY"));
 	// A provider that needs host authentication keeps every variable reserved, bound or not, as a job on it does.
 	assert.ok(HOST_AUTH_PROVIDERS.some((provider) => providerKeyCandidates(provider).length > 0), "the loop below judges a variable");
 	for (const provider of HOST_AUTH_PROVIDERS) {
@@ -1694,6 +1696,30 @@ test("issue #999: a declared auxiliary key is that model's only credential, so a
 	const refused = (over) => assert.throws(() => buildContainerEnv({ ...options, hostEnv: { OPENROUTER_API_KEY: "host-or", ANTHROPIC_API_KEY: "host-key" }, ...over }), (error) => error.piDispatchConfig === true && error.message.includes("ANTHROPIC_API_KEY") && !error.message.includes("declared"), JSON.stringify(over));
 	refused({ secrets: { ANTHROPIC_API_KEY: "" } });
 	refused({ subscriptionAuth: [{ provider: "anthropic", env: { ANTHROPIC_OAUTH_TOKEN: "subscription" } }] });
+});
+
+// --- issue #997: a watch rule's decide model takes a declared key on the main provider's rule ---
+
+test("issue #997: a declared role credential is the classifier's only credential, and every wrong shape of it refuses without naming the value", { skip }, () => {
+	const options = { provider: "openrouter", secondaryProvider: "anthropic", model: "deepseek/deepseek-chat", maxTurns: 5, jobId: "watch-1", forgeKind: "local", authFromPi: true, readFile: () => assert.fail("auth.json must not be read for a declared role credential"), hostEnv: { OPENROUTER_API_KEY: "host-or", ANTHROPIC_API_KEY: "host-key", ANTHROPIC_AUTH_TOKEN: "host-bearer", ANTHROPIC_OAUTH_TOKEN: "host-oauth" }, secrets: { ANTHROPIC_API_KEY: "sk-ant-api03-role-private" }, secondaryCredential: "ANTHROPIC_API_KEY" };
+	// A host bearer or OAuth token neither rides along nor, forwarded by PI_FORWARD_ENV, outranks it.
+	for (const forwardEnv of [[], ["ANTHROPIC_AUTH_TOKEN", "ANTHROPIC_OAUTH_TOKEN"]]) {
+		const env = buildContainerEnv({ ...options, forwardEnv });
+		assert.equal(env.ANTHROPIC_API_KEY, "sk-ant-api03-role-private", String(forwardEnv));
+		assert.equal("ANTHROPIC_AUTH_TOKEN" in env || "ANTHROPIC_OAUTH_TOKEN" in env, false, String(forwardEnv));
+		assert.equal(env.OPENROUTER_API_KEY, "host-or", "the investigation's provider keeps the host's key");
+	}
+	// Without the argument the secret is the reserved classifier variable it always was.
+	assert.throws(() => buildContainerEnv({ ...options, secondaryCredential: null }), /watch classifier credential variable ANTHROPIC_API_KEY is reserved/);
+	const refused = (over) => assert.throws(() => buildContainerEnv({ ...options, ...over }), (error) => error.piDispatchConfig === true && !error.message.includes("private"), JSON.stringify(Object.keys(over)));
+	refused({ secondaryCredential: "ANTHROPIC_OAUTH_TOKEN", secrets: { ANTHROPIC_OAUTH_TOKEN: "oauth-private" } });
+	refused({ secrets: { ANTHROPIC_API_KEY: "" } });
+	refused({ secrets: { ANTHROPIC_API_KEY: "sk-ant-oat01-private" } });
+	refused({ subscriptionAuth: [{ provider: "anthropic", env: { ANTHROPIC_OAUTH_TOKEN: "subscription" } }] });
+	refused({ secondaryProvider: "openrouter", secondaryCredential: "OPENROUTER_API_KEY", secrets: { OPENROUTER_API_KEY: "or-private" } });
+	// On the main provider the classifier shares the declared main key, which the classifier's reservation lets through.
+	const shared = buildContainerEnv({ ...options, secondaryProvider: "openrouter", secondaryCredential: null, mainCredential: "OPENROUTER_API_KEY", secrets: { OPENROUTER_API_KEY: "sk-or-shared" } });
+	assert.equal(shared.OPENROUTER_API_KEY, "sk-or-shared");
 });
 
 // --- issue #1002: a random pool's draw holds no other candidate's API key from the run secrets ---

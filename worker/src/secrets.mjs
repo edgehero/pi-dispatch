@@ -337,7 +337,7 @@ export function makeSecretsResolver({
 		// gate, says so by name. It is lifted from the set only when the name it gives is exactly what the shared rule
 		// (`declaredProviderKey`, the same function the gate asked) derives from this job and this deployment's
 		// PI_FORWARD_ENV: the API-key variable of THIS provider, an own key of `run.secrets` and of no `run.secretFiles`,
-		// on no forwarded name, no decision job and no host-authenticated provider. Any other name stays reserved, so a
+		// on no forwarded name, no answer draft or question grouping and no host-authenticated provider. Any other name stays reserved, so a
 		// caller cannot widen the set by naming something, and without the option the set is exactly what it was. The
 		// issue #309 hazard does not return: the replacement is no longer silent, because the processor hands the name to the container as THE credential and
 		// the host's key for the provider is then not read at all; the OAuth and bearer variables pi reads first stay

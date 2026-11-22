@@ -4306,8 +4306,8 @@ export async function collectChecks(shellVars, seams) {
 		// the machine doctor happened to run on.
 		//
 		// Issue #967: asked of each provider a trigger's attempts run on as their main one, through `modelSubjects`: its own,
-		// each random candidate's and each fallback's, and of a watch rule's `decide` model's provider, whose variables the
-		// worker keeps reserved for every job of the rule. It used to be asked of PI_PROVIDER alone: a trigger on `openai`
+		// each random candidate's and each fallback's, and of a watch rule's `decide` model's provider, judged by the same
+		// rule since issue #997. It used to be asked of PI_PROVIDER alone: a trigger on `openai`
 		// binding ANTHROPIC_API_KEY failed here though the worker runs it, and one on `openrouter` binding OPENROUTER_API_KEY
 		// passed though the worker refused it. The one name the worker now admits, the provider's own API-key variable as the
 		// trigger's declared credential, is judged by the worker's own rule (`declaredProviderKey`) and the subscription
@@ -4327,7 +4327,7 @@ export async function collectChecks(shellVars, seams) {
 			const managed = new Map();
 			for (const subject of secretSubjects) {
 				if (subject.deployment === true || subject.secretNames.length + subject.secretFileNames.length === 0) continue;
-				for (const subjectProvider of [subject.main.provider, subject.primaryProvider, ...(subject.auxiliaryModels ?? []).map((ref) => splitModelEntry(ref).provider)]) {
+				for (const subjectProvider of [subject.main.provider, subject.primaryProvider, ...(subject.auxiliaryModels ?? []).map((ref) => splitModelEntry(ref).provider), typeof subject.decisionModel === "string" ? splitModelEntry(subject.decisionModel)?.provider : undefined]) {
 					if (typeof subjectProvider !== "string" || managed.has(subjectProvider) || providerIdProblem(subjectProvider) !== null) continue;
 					managed.set(subjectProvider, (await subscriptionCredentials.check(subjectProvider)).managed === true);
 				}
@@ -6956,8 +6956,8 @@ export function listedProviderCredentialChecks(subjects, { candidatesOf, forward
  * name pi reads for that provider (`candidatesOf`, the provider oracle) is a clash the worker refuses pre-spend as
  * `secret-name-reserved`, unless the worker's own rule admits it as the job's declared credential: `declaredOf` is
  * `declaredProviderKey`, asked with the subject's names and the deployment's PI_FORWARD_ENV (`forwarded`), and
- * `managed(provider)` is the subscription verdict the worker's gate asks before it. Every variable of a watch rule's
- * `decide` model's provider is a clash too, and so (issue #999) is every variable of an auxiliary model's provider but
+ * `managed(provider)` is the subscription verdict the worker's gate asks before it. A watch rule's `decide` model's
+ * provider is judged by the same rule (issue #997), and (issue #999) every variable of an auxiliary model's provider but
  * the API key the main rule would admit: `auxiliaryOf` is `reservedAuxiliaryNames`, the set the worker's resolver
  * refuses, asked one auxiliary model at a time so the line can name the provider, and a provider `managed` here admits
  * none, as the processor refuses that key too. An admitted name is a fact line, since the trigger's own
@@ -6985,7 +6985,8 @@ export function triggerSecretProviderChecks(subjects, { candidatesOf, declaredOf
 		providers.add(provider);
 		const candidates = candidatesOf(provider) ?? [];
 		// A watch rule's `decide` model: the worker refuses every variable of its provider in the rule's jobs
-		// (`secondaryCredentialNames`, processor.mjs), whichever provider the investigation runs on.
+		// (`secondaryCredentialNames`, processor.mjs), whichever provider the investigation runs on, but the API key the
+		// same rule admits for it (issue #997, `roleAdmitted` below).
 		const roleProvider = typeof s.decisionModel === "string" ? splitModelEntry(s.decisionModel)?.provider ?? null : null;
 		const roleNames = roleProvider !== null && providerIdProblem(roleProvider) === null ? candidatesOf(roleProvider) ?? [] : [];
 		if (roleNames.length > 0) providers.add(roleProvider);
@@ -7000,15 +7001,18 @@ export function triggerSecretProviderChecks(subjects, { candidatesOf, declaredOf
 			for (const name of managed(auxProvider) ? candidatesOf(auxProvider) ?? [] : auxiliaryOf({ ...asJob, auxiliaryModels: [ref] }, { forwardEnv: forwarded })) auxiliary.set(name, auxProvider);
 		}
 		const admitted = managed(provider) ? null : declaredOf(asJob, { forwardEnv: forwarded });
+		// Issue #997: the `decide` model's own declared key, the same rule asked of its provider (a watch job counts since).
+		const roleAdmitted = roleNames.length > 0 && !managed(roleProvider) ? declaredOf({ ...asJob, provider: roleProvider }, { forwardEnv: forwarded }) : null;
 		// Where an admitted key is spent, or a refused one refuses: every job of the trigger, or only the attempts that run
 		// on this subject.
 		const where = s.random === true ? "on its draws" : s.fallback === true ? "on its failover attempts" : "on every job of its trigger";
 		for (const name of [...new Set([...secretNames, ...fileNames])]) {
-			if (roleNames.includes(name)) clashes.push(`${s.label}: ${name} (${printable(roleProvider)}, the watch rule's decide model; refused ${where})`);
+			if (roleNames.includes(name) && name !== roleAdmitted) clashes.push(`${s.label}: ${name} (${printable(roleProvider)}, the watch rule's decide model; refused ${where})`);
 			else if (candidates.includes(name)) {
 				if (name === admitted) declared.push(`${s.label}: ${name} (${printable(provider)}, ${where})`);
 				else clashes.push(`${s.label}: ${name} (${printable(provider)}; refused ${where})`);
-			} else if (auxiliary.has(name)) clashes.push(`${s.label}: ${name} (${printable(auxiliary.get(name))}, an auxiliary model's provider; refused ${where})`);
+			} else if (roleNames.includes(name)) declared.push(`${s.label}: ${name} (${printable(roleProvider)}, the watch rule's decide model, ${where})`);
+			else if (auxiliary.has(name)) clashes.push(`${s.label}: ${name} (${printable(auxiliary.get(name))}, an auxiliary model's provider; refused ${where})`);
 		}
 	}
 	if (providers.size === 0) return [];
@@ -7021,7 +7025,7 @@ export function triggerSecretProviderChecks(subjects, { candidatesOf, declaredOf
 		});
 	}
 	if (declared.length > 0) {
-		checks.push({ ok: true, label: `${declared.length} trigger secret(s) are the main provider's own API key, so each replaces this host's credential for that provider: ${declared.join("; ")}` });
+		checks.push({ ok: true, label: `${declared.length} trigger secret(s) are the API key of the main model's own provider or of a watch rule's decide model's provider, so each replaces this host's credential for that provider: ${declared.join("; ")}` });
 	}
 	if (checks.length === 0) checks.push({ ok: true, label: `No trigger binds a variable pi reads for ${[...providers].sort().map(printable).join(", ")}` });
 	return checks;
@@ -7424,9 +7428,9 @@ function readTriggerFacts(env, fileExists, cwd, declaredWorkerName, versionTable
 				...(Array.isArray(t.run.auxiliaryModels) ? { auxiliaryModels: t.run.auxiliaryModels } : {}),
 				maxCostUsd: t.run.maxCostUsd ?? undefined,
 				secretNames: t.run.secrets !== undefined && t.run.secrets !== null ? Object.keys(t.run.secrets) : [],
-				// Issue #967: the file secret names too, whether the trigger's jobs are watch jobs (an internal decision job,
-				// whose provider key is never a declared credential), and a watch rule's `decide` model, whose provider's
-				// variables every job of the rule keeps reserved, for the trigger-secret clash line.
+				// Issue #967: the file secret names too, whether the trigger's jobs are watch jobs, and a watch rule's `decide`
+				// model, whose provider's API key the rule may declare like the main one since issue #997, for the
+				// trigger-secret clash line.
 				secretFileNames: t.run.secretFiles !== undefined && t.run.secretFiles !== null ? Object.keys(t.run.secretFiles) : [],
 				...(t.on.type === "watch" ? { decisionJob: true, ...(typeof t.decide?.model === "string" ? { decisionModel: t.decide.model } : {}) } : {}),
 			})),

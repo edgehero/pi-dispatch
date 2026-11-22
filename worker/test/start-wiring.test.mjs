@@ -1528,7 +1528,8 @@ test("issue #967: a run secret declaring the main provider's key is the credenti
 	assert.equal((await gate({ ...declared, secrets: undefined })).ok, false, "without the binding the host is asked, and has no key");
 	assert.equal((await gate({ ...declared, secrets: {}, secretFiles: { OPENROUTER_API_KEY: "op://ci/or/key" } })).ok, false, "a file secret is no credential");
 	assert.equal((await gate({ ...declared, provider: "anthropic", model: "m", secrets: { ANTHROPIC_OAUTH_TOKEN: "op://ci/a/oauth" } })).ok, false, "nor the OAuth variable");
-	assert.equal((await gate({ ...declared, watch: { findingId: "f" } })).ok, false, "a decision job keeps the host's credential");
+	assert.equal((await gate({ ...declared, answerDraft: { runId: "r" } })).ok, false, "an answer draft keeps the host's credential");
+	assert.deepEqual(await gate({ ...declared, watch: { findingId: "f" } }), { ok: true, declared: "OPENROUTER_API_KEY" }, "issue #997: a watch job declares a key like any trigger's job");
 	// The candidate gate of a random pool or a fallback: the candidate carries the job's secrets.
 	const candidate = { ...declared, models: ["openrouter/deepseek/deepseek-chat"] };
 	assert.equal(await deps.checkFailoverCandidate(candidate, { models: null, endpoints: [] }), null, "the declared key makes the candidate eligible");
