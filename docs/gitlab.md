@@ -82,8 +82,12 @@ as they should. The exception is GitHub by polling ([polling.md](polling.md)): s
 `.env`.
 
 **5. Check it.** `pi-dispatch doctor` reports whether the token, the verification mode and the webhook
-secret are set when your triggers name GitLab. Where GitHub is in play too, it names the transport that carries it,
-and it checks `WEBHOOK_SECRET` only where the receiver serves GitHub.
+secret are set. Any one of `GITLAB_WEBHOOK_MODE`, `GITLAB_WEBHOOK_SECRET` and `GITLAB_TOKEN` set makes `serve` arm
+`/gitlab` and need all three, whether your triggers name GitLab or not (a `GITLAB_TOKEN` set for GitLab jobs alone
+counts), so doctor judges them whenever one is set and names `serve` as what refuses to start: `poll` and `watch`
+never read them. With GitLab triggers and none of the three set, `serve` starts and arms no `/gitlab` route, and
+doctor says those triggers never fire. Where GitHub is in play too, it names the transport that carries it, and it
+checks `WEBHOOK_SECRET` only where the receiver serves GitHub.
 
 **6. Start it.** `pi-dispatch-receiver` from your deployment folder; `serve` is the default command, so
 there is nothing to type after the name. A container profile is the alternative

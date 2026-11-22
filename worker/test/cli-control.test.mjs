@@ -302,7 +302,7 @@ test("status asks the shared rule: POLL_REPOS without GITHUB_INGEST expects a po
 	for (const r of [lists, split]) assert.doesNotMatch(JSON.stringify(r.status), /acme\/(api|web|x)/);
 });
 
-test("a kept poller over this host's file: a watch secret this shell alone sets leaves it judged, WEBHOOK_SECRET or a setting this shell alone sets does not (issues #970, #994)", async () => {
+test("a kept poller over this host's file: a watch secret or WEBHOOK_SECRET this shell alone sets leaves it judged, a setting this shell alone sets does not (issues #970, #994, #1006)", async () => {
 	// A poller's start judges no watch source's secret (issue #994), so status resolves none: a shell that exports one
 	// where the .env does not changes nothing the poller reads, and the file is judged as the poller would take it.
 	const watched = JSON.stringify({ watchSources: { prod: { verify: "hmac-sha256", secretEnv: "WATCH_PROD_SECRET", maxPerDay: 10 } }, triggers: [{ on: { type: "watch", id: "w1", source: "prod", fingerprint: ["service"], window: "10m", cooldown: "1h", maxPerDay: 2 }, run: { kind: "local", mode: "issue", issue: { kind: "github", repo: "acme/shop" } } }] });
@@ -312,13 +312,13 @@ test("a kept poller over this host's file: a watch secret this shell alone sets 
 	assert.equal(secret.status.pollers.note, "poller: running on the previous triggers.json, it refused the current file, which this host's check takes: its settings differ from this shell's, so run pi-dispatch triggers check where it runs");
 	assert.equal(secret.status.pollers.local, undefined);
 	assert.doesNotMatch(JSON.stringify(secret.status), /private-shell-value|WATCH_PROD_SECRET|another host/);
-	// WEBHOOK_SECRET is one a poller's start judges (a blank one where serve serves GitHub, which this file's GitHub rule
-	// makes it), so this shell alone setting it still leaves the file unjudged, and the file is still this host's.
+	// WEBHOOK_SECRET is `serve`'s alone too (issue #1006: the poller refused one of spaces where serve serves GitHub, which
+	// this file's GitHub rule makes it), so this shell alone setting it leaves the file judged as well.
 	const hook = await pollerStatus(deployment("POLL_REPOS=o/r\n", GOOD_FILE), { records: { mini1: kept(GOOD_FILE) }, env: { WEBHOOK_SECRET: "private-shell-value" } });
-	assert.match(hook.status.pollers.note, /^poller: running on the previous triggers\.json, it refused this host's file, which cannot be judged from this shell: WEBHOOK_SECRET is set in this shell and not in .*\.env \(no value is shown\)/);
-	assert.match(hook.status.pollers.local, /^WEBHOOK_SECRET is set in this shell and not in /);
+	assert.equal(hook.status.pollers.note, "poller: running on the previous triggers.json, it refused the current file, which this host's check takes: its settings differ from this shell's, so run pi-dispatch triggers check where it runs");
+	assert.equal(hook.status.pollers.local, undefined);
 	assert.doesNotMatch(JSON.stringify(hook.status), /private-shell-value|another host/);
-	// A setting only this shell has is the same.
+	// A setting only this shell has still leaves it unjudged: the file is still this host's.
 	const setting = await pollerStatus(deployment("POLL_REPOS=o/r\n", PROBE_FILE), { records: { mini1: kept(PROBE_FILE) }, env: { GITHUB_INGEST: "poll" } });
 	assert.match(setting.status.pollers.note, /^poller: running on the previous triggers\.json, it refused this host's file, which cannot be judged from this shell: GITHUB_INGEST is set in this shell and not in /);
 });

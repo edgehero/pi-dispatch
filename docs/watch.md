@@ -130,7 +130,10 @@ Fields and matching are operator-authored. The interval is 5 to 3600 seconds. Lo
 and keeps its optional read credential on the collector host. The source still declares `verify` and `secretEnv`, but
 the pull command never reads that signing secret, and neither does `poll`: only `pi-dispatch-receiver serve`, which
 verifies pushes with it, refuses to start while a declared source's secret is unset or blank, and a live edit that adds
-such a source leaves `serve` on the rules it runs. `watch` and `poll` start and take the file either way. `pi-dispatch
+such a source leaves `serve` on the rules it runs. `watch` and `poll` start and take the file either way, and neither
+reads `serve`'s other settings (`WEBHOOK_SECRET`, `RECEIVER_PORT`, a forge's webhook settings). `watch` reads no GitHub
+setting either: a GitHub auth source it cannot use or a malformed `RECEIVER_IDENTITY_RETRY_SECONDS` does not stop it,
+though a garbled `GITHUB_INGEST` still does, as the console says of every receiver command. `pi-dispatch
 triggers check` says so before you swap the file in ([triggers.md](triggers.md#check-a-file-before-you-swap-it-in)).
 Doctor warns when a declared signing secret is unset or blank, naming `serve` as the one that refuses to start, or a
 Loki credential is absent, and prints key names only. All samples are replaced with `[redacted]` by default on the

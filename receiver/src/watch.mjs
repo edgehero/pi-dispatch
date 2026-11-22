@@ -46,7 +46,7 @@ export function makeWatchHandler({ cfg, store, enqueue, env = process.env, now =
 		if (!source || !Object.hasOwn(sources, source)) return respond(res, 404, { error: "watch source not configured" });
 		const declared = sources[source]; const secret = env[declared.secretEnv];
 		// The loader's own predicate (issue #994), so a blank secret is missing here as it is to `serve`'s start: a secret of
-		// spaces is a key anyone can sign with, and only a caller that loads without `verifiesWatchPushes` reaches this.
+		// spaces is a key anyone can sign with, and only a caller that loads as a command other than `serve` reaches this.
 		if (watchSecretsMissing({ [source]: declared }, env).length > 0) return respond(res, 503, { error: "watch source secret unavailable" });
 		const verified = makeWatchVerifiedHandler({ secret, bodyLimit: declared.maxBodyBytes, now, log: (_event, fields) => log("watch_signature", { source, ...fields }) }, async ({ rawBody, delivery }, reply) => {
 			let finding;

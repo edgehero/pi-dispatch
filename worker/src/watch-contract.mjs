@@ -34,8 +34,9 @@ export function normalizeWatchSources(value = {}) {
  * The declared watch sources whose signing secret this environment lacks, as `[{ source, secretEnv }]` in declaration
  * order (issue #970). Unset, not a string, empty or only whitespace is missing: a blank secret would verify nothing.
  *
- * ONE predicate for every reader of it. The receiver's triggers loader refuses the whole file on any entry here
- * (receiver/src/config.mjs), so `serve`, `poll` and `watch` refuse to start and a live reload keeps the running rules;
+ * ONE predicate for every reader of it. The receiver's triggers loader refuses the whole file on any entry here for
+ * `serve` alone (receiver/src/config.mjs, issue #994), so `serve` refuses to start and its live reload keeps the running
+ * rules, while `poll` and `watch`, which read no push, take the file; the push handler answers such a source 503;
  * doctor warns with it, and `pi-dispatch triggers check` judges a candidate file with it. Doctor used to test presence
  * with `length > 0` while the loader trimmed, so a secret of spaces passed doctor and refused the receiver. Names only:
  * a value never leaves this function.

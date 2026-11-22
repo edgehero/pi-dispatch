@@ -958,11 +958,120 @@ export function githubTriggerTransports(env) {
 	const ingest = githubIngestFrom(env);
 	const raw = env.WEBHOOK_SECRET;
 	const secret = typeof raw === "string" && raw.trim() !== "";
-	// Under `both` the poller loads `serve`'s config, which serves GitHub and so judges the secret: an absent or empty one
-	// is papered over for that call (poller-config.mjs), but whitespace alone is a value no signature can be checked
-	// against, and the poller refuses it too (docs/polling.md). Under `poll` the loader asks for no secret at all.
-	const blankValue = typeof raw === "string" && raw !== "" && !secret;
-	return [...(ingest !== "poll" && secret ? ["webhook"] : []), ...(ingest === "poll" || (ingest === "both" && !blankValue) ? ["poll"] : [])];
+	// The poller never reads WEBHOOK_SECRET (issue #1006: it loads as a command that does not listen), so under `both` a
+	// secret of spaces costs the webhook half alone; it used to refuse the poller too.
+	return [...(ingest !== "poll" && secret ? ["webhook"] : []), ...(ingest === "poll" || ingest === "both" ? ["poll"] : [])];
+}
+
+/**
+ * The variables that name each of `serve`'s other forge webhook blocks (issue #1006). Any one of them set, even to
+ * spaces, makes `serve` arm that forge's route and judge the whole block; none set leaves the forge unserved, with no
+ * route at all rather than one that answers 401, since an endpoint that responds is one an operator can believe is
+ * armed. Only `serve` reads them: the poller polls GitHub and the watch collector pulls watch sources, so neither
+ * judges them (they used to, through `serve`'s loader, and a deployment whose `.env` carried GITLAB_TOKEN for its
+ * worker lost GitHub polling at the next restart). Moved here from the receiver's loader so doctor judges a block by
+ * the code `serve` refuses it with.
+ */
+export const FORGE_WEBHOOK_NAMES = Object.freeze({
+	gitlab: Object.freeze(["GITLAB_WEBHOOK_MODE", "GITLAB_WEBHOOK_SECRET", "GITLAB_TOKEN"]),
+	forgejo: Object.freeze(["FORGEJO_WEBHOOK_SECRET", "FORGEJO_TOKEN", "FORGEJO_URL"]),
+	azure: Object.freeze(["AZURE_WEBHOOK_MODE", "AZURE_WEBHOOK_SECRET", "AZURE_TOKEN", "AZURE_ORG_URL"]),
+});
+
+/** Whether `env` names `kind`'s webhook block: any of its `FORGE_WEBHOOK_NAMES` set to a non-empty value. */
+export function forgeWebhookNamed(kind, env) {
+	return FORGE_WEBHOOK_NAMES[kind].some((name) => Boolean(env[name]));
+}
+
+const blankSetting = (value) => typeof value !== "string" || value.trim() === "";
+
+/**
+ * Each forge's faults, in the order `serve` checks them, as `[{ name, message }]`: `name` the variable at fault,
+ * `message` `serve`'s refusal for it. Every check is independent of the others, so the whole list is what a start
+ * would meet one fault at a time.
+ *
+ *  - GitLab. `GITLAB_WEBHOOK_MODE` is REQUIRED once any GitLab variable is set, and is not defaulted. The two modes are
+ *    not equally strong -- `signature` is an HMAC over the body, `token` is a shared-secret compare that proves nothing
+ *    about the body's integrity -- so which one a deployment runs must be a thing somebody chose and can be asked
+ *    about, never a thing it fell into. Defaulting to the weaker one would silently downgrade every operator who did
+ *    not know the field existed; defaulting to the stronger one would break every instance below GitLab 19.0. The
+ *    gate needs GITLAB_TOKEN BEFORE any job runs: the actor's access level is what authorises a GitLab trigger at all
+ *    (CONST-TRIGGER-AUTHOR-GATE), and without a token every lookup is indeterminate and every delivery 503s, which
+ *    GitLab never resends. After 4 in a row GitLab disables the hook for a while (on gitlab.com, and a group hook
+ *    anywhere; a self-managed project hook only where the `auto_disabling_web_hooks` feature flag is on). Refusing at
+ *    boot is the difference between one clear message and every delivery failing, and perhaps the hook switched off.
+ *  - Forgejo. There is no MODE, and that absence is the good news: Forgejo signs the raw body with HMAC-SHA256 and
+ *    sends GitHub's three headers verbatim, so there is exactly one verification mechanism and it is the strong one.
+ *    No default instance URL, deliberately: Forgejo is self-hosted by nature and there is no forgejo.com to fall back
+ *    to, so guessing one would send a token to a host the operator never named. FORGEJO_TOKEN is needed BEFORE any
+ *    job runs for the same author-gate reason as GitLab's.
+ *  - Azure DevOps. `AZURE_WEBHOOK_MODE` is REQUIRED once any AZURE_* variable is set and is deliberately not
+ *    defaulted -- the same rule GitLab's mode gets, and for a sharper reason. Azure offers no HMAC at all, so BOTH
+ *    modes are shared-secret compares that cover no bytes; which header carries the secret is a deployment fact
+ *    somebody has to have decided. No default organization URL either: guessing one would send an operator's token to
+ *    an organization they never named. AZURE_TOKEN is needed BEFORE any job runs: project membership is what
+ *    authorises an azure trigger at all.
+ */
+const FORGE_WEBHOOK_FAULTS = {
+	gitlab: (env) => [
+		...(env.GITLAB_WEBHOOK_MODE !== "signature" && env.GITLAB_WEBHOOK_MODE !== "token" ? [{ name: "GITLAB_WEBHOOK_MODE", message: `GITLAB_WEBHOOK_MODE must be "signature" (HMAC, GitLab 19.0+) or "token" (X-Gitlab-Token, any version); got ${JSON.stringify(env.GITLAB_WEBHOOK_MODE)}` }] : []),
+		...(blankSetting(env.GITLAB_WEBHOOK_SECRET) ? [{ name: "GITLAB_WEBHOOK_SECRET", message: "GITLAB_WEBHOOK_SECRET is required; refusing to start a gitlab endpoint that cannot verify deliveries" }] : []),
+		...(blankSetting(env.GITLAB_TOKEN) ? [{ name: "GITLAB_TOKEN", message: "GITLAB_TOKEN is required for gitlab triggers -- the receiver resolves the actor's project access level before it may enqueue" }] : []),
+	],
+	forgejo: (env) => [
+		...(blankSetting(env.FORGEJO_URL) ? [{ name: "FORGEJO_URL", message: "FORGEJO_URL is required for forgejo triggers -- there is no default instance to fall back to" }] : []),
+		...(blankSetting(env.FORGEJO_WEBHOOK_SECRET) ? [{ name: "FORGEJO_WEBHOOK_SECRET", message: "FORGEJO_WEBHOOK_SECRET is required; refusing to start a forgejo endpoint that cannot verify deliveries" }] : []),
+		...(blankSetting(env.FORGEJO_TOKEN) ? [{ name: "FORGEJO_TOKEN", message: "FORGEJO_TOKEN is required for forgejo triggers -- the receiver resolves the actor's repository permission before it may enqueue" }] : []),
+	],
+	azure: (env) => [
+		...(env.AZURE_WEBHOOK_MODE !== "basic" && env.AZURE_WEBHOOK_MODE !== "header" ? [{ name: "AZURE_WEBHOOK_MODE", message: `AZURE_WEBHOOK_MODE must be "basic" (HTTP Basic on the subscription) or "header" (a custom header); got ${JSON.stringify(env.AZURE_WEBHOOK_MODE)}` }] : []),
+		...(env.AZURE_WEBHOOK_MODE === "header" && blankSetting(env.AZURE_WEBHOOK_HEADER ?? null) ? [{ name: "AZURE_WEBHOOK_HEADER", message: "AZURE_WEBHOOK_HEADER is required when AZURE_WEBHOOK_MODE=header -- there is no default header name to guess" }] : []),
+		...(blankSetting(env.AZURE_WEBHOOK_SECRET) ? [{ name: "AZURE_WEBHOOK_SECRET", message: "AZURE_WEBHOOK_SECRET is required; refusing to start an azure endpoint that cannot authenticate deliveries" }] : []),
+		...(blankSetting(env.AZURE_ORG_URL) ? [{ name: "AZURE_ORG_URL", message: "AZURE_ORG_URL is required for azure triggers (e.g. https://dev.azure.com/your-org)" }] : []),
+		...(blankSetting(env.AZURE_TOKEN) ? [{ name: "AZURE_TOKEN", message: "AZURE_TOKEN is required for azure triggers -- the receiver resolves the actor's project membership before it may enqueue" }] : []),
+	],
+};
+
+/**
+ * What `serve` would refuse `kind`'s webhook block on under `env`: `[{ name, message }]`, empty when the block is
+ * complete or nothing names it (`forgeWebhookNamed`). Doctor's forge lines read this, so they say a refusal exactly
+ * where `serve` makes one and name no other reader.
+ */
+export function forgeWebhookFaults(kind, env) {
+	return forgeWebhookNamed(kind, env) ? FORGE_WEBHOOK_FAULTS[kind](env) : [];
+}
+
+/**
+ * `serve`'s block for `kind`, or null when nothing names it; refuses with the first fault (`configError`, exit 2).
+ *
+ * Forgejo's block carries two optional settings. `FORGEJO_BOT_ID` exists for one reason: a repository-scoped token
+ * cannot call `GET /user` (see forgejo-identity.mjs), so without it following the token-scoping advice would leave the
+ * receiver unable to identify itself. `FORGEJO_PERMISSION_TOKEN` is the author gate's alone (OQ-043): Forgejo answers
+ * a lookup of ANOTHER user's repository permission only to a site or repository admin, and FORGEJO_TOKEN is every
+ * forgejo job's token, so making ITS account an admin hands each job a token that can lift branch protection. This
+ * variable lets a DIFFERENT account, an admin of the repositories, answer that one GET with a `read:repository` token.
+ * Read here and by `serve` alone: it never reaches the worker's job env, and the worker refuses it in PI_FORWARD_ENV
+ * and run.secrets (WORKER_ONLY_SECRET_VARS). Unset (or blank), the lookup falls back to FORGEJO_TOKEN;
+ * `lookupTokenVar` names which one is in use, so the boot line and a 403's reason can say so.
+ */
+export function loadForgeWebhook(kind, env) {
+	if (!forgeWebhookNamed(kind, env)) return null;
+	const faults = FORGE_WEBHOOK_FAULTS[kind](env);
+	if (faults.length > 0) throw configError(faults[0].message);
+	if (kind === "gitlab") return { mode: env.GITLAB_WEBHOOK_MODE, secret: env.GITLAB_WEBHOOK_SECRET, token: env.GITLAB_TOKEN, apiUrl: env.GITLAB_URL ?? "https://gitlab.com" };
+	if (kind === "forgejo") {
+		const permissionToken = typeof env.FORGEJO_PERMISSION_TOKEN === "string" ? env.FORGEJO_PERMISSION_TOKEN.trim() : "";
+		return {
+			secret: env.FORGEJO_WEBHOOK_SECRET,
+			token: env.FORGEJO_TOKEN,
+			apiUrl: env.FORGEJO_URL.trim(),
+			botId: env.FORGEJO_BOT_ID ?? null,
+			lookupToken: permissionToken !== "" ? permissionToken : env.FORGEJO_TOKEN,
+			lookupTokenVar: permissionToken !== "" ? "FORGEJO_PERMISSION_TOKEN" : "FORGEJO_TOKEN",
+		};
+	}
+	const headerName = env.AZURE_WEBHOOK_HEADER ?? null;
+	return { mode: env.AZURE_WEBHOOK_MODE, secret: env.AZURE_WEBHOOK_SECRET, headerName: headerName?.trim() ?? null, token: env.AZURE_TOKEN, orgUrl: env.AZURE_ORG_URL.trim().replace(/\/+$/, "") };
 }
 
 // env-internal TMPDIR, TEMP: the OS temp dir, read to place the default job and sandbox paths

@@ -944,7 +944,7 @@ test("a GitHub rule reloaded into a receiver that started without `/` is said lo
 
 test("serve refuses a watch source whose secret is unset at its start, and keeps one added live out of the rules it runs (issue #994)", async () => {
 	// `serve` answers POST /watch/<source> and verifies each push with the source's secret, so it alone judges the
-	// secret (`verifiesWatchPushes`); the poller and the watch collector load the same file without that rule.
+	// secret (it loads as the command that listens); the poller and the watch collector load the same file without it.
 	const dir = tempDir("receiver-watch-secret-");
 	const triggersPath = join(dir, "triggers.json");
 	const gitlabRule = { on: { type: "label", any: ["pi:frontend"] }, run: { kind: "gitlab", flow: "gl-fix" } };

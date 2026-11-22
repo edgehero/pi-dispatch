@@ -167,7 +167,7 @@ import { holdAfterDedup, holdBeforeLabel } from "./held.mjs";
 import { filter, hasCloseTriggers, wantsCloserAuthority } from "./filter.mjs";
 import { makeResolveGitHubAuthority } from "./github-members.mjs";
 import { parseSubset } from "./receiver.mjs";
-import { loadPollerConfig, pollerLoaderEnv } from "./poller-config.mjs";
+import { loadPollerConfig } from "./poller-config.mjs";
 import { makeTriggersFollower, triggersFilePath } from "./config.mjs";
 import { retryIdentity } from "./boot-retry.mjs";
 import { hasLocalCloseListeners, localEventsWantCloserAuthority, makeLocalEventAdmission } from "./local-event-listeners.mjs";
@@ -270,8 +270,9 @@ export async function startPoller(env = process.env, deps = {}) {
 			return text;
 		},
 	});
-	// Judged under the boot load's own environment (`pollerLoaderEnv` says why), so a file the boot took is taken again.
-	const triggersFollower = makeTriggersFollower(pollerLoaderEnv(env), cfg, { readFile: fsDeps.readFile, fileExists: fsDeps.fileExists, baseline: triggersAtBoot, log: out, now });
+	// Judged under the boot load's own environment and not as `serve` (the poller's cfg carries no `command`), so a file
+	// the boot took is taken again and no watch source's secret is asked for (issues #994, #1006).
+	const triggersFollower = makeTriggersFollower(env, cfg, { readFile: fsDeps.readFile, fileExists: fsDeps.fileExists, baseline: triggersAtBoot, log: out, now });
 
 	// HARD-FAIL identity resolution, exactly start.mjs's boot gate and for the same reason: selfId is
 	// the bot-loop guard's sole input, and a poller running without it would read the harness's own

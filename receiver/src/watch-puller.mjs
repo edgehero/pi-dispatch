@@ -44,9 +44,10 @@ export async function pollWatchSources({ cfg, redis, store, enqueue, adapterFact
 }
 
 export async function startWatchPuller(env = process.env, deps = {}) {
-	const { now = () => Date.now(), signals = true, out = value => process.stdout.write(`${JSON.stringify(value)}\n`), loadConfig = loadReceiverConfig, reload = reloadTriggers, adapterFactory = makeWatchPullAdapter } = deps;
-	// Loaded without `verifiesWatchPushes` (issue #994): the collector pulls and reads no source's push secret, so an unset
-	// one refuses neither this start nor a reload below; `serve`, which verifies pushes with it, refuses it.
+	const { now = () => Date.now(), signals = true, out = value => process.stdout.write(`${JSON.stringify(value)}\n`), loadConfig = (e) => loadReceiverConfig(e, { command: "watch" }), reload = reloadTriggers, adapterFactory = makeWatchPullAdapter } = deps;
+	// Loaded as the collector (issues #994, #1006): it pulls, resolves no identity and calls no forge, so a source's push
+	// secret, the forge webhook blocks, WEBHOOK_SECRET, RECEIVER_PORT, the GitHub auth block and the identity retry
+	// window refuse neither this start nor a reload below; `serve` and `poll`, which read some of them, refuse them.
 	const cfg = loadConfig(env);
 	if (!Object.values(cfg.triggers?.watchSources ?? {}).some(source => source.pull)) throw configError("watch: no pull sources configured");
 	const ownedRedis = !deps.redis; const ownedQueue = !deps.enqueue;

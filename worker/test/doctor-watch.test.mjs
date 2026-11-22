@@ -65,7 +65,7 @@ test("doctor reads a watch source's signing secret from the deployment .env when
 	const without = (await run(null)).find(c => c.id?.startsWith("watch.secret-"));
 	assert.equal(without.ok, false, "neither this shell nor a .env sets it");
 });
-test("a GitHub auth setting, WEBHOOK_SECRET and RECEIVER_PORT name every reader whose loader refuses them, the watch collector where the file has a pull source (issue #1001)", async () => {
+test("a GitHub auth setting, WEBHOOK_SECRET, RECEIVER_PORT and the identity retry window name every reader whose loader refuses them, and never the watch collector, pull source or none (issues #1001, #1006)", async () => {
 	const dir = tempDir("pd-1001-doctor-readers-");
 	const triggersFile = join(dir, "triggers.json");
 	const label = { on: { type: "label", any: ["pi:fix"] }, run: { kind: "github", flow: "fix" } };
@@ -74,21 +74,27 @@ test("a GitHub auth setting, WEBHOOK_SECRET and RECEIVER_PORT name every reader 
 	// Each setting alone, bad: the line's start, the readers it must name with a pull source and without, and the loader's
 	// own refusal, which every named reader makes and no other.
 	const cases = [
-		{ env: { GITHUB_AUTH_SOURCE: "token", WEBHOOK_SECRET: "w" }, line: 'GITHUB_AUTH_SOURCE is "token", which is none of pat, gh or app: ', pulled: "the worker, the receiver, the poller and the watch collector refuse to start on it (exit 2)", pushed: "the worker, the receiver and the poller refuse to start on it (exit 2)", refusal: /^invalid GITHUB_AUTH_SOURCE/ },
-		{ env: { GITHUB_AUTH_SOURCE: "pat", WEBHOOK_SECRET: "w" }, line: "GITHUB_AUTH_SOURCE=pat but GITHUB_PAT is unset: ", pulled: "the worker, the receiver, the poller and the watch collector refuse to start (exit 2)", pushed: "the worker, the receiver and the poller refuse to start (exit 2)", refusal: /^GITHUB_AUTH_SOURCE=pat requires/ },
-		{ env: {}, line: "triggers.json has github triggers but WEBHOOK_SECRET is unset -- ", pulled: "the receiver and the watch collector will refuse to start", pushed: "the receiver will refuse to start", refusal: /^WEBHOOK_SECRET is required/ },
-		// A blank one is passed through to the poller's loader (its stand-in replaces only an unset or empty one), so it
-		// refuses the poller too.
-		{ env: { WEBHOOK_SECRET: "   " }, line: "triggers.json has github triggers but WEBHOOK_SECRET is unset -- ", pulled: "the receiver, the poller and the watch collector will refuse to start", pushed: "the receiver and the poller will refuse to start", refusal: /^WEBHOOK_SECRET is required/ },
-		{ env: { WEBHOOK_SECRET: "w", RECEIVER_PORT: "http" }, line: 'RECEIVER_PORT is "http", which is not a positive integer -- ', pulled: "the receiver, the poller and the watch collector will refuse to start", pushed: "the receiver and the poller will refuse to start", refusal: /^invalid RECEIVER_PORT/ },
+		{ env: { GITHUB_AUTH_SOURCE: "token", WEBHOOK_SECRET: "w" }, line: 'GITHUB_AUTH_SOURCE is "token", which is none of pat, gh or app: ', pulled: "the worker, the receiver and the poller refuse to start on it (exit 2)", pushed: "the worker, the receiver and the poller refuse to start on it (exit 2)", refusal: /^invalid GITHUB_AUTH_SOURCE/ },
+		{ env: { GITHUB_AUTH_SOURCE: "pat", WEBHOOK_SECRET: "w" }, line: "GITHUB_AUTH_SOURCE=pat but GITHUB_PAT is unset: ", pulled: "the worker, the receiver and the poller refuse to start (exit 2)", pushed: "the worker, the receiver and the poller refuse to start (exit 2)", refusal: /^GITHUB_AUTH_SOURCE=pat requires/ },
+		// What only a listener reads is the receiver's alone (issue #1006): the poller and the collector load without it, a
+		// WEBHOOK_SECRET of spaces and a port they never bind included.
+		{ env: {}, line: "triggers.json has github triggers but WEBHOOK_SECRET is unset -- ", pulled: "the receiver will refuse to start", pushed: "the receiver will refuse to start", refusal: /^WEBHOOK_SECRET is required/ },
+		{ env: { WEBHOOK_SECRET: "   " }, line: "triggers.json has github triggers but WEBHOOK_SECRET is unset -- ", pulled: "the receiver will refuse to start", pushed: "the receiver will refuse to start", refusal: /^WEBHOOK_SECRET is required/ },
+		{ env: { WEBHOOK_SECRET: "w", RECEIVER_PORT: "http" }, line: 'RECEIVER_PORT is "http", which is not a positive integer -- ', pulled: "the receiver will refuse to start", pushed: "the receiver will refuse to start", refusal: /^invalid RECEIVER_PORT/ },
+		// The identity retry window: serve and the poller resolve an identity at their start, the collector none (issue #1006).
+		// A value that is not short and plain is never shown: a token pasted into the wrong line is a token.
+		{ env: { WEBHOOK_SECRET: "w", RECEIVER_IDENTITY_RETRY_SECONDS: "x" }, line: 'RECEIVER_IDENTITY_RETRY_SECONDS is "x", which is not a positive integer: ', pulled: "the receiver and the poller refuse to start on it (exit 2)", pushed: "the receiver and the poller refuse to start on it (exit 2)", refusal: /^invalid RECEIVER_IDENTITY_RETRY_SECONDS/ },
+		{ env: { WEBHOOK_SECRET: "w", RECEIVER_IDENTITY_RETRY_SECONDS: `ghp_${"x".repeat(36)}` }, line: "RECEIVER_IDENTITY_RETRY_SECONDS is an unrecognised value (40 characters, not shown), which is not a positive integer: ", pulled: "the receiver and the poller refuse to start on it (exit 2)", pushed: "the receiver and the poller refuse to start on it (exit 2)", refusal: /^invalid RECEIVER_IDENTITY_RETRY_SECONDS/ },
 	];
 	const fs = (pull) => ({ readFile: () => text(pull), fileExists: () => true });
 	const readers = {
 		worker: async (env) => loadConfig(env),
-		receiver: async (env, pull) => loadReceiverConfig(env, { ...fs(pull), verifiesWatchPushes: true }),
+		// `serve` loads as the listener, the loader's default (receiver/src/start.mjs says so explicitly).
+		receiver: async (env, pull) => loadReceiverConfig(env, fs(pull)),
 		poller: async (env, pull) => loadPollerConfig({ ...env, POLL_REPOS: "o/r" }, fs(pull)),
-		// A collector its loader took would go on to judge Valkey: that is refused here, so it never connects to anything.
-		"watch collector": (env, pull) => startWatchPuller(env, { loadConfig: (e) => loadReceiverConfig(e, fs(pull)), judgeValkey: async () => { throw new Error("started"); }, signals: false, out: () => {} }),
+		// The collector with its own loader, on the file written above. One its loader took would go on to judge Valkey:
+		// that is refused here, so it never connects to anything.
+		"watch collector": (env) => startWatchPuller(env, { judgeValkey: async () => { throw new Error("started"); }, signals: false, out: () => {} }),
 	};
 	for (const { env, line, pulled, pushed, refusal } of cases) {
 		for (const pull of [true, false]) {
@@ -97,6 +103,7 @@ test("a GitHub auth setting, WEBHOOK_SECRET and RECEIVER_PORT name every reader 
 			const found = (await doctorIn(dir, { ...base, ...env })).find((c) => c.label.startsWith(line));
 			assert.ok(found, `${line} pull=${pull}`);
 			assert.equal(found.label.slice(line.length, line.length + want.length), want, `${line} pull=${pull}: ${found.label}`);
+			assert.doesNotMatch(found.label, /x{36}/, "a long value is never printed");
 			for (const [reader, load] of Object.entries(readers)) {
 				let message = null;
 				try {
@@ -104,7 +111,7 @@ test("a GitHub auth setting, WEBHOOK_SECRET and RECEIVER_PORT name every reader 
 				} catch (error) {
 					message = error.message;
 				}
-				// The collector with no pull source refuses every file, so only its refusal with one says anything here.
+				// The collector with no pull source refuses every file, so only its answer with one says anything here.
 				if (reader === "watch collector" && !pull) continue;
 				assert.equal(message !== null && refusal.test(message), want.includes(`the ${reader}`), `${reader} ${line} pull=${pull}: ${message}`);
 			}

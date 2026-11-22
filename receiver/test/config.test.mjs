@@ -1050,3 +1050,52 @@ test("forgejo: lookupToken is FORGEJO_PERMISSION_TOKEN when set (trimmed), else 
 		assert.equal(unset.lookupTokenVar, "FORGEJO_TOKEN");
 	}
 });
+
+test("each forge webhook block refuses with serve's own words, in its fixed order, and normalises what it keeps (issue #1006)", () => {
+	// The blocks' rule lives in the worker package now (`loadForgeWebhook`), shared with doctor, so a test that compares
+	// the two cannot see it drift: these are the messages and the order a start meets, pinned here. Every variable starts
+	// blank (set, so the block is named, and missing to the rule), and each step fixes the fault the previous one named.
+	const steps = {
+		gitlab: [
+			[{ GITLAB_WEBHOOK_MODE: " ", GITLAB_WEBHOOK_SECRET: " ", GITLAB_TOKEN: " " }, 'GITLAB_WEBHOOK_MODE must be "signature" (HMAC, GitLab 19.0+) or "token" (X-Gitlab-Token, any version); got " "'],
+			[{ GITLAB_WEBHOOK_MODE: "token" }, "GITLAB_WEBHOOK_SECRET is required; refusing to start a gitlab endpoint that cannot verify deliveries"],
+			[{ GITLAB_WEBHOOK_SECRET: "s" }, "GITLAB_TOKEN is required for gitlab triggers -- the receiver resolves the actor's project access level before it may enqueue"],
+		],
+		forgejo: [
+			[{ FORGEJO_URL: " ", FORGEJO_WEBHOOK_SECRET: " ", FORGEJO_TOKEN: " " }, "FORGEJO_URL is required for forgejo triggers -- there is no default instance to fall back to"],
+			[{ FORGEJO_URL: " https://code.example.org " }, "FORGEJO_WEBHOOK_SECRET is required; refusing to start a forgejo endpoint that cannot verify deliveries"],
+			[{ FORGEJO_WEBHOOK_SECRET: "s" }, "FORGEJO_TOKEN is required for forgejo triggers -- the receiver resolves the actor's repository permission before it may enqueue"],
+		],
+		azure: [
+			[{ AZURE_WEBHOOK_MODE: " ", AZURE_WEBHOOK_SECRET: " ", AZURE_TOKEN: " ", AZURE_ORG_URL: " " }, 'AZURE_WEBHOOK_MODE must be "basic" (HTTP Basic on the subscription) or "header" (a custom header); got " "'],
+			[{ AZURE_WEBHOOK_MODE: "header" }, "AZURE_WEBHOOK_HEADER is required when AZURE_WEBHOOK_MODE=header -- there is no default header name to guess"],
+			[{ AZURE_WEBHOOK_HEADER: " X-Hook " }, "AZURE_WEBHOOK_SECRET is required; refusing to start an azure endpoint that cannot authenticate deliveries"],
+			[{ AZURE_WEBHOOK_SECRET: "s" }, "AZURE_ORG_URL is required for azure triggers (e.g. https://dev.azure.com/your-org)"],
+			[{ AZURE_ORG_URL: " https://dev.azure.com/acme/// " }, "AZURE_TOKEN is required for azure triggers -- the receiver resolves the actor's project membership before it may enqueue"],
+		],
+	};
+	const kept = {
+		gitlab: [{ GITLAB_TOKEN: "t" }, { mode: "token", secret: "s", token: "t", apiUrl: "https://gitlab.com" }],
+		forgejo: [{ FORGEJO_TOKEN: "t" }, { secret: "s", token: "t", apiUrl: "https://code.example.org", botId: null, lookupToken: "t", lookupTokenVar: "FORGEJO_TOKEN" }],
+		azure: [{ AZURE_TOKEN: "t" }, { mode: "header", secret: "s", headerName: "X-Hook", token: "t", orgUrl: "https://dev.azure.com/acme" }],
+	};
+	for (const [kind, list] of Object.entries(steps)) {
+		let env = { WEBHOOK_SECRET: "shh" };
+		for (const [fix, message] of list) {
+			env = { ...env, ...fix };
+			assert.throws(() => loadReceiverConfig(env, validTriggers), (e) => e.piDispatchConfig === true && e.message === message, `${kind} ${JSON.stringify(env)}`);
+		}
+		env = { ...env, ...kept[kind][0] };
+		assert.deepEqual(loadReceiverConfig(env, validTriggers)[kind], kept[kind][1], kind);
+	}
+});
+
+test("a receiver command the loader does not know is refused, never loaded as a mix of two (issue #1006)", () => {
+	// Each command judges only what it reads, so a misspelt one would otherwise skip serve's checks and still return
+	// serve's shape.
+	for (const command of ["Serve", "listen", "", null]) {
+		assert.throws(() => loadReceiverConfig({ WEBHOOK_SECRET: "shh" }, { ...validTriggers, command }), /unknown receiver command/, JSON.stringify(command));
+	}
+	for (const command of ["serve", "poll", "watch"]) assert.equal(loadReceiverConfig({ WEBHOOK_SECRET: "shh" }, { ...validTriggers, command }).command, command);
+});
+

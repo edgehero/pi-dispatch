@@ -63,7 +63,7 @@ import { basename, dirname, isAbsolute, join, posix, resolve, win32 } from "node
 import { fileURLToPath } from "node:url";
 import { spawn as nodeSpawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { DEFAULT_MODEL, DEFAULT_PROVIDER, DEFAULT_VALKEY_URL, accountTempRoot, configError, githubIngestFrom, checkpointStoreCollision, checkpointsDirPath, allowedModelsFrom, modelFrom, providerFrom, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirOwnerFix, jobsDirPath, sandboxDirOwnerFix, legacyTempStateDir, logsDirPath, modelEndpointsFilePath, privateEndpointsFilePath, delimitedList, envelopeFilePath, pauseWindowsFilePath, projectsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir, workerName as workerNameFrom } from "./config.mjs";
+import { DEFAULT_MODEL, DEFAULT_PROVIDER, DEFAULT_VALKEY_URL, FORGE_WEBHOOK_NAMES, accountTempRoot, configError, forgeWebhookFaults, forgeWebhookNamed, githubIngestFrom, checkpointStoreCollision, checkpointsDirPath, allowedModelsFrom, modelFrom, providerFrom, defaultLogsDir, defaultSandboxDir, defaultSettingsFile, defaultWorkerName, globalExtensionsEnabled, jobsDirOwnerFix, jobsDirPath, sandboxDirOwnerFix, legacyTempStateDir, logsDirPath, modelEndpointsFilePath, privateEndpointsFilePath, delimitedList, envelopeFilePath, pauseWindowsFilePath, projectsFilePath, safeHomeDir, scopedLimitsFilePath, settingsFilePath, underOsTempDir, workerName as workerNameFrom } from "./config.mjs";
 import { SYSTEMD_HAZARD_SHAPES, decodeEnvFile, envFileHazard, envValueShown, quotedRegions, readEnvAssignments, renderEnvValue, envFileWrapperInternal, wrapperInternalSentence } from "./env-file.mjs";
 import { canonicalScope, danglingProjectRows, dollarRowsBelowJobCap, dollarRowsWithoutCap, isModelScope, isProjectScope, loadScopedLimits, parseScopedLimits, scopedLimitsVersionFor } from "./scoped-limits.mjs";
 import { EMPTY_PROJECTS_FINGERPRINT, escapeControls, loadProjects, projectOf, projectsFingerprint } from "./projects.mjs";
@@ -118,7 +118,6 @@ import { JOBS_ONLY, durationText, milliText, notSharedWhy, percentText, shareTex
 import { CGROUP_PARENT, HELPER_LABEL_KEY, cgroupParentFor, guardHelperRun, helperName as cpuReserveHelperName, operatorQuotaCommand, readQuota, reservePlan, userQuotaCommand } from "./cpu-reserve.mjs";
 import { HOST_BUDGET_KEYS, computeHostBudget, hostBudgetSettings, largestFit, neverFits, projectBudgetRow, publishedBudget, readUserServiceLimits } from "./host-budget.mjs";
 import { makeImagePreflight, normalizeImageId } from "./image-preflight.mjs";
-import { webhookSecretRefusers } from "./triggers-check.mjs";
 import { watchSecretsMissing } from "./watch-contract.mjs";
 import { BOOT_REFUSING_JOB_USER_CAUSES, DAEMON_FACTS_TIMEOUT_MS, JOB_USER_FIX, makeDaemonFactsReader, makeJobUserResolver, relabelsPrivateMounts, resolveImageUser } from "./job-user.mjs";
 import { mergeSecretProfiles, parseSecretProfiles, servableSecretProfiles } from "./secret-profiles.mjs";
@@ -834,7 +833,7 @@ export const GITHUB_SERVICE_KEYS = Object.freeze(["GITHUB_AUTH_SOURCE", "GITHUB_
  *  console: the worker reads it (it runs the audit reaper), and a console key set alone makes doctor judge a console. */
 export const WORKER_SERVICE_KEYS = Object.freeze(["PI_JOB_IMAGE", "PI_JOB_MEMORY", "PI_JOB_CPUS", "PI_CONCURRENCY", ...Object.values(HOST_BUDGET_KEYS), "PI_TRIGGERS_FILE", "PI_LOGS_DIR", "PI_LOG_RETENTION_DAYS", "PI_CONSOLE_AUDIT_RETENTION_DAYS", "PI_RUN_MIRROR_MAX_RUNS", "PI_SETTINGS_FILE", "PI_SESSIONS_DIR", "PI_CHECKPOINTS_DIR", "PI_SESSIONS_TTL_DAYS", "PI_SESSION_MAX_AGE_DAYS", "PI_SESSION_MAX_CONTEXT_PCT", "PI_SESSION_MAX_RESUME_CHAIN", "PI_GLOBAL_PI_DIR", "PI_GLOBAL_ALLOW_EXTENSIONS", "PI_FORWARD_ENV", "PI_AUTH_FROM_PI", "PI_AUTH_CONNECTIONS_FILE", "PI_AUTH_STORE_DIR", "PI_CODING_AGENT_DIR", "PI_BACKEND_FLOOR", "PI_OPENSHELL_ENGINE", "PI_OPENSHELL_GATEWAY", "PI_SECRET_PROFILES", "PI_SECRET_BUNDLES", "PI_SECRET_RESOLVER_ROOTS", "PI_SECRET_RESOLVE_TIMEOUT_MS", "PI_WAIT_PROFILES", "PI_WAIT_AFTER_MAX_MS", "PI_SANDBOX_RETENTION_HOURS", "PI_DOCTOR_INTERVAL_HOURS", "PI_ALLOWED_MODELS", "PI_DISPATCH_RUN_ROOTS", "GITHUB_PAT_VAR", "TEMP", ...Object.values(DOLLAR_ENV_NAMES)]);
 /** Issue #471: the receiver's keys doctor judges its boot by (the receiver's unit reads the same `.env`). */
-export const RECEIVER_SERVICE_KEYS = Object.freeze(["WEBHOOK_SECRET", "GITHUB_INGEST", "POLL_REPOS", "RECEIVER_PORT", "GITLAB_TOKEN", "GITLAB_URL", "GITLAB_WEBHOOK_MODE", "GITLAB_WEBHOOK_SECRET", "FORGEJO_URL", "FORGEJO_TOKEN", "FORGEJO_PERMISSION_TOKEN", "FORGEJO_WEBHOOK_SECRET", "AZURE_ORG_URL", "AZURE_TOKEN", "AZURE_WEBHOOK_MODE", "AZURE_WEBHOOK_SECRET", "AZURE_WEBHOOK_HEADER"]);
+export const RECEIVER_SERVICE_KEYS = Object.freeze(["WEBHOOK_SECRET", "GITHUB_INGEST", "POLL_REPOS", "RECEIVER_PORT", "RECEIVER_IDENTITY_RETRY_SECONDS", "GITLAB_TOKEN", "GITLAB_URL", "GITLAB_WEBHOOK_MODE", "GITLAB_WEBHOOK_SECRET", "FORGEJO_URL", "FORGEJO_TOKEN", "FORGEJO_PERMISSION_TOKEN", "FORGEJO_WEBHOOK_SECRET", "AZURE_ORG_URL", "AZURE_TOKEN", "AZURE_WEBHOOK_MODE", "AZURE_WEBHOOK_SECRET", "AZURE_WEBHOOK_HEADER"]);
 /**
  * Issue #471 (follow-up): the variables the CLIs doctor spawns read from their environment, by the CLI that reads them.
  * The worker starts podman, docker and gh with its OWN environment (no `env` option: `image-preflight.mjs`,
@@ -2122,9 +2121,6 @@ export async function collectChecks(shellVars, seams) {
 	// so a secret only the `.env` set was called missing. The lines judge its presence only.
 	const watchSecretFile = service.extra(Object.values(triggerWatchSources ?? {}).map((source) => source.secretEnv)).fromFile;
 	checks.push(...watchDoctorChecks({ sources: triggerWatchSources, rules: triggerWatchRules, env: { ...env, ...watchSecretFile } }));
-	// Whether a watch collector runs on this file (issue #1001): one with no pull source refuses every file and runs
-	// nowhere, so the lines below that name who refuses a setting name it only here, as `pi-dispatch triggers check` does.
-	const collectsHere = Object.values(triggerWatchSources ?? {}).some((source) => source.pull);
 	// FIRST, and fail rather than warn: every check below this line reads counts that a parse failure
 	// zeroed, so a green run here would be reporting on a file nobody could read. The receiver loads this
 	// file unconditionally and refuses to start without it, which is the consequence worth naming.
@@ -2733,8 +2729,9 @@ export async function collectChecks(shellVars, seams) {
 					checks.push({
 						ok: false,
 						warn: true,
-						// Issue #1001: every reader the loader's refusal reaches, `pi-dispatch triggers check`'s list for it.
-						label: `${githubServe.why} but WEBHOOK_SECRET is unset -- ${readersNamed(webhookSecretRefusers(env, { collects: collectsHere }))} will refuse to start`,
+						// The receiver alone (issue #1006): the poller and the watch collector load as commands that do not listen and
+						// never read it, a secret of spaces included, as `pi-dispatch triggers check` names it.
+						label: `${githubServe.why} but WEBHOOK_SECRET is unset -- the receiver will refuse to start`,
 						// The way out an inferred answer leaves (issue #879): a deployment whose GitHub events come from the poller
 						// needs no secret, and said here because this is the line such an operator meets. An operator who set
 						// GITHUB_INGEST to webhook or both chose the webhook, so the fix is the secret alone. Where only a
@@ -2751,28 +2748,71 @@ export async function collectChecks(shellVars, seams) {
 				checks.push({ ok: true, label: `WEBHOOK_SECRET not needed: \`pi-dispatch-receiver serve\` serves no GitHub route here (${githubServe.why})` });
 			}
 		}
-		// Validated only WHEN SET: unset (or empty) means the loader's own default of 3000, which needs no
-		// line. The malformed value IS echoed -- a port is not a secret, and naming the shape it actually
-		// has is what makes the warn actionable. Mirrors `positiveInt` (worker config.mjs) exactly, because
-		// that is the parse the receiver refuses to boot on.
-		const port = env.RECEIVER_PORT;
-		if (port !== undefined && port !== "") {
-			const n = Number.parseInt(port, 10);
-			if (!Number.isInteger(n) || n < 1 || String(n) !== String(port).trim()) {
-				checks.push({
-					ok: false,
-					warn: true,
-					// Issue #1001: `poll` and `watch` parse it too, through the same loader, though neither binds a port.
-					label: `RECEIVER_PORT is ${JSON.stringify(port)}, which is not a positive integer -- ${readersNamed(["receiver", "poller", ...(collectsHere ? ["watch collector"] : [])])} will refuse to start`,
-					fix: "set RECEIVER_PORT to a TCP port number, or drop it for the default (3000)",
-				});
-			}
+	}
+	// Validated only WHEN SET: unset (or empty) means the loader's own default of 3000, which needs no
+	// line. The malformed value IS echoed -- a port is not a secret, and naming the shape it actually
+	// has is what makes the warn actionable. Mirrors `positiveInt` (worker config.mjs) exactly, because
+	// that is the parse the receiver refuses to boot on. Issue #1006: `serve` alone reads it (the poller and the watch
+	// collector listen on nothing), and it refuses whatever the triggers file names, so the line is said wherever the
+	// setting is malformed rather than only beside forge triggers: a deployment that takes watch pushes alone runs
+	// `serve` too.
+	const port = env.RECEIVER_PORT;
+	if (port !== undefined && port !== "") {
+		const n = Number.parseInt(port, 10);
+		if (!Number.isInteger(n) || n < 1 || String(n) !== String(port).trim()) {
+			checks.push({
+				ok: false,
+				warn: true,
+				label: `RECEIVER_PORT is ${JSON.stringify(port)}, which is not a positive integer -- the receiver will refuse to start`,
+				fix: "set RECEIVER_PORT to a TCP port number, or drop it for the default (3000)",
+			});
+		}
+	}
+	// Issue #1006: the boot identity retry window, which `serve` and `poll` parse at their start (`positiveInt`, mirrored
+	// here exactly as RECEIVER_PORT's is) and `watch` does not read, since it resolves no identity. Nothing said a malformed
+	// one before, while both refused it. The value is shown only where it is short and plain, as GITHUB_AUTH_SOURCE's line
+	// does: a line pasted into the wrong variable may hold a token.
+	const retry = env.RECEIVER_IDENTITY_RETRY_SECONDS;
+	if (retry !== undefined && retry !== "") {
+		const n = Number.parseInt(retry, 10);
+		if (!Number.isInteger(n) || n < 1 || String(n) !== String(retry).trim()) {
+			const retryShown = /^[A-Za-z0-9_-]{0,12}$/.test(retry) ? quotedShown(retry) : `an unrecognised value (${retry.length} characters, not shown)`;
+			checks.push({
+				ok: false,
+				warn: true,
+				label: `RECEIVER_IDENTITY_RETRY_SECONDS is ${retryShown}, which is not a positive integer: ${readersNamed(["receiver", "poller"])} refuse to start on it (exit 2)${fromFileNote(fileSays("RECEIVER_IDENTITY_RETRY_SECONDS"))}`,
+				fix: "set RECEIVER_IDENTITY_RETRY_SECONDS to a whole number of seconds (60 or more; a smaller positive one is raised to 60), or delete the line for the default (600)",
+			});
 		}
 	}
 
-	// GitLab, when the triggers file names it. WARNS rather than fails, matching the github auth checks
-	// below and for the same reason: a deployment can legitimately be mid-setup, and doctor's job is to say
-	// what will not work, not to refuse.
+	// The other forges' webhook blocks (issue #1006). WARNS rather than fails, matching the github auth checks below and
+	// for the same reason: a deployment can legitimately be mid-setup, and doctor's job is to say what will not work, not
+	// to refuse. Judged by `serve`'s own rule (`forgeWebhookFaults`, worker config.mjs), the code its loader refuses with,
+	// so a refusal is said exactly where `serve` makes one: whenever one of the forge's variables is set, with a GitLab,
+	// Forgejo or Azure rule or not (GITLAB_TOKEN set for a worker's GitLab jobs names the block too), and never where
+	// none is. Only `serve` reads these settings, so the line names it alone. Before this the lines ran only beside the
+	// forge's triggers, said "the receiver will refuse to start" with nothing set while `serve` started, and said nothing
+	// with GITLAB_TOKEN alone while `serve`, `poll` and `watch` all exited 2. Rules with no variable set refuse nothing,
+	// and fire nothing either: `serve` arms no route for them, which is said as that.
+	const forgeWebhookFix = {
+		gitlab: 'set GITLAB_WEBHOOK_MODE to "signature" (HMAC, GitLab 19.0+) or "token" (X-Gitlab-Token, any version), deliberately undefaulted, and GITLAB_WEBHOOK_SECRET and GITLAB_TOKEN, in .env (.env.example, docs/gitlab.md); where no GitLab webhook comes to this deployment, `serve` must see none of the three, and a GITLAB_TOKEN set for gitlab jobs alone still arms /gitlab',
+		forgejo: "set FORGEJO_URL, FORGEJO_WEBHOOK_SECRET and FORGEJO_TOKEN in .env (.env.example documents each; docs/forgejo.md walks the webhook setup); FORGEJO_BOT_ID is also needed when FORGEJO_TOKEN is repository-scoped -- a scoped token cannot call GET /user to identify itself. Where no Forgejo webhook comes to this deployment, `serve` must see none of the three",
+		azure: 'set AZURE_WEBHOOK_MODE to "basic" (HTTP Basic on the service hook) or "header" (a custom header, named in AZURE_WEBHOOK_HEADER), deliberately undefaulted since Azure offers no HMAC, and AZURE_WEBHOOK_SECRET, AZURE_ORG_URL and AZURE_TOKEN, in .env (.env.example, docs/azure-devops.md); where no Azure DevOps webhook comes to this deployment, `serve` must see none of them',
+	};
+	const forgeWebhookLines = (kind) => {
+		const faults = forgeWebhookFaults(kind, env);
+		if (faults.length > 0) {
+			// A mode is a choice, not a secret, so a value the rule refuses is echoed; every other variable is presence only.
+			const said = faults.map(({ name }) => (/_WEBHOOK_MODE$/.test(name) && typeof env[name] === "string" && env[name] !== "" ? `${name} is ${JSON.stringify(env[name])}` : `${name} is unset or blank`));
+			checks.push({ ok: false, warn: true, label: `${kind} webhook settings: ${said.join(", ")} -- with any of ${FORGE_WEBHOOK_NAMES[kind].join(", ")} set, the receiver (\`pi-dispatch-receiver serve\`) arms /${kind} and will refuse to start on these; the poller and the watch collector do not read them`, fix: forgeWebhookFix[kind] });
+		} else if (forges.includes(kind) && !forgeWebhookNamed(kind, env)) {
+			checks.push({ ok: false, warn: true, label: `triggers.json has ${kind} triggers but none of ${FORGE_WEBHOOK_NAMES[kind].join(", ")} is set, so \`pi-dispatch-receiver serve\` serves no /${kind} route and they never fire (nothing refuses to start)`, fix: forgeWebhookFix[kind] });
+		}
+		return faults.length === 0 && forgeWebhookNamed(kind, env);
+	};
+
+	// GitLab. Its job token line is the worker's (a gitlab job clones and comments with GITLAB_TOKEN), beside the triggers.
 	if (forges.includes("gitlab")) {
 		const token = env.GITLAB_TOKEN;
 		if (typeof token !== "string" || token.trim() === "") {
@@ -2793,46 +2833,13 @@ export async function collectChecks(shellVars, seams) {
 				label: "a GitLab project access token needs the `api` scope to post notes, which grants full project API read/write: scope it to ONE project and rotate it on a schedule (GitLab has no contents-vs-issues split and no short-expiry token)",
 			});
 		}
-		// The receiver-boot half (issue #80), mirrored from receiver/src/config.mjs loadGitLabConfig: once
-		// ANY GITLAB_* variable is set, boot refuses without a chosen mode and a secret -- and with NONE
-		// set there is no /gitlab route at all, so these triggers can never fire either way. The mode value
-		// is echoed (it is a choice, not a secret); the secret is presence-only.
-		const glMode = env.GITLAB_WEBHOOK_MODE;
-		if (glMode !== "signature" && glMode !== "token") {
-			checks.push({
-				ok: false,
-				warn: true,
-				label: `triggers.json has gitlab triggers but GITLAB_WEBHOOK_MODE is ${glMode === undefined ? "unset" : JSON.stringify(glMode)} -- the receiver will refuse to start`,
-				fix: 'set it to "signature" (HMAC, GitLab 19.0+) or "token" (X-Gitlab-Token, any version) -- deliberately undefaulted, which verification a deployment runs must be a thing somebody chose (.env.example, docs/gitlab.md)',
-			});
-		}
-		if (typeof env.GITLAB_WEBHOOK_SECRET !== "string" || env.GITLAB_WEBHOOK_SECRET.trim() === "") {
-			checks.push({
-				ok: false,
-				warn: true,
-				label: "triggers.json has gitlab triggers but GITLAB_WEBHOOK_SECRET is unset -- the receiver cannot verify deliveries and will refuse to start",
-				fix: "set GITLAB_WEBHOOK_SECRET in .env to the secret configured on the project webhook (.env.example, docs/gitlab.md)",
-			});
-		}
 	}
+	forgeWebhookLines("gitlab");
 
-	// Forgejo, when the triggers file names it (issue #80) -- the gitlab block's twin, and previously the
-	// gap: a forgejo misconfiguration hard-failed at receiver boot with no preflight warning. The variable
-	// set mirrors receiver/src/config.mjs loadForgejoConfig exactly (those three are what boot
-	// hard-requires), so this warns about precisely what the receiver will refuse. Presence-only for all
-	// three: FORGEJO_URL is no secret, but one rule for the set is one rule to audit.
+	// Forgejo: the block, then which token the author gate asks with, beside the triggers.
+	const forgejoArmed = forgeWebhookLines("forgejo");
 	if (forges.includes("forgejo")) {
-		const missing = ["FORGEJO_URL", "FORGEJO_WEBHOOK_SECRET", "FORGEJO_TOKEN"].filter((k) => typeof env[k] !== "string" || env[k].trim() === "");
-		if (missing.length > 0) {
-			checks.push({
-				ok: false,
-				warn: true,
-				label: `triggers.json has forgejo triggers but ${missing.join(", ")} ${missing.length === 1 ? "is" : "are"} unset -- the receiver will refuse to start (or serve no /forgejo endpoint at all)`,
-				fix: "set them in .env (.env.example documents each; docs/forgejo.md walks the webhook setup); FORGEJO_BOT_ID is also needed when FORGEJO_TOKEN is repository-scoped -- a scoped token cannot call GET /user to identify itself",
-			});
-		} else {
-			checks.push({ ok: true, label: `forgejo triggers configured (${urlShown(env.FORGEJO_URL)})` });
-		}
+		if (forgejoArmed) checks.push({ ok: true, label: `forgejo triggers configured (${urlShown(env.FORGEJO_URL)})` });
 		// Measured on Forgejo 14.0.5: the author gate's permission lookup answers 403 unless the token's account is a site
 		// admin, a repository admin, or the actor themselves. Which token asks is the receiver's choice (OQ-043):
 		// FORGEJO_PERMISSION_TOKEN when set, a read:repository token of an admin account that no job ever holds; else
@@ -2859,35 +2866,9 @@ export async function collectChecks(shellVars, seams) {
 	// Issue #508: with the egress policy on, a job reaches a forge only over https on port 443.
 	checks.push(...forgeUrlEgressChecks(env, forges));
 
-	// Azure DevOps, when the triggers file names it (issue #80) -- same shape, mirrored from
-	// receiver/src/config.mjs loadAzureConfig. AZURE_WEBHOOK_MODE gets its own line because it is
-	// required-UNDEFAULTED: Azure offers no HMAC at all, so both modes are shared-secret compares, and
-	// which header carries the secret must be a thing somebody decided. AZURE_WEBHOOK_HEADER joins the
-	// required set only under mode=header, exactly as boot requires it.
-	if (forges.includes("azure")) {
-		const azMode = env.AZURE_WEBHOOK_MODE;
-		const azModeOk = azMode === "basic" || azMode === "header";
-		if (!azModeOk) {
-			checks.push({
-				ok: false,
-				warn: true,
-				label: `triggers.json has azure triggers but AZURE_WEBHOOK_MODE is ${azMode === undefined ? "unset" : JSON.stringify(azMode)} -- the receiver will refuse to start`,
-				fix: 'set it to "basic" (HTTP Basic on the service hook) or "header" (a custom header) -- deliberately undefaulted, Azure offers no HMAC, so which shared-secret compare gates the endpoint must be a chosen thing (.env.example, docs/azure-devops.md)',
-			});
-		}
-		const azRequired = ["AZURE_WEBHOOK_SECRET", "AZURE_TOKEN", "AZURE_ORG_URL", ...(azMode === "header" ? ["AZURE_WEBHOOK_HEADER"] : [])];
-		const azMissing = azRequired.filter((k) => typeof env[k] !== "string" || env[k].trim() === "");
-		if (azMissing.length > 0) {
-			checks.push({
-				ok: false,
-				warn: true,
-				label: `triggers.json has azure triggers but ${azMissing.join(", ")} ${azMissing.length === 1 ? "is" : "are"} unset -- the receiver will refuse to start (or serve no /azure endpoint at all)`,
-				fix: "set them in .env (.env.example documents each; docs/azure-devops.md walks the service-hook setup)",
-			});
-		} else if (azModeOk) {
-			checks.push({ ok: true, label: `azure triggers configured (${urlShown(env.AZURE_ORG_URL)})` });
-		}
-	}
+	// Azure DevOps: the block, which takes AZURE_WEBHOOK_HEADER only under mode=header, exactly as `serve` requires it.
+	const azureArmed = forgeWebhookLines("azure");
+	if (forges.includes("azure") && azureArmed) checks.push({ ok: true, label: `azure triggers configured (${urlShown(env.AZURE_ORG_URL)})` });
 
 	// REQ-BRANCH-PROTECTION-PRECONDITION, preflighted (issue #80). The worker refuses a forge-backed job
 	// on an unprotected default branch BEFORE any spend -- correct, but that answer arrives at the first
@@ -2923,14 +2904,13 @@ export async function collectChecks(shellVars, seams) {
 	// Only the keys that decide a line: the App keys matter only while app is the source.
 	const ghRead = GITHUB_SERVICE_KEYS.filter((k) => settingsRead(service.fromFile).includes(k) && (k === "GITHUB_AUTH_SOURCE" || ghSource === "app"));
 	if (ghRead.length > 0) checks.push({ ok: true, label: `GitHub auth settings read from ${serviceEnvFile.path}, as the service reads them (this shell does not set them): ${ghRead.join(", ")}` });
-	// Issue #1001: who refuses a setting `loadGitHubAuth` refuses, said once for every line below that names one. Every
-	// reader loads the block at its start, whatever the triggers file holds: the worker through `loadConfig`, and the
-	// receiver's three commands through `loadReceiverConfig` (`serve`, and `poll` and `watch`, which load with it). The
-	// lines named the worker and the receiver, or the worker alone, so a polling deployment was not told its poller would
-	// not start, the service issue #970 is about.
-	const githubAuthRefusers = readersNamed(["worker", "receiver", "poller", ...(collectsHere ? ["watch collector"] : [])]);
-	// Issue #481: a source `loadGitHubAuth` refuses, the EMPTY one included, and both the worker and the receiver load it
-	// at start. It was said nowhere: every branch below asks for gh, pat or app, so `GITHUB_AUTH_SOURCE=` passed doctor on
+	// Issue #1001: who refuses a setting `loadGitHubAuth` refuses, said once for every line below that names one: every
+	// reader of the block, at its start, whatever the triggers file holds. The worker loads it through `loadConfig`, and
+	// `serve` and `poll` through `loadReceiverConfig`; the watch collector does not, since it resolves no identity and
+	// calls no forge (issue #1006). The lines named the worker and the receiver, or the worker alone, so a polling
+	// deployment was not told its poller would not start, the service issue #970 is about.
+	const githubAuthRefusers = readersNamed(["worker", "receiver", "poller"]);
+	// Issue #481: a source `loadGitHubAuth` refuses, the EMPTY one included. It was said nowhere: every branch below asks for gh, pat or app, so `GITHUB_AUTH_SOURCE=` passed doctor on
 	// a deployment that exits 2 at boot. The value is shown only where it is short and plain (PR #485 review round 1): a
 	// token pasted into the wrong line is a token, and this line would have printed it in full.
 	if (ghSource !== "gh" && ghSource !== "pat" && ghSource !== "app") {

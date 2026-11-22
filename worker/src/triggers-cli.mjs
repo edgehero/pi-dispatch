@@ -52,7 +52,11 @@ function listed(words, last = "and") {
 	return words.length <= 1 ? words.join("") : `${words.slice(0, -1).join(", ")} ${last} ${words.at(-1)}`;
 }
 
-/** A value's presence by the two tests its readers make (trimmed for the loaders, falsy for the poller's stand-in). */
+/**
+ * A value's presence as the loaders test it (trimmed): "set", or "" (empty) and " " (blank), told apart for the words
+ * alone. Empty and blank are the same to every reader since the poller's stand-in for an empty WEBHOOK_SECRET went
+ * (issue #1006), so they never disagree.
+ */
 function presenceMark(value) {
 	if (typeof value !== "string") return undefined;
 	if (value === "") return "";
@@ -75,12 +79,12 @@ function secretMarks(names, { env, envPath, file }) {
 	const unread = [...read.unread.map((u) => u.key), ...read.hazardSkipped];
 	if (unread.length > 0) return { problem: `${envPath} has a line for ${listed(unread)} that the service's loader may read differently, so whether ${unread.length === 1 ? "it is" : "they are"} set cannot be told (pi-dispatch doctor names the line)` };
 	// Set in this shell and absent from the .env (issue #970): a service reading the .env runs without it, so judging this
-	// shell's value would pass a file the services refuse at their start. Empty here and absent there are both unset to
-	// every reader, and are judged so.
-	const shellOnly = read.shellOnly.filter((k) => presenceMark(env[k]) !== "");
+	// shell's value would pass a file the services refuse at their start. Empty or blank here and absent there are both
+	// missing to every reader, and are judged so.
+	const shellOnly = read.shellOnly.filter((k) => presenceMark(env[k]) === "set");
 	if (shellOnly.length > 0) return { problem: `${listed(shellOnly)} ${shellOnly.length === 1 ? "is" : "are"} set in this shell and not in ${envPath} (no value is shown), and the services read the .env, so whether ${shellOnly.length === 1 ? "it is" : "they are"} set for them cannot be told: add ${shellOnly.length === 1 ? "it" : "them"} to the .env, or unset ${shellOnly.length === 1 ? "it" : "them"} in this shell` };
 	// Two values that are both set are no business of this command's: presence is all it judges.
-	const split = read.disagreements.filter((d) => presenceMark(d.shell) !== presenceMark(d.file));
+	const split = read.disagreements.filter((d) => (presenceMark(d.shell) === "set") !== (presenceMark(d.file) === "set"));
 	if (split.length > 0) return { problem: `${split.map((d) => `${d.key} is ${MARK_WORDS[presenceMark(d.shell)]} in this shell and ${MARK_WORDS[presenceMark(d.file)]} in ${envPath}`).join("; ")} (neither value is shown), so whether ${split.length === 1 ? "it is" : "they are"} set cannot be told: make them agree (the service runs the file's)` };
 	return { env: Object.fromEntries(names.map((key) => [key, presenceMark(read.env[key])])) };
 }
@@ -102,8 +106,9 @@ function countsText({ triggers, cron, forge, watch }) {
  *
  * `secrets`, when given, limits the secrets resolved from this shell and the `.env` to those names; any other the check
  * asks about is judged unset and never resolved, so a disagreement on it cannot leave the file unjudged. `triggers
- * check` resolves every one. `status` passes the only one a poller's start judges (issue #994: a watch source's secret
- * is `serve`'s alone), and keeps only refusals that name the poller, so an unset one adds nothing it reads.
+ * check` resolves every one. `status` passes none, since no secret the check asks about is a poller's (a watch
+ * source's secret and WEBHOOK_SECRET are `serve`'s alone, issues #994 and #1006), and keeps only refusals that name the
+ * poller, so an unset one adds nothing it reads.
  */
 export async function judgeDeploymentTriggers({ file = undefined, env = process.env, cwd = process.cwd(), platform = process.platform, readEnv = (p) => readFileSync(p), readText = (p) => readFileSync(p, "utf8"), existsSync = fsExistsSync, now = Date.now, check = checkTriggersText, secrets: only = null } = {}) {
 	// One read of the deployment `.env` for both halves, so the two cannot be judged from two different files.

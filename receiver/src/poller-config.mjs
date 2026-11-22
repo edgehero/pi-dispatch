@@ -1,23 +1,23 @@
 /**
  * Poller configuration (issue #81, polling producer). The polling producer shares almost everything
  * with the webhook receiver -- the triggers file, the GitHub auth block, the queue URL -- and differs
- * on exactly one requirement: WEBHOOK_SECRET.
+ * on what a listener alone reads: WEBHOOK_SECRET, RECEIVER_PORT and RECEIVER_BIND, the GitLab, Forgejo and
+ * Azure DevOps webhook blocks, and each watch source's push secret.
  *
- * The receiver HARD-REQUIRES that secret because an inbound delivery is a forgeable paid-agent
+ * The receiver HARD-REQUIRES the webhook secret because an inbound delivery is a forgeable paid-agent
  * trigger until the HMAC over the raw body proves otherwise (CONST-HMAC-OVER-RAW-BODY). The poller
  * has no inbound anything: it originates every request itself, over TLS, to api.github.com, carrying
  * the operator's own credential -- the authentication runs in the OTHER direction, so there is
  * nothing for a webhook secret to verify and demanding one would block exactly the deployment this
- * mode exists for (no public URL, no DNS, no tunnel).
- *
- * A watch source's push secret (its `secretEnv`) is the same kind of setting and is not judged here at all (issue
- * #994): the loader judges it only for `serve` (`verifiesWatchPushes`), which this loader does not ask for.
+ * mode exists for (no public URL, no DNS, no tunnel). The rest are the same kind of setting: it binds no port and
+ * serves no other forge.
  *
  * REUSE, NEVER RE-DERIVE: this loader does not fork `loadTriggers`/`loadGitHubAuth`. It calls the
  * receiver's own `loadReceiverConfig` -- the single place the trigger file is grouped for the filter
- * and the auth block is validated -- satisfying its WEBHOOK_SECRET precondition with an inert
- * placeholder when the env has none, and then DROPS the field from the returned object so nothing
- * downstream can ever read the placeholder and believe it is armed. A forked grouping loader would be
+ * and the auth block is validated -- as the poller (`command: "poll"`, issue #1006), so none of the listener's
+ * settings is judged here, a malformed one included. It used to load as `serve` with an inert
+ * placeholder standing in for an absent WEBHOOK_SECRET, which still refused a secret of spaces, a malformed
+ * RECEIVER_PORT and a partly set forge block, none of which the poller reads. A forked grouping loader would be
  * the classic drift: two parsers of one file, one of them quietly behind on the next rule field.
  *
  * Poller-specific env:
@@ -50,10 +50,6 @@ import { existsSync, readFileSync } from "node:fs";
 import { configError, nonNegativeInt, positiveInt } from "@edgehero/pi-dispatch/config";
 import { loadReceiverConfig } from "./config.mjs";
 
-// Never a real secret and never returned: it exists only to satisfy loadReceiverConfig's fail-loud
-// precondition when the deployment is pure-polling and legitimately has no WEBHOOK_SECRET at all.
-const PLACEHOLDER_SECRET = "poller-has-no-webhook-to-verify";
-
 const POLL_INTERVAL_FLOOR_SECONDS = 30;
 const POLL_INTERVAL_DEFAULT_SECONDS = 60;
 // An hour (issue #880): long enough for a host restart, an upgrade or a supervisor's restart loop to catch up
@@ -72,7 +68,7 @@ const POLL_CATCHUP_DEFAULT_MINUTES = 60;
  * the auth source is `app`.
  */
 export function loadPollerConfig(env = process.env, { readFile = readFileSync, fileExists = existsSync } = {}) {
-	const base = loadReceiverConfig(pollerLoaderEnv(env), { readFile, fileExists });
+	const base = loadReceiverConfig(env, { readFile, fileExists, command: "poll" });
 
 	// Issue #879: an operator who wrote GITHUB_INGEST=webhook said the webhook alone carries GitHub here, so a poller
 	// started anyway (an old unit, a copied command) would enqueue every event a second time under its own ids, and
@@ -104,21 +100,6 @@ export function loadPollerConfig(env = process.env, { readFile = readFileSync, f
 		// same window -- a pure-polling deployment loses deliveries to a stopped process just as surely.
 		identityRetryWindowMs: base.identityRetryWindowMs,
 	};
-}
-
-/**
- * The environment the poller's triggers file is judged under. A present WEBHOOK_SECRET is passed through untouched (a
- * deployment may run serve AND poll from one env file); only its ABSENCE is papered over, for the loader's call alone.
- *
- * Exported for the poller's live follow of the file (issue #947), which judges every later text under exactly the
- * environment the boot load judged the first, so the two judgements cannot differ on anything the loader reads. It was
- * load-bearing while the poller judged watch source secrets: a source naming WEBHOOK_SECRET was satisfied by the
- * placeholder at boot and would have been refused by every later read under the bare environment. Since issue #994 the
- * poller judges no watch secret, and the loader reads only the file's path from it here. The placeholder still goes
- * nowhere else: the follow hands this environment only to the triggers loader.
- */
-export function pollerLoaderEnv(env) {
-	return env.WEBHOOK_SECRET ? env : { ...env, WEBHOOK_SECRET: PLACEHOLDER_SECRET };
 }
 
 /**
