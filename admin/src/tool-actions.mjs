@@ -6,7 +6,7 @@ import { hostname } from "node:os";
 import * as rm from "./read-model.mjs";
 import * as plans from "./write-plans.mjs";
 import { agentReadProjection } from "./agent-read.mjs";
-import { actionNamed } from "./console/actions.mjs";
+import { actionNamed, AGENT_QUEUES_SHORT } from "./console/actions.mjs";
 import { authorizeTransition } from "./action-policy.mjs";
 import { agentActor, panelAudit, auditedWrite, AUDIT_REFUSAL } from "./audited-write.mjs";
 import { readJobsData } from "./console/job-data.mjs";
@@ -81,11 +81,25 @@ export function toolWriteResult(result, { action, out } = {}) {
     value.applied = value.done > 0;
   }
   if (result?.warning || result?.touchWarning) value.warning = "tracking-incomplete";
+  // Issue #964: a fleet pause or resume that switched every queue it knew over a set of queues that may be short.
+  if (result?.queuesMayBeShort === true) value.queuesMayBeShort = true;
   return value;
 }
 
+/**
+ * A fleet pause or resume that reached part of the fleet (issue #964), in words a model may be handed: that part of the
+ * fleet may have changed, so it never reads as "nothing happened", and that the list of queues may be short when it
+ * may. "Once Valkey answers" only where a switch was sent and not answered (`sent`): a queue a Valkey that answers
+ * refused is a matter of looking at the fleet. Never the console's own sentence, which names queues and a Valkey's address.
+ */
+export function switchPartialRefusal(paused, short, sent) {
+  const verb = paused ? "paused" : "resumed";
+  const noun = paused ? "pause" : "resume";
+  return `The fleet ${noun} did not reach every queue, so some queues may be ${verb} and others not${short ? `, and the list of queues may be short, so other queues may exist and were not ${verb}` : ""}. ${sent ? `An operator can look at the fleet in the console and ${noun} it again once Valkey answers.` : `An operator can look at the fleet in the console before trying the ${noun} again.`}`;
+}
+
 /** The grant is captured at extension registration, never reconstructed from deployment configuration. */
-export async function executeToolAction(name, params, rawCtx, { paths, env, grantsEnv, granted = false, now = Date.now, fleet: injectedFleet, actionLookup = actionNamed, policy = authorizeTransition, audit: injectedAudit, actor: injectedActor, fs: files = fs, readModel = rm, writePlans = plans, deploymentDir = null, sizingNoteFn = null } = {}) {
+export async function executeToolAction(name, params, rawCtx, { paths, env, grantsEnv, granted = false, now = Date.now, fleet: injectedFleet, actionLookup = actionNamed, policy = authorizeTransition, audit: injectedAudit, actor: injectedActor, fs: files = fs, readModel = rm, writePlans = plans, deploymentDir = null, sizingNoteFn = null, ownQueueNamesFn = () => [] } = {}) {
   if (["priorities-set", "allocation-revert", "envelope-set"].includes(TOOL_ACTIONS[name]) && now === Date.now) now = () => allocNow().getTime();
   const allocationModel = { ...readModel };
   for (const method of ["applyPriorities", "revertAllocation", "writeEnvelope"]) allocationModel[method] = (args) => readModel[method]({ ...args, ...allocRedis() });
@@ -104,7 +118,10 @@ export async function executeToolAction(name, params, rawCtx, { paths, env, gran
   // Explicit enumerable methods survive the action's origin wrapper. A Proxy with only get would lose
   // pauseQueue/resumeQueue when that wrapper copies its fleet adapter, despite reads working normally.
   const fleet = injectedFleet ?? Object.fromEntries(["snapshot", "pause", "resume", "cancelActive", "pauseQueue"].map((method) => [method, (...args) => {
-    ownedFleet ??= readModel.createFleetReader(paths, { readOnly: true, dollarEnvFn: () => env, nowFn: now });
+    // Issue #964: the kill switch's plan (the deployment's Valkey, and both on a disagreement, as the preview names them) and
+    // this host's own queue from the deployment's `.env` (`deploymentOwnQueues`, which index.ts hands in), so a pause
+    // reaches that queue on the Valkey its worker drains and on no other.
+    ownedFleet ??= readModel.createFleetReader(paths, { readOnly: true, dollarEnvFn: () => env, nowFn: now, killSwitchPlanFn: ({ paused }) => readModel.killSwitchPlan({ paused, env }), ownQueueNamesFn });
     return ownedFleet[method](...args);
   }]));
   if (!injectedFleet) fleet.dispose = async () => ownedFleet?.dispose();
@@ -175,9 +192,12 @@ export async function executeToolAction(name, params, rawCtx, { paths, env, gran
         return { results };
       };
     }
-    const result = action.bulk ? await action.apply(out, ctx) : await auditedWrite({ audit, actor, kind: action.kind, target: fresh.target, beforeDigest: fresh.beforeDigest, afterDigest: fresh.afterDigest, reserve: fresh.reserve?.dollarsMicros ?? null, failure }, () => action.apply(out, ctx));
+    // Issue #964: a switch that landed over a set of queues that may be short gets its second `ok` row, the closed word.
+    const note = (r) => (r?.queuesMayBeShort === true ? AGENT_QUEUES_SHORT : null);
+    const result = action.bulk ? await action.apply(out, ctx) : await auditedWrite({ audit, actor, kind: action.kind, target: fresh.target, beforeDigest: fresh.beforeDigest, afterDigest: fresh.afterDigest, reserve: fresh.reserve?.dollarsMicros ?? null, failure, note }, () => action.apply(out, ctx));
     if (bulkWarning) result.warning = "tracking-incomplete";
     if (result?.invalid === AUDIT_REFUSAL) throw publicToolRefusal(AUDIT_REFUSAL);
+    if (result?.partial === true && (action.name === "fleet-pause" || action.name === "fleet-resume")) throw publicToolRefusal(switchPartialRefusal(action.name === "fleet-pause", result.queuesMayBeShort === true, result.sentUnconfirmed === true));
     if (!result?.ok && !(action.name === "priorities-set" && result?.outcome === "refused")) throw new Error(result?.invalid ?? result?.refused ?? "the action could not be applied");
     return toolWriteResult(result, { action: action.name, out: fresh });
   } finally {

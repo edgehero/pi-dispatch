@@ -76,8 +76,13 @@ export function defaultFailure(result) {
  *   3. When `fn` throws (or rejects), or `failure(result)` names a reason, append the compensating `{ outcome:
  *      "failed", reason }` row with the same ticket, then return the result or rethrow, unchanged. A compensating
  *      append that fails is reported to `log` and swallowed: the write's own outcome is what the caller must see.
+ *   4. When the write landed and `note(result)` names a reason (issue #964: a kill switch that switched every queue it
+ *      knew over a set of queues that may be short), append a second `{ outcome: "ok", reason }` row with the same
+ *      ticket, before an agent's receipt. The write's outcome is still `ok`, so a reader taking the last row for a
+ *      ticket reads it as landed, and the reason says what the first row, written before the outcome, could not. One
+ *      that fails is reported to `log` and swallowed, like a compensating row.
  */
-export function auditedWrite({ audit, actor, kind, target, beforeDigest = null, afterDigest = null, reserve = null, count = null, failure = defaultFailure, refusal = (s) => ({ ok: false, invalid: s, refused: s }), log = () => {}, ticket = writeTicket() }, fn) {
+export function auditedWrite({ audit, actor, kind, target, beforeDigest = null, afterDigest = null, reserve = null, count = null, failure = defaultFailure, note = () => null, refusal = (s) => ({ ok: false, invalid: s, refused: s }), log = () => {}, ticket = writeTicket() }, fn) {
   const row = { actor, action: "write", kind, target: target === null || target === undefined ? null : String(target), beforeDigest, afterDigest, reserve, count, ticket };
   try {
     audit.append({ ...row, outcome: "ok" });
@@ -95,6 +100,14 @@ export function auditedWrite({ audit, actor, kind, target, beforeDigest = null, 
   const judge = (result) => {
     const why = failure(result);
     if (why !== null && why !== undefined) { compensate(why); return result; }
+    const said = note(result);
+    if (typeof said === "string" && said !== "") {
+      try {
+        audit.append({ ...row, outcome: "ok", reason: said });
+      } catch (e) {
+        log(`panel: audit append failed (${e?.code ?? "error"}) for what a ${kind} write that landed had to say; the log's rows for ticket ${ticket} say ok without it`);
+      }
+    }
     if (actor?.role === "agent") {
       try {
         // An intent says a write was attempted. This correlated receipt is evidence that it landed.

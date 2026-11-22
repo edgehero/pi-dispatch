@@ -1,8 +1,8 @@
 import assert from "node:assert/strict";
-import { mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { test } from "node:test";
-import { entryExitCode, main } from "../src/cli.mjs";
+import { entryExitCode, killSwitchShortNote, main } from "../src/cli.mjs";
 import { POLLER_GRACE_MS, parsePollerStatus, pollerKey, triggersDigest } from "../src/poller-status.mjs";
 import { readPollerFacts } from "../src/poller-facts.mjs";
 import { tempDir } from "./helpers/temp-dir.mjs";
@@ -95,6 +95,83 @@ test("status marks a failed queue scan incomplete even when the registry and vis
 		assert.deepEqual(closed, opened);
 		assert.equal(disconnected, true);
 	}
+});
+
+// Issue #964: the kill switch also flips this host's own queue, which the deployment's .env names, and says what a set
+// of queues that may be short means. Fake clients: nothing is dialled.
+test("pause and resume flip this host's own queue and say when the set of queues may be short, exiting 0 (#964)", async () => {
+	const dir = tempDir("pd-964-cli-");
+	const run = async (argv, envFile, env = {}, pauseFails = () => false) => {
+		writeFileSync(join(dir, ".env"), envFile);
+		const flipped = [];
+		let out = "";
+		const code = await main(argv, { VALKEY_URL: "redis://127.0.0.1:1/15", ...env }, {
+			cwd: dir,
+			write: (text) => { out += text; },
+			valkeyRefusal: async () => null,
+			controlClients: {
+				// A registry and a keyspace scan that do not answer: only the shared queue and this host's own are named.
+				makeRedisClient: () => ({ on() {}, disconnect() {}, async smembers() { throw new Error("registry boom"); }, async scan() { throw new Error("scan refused"); } }),
+				// Each queue named with the database its connection selects, so the Valkey it was flipped on is seen.
+				makeQueue: (connection, { name }) => ({ name, async pause() { if (pauseFails(name)) throw new Error("down"); flipped.push(`${connection.db}:${name}`); }, async resume() { flipped.push(`${connection.db}:${name}`); }, async close() {} }),
+			},
+		});
+		return { code, flipped, out };
+	};
+	const paused = await run(["pause"], "PI_WORKER_NAME=hosta\n");
+	assert.equal(paused.code, 0, paused.out);
+	assert.deepEqual(paused.flipped, ["15:pi-jobs", "15:pi-jobs@hosta"]);
+	assert.equal(paused.out, `paused: worker will stop taking new jobs (jobs still enqueue) [2 queues] [registry unreadable: registry boom] [queue scan incomplete]\n  but ${killSwitchShortNote(true)}\n`);
+	// A resume reaches it only where the scan found it: a queue that does not exist has nothing to resume, and one built to
+	// resume it would write its meta key.
+	const resumed = await run(["resume"], "PI_WORKER_NAME=hosta\n");
+	assert.deepEqual([resumed.code, resumed.flipped], [0, ["15:pi-jobs"]]);
+	assert.equal(resumed.out, `resumed [registry unreadable: registry boom] [queue scan incomplete]\n  but ${killSwitchShortNote(false)}\n`);
+	assert.equal(killSwitchShortNote(true), "the list of queues may be short: the host registry or the look for queues could not be read, so other queues may exist and were not paused. Pause the fleet again once Valkey answers");
+	// The name is the deployment .env's alone, which the worker service runs. None declared there: the shared queue alone,
+	// never one a hostname would name, and a name only this shell sets is said and left out. A name this shell sets
+	// otherwise, or one the worker refuses, is said too, and the switch goes on.
+	assert.deepEqual((await run(["pause"], "")).flipped, ["15:pi-jobs"]);
+	const shellOnly = await run(["pause"], "", { PI_WORKER_NAME: "hostz" });
+	assert.deepEqual(shellOnly.flipped, ["15:pi-jobs"]);
+	assert.match(shellOnly.out, /\[this host's queue not added: PI_WORKER_NAME is set in this shell and not in .*\.env, which the service reads\]/);
+	const refused = await run(["pause"], "PI_WORKER_NAME=runs.json\n");
+	assert.deepEqual([refused.code, refused.flipped], [0, ["15:pi-jobs"]]);
+	assert.match(refused.out, / \[this host's queue not added: PI_WORKER_NAME must not end in \.json or \.log: "runs\.json" would collide with the run-history filenames in PI_LOGS_DIR\]\n/);
+	const hazard = await run(["pause"], 'PI_WORKER_NAME="hosta\n');
+	assert.deepEqual(hazard.flipped, ["15:pi-jobs"]);
+	assert.match(hazard.out, /\[this host's queue not added: .*\.env has a line for PI_WORKER_NAME that the service's loader may read differently, so it cannot be told \(pi-dispatch doctor names the line\)\]/);
+	writeFileSync(join(dir, ".env"), "PI_WORKER_NAME=hosta\n");
+	chmodSync(join(dir, ".env"), 0o000);
+	let unreadable;
+	try {
+		unreadable = await main(["pause"], { VALKEY_URL: "redis://127.0.0.1:1/15" }, { cwd: dir, write: (text) => { unreadable = (unreadable ?? "") + text; }, valkeyRefusal: async () => null, controlClients: { makeRedisClient: () => ({ on() {}, disconnect() {}, async smembers() { return []; }, async scan() { return ["0", []]; } }), makeQueue: (_c, { name }) => ({ name, async pause() {}, async close() {} }) } }).then(() => unreadable);
+	} finally {
+		chmodSync(join(dir, ".env"), 0o600);
+	}
+	assert.match(unreadable, /\[this host's queue not added: .*\.env could not be read \(EACCES\), so PI_WORKER_NAME cannot be told\]\n$/);
+	const torn = await run(["pause"], "PI_WORKER_NAME=hosta\n", { PI_WORKER_NAME: "hostz" });
+	assert.deepEqual(torn.flipped, ["15:pi-jobs"]);
+	assert.match(torn.out, /\[this host's queue not added: PI_WORKER_NAME is "hostz" in this shell and "hosta" in .*\.env: make them agree \(the service runs the file's\)\]/);
+	// The deployment's Valkey alone: on a VALKEY_URL disagreement the .env's (database 14 here), never this shell's, and a
+	// --valkey-url only where it names the .env's.
+	const env14 = "VALKEY_URL=redis://127.0.0.1:1/14\nPI_WORKER_NAME=hosta\n";
+	assert.deepEqual((await run(["pause"], env14)).flipped.sort(), ["14:pi-jobs", "14:pi-jobs@hosta", "15:pi-jobs"]);
+	assert.deepEqual((await run(["pause", "--valkey-url", "redis://127.0.0.1:1/15"], env14)).flipped, ["15:pi-jobs"]);
+	assert.deepEqual((await run(["pause", "--valkey-url", "redis://127.0.0.1:1/14"], env14)).flipped, ["14:pi-jobs", "14:pi-jobs@hosta"]);
+	assert.deepEqual((await run(["pause", "--valkey-url", "redis://127.0.0.1:2/0"], "PI_WORKER_NAME=hosta\n")).flipped, ["0:pi-jobs"]);
+	// A pause that fails part-way over such a set says it too, under the queues it reached.
+	const said = [];
+	const write = process.stderr.write;
+	process.stderr.write = (chunk) => (said.push(String(chunk)), true);
+	let failed;
+	try {
+		failed = await run(["pause"], "PI_WORKER_NAME=hosta\n", {}, (name) => name === "pi-jobs@hosta");
+	} finally {
+		process.stderr.write = write;
+	}
+	assert.equal(failed.code, 1);
+	assert.equal(said.join(""), `error: could not pause the whole deployment at redis://127.0.0.1:1/15\n  paused: pi-jobs\n  failed at: pi-jobs@hosta\n  down\n  and ${killSwitchShortNote(true)}\n`);
 });
 
 // Issue #464 (gate round 3): the kill switch and status judge the Valkey before they talk to it.

@@ -1,14 +1,15 @@
 #!/usr/bin/env node
 import { existsSync, readFileSync } from "node:fs";
+import * as nodeFs from "node:fs";
 import { resolve } from "node:path";
 import { parseArgs } from "node:util";
-import { TRIGGER_LOADER_ENV_KEYS, loadConfig } from "./config.mjs";
+import { TRIGGER_LOADER_ENV_KEYS, loadConfig, workerName } from "./config.mjs";
 import { EXIT_POLICY, installRejectionPrinter, installStdoutPipeGuard } from "./exit-code.mjs";
 import { isEntryModule } from "./entry.mjs";
 import { gitDirty, localRepoProblem } from "./git-dirty.mjs";
 import { imageRefProblem } from "./image-ref.mjs";
 import { modelIdProblem, providerIdProblem } from "./model-ref.mjs";
-import { cliDeploymentEnv } from "./service-env.mjs";
+import { cliDeploymentEnv, deploymentServiceEnv } from "./service-env.mjs";
 
 // Issue #804: `cliDeploymentEnv` lives in service-env.mjs, where `service restart --drain` reads it too (service.mjs
 // must not import this entry module). Re-exported so every caller that took it from here keeps working.
@@ -343,7 +344,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 		const { urlShown } = await import("./connection.mjs");
 		// `status --target <item>` (issue #932): what the queue holds for one issue or pull request. Read-only, so it
 		// takes the kill switch's URL rule and shows every URL it resolves to, as plain `status` does.
-		const picked = await killSwitchUrls(argv.slice(1), env, cmd === "status" ? { target: { type: "string" } } : {});
+		const picked = await killSwitchUrls(argv.slice(1), env, cmd === "status" ? { target: { type: "string" } } : {}, cwd);
 		if (picked.error) return fail(picked.error);
 		if (picked.positionals.length > 0) return fail(`pi-dispatch ${cmd} takes no argument but ${cmd === "status" ? "--target <item> and " : ""}--valkey-url <url> (got ${picked.positionals.map((p) => JSON.stringify(p)).join(" ")})`);
 		let item = null;
@@ -356,12 +357,18 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
 			if (cmd === "resume") return fail(`${picked.disagreement}: resume would start jobs on one of them, so it names neither. Say which: pi-dispatch resume --valkey-url <url>`);
 			process.stderr.write(`warning: ${picked.disagreement}: ${cmd === "pause" ? "pausing both" : "showing both"}\n`);
 		}
+		// Issue #964: a pause or resume also flips this host's own queue, on the deployment's Valkey alone: the one this
+		// command reaches with no --valkey-url (the `.env`'s on a disagreement), so never the shell's, and never a
+		// --valkey-url that names another: this host's worker drains neither, and a pause there would write a meta key every
+		// later scan of it lists.
+		const own = cmd === "pause" || cmd === "resume" ? await ownQueueOf(env, cwd) : { names: [], problem: null };
+		const ownAt = own.names.length > 0 || own.problem ? await deploymentValkeyUrl(env, cwd, picked.urls, urlShown) : null;
 		let code = 0;
 		for (const url of picked.urls) {
 			const label = picked.urls.length > 1 ? `[${urlShown(url)}] ` : "";
 			code = Math.max(code, item !== null
 				? await targetStatus(item, url, { env, write, label, urlShown, valkeyRefusal, now, controlClients })
-				: await killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal, now, controlClients, cwd }));
+				: await killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal, now, controlClients, cwd, own: url === ownAt ? own : null }));
 		}
 		return code;
 	}
@@ -414,7 +421,7 @@ export async function main(argv = process.argv.slice(2), env = process.env, { wr
  * flags (steer's `--later` and `--withdraw`), returned in `values`. `{ urls, disagreement, positionals, values }` or
  * `{ error }`; a note (a URL that matches neither side) is written to stderr.
  */
-async function killSwitchUrls(args, env, extraOptions = {}) {
+async function killSwitchUrls(args, env, extraOptions = {}, cwd = undefined) {
 	let parsed;
 	try {
 		parsed = parseArgs({ args, allowPositionals: true, options: { ...extraOptions, "valkey-url": { type: "string" } } });
@@ -422,7 +429,7 @@ async function killSwitchUrls(args, env, extraOptions = {}) {
 		return { error: error.message };
 	}
 	const { killSwitchValkeyUrls } = await import("./connection.mjs");
-	const picked = killSwitchValkeyUrls({ env, flagUrl: parsed.values["valkey-url"] ?? null });
+	const picked = killSwitchValkeyUrls({ env, flagUrl: parsed.values["valkey-url"] ?? null, ...(cwd ? { cwd } : {}) });
 	if (picked.error) return picked;
 	if (picked.note) process.stderr.write(`warning: ${picked.note}\n`);
 	return { ...picked, positionals: parsed.positionals, values: parsed.values };
@@ -609,7 +616,53 @@ async function deploymentQueueNames(url, controlClients) {
 	return { names: unionQueueNames(fleetQueueNames(fleet?.hosts), existing.names), blind: fleet?.unreachable ?? null, incomplete: Boolean(existing?.incomplete), existing };
 }
 
-async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal, now, controlClients, cwd = process.cwd() }) {
+/**
+ * The fleet's sentence for a pause or resume whose set of queues may be short (issue #964): the console's
+ * `switchShortNote` (admin/src/words.mjs), held equal to it by a test, since the CLI does not import the admin.
+ */
+export function killSwitchShortNote(paused) {
+	return `the list of queues may be short: the host registry or the look for queues could not be read, so other queues may exist and were not ${paused ? "paused" : "resumed"}. ${paused ? "Pause" : "Resume"} the fleet again once Valkey answers`;
+}
+
+/**
+ * This host's own queue for the kill switch (issue #964), `{ names, problem }`: `pi-jobs@<name>` when the deployment's
+ * `.env` in `cwd` declares PI_WORKER_NAME, by the worker's own rule (`workerName`), else none. The file's value alone:
+ * the worker service reads that file and its value beats one injected around it, so a name this shell sets otherwise, or
+ * sets where the file has none, names no queue the worker drains. Never the hostname an unnamed worker falls back to:
+ * that worker drains only the shared queue, and a pause of `pi-jobs@<hostname>` would write a meta key every later scan
+ * lists as a queue. A name that cannot be told, or one the worker refuses, is `problem`, which the line names; the kill
+ * switch never refuses for it.
+ */
+async function ownQueueOf(env, cwd) {
+	const res = deploymentServiceEnv({ env: {}, dir: cwd, keys: ["PI_WORKER_NAME"], fs: nodeFs });
+	const shell = typeof env.PI_WORKER_NAME === "string" ? env.PI_WORKER_NAME : undefined;
+	if (res.untrusted || res.unreadable) return { names: [], problem: `${res.path} ${res.untrusted ?? `could not be read (${res.unreadable})`}, so PI_WORKER_NAME cannot be told` };
+	if (res.unread.length > 0 || res.hazardSkipped.length > 0) return { names: [], problem: `${res.path} has a line for PI_WORKER_NAME that the service's loader may read differently, so it cannot be told (pi-dispatch doctor names the line)` };
+	const file = res.fromFile.PI_WORKER_NAME;
+	if (typeof file !== "string" || file === "") return { names: [], problem: shell !== undefined && shell !== "" ? `PI_WORKER_NAME is set in this shell and not in ${res.path}, which the service reads` : null };
+	if (shell !== undefined && shell !== file) return { names: [], problem: `PI_WORKER_NAME is ${JSON.stringify(shell)} in this shell and ${JSON.stringify(file)} in ${res.path}: make them agree (the service runs the file's)` };
+	const { hostQueueName } = await import("./queue.mjs");
+	try {
+		return { names: [hostQueueName(workerName({ PI_WORKER_NAME: file }))], problem: null };
+	} catch (error) {
+		return { names: [], problem: error.message };
+	}
+}
+
+/**
+ * Which of `urls` is the deployment's Valkey (issue #964): the one this command reaches with no --valkey-url, the `.env`'s
+ * on a disagreement (the second, `killSwitchValkeyUrls`'s order), compared as `urlShown` prints them. Null when none of
+ * `urls` is it: a --valkey-url that names the shell's or another Valkey.
+ */
+async function deploymentValkeyUrl(env, cwd, urls, urlShown) {
+	const { killSwitchValkeyUrls } = await import("./connection.mjs");
+	const base = killSwitchValkeyUrls({ env, ...(cwd ? { cwd } : {}) });
+	if (base.error || !Array.isArray(base.urls) || base.urls.length === 0) return null;
+	const at = urlShown(base.urls.length > 1 ? base.urls[1] : base.urls[0]);
+	return urls.find((u) => urlShown(u) === at) ?? null;
+}
+
+async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal, now, controlClients, cwd = process.cwd(), own = null }) {
 	// Its own discovery, not `deploymentQueueNames`: `status` also reads consumer health (issue #924) through the same
 	// probe before it is closed, so this keeps the probe open across both reads.
 	const { parseConnection, makeRedisClient } = await import("./connection.mjs");
@@ -647,10 +700,15 @@ async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal
 	const pollers = cmd === "status" ? await (await import("./poller-facts.mjs")).readPollerFacts(probe, { env, cwd, now: () => Number(now()) }).catch(() => ({ expected: null, hosts: [], complete: false })) : null;
 	probe.disconnect?.();
 	const blind = fleet?.unreachable ?? null;
-	const names = unionQueueNames(fleetQueueNames(fleet?.hosts), existing.names);
+	// With this host's own queue on a pause (issue #964, `ownQueueOf`), which a registry or a scan that did not answer cannot
+	// name. Not on a resume: a queue the scan did not find does not exist, has nothing to resume, and a queue built to
+	// resume it would write its meta key.
+	const names = unionQueueNames(fleetQueueNames(fleet?.hosts), [...existing.names, ...(cmd === "pause" ? own?.names ?? [] : [])]);
 	// The registry being unreadable no longer means we saw one queue: the keyspace scan may well have
-	// found them. Report the count we ACTED on, and name the degraded read separately.
-	const span = `${names.length > 1 ? ` [${names.length} queues]` : ""}${blind ? ` [registry unreadable: ${blind}]` : ""}`;
+	// found them. Report the count we ACTED on, and name the degraded read separately, the scan's too (issue #964).
+	const span = `${names.length > 1 ? ` [${names.length} queues]` : ""}${blind ? ` [registry unreadable: ${blind}]` : ""}${existing?.incomplete ? " [queue scan incomplete]" : ""}${own?.problem ? ` [this host's queue not added: ${own.problem}]` : ""}`;
+	// What a set that may be short means, and what to do (issue #964), under the line; the exit code stays 0.
+	const short = blind || existing?.incomplete ? `\n${label}  but ${killSwitchShortNote(cmd === "pause")}` : "";
 	const queues = [];
 	try {
 		// Constructed INSIDE the try: `makeQueue` can throw on a malformed peer-written name, and a throw
@@ -667,9 +725,9 @@ async function killSwitch(cmd, url, { env, write, label, urlShown, valkeyRefusal
 				// A mid-loop failure leaves the deployment HALF switched. Naming what did change is the whole
 				// difference between an operator who knows to finish the job and one who reads "unreachable"
 				// as "nothing happened" and walks away from a fleet with one host still spending.
-				return fail(`could not ${cmd} the whole deployment at ${urlShown(url)}\n  ${done.length > 0 ? `${cmd}d: ${done.join(", ")}` : "nothing changed"}\n  failed at: ${names[done.length]}\n  ${error.message}`);
+				return fail(`could not ${cmd} the whole deployment at ${urlShown(url)}\n  ${done.length > 0 ? `${cmd}d: ${done.join(", ")}` : "nothing changed"}\n  failed at: ${names[done.length]}\n  ${error.message}${blind || existing?.incomplete ? `\n  and ${killSwitchShortNote(cmd === "pause")}` : ""}`);
 			}
-			write(`${label}${cmd === "pause" ? `paused: worker will stop taking new jobs (jobs still enqueue)${span}` : `resumed${span}`}\n`);
+			write(`${label}${cmd === "pause" ? `paused: worker will stop taking new jobs (jobs still enqueue)${span}` : `resumed${span}`}${short}\n`);
 		} else {
 			// "paused" is included in the counts because jobs enqueued while paused land in the
 			// `paused` list, not `wait` -- omitting it would report backlog 0 in the exact state

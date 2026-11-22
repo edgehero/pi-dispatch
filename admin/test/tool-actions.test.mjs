@@ -3,7 +3,8 @@ import assert from "node:assert/strict";
 import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tempDir } from "./helpers/temp-dir.mjs";
-import { executeToolAction, toolActionRequest } from "../src/tool-actions.mjs";
+import { executeToolAction, switchPartialRefusal, toolActionRequest } from "../src/tool-actions.mjs";
+import { modelToolRefusal } from "../src/tool-refusals.mjs";
 import { failedForAgent, waitingForAgent, readOperationalTool } from "../src/tool-reads.mjs";
 import { createFleetReader, readHeldJobs } from "../src/read-model.mjs";
 import { keyedRedis, quietQueue, registryKeys } from "./helpers/fleet-reader-fakes.mjs";
@@ -150,6 +151,53 @@ test("the lazy fleet adapter preserves actual pause methods through the origin w
   const out = await executeToolAction("dispatch_pause", { queue: "pi-jobs" }, { hasUI: false }, { ...f.options, fleet: undefined, readModel });
   assert.equal(out.applied, true);
   assert.deepEqual(calls, [{ queue: "pi-jobs", paused: true }, "disposed"]);
+});
+
+// Issue #964: over a REAL fleet reader whose host registry does not answer (its SMEMBERS rejects), so the reader itself
+// marks the set of queues it switched as one that may be short.
+test("dispatch_pause over a set of queues that may be short answers queuesMayBeShort with an audit row of its own, and a part-way one a fixed refusal naming no queue (#964)", async () => {
+  const f = fixture();
+  let answer = () => Promise.resolve();
+  const make = quietQueue();
+  const reader = createFleetReader(f.paths, { makeQueueFn: (c, o) => ({ ...make(c, o), pause: () => answer(), resume: () => answer() }), parseConnectionFn: () => ({}), redisFn: () => keyedRedis({}, { registryDown: () => true }), readOnly: true, switchStepTimeoutMs: 80, closeTimeoutMs: 30 });
+  const rm = await import("../src/read-model.mjs");
+  const options = { ...f.options, fleet: reader, readModel: { ...rm, killSwitchPlan: () => ({ urls: [f.paths.valkeyUrl], disagreement: null, context: null }) } };
+  const rows = () => f.rows.map((r) => [r.action, r.outcome, r.reason ?? null]);
+  let keep = null;
+  try {
+    const out = await executeToolAction("dispatch_pause", {}, { hasUI: false }, options);
+    assert.deepEqual([out.applied, out.queuesMayBeShort], [true, true], JSON.stringify(out));
+    assert.deepEqual(rows(), [["write", "ok", null], ["write", "ok", "queues-may-be-short"], ["write-applied", "ok", null]]);
+    // Sent and never answered: part of the fleet may be paused, said in words a model may be handed. The step's own timer
+    // is unref'd, so this test holds the event loop open while it runs out.
+    answer = () => new Promise(() => {});
+    keep = setInterval(() => {}, 20);
+    const sentence = "The fleet pause did not reach every queue, so some queues may be paused and others not, and the list of queues may be short, so other queues may exist and were not paused. An operator can look at the fleet in the console and pause it again once Valkey answers.";
+    await assert.rejects(executeToolAction("dispatch_pause", {}, { hasUI: false }, options), (e) => modelToolRefusal(e) === sentence && e.message === sentence);
+    assert.equal(switchPartialRefusal(true, true, true), sentence);
+    assert.deepEqual(rows().slice(3), [["write", "ok", null], ["write", "failed", "action-unconfirmed"]]);
+  } finally {
+    clearInterval(keep);
+    await reader.dispose();
+  }
+});
+
+test("dispatch_pause refused by a Valkey that answers, over a whole set, points at the fleet, never at Valkey answering (#964)", async () => {
+  const f = fixture();
+  // A real reader whose registry names hostb and whose scan is whole; hostb's queue refuses its pause (an error that came
+  // back, not a lost answer) while the shared queue takes it.
+  const make = quietQueue();
+  const reader = createFleetReader(f.paths, { makeQueueFn: (c, o) => ({ ...make(c, o), pause: async () => { if (o?.name === "pi-jobs@hostb") throw new Error("refused"); } }), parseConnectionFn: () => ({}), redisFn: () => keyedRedis(registryKeys({ hostb: { routes: "true", beatAt: String(NOW) } })), readOnly: true, switchStepTimeoutMs: 80, closeTimeoutMs: 30 });
+  const rm = await import("../src/read-model.mjs");
+  const options = { ...f.options, fleet: reader, readModel: { ...rm, killSwitchPlan: () => ({ urls: [f.paths.valkeyUrl], disagreement: null, context: null }) } };
+  try {
+    const sentence = "The fleet pause did not reach every queue, so some queues may be paused and others not. An operator can look at the fleet in the console before trying the pause again.";
+    await assert.rejects(executeToolAction("dispatch_pause", {}, { hasUI: false }, options), (e) => modelToolRefusal(e) === sentence);
+    assert.equal(switchPartialRefusal(true, false, false), sentence);
+    assert.equal(switchPartialRefusal(false, true, false), "The fleet resume did not reach every queue, so some queues may be resumed and others not, and the list of queues may be short, so other queues may exist and were not resumed. An operator can look at the fleet in the console before trying the resume again.");
+  } finally {
+    await reader.dispose();
+  }
 });
 
 test("bulk and cancellation selectors refuse ambiguous or ignored arguments", async () => {

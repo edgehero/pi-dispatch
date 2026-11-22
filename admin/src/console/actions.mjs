@@ -71,7 +71,7 @@ import { parseTriggersDocument } from "@edgehero/pi-dispatch/triggers";
 import { PAUSE_WINDOW_FIELDS, heldPauseWindows, parsePauseWindows, pauseWindowsText } from "@edgehero/pi-dispatch/pause-windows";
 import { auditedWrite } from "../audited-write.mjs";
 import { pauseWindowsNewerRefusal } from "../newer-release.mjs";
-import { fieldNamed, NO_EXPLANATION, UNNAMED_FIELD } from "../words.mjs";
+import { fieldNamed, NO_EXPLANATION, switchShortNote, UNNAMED_FIELD } from "../words.mjs";
 import { PREVIEW_AGAIN } from "./confirm.mjs";
 import { bulkResultsHtml, diffHtmlOf, plural, previewBarHtml, REFUSAL_STATES, refusalHtml, textHtml, unchangedBarHtml } from "./confirm-view.mjs";
 import { bindingFailure } from "./device-trust.mjs";
@@ -1696,6 +1696,34 @@ export const RESUME_WAITING_UNKNOWN = Object.freeze({
   unread: "How many jobs wait to start is not known: the fleet could not be read. Each reserves up to its own per-job dollar cap when a worker picks it up",
 });
 
+/**
+ * A fleet switch preview's line when its snapshot was not read (issue #964): the switch still reaches every queue the
+ * kill switch finds, and its answer says when the list of queues may be short, since a Valkey that did not answer the
+ * preview's read may not answer the confirm's discovery either.
+ */
+export const SWITCH_UNREAD_LINES = Object.freeze({
+  pause: "The queues and running, delayed and held counts could not be read; a pause still reaches every queue the kill switch finds, and its answer says when the list of queues may be short",
+  resume: "The queues could not be read; a resume still reaches every queue the kill switch finds, and its answer says when the list of queues may be short",
+});
+
+/**
+ * The fleet switch preview's line when this host's own queue is left out for a reason (issue #964, `deploymentOwnQueue`'s
+ * `problem` through `ownQueueProblemFn`: the `.env` could not be read, or names it otherwise than this environment), as
+ * the CLI says it; none where nothing was meant. Never throws.
+ */
+function ownQueueProblemLines(ctx) {
+  let problem = null;
+  try {
+    problem = typeof ctx.a.ownQueueProblemFn === "function" ? ctx.a.ownQueueProblemFn() : null;
+  } catch {
+    problem = null;
+  }
+  return typeof problem === "string" && problem !== "" ? [`This host's queue is not added: ${problem}`] : [];
+}
+
+/** The pause preview's line for this host's own queue that no discovery found and so was not read (issue #964). */
+export const SWITCH_OWN_UNREAD = (names) => `Not read, so not in these counts: ${names.join(", ")}, this host's own queue, which the look for queues did not find`;
+
 /** The fleet's pause or resume: the kill switch's decision at the preview, the fleet reader's funnel at the confirm. */
 function fleetSwitch({ name, kind, paused }) {
   return {
@@ -1716,7 +1744,7 @@ function fleetSwitch({ name, kind, paused }) {
       let pausedBefore = null;
       let short = [];
       let shortLines = [];
-      let pauseLines = [];
+      let switchLines = [];
       if (paused) {
         const s = await snapshotOf(ctx, SWITCH_READ, ctx.a.pauseSnapshotTimeoutMs ?? PAUSE_SNAPSHOT_TIMEOUT_MS);
         if (s.snapshot) {
@@ -1724,8 +1752,12 @@ function fleetSwitch({ name, kind, paused }) {
           short = switchShortOf(s.snapshot);
           shortLines = switchShortLines(s.snapshot, short);
           const sum = (key) => all.reduce((n, row) => n + (Number.isSafeInteger(row.counts?.[key]) ? row.counts[key] : 0), 0);
-          pauseLines = [...Array.from({ length: Math.ceil(all.length / 20) }, (_, i) => `Queues: ${all.slice(i * 20, (i + 1) * 20).map((row) => String(row.queue)).join(", ")}`), `${plural(sum("active"), "running job")} ${sum("active") === 1 ? "keeps" : "keep"} running`, `${plural(sum("delayed"), "delayed job")} and ${s.snapshot.held?.unreachable || !Array.isArray(s.snapshot.held?.rows) ? "an unknown number of" : `${s.snapshot.held.truncated ? "at least " : ""}${s.snapshot.held.rows.length + (Number.isSafeInteger(s.snapshot.held.more) ? s.snapshot.held.more : 0)}`} held ${s.snapshot.held?.rows?.length === 1 && !s.snapshot.held?.truncated && !s.snapshot.held?.more ? "job waits" : "jobs wait"} until a resume`, "Audited as fleet-pause"];
-        } else pauseLines = ["The queues and running, delayed and held counts could not be read; a pause still reaches every queue the kill switch discovers", "Audited as fleet-pause", "Undo: Resume the fleet"];
+          // Issue #964: this host's own queue where no discovery named it is paused too and never read (a queue built to
+          // read it would write its meta key), so it is named, and named as left out of the counts.
+          const unread = Array.isArray(s.snapshot.switchUnread) ? s.snapshot.switchUnread.map(String) : [];
+          const listed = [...all.map((row) => String(row.queue)), ...unread];
+          switchLines = [...Array.from({ length: Math.ceil(listed.length / 20) }, (_, i) => `Queues: ${listed.slice(i * 20, (i + 1) * 20).join(", ")}`), ...(unread.length > 0 ? [SWITCH_OWN_UNREAD(unread)] : []), `${plural(sum("active"), "running job")} ${sum("active") === 1 ? "keeps" : "keep"} running`, `${plural(sum("delayed"), "delayed job")} and ${s.snapshot.held?.unreachable || !Array.isArray(s.snapshot.held?.rows) ? "an unknown number of" : `${s.snapshot.held.truncated ? "at least " : ""}${s.snapshot.held.rows.length + (Number.isSafeInteger(s.snapshot.held.more) ? s.snapshot.held.more : 0)}`} held ${s.snapshot.held?.rows?.length === 1 && !s.snapshot.held?.truncated && !s.snapshot.held?.more ? "job waits" : "jobs wait"} until a resume`, "Audited as fleet-pause"];
+        } else switchLines = [SWITCH_UNREAD_LINES.pause, "Audited as fleet-pause", "Undo: Resume the fleet"];
       }
       if (!paused) {
         const s = await snapshotOf(ctx, SWITCH_READ);
@@ -1738,6 +1770,7 @@ function fleetSwitch({ name, kind, paused }) {
           pausedBefore = Array.isArray(s.snapshot.queueCounts) ? { queues: all.length, paused: rows.map((q) => String(q?.queue ?? "-")), ...(short.length > 0 ? { short: true } : {}) } : null;
         } else {
           waiting = { count: null, line: s.timedOut === true ? RESUME_WAITING_UNKNOWN.timeout : RESUME_WAITING_UNKNOWN.unread };
+          switchLines = [SWITCH_UNREAD_LINES.resume];
         }
       }
       return {
@@ -1745,7 +1778,7 @@ function fleetSwitch({ name, kind, paused }) {
         payload: {},
         ...(paused ? {} : { pausedBefore }),
         ...(waiting ? { count: waiting.count } : {}),
-        summary: [paused ? "Pause every queue of the fleet (the kill switch): nothing new starts, running jobs finish" : "Resume every queue of the fleet: queued jobs start spending again", `Valkey: ${shown.join(", ") || "the deployment's"}`, ...(plan?.disagreement ? [`${plan.disagreement}: a pause reaches both`] : []), ...(waiting ? [waiting.line] : []), ...pauseLines, ...shortLines],
+        summary: [paused ? "Pause every queue of the fleet (the kill switch): nothing new starts, running jobs finish" : "Resume every queue of the fleet: queued jobs start spending again", `Valkey: ${shown.join(", ") || "the deployment's"}`, ...(plan?.disagreement ? [`${plan.disagreement}: a pause reaches both`] : []), ...(waiting ? [waiting.line] : []), ...switchLines, ...shortLines, ...ownQueueProblemLines(ctx)],
       };
     },
     async apply(_entry, ctx) {
@@ -1770,14 +1803,28 @@ function fleetSwitch({ name, kind, paused }) {
         // The set of queues itself may be short: the registry or the keyspace scan was not read whole.
         ...(r.res?.blind || r.res?.incomplete ? { short: true } : {}),
       }));
-      if (results.length > 0 && results.every((r) => r.ok)) return { ok: true, results };
+      // Issue #964: a switch that reached every queue it knew, over a set of queues that may be short, is said as that,
+      // never as a flat "Paused the fleet": `note` goes after the banner's past tense (`changeOf`) and into a second `ok`
+      // row of its own (`auditedWrite`'s `note`), and `queuesMayBeShort` is the machine fact an agent reads.
+      const short = results.some((r) => r.short);
+      const shortFacts = short ? { queuesMayBeShort: true, note: switchShortNote(paused) } : {};
+      if (results.length > 0 && results.every((r) => r.ok)) return { ok: true, results, ...shortFacts };
       // Issue #737: a Valkey that took the switch, or a loop that stopped part-way (the queue it failed at may have
       // flipped too: the error came back, not the state), means part of the fleet DID change, so the refusal is
       // `partial` and the slot never says "Nothing was changed" over it. Only when no Valkey's loop started did nothing.
       // Issue #842: a queue whose pause was sent and not answered counts as that too, and a switch where every queue
       // was refused before anything was sent does not.
       const partial = results.some((r) => r.ok || (r.partial && (!r.partial.unconfirmed || r.partial.done.length + r.partial.unconfirmed.length > 0)));
-      return { invalid: `the kill switch did not reach every queue: ${results.map((r) => `${r.valkey} ${r.ok ? "done" : r.partial ? switchPartialWords(r.partial, paused) : "unreachable"}${!r.ok && r.short ? " (the list of queues may be short)" : ""}`).join("; ") || "no Valkey answered"}. Look at the fleet and try again`, ...(partial ? { partial: true } : {}) };
+      // Issue #964: a set that may be short is said FIRST, beside a switch that was sent and may or may not have been made,
+      // where it was a parenthesis at the end that a long Valkey address or list of queues pushed out of the audit row's
+      // 200 code points and a person read past: "pi-jobs" alone, with two more queues that were never sent a pause. Both
+      // clauses lead, so the row keeps both however long the Valkey's address or the list of queues; what to do closes the
+      // sentence. One that is not short keeps its sentence.
+      const sent = results.some((r) => Array.isArray(r.partial?.unconfirmed) && r.partial.unconfirmed.length > 0);
+      const verb = paused ? "paused" : "resumed";
+      const lead = !short ? "the kill switch did not reach every queue" : `the kill switch did not reach every queue, ${sent ? `a ${paused ? "pause" : "resume"} was sent that may or may not have been made, ` : ""}and the list of queues may be short`;
+      const then = short ? `Other queues may exist and were not ${verb}: ${paused ? "pause" : "resume"} the fleet again once Valkey answers` : "Look at the fleet and try again";
+      return { invalid: `${lead}: ${results.map((r) => `${r.valkey} ${r.ok ? "done" : r.partial ? switchPartialWords(r.partial, paused) : "unreachable"}`).join("; ") || "no Valkey answered"}. ${then}`, ...(partial ? { partial: true } : {}), ...(short ? { queuesMayBeShort: true } : {}), ...(sent ? { sentUnconfirmed: true } : {}) };
     },
   };
 }
@@ -1800,6 +1847,12 @@ export function switchPartialWords(partial, paused) {
   ].join("; ");
 }
 
+/**
+ * One queue's pause or resume refused for this host's own queue before it exists (issue #964): this host's worker drains
+ * it once it starts, so "not a queue this deployment drains" was not true of it, and nothing exists to switch yet.
+ */
+export const ownQueueAbsentRefusal = (queue, paused) => `${queue} does not exist yet (this host's worker creates it when it starts); ${paused ? "pause the fleet to reach it" : "there is nothing to resume"}, and nothing was changed`;
+
 /** One queue's pause or resume. */
 function queueSwitch({ name, kind, paused }) {
   return {
@@ -1817,6 +1870,8 @@ function queueSwitch({ name, kind, paused }) {
       const row = rows.find((q) => q?.queue === queue);
       // A read that was short (`switchShortOf`) cannot say a queue it did not read does not exist: it says why instead.
       if (!row && switchShortOf(s.snapshot).length > 0) return { refusal: queueUnreadRefusal(queue) };
+      // Issue #964: this host's own queue before its worker made it: the switch names it and no queue of it exists yet.
+      if (!row && Array.isArray(s.snapshot.switchUnread) && s.snapshot.switchUnread.includes(queue)) return { refusal: ownQueueAbsentRefusal(queue, paused) };
       if (!row) return { refusal: `${JSON.stringify(queue)} is not a queue this deployment drains (${queuesNamed(rows.map((q) => String(q?.queue ?? "-")))}); nothing was changed` };
       if (Boolean(row.paused) === paused) return { unchanged: `${queue} is already ${paused ? "paused" : "running"}` };
       const waiting = paused ? null : resumeWaiting([row], "it");
@@ -2668,7 +2723,19 @@ function actionCtx(ctx) {
  */
 export const AGENT_REFUSED = "action-refused";
 export const AGENT_UNCONFIRMED = "action-unconfirmed";
+/**
+ * The closed word of the second `ok` row an agent's fleet pause or resume gets when it landed over a set of queues that
+ * may be short (issue #964, `auditedWrite`'s `note`), where a person's row carries the sentence.
+ */
+export const AGENT_QUEUES_SHORT = "queues-may-be-short";
 export const agentFailure = (result) => (result?.partial === true ? AGENT_UNCONFIRMED : AGENT_REFUSED);
+
+/**
+ * The reason of the second `ok` row a write that landed with something still to say gets (issue #964, `auditedWrite`'s
+ * `note`): today the kill switch over a set of queues that may be short. The sentence for a person, the closed word for
+ * an agent; null for any other write.
+ */
+const auditNoteOf = (result, role) => (result?.queuesMayBeShort === true && typeof result.note === "string" && result.note !== "" ? (role === "agent" ? AGENT_QUEUES_SHORT : result.note) : null);
 
 /** A funnel result's failure for its audit row: the refusal, a fixed word for Valkey, or null when it landed. */
 function failureOf(result) {
@@ -2925,6 +2992,9 @@ function changeOf(ctx, entry, action, { auditSeq, auditLast = null, count, done 
     }
   }
   const change = { summary: ctx.session?.role === "agent" ? `${action.name} applied to ${done} of ${count}` : summary ?? String(meta.done ?? meta.title ?? action.name), by: String(ctx.session?.name ?? ""), auditSeq, auditLast, count, done, undo, inverse, kind: action.kind, at: clockOf(ctx.deps) };
+  // Issue #964: what a write that landed must still say (the kill switch's list of queues that may be short) follows its
+  // past tense, so the banner never reads as a flat success over it.
+  if (typeof result?.note === "string" && result.note !== "") change.summary += `, but ${result.note}`;
   if (result?.touchWarning || result?.warning || result?.results?.some((row) => row.touchWarning)) change.summary += " Zero touch accounting is incomplete and pending repair. The action succeeded; do not repeat it for its metric.";
   if (Buffer.byteLength(JSON.stringify(change), "utf8") > FLASH_MAX_BYTES) {
     change.inverse = null;
@@ -2998,7 +3068,7 @@ async function confirmOne(ctx, action, entry, { actor, tag, actx, flight }) {
   let result;
   try {
     result = await auditedWrite(
-      { audit, actor, kind: action.kind, target: entry.target, beforeDigest: entry.beforeDigest ?? null, afterDigest: entry.afterDigest ?? null, reserve: reserveMicros(entry.reserve), count: Number.isSafeInteger(entry.count) && entry.count >= 1 ? entry.count : null, ticket: tag, failure: r => { const why = failureOf(r); return session.role === "agent" && why ? agentFailure(r) : why; }, refusal: () => ({ [AUDIT]: true }), log },
+      { audit, actor, kind: action.kind, target: entry.target, beforeDigest: entry.beforeDigest ?? null, afterDigest: entry.afterDigest ?? null, reserve: reserveMicros(entry.reserve), count: Number.isSafeInteger(entry.count) && entry.count >= 1 ? entry.count : null, ticket: tag, failure: r => { const why = failureOf(r); return session.role === "agent" && why ? agentFailure(r) : why; }, note: (r) => auditNoteOf(r, session.role), refusal: () => ({ [AUDIT]: true }), log },
       () => {
         started = true;
         return action.apply(entry, actx);

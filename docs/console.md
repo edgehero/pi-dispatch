@@ -1023,9 +1023,23 @@ Breakdown always reads this host's run records only, and says so; Runs lists eve
 A change that timed out before it left the console is not made when Valkey returns. One that reached a Valkey which then
 stopped answering may or may not have been made, and the confirm and its audit row say so. Adopting or undoing a package and
 ending a sandbox shell say it too, and an End request that may still stand is taken back. With Valkey unreachable, Adopt and
-Undo say that, not that someone changed the package. On a Valkey that stopped answering, the kill switch answers within about 5 seconds for a pause and 10 for a
-resume: it names the queues it knows are paused (or resumed), those not confirmed, whose pause or resume was sent and may or may not have
-been made, and those it did not try, since a resume stops at the first queue that does not answer. The previews of a failed job's and a
+Undo say that, not that someone changed the package. On a Valkey that stopped answering, the kill switch answers within about 6 seconds for a pause and 12 for a
+resume (9 measured), and its preview waits at most 6 seconds for the fleet's counts before a pause and 10 before a resume. It names the
+queues it knows are paused (or resumed), those not confirmed, whose pause or resume was sent and may or may not have been made, and those it
+did not try, since a resume stops at the first queue that does not answer. When the host registry or the look for queues could not be
+read, the list of queues it switched may be short. The answer then starts by saying so, beside a pause that was sent and may or may not
+have been made, so the audit row keeps both, and ends with what to do: other queues may exist and were not paused, so pause the fleet
+again once Valkey answers. It says so even when every queue it found was paused, then in the banner after "Paused the fleet", and the
+audit log keeps it in a second row on the same ticket; the `/dispatch` panel and command, the agent tools and `pi-dispatch pause` say it
+too. A console started while Valkey does not answer knows only `pi-jobs`, so a pause also goes to this host's own queue,
+`pi-jobs@<name>`, when the deployment's `.env` sets `PI_WORKER_NAME`, the name the worker service runs. None is added when the `.env`
+names none or when the console's (or pi's) own environment sets another name, and the preview says why when the `.env` could not
+be read or the names differ. It goes only to the deployment's Valkey: the `.env`'s `VALKEY_URL` when it and the environment's
+differ, else the one the kill switch reaches (the environment's when the `.env` names none). A resume reaches it only once it
+exists, and the pause's preview lists it by name and reads it only once it exists, so neither writes anything for it; a single
+queue's preview of it before then says it does not exist yet and to pause the fleet to reach it. The restart banner says that
+Pause the fleet and Resume the fleet take the name the `.env` holds now. A host without a name has no queue of its own, and the
+projects and triggers files name no host. The previews of a failed job's and a
 steer's actions say within 10 and 5 seconds that they could not read, and a stop of the console waits for the confirms it is still carrying out, takes no new one (it says it is stopping and nothing
 was changed), and ends within about a second of the last of them, never later than 10, with its lock released. While Valkey stays down,
 its log says each queue's error once a minute, and an outage after Valkey came back says it again at once.
@@ -1064,9 +1078,9 @@ value it read from the `.env` at start, those a bad line kept from being read in
 and every error page that shows the navigation bar, carries a banner, "This console needs a restart", for operators and
 viewers alike. It names the settings that changed but never their values, and a refused database by its number. A path
 written another way that names the same file is not a change. The console's log says the same once, and says again when it
-is over (a change put back). One exception: Pause the fleet and Resume the fleet read `VALKEY_URL` from the `.env` each time
-you use them, so they already act on the Valkey it names now while the pages still read the old one, and the banner says
-so.
+is over (a change put back). One exception: Pause the fleet and Resume the fleet read `VALKEY_URL` and `PI_WORKER_NAME` from the `.env` each
+time you use them, so they already act on the Valkey and this host's queue it names now while everything else still reads
+the old values, and the banner says so.
 
 When the `.env` is gone since the console started, or cannot be read now in a way it could at start (a line for
 `VALKEY_PASSWORD` included), the banner asks you to fix it before restarting, since a console started then would run

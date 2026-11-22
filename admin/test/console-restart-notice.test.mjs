@@ -36,6 +36,8 @@ test("restartReasons: a changed setting by name, never its value; one only the s
   // The kill switch reads VALKEY_URL from the .env at each use, so the sentence says so for that key (and for no other).
   assert.equal(reasons[0].sentence, "`PI_SESSIONS_DIR` and `VALKEY_URL` have changed in the deployment's .env since this console started, and the console keeps the values it started with until it is restarted. Pause the fleet and Resume the fleet already use the `VALKEY_URL` the .env names now; the pages read the one the console started with.");
   assert.equal(restartReasons({ start, now: reading({ ...start.values, PI_LOGS_DIR: '["/srv/other"]' }) })[0].sentence, "`PI_LOGS_DIR` has changed in the deployment's .env since this console started, and the console keeps the value it started with until it is restarted.");
+  // Issue #964: the kill switch names this host's queue from the .env's PI_WORKER_NAME at each use, so that key has its own.
+  assert.equal(restartReasons({ start, now: reading({ ...start.values, PI_WORKER_NAME: '["hostq"]' }) })[0].sentence, "`PI_WORKER_NAME` has changed in the deployment's .env since this console started, and the console keeps the value it started with until it is restarted. Pause the fleet and Resume the fleet already take this host's queue from the `PI_WORKER_NAME` the .env names now; everything else reads the one the console started with.");
   // A key the reading no longer has at all is a change too (a line removed), and so is one it gained.
   assert.deepEqual(restartReasons({ start, now: reading({ VALKEY_URL: start.values.VALKEY_URL }) })[0].keys, ["PI_LOGS_DIR", "PI_SESSIONS_DIR"]);
   // Past six names, the rest are counted.

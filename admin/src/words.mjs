@@ -125,6 +125,26 @@ export const SAYS_NOTHING_CHANGED = /\bnothing (?:was|is) (?:changed|done|applie
 /** A refusal's sentence as a person reads it anywhere but the slot's bar: stopped, and saying nothing changed once. */
 export const refusalLine = (sentence) => `${stopped(sentence)}${SAYS_NOTHING_CHANGED.test(sentence) ? "" : " Nothing was changed."}`;
 
+/**
+ * Whether one Valkey's kill switch answer (the read model's `switchOutcome` shape) says its set of queues may be short
+ * (issue #964): the registry (`blind`) or the keyspace scan (`incomplete`) was not read whole, so a queue may exist that
+ * the switch never named. True of an answer that switched every queue it named, too: that answer is the one that used
+ * to say nothing.
+ */
+export function switchListShort(res) {
+  return Boolean(res?.blind || res?.incomplete);
+}
+
+/**
+ * What a fleet pause or resume whose set of queues may be short says (issue #964), on every surface that switches the
+ * fleet: that other queues may exist and were not switched, and what to do. "Once Valkey answers", never once a page
+ * reads it: a page can stay unread while the switch works (issue #986). Fixed words with no queue name, so an audit
+ * row, the pi extension and the CLI (`worker/src/cli.mjs`, held equal by a test) carry the same sentence.
+ */
+export function switchShortNote(paused) {
+  return `the list of queues may be short: the host registry or the look for queues could not be read, so other queues may exist and were not ${paused ? "paused" : "resumed"}. ${paused ? "Pause" : "Resume"} the fleet again once Valkey answers`;
+}
+
 /** Names in a sentence: "a", "a and b", "a, b and c". The order is the caller's. */
 export function listed(names) {
   return names.length < 2 ? names.join("") : `${names.slice(0, -1).join(", ")} and ${names.at(-1)}`;

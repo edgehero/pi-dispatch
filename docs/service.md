@@ -33,7 +33,13 @@ never restarts the service, on any OS, so no supervisor keeps retrying against a
 From any terminal:
 
 - `pi-dispatch pause` stops taking new jobs. It is stored in the queue, so it survives restarts. Jobs still queue up and wait.
-  `pi-dispatch resume` takes jobs again, and `pi-dispatch status` prints counts and [waiting details](#status-output).
+  `pi-dispatch resume` takes jobs again, and `pi-dispatch status` prints counts and [waiting details](#status-output). Both reach every
+  queue the host registry and a look for queues name, and this host's own (`pi-jobs@<name>`) when the deployment's `.env` sets
+  `PI_WORKER_NAME`, only on the deployment's Valkey: the `.env`'s `VALKEY_URL` when it and the shell's differ, else the one the command
+  reaches with no `--valkey-url`. A resume reaches that queue only once it exists. When the shell sets another name, or sets one the
+  `.env` does not, or the `.env` cannot be read, the line says so (`[this host's queue not added: ...]`) and leaves that queue out. When the registry or the look could not be read
+  (`[registry unreadable: ...]`, `[queue scan incomplete]`), a second line says the list of queues may be short and to pause (or resume)
+  again once Valkey answers; the exit code stays 0.
 - `pi-dispatch service restart --drain` restarts the worker without stopping a job halfway. It pauses the queues this host's worker takes
   jobs from: the shared one and, when `PI_WORKER_NAME` is set, the host's own (`pi-jobs@<name>`, where its cron, chained and manual runs and
   the forge deliveries [routed to it](multi-host.md#a-forge-delivery-that-needs-one-particular-machine) wait). It waits until none of them has
