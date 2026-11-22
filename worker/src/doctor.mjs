@@ -10111,9 +10111,13 @@ export function doctorHostBudget(env, { daemon = undefined, podman = undefined, 
  * `run(bin, args, { timeoutMs })` resolves `{ code, stdout, error }`.
  *
  * Issue #978: the helper runs under doctor's own fixed name (`helperName(workerName, { doctor: true })`, never the
- * worker's, so a doctor never removes the worker's helper mid-step), with `rm -f` of that name before the read and again
- * after a timeout (`guardHelperRun`). A doctor killed mid-read (the worker's own doctor child is killed at its bound)
- * leaves at most that one container, which the next doctor removes first.
+ * worker's, so a doctor never removes the worker's helper mid-step), removed before the read and again after a timeout
+ * (`guardHelperRun`). A doctor killed mid-read (the worker's own doctor child is killed at its bound) leaves at most
+ * that one container, which the next doctor removes first. Issue #1021: the rm before the read is a plain `rm`
+ * (`forceBefore: false`), which refuses a running container, because every doctor of this deployment reads under that
+ * one name: a doctor started while another doctor's read runs leaves it alone (and is answered 125, the cause its line
+ * names), where `rm -f` killed it and that doctor reported the quota unreadable. A killed doctor's leftover is `created`,
+ * which the plain `rm` still removes. After doctor's OWN timeout the rm stays `-f`: what holds the name is its own.
  */
 export async function doctorCpuReserve({ daemon = undefined, podman = undefined, endpointLocal = false, platform = process.platform, run, image, imagePresent = false, workerName = "" }) {
 	const venues = [];
@@ -10126,7 +10130,7 @@ export async function doctorCpuReserve({ daemon = undefined, podman = undefined,
 		if (plan.parent && plan.method === "helper" && !imagePresent) read = { ok: false, reason: "job-image-absent" };
 		else if (plan.parent && plan.method === "helper") {
 			const name = cpuReserveHelperName(workerName, { doctor: true });
-			read = await readQuota(plan, { run: guardHelperRun({ run, name }), image, name });
+			read = await readQuota(plan, { run: guardHelperRun({ run, name, forceBefore: false }), image, name });
 		} else if (plan.parent && plan.method) read = await readQuota(plan, { run, image });
 		out.push({ plan, read, cgroupManager: v.facts?.cgroupDriver ?? v.facts?.cgroupManager ?? null });
 	}
@@ -10187,8 +10191,9 @@ export function cpuReserveChecks(reads, cpuCenti) {
 					? `the worker sets it when it starts; start or restart it, or run as the worker's account: \`${userQuotaCommand(target)}\``
 					: "the worker writes it when it starts and re-checks it every ten minutes; start or restart the worker";
 		// Issue #978: exit 125 is any refusal by the runtime, and stderr is never read, so the cause is not known here. After
-		// doctor removed its own helper's name, one cause is another doctor of this deployment reading the quota under the
-		// same name at that moment, which is the one an operator can act on; the line names it as a cause, not the cause.
+		// doctor's rm of its own helper's name (a plain `rm`, which leaves a running one alone, issue #1021), one cause is
+		// another doctor of this deployment reading the quota under the same name at that moment, which is the one an
+		// operator can act on; the line names it as a cause, not the cause.
 		if (!read?.ok && plan.method === "helper" && read?.reason === "exit-125") {
 			checks.push({ ok: false, warn: true, label: `${v}: no host CPU reserve across jobs could be confirmed: the quota of ${CGROUP_PARENT} was not readable (exit-125: the runtime refused the helper, which another doctor reading the quota at the same moment causes)`, fix: `if another doctor was running, run doctor again once it has finished; otherwise ${fixFor(want)}` });
 			continue;

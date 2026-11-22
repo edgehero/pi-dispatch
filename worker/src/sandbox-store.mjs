@@ -122,9 +122,11 @@ export const SANDBOX_TOMBSTONE_RELOG_MS = DAY_MS;
 /**
  * The bound on ONE pass of the retention sweep (issue #978): wall time from the pass's start, its rests included. A
  * boot after a long gap used to sweep its whole backlog in one go before the worker took a job (959 `reaped_sandbox`
- * lines back to back on one host), one runtime ask and one recursive delete per run with nothing between them, which
- * on a VM-backed daemon was minutes of pickup delay. A pass now stops at its first loop boundary past this, and what it
- * left is the next pass's (`makeSweepFollowUps`). So this bounds the boot delay before pickup and each burst after it.
+ * lines back to back on one host), one runtime ask and one recursive delete per run with nothing between them, all of
+ * it before pickup. How long that took there was never measured; a thousand such removals took 10 to 18 s on a healthy
+ * runner (measured), and on a slow daemon each ask can take seconds (issue #1021). A pass now stops at its first loop
+ * boundary past this, and what it left is the next pass's (`makeSweepFollowUps`). So this bounds the boot delay before
+ * pickup and each burst after it.
  */
 export const SANDBOX_PASS_BUDGET_MS = 20_000;
 

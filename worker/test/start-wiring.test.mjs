@@ -6152,7 +6152,7 @@ test("issue #596, phase 2: every budget refresh keeps the jobs' parent cgroup's 
 	assert.deepEqual(syncs[1], { cpuCenti: null, plans: [] });
 });
 
-test("issue #978: a named worker's CPU reserve helper is named from PI_WORKER_NAME, and its runner passes the leftover listing's output bound on", { skip }, async () => {
+test("issue #978: a named worker's CPU reserve helper is named from PI_WORKER_NAME, and its runner passes the leftover listing's output bound on and hands stderr back", { skip }, async () => {
 	const made = [];
 	await runStart({
 		env: { PI_BACKENDS: "podman", PI_JOB_IMAGE: "pi-job:ci", PI_WORKER_NAME: "cpu-reserve-978" },
@@ -6179,6 +6179,9 @@ test("issue #978: a named worker's CPU reserve helper is named from PI_WORKER_NA
 	assert.deepEqual([roomy.code, roomy.stdout.length], [0, 100 * 1024]);
 	const bounded = await made[0].run(process.execPath, emit, { timeoutMs: 30_000 });
 	assert.equal(bounded.code, null, "without one, the default bound still applies");
+	// Issue #1021: it hands stderr back, so the helper's guard can tell a create refused for its name from any other 125.
+	const refused = await made[0].run(process.execPath, ["-e", "process.stderr.write('the container name is already in use'); process.exit(125)"], { timeoutMs: 30_000 });
+	assert.deepEqual([refused.code, refused.stderr], [125, "the container name is already in use"]);
 });
 
 // Issue #643: the off switch reaches BOTH venues and the preparer. With PI_LIVE_TRANSCRIPTS=0 neither venue's runContainer

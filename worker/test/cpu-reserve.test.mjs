@@ -3,6 +3,7 @@ import { test } from "node:test";
 import {
 	CGROUP_PARENT,
 	HELPER_LABEL_KEY,
+	HELPER_NAME_RE,
 	HELPER_PARENT_PATH,
 	LEGACY_HELPER_CHUNK,
 	LEGACY_HELPER_MIN_AGE_MS,
@@ -20,6 +21,7 @@ import {
 	helperArgs,
 	helperName,
 	isLegacyHelper,
+	legacyHelperVerdict,
 	makeCpuReserve,
 	operatorQuotaCommand,
 	parseCpuMaxRead,
@@ -568,8 +570,8 @@ test("issue #978: an attempt stops at its first timeout: no write after a timed-
 	await reserve.sync({ cpuCenti: 1300, plans: [HELPER] });
 	assert.deepEqual(kinds(d.calls).slice(4), ["rm -f", "read", "ps -a"]);
 	assert.equal(reserve.states()[0].status, "held");
-	// A write refused at once (its name still taken) whose read back shows the wanted quota: held, never differs at the
-	// very quota wanted.
+	// A write refused at once whose read back shows the wanted quota: held, never differs at the very quota wanted. (A
+	// 125 with no conflict text is not retried, issue #1021.)
 	const g = fakeRun([{ code: 0 }, { code: 0, stdout: "max 100000" }, { code: 125 }, { code: 0 }, { code: 0, stdout: "1300000 100000" }, { code: 0, stdout: "" }]);
 	const refused = makeCpuReserve({ run: g.run, image: "i", name: NAME, now: c.now });
 	await refused.sync({ cpuCenti: 1300, plans: [HELPER] });
@@ -688,11 +690,13 @@ const merged = (base, over) => Object.fromEntries([...new Set([...Object.keys(ba
 
 /**
  * An older worker's read helper as `docker container inspect` printed it (Docker 28.0.4, made with 5.4.2's argv;
- * only the keys the format reads). `HostConfig` has no `Mounts` key: the daemon omits it without a `--mount`.
+ * only the keys the format reads, and `Name`, which `ps` prints). `HostConfig` has no `Mounts` key: the daemon omits it
+ * without a `--mount`. Unnamed, so the daemon named it (`/<adjective>_<name>`).
  */
 function readHelper(n, over = {}) {
 	const doc = {
 		Id: id(n),
+		Name: `/eager_turing${n}`,
 		Created: createdAgo(2 * 3_600_000),
 		State: { Status: "created" },
 		Image: BARE_IMAGE,
@@ -731,8 +735,8 @@ function render(format, doc) {
 const rowOf = (doc) => JSON.parse(render(LEGACY_INSPECT_FORMAT, doc));
 
 /**
- * A fake daemon holding real-shaped containers: `ps` lists the `created` ones as the CLI prints them (full id, the helper
- * label, the quoted command), `container inspect` renders the given format per container (exit 1 when one is refused or
+ * A fake daemon holding real-shaped containers: `ps` lists the `created` ones as the CLI prints them (full id, the name
+ * without its slash, the helper label, the quoted command), `container inspect` renders the given format per container (exit 1 when one is refused or
  * gone), `image inspect` the same over the image, a plain `rm` removes what has not started (`startsAt`: one that
  * started between the inspect and the rm) and prints its id. `slow(args, n)` makes the n-th call `timeout` or `refuse`.
  */
@@ -746,7 +750,7 @@ function fakeLeftovers(docs, { images = IMAGES, slow = () => "ok", quota = "1300
 		if (how === "refuse") return { code: 1, stdout: "" };
 		if (args[0] === "ps") {
 			const command = (d) => JSON.stringify([d.Config.Entrypoint[0], ...[...d.Config.Entrypoint.slice(1), ...d.Config.Cmd].map((a) => (a.includes(" ") ? `'${a}'` : a))].join(" "));
-			return { code: 0, stdout: [...live.values()].filter((d) => d.State.Status === "created" || d.listedCreated).map((d) => `${d.Id}\t${d.Config.Labels?.["pi.dispatch.helper"] ?? ""}\t${command(d)}`).join("\n") };
+			return { code: 0, stdout: [...live.values()].filter((d) => d.State.Status === "created" || d.listedCreated).map((d) => `${d.Id}\t${d.Name.slice(1)}\t${d.Config.Labels?.["pi.dispatch.helper"] ?? ""}\t${command(d)}`).join("\n") };
 		}
 		if (args[0] === "container" && args[1] === "inspect") {
 			const out = args.slice(4).map((x) => (live.has(x) ? render(args[3], live.get(x)) : null));
@@ -827,9 +831,11 @@ test("removeLegacyHelpers: removes exactly the fingerprints, with a plain rm in 
 	];
 	const d = fakeLeftovers([...helpers, ...decoys]);
 	const out = await removeLegacyHelpers({ run: d.run, now: () => NOW });
-	assert.deepEqual(out, { complete: true, reason: null, removed: 43, failed: 0 });
+	// Listed: the 43, and every decoy but the labelled one under no helper name and the one whose command is another's;
+	// the 60 s old one is young, the rest kept.
+	assert.deepEqual(out, { complete: true, reason: null, listed: 49, removed: 43, failed: 0, young: 1, kept: 5 });
 	assert.deepEqual([...d.live.keys()].sort(), decoys.map((r) => r.Id).sort());
-	assert.deepEqual(d.calls[0].args, ["ps", "-a", "--filter", "status=created", "--no-trunc", "--format", '{{.ID}}\t{{.Label "pi.dispatch.helper"}}\t{{.Command}}']);
+	assert.deepEqual(d.calls[0].args, ["ps", "-a", "--filter", "status=created", "--no-trunc", "--format", '{{.ID}}\t{{.Names}}\t{{.Label "pi.dispatch.helper"}}\t{{.Command}}']);
 	const rms = d.calls.filter((x) => x.args[0] === "rm");
 	assert.deepEqual(rms.map((x) => x.args.length - 1), [20, 20, 3]);
 	assert.ok(rms.every((x) => !x.args.includes("-f") && !x.args.includes("--force")), "never a forced rm");
@@ -839,10 +845,10 @@ test("removeLegacyHelpers: removes exactly the fingerprints, with a plain rm in 
 	assert.ok(!d.calls.some((x) => x.args.some((a) => String(a).startsWith("volume="))), "no volume filter");
 	// One that starts between the inspect and the rm is refused by the plain rm and counted, never forced.
 	const e = fakeLeftovers([readHelper(1), readHelper(2, { startsAt: true })]);
-	assert.deepEqual(await removeLegacyHelpers({ run: e.run, now: () => NOW }), { complete: true, reason: null, removed: 1, failed: 1 });
+	assert.deepEqual(await removeLegacyHelpers({ run: e.run, now: () => NOW }), { complete: true, reason: null, listed: 2, removed: 1, failed: 1, young: 0, kept: 0 });
 	assert.deepEqual([...e.live.keys()], [id(2)]);
 	// Nothing listed is a pass that finished.
-	assert.deepEqual(await removeLegacyHelpers({ run: fakeLeftovers([]).run, now: () => NOW }), { complete: true, reason: null, removed: 0, failed: 0 });
+	assert.deepEqual(await removeLegacyHelpers({ run: fakeLeftovers([]).run, now: () => NOW }), { complete: true, reason: null, listed: 0, removed: 0, failed: 0, young: 0, kept: 0 });
 });
 
 test("removeLegacyHelpers: a timeout at any step, a listing that failed, or an inspect that answered without rows cuts the pass short, and nothing runs after it", async () => {
@@ -867,10 +873,10 @@ test("removeLegacyHelpers: a timeout at any step, a listing that failed, or an i
 	// An inspect that exits 0 and prints no row of its chunk established nothing either.
 	const e = fakeLeftovers(docs, { slow: () => "ok" });
 	const silent = async (bin, args, opts) => (args[0] === "container" ? { code: 0, stdout: "" } : e.run(bin, args, opts));
-	assert.deepEqual(await removeLegacyHelpers({ run: silent, now: () => NOW }), { complete: false, reason: "inspect-no-rows", removed: 0, failed: 0 });
+	assert.deepEqual(await removeLegacyHelpers({ run: silent, now: () => NOW }), { complete: false, reason: "inspect-no-rows", listed: 25, removed: 0, failed: 0, young: 0, kept: 0 });
 });
 
-test("issue #978: the leftover pass runs only after a read that holds, again after each until one finishes, then never; a pass cut short is said once", async () => {
+test("issue #978: the leftover pass runs only after a read that holds, again after each until one leaves nothing to come back for, then never; a pass cut short is said once, one that removed always, with its own counts", async () => {
 	const c = clock(NOW);
 	const logs = [];
 	const said = () => logs.filter(([e]) => e === "cpu_reserve_leftovers_removed").map(([, x]) => x);
@@ -882,7 +888,8 @@ test("issue #978: the leftover pass runs only after a read that holds, again aft
 	assert.equal(d.calls.filter((x) => x.args[0] === "ps").length, 0, "not on a daemon whose read did not hold");
 	assert.equal(d.live.size, 2);
 	// 25 leftovers. The first pass removes the first chunk and its second inspect times out; the second pass's listing
-	// times out; the third finishes. Cut short is said once, with what was removed so far; the end once, with the total.
+	// times out; the third finishes. Cut short is said once (by the first line, which removed); the end once, with the
+	// five that pass listed and removed (issue #1021: every count is that pass's).
 	let inspects = 0;
 	let lists = 0;
 	const docs = Array.from({ length: 25 }, (_, i) => readHelper(300 + i));
@@ -895,14 +902,14 @@ test("issue #978: the leftover pass runs only after a read that holds, again aft
 	};
 	await pass();
 	assert.equal(e.live.size, 5);
-	assert.deepEqual(said(), [{ venue: "local", removed: 20, failed: 0, complete: false, reason: "inspect-timeout" }]);
+	assert.deepEqual(said(), [{ venue: "local", listed: 25, removed: 20, failed: 0, young: 0, kept: 0, complete: false, reason: "inspect-timeout" }]);
 	await pass();
 	assert.equal(said().length, 1, "a second pass cut short is not said again");
 	await pass();
 	assert.equal(e.live.size, 0);
-	assert.deepEqual(said().at(-1), { venue: "local", removed: 25, failed: 0, complete: true });
+	assert.deepEqual(said().at(-1), { venue: "local", listed: 5, removed: 5, failed: 0, young: 0, kept: 0, complete: true });
 	await pass();
-	assert.equal(e.calls.filter((x) => x.args[0] === "ps").length, 3, "after one pass finished, never again");
+	assert.equal(e.calls.filter((x) => x.args[0] === "ps").length, 3, "after a pass that left nothing to come back for, never again");
 	assert.equal(said().length, 2);
 	// A pass that finds nothing finishes quietly.
 	const f = fakeLeftovers([]);
@@ -916,4 +923,212 @@ test("issue #978: the leftover pass runs only after a read that holds, again aft
 	const g = fakeRun([{ code: 0, stdout: "3s" }]);
 	await makeCpuReserve({ run: g.run, image: "i", name: NAME, now: c.now }).sync({ cpuCenti: 300, plans: [USER] });
 	assert.equal(g.calls.length, 1);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// Issue #1021: what one pass leaves behind, the helper of a worker since renamed, and a name a clean exit did not free.
+
+/** `Created` as Docker prints it (nine fractional digits) for an instant on the test's clock. */
+const createdAt = (ms) => `${new Date(ms).toISOString().slice(0, 23)}000000Z`;
+/** A helper as `helperArgs` makes it now: an older worker's argv plus the name and the label. */
+const namedHelper = (n, name, over = {}) => merged(readHelper(n, { Name: `/${name}`, Config: { Labels: { [HELPER_LABEL_KEY]: "cpu-reserve" } } }), over);
+
+test("issue #1021: young fingerprints keep the venue not done, said once with what was kept, and a later held read removes them once old", async () => {
+	const c = clock(NOW);
+	const logs = [];
+	const said = () => logs.filter(([e]) => e === "cpu_reserve_leftovers_removed").map(([, x]) => x);
+	// Three leftovers a minute old (the issue's measured pass: every match younger than ten minutes) and one that is no
+	// fingerprint (a label of its own).
+	const young = [readHelper(1, { Created: createdAgo(60_000) }), writeHelper(2, "150000 100000", { Created: createdAgo(60_000) }), readHelper(3, { Created: createdAgo(60_000) })];
+	const d = fakeLeftovers([...young, readHelper(4, { Config: { Labels: { own: "1" } } })]);
+	const reserve = makeCpuReserve({ run: d.run, image: "i", name: NAME, now: c.now, log: (e, x) => logs.push([e, x]) });
+	await reserve.sync({ cpuCenti: 1300, plans: [HELPER] });
+	assert.equal(reserve.states()[0].status, "held");
+	assert.deepEqual(said(), [{ venue: "local", listed: 4, removed: 0, failed: 0, young: 3, kept: 1, complete: true }], "a pass that only kept is said");
+	assert.equal(d.live.size, 4);
+	// The next read that holds is the recheck, ten minutes on: the three are old now, and that pass removes them.
+	c.advance(RESERVE_RECHECK_MS - 1);
+	await reserve.sync({ cpuCenti: 1300, plans: [HELPER] });
+	assert.equal(d.calls.filter((x) => x.args[0] === "ps").length, 1, "nothing before the recheck");
+	c.advance(1);
+	await reserve.sync({ cpuCenti: 1300, plans: [HELPER] });
+	assert.deepEqual([...d.live.keys()], [id(4)]);
+	assert.deepEqual(said().at(-1), { venue: "local", listed: 4, removed: 3, failed: 0, young: 0, kept: 1, complete: true }, "a pass that removed is said");
+	assert.equal(said().length, 2);
+	// Nothing young, nothing refused: done, never listed again in this process.
+	c.advance(RESERVE_RECHECK_MS);
+	await reserve.sync({ cpuCenti: 1300, plans: [HELPER] });
+	assert.equal(d.calls.filter((x) => x.args[0] === "ps").length, 2);
+	assert.equal(said().length, 2);
+});
+
+test("issue #1021: an older worker beside this one keeps making young ones: a listing each recheck, one line, never a line per recheck", async () => {
+	const c = clock(NOW);
+	const logs = [];
+	const d = fakeLeftovers([]);
+	const reserve = makeCpuReserve({ run: d.run, image: "i", name: NAME, now: c.now, log: (e, x) => logs.push([e, x]) });
+	for (let n = 0; n < 4; n += 1) {
+		// The one it made last time started and went (AutoRemove); a new one is a minute old at this pass.
+		d.live.clear();
+		const doc = readHelper(500 + n, { Created: createdAt(c.now() - 60_000) });
+		d.live.set(doc.Id, doc);
+		await reserve.sync({ cpuCenti: 1300, plans: [HELPER] });
+		c.advance(RESERVE_RECHECK_MS);
+	}
+	assert.equal(d.calls.filter((x) => x.args[0] === "ps").length, 4, "never done while young ones are left");
+	assert.deepEqual(logs.filter(([e]) => e === "cpu_reserve_leftovers_removed").map(([, x]) => x), [{ venue: "local", listed: 1, removed: 0, failed: 0, young: 1, kept: 0, complete: true }]);
+});
+
+test("issue #1021: a fingerprint whose rm is refused keeps the venue not done, said once, and goes once the rm gets through", async () => {
+	const c = clock(NOW);
+	const logs = [];
+	const said = () => logs.filter(([e]) => e === "cpu_reserve_leftovers_removed").map(([, x]) => x);
+	const d = fakeLeftovers([readHelper(1, { startsAt: true })]);
+	const reserve = makeCpuReserve({ run: d.run, image: "i", name: NAME, now: c.now, log: (e, x) => logs.push([e, x]) });
+	await reserve.sync({ cpuCenti: 1300, plans: [HELPER] });
+	assert.deepEqual(said(), [{ venue: "local", listed: 1, removed: 0, failed: 1, young: 0, kept: 0, complete: true }]);
+	c.advance(RESERVE_RECHECK_MS);
+	await reserve.sync({ cpuCenti: 1300, plans: [HELPER] });
+	assert.equal(d.calls.filter((x) => x.args[0] === "rm" && x.args[1] !== "-f").length, 2, "tried again on the next read that holds");
+	assert.equal(said().length, 1, "the same refusal is not said every recheck");
+	delete d.live.get(id(1)).startsAt;
+	c.advance(RESERVE_RECHECK_MS);
+	await reserve.sync({ cpuCenti: 1300, plans: [HELPER] });
+	assert.equal(d.live.size, 0);
+	assert.deepEqual(said().at(-1), { venue: "local", listed: 1, removed: 1, failed: 0, young: 0, kept: 0, complete: true });
+	c.advance(RESERVE_RECHECK_MS);
+	await reserve.sync({ cpuCenti: 1300, plans: [HELPER] });
+	assert.equal(d.calls.filter((x) => x.args[0] === "ps").length, 3, "done once nothing is left to come back for");
+});
+
+test("issue #1021: a pass that listed only containers that are no fingerprint is done, and says so once", async () => {
+	const c = clock(NOW);
+	const logs = [];
+	const decoys = [readHelper(1, { Config: { Cmd: ["/p/cpu.max", "/etc/hostname"] } }), readHelper(2, { HostConfig: { NetworkMode: "bridge" } })];
+	const d = fakeLeftovers(decoys);
+	const reserve = makeCpuReserve({ run: d.run, image: "i", name: NAME, now: c.now, log: (e, x) => logs.push([e, x]) });
+	await reserve.sync({ cpuCenti: 1300, plans: [HELPER] });
+	c.advance(RESERVE_RECHECK_MS);
+	await reserve.sync({ cpuCenti: 1300, plans: [HELPER] });
+	assert.equal(d.calls.filter((x) => x.args[0] === "ps").length, 1, "a fingerprint that misses everything is not looked for again");
+	assert.equal(d.live.size, 2);
+	assert.deepEqual(logs.filter(([e]) => e === "cpu_reserve_leftovers_removed").map(([, x]) => x), [{ venue: "local", listed: 2, removed: 0, failed: 0, young: 0, kept: 2, complete: true }]);
+});
+
+test("issue #1021: a stuck helper labelled under another helper name is removed with a plain rm; this worker's own name never; a young, running or extra-labelled one is kept", async () => {
+	assert.match(helperName("old-name"), HELPER_NAME_RE);
+	assert.match(helperName("", { doctor: true }), HELPER_NAME_RE);
+	for (const bad of ["pi-dispatch-cpu-reserve-E3B0C442", "pi-dispatch-cpu-reserve-e3b0c44", "x-pi-dispatch-cpu-reserve-e3b0c442", "pi-dispatch-cpu-reserve-e3b0c442,other", "pi-dispatch-cpu-reserve-other-e3b0c442"]) assert.doesNotMatch(bad, HELPER_NAME_RE, bad);
+	const renamed = namedHelper(1, helperName("old-name"));
+	const doctorStuck = writeHelper(2, "150000 100000", { Name: `/${helperName("", { doctor: true })}`, Config: { Labels: { [HELPER_LABEL_KEY]: "cpu-reserve" } } });
+	const onLabelledImage = namedHelper(3, helperName("older"), { Image: LABELLED_IMAGE, Config: { Labels: { ...LAB_LABELS, [HELPER_LABEL_KEY]: "cpu-reserve" } } });
+	const own = namedHelper(4, NAME);
+	const youngOne = namedHelper(5, helperName("young"), { Created: createdAgo(60_000) });
+	const running = namedHelper(6, helperName("running"), { State: { Status: "running" }, listedCreated: true });
+	const extra = namedHelper(7, helperName("extra"), { Config: { Labels: { own: "1" } } });
+	const notAHelperName = namedHelper(8, "my-helper");
+	// Another helper role's label under a helper name: not this role's leftover, so not even listed.
+	const otherRole = namedHelper(12, helperName("probe"), { Config: { Labels: { [HELPER_LABEL_KEY]: "egress-probe" } } });
+	const d = fakeLeftovers([renamed, doctorStuck, onLabelledImage, own, youngOne, running, extra, notAHelperName, otherRole]);
+	const out = await removeLegacyHelpers({ run: d.run, now: () => NOW, ownName: NAME });
+	assert.deepEqual(out, { complete: true, reason: null, listed: 6, removed: 3, failed: 0, young: 1, kept: 2 });
+	assert.deepEqual([...d.live.keys()].sort(), [own, youngOne, running, extra, notAHelperName, otherRole].map((x) => x.Id).sort());
+	assert.ok(!d.calls.some((x) => x.args.includes(own.Id)), "this worker's own helper is never inspected nor removed");
+	assert.ok(!d.calls.some((x) => x.args.includes(otherRole.Id)), "another role's labelled container is never inspected");
+	assert.ok(d.calls.filter((x) => x.args[0] === "rm").every((x) => !x.args.includes("-f") && !x.args.includes("--force")), "never a forced rm");
+	// The fingerprint itself: a named helper's carries exactly the label, an unnamed one's none.
+	const at = (doc) => ({ imageLabels: IMAGES[doc.Image]?.Config.Labels ?? null, nowMs: NOW });
+	assert.equal(legacyHelperVerdict(rowOf(renamed), { ...at(renamed), labelled: true }), "remove");
+	assert.equal(legacyHelperVerdict(rowOf(renamed), at(renamed)), "kept", "unnamed rules: no label of its own");
+	assert.equal(legacyHelperVerdict(rowOf(readHelper(9)), { ...at(readHelper(9)), labelled: true }), "kept", "named rules: the label must be there");
+	assert.equal(legacyHelperVerdict(rowOf(youngOne), { ...at(youngOne), labelled: true }), "young");
+	assert.equal(legacyHelperVerdict(rowOf(readHelper(9, { Created: "soon" })), at(readHelper(9))), "kept", "a Created no later pass could read is not young");
+	assert.equal(legacyHelperVerdict(rowOf(namedHelper(9, helperName("x"), { Config: { Labels: { [HELPER_LABEL_KEY]: "other" } } })), { ...at(readHelper(9)), labelled: true }), "kept");
+	// Wired: the worker passes its own name, so its own stuck helper is its guard's alone.
+	const e = fakeLeftovers([namedHelper(10, NAME), namedHelper(11, helperName("old-name"))]);
+	await makeCpuReserve({ run: e.run, image: "i", name: NAME, now: () => NOW }).sync({ cpuCenti: 1300, plans: [HELPER] });
+	assert.deepEqual([...e.live.keys()], [id(10)]);
+});
+
+test("issue #1021: a create refused for its name after a clean step gets one rm and one more try; any other 125, or one without stderr, does not; a second refusal is answered and leaves the name dirty; a refusal right after the guard's own rm is not retried", async () => {
+	// The daemon's own words for a name still taken (Docker 28.0.4, and Podman's), and two other refusals that exit 125.
+	const CONFLICT = 'docker: Error response from daemon: Conflict. The container name "/pi-dispatch-cpu-reserve-e3b0c442" is already in use by container "4f2a". You have to remove (or rename) that container to be able to reuse that name.\n';
+	const PODMAN_CONFLICT = 'Error: creating container storage: the container name "pi-dispatch-cpu-reserve-e3b0c442" is already in use by 4f2a. You have to remove that container to be able to reuse that name: that name is already in use\n';
+	const held = { code: 125, stdout: "", stderr: CONFLICT };
+	const calls = [];
+	const answers = [];
+	const run = async (bin, args) => {
+		calls.push(args[0] === "run" ? "run" : args.slice(0, 2).join(" "));
+		return args[0] === "run" ? answers.shift() : { code: 0, stdout: "" };
+	};
+	const guarded = guardHelperRun({ run, name: NAME });
+	// The first step: the name is dirty, so it is cleared first, and the refusal that follows is not retried.
+	answers.push(held);
+	assert.equal((await guarded("docker", ["run"], {})).code, 125);
+	assert.deepEqual(calls.splice(0), ["rm -f", "run"]);
+	// Dirty again: cleared, then a clean step.
+	answers.push({ code: 0, stdout: "ok" });
+	assert.equal((await guarded("docker", ["run"], {})).stdout, "ok");
+	assert.deepEqual(calls.splice(0), ["rm -f", "run"]);
+	// After a clean step the name is not cleared, and a refusal for the name there is a name a clean exit did not free:
+	// one rm, one retry. Podman's words count the same.
+	for (const stderr of [CONFLICT, PODMAN_CONFLICT]) {
+		answers.push({ code: 125, stdout: "", stderr }, { code: 0, stdout: "ok" });
+		assert.equal((await guarded("docker", ["run"], {})).stdout, "ok");
+		assert.deepEqual(calls.splice(0), ["run", "rm -f", "run"]);
+	}
+	// Any other 125 is answered at once: an image the runtime refuses, a flag it does not know, a runner with no stderr.
+	for (const refusal of [{ code: 125, stdout: "", stderr: 'Unable to find image "pi-job:pinned" locally\ndocker: Error response from daemon: No such image: pi-job:pinned.\n' }, { code: 125, stdout: "", stderr: "unknown flag: --pull\n" }, { code: 125, stdout: "" }]) {
+		answers.push(refusal);
+		assert.equal((await guarded("docker", ["run"], {})).code, 125);
+		assert.deepEqual(calls.splice(0), ["run"], JSON.stringify(refusal));
+		answers.push({ code: 0, stdout: "ok" });
+		await guarded("docker", ["run"], {});
+		assert.deepEqual(calls.splice(0), ["rm -f", "run"], "that 125 left the name dirty, as any failed step does");
+	}
+	// Twice refused: the second is answered, and the next step clears the name first.
+	answers.push(held, held);
+	assert.equal((await guarded("docker", ["run"], {})).code, 125);
+	assert.deepEqual(calls.splice(0), ["run", "rm -f", "run"]);
+	answers.push({ code: 0, stdout: "ok" });
+	await guarded("docker", ["run"], {});
+	assert.deepEqual(calls.splice(0), ["rm -f", "run"]);
+	// A retry whose rm times out runs no second step: cleanup-timeout, as before any step.
+	const slow = async (bin, args) => (args[0] === "rm" ? { code: null, stdout: "", error: { timedOut: true } } : answers.shift());
+	const state = { dirty: false };
+	answers.push(held);
+	assert.equal(stepFailure(await guardHelperRun({ run: slow, name: NAME, state })("docker", ["run"], {}), "docker"), "cleanup-timeout");
+	assert.equal(answers.length, 0);
+	// Wired: a write refused for its name right after a clean read is retried, the reserve holds with no fail-open line,
+	// and the daemon's words reach no line.
+	const logs = [];
+	const f = fakeRun([{ code: 0 }, { code: 0, stdout: "max 100000" }, held, { code: 0 }, { code: 0 }, { code: 0, stdout: "1300000 100000" }, { code: 0, stdout: "" }]);
+	const reserve = makeCpuReserve({ run: f.run, image: "i", name: NAME, now: () => NOW, log: (e, x) => logs.push([e, x]) });
+	await reserve.sync({ cpuCenti: 1300, plans: [HELPER] });
+	assert.deepEqual(kinds(f.calls), ["rm -f", "read", "write", "rm -f", "write", "read", "ps -a"]);
+	assert.equal(reserve.states()[0].status, "held");
+	assert.deepEqual(logs.map(([e]) => e), ["cpu_reserve"], "no write-exit-125 fail-open line");
+	// Twice refused, wired: the attempt fails open as write-exit-125, and neither the line nor the state carries stderr.
+	const words = [];
+	const g = fakeRun([{ code: 0 }, { code: 0, stdout: "max 100000" }, held, { code: 0 }, held, { code: 0 }, { code: 0, stdout: "max 100000" }]);
+	const twice = makeCpuReserve({ run: g.run, image: "i", name: NAME, now: () => NOW, log: (e, x) => words.push(JSON.stringify([e, x])) });
+	await twice.sync({ cpuCenti: 1300, plans: [HELPER] });
+	assert.deepEqual([twice.states()[0].status, twice.states()[0].reason], ["unset", "write-exit-125"]);
+	assert.ok(![...words, JSON.stringify(twice.states())].some((w) => /already in use|Conflict/.test(w)), "stderr is matched, never said");
+});
+
+test("issue #1021: the rm before a helper is plain with forceBefore false (doctor's), forced by default (the worker's); after a timeout it is always forced", async () => {
+	const seen = (forceBefore) => {
+		const calls = [];
+		const run = async (bin, args) => {
+			calls.push(args.slice(0, 3));
+			return args[0] === "run" ? { code: null, stdout: "", error: { timedOut: true } } : { code: 0, stdout: "" };
+		};
+		return { calls, guarded: guardHelperRun({ run, name: NAME, ...(forceBefore === undefined ? {} : { forceBefore }) }) };
+	};
+	for (const [forceBefore, before] of [[undefined, ["rm", "-f", NAME]], [true, ["rm", "-f", NAME]], [false, ["rm", NAME]]]) {
+		const { calls, guarded } = seen(forceBefore);
+		await guarded("docker", ["run", "--rm", "x"], { timeoutMs: 1 });
+		assert.deepEqual(calls, [before, ["run", "--rm", "x"], ["rm", "-f", NAME]], String(forceBefore));
+	}
 });
